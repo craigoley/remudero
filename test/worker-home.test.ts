@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import fs, {
   existsSync,
   lstatSync,
@@ -23,6 +24,8 @@ import {
   CLAUDE_CONFIG_BACKUP_PREFIX,
   CLAUDE_CONFIG_REL,
   WORKER_CLAUDE_CREDENTIAL_DIR_RELPATH,
+  WORKER_HOME_LOGIN_PROFILE,
+  WORKER_HOME_LOGIN_PROFILE_SCRIPT,
   WORKER_HOME_RC_FILES,
   WORKER_HOME_SYMLINKS,
   WorkerHomePlacementError,
@@ -50,6 +53,8 @@ function tmp(): string {
 test("workerHomePlan: every rc file lives under the INJECTED workerHome, never realHome", () => {
   const plan = workerHomePlan({ workerHome: "/scratch/worker-home", realHome: "/Users/operator" });
   assert.equal(plan.rcFiles.length, WORKER_HOME_RC_FILES.length);
+  assert.ok(!WORKER_HOME_RC_FILES.includes(".bash_profile"));
+  assert.equal(plan.loginProfile, "/scratch/worker-home/.bash_profile");
   for (const rc of plan.rcFiles) {
     assert.ok(rc.startsWith("/scratch/worker-home/"), `${rc} must live under the redirected HOME`);
   }
@@ -96,6 +101,68 @@ test("workerHomePlan: the macOS login keychain is symlinked back — the OAuth t
       false,
       `the whole ${broad} must never be granted — only named leaves beneath it`,
     );
+  }
+});
+
+test("W1-T11693: login startup removes host-profile aliases and functions, but preserves functions defined later", () => {
+  const generatedHome = tmp();
+  const blankProfileHome = tmp();
+  const realHome = tmp();
+  const loginLeak = "rmd_host_login_profile_leak";
+  const preludeLeak = "rmd_host_prelude_leak";
+  const lateFunction = "rmd_worker_function_after_profile";
+  const aliasName = "rmd_host_profile_alias";
+  try {
+    writeFileSync(join(generatedHome, WORKER_HOME_LOGIN_PROFILE), "stale profile content\n");
+    materializeWorkerHome({ workerHome: generatedHome, realHome });
+    assert.equal(readFileSync(join(generatedHome, WORKER_HOME_LOGIN_PROFILE), "utf8"), WORKER_HOME_LOGIN_PROFILE_SCRIPT);
+    assert.match(WORKER_HOME_LOGIN_PROFILE_SCRIPT, /^# GNU Bash startup files:.*Bash-Startup-Files\.html\)$/m);
+    assert.ok(!WORKER_HOME_LOGIN_PROFILE_SCRIPT.includes("ANTHROPIC_"));
+    writeFileSync(join(blankProfileHome, WORKER_HOME_LOGIN_PROFILE), "");
+
+    const report = [
+      `if declare -F ${loginLeak} >/dev/null; then printf 'login-function=present\n'; else printf 'login-function=absent\n'; fi`,
+      `if declare -F ${preludeLeak} >/dev/null; then printf 'prelude-function=present\n'; else printf 'prelude-function=absent\n'; fi`,
+      `if alias ${aliasName} >/dev/null 2>&1; then printf 'alias=present\n'; else printf 'alias=absent\n'; fi`,
+      "if declare -F _rmd_clear_host_profile_functions >/dev/null; then printf 'cleanup-helper=present\n'; else printf 'cleanup-helper=absent\n'; fi",
+      "if declare -p function_name >/dev/null 2>&1; then printf 'cleanup-variable=present\n'; else printf 'cleanup-variable=absent\n'; fi",
+      `${lateFunction}() { printf 'late-function-called\n'; }`,
+      `if declare -F ${lateFunction} >/dev/null && ${lateFunction}; then printf 'late-function=present\n'; else printf 'late-function=absent\n'; fi`,
+    ].join("; ");
+    const shellQuote = (value: string): string => `'${value.replace(/'/g, "'\\''")}'`;
+    const runLogin = (home: string): string => execFileSync(
+      "bash",
+      ["--noprofile", "--norc", "-c", `function ${loginLeak}() { :; }; export -f ${loginLeak}; exec bash --login -c ${shellQuote(report)}`],
+      { encoding: "utf8", env: { ...process.env, HOME: home } },
+    );
+    const runPrelude = (home: string): string => execFileSync(
+      "bash",
+      ["--noprofile", "--norc", "-c", `alias ${aliasName}=': rmd host alias'; function ${preludeLeak}() { :; }; . "$HOME/${WORKER_HOME_LOGIN_PROFILE}"; ${report}`],
+      { encoding: "utf8", env: { ...process.env, HOME: home } },
+    );
+
+    const blankLogin = runLogin(blankProfileHome);
+    const blankPrelude = runPrelude(blankProfileHome);
+    assert.match(blankLogin, /login-function=present/);
+    assert.match(blankLogin, /late-function=present/);
+    assert.match(blankPrelude, /prelude-function=present/);
+    assert.match(blankPrelude, /alias=present/);
+
+    const generatedLogin = runLogin(generatedHome);
+    const generatedPrelude = runPrelude(generatedHome);
+    for (const output of [generatedLogin, generatedPrelude]) {
+      assert.match(output, /login-function=absent/);
+      assert.match(output, /prelude-function=absent/);
+      assert.match(output, /alias=absent/);
+      assert.match(output, /cleanup-helper=absent/);
+      assert.match(output, /cleanup-variable=absent/);
+      assert.match(output, /late-function-called/);
+      assert.match(output, /late-function=present/);
+    }
+  } finally {
+    rmSync(generatedHome, { recursive: true, force: true });
+    rmSync(blankProfileHome, { recursive: true, force: true });
+    rmSync(realHome, { recursive: true, force: true });
   }
 });
 

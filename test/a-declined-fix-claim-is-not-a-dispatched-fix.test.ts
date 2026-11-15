@@ -8,7 +8,7 @@
 // `fix.dispatch` row at either head, no retry and no escalation.
 //
 // A declined claim is not a dispatched fix: the dedup counts only a real dispatch marker, the next
-// pass re-attempts the claim, and FIX_CLAIM_DECLINE_BACKSTOP declines on one (PR, head) escalate once.
+// pass re-probes the claim, and only the progress judge can escalate a persisting cause.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
@@ -16,7 +16,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   DEFAULT_SWEEP_POLICY,
-  FIX_CLAIM_DECLINE_BACKSTOP,
   dispatchFixSpent,
   runSweep,
   type FixClaimDeclined,
@@ -127,6 +126,7 @@ async function pass(
     },
     runId: "SWEEP-W1-T5919",
     now: () => NOW,
+    fixOwnerReclaimableAtHold: () => true,
     readLedger: () => [...seed, ...readLedgerLines(ledgerPath)],
     ...over,
     ledgerPath,
@@ -196,44 +196,29 @@ test("an awaited declined dispatch records acted:false naming the decline, and t
   }
 });
 
-test("FIX_CLAIM_DECLINE_BACKSTOP declines on one PR head escalate needs-human exactly once, naming owner and reason", async () => {
-  assert.ok(Number.isInteger(FIX_CLAIM_DECLINE_BACKSTOP) && FIX_CLAIM_DECLINE_BACKSTOP >= 2);
-  const declines = (n: number, head = HEAD, reason?: string) =>
-    Array.from({ length: n }, () => [disposed(head), decline(head, reason)]).flat();
-
-  const below = await pass(view(), [earlierHeadDispatch, ...declines(FIX_CLAIM_DECLINE_BACKSTOP - 1)]);
-  assert.equal(below.dispatched, 1, "below the bound the claim is re-attempted");
-  assert.deepEqual(below.escalations, []);
-
+test("an owner claim holds while its probe is present and escalates only on the judge verdict", async () => {
   for (const pr of [view(), conflictedView()]) {
-    const seed = [earlierHeadDispatch, ...declines(FIX_CLAIM_DECLINE_BACKSTOP)];
-    const at = await pass(pr, seed);
-    assert.equal(at.dispatched, 0, "at the bound no further claim is attempted");
-    assert.equal(at.escalations.length, 1);
-    const reason = at.escalations[0];
-    for (const named of [`#${PR}`, HEAD.slice(0, 7), OWNER, "owner_dirty_recovery_preserve_failed", String(FIX_CLAIM_DECLINE_BACKSTOP)]) {
-      assert.ok(reason.includes(named), `the escalation names ${named}: ${reason}`);
-    }
-    assert.equal(at.row.acted, false);
-    assert.equal(at.row.fix_claim_decline_escalated, "owner_dirty_recovery_preserve_failed");
-    assert.match(String(at.row.stand_down_reason), /declined/);
-    assert.doesNotMatch(String(at.row.stand_down_reason), DECLINED_AT_HEAD);
-
-    const again = await pass(pr, seed, { ledgerPath: at.ledgerPath });
-    assert.equal(again.escalations.length, 0, "the escalation is deduped per (PR, head, reason)");
+    const ownerDecline = { ...decline(HEAD), owner_recovery_reason: "process_cwd_owner" };
+    const seed = [earlierHeadDispatch, ownerDecline, { ...ownerDecline, ts: new Date(NOW).toISOString() }];
+    const overrides: Partial<SweepDeps> = { fixOwnerReclaimableAtHold: () => false,
+      fixProgressJudge: async () => ({ verdict: "escalate", loop: "owner", reason: "owner cannot recover" }) };
+    const held = await pass(pr, seed, overrides);
+    assert.equal(held.dispatched, 0);
+    assert.equal(held.row.acted, false);
+    assert.equal(held.row.probe_result, "present");
+    assert.equal(held.row.judge_verdict, "escalate");
+    assert.equal(held.escalations.length, 1);
+    for (const named of [`#${PR}`, HEAD.slice(0, 7), OWNER, "process_cwd_owner"]) assert.ok(held.escalations[0].includes(named));
+    const again = await pass(pr, seed, { ...overrides, ledgerPath: held.ledgerPath });
     assert.equal(again.dispatched, 0);
-    assert.equal(again.row.acted, false);
-    assert.equal(again.row.fix_claim_decline_escalated, "owner_dirty_recovery_preserve_failed");
+    assert.equal(again.escalations.length, 0);
+    const clear = await pass(pr, seed, { ledgerPath: held.ledgerPath, fixOwnerReclaimableAtHold: () => true });
+    assert.equal(clear.dispatched, 1);
   }
-
-  // A changed reason re-earns the escalation at the same head.
-  const escalatedA = disposed(HEAD, { acted: false, fix_claim_decline_escalated: "owner_remove_failed" });
-  const changed = await pass(view(), [...declines(FIX_CLAIM_DECLINE_BACKSTOP), escalatedA]);
-  assert.equal(changed.escalations.length, 1);
 });
 
-test("a new head resets the decline count and re-earns its own escalation", async () => {
-  const oldDeclines = Array.from({ length: FIX_CLAIM_DECLINE_BACKSTOP }, () => [disposed(HEAD), decline(HEAD)]).flat();
+test("a new head starts without the previous head's owner hold", async () => {
+  const oldDeclines = Array.from({ length: 3 }, () => [disposed(HEAD), decline(HEAD)]).flat();
   const escalated = disposed(HEAD, { acted: false, fix_claim_decline_escalated: "owner_dirty_recovery_preserve_failed" });
   const next = await pass(view({ headSha: NEW_HEAD }), [earlierHeadDispatch, ...oldDeclines, escalated]);
   assert.equal(next.dispatched, 1, "the new head's first claim is attempted");

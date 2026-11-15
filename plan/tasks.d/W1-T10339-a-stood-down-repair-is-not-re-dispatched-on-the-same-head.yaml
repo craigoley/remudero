@@ -9,7 +9,7 @@
   band_meaning: span
   budget_usd: 12.00
   priority: 1  # requested by the operator session 2026-10-21: 382 same-head re-dispatches in 7 days, each one held fix capacity from real work
-  status: queued
+  status: merged
   attempts: 0
   origin: "operator session 2026-10-21: #13282 sat on plan-proof-unrunnable from 03:29Z with a fix stand-down every ~4 minutes at one head"
   plan_refs: [W1-T10282, W1-T9955, W1-T1110, W1-T3306, W1-T3434, W1-T2381]

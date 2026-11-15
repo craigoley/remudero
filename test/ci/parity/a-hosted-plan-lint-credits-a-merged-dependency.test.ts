@@ -21,7 +21,7 @@ function fixture(t: TestContext) {
   mkdirSync(join(repo.dir, "src/lib"), { recursive: true }); mkdirSync(join(repo.dir, "test"));
   put("src/lib/subject.ts", "export const answer = 1;\n");
   put("test/proof.test.ts", 'import { test } from "node:test";test("hosted dependency fixture behavior",()=>{});\n');
-  const record = (id: string, dependencies: string[]) => parseTasksFromYaml(`- id: ${id}\n  title: Hosted dependency fixture ${id}\n  repo: remudero\n  depends_on: [${dependencies.join(", ")}]\n  type: implement\n  verify: auto\n  risk: low\n  status: queued\n  attempts: 0\n  origin: fixture\n  files: [src/lib/subject.ts, test/proof.test.ts]\n  acceptance:\n    - claim: The dependency fixture behaves\n      proof: 'unit test: hosted dependency fixture behavior'\n`, "hosted-producer-fixture")[0]!;
+  const record = (id: string, dependencies: string[]) => parseTasksFromYaml(`- id: ${id}\n  title: Hosted dependency fixture ${id}\n  repo: remudero\n  depends_on: [${dependencies.join(", ")}]\n  type: implement\n  design: |\n    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve\n  verify: auto\n  risk: low\n  status: queued\n  attempts: 0\n  origin: fixture\n  files: [src/lib/subject.ts, test/proof.test.ts]\n  acceptance:\n    - claim: The dependency fixture behaves\n      proof: 'unit test: hosted dependency fixture behavior'\n`, "hosted-producer-fixture")[0]!;
   put("plan/tasks.yaml", stringify([record("ZZ-T1", [])]));
   repo.git("add", "."); repo.git("commit", "-qm", "test: committed dependency implementation");
   const base = repo.git("rev-parse", "HEAD");

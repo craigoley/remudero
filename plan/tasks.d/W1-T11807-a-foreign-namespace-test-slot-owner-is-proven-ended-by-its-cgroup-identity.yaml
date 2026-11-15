@@ -13,7 +13,7 @@
   files:
     - src/lib/test-slot.ts
     - test/ci/suites/a-foreign-namespace-test-slot-owner-is-proven-ended-by-its-cgroup-identity.test.ts
-  status: queued
+  status: merged
   priority: 1  # a foreign-namespace owner today has no positive end proof, so author preflights wait behind it to the wait bound
   attempts: 0
   rationale: |

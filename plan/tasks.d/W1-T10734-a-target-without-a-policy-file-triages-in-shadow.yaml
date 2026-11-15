@@ -17,7 +17,7 @@
   files:
     - src/run-task.ts
     - test/inbox/a-target-without-a-policy-file-triages-in-shadow.test.ts
-  status: queued
+  status: merged
   attempts: 0
   note: |
     reservation hand-off: run-W1-T10733-1793034305807 -> run-unfiled-1793035320662

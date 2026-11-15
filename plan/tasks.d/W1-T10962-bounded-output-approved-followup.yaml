@@ -23,7 +23,7 @@
     - "src/lib/garden-registry.ts"
     - "src/lib/worker-containment.ts"
     - "src/lib/worker-provider.ts"
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: The operator requested durable plan custody of the remaining approved

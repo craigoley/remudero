@@ -7,7 +7,7 @@
   risk: high  # Shared selector changes affect census discovery across the repository.
   band_meaning: span
   priority: 1.32
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:test:test/ci/the-selector-reaches-every-whole-tree-suite-it-missed.test.ts"

@@ -23,7 +23,7 @@
     - test/deploy/a-tunnel-off-its-pinned-image-is-rolled-with-no-gap.test.ts
     - test/deploy/a-failed-tunnel-roll-never-darkens-the-console.test.ts
     - test/deploy/a-failed-tunnel-roll-raises-a-host-alert.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-10-27. Cloudflare's eMudhra notice (2026-10-26) requires every cloudflared to be 2026.10.2 or later: older builds trust eight eMudhra intermediates with weak keys. The only cloudflared on the Azure host is the `cloudflared` container, which carries console.remudero.com to http://remudero-serve:4317. It was running 2026.8.3, created 2026-09-05 from `cloudflare/cloudflared:latest` with `--no-autoupdate`.

@@ -11,7 +11,7 @@
   risk: high
   band_meaning: blast-radius
   priority: 4
-  status: queued
+  status: merged
   # backlog gardener: band=4 evidence=f501bc985e1299ea
   # backlog gardener: placed=2026-10-25T20:57:31.291Z
   attempts: 0

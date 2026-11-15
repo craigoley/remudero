@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.28
   status: queued
@@ -27,10 +27,13 @@
     - PR #14806: 0.09 PR-hours — non-test paths need scope (path-not-changed: src/cli/commands/fix.ts) [provider claude, selected_model claude-sonnet-5-5, model sonnet, effort medium] — worker saw: state/runs/DAEMON-1793096246106-fix1-1793102575204.tail
     Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
   risk_ruling:
-    verdict: "high"
-    action: escalate
-    confidence: 0.88
+    verdict: "low"
+    action: proceed
+    confidence: 0.8
     reasons:
-      - "high-risk verdict at confidence 0.88 — on the change's description/files alone, no diff was read — The record supplies recurring commit-refusal reports but no diagnosed cause or proposed mapping correction connecting scripts/test-placement/test-folders.tsv to the reported src/cli/commands/fix.ts scope failure.; on the change's description/files alone, no diff was read — Acceptance checks for a test declaration with grep; it does not establish that the refusal clears. The remedy's effectiveness cannot be verified from the supplied evidence, meeting the stated escalation condition."
-    judged_at: "2026-10-31T16:58:37.410Z"
-    pin: "f154694de510336bda9b075646cfa0482f39fca95a26d40e6cc5677996ce382f"
+      - "Declared files are a test-placement TSV and a new gardener test file, with no secrets, auth, permission, merge/deploy, or review-policy surface evident in the description or files."
+      - "The acceptance criterion is a grep for a named test in the new test file, so it can be verified from what is shown."
+      - "The family track record is 9 merged with 0 declined, and the plan record shows no operator-only decision or irreversible or deleting action."
+      - "The missing test file at base is expected for an implement task that creates it. No actual-change view was supplied, so the scope of the real edit is unverified."
+    judged_at: "2026-11-11T05:42:42.164Z"
+    pin: "e2eac92c39352b6db6a9051226c49e48a44a8034ddb1d22b3bb920557bb61ebf"

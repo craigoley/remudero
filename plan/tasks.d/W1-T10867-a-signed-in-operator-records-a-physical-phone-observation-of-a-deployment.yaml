@@ -23,7 +23,7 @@
     - openapi/daemon.yaml
     - packages/api-client/src/schema.d.ts
     - test/console-api/serve/product-case-device-observations.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: >-
     Filed for issue #14864 by plan-only run PLAN-clarify-1793116565507. This is step 3 of 3 of the product-case

@@ -874,7 +874,7 @@ export interface components {
     };
     ProductCaseError: {
       version: "product-case-v1";
-      error: "invalid_identity" | "invalid_input" | "not_found" | "stale_revision" | "idempotency_conflict" | "capacity" | "busy" | "corrupt" | "unavailable" | "outcome_unknown" | "recovery_required" | "request_too_large" | "repository_missing" | "repository_not_found" | "repository_conflict" | "provider_unreadable" | "plan_not_approved" | "target_not_enrolled" | "target_unreadable" | "target_daemon_missing" | "runner_missing" | "bootstrap_unverified" | "task_not_found" | "task_unreadable" | "task_stale" | "task_claimed" | "task_merged" | "budget_exceeded" | "concurrency_exceeded" | "fleet_halted" | "kick_failed" | "creation_denied" | "envelope_missing" | "handoff_unavailable" | "binding_not_found" | "operator_required" | "deployment_not_qualified" | "repository_required" | "repository_mismatch" | "team_mismatch" | "project_not_found" | "project_conflict" | "not_configured";
+      error: "invalid_identity" | "invalid_input" | "not_found" | "stale_revision" | "idempotency_conflict" | "capacity" | "busy" | "corrupt" | "unavailable" | "outcome_unknown" | "recovery_required" | "request_too_large" | "repository_missing" | "repository_not_found" | "repository_conflict" | "provider_unreadable" | "plan_not_approved" | "target_not_enrolled" | "target_unreadable" | "target_daemon_missing" | "runner_missing" | "bootstrap_unverified" | "task_not_found" | "task_unreadable" | "task_stale" | "task_claimed" | "task_merged" | "budget_exceeded" | "concurrency_exceeded" | "fleet_halted" | "kick_failed" | "creation_denied" | "envelope_missing" | "handoff_unavailable" | "runner_config_missing" | "runner_config_invalid" | "binding_not_found" | "operator_required" | "deployment_not_qualified" | "repository_required" | "repository_mismatch" | "team_mismatch" | "project_not_found" | "project_conflict" | "not_configured";
     };
     /** At most 4096 raw request bytes. Names one task the target repository's own plan filed for the product's approved plan evidence. Reusing requestId with the same command replays its receipt; a changed command conflicts. Ownership comes only from verifiedActor. */
     ProductBuildCommand: {
@@ -1035,6 +1035,10 @@ export interface components {
       /** The board row's plan title, or its escalation title for a task-less escalation. */
       title?: string;
       risk?: "low" | "medium" | "high";
+      /** Present only for a task held in the ops catalog. */
+      catalog?: "ops";
+      /** The operator-approved public acceptance claims and proofs; other private task fields are withheld. */
+      acceptance?: (AcceptanceCriterion)[];
       /** The last ledger activity naming this task; absent when none was observed. */
       lastActivityAt?: string;
       /** Observed accumulated spend for the current in-flight run, including measured zero. */
@@ -1091,8 +1095,19 @@ export interface components {
         firstSignalLatencyMs?: number;
       };
     };
+    /** An unreadable ops catalog is explicit unknown, never a healthy zero count. No private repository identity is exposed. */
+    OpsCatalogState: ({
+      outcome: "ok";
+      taskCount: number;
+    }) | ({
+      outcome: "unreadable";
+      reason: string;
+    });
     /** GET /v1/status's body -- one StatusProjection per plan task, as of `generated_at`, plus (W1-T163, when the daemon's per-token last-seen marker store is wired) the calling token's own "since you last checked" recap. */
     StatusSnapshot: {
+      opsCatalog?: (OpsCatalogState) & ({
+        observedAt: string;
+      });
       generated_at: string;
       tasks: (StatusProjection)[];
       /** W1-T163: every recap-worthy event (src/lib/recap.ts) after this token's PRIOR marker -- absent entirely on a daemon with no last-seen store wired; `[]` on this token's first-ever view (nothing to recap FROM). */
@@ -1543,6 +1558,24 @@ export interface components {
       thread_id?: string | null;
       /** W1-T2302 -- the console-minted per-submission key a repeat of the same submit is recognised by. Null when none was supplied. */
       submission_key?: string | null;
+      /** W1-T11104 -- an explicit console wording correction bound to one native conversation revision. Immutable once captured; absent on every other entry. Evidence for the weekly docket, never a reply or an authority grant. */
+      console_correction?: {
+        kind: "wording_correction";
+        version: 1;
+        symptom: "stale_read" | "unauthorized_read" | "missing_diagnosis" | "unit_or_time_zone" | "denominator" | "changed_recommendation" | "reply_failed" | "reply_duplicate" | "reply_lost" | "agent_ack_vs_work" | "archive_no_more_input" | "reopened_question" | "other";
+        issue_url: string;
+        repository: string;
+        thread_id: string;
+        intent_id: string;
+        conversation_revision: string;
+        source_revision: string;
+        rendered_version: string;
+        rendered_digest?: string | null;
+        before: string;
+        after: string;
+        replay_case_ids: (string)[];
+        context: "operator_reported";
+      } | null;
       /** Set once `rmd triage` opens a proposal PR for this entry; null until then. */
       proposal_pr: string | null;
       /** W1-T313 -- src/lib/feedback.ts's `DecisionSummary`, the plain-language decision card generated once when the entry moves to `proposed`; null until then or on a summarizer failure. */
@@ -5169,6 +5202,7 @@ export interface components {
       data: {
         instance: string;
         board: {
+          opsCatalog?: OpsCatalogState;
           counts: {
             running: number;
             queued: number;
@@ -5365,7 +5399,12 @@ export interface components {
       taskId: string;
       title: string;
       status: string;
+      /** Existing public risk, or the literal withheld for an ops task; never its private risk band. */
       risk: string;
+      /** Present only for a task held in the ops catalog. */
+      catalog?: "ops";
+      /** The operator-approved public acceptance claims and proofs; other private task fields are withheld. */
+      acceptance?: (AcceptanceCriterion)[];
       lastActivityAt?: string;
       prUrl?: string;
       prNumber?: number;
@@ -6529,6 +6568,11 @@ export interface components {
         decline: string;
       };
       replyUnavailableReason?: string;
+      /** Advertised only by a native read that verified this conversation. Opt-in explicit wording-correction kind on the reply route; it is not a reply, clears no Action required, archives nothing and grants no authority. */
+      wordingCorrection?: {
+        kind: "wording_correction";
+        version: 1;
+      };
       details: string;
     };
     EscalationConversationRead: {
@@ -6643,6 +6687,17 @@ export interface components {
       issueUrl?: string;
       expectedRevision?: string;
       intentId?: string;
+      /** Explicit opt-in. Records the operator's wording correction as a separate feedback receipt bound to the exact native conversation revision. Requires a bound request and `correction`; never a reply, never inferred from `text`. */
+      kind?: "wording_correction";
+      /** Bounded source facts. `renderedVersion` and `renderedDigest` are operator-reported context, not a server attestation of what the browser displayed. */
+      correction?: {
+        symptom: "stale_read" | "unauthorized_read" | "missing_diagnosis" | "unit_or_time_zone" | "denominator" | "changed_recommendation" | "reply_failed" | "reply_duplicate" | "reply_lost" | "agent_ack_vs_work" | "archive_no_more_input" | "reopened_question" | "other";
+        renderedVersion: string;
+        renderedDigest?: string | null;
+        before: string;
+        after: string;
+        replayCaseIds?: (string)[];
+      };
     };
     /** One clarification the reply interpreter asks (src/lib/reply-interpreter.ts's `ClarifyingQuestion`). */
     ClarifyingQuestion: {
@@ -6671,6 +6726,10 @@ export interface components {
       };
       inputDelivery?: "recorded" | "unverified";
       work?: "not_observed";
+      /** Present only for an explicit wording correction. */
+      kind?: "wording_correction";
+      /** A wording correction appends no reply and clears no Action required. */
+      reply?: "not_recorded";
       duplicate?: boolean;
       detail?: string;
       feedback?: FeedbackEntry;

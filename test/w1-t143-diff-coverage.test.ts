@@ -158,14 +158,14 @@ function withInstanceRegistry<T>(root: string, fn: () => Promise<T>): Promise<T>
   });
 }
 
-test("main(): `rmd pause` writes the instance's PAUSE flag + ledgers fleet.pause, pushes nothing, exits 0", async (t) => {
+test("main(): `rmd pause --reason` writes the instance's PAUSE flag + ledgers fleet.pause, pushes nothing, exits 0", async (t) => {
   const { home, root } = instance("rmd-t143-pause-");
   const oldHome = process.env.HOME;
   process.env.HOME = home;
   try {
     await withInstanceRegistry(root, () =>
       withPushRecorded(async (pushes) => {
-        const code = await callMain(t, ["node", "run-task.js", "pause"]);
+        const code = await callMain(t, ["node", "run-task.js", "pause", "--reason", "fixture hold"]);
         assert.equal(code, 0);
         assert.ok(existsSync(join(root, "state", "PAUSE")), "the instance's own flag is written");
         const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8");
@@ -180,13 +180,13 @@ test("main(): `rmd pause` writes the instance's PAUSE flag + ledgers fleet.pause
   }
 });
 
-test("main(): `rmd pause --fleet` pushes the fleet-wide hold + ledgers fleet.pause, exits 0", async (t) => {
+test("main(): `rmd pause --fleet --reason` pushes the fleet-wide hold + ledgers fleet.pause, exits 0", async (t) => {
   const { home, root } = instance("rmd-t143-pause-fleet-");
   const oldHome = process.env.HOME;
   process.env.HOME = home;
   try {
     await withPushRecorded(async (pushes) => {
-      const code = await callMain(t, ["node", "run-task.js", "pause", "--fleet"]);
+      const code = await callMain(t, ["node", "run-task.js", "pause", "--fleet", "--reason", "fixture hold"]);
       assert.equal(code, 0);
       const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8");
       assert.match(ledger, /"step":"fleet\.pause"/);

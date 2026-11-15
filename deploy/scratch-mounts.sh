@@ -36,6 +36,9 @@
 
 SCRATCH_STATE_DEST="/home/node/Remudero"
 SCRATCH_CHECKOUT_DEST="${SCRATCH_STATE_DEST}/remudero"
+# The coverage overlay is the one bind that this plan puts below repos. The placement check of
+# serve-container.sh accepts a mount below repos only at this name (W1-T12192).
+SCRATCH_REPOS_COVERAGE_DEST="${SCRATCH_STATE_DEST}/repos/.remudero-coverage"
 SCRATCH_READ_MODEL_DEST="/home/node/rmd-scratch/read-model"
 SCRATCH_WORKER_HOME_DEST="/home/node/rmd-scratch/worker-homes"
 SCRATCH_TEST_SLOT_DEST="/home/node/rmd-scratch/test-slots"
@@ -196,7 +199,7 @@ scratch_plan() {
 ${base}/tmp	${SCRATCH_STATE_DEST}/tmp
 ${base}/remudero-coverage	${SCRATCH_STATE_DEST}/.remudero-coverage
 ${base}/repos	${SCRATCH_STATE_DEST}/repos
-${base}/repos-coverage	${SCRATCH_STATE_DEST}/repos/.remudero-coverage
+${base}/repos-coverage	${SCRATCH_REPOS_COVERAGE_DEST}
 ${base}/read-model	${SCRATCH_READ_MODEL_DEST}
 ${base}/worker-homes	${SCRATCH_WORKER_HOME_DEST}
 ${SCRATCH_CONTAINER_TMP}	/tmp

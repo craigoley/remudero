@@ -6,6 +6,9 @@
  */
 
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { writeAtomic } from "./fs-race-safe.js";
 import { contributionOriginFromRest, type ContributionOrigin, type RestContributionOrigin } from "./contributor-admission.js";
 import type { ConflictFileDiff, MergeConflictEvidence, MergeState, RedundantRefixEvidence } from "./merge-state.js";
 import type { WorkflowRunJobObservation, WorkflowRunObservation } from "./workflow-run.js";
@@ -1704,6 +1707,96 @@ export interface PlanFilingFileCache {
 
 export function createPlanFilingFileCache(): PlanFilingFileCache {
   return { entries: new Map(), missCursors: new Map(), nominatedReads: new Set() };
+}
+
+const PLAN_FILING_FILE_STORE_SCHEMA = 1;
+const PULL_KEY = /^[^\s#@]+\/[^\s#@]+#\d+$/;
+
+/** W1-T12236: a {@link PlanFilingFileCache} kept in `state/cache/plan-filing-files.json` across restarts. */
+export interface KeptPlanFilingFileCache extends PlanFilingFileCache {
+  /** Why the file gave no entries. Absent when it was read, and when there is no file yet. */
+  readonly unreadable?: string;
+  /** Removes each entry of `owner/repo` whose pull request is not in `open`. */
+  retain(owner: string, repo: string, open: Iterable<number>): void;
+  /** Writes the file when its entries changed since the last write. A failed write keeps them in memory. */
+  save(): { ok: true; written: boolean } | { ok: false; reason: string };
+}
+
+const isPlanFilingPath = (value: unknown): value is string =>
+  typeof value === "string" && value.length > 0 && value.length <= 1_024 && !/[\0\r\n]/.test(value);
+
+function parsePlanFilingFileStore(text: string): Map<string, readonly string[]> {
+  const body = JSON.parse(text) as { schema?: unknown; pulls?: unknown } | null;
+  if (body === null || typeof body !== "object" || Array.isArray(body)) throw new Error("the store is not an object");
+  if (body.schema !== PLAN_FILING_FILE_STORE_SCHEMA) {
+    throw new Error(`schema ${JSON.stringify(body.schema)} is not schema ${PLAN_FILING_FILE_STORE_SCHEMA}`);
+  }
+  const pulls = body.pulls;
+  if (pulls === null || typeof pulls !== "object" || Array.isArray(pulls)) throw new Error("pulls is not an object");
+  const entries = new Map<string, readonly string[]>();
+  for (const [pull, value] of Object.entries(pulls as Record<string, unknown>)) {
+    const { head, files } = (value ?? {}) as { head?: unknown; files?: unknown };
+    if (!PULL_KEY.test(pull)) throw new Error(`${pull} is not owner/repo#number`);
+    if (typeof head !== "string" || !/^[^\s#@]+$/.test(head)) throw new Error(`${pull} has no head`);
+    if (!Array.isArray(files) || files.length === 0 || !files.every(isPlanFilingPath)) {
+      throw new Error(`${pull} has no complete file list`);
+    }
+    entries.set(`${pull}@${head}`, [...files]);
+  }
+  return entries;
+}
+
+function planFilingFileStoreText(entries: Map<string, readonly string[]>): string {
+  const pulls: Record<string, { head: string; files: readonly string[] }> = {};
+  for (const key of [...entries.keys()].sort()) {
+    const at = key.lastIndexOf("@");
+    pulls[key.slice(0, at)] = { head: key.slice(at + 1), files: entries.get(key)! };
+  }
+  return JSON.stringify({ schema: PLAN_FILING_FILE_STORE_SCHEMA, pulls });
+}
+
+/**
+ * W1-T12236: reads the kept file lists. Each entry is the complete file list of one pull request at one head,
+ * so a lookup by the exact head is still true after a restart. A missing file gives an empty store. A file
+ * that cannot be read or has a wrong shape also gives an empty store, and `unreadable` names the reason.
+ * The miss cursors and the nominated reads are pass state and are not kept. This function does not throw.
+ */
+export function loadPlanFilingFileCache(stateDir: string): KeptPlanFilingFileCache {
+  const path = join(stateDir, "cache", "plan-filing-files.json");
+  const cache = createPlanFilingFileCache();
+  let unreadable: string | undefined;
+  try {
+    for (const [key, paths] of parsePlanFilingFileStore(readFileSync(path, "utf8"))) {
+      if (cache.entries.size >= PLAN_FILING_FILE_CACHE_MAX_ENTRIES) break;
+      cache.entries.set(key, paths);
+    }
+  } catch (error) {
+    const reason = String((error as Error)?.message ?? error);
+    // A missing file is an empty store and not a failure. Each other failure keeps its reason.
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") unreadable = reason;
+  }
+  // An unreadable file is replaced at the first save.
+  let written = unreadable === undefined ? planFilingFileStoreText(cache.entries) : undefined;
+  return Object.assign(cache, {
+    ...(unreadable !== undefined ? { unreadable } : {}),
+    retain: (owner: string, repo: string, open: Iterable<number>) => {
+      const keep = new Set([...open].map((number) => `${owner}/${repo}#${number}@`));
+      for (const key of cache.entries.keys()) {
+        if (key.startsWith(`${owner}/${repo}#`) && !keep.has(key.slice(0, key.lastIndexOf("@") + 1))) cache.entries.delete(key);
+      }
+    },
+    save: (): ReturnType<KeptPlanFilingFileCache["save"]> => {
+      const text = planFilingFileStoreText(cache.entries);
+      if (text === written) return { ok: true, written: false };
+      try {
+        writeAtomic(path, text, { mode: 0o600 });
+        written = text;
+        return { ok: true, written: true };
+      } catch (error) {
+        return { ok: false, reason: String((error as Error)?.message ?? error) };
+      }
+    },
+  });
 }
 
 function planFilingFileCacheKey(owner: string, repo: string, candidate: PlanFilingFileCandidate): string {

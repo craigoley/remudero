@@ -30,7 +30,7 @@
     - openapi/daemon.yaml
     - packages/api-client/src/schema.d.ts
     - test/plan/product-case-run-receipts.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: >-
     Filed for issue #14864 by plan-only run PLAN-clarify-1793116565507. This is step 1 of 3 of the product-case

@@ -1,0 +1,60 @@
+- id: W1-T12670
+  title: "The daemon sets its GitHub installation share from a registry its container can read and names its own instance"
+  repo: remudero
+  depends_on:
+    - W1-T12553
+  priority: 1.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # every core daemon read now waits on a share, and the daemon's read share changes from none to a quarter of the installation; a wrong count only delays reads, never refuses a write
+  origin: "operator-session#installation-budget-unconfigured-2026-11-14"
+  plan_refs:
+    - W1-T12553
+  files:
+    - src/cli/commands/daemon.ts
+    - src/lib/instance-registry.ts
+    - src/lib/ledger.ts
+    - src/lib/ledger-steps.ts
+    - test/github/the-fleets-app-installation-stays-under-its-hourly-rate-limit.test.ts
+    - test/github/the-daemon-sets-its-installation-share-from-a-registry-its-container-can-read.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "When there is no selected registry and the host registry file does not exist, daemonInstallationRegistry reads the checkout's .remudero/daemon-instances.yaml under repoRoot, and the github.budget.configured row's source names that path"
+      proof: "grep: W1-T12670 criterion 1 in test/github/the-daemon-sets-its-installation-share-from-a-registry-its-container-can-read.test.ts"
+    - claim: "invariant:host-errors-stay-visible — any host registry read error other than a missing file (for example EACCES) does not fall back to the checkout: the row stays unconfigured, reason registry_unreadable, with the error, as W1-T12553 requires"
+      kind: guard
+      proof: "grep: W1-T12670 criterion 2 in test/github/the-daemon-sets-its-installation-share-from-a-registry-its-container-can-read.test.ts"
+    - claim: "When RMD_INSTANCE_NAME is unset, the instance is the one live registry entry whose github_repo matches the daemon's target owner/name. With no match or more than one match the instance stays \"unknown\" and the row's instance_reason is no_registry_match or several_registry_matches. When RMD_INSTANCE_NAME is set, it wins as before"
+      proof: "grep: W1-T12670 criterion 3 in test/github/the-daemon-sets-its-installation-share-from-a-registry-its-container-can-read.test.ts"
+    - claim: "invariant:omitted-ids-only-shrink-a-share — on the checkout fallback a live entry that names no gh_app_installation_id counts as a consumer of the daemon's installation; an entry that names another id never counts, and the selected and host registries keep W1-T12553's rule that an omitted id is not a consumer"
+      kind: guard
+      proof: "grep: W1-T12670 criterion 4 in test/github/the-daemon-sets-its-installation-share-from-a-registry-its-container-can-read.test.ts"
+    - claim: "Through the real daemonCommand start path, with no selected registry, no host registry file, no RMD_INSTANCE_NAME and GH_APP_INSTALLATION_ID 155256285, the daemon logs github.budget.configured with outcome configured, instance core and consumers 4 (the three live instances plus the hand share)"
+      proof: "grep: W1-T12670 criterion 5 in test/github/the-daemon-sets-its-installation-share-from-a-registry-its-container-can-read.test.ts"
+    - claim: "Ledger rotation keeps the github.budget.configured row of each surviving daemon.boot run, by the same lifetime-evidence rule that keeps that run's daemon.memory_policy row"
+      proof: "grep: W1-T12670 criterion 6 in test/github/the-daemon-sets-its-installation-share-from-a-registry-its-container-can-read.test.ts"
+  rationale: |
+    WHY: W1-T12553 (#18419) gave each daemon instance a share of the GitHub App installation that the core, site and console daemons and hand runs share. In the core daemon the share never took effect, so the installation still runs out of its hourly limit.
+    OBSERVED 2026-11-14 on the Azure host: the core daemon restarted at 16:35:58Z at af6ac0660 and logged `{"step":"github.budget.configured","outcome":"unconfigured","instance":"unknown","reason":"registry_unreadable","installation_id":"155256285","error":"ENOENT: no such file or directory, open '/etc/remudero/daemon-instances.yaml'"}`. The row survives only in the rotated archive ledger.2026-11-14T16-36-15-303Z.ndjson.gz: the rotation 17 s later dropped it from the live ledger.
+    READ at origin/main 7739db4ec:
+    - src/cli/commands/daemon.ts:2945-2950 `daemonInstallationRegistry` reads the selected registry, else DEFAULT_HOST_INSTANCE_REGISTRY_PATH (src/lib/instance-registry.ts:36). The core container has no selected registry and does not mount /etc/remudero. Its `_repoRoot` parameter is unused.
+    - :2962 the instance is RMD_INSTANCE_NAME or "unknown". deploy/recycle-container.sh sets RMD_INSTANCE_NAME only with --instance, and the core container was started without it.
+    - src/lib/instance-registry.ts:304-311 `installationConsumers` counts only live rows whose gh_app_installation_id equals the daemon's. The checkout's .remudero/daemon-instances.yaml names no gh_app_installation_id (the host copy names 155256285 on core, site and console). So a plain fallback to the checkout gives no_instance_on_installation, not a share; the W1-T12553 test "Omitted IDs do not establish which installation the instances use" pins that for its own sources.
+    - src/lib/ledger.ts:1968-1979 keeps, for each surviving daemon.boot run, its last row and its daemon.memory and daemon.memory_policy rows. github.budget.configured is in none of the retained sets, so the first rotation after a boot drops it.
+    - The W1-T12553 test "the actual host-registry read propagates failure and startup logs why" requires that an EACCES on the host file is logged and not hidden by a checkout read. This task keeps that: only a missing host file falls back.
+  design: |
+    INVARIANT host-errors-stay-visible: only a missing host registry file (ENOENT) falls back to the checkout; every other host read error is still logged as registry_unreadable with its error.
+    INVARIANT omitted-ids-only-shrink-a-share: a live entry with no installation id counts as a consumer only on the checkout fallback; counting more consumers only makes each share smaller, so a missing id can never let an instance read more than its share.
+    1. In src/cli/commands/daemon.ts `daemonInstallationRegistry(repoRoot)`: selected registry first, as now. Else read DEFAULT_HOST_INSTANCE_REGISTRY_PATH; on ENOENT only, read join(repoRoot, ".remudero", "daemon-instances.yaml") and return `{ text, source: <that path>, omitsInstallationIds: true }`. Any other host error throws as now. A missing checkout copy also throws, so the row stays registry_unreadable.
+    2. In src/lib/instance-registry.ts `installationConsumers(registryText, installationId, opts?)`: with `countOmitted: true`, a live row with no or empty gh_app_installation_id also counts. A row with another id never counts. Default behaviour is unchanged. Add `registryInstanceForRepo(registryText, ownerRepo)` that returns `{ name }` for exactly one live row whose github_repo (or owner/name repo) equals ownerRepo, ignoring case, else `{ reason: "no_registry_match" | "several_registry_matches" }`.
+    3. `startDaemonInstallationBudget` takes the daemon's target owner/name as a new last parameter. When RMD_INSTANCE_NAME is unset and the registry was read, the instance comes from `registryInstanceForRepo`; an "unknown" instance adds `instance_reason` to the row. The production call at daemon.ts:1285 passes `${target.owner}/${target.repo}`. Rows with RMD_INSTANCE_NAME set are byte-identical to today.
+    4. In src/lib/ledger.ts, add github.budget.configured to the per-run lifetime-evidence steps beside daemon.memory and daemon.memory_policy (one step list, no second rule). Update the github.budget.configured meaning in src/lib/ledger-steps.ts to name the checkout fallback and instance_reason.
+    5. Tests: drive daemonCommand with the test helper's deps (as test/a-daemon-whose-boot-fails-releases-its-watchers-and-exits.test.ts does), fs.readFileSync made to throw ENOENT for the host path only, no selected registry env, RMD_INSTANCE_NAME deleted, GH_APP_INSTALLATION_ID 155256285; read the row from the ledger file. The rotation criterion runs the real rotation on a ledger with two boots.
+    NOT IN SCOPE: mounting /etc/remudero into the core container or setting RMD_INSTANCE_NAME on it (host configuration); adding installation ids to the checkout registry (deploy scripts read that file); W1-T12531's in-process client.
+  falsifier: |
+    Remove the ENOENT fallback and criterion 5 must fail with outcome unconfigured, reason registry_unreadable. Fall back on EACCES too and criterion 2 must fail. Drop the repo match and criteria 3 and 5 must fail with instance unknown. Stop counting omitted ids on the fallback and criterion 5 must fail with no_instance_on_installation; count them on the host registry and criterion 4 must fail. Take github.budget.configured out of the lifetime-evidence steps and criterion 6 must fail. Restore and require all to pass.
+  note: |
+    Id reserved for run-unfiled-1794674868000 with ~/rmd-work/bin/reserve-id.sh. Hand-built on the Azure lane, stacked on this filing.

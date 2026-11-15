@@ -1,3 +1,4 @@
+import { attributeAttemptOutcome } from "#src/lib/attempt-outcome-attribution.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
@@ -67,7 +68,7 @@ test("a changed treatment and a generic unit are excluded while the terminal att
     { ts: "2026-09-29T14:22:00Z", step: "worker.attempt", selection_assignment_id: "a3",
       worker_duration_ms: 120_000, tokens: { input: 100, output: 20 }, total_cost_usd: 0.25, billing_mode: "subscription" },
   ];
-  const report = evaluateRoutingExperiment(rows, old, "2026-09-29");
+  const report = evaluateRoutingExperiment(rows, old, "2026-09-29", attributeAttemptOutcome);
   assert.deepEqual(report.excludedAssignments, { genericUnit: 1, changedTreatment: 1, unverifiedTreatment: 1 });
   assert.equal(report.assignments, 1);
   assert.equal(report.arms[0]?.tasks, 1);
@@ -78,7 +79,7 @@ test("a changed treatment and a generic unit are excluded while the terminal att
   assert.equal(report.arms[0]?.costMissingAssignments, 0);
   const cash = evaluateRoutingExperiment([...rows, assignment("a4", "W1-T4801", "claude-sonnet-5", old.id),
     { ts: "2026-09-29T14:23:00Z", step: "worker.attempt", selection_assignment_id: "a4",
-      total_cost_usd: 0.1, billing_mode: "api" }], old, "2026-09-29");
+      total_cost_usd: 0.1, billing_mode: "api" }], old, "2026-09-29", attributeAttemptOutcome);
   assert.equal(cash.arms[0]?.meanCashCostUsd, 0.1);
   assert.equal(cash.arms[0]?.meanNotionalCostUsd, 0.25);
 });

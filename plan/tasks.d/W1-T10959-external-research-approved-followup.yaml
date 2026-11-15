@@ -12,7 +12,7 @@
   plan_refs: []
   files:
     - docs/research/agent-automation-inspirations.md
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: The operator requested durable plan custody of the remaining approved

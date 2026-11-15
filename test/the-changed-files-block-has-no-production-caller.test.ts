@@ -91,7 +91,7 @@ test("W1-T2550: autonomous rmd plan captures committed files after regeneration 
   const region = RUN_TASK_SRC.slice(from, to);
   assert.ok(region.indexOf("applyPlanProposalCommit(worktreePath, commitMessage, log);") < region.indexOf("const planPrFiles ="));
   assert.match(region, /"diff", "--name-only", worktreeMergeBase\(worktreePath\), "HEAD"/);
-  assert.match(region, /criteria:\s*filingAcceptanceCriteria\(reservedIds, planPrFiles\)/);
+  assert.match(region, /criteria:\s*planPrAcceptanceCriteria\(reservedIds, planPrFiles, diffSinceMergeBase\(worktreePath\), worktreePath\)/);
   assert.match(region, /changedFiles:\s*planPrFiles/);
 });
 

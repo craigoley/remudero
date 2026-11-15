@@ -8,7 +8,7 @@
   verify: auto
   risk: low
   priority: 4
-  status: queued
+  status: merged
   # backlog gardener: band=4 evidence=d39c071a2e0e7b12
   # backlog gardener: placed=2026-11-04T22:33:48.078Z
   attempts: 0

@@ -9,7 +9,7 @@
   risk: high  # Rule 19: one concern spans the PR-open refusal class, the non-worker strike set and the existing W1-T3959 hold that reads it; no conclusive verdict for a real miss changes
   band_meaning: span
   priority: 1
-  status: queued
+  status: merged
   attempts: 0
   origin: "filing agent X1 2026-10-28, on Craig's 'file and fix both' after W1's wedge diagnosis of PORTAL-T45"
   plan_refs: [W1-T10742, W1-T8759, W1-T3525, W1-T4691, W1-T7742, W1-T10897, PORTAL-T45, PORTAL-T44]

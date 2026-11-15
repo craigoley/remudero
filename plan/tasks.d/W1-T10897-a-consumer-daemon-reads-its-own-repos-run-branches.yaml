@@ -15,7 +15,7 @@
     - src/run-task.ts
     - src/cli/commands/daemon.ts
     - test/daemon/a-consumer-daemon-reads-its-own-repos-run-branches.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-10-28 ~03:15Z, read-only, at origin/main b3eae3fcf.

@@ -235,9 +235,10 @@ test("nested TSX cleanup preserves owned IPC sockets without letting them hide e
       const {out} = reclaim(fx, 40);
       assert.ok(existsSync(ipc), 'IPC sockets and unrecognized entries are never removed: ' + out);
       assert.ok(existsSync(young));
-      assert.equal(existsSync(old), mode !== 'idle-socket', mode + ': ' + out);
-      if (mode === 'idle-socket') assert.match(out, /pruned tsx cache files=1/);
-      else if (mode === 'live-socket') assert.match(out, /open file or lsof scan uncertain/);
+      // W1-T12252: a live endpoint no longer holds the cache; only a held cache file stays.
+      const trimmed = mode === 'idle-socket' || mode === 'live-socket';
+      assert.equal(existsSync(old), !trimmed, mode + ': ' + out);
+      if (trimmed) assert.match(out, /pruned tsx cache files=1 bytes=\d+ kept-open=0 /);
       else assert.match(out, /TSX discovery contains unrecognized/);
     } finally {rmSync(fx.base, {recursive: true, force: true});}
   }
@@ -362,7 +363,9 @@ test("real lsof preserves a held nested cache while an idle historical cache is 
     fd = openSync(files[0]!, "r");
     const { out } = reclaim(fx, 40, true, { RMD_RECLAIM_LSOF: quietLsof(fx, lsof) });
     assert.ok(existsSync(files[0]!), out); assert.equal(existsSync(files[1]!), false, out);
-    assert.match(out, /open file or lsof scan uncertain/); assert.match(out, /pruned tsx cache files=1.*idle/);
+    // W1-T12252: the held file stays and is counted; it no longer marks its cache as a risk.
+    assert.match(out, /kept tsx cache files held open=1 .*held/); assert.match(out, /pruned tsx cache files=1 .*idle/);
+    assert.doesNotMatch(out, /open file or lsof scan uncertain/);
   } finally { if (fd !== undefined) closeSync(fd); rmSync(fx.base, { recursive: true, force: true }); }
 });
 

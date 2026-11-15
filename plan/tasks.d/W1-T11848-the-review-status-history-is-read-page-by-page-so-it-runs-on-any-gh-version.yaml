@@ -19,7 +19,7 @@
     - test/event-driven-semantic-review.test.ts
     - test/ledger/a-reproduced-fail-is-not-overturned-on-the-same-head.test.ts
     - test/retro-marker-atomic.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: The status history of a head is read as one plain list per page (per_page=100 with a page number, newest first), never with the --slurp or --paginate flags, and reading stops at the first page shorter than 100

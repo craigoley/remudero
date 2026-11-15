@@ -1,0 +1,74 @@
+- id: W1-T12031
+  title: The entrypoint records a daemon exit and continues supervised freshness recovery without awaiting EOF from inherited stderr writers
+  repo: remudero
+  depends_on: []
+  priority: 0.8
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 5
+  risk: high # the baked entrypoint supervises every role; only its inline stderr observer changes
+  band_meaning: span
+  origin: operator approval 2026-11-10 of two paths and an additional combined USD 10.10
+  plan_refs:
+    - W1-T11421
+  files:
+    - deploy/entrypoint.sh
+    - test/daemon/a-slow-crash-loop-is-reported.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: The real supervision section records the actual daemon exit before an inherited stderr writer closes, so that writer's open descriptor cannot hold the supervisor at the observer wait
+      proof: "grep: W1-T12031 criterion 1 in test/daemon/a-slow-crash-loop-is-reported.test.ts"
+    - claim: Forwarded stderr bytes and the last bounded heap-limit line remain exact, absent heap evidence stays absent and the actual child exit code is preserved
+      proof: "grep: W1-T12031 criterion 2 in test/daemon/a-slow-crash-loop-is-reported.test.ts"
+    - claim: A freshness exit can reach the existing supervised resync and next child while the inherited writer is still open, with the restart, signal and crash-budget decisions unchanged
+      proof: "grep: W1-T12031 criterion 3 in test/daemon/a-slow-crash-loop-is-reported.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10: Core requested freshness exit at 09:15:14Z. Its daemon
+    PID151 ended, while supervisor6 waited on its sole child awk109. The observer
+    waited for pipe input, supervisor FD19 was closed, and workers retained FD19.
+    Installed source SHA256 f9e865fae4cb838ab42c1de2e85fc92707674d3a849a929a0c425790f85f2b7e
+    matches the merged S7 entrypoint. Its mawk is 1.3.4 20200120.
+    The exact installed supervision section was replayed in disposable fixtures.
+    Default awk withheld exit evidence while a private child held its writer open;
+    a line-input control recorded real exit75 and heap evidence before writer EOF.
+    Both preserved synthetic stderr. This exposes input buffering; output fflush
+    does not provide the needed input progress. The published mawk manual confirms
+    default pipe buffering. Existing real-entrypoint cases close their writers.
+    Main2c6e7431 and all eleven captured open PR heads retain the old observer;
+    no current observer-buffering task was found. W10861 concerns merged-plan read
+    diagnostics, not this observer. The later Core replacement makes the old leased
+    recovery unnecessary; no retargeted recovery or live signal was performed.
+  design: |
+    Replace only the inline awk stderr observer with a line reader using the
+    existing Node runtime. Consume the in-band stop marker without waiting for EOF,
+    preserve stderr bytes and line endings, preserve the existing bounded last
+    heap-limit evidence, and honor output backpressure before the observer exits.
+    Add no executable dependency, source helper file, timeout, grace period or retry.
+    Keep the child's saved exit status and every existing signal, restart, resync,
+    crash-budget and exit-evidence decision unchanged.
+    Append regressions only to the existing slow-crash-loop test. Exercise the
+    real supervision section with private child processes and an inherited writer
+    that remains open. Also exercise ordinary writer EOF and raw stderr/heap
+    forwarding. Preserve all existing assertions, inputs, expected values, titles,
+    timeouts and skips. No production failure induction or live pipe modification.
+  falsifier: |
+    Restore only the old observer and the real held-writer exit and freshness
+    continuation regressions must fail on the deployed Linux/mawk environment.
+    Drop evidence or alter forwarded bytes and the exact-output control must fail.
+    Restore and require every new case and the unchanged existing suite to pass.
+  note: |
+    Reserved from the current Azure operator checkout on
+    codex/plan-observer-progress-1794311021520; actual HELD id W1-T12031.
+    Operator authority is exactly these two files and an additional combined
+    USD 10.10: one build up to USD 5, one normal review up to USD 5 and a possible
+    USD 0.10 shadow call. Together with W1-T12023 both caps total USD 20.20.
+    Implementation waits for normal plan merge and fresh ownership, merge-credit,
+    source history, subject and runnableCandidates checks. Normal author, hosted,
+    native and BAKED-image adoption gates remain. Image labels alone are insufficient.
+    Preserve engine-pruning STOP and live owners. No coordinator status, arming,
+    approval, merge, manual review, restart, recycle or enforce activation is granted.
+    The separately approved one-time observer recovery was leased to the old Core
+    container and refused the changed container; that exception cannot be retargeted.

@@ -577,6 +577,12 @@ export function escalationAnswerHistory(): EscalationTriageHistoryReader {
   return escalationAnswerHistoryReader ??= createEscalationTriageHistoryReader({ slice: ESCALATION_ANSWER_HISTORY_SLICE });
 }
 
+export const ESCALATION_ANSWER_STAGES = [
+  "refusal_history_read", "refusal_history_fold", "recorded_origins", "answer_parse",
+  "answer_landing", "feedback", "refusal_alarm",
+] as const;
+type EscalationAnswerStage = (typeof ESCALATION_ANSWER_STAGES)[number];
+
 /**
  * Poll every OPEN needs-question issue for a NEW repository-owner reply, and land each accepted
  * one in `plan/questions.ndjson` — the exact store {@link "./worker.js".appendQuestionAnswer}
@@ -609,143 +615,169 @@ export async function readEscalationAnswers(
   } catch {
     return { accepted, ignored, unreadable: 1 }; // the list itself was unreadable this pass
   }
-  const history: Record<string, unknown>[] = [];
-  const botIgnored = botIgnoredOrigins(deps.ledgerPath);
-  let historyReadable = true;
-  if (gateway.refusalIssues) {
-    const read = await (deps.history ?? escalationAnswerHistory())(dirname(deps.ledgerPath));
-    historyReadable = read.ok;
-    if (historyReadable) history.push(...read.rows);
-    for (const row of history) {
-      if (row.step === "escalation_answer.ignored" && row.reason === "bot" && typeof row.origin === "string") rememberBotIgnored(botIgnored, row.origin);
+  let stage: EscalationAnswerStage = "refusal_history_read";
+  try {
+    const history: Record<string, unknown>[] = [];
+    const botIgnored = botIgnoredOrigins(deps.ledgerPath);
+    let historyReadable = true;
+    if (gateway.refusalIssues) {
+      const read = await (deps.history ?? escalationAnswerHistory())(dirname(deps.ledgerPath));
+      historyReadable = read.ok;
+      stage = "refusal_history_fold";
+      if (historyReadable) history.push(...read.rows);
+      for (const row of history) {
+        if (row.step === "escalation_answer.ignored" && row.reason === "bot" && typeof row.origin === "string") rememberBotIgnored(botIgnored, row.origin);
+      }
+      if (!historyReadable) {
+        unreadable++;
+        writeLedger(deps.ledgerPath, { step: "escalation_answer.refusal_alarm_unreadable", run_id: runId, task_id: "ESCALATION-ANSWERS",
+          reason: "unreadable ledger history" });
+      }
     }
-    if (!historyReadable) {
-      unreadable++;
-      writeLedger(deps.ledgerPath, { step: "escalation_answer.refusal_alarm_unreadable", run_id: runId, task_id: "ESCALATION-ANSWERS",
-        reason: "unreadable ledger history" });
-    }
-  }
-  const recordedOrigins = recordedQuestionStoreOrigins(root);
-  /** Land one ACCEPTED answer (a comment or a reaction) in the shared store — design (ii)'s "one
-   *  sink, whichever channel answered", now three channels deep. */
-  const landAnswer = async (taskId: string, origin: string, answer: string, authorLogin: string, subject?: FeedbackAdmissionSubject,
-    replyFields: { bare_option?: boolean } = {}) => {
-    const observation = gateway.admission === undefined || subject === undefined ? undefined
-      : await observeFeedbackSource(gateway.admission, subject, "question-answer", (step, fields) =>
-        writeLedger(deps.ledgerPath, { ...fields, step, run_id: runId, task_id: taskId }), gateway.sourceRead, clock);
-    const contribution = gateway.admission === undefined ? undefined : {
-      kind: subject?.kind ?? "unresolved", source_ref: subject?.sourceRef ?? origin,
-      ...(subject === undefined ? {} : { subject: structuredClone(subject) }),
-      admission: observation?.decision ?? { outcome: "unknown", reason: "lineage-unreadable" },
-    };
-    const recordedToQuestionStore = appendQuestionAnswer(root, { ts: clock.iso(), task: taskId, answer, origin,
-      ...(contribution === undefined ? {} : { contribution }) });
-    writeLedger(deps.ledgerPath, {
-      run_id: runId,
-      task_id: taskId,
-      step: "panel.question_answered",
-      answer,
-      origin,
-      author_login: authorLogin,
-      authority: gateway.operatorLogins === undefined ? "repository-owner" : "configured-operator",
-      flows_to: "plan/questions.ndjson",
-      recorded_to_question_store: recordedToQuestionStore,
-      ...replyFields,
-      ...(contribution === undefined ? {} : { contribution }),
-    });
-    accepted++;
-    recordedOrigins.add(origin);
-  };
-  for (const issue of issues) {
-    const taskId = escalationTaskId(issue.body);
-    if (!taskId) continue; // an issue with no recoverable task referent steers nothing
-    let comments: EscalationIssueComment[];
-    try {
-      comments = await gateway.listComments(issue.number);
-    } catch {
-      unreadable++; // counted, then just this issue is skipped this pass
-      continue;
-    }
-    // W1-T8511: every accepted operator answer on this issue, new or already stored, for the feedback record.
-    const acceptedAnswers: AcceptedAnswer[] = [];
-    for (const comment of comments) {
-      const origin = `issue#${issue.number}:comment:${comment.id}`;
-      const refusal = operatorRefusal(comment, gateway.operatorLogins, comment.authorAssociation === "OWNER");
-      const accepted = (): void => {
-        const text = comment.body.trim();
-        if (text) acceptedAnswers.push({ origin, text, namesOption: optionLabelNamed(text, issue.body ?? "") !== undefined });
+    stage = "recorded_origins";
+    const recordedOrigins = recordedQuestionStoreOrigins(root);
+    stage = "answer_parse";
+    /** Land one ACCEPTED answer (a comment or a reaction) in the shared store — design (ii)'s "one
+     *  sink, whichever channel answered", now three channels deep. */
+    const landAnswer = async (taskId: string, origin: string, answer: string, authorLogin: string, subject?: FeedbackAdmissionSubject,
+      replyFields: { bare_option?: boolean } = {}) => {
+      stage = "answer_landing";
+      const observation = gateway.admission === undefined || subject === undefined ? undefined
+        : await observeFeedbackSource(gateway.admission, subject, "question-answer", (step, fields) =>
+          writeLedger(deps.ledgerPath, { ...fields, step, run_id: runId, task_id: taskId }), gateway.sourceRead, clock);
+      const contribution = gateway.admission === undefined ? undefined : {
+        kind: subject?.kind ?? "unresolved", source_ref: subject?.sourceRef ?? origin,
+        ...(subject === undefined ? {} : { subject: structuredClone(subject) }),
+        admission: observation?.decision ?? { outcome: "unknown", reason: "lineage-unreadable" },
       };
-      if (recordedOrigins.has(origin)) { // design (ii): idempotent per comment id
-        if (refusal === undefined) accepted();
+      const recordedToQuestionStore = appendQuestionAnswer(root, { ts: clock.iso(), task: taskId, answer, origin,
+        ...(contribution === undefined ? {} : { contribution }) });
+      writeLedger(deps.ledgerPath, {
+        run_id: runId,
+        task_id: taskId,
+        step: "panel.question_answered",
+        answer,
+        origin,
+        author_login: authorLogin,
+        authority: gateway.operatorLogins === undefined ? "repository-owner" : "configured-operator",
+        flows_to: "plan/questions.ndjson",
+        recorded_to_question_store: recordedToQuestionStore,
+        ...replyFields,
+        ...(contribution === undefined ? {} : { contribution }),
+      });
+      accepted++;
+      recordedOrigins.add(origin);
+    };
+    for (const issue of issues) {
+      const taskId = escalationTaskId(issue.body);
+      if (!taskId) continue; // an issue with no recoverable task referent steers nothing
+      let comments: EscalationIssueComment[];
+      try {
+        comments = await gateway.listComments(issue.number);
+      } catch {
+        unreadable++; // counted, then just this issue is skipped this pass
         continue;
       }
-      if (refusal !== undefined) {
-        ignored++;
-        if (refusal === "bot") {
-          if (botIgnored.has(origin)) continue; // W1-T10335: already ledgered; still counted in `ignored`
-          rememberBotIgnored(botIgnored, origin);
-        }
-        writeLedger(deps.ledgerPath, {
-          run_id: runId,
-          task_id: taskId,
-          step: "escalation_answer.ignored",
-          origin,
-          author_association: comment.authorAssociation,
-          author_login: comment.authorLogin,
-          author_type: comment.authorType,
-          issue_url: issue.url,
-          pass_id: passId,
-          reason: refusal,
-        });
-        continue;
-      }
-      const answer = answerTextFor(comment.body, issue.body ?? "");
-      if (!answer) continue;
-      await landAnswer(taskId, origin, answer, comment.authorLogin, comment.sourceSubject,
-        { bare_option: replyIsBareOption(comment.body, issue.body ?? "") });
-      accepted();
-      try {
-        gateway.reactPlusOne(comment.id);
-      } catch {
-        // best-effort acknowledgement — a failed reaction never un-lands the answer.
-      }
-    }
-    // W1-T4676: reactions on the ISSUE itself — optional surface, see the gateway's own header.
-    if (gateway.listReactions && (gateway.ownerLogin || gateway.operatorLogins !== undefined)) {
-      let reactions: EscalationIssueReaction[] = [];
-      try {
-        reactions = await gateway.listReactions(issue.number);
-      } catch {
-        unreadable++; // counted, then just this issue's reactions are skipped this pass
-      }
-      for (const reaction of reactions) {
-        const origin = `issue#${issue.number}:reaction:${reaction.id}`;
-        if (operatorRefusal(reaction, gateway.operatorLogins,
-            reaction.authorLogin.toLowerCase() === gateway.ownerLogin?.toLowerCase()) !== undefined) continue;
-        const answer = reactionAnswerText(reaction.content, issue.body ?? "");
-        if (!answer) continue; // not a +1/-1, or no recoverable recommendation to attach it to
-        const namesOption = reaction.content === "+1";
-        if (recordedOrigins.has(origin)) { // design (ii): idempotent per reaction id
-          acceptedAnswers.push({ origin, text: answer, namesOption });
+      // W1-T8511: every accepted operator answer on this issue, new or already stored, for the feedback record.
+      const acceptedAnswers: AcceptedAnswer[] = [];
+      for (const comment of comments) {
+        const origin = `issue#${issue.number}:comment:${comment.id}`;
+        const refusal = operatorRefusal(comment, gateway.operatorLogins, comment.authorAssociation === "OWNER");
+        const accepted = (): void => {
+          const text = comment.body.trim();
+          if (text) acceptedAnswers.push({ origin, text, namesOption: optionLabelNamed(text, issue.body ?? "") !== undefined });
+        };
+        if (recordedOrigins.has(origin)) { // design (ii): idempotent per comment id
+          if (refusal === undefined) accepted();
           continue;
         }
-        await landAnswer(taskId, origin, answer, reaction.authorLogin, reaction.sourceSubject);
-        acceptedAnswers.push({ origin, text: answer, namesOption });
+        if (refusal !== undefined) {
+          ignored++;
+          if (refusal === "bot") {
+            if (botIgnored.has(origin)) continue; // W1-T10335: already ledgered; still counted in `ignored`
+            rememberBotIgnored(botIgnored, origin);
+          }
+          writeLedger(deps.ledgerPath, {
+            run_id: runId,
+            task_id: taskId,
+            step: "escalation_answer.ignored",
+            origin,
+            author_association: comment.authorAssociation,
+            author_login: comment.authorLogin,
+            author_type: comment.authorType,
+            issue_url: issue.url,
+            pass_id: passId,
+            reason: refusal,
+          });
+          continue;
+        }
+        const answer = answerTextFor(comment.body, issue.body ?? "");
+        if (!answer) continue;
+        await landAnswer(taskId, origin, answer, comment.authorLogin, comment.sourceSubject,
+          { bare_option: replyIsBareOption(comment.body, issue.body ?? "") });
+        stage = "answer_parse";
+        accepted();
         try {
-          gateway.reactPlusOneOnIssue?.(issue.number);
+          gateway.reactPlusOne(comment.id);
         } catch {
           // best-effort acknowledgement — a failed reaction never un-lands the answer.
         }
       }
+      // W1-T4676: reactions on the ISSUE itself — optional surface, see the gateway's own header.
+      if (gateway.listReactions && (gateway.ownerLogin || gateway.operatorLogins !== undefined)) {
+        let reactions: EscalationIssueReaction[] = [];
+        try {
+          reactions = await gateway.listReactions(issue.number);
+        } catch {
+          unreadable++; // counted, then just this issue's reactions are skipped this pass
+        }
+        for (const reaction of reactions) {
+          const origin = `issue#${issue.number}:reaction:${reaction.id}`;
+          if (operatorRefusal(reaction, gateway.operatorLogins,
+              reaction.authorLogin.toLowerCase() === gateway.ownerLogin?.toLowerCase()) !== undefined) continue;
+          const answer = reactionAnswerText(reaction.content, issue.body ?? "");
+          if (!answer) continue; // not a +1/-1, or no recoverable recommendation to attach it to
+          const namesOption = reaction.content === "+1";
+          if (recordedOrigins.has(origin)) { // design (ii): idempotent per reaction id
+            acceptedAnswers.push({ origin, text: answer, namesOption });
+            continue;
+          }
+          await landAnswer(taskId, origin, answer, reaction.authorLogin, reaction.sourceSubject);
+          stage = "answer_parse";
+          acceptedAnswers.push({ origin, text: answer, namesOption });
+          try {
+            gateway.reactPlusOneOnIssue?.(issue.number);
+          } catch {
+            // best-effort acknowledgement — a failed reaction never un-lands the answer.
+          }
+        }
+      }
+      // W1-T8511: the question-store write above is unchanged; a feedback GRILL issue ALSO answers its record.
+      stage = "feedback";
+      if (deps.feedback) {
+        const row = await applyGrilledFeedbackAnswer(deps.feedback, issue, taskId, acceptedAnswers);
+        if (row) writeLedger(deps.ledgerPath, { ...row, run_id: runId });
+      }
+      stage = "answer_parse";
     }
-    // W1-T8511: the question-store write above is unchanged; a feedback GRILL issue ALSO answers its record.
-    if (deps.feedback) {
-      const row = await applyGrilledFeedbackAnswer(deps.feedback, issue, taskId, acceptedAnswers);
-      if (row) writeLedger(deps.ledgerPath, { ...row, run_id: runId });
+    stage = "refusal_alarm";
+    if (gateway.refusalIssues && historyReadable) {
+      unreadable += await raiseRefusalAlarms(history, current, gateway.refusalIssues, deps, runId);
     }
+    return { accepted, ignored, unreadable };
+  } catch (error) {
+    let kind = "non-Error";
+    try {
+      if (error instanceof RangeError) {
+        kind = "RangeError";
+        if (error.message === "Maximum call stack size exceeded") kind = "Maximum call stack size exceeded";
+      } else if (error instanceof TypeError) kind = "TypeError";
+      else if (error instanceof SyntaxError) kind = "SyntaxError";
+      else if (error instanceof Error) kind = "Error";
+    } catch {
+      // An unobservable class/message keeps the finite classification reached so far.
+      // The reader still rejects below; an accessor's own payload must never escape.
+    }
+    throw new Error(`escalation answers failed at stage ${stage}: ${kind}`);
   }
-  if (gateway.refusalIssues && historyReadable) {
-    unreadable += await raiseRefusalAlarms(history, current, gateway.refusalIssues, deps, runId);
-  }
-  return { accepted, ignored, unreadable };
 }

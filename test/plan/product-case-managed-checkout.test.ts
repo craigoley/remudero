@@ -7,6 +7,7 @@ import { ProductCaseService } from "#src/lib/product-case.js";
 import { ProductIntentStore } from "#src/lib/product-intent-store.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const actor = "clerk:alice";
 const repository = { provider: "github", id: 1432832754, owner: "craigoley", name: "wreckterra", defaultBranch: "main",
@@ -27,6 +28,11 @@ function fixture(t: TestContext, instance = false, worktree = false) {
   git(seed, "config", "user.name", "Managed checkout fixture");
   git(seed, "config", "user.email", "managed-checkout@example.test");
   git(seed, "remote", "add", "origin", "git@github.com:craigoley/wreckterra.git");
+  // W1-T11195: a plannable target commits its own runner configuration; this repository's table is a valid one.
+  mkdirSync(join(seed, ".remudero"));
+  writeFileSync(join(seed, ".remudero", "mounts.yaml"), readFileSync(join(REPO_ROOT, ".remudero", "mounts.yaml")));
+  git(seed, "add", ".remudero/mounts.yaml");
+  git(seed, "commit", "-qm", "chore: target runner configuration");
   const head = git(seed, "rev-parse", "HEAD");
   if (worktree) { mkdirSync(dirname(checkout), { recursive: true }); git(seed, "worktree", "add", "--detach", checkout, head); }
   mkdirSync(join(control, "state"), { recursive: true });

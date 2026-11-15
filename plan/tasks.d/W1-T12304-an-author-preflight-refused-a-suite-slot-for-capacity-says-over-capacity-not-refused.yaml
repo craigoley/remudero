@@ -1,0 +1,37 @@
+- id: W1-T12304
+  title: "An author preflight that receives a suite-slot OVER_CAPACITY lease records NOT_RUN over-capacity and exits with the capacity code, while every other NOT_RUN remains refused"
+  repo: remudero
+  depends_on: [W1-T12303]
+  priority: 1.4
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium
+  band_meaning: blast-radius
+  origin: architect
+  plan_refs: [W1-T12303, W1-T11914, W1-T9953]
+  files:
+    - scripts/preflight-author.mjs
+    - test/ci/an-author-preflight-refused-a-suite-slot-for-capacity-says-over-capacity-not-refused.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "An over_capacity suite lease starts no suite and writes verdict over-capacity, a suites-stage hostCapacity record with readings, OVER_CAPACITY_EXIT and console text starting author preflight NOT_RUN: OVER_CAPACITY"
+      proof: "unit test: W1-T12304 criterion 1: suite slot capacity refusal produces an over capacity author receipt"
+    - claim: "The refusal is capacityInconclusive, never push-eligible, and its pushEligibleReason names OVER_CAPACITY"
+      proof: "unit test: W1-T12304 criterion 2: capacity refusal cannot authorize publication"
+    - claim: "Private coordination, unproven covered work, mutation guards and every other non-capacity NOT_RUN still use the refused exit-1 path"
+      proof: "unit test: W1-T12304 criterion 3: non-capacity NOT_RUN remains refused"
+    - claim: "The receipt writes the capacity marker explicitly"
+      proof: "grep: capacityInconclusive in scripts/preflight-author.mjs"
+  rationale: |
+    Today admitSuites throws for executionAllowed=false, but its catch maps only MacAuthorCapacityRefusal to over-capacity. A suite-slot refusal is reported as refused and exits 1. OVER_CAPACITY_EXIT already exists, and authorPushEligibility keeps a run with no suites ineligible.
+  design: |
+    In admitSuites, recognize the typed over_capacity lease and throw a capacity refusal carrying stage=suites and its readings. The catch records verdict over-capacity, hostCapacity, affectedTestsNotRunReason and capacityInconclusive=true, prints NOT_RUN: OVER_CAPACITY and exits OVER_CAPACITY_EXIT.
+    Preserve the existing single receipt writer. Every other NOT_RUN retains the refused path and exit 1.
+    NOT IN SCOPE: suite admission (W1-T12303), retro/run-task handling (W1-T12305), or authorPushEligibility.
+  falsifier: |
+    Leave the over_capacity lease on the refused path and criterion 1 must fail. Mark an over-capacity receipt push-eligible and criterion 2 must fail. Map every NOT_RUN to capacity and criterion 3 must fail. Restore and require all criteria to pass.
+  note: |
+    Filed by PLAN-create-1794411017336 from the reserved ids, in order.

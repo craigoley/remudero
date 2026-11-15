@@ -1,0 +1,29 @@
+- id: W1-T12262
+  title: Locate the serve views worker spawn and lifecycle code in views.ts, read-plane.worker.ts and worker-heaps.ts
+  repo: remudero
+  depends_on:
+    - W1-T11937
+  type: recon
+  verify: auto
+  risk: high
+  band_meaning: span
+  status: queued
+  attempts: 0
+  files:
+    - src/lib/views.ts
+    - src/lib/read-plane.worker.ts
+    - src/lib/worker-heaps.ts
+    - src/lib/read-model-worker.ts
+    - docs/forensics/serve.md
+  acceptance:
+    - claim: The recon names the function in each of the four source files that creates, ends, or restarts a views worker thread, with file and symbol
+      proof: "grep: views worker in docs/forensics/serve.md"
+    - claim: The recon states whether the ten-minute idle-end and on-demand restart of W1-T11937 belong in views.ts, read-model-worker.ts or worker-heaps.ts, and why the task's files list omitted them
+      proof: "grep: idle-end in docs/forensics/serve.md"
+  origin: followup:W1-T11937-1794346062013:2026-11-10T21:32:12.597Z:0
+  rationale: >-
+    From the 2026-11-10 follow-up on W1-T11937-1794346062013, ratified via rmd approve:
+  
+    follow-up harvest [research]: locate the views worker spawn and lifecycle code (check
+    `views.ts`, `read-plane.worker.ts`, `worker-heaps.ts`), because the task's `files:` list names
+    only the read-model and slow-lane files. — from W1-T11937 (run W1-T11937-1794346062013)

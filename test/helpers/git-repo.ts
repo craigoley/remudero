@@ -32,9 +32,9 @@
  * correctness.
  */
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { RMD_TMP_PREFIX } from "../../src/lib/tmp.js";
 import { ownedFixtureDir, type FixtureScope } from "./owned-fixture-dir.js";
 
@@ -138,4 +138,30 @@ export function gitRepo(opts: GitRepoOpts = {}): GitRepo {
     });
   }
   return repo;
+}
+
+export interface OriginWithCloneOpts {
+  /** Reclaim the origin and its seed repository at test/suite completion. */
+  scope?: FixtureScope;
+  /** Files (path relative to the repository root, then content) in the one commit on `main`. */
+  seed?: Record<string, string>;
+}
+
+/**
+ * A bare origin with one commit on `main`, and a working clone of it at `cloneDir` — the shape
+ * of a checkout that pushes to its own remote. `cloneDir` must not exist yet; the caller owns it.
+ */
+export function originWithClone(cloneDir: string, opts: OriginWithCloneOpts = {}): { origin: GitRepo; clone: GitRepo } {
+  const origin = gitRepo({ bare: true, scope: opts.scope, kind: "origin" });
+  const seed = gitRepo({ scope: opts.scope, seedCommit: false, kind: "origin-seed" });
+  for (const [rel, content] of Object.entries(opts.seed ?? {})) {
+    mkdirSync(dirname(join(seed.dir, rel)), { recursive: true });
+    writeFileSync(join(seed.dir, rel), content);
+  }
+  seed.git("add", "-A");
+  seed.git("commit", "--quiet", "--allow-empty", "-m", "chore: seed");
+  seed.addRemote("origin", origin.dir);
+  seed.git("push", "--quiet", "origin", "main");
+  execFileSync("git", ["clone", "--quiet", origin.dir, cloneDir], { encoding: "utf8", env: GIT_ENV });
+  return { origin, clone: wrap(cloneDir) };
 }

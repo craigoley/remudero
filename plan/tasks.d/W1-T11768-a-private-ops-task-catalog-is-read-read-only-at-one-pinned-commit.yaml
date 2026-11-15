@@ -11,7 +11,7 @@
   origin: architect
   plan_refs: [W1-T11600, W1-T9763, W1-T9493, W1-T1062]
   priority: 1
-  status: queued
+  status: merged
   attempts: 0
   files: [src/lib/ops-catalog-source.ts, src/lib/daemon.ts, test/github/ops-catalog-source-snapshot-identity.test.ts, test/github/ops-catalog-source-fail-closed-outcomes.test.ts, test/github/ops-catalog-source-redaction-read-only.test.ts, "src/lib/plan-revision-store.ts", "src/lib/tick-read-worker.ts"]
   rationale: |

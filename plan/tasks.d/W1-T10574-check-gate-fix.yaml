@@ -7,7 +7,7 @@
   risk: high  # Rule 19 span: widened to fix, prompt-render, sweep by a scope amendment for #14806
   band_meaning: span
   priority: 1.09
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:gate-fix"

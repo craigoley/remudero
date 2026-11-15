@@ -1,0 +1,38 @@
+- id: W1-T12125
+  title: "Compress the 5649 comment lines in src/lib/sweep.ts without changing executable code"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 1
+  status: merged
+  attempts: 0
+  author_class: machine
+  origin: "comment-compression:src/lib/sweep.ts"
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/compress-src-lib-sweep-ts.test.ts
+  acceptance:
+    - claim: "Comment volume is measurably reduced while executable tokens and existing behavioral assertions are preserved."
+      proof: "unit test: W1-T12125: comment compression preserves executable code"
+  rationale: |
+    Observed 5649 comment lines in src/lib/sweep.ts. This is maintenance debt, never a merge ceiling.
+    Operator 2026-10-24: excess comments create high-priority follow-up work; they must not block the originating change.
+    Compress repeated explanations. Preserve displaced historical detail in the PR review record and retain its citation; keep invariants, traps, falsifiers and text pinned by existing tests.
+    Add the named regression in test/sweep/compress-src-lib-sweep-ts.test.ts; compare executable tokens against the pre-compression source and verify a real comment-count reduction.
+    Read the pre-compression source with compressionPinBase from #test/helpers/compression-pin.js, never a frozen digest or token count: a frozen pin fails every later feature edit to the module (#16082).
+    Compare the token streams with assertSameTokens from #test/helpers/compression-pin.js, never assert.deepEqual: its failure diff over two whole token arrays grows quadratically (W1-T11342).
+    Preserve every existing behavioral assertion and run the actual callers. Do not invent a new hard comment ceiling or claim success from a title-only proof.
+    Preserve existing owners, stops and deployment holds. This maintenance task grants no service restart, release or publication override.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.93
+    reasons:
+      - "The description and declared files show a comment-only edit to src/lib/sweep.ts plus one new test, with no involvement of secrets, auth, permissions, deletion, or merge, deploy or review policy."
+      - "Acceptance is verifiable through a named unit test that compares executable tokens against the pre-compression source using the shared helpers, so the finding can be checked."
+      - "The gates state shows the comment-compression family with 38 merged and 0 declined, and the plan explicitly grants no restart, release or publication override."
+      - "No actual-change view was supplied, so the assessment rests on the description and files list alone. Nothing in them is unusual."
+    judged_at: "2026-11-10T22:35:24.550Z"
+    pin: "d2f5ce5b429763c541aa25b97c8f0bd9bc3fbf38d511b40c481aaff448ce4c63"

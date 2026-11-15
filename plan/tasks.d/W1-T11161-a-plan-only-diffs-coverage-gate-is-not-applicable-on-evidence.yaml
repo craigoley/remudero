@@ -21,7 +21,7 @@
     - test/ci/a-plan-only-diff-whose-coverage-matrix-was-skipped-passes-as-not-applicable.test.ts
     - test/workflow-single-suite-run.test.ts
     - test/fast-lane-classifier.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: When the coverage-shard matrix result is skipped, the coverage-ratchet aggregator classifies the pull request's own diff with scripts/diff-class.mjs --coverage-class (the predicate the shards use) and passes only for PLAN_ONLY, printing a not-applicable line that names the class, the changed-file count and the coverage-ledger result it saw

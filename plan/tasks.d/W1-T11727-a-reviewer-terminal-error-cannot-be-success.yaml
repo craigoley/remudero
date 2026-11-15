@@ -12,7 +12,7 @@
   depends_on: [W1-T11631]
   files: [src/cli/commands/review.ts, test/review/a-reviewer-api-error-cannot-be-success.test.ts]
   priority: 2
-  status: queued
+  status: merged
   # backlog gardener: band=2 evidence=eb3f8bbbcef71c83
   # backlog gardener: placed=2026-11-08T15:36:33.922Z
   attempts: 0

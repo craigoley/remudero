@@ -1,0 +1,40 @@
+- id: W1-T11887
+  title: An operator intervention is routed to the SRE lane once even when the routed-memory file is missing or stale, because the ledger's own incident rows are the dedupe key
+  repo: remudero
+  depends_on: []
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19: one concern, the idempotence of routeOperatorInterventions; by operator ruling every intervention is evidence with no bound, so only a repeat of the same one may be suppressed, never a distinct one
+  origin: operator-session#capacity-1109
+  plan_refs:
+    - W1-T8264
+  files:
+    - src/lib/sre-lane.ts
+    - test/sre/an-operator-intervention-is-routed-once-whatever-the-memory-file-holds.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A routing pass over a window whose interventions already have an `incident.event` in the ledger writes none of them again, with the routed-memory file absent, empty or stale
+      proof: "unit test: test/sre/an-operator-intervention-is-routed-once-whatever-the-memory-file-holds.test.ts"
+    - claim: Two distinct interventions that share a cause class are both routed, once each; only a repeat of the same intervention (same surface, action, target, actor and cause) is suppressed
+      proof: "grep: W1-T11887 criterion 2 in test/sre/an-operator-intervention-is-routed-once-whatever-the-memory-file-holds.test.ts"
+    - claim: A genuinely new intervention is routed once, and an unreadable ledger still refuses the pass instead of routing blind
+      proof: "grep: W1-T11887 criterion 3 in test/sre/an-operator-intervention-is-routed-once-whatever-the-memory-file-holds.test.ts"
+  rationale: |
+    OBSERVED 2026-11-09 (Azure ledger union, three days): 9,758 `incident.event` rows of kind `intervention` in one day carry only 125 distinct messages. 124 of the 125 were routed under more than one pass, up to 79 passes for one intervention. Each pass re-emitted the whole seven-day window. It is the largest row type in the ledger by count (10.1% of its bytes, 9.9 MB).
+    - The bursts recur: 18 to 41 passes inside one hour, then hours with none (2026-11-07 12:00 to 19:00, 2026-11-08 00:00 to 06:00 and 15:00 to 20:00, 2026-11-09 00:00 to 05:00).
+    - `routeOperatorInterventions` already keeps a routed set in `operator-interventions.json` and prunes it by the date at the end of each key. The file exists (written 2026-11-09 05:23:09) and the key format is sound, so the cause is NOT yet traced: INFERRED, a read or write of that file is not durable across some passes.
+    - So the fix does not depend on the cause: the ledger is the authoritative dedupe key, as the escalation catalogue does for its own markers. A pass reads the incident rows it already holds in the window and skips an intervention whose identity is already there.
+    - The 2026-10-11 operator ruling stands: every intervention is evidence with no bound. This suppresses a repeat of one intervention, never a distinct one.
+  design: |
+    - Add `incident.event` rows of kind `intervention` to the rows `routeOperatorInterventions` reads for its window, derive each one's identity from its `message` (surface, action, target, actor, cause), and add those identities to the already-routed set before routing.
+    - Keep the memory file as a cache; a missing or corrupt one no longer causes re-routing.
+    - NOT IN SCOPE: the fingerprint (it is the class identity and stays), the incident lane's own dedup, the intervention window, and the reason the memory file was not honoured (trace it once the repeat can no longer hide it).
+  falsifier: |
+    Delete the memory file between two passes: criterion 1 must see the second pass write every intervention again. Dedupe by fingerprint instead of identity: criterion 2 must see a distinct intervention dropped. Route blind on an unreadable ledger: criterion 3 must fail. Restore and require all three.
+  note: |
+    reservation hand-off: run-unfiled-1794241838000 -> run-unfiled-1794243320000
+    Success is rows: incident.event interventions per day falls from about 9,700 toward the number of distinct interventions (about 125 a day).

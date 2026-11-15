@@ -15,7 +15,7 @@
   files:
     - src/lib/sweep.ts
     - test/sweep/one-stalled-pr-keeps-one-needs-human-question.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A stalled-stage escalation for a PR whose same head and blocker already has an open needs-human issue adds its new diagnosis to that issue instead of opening another, whatever the diagnosis text says. A moved head, a different blocker, or a closed earlier issue still opens a new one"

@@ -13,7 +13,7 @@
   files:
     - scripts/test-slot-owner-release.mjs
     - test/ci/suites/an-owner-lane-releases-its-own-test-slot-by-exact-identity.test.ts
-  status: queued
+  status: merged
   priority: 1  # the aged-hold diagnostic (W1-T11809) must name an action that exists
   attempts: 0
   rationale: |

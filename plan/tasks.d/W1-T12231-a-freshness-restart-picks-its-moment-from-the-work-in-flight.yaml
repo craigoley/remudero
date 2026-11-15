@@ -1,0 +1,74 @@
+- id: W1-T12231
+  title: "A freshness restart picks its moment from the predicted end of the work in flight"
+  repo: remudero
+  depends_on:
+    - W1-T12228
+    - W1-T12160
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # how long a restart waits and which reviews and fix rounds start before it; a wrong prediction holds work or loses it
+  band_meaning: blast-radius
+  origin: operator-session#freshness-restart-findings-2026-11-10
+  plan_refs:
+    - W1-T9808
+    - W1-T8172
+    - W1-T8138
+    - W1-T11320
+    - W1-T9812
+    - W1-T9352
+    - W1-T8141
+  files:
+    - plan/policy.yaml
+    - src/lib/policy.ts
+    - src/lib/deployer.ts
+    - src/lib/deploy-judge.ts
+    - src/lib/daemon.ts
+    - test/daemon/a-freshness-restart-picks-its-moment-from-the-work-in-flight.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "At the restart decision, the time limit of the drain is the predicted end of the reviews and the fix rounds in flight. `deriveDrainWait` computes it from the age of each and from the measured lengths of its kind. The row `daemon.freshness_drain.started` has the prediction for each"
+      proof: "grep: W1-T12231 criterion 1 in test/daemon/a-freshness-restart-picks-its-moment-from-the-work-in-flight.test.ts"
+    - claim: "With nothing in flight at the decision, the drain does not wait for the time limit of the sweep"
+      proof: "grep: W1-T12231 criterion 2 in test/daemon/a-freshness-restart-picks-its-moment-from-the-work-in-flight.test.ts"
+    - claim: "The time limit is never later than the policy row `maxDrainWaitMs` after the decision. With no measured lengths, the time limit is the one of today and the row says `no_history`"
+      proof: "grep: W1-T12231 criterion 3 in test/daemon/a-freshness-restart-picks-its-moment-from-the-work-in-flight.test.ts"
+    - claim: "When the pressure is at or above `likelyFraction` of the score limit, the daemon computes the time to the likely restart. It holds a fix round whose measured length is longer than that time plus `maxDrainWaitMs`. The row `daemon.admission_held` has the reason `restart likely`, the time and the length"
+      proof: "grep: W1-T12231 criterion 4 in test/daemon/a-freshness-restart-picks-its-moment-from-the-work-in-flight.test.ts"
+    - claim: "A review whose measured length fits is admitted. Below `likelyFraction`, every admission is as today. A build run is never held by this rule"
+      proof: "grep: W1-T12231 criterion 5 in test/daemon/a-freshness-restart-picks-its-moment-from-the-work-in-flight.test.ts"
+    - claim: "The time to the likely restart is never earlier than the end of the minimum lifetime"
+      proof: "grep: W1-T12231 criterion 6 in test/daemon/a-freshness-restart-picks-its-moment-from-the-work-in-flight.test.ts"
+    - claim: "The policy block `freshnessRestart` has the rows `likelyFraction` 0.5 and `maxDrainWaitMs` 1800000, each with bounds. The test drives `runDaemon` and the light sweep with the real admission function"
+      proof: "grep: W1-T12231 criterion 7 in test/daemon/a-freshness-restart-picks-its-moment-from-the-work-in-flight.test.ts"
+    - claim: "The daemon calls the prediction"
+      proof: "grep: deriveDrainWait( in src/lib/daemon.ts"
+  rationale: |
+    OBSERVED 2026-11-04T01:56Z to 2026-11-11T01:56Z in the ledger of the core instance: over 36 freshness exits, the drain gave up on 13 reviews and 20 fix rounds at its time limit. Their median age was 51 minutes.
+    - At the start of the drain, 35 reviews and 71 detached actions were in flight.
+    - The restart refused 147 admissions with the reason "restart latched".
+    - The median time from the decision to the exit was 18.0 minutes (p90 100). The drain itself took 0.0 to 0.2 minutes in 20 of the 36 exits.
+    - No worker was orphaned by a freshness exit. A build run is a child process that the next daemon adopts.
+    READ at origin/main 17745c6bf:
+    - `beginLatchDrain` in src/lib/daemon.ts sets the time limit of the drain to the decision time plus `sweepWallClockBoundMs`, about 9 minutes. The value does not depend on the work in flight.
+    - `restartAdmission` holds a review or a fix round only after the decision (W1-T9808). Before the decision it admits everything, also when the restart is minutes away.
+    - The recycle path has the prediction already. `deriveDrainWait` in src/lib/deployer.ts takes measured lengths and the age of each run, and `deploy.recycle_wait_derived` records the result (W1-T8138, W1-T11320). The freshness drain does not call it.
+    - The staleness pressure grows by a known rule, so the daemon can compute when it will reach the score limit.
+    CHECKED for overlap: W1-T9808 (merged) holds admissions after the decision. W1-T9812 (queued) runs the last sweep beside the drain. W1-T9352 (queued) drops a repeated last sweep. W1-T12160 (queued) admits reviews again after the time limit. None picks the time limit from a prediction, and none holds work before the decision.
+    W1-T8141 (queued, priority 3) is the other answer for a fix round: the worker stops and keeps its work. It is not a duplicate. This task makes fewer fix rounds start when they cannot finish.
+    This task depends on W1-T12160 because both change `restartAdmission`, and on W1-T12228 for the policy block.
+  design: |
+    1. Time limit of the drain. In `beginLatchDrain`, list the reviews and the fix rounds in flight with their ages. Call `deriveDrainWait` once for each kind with the measured lengths of that kind. The time limit is the decision time plus the largest wait, and at most `maxDrainWaitMs`. Move `deriveDrainWait` to a small shared module if the daemon cannot import src/lib/deployer.ts.
+    2. Add `deadline_source` (`derived`, `no_history` or `limit`), `derived_wait_ms` and the prediction for each to `daemon.freshness_drain.started`.
+    3. Time to the likely restart. Add a pure function in src/lib/deploy-judge.ts. It returns the time until the staleness pressure alone reaches the score limit, and never less than the time left of the minimum lifetime.
+    4. Hold before the decision. When the pressure is at or above `likelyFraction` of the score limit, `restartAdmission` answers also before the decision. It holds the kinds `review`, `plan-review` and `fix-dispatch` when the measured length is longer than the time to the likely restart plus `maxDrainWaitMs`. It never holds `dispatch-refill`.
+    5. Policy rows in the block `freshnessRestart`, each on one line: `likelyFraction` 0.5 with bounds 0.25 to 0.9, and `maxDrainWaitMs` 1800000 with bounds 559000 to 3600000.
+    Work that is still in flight at the time limit is given up as today, with the rows of today.
+    NOT IN SCOPE: the last sweep before the exit (W1-T9812, W1-T9352), a fix worker that yields (W1-T8141), and what makes the daemon busy (W1-T10054).
+  falsifier: |
+    Keep the fixed time limit and criteria 1 and 2 must fail. Ignore `maxDrainWaitMs` and criterion 3 must fail. Admit every fix round before the decision and criterion 4 must fail. Hold a build run and criterion 5 must fail. Restore and require all eight to pass.
+  note: |
+    The values 0.5 and 30 minutes are starting values. After the merge, read `daemon.restart_cycle` rows (W1-T12229): the work that the drain gave up was 13 reviews and 20 fix rounds in 36 exits. Watch the time from the decision to the exit, which had a median of 18.0 minutes.

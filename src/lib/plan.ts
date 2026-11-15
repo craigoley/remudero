@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { execFile, execFileSync, type ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { parse as parseYaml } from "yaml";
+import { parse as parseYaml, type DocumentOptions } from "yaml";
 import { RmdError } from "./errors.js";
 import { sameTestFile } from "./test-path-resolver.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
@@ -161,6 +161,8 @@ export interface Task {
   status: TaskStatus;
   dispatch_hold?: boolean;
   not_before?: string;
+  /** W1-T12715: held from dispatch until the question store has an answer for this task. */
+  needs_input?: TaskNeedsInput;
   precondition?: TaskPrecondition;
   attempts: number;
   /** Explicit PR number for a task executed by hand before it had a ledger entry (precedence
@@ -209,15 +211,27 @@ export interface TaskPrecondition {
   expect: string;
 }
 
+export interface TaskNeedsInput {
+  question: string;
+  source_pr?: string;
+  asked_at: string;
+}
+
+/** The newest operator answer for a task, or undefined. Production passes worker.ts's taskInputAnswer. */
+export type TaskInputAnswer = (taskId: string) => string | undefined;
+
 export interface TaskPreconditionOptions {
   clock?: Clock;
   readPrecondition?: (args: string[]) => string;
+  /** Absent, a task with needs_input stays held. */
+  inputAnswer?: TaskInputAnswer;
 }
 
 export type UnmetTaskPrecondition =
   | { reason: "not-before"; not_before: string }
   | { reason: "invalid-not-before" | "invalid-precondition" | "read-failed"; error: string }
   | { reason: "recursive-read" }
+  | { reason: "needs-input"; question: string; source_pr?: string }
   | { reason: "unexpected-result"; expected: string; actual: string };
 
 /** BACKSTOP: kill a stalled precondition read so it cannot hold the dispatcher indefinitely. */
@@ -236,6 +250,32 @@ function validateNotBefore(value: unknown, id: string): string | undefined {
     throw new PlanError(`task ${id}: not_before must be a valid ISO date or timestamp with a timezone`);
   }
   return value;
+}
+
+function readNeedsInput(value: unknown): TaskNeedsInput | undefined {
+  if (value === undefined) return undefined;
+  const e = typeof value === "object" && value !== null ? value as Record<string, unknown> : {};
+  return { question: typeof e.question === "string" ? e.question : "", asked_at: typeof e.asked_at === "string" ? e.asked_at : "",
+    ...(typeof e.source_pr === "string" || typeof e.source_pr === "number" ? { source_pr: String(e.source_pr) } : {}) };
+}
+
+/** W1-T12715: the newest answer among question-store lines for `taskId`, or undefined. */
+export function newestTaskAnswer(lines: Iterable<unknown>, taskId: string): string | undefined {
+  let newest: { ts: string; answer: string } | undefined;
+  for (const value of lines) {
+    const line = typeof value === "object" && value !== null ? value as { task?: unknown; answer?: unknown; ts?: unknown } : {};
+    if (line.task !== taskId || typeof line.answer !== "string" || line.answer.trim() === "") continue;
+    const ts = typeof line.ts === "string" ? line.ts : "";
+    if (newest === undefined || ts >= newest.ts) newest = { ts, answer: line.answer };
+  }
+  return newest?.answer;
+}
+
+/** W1-T12715: why a task with an unanswered needs_input question is held, or undefined. */
+function needsInputRefusal(task: Task, inputAnswer?: TaskInputAnswer): string | undefined {
+  if (task.needs_input === undefined) return undefined;
+  if (inputAnswer?.(task.id)?.trim()) return undefined;
+  return `needs-input: ${task.needs_input.question}`;
 }
 
 function validatePrecondition(value: unknown, id: string): TaskPrecondition | undefined {
@@ -273,6 +313,10 @@ export function readTaskPrecondition(args: string[], run: PreconditionCommandRun
 }
 
 export function unmetTaskPrecondition(task: Task, opts: TaskPreconditionOptions = {}): UnmetTaskPrecondition | undefined {
+  if (task.needs_input && needsInputRefusal(task, opts.inputAnswer)) {
+    const { question, source_pr } = task.needs_input;
+    return { reason: "needs-input", question, ...(source_pr !== undefined ? { source_pr } : {}) };
+  }
   if (task.not_before !== undefined) {
     try {
       validateNotBefore(task.not_before, task.id);
@@ -456,6 +500,14 @@ function isCommentCompressionShape(task: Task): boolean {
     !subject.split("/").some(part => part === ".." || part === "." || part === "") && NEW_TEST_FILE.test(files[1]!);
 }
 
+/** W1-T12512: a gate-gardener headroom draft, one subject then its regression test, or one test file that carries it. */
+function isRatchetHeadroomShape(task: Task): boolean {
+  const files = task.files ?? [];
+  return task.origin?.startsWith("headroom:") === true && (files.length === 1 || files.length === 2) &&
+    NEW_TEST_FILE.test(files[files.length - 1]!) && files.every(f => /^(?:src|scripts|learnings|test)\//.test(f) &&
+      !f.split("/").some(part => part === ".." || part === "." || part === ""));
+}
+
 const SCOUT_TEST_FILE = /^test\/(?:[\w-]+\/){0,2}scout-[\w.-]+\.test\.ts$/;
 
 /** A scout draft (W1-T8523): the symptom's files, then the NEW test/scout-*.test.ts as the LAST declared file. */
@@ -471,7 +523,7 @@ function isCiLearningLessonPath(path: string): boolean {
 function isParkedMachineProposal(task: Task): boolean {
   if (isFlowBlockerRemedyProposal(task)) return true;
   if (task.author_class === "machine" && task.verify === "human" && task.status !== "blocked" &&
-      (task.depends_on ?? []).length === 0 && (isExpiringFixtureDefuseShape(task) || isScoutDraftShape(task) || isCommentCompressionShape(task))) return true;
+      (task.depends_on ?? []).length === 0 && (isExpiringFixtureDefuseShape(task) || isScoutDraftShape(task) || isCommentCompressionShape(task) || isRatchetHeadroomShape(task))) return true;
   if (task.author_class === "machine" && task.verify === "human" && task.status !== "blocked" &&
       (task.depends_on ?? []).length === 0 && (isCiFrictionRemedyProposal(task) || isHotFileRemedyProposal(task))) return true;
   return (
@@ -624,10 +676,16 @@ function detachStrings(node: unknown): unknown {
 
 /** Field-validate schema-v1 tasks without resolving dependencies outside this blob.
  *  W1-T110: inbox ratification drafts need partial validation; {@link loadPlanFromYaml} resolves ids. */
-export function parseTasksFromYaml(text: string, sourceLabel: string, onDuplicate?: (id: string) => void): Task[] {
+export function parseTasksFromYaml(
+  text: string,
+  sourceLabel: string,
+  onDuplicate?: (id: string) => void,
+  yamlOptions: Pick<DocumentOptions, "logLevel"> = {},
+  dependencyMode: "strict" | "preserve-external" = "strict",
+): Task[] {
   let raw: unknown;
   try {
-    raw = parseYaml(text);
+    raw = parseYaml(text, yamlOptions);
   } catch (err) {
     throw new PlanError(`plan is not valid YAML (${sourceLabel}): ${String(err)}`);
   }
@@ -665,6 +723,11 @@ export function parseTasksFromYaml(text: string, sourceLabel: string, onDuplicat
     const bandMeaning = e.band_meaning as BandMeaning | undefined;
     if (bandMeaning !== undefined && !BAND_MEANINGS.includes(bandMeaning)) {
       throw new PlanError(`task ${id}: invalid band_meaning '${String(bandMeaning)}' (must be ${BAND_MEANINGS.join("|")})`);
+    }
+    // The ops reader defers edge resolution, so malformed dependency evidence must refuse here.
+    if (dependencyMode === "preserve-external" && e.depends_on !== undefined &&
+      (!Array.isArray(e.depends_on) || e.depends_on.some(dep => typeof dep !== "string" || !TASK_ID_SHAPE.test(dep)))) {
+      throw new PlanError(`task ${id}: depends_on must be an array of task identifiers`);
     }
     const type = req(e.type as string, "type", id);
     if (!TASK_TYPES.includes(type as TaskType)) {
@@ -714,6 +777,7 @@ export function parseTasksFromYaml(text: string, sourceLabel: string, onDuplicat
       superseded_by: supersededBy,
       // W1-T2920: capture provenance once so taskRecordPath needs no reread (see Task.sourcePath).
       sourcePath: sourceLabel,
+      ...(e.needs_input !== undefined ? { needs_input: readNeedsInput(e.needs_input) } : {}),
     };
     byId.set(id, task);
     return task;
@@ -1033,12 +1097,12 @@ function assertSupersededByResolves(t: Task, byId: ReadonlyMap<string, Task>): v
   }
 }
 
-function validatedPlan(tasks: Task[]): Plan {
+function validatedPlan(tasks: Task[], dependencyMode: "strict" | "preserve-external" = "strict"): Plan {
   const byId = new Map(tasks.map((t) => [t.id, t]));
-  // Every dependency must resolve within the merged view (monolith + shards).
+  // Ordinary plans resolve locally; only the explicit ops mode defers to cross-catalog composition.
   for (const t of tasks) {
     for (const dep of t.depends_on) {
-      if (!byId.has(dep)) throw new PlanError(`task ${t.id}: depends_on unknown task '${dep}'`);
+      if (dependencyMode !== "preserve-external" && !byId.has(dep)) throw new PlanError(`task ${t.id}: depends_on unknown task '${dep}'`);
     }    assertSupersededByResolves(t, byId);
   }
   return { tasks, byId };
@@ -1247,8 +1311,14 @@ export function parseBlobBatch(raw: string, ref: string, relPaths: string[]): st
 }
 
 /** Merge already-read plan blobs into one {@link Plan} under {@link loadPlan}'s contract; `label` names each blob. */
-export function mergePlanBlobs(blobs: Array<{ label: string; text: string }>): Plan {
-  return validatedPlan(mergeBlobTasks(blobs));
+export function mergePlanBlobs(
+  blobs: Array<{ label: string; text: string }>,
+  yamlOptions: Pick<DocumentOptions, "logLevel"> = {},
+  opts: { dependencyMode?: "preserve-external" } = {},
+): Plan {
+  const parse = yamlOptions.logLevel === undefined && opts.dependencyMode === undefined ? parseTasksFromYaml
+    : (text: string, label: string, onDuplicate?: (id: string) => void) => parseTasksFromYaml(text, label, onDuplicate, yamlOptions, opts.dependencyMode);
+  return validatedPlan(mergeBlobTasks(blobs, undefined, undefined, parse), opts.dependencyMode);
 }
 
 function mergeBlobTasks(
@@ -1335,6 +1405,8 @@ export function assertRunnable(
   /** W1-T3206: task ids an operator has RELEASED through the ratification pipeline. Absent or
    *  empty means today's behaviour exactly — a `verify: human` task is refused. */
   releasedIds?: ReadonlySet<string>,
+  /** W1-T12715: absent, a task with needs_input is refused. */
+  inputAnswer?: TaskInputAnswer,
 ): void {
   if (operatorReleaseContractChanged(task)) throw new TaskAdmissionError(`task ${task.id} requires explicit reapproval of its changed operator contract`);
   if (task.dispatch_hold === true) {
@@ -1343,6 +1415,8 @@ export function assertRunnable(
   if (task.status === "blocked") {
     throw new TaskAdmissionError(`task ${task.id} is blocked${task.note ? `: ${task.note}` : ""}`);
   }
+  const held = needsInputRefusal(task, inputAnswer);
+  if (held) throw new TaskAdmissionError(`task ${task.id} is held for an operator answer: ${held}`);
   if (task.verify === "human" && releasedIds?.has(task.id) !== true) {
     throw new TaskAdmissionError(`task ${task.id} is verify:human — not auto-runnable by the proto-runner`);
   }
@@ -1404,7 +1478,7 @@ export function machineFilingAdmissionViolations(
   }
 
   const newTestAllowed = isCommentCompressionShape(task) || isCiFrictionRemedyProposal(task) || isFlowBlockerRemedyProposal(task) || isJudgeReleasedFlowBlockerRemedy(task) ||
-    isSelectorShadowStructuralShape(task) || isHotFileRemedyProposal(task);
+    isSelectorShadowStructuralShape(task) || isHotFileRemedyProposal(task) || (isRatchetHeadroomShape(task) && task.files!.length === 2);
   // A merge-driver remedy creates the repository's .gitattributes; no other declared non-test file may be new.
   const created = (path: string) => NEW_TEST_FILE.test(path) || (path === ".gitattributes" && isHotFileRemedyProposal(task));
   const declared = task.files ?? [];

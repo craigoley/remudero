@@ -34,7 +34,11 @@ import { LEDGER_FILENAME } from "./ledger-path.js";
 import { systemClock, type Clock } from "./clock.js";
 
 /**
- * Isolate worker shells with a scratch HOME and empty rc files (W1-T18).
+ * Isolate worker shells with a scratch HOME, blank user rc files, and a generated login profile that
+ * clears host-profile aliases and functions (W1-T18, W1-T11693). Bash startup order puts /etc/profile
+ * before ~/.bash_profile, so a blank profile leaks host functions (GNU Bash: https://www.gnu.org/software/bash/manual/html_node/Bash-Startup-Files.html).
+ * gawk.sh is installed by GNU Gawk, documented at
+ * https://www.gnu.org/software/gawk/manual/html_node/Shell-Startup-Files.html.
  *
  * Only {@link WORKER_HOME_RC_FILES} and named {@link WORKER_HOME_SYMLINKS} grants belong here,
  * never a wholesale HOME copy (env.ts's ANTHROPIC_* discipline).
@@ -51,7 +55,6 @@ import { systemClock, type Clock } from "./clock.js";
 /** Zero-byte bash and zsh rc files; never consult the operator's dotfiles. */
 export const WORKER_HOME_RC_FILES: readonly string[] = [
   ".bashrc",
-  ".bash_profile",
   ".bash_login",
   ".profile",
   ".zshrc",
@@ -60,8 +63,26 @@ export const WORKER_HOME_RC_FILES: readonly string[] = [
   ".zlogin",
 ];
 
-/** One path a worker needs mirrored back from the real HOME into the redirected scratch HOME,
- *  symlinked rather than copied so it is always current. */
+/** Bash reads this user login profile after /etc/profile and before the worker command. */
+export const WORKER_HOME_LOGIN_PROFILE = ".bash_profile";
+
+/** Clear every alias and function inherited from the host's /etc/profile before worker code runs.
+ * Keep this Bash 3.2-compatible: no arrays, namerefs, or non-POSIX shell extensions beyond Bash's
+ * process substitution and function enumeration. The helper removes itself as part of the sweep. */
+export const WORKER_HOME_LOGIN_PROFILE_SCRIPT = [
+  "# GNU Bash startup files: /etc/profile runs before this user login profile (https://www.gnu.org/software/bash/manual/html_node/Bash-Startup-Files.html)",
+  "unalias -a",
+  "_rmd_clear_host_profile_functions() {",
+  "  local function_name",
+  "  while IFS= read -r function_name; do",
+  '    unset -f -- "$function_name"',
+  "  done < <(compgen -A function)",
+  "}",
+  "_rmd_clear_host_profile_functions",
+  "",
+].join("\n");
+
+/** Symlink one real-HOME path into scratch HOME so it stays current. */
 export interface WorkerHomeSymlink {
   /** Path relative to HOME, e.g. `.claude` or `.gitconfig`. */
   relPath: string;
@@ -83,11 +104,10 @@ export interface ClaudeCredentialSeedEvent {
   priorVerdict: string;
 }
 
-/** W1-T6252: provision or heal one shared store under the host's `.claude` bind mount.
- * The CLI's refresh lock serializes renewals; private per-container OAuth forks invalidated peers.
- * Keep old forks for recovery, but never create or resolve them once the shared store exists.
- * Exclusive mkdir selects one provisioner. Never overwrite usable CLI-owned credentials;
- * heal unusable credentials only from a usable owner copy. */
+/** W1-T6252: provision/heal the shared `.claude` store; CLI refresh locks serialize renewals.
+ * Private OAuth forks invalidated peers: retain old forks for recovery, but never create/resolve
+ * them once shared. Exclusive mkdir selects one provisioner; preserve usable CLI credentials
+ * and heal unusable ones only from a usable owner copy. */
 export function seedClaudeFleetCredentials(opts: {
   realHome: string;
   fsImpl?: Partial<ClaudeFleetSeedFsOps>;
@@ -107,8 +127,7 @@ export function seedClaudeFleetCredentials(opts: {
     return "skipped";
   }
 
-  // Stage the file beside the store (same filesystem, so the rename is atomic), then claim the store
-  // with an exclusive mkdir. A competing provisioner gets EEXIST and leaves the winner's token untouched.
+  // Stage beside the store for atomic rename; exclusive mkdir leaves an EEXIST winner's token intact.
   const parent = dirname(store);
   f.mkdirSync(parent, { recursive: true, mode: 0o700 });
   const stagedFile = join(parent, `.credentials-seed-${randomUUID()}`);
@@ -137,8 +156,7 @@ export function seedClaudeFleetCredentials(opts: {
   return "provisioned";
 }
 
-/** The owner's credential bytes, or `undefined` when there is no owner file. Any other read failure throws:
- *  a permissions problem is not an absence. */
+/** Owner credential bytes, or `undefined` for ENOENT; other read failures throw, never imply absence. */
 function readOwnerCredential(realHome: string, f: ClaudeFleetSeedFsOps): Buffer | undefined {
   try {
     return f.readFileSync(join(realHome, ".claude", ".credentials.json")) as Buffer;
@@ -148,9 +166,8 @@ function readOwnerCredential(realHome: string, f: ClaudeFleetSeedFsOps): Buffer 
   }
 }
 
-/** Replace the store's credential only when it is unusable and the owner's is usable. Returns the replaced
- *  credential's reason class, or `undefined` when nothing was replaced. The replacement is staged inside
- *  the store and renamed over it, so a reader sees one file or the other. */
+/** Heal only an unusable store from a usable owner; return its prior reason or `undefined` if unchanged.
+ * Stage inside the store and rename atomically so readers see one complete file. */
 function healClaudeCredentialStore(realHome: string, store: string, f: ClaudeFleetSeedFsOps): string | undefined {
   const storeFile = join(store, ".credentials.json");
   const prior = classifyWorkerCredentialFile(() => f.readFileSync(storeFile, "utf8") as string);
@@ -260,8 +277,7 @@ function carryClaudeFleetIdentity(stagingDir: string, store: string): Extract<Cl
   return "carried";
 }
 
-/** One proper-lockfile-compatible directory lock: `true` when held, `false` while a live peer holds it.
- *  A holder whose mtime is past the CLI's own stale bound is reclaimed, as the CLI itself would. */
+/** proper-lockfile directory: `true` if acquired, `false` if busy; reclaim at the CLI's mtime bound. */
 function tryClaudeRefreshLock(path: string, nowMs: number): boolean {
   try {
     mkdirSync(path);
@@ -289,11 +305,9 @@ function tryClaudeRefreshLock(path: string, nowMs: number): boolean {
   }
 }
 
-/** W1-T10380: replace the fleet store's ONE `.credentials.json` with a console login's staged file.
- *  The staged bytes must classify `usable`, else the store is never opened for write. The write happens
- *  under BOTH of the CLI's refresh locks, so a concurrent worker refresh cannot interleave, and lands by
- *  rename so a reader sees the old file or the new one. The host login (`<realHome>/.claude/.credentials.json`)
- *  is neither read nor written. `proceed` is re-asked under the lock, so an ended session writes nothing. */
+/** W1-T10380: replace the fleet `.credentials.json` only with `usable` staged console-login bytes.
+ * Hold BOTH CLI refresh locks and rename atomically; never read/write the host login
+ * (`<realHome>/.claude/.credentials.json`). Re-ask `proceed` under lock: ended sessions write nothing. */
 export async function replaceClaudeFleetCredential(opts: {
   realHome: string;
   stagingDir: string;
@@ -403,42 +417,35 @@ export const WORKER_HOME_SYMLINKS: readonly WorkerHomeSymlink[] = [
   },
 ];
 
-/** Slots that USED to be granted and are now refused. `.config/gh` linked the operator's real gh
- *  config into every worker HOME: a worker could read its hosts.yml and, through the then-unsandboxed
- *  `gh`, write aliases, `pager` or `http_unix_socket` into the config the operator's own gh reads. A
- *  container worker authenticates with `GH_TOKEN` and needs no config dir at all. */
+/** Revoked slots: `.config/gh` exposed operator hosts.yml and allowed unsandboxed gh to write
+ * aliases, `pager` or `http_unix_socket` into operator config. Containers need only `GH_TOKEN`. */
 export const REVOKED_WORKER_HOME_GRANTS: readonly string[] = [join(".config", "gh")];
 
-/** PURE plan of what {@link materializeWorkerHome} will do, so the redirection logic is unit-testable
- *  without touching the filesystem. INVARIANT: every `from` is under the redirected `workerHome` and
- *  every `to` under the real `realHome`, never `workerHome === realHome`. */
+/** PURE {@link materializeWorkerHome} plan: every `from` is under `workerHome`, every `to` under
+ * `realHome`, and `workerHome !== realHome`; testable without filesystem access. */
 export interface WorkerHomePlan {
   workerHome: string;
   rcFiles: string[];
+  /** Populated by workerHomePlan; optional only for hand-built test and recovery fixtures. */
+  loginProfile?: string;
   symlinks: Array<{ from: string; to: string; reason: string }>;
-  /** What ACTUALLY happened to each grant: a FAILED grant is not an OPTIONAL one. Populated by
-   *  {@link materializeWorkerHome}; absent on the pure {@link workerHomePlan}. */
+  /** Actual grant outcomes from {@link materializeWorkerHome}, absent on the pure plan; failed != optional. */
   outcomes?: WorkerHomeGrantOutcome[];
-  /** W1-T981: whatever the `.claude` grant resolves to for THIS plan. The CLI's own `.claude.json`
-   *  backups land here, so {@link materializeWorkerHome} sweeps it via
-   *  {@link sweepClaudeConfigBackups}. Optional only so a hand-built fixture need not carry it. */
+  /** W1-T981: resolved `.claude` target; materialization calls {@link sweepClaudeConfigBackups}
+   * here for CLI `.claude.json` backups. Optional only for hand-built fixtures. */
   claudeGrantTarget?: string;
-  /** W1-T981: the outcome of sweeping `claudeGrantTarget`'s `.claude.json` backups, so that bound is
-   *  OBSERVABLE on every materialization. Absent on the pure {@link workerHomePlan}. */
+  /** W1-T981: observable backup sweep outcome per materialization; absent on the pure plan. */
   claudeConfigBackupSweep?: ClaudeConfigBackupSweepSummary;
 }
 
-/** One grant's real outcome. INVARIANT: `absent` and `failed` stay distinguishable — the absent skip
- *  is a correct optional-grant path, while a failure is a silent loss of capability. */
+/** Keep `absent` (correct optional skip) distinct from `failed` (lost capability). */
 export interface WorkerHomeGrantOutcome {
   relFrom: string;
   to: string;
-  /** Only the two non-obvious states need saying. `absent` means the TARGET does not exist: an optional
-   *  grant, skipped SILENTLY and correctly, since several are legitimately unavailable. `displaced`
-   *  means a REAL DIRECTORY occupied the slot, was moved aside and the link was then created. */
+  /** `absent`: missing optional target, silently skipped. `displaced`: real directory moved aside,
+   * then symlink created. */
   state: "linked" | "already" | "absent" | "displaced" | "failed";
-  /** Where a `displaced` directory was moved to — kept, never deleted, so the thing that poisoned
-   *  the slot is still inspectable afterwards. */
+  /** Displaced directory's retained location; never delete evidence of the poisoned slot. */
   displacedTo?: string;
   /** Why a `failed` grant failed — the error's own message, never a guess. */
   reason?: string;
@@ -481,6 +488,7 @@ export function workerHomePlan(opts: {
   return {
     workerHome: opts.workerHome,
     rcFiles: WORKER_HOME_RC_FILES.map((f) => join(opts.workerHome, f)),
+    loginProfile: join(opts.workerHome, WORKER_HOME_LOGIN_PROFILE),
     symlinks: WORKER_HOME_SYMLINKS.map((s) => {
       let to: string;
       if (opts.workerKeychainPath && s.relPath === LOGIN_KEYCHAIN_REL) {
@@ -496,20 +504,16 @@ export function workerHomePlan(opts: {
   };
 }
 
-/** Filename prefix the CLI's own backup writer uses when it replaces `.claude.json`:
- *  `<prefix><epoch-ms>` under `<claudeGrantTarget>/backups/`. INVARIANT: this module never WRITES one
- *  — it only observes and reaps what the CLI leaves behind. */
+/** CLI backup name: `<prefix><epoch-ms>` under `<claudeGrantTarget>/backups/`.
+ * This module only observes/reaps backups, never writes them. */
 export const CLAUDE_CONFIG_BACKUP_PREFIX = ".claude.json.backup.";
 
-/** Where the CLI's own `.claude.json` backups land for a `.claude`-grant target: `backups/` under it,
- *  SHARED across every concurrent worker because the grant target is. */
+/** CLI `.claude.json` backups: `backups/` under the grant target, shared by concurrent workers. */
 export function claudeConfigBackupDir(claudeGrantTarget: string): string {
   return join(claudeGrantTarget, "backups");
 }
 
-/** Default bound for {@link sweepClaudeConfigBackups}: keep the newest 20 backups, reap the rest. A
- *  count cap rather than an age cap because these are written on every spawn, so an age-only bound
- *  would still grow without limit inside one busy day. */
+/** Keep the newest 20 backups: per-spawn writes can grow unbounded within one day under an age cap. */
 export const DEFAULT_CLAUDE_CONFIG_BACKUP_MAX_KEEP = 20;
 
 export interface ClaudeConfigBackupSweepSummary {
@@ -520,10 +524,8 @@ export interface ClaudeConfigBackupSweepSummary {
 const claudeConfigBackupFsOps = { readdirSync, rmSync };
 type ClaudeConfigBackupFsOps = typeof claudeConfigBackupFsOps;
 
-/** W1-T981: bound and OBSERVE the CLI's `.claude.json` backups instead of letting them accumulate in
- *  the shared granted `.claude` directory. Keeps the `maxKeep` newest by the epoch in each filename.
- *  INVARIANT: best-effort and never throws — an absent `backups/` directory is a silent, correct
- *  no-op, so this adds no refusal path. */
+/** W1-T981: observe/bound shared CLI backups to the `maxKeep` newest filename epochs.
+ * Best-effort, never throws: absent `backups/` is a silent no-op, never a refusal. */
 export function sweepClaudeConfigBackups(
   claudeGrantTarget: string,
   opts: { maxKeep?: number; fsImpl?: Partial<ClaudeConfigBackupFsOps> } = {},
@@ -628,8 +630,11 @@ export function materializeSpawnWorkerHome(opts: Parameters<typeof materializeWo
   return materializeWorkerHome(opts);
 }
 
-/** Materialize a {@link WorkerHomePlan} on disk: guarantee every rc file exists and is EMPTY, and
- *  symlink each real-HOME path back in.
+/** Materialize a {@link WorkerHomePlan} on disk: keep user rc files blank, write the generated login
+ *  profile that clears host-profile aliases and functions, and symlink each real-HOME path back in.
+ *  Bash reads /etc/profile before ~/.bash_profile; see
+ *  https://www.gnu.org/software/bash/manual/html_node/Bash-Startup-Files.html and
+ *  https://www.gnu.org/software/gawk/manual/html_node/Shell-Startup-Files.html.
  *  INVARIANT: a stale rc file is truncated, never preserved — this directory is Remudero-owned, so a
  *  prior run's leftovers are debris and not operator content.
  *  INVARIANT: best-effort per symlink. An absent source is skipped rather than thrown, because
@@ -655,6 +660,8 @@ export function materializeWorkerHome(opts: {
     // Truncate every time; prior emptiness is not trusted.
     writeFileSync(rc, "");
   }
+  // Reassert the cleanup even when a reused worker home carries a stale login profile.
+  writeFileSync(plan.loginProfile ?? join(plan.workerHome, WORKER_HOME_LOGIN_PROFILE), WORKER_HOME_LOGIN_PROFILE_SCRIPT);
 
   const outcomes: WorkerHomeGrantOutcome[] = [];
   for (const link of plan.symlinks) {

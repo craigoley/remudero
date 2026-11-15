@@ -1,0 +1,25 @@
+- id: W1-T12276
+  title: "Replay retained probe transcripts and measure the outside-line anchor against healthy runs"
+  repo: remudero
+  depends_on: []
+  type: recon
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - LEARNINGS.md
+  acceptance:
+    - claim: "The recon records which retained Codex and Azure probe transcript sources it searched and how many transcripts it found, or states that the searched sources hold none"
+      proof: "grep: outside-line anchor replay sources searched in LEARNINGS.md"
+    - claim: "The recon records the proposed outside-line anchor replayed against healthy probe-negative transcripts and probe-positive control transcripts, with a count for each"
+      proof: "grep: outside-line anchor replay healthy and control counts in LEARNINGS.md"
+    - claim: "The recon states whether the anchor fires on any healthy transcript and makes no recommendation to change the gate without that measurement"
+      proof: "grep: outside-line anchor healthy-run firing verdict in LEARNINGS.md"
+  origin: "followup:W1-T11552-1794365779652:2026-11-11T03:09:11.171Z:0"
+  rationale: >-
+    From the 2026-11-11 follow-up on W1-T11552-1794365779652, ratified via rmd approve:
+  
+    follow-up harvest [research]: Locate retained codex/Azure probe transcripts and replay the
+    proposed `outside:`-line anchor against them. The task requires the anchor to be measured so
+    it does not fire on healthy runs. — from W1-T11552 (run W1-T11552-1794365779652)

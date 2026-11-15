@@ -14,37 +14,22 @@ import { planNodePin } from "../../scripts/node-pin-follows-the-image.mjs";
 import { SECURITY_MERGE_CONTEXT as SECURITY_MERGE_CONTEXT_MJS } from "./code-scanning-merge-adapter.mjs";
 
 /**
- * The dependency-PR review lane (W1-T54, MASTER-PLAN §5D item 1).
+ * The dependency-PR review lane (W1-T54, MASTER-PLAN §5D item 1). Nothing ever posted `remudero-review` on a
+ * Dependabot PR, so each sat UNMERGEABLE — fail-closed but FROZEN. This is a SECOND deterministic judge (beside
+ * lib/review.ts's), scoped to Dependabot PRs: no LLM, ever; its only writes are the `remudero-review` status and
+ * durable migration feedback for majors, both posted by the run-task.ts CLI wiring — it decides, never shells out.
  *
- * Required checks on remudero are `[ci-gate, remudero-review]`. Nothing ever
- * posted `remudero-review` on a Dependabot PR, so every Dependabot PR sat
- * UNMERGEABLE — fail-closed, but FROZEN, never even surfaced as actionable. This
- * module is a SECOND deterministic judge (alongside lib/review.ts's task-acceptance
- * judge), scoped to Dependabot PRs: no LLM, ever, and its only write paths are (a)
- * the `remudero-review` commit status and (b) durable migration feedback for majors
- * (both posted by the run-task.ts CLI wiring — this module decides, it never
- * shells out).
- *
- * THE FIVE-WAY VERDICT is a PURE function ({@link decideDepReview}) so each
- * branch is a unit fixture, proven over RECORDED Dependabot PRs (live #80/#81 on
- * this repo), before any gate depends on it:
- *   - REFUSE   — not authored by Dependabot, or the diff touches a file outside
- *     the manifest/lockfile allowlist (a "dependency bump" that also edits source
- *     is not a dependency bump — refuse rather than rubber-stamp it). No status is
- *     posted: identical to today's silence, but now a DELIBERATE outcome.
- *   - ARM      — a confined minor/patch bump, or a diff-proven GitHub Actions SHA-only
- *     pin refresh with unchanged release annotations, with every required gate green:
- *     post remudero-review=success and arm auto-merge.
- *   - MIGRATE  — a parseable MAJOR bump. Capture a durable feedback entry for
- *     the migration, then tell Dependabot to ignore this major proposal and close
- *     the PR without deleting its branch. No status is posted and no auto-merge is armed.
- *   - ESCALATE — an unparseable bump that is not a diff-proven action pin refresh,
- *     or a major whose dependency identity cannot be safely extracted. Fail closed
- *     via the existing MANUAL escalation path.
- *
- * HOLD covers an otherwise-good minor/patch or verified pin-only PR whose required
- * checks are not yet green (still running, or genuinely red): nothing is posted and
- * the caller tries again later — pending is never treated as pass.
+ * THE FIVE-WAY VERDICT is a PURE function ({@link decideDepReview}), fixture-proven over RECORDED PRs (#80/#81):
+ *   - REFUSE   — not Dependabot-authored, or the diff touches a file outside the manifest/lockfile allowlist.
+ *     No status is posted: today's silence, now a DELIBERATE outcome.
+ *   - ARM      — a confined minor/patch bump, or a diff-proven Actions SHA-only pin refresh with unchanged
+ *     release annotations, with every required gate green: post remudero-review=success, arm auto-merge.
+ *   - MIGRATE  — a parseable MAJOR. Capture durable migration feedback, tell Dependabot to ignore this major
+ *     and close the PR (branch kept). No status, no auto-merge.
+ *   - ESCALATE — an unparseable bump that is not a proven pin refresh, or a major whose dependency identity
+ *     cannot be extracted. Fail closed via the MANUAL escalation path.
+ *   - HOLD     — an otherwise-good minor/patch or pin-only PR whose required checks are not yet green:
+ *     nothing posted, retry later — pending is never treated as pass.
  */
 
 // ── Author ───────────────────────────────────────────────────────────────
@@ -73,8 +58,8 @@ export function isDependabotAuthor(author: DepReviewAuthor): boolean {
 export type SemverLevel = "major" | "minor" | "patch" | "unknown";
 
 /** Bumped when this lane's decision contract changes, independently of task-review semantics.
- *  v3 (PR 15539): a Docker tag bump such as 24.21.0-bookworm-slim parses its semver level. */
-export const DEP_REVIEW_ENGINE_REVISION = "dep-review-docker-tag-semver-v3";
+ *  v4 (W1-T12369): a test file that only moves a pin the bump changes is accepted. */
+export const DEP_REVIEW_ENGINE_REVISION = "dep-review-test-pin-companion-v4";
 /** The revision a sweep row written before rows carried one was decided under. */
 export const DEP_REVIEW_LEGACY_ENGINE_REVISION = "dep-review-selected-attempts-v2";
 
@@ -357,13 +342,11 @@ export function renderDepReviewMigrationFeedback(args: {
 }
 
 /**
- * Parse version bumps ONLY from Dependabot's own summary lines, never from the
- * embedded release-notes prose (the 2026-07-22 #533 false-major: actions/checkout
- * 7.0.0→7.0.1 — a PATCH — classified MAJOR because checkout's OWN changelog,
- * quoted inside the PR body, contains "docker/login-action from 3.3.0 to 4.2.0";
- * #534 carried the same hazard via commit-and-tag-version's changelog, and
- * PR #81's 2026-07-15 escalation has the identical signature). A `from X to Y`
- * pair that only ever appears mid-prose is somebody ELSE'S bump, not this PR's.
+/**
+ * Parse version bumps ONLY from Dependabot's own summary lines, never from embedded release-notes prose
+ * (the 2026-07-22 #533 false-major: checkout 7.0.0→7.0.1 classified MAJOR because its own changelog quotes
+ * "docker/login-action from 3.3.0 to 4.2.0"; #534 and PR #81 had the same signature). A mid-prose `from X to Y`
+ * is somebody ELSE'S bump.
  */
 export function parseAnchoredVersionBumps(text: string): SemverLevel[] {
   return text
@@ -513,6 +496,8 @@ export function changedFilesInDiff(diff: string): string[] {
   for (const m of diff.matchAll(/^\+\+\+ b\/(\S+)/gm)) files.add(m[1]);
   for (const m of diff.matchAll(/^--- a\/(\S+)/gm)) files.add(m[1]);
   for (const m of diff.matchAll(/^rename (?:from|to) (\S+)/gm)) files.add(m[1]);
+  // W1-T12369: a binary or mode-only change carries only its `diff --git` header.
+  for (const m of diff.matchAll(/^diff --git a\/(\S+) b\/(\S+)$/gm)) files.add(m[1]).add(m[2]);
   return [...files];
 }
 
@@ -671,6 +656,113 @@ export function offendingFiles(
   return changedFilesInDiff(diff).filter((f) => !isDependencyDeclarationPath(f, readRootManifest));
 }
 
+/** W1-T12369 — a version or SHA the bump itself moves, old value to new value. */
+export interface DepReviewPinPair { dependency: string; from: string; to: string }
+/** W1-T12369 — a test file whose every changed line moves only {@link DepReviewPinPair}s. */
+export interface DepReviewAcceptedPinFile { file: string; pins: DepReviewPinPair[] }
+
+const isFullSha = (text: string) => /^[a-f0-9]{40}$/i.test(text);
+const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+function diffSections(diff: string): string[] {
+  return diff.split(/^(?=diff --git )/m).filter((section) => section.startsWith("diff --git "));
+}
+
+function changedRuns(section: string): { runs: string[][]; plain: boolean } {
+  const runs: string[][] = [];
+  let run: string[] = [], plain = true, inHunk = false;
+  const flush = () => { if (run.length > 0) runs.push(run); run = []; };
+  for (const line of section.split("\n")) {
+    if (line.startsWith("@@")) { flush(); inHunk = true; continue; }
+    if (!inHunk) {
+      if (!(line === "" || /^(diff --git |index |--- a\/|\+\+\+ b\/)/.test(line))) plain = false;
+      continue;
+    }
+    if (line.startsWith("\\ No newline at end of file")) continue;
+    if (line.startsWith("+") || line.startsWith("-")) run.push(line);
+    else flush();
+  }
+  flush();
+  return { runs, plain };
+}
+
+function bumpPinPairs(title: string, body: string, diff: string): DepReviewPinPair[] {
+  const pairs = new Map<string, DepReviewPinPair>();
+  const add = (dependency: string, from: string, to: string) => {
+    if (from && to && from !== to) pairs.set(`${dependency}\0${from}\0${to}`, { dependency, from, to });
+  };
+  for (const section of diffSections(diff)) {
+    const files = changedFilesInDiff(section);
+    if (files.length !== 1 || !/^\.github\/workflows\/[^/]+\.ya?ml$/i.test(files[0])) continue;
+    for (const run of changedRuns(section).runs) {
+      const removed = run.filter((line) => line.startsWith("-")), added = run.filter((line) => line.startsWith("+"));
+      if (removed.length !== added.length) continue;
+      removed.forEach((line, i) => {
+        const before = ACTION_SHA_PIN_CHANGE_RE.exec(line), after = ACTION_SHA_PIN_CHANGE_RE.exec(added[i]);
+        if (!before || !after || before[2] !== after[2]) return;
+        add(before[2], before[3], after[3]);
+        add(before[2], before[4].replace(/^v/i, ""), after[4].replace(/^v/i, ""));
+      });
+    }
+  }
+  for (const fact of parseDependabotBumpFacts(title, body)) {
+    add(fact.dependency, fact.fromVersion.replace(/^v/i, ""), fact.toVersion.replace(/^v/i, ""));
+  }
+  return [...pairs.values()];
+}
+
+/** The pins that turn `removed` into exactly `added`; undefined when any other text changes. */
+function pinOnlyLineChange(removed: string, added: string, pins: readonly DepReviewPinPair[]): DepReviewPinPair[] | undefined {
+  const text = removed.slice(1);
+  const usable = pins.filter((pin) => isFullSha(pin.from) || text.includes(pin.dependency));
+  if (usable.length === 0) return undefined;
+  const pattern = new RegExp([...new Set(usable.map((pin) => pin.from))].sort((a, b) => b.length - a.length)
+    .map((from) => isFullSha(from)
+      ? String.raw`(?<![0-9a-fA-F])${escapeRegExp(from)}(?![0-9a-fA-F])`
+      : String.raw`(?<![0-9A-Za-z.+_-])v?${escapeRegExp(from)}(?![0-9A-Za-z.+_-])`)
+    .join("|"), "g");
+  const used = new Map<string, DepReviewPinPair>();
+  let ambiguous = false;
+  const moved = text.replace(pattern, (match) => {
+    const from = isFullSha(match) ? match : match.replace(/^v/i, "");
+    const candidates = usable.filter((pin) => pin.from === from);
+    if (new Set(candidates.map((pin) => pin.to)).size !== 1) { ambiguous = true; return match; }
+    const named = candidates.filter((pin) => text.includes(pin.dependency));
+    for (const pin of named.length > 0 ? named : candidates.slice(0, 1)) used.set(`${pin.dependency}\0${pin.from}\0${pin.to}`, pin);
+    return `${match.slice(0, match.length - from.length)}${candidates[0].to}`;
+  });
+  return !ambiguous && used.size > 0 && moved === added.slice(1) ? [...used.values()] : undefined;
+}
+
+/**
+ * W1-T12369 — test files among `offending` whose only change is a pin the bump itself moves.
+ * #17928: test/semgrep-native-install.test.ts asserts the upload-sarif SHA, so every bump of
+ * that action needs the same one-line test edit, which the allowlist alone refuses.
+ */
+export function acceptedTestPinFiles(title: string, body: string, diff: string, offending: readonly string[]): DepReviewAcceptedPinFile[] {
+  const pins = bumpPinPairs(title, body, diff);
+  if (pins.length === 0) return [];
+  const sections = diffSections(diff).map((section) => ({ section, files: changedFilesInDiff(section) }));
+  const out: DepReviewAcceptedPinFile[] = [];
+  for (const file of offending) {
+    const own = sections.filter((s) => s.files.includes(file));
+    if (!file.startsWith("test/") || own.length !== 1 || own[0].files.length !== 1) continue;
+    const { runs, plain } = changedRuns(own[0].section);
+    if (!plain || runs.length === 0) continue;
+    const matched = new Map<string, DepReviewPinPair>();
+    const allPins = runs.every((run) => {
+      const removed = run.filter((line) => line.startsWith("-")), added = run.filter((line) => line.startsWith("+"));
+      return removed.length > 0 && removed.length === added.length && removed.every((line, i) => {
+        const used = pinOnlyLineChange(line, added[i], pins);
+        for (const pin of used ?? []) matched.set(`${pin.dependency}\0${pin.from}\0${pin.to}`, pin);
+        return used !== undefined;
+      });
+    });
+    if (allPins) out.push({ file, pins: [...matched.values()] });
+  }
+  return out;
+}
+
 // ── Required-check gate ──────────────────────────────────────────────────
 
 export interface DepReviewCheck {
@@ -798,19 +890,13 @@ const RED_CONCLUSIONS = new Set(["FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_RE
  * "COMPLETED", not its result) mirrors run-task.ts's own rollup reads exactly.
  */
 /**
+/**
  * W1-T3244 — THE ONE STATUS THIS LANE PUBLISHES CANNOT ALSO BE ONE IT WAITS FOR.
- *
- * `remudero-review` is this module's own write path: `arm` means "post remudero-review=success and
- * arm auto-merge" (see the header). Counting it as a red required check made the lane hold on the
- * status it is the only publisher of — a closed loop with no exit inside the lane, escapable only
- * by `@dependabot recreate` or an admin merge.
- *
- * NEVER HIT UNTIL 2026-09-09 because ABSENT AND RED ARE DIFFERENT. The ordinary case is that
- * nothing ever posted — the state this module's header says every Dependabot PR used to sit in —
- * and absent is not red, so the lane arms every time. Only a RED posting traps it. That day an
- * operator ran the shared task-acceptance verb on a Dependabot PR; it fail-closed correctly on a
- * bot body with no `## Acceptance` block, and #4812 deadlocked. The sweep's own `post-review` rung
- * reaches that path too, as does a transient failure in this lane's write.
+ * `remudero-review` is this module's own write path (`arm` posts it). Counting it as a red required check made
+ * the lane hold on the status it alone publishes, a closed loop escapable only by `@dependabot recreate` or an
+ * admin merge. Absent is not red, so it stayed hidden until a RED posting (#4812, 2026-09-09: the shared
+ * task-acceptance verb failed closed on a bot body with no `## Acceptance` block); the sweep's `post-review`
+ * rung and a transient write failure reach it too.
  */
 export const LANE_OWNED_STATUS_CONTEXT = REVIEW_CONTEXT;
 
@@ -907,6 +993,7 @@ export interface DepReviewResult {
   advisoryRed?: string[]; // W1-T9929: reds outside the required set, on every verdict decideDepReview returns
   judgedAgainst?: "required" | "all-checks";
   requiredFallback?: string;
+  acceptedPinFiles?: DepReviewAcceptedPinFile[]; // W1-T12369: present only when not empty
 }
 
 /**
@@ -918,13 +1005,19 @@ export interface DepReviewResult {
  */
 export function decideDepReview(input: DepReviewInput): DepReviewResult {
   const semverLevel = overallSemverLevel(input.title, input.body);
-  const offending = offendingFiles(input.diff);
-  const { holding: red, advisory: advisoryRed } = splitRedChecks(input.checks, input.required);
-  const judged: Pick<DepReviewResult, "advisoryRed" | "judgedAgainst" | "requiredFallback"> = input.required?.kind === "required"
-    ? { advisoryRed, judgedAgainst: "required" }
-    : { advisoryRed, judgedAgainst: "all-checks", ...(input.required ? { requiredFallback: input.required.fallback } : {}) };
-  const migrationBumps = majorMigrationBumps(input.title, input.body);
   const dependabot = isDependabotAuthor(input.author);
+  const outside = offendingFiles(input.diff);
+  const acceptedPinFiles = dependabot && (semverLevel === "minor" || semverLevel === "patch")
+    ? acceptedTestPinFiles(input.title, input.body, input.diff, outside) : [];
+  const offending = outside.filter((file) => !acceptedPinFiles.some((accepted) => accepted.file === file));
+  const { holding: red, advisory: advisoryRed } = splitRedChecks(input.checks, input.required);
+  const judged: Pick<DepReviewResult, "advisoryRed" | "judgedAgainst" | "requiredFallback" | "acceptedPinFiles"> = {
+    ...(input.required?.kind === "required"
+      ? { advisoryRed, judgedAgainst: "required" as const }
+      : { advisoryRed, judgedAgainst: "all-checks" as const, ...(input.required ? { requiredFallback: input.required.fallback } : {}) }),
+    ...(acceptedPinFiles.length > 0 ? { acceptedPinFiles } : {}),
+  };
+  const migrationBumps = majorMigrationBumps(input.title, input.body);
   const pinOnly = dependabot && offending.length === 0 && semverLevel === "unknown" &&
     isActionShaPinOnlyProposal(input.title, input.body, input.diff);
 
@@ -1004,6 +1097,7 @@ export function decideDepReview(input: DepReviewInput): DepReviewResult {
     reason: (pinOnly
       ? "pin-only GitHub Actions SHA refresh, release annotations unchanged, gates green — safe to auto-merge"
       : `${semverLevel} bump, confined to manifests, gates green — safe to auto-merge`) +
+      (acceptedPinFiles.length > 0 ? `; test pin edit accepted: ${acceptedPinFiles.map((a) => a.file).join(", ")}` : "") +
       (advisoryRed.length > 0 ? `; advisory red, not holding: ${advisoryRed.join(", ")}` : ""),
   };
 }
@@ -1019,25 +1113,14 @@ export function decideDepReview(input: DepReviewInput): DepReviewResult {
  * lane's "no auto-merge" contract for majors exactly.
  */
 /**
- * impl-FR — the DETECTOR for the one failure this lane has no remedy for.
- *
- * A Dependabot PR has NO independent arm path. `sweep.ts`'s `DISPOSITION_RULES` are ordered and
- * first-match-wins (`DISPOSITION_RULES.find(...)`), and the `dep-review` row sits ABOVE both
- * arming rows — so a Dependabot PR never reaches `mergeable` or `post-review` — while the review
- * lane refuses `dependabot/` heads by name ("the dep-review lane owns arming for these"). If this
- * lane decides `arm` and the arm does not take, **nothing else will ever arm that PR**. It goes
- * green, collects no objections, and simply never merges.
- *
- * That silence is the whole risk, so the remedy is a SIGNAL, not a second arming path: a rescue
- * would have to re-derive the semver policy to avoid arming a major bump, and a second copy of
- * that policy is worse than the gap it closes. This escalation cannot arm anything.
- *
- * BOUNDED by construction rather than by a counter: `escalate()`'s composite dedup key is
- * (taskId, PR, headSha, cause) — W1-T195 — so passing `headSha` yields exactly one issue per PR
- * per push, and a re-poll of the same unchanged PR comments rather than opening again. The bound
- * therefore lives in GitHub's open issues, NOT in the ledger, which is what makes it immune to the
- * rotation class that reset `ABSENT_REPUSH_CAP`. The `taskId` is deliberately distinct from
- * {@link buildDepReviewEscalation}'s so the two signals can never dedup against each other.
+/**
+ * impl-FR — the DETECTOR for the one failure this lane has no remedy for. A Dependabot PR has NO
+ * independent arm path: `sweep.ts`'s first-match-wins `DISPOSITION_RULES` put the `dep-review` row above both
+ * arming rows, and the review lane refuses `dependabot/` heads by name. If this lane decides `arm` and the arm
+ * does not take, nothing else ever arms that PR. The remedy is a SIGNAL, never a second arming path (a second
+ * copy of the semver policy is worse than the gap). BOUNDED by `escalate()`'s (taskId, PR, headSha, cause)
+ * dedup (W1-T195): one issue per PR per push, held in GitHub's open issues, not the ledger, so rotation cannot
+ * reset it. Its `taskId` is distinct from {@link buildDepReviewEscalation}'s so the two never dedup together.
  */
 export function buildDepReviewArmUnreachableEscalation(args: {
   prUrl: string;

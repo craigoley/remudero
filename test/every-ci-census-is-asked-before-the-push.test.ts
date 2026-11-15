@@ -1,3 +1,4 @@
+// @census-reads: src/ scripts/ test/ .github/workflows/ci.yml package.json — the CI census population, its precheck parity baseline and wiring.
 /**
  * EVERY CI CENSUS IS ASKED BEFORE THE PUSH, OR NAMED AS CI-ONLY — W1-T5616.
  *

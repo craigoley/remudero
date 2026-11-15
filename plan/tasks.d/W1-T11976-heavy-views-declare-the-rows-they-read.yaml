@@ -1,0 +1,57 @@
+- id: W1-T11976
+  title: "The heavy-lane views (workstreams, repositories, now, host, actions and incidents) declare the rows they read, so each is skipped when only other rows moved"
+  repo: remudero
+  depends_on:
+    - W1-T11975
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # a wrong fingerprint serves a stale body; each declaration is proved by a body-equality test against a full build
+  band_meaning: blast-radius
+  origin: operator-session#serve-idle-2026-11-10
+  plan_refs:
+    - W1-T11127
+    - W1-T11815
+    - W1-T11933
+  files:
+    - src/lib/workstreams-view.ts
+    - src/lib/repositories-view.ts
+    - src/lib/now-view.ts
+    - src/lib/host-view.ts
+    - src/lib/actions-view.ts
+    - src/lib/incidents-view.ts
+    - test/console-api/read-model/a-heavy-view-that-declares-its-rows-is-skipped-when-only-other-rows-moved.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "workstreams, repositories, actions and incidents each declare inputsFingerprint over every input their bodies depend on (rows, snapshots, files and clock-derived fields), and a ledger row none of them reads leaves each declared view skipped"
+      proof: "grep: W1-T11976 criterion 1 in test/console-api/read-model/a-heavy-view-that-declares-its-rows-is-skipped-when-only-other-rows-moved.test.ts"
+    - claim: "For each declared view, a row or file the view does read changes its fingerprint and the next build's body equals a build made with the skip disabled, and a clock-derived field crossing its threshold with no row moving gets a build"
+      proof: "grep: W1-T11976 criterion 2 in test/console-api/read-model/a-heavy-view-that-declares-its-rows-is-skipped-when-only-other-rows-moved.test.ts"
+    - claim: "A view whose inputs include a source it cannot fingerprint cheaply declares nothing and builds as before, and the test names it and the input; now and host are expected to be two of them"
+      proof: "grep: W1-T11976 criterion 3 in test/console-api/read-model/a-heavy-view-that-declares-its-rows-is-skipped-when-only-other-rows-moved.test.ts"
+    - claim: "The production lane registration, built through readModelLaneViews and createReadModelTicker with nothing injected in place of a declaration, skips each declared heavy view when an unrelated row moves, and its audit builds ledger no read_model.view_skip_mismatch row"
+      proof: "grep: W1-T11976 criterion 4 in test/console-api/read-model/a-heavy-view-that-declares-its-rows-is-skipped-when-only-other-rows-moved.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10 on the Azure host (8 cores, CPU pressure some avg300 79 percent): serve used 1.0 to 2.8 cores in 20 to 30 s samples at cpu-shares 4096 against the daemon's 512, with 3.8 GB resident. route-reads.json shows the console's last read of any view at 01:12:34Z; from 01:33Z to 04:19Z, with no reader, read_model.view_builds summed 4,385 s of build time over 9,987 s.
+    - Heavy-lane build time with no reader: now 1,614 s (155 builds, 10.4 s mean, 1,456 s of it in the board stage), workstreams 431 s, repositories 275 s, host 51 s.
+    - None of them declares what it reads, so none can be skipped.
+  design: |
+    Use the mechanism of W1-T11975 as it stands: inputsFingerprint(ctx) over every input, the reuse and restamp rules for a declared view, and the sampled audit. This task changes view files only. If a view needs a change in read-model-worker.ts, stop and amend; do not widen scope.
+    Read each materialize in full first and list its inputs in a comment beside the fingerprint. Surveyed on 2026-11-10 (origin/main 17745c6bf), to be confirmed by that reading:
+    - workstreams: the task and PR rows it derives from (it already tracks reused against derived), the live ledger file by identity, and its github source.
+    - repositories: the registry file and the published sources sidecar by identity, and the telemetry snapshot.
+    - actions: ledger rows only, as far as the survey saw.
+    - incidents: its ledger rows and the one file it stats.
+    - now: EXPECTED UNDECLARED. Its board stage runs git and gh api rate_limit and reads statfs; the output of a process has no identity to fingerprint, and the fingerprint would cost what the build costs. Its 1,614 s is the board stage, which is NOT IN SCOPE here.
+    - host: EXPECTED UNDECLARED. Each build is a new measurement (a host probe stamped as of the clock, statfs, the rate limit), so no two builds have equal inputs.
+    A view with an input it cannot fingerprint cheaply stays undeclared, is named in the test with that input, and is counted under no_declaration by W1-T11974.
+    NOT IN SCOPE: making the board stage itself incremental, and the mechanism in read-model-worker.ts.
+  falsifier: |
+    Let an unrelated row change a fingerprint and criterion 1 must fail; miss an input or a clock threshold and criterion 2 must fail; declare a view whose input is not fingerprinted and criterion 3 must fail; inject a view in place of the lane registration and criterion 4 must fail. Restore and require all four to pass.
+  note: |
+    reservation hand-off: run-unfiled-1794287307841 -> run-unfiled-1794287307841
+    Reserved with rmd next-task-id (W1-T11976 on run-unfiled-1794287307841). Build after the mechanism task.
+    Amended 2026-11-10 with W1-T11975: the declaration is inputsFingerprint over every input, not rows alone. now and host are expected to stay undeclared, so this task is expected to save the workstreams and repositories build time (706 s of the 2,371 s measured), not the now view's.

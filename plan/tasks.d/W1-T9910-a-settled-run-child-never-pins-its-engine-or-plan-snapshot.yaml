@@ -15,7 +15,7 @@
     - src/lib/run-child-contract.ts
     - src/run-task.ts
     - test/a-settled-run-child-never-pins-its-engine-or-plan-snapshot.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

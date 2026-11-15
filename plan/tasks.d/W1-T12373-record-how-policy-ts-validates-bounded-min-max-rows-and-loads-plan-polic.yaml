@@ -1,0 +1,26 @@
+- id: W1-T12373
+  title: Record how policy.ts validates bounded min/max rows and loads plan/policy.yaml, so the freshness-restart block copies that pattern
+  repo: remudero
+  depends_on:
+    - W1-T12228
+  type: recon
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - docs/forensics/policy.md
+  acceptance:
+    - claim: docs/forensics/policy.md gains a section that names the function in src/lib/policy.ts that validates a bounded min/max row, with the file path and line of each check it makes
+      proof: "grep: Bounded row validation pattern in docs/forensics/policy.md"
+    - claim: the same section names how plan/policy.yaml is located, read and parsed, and where a missing or malformed file is refused
+      proof: "grep: Policy file loading pattern in docs/forensics/policy.md"
+    - claim: the section lists the exact steps a new freshness-restart policy block must repeat (schema row, bounds, default, reader), each citing a existing policy row as its example
+      proof: "grep: Steps for a new policy block in docs/forensics/policy.md"
+  origin: "follow-up harvest from W1-T12228 (run W1-T12228-1794423842214): how policy.ts validates other bounded rows (min/max/origin) and loads plan/policy.yaml"
+  rationale: >-
+    From the 2026-11-11 follow-up on W1-T12228-1794423842214, ratified via rmd approve:
+  
+    follow-up harvest [research]: how `policy.ts` validates other bounded rows (min/max/origin)
+    and loads `plan/policy.yaml` — the new block should copy that pattern. — from W1-T12228 (run
+    W1-T12228-1794423842214)

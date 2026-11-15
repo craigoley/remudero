@@ -11,7 +11,7 @@
   plan_refs: [W1-T4732, W1-T9569, W1-T9808, W1-T11027]
   files: [src/lib/daemon.ts, src/lib/sweep.ts, src/cli/commands/sweep.ts, test/daemon/a-due-repair-gets-a-turn-between-overlapping-reviews.test.ts]
   priority: 1
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Main a9eb76ff103a src/lib/daemon.ts:2344 makes every pass reviewOnly when ANY active pass

@@ -20,7 +20,7 @@
     - src/lib/sweep.ts
     - src/lib/merge-probe.ts
     - test/ci/a-head-proven-clean-against-an-older-main-does-not-inherit-clean.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Replaying #15638 (W1-T9795, head 35fa075): a sweep.disposed row that read clean at 2026-11-02T21:14:47.999Z against main 116c844 is not inherited by an unread pass once main is ab39118, which conflicts with that head on src/run-task.ts; the same row is still inherited while main is 116c844; a dirty row is still inherited after main moves; a row with no recorded main is not inherited as clean when main is known; and with no main read the W1-T4470 behaviour is unchanged"

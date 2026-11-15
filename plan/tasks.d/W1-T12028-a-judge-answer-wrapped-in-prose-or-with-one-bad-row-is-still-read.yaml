@@ -1,0 +1,38 @@
+- id: W1-T12028
+  title: "The queue judge reads an answer with prose around its JSON, refuses a bad row alone, and ledgers why an answer was unreadable; 12 passes failed on a malformed answer since 2026-11-06 with nothing recorded about why"
+  repo: remudero
+  depends_on: []
+  priority: 1.4
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # one gardener's answer reader; every accepted row still passes the same evidence and id checks before anything is written
+  band_meaning: blast-radius
+  origin: operator-session#gardener-health-2026-11-10
+  plan_refs:
+    - W1-T9925
+  files:
+    - src/lib/queue-judge-gardener.ts
+    - test/gardeners/a-judge-answer-wrapped-in-prose-or-with-one-bad-row-is-still-read.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "An answer whose JSON is preceded or followed by prose, or sits in a fenced block inside prose, is read as the moves it holds and reaches the inventory"
+      proof: "grep: W1-T12028 criterion 1 in test/gardeners/a-judge-answer-wrapped-in-prose-or-with-one-bad-row-is-still-read.test.ts"
+    - claim: "A row that is not a move is refused alone in a queue_judge.row_refused row naming its index and field, the other rows stand, and an answer whose every row is malformed is still asked again"
+      proof: "grep: W1-T12028 criterion 2 in test/gardeners/a-judge-answer-wrapped-in-prose-or-with-one-bad-row-is-still-read.test.ts"
+    - claim: "An answer with no JSON or no moves list fails the pass as today, and its queue_judge.unavailable row carries the shape and the answer's length and never its text"
+      proof: "grep: W1-T12028 criterion 3 in test/gardeners/a-judge-answer-wrapped-in-prose-or-with-one-bad-row-is-still-read.test.ts"
+  rationale: |
+    OBSERVED 2026-11-06 to 2026-11-10 in the core daemon's ledger (rotations included): 12 queue_judge.unavailable rows and 12 queue-judge.gardener_failed rows, every one "the judge's answer was not the strict JSON shape", beside 14 queue_judge.prediction rows over the same days. The latest was 2026-11-10T09:21Z.
+    - parseQueueJudgeAnswer returns undefined for the whole answer when JSON.parse fails on the full text, when the value has no moves list, or when any one row has any one field of the wrong type.
+    - The ledger row carries only that sentence. Which of the three happened, and how long the answer was, is not recorded, so the 12 failures cannot be told apart after the fact.
+    - Each failed pass is a judge spawn paid for and discarded, and the queue keeps its old ranking until the gardener is admitted again; on 2026-11-10 gardener passes waited a median of 80 minutes for admission.
+  design: |
+    readQueueJudgeAnswer replaces parseQueueJudgeAnswer. It parses the whole text, else a fenced block, else the outermost object or array span. Each row is checked field by field; a row that fails is returned with its index, id and first failing field, and the valid rows are returned as moves. The inventory logs each malformed row as queue_judge.row_refused and passes the valid rows to checkMoves unchanged, so evidence, id and pin checks are as today. An answer with no JSON or no moves list still throws QueueJudgeUnavailableError, and its row gains shape (not-json or no-moves-list) and answer_chars.
+    NOT IN SCOPE: the prompt, the judge spawn, and how often the gardener is admitted.
+  falsifier: |
+    Parse only the whole text and criterion 1 must fail; void the answer on one bad row, or drop the row's field from the refusal, and criterion 2 must fail; drop shape or answer_chars from the row, or put the answer's text in it, and criterion 3 must fail. Restore and require all three to pass.
+  note: |
+    Reserved with rmd next-task-id on this filing's branch. The 12 answers themselves were not kept, so which shape failed is unknown; criterion 3 is what makes the next one diagnosable.

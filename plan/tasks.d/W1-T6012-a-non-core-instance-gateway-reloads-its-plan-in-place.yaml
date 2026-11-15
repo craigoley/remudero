@@ -11,7 +11,7 @@
   origin: "2026-10-06 core-console architecture plan backlog E8 (P0-LOOP: non-core instance gateways loadPlan once at boot)"
   plan_refs: [W1-T4228, W1-T4481, W1-T4906, W1-T5060]
   files: [src/lib/instance-gateway.ts, src/lib/board.ts, test/one-gateway-serves-every-instance.test.ts]
-  status: queued
+  status: merged
   dispatch_hold: false # operator-approved 2026-10-27 after preserved-WIP source handoff
   priority: 3
   attempts: 0

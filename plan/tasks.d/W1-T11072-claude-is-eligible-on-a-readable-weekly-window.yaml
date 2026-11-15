@@ -17,7 +17,7 @@
     - src/lib/worker-provider.ts
     - src/lib/worker.ts
     - test/memory/claude-is-eligible-on-a-readable-weekly-window.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "An answered SDK usage reading whose rate limits carry readable seven-day or model-scoped weekly windows but no five-hour window yields a readable Claude capacity from those weekly windows, so Claude is eligible when they leave headroom above the reserve. A reading with rate_limits_available false, or no rate_limits, or no usable window at all, stays unreadable, and each of those cases is recorded under its own reason instead of one shared capacity-unreadable"

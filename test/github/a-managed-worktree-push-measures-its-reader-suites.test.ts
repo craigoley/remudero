@@ -10,9 +10,10 @@ import { worktreeAdd } from "#src/lib/worker.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
-// W1-T11285: hooks/pre-push's managed-worktree arm (the gate root is a harness checkout, not the pushed tree) used to
-// throw "source-reader runtime calibration is unavailable" for every suite carrying a readerRuntimePolicy. These
-// drive the REAL hook body through gitPushRunBranch, with a fixture bwrap that records each sandboxed child.
+// W1-T11285: hooks/pre-push's managed-worktree arm (the gate root is a harness checkout, not the pushed tree) once
+// measured each reader-policy census suite in the proof sandbox. W1-T12510 took the census precheck out of the hook:
+// ci.yml's ci-shard runs every census suite. These drive the REAL hook body through gitPushRunBranch, with a fixture
+// bwrap that records each sandboxed child, and pin that no reader suite reaches it, healthy or not.
 
 const READER = "test/fixture-reader.test.ts";
 const POLICY = "{ floorMs: 1000, multiple: 4, remeasureMargin: 1.1 }";
@@ -49,13 +50,10 @@ process.stdout.write(r.stdout || ''); process.stderr.write(r.stderr || ''); proc
     : `{ mode: 'bwrap', binary: ${JSON.stringify(runner)} }`;
   put(join(harness, "src/lib/git-push.ts"), `import * as p from ${url("src/lib/git-push.ts")};
 export const createPrePushSandboxRunner = (cwd) => p.createPrePushSandboxRunner(cwd, { probe: () => (${status}) });\n`);
-  // The one admitted member is a structural source-text reader with a valid runtime policy, as
-  // listAdmittedCensusMembers builds for every census-shaped reader.
+  // The admitted member the hook once measured: a structural source-text reader with a valid runtime policy.
   put(join(harness, "scripts/census-precheck.mjs"), `export { main, runCensusSuitesViaChild } from ${url("scripts/census-precheck.mjs")};
 export const listAdmittedCensusMembers = () => [{ testFile: ${JSON.stringify(READER)}, script: '', walks: ['src/'], structural: true, readerRuntimePolicy: ${POLICY} }];\n`);
-  for (const name of ["ci-control-plane-precheck", "lint-plan-precheck"]) {
-    put(join(harness, `scripts/${name}.mjs`), `export * from ${url(`scripts/${name}.mjs`)};\n`);
-  }
+  put(join(harness, "scripts/ci-control-plane-precheck.mjs"), `export * from ${url("scripts/ci-control-plane-precheck.mjs")};\n`);
   put(join(harness, "scripts/lib/git.mjs"), `export * from ${url("scripts/lib/git.mjs")};\n`);
   const remote = gitRepo({ bare: true, kind: "t11285-remote" });
   const seed = gitRepo({ kind: "t11285-seed" });
@@ -119,46 +117,30 @@ async function runPush(f: ReturnType<typeof fixture>) {
 }
 
 describe("test/github/a-managed-worktree-push-measures-its-reader-suites.test.ts", () => {
-  test("W1-T11285 criterion 2: the managed-worktree runSuites hands a reader-policy suite to the sandboxed child", async () => {
+  test("W1-T11285 criterion 2, superseded by W1-T12510: the managed-worktree push hands no reader suite to the sandbox", async () => {
     const f = fixture();
     const result = await runPush(f);
     assert.equal(result.error, undefined, result.output);
     assert.equal(f.remote.git("rev-parse", `refs/heads/${f.branch}`), f.head);
-    assert.doesNotMatch(result.output, /source-reader runtime calibration is unavailable/);
-    // Calibration, then qualification: each one sandboxed run of the reader alone, rooted at the pushed tree.
-    const runs = f.readerRuns();
-    assert.equal(runs.length, 2, result.output);
-    for (const { argv } of runs) {
-      assert.ok(argv.some((a, i) => a === "--ro-bind" && argv[i + 1] === f.wt), "the pushed tree is bound read-only");
-      assert.equal(argv[argv.indexOf("--chdir") + 1], f.wt);
-    }
-    assert.match(result.output, /census-reader-calibration: \{"file":"test\/fixture-reader\.test\.ts"/);
-    assert.match(result.output, /census-reader-runtime: \{"file":"test\/fixture-reader\.test\.ts"/);
-    assert.doesNotMatch(result.output, /census suites NOT MEASURED/);
+    assert.deepEqual(f.readerRuns(), [], result.output);
+    assert.match(result.output, /pre-push: census suites and plan lint run in CI/);
+    assert.doesNotMatch(result.output, /census-reader-calibration:|census suites NOT MEASURED/);
   });
 
-  test("a reader that fails inside the sandbox reaches census-precheck's verdict and blocks the push", async () => {
+  test("a reader that would fail no longer blocks the push: CI's ci-shard judges it", async () => {
     const f = fixture({ reader: "unhealthy" });
     const result = await runPush(f);
-    assert.ok(result.error instanceof push.PushFailedError, result.output);
-    assert.match(result.output, /census-suite: test\/fixture-reader\.test\.ts fails/);
-    assert.throws(() => f.remote.git("rev-parse", "--verify", `refs/heads/${f.branch}`));
-    // The head's failed calibration returns at once; the merge base then calibrates and qualifies, both sandboxed.
-    const roots = f.readerRuns().map(({ argv }) => argv[argv.indexOf("--chdir") + 1]);
-    assert.equal(roots.length, 3, result.output);
-    assert.equal(roots[0], f.wt);
-    assert.notEqual(roots[1], f.wt, "the base run has its own sandbox root");
-    assert.equal(roots[2], roots[1]);
+    assert.equal(result.error, undefined, result.output);
+    assert.equal(f.remote.git("rev-parse", `refs/heads/${f.branch}`), f.head);
+    assert.deepEqual(f.readerRuns(), [], result.output);
   });
 
-  test("a reader suite whose sandbox cannot start still reads skipped, NOT passed (CI runs it)", async () => {
+  test("with no sandbox the push still lands and names no census skip", async () => {
     const f = fixture({ sandbox: "unavailable" });
     const result = await runPush(f);
     assert.equal(result.error, undefined, result.output);
     assert.equal(f.remote.git("rev-parse", `refs/heads/${f.branch}`), f.head);
     assert.deepEqual(f.runs(), []);
-    assert.match(result.output, /pre-push: census-precheck — [^\n]*fixture: user namespaces unavailable[^\n]*: skipped, NOT passed \(CI runs it\)/);
-    assert.match(result.output, /census-precheck: census suites NOT MEASURED - [^\n]*test\/fixture-reader\.test\.ts: proof sandbox could not start/);
-    assert.doesNotMatch(result.output, /source-reader runtime calibration is unavailable/);
+    assert.doesNotMatch(result.output, /census-precheck/);
   });
 });

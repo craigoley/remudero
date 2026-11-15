@@ -17,7 +17,7 @@
     - src/lib/light-pass-compare.ts
     - src/run-task.ts
     - test/github/every-ready-pr-has-its-distance-read-each-light-pass.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: The light pass's compare reader reads the distance of every ready PR it is handed on each pass (memoized per head and main sha as today), so no ready PR is left unmeasured and held with "ready PR distance is unreadable"; the three-per-window rotation (distanceRefreshProbeTargets) still bounds only the stale-distance refresh of PRs that are not ready

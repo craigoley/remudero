@@ -278,7 +278,9 @@ test("a dead holder of the host-wide test slot is reclaimed and a live foreign o
   const cases: Array<[string, Record<string, unknown>, string]> = [
     ["same host, dead pid", { host: "this-cell", pid: 4242 }, "acquired"],
     ["another cell on an earlier kernel boot", { bootId: "boot-0" }, "acquired"],
-    ["another cell whose lease lapsed", { bootId: "boot-1", heartbeatAt: new Date(now - TEST_SLOT_LEASE_MS - 1).toISOString() }, "acquired"],
+    // W1-T11809: on the same kernel boot a lapsed lease is only AGED (UNKNOWN); heartbeat age never frees it.
+    ["another cell on this kernel whose lease lapsed", { bootId: "boot-1", heartbeatAt: new Date(now - TEST_SLOT_LEASE_MS - 1).toISOString() }, "wait_bound_exceeded"],
+    ["another cell with no boot id whose lease lapsed", { heartbeatAt: new Date(now - TEST_SLOT_LEASE_MS - 1).toISOString() }, "acquired"],
     ["an unparseable record", { heartbeatAt: "not-a-time" }, "acquired"],
     ["a live foreign cell, same boot, fresh heartbeat", { bootId: "boot-1" }, "wait_bound_exceeded"],
   ];

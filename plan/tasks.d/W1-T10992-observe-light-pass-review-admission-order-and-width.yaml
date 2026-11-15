@@ -18,7 +18,7 @@
   #   worker evidence: The core ledger at `/mnt/rmd/state2/state` is outside this worktree and I have no shell. I can't count the plain `ledger.<ts>.ndjson` rotations or replay any that exist.
   #   this task is held from dispatch until its record changes; an Architect must make the change above
   # redesign: signature=f1bef8d0bd46f2f1
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The report replays the 7 days of ledger before this task is built. It lists every light-pass review admission made by refillFreedLanes (sweep.review_refilled) whose refillTail was taken from a snapshot older than the moment some other PR became review-eligible, while that PR was older by reviewAdmissionKey and still waiting. Each row gives the admitted PR, its snapshot age, the jumped PR, when the jumped PR became eligible, and the added wait until the jumped PR was admitted (or that it never was)"

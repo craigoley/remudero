@@ -15,7 +15,7 @@
   files:
     - src/lib/read-plane.ts
     - test/console-api/read-model/a-bundled-sync-spawn-names-its-real-caller.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: An esbuild single-file fixture that calls production ghExecFile from actualCaller records actualCaller as the caller and ghExecFile as the leaf even when every stack frame uses run-task.mjs

@@ -47,6 +47,17 @@ const GREEN_UNREADABLE: PlanPrPreflightResult = {
   unreadable: [{ check: "shard-census", firstLine: "test/every-shard-on-main-is-lintable.test.ts is absent from the tree" }],
 };
 
+const MAIN_SHA = "5405ba5e00000000";
+
+/** W1-T12199: the git the sealed task-file landing reads. A tree is named after its fixture root and its main, so no verdict is shared between tests. */
+function landingFixtureGit(root: string, mainSha: string, commitSha: string, args: readonly string[]): string {
+  if (args.includes("rev-parse")) return `${args.at(-1) === "origin/main" ? mainSha : args.at(-1)!.includes(":") ? "ba5eb10b" : commitSha}\n`;
+  if (args.includes("hash-object")) return "a3e9dedb10b\n";
+  if (args.includes("write-tree")) return `tree-of-${root}-on-${mainSha}\n`;
+  if (args.includes("commit-tree")) return `${commitSha}\n`;
+  return "";
+}
+
 type Row = Record<string, unknown>;
 type PreflightCall = { dir: string; sha: string; title: string; body: string };
 
@@ -68,6 +79,7 @@ function effectsFixture(root: string, preflight: PlanPrPreflightResult | undefin
   const ghCalls: string[][] = [];
   const worktrees: string[] = [];
   const removed: string[] = [];
+  const landingPrs: string[] = [];
   const deps: BuildSweepEffectsDeps = {
     owner: "acme",
     repo: "remudero",
@@ -77,7 +89,11 @@ function effectsFixture(root: string, preflight: PlanPrPreflightResult | undefin
     plan: { tasks: [task], byId: new Map([[TASK, task]]) } as unknown as Plan,
     log: (step, extra) => appendLedger(ledger, { run_id: "SWEEP-W1-T5405", task_id: "SWEEP", step, ...extra }),
     nowMsImpl: () => NOW,
-    planRepairGitImpl: (_file, args) => (args.includes("rev-parse") ? `${COMMIT_SHA}\n` : ""),
+    planRepairGitImpl: (_file, args) => {
+      // W1-T12199: the refusal amendment lands through the sealed task-file landing, which pushes with git itself.
+      if (args.includes("push")) pushes.push({ dir: args[1]!, sha: args.at(-1)!.split(":")[0] });
+      return landingFixtureGit(root, MAIN_SHA, COMMIT_SHA, args);
+    },
     worktreeAddImpl: (_repoDir, worktreePath) => {
       worktrees.push(worktreePath);
       mkdirSync(join(worktreePath, "plan", "tasks.d"), { recursive: true });
@@ -90,6 +106,12 @@ function effectsFixture(root: string, preflight: PlanPrPreflightResult | undefin
     },
     ghJsonImpl: (args) => {
       ghCalls.push(args);
+      // W1-T12199: the landing lists the open pull requests of its branch, then creates one.
+      if (args[0] === "pr" && args[1] === "list") return landingPrs.map((url) => ({ url }));
+      if (args[0] === "pr" && args[1] === "create") {
+        landingPrs.push("https://github.com/acme/remudero/pull/9406");
+        return "https://github.com/acme/remudero/pull/9406";
+      }
       return args.includes("--method") ? { html_url: "https://github.com/acme/remudero/pull/9405", number: 9405 } : [];
     },
     buildPlanPrBodyImpl: buildFixturePlanPrBody,
@@ -104,8 +126,8 @@ function effectsFixture(root: string, preflight: PlanPrPreflightResult | undefin
       : {}),
     ...over,
   };
-  const creates = () => ghCalls.filter((c) => c.includes("--method"));
-  return { ledger, effects: buildSweepEffects(deps), preflightCalls, pushes, creates, worktrees, removed };
+  const creates = () => ghCalls.filter((c) => c.includes("--method") || c[1] === "create");
+  return { root, ledger, effects: buildSweepEffects(deps), preflightCalls, pushes, creates, worktrees, removed };
 }
 
 function amendmentRoot(): string {
@@ -135,18 +157,19 @@ test("W1-T5405: a red preflight on the refusal-amendment rung pushes nothing, op
   await withLiveWritesAllowed(() => runSweep([], sweepDeps(f)));
 
   assert.equal(f.preflightCalls.length, 2, "the committed tree, then (W1-T5531) its base alone, are preflighted once each");
-  assert.equal(f.preflightCalls[0]!.dir, f.worktrees[0], "on the worktree that holds the commit");
+  // W1-T12199: the amendment lands through the sealed task-file landing, which builds its commit with no worktree.
+  assert.equal(f.preflightCalls[0]!.dir, f.root, "on the checkout whose object store holds the commit");
   assert.equal(f.preflightCalls[0]!.sha, COMMIT_SHA, "at the exact sha the push would carry");
-  assert.match(f.preflightCalls[0]!.title, /^chore\(plan\): propose an amendment for W1-T5405-FIXTURE/);
-  assert.match(f.preflightCalls[0]!.body, /^Acceptance:\n- the shard records the worker.s refusal/m, "the preflight reads the body the PR would open with");
+  assert.match(f.preflightCalls[0]!.title, /^chore\(plan\): land pending edits of task files$/);
+  assert.match(f.preflightCalls[0]!.body, /^## Acceptance\n- the shard records the worker.s refusal/m, "the preflight reads the body the PR would open with");
   assert.deepEqual(f.pushes, [], "a red preflight pushes nothing");
   assert.equal(f.creates().length, 0, "a red preflight opens no PR");
-  assert.deepEqual(f.removed, f.worktrees, "the worktree is still disposed");
+  assert.deepEqual(f.worktrees, [], "no worktree is cut");
 
   const refused = rows(f.ledger).filter((r) => r.step === "plan_pr.preflight_refused");
   assert.equal(refused.length, 1);
   assert.equal(refused[0]!.lane, "refusal_amendment");
-  assert.equal(refused[0]!.branch, `refusal-amendment/${TASK}`);
+  assert.match(String(refused[0]!.branch), /^task-files-landing/);
   assert.deepEqual(refused[0]!.failures, RED.failures, "the ledger names the failing check");
   const outcome = rows(f.ledger).filter((r) => r.step === REFUSAL_AMENDMENT_STEP);
   assert.deepEqual(
@@ -168,10 +191,11 @@ test("W1-T5405: a green preflight on the refusal-amendment rung opens the PR wit
 
   assert.equal(result!.outcome, "drafted");
   assert.equal(f.preflightCalls.length, 1);
-  assert.deepEqual(f.pushes, [{ dir: f.worktrees[0], sha: COMMIT_SHA }], "the push follows the green preflight");
+  assert.deepEqual(f.pushes, [{ dir: f.root, sha: COMMIT_SHA }], "the push follows the green preflight");
   assert.equal(f.creates().length, 1, "the PR opens as before");
-  assert.ok(f.creates()[0]!.includes(`body=${f.preflightCalls[0]!.body}`), "the opened body is the preflighted body");
-  assert.ok(f.creates()[0]!.includes(`title=${f.preflightCalls[0]!.title}`), "the opened title is the preflighted title");
+  const created = f.creates()[0]!;
+  assert.equal(created[created.indexOf("--body") + 1], f.preflightCalls[0]!.body, "the opened body is the preflighted body");
+  assert.equal(created[created.indexOf("--title") + 1], f.preflightCalls[0]!.title, "the opened title is the preflighted title");
   assert.equal(rows(f.ledger).filter((r) => r.step === "plan_pr.preflight_refused").length, 0);
 });
 
@@ -243,35 +267,31 @@ test("W1-T5405: a green preflight on the plan-repair rung opens the PR and recor
 // ── the default seam really shells out ───────────────────────────────────────────────────────────
 
 test("W1-T5405: the uninjected preflight materializes the rung's real commit and reports its absent checks", async () => {
-  const repo = gitRepo();
+  // W1-T12199: the amendment lands through the sealed task-file landing, so the fixture is a clone of a bare
+  // origin and every git call, the push included, runs for real. Only gh is faked.
+  const origin: GitRepo = gitRepo({ bare: true });
+  const repo = gitRepo({ cloneFrom: origin.dir });
   mkdirSync(join(repo.dir, "plan", "tasks.d"), { recursive: true });
   writeFileSync(join(repo.dir, "plan", "tasks.d", `${TASK}-fixture.yaml`), SHARD);
   repo.git("add", "plan");
   repo.git("commit", "--quiet", "-m", "seed the fixture shard");
-  let wt: GitRepo | undefined;
-  const f = effectsFixture(repo.dir, undefined, {
-    worktreeAddImpl: (_repoDir, worktreePath, branch) => {
-      wt = repo.addWorktree(worktreePath, branch);
-    },
-    // fetch and the stale-branch clear have no remote to reach; add, commit and rev-parse run for real.
-    planRepairGitImpl: (_file, args) => (args[2] === "fetch" || args[2] === "branch" ? "" : `${wt!.git(...args.slice(2))}\n`),
-    worktreeRemoveImpl: undefined,
-  });
+  repo.git("push", "--quiet", "origin", "HEAD:refs/heads/main");
+  const f = effectsFixture(repo.dir, undefined, { planRepairGitImpl: undefined, worktreeRemoveImpl: undefined });
   const candidate = { taskId: TASK, runId: RUN, reportExcerpt: REFUSAL, refusals: extractRefusal(REFUSAL) };
 
   const [result] = await withLiveWritesAllowed(() => f.effects.draftRefusalAmendments!([candidate]));
 
   assert.equal(result!.outcome, "drafted", "checks a bare fixture tree cannot run are unreadable, not red");
-  const headSha = f.pushes[0]?.sha;
-  assert.match(headSha ?? "", /^[0-9a-f]{40}$/, "the push carries the real commit");
-  assert.equal(repo.git("cat-file", "-t", headSha!), "commit");
+  const headSha = origin.git("for-each-ref", "--format=%(objectname)", "refs/heads/task-files-landing*");
+  assert.match(headSha, /^[0-9a-f]{40}$/, "the push carries the real commit");
+  assert.equal(origin.git("cat-file", "-t", headSha), "commit");
   const unreadable = rows(f.ledger).filter((r) => r.step === "plan_pr.preflight_unreadable");
   assert.equal(unreadable.length, 1);
   assert.equal(unreadable[0]!.lane, "refusal_amendment");
   const checks = (unreadable[0]!.unreadable as Array<{ check: string; firstLine: string }>).map((u) => u.check);
   assert.ok(checks.includes("lint-plan") && checks.includes("shard-census"), `the real checks ran inside the materialized tree: ${checks.join(", ")}`);
   assert.ok(!checks.includes("tree"), "the commit was materialized, not skipped");
-  assert.equal(repo.git("worktree", "list").split("\n").length, 1, "the preflight's own tree and the rung's worktree are both removed");
+  assert.equal(repo.git("worktree", "list").split("\n").length, 1, "the preflight's own tree is removed, and the rung cuts none");
 });
 
 // ── a preflight check that ran out of its load-scaled budget ─────────────────────────────────────

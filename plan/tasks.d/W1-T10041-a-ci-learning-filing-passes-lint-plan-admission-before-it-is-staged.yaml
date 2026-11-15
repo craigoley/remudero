@@ -13,7 +13,7 @@
   files:
     - src/lib/measurement-cadence.ts
     - test/a-ci-learning-filing-passes-lint-plan-admission-before-it-is-staged.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

@@ -240,9 +240,11 @@ test("W1-T4769 REAL GIT: the reserver lists claims in one ls-remote and reads th
 test("W1-T4769 WIRING: the default ledger read, the unresolvable-repo arm and a failing ledger write", async () => {
   const { autoTriageCheck } = await import("../src/run-task.js");
   const { loadPolicy, policyPath } = await import("../src/lib/policy.js");
-  const { newFeedbackIdsOldestFirst } = await import("../src/lib/auto-triage.js");
+  const { triageCandidateReaders } = await import("../src/lib/auto-triage.js");
   const { mkdirSync, writeFileSync } = await import("node:fs");
   const repo = join(dirname(fileURLToPath(import.meta.url)), "..");
+  // The same refreshed origin/main view autoTriageCheck reads, never the bare checkout walk (W1-T11374).
+  const { newFeedbackIdsOldestFirst } = await triageCandidateReaders(repo);
   const candidates = newFeedbackIdsOldestFirst(repo);
   if (candidates.length < 1) return; // nothing `status: new` in this checkout: the sweep is never reached
   const shipped = loadPolicy(policyPath(repo));
@@ -299,9 +301,10 @@ test("W1-T4769 WIRING: the default ledger read, the unresolvable-repo arm and a 
 test("W1-T4769 WIRING: autoTriageCheck skips a held head and releases a dead holder before deciding", async () => {
   const { autoTriageCheck } = await import("../src/run-task.js");
   const { loadPolicy, policyPath } = await import("../src/lib/policy.js");
-  const { newFeedbackIdsOldestFirst } = await import("../src/lib/auto-triage.js");
+  const { triageCandidateReaders } = await import("../src/lib/auto-triage.js");
   const { mkdirSync } = await import("node:fs");
   const repo = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const { newFeedbackIdsOldestFirst } = await triageCandidateReaders(repo);
   const candidates = newFeedbackIdsOldestFirst(repo);
   if (candidates.length < 2) return; // the checkout holds too few `status: new` entries to have a head to skip
   const shipped = loadPolicy(policyPath(repo));

@@ -7,7 +7,7 @@ import { createHash } from "node:crypto";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { promisedFollowUps, unreportedFollowUps, followUpPlanRecords, parseHarvestableFollowUps, type HarvestableFollowUp, type PromisedFollowUp, type FollowUpPlanRecord } from "./promised-follow-ups.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
-import { basenameResolutionNote, resolveTestPath, type TestPathResolution, type TestPathResolverGit } from "./test-path-resolver.js";
+import { basenameResolutionNote, listBaseTests, observeComputedPlacement, resolveTestPath, type TestPathResolution, type TestPathResolverGit } from "./test-path-resolver.js";
 import { classifyGrepZeroHit } from "./grep-zero-cause.js";
 // Re-exported so a script already importing the proof dialect from here reaches the resolver through one import.
 export { resolveTestPath };
@@ -19,7 +19,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, isAbsolute, join, resolve, sep as pathSep } from "node:path";
 import { classifyFailure } from "./classify.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
-import { isHolderStale, reclaimStaleLock, type IsHolderStaleOpts } from "./fs-race-safe.js";
+import { isHolderStale, reclaimStaleLock, writeAtomic, type IsHolderStaleOpts } from "./fs-race-safe.js";
 import { observeProofFileInside, type ProofFileObservation } from "./proof-file-read.js";
 import { appendLedger } from "./ledger.js";
 import { systemClock, type Clock } from "./clock.js";
@@ -33,6 +33,7 @@ import { loadDefaultPolicy, type ArmCalibrationBandRow } from "./policy.js";
 import { readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, openLedgerUnion, ledgerLivePath, rotationBeforeTime, rotationStampIso, malformedRowCouldBelong, type LedgerUnionStreamIO } from "./ledger-union.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { GIT_FETCH_KILL_GRACE_MS } from "./git-fetch-retry.js";
+import { isFullReviewerCodeSha, probeReviewerCodeFreshnessAsync } from "./self-sync.js";
 import { formatTail } from "./proofExecutor.js";
 import { playwrightCacheRoot } from "./worker-home.js";
 import { makeTempDir } from "./tmp.js";
@@ -60,12 +61,10 @@ import {
 // @ts-expect-error The shared plain .mjs helper ships under src/ so source-only runtimes can load it.
 import { adjudicateReservationChain, parseReservationHolderLine, parseReservationHolderFields } from "./reservation-chain.mjs";
 
-/** The JUDGE (MASTER-PLAN §12 rule 4 / rule 3B; W1-T1C) — the second half of the merge contract. Standing rule 4:
- * green checks are NOT evidence, so after `ci` goes green a fresh-context REVIEW worker (never the implementer's
- * session; read-only tools plus gh) verdicts each criterion against its stated PROOF and posts a `remudero-review`
- * status. INVARIANTS: {@link judgeReview} is PURE, so its falsifier is a unit fixture; the pure layer is the mechanical
- * FLOOR; a semantic verdict may only DOWNGRADE, never rescue an unpasted proof; and this module never edits code and
- * exposes no write path (acceptance #3). Removed prose: docs/forensics/review.md#second-pass-2026-09-06. */
+/** JUDGE (MASTER-PLAN §12 rules 4/3B; W1-T1C): after green CI, a fresh read-only REVIEW session
+ * judges each stated proof and posts `remudero-review`. {@link judgeReview} is pure (unit-fixture falsifier);
+ * semantics may only downgrade its mechanical floor. No code edits or write path (acceptance #3).
+ * History: docs/forensics/review.md#second-pass-2026-09-06. */
 
 /** The commit-status context string the merge gate keys on. Never change casually. */
 export const REVIEW_CONTEXT = "remudero-review";
@@ -76,10 +75,9 @@ export type ReviewState = "success" | "failure" | "pending";
 /** States the commit-status poster accepts. */
 export type PostableReviewState = ReviewState;
 
-/** Stable review identity: head binds the diff; exact body binds authored claims. Only a commit or body edit
- * earns a fresh retry budget, not comments, labels or `updated_at` churn. Contract changes rearm evidence independently
- * of boot commits, provider or sampling. W1-T3580 bumped v2: W1-T3564 changed the closed console suite registry
- * without a revision bump, so cached v1 terminals replayed instead of executing newly routable proofs. */
+/** Identity binds head/diff and exact body/claims: only commit/body edits renew retries, never metadata churn.
+ * Contract changes rearm independently of boot/provider/sampling. W1-T3580's v2 fixes W1-T3564's registry
+ * change replaying cached v1 terminals instead of newly routable proofs. */
 export const REVIEW_ENGINE_REVISION = "trusted-proof-receipts-v1";
 /** Changes both exact-head identities when the proof loader's verdict semantics change. */
 const PROOF_LOAD_REVISION = "cannot-load-v1";
@@ -252,6 +250,14 @@ function isReviewDecisionTerminalRow(line: Record<string, unknown>, taskId: stri
   return !!verdict && (verdict.state === "success" || verdict.state === "failure") && Array.isArray(verdict.criteria);
 }
 
+export const REVIEW_REQUEUED_STEP = "sweep.review_requeued";
+export const REVIEWER_CODE_ADVANCED = "reviewer-code-advanced";
+
+export function reviewerCodeAdvanceNames(line: Record<string, unknown>, prUrl: unknown, headSha: unknown): boolean {
+  return line.step === REVIEW_REQUEUED_STEP && line.reason === REVIEWER_CODE_ADVANCED &&
+    line.pr_url === prUrl && line.head_sha === headSha;
+}
+
 export function lastReviewDecisionTerminal(
   lines: ReadonlyArray<Record<string, unknown>>,
   taskId: string,
@@ -259,8 +265,11 @@ export function lastReviewDecisionTerminal(
   digest: string,
 ): ReviewDecisionTerminal | undefined {
   let terminal: ReviewDecisionTerminal | undefined;
+  let terminalHead: unknown;
   for (const line of lines) {
+    if (terminal && reviewerCodeAdvanceNames(line, prUrl, terminalHead)) terminal = undefined;
     if (!isReviewDecisionTerminalRow(line, taskId, prUrl, digest)) continue;
+    terminalHead = line.head_sha;
     const verdict = line.decision_verdict as ReviewVerdict;
     terminal = {
       state: verdict.state,
@@ -274,10 +283,8 @@ export function lastReviewDecisionTerminal(
   return terminal;
 }
 
-/** Read live ledger records through {@link readLedgerUnionRecordsSync} (W1-T2898), avoiding the `status.ts`
- * value import that closed three of thirteen tolerated cycles (W1-T2895). `maxRotations: 0` and `dedupe: false`
- * preserve `readLedgerLines`' live-only scope and every ledgered row. None of the three callers uses its
- * `.torn`/`.present` metadata. */
+/** W1-T2898: live-only, undeduplicated rows; callers discard torn/present metadata. The leaf reader
+ * avoids status.ts's three import cycles (W1-T2895). */
 function readLiveLedgerRecords(ledgerPath: string): Array<Record<string, unknown>> {
   return readLedgerUnionRecordsSync(dirname(ledgerPath), { maxRotations: 0, dedupe: false }).rows;
 }
@@ -494,14 +501,12 @@ export async function claimReviewDecision(opts: {
   return { kind: "owned", release: () => handle.release() };
 }
 
-/** WHY a criterion produced no executed outcome (W1-T305). Diagnostic only: never affects `met`, `state`, the keyword
- * floor or capping — it exists so a CAPPED `0/N` says which kind of nothing it is. `no-dialect` no house prefix;
- * `dialect-parse-error` an authoring error; `prose-no-match` zero candidates on a prose body (W1-T161/#349);
- * `exec-error` threw or timed out; `runner-absent` names an unavailable checkout-local tool; `runtime-broken` the only
- * `not ok` names the FILE ITSELF (W1-T1077); `incomplete-run` results then no `# duration_ms` summary (W1-T2740);
- * `cwd-missing` the proof's checkout was deleted before the child could start (W1-T7822);
- * `no-exec-context` no PR-head checkout; `forward-reference` absent at head but declared by this diff's own shard — see {@link
- * shardDeclaredFilesInDiff} — or, on a filing head, any target the diff does not change ({@link FILING_FORWARD_ADVISORY}). */
+/** W1-T305 diagnostics only: never change met/state, keyword floor or capping. No dialect = no prefix;
+ * parse error = authoring; prose-no-match = zero candidates (W1-T161/#349); exec-error = throw/timeout;
+ * runner-absent = missing local tool; runtime-broken = only failing test is the file (W1-T1077);
+ * incomplete-run = results without duration summary (W1-T2740); cwd-missing = deleted checkout (W1-T7822);
+ * no-exec-context = no head checkout. Forward references are head-absent shard declarations
+ * ({@link shardDeclaredFilesInDiff}), or unchanged filing targets ({@link FILING_FORWARD_ADVISORY}). */
 export type ProofSkipReason =
   | "no-dialect"
   | "dialect-parse-error"
@@ -516,21 +521,17 @@ export type ProofSkipReason =
   | "forward-reference"
   | "proof-form";
 
-/** Observed outcome of executing a criterion's proof against the PR head (W1-T65, ratifies P15), recorded per
- * criterion on {@link CriterionVerdict} and on the `review.posted` ledger line so an OBSERVED verdict reads apart from
- * a KEYWORD one. INVARIANT: only `executed_fail` and `stale_self_path` can worsen a verdict; every other non-pass
- * leaves the keyword floor as it stood. `executed_pass` ran and passed, whatever the report says; `executed_fail` ran
- * and failed or matched nothing, and OVERRIDES keyword coverage; `not_executable` is prose or no head checkout;
- * `exec_error` threw or timed out. THE DEGRADES THAT ARE NOT FAILURES: `executed_stale` also passes on the MERGE-BASE
- * and so discriminates nothing (W1-T273; `unit test:` proofs, W1-T362); `base_unreadable` is THIS proof's base blob
- * unreadable, not the whole-base gap `base_unknown` (W1-T460); `not_yet_built` is a head-absent path this diff's own
- * shard declares (W1-T456, plus the `grep:` extension W1-T2737 that `callSiteViolations` mandates). `stale_self_path`
- * (W1-T1071) alone REFUSES, forcing `met` false, and only when {@link ProofExecContext.forwardReferenceFiles} names a
- * path other than the proof's own target. TRAP: `workerKeychainPaths` matched two unrelated hits on the pre-work
- * commit and scored substantiated anyway (W1-T267). `inconclusive_load` (W1-T11132) is a `unit test:` proof whose run
- * ended by a timeout, a signal or an exec_error, or that failed while hosted CI passed the same file at this head: it
- * concluded nothing about the criterion, is never `met` and never an unmet criterion, and holds the verdict PENDING
- * until a re-review at lower host load. Per-outcome rationale: docs/forensics/review.md#second-pass-2026-09-06. */
+/** Head-proof outcomes (W1-T65/P15), stored on {@link CriterionVerdict} and review.posted, separate observed
+ * evidence from keywords. Only executed_fail (failure/zero matches) and stale_self_path worsen the floor;
+ * executed_pass overrides report prose. Not executable = prose/no checkout; exec_error = throw/timeout.
+ * Non-failure degrades: executed_stale also passes at base (W1-T273/W1-T362); base_unreadable names one
+ * unreadable blob, unlike base_unknown (W1-T460); not_yet_built is a declared head-absent path
+ * (W1-T456/W1-T2737, callSiteViolations). stale_self_path alone refuses/met=false when
+ * {@link ProofExecContext.forwardReferenceFiles} names another path (W1-T1071).
+ * TRAP W1-T267: workerKeychainPaths' unrelated pre-work hits falsely substantiated the claim.
+ * inconclusive_load (W1-T11132): timeout/signal/exec_error, or failure despite hosted CI passing this
+ * file/head; neither met nor unmet, PENDING until lower-load review.
+ * Rationale: docs/forensics/review.md#second-pass-2026-09-06. */
 export type ProofExecOutcome =
   | "executed_pass"
   | "executed_fail"
@@ -543,9 +544,8 @@ export type ProofExecOutcome =
   | "not_yet_built"
   | "stale_self_path";
 
-/** One host-load reading (W1-T11132): the 1-minute `/proc/loadavg` and the cgroup's CPU PSI `some avg10`. A field the
- *  host does not expose is ABSENT, never 0 — "measured idle" and "never measured" are different facts. `unreadable` names
- *  each source that could not be read, with the reason, so an absent field is explained rather than silent. */
+/** W1-T11132: 1-minute load and CPU PSI some avg10. Unexposed fields are absent, never measured-idle 0;
+ * unreadable sources carry reasons. */
 export interface HostLoadSample {
   load1?: number;
   cpuPsiSomeAvg10Pct?: number;
@@ -586,9 +586,8 @@ export function sampleHostLoad(read: (path: string) => string = (path) => readFi
   return unreadable.length > 0 ? { ...sample, unreadable } : sample;
 }
 
-/** True when a thrown proof-executor error carries a marker of a run CUT SHORT rather than a failure of the proof: a
- *  timeout (`code: "ETIMEDOUT"`, {@link execWhitelistedProof} checks it first), a kill signal, or a spawn error
- *  (`code: "ENOENT"`, `"EACCES"`, … — a `bwrap` that could not exec). An error with none of them stays `exec_error`. */
+/** Interrupted-run markers: timeout (ETIMEDOUT, checked first by {@link execWhitelistedProof}), kill signal,
+ * or spawn code (e.g. ENOENT/EACCES from bwrap). Unmarked errors stay exec_error. */
 function endedByTimeoutSignalOrSpawnError(e: unknown): boolean {
   if (e === null || typeof e !== "object") return false;
   const err = e as { code?: unknown; signal?: unknown; killed?: unknown };
@@ -711,15 +710,11 @@ export interface CriterionVerdict {
   clauseChars?: number;
 }
 
-/** The two reasons a report can fail to be the PR body, which are NOT the same fact and have different remedies:
- *  `never-fetched` means this path never asked (the common case, nothing wrong), `fetch-failed` means it asked and
- *  the read failed — never once observed here. */
+/** Distinct remedies: never-fetched is a healthy path that never asked; fetch-failed asked and failed. */
 export type ReportSubstituteCause =
-  /** No fetch was attempted. `fixMode` names the mode that does not read the body, when in hand: a
-   *  reader who sees the mode can act; one told a fetch failed cannot. */
+  /** No attempt; fixMode names the path that skips the read so the reader can act. */
   | { kind: "never-fetched"; fixMode?: string }
-  /** A fetch was attempted and threw. Distinct from the above BY CONSTRUCTION so the wording can
-   *  stop implying this is what happened. */
+  /** Attempted and threw; never imply this for an unattempted read. */
   | { kind: "fetch-failed" };
 
 /** The evidence the JUDGE reads: the PR diff, the implement REPORT, optional LLM verdicts. */
@@ -739,10 +734,8 @@ export interface ReviewEvidence {
   priorInconclusiveLoads?: ReadonlyMap<string, number>;
   /** Host-load seam for the proof start/end readings; defaults to {@link sampleHostLoad}. */
   sampleLoad?: () => HostLoadSample;
-  /** The RESOLVED canonical `owner/repo` this review's proofs execute against (W1-T3525) — reused
-   *  from wherever the caller already resolved it (e.g. `resolveDaemonTarget`, W1-T1062), never
-   *  re-derived here. Absent is the LEGACY default: this repo's own two suite roots, unconditionally,
-   *  exactly as the dialect behaved before the registry existed. */
+  /** W1-T3525: reuse caller-resolved owner/repo (e.g. resolveDaemonTarget, W1-T1062), never re-derive.
+   * Absent retains the legacy unconditional two local suite roots. */
   target?: SuiteRegistryTarget;
   /** The unified PR diff, as `gh pr diff` / `git diff` would produce. */
   diff: string;
@@ -761,16 +754,12 @@ export interface ReviewEvidence {
   implementationReport?: string;
   /** One awaited, exact-head/base observation, also included in the review decision identity. */
   promisedFollowUpObservation?: PromisedFollowUpObservation;
-  /** True when `report` is NOT the PR body (W1-T1100): `runTaskBody` (run-task.js) substitutes the worker's own chat
-   *  text after a failed body read, so an outage degrades to judging the narrative rather than stalling the review.
-   *  TRAP: unmarked, a substitute failed two OPPOSITE ways on #2395 — {@link bodyContradictsDiff} manufactured a
-   *  contradiction while the keyword floor scored the narrative HIGHER than an honest body. */
+  /** W1-T1100: runTaskBody substituted worker chat for the PR body. TRAP #2395: without this marker,
+   * {@link bodyContradictsDiff} invented a contradiction while keywords overcredited the narrative. */
   reportIsSubstitute?: boolean;
-  /** WHY `report` is not the body. The boolean above keeps its one meaning — THIS IS NOT THE PR BODY — and this names
-   *  which of two very different facts the REFUSAL TEXT rests on; absent leaves the message silent rather than
-   *  guessing. TRAP: the refusal claimed a failed body fetch where `review.body_fetch_error` read ZERO, the fix rung
-   *  fetching the body only in `body-coverage` mode so `ci-log`, `reviewer-unmet` and `merge-conflict` never try
-   *  (2026-08-25; docs/forensics/review.md#second-pass-2026-09-06). */
+  /** Substitution cause; absent means silence, never a guess. TRAP: a refusal claimed fetch failure
+   * despite zero review.body_fetch_error: only body-coverage fetched, not ci-log/reviewer-unmet/merge-conflict
+   * (2026-08-25; docs/forensics/review.md#second-pass-2026-09-06). */
   reportSubstituteCause?: ReportSubstituteCause;
   /** Optional per-criterion semantic verdicts from the fresh LLM reviewer, index-aligned to the criteria list. `false`
    *  FORCES that criterion to fail; `true`/`undefined` defer to the mechanical floor. Semantic only downgrades. */
@@ -783,19 +772,15 @@ export interface ReviewEvidence {
   /** The checkout whitelisted proofs execute in — MUST be the PR HEAD sha, NEVER the operator's working checkout (HEAD
    *  DISCIPLINE, W1-T65). Absent ⇒ execution is skipped and the keyword floor is byte-identical to pre-W1-T65. */
   headCheckoutDir?: string;
-  /** A checkout of the PR's MERGE-BASE (W1-T273), independent of `headCheckoutDir` and reached with one `git
-   *  merge-base` over a checkout the review already has, so no new gateway and no network call. Consulted only to test
-   *  a proof for non-discrimination; absent ⇒ a proof passing on the head stays `executed_pass`. */
+  /** W1-T273: independent merge-base checkout, resolved locally for discrimination only.
+   * Absent leaves a passing head proof executed_pass. */
   baseCheckoutDir?: string;
-  /** Repo-relative paths whose base blob could NOT be read while `baseCheckoutDir` was built (W1-T460) — a GENUINE
-   *  read failure, never the healthy "absent at the base" forward reference, and never the global gap of an absent
-   *  `baseCheckoutDir`: each path here names a proof exempted while its siblings were checked against the same tree. */
+  /** W1-T460: repo-relative unreadable base blobs exempt only those proofs, not siblings. Distinct from
+   * healthy base-absent forward references and from an entirely absent baseCheckoutDir. */
   baseUnreadablePaths?: ReadonlySet<string>;
-  /** True when `baseCheckoutDir` is a REAL CHECKOUT of the merge-base — the detached worktree `buildBaseProofDir`
-   *  (run-task.ts) adds — rather than the blob-only fallback (R-11), the one tree a `unit test:` proof can be re-run in
-   *  honestly. FAILS CLOSED: absent ⇒ `base_unknown`, never `discriminates`. `grep:` proofs are unaffected, a blob
-   *  being the file grep reads. TRAP: in a blob-only directory `node --test` exits 1 with empty stdout, read as "did
-   *  not pass at base ⇒ discriminates" and certifying a test that passes at both commits. */
+  /** Real buildBaseProofDir checkout, not R-11's blob-only fallback. Absent fails closed to base_unknown,
+   * never discriminates; grep can use blobs. TRAP: node --test's empty-output exit 1 in a blob directory
+   * falsely certified discrimination for a test passing at both commits. */
   baseIsCheckout?: boolean;
   /** (W1-T3190) mirrors {@link BaseProofDir.addedTestFiles} — the `test/**` paths copied INTO the
    *  base worktree for `unit test:` re-runs, which a `grep:` proof must not mistake for base content. */
@@ -809,16 +794,14 @@ export interface ReviewEvidence {
   /** Already-observed form corrections only. The synchronous fold never spawns a file reader. */
   proofFormCorrections?: ReadonlyMap<string, string | undefined>;
   missingExportNotes?: ReadonlyMap<string, string | undefined>;
-  /** The task's DECLARED `files:` scope (W1-T322) — read ONLY for the INVERSE-SCOPE advisory, the direction {@link
-   *  "../run-task.js".scopeGuardOutOfScopeFiles} cannot see: that guard flags a diff touching an UNDECLARED file, this
-   *  flags a declared file the diff never touched. Advisory only; absent ⇒ it never fires. */
+  /** W1-T322: inverse-scope advisory flags declared files untouched by the diff; absent disables it.
+   * Complements {@link "../run-task.js".scopeGuardOutOfScopeFiles}'s undeclared-file guard. */
   taskDeclaredFiles?: string[];
   /** Task ids currently OPEN in the loaded plan (W1-T322), consulted only to check a report's `SHIPS-UNWIRED: <id>`
    *  marker names a real, still-open task. FAIL-CLOSED: absent ⇒ no marker is honoured. */
   openTaskIds?: ReadonlySet<string>;
-  /** Task id → that OPEN task's declared `files:` scope (W1-T458), consulted only to name which open task's scope an
-   *  UNRESOLVED diff overlaps. "Unresolved" is read off {@link taskDeclaredFiles} being empty, NEVER off whether a
-   *  `Remudero-Task:` trailer appears — keyed on the trailer it misfired on #1731. Absent ⇒ never fires. */
+  /** W1-T458: open-task scopes identify unresolved-diff overlaps; absent disables. Unresolved means
+   * empty {@link taskDeclaredFiles}, never a missing trailer (TRAP #1731). */
   openTaskDeclaredFiles?: ReadonlyMap<string, readonly string[]>;
   planLint?: PlanLintOutcome; // W1-T4423: lint-plan over the TARGET plan at the head; absent withholds a plan-only PASS
 }
@@ -5516,6 +5499,29 @@ function admittedProofTests(diff: string, criteria: readonly AcceptanceCriterion
   return admitted;
 }
 
+export function reviewPlacementAdmitted(
+  diff: string, checkoutDir: string | undefined, declaredFiles: readonly string[] | undefined,
+  criteria: readonly AcceptanceCriterion[],
+): Set<string> {
+  if (!checkoutDir || !declaredFiles || declaredFiles.length === 0) return new Set();
+  const added: string[] = [];
+  const deleted: string[] = [];
+  for (const block of diff.split(/^diff --git /m)) {
+    const added_ = /^\+\+\+ b\/(.+)$/m.exec(block)?.[1];
+    if (added_ && /^--- \/dev\/null$/m.test(block) && !/^new file mode 120000$/m.test(block)) added.push(added_);
+    const removed = /^--- a\/(.+)$/m.exec(block)?.[1];
+    if (removed && /^\+\+\+ \/dev\/null$/m.test(block)) deleted.push(removed);
+  }
+  if (added.length === 0) return new Set();
+  return observeComputedPlacement({
+    root: checkoutDir, declaredFiles, proofs: criteria.map((c) => c.proof), candidates: added,
+    baseTracked: () => {
+      const addedSet = new Set(added);
+      return [...listBaseTests(checkoutDir, "HEAD").filter((p) => !addedSet.has(p)), ...deleted];
+    },
+  }).admitted;
+}
+
 /** Scope widening is advisory; subtract the harness's registered artifacts and admitted new proof tests. */
 function scopeViolationFiles(
   diffFiles: readonly string[], declaredFiles: readonly string[] | undefined,
@@ -5539,12 +5545,13 @@ export interface ReviewScopeContext {
 export function reviewScopeContext(
   diff: string,
   declaredFiles: readonly string[] | undefined,
+  placementAdmitted: ReadonlySet<string> = new Set(),
 ): ReviewScopeContext {
   const diffFiles = changedFiles(walkDiff(diff));
   return {
     declaredFiles: [...(declaredFiles ?? [])],
     changedFiles: diffFiles,
-    widenedFiles: scopeViolationFiles(diffFiles, declaredFiles),
+    widenedFiles: scopeViolationFiles(diffFiles, declaredFiles).filter((f) => !placementAdmitted.has(f)),
   };
 }
 
@@ -5838,7 +5845,9 @@ function unwiredAdvisoriesFor(
     });
   }
 
-  const violating = scopeViolationFiles(diffFiles, taskDeclaredFiles, admittedProofTests(diff, criteria));
+  const violating = scopeViolationFiles(diffFiles, taskDeclaredFiles, new Set([
+    ...admittedProofTests(diff, criteria), ...reviewPlacementAdmitted(diff, checkoutDir, taskDeclaredFiles, criteria),
+  ]));
   if (violating.length > 0) {
     out.push({
       reasonCode: "scope_violation",
@@ -6732,9 +6741,7 @@ export function applyVerdictStability(
       summary: passSummary(
         criteria.length,
         computed.keywordOnly,
-        // W1-T305: the suppressed rebuild carries the SAME partial-execution facts `computed`
-        // already measured (suppression only replaces `state`/`criteria`/`summary`, never
-        // re-executes anything), so a re-review's "PARTIAL" tag survives verdict stability too.
+        // W1-T305: the suppressed rebuild keeps `computed`'s partial-execution facts (nothing re-executes).
         computed.partiallyExecuted
           ? { executed: computed.executedProofCount ?? 0, executable: computed.executableProofCount ?? 0 }
           : undefined,
@@ -6758,12 +6765,32 @@ export type ReviewStatusHistory =
 
 export type ReviewStatusHistoryReader = (owner: string, repo: string, prUrl: string, headSha: string) => Promise<ReviewStatusHistory>;
 
+/** Flattens legacy slurped-page fixtures. */
 function rowsFromPaginatedApi(value: unknown): unknown[] {
   if (!Array.isArray(value)) throw new Error("GitHub returned a non-list response");
   if (value.every((row) => row === null || typeof row !== "object" || Array.isArray(row))) {
     return value.flatMap((row) => rowsFromPaginatedApi(row));
   }
   return value;
+}
+
+/** BACKSTOP: over 1,000 rows is unreadable, never truncated. */
+const REVIEW_HISTORY_MAX_PAGES = 10;
+const REVIEW_HISTORY_PAGE_SIZE = 100;
+
+/** Plain page reads: the slurp flag needs a newer host CLI. */
+async function readHistoryPages(
+  readJson: (args: string[], options: { fresh: true }) => unknown | Promise<unknown>,
+  endpoint: string,
+): Promise<unknown[]> {
+  const rows: unknown[] = [];
+  for (let page = 1; page <= REVIEW_HISTORY_MAX_PAGES; page += 1) {
+    const value = await readJson(["api", `${endpoint}?per_page=${REVIEW_HISTORY_PAGE_SIZE}&page=${page}`], { fresh: true });
+    const pageRows = rowsFromPaginatedApi(value);
+    rows.push(...pageRows);
+    if (pageRows.length < REVIEW_HISTORY_PAGE_SIZE) return rows;
+  }
+  throw new Error(`GitHub history still full after ${REVIEW_HISTORY_MAX_PAGES} pages`);
 }
 
 /** Read the shared status history and the same-PR review bodies that explain its failures. */
@@ -6778,9 +6805,7 @@ export async function readReviewStatusHistory(
   try {
     const number = /^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/([1-9]\d*)\/?$/.exec(prUrl)?.[1];
     if (number === undefined) throw new Error("PR number is unavailable from review URL");
-    const statuses = rowsFromPaginatedApi(await readJson([
-      "api", "--paginate", "--slurp", `repos/${owner}/${repo}/commits/${headSha}/statuses?per_page=100`,
-    ], { fresh: true }));
+    const statuses = await readHistoryPages(readJson, `repos/${owner}/${repo}/commits/${headSha}/statuses`);
     if (statuses.some((row) => typeof row !== "object" || row === null ||
         typeof (row as Record<string, unknown>).context !== "string" ||
         typeof (row as Record<string, unknown>).state !== "string" ||
@@ -6791,7 +6816,7 @@ export async function readReviewStatusHistory(
       (row as Record<string, unknown>).context === REVIEW_CONTEXT &&
       String((row as Record<string, unknown>).state).toLowerCase() === "failure");
     const reviews = hasFailure
-      ? rowsFromPaginatedApi(await readJson(["api", "--paginate", "--slurp", `repos/${owner}/${repo}/pulls/${number}/reviews?per_page=100`], { fresh: true }))
+      ? await readHistoryPages(readJson, `repos/${owner}/${repo}/pulls/${number}/reviews`)
       : [];
     if (reviews.some((row) => typeof row !== "object" || row === null ||
         typeof (row as Record<string, unknown>).commit_id !== "string" ||
@@ -11444,6 +11469,7 @@ function lastPostedReviewStatusForInput(
 ): PostedReviewStatusRecord | undefined {
   let prior: PostedReviewStatusRecord | undefined;
   for (const line of lines) {
+    if (reviewerCodeAdvanceNames(line, prUrl, headSha)) prior = undefined;
     if (
       line.step !== "review.posted" ||
       !reviewRowNamesPr(line, taskId, prUrl) ||
@@ -11503,6 +11529,25 @@ export function lastPendingReviewStatusFromLedger(
     prior = pendingReviewStatusRecord(line) ?? prior;
   }
   return prior;
+}
+
+function priorReviewClaimTakeovers(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  input: { taskId: string; sha: string; prUrl?: string; reviewInputDigest?: string },
+): number {
+  const inputIsNamedByPrAndDigest = input.prUrl !== undefined && input.reviewInputDigest !== undefined;
+  let takeoversSinceTheLastVerdict = 0;
+  for (const line of lines) {
+    if (line.step !== "review.posted" && line.step !== "review.pending_posted") continue;
+    if (line.head_sha !== input.sha) continue;
+    const rowIsForAnotherInput = inputIsNamedByPrAndDigest
+      ? !reviewRowNamesPr(line, input.taskId, input.prUrl!) || line.review_input_digest !== input.reviewInputDigest
+      : line.task_id !== input.taskId;
+    if (rowIsForAnotherInput) continue;
+    if (line.step === "review.posted") takeoversSinceTheLastVerdict = 0;
+    else if (typeof line.took_over_run_id === "string") takeoversSinceTheLastVerdict++;
+  }
+  return takeoversSinceTheLastVerdict;
 }
 
 export type PendingReviewOwnerAssessment = "active" | "dead" | "unknown";
@@ -11971,6 +12016,7 @@ export interface PostReviewStatusGuardedOpts {
   repo: string;
   sha: string;
   state: PostableReviewState;
+  outboxBeforePost?: true;
   description?: string;
   /** The PR the lock/ledger key off — every real caller already keys its `review.posted` ledger lines by this same id
    * (the task id, or the `dep-review-PR<n>`/`PR-<n>` synthetic ids `run-task.ts` falls back to). */
@@ -12048,8 +12094,16 @@ export interface PostReviewStatusGuardedResult {
 
 /** The status description is the GitHub-visible verdict, so provenance must survive its hard cap. */
 export function reviewDescriptionWithCodeProvenance(description: string | undefined, codeSha: string): string {
-  const suffix = ` [review code ${codeSha.slice(0, 12)}]`;
-  return `${(description ?? "remudero-review verdict").slice(0, 140 - suffix.length)}${suffix}`;
+  const suffix = ` [review code ${codeSha}]`;
+  const text = (description ?? "remudero-review verdict").replace(REVIEW_CODE_SUFFIX, "");
+  return `${text.slice(0, 140 - suffix.length)}${suffix}`;
+}
+
+const REVIEW_CODE_SUFFIX = / \[review code ([0-9a-f]+)\]$/;
+
+export function reviewCodeShaFromDescription(description: unknown): string | undefined {
+  const sha = typeof description === "string" ? REVIEW_CODE_SUFFIX.exec(description)?.[1] : undefined;
+  return isFullReviewerCodeSha(sha) ? sha : undefined;
 }
 
 function reviewerCodePublicationRefusal(
@@ -12151,7 +12205,7 @@ export async function postReviewStatusGuarded(
           failureIds: history.failures.filter(finding => finding.headSha === opts.sha).map(finding => finding.id).sort(),
           historyRevision: history.revision ?? null,
         })).digest("hex") : opts.reviewDecisionDigest;
-      opts = { ...opts, state: effectiveVerdict.state, reviewDecisionDigest: effectiveReviewDecisionDigest,
+      opts = { ...opts, state: effectiveVerdict.state, verdict: effectiveVerdict, reviewDecisionDigest: effectiveReviewDecisionDigest,
         description: effectiveVerdict.state === "failure" ? effectiveVerdict.summary : opts.description,
         evidence: effectiveVerdict.state === "failure" ? "executed" : opts.evidence };
       if (effectiveVerdict.state === "failure") appendLedger(opts.ledgerPath, {
@@ -12330,12 +12384,17 @@ async function publishReviewStatusLocked(opts: PostReviewStatusGuardedOpts): Pro
         ...(lifecycle.merged ? { lifecycle: "merged" as const } : lifecycle.closed ? { lifecycle: "closed" as const } : {}),
       };
     }
+    if (opts.outboxBeforePost === true && planLintRetryIdentity === undefined && opts.reopenedDegradedTerminal !== true) {
+      writeReviewOutboxEntry(opts, statusDescription, true);
+    }
     try {
       await post({ owner: opts.owner, repo: opts.repo, sha: opts.sha, state: opts.state, description: statusDescription });
     } catch (e) {
       // W1-T135 exhaustion path: ledger-and-continue, never crash the run.
       const message = e instanceof Error ? e.message : String(e);
       if (planLintRetryIdentity !== undefined) appendPlanLintRetryRow(opts.ledgerPath, planLintRetryIdentity, "post_failed", message);
+      const settlesThroughItsOwnRows = planLintRetryIdentity !== undefined || opts.reopenedDegradedTerminal === true;
+      const outboxed = !settlesThroughItsOwnRows && writeReviewOutboxEntry(opts, statusDescription).ok;
       appendLedger(opts.ledgerPath, {
         run_id: opts.runId,
         task_id: opts.taskId,
@@ -12345,6 +12404,7 @@ async function publishReviewStatusLocked(opts: PostReviewStatusGuardedOpts): Pro
         evidence: opts.evidence,
         description: statusDescription,
         error: message,
+        ...(outboxed ? { outboxed: true } : {}),
         ...(opts.prUrl !== undefined ? { pr_url: opts.prUrl } : {}),
         ...(opts.reviewInputDigest !== undefined ? { review_input_digest: opts.reviewInputDigest } : {}),
         ...(opts.reviewEngineRevision !== undefined ? { review_engine_revision: opts.reviewEngineRevision } : {}),
@@ -12390,6 +12450,278 @@ async function publishReviewStatusLocked(opts: PostReviewStatusGuardedOpts): Pro
     return { posted: true, ...(publisherEvidence ? { publisherEvidence } : {}) };
 }
 
+const REVIEW_OUTBOX_VERSION = 1;
+
+export interface ReviewOutboxEntry {
+  version: number;
+  input_key: string;
+  head_sha: string;
+  state: "success" | "failure";
+  description?: string;
+  comment_body?: string;
+  owner: string;
+  repo: string;
+  task_id: string;
+  pr_url: string;
+  run_id: string;
+  evidence: ReviewEvidenceStrength;
+  review_decision_digest?: string;
+  review_engine_revision?: string;
+  decision_verdict?: ReviewVerdict;
+  evaluator_provenance?: ReviewEvaluatorProvenance;
+  presented_failure_ids?: string[];
+  reviewer_code_sha?: string;
+  written_at: string;
+  posting?: true;
+}
+
+export function reviewOutboxDir(ledgerPath: string): string {
+  return join(dirname(ledgerPath), "review-outbox");
+}
+
+function reviewOutboxHash(text: string): string {
+  return createHash("sha256").update(text, "utf8").digest("hex").slice(0, 24);
+}
+
+export function reviewOutboxEntryPath(ledgerPath: string, prUrl: string, inputKey: string): string {
+  return join(reviewOutboxDir(ledgerPath), `${reviewOutboxHash(prUrl)}.${reviewOutboxHash(inputKey)}.json`);
+}
+
+type ReviewOutboxWrite = { ok: true } | { ok: false; reason: string };
+
+function reviewOutboxCommentBody(verdict: PostReviewStatusGuardedOpts["verdict"]): string | undefined {
+  if (!verdict || !Array.isArray(verdict.criteria)) return undefined;
+  const unmet = visibleCriteria(unmetReviewCriteria(verdict.criteria));
+  const reasons = reviewLedgerReasons(verdict);
+  const parts: string[] = [];
+  if (verdict.state !== "success" && (unmet.length > 0 || verdict.testTheater)) {
+    parts.push(
+      `**remudero-review=failure** — the following acceptance ${unmet.length === 1 ? "criterion is" : "criteria are"} unmet:\n\n` +
+        unmet.map((c, i) => {
+          const tail = c.failureTail?.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+          return `${i + 1}. ${c.claim}\n   - ${reasons[i]}` + (tail
+            ? `\n\n   <details>\n   <summary>Proof failure output</summary>\n\n   <pre>${tail}</pre>\n   </details>\n`
+            : "");
+        }).join("\n") +
+        (verdict.testTheater ? `\n\n_Also: test theater — added tests assert nothing._` : "") +
+        `\n\nAdd the missing work (or escalate). Do NOT edit the acceptance criteria to match the diff.`,
+    );
+  }
+  for (const section of [
+    scopeAdvisorySection(verdict.unwiredAdvisories), unwiredExportAdvisorySection(verdict.unwiredAdvisories),
+    inverseScopeAdvisorySection(verdict.unwiredAdvisories),
+  ]) if (section) parts.push(section);
+  if (parts.length === 0) parts.push(`**remudero-review=${verdict.state}** — ${verdict.summary}`);
+  return parts.join("\n\n---\n\n");
+}
+
+export function settleReviewOutboxEntry(ledgerPath: string, prUrl: string, inputKey: string): void {
+  rmSync(reviewOutboxEntryPath(ledgerPath, prUrl, inputKey), { force: true });
+}
+
+function writeReviewOutboxEntry(opts: PostReviewStatusGuardedOpts, description: string | undefined, posting = false): ReviewOutboxWrite {
+  if (opts.state === "pending" || opts.prUrl === undefined || opts.reviewInputDigest === undefined) {
+    return { ok: false, reason: "not a terminal verdict keyed by its PR and review input" };
+  }
+  const entry: ReviewOutboxEntry = {
+    version: REVIEW_OUTBOX_VERSION, input_key: opts.reviewInputDigest, head_sha: opts.sha, state: opts.state,
+    description, comment_body: reviewOutboxCommentBody(opts.verdict), owner: opts.owner, repo: opts.repo, task_id: opts.taskId,
+    pr_url: opts.prUrl, run_id: opts.runId, evidence: opts.evidence, review_decision_digest: opts.reviewDecisionDigest,
+    review_engine_revision: opts.reviewEngineRevision, decision_verdict: opts.verdict,
+    evaluator_provenance: opts.evaluatorProvenance,
+    ...(opts.presentedFailureIds !== undefined ? { presented_failure_ids: [...opts.presentedFailureIds] } : {}),
+    ...(opts.reviewerCodeFreshness?.status === "fresh" ? { reviewer_code_sha: opts.reviewerCodeFreshness.codeSha } : {}),
+    written_at: systemClock.iso(),
+    ...(posting ? { posting: true as const } : {}),
+  };
+  try {
+    const renamed = writeAtomic(reviewOutboxEntryPath(opts.ledgerPath, opts.prUrl, opts.reviewInputDigest), `${JSON.stringify(entry)}\n`);
+    return renamed ? { ok: true } : { ok: false, reason: "the staged entry was withdrawn before its rename" };
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function reviewOutboxFileNames(dir: string): { ok: true; names: string[] } | { ok: false; reason: string } {
+  try {
+    return { ok: true, names: readdirSync(dir) };
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+type FiledReviewOutboxEntry =
+  | { path: string; unreadable: false; entry: ReviewOutboxEntry }
+  | { path: string; unreadable: true };
+
+function readReviewOutbox(ledgerPath: string, prUrl: string): FiledReviewOutboxEntry[] {
+  const dir = reviewOutboxDir(ledgerPath);
+  const listing = reviewOutboxFileNames(dir);
+  if (!listing.ok) return [];
+  const prefix = `${reviewOutboxHash(prUrl)}.`;
+  return listing.names.filter((name) => name.startsWith(prefix) && name.endsWith(".json")).sort().map((name): FiledReviewOutboxEntry => {
+    const path = join(dir, name);
+    try {
+      const entry = JSON.parse(readFileSync(path, "utf8")) as Partial<ReviewOutboxEntry> | null;
+      const readable = entry?.version === REVIEW_OUTBOX_VERSION && entry.pr_url === prUrl &&
+        typeof entry.head_sha === "string" && typeof entry.input_key === "string" &&
+        (entry.state === "success" || entry.state === "failure") &&
+        (entry.evidence === "executed" || entry.evidence === "no_evidence");
+      return readable ? { path, unreadable: false, entry: entry as ReviewOutboxEntry } : { path, unreadable: true };
+    } catch {
+      return { path, unreadable: true };
+    }
+  });
+}
+
+export interface DrainReviewOutboxOpts {
+  owner: string;
+  repo: string;
+  sha: string;
+  taskId: string;
+  runId: string;
+  ledgerPath: string;
+  prUrl: string;
+  reviewInputDigest: string;
+  fetchLifecycle: PostReviewStatusGuardedOpts["fetchLifecycle"];
+  post?: PostReviewStatusGuardedOpts["post"];
+  readReviewStatusHistory?: ReviewStatusHistoryReader;
+  commentDeps?: PostReviewCommentDeps;
+  lockOpts?: AcquireReviewStatusLockOpts;
+  liveStatus?: { state?: string; description?: string };
+  judgeReviewerCode?: (codeSha: unknown) => Promise<ReviewerCodeFreshness>;
+}
+
+export interface ReviewOutboxDrainResult {
+  outcome: "none" | "posted" | "held" | "discarded";
+  reason?: string;
+}
+
+export async function drainReviewOutbox(opts: DrainReviewOutboxOpts): Promise<ReviewOutboxDrainResult> {
+  let drained: ReviewOutboxDrainResult = { outcome: "none" };
+  const prCoordinatesNotUrl = { owner: opts.owner, repo: opts.repo, pr_number: prLifecycleUrlTarget(opts.prUrl)?.number };
+  for (const filed of readReviewOutbox(opts.ledgerPath, opts.prUrl)) {
+    const { path } = filed;
+    const entry = filed.unreadable ? undefined : filed.entry;
+    const discard = (reason: string): void => {
+      rmSync(path, { force: true });
+      appendLedger(opts.ledgerPath, {
+        run_id: opts.runId, task_id: opts.taskId, step: "review.outbox_discarded", ...prCoordinatesNotUrl,
+        head_sha: entry?.head_sha ?? opts.sha, current_head_sha: opts.sha, reason,
+        ...(entry ? { outbox_state: entry.state, outbox_input_key: entry.input_key, outbox_run_id: entry.run_id } : {}),
+      });
+      if (drained.outcome === "none") drained = { outcome: "discarded", reason };
+    };
+    if (!entry) {
+      discard("the outbox entry is unreadable");
+      continue;
+    }
+    if (entry.head_sha !== opts.sha) {
+      discard(`the head moved from ${entry.head_sha.slice(0, 12)} to ${opts.sha.slice(0, 12)}`);
+      continue;
+    }
+    if (entry.input_key !== opts.reviewInputDigest) {
+      discard("the review input changed on an unmoved head");
+      continue;
+    }
+    let onGitHub = false;
+    if (entry.posting === true) {
+      const rowed = readLiveLedgerRecords(opts.ledgerPath).some((line) => line.step === "review.posted" &&
+        line.pr_url === opts.prUrl && line.head_sha === entry.head_sha && line.review_input_digest === entry.input_key &&
+        (line.state === "success" || line.state === "failure"));
+      if (rowed) {
+        discard("the verdict already has its review.posted row");
+        continue;
+      }
+      if (opts.liveStatus === undefined) continue;
+      onGitHub = opts.liveStatus.state === entry.state &&
+        (opts.liveStatus.description ?? "") === (entry.description ?? "").slice(0, 140);
+    }
+    let code: ReviewerCodeFreshness | undefined;
+    if (!onGitHub) {
+      if (!isFullReviewerCodeSha(entry.reviewer_code_sha)) {
+        discard("the outbox entry names no full reviewer-code sha");
+        continue;
+      }
+      code = await (opts.judgeReviewerCode ?? probeReviewerCodeFreshnessAsync)(entry.reviewer_code_sha);
+      if (code.status === "unreadable") {
+        drained = { outcome: "held", reason: `the outbox verdict's reviewer code is unprovable: ${code.reason}` };
+        continue;
+      }
+      if (code.status === "stale") {
+        discard(`reviewer code ${code.codeSha.slice(0, 12)} is materially behind origin/main`);
+        continue;
+      }
+    }
+    const rawPost = opts.post ?? postReviewStatus;
+    let threw = false;
+    const result: PostReviewStatusGuardedResult = onGitHub ? { posted: true } : await postReviewStatusGuarded({
+      reviewerCodeFreshness: code,
+      owner: opts.owner, repo: opts.repo, sha: entry.head_sha, state: entry.state, description: entry.description,
+      taskId: opts.taskId, evidence: entry.evidence, ledgerPath: opts.ledgerPath, runId: opts.runId, prUrl: opts.prUrl,
+      reviewInputDigest: entry.input_key, reviewDecisionDigest: entry.review_decision_digest,
+      verdict: entry.decision_verdict, presentedFailureIds: entry.presented_failure_ids,
+      reviewEngineRevision: entry.review_engine_revision, evaluatorProvenance: entry.evaluator_provenance,
+      readReviewStatusHistory: opts.readReviewStatusHistory,
+      fetchLifecycle: opts.fetchLifecycle, lockOpts: opts.lockOpts,
+      post: async (status) => {
+        try {
+          await rawPost(status);
+        } catch (error) {
+          threw = true;
+          throw error;
+        }
+      },
+    });
+    if (result.conflict) {
+      discard(`the stored verdict contradicts a posted terminal: ${result.reason ?? "conflict"}`);
+      continue;
+    }
+    if (!result.posted) {
+      if (threw) drained = { outcome: "held", reason: `the outbox verdict's post failed again: ${result.reason ?? "post failed"}` };
+      else discard(`the stored verdict was not posted: ${result.reason ?? "refused"}`);
+      continue;
+    }
+    const comment = entry.comment_body === undefined ? undefined
+      : postReviewCommentGuarded(opts.prUrl, entry.comment_body, { commitSha: entry.head_sha, ...opts.commentDeps });
+    const stored = entry.decision_verdict;
+    if (stored && Array.isArray(stored.criteria) && entry.review_decision_digest !== undefined) {
+      const verdict: ReviewVerdict = result.effectiveVerdict
+        ? { ...stored, ...result.effectiveVerdict, state: result.effectiveState ?? result.effectiveVerdict.state }
+        : { ...stored, state: entry.state };
+      appendLedger(opts.ledgerPath, {
+        run_id: opts.runId, task_id: opts.taskId, step: "review.posted", context: REVIEW_CONTEXT, state: verdict.state,
+        head_sha: entry.head_sha, pr_url: opts.prUrl, review_input_digest: entry.input_key,
+        ...(entry.review_engine_revision !== undefined ? { review_engine_revision: entry.review_engine_revision } : {}),
+        review_decision_digest: result.effectiveReviewDecisionDigest ?? entry.review_decision_digest,
+        decision_verdict: verdict,
+        ...(entry.evaluator_provenance !== undefined ? { evaluator_provenance: entry.evaluator_provenance } : {}),
+        test_theater: verdict.testTheater,
+        unmet_criteria: visibleCriteria(unmetReviewCriteria(verdict.criteria)).map((c) => c.claim),
+        reasons: reviewLedgerReasons(verdict),
+        proof_exec: verdict.criteria.map((c) => c.proof_exec),
+        floor_degraded: verdict.floorDegraded,
+        ...reviewLedgerLegibilityFields(verdict),
+        reward_hacking_gap: verdict.rewardHackingGap,
+        outbox_run_id: entry.run_id,
+        ...(entry.reviewer_code_sha !== undefined ? { reviewer_code_sha: entry.reviewer_code_sha } : {}),
+      });
+    }
+    appendLedger(opts.ledgerPath, {
+      run_id: opts.runId, task_id: opts.taskId, step: "review.outbox_posted", ...prCoordinatesNotUrl,
+      head_sha: entry.head_sha, state: entry.state, review_input_digest: entry.input_key, outbox_run_id: entry.run_id,
+      comment: comment === undefined ? "none" : comment.posted ? "posted" : comment.reason,
+      ...(onGitHub ? { status: "already_on_github" } : {}),
+    });
+    rmSync(path, { force: true });
+    drained = {
+      outcome: "posted",
+      reason: `${onGitHub ? "settled" : "posted"} the ${entry.state} verdict run ${entry.run_id} computed for ${entry.head_sha.slice(0, 7)} — no review needed (W1-T11928)`,
+    };
+  }
+  return drained;
+}
+
 // ── W1-T913: post remudero-review=pending at DETECTION, before judging ──────
 
 /** Reclaim pending claims after this TTL; see {@link postReviewPending}. #5672 observed a 23:42 claim still
@@ -12416,7 +12748,10 @@ export interface PostReviewPendingOpts {
   fetchStatus?: GhApiFetcher;
   /** Injected raw poster (tests) — forwarded to {@link postReviewStatusGuarded} unchanged. */
   post?: PostReviewStatusGuardedOpts["post"];
+  readReviewStatusHistory?: ReviewStatusHistoryReader;
+  commentDeps?: PostReviewCommentDeps;
   lockOpts?: AcquireReviewStatusLockOpts;
+  judgeReviewerCode?: DrainReviewOutboxOpts["judgeReviewerCode"];
   /** Injectable only so the durable owner record is deterministic in tests. */
   ownerIdentity?: { pid: number; startedAt: string };
   /** Only proof of death overrides a readable young claim's TTL (W1-T8088). */
@@ -12432,6 +12767,7 @@ export interface PostReviewPendingResult {
   posted: boolean;
   reason?: string;
   lifecycle?: "merged" | "closed";
+  outbox?: "posted" | "held";
 }
 
 /** Single pending-post entry point (design (a)/(d)): `runReview`, `reviewCommand` and transitively sweep
@@ -12453,6 +12789,17 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
       head_sha: opts.sha, pr_url: opts.prUrl, reason,
     });
     return { posted: false, lifecycle: closed, reason: `PR is already ${closed}` };
+  }
+  if (opts.prUrl !== undefined && opts.reviewInputDigest !== undefined) {
+    const drained = await drainReviewOutbox({
+      owner: opts.owner, repo: opts.repo, sha: opts.sha, taskId: opts.taskId, runId: opts.runId,
+      ledgerPath: opts.ledgerPath, prUrl: opts.prUrl, reviewInputDigest: opts.reviewInputDigest,
+      fetchLifecycle: opts.fetchLifecycle, post: opts.post, readReviewStatusHistory: opts.readReviewStatusHistory,
+      commentDeps: opts.commentDeps, lockOpts: opts.lockOpts, judgeReviewerCode: opts.judgeReviewerCode,
+    });
+    if (drained.outcome === "posted" || drained.outcome === "held") {
+      return { posted: false, outbox: drained.outcome, reason: drained.reason };
+    }
   }
   const lines = readLiveLedgerRecords(opts.ledgerPath);
   const hasInputIdentity = opts.prUrl !== undefined && opts.reviewInputDigest !== undefined;
@@ -12488,6 +12835,7 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
   // claim holds unless its owner is proven dead; an unreadable age always holds.
   let takenOverFrom: PendingReviewStatusRecord | undefined;
   let ownerProvenDead = false;
+  let liveStatus: { state?: string; description?: string } = {};
   const assessOwner = opts.assessPendingOwner ??
     ((record: PendingReviewStatusRecord) => assessPendingReviewOwner(record, { isPidAlive: defaultIsPidAlive }));
   if (priorPending && priorPending.headSha === opts.sha) {
@@ -12521,6 +12869,7 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
     if (status && !["pending", "success", "failure", "error"].includes(status.state ?? "")) {
       throw new Error("unrecognized remudero-review state");
     }
+    if (status) liveStatus = { state: status.state === "error" ? "failure" : status.state, description: status.description };
     if (status?.state === "pending") {
       const foreignRun = /owned by run ([^\s)]+)\)/.exec(status.description ?? "")?.[1];
       if (!foreignRun) throw new Error("pending remudero-review owner is unreadable");
@@ -12543,6 +12892,17 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
     }
   } catch (error) {
     return { posted: false, reason: `holding review: shared remudero-review status unreadable — ${String(error)}` };
+  }
+  if (opts.prUrl !== undefined && opts.reviewInputDigest !== undefined) {
+    const settled = await drainReviewOutbox({
+      owner: opts.owner, repo: opts.repo, sha: opts.sha, taskId: opts.taskId, runId: opts.runId,
+      ledgerPath: opts.ledgerPath, prUrl: opts.prUrl, reviewInputDigest: opts.reviewInputDigest,
+      fetchLifecycle: opts.fetchLifecycle, post: opts.post, readReviewStatusHistory: opts.readReviewStatusHistory,
+      commentDeps: opts.commentDeps, lockOpts: opts.lockOpts, liveStatus, judgeReviewerCode: opts.judgeReviewerCode,
+    });
+    if (settled.outcome === "posted" || settled.outcome === "held") {
+      return { posted: false, outbox: settled.outcome, reason: settled.reason };
+    }
   }
   const description = (
     takenOverFrom && ownerProvenDead
@@ -12582,7 +12942,23 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
       ...(opts.prUrl !== undefined ? { pr_url: opts.prUrl } : {}),
       ...(opts.reviewInputDigest !== undefined ? { review_input_digest: opts.reviewInputDigest } : {}),
       ...(opts.reviewEngineRevision !== undefined ? { review_engine_revision: opts.reviewEngineRevision } : {}),
+      ...(takenOverFrom ? { took_over_run_id: takenOverFrom.runId } : {}),
     });
+    const linesReadBeforeThisClaim = lines;
+    const takeoversCountedForTheLedgerOnly = takenOverFrom ? priorReviewClaimTakeovers(linesReadBeforeThisClaim, { ...opts }) + 1 : 0;
+    if (takenOverFrom && takeoversCountedForTheLedgerOnly > 1) {
+      const inputKeyNamingThePr = `${opts.prUrl ?? opts.taskId}@${opts.sha}${opts.reviewInputDigest !== undefined ? `#${opts.reviewInputDigest}` : ""}`;
+      appendLedger(opts.ledgerPath, {
+        run_id: opts.runId,
+        task_id: opts.taskId,
+        step: "review.claim_repeated",
+        input_key: inputKeyNamingThePr,
+        head_sha: opts.sha,
+        takeovers: takeoversCountedForTheLedgerOnly,
+        took_over_run_id: takenOverFrom.runId,
+        ...(opts.reviewInputDigest !== undefined ? { review_input_digest: opts.reviewInputDigest } : {}),
+      });
+    }
   }
   return result;
 }

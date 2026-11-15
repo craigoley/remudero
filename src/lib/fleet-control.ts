@@ -250,6 +250,14 @@ export function pauseDetail(root: string): string | undefined {
   return `${detail}; actor: ${describeActorEvidence(info?.actor_evidence)}`;
 }
 
+/** W1-T12457: the reason, actor and expiry `rmd pause` prints for one held instance; `undefined` when not PAUSED. */
+export function pauseHoldSummary(root: string): string | undefined {
+  if (!isPaused(root)) return undefined;
+  const info = readFlag(pauseFilePath(root));
+  const expires = info?.indefinite || info?.expiresAt === null ? "never (indefinite)" : info?.expiresAt ?? "not recorded";
+  return `reason: ${info?.reason || "not recorded"}; set by: ${pauseActor(root)}; expires: ${expires}`;
+}
+
 /** W3-T5: quiet-hours on/off writes/clears an independent preference; returns its new state. */
 export function setQuietHours(root: string, enabled: boolean): boolean {
   if (enabled) {

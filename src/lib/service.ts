@@ -22,9 +22,8 @@ import { systemClock, type Clock } from "./clock.js";
 export type Scope = "read" | "write";
 
 /**
- * A write-scoped route's CONSEQUENCE class (W1-T404, MASTER-PLAN §7A/§7): `low` is trivially
- * reversible bookkeeping, `middle` reversible-but-disruptive (or a force multiplier for `high`),
- * `high` spends money or moves code. PURELY DECLARATIVE on {@link Route} — see {@link writeTierSatisfies}.
+ * A write route's CONSEQUENCE class (W1-T404): `low` is reversible bookkeeping, `middle` reversible
+ * but disruptive, `high` spends money or moves code. Declarative on {@link Route}.
  * Why: docs/forensics/service.md#writetier (W1-T404).
  */
 export type WriteTier = "low" | "middle" | "high";
@@ -54,9 +53,8 @@ export function assertWriteTiersComplete(routes: readonly Route[]): void {
 }
 
 /**
- * A read route's sensitivity label (W1-T495, MASTER-PLAN §7A) — the read-side axis to {@link
- * WriteTier}'s write-side one, a single label rather than a rank. Absence means "ordinary read",
- * enforced once {@link ServiceOptions.enforceReadSensitivity} is on.
+ * A read route's sensitivity label (W1-T495), the read-side twin of {@link WriteTier}. Absence means
+ * "ordinary read", enforced once {@link ServiceOptions.enforceReadSensitivity} is on.
  * Why: docs/forensics/service.md#readsensitivity (W1-T495).
  */
 export type ReadSensitivity = "sensitive";
@@ -80,24 +78,20 @@ export interface Route {
   path: string;
   scope: Scope;
   handler: RouteHandler;
-  /** A maintained producer can qualify a cached read before any buffer/304 answers. No compute. */
+  /** Qualifies a cached read before any buffer/304 answers. No compute. */
   cacheQualification?: (req: IncomingMessage) => { key: string } | { status: number; body: unknown } | undefined;
-  /** Also accepts the bearer credential via `?token=`. Set ONLY on the static HTML document
-   *  (`GET /`) — a browser navigation can't send an `Authorization` header (W1-T139 bootstrap
-   *  paradox). NEVER on an API/data route: a token in the URL leaks via `Referer` and logs. */
+  /** Also accepts the bearer via `?token=`. ONLY on the HTML shell (`GET /`): a browser navigation
+   *  can't send `Authorization` (W1-T139). NEVER on an API route — a URL token leaks via `Referer`/logs. */
   allowQueryToken?: boolean;
-  /** This route's {@link WriteTier} (W1-T404) — DECLARED, never derived. Meaningful only when
-   *  `scope === "write"`; every write route must carry one (see {@link writeRoutesMissingTier}).
-   *  Enforced only once {@link ServiceOptions.enforceWriteTiers} is on. */
+  /** This route's {@link WriteTier} (W1-T404), declared never derived. Write routes only; every one
+   *  must carry one ({@link writeRoutesMissingTier}). Enforced once {@link ServiceOptions.enforceWriteTiers} is on. */
   tier?: WriteTier;
-  /** This READ route's {@link ReadSensitivity} label (W1-T495) — DECLARED, never derived, mirrors
-   *  {@link tier}. Meaningful only when `scope === "read"`; enforced once
-   *  {@link ServiceOptions.enforceReadSensitivity} is on. Labelling the real table is separate work. */
+  /** This read route's {@link ReadSensitivity} (W1-T495), declared never derived. Read routes only;
+   *  enforced once {@link ServiceOptions.enforceReadSensitivity} is on. */
   sensitivity?: ReadSensitivity;
-  /** Marks this route SELF-AUTHENTICATED (W1-T2568): its handler verifies the caller itself (HMAC
-   *  over the raw body, e.g. GitHub's) rather than the bearer/{@link IdentityProvider} seam, which
-   *  needs a synchronous, request-only `grant`. Bypasses scope/tier/sensitivity dispatch entirely —
-   *  the handler alone must verify first, fail closed, and use {@link readBoundedRawBody}. */
+  /** SELF-AUTHENTICATED (W1-T2568): the handler verifies the caller itself (e.g. HMAC over the raw
+   *  body). Bypasses scope/tier/sensitivity dispatch entirely — the handler must verify first, fail
+   *  closed, and use {@link readBoundedRawBody}. */
   selfAuthenticated?: boolean;
 }
 
@@ -112,8 +106,7 @@ export type SseSend = ((event: string, data: unknown, id?: string) => void) & {
 export interface SseRoute {
   path: string;
   scope: Scope;
-  /** Called once per client connection, after the scope check passes. Must return an
-   *  unsubscribe/cleanup function, invoked on disconnect — no subscription outlives the client. */
+  /** Called once per connection after the scope check. Returns a cleanup invoked on disconnect. */
   subscribe: (send: SseSend, req?: IncomingMessage) => () => void;
 }
 
@@ -125,44 +118,37 @@ export interface ServiceTokens {
 }
 
 /**
- * Tailnet-identity auth, ADDITIVE to the bearer tokens above (W1-T371, MASTER-PLAN §7's
- * auth-endgame): consulted first but only ever ADDS a grant, so a Tailscale failure falls through
- * to the token unchanged rather than locking the operator out.
+ * Tailnet-identity auth, ADDITIVE to the bearer tokens (W1-T371): consulted first but only ever ADDS
+ * a grant, so a Tailscale failure falls through to the token.
  *
- * Two gates, both required: INTERFACE (`trustedLocalAddress`, the only bound address Serve's
- * identity headers are trusted on) and ALLOWLIST (`capability`, a Tailscale ACL app-capability
- * evaluated per NODE, not per account). Funnel traffic carries neither header, so it fails closed.
+ * Two gates, both required: INTERFACE (`trustedLocalAddress`, the only address Serve's identity
+ * headers are trusted on) and ALLOWLIST (`capability`, a Tailscale ACL app-capability per NODE).
+ * Funnel traffic carries neither header, so it fails closed.
  *
  * FALSIFIER: test/tailnet-identity-scope.test.ts.
  * Why: docs/forensics/service.md#identityauth (W1-T371, Tailscale Serve identity-headers guidance).
  */
 export interface IdentityAuth {
-  /** Local address (`req.socket.localAddress`) identity headers are honored on. Production
-   *  wiring passes the loopback address Tailscale Serve's target binds; a request elsewhere
-   *  never consults `capability` below, forged header or not. */
+  /** Local address (`req.socket.localAddress`) identity headers are honored on; a request elsewhere
+   *  never consults `capability`, forged header or not. */
   trustedLocalAddress: string;
-  /** The Tailscale ACL app-capability name an allowlisted node/user must be granted — see this interface's own doc. */
+  /** The Tailscale ACL app-capability name an allowlisted node must be granted. */
   capability: string;
 }
 
-/** The auth/identity extension seam (W1-T430, MASTER-PLAN §6A) — replaces two scope-granting
- *  paths inlined into {@link grantedScopes} with a declared interface. {@link createService}
- *  wires identity first (additive) then the token fallback, appending `ServiceOptions.providers`. */
+/** The auth/identity extension seam (W1-T430). {@link createService} wires identity first (additive),
+ *  then the token fallback, then `ServiceOptions.providers`. */
 export interface IdentityProvider {
-  /** Provenance label carried through to {@link IdentityGrant.provider} — distinguishes "nobody
-   *  vouched" (401) from "vouched, but underscoped" (403) in {@link createService}'s dispatch. */
+  /** Provenance label carried to {@link IdentityGrant.provider}: separates 401 (nobody vouched) from 403 (underscoped). */
   readonly name: string;
-  /** Given the request (and whether `?token=` fallback applies, true only for the HTML shell),
-   *  return the granted scopes, or `undefined` if unrecognized — not a denial, "try the next
-   *  provider"; only once every provider answers `undefined` does the request fail closed (401). */
+  /** Granted scopes, or `undefined` = "try the next provider" (not a denial); only when every provider
+   *  answers `undefined` does the request fail closed (401). `allowQueryToken` is true only for the HTML shell. */
   grant(req: IncomingMessage, allowQueryToken: boolean): ReadonlySet<Scope> | undefined;
-  /** The {@link WriteTier} this provider's `write` grant is entitled to (W1-T404) — a PROVIDER
-   *  property, not per-request. `undefined` satisfies no tier once
-   *  {@link ServiceOptions.enforceWriteTiers} is on (see {@link bearerTokenProvider}: `"low"`). */
+  /** The {@link WriteTier} this provider's `write` grant reaches (W1-T404), a provider property.
+   *  `undefined` satisfies no tier once {@link ServiceOptions.enforceWriteTiers} is on. */
   readonly writeTier?: WriteTier;
-  /** Whether this provider's `read` grant is entitled to a `sensitivity: "sensitive"` {@link Route}
-   *  (W1-T495) — mirrors {@link writeTier}; `undefined` satisfies no sensitive route once
-   *  {@link ServiceOptions.enforceReadSensitivity} is on. */
+  /** Whether this provider's `read` grant reaches a `"sensitive"` {@link Route} (W1-T495); `undefined`
+   *  reaches none once {@link ServiceOptions.enforceReadSensitivity} is on. */
   readonly readSensitivity?: ReadSensitivity;
   /** W1-T4244 — a PER-REQUEST grant, used instead of `grant` when present: its own `tier`/`actor`
    *  replace {@link writeTier}. `undefined` means "not mine"; answer it synchronously (see {@link grantedScopes}). */
@@ -177,14 +163,13 @@ export interface IdentityResolution {
   actor?: string;
 }
 
-/** What {@link createService}'s provider dispatch hands back once some {@link IdentityProvider}
- * recognizes a request: the scopes granted, plus which provider granted them. */
+/** What dispatch hands back once a provider recognizes a request: the scopes plus the granting provider. */
 export interface IdentityGrant {
   scopes: ReadonlySet<Scope>;
   provider: string;
-  /** The granting provider's {@link IdentityProvider.writeTier}, carried through unchanged (W1-T404). */
+  /** The granting provider's {@link IdentityProvider.writeTier} (W1-T404). */
   tier?: WriteTier;
-  /** The granting provider's {@link IdentityProvider.readSensitivity}, carried through unchanged (W1-T495). */
+  /** The granting provider's {@link IdentityProvider.readSensitivity} (W1-T495). */
   readSensitivity?: ReadSensitivity;
   actor?: string;
 }
@@ -203,8 +188,7 @@ export interface ServiceOptions {
   tokens: ServiceTokens;
   /** Additive tailnet-identity auth — see {@link IdentityAuth}. Omitted: identity is never consulted, byte-for-byte the pre-W1-T371 behavior. */
   identity?: IdentityAuth;
-  /** Additional {@link IdentityProvider}s consulted after the two built-in grantors (W1-T430's
-   *  seam) — attaches a future grantor without editing this module's dispatch. Empty by default. */
+  /** Extra {@link IdentityProvider}s consulted after the two built-in grantors (W1-T430). */
   providers?: IdentityProvider[];
   /** W1-T4244 — {@link operatorSessionIdentityProvider}, consulted BEFORE the bearer token: the console
    *  sends both, and the bearer answering first would pin the operator at `low`. */
@@ -213,43 +197,35 @@ export interface ServiceOptions {
   sse?: SseRoute[];
   /** One ledger line per auth decision / SSE lifecycle event / handler error. */
   log?: (step: string, extra?: Record<string, unknown>) => void;
-  /** Turns ON tier + second-factor enforcement (W1-T404) — OFF by default here, so labeling a
-   *  tier never changes access until set. `rmd serve` sets `true` (W1-T500), with
-   *  {@link makeConfirmNonceRoute} mounted for HIGH-tier confirmation.
+  /** Turns ON tier + second-factor enforcement (W1-T404); OFF by default. `rmd serve` sets `true`
+   *  (W1-T500) with {@link makeConfirmNonceRoute} mounted.
    *  Why: docs/forensics/service.md#enforcewritetiers (W1-T404, W1-T500). */
   enforceWriteTiers?: boolean;
-  /** Turns ON sensitivity enforcement (W1-T495) — OFF by default, {@link enforceWriteTiers}'s
-   *  precedent. Ships dark: no built-in provider or production route declares one yet.
+  /** Turns ON sensitivity enforcement (W1-T495); OFF by default, ships dark.
    *  Why: docs/forensics/service.md#enforcereadsensitivity (W1-T495). */
   enforceReadSensitivity?: boolean;
-  /** The nonce store HIGH-tier routes consult when {@link enforceWriteTiers} is on (W1-T404,
-   *  design iv). Defaults to a fresh {@link createConfirmNonceStore} — one process, no sharing. */
+  /** The nonce store HIGH-tier routes consult (W1-T404). Defaults to a fresh {@link createConfirmNonceStore}. */
   confirmNonces?: ConfirmNonceStore;
 }
 
-/** One action a {@link ConfirmNonceStore} nonce authorizes — the exact route and payload
- *  (W1-T404, design iv). Binding to the action, not a time window, avoids standing elevated state. */
+/** The exact route and payload a nonce authorizes (W1-T404) — bound to the action, not a time window. */
 export interface ConfirmNonceAction {
   method: Method;
   path: string;
-  /** The raw request body text the authorized call sends, byte for byte — never a re-serialized
-   *  parsed object, which could reorder/drop keys the caller never typed. */
+  /** The raw body text, byte for byte — never a re-serialized object. */
   payload: string;
 }
 
-/** Server-issued, single-use, action-and-payload-bound second factor. `issue` proves nothing by
- *  itself; `consume` verifies AND SPENDS in one step, so a captured nonce can never be replayed. */
+/** Single-use, action-and-payload-bound second factor. `consume` verifies AND SPENDS in one step. */
 export interface ConfirmNonceStore {
   issue(action: ConfirmNonceAction): string;
   consume(nonce: string, action: ConfirmNonceAction): boolean;
-  /** Count of entries not yet consumed or swept (W1-T451). Exists ONLY so a test can observe that
-   *  eviction actually bounds growth. `createService`'s dispatch never reads this. */
+  /** Entries not yet consumed or swept (W1-T451) — test-only, dispatch never reads it. */
   size(): number;
 }
 
-/** The nonce's TTL (W1-T451, design i): covers one round trip — issue, an operator reads the
- *  confirmation, spend. Five minutes sits roughly two orders of magnitude past the tens-of-seconds
- *  a careful read takes, while staying bounded rather than reinstating a standing elevated state.
+/** The nonce's TTL (W1-T451): one round trip — issue, read, spend. Five minutes is ~two orders past
+ *  a careful read, yet bounded.
  *  Why: docs/forensics/service.md#confirm_nonce_ttl_ms (W1-T451). */
 export const CONFIRM_NONCE_TTL_MS = 5 * 60 * 1000;
 
@@ -258,8 +234,7 @@ interface StoredConfirmNonce {
   issuedAt: number;
 }
 
-/** In-memory default — single process, no persistence needed. `randomToken`/`now` are injectable
- *  so a test can assert on a known nonce or expiry without sleeping; production uses the reals. */
+/** In-memory default; `randomToken`/`now` are injectable for tests. */
 export function createConfirmNonceStore(
   randomToken: () => string = () => randomBytes(24).toString("hex"),
   now: () => number = () => Date.now(),
@@ -270,8 +245,7 @@ export function createConfirmNonceStore(
       // Eviction is separate from expiry, swept here amortised over calls (W1-T451, design ii).
       // Why: docs/forensics/service.md#createconfirmnoncestore-issue.
       const nowMs = now();
-      // Same age comparison `consume` uses below (`>=`, not `<`) — a nonce exactly at its TTL
-      // boundary must be swept here the same way it's refused there.
+      // Same `>=` age comparison as `consume`: a nonce at the TTL boundary is swept as it is refused.
       for (const [staleNonce, entry] of pending) {
         if (nowMs - entry.issuedAt >= CONFIRM_NONCE_TTL_MS) pending.delete(staleNonce);
       }
@@ -320,10 +294,8 @@ export function makeConfirmNonceRoute(store: ConfirmNonceStore): Route {
     method: "POST",
     path: "/v1/confirm",
     scope: "write",
-    // A socket error while reading the body is deliberately NOT caught here — it propagates
-    // out of this async handler to createService's own dispatch try/catch (500, `service.error`),
-    // the same fate every other route's handler already gets on a transport failure. This isn't
-    // a client-input problem (jsonAction's 400 shape), so it never pretends to be one.
+    // A socket error reading the body is deliberately NOT caught: it propagates to createService's
+    // dispatch catch (500, `service.error`), never pretending to be a client-input 400.
     handler: async (req, res) => {
       const raw = await readRawBody(req);
       let parsed: unknown;
@@ -345,16 +317,14 @@ export function makeConfirmNonceRoute(store: ConfirmNonceStore): Route {
 }
 
 /**
- * The raw body, MEMOISED ON THE REQUEST (W1-T500): a stream reads once, and the HIGH-tier nonce
- * check is the FIRST reader, so every HIGH-tier handler downstream needs the cached bytes, not
- * an ended stream. `Symbol.for` keyed so panel-actions.ts's `readJsonBody`, sharing no import,
- * resolves the same cache.
+ * The raw body, MEMOISED ON THE REQUEST (W1-T500): a stream reads once and the HIGH-tier nonce check
+ * reads first, so downstream handlers need the cached bytes. `Symbol.for` keyed so panel-actions.ts's
+ * `readJsonBody` resolves the same cache.
  * Why: docs/forensics/service.md#raw_body_cache (W1-T500).
  */
 export const RAW_BODY_CACHE = Symbol.for("remudero.service.rawBody");
 
-/** Read + buffer a body verbatim, never JSON-parsed — the ONE primitive both
- *  {@link makeConfirmNonceRoute} and createService's dispatch bind a nonce's `payload` against.
+/** Read + buffer a body verbatim, never JSON-parsed — what a nonce's `payload` binds against.
  *  Rejects (never throws synchronously) on a socket error. */
 function readRawBody(req: IncomingMessage): Promise<string> {
   const cached = (req as unknown as Record<symbol, unknown>)[RAW_BODY_CACHE];
@@ -371,8 +341,8 @@ function readRawBody(req: IncomingMessage): Promise<string> {
   });
 }
 
-/** Thrown by {@link readBoundedRawBody} on an over-bound body (W1-T2568); later bytes are
- *  drained but never buffered, so the caller gets the route's 413 instead of a connection reset. */
+/** Thrown by {@link readBoundedRawBody} on an over-bound body (W1-T2568); later bytes are drained
+ *  unbuffered so the caller gets a 413, not a reset. */
 export class RawBodyTooLargeError extends Error {
   constructor(maxBytes: number) {
     super(`request body exceeds the ${maxBytes}-byte bound`);
@@ -381,10 +351,8 @@ export class RawBodyTooLargeError extends Error {
 }
 
 /**
- * The self-authenticated/raw-body seam's other half (W1-T2568): reads + buffers a body exactly
- * like {@link readRawBody} (same {@link RAW_BODY_CACHE} symbol), but BOUNDED — a body over
- * `maxBytes` rejects with {@link RawBodyTooLargeError} and drains later chunks unretained.
- * Exported for any `selfAuthenticated` handler; github-event-wake.ts's webhook is the first caller.
+ * Like {@link readRawBody} (same {@link RAW_BODY_CACHE}) but BOUNDED (W1-T2568): over `maxBytes`
+ * rejects with {@link RawBodyTooLargeError}. For `selfAuthenticated` handlers (github-event-wake.ts).
  */
 export function readBoundedRawBody(req: IncomingMessage, maxBytes: number): Promise<string> {
   const cached = (req as unknown as Record<symbol, unknown>)[RAW_BODY_CACHE];
@@ -440,15 +408,13 @@ function bearerToken(req: IncomingMessage): string | undefined {
   return match?.[1];
 }
 
-/** The `?token=` credential, read ONLY for a route with `allowQueryToken` (the HTML shell, a browser
- *  navigation with no `Authorization` header) — never an API route, where it leaks via `Referer`/logs. */
+/** The `?token=` credential, read ONLY for an `allowQueryToken` route (the HTML shell). */
 function queryToken(req: IncomingMessage): string | undefined {
   const raw = new URL(req.url ?? "/", "http://localhost").searchParams.get("token");
   return raw && raw.length > 0 ? raw : undefined;
 }
 
-/** Scopes granted by tailnet identity — {@link IdentityAuth}'s two gates, both required.
- *  `undefined` on either failure falls through to the bearer token (additive, never a replacement). */
+/** Scopes from tailnet identity ({@link IdentityAuth}'s two gates); `undefined` falls through to the bearer. */
 function identityGrantedScopes(identity: IdentityAuth | undefined, req: IncomingMessage): ReadonlySet<Scope> | undefined {
   if (!identity) return undefined;
   // Gate 1 INTERFACE: a header on any other bound address is untrusted, forged or not.
@@ -468,23 +434,19 @@ function identityGrantedScopes(identity: IdentityAuth | undefined, req: Incoming
   return READ_WRITE;
 }
 
-/** {@link IdentityAuth}'s tailnet-identity grantor, wrapped as an {@link IdentityProvider}
- *  (W1-T430's seam, adopter #1); `allowQueryToken` is irrelevant here, so ignored. */
+/** {@link IdentityAuth}'s grantor as an {@link IdentityProvider} (W1-T430); ignores `allowQueryToken`. */
 function tailscaleIdentityProvider(identity: IdentityAuth): IdentityProvider {
   return {
     name: "tailscale-identity",
     grant: (req) => identityGrantedScopes(identity, req),
-    // W1-T404: unchanged from before tiers existed — the interface+allowlist gates in
-    // IdentityAuth's own doc are already a stronger proof than a pasted secret, so this
-    // grantor keeps reaching every tier once enforcement is on, exactly as it reaches every
-    // route today.
+    // W1-T404: the interface+allowlist gates are stronger than a pasted secret, so this grantor keeps
+    // reaching every tier.
     writeTier: "high",
   };
 }
 
-/** The bearer-token grantor (`ServiceTokens`, constant-time compare) wrapped as an
- * {@link IdentityProvider} — W1-T430's seam, adopter #2. `?token=` is honored only when the
- * caller passes `allowQueryToken` (true only for the HTML shell route). */
+/** The bearer-token grantor (constant-time compare) as an {@link IdentityProvider} (W1-T430).
+ * `?token=` is honored only when `allowQueryToken` (the HTML shell). */
 function bearerTokenProvider(tokens: ServiceTokens): IdentityProvider {
   return {
     name: "bearer-token",
@@ -495,10 +457,9 @@ function bearerTokenProvider(tokens: ServiceTokens): IdentityProvider {
       if (safeEqual(token, tokens.read)) return READ_ONLY;
       return undefined;
     },
-    // W1-T404 design (v), THE SHARPEST RULING IN THE TASK: an EXISTING write credential
-    // resolves to `"low"`, never higher — a deliberate, visible break (once enforcement is on)
-    // from a single token that used to reach every write route. Defaulting this to `"high"`
-    // would ship the change as a no-op that silently re-grants everything.
+    // W1-T404 design (v), THE SHARPEST RULING: an EXISTING write credential resolves to `"low"`, never
+    // higher — a deliberate break from one token reaching every write route. Defaulting to `"high"`
+    // would silently re-grant everything.
     writeTier: "low",
   };
 }

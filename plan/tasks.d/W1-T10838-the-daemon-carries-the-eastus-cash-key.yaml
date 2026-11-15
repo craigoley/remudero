@@ -19,7 +19,7 @@
     - src/lib/config-schema.ts
     - docs/operator-guide.md
     - test/deploy/the-daemon-carries-the-eastus-cash-key.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     VERIFIED ON origin/main 07dbdcc77 AND READ-ONLY ON THE HOST (2026-10-27). A host env var reaches the

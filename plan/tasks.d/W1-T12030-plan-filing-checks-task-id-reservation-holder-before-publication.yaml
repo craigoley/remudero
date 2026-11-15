@@ -1,0 +1,43 @@
+- id: W1-T12030
+  title: "A plan filing checks its task ID reservation holder before publication"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: medium
+  band_meaning: span
+  origin: "operator direction 2026-11-10: stuck PRs must flow or receive an owned actionable disposition; observed a plan filing rejected only after PR creation because its task ID was reserved by a different branch"
+  files:
+    - hooks/pre-push
+    - scripts/task-id-reservation-gate.mjs
+    - test/dispatch/task-id-reservation-gate.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  acceptance:
+    - claim: "the pre-push path checks every task ID introduced by a plan filing against its durable reservation before publication"
+      proof: "unit test: W1-T12030: the pre-push path checks task ID reservation ownership before publication"
+    - claim: "a reservation held by another branch refuses before push and reports the actual holder plus the supported owner recovery command"
+      proof: "unit test: W1-T12030: a mismatched reservation refuses with its holder and recovery command"
+    - claim: "a matching holder passes, while an absent or unreadable reservation surface refuses closed without deleting or rewriting the reservation"
+      proof: "unit test: W1-T12030: matching reservations pass and unknown reservations remain held"
+    - claim: "a filing-shaped plan PR remains exempt from the generic branch identity gate but is still checked for reservation ownership"
+      proof: "unit test: W1-T12030: filing-shaped heads still require the matching task ID reservation"
+  rationale: |
+    INCIDENT: on 2026-11-10, a plan-only PR passed the advisory pre-push head-identity path because filing-shaped subjects are exempt from the generic branch shape check. After the PR was created, `rmd review` failed because its task ID reservation was held by a different branch. The reservation was correctly preserved; the detection came after publication and left a red PR requiring manual repair.
+
+    ROOT CAUSE: no pre-publication gate binds each newly filed shard ID to the exact durable reservation holder branch. The existing review gate enforces ownership late, after CI and a PR slot have already been spent.
+
+    DESIGN: validate changed task shards against the positive-controlled reservation refs before push. A matching exact holder is admitted. A mismatch names the owner branch and existing recovery route. Missing, unreadable or contradictory reservation evidence fails closed and preserves the reservation. The gate never releases, steals or rewrites a reservation and never changes the submitted plan.
+
+    This is separate from the due-PR recovery consumer: it prevents plan-filing identity errors from becoming stuck PRs and does not change merge, review, CI, security or human-approval gates.
+  design: |
+    1. At pre-push, identify added or modified task shards in the plan-only filing diff and parse their declared task IDs using the repository's canonical shard reader.
+    2. Read the corresponding reservation ref for each ID with the existing positive-controlled GitHub read path and compare its holder to the exact pushed branch ref.
+    3. Admit only exact holder matches. For a mismatch, report the observed holder and the supported `rmd next-task-id --branch <filing-branch>` or owner-lane recovery path without releasing the held ID.
+    4. Treat absent, unreadable, malformed or contradictory reservation data as unknown and refuse before publication. Keep the generic branch identity exemption for plan-only filing subjects independent from this ownership check.
+    5. Test matching, mismatched, missing and unreadable reservations, plus a plan-only filing branch that is generic-head-exempt but reservation-checked.
+  falsifier: |
+    A plan-only filing with an ID reserved by another branch reaches GitHub, or an unknown reservation is treated as free. A matching holder is refused, or any refusal releases or rewrites the held reservation.

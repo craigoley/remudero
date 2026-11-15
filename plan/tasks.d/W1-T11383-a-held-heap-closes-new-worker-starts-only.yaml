@@ -30,7 +30,7 @@
     - src/lib/sweep.ts
     - src/lib/idle-lane-accounting.ts
     - test/memory/a-held-heap-closes-new-worker-starts-only.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "heapHoldReadiness over W1-T11382's trace returns READY only with a high, low and dwell each derived from measured same-boot growth, reserve, recovery and rebound, with high below the 75% guard by at least the worst rise plus reserve, low below high, and a replay of the trace that latches before every retained guard crossing and releases after every recovery; otherwise it returns NOT READY naming each missing item, a fixture of PID 138's 12.59% to 99.56% gap with no clean close returns NOT READY, and moving the fixture's measured growth moves the derived pair"

@@ -1,0 +1,53 @@
+- id: W1-T12173
+  title: "The plan lint flags a new exported function that only tests call"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # a blocking check on every code pull request; a false finding stops a correct change
+  band_meaning: blast-radius
+  origin: operator-session#follow-ups-2026-11-10
+  plan_refs:
+    - W1-T9307
+    - W1-T2735
+    - W1-T996
+  files:
+    - src/lib/task-linter.ts
+    - src/run-task.ts
+    - test/plan/the-plan-lint-flags-a-new-exported-function-that-only-tests-call.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "For each function or class that the diff adds as an export under src, the lint searches the tree. It reports the export when no file outside test/ and outside its own file imports or calls it"
+      proof: "grep: W1-T12173 criterion 1 in test/plan/the-plan-lint-flags-a-new-exported-function-that-only-tests-call.test.ts"
+    - claim: "For a module that the diff adds under src, the lint reports the module when no file outside test/ imports it"
+      proof: "grep: W1-T12173 criterion 2 in test/plan/the-plan-lint-flags-a-new-exported-function-that-only-tests-call.test.ts"
+    - claim: "A mention in a comment or in a string is not a call. An import that only another new and uncalled module makes is not a call"
+      proof: "grep: W1-T12173 criterion 3 in test/plan/the-plan-lint-flags-a-new-exported-function-that-only-tests-call.test.ts"
+    - claim: "The finding names the export, its file and the test files that use it, and says what to add"
+      proof: "grep: W1-T12173 criterion 4 in test/plan/the-plan-lint-flags-a-new-exported-function-that-only-tests-call.test.ts"
+    - claim: "A diff that adds no export gets no finding, and the lint reads no extra file for it"
+      proof: "grep: W1-T12173 criterion 5 in test/plan/the-plan-lint-flags-a-new-exported-function-that-only-tests-call.test.ts"
+    - claim: "The lint command runs the check on the added exports it already reads from the diff"
+      proof: "grep: exportsWithoutProductionCaller( in src/run-task.ts"
+  rationale: |
+    MEASURED 2026-11-10 in a sample of reviews from the core instance's ledger, 2026-10-27 to 2026-11-10: the most common objection of both reviewer models, where the proof had passed, was that no production code calls the new function.
+    - 30 of 40 sampled downgrades by gpt-6.1-sol and 32 of 37 by sonnet-5-5 named a specific defect. Most were of this kind: "the test passes on injected fixtures, but no production code calls the function".
+    - A reviewer finds this late, after a full build and a full review. A search of the tree finds it in seconds.
+    - The plan lint already asks a task for a call-site criterion on a new module or a new export (`call-site` in src/lib/task-linter.ts, W1-T9307). That check reads the criteria of the task. It does not read the code that the change adds.
+    - The lint command already reads the added exports from the diff: `addedExportsFromPatch` in src/lib/task-linter.ts, called in `lintPlanCommand` in src/run-task.ts.
+    - The lint runs in the static stage of the author preflight and in hosted CI, so the author sees the finding before the first push.
+  design: |
+    Add `exportsWithoutProductionCaller` to src/lib/task-linter.ts. It takes the added exports, the added modules and a reader of the tree, and returns the findings.
+    It parses each candidate file for imports and calls of the name. A text match alone is not enough, as criterion 3 says.
+    `lintPlanCommand` calls it after `addedExportsFromPatch` and adds the findings to the result as a blocking check with its own name.
+    Count functions and classes. Leave out an exported constant and an exported type: tests in this repository read many constants by design.
+    Before the check blocks, the builder runs it over the last 100 merged code pull requests and reports each finding as true or false in the pull request. If more than 5 are false, the check ships as a warning and the builder says why.
+    NOT IN SCOPE: the criteria check `call-site`, the reviewer's prompt, and exports that existed before the change.
+  falsifier: |
+    Count a call from a test file as a production call and criterion 1 must fail. Count a mention in a comment and criterion 3 must fail. Report an export that a file under src calls and criterion 1 must fail. Restore and require all to pass.
+  note: |
+    src/lib/task-linter.ts has a comment pin with a fixed number of comment bytes (see W1-T12164). Keep new comments in that file short.

@@ -162,6 +162,8 @@ test("W1-T3798 production adapter posts reuse and routes discrimination through 
     head_sha: JUDGED_HEAD,
     decision_verdict: { state: "success", criteria: [{ proof_exec: "executed_pass" }] },
     proof_exec: ["executed_pass"],
+    // W1-T11847: a reused verdict posts only while the reviewer code that judged it is current at origin/main.
+    reviewer_code_sha: "c".repeat(40),
   });
   process.env.PATH = `${bin}:${oldPath}`;
   try {
@@ -177,6 +179,7 @@ test("W1-T3798 production adapter posts reuse and routes discrimination through 
         calls.push("fallback-review");
         return 0;
       },
+      reviewerCodeFreshnessImpl: () => ({ status: "fresh", codeSha: "c".repeat(40), originMainSha: "c".repeat(40), advance: "none" }),
     });
     await withLiveWritesAllowed(() =>
       effects.postReview!(

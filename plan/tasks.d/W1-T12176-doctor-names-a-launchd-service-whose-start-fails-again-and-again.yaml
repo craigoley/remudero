@@ -1,0 +1,51 @@
+- id: W1-T12176
+  title: "Doctor names a launchd service whose start fails again and again, with the cause"
+  repo: remudero
+  depends_on: []
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # doctor's verdict and exit code on every Mac host; a wrong failure sends the operator to a sound service
+  band_meaning: blast-radius
+  origin: operator-session#follow-ups-2026-11-10
+  plan_refs:
+    - W1-T5533
+  files:
+    - src/lib/doctor.ts
+    - src/lib/report-commands.ts
+    - test/deploy/doctor-names-a-launchd-service-whose-start-fails-again-and-again.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "On a Mac, doctor reads the state of each Remudero launchd label that is installed: the daemon, serve, the supervisor and the digest"
+      proof: "grep: W1-T12176 criterion 1 in test/deploy/doctor-names-a-launchd-service-whose-start-fails-again-and-again.test.ts"
+    - claim: "A service with no running process, a last exit code that is not zero and more than three starts fails the check. The line names the label, the count of starts and the last line of its error log"
+      proof: "grep: W1-T12176 criterion 2 in test/deploy/doctor-names-a-launchd-service-whose-start-fails-again-and-again.test.ts"
+    - claim: "When the program that the service starts does not exist, the line names the missing path and says how to repair the install or remove the service"
+      proof: "grep: W1-T12176 criterion 3 in test/deploy/doctor-names-a-launchd-service-whose-start-fails-again-and-again.test.ts"
+    - claim: "A checkout that a service updates by self-sync and that is not on main gives a warning that names the checkout and its branch"
+      proof: "grep: W1-T12176 criterion 4 in test/deploy/doctor-names-a-launchd-service-whose-start-fails-again-and-again.test.ts"
+    - claim: "A label that is not installed gives no finding. A state that cannot be read is reported as unreadable, never as sound. On a host with no launchd the check does not apply"
+      proof: "grep: W1-T12176 criterion 5 in test/deploy/doctor-names-a-launchd-service-whose-start-fails-again-and-again.test.ts"
+    - claim: "The doctor report includes the new check"
+      proof: "grep: judgeLaunchdServices( in src/lib/doctor.ts"
+  rationale: |
+    OBSERVED 2026-11-10 on the Mac agent account: the launchd job com.remudero.daemon failed to start about 450 times in a row, once a minute, and nothing reported it.
+    - Each start ended with "daemon-install/node_modules/.bin/tsx: No such file or directory". The node_modules directory of the install was missing.
+    - The operator found it by reading the job's error log during other work.
+    - The read broker on the same account refuses self-sync, because its checkout ~/Remudero/remudero is on a plan amendment branch and not on main.
+    - `buildDoctorReport` in src/lib/doctor.ts has checks for the ledger, the disk, memory, locks, workers and the Node version. It has none for the services that launchd starts.
+    - src/lib/launchd.ts already holds the four labels and the paths of their property lists and logs.
+  design: |
+    Add `judgeLaunchdServices` to src/lib/doctor.ts as a pure function over readings, in the shape of the other checks there. Call it in `buildDoctorReport`.
+    src/lib/report-commands.ts gathers the readings where it gathers the other doctor inputs: `launchctl print` for each label, the last line of the error log, and whether the program path exists.
+    Doctor reports and repairs nothing. `--fix` stays refused, as today.
+    Take the last line of the log only. Cut it at a fixed length, because a log line can hold a path or a value that a report must not repeat in full.
+    NOT IN SCOPE: the supervisor, a repair of the install, and the same check for systemd units on Linux.
+  falsifier: |
+    Report a failing service as sound and criterion 2 must fail. Report a label that is not installed and criterion 5 must fail. Leave the missing path out of the line and criterion 3 must fail. Restore and require all to pass.
+  note: |
+    The number three in criterion 2 is new. The builder may replace it with a value from launchd's own restart interval and says so in the pull request.
+    src/lib/doctor.ts and src/lib/report-commands.ts each have a comment pin with a fixed number of comment bytes (see W1-T12164). Keep new comments there short.

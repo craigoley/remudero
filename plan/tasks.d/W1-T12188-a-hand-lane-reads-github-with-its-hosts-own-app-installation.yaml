@@ -1,0 +1,81 @@
+- id: W1-T12188
+  title: "A hand lane reads GitHub with its host's own App installation"
+  repo: remudero
+  depends_on:
+    - W1-T11926
+    - W1-T12075
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # which GitHub credential a read uses on a host; the token and the key must never reach a log, a row or a command line
+  band_meaning: span
+  origin: operator-session#hand-lane-identity-2026-11-10
+  plan_refs:
+    - W1-T11926
+    - W1-T12075
+    - W1-T12072
+    - W1-T12170
+    - W1-T10302
+    - W1-T1024
+  files:
+    - src/lib/github-credential.ts
+    - src/lib/github-app.ts
+    - src/lib/gh-read-broker.ts
+    - src/run-task.ts
+    - docs/operator-guide.md
+    - test/github/a-hand-lane-reads-github-with-its-hosts-own-app-installation.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "An app reference names an App id, an installation id and the path of a key file. When the read broker holds a token for it, the resolver answers a read with that token and names the reference as the source"
+      proof: "grep: W1-T12188 criterion 1 in test/github/a-hand-lane-reads-github-with-its-hosts-own-app-installation.test.ts"
+    - claim: "The read broker mints the token of an app reference at its start and renews it before it ends. The token stays in memory. No file, log line, row or argument holds the token or the key"
+      proof: "grep: W1-T12188 criterion 2 in test/github/a-hand-lane-reads-github-with-its-hosts-own-app-installation.test.ts"
+    - claim: "When the mint fails or the key file is unreadable, the resolver takes the next source. The attempt names the reference and the cause, and the read still runs"
+      proof: "grep: W1-T12188 criterion 3 in test/github/a-hand-lane-reads-github-with-its-hosts-own-app-installation.test.ts"
+    - claim: "A write never takes an app reference that is marked for reads. It takes the next source, as today"
+      proof: "grep: W1-T12188 criterion 4 in test/github/a-hand-lane-reads-github-with-its-hosts-own-app-installation.test.ts"
+    - claim: "Each row of the broker's request log names the credential source, the reference and the host. It holds no value"
+      proof: "grep: W1-T12188 criterion 5 in test/github/a-hand-lane-reads-github-with-its-hosts-own-app-installation.test.ts"
+    - claim: "The broker's status command shows, for each credential it used, the requests in the window, the remaining requests of each limit and the time of the reset. It makes no extra GitHub call for this"
+      proof: "grep: W1-T12188 criterion 6 in test/github/a-hand-lane-reads-github-with-its-hosts-own-app-installation.test.ts"
+    - claim: "With no app reference, the broker and the resolver behave as they do after W1-T12075"
+      proof: "grep: W1-T12188 criterion 7 in test/github/a-hand-lane-reads-github-with-its-hosts-own-app-installation.test.ts"
+    - claim: "The operator guide lists what the operator creates once for a host: the App, its installation, its key file and one reference"
+      proof: "grep: W1-T12188 in docs/operator-guide.md"
+    - claim: "The read broker mints the token through the App module"
+      proof: "grep: mintInstallationToken( in src/lib/gh-read-broker.ts"
+  rationale: |
+    OBSERVED 2026-11-10 on the Mac agent account and the fleet host: the hand lanes of two hosts spent one GitHub limit, and it reached zero.
+    A hand lane is an operator session that builds and ships on a host by hand.
+    - The `gh` login of the Mac agent account and the hand token of the Azure host are the same GitHub user. GitHub gives one user 5,000 requests an hour, whatever the number of hosts.
+    - That limit reached zero at 21:14Z. The ship lane on the Mac waited 12 minutes for the reset.
+    - The two hosts used 3,282 requests in the next 37 minutes. Nothing recorded which host or which credential made them.
+    - The daemons of the fleet read with the token of a GitHub App installation (W1-T1024). An installation has its own limit, so the daemons did not stop.
+    READ 2026-11-10 in the source:
+    - The resolver of W1-T11926 (pull request #17706, src/lib/github-credential.ts) accepts a reference of the kind "app". It then fails that reference with "this resolver does not mint GitHub App tokens".
+    - src/lib/github-app.ts mints for one App only. It reads `GH_APP_ID`, `GH_APP_INSTALLATION_ID` and `GH_APP_PRIVATE_KEY_PATH`, and it writes the token to `GH_TOKEN` of its own process.
+    - The read broker in src/lib/gh-read-broker.ts keys its shared pace state by the GitHub login and counts requests by client. Its request log has no field for the credential or the host.
+    - W1-T12075 routes the broker's own `gh` calls through the resolver. After it, a reference on a host decides what the broker reads with.
+  design: |
+    1. The reference. An app reference gains three fields: the App id, the installation id and the absolute path of the key file. None of them is a secret value. It may also carry `reads_only: true`.
+    2. The mint. `mintInstallationToken` in src/lib/github-app.ts takes those three values and returns the token and its end time. It does not read or write `GH_TOKEN`. The read broker calls it at its start for each app reference of its host and renews each token before it ends. It hands the tokens to the resolver through a holder in memory, as `installGithubCredentialMissingSink` hands in the ledger writer.
+    3. The resolver. `GithubCredentialQuery` gains a field that says the call is a write. For an app reference with a held token the resolver answers. With no held token it records why and takes the next source. A short command outside the broker holds no token, so it reads as it does today.
+    4. The record. The broker writes the source, the name of the reference and the host name on each row of its request log. It keeps the last `x-ratelimit-remaining` and reset time of each limit for each credential. It already parses those headers for its pacer.
+    5. The status. `rmd gh-broker status` prints one block for each credential from that state and the request log.
+    6. The pace state. GitHub does not answer `gh api user` for an installation token, so the broker cannot learn a login from it. The builder confirms this and keys the pace state of an app credential by the name of the reference.
+    7. The guide. docs/operator-guide.md gets one section with the steps below.
+    What the operator creates once, for each host that needs its own limit:
+    - a GitHub App (an "operator app") with read access to contents, pull requests, checks, actions and metadata;
+    - one installation of that App on the repositories of the fleet;
+    - one private key of the App, as a file on that host that only the hand lane's account can read;
+    - one app reference in the references file of that host.
+    GitHub counts the limit for each installation, and one App has one installation on one account. So two hosts that must not share a limit need two Apps.
+    NOT IN SCOPE: pushes, pull request writes and merges of a hand lane, which keep the operator's own login; the daemons' own App; the scheduled shell jobs of W1-T12170; and a console screen for the references.
+  falsifier: |
+    Write the token to a row and criterion 2 must fail. Stop the read when the mint fails and criterion 3 must fail. Give a write the token of a reference marked for reads and criterion 4 must fail. Call GitHub from the status command and criterion 6 must fail. Change a read when no app reference exists and criterion 7 must fail. Restore and require all to pass.
+  note: |
+    Build this after W1-T11926 and W1-T12075 merge. src/lib/github-credential.ts is not on main at this filing.
+    The hand lane's direct `gh` calls in a shell do not pass the resolver. They gain the App only when they go through the read broker or through the command of W1-T12170.

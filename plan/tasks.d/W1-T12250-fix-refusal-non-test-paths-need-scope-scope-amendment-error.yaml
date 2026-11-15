@@ -1,0 +1,73 @@
+- id: W1-T12250
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — fix_refusal:non-test-paths-need-scope-scope-amendment-error cost 5.9 PR minute(s) across 4 round(s) on 3 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 1.21
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:fix_refusal:non-test-paths-need-scope-scope-amendment-error"
+  files:
+    - src/cli/commands/fix.ts
+    - test/gardeners/fix-refusal-non-test-paths-need-scope-scope-amendment-error.test.ts
+  acceptance:
+    - claim: "a recorded fix_refusal:non-test-paths-need-scope-scope-amendment-error round, replayed through the real code path in src/cli/commands/fix.ts, is prevented or self-healed without dispatching a fix round"
+      proof: "unit test: W1-T12250: fix_refusal:non-test-paths-need-scope-scope-amendment-error is prevented, not retried"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures fix_refusal:non-test-paths-need-scope-scope-amendment-error's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2. The regression must replay one recorded round of this cause through the real owner path; the after-window measurement, not the regression, shows the cause's share fell."
+  rationale: |
+    MEASURED by the ci-friction gardener: fix_refusal:non-test-paths-need-scope-scope-amendment-error cost 5.9 PR minute(s) (seven-day half-life) across 4 fix round(s) on 3 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/cli/commands/fix.ts: names "non-test paths need scope" (2 line(s))
+
+    RECENT ROUNDS (newest first):
+    - PR #17704 at 2026-11-10T21:46:52.257Z: non-test paths need scope (scope-amendment-error: Error: Command failed: gh api repos/craigoley/remudero/pulls?head=craigoley:scope-amendment/W1-T11928-17704&state=open -i gh: API rate limit exceeded
+    - PR #15133 (https://github.com/craigoley/remudero/pull/15133) at 2026-10-28T10:18:50.913Z: non-test paths need scope (scope-amendment-error: PushFailedError: Command failed: git -C /home/node/Remudero/worktrees/scope-amendment-W1-T10408-15133 push origin HEAD:refs/heads/scope-amendment/W1-T
+        failing tests: unit test: test/the-affected-suite-reach-ratchet.test.ts
+        log excerpt:
+          | ✖ failing tests:
+          | 
+          | test at test/the-affected-suite-reach-ratchet.test.ts:1:4751
+          | ✖ unit test: test/the-affected-suite-reach-ratchet.test.ts (3734.245667ms)
+          |   AssertionError [ERR_ASSERTION]: importerCount: 1011 > 1010; new importers: test/worker/run-task/ci-friction-remedy-077a3aef1f0368e1.test.ts
+          |   medianReachPercent: 48.98599710284886 > 48.983050847457626; new importers: test/worker/run-task/ci-friction-remedy-077a3aef1f0368e1.test.ts
+          |   + actual - expected
+          | 
+          |   + [
+          |   +   'importerCount: 1011 > 1010; new importers: test/worker/run-task/ci-friction-remedy-077a3aef1f0368e1.test.ts',
+          |   +   'medianRea
+    - PR #13513 (https://github.com/craigoley/remudero/pull/13513) at 2026-10-22T07:14:36.728Z: non-test paths need scope (scope-amendment-error: Error: Command failed: git -C /home/node/Remudero/worktrees/sweep-W1-T10227-1792653041219 worktree add -b scope-amendment/W1-T10227-13513 --no-track /
+        failing tests: W1-T10227: board_snapshot.observation_refused no longer recurs
+        log excerpt:
+          | grep -E '^FLAKE-RETRY:' test-shard-output.log > "$FLAKE_RETRY_DIR/shard-1.log" || : > "$FLAKE_RETRY_DIR/shard-1.log"
+          | not ok 1 - W1-T10227: board_snapshot.observation_refused no longer recurs
+          |   ---
+          |   duration_ms: 23.013495
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/gardeners/scout-board-snapshot-observation-refused.test.ts:1:743'
+          |   failureType: 'testCodeFailure'
+          |   error: |-
+          |     the stale sidecar was removed with the replaced data
+          | 
+          |     true !== false
+          | 
+          |   code: 'ERR_ASSERTION'
+          |   name: 'AssertionError'
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+
+    The regression must replay one recorded round above through the real owner path (the code that decides whether a fix round is dispatched or the failure heals), not assert a label, prompt text or report wording.
+    It need not prove the cause never recurs: the after-window measurement decides that, and reopens the cause one rung up if its share does not fall.
+  risk_ruling:
+    verdict: "rule-3-low-privilege"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "rule 3 (live and low-privilege): the symptom is live, 1 occurrence(s) across 7 day(s), last seen 2026-11-10T21:46:52.257Z, and the record declares no privileged path"
+    judged_at: "2026-11-11T05:42:09.351Z"
+    pin: "bd4f7b483bcd3454f3fb80da9555775d08985161daea3283b9c04ec4dfa8789f"

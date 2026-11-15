@@ -7,7 +7,8 @@
  *
  * THE FIX. The ordinary light pass admits `mergeable` and runs the full sweep's own arm path —
  * decideSweepArm, the W1-T5403 risk judge, operator holds and every dedup stand where they stood —
- * and the row it writes names the surface. A review-only pass still arms nothing.
+ * and the row it writes names the surface. A pause, drain, boot or idle pass still arms nothing; an
+ * interphase-review pass arms through the same path (W1-T11510, test/daemon/an-interphase-review-pass-arms-a-ready-pr.test.ts).
  *
  * REVIEW ADMISSION was already a light-pass action (349 of 408 `sweep.review_admitted` rows on
  * 2026-10-05 read `surface: light`). A PR that waited for a full pass had LOST the light pass's
@@ -72,7 +73,8 @@ interface Harness {
   reviewed: number[];
 }
 
-/** `armAllowed` mirrors `buildSweepLightHook`: true on the ordinary pass, false on a review-only one. */
+/** `armAllowed` mirrors `buildSweepLightHook`: true on the ordinary and interphase-review passes, false on the
+ *  other review-only scopes (`lightPassArmAdmitted`, W1-T11510). */
 function harness(over: Partial<SweepDeps> = {}, armAllowed = true): Harness {
   const armed: Harness["armed"] = [];
   const reviewed: number[] = [];
@@ -109,7 +111,7 @@ test("lightPassActionable admits mergeable only when the ordinary light pass say
   assert.equal(lightPassActionable("mergeable", false), false, "every 2-argument caller keeps the original shape");
   assert.equal(lightPassActionable("mergeable", true, true), false, "the requeue batch never arms");
   assert.equal(lightPassActionable("mergeable", false, false, true), true, "the ordinary light pass arms");
-  assert.equal(lightPassActionable("mergeable", false, false, false), false, "a review-only pass does not");
+  assert.equal(lightPassActionable("mergeable", false, false, false), false, "a pause, drain, boot or idle pass does not");
   assert.equal(lightPassActionable("post-review", false, false, false), true);
   assert.equal(lightPassActionable("blocked-fixable", false, false, true), false, "the fix lane is untouched");
   assert.equal(lightPassActionable("stale", false, false, true), false, "close stays a full-sweep lane");
@@ -127,7 +129,7 @@ test("a light pass arms a green, reviewed, mergeable code PR and names the light
   assert.notEqual(row?.stand_down_reason, DEFERRED);
 });
 
-test("a review-only light pass still leaves the arm to the ordinary pass", async () => {
+test("a pause, drain, boot or idle light pass still leaves the arm to the ordinary pass", async () => {
   const h = harness({}, false);
   await runSweepLightPass([readyPr(9102)], h.deps, DEFAULT_SWEEP_POLICY);
   assert.deepEqual(h.armed, []);

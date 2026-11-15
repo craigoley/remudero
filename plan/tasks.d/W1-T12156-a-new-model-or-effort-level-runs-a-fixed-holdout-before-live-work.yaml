@@ -1,0 +1,60 @@
+- id: W1-T12156
+  title: "A new model or effort level runs a fixed holdout before it takes live work"
+  repo: remudero
+  depends_on:
+    - W1-T11120
+    - W1-T10859
+  priority: 1.4
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # a new pass that starts paid workers on stored tasks, and a new refusal in the config gardener
+  band_meaning: blast-radius
+  origin: operator-session#model-choice-2026-11-10
+  plan_refs:
+    - W1-T4619
+    - W1-T11118
+    - W1-T11212
+    - W1-T11599
+  files:
+    - src/lib/model-holdout.ts
+    - src/lib/golden-corpus.ts
+    - src/lib/model-availability.ts
+    - src/lib/config-gardener.ts
+    - src/lib/ledger-steps.ts
+    - src/run-task.ts
+    - test/routing/a-new-model-or-effort-level-runs-a-fixed-holdout-before-live-work.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The holdout is a fixed list of past merged tasks, each with its base commit and its held-out proof. It is frozen once, and a later pass reads it back and never derives it again"
+      proof: "grep: W1-T12156 criterion 1 in test/routing/a-new-model-or-effort-level-runs-a-fixed-holdout-before-live-work.test.ts"
+    - claim: "The pass runs the holdout through the canary command for a model that the successor watch reports as ready. It does the same for a model and effort in the mounts table with no holdout result"
+      proof: "grep: W1-T12156 criterion 2 in test/routing/a-new-model-or-effort-level-runs-a-fixed-holdout-before-live-work.test.ts"
+    - claim: "The pass writes one model.holdout.result row: tasks passed, cost and duration, beside the result of the model and effort it would replace on the same tasks"
+      proof: "grep: W1-T12156 criterion 3 in test/routing/a-new-model-or-effort-level-runs-a-fixed-holdout-before-live-work.test.ts"
+    - claim: "The config gardener refuses an adopt-mount change to a model and effort with no holdout result, and names the result that is absent"
+      proof: "grep: W1-T12156 criterion 4 in test/routing/a-new-model-or-effort-level-runs-a-fixed-holdout-before-live-work.test.ts"
+    - claim: "No holdout task text or proof reaches a prompt outside the holdout run"
+      proof: "grep: W1-T12156 criterion 5 in test/routing/a-new-model-or-effort-level-runs-a-fixed-holdout-before-live-work.test.ts"
+    - claim: "The measurement cadence in src/run-task.ts calls the pass"
+      proof: "grep: runModelHoldoutIfDue( in src/run-task.ts"
+  rationale: |
+    OBSERVED 2026-11-10 in the code on main: a new model or effort level first meets the fleet's work on live tasks.
+    - In the core instance's ledger, 2026-10-27 to 2026-11-10, gpt-6.1-sol reviews gave FAIL in 55.6% (409 of 736) against 14.6% (47 of 322) for sonnet-5-5. The fleet learned that on live pull requests.
+    - gpt-6.1-sol build attempts succeeded in 83.3% of 84 at medium effort and 60.1% of 218 at high effort. No effort level was tried on a fixed set first.
+    - Three parts exist and are not joined. src/lib/golden-corpus.ts derives held-out tasks from merged history. src/lib/model-availability.ts watches for a successor model. The canary command runs a suite, and nothing starts it.
+    - A fixed set gives the same test to every model, so two results can be compared a month apart.
+  design: |
+    Add src/lib/model-holdout.ts.
+    1. Freeze the list once from `deriveGoldenCorpus`, with a seed, into the state directory. Keep the tasks private, in the sealed split that W1-T11118 defines.
+    2. `runModelHoldoutIfDue` reads the successor watch's reading and the mounts table. It finds each model and effort with no `model.holdout.result` row and runs one of them in a pass.
+    3. Run through the canary command that W1-T11120 completes. Spend only inside the canary cash limit of W1-T11212.
+    4. In `mountCandidate` in src/lib/config-gardener.ts, refuse a candidate whose model and effort has no result row.
+    Register the step in src/lib/ledger-steps.ts.
+    NOT IN SCOPE: how a successor is deployed (W1-T10859), the comparator of W1-T11599, and any routing change from a holdout result.
+  falsifier: |
+    Derive the list again on a later pass and criterion 1 must fail. Let the gardener adopt a model with no result and criterion 4 must fail. Put a held-out proof into a live prompt and criterion 5 must fail. Restore and require all to pass.
+  note: |
+    A holdout result does not replace an experiment. It stops a model that is clearly worse before it costs live work.

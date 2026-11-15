@@ -9,7 +9,7 @@
   risk: high  # Rule 19: one concern, how the repository-maintenance controller recovers an escalated store; no other reaper, rung or escalation class changes
   band_meaning: span
   priority: 1
-  status: queued
+  status: merged
   attempts: 0
   origin: "filing agent 2026-10-26: operator host review 18:40-19:00Z found every fleet daemon tree carrying gc.log and core's repos/remudero holding 1.66 GB of loose objects behind stale locks"
   plan_refs: [W1-T2529, W1-T3090, W1-T3116, W1-T5119, W1-T9651]

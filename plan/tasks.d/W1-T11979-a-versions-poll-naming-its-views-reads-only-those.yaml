@@ -1,0 +1,41 @@
+- id: W1-T11979
+  title: "A versions poll that names the views its page shows counts as a read of only those views, so an open console tab no longer keeps every view on its hot cadence"
+  repo: remudero
+  depends_on:
+    - W1-T11933
+  priority: 1.4
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the read-model worker and the versions route; an added optional query parameter, and a poll without it behaves as today
+  band_meaning: blast-radius
+  origin: operator-session#serve-idle-2026-11-10
+  plan_refs:
+    - W1-T11127
+    - W1-T11815
+    - W1-T11933
+  files:
+    - src/lib/read-model-worker.ts
+    - src/lib/view-events.ts
+    - test/console-api/serve/a-versions-poll-naming-its-views-reads-only-those.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "GET /v1/views/versions with a views parameter answers the same body as without it and is counted by viewsReadBy as a read of only the named views and the views they are built from"
+      proof: "grep: W1-T11979 criterion 1 in test/console-api/serve/a-versions-poll-naming-its-views-reads-only-those.test.ts"
+    - claim: "A poll without the parameter is counted as a read of every view, as today, and an unknown name in the parameter is ignored"
+      proof: "grep: W1-T11979 criterion 2 in test/console-api/serve/a-versions-poll-naming-its-views-reads-only-those.test.ts"
+    - claim: "The same holds for the per-instance copy of the path"
+      proof: "grep: W1-T11979 criterion 3 in test/console-api/serve/a-versions-poll-naming-its-views-reads-only-those.test.ts"
+  rationale: |
+    OBSERVED in code: READ_MODEL_EVERY_VIEW_PATHS holds /v1/views/versions, and viewsReadBy returns every view name for it. route-reads.json counts 3,903 reads of that path.
+    - Once every view is read-paced (W1-T11933), one open tab polling versions is enough to keep all fourteen views hot whatever page it shows.
+  design: |
+    Parse an optional comma-separated views parameter in viewsReadBy for the versions path and pass only those names through the existing reader closure. The console change that sends the parameter is a console-repo task to file once this is merged; until then nothing changes for it.
+    NOT IN SCOPE: the console, the events stream and the versions body.
+  falsifier: |
+    Count a named poll as every view and criterion 1 must fail; change an unnamed poll and criterion 2 must fail; skip the per-instance path and criterion 3 must fail. Restore and require all three to pass.
+  note: |
+    reservation hand-off: run-unfiled-1794287307841 -> run-unfiled-1794287307841
+    Reserved with rmd next-task-id (W1-T11979 on run-unfiled-1794287307841). Follow-up for the console repo: send the views parameter.

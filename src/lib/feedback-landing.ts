@@ -26,7 +26,11 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
+import { releaseTaskIdReservationAsync, type ReservationReleaseOutcome } from "./task-id-release.js";
+import { reservationHolderBranch, taskIdReservationRef } from "./task-id-reservation.js";
 import { loadPlanFromYaml } from "./plan.js";
+import { planDestinationRepository, type PlanDestination, type PlanDestinationRepository } from "./plan-destination.js";
+import { planReconcilePrBody, planReconcileProofTemplate } from "./plan-reconcile-batch.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
 import { mergeFeedbackRecord, type FeedbackRecordMergeDecision } from "./feedback-record-merge.js";
@@ -35,6 +39,7 @@ import { feedbackPublicationSteps, type FeedbackPublicationContext } from "./con
 import {
   PlanPrPreflightRefusedError,
   planPrPreflightAtCommit,
+  planPrPreflightAllows,
   planPrPreflightAtCommitAsync,
   refuseRedPlanPr,
   type PlanPrPreflightResult,
@@ -94,6 +99,10 @@ const PLAN_RECONCILE_LANDING_BRANCH = "plan-reconcile-landing";
 const PLAN_RECONCILE_LANDING_PR_TITLE = "chore(plan): reconcile credited task statuses";
 const CI_LEARNING_PENDING_REL_DIR = "state/ci-learning-pending";
 const FEEDBACK_PENDING_REL_DIR = "state/feedback-landing-pending";
+const TASK_FILES_PENDING_REL_DIR = "state/task-files-landing-pending";
+const TASK_FILES_REFUSED_REL_DIR = "state/task-files-landing-refused";
+const TASK_FILES_LANDING_BRANCH = "task-files-landing";
+const TASK_FILES_LANDING_PR_TITLE = "chore(plan): land pending edits of task files";
 const CI_LEARNING_SLUG_MAX = 72;
 /** The one shared branch every automated CI-learning shard landing call force-pushes to. */
 export const CI_LEARNING_LANDING_BRANCH = "ci-learning-landing";
@@ -114,7 +123,7 @@ export interface LandingRepository {
   repo: string;
 }
 
-type LandingFamily = "feedback" | "decisions" | "ci-learning" | "plan-reconcile";
+type LandingFamily = "feedback" | "decisions" | "ci-learning" | "plan-reconcile" | "task-files";
 
 export interface LandingIdentityInput {
   family?: LandingFamily;
@@ -155,6 +164,10 @@ export interface LandFeedbackOpts {
   planPrPreflight?: (commitSha: string, pr: { title: string; body: string }) => PlanPrPreflightResult;
   /** W1-T5460: daemon state root. Set, a status write QUEUES there and `landFeedback` lands nothing; {@link sweepFeedbackLanding} lands it. */
   stateRoot?: string;
+  /** W1-T12203: a landing into the plan destination leaves out each file its gate's leak scan refuses. */
+  screenForDestinationGate?: boolean;
+  /** W1-T12201: the answer of `resolvePlanDestination("decision", ...)`. Only the decision writers read it. */
+  planDestination?: PlanDestination;
 }
 
 export interface LandFeedbackResult {
@@ -196,7 +209,7 @@ const ACKNOWLEDGEMENT_PATH_LIMIT = 50;
 
 const refusedPlanPrTrees = new Map<string, PlanPrPreflightResult>();
 
-type PlanPrPreflightAsk = { commitSha: string; pr: { title: string; body: string } };
+type PlanPrPreflightAsk = { commitSha: string; pr: { title: string; body: string; headRef?: string } };
 type PlanPrPreflightFn = (commitSha: string, pr: PlanPrPreflightAsk["pr"]) => PlanPrPreflightResult;
 type PlanPrPreflightAsyncFn = (commitSha: string, pr: PlanPrPreflightAsk["pr"]) => PlanPrPreflightResult | Promise<PlanPrPreflightResult>;
 /** W1-T5672: a child-process ask; the sync driver runs `run`, the async one awaits `runAsync` so the loop turns meanwhile. */
@@ -446,6 +459,7 @@ const LANDING_BASES: Record<LandingFamily, { branch: string; ownedDir: string; p
     ownedDir: "",
     prTitle: PLAN_RECONCILE_LANDING_PR_TITLE,
   },
+  "task-files": { branch: TASK_FILES_LANDING_BRANCH, ownedDir: "", prTitle: TASK_FILES_LANDING_PR_TITLE },
 };
 
 function repoKey(repo: LandingRepository): string {
@@ -490,9 +504,10 @@ const LEGACY_LANDING_REFS = new Set([
   DECISIONS_LANDING_BRANCH,
   CI_LEARNING_LANDING_BRANCH,
   PLAN_RECONCILE_LANDING_BRANCH,
+  TASK_FILES_LANDING_BRANCH,
 ]);
 const SCOPED_LANDING_REF =
-  /^(?:feedback-landing|decisions-landing|ci-learning-landing)-[a-z0-9](?:[a-z0-9-]*[a-z0-9])?-[0-9a-f]{12}$/;
+  /^(?:feedback-landing|decisions-landing|ci-learning-landing|task-files-landing)-[a-z0-9](?:[a-z0-9-]*[a-z0-9])?-[0-9a-f]{12}$/;
 
 export function isLandingRef(ref: string): boolean {
   return LEGACY_LANDING_REFS.has(ref) || SCOPED_LANDING_REF.test(ref);
@@ -854,6 +869,20 @@ function* decideFeedbackStage(net: LandingNet, remoteSha: string, localBytes: st
 function* hasFeedbackLineage(net: LandingNet, blob: string): Generator<LandingAsk, boolean, AskReply> {
   try { return parseYaml(yield* net.git(["cat-file", "-p", blob]))?.contribution != null; }
   catch { /* Presence is not authority: unreadable bytes get an independent unknown publication receipt. */ return false; }
+}
+
+/** W1-T12203: the leak scan of the plan destination's gate, `LEAK_PATTERNS` in its scripts/ops-gate.rb. */
+const DESTINATION_GATE_LEAKS: ReadonlyArray<[string, RegExp]> = [
+  ["private key header", /-----BEGIN [A-Z ]*PRIVATE KEY-----/],
+  ["GitHub token-shaped string", /(?:ghp_|gho_|ghs_|github_pat_)\w{20,}/],
+  ["AWS access key id-shaped string", /AKIA[0-9A-Z]{16}/],
+  ["Slack token-shaped string", /xox[baprs]-[0-9]+-[0-9A-Za-z-]{6,}/],
+];
+
+function destinationGateRefusal(opts: LandFeedbackOpts, path: string, bytes: string): FeedbackRefusal | undefined {
+  if (!opts.screenForDestinationGate) return undefined;
+  const leak = DESTINATION_GATE_LEAKS.find(([, pattern]) => pattern.test(bytes));
+  return leak === undefined ? undefined : { path, reason: `the plan destination gate refuses this feedback file (${leak[0]})` };
 }
 
 /** W1-T9753: `own` maps each path the landing's own commits changed to its blob at their base (null: absent). */
@@ -1297,6 +1326,8 @@ interface LandPendingOpts extends LandFeedbackOpts {
   /** W1-T5672: awaited forms of the network verbs, used only when an async driver runs the steps. */
   gitAsync?: GitExecAsync;
   ghAsync?: GhExecAsync;
+  /** W1-T12203: the queued records this pass may drain; absent, all of them. */
+  queueScope?: ReadonlySet<string>;
 }
 
 function landPending(root: string, kind: LandingKind, opts: LandPendingOpts): LandFeedbackResult {
@@ -1329,7 +1360,7 @@ function* landPendingSteps(root: string, landing: LandingKind | DeferredLandingK
     // stage or land, so the poll pays no network fetch. An unreadable scan is not "idle" — it takes the full path.
     let idle = false;
     try {
-      idle = (yield* listDirtyRelFiles(root, landing.ownedDir, net)).length === 0 && queuedFeedbackSources(queueRoot).length === 0;
+      idle = (yield* listDirtyRelFiles(root, landing.ownedDir, net)).length === 0 && queuedFeedbackSources(queueRoot, opts.queueScope).length === 0;
     } catch {
       idle = false; // deliberate: an unreadable scan is not "idle", so the full path below reports it
     }
@@ -1338,7 +1369,7 @@ function* landPendingSteps(root: string, landing: LandingKind | DeferredLandingK
 
     yield* net.git(["fetch", "origin", "--quiet"]);
     acknowledgement = yield* acknowledgeLandedQueueCopies(root, kind, net);
-    if (queueRoot) keptForCheckout = yield* acknowledgeLandedFeedbackQueue(opts.servedRoot ?? root, queueRoot, net);
+    if (queueRoot) keptForCheckout = yield* acknowledgeLandedFeedbackQueue(opts.servedRoot ?? root, queueRoot, net, opts.queueScope);
 
     // W1-T3561: new blobs stage, identical blobs skip; changed feedback records use the shared
     // §7B merge predicate and report backward-copy refusals. Other paths retain byte inequality.
@@ -1350,9 +1381,11 @@ function* landPendingSteps(root: string, landing: LandingKind | DeferredLandingK
       const refused: FeedbackRefusal[] = [];
       const candidates: Array<[string, string]> = [
         ...(yield* listDirtyRelFiles(root, kind.ownedDir, net)).map((rel): [string, string] => [rel, join(root, rel)]),
-        ...queuedFeedbackSources(queueRoot),
+        ...queuedFeedbackSources(queueRoot, opts.queueScope),
       ];
       for (const [rel, abs] of candidates) {
+        const gateRefusal = destinationGateRefusal(opts, rel, readFileSync(abs, "utf8"));
+        if (gateRefusal) { refused.push(gateRefusal); continue; }
         const localSha = (yield* net.git(["hash-object", abs])).trim();
         let mainSha: string | null = null;
         if (env) {
@@ -1468,16 +1501,91 @@ export function sweepFeedbackLanding(root: string, opts: SweepFeedbackLandingOpt
   return logLandingSweep(opts.log, driveLanding(sweepLandingSteps(root, opts), syncPreflightOf(root, opts), meter), meter);
 }
 
-/** The daemon's feedback-landing rungs (W1-T5620; the boot pass awaits since W1-T9695). */
+/** The daemon's feedback-landing rungs (W1-T5620; the boot pass awaits since W1-T9695). W1-T12203: given the state
+ *  directory, each pass reads the plan destination switch and also lands in the destination checkout. */
 export function feedbackLandingSweepRungs(
   root: string,
-  opts: Omit<SweepFeedbackLandingOpts, "planPrPreflight">,
+  opts: Omit<SweepFeedbackLandingOpts, "planPrPreflight"> & { planDestinationStateDir?: string },
 ): { atBoot: () => Promise<LandFeedbackResult>; perPoll: () => Promise<LandFeedbackResult> } {
-  return { atBoot: () => sweepFeedbackLandingAsync(root, opts), perPoll: () => sweepFeedbackLandingAsync(root, opts) };
+  const { planDestinationStateDir, ...sweepOpts } = opts;
+  const pass = (): Promise<LandFeedbackResult> => planDestinationStateDir === undefined
+    ? sweepFeedbackLandingAsync(root, sweepOpts) : sweepWithPlanDestination(root, sweepOpts, planDestinationStateDir);
+  return { atBoot: pass, perPoll: pass };
+}
+
+/**
+ * W1-T12203: the options of a landing into the plan destination checkout. The pull request opens in that
+ * repository, on the plain landing branch, with no review request of the public repository. Each row and
+ * receipt says "the plan destination" in place of its name and its checkout path (the W1-T11768 rule).
+ */
+export function planDestinationLandingOpts<O extends LandFeedbackOpts | LandFeedbackAsyncOpts>(opts: O, destination: PlanDestinationRepository): O {
+  const target = { owner: destination.owner, repo: destination.repo };
+  const redact = (fields: Record<string, unknown> = {}): Record<string, unknown> => JSON.parse(JSON.stringify(fields)
+    .split(destination.checkoutDir).join("the plan destination checkout")
+    .split(repoKey(target)).join("the plan destination"));
+  const { requestReview: _review, landingOwner: _owner, git: _git, gitAsync: _gitAsync, ...rest } = opts as O & { gitAsync?: GitExecAsync };
+  const { log, publication } = opts;
+  return {
+    ...rest as O, targetRepository: target, sourceRepository: target, screenForDestinationGate: true,
+    ...(log === undefined ? {} : { log: (step: string, extra?: Record<string, unknown>) => log(step, redact(extra)) }),
+    ...(publication === undefined ? {} : { publication: { ...publication, record: (step: string, fields: Record<string, unknown>) => publication.record(step, redact(fields)) } }),
+  };
+}
+
+/** W1-T12203: a queued record lands where a checkout or its origin/main holds it. A new record follows the switch. */
+async function queuedRecordHome(root: string, checkoutDir: string, rel: string, kindOn: boolean): Promise<"public" | "destination"> {
+  const onMain = async (dir: string): Promise<boolean> => {
+    try {
+      await defaultGitAsync(dir)(["cat-file", "-e", `origin/main:${rel}`]);
+      return true;
+    } catch {
+      return false; // git exits 1 when origin/main has no such path: this checkout does not hold the record
+    }
+  };
+  if (existsSync(join(root, rel))) return "public";
+  if (existsSync(join(checkoutDir, rel))) return "destination";
+  if (await onMain(root)) return "public";
+  if (await onMain(checkoutDir)) return "destination";
+  return kindOn ? "destination" : "public";
+}
+
+async function sweepWithPlanDestination(
+  root: string,
+  opts: Omit<SweepFeedbackLandingAsyncOpts, "planPrPreflight">,
+  stateDir: string,
+): Promise<LandFeedbackResult> {
+  const named = planDestinationRepository(stateDir);
+  if (named.outcome === "off") return sweepFeedbackLandingAsync(root, opts);
+  const queued = opts.stateRoot === undefined ? [] : queuedFeedbackLandings(opts.stateRoot);
+  // With `feedback` out of the kinds and nothing queued, the kind is off: the pass is today's pass, with no added row.
+  const kindOn = named.outcome === "named" && named.kinds.includes("feedback");
+  if (named.outcome === "named" && !kindOn && queued.length === 0) return sweepFeedbackLandingAsync(root, opts);
+  if (named.outcome === "unreadable" || !existsSync(join(named.checkoutDir, ".git"))) {
+    // A queued record has no known repository while the switch cannot be read: it waits in the queue.
+    const reason = named.outcome === "unreadable" ? named.reason : "the plan destination checkout is not a git checkout";
+    const log = opts.log;
+    return sweepFeedbackLandingAsync(root, { ...opts, queueScope: new Set(), ...(log === undefined ? {} : {
+      log: (step, extra) => log(step, { ...extra, plan_destination: "unreadable", plan_destination_reason: reason, queue_waiting: queued.length }),
+    }) });
+  }
+  const toDestination = new Set<string>(), toPublic = new Set<string>();
+  for (const rel of queued) {
+    ((await queuedRecordHome(root, named.checkoutDir, rel, kindOn)) === "destination" ? toDestination : toPublic).add(rel);
+  }
+  const result = await sweepFeedbackLandingAsync(root, { ...opts, queueScope: toPublic });
+  if (!kindOn && toDestination.size === 0) return result;
+  const destination = planDestinationLandingOpts({ ...opts, servedRoot: named.checkoutDir, queueScope: toDestination }, named);
+  const log = destination.log;
+  await sweepFeedbackLandingAsync(named.checkoutDir, {
+    ...destination, ...(log === undefined ? {} : { log: (step, extra) => log(step, { ...extra, plan_destination: "destination" }) }),
+  });
+  return result;
 }
 
 export interface SweepFeedbackLandingAsyncOpts extends Omit<SweepFeedbackLandingOpts, "planPrPreflight"> {
   planPrPreflight?: PlanPrPreflightAsyncFn;
+  /** W1-T12203: set by the rungs only; the queued records this pass may drain. */
+  queueScope?: ReadonlySet<string>;
   /** W1-T5672: the awaited form of `git` for the network verbs (fetch, ls-remote, push); defaults to an injected `git`, else a real child process. */
   gitAsync?: GitExecAsync;
   /** W1-T5672: the awaited form of `gh`; defaults to an injected `gh`, else the paced async transport. */
@@ -1494,7 +1602,7 @@ export async function sweepFeedbackLandingAsync(root: string, opts: SweepFeedbac
 
 function sweepLandingSteps(
   root: string,
-  opts: Omit<SweepFeedbackLandingOpts, "planPrPreflight"> & { gitAsync?: GitExecAsync; ghAsync?: GhExecAsync },
+  opts: Omit<SweepFeedbackLandingOpts, "planPrPreflight"> & { gitAsync?: GitExecAsync; ghAsync?: GhExecAsync; queueScope?: ReadonlySet<string> },
 ): LandingSteps {
   const { log, ...landOpts } = { ...opts, planPrPreflight: undefined };
   const git = landOpts.git ?? defaultGit(root);
@@ -1638,6 +1746,8 @@ function* landContentSteps(
       const refused: FeedbackRefusal[] = [...(carried?.refused ?? [])];
       let i = 0;
       for (const { relPath, content: inputContent } of inputs) {
+        const gateRefusal = destinationGateRefusal(opts, relPath, inputContent);
+        if (gateRefusal) { refused.push(gateRefusal); continue; }
         let content = inputContent;
         // A scratch tmp file, never inside root — hash-object just needs a path to read from.
         const tmpFile = join(scratchDir as string, `content-${i++}`);
@@ -1718,6 +1828,17 @@ export function landPlanReconcileShards(root: string, inputs: readonly LandConte
 
 export type PlanReconcileLand = (root: string, inputs: readonly LandContentInput[], opts: LandFeedbackAsyncOpts) => LandFeedbackResult | Promise<LandFeedbackResult>;
 
+/**
+ * W1-T11860: a refused landing's message, bounded. A failed `gh pr create` echoes its whole command line, pull-request body
+ * included (93,961 characters on 2026-11-08), and ends with its cause, so the start and the last 600 characters are kept.
+ */
+export function boundedLandingError(message: string, max = 1_000): string {
+  if (message.length <= max) return message;
+  const head = message.slice(0, 300);
+  const tail = message.slice(-600);
+  return `${head} ... [${message.length - head.length - tail.length} characters dropped] ... ${tail}`;
+}
+
 /** W1-T9695: the cadence's sync `land` seam over an awaited landing. `land` starts one; `settled` awaits all and throws on a refusal. */
 export function planReconcileLanding(
   root: string,
@@ -1726,7 +1847,7 @@ export function planReconcileLanding(
 ): { land: (inputs: readonly LandContentInput[]) => void; settled: () => Promise<void> } {
   const landings: Promise<LandFeedbackResult>[] = [];
   const requireLanded = (landing: LandFeedbackResult): void => {
-    if (!landing.landed || landing.error) throw new Error(landing.error ?? "plan reconciliation landing did not produce a PR");
+    if (!landing.landed || landing.error) throw new Error(boundedLandingError(landing.error ?? "plan reconciliation landing did not produce a PR"));
   };
   return {
     land: (inputs) => {
@@ -1747,7 +1868,7 @@ function planReconcileLandingKindSteps(
     {
       family: "plan-reconcile",
       commitMessage: (files) => [PLAN_RECONCILE_LANDING_PR_TITLE, "", "Automated plan-status reconciliation from the measurement cadence.", "", ...files.map((file) => `- ${file}`)].join("\n"),
-      prBody: (files, content) => ["Reconciles credited task shards whose decorative status is still queued.", "", "The change is derived from the existing credit projection and staged through the scratch-index landing bridge.", "", "## Acceptance", ...files.map((file) => `- ${file} is reconciled without a daemon checkout write | ${landingProof(file, `grep: ^  status: merged$ in ${file}`, content)}`)].join("\n"),
+      prBody: (files, content) => planReconcilePrBody(files, (file) => landingProof(file, planReconcileProofTemplate(file), content)),
     },
     root,
     opts,
@@ -1798,11 +1919,28 @@ export function recordDecision(
   opts: LandFeedbackOpts = {},
 ): LandFeedbackResult {
   const relPath = decisionRecordRelPath(params.taskId, params.runId);
-  const git = opts.git ?? defaultGit(root);
-  return landContent(root, landingKind(DECISIONS_LANDING_KIND, root, opts, git), [{ relPath, content: decisionRecordContent(params) }], {
-    ...opts,
+  const at = decisionLandingAt(root, relPath, opts);
+  if (!at.ok) return at.result;
+  const git = at.opts.git ?? defaultGit(at.root);
+  return landContent(at.root, landingKind(DECISIONS_LANDING_KIND, at.root, at.opts, git), [{ relPath, content: decisionRecordContent(params) }], {
+    ...at.opts,
     git,
   });
+}
+
+/**
+ * W1-T12201: where a decision writer lands. `destination`: that checkout and repository, unless the public
+ * checkout already holds the file (a file is edited where it is). `unreadable`: nowhere, and the result names
+ * the cause. Absent, `off` or `not_listed`: `root` and `opts` unchanged.
+ */
+function decisionLandingAt<O extends LandFeedbackOpts | LandFeedbackAsyncOpts>(root: string, relPath: string, opts: O):
+  { ok: true; root: string; opts: O } | { ok: false; result: LandFeedbackResult } {
+  const destination = opts.planDestination;
+  if (destination?.outcome === "unreadable") {
+    return { ok: false, result: { landed: false, files: [], error: `the decision landed in no repository: ${destination.reason}` } };
+  }
+  if (destination?.outcome !== "destination" || existsSync(join(root, relPath))) return { ok: true, root, opts };
+  return { ok: true, root: destination.checkoutDir, opts: { ...opts, targetRepository: { owner: destination.owner, repo: destination.repo } } };
 }
 
 export function recordDecisionAsync(
@@ -1810,9 +1948,51 @@ export function recordDecisionAsync(
   params: DecisionRecordParams,
   opts: LandFeedbackAsyncOpts = {},
 ): Promise<LandFeedbackResult> {
-  const { planPrPreflight: _preflight, ...kindOpts } = opts;
-  return landContentAsync(root, (net) => landingKindSteps(DECISIONS_LANDING_KIND, root, kindOpts, net),
-    [{ relPath: decisionRecordRelPath(params.taskId, params.runId), content: decisionRecordContent(params) }], opts);
+  const relPath = decisionRecordRelPath(params.taskId, params.runId);
+  const at = decisionLandingAt(root, relPath, opts);
+  if (!at.ok) return Promise.resolve(at.result);
+  const { planPrPreflight: _preflight, ...kindOpts } = at.opts;
+  return landContentAsync(at.root, (net) => landingKindSteps(DECISIONS_LANDING_KIND, at.root, kindOpts, net),
+    [{ relPath, content: decisionRecordContent(params) }], at.opts);
+}
+
+/** Everything the decision record currently says, as ONE string for the contradiction check:
+ *  `DECISIONS.md` plus every landed `plan/decisions.d/**` shard, since a record that landed
+ *  through the bridge but has not been folded into the root file is no less standing. An
+ *  unreadable path contributes nothing rather than throwing — and contributing nothing is the
+ *  SAFE direction here only because an unresolvable `supersedes` escalates anyway. */
+export function readStandingDecisions(root: string, stateDir?: string): string {
+  // W1-T12201: while the host file names a repository, its checkout is a second root, whatever the kinds.
+  const named = planDestinationRepository(stateDir);
+  const standing = decisionsUnder(root);
+  return named.outcome === "named" ? [standing, decisionsUnder(named.checkoutDir)].filter(Boolean).join("\n") : standing;
+}
+
+function decisionsUnder(root: string): string {
+  const parts: string[] = [];
+  try {
+    parts.push(readFileSync(join(root, "DECISIONS.md"), "utf8"));
+  } catch {
+    // no root decision file in this checkout — the shards below are still consulted
+  }
+  const dir = join(root, "plan", "decisions.d");
+  let entries: string[] = [];
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    // no plan/decisions.d in this checkout — DECISIONS.md alone is the whole standing record here,
+    // which is a real state (a fresh clone before the first landing), not a read failure to report
+    return parts.join("\n");
+  }
+  for (const name of entries) {
+    if (!name.endsWith(".md")) continue;
+    try {
+      parts.push(readFileSync(join(dir, name), "utf8"));
+    } catch {
+      // one unreadable shard never hides the rest
+    }
+  }
+  return parts.join("\n");
 }
 
 /** Land one agent-authored RULING record (W1-T3212) via {@link landContent} — the governance
@@ -1825,8 +2005,10 @@ export function recordRuling(
   content: string,
   opts: LandFeedbackOpts = {},
 ): LandFeedbackResult {
-  const git = opts.git ?? defaultGit(root);
-  return landContent(root, landingKind(DECISIONS_LANDING_KIND, root, opts, git), [{ relPath, content }], { ...opts, git });
+  const at = decisionLandingAt(root, relPath, opts);
+  if (!at.ok) return at.result;
+  const git = at.opts.git ?? defaultGit(at.root);
+  return landContent(at.root, landingKind(DECISIONS_LANDING_KIND, at.root, at.opts, git), [{ relPath, content }], { ...at.opts, git });
 }
 
 /** Land one feedback entry's already-serialized YAML via {@link landContent} — the write-site-2 sibling of
@@ -1842,6 +2024,18 @@ export function landFeedbackStatusContent(
   if (opts.stateRoot !== undefined) return queueFeedbackLanding(opts.stateRoot, relPath, content);
   const git = opts.git ?? defaultGit(root);
   return landContent(root, landingKind(FEEDBACK_LANDING_KIND, root, opts, git), [{ relPath, content }], { ...opts, git });
+}
+
+/** W1-T12790: {@link landFeedbackStatusContent} for a daemon lane; its preflight and every git and gh verb are awaited. */
+export function landFeedbackStatusContentAsync(
+  root: string,
+  relPath: string,
+  content: string,
+  opts: LandFeedbackAsyncOpts = {},
+): Promise<LandFeedbackResult> {
+  if (opts.stateRoot !== undefined) return Promise.resolve(queueFeedbackLanding(opts.stateRoot, relPath, content));
+  const { planPrPreflight: _preflight, ...kindOpts } = opts;
+  return landContentAsync(root, (net) => landingKindSteps(FEEDBACK_LANDING_KIND, root, kindOpts, net), [{ relPath, content }], opts);
 }
 
 const QUEUED_FEEDBACK_RECORD = new RegExp(`^${FEEDBACK_REL_DIR}/[^/]+\\.yaml$`);
@@ -1928,14 +2122,17 @@ export function overlayQueuedFeedbackEntries<E extends { id: string; status: str
   return [...entries.map((entry) => overlayQueuedFeedback(entry, queued)), ...queueOnly];
 }
 
-function queuedFeedbackSources(stateRoot: string | undefined): Array<[string, string]> {
-  return stateRoot === undefined ? [] : queuedFeedbackLandings(stateRoot).map((rel) => [rel, join(feedbackPendingRoot(stateRoot), rel)]);
+function queuedFeedbackSources(stateRoot: string | undefined, scope?: ReadonlySet<string>): Array<[string, string]> {
+  return stateRoot === undefined ? [] : queuedFeedbackLandings(stateRoot)
+    .filter((rel) => scope === undefined || scope.has(rel)).map((rel) => [rel, join(feedbackPendingRoot(stateRoot), rel)]);
 }
 
 /** Drop a landed queued record only once the served checkout holds the upstream bytes. */
-function* acknowledgeLandedFeedbackQueue(root: string, stateRoot: string, net: LandingNet): Generator<LandingAsk, number, AskReply> {
+function* acknowledgeLandedFeedbackQueue(
+  root: string, stateRoot: string, net: LandingNet, scope: ReadonlySet<string> | undefined,
+): Generator<LandingAsk, number, AskReply> {
   let keptForCheckout = 0;
-  for (const [rel, abs] of queuedFeedbackSources(stateRoot)) {
+  for (const [rel, abs] of queuedFeedbackSources(stateRoot, scope)) {
     try {
       const remoteSha = (yield* net.git(["rev-parse", `origin/main:${rel}`])).trim();
       if ((yield* decideFeedbackStage(net, remoteSha, readFileSync(abs, "utf8"))).kind !== "keep-upstream") continue;
@@ -2242,5 +2439,511 @@ function* findPendingLandingPrSteps(net: LandingNet, identity: LandingIdentity):
   } catch {
     // Deliberate, as in findPendingLandingPr: an unreadable listing reads as "no PR yet", and the caller opens one.
     return undefined;
+  }
+}
+
+/** W1-T12199: one machine-filed edit of a task file that origin/main holds, with the criterion its landing PR states. */
+export interface TaskFileInput {
+  relPath: string;
+  content: string;
+  claim: string;
+  proof: string;
+  /** W1-T12222: a new task file from a checkout that files only task files; main need not hold the path. */
+  newFile?: true;
+}
+
+export interface TaskFileRefusal {
+  path: string;
+  reason: string;
+  failures?: PlanPrPreflightResult["failures"];
+  /** Set with `failures`: the origin/main the file was tested on, and whether main alone has the same red. */
+  mainSha?: string;
+  mainRed?: boolean;
+  mainRedProbeError?: string;
+  timedOut?: true;
+  reserved_id?: string;
+  id_release?: SetAsideIdRelease["id_release"];
+}
+
+export interface TaskFilesLandingResult {
+  /** The open landing PR: the one this call opened, or the one that seals the branch. */
+  prUrl?: string;
+  /** Staged paths the open landing PR carries. */
+  landed: string[];
+  /** Staged paths no open PR carries; a later call lands them. */
+  waiting: string[];
+  /** Inputs this call did not stage. */
+  refused: TaskFileRefusal[];
+  /** Staged files this call moved out of the queue, each with its cause. */
+  setAside: TaskFileRefusal[];
+  pushed: boolean;
+  error?: string;
+}
+
+export interface LandTaskFilesOpts extends LandFeedbackAsyncOpts {
+  /** Daemon state root; files wait under `state/task-files-landing-pending`, never in the checkout. */
+  stateRoot: string;
+  /** Stage the inputs and stop, so one later call lands every staged file as one batch. */
+  stageOnly?: boolean;
+  /** The lane the preflight rows name; defaults to the landing's own. */
+  lane?: string;
+}
+
+interface StagedTaskFileMeta {
+  /** Null for a new file: main held no blob at the path when it was staged. */
+  baseBlob: string | null;
+  claim: string;
+  proof: string;
+  prUrl?: string;
+  /** W1-T12212: the `<owner>/<name>` it was staged for. A file staged before W1-T12212 names none. */
+  repository?: string;
+}
+
+interface StagedTaskFile extends StagedTaskFileMeta {
+  relPath: string;
+  abs: string;
+}
+
+const TASK_FILE_META_SUFFIX = ".meta.json";
+const taskFilesPendingRoot = (stateRoot: string): string => join(stateRoot, TASK_FILES_PENDING_REL_DIR);
+const taskFilesRefusedRoot = (stateRoot: string): string => join(stateRoot, TASK_FILES_REFUSED_REL_DIR);
+
+function readStagedTaskFiles(stateRoot: string): StagedTaskFile[] {
+  const root = taskFilesPendingRoot(stateRoot);
+  const staged: StagedTaskFile[] = [];
+  for (const relPath of listRelFiles(root, ".").map((rel) => rel.slice(2)).sort()) {
+    if (relPath.endsWith(TASK_FILE_META_SUFFIX) || relPath.endsWith(".tmp")) continue;
+    const abs = join(root, relPath);
+    try {
+      staged.push({ ...(JSON.parse(readFileSync(`${abs}${TASK_FILE_META_SUFFIX}`, "utf8")) as StagedTaskFileMeta), relPath, abs });
+    } catch {
+      // A file with no readable record has no base to check, so it never joins a batch; it stays for a person to read.
+    }
+  }
+  return staged;
+}
+
+/** W1-T12222: the branch {@link landTaskFilesAsync} pushes for this target, the holder of an id a new task file takes. */
+export async function taskFilesLandingBranchAsync(targetRepository: LandingRepository): Promise<string> {
+  return landingIdentity({ family: "task-files", targetRepository, sourceRepository: await sourceRepositoryFromCwdAsync() }).branch;
+}
+
+/** W1-T12199: every edit that waits under `stateRoot`, and the landing PR that carries it once one does. */
+export function stagedTaskFiles(stateRoot: string): Array<{ relPath: string; prUrl?: string }> {
+  return readStagedTaskFiles(stateRoot).map(({ relPath, prUrl }) => ({ relPath, ...(prUrl ? { prUrl } : {}) }));
+}
+
+/**
+ * W1-T12222: the `origin:` each waiting task file records. A file that waits for the landing PR holds its
+ * finding though no plan holds it yet, so a gardener that looks for a finding already filed reads these too.
+ * A file with no origin line holds no finding and is left out.
+ */
+export function stagedTaskFileOrigins(stateRoot: string): Array<{ relPath: string; origin: string }> {
+  const held: Array<{ relPath: string; origin: string }> = [];
+  for (const file of readStagedTaskFiles(stateRoot)) {
+    if (!existsSync(file.abs)) continue;
+    const origin = taskFileOrigin(readFileSync(file.abs, "utf8"));
+    if (origin !== "") held.push({ relPath: file.relPath, origin });
+  }
+  return held;
+}
+
+/** W1-T12222: the `origin:` line of a task file's text, unquoted; empty when it has none. */
+export function taskFileOrigin(text: string): string {
+  const raw = /^\s*(?:-\s+)?origin:[ \t]*(.*?)[ \t]*$/m.exec(text)?.[1] ?? "";
+  return /^".*"$/.test(raw) ? raw.slice(1, -1).replace(/\\(["\\])/g, "$1") : /^'.*'$/.test(raw) ? raw.slice(1, -1) : raw;
+}
+
+function writeStagedTaskFile(stateRoot: string, relPath: string, content: string | undefined, meta: StagedTaskFileMeta): void {
+  const abs = join(taskFilesPendingRoot(stateRoot), relPath);
+  mkdirSync(dirname(abs), { recursive: true });
+  const put = (path: string, bytes: string): void => {
+    writeFileSync(`${path}.${process.pid}.tmp`, bytes, "utf8");
+    renameSync(`${path}.${process.pid}.tmp`, path);
+  };
+  put(`${abs}${TASK_FILE_META_SUFFIX}`, `${JSON.stringify(meta)}\n`);
+  if (content !== undefined) put(abs, content);
+}
+
+function taskFilesCommitMessage(paths: string[]): string {
+  return [
+    TASK_FILES_LANDING_PR_TITLE,
+    "",
+    "Plan-only: each file is a machine-filed edit of a task file that main already holds.",
+    "The branch takes no push while its pull request is open (W1-T12199).",
+    "",
+    ...paths.map((f) => `- ${f}`),
+  ].join("\n");
+}
+
+function taskFilesPrBody(files: ReadonlyArray<Pick<StagedTaskFile, "claim" | "proof">>): string {
+  return [
+    `Lands ${files.length} machine-filed edit(s) of task files in one pull request (W1-T12199).`,
+    "",
+    "This branch takes no push while this pull request is open. A later edit waits in the",
+    "state directory and goes into the next landing pull request.",
+    "",
+    "## Acceptance",
+    ...files.map((f) => `- ${f.claim} | ${f.proof}`),
+  ].join("\n");
+}
+
+/** As W1-T5531: a red is main's when every failing check reads the plan tree and fails on main alone too. */
+function taskFileRedIsMainCaused(failures: PlanPrPreflightResult["failures"], base: PlanPrPreflightResult["failures"]): boolean {
+  return failures.length > 0 && failures.every((f) => (f.check === "lint-plan" || f.check === "shard-census") && base.some((b) => b.check === f.check));
+}
+
+const greenTaskFileTrees = new Set<string>();
+
+type SetAsideIdRelease = { reserved_id?: string; id_release: ReservationReleaseOutcome | "kept_other_holder" | "kept_main_holds_path" | "no_id" };
+
+function taskIdOfTaskFileText(text: string): string | undefined {
+  return /^\s*(?:-\s+)?id:\s*["']?(W1-T\d+)["']?\s*$/m.exec(text)?.[1];
+}
+
+/** W1-T12410: free the id of a new task file the landing sets aside. Only a reservation the landing branch holds goes. */
+async function releaseSetAsideTaskIdAsync(
+  gitAsync: GitExecAsync, text: string, landingBranch: string, reason: string, lane: string, log: LandTaskFilesOpts["log"],
+): Promise<SetAsideIdRelease> {
+  const taskId = taskIdOfTaskFileText(text);
+  if (taskId === undefined) return { id_release: "no_id" };
+  const run = async (args: string[]) => {
+    try {
+      return { status: 0, stdout: await gitAsync(args), stderr: "" };
+    } catch (e) {
+      const err = e as { code?: unknown; stdout?: unknown; stderr?: unknown; message?: unknown };
+      return { status: typeof err.code === "number" ? err.code : 1, stdout: String(err.stdout ?? ""), stderr: String(err.stderr || err.message || e) };
+    }
+  };
+  const ref = taskIdReservationRef(taskId);
+  const listed = await run(["ls-remote", "origin", ref]);
+  const sha = listed.stdout.split("\n").map((l) => l.trim().split(/\s+/)).find(([, name]) => name === ref)?.[0];
+  if (listed.status !== 0) return { reserved_id: taskId, id_release: "unreadable" };
+  if (sha === undefined) return { reserved_id: taskId, id_release: "already_absent" };
+  const fetched = await run(["fetch", "--quiet", "--no-tags", "origin", ref]);
+  const message = fetched.status === 0 ? await run(["log", "-1", "--format=%B", sha]) : fetched;
+  if (message.status !== 0) return { reserved_id: taskId, id_release: "unreadable" };
+  if (reservationHolderBranch(message.stdout) !== landingBranch) return { reserved_id: taskId, id_release: "kept_other_holder" };
+  const outcome = await releaseTaskIdReservationAsync(run, { taskId, sha }, { reason, lane, ...(log ? { log: (step, fields) => log(step, fields) } : {}) });
+  return { reserved_id: taskId, id_release: outcome };
+}
+
+/**
+ * W1-T12199: stage machine-filed edits of task files outside the checkout, then land every staged file
+ * through ONE pull request on one fixed branch. The branch is sealed while that pull request is open:
+ * this never pushes to it, so CI and review are not restarted by a later file. Never throws.
+ */
+export async function landTaskFilesAsync(root: string, inputs: readonly TaskFileInput[], opts: LandTaskFilesOpts): Promise<TaskFilesLandingResult> {
+  const { planPrPreflight, ...landOpts } = opts;
+  const preflight = planPrPreflight ?? ((sha, pr) => planPrPreflightAtCommitAsync(root, sha, pr, { log: opts.log }));
+  return driveLandingAsync(taskFilesLandingSteps(root, inputs, { ...landOpts, ...asyncSeamsOf(root, landOpts) }), preflight);
+}
+
+function* taskFilesLandingSteps(
+  root: string,
+  inputs: readonly TaskFileInput[],
+  opts: Omit<LandTaskFilesOpts, "planPrPreflight">,
+): PreflightSteps<TaskFilesLandingResult> {
+  const result: TaskFilesLandingResult = { landed: [], waiting: [], refused: [], setAside: [], pushed: false };
+  const { stateRoot } = opts;
+  let scratchDir: string | undefined;
+  let queued = (): StagedTaskFile[] => readStagedTaskFiles(stateRoot);
+  try {
+    if (inputs.length === 0 && readStagedTaskFiles(stateRoot).length === 0) return result;
+    const net = landingNet(opts.git ?? defaultGit(root), opts.gh ?? defaultGh(), opts);
+    const shardDir = ciLearningShardRelDir(root);
+    const kind: LandingKind = {
+      family: "task-files",
+      ...(yield* landingIdentitySteps("task-files", opts, net)),
+      ownedDir: shardDir,
+      commitMessage: taskFilesCommitMessage,
+      prBody: () => "",
+    };
+    const lane = opts.lane ?? `${kind.family}-landing`;
+    // W1-T12212: one queue per repository. A file that names no repository is never the plan destination's.
+    const repository = kind.targetRepository === undefined ? undefined : repoKey(kind.targetRepository);
+    const named = planDestinationRepository(join(stateRoot, "state"));
+    const destinationKey = named.outcome === "named" ? `${named.owner}/${named.repo}` : undefined;
+    queued = () => readStagedTaskFiles(stateRoot).filter((f) =>
+      f.repository === undefined ? repository === undefined || repository !== destinationKey : f.repository === repository);
+    scratchDir = mkdtempSync(join(tmpdir(), `rmd-${kind.branch}-`));
+    const scratch = scratchDir;
+    const env = { ...process.env, GIT_INDEX_FILE: join(scratch, "index") };
+
+    let mainSha: string | undefined;
+    const freshMain = function* (): Generator<LandingAsk, string, AskReply> {
+      if (mainSha === undefined) {
+        yield* net.git(["fetch", "origin", "--quiet"]);
+        mainSha = (yield* net.git(["rev-parse", "origin/main"])).trim();
+      }
+      return mainSha;
+    };
+    const mainBlobOf = function* (relPath: string): Generator<LandingAsk, string | null, AskReply> {
+      const main = yield* freshMain();
+      try {
+        return (yield* net.git(["rev-parse", `${main}:${relPath}`])).trim();
+      } catch {
+        return null; // main does not hold the path
+      }
+    };
+    /** Whether a file on main other than `relPath` holds the id that `text` files. An unreadable search says yes. */
+    const otherMainFileHoldsId = function* (text: string, relPath: string): Generator<LandingAsk, boolean, AskReply> {
+      const id = taskIdOfTaskFileText(text);
+      if (id === undefined) return true;
+      try {
+        const hits = yield* net.git(["grep", "-l", "-E", `^[[:space:]]*(-[[:space:]]+)?id:[[:space:]]*["']?${id}["']?[[:space:]]*$`, yield* freshMain(), "--", relative(root, resolveRepoLayout(root).planDir)]);
+        return hits.split("\n").map((l) => l.trim()).filter((l) => l !== "").some((l) => l.slice(l.indexOf(":") + 1) !== relPath);
+      } catch (e) {
+        // git grep exits 1 for no match; any other failure is unreadable, and unreadable keeps the id.
+        return (e as { code?: unknown; status?: unknown }).code !== 1 && (e as { status?: unknown }).status !== 1;
+      }
+    };
+    const treeOf = function* (files: ReadonlyArray<{ relPath: string; blob: string }>): Generator<LandingAsk, string, AskReply> {
+      yield* net.git(["read-tree", yield* freshMain()], { env });
+      for (const f of files) yield* net.git(["update-index", "--add", "--cacheinfo", `100644,${f.blob},${f.relPath}`], { env });
+      return (yield* net.git(["write-tree"], { env })).trim();
+    };
+    const commitOf = function* (treeSha: string, paths: string[]): Generator<LandingAsk, string, AskReply> {
+      return (yield* net.git(
+        ["-c", `user.name=${LANDING_AUTHOR_NAME}`, "-c", `user.email=${LANDING_AUTHOR_EMAIL}`,
+          "commit-tree", treeSha, "-p", yield* freshMain(), "-m", taskFilesCommitMessage(paths)],
+        { env },
+      )).trim();
+    };
+    type Tested = { relPath: string; blob: string; claim: string; proof: string };
+    const verdictOf = function* (files: readonly Tested[]): Generator<LandingAsk, PlanPrPreflightResult, AskReply> {
+      const treeSha = yield* treeOf(files);
+      if (greenTaskFileTrees.has(treeSha)) return { ok: true, failures: [], unreadable: [] };
+      const known = refusedPlanPrTrees.get(treeSha);
+      if (known) return known;
+      const commitSha = yield* commitOf(treeSha, files.map((f) => f.relPath));
+      const verdict = (yield { commitSha, pr: { title: kind.prTitle, body: taskFilesPrBody(files), headRef: kind.branch } }) as PlanPrPreflightResult;
+      planPrPreflightAllows(verdict, { lane, branch: kind.branch, log: opts.log });
+      if (!verdict.ok) refusedPlanPrTrees.set(treeSha, verdict);
+      else if (verdict.timedOut === undefined) {
+        if (greenTaskFileTrees.size > 256) greenTaskFileTrees.clear();
+        greenTaskFileTrees.add(treeSha);
+      }
+      return verdict;
+    };
+    /** Whether main alone has the same red. A probe that cannot run leaves the red the file's own, and says why. */
+    const mainRedOf = function* (failures: PlanPrPreflightResult["failures"]): Generator<LandingAsk, { mainRed: boolean; mainRedProbeError?: string }, AskReply> {
+      try {
+        const onBase = (yield { commitSha: yield* freshMain(), pr: { title: kind.prTitle, body: taskFilesPrBody([]) } }) as PlanPrPreflightResult;
+        return { mainRed: taskFileRedIsMainCaused(failures, onBase.failures) };
+      } catch (e) {
+        const reason = String((e as Error)?.message ?? e);
+        return { mainRed: false, mainRedProbeError: reason };
+      }
+    };
+    const refusalText = (failures: PlanPrPreflightResult["failures"]): string =>
+      `the plan preflight refused it: ${failures.map((f) => `[${f.check}] ${f.firstLine}`).join("; ")}`;
+    const setAside = function* (file: StagedTaskFile, refusal: Omit<TaskFileRefusal, "path">, mainBlob: string | null): Generator<LandingAsk, void, AskReply> {
+      let idRelease: SetAsideIdRelease | undefined;
+      if (file.baseBlob === null) {
+        const text = readFileSync(file.abs, "utf8");
+        idRelease = mainBlob !== null ? { id_release: "kept_main_holds_path" } : JSON.parse((yield {
+          run: () => { throw new Error("the task-file landing releases an id only under the async driver"); },
+          runAsync: async () => JSON.stringify(await releaseSetAsideTaskIdAsync(opts.gitAsync!, text, kind.branch, refusal.reason, lane, opts.log)),
+        }) as string) as SetAsideIdRelease;
+      }
+      const to = join(taskFilesRefusedRoot(stateRoot), file.relPath);
+      mkdirSync(dirname(to), { recursive: true });
+      renameSync(file.abs, to);
+      writeFileSync(`${to}${TASK_FILE_META_SUFFIX}`, `${JSON.stringify({ reason: refusal.reason })}\n`, "utf8");
+      rmSync(`${file.abs}${TASK_FILE_META_SUFFIX}`, { force: true });
+      result.setAside.push({ path: file.relPath, ...refusal });
+      opts.log?.("task_files_landing.set_aside", { path: file.relPath, reason: refusal.reason, ...(refusal.failures ? { failures: refusal.failures } : {}), ...idRelease });
+    };
+
+    // ── stage ──
+    let n = 0;
+    for (const input of inputs) {
+      const { relPath, content, claim, proof } = input;
+      let baseBlob: string | null | undefined;
+      const refuse = function* (reason: string, extra: Partial<TaskFileRefusal> = {}, mainHoldsBytes = false): Generator<LandingAsk, void, AskReply> {
+        let idRelease: SetAsideIdRelease | undefined;
+        if ((baseBlob === null || mainHoldsBytes) && input.newFile === true && extra.timedOut !== true && !existsSync(join(taskFilesPendingRoot(stateRoot), relPath))) {
+          idRelease = JSON.parse((yield {
+            run: () => { throw new Error("the task-file landing releases an id only under the async driver"); },
+            runAsync: async () => JSON.stringify(await releaseSetAsideTaskIdAsync(opts.gitAsync!, content, kind.branch, reason, lane, opts.log)),
+          }) as string) as SetAsideIdRelease;
+        }
+        result.refused.push({ path: relPath, reason, ...extra, ...idRelease });
+      };
+      if (!relPath.startsWith(`${shardDir}/`) || !/\.ya?ml$/.test(relPath) || relPath.includes("..")) {
+        yield* refuse(`${relPath} is not a task file under ${shardDir}`);
+        continue;
+      }
+      baseBlob = yield* mainBlobOf(relPath);
+      if (baseBlob === null && !input.newFile) {
+        yield* refuse(`origin/main does not hold ${relPath}; this landing takes only an edit of a task file that exists`);
+        continue;
+      }
+      const stagedAbs = join(taskFilesPendingRoot(stateRoot), relPath);
+      if (existsSync(stagedAbs)) {
+        if (readFileSync(stagedAbs, "utf8") !== content) yield* refuse(`another edit of ${relPath} waits for its landing`);
+        continue; // the same bytes wait already
+      }
+      const refusedAbs = join(taskFilesRefusedRoot(stateRoot), relPath);
+      if (existsSync(refusedAbs) && readFileSync(refusedAbs, "utf8") === content) {
+        let why = "no cause was recorded";
+        try {
+          why = String((JSON.parse(readFileSync(`${refusedAbs}${TASK_FILE_META_SUFFIX}`, "utf8")) as { reason?: unknown }).reason);
+        } catch {
+          // The bytes alone prove the earlier refusal; only its cause is unreadable.
+        }
+        yield* refuse(`the same bytes were set aside before: ${why}`);
+        continue;
+      }
+      const tmpFile = join(scratch, `input-${n++}`);
+      writeFileSync(tmpFile, content);
+      const blob = (yield* net.git(["hash-object", "-w", tmpFile], { env })).trim();
+      if (blob === baseBlob) {
+        // W1-T12456: main already carries the id in this very file, so its reservation is dead weight —
+        // unless a different file on main also holds the id, which is then not ours to free.
+        yield* refuse(`origin/main already holds these bytes at ${relPath}`, {}, !(yield* otherMainFileHoldsId(content, relPath)));
+        continue;
+      }
+      const verdict = yield* verdictOf([{ relPath, blob, claim, proof }]);
+      if (!verdict.ok) {
+        yield* refuse(refusalText(verdict.failures), {
+          failures: verdict.failures, mainSha: yield* freshMain(), ...(yield* mainRedOf(verdict.failures)),
+          ...(verdict.timedOut === undefined ? {} : { timedOut: true as const }),
+        });
+        continue;
+      }
+      if (verdict.timedOut !== undefined) {
+        yield* refuse("the plan preflight ran out of its budget, so the file was not staged", { failures: verdict.timedOut, timedOut: true });
+        continue;
+      }
+      writeStagedTaskFile(stateRoot, relPath, content, { baseBlob, claim, proof, ...(repository === undefined ? {} : { repository }) });
+    }
+
+    const staged = queued();
+    const wait = (reason?: string): TaskFilesLandingResult => {
+      result.waiting = queued().map((f) => f.relPath).filter((p) => !result.landed.includes(p));
+      if (reason !== undefined) {
+        result.error = reason;
+        opts.log?.("task_files_landing.waiting", { branch: kind.branch, reason, files: result.waiting });
+      }
+      return result;
+    };
+    if (opts.stageOnly || staged.length === 0) return wait();
+
+    // ── the seal: an open pull request, or a listing that cannot be read, means no push ──
+    let open: Array<{ url: string }>;
+    try {
+      open = JSON.parse(yield* net.gh(pendingLandingPrArgs(kind.prHead, landingRepoArgs(kind)))) as Array<{ url: string }>;
+    } catch (e) {
+      const reason = `the open pull requests of ${kind.branch} cannot be read, so the landing waits: ${String((e as Error)?.message ?? e)}`;
+      return wait(reason);
+    }
+    if (open[0]) {
+      result.prUrl = open[0].url;
+      result.landed = staged.filter((f) => f.prUrl === open[0]!.url).map((f) => f.relPath);
+      return wait();
+    }
+
+    // ── build the batch ──
+    const batch: Array<StagedTaskFile & { blob: string }> = [];
+    for (const file of staged) {
+      const blob = (yield* net.git(["hash-object", "-w", file.abs], { env })).trim();
+      const mainBlob = yield* mainBlobOf(file.relPath);
+      if (mainBlob === blob) {
+        rmSync(file.abs, { force: true });
+        rmSync(`${file.abs}${TASK_FILE_META_SUFFIX}`, { force: true });
+        continue; // main holds the edit: it landed
+      }
+      if (file.prUrl) {
+        let state: string;
+        try {
+          state = (JSON.parse(yield* net.gh(["pr", "view", file.prUrl, "--json", "state"])) as { state: string }).state;
+        } catch {
+          continue; // its pull request cannot be read: the file waits, out of this batch
+        }
+        if (state === "CLOSED") {
+          yield* setAside(file, { reason: `its landing pull request ${file.prUrl} was closed without a merge` }, mainBlob);
+          continue;
+        }
+      }
+      if (mainBlob !== file.baseBlob) {
+        yield* setAside(file, {
+          reason: `origin/main changed ${file.relPath} after this edit was staged (base ${file.baseBlob}, main ${mainBlob ?? "deleted"}); the copy on main stands`,
+        }, mainBlob);
+        continue;
+      }
+      batch.push({ ...file, blob });
+    }
+    if (batch.length === 0) return wait();
+
+    let landing = batch;
+    let verdict = yield* verdictOf(landing);
+    if (!verdict.ok) {
+      const green: typeof batch = [];
+      let mainRed = false;
+      for (const file of batch) {
+        const alone = batch.length === 1 ? verdict : yield* verdictOf([file]);
+        if (alone.ok) {
+          if (alone.timedOut === undefined) green.push(file);
+          continue;
+        }
+        const probe = yield* mainRedOf(alone.failures);
+        if (probe.mainRed) mainRed = true;
+        else yield* setAside(file, { reason: refusalText(alone.failures), failures: alone.failures, mainSha: yield* freshMain(), ...probe }, file.baseBlob);
+      }
+      if (mainRed) return wait(`origin/main is red at ${yield* freshMain()}, so no file was set aside and the landing waits for main to move`);
+      if (green.length === 0) return wait();
+      if (green.length === batch.length) return wait(`each file passes the plan preflight alone and the batch fails: ${refusalText(verdict.failures)}`);
+      landing = green;
+      verdict = yield* verdictOf(landing);
+      if (!verdict.ok) return wait(`the files that pass alone fail together: ${refusalText(verdict.failures)}`);
+    }
+    if (verdict.timedOut !== undefined) return wait("the plan preflight ran out of its budget, so the landing waits");
+
+    // ── push once, then open the pull request ──
+    const paths = landing.map((f) => f.relPath);
+    const treeSha = yield* treeOf(landing);
+    const tipSha = (yield* refreshLandingRef(net, kind.branch)) ? (yield* net.git(["rev-parse", `origin/${kind.branch}`])).trim() : undefined;
+    if (tipSha === undefined || (yield* net.git(["rev-parse", `${tipSha}^{tree}`])).trim() !== treeSha) {
+      const commitSha = yield* commitOf(treeSha, paths);
+      assertLiveWriteAllowed("git-push", `pushing the ${kind.branch} branch`);
+      try {
+        yield* net.git(["push", `--force-with-lease=refs/heads/${kind.branch}:${tipSha ?? ""}`, "origin", `${commitSha}:refs/heads/${kind.branch}`]);
+      } catch (e) {
+        const reason = lostLease(e)
+          ? `${kind.branch} moved while this batch was built, so another writer has it and the landing waits`
+          : pushFailure(kind.branch, e);
+        return wait(reason);
+      }
+      result.pushed = true;
+    }
+    const { prUrl, error } = yield* ensurePrOpen(kind, net, taskFilesPrBody(landing), opts.requestReview);
+    if (!prUrl) return wait(`pushed to ${kind.branch} but ${error ?? "its pull request did not open"}`);
+    for (const file of landing) {
+      writeStagedTaskFile(stateRoot, file.relPath, undefined, {
+        baseBlob: file.baseBlob, claim: file.claim, proof: file.proof, ...(file.repository === undefined ? {} : { repository: file.repository }), prUrl,
+      });
+    }
+    result.prUrl = prUrl;
+    result.landed = paths;
+    opts.log?.("task_files_landing.opened", { branch: kind.branch, pr_url: prUrl, files: paths, pushed: result.pushed });
+    return wait(error);
+  } catch (e) {
+    result.error = String((e as Error)?.message ?? e);
+    try {
+      result.waiting = queued().map((f) => f.relPath);
+    } catch {
+      // The queue is unreadable too; the error above already names the failed call.
+    }
+    return result;
+  } finally {
+    if (scratchDir) {
+      try {
+        rmSync(scratchDir, { recursive: true, force: true });
+      } catch {
+        // best-effort cleanup of a temp dir; never let this mask the result above
+      }
+    }
   }
 }

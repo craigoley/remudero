@@ -1,0 +1,25 @@
+- id: W1-T11985
+  title: "The review lane's worker calls record servedModel in only 16.2% of joined calls (57/351, 7-day window) — restore servedModel at the review ledger write site or record why the lane legitimately lacks it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 40.00
+  rationale: "evidence-coverage-v1 over benchmark-quality-v1 reports lane `review`, field `servedModel`: 57/351 joined worker calls (16.2%) in the window 2026-11-02..2026-11-09 (earlier 57/468, 12.2%), against a 100.0% trailing baseline, first seen 2026-09-28T05:55:37Z. The reviewer spawns from src/run-task.ts (sandboxIntent disposable-review, incl. the shadow judge); src/lib/benchmark-evidence.ts names what servedModel reads. Sibling gaps: W1-T8374 (daemon servedModel), W1-T8947 (isolation servedModel), W1-T11006 (ci-judge servedModel), W1-T10272 (inbox-response servedModel), W1-T9387 (review cost)."
+  design: |
+    DIAGNOSE FIRST. Find which review worker calls land without servedModel: compare worker.attempt terminal rows for review spawns with the WorkerResult the reviewer path receives. Candidates: failed / timed-out / clock-bound attempts whose terminal row skips served-model capture, non-Claude providers, and the shadow-judge spawn.
+    THEN EITHER restore: thread the worker's served model into the review terminal row (see the-served-model-is-not-the-model-that-was-requested for the requested-vs-served distinction); OR, where a call legitimately has no served model, record a named reason so the lane is excused honestly rather than counted missing.
+    Rule 19 merits test: one integration test must prove servedModel (or its named reason) survives review spawn-to-ledger-to-evidence-reader, including a failed or clock-bound attempt.
+    NOT IN SCOPE: lowering the floor/baseline, editing the gardener, or touching other lanes.
+  acceptance:
+    - claim: "a test drives the review lane's spawn path, including a failed or clock-bound attempt, and feeds the ledger rows into the benchmark evidence reader: a served model is retained and counted observed, while a legitimately model-less call retains a named reason and is excused rather than missing"
+      proof: "unit test: test/review-lane-served-model.test.ts"
+  risk: high
+  band_meaning: span
+  origin: feedback#evidence-coverage-review-served-model
+  plan_refs: ["§7B"]
+  files: [src/run-task.ts, src/lib/worker.ts, src/lib/benchmark-evidence.ts, test/review-lane-served-model.test.ts]
+  priority: 4
+  status: queued
+  attempts: 0

@@ -1,0 +1,47 @@
+- id: W1-T12143
+  title: "A concluded experiment proposes its change to the mounts table"
+  repo: remudero
+  depends_on:
+    - W1-T12142
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the config gardener opens a pull request against the table that picks the model for every worker
+  band_meaning: blast-radius
+  origin: operator-session#model-choice-2026-11-10
+  plan_refs:
+    - W1-T2560
+    - W1-T10842
+  files:
+    - src/lib/config-gardener.ts
+    - src/lib/mount-recommender.ts
+    - src/run-task.ts
+    - test/gardeners/a-concluded-experiment-proposes-its-change-to-the-mounts-table.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The config gardener reads the newest routing.experiment.result row of each experiment, and a result that is concluded with a winner becomes one adopt-mount candidate"
+      proof: "grep: W1-T12143 criterion 1 in test/gardeners/a-concluded-experiment-proposes-its-change-to-the-mounts-table.test.ts"
+    - claim: "The candidate edits the rows of .remudero/mounts.yaml that the experiment covers, and its reason quotes the result: both rates, the interval and the number of tasks"
+      proof: "grep: W1-T12143 criterion 2 in test/gardeners/a-concluded-experiment-proposes-its-change-to-the-mounts-table.test.ts"
+    - claim: "The candidate goes through the same canary and review as every other adopt-mount change, and the tier check still refuses a change that breaks it"
+      proof: "grep: W1-T12143 criterion 3 in test/gardeners/a-concluded-experiment-proposes-its-change-to-the-mounts-table.test.ts"
+    - claim: "A result that is running, underpowered or concluded with no difference proposes nothing. A winner that the table cannot express is reported as a finding that names the setting that can"
+      proof: "grep: W1-T12143 criterion 4 in test/gardeners/a-concluded-experiment-proposes-its-change-to-the-mounts-table.test.ts"
+  rationale: |
+    MEASURED 2026-11-10 in the core instance's ledger, 2026-10-27 to 2026-11-10: the experiment `sol61-vs-sonnet55` ran on 326 tasks and changed no routing.
+    - By assigned arm, build runs merged in 68.6% (24 of 35) for sonnet and 49.1% (26 of 53) for sol61. No part of the fleet acts on that.
+    - The config gardener's adopt-mount path takes one kind of evidence: the mount headroom sweep, read by `recommendMounts`. That sweep is observational, and its own notice says so.
+    - `mountCandidate` skips a recommendation whose two arms are on different providers. Every live experiment compares two providers.
+    - A randomised result is stronger evidence than the sweep, and it has no path to the table.
+  design: |
+    Add a second source beside `mountRecommendationSource`: the newest `routing.experiment.result` row for each experiment, from W1-T12142.
+    Map a concluded result to the `MountRecommendation` shape so `mountCandidate` and the canary code stay one path. Mark its evidence as randomised, and leave out the observational notice for it.
+    Where the winner is on another provider, edit the row only if its schema allows a provider. If it does not, write a finding that names the routing setting that holds the choice.
+    NOT IN SCOPE: a change to the auction (W1-T12148), and any new experiment.
+  falsifier: |
+    Accept a running result and criterion 4 must fail. Skip the canary for an experiment candidate and criterion 3 must fail. Drop the interval from the reason and criterion 2 must fail. Restore and require all to pass.
+  note: |
+    The canary measures the change again on live work, so a wrong experiment result is caught before the change stays.

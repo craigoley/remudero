@@ -17,7 +17,7 @@
   files:
     - src/lib/worker.ts
     - test/worker/spawn/an-in-process-fix-start-rereads-the-fleet-hold.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: For an in-process start (no run-child reservation) of worker class fix, spawnWorker reads the fleet STOP/PAUSE hold after awaitMemoryAdmission and before claiming occupancy; under a hold it releases any reservation, spawns nothing and returns notStarted admission-abandoned; with no hold, and for every other worker class, it starts exactly as before

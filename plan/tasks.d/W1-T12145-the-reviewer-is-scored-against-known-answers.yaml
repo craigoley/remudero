@@ -1,0 +1,59 @@
+- id: W1-T12145
+  title: "The reviewer is scored against known answers"
+  repo: remudero
+  depends_on: []
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # a new scheduled pass that starts reviewers on stored changes, and a change to the verdict calibration report
+  band_meaning: blast-radius
+  origin: operator-session#model-choice-2026-11-10
+  plan_refs:
+    - W1-T4619
+    - W1-T424
+    - W1-T11985
+  files:
+    - src/lib/reviewer-calibration.ts
+    - src/lib/golden-corpus.ts
+    - src/lib/review-replay-sample.ts
+    - src/lib/verdict-calibration.ts
+    - src/lib/ledger-steps.ts
+    - src/run-task.ts
+    - test/review/the-reviewer-is-scored-against-known-answers.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The pass builds the known-answer set from merged history. Each case is a merged change as the clean control, or the same change with one seeded defect that makes the task's held-out proof fail"
+      proof: "grep: W1-T12145 criterion 1 in test/review/the-reviewer-is-scored-against-known-answers.test.ts"
+    - claim: "The set is frozen once with its seed. A later pass reads it back and never derives it again"
+      proof: "grep: W1-T12145 criterion 2 in test/review/the-reviewer-is-scored-against-known-answers.test.ts"
+    - claim: "For each reviewer model the pass writes one review.calibration.result row. The row records precision, recall and the rate of FAIL verdicts on clean changes, each with an interval and its number of cases"
+      proof: "grep: W1-T12145 criterion 3 in test/review/the-reviewer-is-scored-against-known-answers.test.ts"
+    - claim: "The verdict calibration report groups passed pull requests by the reviewer model that passed them. It gives each model its revert rate and its follow-up fix rate inside the existing 14-day window"
+      proof: "grep: W1-T12145 criterion 4 in test/review/the-reviewer-is-scored-against-known-answers.test.ts"
+    - claim: "A reviewer verdict from this pass posts no status and changes no pull request"
+      proof: "grep: W1-T12145 criterion 5 in test/review/the-reviewer-is-scored-against-known-answers.test.ts"
+    - claim: "The measurement cadence in src/run-task.ts calls the pass"
+      proof: "grep: scoreReviewersAgainstKnownAnswers( in src/run-task.ts"
+  rationale: |
+    MEASURED 2026-11-10 in the core instance's ledger, 2026-10-27 to 2026-11-10: the two reviewer models disagree widely, and nothing measures which one is right.
+    - gpt-6.1-sol gave FAIL in 55.6% of reviews (409 of 736). sonnet-5-5 gave FAIL in 14.6% (47 of 322).
+    - gpt-6.1-sol failed a criterion although its proof passed in 26.0% of criteria (623 of 2,392). sonnet-5-5 did so in 3.7% (37 of 987).
+    - A gpt-6.1-sol review took a median 273 seconds and $0.44. A sonnet-5-5 review took 54 seconds and $0.13.
+    - The shadow judge agreed with the reviewer in 57.3% of cases (43 of 75). Agreement shows only that two models differ. It does not show which one is right, and nothing reads it.
+    - src/lib/verdict-calibration.ts already joins a passed merge to a later revert or fix. It groups by verdict class and never by reviewer model.
+  design: |
+    Add src/lib/reviewer-calibration.ts.
+    1. Take cases from `deriveGoldenCorpus`: a merged task with a held-out proof that discriminates. The merged diff is the clean control.
+    2. Seed one defect for each case: remove or invert one hunk of the merged diff, and keep the case only if the held-out proof then fails. This makes the right answer known without a person.
+    3. Run each reviewer model on each case through the replay path in src/lib/review-replay-sample.ts. Keep the verdict off GitHub.
+    4. Score: a FAIL on a seeded defect is a true positive. A FAIL on a clean control is a false FAIL. Use a Wilson interval.
+    5. Run from the measurement cadence, a fixed number of cases for each model each pass. The builder states that number and its cost in the pull request.
+    For criterion 4, add the reviewer's served model to `VerdictRow` from the `review.posted` row and group by it. Where the row names no model, count it under "unreadable".
+    NOT IN SCOPE: any change to which model reviews, and the review prompt.
+  falsifier: |
+    Keep a seeded case whose held-out proof still passes and criterion 1 must fail. Derive the set again on the second pass and criterion 2 must fail. Count a FAIL on a clean control as correct and criterion 3 must fail. Post a status from the pass and criterion 5 must fail. Restore and require all to pass.
+  note: |
+    W1-T11985 restores the served model on review rows. Until it merges, criterion 4 counts more rows as unreadable.

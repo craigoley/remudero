@@ -18,7 +18,7 @@
     - test/retro-prepublish-validation.test.ts # its row-list pins gain the start row
     - test/learning/scout-retro-preflight-failed.test.ts # likewise
   # redesign: signature=622563fc631539c6
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: runRetroPrepublishPreflight ledgers one retro.preflight_started row, with the retro run id, the changed-file count and the test pool it will run, before it spawns its preflight, and its passed/failed end rows are unchanged

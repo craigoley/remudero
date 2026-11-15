@@ -12,7 +12,7 @@
   plan_refs: [W1-T11454, W1-T11431, W1-T1069, W1-T3596, W1-T10573]
   files: [deploy/recycle-container.sh, test/recycle-container.test.ts]
   priority: 2
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     W1-T11454 source d35ad6af0491494dd03a0e4dbb62ad6804aee8a0 merged in

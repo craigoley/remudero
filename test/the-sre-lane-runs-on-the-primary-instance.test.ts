@@ -197,7 +197,7 @@ test("selected lifecycle shadow reaches actual deploy pause and daemon consumers
   const exitMock = t.mock.method(process, "exit", ((code: number) => { assert.equal(code, 0); throw exit; }) as never);
   try {
     for (const verb of ["pause", "resume"]) {
-      process.argv = [process.execPath, "run-task.js", verb];
+      process.argv = [process.execPath, "run-task.js", verb, ...(verb === "pause" ? ["--reason", "fixture hold"] : [])];
       await assert.rejects(runTask.main({ checkFreshness: () => ({ status: "guarded" }) }), error => error === exit);
     }
     const plan = join(root, "tasks.yaml");

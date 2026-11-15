@@ -16,7 +16,7 @@
   files:
     - src/cli/commands/review.ts
     - test/review/the-review-is-told-whether-hosted-ci-passed-each-proof-file.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: runReview fills ReviewEvidence.hostedCiFilePassed for each unit-test proof's file from the head's concluded hosted CI shard checks, through W1-T11133's off-host-pass reader rather than a second GitHub reader; a file whose shard has not concluded, a failed or unreadable read, or a head other than the one judged leaves it absent

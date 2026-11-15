@@ -1,3 +1,4 @@
+// @census-reads: src/ test/ledger-rotation.test.ts — the ledger source it copies and mutates, and its own text.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
@@ -92,6 +93,7 @@ test("DECISION_RELEVANT_LEDGER_STEPS: derived from consumers, not hardcoded — 
     "../src/lib/drain.ts",
     "../src/lib/review.ts",
     "../src/lib/stall-verifier.ts",
+    "../src/lib/restart-cycle.ts",
   ];
 
   // VERIFIED non-deciding despite living in a deciding-reader file: status.ts's

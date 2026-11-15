@@ -27,7 +27,7 @@ RMD_MIN_BUILD_CEILING_MIB="${RMD_MIN_BUILD_CEILING_MIB:-2048}"
 RMD_SERVE_MEMORY_LIMIT_MIB="${RMD_SERVE_MEMORY_LIMIT_MIB:-}"         # empty = the shared budget; set = operator override (0 = none)
 RMD_SERVE_SWAP_MIB="${RMD_SERVE_SWAP_MIB:-2048}"                     # operator ruling 2026-10-19 (was 1024: 95% full)
 RMD_SERVE_CPUS="${RMD_SERVE_CPUS:-}"                                 # empty = no CPU quota, weight only
-RMD_SERVE_CPU_SHARES="${RMD_SERVE_CPU_SHARES:-4096}"
+RMD_SERVE_CPU_SHARES="${RMD_SERVE_CPU_SHARES:-512}"         # W1-T12532: equal to a build daemon's, never lower
 RMD_BUILD_CPU_SHARES="${RMD_BUILD_CPU_SHARES:-512}"
 
 # ── memory.high: A SOFT CEILING SIZED FROM ONE HOST BUDGET (2026-10-09) ─────────────────────────
@@ -481,7 +481,7 @@ resource_policy_probe_memory_high() {
   fi
 }
 
-# serve gets a high CPU weight and a hard memory ceiling that bounds a leak rather than squeezing
+# serve gets a daemon's CPU weight and a hard memory ceiling that bounds a leak rather than squeezing
 # the working set. NO memory.low (operator ruling 2026-10-19): --memory-reservation set serve's
 # memory.low to 5 GiB, but system.slice holds memory.low=0, and the kernel limits a cgroup's
 # effective low boundary by its ancestors' (Documentation/admin-guide/cgroup-v2.rst), so it
@@ -492,8 +492,8 @@ resource_policy_probe_memory_high() {
 # bounding it. 5 GiB is 1.4x the highest reading (3.64 GiB, page cache included, under a
 # 40-route probe) and 2x the highest process RSS (2.5 GB). At the ceiling the kernel first drops
 # serve's own page cache, then swaps up to RMD_SERVE_SWAP_MIB, and only then kills; the container
-# restarts itself. No CPU quota by default: the weight already wins contention, and a quota would
-# slow serve's cold reads on an idle host. RMD_SERVE_CPUS adds one without a code change.
+# restarts itself. No CPU quota by default: the weight (equal to a daemon's, W1-T12532) shares contention, and a
+# quota would slow serve's cold reads on an idle host. RMD_SERVE_CPUS adds one without a code change.
 # Serve has no other NODE_OPTIONS, so its whole value is the ruled memory flags.
 resource_policy_serve_args() {
   local serve_node_options
@@ -593,8 +593,8 @@ resource_policy_build_args() {
 # claimant on the same budget as the containers above: RMD_SESSION_MEMORY_WEIGHT against
 # RMD_MEMORY_WEIGHTS. It is rounded to RMD_SESSION_HIGH_STEP_MIB so a MemTotal that moves by a few
 # MiB across kernels never rewrites the file. The container shares are left as they are: memory.high
-# is soft, and on this host their working-set floors already exceed the budget. CPUWeight 30 is about
-# half a build daemon's measured 59, so a session yields to the fleet when both want the CPU.
+# is soft, and on this host their working-set floors already exceed the budget. CPUWeight also goes
+# on user.slice, which competes with system.slice; the UID slice alone has no rival (W1-T12060).
 RMD_SESSION_MEMORY_WEIGHT="${RMD_SESSION_MEMORY_WEIGHT:-24}"
 RMD_SESSION_CPU_WEIGHT="${RMD_SESSION_CPU_WEIGHT:-30}"
 RMD_SESSION_HIGH_STEP_MIB="${RMD_SESSION_HIGH_STEP_MIB:-256}"
@@ -604,7 +604,7 @@ resource_policy_session_slice() {
   local total budget sum=0 entry share step="${RMD_SESSION_HIGH_STEP_MIB}"
   RP_SESSION_HIGH_MIB="" RP_SESSION_NOTE=""
   if ! total="$(resource_policy_mem_total_mib)" || [ -z "${total}" ]; then
-    RP_SESSION_NOTE="NO session cap — host MemTotal unreadable at ${RMD_MEMINFO_PATH:-/proc/meminfo}"
+    RP_SESSION_NOTE="NO session cap — host MemTotal unreadable at ${RMD_MEMINFO_PATH:-/proc/meminfo}, CPUWeight ${RMD_SESSION_CPU_WEIGHT} on user.slice"
     return 0
   fi
   budget=$((total - RMD_HOST_RESERVE_MIB))
@@ -614,11 +614,16 @@ resource_policy_session_slice() {
   [ "${step}" -gt 0 ] 2>/dev/null || step=1
   share=$(((share + step / 2) / step * step))
   if [ "${share}" -le 0 ]; then
-    RP_SESSION_NOTE="NO session cap — weight ${RMD_SESSION_MEMORY_WEIGHT}/${sum} of a ${budget} MiB budget rounds to nothing"
+    RP_SESSION_NOTE="NO session cap — weight ${RMD_SESSION_MEMORY_WEIGHT}/${sum} of a ${budget} MiB budget rounds to nothing, CPUWeight ${RMD_SESSION_CPU_WEIGHT} on user.slice"
     return 0
   fi
   RP_SESSION_HIGH_MIB="${share}"
-  RP_SESSION_NOTE="session MemoryHigh ${share} MiB = weight ${RMD_SESSION_MEMORY_WEIGHT}/${sum} of a ${budget} MiB budget (host ${total} - reserve ${RMD_HOST_RESERVE_MIB}), CPUWeight ${RMD_SESSION_CPU_WEIGHT}"
+  RP_SESSION_NOTE="session MemoryHigh ${share} MiB = weight ${RMD_SESSION_MEMORY_WEIGHT}/${sum} of a ${budget} MiB budget (host ${total} - reserve ${RMD_HOST_RESERVE_MIB}), CPUWeight ${RMD_SESSION_CPU_WEIGHT} on user.slice"
+}
+
+resource_policy_session_cpu_slice_dropin() {
+  printf '# CPUWeight %s on user.slice, the sibling of system.slice (W1-T12060).\n' "${RMD_SESSION_CPU_WEIGHT}"
+  printf '[Slice]\nCPUWeight=%s\n' "${RMD_SESSION_CPU_WEIGHT}"
 }
 
 # The systemd drop-in for user-<uid>.slice, or nothing when no cap can be sized.

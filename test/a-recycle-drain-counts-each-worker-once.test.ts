@@ -70,7 +70,7 @@ case "$1" in
         cat "$FIXTURE_DIR/cwd-$pid" 2>/dev/null ;;
       sh) echo PRESENT ;;
     esac ;;
-  stop|rm|run|container) touch "$FIXTURE_DIR/stopped" ;;
+  stop|rm|run) touch "$FIXTURE_DIR/stopped" ;;
 esac
 exit 0
 `, { mode: 0o755 });
@@ -87,7 +87,7 @@ exit 0
   });
   assert.ifError(r.error);
   assert.equal(r.status, 1, `${r.stdout}\n${r.stderr}`);
-  assert.equal(existsSync(join(dir, "stopped")), false, "busy work prevents smoke and container replacement");
+  assert.equal(existsSync(join(dir, "stopped")), false, "busy work prevents container replacement (the smoke now runs before the drain)");
   if (lockKey) assert.equal(existsSync(join(dir, "state/inflight", `${lockKey}.lock`)), true);
   assert.equal(existsSync(join(dir, "state/PAUSE")), false, "refusal releases its own pause");
   return r.stderr;

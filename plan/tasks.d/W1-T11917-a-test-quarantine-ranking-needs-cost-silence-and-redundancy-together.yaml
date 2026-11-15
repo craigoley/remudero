@@ -1,0 +1,38 @@
+- id: W1-T11917
+  title: A script ranks the tests that are expensive, have never failed in the observed runs and are mutation-covered by another suite, as candidates for a nightly-only lane, and changes nothing
+  repo: remudero
+  depends_on: []
+  priority: 1.6
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: low # one concern: a read-only candidate ranking; no test is moved, skipped or deleted by it
+  origin: operator-session#gate-efficiency-1109
+  plan_refs:
+    - W1-T4406
+  files:
+    - scripts/test-quarantine-candidates.mjs
+    - test/a-test-quarantine-ranking-needs-cost-silence-and-redundancy-together.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A test is a candidate only when its measured cost is above the median, it has zero failures across every observed complete run, and another suite kills the same mutants, and each candidate row names its cost, run count and covering suite
+      proof: "unit test: test/a-test-quarantine-ranking-needs-cost-silence-and-redundancy-together.test.ts"
+    - claim: A test that is cheap, that has failed even once, or that no other suite covers is never listed
+      proof: "grep: W1-T11917 criterion 2 in test/a-test-quarantine-ranking-needs-cost-silence-and-redundancy-together.test.ts"
+    - claim: The script writes only its report and leaves every test file and the tier manifest byte-identical
+      proof: "grep: W1-T11917 criterion 3 in test/a-test-quarantine-ranking-needs-cost-silence-and-redundancy-together.test.ts"
+  rationale: |
+    OBSERVED 2026-11-09: 4,474 test files, 1.08 million lines of tests against 471 thousand of source, a modelled 252 serial minutes, and the 50 costliest files are a quarter of it. 1,321 files spawn processes and 276 read source text. A sample scan found no orphaned test (an apparent 69 were fixture strings) and 74 files carrying skip or todo markers.
+    - Deleting on "never failed" alone is wrong for a guard test, which exists to stay green. Cost alone is wrong for a test that is the only cover of a rule. The three conditions together (expensive, silent, redundant) are what make a test cheap to move to a lane that still runs nightly.
+    - The selector shadow store already holds failures per file across 2,745 runs and the repo already measures proof discrimination; this task joins them rather than adding a new measurement.
+  design: |
+    - A pure function, exported by the script and imported by the test, takes per-file cost, per-file failure counts, run count and the mutation coverage map, and returns the ranked rows.
+    - A script reads the three inputs from their existing stores and prints the report; it opens no PR and edits nothing. Moving anything to a nightly lane is a separate task, filed once the first report shows the size of the prize.
+    - NOT IN SCOPE: moving, skipping or deleting a test, the tier manifest, and any CI workflow.
+  falsifier: |
+    List a cheap test: criterion 2 must fail. List a test that failed once: criterion 2 must fail. List a test no other suite covers: criterion 2 must fail. Let the script edit the manifest: criterion 3 must fail. Restore and require all three.
+  note: |
+    reservation hand-off: run-unfiled-1794254218113
+    Success is a ranked list with a measured seconds-per-PR saving, read by a person or by the follow-on task that moves the tests; if the list is empty, that is a result too.

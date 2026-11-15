@@ -1,0 +1,70 @@
+- id: W1-T12257
+  title: "The Mac janitor removes fleet leftovers from the temp folder of its account"
+  repo: remudero
+  depends_on:
+    - W1-T12252
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # a deletion rule in a folder that every session of the account shares
+  band_meaning: blast-radius
+  origin: operator-session#janitor-disk-waste-2026-11-11
+  plan_refs:
+    - W1-T11461
+    - W1-T7808
+    - W1-T320
+    - W1-T10256
+  files:
+    - deploy/mac/tmp-reclaim.sh
+    - test/deploy/the-mac-janitor-removes-fleet-leftovers-from-the-user-temp-folder.test.ts
+    - test/the-mac-reclaims-its-own-scratch.test.ts
+    - test/deploy/a-tsx-alias-follows-the-candidate-and-cache-only-scans-user-roots.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "In its regular mode the pass visits the temp folder of the account and judges only the direct children whose name starts with `rmd-` or `remudero-`. One array in the script holds these patterns"
+      proof: "grep: W1-T12257 criterion 1 in test/deploy/the-mac-janitor-removes-fleet-leftovers-from-the-user-temp-folder.test.ts"
+    - claim: "The pass removes such an entry when the account owns it, nothing in it changed for six hours, and no process uses it"
+      proof: "grep: W1-T12257 criterion 2 in test/deploy/the-mac-janitor-removes-fleet-leftovers-from-the-user-temp-folder.test.ts"
+    - claim: "The pass never removes and never opens an entry with another name, at any age. The test has entries named `daemon-x`, `claude-x` and `com.apple.x` that are a week old"
+      proof: "grep: W1-T12257 criterion 3 in test/deploy/the-mac-janitor-removes-fleet-leftovers-from-the-user-temp-folder.test.ts"
+    - claim: "An entry stays when a process uses it, when something in it changed inside the six hours, or when it holds a lock file, a pid file, a socket or a Git checkout"
+      proof: "grep: W1-T12257 criterion 4 in test/deploy/the-mac-janitor-removes-fleet-leftovers-from-the-user-temp-folder.test.ts"
+    - claim: "An entry that holds a symlink to a path outside the temp folder stays, and the pass never removes the path that the symlink points to"
+      proof: "grep: W1-T12257 criterion 5 in test/deploy/the-mac-janitor-removes-fleet-leftovers-from-the-user-temp-folder.test.ts"
+    - claim: "A dry run lists each entry that would go, with its size, and removes nothing. The cache-only mode does not judge these entries"
+      proof: "grep: W1-T12257 criterion 6 in test/deploy/the-mac-janitor-removes-fleet-leftovers-from-the-user-temp-folder.test.ts"
+    - claim: "Each pass prints one line for each name stem with the count and the bytes it removed. It also prints the count of the entries it left whose name has the shape of a `mkdtemp` name and no fleet prefix, for each stem"
+      proof: "grep: W1-T12257 criterion 7 in test/deploy/the-mac-janitor-removes-fleet-leftovers-from-the-user-temp-folder.test.ts"
+  rationale: |
+    OBSERVED 2026-11-11 on the Mac agent account: the temp folder of the account (`getconf DARWIN_USER_TEMP_DIR`) held about 4,170 entries, and 2,600 of them were more than three hours old.
+    - The names were `rmd-*`, `daemon-*`, `rmd-cow-wt-*` and `rmd-test-*`. They are small in bytes and they use thousands of inodes.
+    - A second reading the same night, after a person removed entries, found 1,612. By name stem: `rmd-containment-test` 352, `rmd-census-capture` 275, `rmd-t<n>` 114, `daemon` 102, `daemon-freshness` 60, `rmd-test-slots` 55.
+    READ at origin/main 3c6e5e476.
+    - deploy/mac/tmp-reclaim.sh sweeps `/private/tmp` (`ROOT`, line 44). In the temp folder of the account it visits only `tsx-*` and `node-compile-cache` (lines 670 to 681).
+    - `sweepStaleTempDirs` (src/lib/tmp.ts:172) removes `rmd-` and `remudero-` names after 24 hours. Its callers are the daemon start (src/cli/commands/daemon.ts:1520) and src/cli/commands/run-task-verb.ts. No daemon runs on the Mac agent account (rationale of W1-T12176).
+    - The `temp_roots` setting of preserve-retire covers `/private/tmp` only (deploy/mac/JANITOR.md).
+    - test/setup/tmp-hygiene.ts removes the folders of a test process when it exits. A killed process leaves them. test/setup/reapable-prefix.ts gives each fixture name the prefix `rmd-test-` for that case.
+    - 162 entries were named `daemon-*`. That name has no fleet prefix, so something makes temp folders without the wrapper. The janitor must not own that name: other software can use it.
+    - The Azure host needs no task for this. Its hourly root pass sweeps `rmd-*` and `node-coverage-*` under `/tmp`, `/mnt/rmd/tmp`, `/mnt/scratch/tmp` and `/mnt/scratch/rmd-work-tmp` (deploy/rmd-tmp-sweep.sh).
+    WHY patterns and not the folder: every session of the account writes to this folder, and so does macOS. The janitor owns a declared list of names. It does not own the folder.
+  design: |
+    In deploy/mac/tmp-reclaim.sh, in the regular mode (`TSX_ONLY=0`), after the `tsx-*` loop over `TMP_REAL`:
+    - Add `USER_TMP_PATTERNS=('rmd-*' 'remudero-*')`. These are the two prefixes of `isRmdOwnedTempName` in src/lib/tmp.ts. Name that function in a comment.
+    - For each direct child of `TMP_REAL` that matches a pattern, call the entry function of today (`process_tmp_entry`). It already tests the owner, the six hours, the process, the working directory, the open files, symlinks, Git data and coordination files.
+    - Set `ROOT_REAL` to `TMP_REAL` for these calls and restore it after them, as the session scratch block does.
+    - Do nothing when `TMP_REAL` equals the main root. The main loop has judged those entries.
+    - Count by name stem. The stem is the name without the last `-` or `.` and the six characters after it.
+    - For the entries that match no pattern, count only those whose name ends in six characters of `mkdtemp` shape. Do not open them. Print `leftover stem=<stem> removed=<n> bytes=<b>` and `unowned stem=<stem> left=<n>`.
+    The test slot folder (src/lib/test-slot.ts) may have an `rmd-` name. Read how it marks use. If it holds no lock file and no pid file while in use, add its name to `KEEP_NAMES`.
+    NOT IN SCOPE: a new pattern such as `daemon-*`, the fix of the creator of those names, the 24 hours of `sweepStaleTempDirs`, and the Azure janitor.
+  falsifier: |
+    Judge every direct child and criterion 3 must fail. Remove an entry with a pid file and criterion 4 must fail. Follow the symlink and criterion 5 must fail. Remove an entry in a dry run and criterion 6 must fail. Leave out the count of the names with no fleet prefix and criterion 7 must fail. Restore and require all seven to pass.
+  note: |
+    Host and account: every Mac account that schedules the temp cleaner. On the agent account it runs each hour at minute 17.
+    Owner of the paths: the account that runs the pass, for the names in the pattern list only.
+    Never removed: an entry with another name, an entry of another owner, an entry in use, and a path outside the temp folder.
+    It depends on W1-T12252 because both change deploy/mac/tmp-reclaim.sh.
+    The `unowned` lines are the count for a gardener. A stem names the fixture prefix, and a search of `test/` for the prefix finds the test that leaks. No gardener reads the lines yet.

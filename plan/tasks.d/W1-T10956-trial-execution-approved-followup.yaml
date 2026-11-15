@@ -30,7 +30,7 @@
     - test/benchmark-nondispatch-attempts.test.ts
     - test/every-routing-decision-records-why.test.ts
     - test/the-draft-cap-is-a-batch-size-not-a-concurrency-limit.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: The operator requested durable plan custody of the remaining approved

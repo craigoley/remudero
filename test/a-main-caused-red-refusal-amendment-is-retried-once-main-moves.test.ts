@@ -46,6 +46,15 @@ const TITLE_RED: PlanPrPreflightResult = {
 };
 const GREEN: PlanPrPreflightResult = { ok: true, failures: [], unreadable: [] };
 
+/** W1-T12199: the git the sealed task-file landing reads. A tree is named after its fixture root and its main, so no verdict is shared between tests. */
+function landingFixtureGit(root: string, mainSha: string, commitSha: string, args: readonly string[]): string {
+  if (args.includes("rev-parse")) return `${args.at(-1) === "origin/main" ? mainSha : args.at(-1)!.includes(":") ? "ba5eb10b" : commitSha}\n`;
+  if (args.includes("hash-object")) return "a3e9dedb10b\n";
+  if (args.includes("write-tree")) return `tree-of-${root}-on-${mainSha}\n`;
+  if (args.includes("commit-tree")) return `${commitSha}\n`;
+  return "";
+}
+
 type Row = Record<string, unknown>;
 
 function rows(path: string): Row[] {
@@ -126,6 +135,7 @@ function fixture(
   let baseSha = BASE_A;
   const preflightShas: string[] = [];
   const ghCalls: string[][] = [];
+  const landingPrs: string[] = [];
   const deps: BuildSweepEffectsDeps = {
     owner: "acme",
     repo: "remudero",
@@ -135,7 +145,7 @@ function fixture(
     plan: { tasks: [task], byId: new Map([[TASK, task]]) } as unknown as Plan,
     log: (step, extra) => appendLedger(ledger, { run_id: "SWEEP-W1-T5531", task_id: "SWEEP", step, ...extra }),
     nowMsImpl: () => NOW,
-    planRepairGitImpl: (_file, args) => (args.includes("HEAD^") ? `${baseSha}\n` : args.includes("rev-parse") ? `${COMMIT_SHA}\n` : ""),
+    planRepairGitImpl: (_file, args) => landingFixtureGit(root, baseSha, COMMIT_SHA, args),
     worktreeAddImpl: (_repoDir, worktreePath) => {
       mkdirSync(join(worktreePath, "plan", "tasks.d"), { recursive: true });
     },
@@ -143,6 +153,12 @@ function fixture(
     worktreeRemoveImpl: () => {},
     ghJsonImpl: (args) => {
       ghCalls.push(args);
+      // W1-T12199: the landing lists the open pull requests of its branch, then creates one.
+      if (args[0] === "pr" && args[1] === "list") return landingPrs.map((url) => ({ url }));
+      if (args[0] === "pr" && args[1] === "create") {
+        landingPrs.push("https://github.com/acme/remudero/pull/9532");
+        return "https://github.com/acme/remudero/pull/9532";
+      }
       return args.includes("--method") ? { html_url: "https://github.com/acme/remudero/pull/9531", number: 9531 } : [];
     },
     buildPlanPrBodyImpl: buildFixturePlanPrBody,
@@ -157,7 +173,7 @@ function fixture(
   return {
     ledger,
     preflightShas,
-    creates: () => ghCalls.filter((c) => c.includes("--method")),
+    creates: () => ghCalls.filter((c) => c[1] === "create"),
     setBase: (sha) => {
       baseSha = sha;
     },
@@ -212,20 +228,20 @@ test("W1-T5531: a base probe that throws records the error and leaves the refusa
   assert.match(String(row!.main_red_probe_error), /base tree could not be preflighted/);
 });
 
+// W1-T12199: the landing reads origin/main before it builds the amendment's commit, so an unreadable base is no
+// longer a refusal with an unknown base. Nothing is preflighted and no row settles the source run.
 test("W1-T5531: a base sha that cannot be read records the error and leaves the refusal final", async () => {
   const f = fixture(() => LINT_RED, () => LINT_RED, {
     planRepairGitImpl: (_file, args) => {
-      if (args.includes("HEAD^")) throw new Error("no parent commit");
-      return args.includes("rev-parse") ? `${COMMIT_SHA}\n` : "";
+      if (args.at(-1) === "origin/main") throw new Error("origin/main is unreadable");
+      return "";
     },
   });
   appendLedger(f.ledger, verdict());
   await withLiveWritesAllowed(() => runSweep([], f.sweepDeps(BASE_A)));
-  const [row] = outcomes(f);
-  assert.equal(row!.main_red, false);
-  assert.equal(row!.origin_main_sha, undefined);
-  assert.match(String(row!.main_red_probe_error), /no parent commit/);
-  assert.deepEqual(f.preflightShas, [COMMIT_SHA], "no base to probe");
+  assert.deepEqual(outcomes(f), [], "no row settles the source run, so a later pass asks again");
+  assert.deepEqual(f.preflightShas, [], "no base, so nothing to preflight");
+  assert.equal(f.creates().length, 0);
 });
 
 test("W1-T5531: the sweep retries a main-red refusal once main moves, and only once", async () => {

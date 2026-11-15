@@ -475,12 +475,12 @@ test("the repair shares the fix rung's hold, claim, host admission and detached 
     judgments++;
     assert.equal(input.strikesSpent, DEFAULT_SWEEP_POLICY.strikeCap);
     assert.equal(input.rounds.length, DEFAULT_SWEEP_POLICY.strikeCap);
-    return undefined;
+    throw new Error("progress provider offline");
   } });
   await runSweep([blockedPr()], claimed.deps, DEFAULT_SWEEP_POLICY);
   assert.equal(judgments, 1);
   assert.equal(claimed.rec.dispatched.length, 0);
-  assert.match(String(claimed.rec.rows.find((row) => row.step === "sweep.disposed")?.stand_down_reason), /absent or unparseable fix progress verdict/);
+  assert.match(String(claimed.rec.rows.find((row) => row.step === "sweep.disposed")?.stand_down_reason), /fix progress judgment failed/);
   claimed.deps.fixProgressJudge = async () => {
     judgments++;
     return { verdict: "change-approach", approach: "reproduce the scanner finding", reason: "new fixture" };

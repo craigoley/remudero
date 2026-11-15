@@ -24,7 +24,7 @@
     - deploy/install-host-units.sh
     - test/recycle-container.test.ts
     - test/deploy/the-rendered-watchdog-passes-the-installed-registry-to-the-memory-policy.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: For each fleet container, serve included, memory.max is the shared-budget formula (the host's MemTotal less the host reserve less the sum of the OTHER containers' learned peaks) whenever that covers the container's own learned peak; when the formula falls below its own peak the host is overcommitted and the container keeps the larger of its own peak and the memory.max it already runs with (read from its running container's cgroup, or its own peak when none runs), so no limit is lowered below today's while overcommitted and none is ever below measured need, and once the peaks fit the formula governs

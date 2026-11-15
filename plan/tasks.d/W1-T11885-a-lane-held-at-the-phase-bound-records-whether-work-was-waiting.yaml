@@ -1,0 +1,40 @@
+- id: W1-T11885
+  title: A lane held or parked at the phase bound records how many runnable tasks were waiting, so phase_bound idle time can be told apart from an empty queue
+  repo: remudero
+  depends_on: []
+  priority: 1.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19: one concern, a shadow measurement on the lane refill path; it spans the daemon's refill decision and the row it writes, and a wrong read must never change a hold
+  origin: operator-session#capacity-1109
+  plan_refs:
+    - W1-T5761
+    - W1-T8235
+  files:
+    - src/lib/daemon.ts
+    - test/daemon/a-lane-held-at-the-phase-bound-records-whether-work-was-waiting.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A `dispatch.lane_refill_held` or `dispatch.lane_parked` row whose reason is the phase bound carries `runnable_waiting`, the number of tasks the refill's own candidate selection would have taken
+      proof: "unit test: test/daemon/a-lane-held-at-the-phase-bound-records-whether-work-was-waiting.test.ts"
+    - claim: The measurement changes no decision, so a lane held or parked at the phase bound is held or parked exactly as before whatever the count, and a failed read records `runnable_waiting_unread` with its reason and holds as before
+      proof: "grep: W1-T11885 criterion 2 in test/daemon/a-lane-held-at-the-phase-bound-records-whether-work-was-waiting.test.ts"
+    - claim: The read happens once per hold or park, never per tick, and never on a refill that is not phase bound
+      proof: "grep: W1-T11885 criterion 3 in test/daemon/a-lane-held-at-the-phase-bound-records-whether-work-was-waiting.test.ts"
+  rationale: |
+    OBSERVED 2026-11-09 (lane.idle_summary, 91 windows, 136.8 wall-hours, 2026-11-04 to 2026-11-09): 56% of build-lane capacity was idle (231.4 of 410.4 slot-hours). `phase_bound` is charged 57.9 slot-hours (25% of idle time) and `selection_empty` 59.5 (26%).
+    - The two rows that name the phase bound explain almost none of it. Over 2026-11-06 to 2026-11-09 there were 19 phase-bound parks totalling 1.6 hours (median 4 minutes) and 53 phase-bound holds. A held lane stays idle until the daemon's next dispatch round, and that interval is charged to `phase_bound` even when the next round finds nothing runnable. INFERRED, not yet measured: much of the 25% is an empty queue wearing the wrong label.
+    - Dispatch rounds are few and small: 57 `dispatch.concurrent_set` rows in 2.6 days, most naming one task, median gap 35 minutes, p90 162.
+    - The barrier exists for a reason (a round must end so the loop can sweep and take its restart decision), so removing it blind could cost more than it returns. The measurement decides whether it is worth changing.
+  design: |
+    - In `decideRefill`'s phase-bound branches, run the SAME candidate selection the refill path runs when it is not phase bound (the pool read and `partitionByFileOverlap`), read-only, and put the count of candidates that fit on the `dispatch.lane_refill_held` and `dispatch.lane_parked` rows as `runnable_waiting`.
+    - The measurement never changes the verdict: the hold or park still happens, the claim and the pool are untouched, and a read that throws records `runnable_waiting_unread: <reason>`.
+    - NOT IN SCOPE: changing the barrier, the idle account's attribution, the refill bound, or any other refill reason. The idle account is re-attributed in a later task once these rows show how much phase_bound time had work waiting.
+  falsifier: |
+    Write the count from a stale pool: criterion 1 must see the wrong number. Let a count of zero release the hold, or a read failure change the hold: criterion 2 must fail. Run the read on every tick or on a non-phase-bound refill: criterion 3 must fail. Restore and require all three.
+  note: |
+    reservation hand-off: run-unfiled-1794241838000 -> run-unfiled-1794243320000
+    Filed from the idle-capacity investigation of 2026-11-09. Success is a number: the share of phase_bound idle time during which runnable_waiting was above zero.

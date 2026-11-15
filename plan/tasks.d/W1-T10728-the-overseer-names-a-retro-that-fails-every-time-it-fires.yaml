@@ -11,7 +11,7 @@
   origin: "operator ask 2026-10-26: review the codebase against the backlog and scan Swamp for ideas, leaning into automation and self-improvement (MASTER-PLAN §4H)"
   plan_refs: [W1-T4802, W1-T9119]
   files: [src/lib/gardener-overseer.ts, test/gardeners/the-overseer-names-a-retro-that-fails-every-time-it-fires.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

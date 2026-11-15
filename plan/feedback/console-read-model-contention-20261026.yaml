@@ -60,10 +60,11 @@ attachments:
   - https://sqlite.org/wal.html
   - https://github.com/craigoley/remudero/blob/7983162fd418fa9a3ff404b919eecafa1448d9f7/src/lib/read-model-worker.ts
 origin: repair#console-read-model-contention
-status: new
+status: grilling
 reply_to: null
 proposal_pr: null
 summary: null
 expansion: null
 submission_key: console-followup:2f22bcbf-f704-4c5b-ad93-0ddc78267da1
 thread_id: null
+answered_by: null

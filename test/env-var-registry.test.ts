@@ -1,4 +1,5 @@
 // @source-text-subject - this suite's subject is the source text that declares harness env names.
+// @census-reads: src/ test/env-var-registry.test.ts — every src/*.ts file's env names, and its own text.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";

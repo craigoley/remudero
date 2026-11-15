@@ -14,7 +14,7 @@
   files:
     - src/lib/worker-provider.ts
     - test/worker/spawn/three-open-weight-arms-are-priced-and-off-every-lead.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     VERIFIED ON origin/main 742487eb2 AND AGAINST THE LIVE ACCOUNT (2026-10-27). Deployments on synthwatch-foundry

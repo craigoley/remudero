@@ -15,7 +15,7 @@
   files:
     - src/lib/serve-policy-convergence.ts
     - test/console-api/serve/serve-policy-convergence-replaces-serve-under-the-active-selection.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: When an active registry selection is in effect, serve-policy convergence runs serve-container.sh --replace with the selected instance and inside the same selection wrapper deploy-run uses, so the replace reaches the selected binding instead of refusing with instance_missing; with no selection the invocation is unchanged

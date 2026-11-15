@@ -1,0 +1,47 @@
+- id: W1-T12062
+  title: A new dependency-seed generation seals only lockfile-declared workspace link targets contained beneath its staged root, under a policy-discriminated identity, so existing seeds and their borrowers are never touched
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # changes seed identity keys and what is chmodded before publication; an escaping target must be refused before any chmod, and no existing generation or borrower may change
+  band_meaning: blast-radius
+  priority: 1.2
+  origin: architect
+  plan_refs:
+    - W1-T11820
+    - W1-T10949
+    - W1-T10739
+  files:
+    - src/lib/dependency-seeds.ts
+    - test/dependency-seeds.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: In a newly staged generation, a lockfile-declared workspace link (packages entry with link true and a resolved path) whose realpath lies beneath the staged generation root has its target made read-only before publication, so the published generation passes verifyImmutableGeneration
+      proof: "unit test: W1-T12062 criterion 1"
+    - claim: A lockfile-declared workspace link whose resolved target lies outside the staged generation root is rejected with an error before any chmod, and the outside target's mode and bytes are unchanged
+      proof: "unit test: W1-T12062 criterion 2"
+    - claim: Seed identity carries a new policy discriminator, so a checkout whose inputs match a pre-existing seed gets a different key and a fresh generation, while the pre-existing shared seed and every existing borrower stay byte- and mode-identical and VERSION is unchanged
+      proof: "unit test: W1-T12062 criterion 3"
+    - claim: The sealing step is a named function the stage path calls
+      proof: "grep: sealWorkspaceLinkTargets( in src/lib/dependency-seeds.ts"
+  rationale: |
+    The initiative is a bounded, separately reviewed prerequisite for author qualification: the versioned dependency-seed proof install must publish generations whose workspace link targets are immutable, without mutating anything already lent out.
+    OBSERVED in src/lib/dependency-seeds.ts at this head: materializeDependencySeed seals the staged node_modules, each workspace package directory named by a staged package.json, and the staged input files (setWritable(..., false)), but nothing seals a lockfile-declared workspace link target as such; verifyImmutableGeneration follows every symlink by realpath and refuses a writable target, so a link target that is not one of those directories leaves the generation unverifiable or writable. workspaceLinks() already applies a contained-in-checkout rule for consumer-side links; the staged generation has no equivalent rule before chmod.
+    Identity today is { version: VERSION, files, policy, platform, arch, node, abi, npm, npmConfig, nodeEnv } hashed into the key. Bumping VERSION would invalidate every root marker, readiness record and consumer marker at once (they all compare against VERSION), so the discriminator must be a new identity field, not a VERSION change.
+    Settled by lookup: is this already filed or already decided? -> no. W1-T11820 (queued) changes how a Linux proof install is materialized from a seed (hardlink farm); W1-T10949 (queued) reconciles command reuse and owner cleanup; W1-T10507/W1-T10508/W1-T10739 cover host linking, lock reclamation and the one-command proof prime; W1-T10510 is a retired ci-friction filing. None seals workspace link targets or adds an identity discriminator (grep of plan/tasks.d for dependency-seed, symlink target, seal, discriminator; LEARNINGS.md/DECISIONS.md/MASTER-PLAN.md have no dependency-seed entry).
+    Settled by lookup: may the shared VERSION change? -> no; the initiative forbids it and VERSION gates the store root marker, ready.json and every consumer marker (src/lib/dependency-seeds.ts makeStore, verifyExistingDependencies, ownLinkOnlyMaterialization, sweepDependencySeeds).
+    Settled by lookup: where does "contained" get decided? -> by resolved realpath under the staged generation root, mirroring the existing `${seed}${sep}` prefix rule in verifyImmutableGeneration and the `${resolve(checkout)}${sep}` rule in workspaceLinks (src/lib/dependency-seeds.ts).
+    Settled by lookup: what files may change? -> only src/lib/dependency-seeds.ts and test/dependency-seeds.test.ts (initiative scope); both exist.
+  design: |
+    (1) Add sealWorkspaceLinkTargets(stage, lockText): read the staged package-lock.json packages, take every entry with link true and a string resolved, resolve it against the stage, realpath it, and require the result to start with `${realpath(stage)}${sep}`. Validate ALL entries first; if any target escapes (including via an intermediate symlink), throw before a single chmod. Only then setWritable(target, false) for each contained target. Call it in the stage branch after verifyPackages and alongside the existing setWritable calls, before ready.json is written and before renameSync(stage, seed).
+    (2) Add a policy discriminator field to the identity object in dependencySeedIdentity (for example sealing: "workspace-link-targets-v1"), keeping VERSION = 1. The changed key routes every new consumer to a fresh generation directory; old generations keep their old key, old ready.json and old consumer markers and are left for the existing sweeper.
+    (3) Tests in test/dependency-seeds.test.ts: a fixture whose lock declares a contained workspace link proves the target is read-only in the new generation; a pre-existing seed plus borrower built under the old identity is snapshotted (bytes and modes) before and after a new materialization and must be identical, with the new key different; a lock entry resolving outside the stage throws and an outside target's mode is unchanged (spy or mode snapshot proves no chmod ran).
+    NOT IN SCOPE: chmodding, replacing or repairing any existing seed; changing VERSION; host configuration; existing borrowers; scripts/dependency-seeds.mjs; the W1-T11820 hardlink method. W1-T11820 touches the same two files, so these two must not be co-dispatched; either may land first.
+  falsifier: |
+    Remove the containment check and criterion 2 must fail (the outside target becomes read-only). Move the check after the chmod loop and criterion 2 must fail on the mode snapshot. Drop the identity field and criterion 3 must fail (same key, old seed reused). Bump VERSION instead and the old-borrower snapshot test must fail on a marker mismatch. Skip the seal call and criterion 1 must fail on a writable target. Restore and require all to pass.
+  note: |
+    Filed by the PLAN architect in create mode (run PLAN-create-1794317734331) with the harness-reserved id W1-T12062. Separately reviewed prerequisite for author qualification; it grants no qualification by itself.

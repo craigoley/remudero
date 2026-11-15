@@ -14,7 +14,7 @@
   files:
     - src/cli/commands/review.ts
     - test/review/a-review-records-its-start-before-its-first-row.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: Before its review.provider_provenance row, the review command ledgers one review.start_phases row with the elapsed milliseconds of its config load, the live-ledger read, the PR-head fetch, the head plan-criteria resolution and the origin/main one, each measured even when that step throws

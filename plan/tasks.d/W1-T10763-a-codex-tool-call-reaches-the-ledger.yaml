@@ -11,7 +11,7 @@
   origin: "operator recon 2026-10-26 (Part B, W1-T10727 verdict): the procedure census's denominators hold codex runs with no tool rows"
   plan_refs: [W1-T10727, W1-T4668]
   files: [src/lib/worker-provider.ts, test/learning/a-codex-tool-call-reaches-the-ledger.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

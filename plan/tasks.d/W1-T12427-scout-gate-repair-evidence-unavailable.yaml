@@ -1,0 +1,31 @@
+- id: W1-T12427
+  title: "THE SCOUT'S UNCOVERED RECURRING SYMPTOM — gate.repair_evidence_unavailable landed 8507 ledger rows across the trailing window and no task cites it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 1.16
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "scout:gate.repair_evidence_unavailable"
+  files:
+    - src/lib/gate-gardener.ts
+    - test/gardeners/scout-gate-repair-evidence-unavailable.test.ts
+  acceptance:
+    - claim: "gate.repair_evidence_unavailable stops recurring: its cause is fixed rather than its rows hidden"
+      proof: "grep: test(\"W1-T12427: gate.repair_evidence_unavailable no longer recurs\" in test/gardeners/scout-gate-repair-evidence-unavailable.test.ts"
+  note: "Filed by the scout gardener (W1-T5454). The scout measures this step again once the build merges and credits or debits its class by whether the rows stopped. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person."
+  rationale: |
+    The ledger step gate.repair_evidence_unavailable carries a failure shape and landed rows in both halves of the trailing 7 days: 3787 in the older half, 4720 in the newer.
+    No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
+    The rows name no file; tracked source literals locate this step in: src/lib/gate-gardener.ts. Start there.
+  risk_ruling:
+    verdict: "rule-3-low-privilege"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "rule 3 (live and low-privilege): the symptom is live, 8750 occurrence(s) across 7 day(s), last seen 2026-11-12T19:52:59.573Z, and the record declares no privileged path"
+    judged_at: "2026-11-12T20:11:21.939Z"
+    pin: "5b05314988b47b34ac9c66ce01f5f663b4b7a147283fb9ad2f9bd27bc3a2344a"

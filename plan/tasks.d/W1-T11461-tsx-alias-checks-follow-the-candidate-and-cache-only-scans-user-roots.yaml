@@ -11,7 +11,7 @@
   plan_refs: []
   files: [deploy/mac/tmp-reclaim.sh, deploy/mac/JANITOR.md, test/deploy/a-tsx-alias-follows-the-candidate-and-cache-only-scans-user-roots.test.ts]
   priority: 4
-  status: queued
+  status: merged
   # backlog gardener: band=4 evidence=b78c55347296abb4
   # backlog gardener: placed=2026-11-06T05:13:51.452Z
   attempts: 0

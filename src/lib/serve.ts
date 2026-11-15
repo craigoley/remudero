@@ -93,6 +93,7 @@ import { consumeHumanGateCounts, unavailableHumanGateCounts, type HumanGateProje
 import { startRepositoriesSourcePublisher, type RepositoriesSources } from "./repositories-view.js";
 import { withViewShadow } from "./view-shadow.js";
 import { buildRecentRoute, buildStatusRoute, buildStatusStream, createBoardSnapshotCache, DEFAULT_POLL_MS, type BoardDeps, type BoardSnapshotSource } from "./board.js";
+import { BOARD_PROJECTION_IDLE_INTERVAL_MS } from "./board-worker.js";
 import { buildBatchedGithub, type GhFailureReason, type GitHub } from "./status.js";
 import { fleetRuntimeHealthTelemetry, readFleetRuntimeHealth, type FleetRuntimeHealth } from "./fleet-runtime-health.js";
 import { buildInstanceGatewayRoutes, CORE_INSTANCE, DEFAULT_INSTANCE_STATE_BASE, instanceStateRoot, livenessInstances, watchInstanceLiveness, type InstanceGatewayOptions } from "./instance-gateway.js";
@@ -165,7 +166,7 @@ import { asyncGit, checkServiceFreshness } from "./self-sync.js";
 import { boundGitCall, GATEWAY_FETCH_TIMEOUT_MS } from "./git-fetch-retry.js";
 import { reloadServePlan, touchesReloadablePlan, type PlanSourceHolder } from "./serve-plan-reload.js";
 import { publishThreadPlan } from "./thread-plan.js";
-import { changedPathsSince, serveRestartRelevant, type ChangedPathsRead, type ChangedPathsReader } from "./serve-restart-relevance.js";
+import { changedPathsSince, serveRestartRelevant, touchesPerRequestPath, type ChangedPathsRead, type ChangedPathsReader } from "./serve-restart-relevance.js";
 import { buildAccountUsageRoute, type AccountUsageDeps } from "./account-usage.js";
 import { readProviderRoutingStatus, type ProviderRoutingStatus } from "./provider-routing-status.js";
 import { readRepairLadderState, type RepairLadderState } from "./worker-provider.js";
@@ -177,6 +178,7 @@ import {
   type ProviderRoutingPolicyOverrideInput,
 } from "./provider-routing-policy.js";
 import { appendLedger } from "./ledger.js";
+import { createServeDemand, recordServeRequest, type ServeDemandOptions } from "./serve-demand.js";
 import {
   buildAnalyticsRoute,
   coldAnalyticsSnapshot,
@@ -370,7 +372,7 @@ export interface ServeDeps {
    */
   boardGithubRefreshMs?: number;
   /** Published off-thread board projection for the production status route; `pause`/`resume` shed its thread (W1-T9508). */
-  boardSnapshotSource?: BoardSnapshotSource & { pause?(): Promise<boolean>; resume?(): void };
+  boardSnapshotSource?: BoardSnapshotSource & { pause?(): Promise<boolean>; resume?(): void; setClientPresence?(present: boolean): void };
   /**
    * W1-T183: tunable anomaly thresholds (ms), keyed by {@link Phase} with a `default` fallback;
    * defaults to {@link DEFAULT_PHASE_ELAPSED_THRESHOLDS_MS}. {@link renderShellHtml} embeds them
@@ -379,6 +381,7 @@ export interface ServeDeps {
   phaseElapsedThresholdsMs?: Record<string, number>;
   /** Forwarded to `createService` — one ledger line per auth decision/SSE lifecycle/handler error. */
   log?: ServiceOptions["log"];
+  demand?: Pick<ServeDemandOptions, "clock" | "every">;
   /**
    * W1-T163: per-token recap markers (last-seen.ts), shared with digest.ts's
    * `sendMarkerAwareDigest` so push and pull read/advance the same state. Injectable; otherwise
@@ -1354,6 +1357,31 @@ export interface GatewayCheckoutAssessment {
   reloadPlanAt?: string;
   /** origin/main's sha when the checkout is behind: what a handoff requested now would serve. */
   targetSha?: string;
+  /** W1-T12706: behind, clean, and every changed path is one serve reads per request or never loads. */
+  advanceInPlace?: CheckoutAdvance;
+}
+
+/** A fast-forward of serve's checkout that keeps the running generation and its warm read model. */
+interface CheckoutAdvance {
+  fromSha: string;
+  toSha: string;
+  changedPaths: string[];
+  run: () => Promise<{ advanced: true } | { advanced: false; reason: string }>;
+}
+
+/** The entrypoint's sync_tree step (`git checkout --detach`), only from the sha the diff was read at
+ *  and only on a clean tree. Anything else refuses, and the gate falls back to a handoff. */
+async function advanceCheckout(git: (args: string[]) => string | Promise<string>, fromSha: string, toSha: string): Promise<{ advanced: true } | { advanced: false; reason: string }> {
+  try {
+    const head = (await git(["rev-parse", "HEAD"])).trim();
+    if (head !== fromSha) return { advanced: false, reason: `the checkout moved to ${head}` };
+    if ((await git(["status", "--porcelain", "-uno"])).trim().length > 0) return { advanced: false, reason: "the checkout became dirty" };
+    await git(["checkout", "--quiet", "--detach", toSha]);
+    const landed = (await git(["rev-parse", "HEAD"])).trim();
+    return landed === toSha ? { advanced: true } : { advanced: false, reason: `the checkout is at ${landed} after the move` };
+  } catch (err) {
+    return { advanced: false, reason: err instanceof Error ? err.message : String(err) };
+  }
 }
 
 /** {@link assessGatewayCheckout}'s seams; every git call is injectable so a test stays hermetic. */
@@ -1503,10 +1531,17 @@ export async function assessGatewayCheckout(deps: GatewayCheckoutDeps): Promise<
   // RELOADED EVEN WHEN RELEVANT: a code handoff now waits out SERVE_HANDOFF_COALESCE_MS, and the plan
   // half of a mixed merge must not wait with it. A plan the old code cannot parse keeps the old one.
   const reloadPlanAt = svc.behind !== null && behindBy !== 0 && touchesReloadablePlan(svc.behind.changedPaths) ? svc.behind.newSha : undefined;
+  const fromSha = head.trim();
+  const toSha = svc.behind?.newSha;
+  const advanceInPlace: CheckoutAdvance | undefined =
+    toSha !== undefined && typeof behindBy === "number" && behindBy > 0 && !svc.dirty && !relevant && touchesPerRequestPath(svc.behind?.changedPaths)
+      ? { fromSha, toSha, changedPaths: [...(svc.behind?.changedPaths ?? [])], run: () => advanceCheckout(git, fromSha, toSha) }
+      : undefined;
   return {
     state,
     restartDue: !svc.dirty && relevant,
     ...(reloadPlanAt === undefined ? {} : { reloadPlanAt }),
+    ...(advanceInPlace === undefined ? {} : { advanceInPlace }),
     ...(svc.behind === null ? {} : { targetSha: svc.behind.newSha }),
   };
 }
@@ -1622,6 +1657,83 @@ export function stampReadWith(route: Route, stamp: (req: import("node:http").Inc
   };
 }
 
+/** Keep the board projection at its active cadence only while the status surface has a reader. */
+function trackBoardProjectionClients(
+  source: { setClientPresence?(present: boolean): void } | undefined,
+  idleMs = BOARD_PROJECTION_IDLE_INTERVAL_MS,
+): { noteStatusRead(): void; wrap(route: SseRoute): SseRoute; stop(): void } {
+  let streamClients = 0;
+  let lastStatusReadAt: number | undefined;
+  let expiry: ReturnType<typeof setTimeout> | undefined;
+  let present = false;
+  const update = (): void => {
+    const next = streamClients > 0 || (lastStatusReadAt !== undefined && systemClock.now() - lastStatusReadAt < idleMs);
+    if (next === present) return;
+    present = next;
+    source?.setClientPresence?.(next);
+  };
+  const expireReadAttention = (): void => {
+    expiry = undefined;
+    if (lastStatusReadAt === undefined) return;
+    const remaining = idleMs - (systemClock.now() - lastStatusReadAt);
+    if (remaining > 0) {
+      expiry = setTimeout(expireReadAttention, remaining);
+      expiry.unref?.();
+      return;
+    }
+    lastStatusReadAt = undefined;
+    update();
+  };
+  const scheduleExpiry = (): void => {
+    if (expiry) clearTimeout(expiry);
+    expiry = setTimeout(expireReadAttention, idleMs);
+    expiry.unref?.();
+  };
+  source?.setClientPresence?.(false);
+  return {
+    noteStatusRead() {
+      lastStatusReadAt = systemClock.now();
+      scheduleExpiry();
+      update();
+    },
+    wrap(route) {
+      return {
+        ...route,
+        subscribe: (send, req) => {
+          streamClients++;
+          update();
+          let unsubscribe: () => void;
+          try {
+            unsubscribe = route.subscribe(send, req);
+          } catch (error) {
+            streamClients = Math.max(0, streamClients - 1);
+            update();
+            throw error;
+          }
+          let closed = false;
+          return () => {
+            if (closed) return;
+            closed = true;
+            try {
+              unsubscribe();
+            } finally {
+              streamClients = Math.max(0, streamClients - 1);
+              update();
+            }
+          };
+        },
+      };
+    },
+    stop() {
+      if (expiry) clearTimeout(expiry);
+      expiry = undefined;
+      lastStatusReadAt = undefined;
+      streamClients = 0;
+      update();
+    },
+  };
+}
+
 export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
   const resolveCurrentSha = deps.resolveCurrentSha ?? resolveConsoleSha;
   const exit = deps.exit ?? ((code: number) => exitWithin(code));
@@ -1647,6 +1759,8 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
   let dirtyReported: string | undefined;
   let windowFrom = deps.bootedAt ?? clock.now();
   let coalescing: { firstSeenSha: string; firstSeenAt: number } | undefined;
+  let advancing = false;
+  let advanceRefused: string | undefined;
   const readChangedPaths = deps.changedPathsSince ?? ((boot, target) => changedPathsSince(boot, target, serveRepoDir()));
   const relevance = new Map<string, boolean | "pending">();
   let headPlanRef: string | undefined;
@@ -1691,6 +1805,21 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
     syncPlan();
     // NEVER NEGOTIABLE: an exit mid-write drops the request, and a drain's bound could cut one.
     if (inFlightWrites !== 0) return;
+    const move = checkout?.advanceInPlace;
+    if (move && !advancing && checkout) {
+      advancing = true;
+      checkout = { ...checkout, advanceInPlace: undefined };
+      void move.run().then((landed) => {
+        if (landed.advanced) log("serve.checkout_advanced", { bootSha: deps.bootSha, fromSha: move.fromSha, toSha: move.toSha, changedPaths: move.changedPaths });
+        else {
+          advanceRefused = move.toSha;
+          log("serve.checkout_advance_refused", { fromSha: move.fromSha, toSha: move.toSha, reason: landed.reason });
+        }
+      }).finally(() => {
+        advancing = false;
+        maybeExit();
+      });
+    }
     const currentSha = resolveCurrentSha();
     const codeStale = isConsoleCodeStale(deps.bootSha, currentSha) && movedRelevantly(currentSha);
     const checkoutBehind = checkout?.restartDue === true;
@@ -1764,7 +1893,8 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
     return exited;
   };
   const noteCheckout = (next: GatewayCheckoutAssessment): void => {
-    checkout = next;
+    // A move that refused once is not tried again: the clean tree takes the handoff instead.
+    checkout = next.advanceInPlace?.toSha === advanceRefused && next.advanceInPlace ? { ...next, advanceInPlace: undefined, restartDue: true } : next;
     originPlanRef = next.reloadPlanAt;
     syncPlan();
     const { state } = next;
@@ -3217,6 +3347,15 @@ interface ServeServerAssembly {
 
 export const INCIDENT_INVARIANTS_INTERVAL_MS = 60_000;
 
+/**
+ * W1-T11936: how far back the monitor's live ledger tail keeps parsed rows. Each tick reads only the bytes
+ * appended since the previous one (live-ledger-tail.ts) and re-reads from byte 0 only on a rotation, a
+ * truncation or a rewrite, so this bounds the memory the tail holds, not the bytes a tick reads.
+ * BACKSTOP: twice the longest rule window, so every window any rule evaluates is covered with a full window of
+ * slack; a row older than this can reach no verdict. Raise it with a longer rule, never drop it to unbounded.
+ */
+export const INCIDENT_INVARIANTS_TAIL_RETAIN_MS = 2 * INCIDENT_LONGEST_WINDOW_MS;
+
 /** The sampling resolution of serve's `runtime.loop_lag` histogram: the timer whose lateness it records, and so
  *  the cadence serve's loop is expected to turn at. W1-T10074: the loop-stall profiler's interval is this number. */
 export const SERVE_LOOP_LAG_RESOLUTION_MS = 20;
@@ -3244,7 +3383,7 @@ export function startIncidentInvariantsMonitor(
   deps: NonNullable<ServeDeps["incidentInvariants"]> & { log?: ServiceOptions["log"] } = {},
 ): (() => void) & { stallProfiler: LoopStallProfiler } {
   const readLedger = deps.readLedger;
-  const liveRows = readLedger ? () => readLedger(ledgerPath) : createLiveLedgerTail(ledgerPath, 2 * INCIDENT_LONGEST_WINDOW_MS);
+  const liveRows = readLedger ? () => readLedger(ledgerPath) : createLiveLedgerTail(ledgerPath, INCIDENT_INVARIANTS_TAIL_RETAIN_MS);
   const writeLedger = deps.writeLedger ?? appendLedger;
   const eventLoopLag = deps.eventLoopLag
     ?? createEventLoopLagMonitor(systemClock, () => monitorEventLoopDelay({ resolution: SERVE_LOOP_LAG_RESOLUTION_MS }));
@@ -3305,7 +3444,8 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   const liveThreads = deps.serveMemory?.workers ?? workerThreads().live;
   const github = deps.board.github;
   github.serveOffLoop?.();
-  const statusStream = buildStatusStream(deps.board, deps.pollMs ?? DEFAULT_POLL_MS);
+  const boardPresence = trackBoardProjectionClients(deps.boardSnapshotSource);
+  const statusStream = boardPresence.wrap(buildStatusStream(deps.board, deps.pollMs ?? DEFAULT_POLL_MS));
   const refreshMs = deps.boardGithubRefreshMs ?? DEFAULT_BOARD_PREWARM_MS;
   const walk = { refresh: () => github.warm?.(), telemetry: () => github.warmTelemetry?.(), targetFreshnessMs: refreshMs, log: deps.log };
   const keepWarm = github.warmsOffLoop?.() ? createGithubKeepWarm(walk) : undefined;
@@ -3341,6 +3481,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   const wakeCounters = createWakeCounters();
   const routeReads = createRouteReadRollup({ stateDir: join(deps.fleetControlRoot, "state"), log: deps.log, write: (row) => deps.log?.(ROUTE_READS_STEP, { ...row }) });
   let stopRouteReads = (): void => {};
+  let stopDemand = (): void => {};
   const stopWakeSummary = startWakeSummaryFlush({
     counters: wakeCounters,
     clock: systemClock,
@@ -3375,6 +3516,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
       liveAnalyticsCache.stop();
       stopWakeSummary();
       stopRouteReads();
+      stopDemand();
       prewarm.stop();
       routeAssembly.linkRefusals.stop();
     },
@@ -3399,6 +3541,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   const stampRead = (route: Route): Route =>
     stampReadWith(route, (req) => {
       lastReadAt = systemClock.now();
+      if (route.path === "/v1/status") boardPresence.noteStatusRead();
       prewarm.noteRead();
       readModel?.noteGithubRead?.();
       // A per-instance view's read names its instance, so only that instance's unit keeps its cadence.
@@ -3466,6 +3609,8 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     // and HIGH after a recent step-up; the bearer token is still pinned at LOW.
     enforceWriteTiers: true,
   });
+  const demand = createServeDemand({ ...deps.demand, log: deps.log, ledgerPath: deps.ledgerPath, routes, sse: [prewarm.route] });
+  server.prependListener("request", (req, res) => recordServeRequest(demand, req, res));
   serveDrain.attach(server);
   viewEventsHandover = routeAssembly.viewEvents.handover;
   if (readModel) {
@@ -3480,11 +3625,12 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     })));
   }
   server.on("close", staleExit.stop);
+  server.on("close", boardPresence.stop);
   server.on("close", prewarm.stop);
   if (keepWarm) server.once("listening", keepWarm.start);
   server.on("close", stopWakeSummary);
-  server.once("listening", () => (stopRouteReads = routeReads.start()));
-  server.on("close", () => stopRouteReads());
+  server.once("listening", () => { stopRouteReads = routeReads.start(); stopDemand = demand.start(); });
+  server.on("close", () => { stopRouteReads(); stopDemand(); });
   server.once("listening", analyticsCache.start);
   server.on("close", analyticsCache.stop);
   server.once("listening", () => { for (const cache of routeAssembly.instanceAnalyticsCaches) cache.start(); });
@@ -3633,12 +3779,8 @@ export async function buildReadyServeServer(deps: ServeDeps): Promise<Server> {
 // ── CLI glue: port + token resolution (kept here, not run-task.ts, so both are unit-testable
 // as pure/near-pure functions rather than only exercisable through the live CLI) ────────────
 /**
- * `--port <n>` if present, else `configPort` (the `serve.port` field an install may pin —
- * W1-T152, so the launchd unit and a hand-run `rmd serve` agree on ONE port without the
- * operator retyping a flag), else {@link DEFAULT_SERVE_PORT}. BOTH sources are validated as an
- * integer 1-65535 — a garbage config value must fail as loudly as a garbage flag, not silently
- * fall through to the default and bind a port nobody's bookmark points at. Throws (never
- * returns an invalid port) so the CLI can fail loud before any bind attempt.
+ * W1-T152: --port overrides config serve.port, then {@link DEFAULT_SERVE_PORT}.
+ * Both explicit sources must be integers 1-65535; throw before binding on invalid input.
  */
 export function resolveServePort(rest: string[], configPort?: number): number {
   const idx = rest.indexOf("--port");
@@ -3651,42 +3793,19 @@ export function resolveServePort(rest: string[], configPort?: number): number {
   }
   return n;
 }
-/** Loopback. The default bind: reachable from this machine and from nothing else. UNCHANGED by
- *  this task — see {@link resolveServeHosts}'s own doc for why the default stays exactly this,
- *  containerized or not: "exposure must be typed, never inherited" (R-4) applies here too. */
+/** R-4: default to loopback even in containers; exposure must be typed, never inherited. */
 export const DEFAULT_SERVE_HOST = "127.0.0.1";
 /**
- * W1-T915: the one wildcard spelling {@link assertBindableHost} will accept — and ONLY when the
- * caller also names {@link CONTAINER_NETWORK_ENV} — because it is the one that matches the actual
- * defect. `remudero-serve` runs in a container with no published port: `DEFAULT_SERVE_HOST`
- * (loopback) answers neither Docker's `-p` NAT nor a sibling container (the Cloudflare Tunnel
- * client the 2026-08-14 DECISIONS.md ruling puts on this same box), because both reach a
- * container over ITS interface inside the container's own network namespace, never over its
- * loopback. `0.0.0.0` there is the address that namespace needs to gain.
- *
- * This is deliberately NOT what {@link WILDCARD_HOSTS}'s existing refusal is about. That refusal
- * guards a BARE HOST, where "every interface" means every network the host's own NIC joins — home
- * wifi, a coffee-shop LAN, whatever's plugged in, with a bearer token as the only thing standing
- * between a stranger on that LAN and a write route. Inside a container, "every interface" is
- * bounded by Docker's own network isolation to that container's namespace; nothing here publishes
- * a port to the host's other networks or to the public internet on its own — that stays an
- * operator act (`docker run -p`, or co-locating the tunnel client). So the container's namespace
- * gains an address; nothing wider does, and never silently: see {@link CONTAINER_NETWORK_ENV}.
+ * W1-T915: accept this wildcard only with {@link CONTAINER_NETWORK_ENV} declared.
+ * Container loopback cannot receive Docker NAT or sibling tunnel traffic (DECISIONS.md,
+ * 2026-08-14). This bind reaches the container namespace; publishing ports or co-locating
+ * the tunnel remains an operator act. Bare-host wildcards remain refused.
  */
 export const CONTAINER_ALL_INTERFACES_HOST = "0.0.0.0";
 /**
- * The env var that must be set to exactly {@link CONTAINER_NETWORK_VALUE} before
- * {@link assertBindableHost} will accept {@link CONTAINER_ALL_INTERFACES_HOST} as a `--host`/
- * `RMD_SERVE_HOST` value — same shape as {@link TRUSTED_PROXY_TAILSCALE}'s single accepted value,
- * refused for anything else (an unset var, a typo, `"1"`, `"true"`) rather than treated as a
- * loose boolean. Deliberately a SEPARATE knob from the host value itself, not folded into it:
- * typing `--host 0.0.0.0` alone must keep failing exactly as loudly as before (the existing
- * `resolveServeHost`/`resolveServeHosts` wildcard tests assert this, unchanged by this task), so
- * a template copy-paste or a fat-fingered address can never silently open every interface on a
- * bare host. Only a caller who names BOTH "I mean 0.0.0.0" (the host value) AND "I am declaring a
- * container's own network namespace, not a host's" (this var) gets through — exposure stays
- * something someone typed, it just now takes two independent things typed together instead of
- * being permanently unreachable no matter how deliberately they were typed.
+ * Must equal {@link CONTAINER_NETWORK_VALUE} alongside an explicit 0.0.0.0 host.
+ * Unset, typo, "1" and "true" are refused; --host 0.0.0.0 alone must still fail
+ * (resolveServeHost/resolveServeHosts wildcard tests). Both declarations are required.
  */
 export const CONTAINER_NETWORK_ENV = "RMD_SERVE_NETWORK";
 export const INGEST_TOKEN_ENV = "RMD_SERVE_INGEST_TOKEN";
@@ -3710,15 +3829,10 @@ export function readIngestTokenFile(path: string | undefined, log?: ServeDeps["l
 export const CONTAINER_NETWORK_VALUE = "container";
 
 /**
- * Wildcard binds, refused by name — UNLESS `host` is exactly {@link CONTAINER_ALL_INTERFACES_HOST}
- * and `allowContainerWildcard` says the caller declared {@link CONTAINER_NETWORK_ENV}. Plain
- * `server.listen(port)` with no host defaults to `::`, which accepts from EVERY interface — which
- * is what `rmd serve` actually did while printing "listening on http://localhost:4317". On a bare
- * host anyone on any network that host is attached to could reach the console, and the only thing
- * between them and fleet-control write actions was a bearer token the same command printed to a
- * world-readable log. `::`, `*` and `""` stay refused unconditionally: only `0.0.0.0`, and only
- * with the explicit container declaration, is the one case this task carves out — see
- * {@link CONTAINER_ALL_INTERFACES_HOST}'s doc for why that specific pairing is safe.
+ * Refuse wildcards except explicitly declared container 0.0.0.0 (W1-T915).
+ * Never omit the listen host: Node defaults to ::, exposing fleet-control routes while
+ * the old banner claimed localhost and leaked bearer tokens into world-readable logs.
+ * ::, * and the empty string remain unconditionally refused.
  */
 export const WILDCARD_HOSTS = new Set(["0.0.0.0", "::", "*", ""]);
 
@@ -3756,24 +3870,11 @@ export function defaultIsListening(host: string, port: number, timeoutMs = 1500)
 }
 
 /**
- * Resolve the interface `rmd serve` binds to: `--host <addr>`, else `RMD_SERVE_HOST`, else
- * `configHost` (config.json's `serve.host` — W1-T152, so a launchd unit and a hand-run serve
- * agree without the operator retyping the address), else loopback. A wildcard is REFUSED rather
- * than silently accepted — exposure must be a thing someone typed, naming the interface they
- * meant — with exactly one carve-out (W1-T915): `0.0.0.0` is accepted when
- * `env[CONTAINER_NETWORK_ENV] === CONTAINER_NETWORK_VALUE`, because inside a container that value
- * names the container's own network namespace, not "every network this host is attached to". The
- * DEFAULT (`raw === undefined`, nobody named anything) is UNCHANGED — still always loopback,
- * containerized or not: R-4 ("exposure must be typed, never inherited") applies to the carve-out
- * exactly as it applies to every other interface this function resolves. `remudero-serve` closes
- * the measured defect by SETTING `RMD_SERVE_HOST=0.0.0.0` and `RMD_SERVE_NETWORK=container` in
- * its own launch config — an operator/deploy act, same as every other `RMD_SERVE_HOST` value —
- * not by this function inventing a default nobody typed.
- *
- * Remote access is expressed by naming the interface, not by opening all of them. This fleet is
- * reached from the operator's phone over Tailscale, so the tailnet address is the correct value
- * here (`RMD_SERVE_HOST=100.x.y.z`) — that keeps the console on an authenticated, encrypted
- * overlay instead of on every coffee-shop LAN the laptop joins.
+ * W1-T152: --host, then RMD_SERVE_HOST, then config serve.host, then loopback.
+ * R-4: exposure must be typed, never inherited; even containers default to loopback.
+ * W1-T915 permits explicit 0.0.0.0 only with RMD_SERVE_NETWORK=container; deployment owns
+ * both settings. For phone access, name the Tailscale address (100.x.y.z) to restrict
+ * reachability to the encrypted overlay rather than every host network.
  */
 export function resolveServeHosts(rest: string[], env: NodeJS.ProcessEnv = process.env, configHost?: string): string[] {
   const idx = rest.indexOf("--host");
@@ -3783,9 +3884,7 @@ export function resolveServeHosts(rest: string[], env: NodeJS.ProcessEnv = proce
     .split(",")
     .map((h) => h.trim())
     .filter((h, i, all) => all.indexOf(h) === i);
-  // An all-empty value (",", "  ") must not silently collapse to "listen nowhere" — that would
-  // read as a working server that answers no one. Fall through to the wildcard check below,
-  // which names the empty string, so the operator gets a message rather than a silent no-op.
+  // All-empty input must hit the wildcard refusal rather than silently listen nowhere.
   if (hosts.length === 0) hosts.push("");
   const allowContainerWildcard = env[CONTAINER_NETWORK_ENV] === CONTAINER_NETWORK_VALUE;
   for (const host of hosts) assertBindableHost(host, raw, allowContainerWildcard);
@@ -3793,11 +3892,8 @@ export function resolveServeHosts(rest: string[], env: NodeJS.ProcessEnv = proce
 }
 
 /**
- * SINGLE-HOST CONVENIENCE, retained because most callers want one address. Returns the FIRST
- * resolved host — never an UNDECLARED wildcard, since {@link resolveServeHosts} has already
- * refused those; it CAN return {@link CONTAINER_ALL_INTERFACES_HOST} when the caller explicitly
- * declared {@link CONTAINER_NETWORK_ENV} (W1-T915), the one wildcard spelling that is no longer
- * unconditionally refused.
+ * Return the first resolved host; only explicitly declared container 0.0.0.0 may be wildcard
+ * (W1-T915, {@link resolveServeHosts}).
  */
 export function resolveServeHost(rest: string[], env: NodeJS.ProcessEnv = process.env): string {
   return resolveServeHosts(rest, env)[0] as string;
@@ -3897,21 +3993,10 @@ export const DEFAULT_BIND_ATTEMPTS = 20;
 export const DEFAULT_BIND_RETRY_MS = 500;
 
 /**
- * Bind, WAITING OUT a port the previous process has not released yet.
- *
- * THE INCIDENT: `kill $(lsof -ti :4317)` followed immediately by a relaunch raced — the new
- * process hit EADDRINUSE, died into an unread log, the OLD process kept serving stale code,
- * and when it finally exited the console was down with nothing listening. Every layer of that
- * was silent. Under launchd the same race is REAL and more likely, not less: `kickstart -k`
- * SIGKILLs and relaunches immediately, and a relaunch that dies on EADDRINUSE burns a
- * ThrottleInterval before anyone finds out.
- *
- * So an in-use port is treated as a TRANSIENT condition to wait out (the old owner is being
- * reaped), not a fatal one — but only for a bounded window, and only for EADDRINUSE: any other
- * listen error (EACCES on a privileged port, EADDRNOTAVAIL for a tailnet address that isn't up
- * yet) is rethrown immediately, because retrying those just delays a real diagnosis. `onRetry`
- * is how the caller makes the wait AUDIBLE — the silence is what made the original outage
- * expensive.
+ * W1-T152: bound the kill/relaunch EADDRINUSE race while the previous owner releases its port.
+ * An immediate launchd kickstart previously left stale code serving, then nothing listening.
+ * Retry only EADDRINUSE; rethrow EACCES/EADDRNOTAVAIL and other errors immediately.
+ * onRetry makes the wait audible instead of hiding the outage in an unread log.
  */
 export async function listenWithReapWait(
   listen: () => Promise<void>,
@@ -3939,18 +4024,9 @@ export async function listenWithReapWait(
 }
 
 /**
- * Force mode 0600 on the console's log files, creating them if absent (R-5, standing rule 24).
- *
- * launchd creates `StandardOutPath`/`StandardErrorPath` at its own umask — 0644 — and serve's
- * startup banner prints the READ bearer token, so the default is a token in a world-readable
- * file that outlives the process. That already happened once and cost a token rotation. Both
- * the `--write` install path and serve's own boot call this: pre-creating at 0600 wins the
- * common case (launchd appends to the existing file, keeping the mode), and the boot-time call
- * repairs a file launchd got to first.
- *
- * BEST-EFFORT BY CONSTRUCTION: a chmod failure returns the path in `failed` and NEVER throws —
- * a service that refuses to start because it could not tighten a log file has turned a hygiene
- * problem into an outage (the W1-T255 posture, applied to file state instead of tree state).
+ * R-5/standing rule 24: create and force console logs to 0600 at install and boot.
+ * launchd's 0644 umask exposed the startup READ token and required rotation; boot repairs
+ * files launchd created first. W1-T255: return failures in failed, never crash the service.
  */
 export function ensureLogFileMode(paths: string[], mode: number = 0o600): { secured: string[]; failed: string[] } {
   const secured: string[] = [];
@@ -3974,22 +4050,10 @@ export function ensureLogFileMode(paths: string[], mode: number = 0o600): { secu
 export const SERVE_EXPECTED_BRANCH = "main";
 
 /**
- * The LOUD non-fatal notice a console prints when its checkout is not on `main` — or `null`
- * when it is (and when the branch can't be read at all, which is not evidence of anything).
- *
- * THE INCIDENT: `rmd serve` launched off a feature branch keeps serving that branch's code
- * after the checkout returns to main, because tsx loads the module graph once. Three
- * stale-code incidents in one day traced to it, and the operator had no way to tell from the
- * board that he was looking at un-shipped code.
- *
- * WHY A NOTICE AND NOT A REFUSAL. W1-T152 originally specified "REFUSES to bind when not on
- * main, exit non-zero". W1-T255 (#726) then established the opposite for services, the hard
- * way: the daemon's dirty-tree refusal exit-1'd on every launchd restart and took the whole
- * automation down for hours. A KeepAlive'd unit turns ANY startup refusal into a crash-loop,
- * and a crash-looping console is strictly worse than a console that is honest about which
- * branch it serves — the operator reattaching from a phone needs a surface that answers.
- * So: assess, say so in the log every boot, and serve. (Amended in plan/tasks.yaml with this
- * citation rather than implemented against the older wording.)
+ * Warn at boot for non-main; return null for main or an unreadable branch.
+ * tsx loads once: returning the checkout to main leaves a running feature build stale.
+ * W1-T255 (#726) supersedes W1-T152's refusal: KeepAlive turns startup refusals into
+ * crash-loops. Log the branch and keep the console available to the operator.
  */
 export function offMainNotice(branch: string | null): string | null {
   if (branch === null || branch === SERVE_EXPECTED_BRANCH) return null;

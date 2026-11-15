@@ -107,7 +107,9 @@ test("a recycle records only a running state and the exact live cadence run and 
     const r = recycle(t, opts);
     assert.equal(existsSync(r.marker), false);
     const rows = readFileSync(join(r.dir, "ledger-before-stop"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
-    assert.deepEqual(rows.map((row) => row.step), ["recycle.invoked"], "the invocation is recorded, with no cadence kill attributed");
+    // W1-T12244: the phase rows before the stop are timing rows, not a cadence kill.
+    assert.deepEqual(rows.map((row) => row.step).filter((step) => step !== "recycle.phase"), ["recycle.invoked"],
+      "the invocation is recorded, with no cadence kill attributed");
   }
 });
 

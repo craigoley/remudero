@@ -9,6 +9,7 @@ import { lstat, open, realpath } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isAbsolute } from "node:path";
+import { performance } from "node:perf_hooks";
 import { loopAvailableDeadline, systemClock } from "./clock.js";
 import { RmdError } from "./errors.js";
 import { SELECTED_INSTANCE_REGISTRY_FIELDS, parseInstanceRegistry, projectRegistry, type RegistryInstance, type RegistryProjection } from "./instance-registry.js";
@@ -112,41 +113,79 @@ function requireActive(signal: AbortSignal): void {
   if (signal.aborted) throw new ReadRefusal("cancelled");
 }
 
-async function readBounded(path: string, maxBytes: number, signal: AbortSignal, io: RegistryFileIO, physicalIdentity: boolean): Promise<RegistryBytes | Unknown> {
+type RegistryReadHop = "lstat" | "open" | "fstat" | "read" | "realpath" | "close";
+/** W1-T11605: one timeout's attribution evidence. Hop names and times only; never a path or byte. */
+export interface SelectedRegistryReadTimeoutTrace {
+  readonly subject: "registry" | "worker_policy";
+  readonly budget_ms: number;
+  readonly wall_ms: number;
+  readonly loop_active_ms: number;
+  readonly loop_idle_ms: number;
+  readonly hops_completed: number;
+  readonly pending_hop: RegistryReadHop | null;
+  readonly hop_ms: readonly Readonly<{ hop: RegistryReadHop; ms: number }>[];
+  readonly max_hop_ms: number;
+  readonly concurrent_reads: number;
+}
+export type SelectedRegistryReadTimeoutObserver = (trace: SelectedRegistryReadTimeoutTrace) => void;
+let timeoutObserver: SelectedRegistryReadTimeoutObserver | undefined;
+let readsInFlight = 0;
+/** Process-wide sink for timed-out reads; returns the previous one so a caller can restore it. */
+export function setSelectedRegistryReadTimeoutObserver(observer: SelectedRegistryReadTimeoutObserver | undefined): SelectedRegistryReadTimeoutObserver | undefined {
+  const previous = timeoutObserver;
+  timeoutObserver = observer;
+  return previous;
+}
+/** Installs a sink writing one `instance_registry.read_timeout` row per timeout; returns its uninstall. */
+export function ledgerSelectedRegistryReadTimeouts(log: (step: string, extra?: Record<string, unknown>) => void): () => void {
+  const previous = setSelectedRegistryReadTimeoutObserver((trace) => log("instance_registry.read_timeout", { ...trace }));
+  return () => { setSelectedRegistryReadTimeoutObserver(previous); };
+}
+interface HopTrace { hops: { hop: RegistryReadHop; ms: number }[]; pending: RegistryReadHop | null }
+const roundMs = (ms: number) => Math.round(ms * 10) / 10;
+async function timedHop<T>(trace: HopTrace, hop: RegistryReadHop, operation: () => Promise<T>): Promise<T> {
+  trace.pending = hop;
+  const startedAt = performance.now();
+  try { return await operation(); }
+  finally { trace.hops.push({ hop, ms: roundMs(performance.now() - startedAt) }); trace.pending = null; }
+}
+
+async function readBounded(path: string, maxBytes: number, signal: AbortSignal, io: RegistryFileIO, physicalIdentity: boolean, trace: HopTrace): Promise<RegistryBytes | Unknown> {
   let handle: RegistryFileHandle | undefined;
   let phase: UnknownReason = "lstat_failed";
   let result: RegistryBytes | Unknown;
   try {
     requireActive(signal);
-    const before = await io.lstat(path); requireFile(before, maxBytes);
-    requireActive(signal); phase = "open_failed"; handle = await io.open(path);
+    const before = await timedHop(trace, "lstat", () => io.lstat(path)); requireFile(before, maxBytes);
+    requireActive(signal); phase = "open_failed"; handle = await timedHop(trace, "open", () => io.open(path));
     requireActive(signal); phase = "stat_failed";
-    const opened = await handle.stat(); requireFile(opened, maxBytes);
+    const file = handle;
+    const opened = await timedHop(trace, "fstat", () => file.stat()); requireFile(opened, maxBytes);
     if (!sameStamp(before, opened)) throw new ReadRefusal("revision_changed");
     // One bounded buffer, including a one-byte overflow probe. Stat never authorizes allocation.
     const bytes = Buffer.alloc(maxBytes + 1);
     let length = 0; phase = "read_failed";
     while (length < bytes.length) {
       requireActive(signal);
-      const n = await handle.read(bytes, length, bytes.length - length, length);
+      const n = await timedHop(trace, "read", () => file.read(bytes, length, bytes.length - length, length));
       if (!Number.isSafeInteger(n) || n < 0 || n > bytes.length - length) throw new ReadRefusal("read_failed");
       if (n === 0) break;
       length += n;
       if (length > maxBytes) throw new ReadRefusal("oversized");
     }
     requireActive(signal); phase = "stat_failed";
-    const after = await handle.stat(), current = await io.lstat(path);
+    const after = await timedHop(trace, "fstat", () => file.stat()), current = await timedHop(trace, "lstat", () => io.lstat(path));
     requireFile(after, maxBytes); requireFile(current, maxBytes);
     if (length !== opened.size || !sameStamp(opened, after) || !sameStamp(after, current)) throw new ReadRefusal("revision_changed");
     let canonicalPath: string | undefined;
     if (physicalIdentity) {
       phase = "file_identity_unqualified";
-      canonicalPath = await io.canonicalPath?.(path);
+      canonicalPath = await timedHop(trace, "realpath", async () => io.canonicalPath?.(path));
       requireActive(signal);
       if (!canonicalPath || !isAbsolute(canonicalPath) || after.nlink !== 1
         || !Number.isSafeInteger(after.dev) || !Number.isSafeInteger(after.ino)
         || !Number.isFinite(after.mtimeMs) || !Number.isFinite(after.ctimeMs)) throw new ReadRefusal(phase);
-      const physical = await io.lstat(canonicalPath);
+      const physical = await timedHop(trace, "lstat", () => io.lstat(canonicalPath!));
       requireActive(signal); requireFile(physical, maxBytes);
       if (!sameStamp(after, physical)) throw new ReadRefusal("revision_changed");
     }
@@ -157,7 +196,8 @@ async function readBounded(path: string, maxBytes: number, signal: AbortSignal, 
       : (error as NodeJS.ErrnoException)?.code === "ENOENT" ? "missing" : phase };
   } finally {
     if (handle) {
-      try { await handle.close(); }
+      const file = handle;
+      try { await timedHop(trace, "close", () => file.close()); }
       catch {
         // A close failure is unresolved resource/integrity evidence, not a successful read.
         result = { kind: "unknown", reason: "close_failed" };
@@ -167,8 +207,26 @@ async function readBounded(path: string, maxBytes: number, signal: AbortSignal, 
   return result!;
 }
 
-async function readWithDeadline(path: string, maxBytes: number, timeoutMs: number, external: AbortSignal | undefined, io: RegistryFileIO, physicalIdentity: boolean): Promise<RegistryBytes | Unknown> {
+function timeoutTrace(subject: SelectedRegistryReadTimeoutTrace["subject"], budgetMs: number, startedAt: number,
+  loopAtStart: ReturnType<typeof performance.eventLoopUtilization>, trace: HopTrace): SelectedRegistryReadTimeoutTrace {
+  // ELU before the wall clock, both after the start captures: active + idle fits inside wall_ms.
+  const loop = performance.eventLoopUtilization(loopAtStart);
+  const wallMs = performance.now() - startedAt;
+  const hops = trace.hops.map((h) => Object.freeze({ ...h }));
+  return Object.freeze({
+    subject, budget_ms: budgetMs, wall_ms: roundMs(wallMs),
+    loop_active_ms: roundMs(loop.active), loop_idle_ms: roundMs(loop.idle),
+    hops_completed: hops.length, pending_hop: trace.pending, hop_ms: Object.freeze(hops),
+    max_hop_ms: hops.reduce((max, h) => Math.max(max, h.ms), 0), concurrent_reads: readsInFlight,
+  });
+}
+
+async function readWithDeadline(path: string, maxBytes: number, timeoutMs: number, external: AbortSignal | undefined, io: RegistryFileIO, physicalIdentity: boolean,
+  subject: SelectedRegistryReadTimeoutTrace["subject"] = "registry"): Promise<RegistryBytes | Unknown> {
   if (external?.aborted) return { kind: "unknown", reason: "cancelled" };
+  const startedAt = performance.now();
+  const loopAtStart = performance.eventLoopUtilization();
+  const hops: HopTrace = { hops: [], pending: null };
   const controller = new AbortController();
   let disarmDeadline: () => void;
   let onAbort: () => void;
@@ -176,12 +234,20 @@ async function readWithDeadline(path: string, maxBytes: number, timeoutMs: numbe
     onAbort = () => { controller.abort(); resolve({ kind: "unknown", reason: "cancelled" }); };
     disarmDeadline = loopAvailableDeadline(systemClock, timeoutMs, () => {
       controller.abort(); resolve({ kind: "unknown", reason: "timeout" });
+      const observer = timeoutObserver;
+      if (observer === undefined) return;
+      try { observer(timeoutTrace(subject, timeoutMs, startedAt, loopAtStart, hops)); }
+      catch {
+        // Observability only: a failing sink must never change or delay the read's timeout outcome.
+      }
     });
     external?.addEventListener("abort", onAbort, { once: true });
   });
+  readsInFlight += 1;
   try {
-    return await Promise.race([readBounded(path, maxBytes, controller.signal, io, physicalIdentity), stopped]);
+    return await Promise.race([readBounded(path, maxBytes, controller.signal, io, physicalIdentity, hops), stopped]);
   } finally {
+    readsInFlight -= 1;
     disarmDeadline!(); external?.removeEventListener("abort", onAbort!);
   }
 }
@@ -434,7 +500,7 @@ export async function captureInstanceRegistryRuntimeFile(path: string): Promise<
   const scope = selectedRuntime();
   if (!scope || typeof path !== "string" || !isAbsolute(path) || path.includes("\0")) throw new InstanceRegistryRuntimeError("worker_policy_input_unqualified");
   await assertInstanceRegistryRuntimeCurrent();
-  const original = await readWithDeadline(path, 64 * 1024, 1500, undefined, registryFileIO, true);
+  const original = await readWithDeadline(path, 64 * 1024, 1500, undefined, registryFileIO, true, "worker_policy");
   if (original.kind !== "bytes") throw new InstanceRegistryRuntimeError(`worker_policy_${original.reason}`);
   let text: string;
   try { text = new TextDecoder("utf-8", { fatal: true }).decode(original.bytes); }
@@ -446,7 +512,7 @@ export async function captureInstanceRegistryRuntimeFile(path: string): Promise<
   return Object.freeze({ canonicalPath: original.canonicalPath!, text, recheck: async () => {
     if (selectedRuntime() !== scope) throw new InstanceRegistryRuntimeError("worker_policy_invocation_changed");
     await assertInstanceRegistryRuntimeCurrent();
-    const current = await readWithDeadline(path, 64 * 1024, 1500, undefined, registryFileIO, true);
+    const current = await readWithDeadline(path, 64 * 1024, 1500, undefined, registryFileIO, true, "worker_policy");
     if (current.kind !== "bytes") throw new InstanceRegistryRuntimeError(`worker_policy_${current.reason}`);
     if (!sameStamp(original.identity, current.identity) || original.canonicalPath !== current.canonicalPath
       || !original.bytes.equals(current.bytes)) throw new InstanceRegistryRuntimeError("worker_policy_revision_changed");

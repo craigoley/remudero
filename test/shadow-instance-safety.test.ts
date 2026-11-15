@@ -1683,7 +1683,7 @@ test("private registry selection preserves owner holds and private-safe boundari
       const started = process.hrtime.bigint();
       const proc = spawn(process.execPath,
         ["--import", "tsx", "--input-type=module", "-e",
-          `import { main } from "#src/run-task.js"; process.argv = [process.execPath, "rmd", ${JSON.stringify(verb)}];
+          `import { main } from "#src/run-task.js"; process.argv = [process.execPath, "rmd", ...${JSON.stringify(verb === "pause" ? [verb, "--reason", "fixture hold"] : [verb])}];
            await main({ checkFreshness: () => ({ status: "guarded" }) }).catch(error => { console.error(error.message); process.exitCode = 2; });`],
         { cwd: REPO_ROOT, env: { ...withoutRegistrySelection(process.env), HOME: home, GH_TOKEN: "fixture-not-a-credential",
           ...(path === undefined ? {} : { RMD_INSTANCE_REGISTRY: path }),

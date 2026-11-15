@@ -510,6 +510,8 @@ interface InFlight {
 export const GH_BROKER_INITIAL_FRESH_MS = 60_000; // GitHub's own `max-age=60` on authenticated REST reads
 export const GH_BROKER_CACHE_SHARE_OF_FREE = 0.01;
 export const GH_BROKER_LOG_RETENTION_DAYS = 7;
+/** BACKSTOP: boot parses at most this many cache bytes (a third of the ~75 MB that crash-looped a ~250 MB heap). */
+export const BROKER_BOOT_PARSE_BYTES = 24 * 1024 * 1024;
 
 export class GhReadBroker {
   readonly dir: string;
@@ -526,7 +528,9 @@ export class GhReadBroker {
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly freeBytes: () => number;
   private readonly entries = new Map<string, { bytes: number; subjects: GhBrokerSubject[] }>();
-  private readonly memo = new Map<string, GhBrokerCacheEntry>();
+  private readonly memo = new Map<string, { entry: GhBrokerCacheEntry; bytes: number }>();
+  private memoryBytes = 0;
+  private memoryTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly inflight = new Map<string, InFlight>();
   private readonly queues = new Map<GhBrokerLimiter, QueuedJob[]>();
   private readonly draining = new Set<GhBrokerLimiter>();
@@ -570,17 +574,51 @@ export class GhReadBroker {
       return fs.bavail * fs.bsize;
     });
     mkdirSync(join(dir, "cache"), { recursive: true, mode: 0o700 });
-    for (const name of readdirSync(join(dir, "cache"))) {
-      if (!name.endsWith(".json")) continue;
-      const entry = this.readEntry(name.slice(0, -".json".length));
-      if (entry) this.entries.set(entry.key, { bytes: statSync(this.entryPath(entry.key)).size + this.ghCacheBytes(entry.key), subjects: entry.subjects });
-    }
+    this.bootLoad();
     // Invalidations written before this broker started describe cache it never served stale.
     try {
       this.invalidationOffset = statSync(join(dir, GH_BROKER_INVALIDATIONS)).size;
     } catch {
       this.invalidationOffset = 0; // no invalidation file yet: nothing has been written
     }
+  }
+
+  /** Boot: stat only, keep the newest entries fitting BROKER_BOOT_PARSE_BYTES, evict the rest unparsed, then parse one at a time. */
+  private bootLoad(): void {
+    const cache = join(this.dir, "cache");
+    const names = readdirSync(cache);
+    const ghDirs = new Set(names.filter((n) => n.endsWith(".gh")));
+    const listed: { key: string; bytes: number; mtimeMs: number }[] = [];
+    for (const name of names) {
+      if (!name.endsWith(".json")) continue;
+      const key = name.slice(0, -".json".length);
+      try {
+        const st = statSync(join(cache, name));
+        listed.push({ key, bytes: st.size + (ghDirs.has(`${key}.gh`) ? directoryBytes(this.ghCachePath(key)) : 0), mtimeMs: st.mtimeMs });
+      } catch { /* gone since the listing: nothing to load */ }
+    }
+    listed.sort((a, b) => b.mtimeMs - a.mtimeMs);
+    let total = 0;
+    let evicted = 0;
+    let evictedBytes = 0;
+    const kept: typeof listed = [];
+    for (const item of listed) {
+      if (total + item.bytes <= BROKER_BOOT_PARSE_BYTES) {
+        total += item.bytes;
+        kept.push(item);
+      } else {
+        this.dropEntry(item.key);
+        evicted += 1;
+        evictedBytes += item.bytes;
+      }
+    }
+    for (const item of kept.reverse()) { // oldest first: the map's order is the LRU order
+      try {
+        const entry = JSON.parse(readFileSync(this.entryPath(item.key), "utf8")) as GhBrokerCacheEntry;
+        this.entries.set(entry.key, { bytes: item.bytes, subjects: entry.subjects });
+      } catch { /* unreadable is a miss, as readEntry treats it */ }
+    }
+    if (evicted > 0) this.log({ event: "boot-evict", entries: evicted, bytes: evictedBytes });
   }
 
   private now(): number {
@@ -675,10 +713,11 @@ export class GhReadBroker {
 
   private readEntry(key: string): GhBrokerCacheEntry | undefined {
     const memo = this.memo.get(key);
-    if (memo) return memo;
+    if (memo) return memo.entry;
     try {
-      const entry = JSON.parse(readFileSync(this.entryPath(key), "utf8")) as GhBrokerCacheEntry;
-      this.memo.set(key, entry);
+      const text = readFileSync(this.entryPath(key), "utf8");
+      const entry = JSON.parse(text) as GhBrokerCacheEntry;
+      this.remember(entry, Buffer.byteLength(text));
       return entry;
     } catch {
       // Absent and unreadable are both a miss: the read goes upstream and rewrites the entry.
@@ -686,9 +725,49 @@ export class GhReadBroker {
     }
   }
 
+  private forgetMemo(key: string): void {
+    const memo = this.memo.get(key);
+    if (memo) this.memoryBytes -= memo.bytes;
+    this.memo.delete(key);
+  }
+
+  /** Payload bytes use the complete serialized entry, including headers and duplicated output fields. */
+  private remember(entry: GhBrokerCacheEntry, bytes: number): void {
+    this.forgetMemo(entry.key);
+    if (this.fresh(entry, this.now()) && bytes <= this.cacheShareOfFree * this.freeBytes()) {
+      this.memo.set(entry.key, { entry, bytes });
+      this.memoryBytes += bytes;
+    }
+    this.trimMemory();
+  }
+
+  /** Memory has no newest-entry exemption; disk entries remain available for hits and revalidation. */
+  private trimMemory(): number {
+    if (this.memoryTimer) clearTimeout(this.memoryTimer);
+    this.memoryTimer = undefined;
+    const nowMs = this.now();
+    const budget = Math.max(0, this.cacheShareOfFree * this.freeBytes());
+    for (const [key, memo] of this.memo) {
+      if (!this.fresh(memo.entry, nowMs)) this.forgetMemo(key);
+    }
+    for (const key of this.memo.keys()) {
+      if (this.memoryBytes <= budget) break;
+      this.forgetMemo(key);
+    }
+    let expiresAt = Infinity;
+    for (const { entry } of this.memo.values()) {
+      if (!entry.immutable) expiresAt = Math.min(expiresAt, entry.storedAtMs + entry.maxAgeMs!);
+    }
+    if (Number.isFinite(expiresAt)) {
+      this.memoryTimer = setTimeout(() => this.trimMemory(), Math.min(2 ** 31 - 1, Math.max(1, expiresAt - nowMs)));
+      this.memoryTimer.unref();
+    }
+    return budget;
+  }
+
   private dropEntry(key: string): void {
     this.entries.delete(key);
-    this.memo.delete(key);
+    this.forgetMemo(key);
     rmSync(this.entryPath(key), { force: true });
     rmSync(this.ghCachePath(key), { recursive: true, force: true });
   }
@@ -699,7 +778,6 @@ export class GhReadBroker {
     const tmp = `${this.entryPath(entry.key)}.${process.pid}.tmp`;
     writeFileSync(tmp, text, { mode: 0o600 });
     renameSync(tmp, this.entryPath(entry.key));
-    this.memo.set(entry.key, entry);
     this.entries.delete(entry.key);
     this.entries.set(entry.key, { bytes: Buffer.byteLength(text) + this.ghCacheBytes(entry.key), subjects: entry.subjects });
     const budget = this.cacheShareOfFree * this.freeBytes();
@@ -709,9 +787,15 @@ export class GhReadBroker {
       this.dropEntry(key);
       total -= meta.bytes;
     }
+    this.remember(entry, Buffer.byteLength(text));
   }
 
   private touch(key: string): void {
+    const memo = this.memo.get(key);
+    if (memo) {
+      this.memo.delete(key);
+      this.memo.set(key, memo);
+    }
     const meta = this.entries.get(key);
     if (!meta) return;
     this.entries.delete(key);
@@ -897,6 +981,7 @@ export class GhReadBroker {
 
   /** One read. Never throws: every failure comes back as `gh` would have reported it. */
   async read(request: GhBrokerReadRequest, onProgress?: (p: GhBrokerProgress) => void): Promise<GhBrokerResult> {
+    this.trimMemory();
     this.inProgress += 1;
     try {
       return await this.readOnce(request, onProgress);
@@ -1053,6 +1138,7 @@ export class GhReadBroker {
   }
 
   status(): Record<string, unknown> {
+    const memoryBudget = this.trimMemory();
     const nowMs = this.now();
     const queues: Record<string, Record<string, number>> = {};
     for (const [limiter, queue] of this.queues) {
@@ -1078,6 +1164,10 @@ export class GhReadBroker {
       cache_entries: this.entries.size,
       cache_bytes: [...this.entries.values()].reduce((sum, e) => sum + e.bytes, 0),
       cache_share_of_free: this.cacheShareOfFree,
+      memory_entries: this.memo.size,
+      memory_bytes: this.memoryBytes,
+      memory_budget_bytes: memoryBudget,
+      memory_maps: { memo: this.memo.size, entries: this.entries.size, last_served: this.lastServed.size, inflight: this.inflight.size },
       log_retention_days: this.logRetentionDays,
       login: this.loginKnown ?? null,
       account: this.account,

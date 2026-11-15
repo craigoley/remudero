@@ -1,0 +1,73 @@
+- id: W1-T12422
+  title: "A new decision model or cash deployment joins each judge's shadow pool by itself, after its corpus replay"
+  repo: remudero
+  depends_on:
+    - W1-T12417
+    - W1-T12421
+  priority: 1.7
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the cadence starts paid replays by itself and a judge role spreads its shadow calls over several paid models; the judges' answers stay the same
+  band_meaning: span
+  origin: operator-session#field-trials-new-models-2026-11-12
+  plan_refs:
+    - W1-T12417
+    - W1-T12421
+    - W1-T12187
+    - W1-T10840
+    - W1-T10857
+    - W1-T10858
+    - W1-T12420
+  files:
+    - src/lib/judge-shadow.ts
+    - src/lib/bakeoff-trigger.ts
+    - src/lib/mounts.ts
+    - .remudero/mounts.yaml
+    - src/run-task.ts
+    - docs/model-routing.md
+    - test/routing/a-new-model-joins-the-judge-shadow-pool-by-itself.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A role's mount row may say `shadow: auto`. Its pool is every decision_models candidate and every ready cash deployment that is not a Foundry Claude deployment and that has a judge_replay.finished row for that role. A role that names one candidate keeps W1-T12417's behaviour"
+      proof: "grep: W1-T12422 criterion 1 in test/routing/a-new-model-joins-the-judge-shadow-pool-by-itself.test.ts"
+    - claim: "For each sampled call the shadow picks one pool member by a seeded draw on the role and the input digest. The same input always picks the same member, and over many inputs each member gets about the same share"
+      proof: "grep: W1-T12422 criterion 2 in test/routing/a-new-model-joins-the-judge-shadow-pool-by-itself.test.ts"
+    - claim: "A member whose replay rejected more than the declared share of cases, or whose median settled cost per case is above the declared ceiling, stays out of the pool, and the bake-off proposal names it with its figures"
+      proof: "grep: W1-T12422 criterion 3 in test/routing/a-new-model-joins-the-judge-shadow-pool-by-itself.test.ts"
+    - claim: "The bake-off keys a decision model as decisions:<candidate>, apart from cash:<deployment>. A decision model on the deployment gpt-6-luna is untrialed even when the cash deployment gpt-6-luna was trialed"
+      proof: "grep: W1-T12422 criterion 4 in test/routing/a-new-model-joins-the-judge-shadow-pool-by-itself.test.ts"
+    - claim: "When the measurement cadence finds a new or changed decision_models row, or a newly ready cash deployment, it runs the direct judge replay for each auto role once per readiness digest, with no operator step. A replay that stopped on a 429 or a budget refusal is tried again on a later pass and is not marked trialed"
+      proof: "grep: W1-T12422 criterion 5 in test/routing/a-new-model-joins-the-judge-shadow-pool-by-itself.test.ts"
+    - claim: "With today's price rows and both decision models declared, the pool of an auto role holds the two decision models and the open-weight deployments gpt-oss-120b, DeepSeek-V4-Flash, DeepSeek-V4.1-Flash and Kimi-K2.6 once their replays pass, and names none of them in code"
+      proof: "grep: W1-T12422 criterion 6 in test/routing/a-new-model-joins-the-judge-shadow-pool-by-itself.test.ts"
+    - claim: "The shadow draws from the pool"
+      proof: "grep: shadowPoolMember( in src/lib/judge-shadow.ts"
+    - claim: "The bake-off deployments include the decision models"
+      proof: "grep: decisionBakeoffDeployments( in src/run-task.ts"
+  rationale: |
+    WHY: the operator wants a new decision or open-weight deployment to enter benchmarks and trials with no operator step (2026-11-12). This task joins backlog items FT3 (open-weight judge arms in the same trial) and BM2 (the bake-off onboards a new decision deployment and replays it before it can shadow). They are one task because the pool rule and the onboarding read the same replay row.
+    READ 2026-11-12 in the source at origin/main 920669542:
+    - src/lib/bakeoff-trigger.ts:22 keys a trial by `${billing}:${model}`, and :24-33 `findUntrialedModels` skips a key already trialed. The cash deployment gpt-6-luna is trialed, so a decision model on a deployment of the same name would never be seen as new.
+    - src/run-task.ts:36119-36133 `measurementBakeoffDeployments` builds the deployed list from OPENWEIGHT_PRICES (ready deployments) and the Claude candidates only. A decision_models row (W1-T12416) is not in it. :22020 passes it to the sweep's bake-off (src/lib/sweep.ts:19232 `runSweepBakeoff`).
+    - The bake-off replays inbox drafts (src/lib/inbox-bakeoff.ts), a text task. It measures no judge answer.
+    - W1-T12417 (queued, PR #18175) lets a role name ONE shadow candidate. With one name per role, the four open-weight deployments and the two decision models cannot all build a record in one role.
+    - W1-T12187 (queued) measured judge calls at a median of $0.003 on gpt-6-luna (rationale, 2026-11-10). That figure is the starting cost ceiling per case.
+    - src/lib/worker-provider.ts:3526-3594 OPENWEIGHT_PRICES holds gpt-oss-120b, DeepSeek-V4-Flash, DeepSeek-V4.1-Flash and Kimi-K2.6 today (W1-T10855, merged), so they are ready cash deployments and enter by the general rule.
+    OBSERVED 2026-11-12 by the operator session: gpt-oss-120b has 450K tokens per minute and DeepSeek-V4-Flash, DeepSeek-V4.1-Flash and Kimi-K2.6 have 300K each, with spare quota.
+  design: |
+    1. In src/lib/mounts.ts let a judge row's `shadow` be `auto` as well as one name. Set `shadow: auto` on the fixed-option judge rows that W1-T12417 lists in .remudero/mounts.yaml, one row per line.
+    2. In src/lib/judge-shadow.ts add `shadowPoolMember(role, inputDigest, pool)`. The pool is built as criterion 1 says, from the decision_models section and `openWeightDeploymentReady` on the member's surface (W1-T12420). The draw is `sha256(role, inputDigest)` over the members in name order. The chosen member is called as W1-T12417 calls a named candidate.
+    3. Pool bar: at most 10% rejected cases in the newest replay, and a median settled cost per case of at most $0.003. The builder may set measured values and says why in the pull request.
+    4. In src/lib/bakeoff-trigger.ts give a decision model the key `decisions:<candidate>` and a readiness digest over its mounts row. In src/run-task.ts add `decisionBakeoffDeployments(mounts)` and pass its rows with `measurementBakeoffDeployments`. For each new or changed key, the bake-off runs W1-T12421's direct replay for each auto role, and the proposal adds a table of the replay figures beside the inbox-draft table. A cash deployment gets both the inbox-draft trial and the judge replay; a decision model gets the judge replay only.
+    5. Record `shadow: auto`, the draw and the pool bar in docs/model-routing.md.
+    NOT IN SCOPE: switching any role's primary (W1-T12417's gardener proposal does that); the ruling, machine-filing and flight judges; the reconciled invoice of W1-T10858, which gates a cash lead and not a shadow.
+  falsifier: |
+    Admit a member with no replay row and criterion 1 must fail. Draw by call time in place of the input digest and criterion 2 must fail. Admit a member above the cost ceiling and criterion 3 must fail. Key a decision model as cash:<deployment> and criterion 4 must fail. Mark a replay that stopped on a 429 as trialed and criterion 5 must fail. Restore and require all to pass.
+  note: |
+    Ids reserved for run-unfiled-1794497247000 with ~/rmd-work/bin/reserve-id.sh. Filed with W1-T12420, W1-T12421, W1-T12423 and W1-T12424.
+    OVERLAP: W1-T10858 (queued) also edits src/lib/bakeoff-trigger.ts, to mark lead eligibility in the proposal. The two change different parts of the proposal.
+    COST: each shadow call is sampled as W1-T12187 and W1-T12417 sample, so spreading the calls over the pool does not raise the number of paid shadow calls. Each replay is bounded by W1-T12421's ceiling of $1.00 per candidate per corpus.
+    The test folder came from `rmd test-place` on a draft (models-routing, medium). The builder runs it again on the real test and moves the path if it changes.

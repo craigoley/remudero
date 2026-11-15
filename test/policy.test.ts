@@ -246,7 +246,7 @@ function assertRowsInBounds(node: unknown, path: string): void {
       // headroom.curve / githubEventWake.aggregateCheckNames — each array's member shape is
       // enforced by its own loader; only a non-empty, reviewable shape is re-checked here.
       assert.ok(value.length > 0, `${path}.value must be a non-empty array`);
-      if (path === "githubEventWake.aggregateCheckNames") {
+      if (path === "githubEventWake.aggregateCheckNames" || path === "fix.modelOrder") {
         for (const name of value) assert.equal(typeof name, "string", `${path}.value entries must be strings`);
       } else {
         for (const rung of value) {
@@ -283,7 +283,8 @@ test("the SHIPPED plan/policy.yaml loads, and every row's value sits within its 
     "fixSpawnWallClockBoundMs",
     "keychainProvisionLockWaitMs",
     "sweep", "drain", "retro", "autoTriage", "boardReview", "measurementCadence", "digestCadence", "intakeCadence", "ciLearningCadence", "wipeTestCadence", "headroom", "launchd", "scratchReap", "worktreeReapBoot", "objectReap", "githubEventWake",
-    "armCalibrationBands", "workerRuleHeadlines",
+    "armCalibrationBands", "workerRuleHeadlines", "freshnessRestart",
+    "fix", // W1-T12710
   ];
   assert.deepEqual(Object.keys(p.values).sort(), expectedTopLevelKeys.sort());
 
@@ -670,6 +671,9 @@ test("every LIFTED field records origin=lifted:<source-site> — the net-new fie
     // W1-T2761: the worker rule-headline gate, shipped ON by the operator's 2026-10-13 ruling. No
     // prior literal gated a prompt part that did not exist before that task.
     "workerRuleHeadlines.enabled",
+    // W1-T12710: no earlier literal triggered a different remedy for a stalled criterion.
+    "fix.stallRounds",
+    "fix.modelOrder",
   ]);
   const liftedPaths = Object.keys(p.origin).filter((path) => !NET_NEW.has(path));
   assert.ok(liftedPaths.length > 0);

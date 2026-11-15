@@ -1,0 +1,70 @@
+- id: W1-T12515
+  title: Correct CONSOLE-T172's timeout proofs in a separate plan amendment before retry
+  repo: remudero-console
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: medium
+  origin: architect
+  plan_refs: ["§5B", W1-T3434, W1-T11608, CONSOLE-T172]
+  files:
+    - plan/tasks.d/CONSOLE-T172-bounded-product-stage-timeouts.yaml
+  status: queued
+  attempts: 0
+  rationale: |
+    Settled by lookup: is this already filed or already decided? -> CONSOLE-T172 already owns the
+    Console timeout implementation; W1-T11608 describes the related recovery incident, and W1-T3434
+    establishes separate authoritative plan amendments. None supplies this T172 proof correction
+    (plan/tasks.d/W1-T11608-console-plan-recovery-timeout-idempotent-replay.yaml;
+    plan/tasks.d/W1-T3434-a-capped-proof-repair-must-amend-the-plan-not-the-pr-body.yaml).
+    Settled by lookup: which artifact judges T172? -> its Console plan shard, not a PR body or a
+    second Core implementation task (Console plan/tasks.d/CONSOLE-T172-bounded-product-stage-timeouts.yaml;
+    W1-T3434).
+    Settled by lookup: do the current proofs establish the proposed timeout behavior? -> no. The
+    first title already tests fresh session/nonce binding; the second scans unrelated operator
+    controls; the third already tests transport-loss receipt validation. They do not establish
+    delayed product receipts, ordered product deadlines, or frozen-command recovery after timeout
+    (Console tests/unit/product-build-handoff.test.tsx; tests/unit/client-control-timeouts.test.ts).
+    The reported T172 launch failed before an implementation PR. Do not apply the capped-PR
+    automation's implementation-head/base transaction to a PR that does not exist.
+  design: |
+    Deliver one plan-only Console PR changing the existing T172 shard. Preserve all three claim
+    strings verbatim. Replace their proof scalars, in order, with whole-file unit-test proofs for
+    tests/unit/product-stage-gateway-timeouts.test.ts,
+    tests/unit/product-stage-deadlines.test.ts, and
+    tests/unit/product-stage-timeout-replay.test.tsx. Add these paths to T172's files list while
+    retaining its existing paths. These are prospective suites T172 must implement, not assertions
+    that the tests already exist or have passed. If equivalent dedicated suites have landed by
+    build time, report that evidence and re-amend this filing before substituting proof paths.
+
+    Clarify T172's design so the gateway suite advances a deterministic clock beyond five seconds
+    through nonce plus POST and receives the genuine plan/build receipt, with an unrelated HIGH
+    write retaining the original default. The deadlines suite verifies finite ordered browser,
+    complete gateway-exchange and route budgets. The recovery suite drives timeout and lost response
+    through the actual saved-command recovery path, retains identical requestId and payload, and
+    never fabricates admission or enables Build without a matching receipt. These are obligations
+    of T172's later implementation, not code changes in this amendment.
+
+    INVARIANT t172-contract: The existing timeout claims, product-command-receipt invariant,
+    ownership, authorization and normal filing/review/hosted-CI/protected-merge requirements remain
+    intact; this task only repairs their plan evidence and declares the future test paths.
+
+    Add a rationale correction explaining why each old proof was non-responsive. Do not edit a
+    Console dependency, implementation/test file, PR body, credential, limit, attempt counter or
+    retained failed T172 branch. Do not retry T172. The parent/operator must confirm this amendment
+    and W1-T12516/W1-T12517 landed normally before separately admitting a fresh T172 attempt through
+    the existing ownership and filing checks. Do not redispatch W1-T11608 as a duplicate repair.
+  acceptance:
+    - claim: T172's delayed gateway receipt claim names its dedicated prospective whole-file suite
+      proof: 'grep: unit test: tests/unit/product-stage-gateway-timeouts\.test\.ts in plan/tasks.d/CONSOLE-T172-bounded-product-stage-timeouts.yaml'
+    - claim: T172's finite ordered deadlines claim names its dedicated prospective whole-file suite
+      proof: 'grep: unit test: tests/unit/product-stage-deadlines\.test\.ts in plan/tasks.d/CONSOLE-T172-bounded-product-stage-timeouts.yaml'
+    - claim: "invariant:t172-contract — the unchanged receipt and recovery claim names its dedicated prospective whole-file suite in a plan-only amendment"
+      proof: 'grep: unit test: tests/unit/product-stage-timeout-replay\.test\.tsx in plan/tasks.d/CONSOLE-T172-bounded-product-stage-timeouts.yaml'
+  falsifier: |
+    Leaving the old title proofs in the shard makes the three positive grep proofs miss. Review the
+    exact plan-only diff to verify claims and operational fields were preserved. This amendment's
+    proof success establishes the corrected declaration only; it cannot establish timeout behavior
+    or authorize retry, implementation credit, deployment, or merge of T172.

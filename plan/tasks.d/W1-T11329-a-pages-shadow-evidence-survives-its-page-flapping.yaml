@@ -15,7 +15,7 @@
     - src/lib/view-shadow.ts
     - src/lib/inbox-view.ts
     - test/console-api/views/a-page-that-flaps-keeps-its-shadow-evidence.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: A page whose logical key leaves the population and returns with no real diff recorded in between keeps its incarnation, samples and sinceMs instead of restarting at zero with a fresh incarnation; a real diff still resets it, and a brand-new position still needs its own full day and cadence, so the readiness rule itself is unchanged

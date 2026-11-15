@@ -1,0 +1,38 @@
+- id: W1-T12046
+  title: "Pull requests that are stuck for the same cause share one escalation"
+  repo: remudero
+  depends_on: []
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the sweep's stuck-PR escalation path; a wrong merge of causes could hide a pull request that needs its own decision
+  band_meaning: blast-radius
+  origin: operator-session#plain-language-2026-11-10
+  plan_refs:
+    - W1-T78
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/pull-requests-stuck-for-one-cause-share-one-escalation.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "When several pull requests are stuck in the same stage with the same diagnosis in one sweep, one escalation is opened that lists each of them"
+      proof: "grep: W1-T12046 criterion 1 in test/sweep/pull-requests-stuck-for-one-cause-share-one-escalation.test.ts"
+    - claim: "A pull request stuck for a different cause, or in a different stage, still gets its own escalation"
+      proof: "grep: W1-T12046 criterion 2 in test/sweep/pull-requests-stuck-for-one-cause-share-one-escalation.test.ts"
+    - claim: "A pull request that later becomes stuck for a cause that already has an open escalation is added to it as a comment, and no new issue is opened"
+      proof: "grep: W1-T12046 criterion 3 in test/sweep/pull-requests-stuck-for-one-cause-share-one-escalation.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10: issues #17633 to #17637 are five escalations opened within minutes of each other. Each says "PR stage stalled … awaiting-review" for a different pull request, with the same diagnosis: "checks green, review never posted".
+    - The cause was one: the review pipeline was not posting (the host ran at a load of 60 to 100 that day, and the review width was 1). The operator received five requests for one decision.
+    - Each of the five opens with the same machine header and differs only in the pull request number.
+    - A stuck pull request is the worst case for this system, and five copies of one alarm make the real one harder to see.
+  design: |
+    Where the sweep escalates a stalled stage (near src/lib/sweep.ts lines 636 to 646), group the pull requests of one sweep by stage and diagnosis. Open one escalation for a group, with a list of its pull requests. Reuse an open escalation of the same stage and diagnosis by adding a comment. Grouping is by the diagnosis the sweep already computes; no count or time limit is added.
+    NOT IN SCOPE: why the review did not post, the stall thresholds, and the wording of the diagnosis.
+  falsifier: |
+    Open one issue per pull request and criterion 1 must fail. Merge two different diagnoses into one issue and criterion 2 must fail. Open a new issue while one for the same cause is open and criterion 3 must fail. Restore and require all three to pass.
+  note: |
+    The builder confirms the grouping key against the five issues before writing code.

@@ -50,11 +50,14 @@ export const ONE_TEST_SUITE_AT_A_TIME_LINE =
  * W1-T2672: GENERATED_LEDGER_CLASSES independently admits measurement companions, including
  * scripts/knowledge-budget-baseline.json, which the generator registry does not cover.
  * Both exemptions require a declared scope; neither widens the fail-closed default.
+ * W1-T11501: `placementAdmitted` is the output of observeComputedPlacement (lib/test-path-resolver.ts), the ONE
+ * predicate that admits a declared test written at its contents-computed folder; empty by default.
  */
 export function scopeGuardOutOfScopeFiles(
   diffFiles: readonly string[],
   declaredFiles: readonly string[] | undefined,
   registrationChanges: readonly RegistrationChange[] = [],
+  placementAdmitted: ReadonlySet<string> = new Set(),
 ): string[] {
   if (diffFiles.length === 0) return [];
   if (!declaredFiles || declaredFiles.length === 0) return [...diffFiles];
@@ -63,6 +66,7 @@ export function scopeGuardOutOfScopeFiles(
   return diffFiles.filter(
     (f) =>
       !declared.has(f) &&
+      !placementAdmitted.has(f) &&
       !admittedRegistrations.includes(f) &&
       !Object.hasOwn(REGENERABLE_ARTIFACT_GENERATORS, f) &&
       !isCompanionPath(f, GENERATED_LEDGER_CLASSES),
@@ -104,11 +108,12 @@ export function outOfDeclaredScopeFiles(
   declaredFiles: readonly string[] | undefined,
   registrationChanges: readonly RegistrationChange[] = [],
   regime: FixScopeRegime = fixScopeRegime(declaredFiles),
+  placementAdmitted: ReadonlySet<string> = new Set(),
 ): string[] {
   if (!declaredFiles || declaredFiles.length === 0) return [];
   return regime === "plan"
     ? outOfPlanScopeFiles([...files])
-    : scopeGuardOutOfScopeFiles(files, declaredFiles, registrationChanges);
+    : scopeGuardOutOfScopeFiles(files, declaredFiles, registrationChanges, placementAdmitted);
 }
 
 // W1-T94/W1-T76, #157: preserve the actual failure signal; a proof-keyword gap is not broken code,
@@ -161,7 +166,7 @@ export function priorPartialWorkLines(work: PriorPartialWork | undefined): strin
   const more = work.stagedMore && work.stagedMore > 0 ? ` (+${work.stagedMore} more)` : "";
   return [
     "",
-    "PRIOR PARTIAL WORK (W1-T6434): an earlier fix worker for this PR died with staged, uncommitted work at this",
+    "PRIOR PARTIAL WORK (W1-T6434): an earlier fix worker for this PR stopped with partial work at this",
     "exact head. It was preserved, not applied. It is UNVERIFIED — it may be incomplete, wrong, or already",
     "superseded. Evaluate it against the evidence below; never apply it blindly.",
     `RECOVERY REF: ${work.recoveryRef}`,
@@ -171,6 +176,15 @@ export function priorPartialWorkLines(work: PriorPartialWork | undefined): strin
     CI_LOG_FENCE_OPEN,
     neutralizeFenceMarkers(work.excerpt),
     CI_LOG_FENCE_CLOSE,
+    ...(work.indexPatch ? [
+      "SEPARATE INDEX SNAPSHOT: staged bytes differ from the worktree snapshot above. Inspect both before resuming.",
+      `INDEX RECOVERY REF: ${work.indexPatch.recoveryRef}`,
+      `Inspect it with: git diff ${work.indexPatch.recoveryRef}^ ${work.indexPatch.recoveryRef}`,
+      `INDEX DIFF EXCERPT (secret-scrubbed${work.indexPatch.excerptTruncated ? ", TRUNCATED — read the ref for the rest" : ""}):`,
+      CI_LOG_FENCE_OPEN,
+      neutralizeFenceMarkers(work.indexPatch.excerpt),
+      CI_LOG_FENCE_CLOSE,
+    ] : []),
   ];
 }
 

@@ -1,6 +1,8 @@
 /** The status board's plan/ledger projection runs here, never in serve's request loop. */
 import { MessageChannel, Worker, isMainThread, parentPort, receiveMessageOnPort, workerData, type MessagePort } from "node:worker_threads";
 import { statSync } from "node:fs";
+import { dirname } from "node:path";
+import { planDestinationRepository } from "./plan-destination.js";
 import { performance } from "node:perf_hooks";
 import { createBoardSnapshotCache, type BoardSnapshot, type BoardSnapshotCache, type BoardSnapshotSource, type BoardSnapshotState } from "./board.js";
 import { systemClock, type Clock } from "./clock.js";
@@ -8,13 +10,21 @@ import { readInflightLock } from "./inflight-lock.js";
 import type { BoardDeps, GitHub } from "./status.js";
 import { planFilesIdentity, threadPlanPin, threadStrictPlan } from "./thread-plan.js";
 import { startWorker } from "./child-entry-argv.js";
+import { adoptBoardCatalogs, BOARD_CATALOG_WIRE_VERSION, createBoardCatalogParentBridge, createWorkerBoardCatalogClient,
+  isBoardCatalogReply, isBoardCatalogRequest, type BoardCatalogClient, type BoardCatalogParentBridge, type BoardCatalogReply, type BoardCatalogRequest } from "./serve-plan-reload.js";
 
 const KIND = "remudero-board-projection";
 export const BOARD_PROJECTION_INTERVAL_MS = 3_000;
+/**
+ * BACKSTOP: how often the thread projects while serve reports no status or event-stream client (W1-T11935).
+ * Well under {@link BOARD_PROJECTION_STALE_MS}, so a reader that is not a client still finds a ready snapshot.
+ */
+export const BOARD_PROJECTION_IDLE_INTERVAL_MS = 15_000;
 export const BOARD_PROJECTION_STALE_MS = 30_000;
 const FACT_REPLY_BOUND_MS = 5_000;
 
 type WorkerInput = {
+  catalogBridgeVersion?: number;
   kind: typeof KIND;
   planPath: string;
   ledgerPath: string;
@@ -27,6 +37,8 @@ type WorkerInput = {
 };
 type FactRequest = { kind: "fact"; id: number; method: string; args: unknown[] };
 type FactReply = { id: number } & ({ ok: true; value: unknown } | { ok: false; error: string });
+/** Parent to thread: the cadence for client presence, and whether to project at once because the snapshot is older than the active interval. */
+export type BoardProjectionPace = { kind: "pace"; intervalMs: number; projectNow: boolean };
 type ProjectionMessage =
   | { kind: "snapshot"; snapshot: BoardSnapshot; planIdentity: string }
   | { kind: "failure"; reason: string };
@@ -79,6 +91,7 @@ export function boardWorkerPass(
   input: { planPath: string; ledgerPath: string; inflightDir: string },
   github: GitHub,
   cache: BoardSnapshotCache,
+  catalogs?: BoardCatalogClient,
 ): BoardSnapshot {
   const deps: BoardDeps = {
     plan: threadStrictPlan(input.planPath),
@@ -86,12 +99,32 @@ export function boardWorkerPass(
     github,
     inflightHolder: (taskId) => readInflightLock(input.inflightDir, taskId),
   };
+  if (catalogs) adoptBoardCatalogs(deps, catalogs.current(deps.plan, dirname(input.ledgerPath)));
   return computeWorkerBoardSnapshot(deps, cache);
+}
+
+/**
+ * The thread's cadence: one pass now, then one per interval, re-paced by each {@link BoardProjectionPace}.
+ * Also called in-process by a test, with fake timers.
+ */
+export function paceBoardProjection(
+  tick: () => void,
+  intervalMs: number,
+  timers: { setInterval: (run: () => void, ms: number) => unknown; clearInterval: (timer: never) => void } = { setInterval, clearInterval },
+): (pace: BoardProjectionPace) => void {
+  tick();
+  let timer = timers.setInterval(tick, intervalMs);
+  return (pace) => {
+    timers.clearInterval(timer as never);
+    if (pace.projectNow) tick();
+    timer = timers.setInterval(tick, pace.intervalMs);
+  };
 }
 
 function runBoardWorker(input: WorkerInput): void {
   const github = projectionGithub(input);
   const cache = createBoardSnapshotCache();
+  const catalogs = createWorkerBoardCatalogClient(input.catalogBridgeVersion === BOARD_CATALOG_WIRE_VERSION, request => parentPort!.postMessage(request));
   let busy = false;
   const tick = (): void => {
     if (busy) return;
@@ -100,15 +133,18 @@ function runBoardWorker(input: WorkerInput): void {
       if (input.delayMs > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, input.delayMs);
       // The identity is taken BEFORE the pass reads the plan, so it can only name a plan at least as old as the one projected.
       const planIdentity = threadPlanPin(input.planPath) || planFilesIdentity(input.planPath);
-      parentPort!.postMessage({ kind: "snapshot", snapshot: boardWorkerPass(input, github, cache), planIdentity } satisfies ProjectionMessage);
+      parentPort!.postMessage({ kind: "snapshot", snapshot: boardWorkerPass(input, github, cache, catalogs), planIdentity } satisfies ProjectionMessage);
     } catch (error) {
       parentPort!.postMessage({ kind: "failure", reason: String((error as Error)?.message ?? error) } satisfies ProjectionMessage);
     } finally {
       busy = false;
     }
   };
-  tick();
-  setInterval(tick, input.intervalMs);
+  const pace = paceBoardProjection(tick, input.intervalMs);
+  parentPort!.on("message", (message: BoardProjectionPace | BoardCatalogReply) => {
+    if (isBoardCatalogReply(message)) { catalogs.accept(message); tick(); }
+    else if (message.kind === "pace") pace(message);
+  });
 }
 
 export interface BoardProjectionWorker extends BoardSnapshotSource {
@@ -124,13 +160,19 @@ export interface BoardProjectionWorker extends BoardSnapshotSource {
   /** Starts a thread {@link pause} terminated; a no-op when none was paused. */
   resume(): void;
   isReady(): boolean;
+  /**
+   * W1-T11935: whether serve has a status or event-stream client. Absent, the thread projects every
+   * idle interval; present again, it returns to the active interval at once and projects first when the
+   * snapshot is older than that interval. Until serve reports presence the active interval holds.
+   */
+  setClientPresence(present: boolean): void;
 }
 
 export function createBoardProjectionWorker(
   github: GitHub,
   input: { planPath: string; ledgerPath: string; inflightDir: string },
   options: {
-    intervalMs?: number; delayMs?: number; staleMs?: number; workerUrl?: URL; clock?: Clock;
+    intervalMs?: number; idleIntervalMs?: number; delayMs?: number; staleMs?: number; workerUrl?: URL; clock?: Clock;
     /** Told of every snapshot the thread publishes, so serve can reconcile its own plan with the one the thread read. */
     onSnapshot?: (planIdentity: string) => void;
   } = {},
@@ -141,8 +183,12 @@ export function createBoardProjectionWorker(
   let thread: Worker | undefined;
   let planIdentity: string | undefined;
   let replyPort: MessagePort | undefined;
+  let catalogBridge: BoardCatalogParentBridge | undefined;
   let stopped = false;
   let paused = false;
+  let clientPresent = true;
+  const activeMs = options.intervalMs ?? BOARD_PROJECTION_INTERVAL_MS;
+  const idleMs = options.idleIntervalMs ?? BOARD_PROJECTION_IDLE_INTERVAL_MS;
   let mergedLookup: ((taskId: string) => ReturnType<GitHub["findMergedByTrailer"]>) | null = null;
   const unavailable = (reason: string): void => {
     state = { state: "unavailable", buildStartedAt, checkedAt: clock.iso(), reason };
@@ -156,6 +202,12 @@ export function createBoardProjectionWorker(
     },
     isReady: () => handle.current().state === "ready",
     planIdentity: () => planIdentity,
+    setClientPresence(present) {
+      if (present === clientPresent) return;
+      clientPresent = present;
+      const ageMs = state.state === "ready" ? clock.now() - Date.parse(state.snapshot.generated_at) : Number.POSITIVE_INFINITY;
+      thread?.postMessage({ kind: "pace", intervalMs: present ? activeMs : idleMs, projectNow: present && ageMs > activeMs } satisfies BoardProjectionPace);
+    },
     start() {
       if (stopped || thread) return;
       const { port1, port2 } = new MessageChannel();
@@ -163,11 +215,12 @@ export function createBoardProjectionWorker(
       const signal = new SharedArrayBuffer(4);
       const data: WorkerInput = {
         kind: KIND,
+        catalogBridgeVersion: BOARD_CATALOG_WIRE_VERSION,
         ...input,
         methods: Object.entries(github).filter(([, value]) => typeof value === "function").map(([name]) => name),
         replyPort: port2,
         signal,
-        intervalMs: options.intervalMs ?? BOARD_PROJECTION_INTERVAL_MS,
+        intervalMs: clientPresent ? activeMs : idleMs,
         delayMs: options.delayMs ?? 0,
       };
       try {
@@ -182,8 +235,12 @@ export function createBoardProjectionWorker(
       }
       const wake = new Int32Array(signal);
       const spawned = thread;
-      thread.on("message", (message: FactRequest | ProjectionMessage) => {
+      catalogBridge = createBoardCatalogParentBridge([dirname(input.ledgerPath)], reply => {
+        if (!stopped && thread === spawned) spawned.postMessage(reply);
+      }, clock);
+      thread.on("message", (message: FactRequest | ProjectionMessage | BoardCatalogRequest) => {
         if (stopped || thread !== spawned) return;
+        if (isBoardCatalogRequest(message)) { catalogBridge?.request(message); return; }
         if (message.kind === "fact") {
           let reply: FactReply;
           try {
@@ -202,7 +259,13 @@ export function createBoardProjectionWorker(
           return;
         }
         if (message.kind === "snapshot") {
-          state = { state: "ready", snapshot: message.snapshot };
+          // An older child ignores the advertised capability and sends only public rows. Keep
+          // those available, but never mistake that unsupported private producer for a healthy whole.
+          const selected = planDestinationRepository(dirname(input.ledgerPath)).outcome !== "off";
+          const snapshot = selected && message.snapshot.opsCatalog === undefined
+            ? { ...message.snapshot, opsCatalog: { outcome: "unreadable" as const, observedAt: clock.iso(), reason: "catalog-bridge-unavailable" } }
+            : message.snapshot;
+          state = { state: "ready", snapshot };
           planIdentity = message.planIdentity;
           options.onSnapshot?.(message.planIdentity);
         } else unavailable(`worker_projection_failed: ${message.reason}`);
@@ -213,6 +276,8 @@ export function createBoardProjectionWorker(
       thread.once("exit", (code) => {
         // A paused thread is already replaced by undefined, or by its successor: neither is this exit's to clear.
         if (thread !== spawned) return;
+        catalogBridge?.close();
+        catalogBridge = undefined;
         if (!stopped) unavailable(crash ?? `worker_exited: ${code}`);
         thread = undefined;
         replyPort?.close();
@@ -221,6 +286,8 @@ export function createBoardProjectionWorker(
     },
     stop() {
       stopped = true;
+      catalogBridge?.close();
+      catalogBridge = undefined;
       void thread?.terminate();
       replyPort?.close();
     },
@@ -228,6 +295,8 @@ export function createBoardProjectionWorker(
       const running = thread;
       if (stopped || !running) return false;
       paused = true;
+      catalogBridge?.close();
+      catalogBridge = undefined;
       thread = undefined;
       replyPort?.close();
       replyPort = undefined;

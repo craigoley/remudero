@@ -48,7 +48,7 @@ function fakeWorker(text: string): WorkerResult {
   } as unknown as WorkerResult;
 }
 
-const TASK_FIELDS = ["  repo: remudero", "  depends_on: []", "  type: implement", "  verify: auto", "  status: queued", "  attempts: 0"].join("\n");
+const TASK_FIELDS = ["  repo: remudero", "  depends_on: []", "  type: implement", "  design: |", "    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve", "  verify: auto", "  status: queued", "  attempts: 0"].join("\n");
 
 /** A bare origin whose plan tops out at W1-T9 (so the advisory mint is W1-T10), plus one `new`
  *  feedback entry. `heldIds` are pre-created `refs/rmd-id/` refs — the lever that forces the remote
@@ -141,7 +141,7 @@ async function runTriage(heldIds: string[], fileAs: (promptedId: string) => stri
           mkdirSync(dir, { recursive: true });
           writeFileSync(join(dir, `${id}-fixture.yaml`), [
             `- id: ${id}`, `  title: "a clean task filed for the W1-T2326 proof"`,
-            "  repo: remudero", "  origin: architect", "  depends_on: []", "  type: implement",
+            "  repo: remudero", "  origin: architect", "  depends_on: []", "  type: implement", "  design: |", "    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve",
             "  verify: auto", "  status: queued", "  attempts: 0",
             "  files: [test/triage-files-under-the-reserved-id.test.ts]", "  acceptance:",
             '    - claim: "the thing holds"',

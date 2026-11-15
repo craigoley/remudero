@@ -6733,7 +6733,7 @@ test("rmd lint-plan --base HEAD: the reconstruct-base-plan branch (tmpDir, git s
 const LINT_DI_FIXTURE = fileURLToPath(new URL("./fixtures/lint-plan-status-di/tasks.yaml", import.meta.url));
 const LINT_DI_BASE_YAML = readFileSync(LINT_DI_FIXTURE, "utf8");
 const LINT_DI_AMENDED_YAML =
-  LINT_DI_BASE_YAML +
+  LINT_DI_BASE_YAML.replace("  type: implement", "  type: implement\n  design: |\n    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve") +
   '    - claim: "the fixture\'s amended criterion"\n' +
   // W1-T3073: was `test/run-task.test.ts::LINTDI-1 amended criterion proof`, the path-plus-title
   // grammar the shared parser now REFUSES. This fixture is about Rule 21 status resolution, not

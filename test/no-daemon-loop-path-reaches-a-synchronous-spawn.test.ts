@@ -46,7 +46,6 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   checkCliFreshness: 1,
   checkProofAtAuthorTime: 1,
   ciLearningTaskIdMinter: 1,
-  classifyHeadShaAvailability: 1,
   codeScanningJudgeDeps: 1,
   couldBeInterpolatedTitle: 1,
   createGhCallPacer: 1,
@@ -162,7 +161,6 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   isPrMergedNow: 1,
   ladderGardenSpec: 1,
   listRegisteredWorktrees: 1,
-  loadPlanAtRef: 1,
   localBranchExists: 1,
   localMergeSpawn: 1,
   main: 5,
@@ -234,7 +232,6 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   resolveCommitAssignment: 1,
   resolveMergeLogReadOptions: 1,
   resolveOwnerRepoAt: 1,
-  resolvePlanCriteriaAtHead: 1,
   reviewCommandHost: 2,
   retroShippedGithubGateway: 1,
   reuseDonor: 1,
@@ -266,7 +263,7 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   taskIdOwnershipFindings: 1,
   taskIdsEverFiled: 1,
   testSlotProcessFacts: 1,
-  triageCommandLocked: 3,
+  triageCommandLocked: 2,
   vetPinnedConfig: 1,
   worktreeAdd: 5,
   worktreePushExec: 1,
@@ -337,6 +334,22 @@ function refusals(fns: Fn[], baseline: Readonly<Record<string, number>>): string
         ? `${name} makes 0 synchronous spawn call(s) on the daemon loop < row ${row} — delete the \`${name}\` row from SYNC_SPAWN_LOOP_BASELINE (${BASELINE_FILE}) in this PR`
         : `${name} makes ${count} synchronous spawn call(s) on the daemon loop < row ${row} — lower SYNC_SPAWN_LOOP_BASELINE \`${name}\` to ${count} (${BASELINE_FILE}) in this PR`);
     }
+  }
+  return out;
+}
+
+/** W1-T12791: the functions repairPrMetadata's production plan reader runs, which must await the async git leaf. */
+const MERGE_PLAN_READERS = ["planCriteriaAtMergeForRepair", "mergeCommitForRepair", "repairCheckoutTopLevel"] as const;
+const SYNC_GIT_LEAF_CALL = /\bhostWorktreeGit(?:AtTopLevel|Result)?\(/g;
+
+/** Each merge-plan reader that calls a synchronous spawn or the synchronous git leaf, named under repairPrMetadata. */
+function mergePlanReadRefusals(fns: Fn[]): string[] {
+  const out: string[] = [];
+  for (const name of MERGE_PLAN_READERS) {
+    const fn = fns.find((f) => f.name === name);
+    if (fn === undefined) { out.push(`repairPrMetadata's plan reader ${name} is missing`); continue; }
+    const count = (fn.body.match(SYNC_GIT_LEAF_CALL) ?? []).length + syncSpawnCalls(fn);
+    if (count > 0) out.push(`repairPrMetadata's plan reader ${name} makes ${count} synchronous git call(s) — await hostWorktreeGitAsync instead`);
   }
   return out;
 }
@@ -555,6 +568,69 @@ test("W1-T9615: the SRE lane's daemon input reaches no synchronous plan-PR prefl
   }
 });
 
+/** W1-T12790: the triage status landing the daemon's idle branch drives (runAutoTriage -> triageCommand ->
+ *  triageCommandLocked), and the synchronous plan-PR preflight it ran on the loop until it awaited the async landing. */
+const TRIAGE_LANDING_SEEDS = ["landTriageStatusOutcome", "landPrivateTriageStatus"] as const;
+const TRIAGE_SYNC_PREFLIGHT = ["planPrPreflightAtCommit", "runInTree"] as const;
+/** Names the name walk crosses from those seeds that run no synchronous landing. `planPrPreflight` is the landing
+ *  option key the async landing reads (W1-T9736 makes the walk read keys as keys). `escalation` is the member read
+ *  `message.extra.escalation` in recordEscalationIntakeOutcome. `setFeedbackStatus` lands only when its `land` option
+ *  has no `stateRoot`: landPrivateTriageStatus passes a `stateRoot` and landTriageStatusOutcome passes no `land`. */
+const TRIAGE_NO_LANDING_NAMES: ReadonlySet<string> = new Set(["planPrPreflight", "escalation", "setFeedbackStatus"]);
+
+/** The first path, as names, from `seed` to a name in `targets` that crosses none of `around`; undefined when none. */
+function pathAround(fns: Fn[], seed: string, targets: readonly string[], around: ReadonlySet<string>): string[] | undefined {
+  const byName = new Map<string, Fn[]>();
+  for (const f of fns) byName.set(f.name, [...(byName.get(f.name) ?? []), f]);
+  const parent = new Map<string, string | undefined>([[seed, undefined]]);
+  const queue = [seed];
+  while (queue.length) {
+    const name = queue.shift()!;
+    if ((targets as readonly string[]).includes(name)) {
+      const path = [name];
+      for (let up = parent.get(name); up !== undefined; up = parent.get(up)) path.unshift(up);
+      return path;
+    }
+    for (const f of byName.get(name) ?? []) {
+      for (const id of f.body.match(/[A-Za-z_$][\w$]*/g) ?? []) {
+        if (byName.has(id) && !parent.has(id) && !around.has(id)) {
+          parent.set(id, name);
+          queue.push(id);
+        }
+      }
+    }
+  }
+  return undefined;
+}
+
+/** One refusal per seed whose walk reaches the synchronous plan-PR preflight, naming the seed and the path. */
+function triageLandingRefusals(fns: Fn[]): string[] {
+  return TRIAGE_LANDING_SEEDS.flatMap((seed) => {
+    const path = pathAround(fns, seed, TRIAGE_SYNC_PREFLIGHT, TRIAGE_NO_LANDING_NAMES);
+    return path === undefined ? [] : [`${seed} reaches the synchronous plan-PR preflight: ${path.join(" > ")}`];
+  });
+}
+
+test("W1-T12790 criterion 4: the triage status landing reaches no synchronous plan-PR preflight, and no census row rises", () => {
+  const fns = censusFunctions();
+  const daemon = loopReachable(fns, "daemonCommand");
+  for (const seed of TRIAGE_LANDING_SEEDS) assert.ok(daemon.has(seed), `positive control: the daemon loop reaches ${seed}`);
+  assert.deepEqual(triageLandingRefusals(fns), [], "a triage status landing runs the synchronous plan-PR preflight on the loop");
+  // Every name the walk goes around is still on a seed's walk: a name that left it must leave this list too.
+  const reached = new Set(TRIAGE_LANDING_SEEDS.flatMap((seed) => [...loopReachable(fns, seed)]));
+  for (const name of TRIAGE_NO_LANDING_NAMES) assert.ok(reached.has(name), `${name} is no longer on a seed's walk; delete it`);
+  // Positive control: the walk without those names does reach the preflight, so the check above cannot pass vacuously.
+  assert.ok(pathAround(fns, "landTriageStatusOutcome", TRIAGE_SYNC_PREFLIGHT, new Set()), "the plain walk reaches the preflight by name");
+  // Positive control: putting the synchronous landing call back fails with the seed's name.
+  for (const seed of TRIAGE_LANDING_SEEDS) {
+    const reverted = fns.map((f) => (f.name === seed ? { ...f, body: `${f.body}\nlandFeedbackStatusContent(root, relPath, content, opts);` } : f));
+    const found = triageLandingRefusals(reverted);
+    const named = `${seed} reaches the synchronous plan-PR preflight: ${seed} > landFeedbackStatusContent > `;
+    assert.ok(found.some((m) => m.startsWith(named)), `the reverted ${seed} is refused by name: ${found.join(" | ")}`);
+  }
+  assert.deepEqual(refusals(fns, SYNC_SPAWN_LOOP_BASELINE), [], "no SYNC_SPAWN_LOOP_BASELINE row rises and no name is added");
+});
+
 /** W1-T9696: daemon-loop captures that now stage for the async sweep, and so never name captureFeedback. */
 const STAGED_CAPTURE_SEEDS = ["pollIssues", "pollAlerts", "productionIssueRevalidationPorts", "feedbackEvidenceCoverageFiler"] as const;
 
@@ -718,4 +794,23 @@ test("W1-T9737: a data-returning initializer call stays module load", () => {
   const fromSeed = loopReachable(synthetic, "seed");
   assert.ok(!fromSeed.has("captureId") && !fromSeed.has("Thing"), "data-returning calls are not loop reach");
   assert.ok(loopReachable(synthetic, MODULE_LOAD).has("captureId"), "the module-load node holds the call");
+});
+
+test("W1-T12791 criterion 4: repairPrMetadata's merge-plan read awaits the async git leaf and no row rises", () => {
+  const fns = censusFunctions();
+  const reach = loopReachable(fns, "daemonCommand");
+  assert.ok(reach.has("repairPrMetadata"), "the daemon loop reaches repairPrMetadata");
+  for (const name of MERGE_PLAN_READERS) assert.ok(reach.has(name), `the daemon loop reaches ${name} through repairPrMetadata`);
+  assert.ok(SYNC_SPAWN_LOOP_BASELINE.repairPrMetadata! <= 2, "the repairPrMetadata row does not rise");
+  assert.ok((population(fns).get("repairPrMetadata") ?? 0) <= 2, "repairPrMetadata itself makes no new synchronous call");
+  assert.deepEqual(mergePlanReadRefusals(fns), [], "the merge-plan read is awaited");
+  assert.deepEqual(refusals(fns, SYNC_SPAWN_LOOP_BASELINE).filter((r) => /repairPrMetadata|ForRepair|repairCheckoutTopLevel/.test(r)), []);
+
+  // Falsifier on the real source: the merge read moved to the synchronous leaf is named under repairPrMetadata.
+  const synchronous = fns.map((f) =>
+    f.name === "mergeCommitForRepair" ? { ...f, body: f.body.replace(/await hostWorktreeGitAsync\(/g, "hostWorktreeGit(") } : f,
+  );
+  const named = mergePlanReadRefusals(synchronous);
+  assert.equal(named.length, 1);
+  assert.match(named[0]!, /^repairPrMetadata's plan reader mergeCommitForRepair makes 4 synchronous git call\(s\)/);
 });

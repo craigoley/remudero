@@ -1,0 +1,101 @@
+- id: W1-T12126
+  title: Serve reads each other instance's managed repositories from their qualified host source
+  repo: remudero
+  depends_on: []
+  priority: 0.8
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 5
+  risk: high # a read-only repository bind affects every instance served by the shared gateway
+  band_meaning: span
+  origin: operator approval 2026-11-10 of exactly two source paths and an additional combined USD 10.10
+  plan_refs: [W1-T4228, W1-T9617, W1-T9519, W1-T11431]
+  files:
+    - deploy/serve-container.sh
+    - test/one-gateway-serves-every-instance.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: With another instance's managed repositories on scratch, the real launcher plans a qualified read-only repository bind and its actual plan is reachable rather than the stale or absent durable-root copy
+      proof: "grep: W1-T12126 criterion 1 in test/one-gateway-serves-every-instance.test.ts"
+    - claim: Unreadable, malformed, ambiguous or changed repository placement is explicit unavailable or refusal before replacement and never becomes an invented healthy source or a stale durable fallback
+      proof: "grep: W1-T12126 criterion 2 in test/one-gateway-serves-every-instance.test.ts"
+    - claim: Scratch-off and ordinary legacy launches preserve existing instance selection, read-only roots, writable state directories and absent or retired instance behavior without new runtime policy
+      proof: "grep: W1-T12126 criterion 3 in test/one-gateway-serves-every-instance.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10 during the operator-approved four-view auto pilot:
+    104 exact read_model.now_view_failed rows for Site report ENOENT at
+    /home/node/rmd-instances/site/repos/remudero-site/plan/tasks.yaml.
+    Docker Mounts shows Serve binds /home/craigoleyagent/rmd-site-state at
+    /home/node/rmd-instances/site read-only, plus its writable state subdirectory.
+    That host root's repos/remudero-site/plan/tasks.yaml is absent. The running
+    Site daemon additionally binds /mnt/scratch/rmd/rmd-site-state/repos at
+    /home/node/Remudero/repos, and the actual plan exists there.
+    serve-container.sh's foreign-instance loop mounts only the durable root and
+    state directory, so it never exposes that separate managed-repositories source.
+
+    Source read-only census at main24a645b8 and all eleven captured open PR heads
+    found identical launcher and existing gateway-test blobs. None of their
+    subject candidates adds this repository bind. Existing W1-T9519 records a
+    generic Now failure recurrence and permits only its scout test; it does not
+    name or repair this mount cause. W1-T9617 moves hot code checkouts, not other
+    instances' managed repository exposure in Serve. Existing selected-registry
+    and credential tasks remain separate. Recheck overlap and ownership before build.
+
+    Now catches each instance independently. Console's Now body updated during
+    the pilot while Core's remained old, so fixing Site is not claimed to explain
+    or resolve Core's separate stale body. The failed pilot was rolled back to off.
+  design: |
+    Limit implementation to the two approved files. Extend the real shared-gateway
+    launcher to resolve each other registered instance's effective managed-repos
+    host source through the existing registry and scratch/mount qualification paths.
+    When a running daemon's bind supplies the authoritative source, inspect only
+    the relevant Mounts data; do not read container environment values or infer a
+    host path from a code checkout or a guessed container name. Preserve cold and
+    absent-instance handling with explicit availability, rather than stale guesses.
+
+    Expose only the qualified repos directory read-only at that instance's existing
+    namespaced repos destination. Keep its durable root read-only and state directory
+    writable. Retain ordinary scratch-off behavior where the parent bind already
+    exposes the qualified durable repos path. Do not bind another instance's whole
+    scratch root, worktrees, worker homes, credentials or caches. Do not copy or
+    mutate repository contents to make an absent source appear healthy.
+    Unknown, contradictory, malformed or revised placement must be visible as
+    unavailable or refuse before replacement; it must not silently choose a stale
+    durable path. Reuse the launcher's existing read and replacement admission
+    contracts; add no new global environment transport, policy or timeout value.
+
+    Append contained fixtures only to the existing gateway test. Exercise the
+    actual launcher's dry-run/Docker command boundary with private state and
+    Docker fixtures, including scratch repositories and a misleading durable
+    copy, ordinary scratch-off operation, unavailable or ambiguous inspection,
+    source changes before launch and retained state permissions/instance selection.
+    Preserve every byte of all pre-existing test inputs, expectations, assertions,
+    titles, timeouts and skips. No real Docker replacement or host path mutation.
+  falsifier: |
+    On the same appended test bytes, restore the old launcher or remove only the
+    qualified other-instance repos bind. The scratch plan/readability regression
+    must fail. Remove source qualification or identity revalidation and the
+    corresponding unknown/changed-source controls must fail. Restore the repair
+    and require the unchanged existing suite plus all new cases to pass.
+  note: |
+    Reserved from the Azure operator checkout on
+    codex/plan-foreign-repos-1794333890802. The reservation walk reported W1-T12126
+    as actually HELD after advancing from contested W1-T12125; do not reuse the loser.
+    Authority is exactly deploy/serve-container.sh and appended tests in
+    test/one-gateway-serves-every-instance.test.ts, with an additional combined
+    USD 10.10: one build up to USD 5, one normal review up to USD 5 and a possible
+    USD 0.10 shadow call. Together with W1-T12023 and W1-T12031 the three caps total
+    USD 30.30. Manual filing/implementation does not reset a spent phase or budget.
+    Build only after normal plan merge and fresh ownership, merge-credit, history,
+    subject and runnableCandidates checks. Keep normal author, hosted, source
+    review and artifact adoption gates. Record Decisions and luna/REPORTS.md.
+    No coordinator status, arming, approval, merge or manual review; no live bind,
+    manual restart/recycle, registry/provider/credential/egress change or flag
+    reactivation. Engine-pruning STOP and other owners remain. The consumed
+    four-view pilot and old observer recovery cannot be repeated or retargeted.
+    If the bounded two-file design cannot be supported, stop for a concrete scope
+    decision before expanding it. Core stale Now and signed-in acceptance remain
+    separate questions; do not claim them fixed by this task.

@@ -13,7 +13,7 @@
   files:
     - src/lib/preopen-gate.ts
     - test/a-gate-sandbox-failure-keeps-its-errno.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

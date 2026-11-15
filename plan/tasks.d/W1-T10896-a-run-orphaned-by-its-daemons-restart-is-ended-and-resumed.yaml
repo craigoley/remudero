@@ -17,7 +17,7 @@
     - src/lib/daemon.ts
     - test/dispatch/a-run-orphaned-by-its-daemons-restart-is-ended-and-resumed.test.ts
     - "src/cli/commands/run-task-verb.ts"
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-10-28 ~03:20Z, read-only, on the core host ledger (60 newest archives plus the live file;

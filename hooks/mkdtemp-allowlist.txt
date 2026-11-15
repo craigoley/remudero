@@ -260,12 +260,6 @@ test/drain.test.ts	idle-cap- # pre-existing at W1-T2786 re-key — W1-T2775 tran
 test/drain.test.ts	idle-reasons- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/drain.test.ts	w1t916-plan- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/drain.test.ts	w1t916-supplier- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/empty-diff-merge-gate.test.ts	t963-ghshim- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/empty-diff-merge-gate.test.ts	t963-home- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/empty-diff-merge-gate.test.ts	t963-origin- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/empty-diff-merge-gate.test.ts	t963-root- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/empty-diff-merge-gate.test.ts	t963-seed- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/empty-diff-merge-gate.test.ts	t963-sibling- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/entrypoint-boot.test.ts	entrypoint-cwd- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/entrypoint-boot.test.ts	entrypoint-home- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/entrypoint-boot.test.ts	entrypoint-mutant- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending

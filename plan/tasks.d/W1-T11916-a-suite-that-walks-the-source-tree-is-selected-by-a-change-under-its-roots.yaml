@@ -1,0 +1,39 @@
+- id: W1-T11916
+  title: A suite that walks the source tree at run time is selected by a change anywhere under the roots it walks, so the narrow selection stops missing the census walkers
+  repo: remudero
+  depends_on: []
+  priority: 1.4
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19: one concern, which suites a changed source file reaches through a run-time tree read; the symbol arm, the import arm and the recent-failure rescue are unchanged
+  origin: operator-session#gate-efficiency-1109
+  plan_refs:
+    - W1-T4406
+    - W1-T4462
+  files:
+    - src/lib/affected-suites.ts
+    - test/the-narrow-selection-reaches-a-suite-that-walks-the-source-tree-at-run-time.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A suite that imports a source-walking helper, or reads a directory of src at run time, is selected by the narrow arm when any file under the walked root changes, even when it imports none of the changed symbols
+      proof: "unit test: test/the-narrow-selection-reaches-a-suite-that-walks-the-source-tree-at-run-time.test.ts"
+    - claim: A suite that imports and reads nothing under a changed root is not added by this rule
+      proof: "grep: W1-T11916 criterion 2 in test/the-narrow-selection-reaches-a-suite-that-walks-the-source-tree-at-run-time.test.ts"
+    - claim: The narrow selection for a diff that touches no walked root is identical with the change and without it
+      proof: "grep: W1-T11916 criterion 3 in test/the-narrow-selection-reaches-a-suite-that-walks-the-source-tree-at-run-time.test.ts"
+  rationale: |
+    OBSERVED 2026-11-09 (selector shadow store, 2,745 complete CI runs): the narrow arm saves a median 87% of suites but misses 41 of 843 failures (4.9%) and the verdict is "misses", which holds back W1-T4406. The misses concentrate: 28 distinct files, and two of them account for 28 of all 75 missed failures across the arms (test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts 17, test/a-ci-friction-cause-owned-by-a-test-alone-escalates-as-no-owner.test.ts 11). The first walks the daemon's call graph by reading source files at run time, so its dependence on a changed file is invisible to the import graph and to the symbol arm.
+    - The store holds 114 one-off causes, one filed task per missed edge. Each repairs one edge and the next walker misses again. A structural rule closes the class.
+    - A module-level import graph cannot be the lever: measured on this tree, 679 of 730 source modules reach more than half of the 4,474 suites (run-task.ts alone imports 679 of them), and ignoring type-only imports changes that by 2%. The narrow arm's symbol reach is where the selectivity is.
+  design: |
+    - Detect a walker by what it does, in the same way namedPaths already reads a suite's text: it imports a helper that reads source files (helpers/daemon-loop-walk and its peers), or names a directory under src and reads it. Record the roots it walks.
+    - A changed file under a walked root selects the walker in the narrow arm.
+    - NOT IN SCOPE: the floor arm, the impact arm, the recent-failure rescue, and the hosted CI selection (W1-T4406 itself).
+  falsifier: |
+    Select no walker: criterion 1 must fail. Select every suite that reads any file: criterion 2 must fail. Change the narrow selection for a diff touching no walked root: criterion 3 must fail. Restore and require all three.
+  note: |
+    reservation hand-off: run-unfiled-1794254218113
+    Success is the shadow store's narrow miss rate falling, measured by re-reading selector-shadow-gardener.json after enough runs; do not narrow hosted CI on the strength of this change alone.

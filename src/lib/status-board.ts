@@ -1,30 +1,21 @@
 /**
- * lib/status-board.ts — `rmd status` (W1-T279, W1-T280; MASTER-PLAN §7/§5D).
- *
- * ONE READ MODEL, TWO RENDERERS. Text, `--json` and the console's Now tab project the same
- * {@link StatusBoardModel} from {@link buildStatusBoard}. FALSIFIER: test/status-board.test.ts.
- *
- * OFFLINE-SAFE LOCAL HALF. Liveness, latches and last cycle use local files, ledger or injected
- * process queries; `origin/main` uses local `git rev-parse`, never fetch.
- *
- * GITHUB IS DECORATION, NEVER A GATE ({@link StatusBoardDeps.github}). One batched gateway supplies
- * live merge state. Failure gives affected rows an `unknownReason`, never a throw, silent empty
- * section or healthy-looking zero; unresolvable facts render `"unknown"`.
- *
- * RENDERS, NEVER SENSES. Assemble facts from fleet-control.ts, deployer.ts, inflight-lock.ts,
- * daemon.ts, status.ts, sweep.ts and config.ts; invent no sensors or signal vocabulary.
- *
- * NEXT ACTION TABLES ARE POLICY AS DATA (rule 2): FIRST matching `{applies, action}` row wins.
- * No match, no advice; unconditional advice trains the operator to skip it.
+ * `rmd status` read model (W1-T279/W1-T280; MASTER-PLAN §7/§5D).
+ * Text, JSON and the console's Now tab share {@link StatusBoardModel} from {@link buildStatusBoard}.
+ * FALSIFIER: test/status-board.test.ts. Incident record: docs/forensics/status-board.md.
+ * Local facts use files, ledger and injected process queries; `origin/main` is resolved without fetching.
+ * GitHub decorates through one batch: failures set `unknownReason`, never throw or imply healthy zeros.
+ * Render existing fleet-control/deployer/inflight-lock/daemon/status/sweep/config facts; invent no sensors.
+ * Next-action policy tables use the first matching `{applies, action}` row; no match means no advice.
  */
-// Why: the incidents and measured counts behind these rules — docs/forensics/status-board.md
 
 import { execFileSync } from "node:child_process";
 import { isQueueDispatchRunStart } from "./ledger.js";
 // Keep DEFAULT fs and call-time lookups: non-configurable ESM named bindings defeat spies.
 // Why: the TOCTOU-race test — docs/forensics/status-board.md
 import fs from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { readBoardCatalogs, publicOpsTaskFields, type BoardCatalogContext } from "./serve-plan-reload.js";
+import type { OpsCatalogApi } from "./ops-catalog-source.js";
 import { hostname } from "node:os";
 import {
   detectDaemonCrashLoop,
@@ -68,7 +59,7 @@ import {
   stopFilePath,
   type SharedPauseRead,
 } from "./fleet-control.js";
-import { readInflightLock } from "./inflight-lock.js";
+import { hostLockSilence, isHostWrittenLock, readInflightLock } from "./inflight-lock.js";
 import { classifyGlobalArtifactRefusal } from "./learnings.js";
 import { DEFAULT_SUPERVISOR_INTERVAL_S } from "./launchd.js";
 import {
@@ -108,8 +99,6 @@ import {
 } from "./status.js";
 import { taskCardRuns } from "./task-card.js";
 import { colourEnabled, paint, sectionRule } from "./tty.js";
-
-// ── The model ────────────────────────────────────────────────────────────────────────────────
 
 export type ServiceName = "daemon" | "serve" | "deploy-supervisor";
 
@@ -268,7 +257,16 @@ export interface RetiredBlocker {
   reason: string;
 }
 
-export type BlockerRow = CircuitBrokenBlocker | IndeterminateBlocker | BlockedPrBlocker | RetiredBlocker;
+/** W1-T12316: a lock a host process wrote, whose run is silent past the measured bound. Only host-side code can free it. */
+export interface HostLockSilentBlocker {
+  kind: "host_lock_silent";
+  taskId: string;
+  runId: string;
+  silentMs: number;
+  boundMs: number;
+}
+
+export type BlockerRow = CircuitBrokenBlocker | IndeterminateBlocker | BlockedPrBlocker | RetiredBlocker | HostLockSilentBlocker;
 
 /** `circuit_broken` and `indeterminate` are PURE ledger reads, always present in full. `blocked_pr` (W1-T306) is a
  *  claim about NOW, re-derived against live merge state every render, never replayed from `sweep.disposed`. Why:
@@ -552,6 +550,8 @@ export interface NeedsMeSection {
 }
 
 export interface StatusBoardModel {
+  opsCatalog?: { outcome: "unreadable"; reason: string; observedAt: string }
+    | { outcome: "ok"; observedAt: string; rows: Array<ReturnType<typeof publicOpsTaskFields> & { status: Task["status"]; indeterminate?: true }> };
   generatedAt: string;
   repositoryMaintenance?: RepositoryMaintenanceStatus[];
   liveness: LivenessSection;
@@ -608,6 +608,8 @@ export function repositoryMaintenanceStatus(lines: readonly Record<string, unkno
 // ── Deps ─────────────────────────────────────────────────────────────────────────────────────
 
 export interface StatusBoardDeps {
+  opsCatalogApi?: OpsCatalogApi;
+  opsBoardCatalog?: BoardCatalogContext;
   /** Per-service running/pid, plus the last run's exit code for `"deploy-supervisor"`. `launchctl` lives at the CLI
    *  layer (Rule 16), so this is required with no default in lib/. `lastExitCode` is `undefined` when unknown, never a
    *  fabricated `0`; `sensed` (W1-T2450) is `false` iff `launchctl` could not be invoked at all. */
@@ -958,18 +960,9 @@ export function deployFailedConsequence(json: Record<string, unknown> | null): s
 }
 
 /** Ordered by operational urgency — also the order rows render in (most-actionable first). */
-// ── W1-T3236: CADENCE-MARKER LIVENESS ────────────────────────────────────────────────────────
-//
-// `state/last-retro.json` sat frozen from 2026-09-03 to 2026-09-09 while the fleet completed 28-40
-// runs a day and merged normally. A day-by-day replay over that fortnight recovered 426 follow-up
-// candidates the rung should have published. Nothing said so; an operator asked why the board had
-// gone quiet.
-//
-// THE LATCH TABLE BELOW IS NOT THIS, and mistaking it for this is the trap. It reads marker JSON
-// and computes `markerAgeMs`, so skimming for "does anything watch a marker's age" finds a yes —
-// but it watches OPERATOR LEVERS (STOP, PAUSE, DEPLOY_AUTO), where age is context for a decision
-// already taken. No cadence marker is in it, and its `if (!existsSync) continue` is right for a
-// latch and exactly wrong here, where ABSENT means the rung has NEVER FIRED.
+// W1-T3236: cadence markers detect silent periodic rungs even while the fleet runs normally.
+// The latch table watches operator levers, not cadence. Skipping an absent latch is correct;
+// skipping an absent cadence marker would hide a rung that never fired.
 
 /** One periodic rung's marker, and the policy interval its own cadence is paced by. */
 export interface CadenceMarkerDef {
@@ -988,13 +981,8 @@ export interface CadenceMarkerDef {
   writer?: ServiceName;
 }
 
-/** How many of a rung's OWN intervals may elapse before its marker reads stale.
- *
- *  PRIMARY CONTROL for this table — nothing else bounds it. Denominated in the rung's own cadence
- *  rather than in wall-clock, because ONE global age would fire on the healthy slow rung and stay
- *  silent on the dead fast one: this repo's bound-fires-on-a-healthy-condition defect wearing the
- *  opposite face. Three is deliberate slack — a rung that missed one fire is not news; one that has
- *  missed three has stopped. */
+/** Primary stale bound: three of the rung's own intervals allow a missed fire.
+ * A global age would flag healthy slow rungs and miss dead fast ones. */
 export const CADENCE_STALE_INTERVALS = 3;
 
 /** Fallback pacing for a rung whose interval `plan/policy.yaml` does not declare. A DAY, which is
@@ -1014,10 +1002,8 @@ export const CADENCE_MARKERS: readonly CadenceMarkerDef[] = [
   { name: "wipe-test-cadence", file: "last-wipe-test-cadence.json", policyKey: "wipeTestCadence" },
   { name: "ci-learning-cadence", file: "last-ci-learning-cadence.json", policyKey: "ciLearningCadence" },
   { name: "auto-triage", file: "last-auto-triage.json", policyKey: "autoTriage" },
-  // SEVEN DAYS, because `feedbackDocketDue` (lib/feedback-docket.ts) gates on `SEVEN_DAYS_MS` and
-  // the rung's own doc calls it "the weekly feedback docket's rung ... cron Mondays, 7-day
-  // lookback". Judged against the 1440-minute fallback it read stale for 96 of every 168 hours
-  // while behaving exactly as designed — measured on the live board 2026-09-18.
+  // Match feedbackDocketDue's SEVEN_DAYS_MS: the daily fallback falsely marked this weekly rung stale.
+  // Live-board observation: 2026-09-18 (96 of 168 healthy hours flagged).
   { name: "feedback-docket", file: "last-feedback-docket.json", intervalMinutes: SEVEN_DAYS_MINUTES },
   { name: "last-seen", file: "last-seen.json", writer: "serve" },
 ];
@@ -1047,32 +1033,14 @@ export interface CadenceSection {
   rows: CadenceMarkerRow[];
 }
 
-/**
- * Judge every cadence marker against its own rung's interval.
- *
- * PURE over injected reads: `readMarkerAgeMs` returns `undefined` for an absent or unparseable
- * marker, which is always the `never` state — a marker that has never been written says nothing
- * about the writer's CURRENT liveness, so a stopped writer does not override it. `intervalMinutesFor`
- * returns the rung's declared `minIntervalMinutes`, or `undefined` to take {@link
- * CADENCE_DEFAULT_INTERVAL_MINUTES}. Only a marker that HAS aged past its budget is re-checked
- * against its named writer: a positively-stopped writer turns that verdict from `stale` into
- * `writer-stopped`, because a deliberately-down service is not a failing cadence. unsensed is not stopped
- * — only a positive observation suppresses the verdict. A row that names no writer, or whose writer
- * is not observed stopped, retains the original three-state judgment.
- */
-/**
- * The registry rows the fallback would MISJUDGE — every def that declares no interval of its own
- * and whose real period the caller reports as longer than {@link CADENCE_DEFAULT_INTERVAL_MINUTES}.
- *
- * WHY THIS IS A FUNCTION AND NOT A COMMENT. The fallback's own doc promises it "can only ever
- * under-report", and that promise went quietly false the moment a weekly rung joined the table
- * without declaring its period: three intervals of grace is 72h against a real 168h cadence, so
- * the row read stale 57% of the time with nothing wrong. A claim a reader must re-verify by hand
- * is the class of guard this repo has already paid for; this one is checkable.
- *
- * In one line: a rung slower than a day may not rely on the fallback, and this says which ones
- * are relying on it anyway.
- */
+/** Judge markers purely from injected ages, intervals and writer observations.
+ * Missing/unparseable ages always mean `never`, regardless of current writer liveness.
+ * Undeclared intervals use {@link CADENCE_DEFAULT_INTERVAL_MINUTES}. Only stale markers may
+ * become `writer-stopped`, requiring a positive stopped observation; unsensed is not stopped.
+ * Unnamed or unobserved writers retain the original three-state judgment. */
+/** Find undeclared intervals whose real periods exceed {@link CADENCE_DEFAULT_INTERVAL_MINUTES}.
+ * The fallback's "can only ever under-report" promise fails for slower rungs: a weekly rung
+ * gets 72h grace for a 168h cadence. {@link cadenceDefsMisjudgedByFallback} exposes that mismatch. */
 export function cadenceDefsMisjudgedByFallback(
   defs: readonly CadenceMarkerDef[],
   realPeriodMinutesFor: (def: CadenceMarkerDef) => number | undefined,
@@ -1096,9 +1064,7 @@ export function cadenceMarkerRows(
     const intervalMinutes = def.intervalMinutes ?? intervalMinutesFor(def) ?? CADENCE_DEFAULT_INTERVAL_MINUTES;
     const ageMs = readMarkerAgeMs(def);
     if (ageMs === undefined) {
-      // A marker that has NEVER been written is its own fact, independent of the writer's current
-      // liveness — a writer that is down right now says nothing about whether the rung ever fired
-      // in the past, so "never" stands even when {@link writerStateFor} reports it stopped.
+      // `never` describes marker history, independent of the writer's current liveness.
       return {
         name: def.name,
         state: "never",
@@ -1110,12 +1076,8 @@ export function cadenceMarkerRows(
     if (ageMs <= budgetMs) {
       return { name: def.name, state: "fresh", ageMs, intervalMinutes, consequence: `advanced within ${CADENCE_STALE_INTERVALS} of its own intervals` };
     }
-    // The marker HAS aged past its own budget. Before reading that as a failing cadence, check
-    // whether its named writer is positively observed stopped — a deliberately-down service left a
-    // marker that will not advance no matter how long it waits, which is not the same defect as a
-    // running writer that stopped advancing. Unsensed (the sensor itself could not be asked) is
-    // deliberately NOT treated as stopped here: an unknown liveness must not suppress a real stale
-    // reading.
+    // Suppress a stale verdict only for a positively stopped writer, never an unsensed one.
+    // A deliberately stopped service cannot advance its marker; a running service should.
     if (def.writer && writerStateFor?.(def.writer) === "stopped") {
       return {
         name: def.name,
@@ -1351,13 +1313,9 @@ const LIVENESS_NEXT_ACTIONS: readonly NextActionRule<LivenessCtx>[] = [
     },
   },
   {
-    // W1-T3759: a daemon this panel CAN read liveness for (running, or unsensed — {@link
-    // canCompareHeadVsOrigin}) with NO `daemon.boot` `head_sha` on record must not fall through
-    // silently, and must not be told `rmd deploy` either — the deploy path skips for that SAME
-    // missing record ("daemon running head not recorded ... mount staleness cannot be ruled
-    // out", deployer.ts) so that advice is guaranteed not to work. Name the gap instead. Checked
-    // AFTER the stale rule (a real stale verdict still wins) and BEFORE the "no sensor"/"stopped"
-    // rules below, which cover a DIFFERENT absence (the service itself, not its head).
+    // W1-T3759: name missing daemon.boot head_sha; `rmd deploy` also skips without it.
+    // Apply after real staleness, before no-sensor/stopped rules. canCompareHeadVsOrigin admits
+    // running or unsensed daemons: missing head evidence differs from missing service evidence.
     applies: (ctx) => {
       const row = ctx.services.find((s) => s.service === "daemon");
       return (
@@ -1718,17 +1676,38 @@ export function deriveBlockedPrSections(
   return { blockedPrs, blockedPrsUnverifiedReason, mergeHeld: deriveMergeHeld(lines) };
 }
 
+function deriveHostLockSilentBlockers(inflightDir: string, lines: Array<Record<string, unknown>>, nowMs: number, myHost: string): HostLockSilentBlocker[] {
+  const out: HostLockSilentBlocker[] = [];
+  let entries: string[] = [];
+  try {
+    entries = fs.readdirSync(inflightDir);
+  } catch {
+    return out; // no state/inflight dir yet: no lock, no blocker
+  }
+  for (const entry of entries.filter((name) => name.endsWith(".lock")).sort()) {
+    const taskId = entry.slice(0, -".lock".length);
+    const lock = readInflightLock(inflightDir, taskId);
+    if (!lock || !isHostWrittenLock(lock, myHost)) continue;
+    const silence = hostLockSilence(lock, lines, nowMs);
+    if (silence.silent && silence.boundMs !== undefined) {
+      out.push({ kind: "host_lock_silent", taskId, runId: lock.run_id, silentMs: silence.silentMs, boundMs: silence.boundMs });
+    }
+  }
+  return out;
+}
+
 function deriveBlockers(
   plan: Plan | undefined,
   lines: Array<Record<string, unknown>>,
   projections: Map<string, StatusProjection> | undefined,
   { blockedPrs, blockedPrsUnverifiedReason }: BlockedPrSections,
   index: LedgerIndex,
+  hostLocks: HostLockSilentBlocker[],
 ): BlockersSection {
   const circuitBroken = deriveCircuitBrokenBlockers(lines, plan, projections, index);
   const indeterminate = deriveIndeterminateBlockers(lines, projections);
   const retired = deriveRetiredBlockers(plan);
-  const rows: BlockerRow[] = [...circuitBroken, ...indeterminate, ...blockedPrs, ...retired];
+  const rows: BlockerRow[] = [...circuitBroken, ...indeterminate, ...blockedPrs, ...retired, ...hostLocks];
   const section: BlockersSection = { rows, blockedPrsUnverifiedReason };
   section.nextAction = pickNextAction(BLOCKERS_NEXT_ACTIONS, section);
   return section;
@@ -1815,9 +1794,7 @@ export function deriveQueueHead(
     isIndeterminate,
     isCircuitTripped,
     hasPushedRunBranch,
-    // W1-T2415: THE CALLBACK THIS FUNCTION ALREADY HAD AND NEVER SUPPLIED. A tripped task was always removed from
-    // `rows`, but the one surface built to EXPLAIN a refusal could not name it. Observation only — the eligible set is
-    // byte-identical.
+    // W1-T2415: explain breaker refusals already excluded from rows; eligibility stays unchanged.
     onCircuitBreak: (task) => {
       const dispatchCount = dispatchesWithoutNewOwnedPr(lines, task.id, index);
       pushRefused({
@@ -2322,21 +2299,18 @@ const HEADROOM_NEXT_ACTIONS: readonly NextActionRule<HeadroomSection>[] = [
 
 // ── buildStatusBoard — the ONE read model ───────────────────────────────────────────────────────
 
-/**
- * W1-T11128: {@link buildStatusBoard} with INBOX's evidence anchors answered OFF the event loop. Every anchor the
- * registry carries is warmed through {@link gitGrepAnchorTrueAsync} first (a failed or timed-out grep is carried and
- * rethrown where the sync grep would have thrown), then the unchanged sync board reads those answers, so a caller
- * that must not block its loop (serve) forks no `git grep` synchronously. An injected `grepAnchorTrue` still wins;
- * `buildStatusBoard` itself keeps its synchronous contract for the CLI.
- */
+/** W1-T11128: warm every INBOX anchor via {@link gitGrepAnchorTrueAsync} before building the board.
+ * Serve avoids synchronous greps; failures/timeouts rethrow at the original sync read site.
+ * Injected grepAnchorTrue still wins; {@link buildStatusBoard} keeps the CLI's sync contract. */
 export async function buildStatusBoardAsync(root: string, ledgerPath: string, deps: StatusBoardDeps): Promise<StatusBoardModel> {
+  const catalog = await readBoardCatalogs(() => deps.plan ?? tryLoadDefaultPlan(deps.repoDir), dirname(ledgerPath), deps.opsCatalogApi);
+  if (catalog !== undefined) deps = { ...deps, ...(catalog.publicPlan === undefined ? {} : { plan: catalog.publicPlan }), opsBoardCatalog: catalog };
   if (deps.grepAnchorTrue) return buildStatusBoard(root, ledgerPath, deps);
   const readRegistry = deps.readProposalRegistry ?? (() => parseProposalRegistry(readTextFileIfExists(join(root, "state", "inbox-proposals.json"))));
   const ref = "origin/main";
   const cache = createAnchorGrepCache();
-  // ONE registry read serves the warm and the board: a registry that changed between two reads handed the board an
-  // anchor the warm never saw, and that anchor took the sync `git grep` (review of #16432). A throwing read warms
-  // nothing and is rethrown by the board's own INBOX read, exactly as the sync board reports it.
+  // #16432: share one registry snapshot so newly added anchors cannot escape warming into sync grep.
+  // Failed reads warm nothing and rethrow from the board's INBOX read.
   let snapshot: { proposals: ReturnType<typeof readRegistry> } | { error: unknown };
   try {
     snapshot = { proposals: readRegistry() };
@@ -2436,8 +2410,19 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
   const plan = deps.plan ?? tryLoadDefaultPlan(deps.repoDir);
   // W1-T6253: one index for the projection and both sections, and none at all while the rows' generation is unchanged.
   const ledgerIndex = buildLedgerIndex(lines);
-  const { projections, unknownReason: ghUnknownReason } = projectPlanOnce(plan, deps.github, ledgerPath, lines, now, ledgerIndex);
-  const isMerged: MergedSet = (id) => projections?.get(id)?.merged === true;
+  const catalog = deps.opsBoardCatalog;
+  const { projections: catalogProjections, unknownReason: ghUnknownReason } = projectPlanOnce(catalog?.plan ?? plan, deps.github, ledgerPath, lines, now, ledgerIndex);
+  // Legacy sections consume the public plan only. Private projections reach only the explicit field whitelist.
+  const projections = catalogProjections === undefined || catalog === undefined ? catalogProjections
+    : new Map([...catalogProjections].filter(([id]) => plan?.byId.has(id)));
+  const isMerged: MergedSet = (id) => catalogProjections?.get(id)?.merged === true;
+  const opsCatalog: StatusBoardModel["opsCatalog"] = catalog === undefined ? undefined
+    : catalog.outcome === "unreadable" ? { outcome: "unreadable", reason: catalog.reason, observedAt: catalog.observedAt }
+    : { outcome: "ok", observedAt: catalog.observedAt, rows: (catalog.plan?.tasks ?? []).filter(t => catalog.opsIds.has(t.id)).map(t => {
+      const projection = catalogProjections?.get(t.id);
+      return { ...publicOpsTaskFields(t), status: projection?.status ?? t.status,
+        ...(projection === undefined || projection.indeterminate ? { indeterminate: true as const } : {}) };
+    }) };
 
   // ── LATCHES ──
   const dispatchClaims = readDispatchClaims(deps.repoDir);
@@ -2480,7 +2465,8 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
   const queueHeadLimit = deps.queueHeadLimit ?? 5;
 
   const blockedPrSections = deriveBlockedPrSections(lines, deps.github, queueHeadLimit);
-  const blockers = deriveBlockers(plan, lines, projections, blockedPrSections, ledgerIndex);
+  const hostLocks = deriveHostLockSilentBlockers(join(root, "state", "inflight"), lines, nowMs, deps.localHost ?? hostname());
+  const blockers = deriveBlockers(plan, lines, projections, blockedPrSections, ledgerIndex, hostLocks);
   // W1-T1205: dispatcher-equivalent hasPushedRunBranch; ONE unbatched sweep per render.
   const readPushedRunBranches = deps.readPushedRunBranches ?? defaultReadPushedRunBranches;
   const pushedRunBranchIds = runBranchTaskIds(readPushedRunBranches(deps.repoDir));
@@ -2521,6 +2507,7 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
 
   return {
     generatedAt: new Date(nowMs).toISOString(),
+    ...(opsCatalog === undefined ? {} : { opsCatalog }),
     repositoryMaintenance: repositoryMaintenanceStatus(lines),
     liveness,
     latches: latchesSection,
@@ -2671,11 +2658,13 @@ function renderBlockersBlock(b: BlockersSection): string[] {
   const blockedPrs = b.rows.filter((r): r is BlockedPrBlocker => r.kind === "blocked_pr");
   const indeterminate = b.rows.filter((r): r is IndeterminateBlocker => r.kind === "indeterminate");
   const retired = b.rows.filter((r): r is RetiredBlocker => r.kind === "retired");
+  const hostLocks = b.rows.filter((r): r is HostLockSilentBlocker => r.kind === "host_lock_silent");
   if (
     circuitBroken.length === 0 &&
     blockedPrs.length === 0 &&
     indeterminate.length === 0 &&
     retired.length === 0 &&
+    hostLocks.length === 0 &&
     !b.blockedPrsUnverifiedReason
   ) {
     out.push("no blockers");
@@ -2684,6 +2673,10 @@ function renderBlockersBlock(b: BlockersSection): string[] {
   for (const r of blockedPrs) out.push(`blocked PR     : #${r.prNumber}${r.taskId ? ` (${r.taskId})` : ""} [${r.disposition}] — ${r.reason}`);
   for (const r of indeterminate) out.push(`indeterminate  : ${r.taskId} — ${r.ghWindowNote}`);
   for (const r of retired) out.push(`retired        : ${r.taskId} — ${r.reason}`);
+  for (const r of hostLocks) {
+    out.push(`host_lock_silent: ${r.taskId} run ${r.runId} — silent ${formatAgeMs(r.silentMs)}, past the bound ${formatAgeMs(r.boundMs)}; ` +
+      "a host process wrote this lock, so only the host janitor or a person on the host can free it");
+  }
   if (b.blockedPrsUnverifiedReason) out.push(`blocked PR     : unverified — ${b.blockedPrsUnverifiedReason}`);
   if (b.nextAction) out.push(`next action: ${b.nextAction}`);
   return out;
@@ -3042,6 +3035,10 @@ export function renderStatusBoardText(model: StatusBoardModel, opts: { colourEna
   // Each block renders into its own array so the presence projection can read what the reader actually sees. The join
   // below reproduces the previous concatenation line for line.
   const blocks: { label: string; section: unknown; rendered: string[] }[] = [
+    ...(model.opsCatalog === undefined ? [] : [{ label: "ops catalog", section: model.opsCatalog,
+      rendered: model.opsCatalog.outcome === "unreadable" ? [`ops catalog: unreadable (${model.opsCatalog.reason})`]
+        : [`ops catalog: ${model.opsCatalog.rows.length} task(s), observed ${model.opsCatalog.observedAt}`,
+          ...model.opsCatalog.rows.map(row => `${row.taskId} [ops] ${row.status}${row.indeterminate ? " (unverified)" : ""}: ${row.title} — ${JSON.stringify(row.acceptance)}`)] }]),
     ...(model.repositoryMaintenance?.length ? [{ label: "repository maintenance", section: model.repositoryMaintenance,
       rendered: ["### repository maintenance", ...model.repositoryMaintenance.map((row) =>
         `${row.repo}: ${row.outcome} — ${row.reason}; gc log ${row.gcLogVerdict}; ` +

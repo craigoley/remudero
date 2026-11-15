@@ -14,7 +14,7 @@
     - scripts/preflight-author.mjs
     - test/ci/an-author-preflight-runs-the-workers-its-measured-slot-grants.test.ts
     - test/a-full-fallback-author-selection-is-never-run-whole.test.ts
-  status: queued
+  status: merged
   priority: 2  # every author preflight runs its affected suites one file at a time on a host that measured room for up to four
   attempts: 0
   rationale: |
@@ -67,6 +67,19 @@
     They inject load, memory headroom and a temp slot dir, and read `--test-concurrency=` from the captured
     affected-tests argv and `receipt.executionWorkers`.
     Scope amendment (operator approved 2026-11-07): include the existing full-fallback author selection suite. Measured slot concurrency can vary the number of suites left for hosted CI; its assertion will check that the partial count, remaining count, and CI-only verdict agree with the measured selection instead of requiring exactly three suites to remain.
+  amendment: |
+    2026-11-10, operator-authorized (run PLAN-clarify-1794281152733): the intended end state is no fixed author worker
+    ceiling at all. AUTHOR_MAX_WORKERS=4 goes too, not only AUTHOR_SLOT_CEILING=1. Author test concurrency comes entirely
+    from the shared test slot grant (measured CPU and memory headroom, FIFO owner leases), and that includes any calibration
+    path still clamped to 4. The disk reserve, Mac capacity refusal, private coordination, active-owner protection, run
+    deadlines, exact-head preflight and hosted merge gates stay as they are.
+    This task's implementation is already MERGED (PR #17263, plan amendment #17276). Its three criterion tests live in
+    test/ci/an-author-preflight-runs-the-workers-its-measured-slot-grants.test.ts. Under standing rule 21 (MASTER-PLAN.md),
+    a merged task is terminal and the drain skips it, so this amendment is for the record only. Its criteria and fields
+    are unchanged, and the executable scope lives in the existing follow-up W1-T11891. That follow-up already owned the
+    AUTHOR_MAX_WORKERS removal and is now widened to the calibration clamps (scripts/calibrate-author-runtime.mjs, the
+    readRuntimeProfile `> 4` bound) and to absence tests and docs. No new overlapping task was filed. The pre-amendment
+    criterion "never above AUTHOR_MAX_WORKERS" describes the merged state and is superseded by W1-T11891 once it lands.
   acceptance:
     - claim: "on an injected idle 8-core host with ample memory headroom, the affected-tests child is spawned with --test-concurrency greater than 1 and never above AUTHOR_MAX_WORKERS, and receipt.executionWorkers matches it"
       proof: "unit test: W1-T11583 criterion 1: an idle eight-core host uses more than one author test worker"

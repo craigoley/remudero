@@ -117,6 +117,7 @@ export interface MachineShardSpec {
   origin: string;
   files: readonly string[];
   acceptance: readonly { claim: string; proof: string }[];
+  design?: string;
   note?: string;
   /** The finding's measured cost (PR-minutes or occurrences), which sets its dispatch priority. */
   cost?: number;
@@ -144,6 +145,7 @@ export function renderMachineShard(spec: MachineShardSpec): { text: string; refu
     `  origin: ${q(spec.origin)}`,
     "  files:",
     ...spec.files.map((f) => `    - ${f}`),
+    ...(spec.design === undefined ? [] : [`  design: ${q(spec.design)}`]),
     "  acceptance:",
     ...spec.acceptance.flatMap((c) => [`    - claim: ${q(c.claim)}`, `      proof: ${q(c.proof)}`]),
     ...(spec.note === undefined ? [] : [`  note: ${q(spec.note)}`]),

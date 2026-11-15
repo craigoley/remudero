@@ -7,7 +7,7 @@
   risk: low
   priority: 1
   budget_usd: 8
-  status: queued
+  status: merged
   attempts: 0
   depends_on:
     - W1-T10829

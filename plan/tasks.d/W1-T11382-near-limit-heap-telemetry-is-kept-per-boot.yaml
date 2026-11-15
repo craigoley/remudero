@@ -22,7 +22,7 @@
     - src/lib/daemon-heap-near-limit.ts
     - src/lib/daemon.ts
     - test/memory/near-limit-heap-telemetry-is-kept-per-boot.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Each daemon tick boundary, in-flight ticker beat and worker-admission seam read records one sample naming its timestamp, boot_key (pid plus boot start, so a reused PID is a different boot), surface, V8 used and limit, RSS, swap, cgroup budget, memory PSI, active, admitted and in-flight work counts, and elapsed_ms since the same boot's previous sample; an unreadable input is absent, never zero, and a boot's first sample has no elapsed_ms"

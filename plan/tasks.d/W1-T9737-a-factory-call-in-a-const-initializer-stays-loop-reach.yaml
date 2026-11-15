@@ -13,7 +13,7 @@
   files:
     - test/helpers/daemon-loop-walk.ts
     - test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts
-  status: queued
+  status: merged
   priority: 2.5  # a guard: no row escapes today, but the next factory-built seam would escape silently
   attempts: 0
   rationale: |

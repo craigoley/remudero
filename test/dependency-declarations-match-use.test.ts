@@ -264,12 +264,12 @@ test(
   () => {
     const inventory = prePushRuntimePackages();
     assert.ok(
-      inventory.files.has(join(REPO_ROOT, "scripts", "census-precheck.mjs")),
-      "positive control: pre-push reaches census-precheck.mjs",
+      inventory.files.has(join(REPO_ROOT, "scripts", "ci-control-plane-precheck.mjs")),
+      "positive control: pre-push reaches ci-control-plane-precheck.mjs",
     );
     assert.ok(
-      inventory.packages.has("acorn"),
-      "positive control: census-precheck.mjs contributes its bare acorn import",
+      inventory.sources.get("yaml")?.has("scripts/generate-capability-snapshot.mjs"),
+      "positive control: the capability snapshot check contributes its bare yaml import",
     );
     const dependencies = new Set(Object.keys(readPackageJson().dependencies ?? {}));
     const missing = [...inventory.packages].filter((name) => !dependencies.has(name)).sort();

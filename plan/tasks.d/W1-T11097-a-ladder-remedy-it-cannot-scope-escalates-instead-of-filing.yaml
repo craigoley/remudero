@@ -17,7 +17,7 @@
     - src/lib/flow-remedy-gardener.ts
     - src/lib/fix-lane-gardener.ts
     - test/gardeners/a-ladder-remedy-it-cannot-scope-escalates-instead-of-filing.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: Before a ladder writes a drafted remedy, remedyScopeRefusal returns a reason when the owner file is not a source module, is one of the ladder's own measuring modules, or is the owner file of a prior remedy whose effect did not fall; that action takes the ladder's existing escalation path and writes no shard, while an admissible owner still files exactly as before

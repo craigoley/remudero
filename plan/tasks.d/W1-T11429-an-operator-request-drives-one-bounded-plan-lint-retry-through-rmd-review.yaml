@@ -14,7 +14,7 @@
     - src/cli/commands/review.ts
     - test/an-explicit-plan-lint-retry-request-drives-one-bounded-review.test.ts
   priority: 3
-  status: queued
+  status: merged
   # backlog gardener: band=3 evidence=4a39afd506921179
   # backlog gardener: placed=2026-11-05T23:00:35.430Z
   attempts: 0

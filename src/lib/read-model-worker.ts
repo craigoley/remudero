@@ -29,6 +29,8 @@ import { LEDGER_FILENAME } from "./ledger-path.js";
 import { FUTURE_ROW_TOLERANCE_MS, LEDGER_PROJECTOR_SCHEMA_VERSION, createLedgerProjector, openProjectorReadModel, type LedgerProjector, type ProjectorTickResult } from "./ledger-projector.js";
 import { createNavBadgeReadModelView, NAV_BADGE_VIEW_NAME } from "./nav-badge-view.js";
 import { createNowView, NOW_VIEW_NAME } from "./now-view.js";
+import { BOARD_CATALOG_WIRE_VERSION, createBoardCatalogParentBridge, createWorkerBoardCatalogClient,
+  isBoardCatalogReply, isBoardCatalogRequest, type BoardCatalogClient, type BoardCatalogReply, type BoardCatalogRequest } from "./serve-plan-reload.js";
 import { createOperatorAgentRowsView, OPERATOR_AGENT_ROWS_VIEW } from "./operator-agent-read-model.js";
 import { createTaskView, type ReadModelInstanceState as TaskViewInstanceState } from "./task-view.js";
 import { planFilesIdentity, threadPlanPin } from "./thread-plan.js";
@@ -113,6 +115,8 @@ export const READ_MODEL_ORACLE_CHILD_STEP = "read_model.oracle_child_exited";
  * 0.6-1.4 s/instance per generation and nav-badge ~130 ms idle: unbudgeted ticks took 2-4 s.
  */
 export const READ_MODEL_VIEW_SHARE = 0.4;
+/** BACKSTOP: sample the first would-be skip and every twentieth thereafter to detect missing inputs. */
+export const READ_MODEL_SKIP_AUDIT_EVERY = 20;
 /**
  * {@link ReadModelView.readPaced}: after this unread window, each finished build doubles the wait;
  * a read restores cost / share cadence (stale units run next tick). MEASURED 2026-10-06 20:25Z to
@@ -125,8 +129,20 @@ export const READ_MODEL_READ_HOT_MS = 2 * 60_000;
  * `now@core` (~4.8 s cost, ~12 s interval) then runs every ~6.4 min at ~1/32 of its read cost.
  */
 export const READ_MODEL_IDLE_STRETCH_MAX = 32;
+/**
+ * BACKSTOP (W1-T11933): an {@link ReadModelView.idleFloor} unit unread for {@link READ_MODEL_READ_HOT_MS}
+ * waits at least this long between builds; a read restores cost / share cadence on the next tick.
+ * OBSERVED 2026-11-10, no console open: instances, nav-badge and analytics rebuilt ~3.4 times a second.
+ */
+export const READ_MODEL_IDLE_FLOOR_MS = 45_000;
 /** Main posts one read of a path to the worker at most this often: well inside {@link READ_MODEL_READ_HOT_MS}. */
 export const READ_MODEL_READ_NOTE_MS = 5_000;
+/**
+ * BACKSTOP (W1-T11937): the heavy view lane ends between builds after this long with no read or want,
+ * returning its heap (0.86 GB, serve research 2026-11-10); the next one restarts it. An open console
+ * reads every minute, so only a closed one reaches it. Costs the first paint 0.3-5 s after idle.
+ */
+export const READ_MODEL_HEAVY_IDLE_MS = 10 * 60_000;
 /** `GET /v1/views/versions` (view-events.ts's VIEW_VERSIONS_PATH): a console polling every view's version reads them all. */
 const READ_MODEL_EVERY_VIEW_PATHS: ReadonlySet<string> = new Set(["/v1/views/versions"]);
 /** A legacy read that serves a view's body inside its own answer: `/v1/status` carries `needs-you`'s human gates. */
@@ -176,6 +192,16 @@ export const VIEW_AUTO_PROMOTED_STEP = "view.auto_promoted";
 export const VIEW_AUTO_DEMOTED_STEP = "view.auto_demoted";
 
 export const DEFAULT_READ_MODEL_SWITCHES: ReadModelSwitches = { projector: "on", views: {} };
+
+/** The calling thread's own user plus system CPU in microseconds, or undefined when the runtime has no per-thread reading. */
+function threadCpuMicros(): number | undefined {
+  try {
+    const usage = process.threadCpuUsage();
+    return usage.user + usage.system;
+  } catch {
+    return undefined; // a missing reading only omits cpuMs; it must never fail a build
+  }
+}
 
 export function readModelSwitchesPath(stateDir: string): string {
   return join(stateDir, READ_MODEL_DIRNAME, READ_MODEL_SWITCHES_FILE);
@@ -231,6 +257,7 @@ export type ReadModelInstanceState = TaskViewInstanceState;
 export type ReadModelBodyEntry = ViewBodyEntry;
 
 export type ReadModelWorkerMessage =
+  | BoardCatalogRequest
   | { type: "body"; entry: ReadModelBodyEntry }
   /** Pending precedes bodies; current follows the whole committed batch, including retired-key drops. */
   | { type: "qualification"; view: typeof INBOX_VIEW_NAME; generation: string; scope: InboxQualificationScope; snapshotKey?: string }
@@ -281,6 +308,8 @@ export interface ReadModelView {
   ledgerReads?(db: ReadModelDb): string | null;
   /** What reuse fingerprints instead of `ledgerReads` when the two differ; it never stamps a source's asOf. */
   digestReads?(db: ReadModelDb): string | null;
+  /** All body and source inputs; undefined means this call cannot certify reuse. */
+  inputsFingerprint?(ctx: ReadModelViewContext): string | undefined;
   /** Work ahead of `materialize`, one bounded step per `more()`; false while some remains, and no body is built before it is done. */
   prepare?(ctx: ReadModelViewContext, more: () => boolean): boolean;
   stages?(ctx: ReadModelViewContext): Record<string, number> | undefined;
@@ -298,6 +327,8 @@ export interface ReadModelView {
    * judges every source at request time, so a body read before its rebuild says it is stale.
    */
   readPaced?: true;
+  /** Its cadence floors while unread: {@link READ_MODEL_IDLE_FLOOR_MS} between builds, never for a `demand` view. */
+  idleFloor?: true;
 }
 
 export interface ReadModelViewFactory {
@@ -308,6 +339,8 @@ export interface ReadModelViewFactory {
   snapshotSourced?: true;
   /** {@link ReadModelView.readPaced}: the unit is paced by the factory's flag, so a view made cold after a lane move keeps it. */
   readPaced?: true;
+  /** {@link ReadModelView.idleFloor}, read from the factory like `readPaced`. */
+  idleFloor?: true;
   create(): ReadModelView;
 }
 
@@ -460,7 +493,7 @@ export function scopedReadPath(path: string, instance: string | undefined): stri
 const LEDGER_SOURCE_PREFIX = "ledger:";
 
 export interface ReadModelTickerOptions {
-  /** The keys of the demand views that stay materialized; absent, `want` is refused and nothing is evicted. */
+  /** The keys of the demand views that stay materialized, and a demand unit is due only while it holds one; absent, `want` is refused, nothing is evicted and demand units are paced like any other. */
   demand?: DemandBook;
   /** Core's state dir: every instance's DB lives under its `read-model/` (design §1.7). */
   stateDir: string;
@@ -860,12 +893,29 @@ interface ViewUnit {
   stretch?: number;
   /** When it would be due unstretched; a read pulls `dueAt` back to it. */
   baseDueAt?: number;
+  /** An idle-floor unit's last build was finished unread, so `dueAt` waits {@link READ_MODEL_IDLE_FLOOR_MS}. */
+  floored?: true;
   startedAt?: number;
   peakMs?: number;
   heavy?: boolean;
   lastBuiltAt?: number;
-  lastInputDigest?: string;
+  lastInputDigest?: InputDigest;
   builtKeys?: string[];
+  skipCandidates?: number;
+  skipMismatch?: true;
+}
+
+/** A unit's inputs as named parts, in the order a moved part is reported; two digests are equal when every part is. */
+type InputDigest = ReadonlyArray<readonly [part: string, value: string]>;
+
+/** Why a due build cannot be skipped, or undefined when no input moved since the unit's last successful build. */
+function notSkippedReason(unit: ViewUnit, declared: boolean, reusable: boolean, digest: InputDigest | undefined): string | undefined {
+  if (!declared) return "no_declaration";
+  if (unit.builtKeys !== undefined && !reusable) return "sources";
+  if (digest === undefined) return "unreadable";
+  const last = unit.lastInputDigest;
+  if (unit.builtKeys === undefined || last === undefined || last.length !== digest.length) return "no_previous";
+  return digest.find(([part, value], index) => last[index]![0] !== part || last[index]![1] !== value)?.[0];
 }
 
 class ReadModelViewFactoryMismatch extends RmdError {
@@ -1496,20 +1546,20 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   }
 
   const unswitched = new Map<string, { builds: number; ms: number }>();
-  const viewBuilds = new Map<ViewUnit, { calls: number; builds: number; skipped: number; ms: number; maxMs: number }>();
+  const viewBuilds = new Map<ViewUnit, { calls: number; builds: number; skipped: number; notSkipped: Record<string, number>; ms: number; maxMs: number; cpuUs?: number }>();
   let viewBuildsFrom = clock.now();
   function reportViewBuilds(): void {
     const now = clock.now();
     if (now - viewBuildsFrom < 10 * 60_000) return;
     for (const [unit, tally] of viewBuilds) {
       if (tally.calls === 0 && tally.ms === 0) continue;
-      const { skipped, ...counts } = tally;
+      const { skipped, notSkipped, cpuUs, ...counts } = tally;
       log("read_model.view_builds", {
         view: unit.view.name,
         ...(unit.slot ? { instance: unit.slot.instance.name } : {}),
         thread: viewsOnly ? "views" : "projector",
         ...(opts.lane ? { lane: opts.lane } : {}),
-        ...counts, ...(skipped > 0 ? { skipped } : {}), window: [viewBuildsFrom, now],
+        ...counts, ...(cpuUs === undefined ? {} : { cpuMs: Math.round(cpuUs / 1000) }), ...(skipped > 0 ? { skipped } : {}), ...(Object.keys(notSkipped).length > 0 ? { not_skipped: notSkipped } : {}), window: [viewBuildsFrom, now],
       });
     }
     viewBuilds.clear();
@@ -1528,17 +1578,20 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   function paced(unit: ViewUnit, finished: number): number {
     const waitMs = unit.costMs! / READ_MODEL_VIEW_SHARE;
     unit.baseDueAt = finished + waitMs;
-    if (unit.view.readPaced !== true) return unit.baseDueAt;
     const idleMs = finished - lastReadOf(unit);
+    if (unit.view.readPaced !== true) {
+      unit.floored = unit.view.idleFloor === true && unit.view.demand !== true && idleMs >= READ_MODEL_READ_HOT_MS ? true : undefined;
+      return unit.floored ? finished + Math.max(waitMs, READ_MODEL_IDLE_FLOOR_MS) : unit.baseDueAt;
+    }
     unit.stretch = idleMs < READ_MODEL_READ_HOT_MS ? 1 : Math.min(READ_MODEL_IDLE_STRETCH_MAX, (unit.stretch ?? 1) * 2);
     return finished + waitMs * unit.stretch;
   }
 
-  function inputDigest(ctx: ReadModelViewContext, readAsOf: Map<string, string | null> | undefined): string | undefined {
-    if (!readAsOf || readAsOf.size === 0 || !ctx.sourceStore) return undefined;
+  function inputDigest(ctx: ReadModelViewContext, readAsOf: Map<string, string | null> | undefined, view: ReadModelView): InputDigest | undefined {
+    if ((!view.inputsFingerprint && (!readAsOf || readAsOf.size === 0)) || !ctx.sourceStore) return undefined;
     const stores = [...new Set([ctx.sourceStore, ...ctx.instances.flatMap(({ db }) => db ? [db] : [])])];
-    const generations = stores.map(db => [db.path, fileIno(db.path), db.meta("generation")]);
-    if (generations.some(([, ino, generation]) => ino === undefined || generation === undefined || !/^\d+$/.test(generation))) return undefined;
+    const generations = stores.map(db => [db.path, fileIno(db.path), view.inputsFingerprint ? undefined : db.meta("generation")]);
+    if (generations.some(([, ino, generation]) => ino === undefined || !view.inputsFingerprint && (generation === undefined || !/^\d+$/.test(generation)))) return undefined;
     if (ctx.instances.some(({ db, state }) => !db || state.reason || state.failures > 0 || state.lease !== "held")) return undefined;
     const plans = ctx.instances.map(({ state }) => {
       const path = opts.instances.find(instance => instance.name === state.instance)?.planPath;
@@ -1547,31 +1600,47 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       if (!pin) statSync(path); // An unreadable plan is not evidence of unchanged inputs.
       return [path, pin || planFilesIdentity(path)];
     });
+    if (view.inputsFingerprint) {
+      const inputs = view.inputsFingerprint(ctx);
+      if (inputs === undefined) return undefined;
+      const ownership = stores.map(db => {
+        const slot = slots.find(slot => slot.db === db);
+        const lease = db.prepare("SELECT holder, expires_ms FROM lease WHERE name = ?").get(PROJECTOR_LEASE_NAME);
+        if (!slot || slot.state.reason || slot.state.failures > 0 || slot.state.lease !== "held" || !slot.lease || !lease || lease.holder !== slot.lease.holder || Number(lease.expires_ms) <= ctx.now) return undefined;
+        return [slot.state.instance, slot.state.lease, slot.state.heldBy, lease.holder];
+      });
+      if (ownership.some(state => state === undefined)) return undefined;
+      const state = [generations.map(([path, ino]) => [path, ino]), ownership];
+      return Object.entries({ inputs, plan: plans, state, switches: ctx.switches, shadow: ctx.shadow })
+        .map(([part, value]) => [part, JSON.stringify(value) ?? "null"] as const);
+    }
     const snapshots = ctx.sourceStore.prepare("SELECT instance, name, as_of, error, error_ms FROM source_snapshot ORDER BY instance, name").all();
     if (snapshots.some(snapshot => snapshot.error !== null)) return undefined;
     // Status reads these alongside generation. Quarantined diagnostics can leave generation unchanged.
     const states = ctx.instances.map(({ state, db }) => [state.instance, state.generation, state.lease, state.heldBy,
       Number(db!.prepare("SELECT count(*) AS n FROM quarantine").get()?.n ?? 0)]);
-    return JSON.stringify([Array.from(readAsOf), plans, generations, states, snapshots, ctx.switches, ctx.shadow]);
+    const parts = { ledger: Array.from(readAsOf!), plan: plans, generation: generations, state: states, snapshot: snapshots, switches: ctx.switches, shadow: ctx.shadow };
+    return Object.entries(parts).map(([part, value]) => [part, JSON.stringify(value) ?? "null"] as const);
   }
 
   /** File-backed and other undeclared sources need their producer; a ledger declaration cannot verify them. */
-  function reusableSources(unit: ViewUnit, ctx: ReadModelViewContext): boolean {
+  function reusableSources(unit: ViewUnit, ctx: ReadModelViewContext, declared: boolean): boolean {
     return unit.builtKeys !== undefined && unit.builtKeys.length > 0 && unit.builtKeys.every(id => {
       const entry = latest.get(id);
       return entry !== undefined && entry.body.sources.every(source => source.state === "fresh" &&
-        (ctx.instances.some(({ state }) => source.name === `${LEDGER_SOURCE_PREFIX}${state.instance}`) || ctx.instances.some(({ state }) =>
+        (declared ? source.name.startsWith(LEDGER_SOURCE_PREFIX) || judgeSource(source, ctx.now).state === "fresh" :
+          ctx.instances.some(({ state }) => source.name === `${LEDGER_SOURCE_PREFIX}${state.instance}`) || ctx.instances.some(({ state }) =>
           source.name === `plan:${state.instance}` && opts.instances.some(instance => instance.name === state.instance && instance.planPath !== undefined))));
     });
   }
 
-  function restamp(unit: ViewUnit, ctx: ReadModelViewContext, readAsOf: Map<string, string | null> | undefined): void {
+  function restamp(unit: ViewUnit, ctx: ReadModelViewContext, readAsOf: Map<string, string | null> | undefined, declared: boolean): void {
     for (const id of unit.builtKeys!) {
       const entry = latest.get(id)!;
       const sources = entry.body.sources.map(source => {
         const instance = ctx.instances.find(({ state }) => source.name === `${LEDGER_SOURCE_PREFIX}${state.instance}`);
         return instance ? { ...ledgerSource(instance.state, ctx.now), ...(readAsOf?.has(source.name) ? { asOf: readAsOf.get(source.name)! } : {}) }
-          : { ...source, asOf: fixedClock(ctx.now).iso() };
+          : declared ? source : { ...source, asOf: fixedClock(ctx.now).iso() };
       });
       publishEntry({ ...entry, body: { ...entry.body, sources, asOf: oldestAsOf(sources) } });
     }
@@ -1580,6 +1649,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   function build(unit: ViewUnit, now: number, ctx: ReadModelViewContext, generation: number, allowanceMs: number): void {
     const { view } = unit;
     const started = clock.now();
+    const cpuFrom = threadCpuMicros();
     const named = { view: view.name, ...(unit.slot ? { instance: unit.slot.instance.name } : {}) };
     if (viewsOnly) opts.post({ type: "view_unit", ...named, phase: "start" });
     let ready = true;
@@ -1587,7 +1657,8 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     let yielded = 0;
     let calls = 0;
     let skipped = false;
-    let digest: string | undefined;
+    let why: string | undefined;
+    let digest: InputDigest | undefined;
     const builtKeys: string[] = [];
     const scoped = unit.slot ? { ...ctx, instances: ctx.instances.filter(({ state }) => state === unit.slot!.state) } : ctx;
     const buildStartedMs = (unit.startedAt ??= started);
@@ -1601,23 +1672,46 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
         const read = live.ledgerReads;
         const readAsOf = read ? new Map(scoped.instances.map(({ state, db }) =>
           [`${LEDGER_SOURCE_PREFIX}${state.instance}`, db ? read(db) : null])) : undefined;
-        const reusable = reusableSources(unit, scoped);
-        const fingerprint = live.digestReads;
+        const declared = live.inputsFingerprint !== undefined;
+        const reusable = reusableSources(unit, scoped, declared);
+        const fingerprint = declared ? undefined : live.digestReads;
         const digestAsOf = fingerprint ? new Map(scoped.instances.map(({ state, db }) =>
           [`${LEDGER_SOURCE_PREFIX}${state.instance}`, db ? fingerprint(db) : null])) : readAsOf;
-        try { if (unit.builtKeys === undefined || reusable) digest = inputDigest(scoped, digestAsOf); }
+        // A declared digest is cheap, so a rebuild forced by an aged source still records it and the next pass can skip.
+        try { if (declared || unit.builtKeys === undefined || reusable) digest = inputDigest(scoped, digestAsOf, live); }
         catch (error) { log("read_model.view_digest_unreadable", { ...named, error: (error as Error).message }); }
-        if (digest !== undefined && digest === unit.lastInputDigest && reusable) {
-          restamp(unit, scoped, readAsOf);
+        why = unit.skipMismatch ? "mismatch" : notSkippedReason(unit, declared || digestAsOf !== undefined, reusable, digest);
+        if (declared && digest === undefined && why === "unreadable") why = "inputs";
+        let audit = false;
+        if (why === undefined && declared) {
+          audit = (unit.skipCandidates ?? 0) % READ_MODEL_SKIP_AUDIT_EVERY === 0;
+          unit.skipCandidates = (unit.skipCandidates ?? 0) + 1;
+          if (audit) why = "audit";
+        }
+        if (why === undefined) {
+          restamp(unit, scoped, readAsOf, declared);
           skipped = true;
         } else {
-          for (const { key, data, sources } of live.materialize(scoped)) {
+          const bodies = live.materialize(scoped);
+          if (audit) {
+            const expected = new Map((unit.builtKeys ?? []).map(id => [id, latest.get(id)?.etag]));
+            const actual = new Map(bodies.map(({ key, data, sources }) => [`${view.name}\u0000${key}`,
+              viewEtag(view.name, live!.version, sources.some(source => source.state !== "fresh"), data)]));
+            const differingKeys = [...new Set([...expected.keys(), ...actual.keys()])]
+              .filter(id => expected.get(id) !== actual.get(id)).length;
+            if (differingKeys > 0) {
+              unit.skipMismatch = true;
+              log("read_model.view_skip_mismatch", { ...named, differing_keys: differingKeys });
+            }
+          }
+          for (const { key, data, sources } of bodies) {
             yielded++;
             const stamped = readAsOf ? sources.map((source) => readAsOf.has(source.name)
               ? { ...source, asOf: readAsOf.get(source.name)! } : source) : sources;
             publish(view.name, live.version, key, data, stamped, generation, buildStartedMs, live.qualificationGeneration);
             builtKeys.push(`${view.name}\u0000${key}`);
           }
+          if (declared) for (const id of unit.builtKeys ?? []) if (!builtKeys.includes(id)) drop(view.name, id.slice(view.name.length + 1));
         }
       }
       succeeded = ready && yielded > 0;
@@ -1625,6 +1719,8 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       log("read_model.materialize_failed", { view: view.name, error: (error as Error).message });
     }
     const finished = clock.now();
+    const cpuTo = cpuFrom === undefined ? undefined : threadCpuMicros();
+    const cpuUs = cpuFrom === undefined || cpuTo === undefined ? undefined : Math.max(0, cpuTo - cpuFrom);
     if (!skipped) {
       unit.lastInputDigest = succeeded ? digest : undefined;
       unit.builtKeys = succeeded ? builtKeys : undefined;
@@ -1632,12 +1728,14 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     }
     const elapsedMs = finished - started;
     unit.costMs = skipped ? unit.costMs ?? elapsedMs : elapsedMs;
-    const counts = viewBuilds.get(unit) ?? { calls: 0, builds: 0, skipped: 0, ms: 0, maxMs: 0 };
+    const counts = viewBuilds.get(unit) ?? { calls: 0, builds: 0, skipped: 0, notSkipped: {}, ms: 0, maxMs: 0 };
     counts.calls += calls;
     counts.builds += yielded > 0 ? 1 : 0;
     counts.skipped += skipped ? 1 : 0;
+    if (why !== undefined) counts.notSkipped[why] = (counts.notSkipped[why] ?? 0) + 1;
     counts.ms += elapsedMs;
     counts.maxMs = Math.max(counts.maxMs, elapsedMs);
+    if (cpuUs !== undefined) counts.cpuUs = (counts.cpuUs ?? 0) + cpuUs;
     viewBuilds.set(unit, counts);
     const peakMs = (unit.peakMs = Math.max(unit.peakMs ?? 0, unit.costMs));
     if (unit.cold && succeeded) {
@@ -1664,7 +1762,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     const stages = elapsedMs > passMs ? live?.stages?.(scoped) : undefined;
     const tally = switches.views[view.name] === undefined ? unswitched.get(view.name) ?? { builds: 0, ms: 0 } : undefined;
     if (tally) unswitched.set(view.name, { builds: tally.builds + (yielded > 0 ? 1 : 0), ms: tally.ms + elapsedMs });
-    if (elapsedMs > passMs) log("read_model.slow_view", { ...named, ms: elapsedMs, passMs, thread: viewsOnly ? "views" : "projector", ...(stages ? { stages } : {}), ...(tally ? { unswitched: unswitched.get(view.name) } : {}) });
+    if (elapsedMs > passMs) log("read_model.slow_view", { ...named, ms: elapsedMs, ...(cpuUs === undefined ? {} : { cpuMs: Math.round(cpuUs / 1000) }), passMs, thread: viewsOnly ? "views" : "projector", ...(stages ? { stages } : {}), ...(tally ? { unswitched: unswitched.get(view.name) } : {}) });
   }
 
   const readers = opts.readers ?? READ_MODEL_VIEW_READERS;
@@ -1732,7 +1830,9 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     }));
     log("read_model.view_lane_held", { lane: opts.lane, count: held.length, units: held });
   }
-  const dueUnits = (now: number): ViewUnit[] => units.filter((unit) => owns(unit) && built(unit.view.name) && unit.dueAt <= now).sort((a, b) => a.dueAt - b.dueAt);
+  /** W1-T11934: a demand unit is due only while the book holds a key of its view; its default keys alone rebuilt it every tick. */
+  const demanded = (unit: ViewUnit): boolean => unit.view.demand !== true || !opts.demand || opts.demand.keys(unit.view.name).length > 0;
+  const dueUnits = (now: number): ViewUnit[] => units.filter((unit) => owns(unit) && built(unit.view.name) && unit.dueAt <= now && demanded(unit)).sort((a, b) => a.dueAt - b.dueAt);
 
   /**
    * Build oldest due units within the pass left since `tickStart`, fitting each by last cost.
@@ -1905,10 +2005,11 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
         instance !== undefined && name === direct && views.some((view) => view.name === name && view.perInstance) ? instance : undefined;
       for (const view of read) readAt.set(only(view) === undefined ? view : `${view}@${only(view)}`, now);
       for (const unit of units) {
-        if (!read.has(unit.view.name) || (unit.stretch ?? 1) === 1) continue;
+        if (!read.has(unit.view.name) || ((unit.stretch ?? 1) === 1 && unit.floored !== true)) continue;
         const scope = only(unit.view.name);
         if (scope !== undefined && unit.slot?.instance.name !== scope) continue;
         unit.stretch = 1;
+        unit.floored = undefined;
         if (unit.baseDueAt !== undefined) unit.dueAt = Math.min(unit.dueAt, unit.baseDueAt);
       }
     },
@@ -1990,6 +2091,7 @@ const READ_MODEL_VIEWS_KIND = "remudero-read-model-views" as const;
 
 /** What the view thread needs, all serializable. */
 export interface ReadModelViewsData {
+  catalogBridgeVersion?: number;
   selectedRegistryIntent?: SelectedRegistryIntent;
   kind: typeof READ_MODEL_VIEWS_KIND;
   stateDir: string;
@@ -2011,6 +2113,7 @@ export interface ReadModelViewsData {
 
 /** What the projector thread tells its view thread. */
 export type ReadModelViewsInput =
+  | BoardCatalogReply
   | { type: "state"; instances: ReadModelInstanceState[] }
   | { type: "shadow"; request: ShadowRequest }
   | { type: "shadow-prepare"; request: ShadowRequest }
@@ -2038,7 +2141,9 @@ export function runReadModelViewWorker(
   let timer: NodeJS.Timeout | undefined;
   let stopped = false;
   const early: ReadModelViewsInput[] = [];
+  const catalogs = createWorkerBoardCatalogClient(data.catalogBridgeVersion === BOARD_CATALOG_WIRE_VERSION, post, clock);
   const handle = (msg: ReadModelViewsInput): void => {
+    if (isBoardCatalogReply(msg)) { catalogs.accept(msg); return; }
     if (msg.type === "stop") {
       stopped = true;
       clearTimeout(timer);
@@ -2083,7 +2188,7 @@ export function runReadModelViewWorker(
     const demand = createDemandBook({ clock });
     ticker = createReadModelTicker({
       stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, clock, holder: data.holder, post, viewsOnly: true, oracle: "off", demand, ...(data.lane ? { lane: data.lane } : {}), ...(data.restoreCosts === false ? { restoreCosts: false } : {}),
-      views: [...readModelLaneViews(data, clock, log, demand), ...extra],
+      views: [...readModelLaneViews(data, clock, log, demand, catalogs), ...extra],
     });
     ticker.start();
     for (const msg of early.splice(0)) handle(msg);
@@ -2096,10 +2201,11 @@ export function readModelLaneViews(
   clock: Clock,
   log: (step: string, extra: Record<string, unknown>) => void,
   demand: DemandBook,
+  catalogs?: BoardCatalogClient,
 ): Array<ReadModelView | ReadModelViewFactory> {
   const instances = data.instances;
   const selectedRegistryObserver = selectedRegistryObserverFromIntent(data.selectedRegistryIntent, log);
-  return [
+  const views: Array<ReadModelView | ReadModelViewFactory> = [
     { name: NAV_BADGE_VIEW_NAME, create: () => createNavBadgeReadModelView(ledgerSource) },
     { name: "repositories", create: () => createRepositoriesReadModelView(ledgerSource, selectedRegistryObserver) },
     { name: CODE_HEALTH_VIEW_NAME, demand: true, create: () => createCodeHealthView({
@@ -2111,7 +2217,7 @@ export function readModelLaneViews(
       keys: () => demand.keys(DAILY_PROGRESS_VIEW_NAME),
     }) },
     readModelStatusView,
-    { name: NOW_VIEW_NAME, perInstance: true, readPaced: true, create: () => createNowView({ instances, ledgerSource, clock, log }) },
+    { name: NOW_VIEW_NAME, perInstance: true, readPaced: true, create: () => createNowView({ instances, ledgerSource, clock, log, catalogs }) },
     { name: INSTANCES_VIEW_NAME, qualificationGeneration: INSTANCES_QUALIFICATION_GENERATION, create: () => createInstancesView({ instances, ...data.registry, ledgerSource }) },
     { name: TASK_VIEW_NAME, demand: true, create: () => createTaskView({ instances, ledgerSource, clock, demand, log }) },
     { name: INBOX_THREAD_VIEW_NAME, demand: true, create: () => createInboxThreadView({ ...(data.inboxRoot ? { inboxRoot: data.inboxRoot } : {}), clock, demand, log }) },
@@ -2122,6 +2228,8 @@ export function readModelLaneViews(
     { name: INCIDENTS_VIEW_NAME, create: () => createIncidentsView({ instances, ledgerSource }) },
     { name: OPERATOR_AGENT_ROWS_VIEW, create: () => createOperatorAgentRowsView(ledgerSource) },
   ];
+  // W1-T11933: a view no demand key holds and not already read-paced floors its cadence while unread.
+  return views.map((view) => view.demand === true || view.readPaced === true ? view : { ...view, idleFloor: true as const });
 }
 
 export function readModelWorkerLog(post: (message: ReadModelWorkerMessage) => void, viewsOnly: boolean, lane?: "fast" | "heavy"): (step: string, extra: Record<string, unknown>) => void {
@@ -2130,17 +2238,21 @@ export function readModelWorkerLog(post: (message: ReadModelWorkerMessage) => vo
 
 /** The projector thread's handle on its view thread. */
 export interface ReadModelViewLane {
+  catalog(reply: BoardCatalogReply): void;
   state(instances: ReadModelInstanceState[]): void;
   shadow(request: ShadowRequest): void;
   accept(built: SlowLaneBodies): void;
   snapshot(write: SourceSnapshotWrite): void;
   /** Main asked for a key of a demand view. */
-  want(view: string, key: string): void;
+  want(view: string, key: string): ReadModelLaneWake;
   /** Serve answered a read of `path`: both lanes, since either may own a unit it reads. */
-  read(path: string): void;
+  read(path: string): ReadModelLaneWake;
   holdsOf(threadId: number): ThreadHoldsSnapshot | undefined;
   close(): void;
 }
+
+/** What a read or want did to an idle-ended heavy lane: nothing to restart, a restart, or a failed one the next read retries. */
+export type ReadModelLaneWake = { woke: "none" } | { woke: "restarted" } | { woke: "failed"; error: string };
 
 /**
  * Relay fast/heavy view threads (solo budget: W1-T5885). Watch each lane's heartbeat; report builds
@@ -2158,12 +2270,19 @@ export function threadViews(opts: {
   const selectedRegistryIntent = copySelectedRegistryIntent(opts.data.selectedRegistryIntent);
   const clock = opts.clock ?? systemClock;
   let closed = false;
-  interface Lane { name: "fast" | "heavy"; worker?: Worker; deaths: number; respawn?: NodeJS.Timeout; building?: { view: string; instance?: string; since: number; reported: boolean }; holds?: ThreadHoldsSnapshot }
+  interface Lane { name: "fast" | "heavy"; worker?: Worker; deaths: number; respawn?: NodeJS.Timeout; building?: { view: string; instance?: string; since: number; reported: boolean }; holds?: ThreadHoldsSnapshot;
+    /** Ended for want of a read (W1-T11937): its units stay its own, unbuilt, until a read restarts it. */
+    idle?: boolean;
+    /** When a read restarted it, until its first paint. */
+    wokeAt?: number }
   const fast: Lane = { name: "fast", deaths: 0 };
   const heavy: Lane = { name: "heavy", deaths: 0 };
   const other = (lane: Lane): Lane => (lane === fast ? heavy : fast);
   const reset: ReadModelViewsInput = { type: "lane", heavy: false, dueAt: 0 };
   const heavyUnits = new Set<string>();
+  // Each thread between a unit's start and its end: one is never ended for idleness mid-build.
+  const busy = new WeakSet<Worker>();
+  let lastReadAt = clock.now();
   const reclaim = (lane: Lane, reason: "exit" | "respawn"): void => {
     const survivor = other(lane);
     const count = survivor.name === "fast" ? heavyUnits.size : 0;
@@ -2205,11 +2324,18 @@ export function threadViews(opts: {
           from: lane.name, to: msg.heavy ? "heavy" : "fast", costMs: msg.costMs,
           soloMs: READ_MODEL_LEASE_RENEW_MS * READ_MODEL_PASS_SHARE * READ_MODEL_VIEW_SHARE,
         });
-        if (!heavy.worker && !heavy.respawn && !closed) spawnLane(heavy);
+        if (!heavy.worker && !heavy.respawn && !heavy.idle && !closed) spawnLane(heavy);
         return other(lane).worker?.postMessage({ ...msg, type: "lane" } satisfies ReadModelViewsInput);
       }
       if (msg.type === "body" && lane === heavy) fast.worker?.postMessage({ type: "peer", entry: msg.entry } satisfies ReadModelViewsInput);
+      if (lane.wokeAt !== undefined && lane.worker === spawned && (msg.type === "body" || (msg.type === "view_unit" && msg.phase === "end"))) {
+        opts.log("read_model.view_lane_restarted", { lane: lane.name, firstPaintMs: clock.now() - lane.wokeAt, units: heavyUnits.size });
+        lane.wokeAt = undefined;
+      }
       if (msg.type !== "view_unit") return opts.relay(msg);
+      if (msg.phase === "start") busy.add(spawned);
+      else busy.delete(spawned);
+      if (lane.worker !== spawned) return;
       lane.deaths = 0;
       lane.building = msg.phase === "start" ? { view: msg.view, ...(msg.instance ? { instance: msg.instance } : {}), since: clock.now(), reported: false } : undefined;
     });
@@ -2217,6 +2343,12 @@ export function threadViews(opts: {
     spawned.on("exit", (code) => {
       if (lane.worker !== spawned || closed) return;
       lane.worker = undefined;
+      if (lane.wokeAt !== undefined) {
+        // A restart that died before its first paint is left idle: the next read retries it.
+        lane.wokeAt = undefined;
+        lane.idle = true;
+        return opts.log("read_model.view_lane_restart_failed", { lane: lane.name, code });
+      }
       lane.deaths++;
       reclaim(lane, "exit");
       const delayMs = Math.min(opts.data.tickMs * 2 ** lane.deaths, READ_MODEL_MAX_BACKOFF_MS);
@@ -2230,7 +2362,43 @@ export function threadViews(opts: {
       lane.respawn.unref();
     });
   };
+  const endIdle = (): void => {
+    const running = heavy.worker, idleMs = clock.now() - lastReadAt;
+    if (closed || !running || busy.has(running) || idleMs < READ_MODEL_HEAVY_IDLE_MS) return;
+    Object.assign(heavy, { worker: undefined, idle: true, building: undefined, holds: undefined, wokeAt: undefined });
+    let exited = false;
+    running.once("exit", () => void (exited = true));
+    running.postMessage({ type: "stop" } satisfies ReadModelViewsInput);
+    opts.log("read_model.view_lane_idle_ended", { lane: heavy.name, idleMs, units: heavyUnits.size });
+    // The stop ends it between builds; a thread that outlives it is terminated, but never mid-build.
+    const reap = (): void => {
+      if (exited) return;
+      if (busy.has(running)) return void setTimeout(reap, READ_MODEL_STOP_WAIT_MS).unref();
+      void running.terminate();
+    };
+    setTimeout(reap, READ_MODEL_STOP_WAIT_MS).unref();
+  };
+  const wake = (): ReadModelLaneWake => {
+    lastReadAt = clock.now();
+    if (!heavy.idle || closed) return { woke: "none" };
+    try {
+      spawnLane(heavy, false);
+    } catch (error) {
+      const message = String((error as Error)?.message ?? error);
+      opts.log("read_model.view_lane_restart_failed", { lane: heavy.name, error: message });
+      return { woke: "failed", error: message };
+    }
+    heavy.idle = false;
+    heavy.wokeAt = lastReadAt;
+    // Its units are handed straight back, due now, so the fast lane keeps its own pace.
+    for (const id of heavyUnits) {
+      const [view, instance] = JSON.parse(id) as [string, string | null];
+      heavy.worker?.postMessage({ type: "lane", view, ...(instance === null ? {} : { instance }), heavy: true, dueAt: 0 } satisfies ReadModelViewsInput);
+    }
+    return { woke: "restarted" };
+  };
   const stopWatch = (opts.every ?? everyUnref)(() => {
+    endIdle();
     for (const lane of [fast, heavy]) {
       const building = lane.building;
       if (!building || building.reported || clock.now() - building.since < READ_MODEL_STALL_MS) continue;
@@ -2243,6 +2411,7 @@ export function threadViews(opts: {
   };
   spawnLane(fast);
   return {
+    catalog: (reply) => send(reply),
     state: (instances) => send({ type: "state", instances }),
     shadow: (request) => {
       const instance = new URLSearchParams(request.key).get("instance") ?? undefined;
@@ -2253,8 +2422,16 @@ export function threadViews(opts: {
     },
     accept: (built) => send({ type: "bodies", built }, [fast]),
     snapshot: (write) => send({ type: "snapshot", snapshot: write }),
-    want: (view, key) => send({ type: "want", view, key }),
-    read: (path) => send({ type: "read", path }),
+    want: (view, key) => {
+      const woke = wake();
+      send({ type: "want", view, key });
+      return woke;
+    },
+    read: (path) => {
+      const woke = wake();
+      send({ type: "read", path });
+      return woke;
+    },
     holdsOf: (threadId) => [fast, heavy].find((lane) => lane.worker?.threadId === threadId)?.holds,
     close: () => {
       closed = true;
@@ -2275,6 +2452,7 @@ const spawnViews = (override: URL | undefined, data: ReadModelViewsData): Worker
 const spawnHeavyViews = (override: URL | undefined, data: ReadModelViewsData): Worker => startWorker(import.meta.url, { workerData: data, env: SHARE_ENV }, { override });
 
 export interface ReadModelWorkerData {
+  catalogBridgeVersion?: number;
   selectedRegistryIntent?: SelectedRegistryIntent;
   kind: typeof READ_MODEL_WORKER_KIND;
   stateDir: string;
@@ -2319,7 +2497,7 @@ export function runReadModelWorker(
   setLedgerMemoRetentionContext({ thread: "projector", log, instances: data.instances });
   const holder = randomUUID();
   const views = threadViews({
-    data: { stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, holder, ...(data.registry ? { registry: data.registry } : {}), ...(data.viewsModule ? { viewsModule: data.viewsModule } : {}), ...(data.slowLane?.inbox ? { inboxRoot: data.slowLane.inbox.inboxRoot } : {}), ...hostOf(data.slowLane), ...(data.modelApprovalConfig ? { modelApprovalConfig: data.modelApprovalConfig } : {}), ...(data.selectedRegistryIntent === undefined ? {} : { selectedRegistryIntent: data.selectedRegistryIntent }),
+    data: { catalogBridgeVersion: data.catalogBridgeVersion, stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, holder, ...(data.registry ? { registry: data.registry } : {}), ...(data.viewsModule ? { viewsModule: data.viewsModule } : {}), ...(data.slowLane?.inbox ? { inboxRoot: data.slowLane.inbox.inboxRoot } : {}), ...hostOf(data.slowLane), ...(data.modelApprovalConfig ? { modelApprovalConfig: data.modelApprovalConfig } : {}), ...(data.selectedRegistryIntent === undefined ? {} : { selectedRegistryIntent: data.selectedRegistryIntent }),
       ...(data.slowLane?.dailyProgress?.timeZone ? { dailyProgressTimeZone: data.slowLane.dailyProgress.timeZone } : {}) },
     relay: (m) => port.postMessage(m), log, clock,
   });
@@ -2398,6 +2576,7 @@ export function runReadModelWorker(
     timer = setTimeout(loop, data.tickMs);
   };
   port.on("message", (msg) => {
+    if (isBoardCatalogReply(msg)) return void views.catalog(msg);
     if (answerThreadHeaps(port, msg, threads, views.holdsOf)) return;
     if (msg.type === "shadow") return void views.shadow(msg as unknown as ShadowRequest);
     if (msg.type === "want") return void views.want((msg as unknown as { view: string }).view, (msg as unknown as { key: string }).key);
@@ -2791,6 +2970,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
     noteRecycle({ at: clock.now(), silentMs, boundMs, ...last });
   };
 
+  let closeCatalogBridge = (): void => {};
   const bodyListeners = new Set<(entry: ReadModelBodyEntry) => void>();
   const onMessage = (msg: ReadModelWorkerMessage): void => {
     heardAt = clock.now();
@@ -2836,6 +3016,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
   const spawn = (): void => {
     const shared = new SharedArrayBuffer(8);
     const data: ReadModelWorkerData = {
+      catalogBridgeVersion: BOARD_CATALOG_WIRE_VERSION,
       kind: READ_MODEL_WORKER_KIND, stateDir: opts.stateDir, instances: [...opts.instances], tickMs: opts.tickMs ?? READ_MODEL_TICK_MS, signal: shared, ...(opts.registry ? { registry: opts.registry } : {}),
       ...(selectedRegistryIntent === undefined ? {} : { selectedRegistryIntent }),
       ...(opts.escalationRepository ? { escalationRepository: opts.escalationRepository } : {}),
@@ -2853,9 +3034,22 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
     spawned.unref();
     // A heap answer is not a sign of progress: the watchdog never hears it, so a loop that died still recycles.
     const heapAnswer = askNestedThreadHeaps(spawned);
-    spawned.on("message", (msg: ReadModelWorkerMessage) => void (heapAnswer(msg) || onMessage(msg)));
+    const catalogBridge = createBoardCatalogParentBridge(opts.instances.map(instance => instance.ledgerDir), reply => {
+      if (worker === spawned && !stopping && !paused) spawned.postMessage(reply);
+    }, clock);
+    closeCatalogBridge = () => catalogBridge.close();
+    spawned.on("message", (msg: ReadModelWorkerMessage) => {
+      // Guard only the new private protocol. Legacy finalization messages, including the
+      // stopped/lease-release receipt, must still arrive after stop or pause clears `worker`.
+      if (isBoardCatalogRequest(msg)) {
+        if (worker === spawned && !stopping && !paused) catalogBridge.request(msg);
+        return;
+      }
+      void (heapAnswer(msg) || onMessage(msg));
+    });
     spawned.on("error", (error) => opts.log?.("read_model.worker_failed", { error: String(error?.message ?? error) }));
     spawned.on("exit", (code) => {
+      catalogBridge.close();
       if (worker !== spawned || stopping) return;
       worker = undefined;
       deaths++;
@@ -2955,6 +3149,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
     },
     stop: () => {
       stopping = true;
+      closeCatalogBridge();
       stopSwitchWatch();
       clearTimeout(respawnTimer);
       const running = worker;
@@ -2971,6 +3166,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
     pause: async () => {
       if (stopping || paused || !started) return false;
       paused = true;
+      closeCatalogBridge();
       stopSwitchWatch();
       clearTimeout(respawnTimer);
       const running = worker;

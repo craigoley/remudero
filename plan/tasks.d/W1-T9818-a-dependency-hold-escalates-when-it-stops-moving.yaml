@@ -15,7 +15,7 @@
     - src/run-task.ts
     - test/dep-review-held-escalation.test.ts
     - test/a-dependency-hold-escalates-when-it-stops-moving.test.ts
-  status: queued
+  status: merged
   priority: 2  # a held Dependabot head (security bumps included: #12191 carried GHSA-84m7-p3x7-pcfv) waits up to a day for its first operator ask with no remedy acting
   attempts: 0
   rationale: |

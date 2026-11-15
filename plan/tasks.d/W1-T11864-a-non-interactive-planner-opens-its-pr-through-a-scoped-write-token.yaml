@@ -16,7 +16,7 @@
     - src/lib/github-app.ts
     - src/run-task.ts
     - test/plan/a-non-interactive-planner-opens-its-pr-through-a-scoped-write-token.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     ORIGIN: end-to-end evidence from plan run PLAN-create-1794227143936. The git id reservation and the run-branch

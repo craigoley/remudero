@@ -220,7 +220,8 @@ async function runLane(tag: string, verdictLine: string): Promise<LaneRun> {
     const ledger = existsSync(path)
       ? readFileSync(path, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>)
       : [];
-    const refs = git(bare, "for-each-ref", "--format=%(refname)", "refs/heads/run-*").split("\n").filter(Boolean);
+    // W1-T12198: no_task and grill land through the feedback landing branch, not a run branch.
+    const refs = git(bare, "for-each-ref", "--format=%(refname)", "refs/heads/run-*", "refs/heads/feedback-landing").split("\n").filter(Boolean);
     const branch = refs[refs.length - 1];
     const body = branch ? git(bare, "show", `${branch}:plan/feedback/${feedbackId}.yaml`) : "";
     return { ledger, pushedStatus: /^status: (\S+)$/m.exec(body)?.[1] };

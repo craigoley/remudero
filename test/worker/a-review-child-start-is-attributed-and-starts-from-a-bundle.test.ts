@@ -125,7 +125,8 @@ test("W1-T11152 criterion 2: a fresh-tree review runs the stored bundle and ledg
       const actual = JSON.parse(readFileSync(join(f.tree, "observed.json"), "utf8"));
       assert.equal(actual.bundled, true);
       assert.equal(actual.entry, "bundle:source-hash-match");
-      assert.deepEqual(actual.args, ["review", "7", "--judge-at-own-start"]);
+      assert.deepEqual(actual.args.slice(0, 4), ["review", "7", "--judge-at-own-start", "--exit-cause-file"]);
+      assert.equal(actual.args.length, 5, "the result file path is the one argument after its flag");
       assert.equal(rows.at(-1)?.step, "review.ran_from_fresh_tree");
       assert.equal(rows.at(-1)?.entry_kind, "bundle");
       assert.equal(rows.at(-1)?.entry_reason, `source-hash-match; ${i === 0 ? "store-hit" : "tree-current"}`);

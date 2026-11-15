@@ -1,0 +1,59 @@
+- id: W1-T12232
+  title: "The config gardener proposes a restart score limit or staleness horizon from measured cycle costs"
+  repo: remudero
+  depends_on:
+    - W1-T12228
+    - W1-T12229
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # a gardener that changes when the daemon restarts; every change goes through the canary of the config gardener
+  band_meaning: blast-radius
+  origin: operator-session#freshness-restart-findings-2026-11-10
+  plan_refs:
+    - W1-T4113
+    - W1-T4945
+    - W1-T11139
+  files:
+    - src/lib/config-gardener.ts
+    - test/gardeners/a-gardener-proposes-a-restart-limit-or-horizon-from-cycle-costs.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The config gardener reads the last 20 complete `daemon.restart_cycle` rows that are later than the last change of the two policy rows. With fewer than 20 rows it proposes nothing and its pass row says how many it has"
+      proof: "grep: W1-T12232 criterion 1 in test/gardeners/a-gardener-proposes-a-restart-limit-or-horizon-from-cycle-costs.test.ts"
+    - claim: "If the median `waiting_cost_ms` is 1.5 times the median `restart_cost_ms` or more, the gardener proposes a value that is 25% lower. If the median `restart_cost_ms` is 1.5 times the median `waiting_cost_ms` or more, it proposes a value that is 25% higher. Between the two it proposes nothing"
+      proof: "grep: W1-T12232 criterion 2 in test/gardeners/a-gardener-proposes-a-restart-limit-or-horizon-from-cycle-costs.test.ts"
+    - claim: "If staleness released more than half of the 20 restarts, the proposal changes the row `stalenessHorizonMs`. If not, it changes the row `scoreLimit`"
+      proof: "grep: W1-T12232 criterion 3 in test/gardeners/a-gardener-proposes-a-restart-limit-or-horizon-from-cycle-costs.test.ts"
+    - claim: "The proposed value is inside the `min` and `max` of its row. If the row is at its bound, the gardener proposes nothing and says so"
+      proof: "grep: W1-T12232 criterion 4 in test/gardeners/a-gardener-proposes-a-restart-limit-or-horizon-from-cycle-costs.test.ts"
+    - claim: "A row with a null cost part is not counted, and the pass row gives the count of such rows. The gardener never reads a null as 0"
+      proof: "grep: W1-T12232 criterion 5 in test/gardeners/a-gardener-proposes-a-restart-limit-or-horizon-from-cycle-costs.test.ts"
+    - claim: "`configCandidates` returns the proposal as an action with one edit of one line in the policy file. The action goes through the canary of the config gardener like every other class, and a scope that cools down is not proposed again. The test drives `configCandidates`"
+      proof: "grep: W1-T12232 criterion 6 in test/gardeners/a-gardener-proposes-a-restart-limit-or-horizon-from-cycle-costs.test.ts"
+    - claim: "The gardener reads the step"
+      proof: "grep: restart_cycle in src/lib/config-gardener.ts"
+  rationale: |
+    OBSERVED 2026-11-04T01:56Z to 2026-11-11T01:56Z in the ledger of the core instance: the freshness judge restarted the daemon 36 times, 5.1 times a day, and no measurement set its values.
+    - Cost of waiting: the daemon ran on materially stale code for 72.0 of 150.5 hours of lifetime (48%). 42 reviews ran in full and were refused for stale reviewer code. After a refusal the pull request waited a median of 39 minutes.
+    - Cost of restarting: the median time with no verdict was 41 minutes for each restart cycle. The fleet posted 4.34 verdicts an hour in hours with a restart cycle and 5.97 in hours without one. The drain gave up on 13 reviews and 20 fix rounds.
+    - The score limit of 18 came from a replay on 2026-09-08. The minimum lifetime of 90 minutes came from an operator ruling on 2026-10-17. Neither was measured again.
+    READ at origin/main 17745c6bf, src/lib/config-gardener.ts:
+    - The config gardener has three classes: `recalibrate-budget`, `adopt-mount` and `re-derive-cap`. Each proposal is one or more edits of whole lines, and each goes through a canary that can roll it back.
+    - `configCandidates` collects the proposals. `CONFIG_GARDEN_LEDGER_STEPS` lists the steps that the gardener reads.
+    This task depends on W1-T12228 for the two policy rows and on W1-T12229 for the row with the two costs.
+  design: |
+    1. Add the class `retune-restart` to `ConfigGardenClass` and the step `daemon.restart_cycle` to `CONFIG_GARDEN_LEDGER_STEPS`.
+    2. Add `restartTuneCandidate(inv)`. It takes the last 20 rows with `first_verdict_at` and both cost fields present, later than the last commit that changed either policy row.
+    3. Compare the two medians with the factor 1.5. Choose the row from the `trigger` field of the 20 rows. Compute the new value: 25% lower or higher, a whole number for `scoreLimit` and whole minutes for `stalenessHorizonMs`, kept inside the bounds of the row.
+    4. The edit replaces the one line of the row in plan/policy.yaml. W1-T12228 writes each row on one line, so the line is unique.
+    5. Call the function from `configCandidates`. Use the cohort `all`: a policy row reaches every restart. The shadow evidence is the two medians and the count of rows.
+    The three numbers of the rule are 20 rows, the factor 1.5 and the step of 25%. Keep them as named constants beside the other constants of the gardener.
+    NOT IN SCOPE: the quiet window and the minimum lifetime, and the rows that W1-T12230 and W1-T12231 add.
+  falsifier: |
+    Propose with 19 rows and criterion 1 must fail. Propose inside the band between the two factors and criterion 2 must fail. Propose a value above `max` and criterion 4 must fail. Count a null part as 0 and criterion 5 must fail. Restore and require all seven to pass.
+  note: |
+    The gardener proposes a plan pull request; it does not change a running daemon. A changed row applies after the next restart of the daemon.

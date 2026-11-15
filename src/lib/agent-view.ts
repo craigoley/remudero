@@ -14,7 +14,7 @@
  * so no fact is discarded. The nav badge counts from the same fold ({@link AGENT_FOLDS}).
  */
 import { join } from "node:path";
-import { analyticsSource, ANALYTICS_SOURCE_CONSOLE_V1, ANALYTICS_SOURCE_SIGNALS, type AnalyticsConsoleSource, type AnalyticsInstanceInput } from "./analytics-view.js";
+import { analyticsSource, snapshotInputs, ANALYTICS_SOURCE_CONSOLE_V1, ANALYTICS_SOURCE_SIGNALS, type AnalyticsConsoleSource, type AnalyticsInstanceInput } from "./analytics-view.js";
 import type { AnalyticsSnapshot } from "./analytics-route.js";
 import { AUTOMATION_ACTION_VERSION } from "./automation-action.js";
 import { clockFromMillisFn } from "./clock.js";
@@ -45,6 +45,16 @@ export const AGENT_VIEW_VERSION = 1;
 export const AGENT_QUALIFICATION_GENERATION = "operator-agent-records-v1";
 /** A part's time-dependent states (expiry, staleness) are recomputed at least this often with no new fact. */
 export const AGENT_CLOCK_MS = 60_000;
+/** The fact_step range index excludes unrelated facts from the agent's reuse identity. */
+export function agentInputSequence(db: ReadModelDb): number {
+  return Number(db.prepare("SELECT coalesce(max(seq), 0) AS seq FROM fact INDEXED BY fact_step WHERE step >= 'panel.' AND step < 'panel/'").get()?.seq);
+}
+/**
+ * BACKSTOP: how long an instance's builds are tallied before one `agent.built` row is written. A row per build was
+ * 1,043 ledger rows in 13 hours (2026-11-10), each one moving the ledger every reader folds; `read_model.view_builds`
+ * reports on the same 10 minutes.
+ */
+export const AGENT_BUILT_ROW_WINDOW_MS = 10 * 60_000;
 
 /** Every part, and the route whose body it is (`proposals` is the engine the nav badge counts). */
 export const AGENT_VIEW_PARTS = {
@@ -180,6 +190,8 @@ export interface AgentViewOptions<S extends { instance: string; tickedAt?: numbe
   ledgerSource: (state: S, now: number) => ViewSource;
   folds?: AgentFolds;
   log?: (step: string, extra: Record<string, unknown>) => void;
+  /** How long builds are tallied into one `agent.built` row; 0 writes a row per build. */
+  builtRowWindowMs?: number;
 }
 
 /** What one instance's bodies were built from, so the shadow's legacy side reads that build's inputs. */
@@ -199,6 +211,7 @@ export function createAgentView<S extends { instance: string; tickedAt?: number 
   qualificationGeneration: string;
   perInstance: true;
   snapshotSourced: true;
+  inputsFingerprint(ctx: { now: number; sourceStore?: ReadModelDb; instances: ReadonlyArray<{ state: S; db?: ReadModelDb; lease?: ReadModelLease }> }): string | undefined;
   prepare(ctx: { instances: ReadonlyArray<{ state: S; db?: ReadModelDb; lease?: ReadModelLease }> }, more: () => boolean): boolean;
   materialize(ctx: { now: number; sourceStore?: ReadModelDb; instances: ReadonlyArray<{ state: S; db?: ReadModelDb; lease?: ReadModelLease }> }): Array<{ key: string; data: AgentViewData; sources: ViewSource[] }>;
   legacy(key: string, now: number, data: unknown): ShadowLegacy | undefined;
@@ -206,6 +219,24 @@ export function createAgentView<S extends { instance: string; tickedAt?: number 
   const folds = opts.folds ?? AGENT_FOLDS;
   const byName = new Map(opts.instances.map((instance) => [instance.name, instance]));
   const built = new Map<string, { memo: string; bodies: ReturnType<typeof agentPartBodies>; info: Built }>();
+  const builtRowWindowMs = opts.builtRowWindowMs ?? AGENT_BUILT_ROW_WINDOW_MS;
+  const tallies = new Map<string, { since: number; builds: number; seq: number; rows: number }>();
+  /** The first build after start is written at once so a cold start stays visible; later ones wait for the window. */
+  const noteBuilt = (instance: string, now: number, seq: number, rows: number): void => {
+    const tally = tallies.get(instance);
+    if (tally) Object.assign(tally, { builds: tally.builds + 1, seq, rows });
+    else {
+      tallies.set(instance, { since: now, builds: 0, seq, rows });
+      opts.log?.("agent.built", { instance, builds: 1, seq, rows });
+    }
+  };
+  /** Writes the window's row once it has run its length; a window with no build writes none. */
+  const flushBuilt = (instance: string, now: number): void => {
+    const tally = tallies.get(instance);
+    if (!tally || tally.builds === 0 || now - tally.since < builtRowWindowMs) return;
+    opts.log?.("agent.built", { instance, builds: tally.builds, seq: tally.seq, rows: tally.rows });
+    Object.assign(tally, { since: now, builds: 0 });
+  };
   const shown = new WeakMap<AgentViewData, Built>();
   const legacyMemos = new Map<string, LedgerRotationMemo>();
   const held = new WeakMap<ReadModelDb, Map<string, AgentAnalytics>>();
@@ -222,6 +253,15 @@ export function createAgentView<S extends { instance: string; tickedAt?: number 
     perInstance: true,
     // A committed analytics snapshot makes the proposals part due at once.
     snapshotSourced: true,
+    // Relevant panel facts, scoped readiness, home-store analytics states/freshness and the memo's clock bucket.
+    inputsFingerprint: ({ now, sourceStore, instances }) => {
+      const home = sourceStore ?? instances[0]?.db;
+      if (!home) return undefined;
+      return JSON.stringify([Math.floor(now / AGENT_CLOCK_MS), slotsOf(instances).map(slot => [
+        slot.instance.name, agentInputSequence(slot.db), snapshotInputs(home, slot.instance.name,
+          [ANALYTICS_SOURCE_CONSOLE_V1, ANALYTICS_SOURCE_SIGNALS], now),
+      ])]);
+    },
     prepare: ({ instances }, more) => slotsOf(instances).every((slot) => folds.advance(foldSlot(slot), more)),
     materialize: ({ now, sourceStore, instances }) => {
       // Scoping a build must not move the shared analytics store to that repository's DB.
@@ -233,14 +273,15 @@ export function createAgentView<S extends { instance: string; tickedAt?: number 
         const { instance } = slot;
         const fold = folds.current(foldSlot(slot));
         const committed = committedAnalytics(home, instance.name, parsed, now);
-        const memo = `${fold.seq}|${committed.analytics?.asOf ?? "-"}|${committed.analytics?.reason ?? "-"}|${committed.source.state}|${committed.source.phase ?? "-"}|${Math.floor(now / AGENT_CLOCK_MS)}`;
+        const memo = `${agentInputSequence(slot.db)}|${committed.analytics?.asOf ?? "-"}|${committed.analytics?.reason ?? "-"}|${committed.source.state}|${committed.source.phase ?? "-"}|${Math.floor(now / AGENT_CLOCK_MS)}`;
         let entry = built.get(instance.name);
         if (entry?.memo !== memo) {
           const input = { ledgerDir: instance.ledgerDir, instance: instance.name, ...(instance.repo ? { repository: instance.repo } : {}), now, rows: fold.rows, ...(committed.analytics ? { analytics: committed.analytics } : {}) };
           entry = { memo, bodies: agentPartBodies(input), info: { instance, builtMs: now, newestTsMs: fold.newestTsMs, ...(committed.analytics ? { analytics: committed.analytics } : {}) } };
           built.set(instance.name, entry);
-          opts.log?.("agent.built", { instance: instance.name, seq: fold.seq, rows: fold.rows.length });
+          noteBuilt(instance.name, now, fold.seq, fold.rows.length);
         }
+        flushBuilt(instance.name, now);
         const ledger = opts.ledgerSource(slot.state, now);
         const { bodies, info } = entry;
         return (Object.keys(AGENT_VIEW_PARTS) as AgentViewPart[]).map((part) => {

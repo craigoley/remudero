@@ -24,7 +24,7 @@
     - .remudero/managed-repos.json
     - test/review/wreckterra-web-profile.test.ts
     - test/managed-repos.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: The operator authorized implementation, task filing and guarded Remudero builds of the Console new-product flow and mobile-first Central Park prototype, using existing public craigoley/wreckterra. Source/main and every open PR head were swept for subject overlap; no competing product-flow implementation was observed. Existing auth, nonce, admission, review and resource guards remain required.
   design: Add an exact craigoley/wreckterra profile to the closed acceptance-suite registry using its chosen unit/browser roots and checkout-pinned test CLIs. Existing core/site/console behavior and unknown-owner/unknown-repo refusal remain intact. Add managed repository discovery only through reviewed source. Ensure ts-web inheritance can bootstrap this empty repository with real commands, strict TypeScript, always-reporting ci-gate, security and measured nonzero baselines; do not invent baseline measurements or disable a scanner. The live baseline/protection application is a separate observable receipt after meaningful tests exist. Do not start a persistent daemon or commandeer existing jobs. The authorized initial build may use the existing bounded target-repo drain path after real runner acceptance and normal admission.

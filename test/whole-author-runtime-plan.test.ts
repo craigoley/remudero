@@ -71,7 +71,11 @@ test('whole author plan refuses unsafe phase totals and never treats unavailable
   huge.accounting.nativeDurationMs=7.5e15+1000;huge.accounting.wallDurationMs=7.5e15+1000;huge.accounting.selectionAndAdmissionOverheadMs=0;
   assert.throws(()=>runtime.wholeAuthorDeadlineFit(files,manifest,profile,huge,options),/unsafe timing total/);
   assert.equal(runtime.wholeAuthorDeadlineFit(files,manifest,profile,phases,options).resourceFitQualified,false);
-  for(const workers of [0,5,1.5])assert.throws(()=>runtime.wholeAuthorDeadlineFit(files,manifest,profile,phases,{...options,workers}),/invalid/);
+  for(const workers of [0,-1,1.5])assert.throws(()=>runtime.wholeAuthorDeadlineFit(files,manifest,profile,phases,{...options,workers}),/invalid/);
+  // W1-T11891: planning prices a width above four, as an estimate that grants nothing.
+  const wide=runtime.wholeAuthorDeadlineFit(files,manifest,profile,phases,{...options,workers:12});
+  assert.equal(wide.workers,12);assert.equal(wide.authority,'estimate-only');assert.equal(wide.state,'estimated');
+  assert.equal(wide.dispatchAllowed,false);assert.equal(wide.capacityGranted,false);
 });
 
 function phaseEvidence(dir:string,sourceHead:string){
@@ -120,6 +124,7 @@ test('whole author planning CLI uses validated native profile and complete phase
   const now=Date.now(),result=planAuthorRuntime({root:f.dir,profilePath:observed.path,authorReceipt:e.path,workers:1,now,deadline:now+1000000});
   assert.equal(result.selection,'full-corpus');assert.equal(result.selectedFiles,2);assert.equal(result.calibratedSampleFiles,2);
   assert.equal(result.dispatchAllowed,false);assert.equal(result.capacityGranted,false);assert.equal(result.authorPassReused,false);assert.equal(result.fullSelectionQualified,false);
+  assert.equal(result.estimateOnly,true);assert.equal(result.executionAllowed,false);assert.equal(result.authority,'estimate-only');
   const script=join(process.cwd(),'scripts/plan-author-runtime.mjs');
   const runCLI=(deadline:number)=>spawnSync(process.execPath,['--import','tsx',script,'--root',f.dir,
     '--runtime-profile',observed.path,'--author-receipt',e.path,'--workers','1','--deadline',new Date(deadline).toISOString()],

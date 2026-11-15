@@ -10,14 +10,12 @@ const HOOK = join(REPO_ROOT, "hooks", "pre-push");
 const ZERO = "0".repeat(40);
 const SHA = "1".repeat(40);
 
-/** The nine content gates the hook runs, each by its script name. */
+/** The seven content gates the hook runs, each by its script name (W1-T12510 left census and plan lint to CI). */
 const GATES = [
   "rule15-precheck.mjs",
   "rule25-precheck.mjs",
   "ci-control-plane-precheck.mjs",
   "test-tier-manifest.mjs",
-  "census-precheck.mjs",
-  "lint-plan-precheck.mjs",
   "head-identity-gate.mjs",
   "worker-branch-shape.mjs",
   "proof-resolve-precheck.mjs",

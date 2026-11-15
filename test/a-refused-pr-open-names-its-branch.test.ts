@@ -138,9 +138,10 @@ function originBranches(origin: string): Map<string, string> {
 }
 
 // 2026-10-09: a branch-gap refusal still stranded the finished work — W1-T7243's build pushed, refused at open on
-// one failing proof, and sat with no PR for hours until an operator found it (#10551). The open now goes ahead
-// with the failing proof named as the PR's fix target, so the sweep, fix lane and progress judge take it.
-test("a build whose filed proof fails at open opens its PR with that proof named instead of stranding the branch", async () => {
+// one failing proof, and sat with no PR for hours until an operator found it (#10551). It was then opened red, and
+// each such PR cost a hosted proof-discrimination round (W1-T10355). The refusal is now RECORDED instead: the row
+// names the branch, head and proof, the branch stays on origin, and the orphan-branch grace re-dispatches it.
+test("a build whose filed proof fails at open is refused with that proof named and its branch kept, never opened red", async () => {
   const fx = buildRun("grep: NEVER_WRITTEN_MARK in README.md");
   try {
     const created: string[][] = [];
@@ -170,17 +171,15 @@ test("a build whose filed proof fails at open opens its PR with that proof named
     );
     const ledger = readLedger(fx.root);
     assert.deepEqual(proofRuns, ["grep: NEVER_WRITTEN_MARK in README.md"], "the filed proof ran once and failed cleanly");
-    assert.equal(ledger.filter((row) => row.step === "pr.open_refused").length, 0, "a failing proof no longer refuses the open");
-    const opened = ledger.filter((row) => row.step === "pr.opened_with_failing_proof");
-    assert.equal(opened.length, 1, "the open names the failing proof");
-    assert.equal(opened[0]?.proof, "grep: NEVER_WRITTEN_MARK in README.md");
-    assert.equal(created.length, 1, "the PR create ran for the built branch");
-    assert.deepEqual(created[0]?.slice(0, 4), ["api", "--method", "POST", `repos/${FIXTURE_OWNER}/remudero/pulls`]);
-    const body = created[0]?.find((arg) => arg.startsWith("body=")) ?? "";
-    assert.match(body, /## Pre-open proof failure/);
-    assert.match(body, /NEVER_WRITTEN_MARK/);
-    assert.match(body, /Remudero-Task: W1-T990071/, "the checked body still carries the task trailer");
-    assert.notEqual(result.verdict, "merged");
+    assert.equal(ledger.filter((row) => row.step === "pr.opened_with_failing_proof").length, 0, "a failing proof never opens red");
+    assert.deepEqual(created, [], "the PR create never ran for a known-red build");
+    const refused = ledger.filter((row) => row.step === "pr.open_refused");
+    assert.equal(refused.length, 1, "the refusal names the branch it left behind");
+    assert.equal(refused[0]?.refusal_class, "branch-gap");
+    assert.equal(refused[0]?.proof, "grep: NEVER_WRITTEN_MARK in README.md");
+    assert.match(String(refused[0]?.proof_output), /grep finds no match/);
+    assert.equal(originBranches(fx.origin).get(String(refused[0]?.branch)), refused[0]?.head_sha, "the branch is kept on origin");
+    assert.equal(result.verdict, "failed");
   } finally {
     fx.cleanup();
   }

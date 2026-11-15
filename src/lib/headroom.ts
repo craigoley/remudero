@@ -58,8 +58,12 @@ export interface WeeklyWindow extends UsageWindow {
 /** Everything the HeadroomTracker reads from one `/usage` capture. */
 export interface UsageSnapshot {
   billingMode: BillingMode;
-  /** The 5-hour rolling session window. */
-  session: UsageWindow;
+  /**
+   * The 5-hour rolling session window. ABSENT when the reading had no session window (W1-T12153:
+   * the CLI panel since 2026-11-11 prints weekly lines only). Absent is never 0% used: a reader
+   * leaves the window out, and the weekly windows bind.
+   */
+  session?: UsageWindow;
   /**
    * The weekly windows, in the order `/usage` lists them. Max reports two — an
    * all-models cap and a model-specific cap — each with its own reset. Order is
@@ -137,19 +141,24 @@ function parseBillingMode(text: string): BillingMode {
   return "unknown";
 }
 
+const PANEL_LINE = /^\s*Current\b/im;
+
+/** The reason for an output that has no account panel at all (W1-T12153 criterion 3). */
+export const NO_USAGE_PANEL_REASON = "no account panel in /usage output (no 'Current' line)";
+
 /**
  * Parse a `claude -p "/usage"` capture into a {@link UsageSnapshot}.
  *
  * Accepts the raw `result` text (extra lines such as the Last-24h/7d summary are
- * ignored). Throws {@link UsageParseError} — fail-closed — if the session line or
- * any weekly line is absent, so a garbled capture can never read as "0% used".
+ * ignored). Throws {@link UsageParseError} — fail-closed — if there is no panel, a
+ * window has no readable percentage, or no weekly line is present, so a garbled
+ * capture can never read as "0% used". A panel with weekly lines and no session line
+ * gives a snapshot with no `session` (the CLI form of the SDK `weekly-only` case).
  */
 export function parseUsage(text: string): UsageSnapshot {
+  if (!PANEL_LINE.test(text)) throw new UsageParseError(NO_USAGE_PANEL_REASON);
   const sessionMatch = SESSION_LINE.exec(text);
-  if (!sessionMatch) {
-    throw new UsageParseError("no 'Current session:' line in /usage output");
-  }
-  const session = parseTail(sessionMatch[1], "session");
+  const session = sessionMatch ? parseTail(sessionMatch[1], "session") : undefined;
 
   const weekly: WeeklyWindow[] = [];
   WEEKLY_LINE.lastIndex = 0;
@@ -161,7 +170,35 @@ export function parseUsage(text: string): UsageSnapshot {
     throw new UsageParseError("no 'Current week (…):' lines in /usage output");
   }
 
-  return { billingMode: parseBillingMode(text), session, weekly };
+  return { billingMode: parseBillingMode(text), ...(session ? { session } : {}), weekly };
+}
+
+/** Words of the `/usage` panel that a shape may keep. Every other word is masked. */
+const USAGE_SHAPE_WORDS = new Set([
+  "you", "are", "currently", "using", "your", "subscription", "to", "power", "claude", "code", "usage",
+  "current", "session", "sessions", "week", "month", "all", "models", "model", "used", "resets", "reset",
+  "what's", "contributing", "approximate", "on", "this", "machine", "only", "shares", "overlap", "last",
+  "h", "d", "k", "requests", "request", "tokens", "per", "api", "plan", "extra", "limit", "limits",
+  "account", "email", "organization", "login", "method", "opus", "sonnet", "haiku", "fable", "error",
+  "total", "cost", "duration", "wall",
+]);
+const USAGE_SHAPE_LABEL_MAX = 32;
+const USAGE_SHAPE_MAX = 400;
+
+/**
+ * W1-T12153: the shape of a `/usage` output for the `usage.probe_failed` row. It is the number
+ * of lines and, for each line, the text before the first colon. Digits become `#`, and a word
+ * that is not a panel word becomes `*`, so no account name, email or path is written.
+ */
+export function usageOutputShape(text: string): string {
+  const lines = text.replace(/\s+$/, "").split(/\r?\n/);
+  const labels = lines.map((line) =>
+    (line.split(":")[0] ?? "")
+      .trim()
+      .replace(/[\p{L}'’]+/gu, (w) => (USAGE_SHAPE_WORDS.has(w.toLowerCase()) ? w : "*"))
+      .replace(/\d/g, "#")
+      .slice(0, USAGE_SHAPE_LABEL_MAX));
+  return `${lines.length} lines: ${labels.join(" | ")}`.slice(0, USAGE_SHAPE_MAX);
 }
 
 /** Default: at/near a window limit means ≥95% consumed. Never hammer the last 5%. */
@@ -322,7 +359,8 @@ export function headroomExhausted(
   // holding without a single caller change, and a resetless window renders the sentinel rather
   // than the literal text "undefined".
   const windows: Array<{ window: string; percentUsed: number; resetsAt: string }> = [
-    { window: "session (5h)", percentUsed: snap.session.percentUsed, resetsAt: snap.session.resetsAt ?? RESET_UNKNOWN },
+    // An absent session window is left out, never read as 0% used; the weekly windows bind.
+    ...(snap.session ? [{ window: "session (5h)", percentUsed: snap.session.percentUsed, resetsAt: snap.session.resetsAt ?? RESET_UNKNOWN }] : []),
     ...snap.weekly.map((w) => ({
       window: `weekly (${w.label})`,
       percentUsed: w.percentUsed,

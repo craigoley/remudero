@@ -242,8 +242,8 @@ test("W1-T1273: an empty window still writes the marker, files nothing, and name
     assert.ok(empty, "an empty gather ledgers feedback_docket.empty");
     assert.deepEqual(
       empty!.extra.counts_by_source,
-      { reframe: 0, operator_feedback: 0, rejected_feedback: 0, question_answer: 0, operator_note: 0 },
-      "every one of the five surfaces is NAMED with its own count, so a silent channel is legible",
+      { reframe: 0, operator_feedback: 0, rejected_feedback: 0, question_answer: 0, operator_note: 0, console_correction: 0 },
+      "every one of the six surfaces is NAMED with its own count, so a silent channel is legible",
     );
   } finally {
     rmSync(instanceRoot, { recursive: true, force: true });

@@ -1,0 +1,42 @@
+- id: W1-T12302
+  title: "The suite-admission saturation line is derived from structured green and timeout receipts, and remains UNKNOWN until their measured CPU-pressure readings separate"
+  repo: remudero
+  depends_on: [W1-T12301]
+  priority: 1.4
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium
+  band_meaning: blast-radius
+  origin: architect
+  plan_refs: [W1-T12301, W1-T12303, W1-T2985, W1-T11129]
+  files:
+    - scripts/calibrate-suite-admission.mjs
+    - test/ci/the-suite-admission-saturation-line-is-calibrated-from-green-and-timed-out-receipts.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Green receipts with load per effective core at most 2 and timed-out receipts at 6 or more derive line 2 and retain both sample counts"
+      proof: "unit test: W1-T12302 criterion 1: calibration chooses the highest separated green load reading"
+    - claim: "Overlapping samples or either empty population produce UNKNOWN, never a numeric line"
+      proof: "unit test: W1-T12302 criterion 2: overlapping or empty populations stay UNKNOWN"
+    - claim: "Receipts with no suites run are excluded from both populations; missing or wrong-schema files read UNKNOWN"
+      proof: "unit test: W1-T12302 criterion 3: non-run receipts are excluded and missing calibration stays UNKNOWN"
+    - claim: "The script writer and exported reader round-trip the same lines, counts, UNKNOWN values and receipt identities"
+      proof: "unit test: W1-T12302 criterion 4: written calibration records round-trip through the reader"
+    - claim: "Calibration remains in the existing script and adds no uncalled src module"
+      proof: "grep: deriveSuiteAdmissionCalibration( in scripts/calibrate-suite-admission.mjs"
+  rationale: |
+    The telemetry task W1-T12301 runs first, so this calibrator consumes structured measurements that already exist on author receipts. It does not expect a later admission task to create its inputs.
+    A green author receipt means suites ran and passed. A timeout receipt means suites ran but timed out. Capacity refusals and every other receipt with no suite execution are excluded, so host saturation is never learned from a test that did not run.
+  design: |
+    Keep the pure derivation, schema reader and CLI writer in scripts/calibrate-suite-admission.mjs; no new src module is introduced before its consumer exists.
+    Read structured values from testSlot.cpuObservation. Calibrate load per effective core and CPU PSI some avg10 independently. For each measure emit the highest green value only when every timed-out value is above it. If either population is empty, readings are missing, or sets overlap, emit UNKNOWN with counts and reasons.
+    Never use system CPU PSI full. Exclude samples whose effective quota is UNKNOWN from normalized-load calibration and count them as unusable evidence, not unlimited capacity.
+    Write rmd-suite-admission-calibration/v1 with counts, source receipt identities and derivedAt. The default file is suite-admission-calibration.json in the shared host test-slot directory. Missing, unreadable or wrong-schema data reads UNKNOWN.
+    NOT IN SCOPE: consuming the calibration (W1-T12303), changing author receipts (W1-T12301), a fixed threshold, or scheduling.
+  falsifier: |
+    Use a mean or fixed percentile instead of the highest separated green value and criterion 1 must fail. Emit a number for overlapping or empty sets and criterion 2 must fail. Count a receipt with no suite execution and criterion 3 must fail. Make writer and reader disagree and criterion 4 must fail. Restore and require all four to pass.
+  note: |
+    Filed by PLAN-create-1794411017336 from the reserved ids, in order.

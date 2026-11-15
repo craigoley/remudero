@@ -36,11 +36,90 @@ fi
 
 APPLY=0
 TSX_ONLY=0
+REFRESH_ONLY=0
 for option in "$@"; do
   case "$option" in --apply) APPLY=1 ;; --dry-run) APPLY=0 ;; --tsx-only) TSX_ONLY=1 ;;
+    --refresh-install) REFRESH_ONLY=1 ;;
     *) printf 'unknown cleanup option: %s\n' "$option" >&2; exit 2 ;;
   esac
 done
+REFRESH_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+
+# Replace the code in this install folder with `origin/main` of the checkout that its installer
+# recorded in `install-source`. Both installed layouts hold this file, and remudero-janitor.sh calls
+# it with --refresh-install. It reads only the ref as the checkout last fetched it: no fetch, and
+# never a file of the working tree. Any read that fails keeps every installed file. The pass that
+# calls it keeps the code it started with; the next pass runs the new code.
+rmd_janitor_refresh() ( # $1 = 1 to install, 0 to report only
+  set -o pipefail
+  unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY
+  kept() { printf 'janitor refresh: kept (%s)\n' "$1"; exit 0; }
+  dir=$REFRESH_DIR record="$REFRESH_DIR/install-source"
+  [ -n "$dir" ] || kept 'install folder unreadable'
+  [ -f "$record" ] && [ ! -L "$record" ] && [ -r "$record" ] || kept "no install-source record in $dir"
+  [ -O "$dir" ] && [ -O "$record" ] || kept "install folder owned by another account: $dir"
+  checkout='' layout='' origin=''
+  while IFS='=' read -r key value || [ -n "$key" ]; do
+    case "$key" in checkout) checkout=$value ;; layout) layout=$value ;; origin) origin=$value ;; esac
+  done < "$record"
+  case "$checkout" in /*) ;; *) kept 'install-source names no absolute checkout' ;; esac
+  guards='workspace-retirement-guard.sh:deploy/workspace-retirement-guard.sh'
+  cache='dependency-seed-guard.sh:deploy/dependency-seed-guard.sh tmp-reclaim.sh:deploy/mac/tmp-reclaim.sh cache-reclaim.py:deploy/mac/cache-reclaim.py'
+  janitor='retire-legacy-sweeper.py:deploy/mac/retire-legacy-sweeper.py preserve-retire.py:deploy/mac/preserve-retire.py remudero-janitor.sh:deploy/mac/remudero-janitor.sh'
+  case "$layout" in
+    home-bin) installer=deploy/mac/install-janitor.sh files="$guards $cache $janitor" ;;
+    shared) installer=deploy/mac/install-janitor.sh files="$guards $cache $janitor"
+      [ "${dir##*/}" = remudero-mac ] || kept "shared layout outside a remudero-mac folder: $dir" ;;
+    application-support) installer=deploy/mac/install-tmp-reclaim.sh files=$cache
+      support=$(cd "$HOME/Library/Application Support/remudero" 2>/dev/null && pwd -P)
+      [ "$support" = "$dir" ] || kept "application-support layout outside $HOME/Library/Application Support/remudero" ;;
+    *) kept "install-source names an unknown layout: ${layout:-none}" ;;
+  esac
+  [ -d "$checkout" ] && [ -O "$checkout" ] || kept "checkout unreadable or owned by another account: $checkout"
+  g() { git -C "$checkout" "$@"; }
+  current=$(g remote get-url origin 2>/dev/null) || kept "checkout has no readable origin: $checkout"
+  [ "$current" = "$origin" ] || kept "checkout origin $current is not the recorded origin ${origin:-none}"
+  case "$origin" in *github.com[:/]craigoley/remudero|*github.com[:/]craigoley/remudero.git) ;;
+    *) kept "origin is not the remudero repository: $origin" ;; esac
+  commit=$(g rev-parse --verify --quiet 'refs/remotes/origin/main^{commit}' 2>/dev/null) || kept "origin/main unreadable in $checkout"
+  for pair in $files "installer:$installer"; do
+    g cat-file -e "$commit:${pair#*:}" 2>/dev/null || kept "source set at origin/main is not complete: ${pair#*:} missing"
+  done
+  changed=()
+  for pair in $files; do
+    name=${pair%%:*}
+    new=$(g rev-parse --verify --quiet "$commit:${pair#*:}") || kept "origin/main unreadable: ${pair#*:}"
+    old=absent
+    if [ -e "$dir/$name" ]; then old=$(g hash-object --no-filters -- "$dir/$name") || kept "installed file unreadable: $name"; fi
+    [ "$old" = "$new" ] || changed+=("$name $old -> $new")
+  done
+  short=${commit:0:12}
+  [ "${#changed[@]}" -gt 0 ] || { printf 'janitor refresh: current at %s\n' "$short"; exit 0; }
+  if [ "$1" != 1 ]; then
+    printf 'janitor refresh: would install %d files from %s\n' "${#changed[@]}" "$short"
+    printf 'janitor refresh: would replace %s\n' "${changed[@]}"
+    exit 0
+  fi
+  stage=$(mktemp -d "${TMPDIR:-/tmp}/rmd-janitor-refresh.XXXXXX") || kept 'temporary folder unavailable'
+  trap 'rm -rf "$stage"' EXIT
+  g archive --format=tar "$commit" -- deploy/workspace-retirement-guard.sh deploy/dependency-seed-guard.sh deploy/mac \
+    | tar -xf - -C "$stage" || kept "git archive of $short failed"
+  # An installer without a code-only mode would rewrite the schedule; never run one.
+  grep -q -- '--code-only)' "$stage/$installer" || kept "$installer at $short has no code-only mode"
+  case "$layout" in
+    home-bin) out=$(REMUDERO_JANITOR_INSTALL_DIR="$dir" bash "$stage/$installer" --code-only 2>&1) ;;
+    shared) out=$(bash "$stage/$installer" --shared-root "${dir%/*}" --code-only 2>&1) ;;
+    *) out=$(bash "$stage/$installer" --code-only 2>&1) ;;
+  esac || { printf 'janitor refresh: failed (installer exit %s: %s)\n' "$?" "${out##*$'\n'}"; exit 0; }
+  for pair in $files; do
+    name=${pair%%:*}
+    [ "$(g hash-object --no-filters -- "$dir/$name" 2>/dev/null)" = "$(g rev-parse "$commit:${pair#*:}")" ] ||
+      { printf 'janitor refresh: failed (%s differs from %s after the install)\n' "$name" "$short"; exit 0; }
+  done
+  printf 'janitor refresh: replaced %s\n' "${changed[@]}"
+  printf 'janitor refresh: installed %d files from %s\n' "${#changed[@]}" "$short"
+)
+if [ "$REFRESH_ONLY" = 1 ]; then rmd_janitor_refresh "$APPLY"; exit 0; fi
 ROOT="${RMD_RECLAIM_ROOT:-/private/tmp}"
 SESSION_ROOT="${RMD_RECLAIM_SESSION_ROOT:-$HOME/Remudero/.session-scratch}"
 REPORT="${RMD_RECLAIM_REPORT:-$HOME/Library/Logs/remudero/tmp-reclaim-kept.txt}"
@@ -414,11 +493,40 @@ prune_old_tree_files() {
   done < <(find "$tree" -xdev -type f -user "$ME" -mmin "+$AGE_MIN" -cmin "+$AGE_MIN" -print0 2>/dev/null)
 }
 
-# TSX caches are write-once compiled files. Keep the cache directory itself;
-# prune only regular, account-owned entries older than the age window. An open-file scan
-# fails closed so an active compiler's cache is not disturbed.
+# Print the files that a process holds open under the resolved cache "$1", one path per line.
+# Return 1 with a reason when the whole cache must stay: the process list or an lsof result is
+# unreadable, a process command names the cache, a working directory is inside it, or lsof
+# names a path that is not under the cache.
+tsx_cache_open_files() {
+  local real="$1" why open_text status names
+  if ! why=$(path_is_live_or_unknown "$real"); then return 0; fi
+  [ "$why" = 'open file or lsof scan uncertain' ] || { echo "$why"; return 1; }
+  # That reason covers an open file and an unreadable scan. Read the names to tell them apart;
+  # the delete relies on this read alone, so it must be complete.
+  open_text=$("$LSOF_CMD" -nP -Fn +D "$real" 2>"$LSOF_ERR"); status=$?
+  if [ "$status" -gt 1 ] || lsof_warning_covers "$real"; then echo "$why"; return 1; fi
+  if ! names=$(printf '%s\n' "$open_text" | TSX_CACHE="$real" LC_ALL=C awk '
+    /^n/ {
+      name = substr($0, 2)
+      if (name == ENVIRON["TSX_CACHE"]) next
+      if (index(name, ENVIRON["TSX_CACHE"] "/") != 1) { bad = 1; exit }
+      print name
+    }
+    END { exit bad }
+  '); then echo "$why"; return 1; fi
+  # No name explains the reason: the first read failed, or the file closed since. Hold the cache.
+  [ -n "$names" ] || { echo "$why"; return 1; }
+  printf '%s\n' "$names"
+}
+
+# TSX caches are write-once compiled files, and tsx reads a missing one as a cache miss. Keep
+# the cache directory itself; prune only regular, account-owned entries older than the age
+# window. A file that a process holds open stays, and every other old file goes (W1-T12252):
+# a host that runs tsx all day always has one open file, and that must not hold the cache.
+# A scan that cannot be read still holds the whole cache.
 prune_tsx_cache() {
   local dir="$1" strict="${2:-0}" files owner_name count active parent entry entries
+  local real open again doomed total held bytes removed left
   [ -d "$dir" ] && [ ! -L "$dir" ] || return 0
   owner_name=$(owner "$dir" 2>/dev/null)
   if [ "$owner_name" != "$ME" ]; then
@@ -438,8 +546,8 @@ prune_tsx_cache() {
     while IFS= read -r entry; do
       [ -n "$entry" ] || continue
       # tsx creates <pid>.pipe Unix sockets beside its transpile cache. Keep
-      # these IPC endpoints, but do not let a stale endpoint hide old cache
-      # files. Whole-cache live/open checks below still protect a live server.
+      # these IPC endpoints, but do not let one hide old cache files. The
+      # process and working-directory checks below still hold a cache in use.
       if [ -S "$entry" ] && [ ! -L "$entry" ] && [[ "${entry##*/}" =~ ^[0-9]+\.pipe$ ]] && [ "$(owner "$entry" 2>/dev/null)" = "$ME" ]; then
         continue
       fi
@@ -448,27 +556,65 @@ prune_tsx_cache() {
       fi
     done <<< "$entries"
   fi
-  if ! files=$("$TSX_FIND" "$dir" -xdev -type f -user "$ME" -mmin "+$TSX_AGE_MIN" -cmin "+$TSX_AGE_MIN" -print 2>/dev/null); then
+  # lsof prints resolved paths, so the files are listed below the resolved cache path.
+  real=$(cd "$dir" 2>/dev/null && pwd -P) || real=""
+  case "$real" in ''|*$'\n'*)
+    TSX_SKIPPED=$((TSX_SKIPPED+1)); report_risk 'TSX cache path unverified' "$dir"; return 0 ;;
+  esac
+  # A name with a line break cannot be listed one path per line; such a file stays.
+  if ! files=$("$TSX_FIND" "$real" -xdev -type f -user "$ME" ! -name $'*\n*' -mmin "+$TSX_AGE_MIN" -cmin "+$TSX_AGE_MIN" -print 2>/dev/null); then
     TSX_SKIPPED=$((TSX_SKIPPED+1)); report_risk 'TSX cache age scan unverified' "$dir"; return 0
   fi
   [ -n "$files" ] || return 0
-  count=$(printf '%s\n' "$files" | awk 'END {print NR+0}')
-  if active=$(path_is_live_or_unknown "$(cd "$dir" 2>/dev/null && pwd -P)"); then
-    TSX_SKIPPED=$((TSX_SKIPPED+1)); report_risk "TSX cache $active" "$dir"; return 0
+  if ! open=$(tsx_cache_open_files "$real"); then
+    TSX_SKIPPED=$((TSX_SKIPPED+1)); report_risk "TSX cache $open" "$dir"; return 0
   fi
   if [ "$APPLY" = 1 ]; then
-    # Recheck liveness immediately before the batched age/owner-filtered delete.
-    if active=$(path_is_live_or_unknown "$(cd "$dir" 2>/dev/null && pwd -P)"); then
-      TSX_SKIPPED=$((TSX_SKIPPED+1)); report_risk "TSX cache $active" "$dir"; return 0
+    # Read the open files again immediately before the delete. A file open in either read stays.
+    if ! again=$(tsx_cache_open_files "$real"); then
+      TSX_SKIPPED=$((TSX_SKIPPED+1)); report_risk "TSX cache $again" "$dir"; return 0
     fi
-    if ! "$TSX_FIND" "$dir" -xdev -type f -user "$ME" -mmin "+$TSX_AGE_MIN" -cmin "+$TSX_AGE_MIN" -exec rm -f -- {} +; then
-      TSX_SKIPPED=$((TSX_SKIPPED+1)); report_risk 'TSX cache prune incomplete' "$dir"; return 0
+    open="$open"$'\n'"$again"
+  fi
+  # lsof escapes a backslash and every byte outside printable ASCII, so such a name cannot be
+  # compared with its list. While any file is open, a file with such a name stays.
+  doomed=$(LC_ALL=C awk '
+    NR == FNR { if ($0 != "") { open[$0] = 1; any = 1 }; next }
+    $0 == "" || ($0 in open) { next }
+    any && ($0 ~ /[^ -~]/ || index($0, "\\")) { next }
+    { print }
+  ' <(printf '%s\n' "$open") <(printf '%s\n' "$files"))
+  total=$(printf '%s\n' "$files" | awk '$0 != "" { n++ } END { print n+0 }')
+  count=$(printf '%s\n' "$doomed" | awk '$0 != "" { n++ } END { print n+0 }')
+  held=$((total - count))
+  if [ "$count" -eq 0 ]; then
+    echo "kept tsx cache files held open=$held (older than $TSX_AGE_MIN min): $dir"; return 0
+  fi
+  # Measure before the delete. A file that vanished since the listing adds nothing.
+  bytes=$(printf '%s\n' "$doomed" | tr '\n' '\0' | xargs -0 du -k 2>/dev/null | awk '{ kb += $1 } END { printf "%d", kb * 1024 }')
+  case "$bytes" in ''|*[!0-9]*) bytes=0 ;; esac
+  if [ "$APPLY" = 1 ]; then
+    # Each listed path is judged again by owner, type and age as it is removed, so a file
+    # that changed or vanished since the listing is passed over and the pass goes on.
+    # shellcheck disable=SC2016 # the shell body is passed literally to xargs' child
+    removed=$(printf '%s\n' "$doomed" | tr '\n' '\0' | xargs -0 /bin/sh -c '
+      find_cmd=$1; me=$2; age=$3; shift 3
+      "$find_cmd" "$@" -maxdepth 0 -type f -user "$me" -mmin "+$age" -cmin "+$age" -exec rm -f -- {} + -print
+    ' sh "$TSX_FIND" "$ME" "$TSX_AGE_MIN" 2>/dev/null | awk 'END { print NR+0 }')
+    # shellcheck disable=SC2016
+    left=$(printf '%s\n' "$doomed" | tr '\n' '\0' | xargs -0 /bin/sh -c '
+      find_cmd=$1; me=$2; age=$3; shift 3
+      "$find_cmd" "$@" -maxdepth 0 -type f -user "$me" -mmin "+$age" -cmin "+$age" -print
+    ' sh "$TSX_FIND" "$ME" "$TSX_AGE_MIN" 2>/dev/null | awk 'END { print NR+0 }')
+    if [ "$left" -gt 0 ]; then
+      TSX_SKIPPED=$((TSX_SKIPPED+1)); report_risk 'TSX cache prune incomplete' "$dir"
+      removed=$((removed - left)); [ "$removed" -ge 0 ] || removed=0
     fi
-    TSX_PRUNED_N=$((TSX_PRUNED_N+count))
-    echo "pruned tsx cache files=$count (older than $TSX_AGE_MIN min): $dir"
+    TSX_PRUNED_N=$((TSX_PRUNED_N+removed))
+    echo "pruned tsx cache files=$removed bytes=$bytes kept-open=$held (older than $TSX_AGE_MIN min): $dir"
   else
     TSX_PRUNED_N=$((TSX_PRUNED_N+count))
-    echo "would prune tsx cache files=$count (older than $TSX_AGE_MIN min): $dir"
+    echo "would prune tsx cache files=$count bytes=$bytes kept-open=$held (older than $TSX_AGE_MIN min): $dir"
   fi
 }
 
@@ -737,3 +883,5 @@ if [ $APPLY = 1 ]; then
     if [ "$risky_n" -gt 0 ]; then printf '%s\n' "${risky[@]}"; fi
   } > "$REPORT"
 fi
+# The scheduled full pass refreshes its own install folder last; the delegated cache-only call does not.
+[ "$TSX_ONLY" = 1 ] || rmd_janitor_refresh "$APPLY"

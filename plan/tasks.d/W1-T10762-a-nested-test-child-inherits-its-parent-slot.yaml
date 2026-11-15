@@ -11,7 +11,7 @@
   origin: "operator recon 2026-10-26 (E5): reproduce the 2026-10-13 private-RMD_TEST_SLOT_DIR nested-test wait after #12570, #13304, #13363, #14360 and W1-T8047"
   plan_refs: [W1-T8047, W1-T9928]
   files: [src/lib/test-slot.ts, test/ci/suites/a-nested-test-child-inherits-its-parent-slot.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

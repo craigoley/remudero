@@ -17,7 +17,7 @@
     - src/lib/serve.ts
     - src/lib/incident-invariants.ts
     - test/sre/a-live-ledger-tail-matches-a-full-read.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: createLiveLedgerTail returns the rows a full readLedgerLines read returns within the retained window, and the same incident findings, across appends, a torn complete line, a trailing line with no newline, a rotation rename, an in-place truncation or rewrite, deletion and recreation

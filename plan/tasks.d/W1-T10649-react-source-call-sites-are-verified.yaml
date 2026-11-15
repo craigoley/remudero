@@ -16,7 +16,7 @@
   files:
     - src/lib/task-linter.ts
     - test/plan/react-source-call-sites-are-verified.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: >-
     The authorized React/Vite Wreckterra starter is merged and provides real

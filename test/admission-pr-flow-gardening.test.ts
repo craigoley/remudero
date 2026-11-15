@@ -242,7 +242,7 @@ test("W1-T7756 recurrence: replay and head churn are not new episodes; controls 
 test("W1-T7756 integration: ordinary remedies survive missing admission evidence and shadow proposals do not land", async (t) => {
   const f = fixture(t);
   const ordinary: LedgerRecord[] = [-2, -1].map(hours => ({ step: "sweep.disposed", pr_number: 9,
-    ts: fixedClock(now + hours * 3_600_000).iso(), blocker: "escalated", reason: "ordinary cause", blocker_owner: "NONE" }));
+    ts: fixedClock(now + hours * 3_600_000).iso(), blocker: "own-red", reason: "ordinary cause", blocker_owner: "fix-lane" }));
   const sources: remedy.FlowGardenSources = { owner: input.owner, repo: input.repo, mintTaskId: () => { throw Error("forbidden mint"); },
     ledgerRecords: () => ordinary, planState: () => ({ tasks: [] }), prOutcomes: () => new Map(),
     admission: { ...input, readCorpus: async () => corpus(), readLedger: () => ({ ok: false, rows: [], unread: ["lost"] }) } };

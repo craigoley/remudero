@@ -159,7 +159,7 @@ test("W1-T7727: pausing wild-trails holds no Remudero instance, and pausing core
   assert.equal(resumed.status, 0, resumed.out);
   assert.deepEqual(await heldInstances(fx), []);
 
-  const core = rmd(fx, "operator", "pause", "--instance", "core");
+  const core = rmd(fx, "operator", "pause", "--instance", "core", "--reason", "core window");
   assert.equal(core.status, 0, core.out);
   assert.deepEqual(await heldInstances(fx), ["core"], "wild-trails stays free while core is held");
   assert.equal(sharedRefOnOrigin(fx), "");
@@ -178,17 +178,17 @@ test("W1-T7727: resuming one instance leaves another instance's hold standing", 
 
 test("W1-T7727: a target that cannot be resolved unambiguously changes nothing", async () => {
   const cases: Array<{ name: string; fx: () => Fixture; as: Instance | "operator"; args: string[]; refusal: RegExp }> = [
-    { name: "a config.root that is no instance's state_dir", fx: () => makeFixture(), as: "operator", args: ["pause"], refusal: /not the state_dir of any instance/ },
-    { name: "an undeclared --instance", fx: () => makeFixture(), as: "operator", args: ["pause", "--instance", "nope"], refusal: /not a declared instance/ },
-    { name: "--fleet with --instance", fx: () => makeFixture(), as: "core", args: ["pause", "--fleet", "--instance", "core"], refusal: /cannot be combined/ },
+    { name: "a config.root that is no instance's state_dir", fx: () => makeFixture(), as: "operator", args: ["pause", "--reason", "hold"], refusal: /not the state_dir of any instance/ },
+    { name: "an undeclared --instance", fx: () => makeFixture(), as: "operator", args: ["pause", "--instance", "nope", "--reason", "hold"], refusal: /not a declared instance/ },
+    { name: "--fleet with --instance", fx: () => makeFixture(), as: "core", args: ["pause", "--fleet", "--instance", "core", "--reason", "hold"], refusal: /cannot be combined/ },
     {
       name: "two instances declaring one state_dir",
       fx: () => makeFixture((dir) => registryText(dir, `  shadow-core:\n    repo: shadow\n    github_repo: fixture/shadow\n    state_dir: ${join(dir, "core")}\n`)),
       as: "core",
-      args: ["pause"],
+      args: ["pause", "--reason", "hold"],
       refusal: /state_dir of 2 instances/,
     },
-    { name: "an unreadable registry", fx: () => makeFixture((dir) => `not a registry ${dir}\n`), as: "core", args: ["pause"], refusal: /cannot tell which instance/ },
+    { name: "an unreadable registry", fx: () => makeFixture((dir) => `not a registry ${dir}\n`), as: "core", args: ["pause", "--reason", "hold"], refusal: /cannot tell which instance/ },
     {
       name: "a registry file that cannot be read",
       fx: () => {
@@ -198,7 +198,7 @@ test("W1-T7727: a target that cannot be resolved unambiguously changes nothing",
         return fx;
       },
       as: "core",
-      args: ["pause", "--instance", "core"],
+      args: ["pause", "--instance", "core", "--reason", "hold"],
       refusal: /instance registry .* is unreadable/,
     },
   ];
@@ -278,7 +278,7 @@ test("W1-T7727: a missing configured root refuses pause and resume without recre
   for (const verb of ["pause", "resume"] as const) {
     const fx = makeFixture();
     renameSync(fx.root("core"), join(fx.dir, "core-unavailable"));
-    const result = rmd(fx, "core", verb);
+    const result = rmd(fx, "core", verb, ...(verb === "pause" ? ["--reason", "hold"] : []));
     assert.notEqual(result.status, 0, `${verb}: the missing configured root is refused`);
     assert.match(result.out, /not reachable from this process/);
     assert.equal(existsSync(fx.root("core")), false, `${verb}: neither invocation telemetry nor the control creates a replacement root`);

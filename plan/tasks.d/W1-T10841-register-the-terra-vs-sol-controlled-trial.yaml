@@ -17,7 +17,7 @@
     - src/lib/benchmark-paid-pilot.ts
     - src/run-task.ts
     - test/routing/terra-vs-sol-trial-registration.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     VERIFIED ON origin/main 07dbdcc77 (2026-10-27). The evaluation machinery exists; no trial has been registered on it.

@@ -1052,8 +1052,11 @@ WATCHDOG_DEPLOY_DEADLINE_S=3600
 watchdog_deploy_run() (
   local observer="" root="${BASHPID:-$$}"
   local tmo=()
+  # W1-T12247: the deploy step reads the second at which timeout ends it. No timeout, no limit to give.
+  unset RMD_DEPLOY_STEP_ENDS_AT
   if command -v timeout >/dev/null 2>&1; then
     tmo=(timeout -k 30 "$WATCHDOG_DEPLOY_DEADLINE_S")
+    export RMD_DEPLOY_STEP_ENDS_AT="$(($(date +%s) + WATCHDOG_DEPLOY_DEADLINE_S))"
     # Snapshot BEFORE timeout signals the process group, so a normally TERM-responsive child is
     # still visible. Only this owned observer/sleeper is stopped when the command returns early.
     (
@@ -1521,7 +1524,11 @@ $(render_serve_memory_tuning)
     if [ -f "\$DAEMON_CODE/src/run-task.ts" ]; then
       refresh_deploy_code '${CONTAINER_NAME}' || deploy_code_busy_handoff '${CONTAINER_NAME}' || exit 0
     fi
-    echo "rmd-relaunch: ${CONTAINER_NAME} healthy -- asking the supervisor whether a RECYCLE is due."
+    if watchdog_healthy; then
+      echo "rmd-relaunch: ${CONTAINER_NAME} healthy -- asking the supervisor whether a RECYCLE is due."
+    else
+      echo "rmd-relaunch: ${CONTAINER_NAME} \${PROGRESS_STATE:-UNKNOWN} action=\${PROGRESS_ACTION:-none} -- \$(verdict_field reason)"
+    fi
     DEPLOY_SHADOW_ARGS=()
     if [ -n "\${registry_shadow_session:-}" ] && [ -r "\$DAEMON_CODE/src/run-task.ts" ] && \\
         grep -F -- 'selectedRegistryLifecycleExec(' "\$DAEMON_CODE/src/run-task.ts" >/dev/null; then
@@ -2130,8 +2137,10 @@ if [ -n "$CLEANUP_PATH" ]; then
   # Include the service user's disposable worktree root in the same guarded six-hour janitor.
   # It is separate from /mnt/scratch/worktrees, and omitting it left stale linked trees in rmd-work
   # accumulating indefinitely. Keep the roots overrideable for hosts with a different layout.
-  CLEANUP_WORKTREE_ROOTS="${RMD_CLEANUP_WORKTREE_ROOTS-/mnt/scratch/worktrees:/home/${SERVICE_USER}/rmd-work}"
-  CLEANUP_LIVE_CHECKOUTS="${RMD_CLEANUP_LIVE_CHECKOUTS-/home/${SERVICE_USER}/rmd-mint:/home/${SERVICE_USER}/rmd-op}"
+  # W1-T12454: the hand lane makes its worktrees under /mnt/scratch/rmd/hand. Its shared reservation
+  # checkout wt-reserve sits there too, so it is a live checkout and never swept.
+  CLEANUP_WORKTREE_ROOTS="${RMD_CLEANUP_WORKTREE_ROOTS-/mnt/scratch/worktrees:/home/${SERVICE_USER}/rmd-work:/mnt/scratch/rmd/hand}"
+  CLEANUP_LIVE_CHECKOUTS="${RMD_CLEANUP_LIVE_CHECKOUTS-/home/${SERVICE_USER}/rmd-mint:/home/${SERVICE_USER}/rmd-op:/mnt/scratch/rmd/hand/wt-reserve}"
   checkout_git() {
     if [ "$(id -un)" = "$SERVICE_USER" ]; then git -C "$@"
     else sudo -n -u "$SERVICE_USER" git -C "$@"; fi
@@ -2139,6 +2148,11 @@ if [ -n "$CLEANUP_PATH" ]; then
   while IFS= read -r live_checkout; do
     [ -n "$live_checkout" ] || continue
     checkout_git "$live_checkout" rev-parse --git-dir >/dev/null 2>&1 || continue
+    # A linked worktree takes its hooks and config from its main checkout; setting core.hooksPath
+    # here would change that other checkout (W1-T12454: wt-reserve is a worktree of a shared one).
+    live_git_dir=$(checkout_git "$live_checkout" rev-parse --absolute-git-dir 2>/dev/null) || continue
+    live_common_dir=$(checkout_git "$live_checkout" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || continue
+    [ "$live_git_dir" = "$live_common_dir" ] || continue
     if hooks_path=$(checkout_git "$live_checkout" config --path --get core.hooksPath 2>/dev/null); then
       :
     else
@@ -2283,9 +2297,12 @@ fi
 SESSION_SLICE_DROPIN=""
 SESSION_SLICE_WANT=""
 SESSION_SLICE_WRITTEN=0
+SESSION_CPU_DROPIN=""
 if [ -z "$INSTANCE_NAME" ] || [ "$INSTANCE_NAME" = "core" ]; then
   # shellcheck source=deploy/resource-policy.sh
   . "${SCRIPT_DIR}/resource-policy.sh"
+  SESSION_CPU_DROPIN="${UNIT_DIR}/user.slice.d/50-rmd-cap.conf"
+  SESSION_CPU_WANT="$(resource_policy_session_cpu_slice_dropin)"
   SESSION_UID="${RMD_SERVICE_UID:-$(id -u "$SERVICE_USER" 2>/dev/null || true)}"
   case "$SESSION_UID" in
     ''|*[!0-9]*) echo "install-host-units: skipped session slice cap -- no uid for service user '${SERVICE_USER}'" ;;
@@ -2318,6 +2335,28 @@ if [ -n "$SESSION_SLICE_DROPIN" ]; then
     SESSION_SLICE_WRITTEN=1
     UNIT_CHANGED=1
     echo "install-host-units: wrote   $SESSION_SLICE_DROPIN (${RP_SESSION_NOTE})"
+  fi
+fi
+
+# The parent CPU weight is independent of the UID slice's memory sizing (W1-T12060).
+if [ -n "$SESSION_CPU_DROPIN" ]; then
+  if [ -e "$SESSION_CPU_DROPIN" ] && [ "$(effective_directives "$SESSION_CPU_WANT")" = "$(effective_directives "$(cat "$SESSION_CPU_DROPIN" 2>/dev/null)")" ]; then
+    echo "install-host-units: ok      $SESSION_CPU_DROPIN"
+  elif [ "$MODE" = "check" ]; then
+    if [ -e "$SESSION_CPU_DROPIN" ]; then
+      echo "install-host-units: DRIFTED $SESSION_CPU_DROPIN (want: CPUWeight=${RMD_SESSION_CPU_WEIGHT})"
+    else
+      echo "install-host-units: MISSING $SESSION_CPU_DROPIN"
+    fi
+    drift=$(( drift + 1 ))
+  else
+    mkdir -p "$(dirname "$SESSION_CPU_DROPIN")"
+    tmp="${SESSION_CPU_DROPIN}.tmp.$$"
+    printf '%s\n' "$SESSION_CPU_WANT" > "$tmp"
+    chmod 0644 "$tmp"
+    mv -f "$tmp" "$SESSION_CPU_DROPIN"
+    UNIT_CHANGED=1
+    echo "install-host-units: wrote   $SESSION_CPU_DROPIN (CPUWeight ${RMD_SESSION_CPU_WEIGHT} on user.slice)"
   fi
 fi
 
@@ -2392,6 +2431,17 @@ if [ "$SYSTEMD_LIVE" = 1 ]; then
     echo "install-host-units: ${reload_note}; ${SERVICE_UNIT_NAME}, ${WATCHDOG_TIMER_NAME} are enabled"
   fi
   echo "install-host-units: NOTE — the daemon itself was not started or stopped; run ${LAUNCHER} to bring it up."
+fi
+
+if [ -n "$SESSION_CPU_DROPIN" ] && [ "$SYSTEMD_LIVE" = 1 ]; then
+  live_cpu="$("$SYSTEMCTL" show user.slice -p CPUWeight --value 2>/dev/null || true)"
+  if [ "$live_cpu" = "$RMD_SESSION_CPU_WEIGHT" ]; then
+    echo "install-host-units: user.slice CPUWeight confirmed live at ${RMD_SESSION_CPU_WEIGHT}"
+  elif "$SYSTEMCTL" set-property --runtime user.slice "CPUWeight=${RMD_SESSION_CPU_WEIGHT}" 2>/dev/null; then
+    echo "install-host-units: user.slice CPUWeight read ${live_cpu:-unknown}; applied ${RMD_SESSION_CPU_WEIGHT} at runtime"
+  else
+    echo "install-host-units: WARNING user.slice CPUWeight reads ${live_cpu:-unknown}, not ${RMD_SESSION_CPU_WEIGHT}; the file takes effect at the next boot" >&2
+  fi
 fi
 
 # A rewritten slice drop-in takes effect at the daemon-reload above. Confirm it from what systemd

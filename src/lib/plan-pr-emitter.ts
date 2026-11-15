@@ -22,10 +22,14 @@ import { createRequire } from "node:module";
 import { existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { promisify } from "node:util";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
+import { configPath } from "./config.js";
+import { readFileIfExists } from "./fs-race-safe.js";
+import { resolvePlanDestination } from "./plan-destination.js";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { parse as parseYaml } from "yaml";
-import { acceptanceBlockDiagnostics, acceptanceHeaderLine, parseAcceptanceBlock, parseWhitelistedProof } from "./review.js";
+import { acceptanceBlockDiagnostics, acceptanceHeaderLine, parseAcceptanceBlock, parseWhitelistedProof, wrappedGrepPattern } from "./review.js";
+import { breMetacharsIn } from "./bre-metachars.js";
 import { emDashSeparatedProof, refuseNonDiscriminatingCriteria } from "./body-repair.js";
 import {
   checkCommitMessage,
@@ -218,6 +222,155 @@ export function filingAcceptanceCriteria(taskIds: string[], files: string[]): Ac
     ];
   }
   return criteria;
+}
+
+// ── 3b. The safety bar for a grep proof over a line a diff ADDS (W1-T4263, shared by W1-T11625) ─────
+
+const ANCHOR_MIN_LENGTH = 8;
+
+/** Escape a literal line into a BRE `grep` pattern the proof executor reads back as that literal. */
+export function escapeGrepLiteral(line: string): string {
+  let escaped = "";
+  for (const ch of line) {
+    if (ch === "\\") escaped += "\\\\";
+    else if (ch === "?") escaped += "[?]";
+    else if (".[]*^$".includes(ch)) escaped += `\\${ch}`;
+    else escaped += ch;
+  }
+  return escaped;
+}
+
+/** The lines a unified diff adds (with the path they land in) and removes. `sawHeader` is false for text that is
+ *  not a diff at all. */
+export function parseDiffLines(diffText: string): { sawHeader: boolean; added: Array<{ path: string; line: string }>; removed: Set<string> } {
+  const added: Array<{ path: string; line: string }> = [];
+  const removed = new Set<string>();
+  let file: string | undefined;
+  let sawHeader = false;
+  for (const raw of diffText.split("\n").map((l) => l.replace(/\r$/, ""))) {
+    if (raw.startsWith("diff --git ")) {
+      file = undefined;
+      continue;
+    }
+    if (raw.startsWith("+++ ")) {
+      sawHeader = true;
+      const path = raw.slice(4).replace(/^b\//, "").trim();
+      file = path === "/dev/null" ? undefined : path;
+      continue;
+    }
+    if (raw.startsWith("--- ")) continue;
+    if (raw.startsWith("-")) removed.add(raw.slice(1).trim());
+    else if (file && raw.startsWith("+")) added.push({ path: file, line: raw.slice(1).trim() });
+  }
+  return { sawHeader, added, removed };
+}
+
+/** The ONE safety bar: a `grep:` proof for `line` in `path`, or `undefined` when the line cannot be a runnable,
+ *  parser-valid proof that survives the Acceptance block verbatim. A line the diff also REMOVES is a move. */
+export function safeAddedLineProof(path: string, line: string, removed: ReadonlySet<string>): string | undefined {
+  if (line.length < ANCHOR_MIN_LENGTH || removed.has(line) || /\sin\s/i.test(line)) return undefined;
+  if (!/\.[^/]+$/.test(path) || /\s/.test(path) || path.includes("..")) return undefined;
+  const pattern = escapeGrepLiteral(line);
+  const proof = `grep: ${pattern} in ${path}`;
+  if (parseWhitelistedProof(proof) === null || breMetacharsIn(pattern).blocking.length > 0) return undefined;
+  if (wrappedGrepPattern(proof) !== undefined) return undefined;
+  const roundTrip = parseAcceptanceBlock(renderAcceptanceBlock([{ claim: "anchor", proof }]));
+  if (roundTrip.length !== 1 || roundTrip[0].proof !== proof) return undefined;
+  return proof;
+}
+
+/** A shard's task id from its own first `- id:` line, or `undefined`. */
+function shardOwnId(content: string): string | undefined {
+  return /^\s*-\s+id:\s*["']?([A-Za-z0-9._-]+)["']?\s*$/m.exec(content)?.[1];
+}
+
+function readShardAt(cwd: string, relPath: string): string | undefined {
+  try {
+    return readFileSync(join(cwd, relPath), "utf8");
+  } catch (e) {
+    void e; // an unreadable (deleted or absent) shard has no head content to prove against; the caller skips it
+    return undefined;
+  }
+}
+
+/**
+ * W1-T11625 — acceptance criteria for a PLAN PR (`rmd plan`) that may file new shards AND amend existing ones.
+ * A reserved id's shard keeps {@link filingAcceptanceCriteria}'s `grep: id:` proof (absent at base, so it
+ * discriminates). A changed shard no reserved id pairs with is an AMENDMENT of an existing task, whose `id:` line
+ * passes at the merge base too, so its proof greps a line the amendment adds to THAT shard, under the same
+ * safety bar as {@link safeAddedLineProof}, and only when that line occurs nowhere else in the head shard and in
+ * no removed line (so it cannot already match at base). NEVER prose: with no runnable proof it THROWS.
+ */
+export function planPrAcceptanceCriteria(
+  reservedIds: string[],
+  files: string[],
+  diffText: string | undefined,
+  cwd: string = process.cwd(),
+): AcceptanceCriterion[] {
+  const criteria: AcceptanceCriterion[] = [];
+  const shards = files.filter((f) => f.startsWith(PLAN_TASK_SHARD_PREFIX) && !f.slice(PLAN_TASK_SHARD_PREFIX.length).includes("/"));
+  const paired = new Set<string>();
+  for (const id of reservedIds) {
+    const shard = shards.find((f) => isTaskShardName(f.slice(PLAN_TASK_SHARD_PREFIX.length), id));
+    if (shard === undefined) continue;
+    paired.add(shard);
+    criteria.push({
+      claim: `${id} is filed as a well-formed plan task shard by this PR, not (yet) implemented`,
+      proof: `grep: id: ${id} in ${shard}`,
+    });
+  }
+  const parsed = diffText === undefined ? undefined : parseDiffLines(diffText);
+  for (const shard of shards) {
+    if (paired.has(shard) || parsed === undefined) continue;
+    const content = readShardAt(cwd, shard);
+    const id = content === undefined ? undefined : shardOwnId(content);
+    if (content === undefined || id === undefined || !isTaskShardName(shard.slice(PLAN_TASK_SHARD_PREFIX.length), id)) continue;
+    const headLines = content.split("\n");
+    for (const { path, line } of parsed.added) {
+      if (path !== shard) continue;
+      if (headLines.filter((l) => l.includes(line)).length !== 1) continue;
+      if ([...parsed.removed].some((r) => r.includes(line))) continue;
+      const proof = safeAddedLineProof(path, line, parsed.removed);
+      if (proof === undefined) continue;
+      criteria.push({
+        claim: `${id} is amended (not implemented) by this PR; its proof greps a line this PR adds to ${shard}`,
+        proof,
+      });
+      break;
+    }
+  }
+  if (criteria.length === 0 && parsed !== undefined) {
+    const otherPlanFiles = files
+      .filter((f) => f === "plan/tasks.yaml" || f === "MASTER-PLAN.md" || f.startsWith("plan/"))
+      .filter((f) => !shards.includes(f))
+      .sort((a, b) => {
+        const rank = (path: string): number => path === "plan/tasks.yaml" ? 0 : path === "MASTER-PLAN.md" ? 1 : 2;
+        return rank(a) - rank(b) || files.indexOf(a) - files.indexOf(b);
+      });
+    for (const path of otherPlanFiles) {
+      const content = readShardAt(cwd, path);
+      if (content === undefined) continue;
+      const headLines = content.split("\n");
+      for (const { path: addedPath, line } of parsed.added) {
+        if (addedPath !== path || headLines.filter((candidate) => candidate.includes(line)).length !== 1) continue;
+        if ([...parsed.removed].some((removedLine) => removedLine.includes(line))) continue;
+        const proof = safeAddedLineProof(path, line, parsed.removed);
+        if (proof === undefined) continue;
+        criteria.push({ claim: `${path} is amended by this PR; its proof greps a line this PR adds to ${path}`, proof });
+        break;
+      }
+      if (criteria.length > 0) break;
+    }
+  }
+  const runnable = criteria.filter((c) => {
+    if (parseWhitelistedProof(c.proof) === null) return false;
+    const roundTrip = parseAcceptanceBlock(renderAcceptanceBlock([c]));
+    return roundTrip.length === 1 && roundTrip[0].proof === c.proof;
+  });
+  if (runnable.length === 0) {
+    throw new Error(`plan PR refused: no runnable acceptance proof derivable from ${files.join(", ") || "(no files)"}`);
+  }
+  return runnable;
 }
 
 // ── 4. Gate-compliant commit-message assembly (the #387 body fix) ───────────────────────────
@@ -483,6 +636,45 @@ export function probeExistingPlanPr(fetch: GhApiFetcher, owner: string, repo: st
 // it is about to push, and a red answer refuses the push. A check that cannot run is reported, never refusing —
 // the same rule the hook keeps with its exit 2. Operator and session PRs never pass through here.
 
+/** A preflight reads a plan tree and, optionally, a separately pinned public code tree. */
+export interface PlanPrPreflightInput {
+  cwd: string;
+  title: string;
+  body: string;
+  headRef?: string;
+  codeRoot?: string;
+  /** Check PR-body proofs against the candidate plan checkout when they assert plan-file contents. */
+  bodyProofRoot?: "code" | "plan";
+}
+export interface PlanPrDestinationChecks {
+  destinationStateDir?: () => string | undefined;
+  publicCodeRoot?: () => string;
+}
+/** Read-only, with loadConfig's existing root fallback. Importing feedback's helper here would
+ * introduce feedback -> landing -> emitter -> feedback; do not create that production cycle. */
+function preflightStateDir(): string | undefined {
+  const raw = readFileIfExists(configPath());
+  if (raw === undefined) return undefined;
+  let root: unknown;
+  try { root = (JSON.parse(raw) as { root?: unknown } | null)?.root; }
+  catch (error) { void error; /* malformed config keeps loadConfig's documented default root */ }
+  return join(typeof root === "string" && root !== "" ? root : join(homedir(), "Remudero"), "state");
+}
+function preflightCodeRoot(input: Pick<PlanPrPreflightInput, "cwd" | "codeRoot">, checks: PlanPrDestinationChecks): string | undefined {
+  if (input.codeRoot !== undefined) return realpathSync(input.codeRoot);
+  const destination = resolvePlanDestination("task", (checks.destinationStateDir ?? preflightStateDir)(), { owner: "", repo: "", checkoutDir: "" });
+  if (destination.outcome === "unreadable") throw new Error("plan destination is unreadable");
+  if (destination.outcome !== "destination" || realpathSync(input.cwd) !== realpathSync(destination.checkoutDir)) return undefined;
+  const root = checks.publicCodeRoot ?? (() => (createRequire(import.meta.url)("../../scripts/lib/repo-root.mjs") as { REPO_ROOT: string }).REPO_ROOT);
+  return realpathSync(root());
+}
+function codeRootFailureReason(error: unknown): string {
+  if (error instanceof Error && error.message === "plan destination is unreadable") return "host-selection-unreadable";
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  return ["ENOENT", "EACCES", "EPERM", "ENOTDIR", "ELOOP"].includes(code ?? "") ? `public-code-root-${code}` : "public-code-root-unreadable";
+}
+const unreadableCodeRoot = (reason: string): PlanPrPreflightResult => ({ ok: false, failures: [], unreadable: [{ check: "tree", firstLine: `the selected plan destination or its public code root is unreadable (${reason})` }] });
+
 export type PlanPrPreflightCheck = "tree" | "lint-plan" | "task-id-existence" | "proof-discrimination" | "pr-title" | "shard-census";
 export interface PlanPrPreflightFinding {
   check: PlanPrPreflightCheck;
@@ -581,7 +773,7 @@ async function runShardCensusAsync(cwd: string, budgetMs: number): Promise<PlanP
 
 /** Run a script the tree itself carries; a tree without it is a check that cannot run. Killed at `budgetMs`. */
 function runInTree(cwd: string, relPath: string, argv: string[], budgetMs: number, judged?: JudgedRun): PlanPrPreflightReading {
-  if (!existsSync(join(cwd, relPath))) return absentFromTree(relPath);
+  if (!existsSync(resolve(cwd, relPath))) return absentFromTree(relPath);
   const { file, args, env } = inTreeCommand(cwd, relPath, argv, judged);
   const r = spawnSync(file, args, { cwd, encoding: "utf8", maxBuffer: 1 << 26, env, ...budgetedSpawn(budgetMs) });
   const output = `${r.stdout ?? ""}\n${r.stderr ?? ""}`;
@@ -609,7 +801,7 @@ async function runChildAsync(file: string, args: string[], cwd: string, env?: No
   }
 }
 async function runInTreeAsync(cwd: string, relPath: string, argv: string[], budgetMs: number, judged?: JudgedRun): Promise<PlanPrPreflightReading> {
-  if (!existsSync(join(cwd, relPath))) return absentFromTree(relPath);
+  if (!existsSync(resolve(cwd, relPath))) return absentFromTree(relPath);
   const { file, args, env } = inTreeCommand(cwd, relPath, argv, judged);
   return runChildAsync(file, args, cwd, env, budgetMs);
 }
@@ -626,27 +818,73 @@ function checkProofLaunchArgv(cwd: string, proof: string, log: CheckProofChildLo
   log("plan_pr.check_proof_child", { kind: launch.kind, reason: launch.reason });
   return launch.argv;
 }
+function runProofInTree(cwd: string, entryRoot: string, proof: string, budgetMs: number,
+  log?: CheckProofChildLog, storeRoot?: string | false): PlanPrPreflightReading {
+  if (!existsSync(join(entryRoot, CHECK_PROOF_CHILD_ENTRY))) return absentFromTree(CHECK_PROOF_CHILD_ENTRY);
+  const args = checkProofLaunchArgv(entryRoot, proof, log, storeRoot);
+  // Reuse the shared sync tree runner so this adds no second sync-spawn path to the daemon census.
+  return runInTree(cwd, join(entryRoot, CHECK_PROOF_CHILD_ENTRY), args, budgetMs);
+}
+async function runProofInTreeAsync(cwd: string, entryRoot: string, proof: string, budgetMs: number,
+  log?: CheckProofChildLog, storeRoot?: string | false): Promise<PlanPrPreflightReading> {
+  if (!existsSync(join(entryRoot, CHECK_PROOF_CHILD_ENTRY))) return absentFromTree(CHECK_PROOF_CHILD_ENTRY);
+  const args = checkProofLaunchArgv(entryRoot, proof, log, storeRoot);
+  return runInTreeAsync(cwd, join(entryRoot, CHECK_PROOF_CHILD_ENTRY), args, budgetMs);
+}
 
+interface PlanLintScriptTools { lintArgvFromPackage(text: string): { args: string[]; base?: string } | undefined; }
+/** Reuse the maintained package-script parser. The precheck wrapper does not forward arbitrary
+ * argv; the cross-repository case must invoke its actual configured lint, with both roots. */
+function codeRootLint(cwd: string, codeRoot: string): { entry: string; args: string[] } {
+  const tools = createRequire(import.meta.url)("../../scripts/lint-plan-precheck.mjs") as PlanLintScriptTools;
+  const lint = tools.lintArgvFromPackage(readFileSync(join(codeRoot, "package.json"), "utf8"));
+  if (!lint) throw new Error("the public code root has no plain Node plan lint");
+  const args = [...lint.args];
+  let entry: string | undefined;
+  for (let i = 0; i < args.length; i++) {
+    if (["--import", "--require", "--loader", "--experimental-loader"].includes(args[i]!)) {
+      const value = args[++i];
+      if (!value) throw new Error("the public code root lint has an incomplete loader option");
+      args[i] = value.startsWith(".") || value.startsWith("/") ? resolve(codeRoot, value) : createRequire(join(codeRoot, "package.json")).resolve(value);
+    } else if (!args[i]!.startsWith("-")) { entry = resolve(codeRoot, args[i]!); args[i] = entry; break; }
+  }
+  if (!entry) throw new Error("the public code root lint has no script");
+  return { entry, args: [...args, "--repo-root", cwd, "--code-root", codeRoot] };
+}
+function codeRootTaskIds(codeRoot: string, headRef?: string): { entry: string; args: string[] } {
+  const entry = join(codeRoot, TASK_ID_SCRIPT);
+  return { entry, args: [entry, ...taskIdArgv(headRef).slice(1), "--code-root", codeRoot, "--baseline", join(codeRoot, "scripts/task-id-existence-baseline.json")] };
+}
 /** The four checks that shell out inside `cwd` (`checkProof` answers check-proof's exit), sync and awaited, budgeted. */
 const defaultPreflightChecks = {
-  lintPlan: (cwd: string, budgetMs: number): PlanPrPreflightReading => runInTree(cwd, LINT_PLAN_SCRIPT, LINT_PLAN_ARGV, budgetMs),
-  taskIdExistence: (cwd: string, headRef: string | undefined, budgetMs: number): PlanPrPreflightReading =>
-    taskIdReading(runInTree(cwd, TASK_ID_SCRIPT, taskIdArgv(headRef), budgetMs)),
+  lintPlan: (cwd: string, budgetMs: number, codeRoot?: string): PlanPrPreflightReading => {
+    if (codeRoot === undefined) return runInTree(cwd, LINT_PLAN_SCRIPT, LINT_PLAN_ARGV, budgetMs);
+    const launch = codeRootLint(cwd, codeRoot); return runInTree(cwd, launch.entry, launch.args, budgetMs);
+  },
+  taskIdExistence: (cwd: string, headRef: string | undefined, budgetMs: number, codeRoot?: string): PlanPrPreflightReading => {
+    const launch = codeRoot === undefined ? { entry: TASK_ID_SCRIPT, args: taskIdArgv(headRef) } : codeRootTaskIds(codeRoot, headRef);
+    return taskIdReading(runInTree(cwd, launch.entry, launch.args, budgetMs));
+  },
   shardCensus: (cwd: string, budgetMs: number): PlanPrPreflightReading => runShardCensus(cwd, budgetMs),
-  checkProof: (cwd: string, proof: string, budgetMs: number, log?: CheckProofChildLog, storeRoot?: string | false): ProofCheckStatus =>
-    proofCheckStatus(runInTree(cwd, CHECK_PROOF_CHILD_ENTRY, checkProofLaunchArgv(cwd, proof, log, storeRoot), budgetMs)),
+  checkProof: (cwd: string, proof: string, budgetMs: number, log?: CheckProofChildLog, storeRoot?: string | false, codeRoot?: string): ProofCheckStatus =>
+    proofCheckStatus(runProofInTree(cwd, codeRoot ?? cwd, proof, budgetMs, log, storeRoot)),
 };
 /** A test's stand-ins for any of {@link defaultPreflightChecks}, and for the budget each in-tree check gets. */
-export type PlanPrPreflightChecks = Partial<typeof defaultPreflightChecks> & { budgetMs?: () => number; log?: CheckProofChildLog; storeRoot?: string | false };
+export type PlanPrPreflightChecks = Partial<typeof defaultPreflightChecks> & PlanPrDestinationChecks & { budgetMs?: () => number; log?: CheckProofChildLog; storeRoot?: string | false };
 const defaultPreflightChecksAsync = {
-  lintPlan: (cwd: string, budgetMs: number): Promise<PlanPrPreflightReading> => runInTreeAsync(cwd, LINT_PLAN_SCRIPT, LINT_PLAN_ARGV, budgetMs),
-  taskIdExistence: async (cwd: string, headRef: string | undefined, budgetMs: number): Promise<PlanPrPreflightReading> =>
-    taskIdReading(await runInTreeAsync(cwd, TASK_ID_SCRIPT, taskIdArgv(headRef), budgetMs)),
+  lintPlan: (cwd: string, budgetMs: number, codeRoot?: string): Promise<PlanPrPreflightReading> => {
+    if (codeRoot === undefined) return runInTreeAsync(cwd, LINT_PLAN_SCRIPT, LINT_PLAN_ARGV, budgetMs);
+    const launch = codeRootLint(cwd, codeRoot); return runInTreeAsync(cwd, launch.entry, launch.args, budgetMs);
+  },
+  taskIdExistence: async (cwd: string, headRef: string | undefined, budgetMs: number, codeRoot?: string): Promise<PlanPrPreflightReading> => {
+    const launch = codeRoot === undefined ? { entry: TASK_ID_SCRIPT, args: taskIdArgv(headRef) } : codeRootTaskIds(codeRoot, headRef);
+    return taskIdReading(await runInTreeAsync(cwd, launch.entry, launch.args, budgetMs));
+  },
   shardCensus: (cwd: string, budgetMs: number): Promise<PlanPrPreflightReading> => runShardCensusAsync(cwd, budgetMs),
-  checkProof: async (cwd: string, proof: string, budgetMs: number, log?: CheckProofChildLog, storeRoot?: string | false): Promise<ProofCheckStatus> =>
-    proofCheckStatus(await runInTreeAsync(cwd, CHECK_PROOF_CHILD_ENTRY, checkProofLaunchArgv(cwd, proof, log, storeRoot), budgetMs)),
+  checkProof: async (cwd: string, proof: string, budgetMs: number, log?: CheckProofChildLog, storeRoot?: string | false, codeRoot?: string): Promise<ProofCheckStatus> =>
+    proofCheckStatus(await runProofInTreeAsync(cwd, codeRoot ?? cwd, proof, budgetMs, log, storeRoot)),
 };
-export type PlanPrPreflightAsyncChecks = Partial<typeof defaultPreflightChecksAsync> & { budgetMs?: () => number; log?: CheckProofChildLog; storeRoot?: string | false };
+export type PlanPrPreflightAsyncChecks = Partial<typeof defaultPreflightChecksAsync> & PlanPrDestinationChecks & { budgetMs?: () => number; log?: CheckProofChildLog; storeRoot?: string | false };
 
 const DIAGNOSTIC_LINE = /^(?:not ok |REFUSES\b|FAILED\b|✗|task-id-existence: FAILED\b|lint-plan-precheck:[^\n]*\bREFUSES\b)/;
 const outputLines = (output: string): string[] => output.split("\n").map((l) => l.trim()).filter(Boolean);
@@ -755,26 +993,34 @@ function discriminationReading(red: string[], unreadable: string[], timeouts: Pr
 }
 
 /** A PR-body proof is red on any non-pass; a shard's only when it passes at origin/main (a filed task fails at head). */
-function proofDiscrimination(cwd: string, body: string, checkProof: (cwd: string, proof: string) => ProofCheckStatus): PlanPrPreflightReading {
+function proofDiscrimination(
+  cwd: string,
+  body: string,
+  checkProof: (cwd: string, proof: string) => ProofCheckStatus,
+  bodyProofCwd = cwd,
+  shardProofCwd = cwd,
+): PlanPrPreflightReading {
   const red: string[] = [];
   const unreadable: string[] = [];
   const timeouts: ProofTimeouts = { lines: [] };
-  for (const proof of bodyProofsOf(body)) sortBodyProof(proof, checkProof(cwd, proof), red, unreadable, timeouts);
+  for (const proof of bodyProofsOf(body)) sortBodyProof(proof, checkProof(bodyProofCwd, proof), red, unreadable, timeouts);
   const shardProofList = changedShardProofs(cwd);
-  for (const proof of new Set(shardProofList ?? [])) sortShardProof(proof, checkProof(cwd, proof), red, timeouts);
+  for (const proof of new Set(shardProofList ?? [])) sortShardProof(proof, checkProof(shardProofCwd, proof), red, timeouts);
   return discriminationReading(red, unreadable, timeouts, shardProofList);
 }
 async function proofDiscriminationAsync(
   cwd: string,
   body: string,
   checkProof: (cwd: string, proof: string) => Promise<ProofCheckStatus>,
+  bodyProofCwd = cwd,
+  shardProofCwd = cwd,
 ): Promise<PlanPrPreflightReading> {
   const red: string[] = [];
   const unreadable: string[] = [];
   const timeouts: ProofTimeouts = { lines: [] };
-  for (const proof of bodyProofsOf(body)) sortBodyProof(proof, await checkProof(cwd, proof), red, unreadable, timeouts);
+  for (const proof of bodyProofsOf(body)) sortBodyProof(proof, await checkProof(bodyProofCwd, proof), red, unreadable, timeouts);
   const shardProofList = await changedShardProofsAsync(cwd);
-  for (const proof of new Set(shardProofList ?? [])) sortShardProof(proof, await checkProof(cwd, proof), red, timeouts);
+  for (const proof of new Set(shardProofList ?? [])) sortShardProof(proof, await checkProof(shardProofCwd, proof), red, timeouts);
   return discriminationReading(red, unreadable, timeouts, shardProofList);
 }
 
@@ -801,6 +1047,26 @@ function preflightTally() {
   };
 }
 const errorText = (e: unknown): string => String((e as Error)?.message ?? e);
+
+const DECISION_RECORD_PREFIX = "plan/decisions.d/";
+const CHANGED_PATHS_ARGS = ["diff", "--name-only", "origin/main...HEAD"];
+/**
+ * W1-T12201: a tree with no `scripts/` directory is a plan destination checkout. When its change holds only
+ * decision files, the awaited preflight runs the PR-title lint only: the plan lint, the task-id check, proof
+ * discrimination and the shard census read task files and run scripts that such a tree does not carry.
+ * The sync form keeps every check: one more sync spawn there would reach the daemon loop.
+ */
+const withoutScripts = (cwd: string): boolean => !existsSync(join(cwd, "scripts"));
+async function decisionFilesOnly(cwd: string): Promise<boolean> {
+  let paths: string[];
+  try {
+    paths = (await hostWorktreeGitAsync(cwd, CHANGED_PATHS_ARGS)).split("\n").map((l) => l.trim()).filter(Boolean);
+  } catch {
+    return false; // an unreadable diff runs every check, as before
+  }
+  return paths.length > 0 && paths.every((p) => p.startsWith(DECISION_RECORD_PREFIX));
+}
+
 function prTitleReading(title: string): PlanPrPreflightReading {
   const v = checkCommitMessage(title)[0];
   return v ? { status: 1, output: `${v.rule}: ${v.message}` } : { status: 0, output: "" };
@@ -812,7 +1078,12 @@ function prTitleReading(title: string): PlanPrPreflightReading {
  * task-id-existence `--require-open-prs`, proof discrimination of the PR body and of each changed shard through
  * `rmd check-proof --base origin/main`, the PR-title lint, and the `every-shard-on-main-is-lintable` census.
  */
-export function planPrPreflight(input: { cwd: string; title: string; body: string; headRef?: string }, checks: PlanPrPreflightChecks = {}): PlanPrPreflightResult {
+export function planPrPreflight(input: PlanPrPreflightInput, checks: PlanPrPreflightChecks = {}): PlanPrPreflightResult {
+  let codeRoot: string | undefined;
+  try { codeRoot = preflightCodeRoot(input, checks); } catch (error) {
+    const reason = codeRootFailureReason(error);
+    return unreadableCodeRoot(reason);
+  }
   const d = { ...defaultPreflightChecks, ...checks };
   const budgetMs = checks.budgetMs ?? (() => inTreeCheckBudgetMs());
   const tally = preflightTally();
@@ -825,19 +1096,30 @@ export function planPrPreflight(input: { cwd: string; title: string; body: strin
     }
     tally.record(check, reading);
   };
-  read("lint-plan", () => d.lintPlan(input.cwd, budgetMs()));
-  read("task-id-existence", () => d.taskIdExistence(input.cwd, input.headRef, budgetMs()));
-  read("proof-discrimination", () => proofDiscrimination(input.cwd, input.body, (cwd, proof) => d.checkProof(cwd, proof, budgetMs(), checks.log, checks.storeRoot)));
+  read("lint-plan", () => codeRoot === undefined ? d.lintPlan(input.cwd, budgetMs()) : d.lintPlan(input.cwd, budgetMs(), codeRoot));
+  read("task-id-existence", () => codeRoot === undefined ? d.taskIdExistence(input.cwd, input.headRef, budgetMs()) : d.taskIdExistence(input.cwd, input.headRef, budgetMs(), codeRoot));
+  read("proof-discrimination", () => proofDiscrimination(
+    input.cwd,
+    input.body,
+    (cwd, proof) => d.checkProof(cwd, proof, budgetMs(), checks.log, checks.storeRoot, codeRoot),
+    input.bodyProofRoot === "plan" ? input.cwd : codeRoot ?? input.cwd,
+    codeRoot ?? input.cwd,
+  ));
   read("pr-title", () => prTitleReading(input.title));
-  read("shard-census", () => d.shardCensus(input.cwd, budgetMs()));
+  read("shard-census", () => d.shardCensus(codeRoot ?? input.cwd, budgetMs()));
   return tally.result();
 }
 
 /** {@link planPrPreflight} as awaited child processes (W1-T5521): the same checks, order and verdict, off the loop. */
 export async function planPrPreflightAsync(
-  input: { cwd: string; title: string; body: string; headRef?: string },
+  input: PlanPrPreflightInput,
   checks: PlanPrPreflightAsyncChecks = {},
 ): Promise<PlanPrPreflightResult> {
+  let codeRoot: string | undefined;
+  try { codeRoot = preflightCodeRoot(input, checks); } catch (error) {
+    const reason = codeRootFailureReason(error);
+    return unreadableCodeRoot(reason);
+  }
   const d = { ...defaultPreflightChecksAsync, ...checks };
   const budgetMs = checks.budgetMs ?? (() => inTreeCheckBudgetMs());
   const tally = preflightTally();
@@ -850,11 +1132,21 @@ export async function planPrPreflightAsync(
     }
     tally.record(check, reading);
   };
-  await read("lint-plan", () => d.lintPlan(input.cwd, budgetMs()));
-  await read("task-id-existence", () => d.taskIdExistence(input.cwd, input.headRef, budgetMs()));
-  await read("proof-discrimination", () => proofDiscriminationAsync(input.cwd, input.body, (cwd, proof) => d.checkProof(cwd, proof, budgetMs(), checks.log, checks.storeRoot)));
+  if (withoutScripts(input.cwd) && await decisionFilesOnly(input.cwd)) {
+    await read("pr-title", () => prTitleReading(input.title));
+    return tally.result();
+  }
+  await read("lint-plan", () => codeRoot === undefined ? d.lintPlan(input.cwd, budgetMs()) : d.lintPlan(input.cwd, budgetMs(), codeRoot));
+  await read("task-id-existence", () => codeRoot === undefined ? d.taskIdExistence(input.cwd, input.headRef, budgetMs()) : d.taskIdExistence(input.cwd, input.headRef, budgetMs(), codeRoot));
+  await read("proof-discrimination", () => proofDiscriminationAsync(
+    input.cwd,
+    input.body,
+    (cwd, proof) => d.checkProof(cwd, proof, budgetMs(), checks.log, checks.storeRoot, codeRoot),
+    input.bodyProofRoot === "plan" ? input.cwd : codeRoot ?? input.cwd,
+    codeRoot ?? input.cwd,
+  ));
   await read("pr-title", () => prTitleReading(input.title));
-  await read("shard-census", () => d.shardCensus(input.cwd, budgetMs()));
+  await read("shard-census", () => d.shardCensus(codeRoot ?? input.cwd, budgetMs()));
   return tally.result();
 }
 
@@ -914,9 +1206,14 @@ function canonicalWorktreePath(path: string): string {
 export function planPrPreflightAtCommit(
   repoDir: string,
   commitSha: string,
-  pr: { title: string; body: string; headRef?: string },
+  pr: Omit<PlanPrPreflightInput, "cwd">,
   checks: PlanPrPreflightChecks = {},
 ): PlanPrPreflightResult {
+  let codeRoot: string | undefined;
+  try { codeRoot = preflightCodeRoot({ cwd: repoDir, ...pr }, checks); } catch (error) {
+    const reason = codeRootFailureReason(error);
+    return unreadableCodeRoot(reason);
+  }
   const parent = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}plan-pr-preflight-`));
   const tree = join(parent, "tree");
   const realTree = join(realpathSync(parent), "tree");
@@ -928,7 +1225,7 @@ export function planPrPreflightAtCommit(
       return treeNotMaterialized(commitSha, e, budgetMs); // failed or killed: it names which, unreadable or timedOut
     }
     borrowNodeModules(repoDir, tree);
-    return planPrPreflight({ cwd: tree, ...pr }, checks);
+    return planPrPreflight({ cwd: tree, ...pr, ...(codeRoot === undefined ? {} : { codeRoot }) }, checks);
   } finally {
     let removed = true;
     try {
@@ -948,9 +1245,14 @@ export function planPrPreflightAtCommit(
 export async function planPrPreflightAtCommitAsync(
   repoDir: string,
   commitSha: string,
-  pr: { title: string; body: string; headRef?: string },
+  pr: Omit<PlanPrPreflightInput, "cwd">,
   checks: PlanPrPreflightAsyncChecks = {},
 ): Promise<PlanPrPreflightResult> {
+  let codeRoot: string | undefined;
+  try { codeRoot = preflightCodeRoot({ cwd: repoDir, ...pr }, checks); } catch (error) {
+    const reason = codeRootFailureReason(error);
+    return unreadableCodeRoot(reason);
+  }
   const parent = await mkdtemp(join(tmpdir(), `${RMD_TMP_PREFIX}plan-pr-preflight-`));
   const tree = join(parent, "tree");
   const realTree = join(realpathSync(parent), "tree");
@@ -969,7 +1271,7 @@ export async function planPrPreflightAtCommitAsync(
       return result;
     }
     borrowNodeModules(repoDir, tree);
-    return await planPrPreflightAsync({ cwd: tree, ...pr }, checks);
+    return await planPrPreflightAsync({ cwd: tree, ...pr, ...(codeRoot === undefined ? {} : { codeRoot }) }, checks);
   } finally {
     if (!leaveTreeForSafety) {
       await removeTemporaryWorktree(repoDir, tree);

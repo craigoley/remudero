@@ -12,7 +12,7 @@
   plan_refs: [W1-T5399]
   files:
     - test/assistant-action-discovery.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

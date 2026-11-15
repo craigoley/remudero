@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-15: found beside W1-T9615 (PR #12030), which staged pollAlerts' captures but left its reconciler on the inline landing"
   plan_refs: [W1-T9615, W1-T5460, W1-T5628, W1-T5689, W1-T462]
   files: [src/lib/ops.ts, test/the-ops-alert-reconciler-stages-its-status-flip.test.ts]
-  status: queued
+  status: merged
   priority: 2  # dormant today: plan/policy.yaml intakeCadence.ops.enabled is false, and the retained core ledger holds no INTAKE-ops run and no ops.feedback_reconciled row; it holds the loop on the first poll after ops is enabled
   attempts: 0
   rationale: |

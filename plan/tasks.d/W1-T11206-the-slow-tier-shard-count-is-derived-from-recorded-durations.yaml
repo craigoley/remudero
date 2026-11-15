@@ -17,7 +17,7 @@
     - .github/workflows/ci.yml
     - scripts/test-tier-manifest.mjs
     - test/ci/suites/the-slow-tier-shard-count-is-derived-from-recorded-durations.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: slowTierShardCount(manifest, { ceilingMs, workers }) returns the smallest shard count, never below 2, whose largest shard's predicted wall time (predictMakespanMs over balanceFilesByDuration's split of the slow tier) is at most 60% of the job ceiling; it rises when recorded durations grow, and on origin/main's scripts/test-tier-manifest.json with the 35-minute ceiling it returns more than 2

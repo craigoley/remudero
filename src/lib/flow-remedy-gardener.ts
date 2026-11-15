@@ -13,7 +13,7 @@ import { ghExec } from "./github-transport.js";
 import { PR_TERMINAL_STEP } from "./ledger-carry.js";
 import { ledgerRotationEntries, readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { machineShardFilingRefusal, machineShardLandingGuard, renderMachineShard } from "./machine-filing.js";
-import { loadPlanFromYaml, newTestPath } from "./plan.js";
+import { loadPlanFromYaml, newTestPath, parseTasksFromYaml } from "./plan.js";
 import { blockerOwnerModule, PR_BLOCKERS, type PrBlocker } from "./pr-blocker.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import type { LedgerRecord } from "./retro.js";
@@ -36,8 +36,10 @@ export interface FlowAction extends GardenAction<"draft"> {
 }
 export interface Inventory {
   charges: Charge[]; episodes: Episode[]; priced: Price[]; candidates: Price[];
-  next?: FlowAction; ladder: Array<{ cause: string; state: string; rung: number; effect?: RemedyEffect }>;
+  next?: FlowAction; ladder: Array<{ cause: string; state: string; rung: number; effect?: RemedyEffect; reason?: string }>;
 }
+/** W1-T12548: why the ladder cannot file this draft in this pass, or undefined when it can. */
+export type LadderFileable = (action: FlowAction) => string | undefined;
 export interface FlowGardenSources {
   owner: string; repo: string;
   mintTaskId: GardenTaskIdMinter;
@@ -215,7 +217,10 @@ export function readLadderPlan(repoRoot: string, kind: LadderKind): CiFrictionPl
   const unreadable: string[] = [];
   for (const path of listed.trim().split("\n").filter(Boolean).map(p => p.replace("origin/main:", ""))) {
     try {
-      for (const task of loadPlanFromYaml(git(["show", `origin/main:${path}`]), path).tasks) {
+      // W1-T12025: one shard is not a plan. `loadPlanFromYaml` resolves depends_on and superseded_by inside the blob
+      // it is given, so a ladder shard naming a task in another shard read as unreadable and failed the pass
+      // (W1-T11062 superseded_by W1-T11172, 2026-11-10). The shard's own schema is still checked here.
+      for (const task of parseTasksFromYaml(git(["show", `origin/main:${path}`]), path)) {
         if (!task.origin || !parseOrigin(kind, task.origin)) continue;
         tasks.push({ id: task.id, origin: task.origin, status: task.status, retired: task.retirement !== undefined,
           files: [...(task.files ?? [])], path });
@@ -309,7 +314,11 @@ function priceEpisodes(episodes: readonly Episode[], now: number): Price[] {
     .sort((a, b) => b.hours - a.hours || b.prs - a.prs || a.key.localeCompare(b.key));
 }
 
-/** Marks which episodes are worth a remedy: no owner, a failed end, or an open wait past the p90 of cleared ones. */
+/** W1-T12548: an open own-red episode older than this is eligible whatever the p90 of cleared ones is. */
+export const FLOW_OWN_RED_OPEN_AGE_MS = 60 * 60_000;
+
+/** Marks which episodes are worth a remedy: no owner, a failed end, an open wait past the p90 of cleared ones,
+ *  or an own-red episode open past {@link FLOW_OWN_RED_OPEN_AGE_MS}. */
 export function markEligibility(episodes: Episode[], now: number): Map<string, number> {
   const thresholds = new Map<string, number>();
   for (const key of new Set(episodes.map(e => e.key))) {
@@ -320,23 +329,26 @@ export function markEligibility(episodes: Episode[], now: number): Map<string, n
   for (const e of episodes) {
     const threshold = thresholds.get(e.key);
     e.eligible = e.owner === "NONE" || e.outcome === "failed" ||
-      (e.outcome === "open" && threshold !== undefined && (now - e.start) / 3_600_000 > threshold);
+      (e.outcome === "open" && threshold !== undefined && (now - e.start) / 3_600_000 > threshold) ||
+      (e.outcome === "open" && e.key.startsWith("own-red:") && now - e.start > FLOW_OWN_RED_OPEN_AGE_MS);
   }
   return thresholds;
 }
 
-function inventoryOf(records: readonly LedgerRecord[], tasks: readonly CiFrictionRemedyTask[], outcomes: ReadonlyMap<number, PrOutcome>, now: number): Inventory {
+function inventoryOf(records: readonly LedgerRecord[], tasks: readonly CiFrictionRemedyTask[], outcomes: ReadonlyMap<number, PrOutcome>,
+  now: number, fileable?: LadderFileable): Inventory {
   const episodes = episodesOf(records, outcomes, now);
   const thresholds = markEligibility(episodes, now);
-  return ladderOf(FLOW_LADDER, episodes, records, tasks, now, thresholds);
+  return ladderOf(FLOW_LADDER, episodes, records, tasks, now, thresholds, fileable);
 }
 
 /**
  * The shared rung logic: price the episodes' cause keys, find each cause's remedy among the plan's tasks, measure the
  * effect of a merged one, and name the next draft or escalation. A cause with a remedy still open drafts nothing.
+ * W1-T12548: a draft `fileable` refuses is `skipped` with its reason and the walk goes on; an escalation is never skipped.
  */
 export function ladderOf(kind: LadderKind, episodes: Episode[], records: readonly LedgerRecord[], tasks: readonly CiFrictionRemedyTask[],
-  now: number, thresholds: ReadonlyMap<string, number> = new Map()): Inventory {
+  now: number, thresholds: ReadonlyMap<string, number> = new Map(), fileable?: LadderFileable): Inventory {
   const charges = episodes.flatMap(e => e.charges);
   const priced = priceEpisodes(episodes, now);
   const candidates = priceEpisodes(episodes.filter(e => e.eligible), now).map(p => ({ ...p, thresholdHours: thresholds.get(p.key) }));
@@ -380,13 +392,14 @@ export function ladderOf(kind: LadderKind, episodes: Episode[], records: readonl
     if (receipts.has(origin) && !mine.some(t => t.origin === origin)) state = "in_progress";
     if (escalated.has(origin)) state = "escalated";
     if (state === "draft" && rung >= (kind.shadowAdmission ? 2 : CI_FRICTION_ESCALATE_RUNG)) state = "escalate";
-    ladder.push({ cause: price.key, state, rung, effect });
-    if (!next && (state === "draft" || state === "escalate")) {
-      next = { class: "draft", target: origin, origin, rung, price, prior,
-        charges: episodes.filter(e => e.eligible && e.key === price.key).flatMap(e => e.charges),
-        population: candidates.map(p => p.hours), reason: `${price.key} cost ${price.hours.toFixed(2)} PR-hours; owner ${price.owners.join(", ")}`,
-        ...(state === "escalate" ? { escalation: unverifiable ?? `${rung - 1} remedy rungs did not reduce the share of PR-hours` } : {}) };
-    }
+    const action: FlowAction | undefined = !next && (state === "draft" || state === "escalate") ? {
+      class: "draft", target: origin, origin, rung, price, prior,
+      charges: episodes.filter(e => e.eligible && e.key === price.key).flatMap(e => e.charges),
+      population: candidates.map(p => p.hours), reason: `${price.key} cost ${price.hours.toFixed(2)} PR-hours; owner ${price.owners.join(", ")}`,
+      ...(state === "escalate" ? { escalation: unverifiable ?? `${rung - 1} remedy rungs did not reduce the share of PR-hours` } : {}) } : undefined;
+    const skipped = action && state === "draft" ? fileable?.(action) : undefined;
+    ladder.push({ cause: price.key, state: skipped === undefined ? state : "skipped", rung, effect, ...(skipped === undefined ? {} : { reason: skipped }) });
+    if (action && skipped === undefined) next = action;
   }
   return { episodes, charges, priced, candidates, ladder, next };
 }
@@ -462,8 +475,9 @@ export function draftShard(action: FlowAction, taskId: string, search: OwnerSear
 export interface LadderSpecInput {
   kind: LadderKind;
   sources: Pick<FlowGardenSources, "mintTaskId" | "ownerSearch" | "draftShard" | "escalate">;
-  inventory: () => Inventory;
-  inventoryAsync?: () => Promise<Inventory>;
+  /** W1-T12548: `ladderGardenSpec` passes the `fileable` check a ladder hands to {@link ladderOf}. */
+  inventory: (fileable?: LadderFileable) => Inventory;
+  inventoryAsync?: (fileable?: LadderFileable) => Promise<Inventory>;
   /** The pacing bucket the cheap fingerprint carries; the flow ladder re-reads hourly, the fix-lane ladder daily. */
   bucket?: (clock: Clock) => number;
   /** Called once per pass with the scorecard the pass is about to log (the fix-lane garden writes its report here). */
@@ -485,6 +499,22 @@ export function ladderGardenSpec(deps: GardenerDeps, input: LadderSpecInput): Ga
     }
     return remedyScopeRefusal(file, kind, action.prior);
   };
+  // W1-T12548: a draft with no nameable owner, or a refused owner file, is skipped for this pass instead of filed.
+  const fileable: LadderFileable = action => {
+    let file: string;
+    try { file = chooseOwner(action, searchOf(), kind).files[0]!.file; } catch (err) {
+      if (!(err instanceof Error) || !/no source owner found/.test(err.message)) throw err;
+      return err.message;
+    }
+    return remedyScopeRefusal(file, kind, action.prior);
+  };
+  const logSkips = (inv: Inventory): Inventory => {
+    for (const rung of inv.ladder) {
+      if (rung.state === "skipped") deps.log(`${kind.name}.cause_skipped`, { cause: rung.cause, rung: rung.rung, reason: rung.reason });
+    }
+    return inv;
+  };
+  const inventoryAsync = input.inventoryAsync;
   return {
     name: kind.name, landingRefusal: machineShardLandingGuard(deps, sources.ownerSearch?.fileExists), classes: ["draft"], review: { draft: "a remedy task is a judgement call for the machine-filing judge or a person" },
     cheapFingerprint: () => {
@@ -494,8 +524,8 @@ export function ladderGardenSpec(deps: GardenerDeps, input: LadderSpecInput): Ga
       }).join("|");
       return `${head}:${bucket(clock)}:${archives}`;
     },
-    inventory: input.inventory,
-    ...(input.inventoryAsync ? { inventoryAsync: input.inventoryAsync } : {}),
+    inventory: () => logSkips(input.inventory(fileable)),
+    ...(inventoryAsync ? { inventoryAsync: async () => logSkips(await inventoryAsync(fileable)) } : {}),
     unfinished: inv => inv.next !== undefined,
     fingerprint: inv => `${inv.candidates.map(p => `${p.key}:${p.hours}`).join(",")}|${inv.next?.origin ?? ""}`,
     candidates: inv => inv.next ? [inv.next] : [],
@@ -549,22 +579,22 @@ export function ladderGardenSpec(deps: GardenerDeps, input: LadderSpecInput): Ga
 /** W1-T5538: prices observed PR waits and files one admitted remedy for an unowned or uncleared cause. */
 export function flowGardenSpec(deps: GardenerDeps, sources: FlowGardenSources): GardenSpec<"draft", Inventory, FlowAction, GardenCheckout> {
   const clock = deps.clock ?? systemClock;
-  const inventory = (): Inventory => {
+  const inventory = (fileable?: LadderFileable): Inventory => {
     const records = sources.ledgerRecords ? sources.ledgerRecords() : readLadderRecords(deps.stateDir, FLOW_LADDER);
     const plan = sources.planState ? sources.planState() : readLadderPlan(deps.repoRoot, FLOW_LADDER);
     if (plan.degraded) deps.log("flow.origins_degraded", { reason: plan.degraded });
     if (plan.unreadable?.length) throw new Error(`flow plan shards unreadable: ${plan.unreadable.join(", ")}`);
     const prs = [...new Set(episodesOf(records, new Map(), clock.now()).filter(e => e.outcome === "open" && e.owner !== "NONE").map(e => e.pr))];
     const outcomes = sources.prOutcomes ? sources.prOutcomes(prs) : readOutcomes(prs, sources);
-    return inventoryOf(records, plan.tasks, outcomes, clock.now());
+    return inventoryOf(records, plan.tasks, outcomes, clock.now(), fileable);
   };
   const admission = sources.admission;
   const enabled = admission?.settings?.mode === "shadow" && admission.settings.disposition === "shadow";
   return ladderGardenSpec(deps, {
     kind: FLOW_LADDER, sources,
     inventory,
-    ...(enabled ? { inventoryAsync: async (): Promise<Inventory> => {
-      const ordinary = inventory();
+    ...(enabled ? { inventoryAsync: async (fileable?: LadderFileable): Promise<Inventory> => {
+      const ordinary = inventory(fileable);
       try {
         const report = await observeAdmissionFlow(deps, admission);
         const records = sources.ledgerRecords ? sources.ledgerRecords() : readLadderRecords(deps.stateDir, ADMISSION_FLOW_LADDER, [ADMISSION_FLOW_STEP]);

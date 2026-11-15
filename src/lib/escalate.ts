@@ -203,16 +203,10 @@ export interface OpenIssue {
   body?: string;
 }
 
-/**
- * The `gh api repos/<slug>/issues?labels=…` argv every labelled-issue read here uses.
- *
- * INVARIANT: REST, never `gh issue list --label`. `gh` routes `--label` through GitHub's GraphQL
- * `search()` connection, throttled account-wide here, so that form failed every time while the
- * reconciler read an empty list. TRAP: `--slurp` needs `gh` 2.51 and this fleet's operator host runs
- * 2.45.0, so bare `--paginate` is the ceiling — and it concatenates one array per page with no
- * separator, which {@link parseLabelledIssuesRest} reassembles. FALSIFIER:
- * test/escalation-issue-list-rest.test.ts. Why: docs/forensics/escalate.md (W1-T1208).
- */
+/** W1-T1208: labelled reads use REST, never GraphQL-throttled `gh issue list --label`.
+ * TRAP: host gh 2.45.0 lacks `--slurp`; bare `--paginate` concatenates arrays, reassembled by
+ * {@link parseLabelledIssuesRest}. FALSIFIER: test/escalation-issue-list-rest.test.ts.
+ * Why: docs/forensics/escalate.md. */
 export function labelledIssuesRestArgs(repoArg: string, label: string, state: "open" | "all"): string[] {
   const q = `labels=${encodeURIComponent(label)}&state=${state}&per_page=100`;
   return ["api", `repos/${repoArg}/issues?${q}`, "--paginate"];
@@ -342,12 +336,9 @@ export function maintenanceIssueKey(repo: string): string {
   return `**Repository maintenance:** ${repo}`;
 }
 
-/**
- * W1-T10750 — the repository-maintenance controller's operator channel over an existing {@link AsyncIssueGateway}
- * (no new issue writer). `open` files ONE `needs-human` issue keyed by repo path — an issue already open for the
- * repo is returned, never duplicated — naming every kept leftover with its reason, the last failure and the next
- * re-survey. `close` posts the recovery comment and closes it, finding the issue by key when its url is not known.
- */
+/** W1-T10750: maintenance operator channel over the existing {@link AsyncIssueGateway}.
+ * `open` reuses one needs-human issue per repo, naming kept leftovers/reasons, failure and next survey.
+ * `close` cites recovery, looking up the repo key when its issue URL is unknown. */
 export function maintenanceOperatorChannel(issues: AsyncIssueGateway): {
   open(note: { repo: string; leftovers: Array<{ path: string; reason: string }>; lastReason: string; nextSurveyAt: number }): Promise<string>;
   close(repo: string, issueUrl: string | undefined, comment: string): Promise<void>;
@@ -640,17 +631,10 @@ function namesOperatorOnlyAct(option: EscalationOption): boolean {
   );
 }
 
-/**
- * Classify ONE escalation as an ACTION the operator must perform or a QUESTION they must answer
- * (W1-T346; MASTER-PLAN §4) — derived from fields the escalation already carries, never a
- * producer-side field and never an LLM call. Pure, deterministic and total.
- *
- * MANUAL is ACTION by definition, GRILL is QUESTION by definition. BLOCKED and HARD_STOP fall to the
- * options-shape test: any option naming an operator-only act ({@link namesOperatorOnlyAct}) makes it
- * an ACTION; options the machine carries out make it a QUESTION. INVARIANT: it defaults ACTION when
- * that test cannot decide — a question shown as an action costs one wasted read, an action shown as
- * a question hides real work. Why: docs/forensics/escalate.md.
- */
+/** W1-T346; MASTER-PLAN §4: pure, total classification from existing fields, never an LLM.
+ * MANUAL is ACTION; GRILL is QUESTION; otherwise {@link namesOperatorOnlyAct} tests options.
+ * INVARIANT: uncertainty defaults ACTION: misclassifying real work as a question hides it.
+ * Why: docs/forensics/escalate.md. */
 export function classifyAsk(e: Escalation): AskType {
   if (e.class === "MANUAL") return "action";
   if (e.class === "GRILL") return "question";
@@ -691,12 +675,8 @@ export function awayFilePath(root: string): string {
   return join(root, "state", "AWAY");
 }
 
-/** The operator's CURRENT presence mode. The manual flag OVERRIDES outright when set (W1-T4674
- *  design clause iii); with no flag file, presence is INFERRED from the operator's own recent
- *  activity ({@link inferOperatorPresence}, src/lib/presence.ts) rather than assumed attended —
- *  the operator can forget to set the flag, but inference cannot forget for them. A cold root
- *  with no activity history at all still reads attended, the same safe default as before this
- *  task (presence.ts's own `inferPresenceFromActivity` documents why). */
+/** W1-T4674 (iii): a manual flag overrides {@link inferOperatorPresence}'s activity inference.
+ * Without a flag or activity history, a cold root defaults attended (presence.ts explains why). */
 export function presenceMode(root: string): PresenceMode {
   if (existsSync(awayFilePath(root))) return "away";
   return inferOperatorPresence(root);
@@ -1075,13 +1055,9 @@ export function realEscalationJudge(opts: {
   };
 }
 
-/** The PULL-REQUEST NUMBER an escalation issue names in its own text, or `undefined` (impl-DY).
- *  {@link renderIssueBody} writes the PR as a full URL, so the referent can be read back off an issue
- *  whose `**Task:** <id>` the reconciler cannot resolve. INVARIANT: it matches a FULL `/pull/<n>` URL
- *  only, never a bare `#707` — on GitHub that is ambiguous between an issue and a PR, and an
- *  escalation body routinely cites sibling issue numbers, so resolving one as a PR would retire a
- *  live escalation against an unrelated referent. PURE: it says what the issue is ABOUT, never
- *  whether that thing is finished. Why: docs/forensics/escalate.md. */
+/** impl-DY: pure PR referent readback from {@link renderIssueBody}, not a completion check.
+ * INVARIANT: require a FULL `/pull/<n>` URL; bare `#707` may name an unrelated sibling issue.
+ * Why: docs/forensics/escalate.md. */
 export function prReferentFromIssueText(text: string | undefined): number | undefined {
   const m = /\/pull\/(\d+)/.exec(text ?? "");
   if (!m) return undefined;
@@ -1106,16 +1082,10 @@ function fullEscalationSummaryLine(e: Pick<Escalation, "summary">): string {
   return `**Full summary (JSON):** ${text}`;
 }
 
-/**
- * Render the issue body: context, the options, and the recommendation called out.
- *
- * A validating `e.decisionSummary` renders a "## Decision Summary" block ABOVE the raw `detail`, so
- * the summary rides the same GitHub-mobile channel the operator sees first (W1-T313). It is purely
- * additive — `e.detail` is byte-identical either way — and is re-validated here, so a malformed
- * attach degrades to the raw-only body. `**Host:**` names the machine whose process rendered THIS
- * body, unconditionally (W1-T972). TRAP: nothing on the issue used to say which machine it described,
- * so correct crash-loop escalations were followed to a healthy unit. Why: docs/forensics/escalate.md.
- */
+/** Render context, options and recommendation. W1-T313: revalidate decisionSummary; valid cards
+ * precede byte-identical detail, malformed cards fall back to raw-only. W1-T972: always name Host.
+ * TRAP: without Host, operators followed crash-loop reports to healthy machines.
+ * Why: docs/forensics/escalate.md. */
 export function renderIssueBody(e: Escalation): string {
   const decisionSummary = validateDecisionSummary(e.decisionSummary ?? null);
   const lines = [
@@ -1232,12 +1202,9 @@ function extractPrRef(text: string): string | undefined {
   );
 }
 
-/** Does `e.taskId`, AS WRITTEN, name a referent some lookup can retire (W1-T1103, design iii)? `""` is
- *  excluded because {@link renderIssueBody}'s `**Task:**` line needs one non-whitespace character for
- *  the reconciler's own `\S+` read to match. `"undefined"` and `"null"` are the textbook symptom of a
- *  caller stringifying a missing value into something that satisfies `string` at compile time and
- *  carries no referent at runtime — and neither is a shape a real task id or GRILL's
- *  `TRIAGE-<feedbackId>` ever takes. Why: docs/forensics/escalate.md. */
+/** W1-T1103 (iii): can the written taskId name a retirable referent? Reject empty/whitespace
+ * (`**Task:**` requires `\S+`) and stringified missing values `"undefined"`/`"null"`.
+ * Real task IDs and GRILL's `TRIAGE-<feedbackId>` avoid these. Why: docs/forensics/escalate.md. */
 function isKnownBrokenTaskId(taskId: string): boolean {
   const trimmed = taskId.trim();
   return trimmed === "" || trimmed === "undefined" || trimmed === "null";
@@ -1275,23 +1242,12 @@ const CAUSE_LINE_RE = /^\*\*Cause:\*\*\s*(\S+)\s*$/m;
  *  opened by a producer this task did not migrate, like {@link HEAD_SHA_LINE_RE}/{@link
  *  CAUSE_LINE_RE}. Exported (unlike its two siblings) so a test can drive both arms of this
  *  validator directly by identifier — see test/fix-rung-open-escalation-stand-down.test.ts. */
-/**
- * W1-T3579: one deterministic revision of the CURRENT authoritative task contract the fix rung's
- * open-escalation guard (immediately below) versions its stand-down against — covers task
- * identity, declared `files:`, and every acceptance criterion's `claim`/`proof` pair, never
- * `satisfied_by`/`holdout` or any other decorative/volatile field (a `status`/`attempts` bump on
- * every dispatch must never move this). THE DEFECT THIS CLOSES: PORTAL-T4 (remudero-site PR #21,
- * 2026-09-14) was correctly refused, then a plan-only scope amendment re-authorized the exact same
- * repair on the exact same PR head — and the open-escalation guard, keyed on `headSha` alone,
- * stood the repair down forever because nothing distinguished "a human already answered this
- * question" from "the question changed underneath an open issue". Declared files are sorted
- * first (order is never part of the contract — {@link filesDigest}'s own convention); acceptance
- * pairs are read in DECLARED order, because reordering criteria is itself an amendment a re-admit
- * should notice. PURE: reads nothing off disk — the caller already holds the live `Task`/{@link
- * runFixRung}'s own `opts.task` this rung dispatched against, never a worker report or PR-body
- * prose (design note (i) — recovering it from either would let a worker's own claim decide
- * whether it gets re-admitted).
- */
+/** W1-T3579: revision of the authoritative task identity, sorted files and ordered claim/proof
+ * pairs; exclude volatile/decorative fields (status, attempts, satisfied_by, holdout).
+ * TRAP: PORTAL-T4 (remudero-site PR #21, 2026-09-14) stayed blocked after a scope amendment
+ * authorized the same repair/head. A changed contract must release that stand-down.
+ * PURE: hash the caller's live Task/runFixRung opts.task, never disk, reports or PR-body prose;
+ * otherwise a worker could authorize its own re-admission (design i). */
 export function taskContractRevision(task: {
   id: string;
   files?: readonly string[];
@@ -1320,6 +1276,10 @@ export const CONTRACT_REVISION_LINE_RE = /^\*\*Contract:\*\*\s*(\S+)\s*$/m;
  *  {@link matchesOptionalDimension} is permissive on an absent dimension, the wrong polarity there. */
 export function escalationHeadSha(body: string | undefined): string | undefined {
   return HEAD_SHA_LINE_RE.exec(body ?? "")?.[1];
+}
+
+export function escalationIssueCause(body: string | undefined): string | undefined {
+  return CAUSE_LINE_RE.exec(normalizeCandidateBody(body ?? ""))?.[1];
 }
 
 /** The `**Task:** <id>` an already-open issue's body carries, or `undefined` (W1-T4471) — via the
@@ -1430,12 +1390,13 @@ export function fixEscalationDedupKey(
 }
 
 /** A duplicate may refuse a repair only when it positively names this head. A changed recorded
- * contract, cleared conflict, or unspent operator answer releases the same question in both lanes. */
+ * contract, cleared conflict, or unspent operator answer releases the same question in both lanes.
+ * W1-T12544: a conflict round (`conflictRound`) is held only by an issue whose cause is the conflict. */
 export function openEscalationStandDownReason(
   headSha: string,
   candidate: OpenIssue | undefined,
   currentContractRevision?: string,
-  current?: { conflictEvidenceCaptured: boolean; baseSha?: string },
+  current?: { conflictEvidenceCaptured: boolean; baseSha?: string; conflictRound?: true },
   redCheckNames?: readonly string[],
   pendingAnswer?: { spent?: true },
 ): { reason: string } | undefined {
@@ -1453,6 +1414,7 @@ export function openEscalationStandDownReason(
   // push whose issue has not been filed yet — in both, the failure direction of guessing wrong is
   // "stop fixing things", so both fail open.
   if (candidateHead === undefined || candidateHead !== headSha) return undefined;
+  if (current?.conflictRound && escalationIssueCause(candidate.body) !== "conflict") return undefined;
   const candidateRevision = escalationContractRevision(candidate.body);
   // W1-T3579: a genuine disagreement between the RECORDED and CURRENT contract revision means the
   // question this issue asked has since changed underneath it — re-admit rather than stand down.
@@ -1472,17 +1434,10 @@ export function openEscalationStandDownReason(
   };
 }
 
-/** Replace a bare CR, U+2028 (LINE SEPARATOR) or U+2029 (PARAGRAPH SEPARATOR) with a single space
- *  (W1-T974). These are the three characters besides `\n` itself that JavaScript's `m` regex flag
- *  treats as a line start, and the ones a producer's log-tail splice can leave sitting INSIDE one
- *  line after a newline-only split and an ends-only `.trim()` (`summarizeCiFailure`,
- *  src/run-task.ts) — a forged `**Cause:**`/`**Head:**` line smuggled in that way would otherwise
- *  parse as if {@link renderIssueBody} had written it. `\n` itself is left untouched: every honest
- *  named line {@link renderIssueBody} writes is newline-separated, so stripping it too would break
- *  every read below (the mistake this shard's own criterion 2 falsifies). Applied ONLY here, at the
- *  one place an already-open issue's body is fed back into these `^...$/m` regexes — never at
- *  {@link renderIssueBody} itself, so an innocent log line still reaches a NEWLY created issue body
- *  byte for byte (criterion 3). */
+/** W1-T974: normalize bare CR/U+2028/U+2029 to spaces ONLY on candidate-body readback.
+ * TRAP: JS multiline regexes treat them as line starts, allowing log-tail text to forge Head/Cause.
+ * Preserve `\n` so honest metadata still parses (criterion 2); never normalize renderIssueBody,
+ * whose new issue detail must remain byte-identical (criterion 3; summarizeCiFailure, run-task.ts). */
 function normalizeCandidateBody(body: string): string {
   return body.replace(/\r|\u2028|\u2029/g, " ");
 }
@@ -1522,14 +1477,19 @@ export function matchDuplicateEscalation(e: EscalationDedupKey, open: OpenIssue[
  *  INVARIANT: unreadability must never manufacture a fix stand-down. Issue creation instead uses
  *  {@link lookupDuplicateEscalation}, which distinguishes unreadability from no match. */
 export function findDuplicateEscalation(e: EscalationDedupKey, deps: Pick<EscalateDeps, "issues">): OpenIssue | undefined {
-  if (!deps.issues.listOpen) return undefined;
+  return findDuplicateEscalations(e, deps)[0];
+}
+
+/** All matching probe candidates: a released question must not mask an independent open hold. */
+export function findDuplicateEscalations(e: EscalationDedupKey, deps: Pick<EscalateDeps, "issues">): OpenIssue[] {
+  if (!deps.issues.listOpen) return [];
   let open: OpenIssue[];
   try {
     open = deps.issues.listOpen(NEEDS_HUMAN_LABEL);
   } catch {
-    return undefined; // best-effort dedup: a failed read must never block the PROBE itself
+    return []; // best-effort dedup: a failed read must never block the PROBE itself
   }
-  return matchDuplicateEscalation(e, open);
+  return open.filter(issue => matchDuplicateEscalation(e, [issue]) !== undefined);
 }
 
 /** W1-T2912: unreadable is distinct from no match. Otherwise a REST-read outage with working
@@ -1643,13 +1603,10 @@ function* closeSupersededEscalations(e: Escalation, prRef: string, open: OpenIss
   }
 }
 
-/** Ensure labels, render the body, create the issue and ledger it — extracted from {@link escalate} so
- *  {@link escalateWithJudge} can open a FLEET-NOTICE-labelled issue (W1-T349) through the same label
- *  machinery instead of a drifting copy. `opts.queueLabel` is the only thing that varies. INVARIANT:
- *  `opts.queueLabel` IS NEVER DEGRADED, unlike the class and ask-type labels — `RETIRABLE_ESCALATION_LABELS`
- *  (sweep.ts) is the only thing the reconciler filters open issues on, so a queue-label-less issue is
- *  invisible to it forever. A repo where the label genuinely cannot be attached fails `create()`: a
- *  visible, retriable failure, never a permanently un-retirable issue. Why: docs/forensics/escalate.md. */
+/** Shared issue creation for escalate/escalateWithJudge (W1-T349); opts.queueLabel selects queue.
+ * INVARIANT: NEVER degrade the queue label: sweep.ts's RETIRABLE_ESCALATION_LABELS cannot see
+ * unlabelled issues. Class/ask labels may degrade; an unavailable queue label must fail create
+ * visibly and retriably. Why: docs/forensics/escalate.md. */
 function* createEscalationIssue(
   e: Escalation,
   deps: EscalateDeps<AsyncIssueGateway>,
@@ -1725,12 +1682,9 @@ function refuseUnlessResolvable(e: Escalation): Escalation {
   return resolved === e.taskId ? e : { ...e, taskId: resolved };
 }
 
-/** Append THIS escalation's prose onto the thread its derived identity belongs to — taskId, class,
- *  cause and the SAME PR referent dedup already scrapes (W1-T2494; inbox-thread.ts says why the id is
- *  DERIVED, never minted). Fires on EVERY call, dup or not: the dup path re-raises the identical
- *  concern, which is the "appends rather than starting a new thread" case. BEST-EFFORT, like the dedup
- *  read: an unset `threadStorePath` is a silent no-op and a throwing write is swallowed, so "an
- *  escalation that never reaches the console behaves exactly as it does today" stays literal. */
+/** W1-T2494: append every call (including duplicates) to the derived taskId/class/cause/PR thread
+ * (inbox-thread.ts), reusing dedup's PR referent. BEST-EFFORT: no threadStorePath is a no-op;
+ * failed writes never block escalation delivery. */
 function recordThreadMessage(e: Escalation, deps: Pick<EscalateDeps, "threadStorePath">): void {
   if (!deps.threadStorePath) return;
   try {
@@ -1803,12 +1757,10 @@ interface TriageRoute {
   pending?: { action: TriageAction; effect: string; cfg: EscalateTriageSettings };
 }
 
-/** W1-T8868 — THE TRIAGE FUNNEL. Every escalation that opens an issue crosses this once: the outcome
- *  is decided by {@link triageEscalation}, ALWAYS ledgered as `escalation.triaged`, and — only in `act`
- *  mode — turned into a route. Returns `undefined` in shadow mode (deliver exactly as before). An
- *  auto-resolve keeps the issue OPEN under the fleet-notice label with the action's effect and its
- *  undo as the first comment; a missing executor, a spent pass cap or a throwing executor all fall
- *  back to needs-human. */
+/** W1-T8868: every new issue crosses triageEscalation once and ledgers escalation.triaged.
+ * Only act mode changes routing; shadow delivers unchanged. Auto-resolve keeps a fleet-notice
+ * issue OPEN with effect/undo in its first comment. Missing/throwing executor or spent pass cap
+ * falls back to needs-human. */
 function* triageRoute(
   e: Escalation,
   deps: EscalateDeps<AsyncIssueGateway>,
@@ -1940,13 +1892,10 @@ function* escalateSteps(e: Escalation, deps: EscalateDeps<AsyncIssueGateway>, al
   return url;
 }
 
-/** The async triage funnel with an explicit residual judge. Shadow still delivers every outcome.
- *  ORDER MATTERS: dedup runs FIRST, through the exact same {@link
- *  lookupDuplicateEscalation} search, so the judge never sees a duplicate (and never runs at all on
- *  an unreadable surface — W1-T2912). A `demote` opens the issue fleet-notice-labelled with the
- *  judge's reason as the first comment; anything else — deliver, an exempt class, or a judge failure
- *  — opens it needs-human-labelled. W1-T5765: every gateway call is awaited, so an async gateway
- *  keeps the daemon loop ticking; a sync one is still accepted. */
+/** Async triage with an explicit residual judge; shadow still delivers every outcome.
+ * ORDER MATTERS: lookupDuplicateEscalation runs first; duplicates/unreadable reads never reach
+ * the judge (W1-T2912). Demote opens fleet-notice with judge reason first; other outcomes,
+ * exemptions and failures open needs-human. W1-T5765: await every gateway call; sync is accepted. */
 export async function escalateWithJudge(
   e: Escalation,
   deps: EscalateDeps<AsyncIssueGateway> & EscalationJudgeDeps,
@@ -1989,12 +1938,9 @@ function* tryEscalateSteps(e: Escalation, deps: EscalateDeps<AsyncIssueGateway>,
 /** {@link EscalateDeps} plus the one extra dependency {@link escalateWithSummary} needs. */
 export interface EscalateWithSummaryDeps extends EscalateDeps<AsyncIssueGateway>, SummarizeDeps {}
 
-/** THE CHOKE POINT (W1-T348) — compose {@link summarizeEscalation} and {@link escalate} into the ONE
- *  call an await-capable producer makes, for the same reason dedup lives inside `escalate()`: a
- *  caller inherits summary generation by construction instead of hand-composing two calls. NOT every
- *  producer switches — the synchronous dispatch-loop breaker callbacks (run-task.ts) cannot await
- *  without making their callback interface async, so they keep calling {@link escalate} and never
- *  attach a summary, the documented fail-open default. */
+/** W1-T348: await-capable producers inherit summarizeEscalation + escalateAsync here.
+ * TRAP: synchronous dispatch-loop breaker callbacks (run-task.ts) cannot await; they retain
+ * escalate without a summary, the documented fail-open default. */
 export async function escalateWithSummary(e: Escalation, deps: EscalateWithSummaryDeps): Promise<string> {
   const decisionSummary = await summarizeEscalation(e, deps);
   return escalateAsync({ ...e, decisionSummary }, deps);
@@ -2023,12 +1969,10 @@ export async function triageExistingEscalation(
   });
 }
 
-/** Real gateway: `gh issue create`, scoped to `owner/repo`. Runs outside the sandbox (gh is
- *  documented to fail TLS verification under Seatbelt, §4A) but still inside bypass plus the
- *  deny-hook floor, carrying only the scoped PAT. `ensureLabel` provisions with `gh label create …
- *  --force`, so an existing label is a no-op and a hard failure returns false. `opts.exec`
- *  (mirroring `ghGateway` in status.ts) is an injectable stand-in for the raw `gh` invocation, so
- *  both the tolerate-failure branch and `create`'s URL plumbing are exercised without shelling out. */
+/** Real owner/repo-scoped gh issue gateway: outside sandbox for Seatbelt TLS (§4A), within
+ * bypass/deny-hook floor, scoped PAT only. ensureLabel uses `gh label create … --force`:
+ * existing labels succeed, hard failures return false. opts.exec injects raw gh (like status.ts's
+ * ghGateway) for failure and URL tests. */
 export function ghIssueGateway(
   owner: string,
   repo: string,
@@ -2221,13 +2165,8 @@ export function signOptionLink(claims: OptionLinkClaims, secret: string): string
  *  has not answered in a day wants a fresh look at the issue, not a stale one-tap. */
 export const OPTION_LINK_TTL_MS = 24 * 60 * 60 * 1000;
 
-/**
- * One answer URL for one executable option.
- *
- * Only an `executable` option gets a link: an `operator-only` option names an act the console
- * cannot perform, so a link for it would be a button that does nothing. Returns `undefined`
- * there rather than a dead URL, and the caller keeps rendering the prose.
- */
+/** Executable options get one answer URL. Operator-only acts return undefined, preserving
+ * prose rather than rendering a link the console cannot execute. */
 export function mintOptionLink(
   escalationId: string,
   cls: string,
@@ -2254,14 +2193,9 @@ export type OptionLinkCheck =
   | { readonly ok: true; readonly claims: OptionLinkClaims; readonly signature: string }
   | { readonly ok: false; readonly reason: OptionLinkRefusal; readonly detail: string };
 
-/**
- * Check a link's query before anything acts on it.
- *
- * The three failures are checked independently and reported apart, because they mean different
- * things to the operator: `forged` is an attack or a corrupted URL, `expired` is a stale ping
- * worth re-raising, `already-used` is a double-tap and is benign. Collapsing them into one
- * refusal would make the ledger unable to tell an attack from a second tap.
- */
+/** Verify before acting; keep independent refusals actionable: forged = attack/corruption,
+ * expired = stale ping to re-raise, already-used = benign double-tap. Collapsing them hides
+ * attacks among second taps in the ledger. */
 export function verifyOptionLink(
   query: URLSearchParams,
   secret: string,

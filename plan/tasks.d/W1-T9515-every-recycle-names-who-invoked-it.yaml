@@ -17,7 +17,7 @@
     - src/lib/sre-runbooks.ts
     - src/lib/operator-interventions.ts
     - test/every-recycle-names-who-invoked-it.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

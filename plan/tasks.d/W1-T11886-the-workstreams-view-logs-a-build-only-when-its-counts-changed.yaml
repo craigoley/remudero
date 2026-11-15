@@ -1,0 +1,37 @@
+- id: W1-T11886
+  title: The workstreams view logs a build only when its counts changed since the last logged build, carrying the number of silent builds on the next row, instead of one identical row per build
+  repo: remudero
+  depends_on: []
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # one concern: when one telemetry row is written; the view's body, its build cadence and its reuse accounting are unchanged
+  origin: operator-session#capacity-1109
+  plan_refs:
+    - W1-T11127
+  files:
+    - src/lib/workstreams-view.ts
+    - test/console-api/the-workstreams-view-logs-a-build-only-when-its-counts-changed.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A workstreams build whose instances, reused and derived counts equal the last logged build writes no `workstreams.built` row, and the next row that differs carries `repeats`, the number of builds it stood in for
+      proof: "unit test: test/console-api/the-workstreams-view-logs-a-build-only-when-its-counts-changed.test.ts"
+    - claim: The first build always logs, and a build whose counts differ logs at once with `repeats` of 0 when nothing was skipped
+      proof: "grep: W1-T11886 criterion 2 in test/console-api/the-workstreams-view-logs-a-build-only-when-its-counts-changed.test.ts"
+    - claim: The view's served body and its retained-body accounting are identical with the change and without it
+      proof: "grep: W1-T11886 criterion 3 in test/console-api/the-workstreams-view-logs-a-build-only-when-its-counts-changed.test.ts"
+  rationale: |
+    OBSERVED 2026-11-09 (Azure ledger, 14 files, 137,066 rows, 98.3 MB in the last 28 hours): `workstreams.built` is 11,795 rows from one emitter, of which only 231 are distinct once the timestamp and run id are ignored. 98% of them repeat the previous row's counts.
+    - Every ledger reader pays for every row. The serve process's event loop stalls about 150 times an hour with `scanLedgerBuffer` as the top frame (4,196 `runtime.loop_stall_profile` rows in the same window, 9.1 MB).
+    - A plain "once per N minutes" would hide the build rate, which W1-T11127 used as its evidence ("builds == calls, 1,426 each per 10 minutes"). Carrying `repeats` on the next row keeps the exact build count with no arbitrary interval.
+  design: |
+    - At the one emit site in workstreams-view.ts, keep the last logged `{instances, reused, derived}` and a count of builds since. An equal build increments the count and writes nothing; a differing build writes its row with `repeats` set to the count and resets it.
+    - NOT IN SCOPE: the view body, the build trigger, `reused`/`derived` themselves, other `*.built` rows (`agent.built` carries a changing sequence number and is a separate decision), and the loop-stall profiler.
+  falsifier: |
+    Write a row for every build: criterion 1 must see rows for unchanged builds. Drop `repeats`: criterion 1 must lose the count. Skip the first build's row: criterion 2 must fail. Let the suppression change what is served: criterion 3 must fail. Restore and require all three.
+  note: |
+    reservation hand-off: run-unfiled-1794241838000 -> run-unfiled-1794243320000
+    Success is rows: workstreams.built per day falls from about 10,000 to the number of distinct count changes, with the build total unchanged.

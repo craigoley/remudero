@@ -22,7 +22,7 @@
     - test/a-completed-openweight-request-settles-its-reservation.test.ts
     - src/lib/cash-web-bridge.ts
     - src/lib/spend-rows.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: The operator requested durable plan custody of the remaining approved

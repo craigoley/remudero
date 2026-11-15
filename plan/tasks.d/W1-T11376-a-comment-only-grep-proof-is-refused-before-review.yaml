@@ -18,7 +18,7 @@
     - src/lib/check-proof.ts
     - src/lib/redesign-gardener.ts
     - test/plan/a-comment-only-grep-proof-is-refused-before-review.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: lint-plan refuses a new or changed grep proof whose pattern can only match comment text in its target, either because the pattern starts with that file's comment opener or because every line it matches at head is a comment, and says review grades it executed_stale

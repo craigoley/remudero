@@ -16,6 +16,7 @@ import { SELECTED_REGISTRY_LAUNCH_WRAPPER, selectedRegistryLifecycleExec } from 
 import { ghShim } from "#test/helpers/gh-shim.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { hermeticToolPath, registryShellFixture } from "#test/helpers/registry-shell-fixture.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 type Row = Record<string, unknown>;
 
@@ -143,7 +144,7 @@ test("selected shell capability probe reads the whole trusted child script", t =
 function supervisorFixture(t: { after(fn: () => void): void }) {
   const f = registryShellFixture(t), pin = f.capture();
   writeFileSync(f.legacy, `instances:\n  core:\n    repo: remudero\n    github_repo: craigoley/remudero\n    state_dir: ${f.state}\n    container_name: remudero-daemon\n    primary: true\n    image: fixture.azurecr.io/remudero:latest\n    claude_dir: ${f.env.RMD_CLAUDE_DIR}\n    codex_dir: ${f.env.RMD_CODEX_DIR}\n    container_config_dir: ${f.env.RMD_CONTAINER_CONFIG_DIR}\n`);
-  mkdirSync(join(f.state, "daemon-install/.remudero"));
+  mkdirSync(join(f.state, "daemon-install/.remudero"), { recursive: true });
   writeFileSync(join(f.state, "daemon-install/.remudero/daemon-instances.yaml"), readFileSync(f.legacy));
   // W1-T10573 (#15532) reads RMD_INSTANCE_REGISTRY as the ACTIVE selection in the recycler, serve and deploy-run. This
   // supervisor is the legacy, unselected one: its children read the install's default registry above; the shadow
@@ -156,7 +157,7 @@ function supervisorFixture(t: { after(fn: () => void): void }) {
 const fs = require('node:fs'), cp = require('node:child_process');
 const args = process.argv.slice(2);
 fs.appendFileSync(process.env.FIXTURE_CALLS, JSON.stringify({bin:'rmd', args}) + '\\n');
-if (args[0] !== 'deploy-run') { console.log('{"state":"HEALTHY","action":"none"}'); process.exit(0); }
+if (args[0] !== 'deploy-run') { console.log('{"state":"PROGRESSING","action":"none"}'); process.exit(0); }
 const r = cp.spawnSync(process.execPath, ['--import', ${JSON.stringify(join(REPO_ROOT, "node_modules/tsx/dist/loader.mjs"))},
   ${JSON.stringify(join(REPO_ROOT, "src/run-task.ts"))}, ...args, '--repo-root', ${JSON.stringify(join(f.state, "daemon-install"))}],
   {stdio:'inherit', env:process.env});
@@ -328,7 +329,23 @@ test("selected shell defaults and failures remain shadow only without live effec
   assert.ok(!JSON.stringify(errors).includes(f.session));
 });
 
-test("selected shell shadow reaches real lifecycle and heartbeat consumers", async t => {
+/** Serve's scratch plan inside the fixture, and a serve run from the fixture's checkout (W1-T12455). */
+function serveFixture(f: ReturnType<typeof registryShellFixture>) {
+  const scratch = f.env.RMD_SCRATCH_ROOT!, mounts = join(f.root, "mounts");
+  mkdirSync(scratch);
+  writeFileSync(mounts, `/dev/fixture ${scratch} ext4 rw 0 0\n`);
+  f.env.RMD_SCRATCH = "on"; f.env.RMD_SCRATCH_MOUNTS_FILE = mounts;
+  // W1-T10573 (#15532) makes RMD_INSTANCE_REGISTRY serve's ACTIVE selection; the legacy control is its genuine absence.
+  const serve = (args: string[] = [], extra: NodeJS.ProcessEnv = {}) =>
+    f.run(join(f.checkout, "deploy/serve-container.sh"), ["--replace", ...args], { RMD_INSTANCE_REGISTRY: undefined, ...extra });
+  const launches = () => f.receipts().filter(c => c.bin === "docker" && c.args[0] === "run" && c.args.includes("remudero-serve"));
+  return { scratch, serve, launches };
+}
+
+test("selected shell shadow reaches real lifecycle and heartbeat consumers (W1-T12455 criterion 1: on an empty HOME)", async t => {
+  const home = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}empty-home-`)), realHome = process.env.HOME;
+  process.env.HOME = home;
+  t.after(() => { process.env.HOME = realHome; rmSync(home, { recursive: true, force: true }); });
   const f = registryShellFixture(t), pin = f.capture();
   const installed = f.install();
   assert.equal(installed.status, 0, installed.stderr);
@@ -346,23 +363,42 @@ test("selected shell shadow reaches real lifecycle and heartbeat consumers", asy
   assert.equal(result.status, 0, result.stderr);
   assert.ok(result.calls.some(call => call.startsWith("run ")));
   assert.ok(refresh.rows().some(row => row.action === "field-trials"));
-  // W1-T10573 (#15532) makes RMD_INSTANCE_REGISTRY serve's ACTIVE selection; the legacy control is its genuine absence.
-  const unselected = { RMD_INSTANCE_REGISTRY: undefined };
-  const scratch = f.env.RMD_SCRATCH_ROOT!, mounts = join(f.root, "mounts");
-  mkdirSync(scratch);
-  writeFileSync(mounts, `/dev/fixture ${scratch} ext4 rw 0 0\n`);
-  f.env.RMD_SCRATCH = "on"; f.env.RMD_SCRATCH_MOUNTS_FILE = mounts;
-  const serve = f.run(join(REPO_ROOT, "deploy/serve-container.sh"), ["--replace"], unselected);
+  const s = serveFixture(f), serve = s.serve();
   assert.equal(serve.status, 0, serve.stdout + serve.stderr);
-  const selectedServe = f.run(join(REPO_ROOT, "deploy/serve-container.sh"), ["--replace", "--selected-registry-shadow", f.session], unselected);
+  const selectedServe = s.serve(["--selected-registry-shadow", f.session]);
   assert.equal(selectedServe.status, 0, selectedServe.stdout + selectedServe.stderr);
   assert.ok(f.rows().some(row => row.action === "serve"));
-  const serveLaunch = f.receipts().filter(c => c.bin === "docker" && c.args[0] === "run" && c.args.includes("remudero-serve")).at(-1);
-  assert.ok(serveLaunch && mountSources(serveLaunch.args).some(source => within(source, scratch)),
+  const serveLaunch = s.launches().at(-1);
+  assert.ok(serveLaunch && mountSources(serveLaunch.args).some(source => within(source, s.scratch)),
     "the actual serve launcher mounts its real scratch plan during qualification");
   const host = f.run(join(REPO_ROOT, "deploy/host-update.sh"), ["--print-daemon-run", "--selected-registry-shadow", f.session]);
   assert.equal(host.status, 0, host.stdout + host.stderr);
   assert.ok(f.rows().some(row => row.action === "host-update"));
+});
+
+test("selected shell shadow reaches real lifecycle and heartbeat consumers: W1-T12455 criterion 2 serve reads a known foreign placement under the fixture root", t => {
+  const f = registryShellFixture(t), s = serveFixture(f), serve = s.serve();
+  assert.equal(serve.status, 0, serve.stdout + serve.stderr);
+  assert.ok(f.receipts().some(c => c.bin === "docker" && c.args[0] === "inspect" && c.args[1] === "remudero-other-daemon" &&
+    c.args.includes("{{json .Mounts}}")), "serve reads the second instance's mount list from the docker stub");
+  const sources = mountSources(s.launches().at(-1)?.args ?? []);
+  assert.ok(sources.some(source => within(source, f.foreign)), "serve mounts the second instance's fixture state");
+  const outside = sources.filter(source => !within(source, f.root));
+  assert.equal(outside.length, 0, `serve mounts only fixture folders: ${outside.join(", ")}`);
+});
+
+test("selected shell shadow reaches real lifecycle and heartbeat consumers: W1-T12455 criterion 3 serve still refuses an empty or unknown mount list", t => {
+  const f = registryShellFixture(t), s = serveFixture(f);
+  for (const [mode, reason] of [["empty", /Unexpected end of JSON input/], ["unknown", /ambiguous or unsupported repos placement/]] as const) {
+    const refused = s.serve([], { FIXTURE_MOUNTS: mode });
+    assert.equal(refused.status, 1, mode + ": " + refused.stdout + refused.stderr);
+    assert.match(refused.stderr, /REFUSING — foreign repos placement unavailable/, mode);
+    assert.match(refused.stderr, reason, mode);
+    assert.equal(s.launches().length, 0, `${mode}: a refused replace launches no serve`);
+  }
+  const accepted = s.serve();
+  assert.equal(accepted.status, 0, accepted.stdout + accepted.stderr);
+  assert.equal(s.launches().length, 1, "the same fixture launches serve once its mount list is known");
 });
 
 test("selected shell shadow reaches real lifecycle and heartbeat consumers: installed field trials command", async t => {

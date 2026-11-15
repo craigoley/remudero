@@ -15,7 +15,7 @@
     - src/lib/plan-base-reader.ts
     - src/run-task.ts
     - test/plan/plan-base-reader.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: The first real Wreckterra product case executed all nine filing proofs, but remudero-review refused its initial plan because lint-plan --base assumes plan/tasks.yaml already exists at the merge base. The live refusal is lint-plan exited 1 with no summary. A new-product flow must support an empty repository without weakening review or substituting a whole-plan lint for changed-record qualification.
   design: Extract a bounded base-plan reader used by lintPlanCommand. Resolve and pin a real commit first; inspect that exact commit's tree to distinguish a confirmed absent plan from invalid refs, transport/process failures, symlinks, unexpected object types and unreadable blobs. Only confirmed absence at a valid commit yields an empty prior plan, so every new head record is linted with ordinary reservation, dialect, scope, monolith and dependency guards. Existing valid and malformed-base behavior must retain its current semantics. Preserve the target repo root, exact merge-base and meaningful summary through lintPlanForReview; never catch arbitrary git failure as an empty plan or skip lint. Exercise real Git fixtures with a README-only base, an invalid new task, an existing sharded plan, an invalid ref and a failed blob read. The first filing must pass only when its actual changed records are valid. This task repairs onboarding preparation; it grants no runner, dispatch, protection or release authority.

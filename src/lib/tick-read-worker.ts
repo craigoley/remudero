@@ -1,24 +1,23 @@
 import { hydrateDependencyMainIdentitiesSteps } from "./dependency-main-identity.js";
-/**
- * W1-T9722/W1-T4075: narrow entry for the daemon's read-plane worker; run-task.ts re-exports its API.
- * Only a read-plane worker installs the producer at top level. Never import src/run-task.ts,
- * even transitively: it loads the whole CLI into the isolate. Graph and real-worker falsifier:
+/** W1-T9722/W1-T4075: narrow read-plane entry; run-task.ts re-exports it, never import that CLI
+ * transitively. Only read-plane workers install the producer. Graph/worker falsifier:
  * test/the-read-plane-worker-starts-from-a-narrow-entry.test.ts.
- * WORKER_ENTRIES in scripts/build-child-entries.mjs includes this module. startWorker chooses a
- * current bundle under node, otherwise .ts under tsx (W1-T8777/W1-T9370).
- * `read_plane.worker_started` records the chosen entry and isolate footprint.
- */
+ * WORKER_ENTRIES registers it; startWorker selects a current node bundle or tsx .ts entry
+ * (W1-T8777/W1-T9370); read_plane.worker_started records entry and isolate footprint. */
 import { relative } from "node:path";
 import { boundChildByLoopTime } from "./loop-bounded-child.js";
 import { GIT_FETCH_KILL_GRACE_MS } from "./git-fetch-retry.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { fileURLToPath } from "node:url";
 import { SHARE_ENV, Worker, workerData as threadData, type WorkerOptions } from "node:worker_threads";
-import { READ_PLANE_KIND, freezeReadGeneration, revisionedProducer, type RevisionedRequest } from "./read-plane.js";
+import { READ_PLANE_KIND, revisionedProducer, type RevisionedRequest } from "./read-plane.js";
+import { createPlanRevisionStore, type PlanRevision, type PlanRevisionStore, type RevisionLoad } from "./plan-revision-store.js";
+export { createPlanRevisionStore, type PlanRevision, type PlanRevisionStore, type RevisionLoad } from "./plan-revision-store.js";
 import { readPlaneWorkerInput, readPlaneWorkerLog, runReadPlaneWorker } from "./read-plane.worker.js";
 import { runsBundled, startWorker } from "./child-entry-argv.js";
 import { execFile, execFileSync, spawnSync } from "node:child_process";
-import { ghExec, ghJsonAsync, ghLinesAsync, ghTextAsync } from "./github-transport.js";
+import { ghExec, ghJsonAsync, ghLinesAsync, ghTextAsync, githubInstallationBudget } from "./github-transport.js";
+import type { InstallationBudgetThreadInput } from "./github-installation-budget.js";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { loadConfig, type Config } from "./config.js";
@@ -27,15 +26,17 @@ import { createBoardSnapshotCache } from "./board-snapshot-cache.js";
 import { createChangedFilesCache } from "./changed-files-cache.js";
 import { readFileIfExists } from "./fs-race-safe.js";
 import { ghIssueGateway, ghIssueGatewayAsync, type AsyncIssueGateway, type IssueGateway, type OpenIssue, prReferentFromIssueText } from "./escalate.js";
-import { checkRunsRestArgs, createGhCallPacer, fetchOpenPrsRest, fetchOpenPrsRestSteps, type OpenPrRest, hydrateMergeConflictEvidenceSteps, hydratePlanFilingFilesSteps, hydrateSupersessionVerdictsSteps, hydrateWorkflowRunsSteps, hydrateMergeStateObservationsSteps, hydrateScannerBlockerObservationsSteps, hydrateCodeqlHeadAlertsSteps, codeqlCheckFailed, securityMergePolicyRefusal, isHumanHoldCandidate, isScannerBlockerCandidate, isReviewQueueHoldCandidate, hydrateReviewQueueHoldsSteps, paceGhEntryAsync, hydrateReviewReuseFactsSteps, type GhApiFetcher, type GhCallPacer, createPlanFilingFileCache, PLAN_FILING_FILE_MISS_CAP, type PlanFilingFileCache, type PlanFilingFileObservation } from "./open-prs-rest.js";
+import { checkRunsRestArgs, createGhCallPacer, fetchOpenPrsRest, fetchOpenPrsRestSteps, type OpenPrRest, hydrateMergeConflictEvidenceSteps, hydratePlanFilingFilesSteps, hydrateSupersessionVerdictsSteps, hydrateWorkflowRunsSteps, hydrateMergeStateObservationsSteps, hydrateScannerBlockerObservationsSteps, hydrateCodeqlHeadAlertsSteps, codeqlCheckFailed, securityMergePolicyRefusal, isHumanHoldCandidate, isScannerBlockerCandidate, isReviewQueueHoldCandidate, classifyChangesRequested, pullReviewsRestArgs, paceGhEntryAsync, hydrateReviewReuseFactsSteps, type GhApiFetcher, type GhCallPacer, createPlanFilingFileCache, loadPlanFilingFileCache, PLAN_FILING_FILE_MISS_CAP, type PlanFilingFileCache, type PlanFilingFileObservation, combinedStatusRestArgs, openPrsRestArgs, MERGE_STATE_HYDRATION_CAP, SCANNER_BLOCKER_HYDRATION_CAP, REVIEW_QUEUE_HOLD_READ_CAP, CODEQL_HEAD_ALERT_HYDRATION_CAP, WORKFLOW_RUN_HYDRATION_CAP, type MergeStateObservation } from "./open-prs-rest.js";
+import { createHash } from "node:crypto";
 import { codeqlAlertsReadDue } from "./pr-blocker.js";
 import { planFilesIdentity } from "./thread-plan.js";
 import { isInPlanScope } from "./plan-architect.js";
 import { appendLedger } from "./ledger.js";
-import { systemClock } from "./clock.js";
+import { fixedClock, systemClock } from "./clock.js";
+import { classifyLogFetchFailure, logFetchRetryAtMs, readCheckRunOutputAsync } from "./ci-incidents.js";
 import { createSizedMemo } from "./ledger-union.js";
 import { type BoardItem } from "./board-review.js";
-import { loadPlan, DEFAULT_RISK, PlanBlobCache, mergePlanBlobsQuarantiningDuplicates, readBlobsAtRefAsync, type QuarantinedTask, type MergedResolver, type Plan, type Task } from "./plan.js";
+import { loadPlan, DEFAULT_RISK, readBlobsAtRefAsync, type QuarantinedTask, type MergedResolver, type Plan, type Task } from "./plan.js";
 import { cappedOverrideFromLedger, postedArmFactsFromLedger, lastPendingReviewStatusFromLedger, assessPendingReviewOwner, priorReviewVerdictFromLedger, reviewLedgerKeyFor, reviewRowNamesPr, UNFILED_RUN_SENTINEL, enforcementDataInDiff, bodyReviewContractDigest, reviewContractDigest, reviewTaskNarrative, reviewInputDigest, isCriterionRefusal, type PendingReviewOwnerAssessment, type PendingReviewStatusRecord, type CriterionVerdict, type CriterionRefusal } from "./review.js";
 import { buildBatchedGithub, defaultCreditStorePath, loadCreditStore, buildCommitTrailerIndex, deriveStatus, isGhRateLimitError, projectPlan, readLedgerLines, type DeriveDeps, type GitHub, isBookkeepingOnlyChangeset, type PrRef, type StatusProjection, taskIdFromRunBranch, creditsByAnchoredTrailer, readMergeCreditedTaskIds, readRequiredStatusCheckContextsAsync, isPlanTextDeliverable, type RequiredContextsRead } from "./status.js";
 import { RUNNER_TIMEOUT_LINE, actionableGateFailuresFromReasons, cancelledRequiredCheckNames, withoutDownstreamGateFailure, earlyRedEvidenceRollup, checksStateFromRollup, checksPendingSinceFromRollup, dedupeRollupByLatestAttempt, fixLedgerRowsForHead, fixRoundTally, listRetirableEscalationIssues, listRetirableEscalationIssuesAsync, operatorVerdictEvidence, REQUIRED_CHECK_FAIL, closedPrFacts, type ClosedPrFact, redQualityGateNames, pendingQualityGateNames, usableInstrumentEntanglementPaths, type ActionableGateFailure, type CancelledRequiredCheck, type CiFailure, type CiLogUnavailableCause, MAX_CI_LOG_FAILURE_DETAIL, type CiTailSource, type CiAnnotationFallback, type CreditCandidate, type EscalationReconcileCandidate, type InstrumentEntanglementPaths, type OpenPrView, type StrikeAttempt, DEFAULT_FIX_CLASSES, checkJobId, corroboratedIneligibility, creditSubjectIsImplementation, isPostReviewDiffCeilingRefusal, isRetryableReviewThrow, codeScanningHeadSettled, reviewInputLoopFacts, type BaseChangedFiles } from "./sweep.js";
@@ -88,21 +89,15 @@ export function* openPrsWithPostedIdsSteps(owner: string, repo: string, fetch: G
   return prs;
 }
 
-/**
- * Extract only a generator explicitly prescribed by the failing check's own log:
- * `Run 'npm run <name>' and commit the result.` Otherwise return undefined, keeping ordinary
- * test, lint and type failures outside this deterministic repair class (rationale (5a)).
- */
+/** Only the failing log's explicit `Run 'npm run <name>' and commit the result.` qualifies;
+ * ordinary test/lint/type failures remain outside deterministic repair (rationale (5a)). */
 export function remedyGeneratorNamedInLog(logTail: string): string | undefined {
   const m = /Run 'npm run ([\w:@./-]+)' and commit the result\.?/.exec(logTail ?? "");
   return m ? m[1] : undefined;
 }
 
-/**
- * W1-T2733: BACKSTOP on distinct remedies retained from outside the tail; deduplication is the
- * primary control against repetitive logs. {@link allCiFailuresAreGeneratorFixable} needs one
- * remedy per failing check; a larger catalogue is outside the deterministic rung's remit.
- */
+/** W1-T2733: BACKSTOP on distinct off-tail remedies; deduplication is primary.
+ * {@link allCiFailuresAreGeneratorFixable} requires one remedy per failed check. */
 export const MAX_RETAINED_REMEDY_LINES = 5;
 
 /** W1-T2733 — the marker that says these lines did not come from the tail. Present ONLY when
@@ -112,23 +107,16 @@ export const RETAINED_REMEDY_HEADER = "--- generator remedy line(s) retained fro
 /** W1-T3387: the semantic reviewer's hard cap for a PR with no task id (and so no declared `budget_usd`). */
 export const UNTASKED_REVIEW_BUDGET_USD = 15;
 
-/**
- * W1-T3084: reconciliation requires a merge and positive implementation/build evidence.
- * False or unknown evidence alone cannot credit a filing (#4461); align destructive consumers
- * with sweep.ts. Explicit `=== true` states intent, not a stronger guard than truthiness for
- * boolean | undefined. Export the predicate so tests can drive all three values without I/O.
- */
+/** W1-T3084/#4461: require merge plus positive implementation/build evidence, matching sweep.ts's
+ * destructive consumers. Exported for three-value tests; false/unknown cannot credit a filing. */
 export function creditIsReconcilable(c: { merged?: boolean; creditIsImplementation?: boolean; creditHasBuildDiff?: boolean; creditHasOtherBuildMerge?: boolean }): boolean {
   return c.merged === true && (c.creditIsImplementation === true || c.creditHasBuildDiff === true || c.creditHasOtherBuildMerge === true);
 }
 
-/**
- * W1-T2304's board-review rung: the open board as {@link BoardItem}s. PURE mapping; {@link defaultBoardReviewItems} is
- * its one real read. Every absent input fails OPEN: an unknown age is zero, an unreadable rollup is zero red, an
- * unreadable projection is no escalation, and a PR whose task or `origin:` cannot be resolved is not self-produced
- * (W1-T2465), because marking on an uncertain read would hide a real board item from every finding.
- * Why: docs/forensics/tick-read-worker.md#boarditemescalationinfo
- */
+/** W1-T2304: pure BoardItem mapping; {@link defaultBoardReviewItems} performs the read.
+ * Missing inputs fail OPEN: unknown age/red count = zero, unreadable projection = no escalation,
+ * unresolved task/origin = not self-produced (W1-T2465), lest uncertainty hide real findings.
+ * Why: docs/forensics/tick-read-worker.md#boarditemescalationinfo */
 export interface BoardItemEscalationInfo {
   title?: string;
   issueUrl?: string;
@@ -170,9 +158,7 @@ export function boardItemsFromOpenPrs(
   });
 }
 
-/** The three real reads {@link defaultBoardReviewItems} chains, injectable as one bundle so a
- *  test can drive the whole reader over synthetic rows — the same one-seam discipline
- *  {@link PlanLifecycleCountsIo} already follows. */
+/** Injectable read bundle for {@link defaultBoardReviewItems}, like {@link PlanLifecycleCountsIo}. */
 export interface BoardReviewItemsIo {
   fetchOpenPrs?: (owner: string, repo: string) => OpenPrRest[];
   resolveOwnerRepo?: () => { owner: string; repo: string };
@@ -184,12 +170,8 @@ export interface BoardReviewItemsIo {
 /** The synchronous open-PR read {@link defaultBoardReviewItems} defaults to. */
 export const syncBoardReviewOpenPrs = (o: string, r: string): OpenPrRest[] => fetchOpenPrsRest(o, r, ghJson);
 
-/**
- * Board-review's real read, analogous to {@link buildOpenPrViews}. Reuse fetchOpenPrsRest's
- * rollups; the daemon prefetches this per-tick read off the loop (W1-T5481).
- * Never throw: an outage yields no items and decideBoardReviewTrigger's `fire: false`.
- * This report-only rung may miss one period rather than take down the daemon tick.
- */
+/** W1-T5481: daemon-prefetched board read reuses REST rollups, like {@link buildOpenPrViews}.
+ * Never throw: outages yield no items/fire:false, missing a report period rather than a tick. */
 export function defaultBoardReviewItems(config: Config, io: BoardReviewItemsIo = {}): BoardItem[] {
   try {
     const { owner, repo } = (io.resolveOwnerRepo ?? resolveOwnerRepo)();
@@ -203,8 +185,7 @@ export function defaultBoardReviewItems(config: Config, io: BoardReviewItemsIo =
         { ledgerPath: ledgerPathFor(config), github: buildBatchedGithub(owner, repo) },
         join(config.root, "state", "status.json"),
       );
-      // W1-T2453/W1-T2466: reuse the projection's escalation title, URL, verification and openedAt;
-      // boardItemsFromOpenPrs needs no second read.
+      // W1-T2453/W1-T2466: reuse projected escalation title/URL/verification/openedAt; no second read.
       escalations = new Map(
         [...proj.values()]
           .filter((p) => p.needsHuman && p.prNumber !== undefined)
@@ -218,8 +199,7 @@ export function defaultBoardReviewItems(config: Config, io: BoardReviewItemsIo =
             },
           ] as const),
       );
-      // W1-T2465: join the projection's taskId to its own plan without another read.
-      // Missing index/task means not-self-produced; never lose escalations to a throw here.
+      // W1-T2465: join taskId to the same plan; missing index/task means not-self-produced, never throw.
       originByPrNumber = new Map(
         [...proj.values()]
           .filter((p) => p.prNumber !== undefined)
@@ -227,13 +207,11 @@ export function defaultBoardReviewItems(config: Config, io: BoardReviewItemsIo =
           .filter((entry): entry is [number, string] => BOARD_REVIEW_PROPOSAL_ORIGIN_PATTERN.test(entry[1] ?? "")),
       );
     } catch {
-      // The escalation/origin arms degrade to zero rather than taking the whole read down — the
-      // open-PR list is the arm that qualified on 2026-08-26 and it is already in hand.
+      // Escalation/origin failures preserve the open-PR list (qualified 2026-08-26).
     }
     return boardItemsFromOpenPrs(prs, io.now?.() ?? systemClock.date(), escalations, originByPrNumber);
   } catch {
-    // Report-only fail direction: no items means fire:false, costing at most one report period
-    // (minIntervalMinutes). `check` returns the reason for the tick's board_review.skipped row.
+    // No items means fire:false for one minIntervalMinutes; check supplies board_review.skipped's reason.
     return [];
   }
 }
@@ -244,6 +222,8 @@ export interface TickReadOptions {
   config: Config;
   ledgerPath: string;
   checkoutRoot: string;
+  /** W1-T12555: the main thread's budget state, so the worker's reads take their share of it. */
+  githubInstallationBudget?: InstallationBudgetThreadInput;
 }
 
 export function createTickReadProducer(options: TickReadOptions, io: {
@@ -267,7 +247,9 @@ export function createTickReadProducer(options: TickReadOptions, io: {
   const fileOptions = { log, ...(io.changedFilesFetch ? { fetch: io.changedFilesFetch } : {}) };
   const files = createChangedFilesCache(config.root, owner, repo, fileOptions);
   let openFiles = files;
-  const filingFiles = createPlanFilingFileCache();
+  const filingFiles = loadPlanFilingFileCache(join(config.root, "state"));
+  const stageReuse = createOpenPrStageReuse();
+  if (filingFiles.unreadable !== undefined) log("plan_filing_files.store_unreadable", { reason: filingFiles.unreadable });
   let reads = new Map<string, unknown>();
   let generationClock = 0;
   const closedAt = new Map<number, string>();
@@ -316,11 +298,9 @@ export function createTickReadProducer(options: TickReadOptions, io: {
       evidence: (url, state, headRefOid) => (state === "MERGED" || state === "CLOSED" ? files : openFiles).evidence!(url, state, headRefOid),
       settle: async () => { await files.settle(); await openFiles.settle(); },
     },
-    // A logical tick clock expires each half once per generation, independent of read duration.
-    // Only cache age uses it; the persisted open snapshot above retains the real clock.
+    // Logical clock expires both halves once per generation; persisted snapshots keep real time.
     now: () => generationClock, ttlMs: 1, mergedTtlMs: 1,
-    // Every read goes through the generation-memoised JSON fetch: the gateway's one `--jq` read
-    // (changed files) is answered by the changed-files cache above and never reaches `exec`.
+    // Generation-memoised JSON fetch; changed-files cache answers the gateway's --jq read before exec.
     exec: (args) => JSON.stringify(fetch(args)),
     commitTrailerIndex: io.commitTrailerIndex ?? (() => buildCommitTrailerIndex({ slug: `${owner}/${repo}`, cwd: checkoutRoot })()),
   });
@@ -367,9 +347,14 @@ export function createTickReadProducer(options: TickReadOptions, io: {
     credits = creditBefore;
     projection = derive();
     const openPrViews = openPrRows ? await buildOpenPrViewsAsync(owner, repo, ledgerPath, {
-      ...io.viewsDeps, fetchAsync, pacer, planFilingFileCache: filingFiles, openPrRows,
+      ...io.viewsDeps, fetchAsync, pacer, planFilingFileCache: filingFiles, openPrRows, stageReuse,
       readMainPlan: () => plan, isMerged: (task) => projection.get(task.id)?.merged ?? false,
     }) : [];
+    if (openPrRows) {
+      filingFiles.retain(owner, repo, openPrRows.map((pr) => pr.number));
+      const saved = filingFiles.save();
+      if (!saved.ok) log("plan_filing_files.store_save_failed", { reason: saved.reason });
+    }
     const evidenceRootFor = io.evidenceRootFor ?? (() => checkoutRoot);
     const credit = () => buildCreditCandidates(owner, repo, plan, ledgerPath, log, github, evidenceRootFor, readLedgerLines, creditIo);
     const beforeCreditRead = credits;
@@ -412,24 +397,17 @@ export function createTickReadProducer(options: TickReadOptions, io: {
   };
 }
 
-// LiveInflightRun / liveInflightRuns moved to src/lib/report-commands.ts (W1-T2888) — imported/
-// re-exported below.
+// W1-T2888: LiveInflightRun/liveInflightRuns live in report-commands.ts; imported/re-exported below.
 
-/**
- * W1-T1212/#2477: explicit required-context → workflow-file map for the stale-gate discriminator.
- * remudero-review is a commit status, not a workflow check; checksStateFromRollup excludes it too.
- * Unmapped names produce no stale-gate signal. Never guess a workflow or broaden this resolver
- * beyond the filed scope (design note (vi)).
- */
+/** W1-T1212/#2477: explicit stale-gate context→workflow map; unmapped names yield no signal.
+ * Never guess/broaden scope (design vi). remudero-review is a commit status, excluded by
+ * checksStateFromRollup too. */
 const STALE_GATE_WORKFLOW_FILE: Readonly<Record<string, string>> = {
   "ci-gate": ".github/workflows/ci-gate.yml",
 };
 
-/**
- * W1-T1212 (design i): read one blob SHA at one ref through the contents API.
- * Missing file, bad ref or transport failure yields undefined: no stale-gate evidence,
- * never an aborted sweep pass.
- */
+/** W1-T1212 (design i): contents-API blob SHA; missing/bad ref/transport error means unknown,
+ * never stale-gate evidence or an aborted sweep. */
 function blobShaAtRef(owner: string, repo: string, path: string, ref: string): string | undefined {
   try {
     const out = ghExec(["api", `repos/${owner}/${repo}/contents/${path}`, "-f", `ref=${ref}`, "--jq", ".sha"],
@@ -443,11 +421,8 @@ function blobShaAtRef(owner: string, repo: string, path: string, ref: string): s
   }
 }
 
-/**
- * W1-T1212 (design i): compare a red PR's failing-check workflows at its own pull/<n>/merge ref
- * (the pull_request evaluation frozen at synchronize) against current main. Unmapped checks or
- * failed reads on either ref contribute nothing: fail toward not stale.
- */
+/** W1-T1212 (design i): compare failed workflows at pull/<n>/merge (frozen at synchronize)
+ * with current main. Unmapped checks or either unreadable ref fail toward not stale. */
 function staleGateFailureNames(owner: string, repo: string, pr: OpenPrView): string[] {
   const out: string[] = [];
   for (const failure of pr.ciFailures ?? []) {
@@ -460,11 +435,8 @@ function staleGateFailureNames(owner: string, repo: string, pr: OpenPrView): str
   return out;
 }
 
-/**
- * W1-T1212 — {@link SweepDeps.staleGateWorkflowsByPr}'s real wiring. One map entry per
- * checks-red PR that has at least one stale-gate name — every already-green/pending PR costs no
- * `gh api` read at all, keeping this bounded to the population the mechanism actually concerns.
- */
+/** W1-T1212: {@link SweepDeps.staleGateWorkflowsByPr} wiring; only red PRs incur reads,
+ * and only those with stale-gate names get entries. */
 export function buildStaleGateWorkflowsByPr(
   owner: string,
   repo: string,
@@ -479,12 +451,9 @@ export function buildStaleGateWorkflowsByPr(
   return out;
 }
 
-/** PRIMARY CONTROL — the most direct graph evidence the distance-refresh rung may read on one pass.
- * It ignores GitHub's `mergeable_state`: `open-prs-rest.ts` normalizes `behind` to `clean`, and
- * GitHub can report `clean` even when its compare endpoint says main is many commits ahead. Three
- * serial reads every five-minute rotation keep the observation bounded while eventually covering
- * every open, updateable PR.
- */
+/** PRIMARY CONTROL: three serial graph reads per five-minute rotation eventually cover eligible
+ * PRs. Ignore mergeable_state: open-prs-rest.ts normalizes behind→clean, and GitHub's clean
+ * can contradict compare's measured distance. */
 export const DISTANCE_REFRESH_PROBE_LIMIT = 3;
 
 export const DISTANCE_REFRESH_ROTATION_MS = 5 * 60_000;
@@ -496,10 +465,8 @@ export function createDistanceProbeSequence(): () => number {
   return () => window++ * DISTANCE_REFRESH_ROTATION_MS;
 }
 
-/** W1-T3277 — choose a small, fair rotating slice of PRs for direct graph comparison. A draft or
- * conflicted PR cannot reach `update-branch`, so probing it would spend GitHub capacity without
- * creating an admissible candidate. The activity order is stable within a window; the window
- * offset guarantees an unchanged population larger than the cap is not permanently starved. */
+/** W1-T3277: stable activity order plus rotating offset prevents starvation above the cap.
+ * Skip drafts/conflicts: neither can reach update-branch. */
 export function distanceRefreshProbeTargets(
   openPrs: readonly OpenPrView[],
   nowMs: number = systemClock.now(),
@@ -517,11 +484,7 @@ export function distanceRefreshProbeTargets(
   );
 }
 
-/**
- * W1-T3277 — the generic stale-PR distance reader. It deliberately derives freshness from the
- * compare endpoint rather than `mergeable_state`: the latter is a mergeability label, not a
- * graph-distance guarantee. The pure selector in `sweep.ts` receives only measured distances.
- */
+/** W1-T3277: sweep.ts receives measured compare distances, never mergeable_state's labels. */
 /** GitHub's compare endpoint lists at most this many files; a list this long may be cut short. */
 const BASE_COMPARE_FILES_CAP = 300;
 
@@ -573,14 +536,8 @@ function* behindMainByPrSteps(
   return out;
 }
 
-// ── rmd sweep — the level-triggered PR-pipeline reconciler (W1-T77, P22 core) ──
-//
-// The deterministic core (predicate + orchestration + idempotence) lives in
-// lib/sweep.ts and is graded by test/sweep.test.ts over INJECTED deps. This is
-// its real wiring: it BUILDS the observed open-PR state from `gh`/the ledger and
-// supplies the four gated effects (arm / dispatch-fix / close / escalate). The
-// SAME `runSweep` entry point is invoked by `rmd daemon`'s poll loop (see
-// buildSweepHook, wired into DaemonDeps.sweep) — acceptance 4's shared impl.
+// W1-T77/P22: real gh/ledger wiring for sweep.ts's injected, idempotent core (test/sweep.test.ts).
+// Supplies arm/dispatch-fix/close/escalate; daemon's buildSweepHook shares runSweep (acceptance 4).
 
 /** One rollup check entry as `gh pr list --json statusCheckRollup` returns it. */
 export interface RollupCheck {
@@ -622,14 +579,8 @@ export interface RawOpenPr {
   statusCheckRollup?: RollupCheck[];
   /** W1-T528: GitHub's `draft`, carried by `mapRestPr` (lib/open-prs-rest.ts). */
   isDraft?: boolean;
-  /**
-   * W1-T1201 — the PR's creation timestamp, projected onto `OpenPrView.createdAt` below for
-   * `deriveDisposition`'s age clamp. Optional so this type stays satisfied by today's
-   * `mapRestPr` output (lib/open-prs-rest.ts), which does not carry it yet — see that gap named
-   * in this task's own rationale. Wiring a real producer here is a follow-up (`created_at` sits
-   * on the SAME REST row `updated_at` already comes from); until then this is always `undefined`,
-   * the same fail-toward-unclamped default `OpenPrView.createdAt` documents.
-   */
+  /** W1-T1201: projected to OpenPrView.createdAt for deriveDisposition's age clamp.
+   * Optional for REST producers lacking created_at; undefined fails toward unclamped. */
   createdAt?: string;
 }
 
@@ -645,25 +596,15 @@ export function reviewStateFromRollup(rollup: RollupCheck[] | undefined): OpenPr
   return "pending";
 }
 
-/**
- * W1-T2299: produce OpenPrView.reviewVerdictPostedAt from the current remudero-review rollup,
- * reusing reviewStateFromRollup's entry. open-prs-rest.ts maps the commit status's created_at to
- * startedAt (review.ts's postStatus). Missing/undateable evidence means not superseded, fail closed.
- */
+/** W1-T2299: current review rollup's startedAt (REST commit-status created_at) supplies
+ * reviewVerdictPostedAt; missing/undateable evidence fails closed toward not superseded. */
 export function reviewVerdictPostedAtFromRollup(rollup: RollupCheck[] | undefined): string | undefined {
   const r = (rollup ?? []).find((c) => c.context === REVIEW_CTX || c.name === REVIEW_CTX);
   return r?.startedAt;
 }
 
-/**
- * Has the deterministic `rmd review` post already been attempted and refused for this exact
- * task/synthetic key + PR URL + head + body digest? Deliberately not `review.post_failed`
- * (a transient `gh` error, which must keep retrying, never escalate on a
- * mere network hiccup) and NOT `review.posted` (a real post always flips
- * GitHub's live rollup away from "zero runs," so `reviewStateFromRollup`
- * itself carries that outcome on the next read — no ledger check needed).
- * A commit or body edit changes the identity and resets this refusal dedup immediately.
- */
+/** Dedup refusals by task/synthetic key + PR URL + head + body digest; edits reset identity.
+ * Ignore transient review.post_failed (must retry) and review.posted (live rollup carries it). */
 function reviewPostRefusedFor(
   ledger: Array<Record<string, unknown>>,
   taskId: string,
@@ -683,11 +624,9 @@ function reviewPostRefusedFor(
   );
 }
 
-/** Completed review judgments for one exact, current review input. Unlike the historical orphan
- * scan below, this is the retry/backoff counter: only `review.posted` counts, and only when task,
- * PR, head and body digest all match. A refusal did not judge the input; a legacy row without the
- * identity cannot safely block it; and a commit or body edit changes the digest and resets both
- * the count and its clock immediately. */
+/** Current-input retry/backoff facts: count only completed review.posted judgments matching
+ * task/PR/head/body digest. Refusals and identity-less legacy rows cannot block; edits reset
+ * both count and clock. The historical orphan scan below has a different scope. */
 export interface ReviewInputAttemptFacts {
   attempts: number;
   lastAttemptAt?: string;
@@ -887,7 +826,7 @@ export interface CiFailureFetchOptions {
   annotationReadLimit?: number;
 }
 
-function ciFetchOptions(options: CiAnnotationFetch | CiFailureFetchOptions | undefined): Required<CiFailureFetchOptions> {
+function ciFetchOptions(options: CiAnnotationFetch | CiFailureFetchOptions | undefined): CiFailureReads {
   if (typeof options === "function") {
     return {
       fetchAnnotations: options,
@@ -900,6 +839,62 @@ function ciFetchOptions(options: CiAnnotationFetch | CiFailureFetchOptions | und
     fetchJobLog: options?.fetchJobLog ?? defaultCiJobLogFetch,
     annotationReadLimit: options?.annotationReadLimit ?? DEFAULT_CI_ANNOTATION_READ_LIMIT,
   };
+}
+
+/** W1-T12713: the reads one pass makes for its failing checks. `readCheckOutput` reads the check run's own output. It
+ *  is async only, so the sync path keeps the inline REST output; like `readJobLogRegion`, it is absent when the caller
+ *  injects its own log read, so no real read starts beside it. */
+type CiFailureReads = Required<CiFailureFetchOptionsAsync> & {
+  readCheckOutput?: (owner: string, repo: string, checkRunId: string, tailLines: number) => string | Promise<string>;
+  readJobLogRegion?: (owner: string, repo: string, jobId: string, tailLines: number) => Promise<string>;
+};
+
+/** W1-T12713: per process, each job log whose read failed on a rate limit or a server error: how many
+ *  reads failed in a row, and when the next read is due. A pass before that time does not read the log. */
+const logReadBackoff = new Map<string, { failures: number; untilMs: number; cause: "rate-limit" | "transient"; detail: string }>();
+/** BACKSTOP: entries kept; the oldest goes first. One entry per failing job, cleared when its log reads. */
+const LOG_READ_BACKOFF_ENTRIES = 512;
+/** PRIMARY CONTROL: failed retries before the check run's output stands in for the log. */
+export const LOG_READ_RETRIES_BEFORE_FALLBACK = 2;
+
+/** After a failed log read: defer it to its retry time, or read the check run's output in its place. */
+function logReadAfterFailure(key: string, err: unknown, detail: string, nowMs: number):
+    { deferred?: { cause: "rate-limit" | "transient"; until: string; detail: string }; checkOutput: boolean } {
+  const prior = logReadBackoff.get(key);
+  const defer = (e: { failures: number; untilMs: number; cause: "rate-limit" | "transient"; detail: string }) =>
+    e.failures > LOG_READ_RETRIES_BEFORE_FALLBACK ? { checkOutput: true }
+      : { deferred: { cause: e.cause, until: fixedClock(e.untilMs).iso(), detail: e.detail }, checkOutput: false };
+  if ((err as { logReadWaiting?: true } | null)?.logReadWaiting && prior !== undefined) return defer(prior);
+  const failure = classifyLogFetchFailure(err);
+  if (failure.kind !== "rate-limit" && failure.kind !== "transient") {
+    logReadBackoff.delete(key);
+    return { checkOutput: failure.kind === "absent" };
+  }
+  const failures = (prior?.failures ?? 0) + 1;
+  const entry = { failures, untilMs: logFetchRetryAtMs(failure, failures, nowMs), cause: failure.kind, detail };
+  logReadBackoff.delete(key);
+  logReadBackoff.set(key, entry);
+  if (logReadBackoff.size > LOG_READ_BACKOFF_ENTRIES) logReadBackoff.delete(logReadBackoff.keys().next().value!);
+  return defer(entry);
+}
+
+/** The check run's own output for a check whose log is absent or that has no Actions job id. A commit status has
+ *  none: its description already reaches the fix round as `statusDescription`. The inline REST title and summary
+ *  stand in when no read is made, the read fails, or the budget is spent. */
+function* checkOutputTail(owner: string, repo: string, c: RollupCheck, checkRunId: string | undefined, tailLines: number,
+  fetch: CiFailureReads, budget: { left: number }): Steps<string> {
+  if (c.context) return "";
+  const inline = [c.title, c.outputSummary].filter((p): p is string => typeof p === "string" && p.trim() !== "").join("\n");
+  const read = fetch.readCheckOutput;
+  if (read === undefined || checkRunId === undefined || budget.left <= 0) return inline.split("\n").slice(0, tailLines).join("\n");
+  budget.left -= 1;
+  try {
+    const text = yield* step(() => read(owner, repo, checkRunId, tailLines));
+    return (text.trim() !== "" ? text : inline).split("\n").slice(0, tailLines).join("\n");
+  } catch {
+    // Best-effort: the inline output stands in, and the caller names the log's own failure when it is empty.
+    return inline.split("\n").slice(0, tailLines).join("\n");
+  }
 }
 
 /** The real annotations read: `gh api` against the endpoint that answers, parsed as JSON. Only
@@ -926,9 +921,10 @@ function failureAnnotationLines(out: string): string[] {
 
 /** The real Actions job-log read. This endpoint stayed readable when `gh run view --log` returned zero bytes. */
 export function defaultCiJobLogFetch(owner: string, repo: string, jobId: string): string {
+  // W1-T12713: stderr is kept so a failed read names its HTTP status for classifyLogFetchFailure.
   return ghExec(["api", `repos/${owner}/${repo}/actions/jobs/${jobId}/logs`], {
     encoding: "utf8",
-    stdio: ["ignore", "pipe", "ignore"],
+    stdio: ["ignore", "pipe", "pipe"],
     maxBuffer: 1 << 22,
   });
 }
@@ -1324,6 +1320,8 @@ function annotationLogReducer(annotations: NonNullable<CiFailure["annotations"]>
   };
 }
 
+export { classifyLogFetchFailure };
+
 export function fetchCiFailures(
   owner: string,
   repo: string,
@@ -1353,6 +1351,8 @@ export function fetchCiFailuresAsync(
       fetchJobLog: options.fetchJobLog ?? defaultCiJobLogFetchAsync,
       annotationReadLimit: options.annotationReadLimit ?? DEFAULT_CI_ANNOTATION_READ_LIMIT,
       readJobLogRegion: options.fetchJobLog ? undefined : defaultCiJobLogRegionAsync,
+      readCheckOutput: options.fetchJobLog ? undefined
+        : (owner, repo, checkRunId, tailLines) => readCheckRunOutputAsync(`${owner}/${repo}`, checkRunId, tailLines),
     }),
   );
 }
@@ -1362,11 +1362,10 @@ function* ciFailuresSteps(
   repo: string,
   rollup: RollupCheck[] | undefined,
   tailLines: number,
-  fetch: Required<CiFailureFetchOptionsAsync> & {
-    readJobLogRegion?: (owner: string, repo: string, jobId: string, tailLines: number) => Promise<string>;
-  },
+  fetch: CiFailureReads,
 ): Steps<CiFailure[]> {
   let annotationReads = 0;
+  const checkOutputBudget = { left: fetch.annotationReadLimit };
   const failing = dedupeRollupByLatestAttempt(rollup ?? []).filter((c) => {
     const s = (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase();
     return REQUIRED_CHECK_FAIL.has(s);
@@ -1438,8 +1437,11 @@ function* ciFailuresSteps(
     } else if (jobId) {
       annotationFallback = { outcome: "skipped-limit" };
     }
+    const backoffKey = `${owner}/${repo}#${jobId}`;
     if (jobId) {
       try {
+        const waiting = logReadBackoff.get(backoffKey);
+        if (waiting !== undefined && systemClock.now() < waiting.untilMs) throw Object.assign(new Error(waiting.detail), { logReadWaiting: true });
         const readRegion = fetch.readJobLogRegion;
         if (annotations.length > 0 && runnerTimeoutLines === undefined && finalizeAnnotation === undefined) {
           const reducer = annotationLogReducer(annotations, tailLines);
@@ -1484,6 +1486,7 @@ function* ciFailuresSteps(
           logUnavailable = logTail.trim() === "" ? { kind: "empty-log" } : undefined;
           if (logUnavailable === undefined) tailSource = "log";
         }
+        logReadBackoff.delete(backoffKey);
       } catch (err) {
         let detail = "unknown error";
         try {
@@ -1509,11 +1512,17 @@ function* ciFailuresSteps(
           logUnavailable = undefined;
           tailSource = "annotations";
         } else {
-          logUnavailable = { kind: "fetch-failed", detail };
-          logTail = "";
-          tailSource = undefined;
+          const after = logReadAfterFailure(backoffKey, err, detail, systemClock.now());
+          logUnavailable = after.deferred ? { kind: "deferred", ...after.deferred } : { kind: "fetch-failed", detail };
+          logTail = after.checkOutput ? yield* checkOutputTail(owner, repo, c, c.checkRunId?.toString() ?? jobId, tailLines,
+            fetch, checkOutputBudget) : "";
+          if (logTail.trim() !== "") logUnavailable = undefined;
+          tailSource = logTail.trim() !== "" ? "check-output" : undefined;
         }
       }
+    } else {
+      logTail = yield* checkOutputTail(owner, repo, c, c.checkRunId?.toString(), tailLines, fetch, checkOutputBudget);
+      if (logTail.trim() !== "") [logUnavailable, tailSource] = [undefined, "check-output"];
     }
     failures.push({
       name,
@@ -2023,6 +2032,66 @@ interface OpenPrViewReads {
   openPrRows: () => unknown;
   ciFailures: (owner: string, repo: string, rollup: RollupCheck[] | undefined) => CiFailure[] | Promise<CiFailure[]>;
   requiredContexts: (owner: string, repo: string) => RequiredContextsRead | Promise<RequiredContextsRead>;
+  /** W1-T12530: the async driver runs one stage's per-PR reads at once. */
+  concurrent?: true;
+  baseTip?: () => string | undefined | Promise<string | undefined>;
+}
+
+/** W1-T12530: per-PR stage answers kept across passes, each under the inputs its read took. */
+export interface OpenPrStageReuse {
+  readonly entries: Map<string, { key: string; values: unknown }>;
+}
+
+export function createOpenPrStageReuse(): OpenPrStageReuse {
+  return { entries: new Map() };
+}
+
+interface PrStageContext {
+  reuse: OpenPrStageReuse | undefined;
+  concurrent: boolean;
+  read: GhApiFetcher;
+  keyFor: (prNumber: number, input: unknown) => string | undefined;
+}
+
+/** W1-T12530: one stage's per-PR reads. An answer is reused only under the same key and only after
+ *  a read that did not fail; `reusable: false` marks a stage whose answer can change under the key. */
+function* perPrStageSteps<C extends { number: number }, V>(
+  ctx: PrStageContext,
+  stage: string,
+  candidates: readonly C[],
+  run: (candidate: C, read: GhApiFetcher) => Steps<V>,
+  reusable: ((value: V) => boolean) | false = () => true,
+): Steps<V[]> {
+  const one = function* (candidate: C): Steps<V> {
+    const id = `${stage}\0${candidate.number}`;
+    const key = reusable === false ? undefined : ctx.keyFor(candidate.number, candidate);
+    const held = key === undefined ? undefined : ctx.reuse?.entries.get(id);
+    if (held !== undefined && held.key === key) return held.values as V;
+    let failed = false;
+    const read: GhApiFetcher = (args, onRateLimit) => {
+      try {
+        const answer = ctx.read(args, onRateLimit);
+        return answer instanceof Promise ? answer.catch((error: unknown) => { failed = true; throw error; }) : answer;
+      } catch (error) {
+        failed = true;
+        throw error;
+      }
+    };
+    const value = yield* run(candidate, read);
+    if (key !== undefined && !failed && reusable !== false && reusable(value)) ctx.reuse?.entries.set(id, { key, values: value });
+    else ctx.reuse?.entries.delete(id);
+    return value;
+  };
+  if (ctx.concurrent) return (yield* step(() => Promise.all(candidates.map((c) => runStepsAsync(one(c)))))) as V[];
+  const out: V[] = [];
+  for (const candidate of candidates) out.push(yield* one(candidate));
+  return out;
+}
+
+function byCandidate<V>(candidates: readonly { number: number }[], values: readonly (V | undefined)[]): Map<number, V> {
+  const out = new Map<number, V>();
+  candidates.forEach((c, i) => { const v = values[i]; if (v !== undefined) out.set(c.number, v); });
+  return out;
 }
 
 export function* openPrViewSteps(
@@ -2068,18 +2137,48 @@ export function* openPrViewSteps(
      *  drain.ts's `isDispatchEligible` would. Omitted ⇒ `planResequenceIneligible` stays `undefined`
      *  for every PR — fail closed, exactly today's behavior for every existing caller/fixture. */
     isMerged?: MergedResolver;
+    stageReuse?: OpenPrStageReuse;
+    /** W1-T12530: each stage's wall time is added here, for `sweep_light.pre_review_timing`. */
+    stagesMs?: Record<string, number>;
   } = {},
   io: OpenPrViewReads,
 ): Steps<ClassifiedOpenPrView[]> {
   const fetch = io.read;
+  let stageStart = systemClock.now();
+  const lap = (stage: string) => {
+    const now = systemClock.now();
+    if (deps.stagesMs) deps.stagesMs[stage] = (deps.stagesMs[stage] ?? 0) + now - stageStart;
+    stageStart = now;
+  };
   const assessPendingOwner =
     deps.assessPendingOwner ??
     ((record: PendingReviewStatusRecord) => assessPendingReviewOwner(record, { isPidAlive: defaultIsPidAlive }));
   const raw = (deps.openPrRows ?? (yield* step(io.openPrRows))) as RawOpenPr[];
+  lap("open_pr_list");
+  let baseTip: string | undefined;
+  let baseTipUnreadable: string | undefined;
+  if (deps.stageReuse && io.baseTip) {
+    try { baseTip = yield* step(io.baseTip); } catch (error) {
+      // An unreadable base tip only turns reuse off for this pass: every PR reads again.
+      baseTipUnreadable = String(error);
+    }
+    lap("base_tip");
+  }
+  const byNumber = new Map(raw.map((pr) => [pr.number, pr]));
+  const stageCtx: PrStageContext = {
+    reuse: deps.stageReuse, concurrent: io.concurrent === true, read: fetch,
+    keyFor: (prNumber, input) => {
+      const pr = byNumber.get(prNumber);
+      if (!deps.stageReuse || baseTipUnreadable !== undefined || baseTip === undefined || !pr || (pr as { rollupUnreadable?: true }).rollupUnreadable) return undefined;
+      const rollup = createHash("sha256").update(JSON.stringify(pr.statusCheckRollup ?? null)).digest("hex");
+      return JSON.stringify([pr.headRefOid, baseTip, rollup, pr.updatedAt, input]);
+    },
+  };
   const ledger = readLedgerLines(ledgerPath);
   // W1-T435: the SAME evidence pass that quotes an operator's steering note also produces
   // `pendingAnswer` from an answered clarification — a local file read, never GitHub.
   const questionLines = readQuestionsNdjson(repoRoot);
+  lap("ledger_read");
   // W1-T103: branch protection's OWN required-contexts list, read ONCE per
   // repo for this whole sweep pass (never per-PR, never hardcoded) — see
   // checksStateFromRollup's doc for why this must gate checksState instead of
@@ -2104,6 +2203,7 @@ export function* openPrViewSteps(
   const ciGateRequired = deps.readCiGateRequired
     ? deps.readCiGateRequired(repoRoot)
     : readCiGateRequiredChecks(repoRoot);
+  lap("required_contexts");
   let mainPlan: Plan | undefined;
   const mainPlanPath = deps.mainPlanPath ?? join(repoRoot, "plan", "tasks.yaml");
   const planReader = deps.readMainPlan ?? loadPlan;
@@ -2122,6 +2222,7 @@ export function* openPrViewSteps(
     // An unreadable local plan only disables branch-derived trailer repair for this pass.
     mainPlan = undefined;
   }
+  lap("plan_read");
 
   // W1-T2864: the local emitter receipt is still the zero-request positive answer. Only PRs
   // without it enter the bounded REST hydrator; complete reads are cached by exact head.
@@ -2139,9 +2240,11 @@ export function* openPrViewSteps(
     planFilingFileCache,
     { missCap: deps.planFilingFileMissCap ?? PLAN_FILING_FILE_MISS_CAP },
   );
+  lap("plan_filing_files");
   const dependencyMainIdentities = yield* hydrateDependencyMainIdentitiesSteps(
     owner, repo, raw, planFilingFiles, io.dependencyIdentityRead ?? fetch, planFilingFileCache,
   );
+  lap("dependency_identities");
   const planFilingClassifications = new Map<number, PlanFilingClassification>();
   for (const pr of raw) {
     const classification = classifyPlanFiling(emitterPlanFilings.get(pr.number) === true, planFilingFiles.get(pr.number));
@@ -2155,12 +2258,14 @@ export function* openPrViewSteps(
   // 5,735 sweeps — and hard-capped, so the pathological case cannot run away. Best-effort by
   // construction: an exhausted budget yields an empty map and every PR keeps the `undefined` it
   // has carried since the REST migration, i.e. exactly today's behaviour.
-  const mergeStateObservations = yield* hydrateMergeStateObservationsSteps(
-    owner,
-    repo,
-    raw.map((p) => p.number),
-    fetch,
-  );
+  const mergeCandidates = raw.slice(0, MERGE_STATE_HYDRATION_CAP).map((p) => ({ number: p.number }));
+  const mergeStateObservations = byCandidate(mergeCandidates, yield* perPrStageSteps(stageCtx, "merge_states", mergeCandidates,
+    function* (c, read): Steps<MergeStateObservation | undefined> {
+      return (yield* hydrateMergeStateObservationsSteps(owner, repo, [c.number], read)).get(c.number);
+    },
+    // GitHub answers `unknown` while it computes mergeability; only a computed state is reused.
+    (observation) => observation?.state !== undefined));
+  lap("merge_states");
   const mergeStates = new Map(
     [...mergeStateObservations]
       .filter(([, observation]) => observation.state !== undefined)
@@ -2174,7 +2279,18 @@ export function* openPrViewSteps(
   // the same literal `ghPrCreateFillCommand`'s own `--base` argv already hardcodes.
   const dirtyPrs = raw.filter((p) => mergeStates.get(p.number) === "dirty").map((p) => ({ number: p.number, headRefOid: p.headRefOid }));
   const mergeConflictGaps = new Map<number, string>();
-  const mergeConflicts = yield* hydrateMergeConflictEvidenceSteps(owner, repo, "main", dirtyPrs, fetch, undefined, mergeConflictGaps);
+  for (const p of dirtyPrs.slice(MERGE_STATE_HYDRATION_CAP)) {
+    mergeConflictGaps.set(p.number, `over the ${MERGE_STATE_HYDRATION_CAP}-PR conflict-evidence cap this pass`);
+  }
+  const conflictCandidates = dirtyPrs.slice(0, MERGE_STATE_HYDRATION_CAP);
+  const conflictRuns = yield* perPrStageSteps(stageCtx, "merge_conflicts", conflictCandidates, function* (c, read) {
+    const gaps = new Map<number, string>();
+    const evidence = (yield* hydrateMergeConflictEvidenceSteps(owner, repo, "main", [c], read, undefined, gaps)).get(c.number);
+    return { evidence, gap: gaps.get(c.number) };
+  }, (run) => run.gap === undefined);
+  const mergeConflicts = byCandidate(conflictCandidates, conflictRuns.map((run) => run.evidence));
+  for (const [n, gap] of byCandidate(conflictCandidates, conflictRuns.map((run) => run.gap))) mergeConflictGaps.set(n, gap);
+  lap("merge_conflicts");
 
     // WORKFLOW RUNS (W1-T2340 — the producer `OpenPrView.workflowRuns` has lacked since it was
     // declared): a THIRD bounded follow-up fetch, scoped the same way the conflict-evidence one
@@ -2188,7 +2304,10 @@ export function* openPrViewSteps(
     const pendingPrs = raw
       .filter((p) => checksStateFromRollup(p.statusCheckRollup, requiredContexts) === "pending")
       .map((p) => ({ number: p.number, headRefOid: p.headRefOid }));
-    const workflowRuns = yield* hydrateWorkflowRunsSteps(owner, repo, pendingPrs, fetch);
+    const runCandidates = pendingPrs.slice(0, WORKFLOW_RUN_HYDRATION_CAP);
+    const workflowRuns = byCandidate(runCandidates, yield* perPrStageSteps(stageCtx, "workflow_runs", runCandidates,
+      function* (c, read) { return (yield* hydrateWorkflowRunsSteps(owner, repo, [c], read)).get(c.number); }, false));
+    lap("workflow_runs");
 
   // supersededBy: the HIGHEST-numbered other open PR crediting the same task.
   const byTask = new Map<string, number[]>();
@@ -2222,7 +2341,13 @@ export function* openPrViewSteps(
     const newest = peers.length ? Math.max(...peers) : pr.number;
     if (newest > pr.number) supersededPrs.push({ number: pr.number, supersededBy: newest, taskId: t });
   }
-  const supersessionVerdicts = yield* hydrateSupersessionVerdictsSteps(owner, repo, supersededPrs, fetch, isInPlanScope);
+  const supersededCandidates = supersededPrs.slice(0, MERGE_STATE_HYDRATION_CAP);
+  // Not reused: the verdict also reads the newer PR, whose head is not in this PR's key.
+  const supersessionVerdicts = byCandidate(supersededCandidates, yield* perPrStageSteps(stageCtx, "supersession",
+    supersededCandidates, function* (c, read) {
+      return (yield* hydrateSupersessionVerdictsSteps(owner, repo, [c], read, isInPlanScope)).get(c.number);
+    }, false));
+  lap("supersession");
 
   // W1-T3704 (completed here) — THE CURRENT SIDE OF THE REVIEW-REUSE COMPARISON, hydrated ONCE for a bounded set.
   //
@@ -2242,17 +2367,21 @@ export function* openPrViewSteps(
       return reviewOrphansFor(ledger, reviewLedgerKeyFor(t, pr.number), pr.headRefOid, undefined, pr.url).orphanedByPush;
     })
     .map((pr) => ({ number: pr.number, headRefOid: pr.headRefOid }));
-  const reviewReuseCurrent = yield* hydrateReviewReuseFactsSteps(
-    owner, repo, "main", reviewOrphanedPrs, fetch, undefined,
-    (prNumber, reason) => {
-      const pr = raw.find((candidate) => candidate.number === prNumber)!;
-      appendLedger(ledgerPath, {
-        run_id: `sweep-review-reuse-${systemClock.now()}`, task_id: "SWEEP", lane: "sweep",
-        step: "sweep.review_reuse_unreadable", pr_number: prNumber, pr_url: pr.url,
-        head_sha: pr.headRefOid, reason,
-      });
-    },
-  );
+  const reviewReuseCurrent = byCandidate(reviewOrphanedPrs, yield* perPrStageSteps(stageCtx, "review_reuse",
+    reviewOrphanedPrs, function* (c, read) {
+      return (yield* hydrateReviewReuseFactsSteps(
+        owner, repo, "main", [c], read, undefined,
+        (prNumber, reason) => {
+          const pr = raw.find((candidate) => candidate.number === prNumber)!;
+          appendLedger(ledgerPath, {
+            run_id: `sweep-review-reuse-${systemClock.now()}`, task_id: "SWEEP", lane: "sweep",
+            step: "sweep.review_reuse_unreadable", pr_number: prNumber, pr_url: pr.url,
+            head_sha: pr.headRefOid, reason,
+          });
+        },
+      )).get(c.number);
+    }));
+  lap("review_reuse");
   // An unarmed plan PR is never armed (W1-T5615), so its human hold is read here or never: the same
   // facts the view below stamps (`isPlanFiling`, the complete file list) decide it.
   const holdCandidateFacts = (pr: RawOpenPr) => {
@@ -2268,56 +2397,74 @@ export function* openPrViewSteps(
       changedFiles: files?.state === "complete" ? files.paths : undefined,
     };
   };
-  const scannerBlockers = yield* hydrateScannerBlockerObservationsSteps(
-    owner,
-    repo,
-    raw
-      .filter((pr) => isHumanHoldCandidate(holdCandidateFacts(pr)))
-      .map((pr) => ({
-        number: pr.number, headSha: pr.headRefOid, merge: mergeStateObservations.get(pr.number),
-        ...(isScannerBlockerCandidate(holdCandidateFacts(pr)) ? {} : { holdOnly: true as const }),
-      })),
-    fetch,
-  );
+  const scannerAll = raw
+    .filter((pr) => isHumanHoldCandidate(holdCandidateFacts(pr)))
+    .map((pr) => ({
+      number: pr.number, headSha: pr.headRefOid, merge: mergeStateObservations.get(pr.number),
+      ...(isScannerBlockerCandidate(holdCandidateFacts(pr)) ? {} : { holdOnly: true as const }),
+    }));
+  // The hydrator's own order: armed candidates take the cap first.
+  const scannerCandidates = [...scannerAll.filter((c) => c.holdOnly !== true), ...scannerAll.filter((c) => c.holdOnly === true)]
+    .slice(0, SCANNER_BLOCKER_HYDRATION_CAP);
+  // Not reused: a person can dismiss a scanner alert without changing this PR's key.
+  const scannerBlockers = byCandidate(scannerCandidates, yield* perPrStageSteps(stageCtx, "scanner_blockers", scannerCandidates,
+    function* (c, read) { return (yield* hydrateScannerBlockerObservationsSteps(owner, repo, [c], read)).get(c.number); }, false));
+  lap("scanner_blockers");
 
   // W1-T11153: review admission puts a PR a person must clear last, so the review queue's own human
   // CHANGES_REQUESTED holds are read here; the scanner read above covers only already-reviewed PRs.
-  const reviewQueueHolds = yield* hydrateReviewQueueHoldsSteps(
-    owner,
-    repo,
-    raw
-      .filter((pr) => isReviewQueueHoldCandidate(holdCandidateFacts(pr)) && !isHumanHoldCandidate(holdCandidateFacts(pr)))
-      .sort((a, b) => (a.createdAt ?? "").localeCompare(b.createdAt ?? "") || a.number - b.number)
-      .map((pr) => ({ number: pr.number, headSha: pr.headRefOid })),
-    fetch,
-  );
+  const holdCandidates = raw
+    .filter((pr) => isReviewQueueHoldCandidate(holdCandidateFacts(pr)) && !isHumanHoldCandidate(holdCandidateFacts(pr)))
+    .sort((a, b) => (a.createdAt ?? "").localeCompare(b.createdAt ?? "") || a.number - b.number)
+    .map((pr) => ({ number: pr.number, headSha: pr.headRefOid }))
+    .slice(0, REVIEW_QUEUE_HOLD_READ_CAP);
+  // Keep the classified read until reuse is decided. The map-only hydrator drops an unreadable
+  // listing just like a valid empty listing, so caching its undefined result would hide recovery.
+  const holdReads = yield* perPrStageSteps(stageCtx, "review_queue_holds", holdCandidates,
+    function* (c, read) {
+      try {
+        const reviews = yield* step(() => read(pullReviewsRestArgs(owner, repo, c.number)));
+        const observation = classifyChangesRequested(c, reviews);
+        return { hold: observation?.kind === "changes-requested" ? observation : undefined,
+          readable: observation?.kind !== "ambiguous" };
+      } catch {
+        // An unreadable reviews page is not "no hold": readable:false keeps the result out of the reuse cache.
+        return { hold: undefined, readable: false };
+      }
+    }, (result) => result.readable);
+  const reviewQueueHolds = byCandidate(holdCandidates, holdReads.map((result) => result.hold));
+  lap("review_queue_holds");
 
   // W1-T5633: a head whose latest `CodeQL` check failed has its open high alerts read, unless its ledger
   // already holds a terminal code-scanning ruling for that head (a false positive, or a fix dispatched).
   // W1-T9731: so does a head whose newest arm the security policy refused on a new high alert.
   // #14202: and a head whose own security-merge-policy status is blocked, armed or not.
-  const codeqlHeadAlerts = yield* hydrateCodeqlHeadAlertsSteps(
-    owner,
-    repo,
-    raw
-      .filter((pr) => pr.isDraft !== true &&
-        codeqlAlertsReadDue(ledger, pr.number, pr.headRefOid, codeqlCheckFailed(pr.statusCheckRollup) ||
-          securityMergePolicyRefusal(pr.statusCheckRollup)?.state === "blocked") &&
-        !codeScanningHeadSettled(ledger, pr.number, pr.headRefOid))
-      .map((pr) => ({ number: pr.number, headSha: pr.headRefOid })),
-    fetch,
-  );
+  const codeqlCandidates = raw
+    .filter((pr) => pr.isDraft !== true &&
+      codeqlAlertsReadDue(ledger, pr.number, pr.headRefOid, codeqlCheckFailed(pr.statusCheckRollup) ||
+        securityMergePolicyRefusal(pr.statusCheckRollup)?.state === "blocked") &&
+      !codeScanningHeadSettled(ledger, pr.number, pr.headRefOid))
+    .map((pr) => ({ number: pr.number, headSha: pr.headRefOid }))
+    .slice(0, CODEQL_HEAD_ALERT_HYDRATION_CAP);
+  const codeqlHeadAlerts = byCandidate(codeqlCandidates, yield* perPrStageSteps(stageCtx, "codeql_alerts", codeqlCandidates,
+    function* (c, read) { return (yield* hydrateCodeqlHeadAlertsSteps(owner, repo, [c], read)).get(c.number); }, false));
+  lap("codeql_alerts");
 
-  const ciFailuresByPr = new Map<number, CiFailure[] | undefined>();
+  const redCandidates: { number: number; rollup: RollupCheck[] | undefined }[] = [];
   for (const pr of raw) {
     const redRequiredChecks = redQualityGateNames(pr.statusCheckRollup, ciGateRequired);
     const red = checksStateFromRollup(pr.statusCheckRollup, requiredContexts) === "red";
     if (!red && redRequiredChecks.length === 0) continue;
-    const evidenceRollup = red ? pr.statusCheckRollup : earlyRedEvidenceRollup(pr.statusCheckRollup, redRequiredChecks);
-    ciFailuresByPr.set(pr.number, yield* step(() => io.ciFailures(owner, repo, evidenceRollup)));
+    redCandidates.push({ number: pr.number, rollup: red ? pr.statusCheckRollup : earlyRedEvidenceRollup(pr.statusCheckRollup, redRequiredChecks) });
   }
+  const ciRuns = yield* perPrStageSteps(stageCtx, "ci_failures", redCandidates,
+    function* (c) { return yield* step(() => io.ciFailures(owner, repo, c.rollup)); },
+    // A log that could not be read is read again next pass.
+    (failures) => Array.isArray(failures) && failures.every((f) => f.logUnavailable === undefined || f.logUnavailable.kind === "no-job-id"));
+  const ciFailuresByPr = new Map<number, CiFailure[] | undefined>(redCandidates.map((c, i) => [c.number, ciRuns[i]]));
+  lap("ci_failures");
 
-  return raw.map((pr) => {
+  const views: ClassifiedOpenPrView[] = raw.map((pr) => {
     const planFiling = planFilingClassifications.get(pr.number) ?? { isPlanFiling: false, source: "unreadable" as const };
     // W1-T3505: thread the SAME classification this view stamps below into task-identity
     // resolution, so a `github-files`-classified plan filing withholds its run-branch id exactly
@@ -2614,6 +2761,13 @@ export function* openPrViewSteps(
       pendingAnswer: taskId ? operatorVerdictEvidence(taskId, ledger, questionLines) : undefined,
     };
   });
+  lap("views");
+  if (deps.stageReuse) {
+    for (const id of deps.stageReuse.entries.keys()) {
+      if (!byNumber.has(Number(id.slice(id.indexOf("\0") + 1)))) deps.stageReuse.entries.delete(id);
+    }
+  }
+  return views;
 }
 
 type OpenPrCiFailureRead = (owner: string, repo: string, rollup: RollupCheck[] | undefined) => Promise<CiFailure[]>;
@@ -2624,7 +2778,37 @@ export function fetchOpenPrsWithPostedIdsAsync(
   read: GhApiFetcher,
   pacer: GhCallPacer | undefined,
 ): Promise<OpenPrRest[]> {
-  return paceGhEntryAsync(pacer, isGhRateLimitError, () => runStepsAsync(openPrsWithPostedIdsSteps(owner, repo, read)));
+  return paceGhEntryAsync(pacer, isGhRateLimitError,
+    () => runStepsAsync(openPrsWithPostedIdsSteps(owner, repo, rollupPrefetchRead(owner, repo, read, pacer))));
+}
+
+/** W1-T12530: when the open-PR list arrives, every head's check-run and status reads start at once,
+ *  each through the pacer; the list's own walk then takes each answer in its usual order. */
+function rollupPrefetchRead(owner: string, repo: string, read: GhApiFetcher, pacer: GhCallPacer | undefined): GhApiFetcher {
+  type Held = Promise<{ ok: true; value: unknown } | { ok: false; error: unknown }>;
+  const early = new Map<string, Held>();
+  const list = openPrsRestArgs(owner, repo).join("\0");
+  const start = (args: string[]) => early.set(args.join("\0"), paceGhEntryAsync(pacer, isGhRateLimitError, async () => read(args))
+    .then((value) => ({ ok: true as const, value }), (error: unknown) => ({ ok: false as const, error })));
+  return (args, onRateLimit) => {
+    const key = args.join("\0");
+    const held = early.get(key);
+    if (held !== undefined) {
+      early.delete(key);
+      return held.then((answer) => { if (answer.ok) return answer.value; throw answer.error; });
+    }
+    const answer = read(args, onRateLimit);
+    if (key !== list) return answer;
+    return Promise.resolve(answer).then((rows) => {
+      for (const row of Array.isArray(rows) ? rows as Array<{ head?: { sha?: unknown } | null }> : []) {
+        const sha = row?.head?.sha;
+        if (typeof sha !== "string" || sha === "") continue;
+        start(checkRunsRestArgs(owner, repo, sha));
+        start(combinedStatusRestArgs(owner, repo, sha));
+      }
+      return rows;
+    });
+  };
 }
 
 /** W1-T6591: {@link buildOpenPrViews} in ONE pass, every remote read awaited at its own step. */
@@ -2639,13 +2823,20 @@ export function buildOpenPrViewsAsync(
   } = {},
 ): Promise<ClassifiedOpenPrView[]> {
   const transport: GhApiFetcher = deps.fetchAsync ?? ((args, onRateLimit) => ghJsonAsync(args, undefined, onRateLimit));
-  const read = transport;
+  // W1-T12530: every per-PR read goes through the pacer, because a stage's reads now start together.
+  const paced: GhApiFetcher = (args, onRateLimit) => paceGhEntryAsync(deps.pacer, isGhRateLimitError, async () => transport(args, onRateLimit));
+  const ciFailures = deps.fetchCiFailureEvidence ?? deps.fetchCiFailureEvidenceAsync ?? fetchCiFailuresAsync;
   return runStepsAsync(openPrViewSteps(owner, repo, ledgerPath, deps, {
-    read,
-    dependencyIdentityRead: (args, onRateLimit) => paceGhEntryAsync(deps.pacer, isGhRateLimitError, async () => transport(args, onRateLimit)),
-    openPrRows: () => fetchOpenPrsWithPostedIdsAsync(owner, repo, read, deps.pacer),
-    ciFailures: deps.fetchCiFailureEvidence ?? deps.fetchCiFailureEvidenceAsync ?? fetchCiFailuresAsync,
+    read: paced,
+    concurrent: true,
+    dependencyIdentityRead: paced,
+    openPrRows: () => fetchOpenPrsWithPostedIdsAsync(owner, repo, transport, deps.pacer),
+    ciFailures: (o, r, rollup) => paceGhEntryAsync(deps.pacer, isGhRateLimitError, async () => ciFailures(o, r, rollup)),
     requiredContexts: deps.readRequiredContextsAsync ?? readRequiredStatusCheckContextsAsync,
+    baseTip: async () => {
+      const ref = (await paced(["api", `repos/${owner}/${repo}/git/ref/heads/main`])) as { object?: { sha?: unknown } } | null;
+      return typeof ref?.object?.sha === "string" && ref.object.sha !== "" ? ref.object.sha : undefined;
+    },
   }));
 }
 
@@ -3202,7 +3393,8 @@ export function tickReadWorkerBoot(entry: string): string {
  */
 export function startTickReadWorker(input: TickReadOptions, opts: { url?: URL; start?: typeof startWorker } = {}): Worker {
   const url = opts.url ?? tickReadWorkerUrl();
-  const workerData = { kind: READ_PLANE_KIND, input, entry: url.href };
+  const budget = input.githubInstallationBudget ?? githubInstallationBudget().threadInput();
+  const workerData = { kind: READ_PLANE_KIND, input: budget === undefined ? input : { ...input, githubInstallationBudget: budget }, entry: url.href };
   // SHARE_ENV: the daemon's hourly GH_TOKEN refresh must reach the worker's reads. startWorker decides the entry
   // and, for a bundle, the execArgv without tsx; the boot imports whichever entry it chose.
   return (opts.start ?? startWorker)(url, { workerData, env: SHARE_ENV }, {
@@ -3284,65 +3476,6 @@ export function planSyncGitRunnerAsync(
       child.stdin?.end(stdin ?? "");
       const bound = boundChildByLoopTime(child, timeoutMs, { escalateAfterMs: opts.graceMs ?? GIT_FETCH_KILL_GRACE_MS });
     });
-}
-
-/** W1-T9763: `key` is `<tasks.yaml blob>:<tasks.d tree>`; `commit` is where a reader without it reads it again. */
-export interface PlanRevision {
-  key: string;
-  commit: string;
-  repoDir: string;
-  relPath: string;
-}
-
-export type RevisionLoad = { plan: Plan; quarantined: QuarantinedTask[] };
-
-/** One parsed {@link Plan} per {@link PlanRevision}; `adopt` reuses each unchanged blob's tasks. */
-export interface PlanRevisionStore {
-  get(key: string): RevisionLoad | undefined;
-  adopt(revision: PlanRevision, blobs: Array<{ label: string; text: string }>): RevisionLoad;
-  revisionOf(plan: Plan): PlanRevision | undefined;
-  counts(): { parsed: number; reused: number; held: number; retained: number };
-}
-
-/** A plan is frozen, so a reader that mutates it throws instead of changing every reader's plan, and held weakly, so
- *  one no reader holds is released; `retainLatest` keeps the newest for a reader holding nothing between requests. */
-export function createPlanRevisionStore(opts: { retainLatest?: boolean } = {}): PlanRevisionStore {
-  const blobCache = new PlanBlobCache();
-  const held = new Map<string, WeakRef<Plan>>();
-  const meta = new WeakMap<Plan, { revision: PlanRevision; quarantined: QuarantinedTask[] }>();
-  const released = new FinalizationRegistry<string>((key) => {
-    if (held.get(key)?.deref() === undefined) held.delete(key);
-  });
-  let latest: Plan | undefined;
-  let parsed = 0;
-  let reused = 0;
-  const lookup = (key: string): RevisionLoad | undefined => {
-    const plan = held.get(key)?.deref();
-    const known = plan && meta.get(plan);
-    return plan && known ? { plan, quarantined: known.quarantined } : undefined;
-  };
-  const hit = (key: string): RevisionLoad | undefined => {
-    const load = lookup(key);
-    if (load) reused++;
-    return load;
-  };
-  return {
-    get: hit,
-    adopt: (revision, blobs) => {
-      const already = hit(revision.key);
-      if (already) return already;
-      const read = mergePlanBlobsQuarantiningDuplicates(blobs, blobCache);
-      parsed++;
-      freezeReadGeneration(read.plan);
-      held.set(revision.key, new WeakRef(read.plan));
-      meta.set(read.plan, { revision, quarantined: read.quarantined });
-      released.register(read.plan, revision.key);
-      if (opts.retainLatest) latest = read.plan;
-      return { plan: read.plan, quarantined: read.quarantined };
-    },
-    revisionOf: (plan) => meta.get(plan)?.revision,
-    counts: () => ({ parsed, reused, held: held.size, retained: latest ? 1 : 0 }),
-  };
 }
 
 export async function planBlobsAtRevision(revision: PlanRevision, runGit: GitRunnerAsync): Promise<Array<{ label: string; text: string }>> {

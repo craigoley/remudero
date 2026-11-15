@@ -8,6 +8,8 @@
   repo: remudero
   depends_on: []
   type: implement
+  design: |
+    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve
   verify: auto
   status: queued
   attempts: 0

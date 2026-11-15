@@ -34,6 +34,7 @@ function recordingRunner(diffClass: string, testResult = ok("# tests 1\n# pass 1
     calls.push(args);
     const at = args.indexOf("--changed-files");
     if (at >= 0) listed.push(readFileSync(args[at + 1]!, "utf8"));
+    if (args.includes("--list-plan-only-suites")) return ok("test/reads-master-plan.test.ts\n");
     if (args.includes("--list-plan-reading-suites")) {
       return at >= 0
         ? ok("test/reads-master-plan.test.ts\n", "diff-class: plan-reading selected_count=1 previous_count=3\n")
@@ -72,20 +73,20 @@ test("W1-T10144: retro.preflight_failed no longer recurs", async () => {
   const { result, rows } = await preflight(run, { files: ["MASTER-PLAN.md", "docs/ORIENTATION.md"] });
 
   assert.deepEqual(result, { ok: true, attempts: 1, suiteCount: 1, repaired: false });
-  const listing = calls.find((args) => args.includes("--list-plan-reading-suites"))!;
+  const listing = calls.find((args) => args.includes("--list-plan-only-suites"))!;
   assert.ok(listing.includes("--changed-files"), "the listing is narrowed by the branch's changed paths, as ci.yml narrows it");
-  assert.deepEqual(listed, ["MASTER-PLAN.md\ndocs/ORIENTATION.md\n", "MASTER-PLAN.md\ndocs/ORIENTATION.md\n"],
-    "the classifier and the listing both read exactly the branch's changed paths");
+  assert.deepEqual(listed, Array(3).fill("MASTER-PLAN.md\ndocs/ORIENTATION.md\n"),
+    "the classifier and both listings read exactly the branch's changed paths");
   const testRun = calls.at(-1)!;
   assert.ok(testRun.includes("test/reads-master-plan.test.ts"));
   assert.ok(!testRun.includes("test/b.test.ts") && !testRun.includes("test/c.test.ts"), "suites CI would not run for this PR are not run");
   const list = listing[listing.indexOf("--changed-files") + 1]!;
   assert.equal(existsSync(list), false, "the private changed-path list is removed after the listing");
   assert.equal(rows[0]!.step, "retro.preflight_passed");
-  assert.equal(rows[0]!.extra.suite_selection, "changed-paths");
-  assert.equal(rows[0]!.extra.suite_selection_reason, "diff class PLAN_ONLY");
+  assert.equal(rows[0]!.extra.suite_selection, "plan-only");
+  assert.equal(rows[0]!.extra.suite_selection_reason, "diff class PLAN_ONLY (author plan-only selection)");
   assert.equal(rows[0]!.extra.changed_path_count, 2);
-  assert.equal(rows[0]!.extra.broad_suite_count, 3, "the row records the broad count, so each pass's saving is measurable");
+  assert.equal(rows[0]!.extra.broad_suite_count, 1, "the row records the plan-reading count it replaced, so each pass's saving is measurable");
   assert.equal(rows[0]!.extra.suite_count, 1);
 });
 

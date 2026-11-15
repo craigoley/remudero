@@ -16,7 +16,7 @@
   files:
     - src/lib/worker.ts
     - test/worker/spawn/provider-safe-continuation.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: Under a selected private registry, a read-only Codex call carrying a resume session and a fresh handoff gets no resume, a fresh-handoff receipt with reason private-registry-fresh-only, and a prompt led by the handoff that keeps the pending action. With no selected registry the same call still resumes, and a Claude resume is unchanged

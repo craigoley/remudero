@@ -14,7 +14,7 @@
     - test/review/shared-git-storage.test.ts
     - test/no-test-fixture-state-lands-under-the-real-scratch-root.test.ts
     - test/infra/the-shared-storage-fixtures-pass-under-a-sticky-shared-tmpdir.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: Under a group-writable umask (0002) and with TMPDIR set to a world-writable sticky directory outside /tmp, both suites' fixtures build their storage under an account-owned directory and every case passes, while each production refusal they assert still fires for its own reason

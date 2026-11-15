@@ -17,7 +17,7 @@
     - src/run-task.ts
     - test/relint-loop.test.ts
     - test/triage/triage-relint-verdictless-repair.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: The plan lane redrafts a locally clean filing when the review's changed-task lint reports push-gate violations

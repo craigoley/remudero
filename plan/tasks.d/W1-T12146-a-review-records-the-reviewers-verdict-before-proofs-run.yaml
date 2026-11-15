@@ -1,0 +1,43 @@
+- id: W1-T12146
+  title: "A review records the reviewer's verdict before proofs run"
+  repo: remudero
+  depends_on: []
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the criterion record that every review writes and the sweep reads back; the verdict itself must not move
+  band_meaning: blast-radius
+  origin: operator-session#model-choice-2026-11-10
+  plan_refs:
+    - W1-T11132
+  files:
+    - src/lib/review.ts
+    - test/review/a-review-records-the-reviewers-verdict-before-proofs-run.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Each criterion in a review.posted row records the verdict the reviewer gave for it before any proof ran, beside the final verdict"
+      proof: "grep: W1-T12146 criterion 1 in test/review/a-review-records-the-reviewers-verdict-before-proofs-run.test.ts"
+    - claim: "The row counts the overturns in both directions: the reviewer said met and the proof failed, and the reviewer said unmet and the proof passed"
+      proof: "grep: W1-T12146 criterion 2 in test/review/a-review-records-the-reviewers-verdict-before-proofs-run.test.ts"
+    - claim: "A criterion the reviewer gave no verdict for records that as its own value, never as met or unmet"
+      proof: "grep: W1-T12146 criterion 3 in test/review/a-review-records-the-reviewers-verdict-before-proofs-run.test.ts"
+    - claim: "The final verdict of every criterion and of the review is the same as before this change"
+      proof: "grep: W1-T12146 criterion 4 in test/review/a-review-records-the-reviewers-verdict-before-proofs-run.test.ts"
+  rationale: |
+    MEASURED 2026-11-10 in the core instance's ledger, 2026-10-27 to 2026-11-10: the reviewer's own verdict on a criterion is lost when a proof runs.
+    - gpt-6.1-sol failed a criterion although its proof passed in 26.0% of criteria (623 of 2,392). sonnet-5-5 did so in 3.7% (37 of 987).
+    - That count is one direction only, and it was rebuilt from the reason text. The other direction, a reviewer that says met when the proof fails, cannot be counted.
+    - `judgeCriterion` in src/lib/review.ts holds the reviewer's answer in `keywordMet`. Proof execution then overrides it, and the row keeps only the result.
+    - `floorMet` on `CriterionVerdict` is taken after the proof ran, so it does not answer this.
+  design: |
+    Add an optional field to `CriterionVerdict` for the reviewer's verdict before proofs: met, unmet or none. Set it in `judgeCriterion` from `keywordMet` before the proof runs. It rides `decision_verdict` on `review.posted` like the other criterion fields.
+    Add two counts to the row: overturned to unmet, and overturned to met.
+    The field is optional, so older rows and the rebuilt rows in run-task.ts and sweep.ts need no change.
+    NOT IN SCOPE: any change to how a verdict is decided.
+  falsifier: |
+    Set the field after the proof runs and criterion 1 must fail. Count one direction only and criterion 2 must fail. Let the field change `met` and criterion 4 must fail. Restore and require all to pass.
+  note: |
+    W1-T12145 measures which reviewer model is right. This task supplies the per-criterion record that explains why.

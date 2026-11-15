@@ -1,6 +1,7 @@
 import type { FeedbackEntry } from "./feedback.js";
 import { readLedgerUnionRecordsSync, realLedgerFs } from "./ledger-union.js";
 import type { PolicyValues } from "./policy.js";
+import type { Task, TaskInputAnswer } from "./plan.js";
 import { ratificationPinCheck, type Ratifications } from "./ratification.js";
 import type { NeedsMeSection } from "./status-board.js";
 import type { VerifyHumanRuling } from "./verify-human-judge.js";
@@ -132,7 +133,7 @@ export function feedbackHasAnswer(entry: FeedbackEntry, entries: readonly Feedba
 
 export function feedbackQuestionContext(entry: FeedbackEntry): string {
   const summary = entry.summary;
-  return [typeof entry.raw === "string" ? entry.raw : "", ...(summary ? [summary.headline, summary.what_happened, summary.decision, ...summary.options.map((o) => `${o.label}: ${o.consequence}`)] : [])].filter(Boolean).join("\n\n");
+  return [typeof entry.raw === "string" ? entry.raw : "", ...(typeof summary === "string" ? [summary] : summary ? [summary.headline, summary.what_happened, summary.decision, ...summary.options.map((o) => `${o.label}: ${o.consequence}`)] : [])].filter(Boolean).join("\n\n");
 }
 
 export interface FeedbackGateSource extends HumanGateSource {
@@ -238,6 +239,30 @@ export function projectFeedbackGates(input: {
   result.gates = gates;
   if (reasons.length > 0) result.reason = reasons.join("; ");
   return result;
+}
+
+/** W1-T12715: the task file on main, or null when the task was not read from a task file. */
+function heldTaskFileUrl(repository: string | undefined, task: Pick<Task, "sourcePath">): string | null {
+  const path = /(plan\/tasks\.d\/[^\s:/]+\.yaml)$/.exec(task.sourcePath ?? "")?.[1];
+  return repository && path ? `https://github.com/${repository}/blob/main/${path}` : null;
+}
+
+/** W1-T12715: one task_question gate for each queued task whose needs_input question has no answer. */
+export function projectHeldTaskQuestionGates(tasks: readonly Task[], inputAnswer: TaskInputAnswer, repository?: string): HumanGateObservation[] {
+  return tasks.flatMap((task): HumanGateObservation[] => {
+    if (task.needs_input === undefined || task.status !== "queued" || inputAnswer(task.id)?.trim()) return [];
+    const { question, source_pr, asked_at } = task.needs_input;
+    return [{ kind: "task_question", subject: task.id, ownerSurface: "inbox", openedAt: asked_at || null,
+      url: heldTaskFileUrl(repository, task),
+      reason: source_pr ? `${question} (source pull request: ${source_pr})` : question, resolutionVerb: "answer" }];
+  });
+}
+
+/** W1-T12715: the held-task questions as `rmd inbox` prints them; "" when there are none. */
+export function renderHeldTaskQuestions(gates: readonly HumanGateObservation[]): string {
+  if (gates.length === 0) return "";
+  return [`HELD FOR YOUR ANSWER (${gates.length}): each task waits until you answer (POST /v1/questions/answer {taskId, answer})`,
+    ...gates.map((gate) => `  ${gate.subject}: ${gate.reason}${gate.url ? `\n    ${gate.url}` : ""}`)].join("\n");
 }
 
 interface ChangeManagementAction {

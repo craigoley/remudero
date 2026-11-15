@@ -351,6 +351,6 @@ export function idleLaneCauseForRefillReason(reason: unknown): IdleLaneCause | u
   if (/^governor: memory(?: |$)/.test(reason)) return "memory";
   if (/^governor: queue/.test(reason) || /^lane budget/.test(reason)) return "wip_limit";
   if (/^governor: cost/.test(reason)) return "capacity_headroom";
-  if (/^governor/.test(reason)) return "governor";
+  if (/^governor/.test(reason) || /^lane target/.test(reason)) return "governor";
   return undefined;
 }

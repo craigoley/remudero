@@ -20,6 +20,13 @@ export const MINT_ISO = "2000-01-01T00:00:00.000Z";
 /** No Linux pid reaches this (pid_max is at most 2^22). */
 export const DEAD_PID = 2_147_483_646;
 export const LOCAL = hostname();
+/** W1-T12528: the host every {@link instance} boot judges on — read once here, never by the sweep. */
+export const NAMESPACE_BOOT_ISO = "2001-01-01T00:00:00.000Z";
+export const FIXED_HOST_PROBE = {
+  hostname: () => LOCAL,
+  namespaceBootMs: () => Date.parse(NAMESPACE_BOOT_ISO),
+  pidPresent: (pid: number) => pid !== DEAD_PID,
+};
 export const OTHER_HOST = "0123456789ab";
 export const ORPHAN_PLAN = `- id: ${TASK}\n  title: restart orphan fixture\n  repo: remudero\n  type: implement\n` +
   "  verify: auto\n  risk: medium\n  origin: test\n  status: queued\n  files: [src/change.ts]\n" +
@@ -89,7 +96,7 @@ export function instance(t: TestContext, seed: Array<Record<string, unknown>>): 
       const runId = `DAEMON-${++boots}`;
       const lockIso = new Date().toISOString();
       bootSweepDispatchClaims(reserver, {
-        localHost: LOCAL,
+        hostProbe: FIXED_HOST_PROBE,
         lockHeldSinceMs: Date.parse(lockIso),
         lockHeldSinceIso: lockIso,
         stateDir,

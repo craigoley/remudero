@@ -1,0 +1,63 @@
+- id: W1-T12820
+  title: "A paced read never waits past a short bound for the installation reset; it stands down so the sweep runs a partial pass"
+  repo: remudero
+  depends_on:
+    - W1-T12553
+  priority: 1.4
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # every core daemon read meets this path; a wrong bound either hangs a tick again or stands reads down that could have waited a few seconds, and a write never meets it
+  origin: "operator-session#installation-budget-wait-holds-the-tick-2026-11-15"
+  plan_refs:
+    - W1-T12553
+    - W1-T12555
+    - W1-T12670
+    - W1-T12717
+  files:
+    - src/lib/github-installation-budget.ts
+    - src/lib/github-transport.ts
+    - src/cli/commands/daemon.ts
+    - src/lib/tick-read-worker.ts
+    - test/github/the-fleets-app-installation-stays-under-its-hourly-rate-limit.test.ts
+    - test/github/tick-reads-in-the-worker-thread-take-their-share-of-the-installation-budget.test.ts
+    - test/github/a-paced-read-stands-down-past-a-short-wait-for-the-installation-reset.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "When a refused core read's reset is more than the budget's wait bound away, admitInstallationReadAsync (ghJsonAsync, ghTextAsync, ghLinesAsync) throws GhPaceFloorStandDownError with the refusing reading and sleeps no timer, and the throttle row is still written. The bound is the daemon's poll interval (policy pollIntervalMs), set by startDaemonInstallationBudget, and a worker thread that joins the budget through threadInput gets the same bound"
+      proof: "grep: W1-T12820 criterion 1 in test/github/a-paced-read-stands-down-past-a-short-wait-for-the-installation-reset.test.ts"
+    - claim: "Through the real daemonCommand start path and its real tick read, with the installation reading exhausted and its reset an hour away, the first tick read settles within the bound with openPrError naming the stand-down, and the boot light pass runs (a sweep_light.pre_review_timing row) within the bound: a partial pass, never a hang"
+      proof: "grep: W1-T12820 criterion 2 in test/github/a-paced-read-stands-down-past-a-short-wait-for-the-installation-reset.test.ts"
+    - claim: "invariant:one-argv-aware-claim — the pacer (createGhCallPacer wait and waitAsync) no longer asks the budget without an argv. With the core reading exhausted, a paced `gh api graphql` read and a paced read with a bucket hint go ahead on the sync and async paths, and a paced core REST read on the same pacer still stands down at the transport's claim"
+      kind: guard
+      proof: "grep: W1-T12820 criterion 3 in test/github/a-paced-read-stands-down-past-a-short-wait-for-the-installation-reset.test.ts"
+    - claim: "invariant:short-waits-keep-the-back-off — when the reset is at or below the bound, the async read still awaits one timer to the reset and then reads, as W1-T12553 requires; with no bound configured the wait is unbounded as today"
+      kind: guard
+      proof: "grep: W1-T12820 criterion 4 in test/github/a-paced-read-stands-down-past-a-short-wait-for-the-installation-reset.test.ts"
+  rationale: |
+    WHY: since W1-T12553 (#18419) and W1-T12670 (#18523) gave the core daemon its installation share, an exhausted installation holds the daemon's tick for the whole reset window. Before the budget, a rate-limited hour still gave partial sweeps.
+    OBSERVED 2026-11-15 on the Azure host: the core daemon restarted at 02:56Z with the budget configured. The installation was at remaining 0 of 15000 (a real GitHub 403), with the reset at 03:09:06Z. The first tick's read slept until the reset. The daemon tick awaited it, so there were no sweep passes from 02:57Z to 03:21Z. The tick read took 1132 s, past the 300 s stale age (TICK_READ_MAX_AGE_MS), so its board_items result was refused (`tick_read.stale_refused`) and the work was wasted.
+    READ at origin/main ddf647c0e:
+    - src/lib/tick-read-worker.ts:2563 and :2581 run the open-PR reads through `paceGhEntryAsync`, which calls the pacer's `waitAsync`.
+    - src/lib/github-transport.ts:732-739 `waitAsync` calls `budget.admit()` and, when it refuses, does `await sleep(admit.waitUntil * 1000 - now())`: up to an hour.
+    - :655-663 `admitInstallationReadAsync` (called at :446, :453, :497, :504, :533) loops `claimRead()` and sleeps to `waitUntil` the same way.
+    - :719-725 `wait()` and :735 `waitAsync()` call `budget.admit()` with no argv. The argv-aware `installationCoreRead()` (:640) exempts writes, GraphQL and bucket-hinted reads, but the pacer cannot see the argv, so an exhausted core reading also holds paced GraphQL and other-bucket reads.
+    - Every paced production read reaches a transport entry that already claims argv-aware and counted: ghExec (:238), ghExecFile (:258), ghJson (:285), ghJsonAsync and ghTextAsync (:446-533). So the pacer's `admit()` is a second, argv-less check of the same budget.
+    - The tick already treats a thrown open-PR read as unreadable: src/lib/tick-read-worker.ts:311-315 sets `openPrError`, and src/cli/commands/daemon.ts:871 then gives the light pass its own read, whose synchronous claim stands down (:645-652). So a stand-down gives a partial pass; only the long sleep does not.
+    - src/cli/commands/daemon.ts:1324 starts the budget; the daemon's poll interval (`opts.pollIntervalMs`, from policy pollIntervalMs) is in scope there.
+  design: |
+    INVARIANT one-argv-aware-claim: each core read is claimed once, by the transport, from its argv; the pacer never asks the budget, so GraphQL, bucket-hinted reads and writes are never held by the core reading.
+    INVARIANT short-waits-keep-the-back-off: a refused read whose reset is within the bound still sleeps to the reset; only a longer wait stands down, and with no bound the wait is unbounded as today.
+    INVARIANT writes-keep-their-reserve (from W1-T12553): no write meets the budget.
+    1. src/lib/github-installation-budget.ts: `createInstallationBudget` takes `maxWaitMs?: number`; `InstallationBudgetThreadInput` carries it, so `installationBudgetForThread` gives a worker thread the same bound. A new budget method `resetWaitMs(refusal)` returns `max(1, waitUntil * 1000 - now)` when that is at or below `maxWaitMs` (or no bound is set), else undefined. New logic goes here, not in the transport.
+    2. src/lib/github-transport.ts: `admitInstallationReadAsync` sleeps `resetWaitMs(refusal)` or, when it is undefined, throws `GhPaceFloorStandDownError(refusal.reading)` after `noteThrottle`. `createGhCallPacer`'s `wait` and `waitAsync` drop their `budget.admit()` blocks (the gap, low-water and floor stand-down stay). `workerInstallationBudget` builds its budget with `installationBudgetForThread`, so the bound reaches the tick-read worker. Net line growth in this file is at or below 0 (it is over its source-size ceiling).
+    3. src/cli/commands/daemon.ts: `startDaemonInstallationBudget` takes the wait bound as a new last parameter and passes it to the budget and to `daemonInstallationBudgetInput`; the production call at :1324 passes `opts.pollIntervalMs`. No new constant: the bound is the policy poll interval, so a tick waits at most one poll interval. Net line growth at or below 0, and no added comment lines (comment cap).
+    4. src/lib/tick-read-worker.ts: no change is expected; it is listed in case the stand-down needs a reason shape there. Net line growth at or below 0.
+    5. Tests: the W1-T12553 tests that assert `pacer.wait()` or `pacer.waitAsync()` refuse or sleep on the budget move to reads through the transport, with the same meaning; the async full-reset waits in that file use a reset within the bound. Criterion 2 drives daemonCommand as test/daemon/the-first-tick-counts-the-early-tick-read-as-its-own.test.ts does, with a read plane whose read runs the daemon's own inline tick read, a gh shim that answers core reads with remaining 0 and a reset an hour away, and GH_APP_INSTALLATION_ID and RMD_INSTANCE_NAME set so the daemon configures the budget itself. Each test uses a time limit so a regression fails rather than hangs.
+    NOT IN SCOPE: the first tick's re-read of a stale early read (it is cheap once the read stands down); W1-T12717's source-size judge; any change to the share or the write reserve.
+  falsifier: |
+    Put back the unbounded sleep in admitInstallationReadAsync and criteria 1 and 2 must fail on their time limit (no stand-down, no light pass). Put back `budget.admit()` in the pacer's wait or waitAsync and criterion 3 must fail: the paced GraphQL read is refused or held. Make every refusal stand down and criterion 4 must fail: no timer, no read after the reset. Restore and require all to pass.
+  note: |
+    Id reserved for run-unfiled-1794713293000 with ~/rmd-work/bin/reserve-id.sh. Hand-built on the Azure lane, stacked on this filing.

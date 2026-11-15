@@ -16,7 +16,7 @@
     - src/lib/instrument-grant.ts
     - src/cli/commands/fix.ts
     - test/ci/gates/an-instrument-edit-is-judged-in-shadow-before-it-escalates.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "At an instrument-scope stand-down, the worker's uncommitted diff of each requested instrument path is classified as additive (adds lines, removes none), modifies (any removed or changed line, a deletion, a mode change, a rename or a binary diff) or absent (untouched), and the round is ledgered as instrument_grant.shadow with would_grant only when every path is additive. The patch is saved under state/instrument-grant-shadow for the operator's spot-check, an unreadable diff or unwritable patch is ledgered without throwing, and the escalation is unchanged"

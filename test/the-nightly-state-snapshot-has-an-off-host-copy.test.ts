@@ -191,6 +191,9 @@ function runRung(opts: Opts = {}): Run {
   const state = join(rec, "az-state.json");
   writeFileSync(state, JSON.stringify({ snapshots: opts.seed ?? [], blobs: {} }));
   const vol = opts.vol ?? stateVolume();
+  const config = join(rec, "container-config");
+  mkdirSync(config, { mode: 0o700 });
+  writeFileSync(join(config, "config.json"), '{"workerProviders":["claude"]}\n', { mode: 0o600 });
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     PATH: `${dir}:${process.env.PATH ?? ""}`,
@@ -200,6 +203,7 @@ function runRung(opts: Opts = {}): Run {
     STUB_AZ_STATE: state,
     STUB_DISK_ID: DISK_ID,
     RMD_STATE_DIR: vol,
+    RMD_CONTAINER_CONFIG_DIR: config,
     RMD_STATE_OFFHOST_AZ: join(dir, "az-fake"),
     RMD_GIT_RECLAIM_DIRS: gitRepo({ kind: "offhost-reclaim-target" }).dir,
     RMD_AGENT_HISTORY_DIRS: join(vol, "no-agent-history"),

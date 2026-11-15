@@ -17,7 +17,7 @@
     - test/sweep/a-light-pass-reads-only-appended-ledger-bytes.test.ts
     - test/ledger-read-intent.test.ts # its census pins the three marked readLedger bindings to readLedgerLines by name
     - src/lib/live-ledger-tail.ts # keepUntimed: the light pass keeps the rows readLedgerLines keeps, including untimed fix.dispatch rows
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: With no readLedger injected, observeLightPassReviewEligibility and runSweepLightPass read the live ledger through one process-wide createLiveLedgerTail, return the same rows readLedgerLines returns for that file, and a second light pass over a file with no new bytes parses no line

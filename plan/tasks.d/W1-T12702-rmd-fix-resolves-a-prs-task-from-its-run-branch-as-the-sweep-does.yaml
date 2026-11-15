@@ -1,0 +1,55 @@
+- id: W1-T12702
+  title: "rmd fix resolves a PR's task from its run branch as the sweep does, not only from a body trailer"
+  repo: remudero
+  depends_on: []
+  priority: 1.3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # the fix verb attributes more PRs to a task, so it can dispatch on PRs it refused before; the sweep's resolver and the plan-filing rule are unchanged
+  origin: "operator-session#fix-verb-criteria-unrecoverable-2026-11-14"
+  plan_refs:
+    - W1-T453
+    - W1-T440
+    - W1-T3505
+  files:
+    - src/cli/commands/fix.ts
+    - test/fix-lane/rmd-fix-resolves-a-prs-task-from-its-run-branch-as-the-sweep-does.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "Through fixCommand, a PR whose body has no Remudero-Task: trailer and whose head ref is run-W1-T<n>-<ms> resolves task W1-T<n>: the view has taskId W1-T<n>, criteriaRecoverable true and the unmet criteria from the ledger, and the verb never refuses it as \"criteria unrecoverable (no Remudero-Task: trailer to resolve them from)\""
+      proof: "grep: W1-T12702 criterion 1 in test/fix-lane/rmd-fix-resolves-a-prs-task-from-its-run-branch-as-the-sweep-does.test.ts"
+    - claim: "The verb's task id is the one resolveReviewTaskId (src/lib/tick-read-worker.ts) returns for the PR's body, head ref and plan-filing classification, for each of: a body trailer (it wins over the branch), a run branch only, a plan-only filing on a run branch (no task), and neither (no task)"
+      proof: "grep: W1-T12702 criterion 2 in test/fix-lane/rmd-fix-resolves-a-prs-task-from-its-run-branch-as-the-sweep-does.test.ts"
+    - claim: "invariant:a-filing-credits-no-task — a plan-only filing (an emitter ledger row, or changed paths all in plan scope as classifyPlanFiling reads them) on a run-W1-T<n>-<ms> branch still resolves no task and is refused as criteria unrecoverable, as the sweep does"
+      kind: guard
+      proof: "grep: W1-T12702 criterion 3 in test/fix-lane/rmd-fix-resolves-a-prs-task-from-its-run-branch-as-the-sweep-does.test.ts"
+    - claim: "invariant:escalate-only-without-a-source — a PR with no body trailer and a head ref that names no task (for example fix/some-branch) is still refused as criteria unrecoverable"
+      kind: guard
+      proof: "grep: W1-T12702 criterion 4 in test/fix-lane/rmd-fix-resolves-a-prs-task-from-its-run-branch-as-the-sweep-does.test.ts"
+  rationale: |
+    WHY: the operator's manual repair verb refuses PRs that the sweep repairs. The verb and the sweep should name the same task for the same PR.
+    OBSERVED 2026-11-14 in the core ledger (~/rmd-state2/state/ledger.ndjson):
+    - 16:41:35.980Z FIX-1794674442960 `fix.refused` on #18449: "review failing — criteria unrecoverable (no Remudero-Task: trailer to resolve them from) — escalating".
+    - 16:42:15.814Z FIX-1794674475565 `fix.refused` on #18427, the same reason.
+    - The sweep resolved both at the same time: `sweep.disposed` 16:41:24.90Z #18449 task W1-T12544 "3 unmet criteria — fix round 5", and #18427 task W1-T12550 "1 unmet criterion — fix round 2"; at 16:46:35Z the sweep acted on #18427.
+    READ on GitHub 2026-11-14 ~17:15Z: neither PR body has a Remudero-Task: line. The head refs are run-W1-T12544-1794625576000 and run-W1-T12550-1794620837000. Only the first commit of each branch carries a trailer (62da09002 W1-T12544, 04289c63d W1-T12550); the later commits (fleet fix commits and "Merge branch 'main' into ..." commits) carry none.
+    READ at origin/main ab2dd5256:
+    - src/cli/commands/fix.ts:5843 the verb sets `taskId = reviewTaskIdFromBody(raw.body ?? "")`, the PR body's trailer only (src/lib/report-commands.ts:1202). :5872 `criteriaRecoverable: taskId !== undefined`.
+    - src/lib/tick-read-worker.ts:1571-1580 `resolveReviewTaskId(body, headRefName, planOnlyFiling)`: the body trailer first; no task for a plan-only filing; else `taskIdFromRunBranch(headRefName)`. The sweep's board read calls it through `resolveOpenPrTaskId` at :2258, with the plan-filing verdict from `classifyPlanFiling` (:1544) over the emitter ledger row (`isPlanOnlyFilingPr`, :1524) and the PR's changed paths (:2061-2080).
+    - src/lib/sweep.ts:12286-12291 writes the "criteria unrecoverable" reason when `criteriaRecoverable === false`.
+    So the sweep does not read earlier commits either; the branch name is the source it has and the verb lacks. This task does not add a commit-history read.
+    CHECKED for overlap: W1-T453 (merged) gave the board path the branch fallback; no queued task covers the verb.
+  design: |
+    INVARIANT a-filing-credits-no-task: the verb withholds the branch fallback for a plan-only filing, by the same classifyPlanFiling verdict the sweep uses (W1-T3505).
+    INVARIANT escalate-only-without-a-source: the verb refuses as criteria unrecoverable only when neither the body trailer nor the run branch names a task.
+    1. In fixCommand (src/cli/commands/fix.ts), replace `reviewTaskIdFromBody(raw.body ?? "")` with `resolveReviewTaskId(raw.body ?? "", raw.headRefName, planOnlyFiling)`. Compute `planOnlyFiling` with `classifyPlanFiling(isPlanOnlyFilingPr(ledger, raw.url), files)`, where `files` is one REST read of the PR's changed paths in the shape the sweep's `hydratePlanFilingFilesSteps` gives (reuse that reader or its single-PR step; do not write a second classifier). A failed read gives `{ state: "unreadable" }`, which classifies as not a filing, exactly as the sweep reads it.
+    2. Every later use of `taskId` in fixCommand (unmet criteria, prior strikes, strike history, the printed line) then reads the resolved id. No other change to routeFix or to the sweep.
+    3. Tests drive fixCommand with its existing fetch and route seams (as test/fix-lane/manual-fix-collects-independent-red-evidence.test.ts does) and read the view that reaches `route`, plus the ledger rows.
+    NOT IN SCOPE: reading earlier commits' trailers; changing resolveReviewTaskId; the body repair that adds a missing trailer.
+  falsifier: |
+    Restore `reviewTaskIdFromBody` alone: criteria 1 and 2 must fail with "criteria unrecoverable". Drop the plan-filing check: criterion 3 must fail. Restore and require all to pass.
+  note: |
+    Id reserved for run-unfiled-1794676672000 with ~/rmd-work/bin/reserve-id.sh. Do not run `rmd fix` on a live PR to check this.

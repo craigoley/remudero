@@ -1,3 +1,4 @@
+// @census-reads: src/ scripts/ bin/ test/ — every tracked spawn and Worker site it scans for the Node 24 runtime shapes.
 import assert from "node:assert/strict";
 import { spawnSync, execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";

@@ -10,6 +10,8 @@ import { hostWorktreeGit, hostWorktreeGitAsync } from "./worktree-git.js";
 import { parse as parseYaml } from "yaml";
 import { observeFeedbackAdmission } from "./authority.js";
 import type { FeedbackAdmissionContext } from "./contributor-admission.js";
+import { assertOneFeedbackCopy, feedbackReadRoots, instanceStateDir } from "./feedback.js";
+import { planDestinationRepository } from "./plan-destination.js";
 
 /**
  * The daemon's second work-generating rung (recon-DC #2): claims and fires at most one feedback
@@ -92,11 +94,23 @@ export function decideTriageClaim(
 }
 
 /**
- * PURE. Does any merged commit subject name this feedback entry? Matched as a plain substring,
- * never a regex — a feedback id may contain characters a pattern would need to escape.
+ * PURE. Does main show an outcome for this feedback entry? Either a merged commit subject names
+ * it (a plain substring, never a regex), or its status on origin/main is not `new`. W1-T12198:
+ * the shared feedback landing merges under a subject that names no feedback id.
  */
-export function feedbackOutcomeObserved(subjects: readonly string[], feedbackId: string): boolean {
-  return subjects.some((s) => s.includes(feedbackId));
+export function feedbackOutcomeObserved(subjects: readonly string[], feedbackId: string, landedStatus?: string): boolean {
+  return subjects.some((s) => s.includes(feedbackId)) || (landedStatus !== undefined && landedStatus !== "new");
+}
+
+/** The evidence-arm inputs. Each is read lazily, and only for an id whose claim is held. */
+interface TriageOutcomeEvidence {
+  mergedSubjects?: () => readonly string[];
+  /** The entry's `status:` on origin/main; `undefined` when it cannot be read. */
+  landedStatus?: (feedbackId: string) => string | undefined;
+}
+
+function outcomeObservedFor(feedbackId: string, evidence: TriageOutcomeEvidence): boolean {
+  return feedbackOutcomeObserved(evidence.mergedSubjects?.() ?? [], feedbackId, evidence.landedStatus?.(feedbackId));
 }
 
 /** Which release arm applies. `liveness` (W1-T4769) is the fourth, and still no bare timer: it
@@ -446,7 +460,7 @@ export interface TriageClaimResult extends TriageClaimDecision {
 export async function claimTriage(
   feedbackId: string,
   reserver: TriageClaimReserverAsync,
-  opts: { mergedSubjects?: () => readonly string[] } = {},
+  opts: TriageOutcomeEvidence = {},
 ): Promise<TriageClaimResult> {
   const anchor = await reserver.mintAnchor();
   if (!anchor) return decideTriageClaim("unreachable", { feedbackId, stderr: reserver.lastAttemptStderr?.() ?? "the claim anchor came back empty" });
@@ -455,7 +469,7 @@ export async function claimTriage(
   const holder = outcome === "taken" ? await reserver.holder(feedbackId) : undefined;
   const decision = decideTriageClaim(outcome, { feedbackId, holder, stderr: reserver.lastAttemptStderr?.() });
   if (outcome !== "taken") return decision;
-  const observed = feedbackOutcomeObserved(opts.mergedSubjects?.() ?? [], feedbackId);
+  const observed = outcomeObservedFor(feedbackId, opts);
   const released = await releaseTriageClaim(feedbackId, reserver, { outcomeObserved: observed });
   return { ...decision, reason: `${decision.reason} ${released.reason}`, staleReleased: released.dropped };
 }
@@ -505,12 +519,11 @@ export interface TriageClaimSweep {
 export async function sweepTriageClaims(
   candidates: readonly string[],
   reserver: TriageClaimReserverAsync,
-  o: {
+  o: TriageOutcomeEvidence & {
     now: Date;
     /** Rows stamped at or after `sinceIso`, or `undefined` when the ledger union was unreadable. */
     readRows: (sinceIso: string) => readonly TriageLivenessRow[] | undefined;
     log: (step: string, extra?: Record<string, unknown>) => void;
-    mergedSubjects?: () => readonly string[];
   },
 ): Promise<TriageClaimSweep> {
   const claimed = await reserver.claimedIds?.();
@@ -532,7 +545,7 @@ export async function sweepTriageClaims(
       liveness = assessTriageClaimLiveness({ holder, rows, now: o.now });
     }
     const result = await releaseTriageClaim(id, reserver, {
-      outcomeObserved: feedbackOutcomeObserved(o.mergedSubjects?.() ?? [], id),
+      outcomeObserved: outcomeObservedFor(id, o),
       liveness,
       heldSha: sha,
     });
@@ -563,7 +576,7 @@ export async function claimTriageWithLogging(
   log: (step: string, extra?: Record<string, unknown>) => void,
   feedbackId: string,
   reserver: TriageClaimReserverAsync,
-  opts: { mergedSubjects?: () => readonly string[] } = {},
+  opts: TriageOutcomeEvidence = {},
 ): Promise<TriageClaimResult> {
   const result = await claimTriage(feedbackId, reserver, opts);
   log("triage.claim", {
@@ -862,12 +875,31 @@ export function decideAutoTriage(i: AutoTriageInputs): AutoTriageDecision {
  * Why: docs/forensics/auto-triage.md#feedbackentriesoldestfirst.
  */
 function feedbackEntriesOldestFirst(root: string, admission?: FeedbackAdmissionContext): Array<{ id: string; ts: string }> {
+  // W1-T12202: the public root and, while the host file names one, the destination checkout. One id is read once.
+  const texts = new Map<string, { path: string; text: string }>();
+  for (const r of triageFeedbackRoots(root)) {
+    for (const [id, copy] of feedbackTextsOf(r)) {
+      const held = texts.get(id);
+      if (held === undefined) texts.set(id, copy);
+      else assertOneFeedbackCopy(id, held, copy);
+    }
+  }
   const out: Array<{ id: string; ts: string }> = [];
+  for (const [id, { text }] of texts) admitNewEntry(id, text, admission, out);
+  return sortOldestFirst(out);
+}
+
+function triageFeedbackRoots(root: string): string[] {
+  return feedbackReadRoots(root, planDestinationRepository(instanceStateDir()));
+}
+
+function feedbackTextsOf(root: string): Map<string, { path: string; text: string }> {
+  const out = new Map<string, { path: string; text: string }>();
   const view = currentMainFeedbackView(root);
   // W1-T11374: origin/main judges every entry it or the checkout's HEAD tracks; only a capture neither holds is read locally.
-  if (view !== undefined) for (const entry of view.entries) admitNewEntry(entry.id, entry.text, admission, out);
+  if (view !== undefined) for (const entry of view.entries) out.set(entry.id, { path: `${root} origin/main:plan/feedback/${entry.id}.yaml`, text: entry.text });
   const dir = join(root, "plan", "feedback");
-  if (!existsSync(dir)) return sortOldestFirst(out);
+  if (!existsSync(dir)) return out;
   for (const name of readdirSync(dir)) {
     if (!name.endsWith(".yaml")) continue;
     if (view !== undefined && (view.mainNames.has(name) || view.headNames.has(name))) continue;
@@ -877,9 +909,9 @@ function feedbackEntriesOldestFirst(root: string, admission?: FeedbackAdmissionC
     } catch {
       continue; // an unreadable entry is skipped, never a reason to refuse the whole sweep
     }
-    admitNewEntry(name.replace(/\.yaml$/, ""), text, admission, out);
+    out.set(name.replace(/\.yaml$/, ""), { path: join(dir, name), text });
   }
-  return sortOldestFirst(out);
+  return out;
 }
 
 function admitNewEntry(id: string, text: string, admission: FeedbackAdmissionContext | undefined, out: Array<{ id: string; ts: string }>): void {
@@ -925,6 +957,15 @@ export async function refreshFeedbackFromMain(
   root: string,
   log?: (step: string, extra: Record<string, unknown>) => void,
   git: MainFeedbackGit = hostWorktreeGitAsync,
+): Promise<void> {
+  // W1-T12202: each root keeps its own view, keyed by its own path and its own origin/main.
+  for (const r of triageFeedbackRoots(root)) await refreshOneFeedbackRoot(r, log, git);
+}
+
+async function refreshOneFeedbackRoot(
+  root: string,
+  log: ((step: string, extra: Record<string, unknown>) => void) | undefined,
+  git: MainFeedbackGit,
 ): Promise<void> {
   const dirs = gitDirsOf(root);
   if (dirs === undefined) return dropView(root, "not a git checkout", log);
@@ -1055,15 +1096,18 @@ function readTextOrUndefined(path: string): string | undefined {
 /** The feedback entry's `status:` as committed on origin/main — the daemon's own checkout can lag a merged
  *  triage (#10265). `undefined` when the ref, the file or the field cannot be read. */
 export function feedbackStatusOnMain(root: string, feedbackId: string): string | undefined {
-  let text: string;
-  try {
-    text = hostWorktreeGit(root, ["show", `origin/main:plan/feedback/${feedbackId}.yaml`], { timeout: 10_000 });
-  } catch (error) {
-    // A missing ref/file is an unreadable main status. Preserve security refusals from the leaf.
-    if (error !== null && typeof error === "object" && "status" in error) return undefined;
-    throw error;
+  const copies: Array<{ path: string; text: string }> = [];
+  for (const dir of feedbackReadRoots(root, planDestinationRepository(instanceStateDir()))) {
+    try {
+      copies.push({ path: `${dir} origin/main`, text: hostWorktreeGit(dir,
+        ["show", `origin/main:plan/feedback/${feedbackId}.yaml`], { timeout: 10_000 }) });
+    } catch (error) {
+      // Missing/unreadable Git bytes provide no release evidence. Preserve leaf security refusals.
+      if (error === null || typeof error !== "object" || !("status" in error)) throw error;
+    }
   }
-  return /^status:\s*(\S+)\s*$/m.exec(text)?.[1];
+  if (copies.length === 2) assertOneFeedbackCopy(feedbackId, copies[0], copies[1]);
+  return copies[0] === undefined ? undefined : /^status:\s*(\S+)\s*$/m.exec(copies[0].text)?.[1];
 }
 
 /** Feedback ids at `status: new`, oldest first — the count half of

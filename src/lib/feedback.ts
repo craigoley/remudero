@@ -10,13 +10,21 @@ import {
 } from "./contributor-admission.js";
 export type { FeedbackAdmissionContext } from "./contributor-admission.js";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { basename, join, relative, resolve, sep } from "node:path";
+import { configPath } from "./config.js";
+import { readFileIfExists } from "./fs-race-safe.js";
+import { planDestinationRepository, resolvePlanDestination, type PlanDestinationRepository, type PlanDestinationRepositoryRead } from "./plan-destination.js";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
-import { landFeedback, landFeedbackStatusContent, queueFeedbackRecord, queuedFeedbackDir, readQueuedFeedbackRecords, type LandFeedbackOpts } from "./feedback-landing.js";
+import {
+  landFeedback, landFeedbackStatusContent, planDestinationLandingOpts, queueFeedbackRecord, queuedFeedbackDir, readQueuedFeedbackRecords,
+  type LandFeedbackOpts,
+} from "./feedback-landing.js";
 import type { Mount, Mounts } from "./mounts.js";
 import { resolveRiskJudgeMount } from "./risk-judge.js";
 import { spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
 import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
+import type { ConsoleCorrection } from "./console-feedback.js";
 
 /** `plan/feedback/` — the durable, diffable feedback inbox (MASTER-PLAN §7B, W1-T40). One entry
  * per item: id, timestamp, raw text, attachments, origin, status. Capture is pure filesystem
@@ -121,6 +129,10 @@ export interface FeedbackEntry {
   thread_id?: string | null;
   /** W1-T7754: immutable original-source evidence, not a replayable authority grant. */
   contribution?: FeedbackContribution | null;
+  /** W1-T11104: an operator's explicit console wording correction — bounded source facts bound to
+   *  one native conversation revision. Immutable once captured; absent on every other entry. It is
+   *  evidence for the weekly docket, never a reply, a grill answer or an authority grant. */
+  console_correction?: ConsoleCorrection | null;
 }
 
 // ── Decision summaries (W1-T313) ─────────────────────────────────────────────
@@ -512,15 +524,92 @@ function feedbackEntryRelPath(root: string, id: string): string {
   return relative(root, feedbackEntryPath(root, id)).split(sep).join("/");
 }
 
+/** W1-T12202: `<config root>/state` as loadConfig finds it, read without creating the config.
+ *  `undefined` when this host has no config file: the plan destination switch is off. */
+export function instanceStateDir(): string | undefined {
+  const raw = readFileIfExists(configPath());
+  if (raw === undefined) return undefined;
+  let root: unknown;
+  try {
+    root = (JSON.parse(raw) as { root?: unknown } | null)?.root;
+  } catch (error) {
+    void error; // A config that is not JSON: loadConfig's own default root, as defaultHeapCeilingLocation does.
+  }
+  return join(typeof root === "string" && root !== "" ? root : join(homedir(), "Remudero"), "state");
+}
+
+/**
+ * W1-T12202: the roots a feedback reader reads. The public root always; the destination checkout too
+ * while the host file names a repository. A switch file or a checkout that cannot be read is an error,
+ * never an empty second root.
+ */
+export function feedbackReadRoots(root: string, named: PlanDestinationRepositoryRead): string[] {
+  if (named.outcome === "off") return [root];
+  if (named.outcome === "unreadable") throw new FeedbackError(`the plan destination is unreadable: ${named.reason}`);
+  if (resolve(named.checkoutDir) === resolve(root)) return [root];
+  if (!existsSync(join(named.checkoutDir, ".git"))) {
+    throw new FeedbackError("the plan destination checkout is unreadable: it is not a git checkout");
+  }
+  return [root, named.checkoutDir];
+}
+
+function hostFeedbackRoots(root: string): string[] {
+  return feedbackReadRoots(root, planDestinationRepository(instanceStateDir()));
+}
+
+/** W1-T12203: the root that holds entry `id`, and the destination when that root is the destination checkout.
+ *  A file in the public root is edited there, also while the kind is on. */
+function feedbackRecordHome(root: string, id: string): { root: string; destination?: PlanDestinationRepository } {
+  const named = planDestinationRepository(instanceStateDir());
+  const roots = feedbackReadRoots(root, named);
+  if (named.outcome !== "named" || roots.length === 1 || existsSync(feedbackEntryPath(root, id))) return { root };
+  return existsSync(feedbackEntryPath(named.checkoutDir, id)) ? { root: named.checkoutDir, destination: named } : { root };
+}
+
+/** W1-T12203: where a NEW capture is written and landed. A console capture (`stateRoot`) is moved into the landing
+ *  queue by its route, and the daemon sweep chooses its repository. A switch that cannot be read refuses the capture. */
+function feedbackCaptureHome(root: string, land: LandFeedbackOpts): { root: string; land: LandFeedbackOpts } {
+  if (land.stateRoot !== undefined) return { root, land };
+  const destination = resolvePlanDestination("feedback", instanceStateDir(), { owner: "", repo: "", checkoutDir: root });
+  if (destination.outcome === "unreadable") {
+    throw new FeedbackError(`feedback capture refused: the plan destination is unreadable: ${destination.reason}`);
+  }
+  if (destination.outcome !== "destination") return { root, land };
+  if (!existsSync(join(destination.checkoutDir, ".git"))) {
+    throw new FeedbackError("feedback capture refused: the plan destination checkout is unreadable: it is not a git checkout");
+  }
+  return { root: destination.checkoutDir, land: planDestinationLandingOpts(land, destination) };
+}
+
+/** W1-T12202: one id in both roots is read once. Equal bytes keep the public copy; different bytes are refused. */
+export function assertOneFeedbackCopy(id: string, first: { path: string; text: string }, second: { path: string; text: string }): void {
+  if (first.text !== second.text) {
+    throw new FeedbackError(`feedback entry "${id}" is in both roots with different bytes: ${first.path} and ${second.path}`);
+  }
+}
+
 export function readLandedFeedbackEntry(root: string, id: string, git: UpstreamGitExec = defaultUpstreamGit(root)): FeedbackEntry | null {
+  const roots = hostFeedbackRoots(root);
+  const landed = landedFeedbackText(git, root, id);
+  if (roots.length === 1) return landed?.entry ?? null;
+  const destination = landedFeedbackText(defaultUpstreamGit(roots[1]), roots[1], id);
+  if (landed !== null && destination !== null) assertOneFeedbackCopy(id, landed, destination);
+  return landed?.entry ?? destination?.entry ?? null;
+}
+
+function landedFeedbackText(git: UpstreamGitExec, root: string, id: string): { path: string; text: string; entry: FeedbackEntry } | null {
+  const rel = feedbackEntryRelPath(root, id);
+  let text: string;
   let parsed: unknown;
   try {
-    parsed = parseYaml(git(["show", `origin/main:${feedbackEntryRelPath(root, id)}`]));
+    text = git(["show", `origin/main:${rel}`]);
+    parsed = parseYaml(text);
   } catch {
     return null; // W1-T9624: a lagging HEAD can lack origin/main's entry; a git failure is absent, never "exists"
   }
   const entry = parsed as Partial<FeedbackEntry> | null;
-  return entry !== null && typeof entry === "object" && entry.id === id && typeof entry.status === "string" ? (entry as FeedbackEntry) : null;
+  return entry !== null && typeof entry === "object" && entry.id === id && typeof entry.status === "string"
+    ? { path: `${root} origin/main:${rel}`, text, entry: entry as FeedbackEntry } : null;
 }
 
 /** ROOT-FREE repo-relative path of a feedback entry — `plan/feedback/<id>.yaml` — for callers
@@ -859,6 +948,9 @@ export interface CaptureFeedbackOptions {
   contribution?: FeedbackContributionInput;
   admission?: FeedbackAdmissionContext;
   derivedFrom?: { entry: Pick<FeedbackEntry, "id" | "origin" | "contribution">; relayedBy: string };
+  /** W1-T11104: the explicit wording correction, ALREADY BOUND to the native conversation by the
+   *  caller (`bindConsoleCorrection`); this function verifies nothing about it. */
+  consoleCorrection?: ConsoleCorrection;
 }
 
 /** Find an existing feedback entry by its console-minted `submission_key` (W1-T2302) —
@@ -875,14 +967,15 @@ export function findFeedbackBySubmissionKey(root: string, key: string, stateRoot
 export function captureFeedback(root: string, opts: CaptureFeedbackOptions): FeedbackEntry {
   const existing = existingCapture(root, opts, opts.land?.stateRoot);
   if (existing) return existing;
-  const entry = writeCapture(root, opts);
+  const home = feedbackCaptureHome(root, opts.land ?? {});
+  const entry = writeCapture(home.root, opts);
   const publication = capturePublication(opts);
   try {
-    landFeedback(root, { ...opts.land, ...(publication === undefined ? {} : { publication }) });
+    landFeedback(home.root, { ...home.land, ...(publication === undefined ? {} : { publication }) });
   } catch {
     // landFeedback already swallows its own failures — a defensive second layer only.
   }
-  return upstreamCapture(root, entry, opts, publication);
+  return upstreamCapture(root, entry, opts, publication, home.root);
 }
 
 /** {@link stageFeedbackCapture}'s answer: `queued` is false for an existing entry (nothing written) or an unstaged copy. */
@@ -916,7 +1009,8 @@ function existingCapture(root: string, opts: CaptureFeedbackOptions, stateRoot: 
     if (existing) return existing;
   }
   if (opts.id === undefined) return null;
-  if (existsSync(feedbackEntryPath(root, opts.id))) return readFeedbackEntry(root, opts.id);
+  const id = opts.id;
+  if (hostFeedbackRoots(root).some((r) => existsSync(feedbackEntryPath(r, id)))) return readFeedbackEntry(root, id);
   if (queuedIds && stateRoot !== undefined) {
     const queued = readQueuedFeedbackRecords(stateRoot).get(feedbackEntryRepoPath(opts.id));
     if (queued) return queued as unknown as FeedbackEntry;
@@ -955,6 +1049,7 @@ function writeCapture(root: string, opts: CaptureFeedbackOptions): FeedbackEntry
     submission_key: opts.submissionKey ?? null,
     thread_id: opts.threadId ?? null,
     ...(contribution === null ? {} : { contribution }),
+    ...(opts.consoleCorrection === undefined ? {} : { console_correction: opts.consoleCorrection }),
   };
   writeFileSync(feedbackEntryPath(root, id), stringifyYaml(entry));
   observeFeedbackAdmission(entry, opts.admission, "capture");
@@ -966,7 +1061,9 @@ function capturePublication(opts: CaptureFeedbackOptions): FeedbackPublicationCo
 }
 
 /** The W1-T397 upstream step: a configured home repo other than this one gets a PR, recorded on the entry. */
-function upstreamCapture(root: string, captured: FeedbackEntry, opts: CaptureFeedbackOptions, publication: FeedbackPublicationContext | undefined): FeedbackEntry {
+function upstreamCapture(
+  root: string, captured: FeedbackEntry, opts: CaptureFeedbackOptions, publication: FeedbackPublicationContext | undefined, entryRoot = root,
+): FeedbackEntry {
   let entry = captured;
   const id = entry.id;
   try {
@@ -985,13 +1082,13 @@ function upstreamCapture(root: string, captured: FeedbackEntry, opts: CaptureFee
             ? { home: `${home.owner}/${home.repo}`, status: "landed", pr_url: prUrl }
             : { home: `${home.owner}/${home.repo}`, status: "unreachable", error: error ?? "unknown error" },
         };
-        writeFileSync(feedbackEntryPath(root, id), stringifyYaml(entry));
+        writeFileSync(feedbackEntryPath(entryRoot, id), stringifyYaml(entry));
       }
     }
   } catch (e) {
     // Same failure class as an unreachable home repo — the entry is already captured locally.
     entry = { ...entry, upstream: { home: "unknown", status: "unreachable", error: String((e as Error)?.message ?? e) } };
-    writeFileSync(feedbackEntryPath(root, id), stringifyYaml(entry));
+    writeFileSync(feedbackEntryPath(entryRoot, id), stringifyYaml(entry));
   }
   return entry;
 }
@@ -1007,19 +1104,29 @@ function feedbackEntryFrom(parsed: unknown, id: string): FeedbackEntry {
 }
 
 export function readFeedbackEntry(root: string, id: string): FeedbackEntry {
-  const p = feedbackEntryPath(root, id);
-  if (!existsSync(p)) throw new FeedbackError(`no feedback entry "${id}" (looked in ${p})`);
-  return feedbackEntryFrom(parseYaml(readFileSync(p, "utf8")), id);
+  const looked = hostFeedbackRoots(root).map((r) => feedbackEntryPath(r, id));
+  const held = looked.filter((p) => existsSync(p));
+  if (held.length === 0) throw new FeedbackError(`no feedback entry "${id}" (looked in ${looked.join(" and ")})`);
+  const text = readFileSync(held[0], "utf8");
+  if (held.length === 2) assertOneFeedbackCopy(id, { path: held[0], text }, { path: held[1], text: readFileSync(held[1], "utf8") });
+  return feedbackEntryFrom(parseYaml(text), id);
 }
 
-/** List every captured entry, oldest first (id is Date.now()-prefixed, so filename sort = capture order). */
+/** List every captured entry of both roots, oldest first (id is Date.now()-prefixed, so filename sort = capture order). */
 export function listFeedback(root: string, opts: { status?: FeedbackStatus } = {}): FeedbackEntry[] {
-  const dir = feedbackDir(root);
-  if (!existsSync(dir)) return [];
-  const entries = readdirSync(dir)
-    .filter((f) => f.endsWith(".yaml"))
-    .sort()
-    .map((f) => feedbackEntryFrom(parseYaml(readFileSync(join(dir, f), "utf8")), f.replace(/\.yaml$/, "")));
+  const files = new Map<string, { path: string; text: string }>();
+  for (const r of hostFeedbackRoots(root)) {
+    const dir = feedbackDir(r);
+    if (!existsSync(dir)) continue;
+    for (const f of readdirSync(dir).filter((name) => name.endsWith(".yaml"))) {
+      const copy = { path: join(dir, f), text: readFileSync(join(dir, f), "utf8") };
+      const held = files.get(f);
+      if (held === undefined) files.set(f, copy);
+      else assertOneFeedbackCopy(f.replace(/\.yaml$/, ""), held, copy);
+    }
+  }
+  const entries = [...files].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([f, copy]) => feedbackEntryFrom(parseYaml(copy.text), f.replace(/\.yaml$/, "")));
   return opts.status ? entries.filter((e) => e.status === opts.status) : entries;
 }
 
@@ -1113,14 +1220,17 @@ export function setFeedbackStatus(
     answered_by: opts.answeredBy !== undefined ? opts.answeredBy : (entry.answered_by ?? null),
   };
   const content = stringifyYaml(updated);
+  // W1-T12203: a queued write waits for the daemon sweep, which lands it where the record is held.
+  const home = opts.land?.stateRoot === undefined ? feedbackRecordHome(root, id) : { root };
   if (opts.land) {
+    const land = home.destination === undefined ? opts.land : planDestinationLandingOpts(opts.land, home.destination);
     try {
-      landFeedbackStatusContent(root, feedbackEntryRelPath(root, id), content, opts.land);
+      landFeedbackStatusContent(home.root, feedbackEntryRelPath(home.root, id), content, land);
     } catch {
       // landFeedbackStatusContent already swallows its own failures — defensive layer only.
     }
   } else {
-    writeFileSync(feedbackEntryPath(root, id), content);
+    writeFileSync(feedbackEntryPath(home.root, id), content);
   }
   return updated;
 }

@@ -1,3 +1,4 @@
+// @census-reads: test/ — every tracked test file it scans for a nested real preflight, itself included.
 /**
  * A SUITE NESTED INSIDE THE SUITE. `preflightCommand` with no injected `spawn` runs the REAL
  * gates — commitlint, `tsc --noEmit`, the whole fast gate's rule suites and a scoped

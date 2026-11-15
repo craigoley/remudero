@@ -9,7 +9,8 @@ this post-migration rule supersedes its first-push **full-parity** obligation.
 Commit first, then run `node --import tsx scripts/preflight-author.mjs` before the first push. The script refreshes and
 pins `origin/main`, verifies the committed tree and each selected test path, checks the shipped
 cheap census before expensive validation, runs default static preflight and the module-level affected floor, and refuses missing/zero test
-summaries. Configuration, dependency, workflow, fixture/helper, unknown and empty-floor changes
+summaries. A test helper, a `.remudero/` file or a `hooks/` file selects the suites that import, name or read it
+(W1-T12506), and every suite when none does. Configuration, dependency, workflow, fixture, unknown and empty-floor changes
 fall back to every suite, without full-suite coverage instrumentation. A failing test is not
 retried into a green verdict. An unsuccessful static gate stops before affected tests: the receipt cannot
 pass, retains the selected floor and native static outcome, and explicitly records why tests were not run.
@@ -99,6 +100,16 @@ and security gates remain unchanged and required before merging. `rmd preflight 
 and `--coverage` remain available for full local reproduction; infrastructure, coverage-merger
 and test-selector changes should use that full reproduction before their first push. The default
 static preflight's small scoped coverage check is also retained, not silently removed.
+
+Author test concurrency has no fixed ceiling (W1-T11891; the old four-worker maximum is gone).
+The affected-tests width and the runtime-calibration width both come only from the shared test
+slot grant: measured CPU after the reserved core and load, measured memory headroom (on macOS
+the same `vm_stat` reading slot admission uses) and the FIFO owner lease. Each width is rechecked
+against the run deadline at the exact acquired grant, and a calibration profile is refused unless
+its concurrency equals the grant it recorded. Unmeasured memory before a slot is held still means
+ONE worker; a refused, missing or unproven slot is never execution capacity, and the
+`plan-author-runtime` width is an estimate only. The separate 2026-10-23 low-footprint
+warning-admission ceiling below (at most four explicit files, one worker) is unchanged.
 
 ### Explicit low-footprint local checks
 

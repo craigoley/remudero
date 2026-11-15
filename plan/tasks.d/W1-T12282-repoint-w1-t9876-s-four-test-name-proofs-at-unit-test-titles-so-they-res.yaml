@@ -1,0 +1,30 @@
+- id: W1-T12282
+  title: Repoint W1-T9876's four test-name proofs at unit test titles so they resolve before its test file exists
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - plan/tasks.d/W1-T9876-every-test-sits-in-a-mapped-folder.yaml
+  acceptance:
+    - claim: the first W1-T9876 criterion is proved by a unit test title instead of a grep of an absent test file
+      proof: "grep: unit test: W1-T9876: a new flat test is refused in plan/tasks.d/W1-T9876-every-test-sits-in-a-mapped-folder.yaml"
+    - claim: the legacy-debt criterion is proved by a unit test title
+      proof: "grep: unit test: W1-T9876: a flat test named by a shard on the merge base is allowed as legacy debt in plan/tasks.d/W1-T9876-every-test-sits-in-a-mapped-folder.yaml"
+    - claim: the flat-count criterion is proved by a unit test title
+      proof: "grep: unit test: W1-T9876: the flat count may not rise above the merge base in plan/tasks.d/W1-T9876-every-test-sits-in-a-mapped-folder.yaml"
+    - claim: the folder-map and rule-suite-name criterion is proved by a unit test title
+      proof: "grep: unit test: W1-T9876: a folder outside the map or named like a rule suite is refused in plan/tasks.d/W1-T9876-every-test-sits-in-a-mapped-folder.yaml"
+  origin: proof-debt:W1-T9876
+  rationale: >-
+    From the 2026-11-11 proposal on proof-debt:W1-T9876, ratified via rmd approve:
+  
+    proof-debt: W1-T9876 has 4 criterion(s) whose proof cannot resolve against the checkout (rmd
+    proof-queue-audit): criterion 0 (grep-path-absent) — "a new test added directly under test/ is
+    refused"; criterion 1 (grep-path-absent) — "a flat test named by a shard on the merge base is
+    allowed as legacy debt"; criterion 2 (grep-path-absent) — "the flat count may not rise above
+    the merge base"; criterion 3 (grep-path-absent) — "a folder outside the map, or named like a
+    rule suite, is refused".

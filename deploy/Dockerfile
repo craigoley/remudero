@@ -13,7 +13,7 @@
 # `assertPinnedNodeVersion` (scripts/coverage-merge-ratchet.mjs) throws on any string mismatch, so
 # a moved floating tag reddened six merge-lcov tests with no change in this repo (W1-T2770).
 # test/merge-lcov-node-drift-cluster-and-image-pin.test.ts reads this line against `.nvmrc`.
-FROM node:24.22.2-bookworm-slim@sha256:c86ecead9e55a5210ac1727de38a4ca840bf03dcaf34dc9749addbf383b1920c
+FROM node:24.22.2-bookworm-slim@sha256:01d566e8d94d8c619591d78652babfccd3c6992a3dffa9ed5ab39e11cf6c70e9
 
 # ── REQ 1: an init that reaps ────────────────────────────────────────────────────────────────
 # tini must be PID 1. `spawnDetachedGroup` (src/lib/worker-containment.ts) spawns detached, so each
@@ -276,5 +276,8 @@ USER node
 #   docker run --rm -e RMD_SKIP_BOOTSTRAP=1 <image> <probe>                    # go through it, no clone
 # Not fixed deliberately: a heuristic guessing which commands are diagnostic would fail expensively.
 COPY --chown=node:node deploy/entrypoint.sh /usr/local/bin/rmd-entrypoint
+# W1-T12240: the image copy of the second stage. The entrypoint reads the checkout copy first; this
+# one runs only when that copy cannot, so it is not a baked path and may be older than main.
+COPY --chown=node:node deploy/entrypoint-supervise.sh /usr/local/lib/rmd/entrypoint-supervise.sh
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/rmd-entrypoint"]
 CMD ["./bin/rmd", "status"]

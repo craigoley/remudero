@@ -1,0 +1,23 @@
+- id: W1-T12283
+  title: W1-T9880's two acceptance proofs name files that do not exist until its dependency W1-T9879 ships, so each is restated as a demonstration the wave's own PR supplies
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - plan/tasks.d/W1-T9880-move-the-inbox-tests-into-their-folder.yaml
+  acceptance:
+    - claim: W1-T9880's wave-log criterion is a demonstration naming scripts/test-placement/waves.ndjson, not a grep over a file absent from the checkout
+      proof: "grep: demonstration: scripts/test-placement/waves.ndjson in plan/tasks.d/W1-T9880-move-the-inbox-tests-into-their-folder.yaml"
+    - claim: W1-T9880's blame-ignore criterion is a demonstration naming .git-blame-ignore-revs, not a grep over a file absent from the checkout
+      proof: "grep: demonstration: .git-blame-ignore-revs in plan/tasks.d/W1-T9880-move-the-inbox-tests-into-their-folder.yaml"
+  origin: proof-debt:W1-T9880
+  rationale: >-
+    From the 2026-11-11 proposal on proof-debt:W1-T9880, ratified via rmd approve:
+  
+    proof-debt: W1-T9880 has 2 criterion(s) whose proof cannot resolve against the checkout (rmd
+    proof-queue-audit): criterion 0 (grep-path-absent) — "the inbox wave is recorded in the wave
+    log"; criterion 1 (grep-path-absent) — "the inbox move commit is in the blame ignore list".

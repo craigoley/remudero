@@ -1,4 +1,6 @@
 import { withWorkspaceCleanup } from "./workspace-cleanup-contract.js";
+import { newestTaskAnswer, type Task } from "./plan.js";
+import { citation } from "./provenance.js";
 import { BoundedOutput, readBoundedFileTail, type FileTail } from "./bounded-file-tail.js";
 import type { CashRequestEffortCount } from "./cash-request-effort.js";
 import { workerExecutionEvidence, sdkRequestedEffort, sdkRequestedModel, type SdkRequestEvidence,
@@ -70,7 +72,7 @@ import {
   type WorkerProviderId,
 } from "./config.js";
 import { assertModelAllowed } from "./model-gate.js";
-import { chooseDraftDeployment, readDraftStats, recordDraftRouting, type DraftStats, type DraftChoice } from "./draft-routing.js";
+import { chooseDraftDeployment, readDraftStats, recordDraftRouting, type DraftStats, type DraftChoice, type DraftOutcome } from "./draft-routing.js";
 import { sdkUsageReadingCase } from "./headroom.js";
 import {
   detectCompactionEvents,
@@ -535,6 +537,8 @@ export interface WorkerSelectionAssignment {
     preferenceBypass?: { provider: WorkerProviderId; reason: string };
     /** Present when the requested capability's declared preference governed an automatic auction. */
     capabilityPreference?: { capability: string; provider: WorkerProviderId };
+    /** W1-T12172: present when the worker role's declared preference governed an automatic auction. */
+    rolePreference?: { role: string; provider: WorkerProviderId };
     /** WHY: the rule that fired, what it weighed, and each subscription's headroom at that moment. */
     decision?: RoutingDecision;
     propensity?: RoutingPropensity;
@@ -564,6 +568,7 @@ export type RoutingRule =
   | "mount-affinity"
   | "headroom-auction"
   | "capability-preference"
+  | "role-preference"
   | "operator-preference"
   | "preference-bypassed"
   | "cash-fallback"
@@ -1722,6 +1727,7 @@ export function workerSelectionAssignment(
     selection?: ProviderSelection;
     preferenceBypass?: { provider: WorkerProviderId; reason: string };
     capabilityPreference?: { capability: string; provider: WorkerProviderId };
+    rolePreference?: { role: string; provider: WorkerProviderId };
     /** Further models the provider's own ladder held in reserve (the cash walk's alternatives). */
     alternatives?: readonly string[];
     /** The capability tier the requested model resolves to; absent when no model was requested. */
@@ -1766,6 +1772,7 @@ export function workerSelectionAssignment(
         : {}),
       ...(input.preferenceBypass ? { preferenceBypass: input.preferenceBypass } : {}),
       ...(input.capabilityPreference ? { capabilityPreference: input.capabilityPreference } : {}),
+      ...(input.rolePreference ? { rolePreference: input.rolePreference } : {}),
       decision,
       propensity: selectionPropensity({
         selected: input.provider,
@@ -1791,6 +1798,7 @@ function routingRule(args: SpawnWorkerArgs, input: Parameters<typeof workerSelec
   if (input.mode !== "multi-provider") return input.mode;
   if (input.selection?.lane === "codex-credits") return "codex-credits";
   if (input.preferenceBypass) return "preference-bypassed";
+  if (input.rolePreference) return "role-preference";
   if (input.capabilityPreference) return "capability-preference";
   return input.policy.preference === "automatic" ? "headroom-auction" : "operator-preference";
 }
@@ -1821,7 +1829,9 @@ function routingDecision(args: SpawnWorkerArgs, input: Parameters<typeof workerS
   }
   const rule = routingRule(args, input);
   const learner = input.selection?.draw?.learned ? FIX_ROUTING_LEARNER : undefined;
-  const ab = rule === "headroom-auction" && learner === undefined && experimentTaskIdentity(args.taskId) !== undefined
+  // W1-T12172: a role preference serves the provider but the task keeps the arm it drew, so the row still joins the experiment.
+  const drawn = rule === "headroom-auction" || (input.rolePreference !== undefined && (rule === "role-preference" || rule === "preference-bypassed"));
+  const ab = drawn && learner === undefined && experimentTaskIdentity(args.taskId) !== undefined
     ? routingExperimentFor({ capability: input.capability, effort: args.effort, considered: experimentArms(considered) })
     : undefined;
   return {
@@ -1971,23 +1981,11 @@ export function clearClaudeCapacityCache(): void {
 }
 
 
-/**
- * The account a Claude capacity reading was taken under — `oauthAccount.accountUuid`.
- *
- * The operator switches subscriptions by hand, and every instrument follows whatever Claude Code
- * is logged into, so two readings from two accounts are indistinguishable in the ledger. The uuid
- * is stable per account and answers "which account", which is the entire question.
- *
- * NEVER emailAddress OR organizationName. They sit beside the uuid in the same object and are
- * unnecessary exposure; only `accountUuid` is ever bound here, so the others cannot reach a caller
- * even by accident. This mirrors account-usage.ts's own discipline.
- *
- * FAILS OPEN, ALWAYS. An absent, unreadable, unparseable or shape-changed file yields `undefined`,
- * never a throw: the label annotates a reading and is never a precondition for taking one. A host
- * with one account has run fine without it for months and must keep running.
- *
- * FALSIFIER: test/the-capacity-read-cannot-say-which-account-it-measured.test.ts.
- */
+/** Label capacity readings with stable `oauthAccount.accountUuid` across manual account switches.
+ * NEVER emailAddress OR organizationName: bind only the uuid, as in account-usage.ts.
+ * FAILS OPEN, ALWAYS: missing, unreadable, unparseable or changed shapes yield `undefined`;
+ * this annotation must never prevent a capacity read.
+ * FALSIFIER: test/the-capacity-read-cannot-say-which-account-it-measured.test.ts. */
 /** Why a reading carries no label. Four distinct causes, kept apart for the same reason
  *  account-usage.ts keeps its own: "absent" and "unreadable" are different facts. */
 export type ClaudeAccountLabelReason = "unreadable" | "unparseable" | "not-an-object" | "no-account" | "no-uuid";
@@ -2322,25 +2320,12 @@ const WORKER_SPAWN_ISOLATION: { settingSources: SettingSource[] } = {
  *  — never a value asserted independently of it. */
 export const WORKER_SETTING_SOURCES: SettingSource[] = WORKER_SPAWN_ISOLATION.settingSources;
 
-/**
- * Run an open-weight spawn, and on a DEPLOYMENT CAPABILITY REFUSAL try the next rung of the ladder
- * rather than failing the run.
- *
- * MEASURED over the live ledger: 22,356 `openweight_error` runs, 21,942 of them (98%) on ONE
- * deployment across three days — while two other candidates sat configured in the SAME ladder row
- * and were never tried. `selectOpenWeightModel` already walks the ladder for CONTEXT FIT; nothing
- * walked it for FAILURE, so a single unusable deployment took the whole run.
- *
- * Draft callers additionally walk on a failed output contract (W1-T4067).
- * `OpenWeightUnsupportedResponseFormatError` names the deployment and what it could not honour,
- * and its own message prescribes this remedy. Everything else is deliberately NOT walked: a
- * timeout or truncated reply may be transient and walking turns a blip into a second charge
- * against `dailyCapUsd`; a too-large request already consulted the fit gate; auth and cap refusals
- * recur on every rung. Walking those spends real money to learn nothing.
- *
- * BOUNDED BY THE LADDER: one attempt per remaining candidate, over a list the context gate already
- * filtered — it can neither loop nor widen the context rule.
- */
+/** Walk the context-filtered ladder on DEPLOYMENT CAPABILITY REFUSAL; draft callers also walk
+ * on failed output contracts (W1-T4067). `OpenWeightUnsupportedResponseFormatError` names the remedy.
+ * Historical trigger: 21,942 of 22,356 openweight errors hit one deployment while alternatives sat idle.
+ * Never walk timeouts/truncation (a second charge), oversized requests (already fit-gated), or
+ * auth/cap refusals (shared across rungs). BOUNDED BY THE LADDER: one attempt per remaining
+ * candidate, without looping or widening context eligibility. */
 export async function runOpenWeightWalkingLadder(
   run: (selection: OpenWeightModelSelection) => Promise<WorkerResult>,
   selection: OpenWeightModelSelection,
@@ -2566,9 +2551,9 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
       modelUsage: {}, compactionEvents: [], qualitySuspect: false };
   };
   if (admission?.kind === "abandoned" || args.signal?.aborted) return admissionAbandoned();
-  // W1-T11336: the sweep's admission may precede a fleet PAUSE by tens of minutes. In-process fix starts
-  // re-read at the same boundary as run children; reviews and other classes retain their existing path.
-  if (childReservationId === undefined && workerClassOf(args) === "fix") {
+  // W1-T11336, W1-T12497: the sweep's admission may precede a fleet PAUSE by tens of minutes. Every fix start,
+  // in process or in a run child, re-reads the hold here; reviews and other classes retain their existing path.
+  if (workerClassOf(args) === "fix") {
     const root = (args.config ?? loadConfig()).root;
     const hold = (args.readWorkerAdmissionHold ?? workerAdmissionHold)(root);
     if (hold) {
@@ -2676,6 +2661,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
   let routedClaudeCapacities: ProviderCapacity[] | undefined;
   let routedClaudePreferenceBypass: { provider: WorkerProviderId; reason: string } | undefined;
   let routedCapabilityPreference: { capability: string; provider: WorkerProviderId } | undefined;
+  let routedRolePreference: { role: string; provider: WorkerProviderId } | undefined;
   if (providers.length === 1 && providers[0] === "claude" && claudeHealthRoute && !claudeHealthRoute.eligible) {
     const capacity = unavailableClaudeCapacity(claudeHealthRoute);
     try {
@@ -2755,8 +2741,11 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         routingPolicy,
         requestedCapability,
         capabilities?.providerPreference,
+        // W1-T12172: the disposable review sandbox is the one spawn whose worker role the router can tell apart.
+        { role: args.sandboxIntent === "disposable-review" ? "reviewer" : undefined, preferences: capabilities?.rolePreference },
       );
       routedCapabilityPreference = auction.capabilityPreference;
+      routedRolePreference = auction.rolePreference;
       const initialCandidates = providerExclusionCandidates(
         capacities, auction.policy.reservePercent, args.excludeProviders, auction.policy.routableProviders,
       );
@@ -2946,6 +2935,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         provider: selection.provider,
         preference: routingPolicy.preference,
         ...(routedCapabilityPreference ? { capability_preference: routedCapabilityPreference } : {}),
+        ...(routedRolePreference ? { role_preference: routedRolePreference } : {}),
         ...(preferenceBypass ? { preference_bypass: preferenceBypass } : {}),
         tightest_remaining_percent: selection.tightestRemainingPercent,
         ...(selection.allocationWeight !== undefined ? { allocation_weight: selection.allocationWeight } : {}),
@@ -2997,6 +2987,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         selection,
         preferenceBypass,
         capabilityPreference: routedCapabilityPreference,
+        rolePreference: routedRolePreference,
         capability: requestedCapability,
         exclusion_unhonoured: assignmentExclusionUnhonoured,
       });
@@ -3157,8 +3148,11 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         draftChoice = chooseDraftDeployment(stats, [openWeight.model, ...openWeight.alternatives].map((deployment) => ({
           deployment, estimatedCostUsd: openWeightUsageUsd(deployment, openWeight.estimatedTokens ?? 1, OPENWEIGHT_MAX_COMPLETION_TOKENS),
         })), args.draftRouting.random);
+        for (const skip of draftChoice.skipped ?? []) recordDraftRouting(args.draftRouting.log, "draft.routing.skip", {
+          lane: args.draftRouting.lane, proposal_id: args.draftRouting.proposalId, ...skip, reason: "refused-or-failed",
+        });
         openWeight = { ...openWeight, model: draftChoice.deployment,
-          alternatives: [openWeight.model, ...openWeight.alternatives].filter((model) => model !== draftChoice!.deployment) };
+          alternatives: draftChoice.arms.map((arm) => arm.deployment).filter((model) => model !== draftChoice!.deployment) };
       }
     }
     assertModelAllowed(openWeight.model, config);
@@ -3227,6 +3221,8 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
               }
             }
             draftContractFailed = outcome.contractFailed;
+            const endClass: DraftOutcome = rung.usageRefusal || rung.budgetRefused ? "refused"
+              : rung.isError ? "failed" : outcome.contractFailed ? "contract-failed" : outcome.clean ? "clean" : "not-clean";
             // A denied first reservation is operational evidence, not a model-quality sample.
             // budgetRefused alone also covers later paid turns: require the complete zero-work receipt.
             const notInvokedBudgetRefusal = rung.isError && rung.budgetRefused === true &&
@@ -3237,6 +3233,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
               proposal_id: args.draftRouting.proposalId, deployment: selection.model, session_id: rung.sessionId,
               selection_assignment_id: selectionAssignmentId,
               ...(notInvokedBudgetRefusal ? { quality_sample: "not-invoked-budget-refusal" } : {}),
+              ts: systemClock.iso(), outcome: endClass,
               draft_cost_usd: rung.costUsd, clean: outcome.clean, contract_failed: outcome.contractFailed });
           }
           return rung;
@@ -3522,6 +3519,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
       selection: routedClaudeSelection,
       preferenceBypass: routedClaudePreferenceBypass,
       capabilityPreference: routedCapabilityPreference,
+      rolePreference: routedRolePreference,
       capability: requestedCapability,
       exclusion_unhonoured: assignmentExclusionUnhonoured,
     });
@@ -4740,20 +4738,10 @@ function anchoredPrUrl(text: string): string | undefined {
   return matches.length ? matches[matches.length - 1][1] : undefined;
 }
 
-/**
- * ANCHORED `COMMIT_MESSAGE` extraction, the same dialect and discipline as {@link anchoredPrUrl}:
- * only a line matching `COMMIT_MESSAGE:` at its own start counts, and when the contract is honoured
- * twice the LAST one wins.
- *
- * THE SUBJECT ONLY, AND DELIBERATELY. A worker with no shell cannot run `git commit`, so it names
- * the subject and the harness commits under it — but the text travels as DATA into an argv array,
- * never a command line, so a newline in it could not smuggle a second instruction anywhere. Taking
- * one line keeps that obvious rather than merely true.
- *
- * `undefined` for a missing, empty, or over-long subject rather than a repaired one: an invented
- * commit message would attribute work to a run that never asked for it, and commitlint's header
- * ceiling is 100 CHARACTERS, so a longer subject must be refused here rather than fail at push.
- */
+/** ANCHORED `COMMIT_MESSAGE:` extraction, last line wins, as in {@link anchoredPrUrl}.
+ * THE SUBJECT ONLY: the shell-less worker names it; the harness passes it as DATA in argv.
+ * Missing, empty or over-long subjects yield `undefined`, never an invented repair.
+ * Commitlint's limit is 100 CHARACTERS; refuse here before push. */
 export function anchoredCommitMessage(text: string): string | undefined {
   const matches = [...text.matchAll(/^[ \t]*COMMIT_MESSAGE:[ \t]*(.+)$/gim)];
   if (matches.length === 0) return undefined;
@@ -4789,19 +4777,10 @@ export interface LearningsUsedResult {
 
 const LEARNINGS_USED_REFUSAL_REASON = "never injected into this run";
 
-/** ANCHORED `LEARNINGS_USED` extraction — the citation miner's missing producer (W1-T2760). Same
- * last-line-wins discipline as {@link anchoredPrUrl} (W1-T62): only a line matching
- * `LEARNINGS_USED:` anchored to its own start counts, and when the contract is honoured twice the
- * LAST one wins. `null` when the report carries no anchored line at all — a SILENT report,
- * distinguishable from one that explicitly wrote `LEARNINGS_USED: none` (which parses to
- * `usedIds: []`, not `null`).
- *
- * Every claimed `learnings#<id>` is checked against `injectedIds` — the run's OWN
- * `matched_ids` (the ids `learnings.injected` actually put in this worker's prompt). An id absent
- * from that set is REFUSED BY NAME, never counted as used: a worker citing a learning it was never
- * shown is the exact fabrication the keyword floor already catches on the PR-body channel, and
- * trusting it here would let the citation miner's new signal be gamed as easily as the old one was
- * silent. Duplicate ids within one line count once. */
+/** ANCHORED `LEARNINGS_USED:` extraction (W1-T2760), last line wins as in {@link anchoredPrUrl}
+ * (W1-T62). Missing line yields `null`; explicit `none` yields `usedIds: []`.
+ * Check each claimed `learnings#<id>` against `injectedIds`, the run's OWN `matched_ids` from
+ * `learnings.injected`: unseen ids are REFUSED BY NAME, never credited. Deduplicate within a line. */
 export function parseLearningsUsed(text: string, injectedIds: readonly string[]): LearningsUsedResult | null {
   const matches = [...text.matchAll(/^[ \t]*LEARNINGS_USED:[ \t]*(.*)$/gim)];
   if (matches.length === 0) return null;
@@ -4964,6 +4943,33 @@ export function appendQuestionAnswer(repoRoot: string, entry: QuestionAnswerEntr
   } catch {
     return false;
   }
+}
+
+/** W1-T12715: the newest ANSWER text the question store holds for `taskId`, or undefined. An unreadable store
+ * answers nothing, so a task with needs_input stays held. */
+export function taskInputAnswer(repoRoot: string, taskId: string): string | undefined {
+  let text: string;
+  try {
+    text = fs.readFileSync(join(repoRoot, "plan", "questions.ndjson"), "utf8");
+  } catch {
+    return undefined; // deliberate: an absent or unreadable store holds the task, the safe side.
+  }
+  const lines: unknown[] = [];
+  for (const raw of text.split("\n")) {
+    try {
+      lines.push(JSON.parse(raw));
+    } catch {
+      continue; // deliberate: a torn or blank line is skipped, as every other reader of this store does.
+    }
+  }
+  return newestTaskAnswer(lines, taskId);
+}
+
+/** W1-T12715: the answer to a held task's question, as one cited line for the build prompt's operator notes. */
+export function renderTaskInputAnswer(task: Pick<Task, "id" | "needs_input">, answer: string | undefined): string {
+  if (task.needs_input === undefined || answer === undefined || answer.trim() === "") return "";
+  const flat = (text: string): string => text.replace(/\s+/g, " ").trim();
+  return `- Operator answer to "${flat(task.needs_input.question)}": ${flat(answer)} ${citation(`operator#answer@${task.id}`)}`;
 }
 
 // ── Mid-run operator answer delivery (W1-T4673) ─────────────────────────────
@@ -6666,6 +6672,39 @@ export async function worktreeRemoveAsync(repoDir: string, worktreePath: string)
   sweepStaleWorkerScratch({ maxAgeMs: DEFAULT_TEARDOWN_SCRATCH_SWEEP_MAX_AGE_MS });
 }
 
+/** W1-T12550: only git's complete absence diagnostic qualifies; a lock reason can quote it. */
+function worktreeAlreadyRemoved(error: unknown, worktreePath: string): boolean {
+  const failure = (error ?? {}) as { stderr?: unknown };
+  return String(failure.stderr ?? "").trim() === `fatal: '${worktreePath}' is not a working tree`;
+}
+
+function settleRemovedWorktree(worktreePath: string): "already-removed" {
+  removeWorktreeBase(worktreePath);
+  fs.rmSync(worktreePath, { recursive: true, force: true });
+  return "already-removed";
+}
+
+/** {@link worktreeRemove} that tolerates only an absent tree; every other failure still throws. */
+export function worktreeRemoveIfPresent(repoDir: string, worktreePath: string): "removed" | "already-removed" {
+  try {
+    worktreeRemove(repoDir, worktreePath);
+    return "removed";
+  } catch (error) {
+    if (!worktreeAlreadyRemoved(error, worktreePath)) throw error;
+    return settleRemovedWorktree(worktreePath);
+  }
+}
+
+export async function worktreeRemoveIfPresentAsync(repoDir: string, worktreePath: string): Promise<"removed" | "already-removed"> {
+  try {
+    await worktreeRemoveAsync(repoDir, worktreePath);
+    return "removed";
+  } catch (error) {
+    if (!worktreeAlreadyRemoved(error, worktreePath)) throw error;
+    return settleRemovedWorktree(worktreePath);
+  }
+}
+
 /** Summary of what a start-of-run prune reclaimed (ledgered for provenance). */
 export interface PruneSummary {
   worktrees: string[];
@@ -7293,16 +7332,11 @@ export interface WorktreeReapOpts {
   onEnumerationError?: (error: unknown) => void;
 }
 
-/** A {@link WorktreeReapOpts.isPidAlive}-shaped predicate for the one-shot container boot rung: it answers "is THIS the
- * process that wrote the lock", not merely "does some process hold this pid".
- *
- * TRAP: {@link defaultIsPidAlive} answers only the second question, reading this container's OWN pid namespace, which
- * restarts at 1 on every `docker run`. A lock from a previous boot naming a low pid very often finds that number ALIVE as an
- * unrelated process, so the reaper takes the live-pid keep branch forever — PERMANENT NON-RECLAMATION, the shape of the 3.0
- * GB this was filed against, not destruction. Reuses {@link isHolderStale} as written: `pid`/`startedAt` satisfy {@link
- * HolderIdentity} with no `host` key, so its host rung is skipped by construction, and `RunLockInfo` deliberately gains no
- * `host` field because that would import the very hazard — a hostname changing every boot — this avoids. `deps` is injectable
- * so the pid-reuse scenario is drivable (W1-T406, W1-T396, W1-T368). */
+/** Boot-rung {@link WorktreeReapOpts.isPidAlive}: identify the lock writer, not just a live pid.
+ * TRAP: {@link defaultIsPidAlive} sees this container's reset pid namespace; an unrelated reused
+ * pid kept 3.0 GB forever. Reuse {@link isHolderStale} with `pid`/`startedAt` ({@link HolderIdentity}),
+ * omitting `host` so changing container hostnames cannot affect identity. Keep `RunLockInfo`
+ * host-free; injectable `deps` drives pid reuse (W1-T406, W1-T396, W1-T368). */
 export function worktreeLockIsPidAlive(
   pid: number,
   info: RunLockInfo,
@@ -7360,18 +7394,12 @@ function canonicalIdentity(
   }
 }
 
-/** Cross-reference `entryPath` against `git worktree list --porcelain` for its OWN resolved repoDir, never a fixed one — the
- * multi-checkout lesson.
- *
- * W1-T2950 — COMPARE BY INODE IDENTITY, NEVER BY BYTE STRING. Git is allowed to report a canonical path that differs from the
- * spelling used to reach the same directory: MEASURED on macOS, a lane at `/var/folders/...` is registered as
- * `/private/var/folders/...`. The old `entry.path === entryPath` missed that registration, skipped the `branchIsLiveUpstream`
- * probe entirely, and let the armed reaper destroy a lane whose PR was still open. The canonical form is ONLY an equality
- * key — every removal and every ledger line still uses the original paths.
- *
- * A CANONICALIZATION FAILURE IS NOT EVIDENCE OF ANYTHING. It returns `undecidable`, never `unregistered`, and there is
- * deliberately NO fallback to the raw-string compare: falling back would reinstate exactly the defect this fixes, on the one
- * path where the evidence is weakest (W1-T378/W1-T381's doctrine — ambiguous evidence keeps). */
+/** Cross-reference `entryPath` with `git worktree list --porcelain` in its OWN resolved repoDir.
+ * W1-T2950 — COMPARE BY INODE IDENTITY, NEVER BY BYTE STRING: macOS `/var/folders/...` may register
+ * as `/private/var/folders/...`; missing it skipped `branchIsLiveUpstream` and destroyed an open-PR lane.
+ * Canonical paths are equality keys only; removals and ledger rows retain original paths.
+ * A CANONICALIZATION FAILURE IS NOT EVIDENCE OF ANYTHING: return `undecidable`, never `unregistered`
+ * or a raw-string fallback. Ambiguous evidence keeps (W1-T378/W1-T381). */
 function resolveWorktreeRegistration(
   entryPath: string,
   realpath: (p: string) => string = realpathSync,

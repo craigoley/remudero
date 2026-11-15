@@ -93,7 +93,7 @@ case "$1" in
       readlink) printf '%s\\n' "$FIXTURE_CWD" ;;
       sh) echo PRESENT ;;
     esac ;;
-  stop|rm|run|container) touch "$FIXTURE_DIR/lifecycle" ;;
+  stop|rm|run) touch "$FIXTURE_DIR/lifecycle" ;;
 esac
 exit 0
 `, { mode: 0o755 });

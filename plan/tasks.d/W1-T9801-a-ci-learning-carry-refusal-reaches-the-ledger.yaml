@@ -14,7 +14,7 @@
     - src/run-task.ts
     - src/lib/daemon.ts
     - test/a-ci-learning-carry-refusal-reaches-the-ledger.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

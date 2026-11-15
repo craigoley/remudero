@@ -1,0 +1,50 @@
+- id: W1-T12275
+  title: "A latched restart admits a review during the pre-exit pass once a cut review is settled at the next boot"
+  repo: remudero
+  depends_on:
+    - W1-T12160
+    - W1-T9812
+  priority: 1.4
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # which reviews a daemon may start while it exits; a wrong rule posts a verdict twice or loses one
+  band_meaning: blast-radius
+  origin: operator-session#green-prs-merge-at-once-2026-11-11
+  plan_refs:
+    - W1-T12160
+    - W1-T9808
+    - W1-T11928
+    - W1-T9352
+  files:
+    - src/lib/daemon.ts
+    - test/daemon/a-latched-restart-admits-a-review-during-the-pre-exit-pass.test.ts
+    - test/daemon/a-latched-restart-holds-a-review-no-longer-than-its-drain-limit.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Once the drain of the exit has begun and the pre-exit pass runs beside it, the latch admits a review whose outbox entry is written before its post"
+      proof: "grep: W1-T12275 criterion 1 in test/daemon/a-latched-restart-admits-a-review-during-the-pre-exit-pass.test.ts"
+    - claim: "A review that was admitted then and that the exit cuts between its post and its row is settled at the next boot: one row, one comment, no second status. The test ends a real child process at that point"
+      proof: "grep: W1-T12275 criterion 2 in test/daemon/a-latched-restart-admits-a-review-during-the-pre-exit-pass.test.ts"
+    - claim: "The exit does not wait longer for such a review than its drain limit"
+      proof: "grep: W1-T12275 criterion 3 in test/daemon/a-latched-restart-admits-a-review-during-the-pre-exit-pass.test.ts"
+    - claim: "A fix and a build refill stay held, and a review with no outbox entry stays held once the drain of the exit has begun"
+      proof: "grep: W1-T12275 criterion 4 in test/daemon/a-latched-restart-admits-a-review-during-the-pre-exit-pass.test.ts"
+  rationale: |
+    W1-T12160 (queued, built on 2026-11-10) lets the restart latch admit a review again after the drain deadline has passed. Its fifth criterion keeps one refusal: once the drain of the exit has begun, the latch holds a review.
+    That guard was added on 2026-11-10 for one risk. With W1-T9812 the pre-exit pass runs beside the restart drain. A review admitted then gets no time, and the exit can cut it between its post and its `review.posted` row. The next daemon then finds no row and reviews the head again: a second post.
+    W1-T12251 (filed 2026-11-11) removes that risk. A review writes an outbox entry before it posts. The next boot settles a cut review from the entry: it writes the row, and it posts the kept verdict only when the post did not reach GitHub.
+    With both merged the guard holds green pull requests for no reason. The measured verdict gap around a restart was a median of 41 minutes on 2026-11-10.
+    CHECKED for overlap: W1-T11928 keeps a computed verdict for the next pass. W1-T9352 and W1-T9812 change when the pre-exit pass runs. None relaxes the guard.
+  design: |
+    In `restartAdmission` in src/lib/daemon.ts, remove the refusal "once the drain of the exit has begun" for the kinds review and plan review, when the review command writes its outbox entry before the post (`outboxBeforePost`, W1-T12251).
+    - Keep the refusal for the kinds "fix-dispatch" and "dispatch-refill".
+    - Keep the drain limit: the exit gives up on a review at its limit and tells it to stop, as today.
+    - Change the fifth criterion's test in test/daemon/a-latched-restart-holds-a-review-no-longer-than-its-drain-limit.test.ts to the new rule.
+    Before the build, read the three tasks this depends on as merged, with their code. If W1-T12251 merged with a different outbox contract, stop and report it.
+    NOT IN SCOPE: the outbox, the drain, and why an exit can pass its deadline.
+    DEPENDS ALSO on W1-T12251. Its task file was in an open filing pull request on 2026-11-11, and the plan lint refuses a dependency on a task that is not on main. Add W1-T12251 to `depends_on` when it is on main. Do not build this task before W1-T12251 has merged.
+  falsifier: |
+    Keep the refusal and criterion 1 must fail. Admit a review with no outbox entry and criterion 4 must fail. Let the exit wait for the review past its limit and criterion 3 must fail. Restore and require all four to pass.

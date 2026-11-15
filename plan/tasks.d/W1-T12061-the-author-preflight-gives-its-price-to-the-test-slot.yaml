@@ -1,0 +1,48 @@
+- id: W1-T12061
+  title: "The author preflight gives its price to the test slot"
+  repo: remudero
+  depends_on: [W1-T11915]
+  priority: 1.4
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # two concerns: the preflight script and the ticket it already holds in the queue
+  band_meaning: blast-radius
+  status: blocked
+  retirement: withdrawn
+  superseded_by: W1-T11915
+  origin: operator-session#review-flow-2026-11-10
+  plan_refs:
+    - W1-T9951
+  files:
+    - scripts/preflight-author.mjs
+    - src/lib/test-slot-queue.ts
+    - test/ci/the-author-preflight-gives-its-price-to-the-test-slot.test.ts
+  attempts: 0
+  acceptance:
+    - claim: "After the preflight prices its selection, its waiting ticket carries that price, and the next heartbeat keeps it"
+      proof: "grep: W1-T12061 criterion 1 in test/ci/the-author-preflight-gives-its-price-to-the-test-slot.test.ts"
+    - claim: "The preflight still takes its ticket before pricing, so it keeps its place in arrival order while it prices"
+      proof: "grep: W1-T12061 criterion 2 in test/ci/the-author-preflight-gives-its-price-to-the-test-slot.test.ts"
+    - claim: "A ticket that is never priced is ordered as an unpriced ticket, as W1-T11915 defines"
+      proof: "grep: W1-T12061 criterion 3 in test/ci/the-author-preflight-gives-its-price-to-the-test-slot.test.ts"
+  rationale: |
+    OBSERVED 2026-11-10 while building W1-T11915: that task makes the test-slot queue admit the cheapest waiting run first. Its option, costMs, has no caller, so the live queue still runs in arrival order.
+    - scripts/preflight-author.mjs takes its ticket at line 585 and prices its selection at line 671. The price is not known when the ticket is taken.
+    - A waiting ticket's heartbeat rewrites a record it closed over (OwnTicket.beat in src/lib/test-slot-queue.ts), so a price added later is lost unless the queue module gives a way to set it.
+    - On 2026-11-10 an author preflight spent about 50 minutes working and about two hours waiting in this queue, behind runs of every size.
+  design: |
+    Add a setPrice(costMs) to the ticket the queue module returns, which updates the record the heartbeat writes. Call it from the preflight after capacityVerdict prices the selection.
+    NOT IN SCOPE: the ordering rule (W1-T11915) and what the preflight runs.
+  falsifier: |
+    Drop the price on the next heartbeat and criterion 1 must fail. Take the ticket after pricing and criterion 2 must fail. Treat a never-priced ticket as free or as costly and criterion 3 must fail. Restore and require all three to pass.
+  amendment: |
+    2026-11-10, PLAN-expand-1794349444421, at the operator's request: folded into W1-T11915 so that one task is credited for making cheapest-first ordering live.
+    - Withdrawn before any dispatch: there was no plan/claims.yaml row, and its test file did not exist.
+    - W1-T11915's criterion 4 carries this task's three claims on the production path.
+    - The fold also corrects this task's design. capacityVerdict runs only after queue.admit() returns (scripts/preflight-author.mjs), so a price set there reaches a ticket that has already left the queue. W1-T11915 prices with priceSelection right after enqueueTestSlot instead; that costMs is the same one the verdict records.
+    - Grounding: shortest-job-next needs each job's run time, known or estimated, before the job runs (https://en.wikipedia.org/wiki/Shortest_job_next).
+    - superseded_by names W1-T11915, so this retirement holds the origin until that task lands (W1-T9729).
+  note: |
+    Follows W1-T11915, whose file list did not include these two files. Superseded: W1-T11915 now lists them.

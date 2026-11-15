@@ -13,7 +13,7 @@
     - src/lib/worker.ts
     - src/lib/worker-provider.ts
     - test/worker/spawn/a-sonnet-run-stopped-by-the-foundry-claude-cap-continues-on-the-luna-ladder.test.ts
-  status: queued
+  status: merged
   priority: 1.5
   attempts: 0
   rationale: |

@@ -169,6 +169,10 @@ export interface FixProgressInput {
     pendingChecks?: number };
   /** The excerpts behind {@link signals.reviewerOnlyFailurePersists}, for the escalation to carry. */
   persistentReviewerFailures?: ReviewerProofFailure[];
+  /** W1-T12711: a rerun of this head's failed checks reproduced the same red, so a harness claim is refuted here. */
+  harnessRefuted?: true;
+  /** W1-T12711: why the judge's previous answer in this pass was refused. Present only on the second ask. */
+  reaskReason?: string;
 }
 
 export type FixProgressVerdict =
@@ -178,6 +182,14 @@ export type FixProgressVerdict =
 export type FixProgressJudge = (input: FixProgressInput) => Promise<FixProgressVerdict |
   { verdict: "harness"; reason: string } | undefined>;
 export type FixProgressResult = FixProgressVerdict | { verdict: "unavailable"; reason: string };
+/** W1-T12711: the second answer was again an uncorroborated harness: rerun the head's failed checks once. */
+export interface FixProgressRerun { verdict: "rerun-checks"; reason: string; reask: 1 }
+/** W1-T12711: why a re-asked judgment was decided without the judge's verdict. */
+export type FixProgressReaskSkip =
+  | "unparseable-twice" | "harness-refuted" | "harness-rerun-spent" | "harness-rerun-unavailable";
+/** W1-T12711: what a caller that re-asks a refused answer gets. It is never a hold on a refused answer. */
+export type FixProgressReaskResult =
+  | (FixProgressResult & { reask?: 1; judge_skipped?: FixProgressReaskSkip }) | FixProgressRerun;
 
 const sorted = (values: string[]) => [...new Set(values)].sort();
 
@@ -515,7 +527,12 @@ export function buildFixProgressInput(facts: {
   const offHostPassEvidence = signals.reviewerOnlyFailurePersists > 0
     ? offHostPassEvidenceOf(facts, rounds, pendingChecks) : [];
   if (offHostPassEvidence.length > 0) signals.offHostPass = true;
+  const rerun = facts.prNumber === undefined ? undefined : facts.ledger.findLast(row => row.step === "fix.progress_rerun" &&
+    rowPrNumber(row) === facts.prNumber && row.head_sha === facts.headSha && row.outcome === "rerun");
+  const harnessRefuted = rerun !== undefined && pendingChecks.length === 0 && Array.isArray(rerun.red) &&
+    same(sorted(rerun.red.filter((r): r is string => typeof r === "string")), currentRed);
   return { ...(reviewFailureEvidence?.length ? { reviewFailureEvidence } : {}),
+    ...(harnessRefuted ? { harnessRefuted: true as const } : {}),
     ...(offHostPassEvidence.length > 0 ? { offHostPassEvidence,
       harnessGuidance: "A harness verdict escalates this review-only failure with both off-host passes and the recorded review load; it never dispatches a fix round." } : {}),
     taskId: facts.taskId, prNumber: facts.prNumber, headSha: facts.headSha,
@@ -556,23 +573,100 @@ export function firstFixRoundVerdict(input: FixProgressInput):
   return { verdict: "continue", reason: FIRST_FIX_ROUND_UNJUDGED_REASON, judge_skipped: "first-round" };
 }
 
-export async function judgeFixProgress(input: FixProgressInput, judge?: FixProgressJudge): Promise<FixProgressResult> {
+/** W1-T12541: why a merge-conflict round was not shown to the progress judge. */
+export const CONFLICT_ROUND_UNJUDGED_REASON =
+  "merge-conflict round: decided on the conflict's head, base and files, not on a CI progress verdict";
+
+/** The conflict facts one merge-conflict round is decided on. */
+export interface ConflictRoundFacts {
+  taskId?: string; prNumber?: number; headSha: string; baseSha?: string; conflictedFiles: readonly string[];
+}
+
+/**
+ * W1-T12541: a merge-conflict round's progress, from conflict facts only. PURE. `escalate` with loop `conflict` when
+ * two earlier merge-conflict rounds at this head, this base and this sorted conflicted file set each ended with no
+ * pushed head on the PR; else `continue`. A round sent at the PR's current head that has ended left the PR at that
+ * head, so whatever it pushed did not reach the PR. An unknown base matches only another unknown base.
+ */
+export function conflictRoundProgressVerdict(input: ConflictRoundFacts, ledger: readonly Record<string, unknown>[]):
+  | { verdict: "continue"; reason: string; judge_skipped: "conflict-round" }
+  | { verdict: "escalate"; loop: "conflict"; reason: string; judge_skipped: "conflict-round" } {
+  const files = JSON.stringify(sorted([...input.conflictedFiles]));
+  const base = input.baseSha ?? null;
+  const dispatched = new Map<string, string | undefined>();
+  const stuck: { id: string; reason?: string }[] = [];
+  for (const row of ledger) {
+    const rowPr = rowPrNumber(row);
+    if (input.taskId !== undefined ? row.task_id !== input.taskId : rowPr !== input.prNumber) continue;
+    if (rowPr !== undefined && input.prNumber !== undefined && rowPr !== input.prNumber) continue;
+    const id = stringValue(row.round_id);
+    if (id === undefined || row.head_sha !== input.headSha) continue;
+    if (row.step === "fix.dispatch" && row.mode === "merge-conflict") {
+      const rowFiles = Array.isArray(row.conflicted_files) ? row.conflicted_files.filter((p): p is string => typeof p === "string") : [];
+      if ((stringValue(row.base_sha) ?? null) === base && JSON.stringify(sorted(rowFiles)) === files)
+        dispatched.set(id, dispatched.get(id) ?? stringValue(row.reason));
+    } else if (row.step === "fix.commit_refused" && dispatched.has(id)) {
+      dispatched.set(id, dispatched.get(id) ?? stringValue(row.reason));
+    } else if (row.step === "fix.done" && dispatched.has(id) && !stuck.some(r => r.id === id)) {
+      stuck.push({ id, reason: dispatched.get(id) });
+    }
+  }
+  if (stuck.length < 2) return { verdict: "continue", reason: CONFLICT_ROUND_UNJUDGED_REASON, judge_skipped: "conflict-round" };
+  const [a, b] = stuck.slice(-2);
+  const named = (r: { id: string; reason?: string }) => r.reason ? `${r.id} (${r.reason})` : r.id;
+  return { verdict: "escalate", loop: "conflict", judge_skipped: "conflict-round",
+    reason: `merge-conflict rounds ${named(a)} and ${named(b)} each ended with the PR still at head ${input.headSha}, ` +
+      `base ${input.baseSha ?? "unknown"} and conflicted files ${sorted([...input.conflictedFiles]).join(", ")}` };
+}
+
+const UNCORROBORATED_HARNESS_REASON = "harness judgment lacks corroborating off-host proof results";
+const UNPARSEABLE_REASON = "absent or unparseable fix progress verdict; re-ask next pass";
+
+type FixProgressAnswer = { result: FixProgressResult } | { refused: "harness" | "unparseable"; reason: string };
+
+async function askFixProgress(input: FixProgressInput, judge?: FixProgressJudge): Promise<FixProgressAnswer> {
+  const verdict = judge ? await judge(input) : { verdict: "harness", reason: "the persisted proof passes off-host" };
+  const parsed = verdict && parseFixProgressVerdict(JSON.stringify(verdict));
+  if (parsed?.verdict === "escalate" && parsed.loop === "harness") {
+    if (!input.signals.offHostPass || input.offHostPassEvidence === undefined || input.offHostPassEvidence.length === 0)
+      return { refused: "harness", reason: UNCORROBORATED_HARNESS_REASON };
+    const evidence = input.offHostPassEvidence.map(e => [
+      `Proof: ${e.proof} (${e.claim})`, `Reviewer failure: ${e.reviewerOutput}`,
+      `Review load: ${e.reviewLoad ?? "not recorded"}`,
+      `Worker ${e.worker.result} at ${e.worker.headSha}: ${e.worker.output}`,
+      ...e.ci.map(c => `CI ${c.check} ${c.result} at ${c.headSha} (${c.testFile}): ${c.output}`),
+    ].join("\n")).join("\n\n");
+    return { result: { ...parsed, reason: `${parsed.reason}\n${evidence}` } };
+  }
+  return parsed ? { result: parsed } : { refused: "unparseable", reason: UNPARSEABLE_REASON };
+}
+
+/**
+ * W1-T12711: with `reask`, a refused answer (an uncorroborated harness, or no parseable verdict) is asked again once
+ * with the reason. A second unparseable answer is `continue` (unparseable-twice); a second harness is `rerun-checks`,
+ * or `continue` (harness-refuted) when a rerun at this head already reproduced the red. Without `reask`, a refused
+ * answer is `unavailable` as before.
+ */
+export function judgeFixProgress(input: FixProgressInput, judge: FixProgressJudge | undefined,
+  opts: { reask: true }): Promise<FixProgressReaskResult>;
+export function judgeFixProgress(input: FixProgressInput, judge?: FixProgressJudge): Promise<FixProgressResult>;
+export async function judgeFixProgress(input: FixProgressInput, judge?: FixProgressJudge,
+  opts: { reask?: boolean } = {}): Promise<FixProgressReaskResult> {
   if (!judge && !input.signals.offHostPass) return { verdict: "unavailable", reason: "fix progress judge is not wired" };
   try {
-    const verdict = judge ? await judge(input) : { verdict: "harness", reason: "the persisted proof passes off-host" };
-    const parsed = verdict && parseFixProgressVerdict(JSON.stringify(verdict));
-    if (parsed?.verdict === "escalate" && parsed.loop === "harness") {
-      if (!input.signals.offHostPass || input.offHostPassEvidence === undefined || input.offHostPassEvidence.length === 0)
-        return { verdict: "unavailable", reason: "harness judgment lacks corroborating off-host proof results" };
-      const evidence = input.offHostPassEvidence.map(e => [
-        `Proof: ${e.proof} (${e.claim})`, `Reviewer failure: ${e.reviewerOutput}`,
-        `Review load: ${e.reviewLoad ?? "not recorded"}`,
-        `Worker ${e.worker.result} at ${e.worker.headSha}: ${e.worker.output}`,
-        ...e.ci.map(c => `CI ${c.check} ${c.result} at ${c.headSha} (${c.testFile}): ${c.output}`),
-      ].join("\n")).join("\n\n");
-      return { ...parsed, reason: `${parsed.reason}\n${evidence}` };
-    }
-    return parsed ?? { verdict: "unavailable", reason: "absent or unparseable fix progress verdict; re-ask next pass" };
+    const first = await askFixProgress(input, judge);
+    if ("result" in first) return first.result;
+    if (!opts.reask) return { verdict: "unavailable", reason: first.reason };
+    const second = await askFixProgress({ ...input, reaskReason: `the previous answer was refused: ${first.reason}` }, judge)
+      .catch((error: unknown): FixProgressAnswer => ({ refused: "unparseable", reason: `fix progress judgment failed: ${String(error)}` }));
+    if ("result" in second) return { ...second.result, reask: 1 };
+    const asked = `asked twice in this pass: ${first.reason}; then ${second.reason}`;
+    if (second.refused === "unparseable")
+      return { verdict: "continue", reask: 1, judge_skipped: "unparseable-twice", reason: `${asked}; the round runs` };
+    if (input.harnessRefuted)
+      return { verdict: "continue", reask: 1, judge_skipped: "harness-refuted",
+        reason: `${asked}; a rerun at this head already reproduced the same red, so the round runs` };
+    return { verdict: "rerun-checks", reask: 1, reason: `rerun-checks at ${input.headSha}: ${asked}` };
   } catch (error) {
     return { verdict: "unavailable", reason: `fix progress judgment failed: ${String(error)}` };
   }
@@ -588,10 +682,15 @@ export interface FixProgressWitness {
 /** W1-T9502: one lookup for automated repair callers, over their existing ledger snapshot. No TTL or store.
  * Keep this key separate from the escalation latch: that latch still owns its contract-refresh handshake.
  * Old rows lacking these witnesses are conservatively judged once before becoming reusable. */
+type FixProgressResolveOptions = FixProgressWitness & { judge?: FixProgressJudge; firstRound?: boolean };
+type FixProgressReceipt = { step: "fix.progress_judged" | "fix.progress_reused"; input_key: string; judged_at?: string };
+export function resolveFixProgress(input: FixProgressInput, ledger: readonly Record<string, unknown>[],
+  opts: FixProgressResolveOptions & { reask: true }): Promise<{ decision: FixProgressReaskResult; receipt: FixProgressReceipt }>;
+export function resolveFixProgress(input: FixProgressInput, ledger: readonly Record<string, unknown>[],
+  opts?: FixProgressResolveOptions): Promise<{ decision: FixProgressResult; receipt: FixProgressReceipt }>;
 export async function resolveFixProgress(input: FixProgressInput, ledger: readonly Record<string, unknown>[],
-  opts: FixProgressWitness & { judge?: FixProgressJudge; firstRound?: boolean } = {},
-): Promise<{ decision: FixProgressResult; receipt: { step: "fix.progress_judged" | "fix.progress_reused";
-  input_key: string; judged_at?: string } }> {
+  opts: FixProgressResolveOptions & { reask?: boolean } = {},
+): Promise<{ decision: FixProgressReaskResult; receipt: FixProgressReceipt }> {
   const inputKey = createHash("sha256").update(JSON.stringify({ input,
     reviewInputDigest: opts.reviewInputDigest, contractRevision: opts.contractRevision })).digest("hex");
   const readable = Boolean(opts.reviewInputDigest?.trim()) && opts.contractRevision !== undefined &&
@@ -606,6 +705,75 @@ export async function resolveFixProgress(input: FixProgressInput, ledger: readon
       return { decision, receipt: { step: "fix.progress_reused", input_key: inputKey, judged_at: newest.ts } };
     }
   }
-  const decision = (opts.firstRound ? firstFixRoundVerdict(input) : undefined) ?? await judgeFixProgress(input, opts.judge);
+  const decision = (opts.firstRound ? firstFixRoundVerdict(input) : undefined) ??
+    (opts.reask ? await judgeFixProgress(input, opts.judge, { reask: true }) : await judgeFixProgress(input, opts.judge));
   return { decision, receipt: { step: "fix.progress_judged", input_key: inputKey } };
+}
+
+/** W1-T12710: the remedies a stalled criterion gets, in this order. */
+export const STALL_REMEDIES = ["stronger-worker", "amend-criterion", "operator-input"] as const;
+export type StallRemedy = (typeof STALL_REMEDIES)[number];
+
+/** W1-T12710: one `fix.stall_remedy` row of a pull request and criterion, as read back. */
+export interface StallRemedyRow { remedy: StallRemedy; outcome: "taken" | "skipped"; rounds: number; mount?: string }
+
+/**
+ * W1-T12710: the completed rounds dispatched against `criterionKey` (`review:<claim>`, or a check name for a CI red)
+ * since the last round that moved it. A round moved it when it landed and, after it, the criterion was met or failed
+ * with a new digest. A round that did not land, or left the same failure, adds one. A round that waits on a scope
+ * amendment, or that a pending check leaves unknown, neither adds nor resets. PURE.
+ */
+export function sameCriterionStall(rounds: readonly FixProgressRound[], criterionKey: string): number {
+  const claim = criterionKey.startsWith("review:") ? criterionKey.slice("review:".length) : undefined;
+  let stall = 0;
+  for (const round of rounds) {
+    if (!round.completed || !round.redBefore.includes(criterionKey)) continue;
+    if (round.scopeAmendment?.state === "pending" || round.scopeAmendment?.state === "merged") continue;
+    const unmet = (round.redAfter ?? []).includes(criterionKey);
+    if (!unmet && round.redAfterPartial) continue;
+    const landed = round.subtype !== "push_failed" && round.pushedHead !== undefined && round.pushedHead !== round.dispatchedHead;
+    const before = claim === undefined ? undefined : round.reviewerFailures?.find(f => f.claim === claim)?.digest;
+    const after = claim === undefined ? undefined : round.reviewAfter?.find(f => f.claim === claim)?.digest;
+    const newDigest = before !== undefined && after !== undefined && before !== after;
+    stall = landed && (!unmet || newDigest) ? 0 : stall + 1;
+  }
+  return stall;
+}
+
+/**
+ * W1-T12710: the first remedy not tried yet for one pull request and criterion. stronger-worker takes the next mount
+ * in `fixModelOrder` that no earlier stronger-worker row used (the first entry is the ordinary fix mount); when the
+ * order has none, it is returned in `skipped` and the next remedy is taken. undefined when every remedy was tried. PURE.
+ */
+export function nextStallRemedy(tried: readonly StallRemedyRow[], policy: { fixModelOrder: readonly string[] }):
+  { remedy: StallRemedy; mount?: string; skipped: StallRemedy[] } | undefined {
+  const skipped: StallRemedy[] = [];
+  for (const remedy of STALL_REMEDIES) {
+    const rows = tried.filter(r => r.remedy === remedy);
+    if (remedy === "stronger-worker") {
+      if (rows.some(r => r.outcome === "skipped")) continue;
+      const used = new Set(rows.map(r => r.mount));
+      const mount = policy.fixModelOrder.slice(1).find(m => !used.has(m));
+      if (mount !== undefined) return { remedy, mount, skipped };
+      if (rows.length === 0) skipped.push(remedy);
+    } else if (rows.length === 0) return { remedy, skipped };
+  }
+  return undefined;
+}
+
+/** W1-T12710: the `fix.stall_remedy` rows of one pull request and criterion, oldest first. PURE. */
+export function stallRemedyRows(ledger: readonly Record<string, unknown>[], prNumber: number, criterion: string): StallRemedyRow[] {
+  return ledger.flatMap(row => row.step === "fix.stall_remedy" && row.pr_number === prNumber && row.criterion === criterion &&
+    STALL_REMEDIES.includes(row.remedy as StallRemedy) && (row.outcome === "taken" || row.outcome === "skipped")
+    ? [{ remedy: row.remedy as StallRemedy, outcome: row.outcome as StallRemedyRow["outcome"], rounds: typeof row.rounds === "number" ? row.rounds : 0,
+      ...(typeof row.mount === "string" ? { mount: row.mount } : {}) }] : []);
+}
+
+/** W1-T12710: each earlier round on `criterionKey` as an approach that did not work: its diff summary and outcome. PURE. */
+export function failedApproaches(rounds: readonly FixProgressRound[], criterionKey: string): string[] {
+  return rounds.filter(r => r.completed && r.redBefore.includes(criterionKey)).map(r => {
+    const diff = r.diffStat === undefined ? "no diff recorded" : JSON.stringify(r.diffStat).slice(0, 300);
+    const outcome = r.subtype === "push_failed" ? "not landed" : r.fixOutcome ?? r.subtype ?? "no outcome recorded";
+    return `round ${r.id} at ${r.dispatchedHead ?? "an unknown head"}: diff ${diff}; outcome ${outcome}`;
+  });
 }

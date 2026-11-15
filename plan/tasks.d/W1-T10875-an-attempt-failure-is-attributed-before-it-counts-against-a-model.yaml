@@ -16,7 +16,7 @@
     - src/lib/field-trials-cohorts.ts
     - test/routing/an-attempt-failure-is-attributed-before-it-counts-against-a-model.test.ts
     - "src/lib/field-trials-flow.ts"
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-10-27, read-only, on the host ledger union 2026-09-27T18:00Z..2026-10-27T17:58Z (594 archives
