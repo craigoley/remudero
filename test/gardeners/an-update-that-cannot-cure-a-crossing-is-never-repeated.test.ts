@@ -145,12 +145,14 @@ test("W1-T12717 criterion 1: the judge counts only gates CI runs against the sam
   assert.doesNotMatch(scripts["source-size-signal"] ?? "", /--baseline/, "CI's run of the gate reads no baseline");
   assert.ok(!COUNTED_RATCHET_GATES.includes("source-size"));
   assert.ok(UNCOUNTED_RATCHET_GATES.some((u) => u.gate === "source-size" && u.class === "ci-signal" && /CI_READS_BASELINE false/.test(u.reason ?? "")));
-  // The judge never reads the source-size baseline, on either tree.
-  const read: string[] = [];
-  const reader = (p: string) => { read.push(p); return p === WORKER ? numbered("w", 90) : p === SIZE ? json({ [WORKER]: 40 }) : null; };
+  // The judge never uses the source-size baseline, on either tree. Other gates may touch the path (the
+  // affected-reach scan looks at every landing path), so the proof is that its text is never parsed: an
+  // unparseable baseline would rule the gate `unread` if the source-size counter ran.
+  const reader = (p: string) => (p === WORKER ? numbered("w", 90) : p === SIZE ? "{ this is not json" : null);
   const j = judgeMergedRatchets({ mainSha: "m", headSha: "h", changed: [WORKER, SIZE], measuredFiles: [], populationFiles: [WORKER], readMerged: reader, readMain: reader });
   assert.equal(j.verdict, "clean", j.reason);
-  assert.ok(!read.includes(SIZE), `read ${read.join(", ")}`);
+  assert.equal(j.reason, undefined, "no gate was ruled unread");
+  assert.ok(!j.counted.includes("source-size"));
   assert.ok(!mergedRatchetReadSet([WORKER], new Map(), [WORKER]).includes(SIZE));
 });
 
