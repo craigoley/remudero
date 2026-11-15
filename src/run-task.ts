@@ -44595,6 +44595,9 @@ export async function main(
     dispatch?: typeof dispatchCommand;
   } = {},
 ): Promise<void> {
+  // W1-T12075: installed before the early read verbs below, because `rmd gh` and `rmd pr-state` spawn gh too.
+  // It writes nothing until a gh call finds no credential; then the row names the sources tried, never a value.
+  installGithubCredentialMissingSink((row) => appendLedger(ledgerPathFor(loadConfig()), row));
   const inspectionArgv = stripRepoRootFlag(process.argv.slice(2));
   if (inspectionArgv[0] === "inspect" && inspectionArgv[1] === "selected-registry-shadow") {
     return await flushThenExit(await dispatchCommand(inspectionArgv[0], inspectionArgv.slice(1), REGISTRY, USAGE));
@@ -44633,7 +44636,6 @@ export async function main(
   // calls this repo's `callMain` tests make do not stack listeners.
   installUnhandledRejectionGuard();
   setGhReadActorResolver((env) => deriveLedgerActor(env));
-  installGithubCredentialMissingSink((row) => appendLedger(ledgerPathFor(loadConfig()), row));
   // W1-T3065 — THE HAND LANE REAPS TOO. Until this line the temp sweep had exactly two callers,
   // both daemon rungs, so a machine running `rmd` by hand and no daemon reclaimed NOTHING: the
   // operator's Mac reached 100% of a 228 GiB volume with 138 stale dirs and 11 GiB of debris, and
