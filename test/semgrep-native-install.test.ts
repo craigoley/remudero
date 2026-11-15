@@ -115,7 +115,7 @@ test("native Semgrep installs into a fresh environment then verifies offline has
   assert.doesNotMatch(run, /install-semgrep-pro|sudo|docker|uv tool|pipx|curl/);
 });
 
-test("W1-T12492 criterion 2 native install preserves qualification controls and fails closed on incompatible or unknown closure evidence", () => {
+test("W1-T12956 criterion 3 W1-T12492 criterion 2 native install preserves qualification controls and fails closed on incompatible or unknown closure evidence", () => {
   const build = parseLock(read(buildPath));
   const runtime = parseLock(read(runtimePath));
   assert.deepEqual([...build], [
