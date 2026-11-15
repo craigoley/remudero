@@ -6,7 +6,7 @@ import {
   advanceIsMaterial,
   reviewAdvanceIsMaterial,
   checkReviewerCodeFreshness,
-} from "../src/lib/self-sync.js";
+} from "#src/lib/self-sync.js";
 
 // W1-T3735. The reviewer computed PASS and threw it away: 200 `review.post_refused` rows on the
 // live fleet, every one `attempted_state: "success"`, `evidence: "executed"`. Cause: the RESTART
@@ -75,4 +75,45 @@ test("and STALE when the advance really did touch the review path", () => {
     }),
   } as never);
   assert.equal(freshness.status, "stale");
+});
+
+/** W1-T12824: a reviewer `git` that serves two blobs of each path and the -U0 diff of src/run-task.ts. */
+function servedGit(blobs: Record<string, [string, string]>, runTaskDiff = ""): (args: string[]) => string {
+  return (args) => {
+    if (args[0] === "merge-base") return "a".repeat(40);
+    if (args[0] === "diff") return runTaskDiff;
+    const [sha, path] = args[0] === "show" ? args[1].split(":") : [];
+    const pair = path === undefined ? undefined : blobs[path];
+    if (pair) return sha === "a".repeat(40) ? pair[0] : pair[1];
+    throw new Error(`unexpected git call: ${args.join(" ")}`);
+  };
+}
+
+function freshnessOver(changedPaths: string[], git: (args: string[]) => string) {
+  return checkReviewerCodeFreshness("/unused", {}, {
+    git,
+    checkServiceFreshness: () => ({ status: "loaded", behind: { oldSha: "a".repeat(40), newSha: "b".repeat(40), changedPaths } }),
+  } as never);
+}
+
+test("W1-T12824: the 8b221c208 shape, a comment-only compression of src/lib/task-linter.ts, lets the verdict post", () => {
+  const before = "// Proof dialect.\n/**\n * Parses one line.\n */\nexport const parse = (s: string) => s.trim(); // trims\n";
+  const after = "/** Proof dialect: parses one line. */\nexport const parse = (s: string) => s.trim();\n";
+  const freshness = freshnessOver(["src/lib/task-linter.ts"], servedGit({ "src/lib/task-linter.ts": [before, after] }));
+  assert.equal(freshness.status, "fresh");
+  const changed = freshnessOver(["src/lib/task-linter.ts"], servedGit({ "src/lib/task-linter.ts": [before, after.replace("trim()", "trimEnd()")] }));
+  assert.equal(changed.status, "stale", "a code token change still withholds");
+});
+
+test("W1-T12824: the c79f9fd5b shape, an unused name added to a used import line of src/run-task.ts, lets the verdict post", () => {
+  const roots = "async function runReview() {\n  return worktreeRemove;\n}\nasync function reviewCommand() {\n  return runReview();\n}\n" +
+    "function buildFreshTreeReviewRunner() {}\nfunction spawnRmdReviewForFreshTree() {}\nfunction garden() {\n  return 1;\n}\n";
+  const before = `import { worktreeRemove } from "lib/worker.js";\n${roots}`;
+  const after = `import { worktreeRemove, worktreeRemoveIfPresent } from "lib/worker.js";\n${roots.replace("return 1;", "return 2;")}`;
+  const diff = "@@ -1 +1 @@\n-x\n+y\n@@ -12 +12 @@\n-x\n+y\n";
+  assert.equal(freshnessOver(["src/run-task.ts"], servedGit({ "src/run-task.ts": [before, after] }, diff)).status, "fresh");
+  const used = after.replace("return worktreeRemove;", "return worktreeRemoveIfPresent;");
+  const usedDiff = "@@ -1 +1 @@\n-x\n+y\n@@ -3 +3 @@\n-x\n+y\n";
+  assert.equal(freshnessOver(["src/run-task.ts"], servedGit({ "src/run-task.ts": [before, used] }, usedDiff)).status, "stale",
+    "a new name the review path uses still withholds");
 });
