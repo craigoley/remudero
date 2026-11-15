@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
@@ -12,7 +12,7 @@ const NIGHT = "state-backup.2026-11-10T00-00-00-000Z";
 const LEDGER = '{"step":"run.start"}\n';
 
 function fixture(t: TestContext) {
-  const home = ownedFixtureDir(t, "w1-t12174-config-backup").dir;
+  const home = realpathSync(ownedFixtureDir(t, "w1-t12174-config-backup").dir);
   const bin = join(home, "bin");
   const config = join(home, "container config");
   const roots = [join(home, "primary"), join(home, "secondary")];
@@ -59,6 +59,12 @@ for arg in "$@"; do
   fi
 done
 exec /bin/cp "$@"
+`, { mode: 0o755 });
+  // The host script runs on Linux; normalize BSD chmod's lack of `--` to that command-line contract.
+  writeFileSync(join(bin, "chmod"), `#!/usr/bin/env bash
+args=()
+for arg in "$@"; do [ "$arg" = "--" ] || args+=("$arg"); done
+exec /bin/chmod "\${args[@]}"
 `, { mode: 0o755 });
   const receipt = join(home, "snapshot.receipt");
   const run = (extra: NodeJS.ProcessEnv = {}, dryRun = false) => {
