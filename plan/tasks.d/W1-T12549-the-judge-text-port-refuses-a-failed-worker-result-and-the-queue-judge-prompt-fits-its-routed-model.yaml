@@ -19,7 +19,7 @@
     - test/gardeners/the-judge-text-port-refuses-a-failed-worker-result.test.ts
     - test/the-issue-revalidation-garden-re-judges-every-open-issue.test.ts
     - test/gardeners/the-queue-judge-re-ranks-queued-tasks-by-measured-cost-of-delay.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "issueRevalidationJudgeText throws a JudgeWorkerFailedError that names the result subtype when the worker result is an error (isError, apiError, or a subtype other than success). It still records the attempt's spend first"
