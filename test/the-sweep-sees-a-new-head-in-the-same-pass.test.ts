@@ -385,6 +385,7 @@ function rereadAnswer(args: string[], row = rereadRow()): unknown {
 
 test("W1-T7734: the paced single-PR producer rebuilds head facts and preserves board facts", async () => {
   const calls: string[] = [];
+  const pacedReads: Array<[string, number]> = [];
   let waits = 0;
   const pacedResults: boolean[] = [];
   const pacer: GhCallPacer = {
@@ -400,7 +401,11 @@ test("W1-T7734: the paced single-PR producer rebuilds head facts and preserves b
   };
   const reread = buildRereadPrAtAct("o", "r", writeLedger().path, {
     pacer, views: rereadViews,
-    fetchAsync: async (args) => { calls.push(args[1]); return rereadAnswer(args); },
+    fetchAsync: async (args) => {
+      calls.push(args[1]);
+      pacedReads.push([args[1], waits]);
+      return rereadAnswer(args);
+    },
   });
   const view = await reread(pr);
   assert.ok(view);
@@ -414,8 +419,15 @@ test("W1-T7734: the paced single-PR producer rebuilds head facts and preserves b
   assert.equal(view.planResequenceIneligible, pr.planResequenceIneligible);
   assert.deepEqual(view.planResequenceUnmetDependencies, pr.planResequenceUnmetDependencies);
   assert.equal(view.planResequenceHeld, pr.planResequenceHeld);
-  assert.equal(waits, 1, "the reread uses the daemon's async pacer");
-  assert.deepEqual(pacedResults, [false]);
+  assert.equal(waits, 3, "the single-PR read and both view-stage reads use the daemon's async pacer");
+  assert.deepEqual(pacedResults, [false, false, false]);
+  assert.deepEqual(pacedReads, [
+    ["repos/o/r/pulls/10001", 1],
+    [`repos/o/r/commits/${LIVE_HEAD}/check-runs?per_page=100`, 1],
+    [`repos/o/r/commits/${LIVE_HEAD}/status`, 1],
+    ["repos/o/r/pulls/10001/files?per_page=100", 2],
+    ["repos/o/r/pulls/10001", 3],
+  ], "the file-list and merge-state hydrations each wait before reading");
   assert.equal(calls.filter((path) => path.includes("/check-runs?")).length, 1);
   assert.equal(calls.filter((path) => path.endsWith("/status")).length, 1);
   assert.ok(calls.every((path) => !path.includes("state=open")), "the board is not enumerated again");

@@ -268,7 +268,7 @@ function sweepRows(hold: Record<string, unknown>): Record<string, unknown>[] {
   ];
 }
 
-async function sweepOnce(rows: Record<string, unknown>[], contract = "contract-A") {
+async function sweepOnce(rows: Record<string, unknown>[], contract = "contract-A", pr: Partial<OpenPrView> = {}) {
   const state = { escalated: 0, dispatched: 0 };
   const deps: SweepDeps = {
     ledgerPath: "/unused/needs-design-routing-ledger", runId: "W1-T12714-test", now: () => NOW,
@@ -280,7 +280,7 @@ async function sweepOnce(rows: Record<string, unknown>[], contract = "contract-A
     escalate: () => { state.escalated++; }, dispatchFix: () => { state.dispatched++; },
     claimFixAdmission: () => ({ admitted: true }),
   };
-  await runSweep([sweepPr()], deps);
+  await runSweep([{ ...sweepPr(), ...pr }], deps);
   return { state, disposed: rows.findLast((row) => row.step === "sweep.disposed" && row.pr_number === 18060)! };
 }
 
@@ -300,5 +300,42 @@ describe("the sweep reads the routed kind at the hold", () => {
     const { state, disposed } = await sweepOnce(sweepRows({ needs_design_kind: "design", needs_design_remedy: "escalate" }));
     assert.equal(disposed.disposition, "refused-escalate");
     assert.equal(state.escalated, 1);
+  });
+
+  test("an amendment wait permits conflict repair and still waits on the amendment at the pushed head", async () => {
+    const rows = sweepRows({ needs_design_kind: "contract", needs_design_remedy: "amendment-proposed" });
+    rows.push(
+      { step: "sweep.disposed", ts: new Date(NOW - 800).toISOString(), run_id: "EARLIER-SWEEP",
+        pr_number: 18060, head_sha: HEAD, disposition: "blocked-fixable", acted: true },
+      { step: "fix.stood_down", ts: new Date(NOW - 700).toISOString(), run_id: "AMENDMENT-WAIT", task_id: TASK,
+        head_sha: HEAD, read_head_sha: HEAD, read_contract_revision: "contract-A", site: "rung.needs_design_amendment",
+        reason: "awaiting the proposed task contract amendment" },
+    );
+    const conflicted = await sweepOnce(rows, "contract-A", {
+      headRefName: `run-${TASK}-1`,
+      mergeState: "dirty", mergeConflict: { files: [{ path: "src/lib/sweep.ts", oursDeleted: 2, theirsDeleted: 59 }],
+        oursLog: "needs-design routing", theirsLog: "conflict rounds under holds" },
+    });
+    assert.equal(conflicted.disposed.disposition, "conflicted");
+    assert.equal(conflicted.state.dispatched, 1);
+    assert.equal(conflicted.state.escalated, 0);
+    assert.equal(conflicted.disposed.design_hold_kept, true);
+
+    const pushedHead = "b".repeat(40);
+    const round = { task_id: TASK, head_sha: HEAD, run_id: "CONFLICT-ROUND", round_id: "CONFLICT-ROUND:1",
+      repair_pr_url: PR_URL, host: "fixture-host", actor_pid: 778 };
+    rows.push(
+      { ...round, step: "fix.dispatch", ts: new Date(NOW - 500).toISOString(), mode: "merge-conflict" },
+      { ...round, step: "fix.done", ts: new Date(NOW - 100).toISOString(), fix_outcome: "FIXED",
+        subtype: "success", pushed_head_sha: pushedHead },
+    );
+    const merged = await sweepOnce(rows, "contract-A", { headSha: pushedHead });
+    assert.equal(merged.disposed.disposition, "wait");
+    assert.equal(merged.disposed.hold_head_sha, HEAD);
+    assert.equal(merged.state.dispatched, 0);
+    assert.equal(merged.state.escalated, 0);
+
+    const amended = await sweepOnce(rows, "contract-B", { headSha: pushedHead });
+    assert.equal(amended.disposed.disposition, "blocked-fixable", "the changed contract releases the carried wait");
   });
 });
