@@ -89,7 +89,7 @@ import {
   type StackPrerequisiteCheck,
 } from "./arm-auto-merge.js";
 import { diagnoseBodyDefects, type BodyRepairDeps } from "./body-repair.js";
-import { judgeMergedRatchets, ratchetJudgeLedgerFields, ratchetVerdictHolds, type MergedRatchetJudgement } from "./merged-ratchet-verdict.js";
+import { RATCHET_JUDGE_DECIDED_STEP, armedRejudgeHold, judgeMergedRatchets, ratchetJudgeLedgerFields, withheldRatchetFixRoute, type MergedRatchetJudgement, type SweepFixRoute } from "./merged-ratchet-verdict.js";
 import { MAX_PLAN_REPAIR_STRIKES, planCappedRepair, judgeCappedRepair } from "./classify.js";
 import { DEFAULT_ESTIMATE_MIB, readMemoryLedger, type HostMemoryReading } from "./host-memory-ledger.js";
 import { classEstimate, classTypical, type LearnedEstimate } from "./host-memory-learning.js";
@@ -23263,7 +23263,10 @@ export async function runSweep(
                 standDownReason = codeScanning.reason;
                 break;
               }
-              if (codeScanning.kind === "fix") {
+              const fixRoute: SweepFixRoute | undefined = codeScanning.kind !== "fix" ? withheldRatchetFixRoute(pr, armLines) : {
+                what: "CodeQL reported a new high alert", reason: codeScanning.reason, dispatchRow: { alert_numbers: codeScanning.alerts.map((a) => a.alertNumber) },
+                disposed: { code_scanning_fix_preparing: true, code_scanning_fix_reason: codeScanning.reason }, ciFailures: codeScanningFixCiFailures(codeScanning.alerts, codeScanning.reason) };
+              if (fixRoute !== undefined) {
                 // W1-T11510: a review-only pass that may arm keeps this fix route closed too. The ruling row
                 // stays, so the next ordinary pass reads it back as `priorFix` and takes the fix.
                 if (deps.lightPassScope !== undefined) {
@@ -23278,8 +23281,8 @@ export async function runSweep(
                   : undefined;
                 if (unfixable !== undefined) {
                   // A fix that cannot be dispatched must still never sit silent: ask once per head.
-                  const reason = `CodeQL reported a new high alert and ${unfixable} (${codeScanning.reason})`;
-                  appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: CODE_SCANNING_FIX_DISPATCH_STEP,
+                  const reason = `${fixRoute.what} and ${unfixable} (${fixRoute.reason})`;
+                  if (fixRoute.dispatchRow !== undefined) appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: CODE_SCANNING_FIX_DISPATCH_STEP,
                     pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha, dispatched: false, escalated: true, reason });
                   await deps.escalate(pr, reason, renderClarificationQuestion(pr, reason, pr.strikeHistory ?? []));
                   acted = false;
@@ -23312,11 +23315,10 @@ export async function runSweep(
                   standDownReason = fixAdmission.reason;
                   break;
                 }
-                appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: CODE_SCANNING_FIX_DISPATCH_STEP,
-                  pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha, dispatched: false, phase: "preparing", reason: codeScanning.reason,
-                  alert_numbers: codeScanning.alerts.map((a) => a.alertNumber) });
-                extraDisposedFields = { code_scanning_fix_preparing: true, code_scanning_fix_reason: codeScanning.reason };
-                const fixEvidence = { unmetCriteria: [], ciFailures: codeScanningFixCiFailures(codeScanning.alerts, codeScanning.reason) };
+                if (fixRoute.dispatchRow !== undefined) appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: CODE_SCANNING_FIX_DISPATCH_STEP,
+                  pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha, dispatched: false, phase: "preparing", reason: fixRoute.reason, ...fixRoute.dispatchRow });
+                extraDisposedFields = fixRoute.disposed;
+                const fixEvidence = { unmetCriteria: [], ciFailures: fixRoute.ciFailures };
                 if (deps.detachFixWait) {
                   await detachFixDispatch(pr, (onPhase) => fixClaim.run(() => deps.dispatchFix(pr, fixEvidence, onPhase, fixClaim.control)), fixClaim, undefined, fixEvidence);
                   break;
@@ -25952,8 +25954,6 @@ export async function runLightPassReadyRefresh( // W1-T7214: W1-T6022's ready-ov
   }
 }
 
-export const RATCHET_JUDGE_DECIDED_STEP = "sweep.ratchet_judge.decided";
-
 /** W1-T9962 — each armed, non-draft PR whose (head, main tip) pair has no judge row yet, oldest arm first. */
 export function armedRatchetRejudgeTargets(openPrs: readonly OpenPrView[], ledgerLines: readonly Record<string, unknown>[], mainTip: string): OpenPrView[] {
   const judged = new Set<string>();
@@ -25997,10 +25997,9 @@ export async function runArmedRatchetRejudge(
     const row = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: RATCHET_JUDGE_DECIDED_STEP, pr_number: pr.prNumber,
       lane: "sweep-armed", ...ratchetJudgeLedgerFields(judge), head_sha: pr.headSha, main_sha: mainTip,
       ...(judge.mainSha !== undefined && judge.mainSha !== mainTip ? { merged_main_sha: judge.mainSha } : {}) };
-    const spent = ledgerLines.some((l) => (l.step === "sweep.update_branch.attempted" || l.step === "sweep.ci_timeout_refresh.attempted") &&
-      l.pr_number === pr.prNumber && l.head_sha === pr.headSha);
-    if (!ratchetVerdictHolds(judge) || spent || !deps.updateBranch) {
-      appendLine(deps.ledgerPath, { ...row, remedy: !ratchetVerdictHolds(judge) ? "proceed" : spent ? "retry-later" : "unwired" });
+    const hold = armedRejudgeHold(judge, pr, ledgerLines, Boolean(deps.updateBranch));
+    if (hold !== undefined || !deps.updateBranch) {
+      appendLine(deps.ledgerPath, { ...row, ...hold });
       continue;
     }
     if (incidentHold === undefined) {
