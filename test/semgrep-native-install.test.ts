@@ -138,7 +138,7 @@ test("W1-T12492 criterion 2 native install preserves qualification controls and 
   ] as const;
   for (const [name, version, sha256] of reviewedRuntime) assert.deepEqual(runtime.get(name), { version, sha256 });
 
-  const auditor = fileURLToPath(new URL("../.github/semgrep/runtime-compatibility-audit.py", import.meta.url));
+  const auditor = fileURLToPath(new URL(".github/semgrep/runtime-compatibility-audit.py", root));
   const validateClosure = (buildText: string, runtimeText: string) => {
     const scratch = mkdtempSync(join(tmpdir(), "rmd-semgrep-native-closure-"));
     try {
