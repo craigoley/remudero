@@ -66,10 +66,11 @@ raw: >-
   task that is not yet covered by any existing plan task.
 attachments: []
 origin: issue#15309
-status: new
+status: rejected
 reply_to: null
 proposal_pr: null
 summary: null
 expansion: null
 submission_key: null
 thread_id: null
+answered_by: null
