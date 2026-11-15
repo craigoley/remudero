@@ -1,0 +1,58 @@
+- id: W1-T12791
+  title: "An open PR's body acceptance block follows a plan amendment of its task"
+  repo: remudero
+  depends_on: []
+  priority: 1.3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the cure rewrites a live PR body through the REST endpoint; a wrong plan read writes proofs the gate then refuses
+  origin: "operator-session#acceptance-body-after-amendment-2026-11-15"
+  plan_refs:
+    - W1-T5544
+    - W1-T3658
+    - W1-T6135
+    - W1-T10336
+  files:
+    - src/run-task.ts
+    - test/a-metadata-only-body-red-gets-its-proof-repaired-not-a-question.test.ts
+    - test/run-task-s-widened-git-sites-are-classified-and-converted.test.ts
+    - test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "On a fixture clone where the PR head and its body carry the task's unit test proofs and main carries a merged amendment that changes them to grep proofs, repairPrMetadata with acceptance-author-gate red and the production plan reader (nothing injected) writes a body whose Acceptance proofs equal main's amended proofs, and trailerBodyProofDivergenceRefusal on that body with the plan of the merge of head into main returns no refusal"
+      proof: "grep: W1-T12791 criterion 1 in test/a-metadata-only-body-red-gets-its-proof-repaired-not-a-question.test.ts"
+    - claim: "invariant:the-plan-the-gate-reads — the criteria the cure renders are the task's criteria in the tree that merges the PR head into its base (git merge-tree), the tree the gate checks out; when the PR head itself edits the task file, the merged task file is used"
+      kind: guard
+      proof: "grep: W1-T12791 criterion 2 in test/a-metadata-only-body-red-gets-its-proof-repaired-not-a-question.test.ts"
+    - claim: "When the base cannot be fetched or merge-tree reports a conflict, the reader uses the head's plan, as today, and never a guessed plan; with no trailer, no body block, or a block that already equals the merged plan, the body is not changed"
+      proof: "grep: W1-T12791 criterion 3 in test/a-metadata-only-body-red-gets-its-proof-repaired-not-a-question.test.ts"
+    - claim: "invariant:census-only-falls — the merge read uses the async git leaf; no row of SYNC_SPAWN_LOOP_BASELINE rises (repairPrMetadata stays at 2 or lower) and the widened-git-sites table adds no raw git call"
+      kind: guard
+      proof: "grep: W1-T12791 criterion 4 in test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts"
+  rationale: |
+    WHY: when a plan amendment changes a task's proofs while its PR is open, acceptance-author-gate refuses the PR and the fleet's cure does nothing. A person must edit the PR body by hand.
+    OBSERVED: on 2026-11-14 #18422 (W1-T12117) was refused with trailer-body-proof-divergence at 21:31:33Z and 22:05:21Z. Amendment #18563 had merged at 21:27:21Z and changed the task's `unit test:` proofs to `grep:` proofs; the PR body kept the old proofs. The fleet escalated it ("the body red has no deterministic acceptance repair; scope or proof amendment is required") and the body needed a hand edit.
+    MEASURED on GitHub, acceptance-author-gate workflow runs, 72 h to 2026-11-15T02:43Z: 1,008 runs, 43 failed. 9 failed with trailer-body-proof-divergence, on 5 PRs. 6 of the 9 came less than 40 minutes after an amendment of the credited task merged to main: #18422 after #18563 (2 runs), #18227 (W1-T11014) after #18247 (2), #18033 (W1-T11503) after #18157 (1), #18305 (W1-T12177) after #18430 (1). The other 3 were one #18305 run before its amendment and two runs on a hand branch.
+    MEASURED on the core ledger, same 72 h: 8 `escalation.issue_opened` rows carry "no deterministic acceptance repair", on #18310 and #18422.
+    READ at origin/main 5e3cabf0b:
+    - .github/workflows/acceptance-author-gate.yml checks out the pull_request merge commit and runs scripts/acceptance-author-gate.mjs; at :767 it reads the task's acceptance from that tree (planTaskAcceptanceResolver(root)), so the gate sees main's amended plan.
+    - The cure exists: repairPrMetadata (src/run-task.ts:5584) calls acceptanceGateBodyRepair (:5883) -> trailerBodyDivergenceRepair (:5952) with planCriteria from planCriteriaAtHead (:5626). Its production reader planCriteriaAtHeadForRepair (:5664) reads the plan at the PR head SHA.
+    - The PR head does not hold the amendment (checked: d2b6dedeb is not an ancestor of #18422's head 396a928, whose task file still has the unit test proofs). So at the head the body equals the plan, rewriteAcceptanceBlockFromPlan answers healthy, the cure returns undefined, and :5647 escalates.
+    WHICH FIX FITS: the gate already reads the plan; changing it to accept a body that matches only the head's plan would weaken the CONSOLE-T12 check (W1-T3658). A new pass that rewrites every open PR when an amendment merges would duplicate the cure. The fit is to make the existing cure read the plan the gate reads. The REST edit fires the gate's `edited` trigger, so the gate runs again at once.
+    RELATED: W1-T10336 (queued) stops an escalation when the live body already passes; it does not change which plan the cure reads. W1-T11624 (queued) is a CI-friction gardener row for this gate, with no design.
+  design: |
+    INVARIANT the-plan-the-gate-reads: the criteria the cure renders into a PR body are the task's criteria in the tree that merges the PR head into its base, the tree acceptance-author-gate checks out; never the head alone when that merge is readable, never a guessed plan.
+    INVARIANT census-only-falls: no row of SYNC_SPAWN_LOOP_BASELINE rises and no new name is added; rows only fall.
+    1. src/run-task.ts: add an async production reader (for example planCriteriaAtMergeForRepair(body, headSha, baseRef, cwd)). It fetches the base ref and the head SHA once with the async git leaf (hostWorktreeGitAsync, the same vetted config as W1-T6135), runs `git merge-tree --write-tree --no-messages <base> <head>`, wraps the tree in a local commit with no ref (`git commit-tree <tree> -p <base> -p <head>`, the shape of the merge commit the gate checks out), and resolves the trailer task's criteria at that commit with the async plan resolver (resolvePlanCriteriaAtHeadAsync, src/lib/review.ts:8932, which probes `<sha>^{commit}`). On a fetch failure or a conflict it resolves at the head, as today.
+    2. repairPrMetadata: make the planCriteriaAtHead seam accept a Promise and await it; pass the PR's base ref (the live PR read already returns it, or read it with the same REST call). Keep every reason string as today.
+    3. If planCriteriaAtHeadForRepair has no production caller left, remove it and its rows in test/run-task-s-widened-git-sites-are-classified-and-converted.test.ts; otherwise list its callers in the why-file.
+    4. Tests build the clone with test/helpers/git-repo.ts: a base with the task's unit test proofs, a PR branch, then an amendment merged on main. Drive repairPrMetadata with only the REST read and write replaced by the fake GitHub helper.
+    NOT IN SCOPE: the gate script itself; W1-T10336's healthy-body guard; a pass that rewrites open PRs when no gate is red.
+  falsifier: |
+    Point the production reader back at the head SHA: criterion 1 must fail with the body unchanged. Read main's task file instead of the merge tree: criterion 2's head-edits-the-task case must fail. Return [] on a merge conflict: criterion 3 must fail. Use the synchronous git leaf for the merge read: criterion 4 must fail with repairPrMetadata's name. Restore, and all must pass.
+  note: |
+    Id reserved for run-unfiled-1794710957000 with ~/rmd-work/bin/reserve-id.sh.
+    src/run-task.ts is over 44,000 lines: run npm run census:source-size after the change. Extend the existing test files; a new test file that imports #src/run-task.js raises census:affected-reach.
