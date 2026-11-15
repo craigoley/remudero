@@ -2328,14 +2328,16 @@ export const INTERPHASE_REVIEW_CLOCK_STOP_BOUND_MS = 1_000;
 
 /** W1-T4053 — what one light pass may act on. The ordinary pass opens its fix rung whenever nothing is in
  * flight (W1-T1211), and a freshness drain has nothing in flight by construction, so a fix admitted there
- * would detach one more action into the very drain it runs beside. `reviewOnly` closes every lane but review;
- * of the review-only scopes, an interphase-review pass may also arm ({@link lightPassArmAdmitted}, W1-T11510). */
+ * would detach one more action into the very drain it runs beside. `reviewOnly` closes every lane but review, and
+ * a boot pass keeps its fix lanes (W1-T12703); an interphase-review pass may also arm ({@link lightPassArmAdmitted}). */
 export interface LightPassScope {
   readonly reviewOnly: boolean;
   /** W1-T9569: WHY the pass is review-only, so its stand-downs name it; an ordinary pass passes none. */
   readonly scope?: LightPassScopeName;
   /** W1-T9808: present only while a restart is latched; the pass asks it before each review or fix it admits. */
   readonly admit?: RestartAdmission;
+  readonly claimSweepPending?: () => boolean;
+  readonly waitForClaimSweep?: () => Promise<void>;
   readonly observeRepairTurn?: (observation: RepairTurnObservation) => void;
 }
 
@@ -2355,9 +2357,10 @@ export type RestartAdmission = ((
   kind: "review" | "plan-review" | "fix-dispatch" | "dispatch-refill", surface?: "light" | "light-refill" | "full-sweep", lengthMs?: number,
 ) => boolean) & { readonly heldBy?: string; readonly recycleWait?: true };
 
-/** W1-T9808: may this light pass open its fix lanes? Never on a review-only pass, nor when the latch refuses a fix. */
+/** W1-T9808: may this light pass open its fix lanes? Not on a review-only pass but boot after the claim sweep, nor when the latch refuses. */
 export function lightPassFixAdmitted(scope?: LightPassScope): boolean {
-  return scope?.reviewOnly !== true && scope?.admit?.("fix-dispatch", "light") !== false;
+  return (scope?.reviewOnly !== true || (scope.scope === "boot" && scope.claimSweepPending?.() !== true)) &&
+    scope?.admit?.("fix-dispatch", "light") !== false;
 }
 
 /** W1-T11510: may this light pass arm a ready PR? The ordinary pass, and of the review-only scopes only an
@@ -7054,9 +7057,15 @@ export async function runDaemon(
     if (bootGateTrigger === undefined && !bootReviewStarted) {
       bootReviewStarted = true;
       bootReviewInFlight = true;
+      let claimSweepPending = deps.claimSweepSettled !== undefined;
+      const claimSweepDone = () => { claimSweepPending = false; };
+      void deps.claimSweepSettled?.then(claimSweepDone, claimSweepDone);
+      const claimSweepWait = deps.claimSweepSettled?.then(claimSweepDone, claimSweepDone);
+      const waitForClaimSweep = async () => { await claimSweepWait; };
       void (async () => {
         try {
-          await deps.sweepLight?.(heapHeldLightPass(deps, log, { reviewOnly: true, scope: "boot" }));
+          await deps.sweepLight?.(heapHeldLightPass(deps, log,
+            { reviewOnly: true, scope: "boot", claimSweepPending: () => claimSweepPending, waitForClaimSweep }));
         } catch (e) {
           log("daemon.sweep_light.failed", { phase: "boot", error: String((e as Error)?.message ?? e) });
         } finally {
