@@ -2336,6 +2336,8 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
   pendingAnswer?: OpenPrView["pendingAnswer"];
   /** W1-T10339: digest of the PR body a TASKLESS PR was dispatched on — an input every stand-down records. */
   prBodySha256?: string;
+  /** W1-T12710: a stronger-worker round's earlier rounds on its stalled criterion: diff summary and outcome each. */
+  failedApproaches?: readonly string[];
 },
   host: FixCommandHost,
 ): ReturnType<RunTaskCommandHost["runFixRung"]> {
@@ -2430,7 +2432,10 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
   let consultedThisRound = false;
   let progressApproach = opts.progressApproach;
   let progressRoundReason: string | undefined;
-  const progressConstraint = () => [opts.constraint, progressApproach && `Progress judge approach: ${progressApproach}`, needsDesignNote].filter(Boolean).join("\n\n") || undefined;
+  const progressConstraint = () => [opts.constraint, progressApproach && `Progress judge approach: ${progressApproach}`,
+    opts.failedApproaches?.length ? `Approaches that did not work (earlier rounds on this criterion):\n${opts.failedApproaches.map(a => `- ${a}`).join("\n")}` : undefined,
+    needsDesignNote,
+  ].filter(Boolean).join("\n\n") || undefined;
   // W1-T3579: computed ONCE, from the live task this rung was dispatched against — never
   // recomputed per round (a task's own contract cannot change mid-rung; only a FRESH `runFixRung`
   // built by the next sweep, after a plan amendment, would ever see a different one). Threaded

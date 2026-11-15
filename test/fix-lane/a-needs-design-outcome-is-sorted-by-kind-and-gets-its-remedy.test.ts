@@ -48,7 +48,7 @@ function failedReview(headSha: string) {
 
 /** One fix rung on a real repository. The stub worker answers each report in turn, then repeats the last. */
 async function rung(reports: string[], rows: Row[] = [], repo = gitRepo({ kind: "needs-design-routing" }),
-  options: { body?: string; proofDiscrimination?: ProofDiscriminationEvidence } = {}) {
+  options: { body?: string; proofDiscrimination?: ProofDiscriminationEvidence; failedApproaches?: readonly string[] } = {}) {
   let body = options.body ?? "body";
   const writes: string[] = [];
   const spawns: Array<{ resumeSessionId?: string; prompt: string; body: string }> = [];
@@ -64,6 +64,7 @@ async function rung(reports: string[], rows: Row[] = [], repo = gitRepo({ kind: 
     settingsFile: join(repo.dir, "settings.json"),
     config: { root: repo.dir, workerProviders: { harnessCommitsFix: true } } as Config,
     budgetUsd: 10, strikeCap: 3, initialReview: review, proofDiscrimination: options.proofDiscrimination,
+    ...(options.failedApproaches ? { failedApproaches: options.failedApproaches } : {}),
     reviewBase: { owner: "acme", repo: "remudero", headCheckoutDir: repo.dir, reviewerMount: mount },
     escalationJudge: async () => ({ decision: "deliver", reason: "test" }),
     deps: {
@@ -117,9 +118,14 @@ describe("a needs-design outcome is sorted by its kind and gets its remedy", () 
   });
 
   test("W1-T12714 criterion 3: a capability report runs its action through the owner, and the next round starts on it", async () => {
-    const commit = await rung([REPORTS.commit!, REPORTS.design!]);
+    const earlier = 'round earlier at old-head: diff {"files":1}; outcome NOT_LANDED';
+    const commit = await rung([REPORTS.commit!, REPORTS.design!], [], undefined, { failedApproaches: [earlier] });
     assert.equal(commit.spawns.length, 2, "the next round runs at once");
     assert.match(commit.spawns[1]!.prompt, /the harness makes this round's commit from your COMMIT line/);
+    for (const spawn of commit.spawns) {
+      assert.ok(spawn.prompt.includes(`Approaches that did not work (earlier rounds on this criterion):\n- ${earlier}`),
+        "the stalled criterion's history survives the capability remedy in the next prompt");
+    }
     assert.deepEqual(routed(commit.rows).map((row) => [row.kind, row.capability, row.remedy]),
       [["capability", "commit-message", "harness-commit"], ["design", undefined, "escalate"]]);
 
