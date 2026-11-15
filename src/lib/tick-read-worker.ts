@@ -2354,6 +2354,7 @@ export function* openPrViewSteps(
         return { hold: observation?.kind === "changes-requested" ? observation : undefined,
           readable: observation?.kind !== "ambiguous" };
       } catch {
+        // An unreadable reviews page is not "no hold": readable:false keeps the result out of the reuse cache.
         return { hold: undefined, readable: false };
       }
     }, (result) => result.readable);
