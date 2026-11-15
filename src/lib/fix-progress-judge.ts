@@ -709,3 +709,71 @@ export async function resolveFixProgress(input: FixProgressInput, ledger: readon
     (opts.reask ? await judgeFixProgress(input, opts.judge, { reask: true }) : await judgeFixProgress(input, opts.judge));
   return { decision, receipt: { step: "fix.progress_judged", input_key: inputKey } };
 }
+
+/** W1-T12710: the remedies a stalled criterion gets, in this order. */
+export const STALL_REMEDIES = ["stronger-worker", "amend-criterion", "operator-input"] as const;
+export type StallRemedy = (typeof STALL_REMEDIES)[number];
+
+/** W1-T12710: one `fix.stall_remedy` row of a pull request and criterion, as read back. */
+export interface StallRemedyRow { remedy: StallRemedy; outcome: "taken" | "skipped"; rounds: number; mount?: string }
+
+/**
+ * W1-T12710: the completed rounds dispatched against `criterionKey` (`review:<claim>`, or a check name for a CI red)
+ * since the last round that moved it. A round moved it when it landed and, after it, the criterion was met or failed
+ * with a new digest. A round that did not land, or left the same failure, adds one. A round that waits on a scope
+ * amendment, or that a pending check leaves unknown, neither adds nor resets. PURE.
+ */
+export function sameCriterionStall(rounds: readonly FixProgressRound[], criterionKey: string): number {
+  const claim = criterionKey.startsWith("review:") ? criterionKey.slice("review:".length) : undefined;
+  let stall = 0;
+  for (const round of rounds) {
+    if (!round.completed || !round.redBefore.includes(criterionKey)) continue;
+    if (round.scopeAmendment?.state === "pending" || round.scopeAmendment?.state === "merged") continue;
+    const unmet = (round.redAfter ?? []).includes(criterionKey);
+    if (!unmet && round.redAfterPartial) continue;
+    const landed = round.subtype !== "push_failed" && round.pushedHead !== undefined && round.pushedHead !== round.dispatchedHead;
+    const before = claim === undefined ? undefined : round.reviewerFailures?.find(f => f.claim === claim)?.digest;
+    const after = claim === undefined ? undefined : round.reviewAfter?.find(f => f.claim === claim)?.digest;
+    const newDigest = before !== undefined && after !== undefined && before !== after;
+    stall = landed && (!unmet || newDigest) ? 0 : stall + 1;
+  }
+  return stall;
+}
+
+/**
+ * W1-T12710: the first remedy not tried yet for one pull request and criterion. stronger-worker takes the next mount
+ * in `fixModelOrder` that no earlier stronger-worker row used (the first entry is the ordinary fix mount); when the
+ * order has none, it is returned in `skipped` and the next remedy is taken. undefined when every remedy was tried. PURE.
+ */
+export function nextStallRemedy(tried: readonly StallRemedyRow[], policy: { fixModelOrder: readonly string[] }):
+  { remedy: StallRemedy; mount?: string; skipped: StallRemedy[] } | undefined {
+  const skipped: StallRemedy[] = [];
+  for (const remedy of STALL_REMEDIES) {
+    const rows = tried.filter(r => r.remedy === remedy);
+    if (remedy === "stronger-worker") {
+      if (rows.some(r => r.outcome === "skipped")) continue;
+      const used = new Set(rows.map(r => r.mount));
+      const mount = policy.fixModelOrder.slice(1).find(m => !used.has(m));
+      if (mount !== undefined) return { remedy, mount, skipped };
+      if (rows.length === 0) skipped.push(remedy);
+    } else if (rows.length === 0) return { remedy, skipped };
+  }
+  return undefined;
+}
+
+/** W1-T12710: the `fix.stall_remedy` rows of one pull request and criterion, oldest first. PURE. */
+export function stallRemedyRows(ledger: readonly Record<string, unknown>[], prNumber: number, criterion: string): StallRemedyRow[] {
+  return ledger.flatMap(row => row.step === "fix.stall_remedy" && row.pr_number === prNumber && row.criterion === criterion &&
+    STALL_REMEDIES.includes(row.remedy as StallRemedy) && (row.outcome === "taken" || row.outcome === "skipped")
+    ? [{ remedy: row.remedy as StallRemedy, outcome: row.outcome as StallRemedyRow["outcome"], rounds: typeof row.rounds === "number" ? row.rounds : 0,
+      ...(typeof row.mount === "string" ? { mount: row.mount } : {}) }] : []);
+}
+
+/** W1-T12710: each earlier round on `criterionKey` as an approach that did not work: its diff summary and outcome. PURE. */
+export function failedApproaches(rounds: readonly FixProgressRound[], criterionKey: string): string[] {
+  return rounds.filter(r => r.completed && r.redBefore.includes(criterionKey)).map(r => {
+    const diff = r.diffStat === undefined ? "no diff recorded" : JSON.stringify(r.diffStat).slice(0, 300);
+    const outcome = r.subtype === "push_failed" ? "not landed" : r.fixOutcome ?? r.subtype ?? "no outcome recorded";
+    return `round ${r.id} at ${r.dispatchedHead ?? "an unknown head"}: diff ${diff}; outcome ${outcome}`;
+  });
+}

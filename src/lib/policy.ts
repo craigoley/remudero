@@ -124,6 +124,13 @@ export interface PolicyValues {
      *  docs/forensics/policy.md#sweepmemoryfloormib. */
     memoryFloorMib: number;
   };
+  /** W1-T12710: what the fix lane does when rounds stop moving one criterion. */
+  fix: {
+    /** Completed rounds with no progress on one criterion after which its next action is a new remedy. */
+    stallRounds: number;
+    /** Mount names, weakest first; the first is the ordinary fix mount. A stronger-worker remedy takes the next. */
+    modelOrder: string[];
+  };
   drain: {
     max: number;
   };
@@ -322,6 +329,8 @@ const EXPECTED_ORIGIN_KIND: Record<string, PolicyOriginKind> = {
   "sweep.recordableRatchetRepairEnabled": "lifted",
   "sweep.memoryFloorMib": "net-new",
   "drain.max": "lifted",
+  "fix.stallRounds": "net-new",
+  "fix.modelOrder": "net-new",
   "autoTriage.enabled": "net-new",
   "autoTriage.minIntervalMinutes": "net-new",
   "autoTriage.maxPerDay": "net-new",
@@ -494,6 +503,27 @@ function booleanField(
   }
   origins[path] = parseOrigin(path, origin);
   return value;
+}
+
+/** W1-T12710: `fix.stallRounds` when the policy has no `fix` block. */
+export const DEFAULT_FIX_STALL_ROUNDS = 3;
+/** W1-T12710: the mount names a stronger-worker remedy may take, weakest first. */
+export const FIX_MODEL_ORDER_MOUNTS = ["fix", "step_up"] as const;
+/** W1-T12710: `fix.modelOrder` when the policy has no `fix` block. */
+export const DEFAULT_FIX_MODEL_ORDER: readonly string[] = FIX_MODEL_ORDER_MOUNTS;
+
+function fixModelOrderField(raw: unknown, origins: Record<string, PolicyFieldOrigin>): string[] {
+  const path = "fix.modelOrder";
+  if (!isPlainObject(raw)) throw new PolicyError(`policy.yaml: '${path}' must be a mapping with 'value'/'origin'.`);
+  const { value, origin } = raw as Record<string, unknown>;
+  const known: readonly string[] = FIX_MODEL_ORDER_MOUNTS;
+  if (!Array.isArray(value) || value.length === 0 || value[0] !== "fix" ||
+      value.some(name => typeof name !== "string" || !known.includes(name)) || new Set(value).size !== value.length) {
+    throw new PolicyError(`policy.yaml: '${path}.value' must list distinct mount names from ${known.join(", ")}, ` +
+      `starting with fix; got ${JSON.stringify(value)}.`);
+  }
+  origins[path] = parseOrigin(path, origin);
+  return value as string[];
 }
 
 function githubEventWakeSemanticModeField(
@@ -941,6 +971,14 @@ export function validatePolicy(raw: unknown): Policy {
       !Number.isInteger(maintenancePolicy.maxFailures) || !Number.isInteger(maintenancePolicy.maxActiveLanes) ||
       maintenancePolicy.maxActiveLanes < 0) throw new PolicyError("policy.yaml: invalid objectReap maintenance limits");
 
+  const fixRaw = raw.fix as Record<string, unknown> | undefined;
+  const fixPolicy = {
+    stallRounds: fixRaw?.stallRounds !== undefined
+      ? numberField("fix.stallRounds", fixRaw.stallRounds, origin, bounds) : DEFAULT_FIX_STALL_ROUNDS,
+    modelOrder: fixRaw?.modelOrder !== undefined
+      ? fixModelOrderField(fixRaw.modelOrder, origin) : [...DEFAULT_FIX_MODEL_ORDER],
+  };
+
   // Optional, same absent-means-default shape as sweepWallClockBoundMs/fixSpawnWallClockBoundMs
   // above — only a present row is validated, so a typo in an opted-in row still fails loud.
   const githubEventWakeRaw = raw.githubEventWake as Record<string, unknown> | undefined;
@@ -1014,6 +1052,7 @@ export function validatePolicy(raw: unknown): Policy {
         recordableRatchetRepairEnabled,
         memoryFloorMib,
       },
+      fix: fixPolicy,
       drain: { max: drainMax },
       retro: { mergesThreshold: retroMergesThreshold, daysThreshold: retroDaysThreshold },
       autoTriage,

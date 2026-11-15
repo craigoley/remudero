@@ -2,7 +2,6 @@
   title: "The Semgrep runtime auditor lock policy admits the reviewed setuptools 84.1.0 pin"
   repo: remudero
   depends_on: []
-  priority: 1.5
   type: implement
   verify: auto
   principles:
@@ -21,7 +20,9 @@
     - test/semgrep-artifact-audit-ci-contract.test.ts
     - test/review/semgrep-setuptools-trust-before-lock-12716.test.ts
     - test/review/semgrep-setuptools-lock-policy-12823.test.ts
-  status: queued
+  status: blocked
+  retirement: retired  # superseded by W1-T12492 (#18656): its auditor checks each build tool pin as an exact reviewed pair in both lock-policy checks
+  superseded_by: W1-T12492
   attempts: 0
   acceptance:
     - claim: "invariant:exact-lock-trust — the auditor's lock policy (_locked_inputs and audit_locked_artifacts) admits a build lock whose setuptools pin is 84.0.0 with sha256 51a52592...c670 or 84.1.0 with sha256 5231689c...24c9, and refuses any other setuptools version or digest, a missing or extra tool, and any change to the pip, packaging or wheel pins"
@@ -76,3 +77,12 @@
     AUDITOR_SHA256: criterion 3 must fail. Restore and require all to pass.
   note: |
     Id reserved for run-unfiled-1794724955000 with ~/rmd-work/bin/reserve-id.sh.
+    CLOSED UNBUILT 2026-11-15, superseded by W1-T12492 (#18656, "validate reviewed setuptools lock pins",
+    merged as 4ac845f88). Read-only check of .github/semgrep/runtime-compatibility-audit.py on origin/main:
+    - approved_build_tool_pins(build) holds only when the tool names equal APPROVED_TOOLS's keys and
+      approved_tool_artifact admits every (version, sha256) pin. approved_tool_artifact admits setuptools
+      84.0.0 and 84.1.0 from APPROVED_TOOL_ARTIFACTS, each as one exact pair.
+    - _locked_inputs uses it for RECIPE_POLICY, and audit_locked_artifacts uses it for BUILD_TOOL_POLICY.
+      Neither compares the whole lock to APPROVED_TOOLS any more.
+    - That is design steps 1 and 2 of this task. The duplicate build, #18681, was closed unmerged.
+    Nothing remains to build.
