@@ -16,7 +16,7 @@
     - src/cli/commands/fix.ts
     - src/run-task.ts
     - test/a-fix-round-keeps-a-plan-filing-uncredited-and-its-criteria-whole.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "planFilingFixRoundRefusal refuses a fix round on a plan-only filing when any commit the round adds carries a Remudero-Task trailer naming a task the filing introduces, whether the worker wrote it in COMMIT_MESSAGE or the harness appended it, and names the trailer, the commit and the plan-pr-emitter invariant; the same trailer on a round over an implementation baseline is unaffected"
