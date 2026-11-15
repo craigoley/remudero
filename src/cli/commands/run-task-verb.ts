@@ -17,7 +17,7 @@ import { type FixOutcome as TypedFixOutcome } from "../../lib/fix-outcome.js";
 import { type FixRoundReapplyPorts } from "../../lib/fix-round-reapply.js";
 import { fixRoundBranchClaim, productionFixProgressJudge, type JobRequeueOutcome } from "../../lib/sweep.js";
 import { ghExec, ghJsonAsync, ghTextAsync } from "../../lib/github-transport.js";
-import { findTaskInCatalogs } from "../../lib/task-lookup.js";
+import { composeSecondaryPlan, findTaskInCatalogs, opsPlanForLookup } from "../../lib/task-lookup.js";
 import { renderAcceptanceBlock } from "../../lib/plan-pr-emitter.js";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmdirSync, writeFileSync } from "node:fs";
@@ -4918,7 +4918,15 @@ export async function runTask(
     ? bindCanonicalOpsCriteria(task.id, task.title, `${owner}/${task.repo}`, lookup.commit, task.acceptance ?? [])
     : undefined;
   if (task.catalog === "ops" && !plan.byId.has(taskId)) {
-    plan = { ...plan, tasks: [...plan.tasks, task], byId: new Map([...plan.byId, [taskId, task]]) };
+    const privatePlan = opsPlanForLookup(lookup);
+    if (privatePlan === undefined) throw new Error("task catalog unreadable (ops-plan-unavailable)");
+    const composition = composeSecondaryPlan(plan, privatePlan);
+    if (composition.outcome !== "ok") throw new Error(`task catalog unreadable (ops-${composition.outcome})`);
+    // Credit and assertRunnable need the prerequisite records, not just the chosen task.
+    // Their catalog provenance stays private; public source/claim roots are unchanged.
+    const tasks = composition.plan.tasks.map(record => composition.secondaryIds.has(record.id)
+      ? { ...record, catalog: "ops" as const } : record);
+    plan = { ...plan, tasks, byId: new Map(tasks.map(record => [record.id, record])) };
   }
 
   // ── Merge-state is DERIVED FROM GITHUB, never from the yaml `status:` field
