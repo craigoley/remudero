@@ -525,9 +525,8 @@ export interface RunTaskCommandHost {
     prUrl?: string;
     log: (step: string, extra?: Record<string, unknown>) => void;
     say: (msg: string) => void;
-    
     runId?: string;
-    
+    worktreePath?: string;
     seen?: Set<string>;
   }) => void;
   readonly commitsAhead: (worktreePath: string, base: string) => number;
