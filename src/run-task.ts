@@ -1802,8 +1802,11 @@ import {
   type DependabotActionsPort,
   type SupersededRerunOutcome,
   reconcileDependabotTitle,
-  depReviewRequiredSet,
+  depReviewRequiredReader,
+  depReviewRequiredSetFrom,
+  readDepReviewCiGateRequired,
   type DepReviewRequired,
+  type DepReviewRequiredChecksSource,
   overHeaderLimit,
   DEPENDABOT_OWN_RED_SIGNALS,
   DEPENDABOT_REFRESH_CAUSES,
@@ -2830,7 +2833,6 @@ export function handedOffHeadRiskJudge(
     };
   });
 }
-import { readCiGateRequiredChecks } from "./lib/ci-gate-required.js";
 import { dropDerivativeAggregateCiFailure } from "./lib/derivative-ci-failure.js";
 import { applyCorrection } from "./lib/correct.js";
 import { projectHeldTaskQuestionGates, renderHeldTaskQuestions } from "./lib/human-gate.js";
@@ -12312,9 +12314,12 @@ export interface DepReviewDeps {
 }
 
 export async function readDepReviewRequiredChecks(
-  owner: string, repo: string, branch: string, root: string, readText: (args: string[]) => Promise<string> = ghTextAsync,
+  owner: string, repo: string, branch: string, root: string | DepReviewRequiredChecksSource,
+  readText: (args: string[]) => Promise<string> = ghTextAsync,
 ): Promise<DepReviewRequired> {
-  return depReviewRequiredSet(await readRequiredStatusCheckContextsAsync(owner, repo, branch, readText), readCiGateRequiredChecks(root));
+  // W1-T12940: a bare root is the daemon's own checkout; a managed repository passes its own source.
+  const source = typeof root === "string" ? { root, self: true } : root;
+  return depReviewRequiredSetFrom(await readRequiredStatusCheckContextsAsync(owner, repo, branch, readText), readDepReviewCiGateRequired(source));
 }
 
 /** W1-T9664: the real proposal capture. Staged, a record the queue refused throws, so the caller keeps the bot PR open. */
@@ -12517,7 +12522,11 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
   }
 
   let selectedChecks = dedupeRollupByLatestAttempt(view.statusCheckRollup ?? []);
-  const readRequired = deps.requiredChecks ?? (deps.gh === undefined ? (b: string) => readDepReviewRequiredChecks(owner, repo, b, proposalRoot) : undefined);
+  // W1-T12940: ci-gate's REQUIRED list is the pull request's own repository's, never the daemon checkout's for a managed one.
+  const requiredReader = depReviewRequiredReader({ repo, selfRepo: resolveOwnerRepo().repo, selfRoot: proposalRoot, configRoot: config.root,
+    readProtection: (b) => readRequiredStatusCheckContextsAsync(owner, repo, b, ghTextAsync) });
+  const requiredSource = requiredReader.source;
+  const readRequired = deps.requiredChecks ?? (deps.gh === undefined ? requiredReader.read : undefined);
   const required: DepReviewRequired = readRequired ? await readRequired(view.baseRefName ?? "main") : { kind: "all-checks", fallback: "required-reader-not-injected" };
   const input = {
     author: { login: view.author?.login ?? "" },
@@ -12543,7 +12552,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
       reason: `selected check evidence is ${selectedState}; no success or arm without current green evidence` };
   }
   log("dep-review.decided", { ...result, pr_url: view.url, head_sha: view.headRefOid, advisory_red: result.advisoryRed ?? [],
-    judged_against: required.kind, ...(required.kind === "all-checks" ? { required_fallback: required.fallback } : {}) });
+    judged_against: required.kind, required_root: requiredSource.root, ...(required.kind === "all-checks" ? { required_fallback: required.fallback } : {}) });
   console.log(`### rmd dep-review PR #${view.number} — ${result.decision}: ${result.reason}`);
 
   let remedyAskUrl: string | undefined;

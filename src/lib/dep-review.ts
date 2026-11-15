@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { readCiGateRequiredChecks, type CiGateWorkflowReader } from "./ci-gate-required.js";
 import { fixedClock } from "./clock.js";
 import { checkCommitMessage, CONVENTIONAL_LIMITS } from "./commit-message.js";
 import { escalate, type Escalation, type EscalateDeps } from "./escalate.js";
@@ -966,6 +967,62 @@ export function depReviewRequiredSet( // W1-T9929: protection's contexts ∪ ci-
   if (protection.kind === "none") return { kind: "all-checks", fallback: "protection-none" };
   if (protection.contexts.includes("ci-gate") && ciGateRequired.length === 0) return { kind: "all-checks", fallback: "ci-gate-required-empty" };
   return { kind: "required", names: [...new Set([...protection.contexts, ...ciGateRequired])].sort() };
+}
+
+/** W1-T12940: where one pull request's ci-gate REQUIRED list is read. `self` is the repository the daemon's own
+ *  checkout serves; any other repository reads its managed checkout under the config root. */
+export interface DepReviewRequiredChecksSource { root: string; self: boolean }
+
+export function depReviewRequiredChecksSource(args: {
+  repo: string; selfRepo: string; selfRoot: string; configRoot: string;
+}): DepReviewRequiredChecksSource {
+  return args.repo.toLowerCase() === args.selfRepo.toLowerCase()
+    ? { root: args.selfRoot, self: true }
+    : { root: join(args.configRoot, "repos", args.repo), self: false };
+}
+
+export type DepReviewCiGateRequired = { kind: "names"; names: string[] } | { kind: "unreadable"; path: string };
+
+/** W1-T12940: the daemon's own checkout keeps its inert read (an unreadable workflow is an empty list). A managed
+ *  checkout whose workflow cannot be read is reported as such, so the caller judges every check instead of fewer. */
+export function readDepReviewCiGateRequired(
+  source: DepReviewRequiredChecksSource,
+  read: CiGateWorkflowReader = (path) => readFileSync(path, "utf8"),
+): DepReviewCiGateRequired {
+  if (source.self) return { kind: "names", names: readCiGateRequiredChecks(source.root, read) };
+  const path = join(source.root, ".github", "workflows", "ci-gate.yml");
+  let text: string;
+  try {
+    text = read(path);
+  } catch (_error) {
+    // The path is the diagnosis; the caller names it in the fallback instead of borrowing another repository's list.
+    return { kind: "unreadable", path };
+  }
+  return { kind: "names", names: readCiGateRequiredChecks(source.root, () => text) };
+}
+
+/** W1-T12940: {@link depReviewRequiredSet} over a per-repository read. Protection's own fallbacks come first. */
+export function depReviewRequiredSetFrom(
+  protection: Parameters<typeof depReviewRequiredSet>[0],
+  ciGate: DepReviewCiGateRequired,
+): DepReviewRequired {
+  if (ciGate.kind === "names") return depReviewRequiredSet(protection, ciGate.names);
+  const fromProtection = depReviewRequiredSet(protection, []);
+  return protection.kind === "contexts" ? { kind: "all-checks", fallback: `ci-gate-required-unreadable:${ciGate.path}` } : fromProtection;
+}
+
+/** W1-T12940: the one reader the dependency lane uses for a pull request's required set. The caller passes plain
+ *  facts (which repository, where the daemon's own checkout and the config root are); the source is chosen here. */
+export function depReviewRequiredReader(args: {
+  repo: string; selfRepo: string; selfRoot: string; configRoot: string;
+  readProtection: (branch: string) => Promise<Parameters<typeof depReviewRequiredSet>[0]>;
+  readWorkflow?: CiGateWorkflowReader;
+}): { source: DepReviewRequiredChecksSource; read: (branch: string) => Promise<DepReviewRequired> } {
+  const source = depReviewRequiredChecksSource(args);
+  return {
+    source,
+    read: async (branch) => depReviewRequiredSetFrom(await args.readProtection(branch), readDepReviewCiGateRequired(source, args.readWorkflow)),
+  };
 }
 
 // ── The five-way verdict ─────────────────────────────────────────────────
