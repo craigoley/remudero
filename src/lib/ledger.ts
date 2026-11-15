@@ -2032,21 +2032,21 @@ function rotateLedgerLocked(
     group.push(p);
     byStep.set(key, group);
   }
+  const excessOf = (step: string, group: readonly ParsedLedgerLine[]): number =>
+    step === "sweep.disposed" || isHealthOrDeployStep(step) || (!isModelAttributionStep(step) && isRenderRelevantStep(step)) ? 0
+      : Math.max(0, group.length - (step === "review.posted" ? REVIEW_POSTED_RETAINED_ROWS : MAX_RETAINED_LINES_PER_STEP));
+  // W1-T12756: W1-T12534 keys a head a kept sweep.absent_repush row names by its first eligibility row; that row stays.
+  const repushes = byStep.get("sweep.absent_repush") ?? [];
+  const repushedHeads = new Set(repushes.slice(excessOf("sweep.absent_repush", repushes)).flatMap((p) =>
+    typeof p.json?.new_head === "string" ? [`${String(p.json.pr_number)}@${p.json.new_head}`] : []));
   const capped: ParsedLedgerLine[] = [];
   for (const [step, group] of byStep.entries()) {
-    if (
-      step === "sweep.disposed" ||
-      isHealthOrDeployStep(step) ||
-      (!isModelAttributionStep(step) && isRenderRelevantStep(step)) ||
-      group.length <= (step === "review.posted" ? REVIEW_POSTED_RETAINED_ROWS : MAX_RETAINED_LINES_PER_STEP)
-    ) {
-      capped.push(...group);
-      continue;
-    }
     // group is in file order (chronological); drop the oldest excess, keep the newest cap.
-    const excess = group.length - (step === "review.posted" ? REVIEW_POSTED_RETAINED_ROWS : MAX_RETAINED_LINES_PER_STEP);
-    archivedLineCount += excess;
-    capped.push(...group.slice(excess));
+    const excess = excessOf(step, group);
+    const pinned = step !== "sweep.review_eligible" ? [] : group.slice(0, excess).filter((p) => // first row per head
+      typeof p.json?.head_sha === "string" && repushedHeads.delete(`${String(p.json.pr_number)}@${p.json.head_sha}`));
+    archivedLineCount += excess - pinned.length;
+    capped.push(...pinned, ...group.slice(excess));
   }
 
   // Restore original file order — every pass above regrouped by key/step, losing it. Filtering
