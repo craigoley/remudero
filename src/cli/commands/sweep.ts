@@ -30,6 +30,7 @@ import { applyMergeProbeEvidence, probeOpenPrMerges } from "../../lib/merge-prob
 import type { ComposedRealGraph } from "../../lib/composition-root.js";
 import type { EscalationAnswerGateway } from "../../lib/escalation-answers.js";
 import { readEscalationAnswers } from "../../lib/escalation-answers.js";
+import { createLightPassOpenPrList, headReadOrStandDown, LIGHT_PASS_VIEWS_DEADLINE_MS, LIGHT_PASS_VIEWS_FALLBACK_MAX_AGE_MS, mergeAtListHead } from "../../lib/light-pass-open-pr-list.js";
 import { buildBehindMainByPr, buildBehindMainByPrAsync, createDistanceProbeSequence, buildCreditCandidates, buildOpenPrViewsAsync, buildStaleGateWorkflowsByPr, fetchCiFailuresAsync, type TickReadFacts } from "../../lib/tick-read-worker.js";
 import { DEFAULT_SWEEP_POLICY, REVIEW_STATUS_RESTORED_STEP, restorableDeliveredVerdict, buildSweepEffects as buildSweepEffectsFromLib, dispatchFixCatchOutcome, fixRungTaskFor, discriminateReviewReuseAsync, projectMergedTaskCandidates, runSweep, runSweepLightPass, runCreditBackfill, renderSweepSummary, planOnlyRunBranchReceipts, withFullSweepRepairAdmission, createEscalationTriageHistoryReader, ESCALATION_TRIAGE_EVIDENCE_SLICE, createFullPreludeTimer, LightPassPreReviewTiming, observeLightPassReviewEligibility, runLightPassReadyRefresh, selectLightPassReadyOverlap, refreshAdmissionWaiters, runLightPassRefreshAdmission, lightPassHeadContractRefresh, runArmedRatchetRejudge, isReviewLaneDisposition, deriveDisposition, orderPendingReviews, type BuildSweepEffectsDeps, type ReviewerCodeAdvance, type SweepDeps, type OpenPrView, type ReviewDispatchMode, type ReviewReuseInputs, type BaseChangedFiles, type Disposition } from "../../lib/sweep.js";
 import { missingReviewReuseFact, priorPostedReviewRow, reviewLedgerKeyFor, REVIEW_ENGINE_REVISION, REVIEW_CONTEXT, reviewEvidenceStrength, type ProofExecutor, type ReviewVerdict } from "../../lib/review.js";
@@ -1250,6 +1251,9 @@ export function buildSweepLightHook(
   const compares = createLightPassCompareReader(owner, repo, io.readCompare ?? ghJsonAsync);
   const policy = io.sweepWallClockBoundMs === undefined ? DEFAULT_SWEEP_POLICY
     : { ...DEFAULT_SWEEP_POLICY, sweepWallClockBoundMs: io.sweepWallClockBoundMs };
+  // W1-T12755: the last good open-PR list, kept for this hook's lifetime.
+  const openPrList: ReturnType<typeof createLightPassOpenPrList<OpenPrView>> = createLightPassOpenPrList({ clock: io.clock ?? systemClock, log, runId,
+    deadlineMs: LIGHT_PASS_VIEWS_DEADLINE_MS, maxAgeMs: LIGHT_PASS_VIEWS_FALLBACK_MAX_AGE_MS });
   return withMainHealthOnLightPass(async (scope?: LightPassScope) => {
     // W1-T4053: a freshness drain's pass. The fix rung reads closed and the requeue batch never forms,
     // so `post-review` is the only lane left.
@@ -1258,7 +1262,7 @@ export function buildSweepLightHook(
     const lightTickId = randomUUID();
     const timing = new LightPassPreReviewTiming(io.clock);
     let timingWritten = false;
-    let viewsSource: "tick_read" | "own_read" = "own_read";
+    let viewsSource: "tick_read" | "own_read" | "fallback" = "own_read";
     const finishTiming = () => {
       if (timingWritten) return;
       timingWritten = true;
@@ -1267,10 +1271,7 @@ export function buildSweepLightHook(
     try {
       await timing.run(async () => {
       // W1-T12236: only the first read passes the scope; a refill read reads its own views.
-      const readViews = async (passScope?: LightPassScope, initial = false) => {
-        const served = io.openPrViews?.(passScope);
-        if (initial) viewsSource = served ? "tick_read" : "own_read";
-        if (served) return { source: "tick_read" as const, views: await served };
+      const ownViews = async () => {
         const views = await buildOpenPrViewsAsync(owner, repo, ledgerPath, {
           planFilingFileCache,
           onPlanFilingClassification: reportPlanFilingClassification,
@@ -1280,10 +1281,19 @@ export function buildSweepLightHook(
         planFilingFileCache.retain(owner, repo, views.map((pr) => pr.prNumber));
         const saved = planFilingFileCache.save();
         if (!saved.ok) log("plan_filing_files.store_save_failed", { reason: saved.reason });
-        return { source: "own_read" as const, views };
+        return views;
+      };
+      // W1-T12755: a failed or slow read decides from the last good list (a refill read too).
+      const readViews = async (passScope?: LightPassScope, initial = false) => {
+        const served = io.openPrViews?.(passScope);
+        if (initial) viewsSource = served ? "tick_read" : "own_read";
+        const read = await openPrList.read(served, ownViews);
+        if (initial && read.fallback) viewsSource = "fallback";
+        return read;
       };
       const first = await timing.run(() => timing.measure("open_pr_views", () => readViews(scope, true)));
       const openPrs = first.views;
+      const onLastGoodList = first.fallback;
       compares.retain(openPrs);
       const activePlan = planAccessor?.() ?? plan;
       const effects: Omit<SweepDeps, "ledgerPath" | "runId"> = timing.run(() => (io.effects ?? buildSweepEffects)({
@@ -1297,6 +1307,7 @@ export function buildSweepLightHook(
         log: log,
         policy,
         feedbackLandingStateRoot: config.root,
+        ...(onLastGoodList ? mergeAtListHead(new Map(openPrs.map((pr) => [pr.prNumber, pr.headSha])), ledgerPath) : {}),
       }));
       // W1-T1211: ONE read per tick. `readLedgerLines` is the same reader every other rung in this
       // file uses, and the in-flight ids come from lock FILENAMES — no pid probe, no lock content.
@@ -1340,7 +1351,8 @@ export function buildSweepLightHook(
           // W1-T11510: a held head that derives another disposition keeps its scope's own stand-down text.
           ...(mergeHold !== undefined ? { standDownReasonFor: (d: Disposition) => d === "mergeable"
             ? mergeHold : scopeDeps.standDownReasonFor?.(d) } : {}),
-          readLiveStateAtAct: effects.readLiveState,
+          readLiveStateAtAct: onLastGoodList ? headReadOrStandDown(effects.readLiveState) : effects.readLiveState,
+          ...(onLastGoodList ? { guardEveryHeadAtAct: true } : {}),
           // W1-T11153: a refill re-reads the open PRs. One tick's snapshot is split into batches, each with its
           // own light pass, so a batch refills only from its own PRs and PRs the tick's snapshot did not hold.
           readOpenPrsForRefill: async () => {
