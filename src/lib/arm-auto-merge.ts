@@ -54,7 +54,7 @@ import {
   type PlanMergeSafetyReadings,
 } from "./plan-pr-merge-safety.js";
 import { readLedgerLines } from "./status.js";
-import { describeRatchetRows, judgeMergedRatchets, ratchetJudgeLedgerFields, ratchetVerdictHolds, readMergedRatchetInputsSteps, type MergedRatchetJudgement } from "./merged-ratchet-verdict.js";
+import { describeRatchetRows, judgeMergedRatchets, ratchetJudgeLedgerFields, ratchetUpdateRefusal, ratchetVerdictHolds, readMergedRatchetInputsSteps, type MergedRatchetJudgement, type RatchetUpdateWithheldEvidence } from "./merged-ratchet-verdict.js";
 import {
   closingReferenceGuardSteps,
   recordClosingReferenceToLedger,
@@ -1043,11 +1043,11 @@ export interface ArmAttemptResult {
   ratchetJudge?: MergedRatchetJudgement;
 }
 
-export interface DirectMergePreflightEvidence {
+export interface DirectMergePreflightEvidence extends RatchetUpdateWithheldEvidence {
   priorHeadSha?: string;
   behindBy?: number;
   mergeable?: string;
-  remedy: "direct-merge" | "update-branch" | "retry-later" | "mergeability-unknown" | "operator";
+  remedy: "direct-merge" | "update-branch" | "retry-later" | "mergeability-unknown" | "operator" | "fix-lane";
   error?: string;
   /** W1-T5472 — set only when the plan-touch read ran (a behind PR GitHub would merge as-is). */
   planTouch?: PlanTouch;
@@ -1444,10 +1444,10 @@ function* ratchetCollisionSteps(
   if (!ratchetVerdictHolds(judge)) return { judge };
   const head = observedHead ?? judge.headSha;
   const evidence = { ...baseEvidence, ...(head !== undefined ? { priorHeadSha: head } : {}), reason: "ratchet_collision" as const, ratchetJudge: judge };
-  if (head !== undefined && (deps.ledgerLines?.() ?? []).some((l) => l.step === "automerge.direct_merge_updated" &&
-      l.reason === "ratchet_collision" && l.pr_url === prUrl && l.prior_head_sha === head)) {
-    deps.say(`automerge.direct_merge_preflight_refused (W1-T9962): head ${head} was already refreshed for a ${judge.verdict} — awaiting its new head: ${prUrl}`);
-    return { hold: { outcome: "direct-merge-preflight-refused", ...context, directMergePreflight: { ...evidence, remedy: "retry-later" } } };
+  const refusal = ratchetUpdateRefusal(judge, prUrl, head, prNumberFromRef(prUrl), deps.ledgerLines?.() ?? []);
+  if (refusal !== undefined) {
+    deps.say(refusal.say);
+    return { hold: { outcome: "direct-merge-preflight-refused", ...context, directMergePreflight: { ...evidence, ...refusal.evidence } } };
   }
   let update: { ok: boolean; error?: string };
   try {
@@ -2385,7 +2385,7 @@ export function logArmAttribution(
   const judge = ratchetJudge ?? directMergePreflight?.ratchetJudge;
   if (judge) {
     const remedy = directMergePreflight?.reason === "ratchet_collision" ? directMergePreflight.remedy : "proceed";
-    log("sweep.ratchet_judge.decided", { task_id: taskId, pr_number: prNumber, lane, ...ratchetJudgeLedgerFields(judge), remedy, outcome });
+    log("sweep.ratchet_judge.decided", { task_id: taskId, pr_number: prNumber, lane, ...ratchetJudgeLedgerFields(judge, directMergePreflight?.updateWithheld), remedy, outcome });
   }
   const ghFields = rateLimit
     ? { gh_bucket: rateLimit.bucket, gh_bucket_resets_at: rateLimit.resetsAt, gh_bucket_operation: rateLimit.operation }

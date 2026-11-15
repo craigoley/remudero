@@ -1518,7 +1518,7 @@ export function feedbackLandingSweepRungs(
  * repository, on the plain landing branch, with no review request of the public repository. Each row and
  * receipt says "the plan destination" in place of its name and its checkout path (the W1-T11768 rule).
  */
-export function planDestinationLandingOpts<O extends LandFeedbackOpts>(opts: O, destination: PlanDestinationRepository): O {
+export function planDestinationLandingOpts<O extends LandFeedbackOpts | LandFeedbackAsyncOpts>(opts: O, destination: PlanDestinationRepository): O {
   const target = { owner: destination.owner, repo: destination.repo };
   const redact = (fields: Record<string, unknown> = {}): Record<string, unknown> => JSON.parse(JSON.stringify(fields)
     .split(destination.checkoutDir).join("the plan destination checkout")
@@ -2024,6 +2024,18 @@ export function landFeedbackStatusContent(
   if (opts.stateRoot !== undefined) return queueFeedbackLanding(opts.stateRoot, relPath, content);
   const git = opts.git ?? defaultGit(root);
   return landContent(root, landingKind(FEEDBACK_LANDING_KIND, root, opts, git), [{ relPath, content }], { ...opts, git });
+}
+
+/** W1-T12790: {@link landFeedbackStatusContent} for a daemon lane; its preflight and every git and gh verb are awaited. */
+export function landFeedbackStatusContentAsync(
+  root: string,
+  relPath: string,
+  content: string,
+  opts: LandFeedbackAsyncOpts = {},
+): Promise<LandFeedbackResult> {
+  if (opts.stateRoot !== undefined) return Promise.resolve(queueFeedbackLanding(opts.stateRoot, relPath, content));
+  const { planPrPreflight: _preflight, ...kindOpts } = opts;
+  return landContentAsync(root, (net) => landingKindSteps(FEEDBACK_LANDING_KIND, root, kindOpts, net), [{ relPath, content }], opts);
 }
 
 const QUEUED_FEEDBACK_RECORD = new RegExp(`^${FEEDBACK_REL_DIR}/[^/]+\\.yaml$`);
