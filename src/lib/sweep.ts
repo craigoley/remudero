@@ -90,7 +90,7 @@ import {
   type StackPrerequisiteCheck,
 } from "./arm-auto-merge.js";
 import { diagnoseBodyDefects, type BodyRepairDeps } from "./body-repair.js";
-import { judgeMergedRatchets, ratchetJudgeLedgerFields, ratchetVerdictHolds, type MergedRatchetJudgement } from "./merged-ratchet-verdict.js";
+import { RATCHET_JUDGE_DECIDED_STEP, armedRejudgeHold, judgeMergedRatchets, ratchetJudgeLedgerFields, withheldRatchetFixRoute, type MergedRatchetJudgement, type SweepFixRoute } from "./merged-ratchet-verdict.js";
 import { MAX_PLAN_REPAIR_STRIKES, planCappedRepair, judgeCappedRepair } from "./classify.js";
 import { DEFAULT_ESTIMATE_MIB, readMemoryLedger, type HostMemoryReading } from "./host-memory-ledger.js";
 import { classEstimate, classTypical, type LearnedEstimate } from "./host-memory-learning.js";
@@ -15526,6 +15526,9 @@ export interface SweepDeps {
   /** W1-T11153: the open-PR reader the light pass started from, re-read when a freed lane refills so a PR that
    *  became eligible after the pass-start snapshot is ordered by its own admission key. Absent: the snapshot. */
   readOpenPrsForRefill?: () => Promise<OpenPrView[]>;
+  /** W1-T12535: the tick's whole open-PR snapshot. A light pass counts its review queue depth over it; it still admits
+   *  only its own PRs. Absent: the pass's own PRs. */
+  snapshotOpenPrs?: readonly OpenPrView[];
   /** W1-T5749 — head-only guard fallback when readLiveStateAtAct is omitted: a changed head stands down as `sweep.head_moved`, an unreadable one acts. */
   readLiveHeadSha?: (pr: OpenPrView) => string | undefined | Promise<string | undefined>;
   /** W1-T12755: a light pass on its last good open-PR list reads every lane's head at act time, not only an arm's. */
@@ -18184,7 +18187,10 @@ export async function drainInFlightReviews(opts: {
   closeRefills?: boolean;
 }): Promise<number> {
   // A drain is an exit: a freed lane must not refill behind it. The next light pass reopens refills.
-  if (opts.closeRefills !== false) lightPassRefillsClosed = true;
+  if (opts.closeRefills !== false) {
+    lightPassRefillsClosed = true;
+    lightPassRefillEpoch++;
+  }
   const running = [...inFlightReviewRuns.keys()];
   for (const work of running) opts.onWait?.(reviewRestartItem(work, inFlightReviewRuns.get(work)!));
   if (running.length === 0) return 0;
@@ -23356,7 +23362,10 @@ export async function runSweep(
                 standDownReason = codeScanning.reason;
                 break;
               }
-              if (codeScanning.kind === "fix") {
+              const fixRoute: SweepFixRoute | undefined = codeScanning.kind !== "fix" ? withheldRatchetFixRoute(pr, armLines) : {
+                what: "CodeQL reported a new high alert", reason: codeScanning.reason, dispatchRow: { alert_numbers: codeScanning.alerts.map((a) => a.alertNumber) },
+                disposed: { code_scanning_fix_preparing: true, code_scanning_fix_reason: codeScanning.reason }, ciFailures: codeScanningFixCiFailures(codeScanning.alerts, codeScanning.reason) };
+              if (fixRoute !== undefined) {
                 // W1-T11510: a review-only pass that may arm keeps this fix route closed too. The ruling row
                 // stays, so the next ordinary pass reads it back as `priorFix` and takes the fix.
                 if (deps.lightPassScope !== undefined) {
@@ -23371,8 +23380,8 @@ export async function runSweep(
                   : undefined;
                 if (unfixable !== undefined) {
                   // A fix that cannot be dispatched must still never sit silent: ask once per head.
-                  const reason = `CodeQL reported a new high alert and ${unfixable} (${codeScanning.reason})`;
-                  appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: CODE_SCANNING_FIX_DISPATCH_STEP,
+                  const reason = `${fixRoute.what} and ${unfixable} (${fixRoute.reason})`;
+                  if (fixRoute.dispatchRow !== undefined) appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: CODE_SCANNING_FIX_DISPATCH_STEP,
                     pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha, dispatched: false, escalated: true, reason });
                   await deps.escalate(pr, reason, renderClarificationQuestion(pr, reason, pr.strikeHistory ?? []));
                   acted = false;
@@ -23405,11 +23414,10 @@ export async function runSweep(
                   standDownReason = fixAdmission.reason;
                   break;
                 }
-                appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: CODE_SCANNING_FIX_DISPATCH_STEP,
-                  pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha, dispatched: false, phase: "preparing", reason: codeScanning.reason,
-                  alert_numbers: codeScanning.alerts.map((a) => a.alertNumber) });
-                extraDisposedFields = { code_scanning_fix_preparing: true, code_scanning_fix_reason: codeScanning.reason };
-                const fixEvidence = { unmetCriteria: [], ciFailures: codeScanningFixCiFailures(codeScanning.alerts, codeScanning.reason) };
+                if (fixRoute.dispatchRow !== undefined) appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: CODE_SCANNING_FIX_DISPATCH_STEP,
+                  pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha, dispatched: false, phase: "preparing", reason: fixRoute.reason, ...fixRoute.dispatchRow });
+                extraDisposedFields = fixRoute.disposed;
+                const fixEvidence = { unmetCriteria: [], ciFailures: fixRoute.ciFailures };
                 if (deps.detachFixWait) {
                   await detachFixDispatch(pr, (onPhase) => fixClaim.run(() => deps.dispatchFix(pr, fixEvidence, onPhase, fixClaim.control)), fixClaim, undefined, fixEvidence);
                   break;
@@ -26052,8 +26060,6 @@ export async function runLightPassReadyRefresh( // W1-T7214: W1-T6022's ready-ov
   }
 }
 
-export const RATCHET_JUDGE_DECIDED_STEP = "sweep.ratchet_judge.decided";
-
 /** W1-T9962 — each armed, non-draft PR whose (head, main tip) pair has no judge row yet, oldest arm first. */
 export function armedRatchetRejudgeTargets(openPrs: readonly OpenPrView[], ledgerLines: readonly Record<string, unknown>[], mainTip: string): OpenPrView[] {
   const judged = new Set<string>();
@@ -26097,10 +26103,9 @@ export async function runArmedRatchetRejudge(
     const row = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: RATCHET_JUDGE_DECIDED_STEP, pr_number: pr.prNumber,
       lane: "sweep-armed", ...ratchetJudgeLedgerFields(judge), head_sha: pr.headSha, main_sha: mainTip,
       ...(judge.mainSha !== undefined && judge.mainSha !== mainTip ? { merged_main_sha: judge.mainSha } : {}) };
-    const spent = ledgerLines.some((l) => (l.step === "sweep.update_branch.attempted" || l.step === "sweep.ci_timeout_refresh.attempted") &&
-      l.pr_number === pr.prNumber && l.head_sha === pr.headSha);
-    if (!ratchetVerdictHolds(judge) || spent || !deps.updateBranch) {
-      appendLine(deps.ledgerPath, { ...row, remedy: !ratchetVerdictHolds(judge) ? "proceed" : spent ? "retry-later" : "unwired" });
+    const hold = armedRejudgeHold(judge, pr, ledgerLines, Boolean(deps.updateBranch));
+    if (hold !== undefined || !deps.updateBranch) {
+      appendLine(deps.ledgerPath, { ...row, ...hold });
       continue;
     }
     if (incidentHold === undefined) {
@@ -26242,12 +26247,14 @@ export function reportReviewPhase(phase: string): void {
 }
 const reviewSlotWaiters = new Set<() => void>();
 const releaseReviewSlot = (): void => {
-  for (const wake of [...reviewSlotWaiters]) wake();
+  const waiters = [...reviewSlotWaiters];
   reviewSlotWaiters.clear();
+  for (const wake of waiters) wake();
 };
 const inFlightNote = (inFlight: number): string => (inFlight > 0 ? `, in-flight ${inFlight}` : "");
 // Closed by `drainInFlightReviews` (an exit), reopened by the next light pass.
 let lightPassRefillsClosed = false;
+let lightPassRefillEpoch = 0;
 
 const lightPassActionScope = new AsyncLocalStorage<{ onMemoryWait: () => void }>();
 const lightPassMemoryWaits = new Map<string, { sinceMs: number }>();
@@ -26649,11 +26656,15 @@ async function runSweepLightPassCore(
   const readLedger = deps.readLedger ?? readLiveLedgerRows;
   const selectionLedgerLines = readLedger(deps.ledgerPath);
   const repushedQueuedAt = repushedHeadQueuedAt(selectionLedgerLines);
-  openPrs = openPrs.map(pr => promiseHarvestRetryView(pr, selectionLedgerLines, deps.sampleLoad));
-  const selectionPrior = priorActionsFromLedger(selectionLedgerLines, openPrs, deps.sampleLoad);
-  openPrs = openPrs.map(pr => completedRefusalRetryView(pr, selectionPrior));
+  const ownNumbers = new Set(openPrs.map((pr) => pr.prNumber));
+  let queuePrs = deps.snapshotOpenPrs === undefined ? openPrs
+    : [...openPrs, ...deps.snapshotOpenPrs.filter((pr) => !ownNumbers.has(pr.prNumber))];
+  queuePrs = queuePrs.map(pr => promiseHarvestRetryView(pr, selectionLedgerLines, deps.sampleLoad));
+  const selectionPrior = priorActionsFromLedger(selectionLedgerLines, queuePrs, deps.sampleLoad);
+  queuePrs = queuePrs.map(pr => completedRefusalRetryView(pr, selectionPrior));
+  openPrs = queuePrs.filter((pr) => ownNumbers.has(pr.prNumber));
   const freshnessBackoffs = new Set<string>();
-  for (const pr of openPrs) {
+  for (const pr of queuePrs) {
     const key = reviewOutcomeKeyForPr(pr);
     const refusal = selectionPrior.reviewFreshnessRefusals.get(key);
     // A due unreadable-source probe must still reach runSweep's recovery path.
@@ -26674,7 +26685,9 @@ async function runSweepLightPassCore(
   };
   observeReviewEligibility(openPrs, deps, policy, now, selectionLedgerLines, outcomes, "light");
   await resolveUnreadPlanLanes(openPrs.filter((pr) => !reviewAdmissionOutcomeKnown(pr, outcomes, policy, now)), deps, policy, now);
-  const queueDepth = reviewAdmissionQueueDepth(openPrs, policy, now, outcomes);
+  const ownQueueDepth = reviewAdmissionQueueDepth(openPrs, policy, now, outcomes);
+  const queueDepth = deps.snapshotOpenPrs === undefined ? ownQueueDepth
+    : reviewAdmissionQueueDepth(queuePrs, policy, now, outcomes);
   // W1-T11340: free a head whose in-process review outlived its pending ceiling before reading the reservations.
   await reclaimStuckInProcessReviews(openPrs, deps, policy, now);
   // W1-T7095: candidates for the host-memory demand row, read BEFORE this pass reserves its own spawning heads.
@@ -26702,7 +26715,7 @@ async function runSweepLightPassCore(
   const planFilings = selected.planFilings.filter(admitAfterLatch);
   publishLightPassReviewDemand(demandCandidates, spawning, policy, now, outcomes, deps);
   // W1-T7734: what this pass leaves waiting is what an idle daemon should keep a light pass running for.
-  noteIdleReviewDemand(Math.max(0, queueDepth - spawning.length), openPrs.length, now);
+  noteIdleReviewDemand(Math.max(0, ownQueueDepth - spawning.length), openPrs.length, now);
   lightPassSpawningReservations += spawning.length;
   planLaneReviewsInFlight += planFilings.length;
   for (const pr of [...spawning, ...planFilings]) lightPassReservedHeads.add(lightPassHeadKey(pr));
@@ -27095,22 +27108,47 @@ async function runSweepLightPassCore(
     }
     return true;
   };
+  let boundZeroHeld = false;
+  let boundZeroWaiting = false;
+  let boundZeroEpoch = lightPassRefillEpoch;
+  const retryOnAnyLane = (): void => {
+    boundZeroWaiting = false;
+    if (refillTail.length > 0 && !lightPassRefillsClosed && boundZeroEpoch === lightPassRefillEpoch) void refillFreedLanes();
+  };
+  const holdAtBoundZero = (width: number, inFlight: number, activeWorkers: number): false => {
+    if (refillTail.length === 0 || lightPassRefillsClosed) return false;
+    if (!boundZeroHeld && !deps.dryRun) {
+      append(deps.ledgerPath, { run_id: deps.runId, task_id: "SWEEP", step: "sweep.review_refill.bound_zero",
+        bound: 0, width, in_flight: inFlight, active_workers: activeWorkers, tail_length: refillTail.length });
+    }
+    boundZeroHeld = true;
+    if (!boundZeroWaiting) {
+      boundZeroWaiting = true;
+      boundZeroEpoch = lightPassRefillEpoch;
+      reviewSlotWaiters.add(retryOnAnyLane);
+    }
+    return false;
+  };
   const admitOneRefill = async (): Promise<boolean> => {
+    const epoch = lightPassRefillEpoch;
+    const refillsClosed = (): boolean => lightPassRefillsClosed || epoch !== lightPassRefillEpoch;
     const askedAtAdmit = deps.restartAdmission?.recycleWait === true && recycleRefillDetail() !== undefined;
     if (providerFloorMet || (!askedAtAdmit && deps.restartAdmission?.("review", "light-refill") === false)) return false;
     if (refillHeldForRecycle()) return false;
     // Read the queue only when a lane is actually free, so a refill that admits nothing reads nothing.
+    const freeWorkers = (deps.readActiveWorkerCount ?? activeWorkerCount)();
     const freeWidth = effectiveReviewWidth(deps, policy, Math.max(1, refillTail.length), deps.now ? deps.now() : systemClock.now(),
-      selectionLedgerLines, (deps.readActiveWorkerCount ?? activeWorkerCount)());
-    if (reviewAdmissionBound(freeWidth).bound === 0) return false;
+      selectionLedgerLines, freeWorkers);
+    const free = reviewAdmissionBound(freeWidth);
+    if (free.bound === 0) return holdAtBoundZero(freeWidth, free.inFlight, freeWorkers);
     await refreshRefillTail();
-    if (refillHeldForRecycle()) return false;
+    if (refillsClosed() || refillHeldForRecycle()) return false;
     if (refillTail.length === 0) return false;
     const nowMs = deps.now ? deps.now() : systemClock.now();
-    const width = effectiveReviewWidth(deps, policy, refillTail.length, nowMs, selectionLedgerLines,
-      (deps.readActiveWorkerCount ?? activeWorkerCount)());
+    const activeWorkers = (deps.readActiveWorkerCount ?? activeWorkerCount)();
+    const width = effectiveReviewWidth(deps, policy, refillTail.length, nowMs, selectionLedgerLines, activeWorkers);
     const { bound, inFlight } = reviewAdmissionBound(width);
-    if (bound === 0) return false;
+    if (bound === 0) return holdAtBoundZero(width, inFlight, activeWorkers);
     const next = refillTail.shift();
     if (next === undefined) return false;
     const key = lightPassHeadKey(next);
@@ -27151,13 +27189,14 @@ async function runSweepLightPassCore(
       return true;
     }
     try {
-      if (refillHeldForRecycle(true)) {
+      if (refillsClosed() || refillHeldForRecycle(true)) {
         unreserve();
         refilledHeads.delete(key);
         refillTail.unshift(next);
         return false;
       }
       append(deps.ledgerPath, { ...row, step: "sweep.review_refilled" });
+      boundZeroHeld = false;
     } catch (error) {
       unreserve();
       throw error;

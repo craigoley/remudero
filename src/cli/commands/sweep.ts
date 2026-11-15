@@ -30,6 +30,7 @@ import { applyMergeProbeEvidence, probeOpenPrMerges } from "../../lib/merge-prob
 import type { ComposedRealGraph } from "../../lib/composition-root.js";
 import type { EscalationAnswerGateway } from "../../lib/escalation-answers.js";
 import { readEscalationAnswers } from "../../lib/escalation-answers.js";
+import type { FullPassServe } from "../../lib/read-plane.js";
 import { createLightPassOpenPrList, headReadOrStandDown, LIGHT_PASS_VIEWS_DEADLINE_MS, LIGHT_PASS_VIEWS_FALLBACK_MAX_AGE_MS, mergeAtListHead } from "../../lib/light-pass-open-pr-list.js";
 import { buildBehindMainByPr, buildBehindMainByPrAsync, createDistanceProbeSequence, buildCreditCandidates, buildOpenPrViewsAsync, buildStaleGateWorkflowsByPr, fetchCiFailuresAsync, type TickReadFacts } from "../../lib/tick-read-worker.js";
 import { DEFAULT_SWEEP_POLICY, REVIEW_STATUS_RESTORED_STEP, restorableDeliveredVerdict, buildSweepEffects as buildSweepEffectsFromLib, dispatchFixCatchOutcome, fixRungTaskFor, discriminateReviewReuseAsync, projectMergedTaskCandidates, runSweep, runSweepLightPass, runCreditBackfill, renderSweepSummary, planOnlyRunBranchReceipts, withFullSweepRepairAdmission, createEscalationTriageHistoryReader, ESCALATION_TRIAGE_EVIDENCE_SLICE, createFullPreludeTimer, LightPassPreReviewTiming, observeLightPassReviewEligibility, runLightPassReadyRefresh, selectLightPassReadyOverlap, refreshAdmissionWaiters, runLightPassRefreshAdmission, lightPassHeadContractRefresh, runArmedRatchetRejudge, isReviewLaneDisposition, deriveDisposition, orderPendingReviews, type BuildSweepEffectsDeps, type ReviewerCodeAdvance, type SweepDeps, type OpenPrView, type ReviewDispatchMode, type ReviewReuseInputs, type BaseChangedFiles, type Disposition } from "../../lib/sweep.js";
@@ -910,8 +911,8 @@ export function buildSweepHook(
   // W1-T5115: the daemon's git credential socket. Omitted ⇒ fix workers keep the ambient helper.
   gitCredentialSocketPath?: string,
   // W1-T7734: `servedPublishedAtMs` is when the generation these facts came from was published.
-  tickReadFor?: () => (TickReadFacts & { servedPublishedAtMs?: number }) | undefined |
-    Promise<(TickReadFacts & { servedPublishedAtMs?: number }) | undefined>,
+  tickReadFor?: (() => (TickReadFacts & { servedPublishedAtMs?: number }) | undefined |
+    Promise<(TickReadFacts & { servedPublishedAtMs?: number }) | undefined>) & { lastServe?: () => FullPassServe | undefined },
   escalationFeedbackReply?: Pick<PanelGraphDeps, "root" | "inboxRoot" | "feedbackLand">,
 ): (continueReviewAdmissions?: ReviewAdmissionGate) => Promise<SweepCycleOutcome | void> {
   const {
@@ -1015,10 +1016,16 @@ export function buildSweepHook(
         }
       }),
     ]);
+    // W1-T12754: why the published generation was not used, and a joined read's own publish time.
+    const serve = tickReadFor === undefined ? { source: "none" as const, miss: "no_plane" as const } : tickReadFor.lastServe?.();
+    const servedAtMs = serve?.source === "joined" ? serve.publishedAtMs : tickRead?.servedPublishedAtMs;
+    const tickReadSource = serve?.source === "joined" ? "joined" : tickRead === undefined ? "none"
+      : (servedAtMs ?? prelude.startedAtMs) < prelude.startedAtMs ? "served" : "own_read";
     prelude.note({
-      tick_read_source: tickRead === undefined ? "none"
-        : (tickRead.servedPublishedAtMs ?? prelude.startedAtMs) < prelude.startedAtMs ? "served" : "own_read",
-      ...(tickRead?.servedPublishedAtMs !== undefined ? { snapshot_published_at_ms: tickRead.servedPublishedAtMs } : {}),
+      tick_read_source: tickReadSource,
+      ...(servedAtMs !== undefined ? { snapshot_published_at_ms: servedAtMs } : {}),
+      ...(tickReadSource !== "served" && serve?.miss !== undefined ? { tick_read_miss: serve.miss } : {}),
+      ...(serve?.waitMs !== undefined ? { tick_read_wait_ms: serve.waitMs } : {}),
     });
     // W1-T3618: this pass's own reviewer-code freshness discovery, if any — read by `effects`
     // (`buildSweepEffects`'s own once-per-call cache) below and surfaced here so the daemon's tick
@@ -1101,7 +1108,7 @@ export function buildSweepHook(
             views: { planFilingFileCache, onPlanFilingClassification: reportPlanFilingClassification, isMerged,
               readMainPlan: resolvedReadMainPlan },
           }),
-          ...(tickRead?.servedPublishedAtMs !== undefined ? { snapshotPublishedAtMs: tickRead.servedPublishedAtMs } : {}),
+          ...(servedAtMs !== undefined ? { snapshotPublishedAtMs: servedAtMs } : {}),
           markPrelude: prelude.mark,
           ledgerPath,
           runId,
@@ -1348,6 +1355,7 @@ export function buildSweepLightHook(
             ? mergeHold : scopeDeps.standDownReasonFor?.(d) } : {}),
           readLiveStateAtAct: onLastGoodList ? headReadOrStandDown(effects.readLiveState) : effects.readLiveState,
           ...(onLastGoodList ? { guardEveryHeadAtAct: true } : {}),
+          snapshotOpenPrs: openPrs,
           // W1-T11153: a refill re-reads the open PRs. One tick's snapshot is split into batches, each with its
           // own light pass, so a batch refills only from its own PRs and PRs the tick's snapshot did not hold.
           readOpenPrsForRefill: async () => {
@@ -1368,6 +1376,7 @@ export function buildSweepLightHook(
         if (requeueOnlyPrs.length > 0) passes.push(runSweepLightPass(requeueOnlyPrs, {
           ...common,
           actionable: (d) => lightPassActionable(d, fixRungAllowed, true),
+          snapshotOpenPrs: openPrs,
           readCiGateRollup: undefined,
           reaggregateCiGate: undefined,
         }, policy));
