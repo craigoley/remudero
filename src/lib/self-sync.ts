@@ -3,6 +3,7 @@ import { existsSync, realpathSync } from "node:fs";
 import { constants as osConstants } from "node:os";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 // Why: a deliberate runtime (not type-only) import. treeFfSafe is deployer.ts's own dirty-vs-
 // incoming predicate, reused here rather than re-derived, at the accepted cost of widening this
 // module's (and so the whole CLI's) startup import graph. Falsifier: a second intersection of
@@ -1047,7 +1048,98 @@ function topLevelUnits(source: string): TopLevelUnit[] | undefined {
   return units;
 }
 
+/** W1-T12824: the code tokens of a TypeScript text, each with its line-break flag; comments and whitespace are dropped.
+ *  `undefined`: the scan met an unknown character, an unterminated token or unbalanced brackets. */
+function codeTokens(text: string): string[] | undefined {
+  const scanner = createScanner(true, undefined, text);
+  const tokens: string[] = [];
+  const open: SyntaxKind[] = [];
+  const pairs = new Map([[SyntaxKind.CloseBraceToken, SyntaxKind.OpenBraceToken], [SyntaxKind.CloseBracketToken, SyntaxKind.OpenBracketToken],
+    [SyntaxKind.CloseParenToken, SyntaxKind.OpenParenToken], [SyntaxKind.TemplateTail, SyntaxKind.TemplateHead]]);
+  let previous: SyntaxKind | undefined;
+  for (let token = scanner.scan(); token !== SyntaxKind.EndOfFile; token = scanner.scan()) {
+    const division = previous !== undefined && ENDS_AN_OPERAND.has(previous);
+    if ((token === SyntaxKind.SlashToken || token === SyntaxKind.SlashEqualsToken) && !division) token = scanner.reScanSlashToken();
+    else if (token === SyntaxKind.CloseBraceToken && open.at(-1) === SyntaxKind.TemplateHead) token = scanner.reScanTemplateToken(false);
+    if (token === SyntaxKind.Unknown || scanner.isUnterminated()) return undefined;
+    if ([SyntaxKind.OpenBraceToken, SyntaxKind.OpenBracketToken, SyntaxKind.OpenParenToken, SyntaxKind.TemplateHead].includes(token)) open.push(token);
+    else if (pairs.has(token) && open.pop() !== pairs.get(token)) return undefined;
+    tokens.push(`${scanner.hasPrecedingLineBreak() ? "\n" : ""}${token} ${scanner.getTokenText()}`);
+    previous = token;
+  }
+  return open.length === 0 ? tokens : undefined;
+}
+
+// A slash after these is division; after anything else it starts a regular expression.
+const ENDS_AN_OPERAND = new Set([SyntaxKind.Identifier, SyntaxKind.PrivateIdentifier, SyntaxKind.NumericLiteral, SyntaxKind.BigIntLiteral,
+  SyntaxKind.StringLiteral, SyntaxKind.RegularExpressionLiteral, SyntaxKind.NoSubstitutionTemplateLiteral, SyntaxKind.TemplateTail,
+  SyntaxKind.CloseParenToken, SyntaxKind.CloseBracketToken, SyntaxKind.CloseBraceToken, SyntaxKind.PlusPlusToken, SyntaxKind.MinusMinusToken,
+  SyntaxKind.ThisKeyword, SyntaxKind.SuperKeyword, SyntaxKind.TrueKeyword, SyntaxKind.FalseKeyword, SyntaxKind.NullKeyword]);
+
+/** W1-T12824: true when two TypeScript texts have the same code once comments and whitespace are dropped. A text the scan
+ *  cannot read to its end is never equal, so a change to it stays material. */
+export function tokensEqualWithoutComments(oldText: string, newText: string): boolean {
+  const before = codeTokens(oldText);
+  const after = codeTokens(newText);
+  return before !== undefined && after !== undefined && before.length === after.length && before.every((token, i) => token === after[i]);
+}
+
+/** W1-T12824: the bindings of import statements as `specifier\0local\0imported`; a side-effect import binds the empty local.
+ *  `undefined`: the text is not only import statements this reader knows. */
+function importBindings(text: string): string[] | undefined {
+  const scanner = createScanner(true, undefined, text);
+  const bindings: string[] = [];
+  const word = () => scanner.getToken() === SyntaxKind.StringLiteral || /^[A-Za-z_$][\w$]*$/.test(scanner.getTokenText());
+  for (let token = scanner.scan(); token !== SyntaxKind.EndOfFile; token = scanner.scan()) {
+    if (token !== SyntaxKind.ImportKeyword) return undefined;
+    const bound: Array<[string, string]> = [];
+    token = scanner.scan();
+    if (token === SyntaxKind.TypeKeyword && scanner.lookAhead(() => [SyntaxKind.OpenBraceToken, SyntaxKind.AsteriskToken, SyntaxKind.Identifier].includes(scanner.scan()))) token = scanner.scan();
+    if (token !== SyntaxKind.StringLiteral) {
+      if (token !== SyntaxKind.OpenBraceToken && token !== SyntaxKind.AsteriskToken) {
+        if (!word()) return undefined;
+        bound.push([scanner.getTokenText(), "default"]);
+        token = scanner.scan();
+        if (token === SyntaxKind.CommaToken) token = scanner.scan();
+      }
+      if (token === SyntaxKind.AsteriskToken) {
+        if (scanner.scan() !== SyntaxKind.AsKeyword) return undefined;
+        scanner.scan();
+        if (!word()) return undefined;
+        bound.push([scanner.getTokenText(), "*"]);
+        token = scanner.scan();
+      } else if (token === SyntaxKind.OpenBraceToken) {
+        for (token = scanner.scan(); token !== SyntaxKind.CloseBraceToken; token = scanner.scan()) {
+          const words: string[] = [];
+          for (; token !== SyntaxKind.CommaToken && token !== SyntaxKind.CloseBraceToken; token = scanner.scan()) {
+            if (!word()) return undefined;
+            words.push(token === SyntaxKind.StringLiteral ? scanner.getTokenValue() : scanner.getTokenText());
+          }
+          if (words[0] === "type" && (words.length === 2 || words.length === 4)) words.shift();
+          if (words.length === 1) bound.push([words[0], words[0]]);
+          else if (words.length === 3 && words[1] === "as") bound.push([words[2], words[0]]);
+          else return undefined;
+          if (token === SyntaxKind.CloseBraceToken) break;
+        }
+        token = scanner.scan();
+      }
+      if (token !== SyntaxKind.FromKeyword || scanner.scan() !== SyntaxKind.StringLiteral) return undefined;
+    }
+    const specifier = scanner.getTokenValue();
+    bindings.push(...(bound.length === 0 ? [`${specifier}\0\0`] : bound.map(([local, imported]) => `${specifier}\0${local}\0${imported}`)));
+    if (scanner.lookAhead(() => scanner.scan() === SyntaxKind.SemicolonToken)) scanner.scan();
+  }
+  return bindings;
+}
+
+interface ReviewPathScan { code: Array<[number, number]>; imports: Array<[number, number]>; used: Set<string>; bindings: string[] | undefined }
+
 export function reviewPathSpans(source: string): { spans: Array<[number, number]> } | { unreadable: string } {
+  const scan = scanReviewPath(source);
+  return "unreadable" in scan ? scan : { spans: [...scan.code, ...scan.imports] };
+}
+
+function scanReviewPath(source: string): ReviewPathScan | { unreadable: string } {
   const units = topLevelUnits(source);
   if (!units) return { unreadable: "could not scan it to its end" };
   const unnamed = units.find((unit) => !unit.names);
@@ -1066,16 +1158,29 @@ export function reviewPathSpans(source: string): { spans: Array<[number, number]
   // An import line counts if reached code uses a name it binds, or it binds none (the specifier).
   const used = new Set([...reached].flatMap((unit) => (unit.imports ? [] : [...unit.refs])));
   const lines = source.split("\n");
+  const importLines = [...reached].filter((unit) => unit.imports).flatMap((unit) =>
+    lines.slice(unit.start - 1, unit.end).flatMap((text, k): Array<[number, number]> => {
+      const bound = text.replace(/(["'`]).*?\1/g, "").match(/[A-Za-z_$][\w$]*/g) ?? [];
+      const names = bound.filter((word) => !["import", "type", "as", "from"].includes(word));
+      return names.length === 0 || names.some((name) => used.has(name)) ? [[unit.start + k, unit.start + k]] : [];
+    }));
+  const bindings = units.filter((unit) => unit.imports).map((unit) => importBindings(lines.slice(unit.start - 1, unit.end).join("\n")));
   return {
-    spans: [...reached].flatMap((unit): Array<[number, number]> => {
-      if (!unit.imports) return [[unit.start, unit.end]];
-      return lines.slice(unit.start - 1, unit.end).flatMap((text, k): Array<[number, number]> => {
-        const bound = text.replace(/(["'`]).*?\1/g, "").match(/[A-Za-z_$][\w$]*/g) ?? [];
-        const names = bound.filter((word) => !["import", "type", "as", "from"].includes(word));
-        return names.length === 0 || names.some((name) => used.has(name)) ? [[unit.start + k, unit.start + k]] : [];
-      });
-    }),
+    code: [...reached].filter((unit) => !unit.imports).map((unit): [number, number] => [unit.start, unit.end]),
+    imports: importLines, used, bindings: bindings.some((bound) => bound === undefined) ? undefined : (bindings as string[][]).flat(),
   };
+}
+
+/** W1-T12824: an import change avoids the review path when every binding it adds or removes has a name that reached code on
+ *  neither side uses. A side-effect import, or imports this reader cannot parse, never avoid it. */
+function importChangeAvoidsReviewPath(before: ReviewPathScan, after: ReviewPathScan): boolean {
+  if (!before.bindings || !after.bindings) return false;
+  const [old, current] = [new Set(before.bindings), new Set(after.bindings)];
+  const changed = [...old].filter((binding) => !current.has(binding)).concat([...current].filter((binding) => !old.has(binding)));
+  return changed.every((binding) => {
+    const local = binding.split("\0")[1];
+    return local !== "" && !before.used.has(local) && !after.used.has(local);
+  });
 }
 
 /** True when a hunk's old or new range meets a reached span of that version. STILL FAILS TOWARD
@@ -1086,16 +1191,19 @@ export function runTaskAdvanceTouchesReviewPath(
   originMainSha: string,
 ): { touchesReviewPath: boolean; reason: string } {
   let diff: string;
-  let sides: Array<{ spans: Array<[number, number]> } | { unreadable: string }>;
+  let sides: Array<ReviewPathScan | { unreadable: string }>;
   try {
     diff = git(["diff", "-U0", `${codeSha}..${originMainSha}`, "--", RUN_TASK_PATH]);
-    sides = [codeSha, originMainSha].map((sha) => reviewPathSpans(git(["show", `${sha}:${RUN_TASK_PATH}`])));
+    sides = [codeSha, originMainSha].map((sha) => scanReviewPath(git(["show", `${sha}:${RUN_TASK_PATH}`])));
   } catch (error) {
     return { touchesReviewPath: true, reason: `could not read the ${RUN_TASK_PATH} advance: ${String(error)}` };
   }
   const blind = sides.find((side) => "unreadable" in side) as { unreadable: string } | undefined;
   if (blind) return { touchesReviewPath: true, reason: blind.unreadable };
-  const [oldSpans, newSpans] = sides.map((side) => (side as { spans: Array<[number, number]> }).spans);
+  const [before, after] = sides as ReviewPathScan[];
+  const importsMatter = !importChangeAvoidsReviewPath(before, after);
+  const oldSpans = importsMatter ? [...before.code, ...before.imports] : before.code;
+  const newSpans = importsMatter ? [...after.code, ...after.imports] : after.code;
   const headers = diff.split("\n").filter((line) => line.startsWith("@@"));
   if (headers.length === 0) return { touchesReviewPath: true, reason: `no ${RUN_TASK_PATH} hunks to classify` };
   const meets = (spans: Array<[number, number]>, start: number, count: number) =>
@@ -1118,8 +1226,20 @@ function reviewAdvanceIsMaterialAt(
   originMainSha: string,
 ): boolean {
   if (!reviewAdvanceIsMaterial(changedPaths)) return false;
-  if (changedPaths!.some((path) => path.trim() !== RUN_TASK_PATH && reviewAdvanceIsMaterial([path]))) return true;
+  const counted = changedPaths!.filter((path) => reviewAdvanceIsMaterial([path]) && !commentOnlyChange(git, path.trim(), codeSha, originMainSha));
+  if (changedPaths!.length > 0 && counted.length === 0) return false;
+  if (counted.some((path) => path.trim() !== RUN_TASK_PATH)) return true;
   return runTaskAdvanceTouchesReviewPath(git, codeSha, originMainSha).touchesReviewPath;
+}
+
+/** W1-T12824: a .ts path whose blobs at both shas have equal code tokens. A blob that cannot be read is a code change. */
+function commentOnlyChange(git: GitRunner, path: string, codeSha: string, originMainSha: string): boolean {
+  if (!path.endsWith(".ts")) return false;
+  try {
+    return tokensEqualWithoutComments(git(["show", `${codeSha}:${path}`]), git(["show", `${originMainSha}:${path}`]));
+  } catch {
+    return false; // deliberate, no throw: an unreadable blob keeps the path material, the safe answer
+  }
 }
 
 export function checkReviewerCodeFreshness(
