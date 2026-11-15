@@ -18,6 +18,9 @@
     - src/lib/prompt-render.ts
     - test/worker/check-body-coverage.test.ts
     - "src/cli/commands/fix.ts"
+  design: |
+    NO-INVARIANTS: This amendment changes only the plan record's scope, risk and verification routing; it changes no production implementation or runtime contract.
+    Prior-behavior inventory: existing output buckets, legacy receipts, defaults, error/unknown paths, and public side effects of the check:body-coverage and fix flows remain unchanged. The amendment only records where the existing task may work and returns its updated machine-authored record to the judge.
   acceptance:
     - claim: "a recorded check:body-coverage round, replayed through the real code path in src/lib/prompt-render.ts, is prevented or self-healed without dispatching a fix round"
       proof: "unit test: test/worker/check-body-coverage.test.ts"
