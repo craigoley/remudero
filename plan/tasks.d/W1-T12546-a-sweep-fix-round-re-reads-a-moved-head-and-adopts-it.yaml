@@ -21,7 +21,7 @@
     - src/lib/ledger-steps.ts
     - test/sweep/a-sweep-fix-round-adopts-a-moved-head.test.ts
     - test/reviews-and-detached-actions-run-as-run-children.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:fix-acts-on-exact-head-evidence — When the sweep's fresh head read gives a head other than the one it judged, the dispatch re-reads that PR at the new head. If the PR is open and still fixable there with readable exact-head evidence, the dispatch continues at the new head with that evidence and logs sweep.fix.head_adopted. It writes no sweep.fix.checkout_claim_declined row with head_identity_changed"
