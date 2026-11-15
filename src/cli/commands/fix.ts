@@ -4795,13 +4795,15 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
 
     // The fix rung's own footer carries the same '## Follow-ups' invitation (renderFixPrompt
     // above); PR provenance included (the fix rung always has one).
-    host.harvestFollowupsFromReport(workerTranscript(fixResult), {
+    const harvestContext = {
       label: "fix",
       prUrl: opts.prUrl,
       runId: opts.runId,
+      worktreePath: opts.worktreePath,
       log: deps.log,
       say: deps.say,
-    });
+    };
+    host.harvestFollowupsFromReport(workerTranscript(fixResult), harvestContext);
 
     if (fixAction.kind === "verify-base") {
       const files = baseReproductionFiles(priorCiFailures ?? []);
