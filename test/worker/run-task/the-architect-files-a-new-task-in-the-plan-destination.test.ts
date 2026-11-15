@@ -25,7 +25,7 @@ function publicTask(extra = ""): string {
     "  verify: auto", "  status: queued", "  attempts: 0", extra].filter(Boolean).join("\n") + "\n";
 }
 
-function fixture(t: TestContext, kinds: string[] | undefined) {
+function fixture(t: TestContext, kinds: string[] | undefined, privateFeedback = false) {
   const root = ownedFixtureDir(t, "architect-destination").dir;
   const home = join(root, "home");
   mkdirSync(join(home, ".config", "remudero"), { recursive: true });
@@ -40,7 +40,8 @@ function fixture(t: TestContext, kinds: string[] | undefined) {
   mkdirSync(join(seed.dir, "src"), { recursive: true });
   writeFileSync(join(seed.dir, "plan", "tasks.yaml"), "- id: W1-T4\n  title: seed\n  repo: remudero\n  depends_on: []\n  type: implement\n  verify: auto\n  status: queued\n  attempts: 0\n");
   writeFileSync(join(seed.dir, PUBLIC_TASK), publicTask());
-  writeFileSync(join(seed.dir, REL), `id: ${ID}\nts: '2026-11-14T00:00:00.000Z'\nraw: file a task for the fixture\nattachments: []\norigin: human\nstatus: new\nproposal_pr: null\n`);
+  const feedbackText = `id: ${ID}\nts: '2026-11-14T00:00:00.000Z'\nraw: file a task for the fixture\nattachments: []\norigin: human\nstatus: new\nproposal_pr: null\n`;
+  if (!privateFeedback) writeFileSync(join(seed.dir, REL), feedbackText);
   writeFileSync(join(seed.dir, SOURCE), `export const mark = "${SOURCE_MARK}";\n`);
   writeFileSync(join(seed.dir, "MASTER-PLAN.md"), "# fixture\n");
   seed.git("add", "-A"); seed.git("commit", "--quiet", "-m", "chore: seed the public repository");
@@ -48,6 +49,10 @@ function fixture(t: TestContext, kinds: string[] | undefined) {
   const opsSeed = gitRepo({ scope: t });
   mkdirSync(join(opsSeed.dir, "plan"), { recursive: true });
   writeFileSync(join(opsSeed.dir, "plan", "tasks.yaml"), "[]\n");
+  if (privateFeedback) {
+    mkdirSync(join(opsSeed.dir, "plan", "feedback"), { recursive: true });
+    writeFileSync(join(opsSeed.dir, REL), feedbackText);
+  }
   opsSeed.git("add", "-A"); opsSeed.git("commit", "--quiet", "-m", "chore: seed the ops repository");
   opsSeed.addRemote("origin", opsOrigin.dir); opsSeed.git("push", "--quiet", "origin", "main");
   mkdirSync(join(root, "repos"), { recursive: true });
@@ -247,4 +252,21 @@ test("W1-T12213 criterion 6: the test drives the rmd plan and rmd triage command
     assert.match(f.ledger(), new RegExp(`"step":"${command}.start"`), `the ${command} command ran its own entry`);
   }
   assert.equal(f.posts(OPS), 2);
+});
+
+test("W1-T12213 private feedback proposal awaits its home landing before settling", (t) => {
+  const f = fixture(t, ["task", "feedback"], true);
+  const result = f.run("triage");
+  assert.equal(result.error, undefined, f.ledger());
+  assert.equal(result.code, 1, "the fixture's red CI is the terminal refusal, after the private landing");
+  assert.equal(f.posts(OPS), 1);
+  const [branch] = f.runBranches(f.opsOrigin, "TRIAGE");
+  assert.ok(branch, "the new task is filed in its selected repository");
+  assert.deepEqual(f.changed(f.opsOrigin, branch), [NEW_TASK]);
+  const landed = f.opsOrigin.git("show", LANDING_BRANCH + ":" + REL);
+  assert.match(landed, /status: proposed/);
+  assert.match(landed, /proposal_pr:.*fixture\/remudero-ops\/pull\/1/);
+  assert.deepEqual(f.runBranches(f.publicOrigin, "TRIAGE"), []);
+  assert.equal(f.publicOrigin.git("for-each-ref", "--format=%(refname)", "refs/heads/" + LANDING_BRANCH).trim(), "",
+    "private feedback is not published to the public origin");
 });
