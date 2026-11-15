@@ -1107,6 +1107,7 @@ import {
   joinedRatificationPrBody,
   knownPlanRepos,
   ratificationPrBody,
+  type ShardWriteFs,
   writeApprovedSkillFile,
 } from "./lib/inbox.js";
 import { declinedWithReceipts } from "./lib/inbox-verdict-receipts.js";
@@ -39203,6 +39204,14 @@ export async function approveCommand(
     return code;
   }
 
+  // W1-T12214: the repository this approval files its task file in. Skill approvals stay in the public repository.
+  const publicFiling = { owner, repo, checkoutDir: join(config.root, "repos", repo), destination: false };
+  const filing = deps.gateway === undefined && classification.state === "ready" && classification.draft && !classification.skillFile
+    ? await approveFilingRepository([classification.draft.fragmentYaml], plan, join(config.root, "state"), publicFiling) : publicFiling;
+  if ("refused" in filing) {
+    console.error(`rmd approve: refusing ${proposalId} — ${filing.refused}`);
+    return 1;
+  }
   let approveDestinationSnapshot: TaskIdDestinationSnapshot | null = null;
   let approveDestinationFailure: string | undefined;
   if (deps.gateway === undefined && classification.state === "ready" && classification.draft) {
@@ -39247,13 +39256,16 @@ export async function approveCommand(
   // W1-T903: shared by findPushedBranch (resume evidence) and createRatificationBranch (fresh
   // PROCEED) — both need the same clone, and only one of the two ever runs per approve call.
   const ensureRepoDir = (): string => {
-    repoDir = repoDir ?? join(config.root, "repos", repo);
+    repoDir = repoDir ?? filing.checkoutDir;
     if (!existsSync(repoDir)) {
+      if (filing.destination) throw new Error("rmd approve: the plan destination checkout is missing");
       mkdirSync(dirname(repoDir), { recursive: true });
       ghExec(["repo", "clone", `${owner}/${repo}`, repoDir], { stdio: "inherit" });
     }
     return repoDir;
   };
+  // The id mint and the id reservations stay on the public repository.
+  const idRoot = (worktreePath: string): string => filing.destination ? approvePublicClone(config, owner, repo) : worktreePath;
   const addApproveWorktree = (dir: string, path: string, branch: string, base: string): string => {
     addLockedRunWorktree(dir, path, branch, base, runId, log); // W1-T5356: lock before add
     return (addedWorktreePath = path);
@@ -39292,7 +39304,7 @@ export async function approveCommand(
     worktreePath: string, payload: RatificationPayload, purposeLabel: string, filingBranch: string,
   ): void => {
     const subjectId = deriveTaskReferent(payload.proposalId);
-    const subject = subjectId === undefined ? undefined : loadPlan(join(worktreePath, "plan", "tasks.yaml")).byId.get(subjectId);
+    const subject = subjectId === undefined ? undefined : (filing.destination ? plan : loadPlan(join(worktreePath, "plan", "tasks.yaml"))).byId.get(subjectId);
     if (subject?.status === "blocked" && subject.retirement) {
       throw new Error(`rmd approve: refusing to ratify ${payload.proposalId} — task ${subjectId} is ${subject.retirement} in the worktree plan`);
     }
@@ -39308,8 +39320,8 @@ export async function approveCommand(
         mint: () => {
           if (approveDestinationFailure) throw new Error(approveDestinationFailure);
           return mintNextTaskIdWithHistory({
-            planPath: join(worktreePath, "plan", "tasks.yaml"),
-            repoRoot: worktreePath,
+            planPath: join(idRoot(worktreePath), "plan", "tasks.yaml"),
+            repoRoot: idRoot(worktreePath),
             destinationSnapshot: approveDestinationSnapshot,
             openPrTexts: () => openPrMintTexts(owner, repo),
           });
@@ -39328,7 +39340,7 @@ export async function approveCommand(
           // reservation failure into a free-text `reason` string) so a genuine
           // `TaskIdReservationError` still leaves a durable, structured ledger event before
           // `materializeDraftTaskIds` reduces it to prose.
-          const approveRun = (args: string[]) => {
+          const approveRun = filing.destination ? publicCloneRun(approvePublicClone(config, owner, repo)) : (args: string[]) => {
             const r = spawnSync("git", ["-C", worktreePath, ...args], { encoding: "utf8" });
             return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
           };
@@ -39356,8 +39368,9 @@ export async function approveCommand(
     shardRelPaths = fileRatificationDraft(
       worktreePath,
       { fragmentYaml: materialized.fragmentYaml, proposalId: payload.proposalId, stampLine: materialized.stampLine },
-      { mkdirSync, writeFileSync, readFileSync },
+      ratificationFs(filing.destination),
       join,
+      filing.destination ? knownPlanRepos(repoRoot) : undefined, filing.destination ? repoRoot : undefined,
     );
     log("approve.shards_written", { proposal_id: payload.proposalId, paths: shardRelPaths });
 
@@ -39386,7 +39399,8 @@ export async function approveCommand(
   // W1-T5348: the committed shards and the title are preflighted before the push. The body is authored later by
   // buildPlanPrBody, which already refuses a proof that does not discriminate, so it is not re-checked here.
   const preflightApprovePush = (path: string, branch: string, id: string): void =>
-    refuseRedPlanPr(planPrPreflight({ cwd: path, title: approvePrTitle(id), body: "" }, { log }), { lane: "approve", branch, log });
+    refuseRedPlanPr(planPrPreflight({ cwd: path, title: approvePrTitle(id), body: "", ...(filing.destination ? { codeRoot: repoRoot } : {}) }, { log }),
+      { lane: "approve", branch, log });
   const branchFiledTaskIds = (path: string): string[] =>
     execFileSync("git", ["-C", path, "diff", "origin/main...HEAD", "--", "plan/tasks.yaml", "plan/tasks.d"], { encoding: "utf8" })
       .split("\n")
@@ -39406,7 +39420,7 @@ export async function approveCommand(
     // W1-T903 design (ii): the SAME REST surface fetchOpenPrsRest (open-prs-rest.ts) reads,
     // never `gh pr list` — a probe issues no GraphQL call at all.
     findExistingPr(branch) {
-      return probeExistingPlanPr(ghJson, owner, repo, branch);
+      return probeExistingPlanPr(ghJson, filing.owner, filing.repo, branch);
     },
     // W1-T4437 design (i)/(ii): the OPEN plan PR of a DIFFERENT approve run of this same pass, if
     // one is safe to join. The ledger names the CANDIDATE (evidence only, cheap, no network);
@@ -39423,7 +39437,7 @@ export async function approveCommand(
         log("approve.join_skipped", { pr_url: candidate.prUrl, branch: candidate.branch, reason: "approving_pid_alive", actor_pid: candidate.actorPid });
         return undefined;
       }
-      const open = probeExistingPlanPr(ghJson, owner, repo, candidate.branch);
+      const open = probeExistingPlanPr(ghJson, filing.owner, filing.repo, candidate.branch);
       if (!open) return undefined;
       let headSha: string | undefined;
       try {
@@ -39508,7 +39522,7 @@ export async function approveCommand(
       log("approve.joined", { proposal_id: payload.proposalId, branch });
       // W1-T4706: the open PR's body is rebuilt over every proposal on the branch, never left as the first approve's.
       try {
-        const live = ghJson(["api", `repos/${owner}/${repo}/pulls/${prUrl.match(/\/pull\/(\d+)/)?.[1]}`]) as { body?: string | null };
+        const live = ghJson(["api", `repos/${filing.owner}/${filing.repo}/pulls/${prUrl.match(/\/pull\/(\d+)/)?.[1]}`]) as { body?: string | null };
         const paths = execFileSync("git", ["-C", worktreePath, "diff", "--name-only", worktreeMergeBase(worktreePath), "HEAD"], { encoding: "utf8" }).split("\n").filter(Boolean);
         const body = joinedRatificationPrBody(live.body ?? "", filedStampLine, branchFiledTaskIds(worktreePath), paths, { proofCwd: worktreePath });
         writePrBodyRest(prUrl, body);
@@ -39548,10 +39562,10 @@ export async function approveCommand(
       // NO Remudero-Task trailer. W1-T4700: Changed files are the paths the commit wrote.
       const ids = filedTaskIds.length > 0 ? filedTaskIds : [id];
       const body = ratificationPrBody(classification.draft?.stampLine ?? "", ids, shardRelPaths, { proofCwd: worktreePath });
-      assertLiveWriteAllowed("gh-pr-create", `opening a PR against ${owner}/${repo}`);
+      assertLiveWriteAllowed("gh-pr-create", `opening a PR against ${filing.owner}/${filing.repo}`);
       // W1-T903 design (i): REST, not `gh pr create` (GraphQL) — a pure transport swap, since
       // title/body are already fully authored above (no `--fill` autofill to replace).
-      const created = createPlanPrRest(ghJson, owner, repo, {
+      const created = createPlanPrRest(ghJson, filing.owner, filing.repo, {
         title: approvePrTitle(id),
         body,
         head: branch,
@@ -39732,7 +39746,7 @@ export async function approveCommand(
     const notGreenExit = approveCiNotGreenExit(ci, result.prUrl, removeApproveWorktree);
     if (notGreenExit !== undefined) return notGreenExit;
     const prNum = result.prUrl.match(/\/pull\/(\d+)/)?.[1] ?? result.prUrl;
-    const reviewCode = await reviewCommand(prNum);
+    const reviewCode = await reviewCommand(filing.destination ? result.prUrl : prNum);
     // W1-T230: a ratification PR carries NO Remudero-Task trailer by design
     // (see the no-trailer comment above) — reviewCommand's own taskId resolve
     // therefore falls back to `PR-${view.number}` and its review.posted ledger
@@ -39770,6 +39784,58 @@ export async function approveCommand(
   } finally {
     if (ownedWorktreePath) removeRunLock(ownedWorktreePath);
   }
+}
+
+/** W1-T12214: the repository and checkout an approval files in. */
+interface ApproveFilingRepository { owner: string; repo: string; checkoutDir: string; destination: boolean }
+
+/** W1-T12214: a fragment that names a task already filed edits that task in the repository that holds it
+ * (the one lookup of W1-T12207). A fragment of new tasks only follows the `task` kind of the host file. */
+async function approveFilingRepository(fragments: readonly string[], plan: Pick<Plan, "byId">, stateDir: string,
+  publicRepository: ApproveFilingRepository): Promise<ApproveFilingRepository | { refused: string }> {
+  const selected = resolvePlanDestination("task", stateDir, publicRepository);
+  if (selected.outcome === "unreadable") return { refused: selected.reason };
+  const named = [...new Set(fragments.flatMap((fragment) => [...fragment.matchAll(/^- id:\s*(\S+)/gm)].map((m) => m[1]!)))].filter(namesATask);
+  const holders = new Set<"public" | "ops">();
+  for (const id of named) {
+    const found = await findTaskInCatalogs(id, { byId: plan.byId, stateDir });
+    if (found.outcome === "unreadable") return { refused: `the catalog that holds ${id} is unreadable (${found.reason})` };
+    if (found.outcome === "found") holders.add(found.catalog);
+  }
+  if (holders.size > 1) return { refused: "the approval changes task files in both repositories" };
+  if (holders.has("ops")) {
+    const ops = planDestinationRepository(stateDir);
+    if (ops.outcome !== "named") return { refused: "the repository that holds the task is not named on this host" };
+    return { owner: ops.owner, repo: ops.repo, checkoutDir: ops.checkoutDir, destination: true };
+  }
+  if (holders.has("public") || selected.outcome !== "destination") return publicRepository;
+  return { owner: selected.owner, repo: selected.repo, checkoutDir: selected.checkoutDir, destination: true };
+}
+
+/** The shard writer's file system. A destination checkout can hold no MASTER-PLAN.md. There, an absent file reads
+ * as empty, so the stamp changes nothing and no MASTER-PLAN.md is written. */
+function ratificationFs(destination: boolean): ShardWriteFs & { readFileSync: (path: string, enc: "utf8") => string } {
+  if (!destination) return { mkdirSync, writeFileSync, readFileSync };
+  return { mkdirSync, writeFileSync,
+    readFileSync: (path, enc) => basename(path) === "MASTER-PLAN.md" && !existsSync(path) ? "" : readFileSync(path, enc) };
+}
+
+/** A git runner over the public clone, through the hardened leaf, for the id reservations of a destination approval. */
+function publicCloneRun(dir: string): (args: string[]) => { status: number; stdout: string; stderr: string } {
+  return (args) => {
+    const r = hostWorktreeGitResult(dir, args);
+    return { status: r.status ?? 1, stdout: r.stdout, stderr: r.stderr };
+  };
+}
+
+/** W1-T12214: the public clone that a destination approval mints and reserves its ids in. */
+function approvePublicClone(config: Config, owner: string, repo: string): string {
+  const dir = join(config.root, "repos", repo);
+  if (!existsSync(dir)) {
+    mkdirSync(dirname(dir), { recursive: true });
+    ghExec(["repo", "clone", `${owner}/${repo}`, dir], { stdio: "inherit" });
+  }
+  return dir;
 }
 
 /**
@@ -39817,6 +39883,15 @@ async function approveBatchCommand(
     return 2;
   }
 
+  // W1-T12214: one batch files in one repository, as the single form decides it.
+  const publicFiling = { owner, repo, checkoutDir: join(config.root, "repos", repo), destination: false };
+  const filing = deps.batchGateway === undefined
+    ? await approveFilingRepository(found.flatMap((row) => row.classification.draft ? [row.classification.draft.fragmentYaml] : []), plan,
+      join(config.root, "state"), publicFiling) : publicFiling;
+  if ("refused" in filing) {
+    console.error(`rmd approve: refusing the batch — ${filing.refused}`);
+    return 1;
+  }
   let batchDestinationSnapshot: TaskIdDestinationSnapshot | null = null;
   let batchDestinationFailure: string | undefined;
   if (deps.batchGateway === undefined) {
@@ -39841,15 +39916,16 @@ async function approveBatchCommand(
   let batchPushed: LanePushedIds;
   const releaseBatchUnfiled = (ending: string): void => {
     if (batchHeld.length === 0 || repoDir === undefined) return;
-    const cloneDir = repoDir;
+    const cloneDir = filing.destination ? approvePublicClone(config, owner, repo) : repoDir;
     releaseUnfiledReservations(batchHeld, batchPushed, {
       run: gitRunAdapter((args) => hostWorktreeGitResult(cloneDir, args)), lane: "approve-batch", log,
       reason: laneReleaseReason(`rmd approve batch ${runId}`, ending, batchPushed),
     });
   };
   const ensureRepoDir = (): string => {
-    repoDir = repoDir ?? join(config.root, "repos", repo);
+    repoDir = repoDir ?? filing.checkoutDir;
     if (!existsSync(repoDir)) {
+      if (filing.destination) throw new Error("rmd approve: the plan destination checkout is missing");
       mkdirSync(dirname(repoDir), { recursive: true });
       ghExec(["repo", "clone", `${owner}/${repo}`, repoDir], { stdio: "inherit" });
     }
@@ -39874,6 +39950,8 @@ async function approveBatchCommand(
       // fileRatificationBatch, so each member gets the single lane's refusal and written-paths list,
       // and every member's stamp folds over this worktree's own MASTER-PLAN.md in order (Q2).
       const batchWorktree = worktreePath;
+      // The id mint and the id reservations stay on the public repository.
+      const batchIdRoot = filing.destination ? approvePublicClone(config, owner, repo) : batchWorktree;
       const filed = fileRatificationBatch(
         batchWorktree,
         payloads,
@@ -39884,8 +39962,8 @@ async function approveBatchCommand(
               mint: () => {
                 if (batchDestinationFailure) throw new Error(batchDestinationFailure);
                 return mintNextTaskIdWithHistory({
-                  planPath: join(batchWorktree, "plan", "tasks.yaml"),
-                  repoRoot: batchWorktree,
+                  planPath: join(batchIdRoot, "plan", "tasks.yaml"),
+                  repoRoot: batchIdRoot,
                   destinationSnapshot: batchDestinationSnapshot,
                   openPrTexts: () => openPrMintTexts(owner, repo),
                 });
@@ -39898,7 +39976,7 @@ async function approveBatchCommand(
                 const reserveFrom = block.ids[0];
                 const batchReserver = gatedRemoteRefReserver({
                   lane: "approve-batch", log,
-                  run: (args) => {
+                  run: filing.destination ? publicCloneRun(batchIdRoot) : (args) => {
                     const r = spawnSync("git", ["-C", batchWorktree, ...args], { encoding: "utf8" });
                     return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
                   },
@@ -39921,8 +39999,9 @@ async function approveBatchCommand(
           const filedPayload = { proposalId: payload.proposalId, fragmentYaml: materialized.fragmentYaml, stampLine: materialized.stampLine };
           return deps.automaticFollowups ? deps.automaticFollowups.finalize(filedPayload) : filedPayload;
         },
-        { mkdirSync, writeFileSync, readFileSync },
+        ratificationFs(filing.destination),
         join,
+        filing.destination ? knownPlanRepos(repoRoot) : undefined, filing.destination ? repoRoot : undefined,
       );
       allWrittenPaths = filed.writtenPaths;
       allFiledTaskIds = filed.filedIds;
@@ -39954,8 +40033,8 @@ async function approveBatchCommand(
         changedFiles: filedPaths,
         proofCwd: worktreePath,
       });
-      assertLiveWriteAllowed("gh-pr-create", `opening a PR against ${owner}/${repo}`);
-      const created = createPlanPrRest(ghJson, owner, repo, {
+      assertLiveWriteAllowed("gh-pr-create", `opening a PR against ${filing.owner}/${filing.repo}`);
+      const created = createPlanPrRest(ghJson, filing.owner, filing.repo, {
         title: deps.automaticFollowups ? followupFilingPresentation(ids).title :
           `chore(plan): ratify ${ids.length} proposals via rmd approve`,
         body,
@@ -40037,7 +40116,7 @@ async function approveBatchCommand(
     const notGreenExit = approveCiNotGreenExit(ci, result.prUrl, removeApproveWorktree);
     if (notGreenExit !== undefined) return notGreenExit;
     const prNum = result.prUrl.match(/\/pull\/(\d+)/)?.[1] ?? result.prUrl;
-    const reviewCode = await reviewCommand(prNum);
+    const reviewCode = await reviewCommand(filing.destination ? result.prUrl : prNum);
     let armHeadSha: string | undefined;
     try {
       armHeadSha = readHeadShaRest(result.prUrl);

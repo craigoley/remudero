@@ -1,0 +1,48 @@
+- id: W1-T12837
+  title: "The scheduled learning rung drafts a lesson from each repeated hand-fix class, and the draft waits for the operator"
+  repo: remudero
+  depends_on:
+    - W1-T12836
+    - W1-T12833
+  priority: 0.6
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # the scheduled learning rung drafts plan records; a draft that reached workers unreleased would teach from an unreviewed hand fix
+  origin: "operator-session#self-improvement-audit-2026-11-15"
+  plan_refs:
+    - W1-T12836
+    - W1-T3712
+  files:
+    - src/lib/measurement-cadence.ts
+    - test/daemon/the-learning-rung-drafts-a-lesson-from-a-repeated-hand-fix-class.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "For each hand-fix class (cause class plus most-changed file, from operator.intervention evidence) seen 2 or more times in the trailing 14 days, the scheduled learning rung drafts one learning shard scoped to the fixed files, citing each PR and hand commit and stating what the fleet's last attempt left failing"
+      proof: "grep: W1-T12837 criterion 1 in test/daemon/the-learning-rung-drafts-a-lesson-from-a-repeated-hand-fix-class.test.ts"
+    - claim: "invariant:a-hand-fix-draft-waits-for-the-operator — the draft is author_class machine and verify human, and no text from it is selected for a worker prompt until its record is released and merged"
+      proof: "grep: W1-T12837 criterion 2 in test/daemon/the-learning-rung-drafts-a-lesson-from-a-repeated-hand-fix-class.test.ts"
+    - claim: "A class with an open draft, a merged lesson or a retired draft is not drafted again, except that a retired class is drafted once more when its count has doubled since the retirement"
+      proof: "grep: W1-T12837 criterion 3 in test/daemon/the-learning-rung-drafts-a-lesson-from-a-repeated-hand-fix-class.test.ts"
+    - claim: "Hand-fix drafts count against the rung's existing per-day cap and interval, and a day with no qualifying class drafts nothing and writes its skipped row as today"
+      proof: "grep: W1-T12837 criterion 4 in test/daemon/the-learning-rung-drafts-a-lesson-from-a-repeated-hand-fix-class.test.ts"
+  rationale: |
+    MEASURED 2026-11-15 by the operator session, read-only, over the daemon ledger union (~/rmd-state2/state, 2026-11-08T00:00Z to 2026-11-15T15:00Z) and origin/main d5722e1fe.
+
+    - No commit has touched learnings/ on origin/main since 2026-10-24, three weeks. Over the same period the ledger records 234 distinct operator hand actions on fleet PRs, and human-login sessions made about half of all merges.
+    - READ measurement-cadence.ts mintCiLearningShards: the rung pairs a red gate with a later green commit on the same PR and keeps file names. It has no input from operator.intervention rows.
+    - READ knowledge-gardener.ts: it merges, folds and retires lessons and never creates one.
+    - READ retro.ts buildGather and gatherRuns: retro input is ledger run ids only, and operator sessions write no run rows.
+    - The W1-T3712 ruling left session lessons to be landed by hand at discovery. The operator replaced it on 2026-11-15 with "Draft automatically, you release".
+  design: |
+    1. measurement-cadence.ts: add a hand-fix source to the rung's corpus. Group operator.intervention rows that carry evidence (W1-T12836) by cause class and most-changed file, keep classes with 2 or more rows in 14 days, and render one draft per class through the shared machine shard writer.
+    2. Dedup against open drafts and merged lessons by the class key stored in the draft's origin (hand-fix:<class key>).
+    INVARIANT a-hand-fix-draft-waits-for-the-operator: drafts are verify human and author_class machine, and the selection that injects learnings reads only merged lessons.
+    NOT IN SCOPE: capturing the evidence (W1-T12836), automatic release, retro inputs, and doctrine files.
+  falsifier: |
+    Remove the hand-fix source and criterion 1 must fail. Render a draft as verify auto and criterion 2 must fail. Draft an already drafted class and criterion 3 must fail. Ignore the cap and criterion 4 must fail. Restore and all pass.
+  note: |
+    reservation hand-off: run-unfiled-1794756420518 -> run-unfiled-1794756420518
+    Reserved with rmd next-task-id from the operator checkout. Check refs/rmd-dispatch/W1-T12837 and any run branch before building. The test folder is the one rmd test-place computed for a stub with this test's imports; confirm it once the file exists.
