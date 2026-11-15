@@ -39,7 +39,7 @@
       proof: "grep: W1-T12231 criterion 3 in test/daemon/a-freshness-restart-picks-its-moment-from-the-work-in-flight.test.ts"
     - claim: "When the pressure is at or above `likelyFraction` of the score limit, the daemon computes the time to the likely restart. It holds a fix round whose measured length is longer than that time plus `maxDrainWaitMs`. The row `daemon.admission_held` has the reason `restart likely`, the time and the length"
       proof: "grep: W1-T12231 criterion 4 in test/daemon/a-freshness-restart-picks-its-moment-from-the-work-in-flight.test.ts"
-    - claim: "A review whose measured length fits is admitted. Below `likelyFraction`, every admission is as today. A build run is never held by this rule"
+    - claim: "invariant:build-admission — A review whose measured length fits is admitted. Below `likelyFraction`, every admission is as today. A build run is never held by this rule"
       proof: "grep: W1-T12231 criterion 5 in test/daemon/a-freshness-restart-picks-its-moment-from-the-work-in-flight.test.ts"
     - claim: "The time to the likely restart is never earlier than the end of the minimum lifetime"
       proof: "grep: W1-T12231 criterion 6 in test/daemon/a-freshness-restart-picks-its-moment-from-the-work-in-flight.test.ts"
@@ -66,6 +66,7 @@
     2. Add `deadline_source` (`derived`, `no_history` or `limit`), `derived_wait_ms` and the prediction for each to `daemon.freshness_drain.started`.
     3. Time to the likely restart. Add a pure function in src/lib/deploy-judge.ts. It returns the time until the staleness pressure alone reaches the score limit, and never less than the time left of the minimum lifetime.
     4. Hold before the decision. When the pressure is at or above `likelyFraction` of the score limit, `restartAdmission` answers also before the decision. It holds the kinds `review`, `plan-review` and `fix-dispatch` when the measured length is longer than the time to the likely restart plus `maxDrainWaitMs`. It never holds `dispatch-refill`.
+    INVARIANT build-admission: the restart-likelihood rule never holds a build run, preserving the daemon's existing build admission behavior.
     5. Policy rows in the block `freshnessRestart`, each on one line: `likelyFraction` 0.5 with bounds 0.25 to 0.9, and `maxDrainWaitMs` 1800000 with bounds 559000 to 3600000.
     Work that is still in flight at the time limit is given up as today, with the rows of today.
     NOT IN SCOPE: the last sweep before the exit (W1-T9812, W1-T9352), a fix worker that yields (W1-T8141), and what makes the daemon busy (W1-T10054).
