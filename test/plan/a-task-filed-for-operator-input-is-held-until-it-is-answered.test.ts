@@ -4,6 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
+import "#src/lib/live-analytics-snapshot-cache.js";
+import { runDaemon } from "#src/lib/daemon.js";
+import { createDaemonMemoryGovernor } from "#src/lib/daemon-memory-policy.js";
 import { nextRunnable, runnableCandidates } from "#src/lib/drain.js";
 import { consumeHumanGateCounts, projectHeldTaskQuestionGates, projectHumanGates, renderHeldTaskQuestions } from "#src/lib/human-gate.js";
 import { assertRunnable, loadPlanFromYaml, TaskAdmissionError, type Plan } from "#src/lib/plan.js";
@@ -99,6 +102,44 @@ test("W1-T12715 criterion 3: a task with no needs_input block dispatches exactly
     assert.equal(reads, 0, "the answer store is never read for a task with no question");
     assert.equal(renderTaskInputAnswer(task, "an answer"), "", "no answer line reaches the prompt");
   });
+});
+
+test("W1-T12715: a daemon kick holds an unanswered task and admits it after the operator answers", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-held-kick-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const plan = planOf(NEEDS_INPUT);
+  const drive = async () => {
+    let kicks = [{ taskId: "W1-T90001", origin: "fixture" }];
+    let polls = 0;
+    const ran: string[] = [];
+    const rows: { step: string; data: Record<string, unknown> }[] = [];
+    await runDaemon(plan, {
+      refreshMerged: () => () => false,
+      taskInputAnswer: (id) => taskInputAnswer(root, id),
+      pendingKicks: () => kicks,
+      clearKick: (id) => { kicks = kicks.filter((kick) => kick.taskId !== id); },
+      checkStop: () => ++polls > 2 ? "fixture finished" : undefined,
+      runOne: async (id) => {
+        ran.push(id);
+        return { taskId: id, runId: "fixture-run", merged: true, costUsd: 0, verdict: "merged" };
+      },
+      sleep: async () => {},
+      log: (step, data = {}) => { rows.push({ step, data }); },
+      memoryGovernor: createDaemonMemoryGovernor({ read: () => ({ rss_bytes: 1 }), setFlags: () => {}, heapUsed: () => 1 }),
+      heapStatistics: () => ({ used_heap_size: 1, heap_size_limit: 1_000_000_000 }),
+      bootCheckoutBlocked: "",
+    }, { headroomEnabled: false, max: 1 });
+    return { ran, rows };
+  };
+  const held = await drive();
+  assert.deepEqual(held.ran, []);
+  assert.ok(held.rows.some(({ step, data }) => step === "console.kick_refused" &&
+    data.task === "W1-T90001" && String(data.reason).includes(`needs-input: ${QUESTION}`)));
+  answer(root, "Use 5 passes.");
+  const answered = await drive();
+  assert.deepEqual(answered.ran, ["W1-T90001"]);
+  assert.ok(answered.rows.some(({ step, data }) => step === "console.kick_dispatched" && data.task === "W1-T90001"));
+  assert.equal(answered.rows.some(({ step }) => step === "console.kick_refused"), false);
 });
 
 test("W1-T12715 criterion 4: each held task is one task_question gate for the inbox, with the question and the source pull request", () => {
