@@ -58,7 +58,7 @@ import { plannedSequence, runDrain, type DrainDeps, type MergedSet, type OpenPrC
 import { fileTargetJobStore, nativeTargetAdmission, readTargetExecution, type ProductBuildInstances } from "../../lib/product-build.js";
 import { loadManagedRepos } from "../../lib/managed-repos.js";
 import type { RunResult } from "../../lib/run-result.js";
-import { runBoundedTargetJob, type BoundedTargetJobPorts, type BoundedTargetJobOutcome, daemonBoot, daemonExitCodeForSummary, resolveFleetControlHold, runDaemon, readRestartHistoryLines, type BootPhases, type CrashLoopVerdict, type DaemonDeps, type DaemonKick, type DaemonOpts, type DaemonSummary, priorUnrecognisedResetStrings, daemonPushTokenSource, receivePackCredentialProbe } from "../../lib/daemon.js";
+import { runBoundedTargetJob, type BoundedTargetJobPorts, type BoundedTargetJobOutcome, daemonBoot, daemonExitCodeForSummary, resolveFleetControlHold, runDaemon, readRestartHistoryLines, type BootPhases, type CrashLoopVerdict, type DaemonDeps, type OpsTaskDispatchRead, type DaemonKick, type DaemonOpts, type DaemonSummary, priorUnrecognisedResetStrings, daemonPushTokenSource, receivePackCredentialProbe } from "../../lib/daemon.js";
 import { sweepStrandedReviewWorktreesAsync } from "../../lib/review-worktree-reclaim.js";
 import { sweepReclaimableArtifacts } from "../../lib/disk-artifact-reclaim.js";
 import { readGhRateLimitBuckets } from "../../lib/daemon-health.js";
@@ -84,7 +84,7 @@ import { sweepInflightLocksWithReceipts } from "../../lib/benchmark-run.js";
 import { ledgerMemoHolders, readLedgerUnionRecordsSync } from "../../lib/ledger-union.js";
 import { childMeasurementCadenceSpawn, measurementCadenceChildRunner } from "../../lib/measurement-cadence.js";
 import { loadPlan, type Plan } from "../../lib/plan.js";
-import { PLAN_DESTINATION_KINDS, planDestinationRepository, resolvePlanDestination, type PlanDestinationRepository } from "../../lib/plan-destination.js";
+import { PLAN_DESTINATION_KINDS, planDestinationRepository, planDestinationPath, resolvePlanDestination, type PlanDestinationRepository } from "../../lib/plan-destination.js";
 import { readOperatorReleaseRecords } from "../../lib/machine-filing-judge.js";
 import { readReleaseLedgerLines } from "../../lib/operator-release.js";
 import { runnerConfigDigest, terminalPreDispatchRefusalRevisions } from "../../lib/dispatch-repair.js";
@@ -882,20 +882,59 @@ function isOpsCatalogSlug(slug: string): boolean {
  * W1-T11770: the tick reads `current` synchronously and gets the last completed refresh. Each read starts at most one
  * refresh behind it, the W1-T7744 filing-prefetch shape, so a slow or hung read never delays a tick.
  */
-function opsCatalogShadowFeed(source: { refresh(): Promise<OpsCatalogShadowInput> }): { current: () => OpsCatalogShadowInput | undefined } {
+/** BACKSTOP: completed private evidence expires even if a successor refresh hangs. */
+export const OPS_DISPATCH_SOURCE_MAX_AGE_MS = 120_000;
+
+export function opsCatalogShadowFeed(source: { refresh(): Promise<OpsCatalogShadowInput> }, clock: Clock = systemClock): {
+  current(): OpsCatalogShadowInput | undefined;
+  forDispatch(): OpsCatalogShadowInput | undefined;
+} {
   let latest: OpsCatalogShadowInput | undefined;
+  let completedAt: number | undefined;
   let inFlight = false;
   return {
     current: () => {
       if (!inFlight) {
         inFlight = true;
-        // refresh() answers every failure as an outcome; a rejection anyway is read as `unreadable`.
-        void source.refresh().then((input) => { latest = input; }, (error: unknown) => { latest = { outcome: "unreadable" }; void error; })
-          .finally(() => { inFlight = false; });
+        // refresh() answers failure as an outcome; an unexpected rejection remains unreadable.
+        void source.refresh().then((input) => { latest = input; completedAt = clock.now(); }, (error: unknown) => {
+          latest = { outcome: "unreadable" }; completedAt = clock.now(); void error;
+        }).finally(() => { inFlight = false; });
       }
       return latest;
     },
+    forDispatch: () => {
+      if (latest?.outcome !== "ok") return latest;
+      const age = completedAt === undefined ? NaN : clock.now() - completedAt;
+      return !Number.isFinite(age) || age < 0 || age >= OPS_DISPATCH_SOURCE_MAX_AGE_MS ? { outcome: "stale" } : latest;
+    },
   };
+}
+
+type OpsDispatchSelection = { outcome: "off" } | { outcome: "on"; repository: string }
+  | { outcome: "unavailable"; reason: string };
+
+/** Read the new flag, reusing canonical repository validation and refusing a changed file. */
+function opsDispatchSelection(stateDir: string): OpsDispatchSelection {
+  try {
+    const path = planDestinationPath(stateDir), before = readFileIfExists(path);
+    if (before === undefined) return { outcome: "off" };
+    const record: unknown = JSON.parse(before);
+    if (record === null || typeof record !== "object" || Array.isArray(record)) return { outcome: "unavailable", reason: "selection_unreadable" };
+    const flag = (record as Record<string, unknown>).dispatch_ops_tasks;
+    if (flag === undefined || flag === false) return { outcome: "off" };
+    if (flag !== true) return { outcome: "unavailable", reason: "invalid_dispatch_flag" };
+    const named = planDestinationRepository(stateDir);
+    if (before !== readFileIfExists(path)) return { outcome: "unavailable", reason: "selection_changed" };
+    if (named.outcome !== "named" || (record as Record<string, unknown>).repository !== `${named.owner}/${named.repo}`) {
+      return { outcome: "unavailable", reason: "selection_unreadable" };
+    }
+    return { outcome: "on", repository: `${named.owner}/${named.repo}` };
+  } catch (error) {
+    // A local selection failure is UNKNOWN, never a public fallback for a private task.
+    void error;
+    return { outcome: "unavailable", reason: "selection_unreadable" };
+  }
 }
 
 /** W1-T12244: the parts of the time from the process start to the first tick, on the daemon clock. */
@@ -2169,9 +2208,30 @@ export async function daemonCommand(
     await dispatchFilingPrefetch.refresh(target.planPath);
     bootPhases.mark("filing_prefetch");
     // W1-T11770: absent the flag, nothing is built, read or passed. Present, the first read starts here, unawaited.
-    const opsShadow = shadowOpsCatalog === undefined ? undefined
-      : opsCatalogShadowFeed(createOpsCatalogShadowSource({ repository: shadowOpsCatalog }, deps.opsCatalogApi));
+    const opsSelection = opsDispatchSelection(join(config.root, "state"));
+    const opsSourceRepository = shadowOpsCatalog ?? (opsSelection.outcome === "on" ? opsSelection.repository : undefined);
+    const source = opsSourceRepository === undefined ? undefined
+      : createOpsCatalogShadowSource({ repository: opsSourceRepository }, deps.opsCatalogApi);
+    const opsShadow = source === undefined ? undefined : opsCatalogShadowFeed(shadowOpsCatalog ? source : {
+      refresh: () => {
+        const current = opsDispatchSelection(join(config.root, "state"));
+        return current.outcome === "on" && current.repository === opsSourceRepository
+          ? source.refresh() : Promise.resolve({ outcome: "stale" as const });
+      },
+    }, clockFromMillisFn(deps.now));
     opsShadow?.current();
+    const readOpsTaskDispatch = opsSelection.outcome === "off" ? undefined : (publicPlan: Plan): OpsTaskDispatchRead => {
+      const current = opsDispatchSelection(join(config.root, "state"));
+      if (current.outcome !== "on") return current;
+      if (!opsShadow || current.repository !== opsSourceRepository) return { outcome: "unavailable", reason: "selection_changed" };
+      opsShadow.current();
+      const input = opsShadow.forDispatch();
+      if (input === undefined) return { outcome: "unavailable", reason: "source_pending" };
+      if (input.outcome !== "ok") return { outcome: "unavailable", reason: input.outcome, source: input };
+      const publicCommit = planReaders.revisions.revisionOf(publicPlan)?.commit;
+      if (publicCommit === undefined) return { outcome: "unavailable", reason: "primary_revision_unknown", source: input };
+      return { outcome: "selected", source: input, publicCommit };
+    };
     const summary = await runDaemonFn(
       plan,
       {
@@ -2201,6 +2261,7 @@ export async function daemonCommand(
           activePlanRef.current = fresh;
           daemonPlanCopies.observe(fresh);
         },
+        ...(readOpsTaskDispatch ? { readOpsTaskDispatch } : {}),
         ...(opsShadow ? {
           secondaryCatalogShadowSource: opsShadow.current,
           primaryPlanCommit: () => planReaders.revisions.revisionOf(activePlanRef.current)?.commit,
