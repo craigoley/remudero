@@ -6,9 +6,9 @@
 // the environment it received to a file, so the assertion is on what the child got, not on source text.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { main } from "#src/run-task.js";
 import { fixedClock } from "#src/lib/clock.js";
@@ -21,6 +21,7 @@ import {
 import { LEDGER_FILENAME } from "#src/lib/ledger-path.js";
 import { prStateCommand } from "#src/lib/pr-state.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { ghStubPath } from "#test/helpers/gh-stub.js";
 
 const AMBIENT = "ambient-token-w1-t12075";
 const REFERENCED = "referenced-token-w1-t12075";
@@ -40,7 +41,7 @@ interface Fixture {
   loggedIn: string;
   /** A gh config directory with no stored login. */
   loggedOut: string;
-  /** The directory holding the stub `gh`. */
+  /** The directory holding the stub `gh`, built by the shared helper. */
   stubDir: string;
   /** A directory on PATH with no `gh` in it. */
   noGhDir: string;
@@ -57,21 +58,20 @@ function fixture(t: TestContext): Fixture {
     referencedHome: join(root, "referenced-home"),
     loggedIn: join(root, "gh-logged-in"),
     loggedOut: join(root, "gh-logged-out"),
-    stubDir: join(root, "stub"),
+    stubDir: "",
     noGhDir: join(root, "no-gh"),
     cache: join(root, "cache"),
     dump: join(root, "env.dump"),
   };
-  for (const dir of [f.bareHome, f.loggedIn, f.loggedOut, f.stubDir, f.noGhDir, f.cache]) mkdirSync(dir, { recursive: true });
+  for (const dir of [f.bareHome, f.loggedIn, f.loggedOut, f.noGhDir, f.cache]) mkdirSync(dir, { recursive: true });
   const stateDir = join(f.referencedHome, "Remudero", "state");
   mkdirSync(stateDir, { recursive: true });
   writeFileSync(join(stateDir, GITHUB_CREDENTIAL_REFERENCES_FILENAME),
     JSON.stringify({ references: [{ scope: "*", kind: "env", name: REFERENCE_VAR }] }));
   writeFileSync(join(f.loggedIn, "hosts.yml"), "github.com:\n  user: octo\n");
   // The stub writes the environment it received and prints nothing, so an inherited stdout stays quiet.
-  const stub = join(f.stubDir, "gh");
-  writeFileSync(stub, `#!/bin/sh\nenv > '${f.dump}'\nexit 0\n`);
-  chmodSync(stub, 0o755);
+  f.stubDir = ghStubPath(`#!/bin/sh\nenv > '${f.dump}'\nexit 0\n`);
+  t.after(() => rmSync(dirname(f.stubDir), { recursive: true, force: true }));
   return f;
 }
 
@@ -94,7 +94,7 @@ function takeDump(f: Fixture): string[] | undefined {
 
 /** What the stub receives when spawned with exactly `env`: the environment a spawn gave gh before W1-T12075. */
 function control(f: Fixture, env: NodeJS.ProcessEnv): string[] {
-  const out = spawnSync(join(f.stubDir, "gh"), [], { env, cwd: process.cwd() });
+  const out = spawnSync(`${f.stubDir}/gh`, [], { env, cwd: process.cwd() });
   assert.equal(out.status, 0, String(out.stderr));
   const dump = takeDump(f);
   assert.ok(dump, "the control spawn wrote its environment");
@@ -205,7 +205,7 @@ test("W1-T12075 criterion 1: `rmd gh` installs the ledger writer, and a gh call 
   t.after(() => installGithubCredentialMissingSink(undefined));
   const originalArgv = process.argv;
   t.after(() => { process.argv = originalArgv; });
-  process.argv = ["node", "rmd", "gh", "--", "api", "repos/acme/widgets-c1/pulls/7"];
+  process.argv = ["node", "rmd", ..."gh -- api repos/acme/widgets-c1/pulls/7".split(" ")];
   class Exit extends Error {
     constructor(readonly code: number | undefined) { super(`process.exit(${code})`); }
   }
