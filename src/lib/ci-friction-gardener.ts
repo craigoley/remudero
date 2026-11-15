@@ -18,7 +18,7 @@ import { readOriginMainSha } from "./inbox.js";
 import { loadPlanFromYaml, newTestPath, type Task } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { lintTask, proofResolvabilityViolations } from "./task-linter.js";
-import { machineShardFilingRefusal, machineShardLandingGuard, renderMachineShard } from "./machine-filing.js";
+import { MACHINE_SHARD_LINT_OPTIONS, machineShardFilingRefusal, machineShardLandingGuard, renderMachineShard } from "./machine-filing.js";
 import {
   CI_FRICTION_REMEDIES_DOC,
   ciFrictionCauseState,
@@ -1406,6 +1406,17 @@ export function ciFrictionShardYaml(draft: CiFrictionDraft, taskId: string, pric
         : `a recorded ${key} round, replayed through the real code path in ${owner.files[0]!}, is prevented or self-healed without dispatching a fix round`,
         proof: `unit test: ${ciFrictionRemedyTestTitle(taskId, key)}` },
     ],
+    invariants: { declared: [census ? {
+      slug: "healthy-findings-still-refused",
+      statement: "a finding a healthy census run reports is still refused by the existing predicate; only the diagnosed runner failure is prevented.",
+      claim: "a branch finding from a healthy census run is still refused publication by the existing predicate",
+      proof: `unit test: ${taskId}: a healthy census finding is still refused publication`,
+    } : {
+      slug: "unhealed-failures-still-get-a-fix-round",
+      statement: "a failure the remedy neither prevents nor heals still dispatches its fix round as before; the remedy never hides a red by skipping the round.",
+      claim: "a red round the remedy does not prevent or heal still dispatches its fix round",
+      proof: `unit test: ${taskId}: a failure the remedy does not heal still gets its fix round`,
+    }] },
     note: `Filed by the ci-friction gardener (W1-T4435) at rung ${rung}. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures ${key}'s share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung ${rung + 1}.` +
       (census ? " The regression must execute the diagnosed failure through the real owner path and retain a control that a healthy branch finding is still refused; class-wide cost observations and after-window measurement remain unchanged."
         : " The regression must replay one recorded round of this cause through the real owner path; the after-window measurement, not the regression, shows the cause's share fell."),
@@ -1425,7 +1436,7 @@ export function ciFrictionShardYaml(draft: CiFrictionDraft, taskId: string, pric
 export function ciFrictionRecordVerdict(contents: string, label: string): { ok: boolean; reason: string } {
   try {
     const task = loadPlanFromYaml(contents, label).tasks[0];
-    const lint = lintTask(task);
+    const lint = lintTask(task, MACHINE_SHARD_LINT_OPTIONS);
     return lint.ok ? { ok: true, reason: "" } : { ok: false, reason: lint.violations.map((v) => `${v.severity}:${v.check}`).join(", ") };
   } catch (e) {
     return { ok: false, reason: `unparseable: ${(e as Error).message}` };

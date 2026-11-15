@@ -183,6 +183,10 @@ export function renderFalsePositiveShard(action: GateGardenAction, taskId: strin
     files: [rule.recognizer], cost: 1,
     acceptance: [{ claim: `${rule.symbol} accepts the healthy case from PR #${pair.pr} while still refusing its unhealthy control.`,
       proof: `unit test: ${taskId}: ${rule.symbol} distinguishes the false positive from its unhealthy control` }],
+    invariants: { declared: [{ slug: "gate-still-refuses-its-defect",
+      statement: `${rule.gate} still refuses the defect it was written for; the repair admits the healthy case and nothing else.`,
+      claim: `The defect ${rule.gate} was written to catch is still refused by ${rule.symbol} after the repair.`,
+      proof: `unit test: ${taskId}: ${rule.symbol} still refuses the defect its gate was written for` }] },
     rationale: [`Gate ${rule.gate}, PR #${pair.pr}: ${pair.redSha} -> ${pair.greenSha}; classification ${classification}.`,
       `Repair the recognizer ${rule.symbol} in ${rule.recognizer}. Gate-owned files: ${rule.ownFiles.join(", ")}.`,
       "Measure the gate's suspect repair rate after the remedy merges; lowering that rate is the effect.",
@@ -854,6 +858,10 @@ export function renderHeadroomShard(f: HeadroomFinding, taskId: string) {
     origin: headroomOrigin(f), files: [...new Set([...subjects, testFile])],
     acceptance: [{ claim: `The ${f.gate} ${f.field} measures below ${f.limit} and no limit, baseline or ceiling is raised.`,
       proof: `unit test: ${taskId}: ${f.gate} ${f.field} has headroom under its limit` }],
+    invariants: { declared: [{ slug: "gate-limit-not-raised",
+      statement: `the ${f.gate} gate still refuses what it refused before: ${f.field} in ${f.limitFile} is not raised above ${f.limit}.`,
+      claim: `${f.field} in ${f.limitFile} is at most ${f.limit} after the cleanup.`,
+      proof: `unit test: ${taskId}: ${f.gate} ${f.field} limit is not raised` }] },
     rationale: [
       `Measured ${f.measured} against the limit ${f.limit} (${f.field} in ${f.limitFile}).`,
       f.raised ? `Commit ${f.raised.commit} on main raised it ${f.raised.detail} in the last ${HEADROOM_WINDOW_DAYS} days; the census refuses any growth past it.`
@@ -916,6 +924,11 @@ export function renderCommentCompressionShard(finding: CommentCompressionFinding
     origin: commentCompressionOrigin(finding.file), files: [finding.file, testFile],
     acceptance: [{ claim: "Comment volume is measurably reduced while executable tokens and existing behavioral assertions are preserved.",
       proof: `unit test: ${taskId}: comment compression preserves executable code` }],
+    invariants: { declared: [{ slug: "executable-code-unchanged",
+      statement: `${finding.file} runs the same code after the compression; only its comment lines change.`,
+      claim: `A regression named for this task compares ${finding.file} with its pre-compression source through the shared comparator, so a changed statement fails it.`,
+      // Never `grep: assertSameTokens`: a file compressed before already has its pin test, so that pattern matches at base.
+      proof: `grep: test("${taskId}: the compressed file keeps its executable tokens" in ${testFile}` }] },
     rationale: [
       `Observed ${finding.comments} comment lines in ${finding.file}. This is maintenance debt, never a merge ceiling.`,
       "Operator 2026-10-24: excess comments create high-priority follow-up work; they must not block the originating change.",
@@ -941,9 +954,10 @@ export function renderDefuseShard(action: GateGardenAction, taskId: string) {
   return renderMachineShard({
     taskId, title: `Defuse the expiring fixture in ${f.file} before ${crossing}`, origin: action.target,
     files: [f.file], cost: 1, costPopulation: urgent ? [0, 1] : [1],
-    design: "INVARIANT fixture-behavior: preserve the fixture's behavioral assertions across the clock crossing.",
-    acceptance: [{ claim: `invariant:fixture-behavior — The census reports no crossing for ${f.file} with now past ${crossing}, and the test remains green across the crossing while preserving its behavioral assertions.`,
-      proof: `grep: test("${breLiteral(title)}" in ${f.file}` }],
+    acceptance: [],
+    invariants: { declared: [{ slug: "fixture-behavior", statement: "preserve the fixture's behavioral assertions across the clock crossing.",
+      claim: `The census reports no crossing for ${f.file} with now past ${crossing}, and the test remains green across the crossing while preserving its behavioral assertions.`,
+      proof: `grep: test("${breLiteral(title)}" in ${f.file}` }] },
     rationale: [
       `${f.file}:${f.line}: ${f.field} is stamped ${f.stamp}; ${f.threshold} crosses on ${crossing}.`,
       `Found ${f.daysLeft} days before crossing using a ${leadDays}-day lead horizon.`,

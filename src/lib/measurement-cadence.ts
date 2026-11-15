@@ -83,7 +83,7 @@ import {
 } from "./coverage-improvement.js";
 import { handRunCensus, type HandRunCensusCadenceOpts, type HandRunCensusCadenceResult } from "./hand-run-census.js";
 import { lintPlan, lintTask, type LintResult } from "./task-linter.js";
-import { machineShardFilingRefusal, machineShardHeaderLines } from "./machine-filing.js";
+import { MACHINE_SHARD_LINT_OPTIONS, machineShardDesign, machineShardFilingRefusal, machineShardHeaderLines } from "./machine-filing.js";
 import { mechanicalRulingRow, type MechanicalDecision } from "./mechanical-rulings.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
 import {
@@ -3287,6 +3287,7 @@ export function ciLearningShardYaml(draft: CiLearningShardDraft, taskId: string,
     `  ci_learning_prs: [${draft.prs.join(", ")}]`,
     "  files:",
     `    - ${lessonsFile}`,
+    `  design: ${q(machineShardDesign(undefined, { none: `the task adds one new learnings file, ${lessonsFile}, and its golden verdict fixture; no existing lesson, gate or code path changes` }))}`,
     "  acceptance:",
     `    - claim: ${q(`the lane that trips the ${draft.gate} gate is reached by a matched learnings entry rather than prose no dispatched worker reads`)}`,
     `      proof: ${q(`grep: ${draft.findingId} in ${lessonsFile}`)}`,
@@ -3315,7 +3316,7 @@ export function ciLearningGoldenFixtureDir(findingId: string): string {
 export function ciLearningRecordVerdict(contents: string, label: string): { ok: boolean; reason: string } {
   try {
     const task = loadPlanFromYaml(contents, label).tasks[0];
-    const lint = lintTask(task);
+    const lint = lintTask(task, MACHINE_SHARD_LINT_OPTIONS);
     if (!lint.ok) return { ok: false, reason: lint.violations.map((v) => `${v.severity}:${v.check}`).join(", ") };
     // A lesson creates its own path; admission must not borrow files from the daemon's tree.
     const refused = machineShardFilingRefusal(contents, label, { pathExists: () => false });

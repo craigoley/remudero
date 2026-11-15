@@ -27,7 +27,8 @@ const CLOCK = fixedClock(Date.parse("2026-10-24T12:00:00Z"));
 function shard(id: string, family = "flow-blocker"): string {
   const result = renderMachineShard({ taskId: id, title: `record the remedy for ${id}`,
     origin: `${family}:fixture`, files: ["docs/remedy.md"],
-    acceptance: [{ claim: "the remedy is recorded", proof: "grep: remedy in docs/remedy.md" }] });
+    acceptance: [{ claim: "the remedy is recorded", proof: "grep: remedy in docs/remedy.md" }],
+    invariants: { none: "the fixture records one remedy in a docs file and changes no existing behaviour" } });
   assert.equal(result.refused, undefined);
   return result.text;
 }

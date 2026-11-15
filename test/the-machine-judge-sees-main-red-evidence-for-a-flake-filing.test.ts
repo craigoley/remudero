@@ -44,6 +44,7 @@ function flakeRecord(id: string, recovered: number, alsoFailed: number, prs: num
       { claim: `the cause of the intermittent failure ${id} records in ${FILE} is fixed, pinned by a test that forces the failing order`, proof: `unit test: ${id} pins the cause of the intermittent failure` },
       { claim: `the test that pins the cause is added to ${FILE}, beside the test that failed`, proof: `grep: test("${id} pins the cause of the intermittent failure" in ${FILE}` },
     ],
+    invariants: { none: `the only declared path is the test file ${FILE}, so the fix changes test code alone and no production behaviour` },
     note: "Filed by the flake-incident gardener (W1-T6406). MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person.",
     rationale: [
       `Test: '${TITLE}' (${FILE})`,

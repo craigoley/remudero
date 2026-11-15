@@ -34,6 +34,7 @@ function flakeIncident(id: string, extraProof?: string): string {
       { claim: `the cause of ${FLAKY}'s intermittent failure is fixed, pinned by a test that forces the failing order`, proof: `unit test: ${id} pins the cause of the intermittent failure` },
       ...(extraProof === undefined ? [] : [{ claim: "the new test names the forced order", proof: extraProof }]),
     ],
+    invariants: { none: `the only declared path is the test file ${FLAKY}, so the fix changes test code alone and no production behaviour` },
   });
   assert.equal(rendered.refused, undefined, "the filer's own lint admits it at verify: human");
   return rendered.text;
