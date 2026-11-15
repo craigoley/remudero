@@ -113,7 +113,11 @@ test("W1-T11816 criterion 1: each minute's row names main and every live worker 
 });
 
 test("W1-T11816 criterion 1: on the real runtime a busy worker's CPU and loop are read and main's are measured", async (t) => {
-  const worker = new Worker("const end = Date.now() + 150; while (Date.now() < end); require('node:worker_threads').parentPort.postMessage('spun'); setTimeout(() => {}, 30_000);", { eval: true });
+  // Spin until the thread's OWN CPU clock reads 150 ms (not wall time: a loaded CI runner deschedules the thread, so a wall-clock spin used under 100 ms of CPU).
+  const spin = "const cpu = () => { const u = process.threadCpuUsage ? process.threadCpuUsage() : process.cpuUsage(); return (u.user + u.system) / 1000; };"
+    + "const give = Date.now() + 20_000; while (cpu() < 150 && Date.now() < give);"
+    + "require('node:worker_threads').parentPort.postMessage('spun'); setTimeout(() => {}, 30_000);";
+  const worker = new Worker(spin, { eval: true });
   t.after(() => worker.terminate());
   await new Promise((resolve) => worker.once("message", resolve));
   const rows: Row[] = [];
