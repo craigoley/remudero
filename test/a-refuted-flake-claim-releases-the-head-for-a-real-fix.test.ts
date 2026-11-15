@@ -133,10 +133,15 @@ describe("test/a-refuted-flake-claim-releases-the-head-for-a-real-fix.test.ts", 
   test("an unavailable progress verdict holds and is asked again on the next pass", async () => {
     const rows = history();
     let calls = 0;
-    const f = sweep(rows, async () => ++calls === 1 ? undefined : { verdict: "continue", reason: "attempt a real repair" });
+    const f = sweep(rows, async () => {
+      if (++calls === 1) throw new Error("test progress judge unavailable");
+      return { verdict: "continue", reason: "attempt a real repair" };
+    });
     await runSweep([pr()], f.deps);
     assert.equal(calls, 1);
     assert.equal(f.dispatched.length, 0);
+    assert.equal(rows.findLast(r => r.step === "fix.progress_judged")?.verdict, "unavailable");
+    assert.match(String(rows.findLast(r => r.step === "fix.progress_judged")?.reason), /test progress judge unavailable/);
     await runSweep([pr()], f.deps);
     assert.equal(calls, 2);
     assert.equal(f.dispatched.length, 1);

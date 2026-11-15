@@ -9,7 +9,8 @@ import { parseInstanceRegistry } from "./instance-registry.js";
 import { selectedInstanceRegistryEnvPath } from "./instance-registry-selection.js";
 import { buildFixProgressInput as buildBaseFixProgressInput, fixRedClass, resolveFixProgress, parseFixProgressVerdict, scopeEscalationStandDown,
   type FixProgressWitness, type FixProgressHostedProofResult,
-  type FixProgressInput, type FixProgressJudge, type FixProgressResult, type FixProgressVerdict } from "./fix-progress-judge.js";
+  type FixProgressInput, type FixProgressJudge, type FixProgressResult, type FixProgressVerdict,
+  type FixProgressReaskResult, rowPrNumber } from "./fix-progress-judge.js";
 import type { DispatchBreakJudge } from "./stall-verifier.js";
 import { readCiGateRequiredChecks } from "./ci-gate-required.js";
 import { createHeadRehomePorts, headIdentityRed, headRehomePlan, type HeadRehomePorts } from "./head-rehome.js";
@@ -2490,12 +2491,16 @@ export function productionFixProgressJudge(opts: {
     const args = buildRiskJudgeSpawnArgs({ input: {
       change: { description: "fix progress" }, gatesState: {}, planContext: { taskId: input.taskId },
     }, mount, cwd: opts.cwd, settingsFile: opts.settingsFile });
+    const harnessOffered = input.signals.offHostPass === true && input.harnessRefuted !== true;
     const prompt = [
       "Judge whether another fix round is justified. Return only FIX_PROGRESS: followed by a JSON object.",
-      "Schema: {verdict: continue | change-approach | escalate | harness, reason: string, approach?: string, loop?: string}.",
+      `Schema: {verdict: continue | change-approach | escalate${harnessOffered ? " | harness" : ""}, reason: string, approach?: string, loop?: string}.`,
       "change-approach requires concrete approach text; escalate requires a named loop, not a round count.",
-      "offHostPass means the persisted reviewer proof passed on the worker and exact-head hosted CI. " +
-        "Consider harness with offHostPassEvidence and the recorded review load; harness escalates without dispatching another round.",
+      harnessOffered ? "offHostPass means the persisted reviewer proof passed on the worker and exact-head hosted CI. " +
+        "Consider harness with offHostPassEvidence and the recorded review load; harness escalates without dispatching another round."
+        : input.harnessRefuted ? "harness is not offered: a rerun of the failed checks at this head reproduced the same red"
+        : "harness is not offered: no reviewer-only failure persisted, so there is no off-host proof pass to weigh",
+      ...(input.reaskReason ? [`This is the second ask in this pass: ${input.reaskReason}. Answer with an offered verdict.`] : []),
       "Require stronger evidence of progress as the round count grows. There is no hard round ceiling.",
       "Pre-signals are evidence, never automatic decisions. A shrinking red set can justify further rounds.",
       "Consider no-op/refused rounds, repeated diffs and red sets, oscillation, operator answers and parked reasons.",
@@ -2527,6 +2532,26 @@ export function productionFixProgressJudge(opts: {
   };
   PRODUCTION_FIX_PROGRESS_JUDGES.add(judge);
   return judge;
+}
+
+/** W1-T12711: a second uncorroborated harness answer reruns this head's failed checks once; the next pass judges their red. */
+async function rerunChecksForHarness(pr: OpenPrView, input: FixProgressInput, decision: FixProgressReaskResult,
+  deps: Pick<SweepDeps, "rerunFailedChecks" | "ledgerPath" | "runId" | "dryRun" | "appendLine">, ledger: readonly Record<string, unknown>[],
+): Promise<FixProgressReaskResult> {
+  if (decision.verdict !== "rerun-checks") return decision;
+  const proceed = (skip: "harness-rerun-spent" | "harness-rerun-unavailable", why: string): FixProgressReaskResult =>
+    ({ verdict: "continue", reask: 1, judge_skipped: skip, reason: `${decision.reason}; ${why}, so the round runs` });
+  if (ledger.some(row => row.step === "fix.progress_rerun" && rowPrNumber(row) === pr.prNumber && row.head_sha === pr.headSha))
+    return proceed("harness-rerun-spent", "the failed checks were already rerun once at this head");
+  if (!deps.rerunFailedChecks || deps.dryRun) return proceed("harness-rerun-unavailable", "no check rerun is wired");
+  const rerun = await deps.rerunFailedChecks(pr).catch((error: unknown) =>
+    ({ outcome: "unavailable" as const, runIds: [] as number[], reason: String((error as Error)?.message ?? error) }));
+  (deps.appendLine ?? appendLedger)(deps.ledgerPath, { run_id: deps.runId, task_id: escalationTaskIdFor(pr), step: "fix.progress_rerun",
+    pr_number: pr.prNumber, head_sha: pr.headSha, red: input.currentRed, outcome: rerun.outcome, run_ids: rerun.runIds,
+    ...(rerun.reason ? { reason: rerun.reason } : {}) });
+  if (rerun.outcome === "unavailable") return proceed("harness-rerun-unavailable", `the rerun was unavailable: ${rerun.reason}`);
+  return { ...decision, reason: `${decision.reason}; failed checks ${rerun.outcome === "rerun" ? `rerun (runs ${rerun.runIds.join(", ")})`
+    : "not rerun: the head moved"}; the next pass judges the new results` };
 }
 
 /** W1-T7742: {@link productionFixProgressJudge}'s prompt for a tripped dispatch breaker (stall-verifier.ts's judgeDispatchBreak). */
@@ -20365,15 +20390,15 @@ export async function runSweep(
         currentRed: [...redCheckNames(pr).filter(r => !r.startsWith("review:")), ...pr.unmetCriteria.map(c => `review:${c.claim}`)],
         ledger: ledgerLines, operatorAnswer: pr.pendingAnswer?.constraint,
         formerCeiling: pr.repeatedFixRefusal !== undefined ? 2 : fixCeilingInForce(pr, policy.strikeCap, policy.clarify), parkedReason }, deps.readHostedProofResults);
-      const judgeAndRecord = async () => {
+      const judgeAndRecord = async (): Promise<FixProgressReaskResult> => {
         const { decision: result, receipt } = await resolveFixProgress(input, ledgerLines,
-          { ...progressWitness(pr), judge: progressJudge, firstRound: true });
+          { ...progressWitness(pr), judge: progressJudge, firstRound: true, reask: true });
         appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: escalationTaskIdFor(pr),
           pr_number: pr.prNumber, head_sha: pr.headSha,
           site: pr.repeatedFixRefusal !== undefined ? "refused-twice" : "fix-strike",
           parked_reason: input.parkedReason, former_ceiling: input.formerCeiling, red_class: input.redClass,
           round_count: input.rounds.length, signals: input.signals, ...pendingChecksField(input), ...failureEvidenceField(input), ...result, ...receipt });
-        return result;
+        return rerunChecksForHarness(pr, input, result, deps, ledgerLines);
       };
       const result = await judgeWithMemoryWait(pr, judgeAndRecord, progressMemoryWait);
       if (result.verdict === "escalate") {
@@ -23759,18 +23784,18 @@ export async function runSweep(
                   if (amended !== undefined) standDownReason = amended;
                   return false;
                 }
-                const result = await judgeWithMemoryWait<FixProgressResult>(pr, async () => {
+                const result = await judgeWithMemoryWait<FixProgressReaskResult>(pr, async () => {
                   const { decision: result, receipt } = await resolveFixProgress(input, ledgerLines,
-                    { ...progressWitness(pr), judge: progressJudge, firstRound: true });
+                    { ...progressWitness(pr), judge: progressJudge, firstRound: true, reask: true });
                   appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: escalationTaskIdFor(pr),
                     pr_number: pr.prNumber, head_sha: pr.headSha,
                     site: progressParkedReason?.split(":")[0] ?? "fix-strike",
                     parked_reason: input.parkedReason, former_ceiling: input.formerCeiling,
                     red_class: input.redClass, round_count: input.rounds.length, signals: input.signals,
                     ...pendingChecksField(input), ...failureEvidenceField(input), ...result, ...receipt });
-                  return result;
+                  return rerunChecksForHarness(pr, input, result, deps, ledgerLines);
                 }, progressMemoryWait);
-                if (result.verdict === "unavailable") {
+                if (result.verdict === "unavailable" || result.verdict === "rerun-checks") {
                   pr.progressContinue = { reason: result.reason, unavailable: true };
                   acted = false;
                   standDownReason = result.reason;

@@ -399,6 +399,17 @@ const SEED_ROWS: readonly SeedRow[] = [
     outcomes: ["OBSERVED", "UNKNOWN"],
   },
   {
+    // W1-T12711: a harness answer the code refused twice in one pass.
+    step: "fix.progress_rerun",
+    meaning:
+      "The fix progress judge answered harness twice in one pass, and no off-host proof result supports it. " +
+      "The sweep asked GitHub once to rerun the failed checks at this head. `red` is the red the judge saw. " +
+      "When the rerun ends with the same red, the next judgment carries harnessRefuted and is not offered " +
+      "harness at this head. \"unavailable\" means no failed run could be rerun, and the round runs.",
+    writer: ["rerunChecksForHarness"],
+    outcomes: ["rerun", "head-moved", "unavailable"],
+  },
+  {
     step: "serve.checkout_advanced",
     meaning:
       "Serve moved its own clean checkout forward to origin/main in place, with no write in flight, " +
