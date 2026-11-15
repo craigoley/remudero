@@ -399,6 +399,18 @@ const SEED_ROWS: readonly SeedRow[] = [
     outcomes: ["OBSERVED", "UNKNOWN"],
   },
   {
+    // W1-T12710: fix rounds that did not move one criterion get a different remedy.
+    step: "fix.stall_remedy",
+    meaning:
+      "Before a fix round, the sweep found that `rounds` completed rounds left `criterion` unmet with the same " +
+      "failure, or did not land, at or past fix.stallRounds. It took the first remedy not tried for this pull " +
+      "request and criterion: `stronger-worker` (a round on the next mount in fix.modelOrder, named in `mount`, " +
+      "with the earlier approaches listed), `amend-criterion` (an acceptance amendment proposal, `amendment_url`), or " +
+      "`operator-input` (one escalation). \"skipped\" means the remedy could not apply; `reason` says why.",
+    writer: ["takeStallRemedy"],
+    outcomes: ["taken", "skipped"],
+  },
+  {
     // W1-T12711: a harness answer the code refused twice in one pass.
     step: "fix.progress_rerun",
     meaning:
