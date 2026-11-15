@@ -775,6 +775,10 @@ container_path_identity() {
   if [ -e "$1" ]; then
     stat -Lc '%d:%i' -- "$1" 2>/dev/null || stat -Lf '%d:%i' -- "$1" 2>/dev/null && return 0
   fi
+  if [ -L "$1" ] && [ ! -e "$1" ]; then
+    printf '%s\n' "stat: $1: No such file or directory"
+    return 1
+  fi
   err="$(stat -L -- "$1" 2>&1 >/dev/null)"; err="${err//$'\n'/ }"
   printf '%s\n' "${err:-cannot read $1}"
   return 1
@@ -1999,7 +2003,7 @@ expire_preserved_copies() {
 # the same files DUMP_RESUMABLE_ROOTS keeps uncompressed for a resume; a resume happens within its
 # run, never a week later. On 2026-11-07 18,426 logs idle over 7 days held 10 GB of /mnt/rmd.
 sweep_codex_sessions() {
-  local dir f bytes id mounts source dest extra resolved identity held i cursor suffix
+  local dir f bytes id mounts source dest extra resolved identity held hold_reason i cursor suffix
   local -a source_ids=() destinations=()
   [ "$CODEX_SESSION_DAYS" -gt 0 ] || return 0
   [ -d "$CLEAN_HOME/.codex/sessions" ] || [ -d "$CLEAN_HOME/.codex/archived_sessions" ] || return 0
@@ -2017,7 +2021,7 @@ sweep_codex_sessions() {
       case "$source:$dest" in /*:/*) ;; *) log "KEEP $CLEAN_HOME/.codex: container log aliases invalid (fail closed)"; return ;; esac
       [ -z "$extra" ] || { log "KEEP $CLEAN_HOME/.codex: container log aliases invalid (fail closed)"; return; }
       [ -d "$source" ] || continue
-      identity="$(container_path_identity "$source")" || { log "KEEP $CLEAN_HOME/.codex: mount source unreadable: source=$source read=$identity (fail closed)"; return; }
+      identity="$(container_path_identity "$source")" || { log "KEEP $CLEAN_HOME/.codex: mount source unreadable: container=$(docker_container_name "$id") source=$source read=$identity (fail closed)"; return; }
       source_ids+=("$identity"); destinations+=("${dest%/}")
     done <<< "$mounts"
   done <<< "$DOCKER_IDS"
@@ -2027,13 +2031,13 @@ sweep_codex_sessions() {
       # A mounted Codex HOME is expected; a bind-mounted log itself must still stay in place.
       identity="$(container_path_identity "$f")" || { log "KEEP $f: log identity unreadable: read=$identity (unknown)"; continue; }
       case "$DOCKER_IDENTITIES" in *"|$identity|"*) log "KEEP $f: running container mount"; continue ;; esac
-      resolved="$(cd -P -- "${f%/*}" 2>/dev/null && pwd -P)" || { log "KEEP $f: log path unreadable (unknown)"; continue; }
-      resolved="$resolved/${f##*/}"; held=0
+      resolved="$(cd -P -- "${f%/*}" 2>&1 && pwd -P)" || { log "KEEP $f: log parent unreadable: path=${f%/*} read=$resolved (unknown)"; continue; }
+      resolved="$resolved/${f##*/}"; held=0; hold_reason=""
       if is_open "$f" || is_open "$resolved"; then held=1; fi
       if [ "${#source_ids[@]}" -gt 0 ]; then
         cursor="${resolved%/*}"; suffix="/${resolved##*/}"
         while :; do
-          identity="$(container_path_identity "$cursor")" || { held=1; break; }
+          identity="$(container_path_identity "$cursor")" || { held=1; hold_reason="parent path identity unreadable: path=$cursor read=$identity"; break; }
           for i in "${!source_ids[@]}"; do
             if [ "$identity" = "${source_ids[$i]}" ] && is_open "${destinations[$i]}$suffix"; then held=1; fi
           done
@@ -2041,7 +2045,7 @@ sweep_codex_sessions() {
           suffix="/${cursor##*/}$suffix"; cursor="${cursor%/*}"; [ -n "$cursor" ] || cursor=/
         done
       fi
-      if [ "$held" = 1 ]; then log "KEEP $f: held open by a process"; continue; fi
+      if [ "$held" = 1 ]; then log "KEEP $f: ${hold_reason:-held open by a process}"; continue; fi
       bytes="$(du_bytes "$f")"
       log "REMOVE $f: Codex session log idle ${CODEX_SESSION_DAYS} days"
       act rm -f -- "$f" && tally "codex-sessions $dir" "$bytes"
