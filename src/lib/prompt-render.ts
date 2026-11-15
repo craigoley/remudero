@@ -166,7 +166,7 @@ export function priorPartialWorkLines(work: PriorPartialWork | undefined): strin
   const more = work.stagedMore && work.stagedMore > 0 ? ` (+${work.stagedMore} more)` : "";
   return [
     "",
-    "PRIOR PARTIAL WORK (W1-T6434): an earlier fix worker for this PR died with staged, uncommitted work at this",
+    "PRIOR PARTIAL WORK (W1-T6434): an earlier fix worker for this PR stopped with partial work at this",
     "exact head. It was preserved, not applied. It is UNVERIFIED — it may be incomplete, wrong, or already",
     "superseded. Evaluate it against the evidence below; never apply it blindly.",
     `RECOVERY REF: ${work.recoveryRef}`,
@@ -176,6 +176,15 @@ export function priorPartialWorkLines(work: PriorPartialWork | undefined): strin
     CI_LOG_FENCE_OPEN,
     neutralizeFenceMarkers(work.excerpt),
     CI_LOG_FENCE_CLOSE,
+    ...(work.indexPatch ? [
+      "SEPARATE INDEX SNAPSHOT: staged bytes differ from the worktree snapshot above. Inspect both before resuming.",
+      `INDEX RECOVERY REF: ${work.indexPatch.recoveryRef}`,
+      `Inspect it with: git diff ${work.indexPatch.recoveryRef}^ ${work.indexPatch.recoveryRef}`,
+      `INDEX DIFF EXCERPT (secret-scrubbed${work.indexPatch.excerptTruncated ? ", TRUNCATED — read the ref for the rest" : ""}):`,
+      CI_LOG_FENCE_OPEN,
+      neutralizeFenceMarkers(work.indexPatch.excerpt),
+      CI_LOG_FENCE_CLOSE,
+    ] : []),
   ];
 }
 

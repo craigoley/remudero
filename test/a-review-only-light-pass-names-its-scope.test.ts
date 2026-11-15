@@ -3,11 +3,11 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { runDaemon, startInterphaseReviewClock, type DaemonDeps, type LightPassScope } from "#src/lib/daemon.js";
+import { lightPassFixAdmitted, runDaemon, startInterphaseReviewClock, type DaemonDeps, type LightPassScope } from "#src/lib/daemon.js";
 import { loadPlan, type Plan } from "#src/lib/plan.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
-import { runSweepLightPass, type LightPassScopeName, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
+import { reviewOnlyStandDownReason, runSweepLightPass, type LightPassScopeName, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
 import { lightPassActionable, reviewOnlyLightPassDeps } from "#src/run-task.js";
 
 // W1-T9569 — A REVIEW-ONLY LIGHT PASS NAMES ITS SCOPE. Through the orphaned recycle PAUSE of 2026-10-14
@@ -17,6 +17,8 @@ import { lightPassActionable, reviewOnlyLightPassDeps } from "#src/run-task.js";
 const NOW = Date.now();
 const DEFERRED = "deferred to full sweep (light pass)";
 const SCOPES: readonly LightPassScopeName[] = ["pause", "drain", "boot", "idle", "interphase-review"];
+/** W1-T12703: a boot pass keeps its repair lanes open; only these scopes close them. */
+const CLOSED_SCOPES = SCOPES.filter((scope) => scope !== "boot");
 
 function conflicted(): OpenPrView {
   return {
@@ -42,7 +44,7 @@ async function lightPassRows(t: TestContext, scope: LightPassScope | undefined):
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t9569-`));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const reviewOnly = scope?.reviewOnly === true;
-  const fixAdmitted = !reviewOnly && scope?.admit?.("fix-dispatch", "light") !== false;
+  const fixAdmitted = lightPassFixAdmitted(scope);
   const deps: SweepDeps = {
     ledgerPath: join(dir, "ledger.ndjson"), runId: "SWEEP-T9569", now: () => NOW,
     arm: () => { assert.fail("neither head can arm"); },
@@ -67,7 +69,7 @@ test("a review-only pause pass names the pause in its stand-down and light_pass_
     assert.equal(row.stand_down_reason, "review-only pause pass: repair lanes closed until the PAUSE lifts");
     assert.equal(row.light_pass_scope, "pause", `${row.disposition} carries the scope as a field`);
   }
-  for (const scope of SCOPES) {
+  for (const scope of CLOSED_SCOPES) {
     const scoped = await lightPassRows(t, { reviewOnly: true, scope });
     assert.equal(scoped.length, 2);
     for (const row of scoped) {
@@ -76,6 +78,9 @@ test("a review-only pause pass names the pause in its stand-down and light_pass_
       assert.equal(row.light_pass_scope, scope);
     }
   }
+  // W1-T12703: the boot pass opens its repair lanes, and its stand-down names only what it still holds.
+  assert.equal(lightPassFixAdmitted({ reviewOnly: true, scope: "boot" }), true);
+  assert.equal(reviewOnlyStandDownReason("boot"), "review-only boot pass: arming and closing wait until the boot review settles");
 });
 
 // ── the callers ──────────────────────────────────────────────────────────────────────────────────
