@@ -27,7 +27,7 @@ import { planSafetyGitSync, type PlanSafetyGit, type PlanSafetyGitResult } from 
 import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 // @ts-ignore executable census module has no declaration file.
-import { measureReach } from "#scripts/affected-reach-count.mjs";
+import { changesReach, measureReach } from "#scripts/affected-reach-count.mjs";
 
 type Files = Record<string, string | null>;
 
@@ -36,6 +36,7 @@ const REACH = "scripts/affected-reach-baseline.json";
 const json = (v: unknown) => `${JSON.stringify(v, null, 2)}\n`;
 /** One import line, built from its specifier so this file carries no relative specifier of its own. */
 const use = (spec: string) => `import ${JSON.stringify(spec)};\n`;
+const multilineUse = (spec: string) => `await import(\n  ${JSON.stringify(spec)}\n);\n`;
 /** One shard of `n` active entries; each renders `- <20 f> [src: learnings#<id>]`, 43 chars with its newline. */
 const shard = (prefix: string, n: number) => Array.from({ length: n }, (_, i) => `- id: ${prefix}${i}\n  fact: ${"f".repeat(20)}\n`).join("");
 
@@ -162,6 +163,23 @@ test("W1-T12526 criterion 3: affected-reach — two PRs that each add a run-task
   assert.equal(together.rows[0]!.merged, (measureReach(merged, {}) as { importerCount: number }).importerCount);
 });
 
+test("W1-T12526 criterion 3: affected-reach counts multiline specifier edits on the merged tree", () => {
+  const start = {
+    [REACH]: reachBaseline(["test/old.test.ts"]),
+    ...REACH_TREE,
+    "test/a.test.ts": multilineUse("../src/a.js"),
+    "test/b.test.ts": multilineUse("../src/a.js"),
+  };
+  const a = { "test/a.test.ts": multilineUse("../src/run-task.js") };
+  const b = { "test/b.test.ts": multilineUse("../src/run-task.js") };
+  assert.equal(changesReach("test/a.test.ts", start["test/a.test.ts"]!, a["test/a.test.ts"]!), true,
+    "the complete module specifier is part of the reach trigger");
+  const together = assertHeldTogether("affected-reach", landTwo(start, a, b),
+    { path: REACH, field: "importerCount", merged: 3, ceiling: 2 });
+  const merged = new Map(Object.entries({ ...start, ...a, ...b }) as Array<[string, string]>);
+  assert.equal(together.rows[0]!.merged, (measureReach(merged, {}) as { importerCount: number }).importerCount);
+});
+
 test("W1-T12526 criterion 4: affected-reach is bounded — no graph when no import line lands, and unread past the read bound", () => {
   // No landed file changes an import line: the gate is counted with no listing of the code tree at all.
   const quiet = judgeMergedRatchets(memory({ [REACH]: reachBaseline([]), "src/a.ts": "export const a = 2;\n" }, { [REACH]: reachBaseline([]), "src/a.ts": "export const a = 1;\n" }));
@@ -229,6 +247,14 @@ test("W1-T12526 criterion 7: invariant:no-clean-without-count — a counter that
     "affected-reach", /^affected-reach: a ratchet counter threw: the census needs source modules and suites$/);
   unreadBy(judgeMergedRatchets(memory({ [REACH]: reachBaseline([]), "src/a.ts": "export {};\n" }, { [REACH]: reachBaseline([]) })),
     "affected-reach", /^affected-reach: the code tree could not be read: no listing of src\/, scripts\/, bin\/ and test\/ was read$/);
+  // A multiline specifier that the alias resolver cannot model must run the counter and become unread,
+  // not take the no-graph shortcut and claim a clean count.
+  const imports = JSON.stringify({ imports: { "#bad": { import: "./src/a.ts" } } });
+  const aliasMain = { [REACH]: reachBaseline(["test/old.test.ts"]), ...REACH_TREE, "package.json": imports,
+    "test/bad.test.ts": multilineUse("../src/a.js") };
+  const aliasMerged = { ...aliasMain, "test/bad.test.ts": multilineUse("#bad") };
+  unreadBy(judgeMergedRatchets(memory(aliasMerged, aliasMain, { reachFiles: ["src/run-task.ts", "src/a.ts", "test/old.test.ts", "test/bad.test.ts"] })),
+    "affected-reach", /^affected-reach: a ratchet counter threw: package imports target for/);
   // house-layout: a src population the read could not list.
   const layout = judgeMergedRatchets(memory({ "src/a.ts": "export const a = 1;\n" }, {}, { populationUnread: "git ls-tree -l exited 128" }));
   unreadBy(layout, "house-layout", /house-layout: the tree could not be read: git ls-tree -l exited 128/);

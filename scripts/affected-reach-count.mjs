@@ -85,8 +85,22 @@ export function measureReach(files, aliases) {
 /** A line that can carry a graph edge: an import, export-from or require, or a quoted repo path. */
 const EDGE_LINE_RE = /\bimport\b|\brequire\s*\(|\bfrom\s*["'`]|["'`](?:src|scripts|bin|test|openapi|packages)["'`/]/;
 
+/** The module specifiers buildAffectedSuitesGraph reads, including a specifier on a later line of a
+ *  multiline import. Keep these patterns in step with `specifiers` in src/lib/affected-suites.ts. */
+const MODULE_SPECIFIER_PATTERNS = [
+  /\b(?:import|export)\s[^'"`;]*?\bfrom\s*["']([^"']+)["']/g,
+  /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g,
+  /\bimport\s+["']([^"']+)["']/g,
+  /\brequire\s*\(\s*["']([^"']+)["']\s*\)/g,
+];
+
 function edgeLines(text) {
-  return text.split("\n").filter((line) => EDGE_LINE_RE.test(line)).map((line) => line.trim()).sort().join("\n");
+  const lines = text.split("\n").filter((line) => EDGE_LINE_RE.test(line)).map((line) => line.trim());
+  const specifiers = [];
+  for (const pattern of MODULE_SPECIFIER_PATTERNS) {
+    for (const match of text.matchAll(pattern)) specifiers.push(`specifier:${match[1]}`);
+  }
+  return [...lines, ...specifiers].sort().join("\n");
 }
 
 function packageImports(text) {
