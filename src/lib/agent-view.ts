@@ -14,7 +14,7 @@
  * so no fact is discarded. The nav badge counts from the same fold ({@link AGENT_FOLDS}).
  */
 import { join } from "node:path";
-import { analyticsSource, ANALYTICS_SOURCE_CONSOLE_V1, ANALYTICS_SOURCE_SIGNALS, type AnalyticsConsoleSource, type AnalyticsInstanceInput } from "./analytics-view.js";
+import { analyticsSource, snapshotInputs, ANALYTICS_SOURCE_CONSOLE_V1, ANALYTICS_SOURCE_SIGNALS, type AnalyticsConsoleSource, type AnalyticsInstanceInput } from "./analytics-view.js";
 import type { AnalyticsSnapshot } from "./analytics-route.js";
 import { AUTOMATION_ACTION_VERSION } from "./automation-action.js";
 import { clockFromMillisFn } from "./clock.js";
@@ -45,6 +45,10 @@ export const AGENT_VIEW_VERSION = 1;
 export const AGENT_QUALIFICATION_GENERATION = "operator-agent-records-v1";
 /** A part's time-dependent states (expiry, staleness) are recomputed at least this often with no new fact. */
 export const AGENT_CLOCK_MS = 60_000;
+/** The fact_step range index excludes unrelated facts from the agent's reuse identity. */
+export function agentInputSequence(db: ReadModelDb): number {
+  return Number(db.prepare("SELECT coalesce(max(seq), 0) AS seq FROM fact INDEXED BY fact_step WHERE step >= 'panel.' AND step < 'panel/'").get()?.seq);
+}
 /**
  * BACKSTOP: how long an instance's builds are tallied before one `agent.built` row is written. A row per build was
  * 1,043 ledger rows in 13 hours (2026-11-10), each one moving the ledger every reader folds; `read_model.view_builds`
@@ -207,6 +211,7 @@ export function createAgentView<S extends { instance: string; tickedAt?: number 
   qualificationGeneration: string;
   perInstance: true;
   snapshotSourced: true;
+  inputsFingerprint(ctx: { now: number; sourceStore?: ReadModelDb; instances: ReadonlyArray<{ state: S; db?: ReadModelDb; lease?: ReadModelLease }> }): string | undefined;
   prepare(ctx: { instances: ReadonlyArray<{ state: S; db?: ReadModelDb; lease?: ReadModelLease }> }, more: () => boolean): boolean;
   materialize(ctx: { now: number; sourceStore?: ReadModelDb; instances: ReadonlyArray<{ state: S; db?: ReadModelDb; lease?: ReadModelLease }> }): Array<{ key: string; data: AgentViewData; sources: ViewSource[] }>;
   legacy(key: string, now: number, data: unknown): ShadowLegacy | undefined;
@@ -248,6 +253,15 @@ export function createAgentView<S extends { instance: string; tickedAt?: number 
     perInstance: true,
     // A committed analytics snapshot makes the proposals part due at once.
     snapshotSourced: true,
+    // Relevant panel facts, scoped readiness, home-store analytics states/freshness and the memo's clock bucket.
+    inputsFingerprint: ({ now, sourceStore, instances }) => {
+      const home = sourceStore ?? instances[0]?.db;
+      if (!home) return undefined;
+      return JSON.stringify([Math.floor(now / AGENT_CLOCK_MS), slotsOf(instances).map(slot => [
+        slot.instance.name, agentInputSequence(slot.db), snapshotInputs(home, slot.instance.name,
+          [ANALYTICS_SOURCE_CONSOLE_V1, ANALYTICS_SOURCE_SIGNALS], now),
+      ])]);
+    },
     prepare: ({ instances }, more) => slotsOf(instances).every((slot) => folds.advance(foldSlot(slot), more)),
     materialize: ({ now, sourceStore, instances }) => {
       // Scoping a build must not move the shared analytics store to that repository's DB.
@@ -259,7 +273,7 @@ export function createAgentView<S extends { instance: string; tickedAt?: number 
         const { instance } = slot;
         const fold = folds.current(foldSlot(slot));
         const committed = committedAnalytics(home, instance.name, parsed, now);
-        const memo = `${fold.seq}|${committed.analytics?.asOf ?? "-"}|${committed.analytics?.reason ?? "-"}|${committed.source.state}|${committed.source.phase ?? "-"}|${Math.floor(now / AGENT_CLOCK_MS)}`;
+        const memo = `${agentInputSequence(slot.db)}|${committed.analytics?.asOf ?? "-"}|${committed.analytics?.reason ?? "-"}|${committed.source.state}|${committed.source.phase ?? "-"}|${Math.floor(now / AGENT_CLOCK_MS)}`;
         let entry = built.get(instance.name);
         if (entry?.memo !== memo) {
           const input = { ledgerDir: instance.ledgerDir, instance: instance.name, ...(instance.repo ? { repository: instance.repo } : {}), now, rows: fold.rows, ...(committed.analytics ? { analytics: committed.analytics } : {}) };
