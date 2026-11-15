@@ -406,3 +406,96 @@ test("W1-T12551 criterion 5, with W1-T12551 criterion 3 on refill: a lane refill
     await run;
   }
 });
+
+async function clockedRefills(
+  plan: Plan,
+  ledger: Record<string, unknown>[],
+  initial: string[],
+  refills: Array<{ atMs: number; finished: string; next: string }>,
+) {
+  let nowMs = NOW;
+  let stopping = false;
+  const spawned: string[] = [];
+  const rows: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const releases = new Map<string, (r: RunResult) => void>();
+  const merged = new Set<string>();
+  const result = (id: string): RunResult => ({ taskId: id, runId: `${id}-run`, merged: true, costUsd: 0, verdict: "merged" }) as RunResult;
+  const lines = [
+    { ts: iso(NOW - 50 * HOUR), step: "run.start", run_id: "measured", task_id: "W1-T90" },
+    { ts: iso(NOW - 49 * HOUR), step: "verdict", run_id: "measured", task_id: "W1-T90" },
+    ...ledger,
+  ].map((row) => JSON.stringify(row));
+  const run = runDaemon(plan, {
+    refreshMerged: () => (id: string) => merged.has(id),
+    runOne: (id) => {
+      spawned.push(id);
+      return stopping ? Promise.resolve(result(id)) : new Promise<RunResult>((done) => releases.set(id, done));
+    },
+    sleep: async () => {},
+    checkStop: () => (stopping ? "test stop" : undefined),
+    log: (step, extra = {}) => rows.push({ step, extra }),
+    now: () => new Date(nowMs),
+    readLedgerLines: () => lines,
+  } as DaemonDeps, { headroomEnabled: false, laneCount: 2, max: initial.length + refills.length });
+  try {
+    for (let i = 0; i < 5; i++) await flushMicrotasks();
+    assert.deepEqual(spawned, initial, "the initial wave fills both lanes");
+    assert.ok(rows.some((r) => r.step === "dispatch.refill_bound" && r.extra.samples === 1),
+      "measured history lets refills continue while a sibling exceeds its run length");
+    const expected = [...initial];
+    for (const { atMs, finished, next } of refills) {
+      assert.ok(releases.has(finished), `${finished} is running before it settles`);
+      nowMs = atMs;
+      merged.add(finished);
+      releases.get(finished)!(result(finished));
+      for (let i = 0; i < 10; i++) await flushMicrotasks();
+      expected.push(next);
+      assert.deepEqual(spawned, expected, `refill at ${iso(nowMs)} uses only trailing starts`);
+      assert.ok(!merged.has(initial[0]!), "the slow sibling keeps the original phase active");
+    }
+    assert.equal(rows.filter((r) => r.step === "dispatch.concurrent_set").length, 1,
+      "every refill belongs to the initial dispatch phase");
+    return rows;
+  } finally {
+    stopping = true;
+    for (const [id, done] of releases) done(result(id));
+    await run;
+  }
+}
+
+for (const elapsed of [24 * HOUR, 24 * HOUR + 1, 25 * HOUR]) {
+  test(`W1-T12551 criterion 2 and W1-T12551 criterion 5: machine phase starts expire on refill after ${elapsed}ms`, async () => {
+    const plan = planOf(shard("W1-T1"), shard("W1-T2"), shard("W1-T3"),
+      shard("W1-T40", { machine: true, priority: 3 }), shard("W1-T50", { machine: true, priority: 3 }));
+    const expired = elapsed > 24 * HOUR;
+    const rows = await clockedRefills(plan, [
+      { ts: iso(NOW - 30 * HOUR), step: QUEUE_JUDGE_SCORECARD_STEP },
+      { ts: iso(NOW - 3 * HOUR), step: "run.start", task_id: "W1-T7" },
+      { ts: iso(NOW - 2 * HOUR), step: "run.start", task_id: "W1-T8" },
+    ], ["W1-T40", "W1-T1"], [
+      { atMs: NOW, finished: "W1-T1", next: "W1-T2" },
+      { atMs: NOW + elapsed, finished: "W1-T2", next: expired ? "W1-T50" : "W1-T3" },
+    ]);
+    assert.deepEqual(rows.filter((r) => r.step === MACHINE_SHARE_STEP).map((r) => r.extra), [
+      { task_id: "W1-T40", share: MACHINE_DISPATCH_SHARE, machine_starts: 0, starts: 2, queue_judge_stale_ms: 30 * HOUR },
+      ...(expired ? [{ task_id: "W1-T50", share: MACHINE_DISPATCH_SHARE, machine_starts: 0, starts: 0,
+        queue_judge_stale_ms: 30 * HOUR + elapsed }] : []),
+    ], "the move log excludes expired machine starts; starts exactly 24 hours old still count");
+  });
+}
+
+test("W1-T12551 criterion 3 and W1-T12551 criterion 5: expired operator phase starts cannot dilute the trailing share", async () => {
+  const plan = planOf(...[1, 2, 3, 4, 5].map((n) => shard(`W1-T${n}`)),
+    shard("W1-T40", { machine: true, priority: 3 }), shard("W1-T50", { machine: true, priority: 3 }));
+  const rows = await clockedRefills(plan, [
+    { ts: iso(NOW - HOUR), step: QUEUE_JUDGE_SCORECARD_STEP },
+  ], ["W1-T1", "W1-T2"], [
+    { atMs: NOW + 7 * HOUR, finished: "W1-T2", next: "W1-T40" },
+    { atMs: NOW + 8 * HOUR, finished: "W1-T40", next: "W1-T3" },
+    { atMs: NOW + 9 * HOUR, finished: "W1-T3", next: "W1-T4" },
+    { atMs: NOW + 25 * HOUR, finished: "W1-T4", next: "W1-T5" },
+  ]);
+  assert.deepEqual(rows.filter((r) => r.step === MACHINE_SHARE_STEP).map((r) => r.extra), [
+    { task_id: "W1-T40", share: MACHINE_DISPATCH_SHARE, machine_starts: 0, starts: 2, queue_judge_stale_ms: 8 * HOUR },
+  ], "a fresh judge preserves the initial order; later, the true 1/3 share prevents a second promotion and move log");
+});

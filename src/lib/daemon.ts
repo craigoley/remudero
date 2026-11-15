@@ -5205,7 +5205,8 @@ export async function runDaemon(
     const nowMs = daemonClock.now();
     const starts = machineShareStarts(rows, plan.byId, nowMs);
     return {
-      queueJudgeStaleMs: queueJudgeAvailability(rows, nowMs).staleMs, starts: [...starts, ...startedSince],
+      queueJudgeStaleMs: queueJudgeAvailability(rows, nowMs).staleMs,
+      starts: [...starts, ...startedSince.filter((s) => s.atMs !== undefined && s.atMs <= nowMs && nowMs - s.atMs <= MACHINE_SHARE_WINDOW_MS)],
       onMoved: (task, move) => {
         const signature = `${task.id}:${move.machine_starts}:${move.starts}`;
         if (signature === lastMachineShareSignature) return;
