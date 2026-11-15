@@ -1,0 +1,61 @@
+- id: W1-T12792
+  title: "The merge-time ratchet judge reads a population larger than its 50 MiB bound in parts"
+  repo: remudero
+  depends_on:
+    - W1-T12717
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the judge decides whether a PR is held at merge time; a gate counted on a partial population would read clean and let a crossing merge
+  origin: "operator-session#ratchet-population-bound-2026-11-15"
+  plan_refs:
+    - W1-T12717
+    - W1-T12509
+    - W1-T12526
+  files:
+    - src/lib/merged-ratchet-verdict.ts
+    - test/gardeners/two-pull-requests-that-cross-a-ceiling-together-are-held-at-merge-time.test.ts
+    - test/gardeners/a-merge-judge-population-past-one-read-is-read-in-parts.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "readMergedRatchetInputsSteps on a fixture clone whose test population is larger than POPULATION_BYTES_BOUND reads it in several git cat-file --batch calls, each for listed blobs of at most POPULATION_BYTES_BOUND bytes, and judgeMergedRatchets returns fixture-copy rows or a clean count for that gate, not unread"
+      proof: "grep: W1-T12792 criterion 1 in test/gardeners/a-merge-judge-population-past-one-read-is-read-in-parts.test.ts"
+    - claim: "invariant:same-count — for the same merged tree and main, the fixture-copy and deps-interface counts the judge derives from the parts equal scripts/fixture-copy-census.mjs and scripts/deps-interface-census.mjs run on a checkout of each tree"
+      kind: guard
+      proof: "grep: W1-T12792 criterion 2 in test/gardeners/a-merge-judge-population-past-one-read-is-read-in-parts.test.ts"
+    - claim: "invariant:no-ceiling-raise — POPULATION_BYTES_BOUND stays 48 * 1024 * 1024 bytes; a single blob larger than it makes that gate unread with a reason that names the path and its size"
+      kind: guard
+      proof: "grep: W1-T12792 criterion 3 in test/gardeners/a-merge-judge-population-past-one-read-is-read-in-parts.test.ts"
+    - claim: "invariant:no-clean-on-a-part — when one part's cat-file call fails (for example the second of three), the gate is unread with that part's reason, never clean, and a crossing in another gate still holds"
+      kind: guard
+      proof: "grep: W1-T12792 criterion 4 in test/gardeners/a-merge-judge-population-past-one-read-is-read-in-parts.test.ts"
+  rationale: |
+    WHY: the merge-time ratchet judge never counts fixture-copy or deps-interface when a PR lands src or test files. The population is larger than the one-read bound, so both gates read unread on every pass. A PR that crosses either ceiling merges without the judge holding it.
+    MEASURED on the Azure host core ledger (live ledger plus rotated archives), 72 h to 2026-11-15T02:46Z:
+    - 1,161 `sweep.ratchet_judge.decided` rows (672 clean, 347 crossing, 142 unread). 406 of them, on 55 PRs, carry "population is N bytes, past the 50331648-byte bound". The first was at 2026-11-13T21:33:39Z.
+    - The populations named were 60,579,696 to 87,787,864 bytes. The test population alone is past the bound.
+    - In 59 of the 406 rows the bound is the whole verdict (unread); in 347 the row also holds other gates' rows. Remedies on the 406: update-branch 323, proceed 59, unwired 20, retry-later 4. Outcomes: direct-merge-updated 220, armed 41, none 145.
+    MEASURED at origin/main dec302d31 on the host: 4,674 test files (60.8 M characters) and 753 src files (26.4 M characters). countFixtureCopiesInTexts took 315 ms and depsInterfaceCounts 94 ms; reading the files took 874 ms.
+    READ at origin/main 5e3cabf0b:
+    - src/lib/merged-ratchet-verdict.ts:130 POPULATION_BYTES_BOUND is 48 MiB, "under the 64 MiB stdout cap of one git call" (planSafetyGitSync and planSafetyGitAsync, src/lib/plan-pr-merge-safety.ts:223, maxBuffer 1 << 26).
+    - :448 a listing past the bound sets populationUnread, and populationTexts (:213) then returns a reason for each population gate. The bound limits one git call, but the code applies it to the whole population.
+    - :430 readBatch reads every path in one `git cat-file --batch` call, so a population past 64 MiB cannot be read in one call.
+    - The counters are not sums over files: countFixtureCopiesInTexts keeps sets of builder names across files, and depsInterfaceCounts finds aliased seams across files. So the judge must count the whole population once; only the reads can be split.
+    RELATED: W1-T12717 (#18616, open) names this defect and leaves it out of scope ("the population bound"); it changes the same file, so this task builds after it.
+  design: |
+    INVARIANT same-count: the counts the judge derives from a population read in parts equal the census scripts' counts on the same tree.
+    INVARIANT no-ceiling-raise: no git call returns more than POPULATION_BYTES_BOUND bytes of listed blobs, and the bound is not raised.
+    INVARIANT no-clean-on-a-part: a gate whose population was not read in full is unread, never clean; W1-T12509's no-clean-without-count is kept.
+    1. src/lib/merged-ratchet-verdict.ts: keep parsePopulationListing, and make it return each path's size as well as the total. Remove the whole-population bound check at :448.
+    2. Split the population paths into parts whose listed sizes add up to at most POPULATION_BYTES_BOUND, in listing order. Read each part with its own `git cat-file --batch` call through the same `git` step, at main for unchanged paths (as today) and at the merged tree for landed paths. A path whose own size is past the bound makes the population unread with that path and size in the reason.
+    3. Merge the parts into the same readMain/readMerged maps the judge reads today, then count once. No change to judgeMergedRatchets, the counters or any baseline.
+    4. A failed part makes the population unread with that part's verb, status and stderr (the `failed` helper), as a failed listing does today.
+    5. Tests build a clone with test/helpers/git-repo.ts whose test population is just past the bound, from a few large generated test files. Drive readMergedRatchetInputsSteps with the production planSafetyGitSync runner.
+    NOT IN SCOPE: any baseline value; POPULATION_BYTES_BOUND; the gates the judge counts (W1-T12717, W1-T12526); the remedy chosen for a crossing.
+  falsifier: |
+    Put the whole-population bound check back: criterion 1 must fail with unread. Count each part on its own and add the counts: criterion 2 must fail on a builder name defined in one part and used in another. Raise the bound to 128 MiB: criterion 3 must fail. Ignore a failed part: criterion 4 must fail with a clean gate. Restore, and all must pass.
+  note: |
+    Id reserved for run-unfiled-1794710957000 with ~/rmd-work/bin/reserve-id.sh. Build after W1-T12717 merges, off origin/main.
