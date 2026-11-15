@@ -88,11 +88,11 @@
     imports with rmd test-place; use package aliases and the shared repository-root helper.
   acceptance:
     - claim: "The offline census reports corpus coverage, supported forms and external/internal/unresolved candidates, and sees a labelled positive control"
-      proof: "unit test: test/ci/gates/external-payload-observation.test.ts"
+      proof: "unit test: W1-T12821: census reports coverage and classifications with a positive control"
     - claim: "The real CLI distinguishes incomplete input and exceeded bounds from a complete zero and never needs network or host state"
-      proof: "unit test: test/ci/gates/external-payload-observation.test.ts"
+      proof: "unit test: W1-T12821: offline CLI separates incomplete input and exceeded bounds from complete zero"
     - claim: "The report schema preserves per-site absence semantics, evidence gaps, fixture provenance, cohort limits and separate recommendations without turning valid omissions into hazards"
-      proof: "unit test: test/ci/gates/external-payload-observation.test.ts"
+      proof: "unit test: W1-T12821: report schema preserves per-site evidence and rejects unsupported completeness"
     - claim: "The committed observation artifact includes the reviewed cohort and follow-up recommendations"
       proof: "grep: follow_up_recommendations: in plan/external-payload-observation.yaml"
   note: |
