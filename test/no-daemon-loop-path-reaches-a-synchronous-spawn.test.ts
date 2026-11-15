@@ -555,6 +555,69 @@ test("W1-T9615: the SRE lane's daemon input reaches no synchronous plan-PR prefl
   }
 });
 
+/** W1-T12790: the triage status landing the daemon's idle branch drives (runAutoTriage -> triageCommand ->
+ *  triageCommandLocked), and the synchronous plan-PR preflight it ran on the loop until it awaited the async landing. */
+const TRIAGE_LANDING_SEEDS = ["landTriageStatusOutcome", "landPrivateTriageStatus"] as const;
+const TRIAGE_SYNC_PREFLIGHT = ["planPrPreflightAtCommit", "runInTree"] as const;
+/** Names the name walk crosses from those seeds that run no synchronous landing. `planPrPreflight` is the landing
+ *  option key the async landing reads (W1-T9736 makes the walk read keys as keys). `escalation` is the member read
+ *  `message.extra.escalation` in recordEscalationIntakeOutcome. `setFeedbackStatus` lands only when its `land` option
+ *  has no `stateRoot`: landPrivateTriageStatus passes a `stateRoot` and landTriageStatusOutcome passes no `land`. */
+const TRIAGE_NO_LANDING_NAMES: ReadonlySet<string> = new Set(["planPrPreflight", "escalation", "setFeedbackStatus"]);
+
+/** The first path, as names, from `seed` to a name in `targets` that crosses none of `around`; undefined when none. */
+function pathAround(fns: Fn[], seed: string, targets: readonly string[], around: ReadonlySet<string>): string[] | undefined {
+  const byName = new Map<string, Fn[]>();
+  for (const f of fns) byName.set(f.name, [...(byName.get(f.name) ?? []), f]);
+  const parent = new Map<string, string | undefined>([[seed, undefined]]);
+  const queue = [seed];
+  while (queue.length) {
+    const name = queue.shift()!;
+    if ((targets as readonly string[]).includes(name)) {
+      const path = [name];
+      for (let up = parent.get(name); up !== undefined; up = parent.get(up)) path.unshift(up);
+      return path;
+    }
+    for (const f of byName.get(name) ?? []) {
+      for (const id of f.body.match(/[A-Za-z_$][\w$]*/g) ?? []) {
+        if (byName.has(id) && !parent.has(id) && !around.has(id)) {
+          parent.set(id, name);
+          queue.push(id);
+        }
+      }
+    }
+  }
+  return undefined;
+}
+
+/** One refusal per seed whose walk reaches the synchronous plan-PR preflight, naming the seed and the path. */
+function triageLandingRefusals(fns: Fn[]): string[] {
+  return TRIAGE_LANDING_SEEDS.flatMap((seed) => {
+    const path = pathAround(fns, seed, TRIAGE_SYNC_PREFLIGHT, TRIAGE_NO_LANDING_NAMES);
+    return path === undefined ? [] : [`${seed} reaches the synchronous plan-PR preflight: ${path.join(" > ")}`];
+  });
+}
+
+test("W1-T12790 criterion 4: the triage status landing reaches no synchronous plan-PR preflight, and no census row rises", () => {
+  const fns = censusFunctions();
+  const daemon = loopReachable(fns, "daemonCommand");
+  for (const seed of TRIAGE_LANDING_SEEDS) assert.ok(daemon.has(seed), `positive control: the daemon loop reaches ${seed}`);
+  assert.deepEqual(triageLandingRefusals(fns), [], "a triage status landing runs the synchronous plan-PR preflight on the loop");
+  // Every name the walk goes around is still on a seed's walk: a name that left it must leave this list too.
+  const reached = new Set(TRIAGE_LANDING_SEEDS.flatMap((seed) => [...loopReachable(fns, seed)]));
+  for (const name of TRIAGE_NO_LANDING_NAMES) assert.ok(reached.has(name), `${name} is no longer on a seed's walk; delete it`);
+  // Positive control: the walk without those names does reach the preflight, so the check above cannot pass vacuously.
+  assert.ok(pathAround(fns, "landTriageStatusOutcome", TRIAGE_SYNC_PREFLIGHT, new Set()), "the plain walk reaches the preflight by name");
+  // Positive control: putting the synchronous landing call back fails with the seed's name.
+  for (const seed of TRIAGE_LANDING_SEEDS) {
+    const reverted = fns.map((f) => (f.name === seed ? { ...f, body: `${f.body}\nlandFeedbackStatusContent(root, relPath, content, opts);` } : f));
+    const found = triageLandingRefusals(reverted);
+    const named = `${seed} reaches the synchronous plan-PR preflight: ${seed} > landFeedbackStatusContent > `;
+    assert.ok(found.some((m) => m.startsWith(named)), `the reverted ${seed} is refused by name: ${found.join(" | ")}`);
+  }
+  assert.deepEqual(refusals(fns, SYNC_SPAWN_LOOP_BASELINE), [], "no SYNC_SPAWN_LOOP_BASELINE row rises and no name is added");
+});
+
 /** W1-T9696: daemon-loop captures that now stage for the async sweep, and so never name captureFeedback. */
 const STAGED_CAPTURE_SEEDS = ["pollIssues", "pollAlerts", "productionIssueRevalidationPorts", "feedbackEvidenceCoverageFiler"] as const;
 
