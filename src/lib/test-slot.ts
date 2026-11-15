@@ -844,7 +844,8 @@ function parentTestSlotClaim(raw: string, dir: string, requirePrivate: boolean, 
     };
     return { lease: { outcome: "acquired", concurrency: held.concurrency!, waitedMs: 0,
       note: `inherited live parent test slot (${claim.path}); --test-concurrency=${held.concurrency}`,
-      childEnvironment: { [TEST_SLOT_PARENT_ENV]: raw, [TEST_SLOT_DIR_ENV]: dir },
+      childEnvironment: { [TEST_SLOT_PARENT_ENV]: raw, [TEST_SLOT_DIR_ENV]: dir,
+        NODE_COMPILE_CACHE: join(dir, "node-compile-cache") },
       refresh: verifyParent, release: verifyParent } };
   } catch (error) {
     const reason = `unreadable-parent-claim: ${String((error as Error)?.message ?? error)}`;
@@ -1876,7 +1877,7 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
               outcome: "acquired", executionAllowed: true, concurrency, waitedMs,
               ...((opts.pid ?? process.pid) === process.pid && sameHost(host(), hostname()) && processStart ? {
                 childEnvironment: { [TEST_SLOT_PARENT_ENV]: parentClaim,
-                  [TEST_SLOT_DIR_ENV]: dir },
+                  [TEST_SLOT_DIR_ENV]: dir, NODE_COMPILE_CACHE: join(dir, "node-compile-cache") },
                 ...(privateWriter ? {} : { heartbeat: { path, ownerNonce, pid: process.pid, processStart, host: host(),
                   bootId: ownedRecord.bootId, pidNs: ownedRecord.pidNs, ownerUid: ownedRecord.ownerUid,
                   intervalMs: TEST_SLOT_HEARTBEAT_MS, coverageEnvironment: { [TEST_SLOT_RUN_ENV]: parentClaim } } }),
@@ -2223,7 +2224,8 @@ export function admitStaticWork(label: string, opts: TestSlotOptions & { memoryB
       }
       if (announced) log(JSON.stringify({ step: "test_slot.static_admitted", label, outcome, waitedMs: waited() }));
       return { outcome, executionAllowed: true, waitedMs: waited(), release, note: `${why}${unrecorded ?? ""}`,
-        ...(unrecorded ? {} : { childEnvironment: { [TEST_SLOT_DIR_ENV]: dir } }) };
+        ...(unrecorded ? {} : { childEnvironment: { [TEST_SLOT_DIR_ENV]: dir,
+          NODE_COMPILE_CACHE: join(dir, "node-compile-cache") } }) };
     };
     if (headroom === undefined || Number.isNaN(headroom)) return admit("open", "static admission OPEN: no memory reading on this host");
     if (seen.holders.length === 0 || headroom >= need) {
