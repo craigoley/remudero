@@ -50,10 +50,6 @@
   acceptance:
     - claim: invariant:core-public-task-pr — target-local criteria stay authoritative; absent tasks use matching source-pinned Core criteria, and any missing or mismatched identity, target, or source refuses
       proof: 'unit test: test/github/a-run-for-an-ops-task-writes-its-acceptance-block-from-the-ops-catalog.test.ts'
-    - claim: The PR opener refuses malformed or mismatched task, source, and destination bindings before opening a pull request
-      proof: 'unit test: test/github/a-run-for-an-ops-task-writes-its-acceptance-block-from-the-ops-catalog.test.ts'
-    - claim: A task already filed in the destination plan keeps its local acceptance criteria over a competing Core binding
-      proof: 'unit test: test/github/a-run-for-an-ops-task-writes-its-acceptance-block-from-the-ops-catalog.test.ts'
   falsifier: |
     The test must fail if the canonical Core binding is removed from the run-to-open call path, if a
     mismatch is accepted, or if the destination's local task can be overridden. Run it on the exact
