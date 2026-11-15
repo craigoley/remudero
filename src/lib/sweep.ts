@@ -241,6 +241,7 @@ import type {
 import { DEP_REVIEW_ENGINE_REVISION, depReviewRowEngineRevision, isDependabotAuthor, dependabotOwnRedSignal, dependabotReviewArgs, dependabotRefreshVerdict, type DependabotOwnRedSignal, type DependabotRefreshVerdict } from "./dep-review.js";
 import { parseLedger } from "./retro.js";
 import { readReviewHostObservation, selectRuntimeReviewWidth } from "./review-capacity.js";
+import { yieldingFixClaim } from "./review-precedence.js";
 import {
   capacityDecisionText,
   publishReviewDemand,
@@ -20343,7 +20344,7 @@ export async function runSweep(
           waitSinceMs: (pr) => waitSinceMs(pr, false),
         });
   const fixCapacityReleases = new Map<number, () => void>();
-  const capacityClaim = deps.claimFixAdmission ?? fullRepairAdmission?.claim;
+  const capacityClaim = deps.claimFixAdmission ?? yieldingFixClaim("full", fullRepairAdmission?.claim, ledgerLines, now, log, fullReviewCandidates ?? [], fullReviewQueue);
   const claimFixAdmission = capacityClaim ? (pr: OpenPrView) => {
     const claim = capacityClaim(pr);
     if (claim.admitted && claim.release) fixCapacityReleases.set(pr.prNumber, claim.release);
@@ -26673,11 +26674,10 @@ async function runSweepLightPassCore(
   // pass still reconciles every PR concurrently; only the expensive fix-dispatch spending point
   // claims from this shared pool. `activeWorkerCount` is the same process-wide counter the adaptive
   // review controller reads, and selected spawning reviews reserve their width before fixes race.
-  const hostWorkerBudget = policy.reviewCapacity.hostWorkerBudget;
   const repairAdmission = createSweepFixAdmissionController({
     surface: "light",
     queueDepth,
-    hostWorkerBudget,
+    hostWorkerBudget: policy.reviewCapacity.hostWorkerBudget,
     activeWorkers,
     readActiveWorkers: deps.fixProgressJudge || deps.readFixPressure ? deps.readActiveWorkerCount ?? activeWorkerCount : undefined,
     readPressure: deps.readFixPressure ?? (deps.fixProgressJudge
@@ -26687,7 +26687,7 @@ async function runSweepLightPassCore(
     ...productionFixAdmissionReaders(deps),
     log: deps.log,
   });
-  const claimFixAdmission = deps.claimFixAdmission ?? repairAdmission.claim;
+  const claimFixAdmission = yieldingFixClaim("light", deps.claimFixAdmission ?? repairAdmission.claim, selectionLedgerLines, now, deps.log, refillTail);
   const selectedNumbers = new Set<number>([
     ...spawning.map((p) => p.prNumber),
     ...planFilings.map((p) => p.prNumber),
