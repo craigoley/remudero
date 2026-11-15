@@ -385,7 +385,8 @@ import {
   type RefusalAmendmentResult,
   type RefusalCandidate,
 } from "./refusal-amendment.js";
-import { landTaskFilesAsync, stagedTaskFiles, type LandTaskFilesOpts } from "./feedback-landing.js";
+import { landTaskFilesAsync, landingIdentity, stagedTaskFiles, type LandTaskFilesOpts } from "./feedback-landing.js";
+import { actOnParkedPr, parkedPrFacts, parkedPrRemedy, remedyStalledCriterion, takeParkedPrRemedy, type ParkedPrHost } from "./parked-pr-remedy.js";
 
 /** W1-T6434: the bounded, already-scrubbed view of a preserved fix-owner patch. */
 export interface PriorPartialWork {
@@ -2461,6 +2462,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "guardArmedBody",
   // W1-T4838: a worker's categorized refusal is held and drafted as a plan amendment, not retried.
   "draftRefusalAmendments",
+  "parkedPr",
   // W1-T5349: the plan-repair rung's fact read and its renumber/retitle effect.
   "readPlanRepairFacts",
   // W1-T11171: the dependents term of a conflict's blocked cost.
@@ -2632,6 +2634,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "reviewerCodeAdvance"
   | "guardArmedBody"
   | "draftRefusalAmendments"
+  | "parkedPr"
   | "captureRepairFeedback"
   | "disarmAutoMerge"
   | "stackPrerequisite"
@@ -3178,6 +3181,21 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     }
     return contractRevision ? { contractRevision } : {};
   };
+  // W1-T12199: amendments land through the sealed task-file landing. A test's injected git and gh
+  // carry the landing too, so it never runs a real child against the checkout the test runs in.
+  const taskFilesLandingOpts = (target: PlanDestinationRepository): LandTaskFilesOpts => ({
+    stateRoot: config.root,
+    targetRepository: { owner: target.owner, repo: target.repo },
+    log,
+    planPrPreflight: (sha, pr) => planPrPreflightImpl(target.checkoutDir, sha, {
+      ...pr, ...(target.checkoutDir === repoDir ? {} : { codeRoot: repoDir, bodyProofRoot: "plan" as const }),
+    }, { log }),
+    ...(deps.planRepairGitImpl ? { git: (args: string[]) => planRepairGit("git", ["-C", target.checkoutDir, ...args]) } : {}),
+    ...(deps.ghJsonImpl ? { gh: (args: string[]) => {
+      const out = ghJsonForBuild(args);
+      return typeof out === "string" ? out : JSON.stringify(out);
+    } } : {}),
+  });
   return {
     readerAgreement: { owner, repo, plan, readJson: readJsonImpl },
     fixDispatchFleetHold: () => checkSharedPause(config.root, { run: pauseGit.run, mintAnchor: pauseGit.mintAnchor }),
@@ -5347,25 +5365,25 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
 
     guardArmedBody: (pr) => realArmDepsAsync(() => config).closingReferences!(pr.prUrl),
 
+    parkedPr: {
+      readTaskShard: (taskId) => readTaskShard(repoDir, taskId),
+      reserveTaskId: () => reservePlanRepairTaskId(repoDir, landingIdentity({ family: "task-files",
+        targetRepository: { owner, repo }, sourceRepository: { owner, repo } }).branch, undefined, log),
+      landTaskFiles: async (files) => {
+        const landed = await landTaskFilesAsync(repoDir, files, taskFilesLandingOpts(publicTaskRepository));
+        const error = landed.error ?? landed.refused[0]?.reason;
+        return { ...(landed.prUrl === undefined ? {} : { prUrl: landed.prUrl }), ...(error === undefined ? {} : { error }) };
+      },
+      closePr: async (prUrl, comment) => {
+        assertLiveWriteAllowed("gh-transport", `parked pull request close of ${prUrl}`);
+        await ghTextAsync(["pr", "close", prUrl, "--comment", comment]);
+      },
+    },
     // W1-T4838 — hold each refused task, then open ONE plan-only amendment PR for it. The hold is
     // written FIRST (cheap, local, idempotent) so a slow or failed PR never lets the task re-dispatch.
     draftRefusalAmendments: async (candidates) => {
       const results: RefusalAmendmentResult[] = [];
-      // W1-T12199: amendments land through the sealed task-file landing. A test's injected git and gh
-      // carry the landing too, so it never runs a real child against the checkout the test runs in.
-      const landingOpts = (target: PlanDestinationRepository): LandTaskFilesOpts => ({
-        stateRoot: config.root,
-        targetRepository: { owner: target.owner, repo: target.repo },
-        log,
-        planPrPreflight: (sha, pr) => planPrPreflightImpl(target.checkoutDir, sha, {
-          ...pr, ...(target.checkoutDir === repoDir ? {} : { codeRoot: repoDir, bodyProofRoot: "plan" as const }),
-        }, { log }),
-        ...(deps.planRepairGitImpl ? { git: (args: string[]) => planRepairGit("git", ["-C", target.checkoutDir, ...args]) } : {}),
-        ...(deps.ghJsonImpl ? { gh: (args: string[]) => {
-          const out = ghJsonForBuild(args);
-          return typeof out === "string" ? out : JSON.stringify(out);
-        } } : {}),
-      });
+      const landingOpts = taskFilesLandingOpts;
       const targets = new Map([[`${owner}/${repo}`, publicTaskRepository]]);
       const destination = planDestinationRepository(join(config.root, "state"));
       if (destination.outcome === "named") targets.set(`${destination.owner}/${destination.repo}`, destination);
@@ -13604,7 +13622,7 @@ async function proposeStallAmendment(pr: OpenPrView, criterion: string, rounds: 
  * `fix.stall_remedy` row. After every remedy, no round runs for it until the operator answers.
  */
 async function takeStallRemedy(pr: OpenPrView, ledgerLines: readonly Record<string, unknown>[], policy: SweepPolicy,
-  deps: Pick<SweepDeps, "ledgerPath" | "runId" | "appendLine" | "escalate" | "draftRefusalAmendments" | "readTaskContractRevision" | "dryRun">,
+  deps: Pick<SweepDeps, "ledgerPath" | "runId" | "appendLine" | "escalate" | "draftRefusalAmendments" | "readTaskContractRevision" | "dryRun" | "parkedPr" | "now">,
 ): Promise<{ kind: "dispatch"; stallRemedy?: NonNullable<FixDispatchEvidence["stallRemedy"]> } | { kind: "hold"; reason: string }> {
   if (deps.dryRun) return { kind: "dispatch" };
   const currentRed = [...redCheckNames(pr).filter(r => !r.startsWith("review:")), ...pr.unmetCriteria.map(c => `review:${c.claim}`)];
@@ -13625,11 +13643,16 @@ async function takeStallRemedy(pr: OpenPrView, ledgerLines: readonly Record<stri
   const stronger = tried.findLast(r => r.remedy === "stronger-worker" && r.outcome === "taken");
   if (stronger?.mount !== undefined && stronger.rounds >= rounds) return { kind: "dispatch", stallRemedy: { criterion, mount: stronger.mount, approaches } };
   const stalledOn = `fix stall on ${criterion}: ${rounds} rounds left it unmet with the same failure`;
+  const parkedHost = deps.parkedPr;
+  const parked = parkedHost && (async () => (await remedyStalledCriterion(pr, criterion, stalledOn, ledgerLines, parkedHost,
+    { runId: deps.runId, ledgerTaskId: escalationTaskIdFor(pr), nowIso: deps.now ? clockFromMillisFn(deps.now).iso() : systemClock.iso(),
+      append: (row) => (deps.appendLine ?? appendLedger)(deps.ledgerPath, row) })));
   for (;;) {
     const next = nextStallRemedy(tried, { fixModelOrder: policy.fixModelOrder ?? DEFAULT_FIX_MODEL_ORDER });
     for (const remedy of next?.skipped ?? []) record(remedy, "skipped", { reason: "the policy's fix model order has no stronger mount" });
     if (next === undefined) {
       if (pr.pendingAnswer?.constraint) return { kind: "dispatch" };
+      if (parked) return { kind: "hold", reason: `${stalledOn}, and every remedy was tried; ${(await parked()).reason}` };
       return { kind: "hold", reason: `${stalledOn}, and every remedy was tried; awaiting the operator's answer` };
     }
     if (next.remedy === "stronger-worker") {
@@ -13644,6 +13667,11 @@ async function takeStallRemedy(pr: OpenPrView, ledgerLines: readonly Record<stri
       }
       record(next.remedy, "taken", proposal.prUrl ? { amendment_url: proposal.prUrl } : {});
       return { kind: "hold", reason: `${stalledOn}; an acceptance amendment proposal is open${proposal.prUrl ? `: ${proposal.prUrl}` : ""}` };
+    }
+    if (parked) {
+      const outcome = await parked();
+      record(next.remedy, "taken", { parked_pr_remedy: outcome.remedy, ...(outcome.heldTaskId ? { held_task_id: outcome.heldTaskId } : {}) });
+      return { kind: "hold", reason: `${stalledOn}; ${outcome.reason}` };
     }
     const reason = `${stalledOn}; tried ${tried.map(r => `${r.remedy} (${r.outcome})`).join(", ")}; the operator is asked once`;
     await deps.escalate(pr, reason, renderClarificationQuestion(pr, reason, pr.strikeHistory ?? []));
@@ -15475,6 +15503,7 @@ export interface SweepDeps {
    *  where {@link extractRefusal} found a refusal, so an ordinary `no_pr` never reaches this and
    *  keeps its retry path. Called once per full pass; omitted, the sweep never looks. */
   draftRefusalAmendments?: (candidates: readonly RefusalCandidate[]) => Promise<readonly RefusalAmendmentResult[]>;
+  parkedPr?: ParkedPrHost;
   /** Close superseded/abandoned PRs with a reason; the dependency fence alone holds the existing branch mutex through fresh reads and close. */
   close: (pr: OpenPrView, reason: string) => void | Promise<void>;
   withDependencyCloseFence?: (pr: OpenPrView, close: (supersededBy?: string) => Promise<void>) => Promise<{ closed: boolean; reason?: string }>;
@@ -20403,6 +20432,13 @@ export async function runSweep(
       held_ms: heldMs, ...escalationFields };
     recordStuck(row);
     if (escalationHandled) return;
+    if (deps.parkedPr) {
+      await takeParkedPrRemedy(pr, { remedy: "fix-on-pr", inputCriteria: [],
+        reason: "the stalled stage runs again on the pull request, and no needs-human issue is opened" }, currentRows, deps.parkedPr,
+      { runId: deps.runId, ledgerTaskId: escalationTaskIdFor(pr), nowIso: clockFromMillisFn(() => now).iso(), cause: "stage-stall",
+        text: reason, append: (parkedRow) => appendLine(deps.ledgerPath, parkedRow) });
+      return;
+    }
     try {
       await deps.escalate(pr, reason, {
         taskId: escalationTaskIdFor(pr), prNumber: pr.prNumber, prUrl: pr.prUrl, question: reason,
@@ -23002,6 +23038,20 @@ export async function runSweep(
           ruleBlockerByIndex.set(prIndex, "escalated");
         }
       }
+    }
+    if (deps.parkedPr && !deps.dryRun && !strikeLadderDue && !sloLadderDue && standDownHold === undefined && (disposition === "refused-escalate" ||
+        disposition === "blocked-ambiguous" && ruleBlockerByIndex.get(prIndex) === "escalated")) {
+      const designQuestion = terminalDesignHold !== undefined && disposition === "refused-escalate" ? reason : undefined;
+      const facts = parkedPrFacts(pr, { redChecks: redCheckNames(pr).filter(r => !r.startsWith("review:")),
+        ...(designQuestion === undefined ? {} : { designQuestion }), fixModelOrder: policy.fixModelOrder ?? DEFAULT_FIX_MODEL_ORDER },
+      ledgerLines, deps.parkedPr);
+      const parked = await actOnParkedPr(pr, parkedPrRemedy(facts), facts, ledgerLines, deps.parkedPr, { runId: deps.runId, ledgerTaskId: escalationTaskIdFor(pr), nowIso: clockFromMillisFn(() => now).iso(),
+        cause: designQuestion !== undefined ? "needs-design" : pr.isPlanFiling === true ? "plan-gate" : heldEscalationAt !== undefined ? "open-escalation" : `escalated:${disposition}`,
+        text: reason, append: (row) => appendLine(deps.ledgerPath, row) });
+      disposition = parked.disposition;
+      reason = `parked-pr remedy ${parked.remedy} (W1-T12709): ${parked.reason}; it replaces: ${reason}`;
+      ruleBlockerByIndex.set(prIndex, parked.blocker);
+      heldEscalationAt = undefined;
     }
     // Operator ruling 2026-10-30: a fix lane that escalated to a person and got no answer for HELD_ESCALATION_SLO_MS takes the
     // ladder's rebuild rung (the fix-progress judge, then close and requeue with the findings as a note, or a digest) instead

@@ -761,6 +761,12 @@ export function nextStallRemedy(tried: readonly StallRemedyRow[], policy: { fixM
   return undefined;
 }
 
+/** W1-T12709: true when every stall remedy before operator-input was tried on the criterion. PURE. */
+export function stallLadderSpent(tried: readonly StallRemedyRow[], policy: { fixModelOrder: readonly string[] }): boolean {
+  const next = nextStallRemedy(tried, policy);
+  return next === undefined || next.remedy === "operator-input";
+}
+
 /** W1-T12710: the `fix.stall_remedy` rows of one pull request and criterion, oldest first. PURE. */
 export function stallRemedyRows(ledger: readonly Record<string, unknown>[], prNumber: number, criterion: string): StallRemedyRow[] {
   return ledger.flatMap(row => row.step === "fix.stall_remedy" && row.pr_number === prNumber && row.criterion === criterion &&

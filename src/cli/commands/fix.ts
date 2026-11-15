@@ -4,6 +4,7 @@ import { planDestinationRepository } from "../../lib/plan-destination.js";
 import type { RunTaskCommandHost, GitRunner, CiGateOutcome, ReviewRunResult, FixRungOutcome, LiveHeadResult, WorktreeSnapshot, FixRebaseMergeFacts, FixRoundCommit, CensusPushRefusal, FixRoundPushReceipt } from "./run-task-verb.js";
 import { buildBaseProofDir, releaseBaseProofDir, type BaseProofDir } from "../../lib/check-proof.js";
 import { conflictRoundProgressVerdict, judgeFixProgress, resolveFixProgress, type FixProgressJudge, type FixProgressResult, type FixProgressVerdict, type FixProgressWorkerProofResult, reviewerProofFailures, unfiledScopeGrant, UNFILED_SCOPE_GRANT_ANSWER } from "../../lib/fix-progress-judge.js";
+import { openEscalationRelease } from "../../lib/parked-pr-remedy.js";
 import { buildFixProgressInputWithHostedProofs, conflictRoundHeldHead, readHostedFixProofResults, reservePlanRepairTaskId, type HostedFixProofReader } from "../../lib/sweep.js";
 import { parseWhitelistedProof, execWhitelistedProofAsync, proofChildCommand, buildProofEnv, type AsyncProofSpawner } from "../../lib/review.js";
 import { execFileLoopBounded } from "../../lib/loop-bounded-child.js";
@@ -2831,7 +2832,8 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         return findDuplicateEscalations({ ...key, cause: undefined }, { issues: deps.issues }).some(issue =>
           openEscalationStandDownReason(head, issue, currentContractRevision,
             { conflictEvidenceCaptured: hasCapturedMergeConflictEvidence(currentMergeConflict), baseSha: opts.baseSha },
-            noReviewYet ? currentCiFailures?.map(f => f.name) : undefined, opts.pendingAnswer) !== undefined);
+            noReviewYet ? currentCiFailures?.map(f => f.name) : undefined,
+            openEscalationRelease(opts.pendingAnswer, history, prNumber, head)) !== undefined);
       },
     );
     let preStrikeStandDown = await fixRungStandDownReason(
@@ -2866,7 +2868,8 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
               currentMergeConflict !== undefined, noReviewYet, currentContractRevision),
               ...(holdHeadSha !== currentPrHeadSha ? { cause: undefined } : {}) },
             find: (key: EscalationDedupKey) => findDuplicateEscalations(key, { issues: deps.issues }),
-            pendingAnswer: opts.pendingAnswer ?? (opts.constraint !== undefined ? {} : undefined),
+            pendingAnswer: openEscalationRelease(opts.pendingAnswer ?? (opts.constraint !== undefined ? {} : undefined), holdLedgerRows,
+              prNumber, holdHeadSha),
             redCheckNames: noReviewYet ? currentCiFailures?.map(f => f.name) : undefined,
             current: { conflictEvidenceCaptured: hasCapturedMergeConflictEvidence(currentMergeConflict), baseSha: opts.baseSha,
               ...(hasCapturedMergeConflictEvidence(currentMergeConflict) ? { conflictRound: true as const } : {}) },
