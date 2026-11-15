@@ -454,22 +454,64 @@ function* mergedTreePlanSteps(
     const paths = [plan.monolith, ...shards];
     // a monolith the listing lacks is still requested by path, so git itself says it is missing.
     const request = paths.map((p) => ids.get(p) ?? `${tree}:${p}`).join("\n") + "\n";
-    const batch = yield* gitStep(git, ["cat-file", "--batch"], request);
+    let batch = yield* gitStep(git, ["cat-file", "--batch"], request);
     if (batch.status !== 0) return gitStepUnreadable("git cat-file --batch", batch);
     let texts: string[];
-    try {
-      texts = parseBlobBatch(batch.stdout, tree, paths);
-    } catch (e) {
-      // exit 0 with too little stdout: the third case, told apart from a kill and a git failure.
-      const message = String((e as Error)?.message ?? e);
-      const shape = /ended before|unusable size/.test(message) ? "truncated" : "unusable";
-      return withStderr({ state: "unreadable", error: `the batch read was ${shape}: ${message}` }, batch);
+    for (let attempt = 0; ; attempt++) {
+      try {
+        texts = parseBlobBatch(batch.stdout, tree, paths);
+        break;
+      } catch (e) {
+        const message = String((e as Error)?.message ?? e);
+        const shape = /ended before|unusable size/.test(message) ? "truncated" : "unusable";
+        const error = `the batch read was ${shape}: ${message}`;
+        const missing = missingBatchBlobIds(batch.stdout);
+        if (missing.length === 0) return withStderr({ state: "unreadable", error }, batch);
+        if (attempt > 0) {
+          const clone = yield* gitStep(git, ["rev-parse", "--show-toplevel"]);
+          const detail = `the clone ${clone.stdout.trim()} lacks object ${missing.join(", ")} after fetching from origin`;
+          return clone.status === 0 ? withStderr({ state: "unreadable", error: detail }, batch)
+            : gitStepUnreadable(`${detail}; git rev-parse --show-toplevel`, clone);
+        }
+        const fetched = yield* gitStep(git, ["fetch", "--no-tags", "--quiet", "origin", ...missing]);
+        if (fetched.status !== 0) {
+          // A corrupt loose object also prints `missing`; retain that diagnosis beside the fetch failure.
+          const verb = `${error}${batch.stderr ? `: ${batch.stderr}` : ""}; git fetch plan blobs`;
+          return gitStepUnreadable(verb, { ...fetched, stderr: stderrTail([batch.stderr, fetched.stderr].filter(Boolean).join("\n")) });
+        }
+        batch = yield* gitStep(git, ["cat-file", "--batch"], request);
+        if (batch.status !== 0) return gitStepUnreadable("git cat-file --batch", batch);
+      }
     }
     return mergedPlanState(paths.map((p, i) => ({ label: `merged:${p}`, text: texts[i] })));
   } catch (e) {
     // a git spawn or blob read that fails is unreadable, which refreshes — never "loads".
     return { state: "unreadable", error: String((e as Error)?.message ?? e) };
   }
+}
+
+/** Only batch headers name missing objects; skip blob contents by their UTF-8 byte count. */
+function missingBatchBlobIds(raw: string): string[] {
+  const buf = Buffer.from(raw, "utf8");
+  const missing = new Set<string>();
+  let off = 0;
+  while (off < buf.length) {
+    const nl = buf.indexOf(0x0a, off);
+    if (nl < 0) break;
+    const header = buf.toString("utf8", off, nl);
+    off = nl + 1;
+    const absent = /^([0-9a-f]{40,64}) missing$/.exec(header);
+    if (absent) {
+      missing.add(absent[1]!);
+      continue;
+    }
+    const blob = /^[0-9a-f]{40,64} blob ([0-9]+)$/.exec(header);
+    if (!blob) break;
+    const size = Number(blob[1]);
+    if (!Number.isSafeInteger(size) || off + size >= buf.length) break;
+    off += size + 1;
+  }
+  return [...missing];
 }
 
 /** W1-T9670: one failed git step, named with its verb: killed by its bound, or git failed in its own words. */

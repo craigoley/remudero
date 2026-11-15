@@ -3153,6 +3153,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         root: config.root,
         queueDepth,
         activeWorkers: activeWorkers ?? activeWorkerCount(),
+        // W1-T2989: reviews waiting on the provider use no local CPU, so the host worker budget does not count them.
+        providerPhaseWorkers: reviewPhaseSplit(policy.reviewLanes).judgePhaseInFlight,
         nowMs,
         ledgerLines,
         policy: policy.reviewCapacity,
