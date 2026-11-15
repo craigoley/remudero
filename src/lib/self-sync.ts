@@ -3,7 +3,6 @@ import { existsSync, realpathSync } from "node:fs";
 import { constants as osConstants } from "node:os";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 // Why: a deliberate runtime (not type-only) import. treeFfSafe is deployer.ts's own dirty-vs-
 // incoming predicate, reused here rather than re-derived, at the accepted cost of widening this
 // module's (and so the whole CLI's) startup import graph. Falsifier: a second intersection of
@@ -1049,32 +1048,67 @@ function topLevelUnits(source: string): TopLevelUnit[] | undefined {
 }
 
 /** W1-T12824: the code tokens of a TypeScript text, each with its line-break flag; comments and whitespace are dropped.
- *  `undefined`: the scan met an unknown character, an unterminated token or unbalanced brackets. */
+ *  Strings, templates and regular expressions stay whole tokens. `undefined`: an unterminated literal or comment, a
+ *  backslash outside a literal, or unbalanced brackets. No external parser: this module is in the baked supervisor. */
 function codeTokens(text: string): string[] | undefined {
-  const scanner = createScanner(true, undefined, text);
   const tokens: string[] = [];
-  const open: SyntaxKind[] = [];
-  const pairs = new Map([[SyntaxKind.CloseBraceToken, SyntaxKind.OpenBraceToken], [SyntaxKind.CloseBracketToken, SyntaxKind.OpenBracketToken],
-    [SyntaxKind.CloseParenToken, SyntaxKind.OpenParenToken], [SyntaxKind.TemplateTail, SyntaxKind.TemplateHead]]);
-  let previous: SyntaxKind | undefined;
-  for (let token = scanner.scan(); token !== SyntaxKind.EndOfFile; token = scanner.scan()) {
-    const division = previous !== undefined && ENDS_AN_OPERAND.has(previous);
-    if ((token === SyntaxKind.SlashToken || token === SyntaxKind.SlashEqualsToken) && !division) token = scanner.reScanSlashToken();
-    else if (token === SyntaxKind.CloseBraceToken && open.at(-1) === SyntaxKind.TemplateHead) token = scanner.reScanTemplateToken(false);
-    if (token === SyntaxKind.Unknown || scanner.isUnterminated()) return undefined;
-    if ([SyntaxKind.OpenBraceToken, SyntaxKind.OpenBracketToken, SyntaxKind.OpenParenToken, SyntaxKind.TemplateHead].includes(token)) open.push(token);
-    else if (pairs.has(token) && open.pop() !== pairs.get(token)) return undefined;
-    tokens.push(`${scanner.hasPrecedingLineBreak() ? "\n" : ""}${token} ${scanner.getTokenText()}`);
-    previous = token;
+  const open: string[] = [];
+  let i = 0;
+  let lineBreak = false;
+  let regexAllowed = true;
+  const templateText = (from: number): number => {
+    for (let k = from; k < text.length; k++) {
+      if (text[k] === "\\") k++;
+      else if (text[k] === "`") { regexAllowed = false; return k + 1; }
+      else if (text[k] === "$" && text[k + 1] === "{") { open.push("${"); regexAllowed = true; return k + 2; }
+    }
+    return -1;
+  };
+  while (i < text.length) {
+    const c = text[i];
+    if (c === "\n") { lineBreak = true; i++; continue; }
+    if (c === " " || c === "\t" || c === "\r" || c === "\f" || c === "\v" || c === "﻿") { i++; continue; }
+    if (c === "/" && text[i + 1] === "/") { const nl = text.indexOf("\n", i); i = nl < 0 ? text.length : nl; continue; }
+    if (c === "/" && text[i + 1] === "*") {
+      const close = text.indexOf("*/", i + 2);
+      if (close < 0) return undefined;
+      lineBreak ||= text.slice(i, close).includes("\n");
+      i = close + 2;
+      continue;
+    }
+    let end: number;
+    if (/[\w$]/.test(c)) {
+      WORD_OR_NUMBER.lastIndex = i;
+      const word = WORD_OR_NUMBER.exec(text)![0];
+      end = i + word.length;
+      regexAllowed = REGEX_AFTER_WORD.has(word);
+    } else if (c === "'" || c === '"') {
+      end = skipQuoted(text, i + 1, c);
+      regexAllowed = false;
+    } else if (c === "`" || (c === "}" && open.at(-1) === "${")) {
+      if (c === "}") open.pop();
+      end = templateText(i + 1);
+    } else if (c === "/" && regexAllowed) {
+      end = skipRegex(text, i + 1);
+      while (end > 0 && /[a-z]/i.test(text[end] ?? "")) end++;
+      regexAllowed = false;
+    } else if (c === "\\" || c.charCodeAt(0) > 0x7e) {
+      return undefined;
+    } else {
+      end = i + 1;
+      if ("([{".includes(c)) open.push(c);
+      else if (")]}".includes(c) && open.pop() !== "([{"[")]}".indexOf(c)]) return undefined;
+      regexAllowed = !")]}".includes(c);
+    }
+    if (end < 0) return undefined;
+    tokens.push(`${lineBreak ? "\n" : ""}${text.slice(i, end)}`);
+    lineBreak = false;
+    i = end;
   }
   return open.length === 0 ? tokens : undefined;
 }
 
-// A slash after these is division; after anything else it starts a regular expression.
-const ENDS_AN_OPERAND = new Set([SyntaxKind.Identifier, SyntaxKind.PrivateIdentifier, SyntaxKind.NumericLiteral, SyntaxKind.BigIntLiteral,
-  SyntaxKind.StringLiteral, SyntaxKind.RegularExpressionLiteral, SyntaxKind.NoSubstitutionTemplateLiteral, SyntaxKind.TemplateTail,
-  SyntaxKind.CloseParenToken, SyntaxKind.CloseBracketToken, SyntaxKind.CloseBraceToken, SyntaxKind.PlusPlusToken, SyntaxKind.MinusMinusToken,
-  SyntaxKind.ThisKeyword, SyntaxKind.SuperKeyword, SyntaxKind.TrueKeyword, SyntaxKind.FalseKeyword, SyntaxKind.NullKeyword]);
+const WORD_OR_NUMBER = /[\w$]+/y;
 
 /** W1-T12824: true when two TypeScript texts have the same code once comments and whitespace are dropped. A text the scan
  *  cannot read to its end is never equal, so a change to it stays material. */
@@ -1087,47 +1121,48 @@ export function tokensEqualWithoutComments(oldText: string, newText: string): bo
 /** W1-T12824: the bindings of import statements as `specifier\0local\0imported`; a side-effect import binds the empty local.
  *  `undefined`: the text is not only import statements this reader knows. */
 function importBindings(text: string): string[] | undefined {
-  const scanner = createScanner(true, undefined, text);
+  const tokens = codeTokens(text)?.map((token) => token.replace(/^\n/, ""));
+  if (!tokens) return undefined;
+  const isWord = (token: string | undefined) => token !== undefined && /^[A-Za-z_$][\w$]*$/.test(token);
+  const isString = (token: string | undefined) => token !== undefined && /^["']/.test(token);
   const bindings: string[] = [];
-  const word = () => scanner.getToken() === SyntaxKind.StringLiteral || /^[A-Za-z_$][\w$]*$/.test(scanner.getTokenText());
-  for (let token = scanner.scan(); token !== SyntaxKind.EndOfFile; token = scanner.scan()) {
-    if (token !== SyntaxKind.ImportKeyword) return undefined;
+  let k = 0;
+  while (k < tokens.length) {
+    if (tokens[k++] !== "import") return undefined;
     const bound: Array<[string, string]> = [];
-    token = scanner.scan();
-    if (token === SyntaxKind.TypeKeyword && scanner.lookAhead(() => [SyntaxKind.OpenBraceToken, SyntaxKind.AsteriskToken, SyntaxKind.Identifier].includes(scanner.scan()))) token = scanner.scan();
-    if (token !== SyntaxKind.StringLiteral) {
-      if (token !== SyntaxKind.OpenBraceToken && token !== SyntaxKind.AsteriskToken) {
-        if (!word()) return undefined;
-        bound.push([scanner.getTokenText(), "default"]);
-        token = scanner.scan();
-        if (token === SyntaxKind.CommaToken) token = scanner.scan();
+    if (tokens[k] === "type" && (tokens[k + 1] === "{" || tokens[k + 1] === "*" || (isWord(tokens[k + 1]) && tokens[k + 1] !== "from"))) k++;
+    if (!isString(tokens[k])) {
+      if (tokens[k] !== "{" && tokens[k] !== "*") {
+        if (!isWord(tokens[k])) return undefined;
+        bound.push([tokens[k++], "default"]);
+        if (tokens[k] === ",") k++;
       }
-      if (token === SyntaxKind.AsteriskToken) {
-        if (scanner.scan() !== SyntaxKind.AsKeyword) return undefined;
-        scanner.scan();
-        if (!word()) return undefined;
-        bound.push([scanner.getTokenText(), "*"]);
-        token = scanner.scan();
-      } else if (token === SyntaxKind.OpenBraceToken) {
-        for (token = scanner.scan(); token !== SyntaxKind.CloseBraceToken; token = scanner.scan()) {
+      if (tokens[k] === "*") {
+        if (tokens[k + 1] !== "as" || !isWord(tokens[k + 2])) return undefined;
+        bound.push([tokens[k + 2], "*"]);
+        k += 3;
+      } else if (tokens[k] === "{") {
+        for (k++; tokens[k] !== "}"; ) {
           const words: string[] = [];
-          for (; token !== SyntaxKind.CommaToken && token !== SyntaxKind.CloseBraceToken; token = scanner.scan()) {
-            if (!word()) return undefined;
-            words.push(token === SyntaxKind.StringLiteral ? scanner.getTokenValue() : scanner.getTokenText());
+          for (; tokens[k] !== "," && tokens[k] !== "}"; k++) {
+            if (isWord(tokens[k])) words.push(tokens[k]);
+            else if (isString(tokens[k])) words.push(tokens[k].slice(1, -1));
+            else return undefined;
           }
           if (words[0] === "type" && (words.length === 2 || words.length === 4)) words.shift();
           if (words.length === 1) bound.push([words[0], words[0]]);
           else if (words.length === 3 && words[1] === "as") bound.push([words[2], words[0]]);
           else return undefined;
-          if (token === SyntaxKind.CloseBraceToken) break;
+          if (tokens[k] === ",") k++;
         }
-        token = scanner.scan();
+        k++;
       }
-      if (token !== SyntaxKind.FromKeyword || scanner.scan() !== SyntaxKind.StringLiteral) return undefined;
+      if (tokens[k++] !== "from") return undefined;
     }
-    const specifier = scanner.getTokenValue();
+    if (!isString(tokens[k])) return undefined;
+    const specifier = tokens[k++].slice(1, -1);
     bindings.push(...(bound.length === 0 ? [`${specifier}\0\0`] : bound.map(([local, imported]) => `${specifier}\0${local}\0${imported}`)));
-    if (scanner.lookAhead(() => scanner.scan() === SyntaxKind.SemicolonToken)) scanner.scan();
+    if (tokens[k] === ";") k++;
   }
   return bindings;
 }

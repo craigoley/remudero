@@ -2683,7 +2683,7 @@ export function buildSweepEffects(
 
   export function fixRungTaskFor(
   */
-  return buildSweepEffectsFromModule(sweepCommandHost({ freshTreeGit }), { ...deps, feedbackLandingStateRoot: deps.feedbackLandingStateRoot ?? deps.config.root });
+  return buildSweepEffectsFromModule(sweepCommandHost({ freshTreeGit: (args) => execFileSync("git", args, { encoding: "utf8", stdio: "pipe" }).toString() }), { ...deps, feedbackLandingStateRoot: deps.feedbackLandingStateRoot ?? deps.config.root });
 }
 
 /**
@@ -44601,16 +44601,13 @@ export async function runDetachedWork(work: DetachedWorkSpec, ctx: { runId: stri
  *  verdict; a stale one runs the review from a fresh tree at origin/main, or runs no reviewer. */
 export function gatedDetachedReviewCommand(root: string, log: (step: string, extra?: Record<string, unknown>) => void): DetachedReviewCommand {
   const seams: FreshTreeReviewSeams = {
-    git: freshTreeGit, addWorktree: realDeps().reviewWorktree.addWorktree, worktreeRoot: join(root, "..", "worktrees"), spawnReview: spawnRmdReviewForFreshTree,
+    git: (args) => defaultGitCapture("git", args), addWorktree: realDeps().reviewWorktree.addWorktree, worktreeRoot: join(root, "..", "worktrees"), spawnReview: spawnRmdReviewForFreshTree,
   };
   const gate = buildReviewerCodeFreshnessGate(() => checkReviewerCodeFreshnessAsync(root, process.env), log, reviewCommand,
     buildFreshTreeReviewRunner(root, seams));
   return (prArg, rest, opts) => gate.call(prArg, rest, opts);
 }
 
-function freshTreeGit(args: string[]): string {
-  return execFileSync("git", args, { encoding: "utf8", stdio: "pipe" }).toString();
-}
 
 /**
  * W1-T9114: a fix dispatch as a run child's work. The decision envelope comes from the spec; the live dependencies are rebuilt HERE,
