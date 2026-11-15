@@ -4,7 +4,7 @@ import { planDestinationRepository } from "../../lib/plan-destination.js";
 import type { RunTaskCommandHost, GitRunner, CiGateOutcome, ReviewRunResult, FixRungOutcome, LiveHeadResult, WorktreeSnapshot, FixRebaseMergeFacts, FixRoundCommit, CensusPushRefusal, FixRoundPushReceipt } from "./run-task-verb.js";
 import { buildBaseProofDir, releaseBaseProofDir, type BaseProofDir } from "../../lib/check-proof.js";
 import { conflictRoundProgressVerdict, judgeFixProgress, resolveFixProgress, type FixProgressJudge, type FixProgressResult, type FixProgressVerdict, type FixProgressWorkerProofResult, reviewerProofFailures, unfiledScopeGrant, UNFILED_SCOPE_GRANT_ANSWER } from "../../lib/fix-progress-judge.js";
-import { buildFixProgressInputWithHostedProofs, conflictRoundHeldHead, readHostedFixProofResults, type HostedFixProofReader } from "../../lib/sweep.js";
+import { buildFixProgressInputWithHostedProofs, conflictRoundHeldHead, readHostedFixProofResults, reservePlanRepairTaskId, type HostedFixProofReader } from "../../lib/sweep.js";
 import { parseWhitelistedProof, execWhitelistedProofAsync, proofChildCommand, buildProofEnv, type AsyncProofSpawner } from "../../lib/review.js";
 import { execFileLoopBounded } from "../../lib/loop-bounded-child.js";
 import { BASE_REPRODUCTION_MAX_FILES, boundedBaseProbeReason, baseReproductionFiles, decideBaseReproduction, type BaseProbeResult } from "../../lib/base-reproduction.js";
@@ -63,7 +63,8 @@ import { runStepsAsync, runStepsSync, step } from "../../lib/git-push.js";
 import { FIX_WORKER_TOOLS, FIX_WORKER_TOOLS_HARNESS_COMMITS } from "../../lib/fix-fence.js";
 import { assertLiveWriteAllowed } from "../../lib/live-write-guard.js";
 import { repoRoot, resolveOwnerRepo } from "../../lib/repo-location.js";
-import { refusalExcerptFromFixReport } from "../../lib/refusal-amendment.js";
+import { extractRefusal, refusalExcerptForNeedsDesign, refusalExcerptFromFixReport } from "../../lib/refusal-amendment.js";
+import type { CriterionRefusalClass } from "../../lib/review.js";
 import { flagValue, unknownArgError } from "../../lib/cli-args.js";
 import { reviewTaskIdFromBody } from "../../lib/report-commands.js";
 import { type RawOpenPr, type StrikeRegime, classifyPlanFiling, currentStrikeRegimeFor, deriveStrikeHistory, fetchCiFailures, isPlanOnlyFilingPr, priorStrikesFor, remedyGeneratorNamedInLog, resolveReviewTaskId, reviewStateFromRollup, reviewSummaryFromLedger, reviewVerdictPostedAtFromRollup, unmetFromLedger } from "../../lib/tick-read-worker.js";
@@ -308,6 +309,57 @@ export interface FixRebaseDecision {
  * dispatch, not after an elapsed duration.
  */
 export const DEFAULT_FIX_RETRIGGER_CAP = 2;
+
+/** W1-T12714: what a NEEDS_DESIGN report waits on. Each kind has its own remedy; only `design` asks a person. */
+export type NeedsDesignKind = "environment" | "capability" | "contract" | "design";
+/** The action a `capability` report says its round could not take. */
+export type NeedsDesignCapability = "body-edit" | "commit-message" | "id-reservation" | "plan-edit";
+export interface NeedsDesignSort { readonly kind: NeedsDesignKind; readonly capability?: NeedsDesignCapability }
+/** What the fix lane did next. None of these is a wait for a person except `escalate`, the `design` remedy. */
+export type NeedsDesignRemedy = "redispatch-fresh-worker" | "redispatch" | "body-repair" | "harness-commit" | "id-reservation" | "amendment-proposed" | "escalate";
+
+const NEEDS_DESIGN_ENVIRONMENT =
+  /\b(?:sandbox|container|tools?|mcp server|shell)\b[^.\n]{0,40}\b(?:failed to (?:start|launch)|did not start|could not (?:start|launch)|never started)\b/i;
+const NEEDS_DESIGN_CAPABILITY: ReadonlyArray<readonly [NeedsDesignCapability, RegExp]> = [
+  ["commit-message", /\bcommit[- ](?:message|metadata)\b[^.\n]{0,40}\b(?:rewrite|reword|prohibited|not allowed)\b|\b(?:rewrite|reword)\b[^.\n]{0,20}\bcommit[- ](?:message|metadata)\b/i],
+  ["id-reservation", /\breserved? (?:a |an )?(?:new )?(?:task )?id\b|\b(?:task )?id reservation\b/i],
+  ["plan-edit", /\b(?:prohibits?|forbids?|cannot make|may not make|no)\b[^.\n]{0,20}\bplan (?:changes?|edits?)\b/i],
+  ["body-edit", /\b(?:pr|pull request) body\b|\bno (?:gh|rest)\b[^.\n]{0,20}\baccess\b/i],
+];
+const NEEDS_DESIGN_CONTRACT =
+  /\bcriteri(?:on|a)\b[^.\n]{0,60}\b(?:conflicts?|contradicts?|incompatible)\b|\b(?:conflicts?|contradicts?) with (?:the (?:task'?s )?design|another task|criterion)\b|\bstale\b[^.\n]{0,30}\bproof\b|\bparent-owned amendment\b/i;
+const NEEDS_DESIGN_REPORT_TAIL_CHARS = 2000;
+/** Environment rounds one rung gives back. A later one is still dispatched again, but it spends its round. */
+const NEEDS_DESIGN_ENVIRONMENT_REFUNDS = 1;
+
+/**
+ * W1-T12714: sort a NEEDS_DESIGN report by its kind, from the worker's reason, its categorized `REFUSED:` block and the
+ * end of its report. A report that matches no kind is `design`.
+ */
+export function classifyNeedsDesign(reason: string, report?: string): NeedsDesignSort {
+  const text = `${reason}\n${(report ?? "").slice(-NEEDS_DESIGN_REPORT_TAIL_CHARS)}`;
+  if (NEEDS_DESIGN_ENVIRONMENT.test(text)) return { kind: "environment" };
+  const refused = extractRefusal(report);
+  if (refused.some((refusal) => refusal.refusalClass === "needs-operator-input")) return { kind: "design" };
+  for (const [capability, pattern] of NEEDS_DESIGN_CAPABILITY) if (pattern.test(text)) return { kind: "capability", capability };
+  return refused.length > 0 || NEEDS_DESIGN_CONTRACT.test(text) ? { kind: "contract" } : { kind: "design" };
+}
+
+/** W1-T12714: the remedy for one sorted report. An amendment needs a task record, so a taskless PR escalates instead. */
+export function needsDesignRemedy(sorted: NeedsDesignSort, facts: { refundsLeft: boolean; bodyRepaired: boolean; taskRecord: boolean }): NeedsDesignRemedy {
+  if (sorted.kind === "environment") return facts.refundsLeft ? "redispatch-fresh-worker" : "redispatch";
+  if (sorted.capability === "body-edit" && facts.bodyRepaired) return "body-repair";
+  if (sorted.capability === "commit-message") return "harness-commit";
+  if (sorted.capability === "id-reservation") return "id-reservation";
+  return sorted.kind !== "design" && facts.taskRecord ? "amendment-proposed" : "escalate";
+}
+
+const NEEDS_DESIGN_AMENDMENT_CLASS: Readonly<Record<NeedsDesignKind, CriterionRefusalClass>> = {
+  environment: "proof-unexecutable-at-head", capability: "outside-declared-files",
+  contract: "contradicts-another-criterion", design: "needs-operator-input",
+};
+const NEEDS_DESIGN_COMMIT_NOTE = "Needs-design route (W1-T12714): the harness makes this round's commit from your COMMIT " +
+  "line and never rewrites an earlier commit. Put the corrected commit message on your COMMIT line and make the change.";
 
 /**
  * W1-T5544 — THE PROOF-REPAIR FIX MODE. A fleet PR red ONLY on `proof-discrimination` (a trailered PR whose named plan
@@ -2382,6 +2434,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
   let progressRoundReason: string | undefined;
   const progressConstraint = () => [opts.constraint, progressApproach && `Progress judge approach: ${progressApproach}`,
     opts.failedApproaches?.length ? `Approaches that did not work (earlier rounds on this criterion):\n${opts.failedApproaches.map(a => `- ${a}`).join("\n")}` : undefined,
+    needsDesignNote,
   ].filter(Boolean).join("\n\n") || undefined;
   // W1-T3579: computed ONCE, from the live task this rung was dispatched against — never
   // recomputed per round (a task's own contract cannot change mid-rung; only a FRESH `runFixRung`
@@ -2410,6 +2463,8 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     proofDiscriminationEvidenceFromCriteria(review.criteria) !== undefined;
   let strikes = 0;
   let retriggers = 0;
+  let needsDesignRefunds = 0;
+  let needsDesignNote: string | undefined;
   const branchClaimLost = (): FixRungOutcome | undefined => {
     const reason = deps.branchClaim?.reacquire();
     if (reason === undefined) return undefined;
@@ -2702,7 +2757,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
   while (review.state !== "success" || proofDiscriminationStillNeedsRepair()) {
     consultedThisRound = false;
     // A wired judge rules every round itself (below); only the stand-in stops at the former bounds here.
-    if (judgeIsStandIn && (strikes >= opts.strikeCap || retriggers >= retriggerCap || consecutiveMergeRefusalReasons.length >= 2)) {
+    if (judgeIsStandIn && (strikes - needsDesignRefunds >= opts.strikeCap || retriggers >= retriggerCap || consecutiveMergeRefusalReasons.length >= 2)) {
       const bound = consecutiveMergeRefusalReasons.length >= 2
         ? `Consecutive merge refusals:\n${consecutiveMergeRefusalReasons.join("\n")}`
         : retriggers >= retriggerCap && strikes < opts.strikeCap
@@ -2935,6 +2990,11 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     if (priorDesign && !hasCapturedMergeConflictEvidence(currentMergeConflict)) {
       const priorHeadSha = review.headSha;
       const roundLedger = holdLedgerRows;
+      if (priorDesign.needs_design_remedy === "amendment-proposed") {
+        const reason = `awaiting the task contract amendment proposed from this head's needs-design report: ${String(priorDesign.reason)}`;
+        deps.log("fix.stood_down", { head_sha: priorHeadSha, reason, site: "rung.needs_design_amendment" });
+        return { outcome: "stood_down", review, strikes, retriggers, reason };
+      }
       const reason = String(priorDesign.reason);
       const escalated = roundLedger.findLast((row) => row.step === "fix.stood_down" && row.site === "rung.needs_design" &&
         row.task_id === opts.taskId && row.head_sha === priorHeadSha && typeof row.issue_url === "string");
@@ -4988,12 +5048,49 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       });
     if (fixAction.kind === "hand-off") {
       // A NEEDS_DESIGN round still carries the PROOF_AMENDMENT its prompt asks for (W1-T8921, W1-T5689: dropped here).
-      if (evidence.proofDiscrimination?.bodyRepair === true) await repairBodyProofs(evidence.proofDiscrimination);
+      let bodyRepaired = false;
+      if (evidence.proofDiscrimination?.bodyRepair === true) bodyRepaired = (await repairBodyProofs(evidence.proofDiscrimination)).kind === "written";
       else if (evidence.proofDiscrimination) amendProofs(evidence.proofDiscrimination);
-      const refusalExcerpt = refusalExcerptFromFixReport(fixReport);
+      // W1-T12714: sort the report and take its kind's remedy now; only `design` holds this head for a person.
+      const sorted = classifyNeedsDesign(fixAction.reason, fixReport);
+      const remedy = needsDesignRemedy(sorted, { refundsLeft: needsDesignRefunds < NEEDS_DESIGN_ENVIRONMENT_REFUNDS,
+        bodyRepaired, taskRecord: !/^PR-\d+$/.test(opts.taskId) });
+      const routed = { round_id: roundId, pr_number: prNumber, head_sha: priorHeadSha, kind: sorted.kind,
+        ...(sorted.capability ? { capability: sorted.capability } : {}), remedy };
+      if (remedy !== "amendment-proposed" && remedy !== "escalate") {
+        if (remedy === "id-reservation") {
+          let reservedTaskId: string;
+          try {
+            reservedTaskId = reservePlanRepairTaskId(opts.worktreePath, opts.branch, undefined, deps.log);
+          } catch (error) {
+            const reason = `needs-design task id reservation failed: ${String(error)}`;
+            deps.log("fix.needs_design_routed", { ...routed, outcome: "refused", reason });
+            deps.log("fix.stood_down", { head_sha: priorHeadSha, site: "rung.needs_design_reservation", reason });
+            logFixDone();
+            return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason };
+          }
+          needsDesignNote = `Needs-design route (W1-T12714): the harness reserved ${reservedTaskId} for ` +
+            `branch ${opts.branch}. Use this reserved id for the follow-up that needed one; do not reserve another.`;
+          deps.log("fix.needs_design_routed", { ...routed, reserved_task_id: reservedTaskId });
+          logFixDone();
+          continue;
+        }
+        if (remedy === "redispatch-fresh-worker") {
+          needsDesignRefunds += 1;
+          deps.log("fix.strike_refunded", { strike: attempt, head_sha: priorHeadSha, reason: "needs-design-environment" });
+        }
+        if (sorted.kind === "environment") { sessionToResume = undefined; lastGateSnapshot = undefined; }
+        if (remedy === "harness-commit") needsDesignNote = NEEDS_DESIGN_COMMIT_NOTE;
+        deps.log("fix.needs_design_routed", routed);
+        logFixDone();
+        continue;
+      }
+      const refusalExcerpt = refusalExcerptFromFixReport(fixReport) ?? (remedy === "amendment-proposed"
+        ? refusalExcerptForNeedsDesign(fixAction.reason, NEEDS_DESIGN_AMENDMENT_CLASS[sorted.kind]) : undefined);
       deps.log("fix.needs_design", { reason: fixAction.reason, head_sha: priorHeadSha, contract_revision: currentContractRevision,
         ...(currentSemanticRevision === undefined ? {} : { task_semantic_revision: currentSemanticRevision }),
-        ...(refusalExcerpt ? { report_excerpt: refusalExcerpt } : {}) });
+        ...(refusalExcerpt ? { report_excerpt: refusalExcerpt } : {}), needs_design_kind: sorted.kind, needs_design_remedy: remedy });
+      deps.log("fix.needs_design_routed", routed);
       logFixDone();
       return { outcome: "needs_design", review, strikes, retriggers, reason: fixAction.reason };
     }

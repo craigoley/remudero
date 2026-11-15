@@ -61,6 +61,7 @@
     "onboard",
     "ops",
     "plan",
+    "plan-destination",
     "plan-reconcile",
     "pr-checks",
     "pr-owner",
