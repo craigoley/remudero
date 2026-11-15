@@ -69,6 +69,16 @@ function conflictRoundRows(now: number, mode = "merge-conflict", from = HELD_HEA
   ];
 }
 
+function retriggerConflictRoundRows(now: number, from = HELD_HEAD, to = MERGE_HEAD): Row[] {
+  const round = { task_id: TASK, head_sha: from, run_id: `RETRIGGER-CONFLICT-${from}`, host: "fixture-host", actor_pid: 779,
+    round_id: "RETRIGGER-CONFLICT:1", repair_pr_url: PR_URL };
+  return [
+    { ...round, step: "fix.retrigger", ts: new Date(now - 5000).toISOString(), mode: "merge-conflict" },
+    { ...round, step: "fix.done", ts: new Date(now - 4000).toISOString(), fix_outcome: "FIXED", subtype: "success",
+      pushed_head_sha: to },
+  ];
+}
+
 function openIssue(cause?: string, head = HELD_HEAD): OpenIssue {
   return { number: 18100, title: `[BLOCKED] ${TASK}: PR ${PR_URL} needs a clarification`, url: ISSUE_URL,
     body: `**Class:** BLOCKED\n**Task:** ${TASK}\n**Head:** ${head}\n${cause === undefined ? "" : `**Cause:** ${cause}\n`}\nPR ${PR_URL}\n` };
@@ -240,7 +250,7 @@ test("W1-T12544 criterion 3: a new hold at B survives the B→C conflict push wi
 });
 
 test("W1-T12544 criterion 3: a cleared conflict escalation cannot mask a surviving review hold", async t => {
-  for (const receipt of ["fix.done", "sweep.conflict_regenerated"] as const) {
+  for (const receipt of ["fix.done", "fix.retrigger", "sweep.conflict_regenerated"] as const) {
     for (const intermediate of [false, true]) {
       for (const conflictFirst of [true, false]) {
         await t.test(`${receipt}: ${intermediate ? "B→C" : "A→B"}: conflict first ${conflictFirst}`, async t => {
@@ -253,10 +263,11 @@ test("W1-T12544 criterion 3: a cleared conflict escalation cannot mask a survivi
           const review = { ...openIssue("review", from), number: 18101,
             url: "https://github.com/o/r/issues/18101" };
           const issues = conflictFirst ? [conflict, review] : [review, conflict];
-          const rows = receipt === "fix.done" ? conflictRoundRows(now, "merge-conflict", from, to) : [{
-            step: receipt, ts: new Date(now - 4000).toISOString(), pr_number: 18033,
-            head_sha: from, new_head_sha: to, outcome: "pushed",
-          }];
+          const rows = receipt === "fix.done" ? conflictRoundRows(now, "merge-conflict", from, to) :
+            receipt === "fix.retrigger" ? retriggerConflictRoundRows(now, from, to) : [{
+              step: receipt, ts: new Date(now - 4000).toISOString(), pr_number: 18033,
+              head_sha: from, new_head_sha: to, outcome: "pushed",
+            }];
           const f = fixture(t, [...(intermediate ? conflictRoundRows(now) : []), ...rows], issues);
           f.deps.readMainTip = () => OUTSIDE_HEAD;
           const facts = { conflictEvidenceCaptured: false, baseSha: OUTSIDE_HEAD };
@@ -283,16 +294,17 @@ test("W1-T12544 criterion 3: a cleared conflict escalation cannot mask a survivi
 });
 
 test("W1-T12544 criterion 3: newest-200 retention archives conflict pushes without releasing their holds", async t => {
-  for (const receipt of ["fix.done", "sweep.conflict_regenerated"] as const) {
+  for (const receipt of ["fix.done", "fix.retrigger", "sweep.conflict_regenerated"] as const) {
     for (const hold of ["design", "review", "ci", "legacy"] as const) {
       await t.test(`${receipt}: ${hold}`, async t => {
         const now = systemClock.now();
-        const pushRows = receipt === "fix.done" ? conflictRoundRows(now) : [{
-          step: receipt, ts: new Date(now - 4000).toISOString(), pr_number: 18033,
-          head_sha: HELD_HEAD, new_head_sha: MERGE_HEAD, outcome: "pushed",
-        }];
+        const pushRows = receipt === "fix.done" ? conflictRoundRows(now) : receipt === "fix.retrigger" ?
+          retriggerConflictRoundRows(now) : [{
+            step: receipt, ts: new Date(now - 4000).toISOString(), pr_number: 18033,
+            head_sha: HELD_HEAD, new_head_sha: MERGE_HEAD, outcome: "pushed",
+          }];
         const newer = Array.from({ length: MAX_RETAINED_LINES_PER_STEP }, (_, i) =>
-          ["fix.dispatch", "fix.done", "sweep.conflict_regenerated"].map(step => ({
+          ["fix.dispatch", "fix.retrigger", "fix.done", "sweep.conflict_regenerated"].map(step => ({
             step, ts: new Date(now - 3000 + i).toISOString(), task_id: `W1-T${20000 + i}`,
             pr_number: 20000 + i, run_id: `OTHER-${i}`, head_sha: OUTSIDE_HEAD,
           }))).flat();
@@ -303,7 +315,7 @@ test("W1-T12544 criterion 3: newest-200 retention archives conflict pushes witho
         assert.equal(rotateLedger(path, { ceilingBytes: 256_000, smoothingWindowMs: 0,
           now: () => new Date(now) }).rotated, true, "control: production rotation ran");
         const live = readLedgerLines(path);
-        for (const step of ["fix.dispatch", "fix.done", "sweep.conflict_regenerated"]) {
+        for (const step of ["fix.dispatch", "fix.retrigger", "fix.done", "sweep.conflict_regenerated"]) {
           assert.equal(live.filter(row => row.step === step).length, MAX_RETAINED_LINES_PER_STEP);
           assert.equal(live.some(row => row.step === step && row.head_sha === HELD_HEAD), false,
             `${step}: the conflict-push and design-round receipts left the live file`);
@@ -335,10 +347,10 @@ test("W1-T12544 criterion 3: newest-200 retention archives conflict pushes witho
 });
 
 test("W1-T12544 criterion 3: a complete archive keeps the design hold when its live question is absent", async t => {
-  for (const receipt of ["fix.done", "sweep.conflict_regenerated"] as const) {
+  for (const receipt of ["fix.done", "fix.retrigger", "sweep.conflict_regenerated"] as const) {
     await t.test(receipt, async t => {
       const now = systemClock.now();
-      const pushRows = receipt === "fix.done" ? conflictRoundRows(now) : [{
+      const pushRows = receipt === "fix.done" ? conflictRoundRows(now) : receipt === "fix.retrigger" ? retriggerConflictRoundRows(now) : [{
         step: receipt, ts: new Date(now - 4000).toISOString(), pr_number: 18033,
         head_sha: HELD_HEAD, new_head_sha: MERGE_HEAD, outcome: "pushed",
       }];
@@ -357,7 +369,7 @@ test("W1-T12544 criterion 3: a complete archive keeps the design hold when its l
       assert.equal(live.some(row => row.task_id === TASK && row.step === "fix.needs_design"), false,
         "the held question itself has left the live ledger");
       const union = readLedgerUnionRecordsSync(dirname(path), {
-        step: ["fix.dispatch", "fix.done", "fix.needs_design", "sweep.conflict_regenerated"], refuseIncomplete: true });
+        step: ["fix.dispatch", "fix.retrigger", "fix.done", "fix.needs_design", "sweep.conflict_regenerated"], refuseIncomplete: true });
       assert.equal(union.ok, true, "control: the archive is complete and readable");
       assert.equal(union.rows.some(row => row.task_id === TASK && row.step === "fix.needs_design" &&
         row.reason === DESIGN_REASON), true, "control: the archived question is present");
@@ -378,11 +390,25 @@ test("W1-T12544 criterion 3: a complete archive keeps the design hold when its l
 /** Newer rows of other tasks that push this PR's fix rows, its question included, out of the live file on rotation. */
 function archivingRows(now: number): Row[] {
   return [...Array.from({ length: MAX_RETAINED_LINES_PER_STEP }, (_, i) =>
-    ["fix.dispatch", "fix.done", "fix.needs_design"].map(step => ({
+    ["fix.dispatch", "fix.retrigger", "fix.done", "fix.needs_design"].map(step => ({
       step, ts: new Date(now - 3000 + i).toISOString(), task_id: `W1-T${20000 + i}`,
       pr_number: 20000 + i, run_id: `OTHER-${i}`, head_sha: OUTSIDE_HEAD, reason: "another task's question",
     }))).flat(), { step: "cli.invoked", ts: new Date(now).toISOString(), pad: "x".repeat(300_000) }];
 }
+
+test("W1-T12544 criterion 3: a conflict retrigger receipt carries the design hold to its pushed head", async t => {
+  const now = systemClock.now();
+  const rows = [...designRows(now), ...retriggerConflictRoundRows(now)];
+  const pr = prAt(now, MERGE_HEAD, false);
+  assert.equal(conflictRoundHeldHead(pr, rows), HELD_HEAD, "control: the retrigger receipt links B to held head A");
+  const f = fixture(t, rows);
+  const summary = await runSweep([prAt(f.now, MERGE_HEAD, false)], f.deps);
+  assert.equal(summary.actions[0]!.disposition, "refused-escalate");
+  assert.match(summary.actions[0]!.reason, new RegExp(DESIGN_REASON));
+  assert.equal(f.effects.admissions, 0, "no code fix is admitted at the retrigger-pushed head");
+  assert.equal(f.effects.evidence.length, 0);
+  assert.equal(f.disposed().at(-1)!.hold_head_sha, HELD_HEAD);
+});
 
 test("W1-T12544 criterion 3: a design question that retention archived still holds the conflict-pushed head", async t => {
   // Rotation keeps the newest rows per step for every PR, so a busy fleet archives this PR's fix.needs_design row too.
@@ -479,13 +505,14 @@ async function activeConflictRung(t: TestContext, hold: "design" | "review" | "c
 }
 
 test("W1-T12544 criterion 3: a released metadata question at B cannot mask A's unanswered hold at C", async t => {
-  for (const receipt of ["fix.done", "sweep.conflict_regenerated"] as const) {
+  for (const receipt of ["fix.done", "fix.retrigger", "sweep.conflict_regenerated"] as const) {
     for (const hold of ["design", "review"] as const) {
       await t.test(`${receipt}: ${hold}`, async t => {
         const now = systemClock.now();
         const push = (from: string, to: string): Row[] => receipt === "fix.done"
           ? conflictRoundRows(now, "merge-conflict", from, to)
-          : [{ step: receipt, pr_number: 18033, head_sha: from, new_head_sha: to, outcome: "pushed" }];
+          : receipt === "fix.retrigger" ? retriggerConflictRoundRows(now, from, to)
+            : [{ step: receipt, pr_number: 18033, head_sha: from, new_head_sha: to, outcome: "pushed" }];
         const metadata = metadataIssueAtB();
         const older = hold === "design" ? designRows(now) : [];
         const issues = hold === "design" ? [metadata] : [metadata, openIssue("review")];

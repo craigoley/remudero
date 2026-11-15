@@ -16938,8 +16938,8 @@ export function conflictRoundHeldHead(pr: Pick<OpenPrView, "taskId" | "prNumber"
       if (archived !== undefined) { history = [...archived, ...lines]; continue; }
     }
     const pushedBy = history.findLast(row => (row.step === "fix.done" && row.task_id === key && row.pushed_head_sha === head &&
-        typeof row.round_id === "string" && history.some(start => start.step === "fix.dispatch" && start.task_id === key &&
-          start.round_id === row.round_id && start.head_sha === row.head_sha && start.mode === "merge-conflict")) ||
+        typeof row.round_id === "string" && history.some(start => (start.step === "fix.dispatch" || start.step === "fix.retrigger") &&
+          start.task_id === key && start.round_id === row.round_id && start.head_sha === row.head_sha && start.mode === "merge-conflict")) ||
       (row.step === "sweep.conflict_regenerated" && row.pr_number === pr.prNumber && row.new_head_sha === head &&
         row.outcome === "pushed"));
     // Rotation caps the push receipts independently of the held question; a live miss is not an outside head.
@@ -16958,7 +16958,7 @@ export function conflictRoundHeldHead(pr: Pick<OpenPrView, "taskId" | "prNumber"
 /** The production `archive` reader: the fix-round rows across rotations and the live file, or undefined if incomplete. */
 function readFixRoundArchiveRows(ledgerPath: string): ReadonlyArray<Record<string, unknown>> | undefined {
   const read = readLedgerUnionRecordsSync(dirname(ledgerPath), {
-    step: ["fix.dispatch", "fix.done", "fix.needs_design", "sweep.conflict_regenerated"], refuseIncomplete: true });
+    step: ["fix.dispatch", "fix.retrigger", "fix.done", "fix.needs_design", "sweep.conflict_regenerated"], refuseIncomplete: true });
   return read.ok ? read.rows : undefined;
 }
 
@@ -20547,7 +20547,7 @@ export async function runSweep(
   // Hold ancestry and refresh clearance share one archive snapshot for this pass.
   let repairHistory: LedgerUnionRecordRead | undefined;
   const readRepairHistory = () => repairHistory ??= readLedgerUnionRecordsSync(dirname(deps.ledgerPath), {
-    step: [...refreshSteps, "fix.dispatch", "fix.done", "fix.needs_design", "sweep.conflict_regenerated"], refuseIncomplete: true });
+    step: [...refreshSteps, "fix.dispatch", "fix.retrigger", "fix.done", "fix.needs_design", "sweep.conflict_regenerated"], refuseIncomplete: true });
   const readRepairArchive = () => {
     const union = readRepairHistory();
     return union.ok ? union.rows : undefined;
