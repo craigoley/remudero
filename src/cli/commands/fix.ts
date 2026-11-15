@@ -4,7 +4,7 @@ import { planDestinationRepository } from "../../lib/plan-destination.js";
 import type { RunTaskCommandHost, GitRunner, CiGateOutcome, ReviewRunResult, FixRungOutcome, LiveHeadResult, WorktreeSnapshot, FixRebaseMergeFacts, FixRoundCommit, CensusPushRefusal, FixRoundPushReceipt } from "./run-task-verb.js";
 import { buildBaseProofDir, releaseBaseProofDir, type BaseProofDir } from "../../lib/check-proof.js";
 import { conflictRoundProgressVerdict, judgeFixProgress, resolveFixProgress, type FixProgressJudge, type FixProgressResult, type FixProgressVerdict, type FixProgressWorkerProofResult, reviewerProofFailures, unfiledScopeGrant, UNFILED_SCOPE_GRANT_ANSWER } from "../../lib/fix-progress-judge.js";
-import { buildFixProgressInputWithHostedProofs, readHostedFixProofResults, type HostedFixProofReader } from "../../lib/sweep.js";
+import { buildFixProgressInputWithHostedProofs, readHostedFixProofResults, reservePlanRepairTaskId, type HostedFixProofReader } from "../../lib/sweep.js";
 import { parseWhitelistedProof, execWhitelistedProofAsync, proofChildCommand, buildProofEnv, type AsyncProofSpawner } from "../../lib/review.js";
 import { execFileLoopBounded } from "../../lib/loop-bounded-child.js";
 import { BASE_REPRODUCTION_MAX_FILES, boundedBaseProbeReason, baseReproductionFiles, decideBaseReproduction, type BaseProbeResult } from "../../lib/base-reproduction.js";
@@ -316,7 +316,7 @@ export type NeedsDesignKind = "environment" | "capability" | "contract" | "desig
 export type NeedsDesignCapability = "body-edit" | "commit-message" | "id-reservation" | "plan-edit";
 export interface NeedsDesignSort { readonly kind: NeedsDesignKind; readonly capability?: NeedsDesignCapability }
 /** What the fix lane did next. None of these is a wait for a person except `escalate`, the `design` remedy. */
-export type NeedsDesignRemedy = "redispatch-fresh-worker" | "redispatch" | "body-repair" | "harness-commit" | "amendment-proposed" | "escalate";
+export type NeedsDesignRemedy = "redispatch-fresh-worker" | "redispatch" | "body-repair" | "harness-commit" | "id-reservation" | "amendment-proposed" | "escalate";
 
 const NEEDS_DESIGN_ENVIRONMENT =
   /\b(?:sandbox|container|tools?|mcp server|shell)\b[^.\n]{0,40}\b(?:failed to (?:start|launch)|did not start|could not (?:start|launch)|never started)\b/i;
@@ -350,6 +350,7 @@ export function needsDesignRemedy(sorted: NeedsDesignSort, facts: { refundsLeft:
   if (sorted.kind === "environment") return facts.refundsLeft ? "redispatch-fresh-worker" : "redispatch";
   if (sorted.capability === "body-edit" && facts.bodyRepaired) return "body-repair";
   if (sorted.capability === "commit-message") return "harness-commit";
+  if (sorted.capability === "id-reservation") return "id-reservation";
   return sorted.kind !== "design" && facts.taskRecord ? "amendment-proposed" : "escalate";
 }
 
@@ -4967,6 +4968,23 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       const routed = { round_id: roundId, pr_number: prNumber, head_sha: priorHeadSha, kind: sorted.kind,
         ...(sorted.capability ? { capability: sorted.capability } : {}), remedy };
       if (remedy !== "amendment-proposed" && remedy !== "escalate") {
+        if (remedy === "id-reservation") {
+          let reservedTaskId: string;
+          try {
+            reservedTaskId = reservePlanRepairTaskId(opts.worktreePath, opts.branch, undefined, deps.log);
+          } catch (error) {
+            const reason = `needs-design task id reservation failed: ${String(error)}`;
+            deps.log("fix.needs_design_routed", { ...routed, outcome: "refused", reason });
+            deps.log("fix.stood_down", { head_sha: priorHeadSha, site: "rung.needs_design_reservation", reason });
+            logFixDone();
+            return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason };
+          }
+          needsDesignNote = `Needs-design route (W1-T12714): the harness reserved ${reservedTaskId} for ` +
+            `branch ${opts.branch}. Use this reserved id for the follow-up that needed one; do not reserve another.`;
+          deps.log("fix.needs_design_routed", { ...routed, reserved_task_id: reservedTaskId });
+          logFixDone();
+          continue;
+        }
         if (remedy === "redispatch-fresh-worker") {
           needsDesignRefunds += 1;
           deps.log("fix.strike_refunded", { strike: attempt, head_sha: priorHeadSha, reason: "needs-design-environment" });

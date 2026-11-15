@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, test } from "node:test";
 
@@ -7,7 +8,7 @@ import type { Config } from "#src/lib/config.js";
 import type { WorkerResult } from "#src/lib/worker.js";
 import { classifyNeedsDesign, type NeedsDesignKind } from "#src/cli/commands/fix.js";
 import { draftRefusalAmendment, extractRefusal, noPrVerdictRowsFromLedger } from "#src/lib/refusal-amendment.js";
-import { fixLedgerRowsForHead, runSweep, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
+import { fixLedgerRowsForHead, runSweep, type OpenPrView, type ProofDiscriminationEvidence, type SweepDeps } from "#src/lib/sweep.js";
 import { runFixRung } from "#test/helpers/run-task-test.js";
 
 // 33 needs-design hand-offs on 11 pull requests cost 53 PR-hours (2026-11-11 to 2026-11-14), and only two were design
@@ -46,32 +47,39 @@ function failedReview(headSha: string) {
 }
 
 /** One fix rung on a real repository. The stub worker answers each report in turn, then repeats the last. */
-async function rung(reports: string[], rows: Row[] = [], repo = gitRepo({ kind: "needs-design-routing" })) {
-  const spawns: Array<{ resumeSessionId?: string; prompt: string }> = [];
+async function rung(reports: string[], rows: Row[] = [], repo = gitRepo({ kind: "needs-design-routing" }),
+  options: { body?: string; proofDiscrimination?: ProofDiscriminationEvidence } = {}) {
+  let body = options.body ?? "body";
+  const writes: string[] = [];
+  const spawns: Array<{ resumeSessionId?: string; prompt: string; body: string }> = [];
   const issues: string[] = [];
   const mount = { model: "sonnet", effort: "medium", maxTurns: 20, contextBudget: 120000 } as const;
-  const review = failedReview(repo.git("rev-parse", "HEAD"));
+  const failed = failedReview(repo.git("rev-parse", "HEAD"));
+  const review = options.proofDiscrimination ? { ...failed, capped: true,
+    criteria: options.proofDiscrimination.proofs.map((p) => ({ claim: p.claim, proof: p.proof, met: true,
+      reason: "capped proof requires discrimination", proof_exec: "executed_stale" as const })) } : failed;
   const outcome = await runFixRung({
     taskId: TASK, runId: "needs-design-run", task: { id: TASK, title: "needs-design routing", files: ["src/lib/sweep.ts"] },
     prUrl: PR_URL, branch: `run-${TASK}-1`, worktreePath: repo.dir, initialSessionId: "initial", mount,
     settingsFile: join(repo.dir, "settings.json"),
     config: { root: repo.dir, workerProviders: { harnessCommitsFix: true } } as Config,
-    budgetUsd: 10, strikeCap: 3, initialReview: review,
+    budgetUsd: 10, strikeCap: 3, initialReview: review, proofDiscrimination: options.proofDiscrimination,
     reviewBase: { owner: "acme", repo: "remudero", headCheckoutDir: repo.dir, reviewerMount: mount },
     escalationJudge: async () => ({ decision: "deliver", reason: "test" }),
     deps: {
       spawn: async (args) => {
-        spawns.push({ resumeSessionId: args.resumeSessionId, prompt: String(args.prompt) });
+        spawns.push({ resumeSessionId: args.resumeSessionId, prompt: String(args.prompt), body });
         return worker(reports[Math.min(spawns.length, reports.length) - 1]!, spawns.length);
       },
       waitForCiGreen: async () => "green", runReview: async () => review,
-      fetchPrBody: async () => "body", push: () => { throw new Error("a needs-design round never pushes"); },
+      fetchPrBody: async () => body, updatePrBody: async (_url, next) => { body = next; writes.push(next); },
+      push: () => { throw new Error("a needs-design round never pushes"); },
       issues: { create: () => { issues.push("created"); return "https://github.com/acme/remudero/issues/1"; }, listOpen: () => [], comment: () => {} },
       ledgerPath: join(repo.dir, "ledger.ndjson"), ledgerLines: () => rows,
       log: (step, extra) => rows.push({ step, task_id: TASK, run_id: "needs-design-run", ts: new Date().toISOString(), ...extra }), say: () => {}, account: (r) => r,
     },
   });
-  return { outcome, rows, spawns, issues, repo };
+  return { outcome, rows, spawns, issues, repo, writes };
 }
 
 const routed = (rows: Row[]) => rows.filter((row) => row.step === "fix.needs_design_routed");
@@ -115,7 +123,7 @@ describe("a needs-design outcome is sorted by its kind and gets its remedy", () 
     assert.deepEqual(routed(commit.rows).map((row) => [row.kind, row.capability, row.remedy]),
       [["capability", "commit-message", "harness-commit"], ["design", undefined, "escalate"]]);
 
-    for (const name of ["plan", "id", "body"] as const) {
+    for (const name of ["plan", "body"] as const) {
       const { outcome, rows } = await rung([REPORTS[name]!]);
       assert.equal(outcome.outcome, "needs_design", name);
       const [hold] = holds(rows);
@@ -124,6 +132,70 @@ describe("a needs-design outcome is sorted by its kind and gets its remedy", () 
       assert.equal(nominated.length, 1, `${name}: the amendment writer is handed the report`);
       assert.equal(extractRefusal(nominated[0]!.reportExcerpt)[0]?.refusalClass, "outside-declared-files");
     }
+  });
+
+  test("W1-T12714 criterion 3: the reservation owner claims an id before the next worker receives it", async () => {
+    const origin = gitRepo({ kind: "needs-design-id-origin", bare: true });
+    const repo = gitRepo({ kind: "needs-design-id" });
+    repo.addRemote("origin", origin.dir);
+    repo.git("config", "user.name", "reservation fixture");
+    repo.git("config", "user.email", "reservation@fixture.invalid");
+    mkdirSync(join(repo.dir, "plan"));
+    writeFileSync(join(repo.dir, "plan/tasks.yaml"), "tasks:\n  - id: W1-T18060\n");
+    repo.git("add", "plan/tasks.yaml");
+    repo.git("commit", "-qm", "plan");
+    const { rows, spawns } = await rung([REPORTS.id!, REPORTS.design!], [], repo);
+    assert.equal(spawns.length, 2, "a reservation releases the next round immediately");
+    const [receipt] = routed(rows);
+    assert.deepEqual([receipt?.kind, receipt?.capability, receipt?.remedy],
+      ["capability", "id-reservation", "id-reservation"]);
+    assert.equal(receipt?.reserved_task_id, "W1-T18061");
+    const ref = `refs/rmd-id/${receipt?.reserved_task_id}`;
+    assert.match(origin.git("show-ref", "--verify", ref), /^[a-f0-9]{40} refs\/rmd-id\/W1-T18061$/);
+    assert.match(origin.git("log", "-1", "--format=%B", ref), new RegExp(`branch=run-${TASK}-1`));
+    assert.match(spawns[1]!.prompt, /reserved W1-T18061/);
+    assert.deepEqual(holds(rows).map((row) => row.needs_design_kind), ["design"]);
+    assert.equal(noPrVerdictRowsFromLedger(rows, Date.now()).length, 0, "no files amendment is proposed for an id");
+  });
+
+  test("W1-T12714 criterion 3: a failed reservation names the failure and supplies no unreserved id", async () => {
+    const repo = gitRepo({ kind: "needs-design-id-unreachable" });
+    repo.git("config", "user.name", "reservation fixture");
+    repo.git("config", "user.email", "reservation@fixture.invalid");
+    mkdirSync(join(repo.dir, "plan"));
+    writeFileSync(join(repo.dir, "plan/tasks.yaml"), "tasks: []\n");
+    const { rows, spawns, outcome } = await rung([REPORTS.id!], [], repo);
+    assert.equal(outcome.outcome, "stood_down");
+    assert.match(outcome.reason ?? "", /reservation.*failed/i);
+    assert.match(outcome.reason ?? "", /origin/);
+    assert.equal(spawns.length, 1);
+    assert.equal(holds(rows).length, 0, "a reservation fault is not a design hold");
+    assert.equal(routed(rows)[0]?.outcome, "refused");
+    assert.equal(routed(rows)[0]?.reserved_task_id, undefined);
+  });
+
+  test("W1-T12714 criterion 3: body repair validates proof evidence and writes before the next round", async () => {
+    const repo = gitRepo({ kind: "needs-design-body" });
+    const oldProof = "grep: ^export const routed = in src/route.ts";
+    const newProof = "grep: ^export const routed = true; in src/route.ts";
+    mkdirSync(join(repo.dir, "src"));
+    writeFileSync(join(repo.dir, "src/route.ts"), "export const routed = false;\n");
+    repo.git("add", "src/route.ts");
+    repo.git("commit", "-qm", "base");
+    repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
+    writeFileSync(join(repo.dir, "src/route.ts"), "export const routed = true;\n");
+    repo.git("commit", "-qam", "route");
+    const body = `Acceptance:\n- ${CLAIM} | ${oldProof}\n`;
+    const proposal = `PROOF_AMENDMENT:\n1. claim: ${CLAIM}\n   old_proof: ${oldProof}\n   new_proof: ${newProof}\n\n${REPORTS.body}`;
+    const { rows, spawns, writes } = await rung([proposal, REPORTS.design!], [], repo, {
+      body, proofDiscrimination: { bodyRepair: true, proofs: [{ claim: CLAIM, proof: oldProof, proofExec: "executed_stale" }] },
+    });
+    assert.deepEqual(writes, [body.replace(oldProof, newProof)], "the shared proof validator permits the body write");
+    assert.equal(spawns.length, 2);
+    assert.equal(spawns[1]!.body, writes[0], "the next round runs after the body write completes");
+    assert.deepEqual(routed(rows).map((row) => row.remedy), ["body-repair", "escalate"]);
+    assert.ok(rows.findIndex((row) => row.step === "fix.body_proof_repaired") <
+      rows.findIndex((row) => row.step === "fix.needs_design_routed"));
   });
 
   test("W1-T12714 criterion 4: a contract report opens an acceptance amendment proposal through the refusal writer", async () => {
