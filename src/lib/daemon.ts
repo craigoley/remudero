@@ -191,6 +191,7 @@ import {
   type IdleLaneCause,
   type IdleLaneHold,
 } from "./idle-lane-accounting.js";
+import { reviewPrecedenceHold } from "./review-precedence.js";
 
 /** W1-T3978: the implement producer's exact refusal, carried as runtime metadata without widening
  * the shared RunResult union used by every other dispatch lane. */
@@ -1846,7 +1847,7 @@ export interface FleetControlHold {
 }
 
 /** W1-T11383: a worker-start hold; HEAP composes after the fleet controls and never inside them. */
-export type WorkerAdmissionHold = FleetControlHold | { control: "HEAP"; detail: string };
+export type WorkerAdmissionHold = FleetControlHold | { control: "HEAP" | "REVIEW"; detail: string };
 
 export function resolveFleetControlHold(
   deps: Pick<DaemonDeps, "checkStop" | "checkPause">,
@@ -5983,7 +5984,7 @@ export async function runDaemon(
   const holdWorkerAdmission = (surface: string): (WorkerAdmissionHold & { reason: string }) | undefined => {
     const sample = recordNearLimitHeapSample(deps, `admission:${surface}`);
     const hold = deps.workerAdmissionHold?.();
-    if (!hold) return heapWorkerAdmissionHold(deps, surface, sample, log);
+    if (!hold) return heapWorkerAdmissionHold(deps, surface, sample, log) ?? reviewPrecedenceHold(surface, daemonClock.now(), pollIntervalMs, log);
     const reason = `fleet ${hold.control} hold: ${hold.detail}`;
     log("daemon.admission_held", { surface, control: hold.control, detail: hold.detail, reason });
     return { ...hold, reason };
@@ -8138,11 +8139,10 @@ export async function runDaemon(
       continue;
     }
     // W1-T11383: a heap hold starts no batch and exits nothing; it is not a pause, so it writes no daemon.pause row.
-    if (workerHold?.control === "HEAP") {
+    if (workerHold?.control === "HEAP" || workerHold?.control === "REVIEW") {
       await stopInterphaseReviewClock();
       ticks++;
-      idleLaneTickCause = "memory";
-      idleLaneTickHold = { reason: workerHold.reason };
+      [idleLaneTickCause, idleLaneTickHold] = [workerHold.control === "HEAP" ? "memory" : "governor", { reason: workerHold.reason }];
       sampleIdleLane(0, false, dispatchSet.length);
       await sleepUntilSweepWake(pollIntervalMs);
       continue;
