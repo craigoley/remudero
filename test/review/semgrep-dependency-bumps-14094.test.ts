@@ -22,8 +22,8 @@ test("W1-T12492 admits only reviewed setuptools wheels and refuses the incompati
 
   const buildPins = [...build.matchAll(/^setuptools==([^\s]+) --hash=sha256:([a-f0-9]+)$/gm)];
   assert.deepEqual(buildPins.map(([, version, digest]) => [version, digest]),
-    [["84.0.0", "51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670"]],
-    "the trust-only change keeps main's lock on its current reviewed wheel");
+    [["84.1.0", "5231689c6ac8156cd155cfb98c3fd6fb252c3e7e9bd3d78b64d3c55f132624c9"]],
+    "the lock pins exactly one setuptools wheel: the reviewed 84.1.0 exact pair that the auditor admits");
   assert.match(auditor, /"setuptools": frozenset\(\{\s*\("84\.0\.0", "51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670"\),\s*\("84\.1\.0", "5231689c6ac8156cd155cfb98c3fd6fb252c3e7e9bd3d78b64d3c55f132624c9"\),/);
   assert.match(auditor, /APPROVED_SPECIAL_MEMBER_ALIASES = \{[\s\S]*"84\.1\.0", "5231689c6ac8156cd155cfb98c3fd6fb252c3e7e9bd3d78b64d3c55f132624c9"\)[\s\S]*"84\.0\.0", "51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670"\)/);
   assert.match(runtime, /^opentelemetry-api==1\.37\.0 --hash=sha256:accf2024d3e89faec14302213bc39550ec0f4095d1cf5ca688e1bfb1c8612f47$/m);
@@ -81,7 +81,10 @@ test("W1-T12492 lock validator admits the reviewed 84.1.0 wheel and rejects othe
     "auditor = importlib.util.module_from_spec(spec)",
     "spec.loader.exec_module(auditor)",
     "root = pathlib.Path(root)",
-    "(root / 'build-requirements.txt').write_text(pathlib.Path(source).with_name('build-requirements.txt').read_text().replace('setuptools==84.0.0 --hash=sha256:51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670', f'setuptools=={version} --hash=sha256:{digest}'))",
+    "import re",
+    "text, count = re.subn(r'^setuptools==\\S+ --hash=sha256:[0-9a-f]{64}$', f'setuptools=={version} --hash=sha256:{digest}', pathlib.Path(source).with_name('build-requirements.txt').read_text(), flags=re.M)",
+    "assert count == 1, 'the lock must carry exactly one setuptools pin'",
+    "(root / 'build-requirements.txt').write_text(text)",
     "(root / 'requirements.txt').write_bytes(pathlib.Path(runtime).read_bytes())",
     "pins = dict(auditor.APPROVED_TOOLS)",
     "pins['setuptools'] = (version, digest)",
@@ -95,6 +98,9 @@ test("W1-T12492 lock validator admits the reviewed 84.1.0 wheel and rejects othe
   try {
     const old = run("84.0.0", "51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670");
     assert.equal(old.status, 0, old.stderr);
+    assert.equal(old.stdout.trim(),
+      "('84.0.0', '51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670')",
+      "the previous reviewed wheel stays an admitted exact pair after the lock moves");
     const reviewed = run("84.1.0", "5231689c6ac8156cd155cfb98c3fd6fb252c3e7e9bd3d78b64d3c55f132624c9");
     assert.equal(reviewed.status, 0, reviewed.stderr);
     assert.equal(reviewed.stdout.trim(),

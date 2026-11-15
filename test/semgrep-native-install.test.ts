@@ -121,7 +121,7 @@ test("W1-T12492 criterion 2 native install preserves qualification controls and 
   assert.deepEqual([...build], [
     ["packaging", { version: "26.3", sha256: "d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c" }],
     ["pip", { version: "26.2.1", sha256: "71138adf1f4ca900cdb7d289c21b7494329f2332b6d85f0e1c42108c0384ed3e" }],
-    ["setuptools", { version: "84.0.0", sha256: "51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670" }],
+    ["setuptools", { version: "84.1.0", sha256: "5231689c6ac8156cd155cfb98c3fd6fb252c3e7e9bd3d78b64d3c55f132624c9" }],
     ["wheel", { version: "0.48.0", sha256: "3217dcc807155e45db462d7ef2431f5ddda0d7273b700d05a67b271ceb1287ab" }],
   ]);
   const reviewedRuntime = [
@@ -162,12 +162,15 @@ test("W1-T12492 criterion 2 native install preserves qualification controls and 
   const runtimeText = read(runtimePath);
   const current = validateClosure(buildText, runtimeText);
   assert.equal(current.status, 0, `current exact hash locks pass the real closure audit: ${current.stderr}`);
-  const acceptedSetuptools = buildText.replace(
-    "setuptools==84.0.0 --hash=sha256:51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670",
+  const previousSetuptools = buildText.replace(
     "setuptools==84.1.0 --hash=sha256:5231689c6ac8156cd155cfb98c3fd6fb252c3e7e9bd3d78b64d3c55f132624c9",
+    "setuptools==84.0.0 --hash=sha256:51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670",
   );
-  assert.equal(validateClosure(acceptedSetuptools, runtimeText).status, 0, "the individually reviewed setuptools wheel remains accepted");
-  assert.notEqual(validateClosure(acceptedSetuptools.replace("5231689c6ac8156cd155cfb98c3fd6fb252c3e7e9bd3d78b64d3c55f132624c9", "0".repeat(64)), runtimeText).status, 0,
+  assert.notEqual(previousSetuptools, buildText, "the lock pins the reviewed 84.1.0 wheel");
+  assert.equal(validateClosure(previousSetuptools, runtimeText).status, 0, "the previous individually reviewed setuptools wheel remains accepted");
+  const unknownDigest = buildText.replace("5231689c6ac8156cd155cfb98c3fd6fb252c3e7e9bd3d78b64d3c55f132624c9", "0".repeat(64));
+  assert.notEqual(unknownDigest, buildText);
+  assert.notEqual(validateClosure(unknownDigest, runtimeText).status, 0,
     "an unknown build-tool hash fails closed");
   assert.notEqual(validateClosure(buildText, runtimeText.replace("peewee==3.18.3", "peewee==3.18.4")).status, 0,
     "an incompatible runtime closure fails closed");
