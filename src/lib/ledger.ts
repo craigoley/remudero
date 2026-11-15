@@ -1002,6 +1002,9 @@ function isHealthOrDeployStep(step: string): boolean {
  *  still inside its window, while a restart storm's boot count stays bounded rather than kept. */
 export const HEALTH_STEP_RETENTION_WINDOW_MS = 15 * 60 * 1000;
 
+/** Each surviving boot run keeps its newest row of these steps: its heap, its heap policy, its GitHub share. */
+const BOOT_LIFETIME_EVIDENCE_STEPS: ReadonlySet<string> = new Set(["daemon.memory", "daemon.memory_policy", "github.budget.configured"]);
+
 /**
  * Rows retained for per-model attribution, not daemon decisions. W1-T3080 needs `implement.done`
  * to survive rotation because it carries `served_model`/`routed_model` from `workerLedgerFields`;
@@ -1973,7 +1976,7 @@ function rotateLedgerLocked(
     const run = p.json?.run_id;
     if (typeof run !== "string" || !bootRuns.has(run) || p.tsMs === undefined) continue;
     const evidence = lifetimeEvidence.get(run) ?? new Map<string, ParsedLedgerLine>();
-    for (const key of ["last", ...(p.step === "daemon.memory" || p.step === "daemon.memory_policy" ? [p.step] : [])]) {
+    for (const key of ["last", ...(BOOT_LIFETIME_EVIDENCE_STEPS.has(p.step ?? "") ? [p.step!] : [])]) {
       if ((evidence.get(key)?.tsMs ?? -Infinity) <= p.tsMs) evidence.set(key, p);
     }
     lifetimeEvidence.set(run, evidence);

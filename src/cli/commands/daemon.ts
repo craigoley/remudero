@@ -22,7 +22,7 @@ import { GATEWAY_FETCH_TIMEOUT_MS } from "../../lib/git-fetch-retry.js";
 import { productionDispatchBreakJudge, productionFixProgressJudge } from "../../lib/sweep.js";
 import { configureGithubInstallationBudget, ghExec, ghJsonAsync, ghTextAsync, takeGithubBudgetThrottles } from "../../lib/github-transport.js";
 import { createInstallationBudget, createInstallationBudgetState } from "../../lib/github-installation-budget.js";
-import { DEFAULT_HOST_INSTANCE_REGISTRY_PATH, installationConsumers } from "../../lib/instance-registry.js";
+import { DEFAULT_HOST_INSTANCE_REGISTRY_PATH, installationConsumers, registryInstanceForRepo } from "../../lib/instance-registry.js";
 import { GH_APP_INSTALLATION_ID_ENV } from "../../lib/github-app.js";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
@@ -1282,7 +1282,7 @@ export async function daemonCommand(
     onMainEntryStep?.(step);
   };
   ledgerSelectedRegistryReadTimeouts(log);
-  startDaemonInstallationBudget(() => daemonInstallationRegistry(repoRoot), process.env, log);
+  startDaemonInstallationBudget(() => daemonInstallationRegistry(repoRoot), process.env, log, systemClock, `${target.owner}/${target.repo}`);
   // bundlemain: which entry this main started from (bin/rmd's choice), and a bundled main's first tick settles it.
   onMainEntryStep = startMainEntryWatch({ log, root: daemonModuleRepoDir });
   // W1-T9065: the lane's approve and the responder's reframe run from a tree at origin/main.
@@ -2941,11 +2941,22 @@ export function daemonInstallationBudgetWorkerInput(): typeof daemonInstallation
   return daemonInstallationBudgetInput;
 }
 
-/** W1-T12553: use the selected registry or the host copy; an unreadable host must reach startup's log. */
-export function daemonInstallationRegistry(_repoRoot: string): { text: string; source: string } | undefined {
+type DaemonInstallationRegistryRead = { text: string; source: string; omitsInstallationIds?: boolean };
+
+/**
+ * W1-T12553: use the selected registry or the host copy; an unreadable host must reach startup's log.
+ * W1-T12670: only a missing host file falls back to the checkout's copy, which names no installation IDs.
+ */
+export function daemonInstallationRegistry(repoRoot: string): DaemonInstallationRegistryRead | undefined {
   const selected = runtimeInstanceRegistryText();
   if (selected !== undefined) return { text: selected, source: "selected" };
-  return { text: readFileSync(DEFAULT_HOST_INSTANCE_REGISTRY_PATH, "utf8"), source: DEFAULT_HOST_INSTANCE_REGISTRY_PATH };
+  try {
+    return { text: readFileSync(DEFAULT_HOST_INSTANCE_REGISTRY_PATH, "utf8"), source: DEFAULT_HOST_INSTANCE_REGISTRY_PATH };
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") throw err;
+  }
+  const checkout = join(repoRoot, ".remudero", "daemon-instances.yaml");
+  return { text: readFileSync(checkout, "utf8"), source: checkout, omitsInstallationIds: true };
 }
 
 /**
@@ -2954,24 +2965,34 @@ export function daemonInstallationRegistry(_repoRoot: string): { text: string; s
  * an unreadable registry or no instance on the installation sets no budget, and the row says why.
  */
 export function startDaemonInstallationBudget(
-  readRegistry: () => { text: string; source: string } | undefined,
+  readRegistry: () => DaemonInstallationRegistryRead | undefined,
   env: NodeJS.ProcessEnv,
   log: (step: string, extra?: Record<string, unknown>) => void,
   clock: Clock = systemClock,
+  targetRepo?: string,
 ): void {
   const installationId = env[GH_APP_INSTALLATION_ID_ENV]?.trim();
-  const instance = env.RMD_INSTANCE_NAME?.trim() || "unknown";
+  const named = env.RMD_INSTANCE_NAME?.trim();
+  let instance = named || "unknown";
+  let instanceReason = "no_registry";
+  const who = (): Record<string, unknown> => !named && instance === "unknown" ? { instance, instance_reason: instanceReason } : { instance };
   const unset = (reason: string, extra: Record<string, unknown> = {}): void => {
     daemonInstallationBudgetInput = undefined;
     configureGithubInstallationBudget(undefined);
-    log(GITHUB_BUDGET_CONFIGURED_STEP, { outcome: "unconfigured", instance, reason, ...extra });
+    log(GITHUB_BUDGET_CONFIGURED_STEP, { outcome: "unconfigured", ...who(), reason, ...extra });
   };
   if (!installationId) return unset("no_installation_id");
-  let read: { text: string; source: string } | undefined;
+  let read: DaemonInstallationRegistryRead | undefined;
   let consumers: number | undefined;
   try {
     read = readRegistry();
-    consumers = read === undefined ? undefined : installationConsumers(read.text, installationId);
+    if (read !== undefined && !named) {
+      const own = targetRepo === undefined ? { reason: "no_target" } : registryInstanceForRepo(read.text, targetRepo);
+      if ("name" in own) instance = own.name;
+      else instanceReason = own.reason;
+    }
+    consumers = read === undefined ? undefined
+      : installationConsumers(read.text, installationId, { countOmitted: read.omitsInstallationIds === true });
   } catch (err) {
     return unset("registry_unreadable", { installation_id: installationId, error: err instanceof Error ? err.message : String(err) });
   }
@@ -2985,5 +3006,5 @@ export function startDaemonInstallationBudget(
     clock,
     sharedState: state,
   }));
-  log(GITHUB_BUDGET_CONFIGURED_STEP, { outcome: "configured", instance, installation_id: installationId, consumers, source: read.source });
+  log(GITHUB_BUDGET_CONFIGURED_STEP, { outcome: "configured", ...who(), installation_id: installationId, consumers, source: read.source });
 }
