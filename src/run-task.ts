@@ -807,6 +807,7 @@ import {
   ciLearningPendingOrigins,
   findPendingLandingPr,
   landFeedbackStatusContent,
+  landFeedbackStatusContentAsync,
   planDestinationLandingOpts,
   queuedFeedbackDir,
   landCiLearningShards,
@@ -835,7 +836,7 @@ import {
   type TaskFilesLandingResult,
 } from "./lib/feedback-landing.js";
 export { readStandingDecisions };
-import { resolvePlanDestination, planDestinationRepository } from "./lib/plan-destination.js";
+import { resolvePlanDestination, planDestinationRepository, type PlanDestination, type PlanDestinationRepository } from "./lib/plan-destination.js";
 import {
   reconcileFeedbackLanding,
   type FeedbackReconcileRoot,
@@ -2830,7 +2831,8 @@ export function handedOffHeadRiskJudge(
 import { readCiGateRequiredChecks } from "./lib/ci-gate-required.js";
 import { dropDerivativeAggregateCiFailure } from "./lib/derivative-ci-failure.js";
 import { applyCorrection } from "./lib/correct.js";
-import { DEFAULT_PRUNE_GRACE_MS, appendQuestion, ghJson, ghRateLimitRefusalUnknown, type GhRateLimitRefusal, parseDecisionRequest, parseFollowups, parseLearningsUsed, parseSkillsUsed, parseQuestion, parseReconReport, parseReport, pruneStaleRuns, reapStaleWorktrees, removeWorktreeBase, removeRunLock, renderWorkerSettings, resolveGenericRouteToolBound, harnessOwnsGitFor, IMPLEMENT_CASH_TOOLS, IMPLEMENT_CLAUDE_TOOLS, WORKER_RULE_TOOL_NAME, implementToolBound, resolveDispatchLaneToolBound, cashDivertSpawnFields, cashFallbackRefusal, runAdhocLaneReapRung, runWorktreeReapRung, spawnWorker, readClaudeProviderCapacity, activeWorkerCount, cacheTokenLedgerFields, capStderrExcerpt, REPORT_EXCERPT_CAP, STDERR_EXCERPT_CAP, noPrReportExcerpt, foreignTreeStandDownReason, listRegisteredWorktrees, readRunLock, runLockPath, workerLedgerFields, workerTranscript, withAssignmentTrailer, resolveCommitAssignment, uniqueRunBranch, excludeNodeModulesFromGit, linkWorktreeNodeModules, resolveNodeModulesSource, worktreeAdd, worktreeAddAsync, worktreeLockIsPidAlive, worktreeRemove, worktreeRemoveAsync, worktreeRemoveIfPresent, worktreeRemoveIfPresentAsync, worktreesDir, writeRunLock, WorktreeBaseStaleError, WorktreeNodeModulesRefusedError, detectWorktreeBaseUncheckableStreak, WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND, type RunLockInfo, type SpawnWorkerArgs, buildInboxDraftWorkerArgs, type ForeignTreeStandDown, type RegisteredWorktree, type WorkerResult, type WorktreeReapSummary, openUsageProbeSession, type UsageProbeQueryFn, WorkerStateTracker, DEFAULT_WORKER_QUIET_FLOOR_MS, type WorkerState, type WorkerStreamObserver, type WorkerStreamEvent, type WorkerSelectionAssignment, WorkerAbandonedError, SubscriptionOnlyRefusedError, deliverOperatorAnswerToRunningWorker, sharesHarnessCheckout, unwireCredentialHelperSocket, wireCredentialHelperSocket, workerContinuation, workerExecutionForProvider } from "./lib/worker.js";
+import { projectHeldTaskQuestionGates, renderHeldTaskQuestions } from "./lib/human-gate.js";
+import { DEFAULT_PRUNE_GRACE_MS, appendQuestion, ghJson, ghRateLimitRefusalUnknown, type GhRateLimitRefusal, parseDecisionRequest, parseFollowups, parseLearningsUsed, parseSkillsUsed, parseQuestion, parseReconReport, parseReport, pruneStaleRuns, reapStaleWorktrees, removeWorktreeBase, removeRunLock, renderWorkerSettings, resolveGenericRouteToolBound, harnessOwnsGitFor, IMPLEMENT_CASH_TOOLS, IMPLEMENT_CLAUDE_TOOLS, WORKER_RULE_TOOL_NAME, implementToolBound, resolveDispatchLaneToolBound, cashDivertSpawnFields, cashFallbackRefusal, runAdhocLaneReapRung, runWorktreeReapRung, spawnWorker, readClaudeProviderCapacity, activeWorkerCount, cacheTokenLedgerFields, capStderrExcerpt, REPORT_EXCERPT_CAP, STDERR_EXCERPT_CAP, noPrReportExcerpt, foreignTreeStandDownReason, listRegisteredWorktrees, readRunLock, runLockPath, workerLedgerFields, workerTranscript, withAssignmentTrailer, resolveCommitAssignment, uniqueRunBranch, excludeNodeModulesFromGit, linkWorktreeNodeModules, resolveNodeModulesSource, worktreeAdd, worktreeAddAsync, worktreeLockIsPidAlive, worktreeRemove, worktreeRemoveAsync, worktreeRemoveIfPresent, worktreeRemoveIfPresentAsync, worktreesDir, writeRunLock, WorktreeBaseStaleError, WorktreeNodeModulesRefusedError, detectWorktreeBaseUncheckableStreak, WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND, type RunLockInfo, type SpawnWorkerArgs, buildInboxDraftWorkerArgs, type ForeignTreeStandDown, type RegisteredWorktree, type WorkerResult, type WorktreeReapSummary, openUsageProbeSession, type UsageProbeQueryFn, WorkerStateTracker, DEFAULT_WORKER_QUIET_FLOOR_MS, type WorkerState, type WorkerStreamObserver, type WorkerStreamEvent, type WorkerSelectionAssignment, WorkerAbandonedError, SubscriptionOnlyRefusedError, deliverOperatorAnswerToRunningWorker, sharesHarnessCheckout, unwireCredentialHelperSocket, wireCredentialHelperSocket, workerContinuation, workerExecutionForProvider, taskInputAnswer } from "./lib/worker.js";
 import {
   QuietRoundEndedError, createQuietBoundHistory, guardSpawnWithQuietWatchdog, productionQuietWorkerJudge, quietHistoryOptions,
   runQuietWorkerWatchdog, type QuietBoundHistory, type QuietWorkerJudge,
@@ -28166,17 +28168,29 @@ export async function gardenCheckoutAsync(opts: GardenCheckoutOpts): Promise<Gar
   const branch = `${opts.name}-garden-${(opts.clock ?? systemClock).now()}`;
   const root = join(opts.worktreesRoot, branch);
   // W1-T12222: the id holder is the branch that files it, so such a checkout reserves on the landing branch.
-  const reservationBranch = opts.taskFilesOnly ? await taskFilesLandingBranchAsync({ owner: opts.owner, repo: opts.repo }) : branch;
+  // W1-T12212: a new task file of such a checkout lands in the plan destination when the switch names one.
+  const filesTo = opts.taskDestination?.outcome === "destination" ? opts.taskDestination : { owner: opts.owner, repo: opts.repo };
+  const reservationBranch = opts.taskFilesOnly ? await taskFilesLandingBranchAsync({ owner: filesTo.owner, repo: filesTo.repo }) : branch;
   await worktreeAddAsync(opts.repoDir, root, branch, "origin/main", { log: opts.log });
+  const gitAt = (dir: string) => async (...args: string[]) => (await execFilePromise("git", ["-C", dir, ...args], { encoding: "utf8" })).stdout;
   const io: GardenLandIo = {
-    git: async (...args: string[]) => (await execFilePromise("git", ["-C", root, ...args], { encoding: "utf8" })).stdout,
+    git: gitAt(root),
     fetcher: opts.fetcher ?? ((args) => ghJsonAsync(args)),
     generate: (script) => execFilePromise(process.execPath, [...(script === "generate-capability-snapshot.mjs" ? ["--import", import.meta.resolve("tsx")] : []), join(root, "scripts", script)], { cwd: root }),
     preflight: opts.preflight ?? ((input) => planPrPreflightAsync(input, { log: opts.log })),
     // W1-T12221: the seal is async only, as the landing of W1-T12199 is.
-    ...(opts.taskFilesLanding ? { landTaskFiles: (inputs: TaskFileInput[]) => landTaskFilesAsync(opts.repoDir, inputs, {
-      ...opts.taskFilesLanding!, targetRepository: { owner: opts.owner, repo: opts.repo }, log: opts.log, lane: opts.name,
+    ...(opts.taskFilesLanding ? { landTaskFiles: (inputs: TaskFileInput[], at?: PlanDestinationRepository) => landTaskFilesAsync(at?.checkoutDir ?? opts.repoDir, inputs, {
+      ...opts.taskFilesLanding!, targetRepository: at ? { owner: at.owner, repo: at.repo } : { owner: opts.owner, repo: opts.repo }, log: opts.log, lane: opts.name,
     }) } : {}),
+    openDestination: async (at) => {
+      const destRoot = join(opts.worktreesRoot, `${branch}-plan-destination`);
+      await worktreeAddAsync(at.checkoutDir, destRoot, branch, "origin/main", { log: opts.log });
+      return {
+        root: destRoot,
+        git: gitAt(destRoot),
+        dispose: () => worktreeRemoveAsync(at.checkoutDir, destRoot),
+      };
+    },
   };
   return {
     root,
@@ -28198,21 +28212,52 @@ export interface GardenCheckoutOpts {
   fetcher?: GhApiFetcher;
   clock?: Clock;
   /** W1-T5348: the plan-PR preflight over the committed tree; injected only by a test. */
-  preflight?: (input: { cwd: string; title: string; body: string }) => PlanPrPreflightResult;
+  preflight?: (input: { cwd: string; title: string; body: string; codeRoot?: string }) => PlanPrPreflightResult;
   /** W1-T12221: the shared landing of task files: its state root (`config.root`) and its seams. Absent,
    *  every land opens its own PR. */
   taskFilesLanding?: Pick<LandTaskFilesOpts, "stateRoot" | "gh" | "planPrPreflight">;
   /** W1-T12222: every land is a task file, new or edited, through `taskFilesLanding`; `branch` is the landing
    *  branch, and a land with any other path is refused. Async checkout only. */
   taskFilesOnly?: true;
+  /** W1-T12212: `resolvePlanDestination("task")` when the checkout opened; only `destination` and `unreadable` are
+   *  passed. A land whose every path is a new task file goes to the destination; `unreadable` refuses such a land. */
+  taskDestination?: Extract<PlanDestination, { outcome: "destination" | "unreadable" }>;
 }
 
 interface GardenLandIo {
   git: (...args: string[]) => string | Promise<string>;
   fetcher: GhApiFetcher;
   generate: (script: "generate-docs-index.mjs" | "generate-capability-snapshot.mjs") => unknown;
-  preflight: (input: { cwd: string; title: string; body: string }) => PlanPrPreflightResult | Promise<PlanPrPreflightResult>;
-  landTaskFiles?: (inputs: TaskFileInput[]) => Promise<TaskFilesLandingResult>;
+  preflight: (input: { cwd: string; title: string; body: string; codeRoot?: string }) => PlanPrPreflightResult | Promise<PlanPrPreflightResult>;
+  landTaskFiles?: (inputs: TaskFileInput[], at?: PlanDestinationRepository) => Promise<TaskFilesLandingResult>;
+  /** W1-T12212: a worktree of the destination checkout at its origin/main, on the garden branch. Async checkout only. */
+  openDestination?: (at: PlanDestinationRepository) => Promise<{ root: string; git: (...args: string[]) => Promise<string>; dispose: () => Promise<void> }>;
+}
+
+/** W1-T12212: where a land goes. Every path a new task file: the destination. Every path an edit, or any path that is
+ *  not a task file: the checkout's own repository. New and edited task files together: refused. */
+function* gardenLandTarget(opts: GardenCheckoutOpts, root: string, paths: readonly string[], git: GardenLandIo["git"]): Steps<PlanDestinationRepository | "own" | "refused"> {
+  const at = opts.taskDestination;
+  if (at === undefined || paths.length === 0) return "own";
+  const shardDir = relative(root, join(resolveRepoLayout(root).planDir, "tasks.d"));
+  if (!paths.every((p) => p.startsWith(`${shardDir}/`) && /\.ya?ml$/.test(p))) return "own";
+  const fresh: string[] = [];
+  for (const relPath of paths) {
+    try {
+      yield* step(() => git("cat-file", "-e", `HEAD:${relPath}`));
+    } catch {
+      fresh.push(relPath); // main does not hold the path: a new task file
+    }
+  }
+  if (fresh.length === 0) return "own";
+  const refuse = (error: string): "refused" => {
+    opts.log(`${opts.name}.garden_plan_destination`, { outcome: "refused", paths, error });
+    return "refused";
+  };
+  if (fresh.length < paths.length) return refuse("a land that adds a task file and edits another goes to two repositories; land each apart");
+  if (at.outcome === "unreadable") return refuse(`the plan destination is unreadable, so no new task file is filed: ${at.reason}`);
+  opts.log(`${opts.name}.garden_plan_destination`, { outcome: "destination", paths, repository: `${at.owner}/${at.repo}` });
+  return { owner: at.owner, repo: at.repo, checkoutDir: at.checkoutDir };
 }
 
 /** W1-T12221: the landing inputs when every path is an edit of a task file main holds and the body's
@@ -28278,14 +28323,52 @@ function* gardenLandSteps(
   io: GardenLandIo,
 ): Steps<GardenLandResult> {
   const { paths, title, body } = landing;
+  const target = yield* gardenLandTarget(opts, root, paths, io.git);
+  if (target === "refused") return undefined;
   // W1-T12221: an edit of task files rides the shared landing PR, unless the caller keeps its own PR.
   const only = opts.taskFilesOnly === true && io.landTaskFiles !== undefined;
   const sealed = !only && (landing.sealedLanding === false || io.landTaskFiles === undefined) ? undefined : yield* sealedTaskFileInputs(root, paths, body, io.git, only);
-  if (sealed !== undefined) return yield* landSealedTaskFiles(opts, paths, sealed, io.landTaskFiles!);
+  if (sealed !== undefined) {
+    const at = target === "own" ? undefined : target;
+    return yield* landSealedTaskFiles(opts, paths, sealed, (inputs) => io.landTaskFiles!(inputs, at));
+  }
+  if (target !== "own") return yield* gardenLandInDestination(opts, root, branch, landing, io, target);
   if (only) {
     opts.log(`${opts.name}.garden_sealed_landing`, { outcome: "refused", paths, pr_url: null, error: "a checkout that files only task files lands each path under plan/tasks.d with its criterion" });
     return undefined;
   }
+  return yield* gardenCommitAndOpen(opts, root, branch, landing, io, { owner: opts.owner, repo: opts.repo });
+}
+
+/** W1-T12212: new task files that open their own PR: a worktree of the destination, the same commit, preflight, push
+ *  and create there. The preflight reads the public code at the garden checkout. */
+function* gardenLandInDestination(opts: GardenCheckoutOpts, root: string, branch: string, landing: GardenLandOpts, io: GardenLandIo, at: PlanDestinationRepository): Steps<GardenLandResult> {
+  if (io.openDestination === undefined) {
+    opts.log(`${opts.name}.garden_plan_destination`, { outcome: "refused", paths: landing.paths, error: "only the async checkout lands in the plan destination" });
+    return undefined;
+  }
+  const dest = yield* step(() => io.openDestination!(at));
+  try {
+    for (const relPath of landing.paths) {
+      mkdirSync(dirname(join(dest.root, relPath)), { recursive: true });
+      writeFileSync(join(dest.root, relPath), readFileSync(join(root, relPath)));
+    }
+    const destIo: GardenLandIo = { ...io, git: dest.git, preflight: (input) => io.preflight({ ...input, codeRoot: root }) };
+    return yield* gardenCommitAndOpen(opts, dest.root, branch, landing, destIo, { owner: at.owner, repo: at.repo });
+  } finally {
+    yield* step(() => dest.dispose());
+  }
+}
+
+function* gardenCommitAndOpen(
+  opts: GardenCheckoutOpts,
+  root: string,
+  branch: string,
+  landing: GardenLandOpts,
+  io: GardenLandIo,
+  to: { owner: string; repo: string },
+): Steps<GardenLandResult> {
+  const { paths, title, body } = landing;
   yield* step(() => io.git("add", "--", ...paths));
   // A garden log under docs/ changes what docs/docs-index.json must say, and docs-index-check
   // refuses a PR whose index is stale — regenerate it with the checkout's own generator.
@@ -28308,17 +28391,17 @@ function* gardenLandSteps(
   // Both guards run BEFORE the push: a push that lands and a PR that is then refused leaves a
   // branch with no PR — 103 test-run plan-garden-* heads on origin by 2026-09-29.
   assertLiveWriteAllowed("git-push", `pushing the ${opts.name} garden branch ${branch}`);
-  assertLiveWriteAllowed("gh-pr-create", `opening a ${opts.name} garden PR against ${opts.owner}/${opts.repo}`);
+  assertLiveWriteAllowed("gh-pr-create", `opening a ${opts.name} garden PR against ${to.owner}/${to.repo}`);
   // W1-T5348: a tree CI would refuse is never pushed — the lane's not-landed outcome instead of a red PR.
   const verdict = yield* step(() => io.preflight({ cwd: root, title: fitted.header, body: fullTitle + body }));
   if (!planPrPreflightAllows(verdict, { lane: opts.name, branch, log: opts.log })) return undefined;
   yield* step(() => io.git("push", "-q", "origin", `HEAD:refs/heads/${branch}`));
   try {
     const create = { title: fitted.header, body: fullTitle + body, head: branch, base: "main" };
-    const row = yield* step(() => io.fetcher(ratifyPrCreateRestArgs(opts.owner, opts.repo, create)));
-    return createPlanPrRest(() => row, opts.owner, opts.repo, create).prUrl;
+    const row = yield* step(() => io.fetcher(ratifyPrCreateRestArgs(to.owner, to.repo, create)));
+    return createPlanPrRest(() => row, to.owner, to.repo, create).prUrl;
   } catch (e) {
-    yield* retractGardenBranchSteps({ branch, git: io.git, name: opts.name, owner: opts.owner, repo: opts.repo, fetcher: io.fetcher, log: opts.log });
+    yield* retractGardenBranchSteps({ branch, git: io.git, name: opts.name, owner: to.owner, repo: to.repo, fetcher: io.fetcher, log: opts.log });
     throw e;
   }
 }
@@ -28348,7 +28431,15 @@ export type { GardenBuildContext } from "./cli/commands/daemon.js";
 
 export function daemonGardenWorkspace(ctx: Pick<GardenBuildContext, "config" | "repoRoot" | "owner" | "repo" | "log">, name: GardenName): () => Promise<GardenCheckoutAsync> {
   return () => gardenCheckoutAsync({ name, repoDir: ctx.repoRoot, worktreesRoot: worktreesDir(ctx.config), owner: ctx.owner, repo: ctx.repo, log: ctx.log,
-    taskFilesLanding: { stateRoot: ctx.config.root }, ...(TASK_FILES_ONLY_GARDENS.has(name) ? { taskFilesOnly: true } : {}) });
+    taskFilesLanding: { stateRoot: ctx.config.root }, ...(TASK_FILES_ONLY_GARDENS.has(name) ? { taskFilesOnly: true } : {}),
+    ...gardenTaskDestination(ctx.config.root, ctx.repoRoot, ctx.owner, ctx.repo) });
+}
+
+/** W1-T12212: the host switch for a new task file, read each time a checkout opens. Off or not listed: no field, so the
+ *  checkout and its calls are those of today. */
+function gardenTaskDestination(stateRoot: string, repoDir: string, owner: string, repo: string): Pick<GardenCheckoutOpts, "taskDestination"> {
+  const at = resolvePlanDestination("task", join(stateRoot, "state"), { owner, repo, checkoutDir: repoDir });
+  return at.outcome === "destination" || at.outcome === "unreadable" ? { taskDestination: at } : {};
 }
 
 /** W1-T12222: the gardens whose every land is a new task file under plan/tasks.d, read from the code. The first four
@@ -35290,15 +35381,15 @@ export function triageLockRefusalMessage(pid: number, startedAt: string, lockPat
 /** Serialize with the existing queued writer, then land in the entry's home. Neither the public
  * lane nor the shared private checkout receives a mutable feedback copy. The existing queue keeps
  * a refused private write recoverable by the normal landing sweep. */
-function landPrivateTriageStatus(root: string, stateRoot: string, feedbackId: string, status: FeedbackEntry["status"],
-  opts: { proposalPr?: string; summary?: FeedbackEntry["summary"]; log: (step: string, extra?: Record<string, unknown>) => void }) {
+async function landPrivateTriageStatus(root: string, stateRoot: string, feedbackId: string, status: FeedbackEntry["status"],
+  opts: { proposalPr?: string; summary?: FeedbackEntry["summary"]; log: (step: string, extra?: Record<string, unknown>) => void }): Promise<LandFeedbackResult> {
   const home = triageFeedbackHome(root, feedbackId);
   if (home.destination === undefined) throw new Error("private triage status has no destination");
   const updated = setFeedbackStatus(root, feedbackId, status, { ...opts, land: { stateRoot } });
   const content = readFileSync(join(queuedFeedbackDir(stateRoot), `${feedbackId}.yaml`), "utf8");
   if (content !== stringifyYaml(updated)) throw new Error("feedback status queue does not hold the requested edit");
-  return landFeedbackStatusContent(home.root, feedbackEntryRepoPath(feedbackId), content,
-    planDestinationLandingOpts({ log: opts.log }, home.destination));
+  return landFeedbackStatusContentAsync(home.root, feedbackEntryRepoPath(feedbackId), content,
+    planDestinationLandingOpts<LandFeedbackAsyncOpts>({ log: opts.log }, home.destination));
 }
 
 interface PrivateTriagePublication {
@@ -35372,7 +35463,7 @@ async function finishPrivateTriagePublication(publication: PrivateTriagePublicat
   try {
     const stateRoot = join(config.root, "state");
     await proposeFeedbackWithSummary(worktreePath, feedbackId, summarizeDeps, { proposalPr: publication.prUrl, land: { stateRoot } });
-    const landing = landPrivateTriageStatus(worktreePath, stateRoot, feedbackId, "proposed", { proposalPr: publication.prUrl, log });
+    const landing = await landPrivateTriageStatus(worktreePath, stateRoot, feedbackId, "proposed", { proposalPr: publication.prUrl, log });
     if (!landing.landed) throw new Error("the private feedback landing refused the write");
     publication.stage = "feedback_landed";
     writeAtomic(receiptPath, JSON.stringify(publication), { mode: 0o600 });
@@ -35384,7 +35475,7 @@ async function finishPrivateTriagePublication(publication: PrivateTriagePublicat
   return publication.prUrl;
 }
 
-function landTriageStatusOutcome(i: {
+async function landTriageStatusOutcome(i: {
   worktreePath: string;
   repoDir: string;
   feedbackId: string;
@@ -35396,15 +35487,15 @@ function landTriageStatusOutcome(i: {
   stateRoot: string;
   log: (step: string, extra?: Record<string, unknown>) => void;
   say: (msg: string) => void;
-}): number {
+}): Promise<number> {
   const { decision, feedbackId, log, say } = i;
   const home = triageFeedbackHome(i.worktreePath, feedbackId);
   const landing = home.destination !== undefined
-    ? landPrivateTriageStatus(i.worktreePath, i.stateRoot, feedbackId, decision.status, { log })
-    : (() => {
+    ? await landPrivateTriageStatus(i.worktreePath, i.stateRoot, feedbackId, decision.status, { log })
+    : await (() => {
       setFeedbackStatus(i.worktreePath, feedbackId, decision.status);
       const content = readFileSync(feedbackEntryPath(i.worktreePath, feedbackId), "utf8");
-      return landFeedbackStatusContent(i.worktreePath, feedbackEntryRepoPath(feedbackId), content, { log });
+      return landFeedbackStatusContentAsync(i.worktreePath, feedbackEntryRepoPath(feedbackId), content, { log });
     })();
   if (!landing.landed) {
     const cause = landing.error ?? (landing.refused?.length ? `refused: ${JSON.stringify(landing.refused)}` : "nothing was landed");
@@ -35844,7 +35935,7 @@ async function triageCommandLocked(
     // W1-T12198: an outcome that files no task changes one status line, so it rides the shared
     // feedback landing pull request and opens no pull request of its own.
     if (decision.action === "no_task" || decision.action === "grill") {
-      return landTriageStatusOutcome({ worktreePath, repoDir, feedbackId, entry, decision, grillIssueUrl,
+      return await landTriageStatusOutcome({ worktreePath, repoDir, feedbackId, entry, decision, grillIssueUrl,
         repository: `${owner}/${repo}`, threadStorePath: inboxThreadStorePath(config.root), stateRoot: join(config.root, "state"), log, say });
     }
 
@@ -37382,6 +37473,9 @@ export async function inboxCommand(rest: string[], deps: { config?: Config; gith
   const ledgerPath = ledgerPathFor(config);
   const { owner, repo } = instancePlan.target ?? resolveOwnerRepo();
 
+  // W1-T12715: tasks held for an operator answer come first; the console reads the same gates.
+  const held = renderHeldTaskQuestions(projectHeldTaskQuestionGates(plan.tasks, (id) => taskInputAnswer(repoRoot, id), `${owner}/${repo}`));
+  if (held) console.log(held);
   const registryPath = join(config.root, "state", "inbox-proposals.json");
   const proposals: Proposal[] = parseProposalRegistry(readFileIfExists(registryPath));
   if (proposals.length === 0) {
@@ -38188,7 +38282,7 @@ export function productionMachineFilingJudgePorts(opts: {
       };
     },
     openWorkspace: () => gardenCheckoutAsync({ name: "machine-judge", repoDir: opts.repoRoot, worktreesRoot: opts.worktreesRoot, owner: opts.owner, repo: opts.repo, log: opts.log, fetcher, clock: opts.clock,
-      ...(opts.taskFilesLanding ? { taskFilesLanding: opts.taskFilesLanding } : {}) }),
+      ...(opts.taskFilesLanding ? { taskFilesLanding: opts.taskFilesLanding, ...gardenTaskDestination(opts.taskFilesLanding.stateRoot, opts.repoRoot, opts.owner, opts.repo) } : {}) }),
     prState: (prUrl) => gardenPrState(opts.owner, opts.repo, prUrl, fetcher),
     stageProposal: (proposal) => void stageInboxProposalOnce(join(opts.stateDir, "inbox-proposals.json"), proposal),
     log: opts.log,
