@@ -82,6 +82,12 @@ type SeedRow = Omit<LedgerStepRow, "family">;
 // `src/lib/review.ts`, `src/lib/sweep.ts` and `src/lib/panel-actions.ts` at 2026-09-07.
 const SEED_ROWS: readonly SeedRow[] = [
   {
+    step: "sweep_light.views_fallback",
+    meaning: "A light pass could not use a fresh open-PR list: the read failed, was rate-limited or had not settled after 60 s. With a last good list younger than its age limit, the pass decides from that list, reads each head again at act time and stands a moved or unreadable head down. With no such list, the pass decides nothing, as before.",
+    writer: ["createLightPassOpenPrList"],
+    outcomes: ["rate_limited", "read_failed", "slow_read", "no_snapshot", "snapshot_too_old"],
+  },
+  {
     step: "routing.experiment.result",
     meaning: "A daily intention-to-treat routing experiment result, with separate pipeline metrics, task-cluster bootstrap intervals, the decision rule and sample requirement. Missing outcomes remain counted. Terminal results are preserved; the result changes no routing.",
     writer: ["recordRoutingExperimentResults"],
