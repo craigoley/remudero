@@ -247,6 +247,15 @@ function renderUnmetCriteria(review: NonNullable<FixEvidence["review"]>): string
     .join("\n");
 }
 
+/** W1-T10661: a paste-ready Acceptance block naming each unmet claim and proof verbatim, so a
+ *  body-coverage round resolves in ONE pass instead of the worker re-deriving the keywords. */
+export function bodyCoverageAcceptanceBlock(unmet: readonly { claim: string; proof: string; criterionIndex?: number }[]): string[] {
+  return [
+    "Paste-ready PR body Acceptance block (state how the diff satisfies each claim and name its proof verbatim):",
+    ...unmet.map((c, i) => `- Criterion ${c.criterionIndex || i + 1}: ${c.claim} — proven by ${c.proof}`),
+  ];
+}
+
 export const FIX_MODE_RULES: readonly FixModeRule[] = [
   {
     mode: "merge-conflict",
@@ -842,6 +851,8 @@ export function renderFixPrompt(opts: {
       `summary: ${summary}`,
       "",
       list,
+      "",
+      ...bodyCoverageAcceptanceBlock(unmet),
       ...footer,
     ].join("\n");
   }
