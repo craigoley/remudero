@@ -16,7 +16,6 @@
   files:
     - deploy/install-host-units.sh
     - scripts/fleet-heartbeat.sh
-    - .github/workflows/fleet-heartbeat-watch.yml
     - test/deploy/the-fleet-cron-lines-converge-to-the-install.test.ts
     - test/daemon/a-heartbeat-running-stale-code-says-so.test.ts
     - test/host-units-install.test.ts
@@ -204,24 +203,43 @@
       - `unknown — <reason>` when there is no install root or either read fails. A failed read is
         never current.
     - `install_dir` and `install_head_sha` keep their meaning, the directory the beat runs from.
-    - (c4) THE WATCHER RAISES STALE CODE OUTSIDE THE LIVENESS CHAIN. In fleet-heartbeat-watch.yml,
-      extract `beat_code_verdict` beside the other verdicts. A branch in
-      `DAEMON_EXPECTED_BRANCHES` gets its own needs-human record, `--source
-      "fleet-heartbeat:<branch>:code"`, so it neither masks nor is masked by BEAT_STALE and the rest.
-      - It raises when the verdict is `STALE`.
-      - It ALSO raises when a fresh beat has NO `beat_code_verdict` line at all. The watcher runs
-        from main, so a beat without the field is running code older than this change. That is
-        exactly today's frozen copy, and it is how a frozen copy announces itself instead of
-        staying silent.
-      - `current` resolves the record. `unknown` neither raises nor resolves, and says so in the
-        report.
-      - Title: "fleet-heartbeat (<branch>): the beat runs stale code". The body names the running
-        path, both blobs and the install head.
-      - Add the arm to the workflow's self-check step. A STALE fixture and a field-less fixture must
-        raise, and current and unknown fixtures must not.
 
     Nothing else. No change to the launcher's converge logic, the units, deploy-run, host-update.sh,
     the janitor or the reaper.
+
+    INVARIANT a-failed-read-is-never-current: a beat that cannot read its install root, its own
+    blob or the install's blob reports `unknown` with the reason, never `current`.
+
+    AMENDED 2026-11-16 (operator session): step (c4) (the watcher in fleet-heartbeat-watch.yml
+    extracts `beat_code_verdict`, raises its own `fleet-heartbeat:<branch>:code` record for a STALE
+    verdict and for a fresh beat with no such line, and gains a self-check arm), criterion 5, the
+    prompt's watcher case and the two falsifier lines about the watcher moved to W1-T13163, and
+    `.github/workflows/fleet-heartbeat-watch.yml` left `files:`. Why: the daemon never dispatches a
+    task whose `files:` names a path under .github/workflows/ (W1-T5351, `workflowPaths` in
+    src/lib/drain.ts: the fleet App cannot push a workflow file), so this whole task waited for an
+    operator build that nothing announced. Steps (a) and (c1) to (c3) and criteria 1 to 4 need no
+    workflow edit and are what remains here: the cron lines converge, and the beat PUBLISHES
+    `beat_code_verdict`. Raising on it is W1-T13163, which an operator session hand-builds, which
+    depends on this task, and which must not land before a live beat on heartbeat-azure carries
+    the line (a watcher that raises on a missing line would otherwise raise at once). Until then a
+    stale beat says so in its payload and nothing raises it.
+    READ at origin/main ef8b74910f, so neither half is done: `git grep -l -e 'beat_code_verdict'`
+    outside plan/ finds no file; the watcher's judging loop extracts
+    `reaper_verdict=$(printf '%s\n' "$payload" | sed -n 's/^session_reaper_verdict=//p' | tail -n 1)`
+    (:328) and no code verdict; neither new suite exists.
+    ALSO READ, because it changes what MEASURE FIRST will find: the live beat on origin's
+    heartbeat-azure branch at 6dc76a1030 (2026-11-16T14:00:03Z, heartbeat.txt) carries
+    `install_dir=/home/craigoleyagent/rmd-state2/daemon-install`, `install_head_sha=ef8b74910`
+    (main's head at that minute) and a `session_reaper_verdict=` line. So the host's heartbeat
+    cron line no longer runs the frozen 65f87ae06 checkout the title names. Nothing in the repo
+    did that: deploy/install-host-units.sh on main still renders only the janitor's line
+    (`CLEANUP_CRON_SCHEDULE='7 */6 * * *'`, :2116) and never names scripts/fleet-heartbeat.sh,
+    and the beat still writes its objects with `hash-object -w` into `${INSTALL_DIR}/.git`
+    (scripts/fleet-heartbeat.sh:1758), which is now daemon-install. The work of (a) and (c1) to
+    (c3) is therefore still to do; the rationale's host readings are dated 2026-10-26 and are to be
+    measured again, not assumed. That beat carries no `beat_code_verdict` line.
+    The INVARIANT line above and the `invariant:` prefix on criterion 4 are new, for the lint rule
+    design-invariant-proof; they restate step (c3) and add no behaviour.
   prompt: |
     Do the MEASURE FIRST step and put its findings in the PR body. Then write the two suites at
     the exact paths below. `rmd test-place` computed both folders on 2026-10-26, and the proofs
@@ -256,10 +274,6 @@
     - Stale-code case. Run the script from a copy whose blob differs from the install fixture's
       HEAD, and assert `beat_code_verdict=STALE` naming both blobs. Run it from the install
       itself, and assert `current`. With no install root, assert `unknown`.
-    - Watcher case. Extract the judging and delivery steps the way test/fleet-heartbeat.test.ts
-      does. Assert that STALE and field-less payloads on `heartbeat-azure` each raise
-      `fleet-heartbeat:heartbeat-azure:code` beside a FRESH liveness kind. Assert that `current`
-      resolves it and that `unknown` raises nothing.
 
     Restore base code with `git show origin/main:<path>`, never stash, and watch every new case
     fail. Before opening the PR, dry-run the new heartbeat on the real host per the memory rule
@@ -274,10 +288,8 @@
       proof: 'grep: test("W1-T10756: a cron line that runs a frozen checkout reads drifted" in test/deploy/the-fleet-cron-lines-converge-to-the-install.test.ts'
     - claim: "the beat pushes from a checkout with no credential helper using GH_TOKEN, and leaves no objects in the checkout it runs from"
       proof: 'grep: test("W1-T10756: a beat pushes from the install and leaves no objects in it" in test/daemon/a-heartbeat-running-stale-code-says-so.test.ts'
-    - claim: "the beat publishes its own script blob against the converged install's and reads STALE when they differ, current when they match, unknown when the install cannot be read"
+    - claim: "invariant:a-failed-read-is-never-current — the beat publishes its own script blob against the converged install's and reads STALE when they differ, current when they match, unknown when the install cannot be read"
       proof: 'grep: test("W1-T10756: the beat names stale code when its script differs from the converged install" in test/daemon/a-heartbeat-running-stale-code-says-so.test.ts'
-    - claim: "fleet-heartbeat-watch.yml raises a per-host stale-code issue outside the liveness chain for a STALE verdict and for a fresh beat that carries no verdict at all, and resolves it on current"
-      proof: 'grep: test("W1-T10756: the watcher raises stale code, including a beat that predates the field" in test/daemon/a-heartbeat-running-stale-code-says-so.test.ts'
   falsifier: |
     - Leave the heartbeat row out of the table: the installer case must fail on the frozen line.
     - Match the old line by the installed path only, the way the janitor's grep does: the frozen
@@ -287,10 +299,6 @@
     - Write the beat's objects into `${INSTALL_DIR}/.git` again: the objects case must fail.
     - Compare the install's HEAD sha with itself instead of the running file's blob: the
       stale-code case must fail.
-    - Raise only on an explicit STALE, so a beat without the field stays silent: the field-less
-      half of the watcher case must fail.
-    - Put the arm inside the liveness `elif` chain: the watcher case's FRESH-beside-code assertion
-      must fail.
     GUARDS that held at base and must still hold:
     - W1-T4770's janitor tests in test/host-units-install.test.ts (exactly one cleanup entry,
       unrelated lines survive, DRIFTED on an edited line);
