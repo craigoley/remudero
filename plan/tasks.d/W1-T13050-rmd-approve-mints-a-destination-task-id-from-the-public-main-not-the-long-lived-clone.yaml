@@ -17,7 +17,7 @@
   files:
     - src/run-task.ts
     - test/worker/run-task/rmd-approve-mints-a-destination-task-id-from-the-public-main.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With plan-destination.json naming the task kind, and the public clone's checked-out main behind its origin/main by shards that add task ids, a single rmd approve of a draft with one NEW- placeholder mints and reserves an id above origin/main's highest id, writes approve.id_materialized, and writes no approve.error"

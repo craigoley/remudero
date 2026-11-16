@@ -15,7 +15,7 @@
     - W1-T3277
   files:
     - test/the-tick-reads-run-off-the-event-loop.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Three tick reads over nine open PRs, through the producer built by fixtureReader, keep the pacer's real 1.5 s gap (at least nine gaps of paced time) and take less wall time than the paced time, so no read waits on a real timer"

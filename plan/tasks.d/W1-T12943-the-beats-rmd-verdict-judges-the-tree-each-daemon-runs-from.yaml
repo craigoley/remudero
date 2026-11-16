@@ -17,7 +17,7 @@
     - scripts/fleet-heartbeat.sh
     - test/helpers/fleet-heartbeat-harness.ts
     - test/daemon/the-beats-rmd-verdict-judges-the-tree-each-daemon-runs-from.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With daemon containers running, rmd_verdict is derived from the checkout each container mounts at its code path, read from the runtime's mount list, and the payload names each instance's tree with its tsx reading; a host install directory with no node_modules reads ok when every mounted tree has tsx"
