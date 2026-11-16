@@ -257,3 +257,18 @@ for (const reason of ["destination-unreadable", "destination-lookup-failed"]) {
     assert.deepEqual(rows.map(row => [row.outcome, row.reason]), [["refused", reason]]);
   });
 }
+
+test("an exhausted plan filing whose file list cannot be read still rebuilds, and says the read failed", async () => {
+  const { writes, landed, closed } = spies();
+  const rows: Record<string, unknown>[] = [];
+  const out = await planRoundExhaustedRemedy(filing(),
+    { redChecks: ["lint-plan"], violations: [], refusal: REFUSAL, knownPlanFiles: [PLAN_FILE] }, [],
+    { ...writes, readTaskShard: async () => ({ outcome: "refused", reason: "task-absent" }),
+      readPrFiles: async () => { throw new Error("gh pr diff timed out"); } },
+    { runId: "plan-files-unread", ledgerTaskId: `PR-${PR}`, nowIso: new Date(NOW).toISOString(), append: row => { rows.push(row); } });
+  assert.equal(out.error, undefined, out.reason);
+  assert.equal(closed.length, 1);
+  assert.equal(landed.length, 1);
+  assert.deepEqual(heldTask(landed[0]![0]!.content).files, [PLAN_FILE], "the plan files the sweep already knows stay the held task's files");
+  assert.match(String(rows[0]!.text), /The pull request's file list could not be read: gh pr diff timed out\./);
+});
