@@ -53,7 +53,8 @@ test("W1-T9712: a stall row carries the meter by-caller spawn time of its closin
     assert.equal(row.unprofiled_ms, 35_000);
     assert.deepEqual(row.sync_spawn_callers, []);
     assert.equal(row.bound_ms, 40);
-    assert.equal(row.unattributed_ms, Math.max(0, Number(row.lag_ms) - 30_000));
+    // W1-T12753: the profiled 5,000 ms is attributed too, beside the meter's 30,000 ms.
+    assert.equal(row.unattributed_ms, Math.max(0, Number(row.lag_ms) - 30_000 - 5000));
   } finally {
     profiler.stop();
   }

@@ -600,6 +600,7 @@ async function fileIncident(
         claim: `the test that pins the cause is added to ${file}, beside the test that failed`,
         proof: `grep: test("${flakeIncidentTestTitle(taskId)}" in ${file}`,
       }],
+      invariants: { none: `the only declared path is the test file ${file}, so the fix changes test code alone and no production behaviour` },
       note: `Filed by the flake-incident gardener (W1-T6406). MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. The SRE ruling of 2026-09-23 is that a CI flake is an incident.`,
       rationale: [
         `Test: ${subject}`,

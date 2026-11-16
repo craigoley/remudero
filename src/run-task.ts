@@ -1376,7 +1376,7 @@ import {
   type StaleFixDispatchShadow,
 } from "./lib/stale-fix-dispatch-recovery.js";
 import { prStateCommand } from "./lib/pr-state.js";
-import { auditLedgerUnion, createIncrementalLedgerUnion, createSizedMemo, readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, readValidatedRotationDigest, realLedgerFs, type LedgerUnionRecordRead } from "./lib/ledger-union.js";
+import { auditLedgerUnion, createIncrementalLedgerUnion, createSizedMemo, ledgerRowsFor, readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, readValidatedRotationDigest, realLedgerFs, type LedgerUnionRecordRead } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
 // (W1-T2888), which imports it directly.
 import { escalateRepeatingRules, ruleEfficacyReport, type RuleSignature } from "./lib/rule-efficacy.js";
@@ -1473,7 +1473,7 @@ import {
   movedTaskIds,
   planFromFiles,
   planSourceConflicts,
-  criteriaAdded,
+  criteriaAdded, declaresDesignInvariant, designContractChanged,
   DUPLICATE_SLUG_SHINGLE_K,
   followUpCarriesCriteria,
   formatReadIdentity,
@@ -1802,8 +1802,11 @@ import {
   type DependabotActionsPort,
   type SupersededRerunOutcome,
   reconcileDependabotTitle,
-  depReviewRequiredSet,
+  depReviewRequiredReader,
+  depReviewRequiredSetFrom,
+  readDepReviewCiGateRequired,
   type DepReviewRequired,
+  type DepReviewRequiredChecksSource,
   overHeaderLimit,
   DEPENDABOT_OWN_RED_SIGNALS,
   DEPENDABOT_REFRESH_CAUSES,
@@ -2611,6 +2614,7 @@ export function buildSweepEffects(
   | "readRedBaseRefreshFacts"
   | "readOpenEscalations"
   | "depReview"
+  | "retireDepReviewRefusedAsk"
   | "postReview"
   | "repushAbsent"
   | "updateBranch"
@@ -2830,7 +2834,6 @@ export function handedOffHeadRiskJudge(
     };
   });
 }
-import { readCiGateRequiredChecks } from "./lib/ci-gate-required.js";
 import { dropDerivativeAggregateCiFailure } from "./lib/derivative-ci-failure.js";
 import { applyCorrection } from "./lib/correct.js";
 import { projectHeldTaskQuestionGates, renderHeldTaskQuestions } from "./lib/human-gate.js";
@@ -12312,9 +12315,12 @@ export interface DepReviewDeps {
 }
 
 export async function readDepReviewRequiredChecks(
-  owner: string, repo: string, branch: string, root: string, readText: (args: string[]) => Promise<string> = ghTextAsync,
+  owner: string, repo: string, branch: string, root: string | DepReviewRequiredChecksSource,
+  readText: (args: string[]) => Promise<string> = ghTextAsync,
 ): Promise<DepReviewRequired> {
-  return depReviewRequiredSet(await readRequiredStatusCheckContextsAsync(owner, repo, branch, readText), readCiGateRequiredChecks(root));
+  // W1-T12940: a bare root is the daemon's own checkout; a managed repository passes its own source.
+  const source = typeof root === "string" ? { root, self: true } : root;
+  return depReviewRequiredSetFrom(await readRequiredStatusCheckContextsAsync(owner, repo, branch, readText), readDepReviewCiGateRequired(source));
 }
 
 /** W1-T9664: the real proposal capture. Staged, a record the queue refused throws, so the caller keeps the bot PR open. */
@@ -12517,7 +12523,11 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
   }
 
   let selectedChecks = dedupeRollupByLatestAttempt(view.statusCheckRollup ?? []);
-  const readRequired = deps.requiredChecks ?? (deps.gh === undefined ? (b: string) => readDepReviewRequiredChecks(owner, repo, b, proposalRoot) : undefined);
+  // W1-T12940: ci-gate's REQUIRED list is the pull request's own repository's, never the daemon checkout's for a managed one.
+  const requiredReader = depReviewRequiredReader({ repo, selfRepo: resolveOwnerRepo().repo, selfRoot: proposalRoot, configRoot: config.root,
+    readProtection: (b) => readRequiredStatusCheckContextsAsync(owner, repo, b, ghTextAsync) });
+  const requiredSource = requiredReader.source;
+  const readRequired = deps.requiredChecks ?? (deps.gh === undefined ? requiredReader.read : undefined);
   const required: DepReviewRequired = readRequired ? await readRequired(view.baseRefName ?? "main") : { kind: "all-checks", fallback: "required-reader-not-injected" };
   const input = {
     author: { login: view.author?.login ?? "" },
@@ -12543,7 +12553,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
       reason: `selected check evidence is ${selectedState}; no success or arm without current green evidence` };
   }
   log("dep-review.decided", { ...result, pr_url: view.url, head_sha: view.headRefOid, advisory_red: result.advisoryRed ?? [],
-    judged_against: required.kind, ...(required.kind === "all-checks" ? { required_fallback: required.fallback } : {}) });
+    judged_against: required.kind, required_root: requiredSource.root, ...(required.kind === "all-checks" ? { required_fallback: required.fallback } : {}) });
   console.log(`### rmd dep-review PR #${view.number} — ${result.decision}: ${result.reason}`);
 
   let remedyAskUrl: string | undefined;
@@ -12601,13 +12611,21 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
   if (result.decision !== "hold" && !(await reconcileHold())) return 1;
 
   if (result.decision === "refuse") {
+    const reviewFailed = rest.includes("--dependabot-review-failed");
     const refused = reconcileDependabotRefusedPath({
       registryDir: dirname(holdStatePath), owner, repo, prUrl: view.url, prNumber: view.number, title: view.title ?? "",
       body: view.body ?? "", headSha: view.headRefOid, author: input.author, commits: view.commits, result, nowMs: clock.now(), log,
       capture: ({ raw, submissionKey }) => captureProposal({ root: proposalRoot, id: depReviewMigrationFeedbackId(submissionKey), raw, submissionKey }),
       checks: selectedChecks,
       escalate: (escalation) => escalate(escalation, { issues: deps.issues ?? ghIssueGateway(owner, repo), ledgerPath, runId }),
+      reviewFailed,
     });
+    if (refused === "not-proposed" && !reviewFailed) {
+      // W1-T12955: no proposal and no operator ask; the sweep sends the head to the full review.
+      log("dep-review.decided", { ...result, route: "review", pr_url: view.url, head_sha: view.headRefOid });
+      console.log(`refused, no owned-build proposal; routed to the full review: ${view.url}`);
+      return 2;
+    }
     if (refused === "failed") {
       // W1-T9797: the sweep dedups every outcome but hold, so an unfiled remedy must read as hold.
       log("dep-review.decided", { ...result, decision: "hold", review_decision: "refuse",
@@ -19664,9 +19682,9 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
         // in the changed-tasks pass, so a newly filed or edited shard is refused before it
         // repeats the pattern.
         proofSelfPath: "block",
-        // W1-T11746: only this changed-task pass demands INVARIANT/NO-INVARIANTS declarations, so the
-        // whole-plan pass and dispatch leave the historical population valid.
-        requireDesignInvariantDeclaration: true,
+        // W1-T11746/W1-T12832: only this pass demands INVARIANT/NO-INVARIANTS, and only of a task that is new, re-authored
+        // against `oldTask` or already declaring; a metadata-only edit, whole-plan and dispatch leave history valid.
+        requireDesignInvariantDeclaration: designContractChanged(oldTask, task) || declaresDesignInvariant(task),
       };
     }
     // impl-DO: the CALL-SITE check needs to know whether a module already exists, and the linter
@@ -22234,11 +22252,11 @@ export async function defaultVerifyHumanCadenceResult(
   try {
     const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
     const ledgerPath = ledgerPathFor(config);
-    const rows = readLedgerLines(ledgerPath) as unknown as Record<string, unknown>[];
-    const judgedRows = rowsWithArchivedVerifyHumanVerdicts(ledgerPath, rows);
+    const rows = await readLiveLedgerRowsOffLoop(ledgerPath);
+    const judgedRows = await rowsWithArchivedVerifyHumanVerdictsAsync(ledgerPath, rows);
     const registryPath = join(config.root, "state", "inbox-proposals.json");
     const credited = readMergeCreditedTaskIds(ledgerPath).credited;
-    const shards = withWhyMeJudgmentInput(parkedVerifyHumanShards(plan, repoRoot, clock, credited), join(config.root, "state"), readPersistedInbox(join(config.root, "state")), clock.now(), { repository: githubRepoSlugOfCheckout(repoRoot), instance: process.env.RMD_INSTANCE_NAME });
+    const shards = withWhyMeJudgmentInput(await parkedVerifyHumanShardsAsync(plan, repoRoot, clock, credited), join(config.root, "state"), readPersistedInbox(join(config.root, "state")), clock.now(), { repository: githubRepoSlugOfCheckout(repoRoot), instance: process.env.RMD_INSTANCE_NAME });
     const releasedIds = resolveReleasedIds(releaseReadersFor(ledgerPath), plan);
     // W1-T10371: the operator's four rulings decide what they can; the machine-filing judge's landing owns the write.
     const ruledByRules = mechanicalDecisions({
@@ -38238,7 +38256,7 @@ export async function routeAdaptiveLifetimePressure(
   tasks: readonly Task[],
   deps: AdaptiveLifetimePressureRoute,
 ): Promise<VerifyHumanRouteResult> {
-  const rows = readLedgerLines(deps.ledgerPath) as unknown as Record<string, unknown>[];
+  const rows = await readLiveLedgerRowsOffLoop(deps.ledgerPath);
   const nowMs = (deps.clock ?? systemClock).now();
   const filingHistory = createTaskFilingHistoryInvocation(deps.root, tasks.map(task => task.id), deps.filingHistory);
   const shards: ShardUnderJudgement[] = [];
@@ -38284,7 +38302,7 @@ export async function routeAdaptiveLifetimePressure(
       attributableDispatches,
       ...lifetimeShardAge(task.id, nowMs, rows, filingHistory),
       depsAllMerged: (task.depends_on ?? []).every((id) => planTaskLanded(deps.plan.byId.get(id))),
-      citedInSrc: idCitedInSrc(task.id, deps.root),
+      citedInSrc: await idCitedInSrc(task.id, deps.root),
       evidence,
       observationKey: key,
     };
@@ -38301,7 +38319,7 @@ export async function routeAdaptiveLifetimePressure(
     });
   const result = await routeVerifyHumanBacklog(shards, {
     judge: async (shard) => rulings.get(observedStateKey(shard)) ?? judge(shard),
-    priorVerdicts: priorVerifyHumanVerdicts(rowsWithArchivedVerifyHumanVerdicts(deps.ledgerPath, rows)),
+    priorVerdicts: priorVerifyHumanVerdicts(await rowsWithArchivedVerifyHumanVerdictsAsync(deps.ledgerPath, rows)),
     maxJudged: tasks.length,
     stageProposal: (proposal) =>
       void stageInboxProposalOnce(join(deps.config.root, "state", "inbox-proposals.json"), proposal),
@@ -38424,6 +38442,40 @@ export async function routeVerifyHumanBacklog(
 export function rowsWithArchivedVerifyHumanVerdicts(ledgerPath: string, live: readonly Record<string, unknown>[]): Record<string, unknown>[] {
   const archived = readLedgerUnionRecordsSync(dirname(ledgerPath), { step: [VERIFY_HUMAN_JUDGED_STEP] });
   return [...archived.rows, ...live];
+}
+
+/** W1-T12753: {@link rowsWithArchivedVerifyHumanVerdicts} off the daemon loop, through the keyed async reader. */
+export async function rowsWithArchivedVerifyHumanVerdictsAsync(ledgerPath: string, live: readonly Record<string, unknown>[]): Promise<Record<string, unknown>[]> {
+  const archived = await ledgerRowsFor(dirname(ledgerPath), { steps: [VERIFY_HUMAN_JUDGED_STEP] });
+  return [...archived.rows, ...live];
+}
+
+/** Lines parsed between two yields of {@link readLiveLedgerRowsOffLoop}. */
+const LIVE_LEDGER_PARSE_SLICE = 2_000;
+
+/** W1-T12753: readLedgerLines' rows of the live file, in its order, read with an async read and parsed in slices
+ *  that yield to the loop. Absent is no rows; any other read error propagates, as readLedgerLines does. */
+export async function readLiveLedgerRowsOffLoop(path: string): Promise<Record<string, unknown>[]> {
+  let content: string;
+  try {
+    content = await readFileAsync(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+  const out: Record<string, unknown>[] = [];
+  const lines = content.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    if (i > 0 && i % LIVE_LEDGER_PARSE_SLICE === 0) await new Promise<void>((resolve) => setImmediate(resolve));
+    const line = lines[i]!.trim();
+    if (!line) continue;
+    try {
+      out.push(JSON.parse(line) as Record<string, unknown>);
+    } catch {
+      console.error(`ledger: dropping unparseable line in ${path}: ${line}`);
+    }
+  }
+  return out;
 }
 
 /** Verdicts already on the ledger, keyed by the observed state they were taken against —
@@ -38789,8 +38841,20 @@ export function planTaskLanded(task: Task | undefined, ledgerCredited?: Readonly
 /** The parked population, as {@link ShardUnderJudgement} — the ONE place plan records become
  *  judgeable input. Reads the plan and greps src/; writes nothing. */
 export function parkedVerifyHumanShards(plan: Plan, root: string, clock: Clock, ledgerCredited?: ReadonlySet<string>, filingHistoryOptions: FilingHistoryOptions = {}): ShardUnderJudgement[] {
-  const nowMs = clock.now();
+  const parked = parkedVerifyHumanCandidates(plan, root, clock, ledgerCredited, filingHistoryOptions);
+  return parked.candidates.map((task) => parked.shard(task, idCitedInSrcSync(task.id, root)));
+}
+
+/** W1-T12753: {@link parkedVerifyHumanShards} for the daemon's cadence: each src/ citation is an awaited git grep. */
+export async function parkedVerifyHumanShardsAsync(plan: Plan, root: string, clock: Clock, ledgerCredited?: ReadonlySet<string>, filingHistoryOptions: FilingHistoryOptions = {}): Promise<ShardUnderJudgement[]> {
+  const parked = parkedVerifyHumanCandidates(plan, root, clock, ledgerCredited, filingHistoryOptions);
   const out: ShardUnderJudgement[] = [];
+  for (const task of parked.candidates) out.push(parked.shard(task, await idCitedInSrc(task.id, root)));
+  return out;
+}
+
+function parkedVerifyHumanCandidates(plan: Plan, root: string, clock: Clock, ledgerCredited: ReadonlySet<string> | undefined, filingHistoryOptions: FilingHistoryOptions): { candidates: Task[]; shard: (task: Task, citedInSrc: boolean) => ShardUnderJudgement } {
+  const nowMs = clock.now();
   const candidates = plan.tasks.filter(task => {
     // The machine-filing judge routes AND releases every machine record and every operator record that
     // is not ruling-shaped (operator ruling 2026-09-29); only rulings stay on this operator-facing sweep.
@@ -38802,23 +38866,23 @@ export function parkedVerifyHumanShards(plan: Plan, root: string, clock: Clock, 
     return task.verify === "human" && task.status === "queued" && !planTaskLanded(task, ledgerCredited) && heldForAPerson;
   });
   const filingHistory = createTaskFilingHistoryInvocation(root, candidates.map(task => task.id), filingHistoryOptions);
-  for (const task of candidates) {
+  const shard = (task: Task, citedInSrc: boolean): ShardUnderJudgement => {
     const deps = task.depends_on ?? [];
-    out.push({
+    return {
       id: task.id,
       title: task.title ?? task.id,
       rationale: (task as { rationale?: string }).rationale ?? "",
       acceptance: (task.acceptance ?? []).map((c) => c.claim),
       ...shardAgeDays(task.id, nowMs, filingHistory),
       depsAllMerged: deps.every((d) => planTaskLanded(plan.byId.get(d), ledgerCredited)),
-      citedInSrc: idCitedInSrc(task.id, root),
+      citedInSrc,
       ...(() => {
         const evidence = shardEvidence(task);
         return evidence ? { evidence } : {};
       })(),
-    });
-  }
-  return out;
+    };
+  };
+  return { candidates, shard };
 }
 
 /**
@@ -38865,10 +38929,24 @@ function shardAgeDays(taskId: string, nowMs: number, invocation: TaskFilingHisto
 
 /** Whether anything under src/ cites this id — evidence the work may already have landed under
  *  another shard. `git grep` exits 1 on no match, which is an ANSWER, not a failure. */
-function idCitedInSrc(taskId: string, root: string): boolean {
+function idCitedInSrcSync(taskId: string, root: string): boolean {
   const r = spawnSync("git", ["-C", root, "grep", "-l", "-F", "--", taskId, "--", "src"], { encoding: "utf8" });
   return r.status === 0 && r.stdout.trim().length > 0;
 }
+
+/** W1-T12753: {@link idCitedInSrcSync} through the async hardened leaf, so the daemon loop runs while git greps. */
+async function idCitedInSrc(taskId: string, root: string): Promise<boolean> {
+  try {
+    const stdout = await hostWorktreeGitAsync(root, ["grep", "-l", "-F", "--", taskId, "--", "src"], { timeout: ID_CITED_GREP_TIMEOUT_MS });
+    return stdout.trim().length > 0;
+  } catch {
+    // Not a throw: exit 1 is "no match", and an unpinnable root or any other failure read as not cited before too.
+    return false;
+  }
+}
+
+/** The loop-available budget of one {@link idCitedInSrc} grep. */
+const ID_CITED_GREP_TIMEOUT_MS = 120_000;
 
 // ── The ruling judge's production call site (W1-T3212) ────────────────────────────────────────
 //
@@ -39451,8 +39529,9 @@ export async function approveCommand(
     }
     return repoDir;
   };
-  // The id mint and the id reservations stay on the public repository.
-  const idRoot = (worktreePath: string): string => filing.destination ? approvePublicClone(config, owner, repo) : worktreePath;
+  // The id mint and the id reservations stay on the public repository; the mint reads its fetched origin/main (W1-T13050).
+  const mintIn = <T>(worktreePath: string, mint: (root: string) => T): T =>
+    filing.destination ? mintFromPublicMain(config, owner, repo, runId, log, mint) : mint(worktreePath);
   const addApproveWorktree = (dir: string, path: string, branch: string, base: string): string => {
     addLockedRunWorktree(dir, path, branch, base, runId, log); // W1-T5356: lock before add
     return (addedWorktreePath = path);
@@ -39506,12 +39585,12 @@ export async function approveCommand(
       {
         mint: () => {
           if (approveDestinationFailure) throw new Error(approveDestinationFailure);
-          return mintNextTaskIdWithHistory({
-            planPath: join(idRoot(worktreePath), "plan", "tasks.yaml"),
-            repoRoot: idRoot(worktreePath),
+          return mintIn(worktreePath, (root) => mintNextTaskIdWithHistory({
+            planPath: join(root, "plan", "tasks.yaml"),
+            repoRoot: root,
             destinationSnapshot: approveDestinationSnapshot,
             openPrTexts: () => openPrMintTexts(owner, repo),
-          });
+          }));
         },
         reserveBlock: (startId, count) => {
           idBlock = reserveTaskIdBlock(startId, count, taskIdReservationsDir(config.root), {
@@ -40025,6 +40104,31 @@ function approvePublicClone(config: Config, owner: string, repo: string): string
   return dir;
 }
 
+/** W1-T13050: runs a destination approval's id mint in a fresh tree of the public clone at the origin/main its add just
+ *  fetched. The clone's checked-out main lags (no lane moves it), so minting from it refused as local-plan behind. The
+ *  clone's checked-out branch, HEAD and working tree stay as they are. A failed add throws: no fallback to the checkout. */
+function mintFromPublicMain<T>(
+  config: Config, owner: string, repo: string, runId: string, log: (step: string, extra?: Record<string, unknown>) => void,
+  mint: (root: string) => T,
+): T {
+  const clone = approvePublicClone(config, owner, repo);
+  const branch = `${approveRunBranch(runId)}-public-mint`;
+  const path = join(worktreesDir(config), branch);
+  try { addLockedRunWorktree(clone, path, branch, "origin/main", runId, log); }
+  catch (error) {
+    hostWorktreeGitResult(clone, ["branch", "-D", branch]);
+    throw new Error(`rmd approve: refusing to mint task id(s) — the public plan (${owner}/${repo} origin/main) cannot be read: ` +
+      String((error as Error)?.message ?? error).trim().slice(0, 300));
+  }
+  try { return mint(path); }
+  finally {
+    try { worktreeRemove(clone, path); }
+    catch (error) { console.error(`rmd approve: could not remove the public mint tree ${path}: ${String((error as Error)?.message ?? error)}`); }
+    removeRunLock(path);
+    hostWorktreeGitResult(clone, ["branch", "-D", branch]);
+  }
+}
+
 /**
  * `rmd approve <P##> <P##> ...` (N >= 2) — the EXPLICIT-BATCH counterpart of
  * {@link approveCommand} (W1-T2471): ships every READY member of a batch of NAMED proposals
@@ -40137,8 +40241,10 @@ async function approveBatchCommand(
       // fileRatificationBatch, so each member gets the single lane's refusal and written-paths list,
       // and every member's stamp folds over this worktree's own MASTER-PLAN.md in order (Q2).
       const batchWorktree = worktreePath;
-      // The id mint and the id reservations stay on the public repository.
+      // The id mint and the id reservations stay on the public repository; the mint reads its fetched origin/main (W1-T13050).
       const batchIdRoot = filing.destination ? approvePublicClone(config, owner, repo) : batchWorktree;
+      const batchMintIn = <T>(mint: (root: string) => T): T =>
+        filing.destination ? mintFromPublicMain(config, owner, repo, runId, log, mint) : mint(batchWorktree);
       const filed = fileRatificationBatch(
         batchWorktree,
         payloads,
@@ -40148,12 +40254,12 @@ async function approveBatchCommand(
             {
               mint: () => {
                 if (batchDestinationFailure) throw new Error(batchDestinationFailure);
-                return mintNextTaskIdWithHistory({
-                  planPath: join(batchIdRoot, "plan", "tasks.yaml"),
-                  repoRoot: batchIdRoot,
+                return batchMintIn((root) => mintNextTaskIdWithHistory({
+                  planPath: join(root, "plan", "tasks.yaml"),
+                  repoRoot: root,
                   destinationSnapshot: batchDestinationSnapshot,
                   openPrTexts: () => openPrMintTexts(owner, repo),
-                });
+                }));
               },
               reserveBlock: (startId, count) => {
                 const block = reserveTaskIdBlock(startId, count, taskIdReservationsDir(config.root), {
@@ -44838,6 +44944,9 @@ export async function main(
     dispatch?: typeof dispatchCommand;
   } = {},
 ): Promise<void> {
+  // W1-T12075: installed before the early read verbs below, because `rmd gh` and `rmd pr-state` spawn gh too.
+  // It writes nothing until a gh call finds no credential; then the row names the sources tried, never a value.
+  installGithubCredentialMissingSink((row) => appendLedger(ledgerPathFor(loadConfig()), row));
   const inspectionArgv = stripRepoRootFlag(process.argv.slice(2));
   if (inspectionArgv[0] === "inspect" && inspectionArgv[1] === "selected-registry-shadow") {
     return await flushThenExit(await dispatchCommand(inspectionArgv[0], inspectionArgv.slice(1), REGISTRY, USAGE));
@@ -44876,7 +44985,6 @@ export async function main(
   // calls this repo's `callMain` tests make do not stack listeners.
   installUnhandledRejectionGuard();
   setGhReadActorResolver((env) => deriveLedgerActor(env));
-  installGithubCredentialMissingSink((row) => appendLedger(ledgerPathFor(loadConfig()), row));
   // W1-T3065 — THE HAND LANE REAPS TOO. Until this line the temp sweep had exactly two callers,
   // both daemon rungs, so a machine running `rmd` by hand and no daemon reclaimed NOTHING: the
   // operator's Mac reached 100% of a 228 GiB volume with 138 stale dirs and 11 GiB of debris, and

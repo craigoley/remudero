@@ -24,7 +24,7 @@
     - src/lib/self-sync.ts
     - test/review/a-finished-review-is-withheld-only-when-the-code-that-judged-it-changed.test.ts
     - test/a-reviewer-verdict-survives-unrelated-main-churn.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A review that runs as a run child (runDetachedWork, kind review) reads the reviewer code freshness once before any reviewer starts. On a fresh reading the review command gets that reading as its start reading, so a material merge to main that lands while the reviewer runs does not withhold the verdict: it posts"

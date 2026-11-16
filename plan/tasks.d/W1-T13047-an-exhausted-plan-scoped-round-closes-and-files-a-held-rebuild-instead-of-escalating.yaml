@@ -1,0 +1,66 @@
+- id: W1-T13047
+  title: "An exhausted plan-scoped round closes the plan-only pull request and files a held rebuild, instead of escalating"
+  repo: remudero
+  depends_on:
+    - W1-T12709
+  priority: 1.0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # closes a plan-only pull request that today waits on a needs-human issue; a plan PR with a round left keeps its round
+  origin: "operator-session#no-pr-waits-on-the-operator-2026-11-15"
+  plan_refs:
+    - W1-T12709
+    - W1-T9289
+    - W1-T12715
+  files:
+    - src/lib/sweep.ts
+    - src/lib/parked-pr-remedy.ts
+    - src/lib/ledger-steps.ts
+    - test/every-fixed-repair-budget-defers-to-the-progress-judge.test.ts
+    - test/a-dirty-fleet-plan-pr-gets-a-plan-scoped-conflict-round.test.ts
+    - test/sweep/an-exhausted-plan-round-is-closed-and-rebuilt.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "runSweep with the production parkedPr effect, on a fleet plan-only pull request whose plan-scoped round was refused twice with the same reason and whose fix progress judge answers escalate, calls deps.escalate zero times, closes the pull request through parkedPr.closePr, and files one held task with a needs_input question that names the red gates and the refusal reason"
+      proof: "grep: W1-T13047 criterion 1 in test/sweep/an-exhausted-plan-round-is-closed-and-rebuilt.test.ts"
+    - claim: "The same holds for the other two exhausted ends: a refused-twice claim, and refused-twice with no fix progress judge wired. Each writes one parked_pr.remedy row with remedy close-and-rebuild and cause plan-round-exhausted"
+      proof: "grep: W1-T13047 criterion 2 in test/sweep/an-exhausted-plan-round-is-closed-and-rebuilt.test.ts"
+    - claim: "An exhausted plan-scoped merge-conflict round (mergeState dirty) is closed and rebuilt the same way; its reason no longer ends in escalating"
+      proof: "grep: W1-T13047 criterion 3 in test/sweep/an-exhausted-plan-round-is-closed-and-rebuilt.test.ts"
+    - claim: "invariant:round-first — a plan-only pull request whose plan-scoped round is not exhausted (deferred, waiting on base red, held by worker admission, or dispatched) is never closed"
+      kind: guard
+      proof: "grep: W1-T13047 criterion 4 in test/sweep/an-exhausted-plan-round-is-closed-and-rebuilt.test.ts"
+    - claim: "invariant:one-question — later passes over the closed pull request file no second held task for the same pull request and cause"
+      kind: guard
+      proof: "grep: W1-T13047 criterion 5 in test/sweep/an-exhausted-plan-round-is-closed-and-rebuilt.test.ts"
+    - claim: "runSweep calls planRoundExhaustedRemedy where a plan-scoped round is exhausted"
+      proof: "grep: planRoundExhaustedRemedy( in src/lib/sweep.ts"
+  rationale: |
+    WHY: the operator ruled that no pull request waits on the operator (2026-11-14, quoted in W1-T12709). W1-T12709 (#18738, open) moves a red plan-only pull request off the "code-fix lane cannot stage" escalation to a plan-scoped round. But when the plan-scoped round is exhausted, the old escalation stays.
+    READ on the W1-T12709 branch (run-W1-T12709-1794776376000, head ae709cccb), src/lib/sweep.ts:
+    - :22671 planRoundExhausted is set in three places: a claim refused twice (:22696); a round refused twice with the same reason and no fix progress judge (:22711); and the judge's verdict escalate (:22733), which also calls deps.escalate directly at :22735, inside the round.
+    - :22762 an exhausted round sets disposition blocked-ambiguous. :22769 says "the plan-scoped conflict round on this fleet plan PR is exhausted ... — escalating".
+    - :23042 the parked-PR remedy takes blocked-ambiguous only with blocker escalated. A red plan filing's blocker is plan-proof-unrunnable (all 902 measured rows below), so the remedy skips it and the blocked-ambiguous action arm escalates.
+    - W1-T12709's parkedPrRemedy never splits a plan filing, and its plan-filing remedy is "wait" for the next plan-scoped round. Nothing closes a plan filing whose rounds are spent.
+    MEASURED read-only on the Azure host, core ledger and rotated archives, 2026-11-08T23:00Z to 2026-11-15T23:04Z:
+    - The exhausted end itself did not fire in this window: 0 sweep.disposed rows name the exhausted round or a plan-round "fix progress loop". 5 plan-scoped rounds were dispatched, 4 pushed and 1 merged.
+    - The population W1-T12709 moves onto the plan-scoped round is large: 902 refused-escalate rows with blocker plan-proof-unrunnable ("the code-fix lane cannot stage outside a plan filing"), on 41 plan-only pull requests, 97.1 PR-hours from first to last row. 25 needs-human issues were opened on plan-only pull requests.
+    So this task closes the end that those 41 pull requests reach once their rounds run out. Today it is rare because the rounds seldom run.
+    RELATED, not duplicated: W1-T12709 (criterion 7 covers the cannot-stage hold, not an exhausted round). W1-T9289 (the plan-scoped round). W1-T13045 and W1-T13046 (other parked paths).
+  design: |
+    INVARIANT round-first: a plan-only pull request is closed only when its plan-scoped round is exhausted.
+    INVARIANT one-question: one held task per pull request and cause (as in W1-T12709).
+    W1-T12709's rule still holds: a pull request with nothing unmet and nothing red is never closed.
+    1. src/lib/sweep.ts: at :22733 keep the judge's verdict and the receipt row, but do not call deps.escalate. Set planRoundExhausted and keep the judge's reason.
+    2. src/lib/parked-pr-remedy.ts exports planRoundExhaustedRemedy(pr, facts, ledger, host, ctx). After the plan block in src/lib/sweep.ts, when planRoundExhausted is set and deps.parkedPr is wired, call it. It calls takeParkedPrRemedy with remedy close-and-rebuild and cause plan-round-exhausted. The text names the red gates, the log lines planLintViolationsFromCiFailures found, and the refusal reason.
+    3. src/lib/parked-pr-remedy.ts: a close-and-rebuild of a plan filing with no readable task file builds the held task from the pull request instead. Its files are the plan files the pull request adds or changes, and its rationale carries the red gates and the plan files' paths. If the pull request names a task with a readable file, use that file, as today.
+    4. The disposition after the remedy is wait, with blocker other, as actOnParkedPr gives today.
+    5. Without deps.parkedPr, the old path stays.
+    NOT IN SCOPE: the cannot-stage hold (W1-T12709); when a plan-scoped round is dispatched (W1-T9289).
+  falsifier: |
+    Keep the direct deps.escalate call: criterion 1 must fail. Leave one of the three exhausted ends on the old path: criterion 2 must fail. Keep the conflict-round escalation: criterion 3 must fail. Close a plan PR whose round was deferred: criterion 4 must fail. File a held task on each pass: criterion 5 must fail. Restore, and all must pass. If, 14 days after W1-T12709 and this task merge, no plan-only pull request reaches an exhausted plan-scoped round, the end this task changes is still rare. Record that in the task and do not widen it.
+  note: |
+    Id reserved for run-unfiled-1794784170000 with ~/rmd-work/bin/reserve-id.sh. Build after W1-T12709 merges, off origin/main.

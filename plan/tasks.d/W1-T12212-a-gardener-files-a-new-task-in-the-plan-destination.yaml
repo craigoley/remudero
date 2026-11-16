@@ -18,7 +18,7 @@
     - src/run-task.ts
     - src/lib/feedback-landing.ts
     - test/gardeners/a-gardener-files-a-new-task-in-the-plan-destination.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With `task` in the kinds of the host file, a gardener that adds a new task file gets a checkout of the destination repository, pushes there and opens its pull request there"
