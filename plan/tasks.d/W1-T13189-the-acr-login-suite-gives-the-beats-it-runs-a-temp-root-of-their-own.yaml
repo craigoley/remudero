@@ -1,0 +1,43 @@
+- id: W1-T13189
+  title: "The ACR login suite gives the beats it runs a temp root of their own, so its runtime stops following how many temp leftovers the host holds"
+  repo: remudero
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium
+  band_meaning: span
+  origin: "operator-session#mac-author-preflight-2026-11-16"
+  plan_refs:
+    - W1-T13146
+    - W1-T12258
+    - W1-T13157
+  files:
+    - test/w1-t5319-the-acr-login-refreshes-itself-and-escalates-when-it-cannot.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Every script the suite's fixture starts runs with TMPDIR inside the fixture's own root, so a beat it runs measures no temp entry of the host"
+      proof: "grep: W1-T13189 criterion 1 in test/w1-t5319-the-acr-login-refreshes-itself-and-escalates-when-it-cannot.test.ts"
+    - claim: "invariant:the-suite-still-catches-what-it-tests — no existing assertion changes, a login recorded as ok when it failed still fails the suite, and the suite's own mutant test still catches its mutant"
+      proof: "grep: W1-T13189 criterion 2 in test/w1-t5319-the-acr-login-refreshes-itself-and-escalates-when-it-cannot.test.ts"
+  rationale: |
+    MEASURED 2026-11-16 on the operator Mac by the builder of W1-T13146.
+
+    - Since #18545 (W1-T12258, merged 2026-11-15) a beat of scripts/fleet-heartbeat.sh measures every `rmd-*` and `remudero-*` entry of its TMPDIR, one `du` and one `df` each. This suite's `fixture()` starts the scripts with the host's TMPDIR, which held 1,190 such entries that day.
+    - An xtrace of one beat in the fixture's environment took 129 s at load 55 to 89; 117 s of it was in `consumer_kb`'s per-path loop, 1,127 `du` calls. Four of the suite's tests run a beat (five beats), which is the 82.6, 42.7, 41.7 and 11.6 s measured for them.
+    - The same 15 tests: 179.4 s with the host's TMPDIR (load 5.9); 24.5 s with TMPDIR pointed at an empty directory (load 55 to 87); 15.2 s with a five-line fixture change, host TMPDIR still at 1,190 entries (load 44). All 15 pass each time.
+    - That runtime is why the census precheck's 120 s child bound stopped this suite in four author preflights, and why two pull requests needed a one-PR waiver (W1-T13146 raises the bound from history; this removes the cause for this suite).
+    - The fixture change exists: one commit, 3e87df0742, held by the operator session on a local branch. It adds `const temp = join(root, "tmp"); mkdirSync(temp);` to `fixture()` and `TMPDIR: temp` to the environment of the scripts it starts. Mutations made then on the real scripts and restored: `deploy/acr-login.sh` recording a failed login as ok gave fail 1; `deploy/serve-container.sh` no longer logging in before its pull gave fail 3.
+  design: |
+    1. `fixture()` creates a temp directory under its own root and passes it as TMPDIR to every script it starts.
+    2. One new test in the suite reads the environment a started script saw (the fixture's existing stubs record their calls) and asserts its TMPDIR is under the fixture root.
+    3. One new test names the two mutations above as the suite's guard: it runs the existing mutant path and asserts it still fails.
+    INVARIANT the-suite-still-catches-what-it-tests: no existing assertion or expected value changes.
+    NOT IN SCOPE: scripts/fleet-heartbeat.sh (W1-T13190); test/fleet-heartbeat.test.ts, which W1-T13157 changes; reaping the leftovers (W1-T13191).
+  falsifier: |
+    Pass the host's TMPDIR to the scripts again and criterion 1 must fail. Change an expected value so the mutant passes and criterion 2 must fail. Restore and both pass.
+  note: |
+    reservation hand-off: run-unfiled-1794841356902 -> run-unfiled-1794841356902
+    Reserved with rmd next-task-id from a worktree at origin/main. The operator session holds the measured change and will hand-build this. The suite is an existing file directly under test/; it is edited in place, not moved.
