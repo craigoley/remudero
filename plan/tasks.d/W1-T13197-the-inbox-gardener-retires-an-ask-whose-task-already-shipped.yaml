@@ -1,0 +1,46 @@
+- id: W1-T13197
+  title: "The Inbox gardener also retires a verify-human or machine-judge ask whose task already merged or was retired, reversibly and with the same proof it demands of a proof-debt ask"
+  repo: remudero
+  priority: 1.2
+  depends_on: []
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # widens which asks an active gardener may archive; archive stays reversible and the gardener stays off until the operator turns it on
+  band_meaning: blast-radius
+  origin: "operator-ruling#2026-11-16T13:47Z-retire-finished-task-asks"
+  plan_refs:
+    - W1-T9284
+  files:
+    - src/lib/inbox-retirement.ts
+    - src/lib/inbox-gardener.ts
+    - src/lib/inbox-view.ts
+    - test/gardeners/the-inbox-gardener-retires-an-ask-whose-task-already-shipped.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A `verify-human:<task>`, `verify-human-automate:<task>` or `machine-judge:<task>` ask whose task has a merged PR carrying the exact `Remudero-Task: <task>` trailer (or its owned run branch) with implementation credit is retired by an `act` pass, with the same merged-task proof shape a proof-debt ask needs"
+      proof: "grep: W1-T13197 criterion 1 in test/gardeners/the-inbox-gardener-retires-an-ask-whose-task-already-shipped.test.ts"
+    - claim: "Such an ask whose task is plan-retired on origin/main is retired with a plan-retirement proof naming the commit and blob"
+      proof: "grep: W1-T13197 criterion 2 in test/gardeners/the-inbox-gardener-retires-an-ask-whose-task-already-shipped.test.ts"
+    - claim: "An ask is NOT retired when its task is unmerged, its credit read is indeterminate, the task is W1-T216 or dispatch_hold, the task belongs to another repository, the ask has an unanswered operator reply, or the operator already decided it; shadow mode records what it would retire and retires nothing"
+      proof: "grep: W1-T13197 criterion 3 in test/gardeners/the-inbox-gardener-retires-an-ask-whose-task-already-shipped.test.ts"
+    - claim: "invariant:proof-debt-retirement-is-unchanged — a proof-debt ask carrying automaticRetirement is judged exactly as before, the per-pass limits in INBOX_GARDENER_LIMITS are unchanged, and a retired finished-task ask is restored by the existing restoreInboxRetirement"
+      proof: "grep: W1-T13197 criterion 4 in test/gardeners/the-inbox-gardener-retires-an-ask-whose-task-already-shipped.test.ts"
+  rationale: |
+    OBSERVED 2026-11-16 13:30Z in production (craigoley/remudero Inbox): "Waiting on the daemon" held 461 asks about 380 tasks; 281 of those tasks were terminal (176 merged by trailer, 13 status merged, 89 plan-retired, 3 done). At 14:05Z a later census on origin/main ef8b749 found 329 operator-owned asks (239 verify-human, 90 machine-judge) whose task merged or was plan-retired, each classified not_ready with "terminal task facts require an exact reversible ask receipt".
+    READ at origin/main: the gardener (src/lib/inbox-gardener.ts) admits only asks for which mechanicalAskPurpose (src/lib/inbox-retirement.ts) is defined, and that requires producer "proof-queue-audit-v1" and a `proof-debt:` id. So these asks can never retire, and they pile up as near-duplicates the operator must read past.
+    The operator RULED 2026-11-16 13:47Z: retire old Inbox asks whose task merged or was plan-retired, reversibly. That supersedes W1-T9284's "no purpose backfill for legacy asks" for finished tasks only. A one-off drain of the current 329 is waiting on W1-T13188 (serve writes classify one proposal); this task stops new ones from piling up again.
+  design: |
+    1. A second purpose beside mechanicalAskPurpose: a finished-task ask, read from the proposal id with the same shapes core's deriveTaskReferent accepts for verify-human, verify-human-automate and machine-judge. It needs no producer stamp; its task id comes from the id alone.
+    2. validInboxTerminalProof accepts that purpose with the existing merged-task and plan-retirement proof kinds, unchanged in shape: exact anchored trailer or owned run branch, implementation credit, MERGED state, 40-hex SHAs; or a plan-retirement commit and blob.
+    3. protectedCandidate keeps every protection it has (W1-T216, dispatch_hold, other repository, digest mismatch where a digest exists) and adds none of its own beyond the unanswered-reply and operator-decided checks the gardener already makes.
+    3a. A finished-task ask with no positive proof is kept (keep_unfinished) without a judge call: its task is simply not done, so there is nothing to judge and no model spend.
+    4. Retirement and restore use the existing store, ledger rows and reversible archive; no new state file, no new limit.
+    INVARIANT proof-debt-retirement-is-unchanged: a proof-debt ask with automaticRetirement is admitted, proven, judged and retired exactly as today, and INBOX_GARDENER_LIMITS keeps its values.
+    NOT IN SCOPE: turning the gardener on (RMD_INBOX_GARDENER_MODE is a host change that needs the operator's yes); the one-off drain of today's 329; approve, decline or any state change other than the reversible archive.
+  falsifier: |
+    Leave mechanicalAskPurpose as the only purpose and criteria 1 and 2 must fail. Accept a commit-subject mention instead of the anchored trailer, or drop the dispatch_hold protection, and criterion 3 must fail. Change a limit or the proof-debt path and criterion 4 must fail. Restore and all pass.
+  note: |
+    Reserved with rmd next-task-id from the operator checkout (refs/rmd-id/W1-T13197). rmd test-place computed test/gardeners/.
