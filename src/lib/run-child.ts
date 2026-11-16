@@ -1254,7 +1254,7 @@ export interface DetachedWorkChildHost {
     fixKey: string;
     /** The typed decision envelope (sweep.ts `FixDispatchEnvelope`); this module only carries it into `spec.json`, plain JSON. */
     envelope: object;
-  }) => Promise<{ runId: string; settled: Promise<unknown>; acknowledge?: (outcome: PromiseSettledResult<never>) => void } | RunChildAbandoned | undefined>;
+  }) => Promise<{ runId: string; pid?: number; settled: Promise<unknown>; acknowledge?: (outcome: PromiseSettledResult<never>) => void } | RunChildAbandoned | undefined>;
   spawnRetro: (input: { decision: Record<string, unknown> }) => ReturnType<DetachedWorkChildHost["spawnFix"]>;
 }
 
