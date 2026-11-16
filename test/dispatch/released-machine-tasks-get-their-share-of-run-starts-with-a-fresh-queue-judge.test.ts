@@ -18,12 +18,13 @@ import {
   type MachineShareInput, type MachineShareMove,
 } from "#src/lib/drain.js";
 import { loadPlan, type Plan, type Task } from "#src/lib/plan.js";
-import { QUEUE_JUDGE_SCORECARD_STEP } from "#src/lib/queue-judge-gardener.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const HOUR = 3_600_000;
 const NOW = Date.parse("2026-11-16T12:00:00.000Z");
 const iso = (ms: number) => new Date(ms).toISOString();
+/** The queue judge's completed-pass row, which the daemon reads for its staleness. */
+const QUEUE_JUDGE_SCORECARD_STEP = "queue_judge.scorecard";
 
 function shard(id: string, over: { machine?: boolean; priority?: number; verify?: string; status?: string; dependsOn?: string[]; hold?: boolean } = {}): string {
   return [
