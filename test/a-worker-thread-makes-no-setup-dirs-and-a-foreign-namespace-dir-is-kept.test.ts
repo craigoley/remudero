@@ -50,8 +50,8 @@ test("W1-T5624: a worker thread loading the test setup creates no rmd-test-gh-* 
   const script = join(scripts, "worker.mjs");
   writeFileSync(script, [
     "import { parentPort } from 'node:worker_threads';",
-    "const head = (process.env.PATH ?? '').split(':')[0];",
-    "parentPort.postMessage({ config: process.env.GH_CONFIG_DIR, refuse: head, home: process.env.HOME, token: process.env.GH_TOKEN });",
+    `const refuse = (process.env.PATH ?? '').split(':').find(dir => dir.split('/').pop().startsWith(${JSON.stringify(GH_REFUSE_DIR_PREFIX)}));`,
+    "parentPort.postMessage({ config: process.env.GH_CONFIG_DIR, refuse, home: process.env.HOME, token: process.env.GH_TOKEN });",
     "setInterval(() => {}, 1000);",
     "",
   ].join("\n"));
@@ -79,7 +79,9 @@ test("W1-T5624: a worker thread loading the test setup creates no rmd-test-gh-* 
 
     assert.deepEqual(ghSetupDirs(root), [], "a worker thread mints no gh config or refusal-stub dir");
     assert.equal(seen.config, process.env.GH_CONFIG_DIR, "it keeps the parent's GH_CONFIG_DIR");
-    assert.equal(seen.refuse, (process.env.PATH ?? "").split(":")[0], "and the parent's refusal stub heads its PATH");
+    const refuse = (process.env.PATH ?? "").split(":").find(dir => basename(dir).startsWith(GH_REFUSE_DIR_PREFIX));
+    assert.ok(refuse, "the parent has a gh refusal directory on PATH");
+    assert.equal(seen.refuse, refuse, "and the worker keeps the parent's refusal stub on PATH");
   } finally {
     await worker.terminate();
   }
@@ -91,7 +93,7 @@ test("W1-T5624: the main thread's setup dirs carry its pid and pid-namespace id"
   const id = ns.pidNamespaceId?.() ?? "";
   assert.match(id, /^\d+$/);
   const config = basename(process.env.GH_CONFIG_DIR ?? "");
-  const refuse = basename((process.env.PATH ?? "").split(":")[0]);
+  const refuse = basename((process.env.PATH ?? "").split(":").find(dir => basename(dir).startsWith(GH_REFUSE_DIR_PREFIX)) ?? "");
   assert.ok(config.startsWith(`${GH_CONFIG_DIR_PREFIX}${process.pid}-${id}-`), config);
   assert.ok(refuse.startsWith(`${GH_REFUSE_DIR_PREFIX}${process.pid}-${id}-`), refuse);
 });
