@@ -205,6 +205,32 @@ test("W1-T9275: the shard-sizing suite is selected for each recorded miss edge",
   assert.ok(!unrelated.narrow?.includes(suite));
 });
 
+for (const changed of ["src/lib/prompt-render.ts", "test/check-reviewer-unmet.test.ts"]) {
+  test(`W1-T9562: the ci-friction file-admission suite is selected for ${changed}`, () => {
+    const suite = "test/ci-friction-remedies-file-admission.test.ts";
+    const files = new Map([...Object.entries(TREE), [suite, ""], [changed, "export {};\n"]]);
+    const readMap: ReadMapInput = {
+      map: { format: READ_MAP_FORMAT, sha: "main", suites: [], reads: {}, listed: {}, unknownDescriptorSuites: [] },
+      drift: { distance: 0, changedSinceMap: [] },
+    };
+    const selection = selectAffectedSuites([changed], { files, pathReaders: [], symbolSuites: [], readMap });
+    assert.equal(selection.fullRun, false, changed);
+    assert.ok(selection.suites.includes(suite), `${changed} must select ${suite} in the floor`);
+    assert.ok(selection.narrow?.includes(suite), `${changed} must select ${suite} in the narrow candidate`);
+    assert.deepEqual(selection.recentOnly, { floor: [], narrow: [] });
+    assert.deepEqual(shadowRecord(selection, [suite]).failures, [
+      { file: suite, floor: "selected", narrow: "selected" },
+    ]);
+    const unrelated = selectAffectedSuites(["src/a.ts"], { files, pathReaders: [], symbolSuites: [], readMap });
+    assert.ok(!unrelated.suites.includes(suite));
+    assert.ok(!unrelated.narrow?.includes(suite));
+    files.delete(suite);
+    const absent = selectAffectedSuites([changed], { files, pathReaders: [], symbolSuites: [], readMap });
+    assert.ok(!absent.suites.includes(suite));
+    assert.ok(!absent.narrow?.includes(suite));
+  });
+}
+
 test("W1-T7212: the prompt-render suite is selected for each recorded miss edge", () => {
   const suite = "test/prompt-render.test.ts";
   const edges = [

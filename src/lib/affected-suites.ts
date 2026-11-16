@@ -743,6 +743,14 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   if (input.files.has(shardSizing) && files.some((f) => shardSizingEdges.includes(f))) {
     pathReaders.push(shardSizing);
   }
+  const ciFrictionFileAdmission = suitePath("test/ci-friction-remedies-file-admission.test.ts");
+  const ciFrictionFileAdmissionEdges = [
+    "src/lib/prompt-render.ts",
+    suitePath("test/check-reviewer-unmet.test.ts"),
+  ];
+  if (input.files.has(ciFrictionFileAdmission) && files.some((f) => ciFrictionFileAdmissionEdges.includes(f))) {
+    pathReaders.push(ciFrictionFileAdmission);
+  }
   const recent = input.recentFailures ?? [];
   for (const s of pathReaders) pick(s, "reads a changed file by path");
   // W1-T6084: the OBSERVED readers and census readers, beside the source-text rules above (which still
