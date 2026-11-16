@@ -1,0 +1,58 @@
+- id: W1-T13234
+  title: "The read-model oracle compares whole projection tables in SQL instead of loading them into the JS heap, so the core check stops running its child out of 1 GB on run_activity's 742,306 rows"
+  repo: remudero
+  depends_on: []
+  priority: 0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # how two whole tables are compared; which rows count as missing, the heal and the escalation are unchanged
+  origin: "operator-session#serve-oom-2026-11-16"
+  plan_refs:
+    - W1-T13173
+    - W1-T10290
+  files:
+    - src/lib/read-model-consistency.ts
+    - test/read-model-consistency.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A consistency check over the projected fixture calls .all() on no projection table without a WHERE clause: whole tables are read with .iterate() and compared in the scratch database"
+      proof: "grep: W1-T13234 criterion 1 in test/read-model-consistency.test.ts"
+    - claim: "A lowered instance_heartbeat row (a whole-table projection) is still reported as exactly one projectionMissing, and the run's sample names instance_heartbeat"
+      proof: "grep: W1-T13234 criterion 2 in test/read-model-consistency.test.ts"
+    - claim: "invariant:heal-unchanged — the existing heartbeat heal test passes unchanged: the heal raises the heartbeat back and the repo tables equal a clean projection"
+      kind: guard
+      proof: "grep: W1-T13234 criterion 3 in test/read-model-consistency.test.ts"
+  rationale: |
+    WHY: serve's oracle child for core still runs out of its 1 GB heap after W1-T13173 (deaths at 17:07, 17:49, 18:37Z on
+    2026-11-16, the last two with the rate floor deployed), and the validation thread saw the Inbox page show
+    "Unavailable" for about 2 minutes around one of them.
+    MEASURED in the serve container on 2026-11-16 with a read-only replay of the core store's next slice (12,501 rows,
+    36 files read, 210 skipped): the heap stayed at 70 to 90 MB while every archive was read and gunzipped, then rose to
+    1,182 MB (RSS 1,610 MB) in the comparison. Row counts of the tables compareProjections reads WHOLE (not keyed on
+    ts_ms and h, or settled): run_activity 742,306, recent_merge 27,661, task_activity 18,017, recent_run_pr 3,080,
+    run_worker 2,401, activity_ring 500, recent_entry 200.
+    READ at origin/main, src/lib/read-model-consistency.ts compareProjections: for each whole table it runs
+    `db.prepare("SELECT * FROM <table>").all()` to seed the scratch store, then after the replay reads `SELECT * FROM
+    <table>` from both stores with .all() and builds two Sets of canonicalRow JSON strings. That is three full copies
+    of 742,306 rows in the JS heap per check, whatever the slice size, which is why W1-T13173's floor did not help.
+  design: |
+    INVARIANT heal-unchanged: the drift a check reports and the heal it runs are as before.
+    1. For a whole table, create `oracle_stored_<table>` in the scratch store with the table's columns, and stream the
+       stored rows with .iterate(), inserting each into the scratch table and the pristine copy.
+    2. After applyProjections, report each row of `SELECT <cols> FROM <table> EXCEPT SELECT <cols> FROM
+       oracle_stored_<table>` (iterated) as projectionMissing with its canonicalRow text, as today. Whole tables never
+       report projectionExtra (unchanged).
+    3. Tables keyed on (ts_ms, h) keep their window-bounded comparison as it is.
+    4. Tests in test/read-model-consistency.test.ts: criterion 1 wraps the store in a Proxy that records any .all() on an
+       unbounded SELECT of a LEDGER_ROW_PROJECTIONS table; criterion 2 lowers instance_heartbeat; criterion 3 renames
+       the existing heartbeat heal test.
+  falsifier: |
+    Restore the .all() seed or the Set comparison: criterion 1 fails. Compare against the mutated scratch table instead
+    of the pristine copy: criterion 2 fails (0 missing).
+  note: |
+    Id reserved for run-unfiled-1794854520000 with ~/rmd-work/bin/reserve-id.sh.
+    Proof that counts in production: after the deploy, read_model.oracle_child_exited rows for core show outcome ok
+    and child_max_rss_bytes under 512 MB, with no died row for 24 h.
