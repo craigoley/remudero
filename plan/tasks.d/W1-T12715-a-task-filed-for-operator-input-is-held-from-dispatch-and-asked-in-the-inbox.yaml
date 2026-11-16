@@ -31,7 +31,7 @@
     - test/plan/a-task-filed-for-operator-input-is-held-until-it-is-answered.test.ts
     - test/daemon/bounded-drain-and-kick-entry-points.test.ts
     - test/github/tick-reads-in-the-worker-thread-take-their-share-of-the-installation-budget.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:held-until-answered — a task whose needs_input block has a question and no ANSWER entry for its id in the question store is never returned by nextRunnable and is refused by assertRunnable with a reason that names the question"

@@ -23,7 +23,7 @@
     - src/lib/refusal-amendment.ts
     - src/lib/ledger-steps.ts
     - test/fix-lane/a-needs-design-outcome-is-sorted-by-kind-and-gets-its-remedy.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "classifyNeedsDesign sorts a NEEDS_DESIGN report into exactly one of environment, capability, contract or design; a report it cannot sort is design"

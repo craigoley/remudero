@@ -179,6 +179,7 @@ import {
 } from "./provider-routing-policy.js";
 import { appendLedger } from "./ledger.js";
 import { createServeDemand, recordServeRequest, type ServeDemandOptions } from "./serve-demand.js";
+import { startServeThreadLoad, type ServeThreadLoadOptions } from "./serve-thread-load.js";
 import {
   buildAnalyticsRoute,
   coldAnalyticsSnapshot,
@@ -238,6 +239,7 @@ import {
 } from "./console-snapshot-cache.js";
 import { operatorIdentityFromFile, type OperatorIdentityFileIo } from "./operator-identity-file.js";
 import { DEFAULT_HOST_INSTANCE_REGISTRY_PATH, InstanceRegistryError, parseInstanceRegistry, requirePrimaryInstance } from "./instance-registry.js";
+import { daemonInstallationRegistry, startProcessInstallationBudget } from "./installation-budget-start.js";
 import { GoLiveError, readShadowEvidence, requestGoLive, type GoLiveWiring } from "./onboarding-golive.js";
 import {
   INSTANCES_VIEW_NAME,
@@ -557,6 +559,8 @@ export interface ServeDeps {
     /** W1-T5355: the threads whose heaps the sample reads; absent, every thread this one spawns after serve is built. */
     workers?: () => readonly TrackedWorker[];
   };
+  /** W1-T11816: the minute thread-load sampler's seams (serve-thread-load.ts); absent, this process's real counters. */
+  threadLoad?: Omit<ServeThreadLoadOptions, "workers" | "log">;
   /** W1-T8711: the seams of serve's shared producer observation (host-serve-evidence.ts); absent, this host's real store. */
   hostServeEvidence?: HostServePublishOptions;
 }
@@ -2901,6 +2905,12 @@ function assembleServeRoutes(
     env: deps.githubAppRefresh?.env,
   });
   githubCredential.state.armed = githubAppRefresh.armed;
+  // W1-T12950: serve reads with the same token, so it reads within its share. A refused read stands down
+  // at once (no wait), so a console request never waits for the hourly reset.
+  startProcessInstallationBudget({
+    role: "serve", env: deps.githubAppRefresh?.env ?? process.env, maxWaitMs: 0,
+    readRegistry: () => daemonInstallationRegistry(deps.questionsRoot), log: deps.log ?? (() => {}),
+  });
   // W1-T4088: the thread store is wired in production at last — the SAME file the inbox thread
   // routes and the daemon's responder use — so an escalation reply is accepted, not refused.
   const readEscalationConversation = createEscalationConversationReader({ repository: deps.assistantRepository,
@@ -3671,9 +3681,12 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
       log: deps.log,
       incident: (line) => appendLedger(deps.ledgerPath, line),
     });
+    // W1-T11816: each thread's CPU and loop share, and the gc share, once a minute over the threads sampled above.
+    const threadLoad = startServeThreadLoad({ ...deps.threadLoad, workers: liveThreads, log: (step, extra) => deps.log?.(step, extra) });
     server.on("close", () => {
       stopInvariants();
       stopMemory();
+      threadLoad.stop();
       // A supervised generation closing at a handoff is not serve stopping: its successor publishes its own, and a
       // supervisor that really stopped is read as stale (unknown), never as an explicit stop it did not make.
       if (!deps.generation) publishServe("serve-stopped");

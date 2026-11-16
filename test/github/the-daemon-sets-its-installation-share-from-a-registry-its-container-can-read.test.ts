@@ -85,7 +85,7 @@ test("W1-T12670 criterion 2: a host read error other than a missing file is logg
   const attempted = hostRegistryFails(t, "EACCES");
   const row = configuredRow(() => daemonInstallationRegistry(REPO_ROOT));
   assert.deepEqual(row, {
-    outcome: "unconfigured", instance: "unknown", instance_reason: "no_registry", reason: "registry_unreadable",
+    role: "daemon", outcome: "unconfigured", instance: "unknown", instance_reason: "no_registry", reason: "registry_unreadable",
     installation_id: INSTALLATION, error: `EACCES: open '${DEFAULT_HOST_INSTANCE_REGISTRY_PATH}'`,
   });
   assert.deepEqual(attempted, [DEFAULT_HOST_INSTANCE_REGISTRY_PATH], "no checkout read after EACCES");
@@ -109,20 +109,20 @@ test("W1-T12670 criterion 3: with no RMD_INSTANCE_NAME the instance is the one l
   for (const instance of ["site", "unknown"]) {
     const env = { GH_APP_INSTALLATION_ID: INSTALLATION, RMD_INSTANCE_NAME: instance };
     assert.deepEqual(configuredRow(checkout, env), {
-      outcome: "configured", instance, installation_id: INSTALLATION, consumers: 4, source: "checkout",
+      role: "daemon", outcome: "configured", instance, installation_id: INSTALLATION, consumers: 6, source: "checkout",
     }, "RMD_INSTANCE_NAME wins over the repo match without adding instance_reason");
     assert.deepEqual(configuredRow(checkout, { RMD_INSTANCE_NAME: instance }), {
-      outcome: "unconfigured", instance, reason: "no_installation_id",
+      role: "daemon", outcome: "unconfigured", instance, reason: "no_installation_id",
     });
     assert.deepEqual(configuredRow(() => undefined, env), {
-      outcome: "unconfigured", instance, reason: "registry_unreadable", installation_id: INSTALLATION,
+      role: "daemon", outcome: "unconfigured", instance, reason: "registry_unreadable", installation_id: INSTALLATION,
     });
     assert.deepEqual(configuredRow(() => { throw new Error("registry denied"); }, env), {
-      outcome: "unconfigured", instance, reason: "registry_unreadable",
+      role: "daemon", outcome: "unconfigured", instance, reason: "registry_unreadable",
       installation_id: INSTALLATION, error: "registry denied",
     });
     assert.deepEqual(configuredRow(() => ({ text: OMITTED_IDS, source: "selected" }), env), {
-      outcome: "unconfigured", instance, reason: "no_instance_on_installation",
+      role: "daemon", outcome: "unconfigured", instance, reason: "no_instance_on_installation",
       installation_id: INSTALLATION, source: "selected",
     });
   }
@@ -130,12 +130,12 @@ test("W1-T12670 criterion 3: with no RMD_INSTANCE_NAME the instance is the one l
 
 test("W1-T12670 criterion 4: omitted installation ids count only on the checkout fallback, and only as more consumers", () => {
   // core, site and console name no id; "other" names 999 and "old" is retired.
-  assert.equal(installationConsumers(OMITTED_IDS, INSTALLATION, { countOmitted: true }), 4);
-  assert.equal(installationConsumers(OMITTED_IDS, "999", { countOmitted: true }), 5, "an entry on 999 counts for 999 only");
+  assert.equal(installationConsumers(OMITTED_IDS, INSTALLATION, { countOmitted: true }), 6);
+  assert.equal(installationConsumers(OMITTED_IDS, "999", { countOmitted: true }), 7, "an entry on 999 counts for 999 only");
   assert.equal(installationConsumers(OMITTED_IDS, INSTALLATION), undefined, "W1-T12553's rule is the default");
 
   const fallback = configuredRow(() => ({ text: OMITTED_IDS, source: "checkout", omitsInstallationIds: true }));
-  assert.equal(fallback?.consumers, 4);
+  assert.equal(fallback?.consumers, 6);
   const host = configuredRow(() => ({ text: OMITTED_IDS, source: DEFAULT_HOST_INSTANCE_REGISTRY_PATH }));
   assert.equal(host?.outcome, "unconfigured");
   assert.equal(host?.reason, "no_instance_on_installation");
@@ -185,7 +185,8 @@ test("W1-T12670 criterion 5: the real daemon start in a core-like container logs
   assert.equal(row.outcome, "configured", JSON.stringify(row));
   assert.equal(row.instance, "core");
   assert.equal(row.installation_id, INSTALLATION);
-  assert.equal(row.consumers, 4, "core, site and console plus the hand share");
+  assert.equal(row.role, "daemon");
+  assert.equal(row.consumers, 6, "core, site and console plus the hand-run, run-child and serve shares");
   assert.equal(row.source, CHECKOUT_REGISTRY);
 });
 
