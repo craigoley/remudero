@@ -217,3 +217,72 @@ export function loopReachable(fns: Fn[], seed: string): Set<string> {
   }
   return reached;
 }
+
+/** W1-T9615: `body` with string and template-literal text and trailing `//` comments blanked (a template's `${}`
+ *  expressions are kept). The name walk reads every identifier-shaped word, so "origin/main" in a git argument or a
+ *  comment reaches the CLI's `main`, and through it every function in src. A seeded reach only separates once they go. */
+export function codeOnly(body: string): string {
+  let out = "";
+  const braces: number[] = [];
+  let inTemplate = false;
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i]!;
+    if (inTemplate) {
+      if (c === "\\") i++;
+      else if (c === "`") { inTemplate = false; out += '""'; }
+      else if (c === "$" && body[i + 1] === "{") { inTemplate = false; braces.push(0); out += " "; i++; }
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      let j = i + 1;
+      while (j < body.length && body[j] !== c && body[j] !== "\n") j += body[j] === "\\" ? 2 : 1;
+      out += '""';
+      i = j;
+    } else if (c === "`") inTemplate = true;
+    else if (c === "/" && body[i + 1] === "/") {
+      while (i + 1 < body.length && body[i + 1] !== "\n") i++;
+    } else if (c === "/" && body[i + 1] === "*") {
+      const close = body.indexOf("*/", i + 2);
+      i = close < 0 ? body.length : close + 1;
+      out += " ";
+    } else if (c === "/" && regexLiteralEnd(body, i, out) > i) {
+      i = regexLiteralEnd(body, i, out);
+      while (/[a-z]/.test(body[i + 1] ?? "")) i++;
+      out += '""';
+    } else if (braces.length > 0 && c === "}" && braces[braces.length - 1] === 0) {
+      braces.pop();
+      inTemplate = true;
+      out += " ";
+    } else {
+      if (braces.length > 0 && c === "{") braces[braces.length - 1]!++;
+      if (braces.length > 0 && c === "}") braces[braces.length - 1]!--;
+      out += c;
+    }
+  }
+  return out;
+}
+
+/** W1-T9660: where the regex literal opening at `body[i]` closes, or -1 for a division. Read as a string, the backtick in
+ *  worker-provider's `/[;&|`$><]/` opened a template that blanked assertOpenWeightToolBoundary's real `execFileSync`. */
+function regexLiteralEnd(body: string, i: number, before: string): number {
+  let k = before.length;
+  while (k > 0 && /\s/.test(before[k - 1]!)) k--;
+  const prev = before.slice(Math.max(0, k - 8), k);
+  if (prev !== "" && !/[(,=:[!&|?{};+\-*%<>~^]$/.test(prev) && !/(?:^|[^\w$])(?:return|typeof|case|void|in|of|throw|yield|await)$/.test(prev)) return -1;
+  let inClass = false;
+  for (let j = i + 1; j < body.length && body[j] !== "\n"; j++) {
+    if (body[j] === "\\") j++;
+    else if (body[j] === "[") inClass = true;
+    else if (body[j] === "]") inClass = false;
+    else if (body[j] === "/" && !inClass) return j;
+  }
+  return -1;
+}
+
+let censusWalk: Fn[] | undefined;
+/** W1-T12952: the walk a loop census reads, object-literal consts walked and strings and comments blanked
+ *  ({@link codeOnly}), built once per process. A copy, so a caller may change its rows. */
+export function loopCensusFunctions(): Fn[] {
+  censusWalk ??= topLevelFunctions({ objectLiterals: true }).map((f) => ({ ...f, body: codeOnly(f.body) }));
+  return censusWalk.slice();
+}

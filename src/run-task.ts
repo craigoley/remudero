@@ -38223,13 +38223,13 @@ type AdaptiveLifetimePressureRoute = Pick<VerifyHumanRouteDeps, "runId"> & {
   filingHistory?: FilingHistoryOptions;
 };
 
-function lifetimeShardAge(
+async function lifetimeShardAge(
   taskId: string,
   nowMs: number,
   rows: readonly Record<string, unknown>[],
   filingHistory: TaskFilingHistoryInvocation,
-): Pick<ShardUnderJudgement, "ageDays" | "ageUnknownReason"> {
-  const fromGit = shardAgeDays(taskId, nowMs, filingHistory);
+): Promise<Pick<ShardUnderJudgement, "ageDays" | "ageUnknownReason">> {
+  const fromGit = await shardAgeDays(taskId, nowMs, filingHistory);
   if (fromGit.ageDays !== null) return fromGit;
   let first: number | undefined;
   for (const row of rows) {
@@ -38300,7 +38300,7 @@ export async function routeAdaptiveLifetimePressure(
       acceptance: (task.acceptance ?? []).map((criterion) => criterion.claim),
       route: "lifetime-pressure",
       attributableDispatches,
-      ...lifetimeShardAge(task.id, nowMs, rows, filingHistory),
+      ...(await lifetimeShardAge(task.id, nowMs, rows, filingHistory)),
       depsAllMerged: (task.depends_on ?? []).every((id) => planTaskLanded(deps.plan.byId.get(id))),
       citedInSrc: await idCitedInSrc(task.id, deps.root),
       evidence,
@@ -38779,7 +38779,7 @@ export async function verifyHumanSweepCommand(
   // status.ts's reader, which already parses and already skips an unreadable line — no second
   // JSON pass, and one bad line never hides the verdicts around it.
   const rows = readLedgerLines(ledgerPath) as unknown as Record<string, unknown>[];
-  const shards = withWhyMeJudgmentInput(parkedVerifyHumanShards(plan, root, deps.clock ?? systemClock, readMergeCreditedTaskIds(ledgerPath).credited), join(config.root, "state"), readPersistedInbox(join(config.root, "state")), (deps.clock ?? systemClock).now(), { repository: githubRepoSlugOfCheckout(root), instance: process.env.RMD_INSTANCE_NAME });
+  const shards = withWhyMeJudgmentInput(await parkedVerifyHumanShards(plan, root, deps.clock ?? systemClock, readMergeCreditedTaskIds(ledgerPath).credited), join(config.root, "state"), readPersistedInbox(join(config.root, "state")), (deps.clock ?? systemClock).now(), { repository: githubRepoSlugOfCheckout(root), instance: process.env.RMD_INSTANCE_NAME });
   const priorVerdicts = priorVerifyHumanVerdicts(rowsWithArchivedVerifyHumanVerdicts(ledgerPath, rows));
 
   if (dryRun) {
@@ -38840,20 +38840,22 @@ export function planTaskLanded(task: Task | undefined, ledgerCredited?: Readonly
 
 /** The parked population, as {@link ShardUnderJudgement} — the ONE place plan records become
  *  judgeable input. Reads the plan and greps src/; writes nothing. */
-export function parkedVerifyHumanShards(plan: Plan, root: string, clock: Clock, ledgerCredited?: ReadonlySet<string>, filingHistoryOptions: FilingHistoryOptions = {}): ShardUnderJudgement[] {
+export async function parkedVerifyHumanShards(plan: Plan, root: string, clock: Clock, ledgerCredited?: ReadonlySet<string>, filingHistoryOptions: FilingHistoryOptions = {}): Promise<ShardUnderJudgement[]> {
   const parked = parkedVerifyHumanCandidates(plan, root, clock, ledgerCredited, filingHistoryOptions);
-  return parked.candidates.map((task) => parked.shard(task, idCitedInSrcSync(task.id, root)));
+  const out: ShardUnderJudgement[] = [];
+  for (const task of parked.candidates) out.push(await parked.shard(task, idCitedInSrcSync(task.id, root)));
+  return out;
 }
 
 /** W1-T12753: {@link parkedVerifyHumanShards} for the daemon's cadence: each src/ citation is an awaited git grep. */
 export async function parkedVerifyHumanShardsAsync(plan: Plan, root: string, clock: Clock, ledgerCredited?: ReadonlySet<string>, filingHistoryOptions: FilingHistoryOptions = {}): Promise<ShardUnderJudgement[]> {
   const parked = parkedVerifyHumanCandidates(plan, root, clock, ledgerCredited, filingHistoryOptions);
   const out: ShardUnderJudgement[] = [];
-  for (const task of parked.candidates) out.push(parked.shard(task, await idCitedInSrc(task.id, root)));
+  for (const task of parked.candidates) out.push(await parked.shard(task, await idCitedInSrc(task.id, root)));
   return out;
 }
 
-function parkedVerifyHumanCandidates(plan: Plan, root: string, clock: Clock, ledgerCredited: ReadonlySet<string> | undefined, filingHistoryOptions: FilingHistoryOptions): { candidates: Task[]; shard: (task: Task, citedInSrc: boolean) => ShardUnderJudgement } {
+function parkedVerifyHumanCandidates(plan: Plan, root: string, clock: Clock, ledgerCredited: ReadonlySet<string> | undefined, filingHistoryOptions: FilingHistoryOptions): { candidates: Task[]; shard: (task: Task, citedInSrc: boolean) => Promise<ShardUnderJudgement> } {
   const nowMs = clock.now();
   const candidates = plan.tasks.filter(task => {
     // The machine-filing judge routes AND releases every machine record and every operator record that
@@ -38866,14 +38868,14 @@ function parkedVerifyHumanCandidates(plan: Plan, root: string, clock: Clock, led
     return task.verify === "human" && task.status === "queued" && !planTaskLanded(task, ledgerCredited) && heldForAPerson;
   });
   const filingHistory = createTaskFilingHistoryInvocation(root, candidates.map(task => task.id), filingHistoryOptions);
-  const shard = (task: Task, citedInSrc: boolean): ShardUnderJudgement => {
+  const shard = async (task: Task, citedInSrc: boolean): Promise<ShardUnderJudgement> => {
     const deps = task.depends_on ?? [];
     return {
       id: task.id,
       title: task.title ?? task.id,
       rationale: (task as { rationale?: string }).rationale ?? "",
       acceptance: (task.acceptance ?? []).map((c) => c.claim),
-      ...shardAgeDays(task.id, nowMs, filingHistory),
+      ...(await shardAgeDays(task.id, nowMs, filingHistory)),
       depsAllMerged: deps.every((d) => planTaskLanded(plan.byId.get(d), ledgerCredited)),
       citedInSrc,
       ...(() => {
@@ -38921,8 +38923,8 @@ export function shardEvidence(task: Task): string | undefined {
 /** Days since the exact task record was introduced in qualified Git history, or `null` with the reason it could
  *  not be read — never 0, which reads as "filed today" (#7911). Age is CONTEXT for the judge,
  *  never a threshold — nothing here decides anything from it. */
-function shardAgeDays(taskId: string, nowMs: number, invocation: TaskFilingHistoryInvocation): Pick<ShardUnderJudgement, "ageDays" | "ageUnknownReason"> {
-  const history = resolveTaskFilingHistory(taskId, invocation);
+async function shardAgeDays(taskId: string, nowMs: number, invocation: TaskFilingHistoryInvocation): Promise<Pick<ShardUnderJudgement, "ageDays" | "ageUnknownReason">> {
+  const history = await resolveTaskFilingHistory(taskId, invocation);
   if (history.state === "unknown") return { ageDays: null, ageUnknownReason: history.reason };
   return { ageDays: Math.max(0, Math.floor((nowMs - history.committerSeconds * 1000) / 86400000)) };
 }
