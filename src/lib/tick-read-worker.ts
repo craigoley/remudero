@@ -39,7 +39,8 @@ import { type BoardItem } from "./board-review.js";
 import { loadPlan, DEFAULT_RISK, readBlobsAtRefAsync, type QuarantinedTask, type MergedResolver, type Plan, type Task } from "./plan.js";
 import { cappedOverrideFromLedger, postedArmFactsFromLedger, lastPendingReviewStatusFromLedger, assessPendingReviewOwner, priorReviewVerdictFromLedger, reviewLedgerKeyFor, reviewRowNamesPr, UNFILED_RUN_SENTINEL, enforcementDataInDiff, bodyReviewContractDigest, reviewContractDigest, reviewTaskNarrative, reviewInputDigest, isCriterionRefusal, type PendingReviewOwnerAssessment, type PendingReviewStatusRecord, type CriterionVerdict, type CriterionRefusal } from "./review.js";
 import { buildBatchedGithub, defaultCreditStorePath, loadCreditStore, buildCommitTrailerIndex, deriveStatus, isGhRateLimitError, projectPlan, readLedgerLines, type DeriveDeps, type GitHub, isBookkeepingOnlyChangeset, type PrRef, type StatusProjection, taskIdFromRunBranch, creditsByAnchoredTrailer, readMergeCreditedTaskIds, readRequiredStatusCheckContextsAsync, isPlanTextDeliverable, type RequiredContextsRead } from "./status.js";
-import { RUNNER_TIMEOUT_LINE, actionableGateFailuresFromReasons, cancelledRequiredCheckNames, withoutDownstreamGateFailure, earlyRedEvidenceRollup, checksStateFromRollup, checksPendingSinceFromRollup, dedupeRollupByLatestAttempt, fixLedgerRowsForHead, fixRoundTally, listRetirableEscalationIssues, listRetirableEscalationIssuesAsync, operatorVerdictEvidence, REQUIRED_CHECK_FAIL, closedPrFacts, type ClosedPrFact, redQualityGateNames, pendingQualityGateNames, dependabotCheckStates, usableInstrumentEntanglementPaths, type ActionableGateFailure, type CancelledRequiredCheck, type CiFailure, type CiLogUnavailableCause, MAX_CI_LOG_FAILURE_DETAIL, type CiTailSource, type CiAnnotationFallback, type CreditCandidate, type EscalationReconcileCandidate, type InstrumentEntanglementPaths, type OpenPrView, type StrikeAttempt, DEFAULT_FIX_CLASSES, checkJobId, corroboratedIneligibility, creditSubjectIsImplementation, isPostReviewDiffCeilingRefusal, isRetryableReviewThrow, codeScanningHeadSettled, reviewInputLoopFacts, type BaseChangedFiles } from "./sweep.js";
+import { RUNNER_TIMEOUT_LINE, actionableGateFailuresFromReasons, cancelledRequiredCheckNames, withoutDownstreamGateFailure, earlyRedEvidenceRollup, checksStateFromRollup, checksPendingSinceFromRollup, dedupeRollupByLatestAttempt, fixLedgerRowsForHead, fixRoundTally, listRetirableEscalationIssues, listRetirableEscalationIssuesAsync, operatorVerdictEvidence, REQUIRED_CHECK_FAIL, closedPrFacts, type ClosedPrFact, redQualityGateNames, pendingQualityGateNames, dependabotCheckStates, usableInstrumentEntanglementPaths, type ActionableGateFailure, type CancelledRequiredCheck, type CiFailure, type CiLogUnavailableCause, MAX_CI_LOG_FAILURE_DETAIL, type CiTailSource, type CiAnnotationFallback, type CreditCandidate, type EscalationReconcileCandidate, type InstrumentEntanglementPaths, type OpenPrView, type StrikeAttempt, DEFAULT_FIX_CLASSES, checkJobId, corroboratedIneligibility, creditSubjectIsImplementation, isPostReviewDiffCeilingRefusal, isRetryableReviewThrow, codeScanningHeadSettled, reviewInputLoopFacts, REVIEW_INPUT_ADMISSION_BACKSTOP, type ReviewSetupRefusal, type BaseChangedFiles } from "./sweep.js";
+import { loadedReviewerCodeSha } from "./reviewer-health.js";
 import { readCiGateRequiredChecks } from "./ci-gate-required.js";
 import { ghJson } from "./worker.js";
 import { runStepsAsync, runStepsSync, step, type Steps } from "./git-push.js";
@@ -622,6 +623,39 @@ function reviewPostRefusedFor(
       // only the diff-ceiling throw is final. Same classification as the sweep's own fold (W1-T2753).
       (!isRetryableReviewThrow(l.reason) || isPostReviewDiffCeilingRefusal(l.reason)),
   );
+}
+
+/** W1-T13193 — the review setup refusals the running reviewer code wrote for this exact input (PR, head, body
+ *  digest) since the PR's last `review.pending_posted` or `review.posted` row, grouped by reason. Only a group of
+ *  {@link REVIEW_INPUT_ADMISSION_BACKSTOP} or more is returned, so one refusal, or refusals with different
+ *  reasons, are retried. Rows of other reviewer code, another head or another digest never count. */
+export function reviewSetupRefusalsFor(
+  ledger: ReadonlyArray<Record<string, unknown>>,
+  taskId: string,
+  prUrl: string,
+  headSha: string,
+  inputDigest: string,
+  runningReviewerCodeSha: string | null,
+): ReviewSetupRefusal | undefined {
+  const groups = new Map<string, ReviewSetupRefusal>();
+  for (const row of ledger) {
+    if ((row.step === "review.pending_posted" || row.step === "review.posted") && reviewRowNamesPr(row, taskId, prUrl)) {
+      groups.clear();
+      continue;
+    }
+    if (row.step !== "review.semantic_setup_refused" || row.pr_url !== prUrl || row.head_sha !== headSha ||
+        row.review_input_digest !== inputDigest || typeof row.reason !== "string") continue;
+    const codeSha = typeof row.reviewer_code_sha === "string" ? row.reviewer_code_sha : null;
+    if (codeSha !== runningReviewerCodeSha) continue;
+    const group = groups.get(row.reason) ?? { reason: row.reason, count: 0, reviewerCodeSha: codeSha, runningReviewerCodeSha };
+    group.count++;
+    groups.set(row.reason, group);
+  }
+  let held: ReviewSetupRefusal | undefined;
+  for (const group of groups.values()) {
+    if (group.count >= REVIEW_INPUT_ADMISSION_BACKSTOP && (held === undefined || group.count > held.count)) held = group;
+  }
+  return held;
 }
 
 /** Current-input retry/backoff facts: count only completed review.posted judgments matching
@@ -2708,6 +2742,8 @@ export function* openPrViewSteps(
       currentMergeBaseSha: reviewReuseCurrent.get(pr.number)?.mergeBaseSha,
       priorReviewAttemptsForInput: reviewAttempts.attempts,
       reviewInputLoop: reviewInputLoopFacts(ledger, pr.url, pr.headRefOid, inputDigest, reviewLedgerKey),
+      // W1-T13193: the sweep runs each review in process, so this process's code sha is the next review's.
+      reviewSetupRefused: reviewSetupRefusalsFor(ledger, reviewLedgerKey, pr.url, pr.headRefOid, inputDigest, loadedReviewerCodeSha()),
       // Exact-input elapsed-time-backoff clock; see `reviewInputBackoffElapsed`.
       reviewInputLastAttemptAt: reviewAttempts.lastAttemptAt,
       reviewInputDigest: inputDigest,
