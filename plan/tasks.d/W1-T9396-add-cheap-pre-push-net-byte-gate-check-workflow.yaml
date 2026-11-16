@@ -7,7 +7,8 @@
   verify: auto
   risk: low
   priority: 4
-  status: queued
+  status: blocked
+  retirement: withdrawn  # obsolete: CI already runs the net-byte ratchet as a light gate (W1-T503; the net-positive refusal is #4110), and this record names a workflow where its one criterion describes a hook; operator ruling 2026-11-16
   # backlog gardener: band=4 evidence=71681d9b23788aae
   attempts: 0
   files:
