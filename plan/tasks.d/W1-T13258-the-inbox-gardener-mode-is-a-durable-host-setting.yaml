@@ -1,0 +1,43 @@
+- id: W1-T13258
+  title: "The Inbox gardener mode is a durable config.json setting (off, shadow or act) that survives recycles and host reboots, so an operator turns the gardener on without retyping the daemon's launch"
+  repo: remudero
+  priority: 1.1
+  depends_on: []
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # one new optional config key read by the gardener's mode; spans config schema and the inbox gardener
+  band_meaning: blast-radius
+  origin: "operator-session#console-inbox-defects-2026-11-16"
+  plan_refs:
+    - W1-T9284
+    - W1-T13197
+    - W1-T13202
+  files:
+    - src/lib/inbox-retirement.ts
+    - src/lib/config-schema.ts
+    - test/inbox/the-inbox-gardener-mode-is-a-durable-host-setting.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "With RMD_INBOX_GARDENER_MODE unset, inboxGardenerMode returns the inboxGardenerMode value of config.json (off, shadow or act), and returns off when config.json is absent, unreadable or names no mode"
+      proof: "grep: W1-T13258 criterion 1 in test/inbox/the-inbox-gardener-mode-is-a-durable-host-setting.test.ts"
+    - claim: "A valid RMD_INBOX_GARDENER_MODE still wins over config.json, and validateConfigShape accepts inboxGardenerMode only as off, shadow or act"
+      proof: "grep: W1-T13258 criterion 2 in test/inbox/the-inbox-gardener-mode-is-a-durable-host-setting.test.ts"
+    - claim: "invariant:reading-the-mode-never-writes-config — resolving the mode never creates, rewrites or chmods config.json, so a host or test with no config file stays without one"
+      proof: "grep: W1-T13258 criterion 3 in test/inbox/the-inbox-gardener-mode-is-a-durable-host-setting.test.ts"
+  rationale: |
+    OBSERVED 2026-11-16: the fixes the Inbox gardener needed are merged (W1-T13197 #18888 retires asks whose task shipped; W1-T13202 #18883 admits today's 2,343-proposal registry). Craig approved reversible retirement of finished-task asks (13:33Z) and, through his standing "go with all recommendations" ruling, a shadow-mode start.
+    READ at origin/main: inboxGardenerMode (src/lib/inbox-retirement.ts) reads only RMD_INBOX_GARDENER_MODE from process env, and registeredGardenEnabled gates the inbox garden on it. The live remudero-daemon container carries no such variable (docker inspect, names only). Container env is set in two places that each retype it: deploy/recycle-container.sh (captures only the names in deploy/runtime-env-vars.sh) and the boot launcher deploy/install-host-units.sh writes (a fixed -e list used on reboot and watchdog relaunch). So an env-only mode would be dropped by the next reboot even if a recycle carried it.
+    The daemon already reads ~/.config/remudero/config.json (loadConfig), which the host mounts from its container-config directory and which survives recycles and reboots. That is the durable place for an operator setting.
+  design: |
+    1. config-schema.ts: add optional inboxGardenerMode, enum off | shadow | act, documented as the durable host setting for the Inbox gardener (W1-T9284 activation authority still applies).
+    2. inbox-retirement.ts: inboxGardenerMode(env, readConfigured) returns env RMD_INBOX_GARDENER_MODE when it is shadow or act; otherwise the configured mode read through a no-create reader (read configPath() if it exists, JSON.parse, take inboxGardenerMode only when it is one of the three values); any read or parse fault returns off. The default readConfigured is that reader; callers (registeredGardenEnabled, the run-task inbox pass, runInboxGardener) are unchanged.
+    INVARIANT reading-the-mode-never-writes-config: the reader never calls loadConfig (which creates a missing file) and never writes.
+    OPERATOR STEP AFTER DEPLOY (not in this task's diff): only once the daemon runs a head containing this change, add "inboxGardenerMode": "shadow" to the host's container config.json. Writing it earlier makes the old loadConfig refuse the file ("unexpected field").
+    NOT IN SCOPE: the recycle and boot launcher env lists; what the gardener retires; act mode.
+  falsifier: |
+    Ignore config.json and criterion 1 must fail. Let config beat a valid env value, or accept another mode string, and criterion 2 must fail. Resolve through loadConfig and criterion 3 must fail on the created file. Restore and all pass.
+  note: |
+    Reserved with rmd next-task-id from the operator checkout (refs/rmd-id/W1-T13258). rmd test-place computed test/inbox/ for the new suite. Redesigned before build: the first draft (a recycle --set-env flag) would not survive the boot launcher's fixed env on a reboot.
