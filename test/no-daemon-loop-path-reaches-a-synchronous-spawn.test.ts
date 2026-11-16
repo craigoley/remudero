@@ -156,7 +156,6 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   grepProofHolds: 1,
   handedOffHeadRiskJudge: 1,
   hostWorktreeGit: 1,
-  idCitedInSrc: 1,
   installPinnedChromium: 1,
   isPrMergedNow: 1,
   ladderGardenSpec: 1,
@@ -270,6 +269,108 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   writePrBodyRest: 1,
 };
 
+/** W1-T12753: loop-reachable functions that still scan the ledger synchronously (readLedgerUnionRecordsSync,
+ *  ledgerRowsForSync, readLedgerLines), with the count recorded at build time (2026-11-15, on c602c5cea). Exact,
+ *  like the table above: a new name or a higher count fails, and a converter lowers its row in the same PR. */
+const SYNC_LEDGER_SCAN_LOOP_BASELINE: Readonly<Record<string, number>> = {
+  armIfVerdictPermitsAsync: 1,
+  assertConfiguredMergeUnheld: 1,
+  buildHeadroomRecoveryCandidates: 1,
+  buildInboxDraftHook: 1,
+  buildMainHealthRung: 6,
+  buildQueueJudgeSources: 1,
+  buildRedesignSources: 1,
+  buildSweepEffects: 10,
+  buildSweepLightHook: 2,
+  closeRecoveredEscalation: 1,
+  costGovernorGateFor: 1,
+  createIncrementalLedgerUnion: 2,
+  createLiveLedgerTail: 3,
+  daemonBreakerRunbookHost: 1,
+  daemonCommand: 3,
+  daemonCrashSentinel: 2,
+  daemonDefaultBuildSweepHook: 1,
+  daemonEvidenceCoverageInput: 1,
+  daemonSreGovernorEnforcer: 1,
+  daemonSreLaneInput: 1,
+  depReviewCommand: 1,
+  disposeDisarm: 1,
+  escalateCircuitBreak: 1,
+  escalateCrashLoop: 1,
+  escalateDiskHeadroomBreach: 1,
+  escalateHeadroomParkCeiling: 1,
+  escalateHeadroomReserve: 1,
+  escalatePostReviewStall: 1,
+  escalateQuotaExhaustion: 1,
+  escalateReplayStranded: 1,
+  escalateStarvation: 1,
+  escalateStarvationCleared: 1,
+  evaluateDispatchBreakerDetailed: 1,
+  fixCommand: 2,
+  fixRoundClaimEnded: 1,
+  flakeEvidence: 1,
+  inboxCommand: 1,
+  judgeDispatchBreak: 1,
+  ledgerClassTier: 1,
+  memoryReadTrackerFor: 1,
+  mergeAtListHead: 1,
+  observeAdmissionFlow: 1,
+  openPrViewSteps: 1,
+  probeOpenPrMerges: 1,
+  productionGardenerOverseerPorts: 2,
+  productionIssueRevalidationPorts: 1,
+  productionMachineFilingJudgePorts: 2,
+  productionMechanicalPort: 1,
+  productionOpportunityOutcomePorts: 1,
+  queueGovernorGateFor: 1,
+  readDocketLedgerCorpus: 1,
+  readDraftStats: 1,
+  readFixRoundArchiveRows: 1,
+  readFlakeIncidentRows: 1,
+  readFlowLedger: 2,
+  readGovernorIncidents: 1,
+  readLadderRecords: 1,
+  readLedgerUnionBounded: 2,
+  readLedgerUnionRecordsMemoized: 1,
+  readLiveLedgerRecords: 1,
+  readMergeCreditedTaskIds: 2,
+  readMergeCreditedTaskIdsAsync: 1,
+  readOperatorAgentUnion: 1,
+  readRestartHistoryLines: 1,
+  readRunbookReceipts: 1,
+  readSelectorShadowObservations: 1,
+  readTargetExecution: 1,
+  realArmDeps: 1,
+  reapBranchesSteps: 1,
+  receiptOrphanedAssignments: 1,
+  recordRoutingExperimentResults: 1,
+  recordWorkerProvidersAtStart: 1,
+  registryThreadItems: 1,
+  releaseBreaker: 1,
+  reportSilentHostLocks: 1,
+  reviewCommand: 1,
+  runDaemon: 2,
+  runDeploymentBakeoff: 1,
+  runDigestCadenceReport: 1,
+  runFixRung: 13,
+  runReview: 1,
+  runSweep: 2,
+  runTaskBody: 2,
+  runWipeTestPair: 2,
+  runWorkerStallDetectorRung: 1,
+  stageSkillLifecycleForAction: 1,
+  staleBodyFindingsForTick: 1,
+  terminalKeysInArchives: 1,
+  terminalUncreditableHeads: 1,
+  triageClaimSweepForPass: 1,
+  triageCommandLocked: 1,
+  updatedForWorkflowFromLedger: 1,
+  verifyStalledTask: 1,
+  withRequeueReceipts: 1,
+  withdrawArmIfVerdictRefuses: 1,
+  withheldReviewsSince: 1,
+};
+
 let censusWalk: Fn[] | undefined;
 /** W1-T9660: the ONE walk every census test reads — object-literal consts walked, strings and comments blanked
  *  ({@link codeOnly}) — so the daemon-wide census and W1-T9615's SRE-lane test cannot disagree about reach. */
@@ -299,14 +400,36 @@ function syncSpawnCalls(fn: Fn): number {
 }
 
 /** Synchronous-spawn calls per function NAME (same-named functions in different files sum). */
-function population(fns: Fn[]): Map<string, number> {
+function population(fns: Fn[], count: (fn: Fn) => number = syncSpawnCalls): Map<string, number> {
   const pop = new Map<string, number>();
   for (const f of fns) {
-    const n = syncSpawnCalls(f);
+    const n = count(f);
     if (n > 0) pop.set(f.name, (pop.get(f.name) ?? 0) + n);
   }
   return pop;
 }
+
+/** W1-T12753: a synchronous ledger scan — the whole live file read at once, or a sync union read over the archives.
+ *  The async readers (`ledgerRowsFor`, `readLedgerUnionRecords`) do not match: the `(` must follow the name. */
+const SYNC_LEDGER_SCAN_PRIMITIVES = "readLedgerUnionRecordsSync|ledgerRowsForSync|readLedgerLines";
+const SYNC_LEDGER_SCAN_CALL = new RegExp(`\\b(?:${SYNC_LEDGER_SCAN_PRIMITIVES})\\(`, "g");
+
+/** Sync ledger scans in one body; a reader's own definition is not a call site. */
+function syncScanCalls(fn: Fn): number {
+  const defines = new RegExp(`^(?:export\\s+)?function\\s+(?:${SYNC_LEDGER_SCAN_PRIMITIVES})\\(`).test(fn.body) ? 1 : 0;
+  return (fn.body.match(SYNC_LEDGER_SCAN_CALL) ?? []).length - defines;
+}
+
+/** One exact census: what it counts, the table it is held to, and how its refusals read. */
+interface Census {
+  count: (fn: Fn) => number;
+  table: string;
+  noun: string;
+  remedy: string;
+}
+
+const SPAWN_CENSUS: Census = { count: syncSpawnCalls, table: "SYNC_SPAWN_LOOP_BASELINE", noun: "synchronous spawn call(s)", remedy: "await an async seam instead" };
+const LEDGER_SCAN_CENSUS: Census = { count: syncScanCalls, table: "SYNC_LEDGER_SCAN_LOOP_BASELINE", noun: "synchronous ledger scan(s)", remedy: "await an async ledger reader instead" };
 
 /** The file holding SYNC_SPAWN_LOOP_BASELINE, named in every shrink refusal so a converter knows where to edit. */
 const BASELINE_FILE = "test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts";
@@ -316,9 +439,10 @@ const BASELINE_FILE = "test/no-daemon-loop-path-reaches-a-synchronous-spawn.test
  *  refused, and so is shrinkage until the row is lowered (or deleted at 0) in the same PR, so the table
  *  never holds slack a later regression could refill unseen. A row whose name the loop no longer reaches
  *  counts 0. */
-function refusals(fns: Fn[], baseline: Readonly<Record<string, number>>): string[] {
+function refusals(fns: Fn[], baseline: Readonly<Record<string, number>>, census: Census = SPAWN_CENSUS): string[] {
   const reach = loopReachable(fns, "daemonCommand");
-  const pop = population(fns);
+  const pop = population(fns, census.count);
+  const { table, noun, remedy } = census;
   const names = new Set([...pop.keys()].filter((n) => reach.has(n)));
   for (const n of Object.keys(baseline)) names.add(n);
   const out: string[] = [];
@@ -326,13 +450,13 @@ function refusals(fns: Fn[], baseline: Readonly<Record<string, number>>): string
     const count = reach.has(name) ? pop.get(name) ?? 0 : 0;
     const row = Object.hasOwn(baseline, name) ? baseline[name]! : undefined;
     if (row === undefined) {
-      out.push(`${name} makes ${count} synchronous spawn call(s) and is reachable from the daemon loop (daemonCommand), but is not in SYNC_SPAWN_LOOP_BASELINE — await an async seam instead`);
+      out.push(`${name} makes ${count} ${noun} and is reachable from the daemon loop (daemonCommand), but is not in ${table} — ${remedy}`);
     } else if (count > row) {
-      out.push(`${name} makes ${count} synchronous spawn call(s) on the daemon loop, above its SYNC_SPAWN_LOOP_BASELINE row of ${row} — await an async seam instead`);
+      out.push(`${name} makes ${count} ${noun} on the daemon loop, above its ${table} row of ${row} — ${remedy}`);
     } else if (count < row) {
       out.push(count === 0
-        ? `${name} makes 0 synchronous spawn call(s) on the daemon loop < row ${row} — delete the \`${name}\` row from SYNC_SPAWN_LOOP_BASELINE (${BASELINE_FILE}) in this PR`
-        : `${name} makes ${count} synchronous spawn call(s) on the daemon loop < row ${row} — lower SYNC_SPAWN_LOOP_BASELINE \`${name}\` to ${count} (${BASELINE_FILE}) in this PR`);
+        ? `${name} makes 0 ${noun} on the daemon loop < row ${row} — delete the \`${name}\` row from ${table} (${BASELINE_FILE}) in this PR`
+        : `${name} makes ${count} ${noun} on the daemon loop < row ${row} — lower ${table} \`${name}\` to ${count} (${BASELINE_FILE}) in this PR`);
     }
   }
   return out;
@@ -813,4 +937,60 @@ test("W1-T12791 criterion 4: repairPrMetadata's merge-plan read awaits the async
   const named = mergePlanReadRefusals(synchronous);
   assert.equal(named.length, 1);
   assert.match(named[0]!, /^repairPrMetadata's plan reader mergeCommitForRepair makes 4 synchronous git call\(s\)/);
+});
+
+test("W1-T12753 criterion 5: the census counts synchronous ledger scans and names a loop function that gains one", () => {
+  const fns = censusFunctions();
+  assert.deepEqual(refusals(fns, SYNC_LEDGER_SCAN_LOOP_BASELINE, LEDGER_SCAN_CENSUS), [], "a new daemon-loop path scans the ledger synchronously");
+  const reach = loopReachable(fns, "daemonCommand");
+  const pop = population(fns, syncScanCalls);
+  // Positive control: a reachable sync scanner, so the walk cannot pass vacuously.
+  assert.ok(reach.has("readMergeCreditedTaskIds") && (pop.get("readMergeCreditedTaskIds") ?? 0) > 0, "readMergeCreditedTaskIds is a reachable sync scanner");
+  // The lifetime-pressure route and the sync verdict reader hold no row: the route reads through the async readers.
+  for (const name of ["routeAdaptiveLifetimePressure", "rowsWithArchivedVerifyHumanVerdicts"]) {
+    assert.ok(!Object.hasOwn(SYNC_LEDGER_SCAN_LOOP_BASELINE, name), `${name} holds no sync-ledger-scan row`);
+  }
+  assert.ok(reach.has("routeAdaptiveLifetimePressure") && !pop.has("routeAdaptiveLifetimePressure"), "the route is reached and scans nothing synchronously");
+  assert.ok(!reach.has("rowsWithArchivedVerifyHumanVerdicts"), "no daemon-loop path reaches the sync verdict reader");
+
+  // Each primitive counts once; the async readers and a definition do not.
+  for (const call of ["readLedgerUnionRecordsSync(d)", "ledgerRowsForSync(d, q)", "readLedgerLines(p)"]) {
+    assert.equal(syncScanCalls({ name: "x", file: "x", body: `  ${call};` }), 1, call);
+  }
+  for (const call of ["ledgerRowsFor(d, q)", "readLedgerUnionRecords(d)", "readLedgerLinesAsync(p)"]) {
+    assert.equal(syncScanCalls({ name: "x", file: "x", body: `  ${call};` }), 0, call);
+  }
+  assert.equal(syncScanCalls({ name: "readLedgerLines", file: "x", body: "export function readLedgerLines(path) {}" }), 0);
+
+  // Falsifier, driven on the real source: the route gains a sync live read and is named.
+  const planted = fns.map((f) => (f.name === "routeAdaptiveLifetimePressure" ? { ...f, body: `${f.body}\n  readLedgerLines(deps.ledgerPath);` } : f));
+  const named = refusals(planted, SYNC_LEDGER_SCAN_LOOP_BASELINE, LEDGER_SCAN_CENSUS);
+  assert.equal(named.length, 1);
+  assert.match(named[0]!, /^routeAdaptiveLifetimePressure makes 1 synchronous ledger scan\(s\) and is reachable from the daemon loop \(daemonCommand\), but is not in SYNC_LEDGER_SCAN_LOOP_BASELINE/);
+  // A row that holds slack is refused too, so no row can rise unseen later.
+  const real = pop.get("readMergeCreditedTaskIds")!;
+  assert.deepEqual(refusals(fns, { ...SYNC_LEDGER_SCAN_LOOP_BASELINE, readMergeCreditedTaskIds: real + 1 }, LEDGER_SCAN_CENSUS), [
+    `readMergeCreditedTaskIds makes ${real} synchronous ledger scan(s) on the daemon loop < row ${real + 1} — lower SYNC_LEDGER_SCAN_LOOP_BASELINE \`readMergeCreditedTaskIds\` to ${real} (${BASELINE_FILE}) in this PR`,
+  ]);
+  for (const [name, count] of Object.entries(SYNC_LEDGER_SCAN_LOOP_BASELINE)) {
+    assert.ok(Number.isInteger(count) && count > 0, `${name} must carry a positive count`);
+  }
+});
+
+test("W1-T12753 criterion 4: the daemon's verify-human cadence reads its ledger rows through the async readers", () => {
+  const fns = censusFunctions();
+  const reach = loopReachable(fns, "daemonCommand");
+  assert.ok(reach.has("defaultVerifyHumanCadenceResult"), "the loop reaches the verify-human cadence");
+  assert.ok(!Object.hasOwn(SYNC_LEDGER_SCAN_LOOP_BASELINE, "defaultVerifyHumanCadenceResult"), "the cadence holds no sync-ledger-scan row");
+  assert.equal(population(fns, syncScanCalls).get("defaultVerifyHumanCadenceResult") ?? 0, 0);
+  for (const name of ["rowsWithArchivedVerifyHumanVerdictsAsync", "parkedVerifyHumanShardsAsync"]) {
+    assert.ok(reach.has(name), `the loop reaches ${name}`);
+  }
+  // The sync src/ citation grep is no longer on the loop, so its sync-spawn row is gone (criterion 3's census half).
+  assert.ok(!Object.hasOwn(SYNC_SPAWN_LOOP_BASELINE, "idCitedInSrc") && !reach.has("idCitedInSrcSync"), "no daemon-loop path reaches the sync citation grep");
+  // Falsifier: the cadence's sync live read put back is named.
+  const planted = fns.map((f) => (f.name === "defaultVerifyHumanCadenceResult" ? { ...f, body: `${f.body}\n  readLedgerLines(ledgerPath);` } : f));
+  assert.deepEqual(refusals(planted, SYNC_LEDGER_SCAN_LOOP_BASELINE, LEDGER_SCAN_CENSUS), [
+    "defaultVerifyHumanCadenceResult makes 1 synchronous ledger scan(s) and is reachable from the daemon loop (daemonCommand), but is not in SYNC_LEDGER_SCAN_LOOP_BASELINE — await an async ledger reader instead",
+  ]);
 });

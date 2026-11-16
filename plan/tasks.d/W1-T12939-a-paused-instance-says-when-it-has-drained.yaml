@@ -1,0 +1,47 @@
+- id: W1-T12939
+  title: "A paused instance says when it has drained, in its ledger and in the off-host heartbeat, so a host restart no longer depends on a hand-written process watch"
+  repo: remudero
+  priority: 0.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the drained signal is what an operator reboots on; a false "drained" loses in-flight work
+  band_meaning: span
+  origin: "operator-session#host-reboot-2026-11-15"
+  plan_refs:
+    - W1-T7727
+    - W1-T2264
+  files:
+    - src/lib/daemon.ts
+    - scripts/fleet-heartbeat.sh
+    - test/daemon/a-paused-instance-says-when-it-has-drained.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "While an instance is held by PAUSE, each daemon.pause row carries the in-flight units it still owns, by kind and name: live run children, review children, fix and conflict rounds, garden children and judge calls"
+      proof: "grep: W1-T12939 criterion 1 in test/daemon/a-paused-instance-says-when-it-has-drained.test.ts"
+    - claim: "The first paused pass with no in-flight unit writes one daemon.drained row for that hold, a unit that appears afterwards writes daemon.drain_reopened, and releasing the hold ends the episode"
+      proof: "grep: W1-T12939 criterion 2 in test/daemon/a-paused-instance-says-when-it-has-drained.test.ts"
+    - claim: "The fleet heartbeat prints a drain_verdict line per instance: not-paused, draining with the count and the oldest unit's age, or drained with the row's time; an unreadable ledger prints unknown, never drained"
+      proof: "grep: W1-T12939 criterion 3 in test/daemon/a-paused-instance-says-when-it-has-drained.test.ts"
+    - claim: "invariant:pause-behaviour-unchanged — a held instance starts nothing and lets in-flight units finish exactly as on origin/main, an instance that is not held writes no drained row, and every existing daemon.pause field keeps its name and meaning"
+      proof: "grep: W1-T12939 criterion 4 in test/daemon/a-paused-instance-says-when-it-has-drained.test.ts"
+  rationale: |
+    OBSERVED 2026-11-15, Azure host reboot for OS updates, by the operator session.
+
+    - The operator ran `rmd pause --fleet` at 14:22:03Z and needed to know when all three instances had drained before rebooting. Nothing reports that. `rmd pause --status` prints the hold, and `daemon.pause` rows carry tick, detail and poll interval only (READ src/lib/daemon.ts).
+    - The session wrote a process watch by hand. Its first version matched one worker binary path and reported the fleet drained at 14:26Z while two runs were live in core: a build of W1-T12146 started 12:32Z whose worker was two hours in and in its pre-push checks, and a fix round on #18608 started 14:16Z. The mistake was caught by reading the process table again. Both runs finished by 14:33Z; a reboot at 14:26Z would have lost both.
+    - A second watch counted four process shapes and live in-flight locks and required two clear readings. It reported drained at 14:35Z, which the ledger confirmed (implement.done 14:30:40Z, fix.done 14:32:46Z, pr.opened 14:33:04Z).
+    - The daemon already knows every unit it owns: it is what admits and settles them. The fleet heartbeat (scripts/fleet-heartbeat.sh, published to the heartbeat-azure branch) is already readable off the host.
+  design: |
+    1. daemon.ts: the paused branches of the loop compute the in-flight census from the registries the loop already holds (run children, the review and fix lanes' in-flight sets, garden children, pending judge calls) and add `in_flight` to daemon.pause. No new process probe.
+    2. One hold is one episode, keyed by the hold's own identity (the PAUSE file's or the shared hold ref's content). The first empty census writes daemon.drained; a later non-empty one writes daemon.drain_reopened; a released hold ends the episode.
+    3. fleet-heartbeat.sh derives drain_verdict per instance from the newest of daemon.pause, daemon.drained and daemon.drain_reopened, with the same staleness rule the beat uses for daemon_verdict. An unreadable or stale ledger is `unknown`.
+    INVARIANT pause-behaviour-unchanged: what a held instance starts, finishes and logs today is unchanged except for the added field and rows.
+    NOT IN SCOPE: a command that waits for the drain; stopping in-flight work; a fleet-wide verdict computed by the daemon (the heartbeat's per-instance lines are the fleet view).
+  falsifier: |
+    Leave review children out of the census and criterion 1 must fail. Write daemon.drained on every paused pass and criterion 2 must fail. Print drained for an unreadable ledger and criterion 3 must fail. Write daemon.drained for an instance that is not held and criterion 4 must fail. Restore and all pass.
+  note: |
+    reservation hand-off: run-unfiled-1794763854161 -> run-unfiled-1794763854161
+    Reserved with rmd next-task-id from a worktree at origin/main. Check refs/rmd-dispatch/W1-T12939 and any run branch before building. The test folder is the one rmd test-place computed for a stub importing daemon.ts. The heartbeat script is bash; test its drain lines through the existing beat fixtures (see test/daemon/the-beat-publishes-a-session-reaper-pass-that-refused-or-never-finished.test.ts).

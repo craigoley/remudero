@@ -1,0 +1,117 @@
+- id: W1-T12951
+  title: "A dependency hold whose head and checks have not changed is not judged again, so it costs no GitHub reads"
+  repo: remudero
+  depends_on: []
+  priority: 1.4
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the sweep's dep-review dedup decides when a Dependabot PR is judged; a stale dedup would delay a merge
+  origin: "operator-session#github-reads-by-consumer-2026-11-15"
+  plan_refs:
+    - W1-T54
+    - W1-T2427
+    - W1-T9818
+    - W1-T9913
+    - W1-T12892
+  files:
+    - src/lib/sweep.ts
+    - src/lib/tick-read-worker.ts
+    - test/sweep/a-dependency-hold-on-unchanged-inputs-is-not-judged-again.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Through runSweep, a Dependabot PR that the dep-review lane holds because its checks are pending, whose W1-T9818 escalation is already filed for its head, seen again with the same head, check states, review state and mergeable state, is not judged again: depReview runs once in two passes, and the second pass's sweep.disposed row has acted false and a reason that says the hold's inputs have not changed"
+      proof: "grep: W1-T12951 criterion 1 in test/sweep/a-dependency-hold-on-unchanged-inputs-is-not-judged-again.test.ts"
+    - claim: "invariant:a-changed-input-is-judged — a new head, any check whose name, status or conclusion changed, a new review state, a new mergeable state or a new DEP_REVIEW_ENGINE_REVISION makes the next pass judge the PR again"
+      kind: guard
+      proof: "grep: W1-T12951 criterion 2 in test/sweep/a-dependency-hold-on-unchanged-inputs-is-not-judged-again.test.ts"
+    - claim: "invariant:the-stalled-hold-still-escalates — a hold with no dep-review.hold_escalated row in the ledger and no unretired ask in its hold state file for its head is judged again on every pass, so W1-T9818's escalation keeps its timing"
+      kind: guard
+      proof: "grep: W1-T12951 criterion 3 in test/sweep/a-dependency-hold-on-unchanged-inputs-is-not-judged-again.test.ts"
+    - claim: "invariant:terminal-dedup-unchanged — the existing terminal-outcome dedup and depReviewDedupStandsAside (W1-T9913) behave as today"
+      kind: guard
+      proof: "grep: W1-T12951 criterion 4 in test/sweep/a-dependency-hold-on-unchanged-inputs-is-not-judged-again.test.ts"
+    - claim: "Ten sweep passes over a gh shim (test/helpers/gh-shim.ts) that serves one held Dependabot PR with pending checks and a filed escalation make one dep-review judgement, and the shim counts no dep-review reads (pr view, pr diff, check reads) after the first pass"
+      proof: "grep: W1-T12951 criterion 5 in test/sweep/a-dependency-hold-on-unchanged-inputs-is-not-judged-again.test.ts"
+    - claim: "The sweep's dep-review dedup computes the hold's input digest"
+      proof: "grep: depReviewHoldInputsDigest( in src/lib/sweep.ts"
+    - claim: "invariant:a-red-hold-is-judged — a hold whose open-PR view shows a red check, or carries no check states or no merge state, has no digest and is judged on every pass"
+      kind: guard
+      proof: "grep: W1-T12951 criterion 7 in test/sweep/a-dependency-hold-on-unchanged-inputs-is-not-judged-again.test.ts"
+    - claim: "The open-PR view producer gives each Dependabot PR the name, status and conclusion of every check in the rollup it already read"
+      proof: "grep: dependabotCheckStates( in src/lib/tick-read-worker.ts"
+  rationale: |
+    WHY: the console daemon spends about 1,400 of its core GitHub reads an hour judging the same seven Dependabot
+    PRs again and again. Each judgement reads the PR, its diff, the required checks and the selected check
+    evidence, decides hold because the checks are still pending, and changes nothing. No action follows from
+    these reads. The sweep dedups every dep-review outcome except hold, so a hold is judged on every pass.
+    MEASURED, console ledger (/mnt/rmd/remudero-console-state/state), 2026-11-14 18:15Z to 2026-11-15 18:17Z:
+    - 2,182 dep-review.decided rows, all decision hold, on PRs remudero-console #2517 to #2523 (309 to 315 each).
+      Every PR kept one head the whole time. 2,179 rows give the reason "selected check evidence is pending",
+      3 give selected_evidence_read_failed. The first row is at 01:46:58Z.
+    - 3,334 sweep.disposed rows with disposition dep-review on the same seven PRs (476 to 478 each).
+    - daemon.quota rows (bucket core) stamp the console daemon's reads: 673 an hour on average from 18Z to 00Z,
+      before the holds began, and 2,074 an hour from 02Z to 17Z. The rise, about 1,400 an hour, is about 10
+      reads for each of the 132 judgements an hour.
+    - The console daemon had core remaining 0 in 84 daemon.quota rows, 79 of them from 09Z to 14Z.
+    - docker stats at 18:20Z: remudero-console-daemon at 147% CPU.
+    READ at origin/main 57ca3bba9:
+    - src/lib/sweep.ts:23260 dedups dep-review on prior.depReviewed (terminal outcomes only); the W1-T2427 comment
+      says a hold deliberately does not dedup.
+    - src/run-task.ts:12480-12700 (the dep-review command): each judgement reads gh pr view, gh pr diff, the
+      required checks and readSelectedDepReviewChecks.
+    - src/lib/sweep.ts:3424 then reads the whole live ledger again (readLedgerLines) to find the decision.
+    THE OPTIONS, from the code: (a) conditional requests: W1-T12892 (queued) sends an ETag only for `gh api <path>`
+    GETs, and this lane's pr view and pr diff are not that form, so most reads would still cost. (b) A longer
+    interval is a new fixed bound and would also delay a hold whose checks just finished. (c) Reads only while a
+    viewer is present apply to serve's views, not to a daemon lane. So this task takes (d): judge a hold again only
+    when one of its inputs changed. The sweep already holds those inputs in its open-PR view, so the check costs
+    no read.
+    FALSIFIER: if the console daemon's daemon.quota reads stay above 1,500 an hour with these seven PRs still held,
+    the reads come from another lane, and this dedup is not the cause.
+  design: |
+    INVARIANT a-changed-input-is-judged: the digest covers every input the hold decision reads from the open-PR
+    view: head sha, each check's name, context, status, conclusion and state, review state, mergeable, mergeable
+    state, merge state, whether auto-merge is armed, and DEP_REVIEW_ENGINE_REVISION. A digest the sweep cannot
+    compute (no check states or no merge state) never dedups.
+    INVARIANT the-stalled-hold-still-escalates: the W1-T9818 stop-moving escalation keeps its timing.
+    INVARIANT terminal-dedup-unchanged: the terminal-outcome dedup and depReviewDedupStandsAside keep today's answers.
+    INVARIANT a-red-hold-is-judged: a hold whose view shows a red check is judged on every pass.
+    AMENDED 2026-11-15 (W1-T12951 build, read at origin/main):
+    - The open-PR view (OpenPrView, src/lib/sweep.ts) holds no per-check list: only checksState and the
+      required-check name lists. The seven measured holds read "checks green, review none" in their sweep.disposed
+      reason while the lane read "selected check evidence is pending", so a digest over checksState alone would
+      miss the change that lets the lane arm. The producer (src/lib/tick-read-worker.ts) already holds each PR's
+      statusCheckRollup; it now gives each Dependabot PR a checkStates list (name, context, status, conclusion,
+      state) through dependabotCheckStates. No new read.
+    - The open-PR read carries no base ref, so the base ref is not in the digest. Dependabot PRs target the
+      default branch.
+    - W1-T9818 has no fixed escalation age. It asks on the next unchanged pass when no remedy is in flight, or when
+      a remedy's evidence has not moved for longer than its learned gap. The sweep cannot tell when that fires,
+      so it dedups a hold only after the escalation is filed for this head: an unretired ask for the head in the
+      hold state file (dep-review-holds/<owner>/<repo>/PR<n>.json beside the ledger). Once that ask exists,
+      reconcileDepReviewHold returns early at the same head. reconcileDepReviewHold saves the ask before it writes
+      the dep-review.hold_escalated row, and the row rotates out of the live ledger (the measured holds' rows had,
+      while PR2517.json still held its ask for issue #2524), so the sweep reads the state file, not the row.
+    - A red hold waits on main's state (W1-T9584 refresh, W1-T9586 own red), which the digest does not cover. So a
+      view with checksState red, a red required check, a CI failure or a cancelled required check never dedups.
+    1. src/lib/tick-read-worker.ts: assign checkStates: dependabotCheckStates(isDependabot, rollup) in the view.
+    2. src/lib/sweep.ts: add depReviewHoldInputsDigest(pr) over the fields above (stable order, sha256), and
+       dependabotCheckStates.
+    3. When the depReview arm returns hold, write the digest on the pass's sweep.disposed row
+       (dep_review_inputs_digest).
+    4. In the dep-review dedup arm (sweep.ts:23260), also dedup when the newest acted sweep.disposed dep-review row
+       for this PR and head has outcome hold and an equal digest, and the hold's escalation is filed for this head.
+       Name the reason in dedupStandDownReason (W1-T2427 style).
+    5. Add the focused test file for criteria 1 to 5 and 7, through runSweep with a gh shim.
+    NOT IN SCOPE: why the remudero-console checks stay pending; the ETag cache (W1-T12892); the readLedgerLines
+    call at sweep.ts:3424; the refused path (W1-T12955).
+  falsifier: |
+    Remove the hold dedup: criteria 1 and 5 must fail. Leave a check's conclusion out of the digest: criterion 2
+    must fail. Dedup a hold that is due its escalation: criterion 3 must fail. Dedup a red hold: criterion 7 must
+    fail. Restore and require all to pass.
+  note: |
+    Id reserved for run-unfiled-1794767168000 with ~/rmd-work/bin/reserve-id.sh.
+    The per-hour read figures can be read again from the console ledger's daemon.quota reads_stamped field.

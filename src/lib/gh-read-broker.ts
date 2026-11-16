@@ -27,11 +27,12 @@
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-  appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statfsSync, statSync, writeFileSync,
+  accessSync, appendFileSync, chmodSync, constants as fsConstants, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync,
+  statfsSync, statSync, writeFileSync,
 } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
-import { userInfo } from "node:os";
-import { join, resolve } from "node:path";
+import { tmpdir, userInfo } from "node:os";
+import { join, resolve, sep } from "node:path";
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import {
   brokerGhRead, brokerRequest, GH_BROKER_CLASSES, GH_BROKER_HEARTBEAT, GH_BROKER_INVALIDATIONS, GH_BROKER_SOCKET,
@@ -42,7 +43,9 @@ import {
   classifyGhLimitFailure, DEFAULT_GH_CALL_TIMEOUT_MS, DEFAULT_GH_PACE_MIN_GAP_MS, DEFAULT_GH_REFUSAL_BACKOFF_FLOOR_MS, ghRunForBroker,
   ghArgvIsWrite, ghBrokerClassForActor, parseGhApiArgv, parseGhRateLimitHeaders, refuseSentinelGhToken, splitGhHeaderBlock,
 } from "./github-transport.js";
+import { ghArgvNeedsNoCredential, githubRepoOfGhArgv, resolveGithubCredential } from "./github-credential.js";
 import { deriveLedgerActor } from "./ledger.js";
+import { LIVE_WRITE_SENTINEL_TOKEN } from "./live-write-guard.js";
 import { execFileRouted } from "./spawn-helper.js";
 import { hostWorktreeGitEnv, pinWorktreeGit } from "./worktree-git.js";
 
@@ -466,11 +469,47 @@ export interface GhUpstreamResult {
 /** The account's own `gh`, as a direct call would run it. Injected in tests: no real `gh`, no network. */
 export type GhUpstreamExec = (args: string[], opts: { cwd?: string; env?: NodeJS.ProcessEnv }) => Promise<GhUpstreamResult>;
 
+/** True when `gh` resolves through `env.PATH` to an executable under the OS temp dir: a test's own stub,
+ *  which cannot reach GitHub. The same rule the transport applies to its own spawns (W1-T4805). */
+function ghResolvesToTmpdirStub(env: NodeJS.ProcessEnv): boolean {
+  for (const dir of (env.PATH ?? "").split(":").filter((d) => d.length > 0)) {
+    const candidate = join(dir, "gh");
+    try {
+      accessSync(candidate, fsConstants.X_OK);
+    } catch {
+      continue; // not executable in this PATH entry: a spawn would try the next one, and so does this
+    }
+    return candidate.startsWith(tmpdir() + sep);
+  }
+  return false;
+}
+
+/**
+ * W1-T12075: the environment for a `gh` child spawned outside the transport, with the credential the one
+ * resolver (W1-T11926) picked. `env` is the environment the child would have received, `undefined` for
+ * this process's own. It returns `env` itself when the ambient token or gh's stored login answers, so a
+ * host with no references file spawns exactly as before. A process carrying the test-runner token is left
+ * alone, as the transport leaves it. With no credential it throws the resolver's named error, unless the
+ * call needs none or `gh` is a test's own stub.
+ */
+export function ghCredentialChildEnv(args: readonly string[], env: NodeJS.ProcessEnv | undefined): NodeJS.ProcessEnv | undefined {
+  const base = env ?? process.env;
+  if (base.GH_TOKEN === LIVE_WRITE_SENTINEL_TOKEN || base.GITHUB_TOKEN === LIVE_WRITE_SENTINEL_TOKEN) return env;
+  return resolveGithubCredential({
+    env: base,
+    repo: githubRepoOfGhArgv(args),
+    operation: `gh ${args.slice(0, 2).join(" ")}`,
+    mayRunWithout: () => ghArgvNeedsNoCredential(args) || ghResolvesToTmpdirStub(base),
+  }).childEnv(env);
+}
+
 export const defaultGhUpstreamExec: GhUpstreamExec = async (args, opts) => {
   if (!opts.env) return ghRunForBroker(args, { cwd: opts.cwd, maxBuffer: 1 << 26 });
   try {
     refuseSentinelGhToken("gh", args, opts.env);
-    const result = await execFileRouted("gh", args, { cwd: opts.cwd, env: opts.env, encoding: "utf8", maxBuffer: 1 << 26, timeout: DEFAULT_GH_CALL_TIMEOUT_MS });
+    // W1-T12075: a missing credential is thrown here, and the catch below hands its named sources to stderr.
+    const env = ghCredentialChildEnv(args, opts.env);
+    const result = await execFileRouted("gh", args, { cwd: opts.cwd, env, encoding: "utf8", maxBuffer: 1 << 26, timeout: DEFAULT_GH_CALL_TIMEOUT_MS });
     return { ...result, exitCode: 0 };
   } catch (cause) {
     const error = cause as { stdout?: string; stderr?: string; code?: unknown; message?: string };
@@ -1432,8 +1471,16 @@ function resolvePorcelainRepo(args: readonly string[], env: NodeJS.ProcessEnv): 
 
 /** Runs a `gh` read directly with inherited stdio when no broker is live; resolves its exit code. */
 export function runGhDirect(args: string[]): Promise<number> {
+  let env: NodeJS.ProcessEnv | undefined;
+  try {
+    env = ghCredentialChildEnv(args, undefined);
+  } catch (err) {
+    // W1-T12075: the caller reads a failed direct read from stderr, so the resolver's named sources go there.
+    process.stderr.write(`${(err as Error).message}\n`);
+    return Promise.resolve(1);
+  }
   return new Promise((resolve) => {
-    const child = spawn("gh", args, { stdio: "inherit" });
+    const child = spawn("gh", args, { stdio: "inherit", env });
     child.on("error", () => resolve(1));
     child.on("close", (code) => resolve(code ?? 1));
   });

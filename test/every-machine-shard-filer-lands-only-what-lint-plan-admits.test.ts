@@ -287,6 +287,7 @@ test("machine shard rationale keeps multiline failure evidence inside exactly on
       files: ["src/lib/machine-filing.ts", "test/every-machine-shard-filer-lands-only-what-lint-plan-admits.test.ts"],
       acceptance: [{ claim: "multiline evidence remains data",
         proof: "unit test: machine shard rationale keeps multiline failure evidence inside exactly one unjudged task" }],
+      invariants: { none: "the fixture renders evidence lines and changes no existing behaviour" },
       rationale: evidence.map((entry) => entry.replaceAll("\n", lineBreak)),
     });
     const plan = loadPlanFromYaml(rendered.text, "multiline-machine-filing-control.yaml");

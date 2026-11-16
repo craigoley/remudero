@@ -19,7 +19,7 @@
     - src/lib/feedback-landing.ts
     - test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts
     - test/inbox/a-triage-outcome-that-files-no-task-lands-through-the-feedback-landing.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A no_task triage outcome, driven through triageCommand on a fixture whose in-tree scripts/task-id-existence-check.mjs sleeps 2 s, lands its status change while a 50 ms timer started before the call fires at least once in every 500 ms while that 2 s check runs"

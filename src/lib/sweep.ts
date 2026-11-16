@@ -1,5 +1,6 @@
 import { hasNonBotAuthor, namePathLanding, type DependencyMainIdentity } from "./dependency-main-identity.js";
 import { findTaskInCatalogs, type TaskLookupOptions, type TaskLookupResult } from "./task-lookup.js";
+import { planDestinationRepository, type PlanDestinationRepository } from "./plan-destination.js";
 import { decideLoopOutcome } from "./loop-decision.js";
 import { CI_REFRESH_GUARD_VERSION } from "./ci-refresh-prevention.js";
 import { createSelectedModeQualification, observeSelectedMode, readInstanceRegistryText } from "./instance-mode.js";
@@ -242,7 +243,7 @@ import type {
   ReviewEvidence,
   ReviewVerdict,
 } from "./review.js";
-import { DEP_REVIEW_ENGINE_REVISION, depReviewRowEngineRevision, isDependabotAuthor, dependabotOwnRedSignal, dependabotReviewArgs, dependabotRefreshVerdict, type DependabotOwnRedSignal, type DependabotRefreshVerdict } from "./dep-review.js";
+import { DEP_REVIEW_ENGINE_REVISION, depReviewRowEngineRevision, readDepReviewHoldState, isDependabotAuthor, dependabotOwnRedSignal, dependabotReviewArgs, dependabotRefreshVerdict, type DependabotOwnRedSignal, type DependabotRefreshVerdict } from "./dep-review.js";
 import { parseLedger } from "./retro.js";
 import { readReviewHostObservation, selectRuntimeReviewWidth } from "./review-capacity.js";
 import { yieldingFixClaim } from "./review-precedence.js";
@@ -2799,6 +2800,18 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   };
 
   const repoDir = repo === localRepoName ? entrypointRepoRoot : join(config.root, "repos", repo);
+  const publicTaskRepository = { owner, repo, checkoutDir: repoDir };
+  const taskFileRepository = async (taskId: string, byId = plan.byId) => {
+    const found = await findTaskInCatalogs(taskId, {
+      byId, stateDir: join(config.root, "state"),
+      ...(deps.readJsonImpl ? { api: (path: string) => readJsonImpl(["api", path]) } : {}),
+    });
+    if (found.outcome === "unreadable") return found;
+    if (found.catalog !== "ops") return { outcome: "resolved" as const, task: found.task, target: publicTaskRepository };
+    const target = planDestinationRepository(join(config.root, "state"));
+    if (target.outcome !== "named") return { outcome: "unreadable" as const, reason: "destination-unreadable" };
+    return { outcome: "resolved" as const, task: found.task, target };
+  };
   const pauseGit = fixDispatchPauseGitImpl ?? realSharedPauseGitDeps(repoDir);
   // W1-T4460 (design ii): the real default reads this repo's OWN plan fresh off disk, swallowing a
   // read failure (an unreadable plan on this one opportunistic re-read is never this dispatch's
@@ -5340,22 +5353,32 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       const results: RefusalAmendmentResult[] = [];
       // W1-T12199: amendments land through the sealed task-file landing. A test's injected git and gh
       // carry the landing too, so it never runs a real child against the checkout the test runs in.
-      const landingOpts: LandTaskFilesOpts = {
+      const landingOpts = (target: PlanDestinationRepository): LandTaskFilesOpts => ({
         stateRoot: config.root,
-        targetRepository: { owner, repo },
+        targetRepository: { owner: target.owner, repo: target.repo },
         log,
-        planPrPreflight: (sha, pr) => planPrPreflightImpl(repoDir, sha, pr, { log }),
-        ...(deps.planRepairGitImpl ? { git: (args: string[]) => planRepairGit("git", ["-C", repoDir, ...args]) } : {}),
+        planPrPreflight: (sha, pr) => planPrPreflightImpl(target.checkoutDir, sha, {
+          ...pr, ...(target.checkoutDir === repoDir ? {} : { codeRoot: repoDir, bodyProofRoot: "plan" as const }),
+        }, { log }),
+        ...(deps.planRepairGitImpl ? { git: (args: string[]) => planRepairGit("git", ["-C", target.checkoutDir, ...args]) } : {}),
         ...(deps.ghJsonImpl ? { gh: (args: string[]) => {
           const out = ghJsonForBuild(args);
           return typeof out === "string" ? out : JSON.stringify(out);
         } } : {}),
-      };
-      const stagedFor = new Map<string, string>();
+      });
+      const targets = new Map([[`${owner}/${repo}`, publicTaskRepository]]);
+      const destination = planDestinationRepository(join(config.root, "state"));
+      if (destination.outcome === "named") targets.set(`${destination.owner}/${destination.repo}`, destination);
+      const stagedFor = new Map<string, { relPath: string; repository: string }>();
       const currentPlan = candidates.length > 0 ? reloadPlanForFix() ?? plan : plan;
       for (const c of candidates) {
-        const task = currentPlan.byId.get(c.taskId);
         const base = { taskId: c.taskId, sourceRunId: c.runId, classes: c.refusals.map((r) => r.refusalClass) };
+        const resolved = await taskFileRepository(c.taskId, currentPlan.byId);
+        if (resolved.outcome === "unreadable") {
+          results.push({ ...base, outcome: "lookup_unreadable", code: resolved.reason });
+          continue;
+        }
+        const { task, target } = resolved;
         if (!task || !taskAwaitsAmendment(task)) {
           results.push({ ...base, outcome: "task_closed" });
           continue;
@@ -5367,20 +5390,24 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         }
         results.push(
           await draftRefusalAmendment(c, {
-            readShard: (taskId) => readTaskShard(repoDir, taskId),
+            readShard: (taskId) => readTaskShard(target.checkoutDir, taskId),
             // W1-T12199: an amendment that waits, or that the open landing PR carries, is found by its staged
             // file. The per-task branch is still read for an amendment opened before this landing.
-            probeExisting: (branch) => {
-              const relPath = readTaskShard(repoDir, c.taskId)?.relPath;
-              const waiting = relPath === undefined ? undefined : stagedTaskFiles(config.root).find((f) => f.relPath === relPath);
-              return waiting ? { ...(waiting.prUrl ? { prUrl: waiting.prUrl } : {}) } : probeExistingPlanPr(ghJsonForBuild, owner, repo, branch);
+            probeExisting: async (branch) => {
+              const relPath = readTaskShard(target.checkoutDir, c.taskId)?.relPath;
+              const scoped = destination.outcome === "named"
+                ? (await landTaskFilesAsync(target.checkoutDir, [], { ...landingOpts(target), stageOnly: true })).waiting
+                : undefined;
+              const waiting = relPath === undefined || (scoped && !scoped.includes(relPath)) ? undefined
+                : stagedTaskFiles(config.root).find((f) => f.relPath === relPath);
+              return waiting ? { ...(waiting.prUrl ? { prUrl: waiting.prUrl } : {}) } : probeExistingPlanPr(ghJsonForBuild, target.owner, target.repo, branch);
             },
             nowIso: () => clockFromMillisFn(nowMsImpl).iso(),
             openAmendmentPr: async (input) => {
               const landing = await landTaskFilesAsync(
-                repoDir,
+                target.checkoutDir,
                 [{ relPath: input.shardRelPath, content: input.amendedText, claim: input.claim, proof: input.proof }],
-                { ...landingOpts, stageOnly: true, lane: "refusal_amendment" },
+                { ...landingOpts(target), stageOnly: true, lane: "refusal_amendment" },
               );
               const refusal = landing.refused[0];
               // A check that ran out of its budget is no refusal: `plan_pr.preflight_timed_out` records it,
@@ -5399,19 +5426,24 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
               }
               if (refusal) throw new Error(refusal.reason);
               if (landing.error) throw new Error(landing.error);
-              stagedFor.set(c.taskId, input.shardRelPath);
+              stagedFor.set(c.taskId, { relPath: input.shardRelPath, repository: `${target.owner}/${target.repo}` });
               return {};
             },
           }),
         );
       }
-      // One landing call per pass: the amendments of this pass share one pull request, and a file that
+      // One landing call per repository: its amendments share one pull request, and a file that
       // waited behind a merged landing goes into the next one with no new refusal.
-      const landed = await landTaskFilesAsync(repoDir, [], landingOpts);
-      if (landed.error) log("sweep.task_files_landing.error", { error: landed.error, waiting: landed.waiting });
+      const landings = new Map<string, Awaited<ReturnType<typeof landTaskFilesAsync>>>();
+      for (const [key, target] of targets) {
+        const landed = await landTaskFilesAsync(target.checkoutDir, [], landingOpts(target));
+        landings.set(key, landed);
+        if (landed.error) log("sweep.task_files_landing.error", { error: landed.error, waiting: landed.waiting });
+      }
       return results.map((r) => {
-        const relPath = r.outcome === "waiting" ? stagedFor.get(r.taskId) : undefined;
-        return relPath !== undefined && landed.prUrl !== undefined && landed.landed.includes(relPath)
+        const staged = r.outcome === "waiting" ? stagedFor.get(r.taskId) : undefined;
+        const landed = staged && landings.get(staged.repository);
+        return staged !== undefined && landed?.prUrl !== undefined && landed.landed.includes(staged.relPath)
           ? { ...r, outcome: "drafted" as const, prUrl: landed.prUrl }
           : r;
       });
@@ -5714,16 +5746,25 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       const taskId = pr.taskId;
       const proof0 = evidence.proofs[0];
       if (!taskId || !proof0) return;
+      const resolved = await taskFileRepository(taskId);
+      if (resolved.outcome === "unreadable") {
+        log(PLAN_REPAIR_DISPATCH_STEP, {
+          task_id: taskId, pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha,
+          outcome: "lookup_unreadable", code: resolved.reason,
+        });
+        return true;
+      }
+      const { checkoutDir: repairRepoDir, owner: repairOwner, repo: repairRepo } = resolved.target;
       let shardRelPath: string | undefined;
       try {
-        shardRelPath = readdirSync(join(repoDir, "plan", "tasks.d"))
+        shardRelPath = readdirSync(join(repairRepoDir, "plan", "tasks.d"))
           .filter((f) => isTaskShardName(f, taskId) && /\.ya?ml$/.test(f))
           .map((f) => join("plan", "tasks.d", f))[0];
       } catch {
         /* the shard directory is unreadable — fall through to the monolith below */
       }
       if (!shardRelPath) {
-        const monolith = join(repoDir, "plan", "tasks.yaml");
+        const monolith = join(repairRepoDir, "plan", "tasks.yaml");
         if (existsSync(monolith) && readFileSync(monolith, "utf8").includes(`id: ${taskId}\n`)) {
           shardRelPath = "plan/tasks.yaml";
         }
@@ -5744,16 +5785,16 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       }
       const branch = `plan-repair/${taskId}`;
       try {
-        planRepairGit("git", ["-C", repoDir, "fetch", "origin", "--quiet"]);
+        planRepairGit("git", ["-C", repairRepoDir, "fetch", "origin", "--quiet"]);
       } catch {
         /* best-effort — a stale local view still lets the probe below run */
       }
-      const existing = probeExistingPlanPr(ghJsonForBuild, owner, repo, branch);
+      const existing = probeExistingPlanPr(ghJsonForBuild, repairOwner, repairRepo, branch);
       if (existing) {
         planRepairLog("deduped", { plan_repair_pr: existing.prUrl });
         return true;
       }
-      const original = readFileSync(join(repoDir, shardRelPath), "utf8");
+      const original = readFileSync(join(repairRepoDir, shardRelPath), "utf8");
       const marker =
         `sweep-flagged proof — an Architect must correct this criterion's ` +
         `proof; W1-T3390 plan-only repair rung, PR #${pr.prNumber}, ${new Date(nowMsImpl()).toISOString()}`;
@@ -5772,11 +5813,11 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         // left over from an earlier, uncleaned attempt is dropped first — best-effort, since a
         // branch still checked out elsewhere fails closed exactly as the prior `-B` did.
         try {
-          planRepairGit("git", ["-C", repoDir, "branch", "-D", branch]);
+          planRepairGit("git", ["-C", repairRepoDir, "branch", "-D", branch]);
         } catch {
           /* no stale local branch to clear — the common case */
         }
-        worktreeAddForBuild(repoDir, worktreePath, branch, "origin/main", { log });
+        worktreeAddForBuild(repairRepoDir, worktreePath, branch, "origin/main", { log });
         writeFileSync(join(worktreePath, shardRelPath), flagged);
         planRepairGit("git", ["-C", worktreePath, "add", shardRelPath]);
         const commitMessage = buildPlanPrCommitMessage({
@@ -5807,7 +5848,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           proofCwd: worktreePath,
         });
         // W1-T5405: the verdict rides this rung's ONE dispatch row, so a refusal spends a MAX_PLAN_REPAIR_STRIKES strike.
-        const verdict = await planPrPreflightImpl(worktreePath, headSha, { title, body }, { log });
+        const verdict = await planPrPreflightImpl(worktreePath, headSha, {
+          title, body, ...(repairRepoDir === repoDir ? {} : { codeRoot: repoDir, bodyProofRoot: "plan" as const }),
+        }, { log });
         const preflightRow = verdict.unreadable.length > 0 ? { preflight_unreadable: verdict.unreadable } : {};
         if (!planPrPreflightAllows(verdict, { lane: "plan_repair", branch })) {
           // A check that ran out of its budget spends no strike: recorded as such, and the next pass asks again.
@@ -5820,7 +5863,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         }
         await gitPushRunBranchForBuild(worktreePath, { stdio: "ignore", expectedHeadSha: headSha });
         assertLiveWriteAllowed("gh-pr-create", `opening the plan-only repair PR for ${taskId}'s shard`);
-        const created = createPlanPrRest(ghJsonForBuild, owner, repo, { title, body, head: branch, base: "main" });
+        const created = createPlanPrRest(ghJsonForBuild, repairOwner, repairRepo, { title, body, head: branch, base: "main" });
         planRepairLog("dispatched", { plan_repair_pr: created.prUrl, shard_path: shardRelPath, ...preflightRow });
         return true;
       } catch (e) {
@@ -5829,7 +5872,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       } finally {
         if (worktreePath) {
           try {
-            worktreeRemoveForBuild(repoDir, worktreePath);
+            worktreeRemoveForBuild(repairRepoDir, worktreePath);
           } catch {
             /* best-effort cleanup */
           }
@@ -7759,6 +7802,8 @@ export interface OpenPrView {
   redRequiredChecks?: string[];
   /** W1-T10067 — the same contract's children that have not concluded ({@link pendingQualityGateNames}). */
   pendingRequiredChecks?: string[];
+  /** W1-T12951 — each check's own state, for a Dependabot PR only ({@link dependabotCheckStates}). */
+  checkStates?: readonly DependabotCheckState[];
   /** W1-T2340 — this head's own workflow runs, the raw input {@link stalledRunReason} reads.
    *  `undefined` when the listing could not be fetched, never degrading to `[]`, which would read
    *  as "GitHub scheduled nothing" instead of "we could not check". Not yet populated by the real
@@ -7937,6 +7982,43 @@ export const REQUIRED_CHECK_FAIL = new Set([
   "STARTUP_FAILURE",
   "STALE",
 ]);
+
+export type DependabotCheckState = Pick<RollupCheckEntry, "name" | "context" | "status" | "conclusion" | "state">;
+
+/** W1-T12951 — the rollup's per-check states the view keeps, so a held Dependabot head can tell an unchanged pass. */
+export function dependabotCheckStates(
+  isDependabot: boolean, rollup: readonly RollupCheckEntry[] | undefined,
+): DependabotCheckState[] | undefined {
+  if (!isDependabot || rollup === undefined) return undefined;
+  return rollup.map((c) => ({ name: c.name, context: c.context, status: c.status, conclusion: c.conclusion, state: c.state }));
+}
+
+/** W1-T12951 — the digest of what a dependency hold read from the view; undefined (never dedup) when a field is
+ *  missing or a check is red, since a red hold waits on main's state, which this digest does not cover. */
+export function depReviewHoldInputsDigest(pr: Pick<OpenPrView, "headSha" | "checkStates" | "checksState" |
+  "redRequiredChecks" | "ciFailures" | "cancelledRequiredChecks" | "reviewState" | "mergeable" | "mergeableState" |
+  "mergeState" | "autoMergeArmed">): string | undefined {
+  if (!pr.headSha || pr.checkStates === undefined || (pr.mergeState === undefined && pr.mergeableState === undefined)) return undefined;
+  if (pr.checksState === "red" || (pr.redRequiredChecks?.length ?? 0) > 0 || (pr.ciFailures?.length ?? 0) > 0 ||
+      (pr.cancelledRequiredChecks?.length ?? 0) > 0) return undefined;
+  if (pr.checkStates.some((c) => REQUIRED_CHECK_FAIL.has((c.state ?? c.conclusion ?? "").toUpperCase()))) return undefined;
+  const checks = pr.checkStates.map((c) => JSON.stringify([c.name ?? "", c.context ?? "", c.status ?? "", c.conclusion ?? "", c.state ?? ""])).sort();
+  return createHash("sha256").update(JSON.stringify([pr.headSha, checks, pr.reviewState, pr.mergeable ?? null,
+    pr.mergeableState ?? null, pr.mergeState ?? null, pr.autoMergeArmed, DEP_REVIEW_ENGINE_REVISION])).digest("hex");
+}
+
+/** W1-T12951 — W1-T9818's escalation is filed for this head: the hold state file holds its unretired ask. */
+function depReviewHoldEscalationFiled(ledgerPath: string, pr: Pick<OpenPrView, "prNumber" | "prUrl" | "headSha">): boolean {
+  const slug = /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/\d+$/.exec(pr.prUrl);
+  if (!slug) return false;
+  const statePath = join(dirname(ledgerPath), "dep-review-holds", slug[1], slug[2], `PR${pr.prNumber}.json`);
+  if (!existsSync(statePath)) return false;
+  try {
+    return readDepReviewHoldState(statePath, pr.headSha).asks.some((ask) => ask.headSha === pr.headSha && !ask.retired);
+  } catch {
+    return false; // an unreadable hold state cannot prove the escalation, so the hold is judged again
+  }
+}
 
 export function rollupProducerKey(c: RollupCheckEntry): { key: string; known: boolean } {
   const posted = /^(?:run:\d+:\d+:)?job:\d+$/.test(c.externalId ?? "");
@@ -15868,6 +15950,8 @@ interface PriorActions {
   escalated: Set<string>;
   /** `pr@head` keys whose dep-review reached a TERMINAL outcome (arm/escalate/refuse). */
   depReviewed: Set<string>;
+  /** W1-T12951 — `pr@head` to the input digest of the newest acted dep-review row, when it was a hold. */
+  depReviewHoldDigests: Map<string, string>;
   /** Exact-input keys with a DELIVERED verdict. NOT keyed off `sweep.disposed acted:true` like the
    *  other sets: that proves only the LANE WAS INVOKED, and keying on the attempt suppressed the
    *  same input forever after one no-op invocation. W1-T1213 split off {@link reviewRefused}. */
@@ -16827,6 +16911,7 @@ function priorActionsFromLedger(
   const closed = new Set<number>();
   const escalated = new Set<string>();
   const depReviewed = new Set<string>();
+  const depReviewHoldDigests = new Map<string, string>();
   const reviewDelivered = new Set<string>();
   // W1-T5840 — exact-input keys whose NEWEST delivered verdict is a failure, with its post time.
   const reviewDeliveredFailureAt = new Map<string, number>();
@@ -17051,6 +17136,10 @@ function priorActionsFromLedger(
             depReviewRowEngineRevision(line) === DEP_REVIEW_ENGINE_REVISION) {
           depReviewed.add(`${pr}@${typeof line.head_sha === "string" ? line.head_sha : ""}`);
         }
+        if (line.dep_review_outcome === "hold" && typeof line.dep_review_inputs_digest === "string" &&
+            depReviewRowEngineRevision(line) === DEP_REVIEW_ENGINE_REVISION) {
+          depReviewHoldDigests.set(`${pr}@${typeof line.head_sha === "string" ? line.head_sha : ""}`, line.dep_review_inputs_digest);
+        } else depReviewHoldDigests.delete(`${pr}@${typeof line.head_sha === "string" ? line.head_sha : ""}`);
         break;
       // "post-review" deliberately absent here (W1-T254): see the
       // `review.posted`/`review.post_refused` branch above.
@@ -17070,6 +17159,7 @@ function priorActionsFromLedger(
     closed,
     escalated,
     depReviewed,
+    depReviewHoldDigests,
     reviewDelivered,
     reviewRefused,
     reviewRetryableThrows,
@@ -21162,7 +21252,7 @@ export async function runSweep(
   if (endsForRestart("fold_debt")) return endedEarly();
   // ── W1-T4838 A WORKER'S CATEGORIZED REFUSAL IS AN AMENDMENT, NOT A FAILED ATTEMPT ─────────
   // Full passes only. Only a `no_pr` row whose excerpt `extractRefusal` parses is a candidate: an
-  // uncategorized `no_pr` is skipped here and retries exactly as before. `error` outcomes write no
+  // uncategorized `no_pr` is skipped here and retries exactly as before. Errors and unreadable lookups write no
   // ledger row, so the next pass retries; every other outcome is recorded once per source run.
   // W1-T12199: the effect runs with no candidate too, so a task file that waits is landed on this pass.
   if (deps.draftRefusalAmendments && deps.repairAdmissionSurface !== "light") {
@@ -21174,8 +21264,9 @@ export async function runSweep(
       }
       {
         for (const r of await deps.draftRefusalAmendments(candidates)) {
-          if (r.outcome === "error") {
-            log("sweep.refusal_amendment.error", { task_id: r.taskId, error: r.error });
+          if (r.outcome === "error" || r.outcome === "lookup_unreadable") {
+            log("sweep.refusal_amendment.error", { task_id: r.taskId, error: r.error,
+              ...(r.outcome === "lookup_unreadable" ? { outcome: r.outcome, code: r.code } : {}) });
             continue;
           }
           appendLine(deps.ledgerPath, {
@@ -21907,6 +21998,8 @@ export async function runSweep(
         snapshot_age_ms: snapshotAgeMs(index),
         ...(rederivedIndices.has(index) ? { rederived: true } : {}),
         ...(depReviewOutcome ? { dep_review_outcome: depReviewOutcome, dep_review_engine_revision: DEP_REVIEW_ENGINE_REVISION } : {}),
+        ...(depReviewOutcome === "hold" && depReviewHoldInputsDigest(pr) !== undefined
+          ? { dep_review_inputs_digest: depReviewHoldInputsDigest(pr) } : {}),
         ...(actionError ? { action_error: actionError } : {}),
         ...(standDownReason && !deliveredStandDownLogged ? { stand_down_reason: standDownReason } : {}),
         ...(deliveredStandDownLogged ? { stand_down_unchanged: true } : {}),
@@ -23266,6 +23359,14 @@ export async function runSweep(
           dedupStandDownReason =
             `dependency review already reached a TERMINAL outcome at this head ` +
             `(${pr.headSha.slice(0, 7)}) under engine ${DEP_REVIEW_ENGINE_REVISION} — a hold would have re-run instead of deduping`;
+        } else if (!depReviewDedupStandsAside(pr)) {
+          const holdDigest = depReviewHoldInputsDigest(pr);
+          if (holdDigest !== undefined && prior.depReviewHoldDigests.get(`${pr.prNumber}@${pr.headSha}`) === holdDigest &&
+              depReviewHoldEscalationFiled(deps.ledgerPath, pr)) {
+            alreadyDone = true;
+            dedupStandDownReason = `dependency hold inputs have not changed at this head (${pr.headSha.slice(0, 7)}) ` +
+              `since the last judgement and its escalation is filed — the hold is not judged again`;
+          }
         }
         break;
       case "post-review": {

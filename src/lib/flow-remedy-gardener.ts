@@ -360,7 +360,7 @@ export function ladderOf(kind: LadderKind, episodes: Episode[], records: readonl
       && !closedUnmerged.has(Number(/(\d+)$/.exec(r.pr_url)![1])))
     .map(r => (r.next as { origin?: string } | undefined)?.origin).filter((s): s is string => typeof s === "string"));
   const escalated = new Set(records.filter(r => r.step === kind.escalatedStep && typeof r.issue_url === "string").map(r => r.origin));
-  for (const price of candidates.slice(0, 8)) {
+  for (const price of candidates) {
     const mine = tasks.filter(t => parseOrigin(kind, t.origin)?.[1] === price.key);
     const top = [...mine].sort((a, b) => Number(parseOrigin(kind, b.origin)?.[2] ?? 1) - Number(parseOrigin(kind, a.origin)?.[2] ?? 1))[0];
     let rung = top ? Number(parseOrigin(kind, top.origin)?.[2] ?? 1) : 1;
@@ -460,6 +460,10 @@ export function draftShard(action: FlowAction, taskId: string, search: OwnerSear
     files: [files[0]!.file, testPath], cost: action.price.hours, costPopulation: action.population,
     acceptance: [{ claim: kind.claim(action.price.key),
       proof: `grep: test("${taskId}: ${kind.stem}-${stem} clears without a person" in ${testPath}` }],
+    invariants: { declared: [{ slug: "other-blockers-still-hold",
+      statement: `the remedy clears ${flowCauseLabel(action.price.key)} and nothing else; a PR held by any other blocker is still held exactly as before.`,
+      claim: `a PR held by a blocker other than ${flowCauseLabel(action.price.key)} is still held after the change`,
+      proof: `grep: test("${taskId}: ${kind.stem}-${stem} leaves other blockers held" in ${testPath}` }] },
     note: `Filed by ${kind.stem} at rung ${action.rung}; measure the cause's share of PR-hours after the build merges.`,
     rationale: [action.reason, kind.ownerLine(action),
       `Source owner: ${owner?.line ?? files[0]!.file}. Top five PRs by observed hours, with original blocker reasons:`,

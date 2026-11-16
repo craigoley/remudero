@@ -22,7 +22,7 @@
     - src/lib/analytics-view.ts
     - src/lib/nav-badge-view.ts
     - test/console-api/read-model/a-view-that-declares-its-rows-is-skipped-when-only-other-rows-moved.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "For a view that declares inputsFingerprint, the input digest holds that fingerprint, the plan identity, the switches, the shadow readiness and each store's identity and lease state, and leaves out the store-wide generation and every source snapshot the view did not put in its fingerprint"

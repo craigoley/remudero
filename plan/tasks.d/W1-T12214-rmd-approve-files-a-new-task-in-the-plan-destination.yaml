@@ -18,7 +18,7 @@
     - src/run-task.ts
     - src/lib/inbox.ts
     - test/worker/run-task/rmd-approve-files-a-new-task-in-the-plan-destination.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With `task` in the kinds of the host file, `rmd approve` makes its worktree from the destination checkout and opens the pull request for the new task file in the destination repository"

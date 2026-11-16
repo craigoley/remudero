@@ -113,7 +113,10 @@ test("W1-T4075: the tick reads run off the main thread while a timer keeps firin
 test("the persistent tick reader rotates bounded probes across stable open PRs", async () => {
   const f = fixtureReader();
   f.setListed(Array.from({ length: 9 }, (_, i) => i + 10));
-  const produce = createTickReadProducer(f.options, f.io);
+  const produce = createTickReadProducer(f.options, { ...f.io,
+    // This test exercises local probe rotation against a fake API, not production request pacing.
+    pacer: { wait() {}, recordResult() {}, waitAsync: async () => {} },
+  });
   const visited = new Set<number>();
   try {
     for (let pass = 0; pass < 3; pass++) {

@@ -1,0 +1,55 @@
+- id: W1-T12937
+  title: "A Dependabot pull request whose head carries a non-Dependabot commit is reviewed as the hand-edited pull request it is, instead of being refused by the dependency lane on every pass"
+  repo: remudero
+  priority: 0.8
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # it changes which lane judges a pull request; a wrong route either auto-arms an edited bump or strands a clean one
+  band_meaning: span
+  origin: "operator-session#pr-queue-root-causes-2026-11-15"
+  plan_refs:
+    - W1-T54
+    - W1-T9797
+    - W1-T12841
+  files:
+    - src/lib/sweep.ts
+    - src/lib/dep-review.ts
+    - src/lib/tick-read-worker.ts
+    - test/review/a-dependabot-head-a-hand-edited-is-reviewed-as-a-hand-pull-request.test.ts
+  status: blocked
+  retirement: withdrawn  # superseded by W1-T12955 (PR #18723, filed 38 minutes earlier and broader); operator ruling 2026-11-15
+  attempts: 0
+  acceptance:
+    - claim: "The sweep disposes a pull request on a dependabot/ branch whose head is PROVEN to carry a non-Dependabot commit through the ordinary rows (post-review when its checks are green and it has no review), and one whose commits are all Dependabot's, or whose commits could not be read, still takes the dep-review row"
+      proof: "grep: W1-T12937 criterion 1 in test/review/a-dependabot-head-a-hand-edited-is-reviewed-as-a-hand-pull-request.test.ts"
+    - claim: "invariant:unedited-bumps-keep-the-dependency-lane — an all-Dependabot head gets the same dep-review decision, allowlist and arm as origin/main, and the dependency lane never posts a remudero-review success or arms a head that carries a non-Dependabot commit"
+      proof: "grep: W1-T12937 criterion 2 in test/review/a-dependabot-head-a-hand-edited-is-reviewed-as-a-hand-pull-request.test.ts"
+    - claim: "invariant:no-fleet-push-to-a-dependabot-branch — no fix, conflict or refresh rung pushes a commit to a dependabot/ branch, edited or not"
+      proof: "grep: W1-T12937 criterion 3 in test/review/a-dependabot-head-a-hand-edited-is-reviewed-as-a-hand-pull-request.test.ts"
+    - claim: "The hand-off is ledgered once per head as dep-review.handed_to_review, naming the non-Dependabot commit and the files outside the allowlist, and a later pass on the same head writes no second row"
+      proof: "grep: W1-T12937 criterion 4 in test/review/a-dependabot-head-a-hand-edited-is-reviewed-as-a-hand-pull-request.test.ts"
+  rationale: |
+    OBSERVED 2026-11-15 by the operator session, on origin/main cd1e5c686 and the core ledger.
+
+    - #18405 (pip group, setuptools 84.0.0 -> 84.1.0) and #18647 (hono) each carry hand commits by the operator: #18405 changes two suites that pin the semgrep lock's exact version and digest, so the bump cannot go green without them; #18647 carries a fix to an unrelated flaky test.
+    - Each pass, the dependency lane decides `refuse` ("diff touches file(s) outside the manifest/lockfile allowlist") and then logs `dep-review.refused_path.not_proposed` with reason `foreign-commit` (core ledger, 2026-11-15T14:14:45Z and 14:15:13Z). READ src/lib/dep-review.ts reconcileDependabotRefusedPath: a head that carries a non-Dependabot commit returns "not-proposed" before any proposal or operator ask, and the command exits 2 with no status.
+    - READ src/lib/sweep.ts: the dep-review row is `when: (pr) => pr.isDependabot === true`, and src/lib/tick-read-worker.ts sets isDependabot from the branch prefix alone. So the same refusal repeats on every pass: no review, no proposal, no escalation, no owner. #18405 was green the whole time.
+    - The allowlist is right to refuse: it exists so an auto-armed bump cannot carry code. What is missing is the route for a bump a person has edited. That pull request is a hand-edited pull request, and the ordinary reviewer is the gate every other hand-edited pull request goes through.
+  design: |
+    1. tick-read-worker.ts: the open-PR view gains a tri-state for a dependabot/ branch: commits all Dependabot's, PROVEN to include a non-Dependabot commit, or unread. It reuses the commit authorship the dependency lane already reads (headCarriesForeignCommit's inputs); an unread list stays "unread", never "edited".
+    2. sweep.ts: the dep-review row applies when the branch is Dependabot's and the head is not proven edited. A proven-edited head falls through to the ordinary rows. The rows that dispatch a fix, conflict or refresh round keep excluding every dependabot/ branch, as they do today.
+    3. dep-review.ts: `refuse` with a proven non-Dependabot commit writes dep-review.handed_to_review once per head (state beside the existing hold state) instead of refused_path.not_proposed.
+    4. The ordinary reviewer judges the pull request as it judges any untasked one: from the `## Acceptance` block of the body. A body with no block is withheld as today for an untasked pull request; this task adds no new verdict path and no new escalation.
+    INVARIANT unedited-bumps-keep-the-dependency-lane: an all-Dependabot head is judged exactly as on origin/main, and the dependency lane never arms or passes an edited head.
+    INVARIANT no-fleet-push-to-a-dependabot-branch: no rung pushes to a dependabot/ branch.
+    NOT IN SCOPE: widening the manifest allowlist; letting test files ride an auto-armed bump; drafting an Acceptance block for the editor.
+  falsifier: |
+    Route by branch prefix alone again and criterion 1 must fail. Let the dependency lane arm an edited head and criterion 2 must fail. Remove the dependabot/ exclusion from one fix row and criterion 3 must fail. Drop the per-head state and criterion 4 must fail. Restore and all pass.
+  note: |
+    RETIREMENT RECORD, 2026-11-15 — THIS SHARD IS SUPERSEDED. Two operator sessions filed the same root cause 38 minutes apart: W1-T12955 (#18723, merged 19:44Z) and this task (#18724, merged 20:22Z).
+    SUPERSEDED BY W1-T12955, which was filed first and covers more: it routes a refused Dependabot pull request with no owned-build proposal (reason foreign-commit) to a full review, admits a nested pip requirements lock as a manifest, and closes the dep-review-refused escalation issue. It carries this task's guards: an owned-build proposal keeps its route, and no fix round is dispatched onto the Dependabot branch.
+    One point of this record W1-T12955's builder may want: the hand-off row written once per head, naming the non-Dependabot commit. It is blocked, not queued, so dispatch does not build both.
+    reservation hand-off: run-unfiled-1794763854161 -> run-unfiled-1794763854161
+    Reserved with rmd next-task-id from a worktree at origin/main. Check refs/rmd-dispatch/W1-T12937 and any run branch before building. The test folder is the one rmd test-place computed for a stub importing dep-review.ts and the sweep test helper. W1-T12841 gives an unheld hand-built pull request the fix lane's rounds; it must keep excluding dependabot/ branches (criterion 3 here).

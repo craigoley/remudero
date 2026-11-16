@@ -392,12 +392,15 @@ const SEED_ROWS: readonly SeedRow[] = [
   {
     step: "github.budget.configured",
     meaning:
-      "At start, the daemon set its share of the GitHub App installation from the instance registry: " +
+      "At start, a process that reads with the GitHub App installation token set its share of the installation " +
+      "from the instance registry. role names the process: daemon, run_child or serve. The row gives " +
       "the consumer count and the registry it read (the host copy, else the checkout's copy when the host file is missing). " +
+      "A run child also gives share_divisor, the host worker budget that splits the run-child share; " +
+      "with no divisor it is 1 and divisor_reason is divisor_missing. " +
       "\"unconfigured\" names why there is no share (no installation id, an unreadable registry, no instance on the " +
       "installation); its reads are then paced as before. An instance found by neither RMD_INSTANCE_NAME nor the target " +
       "repo is \"unknown\", with instance_reason. Rotation keeps the row of each surviving boot.",
-    writer: ["startDaemonInstallationBudget"],
+    writer: ["startProcessInstallationBudget"],
     outcomes: ["configured", "unconfigured"],
   },
   {
