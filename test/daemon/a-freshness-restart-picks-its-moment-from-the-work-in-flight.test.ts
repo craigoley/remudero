@@ -16,6 +16,7 @@ import { setImmediate as flush } from "node:timers/promises";
 import { test, type TestContext } from "node:test";
 import { parse as parseYaml } from "yaml";
 
+import { freshnessRestartOpts } from "#src/cli/commands/daemon.js";
 import { runDaemon, type DaemonDeps, type DaemonOpts, type LightPassScope, type ReviewAdmissionGate } from "#src/lib/daemon.js";
 import { timeToLikelyFreshnessRestart } from "#src/lib/deploy-judge.js";
 import { loadPlan } from "#src/lib/plan.js";
@@ -400,7 +401,7 @@ test("W1-T12231 criterion 7: freshnessRestart has bounded rows likelyFraction 0.
   // The loaded rows drive the daemon, and its light pass asks the daemon's own admission: the fix round of 60 minutes
   // is longer than 24 2/3 minutes to the likely restart plus the 30-minute drain.
   const h = restartLanes(t, (unit) => [...reviewHistory(5 * unit, unit), ...fixHistory(60 * unit, unit)], { staleUnits: 30,
-    opts: { freshnessLikelyFraction: rows.likelyFraction, freshnessMaxDrainWaitMs: rows.maxDrainWaitMs } });
+    opts: freshnessRestartOpts(rows) });
   try {
     await h.stale(1);
     h.at(2);

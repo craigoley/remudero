@@ -967,12 +967,14 @@ function startBootPhases(clock: Pick<Clock, "now">, uptimeMs: number): BootPhase
 }
 
 /** W1-T12228: `plan/policy.yaml`'s `freshnessRestart` rows as the daemon's options, beside `sweepWallClockBoundMs`. */
-export function freshnessRestartOpts(rows: FreshnessRestartValues): Pick<DaemonOpts, "freshnessScoreLimit" | "freshnessStalenessHorizonMs" | "freshnessQuietWindowMs" | "freshnessMinLifetimeMs"> {
+export function freshnessRestartOpts(rows: FreshnessRestartValues): Pick<DaemonOpts, "freshnessScoreLimit" | "freshnessStalenessHorizonMs" | "freshnessQuietWindowMs" | "freshnessMinLifetimeMs" | "freshnessLikelyFraction" | "freshnessMaxDrainWaitMs"> {
   return {
     freshnessScoreLimit: rows.scoreLimit,
     freshnessStalenessHorizonMs: rows.stalenessHorizonMs,
     freshnessQuietWindowMs: rows.quietWindowMs,
     freshnessMinLifetimeMs: rows.minLifetimeMs,
+    ...(rows.likelyFraction === undefined ? {} : { freshnessLikelyFraction: rows.likelyFraction }),
+    ...(rows.maxDrainWaitMs === undefined ? {} : { freshnessMaxDrainWaitMs: rows.maxDrainWaitMs }),
   };
 }
 
