@@ -11,6 +11,53 @@ Remudero is built to run **unattended** (Standing rule 8: the loop never waits
 on you unless the plan says so), so most of this guide is about reading state,
 not driving it turn by turn.
 
+## A host's GitHub App for hand-lane reads (W1-T12188)
+
+Create these once for each host that needs its own GitHub request limit:
+
+1. Create an operator GitHub App with read access to contents, pull requests,
+   checks, actions and metadata. Keep it separate from the daemon's App.
+2. Install it on the fleet repositories. An installation has its own request
+   limit; one App has one installation per account. Two hosts needing separate
+   limits on the same account therefore need two Apps.
+3. Save its private key on the host as an absolute file path readable only by
+   the hand lane's account (directory mode 0700, key mode 0600).
+4. Add an entry to `state/github-credential-references.json` under the configured
+   Remudero root. Keep existing entries and put the App before fallback references
+   with the same scope. The file holds references, never tokens or key material:
+
+```json
+{
+  "references": [{
+    "scope": "*",
+    "kind": "app",
+    "name": "this-host-reader",
+    "app_id": "123456",
+    "installation_id": "987654",
+    "private_key_path": "/absolute/private/operator-app.pem",
+    "reads_only": true
+  }]
+}
+```
+
+Use a distinct reference name for each installation; `scope` can instead name
+one `owner/repo`. Restart `rmd gh-broker serve` after changing App references.
+The broker mints at startup and renews before expiry, holding tokens in memory.
+Run reads through `rmd gh -- <gh args>` to use it. A short command outside the
+broker holds no App token and continues through the existing fallback sources.
+Failed mints and unreadable keys also fall back; resolver attempts name the
+reference and cause. Writes skip a `reads_only` App reference and retain the
+operator's own login or other configured fallback.
+
+`rmd gh-broker status --since 1h` shows `credentials`: source, reference, host,
+request count in the window, and each observed limiter's remaining requests and
+`reset_ms` (Unix milliseconds). These are the latest response headers, not a new
+GitHub request; a limiter with no observed headers has no reading. Request log
+rows contain attribution and counts, never credential values. App pacing and
+cache identities use the reference instead of probing `gh api user`, which is
+unavailable to installation tokens. Pushes, pull request writes, merges, the
+daemon's App and scheduled shell jobs retain their existing setup.
+
 ## The commands (`rmd`, `bin/rmd`)
 
 For a strict no-change investigation, use the explicit inspection entry point:

@@ -260,7 +260,8 @@ const CLAUDE_MD_BASELINE = "scripts/claude-md-budget-baseline.json";
 const FIXTURE_COPY_BASELINE = "scripts/fixture-copy-baseline.json";
 const LEARNINGS_BASELINE = "scripts/learnings-budget-baseline.json";
 const PACKAGE_JSON = "package.json";
-/** The most population bytes one judgement reads from main's tip: under the 64 MiB stdout cap of one git call. */
+/** The most listed blob bytes one `git cat-file --batch` call reads: under the 64 MiB stdout cap of one git call.
+ *  W1-T12792: it bounds each call, not the population, which is read in parts. */
 const POPULATION_BYTES_BOUND = 48 * 1024 * 1024;
 
 /** The fixture-copy census's own population: every test/**\/*.test.ts but test/fixtures/** and the census suite. */
@@ -594,9 +595,10 @@ export function parseBlobBatchAllowingMissing(raw: string, paths: readonly strin
 const inPopulation = (path: string): boolean => CLOCK_SCOPE_RE.test(path) || isFixtureCopyPath(path) || isShardPath(path);
 const inReachTree = (path: string): boolean => REACH_CODE_RE.test(path) as boolean;
 
-/** `git ls-tree -r -l -z` rows in one scope: regular blobs only, as the census walks see them. */
-function parsePopulationListing(raw: string, inScope: (path: string) => boolean): { paths: string[]; bytes: number } | { error: string } {
+/** `git ls-tree -r -l -z` rows in one scope: regular blobs only, as the census walks see them, with each one's size. */
+function parsePopulationListing(raw: string, inScope: (path: string) => boolean): { paths: string[]; bytes: number; sizes: Map<string, number> } | { error: string } {
   const paths: string[] = [];
+  const sizes = new Map<string, number>();
   let bytes = 0;
   for (const record of raw.split("\0")) {
     if (record === "") continue;
@@ -605,9 +607,27 @@ function parsePopulationListing(raw: string, inScope: (path: string) => boolean)
     const [, mode, type, size, path] = m as unknown as [string, string, string, string, string];
     if (type !== "blob" || mode === "120000" || !inScope(path)) continue;
     paths.push(path);
+    sizes.set(path, Number(size));
     bytes += Number(size);
   }
-  return { paths, bytes };
+  return { paths, bytes, sizes };
+}
+
+/** W1-T12792 — `paths` in listing order, cut into parts whose listed sizes add up to at most the bound of one call.
+ *  A blob past the bound on its own cannot be read by any call: it is named instead. */
+function populationParts(paths: readonly string[], sizes: ReadonlyMap<string, number>): string[][] | { oversized: string } {
+  const parts: string[][] = [];
+  let part: string[] = [];
+  let bytes = 0;
+  for (const path of paths) {
+    const size = sizes.get(path) ?? 0;
+    if (size > POPULATION_BYTES_BOUND) return { oversized: `${path} is ${size} bytes, past the ${POPULATION_BYTES_BOUND}-byte bound of one read` };
+    if (part.length > 0 && bytes + size > POPULATION_BYTES_BOUND) { parts.push(part); part = []; bytes = 0; }
+    part.push(path);
+    bytes += size;
+  }
+  if (part.length > 0) parts.push(part);
+  return parts;
 }
 
 function* git(run: PlanSafetyGit, args: readonly string[], stdin?: string): Steps<PlanSafetyGitResult> {
@@ -665,6 +685,17 @@ export function* readMergedRatchetInputsSteps(
       if (res.status !== 0) throw new Error(failed("git cat-file --batch", res));
       return parseBlobBatchAllowingMissing(res.stdout, paths);
     };
+    // W1-T12792: one call per part into `into`; a failed part is the reason, and `into` then holds no path of the scope.
+    const readParts = function* (rev: string, parts: readonly string[][], into: Map<string, string | null>, read: Set<string>): Steps<string | undefined> {
+      const got = new Map<string, string | null>();
+      for (const [i, part] of parts.entries()) {
+        const res = yield* git(run, ["cat-file", "--batch"], part.map((p) => `${rev}:${p}`).join("\n") + "\n");
+        if (res.status !== 0) return `part ${i + 1} of ${parts.length}: ${failed("git cat-file --batch", res)}`;
+        for (const [p, text] of parseBlobBatchAllowingMissing(res.stdout, part)) got.set(p, text);
+      }
+      for (const [p, text] of got) { into.set(p, text); read.add(p); }
+      return undefined;
+    };
     const mergedKeyed = yield* readBatch(tree, PATH_KEYED_BASELINES);
     const mainKeyed = yield* readBatch(mainSha, PATH_KEYED_BASELINES);
     const baselines = new Map(PATH_KEYED_BASELINES.map((p) => [p, [mergedKeyed.get(p) ?? null, mainKeyed.get(p) ?? null]] as const));
@@ -672,22 +703,26 @@ export function* readMergedRatchetInputsSteps(
     // The population gates read every file in their scope, but only when the merge lands one: an
     // unchanged file is the same blob on both trees, so it is read once, at main.
     let population: { populationFiles: string[] } | { populationUnread: string } | Record<string, never> = {};
-    let mainOnly: string[] = [];
+    let mainOnly: string[][] = [];
     const roots = populationRoots([...landing]);
+    const scope = `the ${roots.join(" and ")} population`;
     if (roots.length > 0) {
       const sized = yield* git(run, ["ls-tree", "-r", "-l", "-z", tree, "--", ...roots]);
       const parsed = sized.status === 0 ? parsePopulationListing(sized.stdout, inPopulation) : { error: failed("git ls-tree -l", sized) };
+      const parts = "error" in parsed ? undefined : populationParts(parsed.paths, parsed.sizes);
       if ("error" in parsed) population = { populationUnread: parsed.error };
-      else if (parsed.bytes > POPULATION_BYTES_BOUND) population = { populationUnread: `the ${roots.join(" and ")} population is ${parsed.bytes} bytes, past the ${POPULATION_BYTES_BOUND}-byte bound` };
+      else if (!Array.isArray(parts)) population = { populationUnread: `${scope} file ${parts!.oversized}` };
       else {
         population = { populationFiles: parsed.paths };
         const readSet = new Set(paths);
-        mainOnly = parsed.paths.filter((p) => !readSet.has(p));
+        mainOnly = parts.map((part) => part.filter((p) => !readSet.has(p))).filter((part) => part.length > 0);
       }
     }
     const mergedBlobs = yield* readBatch(tree, paths);
-    const mainBlobs = yield* readBatch(mainSha, [...paths, ...mainOnly]);
-    const sameOnBoth = new Set(mainOnly);
+    const mainBlobs = yield* readBatch(mainSha, paths);
+    const sameOnBoth = new Set<string>();
+    const partFailed = yield* readParts(mainSha, mainOnly, mainBlobs, sameOnBoth);
+    if (partFailed !== undefined) population = { populationUnread: `${scope}, ${partFailed}` };
     const reader = (blobs: Map<string, string | null>) => (path: string): string | null => {
       if (blobs.has(path)) return blobs.get(path)!;
       if (sameOnBoth.has(path)) return mainBlobs.get(path)!;
@@ -700,12 +735,13 @@ export function* readMergedRatchetInputsSteps(
     if (reachMoves([...landing], readMerged, readMain)) {
       const sized = yield* git(run, ["ls-tree", "-r", "-l", "-z", tree, "--", "src", "scripts", "bin", "test"]);
       const parsed = sized.status === 0 ? parsePopulationListing(sized.stdout, inReachTree) : { error: failed("git ls-tree -l", sized) };
+      const parts = "error" in parsed ? undefined : populationParts(parsed.paths, parsed.sizes);
       if ("error" in parsed) reach = { reachUnread: parsed.error };
-      else if (parsed.bytes > POPULATION_BYTES_BOUND) reach = { reachUnread: `the code tree is ${parsed.bytes} bytes, past the ${POPULATION_BYTES_BOUND}-byte bound` };
+      else if (!Array.isArray(parts)) reach = { reachUnread: `the code tree file ${parts!.oversized}` };
       else {
-        const extra = parsed.paths.filter((p) => !mainBlobs.has(p));
-        if (extra.length > 0) for (const [p, text] of yield* readBatch(mainSha, extra)) { mainBlobs.set(p, text); sameOnBoth.add(p); }
-        reach = { reachFiles: parsed.paths };
+        const extra = parts.map((part) => part.filter((p) => !mainBlobs.has(p))).filter((part) => part.length > 0);
+        const extraFailed = yield* readParts(mainSha, extra, mainBlobs, sameOnBoth);
+        reach = extraFailed === undefined ? { reachFiles: parsed.paths } : { reachUnread: `the code tree, ${extraFailed}` };
       }
     }
     return { mainSha, headSha, changed: [...changed].sort(), measuredFiles, readMerged, readMain,

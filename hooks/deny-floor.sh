@@ -1710,6 +1710,25 @@ if [ -n "$cmd" ] && invokes_gh "$cmd"; then
           printf '  `gh api rate_limit` still reads 5000/5000. Report what you already know and stop -- a wait\n' >&2
           printf '  is the operator to schedule. Writes (create/merge/review/POST) are never refused, and\n' >&2
           printf '  `gh api rate_limit` is exempt. Deliberate burst: RMD_GH_COOLDOWN_S=0, a choice on the record.\n' >&2
+          # W1-T12938: 2026-11-11 to 11-15 the Mac broker was down for four days, every session shared this one
+          # slot, and the refusal never named the cause. One more line, only when this account has a broker
+          # directory whose heartbeat is stale (this branch never runs with a live one): the state, the
+          # heartbeat's age and the installer that restores it. Nothing is started from here. gh_hb_mtime
+          # defaults because the heartbeat may have appeared since the liveness read, under `set -u`.
+          if [ -d "$gh_broker_dir" ] && [ -f "$gh_broker_dir/heartbeat" ]; then
+            gh_down_for="an unknown time"
+            if [ "${gh_hb_mtime:-0}" -gt 0 ] && [ "$gh_now" -ge "${gh_hb_mtime:-0}" ]; then
+              gh_down_s=$(( gh_now - gh_hb_mtime ))
+              if [ "$gh_down_s" -ge 86400 ]; then gh_down_for="$(( gh_down_s / 86400 ))d $(( gh_down_s % 86400 / 3600 ))h"
+              elif [ "$gh_down_s" -ge 3600 ]; then gh_down_for="$(( gh_down_s / 3600 ))h $(( gh_down_s % 3600 / 60 ))m"
+              elif [ "$gh_down_s" -ge 60 ]; then gh_down_for="$(( gh_down_s / 60 ))m $(( gh_down_s % 60 ))s"
+              else gh_down_for="${gh_down_s}s"; fi
+            fi
+            gh_installer="deploy/mac/install-gh-read-broker.sh"
+            gh_hook_root="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd -P || true)"
+            if [ -n "$gh_hook_root" ] && [ -f "$gh_hook_root/$gh_installer" ]; then gh_installer="$gh_hook_root/$gh_installer"; fi
+            printf '  The read broker installed for this account is DOWN: its last heartbeat was %s ago, so every session shares this floor. Restore it: bash %s\n' "$gh_down_for" "$gh_installer" >&2
+          fi
           exit 2
         fi
       fi

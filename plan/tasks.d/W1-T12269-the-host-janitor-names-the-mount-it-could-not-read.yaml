@@ -17,7 +17,7 @@
     - deploy/rmd-host-cleanup.sh
     - test/deploy/the-host-janitor-names-the-mount-it-could-not-read.test.ts
     - test/deploy/the-janitor-keeps-mounted-files-through-housekeeping.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "When the janitor cannot read the identity of a path, its line names the path whose read failed, whether that path is a container mount source or the candidate or a parent of the candidate, the container when there is one, and the error text of the read"

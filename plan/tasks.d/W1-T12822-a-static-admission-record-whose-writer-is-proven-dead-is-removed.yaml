@@ -1,0 +1,61 @@
+- id: W1-T12822
+  title: A static admission record whose writer a waiter proves dead is removed, so a waiter in another pid namespace stops counting its memory peak
+  repo: remudero
+  depends_on: []
+  priority: 0.6
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # src/lib/test-slot.ts admitStaticWork decides how much memory every static preflight stage waits for; removing a live writer's record would let two cold static stages run past the host's memory
+  band_meaning: blast-radius
+  origin: operator ruling 2026-11-15 "Move those 28 aside" (operator session, stale static admission records)
+  plan_refs:
+    - W1-T12504
+    - W1-T11809
+    - W1-T9952
+    - W1-T11925
+  files:
+    - src/lib/test-slot.ts
+    - test/ci/suites/a-static-admission-record-whose-writer-is-proven-dead-is-removed.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: A static record on the waiter's own host and pid namespace whose writer pid is gone, or whose pid now has a different kernel start time, is removed by the admitStaticWork scan, its peak is not counted, and one test_slot.static_record_removed line names the record, its label, its pid and the rung own-namespace
+      proof: "grep: W1-T12822 criterion 1 in test/ci/suites/a-static-admission-record-whose-writer-is-proven-dead-is-removed.test.ts"
+    - claim: A waiter in the initial pid namespace (a single NSpid entry) on the same boot id removes a static record from any other host name or pid namespace when a complete scan of /proc/<pid>/stat finds no process whose start time equals the record's processStart, logging the rung boot-start-scan
+      proof: "grep: W1-T12822 criterion 2 in test/ci/suites/a-static-admission-record-whose-writer-is-proven-dead-is-removed.test.ts"
+    - claim: "invariant:no-removal-without-proof — a static record is kept and its peak still counted when any process has its recorded start time, when any /proc stat entry was unreadable or the scan ran past its bound, when the waiter is not in the initial pid namespace, when the record has no processStart or no bootId, or when the boot ids differ (that record stays dead by boot id as today, and is not removed)"
+      proof: "grep: W1-T12822 criterion 3 in test/ci/suites/a-static-admission-record-whose-writer-is-proven-dead-is-removed.test.ts"
+    - claim: A record that changed between the judgement and the unlink (its inode, size, mtime or content differ) is not removed and stays counted, and a removal that fails with ENOENT is not an error
+      proof: "grep: W1-T12822 criterion 4 in test/ci/suites/a-static-admission-record-whose-writer-is-proven-dead-is-removed.test.ts"
+    - claim: The waiter's own record, a live ancestor's record and slot-N.json records are never removed by this path
+      proof: "grep: W1-T12822 criterion 5 in test/ci/suites/a-static-admission-record-whose-writer-is-proven-dead-is-removed.test.ts"
+  rationale: |
+    OBSERVED 2026-11-15 (Azure host, operator session): /mnt/scratch/rmd/test-slots held 35 static-<uuid>.json admission records. Only 1 belonged to a live process.
+    Each record named memoryBytes of 3328 MiB. Every author static stage waited the full TEST_SLOT_WAIT_BOUND_MS (45 min, logged as test_slot.static_wait_bound_exceeded with waitedMs 2702293 and 2700717), even though the host had about 18 to 22 GB of headroom.
+    The dead records:
+    - 28 were written by host sessions from 11-03 to 11-14, in the initial pid namespace with host name Remudero.
+    - 6 were written by containers from 10-28 to 11-14 (pid namespaces 4026532398, 4026532753 and 4026532399).
+    - All carried this boot's id, a0b7b4ed. None had a live process with its recorded kernel start time; the scan read /proc/<pid>/stat for 310 of 313 processes.
+    - Positive control: each live preflight's record read LIVE, with its recorded processStart equal to /proc/<pid>/stat field 22.
+    With the operator's approval the 34 dead records were moved by exact name to ~/rmd-work/stale-static-holders-<ts>/ (checksummed, reversible).
+    READ at origin/main 0049c6644, src/lib/test-slot.ts:
+    - admitStaticWork's scan skips a record only when testSlotHolderStale says dead. It never removes one, and a writer removes its own record only in a process exit handler. A SIGKILL, a timeout kill or a container that ends leaves the record behind indefinitely.
+    - testSlotHolderStale judges a record from another host name or pid namespace by boot id alone. An equal boot id is never dead (W1-T11809), so from inside the fleet container every dead host record counts as live, and from the host every dead container record counts as live.
+    - W1-T12504 (#18554, merged 11-15) proves a SLOT record's namespace ended. It does not touch the static scan, and its scan returns unknown when any /proc/<pid>/ns/pid link is unreadable. On this host 229 of 312 links are unreadable to the operator uid (other-uid processes), so it would not free these records either.
+    The kernel start time in /proc/<pid>/stat is counted from boot on one clock for every pid namespace. On the same boot id, the absence of that start time from a complete host-wide scan is a positive proof that the writer ended. It needs no namespace links.
+  design: |
+    1. In admitStaticWork's scan (src/lib/test-slot.ts), for a static record (STATIC_RECORD, never SLOT_RECORD, never ownName), judge removal after the existing reads:
+       a. own-namespace rung: same host and same pid namespace, and testSlotHolderStale returns dead through isHolderStale (pid gone, or start time differs).
+       b. boot-start-scan rung: the waiter's /proc/self/status NSpid has one entry (initial pid namespace), the record's bootId equals the waiter's, the record has a proc:<n> processStart, and a bounded scan (about 2 s, the bound W1-T12504's probe uses) reads every /proc/<pid>/stat. It finds no start time equal to n, with no unreadable entry other than ENOENT/ESRCH (a process that exited mid-scan).
+    2. Remove only when the record is unchanged: lstat dev, ino, size and mtime, plus the raw text, equal to what was judged. Then unlink. ENOENT is success. Log one {"step":"test_slot.static_record_removed", name, label, pid, pidNs, host, rung, reason} line through the scan's log.
+    3. A record that fails any rung keeps today's handling: it is skipped when testSlotHolderStale says dead, and counted otherwise.
+    INVARIANT no-removal-without-proof: every path that cannot prove the writer ended (a live start time, an incomplete or unbounded scan, a waiter outside the initial namespace, a record with no processStart or no bootId, a different boot id) leaves the record in place, with exactly today's count or skip.
+    Inject the /proc readers and the NSpid reading through TestSlotOptions, as W1-T12504 injects its probe, so the test needs no real foreign namespace. One test must call the real default scan on Linux, with a record naming a start time no process has.
+    NOT IN SCOPE: the 45-minute wait bound, slot-N.json reclaim (W1-T12504 and W1-T11809), the per-stage memoryBytes estimate, darwin, and records from another boot. Those stay skipped as today, and removing them is a follow-up if they are observed to accumulate.
+  falsifier: |
+    Remove the boot-start-scan rung and criterion 2 must fail. Remove a record without the unchanged check and criterion 4 must fail. Treat an unreadable stat entry as absent and criterion 3 must fail. Restore and all pass.
+  note: |
+    reservation hand-off: run-unfiled-1794719215383 -> run-unfiled-1794719215383
+    Reserved with rmd next-task-id from the operator checkout. Check refs/rmd-dispatch/W1-T12822 and any run branch before building. Test folder follows W1-T12504's test/ci/suites/ placement for test-slot.ts suites; confirm with rmd test-place once the file exists.

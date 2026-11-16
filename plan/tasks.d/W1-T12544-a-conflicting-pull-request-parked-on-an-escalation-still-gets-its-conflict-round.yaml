@@ -22,7 +22,7 @@
     - src/cli/commands/fix.ts
     - test/a-stood-down-fix-rung-re-derives-its-remedy.test.ts
     - test/a-conflict-escalation-whose-cause-has-cleared-does-not-hold-the-repair.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A PR that dispositions conflicted with captured conflict evidence and has a terminal design handoff at its head gets a conflict round. The sweep.disposed row keeps the disposition conflicted and records design_hold_kept true"

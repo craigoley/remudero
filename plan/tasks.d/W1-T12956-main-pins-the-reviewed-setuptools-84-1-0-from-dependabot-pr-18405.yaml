@@ -1,0 +1,69 @@
+- id: W1-T12956
+  title: "Main pins the reviewed setuptools 84.1.0 from Dependabot PR #18405, and the PR and its escalations close"
+  repo: remudero
+  depends_on: []
+  priority: 1.6
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # moves one hash-locked build dependency of the Semgrep security scanner; the runtime qualification gates it
+  origin: "operator-session#no-pr-waits-on-the-operator-2026-11-15"
+  plan_refs:
+    - W1-T12492
+    - W1-T12716
+    - W1-T12823
+    - W1-T12955
+  files:
+    - .github/semgrep/build-requirements.txt
+    - test/review/semgrep-dependency-bumps-14094.test.ts
+    - test/semgrep-native-install.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "The Semgrep build lock pins the reviewed wheel: setuptools 84.1.0 with the one SHA-256 that PR #18405 proposes"
+      proof: "grep: setuptools==84[.]1[.]0 --hash=sha256:5231689c6ac8156cd155cfb98c3fd6fb252c3e7e9bd3d78b64d3c55f132624c9 in .github/semgrep/build-requirements.txt"
+    - claim: "The 14094 bump test asserts the adopted setuptools version and hash against the reviewed evidence, as #18405's diff of that file does"
+      proof: "grep: W1-T12956 criterion 2 in test/review/semgrep-dependency-bumps-14094.test.ts"
+    - claim: "invariant:native-qualification — the native install suite follows the 84.1.0 lock and keeps every exact-artifact, provenance and qualification control; the hosted semgrep-runtime-compatibility and Semgrep OSS checks pass on the PR"
+      kind: guard
+      proof: "grep: W1-T12956 criterion 3 in test/semgrep-native-install.test.ts"
+  rationale: |
+    WHY: Dependabot PR #18405 has waited over 43 h for the operator although its checks are green. The dep-review
+    lane refuses it (its lock is outside the manifest allowlist, W1-T12955) and its owned-build proposal is not
+    filed because the head carries repair commits. The change itself is small and already qualified. Landing the
+    same diff by hand ends the wait without changing any rule.
+    MEASURED, 2026-11-15 about 18:25Z:
+    - gh pr view 18405: OPEN, MERGEABLE, created 2026-11-13 22:56Z. Files: .github/semgrep/build-requirements.txt
+      (+1 -1), test/review/semgrep-dependency-bumps-14094.test.ts (+9 -3), test/semgrep-native-install.test.ts
+      (+8 -5).
+    - gh pr diff 18405: setuptools==84.0.0 (sha256 51a52592...c670) becomes setuptools==84.1.0 --hash=sha256:
+      5231689c6ac8156cd155cfb98c3fd6fb252c3e7e9bd3d78b64d3c55f132624c9.
+    - gh pr checks 18405: 66 pass, 15 skipping, none failing; semgrep-runtime-compatibility pass, Semgrep OSS pass.
+    - Core ledger 2026-11-14 18:15Z to 2026-11-15 18:16Z: 11 dep-review.decided refuse rows and 10
+      dep-review.refused_path.not_proposed rows (reason foreign-commit) for #18405.
+    - Issue #18409 ([BLOCKED] dep-review-refused-PR18405) is open with needs-human; issue #18412 (a stage-stall
+      clarification for #18405) is open.
+    READ at origin/main 57ca3bba9: .github/semgrep/build-requirements.txt pins setuptools==84.0.0. W1-T12716
+    (merged, #18607) admits the reviewed 84.1.0 wheel in the runtime auditor; W1-T12492's merged commit 4ac845f88
+    validates the reviewed lock pin. W1-T12492 itself is held from dispatch (a needs-operator-input refusal whose
+    precondition, the auditor trust update on main, has since merged), and its plan writes to #18405's branch.
+    This task lands the same lock move on main instead and leaves #18405's branch alone.
+    FALSIFIER: if the hosted semgrep-runtime-compatibility check fails on this PR while it passed on #18405 with
+    the same three files, main has moved under the lock, and the lock move needs W1-T12492's full qualification.
+  design: |
+    INVARIANT native-qualification: no qualification control changes; only the lock line and the two tests that
+    follow it move.
+    1. Apply #18405's diff of the three files to a branch off origin/main, exactly. If main has changed either test
+       file since #18405 branched, keep main's change and apply only the version and hash lines of #18405.
+    2. Title the changed tests with the criterion markers W1-T12956 criterion 2 and W1-T12956 criterion 3.
+    3. After the merge (an operational step, not a criterion: a verify:auto task has no proof form for it), the
+       builder closes #18405 with a comment naming the merged PR, and closes #18409 and #18412 with the same link.
+    NOT IN SCOPE: the OpenTelemetry API move (W1-T12492 keeps it refused); the dep-review route (W1-T12955).
+  falsifier: |
+    Put setuptools 84.0.0 back in the lock: criteria 1, 2 and 3 must fail. Change one hex digit of the hash: the
+    native install suite and the hosted semgrep-runtime-compatibility check must fail. Restore and require all to
+    pass.
+  note: |
+    Id reserved for run-unfiled-1794767168000 with ~/rmd-work/bin/reserve-id.sh.
+    A hand build by the session lead.

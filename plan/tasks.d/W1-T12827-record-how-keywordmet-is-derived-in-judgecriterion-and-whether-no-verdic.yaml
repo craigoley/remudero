@@ -19,7 +19,7 @@
   origin: followup:W1-T12146-1794745744727:2026-11-15T12:33:16.415Z:1
   rationale: >-
     From the 2026-11-15 follow-up on W1-T12146-1794745744727, ratified via rmd approve:
-  
+
     follow-up harvest [research]: how `keywordMet` is derived in `judgeCriterion` (lines
     4483–4830). Criterion 3's "none" value depends on whether "no verdict" can be told apart from
     "unmet". — from W1-T12146 (run W1-T12146-1794745744727, head

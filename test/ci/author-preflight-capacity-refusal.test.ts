@@ -95,7 +95,7 @@ test('W1-T12297 criterion 2: a refusal before static-preflight says author work 
   const status = main([], {root: fixture.dir,
     select: () => ({fullRun: false, suites: ['test/a.test.ts'], reasons: ['physical fixture']}),
     admitHost: (stage, workload) => requireMacAuthorCapacity(fixture.dir, stage, readAdmission,
-      {...workload, selection: 'full-fallback'})});
+      {...workload, selection: 'a-selection-nobody-measured'})});
   t.mock.restoreAll();
   const receipt = JSON.parse(readFileSync(join(fixture.dir, 'coverage/preflight-author.json'), 'utf8'));
   assert.equal(status, 3, JSON.stringify(receipt.error));

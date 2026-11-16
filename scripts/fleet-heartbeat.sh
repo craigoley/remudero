@@ -1052,6 +1052,66 @@ MEM_STATE_FILE="${RMD_ROOT}/state/heartbeat-mem.txt"
 MEM_LINES=""
 MEM_RUNTIME="${RMD_HEARTBEAT_DOCKER:-docker}"
 MEM_CONTAINERS="$("$MEM_RUNTIME" ps --no-trunc --format '{{.ID}} {{.Names}}' 2>/dev/null | awk 'NF == 2 && $2 ~ /^remudero-.*daemon$/')" || MEM_CONTAINERS=""
+
+# Resolve only runtime mounts, never a registry's planned placement or the host install.
+# The longest destination wins: a code bind can override the parent state-volume bind.
+rmd_mounted_tree() {
+  local mounts src dest tree="" best=0 code=/home/node/Remudero/remudero
+  mounts="$("$MEM_RUNTIME" inspect "$1" --format '{{range .Mounts}}{{printf "%s\t%s\n" .Source .Destination}}{{end}}' 2>/dev/null)" || return 1
+  while IFS=$'\t' read -r src dest; do
+    case "$src" in /*) : ;; *) continue ;; esac
+    case "$dest" in /*) : ;; *) continue ;; esac
+    dest="${dest%/}"
+    case "$code" in
+      "$dest"|"$dest"/*)
+        if [ -z "$tree" ] || [ "${#dest}" -gt "$best" ]; then
+          tree="${src%/}${code#"$dest"}"; best="${#dest}"
+        fi ;;
+    esac
+  done <<EOF_RMD_MOUNTS
+$mounts
+EOF_RMD_MOUNTS
+  [ -n "$tree" ] || return 1
+  printf '%s' "$tree"
+}
+
+RMD_INSTANCE_LINES=""
+if [ -n "$MEM_CONTAINERS" ]; then
+  _rmd_issues=""; _rmd_broken=0
+  while read -r _rmd_id _rmd_name; do
+    [ -n "$_rmd_name" ] || continue
+    _rmd_tsx=unknown; _rmd_entries=unknown
+    if _rmd_tree="$(rmd_mounted_tree "$_rmd_name")" && [ -d "$_rmd_tree" ] && [ -r "$_rmd_tree" ] && [ -x "$_rmd_tree" ]; then
+      if [ ! -e "$_rmd_tree/node_modules" ]; then
+        _rmd_entries=0
+      elif _rmd_listing="$(ls -1A "$_rmd_tree/node_modules" 2>/dev/null)"; then
+        _rmd_entries=0
+        [ -z "$_rmd_listing" ] || _rmd_entries="$(printf '%s\n' "$_rmd_listing" | wc -l | tr -d ' ')"
+      fi
+      if [ "$_rmd_entries" != unknown ]; then
+        if [ -x "$_rmd_tree/node_modules/.bin/tsx" ]; then _rmd_tsx=yes; else _rmd_tsx=no; fi
+      fi
+    else
+      _rmd_tree="${_rmd_tree:-unknown}"
+    fi
+    if [ "$_rmd_tsx" = no ]; then
+      _rmd_broken=1
+      _rmd_issues="${_rmd_issues}${_rmd_name} tree ${_rmd_tree}: tsx missing (${_rmd_entries} node_modules entries); "
+    elif [ "$_rmd_tsx" = unknown ]; then
+      _rmd_issues="${_rmd_issues}${_rmd_name} tree ${_rmd_tree}: unknown; "
+    fi
+    RMD_INSTANCE_LINES="${RMD_INSTANCE_LINES}
+rmd_${_rmd_name}_tree=${_rmd_tree}
+rmd_${_rmd_name}_tsx=${_rmd_tsx}
+rmd_${_rmd_name}_node_modules_entries=${_rmd_entries}"
+  done <<EOF_RMD_CONTAINERS
+$MEM_CONTAINERS
+EOF_RMD_CONTAINERS
+  if [ "$_rmd_broken" = 1 ]; then RMD_VERDICT="BROKEN: ${_rmd_issues%; }"
+  elif [ -n "$_rmd_issues" ]; then RMD_VERDICT="unknown: ${_rmd_issues%; }"
+  else RMD_VERDICT=ok; fi
+fi
+
 if [ -n "$MEM_CONTAINERS" ]; then
   # name -> the MemoryHigh annotation the launcher started it with ("uint64 <bytes>").
   # shellcheck disable=SC2046 # one argument per container name, by design
@@ -1584,6 +1644,8 @@ rmd_verdict=${RMD_VERDICT}
 tsx_present=${TSX_PRESENT}
 node_modules_entries=${NODE_MODULES_ENTRIES}
 install_dir=${INSTALL_DIR}
+host_install_dir=${INSTALL_DIR}
+host_install_tsx=${TSX_PRESENT}${RMD_INSTANCE_LINES}
 install_head_sha=${INSTALL_SHA}
 runtime_contract_verdict=${RUNTIME_HEALTH_VERDICT}
 gc_verdict=${GC_VERDICT}

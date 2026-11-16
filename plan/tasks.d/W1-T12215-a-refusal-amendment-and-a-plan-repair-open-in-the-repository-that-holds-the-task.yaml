@@ -18,7 +18,7 @@
     - src/lib/sweep.ts
     - src/lib/refusal-amendment.ts
     - test/fix-lane/a-refusal-amendment-and-a-plan-repair-open-in-the-repository-that-holds-the-task.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A refusal amendment for a task that the ops catalog holds reads the task file from the ops checkout and opens its amendment in the ops repository"

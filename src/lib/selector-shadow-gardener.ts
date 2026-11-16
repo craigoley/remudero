@@ -15,7 +15,10 @@ import { ledgerRotationDigests, readLedgerUnionRecordsSync } from "./ledger-unio
 import { linkWorktreeNodeModules } from "./worker.js";
 import { loadPlan, newTestPath, SELECTOR_SHADOW_MISS_TEST_PATH } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
-import { machineShardHeaderLines, machineShardLandingGuard } from "./machine-filing.js";
+import {
+  machineShardDesign, machineShardHeaderLines, machineShardInvariantClaims, machineShardLandingGuard, machineShardLintRefusal,
+  type MachineShardInvariants,
+} from "./machine-filing.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
 import { sameTestFile } from "./test-path-resolver.js";
 
@@ -1423,13 +1426,26 @@ export function selectorShadowCauseOf(origin: string | undefined): string | unde
 /** Where a narrow edge repair's regression test lives; plan.ts owns it so admission parks the same shape. */
 export { SELECTOR_SHADOW_MISS_TEST_PATH };
 
+/** W1-T12833: what both selector repairs must keep. A repair that narrows the selector hides the next failure. */
+function selectorKeepsItsSelections(proof: string): MachineShardInvariants {
+  return { declared: [{ slug: "selector-keeps-its-selections",
+    statement: "every suite the selector already selects for a changed path is still selected; the repair adds coverage and takes none away.",
+    claim: "a suite the selector selected for a changed path before the repair is still selected for that path after it", proof }] };
+}
+
+const invariantClaimLines = (invariants: MachineShardInvariants): string[] =>
+  machineShardInvariantClaims(invariants).flatMap((c) => [`    - claim: ${JSON.stringify(c.claim)}`, `      proof: ${JSON.stringify(c.proof)}`]);
+
 /** A parked plan task names the missed suite and the first observed changed paths into it, without
  *  guessing imports. */
 export function selectorShadowMissTask(miss: SelectorShadowMiss, taskId: string, changedPaths: readonly string[] = []): string {
   const origin = selectorShadowCauseOrigin(miss.file);
   const edge = `${changedPaths.length ? changedPaths.join(", ") : miss.headSha} -> ${miss.file}`;
   const proofTitle = `${taskId}: the selector covers the recorded suite for every recorded edge`;
+  // W1-T13035: one proof behind both claims is shared-proof, which the plan preflight blocks on a new shard.
+  const replayTitle = `${taskId}: the shadow record reads the recorded suite as selected for every recorded edge`;
   const files = ["src/lib/affected-suites.ts", SELECTOR_SHADOW_MISS_TEST_PATH];
+  const invariants = selectorKeepsItsSelections(`unit test: ${taskId}: the selector still selects every suite it selected before the repair`);
   const q = JSON.stringify;
   return [
     `- id: ${taskId}`,
@@ -1440,13 +1456,14 @@ export function selectorShadowMissTask(miss: SelectorShadowMiss, taskId: string,
     ...machineShardHeaderLines(files),
     `  origin: ${q(origin)}`,
     `  files: [${files.join(", ")}]`,
-    `  design: ${q(`Exercise the selector for the exact recorded suite ${miss.file} on every recorded input edge: ${edge}. The regression named "${proofTitle}" must call the selector and assert that exact suite is selected for every edge. Observation: coverage run ${miss.runId}, head ${miss.headSha}, base ${miss.baseSha ?? "unknown"}${miss.prNumber ? `, PR #${miss.prNumber}` : ""}. A filename-only assertion is not the requested repair.`)}`,
-    `  note: ${q(`W1-T4439 first observed a ${miss.selection} miss on coverage run ${miss.runId}${miss.prNumber ? ` for PR #${miss.prNumber}` : ""} at ${miss.headSha}: ${edge}. The failing shard concluded failure, so its retry did not recover it. The changed paths are candidate missing edges, not guessed import edges. Later misses of the same suite are ledgered as selector-shadow.miss_evidence rows naming this task rather than filed again. Add a test named "${proofTitle}" in ${SELECTOR_SHADOW_MISS_TEST_PATH} that calls the selector and asserts ${miss.file} is selected for each recorded edge: diff-coverage blocks an edge no test exercises.`)}`,
+    `  design: ${q(machineShardDesign(`Exercise the selector for the exact recorded suite ${miss.file} on every recorded input edge: ${edge}. The regression named "${proofTitle}" must call the selector and assert that exact suite is selected for every edge. The replay named "${replayTitle}" must pass each of those selections to shadowRecord with that suite as the failed file and assert its ${miss.selection} verdict reads selected, where the observed run read missed. Observation: coverage run ${miss.runId}, head ${miss.headSha}, base ${miss.baseSha ?? "unknown"}${miss.prNumber ? `, PR #${miss.prNumber}` : ""}. A filename-only assertion is not the requested repair.`, invariants))}`,
+    `  note: ${q(`W1-T4439 first observed a ${miss.selection} miss on coverage run ${miss.runId}${miss.prNumber ? ` for PR #${miss.prNumber}` : ""} at ${miss.headSha}: ${edge}. The failing shard concluded failure, so its retry did not recover it. The changed paths are candidate missing edges, not guessed import edges. Later misses of the same suite are ledgered as selector-shadow.miss_evidence rows naming this task rather than filed again. Add a test named "${proofTitle}" in ${SELECTOR_SHADOW_MISS_TEST_PATH} that calls the selector and asserts ${miss.file} is selected for each recorded edge: diff-coverage blocks an edge no test exercises. Beside it add a test named "${replayTitle}" that replays each recorded edge through shadowRecord and asserts ${miss.file} reads selected.`)}`,
     "  acceptance:",
     `    - claim: ${q(`the ${miss.selection} selector includes the recorded missed suite when each recorded edge is exercised`)}`,
     `      proof: ${q(`unit test: ${proofTitle}`)}`,
-    `    - claim: ${q(`a regression test calls the selector and asserts the recorded missed suite is selected for each recorded edge`)}`,
-    `      proof: ${q(`unit test: ${proofTitle}`)}`,
+    `    - claim: ${q(`the shadow record that reported the miss reads the recorded missed suite as selected when each recorded edge is replayed through the selector`)}`,
+    `      proof: ${q(`unit test: ${replayTitle}`)}`,
+    ...invariantClaimLines(invariants),
     "",
   ].join("\n");
 }
@@ -1462,6 +1479,7 @@ export function selectorShadowStructuralTask(file: string, taskId: string, edges
   const testPath = selectorShadowStructuralTestPath(file);
   const proofTitle = `${taskId}: the selector structurally covers every recorded edge`;
   const files = ["src/lib/affected-suites.ts", testPath];
+  const invariants = selectorKeepsItsSelections(`unit test: ${taskId}: the structural rule still selects every suite the selector selected before`);
   const q = JSON.stringify;
   return [
     `- id: ${taskId}`,
@@ -1472,11 +1490,12 @@ export function selectorShadowStructuralTask(file: string, taskId: string, edges
     ...machineShardHeaderLines(files),
     `  origin: ${q(selectorShadowStructuralOrigin(file))}`,
     `  files: [${files.join(", ")}]`,
-    `  design: ${q(`Repair the selector rule for the exact recorded suite ${file}, exercising every recorded edge: ${edges.join("; ")}. The regression named "${proofTitle}" must call the selector and assert that exact suite is selected for every edge. The earlier narrow task ${repairedTaskId} already merged; another filename-only edge is not the requested structural repair.`)}`,
+    `  design: ${q(machineShardDesign(`Repair the selector rule for the exact recorded suite ${file}, exercising every recorded edge: ${edges.join("; ")}. The regression named "${proofTitle}" must call the selector and assert that exact suite is selected for every edge. The earlier narrow task ${repairedTaskId} already merged; another filename-only edge is not the requested structural repair.`, invariants))}`,
     `  note: ${q(`W1-T4839: ${file} was missed again after ${repairedTaskId} (its narrow edge) merged, so another narrow edge is not the repair. Every edge seen: ${edges.join("; ")}. Find what these edges share and fix the selector's rule for it. Add a test named "${proofTitle}" in ${testPath} that calls the selector and asserts ${file} is selected for every recorded edge. Later misses of this suite are ledgered as selector-shadow.miss_evidence rows naming this task; no further task is filed for it.`)}`,
     "  acceptance:",
     `    - claim: ${q(`the selector includes the recorded missed suite for every recorded edge, with a regression test that calls the selector`)}`,
     `      proof: ${q(`unit test: ${proofTitle}`)}`,
+    ...invariantClaimLines(invariants),
     "",
   ].join("\n");
 }
@@ -1718,6 +1737,9 @@ export async function runSelectorShadowGardener(
       const name = `${taskId.toLowerCase()}-selector-shadow-miss.yaml`;
       const relativePath = join("plan", "tasks.d", name);
       const made = build(taskId);
+      // W1-T12833: the lint the plan PR preflight applies, on the final text, before anything is written.
+      const lint = machineShardLintRefusal(made.contents, relativePath);
+      if (lint !== undefined) throw new Error(`selector shadow: missed-edge task refused by lint (${lint})`);
       writeAtomic(join(workspace.root, relativePath), made.contents);
       const refused = machineShardLandingGuard(deps)(workspace.root, [relativePath]);
       if (refused !== undefined) throw new Error(`selector shadow: missed-edge task failed lint-plan's machine-filing admission: ${refused}`);

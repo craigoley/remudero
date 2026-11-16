@@ -247,21 +247,39 @@ async function readSnapshot(
 
 /**
  * A stateful source for a per-tick refresh: a refresh that fails after an earlier success reads `stale` and
- * never hands the earlier snapshot back as current.
+ * never hands the earlier snapshot back as current. W1-T13052: while the default branch still names the kept
+ * commit, one ref GET revalidates the kept snapshot; a moved branch rereads it all; a failed ref GET reads stale.
  */
 export function createOpsCatalogShadowSource(
   target: OpsCatalogTarget,
   api: OpsCatalogApi = defaultOpsCatalogApi(),
 ): { refresh(): Promise<OpsCatalogShadowInput> } {
   let everOk = false;
+  let kept: { plan?: Plan; binding: OpsCatalogBinding; identityDigest?: string } | undefined;
   const store = createPlanRevisionStore({ strict: true, retainLatest: true, yamlLogLevel: "error", dependencyMode: "preserve-external" });
+  const answer = (snap: { plan?: Plan; binding?: OpsCatalogBinding; identityDigest?: string }): OpsCatalogShadowInput =>
+    privateHandles({ outcome: "ok" as const, identityDigest: snap.identityDigest }, { plan: snap.plan, opsCommit: snap.binding?.commit });
+  const revalidate = async (k: NonNullable<typeof kept>): Promise<"same" | "moved" | "failed"> => {
+    try {
+      return await readBranchSha(api, `repos/${target.repository}`, k.binding.ref.slice("refs/heads/".length)) === k.binding.commit
+        ? "same" : "moved";
+    } catch (error) {
+      // A failed revalidation is not evidence, and a full read would start with the same failing GitHub.
+      void error;
+      return "failed";
+    }
+  };
   return {
     async refresh() {
+      const check = kept ? await revalidate(kept) : "moved";
+      if (check === "same" && kept) return answer(kept);
+      kept = undefined;
+      if (check === "failed") return { outcome: "stale" };
       const snap = await readSnapshot(target, api, store);
-      if (snap.outcome === "ok") {
+      if (snap.outcome === "ok" && snap.binding) {
         everOk = true;
-        return privateHandles({ outcome: "ok" as const, identityDigest: snap.identityDigest },
-          { plan: snap.plan, opsCommit: snap.binding?.commit });
+        kept = { plan: snap.plan, binding: snap.binding, identityDigest: snap.identityDigest };
+        return answer(kept);
       }
       return { outcome: everOk ? "stale" : snap.outcome };
     },

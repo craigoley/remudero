@@ -190,7 +190,7 @@ test("W1-T12526 criterion 4: affected-reach is bounded — no graph when no impo
   const reachListing = (args: readonly string[]) => args[0] === "ls-tree" && args.includes("-l") && args.includes("bin");
   assert.ok(!fx.calls.some(reachListing), "the code tree is never listed");
 
-  // Past the bound: the code tree's listing names more bytes than one read may take.
+  // Past the bound: each file in the code tree's listing is more bytes than one read may take (W1-T12792).
   const big = landTwo({ [REACH]: reachBaseline(["test/old.test.ts"]), ...REACH_TREE }, { "src/a.ts": "export const a = 2;\n" },
     { "test/b.test.ts": use("../src/run-task.js") },
     (run) => (args, stdin) => {
@@ -200,7 +200,7 @@ test("W1-T12526 criterion 4: affected-reach is bounded — no graph when no impo
     });
   const bounded = big.onto(2, big.m1);
   assert.equal(bounded.verdict, "unread");
-  assert.match(bounded.reason ?? "", /^affected-reach: the code tree could not be read: the code tree is \d+ bytes, past the 50331648-byte bound$/);
+  assert.match(bounded.reason ?? "", /^affected-reach: the code tree could not be read: the code tree file \S+ is 60000000 bytes, past the 50331648-byte bound of one read$/);
   assert.ok(!bounded.counted.includes("affected-reach"));
   assert.ok(big.calls.some(reachListing), "control: an import line that lands lists the code tree");
 });

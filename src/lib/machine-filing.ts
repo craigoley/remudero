@@ -16,8 +16,8 @@
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { loadPlanFromYaml, machineFilingAdmissionViolations, parseTasksFromYaml, type TaskRisk } from "./plan.js";
-import { lintTask, taskRulingPin } from "./task-linter.js";
+import { loadPlanFromYaml, machineFilingAdmissionViolations, parseTasksFromYaml, type Task, type TaskRisk } from "./plan.js";
+import { lintTask, promoteIntroducedPlanOnlyDiagnostics, taskRulingPin, type LintOpts, type LintViolation } from "./task-linter.js";
 
 /** Paths whose change is dangerous whoever makes it: secrets and credentials, auth and permissions,
  *  CI and deploy machinery, the worker settings, and the operator's own policy and rulings. */
@@ -109,6 +109,53 @@ export function machineShardHeaderLines(files: readonly string[], cost?: number,
   ];
 }
 
+/** One behaviour a drafted remedy must keep: its `INVARIANT <slug>:` design line and the one claim that proves it. */
+export interface MachineShardInvariant { slug: string; statement: string; claim: string; proof: string }
+
+/** W1-T12833: what a template says its remedy must keep working, or the specific reason it keeps nothing. */
+export type MachineShardInvariants = { declared: readonly MachineShardInvariant[] } | { none: string };
+
+/** The changed-task lint options that need no checkout: what `lint-plan --base` asks of a new record (W1-T11746). */
+export const MACHINE_SHARD_LINT_OPTIONS: Readonly<LintOpts> = Object.freeze({ requireDesignInvariantDeclaration: true });
+
+const oneLine = (text: string): string => text.replace(/\s+/g, " ").trim();
+const declaredOf = (i: MachineShardInvariants | undefined): readonly MachineShardInvariant[] => (i !== undefined && "declared" in i ? i.declared : []);
+
+/** A template's design text with its declaration appended, each form on its own line. */
+export function machineShardDesign(design: string | undefined, invariants: MachineShardInvariants): string {
+  const lines = invariants !== undefined && "none" in invariants ? [`NO-INVARIANTS: ${oneLine(invariants.none)}`]
+    : declaredOf(invariants).map((i) => `INVARIANT ${i.slug}: ${oneLine(i.statement)}`);
+  return [...(design === undefined ? [] : [design]), ...lines].join("\n");
+}
+
+/** The one `invariant:<slug>` acceptance entry each declared invariant maps to. */
+export function machineShardInvariantClaims(invariants: MachineShardInvariants): { claim: string; proof: string }[] {
+  return declaredOf(invariants).map((i) => ({ claim: `invariant:${i.slug} — ${i.claim}`, proof: i.proof }));
+}
+
+/** W1-T13035: one record's lint as its own plan pull request meets it. A machine filing is always a NEW plan-only
+ *  shard, so each warning `promoteIntroducedPlanOnlyDiagnostics` blocks there is a block here; a filer that read
+ *  such a record as clean opened a pull request the preflight refused every time. No checkout is read, so a promoted
+ *  check that needs base files reports nothing. `name` is the check, marked when only the promotion blocks it. */
+export function machineShardLint(task: Task): { check: LintViolation["check"]; severity: LintViolation["severity"]; name: string }[] {
+  const raw = lintTask(task, MACHINE_SHARD_LINT_OPTIONS).violations;
+  return promoteIntroducedPlanOnlyDiagnostics(raw, undefined, true).map((v, i) => ({
+    check: v.check, severity: v.severity, name: v.severity === raw[i]!.severity ? v.check : `${v.check} (plan-only promotion)`,
+  }));
+}
+
+/** The shared lint: every blocking finding of {@link machineShardLint} on a single-record shard's text, by name,
+ *  or undefined. A filer that assembles its own text calls this before it writes. */
+export function machineShardLintRefusal(text: string, source: string): string | undefined {
+  try {
+    const blocks = machineShardLint(loadPlanFromYaml(text, source).tasks[0]!).filter((v) => v.severity === "block").map((v) => v.name);
+    return blocks.length === 0 ? undefined : blocks.join(", ");
+  } catch (e) {
+    const reason = `unparseable: ${(e as Error).message}`;
+    return reason;
+  }
+}
+
 /** What a filer knows about ONE finding, enough to render its record. */
 export interface MachineShardSpec {
   taskId: string;
@@ -117,6 +164,8 @@ export interface MachineShardSpec {
   origin: string;
   files: readonly string[];
   acceptance: readonly { claim: string; proof: string }[];
+  /** Rendered into the design and, for each declared slug, one acceptance entry after `acceptance`. */
+  invariants: MachineShardInvariants;
   design?: string;
   note?: string;
   /** The finding's measured cost (PR-minutes or occurrences), which sets its dispatch priority. */
@@ -129,12 +178,13 @@ export interface MachineShardSpec {
 
 /**
  * Render a finding as a single-record shard with the shared header, then parse it back and lint it.
- * `refused` names every blocking lint check; a filer never writes a refused record.
+ * `refused` names every blocking lint check, the promoted ones included; a filer never writes a refused record.
  */
 export function renderMachineShard(spec: MachineShardSpec): { text: string; refused?: string } {
   const q = (v: string): string => JSON.stringify(v);
   const rationale = spec.rationale?.flatMap((entry) => entry.split(/\r\n|\r|\n/));
   const rationaleStyle = /^[ \t]/.test(rationale?.find((line) => line !== "") ?? "") ? "|2" : "|";
+  const design = machineShardDesign(spec.design, spec.invariants);
   const text = [
     `- id: ${spec.taskId}`,
     `  title: ${q(spec.title)}`,
@@ -145,20 +195,15 @@ export function renderMachineShard(spec: MachineShardSpec): { text: string; refu
     `  origin: ${q(spec.origin)}`,
     "  files:",
     ...spec.files.map((f) => `    - ${f}`),
-    ...(spec.design === undefined ? [] : [`  design: ${q(spec.design)}`]),
+    ...(design === "" ? [] : [`  design: ${q(design)}`]),
     "  acceptance:",
-    ...spec.acceptance.flatMap((c) => [`    - claim: ${q(c.claim)}`, `      proof: ${q(c.proof)}`]),
+    ...[...spec.acceptance, ...machineShardInvariantClaims(spec.invariants)].flatMap((c) => [`    - claim: ${q(c.claim)}`, `      proof: ${q(c.proof)}`]),
     ...(spec.note === undefined ? [] : [`  note: ${q(spec.note)}`]),
     ...(rationale === undefined ? [] : [`  rationale: ${rationaleStyle}`, ...rationale.map((line) => (line === "" ? "" : `    ${line}`))]),
     "",
   ].join("\n");
-  try {
-    const lint = lintTask(loadPlanFromYaml(text, `${spec.taskId}.yaml`).tasks[0]!);
-    const blocks = lint.violations.filter((v) => v.severity === "block").map((v) => v.check);
-    return blocks.length === 0 ? { text } : { text, refused: blocks.join(", ") };
-  } catch (e) {
-    return { text, refused: `unparseable: ${(e as Error).message}` };
-  }
+  const refused = machineShardLintRefusal(text, `${spec.taskId}.yaml`);
+  return refused === undefined ? { text } : { text, refused };
 }
 
 /** lint-plan's machine-filing admission (plan.ts), as a filer is handed it. */

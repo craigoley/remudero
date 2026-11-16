@@ -18,7 +18,7 @@
     - src/lib/serve-thread-load.ts
     - src/lib/serve.ts
     - test/console-api/serve/serve-ledgers-one-thread-load-row-a-minute-with-cpu-loop-and-gc-share.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: Once a minute serve appends one serve.thread_load row listing the main thread and each live worker thread by its serve.memory holder name, with the CPU milliseconds it used and its event-loop utilization over the minute

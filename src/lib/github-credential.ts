@@ -51,6 +51,10 @@ export interface GithubCredentialReference {
   scope: string;
   kind: GithubCredentialKind;
   name: string;
+  app_id?: string;
+  installation_id?: string;
+  private_key_path?: string;
+  reads_only?: boolean;
 }
 
 export type GithubCredentialSource = "repo-reference" | "remudero-reference" | "ambient-env" | "gh-login";
@@ -72,6 +76,9 @@ export interface GithubCredentialAttempt {
 export interface GithubCredentialResolution {
   /** The source that answered. "none" means the call may run without a credential. */
   source: GithubCredentialSource | "none";
+  reference?: string;
+  kind?: GithubCredentialKind;
+  referenceKey?: string;
   /** The sources tried before the one that answered, in order. */
   tried: readonly GithubCredentialAttempt[];
   /** The environment for the `gh` child. It returns `base` itself when the source needs no change. */
@@ -79,6 +86,9 @@ export interface GithubCredentialResolution {
 }
 
 export interface GithubCredentialQuery {
+  /** Only an explicitly identified read may use a reads_only App reference. */
+  write?: boolean;
+  appTokens?: GithubAppTokenHolder;
   /** The environment the `gh` child would receive. Defaults to this process's own. */
   env?: NodeJS.ProcessEnv;
   /** The `owner/repo` the call is for, when it is known. */
@@ -128,14 +138,24 @@ export function parseGithubCredentialReferences(text: string): GithubCredentialR
   const list = (parsed as { references?: unknown } | null)?.references;
   if (!Array.isArray(list)) throw new Error("the references file has no `references` list");
   return list.map((entry: unknown, index) => {
-    const { scope, kind, name } = (entry ?? {}) as Record<string, unknown>;
+    const { scope, kind, name, app_id, installation_id, private_key_path, reads_only } = (entry ?? {}) as Record<string, unknown>;
     const where = `references entry ${index + 1}`;
     if (typeof scope !== "string" || (scope !== GITHUB_CREDENTIAL_ALL_REPOS && !REPO_SCOPE.test(scope))) {
       throw new Error(`${where} needs a scope of "${GITHUB_CREDENTIAL_ALL_REPOS}" or owner/repo`);
     }
     if (typeof kind !== "string" || !KINDS.includes(kind)) throw new Error(`${where} needs a kind of env, file or app`);
     if (typeof name !== "string" || name.trim() === "") throw new Error(`${where} needs a name`);
-    return { scope, kind: kind as GithubCredentialKind, name };
+    if (reads_only !== undefined && typeof reads_only !== "boolean") throw new Error(`${where} needs a boolean reads_only`);
+    if (kind === "app" && [app_id, installation_id, private_key_path].some((v) => v !== undefined)) {
+      if (typeof app_id !== "string" || !/^[0-9]+$/.test(app_id) ||
+          typeof installation_id !== "string" || !/^[0-9]+$/.test(installation_id) ||
+          typeof private_key_path !== "string" || !isAbsolute(private_key_path)) {
+        throw new Error(`${where} needs app_id, installation_id and an absolute private_key_path`);
+      }
+    }
+    return { scope, kind: kind as GithubCredentialKind, name,
+      ...(kind === "app" && app_id !== undefined ? { app_id: app_id as string, installation_id: installation_id as string, private_key_path: private_key_path as string } : {}),
+      ...(reads_only === undefined ? {} : { reads_only }) };
   });
 }
 
@@ -145,7 +165,24 @@ function errorCode(err: unknown): string {
 }
 
 type Loaded = { references: GithubCredentialReference[] } | { failure: string };
-type Answer = { token: string } | { reason: string };
+type Answer = { token: string; reference?: string; kind?: GithubCredentialKind; referenceKey?: string } | { reason: string };
+
+export type GithubAppTokenHolder = (reference: GithubCredentialReference) => { token: string; expiresAtMs: number } | { reason: string };
+let appTokenHolder: GithubAppTokenHolder | undefined;
+
+export function installGithubAppTokenHolder(holder: GithubAppTokenHolder | undefined): void {
+  appTokenHolder = holder;
+}
+
+export function readGithubCredentialReferences(env: NodeJS.ProcessEnv = process.env, stateDir?: string): GithubCredentialReference[] {
+  const loaded = loadReferences(join(stateDir ?? join(discoverLiveLedgerRoot(env), "state"), GITHUB_CREDENTIAL_REFERENCES_FILENAME), "");
+  if ("failure" in loaded) throw new Error(loaded.failure);
+  return loaded.references;
+}
+
+export function githubAppReferenceKey(reference: GithubCredentialReference): string {
+  return JSON.stringify([reference.scope.toLowerCase(), reference.name, reference.app_id, reference.installation_id, reference.private_key_path]);
+}
 
 function loadReferences(path: string | undefined, stateDirFailure: string): Loaded {
   if (path === undefined) return { failure: stateDirFailure };
@@ -166,7 +203,7 @@ function loadReferences(path: string | undefined, stateDirFailure: string): Load
 }
 
 /** Read what one reference points at. An unreadable or empty target is a failure, never an answer. */
-function followReference(reference: GithubCredentialReference, env: NodeJS.ProcessEnv): Answer {
+function followReference(reference: GithubCredentialReference, env: NodeJS.ProcessEnv, query: GithubCredentialQuery): Answer {
   if (reference.kind === "env") {
     // A name that is not a variable name is not repeated: it may be a value pasted by mistake.
     if (!ENV_NAME.test(reference.name)) return { reason: "an env reference has a name that is not an environment variable name" };
@@ -182,19 +219,25 @@ function followReference(reference: GithubCredentialReference, env: NodeJS.Proce
       return { reason: `file ${reference.name} is unreadable (${errorCode(err)})` };
     }
   }
-  // Minting a GitHub App token is outside this resolver (W1-T11926 scope), so an app reference fails.
-  return { reason: `app reference ${reference.name} cannot answer: this resolver does not mint GitHub App tokens` };
+  const fail = (reason: string): Answer => ({ reason: `app reference ${reference.name} cannot answer: ${reason}` });
+  if (reference.reads_only && query.write !== false) return fail("reference is for reads only");
+  const held = (query.appTokens ?? appTokenHolder)?.(reference);
+  if (!held) return fail("no broker-held token; this resolver does not mint GitHub App tokens");
+  if ("reason" in held) return fail(held.reason);
+  if (held.expiresAtMs <= (query.clock ?? systemClock).now()) return fail("broker-held token expired");
+  return { token: held.token };
 }
 
-function answerFromReferences(loaded: Loaded, scope: string | undefined, env: NodeJS.ProcessEnv): Answer {
+function answerFromReferences(loaded: Loaded, scope: string | undefined, env: NodeJS.ProcessEnv, query: GithubCredentialQuery): Answer {
   if ("failure" in loaded) return { reason: loaded.failure };
   if (scope === undefined) return { reason: "this call names no repository" };
   const matching = loaded.references.filter((reference) => reference.scope.toLowerCase() === scope.toLowerCase());
   if (matching.length === 0) return { reason: `no reference has the scope ${scope}` };
   const reasons: string[] = [];
   for (const reference of matching) {
-    const answer = followReference(reference, env);
-    if ("token" in answer) return answer;
+    const answer = followReference(reference, env, query);
+    if ("token" in answer) return { ...answer, reference: reference.name, kind: reference.kind,
+      ...(reference.kind === "app" ? { referenceKey: githubAppReferenceKey(reference) } : {}) };
     reasons.push(answer.reason);
   }
   return { reason: reasons.join("; ") };
@@ -268,6 +311,10 @@ export function resolveGithubCredential(query: GithubCredentialQuery = {}): Gith
   const keep = (base: NodeJS.ProcessEnv | undefined): NodeJS.ProcessEnv | undefined => base;
   // The value is held by this closure only. It is not a field, so no logger or row can read it.
   const withToken = (token: string) => (base: NodeJS.ProcessEnv | undefined): NodeJS.ProcessEnv => ({ ...(base ?? process.env), GH_TOKEN: token });
+  const fromReference = (source: GithubCredentialSource, answer: Extract<Answer, { token: string }>, tried: GithubCredentialAttempt[]): GithubCredentialResolution =>
+    Object.defineProperties({ source, tried, childEnv: withToken(answer.token) }, {
+      reference: { value: answer.reference }, kind: { value: answer.kind }, referenceKey: { value: answer.referenceKey },
+    });
 
   let stateDir = query.stateDir;
   let stateDirFailure = "";
@@ -282,12 +329,12 @@ export function resolveGithubCredential(query: GithubCredentialQuery = {}): Gith
   const loaded = loadReferences(stateDir === undefined ? undefined : join(stateDir, GITHUB_CREDENTIAL_REFERENCES_FILENAME), stateDirFailure);
   const tried: GithubCredentialAttempt[] = [];
 
-  const perRepo = answerFromReferences(loaded, query.repo, env);
-  if ("token" in perRepo) return { source: "repo-reference", tried, childEnv: withToken(perRepo.token) };
+  const perRepo = answerFromReferences(loaded, query.repo, env, query);
+  if ("token" in perRepo) return fromReference("repo-reference", perRepo, tried);
   tried.push({ source: "repo-reference", reason: perRepo.reason });
 
-  const wide = answerFromReferences(loaded, GITHUB_CREDENTIAL_ALL_REPOS, env);
-  if ("token" in wide) return { source: "remudero-reference", tried, childEnv: withToken(wide.token) };
+  const wide = answerFromReferences(loaded, GITHUB_CREDENTIAL_ALL_REPOS, env, query);
+  if ("token" in wide) return fromReference("remudero-reference", wide, tried);
   tried.push({ source: "remudero-reference", reason: wide.reason });
 
   if (env.GH_TOKEN || env.GITHUB_TOKEN) return { source: "ambient-env", tried, childEnv: keep };

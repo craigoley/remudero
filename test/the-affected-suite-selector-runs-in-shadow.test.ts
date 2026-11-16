@@ -171,6 +171,40 @@ test("W1-T6924: the now-view rederivation suite is selected for each recorded mi
   assert.ok(!absent.suites.includes(suite), "a suite absent from the tree cannot be selected");
 });
 
+test("W1-T9275: the shard-sizing suite is selected for each recorded miss edge", () => {
+  const suite = "test/every-lint-pass-sizes-a-shard-by-its-own-slug.test.ts";
+  const edges = [
+    "docs/review-gate.md",
+    "src/lib/companion-paths.ts",
+    "test/a-test-helper-is-the-concern-its-suites-accompany.test.ts",
+    "test/the-one-concern-arm-never-adopted-the-shared-table.test.ts",
+  ];
+  const files = new Map([...Object.entries(TREE), [suite, ""]]);
+  const readMap: ReadMapInput = {
+    map: { format: READ_MAP_FORMAT, sha: "main", suites: [], reads: {}, listed: {}, unknownDescriptorSuites: [] },
+    drift: { distance: 0, changedSinceMap: [] },
+  };
+  for (const changed of edges) {
+    if (changed.startsWith("test/")) files.set(changed, "export {};\n");
+    const selection = selectAffectedSuites([changed], { files, pathReaders: [], symbolSuites: [], readMap });
+    assert.equal(selection.fullRun, false, changed);
+    assert.ok(selection.suites.includes(suite), `${changed} must select ${suite} in the floor`);
+    assert.ok(selection.narrow?.includes(suite), `${changed} must select ${suite} in the narrow candidate`);
+    assert.deepEqual(selection.recentOnly, { floor: [], narrow: [] });
+    assert.deepEqual(shadowRecord(selection, [suite]).failures, [
+      { file: suite, floor: "selected", narrow: "selected" },
+    ]);
+    const absentFiles = new Map(files);
+    absentFiles.delete(suite);
+    const absent = selectAffectedSuites([changed], { files: absentFiles, pathReaders: [], symbolSuites: [], readMap });
+    assert.ok(!absent.suites.includes(suite), changed);
+    assert.ok(!absent.narrow?.includes(suite), changed);
+  }
+  const unrelated = selectAffectedSuites(["src/a.ts"], { files, pathReaders: [], symbolSuites: [], readMap });
+  assert.ok(!unrelated.suites.includes(suite));
+  assert.ok(!unrelated.narrow?.includes(suite));
+});
+
 test("W1-T7212: the prompt-render suite is selected for each recorded miss edge", () => {
   const suite = "test/prompt-render.test.ts";
   const edges = [
@@ -196,6 +230,29 @@ test("W1-T7212: the prompt-render suite is selected for each recorded miss edge"
     files: new Map(Object.entries(TREE)), pathReaders: [], symbolSuites: [], readMap,
   });
   assert.ok(!absent.suites.includes(suite), "a suite absent from the tree cannot be selected");
+});
+
+test("W1-T8471: the repo-layout suite is selected for each recorded miss edge", () => {
+  const suite = "test/repo-layout.test.ts";
+  const edges = [
+    "src/lib/daemon.ts",
+    "src/lib/loop-stall-profiler.ts",
+    "src/lib/read-plane.ts",
+    "test/an-unattributed-loop-stall-is-profiled-live.test.ts",
+  ];
+  const files = new Map([...Object.entries(TREE), [suite, ""]]);
+  const readMap: ReadMapInput = {
+    map: { format: READ_MAP_FORMAT, sha: "main", suites: [], reads: {}, listed: {}, unknownDescriptorSuites: [] },
+    drift: { distance: 0, changedSinceMap: [] },
+  };
+  for (const changed of edges) {
+    if (changed.startsWith("test/")) files.set(changed, "export {};\n");
+    const selection = selectAffectedSuites([changed], { files, pathReaders: [], symbolSuites: [], readMap });
+    assert.equal(selection.fullRun, false, changed);
+    assert.ok(selection.suites.includes(suite), `${changed} must select ${suite} in the floor`);
+  }
+  const unrelated = selectAffectedSuites(["src/a.ts"], { files, pathReaders: [], symbolSuites: [], readMap });
+  assert.ok(!unrelated.suites.includes(suite), "an unrelated source change must not select the suite");
 });
 
 test("W1-T7475: the red-branch strike suite is selected for each recorded miss edge", () => {
@@ -240,6 +297,47 @@ test("W1-T4894: the wall-clock bound suite is selected for each recorded miss ed
   assert.ok(!unrelated.suites.includes(suite), "an unrelated source change must not select the suite");
 });
 
+test("W1-T4952: the status deadline suite is selected for each recorded miss edge", () => {
+  const suite = "test/status-json-deadline.test.ts";
+  const edges = ["docs/dep-review.md", "src/lib/dep-review.ts", "src/run-task.ts", "test/dep-review.test.ts"];
+  const files = new Map([...Object.entries(TREE), [suite, ""]]);
+  const readMap: ReadMapInput = {
+    map: { format: READ_MAP_FORMAT, sha: "main", suites: [], reads: {}, listed: {}, unknownDescriptorSuites: [] },
+    drift: { distance: 0, changedSinceMap: [] },
+  };
+  for (const changed of edges) {
+    if (changed.startsWith("test/")) files.set(changed, "export {};\n");
+    const selection = selectAffectedSuites([changed], { files, pathReaders: [], symbolSuites: [], readMap });
+    assert.equal(selection.fullRun, false, changed);
+    assert.ok(selection.suites.includes(suite), `${changed} must select ${suite} in the floor`);
+  }
+  const unrelated = selectAffectedSuites(["src/a.ts"], { files, pathReaders: [], symbolSuites: [], readMap });
+  assert.ok(!unrelated.suites.includes(suite), "an unrelated source change must not select the suite");
+});
+
+test("W1-T7703: the cost-of-delay suite is selected for each recorded miss edge", () => {
+  const suite = "test/new-work-is-ordered-by-cost-of-delay.test.ts";
+  const edges = [
+    "src/lib/test-gardener.ts",
+    "test/a-duration-adoption-waits-for-the-noise-to-settle.test.ts",
+    "test/the-test-gardener-adopts-the-coverage-duration-ledger.test.ts",
+    "test/the-test-suite-tends-itself.test.ts",
+  ];
+  const files = new Map([...Object.entries(TREE), [suite, ""]]);
+  const readMap: ReadMapInput = {
+    map: { format: READ_MAP_FORMAT, sha: "main", suites: [], reads: {}, listed: {}, unknownDescriptorSuites: [] },
+    drift: { distance: 0, changedSinceMap: [] },
+  };
+  for (const changed of edges) {
+    if (changed.startsWith("test/")) files.set(changed, "export {};\n");
+    const selection = selectAffectedSuites([changed], { files, pathReaders: [], symbolSuites: [], readMap });
+    assert.equal(selection.fullRun, false, changed);
+    assert.ok(selection.suites.includes(suite), `${changed} must select ${suite} in the floor`);
+  }
+  const unrelated = selectAffectedSuites(["src/a.ts"], { files, pathReaders: [], symbolSuites: [], readMap });
+  assert.ok(!unrelated.suites.includes(suite), "an unrelated source change must not select the suite");
+});
+
 test("W1-T7763: the refusal-amendment suite is selected for each recorded miss edge", () => {
   const suite = "test/a-worker-refusal-becomes-a-plan-amendment.test.ts";
   const edges = [
@@ -260,6 +358,35 @@ test("W1-T7763: the refusal-amendment suite is selected for each recorded miss e
   }
   const unrelated = selectAffectedSuites(["src/a.ts"], { files, pathReaders: [], symbolSuites: [], readMap });
   assert.ok(!unrelated.suites.includes(suite), "an unrelated source change must not select the suite");
+});
+
+test("W1-T7766: the capped-repair suite is selected for each recorded miss edge", () => {
+  const suite = "test/a-capped-pr-exhausts-repair-before-it-reaches-a-human.test.ts";
+  const edges = [
+    "src/lib/in-tree-budget.ts",
+    "src/lib/plan-pr-emitter.ts",
+    "test/a-starved-plan-pr-preflight-leg-times-out-and-is-asked-again.test.ts",
+  ];
+  const files = new Map([...Object.entries(TREE), [suite, ""]]);
+  for (const changed of edges) {
+    if (changed.startsWith("test/")) files.set(changed, "export {};\n");
+    const selection = selectAffectedSuites([changed], { files, pathReaders: [], symbolSuites: [] });
+    assert.equal(selection.fullRun, false, changed);
+    assert.ok(selection.suites.includes(suite), `${changed} must select ${suite} in the floor`);
+    assert.ok(selection.narrow?.includes(suite), `${changed} must select ${suite} in the narrow candidate`);
+    assert.deepEqual(selection.recentOnly, { floor: [], narrow: [] });
+    assert.deepEqual(shadowRecord(selection, [suite]).failures, [
+      { file: suite, floor: "selected", narrow: "selected" },
+    ]);
+  }
+  const unrelated = selectAffectedSuites(["src/a.ts"], { files, pathReaders: [], symbolSuites: [] });
+  assert.ok(!unrelated.suites.includes(suite), "an unrelated change must not select the suite");
+  assert.ok(!unrelated.narrow?.includes(suite));
+  const absent = selectAffectedSuites([edges[0]!], {
+    files: new Map(Object.entries(TREE)), pathReaders: [], symbolSuites: [],
+  });
+  assert.ok(!absent.suites.includes(suite), "a suite absent from the tree cannot be selected");
+  assert.ok(!absent.narrow?.includes(suite));
 });
 
 test("W1-T6751: the precheck census is selected for each recorded miss edge", () => {

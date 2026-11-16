@@ -45,6 +45,7 @@ function machineRecord(over: {
     origin: over.origin ?? `ci-friction:${id}`,
     files,
     acceptance: claims.map((claim, i) => ({ claim, proof: proofs[i]! })),
+    invariants: { none: "the fixture records one remedy and changes no existing behaviour" },
     note: over.note,
     rationale: over.rationale,
   });
