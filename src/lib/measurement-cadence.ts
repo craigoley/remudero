@@ -82,8 +82,8 @@ import {
   type InjectCoverageImprovementResult,
 } from "./coverage-improvement.js";
 import { handRunCensus, type HandRunCensusCadenceOpts, type HandRunCensusCadenceResult } from "./hand-run-census.js";
-import { lintPlan, lintTask, type LintResult } from "./task-linter.js";
-import { MACHINE_SHARD_LINT_OPTIONS, machineShardDesign, machineShardFilingRefusal, machineShardHeaderLines } from "./machine-filing.js";
+import { lintPlan, type LintResult } from "./task-linter.js";
+import { machineShardDesign, machineShardFilingRefusal, machineShardHeaderLines, machineShardLint } from "./machine-filing.js";
 import { mechanicalRulingRow, type MechanicalDecision } from "./mechanical-rulings.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
 import {
@@ -3292,8 +3292,8 @@ export function ciLearningShardYaml(draft: CiLearningShardDraft, taskId: string,
     `    - claim: ${q(`the lane that trips the ${draft.gate} gate is reached by a matched learnings entry rather than prose no dispatched worker reads`)}`,
     `      proof: ${q(`grep: ${draft.findingId} in ${lessonsFile}`)}`,
     `    - claim: ${q("the lesson carries the golden verdict prompt-surface-gate admits for a learnings path")}`,
-    `      proof: ${q(`grep: ${draft.findingId} in ${fixtureDir}/criteria.yaml`)}`,
-    `  note: ${q(`Filed by the ci-learning rung from ${draft.findingId}. The ${draft.gate} gate went red on #${draft.pr} and was repaired; the repair touched ${draft.repairFiles.join(", ") || "no recorded file"}. Recommended action: ${draft.action ?? "unclear"}. Remedy surface: ${draft.remedySurface}. prompt-surface-gate admits a learnings change only with a golden verdict under ${fixtureDir}/ — build it beside the entry, in the layout of test/fixtures/golden-verdicts/ci-clock-sweep-report-lesson/. MACHINE-AUTHORED AND PARKED — a person decides what guidance changes.`)}`,
+    `      proof: ${q(`grep: ${fixtureDir} in ${lessonsFile}`)}`,
+    `  note: ${q(`Filed by the ci-learning rung from ${draft.findingId}. The ${draft.gate} gate went red on #${draft.pr} and was repaired; the repair touched ${draft.repairFiles.join(", ") || "no recorded file"}. Recommended action: ${draft.action ?? "unclear"}. Remedy surface: ${draft.remedySurface}. prompt-surface-gate admits a learnings change only with a golden verdict under ${fixtureDir}/ — build it beside the entry, in the layout of test/fixtures/golden-verdicts/ci-clock-sweep-report-lesson/. Name ${fixtureDir} in the entry: this record declares the lessons file alone, so both proofs read it. MACHINE-AUTHORED AND PARKED — a person decides what guidance changes.`)}`,
     "",
   ].join("\n");
 }
@@ -3316,8 +3316,8 @@ export function ciLearningGoldenFixtureDir(findingId: string): string {
 export function ciLearningRecordVerdict(contents: string, label: string): { ok: boolean; reason: string } {
   try {
     const task = loadPlanFromYaml(contents, label).tasks[0];
-    const lint = lintTask(task, MACHINE_SHARD_LINT_OPTIONS);
-    if (!lint.ok) return { ok: false, reason: lint.violations.map((v) => `${v.severity}:${v.check}`).join(", ") };
+    const lint = machineShardLint(task);
+    if (lint.some((v) => v.severity === "block")) return { ok: false, reason: lint.map((v) => `${v.severity}:${v.name}`).join(", ") };
     // A lesson creates its own path; admission must not borrow files from the daemon's tree.
     const refused = machineShardFilingRefusal(contents, label, { pathExists: () => false });
     return refused === undefined ? { ok: true, reason: "" } : { ok: false, reason: refused };
