@@ -921,7 +921,9 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
               admitRuntime('before-tests', 0, ranSuites, executionWorkers, slot.concurrency);
               // An over-capacity subset is sized by the arm it was cut from: a narrow arm's subset is narrower still.
               // W1-T10947: an explicit bounded profile is priced against the context this slot was bound to.
+              // W1-T12953: a full fallback cut to fewer suites is priced by the workers that subset runs.
               const testCapacity = admitHost('affected-tests', { selection: receipt.selectedArm ?? receipt.selection, workers: executionWorkers,
+                ...(ranSuites.length < receipt.suites.length ? { overCapacitySubset: true } : {}),
                 ...(values['author-profile'] === undefined ? {} : { boundedProfile: readAuthorProfile(root, values['author-profile']),
                   context: boundContext ? observeContext() : undefined, bound: boundContext }) });
               if (testCapacity) (receipt.hostCapacity ??= []).push(testCapacity);
