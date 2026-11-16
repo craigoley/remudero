@@ -506,6 +506,13 @@ export const ANALYTICS_COLLECTION_STARTED_AT = "2026-08-14";
 /** Refresh cost posture: a scan reaching the safety ceiling occupies at most 12% of one core
  * when the next scan is not armed until this delay AFTER settlement. */
 export const ANALYTICS_REFRESH_INTERVAL_MS = 15 * 60_000;
+/**
+ * W1-T13174: how often a cache writes its checkpoint to disk. The fold resumes from the in-memory checkpoint
+ * between writes; the file is only a cache creation's (a boot's, or a shed's) resume point, and an older one
+ * still resumes correctly from its own source offsets. MEASURED 2026-11-16: the core checkpoint was 79 MB and
+ * written after each of ~12 refreshes an hour on serve's main thread, the top frame of stalls up to 34.5 s.
+ */
+export const ANALYTICS_CHECKPOINT_WRITE_INTERVAL_MS = 60 * 60_000;
 
 /** BACKSTOP: a reduction may not consume a long-lived serve process beyond this point. */
 export const ANALYTICS_REFRESH_TIMEOUT_MS = 120_000;
@@ -2662,6 +2669,18 @@ export function createAnalyticsSnapshotCache(deps: AnalyticsSnapshotCacheDeps): 
   let stopped = false;
   let shedPending = false;
   let progress: AnalyticsResumePoint | undefined;
+  let checkpointWrittenAt: number | undefined;
+  let unwritten: AnalyticsCheckpoint | undefined;
+  const persistCheckpoint = (next: AnalyticsCheckpoint, force: boolean): void => {
+    const nowMs = clock.now();
+    if (!force && checkpointWrittenAt !== undefined && nowMs - checkpointWrittenAt < ANALYTICS_CHECKPOINT_WRITE_INTERVAL_MS) {
+      unwritten = next;
+      return;
+    }
+    writeAnalyticsCheckpoint(deps.stateDir, next);
+    checkpointWrittenAt = nowMs;
+    unwritten = undefined;
+  };
 
   const cancelTimer = (): void => {
     timer?.cancel();
@@ -2734,7 +2753,7 @@ export function createAnalyticsSnapshotCache(deps: AnalyticsSnapshotCacheDeps): 
           if (sourceReadable) checkpoint = result.checkpoint;
           const hasRetainedEvidence = result.checkpoint.source.archives.length > 0 ||
             (result.checkpoint.source.live?.size ?? 0) > 0;
-          if (hasRetainedEvidence && sourceReadable) writeAnalyticsCheckpoint(deps.stateDir, result.checkpoint);
+          if (hasRetainedEvidence && sourceReadable) persistCheckpoint(result.checkpoint, false);
           if (progress !== undefined) clearAnalyticsProgress(deps.stateDir);
           progress = undefined;
         }
@@ -2776,6 +2795,7 @@ export function createAnalyticsSnapshotCache(deps: AnalyticsSnapshotCacheDeps): 
     stopped = true;
     started = false;
     cancelTimer();
+    if (unwritten !== undefined) persistCheckpoint(unwritten, true);
     controller?.abort(new Error("analytics refresh stopped with serve lifecycle"));
   };
 

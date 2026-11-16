@@ -4,7 +4,7 @@ import { planDestinationRepository } from "../../lib/plan-destination.js";
 import type { RunTaskCommandHost, GitRunner, CiGateOutcome, ReviewRunResult, FixRungOutcome, LiveHeadResult, WorktreeSnapshot, FixRebaseMergeFacts, FixRoundCommit, CensusPushRefusal, FixRoundPushReceipt } from "./run-task-verb.js";
 import { buildBaseProofDir, releaseBaseProofDir, type BaseProofDir } from "../../lib/check-proof.js";
 import { conflictRoundProgressVerdict, judgeFixProgress, resolveFixProgress, type FixProgressJudge, type FixProgressResult, type FixProgressVerdict, type FixProgressWorkerProofResult, reviewerProofFailures, unfiledScopeGrant, UNFILED_SCOPE_GRANT_ANSWER } from "../../lib/fix-progress-judge.js";
-import { openEscalationRelease } from "../../lib/parked-pr-remedy.js";
+import { openEscalationRelease, PARKED_PR_REMEDY_STEP } from "../../lib/parked-pr-remedy.js";
 import { buildFixProgressInputWithHostedProofs, conflictRoundHeldHead, readHostedFixProofResults, reservePlanRepairTaskId, type HostedFixProofReader } from "../../lib/sweep.js";
 import { parseWhitelistedProof, execWhitelistedProofAsync, proofChildCommand, buildProofEnv, type AsyncProofSpawner } from "../../lib/review.js";
 import { execFileLoopBounded } from "../../lib/loop-bounded-child.js";
@@ -3004,7 +3004,12 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         row.task_id === opts.taskId && row.head_sha === priorHeadSha && typeof row.issue_url === "string");
       let issueUrl = typeof escalated?.issue_url === "string" ? escalated.issue_url : undefined;
       let deliveryError: { error: string } | undefined;
-      if (!issueUrl) try {
+      // W1-T13046 invariant no-design-issue: the sweep took a parked-PR remedy for this pull request and head, so the
+      // hold reaches the inbox through that remedy's held task, and the fix rung opens no needs-human issue for it.
+      const remedied = prNumber !== undefined && roundLedger.some((row) => row.step === PARKED_PR_REMEDY_STEP &&
+        row.pr_number === prNumber && (row.head_sha === priorHeadSha || row.head_sha === holdHeadSha));
+      if (remedied) issueUrl = undefined;
+      else if (!issueUrl) try {
         issueUrl = (await escalateForTask({ class: "BLOCKED", taskId: opts.taskId, runId: opts.runId,
           headSha: priorHeadSha, cause: escalationCause(currentMergeConflict !== undefined, noReviewYet), contractRevision: `needs-design:${prNumber}:${priorHeadSha}`,
           summary: `PR #${prNumber}'s fix lane handed it back NEEDS_DESIGN and stands down every pass — ${opts.prUrl}`,
@@ -5215,7 +5220,10 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       }
       const refusalExcerpt = refusalExcerptFromFixReport(fixReport) ?? (remedy === "amendment-proposed"
         ? refusalExcerptForNeedsDesign(fixAction.reason, NEEDS_DESIGN_AMENDMENT_CLASS[sorted.kind]) : undefined);
+      // W1-T13046: the hold names what it covers, so the sweep splits those criteria out or rebuilds, never all of them.
       deps.log("fix.needs_design", { reason: fixAction.reason, head_sha: priorHeadSha, contract_revision: currentContractRevision,
+        covers_criteria: (evidence.review?.unmetCriteria ?? []).map((criterion) => criterion.claim),
+        covers_checks: [...new Set((evidence.ciFailures ?? []).map((failure) => failure.name))],
         ...(currentSemanticRevision === undefined ? {} : { task_semantic_revision: currentSemanticRevision }),
         ...(refusalExcerpt ? { report_excerpt: refusalExcerpt } : {}), needs_design_kind: sorted.kind, needs_design_remedy: remedy });
       deps.log("fix.needs_design_routed", routed);
