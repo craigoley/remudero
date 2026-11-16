@@ -18,7 +18,7 @@
   files:
     - .github/workflows/fleet-heartbeat-watch.yml
     - test/daemon/the-heartbeat-watcher-raises-a-spent-restart-budget.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "the off-host watcher treats AT_LIMIT and STOPPED_RETRY_EXHAUSTED on a fresh beat as per-host findings, evaluates every configured host and drives the existing idempotent needs-human delivery"

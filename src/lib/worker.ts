@@ -72,7 +72,7 @@ import {
   type WorkerProviderId,
 } from "./config.js";
 import { assertModelAllowed } from "./model-gate.js";
-import { chooseDraftDeployment, readDraftStats, recordDraftRouting, type DraftStats, type DraftChoice, type DraftOutcome } from "./draft-routing.js";
+import { chooseDraftDeployment, recordDraftRouting, type DraftStats, type DraftChoice, type DraftOutcome } from "./draft-routing.js";
 import { sdkUsageReadingCase } from "./headroom.js";
 import {
   detectCompactionEvents,
@@ -1323,7 +1323,8 @@ export interface SpawnWorkerArgs {
     proposalId: string;
     log: (step: string, extra?: Record<string, unknown>) => void;
     evaluate: (result: WorkerResult) => { clean: boolean; contractFailed: boolean };
-    readStats?: () => DraftStats;
+    /** W1-T13185: the lane's stats, read off the daemon loop: a batch's loaded snapshot, or an awaited slice read. */
+    readStats: () => DraftStats | Promise<DraftStats>;
     random?: () => number;
   };
   /** A departing cash-ladder rung or outer fallback selection, before its successor. A routing
@@ -3138,7 +3139,8 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
     if (args.draftRouting) {
       let stats: DraftStats | undefined;
       try {
-        stats = (args.draftRouting.readStats ?? (() => readDraftStats(join(config.root, "state"), args.draftRouting!.lane)))();
+        // W1-T13185: awaited, never a synchronous ledger union on the loop (a 143 s stall on 2026-11-16).
+        stats = await args.draftRouting.readStats();
       } catch (error) {
         draftReadError = String(error);
         recordDraftRouting(args.draftRouting.log, "draft.routing.error", { lane: args.draftRouting.lane, proposal_id: args.draftRouting.proposalId,

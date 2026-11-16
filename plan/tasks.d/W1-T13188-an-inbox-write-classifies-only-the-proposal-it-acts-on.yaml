@@ -16,7 +16,7 @@
   files:
     - src/lib/panel-graph.ts
     - test/console-api/an-inbox-write-classifies-only-the-proposal-it-acts-on.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With a registry of 40 proposals and a counting classifier, POST /v1/inbox/decline, /v1/inbox/restore, /v1/inbox/keep, /v1/inbox/reframe, /v1/inbox/archive and /v1/inbox/snooze each classify at most one proposal (the one named) and answer as before (200 with the same body, and the same ledger step)"

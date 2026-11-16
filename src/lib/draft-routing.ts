@@ -1,6 +1,6 @@
-import { readdirSync } from "node:fs";
+import { readdir } from "node:fs/promises";
 import { fixedClock, systemClock } from "./clock.js";
-import { readLedgerUnionRecordsSync } from "./ledger-union.js";
+import type { LedgerUnionRecordRead } from "./ledger-union.js";
 
 export interface DraftDeploymentStats {
   attempts: number;
@@ -54,43 +54,67 @@ export function recordDraftRouting(log: DraftRoutingLog, step: string, extra: Re
   catch (error) { console.error(JSON.stringify({ event: "draft.routing.error", reason: "ledger-write-failed", step, error: String(error) })); }
 }
 
-/** A batch reads the archive union once and feeds each new outcome into its shared snapshot. */
-export function createDraftStatsSession(stateDir: string, lane: string, log: DraftRoutingLog, read: typeof readDraftStats = readDraftStats): {
-  readStats: () => DraftStats;
+/** One read of the draft stats; the production read is {@link readDraftStats} over the process's slice reader. */
+export type DraftStatsRead = (stateDir: string, lane: string) => DraftStats | Promise<DraftStats>;
+
+/** A batch reads the archive union once and feeds each new outcome into its shared snapshot. W1-T13185: the
+ *  batch awaits `load()` before its first spawn, so `readStats` answers from the loaded snapshot with no read. */
+export function createDraftStatsSession(stateDir: string, lane: string, log: DraftRoutingLog, read: DraftStatsRead): {
+  load: () => Promise<void>;
+  readStats: () => DraftStats | Promise<DraftStats>;
   log: DraftRoutingLog;
 } {
   let stats: DraftStats | undefined;
   let failure: { reason: string } | undefined;
-  let loaded = false;
+  let pending: Promise<void> | undefined;
+  let started = false;
+  const fail = (error: unknown): void => { failure = { reason: String(error) }; };
+  const loaded = (value: DraftStats): void => { stats = value; };
+  const start = (): void => {
+    if (started) return;
+    started = true;
+    let value: DraftStats | Promise<DraftStats>;
+    try { value = read(stateDir, lane); }
+    catch (error) { failure = { reason: String(error) }; return; }
+    if (value instanceof Promise) pending = value.then(loaded, fail);
+    else loaded(value);
+  };
+  const answer = (): DraftStats => {
+    if (failure) throw new Error(failure.reason);
+    return stats!;
+  };
+  const learn = (into: DraftStats, extra: Record<string, unknown>): void => {
+    const deltaStats = draftStatsFromRows([{ step: "draft.routing.outcome", ...extra }], lane);
+    const recent = recentOutcomes(into);
+    for (const [deployment, incoming] of Object.entries(recentOutcomes(deltaStats))) {
+      recent[deployment] = [...(recent[deployment] ?? []), ...incoming].slice(-10);
+    }
+    for (const [deployment, delta] of Object.entries(deltaStats)) {
+      const measured = into[deployment] ??= { attempts: 0, clean: 0, contractFailures: 0, costUsd: 0 };
+      const current = evidence(measured);
+      const incoming = evidence(delta);
+      current.costedAttempts += incoming.costedAttempts;
+      measured.attempts += delta.attempts;
+      measured.clean += delta.clean;
+      measured.contractFailures += delta.contractFailures;
+      measured.costUsd += delta.costUsd;
+    }
+  };
   return {
+    // A failed load is kept, and every readStats call throws it, as a failed lazy read did.
+    load: async () => {
+      start();
+      await pending;
+    },
     readStats: () => {
-      if (!loaded) {
-        loaded = true;
-        try { stats = read(stateDir, lane); }
-        catch (error) { failure = { reason: String(error) }; }
-      }
-      if (failure) throw new Error(failure.reason);
-      return stats!;
+      start();
+      if (failure || stats) return answer();
+      return pending!.then(answer);
     },
     log: (step, extra = {}) => {
       recordDraftRouting(log, step, extra);
-      if (stats && step === "draft.routing.outcome") {
-        const deltaStats = draftStatsFromRows([{ step, ...extra }], lane);
-        const recent = recentOutcomes(stats);
-        for (const [deployment, incoming] of Object.entries(recentOutcomes(deltaStats))) {
-          recent[deployment] = [...(recent[deployment] ?? []), ...incoming].slice(-10);
-        }
-        for (const [deployment, delta] of Object.entries(deltaStats)) {
-          const measured = stats[deployment] ??= { attempts: 0, clean: 0, contractFailures: 0, costUsd: 0 };
-          const current = evidence(measured);
-          const incoming = evidence(delta);
-          current.costedAttempts += incoming.costedAttempts;
-          measured.attempts += delta.attempts;
-          measured.clean += delta.clean;
-          measured.contractFailures += delta.contractFailures;
-          measured.costUsd += delta.costUsd;
-        }
-      }
+      // An outcome logged before the snapshot exists is in the ledger the read reads, so it is not added here.
+      if (stats && step === "draft.routing.outcome") learn(stats, extra);
     },
   };
 }
@@ -192,7 +216,18 @@ export function draftStatsFromRows(rows: readonly Record<string, unknown>[], lan
   return stats;
 }
 
-const DRAFT_STATS_STEPS = ["draft.routing.outcome", "inbox.draft_synthesized", "inbox.drafted", "inbox.draft_error"] as const;
+export const DRAFT_STATS_STEPS = ["draft.routing.outcome", "inbox.draft_synthesized", "inbox.drafted", "inbox.draft_error"] as const;
+
+/**
+ * W1-T13185: the draft stats' slice of the ledger union, for one durable-digest slice reader per process
+ * (`createEscalationTriageHistoryReader`, built in run-task.ts: sweep.ts imports worker.ts, which imports this
+ * module). OBSERVED 2026-11-16: one inbox draft spawn read the whole union synchronously and stalled the daemon
+ * loop for 143 s. The reader loads each rotation once, off the loop, and leaves a digest a restart reads instead.
+ */
+export const DRAFT_STATS_SLICE = { holder: "draft-routing.draft-stats", steps: DRAFT_STATS_STEPS, version: "1" } as const;
+
+/** The slice reader {@link readDraftStats} awaits: every rotation loaded off the loop, then the live file's new bytes. */
+export type DraftStatsHistoryReader = (stateDir: string) => Promise<LedgerUnionRecordRead>;
 
 /** Could this unparseable ledger line have been a row of one of `steps`? Only a line that names a
  *  step, and none of these, proves it was not: a line torn before its `step` field could be anything. */
@@ -201,15 +236,16 @@ export function tornLineCouldBeStep(line: string, steps: readonly string[]): boo
   return !line.includes('"step":"');
 }
 
-export function readDraftStats(stateDir: string, lane: string): DraftStats {
+export async function readDraftStats(stateDir: string, lane: string, history: DraftStatsHistoryReader): Promise<DraftStats> {
   // The union's best-effort directory read otherwise hides a permissions failure as an empty prior.
-  readdirSync(stateDir);
+  await readdir(stateDir);
   // The union counts EVERY unparseable line it scans, whatever its step. One spliced 2026-09-20 ENOSPC
   // row (sweep.fix_capacity + serve.error) failed all 927 reads from 10-04 to 10-14, so this lane never
-  // routed by its posteriors. Refuse only over a torn line that could have been one of these rows.
-  let tornDraftRows = 0;
-  const read = readLedgerUnionRecordsSync(stateDir, { order: "oldest-first", refuseIncomplete: true, step: [...DRAFT_STATS_STEPS],
-    onTorn: (line) => { if (tornLineCouldBeStep(line, DRAFT_STATS_STEPS)) tornDraftRows += 1; } });
+  // routed by its posteriors. Refuse only over a torn line that could have been one of these rows; a reader
+  // that kept no torn lines leaves each one unjudged, so each one refuses.
+  const read = await history(stateDir);
+  const tornDraftRows = read.tornLines === undefined ? read.torn
+    : read.tornLines.filter((line) => tornLineCouldBeStep(line, DRAFT_STATS_STEPS)).length;
   if (!read.ok || tornDraftRows > 0) {
     throw new Error(`draft stats corpus incomplete: ${read.unread.join(", ")}; torn=${tornDraftRows} of ${read.torn}`);
   }

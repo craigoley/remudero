@@ -21,7 +21,7 @@
     - src/lib/review-triage.ts
     - src/cli/commands/review.ts
     - test/review/a-decision-model-triages-a-pull-request-before-review.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Before a code review starts, one decision request about that one pull request asks: is it docs-only, is it test-only, does it touch high-risk paths, what is its size band, and does it need a human. Two pull requests never share a request"

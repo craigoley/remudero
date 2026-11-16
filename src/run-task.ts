@@ -1117,7 +1117,7 @@ import type { DeployedModel, DeploymentBakeoffCandidate } from "./lib/bakeoff-tr
 import { CASH_RESPONSES_DEPLOYMENTS } from "./lib/cash-responses.js";
 import { runSweepBakeoff } from "./lib/sweep.js";
 import { OPENWEIGHT_PRICES, OPENWEIGHT_CONTEXT_WINDOWS, OPENWEIGHT_TEMPERATURE, openWeightDeploymentReady, OpenWeightAllowanceExhaustedError } from "./lib/worker-provider.js";
-import { createDraftStatsSession, type DraftStats } from "./lib/draft-routing.js";
+import { createDraftStatsSession, DRAFT_STATS_SLICE, readDraftStats, type DraftStats } from "./lib/draft-routing.js";
 import { correctionEvidenceOf, parseReplayPackets, type ReplayPacket } from "./lib/console-feedback.js";
 import {
   buildFeedbackDocket,
@@ -21237,6 +21237,16 @@ const retroTriggerRunHistory = (): EscalationTriageHistoryReader =>
 const autoTriageRefusalHistory = (): EscalationTriageHistoryReader =>
   (autoTriageRefusalReader ??= createEscalationTriageHistoryReader({ slice: AUTO_TRIAGE_REFUSAL_SLICE }));
 
+let draftStatsReader: EscalationTriageHistoryReader | undefined;
+/** W1-T13185: the inbox draft lane's one slice reader per process. `parseAll` keeps every torn archive line, even
+ *  one torn before its `step`, so readDraftStats still refuses over a line that could have been a draft row; a
+ *  rotation it could not load is refused, never read inline on the loop. */
+export const draftStatsHistory = (): EscalationTriageHistoryReader =>
+  (draftStatsReader ??= createEscalationTriageHistoryReader({ slice: DRAFT_STATS_SLICE, parseAll: true }));
+/** The draft stats, read through {@link draftStatsHistory}: each batch's session and each sessionless spawn. */
+export const readInboxDraftStats = (stateDir: string, lane: string): Promise<DraftStats> =>
+  readDraftStats(stateDir, lane, draftStatsHistory());
+
 function sliceReadCost(reader: EscalationTriageHistoryReader, read: LedgerUnionRecordRead, startedMs: number): Record<string, number> {
   const load = reader.lastLoad();
   const pass = reader.lastPass();
@@ -37045,7 +37055,7 @@ export function buildInboxDraftSpawnArgs(args: {
   proposal?: Proposal;
   currentPlanText?: string;
   draftRoutingLog?: (step: string, extra?: Record<string, unknown>) => void;
-  draftRoutingReadStats?: () => DraftStats;
+  draftRoutingReadStats?: () => DraftStats | Promise<DraftStats>;
   avoidModels?: readonly string[];
 }): SpawnWorkerArgs {
   const registryIntent = selectedRegistryIntentForConfig(args.config), registryRecord = args.draftRoutingLog;
@@ -37058,7 +37068,8 @@ export function buildInboxDraftSpawnArgs(args: {
       lane: "inbox-draft",
       proposalId: args.proposalId,
       log: registryRecord,
-      readStats: args.draftRoutingReadStats,
+      // With no batch session, the spawn awaits the process's slice read: still no union on the loop (W1-T13185).
+      readStats: args.draftRoutingReadStats ?? (() => readInboxDraftStats(join(args.config.root, "state"), "inbox-draft")),
       evaluate: (worker: WorkerResult) => withSelectedRegistryContextSync(selectedRegistryObserverFromIntent(registryIntent, registryRecord), () => {
         const parsed = parseDraftedCandidate(workerTranscript(worker), args.proposal, args.currentPlanText);
         const facts = checkoutRepoFacts(args.cwd);
@@ -37180,7 +37191,7 @@ export async function draftProposalBatch(
   // called here any more — see the identical note at the retro call site.
   const mountsTable = loadMounts(mountsPath(repoRoot));
   const inboxDraftMount = mountsTable.synthesis.inbox_draft;
-  const routingStats = createDraftStatsSession(join(config.root, "state"), "inbox-draft", log);
+  const routingStats = createDraftStatsSession(join(config.root, "state"), "inbox-draft", log, readInboxDraftStats);
 
   const settingsFile = renderWorkerSettings({
     templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
@@ -37198,6 +37209,8 @@ export async function draftProposalBatch(
 
   try {
     const planText = stringifyYaml(loadPlan(join(worktreePath, "plan", "tasks.yaml")).tasks);
+    // W1-T13185: the stats load off the loop before the first spawn; each spawn then reads the loaded snapshot.
+    await routingStats.load();
     return await withSelectedRegistryContext(selectedRegistryObserverFromIntent(registryIntent, log), () => runDraftRung(
       toDraft,
       planText,
