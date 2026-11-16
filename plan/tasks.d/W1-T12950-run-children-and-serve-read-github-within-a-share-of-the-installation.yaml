@@ -27,7 +27,7 @@
     - test/github/the-daemon-sets-its-installation-share-from-a-registry-its-container-can-read.test.ts
     - test/github/the-fleets-app-installation-stays-under-its-hourly-rate-limit.test.ts
     - src/lib/config-schema.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A run child started by runChildMain with GH_APP_INSTALLATION_ID set and a readable instance registry writes one github.budget.configured row with role run_child, outcome configured, its consumer count and its share divisor, and a read past its allowance waits or stands down as a daemon read does"

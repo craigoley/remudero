@@ -1,0 +1,53 @@
+- id: W1-T13051
+  title: "A suite that runs a Linux host script on a Mac gets the Linux command contract from the shared test setup, so nine suites stop failing every Mac author preflight that selects them"
+  repo: remudero
+  priority: 1.4
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # it changes the PATH every test child inherits on macOS; a wrong shim changes what a suite observes
+  band_meaning: span
+  origin: "operator-session#mac-author-preflight-2026-11-16"
+  plan_refs:
+    - W1-T12174
+    - W1-T131
+    - W1-T12953
+  files:
+    - test/setup/linux-command-contract.ts
+    - test/setup/tmp-hygiene.ts
+    - test/deploy/the-nightly-state-backup-keeps-a-copy-of-the-container-config.test.ts
+    - test/infra/a-suite-that-runs-a-linux-host-script-on-a-mac-gets-the-linux-command-contract.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "On macOS every test process has a directory first on PATH whose chmod accepts the end-of-options marker, so a child that runs chmod with a mode, the marker and a path succeeds; the directory is created once per test process by the setup every runner already imports"
+      proof: "grep: W1-T13051 criterion 1 in test/infra/a-suite-that-runs-a-linux-host-script-on-a-mac-gets-the-linux-command-contract.test.ts"
+    - claim: "The shim changes nothing but the marker: mode and operands reach the real chmod unchanged, and the real chmod's exit status and error text are returned, so a chmod that should fail still fails"
+      proof: "grep: W1-T13051 criterion 2 in test/infra/a-suite-that-runs-a-linux-host-script-on-a-mac-gets-the-linux-command-contract.test.ts"
+    - claim: "No suite carries its own chmod shim: a census over test files fails on a suite that writes a chmod stub of its own, and the nightly state backup suite uses the shared one"
+      proof: "grep: W1-T13051 criterion 3 in test/infra/a-suite-that-runs-a-linux-host-script-on-a-mac-gets-the-linux-command-contract.test.ts"
+    - claim: "invariant:linux-unchanged — on Linux the setup adds nothing to PATH and writes no shim, and on macOS no command other than chmod is shadowed"
+      proof: "grep: W1-T13051 criterion 4 in test/infra/a-suite-that-runs-a-linux-host-script-on-a-mac-gets-the-linux-command-contract.test.ts"
+  rationale: |
+    MEASURED 2026-11-16 on the operator Mac (macOS, /bin/bash 3.2, Node 24.22.2), on a tree at origin/main 02fe3cacdb plus a plan-only change.
+
+    - The author preflight of W1-T12531 failed three tests in two suites its diff cannot reach. The same three fail on a tree at main: `host-update: STATE SNAPSHOT CONFIG COPY FAILED`.
+    - Cause, reproduced by hand: `chmod 700 -- <dir>` prints `chmod: --: No such file or directory` and exits 1. macOS chmod does not accept the end-of-options marker; GNU chmod does. `snapshot_container_config` in deploy/host-update.sh (W1-T12174, #18455, merged 2026-11-14) calls `chmod 700 -- "${dest}"` and `chmod 600 -- "${copied}"`. The script runs on Linux in production, so hosted CI is green.
+    - W1-T12174's own suite carries a private chmod stub with the comment "The host script runs on Linux; normalize BSD chmod's lack of `--` to that command-line contract". Every other suite that reaches the same code has none.
+    - All 36 suites that name deploy/host-update.sh, one file per command: 11 red on the Mac (25 passing).
+    - The same 11 with one thing changed, a chmod that drops the marker placed first on PATH: 9 turn fully green (a-derived-state-dir-with-no-ledger..., a-disk-reclaim-that-refuses..., a-failed-nightly-backup-alarms-the-fleet, agent-history-does-not-fill-the-root-disk, host-maintenance-shell-portability, selected-registry-shell-consumers, the-nightly-rung-snapshots..., the-nightly-state-snapshot-has-an-off-host-copy, the-state-snapshot-actually-runs-on-this-host), 22 failing tests fixed.
+    - Two stay red for other reasons, not this task's: test/fleet-heartbeat.test.ts (5 tests, each failing after 38 to 80 s) and test/agent-history-reclaim-reaches-the-bulk.test.ts (1 test, "W1-T3676: a refused reclaim is not reported as a clean nothing-to-do run").
+    - Cost: any Mac author preflight whose selection includes one of the nine fails for a red its diff did not cause. One of them also hung each test to its 300 s bound while holding the shared Mac test lock.
+  design: |
+    1. `test/setup/linux-command-contract.ts`: on darwin only, create one directory per test process (under the process's own temp root, so the existing sweep removes it), write a `chmod` that drops a bare `--` argument and execs /bin/chmod with the rest, and put the directory first on `process.env.PATH`. Suites build a child's PATH from `process.env.PATH`, which is how the measurement above reached them.
+    2. `test/setup/tmp-hygiene.ts` imports it, the way it already imports the other process-level setup modules, so every runner invocation gets it with no new flag.
+    3. The nightly state backup suite drops its private stub.
+    4. A census test fails on a test file that writes its own chmod stub.
+    INVARIANT linux-unchanged: on Linux the setup adds nothing to PATH and writes nothing, and on macOS the directory holds chmod and no other command.
+    NOT IN SCOPE: deploy/host-update.sh itself (its contract is Linux); the two suites that stay red for other reasons, which the builder reports with their failure text as separate items; any other GNU-only option a later script may use (add a shim here when one is measured).
+  falsifier: |
+    Stop putting the directory on PATH and criterion 1 must fail on macOS. Make the shim swallow a failing chmod's exit status and criterion 2 must fail. Give a suite its own chmod stub again and criterion 3 must fail. Add the directory on Linux, or a second command to it, and criterion 4 must fail. Restore and all pass.
+  note: |
+    reservation hand-off: run-unfiled-1794791933340 -> run-unfiled-1794791933340
+    Reserved with rmd next-task-id from a worktree at origin/main. Check refs/rmd-dispatch/W1-T13051 and any run branch before building. The test folder is the one rmd test-place computed for a stub importing the shared root helper. Criteria 1, 2 and the macOS half of 4 can only run on macOS: guard them with a stated skip on other platforms and give Linux its own assertions for criterion 4, so neither platform passes unrun. The measurement logs are kept by the operator session.

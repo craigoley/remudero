@@ -597,7 +597,9 @@ test("a narrow selector edge shard declares the test that covers its edge, so di
   assert.equal(task.risk, "low", "declaring the test file must not raise the edge repair's risk");
   const proofs = (task.acceptance ?? []).map((a) => a.proof);
   // W1-T12833: the third criterion is the template's declared invariant, behind its own proof.
-  assert.deepEqual(proofs, [...Array(2).fill("unit test: W1-T9041: the selector covers the recorded suite for every recorded edge"),
+  // W1-T13035: the first two claims each have their own proof; one proof behind both was shared-proof.
+  assert.deepEqual(proofs, ["unit test: W1-T9041: the selector covers the recorded suite for every recorded edge",
+    "unit test: W1-T9041: the shadow record reads the recorded suite as selected for every recorded edge",
     "unit test: W1-T9041: the selector still selects every suite it selected before the repair"]);
   assert.match(task.acceptance![2]!.claim, /^invariant:selector-keeps-its-selections — /);
   assert.ok(task.note?.includes(`asserts ${miss.file} is selected for each recorded edge`));

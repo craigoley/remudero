@@ -257,7 +257,7 @@ function ciLearningDraft(over: Partial<CiLearningShardDraft> = {}): CiLearningSh
   } as CiLearningShardDraft;
 }
 
-interface CensusMember {
+export interface CensusMember {
   /** The generator, as the task's acceptance names it. */
   name: string;
   /** The module that holds its call site, and the shared writer it calls there. */
@@ -267,7 +267,7 @@ interface CensusMember {
 }
 
 /** One member per call site of the shared writer. A new call site needs a member here, and a declaration there. */
-const CENSUS: readonly CensusMember[] = [
+export const CENSUS: readonly CensusMember[] = [
   { name: "ci-friction", module: "src/lib/ci-friction-gardener.ts", writer: "renderMachineShard", render: () =>
     [["check", "ci-log:coverage-ratchet"], ["fix_refusal", "census-precheck"]].map(([kind, name]) => ciFrictionShardYaml({
       price: { cause: { kind, name }, minutes: 1441, rounds: 457, prs: 291 }, rung: 1, owner: { files: ["src/lib/ci-parity.ts"], why: ["a"] }, rounds: [],
@@ -300,7 +300,7 @@ function sourceFiles(dir: string): string[] {
 }
 
 /** `<module>:<writer>` to the number of times the module calls that writer, the writer's own module left out. */
-function writerCallSites(): Record<string, number> {
+export function writerCallSites(): Record<string, number> {
   const sites: Record<string, number> = {};
   const files = sourceFiles(join(REPO_ROOT, "src"));
   assert.ok(files.length > 100, `the scan read only ${files.length} source files`);
