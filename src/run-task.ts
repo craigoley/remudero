@@ -19182,14 +19182,14 @@ export async function lintPlanForReview(
     return { ran: false, reason: `no merge base: ${String((e as Error).message).split("\n")[0]}` };
   }
   try {
-    if (options.signal?.aborted) return { ran: false, reason: "lint-plan aborted" };
+    if (options.signal?.aborted) return { ran: false, reason: "lint-plan aborted", aborted: true };
     const launch = childEntryArgv(repoRoot, "run-task", "src/run-task.ts", ["lint-plan", "--plan",
       join(headCheckoutDir, "plan", "tasks.yaml"), "--base", mergeBase, "--offline", "--repo-root", headCheckoutDir,
       ...(options.codeRoot === undefined ? [] : ["--code-root", options.codeRoot])],
       undefined, { log: options.log });
     options.log?.(CHILD_ENTRY_SPAWNED_STEP, childEntrySpawnedRow("run-task", "lint-plan", launch));
     const result = await run(launch.argv, { cwd: repoRoot, signal: options.signal });
-    if (options.signal?.aborted) return { ran: false, reason: "lint-plan aborted" };
+    if (options.signal?.aborted) return { ran: false, reason: "lint-plan aborted", aborted: true };
     if (result.error) return { ran: false, reason: `lint-plan could not start: ${result.error.message}` };
     if (result.signal) return { ran: false, reason: `lint-plan killed by ${result.signal}` };
     if (result.status === null) return { ran: false, reason: "lint-plan exited without a status" };

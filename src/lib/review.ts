@@ -815,7 +815,9 @@ export interface ReviewEvidence {
 
 export type PlanLintOutcome =
   | { ran: true; label: string; checked: number; violations: string[]; skipped?: string }
-  | { ran: false; reason: string };
+  // W1-T13151: `aborted` marks a lint the lane's own signal stopped. That lint judged nothing, so the review posts no
+  // verdict on it; every other `ran: false` is a lint that could not run and still withholds a plan-only PASS.
+  | { ran: false; reason: string; aborted?: true };
 
 /** See {@link ReviewVerdict.unwiredAdvisories}'s doc for what each code means and why
  *  `net_state_claim` never appears here (retro-time only). */

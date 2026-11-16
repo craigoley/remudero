@@ -544,6 +544,13 @@ export function buildSweepEffects(
       deps.log("sweep.review_reuse_unreadable", { pr_number: pr.prNumber, head_sha: pr.headSha });
       return reviewFallbackRunner(pr.prNumber, pr.isPlanFiling, reviewAttemptId, onPhase, pr.excludeProviders);
     }
+    // W1-T13151: a plan-only verdict rests on its own lint-plan run. One whose lint did not run judged nothing
+    // (#18803: "lint-plan aborted" was re-posted on the next head 10 s after admission), so it is never carried forward.
+    const priorLint = verdict.planLint;
+    if (verdict.planOnly === true && priorLint?.ran !== true) {
+      const lintReason = priorLint === undefined ? "no plan lint recorded" : !priorLint.ran ? priorLint.reason : "plan lint unreadable";
+      return fallbackToFullReview(`prior-plan-lint-did-not-run: ${lintReason}`);
+    }
     const reusedCode = await judgeReviewerCode(reusedRow?.reviewer_code_sha);
     if (reusedCode.status !== "fresh") return fallbackToFullReview(`prior-reviewer-code-${reusedCode.status}`);
     const poster = failureRecordingPoster();

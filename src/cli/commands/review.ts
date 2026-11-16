@@ -25,7 +25,7 @@ import { resolveInstallRoot } from "../../lib/install-root.js";
 import { escalate, ghIssueGateway, tryEscalate } from "../../lib/escalate.js";
 import { combinedStatusRestArgs, compareRestArgs, mapRestPr, rollupForAsync, tryFetchReviewReuseFacts, type ReviewReuseFacts, type RestPullRow } from "../../lib/open-prs-rest.js";
 import { ghJsonAsync, ghTextAsync } from "../../lib/github-transport.js";
-import { appendLedger } from "../../lib/ledger.js";
+import { appendLedger, REVIEW_LANE_ABORTED_STEP } from "../../lib/ledger.js";
 import { requiredSemanticDecisionDigest } from "../../lib/required-semantic-review.js";
 import { classifyReviewOutcome, recordedReviewVerdictLines, reviewReplayLedgerFields, type ReviewReplayInput, type ReviewOutcomeDecision } from "../../lib/review-outcome-class.js";
 import { type AdmissionObserver } from "../../lib/contributor-admission.js";
@@ -948,6 +948,28 @@ export async function runReview(host: ReviewCommandHost, args: {
   // floor, lint-plan, and the plan-PR emitter — is untouched and still runs.
   // The predicate is review.ts's own `planOnlyDiff`, never a second copy of the expression.
   const planOnlySkip = planOnlyDiff(diff);
+  // W1-T13151: the lane's signal aborted (or the lint says its own run was aborted), so this review judged nothing.
+  // It posts no remudero-review verdict and writes one review.lane_aborted row. The pending status stays, so the
+  // next sweep pass admits this head again through the ordinary post-review route. A lint that could not run for
+  // any other reason does not stop here: it still withholds a plan-only PASS (invariant a-lint-that-never-ran-is-no-pass).
+  const laneAbortedResult = (phase: "plan-lint" | "posting", lint: PlanLintOutcome | undefined): ReviewRunResult | undefined => {
+    const lintAborted = lint !== undefined && !lint.ran && lint.aborted === true;
+    if (signal?.aborted !== true && !lintAborted) return undefined;
+    const reason = lintAborted ? lint.reason : "lane signal aborted";
+    log(REVIEW_LANE_ABORTED_STEP, {
+      pr_number: reviewPrNumber(prUrl), pr_url: prUrl, head_sha: headSha, phase, reason,
+      review_decision_digest: decisionDigest, ...(args.shadow ? { shadow: true } : {}),
+    });
+    say(`remudero-review: lane aborted for ${headSha.slice(0, 7)} (${phase}) — ${reason}; no verdict posted`);
+    return {
+      state: "pending", criteria: [], testTheater: false,
+      summary: `review lane aborted (${phase}): ${reason}; no verdict posted`,
+      floorDegraded: false, capped: false, keywordOnly: false, planOnly: planOnlySkip,
+      ...(lint === undefined ? {} : { planLint: lint }),
+      headSha, reviewerOutcome: `not_judged_lane_aborted_${phase}`, verdictWithheld: `lane aborted: ${reason}`,
+      reviewDecisionDigest: decisionDigest,
+    };
+  };
   // Snapshot the optional mount before entering the async temp-dir callback. Besides making the
   // optional semantic-sweep path type-safe, this keeps the spawn's three controls visibly sourced
   // from the resolved reviewer mount — the mount-wiring ratchet intentionally checks these exact
@@ -1236,6 +1258,10 @@ export async function runReview(host: ReviewCommandHost, args: {
   const planLint = planOnlySkip ? await (args.lintPlanForReviewFn ?? lintPlanForReview)(args.headCheckoutDir,
     undefined, undefined, { signal, log }) : undefined;
   phases.lint = systemClock.now();
+  // W1-T13151 (invariant aborted-is-not-judged): a lane the restart drain aborted keeps running, and its lint
+  // returned "lint-plan aborted". Judging that would post a binding FAILURE nothing judged (#18803, 2026-11-16).
+  const abortedAtLint = laneAbortedResult("plan-lint", planLint);
+  if (abortedAtLint !== undefined) return abortedAtLint;
   const computed = await preparedDecision.judge({
     ...proofEvidence, planLint, semantic, semanticClauses, reviewerUnable,
     diff, report,
@@ -1382,6 +1408,9 @@ export async function runReview(host: ReviewCommandHost, args: {
   if (reviewerCodeFreshness !== undefined && reviewerCodeFreshness.status !== "unreadable") {
     replayReviewerCodeSha = reviewerCodeFreshness.codeSha;
   }
+  // W1-T13151: the drain can abort the lane while the verdict is judged; an aborted lane posts nothing binding.
+  const abortedAtPost = laneAbortedResult("posting", planLint);
+  if (abortedAtPost !== undefined) return abortedAtPost;
   phases.postStart = systemClock.now();
   reportPhase("posting");
   const poster = failureRecordingPoster();
