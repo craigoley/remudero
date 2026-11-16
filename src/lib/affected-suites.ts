@@ -751,6 +751,21 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   if (input.files.has(ciFrictionFileAdmission) && files.some((f) => ciFrictionFileAdmissionEdges.includes(f))) {
     pathReaders.push(ciFrictionFileAdmission);
   }
+  // W1-T9511: recorded miss on coverage run 38608353967, PR #11748.
+  const envNames = suitePath("test/every-env-name-a-source-file-reads-is-registered.test.ts");
+  const envNamesEdges = [
+    "src/lib/board-worker.ts",
+    "src/lib/child-entry-argv.ts",
+    "src/lib/read-model-slow-lane.ts",
+    "src/lib/read-model-worker.ts",
+    "src/lib/serve.ts",
+    "src/lib/status.ts",
+    "src/lib/worker-heaps.ts",
+    suitePath("test/serve-starts-its-workers-from-current-worker-bundles.test.ts"),
+  ];
+  if (input.files.has(envNames) && files.some((f) => envNamesEdges.includes(f))) {
+    pathReaders.push(envNames);
+  }
   const recent = input.recentFailures ?? [];
   for (const s of pathReaders) pick(s, "reads a changed file by path");
   // W1-T6084: the OBSERVED readers and census readers, beside the source-text rules above (which still

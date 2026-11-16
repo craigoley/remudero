@@ -15,7 +15,6 @@
     - W1-T6107
     - W1-T9953
   files:
-    - .github/workflows/coverage-nightly.yml
     - scripts/build-read-map.mjs
     - scripts/preflight-author.mjs
     - src/lib/affected-suites.ts
@@ -27,7 +26,7 @@
   status: queued
   attempts: 0
   acceptance:
-    - claim: "coverage-nightly.yml records each suite's reads in a `read-map-shards` matrix job (the eight shards, uninstrumented, RMD_READ_MAP_DIR set) and builds an `rmd-read-map-v2` file for the commit it tested in a `read-map` job, uploaded as the `read-map` artifact beside the `test-impact-map` artifact. scripts/build-read-map.mjs merges the records with `readReadRecords` and `buildReadMap`. A red shard uploads no records, a build that fails or passes its time bound uploads no map, and both jobs are continue-on-error, so the floor run, its ratchet and the notify job run as before"
+    - claim: "scripts/build-read-map.mjs merges the records in a directory with `readReadRecords` and `buildReadMap` into one `rmd-read-map-v2` file for the commit it is given, and when any record problem is found it exits non-zero and writes no map"
       proof: "grep: W1-T12505 criterion 1 in test/ci/the-author-preflight-selects-the-readers-of-a-deploy-or-json-change-from-mains-read-map.test.ts"
     - claim: "When a changed path is a read-mapped path, scripts/preflight-author.mjs reads the newest `read-map` artifact of a successful coverage-nightly run on main into a cache file, within a bounded time, and passes `readReadMapInput(root, mapPath, base)` to the selector as `readMap`. This is the first production caller of `readReadMapInput`"
       proof: "grep: W1-T12505 criterion 2 in test/ci/the-author-preflight-selects-the-readers-of-a-deploy-or-json-change-from-mains-read-map.test.ts"
@@ -76,13 +75,8 @@
   design: |
     1. Add scripts/build-read-map.mjs: read the record directory with `readReadRecords`, build with `buildReadMap(records, { sha })`,
        write the map. It exits non-zero when any record problem is found, so no partial map is written.
-    2. In coverage-nightly.yml, after the merge job: a `read-map-shards` job runs ci.yml's eight shards (`--select-all
-       --shard n/8`) without coverage, with RMD_READ_MAP_DIR and RMD_READ_MAP_ROOT set (the existing hook,
-       test/setup/read-map.ts, loaded by test/setup/tmp-hygiene.ts). A shard whose suite exits non-zero uploads no
-       records, so its suites are absent from the map and the selector picks them for every read-mapped change. A
-       `read-map` job downloads the records, builds the map within a 5-minute bound and uploads `read-map` (retention 14
-       days, if-no-files-found: ignore). Both jobs are continue-on-error; a failed or late build is reported in the step
-       summary. The `shards`, `merge` and `notify` jobs do not change.
+    2. MOVED to W1-T13164 (see AMENDED below): the two coverage-nightly.yml jobs that record each suite's reads, run
+       step 1's script and upload the `read-map` artifact.
     3. In scripts/preflight-author.mjs, only when a changed path is a read-mapped path (`isReadMappedPath`), fetch the
        newest `read-map` artifact of a successful coverage-nightly run on main (the `gh run list` and `gh run download`
        calls ci.yml:1838-1844 makes) into a cache under the author's tmp dir, bounded to 60 s in all. Pass
@@ -113,10 +107,29 @@
     name or a directory above it, itself or through a test/ file it imports, is never left out of that path's selection.
     NOT IN SCOPE: test/helpers, .remudero and hooks paths (a separate task); the impact arm; any change to CI's selection;
     recording child processes' reads (W1-T12536).
+    AMENDED 2026-11-16 (operator session): step 2 (the `read-map-shards` and `read-map` jobs in coverage-nightly.yml),
+    the workflow half of criterion 1 and the falsifier sentence about the nightly job moved to W1-T13164, and
+    `.github/workflows/coverage-nightly.yml` left `files:`. Why: the daemon never dispatches a task whose `files:`
+    names a path under .github/workflows/ (W1-T5351, `workflowPaths` in src/lib/drain.ts: the fleet App cannot push a
+    workflow file), so this whole task waited for an operator build that nothing announced. An operator session
+    hand-builds W1-T13164, which depends on this task because its job runs step 1's script.
+    WHAT STAYS HERE: steps 1 and 3 to 8 and criteria 2 to 6, unchanged, and criterion 1 cut down to what step 1 already
+    promises for scripts/build-read-map.mjs. The script stays on this side because it needs no workflow to be built
+    or tested: it calls `readReadRecords` and `buildReadMap`, both on main, over a directory of records a test can
+    write. Step 7's exclusion stays with it: the completeness check only looks up paths a workflow or package.json
+    already names (`findUnexplainedGaps`, scripts/lib/instrument-surface-census.mjs), so the entry is inert until
+    W1-T13164 lands and then already present, which leaves that diff a workflow and its test.
+    WHAT THIS TASK DELIVERS ALONE: until a nightly run has uploaded a `read-map` artifact, the fetch of step 3 finds
+    none, which is criterion 4's named `mapProblem` and today's selection. The narrowing of criterion 3 reaches a
+    real author run only after W1-T13164 is merged and one nightly run has succeeded.
+    READ at origin/main ef8b74910f, so neither half is done: scripts/build-read-map.mjs does not exist;
+    `git grep -n -e 'read-map'` finds no line in .github/workflows/coverage-nightly.yml, whose jobs are `shards`,
+    `merge` and `notify`; and `readReadMapInput` appears under src/, scripts/ and bin/ only where it is declared
+    (src/lib/affected-suites.ts:214 `export function readReadMapInput(`).
   falsifier: |
     Drop the `readMap` argument and criterion 3 must fail. Drop the unknown-coverage naming rule and criterion 6 must fail.
-    Let a root-level json path narrow past an unknown suite and criterion 4 must fail. Fail the nightly job on a build
-    error and criterion 1 must fail. Restore and require all six to pass.
+    Let a root-level json path narrow past an unknown suite and criterion 4 must fail. Let scripts/build-read-map.mjs
+    write a map when a record is not a read record and criterion 1 must fail. Restore and require all six to pass.
   note: |
     Id W1-T12505 reserved for run-unfiled-1794582098000 with ~/rmd-work/bin/reserve-id.sh.
     Amended by the hand build on plan-amend-W1-T12505-1794589154000 (per-path narrowing, operator session decision).
