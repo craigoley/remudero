@@ -381,7 +381,8 @@ async function judgeHolder(
     return { ok: false, reason: "competing_branch_claim_held" };
   }
   const state = ports.probeProcess(holder);
-  if (state !== "dead") return { ok: false, reason: `process_${state}` };
+  // A live holder of this recovery's or authorization's own claim is a concurrent invocation.
+  if (state !== "dead") return { ok: false, reason: priorMs === undefined ? "competing_branch_claim_held" : `process_${state}` };
   if (priorMs === undefined) return { ok: true };
   const descendants = ports.descendants(holder.pid);
   if (descendants.state !== "none") return { ok: false, reason: `descendants_${descendants.state}` };
@@ -467,12 +468,11 @@ function claimFacts(path: string, ours: string, prior: HeldClaim["prior"]): Stal
 }
 
 /** Prior-lock evidence this recovery already compare-and-reclaimed, re-validated against history. */
-function recordedPrior(rows: readonly Row[], auth: AuthorizationRow, recoveryId: string, ctx: ClaimContext): HeldClaim["prior"] {
+function recordedPrior(rows: readonly Row[], auth: AuthorizationRow, recoveryId: string, ctx: ClaimContext, file: ReceiptFile): HeldClaim["prior"] {
   const held = rows.filter((row) => row.step === PR_OWNER_RECOVERY_RECEIPT_STEP && row.recovery_id === recoveryId);
-  const candidates = [
-    ...held.map((row) => (row.liveness as StaleFixDispatchReceipt["liveness"] | undefined)?.fix_branch_claim?.reclaimedPrior),
-    auth.priorClaim,
-  ];
+  const reclaimedIn = (row: Row) => (row.liveness as StaleFixDispatchReceipt["liveness"] | undefined)?.fix_branch_claim?.reclaimedPrior;
+  // Newest first: the crash-orphaned canonical file, then held receipts, then the authorization.
+  const candidates = [auth.priorClaim, ...held.map(reclaimedIn), file.state === "valid" ? reclaimedIn(file.receipt) : undefined];
   for (const rp of candidates.reverse()) {
     if (rp === undefined || typeof rp?.run_id !== "string" || typeof rp.startedAt !== "string") continue;
     const parsed = parsePriorDispatchClaim(rp, ctx.tuple, rows, ctx.fixRoundClaimId);
@@ -728,16 +728,18 @@ async function gather(
     return { reason: `pr_unreadable: ${messageOf(error)}` };
   }
   const latest = newestDispatch(ledger.rows, t.prNumber);
+  // The authorized dispatch as the ledger still records it; the newest one is compared separately.
+  const own = ledger.rows.find((row) => row.step === "fix.dispatch" && prOf(row) === t.prNumber && row.run_id === t.runId && row.round_id === t.roundId);
   const observed: StaleFixDispatchIdentity = {
-    repo: pr.repo, prNumber: pr.prNumber, taskId: String(latest?.task_id ?? ""), dispatchRunId: String(latest?.run_id ?? ""),
-    dispatchRoundId: String(latest?.round_id ?? ""), headSha: pr.headSha, baseSha: pr.baseSha, branch: pr.branch, authorizationId,
+    repo: pr.repo, prNumber: pr.prNumber, taskId: String(own?.task_id ?? ""), dispatchRunId: String(own?.run_id ?? ""),
+    dispatchRoundId: String(own?.round_id ?? ""), headSha: pr.headSha, baseSha: pr.baseSha, branch: pr.branch, authorizationId,
   };
   const latestTs = typeof latest?.ts === "string" ? latest.ts : undefined;
   return {
     latestTs,
     facts: {
       observed,
-      ...(latest !== undefined ? { latestDispatch: { runId: observed.dispatchRunId, roundId: observed.dispatchRoundId, ...(latestTs ? { ts: latestTs } : {}) } } : {}),
+      ...(latest !== undefined ? { latestDispatch: { runId: String(latest.run_id ?? ""), roundId: String(latest.round_id ?? ""), ...(latestTs ? { ts: latestTs } : {}) } } : {}),
       process: processOf(ports, prior?.holder),
       descendants: prior ? ports.descendants(prior.holder.pid) : { state: "unknown" },
       cwdCensus: await cwdOf(ports, t.branch),
@@ -803,7 +805,7 @@ async function applyUnderClaim(
   if (admin.login !== auth.login) return { outcome: "refused", reason: `authorization_login_mismatch:${admin.login}` };
   const file = readReceiptFile(ports.stateDir, recoveryId, t, authorizationId);
   if (file.state === "invalid") return { outcome: "unknown", reason: file.reason };
-  const prior = claim.prior ?? recordedPrior(ledger.rows, auth, recoveryId, { ...ctx, rows: ledger.rows });
+  const prior = claim.prior ?? recordedPrior(ledger.rows, auth, recoveryId, { ...ctx, rows: ledger.rows }, file);
   const expected: StaleFixDispatchExpected = {
     ...identityOf(t, authorizationId), recoveryInvocationRunId: claim.storedRunId,
     ...(prior !== undefined ? { priorFixBranchClaimRunId: prior.reclaimed.run_id } : {}),
