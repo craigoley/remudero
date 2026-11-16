@@ -1,0 +1,46 @@
+- id: W1-T13231
+  title: "The stale inflight lock suite dates its locks from the clock it runs under, so it stops failing a week from now"
+  repo: remudero
+  priority: 1.0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the suite pins how a recycle reclaims a dead host process's lock; a wrong fixture date would hide or invent a reclaim
+  band_meaning: span
+  origin: "operator-session#clock-sweep-2026-11-16"
+  plan_refs:
+    - W1-T12316
+    - W1-T6078
+    - W1-T13162
+  files:
+    - test/a-stale-inflight-lock-written-by-a-host-process-no-longer-blocks-recycles.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Every lock fixture the suite writes for a lock this host's dead or reused process left behind is dated relative to the clock the test runs under, and the suite passes with the clock shifted forward by a year"
+      proof: "grep: W1-T13231 criterion 1 in test/a-stale-inflight-lock-written-by-a-host-process-no-longer-blocks-recycles.test.ts"
+    - claim: "invariant:the-reclaim-rules-keep-their-meaning — every existing test keeps its title and asserts the same reclaim, refusal or keep it asserts today, and a lock whose age the policy says is fresh is still kept"
+      proof: "grep: W1-T13231 criterion 2 in test/a-stale-inflight-lock-written-by-a-host-process-no-longer-blocks-recycles.test.ts"
+  rationale: |
+    OBSERVED 2026-11-16 by the operator session. Pull request #18903 (W1-T13162) changed .github/workflows/clock-sweep.yml, so the clock sweep ran on it (run 43921421378, report job 2026-11-16T18:10Z). Its report:
+    - "NEW DRIFT — 2 suite(s) NOT in scripts/clock-sweep-baseline.json's recorded set", the first being this suite.
+    - "fails by : +7 days from now"; failing tests "W1-T12316 criterion 2: a lock this host wrote, whose pid is alive but started after the lock, is reclaimed with both start times" and "W1-T12316 criterion 9: the janitor reclaims a dead or reused lock of its own host in its six-hour and hourly passes".
+    - The failure detail: the recycle refused with `recycle-blockers-json: [{"kind":"lock","task_id":"W1-T12114","run_id":"W1-T12114-r2","age_s":-34556398}]`, a lock age of minus 400 days.
+    - The sweep's own hint: "the fixture holds a DATE LITERAL compared against a real clock".
+    - READ on origin/main: the suite writes lock fixtures with `startedAt: "2026-11-11T09:13:44.000Z"` (at least six sites, for example the `lock` objects of criteria 2 and 9 and the janitor fixtures), while other fixtures in the same file already use `iso(now - 6 * 3600_000)`.
+    - So on or after about 2026-11-23 the suite fails on main and every pull request whose selection holds it goes red for a reason no change caused. The scheduled clock sweep on main failed on 2026-11-02 and 2026-11-09 and was cancelled on 2026-11-16 (read from the workflow's run list), so the weekly guard has not been telling anyone.
+    - The suite was added by W1-T12316 (f0337a4f69, 2026-11-13).
+  design: |
+    MEASURE FIRST: run the suite with the clock shifted by +7 and +400 days (`FK_SHIFT_DAYS=<n> node --test --import tsx --import ./test/setup/tmp-hygiene.ts --import scripts/clock-shift.mjs <file>`) and list every failing test and the literal each one reads. Put the list in the PR body.
+
+    1. Each literal start time becomes a value derived from the test's clock, keeping its relation to the policy it is judged by: a lock meant to predate the process or the boot keeps a margin that the test asserts against that policy, rather than an absolute date (PR #1116 is the shape the sweep's hint cites).
+    2. Criterion 1's test runs the reclaim under a shifted clock in-process (the suite already has a `now`) and passes.
+    3. Fixtures that are deliberately ancient (for example the 2026-08-18 lock of another host) may keep a literal if the assertion only needs "older than any bound"; say which and why.
+    INVARIANT the-reclaim-rules-keep-their-meaning: only fixture dates change.
+    NOT IN SCOPE: the reclaim code; test/recycle-container.test.ts (W1-T13232); the clock sweep's baseline (do not add this suite to `driftingSuitesAtCapture`: fix it).
+  falsifier: |
+    Put the literal `2026-11-11T09:13:44.000Z` back in criterion 2's lock and criterion 1 must fail under a +400 day shift. Change an expected reclaim or keep and criterion 2 must fail. Restore and both pass.
+  note: |
+    reservation hand-off: run-unfiled-1794854438459 -> run-unfiled-1794854438459
+    Reserved with rmd next-task-id from a worktree at origin/main. Time-boxed: the suite is expected to fail on main from about 2026-11-23, so this is worth building before then. The file is an existing suite directly under test/ and is edited in place.
