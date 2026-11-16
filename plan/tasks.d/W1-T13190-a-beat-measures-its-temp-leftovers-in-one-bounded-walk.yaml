@@ -1,0 +1,47 @@
+- id: W1-T13190
+  title: "A beat measures its temp leftovers in one bounded walk, so a host with a thousand leftover entries no longer spends two minutes of every beat on them"
+  repo: remudero
+  priority: 0.7
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the heartbeat is the fleet's off-host health signal; a beat that changes what it measures changes what an operator reads
+  band_meaning: span
+  origin: "operator-session#mac-author-preflight-2026-11-16"
+  plan_refs:
+    - W1-T12258
+    - W1-T13189
+    - W1-T13157
+  files:
+    - scripts/fleet-heartbeat.sh
+    - test/daemon/a-beat-measures-its-temp-leftovers-in-one-bounded-walk.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The number of measuring commands a beat starts for its temp leftovers does not grow with the number of leftover entries: a temp root holding hundreds of matching entries is measured with the same count of commands as one holding three"
+      proof: "grep: W1-T13190 criterion 1 in test/daemon/a-beat-measures-its-temp-leftovers-in-one-bounded-walk.test.ts"
+    - claim: "The published leftover total and its device line are the same as today's for the same entries, and a walk that is cut by its time bound still publishes unknown and names the cut, never a partial total"
+      proof: "grep: W1-T13190 criterion 2 in test/daemon/a-beat-measures-its-temp-leftovers-in-one-bounded-walk.test.ts"
+    - claim: "invariant:every-other-consumer-line-is-unchanged — the worktrees, state, docker, scratch, coverage, transcripts and cache lines keep their names, values and unknown rules"
+      proof: "grep: W1-T13190 criterion 3 in test/daemon/a-beat-measures-its-temp-leftovers-in-one-bounded-walk.test.ts"
+  rationale: |
+    MEASURED 2026-11-16 by the builder of W1-T13146 on the operator Mac, and READ on the fleet host the same day by the operator session.
+
+    - `consumer_kb` in scripts/fleet-heartbeat.sh takes a list of paths and, for each, runs `du_idle` (one `du -sk` under nice and a time bound) and `df_field`. Since #18545 (W1-T12258) the temp-leftover consumer passes one path per `rmd-*` / `remudero-*` entry of each temp root.
+    - On the Mac, with 1,190 such entries, an xtrace of one beat took 129 s; 117 s was in that loop, 1,127 `du` calls.
+    - On the fleet host the same day: 140 matching entries in /tmp (31 `rmd-census-capture-*`, 11 `rmd-repo-layout-*`, 8 `rmd-pool-run-*` and others), and the beat stamped 15:00:01Z was published at 15:00:07Z. So the host pays seconds today; the cost is per entry and nothing bounds the count (W1-T13191).
+    - The beat is installed to run every few minutes and its age is what the watcher alarms on, so a beat whose runtime follows a leak is a liveness risk in waiting.
+  design: |
+    MEASURE FIRST on the host, read-only: the beat's wall time and the leftover count over a day of published beats, from the heartbeat-azure branch's history. Put the series in the PR body. If the count on the host stays in the low hundreds, say so: the urgency is then the Mac's, and W1-T13189 and W1-T13191 carry most of it.
+
+    1. The temp-leftover consumer measures each temp ROOT's matching entries with one `du` invocation per root (all matching paths as arguments, or one walk with a name filter) and one `df` per root, under the existing idle priority and time bound.
+    2. The total, the devices line, the unknown rule and the cut marker keep today's meaning.
+    3. The test counts the measuring commands through the heartbeat harness's command stubs for a root with three entries and one with several hundred.
+    INVARIANT every-other-consumer-line-is-unchanged: only the temp-leftover consumer changes how it walks.
+    NOT IN SCOPE: what leaves the entries behind (W1-T13191); any other consumer; the watcher.
+  falsifier: |
+    Measure one entry per command again and criterion 1 must fail. Publish a partial total for a cut walk, or change the total for the same entries, and criterion 2 must fail. Change another consumer's line and criterion 3 must fail. Restore and all pass.
+  note: |
+    reservation hand-off: run-unfiled-1794841356902 -> run-unfiled-1794841356902
+    Reserved with rmd next-task-id from a worktree at origin/main. The test folder is the one rmd test-place computed today for stubs that import the heartbeat harness. macOS and GNU `du` differ in flags: use only what both accept, and say in the PR what was run on which.

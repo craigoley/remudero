@@ -15,7 +15,7 @@ import { creditsByAnchoredTrailer, refusesAsPlanOnly } from "./status.js";
 import { createLedgerProjector, openProjectorReadModel, type LedgerRowProjection } from "./ledger-projector.js";
 import { acquireLease, releaseLease, withWriteTransaction } from "./read-model-db.js";
 import { parse as parseYaml } from "yaml";
-import { inboxSemanticDigest, inboxProposalRevision, mechanicalAskPurpose, validInboxTerminalProof, readInboxGardenerStore,
+import { inboxSemanticDigest, inboxProposalRevision, mechanicalAskPurpose, retirementAsk, validInboxTerminalProof, readInboxGardenerStore,
   writeInboxGardenerStore, withInboxGardenerLock, readInboxGardenerFile, type InboxGardenerScope, type InboxGardenerStore, type InboxLifecycleEvent,
   inboxOperatorIntent, inboxMechanicalTaskDigest, inboxGardenerSource, inboxGardenerTaskFact, inboxGardenerMode, type InboxGardenerMode, sameInboxGardenerScope, type InboxGardenerTaskFact, type InboxTerminalProof, type RetirementProposal } from "./inbox-retirement.js";
 
@@ -50,8 +50,11 @@ export function inboxGardenerSemanticInput(c: InboxGardenerCandidate, proof?: In
   // Snapshot restamps, audit windows, global main advances, and our own diagnostics are deliberately absent.
   return inboxSemanticDigest([inboxProposalRevision(c.proposal), c.task ?? null, c.dependencies ?? [], c.dependencyMerge ?? [], c.sourcePolicy ?? null, c.successor ?? null, c.operatorIntent, c.unansweredReply, c.resolvedByOperator, proof ?? null]);
 }
-const protectedCandidate = (c: InboxGardenerCandidate, scope: InboxGardenerScope) => c.task?.id === "W1-T216" || c.task?.dispatch_hold === true ||
-  c.task?.repo !== scope.repository.split("/")[1] || !mechanicalAskPurpose(c.proposal) || !c.task || mechanicalAskPurpose(c.proposal)?.taskDigest !== inboxMechanicalTaskDigest(c.task);
+const protectedCandidate = (c: InboxGardenerCandidate, scope: InboxGardenerScope) => {
+  const ask = retirementAsk(c.proposal);
+  return c.task?.id === "W1-T216" || c.task?.dispatch_hold === true || c.task?.repo !== scope.repository.split("/")[1] || !ask || !c.task ||
+    ask.kind === "mechanical" && ask.purpose.taskDigest !== inboxMechanicalTaskDigest(c.task);
+};
 const qualified = (p: InboxGardenerPack, scope: InboxGardenerScope, now: number) =>
   sameInboxGardenerScope(p.scope, scope) && /^[a-f0-9]{40}$/.test(p.codeSha) && /^[a-f0-9]{64}$/.test(p.snapshotKey) &&
   Number.isFinite(Date.parse(p.generatedAt)) && now - Date.parse(p.generatedAt) >= 0 && now - Date.parse(p.generatedAt) <= INBOX_STALE_AFTER_MS &&
@@ -124,12 +127,17 @@ export async function runInboxGardener(options: { stateDir: string; scope: Inbox
           scope: { repository: options.scope.repository, instance: options.scope.instance, proposalId: p.id, taskId: candidate.task.id },
           snapshotKey: pack.snapshotKey, at, authority: "automatic", heldAtRetirement: false },
           inputDigest: digest, proposalRevision: inboxProposalRevision(p), operatorIntent: candidate.operatorIntent, proof: proof!, proofId,
-          codeSha: pack.codeSha, reason: `${proof!.kind} positively resolves this mechanical proof-repair ask`, mirrored: false };
+          codeSha: pack.codeSha, reason: retirementAsk(p)?.kind === "finished-task"
+            ? `${proof!.kind} shows this ask's task ${candidate.task.id} already shipped; operator ruling 2026-11-16 retires such asks reversibly`
+            : `${proof!.kind} positively resolves this mechanical proof-repair ask`, mirrored: false };
         store.events.push(event); store.entries[p.id] = { digest, decision: "retire_proven", reason: event.reason };
         writeInboxGardenerStore(options.stateDir, store); // authoritative effect precedes retryable mirrors
         await options.ports.mirror(event, pack); event.mirrored = true; retired++;
       } else if (proven) {
         store.entries[p.id] = { digest, decision: "retire_proven_shadow", reason: "Positive mechanical proof observed; shadow mode makes no transition" };
+      } else if (retirementAsk(p)?.kind === "finished-task") {
+        // W1-T13197: an unshipped task leaves its human ask open; there is nothing for a judge to decide.
+        store.entries[p.id] = { digest, decision: "keep_unfinished", reason: "Its task has not merged or been retired, so the ask stays open" };
       } else {
         if (judged >= limits.judges) break;
         store.entries[p.id] = { digest, decision: "needs_triage", reason: "No positive terminal proof", judge: options.ports.judge ? "started" : "unconfigured" };
@@ -283,7 +291,7 @@ export function defaultInboxGardenerPorts(options: { stateDir: string; scope: In
         inboxSemanticDigest(snapshot?.proposals) === inboxSemanticDigest(proposals) ? "observed" : "unavailable", github: snapshot?.attentionCensus?.sources.githubProjection ?? "unavailable",
         ledger: ledger.state, threads: threads.status === "ok" ? "observed" : "unavailable" },
       candidates: proposals.map(proposal => {
-        const taskId = mechanicalAskPurpose(proposal)?.taskId;
+        const taskId = retirementAsk(proposal)?.taskId;
         const task = taskId ? plan.byId.get(taskId) : undefined;
         const messages = threads.status === "ok" ? threads.threads.get(inboxThreadId(proposal.id)) ?? [] : [];
         const last = messages.at(-1);
@@ -299,43 +307,45 @@ export function defaultInboxGardenerPorts(options: { stateDir: string; scope: In
   };
   return { capture, judge: options.judge,
     proof: async candidate => {
-      const purpose = mechanicalAskPurpose(candidate.proposal);
-      if (!purpose || !candidate.task) return undefined;
+      const ask = retirementAsk(candidate.proposal);
+      if (!ask || !candidate.task) return undefined;
+      const purpose = ask.kind === "mechanical" ? ask.purpose : undefined, taskId = ask.taskId;
       if (candidate.task.retirement && candidate.task.status === "blocked") {
-        const path = plan.byId.get(purpose.taskId)?.sourcePath;
+        const path = plan.byId.get(taskId)?.sourcePath;
         if (!path) throw new Error("plan retirement blob unavailable");
         const gitRoot = dirname(dirname(options.planPath));
         const [commit, blob, current] = await Promise.all([hostWorktreeGitAsync(gitRoot, ["rev-parse", "HEAD"], { timeout: 5000 }),
           hostWorktreeGitAsync(gitRoot, ["rev-parse", `HEAD:${relative(gitRoot, path)}`], { timeout: 5000 }),
           hostWorktreeGitAsync(gitRoot, ["hash-object", "--", path], { timeout: 5000 })]);
         if (blob.trim() !== current.trim()) throw new Error("plan retirement differs from its authoritative committed blob");
-        return { kind: "plan-retirement", taskId: purpose.taskId, repository: options.scope.repository, instance: options.scope.instance,
+        return { kind: "plan-retirement", taskId, repository: options.scope.repository, instance: options.scope.instance,
           commit: commit.trim(), blob: blob.trim(), retirement: candidate.task.retirement };
       }
-      if (candidate.successor?.open && candidate.successor.proposal && mechanicalAskPurpose(candidate.successor.proposal) &&
+      // W1-T13197: a finished-task ask retires only on its own task's merge or plan retirement.
+      if (purpose && candidate.successor?.open && candidate.successor.proposal && mechanicalAskPurpose(candidate.successor.proposal) &&
         candidate.proposal.evidenceAnchors.every(a => candidate.successor!.proposal.evidenceAnchors.some(b => inboxSemanticDigest(a) === inboxSemanticDigest(b))))
         return { kind: "successor", taskId: purpose.taskId, repository: options.scope.repository, instance: options.scope.instance,
           successorId: candidate.successor.proposal.id, revision: inboxProposalRevision(candidate.successor.proposal), predecessorCriteria: purpose.criteriaDigest, present: true, open: true };
-      const handoff = retainedRows.find(row => row.step === "ratify.approved" && row.released === "verify-human" && row.author_class === "operator" && row.task_id === purpose.taskId &&
+      const handoff = purpose && retainedRows.find(row => row.step === "ratify.approved" && row.released === "verify-human" && row.author_class === "operator" && row.task_id === purpose.taskId &&
         row.proposal_id === candidate.proposal.id && row.repository === options.scope.repository && row.instance === options.scope.instance && row.handoff_kind === "proof-repair" && typeof row.receipt_id === "string" && typeof row.run_id === "string");
-      if (handoff) return { kind: "handoff", taskId: purpose.taskId, repository: options.scope.repository, instance: options.scope.instance, proposalId: candidate.proposal.id,
+      if (purpose && handoff) return { kind: "handoff", taskId: purpose.taskId, repository: options.scope.repository, instance: options.scope.instance, proposalId: candidate.proposal.id,
         receiptId: handoff.receipt_id, runId: handoff.run_id, authority: "operator", released: "verify-human" };
       const fields = "number,url,state,headRefName,headRefOid,body,mergeCommit";
       let detailReads = 0;
-      for (const [search, credit] of [[`\"Remudero-Task: ${purpose.taskId}\" in:body`, "trailer"], [`head:run-${purpose.taskId}-`, "run-branch"]] as const) {
+      for (const [search, credit] of [[`\"Remudero-Task: ${taskId}\" in:body`, "trailer"], [`head:run-${taskId}-`, "run-branch"]] as const) {
         const rows = await githubJson(["pr", "list", "--repo", options.scope.repository, "--state", "merged", "--search", search, "--limit", "10", "--json", fields]);
         if (!Array.isArray(rows)) throw new Error("merged credit source unavailable");
         if (rows.length === 10) throw new Error("merged credit search reached its bound; source partial");
         for (const row of rows) {
-          if (overrides.some(o => o?.task === purpose.taskId && o?.pr === row.number && o?.action === "remove-credit")) continue;
-          if (row.state !== "MERGED" || credit === "trailer" && !creditsByAnchoredTrailer(row.state, row.headRefName, row.body, purpose.taskId) ||
-            credit === "run-branch" && !new RegExp(`^run-${purpose.taskId}-[0-9]+$`).test(row.headRefName)) continue;
+          if (overrides.some(o => o?.task === taskId && o?.pr === row.number && o?.action === "remove-credit")) continue;
+          if (row.state !== "MERGED" || credit === "trailer" && !creditsByAnchoredTrailer(row.state, row.headRefName, row.body, taskId) ||
+            credit === "run-branch" && !new RegExp(`^run-${taskId}-[0-9]+$`).test(row.headRefName)) continue;
           if (++detailReads > 2) throw new Error("credit detail budget exhausted; remaining source is partial");
           const detail = await githubJson(["pr", "view", String(row.number), "--repo", options.scope.repository, "--json", "files"]);
           const paths = (detail as { files?: Array<{ path: string }> })?.files?.map(f => f.path);
           if (!paths || paths.length === 0 || paths.length >= 2000) throw new Error("implementation paths are unavailable or bounded");
-          if (refusesAsPlanOnly(plan.byId.get(purpose.taskId)!, paths)) continue;
-          const proof: InboxTerminalProof = { kind: "merged-task", taskId: purpose.taskId, repository: options.scope.repository, instance: options.scope.instance,
+          if (refusesAsPlanOnly(plan.byId.get(taskId)!, paths)) continue;
+          const proof: InboxTerminalProof = { kind: "merged-task", taskId: taskId, repository: options.scope.repository, instance: options.scope.instance,
             number: row.number, url: row.url, state: row.state, headRefName: row.headRefName, headSha: row.headRefOid, mergeSha: row.mergeCommit?.oid, body: row.body ?? "", credit, implementationCredit: true, paths };
           if (validInboxTerminalProof(proof, options.scope, candidate.proposal)) return proof;
         }

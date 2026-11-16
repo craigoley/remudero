@@ -241,6 +241,10 @@ export const MAIN_REPAIR_STALL_TICKS = 2;
  *  #10092 waited 40 minutes for a hand fix. */
 export const MAIN_REPAIR_STALL_MS = 30 * 60_000;
 
+/** W1-T13134 — PRIMARY CONTROL: a record whose fix runs were lost at daemon restarts this many times
+ *  is not dispatched again; its next stall goes to the revert path. */
+export const MAIN_REPAIR_LOST_RUN_LIMIT = 2;
+
 /** W1-T13135 — PRIMARY CONTROL: how old a located culprit may be and still be reused for the same red
  *  when main's push run history window holds no green run to bound the red streak again. */
 export const MAIN_REPAIR_REUSE_WINDOW_MS = 24 * 60 * 60_000;
@@ -794,7 +798,10 @@ export interface MainRepairRecord {
 
 export interface MainRepairAttempt {
   headSha?: string;
-  outcome?: "opened" | "no_pr";
+  /** W1-T13134: the daemon run that dispatched this fix run, from its `fix_dispatched` row. */
+  runId?: string;
+  /** "lost": the daemon run that dispatched it ended before the run reported (W1-T13134). */
+  outcome?: "opened" | "no_pr" | "lost";
   reason?: string;
 }
 
@@ -845,12 +852,18 @@ export function mainRepairRecordsFromLedger(lines: readonly Record<string, unkno
     if (line.step === "main.repair.fix_dispatched") {
       // A further attempt at the same red starts clean: the last one's PR or refusal is history.
       record.fixDispatched = true;
-      record.attempts.push(typeof line.head_sha === "string" ? { headSha: line.head_sha } : {});
+      record.attempts.push({
+        ...(typeof line.head_sha === "string" ? { headSha: line.head_sha } : {}),
+        ...(typeof line.run_id === "string" ? { runId: line.run_id } : {}),
+      });
       delete record.fixPrUrl;
       delete record.fixRefused;
     } else if (line.step === "main.repair.fix_opened") {
       record.fixPrUrl = String(line.pr_url);
       if (attempt) attempt.outcome = "opened";
+    } else if (line.step === "main.repair.fix_refused" && line.lost === true) {
+      // W1-T13134: a lost run is not a refusal the fix-progress judge rules on; it is dispatched again.
+      if (attempt) Object.assign(attempt, { outcome: "lost", reason: String(line.reason) });
     } else if (line.step === "main.repair.fix_refused") {
       record.fixRefused = String(line.reason);
       if (attempt) Object.assign(attempt, { outcome: "no_pr", reason: String(line.reason) });
@@ -1888,11 +1901,11 @@ export function buildMainHealthRung(
       rounds: record.attempts.map((a, index) => ({
         id: `${record.offendingSha}#${index + 1}`,
         ...(a.headSha ? { dispatchedHead: a.headSha } : {}),
-        ...(a.outcome ? { fixOutcome: a.outcome === "no_pr" ? "NO_PR" : "PR_OPENED" } : {}),
+        ...(a.outcome ? { fixOutcome: a.outcome === "no_pr" ? "NO_PR" : a.outcome === "lost" ? "LOST" : "PR_OPENED" } : {}),
         ...(a.reason ? { refusal: a.reason } : {}),
         redBefore: current,
         redAfter: current,
-        completed: a.outcome !== undefined,
+        completed: a.outcome !== undefined && a.outcome !== "lost",
       })),
       parkedReason: `red main ${describeMainRed(red)}, located at merge ${record.offendingSha}: ${why}`,
       signals: {
@@ -1901,7 +1914,7 @@ export function buildMainHealthRung(
         identicalDiffs: 0,
         oscillating: false,
         refusedRounds: noPr,
-        incompleteRounds: record.attempts.filter((a) => a.outcome === undefined).length,
+        incompleteRounds: record.attempts.filter((a) => a.outcome === undefined || a.outcome === "lost").length,
         reviewerOnlyFailurePersists: 0,
       },
     };
@@ -1949,7 +1962,33 @@ export function buildMainHealthRung(
       attemptEnded = true;
       stalled = `the fix run opened no fix PR: ${record.fixRefused}`;
     } else {
-      stalled = stallOf(record.offendingSha, "no-pr", atMs, "the fix run, dispatched before this daemon process started,");
+      // W1-T13134: the fix run lives only in the process that dispatched it. One dispatched by another
+      // daemon run that never reported was lost with that process: record it, and dispatch it again.
+      const last = record.attempts.at(-1);
+      if (last && last.outcome === undefined && last.runId !== undefined && last.runId !== deps.runId) {
+        const reason = `the fix run was lost: daemon run ${last.runId} ended before it reported`;
+        repairRow("main.repair.fix_refused", {
+          offending_sha: record.offendingSha, offending_pr: record.offendingPr, head_sha: sha, lost: true, reason,
+        });
+        Object.assign(last, { outcome: "lost", reason });
+        if (record.attempts.filter((a) => a.outcome === "lost").length < MAIN_REPAIR_LOST_RUN_LIMIT) {
+          fixProgress.delete(record.offendingSha);
+          const again =
+            `${ctx.observation.reason}. Attempt ${record.attempts.length + 1} at this red repeats a lost fix run: ` +
+            `daemon run ${last.runId} dispatched it and ended before it reported`;
+          dispatchFix(lane, await fixRequestFor(ctx.observation, sha, branch, record.offendingSha, record.offendingPr, ctx.failures, again), record.red ?? ctx.red);
+          return true;
+        }
+      }
+      const lostRuns = record.attempts.filter((a) => a.outcome === "lost").map((a) => a.runId);
+      stalled = stallOf(
+        record.offendingSha,
+        "no-pr",
+        atMs,
+        lostRuns.length > 0
+          ? `the fix runs, lost at restarts (daemon runs ${lostRuns.join(", ")} ended before they reported; the limit is ${MAIN_REPAIR_LOST_RUN_LIMIT} lost runs),`
+          : "the fix run, dispatched before this daemon process started,",
+      );
     }
     if (!stalled) return true;
     const red = record.red ?? ctx.red;
