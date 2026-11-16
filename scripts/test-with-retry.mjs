@@ -59,7 +59,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import { gitOrThrow } from "./lib/git.mjs";
 import { newTestCoverage, renderCoverageSummary } from "./coverage-merge-ratchet.mjs";
 import { closeJudgedRun, judgedNodeTestArgs, POOL_ISOLATION_FLAG, prepareJudgedRun, testFilesInArgv, unreportedFilesIn } from "./pure-test-pool.mjs";
-import { boundedNodeTestArgs } from "./test-tier-manifest.mjs";
+import { boundedNodeTestArgs, COVERAGE_HANG_MANIFEST_ENV, withCoverageHangBound } from "./test-tier-manifest.mjs";
 
 /**
  * W1-T2715 — A TEST THAT WRITES INTO THE TRACKED TREE IS OBSERVED BY EVERY OTHER WORKER, and the
@@ -568,7 +568,11 @@ export async function main(argv) {
   const coverageFirstPass = argv[0] === "--coverage-first-pass";
   const rawCoverageDir = coverageFirstPass ? argv[1] : undefined;
   const [cmd, ...given] = coverageFirstPass ? argv.slice(2) : argv;
-  const args = cmd ? withTapReporter(cmd, given) : given;
+  const tapArgs = cmd ? withTapReporter(cmd, given) : given;
+  // W1-T12415: the coverage shard names its instrumented duration manifest, so a hung test fails by
+  // its name inside the job ceiling. The bound is in `args`, so the failed-file retry keeps it too.
+  const hangManifest = coverageFirstPass ? process.env[COVERAGE_HANG_MANIFEST_ENV] : undefined;
+  const args = hangManifest && cmd && isNodeCommand(cmd) ? withCoverageHangBound(tapArgs, hangManifest, process.cwd()) : tapArgs;
   if (!cmd || (coverageFirstPass && !rawCoverageDir)) {
     console.error("usage: test-with-retry.mjs <command> [args...]");
     console.error("       test-with-retry.mjs --coverage-first-pass <raw-coverage-dir> <command> [args...]");
