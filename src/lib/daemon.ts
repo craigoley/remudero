@@ -6711,8 +6711,7 @@ export async function runDaemon(
               if ("abandoned" in child) {
                 log("daemon.retro_trigger.child_refused", { child_run_id: child.runId, reason: child.reason });
               } else {
-                // spawnRetro's launch carries no pid (run-child.ts drops it), so this row names the run id; pid reads null.
-                const settled = retroWatch.watch(child.settled, { runId: child.runId, basis: "spawned" });
+                const settled = retroWatch.watch(child.settled, { pid: child.pid, runId: child.runId, basis: "spawned" });
                 void adoptChildWork({ ...child, settled, taskId: "DAEMON", work: { kind: "retro" } }, log);
                 log("daemon.retro_trigger.detached", { reason: decision.reason, child_run_id: child.runId });
               }

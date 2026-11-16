@@ -18517,6 +18517,8 @@ export function childWorkHoldsReviewKey(reviewKey: string): boolean {
 /** A review started as a run child: the handle the sweep registers, the same one a boot adopts from its spec and status. */
 export interface ReviewChildLaunch {
   runId: string;
+  /** Process id for child kinds whose lifecycle is observed by the daemon. */
+  pid?: number;
   settled: Promise<unknown>;
   readPhase?: () => string | undefined;
   acknowledge?: (outcome: PromiseSettledResult<never>) => void;

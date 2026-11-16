@@ -4379,6 +4379,44 @@ test("W1-T11790 criterion 1: a retro still running past the shadow duration is l
   assert.equal(detachedActionInFlight("retro"), false);
 });
 
+test("W1-T11790 criterion 1: a spawned retro's overrun row includes its child pid and keeps the child running", async () => {
+  const rows: Row[] = [];
+  let release: () => void = () => {};
+  const settled = new Promise<void>((resolve) => { release = resolve; });
+  installDetachedWorkHost({
+    hosts: new Set(["retro"]), mode: () => "on", spawnReview: async () => undefined,
+    spawnRetro: async () => ({ runId: "retro-spawned-overrun", pid: 5151, settled }),
+  });
+  try {
+    let checks = 0;
+    const clock = retroTickClock(7);
+    await runDaemon(fixturePlan(), {
+      refreshMerged: () => mergedSetOf("A", "B", "C", "D"),
+      runOne: async (id) => okResult(id),
+      sleep: fakeClock().sleep,
+      now: clock.now,
+      checkStop: clock.checkStop,
+      checkRetroTrigger: () => ({ fire: checks++ === 0, reason: "merges", mergesSinceMarker: 40, daysSinceMarker: 1 }),
+      runRetroTrigger: async () => { throw new Error("spawned path must not run retro in process"); },
+      log: (step, extra = {}) => rows.push({ step, extra }),
+    });
+  } finally {
+    installDetachedWorkHost(undefined);
+  }
+  const overruns = rowsOf(rows, "retro.overrun");
+  assert.equal(overruns.length, 1, "the spawned child is overrun once despite four late ticks");
+  assert.equal(overruns[0]!.extra.pid, 5151, "the row identifies the spawned retro process");
+  assert.equal(overruns[0]!.extra.run_id, "retro-spawned-overrun");
+  assert.equal(overruns[0]!.extra.threshold_ms, RETRO_SHADOW_OVERRUN_MS);
+  assert.equal(overruns[0]!.extra.age_ms, 3 * RETRO_STEP_MS);
+  assert.equal(overruns[0]!.extra.basis, "spawned");
+  assert.equal(rowsOf(rows, "retro.duration").length, 0, "the spawned retro remains unsettled");
+  assert.equal(detachedActionInFlight("retro"), true, "observing the overrun does not stop the retro");
+  release();
+  await drainDetachedSweepActions({ boundMs: 5000 });
+  assert.equal(detachedActionInFlight("retro"), false);
+});
+
 test("W1-T11790 criterion 2: a retro that finishes within the shadow duration produces no overrun row", async () => {
   const rows: Row[] = [];
   let releaseRetro: () => void = () => {};

@@ -742,7 +742,9 @@ test("W1-T9114: the production host starts a review as a child only where the le
     const decision = { fire: true, reason: "days", mergesSinceMarker: 4, daysSinceMarker: "Infinity" };
     const askRetro = (h: ReturnType<typeof host>) => h.spawnRetro({ decision });
     const beforeRetro = spawned.length;
-    assert.ok(await askRetro(host("on", retroWaited)));
+    const retroLaunch = await askRetro(host("on", retroWaited));
+    assert.ok(retroLaunch);
+    assert.equal(retroLaunch.pid, 1, "the spawned retro launch preserves the process id for daemon overrun observations");
     assert.equal(spawned.at(-1)!.lane, "retro");
     assert.equal(spawned.at(-1)!.taskId, "DAEMON");
     assert.deepEqual(spawned.at(-1)!.work, { kind: "retro", inputs: { decision } });

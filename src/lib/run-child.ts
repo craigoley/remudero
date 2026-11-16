@@ -1695,7 +1695,7 @@ export function createDetachedWorkHost(input: DetachedWorkHostInput): DetachedWo
         plan: async () => ({ plan: { tasks: [] } }), options: options(), log, work,
       });
       if (!launch.started) return launch.abandoned ? launch : undefined;
-      return { runId: launch.runId, settled: launch.settled, acknowledge: launch.acknowledge };
+      return { runId: launch.runId, pid: launch.pid, settled: launch.settled, acknowledge: launch.acknowledge };
     },
   };
 }
