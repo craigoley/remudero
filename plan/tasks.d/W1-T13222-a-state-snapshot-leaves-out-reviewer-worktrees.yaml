@@ -1,0 +1,56 @@
+- id: W1-T13222
+  title: "The state snapshot leaves out the disposable reviewer worktrees under engines/worktrees, so a worktree reaped mid-walk no longer fails the nightly core backup and 1.3 GB of checkouts stop riding in every archive"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # one more excluded path in the snapshot; every other path, the verification and restore are unchanged
+  origin: "operator-session#serve-oom-2026-11-16"
+  plan_refs:
+    - W1-T10766
+    - W1-T234
+  files:
+    - src/lib/ledger.ts
+    - test/ledger/a-state-snapshot-leaves-out-reviewer-worktrees.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "snapshotState on a state dir holding engines/worktrees/reviewer-x/ (files and a node_modules link) publishes an archive whose entries hold nothing under engines/worktrees/, and still holds ledger.ndjson, inbox-proposals.json and an engines/<64-hex>/ tree"
+      proof: "grep: W1-T13222 criterion 1 in test/ledger/a-state-snapshot-leaves-out-reviewer-worktrees.test.ts"
+    - claim: "A reviewer worktree removed while snapshotState walks the state dir (its node_modules stat answers ENOENT) no longer fails the snapshot: the archive is published and verified"
+      proof: "grep: W1-T13222 criterion 2 in test/ledger/a-state-snapshot-leaves-out-reviewer-worktrees.test.ts"
+    - claim: "invariant:only-rederivable-paths-excluded — STATE_BACKUP_EXCLUDED_RELPATHS is exactly status.json and engines/worktrees, and a file at engines/worktrees-notes.json (a sibling that only shares the prefix) is still copied"
+      kind: guard
+      proof: "grep: W1-T13222 criterion 3 in test/ledger/a-state-snapshot-leaves-out-reviewer-worktrees.test.ts"
+  rationale: |
+    WHY: the nightly core state backup failed on 2026-11-16, and escalation #12064 (host-state-backup-azure) stays open.
+    OBSERVED on the Azure host, ~/reclaim.log (host-update.sh nightly run, 04:17Z): "STATE SNAPSHOT FAILED — the snapshot
+    of /home/craigoleyagent/rmd-state2/state exited 1 ... StateBackupError: ... ENOENT: no such file or directory, stat
+    '/rmd-snapshot/state/engines/worktrees/reviewer-14a374e14939/node_modules'", thrown from listStateFiles inside
+    snapshotState (src/lib/ledger.ts, the sourceEntries walk). The console and site snapshots and the Azure disk
+    snapshot that same night were verified, and the core snapshots of 11-14 and 11-15 were verified.
+    state/engines/worktrees holds 1.3 GB of reviewer checkouts (reviewer-14a374e14939, reviewer-255c411599ab, ...):
+    leased, disposable worktrees (reviewer-worktree-lease.ts) that the review lane re-creates from a revision.
+    READ at origin/main: W1-T10766 made the walk survive a reaped engine TREE, but its rule (engineTreePath in
+    src/lib/state-backup-engine-links.ts) matches only engines/<64-hex>, so a path under engines/worktrees/ is not
+    excused and its ENOENT is thrown. STATE_BACKUP_EXCLUDED_RELPATHS is { "status.json" } (W1-T234: only proven
+    rederivable paths).
+  design: |
+    INVARIANT only-rederivable-paths-excluded: the snapshot leaves out exactly status.json and engines/worktrees.
+    1. Add "engines/worktrees" to STATE_BACKUP_EXCLUDED_RELPATHS, and extend the comment above it with why: leased reviewer
+       checkouts, rebuilt from a revision, 1.3 GB, and the 2026-11-16 ENOENT. listStateFiles already skips an excluded
+       relative path before it stats or walks it, so the subtree is never read.
+    2. No change to engineTreePath, the engine-link manifest, verification or restoreState.
+    3. Tests in test/ledger/a-state-snapshot-leaves-out-reviewer-worktrees.test.ts on the fixture shape of
+       test/ledger/a-state-snapshot-survives-an-engine-reaped-mid-walk.test.ts; criterion 2 strikes statSync on the
+       worktree's node_modules path the same way that test strikes its engine path.
+  falsifier: |
+    Leave the exclusion out: criteria 1 and 2 fail (entries under engines/worktrees; the ENOENT is thrown). Exclude by
+    prefix string instead of by path segment: criterion 3 fails (the sibling file is dropped).
+  note: |
+    Id reserved for run-unfiled-1794851215000 with ~/rmd-work/bin/reserve-id.sh.
+    Proof that counts in production: the next nightly host-update run on Azure reports the core snapshot verified, and
+    the archive under rmd-state2/state-backups holds no engines/worktrees/ entries.

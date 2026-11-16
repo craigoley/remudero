@@ -108,13 +108,31 @@ export function mechanicalAskPurpose(p: RetirementProposal): MechanicalAskPurpos
     typeof p.id === "string" && new RegExp(`^proof-debt:${purpose.taskId}(?::\\d+)?$`).test(p.id) && Array.isArray(p.evidenceAnchors) && p.evidenceAnchors.length > 0 &&
     hash(purpose.taskDigest) && purpose.proposalDigest === inboxMechanicalProposalDigest(p) && hash(purpose.criteriaDigest) && purpose.criteriaDigest === inboxSemanticDigest(p.evidenceAnchors) ? purpose : undefined;
 }
-export function validInboxTerminalProof(proof: InboxTerminalProof | undefined, scope: InboxGardenerScope, p: RetirementProposal): proof is InboxTerminalProof {
+/**
+ * W1-T13197: THE ASKS THE GARDENER MAY JUDGE. A proof-debt ask carries its producer's typed purpose; a finished-task ask is
+ * a `verify-human:` / `verify-human-automate:` / `machine-judge:` ask, read with core's deriveTaskReferent shapes, whose
+ * only possible retirement is its own task having shipped. Operator ruling 2026-11-16 13:47Z ("Yes, retire them
+ * reversibly") supersedes W1-T9284's no-backfill rule for finished tasks only: such an ask retires solely on a merged-task
+ * or plan-retirement proof of ITS task, never on a handoff, a successor, a judge, or a related task's merge.
+ */
+export type RetirementAsk = { kind: "mechanical"; taskId: string; purpose: MechanicalAskPurpose } | { kind: "finished-task"; taskId: string };
+const FINISHED_TASK_ASK = /^(?:verify-human|verify-human-automate|machine-judge):([A-Za-z0-9][A-Za-z0-9-]*)$/;
+export function retirementAsk(p: RetirementProposal): RetirementAsk | undefined {
   const purpose = mechanicalAskPurpose(p);
-  if (!purpose || !proof || proof.taskId !== purpose.taskId || proof.repository !== scope.repository || proof.instance !== scope.instance) return false;
+  if (purpose) return { kind: "mechanical", taskId: purpose.taskId, purpose };
+  // A producer-stamped mechanical purpose that no longer verifies is never re-read as a finished-task ask.
+  if (p.automaticRetirement || typeof p.id !== "string") return undefined;
+  const taskId = FINISHED_TASK_ASK.exec(p.id)?.[1];
+  return taskId && taskId.length <= 160 ? { kind: "finished-task", taskId } : undefined;
+}
+export function validInboxTerminalProof(proof: InboxTerminalProof | undefined, scope: InboxGardenerScope, p: RetirementProposal): proof is InboxTerminalProof {
+  const ask = retirementAsk(p);
+  if (!ask || !proof || proof.taskId !== ask.taskId || proof.repository !== scope.repository || proof.instance !== scope.instance) return false;
+  if (ask.kind === "finished-task" && proof.kind !== "merged-task" && proof.kind !== "plan-retirement") return false;
   if (proof.kind === "merged-task") {
     if (typeof proof.body !== "string" || typeof proof.headRefName !== "string") return false;
-    const ownedBranch = new RegExp(`^run-${purpose.taskId}-[0-9]+$`).test(proof.headRefName);
-    const trailer = proof.body.split(/\r?\n/).some(line => line === `Remudero-Task: ${purpose.taskId}`);
+    const ownedBranch = new RegExp(`^run-${ask.taskId}-[0-9]+$`).test(proof.headRefName);
+    const trailer = proof.body.split(/\r?\n/).some(line => line === `Remudero-Task: ${ask.taskId}`);
     return proof.state === "MERGED" && Number.isSafeInteger(proof.number) && proof.number > 0 &&
       typeof proof.headRefName === "string" && !!proof.headRefName && proof.implementationCredit === true &&
       Array.isArray(proof.paths) && proof.paths.length > 0 && proof.paths.every(p => typeof p === "string" && !!p) &&
@@ -123,6 +141,8 @@ export function validInboxTerminalProof(proof: InboxTerminalProof | undefined, s
   }
   if (proof.kind === "plan-retirement") return /^[a-f0-9]{40}$/.test(proof.commit) && /^[a-f0-9]{40}$/.test(proof.blob) &&
     ["retired", "closed", "withdrawn"].includes(proof.retirement);
+  if (ask.kind !== "mechanical") return false;
+  const purpose = ask.purpose;
   if (proof.kind === "handoff") return proof.authority === "operator" && proof.released === "verify-human" && proof.proposalId === p.id && hash(proof.receiptId) && !!proof.runId;
   return proof.kind === "successor" && proof.present === true && proof.open === true &&
     p.id === `${proof.successorId}:${p.id.split(":").at(-1)}` &&
@@ -143,7 +163,7 @@ export function inboxGardenerTaskFact(task: InboxGardenerTaskFact): InboxGardene
 }
 export function inboxGardenerSource(proposals: RetirementProposal[], tasks: ReadonlyMap<string, InboxGardenerTaskFact>, scope: InboxGardenerScope,
   operatorIntents: ReadonlyMap<string, string> = new Map()) {
-  const facts = proposals.map(p => { const id = mechanicalAskPurpose(p)?.taskId, task = id ? tasks.get(id) : undefined;
+  const facts = proposals.map(p => { const id = retirementAsk(p)?.taskId, task = id ? tasks.get(id) : undefined;
     return [p.id, inboxProposalRevision(p), task ? inboxGardenerTaskFact(task) : null,
       task?.depends_on.map(dep => tasks.get(dep) ? inboxGardenerTaskFact(tasks.get(dep)!) : null) ?? [], operatorIntents.get(p.id) ?? inboxSemanticDigest([])]; });
   const owned = { repository: scope.repository, instance: scope.instance, root: scope.root };
@@ -235,7 +255,7 @@ export function inboxRetirementFor(read: InboxGardenerStoreRead, p: RetirementPr
     return pending && (pending.decision === "needs_triage" || pending.decision === "defer_source") ? { unknown: `Inbox revalidation needs triage: ${pending.judge === "started" ? "judge completion unknown; not automatically retried" : pending.reason}` } : undefined;
   }
   if (!validInboxTerminalProof(retirement.proof, read.store.scope, p) || retirement.receipt.authority !== "automatic" || retirement.receipt.heldAtRetirement !== false ||
-    retirement.receipt.scope.taskId !== mechanicalAskPurpose(p)?.taskId) return { unknown: "retirement proof or current mechanical purpose is unverified" };
+    retirement.receipt.scope.taskId !== retirementAsk(p)?.taskId) return { unknown: "retirement proof or current mechanical purpose is unverified" };
   const restored = read.store.events.some(e => e.receipt.kind === "restore" && e.receipt.retirementId === retirement.receipt.id);
   const changed = inboxProposalRevision(p) !== retirement.proposalRevision || operatorIntent !== undefined && operatorIntent !== retirement.operatorIntent;
   return { retirementId: retirement.receipt.id, snapshotKey: retirement.receipt.snapshotKey, scope: retirement.receipt.scope,

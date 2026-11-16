@@ -18,7 +18,7 @@
     - scripts/preflight-author.mjs
     - src/lib/scout-gardener.ts
     - test/gardeners/an-author-preflight-records-its-verdict-where-the-scout-reads-it.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Each author preflight run appends exactly one author_preflight.passed, author_preflight.failed or author_preflight.refused row to the configured ledger, with the head ref, the task id when the branch names one, the first failing or refusing step, the wall time and the time spent waiting for admission"

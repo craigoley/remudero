@@ -1,0 +1,58 @@
+- id: W1-T13209
+  title: "A landing pull request's body lists exactly what its commit holds, so a second writer on the landing branch can no longer leave a body that names a file the head does not carry"
+  repo: remudero
+  priority: 1.3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the task-files landing lane lands every machine-filed task, and this changes when it pushes and what it writes to GitHub
+  band_meaning: span
+  origin: "operator-session#wedged-landing-lane-2026-11-16"
+  plan_refs:
+    - W1-T12199
+    - W1-T12221
+    - W1-T12222
+  files:
+    - src/lib/feedback-landing.ts
+    - test/inbox/a-landing-pull-request-body-lists-exactly-what-its-commit-holds.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "When the lane pushes a commit to the landing branch while a landing pull request is already open on it, the pull request's body is rewritten from the files of the commit that was pushed: its count and its acceptance lines name those files and no other"
+      proof: "grep: W1-T13209 criterion 1 in test/inbox/a-landing-pull-request-body-lists-exactly-what-its-commit-holds.test.ts"
+    - claim: "A caller that read no open pull request before its plan preflight reads the seal again before it pushes, and pushes nothing when a pull request was opened in between"
+      proof: "grep: W1-T13209 criterion 2 in test/inbox/a-landing-pull-request-body-lists-exactly-what-its-commit-holds.test.ts"
+    - claim: "A staged file that the head commit of the open landing pull request does not hold is reported as waiting, not as landed, whatever pull request its staged record names"
+      proof: "grep: W1-T13209 criterion 3 in test/inbox/a-landing-pull-request-body-lists-exactly-what-its-commit-holds.test.ts"
+    - claim: "invariant:an-unlanded-edit-stays-pending — an edit the open pull request's head does not hold stays in the pending directory, is not set aside by this path, and lands in a later landing pull request; and the lane never has two landing pull requests open"
+      proof: "grep: W1-T13209 criterion 4 in test/inbox/a-landing-pull-request-body-lists-exactly-what-its-commit-holds.test.ts"
+  rationale: |
+    OBSERVED 2026-11-16 by the operator session on pull request #18789 ("chore(plan): land pending edits of task files", branch task-files-landing, opened by the fleet App at 02:43:42Z).
+
+    - Its body said "Lands 4 machine-filed edit(s)" with four acceptance lines. Its head commit 0fc8f90feb, dated 02:51:03Z, holds three files (W1-T13092, W1-T13093, w1-t13057; read with `git show --stat`). The file of the third line, plan/tasks.d/W1-T13128-flow-awaiting-review-checks-green-review-orphaned-by-a-push-reviewed-on-an-earlier-he.yaml, is not in the head.
+    - The acceptance gate refused it: `acceptance-author-gate: REFUSED (grep-proof-target-missing)`, criterion 3's grep proof names a file "which does not exist at this head".
+    - It stayed red for 13 hours, with 32 files (16 task edits and their .meta.json) waiting in state/task-files-landing-pending on the fleet host, W1-T13128's among them, until the operator session corrected the body by hand at 15:49Z. The gate and the review then passed and it merged (c5df09af7d).
+    - The commit is seven minutes newer than the pull request, so the branch took a push after the pull request was open, which the body says it never does.
+
+    READ src/lib/feedback-landing.ts on origin/main (2d69d3780c), `taskFilesLandingSteps`:
+    - One call cannot disagree with itself. The commit (`commitOf(treeSha, paths)`) and the body (`taskFilesPrBody(landing)`) are built from the same `landing` array.
+    - Two calls can. The seal is one listing, read before the batch is built (`open = JSON.parse(yield* net.gh(pendingLandingPrArgs(...)))`), and the plan preflight that follows takes minutes. Nothing reads the seal again. The push then takes its lease from a tip refreshed just before it (`--force-with-lease=refs/heads/${kind.branch}:${tipSha ?? ""}`), so a second writer's push succeeds over the first writer's commit. Last, `ensurePrOpen(kind, net, taskFilesPrBody(landing), opts.requestReview)` is called without its `refreshBody` argument (default false), finds the first writer's pull request and returns it with its old body.
+    - The lane has three callers that land and no shared lock: two in src/lib/sweep.ts (the parked pull-request remedy and the refusal-amendment pass) and one in src/run-task.ts (the gardeners).
+    - The first writer also wrote its pull request's URL into the staged record of all four files, and `result.landed = staged.filter((f) => f.prUrl === open[0]!.url)` then reports the fourth as carried by a pull request whose head does not hold it.
+
+    INFERRED, not measured: that this interleaving is what happened on #18789. The code allows it and the times fit (a seal read before 02:43:42Z, a push at 02:51Z). The ledger decides it: see MEASURE FIRST.
+  design: |
+    MEASURE FIRST: read the fleet ledger's `task_files_landing.opened` rows for 2026-11-16 between 02:30Z and 03:00Z. Two rows that name pull request #18789 with different `files` confirm the two-caller interleaving. One row means another path wrote the branch: find it before changing anything, and say so in the PR body.
+
+    1. Read the seal again immediately before the push. An open pull request found there means this caller lost the race: it pushes nothing, writes no pull-request URL into any staged record, and returns its files as waiting.
+    2. When a push does replace the head of a branch whose pull request is open (the lease held and a listing was missed), call `ensurePrOpen` with the body refresh, so the body is rewritten from the pushed commit's files. The body is always a function of the commit that is on the branch.
+    3. `landed` is computed from the head commit of the open pull request (the paths its tree changes against main), not from the staged records' `prUrl`. A staged record that names the pull request but is not in its head is cleared back to waiting.
+    4. If the measurement shows the two writers were in one process, serialise the landing step there as well; say which in the PR body.
+    INVARIANT an-unlanded-edit-stays-pending: a file is removed from the pending directory only when main holds its bytes or the existing set-aside rules apply; a caller that loses the race changes nothing on disk. At most one landing pull request is open per repository.
+    NOT IN SCOPE: what the lane does with a landing pull request that is already red (W1-T13210); the set-aside rules; the other landing families.
+  falsifier: |
+    Call `ensurePrOpen` without the refresh after a push over an open pull request and criterion 1 must fail. Remove the second seal read and criterion 2 must fail. Compute `landed` from the staged `prUrl` and criterion 3 must fail. Set a losing caller's file aside, or open a second pull request, and criterion 4 must fail. Restore and all pass.
+  note: |
+    reservation hand-off: run-unfiled-1794847949786 -> run-unfiled-1794847949786
+    Reserved on the filing branch by the operator session. The test folder is the one rmd test-place computed (test/inbox/, high) for a stub importing src/lib/feedback-landing.ts; it is the folder of W1-T12199's own suite. Drive two interleaved calls through the injected git and gh of the landing, never the real origin (W1-T12199's rationale says why). W1-T13210 depends on this task.

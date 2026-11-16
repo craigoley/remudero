@@ -1,0 +1,40 @@
+- id: W1-T13221
+  title: "The issue-revalidation garden closes an older escalation as superseded when a newer open escalation carries the same task key"
+  repo: remudero
+  priority: 1.4
+  depends_on: []
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # closes fleet-opened issues as superseded; keeps the newest, cites it, capped
+  band_meaning: blast-radius
+  origin: "operator-request#2026-11-16T17:24Z-issue-triage"
+  plan_refs:
+    - W1-T8864
+    - W1-T4659
+  files:
+    - src/lib/issue-revalidation-garden.ts
+    - test/gardeners/the-revalidation-garden-closes-a-same-key-duplicate-escalation.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "When two or more open fleet-opened escalations share the same **Task:** line and class family, every one except the issue the fleet most recently re-observed (or the newest, when none was re-observed) is closed as not planned with a comment naming the kept issue"
+      proof: "grep: W1-T13221 criterion 1 in test/gardeners/the-revalidation-garden-closes-a-same-key-duplicate-escalation.test.ts"
+    - claim: "An issue is never superseded when it is a GRILL, the operator spoke on it last, it was opened by a person, or its task key is a shared lane key (MODEL-CATALOG, daemon, DAEMON, PLAN-clarify, PLAN-expand)"
+      proof: "grep: W1-T13221 criterion 2 in test/gardeners/the-revalidation-garden-closes-a-same-key-duplicate-escalation.test.ts"
+    - claim: "invariant:one-kept-per-key — each task key keeps exactly one open issue after a pass, and supersede closes count toward the existing per-pass close cap"
+      proof: "grep: W1-T13221 criterion 3 in test/gardeners/the-revalidation-garden-closes-a-same-key-duplicate-escalation.test.ts"
+  rationale: |
+    OBSERVED 2026-11-16 via the GitHub REST API: 24 open craigoley/remudero issues duplicated another open issue with the same **Task:** key, for example W1-T8707 (#12258, #13070), MEMORY-BUDGET garden (#13236, #13600, #13616), adoption burnRatePredicate (#11846, #12158, #12233), W1-T11255 (#17901, #17939); and in craigoley/remudero-console CONSOLE-T172 had four (#2508, #2515, #2549, #2559).
+    closeSupersededEscalations (src/lib/escalate.ts, W1-T4659) retires an older issue only when a newly opened one carries a disagreeing Head line for the same PR, so duplicates opened under a new run branch, a new class wording, or no Head line accumulate.
+  design: |
+    1. Group listed open issues by (repository, **Task:** value, class family). For a group of two or more, keep the issue with the newest re-observation (conditionReobserved's source), else the newest.
+    2. Close the others with a citation naming the kept issue, through the garden's existing close path and ledger rows, in both shadow and act modes as today.
+    3. Exclusions as in criterion 2.
+    INVARIANT one-kept-per-key: each task key keeps exactly one open issue after a pass, and supersede closes count toward the per-pass close cap.
+    NOT IN SCOPE: changing the dedup matcher in escalate.ts; terminal referents (a separate task).
+  falsifier: |
+    Skip grouping and criterion 1 must fail. Drop an exclusion and criterion 2 must fail. Exempt supersede closes from the cap and criterion 3 must fail.
+  note: |
+    Reserved with rmd next-task-id from the operator checkout (refs/rmd-id/W1-T13221). rmd test-place computed test/gardeners/.

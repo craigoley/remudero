@@ -19,7 +19,7 @@
     - deploy/mac/install-gh-read-broker.sh
     - hooks/deny-floor.sh
     - test/github/the-mac-read-broker-runs-from-a-durable-install.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The installer's launch agent runs the broker from a private, versioned copy under the account's Application Support folder, not from the checkout or worktree the installer was run in, and removing that checkout afterwards leaves the agent's program path present"

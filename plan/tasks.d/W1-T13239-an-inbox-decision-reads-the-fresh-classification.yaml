@@ -1,0 +1,52 @@
+- id: W1-T13239
+  title: "Inbox decline, restore, keep and reframe judge the proposal from the read path's fresh classification when it holds one, instead of loading and projecting the whole plan on every write"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # which classification a reversible write reads; approve keeps its full read; ledger rows and answers are unchanged
+  band_meaning: span
+  origin: "operator-session#serve-oom-2026-11-16"
+  plan_refs:
+    - W1-T4261
+    - W1-T13188
+    - W1-T2220
+  files:
+    - src/lib/panel-graph.ts
+    - test/console-api/an-inbox-decision-reads-the-fresh-classification.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "When classifyAllProposalsMemo holds a result younger than INBOX_WRITE_CLASSIFICATION_MAX_AGE_MS (30 s) whose fingerprint inputs are unchanged and that includes the named proposal, POST /v1/inbox/decline answers without calling loadPlan, projectPlan or readLedgerLines (counted through seams) and appends the same panel.proposal_declined row as today"
+      proof: "grep: W1-T13239 criterion 1 in test/console-api/an-inbox-decision-reads-the-fresh-classification.test.ts"
+    - claim: "With no memo result, an older one, or one whose fingerprint inputs changed (the registry was rewritten), the write falls back to the single-proposal path of W1-T13188 and answers the same"
+      proof: "grep: W1-T13239 criterion 2 in test/console-api/an-inbox-decision-reads-the-fresh-classification.test.ts"
+    - claim: "invariant:approve-keeps-its-full-read — POST /v1/inbox/approve never reads the memo and still loads the plan through loadPlanAtRef"
+      kind: guard
+      proof: "grep: W1-T13239 criterion 3 in test/console-api/an-inbox-decision-reads-the-fresh-classification.test.ts"
+  rationale: |
+    WHY: after W1-T13187 and W1-T13188 an Inbox decision no longer freezes serve for minutes, but it still costs seconds.
+    OBSERVED on 2026-11-16 after the 18:33Z deploy: a Console snooze took 11.5 s server-side (Inbox defects thread), and
+    serve.demand shows /v1/inbox/snooze up to 11,002 ms and inbox thread routes up to 7,363 ms. W1-T13235 takes archive and
+    snooze off the classification entirely. The decisions still load the plan, project it against GitHub and read the
+    live ledger before they classify one proposal.
+    READ at origin/main, src/lib/panel-graph.ts: the read routes keep a memo (classifyAllProposalsMemo, W1-T4261) keyed on
+    a fingerprint of everything classification reads, and peekClassifiedInboxStamped returns it with its age. The Console
+    shows the operator exactly that classification when they press a button, so judging the write by it is what the
+    operator saw. Decline, restore, keep and reframe are reversible and ledgered.
+  design: |
+    INVARIANT approve-keeps-its-full-read: approve is unchanged.
+    1. Add INBOX_WRITE_CLASSIFICATION_MAX_AGE_MS = 30_000. In proposalVerdictResponse, reframe and keep, first read
+       peekClassifiedInboxStamped(deps). Use it when it is younger than the bound, holds the proposal, and the inbox
+       fingerprint's cheap stamps (the registry, drafts, in-flight and thread-store stats the memo already takes) are
+       unchanged.
+    2. Otherwise call classifyAllProposals(deps, undefined, id) as today.
+    3. Tests count loadPlan, projectPlan and ledger reads through the deps seams the memo already accepts.
+  falsifier: |
+    Always take the single-proposal path: criterion 1 fails (the plan is loaded). Use a memo whose registry stamp moved:
+    criterion 2 fails. Let approve read the memo: criterion 3 fails.
+  note: |
+    Id reserved for run-unfiled-1794856029000 with ~/rmd-work/bin/reserve-id.sh.

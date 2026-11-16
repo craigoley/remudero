@@ -1,0 +1,60 @@
+- id: W1-T13208
+  title: "A scout record never demands a fix its declared files cannot hold: a symptom with no located writer is filed as an investigation, and the queued test-only drafts are finally re-derived"
+  repo: remudero
+  priority: 1.0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # it changes what a machine filer writes into the plan and rewrites queued machine records
+  band_meaning: span
+  origin: "operator-session#scout-test-only-builds-2026-11-16"
+  plan_refs:
+    - W1-T5454
+    - W1-T10261
+    - W1-T9274
+    - W1-T9271
+    - W1-T9268
+  files:
+    - src/lib/scout-gardener.ts
+    - test/gardeners/a-scout-record-never-demands-a-fix-its-files-cannot-hold.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A symptom whose writer the scout cannot locate is filed as an investigation: its one claim is that the code that writes the step is located and named, its title and rationale say it is an investigation, and no claim in it asks for the cause to be fixed"
+      proof: "grep: W1-T13208 criterion 1 in test/gardeners/a-scout-record-never-demands-a-fix-its-files-cannot-hold.test.ts"
+    - claim: "A symptom whose writer is located is filed exactly as on origin/main: the fix claim, with the writer files declared ahead of the scout test"
+      proof: "grep: W1-T13208 criterion 2 in test/gardeners/a-scout-record-never-demands-a-fix-its-files-cannot-hold.test.ts"
+    - claim: "A queued test-only fix draft that passes the record-side conditions is rewritten at the next pass, with its writers when they are located and as an investigation when they are not, and the rewrite reaches the plan through the path the measurement showed was failing"
+      proof: "grep: W1-T13208 criterion 3 in test/gardeners/a-scout-record-never-demands-a-fix-its-files-cannot-hold.test.ts"
+    - claim: "Once an investigation has merged, the scout's next record for that step is a fix record that declares the writer the investigation named, and the investigation is not debited because the rows continued"
+      proof: "grep: W1-T13208 criterion 4 in test/gardeners/a-scout-record-never-demands-a-fix-its-files-cannot-hold.test.ts"
+    - claim: "The scout's scorecard counts the queued drafts that still demand a fix from a single test file, by the reason each was left alone (operator-ruled, open run, rewrite refused with its reason), so the remainder is a number and not a silence"
+      proof: "grep: W1-T13208 criterion 5 in test/gardeners/a-scout-record-never-demands-a-fix-its-files-cannot-hold.test.ts"
+    - claim: "invariant:no-fix-demand-without-a-writer — no record the scout writes or rewrites declares only a test file while one of its claims demands a fix, and a draft that an operator ruled on or that has an open run is never rewritten"
+      proof: "grep: W1-T13208 criterion 6 in test/gardeners/a-scout-record-never-demands-a-fix-its-files-cannot-hold.test.ts"
+  rationale: |
+    OBSERVED 2026-11-16 by the operator session, then measured on origin/main (2d69d3780c).
+
+    - W1-T9274 (origin "scout:shadow_judge.unavailable") declares one file, test/scout-shadow-judge-unavailable.test.ts, and its one claim reads "shadow_judge.unavailable stops recurring: its cause is fixed rather than its rows hidden". A worker may touch only declared files, so its build, pull request #18842, could only add a test. Review failed it ("remudero-review: FAIL — unmet", 2026-11-16T15:11Z) and no fix round could do better. The operator withdrew the task the same day.
+    - THE WRITER LOOKUP EXISTS ALREADY. W1-T10261 (merged 2026-10-20, d42790734a, #13228) made the scout declare the files that hold the step as a source literal, and added a re-derivation of the queued test-only drafts. Two gaps are left, and this task is those two.
+    - GAP 1, READ src/lib/scout-gardener.ts, `scoutShard`: the claim is always `${symptom.step} stops recurring: its cause is fixed rather than its rows hidden`, and when no writer is found the record is `files: [...files, testPath]` with an empty `files` and the rationale line "The rows name no file of their own: locate the code that writes this step first, then fix its cause." That is a fix demanded from one test file.
+    - GAP 2, the re-derivation never landed. `scoutRederivations` returns an action for each draft `isTestOnlyScout` accepts whose writers are found, and `apply()` titles its plan change "the scout gardener scopes N recurring symptom(s)". `git log origin/main --grep='scout gardener scopes'` finds 0 commits, and W1-T9274's record was last changed on 2026-10-13, a week before W1-T10261 merged.
+    - MEASURED over plan/tasks.d (`git grep -l -e 'origin: "scout:'`): 63 scout records. 37 queued, 19 blocked (retired), 7 merged. Of the 37 queued, 25 declare only one test file. For 19 of those 25 the step is a double-quoted literal in a tracked src/ or scripts/ file, and for 6 it is not (W1-T12435, W1-T12439, W1-T12441, W1-T12445, W1-T9267, W1-T9271). The literal count is an approximation made with `git grep -F`, not the scout's own TypeScript scanner. Of the 19, 7 carry an operator ruling and are left alone by design since #14510 (W1-T10143, W1-T10229, W1-T10230, W1-T9519, W1-T9938, W1-T9941, W1-T9944). The other 12 pass every record-side condition of `isTestOnlyScout` and were never rewritten: W1-T10148, W1-T10149, W1-T10231, W1-T10232, W1-T9263, W1-T9273, W1-T9274, W1-T9520, W1-T9521, W1-T9939, W1-T9942 and W1-T9946.
+    - THE CAUSE OF GAP 2 IS NOT KNOWN. Ruled out on a tree equal to main: the rewrite of W1-T9274 with src/lib/shadow-judge.ts (which writes the step at four sites) passes `machineShardFilingRefusal`, so the draft lint is not what stops it.
+    - WHAT BECAME OF THE BUILT ONES: nine commits on main carry a scout task's trailer. Eight changed source. The ninth is the same class passing review once: W1-T9271, 7aa7e25623, #18838, merged 2026-11-16T11:22Z, is 21 lines in test/scout-gate-garden-filing-failed.test.ts and nothing else. W1-T10141 and W1-T10144 declared only a test and merged with source changes; the first records `undeclared: src/lib/config-gardener.ts, src/run-task.ts` in its checkpoint and the second was built by hand. W1-T9268 needed "fix(plan): extend w1-t9268's files for its build" (#18836, 2026-11-16) to add src/lib/scout-gardener.ts after its build met the wall.
+  design: |
+    MEASURE FIRST: find why the twelve eligible drafts were never rewritten. Read the fleet ledger for `scout.record_refused` rows and the scout's own pass rows since 2026-10-20 (the operator session can read them for the builder), and name the step that stops the rewrite: the open-run listing, the landing of an edit to an existing record, the gardener's budget, or a refusal. Put the rows in the PR body. If the cause is outside src/lib/scout-gardener.ts, stop at criterion 3, say so, and name the file: that is a scope amendment, not a guess.
+
+    1. `scoutShard`: when the rows name no file and the writer lookup finds none, render an investigation. Its title says investigation, its one claim is `the code that writes <step> is located and named`, its proof is a grep for a test title in the scout test, and its rationale says what a builder delivers: a test that drives the located writer and names its file, and no fix. The symptom-still-recorded invariant line stays.
+    2. A located writer: no change. The record is today's.
+    3. Re-derivation: fix the measured cause so the rewrite lands. A draft with no locatable writer is rewritten as an investigation by the same pass and the same judge path.
+    4. Follow-up: a merged investigation's test names the writer in a form the scout reads back, so the next record for that step is a fix record with files. The scout's credit-or-debit measure skips an investigation: it was never asked to stop the rows.
+    5. Scorecard: one count of queued fix drafts that declare only a test, split by why each was left.
+    INVARIANT no-fix-demand-without-a-writer: every record the scout writes is either a fix record with at least one non-test file or an investigation with no fix claim; operator-ruled drafts and drafts with an open run are never rewritten.
+    NOT IN SCOPE: which symptoms the scout chooses; the machine-filing judge; the seven operator-ruled drafts (they are counted, and releasing them is the operator's); the scope-extension path that amended W1-T9268.
+  falsifier: |
+    Render the fix claim for a symptom with no writer and criteria 1 and 6 must fail. Change the located-writer record and criterion 2 must fail. Skip the rewrite of an eligible draft, or leave a no-writer draft as it is, and criterion 3 must fail. File a second investigation after one merged, or debit it for rows that continued, and criterion 4 must fail. Drop a reason from the count and criterion 5 must fail. Rewrite an operator-ruled draft and criterion 6 must fail. Restore and all pass.
+  note: |
+    reservation hand-off: run-unfiled-1794847949786 -> run-unfiled-1794847949786
+    Reserved on the filing branch by the operator session. The test folder is the one rmd test-place computed (test/gardeners/, medium) for a stub importing src/lib/scout-gardener.ts and src/lib/machine-filing.ts. The existing suite test/the-scout-declares-the-writer-of-its-symptom.test.ts pins W1-T10261 and #14510: it must stay green unchanged. The numbers in the rationale can be regenerated from any checkout by counting the records with `git grep`; re-measure before building, since the judge retires scout records daily.

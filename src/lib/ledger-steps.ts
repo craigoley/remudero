@@ -387,6 +387,18 @@ const SEED_ROWS: readonly SeedRow[] = [
     outcomes: ["adopted"],
   },
   {
+    // W1-T13046: the hold names the criteria and checks it covers.
+    step: "fix.needs_design",
+    meaning:
+      "A fix round answered NEEDS_DESIGN and the fix lane holds the head: later passes at this head, task contract " +
+      "and PR body stand down with no worker. `reason` is the worker's question. `covers_criteria` lists the unmet " +
+      "claims the round was given, and `covers_checks` the red check names it was given. The sweep splits the covered " +
+      "criteria into a held follow-up task, or closes and rebuilds the pull request when the hold covers every " +
+      "criterion or only red checks. `needs_design_kind` and `needs_design_remedy` name W1-T12714's route.",
+    writer: ["runFixRung"],
+    outcomes: ["amendment-proposed", "escalate"],
+  },
+  {
     // W1-T12714: no needs-design report ends a pass with only a hold.
     step: "fix.needs_design_routed",
     meaning:
