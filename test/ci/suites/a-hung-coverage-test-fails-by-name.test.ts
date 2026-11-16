@@ -6,7 +6,7 @@
 // skipped every server close registered after it, and the listening servers kept the child alive.
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
@@ -15,6 +15,8 @@ import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 // @ts-expect-error — plain .mjs, no declaration file.
 import * as tier from "#scripts/test-tier-manifest.mjs";
+// @ts-expect-error — plain .mjs, no declaration file.
+import * as wrapper from "#scripts/test-with-retry.mjs";
 
 type Manifest = { thresholdMs: number; files: Record<string, number> };
 const boundArgs = tier.coverageShardHangBoundArgs as (files: string[], manifest: Manifest, root?: string) => string[];
@@ -174,4 +176,38 @@ test("a corpus whose root removal fails", async (t) => {
   assert.notEqual(ordered.code, 0, "the failed removal still fails the test");
   assert.match(ordered.output, /^not ok 1 - a corpus whose root removal fails$/m, ordered.output);
   assert.match(ordered.output, /ENOTEMPTY/);
+});
+
+test("W1-T12415: the hang manifest variable reaches no test process, so a fixture copy of the wrapper never looks for it", () => {
+  const coverageEnv = (wrapper.coverageChildEnvironment as (env: NodeJS.ProcessEnv) => NodeJS.ProcessEnv)({ [MANIFEST_ENV]: "scripts/test-tier-coverage-manifest.json", KEEP: "1" });
+  assert.equal(MANIFEST_ENV in coverageEnv, false);
+  assert.equal(coverageEnv.KEEP, "1", "positive control: the rest of the environment is kept");
+  const retry = (wrapper.coverageRetryInvocation as (cmd: string, args: string[], files: string[], env: NodeJS.ProcessEnv) => { env: NodeJS.ProcessEnv } | null)(
+    "node", ["--test", "test/a.test.ts"], ["test/a.test.ts"], { [MANIFEST_ENV]: "scripts/test-tier-coverage-manifest.json", KEEP: "1" });
+  assert.ok(retry);
+  assert.equal(MANIFEST_ENV in retry.env, false);
+  assert.equal(retry.env.KEEP, "1");
+});
+
+test("W1-T12415: a deleted fixture module's source map outside the tree is dropped from raw coverage; an in-tree missing source is not", (t) => {
+  const dir = ownedFixtureDir(t, "missing-fixture-source").dir;
+  const raw = join(dir, "raw");
+  mkdirSync(raw);
+  const fixture = pathToFileURL(join(dir, "gone", "publisher.mjs")).href;
+  const kept = pathToFileURL(join(REPO_ROOT, "src", "lib", "read-model-worker.ts")).href;
+  const inTree = pathToFileURL(join(REPO_ROOT, "src", "no-such-source.ts")).href;
+  const report = { result: [], "source-map-cache": { [fixture]: { data: { sources: [fixture] } }, [kept]: { data: { sources: [kept] } } } };
+  const name = "coverage-1-1794859933719-1.json";
+  writeFileSync(join(raw, name), JSON.stringify(report));
+  writeFileSync(join(raw, "coverage-2-1794859933719-2.json"), JSON.stringify({ result: [], "source-map-cache": { [kept]: { data: { sources: [kept] } } } }));
+  const warning = (source: string, script: string) =>
+    `# Warning: Could not report code coverage. Error [ERR_SOURCE_MAP_MISSING_SOURCE]: Cannot find '${source}' imported from the source map for '${script}'`;
+  const missing = wrapper.missingFixtureSourceMaps as (output: string, cwd?: string) => string[];
+  assert.deepEqual(missing(warning(fixture, fixture), REPO_ROOT), [fixture]);
+  assert.deepEqual(missing(warning(inTree, fixture), REPO_ROOT), [], "a missing source inside the tree is never dropped");
+  const changed = (wrapper.dropFixtureSourceMaps as (rawDir: string, scripts: string[]) => string[])(raw, [fixture]);
+  assert.deepEqual(changed, [join(raw, name)], "only the report that holds the fixture's source map changes");
+  const after = JSON.parse(readFileSync(join(raw, name), "utf8")) as { "source-map-cache": Record<string, unknown> };
+  assert.deepEqual(Object.keys(after["source-map-cache"]), [kept], "the in-tree source map is kept");
+  assert.deepEqual(readdirSync(`${raw}-missing-source`), [name], "the original report is kept beside the raw directory as evidence");
 });

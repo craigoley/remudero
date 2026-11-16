@@ -304,10 +304,13 @@ const COVERAGE_VALUE_FLAGS = new Set([
   "--test-reporter-destination",
 ]);
 
-/** Node's compile cache can reduce V8 coverage precision, including branch detail. */
+/** Node's compile cache can reduce V8 coverage precision, including branch detail. W1-T12415: the
+ *  hang-bound manifest is this wrapper's own input, so no test process gets it. A test that runs a copy
+ *  of this wrapper in a fixture directory would otherwise look for the manifest there, and fail. */
 export function coverageChildEnvironment(env) {
   const childEnv = { ...env, NODE_DISABLE_COMPILE_CACHE: "1" };
   delete childEnv.NODE_COMPILE_CACHE;
+  delete childEnv[COVERAGE_HANG_MANIFEST_ENV];
   return childEnv;
 }
 
@@ -330,7 +333,9 @@ export function coverageRetryInvocation(cmd, args, failedFiles, env = process.en
   }
   // EMPTY, NOT DELETED: Node copies its own NODE_V8_COVERAGE into any child whose env lacks the
   // key, so a deleted key still hands an enclosing coverage run's directory to the retry.
-  return { cmd, args: [...withTapReporter(cmd, retained), ...failedFiles], env: { ...env, NODE_V8_COVERAGE: "" } };
+  const retryEnv = { ...env, NODE_V8_COVERAGE: "" };
+  delete retryEnv[COVERAGE_HANG_MANIFEST_ENV];
+  return { cmd, args: [...withTapReporter(cmd, retained), ...failedFiles], env: retryEnv };
 }
 
 /**
@@ -563,6 +568,87 @@ async function recoverEmptyCoverage(treeBefore, first, cmd, args, rawDir) {
   return reportTrackedTreeDirt(treeBefore, code === 0 && finalSummaryAllPass(first.output) ? 0 : first.code || 1);
 }
 
+// W1-T12415 — A FORCE-EXITED FIXTURE MODULE DOES NOT COST THE SHARD ITS LCOV. Under --test-force-exit a
+// worker thread's raw coverage can keep the source map of a module a test wrote into its own temp
+// directory and has since deleted (read-model-worker.test.ts's restarted-publisher.mjs). Node then
+// throws ERR_SOURCE_MAP_MISSING_SOURCE, writes no lcov, and exits 1 although every test passed. Node
+// never reports a file outside the working directory, so that source map changes no reported figure.
+// Only such an entry is dropped: its script and its missing source are both outside the working
+// directory. A missing source inside the tree is never dropped, and the run stays failed.
+const MISSING_SOURCE = /Cannot find '([^']+)' imported from the source map for '([^']+)'/g;
+const MISSING_SOURCE_ROUNDS = 20;
+
+function outsideTree(url, root) {
+  try {
+    const path = fileURLToPath(url);
+    return !resolve(path).startsWith(root);
+  } catch {
+    return false;
+  }
+}
+
+/** The script URLs whose source maps name a deleted source outside `cwd`, from node's coverage warnings in `output`. */
+export function missingFixtureSourceMaps(output, cwd = process.cwd()) {
+  const root = resolve(cwd) + sep;
+  const scripts = new Set();
+  for (const [, source, script] of output.matchAll(MISSING_SOURCE)) {
+    if (outsideTree(source, root) && outsideTree(script, root) && !existsSync(fileURLToPath(source))) scripts.add(script);
+  }
+  return [...scripts];
+}
+
+/** Removes the source-map-cache entries of `scripts` from the raw reports in `rawDir`. Each changed report's
+ *  original moves beside rawDir as evidence. Returns the changed report paths. */
+export function dropFixtureSourceMaps(rawDir, scripts) {
+  const changed = [];
+  const aside = `${resolve(rawDir)}-missing-source`;
+  for (const entry of readdirSync(rawDir, { withFileTypes: true })) {
+    if (!entry.isFile() || !/^coverage-\d+-\d{13}-\d+\.json$/.test(entry.name)) continue;
+    const path = join(rawDir, entry.name);
+    const text = readFileSync(path, "utf8");
+    if (!scripts.some((script) => text.includes(JSON.stringify(script)))) continue;
+    const report = JSON.parse(text);
+    const cache = report["source-map-cache"];
+    const present = cache && typeof cache === "object" ? scripts.filter((script) => Object.hasOwn(cache, script)) : [];
+    if (present.length === 0) continue;
+    for (const script of present) delete cache[script];
+    mkdirSync(aside, { recursive: true });
+    renameSync(path, join(aside, entry.name));
+    writeFileSync(path, JSON.stringify(report));
+    changed.push(path);
+  }
+  return changed;
+}
+
+/** Drops deleted fixtures' source maps from the raw coverage and rebuilds the lcov, round by round, because
+ *  node names one missing source per failure. True when the lcov was rebuilt. */
+async function repairFixtureSourceMaps(firstOutput, args, rawDir) {
+  if (!coverageOptions(args).output) return false;
+  const env = coverageChildEnvironment({ ...process.env, NODE_V8_COVERAGE: "" });
+  const dropped = new Set();
+  let output = firstOutput;
+  for (let round = 0; round < MISSING_SOURCE_ROUNDS; round += 1) {
+    const scripts = missingFixtureSourceMaps(output).filter((script) => !dropped.has(script));
+    if (scripts.length === 0) return false;
+    try {
+      dropFixtureSourceMaps(rawDir, scripts);
+    } catch (error) {
+      console.error(`test-with-retry: could not drop deleted fixtures' source maps: ${error.message}`);
+      return false;
+    }
+    for (const script of scripts) dropped.add(script);
+    const rebuilt = await runChild(process.execPath, ["--expose-internals", fileURLToPath(import.meta.url), "--rebuild-coverage", rawDir, ...args], env);
+    if (rebuilt.code === 0) {
+      const line = `FLAKE-RETRY-RECOVERED: dropped the source maps of deleted fixture module(s) outside the tree and rebuilt lcov — ${[...dropped].join(", ")}`;
+      console.log(line);
+      if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, line + "\n");
+      return true;
+    }
+    output = rebuilt.output;
+  }
+  return false;
+}
+
 export async function main(argv) {
   if (argv[0] === "--rebuild-coverage") return rebuildCoverage(argv[1], argv.slice(2));
   const coverageFirstPass = argv[0] === "--coverage-first-pass";
@@ -619,6 +705,11 @@ export async function main(argv) {
 
   // W1-T8585: a run that names a failing test or file is never recovered by dropping coverage.
   const namedFailure = firstNames.length > 0 || failedFiles.length > 0;
+  // W1-T12415: the lcov is repaired first, so a failed-file retry that passes still leaves the gates a report.
+  if (coverageFirstPass && isNodeCommand(cmd) && /Could not report code coverage/.test(first.output) &&
+      await repairFixtureSourceMaps(first.output, args, rawCoverageDir) && !namedFailure && finalSummaryAllPass(first.output)) {
+    return reportTrackedTreeDirt(treeBefore, 0);
+  }
   if (coverageFirstPass && !namedFailure && emptyCoverageFailure(cmd, args, first.output)) return recoverEmptyCoverage(treeBefore, first, cmd, args, rawCoverageDir);
   if (coverageFirstPass) return coverageRetry(treeBefore, first.code, coverageRetryInvocation(cmd, args, failedFiles), failedFiles, firstNames);
 
