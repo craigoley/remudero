@@ -1,0 +1,46 @@
+- id: W1-T13223
+  title: "The escalation-answer reader accepts a comment from a repository admin, and never reads a comment the fleet wrote as an operator answer"
+  repo: remudero
+  priority: 1.1
+  depends_on: []
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # widens who may answer an escalation on GitHub (repository admins) and narrows it (fleet-written text); both are authority rules
+  band_meaning: blast-radius
+  origin: "operator-ruling#2026-11-16T17:44Z-cao825-and-craigoley-are-the-owner"
+  plan_refs:
+    - W1-T4471
+    - W1-T6407
+  files:
+    - src/lib/escalation-answers.ts
+    - test/a-humans-answers-that-keep-being-ignored-raise-one-alarm.test.ts
+    - test/inbox/escalation-answer-errors-name-the-failing-stage.test.ts
+    - test/inbox/the-escalation-answer-reader-accepts-an-admin-and-never-the-fleets-own-text.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A non-bot comment whose author holds admin permission on the repository is accepted as an operator answer whether or not operatorGithubLogins is configured, and its panel.question_answered row names authority repository-admin"
+      proof: "grep: W1-T13223 criterion 1 in test/inbox/the-escalation-answer-reader-accepts-an-admin-and-never-the-fleets-own-text.test.ts"
+    - claim: "A comment whose body carries the fleet's own escalation footer, the fleet observation text, or the issue-revalidation garden's refresh text is refused with reason fleet-authored even when its author is an operator or admin login, and that reason never raises the ignored-answers alarm"
+      proof: "grep: W1-T13223 criterion 2 in test/inbox/the-escalation-answer-reader-accepts-an-admin-and-never-the-fleets-own-text.test.ts"
+    - claim: "When the admin permission read fails, the comment is neither accepted nor ledgered as ignored; it is counted unreadable and read again next pass"
+      proof: "grep: W1-T13223 criterion 3 in test/inbox/the-escalation-answer-reader-accepts-an-admin-and-never-the-fleets-own-text.test.ts"
+    - claim: "invariant:reactions-unchanged — a reaction is still accepted only from the owner login or a configured operator login, never on admin permission, because the fleet's own acknowledgement reaction is posted as whichever login gh uses"
+      proof: "grep: W1-T13223 criterion 4 in test/inbox/the-escalation-answer-reader-accepts-an-admin-and-never-the-fleets-own-text.test.ts"
+  rationale: |
+    OBSERVED 2026-11-16 via the GitHub REST API: craigoley is an organization, so a comment from Craig's login cao825 on craigoley/remudero carries author_association MEMBER, never OWNER. Escalation #17274 (opened 2026-11-08 from host Mac-mini) reports cao825 refused on 27 distinct comments with reason not-owner; with no operatorGithubLogins configured, operatorRefusal in src/lib/escalation-answers.ts accepts only OWNER. The Azure config was fixed by hand on 2026-10-08 (W1-T6407's rationale), but every new or rebuilt instance repeats the gap.
+    The operator RULED 2026-11-16 17:44Z: cao825 and craigoley are the same owner and admin of everything, and nothing should refuse either.
+    Also OBSERVED: fleet automation posts as cao825. Reading the first page of comments since 2026-11-01 on each open issue, at least 105 "Another escalation observed the same condition" comments and 13 issue-revalidation refreshes were authored by cao825. Where cao825 is a configured operator, the reader would take those as operator answers; admitting admins without the fleet-authored rule would spread that to every instance.
+  design: |
+    1. EscalationAnswerGateway gains optional isRepoAdmin(login): Promise<boolean>. The gh gateway reads repos/{owner}/{repo}/collaborators/{login}/permission once per login per pass and caches it.
+    2. Before the authority check, a comment whose body matches the fleet's own text (the escalation footer line from renderIssueBody, "Another escalation observed the same condition", or "(issue-revalidation garden, W1-T8864)") is refused as fleet-authored. It is ledgered once like a bot refusal and excluded from refusal alarms.
+    3. Otherwise a comment refused as not-owner or not-configured-operator is re-checked with isRepoAdmin. Admin accepts it with authority repository-admin. A failed read counts as unreadable and skips that comment this pass without a ledger row.
+    INVARIANT reactions-unchanged: the reaction channel's authority rule is exactly as before.
+    Two existing suites move with it: the W1-T6407 real-gateway fixture answers the new permission read (a MEMBER holding write, still refused), and the W1-T11405 parse-reset fixture counts the one extra body read.
+    NOT IN SCOPE: changing which login the fleet posts as (filed separately as a RECON), config.json on any host, the revalidation garden's operator-spoke-last guard.
+  falsifier: |
+    Drop the admin re-check and criterion 1 must fail. Drop the fleet-authored rule and criterion 2 must fail. Treat a failed read as a refusal and criterion 3 must fail. Admit an admin's reaction and criterion 4 must fail.
+  note: |
+    Reserved with rmd next-task-id from the operator checkout (refs/rmd-id/W1-T13223). rmd test-place computed test/inbox/.
