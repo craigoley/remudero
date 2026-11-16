@@ -12,7 +12,7 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, relative } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -42,14 +42,17 @@ test("W1-T13051 criterion 1: on macOS a child of any test process finds a chmod 
   // Other setup directories may sit ahead of it; what matters is that it is ahead of the platform's chmod.
   const resolved = spawnSync("bash", ["-c", "command -v chmod"], { encoding: "utf8", env: process.env }).stdout.trim();
   assert.equal(resolved, join(dir, "chmod"), "a child's `chmod` must resolve to the contract directory's");
-  const target = join(scratch(), "snapshot");
-  writeFileSync(target, "x", { mode: 0o644 });
-  // CONTROL: the platform's own chmod refuses the same arguments, so the pass below is the shim's doing.
-  const bare = spawnSync("/bin/chmod", ["600", "--", target], { encoding: "utf8" });
+  const dirOfTargets = scratch();
+  // CONTROL, on its own file: the platform's chmod refuses the same arguments, so the pass below is the shim's doing.
+  const control = join(dirOfTargets, "control");
+  writeFileSync(control, "x", { mode: 0o644 });
+  const bare = spawnSync("/bin/chmod", ["600", "--", control], { encoding: "utf8" });
   assert.notEqual(bare.status, 0, "macOS chmod is expected to refuse `--`; if it now accepts it this task is obsolete");
   // It reads `--` as a missing file: it still changes the real operand, then exits non-zero for the marker.
   assert.match(bare.stderr, /--/);
-  chmodSync(target, 0o644);
+  const target = join(dirOfTargets, "snapshot");
+  writeFileSync(target, "x", { mode: 0o644 });
+  assert.equal(mode(target), 0o644);
   // The call deploy/host-update.sh makes, through the PATH every suite's child inherits.
   const viaPath = spawnSync("bash", ["-c", 'chmod 600 -- "$1"', "bash", target], { encoding: "utf8", env: process.env });
   assert.equal(viaPath.status, 0, viaPath.stderr);

@@ -22,7 +22,7 @@ import fs from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { reapDeadOwnerDirs, setupDirOwnerTag } from "./no-live-remote.js";
+import { reapDeadOwnerDirs, setupDirOwnerTag } from "#test/setup/no-live-remote.js";
 
 /** The contract directory's name prefix. The owning pid follows it, so a later test process can remove
  *  the directory a killed one left (see `reapDeadOwnerDirs`). */
