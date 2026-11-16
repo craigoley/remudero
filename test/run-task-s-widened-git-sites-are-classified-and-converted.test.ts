@@ -102,7 +102,7 @@ export const RUN_TASK_WIDENED_SITES: Readonly<Record<string, { count: number; cl
   creditEvidenceRootFor: { count: 1, cls: "CHECKOUT", reason: `${OWN}: or a managed clone of the credited repo` },
   registeredFixWorktreeOwner: { count: 1, cls: "CHECKOUT", reason: FIX_CLONE },
   publishAbandonedFixOwnerAhead: { count: 1, cls: "CHECKOUT", reason: FIX_CLONE },
-  idCitedInSrc: { count: 1, cls: "CHECKOUT", reason: OWN },
+  idCitedInSrcSync: { count: 1, cls: "CHECKOUT", reason: `${OWN}: the sync grep kept for non-daemon callers (W1-T12753)` },
   approveCommand: { count: 6, cls: "CHECKOUT", reason: "an approve worktree cut at origin/main whose only writes are the harness's shard and skill files, and the clone it ls-remotes" },
   bundleExportCommand: { count: 1, cls: "CHECKOUT", reason: OWN },
   plannedOnOriginMain: { count: 1, cls: "CHECKOUT", reason: `${OWN}: dir defaults to repoRoot` },
