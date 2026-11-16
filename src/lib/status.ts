@@ -4774,6 +4774,27 @@ export function postPrewarmWorkerResponse(
 // with the matching kind; a normal main-thread load leaves it untouched.
 if (!isMainThread && isPrewarmWorkerRequest(workerData)) postPrewarmWorkerResponse(parentPort, workerData);
 
+/** W1-T12954: each task id's PRs whose body has an anchored `Remudero-Task: <id>` line, in list order. For an id
+ *  with no whitespace this answers exactly what `^Remudero-Task:\s*<id>\s*$` (multiline) answers per PR. */
+function mergedTrailerIndex<T extends { body?: string }>(list: readonly T[]): Map<string, T[]> {
+  const key = "Remudero-Task:";
+  const value = /\s*(\S+)(?=\s*$)/my;
+  const byTask = new Map<string, T[]>();
+  for (const pr of list) {
+    const body = pr.body ?? "";
+    for (let at = body.indexOf(key); at !== -1; at = body.indexOf(key, at + 1)) {
+      if (at > 0 && !"\n\r\u2028\u2029".includes(body[at - 1]!)) continue;
+      value.lastIndex = at + key.length;
+      const taskId = value.exec(body)?.[1];
+      if (taskId === undefined) continue;
+      const prs = byTask.get(taskId);
+      if (prs === undefined) byTask.set(taskId, [pr]);
+      else if (prs.at(-1) !== pr) prs.push(pr);
+    }
+  }
+  return byTask;
+}
+
 /**
  * A GitHub gateway answering ALL of {@link GitHub}'s methods from ONE batched fetch of the repo's PRs, held in
  * memory with a short TTL, instead of one subprocess PER call: {@link ghGateway}'s trailer search runs one
@@ -5339,6 +5360,17 @@ export function buildBatchedGithub(
     // precedence; the difference is that the body miss is now O(1), not a fresh O(merged PRs) scan per task.
     return (taskId: string): PrRef | null => byTask.get(taskId) ?? commitTrailerFallback(taskId)[0] ?? null;
   };
+  // W1-T12954: one body pass for each index() result; an id an index key cannot be keeps the old scan.
+  let trailerIndexOf: { idx: Index; byTask: Map<string, BatchedPr[]> } | undefined;
+  const mergedByTrailer = (taskId: string): BatchedPr[] => {
+    const idx = index();
+    if (taskId === "" || /\s/.test(taskId)) {
+      const anchored = new RegExp(`^Remudero-Task:\\s*${escapeRegExp(taskId)}\\s*$`, "m");
+      return idx.mergedNewestFirst.filter((p) => anchored.test(p.body ?? ""));
+    }
+    if (trailerIndexOf?.idx !== idx) trailerIndexOf = { idx, byTask: mergedTrailerIndex(idx.mergedNewestFirst) };
+    return trailerIndexOf.byTask.get(taskId) ?? [];
+  };
   const lookup = (ref: string | number): BatchedPr | undefined => {
     const idx = index();
     const s = String(ref);
@@ -5573,8 +5605,7 @@ export function buildBatchedGithub(
       return p && typeof p.number === "number" ? asRef(p) : null;
     },
     findMergedByTrailer(taskId) {
-      const anchored = new RegExp(`^Remudero-Task:\\s*${escapeRegExp(taskId)}\\s*$`, "m");
-      const hit = index().mergedNewestFirst.find((p) => anchored.test(p.body ?? ""));
+      const hit = mergedByTrailer(taskId)[0];
       if (hit) return asRef(hit);
       // W1-T2387: THIS is the gateway `resolveAlreadySatisfied` actually builds, so the union has to live here
       // too or the fix ships unwired. Body first; a FAILED fetch still reports as a failure.
@@ -5584,9 +5615,8 @@ export function buildBatchedGithub(
     findMergedByTrailerAll(taskId) {
       // W1-T441: NO ADDITIONAL FETCH — the merged index already carries every merged PR's body from the ONE
       // batched read, so this is a filter over data in hand. null on a fetch failure (W1-T119), never [].
-      const anchored = new RegExp(`^Remudero-Task:\\s*${escapeRegExp(taskId)}\\s*$`, "m");
       if (unreadable()) return null;
-      const byBody = index().mergedNewestFirst.filter((p) => anchored.test(p.body ?? "")).map(asRef);
+      const byBody = mergedByTrailer(taskId).map(asRef);
       // W1-T2387: union, body-first — see the sibling above.
       return byBody.length > 0 ? byBody : commitTrailerFallback(taskId);
     },

@@ -15,11 +15,12 @@ import { join } from "node:path";
 import {
   DEFAULT_SWEEP_POLICY,
   drainDetachedSweepActions,
+  drainInFlightReviews,
   runSweepLightPass,
   type OpenPrView,
   type SweepDeps,
   type SweepPolicy,
-} from "./helpers/sweep-test.js";
+} from "#test/helpers/sweep-test.js";
 import { activeWorkerCount, withWorkerOccupancy } from "../src/lib/worker.js";
 
 const NOW = Date.parse("2026-09-05T20:00:00Z");
@@ -162,6 +163,10 @@ test("W1-T2931: a board larger than the budget spans passes", async () => {
 test("W1-T2931: review width survives a bounded fan-out", async () => {
   const fixed: number[] = [];
   const reviewed: number[] = [];
+  let releaseReviews!: () => void;
+  const reviewsStillRunning = new Promise<void>((resolve) => {
+    releaseReviews = resolve;
+  });
   const board = [
     reviewablePr(21),
     reviewablePr(22),
@@ -171,9 +176,21 @@ test("W1-T2931: review width survives a bounded fan-out", async () => {
     fixablePr(33),
   ];
 
-  await runSweepLightPass(board, deps(ledgerPath(), fixed, reviewed), policy(4, 3));
-  await drainDetachedSweepActions();
+  try {
+    await runSweepLightPass(board, {
+      ...deps(ledgerPath(), fixed, reviewed),
+      postReview: (pr) => {
+        reviewed.push(pr.prNumber);
+        // Keep reservations live while repair history yields to the event loop.
+        return reviewsStillRunning;
+      },
+    }, policy(4, 3));
 
-  assert.deepEqual(reviewed.sort((a, b) => a - b), [21, 22, 23], "all three review lanes keep their selected width");
-  assert.deepEqual(fixed, [31], "fix dispatch receives only the one slot left after review reservation");
+    assert.deepEqual(reviewed.sort((a, b) => a - b), [21, 22, 23], "all three review lanes keep their selected width");
+    assert.deepEqual(fixed, [31], "fix dispatch receives only the one slot left after review reservation");
+  } finally {
+    releaseReviews();
+    await drainInFlightReviews({ boundMs: 1000 });
+    await drainDetachedSweepActions();
+  }
 });
