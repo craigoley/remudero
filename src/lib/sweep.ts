@@ -12462,16 +12462,15 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // W1-T13193 — A REVIEW SETUP REFUSED AT THE SAME INPUT IS NOT RE-ADMITTED EVERY PASS. A refused setup writes no
     // review.posted row, so the W1-T5863 row below never trips on it. Ordered before every post-review row, this row
     // holds the demand until the head, the body or the reviewer code changes; runSweep takes one parked-PR
-    // remedy per head and digest (or, with no remedy host, escalates once). The blocker is `other`, not awaiting-review: no review lane owns a held review, so the hold climbs
-    // the SLO ladder like every blocked-ambiguous row, and the #13305 stage diagnosis reads the hold's refusals too.
+    // remedy per head and digest (or, with no remedy host, escalates once). The blocker stays awaiting-review, so the
+    // #13305 stage diagnosis (which reads review.semantic_setup_refused rows for that blocker) keeps working on the hold.
     disposition: "blocked-ambiguous",
-    blocker: "other",
+    blocker: "awaiting-review",
     when: reviewSetupRefusalHolds,
     reason: (pr) => {
       const held = pr.reviewSetupRefused;
       return `review setup refused ${held?.count ?? 0} times at head ${pr.headSha.slice(0, 7)} ` +
-        `(${held?.reason ?? "unknown"}, digest ${pr.reviewInputDigest ?? "unknown"}, reviewer code ` +
-        `${held?.reviewerCodeSha?.slice(0, 7) ?? "unrecorded"}) — not re-admitted until the head, body or reviewer code changes`;
+        `(${held?.reason ?? "unknown"}) — not re-admitted until the head, body or reviewer code changes`;
     },
   },
   {
@@ -20656,7 +20655,7 @@ export async function runSweep(
     // It is overdue only past the longest review this process has observed (the 30-minute bound stands in).
     // A review whose setup refused at this head, with no review started since, is no live owner: each pass
     // re-admits it and it refuses again, so name the refusal instead of deferring (#13305: 156 refusals, 4.5 h).
-    const refusals = fields.blocker === "awaiting-review" || pr.reviewSetupRefused !== undefined
+    const refusals = fields.blocker === "awaiting-review"
       ? stageRows.filter(row => row.step === "review.semantic_setup_refused" && row.head_sha === pr.headSha) : [];
     const lastRefusalMs = Date.parse(String(refusals.at(-1)?.ts));
     const refusing = refusals.length > 0 && !stageRows.some(row => Date.parse(String(row.ts)) >= lastRefusalMs &&
@@ -22611,7 +22610,7 @@ export async function runSweep(
     let { disposition, reason } = derived;
     // W1-T13193: the review-setup refusal hold, named so the dedup and action arms escalate it once per head and input.
     const setupRefusalHeld = pr.reviewSetupRefused !== undefined && derived.disposition === "blocked-ambiguous" &&
-      derived.blocker === "other" &&
+      derived.blocker === "awaiting-review" &&
       selectDispositionRule(dispositionView, policy, actNowMs, dispositionFacts).rule?.when === reviewSetupRefusalHolds;
     // W1-T9232: a build head cut before its own shard merged is refreshed from main and re-reviewed, never escalated
     // as "contradictory". A refresh that does not take, or a second miss after one, keeps the escalation, named.
