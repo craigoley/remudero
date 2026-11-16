@@ -1,7 +1,7 @@
 - id: W1-T13215
   title: "An author preflight says which of its failures the change caused: it re-runs the failing files at the merge base and labels each failing test as also red at the base or red only at the head"
   repo: remudero
-  priority: 1.1
+  priority: 0.5
   type: implement
   verify: auto
   principles:
