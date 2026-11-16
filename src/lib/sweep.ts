@@ -107,7 +107,7 @@ import {
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { isWorkerProviderId, type Config, type WorkerProviderId, fixStrikeCap, overflowFallbackRefusal } from "./config.js";
 import { defaultGitCaptureAsync, gitPushEmptyCommit, gitPushRunBranchAsync, worktreePushExec, worktreePushExecAsync, runStepsSync, runStepsAsync, step, type Steps } from "./git-push.js";
-import { ghExec, ghJson, ghJsonAsync, ghTextAsync, GhPaceWouldBlockError, type GhJsonReadOptions } from "./github-transport.js";
+import { ghExec, ghJson, ghJsonAsync, ghTextAsync, GhPaceWouldBlockError, paceGhEntryAsync, type GhJsonReadOptions } from "./github-transport.js";
 import { withdrawStaleConflictedJudgePr } from "./machine-filing-judge.js";
 import type { AdmissionObserver, AdmissionSettings, AdmissionRead } from "./contributor-admission.js";
 import { observeContributorAdmission } from "./arm-auto-merge.js";
@@ -1590,7 +1590,7 @@ export interface BuildSweepEffectsDeps {
   armSessionPrsOverride?: boolean;
   updateBranchImpl?: (pr: ArmedStalledPr) => Promise<UpdateBranchOutcome>;
   rebaseDirtyFleetBranchImpl?: (pr: OpenPrView) => DirtyFleetRebaseOutcome | Promise<DirtyFleetRebaseOutcome>;
-  captureRepairFeedbackImpl?: (filing: RepairFilingCapture) => void;
+  captureRepairFeedbackImpl?: (filing: RepairFilingCapture) => void | Promise<void>;
   ghRunImpl?: (file: string, args: readonly string[]) => void;
   spawnWallClockBoundMsOverride?: number;
   /** W1-T4105: how often a running fix worker's PR is re-read; defaults to the daemon poll pace. */
@@ -1598,6 +1598,8 @@ export interface BuildSweepEffectsDeps {
   reclaimWorkerImpl?: (info: { runId: string; taskId: string; elapsedMs: number }) => void | Promise<void>;
   disarmImpl?: (prUrl: string) => DisarmOutcome | void;
   readJsonImpl?: (args: string[], readOpts?: GhJsonReadOptions) => Promise<unknown>;
+  /** W1-T13183: the awaited binary read (an artifact zip); defaults to a byte-keeping {@link ghTextAsync}. */
+  readBufferImpl?: (args: string[]) => Promise<Buffer>;
   fleetDeployStateImpl?: DeployStateReader;
   fleetDeploySensorsImpl?: DeployStateReader["deploy"];
   /** Shared pacer; omitted for the existing immediate CLI/test mode. */
@@ -2722,6 +2724,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     reclaimWorkerImpl = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["reclaimWorkerImpl"]>>("reclaimWorkerImpl"),
     disarmImpl = disarmAutoMerge,
     readJsonImpl = (args, readOpts) => ghJsonAsync(args, undefined, undefined, readOpts),
+    readBufferImpl = async (args) => Buffer.from(await ghTextAsync(args, { maxBuffer: 1 << 26, encoding: "latin1" }), "latin1"),
     pacer,
     fetchWorkflowRunObservationsImpl: fetchWorkflowRunObservationsForBuild = fetchWorkflowRunObservations,
     registeredWorktreeOwnerImpl = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["registeredWorktreeOwnerImpl"]>>("registeredWorktreeOwnerImpl"),
@@ -5745,13 +5748,14 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           repo,
           ingested,
           settled: settledFoldDebtArtifacts,
-          readJson: (args: string[]) => paceGhEntry(pacer, isGhRateLimitError, () => ghJsonForBuild(args)),
-          readZip: (args: string[]) => paceGhEntry(pacer, isGhRateLimitError, () => ghBufferForBuild(args)),
+          // W1-T13183: awaited and paced on timers, so the listing, merge lookups and download leave the loop free.
+          readJson: (args: string[]) => paceGhEntryAsync(pacer, isGhRateLimitError, () => readJsonImpl(args)),
+          readZip: (args: string[]) => paceGhEntryAsync(pacer, isGhRateLimitError, () => readBufferImpl(args)),
           root: repoRoot,
           log,
           land: deps.landFeedbackImpl,
         };
-        return await landFoldDebt(pullFoldDebtEntries(input), input);
+        return await landFoldDebt(await pullFoldDebtEntries(input), input);
       } catch (e) {
         log(FOLD_DEBT_PULL_ERROR_STEP, { phase: "list", error: String((e as Error)?.message ?? e) });
         return [];

@@ -509,17 +509,20 @@ function ghHttpReadFor(args: readonly string[]): (() => Promise<string>) | undef
 /** Bounded, paced async `gh` transport for endpoints whose response is plain text (for example
  * Actions job logs). Unlike {@link ghJsonAsync}, this deliberately preserves the response as text
  * and never attempts JSON parsing. `env` (W1-T9549) is the child's environment, as {@link ghExec}'s
- * `opts.env` is; a call that names one never shares another caller's in-flight read. */
+ * `opts.env` is; a call that names one never shares another caller's in-flight read. `encoding: "latin1"`
+ * (W1-T13183) keeps every byte, so `Buffer.from(text, "latin1")` is a binary body such as an artifact zip;
+ * the broker answers only UTF-8 text, so such a read runs `gh` itself. */
 export async function ghTextAsync(
   args: string[],
-  opts: { maxBuffer?: number; timeout?: number; env?: NodeJS.ProcessEnv; fresh?: true } = {},
+  opts: { maxBuffer?: number; timeout?: number; env?: NodeJS.ProcessEnv; fresh?: true; encoding?: "latin1" } = {},
   execAsync: GhAsyncExecutor = execFileAsync,
 ): Promise<string> {
   const maxBuffer = opts.maxBuffer ?? DEFAULT_GH_MAX_BUFFER;
   const timeout = opts.timeout ?? DEFAULT_GH_CALL_TIMEOUT_MS;
   const env = opts.env;
+  const encoding: BufferEncoding = opts.encoding ?? "utf8";
   const read = async (): Promise<string> => {
-    const execOpts = { encoding: "utf8" as const, maxBuffer, timeout, ...(env === undefined ? {} : { env }) };
+    const execOpts = { encoding, maxBuffer, timeout, ...(env === undefined ? {} : { env }) };
     const { stdout } = await withGhKillEscalation(execAsync("gh", args, execOpts), args, timeout);
     return stdout;
   };
@@ -536,13 +539,13 @@ export async function ghTextAsync(
     await admitInstallationReadAsync(args);
     try { return rememberHeaders(await read()); } catch (err) { noteInstallationRefusal(err); throw err; }
   }
-  const key = env === undefined && ghArgsAreCoalescibleRead(args) ? `text:${opts.fresh === true ? "fresh:" : ""}${JSON.stringify(args)}:${maxBuffer}:${timeout}` : undefined;
+  const key = env === undefined && ghArgsAreCoalescibleRead(args) ? `text:${encoding}:${opts.fresh === true ? "fresh:" : ""}${JSON.stringify(args)}:${maxBuffer}:${timeout}` : undefined;
   const existing = key === undefined ? undefined : asyncReadInFlight.get(key) as Promise<string> | undefined;
   if (existing) return existing;
   const request = (async (): Promise<string> => {
     await admitInstallationReadAsync(args);
     refuseSentinelGhToken("gh", args, env);
-    const brokered = await ghBrokeredAsync(args, opts, env);
+    const brokered = encoding === "utf8" ? await ghBrokeredAsync(args, opts, env) : undefined;
     if (brokered !== undefined) return rememberHeaders(brokered);
     await applyGhReadCadenceAsync(args);
     return rememberHeaders(await read());
