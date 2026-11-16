@@ -35,6 +35,14 @@ export function infrastructureRefusal(line: Record<string, unknown>): string | u
   return undefined;
 }
 
+/** W1-T12154: the stage named on a `verdict` row whose run wrote no `worker.assignment` row. Since W1-T12154 the
+ *  run's own logger writes `worker_assigned: false` and the `last_stage` it reached on that row. An older row
+ *  carries neither, so only the infrastructure refusals above, which end a run before any worker, are judged. */
+export function endedBeforeWorkerAssignment(line: Record<string, unknown>): string | undefined {
+  if (line.worker_assigned === false) return typeof line.last_stage === "string" && line.last_stage.length > 0 ? line.last_stage : "unknown";
+  return infrastructureRefusal(line);
+}
+
 export function lifetimeInfrastructureRefusal(line: Record<string, unknown>): string | undefined {
   return infrastructureRefusal(line) ??
     (typeof line.verdict === "string" && LIFETIME_ONLY_REFUSAL_VERDICTS.has(line.verdict) ? line.verdict : undefined);

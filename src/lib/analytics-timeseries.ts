@@ -1,4 +1,5 @@
 import { spendRoleOf, spendAmountUsd } from "./spend-rows.js";
+import { endedBeforeWorkerAssignment } from "./non-worker-verdict.js";
 
 export type TimeSeriesPoint = {
   t: string;
@@ -39,6 +40,8 @@ const utcDayFormatter = new Intl.DateTimeFormat("en-CA", {
 type HistoricalBucket = {
   observed: boolean;
   completedRuns: number;
+  /** W1-T12154: runs that ended before any worker was assigned — never a completed run nor a duration. */
+  endedBeforeWorkerRuns: number;
   tokensTotal: number;
   cacheRead: number;
   inputTokens: number;
@@ -52,6 +55,7 @@ function emptyHistoricalBucket(): HistoricalBucket {
   return {
     observed: false,
     completedRuns: 0,
+    endedBeforeWorkerRuns: 0,
     tokensTotal: 0,
     cacheRead: 0,
     inputTokens: 0,
@@ -101,9 +105,17 @@ function median(values: readonly number[]): number | undefined {
   return sorted[Math.floor((sorted.length - 1) / 2)];
 }
 
+/** One UTC day's run counts: completed runs, and (W1-T12154) runs that ended before a worker was assigned. */
+export interface HistoricalRunCounts {
+  day: string;
+  completedRuns: number;
+  endedBeforeWorkerRuns: number;
+}
+
 export interface HistoricalSeriesAccumulator {
   add(line: Record<string, unknown>): void;
   build(nowIso: string | null): LedgerTimeSeries[];
+  runCounts(): HistoricalRunCounts[];
 }
 
 function dayRange(nowIso: string): string[] {
@@ -186,7 +198,8 @@ export function createHistoricalSeriesAccumulator(): HistoricalSeriesAccumulator
       }
       if (step === "verdict" && runId && Number.isFinite(timestamp)) {
         const started = starts.get(runId);
-        if (started !== undefined) {
+        if (started !== undefined && endedBeforeWorkerAssignment(line) !== undefined) bucket.endedBeforeWorkerRuns += 1;
+        else if (started !== undefined) {
           bucket.completedRuns += 1;
           bucket.durationsMs.push(Math.max(0, timestamp - started));
         }
@@ -207,6 +220,10 @@ export function createHistoricalSeriesAccumulator(): HistoricalSeriesAccumulator
     },
     build(nowIso) {
       return buildHistoricalSeries(state, nowIso);
+    },
+    runCounts() {
+      return [...state.entries()].sort(([left], [right]) => left.localeCompare(right))
+        .map(([day, bucket]) => ({ day, completedRuns: bucket.completedRuns, endedBeforeWorkerRuns: bucket.endedBeforeWorkerRuns }));
     },
   };
 }

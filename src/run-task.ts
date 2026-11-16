@@ -10483,6 +10483,9 @@ export function benchmarkRunLedgerLogger(write: (step: string, fields: Record<st
   stackEvidence: BenchmarkStackEvidence = {}, initialWork: BenchmarkWorkInput = {}) {
   const assignments = new Set<string>();
   let work = initialWork;
+  // W1-T12154: the furthest stage a run reached, named on its verdict when it never assigned a worker.
+  let lastStage: string | undefined;
+  let lastStep: string | undefined;
   return (step: string, extra: Record<string, unknown> = {}): void => {
     work = observeBenchmarkWork(work, step, extra);
     let fields: Record<string, unknown>;
@@ -10513,6 +10516,12 @@ export function benchmarkRunLedgerLogger(write: (step: string, fields: Record<st
       // Keep the source row and mark the receipt unavailable; telemetry cannot block dispatch.
       fields = { ...extra, benchmark_run_unavailable_reason: "receipt-build-failed" };
     }
+    if (step === "verdict" && assignments.size === 0) {
+      const stage = typeof extra.stage === "string" && extra.stage.length > 0 ? extra.stage : lastStage ?? lastStep ?? "none";
+      fields = { ...fields, worker_assigned: false, last_stage: stage };
+    } else if (step === "run.phase" && typeof extra.waiting_on === "string") lastStage = extra.waiting_on;
+    else if (typeof extra.stage === "string" && extra.stage.length > 0) lastStage = extra.stage;
+    lastStep = step;
     if (step === "worker.attempt") {
       // A metric write is never allowed to change a worker's actual result or retry path.
       try { write(step, fields); } catch { /* measured as absent on the next source audit */ }
