@@ -194,7 +194,7 @@ test("W1-T5705: the inline narrow selector runs for real against this repo", () 
   assert.ok(script, "the coverage shard must invoke node --import tsx -e '<script>' changed-files.txt <diff> coverage-narrow-suites.txt");
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t5705-real-`));
   owned.push(dir);
-  writeFileSync(join(dir, "changed.txt"), ".github/workflows/ci.yml\n");
+  writeFileSync(join(dir, "changed.txt"), "Dockerfile.x\n");
   writeFileSync(join(dir, "affected.diff"), "");
   const real = spawnSync(process.execPath, ["--import", "tsx", "-e", script![1]!, join(dir, "changed.txt"), join(dir, "affected.diff"), join(dir, "out.txt")], {
     cwd: REPO_ROOT,
@@ -202,6 +202,6 @@ test("W1-T5705: the inline narrow selector runs for real against this repo", () 
     env: { ...process.env, GITHUB_WORKSPACE: REPO_ROOT },
   });
   assert.equal(real.status, 0, real.stdout + real.stderr);
-  assert.equal(readFileSync(join(dir, "out.txt"), "utf8"), "full\n", "a workflow change forces a full run");
+  assert.equal(readFileSync(join(dir, "out.txt"), "utf8"), "full\n", "an unmodelled path forces a full run");
   assert.match(real.stdout, /W1-T5705: live coverage selection -> FULL/);
 });
