@@ -160,9 +160,39 @@ export async function runInboxGardener(options: { stateDir: string; scope: Inbox
 }
 
 const RELEVANT_STEPS = ["panel.proposal_reframe_requested", "panel.proposal_declined", "panel.proposal_restored", "ratify.reframed", "ratify.approved", "inbox.gardener_retired", "inbox.gardener_restored", "inbox.gardener_outcome"];
-/** BACKSTOP: admit the observed 1.35-MB/1400-proposal registry with bounded headroom; never label a capped source complete. */
-export const INBOX_GARDENER_SOURCE_LIMITS = { registryBytes: 2 * 1024 * 1024, threadBytes: 1024 * 1024, creditOverrideBytes: 64 * 1024,
-  proposals: 2048, relevantRows: 4096, relevantBytes: 512 * 1024, rowBytes: 16 * 1024 } as const;
+/** BACKSTOP: never label a capped source complete. W1-T13202: the 2026-10-17 bounds (2 MiB, 2,048 proposals) were sized
+ *  for a 1.35-MB/1400-proposal registry; on 2026-11-16 the host's was 2,448,321 bytes and ~2,343 proposals, so every pass
+ *  failed before judging anything. The registry grows with normal use (archiving does not shrink it), so the bounds carry
+ *  roughly 3x headroom and {@link INBOX_GARDENER_NEAR_BOUND_RATIO} warns in the ledger long before the next refusal. */
+export const INBOX_GARDENER_SOURCE_LIMITS = { registryBytes: 8 * 1024 * 1024, threadBytes: 4 * 1024 * 1024, creditOverrideBytes: 64 * 1024,
+  proposals: 8192, relevantRows: 4096, relevantBytes: 512 * 1024, rowBytes: 16 * 1024 } as const;
+/** PRIMARY CONTROL: W1-T13202: a bounded source at or past this share of its bound gets one ledger warning per UTC day,
+ *  so the bound is raised from evidence before {@link INBOX_GARDENER_SOURCE_LIMITS} (the BACKSTOP) refuses a pass. */
+export const INBOX_GARDENER_NEAR_BOUND_RATIO = 0.75;
+/** W1-T13202: the ledger step of that warning row. */
+export const INBOX_GARDENER_SOURCE_WARNING_STEP = "inbox.gardener_source_near_bound";
+const NEAR_BOUND_MARKER = "inbox-gardener-near-bound.json";
+
+/** W1-T13202: append one warning row per source per UTC day once a source reaches the near-bound share. Advisory only:
+ *  a fault here never fails the pass, and the source bound itself still refuses an oversized source. */
+export function warnInboxGardenerNearBound(stateDir: string, clock: Clock, measured: ReadonlyArray<{ source: string; size: number; bound: number }>): string[] {
+  const day = clock.iso().slice(0, 10), markerPath = join(stateDir, NEAR_BOUND_MARKER), warned: string[] = [];
+  let marker: Record<string, string> = {};
+  try { const parsed = JSON.parse(fs.readFileSync(markerPath, "utf8")); if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) marker = parsed; }
+  catch { marker = {}; /* missing or unreadable both mean "not yet warned today": the safe side is one extra warning */ }
+  for (const { source, size, bound } of measured) {
+    if (!(size >= bound * INBOX_GARDENER_NEAR_BOUND_RATIO) || marker[source] === day) continue;
+    try {
+      appendLedger(join(stateDir, LEDGER_FILENAME), { ts: clock.iso(), run_id: `INBOX-GARDENER-near-bound-${source}-${day}`, step: INBOX_GARDENER_SOURCE_WARNING_STEP,
+        task_id: "inbox-gardener", source, size, bound, reason: `${source} is ${size} of its ${bound} bound; the gardener refuses the whole pass past the bound` });
+    } catch { continue; /* not marked, so the next pass warns again; a warning never fails capture */ }
+    marker[source] = day; warned.push(source);
+  }
+  if (warned.length) {
+    try { fs.writeFileSync(markerPath, JSON.stringify(marker)); } catch { /* the next pass warns again; never fails this one */ }
+  }
+  return warned;
+}
 const relevantProjection: LedgerRowProjection = { name: "inbox-gardener-evidence", version: 2,
   tables: ["inbox_gardener_latest", "inbox_gardener_mirrors"],
   ddl: "CREATE TABLE IF NOT EXISTS inbox_gardener_latest(slot TEXT PRIMARY KEY, proposal TEXT NOT NULL, ts TEXT NOT NULL, body TEXT NOT NULL) WITHOUT ROWID; CREATE INDEX IF NOT EXISTS inbox_gardener_proposal ON inbox_gardener_latest(proposal); CREATE TABLE IF NOT EXISTS inbox_gardener_mirrors(id TEXT PRIMARY KEY) WITHOUT ROWID;",
@@ -231,11 +261,20 @@ export function defaultInboxGardenerPorts(options: { stateDir: string; scope: In
   let plan: ReturnType<typeof loadPlan>;
   let retainedRows: Array<Record<string, any>> = [], overrides: Array<Record<string, any>> = [];
   const capture = async (): Promise<InboxGardenerPack> => {
-    const snapshot = readPersistedInbox(options.stateDir), raw = parseProposalRegistryResult(readInboxGardenerFile(join(options.stateDir, "inbox-proposals.json"), INBOX_GARDENER_SOURCE_LIMITS.registryBytes));
+    const registryText = readInboxGardenerFile(join(options.stateDir, "inbox-proposals.json"), INBOX_GARDENER_SOURCE_LIMITS.registryBytes);
+    const snapshot = readPersistedInbox(options.stateDir), raw = parseProposalRegistryResult(registryText);
     const proposals = raw.kind === "ok" ? raw.proposals : [];
     if (proposals.length > INBOX_GARDENER_SOURCE_LIMITS.proposals) throw new Error("Inbox proposal population exceeds verification bound");
     plan = loadPlan(options.planPath);
-    const threads = parseAllThreads(optionalBoundedFile(threadPath, INBOX_GARDENER_SOURCE_LIMITS.threadBytes) ?? "", threadPath);
+    const threadText = optionalBoundedFile(threadPath, INBOX_GARDENER_SOURCE_LIMITS.threadBytes) ?? "";
+    const threads = parseAllThreads(threadText, threadPath);
+    // W1-T13202: sizes come from the bytes each bounded read already returned; a second stat by path would reopen the race
+    // the one-descriptor reads close.
+    warnInboxGardenerNearBound(options.stateDir, clock, [
+      { source: "registry-bytes", size: Buffer.byteLength(registryText), bound: INBOX_GARDENER_SOURCE_LIMITS.registryBytes },
+      { source: "registry-proposals", size: proposals.length, bound: INBOX_GARDENER_SOURCE_LIMITS.proposals },
+      { source: "thread-bytes", size: Buffer.byteLength(threadText), bound: INBOX_GARDENER_SOURCE_LIMITS.threadBytes },
+    ]);
     const ledger = readInboxGardenerLedger(options.stateDir, options.scope, proposals.map(p => p.id));
     retainedRows = ledger.rows;
     if (!fs.statSync(join(options.stateDir, LEDGER_FILENAME)).isFile()) throw new Error("live ledger unavailable");

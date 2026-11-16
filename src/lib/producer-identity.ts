@@ -102,6 +102,7 @@ export const PRODUCER_IDENTITIES: Readonly<Record<string, ProducerIdentity>> = O
   "REVIEWER-HEALTH": producer("reviewer-health", "Reviewer Health"),
   inbox: producer("inbox", "Inbox"),
   "inbox-bakeoff": producer("inbox-bakeoff", "Inbox Bake-off"),
+  "inbox-gardener": producer("inbox-gardener", "Inbox Gardener"),
   _ledger: producer("_ledger", "Ledger Internals"),
   "coverage-improve": producer("coverage-improve", "Coverage Improvement"),
   "coverage-nightly": producer("coverage-nightly", "Nightly Coverage"),
