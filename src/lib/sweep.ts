@@ -243,7 +243,8 @@ import type {
   ReviewEvidence,
   ReviewVerdict,
 } from "./review.js";
-import { DEP_REVIEW_ENGINE_REVISION, depReviewRowEngineRevision, isDependabotAuthor, dependabotOwnRedSignal, dependabotReviewArgs, dependabotRefreshVerdict, type DependabotOwnRedSignal, type DependabotRefreshVerdict } from "./dep-review.js";
+import { DEP_REVIEW_ENGINE_REVISION, depReviewRowEngineRevision, readDepReviewHoldState, isDependabotAuthor, dependabotOwnRedSignal, dependabotReviewArgs, dependabotRefreshVerdict, type DependabotOwnRedSignal, type DependabotRefreshVerdict } from "./dep-review.js";
+import { DEP_REVIEW_REFUSED_ASK_RETIRED_STEP, retireDepReviewRefusedAsk } from "./dep-review.js";
 import { parseLedger } from "./retro.js";
 import { readReviewHostObservation, selectRuntimeReviewWidth } from "./review-capacity.js";
 import { yieldingFixClaim } from "./review-precedence.js";
@@ -2406,6 +2407,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "terminalFixStandDown",
   "readRedBaseRefreshFacts",
   "depReview",
+  "retireDepReviewRefusedAsk", // W1-T12955
   "postReview",
   "repushAbsent",
   "updateBranch",
@@ -2621,6 +2623,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "terminalFixStandDown"
   | "readRedBaseRefreshFacts"
   | "depReview"
+  | "retireDepReviewRefusedAsk"
   | "postReview"
   | "repushAbsent"
   | "updateBranch"
@@ -3436,7 +3439,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // wrote — the outcome drives the sweep's terminal-vs-hold dedup.
     depReview: async (pr, refresh, ownRed) => {
       await observePr(pr, "review");
-      await depReviewCommand(String(pr.prNumber), ["--repo", repo, ...dependabotReviewArgs(refresh, ownRed)]);
+      await depReviewCommand(String(pr.prNumber), ["--repo", repo, ...dependabotReviewArgs(refresh, ownRed),
+        ...(pr.reviewState === "failure" ? ["--dependabot-review-failed"] : [])]);
       const decided = readLedgerLines(ledgerPath)
         .filter((l) => l.step === "dep-review.decided" && l.task_id === `dep-review-PR${pr.prNumber}`)
         .at(-1);
@@ -3451,7 +3455,13 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           .at(-1);
         return completed ? "migrate" : "hold";
       }
+      if (decided?.route === "review") return "route-review";
       return typeof decided?.decision === "string" ? decided.decision : "unknown";
+    },
+    retireDepReviewRefusedAsk: async (pr) => {
+      await retireDepReviewRefusedAsk({ issues: issuesImpl ?? ghIssueGatewayAsync(owner, repo), prUrl: pr.prUrl, prNumber: pr.prNumber,
+        headSha: pr.headSha, reviewState: pr.reviewState,
+        log: (step, extra) => appendLedger(ledgerPath, { run_id: runId, task_id: `dep-review-PR${pr.prNumber}`, step, ...extra }) });
     },
 
     // POST-REVIEW ROUTING (the #584 stall): a checks-green PR with NO posted
@@ -7802,6 +7812,8 @@ export interface OpenPrView {
   redRequiredChecks?: string[];
   /** W1-T10067 — the same contract's children that have not concluded ({@link pendingQualityGateNames}). */
   pendingRequiredChecks?: string[];
+  /** W1-T12951 — each check's own state, for a Dependabot PR only ({@link dependabotCheckStates}). */
+  checkStates?: readonly DependabotCheckState[];
   /** W1-T2340 — this head's own workflow runs, the raw input {@link stalledRunReason} reads.
    *  `undefined` when the listing could not be fetched, never degrading to `[]`, which would read
    *  as "GitHub scheduled nothing" instead of "we could not check". Not yet populated by the real
@@ -7980,6 +7992,43 @@ export const REQUIRED_CHECK_FAIL = new Set([
   "STARTUP_FAILURE",
   "STALE",
 ]);
+
+export type DependabotCheckState = Pick<RollupCheckEntry, "name" | "context" | "status" | "conclusion" | "state">;
+
+/** W1-T12951 — the rollup's per-check states the view keeps, so a held Dependabot head can tell an unchanged pass. */
+export function dependabotCheckStates(
+  isDependabot: boolean, rollup: readonly RollupCheckEntry[] | undefined,
+): DependabotCheckState[] | undefined {
+  if (!isDependabot || rollup === undefined) return undefined;
+  return rollup.map((c) => ({ name: c.name, context: c.context, status: c.status, conclusion: c.conclusion, state: c.state }));
+}
+
+/** W1-T12951 — the digest of what a dependency hold read from the view; undefined (never dedup) when a field is
+ *  missing or a check is red, since a red hold waits on main's state, which this digest does not cover. */
+export function depReviewHoldInputsDigest(pr: Pick<OpenPrView, "headSha" | "checkStates" | "checksState" |
+  "redRequiredChecks" | "ciFailures" | "cancelledRequiredChecks" | "reviewState" | "mergeable" | "mergeableState" |
+  "mergeState" | "autoMergeArmed">): string | undefined {
+  if (!pr.headSha || pr.checkStates === undefined || (pr.mergeState === undefined && pr.mergeableState === undefined)) return undefined;
+  if (pr.checksState === "red" || (pr.redRequiredChecks?.length ?? 0) > 0 || (pr.ciFailures?.length ?? 0) > 0 ||
+      (pr.cancelledRequiredChecks?.length ?? 0) > 0) return undefined;
+  if (pr.checkStates.some((c) => REQUIRED_CHECK_FAIL.has((c.state ?? c.conclusion ?? "").toUpperCase()))) return undefined;
+  const checks = pr.checkStates.map((c) => JSON.stringify([c.name ?? "", c.context ?? "", c.status ?? "", c.conclusion ?? "", c.state ?? ""])).sort();
+  return createHash("sha256").update(JSON.stringify([pr.headSha, checks, pr.reviewState, pr.mergeable ?? null,
+    pr.mergeableState ?? null, pr.mergeState ?? null, pr.autoMergeArmed, DEP_REVIEW_ENGINE_REVISION])).digest("hex");
+}
+
+/** W1-T12951 — W1-T9818's escalation is filed for this head: the hold state file holds its unretired ask. */
+function depReviewHoldEscalationFiled(ledgerPath: string, pr: Pick<OpenPrView, "prNumber" | "prUrl" | "headSha">): boolean {
+  const slug = /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/\d+$/.exec(pr.prUrl);
+  if (!slug) return false;
+  const statePath = join(dirname(ledgerPath), "dep-review-holds", slug[1], slug[2], `PR${pr.prNumber}.json`);
+  if (!existsSync(statePath)) return false;
+  try {
+    return readDepReviewHoldState(statePath, pr.headSha).asks.some((ask) => ask.headSha === pr.headSha && !ask.retired);
+  } catch {
+    return false; // an unreadable hold state cannot prove the escalation, so the hold is judged again
+  }
+}
 
 export function rollupProducerKey(c: RollupCheckEntry): { key: string; known: boolean } {
   const posted = /^(?:run:\d+:\d+:)?job:\d+$/.test(c.externalId ?? "");
@@ -11573,6 +11622,8 @@ export interface DispositionFacts {
   /** W1-T5908 — passes this head already waited on an unknown mergeability read; see
    *  {@link mergeabilityUnknownWaitsFromLedger}. Omitted reads as zero. */
   mergeabilityUnknownPasses?: number;
+  /** W1-T12955 — the newest dep-review.decided row at this head routed the refused PR to the full review. */
+  dependabotReviewRouted?: boolean;
 }
 
 /** W1-T114 — minutes checks have been pending on this head, or `undefined` when there is nothing to
@@ -12036,8 +12087,20 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // `rmd dep-review` by hand, and the failure rows below would misroute them — a ci-log fix rung
     // must never push commits onto a Dependabot branch. The lane holds on red checks and escalates
     // majors, so routing is safe in every state; superseded and stale above still close first.
+    // W1-T12955 — a refused Dependabot PR with no owned-build proposal goes to the full review, never the operator.
+    disposition: "post-review",
+    when: (pr, policy, _ageDays, now, facts) => dependabotRouted(pr, facts) && facts?.reviewVerdictDelivered !== true &&
+      (pr.reviewState === "none" || (pr.reviewState === "pending" &&
+        (pr.reviewPendingOwnerDead === true || reviewPendingIsStale(pr, policy, now)))),
+    blocker: "awaiting-review",
+    reason: (pr) => `dependabot PR refused by the dep-review lane with no owned-build proposal — running the full review on #${pr.prNumber}`,
+  },
+  {
     disposition: "dep-review",
-    when: (pr) => pr.isDependabot === true,
+    // W1-T12955: a routed PR on green checks with a review in flight or a delivered pass takes the review rows below.
+    when: (pr, _policy, _ageDays, _now, facts) => pr.isDependabot === true && !(dependabotRouted(pr, facts) &&
+      pr.checksState === "green" && pr.mergeState !== "dirty" &&
+      (pr.reviewState === "pending" || (pr.reviewState === "success" && facts?.reviewVerdictDelivered === true))),
     blocker: "awaiting-review",
     reason: (pr) => `dependabot PR — dep-review lane (checks ${pr.checksState}, review ${pr.reviewState})`,
   },
@@ -12921,6 +12984,20 @@ export { distanceRefreshCause, REFRESH_RELEVANT_BASE_PATHS, type BaseChangedFile
 /** W1-T6595 — the `mergeable` row's reason for a plan PR, which is merged directly, never armed. */
 export const MERGEABLE_PLAN_PR_REASON =
   "review success, required checks green — a plan PR is never armed (W1-T5615): merging directly";
+
+function dependabotRouted(pr: OpenPrView, facts: DispositionFacts | undefined): boolean {
+  return pr.isDependabot === true && facts?.dependabotReviewRouted === true;
+}
+
+/** W1-T12955 — `pr@head` to whether the newest dep-review.decided row at that head routed it to the full review. */
+function dependabotReviewRoutes(lines: ReadonlyArray<Record<string, unknown>>): Map<string, boolean> {
+  const routes = new Map<string, boolean>();
+  for (const row of lines) {
+    const pr = row.step === "dep-review.decided" ? /^dep-review-PR(\d+)$/.exec(String(row.task_id))?.[1] : undefined;
+    if (pr !== undefined && typeof row.head_sha === "string") routes.set(`${pr}@${row.head_sha}`, row.route === "review");
+  }
+  return routes;
+}
 
 function checksGreenReviewSuccess(pr: Pick<OpenPrView, "checksState" | "reviewState">): boolean {
   return pr.checksState === "green" && pr.reviewState === "success";
@@ -15482,7 +15559,9 @@ export interface SweepDeps {
    *  line records the outcome and dedup can tell TERMINAL outcomes — never re-run for the same
    *  head — from "hold" or an incomplete/unknown result, which re-run next sweep because a red
    *  check can go green or a retitle can finish without deciding on the SAME sha. */
-  depReview?: (pr: OpenPrView, refresh?: DependabotRefreshVerdict, ownRed?: DependabotOwnRedSignal) => string | void | Promise<string | void>; // W1-T9584: `refresh` is the base-red evidence's verdict on a red head; W1-T9586: `ownRed` reads an own one
+  depReview?: (pr: OpenPrView, refresh?: DependabotRefreshVerdict, ownRed?: DependabotOwnRedSignal) => string | void | Promise<string | void>;
+  /** W1-T12955 — close the open dep-review-refused-PR<n> ask once a routed PR's full review is delivered at its head. */
+  retireDepReviewRefusedAsk?: (pr: OpenPrView) => void | Promise<void>; // W1-T9584: `refresh` is the base-red evidence's verdict on a red head; W1-T9586: `ownRed` reads an own one
   /** Invoke the review lane on a checks-green PR whose review was never posted. Verdicts are
    *  per-head, so dedup is unconditional per `pr@head` and a fresh push re-routes naturally.
    *  W1-T473: MAY be invoked CONCURRENTLY with other PRs' calls, bounded by `policy.reviewLanes`,
@@ -15911,6 +15990,8 @@ interface PriorActions {
   escalated: Set<string>;
   /** `pr@head` keys whose dep-review reached a TERMINAL outcome (arm/escalate/refuse). */
   depReviewed: Set<string>;
+  /** W1-T12951 — `pr@head` to the input digest of the newest acted dep-review row, when it was a hold. */
+  depReviewHoldDigests: Map<string, string>;
   /** Exact-input keys with a DELIVERED verdict. NOT keyed off `sweep.disposed acted:true` like the
    *  other sets: that proves only the LANE WAS INVOKED, and keying on the attempt suppressed the
    *  same input forever after one no-op invocation. W1-T1213 split off {@link reviewRefused}. */
@@ -16870,6 +16951,7 @@ function priorActionsFromLedger(
   const closed = new Set<number>();
   const escalated = new Set<string>();
   const depReviewed = new Set<string>();
+  const depReviewHoldDigests = new Map<string, string>();
   const reviewDelivered = new Set<string>();
   // W1-T5840 — exact-input keys whose NEWEST delivered verdict is a failure, with its post time.
   const reviewDeliveredFailureAt = new Map<string, number>();
@@ -17094,6 +17176,10 @@ function priorActionsFromLedger(
             depReviewRowEngineRevision(line) === DEP_REVIEW_ENGINE_REVISION) {
           depReviewed.add(`${pr}@${typeof line.head_sha === "string" ? line.head_sha : ""}`);
         }
+        if (line.dep_review_outcome === "hold" && typeof line.dep_review_inputs_digest === "string" &&
+            depReviewRowEngineRevision(line) === DEP_REVIEW_ENGINE_REVISION) {
+          depReviewHoldDigests.set(`${pr}@${typeof line.head_sha === "string" ? line.head_sha : ""}`, line.dep_review_inputs_digest);
+        } else depReviewHoldDigests.delete(`${pr}@${typeof line.head_sha === "string" ? line.head_sha : ""}`);
         break;
       // "post-review" deliberately absent here (W1-T254): see the
       // `review.posted`/`review.post_refused` branch above.
@@ -17113,6 +17199,7 @@ function priorActionsFromLedger(
     closed,
     escalated,
     depReviewed,
+    depReviewHoldDigests,
     reviewDelivered,
     reviewRefused,
     reviewRetryableThrows,
@@ -18517,6 +18604,8 @@ export function childWorkHoldsReviewKey(reviewKey: string): boolean {
 /** A review started as a run child: the handle the sweep registers, the same one a boot adopts from its spec and status. */
 export interface ReviewChildLaunch {
   runId: string;
+  /** Process id for child kinds whose lifecycle is observed by the daemon. */
+  pid?: number;
   settled: Promise<unknown>;
   readPhase?: () => string | undefined;
   acknowledge?: (outcome: PromiseSettledResult<never>) => void;
@@ -20095,6 +20184,7 @@ export async function runSweep(
   if (endsForRestart("armed_body_guard")) return endedEarly();
   // W1-T11260: the live tail's rows are shared and read-only; this pass appends its own receipts, so it copies them.
   const ledgerLines = [...readLedger(deps.ledgerPath)];
+  const dependabotRoutes = dependabotReviewRoutes(ledgerLines);
   const openEscalationHistory = new Map<string, ReadonlyArray<Record<string, unknown>>>();
   const openEscalationSince = (pr: OpenPrView): string | undefined => {
     const taskId = fixLedgerTaskIdFor(pr);
@@ -21951,6 +22041,8 @@ export async function runSweep(
         snapshot_age_ms: snapshotAgeMs(index),
         ...(rederivedIndices.has(index) ? { rederived: true } : {}),
         ...(depReviewOutcome ? { dep_review_outcome: depReviewOutcome, dep_review_engine_revision: DEP_REVIEW_ENGINE_REVISION } : {}),
+        ...(depReviewOutcome === "hold" && depReviewHoldInputsDigest(pr) !== undefined
+          ? { dep_review_inputs_digest: depReviewHoldInputsDigest(pr) } : {}),
         ...(actionError ? { action_error: actionError } : {}),
         ...(standDownReason && !deliveredStandDownLogged ? { stand_down_reason: standDownReason } : {}),
         ...(deliveredStandDownLogged ? { stand_down_unchanged: true } : {}),
@@ -22170,7 +22262,17 @@ export async function runSweep(
     const dispositionFacts: DispositionFacts = {
       reviewVerdictDelivered: prior.reviewDelivered.has(reviewOutcomeKeyForPr(pr)),
       mergeabilityUnknownPasses: unknownWaits?.headSha === pr.headSha ? unknownWaits.passes : 0,
+      dependabotReviewRouted: dependabotRoutes.get(`${pr.prNumber}@${pr.headSha}`) === true,
     };
+    if (dependabotRouted(pr, dispositionFacts) && dispositionFacts.reviewVerdictDelivered === true && !deps.dryRun &&
+        (pr.reviewState === "success" || pr.reviewState === "failure") && deps.retireDepReviewRefusedAsk &&
+        !ledgerLines.some((r) => r.step === DEP_REVIEW_REFUSED_ASK_RETIRED_STEP && r.pr_number === pr.prNumber && r.head_sha === pr.headSha)) {
+      try {
+        await deps.retireDepReviewRefusedAsk(pr);
+      } catch (error) {
+        log("dep-review.refused_ask.retire_failed", { pr_number: pr.prNumber, head_sha: pr.headSha, error: String((error as Error)?.message ?? error) });
+      }
+    }
     const gardenRecordRefusal = gardenRecordRefusals.get(pr.prNumber);
     const derived = gardenRecordRefusal !== undefined
       ? { disposition: "stale" as const, blocker: "other" as const,
@@ -23310,6 +23412,14 @@ export async function runSweep(
           dedupStandDownReason =
             `dependency review already reached a TERMINAL outcome at this head ` +
             `(${pr.headSha.slice(0, 7)}) under engine ${DEP_REVIEW_ENGINE_REVISION} — a hold would have re-run instead of deduping`;
+        } else if (!depReviewDedupStandsAside(pr)) {
+          const holdDigest = depReviewHoldInputsDigest(pr);
+          if (holdDigest !== undefined && prior.depReviewHoldDigests.get(`${pr.prNumber}@${pr.headSha}`) === holdDigest &&
+              depReviewHoldEscalationFiled(deps.ledgerPath, pr)) {
+            alreadyDone = true;
+            dedupStandDownReason = `dependency hold inputs have not changed at this head (${pr.headSha.slice(0, 7)}) ` +
+              `since the last judgement and its escalation is filed — the hold is not judged again`;
+          }
         }
         break;
       case "post-review": {
