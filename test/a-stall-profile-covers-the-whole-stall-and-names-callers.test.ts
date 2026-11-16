@@ -274,7 +274,7 @@ test("W1-T9361: every chunk of a long stall is attributed and profiled_ms covers
     }
     // Before profiling began the loop had been still for a whole bound: that time is said, not hidden.
     assert.ok(Number(row.unprofiled_ms) >= Number(row.bound_ms), `unprofiled ${row.unprofiled_ms} bound ${row.bound_ms}`);
-    assert.equal(row.unattributed_ms, Math.max(0, Number(row.lag_ms) - Number(row.sync_spawn_ms)));
+    assert.equal(row.unattributed_ms, Math.max(0, Number(row.lag_ms) - Number(row.sync_spawn_ms) - Number(row.profiled_ms)));
     assert.deepEqual((row.top_inclusive as Ref[])[0], { ...ref(TICK), total_ms: 80 + 5 * (served - 3) });
     assert.equal((row.top_callers as Frame[])[0]?.function, "firstChunkWork");
     assert.deepEqual(row.sync_spawn_callers, []);
