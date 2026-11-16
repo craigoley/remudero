@@ -159,12 +159,14 @@ test("an inconclusive local probe falls to CI and a local proof names its files"
       assert.equal(located?.method, fallback === "confirmed" ? "bisected-first-red" : "first-red-unattributed");
       assert.equal(located?.offending_sha, fallback !== "confirmed" || boundary === RED ? RED : C1);
       assert.equal(f.fixes.length, 1);
-      assert.deepEqual(f.reverts, [], "a CI boundary verdict is not a same-file local proof");
+      // W1-T13136: a CI probe red on this red at the culprit, or green at its parent, stands in for the
+      // boundary's unrunnable local run; the other side's local run contrasts the same files.
+      assert.deepEqual(f.reverts, fallback === "confirmed" ? [boundary === RED ? RED : C1] : []);
       if (fallback === "confirmed") {
         const runs = located.probe_runs as Array<Record<string, unknown>>;
         assert.equal(runs.find((run) => run.sha === boundary)?.verdict, boundary === RED ? "red" : "green");
         assert.equal(runs.find((run) => run.sha === boundary)?.method, undefined);
-        assert.equal(f.rows("main.repair.revert_withheld").length, 1);
+        assert.equal(f.rows("main.repair.revert_withheld").length, 0);
       }
     }
   }
@@ -182,7 +184,7 @@ test("an inconclusive local probe falls to CI and a local proof names its files"
     parent_sha: C1, failing_checks: ["ci"], red_checks: ["ci"], test_files: FILES,
     probe_runs: [
       { sha: C2, verdict: "red", method: "local-test", files: FILES, outcomes: result("fails") },
-      { sha: C1, verdict: "green", method: "local-test", files: [FILES[0]], outcomes: result("passes", [FILES[0]]) },
+      { sha: C1, verdict: "green", method: "local-test", files: ["test/unrelated.test.ts"], outcomes: result("passes", ["test/unrelated.test.ts"]) },
     ] });
   appendLedger(forged.ledgerPath, { task_id: "MAIN-HEALTH", run_id: "OLD", step: "main.repair.fix_opened", offending_sha: C2, pr_url: "https://github.com/o/r/pull/1" });
   await forged.settle();
