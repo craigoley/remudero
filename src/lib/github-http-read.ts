@@ -22,7 +22,7 @@ import { LoopBoundedChildTimeout } from "./loop-bounded-child.js";
 /** The host gh reads from when no `--hostname` or GH_HOST names another. */
 export const GITHUB_API_ORIGIN = "https://api.github.com";
 
-/** The same ceiling a `gh` child gets (DEFAULT_GH_CALL_TIMEOUT_MS). It counts loop-available time only. */
+/** PRIMARY CONTROL: the same ceiling a `gh` child gets (DEFAULT_GH_CALL_TIMEOUT_MS), counted in loop-available time. */
 export const GITHUB_HTTP_READ_TIMEOUT_MS = 60_000;
 
 /** One `gh api <path>` read this client can send. `args` is the argv gh would have received. */
