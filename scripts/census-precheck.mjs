@@ -493,6 +493,7 @@ const ADMISSION_TABLE = "src/lib/ci-parity.ts";
 // host, but a structural whole-tree suite runs alone: the literal masker took 61-62 s at load 1.1-1.8 on a 4-core host
 // (2026-10-27), so the old 60 s fired on a healthy tree. Raised to 120 s by the operator (W1-T9919 named the decision).
 // src/run-task.ts's fix-lane controller pins the same value and refuses a budget that reports another.
+// W1-T13146: the FALLBACK. A child whose recorded runs on this host ask for more runs under censusSuiteChildBound.
 const CENSUS_SUITE_CHILD_TIME_BOUND_MS = 120_000;
 /** W1-T9919: the label of a census whose ONLY unmeasured cause is a suite child stopped on the backstop above.
  *  scripts/preflight-author.mjs reads this exact line and goes on (CI runs the suites); every other label refuses. */
@@ -622,7 +623,7 @@ const TEST_PRIORITY = await loadTestPriority();
  * The reader's qualification budget: `multiple` times its calibration (floored), capped at the backstop. `margin`
  * (> 1 only for the one re-measure) is the fast gate's FAST_GATE_CENSUS_REMEASURE_MARGIN, applied as ci-parity does.
  */
-export function censusReaderBudget(measurement, context, policy, nowMs, margin = 1) {
+export function censusReaderBudget(measurement, context, policy, nowMs, margin = 1, childBoundMs = CENSUS_SUITE_CHILD_TIME_BOUND_MS) {
   if (!policy || ![policy.floorMs, policy.multiple].every((n) => Number.isFinite(n) && n > 0) ||
       !(margin >= 1 && Number.isFinite(margin)) ||
       !measurement || measurement.context !== context || measurement.complete !== true || measurement.passed !== true ||
@@ -632,10 +633,10 @@ export function censusReaderBudget(measurement, context, policy, nowMs, margin =
       nowMs - measurement.finishedMs > CENSUS_SUITE_CHILD_TIME_BOUND_MS) {
     throw new Error("source-reader runtime is UNKNOWN: missing, stale, mismatched or incomplete calibration");
   }
-  if (measurement.elapsedMs > CENSUS_SUITE_CHILD_TIME_BOUND_MS) throw new Error("source-reader calibration exceeded the existing backstop");
+  if (measurement.elapsedMs > childBoundMs) throw new Error("source-reader calibration exceeded the existing backstop");
   const budgetMs = Math.ceil(Math.max(policy.floorMs, measurement.elapsedMs) * policy.multiple * margin);
   if (!Number.isSafeInteger(budgetMs)) throw new Error("source-reader runtime is UNKNOWN: invalid derived budget");
-  return Math.min(budgetMs, CENSUS_SUITE_CHILD_TIME_BOUND_MS);
+  return Math.min(budgetMs, childBoundMs);
 }
 
 /**
@@ -674,12 +675,13 @@ export function readCensusReaderHistory(path) {
   }
 }
 
-/** Append one accepted measurement, keeping the window; written 0600 by atomic rename. A failure is reported, never a verdict. */
-export function recordCensusReaderRuntime(path, key, ms) {
+/** Append one accepted measurement, keeping the window; written 0600 by atomic rename. A failure is reported, never a verdict.
+ *  `restart` drops the key's older measurements first (W1-T13146: a suite child that overran its bound). */
+export function recordCensusReaderRuntime(path, key, ms, restart = false) {
   if (!path || !(Number.isFinite(ms) && ms > 0)) return;
   try {
     const { runs } = readCensusReaderHistory(path);
-    runs[key] = [...(runs[key] ?? []), Math.ceil(ms)].slice(-CENSUS_READER_HISTORY_WINDOW);
+    runs[key] = [...(restart ? [] : runs[key] ?? []), Math.ceil(ms)].slice(-CENSUS_READER_HISTORY_WINDOW);
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     const next = `${path}.${process.pid}.tmp`;
     writeFileSync(next, `${JSON.stringify({ version: 1, runs })}\n`, { mode: 0o600 });
@@ -689,13 +691,49 @@ export function recordCensusReaderRuntime(path, key, ms) {
   }
 }
 
-/** The history budget: censusReaderBudget's rule over the floored median of the reader's history, capped at the backstop. */
-export function censusReaderHistoryBudget(runs, policy) {
+/** censusReaderBudget's rule over a history: the policy multiple of the floored median of `runs`; undefined with none. */
+function censusHistoryBudget(runs, policy) {
   if (!Array.isArray(runs) || runs.length === 0) return undefined;
   const sorted = [...runs].sort((a, b) => a - b);
   const mid = Math.floor(sorted.length / 2);
   const median = sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
-  return Math.min(Math.ceil(Math.max(policy.floorMs, median) * policy.multiple), CENSUS_SUITE_CHILD_TIME_BOUND_MS);
+  return Math.ceil(Math.max(policy.floorMs, median) * policy.multiple);
+}
+
+/** The reader's history budget: that rule over the reader's history, capped at the backstop. */
+export function censusReaderHistoryBudget(runs, policy) {
+  const budgetMs = censusHistoryBudget(runs, policy);
+  return budgetMs === undefined ? undefined : Math.min(budgetMs, CENSUS_SUITE_CHILD_TIME_BOUND_MS);
+}
+
+/** W1-T13146: a suite child's key in the reader history store, by the suites it runs (in any order) and the runtime. */
+export function censusSuiteChildHistoryKey(files, runtime) {
+  return censusReaderHistoryKey(`suite-child:${[...files].sort().join(",")}`, runtime);
+}
+
+/**
+ * W1-T13146 — A SUITE CHILD'S BOUND FROM ITS OWN RUNS. OBSERVED 2026-11-16: a suite that passes alone in 179 s was
+ * stopped at the fixed 120 s on four author preflights. The child's completed passing runtimes are kept in W1-T11100's
+ * store under its own key, and its bound is that task's rule over them, uncapped. The backstop stays the bound of a
+ * child with no history, and of one whose history asks for less: 4 x a 22.5 s median is 90 s, and that reader took
+ * 93 s on a loaded host. An overrun restarts the history from the backstop, so a child that hangs on every run keeps
+ * one bound (the multiple of the backstop) and never climbs. `suiteHistory` is `{ path, policy, runtime? }`; a caller
+ * that passes none (every snapshot-mode child, so snapshotControllerBudget's total holds) gets the backstop.
+ */
+export function censusSuiteChildBound({ files = [], suiteHistory } = {}) {
+  const record = suiteChildRecord(files, suiteHistory);
+  const runs = record ? readCensusReaderHistory(record.path).runs[record.key] ?? [] : [];
+  const budgetMs = record ? censusHistoryBudget(runs, record.policy) : undefined;
+  return Number.isSafeInteger(budgetMs) && budgetMs > CENSUS_SUITE_CHILD_TIME_BOUND_MS
+    ? { ms: budgetMs, source: "history", historyRuns: runs.length }
+    : { ms: CENSUS_SUITE_CHILD_TIME_BOUND_MS, source: "backstop", historyRuns: runs.length };
+}
+
+/** Where a suite child's runs are kept, or null when its caller asked for no history or gave no usable policy. */
+function suiteChildRecord(files, suiteHistory) {
+  const policy = suiteHistory?.policy;
+  if (!suiteHistory?.path || files.length === 0 || ![policy?.floorMs, policy?.multiple].every((n) => Number.isFinite(n) && n > 0)) return null;
+  return { path: suiteHistory.path, key: censusSuiteChildHistoryKey(files, suiteHistory.runtime), policy };
 }
 
 const CENSUS_CAPTURE_DISPOSITION = Symbol("census capture disposition");
@@ -812,11 +850,15 @@ function censusReaderContext(root, child, options) {
  */
 export function runCensusSuitesViaChild({ root, files, run = runCensusChild, priority = TEST_PRIORITY, snapshotPath, pathOverride, timeoutMs,
   readerRuntimePolicy, now = () => performance.now(), readContext = censusReaderContext, load1 = () => loadavg()[0],
-  history = { path: censusReaderHistoryPath(), mode: process.env[CENSUS_READER_HISTORY_ENV] === "act" ? "act" : "shadow" } }) {
+  history = { path: censusReaderHistoryPath(), mode: process.env[CENSUS_READER_HISTORY_ENV] === "act" ? "act" : "shadow" }, suiteHistory }) {
   const args = ["--test", "--test-reporter=tap", "--import", import.meta.resolve("tsx"), "--import", TMP_HYGIENE_URL, ...files];
   if (priority.reason) console.error(`census-precheck: census suites run at default priority - ${priority.reason}`);
   const child = priority.wrap(process.execPath, args);
-  const options = childOptions(root, timeoutMs);
+  // W1-T13146: an injected timeout is its caller's bound, so it reads and records no history.
+  const ownHistory = timeoutMs === undefined ? suiteHistory : undefined;
+  const childBound = censusSuiteChildBound({ files, suiteHistory: ownHistory });
+  const childRecord = suiteChildRecord(files, ownHistory);
+  const options = childOptions(root, timeoutMs ?? childBound.ms);
   if (snapshotPath) options.env[CENSUS_SNAPSHOT_ENV] = snapshotPath;
   if (pathOverride !== undefined) options.env.PATH = pathOverride;
   const pending = new Set();
@@ -850,15 +892,20 @@ export function runCensusSuitesViaChild({ root, files, run = runCensusChild, pri
         Number(block.match(/^\s*error: ['"]test timed out after ([0-9]+)ms['"]\s*$/m)?.[1]) === options.timeout);
       const timeBound = TIME_BOUND_CODES.has(res.error?.code) || nodeDeadline;
       const timeoutMessage = res.error?.message ?? "Node test reached its admitted per-test deadline";
-      if (timeBound && options.timeout === CENSUS_SUITE_CHILD_TIME_BOUND_MS) {
-        // W1-T9919: the backstop fired; name what sizes it, so a loaded host reads differently from a hung child.
+      if (timeBound && options.timeout === childBound.ms) {
+        // W1-T9919: the child's bound fired; name what sizes it, so a loaded host reads differently from a hung child.
         const loads = [startLoad, load1()].map((n) => (Number.isFinite(n) ? n.toFixed(2) : "unknown"));
-        throw Object.assign(new Error(`the census suite child could not run to completion: ${timeoutMessage} - time bound: ` +
-          `${Math.round(finishedMs - startedMs)} ms elapsed of the ${CENSUS_SUITE_CHILD_TIME_BOUND_MS} ms bound, ${files.length} suite(s), ` +
+        // W1-T13146: the overrun is recorded as a restart from the backstop, which the next run's bound is priced from.
+        if (childRecord) recordCensusReaderRuntime(childRecord.path, childRecord.key, CENSUS_SUITE_CHILD_TIME_BOUND_MS, true);
+        const sizedBy = childBound.source === "history" ? `a bound from its history (${childBound.historyRuns} recorded run(s))`
+          : `the fixed backstop (${childBound.historyRuns === 0 ? "no recorded run" : `${childBound.historyRuns} recorded run(s) ask for less`})`;
+        throw Object.assign(new Error(`the census suite child could not run to completion: ${timeoutMessage} - ` +
+          `${files.join(", ")} under ${sizedBy} - time bound: ` +
+          `${Math.round(finishedMs - startedMs)} ms elapsed of the ${childBound.ms} ms bound, ${files.length} suite(s), ` +
           `1-minute load ${loads[0]} at start and ${loads[1]} at end`), { censusTimeBound: true });
       }
       if (timeBound) {
-        // Below the backstop the bound is a reader's measured budget: an overrun its qualification re-measures once.
+        // Below the child's bound the bound is a reader's measured budget: an overrun its qualification re-measures once.
         throw Object.assign(new Error(`the census suite child could not run to completion: ${timeoutMessage}`), { readerBudgetOverrun: true });
       }
       assertChildFinished(res, "census suite");
@@ -889,6 +936,8 @@ export function runCensusSuitesViaChild({ root, files, run = runCensusChild, pri
         return [key, matches.length === 1 ? Number(matches[0][1]) : null];
       }));
       const passed = verdict?.complete !== false && summary.pass === Number(total[1]) && ["fail", "cancelled", "skipped", "todo"].every((key) => summary[key] === 0);
+      // W1-T13146: only a complete passing run is a runtime the child's next bound may be priced from.
+      if (childRecord && passed && failing.length === 0) recordCensusReaderRuntime(childRecord.path, childRecord.key, finishedMs - startedMs);
       const identities = [...stdout.matchAll(/^( *)(?:not )?ok [0-9]+ - (.+)$/gm)]
         .map((match) => `${match[1].length}:${match[2]}`);
       return { failing, tests: Number(total[1]), identities, passed, elapsedMs: finishedMs - startedMs, finishedMs,
@@ -943,7 +992,7 @@ export function runCensusSuitesViaChild({ root, files, run = runCensusChild, pri
           assurance: "fresh-timing-only-no-cached-verdict" })}`);
         return single.failing;
       }
-      options.timeout = CENSUS_SUITE_CHILD_TIME_BOUND_MS;
+      options.timeout = childBound.ms;
     }
     const calibration = once();
     if (readContext(root, child, options) !== context) throw new Error("source-reader inputs changed during calibration");
@@ -959,7 +1008,7 @@ export function runCensusSuitesViaChild({ root, files, run = runCensusChild, pri
     // times FAST_GATE_CENSUS_REMEASURE_MARGIN; only a second overrun refuses. Both budgets share one calibration age.
     const budgetAtMs = now();
     const budgets = [1, readerRuntimePolicy.remeasureMargin].map((margin) =>
-      censusReaderBudget(measurement, context, readerRuntimePolicy, budgetAtMs, margin));
+      censusReaderBudget(measurement, context, readerRuntimePolicy, budgetAtMs, margin, childBound.ms));
     finish(calibration, true, "accepted calibration");
     const overruns = [];
     let measured;
@@ -2093,8 +2142,10 @@ export function snapshotControllerBudget() {
   const structural = new Set([...PRECHECK_TRIGGERED_SUITES, ...PRECHECK_PATH_TRIGGERED_SUITES]
     .filter(member => member.gitFree === true && member.structural === true).map(member => member.testFile));
   const stages = { setup: 1, admission: 1, reach: 2, joinedGitFree: 2, structuralGitFree: structural.size * 2 };
-  return { version: 1, childTimeBoundMs: CENSUS_SUITE_CHILD_TIME_BOUND_MS, stages,
-    timeoutMs: Object.values(stages).reduce((sum, count) => sum + count, 0) * CENSUS_SUITE_CHILD_TIME_BOUND_MS };
+  // W1-T13146: a snapshot-mode child is started with no suite history, so each stage is the bound function's fallback.
+  const childTimeBoundMs = censusSuiteChildBound().ms;
+  return { version: 1, childTimeBoundMs, stages,
+    timeoutMs: Object.values(stages).reduce((sum, count) => sum + count * childTimeBoundMs, 0) };
 }
 
 /**
@@ -2140,7 +2191,8 @@ function decideCensusFullPass({ root, changed, snapshot, readers, loadMembers, c
     instrumentInScope: changed.some((p) => INSTRUMENT_SCOPE_RE.test(p)) });
 }
 
-export function main(argv, { measure = measureViaChild, admitted = listAdmittedCensusMembers, runSuites = runCensusSuitesViaChild } = {}) {
+export function main(argv, { measure = measureViaChild, admitted = listAdmittedCensusMembers, runSuites = runCensusSuitesViaChild,
+  suiteHistoryPath = censusReaderHistoryPath() } = {}) {
   let values;
   try {
     ({ values } = parseArgs({
@@ -2235,7 +2287,10 @@ export function main(argv, { measure = measureViaChild, admitted = listAdmittedC
       runSuites: (files, options = {}) => {
         if (!snapshot) {
           try {
-            return runCausedCensusSuites({ root, files, mergeBase, runSuites, ...options });
+            // W1-T13146: the policy is the one the admission table hands its readers (ci-parity's floor and multiple).
+            const policy = loadMembers().find((m) => m.readerRuntimePolicy !== undefined)?.readerRuntimePolicy;
+            return runCausedCensusSuites({ root, files, mergeBase, runSuites, ...options,
+              ...(policy === undefined ? {} : { suiteHistory: { path: suiteHistoryPath, policy } }) });
           } catch (e) {
             suiteErrors.push(e);
             throw e;
