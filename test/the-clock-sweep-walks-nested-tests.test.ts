@@ -104,3 +104,38 @@ test("W1-T9870: an ambiguous exclusion fails the sweep and a stale one is only r
   assert.equal(stale.code, 0);
   assert.match(stale.text, /EXCLUSION PROBLEM.*stale/);
 });
+
+test("W1-T9870: --list names a nested suite and marks a moved artifact by its basename", () => {
+  const lines: string[] = [];
+  const code = main({
+    argv: ["--list"],
+    derive: () => ["learning/moved-artifact", "plain"],
+    artifacts: new Map([["moved-artifact", "compares a shifted Date.now() against a clock the probe cannot shift"]]),
+    allSuites: () => [],
+    log: (m: string) => lines.push(m),
+  });
+  assert.equal(code, 0);
+  assert.ok(lines.some((l) => /^ {4}artifact {2}learning\/moved-artifact$/.test(l)), lines.join("\n"));
+  assert.ok(lines.some((l) => /^ {4} {8} {2}plain$/.test(l)), lines.join("\n"));
+});
+
+test("W1-T9870: a sharded sweep records a failing nested suite as drift and skips a moved artifact", () => {
+  const written: Record<string, unknown>[] = [];
+  const lines: string[] = [];
+  const code = main({
+    argv: ["--shard", "1/1", "--results-out", "out.json"],
+    derive: () => ["learning/drifter", "sre/moved-artifact"],
+    artifacts: new Map([["moved-artifact", "compares a shifted Date.now() against a clock the probe cannot shift"]]),
+    run: () => ({ failed: true, output: "not ok 1 - boom\n" }),
+    touchedAt: () => new Map(),
+    allSuites: () => [],
+    writeJson: (_path: string, value: Record<string, unknown>) => written.push(value),
+    log: (m: string) => lines.push(m),
+    write: () => {},
+  });
+  assert.equal(code, 0);
+  assert.equal(written.length, 1);
+  const drift = written[0].drift as { suite: string }[];
+  assert.deepEqual(drift.map((d) => d.suite), ["learning/drifter"]);
+  assert.deepEqual((written[0].results as { suite: string }[]).map((r) => r.suite).sort(), ["learning/drifter", "sre/moved-artifact"]);
+});
