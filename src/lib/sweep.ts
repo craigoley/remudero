@@ -244,6 +244,7 @@ import type {
   ReviewVerdict,
 } from "./review.js";
 import { DEP_REVIEW_ENGINE_REVISION, depReviewRowEngineRevision, readDepReviewHoldState, isDependabotAuthor, dependabotOwnRedSignal, dependabotReviewArgs, dependabotRefreshVerdict, type DependabotOwnRedSignal, type DependabotRefreshVerdict } from "./dep-review.js";
+import { DEP_REVIEW_REFUSED_ASK_RETIRED_STEP, retireDepReviewRefusedAsk } from "./dep-review.js";
 import { parseLedger } from "./retro.js";
 import { readReviewHostObservation, selectRuntimeReviewWidth } from "./review-capacity.js";
 import { yieldingFixClaim } from "./review-precedence.js";
@@ -2406,6 +2407,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "terminalFixStandDown",
   "readRedBaseRefreshFacts",
   "depReview",
+  "retireDepReviewRefusedAsk", // W1-T12955
   "postReview",
   "repushAbsent",
   "updateBranch",
@@ -2621,6 +2623,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "terminalFixStandDown"
   | "readRedBaseRefreshFacts"
   | "depReview"
+  | "retireDepReviewRefusedAsk"
   | "postReview"
   | "repushAbsent"
   | "updateBranch"
@@ -3436,7 +3439,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // wrote — the outcome drives the sweep's terminal-vs-hold dedup.
     depReview: async (pr, refresh, ownRed) => {
       await observePr(pr, "review");
-      await depReviewCommand(String(pr.prNumber), ["--repo", repo, ...dependabotReviewArgs(refresh, ownRed)]);
+      await depReviewCommand(String(pr.prNumber), ["--repo", repo, ...dependabotReviewArgs(refresh, ownRed),
+        ...(pr.reviewState === "failure" ? ["--dependabot-review-failed"] : [])]);
       const decided = readLedgerLines(ledgerPath)
         .filter((l) => l.step === "dep-review.decided" && l.task_id === `dep-review-PR${pr.prNumber}`)
         .at(-1);
@@ -3451,7 +3455,13 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           .at(-1);
         return completed ? "migrate" : "hold";
       }
+      if (decided?.route === "review") return "route-review";
       return typeof decided?.decision === "string" ? decided.decision : "unknown";
+    },
+    retireDepReviewRefusedAsk: async (pr) => {
+      await retireDepReviewRefusedAsk({ issues: issuesImpl ?? ghIssueGatewayAsync(owner, repo), prUrl: pr.prUrl, prNumber: pr.prNumber,
+        headSha: pr.headSha, reviewState: pr.reviewState,
+        log: (step, extra) => appendLedger(ledgerPath, { run_id: runId, task_id: `dep-review-PR${pr.prNumber}`, step, ...extra }) });
     },
 
     // POST-REVIEW ROUTING (the #584 stall): a checks-green PR with NO posted
@@ -11612,6 +11622,8 @@ export interface DispositionFacts {
   /** W1-T5908 — passes this head already waited on an unknown mergeability read; see
    *  {@link mergeabilityUnknownWaitsFromLedger}. Omitted reads as zero. */
   mergeabilityUnknownPasses?: number;
+  /** W1-T12955 — the newest dep-review.decided row at this head routed the refused PR to the full review. */
+  dependabotReviewRouted?: boolean;
 }
 
 /** W1-T114 — minutes checks have been pending on this head, or `undefined` when there is nothing to
@@ -12075,8 +12087,20 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // `rmd dep-review` by hand, and the failure rows below would misroute them — a ci-log fix rung
     // must never push commits onto a Dependabot branch. The lane holds on red checks and escalates
     // majors, so routing is safe in every state; superseded and stale above still close first.
+    // W1-T12955 — a refused Dependabot PR with no owned-build proposal goes to the full review, never the operator.
+    disposition: "post-review",
+    when: (pr, policy, _ageDays, now, facts) => dependabotRouted(pr, facts) && facts?.reviewVerdictDelivered !== true &&
+      (pr.reviewState === "none" || (pr.reviewState === "pending" &&
+        (pr.reviewPendingOwnerDead === true || reviewPendingIsStale(pr, policy, now)))),
+    blocker: "awaiting-review",
+    reason: (pr) => `dependabot PR refused by the dep-review lane with no owned-build proposal — running the full review on #${pr.prNumber}`,
+  },
+  {
     disposition: "dep-review",
-    when: (pr) => pr.isDependabot === true,
+    // W1-T12955: a routed PR on green checks with a review in flight or a delivered pass takes the review rows below.
+    when: (pr, _policy, _ageDays, _now, facts) => pr.isDependabot === true && !(dependabotRouted(pr, facts) &&
+      pr.checksState === "green" && pr.mergeState !== "dirty" &&
+      (pr.reviewState === "pending" || (pr.reviewState === "success" && facts?.reviewVerdictDelivered === true))),
     blocker: "awaiting-review",
     reason: (pr) => `dependabot PR — dep-review lane (checks ${pr.checksState}, review ${pr.reviewState})`,
   },
@@ -12960,6 +12984,20 @@ export { distanceRefreshCause, REFRESH_RELEVANT_BASE_PATHS, type BaseChangedFile
 /** W1-T6595 — the `mergeable` row's reason for a plan PR, which is merged directly, never armed. */
 export const MERGEABLE_PLAN_PR_REASON =
   "review success, required checks green — a plan PR is never armed (W1-T5615): merging directly";
+
+function dependabotRouted(pr: OpenPrView, facts: DispositionFacts | undefined): boolean {
+  return pr.isDependabot === true && facts?.dependabotReviewRouted === true;
+}
+
+/** W1-T12955 — `pr@head` to whether the newest dep-review.decided row at that head routed it to the full review. */
+function dependabotReviewRoutes(lines: ReadonlyArray<Record<string, unknown>>): Map<string, boolean> {
+  const routes = new Map<string, boolean>();
+  for (const row of lines) {
+    const pr = row.step === "dep-review.decided" ? /^dep-review-PR(\d+)$/.exec(String(row.task_id))?.[1] : undefined;
+    if (pr !== undefined && typeof row.head_sha === "string") routes.set(`${pr}@${row.head_sha}`, row.route === "review");
+  }
+  return routes;
+}
 
 function checksGreenReviewSuccess(pr: Pick<OpenPrView, "checksState" | "reviewState">): boolean {
   return pr.checksState === "green" && pr.reviewState === "success";
@@ -15521,7 +15559,9 @@ export interface SweepDeps {
    *  line records the outcome and dedup can tell TERMINAL outcomes — never re-run for the same
    *  head — from "hold" or an incomplete/unknown result, which re-run next sweep because a red
    *  check can go green or a retitle can finish without deciding on the SAME sha. */
-  depReview?: (pr: OpenPrView, refresh?: DependabotRefreshVerdict, ownRed?: DependabotOwnRedSignal) => string | void | Promise<string | void>; // W1-T9584: `refresh` is the base-red evidence's verdict on a red head; W1-T9586: `ownRed` reads an own one
+  depReview?: (pr: OpenPrView, refresh?: DependabotRefreshVerdict, ownRed?: DependabotOwnRedSignal) => string | void | Promise<string | void>;
+  /** W1-T12955 — close the open dep-review-refused-PR<n> ask once a routed PR's full review is delivered at its head. */
+  retireDepReviewRefusedAsk?: (pr: OpenPrView) => void | Promise<void>; // W1-T9584: `refresh` is the base-red evidence's verdict on a red head; W1-T9586: `ownRed` reads an own one
   /** Invoke the review lane on a checks-green PR whose review was never posted. Verdicts are
    *  per-head, so dedup is unconditional per `pr@head` and a fresh push re-routes naturally.
    *  W1-T473: MAY be invoked CONCURRENTLY with other PRs' calls, bounded by `policy.reviewLanes`,
@@ -20142,6 +20182,7 @@ export async function runSweep(
   if (endsForRestart("armed_body_guard")) return endedEarly();
   // W1-T11260: the live tail's rows are shared and read-only; this pass appends its own receipts, so it copies them.
   const ledgerLines = [...readLedger(deps.ledgerPath)];
+  const dependabotRoutes = dependabotReviewRoutes(ledgerLines);
   const openEscalationHistory = new Map<string, ReadonlyArray<Record<string, unknown>>>();
   const openEscalationSince = (pr: OpenPrView): string | undefined => {
     const taskId = fixLedgerTaskIdFor(pr);
@@ -22219,7 +22260,17 @@ export async function runSweep(
     const dispositionFacts: DispositionFacts = {
       reviewVerdictDelivered: prior.reviewDelivered.has(reviewOutcomeKeyForPr(pr)),
       mergeabilityUnknownPasses: unknownWaits?.headSha === pr.headSha ? unknownWaits.passes : 0,
+      dependabotReviewRouted: dependabotRoutes.get(`${pr.prNumber}@${pr.headSha}`) === true,
     };
+    if (dependabotRouted(pr, dispositionFacts) && dispositionFacts.reviewVerdictDelivered === true && !deps.dryRun &&
+        (pr.reviewState === "success" || pr.reviewState === "failure") && deps.retireDepReviewRefusedAsk &&
+        !ledgerLines.some((r) => r.step === DEP_REVIEW_REFUSED_ASK_RETIRED_STEP && r.pr_number === pr.prNumber && r.head_sha === pr.headSha)) {
+      try {
+        await deps.retireDepReviewRefusedAsk(pr);
+      } catch (error) {
+        log("dep-review.refused_ask.retire_failed", { pr_number: pr.prNumber, head_sha: pr.headSha, error: String((error as Error)?.message ?? error) });
+      }
+    }
     const gardenRecordRefusal = gardenRecordRefusals.get(pr.prNumber);
     const derived = gardenRecordRefusal !== undefined
       ? { disposition: "stale" as const, blocker: "other" as const,

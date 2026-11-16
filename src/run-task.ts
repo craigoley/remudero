@@ -2614,6 +2614,7 @@ export function buildSweepEffects(
   | "readRedBaseRefreshFacts"
   | "readOpenEscalations"
   | "depReview"
+  | "retireDepReviewRefusedAsk"
   | "postReview"
   | "repushAbsent"
   | "updateBranch"
@@ -12610,13 +12611,21 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
   if (result.decision !== "hold" && !(await reconcileHold())) return 1;
 
   if (result.decision === "refuse") {
+    const reviewFailed = rest.includes("--dependabot-review-failed");
     const refused = reconcileDependabotRefusedPath({
       registryDir: dirname(holdStatePath), owner, repo, prUrl: view.url, prNumber: view.number, title: view.title ?? "",
       body: view.body ?? "", headSha: view.headRefOid, author: input.author, commits: view.commits, result, nowMs: clock.now(), log,
       capture: ({ raw, submissionKey }) => captureProposal({ root: proposalRoot, id: depReviewMigrationFeedbackId(submissionKey), raw, submissionKey }),
       checks: selectedChecks,
       escalate: (escalation) => escalate(escalation, { issues: deps.issues ?? ghIssueGateway(owner, repo), ledgerPath, runId }),
+      reviewFailed,
     });
+    if (refused === "not-proposed" && !reviewFailed) {
+      // W1-T12955: no proposal and no operator ask; the sweep sends the head to the full review.
+      log("dep-review.decided", { ...result, route: "review", pr_url: view.url, head_sha: view.headRefOid });
+      console.log(`refused, no owned-build proposal; routed to the full review: ${view.url}`);
+      return 2;
+    }
     if (refused === "failed") {
       // W1-T9797: the sweep dedups every outcome but hold, so an unfiled remedy must read as hold.
       log("dep-review.decided", { ...result, decision: "hold", review_decision: "refuse",

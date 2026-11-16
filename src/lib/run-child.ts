@@ -40,6 +40,7 @@ import { adoptRunChildReservation, reserveRunChild } from "./run-child-reservati
 import type { RunResult } from "./run-result.js";
 import { isWorkerProviderId, type WorkerProviderId } from "./config.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
+import { INSTALLATION_SHARE_DIVISOR_ENV } from "./installation-budget-start.js";
 import { killProcessGroup } from "./worker-containment.js";
 import { execFileLoopBounded } from "./loop-bounded-child.js";
 import type { ReviewerCodeFreshness } from "./self-sync.js";
@@ -815,6 +816,15 @@ const defaultRunChildSpawn: NonNullable<SpawnRunChildPorts["spawn"]> = (command,
   nodeSpawn(command, [...args], { cwd: options.cwd, env: options.env, detached: true, stdio: ["ignore", "ignore", options.stderrFd] });
 
 /**
+ * W1-T12950: the run children of an instance split one installation share by the host worker budget the
+ * daemon admits workers under. Loaded when a child starts, so the child entry does not load the sweep.
+ */
+async function runChildInstallationShareDivisor(): Promise<number> {
+  const { DEFAULT_SWEEP_POLICY } = await import("./sweep.js");
+  return DEFAULT_SWEEP_POLICY.reviewCapacity.hostWorkerBudget;
+}
+
+/**
  * Starts the run child for `input.taskId` and returns the handle its result settles through. Admission and the reservation happen
  * here, in the daemon, and the reservation is bound to the child's pid; the child is a process-group leader and `unref`'d.
  * NEVER rejects: a child that cannot be started returns `started: false` and ledgers `run_child.fallback`.
@@ -916,11 +926,12 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
       throw new Error(pinned.unavailable);
     }
     engineSha = pinned.sha;
+    const shareDivisor = await runChildInstallationShareDivisor();
     stderrFd = openSync(join(dir, RUN_CHILD_STDERR_FILE), "a");
     // The daemon's growth percent rides the child's command line: NODE_OPTIONS refuses it (daemon-memory-policy.ts).
     spawnedAt = clock();
     child = (ports.spawn ?? defaultRunChildSpawn)(process.execPath, [...nodeArgs, ...launch.argv], {
-      cwd: launch.cwd, env: { ...(ports.env ?? process.env) }, stderrFd,
+      cwd: launch.cwd, env: { ...(ports.env ?? process.env), [INSTALLATION_SHARE_DIVISOR_ENV]: String(shareDivisor) }, stderrFd,
     });
     if (child.pid === undefined) throw new Error("the run child has no pid (spawn failed)");
     reservation.bindRoot(child.pid);
