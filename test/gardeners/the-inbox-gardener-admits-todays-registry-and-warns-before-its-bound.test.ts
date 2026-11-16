@@ -4,11 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { fixedClock } from "#src/lib/clock.js";
-import { defaultInboxGardenerPorts, runInboxGardener, warnInboxGardenerNearBound, INBOX_GARDENER_NEAR_BOUND_STEP, INBOX_GARDENER_SOURCE_LIMITS } from "#src/lib/inbox-gardener.js";
+import { defaultInboxGardenerPorts, runInboxGardener, warnInboxGardenerNearBound, INBOX_GARDENER_SOURCE_WARNING_STEP, INBOX_GARDENER_SOURCE_LIMITS } from "#src/lib/inbox-gardener.js";
 import { proofDebtPopulationPermit } from "#src/lib/inbox-retirement.js";
 import { parseProposalRegistry } from "#src/lib/inbox.js";
 import { mintProofDebtProposals } from "#src/lib/measurement-cadence.js";
 import { loadPlan } from "#src/lib/plan.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { fakeGitHub } from "#test/helpers/fake-github.js";
 import { world } from "#test/helpers/why-me-world.js";
 
@@ -34,7 +35,7 @@ async function fixture(t: TestContext, count: number, summaryBytes: number, now 
 }
 function warnings(ledger: string): Array<Record<string, unknown>> {
   if (!existsSync(ledger)) return [];
-  return readFileSync(ledger, "utf8").split("\n").filter(Boolean).map(line => JSON.parse(line)).filter(row => row.step === INBOX_GARDENER_NEAR_BOUND_STEP);
+  return readFileSync(ledger, "utf8").split("\n").filter(Boolean).map(line => JSON.parse(line)).filter(row => row.step === INBOX_GARDENER_SOURCE_WARNING_STEP);
 }
 
 test("W1-T13202 criterion 1: a registry the size of production on 2026-11-16 is captured and judged instead of refused", async t => {
@@ -69,7 +70,7 @@ test("W1-T13202 criterion 2: a source past three quarters of its bound warns onc
 });
 
 test("W1-T13202 criterion 2: a warning fault never fails the pass and is retried next pass", t => {
-  const dir = mkdtempSync(join(tmpdir(), "w1-t13202-")); t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t13202-`)); t.after(() => rmSync(dir, { recursive: true, force: true }));
   const clock = fixedClock(DAY), near = [{ source: "registry-bytes", size: 80, bound: 100 }];
   // An unwritable ledger: nothing is marked, so the warning is not lost.
   mkdirSync(join(dir, "ledger.ndjson"));

@@ -158,9 +158,11 @@ const RELEVANT_STEPS = ["panel.proposal_reframe_requested", "panel.proposal_decl
  *  roughly 3x headroom and {@link INBOX_GARDENER_NEAR_BOUND_RATIO} warns in the ledger long before the next refusal. */
 export const INBOX_GARDENER_SOURCE_LIMITS = { registryBytes: 8 * 1024 * 1024, threadBytes: 4 * 1024 * 1024, creditOverrideBytes: 64 * 1024,
   proposals: 8192, relevantRows: 4096, relevantBytes: 512 * 1024, rowBytes: 16 * 1024 } as const;
-/** W1-T13202: a bounded source at or past this share of its bound gets one ledger warning per UTC day. */
+/** PRIMARY CONTROL: W1-T13202: a bounded source at or past this share of its bound gets one ledger warning per UTC day,
+ *  so the bound is raised from evidence before {@link INBOX_GARDENER_SOURCE_LIMITS} (the BACKSTOP) refuses a pass. */
 export const INBOX_GARDENER_NEAR_BOUND_RATIO = 0.75;
-export const INBOX_GARDENER_NEAR_BOUND_STEP = "inbox.gardener_source_near_bound";
+/** W1-T13202: the ledger step of that warning row. */
+export const INBOX_GARDENER_SOURCE_WARNING_STEP = "inbox.gardener_source_near_bound";
 const NEAR_BOUND_MARKER = "inbox-gardener-near-bound.json";
 
 /** W1-T13202: append one warning row per source per UTC day once a source reaches the near-bound share. Advisory only:
@@ -169,13 +171,13 @@ export function warnInboxGardenerNearBound(stateDir: string, clock: Clock, measu
   const day = clock.iso().slice(0, 10), markerPath = join(stateDir, NEAR_BOUND_MARKER), warned: string[] = [];
   let marker: Record<string, string> = {};
   try { const parsed = JSON.parse(fs.readFileSync(markerPath, "utf8")); if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) marker = parsed; }
-  catch { marker = {}; }
+  catch { marker = {}; /* missing or unreadable both mean "not yet warned today": the safe side is one extra warning */ }
   for (const { source, size, bound } of measured) {
     if (!(size >= bound * INBOX_GARDENER_NEAR_BOUND_RATIO) || marker[source] === day) continue;
     try {
-      appendLedger(join(stateDir, LEDGER_FILENAME), { ts: clock.iso(), run_id: `INBOX-GARDENER-near-bound-${source}-${day}`, step: INBOX_GARDENER_NEAR_BOUND_STEP,
+      appendLedger(join(stateDir, LEDGER_FILENAME), { ts: clock.iso(), run_id: `INBOX-GARDENER-near-bound-${source}-${day}`, step: INBOX_GARDENER_SOURCE_WARNING_STEP,
         task_id: "inbox-gardener", source, size, bound, reason: `${source} is ${size} of its ${bound} bound; the gardener refuses the whole pass past the bound` });
-    } catch { continue; } // not marked, so the next pass warns again; a warning never fails capture
+    } catch { continue; /* not marked, so the next pass warns again; a warning never fails capture */ }
     marker[source] = day; warned.push(source);
   }
   if (warned.length) {
