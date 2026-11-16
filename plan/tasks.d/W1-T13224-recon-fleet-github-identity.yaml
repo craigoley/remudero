@@ -1,0 +1,32 @@
+- id: W1-T13224
+  title: "RECON: find every path where fleet automation writes to GitHub or pushes as a human login, and design the move to the fleet's own App identity"
+  repo: remudero
+  priority: 1.4
+  depends_on: []
+  type: recon
+  verify: auto
+  risk: low # investigation and a written design only; no credential, config or code change
+  band_meaning: blast-radius
+  origin: "operator-ruling#2026-11-16T17:44Z-cao825-and-craigoley-are-the-owner"
+  plan_refs:
+    - W1-T8264
+    - W1-T6407
+  files:
+    - docs/forensics/fleet-github-identity.md
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "docs/forensics/fleet-github-identity.md lists, for each host (Azure, Mac mini) and each write path (issue comment, issue create or close, reaction, PR create, git push), the login it writes as today, each labelled OBSERVED with its source or INFERRED"
+      proof: "grep: ## Write paths by host in docs/forensics/fleet-github-identity.md"
+    - claim: "The document counts, for a stated 7-day window, the cao825-authored comments, reactions and fleet-PR commits that came from fleet automation versus from people or sessions, and names how each was told apart"
+      proof: "grep: ## Attribution census in docs/forensics/fleet-github-identity.md"
+    - claim: "The document proposes the move to the remudero-fleet App identity as ordered steps, names every credential or config change and who must approve it, and changes no credential, token or config itself"
+      proof: "grep: ## Proposed identity split in docs/forensics/fleet-github-identity.md"
+  rationale: |
+    OBSERVED 2026-11-16 via the GitHub REST API: fleet automation writes to craigoley/remudero both as remudero-fleet[bot] and as cao825, Craig's own login (at least 105 dedup observation comments and 13 revalidation refreshes by cao825 since 2026-11-01). Nine open GRILL escalations (#17393, #17615, #17682, #17769, #17860, #17896, #17995, #18062, #18140) ask whether cao825 pushes and actions are a human or the fleet; interventionsFromPullRequest in src/lib/fix-lane-gardener.ts counts every non-fleet-login commit on a fleet PR as a hand push.
+    The operator RULED 2026-11-16 17:44Z: cao825 and craigoley are the owner, and the automation should get its own bot identity. Credentials are never changed without the operator (console hard rules), so this task measures and designs, and the change itself is a separate, approved step.
+  design: |
+    Read the gh and git identity each host's daemon, serve and gardener lanes use; sample the ledger's own push and comment rows against GitHub authorship; write the document with the three sections the acceptance names.
+    NO-INVARIANTS: a recon writes one document and changes no runtime behaviour.
+  note: |
+    Reserved with rmd next-task-id from the operator checkout (refs/rmd-id/W1-T13224).
