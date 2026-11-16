@@ -8,13 +8,12 @@
  * Linux in production, so hosted CI was green, while 9 of the 36 suites that run it failed on every Mac
  * author preflight that selected them (22 tests). One suite carried a private stub; the rest had none.
  *
- * Fix: rather than a stub per suite, every test process on macOS gets one directory on PATH, ahead of the platform's own, whose
+ * Fix: rather than a stub per suite, every test process on macOS gets one directory first on PATH whose
  * `chmod` honours the marker. Suites build a child's PATH from `process.env.PATH`, so present and future
  * suites inherit it. Loaded by test/setup/tmp-hygiene.ts, which every runner invocation already imports.
  *
- * The shim is faithful to what the marker means: it drops the first bare `--`, and an operand after it
- * that begins with `-` is passed as `./<operand>`, so it is still read as a path. Everything else,
- * the real command's exit status and its error text included, passes through.
+ * The shim drops the first bare `--` and forwards every remaining argument unchanged. The real
+ * command's exit status and error text pass through too.
  *
  * Add a command here only when a difference has been measured; this file is the one place for it.
  */
@@ -41,7 +40,6 @@ export function chmodShimSource(realChmod = "/bin/chmod"): string {
     "seen=0",
     'for arg in "$@"; do',
     '  if [ "$seen" = 0 ] && [ "$arg" = "--" ]; then seen=1; continue; fi',
-    '  if [ "$seen" = 1 ]; then case "$arg" in -*) arg="./$arg" ;; esac; fi',
     '  args+=("$arg")',
     "done",
     `exec ${realChmod} "\${args[@]}"`,

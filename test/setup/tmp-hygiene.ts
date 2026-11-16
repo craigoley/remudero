@@ -340,17 +340,14 @@ function installGhRefusalStub(): void {
   process.env.PATH = `${dir}:${process.env.PATH ?? ""}`;
 }
 
-// W1-T13051: on macOS, one more directory goes on PATH ahead of the platform's own, holding the commands
-// whose Linux command-line contract macOS does not honour (today `chmod` and its `--`). A suite that runs
-// a Linux host script inherits it through `process.env.PATH`; on Linux this adds and writes nothing. It is
-// installed BEFORE the refusal stub so the stub's directory stays first on PATH, which the W1-T5550 and
-// W1-T5624 suites read as the stub's. Main thread only, for the reason the stub below gives.
-if (isMainThread) installLinuxCommandContract();
-
 // W1-T5624: a worker thread re-runs this module through the runner's execArgv, but its env copy
-// already puts the parent's stub first on PATH (and the stub logs to the parent's refusals.log, so the
+// already resolves gh to the parent's stub (which logs to the parent's refusals.log, so the
 // parent's exit check counts a worker's refusal). A dir minted here would outlive `worker.terminate()`.
 if (isMainThread) installGhRefusalStub();
+
+// W1-T13051: install last so the macOS chmod contract is first on PATH, ahead of every other setup
+// directory. Children inherit it; worker threads keep the parent's directory. Linux adds and writes nothing.
+if (isMainThread) installLinuxCommandContract();
 
 /**
  * W1-T6108 — A SPAWNED CHILD'S COVERAGE CREDITS THE TEST THAT SPAWNED IT.

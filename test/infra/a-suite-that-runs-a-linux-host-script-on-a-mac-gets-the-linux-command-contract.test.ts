@@ -7,14 +7,14 @@
  * honours the marker. These tests pin what that directory does, that it is the only such stub, and that
  * Linux is untouched.
  *
- * The macOS behaviour can only be observed on macOS and says so when skipped. The install rule itself is
- * driven on every platform through its `platform` and `env` seams, so neither platform passes unrun.
+ * The native macOS marker difference says so when skipped. Argument forwarding and native failures run
+ * on every host; a fresh process selects darwin before loading the complete setup to check PATH order.
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join, relative } from "node:path";
+import { basename, dirname, join, relative } from "node:path";
 import { test, type TestContext } from "node:test";
 
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
@@ -35,11 +35,43 @@ function onMac(t: TestContext): boolean {
   return false;
 }
 
+test("W1-T13051 criterion 1: the complete shared setup leaves one process-owned contract directory first on PATH", () => {
+  const root = scratch();
+  const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
+    import { readdirSync } from 'node:fs';
+    import { tmpdir } from 'node:os';
+    import { join } from 'node:path';
+    import { spawnSync } from 'node:child_process';
+    Object.defineProperty(process, 'platform', { value: 'darwin' });
+    await import('#test/setup/tmp-hygiene.ts');
+    const path = process.env.PATH;
+    await import('#test/setup/tmp-hygiene.ts');
+    const { LINUX_CONTRACT_DIR_PREFIX } = await import('#test/setup/linux-command-contract.ts');
+    const { setupDirOwnerTag } = await import('#test/setup/no-live-remote.ts');
+    const dirs = readdirSync(tmpdir()).filter(name => name.startsWith(LINUX_CONTRACT_DIR_PREFIX + setupDirOwnerTag()));
+    const resolved = spawnSync('/bin/bash', ['-c', 'command -v chmod'], { encoding: 'utf8' });
+    process.stdout.write(JSON.stringify({ path, after: process.env.PATH, dirs,
+      entries: dirs.map(dir => readdirSync(join(tmpdir(), dir))), resolved: resolved.stdout.trim() }));
+  `], { cwd: REPO_ROOT, env: { ...process.env, TMPDIR: root }, encoding: "utf8" });
+  assert.equal(child.status, 0, child.stderr);
+  const seen = JSON.parse(child.stdout) as {
+    path: string; after: string; dirs: string[]; entries: string[][]; resolved: string;
+  };
+  assert.equal(seen.dirs.length, 1, "loading the shared setup twice creates only one contract directory");
+  const dir = join(root, seen.dirs[0]!);
+  assert.equal(seen.path.split(":")[0], dir, "the contract must precede every other setup directory");
+  assert.equal(seen.after, seen.path);
+  assert.equal(dirname(dir), root, "the directory belongs to the child's own temp root");
+  assert.deepEqual(seen.entries, [["chmod"]]);
+  assert.equal(seen.resolved, join(dir, "chmod"));
+  assert.equal(existsSync(dir), false, "the existing exit sweep removes the contract directory");
+});
+
 test("W1-T13051 criterion 1: on macOS a child of any test process finds a chmod that accepts the end-of-options marker", (t) => {
   if (!onMac(t)) return;
   const dir = contractDirOnPath();
   assert.ok(dir, `the shared setup must have put a ${LINUX_CONTRACT_DIR_PREFIX}* directory on PATH: ${process.env.PATH}`);
-  // Other setup directories may sit ahead of it; what matters is that it is ahead of the platform's chmod.
+  assert.equal((process.env.PATH ?? "").split(":")[0], dir, "the contract directory must be first on PATH");
   const resolved = spawnSync("bash", ["-c", "command -v chmod"], { encoding: "utf8", env: process.env }).stdout.trim();
   assert.equal(resolved, join(dir, "chmod"), "a child's `chmod` must resolve to the contract directory's");
   const dirOfTargets = scratch();
@@ -59,8 +91,28 @@ test("W1-T13051 criterion 1: on macOS a child of any test process finds a chmod 
   assert.equal(mode(target), 0o600);
 });
 
-test("W1-T13051 criterion 2: the shim changes nothing but the marker, and a chmod that should fail still fails", (t) => {
-  if (!onMac(t)) return;
+test("W1-T13051 criterion 2: the shim forwards exact mode and operand bytes, dropping only the first marker", () => {
+  const dir = scratch();
+  const recorder = join(dir, "record-arguments");
+  writeFileSync(recorder, '#!/bin/bash\nprintf \'%s\\0\' "$@"\n', { mode: 0o755 });
+  const shim = join(dir, "chmod-under-test");
+  writeFileSync(shim, chmodShimSource(recorder), { mode: 0o755 });
+  const cases = [
+    { args: ["640", "a", "b"], expected: ["640", "a", "b"] },
+    { args: ["--", "-w", "absent"], expected: ["-w", "absent"] },
+    { args: ["600", "--", "-dashed", "--"], expected: ["600", "-dashed", "--"] },
+    { args: ["u=rw", "--", "", "space name", "'quote\"", "line\nbreak", "é"],
+      expected: ["u=rw", "", "space name", "'quote\"", "line\nbreak", "é"] },
+  ];
+  for (const { args, expected } of cases) {
+    const result = spawnSync(shim, args);
+    assert.equal(result.status, 0, result.stderr.toString());
+    assert.deepEqual(result.stdout, Buffer.from(expected.map(arg => `${arg}\0`).join("")), JSON.stringify(args));
+    assert.equal(result.stderr.length, 0);
+  }
+});
+
+test("W1-T13051 criterion 2: the real chmod's status and exact error text survive the shim", () => {
   const dir = scratch();
   const shim = join(dir, "chmod-under-test");
   writeFileSync(shim, chmodShimSource(), { mode: 0o755 });
@@ -70,21 +122,25 @@ test("W1-T13051 criterion 2: the shim changes nothing but the marker, and a chmo
   // No marker: mode and both operands reach the real chmod unchanged.
   assert.equal(spawnSync(shim, ["640", a, b], { encoding: "utf8" }).status, 0);
   assert.deepEqual([mode(a), mode(b)], [0o640, 0o640]);
-  // A marker, then an operand that begins with a dash: still a path, which is what the marker is for.
-  writeFileSync(join(dir, "-dashed"), "x", { mode: 0o644 });
-  const dashed = spawnSync(shim, ["600", "--", "-dashed"], { encoding: "utf8", cwd: dir });
-  assert.equal(dashed.status, 0, dashed.stderr);
-  assert.equal(mode(join(dir, "-dashed")), 0o600);
-  // Only the FIRST bare marker is one; a later `--` is an operand (here a missing file, so it fails).
-  const second = spawnSync(shim, ["600", "--", a, "--"], { encoding: "utf8", cwd: dir });
-  assert.notEqual(second.status, 0);
+  const success = spawnSync(shim, ["600", "--", a, b], { encoding: "utf8" });
+  assert.equal(success.status, 0, success.stderr);
+  assert.deepEqual([mode(a), mode(b)], [0o600, 0o600]);
   // A chmod that should fail still fails, with the real command's own status and error text.
   const missing = join(dir, "no-such-file");
-  const real = spawnSync("/bin/chmod", ["600", missing], { encoding: "utf8" });
-  const through = spawnSync(shim, ["600", "--", missing], { encoding: "utf8" });
-  assert.notEqual(through.status, 0);
-  assert.equal(through.status, real.status);
-  assert.match(through.stderr, /no-such-file/);
+  for (const { args, forwarded } of [
+    { args: ["600", "--", missing], forwarded: ["600", missing] },
+    { args: ["--", "-w", missing], forwarded: ["-w", missing] },
+    { args: ["invalid-mode", "--", a], forwarded: ["invalid-mode", a] },
+    { args: ["invalid-mode", a], forwarded: ["invalid-mode", a] },
+    { args: ["600", "--", missing, "--"], forwarded: ["600", missing, "--"] },
+  ]) {
+    const real = spawnSync("/bin/chmod", forwarded, { encoding: "utf8", cwd: dir });
+    const through = spawnSync(shim, args, { encoding: "utf8", cwd: dir });
+    assert.notEqual(real.status, 0, JSON.stringify(forwarded));
+    assert.equal(through.status, real.status, JSON.stringify(args));
+    assert.equal(through.stderr, real.stderr, JSON.stringify(args));
+    assert.equal(through.stdout, real.stdout, JSON.stringify(args));
+  }
 });
 
 /** A test file that writes a `chmod` stub of its own, in either quote style. */
