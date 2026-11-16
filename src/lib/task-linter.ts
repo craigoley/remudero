@@ -3729,6 +3729,24 @@ export function invariantSlugViolations(task: Task, opts: LintOpts = {}): LintVi
   return out;
 }
 
+/** W1-T12832 — does the design carry a declaration {@link invariantSlugViolations} reads, in either form? */
+export function declaresDesignInvariant(task: Pick<Task, "design">): boolean {
+  const design = task.design ?? "";
+  return INVARIANT_DECL_RE.test(design) || NO_INVARIANTS_RE.test(design);
+}
+
+/** W1-T12832 — was this task's contract text authored in the diff? True for a task absent at the base, a design
+ *  that differs by a byte, or acceptance that differs in length or in any claim or proof. Bookkeeping (priority,
+ *  verify, risk_ruling, status, attempts, note, depends_on) is not contract text, so a machine lane's edit to a
+ *  task filed before W1-T11746 is not asked for a declaration its edit never touched. */
+export function designContractChanged(base: Task | undefined, task: Task): boolean {
+  if (base === undefined) return true;
+  if ((base.design ?? "") !== (task.design ?? "")) return true;
+  const before = base.acceptance ?? [];
+  const after = task.acceptance ?? [];
+  return before.length !== after.length || before.some((c, i) => c.claim !== after[i]!.claim || c.proof !== after[i]!.proof);
+}
+
 export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   const violations: LintViolation[] = [];
   const sizing = sizingViolation(task, opts);

@@ -1,0 +1,71 @@
+- id: W1-T13046
+  title: "A design hold on an open pull request splits or rebuilds the criteria and checks it covers, and the fix lane opens no needs-human issue for it"
+  repo: remudero
+  depends_on:
+    - W1-T12709
+  priority: 1.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # changes which remedy a design-held pull request gets, and removes the fix rung's needs-design escalation for open pull requests
+  origin: "operator-session#no-pr-waits-on-the-operator-2026-11-15"
+  plan_refs:
+    - W1-T12709
+    - W1-T12714
+    - W1-T12715
+    - W1-T12710
+    - W1-T10339
+  files:
+    - src/lib/parked-pr-remedy.ts
+    - src/lib/sweep.ts
+    - src/cli/commands/fix.ts
+    - src/lib/ledger-steps.ts
+    - test/a-fix-round-ends-with-a-typed-outcome.test.ts
+    - test/sweep/a-stood-down-repair-is-not-re-dispatched-on-the-same-head.test.ts
+    - test/sweep/a-design-hold-splits-or-rebuilds-what-it-covers.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The fix.needs_design row records covers_criteria (the unmet claims the round was given) and covers_checks (the red check names the round was given)"
+      proof: "grep: W1-T13046 criterion 1 in test/sweep/a-design-hold-splits-or-rebuilds-what-it-covers.test.ts"
+    - claim: "parkedPrFacts marks as needing input only the unmet criteria named in the hold's covers_criteria, and marks each of them ladder-spent; the other unmet criteria stay fixable. A row without covers_criteria keeps today's rule (every unmet criterion)"
+      proof: "grep: W1-T13046 criterion 2 in test/sweep/a-design-hold-splits-or-rebuilds-what-it-covers.test.ts"
+    - claim: "runSweep with the production parkedPr effect: a design hold that covers some but not all of the task's criteria takes split-follow-up for the covered ones; a design hold that covers every criterion, or covers only red checks, takes close-and-rebuild; neither takes fix-on-pr"
+      proof: "grep: W1-T13046 criterion 3 in test/sweep/a-design-hold-splits-or-rebuilds-what-it-covers.test.ts"
+    - claim: "invariant:no-design-issue — runFixRung at a head with a fix.needs_design row and a parked_pr.remedy row for that pull request and head stands down at rung.needs_design without calling escalateForTask, and its fix.stood_down row has no issue_url"
+      kind: guard
+      proof: "grep: W1-T13046 criterion 4 in test/sweep/a-design-hold-splits-or-rebuilds-what-it-covers.test.ts"
+    - claim: "invariant:main-first — while designHoldMainAdoptionDecision is due (the branch is behind main and the update was not tried), the pull request takes main first and gets no split and no close"
+      kind: guard
+      proof: "grep: W1-T13046 criterion 5 in test/sweep/a-design-hold-splits-or-rebuilds-what-it-covers.test.ts"
+    - claim: "The sweep reads the design hold's coverage through designHoldCoverage before it builds the parked-PR facts"
+      proof: "grep: designHoldCoverage( in src/lib/sweep.ts"
+  rationale: |
+    WHY: the operator ruled that no pull request waits on the operator (2026-11-14, quoted in W1-T12709). Under W1-T12709 (#18738, open), a design hold can still reach the operator, and it can loop on fix-on-pr without end.
+    READ on the W1-T12709 branch (run-W1-T12709-1794776376000, head ae709cccb):
+    - src/lib/parked-pr-remedy.ts:209 parkedPrFacts sets needsInput on EVERY unmet criterion when there is a design question. The fix.needs_design row does not say which criteria or checks it is about.
+    - parkedPrRemedy (:37) picks close-and-rebuild only when a criterion is ladderSpent. ladderSpent comes from fix.stall_remedy rows. Those rows are written only when fix rounds stall, and no round runs under a design hold, so a criterion under a design hold never becomes ladder-spent.
+    - With no unmet criteria (the hold is about a red check), input is empty and the remedy is fix-on-pr. With every criterion held and no stall rows, the remedy is also fix-on-pr. The sweep then sets blocked-fixable.
+    - src/cli/commands/fix.ts:2989-3020: the fix rung finds the same fix.needs_design row at the head, calls escalateForTask (class BLOCKED, "fix lane handed it back NEEDS_DESIGN and stands down every pass") and stands down at rung.needs_design. openEscalationRelease (parked-pr-remedy.ts:98) is passed only to openEscalationStandDownReason, so the fix-on-pr row does not release this hold.
+    - So the ladder gets fix-on-pr, the fix lane stands down again and opens a needs-human issue, and the next pass gives fix-on-pr again.
+    MEASURED read-only on the Azure host, core ledger and rotated archives, 2026-11-08T23:00Z to 2026-11-15T23:04Z:
+    - 408 sweep.disposed rows with needs_design_hold true, on 20 pull requests: 382 refused-escalate, 26 blocked-fixable. From the first to the last such row on each pull request: 65.4 PR-hours.
+    - 16 of the 20 had unmet_count 0 on their newest fix.dispatch row, so the hold was about a red check, not a criterion. Under W1-T12709 these get fix-on-pr. #18321 had 3 unmet; #18414, #18508 and #18536 had 1 each.
+    - 35 fix.needs_design rows on 22 tasks. None names the criteria or checks it covers. None has needs_design_kind, because W1-T12714 merged at 2026-11-15T16:55Z, after the newest of them (14:32Z).
+    - 2 fix.stood_down rows at rung.needs_design, each with a new needs-human issue.
+    RELATED, not duplicated: W1-T12709 (the remedy this changes). W1-T12714 (the needs-design kinds; its amendment route waits on an amendment, not on a person, and is kept). W1-T13045 (the W1-T10339 stand-down hold).
+  design: |
+    INVARIANT no-design-issue: a design hold on an open pull request never opens a needs-human issue from the fix rung when the sweep has taken a parked-PR remedy for that pull request and head.
+    INVARIANT main-first: a split or close under a design hold comes only after the hold's one main adoption, when it is due.
+    W1-T12709's rule still holds: a pull request with nothing unmet and nothing red is never closed.
+    1. src/cli/commands/fix.ts: the fix.needs_design row gains covers_criteria (the unmet claims in the round's evidence) and covers_checks (the red check names in the round's evidence). Declare both fields in src/lib/ledger-steps.ts.
+    2. At the rung.needs_design stand-down (:2989), skip escalateForTask when a parked_pr.remedy row exists for this pull request and head. Write the fix.stood_down row as today, with no issue_url.
+    3. src/lib/parked-pr-remedy.ts parkedPrFacts takes the hold's covers_criteria and covers_checks. A covered criterion needs input and is ladder-spent: the round answered NEEDS_DESIGN, so no stall round will run for it. When the row has no covers fields, keep today's rule.
+    4. parkedPrRemedy under a design hold: covered criteria fewer than the task's criteria take split-follow-up. Every criterion covered, or covered red checks and no covered criterion, take close-and-rebuild. A red check cannot leave the task, so it cannot be split.
+    5. src/lib/parked-pr-remedy.ts exports designHoldCoverage(row), which reads covers_criteria and covers_checks off a fix.needs_design row (undefined when the row has neither). src/lib/sweep.ts calls it on the hold's producer row and passes the result into parkedPrFacts, and does so only after the main-adoption decision is not due.
+    NOT IN SCOPE: the needs-design kinds and the amendment route (W1-T12714); the W1-T10339 stand-down hold (W1-T13045).
+  falsifier: |
+    Leave the covers fields off the row: criterion 1 must fail. Mark every unmet criterion as needing input: criterion 2 must fail on a pull request with one covered and one fixable criterion. Keep fix-on-pr for a fully covered hold: criterion 3 must fail. Keep the escalateForTask call: criterion 4 must fail. Split before the due main adoption: criterion 5 must fail. Restore, and all must pass. If, 7 days after merge, the ledger still shows fix.stood_down rung.needs_design rows with an issue_url on open pull requests, the change did not reach production.
+  note: |
+    Id reserved for run-unfiled-1794784170000 with ~/rmd-work/bin/reserve-id.sh. Build after W1-T12709 merges, off origin/main.

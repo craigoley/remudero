@@ -4,7 +4,7 @@
  *
  * A sampler on the blocked loop records nothing until the block clears ({@link reportLoopLag}). So the
  * watchdog runs in a worker thread. The main loop bumps a shared heartbeat counter each turn. When it has
- * been still past the bound, the worker opens `inspector.Session.connectToMainThread()` and starts V8's
+ * been still past the onset (W1-T12753), the worker opens `inspector.Session.connectToMainThread()` and starts V8's
  * sampling profiler. The inspector reaches a busy main thread through an interrupt, so the profile samples
  * the stall itself. It stops when the heartbeat moves again; at most one profile runs at a time.
  *
@@ -81,6 +81,11 @@ export const LOOP_STALL_LAG_HISTORY = 128;
 export const LOOP_STALL_TOP_FRAMES = 5;
 /** Heartbeats per daemon interval. The watchdog sees a still loop within a quarter interval of the bound. */
 export const LOOP_STALL_HEARTBEATS_PER_INTERVAL = 4;
+/** W1-T12753: the silence after which the first chunk starts, whatever the learned bound (never later than it).
+ *  A 101 s bound left the first 101 s of a 118 s stall unprofiled. */
+export const LOOP_STALL_PROFILE_ONSET_MS = 1_000;
+/** W1-T12753: heartbeats per onset, so an ordinary gap between two beats is never read as a stall. */
+const HEARTBEATS_PER_ONSET = 4;
 /** Samples one profile chunk aims at, so a long bound samples more coarsely and a chunk stays one size. */
 export const LOOP_STALL_SAMPLES_PER_CHUNK = 10_000;
 /** V8's default sampling interval. The profiler never samples finer than this. */
@@ -93,6 +98,7 @@ const BEAT = 0;
 const BOUND = 1;
 const PERIOD = 2;
 const SAMPLING_US = 3;
+const ONSET = 4;
 
 /** THE BOUND: the daemon's interval plus the {@link LOOP_STALL_LAG_QUANTILE} quantile of the observed lags. */
 export function loopStallBoundMs(intervalMs: number, lagsMs: readonly number[]): number {
@@ -384,7 +390,8 @@ const tick = () => {
     return;
   }
   const bound = Atomics.load(shared, ${BOUND});
-  if (!stall && bound > 0 && now - lastChangeAt > bound) run(() => begin(beat, now));
+  const onset = Atomics.load(shared, ${ONSET});
+  if (!stall && onset > 0 && now - lastChangeAt > onset) run(() => begin(beat, now));
   else if (stall && now - stall.chunkAt >= bound) run(rotate);
 };
 tick();
@@ -437,7 +444,7 @@ type WatchdogMessage = { kind: "ready" } | { kind: "failed"; reason: string } | 
 
 export function startLoopStallProfiler(options: LoopStallProfilerOptions = {}): LoopStallProfiler {
   const steps = options.steps ?? DAEMON_LOOP_STALL_STEPS;
-  const shared = new Int32Array(new SharedArrayBuffer(4 * Int32Array.BYTES_PER_ELEMENT));
+  const shared = new Int32Array(new SharedArrayBuffer(5 * Int32Array.BYTES_PER_ELEMENT));
   const lags: number[] = [];
   const beats = new Map<number, { lagMs: number; syncSpawnMs: number; syncSpawn?: LagIntervalReading }>();
   let intervalMs: number | undefined;
@@ -488,16 +495,17 @@ export function startLoopStallProfiler(options: LoopStallProfilerOptions = {}): 
     const lagMs = Math.round(closing?.lagMs ?? message.silent_ms);
     const syncSpawnMs = Math.round(closing?.syncSpawnMs ?? 0);
     const reading = closing?.syncSpawn;
+    const summary = summarizeStallFold(message.fold);
     sink?.(steps.profile, {
       lag_ms: lagMs,
       sync_spawn_ms: syncSpawnMs,
       ...(reading?.top === undefined ? {} : { sync_spawn_top: reading.top }),
       ...(reading?.by_caller === undefined ? {} : { sync_spawn_by_caller: reading.by_caller }),
       ...(reading?.unnamed_ms === undefined ? {} : { sync_spawn_unnamed_ms: reading.unnamed_ms }),
-      unattributed_ms: Math.max(0, lagMs - syncSpawnMs),
+      unattributed_ms: Math.max(0, lagMs - syncSpawnMs - summary.profiled_ms),
       bound_ms: Atomics.load(shared, BOUND),
       unprofiled_ms: message.unprofiled_ms,
-      ...summarizeStallFold(message.fold),
+      ...summary,
     });
   };
   const start = (): void => {
@@ -534,7 +542,9 @@ export function startLoopStallProfiler(options: LoopStallProfilerOptions = {}): 
       intervalMs = Math.max(intervalMs ?? 0, reading.intervalMs);
       const bound = loopStallBoundMs(intervalMs, lags);
       Atomics.store(shared, BOUND, bound);
-      Atomics.store(shared, PERIOD, Math.max(1, Math.round(intervalMs / LOOP_STALL_HEARTBEATS_PER_INTERVAL)));
+      Atomics.store(shared, ONSET, Math.min(bound, LOOP_STALL_PROFILE_ONSET_MS));
+      Atomics.store(shared, PERIOD, Math.max(1, Math.round(Math.min(intervalMs / LOOP_STALL_HEARTBEATS_PER_INTERVAL,
+        LOOP_STALL_PROFILE_ONSET_MS / HEARTBEATS_PER_ONSET))));
       Atomics.store(shared, SAMPLING_US,
         Math.max(MIN_SAMPLING_INTERVAL_US, Math.round((bound * 1000) / LOOP_STALL_SAMPLES_PER_CHUNK)));
       if (worker === undefined) {

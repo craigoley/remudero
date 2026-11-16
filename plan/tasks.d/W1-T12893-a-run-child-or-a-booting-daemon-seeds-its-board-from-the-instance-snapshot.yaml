@@ -18,7 +18,7 @@
     - src/lib/status.ts
     - src/lib/board-snapshot-cache.ts
     - test/a-cold-board-gateway-seeds-from-the-instance-snapshot.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A board gateway built by buildBatchedGithub with no snapshotCache, in a process whose instance root holds a readable closed snapshot for the repository, reads the closed half as a delta from that snapshot (mode delta, one or a few pages) and not as a full walk"

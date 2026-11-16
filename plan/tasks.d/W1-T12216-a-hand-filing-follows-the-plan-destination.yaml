@@ -23,7 +23,7 @@
     - scripts/console-parity-ratchet.mjs
     - scripts/console-parity-baseline.json
     - test/help-renders-a-summary-not-a-paragraph.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A command prints, for a kind, the repository and the checkout that take a new plan file on this host, and the outcome when the host file is unreadable"

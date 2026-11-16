@@ -24,14 +24,14 @@ import { isPrMergedNow, mergeTargetFromPrUrl } from "../../lib/arm-auto-merge.js
 import { ciFailureLedgerEntry } from "../../lib/ci-friction-gardener.js";
 import { conflictedFilePaths } from "../../lib/hot-file-gardener.js";
 import { billingMode } from "../../lib/env.js";
-import { FIX_MODE_RULES, deriveFixMode, fixScopeRegime, outOfDeclaredScopeFiles, renderFixPrompt, renderPrerequisitePrPrompt, sameHeadReviewUnmet, type FixEvidence, type FixReviewFinding } from "../../lib/prompt-render.js";
+import { FIX_MODE_RULES, bodyCoverageSelfHealCriteria, deriveFixMode, fixScopeRegime, outOfDeclaredScopeFiles, renderFixPrompt, renderPrerequisitePrPrompt, sameHeadReviewUnmet, type FixEvidence, type FixReviewFinding } from "../../lib/prompt-render.js";
 import { bakedClosureCatalogDetails } from "../../lib/baked-closure-catalog.js";
 import { escalateWithJudge, escalationCause, realEscalationJudge, escalationHeadSha, openEscalationStandDownReason, fixEscalationDedupKey, findDuplicateEscalations, taskContractRevision, taskSemanticRevision, type Escalation, type EscalationDedupKey, type IssueGateway, type OpenIssue } from "../../lib/escalate.js";
 import { fetchSinglePrRest, codeqlCheckFailed, hydrateCodeqlHeadAlertsSteps, CODEQL_CHECK_NAME, createPlanFilingFileCache, hydratePlanFilingFilesSteps, type GhApiFetcher } from "../../lib/open-prs-rest.js";
 import { remedyFilesForFailingChecks, type RemedyFileForGate } from "../../lib/ci-parity.js";
 import { isInPlanScope } from "../../lib/plan-architect.js";
 import { planFilingFixRoundRefusal, readPlanFilingFixRoundInput } from "../../lib/plan-filing-fix-guard.js";
-import { createPlanPrRest, probeExistingPlanPr } from "../../lib/plan-pr-emitter.js";
+import { createPlanPrRest, probeExistingPlanPr, renderAcceptanceBlock } from "../../lib/plan-pr-emitter.js";
 import { findTaskShard, parseProofAmendmentProposal, requestProofAmendment, requestScopeAmendment, isUngrantableInstrumentPath, SCOPE_AMENDMENT_RETRYABLE_REFUSALS, saveScopeAmendmentWork, restoreScopeAmendmentWork, type ScopeAmendmentOutcome, type ProofAmendmentOutcome } from "../../lib/proof-amendment.js";
 import { appendLedger, isSpawnInfraBlockedError, LEDGER_COST_TAG_INFRA } from "../../lib/ledger.js";
 import { systemClock } from "../../lib/clock.js";
@@ -45,7 +45,7 @@ import { loadMounts, mountsPath, type Mount } from "../../lib/mounts.js";
 import { fixArmEvidence, fixRoutingWeights, readFixRoutingRows, type FixLearnedArms } from "../../lib/fix-routing-learner.js";
 import { loadInjectableSkills, observeSkillSelection, renderSkillsPart, SKILL_FIX_TASK_TYPE, skillWithheldForRun } from "../../lib/skill-workshop.js";
 import { DEFAULT_KNOWLEDGE_BUDGET_CHARS } from "../../lib/learnings.js";
-import { recognizeChangesetClaims, acceptanceAuthorTimeCheck, extractTaskTrailerId, parseAcceptanceBlock, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, reviewInputDigest, reviewLedgerReasons, resolvePlanCriteriaAtHeadAsync, type CriterionVerdict } from "../../lib/review.js";
+import { recognizeChangesetClaims, acceptanceAuthorTimeCheck, acceptanceBlockRegion, extractTaskTrailerId, parseAcceptanceBlock, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, reviewInputDigest, reviewLedgerReasons, resolvePlanCriteriaAtHeadAsync, type CriterionVerdict } from "../../lib/review.js";
 import { repairedProofsAreSafeToPush, diagnoseUnrunnableProofs, renderBodyDefects } from "../../lib/body-repair.js";
 import { recordHeadProviderAfterPush } from "../../lib/review-provider-provenance.js";
 import { ghRequiredStatusCheckContexts, readLedgerLines, taskIdFromRunBranch } from "../../lib/status.js";
@@ -2457,6 +2457,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     });
   let review = opts.initialReview;
   let reconstructedReviewChecked = false;
+  let bodyCoverageSelfHealAttempted = false;
   const proofDiscriminationStillNeedsRepair = () =>
     opts.proofDiscrimination !== undefined &&
     review.capped === true &&
@@ -4052,6 +4053,130 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         deps.log("fix.stood_down", { site: "rung.report_substituted", strike: strikes + 1, reason: infraFaultReason });
         deps.say(`fix rung: standing down before strike ${strikes + 1} — ${infraFaultReason}`);
         return { outcome: "stood_down", review, strikes, retriggers, reason: infraFaultReason, standDownReason: infraFaultReason };
+      }
+    }
+
+    // W1-T10661: a body-coverage verdict is a claim that the report omitted proof keywords, not
+    // evidence that the PR diff needs a coding worker. Before spending a strike, rebuild the PR's
+    // Acceptance block from the exact visible criteria the review just judged, then re-review the
+    // live body on the same head. This only acts when a criterion/proof is genuinely absent from
+    // the body; complete blocks and non-body-coverage evidence keep the existing worker path.
+    if (!bodyCoverageSelfHealAttempted && currentMergeConflict === undefined && !noReviewYet) {
+      const evidence: FixEvidence = { review: { unmetCriteria: rawUnmet, summary: review.summary } };
+      const criteria = bodyCoverageSelfHealCriteria(evidence, visibleCriteria(review.criteria));
+      if (criteria !== undefined) {
+        bodyCoverageSelfHealAttempted = true;
+        let repairPublished = false;
+        try {
+          let repairTask = opts.task;
+          if (deps.resolveTaskContractAtHead) {
+            const contract: CatalogTaskContract | undefined = await deps.resolveTaskContractAtHead(opts.prUrl, opts.taskId);
+            if (!contract || contract.divergence) {
+              const reason = "current PR-head task contract unreadable before body-coverage repair";
+              deps.log("fix.stood_down", { site: "rung.body_coverage_contract", strike: strikes + 1, reason });
+              return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason };
+            }
+            repairTask = Object.assign({}, opts.task, { acceptance: contract.criteria,
+              files: contract.taskDeclaredFiles, catalog: contract.taskCatalog });
+          }
+          const body = await (deps.fetchPrBody ?? host.fetchPrBodyViaGh)(opts.prUrl);
+          if (deps.readLiveHead) {
+            const liveHead = await deps.readLiveHead(opts.prUrl);
+            if (!liveHead.ok || liveHead.headSha !== review.headSha) {
+              const reason = !liveHead.ok
+                ? "live PR head could not be verified before body-coverage repair"
+                : `PR head moved from ${review.headSha} to ${liveHead.headSha ?? "unknown"} before body-coverage repair`;
+              deps.log("fix.stood_down", { site: "rung.body_coverage_head", strike: strikes + 1, reason });
+              return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason };
+            }
+          }
+          const existingProofs = new Set(parseAcceptanceBlock(body).map((criterion) => criterion.proof.trim()));
+          if (!criteria.every((criterion) => existingProofs.has(criterion.proof.trim()))) {
+            if (deps.fetchPrDiffFiles) {
+              try {
+                const recognition = recognizeChangesetClaims(body, await deps.fetchPrDiffFiles(opts.prUrl));
+                deps.log("fix.body_claim_recognition", {
+                  strike: strikes + 1,
+                  recognised: recognition.recognisedCount,
+                  contradictions: recognition.contradictions.length,
+                  stale_counts: recognition.staleCountClaims.length,
+                  fence_unbalanced_at_eof: recognition.fenceUnbalancedAtEof,
+                });
+              } catch (error) {
+                deps.log("fix.body_claim_recognition_error", {
+                  strike: strikes + 1,
+                  error: String((error as Error)?.message ?? error),
+                });
+              }
+            }
+            const rendered = renderAcceptanceBlock(criteria).split("\n");
+            const region = acceptanceBlockRegion(body);
+            const lines = body.split("\n");
+            if (region) lines.splice(region.headerLine, region.endLine - region.headerLine, ...rendered);
+            else lines.push("", ...rendered);
+            const repairedBody = `${lines.join("\n").replace(/\s*$/, "")}\n`;
+            await (deps.updatePrBody ?? host.updatePrBodyViaGh)(opts.prUrl, repairedBody);
+            repairPublished = true;
+            deps.log("fix.body_coverage_repaired", {
+              head_sha: review.headSha,
+              criteria_count: criteria.length,
+              missing_proofs: criteria.filter((criterion) => !existingProofs.has(criterion.proof.trim())).length,
+            });
+            const fresh = await deps.runReview({
+              ...opts.reviewBase,
+              prUrl: opts.prUrl,
+              task: repairTask,
+              report: repairedBody,
+              reportIsSubstitute: false,
+              reviewInputBody: repairedBody,
+              settingsFile: opts.settingsFile,
+              config: opts.config,
+              budgetUsd: opts.budgetUsd,
+              log: deps.log,
+              say: deps.say,
+              account: deps.account,
+              reviewerClockBoundMs: opts.reviewerClockBoundMs,
+              workerTelemetry: opts.workerTelemetry,
+              reviewerCodeFreshness: opts.reviewerCodeFreshness,
+              ledgerPath: deps.ledgerPath,
+              runId: opts.runId,
+              openTaskIds: opts.openTaskIds,
+            });
+            deps.log("fix.pre_dispatch_review", {
+              site: "body-coverage-self-heal",
+              head_sha: fresh.headSha,
+              prior_head_sha: review.headSha,
+              state: fresh.state,
+              verdict_withheld: fresh.verdictWithheld,
+            });
+            if (fresh.verdictWithheld || fresh.headSha !== review.headSha) {
+              const reason = fresh.verdictWithheld ?? "PR head moved during body-coverage self-heal review";
+              deps.log("fix.stood_down", { site: "rung.body_coverage_review", reason, head_sha: fresh.headSha });
+              return { outcome: "stood_down", review: fresh, strikes, retriggers, reason, standDownReason: reason };
+            }
+            review = fresh;
+            progressReviewInputDigest = reviewInputDigest(fresh.headSha, repairedBody);
+            if (fresh.state === "success") {
+              const reason = "PR body coverage repaired and the same-head review passed";
+              deps.log("fix.resolved", { strikes, reason });
+              return { outcome: "fixed", review: fresh, strikes, retriggers, reason };
+            }
+            const reason = "PR body coverage was repaired; returning to sweep with the refreshed failing review";
+            deps.log("fix.stood_down", { site: "rung.body_coverage_review", reason, head_sha: fresh.headSha });
+            return { outcome: "stood_down", review: fresh, strikes, retriggers, reason, standDownReason: reason };
+          }
+        } catch (error) {
+          const reason = `body-coverage repair was published but its same-head review failed: ${String((error as Error)?.message ?? error)}`;
+          deps.log("fix.body_coverage_repair_error", {
+            head_sha: review.headSha,
+            published: repairPublished,
+            error: String((error as Error)?.message ?? error),
+          });
+          if (repairPublished) {
+            deps.log("fix.stood_down", { site: "rung.body_coverage_review", head_sha: review.headSha, reason });
+            return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason };
+          }
+        }
       }
     }
 

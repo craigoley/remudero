@@ -1,0 +1,57 @@
+- id: W1-T13048
+  title: "A parked-PR remedy reads and lands the task file in the catalog that holds it, so an ops-catalog task is split or rebuilt too"
+  repo: remudero
+  depends_on:
+    - W1-T12709
+  priority: 0.8
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the remedy writes task files; a held task or amendment filed in the wrong repository would leak or lose a private task
+  origin: "operator-session#no-pr-waits-on-the-operator-2026-11-15"
+  plan_refs:
+    - W1-T12709
+    - W1-T12200
+    - W1-T12199
+    - W1-T4838
+  files:
+    - src/lib/sweep.ts
+    - src/lib/parked-pr-remedy.ts
+    - test/sweep/a-parked-pr-remedy-files-in-the-catalog-that-holds-the-task.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "buildSweepEffects' parkedPr effect, for a task that findTaskInCatalogs finds in the ops catalog and a plan-destination.json that names that repository, reads the task file from the destination checkout and lands the held task and the acceptance amendment through landTaskFilesAsync with that repository as targetRepository"
+      proof: "grep: W1-T13048 criterion 1 in test/sweep/a-parked-pr-remedy-files-in-the-catalog-that-holds-the-task.test.ts"
+    - claim: "For a task in the public plan, the effect reads and lands in the public repository, as W1-T12709 does today"
+      proof: "grep: W1-T13048 criterion 2 in test/sweep/a-parked-pr-remedy-files-in-the-catalog-that-holds-the-task.test.ts"
+    - claim: "invariant:no-wrong-catalog — when the task is in the ops catalog and plan-destination.json is absent or unreadable, the remedy writes a refused parked_pr.remedy row whose reason is destination-unreadable, and lands no file in the public repository"
+      kind: guard
+      proof: "grep: W1-T13048 criterion 3 in test/sweep/a-parked-pr-remedy-files-in-the-catalog-that-holds-the-task.test.ts"
+    - claim: "taskCriteriaCount reads the ops-catalog task file, so a pull request of an ops-catalog task with some criteria that need input takes split-follow-up, not close-and-rebuild"
+      proof: "grep: W1-T13048 criterion 4 in test/sweep/a-parked-pr-remedy-files-in-the-catalog-that-holds-the-task.test.ts"
+    - claim: "The sweep's parkedPr effect reads the task file through readParkedPrShard"
+      proof: "grep: readParkedPrShard( in src/lib/sweep.ts"
+  rationale: |
+    WHY: the operator ruled that no pull request waits on the operator (2026-11-14, quoted in W1-T12709). W1-T12709 (#18738, open) files held tasks and amendments only in the public plan. A pull request whose task is in the ops catalog cannot be split or rebuilt. Its remedy is refused on every pass, and the pull request waits with no issue at all.
+    READ on the W1-T12709 branch (run-W1-T12709-1794776376000, head ae709cccb), src/lib/sweep.ts:
+    - :5368-5375 the parkedPr effect: readTaskShard reads `readTaskShard(repoDir, taskId)` (the public checkout only), and landTaskFiles lands through `taskFilesLandingOpts(publicTaskRepository)`.
+    - src/lib/parked-pr-remedy.ts takeParkedPrRemedy throws "the task file of <id> cannot be read" when readTaskShard returns nothing. It writes a refused row, and actOnParkedPr sets disposition wait. taskCriteriaCount also returns undefined, so a split is never chosen.
+    - The refusal amendment writer beside it already does this right: draftRefusalAmendments (:5384-5411) resolves each task with taskFileRepository (:2807), which calls findTaskInCatalogs and, for the ops catalog, planDestinationRepository. It then reads and lands in target.checkoutDir and the target repository.
+    MEASURED read-only, 2026-11-15:
+    - The ops catalog (plan/tasks.d in the plan-destination repository) holds 1 task file today (W1-T12996). The host's plan-destination.json lists the kinds decision and feedback.
+    - In the core ledger, 2026-11-08T23:00Z to 2026-11-15T23:04Z, the 109 pull requests with a refused-escalate or escalated disposition had: 60 public-plan tasks, 46 synthetic (SWEEP or PR-<n>), and 3 TRIAGE tasks. None had an ops-catalog task yet.
+    So the exposure today is small. It grows with each kind that moves to the ops catalog, and each such pull request would wait silently.
+    RELATED, not duplicated: W1-T12709 (the remedy). W1-T12200 (the plan destination switch). W1-T12199 (the sealed task-file landing).
+  design: |
+    INVARIANT no-wrong-catalog: a task file is edited in the repository that holds it; a new held task follows the same rule as the refusal amendment writer.
+    1. src/lib/parked-pr-remedy.ts exports readParkedPrShard(resolution, read), which turns a taskFileRepository answer into a shard and its target, or a refusal reason. src/lib/sweep.ts: the parkedPr effect resolves the task with taskFileRepository and calls readParkedPrShard. It reads the shard from target.checkoutDir and lands through taskFilesLandingOpts(target). The id is still reserved with reservePlanRepairTaskId for the landing branch of that target.
+    2. taskFileRepository is async and ParkedPrHost.readTaskShard is sync. Make readTaskShard return a promise, or resolve the target once per pull request before the remedy. Do not add a new named Deps interface.
+    3. An unreadable resolution is a refused parked_pr.remedy row with its reason. No fallback to the public repository.
+    4. taskCriteriaCount reads through the same resolution.
+    NOT IN SCOPE: TRIAGE tasks and synthetic SWEEP or PR-<n> tasks, which have no task file in either catalog; the plan-destination switch itself.
+  falsifier: |
+    Keep `readTaskShard(repoDir, ...)`: criteria 1 and 4 must fail. Fall back to the public repository when the destination is unreadable: criterion 3 must fail. Restore, and all must pass. If, 30 days after the task kind moves to the ops catalog, no pull request of an ops-catalog task reaches a parked-PR remedy, the change had no effect yet.
+  note: |
+    Id reserved for run-unfiled-1794784170000 with ~/rmd-work/bin/reserve-id.sh. Build after W1-T12709 merges, off origin/main.

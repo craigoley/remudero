@@ -16,7 +16,7 @@
   files:
     - src/lib/test-slot-mutation.ts
     - test/ci/suites/a-guard-writer-the-probe-cannot-read-is-ruled-out-by-its-name-or-start.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: A same-uid process whose fd directory or descriptors cannot be read does not make the proc-fd scan unknown when its command name is readable and is not node, or it started later than the guard's birth by more than the declared margin, so a guard no readable process holds reads closed

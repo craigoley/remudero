@@ -19,7 +19,7 @@
     - test/a-metadata-only-body-red-gets-its-proof-repaired-not-a-question.test.ts
     - test/run-task-s-widened-git-sites-are-classified-and-converted.test.ts
     - test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "On a fixture clone where the PR head and its body carry the task's unit test proofs and main carries a merged amendment that changes them to grep proofs, repairPrMetadata with acceptance-author-gate red and the production plan reader (nothing injected) writes a body whose Acceptance proofs equal main's amended proofs, and trailerBodyProofDivergenceRefusal on that body with the plan of the merge of head into main returns no refusal"

@@ -647,6 +647,11 @@ export function renderFlowFollowUp(stat: FlowStageStat, taskId: string, populati
       claim: `the ${stat.cls} ${stat.stage} stage${surface} returns under ${FLOW_REGRESSION_FACTOR}x its baseline p50`,
       proof: `grep: test("the ${stat.cls} ${stat.stage} stage recovers" in ${testPath}`,
     }],
+    invariants: { declared: [{ slug: "pr-outcomes-unchanged",
+      statement: `a ${stat.cls} PR is merged, held or refused on the same conditions as before; the remedy changes ${stat.unit === "minutes" ? "how long the stage takes" : `how many ${stat.stage} a PR needs`}, not what is decided.`,
+      claim: `a ${stat.cls} PR${surface} that was held or refused before the change is still held or refused after it, and one that merged still merges`,
+      proof: `grep: test("the ${stat.cls} ${stat.stage} stage keeps its outcomes" in ${testPath}`,
+    }] },
     note: `Filed by the flow gardener (W1-T5904). MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. The gardener does not re-file this stage while this task is open.`,
     rationale: [
       `${stat.cls} PRs, stage ${stat.stage}${surface}: ${numbers} (${stat.baseline!.source}).`,
@@ -1045,6 +1050,11 @@ function openRepairFiling(repair: FlowOpenRepairAges): FlowFiling | undefined {
           claim: `an open red or conflicting PR gets a fix round within ${bound} min of opening or of its latest round`,
           proof: `grep: test("open red and conflicting prs get a fix round within the bound" in ${testPath}`,
         }],
+        invariants: { declared: [{ slug: "green-prs-handled-as-before",
+          statement: "an open PR with green checks and no conflict is handled exactly as before; the remedy only shortens the wait of a red or conflicting PR.",
+          claim: "an open PR with green checks and no conflict gets the same handling after the change as before it",
+          proof: `grep: test("open green prs are handled as before" in ${testPath}`,
+        }] },
         note: "Filed by the flow gardener (W1-T12547). MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. The gardener does not file this wait again while this task is open.",
         rationale: [
           `${waiting.length} open red or conflicting PRs waited more than ${bound} min since they opened or since their latest fix round, oldest first:`,

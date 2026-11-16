@@ -15,7 +15,7 @@
   files:
     - src/lib/review.ts
     - test/review/a-review-records-the-reviewers-verdict-before-proofs-run.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Each criterion in a review.posted row records the verdict the reviewer gave for it before any proof ran, beside the final verdict"
