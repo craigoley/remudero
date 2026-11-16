@@ -85,14 +85,15 @@ const record = (value: unknown): Row | undefined =>
 
 const answerText = (value: unknown): string => (typeof value === "string" ? value : JSON.stringify(value) ?? "null");
 
-/** W1-T12414: a paired shadow row as one generative single answer, beside the current judge's. */
+/** W1-T12414: a paired shadow row as one generative single answer, beside the current judge's.
+ *  W1-T12420: a shadow judge generates text, so its answer is on the text surface. */
 function shadowTypedAnswer(line: Row): TypedAnswerRow | undefined {
   const role = str(line.surface);
   const model = str(line.shadow_model);
   if (role === undefined || model === undefined || line.shadow_decision === undefined) return undefined;
   const key = str(line.decision_key);
   return {
-    role, question: null, model, source: "generative", questionType: null, options: null,
+    role, question: null, model, source: "generative", modelSurface: "text", questionType: null, options: null,
     inputDigest: key === undefined ? null : createHash("sha256").update(key).digest("hex").slice(0, 16),
     answer: { kind: "single", option: answerText(line.shadow_decision) },
     incumbent: line.primary_decision === undefined ? null : answerText(line.primary_decision), outcome: null,

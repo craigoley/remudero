@@ -4025,15 +4025,40 @@ async function cashRequestJson<T>(input: {
 
 /** How long a 404 keeps a deployment out of selection before one request asks again. */
 export const OPENWEIGHT_ABSENT_TTL_MS = 30 * 60_000;
-const openWeightAbsentUntil = new Map<string, number>();
 
-/** Record a definitive 404. Only a 404 changes the reading; a timeout or any other failure leaves it. */
-export function markOpenWeightDeploymentAbsent(deployment: string, nowMs = systemClock.now()): void {
-  openWeightAbsentUntil.set(deployment, nowMs + OPENWEIGHT_ABSENT_TTL_MS);
+/**
+ * W1-T12420: the surface a request uses on one model id. `text` is a Responses or chat reply with
+ * output text (every worker path). `decisions` is a reply that gives a probability for each
+ * declared option and no text (lib/decision-model.ts). One deployment name can serve both, so
+ * state and figures are keyed by the model id AND its surface (docs/model-routing.md "Model surfaces").
+ */
+export type ModelSurface = "text" | "decisions";
+export const MODEL_SURFACES: readonly ModelSurface[] = ["text", "decisions"];
+
+/** Where a 404 is recorded: a surface and, for a caller with its own endpoint, that endpoint and path. */
+export interface OpenWeightAbsenceScope { surface?: ModelSurface; route?: string }
+
+/**
+ * THE ONE KEY of the absence mark. A 404 on one surface never marks the other surface absent. The
+ * text surface with no route keys by the deployment name alone, so every worker path reads and
+ * writes the same entry it did before surfaces existed.
+ */
+export function openWeightAbsenceKey(deployment: string, surface: ModelSurface, route?: string): string {
+  if (surface === "text" && route === undefined) return deployment;
+  return JSON.stringify([deployment, surface, route ?? null]);
 }
 
-export function openWeightDeploymentKnownAbsent(deployment: string, nowMs = systemClock.now()): boolean {
-  const until = openWeightAbsentUntil.get(deployment);
+const openWeightAbsentUntil = new Map<string, number>();
+
+/** Record a definitive 404. Only a 404 changes the reading; a timeout or any other failure leaves it.
+ *  A caller that names no surface marks the text surface. */
+export function markOpenWeightDeploymentAbsent(deployment: string, nowMs = systemClock.now(), scope: OpenWeightAbsenceScope = {}): void {
+  openWeightAbsentUntil.set(openWeightAbsenceKey(deployment, scope.surface ?? "text", scope.route), nowMs + OPENWEIGHT_ABSENT_TTL_MS);
+}
+
+/** A caller that names no surface reads the text surface. */
+export function openWeightDeploymentKnownAbsent(deployment: string, nowMs = systemClock.now(), scope: OpenWeightAbsenceScope = {}): boolean {
+  const until = openWeightAbsentUntil.get(openWeightAbsenceKey(deployment, scope.surface ?? "text", scope.route));
   return until !== undefined && nowMs < until;
 }
 
@@ -4063,6 +4088,9 @@ export async function sendCashRequest(config: Config, input: CashTransportOption
    *  reading of the reply's usage. Its 404 marks only this endpoint and path absent. */
   target?: { endpoint: string; key: string }; price?: OpenWeightPrice;
   usageUsd?: (envelope: unknown) => number | undefined;
+  /** W1-T12420: the model surface this request uses; its 404 marks and its check read only that
+   *  surface. A caller that names none uses `text`. */
+  surface?: ModelSurface;
 }): Promise<CashRequestOutcome> {
   const clock = input.clock ?? systemClock;
   const startedAt = clock.now();
@@ -4071,8 +4099,9 @@ export async function sendCashRequest(config: Config, input: CashTransportOption
   const failed = (reason: Extract<CashRequestOutcome, { ok: false }>["reason"], detail: string, status?: number): CashRequestOutcome =>
     ({ ok: false, reason, detail, latencyMs: clock.now() - startedAt, reservedUsd, settledUsd, heldUsd, ...(status === undefined ? {} : { status }) });
   if (isFoundryClaudeDeployment(input.deployment)) return failed("not-ready", "a Foundry Claude deployment has its own adapter");
-  const absenceKey = input.target ? `${input.deployment} ${input.target.endpoint} ${input.path}` : input.deployment;
-  if (openWeightDeploymentKnownAbsent(absenceKey, clock.now())) return failed("deployment-absent", `${input.deployment} answered 404 inside ${OPENWEIGHT_ABSENT_TTL_MS}ms`);
+  const absence: OpenWeightAbsenceScope = { surface: input.surface ?? "text",
+    ...(input.target ? { route: `${input.target.endpoint} ${input.path}` } : {}) };
+  if (openWeightDeploymentKnownAbsent(input.deployment, clock.now(), absence)) return failed("deployment-absent", `${input.deployment} answered 404 inside ${OPENWEIGHT_ABSENT_TTL_MS}ms`);
   const target = input.target ? { ok: true as const, ...input.target } : cashDeploymentTarget(config, input.deployment, input.env ?? process.env);
   if (!target.ok) return failed("not-ready", target.reason === "no-endpoint" ? "no cash endpoint" : `${target.keyEnv} is not set`);
   const base = URL.parse(target.endpoint.endsWith("/") ? target.endpoint : `${target.endpoint}/`);
@@ -4142,7 +4171,7 @@ export async function sendCashRequest(config: Config, input: CashTransportOption
       latencyMs: clock.now() - startedAt, reservedUsd, settledUsd, heldUsd };
   } catch (error) {
     const absent = error instanceof OpenWeightDeploymentNotFoundError;
-    if (absent) markOpenWeightDeploymentAbsent(absenceKey, clock.now());
+    if (absent) markOpenWeightDeploymentAbsent(input.deployment, clock.now(), absence);
     const detail = error instanceof Error ? error.message : String(error);
     if (pending) settle(pending, { ...(unbilledCashRefusal(error, azureOpenAi429Unbilled) ? { actualUsd: 0, unbilled: true } : {}), reason: detail });
     if (error instanceof OpenWeightUnpricedDeploymentError) return failed("not-ready", detail);
@@ -4156,13 +4185,15 @@ export async function sendCashRequest(config: Config, input: CashTransportOption
 }
 
 /** READY = priced, shaped and context-sized, and not known absent. A successor can lead a ladder row
- *  before any of that is true; until it is, selection passes over it as if it were not listed. */
+ *  before any of that is true; until it is, selection passes over it as if it were not listed.
+ *  W1-T12420: readiness is a reading of the text surface, the one every worker and cash row uses, so
+ *  a 404 on the decisions surface of the same deployment name never takes it out of selection. */
 export function openWeightDeploymentReady(deployment: string, nowMs = systemClock.now()): boolean {
   return (
     Object.prototype.hasOwnProperty.call(OPENWEIGHT_PRICES, deployment) &&
     Object.prototype.hasOwnProperty.call(OPENWEIGHT_TEMPERATURE, deployment) &&
     Object.prototype.hasOwnProperty.call(OPENWEIGHT_CONTEXT_WINDOWS, deployment) &&
-    !openWeightDeploymentKnownAbsent(deployment, nowMs)
+    !openWeightDeploymentKnownAbsent(deployment, nowMs, { surface: "text" })
   );
 }
 
