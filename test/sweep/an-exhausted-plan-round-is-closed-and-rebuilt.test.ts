@@ -7,7 +7,8 @@ import { parse } from "yaml";
 
 import type { Config } from "#src/lib/config.js";
 import type { FixProgressJudge } from "#src/lib/fix-progress-judge.js";
-import { PARKED_PR_REMEDY_STEP, PLAN_ROUND_EXHAUSTED_CAUSE, type ParkedPrHost } from "#src/lib/parked-pr-remedy.js";
+import { PARKED_PR_REMEDY_STEP, PLAN_ROUND_EXHAUSTED_CAUSE, planRoundExhaustedRemedy, readParkedPrShard,
+  type ParkedPrHost, type ParkedPrTarget } from "#src/lib/parked-pr-remedy.js";
 import type { Plan } from "#src/lib/plan.js";
 import { buildSweepEffects, DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
@@ -49,7 +50,8 @@ function spies() {
   const landed: { relPath: string; content: string }[][] = [];
   const closed: { prUrl: string; comment: string }[] = [];
   let next = 99000;
-  const writes: Pick<ParkedPrHost, "reserveTaskId" | "landTaskFiles" | "closePr" | "readPrFiles"> = {
+  const writes: Pick<ParkedPrHost, "reserveTaskId" | "landTaskFiles" | "closePr" | "readPrFiles" | "planFilingTarget"> = {
+    planFilingTarget: { owner: "o", repo: "r", checkoutDir: "/fixture/public" },
     reserveTaskId: () => `W1-T${++next}`,
     landTaskFiles: async (files) => { landed.push(files.map(f => ({ relPath: f.relPath, content: f.content }))); return { prUrl: "https://github.com/o/r/pull/99999" }; },
     closePr: async (prUrl, comment) => { closed.push({ prUrl, comment }); },
@@ -67,7 +69,9 @@ function productionParkedPr(t: TestContext, writes: ReturnType<typeof spies>["wr
     log: () => {}, reloadPlanForFixImpl: () => undefined, readJsonImpl: async () => assert.fail("no GitHub read") });
   assert.ok(effects.parkedPr, "the production sweep effects wire the remedy");
   assert.equal(typeof effects.parkedPr.readPrFiles, "function", "the production effect reads the pull request's files");
-  return { ...effects.parkedPr, ...writes };
+  assert.deepEqual(effects.parkedPr.planFilingTarget, { owner: "o", repo: "r", checkoutDir: root });
+  const { planFilingTarget: _target, ...effectWrites } = writes;
+  return { ...effects.parkedPr, ...effectWrites };
 }
 
 function world(rows: Record<string, unknown>[], parkedPr: ParkedPrHost | undefined, judge: FixProgressJudge | undefined) {
@@ -133,7 +137,7 @@ test("W1-T13047 criterion 2: a refused-twice claim, and a refused-twice round wi
   ] as const) {
     const { writes, landed, closed } = spies();
     const all = [...rows];
-    const w = world(all, { readTaskShard: () => undefined, ...writes }, judge);
+    const w = world(all, { readTaskShard: async () => ({ outcome: "refused", reason: "task-absent" }), ...writes }, judge);
     await runSweep([filing()], w.deps, DEFAULT_SWEEP_POLICY);
     assert.equal(w.escalated.length, 0, `${name}: no escalation`);
     assert.deepEqual(w.remedies().map(r => [r.remedy, r.cause, r.outcome]), [["close-and-rebuild", PLAN_ROUND_EXHAUSTED_CAUSE, "taken"]],
@@ -153,7 +157,7 @@ test("W1-T13047 criterion 3: an exhausted plan-scoped merge-conflict round is cl
     "without the remedy the exhausted conflict round escalates");
 
   const { writes, landed, closed } = spies();
-  const w = world(roundRefused(), { readTaskShard: () => undefined, ...writes, readPrFiles: async () => [] }, undefined);
+  const w = world(roundRefused(), { readTaskShard: async () => ({ outcome: "refused", reason: "task-absent" }), ...writes, readPrFiles: async () => [] }, undefined);
   await runSweep([dirty()], w.deps, conflictPolicy);
   assert.equal(w.escalated.length, 0);
   assert.deepEqual(w.remedies().map(r => [r.remedy, r.cause, r.outcome]), [["close-and-rebuild", PLAN_ROUND_EXHAUSTED_CAUSE, "taken"]]);
@@ -178,7 +182,7 @@ test("W1-T13047 criterion 4: invariant:round-first, a plan filing whose plan-sco
   ];
   for (const [name, rows, over, reason] of cases) {
     const { writes, landed, closed } = spies();
-    const w = world([...rows], { readTaskShard: () => undefined, ...writes }, ESCALATE);
+    const w = world([...rows], { readTaskShard: async () => ({ outcome: "refused", reason: "task-absent" }), ...writes }, ESCALATE);
     await runSweep([filing()], { ...w.deps, ...over } as SweepDeps, DEFAULT_SWEEP_POLICY);
     assert.equal(closed.length, 0, `${name}: never closed`);
     assert.equal(landed.length, 0, `${name}: no held task`);
@@ -190,7 +194,7 @@ test("W1-T13047 criterion 4: invariant:round-first, a plan filing whose plan-sco
 test("W1-T13047 criterion 5: invariant:one-question, later passes over the closed pull request file no second held task", async () => {
   const { writes, landed, closed } = spies();
   const rows = roundRefused();
-  const w = world(rows, { readTaskShard: () => undefined, ...writes }, undefined);
+  const w = world(rows, { readTaskShard: async () => ({ outcome: "refused", reason: "task-absent" }), ...writes }, undefined);
   for (let pass = 0; pass < 3; pass++) await runSweep([filing()], w.deps, DEFAULT_SWEEP_POLICY);
   assert.equal(landed.length, 1, "one held task for the pull request and cause");
   assert.equal(closed.length, 1, "the pull request is closed once");
@@ -199,3 +203,57 @@ test("W1-T13047 criterion 5: invariant:one-question, later passes over the close
   const later = w.disposed().at(-1)!;
   assert.match(String(later.reason), /held task W1-T99001 was filed for this pull request and cause; this pass reuses it/);
 });
+
+for (const readable of [true, false]) {
+  test(`an exhausted plan filing with a ${readable ? "readable" : "missing"} catalog task file reserves and lands in that catalog`, async () => {
+    const target: ParkedPrTarget = { owner: "private", repo: "ops", checkoutDir: "/fixture/ops" };
+    const taskId = "W1-T13901";
+    const shard = { relPath: `plan/tasks.d/${taskId}-catalog-task.yaml`, text: [
+      `- id: ${taskId}`, "  title: catalog task", "  repo: r", "  files: [src/catalog.ts]",
+      "  acceptance:", "    - claim: the catalog task holds", "      proof: 'grep: catalog in src/catalog.ts'",
+    ].join("\n") };
+    const { writes, landed, closed } = spies();
+    const reservations: ParkedPrTarget[] = [], landings: ParkedPrTarget[] = [], rows: Record<string, unknown>[] = [];
+    const host: ParkedPrHost = { ...writes,
+      readTaskShard: async id => {
+        assert.equal(id, taskId);
+        return readParkedPrShard({ outcome: "resolved", task: { id }, target }, checkoutDir => {
+          assert.equal(checkoutDir, target.checkoutDir);
+          return readable ? shard : undefined;
+        });
+      },
+      reserveTaskId: destination => { reservations.push(destination); return writes.reserveTaskId(destination); },
+      landTaskFiles: async (files, destination) => { landings.push(destination); return writes.landTaskFiles(files, destination); },
+    };
+    const out = await planRoundExhaustedRemedy(filing({ taskId }), { redChecks: ["lint-plan"], violations: [], refusal: REFUSAL },
+      rows, host, { runId: "catalog-plan-rebuild", ledgerTaskId: taskId, nowIso: new Date(NOW).toISOString(),
+        append: row => { rows.push(row); } });
+    assert.equal(out.error, undefined, out.reason);
+    assert.deepEqual([out.disposition, out.blocker], ["wait", "other"]);
+    assert.deepEqual(reservations, [target], "the reservation belongs to the task's catalog");
+    assert.deepEqual(landings, [target], "the held task follows the read's target, even when the file is missing");
+    assert.equal(closed.length, 1);
+    const held = heldTask(landed[0]![0]!.content);
+    assert.deepEqual(held.files, readable ? ["src/catalog.ts"] : [PLAN_FILE, "plan/MASTER-INDEX.md"].sort());
+    assert.match(String(held.title), readable ? /^catalog task/ : /^Rebuild the plan filing/);
+    assert.equal(rows[0]!.outcome, "taken");
+  });
+}
+
+for (const reason of ["destination-unreadable", "destination-lookup-failed"]) {
+  test(`an exhausted plan filing refuses ${reason} without falling back to the public catalog`, async () => {
+    const { writes, landed, closed } = spies();
+    let reservations = 0;
+    const rows: Record<string, unknown>[] = [];
+    const out = await planRoundExhaustedRemedy(filing({ taskId: "W1-T13901" }),
+      { redChecks: ["lint-plan"], violations: [], refusal: REFUSAL }, [],
+      { ...writes, readTaskShard: async () => readParkedPrShard({ outcome: "unreadable", reason }, () => assert.fail("no catalog read")),
+        reserveTaskId: () => { reservations++; return "W1-T99001"; } },
+      { runId: "catalog-plan-refusal", ledgerTaskId: "W1-T13901", nowIso: new Date(NOW).toISOString(), append: row => { rows.push(row); } });
+    assert.equal(out.error, reason);
+    assert.equal(reservations, 0);
+    assert.deepEqual(landed, []);
+    assert.deepEqual(closed, []);
+    assert.deepEqual(rows.map(row => [row.outcome, row.reason]), [["refused", reason]]);
+  });
+}

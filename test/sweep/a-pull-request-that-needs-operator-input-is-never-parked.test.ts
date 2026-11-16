@@ -39,7 +39,9 @@ function host(over: { claims?: readonly string[]; landError?: string } = {}) {
   const closed: { prUrl: string; comment: string; afterLanding: boolean }[] = [];
   let next = 99000;
   const h: ParkedPrHost = {
-    readTaskShard: (id) => id === TASK ? { relPath: SHARD_REL, text: shardOf(over.claims ?? CLAIMS) } : undefined,
+    readTaskShard: async (id) => id === TASK
+      ? { outcome: "read", shard: { relPath: SHARD_REL, text: shardOf(over.claims ?? CLAIMS) }, target: { owner: "o", repo: "r", checkoutDir: "/unused" } }
+      : { outcome: "refused", reason: "task-absent" },
     reserveTaskId: () => `W1-T${++next}`,
     landTaskFiles: async (files) => {
       landed.push(files.map(f => ({ relPath: f.relPath, content: f.content })));
@@ -87,7 +89,7 @@ function parkedWithoutRemedy(rows: readonly Record<string, unknown>[]): number[]
 /** The two calls the sweep makes where it would set refused-escalate. */
 async function remedyParkedPr(pr: ParkedPrSubject, input: Parameters<typeof parkedPrFacts>[1], rows: Record<string, unknown>[],
   h: ParkedPrHost, context: ParkedPrContext) {
-  const facts = parkedPrFacts(pr, input, rows, h);
+  const facts = await parkedPrFacts(pr, input, rows, h);
   return actOnParkedPr(pr, parkedPrRemedy(facts), facts, rows, h, context);
 }
 
@@ -295,7 +297,7 @@ test("W1-T12709 criterion 6: a clarification escalation for an open pull request
   for (let pass = 0; pass < 2; pass++) await runSweep([stale()], w.deps, DEFAULT_SWEEP_POLICY);
   assert.equal(w.escalated.length, 0, "the W1-T78 rung opens no needs-human issue for an open pull request");
   assert.deepEqual(w.remedies().map(r => [r.pr_number, r.remedy, r.cause, r.outcome]), [[PR, "fix-on-pr", "clarification", "taken"]]);
-  assert.match(String(w.remedies()[0]!.text), /not positively mergeable — checks none, review none/);
+  assert.match(String(w.remedies()[0]!.text), /zero check runs on head .*review none — CI suite recovery owns the bounded re-push/);
 });
 
 test("W1-T12709 criterion 9: invariant:never-close-healthy-work, nothing unmet and nothing red is fix-on-pr and never a close", async () => {

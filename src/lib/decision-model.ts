@@ -9,7 +9,7 @@ import { appendProducerLedger } from "./ledger.js";
 import { ledgerPathFor } from "./ledger-path.js";
 import { loadMounts, mountsPath, type DecisionCandidate, type DecisionModelShape } from "./mounts.js";
 import { TYPED_JUDGMENT_SUM_TOLERANCE } from "./typed-judgment.js";
-import { sendCashRequest, type OpenWeightPrice } from "./worker-provider.js";
+import { sendCashRequest, type ModelSurface, type OpenWeightPrice } from "./worker-provider.js";
 
 /**
  * W1-T12416: a decision model answers many fixed-option questions about ONE input in one paid
@@ -32,6 +32,9 @@ export const DECISION_SCORE_LEVELS = { min: 2, max: 10 } as const;
 export const DECISION_OUTPUT_MARGIN_TOKENS = 64;
 /** The option the Microsoft shape adds to each choice, because that shape has no refusal type. */
 export const CANNOT_TELL_OPTION = "cannot_tell";
+/** W1-T12420: every decision request and row is on the decisions surface, never the text surface
+ *  a worker uses on the same deployment name. */
+export const DECISION_MODEL_SURFACE: ModelSurface = "decisions";
 
 const QUESTION_NAME = /^[a-z][a-z0-9_]{0,63}$/;
 const SHAPE_PATHS: Record<DecisionModelShape, string> = {
@@ -58,6 +61,8 @@ export interface DecisionAnsweredRow {
   candidate: string;
   deployment: string;
   shape: DecisionModelShape;
+  /** W1-T12420: always {@link DECISION_MODEL_SURFACE}; readers key figures by model id and surface. */
+  model_surface: ModelSurface;
   outcome: "answered" | "refused" | "unavailable" | "failed";
   reason?: string;
   detail?: string;
@@ -307,7 +312,7 @@ export async function askDecisionModel(config: Config, request: {
   const input = typeof request.input === "string" ? request.input : "";
   const row: DecisionAnsweredRow = {
     role: request.role, input_digest: createHash("sha256").update(input).digest("hex"), candidate: candidate.name,
-    deployment: candidate.deployment, shape: candidate.shape, outcome: "refused", served_model: null, latency_ms: null,
+    deployment: candidate.deployment, shape: candidate.shape, model_surface: DECISION_MODEL_SURFACE, outcome: "refused", served_model: null, latency_ms: null,
     reserved_usd: 0, settled_usd: 0, held_usd: 0, usage: null,
     question_count: Array.isArray(request.questions) ? request.questions.length : 0, answers: [],
   };
@@ -327,7 +332,7 @@ export async function askDecisionModel(config: Config, request: {
     deployment: candidate.deployment, path: SHAPE_PATHS[candidate.shape], source: "decision-model",
     body: JSON.stringify(decisionRequestBody(candidate.shape, candidate.deployment, input, checked.value)),
     outputTokenCeiling: DECISION_OUTPUT_MARGIN_TOKENS, target: { endpoint: target.endpoint, key: target.key }, price,
-    usageUsd: (envelope) => decisionUsageUsd(envelope, candidate.price),
+    usageUsd: (envelope) => decisionUsageUsd(envelope, candidate.price), surface: DECISION_MODEL_SURFACE,
     ...(request.fetchImpl ? { fetchImpl: request.fetchImpl } : {}), ...(request.clock ? { clock: request.clock } : {}),
     ...(request.requestTimeoutMs === undefined ? {} : { requestTimeoutMs: request.requestTimeoutMs }),
     ...(request.signal ? { signal: request.signal } : {}),

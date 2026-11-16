@@ -1,0 +1,49 @@
+- id: W1-T13204
+  title: "A census refuses any new serve route path that reaches a synchronous spawn, as the daemon-loop census does, so a request can no longer fork blocking git or gh processes unseen"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: low # a test-only ratchet over src; no runtime change
+  origin: "operator-session#serve-oom-2026-11-16"
+  plan_refs:
+    - W1-T5689
+    - W1-T13187
+  files:
+    - test/no-serve-route-path-reaches-a-synchronous-spawn.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The census seeds the shared name-based walk (loopReachable) from buildServeRoutes, counts every reachable top-level function that calls or hands over a synchronous spawn primitive (the same primitive patterns as the W1-T5689 census), and holds them in an exact SERVE_SYNC_SPAWN_ROUTE_BASELINE table recorded at build time"
+      proof: "grep: W1-T13204 criterion 1 in test/no-serve-route-path-reaches-a-synchronous-spawn.test.ts"
+    - claim: "The census is exact: a reachable name absent from the table, a count above its row, or a count below its row each fail with a message that names the function, its file and the fix (convert the site, or lower the row in the same PR)"
+      proof: "grep: W1-T13204 criterion 2 in test/no-serve-route-path-reaches-a-synchronous-spawn.test.ts"
+    - claim: "invariant:same-primitives-as-the-loop-census — the census imports or repeats exactly the W1-T5689 census's primitive list, and a test fails when the two lists differ"
+      kind: guard
+      proof: "grep: W1-T13204 criterion 3 in test/no-serve-route-path-reaches-a-synchronous-spawn.test.ts"
+  rationale: |
+    WHY: on 2026-11-16 an Inbox write route reached a synchronous `git ls-tree` per draft path (inbox.ts
+    checkoutRepoFacts, through hostWorktreeGit's execFileSync) and froze serve's loop for 887 s. The daemon has had a
+    census against exactly this since W1-T5689 (test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts, seeded
+    from daemonCommand), but nothing walks serve's routes, so the site shipped unseen. W1-T13187 removes that one site;
+    this census stops the next one.
+    READ at origin/main (a388fde0e): buildServeRoutes (src/lib/serve.ts:3349) assembles every serve route. The shared
+    walk (test/helpers/daemon-loop-walk.ts: topLevelFunctions, loopReachable) takes any seed name.
+  design: |
+    INVARIANT same-primitives-as-the-loop-census: one definition of "a synchronous spawn" for both censuses.
+    1. New test file, modelled line for line on test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts, with
+       seed "buildServeRoutes" and its own baseline table SERVE_SYNC_SPAWN_ROUTE_BASELINE. Record the table from the
+       tree it is built on (the reach is name-based, so it is an upper bound; that is acceptable for a ratchet).
+    2. If the daemon census's primitive regexes are not exported, export them from the shared helper instead of
+       copying, and point both censuses at them (add the helper to files through a scope amendment if needed).
+    3. Mark the test `// @source-text-subject: src/**/*.ts`, as the daemon census does.
+  falsifier: |
+    Delete one row from the table: criterion 2 fails naming that function. Add a synchronous spawn to a function a
+    serve route reaches: criterion 2 fails. Change one primitive pattern in only one census: criterion 3 fails.
+  note: |
+    Id reserved for run-unfiled-1794844054000 with ~/rmd-work/bin/reserve-id.sh.
+    Follow-on: each row the table holds is a conversion candidate; the serve-api split (thin API plan, step 6)
+    should drive the table to the request path's own small set.

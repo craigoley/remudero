@@ -60,13 +60,42 @@ export function parkedPrRemedy(facts: ParkedPrFacts): ParkedPrDecision {
     reason: "the criteria that need operator input have not had the stall remedies yet, so a fix round runs on the pull request" };
 }
 
+export interface ParkedPrShard { relPath: string; text: string }
+/** W1-T13048: the repository that holds a task file, and its checkout. */
+export interface ParkedPrTarget { owner: string; repo: string; checkoutDir: string }
+/** A task file and the repository that holds it, or the reason the remedy cannot read it. */
+export type ParkedPrShardRead =
+  | { outcome: "read"; shard: ParkedPrShard; target: ParkedPrTarget }
+  | { outcome: "refused"; reason: string; target?: ParkedPrTarget };
+/** The answer of the sweep's taskFileRepository: the task and the repository that holds its file, or a reason. */
+export type ParkedPrResolution =
+  | { outcome: "unreadable"; reason: string }
+  | { outcome: "resolved"; task?: unknown; target: ParkedPrTarget };
+
+/**
+ * W1-T13048, invariant:no-wrong-catalog: a task file is read from, and edited in, the repository that holds it. An
+ * unreadable resolution, or a task in neither catalog, is a refusal. It never falls back to the public repository.
+ */
+export function readParkedPrShard(resolution: ParkedPrResolution, read: (checkoutDir: string) => ParkedPrShard | undefined):
+  ParkedPrShardRead {
+  if (resolution.outcome === "unreadable") return { outcome: "refused", reason: resolution.reason };
+  if (resolution.task === undefined) return { outcome: "refused", reason: "task-absent" };
+  const shard = read(resolution.target.checkoutDir);
+  return shard === undefined
+    ? { outcome: "refused", reason: `the task file cannot be read in ${resolution.target.owner}/${resolution.target.repo}`, target: resolution.target }
+    : { outcome: "read", shard, target: resolution.target };
+}
+
 /** The file writes and the one GitHub write a remedy makes. The sweep's production effects wire each one. */
 export interface ParkedPrHost {
-  readTaskShard(taskId: string): { relPath: string; text: string } | undefined;
-  /** R3: an id from reservePlanRepairTaskId. */
-  reserveTaskId(): string;
-  /** R3: lands new and amended task files through landTaskFilesAsync. */
-  landTaskFiles(files: readonly { relPath: string; content: string; claim: string; proof: string }[]):
+  /** The pull request's repository, for a plan filing with no task in either catalog. */
+  planFilingTarget?: ParkedPrTarget;
+  /** W1-T13048: the task file from the repository that holds it (readParkedPrShard). */
+  readTaskShard(taskId: string): Promise<ParkedPrShardRead>;
+  /** R3: an id from reservePlanRepairTaskId, for the landing branch of `target`. */
+  reserveTaskId(target: ParkedPrTarget): string;
+  /** R3: lands new and amended task files through landTaskFilesAsync, in `target`. */
+  landTaskFiles(files: readonly { relPath: string; content: string; claim: string; proof: string }[], target: ParkedPrTarget):
     Promise<{ prUrl?: string; error?: string }>;
   closePr(prUrl: string, comment: string): Promise<void>;
   /** W1-T13047: the paths the pull request adds or changes, for a plan filing rebuilt from the pull request itself. */
@@ -127,15 +156,20 @@ export async function takeParkedPrRemedy(pr: ParkedPrSubject, decision: ParkedPr
   }
   try {
     const closed = decision.remedy === "close-and-rebuild";
-    const shard = pr.taskId === undefined ? undefined : host.readTaskShard(pr.taskId);
+    const read = pr.taskId === undefined ? undefined : await host.readTaskShard(pr.taskId);
     // W1-T13047: a plan filing with no readable task file is rebuilt from the pull request's own plan files.
-    const fromPr = (shard === undefined || pr.taskId === undefined) && closed && pr.isPlanFiling === true;
-    if (!fromPr && (shard === undefined || pr.taskId === undefined)) throw new Error(`the task file of ${pr.taskId ?? "the pull request"} cannot be read`);
+    const fromPr = read?.outcome !== "read" && closed && pr.isPlanFiling === true;
+    if (read?.outcome === "refused" && (!fromPr || (read.target === undefined && read.reason !== "task-absent"))) {
+      throw new Error(read.reason);
+    }
+    if (!fromPr && read === undefined) throw new Error("the task file of the pull request cannot be read");
     if (fromPr && (pr.planFiles ?? []).length === 0) throw new Error("the plan files the pull request adds or changes cannot be read");
-    const heldTaskId = host.reserveTaskId();
-    const files = fromPr ? heldPlanRebuildFiles(heldTaskId, decision, pr, ctx)
-      : heldTaskFiles(shard!, pr.taskId!, heldTaskId, decision, pr, ctx);
-    const landed = await host.landTaskFiles(files);
+    const target = read?.target ?? host.planFilingTarget;
+    if (target === undefined) throw new Error("the repository for the held plan rebuild cannot be resolved");
+    const heldTaskId = host.reserveTaskId(target);
+    const files = read?.outcome === "read" ? heldTaskFiles(read.shard, pr.taskId!, heldTaskId, decision, pr, ctx)
+      : heldPlanRebuildFiles(heldTaskId, decision, pr, ctx);
+    const landed = await host.landTaskFiles(files, target);
     if (landed.error !== undefined) throw new Error(`the task files did not land: ${landed.error}`);
     if (closed) {
       await host.closePr(pr.prUrl, `Closed by the sweep (${pr.isPlanFiling === true ? "W1-T13047" : "W1-T12709"}): ` +
@@ -249,10 +283,10 @@ function heldPlanRebuildFiles(heldTaskId: string, decision: ParkedPrDecision, pr
 }
 
 /** The number of criteria the task file declares for `taskId`, or undefined when it cannot be read. */
-export function taskCriteriaCount(host: Pick<ParkedPrHost, "readTaskShard">, taskId: string | undefined): number | undefined {
-  const shard = taskId === undefined ? undefined : host.readTaskShard(taskId);
-  if (shard === undefined) return undefined;
-  const seq = parseDocument(shard.text).toJSON() as unknown;
+export async function taskCriteriaCount(host: Pick<ParkedPrHost, "readTaskShard">, taskId: string | undefined): Promise<number | undefined> {
+  const read = taskId === undefined ? undefined : await host.readTaskShard(taskId);
+  if (read?.outcome !== "read") return undefined;
+  const seq = parseDocument(read.shard.text).toJSON() as unknown;
   const task = Array.isArray(seq) ? seq.find(t => (t as { id?: unknown } | null)?.id === taskId) as { acceptance?: unknown } | undefined : undefined;
   return Array.isArray(task?.acceptance) ? task.acceptance.length : undefined;
 }
@@ -266,13 +300,13 @@ export interface ParkedPrSweepOutcome extends ParkedPrOutcome {
  * The facts of a pull request the sweep would set refused-escalate for, or hold on an escalated blocker. A design
  * question (W1-T12714's design kind) marks every unmet criterion as needing input. PURE apart from `host` reads.
  */
-export function parkedPrFacts(pr: ParkedPrSubject, input: { redChecks: readonly string[]; designQuestion?: string;
-  fixModelOrder: readonly string[] }, ledger: readonly Record<string, unknown>[], host: Pick<ParkedPrHost, "readTaskShard">): ParkedPrFacts {
+export async function parkedPrFacts(pr: ParkedPrSubject, input: { redChecks: readonly string[]; designQuestion?: string;
+  fixModelOrder: readonly string[] }, ledger: readonly Record<string, unknown>[], host: Pick<ParkedPrHost, "readTaskShard">): Promise<ParkedPrFacts> {
   const unmet = pr.unmetCriteria.map(c => ({ claim: c.claim, ...(c.proof === undefined ? {} : { proof: c.proof }),
     ...(c.reason === undefined ? {} : { reason: c.reason }), needsInput: input.designQuestion !== undefined,
     ladderSpent: stallLadderSpent(stallRemedyRows(ledger, pr.prNumber, `review:${c.claim}`), { fixModelOrder: input.fixModelOrder }) }));
   return { unmetCriteria: unmet, redChecks: input.redChecks, isPlanFiling: pr.isPlanFiling === true,
-    ...(unmet.some(c => c.needsInput) ? { taskCriteria: taskCriteriaCount(host, pr.taskId) } : {}) };
+    ...(unmet.some(c => c.needsInput) ? { taskCriteria: await taskCriteriaCount(host, pr.taskId) } : {}) };
 }
 
 /** Takes the sweep's remedy and names the disposition the pull request goes on with. It is never refused-escalate. */
@@ -303,7 +337,7 @@ export async function remedyStalledCriterion(pr: ParkedPrSubject, criterion: str
   const known = claim === undefined ? undefined : pr.unmetCriteria.find(c => c.claim === claim);
   const decision = parkedPrRemedy({ redChecks: [], isPlanFiling: false,
     unmetCriteria: [{ claim: claim ?? criterion, ...(known?.reason === undefined ? {} : { reason: known.reason }), needsInput: true, ladderSpent: true }],
-    ...(claim === undefined ? {} : { taskCriteria: taskCriteriaCount(host, pr.taskId) }) });
+    ...(claim === undefined ? {} : { taskCriteria: await taskCriteriaCount(host, pr.taskId) }) });
   return takeParkedPrRemedy(pr, decision, ledger, host, { ...ctx, cause: `stall:${criterion}`, text: stalledOn });
 }
 

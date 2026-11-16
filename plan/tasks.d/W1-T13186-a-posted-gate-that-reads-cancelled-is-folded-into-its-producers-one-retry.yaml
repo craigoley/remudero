@@ -1,0 +1,81 @@
+- id: W1-T13186
+  title: "A posted gate that reads CANCELLED is folded into its producer job's one retry, so one cancelled job is re-run once and escalated after that, however many gates it posted and whichever conclusion they carry"
+  repo: remudero
+  depends_on: []
+  priority: 1.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # it decides whether a red is re-run or handed to a fix round; a gate whose constituent truly failed must never be read as a cancellation
+  band_meaning: span
+  origin: "operator-session#w1-t8946-measure-first-2026-11-16"
+  plan_refs:
+    - W1-T8946
+    - W1-T4399
+    - W1-T1223
+    - W1-T2431
+    - W1-T10260
+  files:
+    - src/lib/tick-read-worker.ts
+    - src/lib/sweep.ts
+    - test/a-posted-gate-check-stays-rerunnable.test.ts
+    - test/a-plan-only-pr-requeues-its-cancelled-check.test.ts
+    - test/sweep/a-posted-gate-that-reads-cancelled-is-folded-into-its-producers-one-retry.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A cancelled producer job with several posted gates reading CANCELLED yields one cancelled check for that physical job, and it carries the run attempt read from the gates' external id"
+      proof: "grep: W1-T13186 criterion 1 in test/sweep/a-posted-gate-that-reads-cancelled-is-folded-into-its-producers-one-retry.test.ts"
+    - claim: "A producer already past its one retry is escalated and is not re-queued, whichever conclusion its posted gates carry"
+      proof: "grep: W1-T13186 criterion 2 in test/sweep/a-posted-gate-that-reads-cancelled-is-folded-into-its-producers-one-retry.test.ts"
+    - claim: "On a build pull request whose only reds are a cancelled producer and its posted gates reading CANCELLED, no ci-log fix round is dispatched and the job is re-queued once"
+      proof: "grep: W1-T13186 criterion 3 in test/sweep/a-posted-gate-that-reads-cancelled-is-folded-into-its-producers-one-retry.test.ts"
+    - claim: "invariant:both-shapes-one-retry — the FAILURE shape with the cancelled summary that main posts today is read exactly as #13538 made it, so the reader and the reporter can land in either order, and a gate whose constituent truly failed is never treated as a cancellation"
+      proof: "grep: W1-T13186 criterion 4 in test/sweep/a-posted-gate-that-reads-cancelled-is-folded-into-its-producers-one-retry.test.ts"
+  rationale: |
+    FOUND 2026-11-16 by the hand build of W1-T8946, which stopped at its measure-first step. W1-T8946 makes ci.yml's commitlint-job reporter post a gate as `cancelled`, not `failure`, when its constituent step was cancelled. A reader in src/ depends on the old mapping, so the reporter cannot land first. This task is that reader, and W1-T8946 now depends on it.
+
+    WHAT THE READER DOES TODAY (READ at origin/main ef8b74910f).
+    - 88f649588f (#13538, 2026-10-22, "fix(sweep): route verified producer cancellations to retry", trailer `Remudero-Task: unfiled`) landed nine days after W1-T8946 was filed. It links a posted gate to its cancelled producer job, and it does so only for the shape the reporter posts today.
+    - src/lib/tick-read-worker.ts, `cancelledRequiredChecks` (:1556): a posted check is an alias of the producer only when its external id reads `run:<run>:<attempt>:job:<job>` for the producer's run and job, and (:1576-1578) its conclusion is `FAILURE`, its status `COMPLETED` and its summary exactly `W1-T4399: reported by this job's <name> step(s) (outcome(s): cancelled)`. The summary is kept from the REST read at :64-65. With at least one alias and one attempt among them, the producer's entry gains `explainedFailures` and `runAttempt`.
+    - src/lib/sweep.ts, the plan-filing arm (:22767-22777) re-reads the rollup before it re-queues and requires each alias to still read `FAILURE` (:22773 `return aliases.length === 1 && rollupState(aliases[0]) === "FAILURE";`). Both arms key "already re-queued" on `${pr.headSha}@${check.name}` and on `cancelledCheckAlreadyRequeuedFromSurface(check.runAttempt)` (:22753-22754, :24855-24856), which is true only for an attempt above 1.
+    - Two suites pin the shape. test/a-posted-gate-check-stays-rerunnable.test.ts feeds `conclusion: "failure"` with the cancelled summary (:113-115) and expects `[{ name: "light-gates", jobId: "119601912896", runAttempt: 1, explainedFailures: [{ name: "claims", checkRunId: 119606381286 }] }]` (:133). test/a-plan-only-pr-requeues-its-cancelled-check.test.ts uses the same fixture (:169-171), asserts the gate's failure still reads FAILURE (:194), and holds "several cancelled posted gates spend only their one physical producer retry" (:246).
+    - Unchanged and not at risk: .github/workflows/ci-gate.yml:378 counts `cancelled` among the conclusions that fail a required check, and `REQUIRED_CHECK_FAIL` (src/lib/sweep.ts:8124) holds `CANCELLED`. A gate posted as cancelled still holds the merge.
+
+    WHAT A GATE POSTED AS CANCELLED WOULD DO TO IT. MEASURED by the builder, not re-run by this filing: a throwaway test drove the real `cancelledRequiredChecks` and the real `runSweep` with a stub re-queue, over a cancelled `light-gates` job (attempt 1 or 2) with one or three posted gates, on a plan-filing and on a build pull request. Source and output are in ~/Remudero-notes/handoff-1115/logs-8946/ (consumer-replay-source.ts.txt, consumer-replay.json, consumer-replay-2.json; 16 rows each). Rows for one gate (three gates read the same with 4 in place of 2):
+
+      pull request  attempt  posted as   cancelled checks        re-queue calls  fix rounds  outcome
+      plan filing   1        FAILURE     1 (attempt 1 kept)      1               0           wait, awaiting CI
+      plan filing   1        CANCELLED   2 (no attempt)          2               0           wait, awaiting CI
+      plan filing   2        FAILURE     1 (attempt 2 kept)      0               0           escalated, one issue
+      plan filing   2        CANCELLED   2 (no attempt)          2               0           wait, awaiting CI
+      build         1        FAILURE     1 (attempt 1 kept)      1               1           ci-log fix, strike 1 of 2
+      build         1        CANCELLED   2 (no attempt)          2               0 or 1      see below
+      build         2        FAILURE     1 (attempt 2 kept)      0               1           one issue and a ci-log fix
+      build         2        CANCELLED   2 (no attempt)          2               0 or 1      see below
+
+    Read against the code, the cause is plain: a gate that reads CANCELLED is itself in `cancelledRequiredCheckNames`, so it becomes a cancelled check of its own with the producer's job id; and it no longer passes the `FAILURE` test at :1576, so the producer's entry loses `explainedFailures` and `runAttempt`. One cancelled job with N posted gates becomes N+1 cancelled checks carrying one job id, each re-queued under its own name, and the "already re-run once" bound read from GitHub is gone: a producer on attempt 2 is re-queued again instead of escalated.
+    THE BUILD ROWS, AND WHAT IS NOT SETTLED. The builder's two runs differ only there: with CANCELLED gates the first recorded one fix dispatch and the second none ("NOT DISPATCHED this pass: cancelled required check(s): re-queued …"). The saved source sets each gate's `ciFailures` conclusion to the posted shape by hand, which fits the second run; what the first run fed is not saved. So what the real `fetchCiFailures` hands the sweep for such a gate is not measured, and criterion 3 must be proved through the real reader. Also seen: on a build pull request today a cancelled light gate still earns a ci-log fix round beside its re-queue, because #13538 covered only the plan-filing arm.
+  design: |
+    MEASURE FIRST: re-run the builder's replay (copy consumer-replay-source.ts.txt into a throwaway test, never commit it) at the head you build on, and build the build-pull-request view's `ciFailures` with the real `fetchCiFailures` (src/lib/tick-read-worker.ts) rather than by hand. Put the 16 rows in the PR body. If they differ from the table above, say where before changing anything.
+
+    1. In `cancelledRequiredChecks`, a posted gate is an alias of its producer when it reads `FAILURE` OR `CANCELLED`, with every other test unchanged (same head, completed, external id naming the producer's run and job, a positive check-run id, the exact cancelled summary). An accepted alias is not returned as a cancelled check of its own: the list holds one entry per physical job, with `explainedFailures` and the `runAttempt` from the aliases' external id.
+    2. In src/lib/sweep.ts, the re-confirmation before a re-queue accepts an alias that still reads FAILURE or CANCELLED and refuses any other state, as today. The "explained" set and the genuine-red filter treat a CANCELLED alias as they treat a FAILURE one.
+    3. The build arm: when every red at the head is a cancelled producer, its aliases and the aggregators downstream of them, no ci-log fix round is dispatched; the job is re-queued once, and escalated when its attempt is already above 1. This is for aliases that read CANCELLED. What the FAILURE shape does on a build pull request today (a re-queue and a fix round) is left as it is: it stops occurring once W1-T8946 lands.
+    4. The two existing suites gain the CANCELLED shape beside the FAILURE one in their fixtures; their FAILURE cases and assertions do not change. The new suite, test/sweep/a-posted-gate-that-reads-cancelled-is-folded-into-its-producers-one-retry.test.ts (the folder `rmd test-place` computes), drives the real `cancelledRequiredChecks` and `runSweep` with a recording re-queue. Import through `#src/*` and `#test/*`; do not import src/run-task.ts.
+       - criterion 1: one cancelled producer with one and with three gates reading CANCELLED gives a list of length 1, named for the producer, with the attempt from `run:<run>:<attempt>:job:<job>`; gates of two different jobs give two entries.
+       - criterion 2: attempt 2 with gates reading FAILURE, and attempt 2 with gates reading CANCELLED, each end in one escalation and no re-queue call, on a plan-filing and on a build pull request.
+       - criterion 3: a build pull request whose reds are the cancelled producer and its CANCELLED gates records one re-queue call for the producer's job id, no fix dispatch and no strike.
+       - criterion 4: the FAILURE fixtures of both existing suites give the same list and the same sweep outcome as at base; a gate reading FAILURE or CANCELLED whose summary is not the cancelled one, whose external id names another run or job, or beside which a constituent truly failed, grants no explanation and stays a genuine red.
+    INVARIANT both-shapes-one-retry: for one cancelled physical job the sweep makes at most one re-queue call per head and attempt, whether its gates read FAILURE with the cancelled summary or CANCELLED; and no check without that exact summary and producer link is ever read as a cancellation.
+    NOT IN SCOPE: the reporter itself (W1-T8946); what GitHub answers to a second rerun of the same job in one pass (not measured); the merge gate (ci-gate.yml already fails a cancelled required check); deterministic-timeout handling (W1-T8040).
+  falsifier: |
+    Accept only FAILURE again at the alias test and criteria 1 and 2 must fail: three CANCELLED gates give four entries, and attempt 2 is re-queued. Return the alias as a check of its own and criterion 1 must fail. Drop the summary test, so any CANCELLED check with the producer's job id is an alias, and criterion 4 must fail. Dispatch the fix round for an all-cancelled build red and criterion 3 must fail. Restore and require all four to pass.
+    GUARDS that held at base and must still hold, with their assertions unchanged: every existing test of test/a-posted-gate-check-stays-rerunnable.test.ts and test/a-plan-only-pr-requeues-its-cancelled-check.test.ts, among them "the default REST transport binds cancelled posted claims to exactly one physical producer", "posted cancellation evidence refuses wrong or missing heads, jobs, runs, attempts and constituent outcomes" and "several cancelled posted gates spend only their one physical producer retry".
+  note: |
+    reservation hand-off: run-unfiled-1794839315750 -> run-unfiled-1794839315750
+    Id reserved for the filing branch by the operator session. It names no workflow path, so the fleet can dispatch it. Check `git ls-remote origin 'refs/rmd-dispatch/W1-T13186' 'refs/heads/run-W1-T13186-*'` before building.
+    W1-T8946 (the reporter, operator-built) depends on this task and is claimed by the operator session, which builds it once this is merged.
+    The test folder is the one `rmd test-place` computed on 2026-11-16 (test/sweep/, sweep, high) for a stub importing src/lib/sweep.ts, src/lib/tick-read-worker.ts and src/lib/tmp.ts. The two existing suites are edited where they are.
+    OPEN QUESTION, a guess the builder did not measure and this record does not claim: gates of the same job that never started after the cancellation may report `skipped`, which the reporter posts as `success`. If so, a cancelled job would show green gates beside cancelled ones. Read one real cancelled light-gates run before relying on either answer, and file it if it is true.

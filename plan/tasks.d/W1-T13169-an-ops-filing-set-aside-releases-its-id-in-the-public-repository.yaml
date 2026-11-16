@@ -1,0 +1,92 @@
+- id: W1-T13169
+  title: "A task file the landing sets aside in the plan destination releases its reserved id in the public repository, where the reservation is, and never records a release it did not make"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # a release in the wrong repository frees an id that a branch or a pull request still carries, or burns one for good
+  origin: "operator-session#leftovers-2026-11-16"
+  plan_refs:
+    - W1-T12410
+    - W1-T12456
+    - W1-T12212
+    - W1-T12206
+  files:
+    - src/lib/feedback-landing.ts
+    - src/run-task.ts
+    - test/gardeners/an-ops-filing-set-aside-releases-its-id-in-the-public-repository.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A new task file that the landing sets aside while it lands in the plan destination (its landing pull request closed without a merge, or the plan preflight refused it) releases its refs/rmd-id reservation in the public repository when the destination landing branch holds it"
+      proof: "grep: W1-T13169 criterion 1 in test/gardeners/an-ops-filing-set-aside-releases-its-id-in-the-public-repository.test.ts"
+    - claim: "A new task file refused at staging while it lands in the plan destination releases its reservation in the public repository in the same way"
+      proof: "grep: W1-T13169 criterion 2 in test/gardeners/an-ops-filing-set-aside-releases-its-id-in-the-public-repository.test.ts"
+    - claim: "invariant:release-reads-the-reservation-repository — every ls-remote, fetch, log and lease push of a set-aside release runs against the repository that holds refs/rmd-id, never against the plan destination checkout; a destination remote with no refs/rmd-id refs gives no already_absent and no task_id.reservation_released row"
+      kind: guard
+      proof: "grep: W1-T13169 criterion 3 in test/gardeners/an-ops-filing-set-aside-releases-its-id-in-the-public-repository.test.ts"
+    - claim: "The production garden checkout (gardenCheckoutAsync in src/run-task.ts) passes the public repository's git to the destination landing, so the release in criterion 1 runs in production, not only in the test"
+      proof: "grep: W1-T13169 criterion 4 in test/gardeners/an-ops-filing-set-aside-releases-its-id-in-the-public-repository.test.ts"
+    - claim: "A landing into the public repository releases as it does today: the same calls, the same outcomes, the holder check and the main-holds-path keep unchanged"
+      proof: "grep: W1-T13169 criterion 5 in test/gardeners/an-ops-filing-set-aside-releases-its-id-in-the-public-repository.test.ts"
+  rationale: |
+    WHY: an id reserved for a filing bound for the plan destination (the private ops repository) is burned
+    when the landing sets that filing aside. The release looks for the reservation in the wrong repository,
+    finds nothing, and records the release as done.
+    MEASURED 2026-11-16 on the Azure host, origin/main ef8b74910:
+    - git ls-remote origin 'refs/rmd-id/*' on the public repository: 9,869 reservations. Of the ids with
+      numeric suffix 12000 or greater, 311 have no task file in plan/tasks.d, plan/tasks.yaml or the ops
+      repository tree.
+    - 5 of those 311 name the ops landing branch as holder (anchor line "rmd-id holder
+      branch=task-files-landing-craigoley-remudero-ops-default-ef22dfffbeee"): W1-T13049, W1-T13143,
+      W1-T13145, W1-T13160, W1-T13161. Every pull request on that branch in the ops repository is merged
+      (#17 to #25) and none is open, so no landing still carries these ids.
+    - git -C ~/rmd-state2/repos/remudero-ops ls-remote origin 'refs/rmd-id/*' gives 0 lines: the ops
+      repository holds no reservation refs at all.
+    READ at origin/main ef8b74910:
+    - src/run-task.ts:28289 a garden that files only task files reserves its id on the landing branch of
+      filesTo, which is the plan destination when the switch names one; the reservation ref itself is pushed
+      to the public repository, where the 5 refs above are.
+    - src/run-task.ts:28298 landTaskFilesAsync(at?.checkoutDir ?? opts.repoDir, ...): a destination landing
+      runs with the ops checkout as its root.
+    - src/lib/feedback-landing.ts:2647-2656 (asyncSeamsOf, :251) and :353 defaultGitAsync run git -C root,
+      so opts.gitAsync for that landing is git in the ops checkout.
+    - src/lib/feedback-landing.ts:2741 setAside and :2763 refuse call releaseSetAsideTaskIdAsync with that
+      opts.gitAsync. :2619 runs ls-remote origin refs/rmd-id/<id>, which asks the ops repository; :2622
+      then returns already_absent, and src/lib/task-id-release.ts record() logs already_absent as
+      task_id.reservation_released. The public ref stays.
+    W1-T12410 and W1-T12456 added these releases and tested them only for a landing into the public
+    repository, where root and reservation repository are the same.
+  design: |
+    INVARIANT release-reads-the-reservation-repository: a reservation is read and released only in the repository that holds refs/rmd-id.
+    1. LandTaskFilesOpts gains reservationGitAsync: git in the repository that holds refs/rmd-id. When it
+       is absent the landing uses opts.gitAsync, which is right only when the landing target is the public
+       repository.
+    2. setAside and refuse pass reservationGitAsync to releaseSetAsideTaskIdAsync. Do not change the
+       holder check: the holder is still the landing branch (kind.branch) of the destination.
+    3. gardenCheckoutAsync in src/run-task.ts, when at is a plan destination, passes git at opts.repoDir as
+       reservationGitAsync. Grep every other landTaskFilesAsync caller with a destination target and wire it
+       the same way.
+    4. When the landing target is not the public repository and no reservationGitAsync is given, the
+       release returns a skipped outcome (for example "unreadable" with a detail that says so) and never
+       already_absent, so no false task_id.reservation_released row is written.
+    5. Tests: two bare remotes in a temp directory, one public with a refs/rmd-id/W1-T<n> ref whose anchor
+       names the destination landing branch, one destination with no refs/rmd-id refs. Drive
+       landTaskFilesAsync with the destination as target through each set-aside path and read the public
+       remote after the pass. Criterion 4 reads the gardenCheckoutAsync source, or drives it with seams, to
+       prove the production wiring.
+  falsifier: |
+    Leave the release on opts.gitAsync: criteria 1, 2 and 3 fail (the public ref stays, and the ledger says
+    reservation_released). Pass the public git only in the test and not in gardenCheckoutAsync: criterion 4
+    fails. Release in the public repository without the holder check: criterion 5 fails.
+  note: |
+    Id reserved for run-unfiled-1794837666000 with ~/rmd-work/bin/reserve-id.sh.
+    The 5 refs already burned (W1-T13049, W1-T13143, W1-T13145, W1-T13160, W1-T13161) are not part of this
+    task; this task stops new leaks. The other 306 orphan refs with numeric suffix 12000 or greater are
+    held by other branches (178 by the public task-files-landing branch, the rest by run-* and garden
+    branches) and are a different cause, not measured here.
+    Proof that counts in production: after a destination set-aside, the task_files_landing.set_aside row
+    carries id_release released and git ls-remote on the public repository no longer lists that id.

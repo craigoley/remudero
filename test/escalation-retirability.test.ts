@@ -78,7 +78,7 @@ function fakeSweepDeps(overrides: Partial<SweepDeps> = {}): SweepDeps & {
 // ═══════════════════════════════════════════════════════════════════════════════════════════
 // (i) NOT-YET-SCHEDULED: a required check with zero runs on a head too young to have been
 //     scheduled disposes to WAIT and opens nothing; a genuinely absent check on an older head
-//     still escalates exactly as it does today.
+//     remains blocked, with recoverable heads owned by bounded CI recovery.
 // ═══════════════════════════════════════════════════════════════════════════════════════════
 
 test("deriveDisposition: checksState 'none' 2 minutes after the push -> wait, never blocked-ambiguous", () => {
@@ -100,17 +100,21 @@ test("deriveDisposition: checksState 'none' right at the ceiling still waits; ju
   assert.equal(deriveDisposition(justUnder, DEFAULT_SWEEP_POLICY, NOW).disposition, "wait");
 });
 
-test("deriveDisposition: a genuinely absent required check on an hour-old head still escalates exactly as it does today — blocked-ambiguous, terminal catch-all wording unchanged", () => {
+test("deriveDisposition: an hour-old checkless head remains blocked and names its CI recovery owner", () => {
   const stale = pr({ checksState: "none", reviewState: "none", lastActivityAt: minsAgo(60) });
   const result = deriveDisposition(stale, DEFAULT_SWEEP_POLICY, NOW);
   assert.equal(result.disposition, "blocked-ambiguous");
-  assert.equal(result.reason, "not positively mergeable — checks none, review none — escalating");
+  assert.equal(result.blocker, "awaiting-ci");
+  assert.equal(result.reason, "zero check runs on head aaaa230, review none — CI suite recovery owns the bounded re-push");
 });
 
 test("deriveDisposition: an unreadable head age fails TOWARD escalate, never toward wait — an unparseable timestamp is not evidence of youth", () => {
   const undated = pr({ checksState: "none", lastActivityAt: "not-a-real-timestamp" });
   assert.equal(absentAgeMinutes(undated, NOW), undefined);
-  assert.equal(deriveDisposition(undated, DEFAULT_SWEEP_POLICY, NOW).disposition, "blocked-ambiguous");
+  const result = deriveDisposition(undated, DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(result.disposition, "blocked-ambiguous");
+  assert.equal(result.blocker, "other");
+  assert.equal(result.reason, "not positively mergeable — checks none, review none — escalating");
 });
 
 test("deriveDisposition: NOT-YET-SCHEDULED never fires outside the structural 'none' shape — a dirty PR still routes CONFLICTED first, a pending PR still routes PENDING", () => {
