@@ -1,0 +1,46 @@
+- id: W1-T13258
+  title: "An operator turns the Inbox gardener to shadow, act or off with one recycle flag, and every later recycle carries that mode instead of silently dropping it"
+  repo: remudero
+  priority: 1.1
+  depends_on: []
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # changes the daemon recycle script; secrets keep their existing capture path and only one non-secret name becomes settable
+  band_meaning: blast-radius
+  origin: "operator-session#console-inbox-defects-2026-11-16"
+  plan_refs:
+    - W1-T9284
+    - W1-T13197
+    - W1-T13202
+    - W1-T1069
+  files:
+    - deploy/runtime-env-vars.sh
+    - deploy/recycle-container.sh
+    - deploy/host-update.sh
+    - test/deploy/an-operator-sets-the-inbox-gardener-mode-at-recycle.test.ts
+    - test/recycle-container.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "recycle-container.sh --set-env RMD_INBOX_GARDENER_MODE=shadow launches the new daemon with RMD_INBOX_GARDENER_MODE=shadow, and a later recycle without the flag carries shadow across from the live container"
+      proof: "grep: W1-T13258 criterion 1 in test/deploy/an-operator-sets-the-inbox-gardener-mode-at-recycle.test.ts"
+    - claim: "--set-env refuses, before any pause or pull, a name outside RMD_OPERATOR_SETTABLE_ENV_VARS (GH_TOKEN or any key name included) and a gardener mode other than off, shadow or act"
+      proof: "grep: W1-T13258 criterion 2 in test/deploy/an-operator-sets-the-inbox-gardener-mode-at-recycle.test.ts"
+    - claim: "invariant:settable-names-are-never-secrets — RMD_OPERATOR_SETTABLE_ENV_VARS is a subset of RMD_DAEMON_RUNTIME_ENV_VARS holding no name that matches KEY, TOKEN, SECRET or PRIVATE, and the three copies of the runtime name list still agree"
+      proof: "grep: W1-T13258 criterion 3 in test/deploy/an-operator-sets-the-inbox-gardener-mode-at-recycle.test.ts"
+  rationale: |
+    OBSERVED 2026-11-16: the fixes the Inbox gardener needed are merged (W1-T13197 #18888 retires asks whose task shipped; W1-T13202 #18883 admits today's 2,343-proposal registry). Craig approved reversible retirement of finished-task asks (13:33Z) and, through his standing "go with all recommendations" ruling, a shadow-mode start.
+    READ at origin/main: inboxGardenerMode (src/lib/inbox-retirement.ts) reads only RMD_INBOX_GARDENER_MODE from the daemon's process env, and registeredGardenEnabled gates the inbox garden on it. The live remudero-daemon container carries no such variable (docker inspect, names only). deploy/recycle-container.sh builds the new container's env only from values captured off the live container for names in RMD_DAEMON_RUNTIME_ENV_VARS (deploy/runtime-env-vars.sh), and that list does not name RMD_INBOX_GARDENER_MODE. So there is no supported way to turn the gardener on: a hand docker run would be dropped by the next recycle, and the W1-T1069 drift check would refuse a recycle of a container carrying an undeclared runtime name.
+  design: |
+    1. Add RMD_INBOX_GARDENER_MODE to RMD_DAEMON_RUNTIME_ENV_VARS (and both inline fallback copies in recycle-container.sh and host-update.sh), so a recycle captures and carries it like every other declared name.
+    2. Declare RMD_OPERATOR_SETTABLE_ENV_VARS=(RMD_INBOX_GARDENER_MODE) beside it: the only names an operator may set by flag.
+    3. recycle-container.sh accepts repeatable --set-env NAME=value. It refuses before any pause, login or pull when NAME is not in RMD_OPERATOR_SETTABLE_ENV_VARS or, for RMD_INBOX_GARDENER_MODE, the value is not off, shadow or act. An accepted value replaces the captured one in RUN_ENV_ARGS, and the script prints and ledgers name=value (never a captured value of any other name).
+    4. host-update.sh --print-daemon-run passes the new name through like the others.
+    INVARIANT settable-names-are-never-secrets: the settable list is a subset of the runtime list and holds no secret-shaped name; secrets keep the capture-only path.
+    NOT IN SCOPE: turning the gardener on in production (an operator step after this merges and its baked deploy lands); what the gardener retires.
+  falsifier: |
+    Drop the name from the runtime list and criterion 1's carry half must fail. Accept any name or any value and criterion 2 must fail. Add GH_TOKEN to the settable list and criterion 3 must fail. Restore and all pass.
+  note: |
+    Reserved with rmd next-task-id from the operator checkout (refs/rmd-id/W1-T13258). rmd test-place computed test/deploy/ for the new suite. test/recycle-container.test.ts already asserts the three list copies agree and is listed because its fixture env may need the new name.
