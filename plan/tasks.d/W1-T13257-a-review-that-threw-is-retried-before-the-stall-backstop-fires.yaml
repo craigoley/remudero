@@ -13,6 +13,8 @@
   files:
     - src/lib/sweep.ts
     - test/sweep/a-review-that-threw-is-retried-before-the-stall-backstop-fires.test.ts
+    - test/post-review-throw-backoff.test.ts
+    - test/ledger/check-test-test-post-review-throw-backoff-test-ts.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -36,4 +38,4 @@
   falsifier: |
     Restore the flat pending-ceiling wait and criteria 1 and 2 must fail (a 6-minute-old first throw is still suppressed). Drop the strike-cap check and criterion 3 must fail. Restore and all pass.
   note: |
-    Reserved with rmd next-task-id from the operator checkout (refs/rmd-id/W1-T13257). rmd test-place computed test/sweep/ for the new suite. Unblocking evidence: the same PR was re-admitted after a new head at 21:09Z.
+    Reserved with rmd next-task-id from the operator checkout (refs/rmd-id/W1-T13257). rmd test-place computed test/sweep/ for the new suite. test/post-review-throw-backoff.test.ts and its check:test wrapper pin the old 60-minute timing (a throw 30m ago stands down) and move to the new waits. Unblocking evidence: the same PR was re-admitted after a new head at 21:09Z.
