@@ -84,7 +84,8 @@ async function oneDaemonPoll(t: TestContext): Promise<Record<string, unknown>> {
 
 const sum = (counts: Record<string, number>) => Object.values(counts).reduce((a, b) => a + b, 0);
 
-test("W1-T13182 criterion 1, criterion 2, criterion 4: the core daemon.quota row counts its stamped reads by call site", async (t) => {
+/** 16 reads at site A then 8 at site B, then one daemon poll: its core row and the two sites. */
+async function twoSitesOnTheDaemonRow(t: TestContext) {
   const f = fixture(t);
   takeGhReadCadenceTally({}); // the previous poll
   let siteA = "";
@@ -92,29 +93,13 @@ test("W1-T13182 criterion 1, criterion 2, criterion 4: the core daemon.quota row
   for (let i = 0; i < 16; i++) { f.tick(); siteA = readAtA(f.deps); }
   for (let i = 0; i < 8; i++) { f.tick(); siteB = readAtB(f.deps); }
   const row = await oneDaemonPoll(t);
-  const counts = row.reads_by_call_site as Record<string, number>;
-  // Criterion 1: each stamped read adds 1 under the first frame outside the transport.
-  assert.deepEqual(counts, { [siteA]: 16, [siteB]: 8 });
-  assert.deepEqual(Object.keys(counts), [siteA, siteB], "largest first");
-  // Criterion 2: the counts sum to reads_stamped on the same row.
-  const stamped = row.reads_stamped as Record<string, number>;
-  assert.equal(sum(counts), sum(stamped));
-  assert.equal(sum(stamped), 24);
-  // Criterion 4: a repository-relative file and line, the shape github.pace.loop_wait rows use.
-  for (const site of Object.keys(counts)) {
-    assert.match(site, /^test\/github\/the-daemon-quota-row-counts-core-reads-by-call-site\.test\.ts:\d+$/);
-    assert.equal(isAbsolute(site), false);
-    assert.ok(site.startsWith(`${THIS_FILE}:`));
-  }
-  // Since the previous row: the next poll starts from nothing.
-  const next = takeGhReadCadenceTally({});
-  assert.deepEqual(next.reads_by_call_site, {});
-});
+  return { row, counts: row.reads_by_call_site as Record<string, number>, stamped: row.reads_stamped as Record<string, number>, siteA, siteB };
+}
 
-test("W1-T13182 criterion 1, criterion 2: the top 15 call sites are named and the rest sum as other", (t) => {
+/** Twenty call sites, each its own file under the repository; site i makes (i + 1) * 8 reads. */
+function twentySites(t: TestContext) {
   const f = fixture(t);
   takeGhReadCadenceTally({});
-  // Twenty call sites, each its own file under the repository; site i makes (i + 1) * 8 reads.
   const sites = Array.from({ length: 20 }, (_, i) => ({
     key: `src/lib/call-site-${i}.ts:1`,
     call: runInThisContext("(read, args, deps) => read(args, deps)", { filename: join(REPO_ROOT, "src", "lib", `call-site-${i}.ts`) }) as
@@ -122,14 +107,48 @@ test("W1-T13182 criterion 1, criterion 2: the top 15 call sites are named and th
     reads: (i + 1) * 8,
   }));
   for (const site of sites) for (let n = 0; n < site.reads; n++) { f.tick(); site.call(applyGhReadCadence, ARGS, f.deps); }
-  const tally = takeGhReadCadenceTally({});
-  const expected: Record<string, number> = {};
-  for (const site of [...sites].reverse().slice(0, 15)) expected[site.key] = site.reads;
-  expected.other = sites.slice(0, 5).reduce((a, s) => a + s.reads, 0);
-  assert.deepEqual(tally.reads_by_call_site, expected);
-  assert.deepEqual(Object.keys(tally.reads_by_call_site).slice(0, 15), [...sites].reverse().slice(0, 15).map((s) => s.key));
-  assert.equal(sum(tally.reads_by_call_site), sum(tally.reads_stamped));
-  assert.equal(sum(tally.reads_stamped), sites.reduce((a, s) => a + s.reads, 0));
+  return { sites, tally: takeGhReadCadenceTally({}) };
+}
+
+test("W1-T13182 criterion 1: each stamped read counts under its call site, the top 15 named and the rest as other", async (t) => {
+  await t.test("the core daemon.quota row counts the reads since the previous row by call site", async (st) => {
+    const { counts, siteA, siteB } = await twoSitesOnTheDaemonRow(st);
+    assert.deepEqual(counts, { [siteA]: 16, [siteB]: 8 });
+    assert.deepEqual(Object.keys(counts), [siteA, siteB], "largest first");
+    assert.deepEqual(takeGhReadCadenceTally({}).reads_by_call_site, {}, "the next poll starts from nothing");
+  });
+  await t.test("twenty sites: the 15 largest are named, largest first, and the 5 smallest sum as other", (st) => {
+    const { sites, tally } = twentySites(st);
+    const largest = [...sites].reverse().slice(0, 15);
+    const expected: Record<string, number> = Object.fromEntries(largest.map((site) => [site.key, site.reads]));
+    expected.other = sites.slice(0, 5).reduce((a, s) => a + s.reads, 0);
+    assert.deepEqual(tally.reads_by_call_site, expected);
+    assert.deepEqual(Object.keys(tally.reads_by_call_site).slice(0, 15), largest.map((s) => s.key));
+  });
+});
+
+test("W1-T13182 criterion 2: the sum of reads_by_call_site, with other, equals the sum of reads_stamped", async (t) => {
+  await t.test("on the core daemon.quota row", async (st) => {
+    const { counts, stamped } = await twoSitesOnTheDaemonRow(st);
+    assert.equal(sum(stamped), 24);
+    assert.equal(sum(counts), sum(stamped));
+  });
+  await t.test("with other, over twenty sites", (st) => {
+    const { sites, tally } = twentySites(st);
+    assert.ok((tally.reads_by_call_site.other ?? 0) > 0, "the tally has an other count");
+    assert.equal(sum(tally.reads_stamped), sites.reduce((a, s) => a + s.reads, 0));
+    assert.equal(sum(tally.reads_by_call_site), sum(tally.reads_stamped));
+  });
+});
+
+test("W1-T13182 criterion 4: a call site is a repository-relative file and line, as github.pace.loop_wait rows write it", async (t) => {
+  const { counts } = await twoSitesOnTheDaemonRow(t);
+  assert.equal(Object.keys(counts).length, 2);
+  for (const site of Object.keys(counts)) {
+    assert.match(site, /^test\/github\/the-daemon-quota-row-counts-core-reads-by-call-site\.test\.ts:\d+$/);
+    assert.equal(isAbsolute(site), false);
+    assert.ok(site.startsWith(`${THIS_FILE}:`));
+  }
 });
 
 test("W1-T13182 criterion 3: counting builds one capped stack for 8 reads, however deep the caller", (t) => {
