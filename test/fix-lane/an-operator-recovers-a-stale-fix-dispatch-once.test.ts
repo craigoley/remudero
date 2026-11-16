@@ -21,6 +21,7 @@ import {
 import { fixRoundClaimId } from "#src/lib/sweep.js";
 import { DECISION_RELEVANT_LEDGER_STEPS } from "#src/lib/ledger.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { prOwnerRecoverCommand, prOwnerRecoverPorts } from "#src/run-task.js";
 
 type Row = Record<string, unknown>;
 
@@ -773,4 +774,58 @@ test("W1-T12114 recovery preserves all work", async () => {
   assert.equal(version.status, 0);
   assert.match(version.stdout, /^git version/);
   assert.notEqual((await git(["rev-parse", "--verify", "no-such-ref-w1-t12114"], { env: { GIT_DIR: join(tmpdir(), "no-such-git-dir-w1-t12114") } })).status, 0);
+});
+
+test("W1-T12114 the registered command calls the recovery apply module", async () => {
+  const out: string[] = [];
+  const err: string[] = [];
+  const io = { write: (t: string) => void out.push(t), error: (t: string) => void err.push(t) };
+  for (const argv of [[], ["4851"], ["4851", "--authorize", "--apply"], ["4851", "--apply", "--bogus"]]) {
+    assert.equal(await prOwnerRecoverCommand(argv, io), 2, JSON.stringify(argv));
+  }
+  assert.match(err.join("\n"), /rmd pr-owner-recover <pr-number> --authorize/);
+  // The default config (the test preload's temp HOME): no ledger to read is never a release.
+  assert.equal(await prOwnerRecoverCommand(["4851", "--apply", "--authorization", "x"], io), 1);
+  assert.notEqual(JSON.parse(out.pop()!).outcome, "released");
+
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t12114-cli-`));
+  try {
+    const ledgerPath = join(root, "state", "ledger.ndjson");
+    mkdirSync(join(root, "state"), { recursive: true });
+    mkdirSync(join(root, "repos", "remudero"), { recursive: true });
+    writeFileSync(ledgerPath, `${JSON.stringify({ ts: iso(ROUND_START), step: "fix.dispatch", run_id: RUN, task_id: TASK, pr_number: PR })}\n{"step":"fix.dispatch" torn\n`);
+    const github = async (args: string[]) => {
+      if (args[1] === "user") return { login: "craig" };
+      if (String(args[1]).endsWith("/permission")) return { permission: "admin" };
+      return { number: PR, head: { sha: HEAD, ref: BRANCH }, base: { sha: BASE, repo: { full_name: REPO } } };
+    };
+    // The test runner is a fleet actor, so the command refuses to authorize through the real ports.
+    const code = await prOwnerRecoverCommand(["4851", "--authorize", "--repo", REPO, "--task", TASK, "--run", RUN, "--round", ROUND,
+      "--head", HEAD, "--base", BASE, "--branch", BRANCH, "--reason", "dead worker"], { ...io, config: () => ({ ledgerPath, root }), gh: github });
+    assert.equal(code, 1);
+    assert.match(JSON.parse(out.pop()!).reason, /^fleet_automation_actor:test$/);
+
+    const ports = prOwnerRecoverPorts(REPO, { ledgerPath, root, gh: github });
+    assert.equal(ports.repoDir, join(root, "repos", "remudero"));
+    assert.equal(ports.inflightDir, join(root, "state", "inflight"));
+    const read = await ports.readLedger();
+    assert.equal(read.ok, false, "a torn line makes the read incomplete");
+    assert.equal(read.rows.length, 1);
+    ports.appendLedger(PR_OWNER_RECOVERY_RECEIPT_STEP, { task_id: TASK, outcome: "held" });
+    assert.match(readFileSync(ledgerPath, "utf8"), /"step":"pr_owner\.recovery_receipt"/);
+    assert.deepEqual(await ports.readPr(REPO, PR), { repo: REPO, prNumber: PR, headSha: HEAD, baseSha: BASE, branch: BRANCH });
+    assert.equal(await ports.currentLogin(), "craig");
+    assert.equal(await ports.permission(REPO, "craig"), "admin");
+    assert.equal(ports.processActor(), "test");
+    assert.equal(ports.probeProcess({ pid: process.pid, run_id: "r", host: ports.hostname(), startedAt: iso(Date.now() + 60_000) }), "alive");
+    assert.ok(["none", "present", "unknown"].includes(ports.descendants(process.pid).state));
+    assert.ok(["clear", "occupied", "unknown"].includes(ports.cwdCensus(root).state));
+    assert.equal((await ports.git(["--version"])).status, 0);
+    assert.ok(Number.isFinite(Date.parse(ports.nowIso())));
+    assert.match(ports.nonce(), /^[0-9a-f]{32}$/);
+    assert.equal(ports.pid, process.pid);
+    assert.notEqual(prOwnerRecoverPorts("not-a-repo", { ledgerPath, root }).repoDir, join(root, "repos", ""));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

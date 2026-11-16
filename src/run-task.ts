@@ -4063,12 +4063,15 @@ const PR_OWNER_RECOVER_VALUE_FLAGS = ["--repo", "--task", "--run", "--round", "-
 
 /** W1-T12114: the production ports of `rmd pr-owner-recover` — the ledger union, the gh transport,
  *  the inflight claim directory, the /proc probes and git in the repository's own clone. */
-function prOwnerRecoverPorts(repo: string): RecoveryPorts {
-  const config = loadConfig();
-  const ledgerPath = ledgerPathFor(config);
+export function prOwnerRecoverPorts(
+  repo: string,
+  opts: { ledgerPath: string; root: string; gh?: (args: string[]) => Promise<unknown> },
+): RecoveryPorts {
+  const { ledgerPath } = opts;
+  const gh = opts.gh ?? ((args: string[]) => ghJsonAsync(args));
   const stateDir = dirname(ledgerPath);
   const name = splitRepo(repo)?.[1] ?? "";
-  const clone = join(config.root, "repos", name);
+  const clone = join(opts.root, "repos", name);
   const repoDir = name !== "" && existsSync(clone) ? clone : repoRoot;
   const invocation = `pr-owner-recover-${Date.now()}`;
   const steps = ["fix.dispatch", "fix.done", PR_OWNER_RECOVERY_AUTHORIZED_STEP, PR_OWNER_RECOVERY_RECEIPT_STEP];
@@ -4092,15 +4095,15 @@ function prOwnerRecoverPorts(repo: string): RecoveryPorts {
     },
     appendLedger: (step, row) => appendLedger(ledgerPath, { run_id: invocation, task_id: "", ...row, step }),
     readPr: async (target, prNumber) => {
-      const pr = (await ghJsonAsync(["api", `repos/${target}/pulls/${prNumber}`])) as {
+      const pr = (await gh(["api", `repos/${target}/pulls/${prNumber}`])) as {
         number?: number; head?: { sha?: string; ref?: string }; base?: { sha?: string; repo?: { full_name?: string } };
       };
       return { repo: String(pr.base?.repo?.full_name ?? ""), prNumber: Number(pr.number), headSha: String(pr.head?.sha ?? ""),
         baseSha: String(pr.base?.sha ?? ""), branch: String(pr.head?.ref ?? "") };
     },
-    currentLogin: async () => String(((await ghJsonAsync(["api", "user"])) as { login?: string }).login ?? ""),
+    currentLogin: async () => String(((await gh(["api", "user"])) as { login?: string }).login ?? ""),
     permission: async (target, login) =>
-      String(((await ghJsonAsync(["api", `repos/${target}/collaborators/${login}/permission`])) as { permission?: string }).permission ?? ""),
+      String(((await gh(["api", `repos/${target}/collaborators/${login}/permission`])) as { permission?: string }).permission ?? ""),
     processActor: () => deriveLedgerActor(),
     probeProcess: (holder) => defaultProbeProcess(holder, { hostname }),
     descendants: (pid) => defaultDescendants(pid),
@@ -4117,7 +4120,7 @@ function prOwnerRecoverPorts(repo: string): RecoveryPorts {
  *  verb, so it is deliberately absent from the read-only freshness and precondition exemptions. */
 export async function prOwnerRecoverCommand(
   rest: string[],
-  deps: { recovery?: (repo: string) => RecoveryDeps; write?: (text: string) => void; error?: (text: string) => void } = {},
+  deps: { config?: () => { ledgerPath: string; root: string }; gh?: (args: string[]) => Promise<unknown>; write?: (text: string) => void; error?: (text: string) => void } = {},
 ): Promise<number> {
   const error = deps.error ?? console.error;
   const badArg = unknownArgError("pr-owner-recover", rest.slice(1), PR_OWNER_RECOVER_VALUE_FLAGS, ["--authorize", "--apply"]);
@@ -4128,7 +4131,10 @@ export async function prOwnerRecoverCommand(
     return 2;
   }
   const flag = (name: string) => flagValue(rest, name) ?? "";
-  const recovery = (deps.recovery ?? ((repo: string) => ({ ports: prOwnerRecoverPorts(repo), claimKeyOf: fixBranchClaimKey, fixRoundClaimId })))(flag("--repo"));
+  const config = (deps.config ?? (() => ({ ledgerPath: ledgerPathFor(loadConfig()), root: loadConfig().root })))();
+  const recovery: RecoveryDeps = {
+    ports: prOwnerRecoverPorts(flag("--repo"), { ...config, ...(deps.gh ? { gh: deps.gh } : {}) }), claimKeyOf: fixBranchClaimKey, fixRoundClaimId,
+  };
   let result: RecoveryResult;
   if (mode === "apply") {
     result = await applyStaleFixDispatchRecovery({ authorizationId: flag("--authorization") }, recovery);
