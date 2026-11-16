@@ -6,7 +6,7 @@
 // skipped every server close registered after it, and the listening servers kept the child alive.
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
@@ -210,4 +210,76 @@ test("W1-T12415: a deleted fixture module's source map outside the tree is dropp
   const after = JSON.parse(readFileSync(join(raw, name), "utf8")) as { "source-map-cache": Record<string, unknown> };
   assert.deepEqual(Object.keys(after["source-map-cache"]), [kept], "the in-tree source map is kept");
   assert.deepEqual(readdirSync(`${raw}-missing-source`), [name], "the original report is kept beside the raw directory as evidence");
+});
+
+/**
+ * The coverage shard's own wrapper over a real `node --test` run whose one test loads `count` modules from a
+ * tree OUTSIDE the working directory, each through an inline source map naming a `.ts` that never exists, and
+ * then deletes that tree. Node cannot map those reports, so it writes no lcov and exits 1 although the test
+ * passed: the failure the wrapper repairs. An enclosing coverage run's directory passes through to the
+ * wrapper itself, so the lines it runs here are measured.
+ */
+function runDeletedFixtureShard(t: Parameters<typeof ownedFixtureDir>[0], count: number) {
+  const dir = realpathSync(ownedFixtureDir(t, "deleted-fixture-shard").dir);
+  const work = join(dir, "work");
+  const gone = join(dir, "gone");
+  mkdirSync(join(work, "raw"), { recursive: true });
+  writeFileSync(join(work, "source.mjs"), "export function covered() { return 1; }\nexport function uncovered() { return 2; }\n");
+  writeFileSync(join(work, "fixture.test.mjs"), [
+    'import { mkdirSync, rmSync, writeFileSync } from "node:fs";',
+    'import { join } from "node:path";',
+    'import { test } from "node:test";',
+    'import { pathToFileURL } from "node:url";',
+    `const gone = ${JSON.stringify(gone)};`,
+    'test("an all-pass suite that loads mapped modules from a tree it then deletes", async () => {',
+    "  mkdirSync(gone, { recursive: true });",
+    '  const { covered } = await import("./source.mjs");',
+    "  covered();",
+    `  for (let i = 0; i < ${count}; i += 1) {`,
+    "    const file = join(gone, `fixture-${i}.mjs`);",
+    '    const map = { version: 3, sources: [pathToFileURL(join(gone, `fixture-${i}.ts`)).href], names: [], mappings: "AAAA" };',
+    '    writeFileSync(file, `export const f = () => ${i};\\n//# sourceMappingURL=data:application/json;base64,${Buffer.from(JSON.stringify(map)).toString("base64")}\\n`);',
+    "    (await import(pathToFileURL(file).href)).f();",
+    "  }",
+    "  rmSync(gone, { recursive: true, force: true });",
+    "});",
+    "",
+  ].join("\n"));
+  const env: NodeJS.ProcessEnv = { ...process.env, GITHUB_STEP_SUMMARY: join(dir, "summary"), NODE_V8_COVERAGE: "" };
+  if (process.env.NODE_V8_COVERAGE) env.NODE_V8_COVERAGE = process.env.NODE_V8_COVERAGE;
+  delete env.NODE_TEST_CONTEXT;
+  delete env.TEST_RETRY;
+  delete env.TEST_RETRY_BUDGET_SECONDS;
+  delete env[MANIFEST_ENV];
+  const result = spawnSync(process.execPath, [join(REPO_ROOT, "scripts/test-with-retry.mjs"), "--coverage-first-pass", "raw", process.execPath,
+    "--enable-source-maps", "--experimental-test-coverage",
+    "--test-reporter=tap", "--test-reporter-destination=stderr",
+    "--test-reporter=lcov", "--test-reporter-destination=lcov.info", "--test", "fixture.test.mjs"],
+  { cwd: work, env, encoding: "utf8", timeout: 240_000, killSignal: "SIGKILL" });
+  assert.ifError(result.error);
+  return { work, dir, code: result.status, output: result.stdout + result.stderr };
+}
+
+test("W1-T12415: a shard whose only failure is a deleted fixture module's source map rebuilds its lcov and passes", (t) => {
+  const run = runDeletedFixtureShard(t, 1);
+  assert.match(run.output, /Could not report code coverage[^\n]*Cannot find '[^']*fixture-0\.ts'/, `the first pass could not report\n${run.output}`);
+  const line = /^FLAKE-RETRY-RECOVERED: dropped the source maps of deleted fixture module\(s\) outside the tree and rebuilt lcov — (.*)$/m.exec(run.output);
+  assert.ok(line, `the repair is announced\n${run.output}`);
+  assert.match(line[1]!, /fixture-0\.mjs$/, "and names the module it dropped");
+  assert.equal(run.code, 0, run.output);
+  assert.match(readFileSync(join(run.dir, "summary"), "utf8"), /FLAKE-RETRY-RECOVERED: dropped the source maps of deleted fixture module\(s\)/, "the step summary carries it too");
+  const lcov = readFileSync(join(run.work, "lcov.info"), "utf8");
+  assert.match(lcov, /^SF:source\.mjs$/m, "the rebuilt lcov reports the in-tree module");
+  assert.match(lcov, /^FNDA:1,covered$/m);
+  assert.doesNotMatch(lcov, /fixture-\d/, "and none of the deleted fixtures");
+  assert.equal(existsSync(join(run.work, "raw-missing-source")), true, "the original report is kept as evidence");
+});
+
+test("W1-T12415: a shard with more deleted fixture source maps than the repair has rounds keeps its failing verdict", (t) => {
+  const run = runDeletedFixtureShard(t, 45);
+  assert.match(run.output, /Could not report code coverage[^\n]*Cannot find '[^']*fixture-\d+\.ts'/, `the first pass could not report\n${run.output}`);
+  assert.match(run.output, /test-with-retry: coverage rebuild failed: [^\n]*Cannot find '[^']*fixture-\d+\.ts'/, "a rebuild that still names a missing source is read for the next one");
+  assert.doesNotMatch(run.output, /FLAKE-RETRY-RECOVERED/, "a repair that never rebuilt the lcov is not announced");
+  assert.notEqual(run.code, 0, "the run stays failed");
+  assert.match(run.output, /FLAKE-RETRY-FILES: no failed test file could be named/, "and its verdict stands, unrepeated");
 });
