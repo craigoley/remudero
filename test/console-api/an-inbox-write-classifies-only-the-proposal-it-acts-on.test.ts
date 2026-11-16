@@ -5,7 +5,6 @@
  * Each proposal carries its own evidence anchor, so the anchor grep seam counts classifications.
  */
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
@@ -14,8 +13,8 @@ import { fixedClock } from "#src/lib/clock.js";
 import { anchorFingerprint, type EvidenceAnchor } from "#src/lib/inbox.js";
 import { buildPanelGraphRoutes, type PanelGraphDeps } from "#src/lib/panel-graph.js";
 import { createService } from "#src/lib/service.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { fakeGitHub } from "#test/helpers/fake-github.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 type TestCtx = { after: (fn: () => void) => void };
 const T0 = Date.parse("2026-11-16T15:00:00.000Z");
@@ -24,7 +23,8 @@ const ids = Array.from({ length: 40 }, (_, i) => `verify-human:W9-T${i + 1}`);
 const AGE = "board-review:stale:PR-7";
 
 function world(t: TestCtx): { deps: PanelGraphDeps; grepped: string[] } {
-  const root = makeTempDir("rmd-inbox-classify-one");
+  const repo = gitRepo({ seedCommit: false, kind: "inbox-classify-one" });
+  const root = repo.dir;
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const stateDir = join(root, "state");
   mkdirSync(stateDir, { recursive: true });
@@ -41,10 +41,8 @@ function world(t: TestCtx): { deps: PanelGraphDeps; grepped: string[] } {
   // A release draft per proposal: classification then greps the proposal's own anchor, which the seam counts.
   writeFileSync(join(stateDir, "inbox-drafts.json"), JSON.stringify(Object.fromEntries(proposals.map((p) =>
     [p.id, { releaseTaskId: p.id.split(":").at(-1), anchorFingerprint: anchorFingerprint(p.evidenceAnchors) }]))));
-  const git = (...args: string[]) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false", ...args], { cwd: root });
-  git("init", "-q", "-b", "main");
-  git("add", "plan/tasks.yaml");
-  git("commit", "-q", "-m", "plan");
+  repo.git("add", "plan/tasks.yaml");
+  repo.git("commit", "-q", "-m", "plan");
   const grepped: string[] = [];
   const deps: PanelGraphDeps = {
     root, inboxRoot: root, planPath, ledgerPath,
