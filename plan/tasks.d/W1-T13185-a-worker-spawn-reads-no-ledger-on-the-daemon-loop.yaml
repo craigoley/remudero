@@ -1,0 +1,94 @@
+- id: W1-T13185
+  title: "A worker spawn reads no ledger on the daemon loop: the inbox draft lane's routing stats come from a durable digest of the draft rows, loaded off the loop, so spawnWorkerImpl never parses the whole ledger union synchronously (one spawn stalled the loop for 143 s on 2026-11-16)"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the stats choose which model drafts each inbox proposal; a read that drops or doubles rows moves draft traffic, and the torn-row refusal must hold
+  origin: "operator-session#loop-lag-2026-11-16"
+  plan_refs:
+    - W1-T12753
+    - W1-T13155
+  files:
+    - src/lib/draft-routing.ts
+    - src/lib/worker.ts
+    - src/run-task.ts
+    - test/a-worker-spawn-reads-no-ledger-on-the-daemon-loop.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "An inbox draft spawn over a state dir with gzip archives that hold draft.routing.outcome rows gets the same DraftStats as today's readDraftStats over the same files, and a setImmediate turn counter advances while the stats are read: the read is off the loop"
+      proof: "grep: W1-T13185 criterion 1 in test/a-worker-spawn-reads-no-ledger-on-the-daemon-loop.test.ts"
+    - claim: "A restarted process reads the draft stats from durable digests: after a first reader writes its digests, each archive is overwritten with same-length garbage and its mtime restored, and a fresh reader still returns the archived rows' stats"
+      proof: "grep: W1-T13185 criterion 2 in test/a-worker-spawn-reads-no-ledger-on-the-daemon-loop.test.ts"
+    - claim: "A second draft batch in the same process reads no archive again: its pass reads only the live file from where the previous pass stopped, and the outcomes the first batch logged are counted once"
+      proof: "grep: W1-T13185 criterion 3 in test/a-worker-spawn-reads-no-ledger-on-the-daemon-loop.test.ts"
+    - claim: "invariant:no-sync-union-on-spawn — a worker spawn with draftRouting, with or without a batch session, makes no synchronous ledger-union read (no readLedgerUnionRecordsSync call and no synchronous read of a rotation file during spawnWorkerImpl)"
+      kind: guard
+      proof: "grep: W1-T13185 criterion 4 in test/a-worker-spawn-reads-no-ledger-on-the-daemon-loop.test.ts"
+    - claim: "invariant:torn-draft-row-refuses — a torn line that could be one of the draft steps, in an archive or the live file, still makes the stats read fail, the spawn ledgers draft.routing.error with reason stats-read-failed-row-order, and it keeps the unrouted model order, as today; a torn line that names another step does not"
+      kind: guard
+      proof: "grep: W1-T13185 criterion 5 in test/a-worker-spawn-reads-no-ledger-on-the-daemon-loop.test.ts"
+  rationale: |
+    WHY: starting an inbox draft worker parses the whole ledger union synchronously on the daemon loop. While
+    it parses, the daemon does nothing else: no ticks, no landings, no heartbeats.
+    MEASURED, core ledger (~/rmd-state2/state, 2026-11-16 archives and live file):
+    - A daemon.loop_stall_profile row at 14:45:22Z: lag_ms 143,483. Top inclusive frames: spawnWorkerImpl
+      110,881 ms > readDraftStats 110,426 ms > readLedgerUnionRecordsSync 110,351 ms. Almost all of the
+      spawn's time is the stats read.
+    - 4 stall rows on 11-16 have readDraftStats on their stack: 413 s in total, 143 s the largest.
+    - 11-14 to 11-15, W1-T12753's measurement: readDraftStats 1,390 s of inclusive stall. W1-T12753 (merged)
+      listed readDraftStats as NOT IN SCOPE, so nothing owns it.
+    READ at origin/main ef8b74910:
+    - src/lib/worker.ts:3141, in spawnWorkerImpl (:2486): when args.draftRouting is set, it calls
+      args.draftRouting.readStats, or else readDraftStats(join(config.root, "state"), lane), synchronously.
+    - src/lib/draft-routing.ts:204 readDraftStats calls readLedgerUnionRecordsSync (src/lib/ledger-union.ts:1698)
+      over the whole state dir, every rotation oldest-first plus the live file, with refuseIncomplete and a
+      step filter of the 4 draft steps (DRAFT_STATS_STEPS, :195: draft.routing.outcome, inbox.draft_synthesized,
+      inbox.drafted, inbox.draft_error). It must scan every line to find those rows, then folds them with
+      draftStatsFromRows into per-deployment attempts, clean, contract failures and cost, which
+      chooseDraftDeployment turns into Thompson-sampled clean-per-dollar choices. It reads the whole history
+      because the posteriors have no time window: every draft outcome since the lane began counts.
+    - src/lib/draft-routing.ts:58 createDraftStatsSession reads once per batch, lazily, on the first
+      readStats call, which is inside the first spawn. src/run-task.ts:37170 draftProposalBatch makes a new
+      session for each batch, so every batch that drafts pays one full synchronous read on the loop.
+    - The pattern already in use for the same need: src/lib/sweep.ts:30019 createEscalationTriageHistoryReader
+      (createLedgerRotationMemo with a durable digest, load off the loop, createIncrementalLedgerUnion), with
+      per-process slices such as RETRO_TRIGGER_RUN_SLICE at src/run-task.ts:21224 (W1-T10046). W1-T11178 is
+      the same fix for the measurement cadence child.
+    NOT COVERED: W1-T13155 (filed, #18858) is the garden due checks; W1-T13183 (filed, #18874) is triage and id
+    reservation. Swept origin/main plan/tasks.d and the diffs of the 12 open filing PRs (2026-11-16) for
+    readDraftStats, draft-routing and createDraftStatsSession: no other filing. W1-T11073 (queued) changes which
+    route is skipped, not how the stats are read.
+  design: |
+    INVARIANT no-sync-union-on-spawn: spawnWorkerImpl never calls readLedgerUnionRecordsSync or reads a rotation file synchronously.
+    INVARIANT torn-draft-row-refuses: a torn line that could be a draft row still fails the stats read, as at origin/main.
+    1. draft-routing.ts gets a DRAFT_STATS_SLICE ({ holder: "draft-routing.draft-stats", steps DRAFT_STATS_STEPS,
+       version "1" }) and one module-level createEscalationTriageHistoryReader over it, built on first use, the
+       same shape as retroTriggerRunHistory in run-task.ts. readDraftStats becomes async: it awaits the reader,
+       applies today's refusal (not ok, or a torn line where tornLineCouldBeStep is true) and returns
+       draftStatsFromRows(rows, lane). The readdirSync permission check moves to an awaited readdir.
+       If the reader cannot import from draft-routing.ts without a cycle, put the slice next to the others in
+       run-task.ts and inject the reader; the builder picks, and says which in the PR.
+    2. createDraftStatsSession gets an awaited load(); draftProposalBatch awaits it before runDraftRung, so
+       readStats returns the loaded snapshot with no read. A load failure is kept and thrown by readStats, as today.
+    3. worker.ts:3141 awaits the stats (readStats may return a value or a promise). With no readStats, it awaits
+       the async readDraftStats. A failure ledgers draft.routing.error exactly as today.
+    4. No change to draftStatsFromRows, chooseDraftDeployment, the steps, or what is ledgered per outcome.
+       No new env var, bound or window. The new holder adds one digest per rotation, pruned as the others are.
+    5. TESTS in test/a-worker-spawn-reads-no-ledger-on-the-daemon-loop.test.ts use a fixture state dir with real
+       gzip archives and the real union, as test/the-retro-and-auto-triage-reads-come-from-durable-digests.test.ts
+       does. The parity half of criterion 1 compares against the stats computed from the fixture's own rows in
+       the test. Criterion 4 counts synchronous reads through the reader's fs deps or a spy on the union module.
+  falsifier: |
+    At origin/main the spawn calls readDraftStats synchronously: the setImmediate counter reads 0 turns during the
+    read (criterion 1) and the sync-read count is not 0 (criterion 4). A fresh process over the garbage archives
+    gets a refused read, so criterion 2 fails. Each new batch makes a new session that rereads every rotation, so
+    criterion 3 fails. Drop the torn-line check in the async read: criterion 5 fails.
+  note: |
+    Id reserved for run-unfiled-1794840546000 with ~/rmd-work/bin/reserve-id.sh.
+    Proof that counts in production: no daemon.loop_stall_profile row with readDraftStats or
+    readLedgerUnionRecordsSync under spawnWorkerImpl in its top inclusive frames, over a day with inbox drafts.
