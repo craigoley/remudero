@@ -18,7 +18,7 @@
     - src/run-task.ts
     - src/lib/dep-review.ts
     - test/ci/a-dependency-pull-request-is-judged-by-its-own-repositorys-required-checks.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "For a pull request in a managed repository, the dependency lane's required set is branch protection's contexts united with the REQUIRED list of THAT repository's own ci-gate workflow, read from that repository's checkout, and never the REQUIRED list of the repository the daemon's code runs from"
