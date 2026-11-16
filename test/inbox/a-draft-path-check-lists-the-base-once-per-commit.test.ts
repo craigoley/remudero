@@ -5,19 +5,17 @@
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { checkoutRepoFacts } from "#src/lib/inbox.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
-const git = (cwd: string, ...args: string[]): string =>
-  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false", ...args], { cwd, encoding: "utf8" });
+const git = (cwd: string, ...args: string[]): string => execFileSync("git", ["-C", cwd, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false", ...args], { encoding: "utf8" });
 
 function repo(t: { after: (fn: () => void) => void }): string {
-  const root = mkdtempSync(join(tmpdir(), "rmd-base-listing-"));
+  const root = gitRepo({ seedCommit: false, kind: "base-listing" }).dir;
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  git(root, "init", "-q", "-b", "main");
   mkdirSync(join(root, "src", "lib"), { recursive: true });
   writeFileSync(join(root, "src", "lib", "a.ts"), "export const a = 1;\n");
   writeFileSync(join(root, "README.md"), "x\n");
