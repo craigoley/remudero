@@ -254,9 +254,12 @@ test("W1-T13146 criterion 3: a not-measured census line names the suite, its ela
   const fresh = drive({ files: [SLOW], times: [0, backstopMs() + 46], outcome: stopped, suiteHistory: { path, policy: POLICY, runtime: RUNTIME } });
   assert.match(fresh.error!.message, new RegExp(
     ` - ${SLOW.replaceAll(".", "\\.")} under the fixed backstop \\(no recorded run\\) - time bound: ${backstopMs() + 46} ms elapsed of the ${backstopMs()} ms bound, 1 suite\\(s\\), 1-minute load 5\\.90 at start and 5\\.90 at end$`));
-  seed(path, [SLOW, OTHER], [179_000, 181_000, 183_000]);
-  const boundMs = boundOf(path, [SLOW, OTHER]).ms;
-  const learned = drive({ files: [SLOW, OTHER], times: [0, boundMs + 50], outcome: stopped, suiteHistory: { path, policy: POLICY, runtime: RUNTIME } });
+  // seed() rewrites the whole store, so the joined child's history lives in a store of its own and the overrun `fresh`
+  // recorded for SLOW stays in `path`.
+  const joinedPath = store(t);
+  seed(joinedPath, [SLOW, OTHER], [179_000, 181_000, 183_000]);
+  const boundMs = boundOf(joinedPath, [SLOW, OTHER]).ms;
+  const learned = drive({ files: [SLOW, OTHER], times: [0, boundMs + 50], outcome: stopped, suiteHistory: { path: joinedPath, policy: POLICY, runtime: RUNTIME } });
   assert.match(learned.error!.message, new RegExp(
     ` - ${SLOW.replaceAll(".", "\\.")}, ${OTHER.replaceAll(".", "\\.")} under a bound from its history \\(3 recorded run\\(s\\)\\) - time bound: ${boundMs + 50} ms elapsed of the ${boundMs} ms bound, 2 suite\\(s\\), `));
   assert.ok(!learned.error!.message.includes("backstop"), "a history bound is not called the backstop");
