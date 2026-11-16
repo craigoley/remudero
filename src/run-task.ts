@@ -1325,6 +1325,7 @@ import { routingAbCommand } from "./lib/routing-experiments.js";
 import { attributeAttemptOutcome } from "./lib/attempt-outcome-attribution.js";
 import { recordRoutingExperimentResults } from "./lib/routing-experiment-result.js";
 import { askDecisionModel, decisionsCommand } from "./lib/decision-model.js";
+import { reviewTriageCandidates, triagePullRequest } from "./lib/review-triage.js";
 import {
   PROGRESS_WATCHDOG_READ_STEPS,
   captureDiagnosticsBundle,
@@ -45653,6 +45654,8 @@ function reviewCommandHost(): ReviewCommandHost {
     reviewerClockBoundMs: (reviewerClockBoundMs) => reviewerClockBoundMs ?? loadDefaultPolicy().values.workerAbandon,
     reviewSubjectGit: (dir, argv) =>
       execFileSync("git", ["-C", dir, ...argv], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim(),
+    // W1-T12419: tests never send the paid triage request (the W1-T5939 rule for outside reads).
+    triagePullRequest: isTestRunner() ? undefined : (config, pr) => triagePullRequest(config, pr, {}, reviewTriageCandidates(repoRoot)),
   };
 }
 function sweepCommandHost<P extends Pick<SweepCommandHost, "freshTreeGit" | "commandViews">>(ports: P): SweepCommandHost & P;
