@@ -1,0 +1,82 @@
+- id: W1-T13183
+  title: "Triage, the task-id reservation path, repair feedback capture and the fold-debt pull run their git and gh reads off the daemon loop"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the task-id reservation is what keeps two lanes from minting one id; moving it must keep its ordering and its lock
+  origin: "operator-session#measurements-2026-11-16"
+  plan_refs:
+    - W1-T12057
+    - W1-T12954
+    - W1-T13155
+    - W1-T100
+  files:
+    - src/run-task.ts
+    - src/lib/task-id-reservation.ts
+    - src/lib/task-id-release.ts
+    - src/lib/fold-debt-pull.ts
+    - src/lib/sweep.ts
+    - test/triage-and-task-id-reservation-run-their-git-and-gh-off-the-daemon-loop.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Triage's remote id reservation (gatedRemoteRefReserver, reserveTaskIdRemote, reserveTaskIdBlockRemote) and releaseTaskIdReservation run their git through hostWorktreeGitAsync when called from the daemon process, and a daemon-loop triage makes 0 calls to hostWorktreeGitResult"
+      proof: "grep: W1-T13183 criterion 1 in test/triage-and-task-id-reservation-run-their-git-and-gh-off-the-daemon-loop.test.ts"
+    - claim: "The repair feedback capture under runSweep (captureRepairFeedbackWithPriorVerdict) and pullFoldDebtEntries read GitHub through the async gh helpers (ghJsonAsync, ghTextAsync, paceGhEntryAsync), not ghExec or ghJson, on the daemon loop"
+      proof: "grep: W1-T13183 criterion 2 in test/triage-and-task-id-reservation-run-their-git-and-gh-off-the-daemon-loop.test.ts"
+    - claim: "invariant:no-sync-spawn-on-the-loop-for-these-callers — a guard test runs each of these callers under the daemon loop host with child_process's sync APIs replaced by a recorder, and fails if any of them reaches execFileSync, spawnSync or execSync"
+      kind: guard
+      proof: "grep: W1-T13183 criterion 3 in test/triage-and-task-id-reservation-run-their-git-and-gh-off-the-daemon-loop.test.ts"
+    - claim: "invariant:one-id-one-owner — two concurrent async reservations for the same next id still end with one holder and one refusal, as the sync path does today"
+      kind: guard
+      proof: "grep: W1-T13183 criterion 4 in test/triage-and-task-id-reservation-run-their-git-and-gh-off-the-daemon-loop.test.ts"
+  rationale: |
+    WHY: these callers block the core daemon's loop with synchronous child processes. The loop is the one
+    thread that dispatches, sweeps and answers health checks.
+    MEASURED, core ledger daemon.loop_stall_profile rows, 2026-11-16 09:45:39Z to 14:34:55Z (933 rows, 4.8 h),
+    sync_spawn_by_caller summed by the helper frame:
+    - ghExec 69 calls, 158.3 s; ghJson 267 calls, 145.5 s; hostWorktreeGitResult 384 calls, 126.7 s.
+    - Rows where hostWorktreeGitResult spent its time name in top_inclusive: triageCommandLocked 99.7 s,
+      reserveTaskIdBlockRemote 34.7 s, reserveTaskIdRemote 32.0 s, withIdReservationLogging 25.2 s,
+      releaseTaskIdReservation and releaseUnfiledReservations 6.7 s each.
+    - For ghExec: runSweep 97.8 s, listFeedback and captureRepairFeedbackWithPriorVerdict 65.4 s, runStepsSync
+      31.4 s. For ghJson: runSweep 52.1 s, pullFoldDebtEntries 24.3 s, isDispatchEligible 18.4 s,
+      captureRepairFeedbackWithPriorVerdict 17.0 s, gardenPassDue 15.1 s.
+    (top_inclusive lists a row's heaviest frames, so a frame's figure is the helper's time in rows that
+    hold that frame, not an exact split.)
+    READ at origin/main ef8b74910:
+    - src/run-task.ts:35873 triage builds gatedRemoteRefReserver({ run: gitRunAdapter((args) =>
+      hostWorktreeGitResult(entryRoot, args)) }); src/run-task.ts:16748 hostWorktreeGitResult wraps the
+      sync hostWorktreeGit (src/lib/worktree-git.ts:468). The async twin is hostWorktreeGitAsync (:475).
+    - src/lib/task-id-reservation.ts:878 gatedRemoteRefReserver, :929 reserveTaskIdRemote, :1039
+      reserveTaskIdBlockRemote and src/lib/task-id-release.ts:58 releaseTaskIdReservation take a sync run.
+    - src/run-task.ts:32949 captureRepairFeedbackWithPriorVerdict and src/lib/fold-debt-pull.ts:125
+      pullFoldDebtEntries (readJson from src/lib/sweep.ts:5735, paceGhEntry over ghJsonForBuild) are sync.
+    - src/lib/github-transport.ts:417 ghJsonAsync, :495 ghTextAsync, :932 paceGhEntryAsync exist.
+    Not covered elsewhere: W1-T13155 (open PR #18858) moves only the review-replay due check
+    (gardenPassDue); no open PR or queued task names these callers. W1-T100 shares src/run-task.ts and
+    src/lib/sweep.ts only because both files are large; it routes blocked_ci to the CI-log fix path and
+    moves no git or gh call off the loop.
+  design: |
+    INVARIANT no-sync-spawn-on-the-loop-for-these-callers: none of these callers reaches a sync child_process API on the daemon loop.
+    INVARIANT one-id-one-owner: the async reservation keeps the same ref-create ordering and lock as the sync one.
+    1. task-id-reservation.ts and task-id-release.ts gain async variants that take an async run; the sync
+       versions stay for CLI callers off the loop. The daemon's triage path uses the async ones through
+       hostWorktreeGitAsync.
+    2. captureRepairFeedbackWithPriorVerdict and pullFoldDebtEntries take async readers; sweep.ts passes
+       paceGhEntryAsync over ghJsonAsync.
+    3. isDispatchEligible's merged read and runStepsSync are not moved here; the test records what is left
+       so a follow-up can be filed from it.
+    4. The guard test replaces node:child_process sync APIs with a recorder inside the daemon loop host
+       (ghLoopHost) and drives each caller.
+  falsifier: |
+    Keep hostWorktreeGitResult in triage: criterion 1 fails. Keep ghJson in pullFoldDebtEntries: criteria 2
+    and 3 fail. Drop the reservation lock in the async path: criterion 4 fails.
+  note: |
+    Id reserved for run-unfiled-1794838967000 with ~/rmd-work/bin/reserve-id.sh.
+    Proof that counts in production: daemon.loop_stall_profile rows with no sync_spawn_by_caller entry for
+    hostWorktreeGitResult and a lower ghExec and ghJson total over a day.

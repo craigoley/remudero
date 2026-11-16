@@ -11,7 +11,7 @@ import { systemClock, type Clock } from "./clock.js";
 import { readLedgerLines } from "./status.js";
 import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 import { StringDecoder } from "node:string_decoder";
-import { baseProbeSetupFailure, baseReproductionFiles, boundedBaseProbeReason, type BaseProbeFile, type BaseProbeResult } from "./base-reproduction.js";
+import { baseProbeSetupFailure, baseReproductionFiles, boundedBaseProbeReason, type BaseProbeFile, type BaseProbeOutcome, type BaseProbeResult } from "./base-reproduction.js";
 import { selectAffectedSuites, type AffectedSuitesInput } from "./affected-suites.js";
 import { judgeFixProgress, type FixProgressInput, type FixProgressJudge, type FixProgressVerdict } from "./fix-progress-judge.js";
 import {
@@ -244,6 +244,10 @@ export const MAIN_REPAIR_STALL_MS = 30 * 60_000;
 /** W1-T13134 — PRIMARY CONTROL: a record whose fix runs were lost at daemon restarts this many times
  *  is not dispatched again; its next stall goes to the revert path. */
 export const MAIN_REPAIR_LOST_RUN_LIMIT = 2;
+
+/** W1-T13135 — PRIMARY CONTROL: how old a located culprit may be and still be reused for the same red
+ *  when main's push run history window holds no green run to bound the red streak again. */
+export const MAIN_REPAIR_REUSE_WINDOW_MS = 24 * 60 * 60_000;
 
 /** W1-T6403 — what the priority fix PR's worker is told: the failing checks, their failing test
  *  titles and log excerpt, and the merge that turned main red. */
@@ -494,6 +498,49 @@ function localProbeVerdict(files: readonly string[], outcomes: BaseProbeResult):
   if (files.some((file) => byFile.get(file) === "fails")) return "red";
   return files.length > 0 && outcomes.reason === undefined && outcomes.setup_error === undefined &&
     files.every((file) => byFile.get(file) === "passes" || byFile.get(file) === "absent") ? "green" : "inconclusive";
+}
+
+/** W1-T13136 — the local culprit proof, judged per failing test file. invariant:same-file-contrast: proven
+ *  only when one of `files` is red at the culprit (its local run fails it, or, with no local fail, a CI
+ *  probe run of the culprit is red on this same red) and passes at the first parent (a local pass or
+ *  absence, or a green CI probe run). invariant:timeout-is-not-a-fail: unrunnable or absent is never red.
+ *  The runs may name other files besides `files`; those decide nothing. */
+function sameFileContrast(
+  bisected: { parentSha: string; failingChecks: readonly string[]; localRuns?: ReadonlyArray<Record<string, unknown>> },
+  culprit: string,
+  files: readonly string[],
+  red: MainRedSignature,
+): { proven: true } | { proven: false; reason: string } {
+  const runs = bisected.localRuns ?? [];
+  const local = (sha: string) => runs.filter((run) => run.sha === sha && run.method === "local-test");
+  const ci = (sha: string) => runs.filter((run) => run.sha === sha && run.method !== "local-test");
+  const outcomeOf = (sha: string, file: string): BaseProbeOutcome | undefined => {
+    const seen = local(sha).flatMap((run) => Array.isArray(run.outcomes) ? (run.outcomes as BaseProbeResult) : [])
+      .filter((outcome) => outcome?.file === file).map((outcome) => outcome.outcome);
+    return seen.includes("fails") ? "fails" : seen.includes("unrunnable") ? "unrunnable" : seen[0];
+  };
+  const localFails = files.some((file) => outcomeOf(culprit, file) === "fails");
+  const ciRed = ci(culprit).some((run) => run.verdict === "red");
+  const ciRedMatches = ciRed && bisected.failingChecks.length > 0 &&
+    mainRedSignaturesMatch(mainRedSignature(bisected.failingChecks, undefined), red);
+  const ciGreenParent = ci(bisected.parentSha).some((run) => run.verdict === "green");
+  const sides = files.map((file) => {
+    const atCulprit = outcomeOf(culprit, file);
+    const atParent = outcomeOf(bisected.parentSha, file);
+    const culpritRed = atCulprit === "fails" || (!localFails && ciRedMatches);
+    const parentPass = atParent === "passes" || atParent === "absent" || (atParent === undefined && ciGreenParent);
+    const ownRun = atCulprit === undefined ? "no run" : `local ${atCulprit}`;
+    const culpritSays = atCulprit === "fails" || !ciRed || localFails ? ownRun
+      : `${atCulprit === undefined ? "" : `${ownRun}, `}CI probe red on ${bisected.failingChecks.join(", ") || "no named check"}${ciRedMatches ? "" : ` (not this repair's ${describeMainRed(red)})`}`;
+    const parentSays = atParent !== undefined ? `local ${atParent}` : ciGreenParent ? "CI probe green" : "no run";
+    return { file, contrast: culpritRed && parentPass, said: `${file}: culprit ${culpritSays}, first parent ${parentSays}` };
+  });
+  if (sides.some((side) => side.contrast)) return { proven: true };
+  return {
+    proven: false,
+    reason: `local culprit proof needs one failing test file red at the culprit \`${culprit}\` and passing at its first parent \`${bisected.parentSha}\`: ` +
+      (sides.length > 0 ? sides.map((side) => side.said).join("; ") : "no failing test file was named"),
+  };
 }
 
 /** Probes in flight: one at a time while any CI job in the repo waits for a runner; otherwise as many
@@ -829,6 +876,35 @@ export function mainRepairRecordsFromLedger(lines: readonly Record<string, unkno
     else if (line.step === "main.repair.resolved") record.resolved = true;
   }
   return records;
+}
+
+/** W1-T13135 — the newest `main.repair.located` row of `red` whose record was resolved by "other" (no fix and
+ *  no revert merged), located within {@link MAIN_REPAIR_REUSE_WINDOW_MS} of `nowMs`. Only a location of the
+ *  same red is reused, so a red the run history can no longer bound keeps its culprit. */
+function reusableMainRepairLocation(
+  lines: readonly Record<string, unknown>[],
+  red: MainRedSignature,
+  nowMs: number,
+): { sha: string; pr?: number; ts: string } | undefined {
+  const latest = new Map<string, { row?: Record<string, unknown>; resolvedBy?: string }>();
+  for (const line of lines) {
+    const sha = line.offending_sha;
+    if (typeof sha !== "string") continue;
+    const record = latest.get(sha);
+    const open = record !== undefined && record.resolvedBy === undefined;
+    if (line.step === "main.repair.located" && !open) latest.set(sha, { row: line });
+    else if (line.step === MAIN_INHERITED_RED_STEP && line.outcome === "opened" && !open) latest.set(sha, {});
+    else if (line.step === "main.repair.resolved" && open) record.resolvedBy = String(line.by ?? "");
+  }
+  let reuse: { sha: string; pr?: number; ts: string; atMs: number } | undefined;
+  for (const [sha, { row, resolvedBy }] of latest) {
+    const rowRed = row ? mainRedOfRow(row) : undefined;
+    const atMs = typeof row?.ts === "string" ? Date.parse(row.ts) : Number.NaN;
+    if (!row || resolvedBy !== "other" || !rowRed || !mainRedSignaturesMatch(rowRed, red)) continue;
+    if (!Number.isFinite(atMs) || nowMs - atMs > MAIN_REPAIR_REUSE_WINDOW_MS || (reuse && reuse.atMs >= atMs)) continue;
+    reuse = { sha, ...(typeof row.offending_pr === "number" ? { pr: row.offending_pr } : {}), ts: String(row.ts), atMs };
+  }
+  return reuse && { sha: reuse.sha, ...(reuse.pr !== undefined ? { pr: reuse.pr } : {}), ts: reuse.ts };
 }
 
 function inheritedRecordOf(sha: string, line: Record<string, unknown>): MainRepairRecord {
@@ -1762,17 +1838,8 @@ export function buildMainHealthRung(
     const sha = record.offendingSha;
     if (record.bisected) {
       if (record.bisected.localRuns) {
-        const files = testFiles.length > 0 ? testFiles : record.bisected.testFiles;
-        const matches = (commit: string, verdict: MainProbeVerdict): boolean => {
-          const run = record.bisected!.localRuns!.find((probe) => probe.sha === commit);
-          const named = Array.isArray(run?.files) ? run.files : [];
-          return files.length > 0 && run?.method === "local-test" && run.verdict === verdict &&
-            named.length === files.length && files.every((file) => named.includes(file)) &&
-            Array.isArray(run.outcomes) && localProbeVerdict(files, run.outcomes as BaseProbeResult) === verdict;
-        };
-        if (!matches(sha, "red") || !matches(record.bisected.parentSha, "green")) {
-          return { proven: false, reason: "local culprit proof needs a failing culprit and a passing first parent on the same failing test files" };
-        }
+        const contrast = sameFileContrast(record.bisected, sha, [...new Set([...testFiles, ...record.bisected.testFiles])], red);
+        if (!contrast.proven) return { proven: false, reason: contrast.reason };
       }
       // Located by probing CI on the commits whose own push run was cancelled: the probe runs, recorded
       // on the located row, are the proof, because main's push run history holds none for them.
@@ -2247,6 +2314,14 @@ export function buildMainHealthRung(
         deps.log("main.repair.bisection_pending", { head_sha: sha });
         return false;
       }
+      // W1-T13135: a red longer than the run history window keeps the culprit located for it earlier.
+      const reuse = observation.runHistoryWindowExhausted ? reusableMainRepairLocation(lines, red, atMs) : undefined;
+      if (reuse) {
+        const reason =
+          `${observation.reason}. Main's push run history window holds no green run to bound the red streak, so ` +
+          `\`${reuse.sha}\`, located for this same red at ${reuse.ts}, is named again`;
+        return locate(lane, ctx, { sha: reuse.sha, pr: reuse.pr, method: "reused-located", fields: { reused_from: reuse.ts } }, reason);
+      }
       repairRow("main.repair.unlocated", {
         head_sha: sha,
         failing_checks: observation.failingChecks,
@@ -2274,6 +2349,15 @@ export function buildMainHealthRung(
       ? `${observation.reason}. The commits after the last green \`${first.afterGreenSha}\` could not be attributed (no CI probe could ` +
         `run), so \`${located.sha}\` is named only as the first completed red: repair the failing tests, whichever merge broke them`
       : observation.reason;
+    return locate(lane, ctx, located, reason);
+  };
+  /** Write `main.repair.located` for the named culprit and dispatch its fix. */
+  const locate = async (
+    lane: MainRepairLane,
+    { observation, sha, branch, failures, red }: RepairContext,
+    located: { sha: string; pr?: number; method: string; fields: Record<string, unknown> },
+    reason: string,
+  ): Promise<boolean> => {
     const request = await fixRequestFor(observation, sha, branch, located.sha, located.pr, failures, reason);
     repairRow("main.repair.located", {
       head_sha: sha,

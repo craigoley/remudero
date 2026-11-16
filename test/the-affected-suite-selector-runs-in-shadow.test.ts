@@ -171,6 +171,45 @@ test("W1-T6924: the now-view rederivation suite is selected for each recorded mi
   assert.ok(!absent.suites.includes(suite), "a suite absent from the tree cannot be selected");
 });
 
+test("W1-T9511: the env-name suite is selected for each recorded miss edge", () => {
+  const suite = "test/every-env-name-a-source-file-reads-is-registered.test.ts";
+  const edges = [
+    "src/lib/board-worker.ts",
+    "src/lib/child-entry-argv.ts",
+    "src/lib/read-model-slow-lane.ts",
+    "src/lib/read-model-worker.ts",
+    "src/lib/serve.ts",
+    "src/lib/status.ts",
+    "src/lib/worker-heaps.ts",
+    "test/serve-starts-its-workers-from-current-worker-bundles.test.ts",
+  ];
+  const files = new Map([...Object.entries(TREE), [suite, ""]]);
+  const readMap: ReadMapInput = {
+    map: { format: READ_MAP_FORMAT, sha: "main", suites: [], reads: {}, listed: {}, unknownDescriptorSuites: [] },
+    drift: { distance: 0, changedSinceMap: [] },
+  };
+  for (const changed of edges) {
+    if (changed.startsWith("test/")) files.set(changed, "export {};\n");
+    const selection = selectAffectedSuites([changed], { files, pathReaders: [], symbolSuites: [], readMap });
+    assert.equal(selection.fullRun, false, changed);
+    assert.ok(selection.suites.includes(suite), `${changed} must select ${suite} in the floor`);
+    assert.ok(selection.narrow?.includes(suite), `${changed} must select ${suite} in the narrow candidate`);
+    assert.ok(selection.reasons.includes(`${suite}: reads a changed file by path`), changed);
+    assert.deepEqual(selection.recentOnly, { floor: [], narrow: [] });
+    assert.deepEqual(shadowRecord(selection, [suite]).failures, [
+      { file: suite, floor: "selected", narrow: "selected" },
+    ]);
+    const absentFiles = new Map(files);
+    absentFiles.delete(suite);
+    const absent = selectAffectedSuites([changed], { files: absentFiles, pathReaders: [], symbolSuites: [], readMap });
+    assert.ok(!absent.suites.includes(suite), changed);
+    assert.ok(!absent.narrow?.includes(suite), changed);
+  }
+  const unrelated = selectAffectedSuites(["src/a.ts"], { files, pathReaders: [], symbolSuites: [], readMap });
+  assert.ok(!unrelated.suites.includes(suite));
+  assert.ok(!unrelated.narrow?.includes(suite));
+});
+
 test("W1-T9275: the shard-sizing suite is selected for each recorded miss edge", () => {
   const suite = "test/every-lint-pass-sizes-a-shard-by-its-own-slug.test.ts";
   const edges = [

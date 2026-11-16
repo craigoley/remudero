@@ -24,7 +24,8 @@
     - test/the-live-selection-narrows-the-coverage-lane.test.ts
     - scripts/ci-shard-admission.mjs
     - test/infra/workflow-playwright-runtime.test.ts
-  status: queued
+  status: blocked
+  retirement: withdrawn  # unbuildable: its design reconciles against commit f6e362e5, which is in no clone of this repository; operator ruling 2026-11-16
   priority: 2
   attempts: 0
   rationale: The operator requested durable plan custody of the remaining approved

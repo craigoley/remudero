@@ -1,0 +1,68 @@
+- id: W1-T13180
+  title: "The agent view answers from its legacy side when its switch does not serve it, so the console's agent pages stop reading 404 on every request"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # it changes what serve answers for the console's only agent read, across the agent view module and serve's route list; a wrong answer shows wrong proposals
+  origin: "operator-session#measurements-2026-11-16"
+  plan_refs:
+    - W1-T5051
+    - W1-T5053
+    - W1-T5055
+  files:
+    - src/lib/agent-view.ts
+    - src/lib/serve.ts
+    - test/console-api/read-model/the-agent-view-answers-from-its-legacy-side-when-it-is-not-served.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "With no agent entry in read-model/switches.json (mode off), GET /v1/views/agent?instance=core&part=proposals answers 200 with a body computed by the same operator-agent readers the worker's body uses, where today it answers 404 view_disabled"
+      proof: "grep: W1-T13180 criterion 1 in test/console-api/read-model/the-agent-view-answers-from-its-legacy-side-when-it-is-not-served.test.ts"
+    - claim: "In shadow mode the legacy side answers (legacy primary) and the request is still offered to the shadow comparator; in serve mode the worker's body answers as today"
+      proof: "grep: W1-T13180 criterion 2 in test/console-api/read-model/the-agent-view-answers-from-its-legacy-side-when-it-is-not-served.test.ts"
+    - claim: "invariant:one-proposal-engine — the legacy answer and the worker's body for the same instance, part and facts are equal, because both call agentPartBodies; no second ranking is added"
+      kind: guard
+      proof: "grep: W1-T13180 criterion 3 in test/console-api/read-model/the-agent-view-answers-from-its-legacy-side-when-it-is-not-served.test.ts"
+    - claim: "A request without instance or part still answers 400 invalid_request, and an unknown part still answers 400"
+      proof: "grep: W1-T13180 criterion 4 in test/console-api/read-model/the-agent-view-answers-from-its-legacy-side-when-it-is-not-served.test.ts"
+  rationale: |
+    WHY: the console's agent pages (proposals, history, experiments, preferences) show nothing. Since
+    CONSOLE-T100 they read only core's agent view, and core's agent view refuses every request.
+    MEASURED, core ledger serve.demand rows (2026-11-16 07:10Z to 14:35Z): /v1/views/agent n 87, ok 0,
+    error 87, all 4xx, max 6 ms. The fast 4xx is the route's own refusal, not a build.
+    - read-model/switches.json (~/rmd-state2/state, written 2026-11-15T23:15Z) has views now off,
+      repositories off, instances serve, analytics off, and no agent entry. The last read_model.switch row
+      for agent is 2026-10-13T10:27Z (auto); the entry is not in the file now.
+    - The current ledger has 0 agent.built rows, so no agent body is built.
+    - The console sends instance and part (remudero-console lib/rmd-control.ts:7635), so the 4xx is not the
+      400 for a missing parameter.
+    READ at origin/main ef8b74910:
+    - src/lib/views.ts:316 a view with no switch entry is mode "off" unless it is in servedByDefault; with
+      no body and no legacy ViewDefinition, :334-338 answers 404 NOT_SERVED.off = view_disabled.
+    - src/lib/serve.ts:3059-3067 passes legacy views for nav-badge, analytics, inbox, feedback and host, but
+      none for agent. AGENT_VIEW_NAME is only in readModelViews and requiredParams.
+    - src/lib/agent-view.ts:217 and :295 already build a legacy side for the shadow comparator from the
+      instance's panel rows; it is not given to the route.
+    The other 4xx families in the same rows (/v1/views/now 4 of 4, /v1/views/repositories 10 of 10) are
+    switched off on purpose and the console has legacy routes for them (/v1/i/:instance/repos/summary
+    22 of 22 ok); they are not part of this task.
+  design: |
+    INVARIANT one-proposal-engine: the legacy answer and the worker's body are both agentPartBodies over the same instance's panel facts.
+    1. agent-view.ts exports agentLegacyView(deps): a ViewDefinition named "agent" whose compute reads the
+       instance's panel.* rows (the same memo the shadow legacy uses) and returns agentPartBodies for the
+       requested part, with sources and asOf as the worker's body has them.
+    2. serve.ts adds it to the legacy list at :3067. No change to the switch file and no new switch default.
+    3. Tests drive buildReadModelViewRoutes through serve's route list with a fixture panel ledger, in off,
+       shadow and serve modes.
+  falsifier: |
+    Leave agent out of the legacy list: criterion 1 fails (404 view_disabled). Rank proposals a second way in
+    the legacy side: criterion 3 fails.
+  note: |
+    Id reserved for run-unfiled-1794838967000 with ~/rmd-work/bin/reserve-id.sh.
+    An operator `rmd read-model switch agent serve` would also end the 404s, but only while the switch file
+    keeps the entry; this task makes the console's only agent read answer whatever the switch says.
+    Proof that counts in production: serve.demand /v1/views/agent rows with 2xx and no 4xx after the deploy.
