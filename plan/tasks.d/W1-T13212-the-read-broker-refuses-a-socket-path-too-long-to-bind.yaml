@@ -1,0 +1,47 @@
+- id: W1-T13212
+  title: "The read broker refuses a socket path too long to bind with a line that names the path, its length and the limit, and the in-process client suite builds its broker under a root short enough for every host"
+  repo: remudero
+  priority: 0.8
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # it adds a refusal to the startup of the broker every Mac session reads GitHub through
+  band_meaning: span
+  origin: "operator-session#mac-reds-on-a-tree-equal-to-main-2026-11-16"
+  plan_refs:
+    - W1-T12531
+    - W1-T11789
+  files:
+    - src/lib/gh-read-broker.ts
+    - test/github/every-mac-session-reads-github-through-one-broker.test.ts
+    - test/github/daemon-github-reads-share-one-in-process-client.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A broker asked to serve a directory whose socket path is longer than the platform's socket-path capacity refuses before it binds, with a message that names the path, its length in bytes and the limit"
+      proof: "grep: W1-T13212 criterion 1 in test/github/every-mac-session-reads-github-through-one-broker.test.ts"
+    - claim: "The in-process client suite builds its broker directory through the shared short-path rule, so its live-broker test binds on a host whose temp root is long"
+      proof: "grep: W1-T13212 criterion 2 in test/github/daemon-github-reads-share-one-in-process-client.test.ts"
+    - claim: "invariant:a-refused-broker-changes-nothing — the refusal comes before the broker removes a socket file or writes a heartbeat, so a live broker's socket in that directory survives it, and a path that fits is served exactly as on origin/main"
+      proof: "grep: W1-T13212 criterion 3 in test/github/every-mac-session-reads-github-through-one-broker.test.ts"
+  rationale: |
+    MEASURED 2026-11-16 by the operator session on the operator Mac, on a tree equal to main (865bc4252a), one file per command under the shared test lock.
+
+    - test/github/daemon-github-reads-share-one-in-process-client.test.ts: tests 11, pass 10, fail 1. "W1-T12531 criterion 2: with a live read broker the broker answers and no HTTP request is sent" fails with `Error: listen EINVAL: invalid argument /private/var/folders/sq/…/T/rmd-w1-t12531-zhA2R9/cache/remudero/gh-broker/broker.sock`. Log: ~/Remudero-notes/handoff-1115/logs-mac-red-four/daemon-github-reads-share-one-in-process-client.full.log.
+    - A unix socket path holds 103 bytes on macOS and 107 on Linux (`MAX_UNIX_SOCKET_PATH_BYTES` in src/lib/short-path-root.ts, "A kernel fact, not a tuning knob"). This Mac's temp root is 48 bytes and its real path is longer; the fixed tail `/remudero/gh-broker/broker.sock` is 32.
+    - READ the suite on origin/main (2d69d3780c): `const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t12531-`));` then `cache = join(root, "cache")`. The broker's own three suites in test/github/ already build their root with `shortPathWhenTooLong(join(tmpdir(), prefix), ..., (candidate) => Buffer.byteLength(join(`${candidate}XXXXXX`, "cache", "remudero", "gh-broker", "broker.sock")) <= MAX_UNIX_SOCKET_PATH_BYTES, existsSync)`. This suite, written later, does not.
+    - PRODUCTION HAS NO GUARD. READ src/lib/gh-read-broker.ts, `serveGhReadBroker`: `const socketPath = join(dir, GH_BROKER_SOCKET);`, then `rmSync(socketPath, { force: true });`, then `server.listen(socketPath, () => resolve());`. `ghBrokerDir` (src/lib/gh-read-broker-client.ts) is `${root}/remudero/gh-broker` under the configured cache home or `$HOME/.cache`. A cache root longer than 71 bytes on macOS makes `rmd gh-broker serve` end with a bare `listen EINVAL` after it has already removed whatever socket was there.
+    - NOT W1-T11789: that task (queued) refuses a broker whose GitHub login cannot be resolved. It declares the same two files because its refusal sits at the same place in `serveGhReadBroker`. This task refuses a path that cannot be bound and repairs a fixture; neither covers the other.
+    - NOTHING IS BROKEN TODAY: the live broker's cache root on the operator Mac is `/Users/craigoleyagent/.cache`, 28 bytes, so its socket path is 60. This is a named refusal for a case that today prints an error nobody can read, and a fixture repair for a red that every author preflight on the Mac meets.
+  design: |
+    1. `serveGhReadBroker`: after the ownership check and before the liveness probe and the `rmSync`, compare `Buffer.byteLength(socketPath)` with `MAX_UNIX_SOCKET_PATH_BYTES` (import it from src/lib/short-path-root.ts; do not write the number again). Longer: throw `gh-broker: <path> is <n> bytes; a unix socket path holds at most <limit> here. Point the GitHub cache home at a shorter directory.`
+    2. test/github/daemon-github-reads-share-one-in-process-client.test.ts: `scene` builds its root with `shortPathWhenTooLong`, with the same fit test the sibling suites use. No assertion in the suite changes.
+    3. Criterion 1 and criterion 3 go in the broker's own suite, test/github/every-mac-session-reads-github-through-one-broker.test.ts, beside its other refusals ("already serving", "belongs to uid"): a directory made long on purpose is refused on every host, and a file planted at the socket path is still there afterwards.
+    INVARIANT a-refused-broker-changes-nothing: a refusal for length touches no file in the directory, and a path that fits takes the code path of origin/main unchanged.
+    NOT IN SCOPE: moving the socket to a short path when the cache root is long. The client computes the socket from the directory, so a move needs a rule both sides share; that is a separate decision, and nothing measured needs it. The broker's other suites, which already use the short-path rule.
+  falsifier: |
+    Remove the length check and criterion 1 must fail on every host (the listen error names no limit). Build the suite's root from the temp root alone and criterion 2 must fail on a Mac. Move the check after the `rmSync` and criterion 3 must fail. Restore and all pass.
+  note: |
+    reservation hand-off: run-unfiled-1794847949786 -> run-unfiled-1794847949786
+    Reserved on the filing branch by the operator session. Both tests exist and are edited in place, so no placement was computed: a stub importing only the broker modules gave rmd test-place no signal (test/infra/, confidence none), and the broker's suites live in test/github/. W1-T11789 (queued, behind W1-T11787) adds a different refusal, for a login that cannot be resolved, at the same place in `serveGhReadBroker` and in the same suite: it is not a duplicate, and whichever of the two builds second rebases onto the first. Check `git ls-remote origin 'refs/rmd-dispatch/W1-T11789'` and its run branches before building. Risk is high and not medium because the record changes the broker's startup as well as a fixture; the two are one finding (the same limit, met in a test and unguarded in production).

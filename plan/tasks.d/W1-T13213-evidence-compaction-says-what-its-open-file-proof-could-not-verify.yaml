@@ -1,0 +1,63 @@
+- id: W1-T13213
+  title: "Evidence compaction says what its open-file proof could not verify, and its suite stops depending on what else is mounted on the Mac that runs it"
+  repo: remudero
+  priority: 0.8
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # it touches the proof that decides whether an evidence file may be rewritten in place
+  band_meaning: span
+  origin: "operator-session#mac-reds-on-a-tree-equal-to-main-2026-11-16"
+  plan_refs:
+    - W1-T9310
+  files:
+    - scripts/lib/evidence-storage.mjs
+    - test/review/evidence-storage.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The open-file proof gives two different reasons: one when the listing names a process that holds the file, and one when the listing could not be trusted (it warned, failed or timed out), and the second carries the listing's first warning line"
+      proof: "grep: W1-T13213 criterion 1 in test/review/evidence-storage.test.ts"
+    - claim: "The eight publication tests drive compaction through an injected open-file listing, so on the platform that runs them they pass whatever other file systems the host has mounted"
+      proof: "grep: W1-T13213 criterion 2 in test/review/evidence-storage.test.ts"
+    - claim: "A listing that exits clean of holders but prints a warning keeps the file, byte for byte and on the same inode, and the entry says why"
+      proof: "grep: W1-T13213 criterion 3 in test/review/evidence-storage.test.ts"
+    - claim: "invariant:keep-on-doubt — any listing answer other than the one clean answer of origin/main keeps the file untouched, and the scheduled maintenance entry point passes no listing of its own, so production always asks the real one"
+      proof: "grep: W1-T13213 criterion 4 in test/review/evidence-storage.test.ts"
+  rationale: |
+    MEASURED 2026-11-16 on the operator Mac, on a tree equal to main (865bc4252a): test/review/evidence-storage.test.ts, tests 23, pass 15, fail 8. Log: ~/Remudero-notes/handoff-1115/logs-mac-red-four/evidence-storage.full.log. The eight:
+    1. closed evidence compresses through a pinned descriptor and retains ordinary-reader bytes
+    2. pre-publication evidence writer is retained without replacement
+    3. detached-original evidence writer is UNKNOWN and its newer bytes keep a recovery path
+    4. post-publication public-path writer is not overwritten and the original is retained
+    5. an atomic writer in the final publication gap keeps its actual displaced inode
+    6. an unverified exchange receipt retains both names and never retries or cleans the displaced slot
+    7. a replaced stage pathname is refused before publication and its new bytes are retained
+    8. a replaced public pathname cannot be confused with the retained published descriptor
+    Each gets `KEEP` with reason `open-or-unverified` where it expects a compaction or a later refusal (for example `'KEEP' !== 'LOSSLESSLY_COMPRESSED'`).
+
+    THE SUITE IS MAC-ONLY BY DESIGN, and the first reading of this red had it backwards. READ scripts/lib/evidence-storage.mjs on origin/main (2d69d3780c): `if (process.platform !== 'darwin') throw Error('platform-not-qualified');`. On Linux each of the eight returns early through the suite's own `platformRefusal`, having asserted only that refusal. A Mac is the only place they run their subject.
+
+    THE CAUSE, read and then measured. `noOtherOpenFiles` runs `/usr/sbin/lsof -nP -a -p ^<pid> -Fpn -- <file>` and demands a silent answer: `if (p.error || p.status !== 1 || p.stdout !== '' || p.stderr !== '') throw Error('open-or-unverified');`. Run by hand on this Mac (macOS 27.2.1, lsof 4.91) against a closed file, the command exits 1 with no holder listed and prints on stderr:
+      lsof: WARNING: can't stat() devicefs file system /Users/craigoley/Library/Developer/CoreDevice/DeviceFS
+            Output information may be incomplete.
+    That mount belongs to another account on the machine. The warning is about a file system the evidence file is not on, and it is enough to keep every file.
+
+    WHAT THAT MEANS: keeping on doubt is the right answer, and the reason given hides which doubt it was. A holder and a warning about an unrelated mount read the same in the receipt. And the suite's result depends on the host's mount table, not on the code.
+    Compaction is opt-in and is not enabled for the operator's agent account (no ~/.config/remudero/evidence-storage.json), so no evidence is going uncompacted today because of this.
+  design: |
+    1. `noOtherOpenFiles` classifies its answer. A holder listed on stdout: `open`. Anything else that is not the clean answer (an error, a timeout, a status other than 1, any stderr): `open-files-unverified`, with the first line of stderr or the error's name in the entry. The clean answer stays exactly today's: status 1, empty stdout, empty stderr.
+    2. `compressEvidenceFile` takes the listing as an option beside its existing test hooks (`beforePublish`, `beforeExchange`, `afterPublish`), defaulting to the real one. The eight tests pass a clean listing, so they test publication, exchange and the writer races, which is their subject.
+    3. One test passes a listing that is clean of holders and carries the measured warning text, and asserts the keep, the reason and the untouched bytes and inode. One test runs the REAL listing and accepts exactly two outcomes: the compaction, or a keep whose reason is `open-files-unverified`; anything else fails.
+    4. scripts/maintain-evidence-storage.mjs is not edited; criterion 4 reads its call to prove it passes no listing.
+    5. The suite keeps its existing platform refusal on Linux. W1-T9310's helper promises a Linux requirement and a sibling for the win32 case, not a darwin one, so this task does not depend on it.
+    INVARIANT keep-on-doubt: the set of answers that allow a compaction is not widened by one case.
+    NOT IN SCOPE: whether a warning about a different device may let a compaction proceed (see the note: an open operator question); the early `return` form of the suite's platform refusal, which W1-T9310's check does not see.
+  falsifier: |
+    Give a warning and a holder the same reason and criterion 1 must fail. Take the injected listing away from one of the eight tests and criterion 2 must fail on a Mac whose lsof warns. Let a listing with stderr text reach the compaction and criteria 3 and 4 must fail. Pass a listing from the maintenance entry point and criterion 4 must fail. Restore and all pass.
+  note: |
+    reservation hand-off: run-unfiled-1794847949786 -> run-unfiled-1794847949786
+    Reserved on the filing branch by the operator session. The suite exists and is edited in place.
+    OPEN OPERATOR QUESTION, not decided here: on a Mac where another account has a file system this account cannot stat, compaction never runs. Should a warning that names a file system on a different device from the evidence file allow the compaction? It is a question about what counts as proof, and nothing is waiting on it today because compaction is not enabled on that account. This task keeps every doubt as a keep and only makes the doubt readable.
+    The suite builds its fixtures under the account's home on purpose (the guard refuses world-writable ancestors). Keep that.
