@@ -46,8 +46,31 @@ attachments: []
 origin: cli
 status: proposed
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/18801
+summary:
+  headline: Approve a fail-closed incident signature safeguard
+  what_happened: "Remudero’s incident pipeline fingerprints and publishes sampled
+    error messages after limited scrubbing, so interpolated values can split
+    incident groups and appear in public feedback files. The operator’s finding
+    points to a safer approach: derive signatures from literal log templates and
+    refuse filing when no template is available."
+  decision: Approve a bounded task to use literal message templates for incident
+    signatures and published samples, with no fallback to scrubbed free text.
+  options:
+    - label: Approve
+      consequence: File a bounded task covering template-based signatures, fail-closed
+        refusal counts, and tests proving sensitive interpolated values stay out
+        of fingerprints and feedback.
+      intent: approve
+    - label: Decline
+      consequence: Keep the current limited scrubbing behavior and its risk of
+        publishing interpolated values.
+      intent: decline
+    - label: Reframe
+      consequence: Require prior review of existing incident tasks and every open PR
+        head, then return with a scoped proposal; leave already-landed feedback
+        untouched.
+      intent: reframe
 expansion: null
 submission_key: cross-repo-automation:incident-template-signature:20261029
 thread_id: null
