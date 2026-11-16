@@ -23,7 +23,7 @@ function fixture(t: TestContext) {
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const stateDir = join(root, "state");
   mkdirSync(stateDir);
-  const env = { HOME: root, GH_CONFIG_DIR: join(root, "gh"), PATH: process.env.PATH, GH_TOKEN: FALLBACK };
+  const env = { HOME: root, GH_CONFIG_DIR: join(root, "gh-config"), PATH: process.env.PATH, GH_TOKEN: FALLBACK };
   const reference: GithubCredentialReference = { scope: "*", kind: "app", name: "host-reader", reads_only: true,
     app_id: "123", installation_id: "456", private_key_path: join(root, "app.pem") };
   const write = (references: GithubCredentialReference[]) => writeFileSync(join(stateDir, GITHUB_CREDENTIAL_REFERENCES_FILENAME), JSON.stringify({ references }));
