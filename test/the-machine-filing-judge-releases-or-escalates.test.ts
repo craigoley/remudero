@@ -607,13 +607,13 @@ test("a narrow selector edge shard declares the test that covers its edge, so di
   assert.match(task.note ?? "", /diff-coverage blocks an edge no test exercises/);
 });
 
-test("the verify-human sweep keeps only ruling-shaped records and hands the rest to the machine-filing judge", () => {
+test("the verify-human sweep keeps only ruling-shaped records and hands the rest to the machine-filing judge", async () => {
   const operator = machineShard("W1-T9050").replace("  author_class: machine\n", "");
   const ruling = machineShard("W1-T9052", { files: ["DECISIONS.md"] }).replace("  author_class: machine\n", "");
   const root = planDir({ "W1-T9050-x.yaml": operator, "W1-T9051-x.yaml": machineShard("W1-T9051"), "W1-T9052-x.yaml": ruling });
   try {
     const plan = readPlan(root);
-    assert.deepEqual(parkedVerifyHumanShards(plan, root, CLOCK).map((s) => s.id), ["W1-T9052"]);
+    assert.deepEqual((await parkedVerifyHumanShards(plan, root, CLOCK)).map((s) => s.id), ["W1-T9052"]);
     assert.ok(needsMachineJudgement(plan.byId.get("W1-T9050")!), "an operator verify: human record is the judge's");
     assert.equal(needsMachineJudgement(plan.byId.get("W1-T9052")!), false, "a ruling-shaped record stays with the operator");
   } finally {

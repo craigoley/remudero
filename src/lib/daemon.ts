@@ -48,7 +48,7 @@ import {
 import type { RunResult } from "./run-result.js";
 import { assertCleanBoot, type BootAssertion } from "./env.js";
 import { classifyFailure } from "./classify.js";
-import { changesInstallInputs, coalesceFreshnessRestart, decideFreshnessRestart, DEPLOY_RESTART_RATE_CEILING_MS, DEPLOY_RESTART_SCORE_THRESHOLD, FRESHNESS_COALESCE_WINDOW_MS, FRESHNESS_DECISION_STEP, FRESHNESS_MIN_LIFETIME_MS, INSTALL_INPUTS_RELEASE, MIN_LIFETIME_HOLD, type DeployRestartPressureState, type DeployWorthChange } from "./deploy-judge.js";
+import { changesInstallInputs, coalesceFreshnessRestart, decideFreshnessRestart, DEPLOY_RESTART_RATE_CEILING_MS, DEPLOY_RESTART_SCORE_THRESHOLD, FRESHNESS_COALESCE_WINDOW_MS, FRESHNESS_DECISION_STEP, FRESHNESS_LIKELY_FRACTION, FRESHNESS_MAX_DRAIN_WAIT_MS, FRESHNESS_MIN_LIFETIME_MS, INSTALL_INPUTS_RELEASE, MIN_LIFETIME_HOLD, timeToLikelyFreshnessRestart, type DeployRestartPressureState, type DeployWorthChange } from "./deploy-judge.js";
 import { INITIAL_RETRY_STATE, reasonAboutBlock, type RetryState } from "./block-reason.js";
 import {
   nextRunnable,
@@ -99,7 +99,7 @@ import {
   type ObservedScopeByTask,
 } from "./dispatch-overlap.js";
 import { OVERLAP_SHADOW_STEP, observedOverlapShadow, overlapShadowPayload, type ObservedOpenPrScope } from "./observed-overlap.js";
-import { DEPLOY_IDLE_DEFER_CEILING_MS, readDrainWaitLanes, readImplementDurationsMs, type DrainWaitLane } from "./deployer.js";
+import { DEPLOY_IDLE_DEFER_CEILING_MS, deriveDrainWait, readDrainWaitLanes, readImplementDurationsMs, type DerivedDrainWait, type DrainWaitLane } from "./deployer.js";
 import { predictRecycleWaitRuns, recycleWaitAdmits, soonestRecycleWaitRun, type RecycleWaitInput } from "./recycle-wait-admission.js";
 import { evaluatePauseTier, isRecyclePauseDetail, type PauseTier, type PauseTierInput } from "./fleet-control.js";
 import { createFleetAccountEpisode, redactedAccountLabel, type FleetAccountDivergence, type FleetAccountPair } from "./account-usage.js";
@@ -361,6 +361,11 @@ export function dispatchRunHistory(rawLines: readonly string[], runs?: MeasuredR
 /** W1-T8172: the median review run length, `sweep.review_started` to the next `review.posted` for the same PR (W1-T11148: whose
  *  `plan_only` matches `planOnly` when given), or undefined with no pair. Torn rows and unpaired or reversed ends contribute nothing. */
 export function medianReviewRunMs(rawLines: readonly string[], planOnly?: boolean): number | undefined {
+  return medianOf(reviewRunLengthsMs(rawLines, planOnly));
+}
+
+/** The review run lengths {@link medianReviewRunMs} takes the median of (W1-T12231: the drain predicts from all of them). */
+function reviewRunLengthsMs(rawLines: readonly string[], planOnly?: boolean): number[] {
   const started = new Map<number, number>();
   const lengths: number[] = [];
   for (const raw of rawLines) {
@@ -376,7 +381,7 @@ export function medianReviewRunMs(rawLines: readonly string[], planOnly?: boolea
     started.delete(pr);
     if (at > startedAt && (planOnly === undefined || (row.plan_only === true) === planOnly)) lengths.push(at - startedAt);
   }
-  return medianOf(lengths);
+  return lengths;
 }
 
 function medianOf(lengths: number[]): number | undefined {
@@ -1118,6 +1123,10 @@ export interface DaemonOpts {
   freshnessScoreLimit?: number;
   freshnessStalenessHorizonMs?: number;
   freshnessQuietWindowMs?: number;
+  /** W1-T12231: `freshnessRestart.likelyFraction` (default {@link FRESHNESS_LIKELY_FRACTION}). */
+  freshnessLikelyFraction?: number;
+  /** W1-T12231: `freshnessRestart.maxDrainWaitMs` (default {@link FRESHNESS_MAX_DRAIN_WAIT_MS}). */
+  freshnessMaxDrainWaitMs?: number;
 }
 
 /** A non-stale freshness verdict must name the decision arm that produced it. `unassessed` deliberately retains the
@@ -3474,8 +3483,9 @@ async function runGatedSweep(
       const hold = deps.workerAdmissionHold?.() ?? (recyclePause ? resolveFleetControlHold(deps) : undefined);
       const heap = hold ? undefined : heapWorkerAdmissionHold(deps, "full-sweep", sample, log);
       if (heap) return heap.reason;
-      if (!hold) return kind === undefined && latchedAdmission?.()?.("fix-dispatch", "full-sweep") === false
-        ? "restart latched: a fix round would outlast the time left in the restart's drain" : undefined;
+      const admission = kind === undefined && !hold ? latchedAdmission?.() : undefined;
+      if (!hold) return admission?.("fix-dispatch", "full-sweep") === false
+        ? admission.heldBy ?? "restart latched: a fix round would outlast the time left in the restart's drain" : undefined;
       const reason = `fleet ${hold.control} hold: ${hold.detail}`;
       log("daemon.admission_held", { surface: "full-sweep", control: hold.control, detail: hold.detail, reason });
       return reason;
@@ -4386,6 +4396,8 @@ export async function runDaemon(
   const freshnessStalenessHorizonMs = opts.freshnessStalenessHorizonMs ?? DEPLOY_RESTART_RATE_CEILING_MS;
   const freshnessQuietWindow = opts.freshnessQuietWindowMs === undefined ? FRESHNESS_COALESCE_WINDOW_MS
     : { value: opts.freshnessQuietWindowMs, reason: "plan/policy.yaml freshnessRestart.quietWindowMs" };
+  const freshnessLikelyFraction = opts.freshnessLikelyFraction ?? FRESHNESS_LIKELY_FRACTION;
+  const freshnessMaxDrainWaitMs = opts.freshnessMaxDrainWaitMs ?? FRESHNESS_MAX_DRAIN_WAIT_MS;
   const sweepBound: SweepBoundLearner = { fallbackMs: sweepWallClockBoundMs, settledMs: [] }; // W1-T9563, seeded at boot
   // One mutable ref for when a full pass last actually ran, shared by every call site below — see {@link
   // SweepRetrigger} for why a shared reference, not a fresh object per site, is load-bearing. It starts undefined so
@@ -5440,12 +5452,16 @@ export async function runDaemon(
 
   // W1-T4945/W1-T6093: score the advance, then coalesce change-driven restarts within bounded staleness.
   let freshnessDecidedAtMs: number | undefined;
+  // W1-T12231: the change weight and the stale reading the last freshness decision scored, so an admission before the
+  // decision can predict when the staleness pressure alone takes the restart.
+  let freshnessOutlook: { weight: number; staleSinceMs: number } | undefined;
   const freshnessPhases: { decision_to_latch?: number; lanes?: number; pre_exit_pass?: number; drain?: number } = {};
   const decideFreshness = (freshness: Extract<DaemonFreshness, { stale: true }>, liveLanes = 0): "restart" | "defer" => {
     const nowMs = daemonClock.now();
     observeFreshnessAdvance(freshness.newSha, nowMs, freshness.staleSinceMs);
     const staleAtMs = staleSinceMs!;
     const { decision, busy, busyReasons, background, withheldEvidence } = scoreFreshness(freshness.changes, nowMs, liveLanes);
+    freshnessOutlook = { weight: decision.weight, staleSinceMs: staleAtMs };
     // OPERATOR RULING 2026-10-17: this lifetime began when the loop did (the boot gate's start); every release but the
     // fast paths waits until it is FRESHNESS_MIN_LIFETIME_MS old. Both rows carry it, so the hold is measurable.
     const coalesced = coalesceFreshnessRestart({
@@ -5550,7 +5566,51 @@ export async function runDaemon(
     return { watch, snapshot, release };
   };
   type LatchDrain = { latchAtMs: number; reviews: ReadonlySet<Promise<void>>; detached: number; started: boolean;
-    observation: ReturnType<typeof observeDrain>; done?: true };
+    observation: ReturnType<typeof observeDrain>; done?: true; deadline: DrainDeadline; windowDeadlineMs: number };
+  // W1-T12231 — THE DRAIN'S TIME LIMIT IS THE PREDICTED END OF THE WORK IN FLIGHT. It was the decision plus
+  // `sweepWallClockBoundMs` (~9 min) whatever was in flight, and 2026-11-04..11 the drain gave up 13 reviews and 20 fix
+  // rounds (median age 51 min) at it. Now each kind in flight at the decision is predicted as the recycle predicts its
+  // wait (`deriveDrainWait`, deployer.ts), from its age and the measured lengths of its kind; the time limit is the
+  // largest wait, at most `maxDrainWaitMs`. A kind with no measured length waits today's limit and says `no_history`.
+  type DrainPrediction = { kind: string; wait_ms: number; source: DerivedDrainWait["source"] | "no_history"; samples: number;
+    lanes: ReadonlyArray<{ run_id: string; age_s: number; remaining_s?: number; basis?: string }> };
+  type DrainDeadline = { deadlineMs: number; source: "derived" | "no_history" | "limit"; derivedWaitMs: number;
+    predictions: DrainPrediction[]; ledgerUnreadable?: string };
+  const deriveLatchDrainDeadline = (latchAtMs: number): DrainDeadline => {
+    let lines: readonly string[] = [];
+    let ledgerUnreadable: string | undefined;
+    try {
+      lines = deps.readLedgerLines?.() ?? [];
+    } catch (error) {
+      // No measured length: every kind in flight waits today's limit, and the row names why.
+      ledgerUnreadable = String((error as Error)?.message ?? error);
+    }
+    const byKind = new Map<string, RestartDrainInventoryEntry[]>();
+    for (const work of restartDrainInventory()) {
+      const kind = work.what === "review" ? "review" : work.what === "detached" && work.kind === "fix-dispatch" ? "fix-dispatch" : work.kind;
+      byKind.set(kind, [...(byKind.get(kind) ?? []), work]);
+    }
+    const predictions = [...byKind].map(([kind, work]): DrainPrediction => {
+      const lanes: DrainWaitLane[] = work.map((item, i) => ({ runId: item.task_id ?? `${kind}-${i}`,
+        ...(item.task_id === undefined ? {} : { taskId: item.task_id }), ageS: Math.max(0, Math.floor((latchAtMs - item.admitted_at_ms) / 1000)) }));
+      const lengths = kind === "review" ? reviewRunLengthsMs(lines) : kind === "fix-dispatch" ? fixRoundLengthsMs(lines) : [];
+      if (lengths.length === 0) return { kind, wait_ms: sweepWallClockBoundMs, source: "no_history", samples: 0,
+        lanes: lanes.map((lane) => ({ run_id: lane.runId, age_s: lane.ageS })) };
+      const derived = deriveDrainWait(lengths, lanes, Math.ceil(sweepWallClockBoundMs / 1000));
+      return { kind, wait_ms: derived.waitS * 1000, source: derived.source, samples: derived.samples, lanes: derived.lanes };
+    });
+    const derivedWaitMs = Math.max(0, ...predictions.map((prediction) => prediction.wait_ms));
+    const source = derivedWaitMs > freshnessMaxDrainWaitMs ? "limit"
+      : predictions.some((prediction) => prediction.source === "no_history") ? "no_history" : "derived";
+    return { deadlineMs: latchAtMs + Math.min(derivedWaitMs, freshnessMaxDrainWaitMs), source, derivedWaitMs, predictions,
+      ...(ledgerUnreadable === undefined ? {} : { ledgerUnreadable }) };
+  };
+  const drainDeadlineFields = (deadline: DrainDeadline, withPredictions: boolean): Record<string, unknown> => ({
+    deadline_source: deadline.source, derived_wait_ms: deadline.derivedWaitMs, max_drain_wait_ms: freshnessMaxDrainWaitMs,
+    drain_deadline_at: fixedClock(deadline.deadlineMs).iso(),
+    ...(withPredictions ? { predictions: deadline.predictions } : {}),
+    ...(deadline.ledgerUnreadable === undefined ? {} : { ledger_unreadable: deadline.ledgerUnreadable }),
+  });
   let latchDrain: LatchDrain | undefined;
   // W1-T9808 — A LATCHED RESTART ADMITS NO WORK ITS DRAIN WOULD ABANDON. 2026-10-15 fixes for W1-T9113 and W1-T7699
   // started at 19:02 inside the 18:59:45 drain and were abandoned at its bound. From the latch to the exit, every
@@ -5558,9 +5618,39 @@ export async function runDaemon(
   type RestartWindow = { deadlineMs: number; lengths: { review?: number; "plan-review"?: number; "fix-dispatch"?: number }; held: number;
     latchAtMs: number; holdEnded?: true; exitDrainBegun?: true };
   let restartWindow: RestartWindow | undefined;
+  // W1-T12231 — A LIKELY RESTART HOLDS WORK BEFORE ITS DECISION. 2026-11-04..11 the drain gave up 13 reviews and 20 fix
+  // rounds at its time limit in 36 exits; before the decision every one was admitted, also with the restart minutes
+  // away. At `likelyFraction` of the score limit the time to the restart is known (deploy-judge.ts), so a review or a fix
+  // round that cannot end before it plus `maxDrainWaitMs` is held. A build run (`dispatch-refill`) is never held here.
+  const restartLikely = (): { pressure: number; timeToRestartMs: number } | undefined => {
+    if (freshnessOutlook === undefined) return undefined;
+    const outlook = timeToLikelyFreshnessRestart({ ...freshnessOutlook, nowMs: daemonClock.now(), threshold: freshnessThreshold,
+      ageHorizonMs: freshnessStalenessHorizonMs, lifetimeStartedAtMs: bootGateStartedAtMs, minLifetimeMs: freshnessMinLifetimeMs });
+    return outlook.pressure >= freshnessLikelyFraction * freshnessThreshold.value ? outlook : undefined;
+  };
+  let likelyLengths: { atMs: number; lengths: RestartWindow["lengths"] } | undefined;
+  const likelyRestartAdmission: RestartAdmission = (kind, surface) => {
+    if (kind === "dispatch-refill") return true;
+    const likely = restartLikely();
+    if (likely === undefined) return true;
+    const nowMs = daemonClock.now();
+    if (likelyLengths === undefined || nowMs - likelyLengths.atMs >= 60_000) {
+      const measured = measuredReviewLength();
+      likelyLengths = { atMs: nowMs, lengths: { review: measured.codeMs ?? measured.ms, "plan-review": measured.planMs ?? measured.ms,
+        "fix-dispatch": measured.fixMs } };
+    }
+    const lengthMs = likelyLengths.lengths[kind];
+    if (lengthMs === undefined || lengthMs <= likely.timeToRestartMs + freshnessMaxDrainWaitMs) return true;
+    if (surface === undefined) return false;
+    log("daemon.admission_held", { surface, kind, reason: "restart likely", time_to_restart_ms: likely.timeToRestartMs,
+      measured_length_ms: lengthMs, max_drain_wait_ms: freshnessMaxDrainWaitMs, pressure: likely.pressure,
+      likely_pressure: freshnessLikelyFraction * freshnessThreshold.value });
+    return false;
+  };
   const restartAdmission: RestartAdmission = (kind, surface, candidateMs) => {
-    const lengthMs = kind === "dispatch-refill" ? candidateMs : restartWindow?.lengths[kind];
-    if (restartWindow === undefined || lengthMs === undefined) return true;
+    if (restartWindow === undefined) return likelyRestartAdmission(kind, surface, candidateMs);
+    const lengthMs = kind === "dispatch-refill" ? candidateMs : restartWindow.lengths[kind];
+    if (lengthMs === undefined) return true;
     const leftMs = restartWindow.deadlineMs - daemonClock.now();
     if (leftMs > lengthMs) return true;
     if (leftMs < 0 && !restartWindow.exitDrainBegun && kind !== "fix-dispatch" && kind !== "dispatch-refill") {
@@ -5575,7 +5665,11 @@ export async function runDaemon(
     log("daemon.admission_held", { surface, kind, reason: "restart latched", time_left_ms: Math.max(0, leftMs), measured_length_ms: lengthMs });
     return false;
   };
-  const latchedAdmission = (): RestartAdmission | undefined => restartWindow && restartAdmission;
+  const likelyAdmission: RestartAdmission = Object.assign(
+    (...args: Parameters<RestartAdmission>) => restartAdmission(...args),
+    { heldBy: "restart likely, and the work would outlast the predicted restart and its drain" });
+  const latchedAdmission = (): RestartAdmission | undefined =>
+    restartWindow ? restartAdmission : restartLikely() ? likelyAdmission : undefined;
   let sweepEndedEarly = false;
   const sweepStopsForRestart = (): boolean => {
     const stop = restartWindow !== undefined || preparedFreshnessExit !== undefined;
@@ -5586,17 +5680,21 @@ export async function runDaemon(
     if (latchDrain?.latchAtMs === latchAtMs) return;
     closeDirectMergeAdmissions("freshness_latch");
     const lengths = measuredReviewLength();
-    restartWindow = { deadlineMs: latchAtMs + sweepWallClockBoundMs, held: 0, latchAtMs,
+    const deadline = deriveLatchDrainDeadline(latchAtMs);
+    // Work admitted after the decision is drained on the exit's own bound, so its window keeps today's limit at least.
+    const windowDeadlineMs = Math.max(deadline.deadlineMs, latchAtMs + Math.min(sweepWallClockBoundMs, freshnessMaxDrainWaitMs));
+    restartWindow = { deadlineMs: windowDeadlineMs, held: 0, latchAtMs,
       lengths: { review: lengths.codeMs ?? lengths.ms, "plan-review": lengths.planMs ?? lengths.ms, "fix-dispatch": lengths.fixMs } };
     const reviews = new Set(inFlightReviewRunsNow());
     const detached = detachedSweepActionCount();
     const observation = observeDrain(latchAtMs, latchAtMs);
     for (const item of restartDrainInventory()) observation.watch(item);
     if (freshnessDecidedAtMs !== undefined) freshnessPhases.decision_to_latch = Math.max(0, latchAtMs - freshnessDecidedAtMs);
-    latchDrain = { latchAtMs, reviews, detached, observation,
+    latchDrain = { latchAtMs, reviews, detached, observation, deadline, windowDeadlineMs,
       started: reviews.size > 0 || detached > 0 || directMergeOperationsInFlight().length > 0 };
     if (latchDrain.started) log("daemon.freshness_drain.started", { started_at: "latch", latched_at: fixedClock(latchAtMs).iso(),
-      detached_sweep_actions: detached, in_flight_reviews: reviews.size, waited_on: observation.snapshot() });
+      detached_sweep_actions: detached, in_flight_reviews: reviews.size, waited_on: observation.snapshot(),
+      ...drainDeadlineFields(deadline, true) });
   };
   // W1-T8172 design 2: the drain's clock admits a pass only while the time left exceeds the measured review length.
   const measuredReviewLength = (): { ms?: number; codeMs?: number; planMs?: number; fixMs?: number;
@@ -5652,6 +5750,7 @@ export async function runDaemon(
     const reviewsAtExit = inFlightReviewRunsNow();
     const reviewsAtFreshness = reviewsAtExit.length;
     const latchStarted = fromLatch?.started === true ? fromLatch : undefined;
+    const latchDeadline = stepPrefix === "daemon.freshness_drain" ? (fromLatch ?? latchDrain)?.deadline : undefined;
     if (detachedAtFreshness > 0 || reviewsAtFreshness > 0 || directMergesAtFreshness > 0 || latchStarted || hasChildrenLeft || pass?.overlapped) {
       const drainStartedAtMs = latchStarted ? latchStarted.latchAtMs : exitAtMs;
       const latchFields = fromLatch ? { started_at: fromLatch.started ? "latch" : "exit", latched_at: fixedClock(fromLatch.latchAtMs).iso() }
@@ -5661,10 +5760,13 @@ export async function runDaemon(
         detached_sweep_actions: detachedAtFreshness,
         in_flight_reviews: reviewsAtFreshness,
         waited_on: observation.snapshot(),
+        ...(latchDeadline ? drainDeadlineFields(latchDeadline, true) : {}),
       });
-      // Work admitted by an overlapping pass shares the latch deadline, including work not yet in the inventory.
+      // Work admitted by an overlapping pass shares the latch's admission window, including work not yet in the
+      // inventory; without one, what was in flight at the latch waits for its predicted end (W1-T12231).
       const latchLeftMs = exitDeadlineAtMs !== undefined ? Math.max(0, exitDeadlineAtMs - exitAtMs)
-        : fromLatch ? Math.max(0, fromLatch.latchAtMs + sweepWallClockBoundMs - exitAtMs) : sweepWallClockBoundMs;
+        : fromLatch ? Math.max(0, (pass?.overlapped ? fromLatch.windowDeadlineMs : fromLatch.deadline.deadlineMs) - exitAtMs)
+        : sweepWallClockBoundMs;
       const seen = new Set(reviewsAtExit);
       const settled = new Set<Promise<void>>();
       const watch = (reviews: Iterable<Promise<void>>): void => {
@@ -5774,6 +5876,7 @@ export async function runDaemon(
           review_length_ms: reviewLength?.ms ?? null,
           review_length_source: reviewLength?.source,
           admissions_held_after_latch: restartWindow?.held ?? 0,
+          ...(latchDeadline ? drainDeadlineFields(latchDeadline, false) : {}),
           ...(pass ? { pre_exit_pass: pass.kind, pass_overlap_ms: pass.overlapMs } : {}),
         } : {}),
         ...(fromLatch ? {
@@ -8784,7 +8887,8 @@ export async function runDaemon(
       preparedFreshnessExit ??= prepareFreshnessExit(restartDecided!, restartWait.decidedAtMs);
       childDrain ??= preparedFreshnessExit.then(async () => {
         await stopTicker();
-        await drainBeforeRestart("daemon.freshness_drain", undefined, undefined, restartWait.decidedAtMs + sweepWallClockBoundMs);
+        await drainBeforeRestart("daemon.freshness_drain", undefined, undefined, latchDrain?.latchAtMs === restartWait.decidedAtMs
+          ? latchDrain.windowDeadlineMs : restartWait.decidedAtMs + sweepWallClockBoundMs);
         childDrainDone = true;
         poolControl.detach?.(outOfProcess);
       }).catch((reason: unknown) => {

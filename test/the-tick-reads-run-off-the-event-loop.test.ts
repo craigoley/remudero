@@ -79,7 +79,7 @@ function fixtureReader() {
     issues: { create: () => { throw new Error("write in read plane"); }, listOpen: () => [{
       number: 9, url: "https://github.com/o/r/issues/9", title: "resolved b", body: "**Task:** B",
     }] },
-    viewsDeps: { requiredContexts: () => ["ci-gate"], readCiGateRequired: () => [], fetchCiFailureEvidence: () => [] },
+    viewsDeps: { requiredContexts: () => ["ci-gate"], readRequiredContextsAsync: async () => ({ kind: "contexts", contexts: ["ci-gate"] }), readCiGateRequired: () => [], fetchCiFailureEvidence: () => [] },
     pacer,
   };
   return { plan, options, io, calls, pacedMs: () => pacedAt, setListed: (next: number[]) => { listed = next; },
