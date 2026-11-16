@@ -1880,6 +1880,60 @@ function retroTriggerCrossingKey(decision: Extract<RetroTriggerDecision, { fire:
   return decision.reason;
 }
 
+/** W1-T11790 — THE SHADOW DURATION a detached retro may run before one `retro.overrun` row names it. OBSERVATION ONLY:
+ *  nothing is killed and no hold, admission or gate reads it. OBSERVED 2026-11-08: one retro ran 87 min, held two
+ *  recycles and paused dispatch, and no retro duration had ever been ledgered, so the enforcing bound waits for the
+ *  `retro.duration` rows this writes (the shadow-then-enforce path of W1-T11344). */
+export const RETRO_SHADOW_OVERRUN_MS = 60 * 60_000;
+
+interface WatchedRetro {
+  startedAtMs: number;
+  pid: number | null;
+  runId: string | null;
+  /** "spawned" ages from this process's spawn; "adopted" from a boot's adoption, so its age is a lower bound. */
+  basis: "spawned" | "adopted";
+  overran: boolean;
+}
+
+/** W1-T11790: one detached retro's shadow watch: `observe` writes at most one `retro.overrun` row per retro, and its
+ *  settlement writes one `retro.duration` row. `watch` returns the promise it was handed, unchanged. */
+export function retroDurationWatch(clock: Clock, log: (step: string, extra?: Record<string, unknown>) => void): {
+  watch: <T>(settled: Promise<T>, ident: { pid?: number; runId?: string; basis: WatchedRetro["basis"] }) => Promise<T>;
+  observe: (nowMs: number) => void;
+} {
+  const live = new Set<WatchedRetro>();
+  return {
+    watch(settled, ident) {
+      const entry: WatchedRetro = {
+        startedAtMs: clock.now(), pid: ident.pid ?? null, runId: ident.runId ?? null, basis: ident.basis, overran: false,
+      };
+      live.add(entry);
+      void settled.then(
+        () => ({ outcome: "completed" as const }),
+        (error: unknown) => ({ outcome: "failed" as const, error: String((error as Error)?.message ?? error) }),
+      ).then((ended) => {
+        live.delete(entry);
+        log("retro.duration", {
+          age_ms: Math.max(0, clock.now() - entry.startedAtMs), ...ended, overran: entry.overran,
+          threshold_ms: RETRO_SHADOW_OVERRUN_MS, pid: entry.pid, run_id: entry.runId, basis: entry.basis,
+        });
+      });
+      return settled;
+    },
+    observe(nowMs) {
+      for (const entry of live) {
+        const ageMs = nowMs - entry.startedAtMs;
+        if (entry.overran || ageMs <= RETRO_SHADOW_OVERRUN_MS) continue;
+        entry.overran = true;
+        log("retro.overrun", {
+          pid: entry.pid, run_id: entry.runId, age_ms: ageMs, threshold_ms: RETRO_SHADOW_OVERRUN_MS,
+          detached_since: fixedClock(entry.startedAtMs).iso(), basis: entry.basis,
+        });
+      }
+    },
+  };
+}
+
 /** Duck-typed classifier for a spawn-infrastructure failure, checked by a plain string tag rather than `instanceof` so
  * this module never imports worker.ts as a value. Any other throw is still a genuine, unclassified error: this daemon
  * must not learn to swallow every crash, only the one named infrastructure class (W1-T113). */
@@ -5084,7 +5138,10 @@ export async function runDaemon(
   // and BEFORE the boot adoption below, so an adopted review child is a lane transition the CPU learner samples.
   if (laneGovernorPorts) uninstallReviewLaneTransition = installReviewLaneTransition((apply) => laneCpuTransition(apply));
   // W1-T9114: a child hosting a review or a fix dispatch holds a review slot, never a lane: it is registered with the sweep.
-  for (const child of adoptedAll) if (child.work) void adoptChildWork({ ...child, work: child.work }, log);
+  // W1-T11790: a retro child adopted here is watched from adoption (its age a lower bound); the watch only observes.
+  const retroWatch = retroDurationWatch(daemonClock, log);
+  for (const child of adoptedAll) if (child.work) void adoptChildWork({ ...child, work: child.work,
+    ...(child.work.kind === "retro" ? { settled: retroWatch.watch(child.settled, { pid: child.pid, runId: child.runId, basis: "adopted" }) } : {}) }, log);
   let childMode = deps.adoptRunChildren !== undefined;
   const childTaskIds = (): string[] => [...children.values()].map((child) => child.taskId);
   const hasChildTask = (id: string): boolean => childTaskIds().includes(id);
@@ -6758,7 +6815,8 @@ export async function runDaemon(
               if ("abandoned" in child) {
                 log("daemon.retro_trigger.child_refused", { child_run_id: child.runId, reason: child.reason });
               } else {
-                void adoptChildWork({ ...child, taskId: "DAEMON", work: { kind: "retro" } }, log);
+                const settled = retroWatch.watch(child.settled, { pid: child.pid, runId: child.runId, basis: "spawned" });
+                void adoptChildWork({ ...child, settled, taskId: "DAEMON", work: { kind: "retro" } }, log);
                 log("daemon.retro_trigger.detached", { reason: decision.reason, child_run_id: child.runId });
               }
               return false;
@@ -6779,7 +6837,7 @@ export async function runDaemon(
                   deps,
                   pollIntervalMs,
                   log,
-                  () => deps.runRetroTrigger!(decision),
+                  () => retroWatch.watch(deps.runRetroTrigger!(decision), { basis: "spawned" }),
                   diskHeadroomLatch,
                   sweepRetrigger,
                 ).catch((e) => {
@@ -6949,6 +7007,8 @@ export async function runDaemon(
     recordNearLimitHeapSample(deps, "tick");
     if (tickMemory.sampled) startMemoryReadAfterRow(deps, log);
     const tickStartedAtMs = daemonClock.now();
+    // W1-T11790: before STOP and PAUSE, so a recycle's own PAUSE (the 2026-11-08 shape) still sees an overrunning retro.
+    retroWatch.observe(tickStartedAtMs);
     resetIdleLaneTick();
     spendGatesOpen = false;
 
