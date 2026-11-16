@@ -13,7 +13,9 @@ import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 // A paths: trigger that names one exact test path stops firing when that test moves.
 // The suite reads the real workflow files, so a later edit is what it judges.
 
-const WORKFLOWS = ["mutation-nightly.yml", "ci.yml", "recovery-drill.yml"] as const;
+// W1-T13162: clock-sweep.yml joins the list. Its pull_request trigger names the sweep's three
+// self-check suites, and a self-check that stops running on a pull request fails nothing.
+const WORKFLOWS = ["mutation-nightly.yml", "ci.yml", "recovery-drill.yml", "clock-sweep.yml"] as const;
 
 type Step = { name?: string; run?: string };
 type Job = { steps?: Step[] };
@@ -66,6 +68,39 @@ test("W1-T9873: no paths trigger names an exact flat test path", () => {
   }
   assert.ok(pathsSeen > 0, "parsed 0 paths: entries, so this check would compare nothing");
   assert.deepEqual(offenders, [], "these paths: triggers name one exact test path");
+});
+
+const CLOCK_SWEEP = "clock-sweep.yml";
+
+// The same walk as the paths check above: every event of every listed workflow, each paths: entry.
+function pathsEntries(files: readonly string[]): Array<{ file: string; event: string; entry: string }> {
+  const out: Array<{ file: string; event: string; entry: string }> = [];
+  for (const file of files) {
+    for (const [event, config] of Object.entries(loadWorkflow(file).on ?? {})) {
+      for (const entry of config?.paths ?? []) out.push({ file, event, entry });
+    }
+  }
+  return out;
+}
+
+test("W1-T13162 criterion 2: clock-sweep.yml is on the list the paths check walks, and the walk reads its seven entries", () => {
+  const walked: readonly string[] = WORKFLOWS;
+  assert.ok(walked.includes(CLOCK_SWEEP), `${CLOCK_SWEEP} is not in WORKFLOWS, so no check here reads its paths: trigger`);
+  const seen = pathsEntries(walked).filter(({ file }) => file === CLOCK_SWEEP);
+  assert.ok(seen.length >= 7, `the walk read ${seen.length} paths: entries of ${CLOCK_SWEEP}, not its seven, so the paths check would compare too little`);
+  assert.deepEqual([...new Set(seen.map(({ event }) => event))], ["pull_request"], "the entries are the pull_request trigger's");
+});
+
+test("W1-T13162 criterion 3: clock-sweep.yml's pull_request paths are its four other entries and the three self-check suites at any depth, nothing else", () => {
+  assert.deepEqual(loadWorkflow(CLOCK_SWEEP).on?.pull_request?.paths, [
+    "scripts/clock-shift.mjs",
+    "scripts/clock-sweep.mjs",
+    "scripts/clock-sweep-aggregate.mjs",
+    "test/**/clock-shift-probe.test.ts",
+    "test/**/clock-sweep.test.ts",
+    "test/**/a-clock-sweep-runs-as-shards-and-merges-one-report.test.ts",
+    ".github/workflows/clock-sweep.yml",
+  ]);
 });
 
 function writeTree(root: string, files: readonly string[]): void {
