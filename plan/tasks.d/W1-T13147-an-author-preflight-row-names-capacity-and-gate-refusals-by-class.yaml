@@ -1,0 +1,53 @@
+- id: W1-T13147
+  title: "An author preflight row names capacity and gate refusals by class, so the commonest refusals on the operator Mac stop clustering as other"
+  repo: remudero
+  priority: 0.8
+  depends_on: [W1-T12842]
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium
+  band_meaning: span
+  origin: "operator-session#mac-author-preflight-2026-11-16"
+  plan_refs:
+    - W1-T12842
+    - W1-T12953
+    - W1-T13146
+  files:
+    - scripts/preflight-author.mjs
+    - test/ci/an-author-preflight-row-names-capacity-and-gate-refusals-by-class.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A run the Mac admission does not start for disk carries the class disk-reserve, and one it does not start for memory pressure carries memory-pressure, each read from the admission's own reason tokens and never from verdict text"
+      proof: "grep: W1-T13147 criterion 1 in test/ci/an-author-preflight-row-names-capacity-and-gate-refusals-by-class.test.ts"
+    - claim: "A run stopped by a failed census precheck carries census-precheck with the failing census suite named, and one stopped by a failed static preflight carries static-preflight with the failing check named"
+      proof: "grep: W1-T13147 criterion 2 in test/ci/an-author-preflight-row-names-capacity-and-gate-refusals-by-class.test.ts"
+    - claim: "invariant:the-class-list-stays-closed — every row's class is one of the named classes or other, the classes W1-T12842 defined keep their meaning, and an unrecognised cause is other"
+      proof: "grep: W1-T13147 criterion 3 in test/ci/an-author-preflight-row-names-capacity-and-gate-refusals-by-class.test.ts"
+  rationale: |
+    FOUND 2026-11-16 by the operator session while building W1-T12842, from the author preflights of 2026-11-15 and 2026-11-16 on the operator Mac (the complete logs are kept by the operator session).
+
+    - W1-T12842 gives each author preflight run one ledger row with a refusal class from a closed list: node-version, dependency-precheck, static-wait-bound, test-slot-wait-bound, census-time-bound, lint-plan, affected-tests, other.
+    - The refusals actually met in those two days, and the class each takes under that list:
+      - disk: `Mac author capacity NOT_RUN before static-preflight: {... "reserveBasis":"existing-20GiB" ... "shortfallBytes":13938688 ...}`, three runs: other.
+      - memory: `... "reasons":["pressure:warning"],"stage":"entry" ...`, four runs: other.
+      - `census-precheck failed` naming test/host-capability-fixtures.test.ts and test/the-affected-suite-reach-ratchet.test.ts, two runs: other.
+      - dependency precheck (`installed package version differs: node_modules/hono`), one run: dependency-precheck.
+      - census time bound, four runs: census-time-bound.
+      - failing affected tests, three runs: affected-tests.
+    - Nine of the seventeen fall in other, so the two commonest causes on this host would count as one symptom with every unrelated refusal.
+    - W1-T12842's builder carried the admission's own tokens on the row as `capacity_reasons`, so the class can be derived without parsing text.
+    - NOT SOLVED HERE, recorded for whoever reads these rows: a Mac run appends to the Mac's own ledger (`~/Remudero/state/ledger.ndjson`), which the scout on the fleet host never reads.
+  design: |
+    1. Extend the closed list with disk-reserve, memory-pressure, census-precheck and static-preflight.
+    2. disk-reserve and memory-pressure come from the capacity refusal's reason tokens; census-precheck and static-preflight from the receipt's first failed step, with the failing suite or check on the row.
+    3. Everything else keeps its class; an unrecognised cause is other.
+    INVARIANT the-class-list-stays-closed: the class on every row is a member of the list, and no class defined by W1-T12842 changes meaning.
+    NOT IN SCOPE: getting Mac rows to the fleet scout; clustering by class in the scout; the admission rules themselves.
+  falsifier: |
+    Map a disk or memory refusal to other and criterion 1 must fail. Map a failed census precheck or static preflight to other, or drop the failing name, and criterion 2 must fail. Emit a class outside the list, or change what dependency-precheck means, and criterion 3 must fail. Restore and all pass.
+  note: |
+    reservation hand-off: run-unfiled-1794825029219 -> run-unfiled-1794825029219
+    Reserved with rmd next-task-id from a worktree at origin/main. Build after W1-T12842 merges: it adds the row, the list and the capacity_reasons field. The test folder is the one rmd test-place computed for W1-T12842's suite, which this one sits beside.

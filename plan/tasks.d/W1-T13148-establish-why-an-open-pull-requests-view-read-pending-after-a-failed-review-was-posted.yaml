@@ -1,0 +1,51 @@
+- id: W1-T13148
+  title: "Establish why an open pull request's view read its review as pending for minutes after a failed review had been posted, and pin the cause in a test"
+  repo: remudero
+  priority: 1.0
+  depends_on: [W1-T12994]
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the view's review state decides whether a pull request is reviewed again, fixed or armed
+  band_meaning: span
+  origin: "operator-session#pr-queue-root-causes-2026-11-15"
+  plan_refs:
+    - W1-T12994
+    - W1-T11729
+    - W1-T8088
+  files:
+    - src/lib/tick-read-worker.ts
+    - src/lib/sweep.ts
+    - test/sweep/a-view-reads-the-review-state-github-holds-for-its-head.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The cause is established from rows and code, not assumed: the test replays the recorded sequence of #18701 (a refusal, a pending post, a failure post, then three passes) through the real view producer and shows which input made the view read pending with a pending stamp at or before the refusal"
+      proof: "grep: W1-T13148 criterion 1 in test/sweep/a-view-reads-the-review-state-github-holds-for-its-head.test.ts"
+    - claim: "With the cause fixed, a view built after a terminal review status exists for the head reads that state, and its pending stamp is the newest pending post for the head or absent"
+      proof: "grep: W1-T13148 criterion 2 in test/sweep/a-view-reads-the-review-state-github-holds-for-its-head.test.ts"
+    - claim: "invariant:a-live-pending-is-still-pending — a head whose newest review status is a pending post with a live owner still reads pending with that post's time, and a head with no review status reads none"
+      proof: "grep: W1-T13148 criterion 3 in test/sweep/a-view-reads-the-review-state-github-holds-for-its-head.test.ts"
+  rationale: |
+    OBSERVED 2026-11-15 in the core ledger and on GitHub, read-only, by the operator session; narrowed on 2026-11-16 by the builder of W1-T12994.
+
+    - #18701, head 5dd7beb1. GitHub's status history for remudero-review: pending 17:32:24Z, pending 18:04:58Z, failure 18:06:55Z, failure 18:14:31Z, failure 18:15:41Z.
+    - `sweep.disposed` at 18:14:25Z (`snapshot_age_ms` 8801) and 18:16:34Z (77789) read "the pending review's post was refused after it began (reviewer code cd1e5c686771 is materially behind ...) — re-running the review lane", `acted` true. That reason needs the view to read pending with a pending stamp at or before the 17:36:36Z refusal. Seven and nine minutes earlier GitHub already held a failure for that head.
+    - #18679 showed the same reason with a failure status on GitHub.
+    - READ by the builder of W1-T12994: `reviewState` comes from the combined-status rollup (`reviewStateFromRollup`, src/lib/tick-read-worker.ts); `reviewPendingSince` is the ledger's last `review.pending_posted` row at the head. Replaying the rows as filed does not reproduce the live reason: with the pending stamp at 18:04:58Z main derives a wait. It reproduces only when the view dates its pending at or before 17:36:36Z.
+    - So one of these holds, and nobody has shown which: the 18:04:58Z pending is not a `review.pending_posted` row for this head in the ledger the view read; the rollup the view read predates the failure status (a cached or conditional read); or a second refusal exists that the record does not list. `snapshot_age_ms` measures the generation's publish time, not the GitHub read.
+    - W1-T12994 stops such a view from blocking the fix lane once a delivered failure is on record. It does not say why the view was wrong.
+  design: |
+    MEASURE FIRST, and the measurement is most of this task. From the core ledger's rows for #18701 and #18679 (the union of live and rotated files; they are from 2026-11-15T17:30Z to 18:30Z) and the read path's own code, establish which input was stale or missing: the status rollup, the pending stamp's source row, or the refusal set. Put the rows and the finding in the PR body.
+
+    1. Write the replay as a test through the real view producer, red for the established cause.
+    2. Fix that cause where it originates, as small as it can be.
+    3. If the rows no longer exist and the cause cannot be established, say so plainly, keep the replay as a pinning test of today's behaviour for the three candidate inputs, and change no source: report "cause not established, test only".
+    INVARIANT a-live-pending-is-still-pending: a head whose newest review status is a pending post with a live owner reads pending with that post's time; nothing here makes a live review look finished.
+    NOT IN SCOPE: what the sweep does with a pending view and a delivered verdict (W1-T12994); restoring a regressed status (W1-T11729); read caching policy beyond the one cause found.
+  falsifier: |
+    Feed the view the stale input and criterion 1's replay must show the live reason; with the fix removed criterion 2 must fail. Make a live pending read as its predecessor's state and criterion 3 must fail. Restore and all pass.
+  note: |
+    reservation hand-off: run-unfiled-1794825029219 -> run-unfiled-1794825029219
+    Reserved with rmd next-task-id from a worktree at origin/main. Build after W1-T12994 merges: it adds the fields the replay asserts on. The test folder is the one rmd test-place computed for a stub importing sweep.ts and tick-read-worker.ts. Two other branches change src/lib/sweep.ts near the review code (W1-T12994) and the refresh selection (W1-T12945): keep the source change small.
