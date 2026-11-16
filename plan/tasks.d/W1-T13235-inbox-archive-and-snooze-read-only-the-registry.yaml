@@ -1,0 +1,45 @@
+- id: W1-T13235
+  title: "Inbox archive and snooze check that the proposal exists from the registry alone, with no plan load, plan projection or ledger read, so setting an item aside answers in milliseconds"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: low # the existence check of two triage verbs; their marks, ledger rows and answers are unchanged
+  origin: "operator-session#serve-oom-2026-11-16"
+  plan_refs:
+    - W1-T13188
+    - W1-T8831
+  files:
+    - src/lib/panel-graph.ts
+    - test/console-api/inbox-archive-and-snooze-read-only-the-registry.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "POST /v1/inbox/archive and /v1/inbox/snooze answer 200 as before for a proposal in the registry, and 404 not_found for one absent from it, while a counting statusGithub and a plan path that does not exist show no plan read and no GitHub projection call"
+      proof: "grep: W1-T13235 criterion 1 in test/console-api/inbox-archive-and-snooze-read-only-the-registry.test.ts"
+    - claim: "The existence check reads the same registry file prepareInboxPass reads (inboxInputPaths(deps).registryPath through parseProposalRegistry), so an id the registry gains is found on the next call"
+      proof: "grep: W1-T13235 criterion 2 in test/console-api/inbox-archive-and-snooze-read-only-the-registry.test.ts"
+    - claim: "invariant:decisions-keep-their-classification — decline, restore, keep and reframe still classify the named proposal (W1-T13188) before they act"
+      kind: guard
+      proof: "grep: W1-T13235 criterion 3 in test/console-api/inbox-archive-and-snooze-read-only-the-registry.test.ts"
+  rationale: |
+    WHY: after W1-T13188 a write classifies only its own proposal, but it still loads the plan, projects it and reads the
+    live ledger first. MEASURED in serve.demand on 2026-11-16 after the deploy: /v1/inbox/snooze max 11,002 ms (18:50:45Z
+    window) and /v1/inbox/archive 2,913 ms (18:45:43Z), with a stall profile at 18:46:22Z (11.0 s) whose frames are
+    classifyAllProposals under inbox-verdict-command.ts. Before W1-T13187/13188 one Decline took 887 s.
+    READ at origin/main, src/lib/panel-graph.ts buildInboxVerbActions: archive and snooze use only `proposals` from
+    classifyAllProposals (an existence check), then write state/inbox-triage.json and one ledger row.
+  design: |
+    INVARIANT decisions-keep-their-classification: only archive and snooze change.
+    1. Add a small helper inboxRegistryHas(deps, id): parseProposalRegistry(readFileIfExists(inboxInputPaths(deps).registryPath))
+       .some((p) => p.id === id).
+    2. archive and snooze call it instead of classifyAllProposals. Everything after the check is unchanged.
+    3. Tests in the new file, built like test/the-operator-can-archive-or-snooze-an-inbox-item.test.ts.
+  falsifier: |
+    Keep classifyAllProposals in archive or snooze: criterion 1 fails (the plan is read). Read a different registry path:
+    criterion 2 fails. Route decline through the registry check: criterion 3 fails.
+  note: |
+    Id reserved for run-unfiled-1794855269000 with ~/rmd-work/bin/reserve-id.sh.
