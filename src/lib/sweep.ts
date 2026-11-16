@@ -6442,10 +6442,20 @@ function reviewSetupRefusalHolds(pr: OpenPrView, policy: SweepPolicy, ageDays: n
   return DISPOSITION_RULES.slice(self + 1).find((rule) => rule.when(pr, policy, ageDays, now, facts))?.disposition === "post-review";
 }
 
-/** W1-T13193 — true when this ledger already holds the hold's one escalation for the PR's head and body digest. */
-function reviewSetupRefusalEscalated(ledgerLines: ReadonlyArray<Record<string, unknown>>, pr: OpenPrView): boolean {
-  return ledgerLines.some((row) => row.step === REVIEW_SETUP_REFUSAL_ESCALATED_STEP && row.pr_number === pr.prNumber &&
-    row.head_sha === pr.headSha && row.review_input_digest === pr.reviewInputDigest);
+/** W1-T13193 — the cause a held review-setup refusal's parked_pr.remedy row names, `review-setup-refused:<reason>`. */
+export function reviewSetupRefusalCause(reason: string): string {
+  return `review-setup-refused:${reason}`;
+}
+
+/** W1-T13193 — true when this ledger already holds the hold's one record for the PR's head and body digest: the taken
+ *  parked_pr.remedy row when the remedy host is wired (W1-T13045's pattern), else the legacy escalation row. A refused
+ *  remedy row is not a record, so the next pass takes the remedy again. */
+function reviewSetupRefusalRecorded(ledgerLines: ReadonlyArray<Record<string, unknown>>, pr: OpenPrView, remedied: boolean): boolean {
+  const held = pr.reviewSetupRefused;
+  return ledgerLines.some((row) => row.pr_number === pr.prNumber && row.head_sha === pr.headSha &&
+    row.review_input_digest === pr.reviewInputDigest && (remedied
+    ? row.step === PARKED_PR_REMEDY_STEP && row.cause === reviewSetupRefusalCause(held?.reason ?? "") && row.outcome === "taken"
+    : row.step === REVIEW_SETUP_REFUSAL_ESCALATED_STEP));
 }
 
 /** W1-T5863 — true when a post-review demand would re-admit an input the sweep has already admitted
@@ -12451,8 +12461,8 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
   {
     // W1-T13193 — A REVIEW SETUP REFUSED AT THE SAME INPUT IS NOT RE-ADMITTED EVERY PASS. A refused setup writes no
     // review.posted row, so the W1-T5863 row below never trips on it. Ordered before every post-review row, this row
-    // holds the demand until the head, the body or the reviewer code changes; runSweep escalates the hold once per head
-    // and digest. The blocker is `other`, not awaiting-review: no review lane owns a held review, so the hold climbs
+    // holds the demand until the head, the body or the reviewer code changes; runSweep takes one parked-PR
+    // remedy per head and digest (or, with no remedy host, escalates once). The blocker is `other`, not awaiting-review: no review lane owns a held review, so the hold climbs
     // the SLO ladder like every blocked-ambiguous row, and the #13305 stage diagnosis reads the hold's refusals too.
     disposition: "blocked-ambiguous",
     blocker: "other",
@@ -23812,11 +23822,12 @@ export async function runSweep(
             : `an escalation was already filed for this head (${pr.headSha.slice(0, 7)}) — the ` +
             `escalation is deduped, not skipped, and a new head re-earns its own`;
         }
-        // W1-T13193: a held review-setup refusal escalates once per head and body digest, keyed by its own row.
+        // W1-T13193: a held review-setup refusal takes one remedy (or one legacy escalation) per head and body digest.
         if (setupRefusalHeld && disposition === "blocked-ambiguous" && standDownHold === undefined && !strikeLadderDue && !sloLadderDue) {
-          alreadyDone = reviewSetupRefusalEscalated(ledgerLines, pr);
+          alreadyDone = reviewSetupRefusalRecorded(ledgerLines, pr, deps.parkedPr !== undefined);
           dedupStandDownReason = alreadyDone
-            ? `${reason} — escalated once for this head and input (${pr.headSha.slice(0, 7)}); no review admitted` : undefined;
+            ? `${reason} — ${deps.parkedPr ? "the parked-pr remedy is already recorded" : "escalated once"} for this head and input ` +
+              `(${pr.headSha.slice(0, 7)}); no review admitted and no needs-human issue is opened again` : undefined;
         }
         // An unanswered escalation past its SLO reaches the ladder in the action arm; the dedup still forbids a second issue.
         if (alreadyDone && heldEscalationSlo !== undefined) {
@@ -25690,9 +25701,29 @@ export async function runSweep(
               break;
             case "blocked-ambiguous":
               if (setupRefusalHeld && standDownHold === undefined && !strikeLadderDue && !sloLadderDue) {
-                // W1-T13193: the hold's own row is written first and keys its dedup, like the ownership escalation. acted
-                // stays false, so a later escalation at this head for another cause is not deduped by this one.
+                // W1-T13193: acted stays false, so a later escalation at this head for another cause is not deduped by this one.
                 const held = pr.reviewSetupRefused!;
+                if (deps.parkedPr) {
+                  // No pull request waits on the operator (W1-T13045): the hold opens no needs-human issue. It takes one
+                  // parked-PR remedy row per head and digest; the row carries the digest, so a fix-on-pr row of another
+                  // body does not stand for this one. A held task, once filed, is reused per pull request and cause.
+                  const cause = reviewSetupRefusalCause(held.reason);
+                  const facts = await parkedPrFacts(pr, { redChecks: redCheckNames(pr).filter(r => !r.startsWith("review:")),
+                    fixModelOrder: policy.fixModelOrder ?? DEFAULT_FIX_MODEL_ORDER }, ledgerLines, deps.parkedPr);
+                  const inputLedger = ledgerLines.filter((row) => !(row.step === PARKED_PR_REMEDY_STEP && row.cause === cause &&
+                    row.remedy === "fix-on-pr" && row.review_input_digest !== pr.reviewInputDigest));
+                  const parked = await takeParkedPrRemedy(pr, parkedPrRemedy(facts), inputLedger, deps.parkedPr, { runId: deps.runId,
+                    ledgerTaskId: escalationTaskIdFor(pr), nowIso: clockFromMillisFn(() => now).iso(), cause,
+                    text: `review setup refused ${held.count} times (${held.reason}) at head ${pr.headSha.slice(0, 7)}, digest ` +
+                      `${pr.reviewInputDigest ?? "unknown"}: ${reason}`,
+                    append: (row) => appendLine(deps.ledgerPath, { ...row, review_input_digest: pr.reviewInputDigest,
+                      refusals: held.count, refusal_reason: held.reason }) });
+                  acted = false;
+                  standDownReason = `${reason} — parked-pr remedy ${parked.remedy} (W1-T13193): ${parked.reason}; ` +
+                    "no needs-human issue is opened";
+                  break;
+                }
+                // Legacy, with no remedy host wired: the hold's own row keys its dedup, like the ownership escalation.
                 appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: escalationTaskIdFor(pr), step: REVIEW_SETUP_REFUSAL_ESCALATED_STEP,
                   pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha, review_input_digest: pr.reviewInputDigest,
                   reason: held.reason, refusals: held.count, reviewer_code_sha: held.reviewerCodeSha });

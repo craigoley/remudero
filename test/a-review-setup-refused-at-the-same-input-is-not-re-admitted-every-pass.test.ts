@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -7,13 +7,19 @@ import {
   DEFAULT_SWEEP_POLICY,
   REVIEW_INPUT_ADMISSION_BACKSTOP,
   REVIEW_SETUP_REFUSAL_ESCALATED_STEP,
+  buildSweepEffects,
   deriveDisposition,
+  reviewSetupRefusalCause,
   runSweep,
   type ClarificationQuestion,
   type OpenPrView,
   type SweepDeps,
 } from "#test/helpers/sweep-test.js";
+import type { Config } from "#src/lib/config.js";
+import type { IssueGateway } from "#src/lib/escalate.js";
 import { appendLedger } from "#src/lib/ledger.js";
+import { PARKED_PR_REMEDY_STEP } from "#src/lib/parked-pr-remedy.js";
+import type { Plan } from "#src/lib/plan.js";
 import { reviewSetupRefusalsFor } from "#src/lib/tick-read-worker.js";
 
 // W1-T13193 — the live #18670 shape: a retro run branch run-RETRO-<ms> whose body trailer names RETRO-<ms>. Its
@@ -70,7 +76,7 @@ function viewFor(ledger: Row[], over: Partial<OpenPrView> = {}, running: string 
   } as OpenPrView;
 }
 
-function deps(ledgerPath: string): SweepDeps & {
+function deps(ledgerPath: string, parkedPr?: SweepDeps["parkedPr"]): SweepDeps & {
   escalated: Array<{ reason: string; question: ClarificationQuestion }>;
   reviewed: number[];
 } {
@@ -87,6 +93,7 @@ function deps(ledgerPath: string): SweepDeps & {
     ledgerPath,
     runId: "SWEEP-1",
     now: () => NOW,
+    ...(parkedPr === undefined ? {} : { parkedPr }),
   } as SweepDeps & { escalated: typeof escalated; reviewed: number[] };
 }
 
@@ -163,7 +170,69 @@ test("W1-T13193 criterion 2: a new head, a new body digest or new reviewer code 
   assert.equal(disposed[0]!.disposition, "post-review");
 });
 
-test("W1-T13193 criterion 3: the held PR escalates once per head and input", async () => {
+/** The production parkedPr host, built by buildSweepEffects; its GitHub issue gateway records every write. */
+function productionParkedPr(ledgerPath: string, issueWrites: string[]): NonNullable<SweepDeps["parkedPr"]> {
+  const root = mkdtempSync(join(tmpdir(), "rmd-t13193-root-"));
+  mkdirSync(join(root, "state"));
+  const issues: IssueGateway = {
+    ensureLabel: () => true, listOpen: () => [],
+    create: () => { issueWrites.push("issue"); return "https://github.com/craigoley/remudero/issues/1"; },
+    comment: () => { issueWrites.push("comment"); },
+  };
+  const effects = buildSweepEffects({
+    owner: "craigoley", repo: "remudero", repoRoot: root,
+    config: { root, claudeBin: "/bin/true" } as Config,
+    plan: { tasks: [], byId: new Map() } as unknown as Plan,
+    ledgerPath, runId: "SWEEP-1",
+    log: () => undefined, issuesImpl: issues, ghRunImpl: () => undefined, nowMsImpl: () => NOW,
+    readJsonImpl: async () => ({ user: { login: "remudero-fleet[bot]" } }),
+  });
+  assert.ok(effects.parkedPr, "the production effects wire the parkedPr host");
+  return effects.parkedPr;
+}
+
+test("W1-T13193 criterion 3: the held PR takes one parked-PR remedy per head and input, and opens no needs-human issue", async () => {
+  const ledgerPath = ledgerWith(TWO_REFUSALS);
+  const issueWrites: string[] = [];
+  const parkedPr = productionParkedPr(ledgerPath, issueWrites);
+  const remedies = () => rows(ledgerPath).filter((row) => row.step === PARKED_PR_REMEDY_STEP);
+  const d1 = deps(ledgerPath, parkedPr);
+  await runSweep([viewFor(TWO_REFUSALS)], d1, DEFAULT_SWEEP_POLICY);
+  assert.deepEqual(d1.escalated, [], "deps.escalate is never called when parkedPr is wired");
+  assert.deepEqual(d1.reviewed, []);
+  assert.deepEqual(issueWrites, [], "no needs-human issue is opened");
+  assert.deepEqual(remedies().map((row) => [row.pr_number, row.head_sha, row.review_input_digest, row.cause, row.remedy, row.outcome]),
+    [[PR_NUMBER, HEAD, DIGEST, reviewSetupRefusalCause(REASON), "fix-on-pr", "taken"]]);
+  assert.equal(remedies()[0]!.cause, `review-setup-refused:${REASON}`);
+  assert.match(String(remedies()[0]!.text), /review setup refused 2 times \(head-task-metadata-unavailable\)/);
+  assert.match(String(remedies()[0]!.text), new RegExp(`digest ${DIGEST}`));
+  assert.equal(rows(ledgerPath).filter((row) => row.step === REVIEW_SETUP_REFUSAL_ESCALATED_STEP).length, 0);
+  const disposed = rows(ledgerPath).filter((row) => row.step === "sweep.disposed" && row.pr_number === PR_NUMBER);
+  assert.equal(disposed.at(-1)!.disposition, "blocked-ambiguous", "the hold stays: no review is admitted");
+
+  // Later passes at the same input write none, even after another refusal lands.
+  const d2 = deps(ledgerPath, parkedPr);
+  await runSweep([viewFor(TWO_REFUSALS)], d2, DEFAULT_SWEEP_POLICY);
+  const three = [...TWO_REFUSALS, refused("2026-11-15T11:40:00Z")];
+  appendLedger(ledgerPath, three.at(-1) as never);
+  const d3 = deps(ledgerPath, parkedPr);
+  await runSweep([viewFor(three)], d3, DEFAULT_SWEEP_POLICY);
+  assert.deepEqual([...d2.escalated, ...d3.escalated], []);
+  assert.deepEqual(d3.reviewed, []);
+  assert.equal(remedies().length, 1, "one remedy row per head and input, not one per pass");
+
+  // A new body that is refused twice too is a new input: it takes its own remedy row.
+  const BODY2 = "v1:retro-18670-body-2";
+  const second = [refused("2026-11-15T12:00:00Z", { review_input_digest: BODY2 }), refused("2026-11-15T12:05:00Z", { review_input_digest: BODY2 })];
+  for (const row of second) appendLedger(ledgerPath, row as never);
+  const d4 = deps(ledgerPath, parkedPr);
+  await runSweep([viewFor([...three, ...second], { reviewInputDigest: BODY2 })], d4, DEFAULT_SWEEP_POLICY);
+  assert.deepEqual(d4.escalated, []);
+  assert.deepEqual(remedies().map((row) => row.review_input_digest), [DIGEST, BODY2]);
+  assert.deepEqual(issueWrites, []);
+});
+
+test("W1-T13193 criterion 3: legacy control, with no parkedPr the hold escalates once per head and input", async () => {
   const ledgerPath = ledgerWith(TWO_REFUSALS);
   const d1 = deps(ledgerPath);
   await runSweep([viewFor(TWO_REFUSALS)], d1, DEFAULT_SWEEP_POLICY);
@@ -175,17 +244,12 @@ test("W1-T13193 criterion 3: the held PR escalates once per head and input", asy
   assert.equal(escalations()[0]!.reason, REASON);
   assert.equal(escalations()[0]!.refusals, 2);
   assert.equal(escalations()[0]!.review_input_digest, DIGEST);
+  assert.equal(rows(ledgerPath).filter((row) => row.step === PARKED_PR_REMEDY_STEP).length, 0);
 
-  // Later passes at the same input write none, even after another refusal lands.
   const d2 = deps(ledgerPath);
   await runSweep([viewFor(TWO_REFUSALS)], d2, DEFAULT_SWEEP_POLICY);
   assert.equal(d2.escalated.length, 0, "one escalation per input, not one per pass");
-  const three = [...TWO_REFUSALS, refused("2026-11-15T11:40:00Z")];
-  appendLedger(ledgerPath, three.at(-1) as never);
-  const d3 = deps(ledgerPath);
-  await runSweep([viewFor(three)], d3, DEFAULT_SWEEP_POLICY);
-  assert.equal(d3.escalated.length, 0);
-  assert.deepEqual(d3.reviewed, []);
+  assert.deepEqual(d2.reviewed, []);
   assert.equal(escalations().length, 1);
 });
 
