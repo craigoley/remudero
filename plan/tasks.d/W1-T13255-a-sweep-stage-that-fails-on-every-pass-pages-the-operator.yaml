@@ -1,0 +1,45 @@
+- id: W1-T13255
+  title: "A sweep stage that fails on every pass opens a needs-human issue once its failure streak outlasts the streaks it has recovered from, and closes it when the stage next succeeds"
+  repo: remudero
+  priority: 0.4
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # it adds a page to the operator's alert channel
+  band_meaning: span
+  origin: "operator-session#escalation-answers-overflow-2026-11-16"
+  plan_refs:
+    - W1-T13254
+    - W1-T13248
+    - W1-T11405
+  files:
+    - src/cli/commands/sweep.ts
+    - src/lib/escalation-catalogue.ts
+    - test/inbox/a-sweep-stage-that-fails-on-every-pass-pages-the-operator.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "When a sweep prelude stage (escalation answers first) fails on every pass for longer than the bound derived from its own past failure streaks, the sweep opens one needs-human issue naming the stage, the error, the first failure and the pass count"
+      proof: "grep: W1-T13255 criterion 1 in test/inbox/a-sweep-stage-that-fails-on-every-pass-pages-the-operator.test.ts"
+    - claim: "The issue is opened once per streak and closed by the stage's next success, with a ledger row for each"
+      proof: "grep: W1-T13255 criterion 2 in test/inbox/a-sweep-stage-that-fails-on-every-pass-pages-the-operator.test.ts"
+    - claim: "invariant:a-passing-or-flickering-stage-is-quiet — a stage that succeeds, or fails within the length of streaks it has recovered from, opens nothing, and the sweep still continues past a failing stage as today"
+      proof: "grep: W1-T13255 criterion 3 in test/inbox/a-sweep-stage-that-fails-on-every-pass-pages-the-operator.test.ts"
+  rationale: |
+    MEASURED 2026-11-16 by the operator session on the core ledger (read-only).
+
+    - The escalation answers stage failed on every full sweep pass from at least 2026-11-10 to 2026-11-16 (`escalation_answers.error` 31 to 91 rows a day; the passes between were `escalation_answers.unreadable`), so no operator answer was applied for six days (fix: W1-T13254). Nothing alerted the operator. The operator session found it by reading the ledger by hand, after its own fleet pulse flagged the error rows.
+    - READ src/cli/commands/sweep.ts: the prelude stage is wrapped in `try { … } catch (e) { log("escalation_answers.error", { error: … }); }`. The catch has no counter, no streak, and no route to the escalation channel, so a stage that fails forever looks exactly like one that failed once.
+    - Same class as the dispatch stall of the same day (W1-T13248): a fault that repeats on every pass produced only ledger rows nobody reads.
+  design: |
+    1. The sweep keeps, per prelude stage, the current failure streak (first failure ts, pass count, last error), derived from its own rows so it survives a restart.
+    2. The bound is derived: the p90 length of that stage's past failure streaks that cleared on their own over the trailing window; with fewer than five such streaks, a fallback named in the issue. Say which applied.
+    3. Open through a new catalogue entry (`tryEscalate`, as `escalateStarvation` does): stage, error text, first failure, passes. Close it on the stage's next success. One ledger row per open and close.
+    INVARIANT a-passing-or-flickering-stage-is-quiet: a succeeding or briefly failing stage opens nothing; the sweep's own control flow past a failing stage is unchanged.
+    NOT IN SCOPE: the overflow itself (W1-T13254); stages outside the sweep prelude; the dispatch stall page (W1-T13248).
+  falsifier: |
+    Remove the escalation and criterion 1 must fail. Open one issue per pass, or never close, and criterion 2 must fail. Page on a short streak, or stop the sweep at a failing stage, and criterion 3 must fail. Restore and all pass.
+  note: |
+    reservation hand-off: run-unfiled-1794863362836 -> run-unfiled-1794863362836
+    Reserved with rmd next-task-id from a worktree at origin/main. The test folder is the one rmd test-place computed for a stub importing escalation-catalogue.ts and sweep.ts.

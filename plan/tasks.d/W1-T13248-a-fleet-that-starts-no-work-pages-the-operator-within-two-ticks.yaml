@@ -1,0 +1,51 @@
+- id: W1-T13248
+  title: "A fleet whose free slots go only to runs refused before spend opens a needs-human issue within two ticks, and closes it when a run next passes its claim"
+  repo: remudero
+  priority: 0.4
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # it adds a page to the operator's alert channel; a false page trains the operator to ignore the channel
+  band_meaning: span
+  origin: "operator-session#fleet-dispatch-stall-2026-11-16"
+  plan_refs:
+    - W1-T13241
+    - W1-T13242
+    - W1-T13249
+    - W1-T3979
+  files:
+    - src/lib/daemon.ts
+    - src/lib/escalation-catalogue.ts
+    - test/inbox/a-fleet-that-starts-no-work-pages-the-operator-within-two-ticks.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "When two consecutive ticks admit work and every admitted run is refused before spend (its dispatch claim held elsewhere or unreachable), with no run passing its claim, and the refusing claim's newest sign of life is older than the measured claim-silence window, the daemon opens one needs-human issue naming the task, the holder, the claim's age and the release command"
+      proof: "grep: W1-T13248 criterion 1 in test/inbox/a-fleet-that-starts-no-work-pages-the-operator-within-two-ticks.test.ts"
+    - claim: "The issue is opened once per stall (deduped on the newest run that passed its claim, never on run.start) and is closed by the first run that passes its claim afterwards"
+      proof: "grep: W1-T13248 criterion 2 in test/inbox/a-fleet-that-starts-no-work-pages-the-operator-within-two-ticks.test.ts"
+    - claim: "invariant:a-live-holder-does-not-page — a refusal by a claim whose holder shows a sign of life inside the window, a single refused tick, or a tick that admitted nothing opens no issue"
+      proof: "grep: W1-T13248 criterion 3 in test/inbox/a-fleet-that-starts-no-work-pages-the-operator-within-two-ticks.test.ts"
+  rationale: |
+    OBSERVED 2026-11-16 (core ledger on the fleet host, read-only) with every stall detector read on origin/main 580c27dc1a by a read-only investigation.
+
+    - The fleet started no work from 14:42Z to 20:30Z: each tick's one free slot went to W1-T12114, refused because a dead hand session held its claim (release: W1-T13241; slot: W1-T13242). The daemon was live on every heartbeat. Nothing alerted the operator; an operator session noticed by hand after about 5.5 hours, and the claim was then dropped by hand.
+    - Why nothing paged, per detector (quotes from the investigation):
+      - `runTaskBody` logs `run.start` (run-task-verb.ts) BEFORE the claim and `dispatch.claim` after it, so every refused tick wrote a fresh implement `run.start`. The queue-head STALL (status-board.ts `deriveDispatchCadence`), doctor's dispatch-stall, the incident invariant `dispatch-stall` (`bad: held > 0 && implementStarts === 0 && fulfilled === 0`), the starvation escalation and the heartbeat's `dispatch_last_ts` all read that `run.start` as a dispatch, so all saw a fleet that was building. W1-T13249 repairs those readers.
+      - The idle branch that drives `escalateStarvation` (the one dispatch alarm that opens a needs-human issue) runs only when `dispatchSet.length === 0`; W1-T12114 was in the set every tick.
+      - The incident invariant `repeated-refusal` reads `*_refused` steps; the refusal is `dispatch.claim` (outcome taken) plus a verdict row.
+      - `staleDispatchClaimEscalations` (24 h cross-host claim) lands only as a NEEDS ME line on a rendered status board; nothing passes it to the escalation channel, and the JSON board omits it.
+      - The heartbeat's `DISPATCH_STALLED_AFTER_S=21600` (6 h) was not reached (5 h 48 m), and its last-dispatch line read the refused runs' `run.start`.
+      - The SRE lane's stranded-task detector likely saw W1-T12114 as stranded, which files feedback, not a page.
+  design: |
+    1. At the `blocked_inflight` / `blocked_git_fetch` settle branch and the tick tail, count per tick: admitted runs, runs refused before spend, runs that passed their dispatch claim. Two consecutive ticks with admissions, all refused before spend and none passing, start the condition.
+    2. The bound is derived: the refusing claim's newest sign of life must be older than `claimSilenceWindow` (the fleet's own claim-to-verdict window, floored as that function floors it). With no samples, fall back to the p90 of recent gaps between runs that passed their claim while candidates exist. Say which bound fired in the issue and the row.
+    3. Deliver through a new catalogue entry modelled on `escalateStarvation` / `escalateStarvationCleared` (`tryEscalate`): task, holder `pid@host` from the anchor, claim age, the bound and its source, and the operator release command (`rmd claim <id> --drop` on the holder's host). A ledger marker row per open and per clear; dedup on the newest claim-passing run, never `run.start`.
+    INVARIANT a-live-holder-does-not-page: a refusal by a claim whose holder shows a sign of life inside the window, a single refused tick, or a tick that admitted nothing opens no issue; the starvation escalation and every existing escalation behave as on origin/main.
+    NOT IN SCOPE: releasing the claim (W1-T13241), freeing the slot (W1-T13242), the readers that count a refused run as a dispatch (W1-T13249), the heartbeat's bound.
+  falsifier: |
+    Remove the escalation and criterion 1 must fail. Dedup on run.start, or never close, and criterion 2 must fail. Page on one refused tick or on a live holder and criterion 3 must fail. Restore and all pass.
+  note: |
+    reservation hand-off: run-unfiled-1794862803452 -> run-unfiled-1794862803452
+    Reserved with rmd next-task-id from a worktree at origin/main. The test folder is the one rmd test-place computed for a stub importing escalation-catalogue.ts and daemon.ts. Drive the daemon through its injected seams; do not add a test importer of src/run-task.ts.

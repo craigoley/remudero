@@ -245,6 +245,8 @@ test("W1-T6407: the installed GitHub gateway delivers the alarm through its asyn
   const shim = ghShim([
     { when: "/comments?", stdout: JSON.stringify([1, 2, 3].map(id => ({ id, body: secret, author_association: "MEMBER", user: { login: "cao825", type: "User" } }))) },
     { when: "/reactions?", stdout: "[]" },
+    // W1-T13223: a MEMBER is re-checked for admin permission; this one holds write, so it is still refused.
+    { when: "/permission", stdout: JSON.stringify({ permission: "write" }) },
     { when: "labels=needs-question", stdout: JSON.stringify([{ number: 42, html_url: question(42).url, body: "**Task:** W1-T42" }]) },
     { when: "labels=needs-human", stdout: "[]" },
     { when: "issue create", stdout: "https://github.com/o/r/issues/100" },
