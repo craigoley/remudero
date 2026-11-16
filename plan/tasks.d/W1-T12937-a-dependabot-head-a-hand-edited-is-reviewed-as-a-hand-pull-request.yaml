@@ -18,7 +18,8 @@
     - src/lib/dep-review.ts
     - src/lib/tick-read-worker.ts
     - test/review/a-dependabot-head-a-hand-edited-is-reviewed-as-a-hand-pull-request.test.ts
-  status: queued
+  status: blocked
+  retirement: withdrawn  # superseded by W1-T12955 (PR #18723, filed 38 minutes earlier and broader); operator ruling 2026-11-15
   attempts: 0
   acceptance:
     - claim: "The sweep disposes a pull request on a dependabot/ branch whose head is PROVEN to carry a non-Dependabot commit through the ordinary rows (post-review when its checks are green and it has no review), and one whose commits are all Dependabot's, or whose commits could not be read, still takes the dep-review row"
@@ -47,5 +48,8 @@
   falsifier: |
     Route by branch prefix alone again and criterion 1 must fail. Let the dependency lane arm an edited head and criterion 2 must fail. Remove the dependabot/ exclusion from one fix row and criterion 3 must fail. Drop the per-head state and criterion 4 must fail. Restore and all pass.
   note: |
+    RETIREMENT RECORD, 2026-11-15 — THIS SHARD IS SUPERSEDED. Two operator sessions filed the same root cause 38 minutes apart: W1-T12955 (#18723, merged 19:44Z) and this task (#18724, merged 20:22Z).
+    SUPERSEDED BY W1-T12955, which was filed first and covers more: it routes a refused Dependabot pull request with no owned-build proposal (reason foreign-commit) to a full review, admits a nested pip requirements lock as a manifest, and closes the dep-review-refused escalation issue. It carries this task's guards: an owned-build proposal keeps its route, and no fix round is dispatched onto the Dependabot branch.
+    One point of this record W1-T12955's builder may want: the hand-off row written once per head, naming the non-Dependabot commit. It is blocked, not queued, so dispatch does not build both.
     reservation hand-off: run-unfiled-1794763854161 -> run-unfiled-1794763854161
     Reserved with rmd next-task-id from a worktree at origin/main. Check refs/rmd-dispatch/W1-T12937 and any run branch before building. The test folder is the one rmd test-place computed for a stub importing dep-review.ts and the sweep test helper. W1-T12841 gives an unheld hand-built pull request the fix lane's rounds; it must keep excluding dependabot/ branches (criterion 3 here).
