@@ -1,0 +1,50 @@
+- id: W1-T13191
+  title: "A precheck child that completes leaves no capture directory behind, and one that is stopped or rejected leaves exactly one"
+  repo: remudero
+  priority: 0.9
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium
+  band_meaning: span
+  origin: "operator-session#mac-author-preflight-2026-11-16"
+  plan_refs:
+    - W1-T13146
+    - W1-T13190
+    - W1-T12258
+    - W1-T13194
+    - W1-T12257
+  files:
+    - scripts/census-precheck.mjs
+    - test/ci/gates/a-run-that-ends-leaves-no-capture-directory-behind.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A precheck child that completes leaves no capture directory behind"
+      proof: "grep: W1-T13191 criterion 1 in test/ci/gates/a-run-that-ends-leaves-no-capture-directory-behind.test.ts"
+    - claim: "A precheck child that is stopped or rejected leaves exactly one capture directory, retained with its reason"
+      proof: "grep: W1-T13191 criterion 2 in test/ci/gates/a-run-that-ends-leaves-no-capture-directory-behind.test.ts"
+    - claim: "invariant:evidence-of-a-stopped-run-is-kept — a capture retained for a stopped, rejected or custody-unknown child is never removed by this change, and no directory another process owns is touched"
+      proof: "grep: W1-T13191 criterion 3 in test/ci/gates/a-run-that-ends-leaves-no-capture-directory-behind.test.ts"
+  rationale: |
+    COUNTED 2026-11-16 on the operator Mac and the fleet host, by the operator session and the builder of W1-T13146.
+
+    - Before that day's reboot the Mac's temp root held 1,190 `rmd-*` / `remudero-*` entries: 506 `rmd-containment-test-*`, 450 `rmd-census-capture-*`, 63 `rmd-cow-wt-*` and others. The reboot emptied it. Seventy minutes later it held 234: 110 `rmd-containment-test-*`, 100 `rmd-census-capture-*`. So the leak runs at about three entries a minute while author preflights run.
+    - The fleet host's /tmp held 140 the same day, 31 of them `rmd-census-capture-*`.
+    - The containment suite's share of that count is W1-T13194; this task is the precheck's captures.
+    - A janitor for such leftovers on a Mac exists (W1-T12257, merged that day), with an age window; on the operator Mac the installed copy dated from 2026-11-11 and did not yet carry it.
+    - READ scripts/census-precheck.mjs: `runCensusChild` makes `rmd-census-capture-*` per child; a complete capture goes through `completeCensusCapture`, a failed custody read through `retainFixture`. Which of the two the 100 leftovers came from is not known.
+    - Each leftover is small, but every beat measures each one (W1-T13190), and on the Mac that made one suite take 179 s and stopped four author preflights at the census bound (W1-T13146, W1-T13189).
+  design: |
+    MEASURE FIRST: on the Mac, list the `rmd-census-capture-*` leftovers with what each holds (a complete result, a stop, a rejection) and say which path left them; do the same for the `rmd-cow-wt-*` entries and name their producer. Put the counts in the PR body. A producer found here that is outside this task's files is reported, not changed.
+
+    1. census-precheck.mjs: a complete capture's directory is removed once its result is read; the stopped, rejected and custody-unknown cases keep theirs, as today.
+    2. The new suite drives the capture path with an injected child through each of the three endings and counts the directories under a temp root of its own.
+    INVARIANT evidence-of-a-stopped-run-is-kept: nothing retained on purpose is removed, and nothing is removed by name pattern across the temp root.
+    NOT IN SCOPE: a reaper for old leftovers (the test setup's dead-owner reaper is the place for one; report whether its prefix list covers these names); the beat's cost (W1-T13190).
+  falsifier: |
+    Keep a complete capture and criterion 1 must fail. Drop a stopped or rejected one, or keep two, and criterion 2 must fail. Remove a retained capture, or remove by pattern across the temp root, and criterion 3 must fail. Restore and all pass.
+  note: |
+    reservation hand-off: run-unfiled-1794841356902 -> run-unfiled-1794841356902
+    Reserved with rmd next-task-id from a worktree at origin/main. The new test's folder is the one rmd test-place computed for a stub importing scripts/census-precheck.mjs and the owned-fixture helper. W1-T13146 changes scripts/census-precheck.mjs too (the child's time bound): build on top of it if it has merged.
