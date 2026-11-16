@@ -365,6 +365,18 @@ const SEED_ROWS: readonly SeedRow[] = [
     outcomes: ["adopted"],
   },
   {
+    // W1-T13046: the hold names the criteria and checks it covers.
+    step: "fix.needs_design",
+    meaning:
+      "A fix round answered NEEDS_DESIGN and the fix lane holds the head: later passes at this head, task contract " +
+      "and PR body stand down with no worker. `reason` is the worker's question. `covers_criteria` lists the unmet " +
+      "claims the round was given, and `covers_checks` the red check names it was given. The sweep splits the covered " +
+      "criteria into a held follow-up task, or closes and rebuilds the pull request when the hold covers every " +
+      "criterion or only red checks. `needs_design_kind` and `needs_design_remedy` name W1-T12714's route.",
+    writer: ["runFixRung"],
+    outcomes: ["amendment-proposed", "escalate"],
+  },
+  {
     // W1-T12714: no needs-design report ends a pass with only a hold.
     step: "fix.needs_design_routed",
     meaning:
@@ -392,12 +404,15 @@ const SEED_ROWS: readonly SeedRow[] = [
   {
     step: "github.budget.configured",
     meaning:
-      "At start, the daemon set its share of the GitHub App installation from the instance registry: " +
+      "At start, a process that reads with the GitHub App installation token set its share of the installation " +
+      "from the instance registry. role names the process: daemon, run_child or serve. The row gives " +
       "the consumer count and the registry it read (the host copy, else the checkout's copy when the host file is missing). " +
+      "A run child also gives share_divisor, the host worker budget that splits the run-child share; " +
+      "with no divisor it is 1 and divisor_reason is divisor_missing. " +
       "\"unconfigured\" names why there is no share (no installation id, an unreadable registry, no instance on the " +
       "installation); its reads are then paced as before. An instance found by neither RMD_INSTANCE_NAME nor the target " +
       "repo is \"unknown\", with instance_reason. Rotation keeps the row of each surviving boot.",
-    writer: ["startDaemonInstallationBudget"],
+    writer: ["startProcessInstallationBudget"],
     outcomes: ["configured", "unconfigured"],
   },
   {
@@ -420,9 +435,25 @@ const SEED_ROWS: readonly SeedRow[] = [
       "failure, or did not land, at or past fix.stallRounds. It took the first remedy not tried for this pull " +
       "request and criterion: `stronger-worker` (a round on the next mount in fix.modelOrder, named in `mount`, " +
       "with the earlier approaches listed), `amend-criterion` (an acceptance amendment proposal, `amendment_url`), or " +
-      "`operator-input` (one escalation). \"skipped\" means the remedy could not apply; `reason` says why.",
+      "`operator-input` (one escalation; with the parked-PR remedy wired, a held task instead, named in " +
+      "`parked_pr_remedy` and `held_task_id`). \"skipped\" means the remedy could not apply; `reason` says why.",
     writer: ["takeStallRemedy"],
     outcomes: ["taken", "skipped"],
+  },
+  {
+    // W1-T12709: an open pull request is never parked on a needs-human escalation.
+    step: "parked_pr.remedy",
+    meaning:
+      "Where the sweep would stand down an open pull request on a needs-human escalation, a stage stall or " +
+      "a clarification question, it took one remedy instead. `remedy` is fix-on-pr (a fix round, the stalled " +
+      "stage or the review runs again on the pull request, and the fix lane's open-escalation stand-down is " +
+      "released for this pull request and head), split-follow-up (the criteria that need operator input " +
+      "move to the held task `held_task_id` by an acceptance amendment, and the pull request merges on the " +
+      "rest) or close-and-rebuild (the pull request is closed and `held_task_id` rebuilds it). `cause` keys " +
+      "one held task per pull request; `text` is the escalation text it replaces. \"refused\" means the " +
+      "remedy could not act; `reason` says why, and the next pass tries again.",
+    writer: ["takeParkedPrRemedy"],
+    outcomes: ["taken", "refused"],
   },
   {
     // W1-T12711: a harness answer the code refused twice in one pass.

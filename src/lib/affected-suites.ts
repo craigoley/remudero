@@ -104,15 +104,15 @@ const SYMBOL_SOURCE = /^(?:src|scripts|bin)\//;
 /** W1-T12506: the harness state directory, repo-relative; its layout never overrides it, so no file is read. */
 const STATE_DIR = resolveRepoLayout("", () => undefined).stateDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 /** Areas the selector models: code the graph walks, and prose the path readers cover. */
-const MODELLED = new RegExp(`^(?:src|scripts|bin|test|docs|doctrine|plan|${STATE_DIR}|hooks)/|^[^/]+\\.md$`);
+const MODELLED = new RegExp(`^(?:src|scripts|bin|test|docs|doctrine|plan|${STATE_DIR}|hooks|\\.github)/|^[^/]+\\.md$`);
 /** W1-T12506: a test/ code file that is not a suite, which the import graph walks to its importers. */
 const TEST_HELPER = /^test\/helpers\/.*\.(?:ts|mts|mjs|js|cjs)$/;
 /** W1-T12506: files no code imports, read by the suites that name them (and those the read map records). */
-const NAMED_BY_SUITES = new RegExp(`^(?:${STATE_DIR}|hooks)/`);
+const NAMED_BY_SUITES = new RegExp(`^(?:${STATE_DIR}|hooks|\\.github)/`);
 const CONTRACT_FILE = /^(?:openapi\/daemon\.yaml|packages\/api-client\/src\/schema\.d\.ts)$/;
 
-/** The non-code files whose readers the read map OBSERVES: the contract and deploy trees, and json. */
-const READ_MAPPED = /^(?:(?:openapi|deploy)\/[\s\S]*|[\s\S]*\.json)$/;
+/** The non-code files whose readers the read map OBSERVES: the contract, deploy and .github trees, and json. */
+const READ_MAPPED = /^(?:(?:openapi|deploy|\.github)\/[\s\S]*|[\s\S]*\.json)$/;
 
 /** The two modelled contracts use content readers; other contract-tree paths force a full run.
  *  Other {@link READ_MAPPED} paths force one only when `readMapUsable` is false. */
@@ -652,6 +652,17 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   if (input.files.has(promptRender) && files.some((f) => promptRenderEdges.includes(f))) {
     pathReaders.push(promptRender);
   }
+  // W1-T8471: a coverage shard failed on this suite (run 38231421366, PR #11044) and the narrow selector missed it.
+  const repoLayoutSuite = suitePath("test/repo-layout.test.ts");
+  const repoLayoutSuiteEdges = [
+    "src/lib/daemon.ts",
+    "src/lib/loop-stall-profiler.ts",
+    "src/lib/read-plane.ts",
+    suitePath("test/an-unattributed-loop-stall-is-profiled-live.test.ts"),
+  ];
+  if (input.files.has(repoLayoutSuite) && files.some((f) => repoLayoutSuiteEdges.includes(f))) {
+    pathReaders.push(repoLayoutSuite);
+  }
   // W1-T7475: a coverage shard failed on this suite at 49b4c36c and the narrow selector missed it.
   const redBranchStrike = suitePath("test/a-red-branch-behind-its-base-spends-a-strike-first.test.ts");
   const redBranchStrikeEdges = [
@@ -683,12 +694,77 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   if (input.files.has(refusalAmendment) && files.some((f) => refusalAmendmentEdges.includes(f))) {
     pathReaders.push(refusalAmendment);
   }
+  const cappedRepair = suitePath("test/a-capped-pr-exhausts-repair-before-it-reaches-a-human.test.ts");
+  const cappedRepairEdges = [
+    "src/lib/in-tree-budget.ts",
+    "src/lib/plan-pr-emitter.ts",
+    suitePath("test/a-starved-plan-pr-preflight-leg-times-out-and-is-asked-again.test.ts"),
+  ];
+  if (input.files.has(cappedRepair) && files.some((f) => cappedRepairEdges.includes(f))) {
+    pathReaders.push(cappedRepair);
+  }
   // A coverage shard failed on this suite (run 41111628169, PR #15805) and the narrow selector missed it. The
   // suite drives scripts/openweight-probe.mjs, which reaches worker-provider's tool boundary, not a symbol it names.
   const openWeightProbe = suitePath("test/openweight-probe.test.ts");
   const openWeightProbeEdges = ["src/lib/worker-provider.ts", "scripts/openweight-probe.mjs"];
   if (input.files.has(openWeightProbe) && files.some((f) => openWeightProbeEdges.includes(f))) {
     pathReaders.push(openWeightProbe);
+  }
+  // W1-T4952: a coverage shard failed on this suite (run 36747569062, PR #8110) and the narrow selector missed it.
+  const statusJsonDeadline = suitePath("test/status-json-deadline.test.ts");
+  const statusJsonDeadlineEdges = [
+    "docs/dep-review.md",
+    "src/lib/dep-review.ts",
+    "src/run-task.ts",
+    suitePath("test/dep-review.test.ts"),
+  ];
+  if (input.files.has(statusJsonDeadline) && files.some((f) => statusJsonDeadlineEdges.includes(f))) {
+    pathReaders.push(statusJsonDeadline);
+  }
+  // W1-T7703: a coverage shard failed on this suite (run 38051864963, PR #10627) and the narrow selector missed it.
+  const costOfDelay = suitePath("test/new-work-is-ordered-by-cost-of-delay.test.ts");
+  const costOfDelayEdges = [
+    "src/lib/test-gardener.ts",
+    suitePath("test/a-duration-adoption-waits-for-the-noise-to-settle.test.ts"),
+    suitePath("test/the-test-gardener-adopts-the-coverage-duration-ledger.test.ts"),
+    suitePath("test/the-test-suite-tends-itself.test.ts"),
+  ];
+  if (input.files.has(costOfDelay) && files.some((f) => costOfDelayEdges.includes(f))) {
+    pathReaders.push(costOfDelay);
+  }
+  // W1-T9275: recorded miss on coverage run 38438103359, PR #11434.
+  const shardSizing = suitePath("test/every-lint-pass-sizes-a-shard-by-its-own-slug.test.ts");
+  const shardSizingEdges = [
+    "docs/review-gate.md",
+    "src/lib/companion-paths.ts",
+    suitePath("test/a-test-helper-is-the-concern-its-suites-accompany.test.ts"),
+    suitePath("test/the-one-concern-arm-never-adopted-the-shared-table.test.ts"),
+  ];
+  if (input.files.has(shardSizing) && files.some((f) => shardSizingEdges.includes(f))) {
+    pathReaders.push(shardSizing);
+  }
+  const ciFrictionFileAdmission = suitePath("test/ci-friction-remedies-file-admission.test.ts");
+  const ciFrictionFileAdmissionEdges = [
+    "src/lib/prompt-render.ts",
+    suitePath("test/check-reviewer-unmet.test.ts"),
+  ];
+  if (input.files.has(ciFrictionFileAdmission) && files.some((f) => ciFrictionFileAdmissionEdges.includes(f))) {
+    pathReaders.push(ciFrictionFileAdmission);
+  }
+  // W1-T9511: recorded miss on coverage run 38608353967, PR #11748.
+  const envNames = suitePath("test/every-env-name-a-source-file-reads-is-registered.test.ts");
+  const envNamesEdges = [
+    "src/lib/board-worker.ts",
+    "src/lib/child-entry-argv.ts",
+    "src/lib/read-model-slow-lane.ts",
+    "src/lib/read-model-worker.ts",
+    "src/lib/serve.ts",
+    "src/lib/status.ts",
+    "src/lib/worker-heaps.ts",
+    suitePath("test/serve-starts-its-workers-from-current-worker-bundles.test.ts"),
+  ];
+  if (input.files.has(envNames) && files.some((f) => envNamesEdges.includes(f))) {
+    pathReaders.push(envNames);
   }
   const recent = input.recentFailures ?? [];
   for (const s of pathReaders) pick(s, "reads a changed file by path");

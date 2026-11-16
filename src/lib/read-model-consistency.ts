@@ -628,6 +628,16 @@ export function consistencyCheckDue(db: ReadModelDb, now: number): boolean {
  * ledger held 66k-160k rows and took 1.0-3.3 s, about 50 rows per ms.
  */
 export const ORACLE_SEED_ROWS_PER_MS = 50;
+/**
+ * The lowest rate a slice is sized from. A slice pays a FIXED cost (reading every archive its window may
+ * touch) on top of its rows, and the measured rate (rows / ms) counts that cost as row cost. MEASURED
+ * 2026-11-16 on the host: core slices compared 1-3 rows yet took 45-73 s reading 13-18 archives at about
+ * 1.4 GB RSS, so the rate fell toward zero, each slice shrank to one row, and every oracle child death halved
+ * it again: the cycle crawled one row an hour and the child ran out of its 1 GB heap about every 2 h. With this
+ * floor a slice holds at least `ORACLE_MIN_ROWS_PER_MS x budget` rows (12,500 at the default budget, below the
+ * 66k-160k rows a day slice held at ~165 MB), so a fixed cost can slow a cycle but never stop it.
+ */
+export const ORACLE_MIN_ROWS_PER_MS = 5;
 /** A slice's time budget: one read-model pass (the lease renewal's 5 s times the pass share 0.5). */
 export const ORACLE_SLICE_BUDGET_MS = 2_500;
 const SLICE_CURSOR_KEY = "oracle_slice";
@@ -662,7 +672,7 @@ export function nextOracleSlice(
     // deliberate: an unparseable cursor starts a new cycle, which re-covers every row.
     stored = null;
   }
-  const rate = stored && Number.isFinite(stored.rowsPerMs) && stored.rowsPerMs! > 0 ? stored.rowsPerMs! : ORACLE_SEED_ROWS_PER_MS;
+  const rate = stored && Number.isFinite(stored.rowsPerMs) && stored.rowsPerMs! > 0 ? Math.max(ORACLE_MIN_ROWS_PER_MS, stored.rowsPerMs!) : ORACLE_SEED_ROWS_PER_MS;
   const valid = stored !== null && Number.isFinite(stored.end) && Number.isFinite(stored.next) && stored.next! >= stored.end! - windowMs && stored.next! <= stored.end!;
   const cursor: OracleSliceCursor = valid ? { end: stored!.end!, next: stored!.next!, rowsPerMs: rate } : { end: now - ORACLE_CLOSED_LAG_MS, next: now - ORACLE_CLOSED_LAG_MS, rowsPerMs: rate };
   const floor = cursor.end - windowMs;
@@ -679,14 +689,14 @@ export function nextOracleSlice(
  */
 export function advanceOracleSlice(db: ReadModelDb, lease: ReadModelLease, slice: { cursor: OracleSliceCursor; window: OracleWindow }, measured?: { rows: number; ms: number }): void {
   const seen = measured && measured.rows > 0 && measured.ms > 0 ? measured.rows / measured.ms : undefined;
-  const rowsPerMs = seen === undefined ? slice.cursor.rowsPerMs : (slice.cursor.rowsPerMs + seen) / 2;
+  const rowsPerMs = Math.max(ORACLE_MIN_ROWS_PER_MS, seen === undefined ? slice.cursor.rowsPerMs : (slice.cursor.rowsPerMs + seen) / 2);
   const next = JSON.stringify({ end: slice.cursor.end, next: slice.window.t0 - 1, rowsPerMs });
   withWriteTransaction(db, lease, () => db.prepare("INSERT INTO meta(k, v) VALUES(?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").run(SLICE_CURSOR_KEY, next));
 }
 
-/** A slice that could not finish (its thread died) is tried again, at half the rate: a smaller slice. */
+/** A slice that could not finish (its thread died) is tried again, at half the rate but never below the floor: a smaller slice. */
 export function retryOracleSlice(db: ReadModelDb, lease: ReadModelLease, slice: { cursor: OracleSliceCursor }): void {
-  const again = JSON.stringify({ ...slice.cursor, rowsPerMs: slice.cursor.rowsPerMs / 2 });
+  const again = JSON.stringify({ ...slice.cursor, rowsPerMs: Math.max(ORACLE_MIN_ROWS_PER_MS, slice.cursor.rowsPerMs / 2) });
   withWriteTransaction(db, lease, () => db.prepare("INSERT INTO meta(k, v) VALUES(?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").run(SLICE_CURSOR_KEY, again));
 }
 

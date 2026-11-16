@@ -102,8 +102,8 @@ test("W1-T12506 criterion 3: a modelled helper or hook with no reader still forc
   }
 });
 
-test("W1-T12506 criterion 4: .github, openapi and packages changes still force the full run", () => {
-  for (const path of [".github/workflows/ci.yml", "openapi/other.yaml", "packages/api-client/src/index.ts", "test/fixtures/x.ts"]) {
+test("W1-T12506 criterion 4: openapi, packages and unmodelled root changes still force the full run", () => {
+  for (const path of ["Dockerfile.x", "openapi/other.yaml", "packages/api-client/src/index.ts", "test/fixtures/x.ts"]) {
     assert.equal(fullRunTrigger([path]), path);
     assert.equal(fullRunTrigger([path], true), path);
     const sel = selectAffectedSuites([path, "test/helpers/shared.ts"], input({ readMap: readMap() }));

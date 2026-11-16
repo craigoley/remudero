@@ -1,0 +1,55 @@
+- id: W1-T12842
+  title: "An author preflight records its verdict and refusal class in the ledger, and the scout counts refusals as a symptom"
+  repo: remudero
+  depends_on:
+    - W1-T12833
+  priority: 0.6
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the author preflight is the push gate for every hand session; a ledger write must never change its verdict
+  band_meaning: blast-radius
+  origin: "operator-session#self-improvement-audit-2026-11-15"
+  plan_refs:
+    - W1-T5454
+    - W1-T12504
+  files:
+    - scripts/preflight-author.mjs
+    - src/lib/scout-gardener.ts
+    - test/gardeners/an-author-preflight-records-its-verdict-where-the-scout-reads-it.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "Each author preflight run appends exactly one author_preflight.passed, author_preflight.failed or author_preflight.refused row to the configured ledger, with the head ref, the task id when the branch names one, the first failing or refusing step, the wall time and the time spent waiting for admission"
+      proof: "grep: W1-T12842 criterion 1 in test/gardeners/an-author-preflight-records-its-verdict-where-the-scout-reads-it.test.ts"
+    - claim: "invariant:the-verdict-never-depends-on-the-ledger — a ledger that is missing, unwritable or slow leaves the verdict text and the exit code unchanged, and the run says on stderr that its row was not written"
+      proof: "grep: W1-T12842 criterion 2 in test/gardeners/an-author-preflight-records-its-verdict-where-the-scout-reads-it.test.ts"
+    - claim: "A refused or NOT_RUN run carries a refusal class from a closed list (node-version, dependency-precheck, static-wait-bound, test-slot-wait-bound, census-time-bound, lint-plan, affected-tests, other), so equal causes cluster"
+      proof: "grep: W1-T12842 criterion 3 in test/gardeners/an-author-preflight-records-its-verdict-where-the-scout-reads-it.test.ts"
+    - claim: "The scout's failure-shaped step catalogue includes the refused and failed rows"
+      proof: "grep: author_preflight\\.refused in src/lib/scout-gardener.ts"
+  rationale: |
+    MEASURED 2026-11-15 by the operator session, read-only, over the daemon ledger union (~/rmd-state2/state, 2026-11-08T00:00Z to 2026-11-15T15:00Z) and origin/main d5722e1fe.
+
+    - On 2026-11-15 one operator session's author preflights were refused 6 times for 4 host causes:
+      - a pinned Node patch version moved by an apt upgrade (2 refusals);
+      - a test slot held 37 hours by a dead container process (2);
+      - read-only linked dependencies (1);
+      - a census step's 120 s bound under load (1).
+    - Two more runs waited the full 45-minute static bound behind 34 dead static admission records before they were admitted.
+    - Each run printed its verdict and wrote coverage/preflight-author-static.json in its own worktree. READ scripts/preflight-author.mjs: it writes no ledger row.
+    - So the scout, the flow report and the overseer saw none of it, and every session rediscovers the same host fault alone. The wedged slot blocked every host session's test phase for 37 hours with nothing reporting it.
+    - Human-login sessions make about half of all merges (423 of 824 in 7 days), so this is half of the delivery path with no symptom feed.
+    - Hand CLI verbs already reach the ledger: cli.invoked rows appear as operator.intervention with source ledger.
+  design: |
+    1. preflight-author.mjs: at the single exit point, build the row from the verdict the script already computed, and append it through the repo's ledger writer for the configured state directory. Wrap the write so any failure is reported on stderr and ignored.
+    2. Classify refusals from the script's existing refusal sites into the closed list. Do not parse verdict text.
+    3. scout-gardener.ts: add author_preflight.refused and author_preflight.failed to the failure-shaped catalogue.
+    INVARIANT the-verdict-never-depends-on-the-ledger: the verdict line and exit code are computed before the write and are identical with and without a writable ledger.
+    NOT IN SCOPE: the fleet's own pre-open gate rows, remedies for each refusal class, and any change to what the preflight checks.
+  falsifier: |
+    Remove the write and criterion 1 must fail. Let a write error change the exit code and criterion 2 must fail. Emit a free-text class and criterion 3 must fail. Restore and all pass.
+  note: |
+    reservation hand-off: run-unfiled-1794756420518 -> run-unfiled-1794756420518
+    Reserved with rmd next-task-id from the operator checkout. Check refs/rmd-dispatch/W1-T12842 and any run branch before building. The test folder is the one rmd test-place computed for a stub with this test's imports; confirm it once the file exists.

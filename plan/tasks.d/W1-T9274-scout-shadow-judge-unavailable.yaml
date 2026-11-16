@@ -6,7 +6,8 @@
   verify: auto
   risk: low
   priority: 3.86
-  status: queued
+  status: blocked
+  retirement: withdrawn  # its one criterion asks for a fix its one declared file, a test, cannot hold, so #18842 was test-only and review failed it; the symptom is gone (0 shadow_judge.unavailable rows against 54 shadow_judge.paired over the 162 rotated core ledger files of 2026-11-06 to 2026-11-16 plus the live ledger); operator ruling 2026-11-16
   attempts: 0
   author_class: machine
   origin: "scout:shadow_judge.unavailable"

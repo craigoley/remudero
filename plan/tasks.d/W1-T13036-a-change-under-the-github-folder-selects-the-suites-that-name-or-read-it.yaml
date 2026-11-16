@@ -1,0 +1,46 @@
+- id: W1-T13036
+  title: "A change under the .github folder selects the suites that name or read it, so a one-line workflow or requirements edit no longer selects every suite"
+  repo: remudero
+  priority: 0.3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the selector decides which suites an author and CI run; a wrong narrowing skips a suite that must run
+  band_meaning: span
+  origin: "operator-session#pr-queue-root-causes-2026-11-15"
+  plan_refs:
+    - W1-T12506
+    - W1-T12505
+    - W1-T12953
+  files:
+    - src/lib/affected-suites.ts
+    - test/ci/suites/a-change-under-the-github-folder-selects-the-suites-that-name-or-read-it.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "A changed file under .github selects the suites that name its path or that the read map records as reading it, and no longer forces a full run by being outside what the selector models"
+      proof: "grep: W1-T13036 criterion 1 in test/ci/suites/a-change-under-the-github-folder-selects-the-suites-that-name-or-read-it.test.ts"
+    - claim: "A changed file under .github that no suite names and the read map does not record still forces a full run, and the reason says no reader was found"
+      proof: "grep: W1-T13036 criterion 2 in test/ci/suites/a-change-under-the-github-folder-selects-the-suites-that-name-or-read-it.test.ts"
+    - claim: "invariant:unmodelled-paths-stay-full — a changed path outside the modelled areas other than .github still forces a full run exactly as on origin/main, and the selection for a diff with no .github path is unchanged"
+      proof: "grep: W1-T13036 criterion 3 in test/ci/suites/a-change-under-the-github-folder-selects-the-suites-that-name-or-read-it.test.ts"
+  rationale: |
+    OBSERVED 2026-11-15 on the operator Mac, by the operator session.
+
+    - A three-file change (one line in `.github/semgrep/build-requirements.txt` and the two suites that read it) ran the author preflight and printed `author selection: full-fallback, 4714 suite(s)` with "full run: .github/semgrep/build-requirements.txt is outside what the selector models". On the Mac a full fallback keeps the 20 GiB disk reserve (W1-T12953), and the ship waited on disk space.
+    - READ src/lib/affected-suites.ts on origin/main: `MODELLED` covers src, scripts, bin, test, docs, doctrine, plan, the state directory, hooks and root markdown. `READ_MAPPED` covers openapi, deploy and json. `.github` is in neither, so `fullRunTrigger` names any file under it.
+    - W1-T12506 (merged) already selects, for the state directory and hooks, "files no code imports, read by the suites that name them". The same reader fits `.github`: 223 suites on origin/main name a `.github/` path, 11 of them the semgrep folder.
+    - MEASURED on origin/main: 13 of the 1,668 commits of the last 14 days touch `.github`. The saving per such change is the difference between about 223 suites and every suite, on the author's machine and in the hosted selection that calls the same selector.
+  design: |
+    MEASURE FIRST: for the 13 commits above, replay the selector with the change and list, per commit, the suites selected and any suite that failed in that commit's hosted run and would not have been selected. A miss there changes the design before any code does.
+
+    1. `.github` joins the paths read by the suites that name them (the W1-T12506 reader) and the read-mapped set, so the read map narrows further where it is usable.
+    2. A `.github` file with no reader keeps the full run, with the existing "no reader was found" reason.
+    INVARIANT unmodelled-paths-stay-full: every changed path outside the modelled areas other than `.github` still forces a full run, and a diff with no `.github` path selects exactly what origin/main selects.
+    NOT IN SCOPE: the read map's producer and delivery (W1-T12505); the Mac disk reserve (W1-T12953); which workflows the hosted run executes.
+  falsifier: |
+    Leave .github out of the reader and criterion 1 must fail. Narrow a .github file no suite names and criterion 2 must fail. Stop forcing a full run for another unmodelled path, or change the selection of a diff with no .github path, and criterion 3 must fail. Restore and all pass.
+  note: |
+    reservation hand-off: run-unfiled-1794777729529 -> run-unfiled-1794777729529
+    Reserved with rmd next-task-id from a worktree at origin/main. Check refs/rmd-dispatch/W1-T13036 and any run branch before building. The test folder is the one rmd test-place computed for a stub importing src/lib/affected-suites.ts. The suite of W1-T12506 (test/ci/a-change-to-a-test-helper-a-remudero-file-or-a-hook-selects-the-suites-that-read-it.test.ts) is the pattern.

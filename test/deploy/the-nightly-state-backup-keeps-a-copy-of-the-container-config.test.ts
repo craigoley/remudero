@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
@@ -12,7 +12,7 @@ const NIGHT = "state-backup.2026-11-10T00-00-00-000Z";
 const LEDGER = '{"step":"run.start"}\n';
 
 function fixture(t: TestContext) {
-  const home = ownedFixtureDir(t, "w1-t12174-config-backup").dir;
+  const home = realpathSync(ownedFixtureDir(t, "w1-t12174-config-backup").dir);
   const bin = join(home, "bin");
   const config = join(home, "container config");
   const roots = [join(home, "primary"), join(home, "secondary")];
@@ -60,6 +60,8 @@ for arg in "$@"; do
 done
 exec /bin/cp "$@"
 `, { mode: 0o755 });
+  // The host script runs on Linux. Its `chmod --` reaches a chmod that honours the marker through the
+  // shared setup's contract directory on PATH (test/setup/linux-command-contract.ts, W1-T13051).
   const receipt = join(home, "snapshot.receipt");
   const run = (extra: NodeJS.ProcessEnv = {}, dryRun = false) => {
     const result = spawnSync("bash", [SCRIPT, "--reclaim-only", ...(dryRun ? ["--dry-run"] : [])], {

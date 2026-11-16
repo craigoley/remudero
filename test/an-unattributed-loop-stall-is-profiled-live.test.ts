@@ -6,6 +6,7 @@ import childProcess from "node:child_process";
 import v8 from "node:v8";
 import { Worker } from "node:worker_threads";
 import test from "node:test";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { reportTickLag } from "../src/lib/daemon.js";
 import { loopStallBoundMs, startLoopStallProfiler, topSelfFrames, type CpuProfile } from "../src/lib/loop-stall-profiler.js";
 import { startReadPlaneTelemetry } from "../src/lib/read-plane.js";
@@ -25,16 +26,14 @@ async function waitFor<T>(read: () => T | undefined, timeoutMs = 10_000): Promis
   }
 }
 
-/** The busy function under test: the CPU a spin burns, entered over and over as a scanner's inner step is. */
-function busyLoopPastTheBound(): number {
-  let x = 0;
-  for (let i = 0; i < 2e5; i++) x += (i * 31) % 7;
-  return x;
+/** Recursive work has no loop backedge for OSR to erase from a later profile (W1-T9108). */
+function busyLoopPastTheBound(depth = 16): number {
+  return depth < 2 ? depth : busyLoopPastTheBound(depth - 1) + busyLoopPastTheBound(depth - 2);
 }
 
 /** Hold the main thread for `ms` with the busy function; nothing else on the loop runs until it returns.
- *  Array.from drives the calls in batches, so no frame of the test runs a loop long enough to be replaced on the
- *  stack: V8 credits a frame on-stack-replaced BEFORE the profile began to its caller (loop-stall-profiler.ts). */
+ *  Array.from drives the recursive calls in batches. The outer loop may OSR, but the sampled busy function
+ *  cannot: V8 credits a frame on-stack-replaced BEFORE profiling to its caller (loop-stall-profiler.ts). */
 function stallTheLoop(ms: number): void {
   const end = performance.now() + ms;
   while (performance.now() < end) Array.from({ length: 50 }, busyLoopPastTheBound);
@@ -207,6 +206,23 @@ test("W1-T7746: a logger that throws on the profile row disables the watchdog, n
   }
 });
 
+test("W1-T9108 pins the cause of the intermittent failure", () => {
+  // The workload must remain attributable when it tiers up BEFORE the watchdog starts sampling.
+  // Force synchronous OSR on the first call, before a watchdog could begin sampling.
+  // A positive control proves V8 actually takes the OSR path under these flags.
+  const script = `${busyLoopPastTheBound}
+function osrControl() { let x = 0; for (let i = 0; i < 2e5; i++) x += (i * 31) % 7; return x; }
+console.log("control", osrControl());
+console.log("workload", busyLoopPastTheBound());`;
+  const result = childProcess.spawnSync(process.execPath, [
+    "--always-osr", "--no-concurrent-recompilation", "--trace-osr", "--input-type=module", "-e", script,
+  ], { cwd: REPO_ROOT, encoding: "utf8", timeout: 30_000 });
+  assert.equal(result.status, 0, `${result.error ?? ""}\n${result.stdout}\n${result.stderr}`);
+  assert.match(result.stdout, /OSR - entry\. function: osrControl,/);
+  assert.match(result.stdout, /workload \d+/);
+  assert.doesNotMatch(result.stdout, /OSR - entry\. function: busyLoopPastTheBound,/);
+});
+
 test("W1-T7746: a main-thread busy loop past the bound is profiled and its function is the top frame in the ledger row", async () => {
   const rows: Row[] = [];
   const telemetry = startReadPlaneTelemetry();
@@ -240,8 +256,9 @@ test("W1-T7746: the profile row carries sync_spawn_ms and the unattributed remai
     const lagMs = Number(row.lag_ms);
     const syncSpawnMs = Number(row.sync_spawn_ms);
     assert.ok(syncSpawnMs >= 400, `sync_spawn_ms ${syncSpawnMs}`);
-    assert.equal(row.unattributed_ms, lagMs - syncSpawnMs);
-    assert.ok(Number(row.unattributed_ms) >= 300, `unattributed_ms ${row.unattributed_ms}`);
+    // W1-T12753: the remainder is what neither the meter nor the profile explains.
+    assert.equal(row.unattributed_ms, Math.max(0, lagMs - syncSpawnMs - Number(row.profiled_ms)));
+    assert.ok(Number(row.unattributed_ms) < lagMs - syncSpawnMs, `unattributed_ms ${row.unattributed_ms}`);
     assert.equal((row.top_frames as Frame[])[0]?.function, "busyLoopPastTheBound");
   } finally {
     stopProfiled(telemetry);

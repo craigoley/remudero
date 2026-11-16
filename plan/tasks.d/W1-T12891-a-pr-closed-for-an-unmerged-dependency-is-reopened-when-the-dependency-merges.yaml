@@ -1,0 +1,51 @@
+- id: W1-T12891
+  title: "A pull request the sweep closed because its task's dependency was unmerged is reopened when that dependency merges"
+  repo: remudero
+  depends_on: []
+  priority: 0.6
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # src/lib/sweep.ts reopens a closed pull request; a wrong match would revive work that was closed for another reason
+  band_meaning: blast-radius
+  origin: "operator-session#self-improvement-audit-2026-11-15"
+  plan_refs:
+    - W1-T12209
+    - W1-T12213
+    - W1-T12214
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/a-pr-closed-for-an-unmerged-dependency-is-reopened-when-the-dependency-merges.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A pull request the sweep closed with the plan-resequence reason (PLAN_RESEQUENCE_CLOSE_MARKER, an unmet dependency named in the close) is reopened by the sweep once every dependency it named reads merged, its head branch still exists and its task is not merged, and one sweep.resequence_close_reversed row names the PR, the task and the dependencies"
+      proof: "grep: W1-T12891 criterion 1 in test/sweep/a-pr-closed-for-an-unmerged-dependency-is-reopened-when-the-dependency-merges.test.ts"
+    - claim: "invariant:only-a-resequence-close-is-reversed — a pull request closed for any other reason (its task already merged, a retirement, a person's close, a close with no marker) is never reopened by this path, and a close the sweep made that a person later re-closed is left closed"
+      proof: "grep: W1-T12891 criterion 2 in test/sweep/a-pr-closed-for-an-unmerged-dependency-is-reopened-when-the-dependency-merges.test.ts"
+    - claim: "While a named dependency is unmerged, unreadable or its merged state is indeterminate, the pull request stays closed and nothing is written"
+      proof: "grep: W1-T12891 criterion 3 in test/sweep/a-pr-closed-for-an-unmerged-dependency-is-reopened-when-the-dependency-merges.test.ts"
+    - claim: "A reopen is attempted once per close: a reopen GitHub refuses, or a head branch that is gone, writes one sweep.resequence_close_reverse_failed row with the cause and is not retried on later passes"
+      proof: "grep: W1-T12891 criterion 4 in test/sweep/a-pr-closed-for-an-unmerged-dependency-is-reopened-when-the-dependency-merges.test.ts"
+  rationale: |
+    OBSERVED 2026-11-15 by the operator session, read-only (daemon ledger union and the GitHub issue events of both pull requests):
+    - The sweep closed #18581 (W1-T12214) at 2026-11-14T23:03Z and #18570 (W1-T12213) at 23:59Z. Both carried the comment "task ... is unmet dependency in the current plan: W1-T12209 — the plan resequenced after this PR was admitted, current dispatch will not rebuild it ... closing the leftover implementation PR".
+    - W1-T12209 merged at 2026-11-15T02:41Z (#18534).
+    - Neither pull request had a sweep row after its pr.terminal row. Both stayed closed for 13.5 hours until an operator session reopened them by hand at 16:20Z.
+    READ src/lib/sweep.ts:
+    - The W1-T3585 disposition row closes such a PR as "stale" and names the close reversible.
+    - The branch is kept for that reason (PLAN_RESEQUENCE_CLOSE_MARKER; the head is not deleted).
+    - No code reopens the PR, so the reversal depends on a person noticing that the dependency landed.
+    The sweep's open-PR list no longer contains a closed PR, so this needs its own read of the closes it made.
+  design: |
+    1. src/lib/sweep.ts: when the resequence close acts, keep the PR number, task id, named dependencies and head ref in the sweep's state (the close row already carries them).
+    2. On a full pass, for each kept close whose dependencies all read merged through the pass's merged-task set, with the task itself unmerged: check that the head ref exists, reopen the PR, write sweep.resequence_close_reversed and drop the entry. On a refusal or a missing head, write sweep.resequence_close_reverse_failed and drop the entry.
+    3. Before reopening, read the PR's last close event. If a person closed it after the sweep's close, drop the entry without acting.
+    INVARIANT only-a-resequence-close-is-reversed: the path acts only on closes this sweep made with the resequence marker, and never on a PR a person closed afterwards.
+    NOT IN SCOPE: closes for retirement or an already merged task, rebasing the reopened head (the conflict round owns that), and plan-filing PRs.
+  falsifier: |
+    Remove the reopen and criterion 1 must fail. Reopen a PR closed with no marker and criterion 2 must fail. Reopen while a dependency is indeterminate and criterion 3 must fail. Retry a refused reopen on the next pass and criterion 4 must fail. Restore and all pass.
+  note: |
+    reservation hand-off: run-unfiled-1794719215383 -> run-unfiled-1794719215383
+    Reserved with rmd next-task-id from the operator checkout. Check refs/rmd-dispatch/W1-T12891 and any run branch before building. The test folder is the one rmd test-place computed for a stub importing src/lib/sweep.ts; confirm it once the file exists.

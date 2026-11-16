@@ -1,0 +1,56 @@
+- id: W1-T12839
+  title: "The in-process GitHub client makes conditional reads, so an unchanged answer costs none of the installation's rate limit"
+  repo: remudero
+  depends_on:
+    - W1-T12531
+  priority: 0.4
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # every daemon GitHub read goes through this client; a wrong cached answer or a cross-identity hit reaches every lane
+  band_meaning: blast-radius
+  origin: "operator-session#self-improvement-audit-2026-11-15"
+  plan_refs:
+    - W1-T12531
+    - W1-T12553
+    - W1-T12670
+  files:
+    - src/lib/github-http-read.ts
+    - src/lib/github-transport.ts
+    - test/github/an-unchanged-github-read-costs-none-of-the-rate-limit.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "A GET the in-process client answered with an ETag is repeated with If-None-Match, and a 304 returns the stored status line, headers and body with the 304's own rate-limit headers, so the caller parses the same body and the freshest reading"
+      proof: "grep: W1-T12839 criterion 1 in test/github/an-unchanged-github-read-costs-none-of-the-rate-limit.test.ts"
+    - claim: "invariant:a-stored-answer-never-crosses-identities — the store is keyed by the credential's stable identity (never the token text), the host and the full path and query, so a read under another installation, login or repository credential never receives a stored answer"
+      proof: "grep: W1-T12839 criterion 2 in test/github/an-unchanged-github-read-costs-none-of-the-rate-limit.test.ts"
+    - claim: "The store is bounded by a declared BACKSTOP constant in bytes with least-recently-used eviction, and a body over the per-entry bound is not stored"
+      proof: "grep: W1-T12839 criterion 3 in test/github/an-unchanged-github-read-costs-none-of-the-rate-limit.test.ts"
+    - claim: "A 200 replaces the entry, any other status drops it, and an errored or timed-out request never serves a stored answer"
+      proof: "grep: W1-T12839 criterion 4 in test/github/an-unchanged-github-read-costs-none-of-the-rate-limit.test.ts"
+    - claim: "Argument forms the client does not parse still spawn the CLI with no conditional header, as today"
+      proof: "grep: W1-T12839 criterion 5 in test/github/an-unchanged-github-read-costs-none-of-the-rate-limit.test.ts"
+    - claim: "The transport hands the client the credential's stable identity for the store key"
+      proof: "grep: githubReadIdentity( in src/lib/github-transport.ts"
+  rationale: |
+    MEASURED 2026-11-15 by the operator session, read-only, over the daemon ledger union (~/rmd-state2/state, 2026-11-08T00:00Z to 2026-11-15T15:00Z) and origin/main d5722e1fe.
+
+    - The App installation's limit is 15,000 core requests an hour, shared by 4 consumers. The share budget (W1-T12553, live since W1-T12670 merged on 2026-11-15T02:40Z) stops the daemon's reads at the write reserve.
+    - github.budget.throttled rows on 2026-11-15 show the reserve reached at 06, 08, 09, 10, 11 and 13 UTC (remaining about 1,490 to 1,500), and reads refused at remaining 0 at 02, 09 and 13 UTC.
+    - Gardener and review children were still refused by the rate limit that afternoon: gate.gardener_failed and scout.gardener_failed at 13:53Z, retro.error at 11:05Z.
+    - The budget moves the shortage around and does not remove it. The fleet polls the same PR lists, check runs and statuses every tick, and most answers are unchanged.
+    - GitHub documents that a conditional request answered 304 Not Modified does not count against the primary rate limit. The host's read broker already relies on this for operator sessions. The container's daemon has no broker and no conditional reads.
+    - W1-T12531 puts daemon reads on one shared in-process HTTP client, which is where a validator store belongs.
+  design: |
+    1. github-http-read.ts: keep a store of {etag, statusLine, headers, body} per key. Send If-None-Match when an entry exists. On 304 return the stored answer with the response's x-ratelimit headers substituted; on 200 store the new answer; otherwise drop the entry.
+    2. Key by credential identity from the resolver (installation id or login plus host), never by token text, so an hourly token rotation keeps its entries and two identities never share one. github-transport.ts computes it in githubReadIdentity( and passes it with the read.
+    3. Declare the byte bound as a BACKSTOP constant, evict least recently used, and skip bodies over a per-entry bound.
+    INVARIANT a-stored-answer-never-crosses-identities: an entry is served only to the identity, host and exact request that stored it.
+    NOT IN SCOPE: paginated and jq forms (still spawned), writes, GraphQL, the read broker, and the budget's share arithmetic.
+  falsifier: |
+    Send no validator and criterion 1 must fail. Key by path alone and criterion 2 must fail. Remove the bound and criterion 3 must fail. Serve a stored answer after a 500 and criterion 4 must fail. Restore and all pass.
+  note: |
+    reservation hand-off: run-unfiled-1794756420518 -> run-unfiled-1794756420518
+    Reserved with rmd next-task-id from the operator checkout. Check refs/rmd-dispatch/W1-T12839 and any run branch before building. The test folder is the one rmd test-place computed for a stub with this test's imports; confirm it once the file exists.

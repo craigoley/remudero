@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // Author-time feedback, not a substitute for the required hosted full-suite/coverage verdict.
 import { spawnSync } from 'node:child_process';
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { join, relative, resolve, sep } from 'node:path';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { affectedSelectionOrFull, buildAffectedSuitesGraph, changedSymbols, fullRunTrigger, isPlanOnlyDiff,
   planOnlySelectionOrFull, readAffectedSuitesInput, readPlanOnlyListing, symbollessSourceFiles } from '../src/lib/affected-suites.ts';
 import { callerReachableSuites } from '../src/lib/ci-parity.ts';
@@ -10,6 +11,10 @@ import { authorTestRunnerArgs } from '../src/lib/test-run-timeout.ts';
 import { admitStaticWork, enqueueTestSlot, lowPriorityCommand, memoryTestConcurrency, readHostLoad, readMemoryHeadroom,
   readVmStat, TEST_FILE_PEAK_BYTES, testRunArgv, testRunConcurrency, testSlotExecutionAllowed } from '../src/lib/test-slot.ts';
 import { TYPECHECK_COLD_PEAK_BYTES } from '../src/lib/typecheck-buildinfo.ts';
+import { configPath } from '../src/lib/config.ts';
+import { appendLedger, deriveLedgerActor } from '../src/lib/ledger.ts';
+import { ledgerPathFor } from '../src/lib/ledger-path.ts';
+import { runBranchTaskId } from '../src/lib/remedy-effect.ts';
 import { boundedNodeTestArgs, listTestFiles, manifestEntryFor, medianMeasuredDurationMs, mergeDurations, reportManifestFallbacks, weightedDurationMs } from './test-tier-manifest.mjs';
 import { closeJudgedRun, judgedNodeTestArgs, prepareJudgedRun } from './pure-test-pool.mjs';
 import { isMainModule, parseArgv } from './lib/argv.mjs';
@@ -18,11 +23,11 @@ import { captureStepSync, AUTHOR_OUTPUT_LIMIT_BYTES, AUTHOR_STEP_RUNTIME_MS } fr
 import { AUTHOR_RUNTIME_SAFETY_FACTOR, AUTHOR_SHUTDOWN_RESERVE_MS, runtimeBindings, readRuntimeProfile, runtimeDeadlineFit, closedDurationEvidence } from './lib/native-author-runtime.mjs';
 import { authorDependencyProvenance, sameAuthorDependencyProvenance } from './lib/author-dependency-provenance.mjs';
 import { AUTHOR_CONTEXT_FORMAT, observeAuthorContext, requireAuthorContext } from './lib/author-context-compatibility.mjs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { accountAuthorPhases } from './lib/author-phase-accounting.mjs';
 import { AUTHOR_WORKFLOW_CONTRACT_MAX_MS, AUTHOR_WORKFLOW_CONTRACT_SUITES, authorWorkflowContractInputs } from './lib/author-workflow-contract.mjs';
 import { evaluateHeadIdentityGate } from './head-identity-gate.mjs';
-import { guardedAuthorEntry, MacAuthorCapacityRefusal, macAuthorRefusalReport } from './lib/mac-author-admission.mjs';
+import { guardedAuthorEntry, MacAuthorCapacityRefusal, macAuthorRefusalReport, readMacAuthorAdmission } from './lib/mac-author-admission.mjs';
 import { readBoundedJsonFile } from './lib/coverage-disk-profile.mjs';
 import { scanRepo as scanCoverageBlanking } from './coverage-session-blanking-check.mjs';
 
@@ -310,6 +315,167 @@ export function authorPushEligibility(receipt) {
     ran} of ${selected} suite(s)); ${Math.max(0, selected - ran)} suite(s) are left to the hosted checks`);
 }
 
+/** W1-T12842 — the ledger step each author run appends, one row per run, so the scout can count refusals and failures. */
+export const AUTHOR_VERDICT_STEPS = Object.freeze({ passed: 'author_preflight.passed', failed: 'author_preflight.failed',
+  refused: 'author_preflight.refused' });
+/** The closed list a refused or NOT_RUN row's `refusal_class` comes from, so equal causes cluster. */
+export const AUTHOR_REFUSAL_CLASSES = Object.freeze(['node-version', 'dependency-precheck', 'static-wait-bound',
+  'test-slot-wait-bound', 'census-time-bound', 'lint-plan', 'affected-tests', 'other']);
+/** BACKSTOP: how long the row's child may take before it is killed. The verdict is printed before it starts. */
+export const AUTHOR_VERDICT_WRITE_BOUND_MS = 30_000;
+const AUTHOR_VERDICT_ROW_FLAG = '--append-author-verdict-row';
+/** A refusal that names its class where it is raised; the message is the one the run always printed. */
+const refusal = (refusalClass, message) => Object.assign(new Error(message), { refusalClass });
+
+/** The branch a run's row names: the declared publication target, else the checked-out branch; null when unreadable. */
+export function authorHeadRef(root, declared, spawn = spawnSync) {
+  if (typeof declared === 'string' && declared) return declared.replace(/^refs\/heads\//, '');
+  const result = spawn('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: root, encoding: 'utf8', timeout: 5000,
+    env: authorEnvironment(process.env) });
+  const branch = result?.status === 0 && !result.error ? String(result.stdout ?? '').trim() : '';
+  return branch && branch !== 'HEAD' ? branch : null;
+}
+
+/**
+ * W1-T12842 — the one ledger row an author run appends, built from the receipt the run already computed.
+ * A run that may push is `passed`, one that reached its end with a failed step is `failed`, every other is `refused`.
+ * `first_step` is the first failed step, else the stage the run stopped before. `refusal_class` is on every refused
+ * row and on a failed row whose tests never ran: the class its refusal site named (`refusalClass`), else the one the
+ * receipt's own stages show. A dry run is read-only and has no row.
+ */
+export function authorVerdictRow(receipt, { exitCode = null, headRef, refusalClass, refusalStage, capacityReasons } = {}) {
+  if (receipt.dryRun) return undefined;
+  const steps = receipt.steps ?? [];
+  const outcome = receipt.verdict === 'passed' || (receipt.verdict === 'over-capacity' && receipt.pushEligible === true) ? 'passed'
+    : receipt.verdict === 'failed' ? 'failed' : 'refused';
+  const ran = (name) => steps.some((step) => step.name === name || (name === 'affected-tests' && step.name === 'affected-tests-subset'));
+  const failed = steps.find((step) => step.ok !== true);
+  const censusTimeBound = steps.some((step) => step.name === 'census-precheck' && step.notMeasured === 'time-bound');
+  const atSite = refusalClass !== undefined;
+  const firstStep = outcome === 'passed' ? null : failed?.name ?? refusalStage ?? PUSH_STAGES.find((name) => !ran(name))
+    ?? (atSite ? 'receipt' : censusTimeBound ? 'census-precheck' : 'affected-tests');
+  const derivedClass = outcome === 'failed' ? (failed?.name === 'lint-plan-fast' ? 'lint-plan' : 'other')
+    : atSite ? (AUTHOR_REFUSAL_CLASSES.includes(refusalClass) ? refusalClass : 'other')
+      : ran('affected-tests') && censusTimeBound ? 'census-time-bound' : receipt.verdict === 'over-capacity' ? 'affected-tests' : 'other';
+  const classed = outcome === 'refused' || (outcome === 'failed' && !ran('affected-tests'));
+  const branch = typeof headRef === 'function' ? headRef() : headRef;
+  const head = typeof branch === 'string' && branch ? branch : null;
+  const waits = [receipt.staticAdmission?.waitedMs, Math.max(receipt.suiteQueue?.waitedMs ?? 0, receipt.testSlot?.waitedMs ?? 0)];
+  return {
+    run_id: `author-preflight-${Date.parse(receipt.startedAt) || 0}`,
+    task_id: (head && runBranchTaskId(head)?.taskId) || 'CLI',
+    step: AUTHOR_VERDICT_STEPS[outcome],
+    verdict: receipt.verdict ?? null, exit_code: exitCode, push_eligible: receipt.pushEligible === true,
+    head_ref: head, head_sha: receipt.headSha ?? null, first_step: firstStep,
+    ...(classed ? { refusal_class: derivedClass } : {}),
+    ...(Array.isArray(capacityReasons) && capacityReasons.length > 0 ? { capacity_reasons: capacityReasons.map(String) } : {}),
+    wall_ms: receipt.durationMs ?? null,
+    admission_wait_ms: waits.reduce((sum, ms) => sum + (Number.isFinite(ms) && ms > 0 ? ms : 0), 0),
+    selection: receipt.selectedArm ?? receipt.selection ?? null,
+  };
+}
+
+/** Where this session's ledger root is configured: the instance config's `root`, as `rmd` resolves it. A test-runner
+ *  process and a session with no instance config have none; nothing is created to find out. */
+export function configuredAuthorLedger({ testRunner = Boolean(process.env.NODE_TEST_CONTEXT), configFile = configPath() } = {}) {
+  if (testRunner) return { reason: 'a test-runner process has no configured ledger' };
+  let config;
+  try { config = JSON.parse(readFileSync(configFile, 'utf8')); }
+  catch (error) {
+    return { reason: error.code === 'ENOENT' ? `no instance config at ${configFile}` : `instance config unreadable: ${error.code ?? error.message}` };
+  }
+  const root = typeof config?.root === 'string' && config.root ? config.root : join(homedir(), 'Remudero');
+  return isAbsolute(root) ? { root } : { reason: `instance config root is not an absolute path: ${root}` };
+}
+
+/** One row through the repo's ledger writer, into a `state/` that already exists: a missing state mount is never
+ *  created. `tty` is the author's own terminal reading, which a child with piped stdin cannot take. */
+export function appendAuthorVerdictRow({ root, line, tty } = {}, { append = appendLedger, clock } = {}) {
+  if (!Object.values(AUTHOR_VERDICT_STEPS).includes(line?.step)) return { written: false, reason: 'not an author verdict row' };
+  const path = ledgerPathFor({ root });
+  let state;
+  try { state = statSync(dirname(path)); }
+  catch (error) { return { written: false, reason: `no state directory at ${dirname(path)} (${error.code ?? error.message})` }; }
+  if (!state.isDirectory()) return { written: false, reason: `no state directory at ${dirname(path)}` };
+  // The ceiling keeps this writer from ever starting a rotation: its bounded child may be killed part-way.
+  append(path, line, { ceilingBytes: Number.MAX_SAFE_INTEGER, actor: () => deriveLedgerActor(process.env, tty === true),
+    ...(clock ? { clock } : {}) });
+  return { written: true, path };
+}
+
+/** The bounded child's whole run: one row read from `input`, one JSON result line on stdout. */
+export function runAuthorVerdictRowChild(input) {
+  let result;
+  try { result = appendAuthorVerdictRow(JSON.parse(input)); }
+  catch (error) { result = { written: false, reason: error?.message ?? String(error) }; }
+  console.log(JSON.stringify(result));
+  return 0;
+}
+
+/** The append, run in a child so it can be bounded: a ledger on a hung mount must never hang the preflight. */
+export function appendAuthorVerdictRowBounded(line, root, { boundMs = AUTHOR_VERDICT_WRITE_BOUND_MS, spawn = spawnSync } = {}) {
+  const child = spawn(process.execPath, ['--import', 'tsx', fileURLToPath(import.meta.url), AUTHOR_VERDICT_ROW_FLAG], {
+    cwd: REPO_ROOT, encoding: 'utf8', input: JSON.stringify({ root, line, tty: process.stdin.isTTY === true }),
+    timeout: boundMs, killSignal: 'SIGKILL', maxBuffer: 1024 * 1024 });
+  if (child.error?.code === 'ETIMEDOUT') return { written: false, reason: `the write did not finish within ${boundMs} ms` };
+  if (child.error || child.signal || child.status !== 0) {
+    return { written: false, reason: `the ledger writer ended ${child.signal ?? child.status}: ${String(child.error?.message ?? child.stderr ?? '').trim().slice(-300)}` };
+  }
+  return JSON.parse(child.stdout.trim().split('\n').at(-1));
+}
+
+/**
+ * W1-T12842 — append this run's row to the configured ledger.
+ * INVARIANT the-verdict-never-depends-on-the-ledger: nothing here is thrown, and the result is never read by the
+ * verdict. A ledger that is missing, unwritable or slow costs one stderr line saying the row was not written.
+ */
+export function recordAuthorVerdict(receipt, { ledger = configuredAuthorLedger, append = appendAuthorVerdictRowBounded,
+  log = (line) => console.error(line), boundMs = AUTHOR_VERDICT_WRITE_BOUND_MS, ...context } = {}) {
+  const notWritten = (reason) => ({ written: false, reason });
+  if (receipt.dryRun) return notWritten('a dry run is read-only and appends nothing');
+  let result;
+  try {
+    const target = ledger();
+    const row = typeof target?.root === 'string' ? authorVerdictRow(receipt, context) : undefined;
+    result = row ? append(row, target.root, { boundMs }) : notWritten(target?.reason ?? 'no ledger root is configured');
+    if (result?.written !== true) result = notWritten(result?.reason ?? 'the writer gave no result');
+    else log(`author preflight: verdict row ${row.step} written to ${result.path}`);
+  } catch (error) {
+    result = notWritten(error?.message ?? String(error));
+  }
+  if (!result.written) log(`author preflight: verdict row NOT written to the ledger (${result.reason}); the verdict and exit code are unaffected`);
+  return result;
+}
+
+/** The one exit of an author run: print the verdict, fix the exit code, and only then try the ledger row. */
+export function concludeAuthorRun(receipt, { announce = true, ...context } = {}) {
+  if (announce) {
+    console.log(`author verdict: ${receipt.verdict}; hosted full-suite/coverage remains REQUIRED, not proven by this run`);
+    console.log(`author push-eligible: ${receipt.pushEligible}; ${receipt.pushEligibleReason}`);
+  }
+  const exitCode = ['passed', 'not-run'].includes(receipt.verdict) ? 0 : receipt.verdict === 'over-capacity' ? OVER_CAPACITY_EXIT : 1;
+  recordAuthorVerdict(receipt, { ...context, exitCode });
+  return exitCode;
+}
+
+/** The script's entry. A capacity refusal at entry never reaches `main`, so its row is appended here. */
+export function runGuardedAuthor(argv, { root = REPO_ROOT, runAuthor = main, readAdmission = readMacAuthorAdmission,
+  verdictLedger = {} } = {}) {
+  const startedAt = Date.now();
+  let reached = false, admission;
+  const exitCode = guardedAuthorEntry(argv, { root, readAdmission: (...args) => (admission = readAdmission(...args)),
+    runAuthor: (args, deps) => { reached = true; return runAuthor(args, { ...deps, verdictLedger }); } });
+  if (!reached) {
+    const declared = argv.find((arg) => arg.startsWith('--head-ref='))?.slice('--head-ref='.length)
+      ?? (argv.includes('--head-ref') ? argv[argv.indexOf('--head-ref') + 1] : undefined);
+    recordAuthorVerdict({ verdict: 'over-capacity', pushEligible: false, dryRun: false, steps: [],
+      startedAt: new Date(startedAt).toISOString(), durationMs: Date.now() - startedAt },
+    { ...verdictLedger, exitCode, refusalClass: 'other', refusalStage: 'entry', capacityReasons: admission?.reasons,
+      headRef: () => authorHeadRef(root, declared) });
+  }
+  return exitCode;
+}
+
 /** W1-T12166 — the inputs every stage result depends on. The head names the tree, the rules and this script. */
 export function authorStageReuseKey(receipt) {
   return { headSha: receipt.headSha ?? null, baseSha: receipt.baseSha ?? null, node: receipt.node ?? null,
@@ -457,7 +623,7 @@ export function readAuthorProfile(root, path) {
 
 export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
   select = (changed, range) => authorSelection(root, changed, range), host, admitHost = () => undefined,
-  testSlot = {}, enqueueTestSlot: enqueueSuiteSlot = enqueueTestSlot } = {}) {
+  testSlot = {}, enqueueTestSlot: enqueueSuiteSlot = enqueueTestSlot, verdictLedger = {} } = {}) {
   const { values, helpRequested } = parseArgv(argv, {
     'dry-run': { type: 'boolean' },
     deadline: { type: 'string' },
@@ -476,6 +642,8 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
   catch (error) { previous = { unreadable: String(error.code ?? error.message) }; }
   let reusable = [];
   let diagnosticsRoot;
+  // W1-T12842: the class and stage the refusal site named, when the run ends at one.
+  let refusedAt = {};
   const deadline = values.deadline === undefined ? undefined : Date.parse(values.deadline);
   const run = (file, args, extra = {}) => spawn(file, args, {
     cwd: root, encoding: 'utf8', maxBuffer: 100 * 1024 * 1024,
@@ -576,7 +744,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
       throw new Error('runtime admission requires a future ISO deadline and a native runtime profile together');
     }
     const pinnedNode = readFileSync(join(root, '.nvmrc'), 'utf8').trim().replace(/^v/, '');
-    if (process.versions.node !== pinnedNode) throw new Error(`Node ${pinnedNode} required; got ${process.versions.node}`);
+    if (process.versions.node !== pinnedNode) throw refusal('node-version', `Node ${pinnedNode} required; got ${process.versions.node}`);
     // Turning worktreeConfig on removes Git's main-worktree-only exception for these keys.
     // A suite can enable it midway through validation and poison every sibling checkout.
     // Admit the topology, never migrate an operator's shared Git configuration here.
@@ -678,7 +846,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     if (!values['dry-run']) {
       const dependencyBefore=authorDependencyProvenance(root);
       receipt.dependencyProvenance={before:dependencyBefore,assurance:'metadata/tool precheck, not cached-test permission'};
-      if(dependencyBefore.state!=='present')throw new Error(`installed dependency precheck unavailable: ${dependencyBefore.reason}; expensive validation not started`);
+      if(dependencyBefore.state!=='present')throw refusal('dependency-precheck',`installed dependency precheck unavailable: ${dependencyBefore.reason}; expensive validation not started`);
       // Production phases only: an injected spawn is a diagnostic seam with no native slot to bind.
       const nativeBoundary = spawn === spawnSync;
       const sourceBefore = nativeBoundary ? observeAuthorContext({ root, git, dependency: () => dependencyBefore }).source : undefined;
@@ -785,7 +953,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
           slot = queue.admit();
           receipt.testSlot = { outcome: slot.outcome, concurrency: slot.concurrency, waitedMs: slot.waitedMs, note: slot.note };
           receipt.suiteQueue = { ...receipt.suiteQueue, outcome: 'admitted', waitedMs: Date.now() - (staticEndedAt ?? waitStartedAt) };
-          if (!testSlotExecutionAllowed(slot)) throw new Error(`author preflight NOT_RUN (${slot.note})`);
+          if (!testSlotExecutionAllowed(slot)) throw refusal('test-slot-wait-bound', `author preflight NOT_RUN (${slot.note})`);
           // Bind head/tree, dependencies, the slot's owner nonce and every allocation before work starts.
           requireNativeContext('start');
         };
@@ -826,7 +994,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
           let staticOk = staticReused;
           let lintOk = true;
           try {
-            if (!staticAdmission.executionAllowed) throw new Error(`author static stage NOT_RUN (${staticAdmission.note})`);
+            if (!staticAdmission.executionAllowed) throw refusal('static-wait-bound', `author static stage NOT_RUN (${staticAdmission.note})`);
             if (!staticReused) {
               const staticCommand = lowPriorityCommand(process.execPath, ['--import', 'tsx',
                 join(root, 'src/run-task.ts'), 'preflight', '--from', receipt.baseSha,
@@ -921,7 +1089,9 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
               admitRuntime('before-tests', 0, ranSuites, executionWorkers, slot.concurrency);
               // An over-capacity subset is sized by the arm it was cut from: a narrow arm's subset is narrower still.
               // W1-T10947: an explicit bounded profile is priced against the context this slot was bound to.
+              // W1-T12953: a full fallback cut to fewer suites is priced by the workers that subset runs.
               const testCapacity = admitHost('affected-tests', { selection: receipt.selectedArm ?? receipt.selection, workers: executionWorkers,
+                ...(ranSuites.length < receipt.suites.length ? { overCapacitySubset: true } : {}),
                 ...(values['author-profile'] === undefined ? {} : { boundedProfile: readAuthorProfile(root, values['author-profile']),
                   context: boundContext ? observeContext() : undefined, bound: boundContext }) });
               if (testCapacity) (receipt.hostCapacity ??= []).push(testCapacity);
@@ -989,6 +1159,8 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
       : receipt.selection === 'over-capacity' ? 'over-capacity' : 'passed';
   } catch (error) {
     receipt.verdict = error instanceof MacAuthorCapacityRefusal ? 'over-capacity' : 'refused';
+    refusedAt = { refusalClass: error.refusalClass ?? 'other', ...(error instanceof MacAuthorCapacityRefusal
+      ? { refusalStage: error.stage, capacityReasons: error.admission?.reasons } : {}) };
     // A failed early precheck exits before the normal end-of-run provenance read. Record it here so a
     // later same-input retry can reuse only the measured prefix when the dependency donor stayed stable.
     if (receipt.dependencyProvenance?.before && receipt.dependencyProvenance.after === undefined) {
@@ -1012,6 +1184,8 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
   Object.assign(receipt, authorPushEligibility(receipt));
   receipt.durationMs = Date.now() - startedAt;
   receipt.phaseAccounting = accountAuthorPhases(receipt);
+  const rowContext = { ...verdictLedger, ...refusedAt,
+    headRef: () => authorHeadRef(root, values['head-ref'] ?? receipt.publicationIdentity?.headRef, spawn) };
   try {
     mkdirSync(join(root, 'coverage'), { recursive: true });
     if (diagnosticsRoot) {
@@ -1028,19 +1202,19 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
       try { progress(); }
       catch (progressError) { console.error(`refused progress receipt unavailable: ${progressError.message}`); }
     }
-    return 1;
+    return concludeAuthorRun(receipt, { ...rowContext, refusalClass: refusedAt.refusalClass ?? 'other', announce: false });
   }
-  console.log(`author verdict: ${receipt.verdict}; hosted full-suite/coverage remains REQUIRED, not proven by this run`);
-  console.log(`author push-eligible: ${receipt.pushEligible}; ${receipt.pushEligibleReason}`);
-  return ['passed', 'not-run'].includes(receipt.verdict) ? 0 : receipt.verdict === 'over-capacity' ? OVER_CAPACITY_EXIT : 1;
+  return concludeAuthorRun(receipt, rowContext);
 }
 
+// diff-cov: process-boundary — the CLI guard only hands argv to the row child, the low-footprint author or the guarded entry, each tested where it is defined.
 if (isMainModule(import.meta.url)) {
   const argv = process.argv.slice(2);
-  if (argv.includes('--low-footprint')) {
+  if (argv[0] === AUTHOR_VERDICT_ROW_FLAG) process.exitCode = runAuthorVerdictRowChild(readFileSync(0, 'utf8'));
+  else if (argv.includes('--low-footprint')) {
     const {runLowFootprintAuthor} = await import('./lib/author-low-footprint.mjs');
     process.exitCode = await runLowFootprintAuthor(argv, {
       root: REPO_ROOT, publicationIdentity: authorPublicationIdentity, authorEnvironment, completeTestResult,
     });
-  } else process.exitCode = guardedAuthorEntry(argv, {root: REPO_ROOT, runAuthor: (args, deps) => main(args, deps)});
+  } else process.exitCode = runGuardedAuthor(argv);
 }

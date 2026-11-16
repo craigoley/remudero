@@ -1,0 +1,51 @@
+- id: W1-T12836
+  title: "An operator intervention row records what the hand changed, and a session PR that finished a task the fleet failed is recorded as a hand build"
+  repo: remudero
+  depends_on: []
+  priority: 0.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # operator intervention rows feed the fix-lane inventory and the SRE lane; new fields and a new action must not change existing pricing or dedup
+  band_meaning: blast-radius
+  origin: "operator-session#self-improvement-audit-2026-11-15"
+  plan_refs:
+    - W1-T3712
+    - W1-T10531
+  files:
+    - src/lib/operator-interventions.ts
+    - src/lib/fix-lane-gardener.ts
+    - src/lib/sre-lane.ts
+    - test/inbox/an-operator-intervention-row-records-what-the-hand-changed.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "A PR-surface intervention row for a push carries the hand commit sha, the fleet head it followed, the changed file paths (bounded count) and the insertions and deletions, read from the PR's commits the pass already fetches"
+      proof: "grep: W1-T12836 criterion 1 in test/inbox/an-operator-intervention-row-records-what-the-hand-changed.test.ts"
+    - claim: "A merged PR on a run-<taskId>-<epoch> branch authored by a non-fleet login, whose task has a fleet run in the ledger that ended without a merged PR, yields one intervention row with action hand-build, the task id, the fleet run's last recorded outcome as cause class, and the merged change's file paths"
+      proof: "grep: W1-T12836 criterion 2 in test/inbox/an-operator-intervention-row-records-what-the-hand-changed.test.ts"
+    - claim: "invariant:existing-intervention-rows-keep-their-meaning — at, surface, action, target, actor, cause_class and source keep their values for every action origin/main records, and fixLaneInventoryOf prices push, update-branch, merge and close exactly as before"
+      proof: "grep: W1-T12836 criterion 3 in test/inbox/an-operator-intervention-row-records-what-the-hand-changed.test.ts"
+    - claim: "The incident fingerprint for a PR-surface intervention keys on the cause class and the most-changed file, and an incident that is open or accepted is filed again when its intervention count has doubled since it was filed"
+      proof: "grep: W1-T12836 criterion 4 in test/inbox/an-operator-intervention-row-records-what-the-hand-changed.test.ts"
+  rationale: |
+    MEASURED 2026-11-15 by the operator session, read-only, over the daemon ledger union (~/rmd-state2/state, 2026-11-08T00:00Z to 2026-11-15T15:00Z) and origin/main d5722e1fe.
+
+    - 5,465 operator.intervention rows with source github collapse to 234 distinct hand actions on 62 fleet PRs (2026-10-25 to 2026-11-14): 149 pushes, 58 update-branches, 18 merges, 9 closes, by actors cao825, claude and codex.
+    - Top classes: required checks red during a fix round (29 pushes), a review orphaned by a push (16), unmet criteria after a change-approach judge (15), a merge conflict on an rmd-owned branch (9).
+    - READ operator-interventions.ts OperatorInterventionRow: {at, surface, action, target, actor, cause_class, source}. It holds no diff, file list or reason, so the ledger knows a hand pushed and not what it fixed.
+    - READ fix-lane-gardener.ts interventionsFromPullRequest: it returns [] when the PR author is not the fleet. Human-login sessions made 423 of the 824 merges to main in those 7 days, and hand-built PRs are in no intervention, fix-lane or retro input.
+    - READ sre-lane.ts: interventionFingerprint(cause_class) collapses every intervention of one class into one incident, and fingerprintAlreadyOpen treats only rejected as closed. incident-88280dcecd16e359 (64 pushes, undisposed:none) was triaged "already decided" (#17436) and its task W1-T10531 has been held since 2026-10-27.
+    Operator ruling 2026-11-15: "Draft automatically, you release" (this task is the capture half).
+  design: |
+    1. operator-interventions.ts: add optional evidence {commit, prior_head, files, insertions, deletions} to the row type and the hand-build action; keep the row's other fields as they are.
+    2. fix-lane-gardener.ts readOperatorInterventions: fill the evidence from the commits and files the pass already reads for a fleet PR. Add the hand-build derivation for non-fleet run-branch PRs whose task has a failed, halted or stood-down fleet run and no merged fleet PR. Bound the file list.
+    3. sre-lane.ts interventionFingerprint: for PR-surface rows use the cause class plus the most-changed file; re-file an open or accepted incident when its count doubles.
+    INVARIANT existing-intervention-rows-keep-their-meaning: every field and price origin/main has for push, update-branch, merge and close is unchanged; the new evidence is additive and hand-build is priced separately.
+    NOT IN SCOPE: drafting learnings from the evidence (W1-T12837), storing full diffs, comments as interventions, and the control surface.
+  falsifier: |
+    Drop the evidence fields and criterion 1 must fail. Return [] for a non-fleet author and criterion 2 must fail. Change a push's pricing or cause class and criterion 3 must fail. Fingerprint by cause class alone and criterion 4 must fail. Restore and all pass.
+  note: |
+    reservation hand-off: run-unfiled-1794756420518 -> run-unfiled-1794756420518
+    Reserved with rmd next-task-id from the operator checkout. Check refs/rmd-dispatch/W1-T12836 and any run branch before building. The test folder is the one rmd test-place computed for a stub with this test's imports; confirm it once the file exists.

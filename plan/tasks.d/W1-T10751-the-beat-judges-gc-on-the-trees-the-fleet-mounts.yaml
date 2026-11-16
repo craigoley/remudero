@@ -15,7 +15,6 @@
   plan_refs: [W1-T2529, W1-T9617, W1-T10750, W1-T4770]
   files:
     - scripts/fleet-heartbeat.sh
-    - .github/workflows/fleet-heartbeat-watch.yml
     - test/daemon/the-beat-judges-gc-on-the-trees-the-fleet-mounts.test.ts
     - test/a-clone-that-can-no-longer-gc-says-so-in-the-beat.test.ts
     - test/helpers/fleet-heartbeat-harness.ts
@@ -154,18 +153,7 @@
     - Still read-only. The beat never runs `git gc`, `git prune`, `git maintenance` or any
       object-writing command, and never removes a leftover (W1-T2529's suite keeps guarding this).
 
-    (c) THE WATCHER RAISES A GC ISSUE OF ITS OWN.
-    - Extract the per-tree lines in the judging step. A host with any `UNHEALTHY` tree gets its own
-      record, `--source "fleet-heartbeat:<branch>:gc"`, outside the liveness `elif` chain, so it
-      neither masks nor is masked by BEAT_STALE, CRASH_LOOP and the rest.
-    - Title: "fleet-heartbeat (<branch>): a git store cannot gc". The body names each unhealthy
-      tree, its mounters, its persistent markers and its trend.
-    - The first beat that reads every tree `ok`, `first-seen` or absent resolves that record. A beat
-      that is `unknown` for a tree neither opens nor resolves it, and says so in the report.
-    - `first-seen` alone never raises. That is the "consecutive heartbeats" rule, carried by the
-      beat's own evidence and not by a count the watcher keeps.
-    - Add the new arm to the workflow's self-check step: a fixture beat with a persistent leftover
-      must read as gc-unhealthy, and a first sighting must not.
+    (c) MOVED to W1-T13176 (see AMENDED below): the watcher's gc record and its self-check arm.
 
     DELIVERY. This only helps if the cron runs current code. At 19:05Z the host cron ran the frozen
     10-16 copy (65f87ae06), so merged heartbeat changes since then are not live. #13770's
@@ -177,6 +165,49 @@
 
     Nothing else. No change to object-reaper.ts, the maintenance controller, escalate.ts, the
     recycle or install scripts, or the crontab.
+
+    INVARIANT an-unread-tree-is-never-ok: a tree, or a mount table, that could not be read
+    publishes `unknown` or the fallback source that answered, never `ok`.
+
+    AMENDED 2026-11-16 (operator session): part (c) (the watcher extracts the per-tree lines,
+    raises its own `fleet-heartbeat:<branch>:gc` record for an UNHEALTHY tree and gains a
+    self-check arm), the fifth criterion, the prompt's watcher case and the falsifier line about
+    the gc arm moved to W1-T13176, and `.github/workflows/fleet-heartbeat-watch.yml` left
+    `files:`. Why: the daemon never dispatches a task whose `files:` names a path under
+    .github/workflows/ (W1-T5351, `workflowPaths` in src/lib/drain.ts: the fleet App cannot push a
+    workflow file), so this whole task waited for an operator build that nothing announced. Parts
+    (a) and (b) and criteria 1 to 4 need no workflow edit and are what remains here: the beat
+    PUBLISHES a verdict per mounted tree. Raising on it is W1-T13176, which an operator session
+    hand-builds and which depends on this task. Until it lands, an UNHEALTHY tree says so in the
+    payload and in `gc_verdict`, and nothing raises it.
+    W1-T13176 reads the per-tree lines by the `gc_tree_` prefix and their `verdict=` part, the
+    form (b) gives as its example. If the build publishes them under another name or shape, say so
+    in the PR body, so that record is amended before it is built.
+    READ at origin/main ef8b74910f, so neither half is done:
+    - scripts/fleet-heartbeat.sh:1449 is still `GC_LOG="${INSTALL_DIR}/.git/gc.log"`, one file in
+      one tree, and no line of the script holds `gc_tree_`.
+    - .github/workflows/fleet-heartbeat-watch.yml still does not contain the string `gc` in any case.
+    - test/daemon/the-beat-judges-gc-on-the-trees-the-fleet-mounts.test.ts does not exist.
+    WHAT MAIN HAS GAINED THAT PART (a) CAN REUSE: 664a901e58 (#18808, W1-T12943, 2026-11-16) added
+    `rmd_mounted_tree` to scripts/fleet-heartbeat.sh. It reads one container's
+    `docker inspect` Mounts (`{{range .Mounts}}{{printf "%s\t%s\n" .Source .Destination}}{{end}}`,
+    Source and Destination only) and returns the host path bound at `/home/node/Remudero/remudero`,
+    the longest destination winning. The harness gained `mountedTrees` and `dockerCalls` for it.
+    That is the daemon-tree half of (a) already written. It does not resolve
+    `/home/node/Remudero/repos`, it walks the memory probe's container list rather than the
+    registry plus remudero-serve, and its comment says "Resolve only runtime mounts, never a
+    registry's planned placement or the host install", where (a) asks for the
+    `scratch_live_checkout` fallback with the answering source named. Extend that reader, do not
+    write a second one, and say in the PR body which fallback rule the build kept and why.
+    READ on origin's heartbeat-azure branch at b0adbc2db4 (2026-11-16T14:30:05Z, heartbeat.txt):
+    `install_dir=/home/craigoleyagent/rmd-state2/daemon-install`, `install_head_sha=ef8b74910`,
+    `gc_verdict=ok`, and `rmd_remudero-daemon_tree=/mnt/scratch/rmd/rmd-state2/remudero` with the
+    console and site daemons' trees beside it. So the cron now runs current code (the DELIVERY
+    paragraph's worry on 2026-10-26 no longer holds; measure it again all the same), the mounts
+    reader is live on the host, and `gc_verdict` still judges only the install checkout.
+    The INVARIANT line above and the `invariant:` prefix on criterion 4 are new, for the lint rule
+    design-invariant-proof; they restate (b)'s "Never ok when any part could not be read" and add
+    no behaviour.
   prompt: |
     Do the MEASURE FIRST step and put its findings in the PR body. Then write
     test/daemon/the-beat-judges-gc-on-the-trees-the-fleet-mounts.test.ts (the folder
@@ -205,12 +236,6 @@
       gc.log reads `UNHEALTHY`.
     - The unreadable case has the docker stub fail, then makes one tree unreadable. Assert that the
       fallback source is named and the unreadable tree reads `unknown`, never `ok`.
-    - The watcher case extracts the judging and delivery steps the way test/fleet-heartbeat.test.ts
-      does. Assert three things:
-      - a payload with an `UNHEALTHY` tree raises `fleet-heartbeat:<branch>:gc` beside a FRESH
-        liveness kind;
-      - a `first-seen` payload raises nothing;
-      - an all-ok payload resolves the gc record.
     - Update test/a-clone-that-can-no-longer-gc-says-so-in-the-beat.test.ts so its gc.log sits in a
       tree the beat resolves as mounted. Its MUTANT must still redden, and its never-gc/prune guard
       must still hold.
@@ -224,10 +249,8 @@
       proof: 'grep: test("W1-T10751: a leftover or a gc log is unhealthy only once a later beat finds it unchanged" in test/daemon/the-beat-judges-gc-on-the-trees-the-fleet-mounts.test.ts'
     - claim: "the per-tree loose trend is published against the previous beat with no size threshold, and growth is unhealthy only beside a persistent gc.log or leftover"
       proof: 'grep: test("W1-T10751: the loose trend counts only beside a persistent marker, with no size threshold" in test/daemon/the-beat-judges-gc-on-the-trees-the-fleet-mounts.test.ts'
-    - claim: "an unreadable mount table or tree publishes the fallback source or unknown, never ok"
+    - claim: "invariant:an-unread-tree-is-never-ok — an unreadable mount table or tree publishes the fallback source or unknown, never ok"
       proof: 'grep: test("W1-T10751: an unreadable mount or tree reads unknown, never ok" in test/daemon/the-beat-judges-gc-on-the-trees-the-fleet-mounts.test.ts'
-    - claim: "fleet-heartbeat-watch.yml raises a per-host gc issue outside the liveness chain when a tree stays unhealthy across consecutive beats, raises nothing on a first sighting, and resolves on recovery"
-      proof: 'grep: test("W1-T10751: the watcher raises a gc issue for a tree unhealthy across consecutive beats" in test/daemon/the-beat-judges-gc-on-the-trees-the-fleet-mounts.test.ts'
   falsifier: |
     - Point the probe back at `${INSTALL_DIR}/.git`: the mounted-tree case must fail.
     - Join `<state_dir>/remudero` from the registry instead of reading the mounts: the
@@ -237,7 +260,6 @@
     - Ignore mtime, so any marker present twice is UNHEALTHY: the live-writer half must fail.
     - Add any fixed loose-size limit: the growth-alone half of the trend case must fail.
     - Map an unreadable tree to ok: the unreadable case must fail.
-    - Put the gc arm inside the liveness `elif` chain, or drop it: the watcher case must fail.
     GUARDS that held at base and must still hold:
     - the beat never runs gc, prune or any object-writing git command, and never removes a file in
       a judged tree (W1-T2529's suite);

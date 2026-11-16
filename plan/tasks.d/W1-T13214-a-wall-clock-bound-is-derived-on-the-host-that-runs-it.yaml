@@ -1,0 +1,55 @@
+- id: W1-T13214
+  title: "A wall-clock bound is derived on the host that runs it: the status board's bounded-read test takes its bound from a calibration in the same process, and a read that grows with the corpus still fails everywhere"
+  repo: remudero
+  priority: 0.7
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # test/helpers/wall-clock-bound.ts is imported by 43 suites and pinned by its own census; a mistake there reds or weakens all of them
+  band_meaning: span
+  origin: "operator-session#mac-reds-on-a-tree-equal-to-main-2026-11-16"
+  plan_refs:
+    - W1-T2811
+    - W1-T13146
+  files:
+    - test/helpers/wall-clock-bound.ts
+    - test/status-board-reads-rotations.test.ts
+    - test/infra/a-wall-clock-bound-is-derived-on-the-host-that-runs-it.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The wall-clock helper file exports a second function that returns a bound derived from a calibration run in the same process on the same host, with the calibration time and where the bound came from, and returns the caller's fixed number only when the calibration cannot run"
+      proof: "grep: W1-T13214 criterion 1 in test/infra/a-wall-clock-bound-is-derived-on-the-host-that-runs-it.test.ts"
+    - claim: "The status board's bounded-read test asserts against the derived bound, and its failure message carries the measured time, the calibration time and the bound"
+      proof: "grep: W1-T13214 criterion 2 in test/status-board-reads-rotations.test.ts"
+    - claim: "invariant:a-real-regression-still-fails — on a fixture corpus, a bounded read made to open every rotation fails on every host, by a count of rotations opened and not by a clock"
+      proof: "grep: W1-T13214 criterion 3 in test/status-board-reads-rotations.test.ts"
+    - claim: "The existing assertion helper is unchanged: the same signature, the exact bound it is given, no tolerance"
+      proof: "grep: W1-T13214 criterion 4 in test/infra/a-wall-clock-bound-is-derived-on-the-host-that-runs-it.test.ts"
+  rationale: |
+    MEASURED 2026-11-16 by the operator session on the operator Mac, on a tree equal to main (865bc4252a): test/status-board-reads-rotations.test.ts, tests 11, pass 10, fail 1. "the bounded read stays under a second on the REAL 669-rotation corpus" fails with `bounded read took 1714 ms`, expected `< 1000`. Alone, at low load, three runs gave 1.6 to 2.0 s, so on that host it is not a flake. Log: ~/Remudero-notes/handoff-1115/logs-mac-red-four/status-board-reads-rotations.full.log.
+
+    READ the test on origin/main (2d69d3780c):
+    - It reads a path written into the test, `const real = "/Users/craigoleyagent/Remudero/state/ledger.ndjson";`, and skips when that file is absent ("host ledger absent — this bound is only measurable on the daemon host"). So it runs on one machine, against that machine's live ledger, which changes every day.
+    - Its number is `assertWallClockBound(ms, 1000, ...)` under the comment "MEASURED at 173 ms; 1000 is the ceiling this must never quietly cross". That measurement was of another corpus: the title says 669 rotations, and on 2026-11-16 the directory held 56 ledger files, 63 MiB, with an 11 MiB live file.
+    - So the 1000 is a fixed number that fitted one machine and one corpus on one day. The operator's standing rule is no hard thresholds: a bound is derived from a measurement on the host that runs it.
+
+    READ test/helpers/wall-clock-bound.ts and its pin, test/a-wall-clock-bound-declares-itself.test.ts:
+    - The helper says "DELIBERATELY NOT HERE: any skip, retry, tolerance or slack", and the pin asserts the exact signature and "asserts exactly the bound the call site asserted -- no tolerance, no slack". Calibration cannot go inside `assertWallClockBound` without weakening every caller at once.
+    - COUNTED with `git grep -nE '^[[:space:]]*assertWallClockBound[[:space:]]*\('` over test/: 65 call sites in 43 files (the pin excluded). 51 of them pass a bare number as the bound.
+    - The house already derives a bound at the call site and hands it to the unchanged helper: test/read-model-worker.test.ts passes `Math.max(250, inlineLag.maxMs / 2)`, and test/the-sweeps-plan-pr-preflight-runs-off-the-daemon-loop.test.ts passes `baselineLagMs + LAG_BOUND_MS`. What is missing is one named way to do it.
+  design: |
+    MEASURE FIRST: on the operator Mac, three runs each, time the bounded read of the real ledger, the unbounded union of the same directory, and a plain parse of exactly the files the bounded read opened. Put the nine numbers in the PR body and choose the calibration from them. The sketch below assumes the plain parse.
+
+    1. test/helpers/wall-clock-bound.ts gains one export beside `assertWallClockBound`, which is not touched. It takes a calibration function, the claim as a ratio (the subject may cost at most so many calibrations), and the fixed fallback, runs the calibration in this process, and returns the bound, the calibration time and the source (`calibrated` or `fallback`). The ratio is the claim the test makes about the code; the milliseconds come from the host.
+    2. The status-board test computes its bound through that export, calibrating on the files the bounded read opened, and passes it to `assertWallClockBound`. Its message carries all three numbers. The fallback is today's 1000, used only when the calibration cannot run.
+    3. The regression the bound exists for is proved without a clock: build a fixture corpus with many rotations outside the board's window, count the rotations the bounded read opens through its existing injectable readers, and assert the count does not grow when the corpus does. A mutant that opens every rotation fails this on every host. This is criterion 3.
+    4. Do not migrate the other 64 call sites. Report in the PR body which of the 51 fixed-number sites bound a real cost (as this one does) and which bound a timeout that the test itself sets, where a fixed number is the subject.
+    INVARIANT a-real-regression-still-fails: the unbounded read is refused by a count on every host, whatever the derived wall-clock bound allows there.
+    NOT IN SCOPE: `assertWallClockBound` itself and its pin; the other call sites; the test's hard-coded ledger path (it keeps skipping where the file is absent).
+  falsifier: |
+    Return the fixed number when a calibration ran and criterion 1 must fail. Assert the status-board read against a bare 1000 and criterion 2 must fail. Make the bounded read open every rotation and criterion 3 must fail on every host. Add a tolerance to `assertWallClockBound` or change its signature and criterion 4 must fail, as must the existing pin. Restore and all pass.
+  note: |
+    reservation hand-off: run-unfiled-1794847949786 -> run-unfiled-1794847949786
+    Reserved on the filing branch by the operator session. The new test's folder is the one rmd test-place computed (test/infra/, high) for a stub importing test/helpers/wall-clock-bound.ts; the status-board suite exists and is edited in place. test/a-wall-clock-bound-declares-itself.test.ts walks every call site and pins the helper's one declaration by a grep for `^export function assertWallClockBound\(`: read it before adding the second export, and run it. The new export's name must not make that grep match twice.

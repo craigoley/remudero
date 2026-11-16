@@ -323,9 +323,15 @@ test("W1-T1127: a dispatch that reaches the worker still seeds the dedup exactly
       runSweep([candidate], { ...effects, ledgerPath, runId, log, dryRun: false }, DEFAULT_SWEEP_POLICY),
     );
     assert.equal(spawnCalls, 1, "the real rung's stand-down prevents an unchanged-input second worker");
+    // W1-T12709, W1-T13045: the hold stays, but an open pull request is never parked on a person: the hold keeps its
+    // refused-escalate disposition for the held-escalation ladder, and a parked_pr.remedy row replaces the needs-human issue.
     assert.equal(summary2.actions[0].disposition, "refused-escalate");
     const held = readLedgerLines(ledgerPath).findLast((l) => l.step === "sweep.disposed" && l.stand_down_hold === true);
     assert.equal(held?.stand_down_site, "rung.empty_review_evidence");
+    assert.equal(held?.disposition, "refused-escalate");
+    assert.equal(held?.stand_down_escalation_outcome, undefined, "no needs-human issue is opened for the hold");
+    assert.deepEqual(readLedgerLines(ledgerPath).filter((l) => l.step === "parked_pr.remedy").map((l) => [l.pr_number, l.remedy, l.cause]),
+      [[77, "fix-on-pr", "stand-down:rung.empty_review_evidence"]]);
     //
     // That is a LATENT defect this transport change EXPOSES rather than causes: on origin/main the
     // rung throws before `fix.review`, the gate never re-arms, and no pass after the first ever

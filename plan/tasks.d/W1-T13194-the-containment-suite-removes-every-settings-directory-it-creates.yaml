@@ -1,0 +1,41 @@
+- id: W1-T13194
+  title: "The containment suite removes every settings directory it creates, so a run of it leaves the temp root as it found it"
+  repo: remudero
+  priority: 0.9
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: low
+  band_meaning: span
+  origin: "operator-session#mac-author-preflight-2026-11-16"
+  plan_refs:
+    - W1-T13191
+    - W1-T12257
+    - W1-T13190
+  files:
+    - test/containment.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Every settings directory the suite creates is removed when the test that made it ends, and a run of the suite leaves the temp root's count of its own entries where it found it"
+      proof: "grep: W1-T13194 criterion 1 in test/containment.test.ts"
+    - claim: "invariant:no-assertion-changes — every existing test in the suite keeps its title, its inputs and its expected values, and nothing outside the directories this suite made is removed"
+      proof: "grep: W1-T13194 criterion 2 in test/containment.test.ts"
+  rationale: |
+    COUNTED 2026-11-16 on the operator Mac by the operator session and the builder of W1-T13146.
+
+    - READ test/containment.test.ts: `settingsFile()` calls `mkdtempSync(join(tmpdir(), "rmd-containment-test-"))` on every call, and nothing in the file removes the directory.
+    - Before that day's reboot the Mac's temp root held 506 `rmd-containment-test-*` entries out of 1,190 fleet leftovers. Seventy minutes after the reboot it held 110 again: the suite runs in every author preflight that selects it.
+    - A janitor exists for such leftovers on a Mac (W1-T12257, merged that day), with an age window. Removing them at the source costs nothing and does not depend on a janitor being installed and current on each machine.
+    - Every beat measures each leftover (W1-T13190), which is how this count reached a suite's runtime (W1-T13189).
+  design: |
+    1. `settingsFile()` takes the test context and makes its directory through the shared owned-fixture helper (`#test/helpers/owned-fixture-dir.js`), which removes it when the test ends. Each caller passes its `t`.
+    2. One new test in the suite counts the temp root's `rmd-containment-test-*` entries (or the helper's own prefix, if the name changes) before and after a nested run of a representative test and asserts no growth.
+    INVARIANT no-assertion-changes: only how the directory is made and removed changes.
+    NOT IN SCOPE: the precheck's capture directories (W1-T13191); a reaper for old leftovers.
+  falsifier: |
+    Make the directory with mkdtempSync and no removal again and criterion 1 must fail. Change an expected value in an existing test and criterion 2 must fail. Restore and both pass.
+  note: |
+    reservation hand-off: run-unfiled-1794841356902 -> run-unfiled-1794841356902
+    Reserved with rmd next-task-id from a worktree at origin/main. The suite is an existing file directly under test/ and is edited in place. The fixture-copy and host-capability counts read this file: run `node --import tsx scripts/census-precheck.mjs --counts-only` on the committed tree before handing back.

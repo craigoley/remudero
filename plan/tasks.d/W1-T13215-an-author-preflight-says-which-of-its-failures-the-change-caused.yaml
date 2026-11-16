@@ -1,0 +1,56 @@
+- id: W1-T13215
+  title: "An author preflight says which of its failures the change caused: it re-runs the failing files at the merge base and labels each failing test as also red at the base or red only at the head"
+  repo: remudero
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # it adds a stage to the gate that runs before a local push; the eligibility rule itself must not move
+  band_meaning: span
+  origin: "operator-session#mac-author-preflight-2026-11-16"
+  plan_refs:
+    - W1-T11914
+    - W1-T12842
+    - W1-T13147
+    - W1-T13146
+  files:
+    - scripts/preflight-author.mjs
+    - test/ci/an-author-preflight-says-which-of-its-failures-the-change-caused.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "When the affected-tests stage ends with failing tests, the preflight runs only the failing files again at the merge base in a scratch worktree, prints for each failing test whether it also fails at the base on this host, and removes the scratch worktree whatever the outcome"
+      proof: "grep: W1-T13215 criterion 1 in test/ci/an-author-preflight-says-which-of-its-failures-the-change-caused.test.ts"
+    - claim: "The base run is bounded by the time those same files took at the head, and a base run that is cut short, cannot be set up, or reports no summary labels its tests unattributed with the reason, never pre-existing"
+      proof: "grep: W1-T13215 criterion 2 in test/ci/an-author-preflight-says-which-of-its-failures-the-change-caused.test.ts"
+    - claim: "The author verdict row carries the attribution as counts: failing at the head, also failing at the base, failing only at the head, and unattributed"
+      proof: "grep: W1-T13215 criterion 3 in test/ci/an-author-preflight-says-which-of-its-failures-the-change-caused.test.ts"
+    - claim: "invariant:a-failure-the-change-caused-is-never-pre-existing — a test that passes at the base and fails at the head, and a failing test in a file the base does not hold, are always labelled the change's; and a run with any failing test stays not push-eligible with the reason it has today, whatever the attribution says"
+      proof: "grep: W1-T13215 criterion 4 in test/ci/an-author-preflight-says-which-of-its-failures-the-change-caused.test.ts"
+  rationale: |
+    OBSERVED 2026-11-16 on the operator Mac by the operator session. Three hand-built pull requests were refused by the author preflight for failing tests that were not in the change's files:
+    - W1-T12945 as #18881: 1 failing of 8,552 tests;
+    - W1-T13146 as #18893: 11 failing of 12,806;
+    - W1-T13051 as #18894: 1 failing of about 11,000.
+    Each time the operator session did the attribution by hand: it ran the failing suites on a tree equal to main (all but one failed there identically), ran the remaining one alone on the branch (it passed), wrote the table into the pull request body, and asked the operator for a one-PR waiver. Four of the suites that fail on a tree equal to main on that Mac are filed beside this task (W1-T13211, W1-T13212, W1-T13213, W1-T13214).
+
+    READ scripts/preflight-author.mjs on origin/main (2d69d3780c):
+    - The run knows its base and its diff: `receipt.baseSha = git(['rev-parse', 'origin/main']).trim();` and `git(['diff', '--name-only', '-z', `${receipt.baseSha}...${receipt.headSha}`])`.
+    - It knows what failed: the affected-tests stage is a judged TAP run (`const tests = runStep(testsName, child.args, child.file, judged.env, AUTHOR_STEP_RUNTIME_MS, slot.heartbeat);`) summarised by `testSummary`.
+    - `authorPushEligibility` answers no for any failure: `` return answer(false, `${failed.name} failed${failed.testSummary?.fail ? `: ${failed.testSummary.fail} failing test(s)` : ''}...`) ``. `concludeAuthorRun` prints `author verdict:` and `author push-eligible:`, and since W1-T12842 (merged 2026-11-16, #18867) one verdict row per run goes to the ledger. W1-T13147 (queued) adds refusal classes to that row.
+    - Nothing in it compares a failure with the base. The preflight has the failing files, the merge base and the host; the comparison is the part a person does today.
+  design: |
+    1. After an affected-tests stage (whole or subset) that reported failing tests, and only then: resolve the merge base of the head and origin/main, create a scratch worktree at it under the run's own temp root, and run the failing FILES there with the same runner arguments, in the test slot the run already holds (one after the other with the head run, never beside it: the Mac's memory headroom is thin).
+    2. The base run's bound is the time those files took at the head, taken from the head run's own durations, with the stage's existing ceiling as the backstop. No new fixed number.
+    3. The scratch worktree uses the head's installed dependencies only when the lockfile is identical at the base and the head. Otherwise the base run is not attempted and every failure is unattributed, with that reason. A failing file the base does not hold is the change's by definition and is not run.
+    4. Print one line per failing test: file, test title, and `also red at the base on this host`, `red only at the head`, or `unattributed: <reason>`. Then one summary line with the four counts. The verdict row carries the counts, in fields that sit beside W1-T13147's class.
+    5. Remove the scratch worktree through git in a finally step, and say so if that fails. It must not be left for a janitor.
+    6. `authorPushEligibility` is not edited. A run with failures is not push-eligible, exactly as today, and the exit code does not change.
+    INVARIANT a-failure-the-change-caused-is-never-pre-existing: "also red at the base" is printed only for a test title that was reported failing in a completed base run of the same file; every doubt is unattributed or the change's.
+    NOT IN SCOPE: turning "every failure is also red at the base" into a pushable verdict. That is a separate operator decision: this task produces the evidence a waiver is asked on, and changes no rule. Also not in scope: the census precheck's own reds; the hosted checks; fixing the suites that are red at the base.
+  falsifier: |
+    Skip the base run and criterion 1 must fail. Label a test pre-existing when the base run was cut short and criterion 2 must fail. Drop a count from the row and criterion 3 must fail. Label a test that passes at the base as also red there, or make a run with failures push-eligible, and criterion 4 must fail. Restore and all pass.
+  note: |
+    reservation hand-off: run-unfiled-1794847949786 -> run-unfiled-1794847949786
+    Reserved on the filing branch by the operator session. The test folder is the one rmd test-place computed (test/ci/, high) for a stub importing scripts/preflight-author.mjs; it is the folder of W1-T12842's suite. W1-T13147 edits the same verdict row: read its record and the state of its build before choosing field names, and do not rename a field it adds. Drive the stage through the script's injected spawn in the test; one test must run a real base worktree in a fixture repository, because every other test fakes it.

@@ -51,11 +51,11 @@ test("the PR corpus survives the plan loader — it used to be dropped", () => {
   assert.deepEqual(task?.ci_learning_prs, [5289, 5318, 5321], "the loader must carry the corpus the miner wrote");
 });
 
-test("a shard with no rationale still reaches the judge WITH its corpus", () => {
+test("a shard with no rationale still reaches the judge WITH its corpus", async () => {
   // The exact shape of all 42: no rationale, a corpus in the record.
   const root = planWith("  ci_learning_prs: [5289, 5318, 5321]\n  origin: \"ci-learning:5289:ci-gate\"");
   const plan = loadPlan(join(root, "plan", "tasks.yaml"));
-  const [shard] = parkedVerifyHumanShards(plan, root, clock);
+  const [shard] = await parkedVerifyHumanShards(plan, root, clock);
   assert.equal(shard?.rationale, "", "these records genuinely have no rationale");
   assert.ok(shard?.evidence, "so evidence must carry what the record does hold");
   assert.match(shard.evidence, /3 pull request/, "the corpus size must be stated");
@@ -63,11 +63,11 @@ test("a shard with no rationale still reaches the judge WITH its corpus", () => 
   assert.match(shard.evidence, /ci-learning:5289:ci-gate/, "the origin key identifies the gate");
 });
 
-test("evidence is BOUNDED — a giant note is summarised, not pasted", () => {
+test("evidence is BOUNDED — a giant note is summarised, not pasted", async () => {
   const huge = "Filed by the ci-learning rung. " + Array.from({ length: 200 }, (_, i) => `src/lib/f${i}.ts`).join(", ");
   const root = planWith(`  ci_learning_prs: [1, 2]\n  note: "${huge}"`);
   const plan = loadPlan(join(root, "plan", "tasks.yaml"));
-  const [shard] = parkedVerifyHumanShards(plan, root, clock);
+  const [shard] = await parkedVerifyHumanShards(plan, root, clock);
   assert.ok(shard?.evidence);
   assert.ok(shard.evidence.length < 800, `evidence must stay bounded, got ${shard.evidence.length} chars`);
   assert.ok(!shard.evidence.includes("f199.ts"), "the path dump must not be pasted whole");
@@ -92,13 +92,13 @@ test("ABSENT STAYS ABSENT — a shard carrying no evidence reports none", () => 
  * from one whose evidence was withheld", which is the defect this closes. Asserting both sides in
  * one test is what makes that claim checkable, and it fails at the base on the second half.
  */
-test("absence is DISTINGUISHABLE from withheld evidence — none reads undefined, a corpus reads through", () => {
+test("absence is DISTINGUISHABLE from withheld evidence — none reads undefined, a corpus reads through", async () => {
   const bare = planWith("  priority: 1", false);
   const none = shardEvidence(loadPlan(join(bare, "plan", "tasks.yaml")).byId.get("W1-T9100")!);
   assert.equal(none, undefined, "no evidence must read as undefined, never an empty string");
 
   const carrying = planWith('  ci_learning_prs: [5289, 5318, 5321]\n  origin: "ci-learning:5289:ci-gate"');
-  const [some] = parkedVerifyHumanShards(loadPlan(join(carrying, "plan", "tasks.yaml")), carrying, clock);
+  const [some] = await parkedVerifyHumanShards(loadPlan(join(carrying, "plan", "tasks.yaml")), carrying, clock);
   assert.ok(some?.evidence, "a shard that HAS a corpus must not read as absent -- that is the defect");
   assert.match(some.evidence, /5289/, "and the corpus must be reachable, not merely non-empty");
 });

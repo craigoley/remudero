@@ -1,0 +1,95 @@
+- id: W1-T13195
+  title: "A clean PR keeps its merge facts when a pass reads no main tip or no rollup: a clean row always names its main, a merge probe counts as a read against its main, and an unread rollup is never read as checks none, review none"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # changes which remembered mergeability the sweep may use and which PRs it escalates; a wrong main match could merge on a stale clean read
+  origin: "operator-session#stuck-prs-2026-11-16"
+  plan_refs:
+    - W1-T11166
+    - W1-T4470
+    - W1-T521
+    - W1-T9408
+  files:
+    - src/lib/sweep.ts
+    - src/lib/tick-read-worker.ts
+    - test/a-clean-pr-keeps-its-merge-facts-when-a-pass-reads-no-main-or-no-rollup.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A sweep.disposed row written by a pass with no main tip never records merge_state without merge_main_sha: it carries the main sha of the record it inherited, or it records no merge_state. Then a later pass at main ef8b749 inherits clean for the #18726 shape (clean rows at ef8b749 at 13:20 to 13:28Z, then a row from a pass with no main tip at 13:58:41Z)"
+      proof: "grep: W1-T13195 criterion 1 in test/a-clean-pr-keeps-its-merge-facts-when-a-pass-reads-no-main-or-no-rollup.test.ts"
+    - claim: "lastKnownMergeStateFromLedger reads a sweep.merge_probe row for the same pr_number and head_sha as a read against its main_sha (verdict clean as clean, conflict as dirty), so a clean probe at the current main is inherited and the reason never says 'read against main (unrecorded)'"
+      proof: "grep: W1-T13195 criterion 2 in test/a-clean-pr-keeps-its-merge-facts-when-a-pass-reads-no-main-or-no-rollup.test.ts"
+    - claim: "invariant:clean-only-at-its-own-main — a clean or behind record whose main sha is absent or differs from the current main is still not inherited (W1-T11166 stays true); a dirty record stays inherited at any main"
+      kind: guard
+      proof: "grep: W1-T13195 criterion 3 in test/a-clean-pr-keeps-its-merge-facts-when-a-pass-reads-no-main-or-no-rollup.test.ts"
+    - claim: "A PR whose rollup read failed (rollupUnreadable) is disposed as wait with the reason 'checks and review unread this pass', its sweep.disposed row has rollup_unreadable true, and it is never disposed 'not positively mergeable — checks none, review none' and never gets the absent-checks re-push"
+      proof: "grep: W1-T13195 criterion 4 in test/a-clean-pr-keeps-its-merge-facts-when-a-pass-reads-no-main-or-no-rollup.test.ts"
+    - claim: "invariant:unread-is-never-green — a PR with an unreadable rollup is never mergeable, never armed and never merged on that pass"
+      kind: guard
+      proof: "grep: W1-T13195 criterion 5 in test/a-clean-pr-keeps-its-merge-facts-when-a-pass-reads-no-main-or-no-rollup.test.ts"
+  rationale: |
+    WHY: a clean, green, reviewed plan PR is escalated as blocked-ambiguous, and the reason says its main
+    changed when it did not. On 2026-11-16 at 14:23:20Z the sweep disposed #18726 "not positively mergeable —
+    checks none, review none — ... last known clean for head 7481c5d was read against main (unrecorded), and
+    main is now ef8b749, so it is not inherited (W1-T11166)", snapshot_age_ms 1472312. #18726 had review
+    success and 77 rollup entries on GitHub, and merged at 14:59:46Z.
+    MEASURED, core ledger (~/rmd-state2/state, live file and archives, 2026-11-13T15:00Z to 2026-11-16T15:00Z,
+    duplicate rows removed), PR #18726 head 7481c5d:
+    - 13:20:13Z to 13:28:54Z: 5 sweep.disposed rows with merge_state clean and merge_main_sha ef8b749.
+    - 13:58:14Z: sweep.merge_probe main_sha ef8b749, verdict clean.
+    - 13:58:41Z: sweep.disposed merge_state clean with NO merge_main_sha (a pass with no main tip).
+    - 14:23:20Z: the escalation above. The last clean row had no main, so the clean read at ef8b749 was lost.
+    - The same shape: #18842 at 14:06:37Z (age 469257 ms, "(unrecorded)") and #18847 at 14:14:11Z (age 923534
+      ms, "checks none, review none").
+    Over the 3 days: 1060 sweep.disposed rows on 211 PRs said "not inherited (W1-T11166)"; 178 rows on 64 PRs
+    said "read against main (unrecorded)"; 43 of those rows, on 19 PRs, had a clean sweep.merge_probe at the
+    same head against the very main the row called new. 156 rows on 66 PRs said "checks none, review none"
+    (20, 65, 46 and 25 per day from 11-13 to 11-16); 14 rows on 12 PRs had both texts; 20 of the 156 used a
+    snapshot older than 10 minutes.
+    READ at origin/main ac124599c:
+    - src/lib/sweep.ts:22270 writes merge_state on every sweep.disposed row, and merge_main_sha only when
+      mainTipSha is defined. mainTipSha (sweep.ts:21081) is undefined when the pass has no main read.
+      withInheritedMergeState (sweep.ts:10448) inherits with no main check when mainTipSha is undefined
+      (mergeInheritanceRefused, :10434, needs a main), so that pass writes "clean" with no main.
+    - src/lib/sweep.ts:10407-10431 lastKnownMergeStateFromLedger takes the LAST sweep.disposed row for the head
+      (and fix.stood_down); it never reads sweep.merge_probe. So one row with no main hides every earlier row
+      that had one, and the probe's main_sha is not used. sweep.ts:22159 then prints "(unrecorded)".
+      (conflictNoWorkerMode at sweep.ts:19909 and src/lib/pr-state.ts:72 already read the probe row.)
+    - Checks none and review none: src/lib/open-prs-rest.ts:370-375 (and src/run-task.ts:22556-22563) mark a
+      failed rollup read rollupUnreadable and drop the rollup. src/lib/tick-read-worker.ts:2500-2503 builds
+      reviewState and checksState from the missing rollup, and checksStateFromRollup (sweep.ts:8318-8323)
+      returns "none" for it. OpenPrView has no rollupUnreadable field, so the terminal rule
+      (sweep.ts:12989-12997) escalates it as "checks none, review none", and no ledger row says the rollup was
+      unread. A PR with 77 rollup entries can read "none" only this way or from an empty rollup.
+  design: |
+    INVARIANT clean-only-at-its-own-main: a clean or behind record is inherited only when its main sha is the current main.
+    INVARIANT unread-is-never-green: an unread rollup is never green, never mergeable and never "none".
+    1. sweep.ts:22270: write merge_main_sha whenever merge_state is written. For an inherited state use the
+       inherited record's mainSha; for a state observed with no main tip, write no merge_state. A row never has
+       merge_state clean or behind without merge_main_sha.
+    2. lastKnownMergeStateFromLedger: also read sweep.merge_probe rows for the same pr_number and head_sha,
+       verdict clean as clean and conflict as dirty, with mainSha from main_sha. Last row wins, as today.
+    3. Carry rollupUnreadable from the open-PR read onto OpenPrView (tick-read-worker.ts buildOpenPrViews).
+       Add a disposition row before the absent-checks rows: wait, blocker awaiting-ci, reason "checks and
+       review unread this pass (rollup read failed) — re-reading next pass". Write rollup_unreadable: true on
+       the sweep.disposed row. This also keeps the open W1-T9408 PR (#18847), which routes checks none and
+       review none to the absent-checks re-push, from re-pushing a PR whose checks exist.
+    4. No change to mergeInheritanceRefused, which stays the W1-T11166 rule.
+    5. Tests drive runSweep with ledger fixtures of the #18726 rows and a view with rollupUnreadable, next to
+       test/ci/a-head-proven-clean-against-an-older-main-does-not-inherit-clean.test.ts.
+  falsifier: |
+    Keep writing merge_state with no main: criterion 1 fails ("(unrecorded)"). Ignore merge_probe rows:
+    criterion 2 fails. Inherit clean at any main: criterion 3 fails. Drop the rollupUnreadable field:
+    criterion 4 fails ("checks none, review none"). Read an unread rollup as green: criterion 5 fails.
+  note: |
+    Id reserved for run-unfiled-1794841008000 with ~/rmd-work/bin/reserve-id.sh.
+    Not proven from the ledger: that the 14:23Z view of #18726 came from a failed rollup read. No row records
+    a failed rollup read today; criterion 4 adds that row. The snapshot was 24.5 minutes old.
+    Proof that counts in production: no sweep.disposed row with merge_state clean or behind and no
+    merge_main_sha, and no "(unrecorded)" reason, in the 3 days after the merge.

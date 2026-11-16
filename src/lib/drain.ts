@@ -423,15 +423,18 @@ export function dispatchOrder(tasks: readonly Task[], context?: DispatchValueCon
   return [...ordered.filter((t) => resumable.has(t.id)), ...ordered.filter((t) => !resumable.has(t.id))];
 }
 
-/** W1-T12551 starting values from the 2026-11-13 flow-ledger research: 0 of 54 garden-origin tasks built in 14 days,
- *  and the queue judge without a completed pass since 2026-11-12. The share is of run starts, so it scales with them. */
+/** W1-T12551 starting values from the 2026-11-13 flow-ledger research: 0 of 54 garden-origin tasks built in 14 days.
+ *  W1-T12835: the share is standing, stale judge or not (operator ruling 2026-11-15, "Always reserve 1 in 4").
+ *  It is of run starts, so it scales with them; QUEUE_JUDGE_STALE_MS now only labels the move row. */
 export const MACHINE_DISPATCH_SHARE = 0.25;
 export const QUEUE_JUDGE_STALE_MS = 6 * 60 * 60_000;
 export const MACHINE_SHARE_WINDOW_MS = 24 * 60 * 60_000;
 export const MACHINE_SHARE_STEP = "dispatch.machine_share";
 
 export interface MachineShareStart { taskId: string; authorClass: string | undefined; atMs?: number }
-export interface MachineShareMove { share: number; machine_starts: number; starts: number; queue_judge_stale_ms: number }
+export interface MachineShareMove {
+  share: number; machine_starts: number; starts: number; queue_judge_fresh: boolean; queue_judge_stale_ms?: number;
+}
 export interface MachineShareInput {
   queueJudgeStaleMs: number | undefined;
   /** Undefined when the rows may not hold every start in the window: the share is then unknown and not applied. */
@@ -456,8 +459,8 @@ export function machineShareStarts(rows: readonly Record<string, unknown>[], tas
 /** INVARIANT the-share-never-grants-eligibility: `ordered` is already the eligible set, and only its order changes. */
 function applyMachineShare(ordered: Task[], opts: NextRunnableOpts): Task[] {
   const input = opts.machineShare;
-  const staleMs = input?.queueJudgeStaleMs;
-  if (input === undefined || input.starts === undefined || staleMs === undefined || !(staleMs > QUEUE_JUDGE_STALE_MS)) return ordered;
+  if (input === undefined || input.starts === undefined) return ordered;
+  const staleMs = input.queueJudgeStaleMs;
   const currentStarts = input.starts;
   const nowMs = input.nowMs?.();
   const starts = nowMs === undefined ? currentStarts : currentStarts.filter((s) =>
@@ -474,7 +477,8 @@ function applyMachineShare(ordered: Task[], opts: NextRunnableOpts): Task[] {
   const lead = ordered.filter((t) => resumable.has(t.id));
   const next = [...lead, pick, ...ordered.filter((t) => t !== pick && !resumable.has(t.id))];
   if (next.some((t, i) => t !== ordered[i])) {
-    input.onMoved?.(pick, { share: MACHINE_DISPATCH_SHARE, machine_starts: machineStarts, starts: starts.length, queue_judge_stale_ms: staleMs });
+    input.onMoved?.(pick, { share: MACHINE_DISPATCH_SHARE, machine_starts: machineStarts, starts: starts.length,
+      queue_judge_fresh: !(staleMs !== undefined && staleMs > QUEUE_JUDGE_STALE_MS), ...(staleMs === undefined ? {} : { queue_judge_stale_ms: staleMs }) });
   }
   return next;
 }

@@ -40,8 +40,10 @@ import { adoptRunChildReservation, reserveRunChild } from "./run-child-reservati
 import type { RunResult } from "./run-result.js";
 import { isWorkerProviderId, type WorkerProviderId } from "./config.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
+import { INSTALLATION_SHARE_DIVISOR_ENV } from "./installation-budget-start.js";
 import { killProcessGroup } from "./worker-containment.js";
 import { execFileLoopBounded } from "./loop-bounded-child.js";
+import type { ReviewerCodeFreshness } from "./self-sync.js";
 
 export const RUN_CHILD_SHADOW_STEP = "run_child.shadow";
 export const RUN_CHILD_SHADOW_SKIPPED_STEP = "run_child.shadow_skipped";
@@ -814,6 +816,15 @@ const defaultRunChildSpawn: NonNullable<SpawnRunChildPorts["spawn"]> = (command,
   nodeSpawn(command, [...args], { cwd: options.cwd, env: options.env, detached: true, stdio: ["ignore", "ignore", options.stderrFd] });
 
 /**
+ * W1-T12950: the run children of an instance split one installation share by the host worker budget the
+ * daemon admits workers under. Loaded when a child starts, so the child entry does not load the sweep.
+ */
+async function runChildInstallationShareDivisor(): Promise<number> {
+  const { DEFAULT_SWEEP_POLICY } = await import("./sweep.js");
+  return DEFAULT_SWEEP_POLICY.reviewCapacity.hostWorkerBudget;
+}
+
+/**
  * Starts the run child for `input.taskId` and returns the handle its result settles through. Admission and the reservation happen
  * here, in the daemon, and the reservation is bound to the child's pid; the child is a process-group leader and `unref`'d.
  * NEVER rejects: a child that cannot be started returns `started: false` and ledgers `run_child.fallback`.
@@ -915,11 +926,12 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
       throw new Error(pinned.unavailable);
     }
     engineSha = pinned.sha;
+    const shareDivisor = await runChildInstallationShareDivisor();
     stderrFd = openSync(join(dir, RUN_CHILD_STDERR_FILE), "a");
     // The daemon's growth percent rides the child's command line: NODE_OPTIONS refuses it (daemon-memory-policy.ts).
     spawnedAt = clock();
     child = (ports.spawn ?? defaultRunChildSpawn)(process.execPath, [...nodeArgs, ...launch.argv], {
-      cwd: launch.cwd, env: { ...(ports.env ?? process.env) }, stderrFd,
+      cwd: launch.cwd, env: { ...(ports.env ?? process.env), [INSTALLATION_SHARE_DIVISOR_ENV]: String(shareDivisor) }, stderrFd,
     });
     if (child.pid === undefined) throw new Error("the run child has no pid (spawn failed)");
     reservation.bindRoot(child.pid);
@@ -1253,7 +1265,7 @@ export interface DetachedWorkChildHost {
     fixKey: string;
     /** The typed decision envelope (sweep.ts `FixDispatchEnvelope`); this module only carries it into `spec.json`, plain JSON. */
     envelope: object;
-  }) => Promise<{ runId: string; settled: Promise<unknown>; acknowledge?: (outcome: PromiseSettledResult<never>) => void } | RunChildAbandoned | undefined>;
+  }) => Promise<{ runId: string; pid?: number; settled: Promise<unknown>; acknowledge?: (outcome: PromiseSettledResult<never>) => void } | RunChildAbandoned | undefined>;
   spawnRetro: (input: { decision: Record<string, unknown> }) => ReturnType<DetachedWorkChildHost["spawnFix"]>;
 }
 
@@ -1265,6 +1277,107 @@ export type DetachedReviewCommand = (prArg: string, rest: string[], opts: {
   executionMode: "semantic"; planOnlyFiling?: boolean; reviewAttemptId?: string; onPhase?: (phase: string) => void;
   excludeProviders?: readonly WorkerProviderId[];
 }) => Promise<number>;
+
+/**
+ * W1-T3618 — reads reviewer-code freshness in FRONT of `next` (production: `reviewCommand`), so a
+ * stale reading calls `next` zero times for the PR it guards: no worktree materializes, no proof
+ * executes, no reviewer spawns. Previously this read happened LAST, inside `runReview`, after all
+ * of that had already run.
+ *
+ * W1-T3697 — READS ONCE PER `call()`, NOT ONCE PER PASS. The original shape cached the first read
+ * for the rest of the pass, on the reasoning that the fact "cannot change mid-pass" — but it can:
+ * origin/main advances while a pass is still working through its PR list, and a pass that BEGINS
+ * fresh and goes stale mid-flight is exactly the shape W1-T3618's own measurement recorded (four
+ * withholds inside one cycle that began fresh at its top). A once-per-pass cache can only ever see
+ * a pass that was ALREADY stale before its first PR — structurally rare — so the counter it drives
+ * stayed at zero while the late W1-T228 guard kept discarding full-price verdicts underneath it.
+ * Re-reading before every PR trades one `git fetch` per PR (cheap; `checkReviewerCodeFreshness`'s
+ * own network call) for catching the transition the cache was blind to — the transition is exactly
+ * what makes the expensive path (materialize + prove + spawn) worth skipping.
+ *
+ * `reviewCommand`'s own late guard (W1-T228, `reviewerCodePublicationRefusal`) is UNCHANGED and
+ * stays the fail-closed floor for any PR this earlier gate misses; this is additive, not a
+ * replacement. Extracted so a test can drive it against a counting fake, never a real `gh`/git call.
+ * W1-T12824: the sweep and the run child's review both call it, through buildReviewerCodeFreshnessGate in src/run-task.ts.
+ */
+export type FreshTreeEntry = { kind: "bundle" | "tsx" | "unknown"; reason: string };
+export type FreshTreeExit = { cause: string; signal?: string; errorClass?: string };
+
+/** W1-T3723 — runs `rmd review` from a fresh worktree instead of skipping a stale-code PR. Returns `undefined` when it could not
+ *  run at all, so the caller falls back to the original skip and W1-T3691's recurrence ladder stays the floor. W1-T4055: `onFailure`
+ *  receives WHY, bounded. */
+export type FreshTreeReview = (
+  prArg: string,
+  rest: string[],
+  freshness: Extract<ReviewerCodeFreshness, { status: "stale" }>,
+  onFailure?: (failure: string) => void,
+  onEntry?: (entry: FreshTreeEntry) => void,
+  onExit?: (exit: FreshTreeExit) => void,
+) => Promise<number | undefined>;
+
+export type ReviewerCodeStartGate<D> = {
+  call: (prArg: string, rest: string[], deps: D) => Promise<number>;
+  /** The sha pair the FIRST time THIS PASS'S freshness reads came back stale (there can be many,
+   *  one per `call()`), or `undefined` when every read so far came back fresh, no PR reached the
+   *  gate this pass, or every stale-looking read was actually unreadable. */
+  staleThisPass: () => { oldSha: string; newSha: string } | undefined;
+};
+
+export function reviewerCodeStartGate<D extends object>(
+  readFreshness: () => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  next: (prArg: string, rest: string[], deps: D & { reviewStartFreshness?: ReviewerCodeFreshness }) => Promise<number>,
+  childFlags: (deps: D) => string[],
+  reviewFromFreshTree?: FreshTreeReview,
+): ReviewerCodeStartGate<D> {
+  let firstStale: { oldSha: string; newSha: string } | undefined;
+  return {
+    call: async (prArg, rest, reviewDeps) => {
+      // Read fresh for THIS PR, immediately before the spend it guards — never cached across the
+      // pass (W1-T3697): a reading that changes between two PRs must be observed by the second PR
+      // even though the first already ran under the earlier reading.
+      const freshness = await readFreshness();
+      if (freshness.status === "stale") {
+        firstStale ??= { oldSha: freshness.codeSha, newSha: freshness.originMainSha };
+        const stale = { pr: prArg, code_sha: freshness.codeSha, origin_main_sha: freshness.originMainSha, changed_paths: freshness.changedPaths?.length };
+        // MOVE THE WORK, NOT THE CODE. Six pull requests once sat unreviewed for over an hour
+        // behind a one-commit lag, and the only recovery was a process restart that a
+        // multi-instance host then refused. A review does not need this process's modules — it
+        // needs FRESH ones, and a subprocess out of a worktree at origin/main has them.
+        if (reviewFromFreshTree) {
+          // W1-T4055 — WHY, NOT ONLY WHETHER. 52 of 53 fresh-tree reviews once exited non-zero with
+          // nothing but an exit code ledgered; the cause is what the next fix needs.
+          let failure: string | undefined;
+          let entry: FreshTreeEntry = { kind: "unknown", reason: "launcher-did-not-report" };
+          let exit: FreshTreeExit = { cause: "not-reported" };
+          const childArgs = [...rest, ...childFlags(reviewDeps)];
+          return reviewFromFreshTree(prArg, childArgs, freshness, (why) => { failure = why; }, (choice) => { entry = choice; }, (ended) => { exit = ended; }).then((code) => {
+            if (code !== undefined) {
+              const why = code === 0 ? {} : {
+                failure: failure ?? "no failure reported", exit_cause: exit.cause,
+                ...(exit.signal === undefined ? {} : { exit_signal: exit.signal }),
+                ...(exit.errorClass === undefined ? {} : { exit_error_class: exit.errorClass }),
+              };
+              log("review.ran_from_fresh_tree", { ...stale, exit_code: code, entry_kind: entry.kind, entry_reason: entry.reason, ...why });
+              return code;
+            }
+            // COULD NOT RUN — fall through to the original skip rather than judging with stale
+            // code. W1-T3691's recurrence ladder still sees the skip and still escalates.
+            const reason = failure ?? "no reason reported";
+            log("review.skipped_stale_reviewer_code", { ...stale, fresh_tree: "unavailable", fresh_tree_reason: reason });
+            return 0;
+          });
+        }
+        log("review.skipped_stale_reviewer_code", stale);
+        return 0;
+      }
+      // Operator ruling 2026-10-06: this reading is the review's START reading. The post-time
+      // guard judges against it, so a merge landing mid-review no longer discards the verdict.
+      return next(prArg, rest, { ...reviewDeps, reviewStartFreshness: freshness });
+    },
+    staleThisPass: () => firstStale,
+  };
+}
 
 /** W1-T11151: a review as a run child's work. In a child, `reportReviewPhase` has no observer, so the phase writer is passed down. */
 export async function runDetachedReview(work: DetachedWorkSpec, ctx: { runId: string; taskId: string; onPhase?: (phase: string) => void },
@@ -1593,7 +1706,7 @@ export function createDetachedWorkHost(input: DetachedWorkHostInput): DetachedWo
         plan: async () => ({ plan: { tasks: [] } }), options: options(), log, work,
       });
       if (!launch.started) return launch.abandoned ? launch : undefined;
-      return { runId: launch.runId, settled: launch.settled, acknowledge: launch.acknowledge };
+      return { runId: launch.runId, pid: launch.pid, settled: launch.settled, acknowledge: launch.acknowledge };
     },
   };
 }

@@ -1,9 +1,7 @@
 - id: W1-T12753
   title: "The daemon's event loop never blocks on synchronous git or ledger scans"
   repo: remudero
-  depends_on:
-    - W1-T11795
-    - W1-T11455
+  depends_on: []
   priority: 1.4
   type: implement
   verify: auto
@@ -22,7 +20,9 @@
     - test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts
     - test/a-stall-profile-covers-the-whole-stall-and-names-callers.test.ts
     - test/daemon/the-daemon-loop-never-blocks-on-worktree-git-or-ledger-scans.test.ts
-  status: queued
+    - test/an-unattributed-loop-stall-is-profiled-live.test.ts
+    - test/a-stall-profile-names-the-sync-spawns-the-meter-saw.test.ts
+  status: merged
   attempts: 0
   acceptance:
     - claim: "routeAdaptiveLifetimePressure, driven through productionLifetimePressureHook on a ledger directory of at least 50 MB of archives and a live ledger, reads the live rows and the archived verify-human verdict rows through the async ledger reader: a 50 ms timer started before the call fires at least once in every 500 ms of the call"
@@ -32,7 +32,7 @@
       proof: "grep: W1-T12753 criterion 2 in test/daemon/the-daemon-loop-never-blocks-on-worktree-git-or-ledger-scans.test.ts"
     - claim: "idCitedInSrc runs its git grep with an async spawn: with a git on PATH that sleeps 2 s, a 50 ms timer keeps firing while the lifetime-pressure hook runs, and the census row for idCitedInSrc is deleted"
       proof: "grep: W1-T12753 criterion 3 in test/daemon/the-daemon-loop-never-blocks-on-worktree-git-or-ledger-scans.test.ts"
-    - claim: "Each daemon-loop function that W1-T11795's caller names show making the hostWorktreeGit and vetPinnedConfig calls during a pulse (57 each in the 2026-11-14T22:15:33Z stall) calls hostWorktreeGitAsync instead, and its row in SYNC_SPAWN_LOOP_BASELINE drops by the number of converted calls (or is deleted at 0)"
+    - claim: "defaultVerifyHumanCadenceResult, the daemon's verify-human cadence, reads its live rows and its archived verify_human.judged rows through the same async readers as the lifetime-pressure route, so the sync-ledger-scan census holds no row for defaultVerifyHumanCadenceResult"
       proof: "grep: W1-T12753 criterion 4 in test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts"
     - claim: "invariant:census-only-falls — the census also counts synchronous ledger scans (readLedgerUnionRecordsSync, ledgerRowsForSync and readLedgerLines): a fixture in which a loop-reachable function gains one such call fails with that function's name, and the recorded baseline holds no row for routeAdaptiveLifetimePressure or rowsWithArchivedVerifyHumanVerdicts; no row of either baseline rises"
       kind: guard
@@ -59,15 +59,18 @@
   design: |
     INVARIANT same-rows: every read this task moves to an async reader returns the same rows in the same order as the synchronous read it replaces; no cache, no new bound, no row dropped.
     INVARIANT census-only-falls: the sync-spawn and sync-ledger-scan baselines are exact and only fall; no row rises and no new name is added.
-    1. Build on W1-T11455 (the manifest bound) and W1-T11795 (bundled caller names). After both merge, read 24 h of daemon.loop_lag rows on the live host and write down in the why-file which functions make the hostWorktreeGit and vetPinnedConfig calls on the loop. If any of them is outside `files`, amend this task first.
-    2. routeAdaptiveLifetimePressure: read the live rows and the archived verify-human verdict rows with the async ledger reader (ledgerRowsFor, with the same step filter W1-T11455 gives the sync read). Add an async rowsWithArchivedVerifyHumanVerdicts beside the sync one; the sync one stays for its non-daemon caller at :22117 and :38170 if they are off the loop.
+    1. AMENDED 2026-11-15 (hand build): W1-T11795 is not merged (held on a proof refusal), so the bundled daemon still names no caller of hostWorktreeGit. 24 h of core daemon.loop_lag rows (2026-11-14T15:45Z to 2026-11-15T15:35Z) charge 1,710 calls to `Object.hostWorktreeGit`, 618 to `hostWorktreeGit` and 2,328 to `vetPinnedConfig`, with no caller chain. The static walk finds 98 loop-reachable callers in 40 files. The conversion of the real callers therefore moves to a follow-up task that depends on W1-T11795; this task no longer claims it. W1-T11455 is not needed: ledgerRowsFor (W1-T11423) already bounds the archives a step read opens.
+    2. routeAdaptiveLifetimePressure: read the live rows and the archived verify-human verdict rows with the async ledger reader (ledgerRowsFor with the same step filter the sync read uses). Add an async rowsWithArchivedVerifyHumanVerdicts beside the sync one; the sync one stays for its non-daemon caller (rmd verify-human-sweep). The daemon's verify-human cadence (defaultVerifyHumanCadenceResult) moves to the same async readers. The live file is read with an async read and parsed in slices that yield to the loop, keeping readLedgerLines' rows and order.
     3. idCitedInSrc: run `git grep` through the existing async loop-bounded spawn helper and await it; keep the same exit-code meaning.
-    4. Convert each caller named in step 1 to hostWorktreeGitAsync. Lower or delete its census row in the same change.
+    4. Not in this task (see step 1): the hostWorktreeGit callers W1-T11795 will name.
     5. Census: add a second population to test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts, SYNC_LEDGER_SCAN_CALL (readLedgerUnionRecordsSync(, ledgerRowsForSync(, readLedgerLines( ), walked by the same loopReachable fixed point, with its own exact baseline recorded at build time. Add a positive control fixture.
     6. Stall profiler: start the first chunk when the silence passes a fixed onset (LOOP_STALL_PROFILE_ONSET_MS, a few heartbeats; name the value and its reason in the why-file). Keep the learned bound as the chunk length only. Compute unattributed_ms as lag minus sync spawn time minus profiled time, floored at 0.
+       AMENDED 2026-11-15: the onset is 1,000 ms and never later than the learned bound, and the heartbeat period is at most a quarter of the onset, so an ordinary gap between two beats is never read as a stall. test/an-unattributed-loop-stall-is-profiled-live.test.ts and test/a-stall-profile-names-the-sync-spawns-the-meter-saw.test.ts assert the old unattributed_ms formula (lag minus sync spawn time) and move to the new one.
     NOT IN SCOPE: runInTree and the plan-PR preflight landing chain (4,833 s over the window; it needs its own task); triageCommandLocked and readDraftStats; the ledger archive bound itself (W1-T11455).
   falsifier: |
+    Put readLedgerLines back in defaultVerifyHumanCadenceResult and criterion 4's census must name the function.
     Put readLedgerLines back in routeAdaptiveLifetimePressure and criterion 1 must fail and criterion 5's census must name the function. Return the archived rows after the live rows and criterion 2 must fail. Put spawnSync back in idCitedInSrc and criterion 3 must fail. Restore the learned bound as the onset and criterion 6 must fail with unprofiled_ms near the bound. Compute unattributed_ms as lag minus sync spawn time and criterion 7 must fail. Restore and require all to pass.
   note: |
+    FOLLOW-UP NEEDED (amendment 2026-11-15): convert the daemon-loop callers of hostWorktreeGit that W1-T11795's caller names show to hostWorktreeGitAsync, after W1-T11795 merges. The 2026-11-15 stall profile also named findMergedByTrailer (retroTriggerPrelude shippedSince), the anomaly_sentinels prelude (125 s) and the ledger_fold prelude (128 s) in src/lib/sweep.ts; none is in this task's files.
     Id reserved for run-unfiled-1794695736000 with ~/rmd-work/bin/reserve-id.sh. Build after W1-T11795 and W1-T11455 merge, off origin/main.
     src/run-task.ts is over 44,000 lines: run npm run census:source-size after the change. Add as few comments as possible.

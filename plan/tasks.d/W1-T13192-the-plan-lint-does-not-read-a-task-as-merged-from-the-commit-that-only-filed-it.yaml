@@ -1,0 +1,50 @@
+- id: W1-T13192
+  title: "The plan lint does not read a task as merged from the commit that only filed it, so a task nothing built can still be amended or retired"
+  repo: remudero
+  priority: 0.8
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # it changes which plan amendments the lint refuses as amendments to merged work
+  band_meaning: span
+  origin: "operator-session#workflow-held-tasks-2026-11-16"
+  plan_refs:
+    - W1-T3231
+    - W1-T3414
+    - W1-T5552
+    - W1-T13178
+  files:
+    - src/lib/task-linter.ts
+    - src/lib/status.ts
+    - test/plan/the-plan-lint-does-not-read-a-task-as-merged-from-its-own-filing.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A task whose only crediting commit changed nothing outside the plan is not merged for the plan lint: an amendment to its record is linted as an amendment to a queued task"
+      proof: "grep: W1-T13192 criterion 1 in test/plan/the-plan-lint-does-not-read-a-task-as-merged-from-its-own-filing.test.ts"
+    - claim: "The lint and the daemon's projection give the same merged answer for the same task and the same history, from one shared rule"
+      proof: "grep: W1-T13192 criterion 2 in test/plan/the-plan-lint-does-not-read-a-task-as-merged-from-its-own-filing.test.ts"
+    - claim: "invariant:built-work-stays-terminal — a task credited by a commit that changed files outside the plan is still merged for the lint, an amendment to it is still refused, and a plan-text task whose deliverable is its own plan file keeps today's answer"
+      proof: "grep: W1-T13192 criterion 3 in test/plan/the-plan-lint-does-not-read-a-task-as-merged-from-its-own-filing.test.ts"
+  rationale: |
+    OBSERVED 2026-11-16 by the operator session while cutting the workflow half out of tasks the fleet holds for an operator build.
+
+    - An amendment to W1-T2874 (queued since 2026-09-05, never built) was refused by `rmd lint-plan` with three `post-merge-amendment` violations: "task W1-T2874 is already MERGED ... Standing rule 21: MERGED is terminal".
+    - The only commit on main that names that id in a trailer is its own filing commit, ccedf4a16d (#4063, "chore(plan): file dead-container heartbeat alarm"), which touched only the task's record and ends `Remudero-Task: W1-T2874`.
+    - The daemon is not fooled: its projection on the fleet host (state/status.json, generated 2026-11-16T14:04Z) reads W1-T2874 as `merged: false, source: none`.
+    - A pure-git sweep of origin/main for queued tasks whose only crediting commits are plan-only finds five: W1-T2874, W1-T2867, W1-T3349, W1-T2318 and W1-T11669. The projection reads W1-T2867 and W1-T3349 as not merged too, W1-T11669 as a rejected candidate, and W1-T2318 as merged through its amendment #3059 (it was built by #2972).
+    - Consequence: such a record can be neither amended nor retired. W1-T2874's remaining work had to be re-filed under two new ids (W1-T13177, W1-T13178), and the stale record still sits queued.
+    - READ src/lib/status.ts: the daemon's credit rule already has the refusal that matters (`isPlanOnlyChangeset` with the plan-text exception). The gates that stop a new filing from carrying its own trailer (W1-T3231, W1-T3414) postdate three of the five commits.
+  design: |
+    MEASURE FIRST: name the predicate `lint-plan` passes to the post-merge-amendment check and where its merged set comes from, and show for each of the five ids above what it answers and what the projection answers. Put the table in the PR body.
+
+    1. The lint's merged predicate applies the same plan-only refusal the projection applies, through one exported function both call. The lint has the local git history, so it needs no network read.
+    2. The new suite builds a small history with a filing commit that carries its own trailer, an implementation commit, and a plan-text task, and asserts the lint's answer and the projection's answer for each.
+    INVARIANT built-work-stays-terminal: Standing rule 21 is unchanged for anything a commit outside the plan built.
+    NOT IN SCOPE: retiring W1-T2874, W1-T2867, W1-T3349 or W1-T11669 (an operator act, possible once this lands); the daemon's own credit read; rewriting old commit messages.
+  falsifier: |
+    Read a plan-only filing commit as credit and criterion 1 must fail. Give the lint a rule of its own that differs from the projection's and criterion 2 must fail. Stop refusing an amendment to built work and criterion 3 must fail. Restore and all pass.
+  note: |
+    reservation hand-off: run-unfiled-1794841356902 -> run-unfiled-1794841356902
+    Reserved with rmd next-task-id from a worktree at origin/main. The test folder is the one rmd test-place computed for a stub importing task-linter.ts and status.ts. If the lint's predicate turns out to live in another file than these two, amend this record before building rather than widening the diff.

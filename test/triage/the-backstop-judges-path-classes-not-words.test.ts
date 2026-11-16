@@ -64,6 +64,7 @@ function filed(files: string[], title: string, claim: string): Task {
   const { text, refused } = renderMachineShard({
     taskId: "W1-T9902", title, origin: "ci-friction:W1-T9902", files,
     acceptance: [{ claim, proof: `grep: W1-T9902 in ${files[0]}` }],
+    invariants: { none: "the fixture records one remedy and changes no existing behaviour" },
   });
   assert.equal(refused, undefined, `the fixture record lints clean: ${refused}`);
   return loadPlanFromYaml(text, "plan/tasks.d/W1-T9902-x.yaml").tasks[0]!;

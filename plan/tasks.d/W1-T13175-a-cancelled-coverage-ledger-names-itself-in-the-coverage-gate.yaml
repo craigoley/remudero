@@ -1,0 +1,71 @@
+- id: W1-T13175
+  title: "A coverage matrix skipped behind a cancelled coverage-ledger job fails the coverage gate with a line that names the cancellation and the head, so the sweep can tell it from a matrix that never ran for another reason"
+  repo: remudero
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # it edits the required coverage gate's own step; the arm must stay red, and every other skipped matrix must keep today's message and exit
+  band_meaning: span
+  origin: "operator-session#workflow-held-tasks-2026-11-16"
+  plan_refs:
+    - W1-T11164
+    - W1-T5351
+    - W1-T11161
+    - W1-T3345
+  files:
+    - .github/workflows/ci.yml
+    - test/ci/a-cancelled-coverage-ledger-names-itself-in-the-coverage-gate.test.ts
+    - test/ci/a-plan-only-diff-whose-coverage-matrix-was-skipped-passes-as-not-applicable.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "When the coverage-shard matrix is skipped and needs.coverage-ledger.result is cancelled, the coverage-ratchet aggregator fails with a distinct line naming coverage-ledger-cancelled and the run's head, not the generic never-ran text"
+      proof: "grep: W1-T13175 criterion 1 in test/ci/a-cancelled-coverage-ledger-names-itself-in-the-coverage-gate.test.ts"
+    - claim: "invariant:only-the-message-changes — the arm still exits 1; any other skipped matrix keeps today's message and exit; and W1-T11161's evidenced PLAN_ONLY pass is asked first and is unchanged"
+      proof: "grep: W1-T13175 criterion 2 in test/ci/a-cancelled-coverage-ledger-names-itself-in-the-coverage-gate.test.ts"
+    - claim: "The coverage gate step prints the coverage-ledger-cancelled token"
+      proof: "grep: coverage-ratchet: coverage-ledger-cancelled in .github/workflows/ci.yml"
+    - claim: "(amended 2026-11-16) A skipped matrix with a ledger that was not cancelled still fails with the never-ran message and without the token, on every diff class and event the W1-T11161 suite lists"
+      proof: "grep: W1-T13175 criterion 3 in test/ci/a-cancelled-coverage-ledger-names-itself-in-the-coverage-gate.test.ts"
+    - claim: "(amended 2026-11-16) The W1-T11161 criterion-2 cases run with a coverage ledger that failed, the one result of the real job other than a cancellation that skips the matrix, and assert what they asserted before"
+      proof: 'grep: LEDGER_RESULT: "failure" in test/ci/a-plan-only-diff-whose-coverage-matrix-was-skipped-passes-as-not-applicable.test.ts'
+  rationale: |
+    This is the workflow half of W1-T11164 ("a cancelled coverage ledger is re-run before the ratchet judges"), cut out on 2026-11-16 so the fleet can build the rest. The daemon never dispatches a task whose `files:` names a path under .github/workflows/ (W1-T5351, `workflowPaths` in src/lib/drain.ts: the fleet App cannot push a workflow file), so W1-T11164, at priority 2, waited for an operator build that nothing announced. An operator session hand-builds this half.
+
+    THIS HALF COMES FIRST. W1-T11164's sweep rung re-runs a pull request whose only red is a coverage-ledger cancellation. It recognises that red by a token in the coverage gate's output, and nothing prints the token today, so W1-T11164 depends on this task.
+
+    WHAT W1-T11164 MEASURED (2026-11-02/03, over 30 completed pull_request runs of ci.yml): 2 of 32 coverage-ledger job attempts were cancelled at the job's 1-minute ceiling after every step had concluded success within 19 s. A cancelled prerequisite skips the coverage-shard matrix, and coverage-ratchet then fails with the same text as any other skip.
+
+    READ at origin/main ef8b74910f:
+    - .github/workflows/ci.yml:1536, the coverage-ledger job still has `timeout-minutes: 1`.
+    - :2120, the gate step ("Require every coverage shard to produce an artifact", id `coverage-gate`, in job coverage-ratchet-required) already receives `LEDGER_RESULT: ${{ needs.coverage-ledger.result }}` (7dd14a2178, #16425, W1-T11161) and `RUN_HEAD_SHA`.
+    - :2216-2224, its `skipped)` arm asks `plan_only_evidenced` first and otherwise prints `coverage-ratchet: the shard matrix never ran (matrix result: skipped) — nothing was measured, so nothing is certified. Open the workflow run to see which upstream job gated it.` and exits 1. It does not look at `LEDGER_RESULT` outside the PLAN_ONLY line.
+    - `git grep -n -e 'coverage-ledger-cancelled'` finds no line outside plan/.
+    - test/ci/a-plan-only-diff-whose-coverage-matrix-was-skipped-passes-as-not-applicable.test.ts (W1-T11161) already runs this step's own bash with a controlled environment (`runStep(gate.run!, { …, SHARD_RESULT: "skipped" })`). The new suite drives the step the same way.
+  design: |
+    1. In the `skipped)` arm of the coverage gate step, after the `plan_only_evidenced` branch and before the generic line: when `LEDGER_RESULT` is `cancelled`, print
+       `::error::coverage-ratchet: coverage-ledger-cancelled — the coverage ledger job was cancelled at its ceiling at <head>; the matrix never ran (W1-T11164)`
+       with `<head>` from `RUN_HEAD_SHA`, and exit 1. The `::error::` prefix is the one the `SHARD HANG` line of the same step has (amended 2026-11-16, see below); the words after it are unchanged. The text is W1-T11164's, kept word for word because its sweep rung matches it; the id in it stays W1-T11164 for the same reason. Every other value of `LEDGER_RESULT`, an empty one included, falls through to today's line.
+    2. New suite test/ci/a-cancelled-coverage-ledger-names-itself-in-the-coverage-gate.test.ts (the folder `rmd test-place` computes). It reads ci.yml with the `yaml` package, takes the step with id `coverage-gate` from job coverage-ratchet-required, and runs its `run:` body under bash with a controlled environment, as the W1-T11161 suite does. Root through `#test/helpers/repo-root.js`.
+       - criterion 1: `SHARD_RESULT=skipped`, `LEDGER_RESULT=cancelled`, a SOURCE class and a 40-character `RUN_HEAD_SHA` exit 1; the output holds the token and that sha, and does not hold "the shard matrix never ran (matrix result: skipped)".
+       - criterion 2: the same skip with `LEDGER_RESULT` set to `success`, `failure`, `skipped` and empty exits 1 with today's generic line and without the token; an evidenced PLAN_ONLY pull request with `LEDGER_RESULT=cancelled` still exits 0 with the not-applicable line (the W1-T11161 case); and `SHARD_RESULT` of `success`, `failure` and `cancelled` never print the token.
+    3. In the PR body, name the token line as the contract W1-T11164 reads, so a later edit to its wording is seen as a change to that task.
+    4. (amended 2026-11-16) A DELIBERATE CHANGE TO A SIBLING SUITE'S INPUTS, NEVER TO WHAT IT ASSERTS. In test/ci/a-plan-only-diff-whose-coverage-matrix-was-skipped-passes-as-not-applicable.test.ts, the nine cases of "W1-T11161 criterion 2: any other skipped matrix still fails with the never-ran message" that spread `PLAN_PR` add `LEDGER_RESULT: "failure"`. `PLAN_PR` itself keeps `LEDGER_RESULT: "cancelled"`, because criterion 1 of that suite asserts `coverage-ledger=cancelled` in the not-applicable line and must not move. No assertion in that suite is edited: every one of the ten cases still exits 1, still matches the never-ran message and still does not say not applicable. The one case that suite loses, a cancelled ledger on a diff that is not plan-only, is asserted in this task's own suite (criterion 1: exit 1 and the token). This task's suite also runs the same nine classes and events with a failed ledger (criterion 3), so the fail-closed reading is proved in two places.
+       WHY `failure`: READ in ci.yml, the coverage-shard matrix (job `coverage-ratchet`) has `needs: [coverage-ledger]` and no `if:`, and the coverage-ledger job has no `needs:` and no `if:`. So the matrix is skipped exactly when the ledger job did not succeed, and the ledger job's result is then `failure` or `cancelled`: it cannot be `skipped`, and with `success` the matrix runs. `failure` is the only non-cancelled value the real job can hand the gate beside a skipped matrix.
+    INVARIANT only-the-message-changes: for every input the gate step exits with the code it exits with today; the one change is which line a skipped matrix behind a cancelled ledger prints.
+    NOT IN SCOPE: the sweep rung, its receipt and the re-run (W1-T11164); the coverage-ledger job's ceiling; any other arm of the step.
+    AMENDED 2026-11-16 (operator session, second amendment). A builder sent to hand-build this task stopped at its measure step, correctly: the record contradicted itself. Its falsifier named the W1-T11161 suite as a guard that must still hold, `files:` did not list that suite, and that suite pins the opposite text for this task's own input.
+    - READ test/ci/a-plan-only-diff-whose-coverage-matrix-was-skipped-passes-as-not-applicable.test.ts on origin/main: line 47 is `const PLAN_PR = { CLASS_EVENT: "pull_request", COVERAGE_CLASS: "PLAN_ONLY", COVERAGE_CLASS_COUNT: "1", LEDGER_RESULT: "cancelled" };`. The test "W1-T11161 criterion 2: any other skipped matrix still fails with the never-ran message" spreads it into nine of its ten cases, so they run the gate with the matrix skipped and the ledger cancelled on a diff that is not plan-only, and each asserts `/the shard matrix never ran \(matrix result: skipped\)/`.
+    - MEASURED by the builder with origin/main's real step body under bash (~/Remudero-notes/handoff-1115/logs-13175/conflict-probe.log): at base all ten cases exit 1 with the pinned text. With step 1's branch applied, nine exit 1 with the token and without the pinned text, and the tenth (no evidence at all) is unchanged. The exit code is 1 everywhere, and the evidenced PLAN_ONLY case with a cancelled ledger still exits 0 with the not-applicable line.
+    - DECIDED: step 4 above. The suite that pinned the old text for a cancelled ledger gets a ledger that failed, which is what "any other skipped matrix" meant, and the cancelled case is asserted where the token is.
+    - THE LINE GAINS `::error::`. READ in ci.yml: the generic never-ran line is a plain `echo`, and the `SHARD HANG` line this one is modelled on is `echo "::error::coverage-ratchet: SHARD HANG — ..."`. READ in src/lib/tick-read-worker.ts: when a failing job's log is unreadable or names nothing, the sweep's tail falls back to the check run's failure annotations (`tailSource = "annotations"`; the type is `CiTailSource` in src/lib/sweep.ts), and only an `::error::` line becomes one. The existing grep proof for the token still matches a line that carries the prefix, so no proof text changed.
+  falsifier: |
+    Moved from W1-T11164: at origin/main a pull request whose coverage-ledger job was cancelled after its steps succeeded shows coverage-ratchet "the shard matrix never ran". Put the generic line back for a cancelled ledger and criterion 1 must fail. Print the token for a `failure` ledger, or exit 0 from the new branch, or place it before the PLAN_ONLY branch, and criterion 2 must fail. Restore and require all to pass.
+    (amended 2026-11-16) THE SIBLING SUITE'S INPUTS CHANGE AND ITS ASSERTIONS DO NOT: test/ci/a-plan-only-diff-whose-coverage-matrix-was-skipped-passes-as-not-applicable.test.ts is in `files:` for one edit, the `LEDGER_RESULT: "failure"` of its nine criterion-2 cases. Change any assertion in it, or leave a criterion-2 case on a cancelled ledger, and this task is not done. Make the gate pass a skipped matrix behind a failed ledger and criterion 3 must fail, as must that suite's criterion 2.
+    GUARD that held at base and must still hold, untouched: test/a-cancelled-shard-is-not-a-broken-diff.test.ts, which drives the same step.
+  note: |
+    reservation hand-off: run-unfiled-1794839315750 -> run-unfiled-1794839315750
+    Id reserved for the filing branch by the operator session. An operator session hand-builds this task: the daemon holds any task that names a workflow path (W1-T5351). Check `git ls-remote origin 'refs/rmd-dispatch/W1-T13175' 'refs/heads/run-W1-T13175-*'` before building.
+    W1-T11164 depends on this task and is dormant until it merges. The test folder is the one `rmd test-place` computed on 2026-11-16 (test/ci/, ci-parity, high) for a stub that parses ci.yml, imports src/lib/tmp.ts and test/helpers/repo-root.ts, and runs the gate step under bash. A workflow diff rides alone (W1-T297): this pull request holds ci.yml and its suite, nothing else. ci.yml is the required workflow, so run `rmd preflight --ci-parity` on the committed tree before the push.

@@ -18,7 +18,7 @@
     - src/lib/merged-ratchet-verdict.ts
     - test/gardeners/two-pull-requests-that-cross-a-ceiling-together-are-held-at-merge-time.test.ts
     - test/gardeners/a-merge-judge-population-past-one-read-is-read-in-parts.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "readMergedRatchetInputsSteps on a fixture clone whose test population is larger than POPULATION_BYTES_BOUND reads it in several git cat-file --batch calls, each for listed blobs of at most POPULATION_BYTES_BOUND bytes, and judgeMergedRatchets returns fixture-copy rows or a clean count for that gate, not unread"

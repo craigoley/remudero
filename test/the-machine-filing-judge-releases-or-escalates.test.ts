@@ -596,19 +596,24 @@ test("a narrow selector edge shard declares the test that covers its edge, so di
   assert.deepEqual(task.files, ["src/lib/affected-suites.ts", SELECTOR_SHADOW_MISS_TEST_PATH]);
   assert.equal(task.risk, "low", "declaring the test file must not raise the edge repair's risk");
   const proofs = (task.acceptance ?? []).map((a) => a.proof);
-  assert.deepEqual(proofs, Array(2).fill("unit test: W1-T9041: the selector covers the recorded suite for every recorded edge"));
+  // W1-T12833: the third criterion is the template's declared invariant, behind its own proof.
+  // W1-T13035: the first two claims each have their own proof; one proof behind both was shared-proof.
+  assert.deepEqual(proofs, ["unit test: W1-T9041: the selector covers the recorded suite for every recorded edge",
+    "unit test: W1-T9041: the shadow record reads the recorded suite as selected for every recorded edge",
+    "unit test: W1-T9041: the selector still selects every suite it selected before the repair"]);
+  assert.match(task.acceptance![2]!.claim, /^invariant:selector-keeps-its-selections — /);
   assert.ok(task.note?.includes(`asserts ${miss.file} is selected for each recorded edge`));
   assert.ok(task.note?.includes(SELECTOR_SHADOW_MISS_TEST_PATH));
   assert.match(task.note ?? "", /diff-coverage blocks an edge no test exercises/);
 });
 
-test("the verify-human sweep keeps only ruling-shaped records and hands the rest to the machine-filing judge", () => {
+test("the verify-human sweep keeps only ruling-shaped records and hands the rest to the machine-filing judge", async () => {
   const operator = machineShard("W1-T9050").replace("  author_class: machine\n", "");
   const ruling = machineShard("W1-T9052", { files: ["DECISIONS.md"] }).replace("  author_class: machine\n", "");
   const root = planDir({ "W1-T9050-x.yaml": operator, "W1-T9051-x.yaml": machineShard("W1-T9051"), "W1-T9052-x.yaml": ruling });
   try {
     const plan = readPlan(root);
-    assert.deepEqual(parkedVerifyHumanShards(plan, root, CLOCK).map((s) => s.id), ["W1-T9052"]);
+    assert.deepEqual((await parkedVerifyHumanShards(plan, root, CLOCK)).map((s) => s.id), ["W1-T9052"]);
     assert.ok(needsMachineJudgement(plan.byId.get("W1-T9050")!), "an operator verify: human record is the judge's");
     assert.equal(needsMachineJudgement(plan.byId.get("W1-T9052")!), false, "a ruling-shaped record stays with the operator");
   } finally {
@@ -800,6 +805,7 @@ test("the shared filing path renders a whole machine record and names a lint ref
     origin: "ci-friction:check:x",
     files: ["docs/ci-friction-remedies.md"],
     acceptance: [{ claim: "the remedy is recorded", proof: "grep: ci-friction:check:x in docs/ci-friction-remedies.md" }],
+    invariants: { none: "the fixture records one remedy in a docs file and changes no existing behaviour" },
     note: "priced at 12 PR minutes",
   };
   const ok = renderMachineShard(spec);

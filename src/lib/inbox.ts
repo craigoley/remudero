@@ -2205,12 +2205,22 @@ export interface DraftRepoFacts {
   readGrepProofFile: (repoRelPath: string) => string | undefined;
 }
 
-export function checkoutRepoFacts(root: string): DraftRepoFacts {
+/** W1-T13187: one origin/main listing per commit (files and their parent directories), not a git process per path. */
+export function checkoutRepoFacts(root: string, git: (root: string, args: readonly string[], opts: { maxBuffer: number }) => string = hostWorktreeGit): DraftRepoFacts {
+  let held: { sha: string; paths: ReadonlySet<string> } | undefined;
+  const basePaths = (): ReadonlySet<string> => {
+    const sha = readOriginMainSha(root);
+    if (sha !== undefined && held?.sha === sha) return held.paths;
+    const paths = new Set<string>();
+    for (const file of git(root, ["ls-tree", "-r", "-z", "--name-only", sha ?? "origin/main"], { maxBuffer: 64 * 1024 * 1024 }).split("\0")) {
+      for (let cut = file.length; cut > 0; cut = file.lastIndexOf("/", cut - 1)) paths.add(file.slice(0, cut));
+    }
+    if (sha !== undefined) held = { sha, paths };
+    return paths;
+  };
   return {
     pathIsDirectory: (path) => fs.statSync(resolvePath(root, path), { throwIfNoEntry: false })?.isDirectory() === true,
-    pathExistsAtBase: (path) => fs.existsSync(resolvePath(root, ".git")) &&
-      hostWorktreeGit(root, ["ls-tree", "-z", "--name-only", "origin/main", "--", path])
-      .split("\0").includes(path),
+    pathExistsAtBase: (path) => fs.existsSync(resolvePath(root, ".git")) && basePaths().has(path),
     moduleExists: (path) => fs.existsSync(resolvePath(root, path)),
     readGrepProofFile: (path) => {
       try {
@@ -4315,8 +4325,9 @@ export function fileRatificationDraft(
   fs: ShardWriteFs & { readFileSync: (path: string, enc: "utf8") => string },
   joinPath: (...parts: string[]) => string,
   knownRepos: ReadonlySet<string> | undefined = knownPlanRepos(worktreePath),
+  factsRoot = worktreePath,
 ): string[] {
-  assertRatificationDraftFileable(payload.fragmentYaml, payload.proposalId, payload.stampLine, knownRepos, worktreePath);
+  assertRatificationDraftFileable(payload.fragmentYaml, payload.proposalId, payload.stampLine, knownRepos, factsRoot);
   const written = writeRatificationShards(worktreePath, payload.fragmentYaml, payload.proposalId, fs, joinPath, payload.proposal, payload.stampLine);
   const masterPlanPath = joinPath(worktreePath, "MASTER-PLAN.md");
   const before = fs.readFileSync(masterPlanPath, "utf8");
@@ -4352,13 +4363,14 @@ export function fileRatificationBatch(
   fs: ShardWriteFs & { readFileSync: (path: string, enc: "utf8") => string },
   joinPath: (...parts: string[]) => string,
   knownRepos: ReadonlySet<string> | undefined = knownPlanRepos(worktreePath),
+  factsRoot = worktreePath,
 ): { writtenPaths: string[]; filedIds: string[] } {
-  for (const p of payloads) assertRatificationDraftFileable(p.fragmentYaml, p.proposalId, p.stampLine, knownRepos, worktreePath);
+  for (const p of payloads) assertRatificationDraftFileable(p.fragmentYaml, p.proposalId, p.stampLine, knownRepos, factsRoot);
   const written = new Set<string>();
   const filedIds: string[] = [];
   for (const payload of payloads) {
     const filed = materialize(payload);
-    for (const path of fileRatificationDraft(worktreePath, filed, fs, joinPath, knownRepos)) written.add(path);
+    for (const path of fileRatificationDraft(worktreePath, filed, fs, joinPath, knownRepos, factsRoot)) written.add(path);
     filedIds.push(...[...filed.fragmentYaml.matchAll(/^- id:\s*(\S+)/gm)].map((m) => m[1]));
   }
   return { writtenPaths: [...written], filedIds };

@@ -287,16 +287,16 @@ test("without a usable read map a non-code change falls back to the full run and
 });
 
 test("paths the map does not observe keep the full run with their reason, map or no map", () => {
-  const selection = selectAffectedSuites([".github/workflows/ci.yml", "openapi/daemon.yaml"], input(usable()));
+  const selection = selectAffectedSuites(["Dockerfile.x", "openapi/daemon.yaml"], input(usable()));
   assert.equal(selection.fullRun, true);
-  assert.match(selection.reasons[0]!, /\.github\/workflows\/ci\.yml is outside what the selector models$/);
+  assert.match(selection.reasons[0]!, /Dockerfile\.x is outside what the selector models$/);
   assert.equal(fullRunTrigger(["openapi/daemon.yaml"]), undefined);
   assert.equal(fullRunTrigger(["openapi/daemon.yaml"], true), undefined);
   assert.equal(fullRunTrigger(["deploy/unit.service"]), "deploy/unit.service");
   assert.equal(fullRunTrigger(["deploy/unit.service"], true), undefined);
   assert.equal(fullRunTrigger(["openapi/other.yaml"]), "openapi/other.yaml");
   assert.equal(fullRunTrigger(["openapi/other.yaml"], true), "openapi/other.yaml");
-  assert.equal(fullRunTrigger([".github/workflows/ci.yml"], true), ".github/workflows/ci.yml");
+  assert.equal(fullRunTrigger(["Dockerfile.x"], true), "Dockerfile.x");
   assert.equal(fullRunTrigger(["test/fixtures/x.ts"], true), "test/fixtures/x.ts");
 });
 

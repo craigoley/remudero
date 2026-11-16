@@ -151,6 +151,7 @@ test("a machine shard renders its rationale as a block the plan loader reads bac
   const { text, refused } = renderMachineShard({
     taskId: "W1-T9300", title: "t", origin: "ci-friction:check:x", files: ["src/run-task.ts"],
     acceptance: [{ claim: "c", proof: "unit test: W1-T9300: x" }], rationale: ["first line", "", "third: line"],
+    invariants: { none: "the fixture records one remedy and changes no existing behaviour" },
   });
   assert.equal(refused, undefined);
   assert.match(text, /^ {2}rationale: \|\n {4}first line\n\n {4}third: line$/m);

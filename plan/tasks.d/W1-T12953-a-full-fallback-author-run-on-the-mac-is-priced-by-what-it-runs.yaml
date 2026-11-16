@@ -1,0 +1,56 @@
+- id: W1-T12953
+  title: "A full-fallback author run on the Mac is priced by what it runs, so a change the selector cannot model no longer needs 20 GiB free to run a static stage measured at 256 MiB"
+  repo: remudero
+  priority: 0.7
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # it changes when the local author gate admits a run; a reserve set too low lets a run fill the disk
+  band_meaning: span
+  origin: "operator ask 2026-11-15: \"How do we reduce the need for that much space? How do we make this more efficient?\""
+  plan_refs:
+    - W1-T10765
+    - W1-T10947
+    - W1-T12505
+  files:
+    - scripts/lib/mac-author-admission.mjs
+    - scripts/preflight-author.mjs
+    - test/infra/a-full-fallback-author-run-on-the-mac-is-priced-by-what-it-runs.test.ts
+    - test/infra/the-author-disk-reserve-is-sized-to-its-workload.test.ts
+    - test/ci/author-preflight-capacity-refusal.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "The static stage of an author run is priced by the static stage's own measured peak for every selection, full-fallback included, once a full-fallback static stage has been measured and its row recorded beside the others"
+      proof: "grep: W1-T12953 criterion 1 in test/infra/a-full-fallback-author-run-on-the-mac-is-priced-by-what-it-runs.test.ts"
+    - claim: "The test stage of a full-fallback run that the Mac cuts to an over-capacity subset is priced by the workers that subset runs, not by the full suite it never starts"
+      proof: "grep: W1-T12953 criterion 2 in test/infra/a-full-fallback-author-run-on-the-mac-is-priced-by-what-it-runs.test.ts"
+    - claim: "A capacity refusal names the reserve it applied, the measurement behind it and the free bytes that would admit the run"
+      proof: "grep: W1-T12953 criterion 3 in test/infra/a-full-fallback-author-run-on-the-mac-is-priced-by-what-it-runs.test.ts"
+    - claim: "invariant:unmeasured-keeps-the-full-reserve — a stage or selection with no recorded measurement keeps the 20 GiB reserve, no reserve falls below the operating-system floor plus the safety factor over its measured peak, and the plan-only and affected reserves are unchanged"
+      proof: "grep: W1-T12953 criterion 4 in test/infra/a-full-fallback-author-run-on-the-mac-is-priced-by-what-it-runs.test.ts"
+  rationale: |
+    OBSERVED 2026-11-15 on the operator Mac, by the operator session.
+
+    - A branch changing `package.json`, `deploy/package.json` and their lockfiles (the fleet CLI bump) ran `scripts/preflight-author.mjs`. It printed `author selection: full-fallback, 4715 suite(s)` because "deploy/package-lock.json is outside what the selector models (the read map cannot speak for it: no read map supplied)", then `author push-eligible: false; static-preflight was not run: Mac author capacity NOT_RUN before static-preflight` with `minimumFreeBytes 21474836480`, `reserveBasis existing-20GiB`, `workspaceFreeBytes 18398715904`. Exit 3 at 18:18:57Z. The ship waited on the operator freeing disk.
+    - A plan-only filing started on the same disk minutes later and was admitted: its reserve is the 10 GiB operating-system floor plus twice a 256 MiB measured peak.
+    - READ scripts/lib/mac-author-admission.mjs on origin/main: `macAuthorReserveBytes` returns the full 20 GiB for any selection outside plan-only, affected-narrow and affected-floor, before it looks at the stage. The static stage runs the same checks for every selection, and its measured peak row is 256 MiB.
+    - The Mac never runs a full fallback's 4,715 suites. `scripts/preflight-author.mjs` cuts it to the narrow subset that fits and reports over-capacity. The 20 GiB therefore reserves room for a run that is never started.
+    - W1-T10765 (merged, same operator question on 2026-10-26) sized the three measured selections and left full fallback "unmeasured". W1-T12505 (queued) will stop a deploy or json change from being a full fallback at all; other causes of full fallback remain (W1-T10740).
+  design: |
+    MEASURE FIRST, on the Mac, the way W1-T10765 did: sample the run's own disk growth (its TMPDIR, coverage/ and the tree outside node_modules) every 5 s through a full-fallback run's static stage and its over-capacity test stage. Put the peaks in the PR body. If a peak is above the existing rows, record it as its own row; never reuse a row for a stage that measured higher.
+
+    1. `macAuthorReserveBytes` prices `static-preflight` from the static row for every selection that has a recorded static measurement.
+    2. The test stage of an over-capacity subset is priced per worker from the workers the subset runs.
+    3. The refusal report names the reserve basis, the row and the admitting free-byte figure.
+    MEASURED 2026-11-15 on the operator Mac, with the operator session's sampler (tree outside node_modules every 5 s, TMPDIR every 30 s): the CLI bump's full-fallback static stage grew 193.9 MiB; a second full-fallback run (hand PR 18405) grew 215.0 MiB in its static stage and 138.6 MiB in the test stage of its 295-suite over-capacity subset on one worker. Both are below the 256 MiB rows, so two rows are recorded beside the others at 256 MiB: `full-fallback-static-preflight` and `over-capacity-subset-tests-per-worker`.
+    4. `scripts/preflight-author.mjs` tells the test-stage admission that a full fallback is a cut subset (`overCapacitySubset: true`) only when the subset runs fewer suites than the selection named. A full fallback that runs whole keeps the 20 GiB reserve.
+    EXISTING TESTS: `test/infra/the-author-disk-reserve-is-sized-to-its-workload.test.ts` asserts that a full-fallback static stage keeps 20 GiB, and `test/ci/author-preflight-capacity-refusal.test.ts` forces the selection `full-fallback` to get a 20 GiB refusal before the static stage. Both change to a selection with no recorded measurement; the behavior they guard is unchanged.
+    INVARIANT unmeasured-keeps-the-full-reserve: no stage or selection without a recorded measurement is priced below the 20 GiB reserve, and every priced reserve is at least the operating-system floor plus the safety factor over the measured peak.
+    NOT IN SCOPE: the 10 GiB operating-system floor; the coverage gate's own 20 GiB scratch reserve in src/lib/ci-parity.ts; which changes the selector can model (W1-T12505).
+  falsifier: |
+    Return the full reserve for a full-fallback static stage that has a recorded row and criterion 1 must fail. Price the over-capacity subset as a full run and criterion 2 must fail. Drop the admitting figure from the refusal and criterion 3 must fail. Price an unmeasured stage below 20 GiB, or change the plan-only reserve, and criterion 4 must fail. Restore and all pass.
+  note: |
+    reservation hand-off: run-unfiled-1794763854161 -> run-unfiled-1794763854161
+    Reserved with rmd next-task-id from a worktree at origin/main. Check refs/rmd-dispatch/W1-T12953 and any run branch before building. The test sits beside test/infra/the-author-disk-reserve-is-sized-to-its-workload.test.ts, the suite of W1-T10765. The operator session samples the CLI bump's full-fallback run on 2026-11-15 and leaves the figures in ~/Remudero-notes/handoff-1115/.

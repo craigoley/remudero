@@ -1,0 +1,76 @@
+- id: W1-T13174
+  title: "Serve writes each analytics checkpoint at most once an hour and at stop, not after every refresh, so serializing the 79 MB checkpoint stops blocking serve's request loop for up to 34 s about twelve times an hour"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # how often one restart file is written; the in-memory fold, the scan and the served snapshot are unchanged
+  origin: "operator-session#serve-oom-2026-11-16"
+  plan_refs:
+    - W1-T4024
+  files:
+    - src/lib/analytics-route.ts
+    - test/an-analytics-checkpoint-is-written-at-most-hourly.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "With a fake clock and a counting checkpoint path, the first completed refresh after a cache is created writes the checkpoint, and further completed refreshes within ANALYTICS_CHECKPOINT_WRITE_INTERVAL_MS (one hour) write nothing while current() serves each new snapshot"
+      proof: "grep: W1-T13174 criterion 1 in test/an-analytics-checkpoint-is-written-at-most-hourly.test.ts"
+    - claim: "The first completed refresh one hour or more after the last write writes the newest checkpoint, and stop() writes a checkpoint that a completed refresh produced but did not yet write, so a cache created next on the same state dir resumes from it"
+      proof: "grep: W1-T13174 criterion 2 in test/an-analytics-checkpoint-is-written-at-most-hourly.test.ts"
+    - claim: "invariant:fold-continues-from-memory — a refresh between writes resumes from the in-memory checkpoint the last refresh produced, never from the older one on disk: the reader's prior argument is the previous refresh's checkpoint object"
+      kind: guard
+      proof: "grep: W1-T13174 criterion 3 in test/an-analytics-checkpoint-is-written-at-most-hourly.test.ts"
+  rationale: |
+    WHY: the Console's reads time out (5 s header bound) while serve's request loop is blocked, and the
+    analytics checkpoint write is one of the two largest blocks. Each block withholds every Console write,
+    because the Console then replays its last snapshot marked stale.
+    MEASURED on the Azure host, remudero-serve, 2026-11-16 07:16Z to 14:00Z (runtime.loop_stall_profile
+    rows from serve's pid):
+    - 189 stalls of 4 s or more, 1,494 s in all. 26 of them (292 s) have analytics-route.ts frames on top;
+      the longest, at 13:05:17Z, is 34.5 s with writeJsonAtomic <- writeAnalyticsCheckpoint as its top self
+      frame, then garbage collection and writeFileSync.
+    - serve.analytics_refresh.completed: 90 rows in that window (about 12 an hour: serve's own cache plus
+      one per mounted instance in instance-gateway.ts, each on a 15-minute timer).
+    - The core checkpoint (~/rmd-state2/state/.analytics-console-v1.checkpoint.json) is 79 MB:
+      routingTelemetry 30 MB (56,562 assignments), workIntegrityFold 18 MB, tail 19.7 MB.
+    - A probe of GET /v1/i/core/views/instances every 2 s from the host saw 21.8 s at 14:00:48Z; the same
+      read answers in 1 to 14 ms between stalls.
+    READ at origin/main (ef8b74910), src/lib/analytics-route.ts:
+    - createAnalyticsSnapshotCache's refresh calls writeAnalyticsCheckpoint after every completed snapshot.
+      writeJsonAtomic is a synchronous JSON.stringify and writeFileSync of the whole checkpoint on serve's
+      main thread.
+    - The cache keeps the newest checkpoint in memory (`checkpoint = result.checkpoint`) and every later
+      refresh resumes from it. The disk file is read only when a cache is created (a serve boot) and after
+      shed(). An older disk checkpoint is still a correct resume point: the scan continues from its recorded
+      source offsets, as it does today after a restart.
+    The checkpoint's growth (assignments kept for ever) is a separate defect and is not changed here.
+  design: |
+    INVARIANT fold-continues-from-memory: between writes, refreshes resume from the in-memory checkpoint.
+    1. Add `export const ANALYTICS_CHECKPOINT_WRITE_INTERVAL_MS = 60 * 60_000` beside
+       ANALYTICS_REFRESH_INTERVAL_MS, with a comment that gives the measurement above.
+    2. In createAnalyticsSnapshotCache keep `checkpointWrittenAt` (clock ms of this cache's last write,
+       undefined at creation) and `unwritten` (a checkpoint that passed the existing hasRetainedEvidence and
+       sourceReadable test but was not written). Where refresh writes today, write only when
+       checkpointWrittenAt is undefined or clock.now() - checkpointWrittenAt >= the interval; otherwise set
+       unwritten. A write clears unwritten.
+    3. stop() writes unwritten, if any, before it aborts. shed() does not write (it runs under memory
+       pressure); the refresh after a shed resumes from the older disk checkpoint, which is correct.
+    4. No change to scanAnalyticsLedger, the progress file, writeAnalyticsCheckpoint, the served snapshot
+       or the refresh interval.
+    5. Tests in test/an-analytics-checkpoint-is-written-at-most-hourly.test.ts, as
+       test/a-shed-analytics-cache-resumes-from-its-disk-checkpoint.test.ts does: a temp state dir with a
+       small live ledger, a stepping fake clock, schedule stubbed; count writes by the checkpoint file's
+       mtime/content and by a readSnapshot wrapper that records its prior argument.
+  falsifier: |
+    Write after every refresh again: criterion 1 fails (a second write inside the hour). Never write after
+    the first: criterion 2 fails (no write after an hour, and nothing at stop). Resume from
+    readAnalyticsCheckpoint on each refresh: criterion 3 fails (prior is the older disk object).
+  note: |
+    Id reserved for run-unfiled-1794838096000 with ~/rmd-work/bin/reserve-id.sh.
+    Proof that counts in production: after the deploy, runtime.loop_stall_profile rows from serve whose
+    top frames name writeAnalyticsCheckpoint fall from about 26 per 7 h to about 3, and the
+    .analytics-console-v1.checkpoint.json mtime moves about once an hour.

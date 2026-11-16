@@ -1,0 +1,47 @@
+- id: W1-T13158
+  title: "The read client says when the installed Mac broker copy is older than the broker code it is run beside, and the hook names a broker directory that has no heartbeat"
+  repo: remudero
+  priority: 0.4
+  depends_on: [W1-T12938]
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # it edits the deny-floor hook, which every shell call of every session passes through
+  band_meaning: span
+  origin: "operator-session#mac-read-broker-2026-11-16"
+  plan_refs:
+    - W1-T12938
+    - W1-T10279
+  files:
+    - deploy/mac/install-gh-read-broker.sh
+    - hooks/deny-floor.sh
+    - src/lib/gh-read-broker.ts
+    - test/github/the-mac-read-broker-says-when-its-installed-copy-is-old.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "When the installed copy's recorded commit differs from the calling checkout's commit in the broker's own source paths, `rmd gh` prints one stderr line that names both commits and the reinstall command, at most once per calling checkout commit, and the read's stdout and exit code are exactly what they were"
+      proof: "grep: W1-T13158 criterion 1 in test/github/the-mac-read-broker-says-when-its-installed-copy-is-old.test.ts"
+    - claim: "When the account's broker directory exists and holds no heartbeat file, the floor's refusal carries the same DOWN line and restore command it carries for a heartbeat that is not live"
+      proof: "grep: W1-T13158 criterion 2 in test/github/the-mac-read-broker-says-when-its-installed-copy-is-old.test.ts"
+    - claim: "invariant:routing-and-the-floor-unchanged — which calls are routed, floored, exempt or writes is unchanged, an installed copy that matches prints nothing, and no code path reinstalls, restarts or stops the broker"
+      proof: "grep: W1-T13158 criterion 3 in test/github/the-mac-read-broker-says-when-its-installed-copy-is-old.test.ts"
+  rationale: |
+    FOUND 2026-11-16 by the builder of W1-T12938 (merged as #18834), then READ on origin/main by the operator session.
+
+    - deploy/mac/install-gh-read-broker.sh copies the checkout's committed tree at HEAD to `~/Library/Application Support/remudero/gh-read-broker/<sha>/` and records that sha in `current`. Its launchd agent is `KeepAlive` and `RunAtLoad` only. Nothing compares the serving copy with main afterwards, so the broker runs the code of the day it was installed until someone remembers to reinstall. The repository has met this class before: a reviewer clone that sat behind origin/main refused reviews for hours on 2026-11-15.
+    - hooks/deny-floor.sh adds its "installed for this account is DOWN" line only inside `if [ -f "$gh_broker_dir/heartbeat" ]`. A broker directory with no heartbeat file (an install that never produced a beat, or a cache that was cleared) gets the bare floor and no restore command.
+    - The agent's PATH (`/usr/local/bin:/opt/homebrew/bin:...`) resolves Node 24.21.0 on the operator Mac while `.nvmrc` pins 24.22.2; `engines` allows it. Recorded, not changed here.
+    - The operator's rule is that no remudero service runs on the Mac beyond the approved broker, so a scheduled reinstaller is not proposed: the client that every session already calls says what is stale and how to fix it.
+  design: |
+    1. The installer writes, beside `current`, the list of source paths the copy was made from that the broker serves from (the paths `rmd gh-broker serve` loads; name them once, in one exported list the installer and the client both read).
+    2. The `rmd gh` verb (src/lib/gh-read-broker.ts; the narrow client entry src/gh-read-broker-client-main.ts must keep answering exactly as `gh` does and is not touched) compares `current`'s commit with its own checkout's HEAD over those paths (`git diff --quiet <installed> <head> -- <paths>`, bounded, and silent when either commit is unknown to the checkout). On a difference it prints one stderr line, prefixed `rmd gh:`, with both short commits and `bash <checkout>/deploy/mac/install-gh-read-broker.sh`, once per calling commit (a stamp file under the broker's cache directory).
+    3. The hook's DOWN line also fires for an existing broker directory with no heartbeat file, with "no heartbeat was ever written" in place of the age.
+    INVARIANT routing-and-the-floor-unchanged: no call changes class, and nothing here starts, stops or reinstalls anything.
+    NOT IN SCOPE: a scheduled refresh; the agent's Node version; Linux installs.
+  falsifier: |
+    Print nothing for a differing copy, or print on every call, and criterion 1 must fail. Drop the DOWN line for a directory with no heartbeat file and criterion 2 must fail. Print for a matching copy, or route a call differently, and criterion 3 must fail. Restore and all pass.
+  note: |
+    reservation hand-off: run-unfiled-1794835016375 -> run-unfiled-1794835016375
+    Reserved with rmd next-task-id from a worktree at origin/main. The test folder is the one W1-T12938's suite sits in; confirm it with rmd test-place on a stub before writing the test. READ on origin/main: the `rmd gh` verb and GH_COMMAND_USAGE are in src/lib/gh-read-broker.ts, whose comment says it "prints exactly what gh would": the one added line is on stderr only, and callers that filter stderr by the `rmd` prefix keep working.

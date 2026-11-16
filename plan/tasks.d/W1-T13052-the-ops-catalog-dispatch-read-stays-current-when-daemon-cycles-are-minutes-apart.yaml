@@ -1,0 +1,55 @@
+- id: W1-T13052
+  title: "The ops-catalog dispatch read stays current when daemon cycles are minutes apart, so a selected ops task is not held as stale on every cycle"
+  repo: remudero
+  priority: 1.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the read decides whether private ops tasks may dispatch; a fix that serves an old snapshot as current would dispatch work the catalog no longer holds
+  origin: "operator-session#ops-cutover-stage-3-2026-11-16"
+  plan_refs:
+    - W1-T12209
+    - W1-T11770
+    - W1-T11769
+    - W1-T7744
+  files:
+    - src/cli/commands/daemon.ts
+    - src/lib/ops-catalog-source.ts
+    - test/daemon/the-ops-catalog-dispatch-read-stays-current-between-slow-cycles.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "With dispatch_ops_tasks true and daemon cycles 240 s apart (an injected clock), once the first catalog read completes, every later cycle's readOpsTaskDispatch answers selected, and no dispatch.ops_catalog_held row with outcome stale is written while the catalog's default branch does not move"
+      proof: "grep: W1-T13052 criterion 1 in test/daemon/the-ops-catalog-dispatch-read-stays-current-between-slow-cycles.test.ts"
+    - claim: "Between cycles the feed refreshes on its own unref'd timer (OPS_DISPATCH_SOURCE_REFRESH_MS, less than half of OPS_DISPATCH_SOURCE_MAX_AGE_MS), and the daemon command stops that timer on shutdown through its cleanup list"
+      proof: "grep: W1-T13052 criterion 2 in test/daemon/the-ops-catalog-dispatch-read-stays-current-between-slow-cycles.test.ts"
+    - claim: "When the default branch still names the pinned commit, a refresh revalidates the snapshot with one ref GET and reads no tree or blob; when the branch moves, it rereads the whole catalog at the new commit"
+      proof: "grep: W1-T13052 criterion 3 in test/daemon/the-ops-catalog-dispatch-read-stays-current-between-slow-cycles.test.ts"
+    - claim: "invariant:no-stale-ops-authority — when refreshes fail or hang for OPS_DISPATCH_SOURCE_MAX_AGE_MS or longer after the last completed read, the dispatch read still answers stale and no ops task is selected (W1-T12209 criterion 5 keeps passing)"
+      kind: guard
+      proof: "grep: W1-T13052 criterion 4 in test/daemon/the-ops-catalog-dispatch-read-stays-current-between-slow-cycles.test.ts"
+    - claim: "The daemon command passes the refresh interval to the feed"
+      proof: "grep: refreshEveryMs: OPS_DISPATCH_SOURCE_REFRESH_MS in src/cli/commands/daemon.ts"
+  rationale: |
+    WHY: the operator asked for ops cutover stage 3, and dispatch_ops_tasks is true on the host. The ops catalog's origin/main (b1f8546, 2026-11-16T00:35Z) holds W1-T12996 (dispatch_hold) and W1-T13049 (a flake incident, status queued). The daemon must be able to select a ready ops task. Today it cannot whenever daemon cycles are more than about 2 minutes apart.
+    MEASURED read-only on the Azure host, 2026-11-16 (live ledger ~/rmd-state2/state/ledger.ndjson, daemon pid 153, booted 01:06:46Z):
+    - dispatch.ops_catalog_held outcome source_pending at 01:07:56, then outcome stale at 01:16:51. No ops task was selected after that (checked to 01:22Z). The row is written only when the outcome changes, so stale held on the later cycles.
+    - The daemon cycles were 4 to 5 minutes apart: dispatch rows at 01:07:56, 01:12:50, 01:16:51 and 01:20:12-20.
+    - The catalog itself reads fine: readOpsCatalogSnapshotAsync on craigoley/remudero-ops with the agent token answered ok (2 shards, 12 tree entries). The dispatch.secondary_catalog_shadow row at 01:12:50 with outcome unreadable is the shadow's mapping of an unavailable read with no source (source_pending), not a failed GitHub read.
+    THE CODE, src/cli/commands/daemon.ts on origin/main 02fe3cacd:
+    - :891 opsCatalogShadowFeed. current() starts a refresh only when it is called and returns the last completed result. forDispatch() answers stale when that result completed OPS_DISPATCH_SOURCE_MAX_AGE_MS (120 s) or more ago.
+    - :2228-2233 readOpsTaskDispatch calls opsShadow.current() and then opsShadow.forDispatch() once per cycle. The refresh that current() starts cannot complete before forDispatch() runs, so forDispatch() always judges the result of the refresh started on the previous cycle. Its age is about one cycle. With cycles over about 120 s apart, every cycle answers stale.
+    - Checked with the real opsCatalogShadowFeed and an injected clock: cycles 240 s apart answer stale, stale, stale; cycles 60 s apart answer ok, ok, ok.
+    The 120 s bound is right (W1-T12209: completed private evidence must expire even if the next read hangs). What is wrong is that the only thing that refreshes the evidence is the cycle that judges it.
+    RELATED, not duplicated: W1-T12209 (the live flag and the 120 s bound), W1-T11770 (the feed), W1-T7744 (the prefetch shape). W1-T13050 is the separate mint defect from the same cutover.
+  design: |
+    INVARIANT no-stale-ops-authority: an ops task is selected only on a catalog read that completed less than OPS_DISPATCH_SOURCE_MAX_AGE_MS ago at a commit the default branch still names.
+    1. src/cli/commands/daemon.ts: opsCatalogShadowFeed takes an optional third argument { refreshEveryMs }. When it is set, the feed starts one refresh every refreshEveryMs on an unref'd timer, at most one in flight, as current() does today, and returns stop(). Export OPS_DISPATCH_SOURCE_REFRESH_MS = 45_000. The daemon command passes refreshEveryMs: OPS_DISPATCH_SOURCE_REFRESH_MS when dispatch_ops_tasks is on, and pushes stop onto its cleanup list. forDispatch() and the 120 s bound do not change.
+    2. src/lib/ops-catalog-source.ts: createOpsCatalogShadowSource keeps the binding of its last ok read. A refresh first reads the default branch ref. If it names the same commit, it answers the kept snapshot as a new ok read without reading trees or blobs. If it moved, it reads the whole catalog as today. Any failure keeps today's rule (stale after an earlier success).
+    3. Use the existing pacer; do not add a new named Deps interface.
+    NOT IN SCOPE: the daemon's cycle length; the mint defect (W1-T13050); the shadow row's unreadable mapping of source_pending.
+  falsifier: |
+    Drop the timer (refresh only in current()): criterion 1 must fail with stale at 240 s cycles. Revalidate without the ref GET: criterion 3 must fail. Raise the bound instead of refreshing: criterion 4 must fail. Restore, and all must pass. In production: after deploy, with dispatch_ops_tasks true and cycles over 2 minutes apart, no dispatch.ops_catalog_held row with outcome stale appears while the ops default branch is still. If one does, this change did not fix the cause.
+  note: |
+    Id reserved for run-unfiled-1794791888000 with ~/rmd-work/bin/reserve-id.sh. Build off origin/main.

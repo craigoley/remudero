@@ -16,16 +16,13 @@
   files:
     - src/lib/read-plane.ts
     - test/console-api/read-model/a-bundled-worktree-git-spawn-names-its-real-caller.test.ts
-  # refusal-amendment (W1-T11795, run W1-T11795-1794262265880, 2026-11-10T06:40:38.073Z): the worker refused criterion 1 [proof-unexecutable-at-head] — proposed re-scope-criteria: repair the criterion's proof so it is executable at HEAD, or re-scope the criterion
-  #   worker evidence: W1-T11795: a filed proof already passes at the merge base, so branch run-W1-T11795-1794262265880 cannot open a PR
-  #   this task is held from dispatch until its record changes; an Architect must make the change above
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: An esbuild single-file fixture (outfile run-task.mjs) that calls production hostWorktreeGit on a temporary git repository from actualCaller records actualCaller as the caller and hostWorktreeGit as the leaf for both of that call's synchronous spawns, including vetPinnedConfig's config read, and never charges hostWorktreeGit or vetPinnedConfig as a caller
       proof: "unit test: test/console-api/read-model/a-bundled-worktree-git-spawn-names-its-real-caller.test.ts"
-    - claim: An unbundled spawn through hostWorktreeGit still records the calling function as caller and hostWorktreeGit as leaf through the existing worktree-git path matcher
-      proof: "unit test: W1-T11795 criterion 2"
+    - claim: In the same bundled fixture, vetPinnedConfig's config-read spawn is charged to actualCaller with leaf hostWorktreeGit, so no sync_spawn_by_caller or sync_spawn_top row names vetPinnedConfig as its caller or its leaf
+      proof: "grep: W1-T11795 criterion 2 in test/console-api/read-model/a-bundled-worktree-git-spawn-names-its-real-caller.test.ts"
     - claim: SYNC_SPAWN_LEAF_FRAME_NAMES names hostWorktreeGit as a shared spawn leaf
       proof: 'grep: hostWorktreeGit in src/lib/read-plane.ts'
     - claim: SYNC_SPAWN_LEAF_FRAME_NAMES names vetPinnedConfig as a shared spawn leaf
@@ -89,18 +86,26 @@
       on a temporary directory outside read-plane's meter (before startReadPlaneTelemetry, or with
       the async API) and defines function actualCaller() { return hostWorktreeGit(dir, ["rev-parse", "--git-dir"]); }.
       It calls actualCaller once and prints telemetry.sample().
-    - Give the two tests literal titles with distinct markers: "W1-T11795 criterion 1" for the
-      bundled case and "W1-T11795 criterion 2" for the source-mode regression case.
+    - Give the two bundled tests literal titles with distinct markers: "W1-T11795 criterion 1" for the
+      whole call (caller, leaf, calls 2) and "W1-T11795 criterion 2" for the config read (no row names
+      vetPinnedConfig as caller or leaf). Both fail on origin/main, where the bundle names neither leaf.
+      Criterion 2's proof greps its marker in the suite (a title proof cannot resolve in a plan-only
+      amendment); criterion 1's whole-file proof runs both bundled tests.
     - In the bundled case, exactly one sync_spawn_by_caller row matches
       /^at actualCaller \(.*[/\\]run-task\.mjs:\d+:\d+\)$/ with leaf "hostWorktreeGit" and calls 2.
       No row's caller starts with "at hostWorktreeGit" or "at vetPinnedConfig". Every
       sync_spawn_top row for actualCaller has leaf "hostWorktreeGit".
+    - AMENDED 2026-11-15: the source-mode case stays in the suite as a regression test whose title
+      carries no criterion marker. It passes on origin/main by design, so a proof on it cannot
+      discriminate: the PR opener refused it as executed_stale twice (escalations #17568 and #17629).
     - In the source-mode case, call hostWorktreeGit without esbuild under startReadPlaneTelemetry,
       using a temporary directory with a .git directory and the existing synchronous-spawn test seam.
       Assert that the calling function remains the caller, hostWorktreeGit is the leaf, and the caller
       is not the leaf. Mirror W1-T7745's source-mode setup without editing its existing suite.
     - Do not edit a-bundled-sync-spawn-names-its-real-caller.test.ts. W1-T11410's and W1-T11268's
       fixture and exact counts stay as they are.
+    NO-INVARIANTS: the change adds two names to a diagnostic leaf set that no decision reads; the
+      unbundled path matcher is unchanged and stays guarded by W1-T7745's suite and the unmarked test.
     NOT IN SCOPE:
     - any change to Git execution: hostWorktreeGit, vetPinnedConfig, pinWorktreeGit, the
       hardened argv/env, or the sync-to-async conversion (W1-T11459 owns that);
@@ -111,10 +116,11 @@
   falsifier: |
     Remove "hostWorktreeGit" from SYNC_SPAWN_LEAF_FRAME_NAMES. The bundled test must then fail,
     because the git spawn is charged to "at hostWorktreeGit (...run-task.mjs...)".
-    Remove only "vetPinnedConfig". The test must then fail, because the config-read spawn is charged
-    to vetPinnedConfig and actualCaller's row shows calls 1, not 2.
-    Restore both names and both task-suite tests are green. Criterion 2 guards the unbundled path
-    matcher through the same task-specific falsifier suite.
+    Remove only "vetPinnedConfig". The criterion 2 test must then fail, because the config-read spawn
+    is charged to vetPinnedConfig; the criterion 1 test fails too, because actualCaller's row shows
+    calls 1, not 2.
+    Restore both names and every test in the task suite is green. The unmarked source-mode test
+    guards the unbundled path matcher in the same suite.
   note: |
     Filed by architect run PLAN-create-1794173553065 with reserved id W1-T11795.
     verify:auto: the whole change is two set members plus one bundle fixture, and both are machine-checkable.

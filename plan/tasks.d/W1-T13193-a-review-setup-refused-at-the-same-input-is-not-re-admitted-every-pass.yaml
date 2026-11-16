@@ -1,0 +1,85 @@
+- id: W1-T13193
+  title: "A PR whose review setup is refused for the same reason at the same head and body is not re-admitted every pass: it waits for a new head, a new body or new reviewer code, and it escalates once"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19: one concern, holding a refused review input, read in tick-read-worker and acted on in the sweep; a wrong match could hold a review that would now succeed, so a new head, body or reviewer code always re-opens admission
+  origin: "operator-session#stuck-prs-2026-11-16"
+  plan_refs:
+    - W1-T12883
+    - W1-T5863
+    - W1-T8167
+    - W1-T10346
+  files:
+    - src/lib/sweep.ts
+    - src/lib/tick-read-worker.ts
+    - test/a-review-setup-refused-at-the-same-input-is-not-re-admitted-every-pass.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A PR with 2 review.semantic_setup_refused rows (reason head-task-metadata-unavailable) for the same pr_url, head_sha, review_input_digest and reviewer_code_sha, and no review.pending_posted or review.posted row after the last one, is not admitted: the pass writes no sweep.review_admitted row, and its sweep.disposed row names the refusal reason and the refusal count (the #18670 shape: head run-RETRO-1794737755052, body trailer Remudero-Task: RETRO-1794737755052)"
+      proof: "grep: W1-T13193 criterion 1 in test/a-review-setup-refused-at-the-same-input-is-not-re-admitted-every-pass.test.ts"
+    - claim: "invariant:a-changed-input-is-admitted — the same PR is admitted again when its head_sha changes, when its body changes (a new review_input_digest, which is how the 2026-11-16 trailer edit on #18670 started its review), or when the reviewer_code_sha of the running reviewer differs from the one on the refusal rows"
+      kind: guard
+      proof: "grep: W1-T13193 criterion 2 in test/a-review-setup-refused-at-the-same-input-is-not-re-admitted-every-pass.test.ts"
+    - claim: "The held PR escalates once per head and input: one sweep.question.logged (or incident) row names the refusal, and later passes at the same input write none"
+      proof: "grep: W1-T13193 criterion 3 in test/a-review-setup-refused-at-the-same-input-is-not-re-admitted-every-pass.test.ts"
+    - claim: "invariant:one-refusal-is-retried — a single setup refusal, or refusals with different reasons, still re-admits on the next pass, so a transient setup failure is not held"
+      kind: guard
+      proof: "grep: W1-T13193 criterion 4 in test/a-review-setup-refused-at-the-same-input-is-not-re-admitted-every-pass.test.ts"
+  rationale: |
+    WHY: a review whose setup is refused at origin/main is re-admitted on every sweep pass, without a limit.
+    Each pass starts a review child that refuses again. The PR gets no verdict and the lane spends a review
+    slot each pass. W1-T12883 (queued) fixes the one identity mismatch that caused #18670; this task makes
+    the next such mismatch cost 2 refusals, not 150.
+    MEASURED, core ledger (~/rmd-state2/state, live file and archives 2026-11-13 to 2026-11-16, duplicate rows
+    removed), PR #18670 (head run-RETRO-1794737755052, one head 2c199b9 the whole time):
+    - 2026-11-15T11:16:48Z to 2026-11-16T14:39Z: 157 sweep.review_admitted rows and 142
+      review.semantic_setup_refused rows, all reason head-task-metadata-unavailable, all at head 2c199b9 and
+      the same review_input_digest. The sweep.disposed rows reached repeat_streak 161.
+    - The rules that exist did not stop it: 40 sweep.repeat_escalated rows (the first at 2026-11-15T20:12Z,
+      streak 50) and 2 pr.stuck rows (blocker other, diagnosis "unknown signature"). Neither holds admission.
+    - At about 14:45Z an operator changed the body trailer to "Remudero-Task: RETRO". The new body digest
+      was admitted at 14:50:06Z and review.pending_posted followed at 14:55:52Z.
+    READ at origin/main ac124599c:
+    - src/lib/sweep.ts:6410-6420 reviewDemandLooping (W1-T5863, backstop 2 at :5981) needs
+      postsSinceLastAdmission >= 1. A refused setup writes no review.posted row, so this backstop never trips.
+    - src/lib/tick-read-worker.ts:608-625 reviewPostRefusedFor reads only review.post_refused rows, never
+      review.semantic_setup_refused, so pr.reviewPostRefused stays false.
+    - src/lib/sweep.ts:20571-20578 (#13305, W1-T8167) names "review setup refused at this head on every pass"
+      in the pr.stuck diagnosis, but only for blocker awaiting-review, and it does not hold admission.
+    - src/lib/sweep.ts:23433 sweep.repeat_escalated escalates a repeat streak but does not hold admission.
+    - src/cli/commands/review.ts:2417-2424 writes review.semantic_setup_refused with reason, head_sha and
+      pr_url, and the row also carries review_input_digest and reviewer_code_sha (seen on the #18670 rows).
+    The identity cause (src/lib/tick-read-worker.ts:1665-1669 against src/lib/status.ts:2019-2035, with the
+    retro lane writing the trailer at src/run-task.ts:24383 and :24587) is W1-T12883's scope, not this task's.
+  design: |
+    INVARIANT a-changed-input-is-admitted: a setup refusal holds admission only for the exact pr_url, head_sha, review_input_digest, reviewer_code_sha and reason it was written for.
+    INVARIANT one-refusal-is-retried: one refusal never holds; the hold starts at REVIEW_INPUT_ADMISSION_BACKSTOP (2) refusals with one reason.
+    1. src/lib/tick-read-worker.ts: next to reviewPostRefusedFor, add reviewSetupRefusalsFor(ledger, prUrl,
+       headSha, inputDigest) that counts review.semantic_setup_refused rows for that input after the last
+       review.pending_posted or review.posted row for the PR, grouped by reason and reviewer_code_sha. Stamp
+       the result on OpenPrView as reviewSetupRefused { reason, count, reviewerCodeSha } when one group has at
+       least REVIEW_INPUT_ADMISSION_BACKSTOP rows.
+    2. src/lib/sweep.ts: a post-review demand whose reviewSetupRefused is set, and whose reviewerCodeSha is the
+       running reviewer's code sha, is not admitted. Its disposition is blocked-ambiguous with blocker
+       awaiting-review and the reason "review setup refused <count> times at head <sha7> (<reason>) — not
+       re-admitted until the head, body or reviewer code changes". Escalate once per PR, head and digest, keyed
+       by its own row, like the existing ownership escalation.
+    3. The #13305 diagnosis at sweep.ts:20571 keeps working: the held row keeps blocker awaiting-review.
+    4. Tests drive runSweep with a ledger fixture holding the #18670 rows (real branch run-RETRO-<ms>, real
+       trailer RETRO-<ms>), as test/a-review-demand-cannot-re-admit-the-same-input-without-bound.test.ts does.
+  falsifier: |
+    Remove the hold: criterion 1 fails (a sweep.review_admitted row is written). Key the hold on pr_number
+    alone: criterion 2 fails on the new digest. Hold from the first refusal: criterion 4 fails. Escalate every
+    pass: criterion 3 fails.
+  note: |
+    Id reserved for run-unfiled-1794841008000 with ~/rmd-work/bin/reserve-id.sh.
+    Defect A was filed in two parts. The identity fix (one run identity, RETRO-<ms> on run-RETRO-<ms>, with a
+    test of the real shape) is already queued as W1-T12883, so it is not filed again. This task is the guard.
+    Proof that counts in production: no PR with more than 2 review.semantic_setup_refused rows for one
+    head, digest, reason and reviewer_code_sha.

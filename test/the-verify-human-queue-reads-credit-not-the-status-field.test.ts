@@ -36,27 +36,27 @@ function planOf(blocks: string[][]) {
   return { root, plan: loadPlan(join(root, "plan", "tasks.yaml")) };
 }
 
-test("W1-T4860: a credited ruling shard is not judged again", () => {
+test("W1-T4860: a credited ruling shard is not judged again", async () => {
   const { root, plan } = planOf([shard("W1-T9101", ["  pr: 6561"]), shard("W1-T9102"), shard("W1-T9103")]);
-  const ids = parkedVerifyHumanShards(plan, root, clock, new Set(["W1-T9103"])).map((s) => s.id);
+  const ids = (await parkedVerifyHumanShards(plan, root, clock, new Set(["W1-T9103"]))).map((s) => s.id);
   assert.ok(!ids.includes("W1-T9101"), "a shard credited by `pr:` must not be queued for judgement");
   assert.ok(!ids.includes("W1-T9103"), "a shard credited by a ledger merge must not be queued for judgement");
   assert.ok(ids.includes("W1-T9102"), "an uncredited queued ruling is still judged");
 });
 
-test("W1-T4860: a done dependency counts as landed", () => {
+test("W1-T4860: a done dependency counts as landed", async () => {
   const dependent = shard("W1-T9111");
   dependent[dependent.length - 1] = "  depends_on: [W1-T9110, W1-T9112]";
   const { root, plan } = planOf([shard("W1-T9110", [], "done", "auto"), shard("W1-T9112", ["  pr: 6561"], "queued", "auto"), dependent]);
-  const s = parkedVerifyHumanShards(plan, root, clock).find((x) => x.id === "W1-T9111");
+  const s = (await parkedVerifyHumanShards(plan, root, clock)).find((x) => x.id === "W1-T9111");
   assert.ok(s, "the dependent ruling is queued");
   assert.equal(s.depsAllMerged, true, "a `done` dependency and a `pr:`-credited dependency both count as landed");
 });
 
-test("W1-T4860: an uncredited queued dependency is still not landed", () => {
+test("W1-T4860: an uncredited queued dependency is still not landed", async () => {
   const dependent = shard("W1-T9121");
   dependent[dependent.length - 1] = "  depends_on: [W1-T9120]";
   const { root, plan } = planOf([shard("W1-T9120", [], "queued", "auto"), dependent]);
-  const s = parkedVerifyHumanShards(plan, root, clock).find((x) => x.id === "W1-T9121");
+  const s = (await parkedVerifyHumanShards(plan, root, clock)).find((x) => x.id === "W1-T9121");
   assert.equal(s?.depsAllMerged, false);
 });

@@ -21,6 +21,7 @@
     - W1-T12046
     - W1-T78
   files:
+    - src/lib/fix-progress-judge.ts
     - src/lib/parked-pr-remedy.ts
     - src/lib/sweep.ts
     - src/lib/escalate.ts
@@ -28,7 +29,7 @@
     - src/lib/feedback-landing.ts
     - src/lib/ledger-steps.ts
     - test/sweep/a-pull-request-that-needs-operator-input-is-never-parked.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "For an open pull request whose fix lane would stand down on an open needs-human escalation, and whose unmet criteria a fix round or a scope or acceptance amendment can act on, the sweep dispatches that remedy on the pull request and does not stand down"
@@ -54,6 +55,8 @@
       proof: "grep: W1-T12709 criterion 9 in test/sweep/a-pull-request-that-needs-operator-input-is-never-parked.test.ts"
     - claim: "When the sweep has written a parked_pr.remedy row naming fix-on-pr for a pull request and head, the fix lane's open-escalation stand-down (openEscalationStandDownReason in src/cli/commands/fix.ts) is released for that pull request and head, and only for it"
       proof: "grep: W1-T12709 criterion 10 in test/sweep/a-pull-request-that-needs-operator-input-is-never-parked.test.ts"
+    - claim: "Where W1-T12710's takeStallRemedy would take its last remedy (operator-input: one escalation, then a hold until the operator answers), the stalled criterion is split into a held follow-up task with a needs_input question, an acceptance amendment moves it out of the pull request's task, and the pull request merges once its other criteria pass; close-and-rebuild is chosen only when that split is impossible"
+      proof: "grep: W1-T12709 criterion 11 in test/sweep/a-pull-request-that-needs-operator-input-is-never-parked.test.ts"
   rationale: |
     WHY: the operator ruled on 2026-11-14: "The console is still not fully functional, so the escalations don't make it
     through to me. I also hate the idea of stuck PRs waiting on me in the inbox. I would rather immediately update the PR to
@@ -94,6 +97,13 @@
         the landFeedback route in step 5.
     R4. fix-on-pr releases the fix lane's open-escalation stand-down in src/cli/commands/fix.ts for the pull request and
         head the parked_pr.remedy row names, and for no other.
+    R5. W1-T12710's stall ladder (STALL_REMEDIES and nextStallRemedy in src/lib/fix-progress-judge.ts, takeStallRemedy in
+        src/lib/sweep.ts) ends with operator-input: one escalation, then no round for that criterion until an answer.
+        That parks the pull request. W1-T12709 replaces that last step, and the "every remedy was tried" hold after it:
+        the criterion becomes a split-follow-up (a held task with a W1-T12715 needs_input question, plus the acceptance
+        amendment that moves the criterion out), and the pull request goes on to merge on the rest. The split is
+        impossible only when the criterion cannot leave the task (it is a red check, not a criterion, or it is the
+        task's only criterion); then the remedy is close-and-rebuild.
     INVARIANT no-parked-pr: an open pull request is never left with "a person must answer" as its only next action. Each
     pass gives it one of three remedies.
     INVARIANT one-question: one held task per pull request and cause.
@@ -124,6 +134,7 @@
     Close without filing the rebuild and criterion 3 must fail. File a second held task on the next pass and criterion 5
     must fail. Let the W1-T78 rung open its issue and criterion 6 must fail. Skip plan filings and criterion 7 must fail.
     Close a pull request with nothing unmet and criterion 9 must fail. Keep the fix lane's stand-down after a fix-on-pr
-    remedy and criterion 10 must fail. Restore and all must pass.
+    remedy and criterion 10 must fail. Let the stall ladder's operator-input step escalate and hold and criterion 11 must
+    fail. Restore and all must pass.
   note: |
     Id reserved for run-unfiled-1794689039000 with ~/rmd-work/bin/reserve-id.sh. Build after W1-T12715. The fleet builds it.

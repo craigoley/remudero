@@ -59,6 +59,8 @@ const FAILURE_SHAPE = /failed|refused|unavailable|escalated|unhealthy/;
 const DOTTED_STEP = /^[a-z][a-z0-9_-]*(?:\.[a-z][a-z0-9_-]*)+$/;
 const EXPECTED_RECOVERY_STEP = "inbox.draft_escalated";
 const DRAFT_ERROR_STEPS = new Set(["inbox.draft_error", "inbox.draft_escalation_error"]);
+/** W1-T12842: the author preflight's own verdict rows (scripts/preflight-author.mjs), named so a rename cannot drop them. */
+export const AUTHOR_PREFLIGHT_SYMPTOM_STEPS: readonly string[] = ["author_preflight.refused", "author_preflight.failed"];
 /** A raw-line prefilter for the ledger read, so only failure-shaped rows are ever parsed. */
 const FAILURE_ROW = /"step":"(?:inbox\.draft_(?:escalation_)?error|[^"]*(?:failed|refused|unavailable|escalated|unhealthy)[^"]*)"/;
 
@@ -66,7 +68,7 @@ export const scoutOrigin = (step: string): string => `scout:${step}`;
 
 export function isFailureShapedStep(step: string): boolean {
   return DOTTED_STEP.test(step) && step !== EXPECTED_RECOVERY_STEP &&
-    (DRAFT_ERROR_STEPS.has(step) || FAILURE_SHAPE.test(step));
+    (DRAFT_ERROR_STEPS.has(step) || AUTHOR_PREFLIGHT_SYMPTOM_STEPS.includes(step) || FAILURE_SHAPE.test(step));
 }
 
 export interface ScoutSymptom {
@@ -314,6 +316,11 @@ export function scoutShard(symptom: ScoutSymptom, taskId: string, population: re
       claim: `${symptom.step} stops recurring: its cause is fixed rather than its rows hidden`,
       proof: `grep: test("${taskId}: ${symptom.step} no longer recurs" in ${testPath}`,
     }],
+    invariants: { declared: [{ slug: "symptom-still-recorded",
+      statement: `${symptom.step} is still written to the ledger whenever its failure really occurs; the fix ends the cause, not the record of it.`,
+      claim: `${symptom.step} is still written to the ledger when its failure occurs`,
+      proof: `grep: test("${taskId}: the symptom is still recorded when its failure occurs" in ${testPath}`,
+    }] },
     note: `Filed by the scout gardener (W1-T5454). The scout measures this step again once the build merges and credits or debits its class by whether the rows stopped. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person.`,
     rationale: [
       `The ledger step ${symptom.step} carries a failure shape and landed rows in both halves of the trailing ${SCOUT_WINDOW_MS / 86_400_000} days: ${symptom.older} in the older half, ${symptom.newer} in the newer.`,

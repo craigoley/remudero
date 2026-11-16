@@ -20,7 +20,7 @@
     - src/lib/ledger-steps.ts
     - test/serve-restarts-only-for-changes-it-loads.test.ts
     - test/serve/a-feedback-only-advance-keeps-serve-warm.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Through the production restart decision (the gateway checkout assessment and maybeExit in src/lib/serve.ts), an advance whose only changed paths are under plan/feedback/ (plus paths serve does not load, such as test/ and scripts/) writes no serve.handoff_requested row and keeps the same read model; it writes one row that names the old and new sha and the changed paths"

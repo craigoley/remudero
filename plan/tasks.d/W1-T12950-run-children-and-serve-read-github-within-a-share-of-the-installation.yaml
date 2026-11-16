@@ -1,0 +1,124 @@
+- id: W1-T12950
+  title: "Run children and serve read GitHub within a share of the installation, as the daemons do"
+  repo: remudero
+  depends_on: []
+  priority: 1.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # every GitHub read of a run child and of serve passes this budget; a wrong share stalls builds or the console
+  origin: "operator-session#github-reads-by-consumer-2026-11-15"
+  plan_refs:
+    - W1-T12553
+    - W1-T12555
+    - W1-T12670
+    - W1-T12820
+    - W1-T12893
+  files:
+    - src/lib/installation-budget-start.ts
+    - src/cli/commands/daemon.ts
+    - src/run-child-main.ts
+    - src/lib/run-child.ts
+    - src/lib/serve.ts
+    - src/lib/instance-registry.ts
+    - src/lib/ledger-steps.ts
+    - test/github/run-children-and-serve-read-within-the-installation-share.test.ts
+    - test/github/the-daemon-sets-its-installation-share-from-a-registry-its-container-can-read.test.ts
+    - test/github/the-fleets-app-installation-stays-under-its-hourly-rate-limit.test.ts
+    - src/lib/config-schema.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "A run child started by runChildMain with GH_APP_INSTALLATION_ID set and a readable instance registry writes one github.budget.configured row with role run_child, outcome configured, its consumer count and its share divisor, and a read past its allowance waits or stands down as a daemon read does"
+      proof: "grep: W1-T12950 criterion 1 in test/github/run-children-and-serve-read-within-the-installation-share.test.ts"
+    - claim: "The serve process, at the start where it arms the GitHub App token refresh, writes one github.budget.configured row with role serve, and its reads use the same budget"
+      proof: "grep: W1-T12950 criterion 2 in test/github/run-children-and-serve-read-within-the-installation-share.test.ts"
+    - claim: "invariant:writes-keep-their-reserve — in every role (daemon, run_child, serve) no write calls admit or claimRead, and a read is refused while the latest remaining count is at or below the write reserve"
+      kind: guard
+      proof: "grep: W1-T12950 criterion 3 in test/github/run-children-and-serve-read-within-the-installation-share.test.ts"
+    - claim: "installationConsumers counts one share for the run children and one for serve beside the live instances and the hand-run share: a registry with three live instances on one installation gives 6; a run child divides the run-child share by the host worker budget the daemon passes it, and with no divisor it uses 1 and the row says divisor_missing"
+      proof: "grep: W1-T12950 criterion 4 in test/github/run-children-and-serve-read-within-the-installation-share.test.ts"
+    - claim: "invariant:no-budget-when-unconfigured — with no installation id or an unreadable registry, a run child and serve write an unconfigured row with the reason and read as they do today"
+      kind: guard
+      proof: "grep: W1-T12950 criterion 5 in test/github/run-children-and-serve-read-within-the-installation-share.test.ts"
+    - claim: "The daemon sets its budget through the shared start function, and its github.budget.configured row keeps every field it has today, with role daemon added"
+      proof: "grep: startProcessInstallationBudget( in src/cli/commands/daemon.ts"
+    - claim: "The run child entry calls the shared start function"
+      proof: "grep: startProcessInstallationBudget( in src/run-child-main.ts"
+    - claim: "The serve start calls the shared start function"
+      proof: "grep: startProcessInstallationBudget( in src/lib/serve.ts"
+  rationale: |
+    WHY: the GitHub App installation allows 15,000 core reads an hour, shared by every process that holds its
+    token. W1-T12553 gave each daemon a share of what is left, but only the daemon process sets the budget. A run
+    child and the serve process read with the same installation token and no share and no write reserve, so they
+    can spend the reads the daemons hold back, down to 0.
+    READ at origin/main 57ca3bba9:
+    - configureGithubInstallationBudget has two production callers: startDaemonInstallationBudget
+      (src/cli/commands/daemon.ts:3071, called from :1328) and the daemon's read worker thread
+      (src/lib/status.ts:4708, which joins the daemon's SharedArrayBuffer state). No other process sets it.
+    - With no budget set, githubInstallationBudget() (src/lib/github-transport.ts:620) makes a budget with
+      consumers undefined, which has no allowance and no reserve check.
+    - src/run-child-main.ts:299 and src/lib/serve.ts:2898 start the installation token refresh, so both read
+      as the installation.
+    - installationConsumers (src/lib/instance-registry.ts:305) counts live instances plus one hand-run share.
+    MEASURED, core, site and console ledgers, 2026-11-14 18:15Z to 2026-11-15 18:16Z:
+    - github.budget.configured rows: 30, all with actor daemon and lane daemon (core 11 configured, 2
+      unconfigured; site 9 and 5; console 10 and 2). No row from a run child or from serve.
+    - board_gateway.fetch_bytes and issue_fetch_bytes REST calls in the core ledger by actor: run_child 7,524,
+      daemon 2,524, service (serve) 62. These are the board reads alone; the run children's other reads are not
+      counted in any row.
+    - daemon.quota rows with bucket core and remaining 0: console 84, site 82, core 5. Most fall from
+      2026-11-15 09Z to 14Z (console 79 of 84). github.budget.throttled rows with reason refused (GitHub
+      refused a read for its rate limit): core 8, site 4, console 5.
+    - The operator's read audit of the same day counted at least 8,700 reads an hour: core 3,812, site 1,858,
+      serve 1,234, console 797, broker 694 (not stored on main).
+    - docker inspect at 18:20Z: the core, console and site daemon containers and the serve container all
+      have GH_APP_INSTALLATION_ID in their environment (names only were read, no values).
+    EXPECTED: run children and serve stop their reads at the write reserve, so merges and reviews keep their
+    reads in a drained hour, and the run children of an instance read at most one share between them.
+    FALSIFIER: if the next 24 h after this lands still show daemon.quota remaining 0 rows in the same number,
+    with run children and serve now throttled at the reserve, the drain comes from a consumer outside this
+    budget (the Mac read broker or a hand run), and the next task is that consumer, not a smaller share.
+  design: |
+    INVARIANT writes-keep-their-reserve: unchanged from W1-T12553 in every role; writes never wait.
+    INVARIANT no-budget-when-unconfigured: an unconfigured role reads exactly as today, and its row says why.
+    One shared start: the daemon, a run child and serve set the budget through one function, so the registry
+    read, the consumer count and the row shape cannot drift apart.
+    1. New module src/lib/installation-budget-start.ts: export startProcessInstallationBudget({ role,
+       readRegistry, env, log, clock, targetRepo, maxWaitMs, shareDivisor }). Move the body of
+       startDaemonInstallationBudget into it. role is "daemon", "run_child" or "serve" and goes on the row.
+       The daemon keeps its SharedArrayBuffer worker input (daemonInstallationBudgetWorkerInput); the other roles
+       have no worker thread to share with. Reuse the existing registry reader (daemonInstallationRegistry);
+       declare no new ...Deps interface.
+    2. src/lib/instance-registry.ts: export RUN_CHILD_INSTALLATION_SHARES = 1 and SERVE_INSTALLATION_SHARES = 1,
+       and add both to installationConsumers' count. Each daemon's share then shrinks from 1/4 to 1/6 of what is
+       left; that is the intended trade.
+    3. src/lib/run-child.ts: when the daemon spawns a run child, pass the host worker budget it already uses
+       (host_worker_budget on sweep rows) in the child's environment as the share divisor. A run child's
+       allowance is floor(share / divisor). src/run-child-main.ts calls startProcessInstallationBudget after the
+       token refresh arms.
+    4. src/lib/serve.ts: call startProcessInstallationBudget with role serve where it starts the app refresh.
+    5. src/lib/ledger-steps.ts: the github.budget.configured writer list names startProcessInstallationBudget and
+       its meaning names the three roles.
+    6. Add the focused test file for criteria 1 to 5. Drive runChildMain and the serve start through their
+       production entries with a fake registry file and a gh shim (test/helpers/gh-shim.ts) or the
+       transport's own exec seam (the exec argument of ghJsonAsync), which parses the rate-limit headers.
+    7. Two existing test files pin the old consumer count and the old row: the W1-T12553 and W1-T12670
+       files assert installationConsumers as live instances plus 1 (for example 4 for three instances) and
+       deepEqual whole github.budget.configured rows with no role field. Update them to the new count, live
+       instances plus 3, and to the role daemon field. The W1-T12553 file keeps its share arithmetic (4
+       consumers) by putting one instance, not three, on its installation. Change no other assertion in them.
+    8. The share divisor rides the run child's environment as RMD_INSTALLATION_SHARE_DIVISOR. Register it in
+       ENV_REGISTRY in src/lib/config-schema.ts: test/env-var-registry.test.ts requires every RMD_ name in src
+       to be registered.
+    NOT IN SCOPE: the Mac read broker; hand runs (they keep the hand-run share); the ETag cache (W1-T12892); the
+    run children's cold board walk (W1-T12893).
+  falsifier: |
+    Remove the run child's call: criteria 1 and 7 must fail. Let a write call claimRead: criterion 3 must fail.
+    Drop the two new shares from installationConsumers: criterion 4 must fail. Throw on an unreadable registry
+    in a run child: criterion 5 must fail. Restore and require all to pass.
+  note: |
+    Id reserved for run-unfiled-1794767168000 with ~/rmd-work/bin/reserve-id.sh.
+    The read audit totals are the operator's; the ledger counts above can be read again from
+    github.budget.configured, board_gateway.fetch_bytes and daemon.quota rows.

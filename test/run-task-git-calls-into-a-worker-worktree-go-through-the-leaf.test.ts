@@ -103,7 +103,7 @@ const HARNESS_SITES: Readonly<Record<string, { count: number; reason: string }>>
   creditEvidenceRootFor: { count: 1, reason: OWN },
   registeredFixWorktreeOwner: { count: 2, reason: FIX_CLONE },
   publishAbandonedFixOwnerAhead: { count: 2, reason: FIX_CLONE },
-  idCitedInSrc: { count: 2, reason: OWN },
+  idCitedInSrcSync: { count: 2, reason: `${OWN}; the sync grep kept for the non-daemon callers (the daemon's idCitedInSrc runs the leaf, W1-T12753)` },
   approveCommand: { count: 20, reason: `${APPROVE}, and the clone it ls-remotes` },
   approveBatchCommand: { count: 6, reason: APPROVE },
   bundleExportCommand: { count: 2, reason: OWN },

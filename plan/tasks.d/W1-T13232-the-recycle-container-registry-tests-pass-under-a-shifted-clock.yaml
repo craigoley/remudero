@@ -1,0 +1,42 @@
+- id: W1-T13232
+  title: "The recycle container suite's private registry tests pass under a shifted clock, so they stop failing a week from now"
+  repo: remudero
+  priority: 1.0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the tests pin that a private registry selection reaches the real host and daemon readers and forbids live effects
+  band_meaning: span
+  origin: "operator-session#clock-sweep-2026-11-16"
+  plan_refs:
+    - W1-T10573
+    - W1-T6078
+    - W1-T13231
+  files:
+    - test/recycle-container.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The private registry selection tests pass with the clock shifted forward by a week and by a year, because nothing they compare to the clock is a date written into the fixture"
+      proof: "grep: W1-T13232 criterion 1 in test/recycle-container.test.ts"
+    - claim: "invariant:the-registry-contract-keeps-its-meaning — every existing test keeps its title and its assertions, and the falsifiers that forbid live effects still fail when a live effect is allowed"
+      proof: "grep: W1-T13232 criterion 2 in test/recycle-container.test.ts"
+  rationale: |
+    OBSERVED 2026-11-16 by the operator session, in the same clock sweep run as W1-T13231 (run 43921421378, report job 2026-11-16T18:10Z, triggered by #18903):
+    - test/recycle-container.test.ts is the second NEW DRIFT suite, "fails by : +7 days from now".
+    - Failing tests: "private registry selection reaches real host and daemon readers: recorded readonly mount and image reader" and "private registry selection defaults and falsifiers forbid live effects: real serve assembly".
+    - The sweep's hint: "the fixture holds a DATE LITERAL compared against a real clock". Which literal is not yet established: the suite holds several dated fixtures (for example `startedAt: "2026-08-18T22:00:00Z"` locks and a PAUSE `requestedAt` of 2026-10-01), and the two failing tests come from the private registry selection work (W1-T10573), changed most recently on 2026-11-14 (5d1670adc0).
+    - So from about 2026-11-23 these tests fail on main, and every pull request whose selection holds this suite goes red for a reason no change caused.
+  design: |
+    MEASURE FIRST: run the suite with `FK_SHIFT_DAYS=7` and `FK_SHIFT_DAYS=400` (the reproduce line the sweep printed: `FK_SHIFT_DAYS=7 node --test --import tsx --import ./test/setup/tmp-hygiene.ts --import scripts/clock-shift.mjs test/recycle-container.test.ts`), read each failing assertion, and name the value it compares with the clock (a fixture date, a certificate or token expiry, a cached image age, a receipt freshness window). Put that in the PR body before changing anything. If the value is in production code rather than the fixture (a real expiry the code computes from a fixed date), stop and report: that is a defect in the code, not the test, and needs its own task.
+
+    1. The value becomes relative to the test's clock, keeping its margin against the policy that judges it.
+    2. Criterion 1's test runs the two tests' paths under an in-process shifted clock and passes.
+    INVARIANT the-registry-contract-keeps-its-meaning: only fixture values change.
+    NOT IN SCOPE: the stale inflight lock suite (W1-T13231); the registry selection code; the clock sweep's baseline.
+  falsifier: |
+    Restore the fixed value the measurement names and criterion 1 must fail under a +400 day shift. Change an existing assertion and criterion 2 must fail. Restore and both pass.
+  note: |
+    reservation hand-off: run-unfiled-1794854438459 -> run-unfiled-1794854438459
+    Reserved with rmd next-task-id from a worktree at origin/main. Time-boxed for the same reason as W1-T13231. The suite is large and slow; run only the two named tests with --test-name-pattern while iterating, then the whole file once.

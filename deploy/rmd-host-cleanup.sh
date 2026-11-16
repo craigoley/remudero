@@ -767,33 +767,71 @@ fs_id() {
 DOCKER_OK=1
 DOCKER_MOUNTS=""
 DOCKER_IDS=""
+DOCKER_FAIL_NOTE="(fail closed)"
+DOCKER_READ_FAILURE=""
+# Prints <device>:<inode>. A failed read prints its error text instead, on one line, and returns 1.
 container_path_identity() {
-  [ -e "$1" ] || return 1
-  stat -Lc '%d:%i' -- "$1" 2>/dev/null || stat -Lf '%d:%i' -- "$1" 2>/dev/null
+  local err
+  if [ -e "$1" ]; then
+    stat -Lc '%d:%i' -- "$1" 2>/dev/null || stat -Lf '%d:%i' -- "$1" 2>/dev/null && return 0
+  fi
+  if [ -L "$1" ] && [ ! -e "$1" ]; then
+    printf '%s\n' "stat: $1: No such file or directory"
+    return 1
+  fi
+  err="$(stat -L -- "$1" 2>&1 >/dev/null)"; err="${err//$'\n'/ }"
+  printf '%s\n' "${err:-cannot read $1}"
+  return 1
 }
-snapshot_docker() {
-  local ids id mounts mount identity
-  DOCKER_IDENTITIES="|"; DOCKER_PATH_REASON="Docker mount snapshot failed"
-  if ! ids="$($DOCKER_CMD ps -q 2>/dev/null)"; then DOCKER_OK=0; return; fi
-  DOCKER_IDS="$ids"
+docker_container_name() {
+  local name
+  name="$($DOCKER_CMD inspect --format '{{.Name}}' "$1" 2>/dev/null | head -n 1)"
+  name="${name#/}"; printf '%s\n' "${name:-$1}"
+}
+# One list of the running containers and the identity of every mount source. Status 2 means a
+# mount source could not be read; DOCKER_READ_FAILURE then names the container, source and error.
+snapshot_docker_once() {
+  local ids id mounts mount identity all="" identities="|"
+  if ! ids="$($DOCKER_CMD ps -q 2>/dev/null)"; then return 1; fi
   while IFS= read -r id; do
     [ -n "$id" ] || continue
     if ! mounts="$($DOCKER_CMD inspect --format '{{range .Mounts}}{{println .Source}}{{end}}' "$id" 2>/dev/null)"; then
-      DOCKER_OK=0; return
+      return 1
     fi
-    DOCKER_MOUNTS="$(printf '%s\n%s' "$DOCKER_MOUNTS" "$mounts")"
+    all="$(printf '%s\n%s' "$all" "$mounts")"
     while IFS= read -r mount; do
       [ -n "$mount" ] || continue
       if ! identity="$(container_path_identity "$mount")"; then
-        DOCKER_OK=0; DOCKER_PATH_REASON="Docker mount identity unreadable"; return
+        DOCKER_READ_FAILURE="container=$(docker_container_name "$id") source=$mount read=$identity"; return 2
       fi
-      case "$DOCKER_IDENTITIES" in *"|$identity|"*) ;; *) DOCKER_IDENTITIES="$DOCKER_IDENTITIES$identity|" ;; esac
+      case "$identities" in *"|$identity|"*) ;; *) identities="$identities$identity|" ;; esac
     done <<< "$mounts"
   done <<< "$ids"
+  DOCKER_IDS="$ids"; DOCKER_IDENTITIES="$identities"
+  DOCKER_MOUNTS="$(printf '%s\n%s' "$DOCKER_MOUNTS" "$all")"
+}
+# W1-T12269. A container can end between the list and the read of its mount source, so a failed
+# read takes the list again, once, and uses that second list. If it fails too, the pass holds
+# every candidate and says why once (HOLD ALL); each held candidate refers to that line.
+snapshot_docker() {
+  local status
+  [ "$DOCKER_OK" = 1 ] || return 0
+  DOCKER_IDENTITIES="|"; DOCKER_PATH_REASON="Docker mount snapshot failed"
+  snapshot_docker_once; status=$?
+  if [ "$status" = 2 ]; then
+    log "RE-READ Docker mounts: Docker mount identity unreadable: $DOCKER_READ_FAILURE"
+    DOCKER_IDENTITIES="|"; snapshot_docker_once; status=$?
+  fi
+  case "$status" in
+    0) ;;
+    2) DOCKER_OK=0; DOCKER_PATH_REASON="Docker mount identity unreadable"; DOCKER_FAIL_NOTE="(see HOLD ALL)"
+       log "HOLD ALL: Docker mount identity unreadable: $DOCKER_READ_FAILURE" ;;
+    *) DOCKER_OK=0 ;;
+  esac
 }
 keep_container_path() {
   local p="$1"
-  if [ "$DOCKER_OK" != 1 ]; then log "KEEP $p: $DOCKER_PATH_REASON (fail closed)"; return 0; fi
+  if [ "$DOCKER_OK" != 1 ]; then log "KEEP $p: $DOCKER_PATH_REASON $DOCKER_FAIL_NOTE"; return 0; fi
   if is_docker_mount "$p"; then log "KEEP $p: $DOCKER_PATH_REASON"; return 0; fi
   return 1
 }
@@ -811,8 +849,11 @@ is_docker_mount() {
   cursor="$p"
   while :; do
     if [ -e "$cursor" ] || [ -L "$cursor" ]; then
+      # An unread identity never counts as "not a mount": this candidate is held, by name.
       if ! identity="$(container_path_identity "$cursor")"; then
-        DOCKER_PATH_REASON="Docker mount identity unreadable (fail closed)"; return 0
+        if [ -L "$cursor" ] && [ ! -e "$cursor" ]; then DOCKER_PATH_REASON="dangling symlink $cursor (read=$identity)"
+        else DOCKER_PATH_REASON="Docker mount identity unreadable: path=$cursor read=$identity (fail closed)"; fi
+        return 0
       fi
       case "$DOCKER_IDENTITIES" in
         *"|$identity|"*) DOCKER_PATH_REASON="running container mount through filesystem identity"; return 0 ;;
@@ -1962,12 +2003,12 @@ expire_preserved_copies() {
 # the same files DUMP_RESUMABLE_ROOTS keeps uncompressed for a resume; a resume happens within its
 # run, never a week later. On 2026-11-07 18,426 logs idle over 7 days held 10 GB of /mnt/rmd.
 sweep_codex_sessions() {
-  local dir f bytes id mounts source dest extra resolved identity held i cursor suffix
+  local dir f bytes id mounts source dest extra resolved identity held hold_reason i cursor suffix
   local -a source_ids=() destinations=()
   [ "$CODEX_SESSION_DAYS" -gt 0 ] || return 0
   [ -d "$CLEAN_HOME/.codex/sessions" ] || [ -d "$CLEAN_HOME/.codex/archived_sessions" ] || return 0
   snapshot_docker
-  if [ "$DOCKER_OK" != 1 ]; then log "KEEP $CLEAN_HOME/.codex: $DOCKER_PATH_REASON (fail closed)"; return; fi
+  if [ "$DOCKER_OK" != 1 ]; then log "KEEP $CLEAN_HOME/.codex: $DOCKER_PATH_REASON $DOCKER_FAIL_NOTE"; return; fi
   snapshot_open
   if [ "$OPEN_OK" != 1 ]; then log "KEEP $CLEAN_HOME/.codex: $OPEN_FAILURE (fail closed)"; return; fi
   while IFS= read -r id; do
@@ -1980,7 +2021,7 @@ sweep_codex_sessions() {
       case "$source:$dest" in /*:/*) ;; *) log "KEEP $CLEAN_HOME/.codex: container log aliases invalid (fail closed)"; return ;; esac
       [ -z "$extra" ] || { log "KEEP $CLEAN_HOME/.codex: container log aliases invalid (fail closed)"; return; }
       [ -d "$source" ] || continue
-      identity="$(container_path_identity "$source")" || { log "KEEP $CLEAN_HOME/.codex: mount source unreadable (fail closed)"; return; }
+      identity="$(container_path_identity "$source")" || { log "KEEP $CLEAN_HOME/.codex: mount source unreadable: container=$(docker_container_name "$id") source=$source read=$identity (fail closed)"; return; }
       source_ids+=("$identity"); destinations+=("${dest%/}")
     done <<< "$mounts"
   done <<< "$DOCKER_IDS"
@@ -1988,15 +2029,15 @@ sweep_codex_sessions() {
     [ -d "$dir" ] && [ ! -L "$dir" ] || continue
     while IFS= read -r -d '' f; do
       # A mounted Codex HOME is expected; a bind-mounted log itself must still stay in place.
-      identity="$(container_path_identity "$f")" || { log "KEEP $f: log identity unreadable (unknown)"; continue; }
+      identity="$(container_path_identity "$f")" || { log "KEEP $f: log identity unreadable: read=$identity (unknown)"; continue; }
       case "$DOCKER_IDENTITIES" in *"|$identity|"*) log "KEEP $f: running container mount"; continue ;; esac
-      resolved="$(cd -P -- "${f%/*}" 2>/dev/null && pwd -P)" || { log "KEEP $f: log path unreadable (unknown)"; continue; }
-      resolved="$resolved/${f##*/}"; held=0
+      resolved="$(cd -P -- "${f%/*}" 2>&1 && pwd -P)" || { log "KEEP $f: log parent unreadable: path=${f%/*} read=$resolved (unknown)"; continue; }
+      resolved="$resolved/${f##*/}"; held=0; hold_reason=""
       if is_open "$f" || is_open "$resolved"; then held=1; fi
       if [ "${#source_ids[@]}" -gt 0 ]; then
         cursor="${resolved%/*}"; suffix="/${resolved##*/}"
         while :; do
-          identity="$(container_path_identity "$cursor")" || { held=1; break; }
+          identity="$(container_path_identity "$cursor")" || { held=1; hold_reason="parent path identity unreadable: path=$cursor read=$identity"; break; }
           for i in "${!source_ids[@]}"; do
             if [ "$identity" = "${source_ids[$i]}" ] && is_open "${destinations[$i]}$suffix"; then held=1; fi
           done
@@ -2004,7 +2045,7 @@ sweep_codex_sessions() {
           suffix="/${cursor##*/}$suffix"; cursor="${cursor%/*}"; [ -n "$cursor" ] || cursor=/
         done
       fi
-      if [ "$held" = 1 ]; then log "KEEP $f: held open by a process"; continue; fi
+      if [ "$held" = 1 ]; then log "KEEP $f: ${hold_reason:-held open by a process}"; continue; fi
       bytes="$(du_bytes "$f")"
       log "REMOVE $f: Codex session log idle ${CODEX_SESSION_DAYS} days"
       act rm -f -- "$f" && tally "codex-sessions $dir" "$bytes"

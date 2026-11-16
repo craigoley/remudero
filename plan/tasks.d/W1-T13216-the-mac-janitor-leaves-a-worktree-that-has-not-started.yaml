@@ -1,0 +1,69 @@
+- id: W1-T13216
+  title: "The Mac janitor leaves a worktree that has not started: a head that main already holds is not a finished pull request, so a new worktree is no longer removed under the agent working in it"
+  repo: remudero
+  priority: 1.0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # it changes the rule that decides which worktrees a scheduled job deletes
+  band_meaning: span
+  origin: "operator-session#janitor-removed-working-worktrees-2026-11-16"
+  plan_refs:
+    - W1-T12255
+    - W1-T12257
+  files:
+    - deploy/mac/remudero-janitor.sh
+    - deploy/workspace-retirement-guard.sh
+    - test/deploy/the-mac-janitor-leaves-a-worktree-that-has-not-started.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A clean worktree whose head commit origin/main already holds is not retired as pull-request-finished, on a new branch and detached alike: it is not started, it keeps the six-hour rule, and a recent one is skipped for recent activity as any other worktree is"
+      proof: "grep: W1-T13216 criterion 1 in test/deploy/the-mac-janitor-leaves-a-worktree-that-has-not-started.test.ts"
+    - claim: "A not-started worktree stays past six idle hours while origin holds the dispatch claim of the task its run branch names, or an id reservation whose holder is its filing branch, and it is retired at the next pass once that claim or reservation is gone"
+      proof: "grep: W1-T13216 criterion 2 in test/deploy/the-mac-janitor-leaves-a-worktree-that-has-not-started.test.ts"
+    - claim: "A dry run and an applied pass each name a kept not-started worktree with its reason: recent activity, or the ref that holds it, or that the refs could not be read"
+      proof: "grep: W1-T13216 criterion 3 in test/deploy/the-mac-janitor-leaves-a-worktree-that-has-not-started.test.ts"
+    - claim: "invariant:finished-work-still-retires — a worktree whose head is a published commit of its own and whose pull requests are all merged or closed is retired at the next pass exactly as on origin/main, and no worktree with uncommitted or unpublished work is removed by any rule"
+      proof: "grep: W1-T13216 criterion 4 in test/deploy/the-mac-janitor-leaves-a-worktree-that-has-not-started.test.ts"
+  rationale: |
+    OBSERVED 2026-11-16 on the operator Mac by the operator session. The general janitor (deploy/mac/remudero-janitor.sh, run every 30 minutes from the account's crontab through /Users/Shared/remudero-mac-janitor.sh) removed, among others:
+    - read-broker-main, about 25 minutes after the broker stopped serving from it;
+    - ops-review-1116, five minutes after it was created for reviews;
+    - build-13175 (branch run-W1-T13175-..., its task claimed on origin as refs/rmd-dispatch/W1-T13175), created 16:55Z and gone at 17:00Z while its builder was reading;
+    - file-roots11 (branch run-unfiled-1794847949786, holding reserved ids), gone at 17:00Z about 30 minutes into an agent's research, before its first file was written.
+    Nothing was lost: no commits, and the branches are kept. Each removal cost an agent its working directory in the middle of a task.
+
+    THE DRY RUN OF 15:32Z (~/Remudero-notes/handoff-1115/janitor-dry-run-1116.log) printed seven lines of the form `WOULD-REMOVE-WORKTREE pull-request-finished 746M <path> (branch=<name or empty> retained)`: five detached worktrees and two on run branches: build-8946 (branch run-W1-T8946-1794838881788, new, with no commit of its own, its task's claim held by the same account) and wt-az-FILE13151 (branch run-unfiled-1794834516000). Twenty other worktrees got `SKIP recent-file-activity`. A builder's worktree with two commits of its own and a clean tree (build-13162) survived the 17:00Z pass.
+
+    THE RULE, READ on origin/main (2d69d3780c). deploy/mac/remudero-janitor.sh:
+      finished=0; retire_age="${activity_age}h"
+      if [ -f "$marker" ] \
+        && finished_status=$(rmd_retirement_git "$repo" status --porcelain --untracked-files=all 2>/dev/null) \
+        && [ -z "$finished_status" ] \
+        && finished_head=$(rmd_retirement_git "$repo" rev-parse --verify HEAD 2>/dev/null) \
+        && rmd_workspace_published "$repo" \
+        && rmd_commit_pulls_finished "$repo" "$finished_head"; then
+        finished=1; retire_age="pull-request-finished"
+      fi
+      if [ "$finished" != 1 ] && [ "$activity_age" -lt "$WORKTREE_AGE_HOURS" ]; then
+        ... log "SKIP recent-file-activity ${activity_age}h $repo"; continue
+    and deploy/workspace-retirement-guard.sh, `rmd_commit_pulls_finished`, asks GitHub for `repos/$slug/commits/$commit/pulls` and answers yes for "one pull request or more, all closed".
+    - The question is asked of the HEAD COMMIT, not of the worktree's branch. A worktree cut from origin/main has main's tip as its head, and main's tip is the squash commit of somebody else's merged pull request (file-roots11's was 2d69d3780c, "(#18866)"). So every new clean worktree is "finished" from the moment it is cut, and `finished=1` skips the recent-activity test that would have kept it.
+    - W1-T12255 (merged 2026-11-12, #18173) meant a build worktree whose own pull request merged. Its criterion "A worktree with an open pull request, or with no pull request, keeps the six-hour rule of today" is the intent; a head on main is a case it did not consider.
+    INFERRED, from GitHub's documented behaviour and not from a call made here: that the endpoint lists the merged pull request for a commit on the default branch. The seven dry-run lines and the survival of build-13162 fit it. See MEASURE FIRST.
+  design: |
+    MEASURE FIRST: in a fixture and once against the real repository (one read), run the guard's own question for a commit that is on origin/main and show it answers finished. Put the output in the PR body. If it does not, stop: the cause is elsewhere and this record is wrong.
+
+    1. A worktree is finished only when it holds a commit of its own: its head is NOT reachable from origin/main as the checkout last saw it (a local ancestry test, no network). A head main holds is "not started". If origin/main cannot be read locally, the worktree is not finished.
+    2. Not started means the six-hour rule: recent file activity skips it, as for any worktree with no pull request. This alone would have kept all four worktrees named above.
+    3. Past six idle hours a not-started worktree is still kept while it is held: its branch is `run-<id>-<ms>` and origin advertises `refs/rmd-dispatch/<id>`, or its branch is `run-unfiled-<ms>` and an advertised `refs/rmd-id/*` reservation names that branch as holder. The guard's publication snapshot already makes one listing of origin per repository per pass; the two ref families ride that listing, so there is no new network call. A holder is read from the ref's commit only when that commit is already in the local object store (it is for a claim or reservation made from this machine); nothing is fetched. A listing that cannot be read holds nothing and says so: the six-hour rule decides.
+    4. The kept line names the reason. An applied pass writes it to the decision log as the other skips are.
+    INVARIANT finished-work-still-retires: every criterion of W1-T12255 holds unchanged for a worktree with a commit of its own, and the tests for dirty, unpublished, locked, in-use and out-of-root worktrees still decide before any of this.
+    NOT IN SCOPE: the six hours themselves; standalone clones; the Azure janitor; a worktree left detached at main after its work shipped, which now waits six idle hours instead of one pass (say so in the PR body: it is the price of telling "not started" from "finished" without asking who made the worktree).
+  falsifier: |
+    Ask the pull-request question of a head that main holds and criterion 1 must fail. Retire a held not-started worktree at six hours, or keep one whose claim is gone, and criterion 2 must fail. Drop the reason from the kept line and criterion 3 must fail. Keep a worktree whose own pull request merged, or remove a dirty one, and criterion 4 must fail, as must W1-T12255's suite. Restore and all pass.
+  note: |
+    reservation hand-off: run-unfiled-1794847949786 -> run-unfiled-1794847949786
+    Reserved on the filing branch by the operator session. The test folder is the one rmd test-place computed (test/deploy/, high) for a stub using the janitor suites' helpers (test/helpers/host-cleanup-fixture.ts, test/helpers/gh-shim.ts). The suites that already drive this script: test/deploy/the-mac-janitor-retires-a-finished-worktree-at-its-next-pass.test.ts (W1-T12255; it must stay green unchanged) and test/workspace-retirement-safety.test.ts. The script must pass under the Mac's own bash 3.2 and under Linux bash. The installed copies refresh themselves from the checkout (test/deploy/the-installed-mac-janitor-copies-refresh-themselves.test.ts), so a merge reaches the operator Mac at its next pull. Until then the operator session keeps an untracked marker file in each working worktree, because the janitor skips a dirty one.

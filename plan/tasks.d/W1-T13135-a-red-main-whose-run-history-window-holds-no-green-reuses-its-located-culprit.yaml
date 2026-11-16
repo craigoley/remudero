@@ -1,0 +1,77 @@
+- id: W1-T13135
+  title: "When main's push run history window holds no green run, the red-main repair lane reuses the culprit it already located for the same red instead of stopping, so a long red keeps its repair"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # decides whether the repair lane acts on an older location; a wrong match would repair the wrong merge
+  origin: "operator-session#main-red-13h-2026-11-15"
+  plan_refs:
+    - W1-T6403
+    - W1-T6023
+    - W1-T7760
+    - W1-T13130
+  files:
+    - src/lib/main-health-rung.ts
+    - test/a-red-main-whose-run-history-window-holds-no-green-reuses-its-located-culprit.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "With a ledger that holds main.repair.located for offending sha X with red R and a main.repair.resolved row for X by other with closed_prs [], a red observation of red R whose push run history holds no green run (runHistoryWindowExhausted) writes main.repair.located for X with method reused-located and reused_from naming the earlier row's ts, calls openFixPr once for X, and writes no main.repair.unlocated row"
+      proof: "grep: W1-T13135 criterion 1 in test/a-red-main-whose-run-history-window-holds-no-green-reuses-its-located-culprit.test.ts"
+    - claim: "invariant:reuse-only-the-same-red — a located row whose red does not match the current red (mainRedSignaturesMatch false), or whose record was resolved by fix or revert, is not reused: the pass writes main.repair.unlocated as today"
+      kind: guard
+      proof: "grep: W1-T13135 criterion 2 in test/a-red-main-whose-run-history-window-holds-no-green-reuses-its-located-culprit.test.ts"
+    - claim: "invariant:reuse-is-bounded-in-time — a located row older than MAIN_REPAIR_REUSE_WINDOW_MS (24 h) is not reused"
+      kind: guard
+      proof: "grep: W1-T13135 criterion 3 in test/a-red-main-whose-run-history-window-holds-no-green-reuses-its-located-culprit.test.ts"
+    - claim: "A reused location is written once per streak: a second red observation of the same red advances the reopened record (main.repair.same_red or the stall path) and writes no second located row"
+      proof: "grep: W1-T13135 criterion 4 in test/a-red-main-whose-run-history-window-holds-no-green-reuses-its-located-culprit.test.ts"
+  rationale: |
+    WHY: on 2026-11-15/16 main was red for 13 hours. The lane located the culprit (580877d7c, test-slow) at
+    15:54:27Z. A false green closed that repair at 18:06:06Z (main.repair.resolved by "other", closed_prs
+    [], W1-T13130). From 18:25Z the same red came back, and the lane never repaired it again: every pass
+    wrote main.repair.unlocated "main's push run history window holds no green run to bound the red
+    streak" until the red ended at 03:09Z by an unrelated merge.
+    MEASURED, core ledger (~/rmd-state2/state, live file and archives 2026-11-02 to 2026-11-16):
+    - 49 main.repair.unlocated rows in 14 days; 38 say the window holds no green run. All 38 fall in this
+      one streak (18:25Z to 03:20Z, 31 distinct heads), each after the located row for 580877d7c at
+      15:54Z, and all name test-slow among the failing checks.
+    - 9 main.repair.resolved rows in 14 days; 7 are by "other" (no fix and no revert merged).
+    MEASURED, GitHub: main's push run page as the lane reads it (actions/runs?branch=main&event=push&
+    per_page=100), taken at 18:25:34Z, holds 100 runs from 13:28Z to 18:13Z: 24 CI, 24 CodeQL, 24
+    main-plan-guard, 25 main-tripwire, 3 Build image. The 24 CI runs are 16 cancelled and 8 failure, no
+    success. So the window covers about 4 h 45 min of merges, and a red that lasts longer can never be
+    bounded again.
+    READ at origin/main:
+    - src/lib/main-health-rung.ts:1127 mainPushRunHistoryRestArgs reads one page of 100 push runs of every
+      workflow. src/lib/sweep.ts mainHealthFirstRedCommitFromRunHistory returns "window-exhausted" when the
+      required workflows have a red run and no success in that page.
+    - :2182 repairRedMain: an unresolved record that matches the red is advanced; with none and no first
+      red it writes main.repair.unlocated and returns false. A resolved record is never looked at again.
+    NOT THIS TASK: widening the page to more than 100 runs. Reading the CI workflow's own runs would give
+    about 4 times the span, but the reuse covers the measured case without more GitHub reads.
+  design: |
+    INVARIANT reuse-only-the-same-red: only a location of the same red, resolved by other, is reused.
+    INVARIANT reuse-is-bounded-in-time: a location older than MAIN_REPAIR_REUSE_WINDOW_MS is not reused.
+    1. repairRedMain, in the branch with no record and no first red, when
+       observation.runHistoryWindowExhausted is true: find the newest main.repair.located row whose red
+       (mainRedOfRow) matches the current red (mainRedSignaturesMatch), whose record is resolved by
+       "other" with no merged fix or revert, and whose ts is within MAIN_REPAIR_REUSE_WINDOW_MS (24 h) of
+       now. If one exists, continue as for a new location of that sha (the same path that writes
+       main.repair.located and dispatches the fix), with method "reused-located" and reused_from the old
+       row's ts. Otherwise write main.repair.unlocated as today.
+    2. The located row starts a fresh record (mainRepairRecordsFromLedger already does so after resolved),
+       so the next pass advances it like any other.
+    3. Tests drive buildMainHealthRung with a fake lane, a ledger fixture and a run history with only red
+       and cancelled CI runs.
+  falsifier: |
+    Remove the reuse branch: criterion 1 fails (main.repair.unlocated, no openFixPr call). Drop the red match
+    or the resolved-by check: criterion 2 fails. Drop the time bound: criterion 3 fails.
+  note: |
+    Id reserved for run-unfiled-1794802909000 with ~/rmd-work/bin/reserve-id.sh.
+    Proof that counts in production: no main.repair.unlocated "window holds no green run" row within 24 h
+    after a main.repair.located row of the same red whose record was resolved by other.
