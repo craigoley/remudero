@@ -1,0 +1,61 @@
+- id: W1-T13205
+  title: "Behind RMD_READ_MODEL_PROCESS=on, serve runs its read-model worker as a child process instead of a thread, so view builds, the projector and their garbage collection stop sharing serve's heap and memory lock"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # moves a long-lived worker across a process boundary; behind a default-off switch, the thread path is unchanged
+  band_meaning: span
+  origin: "operator-session#serve-oom-2026-11-16"
+  plan_refs:
+    - W1-T10290
+    - W1-T9754
+  files:
+    - src/lib/read-model-worker.ts
+    - test/a-read-model-worker-can-run-as-a-child-process.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "With RMD_READ_MODEL_PROCESS=on, the read-model handle starts its worker with forkWorkerEntry (serialization advanced), receives the same ReadModelWorkerMessage stream (state, bodies, body, log), and handle.body(view, key) serves a body the child built; with the switch unset the worker is a thread exactly as before"
+      proof: "grep: W1-T13205 criterion 1 in test/a-read-model-worker-can-run-as-a-child-process.test.ts"
+    - claim: "stop() on the child path sends a stop message, waits up to READ_MODEL_STOP_WAIT_MS for the child's stopped receipt or exit, then kills it, and reports confirmed true when the receipt came; a child that exits on its own is respawned with the same backoff as a dead thread"
+      proof: "grep: W1-T13205 criterion 2 in test/a-read-model-worker-can-run-as-a-child-process.test.ts"
+    - claim: "invariant:child-sees-the-refreshed-token — when the parent's GH_TOKEN changes, the child receives it by message before its next escalation, as SHARE_ENV gives the thread today (#9156)"
+      kind: guard
+      proof: "grep: W1-T13205 criterion 3 in test/a-read-model-worker-can-run-as-a-child-process.test.ts"
+  rationale: |
+    WHY: serve is a 2.6 GB process with a 1.3 GB main heap. Every thread shares one heap's garbage collector and one
+    memory map, so a fork, a big GC or a page-table change in any thread pauses the request loop too.
+    MEASURED on the Azure host, 2026-11-16: about 12% of samples of serve's main thread were in D state
+    (lock_mm_and_find_vma, waiting on the process memory lock); about 40% of the container's CPU time was system time;
+    serve.thread_load put the read-model worker thread at 4 to 7 s of CPU a minute beside the main thread. The oracle
+    already runs as one child per slice (childOracle, W1-T10290), which shows the fork-and-message pattern works here.
+    READ at origin/main (a388fde0e), src/lib/read-model-worker.ts: the handle's spawn() (about :3016) starts the worker
+    with startWorker(…, { workerData, env: SHARE_ENV }); stop() (about :3150) sets a SharedArrayBuffer flag, posts
+    {type:"stop"} and Atomics.waits for the stopped receipt; the message protocol is plain data, so it survives
+    `serialization: "advanced"` IPC. A SharedArrayBuffer and SHARE_ENV cannot cross a process boundary.
+    This is step 6a of the approved "serve as a thin API layer" plan: each long-lived producer leaves serve's process,
+    one at a time, behind a switch, measured before the next.
+  design: |
+    INVARIANT child-sees-the-refreshed-token: the child never escalates with a token older than the parent's.
+    1. Add `READ_MODEL_PROCESS_SWITCH = "RMD_READ_MODEL_PROCESS"`. When it is "on", spawn() forks the worker entry with
+       forkWorkerEntry (as childOracle does), passes the worker data as the first message instead of workerData, and
+       wraps the child in a small adapter exposing postMessage/on("message")/on("exit")/terminate, so the rest of the
+       handle is unchanged.
+    2. Replace the SharedArrayBuffer stop flag on the child path with the existing {type:"stop"} message plus the
+       stopped receipt; stop() waits up to READ_MODEL_STOP_WAIT_MS with a synchronous poll of the receipt flag set by
+       the message handler, then kills. Keep the thread path's Atomics protocol as it is.
+    3. Push GH_TOKEN to the child in a {type:"env"} message at start and whenever serve refreshes it; the child sets
+       process.env.GH_TOKEN.
+    4. The child entry runs the same runReadModelWorker main. Nested view threads stay threads inside the child.
+    5. Default off. The operator turns it on after a measured trial (serve heap, loop lag, thread CPU before and after).
+  falsifier: |
+    Ignore the switch: criterion 1 fails (a thread starts). Drop the stopped-receipt wait: criterion 2 fails (confirmed
+    false, or no kill). Fork once with the boot token and never update it: criterion 3 fails.
+  note: |
+    Id reserved for run-unfiled-1794844054000 with ~/rmd-work/bin/reserve-id.sh.
+    Proof that counts in production: with the switch on, serve.thread_load no longer lists the read-model thread,
+    serve.memory heap_used falls, and runtime.loop_lag p99 and the probe's p99 fall against the same hour before.
