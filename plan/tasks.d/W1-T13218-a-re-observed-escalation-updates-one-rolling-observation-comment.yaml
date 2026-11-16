@@ -1,0 +1,45 @@
+- id: W1-T13218
+  title: "A re-observed escalation updates one rolling observation comment on its open issue instead of appending a new comment every time"
+  repo: remudero
+  priority: 1.3
+  depends_on: []
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # changes how the dedup path writes to GitHub; issue creation and dedup matching are unchanged
+  band_meaning: blast-radius
+  origin: "operator-request#2026-11-16T17:24Z-issue-triage"
+  plan_refs:
+    - W1-T104
+    - W1-T345
+    - W1-T8864
+  files:
+    - src/lib/escalate.ts
+    - src/lib/issue-revalidation-garden.ts
+    - test/gardeners/a-re-observed-escalation-updates-one-rolling-observation-comment.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "When an escalation matches an open issue, the first match posts one observation comment; every later match in the same UTC day edits that comment in place (observation count, first and newest observed time, newest rendered body) and posts nothing new"
+      proof: "grep: W1-T13218 criterion 1 in test/gardeners/a-re-observed-escalation-updates-one-rolling-observation-comment.test.ts"
+    - claim: "A match on a later UTC day posts a new observation comment, so an issue gains at most one observation comment per day, and the escalation.deduped ledger row is still written once per match"
+      proof: "grep: W1-T13218 criterion 2 in test/gardeners/a-re-observed-escalation-updates-one-rolling-observation-comment.test.ts"
+    - claim: "conditionReobserved in the issue-revalidation garden treats an observation comment as re-observed by its updated_at time, so an edited comment keeps an issue live exactly as a new comment did"
+      proof: "grep: W1-T13218 criterion 3 in test/gardeners/a-re-observed-escalation-updates-one-rolling-observation-comment.test.ts"
+    - claim: "invariant:dedup-never-blocks-the-probe — when the comment edit fails or the existing comment cannot be found, the path falls back to posting a new comment and never throws into the probe"
+      proof: "grep: W1-T13218 criterion 4 in test/gardeners/a-re-observed-escalation-updates-one-rolling-observation-comment.test.ts"
+  rationale: |
+    OBSERVED 2026-11-16 via the GitHub REST API (cloud session, craigoley/remudero): recordDuplicateEscalation in src/lib/escalate.ts posts "Another escalation observed the same condition ..." plus the full rendered body on every match. Open issue #13968 holds 1,900 comments, #17310 holds 601, #13236 holds 300, and #18861 gained 42 in the 3 hours after it opened. Reading only the first page (100) of comments updated since 2026-11-01 on each open issue, at least 291 of these comments came from remudero-fleet[bot] and at least 105 from cao825.
+    These issues cannot be read by a person, each fetch costs a paginated read for the revalidation garden (listComments uses --paginate), and the volume crowds out the issue's actual question.
+    No queued task covers this: W1-T2381 (merged) and W1-T2382 (retired) touch dedup routing and counters, not the comment count.
+  design: |
+    1. recordDuplicateEscalation finds its own newest observation comment on the issue (a hidden marker `<!-- rmd-observation:<taskId> -->`). If one exists from the same UTC day, it PATCHes that comment with an updated count and the newest body. Otherwise it posts a new comment carrying the marker.
+    2. The AsyncIssueGateway gains an optional editComment(commentId, body) and a listComments read already used by the revalidation garden; when either is missing, the old append path runs.
+    3. conditionReobserved reads a comment's updatedAt when present.
+    INVARIANT dedup-never-blocks-the-probe: any failure falls back to today's append and never throws.
+    NOT IN SCOPE: deleting or compacting the existing comment storms on open issues; dedup matching rules; issue creation.
+  falsifier: |
+    Keep the unconditional append and criteria 1 and 2 must fail. Read createdAt only in conditionReobserved and criterion 3 must fail. Throw from a failed edit and criterion 4 must fail.
+  note: |
+    Reserved with rmd next-task-id from the operator checkout (refs/rmd-id/W1-T13218). rmd test-place computed test/gardeners/.

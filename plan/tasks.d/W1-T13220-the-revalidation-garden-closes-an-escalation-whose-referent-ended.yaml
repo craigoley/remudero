@@ -1,0 +1,45 @@
+- id: W1-T13220
+  title: "The issue-revalidation garden closes an escalation whose referenced PR is closed or merged, or whose plan task is done or retired, without a model judge"
+  repo: remudero
+  priority: 1.3
+  depends_on: []
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # adds deterministic close rules to an act-mode garden; capped and cited
+  band_meaning: blast-radius
+  origin: "operator-request#2026-11-16T17:24Z-issue-triage"
+  plan_refs:
+    - W1-T8864
+    - W1-T9181
+  files:
+    - src/lib/issue-revalidation-garden.ts
+    - test/gardeners/the-revalidation-garden-closes-an-escalation-whose-referent-ended.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A BLOCKED or MANUAL escalation whose task is `PR-<n>`, whose body names a single pull URL as the PR that needs clarification, or that carries a single `<!-- Strike-Ladder-PR: <n> -->` marker is resolved with a citation naming the PR's closed or merged state and time when that PR is closed or merged"
+      proof: "grep: W1-T13220 criterion 1 in test/gardeners/the-revalidation-garden-closes-an-escalation-whose-referent-ended.test.ts"
+    - claim: "A BLOCKED escalation whose **Task:** is a plan task with status done or merged, or with a retirement field, on origin/main is resolved with a citation naming the shard path and the commit that set it"
+      proof: "grep: W1-T13220 criterion 2 in test/gardeners/the-revalidation-garden-closes-an-escalation-whose-referent-ended.test.ts"
+    - claim: "These deterministic resolutions close a MANUAL issue the same way stageStallResolution does, but never a GRILL, never an issue the operator spoke on last, and never an issue re-observed within the window"
+      proof: "grep: W1-T13220 criterion 3 in test/gardeners/the-revalidation-garden-closes-an-escalation-whose-referent-ended.test.ts"
+    - claim: "invariant:judge-path-unchanged — an issue no deterministic rule decides is judged exactly as before, and the per-pass close cap still applies"
+      proof: "grep: W1-T13220 criterion 4 in test/gardeners/the-revalidation-garden-closes-an-escalation-whose-referent-ended.test.ts"
+  rationale: |
+    OBSERVED 2026-11-16 via the GitHub REST API (craigoley/remudero):
+    - #18535 asks about PR #18347, merged 2026-11-14 18:51Z; #18799 asks about PR #18789, merged 2026-11-16 16:49Z; #18639 asks about PR #18635, closed unmerged. All three were still open.
+    - Strike digests #15645, #15860, #15957, #16128 and #17372 each name one PR (#15317, #15551, #15851, #16044, #17209), all closed or merged, and were still open.
+    - #13295 and #13525 (W1-T6153) and #13638 (W1-T5973) were still open, though both shards read `status: done` on origin/main.
+    The escalation reconciler closes only on a task referent it can find through a Remudero-Task trailer, and the garden's model judge refreshed these instead. The garden already has one deterministic rule (stageStallResolution); these are the same kind.
+  design: |
+    1. Add terminalPrResolution and terminalTaskResolution beside stageStallResolution, fed from the batched PR view and the origin/main plan the garden already reads.
+    2. A deterministic resolution is decided before the judge is spawned, so it spends no model call.
+    3. decideAction lets these resolutions close MANUAL and BLOCKED issues (fleetObservation), keeps GRILL operator-owned, and keeps the newer-operator-comment, re-observed and per-pass cap guards.
+    INVARIANT judge-path-unchanged: an issue no deterministic rule decides is judged exactly as before, and the per-pass close cap still applies.
+    NOT IN SCOPE: GRILL issues; duplicate consolidation (a separate task); the issues open today.
+  falsifier: |
+    Drop either new rule and criteria 1 or 2 must fail. Let the rule close a GRILL or skip the re-observed guard and criterion 3 must fail. Route a non-matching issue differently and criterion 4 must fail.
+  note: |
+    Reserved with rmd next-task-id from the operator checkout (refs/rmd-id/W1-T13220). rmd test-place computed test/gardeners/.
