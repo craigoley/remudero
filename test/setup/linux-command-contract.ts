@@ -8,7 +8,7 @@
  * Linux in production, so hosted CI was green, while 9 of the 36 suites that run it failed on every Mac
  * author preflight that selected them (22 tests). One suite carried a private stub; the rest had none.
  *
- * Fix: rather than a stub per suite, every test process on macOS gets one directory first on PATH whose
+ * Fix: rather than a stub per suite, every test process on macOS gets one directory on PATH, ahead of the platform's own, whose
  * `chmod` honours the marker. Suites build a child's PATH from `process.env.PATH`, so present and future
  * suites inherit it. Loaded by test/setup/tmp-hygiene.ts, which every runner invocation already imports.
  *
@@ -51,7 +51,7 @@ export function chmodShimSource(realChmod = "/bin/chmod"): string {
 
 export interface LinuxCommandContract {
   installed: boolean;
-  /** The directory put first on PATH; absent when nothing was installed. */
+  /** The directory put on PATH ahead of the platform's own; absent when nothing was installed. */
   dir?: string;
 }
 
