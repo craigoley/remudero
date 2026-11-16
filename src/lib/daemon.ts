@@ -3407,6 +3407,7 @@ async function runGatedSweep(
   // and must never be attributed to a LATER tick's cycle.
   let outcome: SweepCycleOutcome | undefined;
   try {
+    if (deps.claimSweepSettled) await deps.claimSweepSettled;
     const bound = learnedSweepBound(sweepBound);
     if (sweepBound.seededFrom) log("daemon.sweep.seeded", { samples: bound.samples, source: sweepBound.seededFrom });
     sweepBound.seededFrom = undefined;
