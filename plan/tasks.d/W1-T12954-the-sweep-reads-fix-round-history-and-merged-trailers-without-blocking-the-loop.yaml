@@ -23,6 +23,7 @@
     - test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts
     - test/sweep/the-sweep-reads-its-fix-round-history-without-blocking-the-loop.test.ts
     - test/a-merged-trailer-lookup-reads-an-index-built-once.test.ts
+    - test/a-refresh-decision-reads-history-that-survives-ledger-rotation.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -80,17 +81,23 @@
     directory and options, in the same order; an incomplete corpus gives undefined as today.
     INVARIANT same-trailer-answers: the index is a cache of today's answer, built from the same list.
     INVARIANT census-only-falls: the sweep's synchronous-ledger-scan census row only drops; no row rises.
-    1. src/lib/sweep.ts: before the PR walk, read the readRepairHistory steps through the async union stream
-       (openLedgerUnion, src/lib/ledger-union.ts:835), which yields to the loop, with the same completeness answer
-       as refuseIncomplete. Keep each rotation's parsed rows in a module-level memo (one per ledger directory),
-       as readLedgerUnionRecordsMemoized does for the synchronous reader; that function itself parses
-       synchronously, so it is not enough alone. Give readRepairArchive the result. Only a pass with a holdable
-       PR (conflicted or blocked-fixable) reads.
+    1. src/lib/sweep.ts: before the PR walk, read the readRepairHistory steps through an awaited reader that
+       loads rotations off the loop, with the same completeness answer as refuseIncomplete. Reuse the slice
+       reader the sweep already has for this (createEscalationTriageHistoryReader, as the fleet-state history
+       does): it loads each rotation with the streaming rotation memo, keeps it across passes, and answers the
+       strict LedgerUnionRecordRead. Keep one reader for each ledger directory in a module-level map, read
+       through a new exported readSweepRepairHistory(ledgerPath). Give readRepairArchive the result. Only a pass
+       with a holdable PR (conflicted or blocked-fixable) awaits it before conflictRoundHeldHead; the refresh
+       history reader awaits the same read.
     2. src/lib/status.ts: add mergedTrailerIndex(list), a Map from task id to the merged PRs whose body carries
        the anchored trailer line, newest first, built once for each index() result. findMergedByTrailer and
        findMergedByTrailerAll read it.
     3. test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts: lower the sweep's row only.
     4. Add the two focused test files.
+    5. test/a-refresh-decision-reads-history-that-survives-ledger-rotation.test.ts: its "read once per PR per
+       pass" test counts the archive's fs.readFileSync calls and expects 1. The archive is now read through
+       fs.createReadStream off the loop, so the test counts both: no synchronous read, and one stream for the
+       repair history beside the cost-anomaly scan's own stream.
     NOT IN SCOPE: openEscalationSince's union read (sweep.ts:20067), the ledger_fold and anomaly_sentinels folds,
     listFeedback, readMergedPlan, src/run-task.ts.
   falsifier: |
