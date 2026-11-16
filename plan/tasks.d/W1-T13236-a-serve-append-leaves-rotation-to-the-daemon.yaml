@@ -1,0 +1,50 @@
+- id: W1-T13236
+  title: "Serve's own ledger appends leave rotation to the daemon unless the live ledger passes the 4x backstop, so a 16 MB read, filter and gzip stops running on serve's request loop"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # spans ledger.ts and serve.ts; rotation itself, its lock, retention and the backstop are unchanged
+  band_meaning: span
+  origin: "operator-session#serve-oom-2026-11-16"
+  plan_refs:
+    - W1-T209
+    - W1-T4100
+  files:
+    - src/lib/ledger.ts
+    - src/lib/serve.ts
+    - test/a-serve-append-leaves-rotation-to-the-daemon.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "After setLedgerRotationRole(\"backstop-only\"), an appendLedger that takes the live file past LEDGER_ROTATION_CEILING_BYTES does not rotate, and one that takes it past LEDGER_ROTATION_CEILING_BYTES x LEDGER_ROTATION_BACKSTOP_MULTIPLIER does"
+      proof: "grep: W1-T13236 criterion 1 in test/a-serve-append-leaves-rotation-to-the-daemon.test.ts"
+    - claim: "Serve's boot sets the backstop-only role before it starts any timer that appends, and the daemon's process keeps the default role, which rotates at the ceiling as today"
+      proof: "grep: W1-T13236 criterion 2 in test/a-serve-append-leaves-rotation-to-the-daemon.test.ts"
+    - claim: "invariant:default-role-unchanged — a process that never sets a role rotates exactly as before (the existing rotation suites pass unchanged)"
+      kind: guard
+      proof: "grep: W1-T13236 criterion 3 in test/a-serve-append-leaves-rotation-to-the-daemon.test.ts"
+  rationale: |
+    WHY: whichever process's append crosses the 4 MiB ceiling rotates the shared core ledger, synchronously: it reads the live
+    file, filters the retained steps and gzips it on its own thread. When that process is serve, its request loop stops.
+    MEASURED on the Azure host, 2026-11-16: 3 serve runtime.loop_stall_profile rows name rotateLedger; the longest, at
+    18:41:25Z, is 22,166 ms (appendLedger -> rotateLedger under serve.ts), during which instance reads took 16 to 32 s.
+    The daemon appends far more often than serve, so it reaches the ceiling first in normal operation.
+    READ at origin/main, src/lib/ledger.ts appendLedger: `if (ledgerExceedsRotationCeiling(path, opts.ceilingBytes))
+    rotateLedger(...)`; LEDGER_ROTATION_BACKSTOP_MULTIPLIER is 4.
+  design: |
+    INVARIANT default-role-unchanged: no role set means rotation as today.
+    1. Add a process-level role in ledger.ts: "rotator" (default) or "backstop-only", with setLedgerRotationRole(role).
+       In appendLedger, a backstop-only process rotates only when the live file exceeds ceiling x the backstop multiplier.
+    2. Serve's start (src/lib/serve.ts, before startIncidentInvariantsMonitor and the other appending timers) sets
+       "backstop-only". The daemon does not call it.
+    3. No change to rotateLedger, its lock, the smoothing window or retained steps.
+  falsifier: |
+    Ignore the role in appendLedger: criterion 1 fails (it rotates at the ceiling). Never set it in serve: criterion 2
+    fails. Make backstop-only the default: criterion 3 fails.
+  note: |
+    Id reserved for run-unfiled-1794855269000 with ~/rmd-work/bin/reserve-id.sh.
+    Proof that counts in production: no serve runtime.loop_stall_profile row names rotateLedger for 24 h.

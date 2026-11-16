@@ -3872,6 +3872,11 @@ function refuseInformationalProposal(proposals: Proposal[], classifications: Inb
   return true;
 }
 
+/** W1-T13235: archive and snooze only need to know the proposal exists: read the registry prepareInboxPass reads, nothing more. */
+function inboxRegistryHas(deps: PanelGraphDeps, proposalId: string): boolean {
+  return parseProposalRegistry(readFileIfExists(inboxInputPaths(deps).registryPath)).some((p) => p.id === proposalId);
+}
+
 export function buildInboxVerbActions(deps: PanelGraphDeps, causalScope?: InboxCausalScope): InboxVerbActions {
   const improvementReviewRequired = (proposalId: string, respond: InboxVerbRespond): boolean => {
     if (!proposalId.startsWith("improvement:")) return false;
@@ -3953,8 +3958,7 @@ export function buildInboxVerbActions(deps: PanelGraphDeps, causalScope?: InboxC
       respond(200, { ok: true, proposalId: input.proposalId, kept: input.kept, ...(input.kept ? { keptAt: at } : {}) });
     }),
     archive: validatedInboxAction(validateArchiveProposal, (input, actor, respond) => {
-      const { proposals } = classifyAllProposals(deps, undefined, input.proposalId);
-      if (!proposals.some((p) => p.id === input.proposalId)) {
+      if (!inboxRegistryHas(deps, input.proposalId)) {
         respond(404, { error: "not_found", detail: `no active proposal "${input.proposalId}"` });
         return;
       }
@@ -3964,8 +3968,7 @@ export function buildInboxVerbActions(deps: PanelGraphDeps, causalScope?: InboxC
       respond(200, { ok: true, proposalId: input.proposalId, archived: input.archived, ...(held?.archivedAt === undefined ? {} : { archivedAt: held.archivedAt }) });
     }),
     snooze: validatedInboxAction(validateSnoozeProposal, (input, actor, respond) => {
-      const { proposals } = classifyAllProposals(deps, undefined, input.proposalId);
-      if (!proposals.some((p) => p.id === input.proposalId)) {
+      if (!inboxRegistryHas(deps, input.proposalId)) {
         respond(404, { error: "not_found", detail: `no active proposal "${input.proposalId}"` });
         return;
       }

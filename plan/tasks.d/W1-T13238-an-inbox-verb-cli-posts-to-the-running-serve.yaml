@@ -1,0 +1,49 @@
+- id: W1-T13238
+  title: "The rmd Inbox verb CLI posts to the running serve's write route, as the Console does, so `rmd archive` and its siblings answer in seconds from the host and work inside the serve container"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # changes how eight CLI verbs reach their action; the routes and their answers are unchanged
+  band_meaning: span
+  origin: "operator-session#serve-oom-2026-11-16"
+  plan_refs:
+    - W1-T8831
+    - W1-T13188
+  files:
+    - src/run-task.ts
+    - test/an-inbox-verb-cli-posts-to-the-running-serve.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "With a serve reachable at the configured local address and a write token in state/service-tokens.json, `rmd archive <id>` sends POST /v1/inbox/archive with the bearer write token and prints the route's answer; no in-process classification, ghGateway or resolveOwnerRepo call runs"
+      proof: "grep: W1-T13238 criterion 1 in test/an-inbox-verb-cli-posts-to-the-running-serve.test.ts"
+    - claim: "With no serve reachable (connection refused within 2 s), the CLI falls back to today's in-process actions and says so on stderr"
+      proof: "grep: W1-T13238 criterion 2 in test/an-inbox-verb-cli-posts-to-the-running-serve.test.ts"
+    - claim: "invariant:same-answer-either-path — for archive, snooze and decline, the exit code and printed body are the same whether the verb ran through serve or in-process"
+      kind: guard
+      proof: "grep: W1-T13238 criterion 3 in test/an-inbox-verb-cli-posts-to-the-running-serve.test.ts"
+  rationale: |
+    WHY: gardeners and operators use `rmd archive` and the other Inbox verbs for automation, and on 2026-11-16 it was
+    unusable. OBSERVED by the Inbox defects thread: from the Azure host, `rmd archive verify-human:W1-T235` timed out at
+    400 s and wrote nothing (rc 124); inside the serve container it failed with OwnerRepoUnresolvableError.
+    READ at origin/main, src/run-task.ts inboxActionCliCommand: the CLI builds buildInboxVerbActions in-process with
+    `statusGithub: ghGateway(owner, repo)` (live, synchronous gh calls while projecting the whole plan) after
+    `resolveOwnerRepo()`, which needs a git remote the container's working directory does not have. The Console reaches
+    the same actions through serve's write routes (buildPanelWriteRoutes), which hold the plan snapshot and memo already.
+    One sanctioned write path also means one place that ledgers the actor and one set of guards.
+  design: |
+    INVARIANT same-answer-either-path: the CLI's output and exit code do not depend on the path taken.
+    1. In inboxActionCliCommand, build the verb's JSON body as today (validateInboxVerbArguments), then try POST
+       http://127.0.0.1:<serve port>/v1/inbox/<verb> (the port serve listens on, from config or RMD_SERVE_PORT, default
+       4317) with the write token from state/service-tokens.json, a 2 s connect bound and the route's own response time.
+    2. On connection refused or a missing token, fall back to the in-process actions and print one stderr line naming why.
+    3. Map the HTTP status and body to the same exit code and printed body inboxVerbCommand prints today.
+  falsifier: |
+    Keep the in-process path first: criterion 1 fails (ghGateway is called). Drop the fallback: criterion 2 fails. Print
+    the raw HTTP body differently from inboxVerbCommand: criterion 3 fails.
+  note: |
+    Id reserved for run-unfiled-1794856029000 with ~/rmd-work/bin/reserve-id.sh.

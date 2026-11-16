@@ -1325,6 +1325,7 @@ import { routingAbCommand } from "./lib/routing-experiments.js";
 import { attributeAttemptOutcome } from "./lib/attempt-outcome-attribution.js";
 import { recordRoutingExperimentResults } from "./lib/routing-experiment-result.js";
 import { askDecisionModel, decisionsCommand } from "./lib/decision-model.js";
+import { reviewTriageCandidates, triagePullRequest } from "./lib/review-triage.js";
 import {
   PROGRESS_WATCHDOG_READ_STEPS,
   captureDiagnosticsBundle,
@@ -1401,7 +1402,7 @@ import {
   type FetchMergedCoverageArtifactDeps,
   type FetchMergedCoverageArtifactResult,
 } from "./lib/coverage-improvement.js";
-import { mineVerdictRows, verdictCalibrationReport, type UnmeasurableCause } from "./lib/verdict-calibration.js";
+import { mineVerdictRows, verdictCalibrationReport, VERDICT_OUTCOME_STEP, type UnmeasurableCause } from "./lib/verdict-calibration.js";
 import { mineAutonomyLedgerLines, parseTrailerMerges, zeroTouchMergeRate } from "./lib/autonomy.js";
 import { decideMeasurementCadence, measurementCadenceCheck, ciLearningCadenceCheck, CI_LEARNING_MINT_CEILING, ciLearningLookbackDays, type CiLearningCadencePolicy, type CiLearningCadenceRunResult, measurementCadenceMarkerPath, ciLearningRecordVerdict, ciLearningShardYaml, fileCiLearningShards, mintCiLearningShards, readMeasurementCadenceMarker, recordCiLearningAttempt, recordCiLearningCadenceFire, recordMeasurementCadenceFire, createWipeTestEvidenceReader, wipeTestSlotDraw, recordWipeTestCadenceFire, scheduleWipeTestAblation, renderVerbCensusDigestLine, priorVerifyHumanAgeBandKeys, runMeasurementCadenceReportAsync, runVerbCensus, verifyHumanCadence, wipeTestCadenceCheck, type MeasurementCadenceDecision, buildPlanReconcileCadenceInput, type PlanReconcileHeld, type PlanReconcileCadenceOpts, type PlanReconcileCadenceInputOptions, type PlanReconcileShardRecord, type MeasurementCadenceReportOpts, type MeasurementCadenceRunResult, type VerifyHumanCadenceResult, type WipeTestCadenceDecision, type WipeTestCadencePolicy, type WipeTestCadenceRunResult } from "./lib/measurement-cadence.js";
 import {
@@ -19182,14 +19183,14 @@ export async function lintPlanForReview(
     return { ran: false, reason: `no merge base: ${String((e as Error).message).split("\n")[0]}` };
   }
   try {
-    if (options.signal?.aborted) return { ran: false, reason: "lint-plan aborted" };
+    if (options.signal?.aborted) return { ran: false, reason: "lint-plan aborted", aborted: true };
     const launch = childEntryArgv(repoRoot, "run-task", "src/run-task.ts", ["lint-plan", "--plan",
       join(headCheckoutDir, "plan", "tasks.yaml"), "--base", mergeBase, "--offline", "--repo-root", headCheckoutDir,
       ...(options.codeRoot === undefined ? [] : ["--code-root", options.codeRoot])],
       undefined, { log: options.log });
     options.log?.(CHILD_ENTRY_SPAWNED_STEP, childEntrySpawnedRow("run-task", "lint-plan", launch));
     const result = await run(launch.argv, { cwd: repoRoot, signal: options.signal });
-    if (options.signal?.aborted) return { ran: false, reason: "lint-plan aborted" };
+    if (options.signal?.aborted) return { ran: false, reason: "lint-plan aborted", aborted: true };
     if (result.error) return { ran: false, reason: `lint-plan could not start: ${result.error.message}` };
     if (result.signal) return { ran: false, reason: `lint-plan killed by ${result.signal}` };
     if (result.status === null) return { ran: false, reason: "lint-plan exited without a status" };
@@ -22538,6 +22539,17 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
               lane: "measurement-cadence",
               ...row,
               step: KNOWLEDGE_MEASURED_STEP,
+            }),
+        },
+        // W1-T12425: one `verdict_calibration.outcome` row per measured head and kind, not gated on escalate.
+        outcomes: {
+          writeLedgerLine: (row) =>
+            appendLedger(ledgerPathFor(configFor()), {
+              run_id: `VERDICT-OUTCOME-${cadenceClock.now()}`,
+              lane: "measurement-cadence",
+              ...row,
+              task_id: String(row.task_id),
+              step: VERDICT_OUTCOME_STEP,
             }),
         },
       });
@@ -45653,6 +45665,8 @@ function reviewCommandHost(): ReviewCommandHost {
     reviewerClockBoundMs: (reviewerClockBoundMs) => reviewerClockBoundMs ?? loadDefaultPolicy().values.workerAbandon,
     reviewSubjectGit: (dir, argv) =>
       execFileSync("git", ["-C", dir, ...argv], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim(),
+    // W1-T12419: tests never send the paid triage request (the W1-T5939 rule for outside reads).
+    triagePullRequest: isTestRunner() ? undefined : (config, pr) => triagePullRequest(config, pr, {}, reviewTriageCandidates(repoRoot)),
   };
 }
 function sweepCommandHost<P extends Pick<SweepCommandHost, "freshTreeGit" | "commandViews">>(ports: P): SweepCommandHost & P;

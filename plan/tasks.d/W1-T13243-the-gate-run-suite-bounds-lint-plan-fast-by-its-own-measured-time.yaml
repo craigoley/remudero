@@ -1,0 +1,41 @@
+- id: W1-T13243
+  title: "The gate run suite bounds lint-plan fast by what it measures on the host that runs it, so a slower host stops reading a healthy step as hung"
+  repo: remudero
+  priority: 0.7
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium
+  band_meaning: span
+  origin: "operator-session#mac-red-suites-2026-11-16"
+  plan_refs:
+    - W1-T2791
+    - W1-T13214
+    - W1-T13146
+  files:
+    - test/a-gate-run-leaves-the-tracked-tree-clean.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The suite's run of each fast-gate step is bounded by a time derived from that step's own measured runtime on the running host, with the fixed value only as the fallback, and the failure message names both"
+      proof: "grep: W1-T13243 criterion 1 in test/a-gate-run-leaves-the-tracked-tree-clean.test.ts"
+    - claim: "invariant:a-dirtying-step-still-fails — a step that leaves the tracked tree changed still fails the suite on every host, and a step that truly hangs is still stopped"
+      proof: "grep: W1-T13243 criterion 2 in test/a-gate-run-leaves-the-tracked-tree-clean.test.ts"
+  rationale: |
+    OBSERVED 2026-11-16 on the operator Mac by the operator session.
+
+    - `W1-T2791 (acceptance 3): EVERY step the fast gate runs leaves the tracked tree byte-identical, not just the one guarded by name` in test/a-gate-run-leaves-the-tracked-tree-clean.test.ts fails with `lint-plan:fast ran (status null; signal SIGTERM; code ETIMEDOUT)` after about 132 s.
+    - It fails the same way on a tree equal to origin/main (470095644a) and on a branch three times, alone, so no change causes it. It refused the author preflight of W1-T13171 (#18927), which shipped on a one-PR operator waiver.
+    - The suite starts each fast-gate step as a child with a fixed timeout; on the Mac `lint-plan:fast` needs longer than that bound. On Linux CI it fits. The operator's standing rule is no hard thresholds: a bound is derived from a measurement on the host that runs it.
+  design: |
+    MEASURE FIRST: time `lint-plan:fast` alone on the Mac and in CI (the job log of a recent run) and put both in the PR body; name the fixed bound the suite uses today and where it is set.
+    1. The suite derives each step's bound from a calibration it runs once per process (or from the census history W1-T13146 records, if that has merged and covers the step), keeping the fixed value only as the fallback; the message names the bound and its source. W1-T13214 (queued) adds a shared helper for this kind of bound: use it if it has merged, and say so.
+    2. The tracked-tree assertion is untouched.
+    INVARIANT a-dirtying-step-still-fails: the check of the tree is unchanged, and a hung step is still bounded.
+    NOT IN SCOPE: lint-plan:fast's own speed; other suites' bounds.
+  falsifier: |
+    Use the fixed bound again and criterion 1 must fail on a host where the step is slower than it. Let a step that dirties the tree pass, or run a step with no bound, and criterion 2 must fail. Restore and both pass.
+  note: |
+    reservation hand-off: run-unfiled-1794859278751 -> run-unfiled-1794859278751
+    Reserved with rmd next-task-id from a worktree at origin/main. The suite is an existing file directly under test/ and is edited in place.

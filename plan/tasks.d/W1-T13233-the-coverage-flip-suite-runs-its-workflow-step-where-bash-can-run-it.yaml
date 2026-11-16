@@ -1,0 +1,41 @@
+- id: W1-T13233
+  title: "The coverage flip suite runs its workflow step under a bash that can run it, and says so when the host has none"
+  repo: remudero
+  priority: 0.8
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium
+  band_meaning: span
+  origin: "operator-session#mac-red-suites-2026-11-16"
+  plan_refs:
+    - W1-T5892
+    - W1-T9310
+    - W1-T13051
+  files:
+    - test/ci/coverage/the-live-coverage-flip-requires-a-fresh-nightly-floor.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "On a host whose bash cannot run the step's script, the three tests that run it report that the host's bash is too old, naming the version found and the version the step needs, instead of failing on a missing builtin"
+      proof: "grep: W1-T13233 criterion 1 in test/ci/coverage/the-live-coverage-flip-requires-a-fresh-nightly-floor.test.ts"
+    - claim: "invariant:linux-runs-them-all — where the bash in use is new enough (every Linux runner), the three tests run the real step and assert exactly what they assert today"
+      proof: "grep: W1-T13233 criterion 2 in test/ci/coverage/the-live-coverage-flip-requires-a-fresh-nightly-floor.test.ts"
+  rationale: |
+    OBSERVED 2026-11-16 on the operator Mac by the operator session, on a tree equal to origin/main (27b00b4ed1):
+    - test/ci/coverage/the-live-coverage-flip-requires-a-fresh-nightly-floor.test.ts fails 3 of 21: "W1-T5892: sparse admission shares the producers' policy identity without dependencies", "… one admission precedes all shards and every consumer uses its published pin", "… refused admission and publication failure make every shard full with one named reason".
+    - The failure, verbatim: `…/rmd-w1t5892-step-OYuexS/run.sh: line 99: mapfile: command not found`, exit 127 where 0 is expected. The test runs a step body of .github/workflows/ci.yml under the host's `bash`; line 99 of that body uses `mapfile`, a bash 4 builtin. This Mac has only `/bin/bash` 3.2.57 (no other bash on PATH).
+    - Linux runners have bash 5, so CI is green and nobody sees it; on the Mac it refused three author preflights the same day (W1-T13162 as #18903, W1-T13177 as #18910, and the census run of a fourth), each needing a one-PR operator waiver.
+    - The workflow is not the thing to change: the step runs on Linux, where `mapfile` is right.
+  design: |
+    1. The suite resolves the bash it will run the step with (the same lookup the test uses today) and reads its major version once.
+    2. When it is below 4, the three tests skip through the shared host helper with a reason naming both versions (W1-T9310 adds `test/helpers/host-requirement.ts`; if that has not merged when this is built, use the suite's existing skip form and say so), and one test that always runs asserts that reason's text.
+    3. When it is 4 or more, nothing changes.
+    INVARIANT linux-runs-them-all: no test is skipped on a host with bash 4 or newer; a red there is a red.
+    NOT IN SCOPE: ci.yml; installing a newer bash on the operator Mac; other suites that run workflow steps (list any you find that use bash 4 builtins in the PR body).
+  falsifier: |
+    Skip the three tests whatever the version and criterion 2 must fail. Let them run under bash 3.2 and criterion 1 must fail on the Mac. Restore and both pass.
+  note: |
+    reservation hand-off: run-unfiled-1794854438459 -> run-unfiled-1794854438459
+    Reserved with rmd next-task-id from a worktree at origin/main. The suite is an existing file in its computed folder and is edited in place. The skip must key on the bash version, never on the platform, so a Mac with a newer bash on PATH runs the tests.

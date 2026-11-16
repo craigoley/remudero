@@ -28,8 +28,12 @@ function fixture(t: TestContext) {
   mkdirSync(state, { recursive: true });
   const calls = join(root, "calls");
   writeFileSync(calls, "");
+  // W1-T13189: a beat measures every rmd-* entry of its TMPDIR, one `du` and one `df` each. Left on the host's own,
+  // which held 1,190 of them on 2026-11-16, this suite took 179 s; in a temp root of its own it takes seconds.
+  const temp = join(root, "tmp");
+  mkdirSync(temp);
   const env = {
-    ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: root,
+    ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: root, TMPDIR: temp,
     RMD_ROOT: join(root, "fleet"), RMD_STATE_DIR: join(root, "fleet"),
     REGISTRY: "fixture-registry", CALLS: calls, AZ_REASON: reason, AZ_RESULT: "0",
     RMD_SERVE_REPO_DIR: join(root, "serve-repo"), RMD_SERVE_SUPERVISOR: "off",
@@ -315,4 +319,34 @@ test("W1-T5319: the installed timer runs refresh as the host credential owner", 
   assert.match(timer, /OnUnitActiveSec=1h/);
   assert.match(timer, /Unit=rmd-acr-login.service/);
   assert.ok(existsSync(join(f.root, "installed-bin", "acr-login.sh")));
+});
+
+test("W1-T13189 criterion 1: every script the fixture starts runs with a TMPDIR inside the fixture's own root", (t) => {
+  const f = fixture(t);
+  const probe = join(f.root, "print-tmpdir.sh");
+  writeFileSync(probe, '#!/bin/bash\nprintf "%s" "$TMPDIR"\n', { mode: 0o755 });
+  const result = f.start(probe);
+  assertExit("print-tmpdir.sh", result, 0, result.stderr);
+  assert.equal(result.stdout, join(f.root, "tmp"), "a beat started here measures the fixture's temp root, not the host's");
+  assert.ok(existsSync(result.stdout), "the temp root exists before any script runs");
+});
+
+test("W1-T13189 criterion 2: with its own temp root the suite still catches a failed login recorded as ok", (t) => {
+  const f = fixture(t);
+  const deploy = join(f.root, "deploy");
+  cpSync(join(repo, "deploy"), deploy, { recursive: true });
+  const path = join(deploy, "acr-login.sh");
+  const source = readFileSync(path, "utf8");
+  const mutated = source.replace(
+    'if [ "$status" -eq 127 ]; then result=unavailable; status=0; else result=failed; fi',
+    "result=ok; status=0",
+  );
+  assert.ok(mutated !== source, "the mutant must change how a failed login is recorded");
+  writeFileSync(path, mutated);
+  const result = f.start(path, ["--refresh"], { AZ_RESULT: "1" });
+  assertExit("deploy/acr-login.sh (mutated)", result);
+  const record = JSON.parse(readFileSync(join(f.state, "acr-login.json"), "utf8"));
+  // The suite's own test expects `failed` for this input; the mutant writes something else, so that test goes red.
+  assert.notEqual(record.result, "failed", "the mutant records a failed login as something other than failed");
+  assert.equal(record.result, "ok");
 });

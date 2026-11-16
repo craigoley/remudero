@@ -387,7 +387,7 @@ import {
   type RefusalCandidate,
 } from "./refusal-amendment.js";
 import { landTaskFilesAsync, landingIdentity, stagedTaskFiles, type LandTaskFilesOpts } from "./feedback-landing.js";
-import { PARKED_PR_REMEDY_STEP, openEscalationRelease, actOnParkedPr, designHoldCoverage, parkedPrFacts, parkedPrRemedy, readParkedPrShard, remedyStalledCriterion, standDownHoldRemedied, standDownHoldRemedy, takeParkedPrRemedy, type ParkedPrHost } from "./parked-pr-remedy.js";
+import { PARKED_PR_REMEDY_STEP, openEscalationRelease, actOnParkedPr, designHoldCoverage, parkedPrFacts, parkedPrRemedy, planRoundExhaustedRemedy, readParkedPrShard, remedyStalledCriterion, standDownHoldRemedied, standDownHoldRemedy, takeParkedPrRemedy, type ParkedPrHost } from "./parked-pr-remedy.js";
 
 /** W1-T6434: the bounded, already-scrubbed view of a preserved fix-owner patch. */
 export interface PriorPartialWork {
@@ -5379,6 +5379,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // draftRefusalAmendments does. A task in neither catalog on a host with no readable plan-destination.json may be in the
     // ops catalog, so it is refused as destination-unreadable; nothing falls back to the public repository.
     parkedPr: {
+      planFilingTarget: publicTaskRepository,
       readTaskShard: async (taskId) => {
         const resolved = await taskFileRepository(taskId, (reloadPlanForFix() ?? plan).byId);
         const unknownCatalog = resolved.outcome === "resolved" && resolved.task === undefined &&
@@ -5399,6 +5400,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         assertLiveWriteAllowed("gh-transport", `parked pull request close of ${prUrl}`);
         await ghTextAsync(["pr", "close", prUrl, "--comment", comment]);
       },
+      readPrFiles: (prUrl) => fetchPrDiffFilesViaGh(prUrl),
     },
     // W1-T4838 — hold each refused task, then open ONE plan-only amendment PR for it. The hold is
     // written FIRST (cheap, local, idempotent) so a slow or failed PR never lets the task re-dispatch.
@@ -23012,6 +23014,8 @@ export async function runSweep(
         : await tryPlanRepair(pr);
       const facts = planRoundFacts.get(pr.prNumber);
       let planRoundExhausted = false;
+      // W1-T13047: why the plan-scoped round is exhausted, for the held rebuild's question.
+      let exhaustedRefusal = "";
       if (!repair.repaired && deps.dispatchPlanGateRound && isFleetAppAuthor(facts?.authorLogin) &&
           (isMachineLanePlanHead(pr.headRefName) || facts?.filedTaskRepairReady === true && filedTaskPlanRepairCandidate(pr))) {
         const row = { pr_number: pr.prNumber, head_sha: pr.headSha, lane_head: pr.headRefName,
@@ -23037,6 +23041,7 @@ export async function runSweep(
             if (claimed.reason.includes("refused twice")) {
               repair.repaired = false;
               planRoundExhausted = true;
+              exhaustedRefusal = claimed.reason;
             }
           }
           else {
@@ -23052,7 +23057,8 @@ export async function runSweep(
                 if (!deps.fixProgressJudge) {
                   repair.repaired = false;
                   planRoundExhausted = true;
-                  repair.reason = `; ${repeatedFixRefusalReason(String(repeated.reason))}`;
+                  exhaustedRefusal = repeatedFixRefusalReason(String(repeated.reason));
+                  repair.reason = `; ${exhaustedRefusal}`;
                   return;
                 }
                 const parkedReason = `refused-twice: plan round ${String(repeated.reason)}`;
@@ -23075,7 +23081,9 @@ export async function runSweep(
                   repair.repaired = false;
                   planRoundExhausted = true;
                   repair.reason = `fix progress loop: ${progress.loop} — ${progress.reason}`;
-                  await deps.escalate(pr, repair.reason, renderClarificationQuestion(pr, repair.reason, pr.strikeHistory ?? []));
+                  exhaustedRefusal = `${repair.reason}; the plan-scoped round refused twice: ${String(repeated.reason)}`;
+                  // W1-T13047: with the parked-pr remedy wired, the exhausted round is closed and rebuilt below, not escalated.
+                  if (!deps.parkedPr) await deps.escalate(pr, repair.reason, renderClarificationQuestion(pr, repair.reason, pr.strikeHistory ?? []));
                   return;
                 }
                 if (progress.verdict === "change-approach") pr.pendingAnswer = { ...pr.pendingAnswer, constraint: progress.approach };
@@ -23112,6 +23120,19 @@ export async function runSweep(
         ? `merge conflict (mergeState dirty) — the plan-scoped conflict round on this fleet plan PR is exhausted${repair.reason} — escalating`
         : `plan-only PR is red on ${red} — the code-fix lane cannot stage outside a plan filing, so no ` +
           `fix is dispatched; the plan violation needs a plan repair${violation}${repair.reason}`;
+      // W1-T13047: invariant:round-first, only an exhausted plan-scoped round closes the plan filing. It is rebuilt as one
+      // held task (invariant:one-question) whose needs_input names the red gates and the refusal; no needs-human issue opens.
+      if (planRoundExhausted && deps.parkedPr && !deps.dryRun) {
+        const parked = await planRoundExhaustedRemedy(pr, { redChecks: redCheckNames(pr).filter(r => !r.startsWith("review:")),
+          violations: named, refusal: exhaustedRefusal || repair.reason.replace(/^; /, ""), conflict: planConflictRound,
+          knownPlanFiles: (pr.mergeConflict?.files ?? []).map((file) => file.path) }, ledgerLines, deps.parkedPr,
+        { runId: deps.runId, ledgerTaskId: escalationTaskIdFor(pr), nowIso: clockFromMillisFn(() => now).iso(),
+          append: (row) => appendLine(deps.ledgerPath, row) });
+        parkedBlockerByPr.set(pr.prNumber, parked.blocker);
+        ruleBlockerByIndex.set(prIndex, parked.blocker);
+        disposition = parked.disposition;
+        reason = `parked-pr remedy ${parked.remedy} (W1-T13047): ${parked.reason}; it replaces: ${reason.replace(/ — escalating$/, "")}`;
+      }
     }
     // W1-T3306: capped proof grades live only on `review.posted`, so the capped-green arm refusal
     // routes through the EXISTING fix rung here. #10298: it reads the #5960 escalation row's head too,
