@@ -295,7 +295,7 @@ test("W1-T12709 criterion 6: a clarification escalation for an open pull request
   for (let pass = 0; pass < 2; pass++) await runSweep([stale()], w.deps, DEFAULT_SWEEP_POLICY);
   assert.equal(w.escalated.length, 0, "the W1-T78 rung opens no needs-human issue for an open pull request");
   assert.deepEqual(w.remedies().map(r => [r.pr_number, r.remedy, r.cause, r.outcome]), [[PR, "fix-on-pr", "clarification", "taken"]]);
-  assert.match(String(w.remedies()[0]!.text), /not positively mergeable — checks none, review none/);
+  assert.match(String(w.remedies()[0]!.text), /zero check runs on head .*review none — CI suite recovery owns the bounded re-push/);
 });
 
 test("W1-T12709 criterion 9: invariant:never-close-healthy-work, nothing unmet and nothing red is fix-on-pr and never a close", async () => {

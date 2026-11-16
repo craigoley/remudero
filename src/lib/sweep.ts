@@ -12984,6 +12984,15 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
       `since the last push (< ${policy.absentCeilingMinutes}m ceiling) — not yet scheduled, not genuinely absent — waiting`,
   },
   {
+    // W1-T9408: the bounded absent-suite remedy owns this shape, rather than the unowned catch-all.
+    disposition: "blocked-ambiguous",
+    blocker: "awaiting-ci",
+    when: (pr, policy, _ageDays, now) => pr.reviewState === "none" &&
+      absentChecksRepushDecision(pr, policy, now, { count: 0, shas: new Set<string>() }).repush,
+    reason: (pr) =>
+      `zero check runs on head ${pr.headSha.slice(0, 7)}, review none — CI suite recovery owns the bounded re-push`,
+  },
+  {
     // TERMINAL rule, matching unconditionally — the LEAST permissive disposition (W1-T93), not the
     // most. A checks-red PR is caught by row 5 and a DATABLE checks-pending PR by rows 9/10, so
     // neither lands here. Anything else not positively mergeable and not failure-shaped no longer
