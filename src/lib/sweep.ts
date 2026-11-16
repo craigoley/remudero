@@ -6436,12 +6436,12 @@ export function restorableDeliveredVerdict(
 
 type ReviewInputView = Parameters<typeof restorableDeliveredVerdict>[0];
 
-/** W1-T12994 — the newest `review.posted` row of this exact head and input: the outcome a delivered key stands for. A pending or
- *  refused row after it is a claim or a refusal, never a newer outcome (W1-T11929). An unread input digest names no row. */
-function newestPostedRowForInput(pr: ReviewInputView, lines: ReadonlyArray<Record<string, unknown>>): Record<string, unknown> | undefined {
-  if (pr.reviewInputDigest === undefined) return undefined;
+/** W1-T12994 — the `review.posted` rows of this exact head and input, oldest first: the outcomes a delivered key stands for. A
+ *  pending or refused row after one is a claim or a refusal, never a newer outcome (W1-T11929). An unread digest names no row. */
+function postedRowsForInput(pr: ReviewInputView, lines: ReadonlyArray<Record<string, unknown>>): Record<string, unknown>[] {
+  if (pr.reviewInputDigest === undefined) return [];
   const taskId = reviewOutcomeTaskIdFor(pr);
-  return lines.findLast(r => r.step === "review.posted" && r.task_id === taskId && r.pr_url === pr.prUrl &&
+  return lines.filter(r => r.step === "review.posted" && r.task_id === taskId && r.pr_url === pr.prUrl &&
     r.head_sha === pr.headSha && r.review_input_digest === pr.reviewInputDigest);
 }
 
@@ -6450,15 +6450,18 @@ function newestPostedRowForInput(pr: ReviewInputView, lines: ReadonlyArray<Recor
  *  answered "a verdict was already DELIVERED" for the hold, so no review ran. While GitHub reads pending and the status's owner
  *  process is PROVEN dead, nothing owns the status and no verdict stands: the key is released and the input is reviewed again.
  *  Only the view producer's own process proof counts. A derived cause (a refusal, a harvest, host load) has its own release, and
- *  an owner that is merely old keeps the hold: taking a status over without proof is what one-review-per-input forbids. */
+ *  an owner that is merely old keeps the hold: taking a status over without proof is what one-review-per-input forbids. So does
+ *  any success or failure already recorded for the input, however old: a hold recorded after a verdict releases nothing. */
 export function pendingHoldOwnerProvenDead(
   pr: ReviewInputView & Pick<OpenPrView, "reviewPendingOwnerDead" | "reviewPendingOwnerGone">,
   lines: ReadonlyArray<Record<string, unknown>>,
 ): boolean {
   if (pr.reviewState !== "pending" || pr.reviewPendingOwnerDead !== true) return false;
   if (pr.reviewPendingOwnerGone !== undefined && pr.reviewPendingOwnerGone !== "owner-pid-dead") return false;
-  const row = newestPostedRowForInput(pr, lines);
-  return row?.state === "pending" && (row.decision_verdict as ReviewVerdict | undefined)?.cannotEvaluate === true;
+  const posted = postedRowsForInput(pr, lines);
+  const newest = posted.at(-1);
+  return newest?.state === "pending" && (newest.decision_verdict as ReviewVerdict | undefined)?.cannotEvaluate === true &&
+    !posted.some(row => row.state === "success" || row.state === "failure");
 }
 
 /** W1-T12994 — THE ONE RULE for whether a delivered key dedups a review of this view, called by the walk's post-review arm and
@@ -6493,7 +6496,7 @@ export function pendingViewSettledFromDeliveredFailure(
   reviewKey: string,
 ): { view: OpenPrView; basis: "verdict-after-pending" | "restore-spent"; deliveredAt: string } | undefined {
   if (!delivered || pr.reviewState !== "pending") return undefined;
-  const row = newestPostedRowForInput(pr, lines);
+  const row = postedRowsForInput(pr, lines).at(-1);
   const verdict = row?.decision_verdict as ReviewVerdict | undefined;
   if (row === undefined || row.state !== "failure" || verdict?.state !== "failure" || verdict.cannotEvaluate === true) return undefined;
   if (row.instrument_entangled === true || row.failure_class === "instrument_entangled") return undefined;

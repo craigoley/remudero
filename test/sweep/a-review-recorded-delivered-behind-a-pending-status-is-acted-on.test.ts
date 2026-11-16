@@ -132,6 +132,11 @@ test("W1-T12994 criterion 1: the release reads the newest review.posted row of t
   // A terminal verdict recorded after the hold is the newest outcome: the key is a verdict again.
   f.seed.failure(at("16:40:00"));
   assert.equal(pendingHoldOwnerProvenDead(f.pr, f.lines()), false);
+  // And a hold recorded AFTER a verdict of the same input releases nothing: that input was judged once already.
+  const judged = fixture(t, CASE_A, { reviewPendingSince: at("16:23:23"), reviewPendingOwnerDead: true });
+  judged.seed.failure(at("16:10:00"));
+  judged.seed.hold(at("16:28:35"));
+  assert.equal(pendingHoldOwnerProvenDead(judged.pr, judged.lines()), false);
   // W1-T11729's shape: a row of state success whose verdict could not evaluate is not a pending hold.
   const odd = fixture(t, CASE_A, { reviewPendingSince: at("16:23:23"), reviewPendingOwnerDead: true });
   odd.seed.row("review.posted", at("16:28:35"), { state: "success", decision_verdict: { state: "success", cannotEvaluate: true, criteria: [] } });
