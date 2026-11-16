@@ -18,7 +18,7 @@ import { readSessionOwnershipViaGit } from "#src/lib/sweep.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import {
-  BRANCH, FIXED_HOST_PROBE, fakeReserver, gitRemote, LOCAL, orphanRunRows, TASK,
+  BRANCH, FIXED_HOST_PROBE, fakeReserver, gitRemote, orphanRunRows, TASK,
 } from "#test/helpers/restart-orphan.js";
 import { daemonCommand } from "#test/helpers/run-task-daemon.js";
 
@@ -109,7 +109,7 @@ test("W1-T12707 criterion 2: a dead claim from the previous run is not read as h
   const lockIso = new Date().toISOString();
   const swept: Row[] = [];
   const claimSweepSettled = bootSweepDispatchClaimsAsync(reserver, {
-    hostProbe: FIXED_HOST_PROBE, localHost: LOCAL, lockHeldSinceMs: Date.parse(lockIso), lockHeldSinceIso: lockIso, stateDir,
+    hostProbe: FIXED_HOST_PROBE, lockHeldSinceMs: Date.parse(lockIso), lockHeldSinceIso: lockIso, stateDir,
     log: (step, fields) => { swept.push({ step, ...fields }); },
   }).then(() => undefined);
   const claimsRead: Array<number | undefined> = [];
@@ -126,7 +126,7 @@ test("W1-T12707 criterion 2: a dead claim from the previous run is not read as h
     },
     sweepLight: async () => {},
     sleep: tick,
-    log: (step, x) => { if (/sweep\.|claim/.test(step)) console.log(step, JSON.stringify(x).slice(0,300)); },
+    log: () => {},
   }, { max: 1 });
   await turns(100, () => claimsRead.length > 0);
   assert.deepEqual(claimsRead, [], "the pass has read no claim while the sweep is pending");
