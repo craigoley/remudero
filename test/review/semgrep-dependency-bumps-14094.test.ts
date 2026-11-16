@@ -13,7 +13,7 @@ const root = repoRoot();
 const read = (path: string): string => readFileSync(join(root, path), "utf8");
 const sha256 = (path: string): string => createHash("sha256").update(readFileSync(join(root, path))).digest("hex");
 
-test("W1-T12956 criterion 2 W1-T12492 admits only reviewed setuptools wheels and refuses the incompatible OpenTelemetry move", () => {
+test("W1-T12956 criterion 2 in test/review/semgrep-dependency-bumps-14094.test.ts: W1-T12492 admits only reviewed setuptools wheels and refuses the incompatible OpenTelemetry move", () => {
   const build = read(".github/semgrep/build-requirements.txt");
   const runtime = read(".github/semgrep/requirements.txt");
   const auditor = read(".github/semgrep/runtime-compatibility-audit.py");
