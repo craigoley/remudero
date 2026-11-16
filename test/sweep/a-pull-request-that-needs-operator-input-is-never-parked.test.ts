@@ -293,6 +293,49 @@ test("W1-T12709 criterion 10: a fix-on-pr row releases the fix lane's open-escal
   assert.equal(openEscalationRelease(answered, [remedyRow(PR, head)], PR, head), answered, "an operator's answer keeps its meaning");
 });
 
+// The state production reaches once the fix lane stood down on an already-open needs-human escalation: the pull request is
+// red, the open issue names its exact head, and the sweep holds the dispatch behind it.
+const OPEN_HEAD = "a".repeat(40);
+const openEscalation = (head = OPEN_HEAD) => [{ number: 1, title: "[BLOCKED] repair", url: "https://github.com/o/r/issues/1",
+  body: `**Task:** ${TASK}\n**Class:** BLOCKED\n${PR_URL}\n**Head:** ${head}\n**Cause:** ci\n` }];
+const redOpenPr = (over: Partial<OpenPrView> = {}) => view({ headSha: OPEN_HEAD, checksState: "red", reviewState: "pending",
+  ciFailures: [{ name: "test-shard (1/8)", logTail: "not ok 1 - the fixture" }], ...over });
+
+test("W1-T12709 criterion 1: a pull request held behind an already-open escalation is dispatched the fix round, once", async () => {
+  const legacy = world([]);
+  legacy.deps.readOpenEscalations = () => openEscalation();
+  await runSweep([redOpenPr()], legacy.deps, DEFAULT_SWEEP_POLICY);
+  assert.equal(legacy.dispatched.length, 0, "without the remedy the open escalation holds the pull request");
+
+  const rows: Record<string, unknown>[] = [];
+  const { h, landed, closed } = host();
+  const w = world(rows, h);
+  w.deps.readOpenEscalations = () => openEscalation();
+  await runSweep([redOpenPr()], w.deps, DEFAULT_SWEEP_POLICY);
+  assert.equal(w.dispatched.length, 1, "the fix round runs on the pull request instead of standing down");
+  assert.equal(w.escalated.length, 0);
+  assert.deepEqual(w.remedies().map(r => [r.pr_number, r.head_sha, r.remedy, r.cause, r.outcome]),
+    [[PR, OPEN_HEAD, "fix-on-pr", "open-escalation", "taken"]]);
+  assert.equal(landed.length + closed.length, 0);
+
+  await runSweep([redOpenPr()], w.deps, DEFAULT_SWEEP_POLICY);
+  assert.equal(w.remedies().length, 1, "a later pass at the same head writes no second remedy row");
+  assert.equal(openEscalationStandDownReason(OPEN_HEAD, openEscalation()[0] as OpenIssue,
+    undefined, undefined, undefined, openEscalationRelease(undefined, rows, PR, OPEN_HEAD)), undefined,
+  "the fix lane's stand-down is released for this pull request and head");
+});
+
+test("W1-T12709 criterion 4: invariant:no-parked-pr, a pull request behind an open escalation never carries a refused-escalate row", async () => {
+  const rows: Record<string, unknown>[] = [];
+  const w = world(rows, host().h);
+  w.deps.readOpenEscalations = () => openEscalation();
+  for (let pass = 0; pass < 2; pass++) await runSweep([redOpenPr()], w.deps, DEFAULT_SWEEP_POLICY);
+  assert.deepEqual(parkedWithoutRemedy(rows), []);
+  assert.equal(rows.filter(r => r.step === "sweep.disposed" && r.disposition === "refused-escalate").length, 0);
+  assert.equal(rows.filter(r => r.step === "sweep.disposed" && r.blocker === "escalated").length, 0);
+  assert.equal(w.remedies().length, 1);
+});
+
 test("W1-T12709 criterion 11: the stall ladder's operator-input step becomes a split, or a close and rebuild when a split is impossible", async () => {
   const claim = CLAIMS[1]!;
   const key = `review:${claim}`;

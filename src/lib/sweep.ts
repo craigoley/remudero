@@ -386,7 +386,7 @@ import {
   type RefusalCandidate,
 } from "./refusal-amendment.js";
 import { landTaskFilesAsync, landingIdentity, stagedTaskFiles, type LandTaskFilesOpts } from "./feedback-landing.js";
-import { actOnParkedPr, parkedPrFacts, parkedPrRemedy, remedyStalledCriterion, takeParkedPrRemedy, type ParkedPrHost } from "./parked-pr-remedy.js";
+import { PARKED_PR_REMEDY_STEP, openEscalationRelease, actOnParkedPr, parkedPrFacts, parkedPrRemedy, remedyStalledCriterion, takeParkedPrRemedy, type ParkedPrHost } from "./parked-pr-remedy.js";
 
 /** W1-T6434: the bounded, already-scrubbed view of a preserved fix-owner patch. */
 export interface PriorPartialWork {
@@ -23039,19 +23039,32 @@ export async function runSweep(
         }
       }
     }
-    if (deps.parkedPr && !deps.dryRun && !strikeLadderDue && !sloLadderDue && standDownHold === undefined && (disposition === "refused-escalate" ||
+    // The W1-T10339 held stand-down is the state production reaches after the fix lane stood down on an already-open
+    // needs-human escalation (`fix.stood_down` at `rung.strike`), so it takes the remedy too. A fix-on-pr that was already
+    // taken at this head for this cause and stood down again is not repeated: the hold stays, one row names the remedy.
+    if (deps.parkedPr && !deps.dryRun && !strikeLadderDue && !sloLadderDue && (disposition === "refused-escalate" ||
         disposition === "blocked-ambiguous" && ruleBlockerByIndex.get(prIndex) === "escalated")) {
       const designQuestion = terminalDesignHold !== undefined && disposition === "refused-escalate" ? reason : undefined;
       const facts = parkedPrFacts(pr, { redChecks: redCheckNames(pr).filter(r => !r.startsWith("review:")),
         ...(designQuestion === undefined ? {} : { designQuestion }), fixModelOrder: policy.fixModelOrder ?? DEFAULT_FIX_MODEL_ORDER },
       ledgerLines, deps.parkedPr);
-      const parked = await actOnParkedPr(pr, parkedPrRemedy(facts), facts, ledgerLines, deps.parkedPr, { runId: deps.runId, ledgerTaskId: escalationTaskIdFor(pr), nowIso: clockFromMillisFn(() => now).iso(),
-        cause: designQuestion !== undefined ? "needs-design" : pr.isPlanFiling === true ? "plan-gate" : heldEscalationAt !== undefined ? "open-escalation" : `escalated:${disposition}`,
-        text: reason, append: (row) => appendLine(deps.ledgerPath, row) });
-      disposition = parked.disposition;
-      reason = `parked-pr remedy ${parked.remedy} (W1-T12709): ${parked.reason}; it replaces: ${reason}`;
-      ruleBlockerByIndex.set(prIndex, parked.blocker);
-      heldEscalationAt = undefined;
+      const holdCause = standDownHold === undefined ? undefined
+        : standDownHold.reason.includes("ALREADY OPEN") ? "open-escalation" : `stand-down:${standDownHold.site}`;
+      const cause = designQuestion !== undefined ? "needs-design" : pr.isPlanFiling === true ? "plan-gate"
+        : holdCause ?? (heldEscalationAt !== undefined ? "open-escalation" : `escalated:${disposition}`);
+      const decision = parkedPrRemedy(facts);
+      const repeatedHold = standDownHold !== undefined && decision.remedy === "fix-on-pr" && ledgerLines.some(row =>
+        row.step === PARKED_PR_REMEDY_STEP && row.pr_number === pr.prNumber && row.head_sha === pr.headSha &&
+        row.cause === cause && row.remedy === "fix-on-pr" && row.outcome === "taken");
+      if (!repeatedHold) {
+        const parked = await actOnParkedPr(pr, decision, facts, ledgerLines, deps.parkedPr, { runId: deps.runId, ledgerTaskId: escalationTaskIdFor(pr), nowIso: clockFromMillisFn(() => now).iso(),
+          cause, text: reason, append: (row) => appendLine(deps.ledgerPath, row) });
+        disposition = parked.disposition;
+        reason = `parked-pr remedy ${parked.remedy} (W1-T12709): ${parked.reason}; it replaces: ${reason}`;
+        ruleBlockerByIndex.set(prIndex, parked.blocker);
+        heldEscalationAt = undefined;
+        standDownHold = undefined;
+      }
     }
     // Operator ruling 2026-10-30: a fix lane that escalated to a person and got no answer for HELD_ESCALATION_SLO_MS takes the
     // ladder's rebuild rung (the fix-progress judge, then close and requeue with the findings as a note, or a digest) instead
@@ -23860,8 +23873,23 @@ export async function runSweep(
                 const openHold = issues.filter(issue => matchDuplicateEscalation(holdKey, [issue]) !== undefined)
                   .map(issue => openEscalationStandDownReason(holdHead, issue, escalationKey.contractRevision,
                     { conflictEvidenceCaptured: hasCapturedMergeConflictEvidence(pr.mergeConflict), baseSha: mainTipSha },
-                    isBlockedCi(pr) ? redCheckNames(pr) : undefined, pr.pendingAnswer)).find(hold => hold !== undefined);
-                if (openHold) {
+                    isBlockedCi(pr) ? redCheckNames(pr) : undefined,
+                    openEscalationRelease(pr.pendingAnswer, ledgerLines, pr.prNumber, holdHead))).find(hold => hold !== undefined);
+                // W1-T12709: the fix lane would stand down on this open needs-human escalation. A pull request whose
+                // criteria or red checks a fix round can act on takes the remedy instead: one `parked_pr.remedy` row, then
+                // the dispatch below runs, and the fix lane's own stand-down is released for this pull request and head.
+                let openHoldKept = openHold !== undefined;
+                if (openHold && deps.parkedPr && !deps.dryRun) {
+                  const facts = parkedPrFacts(pr, { redChecks: redCheckNames(pr).filter(r => !r.startsWith("review:")),
+                    fixModelOrder: policy.fixModelOrder ?? DEFAULT_FIX_MODEL_ORDER }, ledgerLines, deps.parkedPr);
+                  const parked = await actOnParkedPr(pr, parkedPrRemedy(facts), facts, ledgerLines, deps.parkedPr, { runId: deps.runId,
+                    ledgerTaskId: escalationTaskIdFor(pr), nowIso: clockFromMillisFn(() => now).iso(), cause: "open-escalation",
+                    text: openHold.reason, append: (row) => appendLine(deps.ledgerPath, row) });
+                  extraDisposedFields = { ...extraDisposedFields, parked_pr_remedy: parked.remedy };
+                  if (parked.error === undefined && parked.remedy === "fix-on-pr") openHoldKept = false;
+                  else openHold.reason = `parked-pr remedy ${parked.remedy} (W1-T12709): ${parked.reason}; it replaces: ${openHold.reason}`;
+                }
+                if (openHold && openHoldKept) {
                   acted = false;
                   spent = false;
                   standDownReason = openHold.reason;

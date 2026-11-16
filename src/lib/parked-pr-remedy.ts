@@ -215,11 +215,6 @@ export function parkedPrFacts(pr: ParkedPrSubject, input: { redChecks: readonly 
     ...(unmet.some(c => c.needsInput) ? { taskCriteria: taskCriteriaCount(host, pr.taskId) } : {}) };
 }
 
-export interface ParkedPrSweepOutcome extends ParkedPrOutcome {
-  disposition: "blocked-fixable" | "post-review" | "wait";
-  blocker: PrBlocker;
-}
-
 /** Takes the sweep's remedy and names the disposition the pull request goes on with. It is never refused-escalate. */
 export async function actOnParkedPr(pr: ParkedPrSubject, decision: ParkedPrDecision, facts: ParkedPrFacts,
   ledger: readonly Record<string, unknown>[], host: ParkedPrHost, ctx: ParkedPrContext): Promise<ParkedPrSweepOutcome> {
