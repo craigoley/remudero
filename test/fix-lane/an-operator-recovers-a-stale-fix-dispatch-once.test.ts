@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -827,5 +827,102 @@ test("W1-T12114 the registered command calls the recovery apply module", async (
     assert.notEqual(prOwnerRecoverPorts("not-a-repo", { ledgerPath, root }).repoDir, join(root, "repos", ""));
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T12114 every unreadable read fails closed", async () => {
+  const reason = (r: RecoveryResult) => (r as { reason?: string }).reason ?? "";
+  // An unreadable claim file holds without a row.
+  const lockDir = makeWorld();
+  try {
+    const id = await authorized(lockDir);
+    mkdirSync(lockDir.priorLockPath, { recursive: true });
+    const res = await apply(lockDir, id);
+    assert.equal(res.outcome, "held");
+    assert.match(reason(res), /^branch_claim_unreadable/);
+  } finally {
+    lockDir.cleanup();
+  }
+  // A claim that vanishes under the apply is unknown, and releasing it is a no-op.
+  const vanished = makeWorld();
+  try {
+    vanished.writePriorLock();
+    const id = await authorized(vanished);
+    vanished.ports.underClaim = () => rmSync(vanished.priorLockPath);
+    const res = await apply(vanished, id);
+    assert.deepEqual([res.outcome, reason(res)], ["held", "branch_claim_unknown"]);
+  } finally {
+    vanished.cleanup();
+  }
+  // No registered worktree and no local branch: nothing to preserve.
+  const none = makeWorld();
+  try {
+    none.state.worktree = undefined;
+    none.writePriorLock();
+    const res = await apply(none, await authorized(none));
+    assert.equal(((res as { receipt: Row }).receipt.preservation as Row).state, "nothing_to_preserve");
+  } finally {
+    none.cleanup();
+  }
+  // A receipt file with the wrong mode, or unparseable bytes, is unknown and never overwritten.
+  for (const tamper of ["mode", "bytes"] as const) {
+    const t = makeWorld();
+    try {
+      t.writePriorLock();
+      const id = await authorized(t);
+      assert.equal((await apply(t, id)).outcome, "released");
+      const path = join(t.stateDir, "pr-owner-recoveries", receiptFiles(t)[0]!);
+      if (tamper === "mode") chmodSync(path, 0o644);
+      else writeFileSync(path, "{garbage", { mode: 0o600 });
+      t.rows.splice(t.rows.indexOf(receipts(t, "released")[0]!), 1);
+      const res = await apply(t, id);
+      assert.equal(res.outcome, "unknown", tamper);
+      assert.match(reason(res), tamper === "mode" ? /mode mismatch/ : /unparseable/);
+    } finally {
+      t.cleanup();
+    }
+  }
+  // An unreadable PR at either authorize read, or at apply, writes nothing.
+  for (const failAt of [1, 2]) {
+    const p = makeWorld();
+    try {
+      let calls = 0;
+      const live = p.ports.readPr;
+      p.ports.readPr = async (repo, n) => {
+        calls += 1;
+        if (calls === failAt) throw new Error("gh: 502");
+        return live(repo, n);
+      };
+      const res = await authorize(p);
+      assert.deepEqual([res.outcome, reason(res).startsWith("pr_unreadable")], ["refused", true], `read ${failAt}`);
+      assert.equal(authRows(p).length, 0);
+    } finally {
+      p.cleanup();
+    }
+  }
+  const atApply = makeWorld();
+  try {
+    const id = await authorized(atApply);
+    atApply.ports.readPr = async () => {
+      throw new Error("gh: 502");
+    };
+    const res = await apply(atApply, id);
+    assert.equal(res.outcome, "unknown");
+    assert.match(reason(res), /^pr_unreadable/);
+  } finally {
+    atApply.cleanup();
+  }
+  // A receipt directory that cannot be created releases nothing.
+  const blocked = makeWorld();
+  try {
+    blocked.writePriorLock();
+    const id = await authorized(blocked);
+    blocked.ports.beforeSecondRead = () => writeFileSync(join(blocked.stateDir, "pr-owner-recoveries"), "not a directory");
+    const res = await apply(blocked, id);
+    assert.equal(res.outcome, "unknown");
+    assert.match(reason(res), /^receipt_file_not_created/);
+    assert.equal(receipts(blocked).length, 0);
+  } finally {
+    blocked.cleanup();
   }
 });
