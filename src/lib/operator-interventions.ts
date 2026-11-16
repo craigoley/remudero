@@ -43,7 +43,7 @@ export type InterventionSurface = "control" | "pr";
 
 /** W1-T12836: a session PR that finished a task the fleet's own run ended without. */
 export const HAND_BUILD_ACTION = "hand-build";
-/** How many changed paths one intervention row keeps; `files_total` says how many there were. */
+/** BACKSTOP on one ledger row's size: how many changed paths an intervention row keeps; `files_total` says how many there were. */
 export const MAX_EVIDENCE_FILES = 20;
 
 /**

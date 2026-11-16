@@ -629,6 +629,7 @@ export async function withHandCommitFiles(sources: Pick<FixLaneSources, "owner" 
       const { files, files_total } = fileEvidence(await filesOf(commit));
       out.push({ ...i, evidence: { ...i.evidence, files, files_total } });
     } catch (error) {
+      // The push is still an intervention: its row is kept, and `files_unread` says why it names no files.
       out.push({ ...i, evidence: { ...i.evidence, files_unread: String((error as Error)?.message ?? error).slice(0, 200) } });
     }
   }
