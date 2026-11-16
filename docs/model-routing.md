@@ -383,6 +383,32 @@ chat-completions and Responses reply, success or failure, carries `x-ratelimit-l
 Raising a deployment's quota is the operator's portal step; the next response reports the new limit
 and the ceiling follows it.
 
+## Model surfaces
+
+One model id can have two surfaces. The **text** surface is a Responses or chat reply with output
+text; every worker path and every cash ladder row uses it. The **decisions** surface is a reply
+that gives a probability for each declared option and no output text, at its own price
+(`src/lib/decision-model.ts`). The deployment name and the served model can be the same string on
+both surfaces, for example `gpt-6-luna`.
+
+- **State is keyed by model id and surface.** `openWeightAbsenceKey` in
+  `src/lib/worker-provider.ts` is the one key of the 404 absence mark. A 404 on the decisions
+  surface never takes the worker deployment of the same name out of selection, and a worker 404
+  never stops decision requests. A caller that names no surface uses the text surface, so each
+  worker path marks, reads and clears absence as before. The per-minute token limit stays keyed by
+  endpoint and deployment, because both surfaces of one deployment share its quota.
+- **Figures are keyed by model id and surface.** Each `decision.answered` row carries
+  `model_surface: "decisions"`; the judge calibration reader maps each shadow answer with surface
+  `text`. `typedAnswerKey` in `src/lib/typed-answer-scores.ts` keys every typed-answer figure by
+  role, model id and surface, so a Decisions distribution and a generated answer from the same
+  model id give two figures, never one. `decision.answered` rows do not enter the field-trials
+  snapshot.
+- **Calibration and thresholds belong to one model on one surface.** A calibration figure or a
+  stored threshold read on one surface says nothing about the other surface of the same model id.
+
+The field `model_surface` is not the `surface` field of a shadow judge row, which names the judge
+role (review, risk, verify-human).
+
 ## Paid pilot accounting
 
 Daily and full trial collection count invalid timestamps separately from future rows. Both are
