@@ -31,6 +31,10 @@ export const INSTALLATION_SHARE_DIVISOR_ENV = "RMD_INSTALLATION_SHARE_DIVISOR";
  */
 export const INSTALLATION_REGISTRY_PATH_ENV = "RMD_INSTALLATION_REGISTRY_PATH";
 export const INSTALLATION_REGISTRY_OMITS_IDS_ENV = "RMD_INSTALLATION_REGISTRY_OMITS_IDS";
+/**
+ * PRIMARY CONTROL: the env name that carries the daemon's poll interval, the bound a run child's read normally
+ * waits under. {@link RUN_CHILD_INSTALLATION_MAX_WAIT_MS} is its backstop when the daemon sets no value.
+ */
 export const INSTALLATION_MAX_WAIT_MS_ENV = "RMD_INSTALLATION_MAX_WAIT_MS";
 
 /**
