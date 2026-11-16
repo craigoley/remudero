@@ -2023,7 +2023,8 @@ function resumeRefusal(prior: AnalyticsResumePoint | undefined, current: Analyti
   if (state.routingTelemetry.benchmarkCounters === undefined || !Array.isArray(state.routingTelemetry.malformedSources) ||
     (state.workIntegrityFold === undefined && !Array.isArray(state.workIntegrityRows)) ||
     (state.judgeCalibrationFold === undefined && !Array.isArray(state.judgeCalibrationRows)) ||
-    (state.judgeCalibrationFold !== undefined && !Array.isArray(state.judgeCalibrationFold.typedAnswers))) return "checkpoint-incomplete";
+    (state.judgeCalibrationFold !== undefined && !Array.isArray(state.judgeCalibrationFold.typedAnswers)) ||
+    (state.judgeCalibrationFold !== undefined && !Array.isArray(state.judgeCalibrationFold.outcomes))) return "checkpoint-incomplete";
   if (current === undefined) return "source-unreadable";
   const last = prior.source.lastArchive;
   const liveMalformed = state.routingTelemetry.malformedSources.some(([, finding]) => finding.form === "live");
