@@ -43,6 +43,7 @@ import { reapableTmpPrefix } from "./reapable-prefix.js";
 import { LIVE_WRITE_SENTINEL_TOKEN } from "../../src/lib/live-write-guard.js";
 import { setTestFileSlotScope } from "../../src/lib/test-slot.js";
 import { fixtureRetentionReason } from "./retained-fixtures.js";
+import { installLinuxCommandContract } from "./linux-command-contract.js";
 
 // Fixtures must not populate the operator's durable dependency store because their HOME is real.
 // Explicit fixture roots remain supported; tests can set their own override after setup.
@@ -340,9 +341,13 @@ function installGhRefusalStub(): void {
 }
 
 // W1-T5624: a worker thread re-runs this module through the runner's execArgv, but its env copy
-// already puts the parent's stub first on PATH (and the stub logs to the parent's refusals.log, so the
+// already resolves gh to the parent's stub (which logs to the parent's refusals.log, so the
 // parent's exit check counts a worker's refusal). A dir minted here would outlive `worker.terminate()`.
 if (isMainThread) installGhRefusalStub();
+
+// W1-T13051: install last so the macOS chmod contract is first on PATH, ahead of every other setup
+// directory. Children inherit it; worker threads keep the parent's directory. Linux adds and writes nothing.
+if (isMainThread) installLinuxCommandContract();
 
 /**
  * W1-T6108 — A SPAWNED CHILD'S COVERAGE CREDITS THE TEST THAT SPAWNED IT.

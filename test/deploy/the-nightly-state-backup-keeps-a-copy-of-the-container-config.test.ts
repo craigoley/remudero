@@ -60,12 +60,8 @@ for arg in "$@"; do
 done
 exec /bin/cp "$@"
 `, { mode: 0o755 });
-  // The host script runs on Linux; normalize BSD chmod's lack of `--` to that command-line contract.
-  writeFileSync(join(bin, "chmod"), `#!/usr/bin/env bash
-args=()
-for arg in "$@"; do [ "$arg" = "--" ] || args+=("$arg"); done
-exec /bin/chmod "\${args[@]}"
-`, { mode: 0o755 });
+  // The host script runs on Linux. Its `chmod --` reaches a chmod that honours the marker through the
+  // shared setup's contract directory on PATH (test/setup/linux-command-contract.ts, W1-T13051).
   const receipt = join(home, "snapshot.receipt");
   const run = (extra: NodeJS.ProcessEnv = {}, dryRun = false) => {
     const result = spawnSync("bash", [SCRIPT, "--reclaim-only", ...(dryRun ? ["--dry-run"] : [])], {
