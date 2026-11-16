@@ -1,0 +1,106 @@
+- id: W1-T13151
+  title: "A review whose lane was aborted posts no binding verdict: a plan lint that did not run because the lane's signal aborted ends the review with no posted status so the review runs again, and the reuse path never carries forward a verdict whose plan lint did not run"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # it changes when the review gate posts a binding verdict; a wrong change could post a PASS that no lint backs
+  origin: "operator-session#18803-lint-aborted-2026-11-16"
+  plan_refs:
+    - W1-T4423
+    - W1-T11340
+    - W1-T9114
+  files:
+    - src/run-task.ts
+    - src/lib/review.ts
+    - src/cli/commands/review.ts
+    - src/cli/commands/sweep.ts
+    - src/lib/ledger.ts
+    - test/an-aborted-review-posts-no-binding-verdict.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "invariant:aborted-is-not-judged — a plan-only review whose lane signal aborts before the plan lint starts, or while the lint child runs, posts no remudero-review status and writes one review.lane_aborted ledger row that names the PR, the head, the phase and the reason lint-plan aborted"
+      kind: guard
+      proof: "grep: W1-T13151 criterion 1 in test/an-aborted-review-posts-no-binding-verdict.test.ts"
+    - claim: "The exact reuse path (mode reuse) refuses a prior plan-only verdict whose planLint has ran false and runs a full review instead, with a sweep.review_reuse_discrimination_fallback row whose fallback_reason names the plan lint that did not run; no review.posted row with effective_review_mode verdict-reuse is written"
+      proof: "grep: W1-T13151 criterion 2 in test/an-aborted-review-posts-no-binding-verdict.test.ts"
+    - claim: "invariant:a-lint-that-never-ran-is-no-pass — a plan lint that could not run for a reason other than the lane abort (a spawn error, a kill by signal, an exit with no summary) with the lane signal not aborted still posts remudero-review failure with the text plan-only PASS withheld, lint-plan could not run, unchanged"
+      kind: guard
+      proof: "grep: W1-T13151 criterion 3 in test/an-aborted-review-posts-no-binding-verdict.test.ts"
+    - claim: "After a review.lane_aborted row, the next sweep pass admits a review of the same PR and head again (disposition post-review), and that review posts its verdict"
+      proof: "grep: W1-T13151 criterion 4 in test/an-aborted-review-posts-no-binding-verdict.test.ts"
+  rationale: |
+    WHY: when a restart drain gives up on a review, it aborts the review's signal, but the review keeps
+    running. Its plan lint sees the aborted signal and returns "did not run". The review then posts that as
+    a binding FAIL, although every criterion proof passed. The reuse path then carries that FAIL onto the
+    next head without a new lint. The PR is parked on a verdict that nothing judged.
+    MEASURED, core ledger (~/rmd-state2/state: ledger.ndjson and the 188 archives
+    ledger.2026-11-0[3-9]*.gz and ledger.2026-11-1*.gz, 2026-11-03 00:03Z to 2026-11-16 13:00Z):
+    - PR #18803. 04:50:55Z sweep.review_admitted full-review on head 7b3b501f1. 05:22:10Z
+      daemon.in_flight_review_abandoned (pr 18803, age_ms 1877543, bound_ms 558874). The review kept
+      running: 05:22:34Z review.reviewer.skipped plan-only, 05:25:09Z review.posted failure, plan_only
+      true. Its decision_verdict has planLint {ran: false, reason: "lint-plan aborted"} and all 3
+      criteria met.
+    - 07:36:39Z sweep.review_admitted review_mode reuse on head fd7800caa (the head only took main).
+      07:36:49Z review.posted failure, effective_review_mode verdict-reuse, 10 s after admission, with
+      the same "lint-plan aborted" text. No lint child ran. The PR then waited about 5 h for a
+      parked-PR remedy.
+    - review.posted failure rows with the reason "lint-plan aborted": 3 rows on 2 PRs. #17918
+      (2026-11-11 12:26:05Z, 6 s after a daemon.freshness_drain started; no
+      daemon.in_flight_review_abandoned row names it) and #18803 (2026-11-16, 2 rows: the full review and
+      the reuse). The operator's first count also named #16833 and #18225; this ledger has no
+      "lint-plan aborted" row for either.
+    - 28 daemon.in_flight_review_abandoned rows in the window. 4 PRs still got a review.posted row
+      within 1 h of the abandon: #18701 (failure), #18749 (success), #18800 (success, 9 s after) and
+      #18803 (failure, lint-plan aborted).
+    READ at origin/main (f399024e2):
+    - src/lib/sweep.ts:18659 drainInFlightReviews: at the bound, for each review that has not settled,
+      it calls onAbandon and then inFlightReviewStops.get(review)?.abort() (:18690). It does not wait
+      for the review to stop. src/lib/daemon.ts:5813 and :5833 write daemon.in_flight_review_abandoned.
+    - src/cli/commands/review.ts:699-700 joins the lane signal (currentReviewSignal) into `signal`.
+      :1236 passes it to lintPlanForReview. Nothing after the lint checks the signal before the binding
+      post at :1389 postReviewStatusGuarded.
+    - src/run-task.ts:19185 and :19192 lintPlanForReview returns {ran: false, reason: "lint-plan aborted"}
+      before and after the spawn when the signal is aborted. That outcome has the same shape as a lint
+      that really could not run.
+    - src/lib/review.ts:6485 planLintRefusalText turns any ran false into "plan-only PASS withheld,
+      lint-plan could not run: <reason>", and :6238 makes it a failure. That is right for a real lint
+      failure (W1-T4423) and wrong for an abort.
+    - src/cli/commands/sweep.ts:541-589, the exact reuse branch of reviewReuseRunner (mode reuse, from
+      the review-reused disposition at src/lib/sweep.ts:12783), reads the prior decision_verdict and
+      posts it again. It does not read verdict.planLint. The discriminate-only branch already refuses a
+      plan-only verdict (src/lib/sweep.ts:601 assessReviewReuse), but the exact branch does not.
+  design: |
+    INVARIANT aborted-is-not-judged: a review whose lane signal aborted posts no binding remudero-review status.
+    INVARIANT a-lint-that-never-ran-is-no-pass: a lint that did not run for any other reason still fails closed, as today.
+    1. lintPlanForReview (src/run-task.ts): when the signal is aborted, return {ran: false, reason: "lint-plan
+       aborted", aborted: true}. Add the optional `aborted: true` field to PlanLintOutcome (src/lib/review.ts).
+       All other outcomes stay as they are.
+    2. reviewCommand (src/cli/commands/review.ts): after the lint and again just before the binding post, if
+       `signal?.aborted` is true (or planLint.aborted is true), do not judge or post. Write one
+       review.lane_aborted row (pr_number, head_sha, phase, reason) and end the review with a non-terminal
+       result, so the posted status stays pending. Register the step in src/lib/ledger.ts.
+    3. The next sweep pass sees a pending status with no live review (the lane has settled) and admits a review
+       again through the existing post-review path. Add no new retry loop.
+    4. reviewReuseRunner, exact branch (src/cli/commands/sweep.ts): when the prior verdict is plan-only and its
+       planLint is not {ran: true}, call fallbackToFullReview("prior-plan-lint-did-not-run"). Do not post the
+       prior verdict.
+    5. Do not change planLintRefusalText or judgeReview. The abort is handled before them.
+    6. Tests drive reviewCommand with a lintPlanForReviewFn seam and a real AbortController (aborted before the
+       lint, and aborted while a stub lint child waits), a recording poster and a temp ledger. They drive
+       reviewReuseRunner with a ledger fixture that holds the #18803 decision_verdict shape. No real spawn, no
+       network.
+  falsifier: |
+    Keep today's code: criterion 1 fails (a failure status is posted) and criterion 2 fails (a
+    verdict-reuse review.posted row is written). Treat every ran false as an abort: criterion 3 fails (no
+    failure status for a spawn error). End the aborted review as terminal: criterion 4 fails (no new
+    admission).
+  note: |
+    Id reserved for run-unfiled-1794834516000 with ~/rmd-work/bin/reserve-id.sh.
+    Proof that counts in production: a review.lane_aborted row after a daemon.in_flight_review_abandoned
+    row, followed by a new sweep.review_admitted for the same PR, and no review.posted row whose
+    decision_verdict.planLint.reason is "lint-plan aborted".
