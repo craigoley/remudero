@@ -15,6 +15,7 @@
   files:
     - src/lib/panel-graph.ts
     - test/console-api/inbox-archive-and-snooze-read-only-the-registry.test.ts
+    - test/console-api/an-inbox-write-classifies-only-the-proposal-it-acts-on.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -37,7 +38,8 @@
     1. Add a small helper inboxRegistryHas(deps, id): parseProposalRegistry(readFileIfExists(inboxInputPaths(deps).registryPath))
        .some((p) => p.id === id).
     2. archive and snooze call it instead of classifyAllProposals. Everything after the check is unchanged.
-    3. Tests in the new file, built like test/the-operator-can-archive-or-snooze-an-inbox-item.test.ts.
+    3. Tests in the new file, built like test/the-operator-can-archive-or-snooze-an-inbox-item.test.ts. W1-T13188's test
+       expects archive and snooze to classify one proposal; update it to expect none for those two routes.
   falsifier: |
     Keep classifyAllProposals in archive or snooze: criterion 1 fails (the plan is read). Read a different registry path:
     criterion 2 fails. Route decline through the registry check: criterion 3 fails.
