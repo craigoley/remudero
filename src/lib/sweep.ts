@@ -8027,6 +8027,9 @@ export interface OpenPrView {
    *  review is required here, and calling its absence decidable would assume permissive on missing
    *  information. `true` routes to the catch-all — blocked-ambiguous, never mergeable. */
   requiredContextsUnreadable?: boolean;
+  /** W1-T13195 — true when this pass's read of the PR's check rollup failed (W1-T521), so
+   *  `checksState` and `reviewState` read "none" without evidence. The PR waits; it is never green. */
+  rollupUnreadable?: true;
   /** W1-T2399 — WHY the required-contexts read was unreadable, captured where the read happens so
    *  the escalation names it without a second GitHub call. Present only on a genuine read failure;
    *  protection that readably declares NO required contexts leaves this undefined. */
@@ -10420,6 +10423,8 @@ function conflictFilesFromRow(value: unknown): ConflictFileDiff[] | undefined {
  * `merge_state` alone, never `disposition`/`reason` prose — that field is written only when a pass's
  * OWN effective mergeState (observed or inherited) was known, so hysteresis composes across `unknown` reads on ONE head.
  * W1-T11173: a rung.strike conflict hand-off (`fix.stood_down`) is this head's dirty read, with its last conflict files.
+ * W1-T13195: a `sweep.merge_probe` row for this exact head is a read against its own `main_sha` (clean as clean,
+ * conflict as dirty), so a disposed row from a pass with no main tip cannot hide the probe's main.
  */
 export function lastKnownMergeStateFromLedger(
   lines: ReadonlyArray<Record<string, unknown>>,
@@ -10432,6 +10437,17 @@ export function lastKnownMergeStateFromLedger(
     if (line.step === "fix.stood_down" && line.site === "rung.strike" && line.reason === CONFLICT_REPAIR_HANDOFF_REASON &&
         (line.read_head_sha ?? line.head_sha) === headSha) {
       out = { state: "dirty", ...(typeof line.ts === "string" ? { observedAt: line.ts } : {}), ...(dirtyFiles ? { conflictFiles: dirtyFiles } : {}) };
+      continue;
+    }
+    if (line.step === "sweep.merge_probe") {
+      if (line.pr_number !== prNumber || line.head_sha !== headSha || typeof line.main_sha !== "string") continue;
+      if (line.verdict !== "clean" && line.verdict !== "conflict") continue;
+      const evidence = line.conflict_evidence as MergeConflictEvidence | undefined;
+      const probeFiles = line.verdict === "conflict" && Array.isArray(evidence?.files) && hasCapturedMergeConflictEvidence(evidence)
+        ? evidence!.files : undefined;
+      if (probeFiles) dirtyFiles = probeFiles;
+      out = { state: line.verdict === "conflict" ? "dirty" : "clean", ...(typeof line.ts === "string" ? { observedAt: line.ts } : {}),
+        ...(probeFiles ? { conflictFiles: probeFiles } : {}), mainSha: line.main_sha };
       continue;
     }
     if (line.step !== "sweep.disposed") continue;
@@ -10450,6 +10466,26 @@ export function lastKnownMergeStateFromLedger(
 
 export function mergeInheritanceRefused(known: KnownMergeState | undefined, mainTipSha: string | undefined): boolean {
   return known !== undefined && known.state !== "dirty" && mainTipSha !== undefined && known.mainSha !== mainTipSha;
+}
+
+/** W1-T13195 — the merge facts one `sweep.disposed` row records. A merge_state always names its main:
+ *  this pass's main tip, or, on a pass with no main tip, a main read from this head's newest record. A
+ *  clean or behind takes the main of the same-state record it inherited, and with none records no
+ *  merge_state. A dirty takes the main of the newest record in any state. With no such main a dirty is
+ *  still recorded, without a main: dropping it loses W1-T4470's hysteresis, so the next pass with
+ *  mergeability unread no longer sees the conflict (a-conflicted-pr-is-never-escalated-as-checkless
+ *  fails). A dirty is inherited at any main, so its missing main admits nothing. */
+function disposedMergeFacts(
+  pr: Pick<OpenPrView, "prNumber" | "headSha" | "mergeState">,
+  ledgerLines: ReadonlyArray<Record<string, unknown>>,
+  mainTipSha: string | undefined,
+): { merge_state?: MergeState; merge_main_sha?: string } {
+  if (pr.mergeState === undefined) return {};
+  if (mainTipSha !== undefined) return { merge_state: pr.mergeState, merge_main_sha: mainTipSha };
+  const known = lastKnownMergeStateFromLedger(ledgerLines, pr.prNumber, pr.headSha);
+  if (pr.mergeState === "dirty") return { merge_state: "dirty", ...(known?.mainSha !== undefined ? { merge_main_sha: known.mainSha } : {}) };
+  return known?.state === pr.mergeState && known.mainSha !== undefined
+    ? { merge_state: pr.mergeState, merge_main_sha: known.mainSha } : {};
 }
 
 /**
@@ -12151,6 +12187,9 @@ export function isFixStrikeExhausted(pr: OpenPrView, policy: SweepPolicy): boole
     (pr.priorStrikes >= fixCeilingInForce(pr, policy.strikeCap, policy.clarify) || pr.repeatedFixRefusal !== undefined);
 }
 
+/** W1-T13195 — the wait reason for a PR whose check rollup this pass could not read. */
+const ROLLUP_UNREAD_REASON = "checks and review unread this pass (rollup read failed) — re-reading next pass";
+
 export const DISPOSITION_RULES: readonly DispositionRule[] = [
   {
     // W1-T920 (DECISIONS.md #1987) — ROUTED THROUGH THE EXISTING "stale" disposition, never a new
@@ -12264,6 +12303,17 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     blocker: "other",
     reason: (_pr, policy, ageDays) =>
       `abandoned — no activity in ${Math.floor(ageDays)}d (>= ${policy.staleDays}d threshold)`,
+  },
+  {
+    // W1-T13195 — AN UNREAD ROLLUP IS NEVER GREEN AND NEVER "NONE". A failed rollup read (W1-T521) leaves
+    // checks and review at "none", which the rows below read as zero check runs and no review: an
+    // absent-checks re-push or a "checks none, review none" escalation of a PR whose checks exist.
+    // Ordered before every row that reads checks or review, so the PR is never mergeable, never armed
+    // and never merged on this pass; the next pass reads the rollup again.
+    disposition: "wait",
+    when: (pr) => pr.rollupUnreadable === true,
+    blocker: "awaiting-ci",
+    reason: () => ROLLUP_UNREAD_REASON,
   },
   {
     // W1-T54's dep lane, ROUTED. Before this row dep PRs sat ungated until an operator ran
@@ -22301,7 +22351,10 @@ export async function runSweep(
         // `lastKnownMergeStateFromLedger`, keyed pr_number+head_sha, so hysteresis persists
         // across any number of consecutive `unknown` reads on the SAME head rather than
         // resetting the moment GitHub goes quiet again.
-        ...(pr.mergeState !== undefined ? { merge_state: pr.mergeState, ...(mainTipSha !== undefined ? { merge_main_sha: mainTipSha } : {}) } : {}),
+        // W1-T13195: a clean or behind state always names its main (see `disposedMergeFacts`).
+        ...disposedMergeFacts(pr, ledgerLines, mainTipSha),
+        // W1-T13195: this pass could not read the PR's check rollup, so its checks and review are unread.
+        ...(pr.rollupUnreadable === true ? { rollup_unreadable: true } : {}),
         ...conflictEvidenceRowFields(pr),
         ...(deduped ? { deduped: true } : {}),
         // W1-T7734: how old the view was when this PR was ACTED on — now minus the generation's publish

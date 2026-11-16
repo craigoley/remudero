@@ -48,6 +48,7 @@
     "install-checkout",
     "inspect",
     "issues",
+    "judge-replay",
     "knowledge",
     "learnings",
     "ledger-compact",

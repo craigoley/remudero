@@ -1117,7 +1117,7 @@ import type { DeployedModel, DeploymentBakeoffCandidate } from "./lib/bakeoff-tr
 import { CASH_RESPONSES_DEPLOYMENTS } from "./lib/cash-responses.js";
 import { runSweepBakeoff } from "./lib/sweep.js";
 import { OPENWEIGHT_PRICES, OPENWEIGHT_CONTEXT_WINDOWS, OPENWEIGHT_TEMPERATURE, openWeightDeploymentReady, OpenWeightAllowanceExhaustedError } from "./lib/worker-provider.js";
-import { createDraftStatsSession, type DraftStats } from "./lib/draft-routing.js";
+import { createDraftStatsSession, DRAFT_STATS_SLICE, readDraftStats, type DraftStats } from "./lib/draft-routing.js";
 import { correctionEvidenceOf, parseReplayPackets, type ReplayPacket } from "./lib/console-feedback.js";
 import {
   buildFeedbackDocket,
@@ -1325,6 +1325,7 @@ import { routingAbCommand } from "./lib/routing-experiments.js";
 import { attributeAttemptOutcome } from "./lib/attempt-outcome-attribution.js";
 import { recordRoutingExperimentResults } from "./lib/routing-experiment-result.js";
 import { askDecisionModel, decisionsCommand } from "./lib/decision-model.js";
+import { judgeReplayCommand, replayJudgeCorpus } from "./lib/judge-replay-batch.js";
 import { reviewTriageCandidates, triagePullRequest } from "./lib/review-triage.js";
 import {
   PROGRESS_WATCHDOG_READ_STEPS,
@@ -21236,6 +21237,16 @@ const retroTriggerRunHistory = (): EscalationTriageHistoryReader =>
 const autoTriageRefusalHistory = (): EscalationTriageHistoryReader =>
   (autoTriageRefusalReader ??= createEscalationTriageHistoryReader({ slice: AUTO_TRIAGE_REFUSAL_SLICE }));
 
+let draftStatsReader: EscalationTriageHistoryReader | undefined;
+/** W1-T13185: the inbox draft lane's one slice reader per process. `parseAll` keeps every torn archive line, even
+ *  one torn before its `step`, so readDraftStats still refuses over a line that could have been a draft row; a
+ *  rotation it could not load is refused, never read inline on the loop. */
+export const draftStatsHistory = (): EscalationTriageHistoryReader =>
+  (draftStatsReader ??= createEscalationTriageHistoryReader({ slice: DRAFT_STATS_SLICE, parseAll: true }));
+/** The draft stats, read through {@link draftStatsHistory}: each batch's session and each sessionless spawn. */
+export const readInboxDraftStats = (stateDir: string, lane: string): Promise<DraftStats> =>
+  readDraftStats(stateDir, lane, draftStatsHistory());
+
 function sliceReadCost(reader: EscalationTriageHistoryReader, read: LedgerUnionRecordRead, startedMs: number): Record<string, number> {
   const load = reader.lastLoad();
   const pass = reader.lastPass();
@@ -37046,7 +37057,7 @@ export function buildInboxDraftSpawnArgs(args: {
   proposal?: Proposal;
   currentPlanText?: string;
   draftRoutingLog?: (step: string, extra?: Record<string, unknown>) => void;
-  draftRoutingReadStats?: () => DraftStats;
+  draftRoutingReadStats?: () => DraftStats | Promise<DraftStats>;
   avoidModels?: readonly string[];
 }): SpawnWorkerArgs {
   const registryIntent = selectedRegistryIntentForConfig(args.config), registryRecord = args.draftRoutingLog;
@@ -37059,7 +37070,8 @@ export function buildInboxDraftSpawnArgs(args: {
       lane: "inbox-draft",
       proposalId: args.proposalId,
       log: registryRecord,
-      readStats: args.draftRoutingReadStats,
+      // With no batch session, the spawn awaits the process's slice read: still no union on the loop (W1-T13185).
+      readStats: args.draftRoutingReadStats ?? (() => readInboxDraftStats(join(args.config.root, "state"), "inbox-draft")),
       evaluate: (worker: WorkerResult) => withSelectedRegistryContextSync(selectedRegistryObserverFromIntent(registryIntent, registryRecord), () => {
         const parsed = parseDraftedCandidate(workerTranscript(worker), args.proposal, args.currentPlanText);
         const facts = checkoutRepoFacts(args.cwd);
@@ -37181,7 +37193,7 @@ export async function draftProposalBatch(
   // called here any more — see the identical note at the retro call site.
   const mountsTable = loadMounts(mountsPath(repoRoot));
   const inboxDraftMount = mountsTable.synthesis.inbox_draft;
-  const routingStats = createDraftStatsSession(join(config.root, "state"), "inbox-draft", log);
+  const routingStats = createDraftStatsSession(join(config.root, "state"), "inbox-draft", log, readInboxDraftStats);
 
   const settingsFile = renderWorkerSettings({
     templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
@@ -37199,6 +37211,8 @@ export async function draftProposalBatch(
 
   try {
     const planText = stringifyYaml(loadPlan(join(worktreePath, "plan", "tasks.yaml")).tasks);
+    // W1-T13185: the stats load off the loop before the first spawn; each spawn then reads the loaded snapshot.
+    await routingStats.load();
     return await withSelectedRegistryContext(selectedRegistryObserverFromIntent(registryIntent, log), () => runDraftRung(
       toDraft,
       planText,
@@ -43603,6 +43617,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "W1-T12416: sends ONE paid cash request to a candidate named in the decision_models section of .remudero/mounts.yaml. The questions file is a JSON array of yes-no, choice (2 to 255 typed options) and score (2 to 10 ordered levels) questions, each with a name and instructions; a bad set is refused before any reservation. The request reserves on its input size plus a 64-token output margin against the normal daily cash cap, settles from the reply's usage at the candidate's own price row, and writes one decision.answered row: role, input digest, candidate, deployment, served model, latency, reserved and settled dollars, usage, and each question's distribution, abstention or rejection. A candidate whose cashDeploymentEndpoints entry or key is missing is unavailable and sends nothing. Shadow only: no gate, route or judge reads the row. Exit 0 answered, 1 refused, unavailable or failed, 2 bad usage.",
   },
   {
+    name: "judge-replay",
+    syntax: "rmd judge-replay --model <id> --corpus <machine-judge-probes|risk-judge-dispositions|all>",
+    summary: "Replay the judge corpora through one named model in one Anthropic Message Batch.",
+    detail: "W1-T12418: reads test/fixtures/machine-judge-probes.json and the risk-judge disposition fixtures (test/fixtures/risk-judge-dispositions/) and sends each case as one request of ONE paid Message Batch to the named model on the Anthropic API, with its expected answer kept beside it. A case the risk-judge scrub flags is refused, because Message Batches are NOT zero-retention: Anthropic keeps batch prompts and results for 29 days, and the output says so. The daemon sends the batch through the secret boundary: a loopback proxy reads ANTHROPIC_API_KEY from the daemon env and puts it in x-api-key, and each decision is a value-free boundary.request row. A worker env, a missing key or a model with no price row sends nothing. The whole batch reserves at the batch price (half the standard row) against the normal daily cash cap before it is sent, polls until the batch ends, and settles from each result's usage; a result with no usage, or a batch that does not end within 25 hours, keeps the reservation held. It writes one judge_replay.answered row per result, a recorded typed answer keyed by the model id that the judge calibration body scores, and one judge_replay.batch row. Offline only: no live judge, gate or route reads the rows. Exit 0 ended, 1 refused, failed or unsettled, 2 bad usage.",
+  },
+  {
     name: "field-trials",
     syntax: "rmd field-trials [--source <label>=<owner/repo>]... [--ledger <label>=<state-dir>]... [--out-dir <dir>] [--consent <file>] [--case-files <file>] [--max-pages <n>] [--offline] [--revoke <release-id>] [--field-note <out> [--site-registry <file>]] [--json] [--refresh-step <name>=<exit-code|skipped>]... [--refresh-script-blob <sha1>] [--refresh-record-only]",
     summary: "Join the ledger union and GitHub history into observational field-trials aggregates.",
@@ -44745,6 +44765,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   )],
   ["routing-ab", async (rest) => await routingAbCommand(rest, { classifyAttempt: attributeAttemptOutcome })],
   ["decisions", async (rest) => await decisionsCommand(rest, (config, request) => askDecisionModel(config, request), { repoRoot })],
+  ["judge-replay", async (rest) => await judgeReplayCommand(rest, (config, request) => replayJudgeCorpus(config, request), { repoRoot })],
   ["progress-watchdog", (rest) => progressWatchdogCommand(rest)],
   ["live-edits", async (rest) => await liveEditsCommand(rest)],
   ["host-alert", async (rest) => hostAlertCommand(rest)],

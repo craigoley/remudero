@@ -1,0 +1,48 @@
+- id: W1-T13249
+  title: "A run refused before spend is not a dispatch: the stall readers count only runs that passed their dispatch claim, so a fleet starting no work stops looking busy"
+  repo: remudero
+  priority: 0.4
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # every dispatch-stall detector reads this predicate
+  band_meaning: span
+  origin: "operator-session#fleet-dispatch-stall-2026-11-16"
+  plan_refs:
+    - W1-T13248
+    - W1-T11966
+    - W1-T12114
+  files:
+    - src/lib/ledger.ts
+    - src/lib/status-board.ts
+    - src/lib/incident-invariants.ts
+    - scripts/fleet-heartbeat.sh
+    - test/console-api/board/a-run-refused-before-spend-is-not-a-dispatch.test.ts
+    - test/the-beat-reports-whether-the-fleet-builds.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A run whose dispatch claim refused it before spend does not count as a queue dispatch: the queue-head cadence and STALL, and the incident invariant dispatch-stall, judge a window holding only such runs as starting no work"
+      proof: "grep: W1-T13249 criterion 1 in test/console-api/board/a-run-refused-before-spend-is-not-a-dispatch.test.ts"
+    - claim: "The heartbeat's last-dispatch time reads the newest run that passed its dispatch claim, not the newest run.start"
+      proof: "grep: W1-T13249 criterion 2 in test/the-beat-reports-whether-the-fleet-builds.test.ts"
+    - claim: "invariant:a-real-dispatch-still-counts — a run that passed its claim, and a run on a path that takes no claim, count exactly as on origin/main"
+      proof: "grep: W1-T13249 criterion 3 in test/console-api/board/a-run-refused-before-spend-is-not-a-dispatch.test.ts"
+  rationale: |
+    OBSERVED 2026-11-16 (core ledger on the fleet host, read-only) with the readers read on origin/main 580c27dc1a by a read-only investigation.
+
+    - From 14:42Z to 20:30Z the fleet started no work; every tick's run of W1-T12114 was refused by a dead hand claim. Yet every stall reader saw a busy fleet, because `runTaskBody` logs `run.start` before the claim and `dispatch.claim` after it, and the refusal ends the run (`endRefusedRun`, verdict `blocked_inflight`).
+    - `isQueueDispatchRunStart` (src/lib/ledger.ts) counts any `run.start` of type implement. Its readers: `deriveDispatchCadence` / `deriveQueueHead` (status-board.ts; the queue-head STALL, also used by `rmd doctor`'s dispatch-stall), and analytics. The incident invariant `dispatch-stall` (incident-invariants.ts) counts `implementStarts` the same way. The heartbeat (scripts/fleet-heartbeat.sh) takes `DISPATCH_LINE` from the newest `"step":"run.start"` with `"lane":"run-task"`.
+    - So none of them could fire, and the stall went unseen for 5.5 hours. W1-T13248 adds the page; this task makes the existing readers honest.
+  design: |
+    MEASURE FIRST (in the PR body): on a recent ledger, how many implement `run.start` rows have a `dispatch.claim` row, how many with proceed true, and which run paths take no claim.
+    1. One predicate in ledger.ts names a queue dispatch: an implement run whose dispatch claim proceeded, or which takes no claim, and never a run whose verdict is a pre-spend claim refusal. Every reader above uses it; no reader keeps its own copy.
+    2. The heartbeat's last-dispatch line uses the same rule (the newest `dispatch.claim` with proceed true, or the newest run.start of a run that took no claim).
+    INVARIANT a-real-dispatch-still-counts: a run that passed its claim, and a run on a path that takes no claim, count exactly as on origin/main, and the readers' bounds and outputs are otherwise unchanged.
+    NOT IN SCOPE: the page (W1-T13248); doctor's plan loading (W1-T11966); the heartbeat's fixed 6 h stall bound; moving `run.start` itself.
+  falsifier: |
+    Count a refused run's run.start again and criterion 1 must fail. Read run.start in the heartbeat and criterion 2 must fail. Drop runs that take no claim, or a passing run, and criterion 3 must fail. Restore and all pass.
+  note: |
+    reservation hand-off: run-unfiled-1794862803452 -> run-unfiled-1794862803452
+    Reserved with rmd next-task-id from a worktree at origin/main. The new suite's folder is the one rmd test-place computed for a stub importing ledger.ts and status-board.ts; the heartbeat suite is an existing file directly under test/ and is edited in place.

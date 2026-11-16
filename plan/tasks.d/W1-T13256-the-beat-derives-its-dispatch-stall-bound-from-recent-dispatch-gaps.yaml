@@ -1,0 +1,41 @@
+- id: W1-T13256
+  title: "The heartbeat derives its build-stalled bound from the fleet's recent gaps between dispatches instead of a fixed six hours"
+  repo: remudero
+  priority: 0.6
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the bound decides when the off-host watcher opens BUILD_STALLED
+  band_meaning: span
+  origin: "operator-session#fleet-dispatch-stall-2026-11-16"
+  plan_refs:
+    - W1-T13249
+    - W1-T13248
+  files:
+    - scripts/fleet-heartbeat.sh
+    - test/the-beat-reports-whether-the-fleet-builds.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The beat's dispatch verdict turns stalled when the time since the last dispatch exceeds a bound derived from the recent gaps between dispatches in the ledger, and publishes that bound and its source"
+      proof: "grep: W1-T13256 criterion 1 in test/the-beat-reports-whether-the-fleet-builds.test.ts"
+    - claim: "invariant:too-little-history-keeps-the-fixed-bound — with too few recent dispatches to derive a bound, the beat uses today's 6 h value and says so, and a fleet with no queued work still reads idle, not stalled"
+      proof: "grep: W1-T13256 criterion 2 in test/the-beat-reports-whether-the-fleet-builds.test.ts"
+  rationale: |
+    OBSERVED 2026-11-16 (core ledger and the heartbeat-azure branch, read-only), with scripts/fleet-heartbeat.sh read on origin/main.
+
+    - The fleet started no work from 14:42Z to 20:30Z (5 h 48 m). The heartbeat's `dispatch_verdict` never read stalled: its last-dispatch line read refused runs as dispatches (W1-T13249), and even an honest signal would not have crossed `DISPATCH_STALLED_AFTER_S=21600`, a fixed 6 h.
+    - On that day four dispatches came within 27 minutes once the block was removed (20:30Z to 20:57Z), so a six-hour bound is many times the fleet's own cadence. The operator rejects fixed thresholds: a bound comes from what the system measures.
+    - The off-host watcher (fleet-heartbeat-watch.yml, hourly) opens BUILD_STALLED from this verdict; it is the one stall alarm that works when the daemon itself is the fault.
+  design: |
+    MEASURE FIRST (in the PR body): the distribution of gaps between dispatches over the last 7 days of the core ledger, and what bound the rule below would have produced on 11-16.
+    1. After W1-T13249 the beat reads the newest dispatch by the shared rule. It derives the bound from the recent gaps between dispatches (a high percentile times a small factor, both named in a comment that says why), and publishes `dispatch_stall_bound_s` and its source.
+    2. With fewer than the needed samples, the fixed 6 h stays as the fallback and the source says so.
+    INVARIANT too-little-history-keeps-the-fixed-bound: the fallback and the idle verdict behave as on origin/main.
+    NOT IN SCOPE: what counts as a dispatch (W1-T13249); the in-daemon page (W1-T13248); the watcher workflow.
+  falsifier: |
+    Use the fixed bound again with ample history and criterion 1 must fail. Derive from too few samples, or call an empty queue stalled, and criterion 2 must fail. Restore and both pass.
+  note: |
+    reservation hand-off: run-unfiled-1794863362836 -> run-unfiled-1794863362836
+    Reserved with rmd next-task-id from a worktree at origin/main. Build after W1-T13249: it edits the same beat line and suite. The suite is an existing file directly under test/ and is edited in place.
