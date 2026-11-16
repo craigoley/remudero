@@ -1,0 +1,42 @@
+- id: W1-T13264
+  title: "The reviewer reads \"a non-plan-only diff\" as a denial, not as the body claiming its own change is plan-only"
+  repo: remudero
+  priority: 0.7
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # one prefix in the body-contradiction grammar; a false FAIL costs a review round
+  band_meaning: span
+  origin: "operator-session#review-false-plan-only-2026-11-16"
+  plan_refs:
+    - W1-T2533
+    - W1-T3061
+    - W1-T13175
+  files:
+    - src/lib/review.ts
+    - test/review/the-reviewer-reads-a-non-plan-only-diff-as-a-denial.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A body that describes some other change as a non-plan-only diff (the shorthand preceded by a non- prefix) produces no changeset contradiction"
+      proof: "grep: W1-T13264 criterion 1 in test/review/the-reviewer-reads-a-non-plan-only-diff-as-a-denial.test.ts"
+    - claim: "invariant:a-real-claim-still-contradicts — This PR is plan-only., a plan-only change in the label, copular and attributive forms, and data-only the same way, still contradict a diff with code, exactly as on origin/main"
+      proof: "grep: W1-T13264 criterion 2 in test/review/the-reviewer-reads-a-non-plan-only-diff-as-a-denial.test.ts"
+  rationale: |
+    OBSERVED 2026-11-16 by the operator session.
+
+    - #18931 (W1-T13175, a ci.yml and test change) got remudero-review FAILURE at 21:38Z: "body contradicts its own diff: claimed \"plan-only\" (backtick a mention to quote it)". Every one of its five proofs had executed and passed. The body never called itself plan-only: it said a sibling suite's cases ran "on a diff that is not plan-only" and that "a cancelled ledger on a non-plan-only diff" is asserted in the new suite.
+    - PROBED `bodyContradictsDiff` on origin/main with a code diff: "This PR is plan-only." gives 1 contradiction (correct); "on a diff that is not plan-only" gives 0; "a non-plan-only diff" gives 1, the false one; "This is not a plan-only change." and "This PR is non-plan-only." give 0.
+    - READ src/lib/review.ts `shorthandIsAboutChangeset`: the attributive arm reads "plan-only diff" as a claim when the head noun is a changeset word, and cancels it only on `DENIED_ATTRIBUTIVE_RE` (`/\b(?:not|never|isn't|aren't|wasn't)\s+(?:a|an|the)?\s*$/i`) before the shorthand. A `non-` prefix glued to the shorthand is a denial the regex cannot see, since the match index is after it.
+    - The operator session backtick-quoted both mentions to clear it, which costs a full review round each time this phrasing appears.
+  design: |
+    1. In the attributive (and, if it reaches, the label and copular) arms, a shorthand immediately preceded by `non-` (any case) is a denial: no claim.
+    2. The suite drives `bodyContradictsDiff` with a code diff over the negated and the positive phrasings above.
+    INVARIANT a-real-claim-still-contradicts: every positive form contradicts as on origin/main.
+    NOT IN SCOPE: other shorthands' grammar; quoting rules; the acceptance-block blanking.
+  falsifier: |
+    Drop the non- denial and criterion 1 must fail. Treat any hyphenated prefix as a denial, so that plan-only after a dash stops counting where it is a real claim, and criterion 2 must fail. Restore and both pass.
+  note: |
+    reservation hand-off: run-unfiled-1794868947911 -> run-unfiled-1794868947911
+    Reserved with rmd next-task-id from a worktree at origin/main. The test folder is the one rmd test-place computed for a stub importing review.ts.
