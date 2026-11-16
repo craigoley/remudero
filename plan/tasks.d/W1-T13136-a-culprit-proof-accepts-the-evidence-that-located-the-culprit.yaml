@@ -1,0 +1,78 @@
+- id: W1-T13136
+  title: "The red-main culprit proof accepts the probe evidence that located the culprit: it judges per failing test file, and a CI probe red stands in for a local run that timed out, so the revert is not withheld on every bisected culprit"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the proof is what lets the lane open a revert of a merged change; a looser proof could revert an innocent merge
+  origin: "operator-session#main-red-13h-2026-11-15"
+  plan_refs:
+    - W1-T6403
+    - W1-T7760
+    - W1-T13134
+  files:
+    - src/lib/main-health-rung.ts
+    - test/a-culprit-proof-accepts-the-evidence-that-located-the-culprit.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A bisected record whose culprit local run fails on file A and whose parent local run passes on file A is proven, also when the two runs and the current failures name different sets of other files (the 5e3cabf0b shape: located test_files 3 files, probe runs 4 files)"
+      proof: "grep: W1-T13136 criterion 1 in test/a-culprit-proof-accepts-the-evidence-that-located-the-culprit.test.ts"
+    - claim: "A bisected record whose culprit has a CI probe run that is red on the current red's checks, and whose parent local run passes on the failing test files, is proven: the 580877d7c shape, where the culprit's local run of the-tick-reads-run-off-the-event-loop.test.ts was unrunnable (LoopBoundedChildTimeout after 412 s) and the CI probe run 43728060756 read red"
+      proof: "grep: W1-T13136 criterion 2 in test/a-culprit-proof-accepts-the-evidence-that-located-the-culprit.test.ts"
+    - claim: "invariant:same-file-contrast — no file has fails (or a matching CI red) at the culprit together with passes at the parent: the revert is withheld, and the reason names each file and its two outcomes"
+      kind: guard
+      proof: "grep: W1-T13136 criterion 3 in test/a-culprit-proof-accepts-the-evidence-that-located-the-culprit.test.ts"
+    - claim: "invariant:timeout-is-not-a-fail — a culprit local run whose only non-passing outcome is unrunnable, with no CI probe run of the culprit, is not proven"
+      kind: guard
+      proof: "grep: W1-T13136 criterion 4 in test/a-culprit-proof-accepts-the-evidence-that-located-the-culprit.test.ts"
+  rationale: |
+    WHY: the red-main repair lane withholds its revert whenever the culprit was located by local test
+    probes. In 14 days it withheld 7 times on 4 culprits and opened 1 revert.
+    MEASURED, core ledger (~/rmd-state2/state, live file and archives 2026-11-02 to 2026-11-16):
+    - 7 main.repair.revert_withheld rows, all with the reason "local culprit proof needs a failing culprit
+      and a passing first parent on the same failing test files", across 4 located culprits: 9fc867122,
+      dc74720ea, 5e3cabf0b (3 rows) and 580877d7c (2 rows). The one main.repair.revert_opened row
+      (9fc867122, 2026-11-03 22:22Z) came 38 minutes after that culprit's own withheld row.
+    - The located rows show why. dc74720ea: test_files 5 files, culprit probe 6 files, parent probe 5
+      files. 5e3cabf0b: test_files 3 files, both probes 4 files. 580877d7c: test_files 1 file; the culprit
+      evidence is a CI probe run (43728060756, red on coverage-ratchet and test-slow) and the parent
+      evidence is a local run of 2 files that passed.
+    - 580877d7c, 15:04:07Z main.repair.probe_concluded method local-test verdict inconclusive: one file
+      passed, the-tick-reads-run-off-the-event-loop.test.ts was unrunnable, "LoopBoundedChildTimeout:
+      Command failed: bwrap ..." after 412313 ms. The test timed out on the loaded host; it did not fail.
+      The lane then probed in CI, which read red at 15:50:18Z, and located the culprit at 15:54:27Z.
+    READ at origin/main:
+    - src/lib/main-health-rung.ts:1743 proveCulprit, for a record with local runs, requires one run per sha
+      with method local-test, exactly the same file set as `files` (the current failures, else the
+      located test_files), and localProbeVerdict over all of them. A CI probe run of the culprit never
+      matches, and any difference in the file set fails the proof.
+    - :488 localProbeVerdict reads "unrunnable" as inconclusive, which is right; the gap is that the
+      proof does not use the CI evidence the locator used instead.
+    So the timeout is part of this defect, not a separate one: an inconclusive local run made the locator
+    fall back to a CI probe, and the proof cannot read that fallback.
+  design: |
+    INVARIANT same-file-contrast: a culprit is proven only by one failing test file red at the culprit and passing at its first parent.
+    INVARIANT timeout-is-not-a-fail: an unrunnable or absent outcome never counts as red.
+    1. proveCulprit, local branch: for each file in the union of the failing files (the current failures and
+       the located test_files), read the culprit's outcome and the parent's outcome from the located row's
+       probe runs. The culprit side is red for a file when its local run says "fails" for it, or when it
+       has no local fails and a CI probe run of the culprit is red and its red matches the current red
+       (mainRedSignaturesMatch). The parent side must be a local "passes" (or a green CI probe run). Proven
+       when at least one file has red at the culprit and a pass at the parent.
+    2. Otherwise withheld, and the reason lists each file with its culprit and parent outcomes, so the row
+       says what was missing.
+    3. No change to localProbeVerdict or to the locator.
+    4. Tests build MainRepairRecord rows through a ledger fixture with the located rows' real shapes (the
+       three measured cases) and drive buildMainHealthRung to the stall, as
+       test/a-red-main-is-attributed-by-its-failing-tests-run-locally.test.ts does.
+  falsifier: |
+    Keep today's exact-file-set check: criteria 1 and 2 fail (revert_withheld). Count unrunnable as fails:
+    criterion 4 fails. Prove without a same-file contrast: criterion 3 fails.
+  note: |
+    Id reserved for run-unfiled-1794802909000 with ~/rmd-work/bin/reserve-id.sh.
+    Proof that counts in production: a main.repair.revert_opened row for a bisected-first-red record, and
+    no revert_withheld row whose located probe runs hold a same-file contrast.

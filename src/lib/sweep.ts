@@ -6462,6 +6462,126 @@ export function restorableDeliveredVerdict(
   return { row, regressionKey };
 }
 
+type ReviewInputView = Parameters<typeof restorableDeliveredVerdict>[0];
+
+/** W1-T12994 — the `review.posted` rows of this exact head and input, oldest first: the outcomes a delivered key stands for. A
+ *  pending or refused row after one is a claim or a refusal, never a newer outcome (W1-T11929). An unread digest names no row. */
+function postedRowsForInput(pr: ReviewInputView, lines: ReadonlyArray<Record<string, unknown>>): Record<string, unknown>[] {
+  if (pr.reviewInputDigest === undefined) return [];
+  const taskId = reviewOutcomeTaskIdFor(pr);
+  return lines.filter(r => r.step === "review.posted" && r.task_id === taskId && r.pr_url === pr.prUrl &&
+    r.head_sha === pr.headSha && r.review_input_digest === pr.reviewInputDigest);
+}
+
+/** W1-T12994 — a `review.posted` row of state pending is a cannot-evaluate HOLD: it folds as delivered, yet nothing was judged.
+ *  OBSERVED 2026-11-15 on #18689: the walk disposed "owner proven dead — re-running the review lane" for two hours while the claim
+ *  answered "a verdict was already DELIVERED" for the hold, so no review ran. While GitHub reads pending and the status's owner
+ *  process is PROVEN dead, nothing owns the status and no verdict stands: the key is released and the input is reviewed again.
+ *  Only the view producer's own process proof counts. A derived cause (a refusal, a harvest, host load) has its own release, and
+ *  an owner that is merely old keeps the hold: taking a status over without proof is what one-review-per-input forbids. So does
+ *  any success or failure already recorded for the input, however old: a hold recorded after a verdict releases nothing. */
+export function pendingHoldOwnerProvenDead(
+  pr: ReviewInputView & Pick<OpenPrView, "reviewPendingOwnerDead" | "reviewPendingOwnerGone">,
+  lines: ReadonlyArray<Record<string, unknown>>,
+): boolean {
+  if (pr.reviewState !== "pending" || pr.reviewPendingOwnerDead !== true) return false;
+  if (pr.reviewPendingOwnerGone !== undefined && pr.reviewPendingOwnerGone !== "owner-pid-dead") return false;
+  const posted = postedRowsForInput(pr, lines);
+  const newest = posted.at(-1);
+  return newest?.state === "pending" && (newest.decision_verdict as ReviewVerdict | undefined)?.cannotEvaluate === true &&
+    !posted.some(row => row.state === "success" || row.state === "failure");
+}
+
+/** W1-T12994 — THE ONE RULE for whether a delivered key dedups a review of this view, called by the walk's post-review arm and
+ *  by the claim's action-time read. Before it the walk never deduped under a pending status (W1-T6047) and the claim always did,
+ *  so a pass could decide a re-run its own claim then refused, every pass. A key that is not delivered runs. A delivered key
+ *  dedups while GitHub agrees with it. Under a pending status the delivered verdict is re-posted once per regression (`restore`,
+ *  W1-T11729) and otherwise dedups: a head and input with a delivered verdict is never reviewed a second time. */
+export function deliveredKeyReviewDecision(
+  pr: ReviewInputView,
+  delivered: boolean,
+  lines: ReadonlyArray<Record<string, unknown>>,
+  reviewKey: string,
+): { dedups: false; restore?: { row: Record<string, unknown>; regressionKey: string } } | { dedups: true } {
+  if (!delivered) return { dedups: false };
+  if (deliveredVerdictDedupsPostReview(pr, delivered)) return { dedups: true };
+  const restorable = restorableDeliveredVerdict(pr, lines, reviewKey);
+  return "row" in restorable ? { dedups: false, restore: restorable } : { dedups: true };
+}
+
+/** W1-T12994 — a delivered FAILURE settles a view that still reads pending: the disposition is derived from the verdict, so the
+ *  head takes what a failed review takes (the fix lane, for unmet criteria) instead of a wait or a re-run its claim refuses.
+ *  OBSERVED 2026-11-15 on #18701: a failure delivered at 18:06:56Z was re-posted twice and then deduped; no fix round in 40 minutes.
+ *  Settled only when no live review can own the pending status: the pending claim is not newer than the verdict
+ *  (`verdict-after-pending`), or this regression's one re-post was already spent (`restore-spent`). A pending claim newer than
+ *  the verdict keeps W1-T11729's re-post, and its wait while fresh. NOT SETTLED, each left to origin/main's behaviour: a success
+ *  (it needs GitHub's status to merge, so it keeps the re-post), a failure whose row names no unmet criterion or is
+ *  instrument-entangled (the view producer routes those by fields this module cannot read), and a key a re-review released. */
+export function pendingViewSettledFromDeliveredFailure(
+  pr: OpenPrView,
+  delivered: boolean,
+  lines: ReadonlyArray<Record<string, unknown>>,
+  reviewKey: string,
+): { view: OpenPrView; basis: "verdict-after-pending" | "restore-spent"; deliveredAt: string } | undefined {
+  if (!delivered || pr.reviewState !== "pending") return undefined;
+  const row = postedRowsForInput(pr, lines).at(-1);
+  const verdict = row?.decision_verdict as ReviewVerdict | undefined;
+  if (row === undefined || row.state !== "failure" || verdict?.state !== "failure" || verdict.cannotEvaluate === true) return undefined;
+  if (row.instrument_entangled === true || row.failure_class === "instrument_entangled") return undefined;
+  const claims = Array.isArray(row.unmet_criteria) ? row.unmet_criteria.map(String) : [];
+  if (claims.length === 0) return undefined;
+  const deliveredAtMs = typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN;
+  const pendingSinceMs = pr.reviewPendingSince ? Date.parse(pr.reviewPendingSince) : Number.NaN;
+  const restoreSpent = lines.some(r => r.step === REVIEW_STATUS_RESTORED_STEP &&
+    r.regression_key === `${reviewKey}|${pr.reviewPendingSince ?? "unstamped"}`);
+  const basis = Number.isFinite(deliveredAtMs) && Number.isFinite(pendingSinceMs) && pendingSinceMs <= deliveredAtMs
+    ? "verdict-after-pending" as const : restoreSpent ? "restore-spent" as const : undefined;
+  if (basis === undefined) return undefined;
+  // The same reading the view producer makes of a failing row (`unmetFromLedger`), for this one row.
+  const reasons = Array.isArray(row.reasons) ? row.reasons.map(String) : [];
+  const judged = new Map<string, Partial<CriterionVerdict>>();
+  const criteria: ReadonlyArray<Partial<CriterionVerdict> | null> = Array.isArray(verdict.criteria) ? verdict.criteria : [];
+  for (const criterion of criteria) {
+    if (criterion?.met === false && typeof criterion.claim === "string") judged.set(criterion.claim, criterion);
+  }
+  const unmetCriteria: CriterionVerdict[] = claims.map((claim, i) => {
+    const context = judged.get(claim);
+    return {
+      claim, proof: context?.proof ?? "", met: false, reason: reasons[i] ?? "",
+      proof_exec: context?.proof_exec as CriterionVerdict["proof_exec"],
+      ...(typeof context?.proofFailureOutput === "string" ? { proofFailureOutput: context.proofFailureOutput } : {}),
+      refusal: isCriterionRefusal(context?.refusal) ? context.refusal : undefined,
+    };
+  });
+  const summary = typeof row.failure_reason === "string" ? row.failure_reason : verdict.summary;
+  return {
+    view: { ...pr, reviewState: "failure", unmetCriteria, reviewSummary: typeof summary === "string" && summary !== "" ? summary : undefined,
+      reviewPendingSince: undefined, reviewPendingOwnerDead: undefined, reviewPendingOwnerGone: undefined, reviewPendingOwnerGoneReason: undefined },
+    basis,
+    deliveredAt: String(row.ts),
+  };
+}
+
+/** W1-T12994 — the row a pass writes the first time its disposition asked for a review that the review's own dedup refused. */
+export const REVIEW_RERUN_CONTRADICTION_STEP = "sweep.review_rerun_contradiction";
+
+/** W1-T12994 — why a review the disposition asked for did not start. */
+export type ReviewDedupCause = "delivered" | "refused" | "backoff" | "claimed";
+
+const REVIEW_NOT_STARTED_CAUSE: Record<ReviewDedupCause, string> = {
+  delivered: "a verdict is already recorded delivered for this head and input",
+  refused: "a review post was already refused for this head and input",
+  backoff: "the review retry is inside its backoff",
+  claimed: "a review of this head and input is already claimed",
+};
+
+/** W1-T12994 — the disposition's sentence once its review did not start: it no longer says a review is being run, and it names
+ *  the cause in fixed words. The key and the full dedup sentence stay on `stand_down_reason` and on the contradiction row. */
+export function reviewNotStartedReason(reason: string, cause: ReviewDedupCause): string {
+  return `${reason.replace(/\b(re-)?running the (review lane|authoritative reviewer)\b/g, "would $1run the $2")} — ` +
+    `NO REVIEW STARTED this pass: ${REVIEW_NOT_STARTED_CAUSE[cause]}`;
+}
+
 /** One of the dispositions every open PR is reconciled into. */
 export type Disposition =
   | "mergeable"
@@ -16064,6 +16184,9 @@ interface PriorActions {
    *  semantic or lifecycle decision about the PR (W1-T2753). */
   reviewRetryableThrows: Map<string, number | undefined>;
   reviewFreshnessRefusals: Map<string, ReviewerCodeFreshnessRefusal>;
+  /** W1-T12994 — exact-input keys with a `review.posted` row in any state, and the newest such row's time. A refusal older than
+   *  it is no longer the newest fact about the review: see {@link completedRefusalRetryView}. An undated row records no time. */
+  reviewPostedAt: Map<string, number>;
   /** W1-T7850 — exact-input keys whose terminal verdict was computed and REFUSED because its reviewer checkout
    *  vanished (`reviewer_code_host_gap`). Neither a freshness refusal (no probe, no backoff) nor a durable one: the
    *  host gap earns a fresh review of the same input. `requestedForRefusal` is true once a
@@ -16209,9 +16332,16 @@ function completedRefusalRetryView(pr: OpenPrView, prior: PriorActions): OpenPrV
   const key = reviewOutcomeKeyForPr(pr);
   const freshness = prior.reviewFreshnessRefusals.get(key);
   const hostGap = prior.reviewHostGapRefusals.get(key);
-  const attemptedAt = freshness?.attemptedAt ?? hostGap?.attemptedAt ?? prior.reviewTimedOutReadRefusals.get(key);
-  const refusalReason = freshness?.attemptedAt !== undefined ? freshness.reason ?? `reviewer-code freshness ${freshness.freshness}`
-    : hostGap?.attemptedAt !== undefined ? `reviewer host gap: ${hostGap.hostGap} (${hostGapProblem(hostGap.hostGap)})` : "reservation read timed out";
+  // W1-T12994: a refusal is the review's completed outcome only while no verdict was recorded for the input after it. OBSERVED
+  // 2026-11-15 on #18701: a 17:36:36Z stale-code refusal still named a review "refused after it began" at 18:14:25Z, eight
+  // minutes after that input's FAILURE was delivered.
+  const postedAt = prior.reviewPostedAt.get(key);
+  const standing = (at: number | undefined): number | undefined => at !== undefined && postedAt !== undefined && postedAt > at ? undefined : at;
+  const freshnessAt = standing(freshness?.attemptedAt);
+  const hostGapAt = standing(hostGap?.attemptedAt);
+  const attemptedAt = freshnessAt ?? hostGapAt ?? standing(prior.reviewTimedOutReadRefusals.get(key));
+  const refusalReason = freshness !== undefined && freshnessAt !== undefined ? freshness.reason ?? `reviewer-code freshness ${freshness.freshness}`
+    : hostGap !== undefined && hostGapAt !== undefined ? `reviewer host gap: ${hostGap.hostGap} (${hostGapProblem(hostGap.hostGap)})` : "reservation read timed out";
   const pendingSince = pr.reviewPendingSince ? Date.parse(pr.reviewPendingSince) : Number.NaN;
   // Only a completed refusal on this exact input after this pending post proves its owner finished.
   return pr.reviewState === "pending" && attemptedAt !== undefined &&
@@ -17015,6 +17145,7 @@ function priorActionsFromLedger(
   const reviewRefused = new Set<string>();
   const reviewRetryableThrows = new Map<string, number | undefined>();
   const reviewFreshnessRefusals = new Map<string, ReviewerCodeFreshnessRefusal>();
+  const reviewPostedAt = new Map<string, number>();
   const reviewHostGapRefusals = new Map<string, { attemptedAt: number | undefined; hostGap: string; requestedForRefusal: boolean }>();
   const reviewTimedOutReadRefusals = new Map<string, number | undefined>();
   const reviewDiffCeilingRefused = new Set<string>();
@@ -17087,6 +17218,8 @@ function priorActionsFromLedger(
         );
         if (line.step === "review.posted") {
           reviewDelivered.add(key);
+          const postedAt = typeof line.ts === "string" ? Date.parse(line.ts) : Number.NaN;
+          if (!Number.isNaN(postedAt) && postedAt > (reviewPostedAt.get(key) ?? Number.NEGATIVE_INFINITY)) reviewPostedAt.set(key, postedAt);
           if (line.state === "failure") {
             reviewDeliveredFailureAt.set(key, typeof line.ts === "string" ? Date.parse(line.ts) : Number.NaN);
           } else {
@@ -17247,8 +17380,10 @@ function priorActionsFromLedger(
   // verdict: release its key so the supersedes demand fires and the claim admits ONE re-review.
   for (const pr of openPrs ?? []) {
     const key = reviewOutcomeKeyForPr(pr);
+    // W1-T12994: a pending cannot-evaluate hold whose owner is proven dead is no standing verdict either. Released HERE, in the
+    // set the walk, the claim and review admission all read, so none of them can dedup what another decided to run.
     if (reviewDeliveredFailureOvertaken(pr, reviewDeliveredFailureAt.get(key)) || incompletePromiseHarvestFromLedger(pr, lines) ||
-        inconclusiveLoadLowered(pr, lines, sample)) reviewDelivered.delete(key);
+        inconclusiveLoadLowered(pr, lines, sample) || pendingHoldOwnerProvenDead(pr, lines)) reviewDelivered.delete(key);
   }
   return {
     armed,
@@ -17261,6 +17396,7 @@ function priorActionsFromLedger(
     reviewRefused,
     reviewRetryableThrows,
     reviewFreshnessRefusals,
+    reviewPostedAt,
     reviewHostGapRefusals,
     reviewTimedOutReadRefusals,
     reviewDiffCeilingRefused,
@@ -21620,6 +21756,22 @@ export async function runSweep(
   // since the pass-level snapshot may be stale by worker start. W1-T513 made it the module-level set.
   const claimedReviewKeys = inFlightReviewKeys;
 
+  /** W1-T12994 — a disposition that asked for a review its dedup refused is a contradiction a machine can read on the first pass:
+   *  ONE named row per head, input and cause (the walk's snapshot holds the earlier passes' rows), and the reason says what is
+   *  true. Before it #18689 read "re-running the review lane" on seven passes that each started nothing. A dry run writes no row. */
+  function reviewNotStarted(pr: OpenPrView, disposition: Disposition, reason: string, reviewKey: string,
+    cause: ReviewDedupCause, dedupReason: string, decidedAt: "walk" | "claim"): string {
+    if (!deps.dryRun && !ledgerLines.some(row => row.step === REVIEW_RERUN_CONTRADICTION_STEP && row.pr_number === pr.prNumber &&
+        row.head_sha === pr.headSha && row.review_key === reviewKey && row.dedup_cause === cause)) {
+      const named = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: REVIEW_RERUN_CONTRADICTION_STEP,
+        pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha, review_key: reviewKey, review_input_digest: pr.reviewInputDigest,
+        disposition, disposition_reason: reason, decided_at: decidedAt, dedup_cause: cause, dedup_reason: dedupReason };
+      appendLine(deps.ledgerPath, named);
+      ledgerLines.push(named);
+    }
+    return reviewNotStartedReason(reason, cause);
+  }
+
   /** W1-T2771 — CLAIM AT ACTION TIME, THEN RE-READ THE OUTCOME UNDER THE CLAIM. The old placement
    *  claimed during the sequential walk, so a later fix action could hold a review candidate's key
    *  for minutes with no review in flight. The fresh read is the other half: reading synchronously
@@ -21627,11 +21779,12 @@ export async function runSweep(
   async function claimReview(
     reviewKey: string, pr: OpenPrView,
   ): Promise<{ ok: true; release: () => void; restore?: { judgedHeadSha: string; regressionKey: string } } |
-    { ok: false; deduped: boolean; reason: string }> {
+    { ok: false; deduped: boolean; reason: string; cause?: ReviewDedupCause }> {
     if (claimedReviewKeys.has(reviewKey)) {
       return {
         ok: false,
         deduped: true,
+        cause: "claimed",
         reason: `duplicate review key (${reviewKey}) already claimed this pass — see PriorActions.reviewDelivered/reviewRefused's docs`,
       };
     }
@@ -21640,24 +21793,27 @@ export async function runSweep(
       const freshLines = readLedger(deps.ledgerPath);
       const fresh = priorActionsFromLedger(freshLines, openPrs, deps.sampleLoad);
       const delivered = fresh.reviewDelivered.has(reviewKey) && !incompletePromiseHarvestFromLedger(pr, freshLines);
+      // W1-T12994: the walk's own rule, read again under the claim on the fresh ledger.
+      const deliveredRule = deliveredKeyReviewDecision(pr, delivered, freshLines, reviewKey);
       const durableRefusal = fresh.reviewRefused.has(reviewKey);
       const retryBackoff =
         retryableReviewThrowBackoffReason(fresh.reviewRetryableThrows, reviewKey, policy, now) ??
         await freshnessBackoff(fresh.reviewFreshnessRefusals, pr);
       // W1-T11729: a delivered verdict GitHub's pending status contradicts is restored, not re-reviewed and not deduped silently.
-      if (delivered && !durableRefusal && retryBackoff === undefined) {
-        const restorable = restorableDeliveredVerdict(pr, freshLines, reviewKey);
-        if ("row" in restorable) {
-          return { ok: true, release: () => claimedReviewKeys.delete(reviewKey),
-            restore: { judgedHeadSha: pr.headSha, regressionKey: restorable.regressionKey } };
-        }
+      const restore = deliveredRule.dedups ? undefined : deliveredRule.restore;
+      if (restore !== undefined && !durableRefusal && retryBackoff === undefined) {
+        return { ok: true, release: () => claimedReviewKeys.delete(reviewKey),
+          restore: { judgedHeadSha: pr.headSha, regressionKey: restore.regressionKey } };
       }
-      if (delivered || durableRefusal || retryBackoff !== undefined) {
+      // A re-post that a refusal or a backoff holds back is still a delivered key: it dedups, as it did before the shared rule.
+      const deliveredDedups = deliveredRule.dedups || restore !== undefined;
+      if (deliveredDedups || durableRefusal || retryBackoff !== undefined) {
         claimedReviewKeys.delete(reviewKey);
         return {
           ok: false,
           deduped: true,
-          reason: delivered
+          cause: deliveredDedups ? "delivered" : durableRefusal ? "refused" : "backoff",
+          reason: deliveredDedups
             ? `a verdict was already DELIVERED for ${reviewKey} — the action-time re-read deduped the re-post`
             : durableRefusal
               ? `a review post was already REFUSED for ${reviewKey} — the action-time re-read deduped the re-post`
@@ -22339,6 +22495,10 @@ export async function runSweep(
     if (pr.planResequenceHeld !== undefined) {
       log("sweep.plan_resequence_close.held", { pr_number: pr.prNumber, task_id: pr.taskId, reason: pr.planResequenceHeld });
     }
+    // W1-T12994: a delivered failure settles a view that still reads pending, before anything below reads the review state.
+    const settledView = pendingViewSettledFromDeliveredFailure(pr, prior.reviewDelivered.has(reviewOutcomeKeyForPr(pr)),
+      ledgerLines, reviewOutcomeKeyForPr(pr));
+    if (settledView !== undefined) pr = settledView.view;
     const hostGapRefusal = prior.reviewHostGapRefusals.get(reviewOutcomeKeyForPr(pr));
     const dispositionView = promiseHarvestRetryView(completedRefusalRetryView(pr, prior), ledgerLines, deps.sampleLoad);
     pr = { ...pr, reviewPendingOwnerGone: dispositionView.reviewPendingOwnerGone,
@@ -23576,7 +23736,8 @@ export async function runSweep(
         // also suppresses UNLESS it was the stale "PR is already closed" refusal, in which case
         // reaching this check already proves the PR is open again.
         const reviewKey = reviewOutcomeKeyForPr(pr);
-        const reviewDelivered = deliveredVerdictDedupsPostReview(pr, prior.reviewDelivered.has(reviewKey));
+        // W1-T12994: the rule the claim reads again at action time, so the two cannot decide differently for one ledger.
+        const reviewDelivered = deliveredKeyReviewDecision(pr, prior.reviewDelivered.has(reviewKey), ledgerLines, reviewKey).dedups;
         const reviewDurablyRefused = prior.reviewRefused.has(reviewKey);
         const retryBackoff =
           retryableReviewThrowBackoffReason(prior.reviewRetryableThrows, reviewKey, policy, now) ??
@@ -23593,6 +23754,11 @@ export async function runSweep(
               ? `a review post was already REFUSED for ${reviewKey} — the re-post is deduped by this ` +
                 `arm, not lost to an admission and not unwired`
               : retryBackoff;
+          // W1-T12994: under a pending status this delivered dedup was the claim's until the walk read the same rule, so it is
+          // named as the claim's refusal is. Every dedup this arm already made keeps W1-T2427's shape: no new step, no new text.
+          if (reviewDelivered && pr.reviewState === "pending") {
+            reason = reviewNotStarted(pr, disposition, reason, reviewKey, "delivered", dedupStandDownReason ?? "", "walk");
+          }
         }
         break;
       }
@@ -23665,6 +23831,8 @@ export async function runSweep(
     let extraDisposedFields: Record<string, unknown> | undefined = queueMembership === undefined ? undefined
       : { queue_membership: typeof queueMembership === "string" ? queueMembership : "unreadable" };
     if (emptyDiffSupersession) extraDisposedFields = { ...extraDisposedFields, empty_diff_superseded: true };
+    if (settledView !== undefined) extraDisposedFields = { ...extraDisposedFields, review_view_settled: settledView.basis,
+      review_view_settled_at: settledView.deliveredAt };
     if (gardenRecordRefusal !== undefined) extraDisposedFields = { ...extraDisposedFields, garden_record_refusal: gardenRecordRefusal };
     if (standDownHold) extraDisposedFields = { ...extraDisposedFields, stand_down_hold: true, stand_down_site: standDownHold.site,
       ...(standDownHold.site === "rung.strike" && standDownHold.reason === CONFLICT_REPAIR_HANDOFF_REASON && mainTipSha !== undefined
@@ -25931,7 +26099,9 @@ export async function runSweep(
         job.index,
         job.pr,
         jobDisposition,
-        job.reason,
+        // W1-T12994: the walk asked for this review and the claim's fresh read refused it.
+        claim.deduped && claim.cause !== undefined
+          ? reviewNotStarted(job.pr, jobDisposition, job.reason, job.reviewKey, claim.cause, claim.reason, "claim") : job.reason,
         job.question,
         false,
         claim.deduped,

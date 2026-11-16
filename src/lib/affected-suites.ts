@@ -652,6 +652,17 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   if (input.files.has(promptRender) && files.some((f) => promptRenderEdges.includes(f))) {
     pathReaders.push(promptRender);
   }
+  // W1-T8471: a coverage shard failed on this suite (run 38231421366, PR #11044) and the narrow selector missed it.
+  const repoLayoutSuite = suitePath("test/repo-layout.test.ts");
+  const repoLayoutSuiteEdges = [
+    "src/lib/daemon.ts",
+    "src/lib/loop-stall-profiler.ts",
+    "src/lib/read-plane.ts",
+    suitePath("test/an-unattributed-loop-stall-is-profiled-live.test.ts"),
+  ];
+  if (input.files.has(repoLayoutSuite) && files.some((f) => repoLayoutSuiteEdges.includes(f))) {
+    pathReaders.push(repoLayoutSuite);
+  }
   // W1-T7475: a coverage shard failed on this suite at 49b4c36c and the narrow selector missed it.
   const redBranchStrike = suitePath("test/a-red-branch-behind-its-base-spends-a-strike-first.test.ts");
   const redBranchStrikeEdges = [
@@ -683,6 +694,15 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   if (input.files.has(refusalAmendment) && files.some((f) => refusalAmendmentEdges.includes(f))) {
     pathReaders.push(refusalAmendment);
   }
+  const cappedRepair = suitePath("test/a-capped-pr-exhausts-repair-before-it-reaches-a-human.test.ts");
+  const cappedRepairEdges = [
+    "src/lib/in-tree-budget.ts",
+    "src/lib/plan-pr-emitter.ts",
+    suitePath("test/a-starved-plan-pr-preflight-leg-times-out-and-is-asked-again.test.ts"),
+  ];
+  if (input.files.has(cappedRepair) && files.some((f) => cappedRepairEdges.includes(f))) {
+    pathReaders.push(cappedRepair);
+  }
   // A coverage shard failed on this suite (run 41111628169, PR #15805) and the narrow selector missed it. The
   // suite drives scripts/openweight-probe.mjs, which reaches worker-provider's tool boundary, not a symbol it names.
   const openWeightProbe = suitePath("test/openweight-probe.test.ts");
@@ -711,6 +731,17 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   ];
   if (input.files.has(costOfDelay) && files.some((f) => costOfDelayEdges.includes(f))) {
     pathReaders.push(costOfDelay);
+  }
+  // W1-T9275: recorded miss on coverage run 38438103359, PR #11434.
+  const shardSizing = suitePath("test/every-lint-pass-sizes-a-shard-by-its-own-slug.test.ts");
+  const shardSizingEdges = [
+    "docs/review-gate.md",
+    "src/lib/companion-paths.ts",
+    suitePath("test/a-test-helper-is-the-concern-its-suites-accompany.test.ts"),
+    suitePath("test/the-one-concern-arm-never-adopted-the-shared-table.test.ts"),
+  ];
+  if (input.files.has(shardSizing) && files.some((f) => shardSizingEdges.includes(f))) {
+    pathReaders.push(shardSizing);
   }
   const recent = input.recentFailures ?? [];
   for (const s of pathReaders) pick(s, "reads a changed file by path");

@@ -1,0 +1,48 @@
+- id: W1-T13149
+  title: "Every machine filer refuses a promoted check when it writes its record, not only in the census, and a CI-learning record may declare its golden fixture"
+  repo: remudero
+  priority: 0.7
+  depends_on: [W1-T13035]
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # it changes which machine-rendered records are written and which CI-learning records admission takes
+  band_meaning: span
+  origin: "operator-session#self-improvement-loop-2026-11-16"
+  plan_refs:
+    - W1-T13035
+    - W1-T12833
+    - W1-T10027
+  files:
+    - src/lib/ci-friction-gardener.ts
+    - src/lib/flow-remedy-gardener.ts
+    - src/lib/plan.ts
+    - src/lib/measurement-cadence.ts
+    - test/triage/every-machine-filer-refuses-a-promoted-check-when-it-writes.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The CI-friction filer and the flow-remedy filer pass their rendered record through the shared machine-shard lint with the plan-only promotion applied before they write it, and a record carrying a promoted check is refused with the check named and nothing written"
+      proof: "grep: W1-T13149 criterion 1 in test/triage/every-machine-filer-refuses-a-promoted-check-when-it-writes.test.ts"
+    - claim: "A CI-learning record may declare its lessons file and the golden fixture its proof reads, admission takes it, and its second proof reads the fixture itself again"
+      proof: "grep: W1-T13149 criterion 2 in test/triage/every-machine-filer-refuses-a-promoted-check-when-it-writes.test.ts"
+    - claim: "invariant:one-lint-for-every-machine-writer — no machine filer writes a task record that the shared lint with the promotion applied would refuse, and admission still refuses a CI-learning record that declares any path beyond its lessons file and its golden fixture"
+      proof: "grep: W1-T13149 criterion 3 in test/triage/every-machine-filer-refuses-a-promoted-check-when-it-writes.test.ts"
+  rationale: |
+    FOUND 2026-11-16 by the builder of W1-T13035 (merged as #18809), READ on that branch.
+
+    - W1-T13035 made the shared machine-shard lint apply the plan-only promotion, and its census walks every template through it. At write time only some filers call it.
+    - `ciFrictionRecordVerdict` in src/lib/ci-friction-gardener.ts calls `lintTask(task, MACHINE_SHARD_LINT_OPTIONS)` directly, with no promotion. `ciFrictionShardYaml` and the flow-remedy `draftShard` return the rendered text and drop the lint's refusal. So these two filers would still write, and open a plan pull request for, a record the preflight then refuses; only the census would notice, and only for the fixtures it renders.
+    - The CI-learning draft's second proof was weakened in W1-T13035: it now greps the fixture directory's name in the lessons file, because the proof may only read declared paths and admission (`isParkedMachineProposal` and `newLessonAllowed` in src/lib/plan.ts, W1-T10027) takes a CI-learning record with exactly one declared path. The fixture can therefore never be declared, and the proof no longer reads the fixture.
+  design: |
+    1. `ciFrictionRecordVerdict` and the flow-remedy draft call the shared `machineShardLint` and carry its refusal to the writer; a refused record is not written and the refusal names the check.
+    2. Admission takes a CI-learning record that declares its lessons file and one golden fixture path under the fixture root, and nothing else.
+    3. `ciLearningShardYaml` declares the fixture and restores the proof that reads it.
+    INVARIANT one-lint-for-every-machine-writer: every machine filer's write goes through the shared lint with the promotion applied, and CI-learning admission stays a closed list of declared paths.
+    NOT IN SCOPE: `machineShardFilingRefusal`, the landing guard, which also sees records that are not new (report what applying the promotion there would refuse, change nothing); which checks the promotion covers.
+  falsifier: |
+    Call the bare lint in either filer, or drop its refusal before the write, and criterion 1 must fail. Refuse the fixture path in admission, or point the proof back at the lessons file, and criterion 2 must fail. Let admission take a third declared path and criterion 3 must fail. Restore and all pass.
+  note: |
+    reservation hand-off: run-unfiled-1794825029219 -> run-unfiled-1794825029219
+    Reserved with rmd next-task-id from a worktree at origin/main. W1-T13035 is merged. The test folder is the one rmd test-place computed for a stub importing ci-friction-gardener.ts and machine-filing.ts. test/the-learnings-store-merges-without-conflict.test.ts pins the CI-learning proof text and will need its expectation moved back with the proof: name that change in the pull request.

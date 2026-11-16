@@ -1,0 +1,53 @@
+- id: W1-T13146
+  title: "A census suite's time bound comes from its own measured runtime, so a healthy suite that needs three minutes on the operator Mac stops making every over-capacity author run ineligible"
+  repo: remudero
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # it changes when the census precheck calls a suite not measured, which gates a local push
+  band_meaning: span
+  origin: "operator-session#mac-author-preflight-2026-11-16"
+  plan_refs:
+    - W1-T9919
+    - W1-T11100
+    - W1-T12953
+  files:
+    - scripts/census-precheck.mjs
+    - scripts/preflight-author.mjs
+    - test/ci/gates/a-census-suites-time-bound-comes-from-its-own-measured-runtime.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A census suite child with a recorded history of completed runs on this host is bounded by a budget derived from that history, and a suite that completes inside it is measured, where the fixed backstop would have ended it as not measured"
+      proof: "grep: W1-T13146 criterion 1 in test/ci/gates/a-census-suites-time-bound-comes-from-its-own-measured-runtime.test.ts"
+    - claim: "A suite with no history, or one that overruns its history budget, falls back to the fixed backstop and to today's not-measured label, and the overrun is recorded so the next run's budget sees it"
+      proof: "grep: W1-T13146 criterion 2 in test/ci/gates/a-census-suites-time-bound-comes-from-its-own-measured-runtime.test.ts"
+    - claim: "A not-measured census line names the suite, its elapsed time, the bound applied and whether that bound came from history or the backstop"
+      proof: "grep: W1-T13146 criterion 3 in test/ci/gates/a-census-suites-time-bound-comes-from-its-own-measured-runtime.test.ts"
+    - claim: "invariant:a-hung-child-still-ends — every census suite child runs under a finite bound, a failing suite still fails the precheck, and the fix-lane controller's pinned total is derived from the same per-suite bounds"
+      proof: "grep: W1-T13146 criterion 4 in test/ci/gates/a-census-suites-time-bound-comes-from-its-own-measured-runtime.test.ts"
+  rationale: |
+    OBSERVED 2026-11-15 and 2026-11-16 on the operator Mac, by the operator session.
+
+    - Four author preflights printed `census suites NOT MEASURED (time bound) - test/w1-t5319-the-acr-login-refreshes-itself-and-escalates-when-it-cannot.test.ts: ... native step exceeded 120000 ms`: the fleet CLI bump twice and W1-T12938 twice.
+    - Run alone on the same heads the suite passes: tests 15, pass 15, fail 0, both times. Timed alone at load 5.9 it took 179.4 s; four of its tests take 82.6 s, 42.7 s, 41.7 s and 11.6 s. One fixture run of scripts/fleet-heartbeat.sh, which those tests drive, takes about 4 s on this machine, so the script is not hung; the suite runs it many times.
+    - READ scripts/census-precheck.mjs on origin/main: `CENSUS_SUITE_CHILD_TIME_BOUND_MS = 120_000`, a fixed backstop "raised to 120 s by the operator" on 2026-10-27 because the old 60 s "fired on a healthy tree". It fires on a healthy suite again.
+    - A plain run goes on after that label (W1-T9919: CI runs the suites). An over-capacity run does not: scripts/preflight-author.mjs answers "census-precheck was not measured (time-bound); an over-capacity run needs it green". Every change the selector treats as a full fallback is over-capacity on the Mac, so any such change whose census set holds this suite cannot become push-eligible there. Both pull requests shipped only on a one-PR operator waiver.
+    - W1-T11100 (merged) already derives a source reader's budget from its own measured history, in shadow. The suite child has no such budget.
+  design: |
+    MEASURE FIRST: list the census suites whose solo runtime on the Mac exceeds half the backstop (run each alone, one file per command, under the shared lock) and put the table in the PR body. If the list is this one suite, also say why its four slow tests take 10 to 80 s when one beat takes 4 s; a cheap fix in the suite is in scope if it is found, and is reported if not.
+
+    1. Record each census suite child's completed runtime per host, the way W1-T11100 records a reader's, and derive the child's bound from that history with the same rule (a multiple of the floored median, never below the floor).
+    2. No history, or an overrun: the fixed backstop and today's label apply, and the overrun is recorded.
+    3. The not-measured line carries the suite, elapsed time, bound and its source.
+    4. The fix-lane controller's pinned total (src/run-task.ts reads it) is computed from the same per-suite bounds through the existing budget report, so the two cannot disagree.
+    @not-a-rule-suite: the new test drives the precheck's bounding function with fixtures; it walks no population of the tree and asserts no count, so it is an ordinary unit suite whose name mentions the census it is about.
+    INVARIANT a-hung-child-still-ends: no census suite child runs without a finite bound, and a suite that fails is still a failed precheck, never a not-measured one.
+    NOT IN SCOPE: whether an over-capacity run may be eligible with an unmeasured census (that rule stays); source-reader budgets (W1-T11100); the Mac disk reserve (W1-T12953).
+  falsifier: |
+    Bound a suite with history by the fixed backstop and criterion 1 must fail. Let a suite with no history run under no bound, or drop the overrun record, and criterion 2 must fail. Drop the bound's source from the line and criterion 3 must fail. Report a failing suite as not measured and criterion 4 must fail. Restore and all pass.
+  note: |
+    reservation hand-off: run-unfiled-1794825029219 -> run-unfiled-1794825029219
+    Reserved with rmd next-task-id from a worktree at origin/main. Check refs/rmd-dispatch/W1-T13146 and any run branch before building. The test folder is the one rmd test-place computed for a stub importing scripts/census-precheck.mjs. src/run-task.ts pins the backstop's value for the fix-lane controller: read that pin before changing how the total is reported, and do not add a new test importer of src/run-task.ts.
