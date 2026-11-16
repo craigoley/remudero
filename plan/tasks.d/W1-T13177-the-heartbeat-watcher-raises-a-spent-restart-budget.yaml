@@ -1,0 +1,82 @@
+- id: W1-T13177
+  title: "The heartbeat watcher raises a daemon container whose restart budget is spent, AT_LIMIT or STOPPED_RETRY_EXHAUSTED on a fresh beat, which it reads today and ignores"
+  repo: remudero
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # a new needs-human finding per watched host; if AT_LIMIT turns out to be a state a healthy fleet sits in, the arm raises on health, which is why the design measures before it builds
+  band_meaning: span
+  origin: "operator-session#workflow-held-tasks-2026-11-16"
+  plan_refs:
+    - W1-T2874
+    - W1-T13178
+    - W1-T5351
+    - W1-T3411
+    - W1-T2876
+    - W1-T11138
+  files:
+    - .github/workflows/fleet-heartbeat-watch.yml
+    - test/daemon/the-heartbeat-watcher-raises-a-spent-restart-budget.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "the off-host watcher treats AT_LIMIT and STOPPED_RETRY_EXHAUSTED on a fresh beat as per-host findings, evaluates every configured host and drives the existing idempotent needs-human delivery"
+      proof: "grep: W1-T13177 criterion 1 in test/daemon/the-heartbeat-watcher-raises-a-spent-restart-budget.test.ts"
+    - claim: "removing the workflow restart-verdict predicate makes the exact 2026-09-05 dead-container regression fail: a fresh beat whose daemon verdict is live and whose restart verdict is STOPPED_RETRY_EXHAUSTED"
+      proof: "grep: W1-T13177 criterion 2 in test/daemon/the-heartbeat-watcher-raises-a-spent-restart-budget.test.ts"
+    - claim: "The workflow's self-check step exercises the restart arm before the live read, with a stubbed live 5 of 5 and an exited-134 5 of 5 response"
+      proof: "grep: W1-T13177 criterion 3 in test/daemon/the-heartbeat-watcher-raises-a-spent-restart-budget.test.ts"
+    - claim: "invariant:the-restart-finding-stands-beside-liveness — the restart finding is counted independent of the deploy-supervisor's state and of every other liveness arm: a host another arm already raises keeps that kind, and `ok`, `unlimited`, `unknown`, `skipped`, `operator_stopped` and a missing line raise nothing"
+      proof: "grep: W1-T13177 criterion 4 in test/daemon/the-heartbeat-watcher-raises-a-spent-restart-budget.test.ts"
+    - claim: "The watcher's judging step extracts `restart_verdict` from the payload beside the other verdicts"
+      proof: "grep: restart_verdict in .github/workflows/fleet-heartbeat-watch.yml"
+  rationale: |
+    This carries the workflow half of W1-T2874 ("a fresh heartbeat greenlights an exhausted dead daemon"), filed 2026-09-05 and never built. Two things held W1-T2874. The daemon never dispatches a task whose `files:` names a path under .github/workflows/ (W1-T5351, `workflowPaths` in src/lib/drain.ts: the fleet App cannot push a workflow file). And the plan lint's status projection reads W1-T2874 as MERGED, which is terminal (standing rule 21): the only commit on main that names the id is its own filing commit, ccedf4a16d (#4063), whose message ends `Remudero-Task: W1-T2874`. So its remaining work is filed under two new ids and its own record is left as filed: this one, which an operator session hand-builds, and W1-T13178, the beat half, which the fleet can build.
+
+    WHAT W1-T2874 OBSERVED (2026-09-05T08:40Z, Azure fleet): docker reported `remudero-daemon state=exited exit=134 restart=5 policy=on-failure max=5`. The host beat one minute later was fresh and said `daemon_verdict=live`, because the newest ledger row was 434 s old. The container stayed exited, docker made no sixth restart, and the off-host watcher saw a fresh beat and raised nothing.
+
+    WHAT MAIN DOES TODAY (READ at origin/main ef8b74910f):
+    - The beat names the state. 229cecb01b (#5407, W1-T3411, 2026-09-13) made scripts/fleet-heartbeat.sh publish `restart_verdict`: `AT_LIMIT` for a running container at its cap, `STOPPED_RETRY_EXHAUSTED` for any other status at its cap (:1315-1317), else `ok`, `unlimited`, `unknown` or `skipped`.
+    - The watcher does not read it. `git grep -n -e 'restart_verdict'` finds no line in .github/workflows/fleet-heartbeat-watch.yml. Its judging loop extracts six verdicts (:323-328: supervisor, daemon, dispatch, escalation spool, crash loop, session reaper), and its only restart check is the self-check that an unreadable budget publishes no number (:241-243).
+    - The watcher does raise a stale daemon now: f7d34b7eb6 (#4068, W1-T2876, 2026-09-05) added the DAEMON_STALE arm for a branch in DAEMON_EXPECTED_BRANCHES. That arm fires only once the ledger goes quiet past the beat's threshold, which is the gap the 2026-09-05 outage sat inside.
+    - Delivery is one record per host, `--source "fleet-heartbeat:${branch}"` (:479), chosen by a first-match `elif` chain (W1-T3367). W1-T2874 was written before that chain existed.
+    READ on origin's heartbeat-azure branch at b0adbc2db4 (2026-11-16T14:30:05Z, heartbeat.txt): `restart_verdict=ok`, `restart_count=0`, `restart_max=5`, `restart_policy=on-failure`. So this arm would raise nothing on the day it lands.
+
+    NOT A DUPLICATE OF W1-T13163 OR W1-T13176, which add other records to the same workflow: W1-T13163 (cut out of W1-T10756, filed the same day) raises a beat that runs stale code, from `beat_code_verdict`; W1-T13176 raises a git store that cannot gc, from the per-tree gc lines; this one raises a spent restart budget, from `restart_verdict`, a field the beat has published since #5407.
+
+    WHAT IS NOT KNOWN, and decides whether this is worth building as written:
+    - W1-T11138 (queued) measured six outages on core between 2026-10-20 and 10-27 in which docker had given up, and found the host watchdog revived the container in 170 s at the median and 974 s at the 90th percentile. The watcher runs hourly (`37 * * * *`) and reads one beat. Whether it would have seen any of the six is not measured.
+    - The beat's own comment above its restart probe says a routine freshness restart also exits non-zero, so "a HEALTHY, MERGING fleet empties the budget as fast as it merges". If that still holds, AT_LIMIT is a state a healthy fleet reaches and an arm that raises on it raises on health. Today's count of 0 on a merging fleet suggests it no longer holds; one reading is not a measurement.
+  design: |
+    MEASURE FIRST, read-only, and put the findings in the PR body before any workflow line changes:
+    - over the last seven days, how many times the core daemon container's restart count reached its cap, how long each such state lasted, and how many of them an hourly read at minute 37 would have landed inside (the watchdog's log and the ledger's daemon.boot rows are the sources; name the ones used and a positive control for each);
+    - whether a routine freshness restart still spends the budget, so whether AT_LIMIT occurs on a healthy fleet.
+    If no state lasted long enough for the hourly read to land in it, or AT_LIMIT is a healthy state, STOP and report that instead of building: the arm as written would then either never fire or fire on health, and the operator rules on re-scoping (a shorter watch interval, STOPPED_RETRY_EXHAUSTED only, or withdrawal).
+
+    THE WATCHER COUNTS A SPENT RESTART BUDGET (carried word for word from W1-T2874's design). Make the off-host workflow parse `restart_verdict` from every fresh host beat and count both conditions, `AT_LIMIT` and `STOPPED_RETRY_EXHAUSTED`, as findings, independent of beat age and deploy-supervisor state. The report must name the exact branch and condition, evaluate all hosts before failing, and use the existing idempotent needs-human issue path. Extend the workflow self-check with a stubbed live 5/5 and exited-134 5/5 response so a future parser or condition regression fails before the watcher reads production branches.
+    HOW THAT READS AGAINST TODAY'S WORKFLOW, which W1-T2874 predates:
+    - "Fresh" is the beat-age test the chain already makes: a BEAT_STALE host is not judged on a restart verdict it may no longer hold.
+    - "Independent of deploy-supervisor state" cannot be had inside the first-match `elif` chain, where an earlier arm masks a later one. Give the finding its own record, `--source "fleet-heartbeat:<branch>:restart"`, outside the chain, for a branch in `DAEMON_EXPECTED_BRANCHES`, counted into the same combined verdict. The gc arm cut out of W1-T10751 (W1-T13176) takes the same shape for the same reason.
+    - `ok` resolves the record. `unlimited`, `unknown`, `skipped`, `operator_stopped` (the word W1-T13178 adds for a clean exit) and a missing line neither raise nor resolve, and the report says which it was.
+    - Title: "fleet-heartbeat (<branch>): the daemon container's restart budget is spent". The body names the verdict and the beat's `restart_count`, `restart_max` and `restart_policy` lines.
+
+    THE SUITE, test/daemon/the-heartbeat-watcher-raises-a-spent-restart-budget.test.ts (the folder `rmd test-place` computes). Extract the judging, delivery and self-check steps from the committed workflow the way test/fleet-heartbeat.test.ts does (`watchStepScript`, `deliverStepScript`), and run them against payload fixtures with stand-ins for `gh` and `node scripts/needs-human-issue.mjs` that record their arguments. Import through `#test/*` and `#src/*`.
+    - criterion 1: with two watched branches, an `AT_LIMIT` payload on one and a `STOPPED_RETRY_EXHAUSTED` payload on the other each raise that host's restart record through the delivery step, both hosts are judged before the step exits non-zero, and a second run with the same payloads files nothing new.
+    - criterion 2: the 2026-09-05 payload (fresh, `daemon_verdict=live`, `restart_verdict=STOPPED_RETRY_EXHAUSTED`, 5 of 5, on-failure) fails the judging step; the same step with the restart predicate replaced by one that never matches passes it, which is the defect.
+    - criterion 3: run the extracted self-check step as committed (it passes), then with the restart arm's predicate replaced by one that never raises and by one that raises on `ok` (it must fail both times).
+    - criterion 4: a payload the chain raises as SUPERVISOR_STALE or DAEMON_STALE keeps that kind and still gets its restart record when its verdict is spent; each of `ok`, `unlimited`, `unknown`, `skipped`, `operator_stopped` and a payload with no `restart_verdict` line raises no restart record.
+    INVARIANT the-restart-finding-stands-beside-liveness: the restart record and the liveness record of one host are two sources; neither a raise nor a resolve of one changes the other.
+    NOT IN SCOPE: scripts/fleet-heartbeat.sh, the exit code and `operator_stopped` (W1-T13178); reviving an exhausted container (W1-T11138); starting, stopping or restarting anything; the `on-failure:5` policy; any existing liveness arm.
+  falsifier: |
+    Carried from W1-T2874, re-read on main: close without implementation only if current main already makes a fresh `heartbeat-azure` beat carrying docker's exited 134, 5-of-5 state fail the off-host watcher and reach the idempotent needs-human path. It does not: the workflow source never reads `restart_verdict`, and the DAEMON_STALE arm waits for the ledger to go quiet.
+    Remove the restart predicate and criterion 2 must fail (the workflow half of W1-T2874's eighth criterion). Put the arm inside the liveness `elif` chain after SUPERVISOR_STALE and criterion 4 must fail. Raise on `unknown` and criterion 4 must fail. Take the arm out of the self-check step and criterion 3 must fail.
+    GUARD that held at base and must still hold: every existing liveness arm still classifies as before (test/fleet-heartbeat.test.ts, test/fleet-heartbeat-supervisor-tick.test.ts and test/daemon/the-beat-publishes-a-session-reaper-pass-that-refused-or-never-finished.test.ts read this workflow). Restore and require every criterion and the guard to pass.
+  note: |
+    reservation hand-off: run-unfiled-1794839315750 -> run-unfiled-1794839315750
+    Id reserved for the filing branch by the operator session. An operator session hand-builds this task: the daemon holds any task that names a workflow path (W1-T5351). Check `git ls-remote origin 'refs/rmd-dispatch/W1-T13177' 'refs/heads/run-W1-T13177-*'` before building.
+    No priority is set, because W1-T2874 has none and its evidence is one outage on 2026-09-05; the MEASURE FIRST step is what would support one.
+    It does not depend on W1-T13178: both verdicts it counts are published today. Until W1-T13178 lands, a container that exited 0 at its cap reads STOPPED_RETRY_EXHAUSTED and this arm would raise it; say in the PR body whether W1-T13178 had merged.
+    The first two criteria are W1-T2874's sixth, word for word, and the workflow half of its eighth. W1-T2874's record keeps its own copies because a merged task's criteria are not edited.
+    The test folder is the one `rmd test-place` computed on 2026-11-16 (test/daemon/, daemon-loop, high) for a stub importing test/helpers/fleet-heartbeat-harness.ts and src/lib/tmp.ts. The harness helper is read, not edited; if the suite needs a new export from it, amend `files:` first.
+    W1-T13176 and W1-T13163 (the stale-code arm cut out of W1-T10756) edit the same judging, delivery and self-check steps of this workflow. They are hand-built one at a time; whichever is built later starts from main after the earlier one merged. A workflow diff rides alone (W1-T297): this pull request holds the workflow and its suite, nothing else.

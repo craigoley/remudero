@@ -39,8 +39,9 @@ type Row = Record<string, unknown>;
 const dist = (pairs: Array<[string, number]>): TypedAnswer => ({ kind: "distribution", distribution: pairs.map(([option, probability]) => ({ option, probability })) });
 
 function row(patch: Partial<TypedAnswerRow> & Pick<TypedAnswerRow, "answer">): TypedAnswerRow {
-  return { role: "risk", question: null, model: "model-a", source: "decisions", questionType: "choice", options: RISK,
-    inputDigest: null, incumbent: null, outcome: null, ...patch };
+  const source = patch.source ?? "decisions";
+  return { role: "risk", question: null, model: "model-a", source, modelSurface: source === "decisions" ? "decisions" : "text",
+    questionType: "choice", options: RISK, inputDigest: null, incumbent: null, outcome: null, ...patch };
 }
 
 function only(groups: readonly TypedAnswerScoreGroup[], model: string, role = "risk", source = "decisions"): TypedAnswerScoreGroup {
