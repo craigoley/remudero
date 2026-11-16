@@ -387,7 +387,7 @@ import {
   type RefusalCandidate,
 } from "./refusal-amendment.js";
 import { landTaskFilesAsync, landingIdentity, stagedTaskFiles, type LandTaskFilesOpts } from "./feedback-landing.js";
-import { PARKED_PR_REMEDY_STEP, openEscalationRelease, actOnParkedPr, designHoldCoverage, parkedPrFacts, parkedPrRemedy, remedyStalledCriterion, standDownHoldRemedied, standDownHoldRemedy, takeParkedPrRemedy, type ParkedPrHost } from "./parked-pr-remedy.js";
+import { PARKED_PR_REMEDY_STEP, openEscalationRelease, actOnParkedPr, designHoldCoverage, parkedPrFacts, parkedPrRemedy, readParkedPrShard, remedyStalledCriterion, standDownHoldRemedied, standDownHoldRemedy, takeParkedPrRemedy, type ParkedPrHost } from "./parked-pr-remedy.js";
 
 /** W1-T6434: the bounded, already-scrubbed view of a preserved fix-owner patch. */
 export interface PriorPartialWork {
@@ -5375,12 +5375,23 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
 
     guardArmedBody: (pr) => realArmDepsAsync(() => config).closingReferences!(pr.prUrl),
 
+    // W1-T13048, invariant:no-wrong-catalog: the remedy reads and lands a task file in the repository that holds it, as
+    // draftRefusalAmendments does. A task in neither catalog on a host with no readable plan-destination.json may be in the
+    // ops catalog, so it is refused as destination-unreadable; nothing falls back to the public repository.
     parkedPr: {
-      readTaskShard: (taskId) => readTaskShard(repoDir, taskId),
-      reserveTaskId: () => reservePlanRepairTaskId(repoDir, landingIdentity({ family: "task-files",
-        targetRepository: { owner, repo }, sourceRepository: { owner, repo } }).branch, undefined, log),
-      landTaskFiles: async (files) => {
-        const landed = await landTaskFilesAsync(repoDir, files, taskFilesLandingOpts(publicTaskRepository));
+      readTaskShard: async (taskId) => {
+        const resolved = await taskFileRepository(taskId, (reloadPlanForFix() ?? plan).byId);
+        const unknownCatalog = resolved.outcome === "resolved" && resolved.task === undefined &&
+          planDestinationRepository(join(config.root, "state")).outcome !== "named";
+        return readParkedPrShard(unknownCatalog ? { outcome: "unreadable", reason: "destination-unreadable" } : resolved,
+          (checkoutDir) => readTaskShard(checkoutDir, taskId));
+      },
+      // Task ids are one global sequence: the id is minted in the public repository, held by the target's landing branch.
+      reserveTaskId: (target) => (deps.planRepairReserveIdImpl ?? ((cwd, branch) => reservePlanRepairTaskId(cwd, branch, undefined, log)))(
+        repoDir, landingIdentity({ family: "task-files", targetRepository: { owner: target.owner, repo: target.repo },
+          sourceRepository: { owner, repo } }).branch),
+      landTaskFiles: async (files, target) => {
+        const landed = await landTaskFilesAsync(target.checkoutDir, files, taskFilesLandingOpts(target));
         const error = landed.error ?? landed.refused[0]?.reason;
         return { ...(landed.prUrl === undefined ? {} : { prUrl: landed.prUrl }), ...(error === undefined ? {} : { error }) };
       },
@@ -10715,6 +10726,12 @@ export function baseRedHistoryFromLedger(lines: readonly Record<string, unknown>
 
 export const BASE_RED_REFRESH_ADMISSION_STEP = "sweep.base_red.refresh_admission";
 export const REFRESH_ADMISSION_FORCED_BY = "base-fixed-admission";
+/** W1-T12945 — a light pass's per-PR fan-out presses no refresh. Its disposition row names the head under this field,
+ *  with the cause and the refresh row, for the pass's one whole-snapshot admission ({@link runLightPassRefreshAdmission}). */
+export const LIGHT_REFRESH_HANDOFF_FIELD = "refresh_handoff";
+/** W1-T12945 — the hand-off cause of a head held as base-red whose held check main no longer fails. */
+export const BASE_RED_MAIN_GREEN_CAUSE = "base-red-main-green";
+const LIGHT_REFRESH_HANDOFF_HOLD = "the branch refresh waits for the light pass's refresh admission";
 
 export interface RefreshAdmissionReading {
   signal: "clear" | "waiting" | "unreadable" | "slow-start";
@@ -10763,7 +10780,7 @@ function postRefreshHeadReader(deps: Pick<SweepDeps, "readLiveHeadSha" | "readLi
 
 export interface RefreshAdmissionCandidate {
   pr: OpenPrView;
-  arm: RefreshArm;
+  arm: RefreshArm | typeof OWN_TASK_RECORD_MISSING_CAUSE;
   heldSinceMs: number;
   row: LedgerLine;
   refresh: () => Promise<string>;
@@ -12982,6 +12999,15 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     reason: (pr, policy, _ageDays, now) =>
       `zero check runs on head ${pr.headSha.slice(0, 7)} but only ${(absentAgeMinutes(pr, now) ?? 0).toFixed(1)}m ` +
       `since the last push (< ${policy.absentCeilingMinutes}m ceiling) — not yet scheduled, not genuinely absent — waiting`,
+  },
+  {
+    // W1-T9408: the bounded absent-suite remedy owns this shape, rather than the unowned catch-all.
+    disposition: "blocked-ambiguous",
+    blocker: "awaiting-ci",
+    when: (pr, policy, _ageDays, now) => pr.reviewState === "none" &&
+      absentChecksRepushDecision(pr, policy, now, { count: 0, shas: new Set<string>() }).repush,
+    reason: (pr) =>
+      `zero check runs on head ${pr.headSha.slice(0, 7)}, review none — CI suite recovery owns the bounded re-push`,
   },
   {
     // TERMINAL rule, matching unconditionally — the LEAST permissive disposition (W1-T93), not the
@@ -21250,6 +21276,8 @@ export async function runSweep(
   const clearedRefreshKeys = new Set(ledgerLines.flatMap((row) => row.step === REFRESH_CLEARANCE_STEP && row.refresh === true
     ? [`${String(row.pr_number)}@${String(row.head_sha)}@${String(row.main_sha)}`] : []));
   const refreshUnwired = `the branch refresh is unwired on this surface (${deps.dryRun ? "dry run" : deps.repairAdmissionSurface === "light" ? "light pass" : "no updateBranch"})`;
+  // W1-T12945: a light pass's fan-out presses no refresh; it names the head for the pass's whole-snapshot admission.
+  const handsRefreshToLightAdmission = !deps.dryRun && !deps.updateBranch && deps.repairAdmissionSurface === "light";
   const heldSinceMs = (pr: OpenPrView): number => {
     const since = baseRedHistory.heldSince.get(`${pr.prNumber}@${pr.headSha}`) ?? Date.parse(priorBlockerByPr.get(pr.prNumber)?.since ?? "");
     return Number.isFinite(since) ? since : Infinity;
@@ -22525,12 +22553,23 @@ export async function runSweep(
       const refreshRow = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: OWN_TASK_RECORD_REFRESH_STEP,
         pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha, cause: OWN_TASK_RECORD_MISSING_CAUSE };
       const named = `${OWN_TASK_RECORD_MISSING_CAUSE} → base refresh`;
-      if (ledgerLines.some((row) => row.step === OWN_TASK_RECORD_REFRESH_STEP && row.pr_number === pr.prNumber)) {
+      // W1-T12945: on a light pass the whole-snapshot admission presses; its row at this head is that press's outcome.
+      const lightPress = handsRefreshToLightAdmission ? ledgerLines.findLast((row) => row.step === OWN_TASK_RECORD_REFRESH_STEP &&
+        row.pr_number === pr.prNumber && row.head_sha === pr.headSha) : undefined;
+      if (lightPress !== undefined) {
+        const took = lightPress.outcome === "updated";
+        disposition = took ? "wait" : "blocked-ambiguous";
+        reason = took ? `${named} (updated) — re-reviewing the refreshed head`
+          : `${OWN_TASK_RECORD_MISSING_CAUSE}: base refresh did not take (${String(lightPress.outcome)}) — escalating`;
+      } else if (ledgerLines.some((row) => row.step === OWN_TASK_RECORD_REFRESH_STEP && row.pr_number === pr.prNumber)) {
         disposition = "blocked-ambiguous";
         reason = `${OWN_TASK_RECORD_MISSING_CAUSE} persists after a base refresh — escalating`;
       } else if (deps.dryRun) {
         disposition = "wait";
         reason = `${named} (dry run: not pressed)`;
+      } else if (handsRefreshToLightAdmission) {
+        disposition = "wait";
+        reason = `${named}: ${LIGHT_REFRESH_HANDOFF_HOLD}`;
       } else if (!deps.updateBranch) {
         disposition = "blocked-ambiguous";
         reason = `${OWN_TASK_RECORD_MISSING_CAUSE}: the branch refresh is unwired — escalating`;
@@ -23359,7 +23398,7 @@ export async function runSweep(
       // coverage now picks a split of what it covers or a close and rebuild, never a fix round the fix lane stands down on.
       const designCoverage = designQuestion === undefined || terminalDesignHold?.mainAdoption === true ? undefined
         : designHoldCoverage(terminalDesignHold?.producer);
-      const facts = parkedPrFacts(pr, { redChecks: redCheckNames(pr).filter(r => !r.startsWith("review:")),
+      const facts = await parkedPrFacts(pr, { redChecks: redCheckNames(pr).filter(r => !r.startsWith("review:")),
         ...(designQuestion === undefined ? {} : { designQuestion }), ...(designCoverage === undefined ? {} : { designCoverage }),
         fixModelOrder: policy.fixModelOrder ?? DEFAULT_FIX_MODEL_ORDER },
       ledgerLines, deps.parkedPr);
@@ -23392,7 +23431,7 @@ export async function runSweep(
     // question's text, and a split or rebuild puts the question into the held task's needs_input (W1-T12715).
     const remedyInsteadOfEscalation = async (cause: string): Promise<string | undefined> => {
       if (!deps.parkedPr || deps.dryRun) return undefined;
-      const facts = parkedPrFacts(pr, { redChecks: redCheckNames(pr).filter(r => !r.startsWith("review:")),
+      const facts = await parkedPrFacts(pr, { redChecks: redCheckNames(pr).filter(r => !r.startsWith("review:")),
         fixModelOrder: policy.fixModelOrder ?? DEFAULT_FIX_MODEL_ORDER }, ledgerLines, deps.parkedPr);
       const parked = await actOnParkedPr(pr, parkedPrRemedy(facts), facts, ledgerLines, deps.parkedPr, { runId: deps.runId,
         ledgerTaskId: escalationTaskIdFor(pr), nowIso: clockFromMillisFn(() => now).iso(), cause, text: reason,
@@ -24237,7 +24276,7 @@ export async function runSweep(
                 // the dispatch below runs, and the fix lane's own stand-down is released for this pull request and head.
                 let openHoldKept = openHold !== undefined;
                 if (openHold && deps.parkedPr && !deps.dryRun) {
-                  const facts = parkedPrFacts(pr, { redChecks: redCheckNames(pr).filter(r => !r.startsWith("review:")),
+                  const facts = await parkedPrFacts(pr, { redChecks: redCheckNames(pr).filter(r => !r.startsWith("review:")),
                     fixModelOrder: policy.fixModelOrder ?? DEFAULT_FIX_MODEL_ORDER }, ledgerLines, deps.parkedPr);
                   const parked = await actOnParkedPr(pr, parkedPrRemedy(facts), facts, ledgerLines, deps.parkedPr, { runId: deps.runId,
                     ledgerTaskId: escalationTaskIdFor(pr), nowIso: clockFromMillisFn(() => now).iso(), cause: "open-escalation",
@@ -24748,19 +24787,28 @@ export async function runSweep(
                 const row = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha, check_name: baseRed.check, main_sha: mainSha,
                   ...(decidedSha !== mainSha ? { main_decided_by_sha: decidedSha } : {}) };
                 let refreshHold = refreshUnwired;
-                if (baseRed.kind === "refresh" && deps.updateBranch) {
+                // W1-T12945: a light pass takes the wired path up to the press, then hands the head to its admission.
+                const handOff = handsRefreshToLightAdmission && baseRed.kind === "refresh";
+                if (baseRed.kind === "refresh" && (deps.updateBranch || handOff)) {
                   const check = baseRed.check;
                   const admit = { pr, arm: "base-red" as const, heldSinceMs: heldSinceMs(pr), row: { ...row, step: BASE_RED_REFRESH_STEP } };
                   if ((await readRefreshHistory(pr)).source === "unreadable") {
-                    const clearance = await admissionClearance(pr, "base-red", (pr.ciFailures ?? []).map(failure => failure.name),
-                      baseReproductionFiles(pr.ciFailures ?? []), mainSha);
+                    // A handed head is assessed once per head and main, like a head the admission holds.
+                    const clearance = handOff && clearedRefreshKeys.has(`${pr.prNumber}@${pr.headSha}@${mainSha}`) ? { refresh: true as const }
+                      : await admissionClearance(pr, "base-red", (pr.ciFailures ?? []).map(failure => failure.name),
+                        baseReproductionFiles(pr.ciFailures ?? []), mainSha);
                     if (!clearance.refresh) {
-                      refreshAdmission.refuse(admit, clearance.evidence);
+                      if (!handOff) refreshAdmission.refuse(admit, clearance.evidence);
                       standDownReason = `base red refresh refused: ${clearance.evidence} — ${clearance.reason}`;
                       break;
                     }
                   }
-                  const held = refreshAdmission.hold(admit);
+                  if (handOff) {
+                    extraDisposedFields = { ...extraDisposedFields, [LIGHT_REFRESH_HANDOFF_FIELD]: { cause: BASE_RED_MAIN_GREEN_CAUSE,
+                      ...(Number.isFinite(admit.heldSinceMs) ? { held_since: clockFromMillisFn(() => admit.heldSinceMs).iso() } : {}),
+                      refresh_row: { ...admit.row, cause: BASE_RED_MAIN_GREEN_CAUSE } } };
+                  }
+                  const held = handOff ? LIGHT_REFRESH_HANDOFF_HOLD : refreshAdmission.hold(admit);
                   if (held === undefined) {
                     await refreshAdmission.enter({ ...admit, refresh: () => pressRefresh(pr, admit.row),
                       settle: (verdict) => admissionReasons.set(pr.prNumber, "outcome" in verdict
@@ -24781,6 +24829,15 @@ export async function runSweep(
                     : mainLatestRun?.state === "red"
                       ? `base red: ${baseRed.check} also fails on main's latest run (${decidedSha}) — not this diff's; no fix dispatched, the branch refreshes once main is green`
                       : `base red: ${baseRed.check} was held while main was red; main is ${mainLatestRun?.state ?? "unread"} at ${mainSha}, not yet green — no fix dispatched, the branch refreshes once main is green`;
+                break;
+              }
+              // W1-T12945: the light admission's refresh of this head took, so this view predates the head it produced.
+              if (handsRefreshToLightAdmission && baseRedHistory.refreshed.has(`${pr.prNumber}@${pr.headSha}`) &&
+                  ledgerLines.some((line) => line.step === BASE_RED_REFRESH_STEP && line.cause === BASE_RED_MAIN_GREEN_CAUSE &&
+                    line.pr_number === pr.prNumber && line.head_sha === pr.headSha && line.outcome === "updated")) {
+                baseRedStandDownPrs.add(pr.prNumber);
+                acted = false;
+                standDownReason = "base red: the light pass's refresh admission requested the branch refresh (updated) — awaiting the refreshed head, no fix dispatched";
                 break;
               }
               // W1-T4586 — A LIVE RUN FOR THIS HEAD SUPERSEDES ITS RED. Runs on one head share the
@@ -26833,10 +26890,44 @@ export async function runArmedRatchetRejudge(
 
 let lightPassRefreshAdmissionInFlight = false;
 
-/** W1-T9595 — the light pass's ONE admission over its snapshot: it replays the heads the last admission held. */
+/** W1-T12945 — the heads a light pass's fan-out named for the whole-snapshot admission, each with its cause: a build
+ *  head whose review skipped for its missing task record and that no refresh was yet pressed for, and a head whose
+ *  latest disposition, at its current head, carries {@link LIGHT_REFRESH_HANDOFF_FIELD}. Read again on every pass, so
+ *  a head the fan-out stopped naming is no candidate. */
+function lightPassRefreshHandOffs(
+  openPrs: readonly OpenPrView[], lines: ReadonlyArray<Record<string, unknown>>, runId: string,
+): AdmissionEntry[] {
+  const disposed = new Map<number, Record<string, unknown>>();
+  const skipped = new Set<string>();
+  const ownRecordRefreshed = new Set<number>();
+  for (const line of lines) {
+    if (line.step === "sweep.disposed" && typeof line.pr_number === "number") disposed.set(line.pr_number, line);
+    else if (line.step === OWN_TASK_RECORD_REFRESH_STEP && typeof line.pr_number === "number") ownRecordRefreshed.add(line.pr_number);
+    else if (line.reason === OWN_TASK_RECORD_MISSING_CAUSE && typeof line.pr_url === "string") skipped.add(line.pr_url);
+  }
+  const since = (value: unknown) => Date.parse(String(value)) || Infinity;
+  return openPrs.flatMap((pr): AdmissionEntry[] => {
+    // One refresh per PR for this cause, as W1-T9232's record bounds it: the head a refresh produced is never pressed.
+    const skip = skipped.has(pr.prUrl) && !ownRecordRefreshed.has(pr.prNumber) ? ownTaskRecordMissingRow(lines, pr) : undefined;
+    if (skip !== undefined) {
+      return [{ pr, arm: OWN_TASK_RECORD_MISSING_CAUSE, heldSinceMs: since(skip.ts),
+        row: { run_id: runId, task_id: pr.taskId ?? "SWEEP", step: OWN_TASK_RECORD_REFRESH_STEP, pr_number: pr.prNumber, pr_url: pr.prUrl,
+          head_sha: pr.headSha, cause: OWN_TASK_RECORD_MISSING_CAUSE } }];
+    }
+    const latest = disposed.get(pr.prNumber);
+    const handed = latest?.head_sha === pr.headSha ? latest[LIGHT_REFRESH_HANDOFF_FIELD] as Record<string, unknown> | null | undefined : undefined;
+    const row = handed?.refresh_row;
+    if (handed?.cause !== BASE_RED_MAIN_GREEN_CAUSE || row === null || typeof row !== "object") return [];
+    return [{ pr, arm: "base-red", heldSinceMs: since(handed.held_since), row: { ...(row as LedgerLine), run_id: runId } }];
+  });
+}
+
+/** W1-T9595 — the light pass's ONE admission over its snapshot: it replays the heads the last admission held.
+ *  W1-T12945 — and admits the heads the fan-out handed it ({@link lightPassRefreshHandOffs}), each through the value test. */
 export async function runLightPassRefreshAdmission(
   openPrs: readonly OpenPrView[],
-  deps: Pick<SweepDeps, "ledgerPath" | "runId" | "updateBranch" | "readLedger" | "appendLine" | "dryRun" | "now" | "readLiveHeadSha" | "readLiveState">,
+  deps: Pick<SweepDeps, "ledgerPath" | "runId" | "updateBranch" | "readLedger" | "appendLine" | "dryRun" | "now" | "readLiveHeadSha" | "readLiveState" |
+    "readBranchProtectionStrict" | "refreshJudge" | "baseChangedFilesByPr" | "refreshCiRunForHead" | "readActionsStatusSummary" | "log">,
 ): Promise<number[]> {
   const updateBranch = deps.updateBranch;
   if (deps.dryRun || !updateBranch || lightPassRefreshAdmissionInFlight) return [];
@@ -26846,12 +26937,40 @@ export async function runLightPassRefreshAdmission(
     const ledgerLines = (deps.readLedger ?? readLiveLedgerRows)(deps.ledgerPath);
     const last = ledgerLines.findLast((row) => row.step === BASE_RED_REFRESH_ADMISSION_STEP);
     const reading = refreshAdmissionReading(openPrs, ledgerLines);
-    const waiting = last !== undefined && Array.isArray(last.waiting) ? last.waiting as Array<Record<string, unknown>> : [];
-    if (waiting.length === 0 || reading.signal === "waiting" || mainLatestRunFromLedger(ledgerLines)?.state === "red") return [];
+    const handOffs = lightPassRefreshHandOffs(openPrs, ledgerLines, deps.runId).filter(({ pr }) => pr.isDependabot !== true);
+    // A handed head this admission left waiting is named again by the fan-out, or is no longer a candidate.
+    const waiting = (last !== undefined && Array.isArray(last.waiting) ? last.waiting as Array<Record<string, unknown>> : [])
+      .filter((held) => typeof (held.refresh_row as { cause?: unknown } | null | undefined)?.cause !== "string");
+    if ((waiting.length === 0 && handOffs.length === 0) || reading.signal === "waiting" || mainLatestRunFromLedger(ledgerLines)?.state === "red") return [];
     const refreshed = baseRedHistoryFromLedger(ledgerLines).refreshed;
     const byNumber = new Map(openPrs.map((pr) => [pr.prNumber, pr]));
     const admission = createRefreshAdmission(reading, "light", undefined,
       postRefreshHeadReader(deps));
+    let valueGate: Promise<RefreshValueGate> | undefined;
+    // W1-T5939: an Actions incident holds every refresh, so a handed head waits it out.
+    const incident = handOffs.length === 0 || deps.readActionsStatusSummary === undefined ? undefined : await Promise.resolve()
+      .then(() => deps.readActionsStatusSummary!()).then((summary) => classifyActionsIncident(summary), (error) => unreadableActionsIncident(error));
+    const incidentHold = incident !== undefined && actionsIncidentHoldDecision(incident, undefined, clockFromMillisFn(deps.now).now()) === "hold";
+    for (const handed of incidentHold ? [] : handOffs) {
+      const { pr } = handed;
+      const ownRecord = handed.arm === OWN_TASK_RECORD_MISSING_CAUSE;
+      if (!ownRecord && refreshed.has(`${pr.prNumber}@${pr.headSha}`)) continue;
+      const row = { ...handed.row, surface: "light" };
+      const forcedBy = ownRecord ? OWN_TASK_RECORD_MISSING_CAUSE : REFRESH_ADMISSION_FORCED_BY;
+      await admission.enter({ ...handed, row, settle: () => {}, refresh: async () => {
+        let outcome: string;
+        try {
+          // W1-T7735: the value test every repair refresh takes; CI in flight at this head holds the press.
+          const gate = await (valueGate ??= buildRefreshValueGate(deps, openPrs, ledgerLines, clockFromMillisFn(deps.now).now(), appendLine));
+          outcome = await gate.settle({ prNumber: pr.prNumber, prUrl: pr.prUrl, headSha: pr.headSha, ...(pr.taskId === undefined ? {} : { taskId: pr.taskId }) },
+            pr, ownRecord ? "plan-repair" : "base-red", undefined, forcedBy) ? await updateBranch(pr) : "value-skip";
+        } catch (error) { outcome = `error: ${String((error as Error)?.message ?? error)}`; }
+        // The one record per head and cause. W1-T9232's refresh has no value test of its own, so a value-skip there
+        // pressed nothing and spends nothing; a base-red value-skip is recorded, as the full pass records it.
+        if (!ownRecord || outcome !== "value-skip") appendLine(deps.ledgerPath, { ...row, outcome, forced_by: forcedBy });
+        return outcome;
+      } });
+    }
     for (const held of waiting) {
       const pr = typeof held.pr_number === "number" ? byNumber.get(held.pr_number) : undefined;
       const row = held.refresh_row;

@@ -1,0 +1,66 @@
+- id: W1-T13178
+  title: "The beat tells a clean stop from a spent restart budget: one inspect also returns the running flag and the exit code, a container that exited 0 reads operator_stopped, and the subject names a spent budget"
+  repo: remudero
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # it changes the one inspect the restart verdict is parsed from; a parse that loses a token must not turn an exhausted container into a healthy reading
+  band_meaning: span
+  origin: "operator-session#workflow-held-tasks-2026-11-16"
+  plan_refs:
+    - W1-T2874
+    - W1-T3411
+    - W1-T483
+    - W1-T484
+    - W1-T2876
+  files:
+    - scripts/fleet-heartbeat.sh
+    - test/fleet-heartbeat.test.ts
+    - test/a-restart-budget-that-runs-out-says-so.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "invariant:a-clean-stop-is-never-a-crash — a clean exited container is reported as operator_stopped and does not become a crash or exhausted-retry finding"
+      proof: "grep: W1-T13178 criterion 1 in test/fleet-heartbeat.test.ts"
+    - claim: "missing and malformed runtime answers omit numeric and state readings, publish a bounded unknown reason and never synthesize a healthy or exhausted value"
+      proof: "grep: W1-T13178 criterion 2 in test/fleet-heartbeat.test.ts"
+    - claim: "one docker inspect supplies state, running flag, exit code, restart count, maximum and policy without a second runtime call or container exec"
+      proof: "grep: W1-T13178 criterion 3 in test/fleet-heartbeat.test.ts"
+    - claim: "The heartbeat subject names AT_LIMIT and STOPPED_RETRY_EXHAUSTED, so the branch list is not green on either condition, and is unchanged for every other restart verdict"
+      proof: "grep: W1-T13178 criterion 4 in test/fleet-heartbeat.test.ts"
+  rationale: |
+    This carries the beat half of W1-T2874 ("a fresh heartbeat greenlights an exhausted dead daemon") that is still missing on main. W1-T2874 itself cannot carry it: the plan lint's status projection reads W1-T2874 as MERGED, and a merged id is never dispatched (standing rule 21). The only commit on main that names the id is its own filing commit, ccedf4a16d (#4063, 2026-09-05), whose message ends `Remudero-Task: W1-T2874`. Nothing built it: its shard still says `status: queued`. So this record and W1-T13177 (the watcher half, operator-built) are follow-ups under new ids, and W1-T2874's record is left as filed for the operator to retire.
+
+    WHAT W1-T2874 OBSERVED (2026-09-05T08:40Z, Azure fleet): docker reported `remudero-daemon state=exited exit=134 restart=5 policy=on-failure max=5`, and the host beat one minute later said `daemon_verdict=live` because the newest ledger row was 434 s old.
+
+    WHAT HAS LANDED SINCE (READ at origin/main ef8b74910f):
+    - 229cecb01b (#5407, W1-T3411, 2026-09-13) made the beat publish `restart_verdict`. scripts/fleet-heartbeat.sh:1286 asks one inspect for `{{.RestartCount}} {{.HostConfig.RestartPolicy.MaximumRetryCount}} {{.HostConfig.RestartPolicy.Name}} {{.State.Status}}`, and :1315-1317 set `AT_LIMIT` for a running container at its cap and `STOPPED_RETRY_EXHAUSTED` for any other status at its cap; below the cap is `ok`, an uncapped policy `unlimited`, a failed read `unknown`. test/a-restart-budget-that-runs-out-says-so.test.ts asserts each, with a live ledger beside an exited 5-of-5 container. So W1-T2874's first and second criteria, and the beat half of its eighth, are already true, and its rationale's sentence that the script "neither reads `.State.Status` nor produces a restart-budget verdict" no longer holds.
+    - f7d34b7eb6 (#4068, W1-T2876, 2026-09-05) made the watcher raise DAEMON_STALE, so the clause in W1-T2874's seventh criterion about "W1-T484's refusal to alarm solely on a stale daemon ledger timestamp" describes a watcher that no longer exists. W1-T484 itself is retired (settled by W1-T1274).
+    WHAT IS STILL MISSING, and is this task:
+    - the inspect reads no exit code and no running flag, so a container that exited 0 at its cap reads `STOPPED_RETRY_EXHAUSTED`, and a deliberate clean stop looks like a dead fleet. `git grep -n -e 'operator_stopped' -e 'container_state' -e 'container_exit_code' -e 'State.ExitCode'` finds no line in scripts/fleet-heartbeat.sh;
+    - the subject (:1741, `SUBJECT="heartbeat ${NOW_ISO}: daemon ${DAEMON_VERDICT%% *} | build ${DISPATCH_VERDICT%% *} | rmd ${RMD_VERDICT%%:*}"`) names no restart verdict, so an exhausted container's beat still lists as an ordinary one.
+    NO PRIORITY IS SET. W1-T2874 had none, and its evidence is one outage on 2026-09-05, before the beat named the exhausted state. READ on origin's heartbeat-azure branch at b0adbc2db4 (2026-11-16T14:30:05Z): `restart_verdict=ok`, `restart_count=0`, `restart_max=5`, `restart_policy=on-failure`.
+  design: |
+    Carried from W1-T2874's design, with what #5407 already built taken as the base.
+    1. Extend the heartbeat's existing single `docker inspect` format to return container state, running flag, exit code, restart count, retry maximum and policy together. Validate every token before using it. Publish bounded `container_state`, `container_exit_code` and `restart_verdict` fields only from a complete parse, with `restart_source` retaining a bounded reason when the read is absent or malformed. Do not add a second Docker call, shell into the container, read logs, expose command arguments or introduce node/tsx into the plain-bash beat.
+    2. Keep the verdicts #5407 derives (`ok`, `AT_LIMIT`, `STOPPED_RETRY_EXHAUSTED`, `unlimited`, `unknown`, `skipped`) and add one: a clean exited container is `operator_stopped`, not a crash alarm, whatever its restart count. `STOPPED_RETRY_EXHAUSTED` then means docker reports the container not running after a NON-ZERO exit with an exhausted finite budget. Preserve the existing daemon ledger verdict separately.
+    3. Make the heartbeat subject name `AT_LIMIT` and `STOPPED_RETRY_EXHAUSTED` so the branch list is no longer green on either condition. Every other restart verdict leaves the subject as it is today.
+    4. RECONCILE ONE CASE AND SAY HOW IN THE PR BODY: #5407's suite holds "a STATUS the runtime could not answer, at the cap, defaults to the ALARMING verdict" (a three-token answer reads `STOPPED_RETRY_EXHAUSTED`), while step 1 publishes a verdict "only from a complete parse". Keep the alarming default for an answer whose count and maximum parsed and whose later tokens did not, unless the measurement of what docker really returns says otherwise; never let a short answer read `ok` or `operator_stopped`.
+    Tests go in test/fleet-heartbeat.test.ts, each title starting `W1-T13178 criterion <n>: `. test/a-restart-budget-that-runs-out-says-so.test.ts is in `files:` because its stubs answer the four-token inspect line this task extends; change its stub lines, not its assertions.
+    This task reports. It does not start, stop, restart, recycle, build or deploy a container; does not change `on-failure:5`; and does not give Serve, GitHub Actions or the beat lifecycle authority.
+    INVARIANT a-clean-stop-is-never-a-crash: a container that exited with code 0 reads `operator_stopped`; it is never `STOPPED_RETRY_EXHAUSTED` and never a crash finding, whatever its restart count.
+    NOT IN SCOPE: the off-host watcher and any workflow file (W1-T13177); reviving an exhausted container (W1-T11138); the daemon's ledger-derived liveness verdict.
+  falsifier: |
+    Read the exit code and still call a 0 exit at the cap `STOPPED_RETRY_EXHAUSTED` (main's behaviour today) and criterion 1 must fail. Publish `container_state` from an answer with a missing token and criterion 2 must fail. Read the exit code through a second runtime call and criterion 3 must fail. Leave the subject as it is for an exhausted container and criterion 4 must fail. Restore and require all four to pass.
+    Carried from W1-T2874: re-design rather than ship if distinguishing a crash requires ledger age, a Docker log scrape, container command inspection, node/tsx, a second runtime call or lifecycle authority. Docker's structured inspect state is the only accepted source for this verdict.
+    GUARDS that held at base and must still hold (W1-T2874's first, second and seventh criteria and the beat half of its eighth, all true on main since #5407):
+    - an exited container at 5 of 5 with a non-zero exit reads `STOPPED_RETRY_EXHAUSTED` while the daemon's ledger row is still inside its window; a running one at 5 of 5 reads `AT_LIMIT`; below the cap `ok`; an uncapped policy `unlimited` (test/a-restart-budget-that-runs-out-says-so.test.ts);
+    - that suite's mutant, "dropping the running-status check collapses AT_LIMIT and STOPPED_RETRY_EXHAUSTED into one value", still reddens;
+    - an unreadable or junk answer publishes no count and no maximum, and `daemon_verdict`, `rmd_verdict` and `supervisor_verdict` read the same with and without the new fields (test/fleet-heartbeat.test.ts).
+  note: |
+    reservation hand-off: run-unfiled-1794839315750 -> run-unfiled-1794839315750
+    Id reserved for the filing branch by the operator session. It names no workflow path, so the fleet can dispatch it. Check `git ls-remote origin 'refs/rmd-dispatch/W1-T13178' 'refs/heads/run-W1-T13178-*'` before building.
+    No `depends_on`: of W1-T2874's three, W1-T483 and W1-T2349 are merged and W1-T484 is retired (`status: blocked`, settled by W1-T1274), and a dependency on a retired task would hold this one for good.
+    W1-T13177 (the watcher half) does not wait for this task and this task does not wait for it. The watcher reads the fields by name, so `operator_stopped` is a new word it must not count; W1-T13177's fourth criterion names it.
+    No new test file, so no folder was computed: the criteria extend the two suites that already drive this probe.

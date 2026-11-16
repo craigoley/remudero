@@ -1,0 +1,67 @@
+- id: W1-T13187
+  title: "An inbox draft's path check reads origin/main's file list once per commit, not one git process per path, so classifying the inbox stops freezing serve for minutes"
+  repo: remudero
+  depends_on: []
+  priority: 0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # one fact source of the draft lint; the lint's rules and verdicts are unchanged
+  origin: "operator-session#serve-oom-2026-11-16"
+  plan_refs:
+    - W1-T9039
+    - W1-T9754
+  files:
+    - src/lib/inbox.ts
+    - test/inbox/a-draft-path-check-lists-the-base-once-per-commit.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "checkoutRepoFacts(root).pathExistsAtBase, asked about 50 paths against one origin/main commit, runs git ls-tree once (a counting git seam sees 1 listing call), and answers true for a file and for each of its parent directories at origin/main and false for a path absent there"
+      proof: "grep: W1-T13187 criterion 1 in test/inbox/a-draft-path-check-lists-the-base-once-per-commit.test.ts"
+    - claim: "When origin/main moves to a new commit, the next pathExistsAtBase call lists the new commit once and sees a file added in it"
+      proof: "grep: W1-T13187 criterion 2 in test/inbox/a-draft-path-check-lists-the-base-once-per-commit.test.ts"
+    - claim: "invariant:same-answers-as-per-path-ls-tree — on a real git repository (no seam), every answer for a file, a directory, a trailing-slash path and an absent path equals the answer of the per-path `git ls-tree -z --name-only origin/main -- <path>` check it replaces"
+      kind: guard
+      proof: "grep: W1-T13187 criterion 3 in test/inbox/a-draft-path-check-lists-the-base-once-per-commit.test.ts"
+  rationale: |
+    WHY: one Console Decline froze serve for 14.8 minutes. Every read, webhook and Inbox write waited behind it, and
+    the Console reported the write as failed.
+    MEASURED on the Azure host, remudero-serve, 2026-11-16:
+    - serve.demand: /v1/inbox/decline n 1, max 887,329 ms (window ending 14:43:58Z). runtime.loop_lag at 14:39:37Z:
+      maxMs 887,447.6. A probe of GET /v1/i/core/views/instances timed out at 40 s on every read from 14:25 to 14:39Z,
+      and again from 14:52 to 14:55Z.
+    - ps sampled at 10 Hz in the container from 14:51 to 14:57Z: 252 samples of `git -C /home/node/rmd-serve-gens/a
+      ls-tree -z --name-only origin/main -- <one path>` and 243 of `git config --list --show-scope --null`, all children
+      of serve's main process (pid 364698), one path per process.
+    - serve's RSS is 2.6 GB. W1-T9754 measured a fork's synchronous cost at 161 ms at 1.1 GB on this host.
+    READ at origin/main (ef8b74910), src/lib/inbox.ts:
+    - checkoutRepoFacts(root).pathExistsAtBase (:2211) calls hostWorktreeGit(root, ["ls-tree", "-z", "--name-only",
+      "origin/main", "--", path]) for each path. hostWorktreeGit (worktree-git.ts:468) is a synchronous execFileSync,
+      after a synchronous vetPinnedConfig that runs `git config --list` itself.
+    - HARNESS_FACTS = checkoutRepoFacts(HARNESS_ROOT) (:2225) is the default for the draft lint
+      (draftMissingPathViolations, draftCallSiteAbsentViolations), which classification runs for every drafted proposal.
+    - readOriginMainSha (:2812) already resolves origin/main from the ref files with no process.
+  design: |
+    INVARIANT same-answers-as-per-path-ls-tree: for any path, the answer equals today's per-path check at the same commit.
+    1. In checkoutRepoFacts, keep one held listing { sha, paths } per facts object. pathExistsAtBase resolves the commit with
+       readOriginMainSha(root) (no process). When it equals the held sha, answer from the held set. Otherwise run
+       hostWorktreeGit(root, ["ls-tree", "-r", "-z", "--name-only", <sha>], { maxBuffer: 64 MiB }) once, and build a set of
+       every file path plus each of its parent directories (the per-path check lists a directory as an entry).
+    2. An unresolvable sha (readOriginMainSha undefined) lists origin/main and does not hold the result, so the next call
+       lists again: no stale answer is ever kept.
+    3. Keep the `.git` existence guard. A path ending in "/" answers false, as the per-path check's `includes(path)` does.
+    4. Let checkoutRepoFacts take an optional git runner (default hostWorktreeGit) so a test can count listings.
+       Production passes nothing; HARNESS_FACTS and the call at :4299 keep their call shape.
+    5. Tests in test/inbox/a-draft-path-check-lists-the-base-once-per-commit.test.ts: criteria 1 and 2 on a temp
+       repository with the counting runner; criterion 3 on a real temp repository, comparing each answer with the old
+       per-path command run directly.
+  falsifier: |
+    Keep the per-path ls-tree: criterion 1 fails (50 listing calls). Hold the listing without checking the sha:
+    criterion 2 fails (the added file is not seen). List files only, without parent directories: criterion 3 fails
+    on the directory path.
+  note: |
+    Id reserved for run-unfiled-1794841088000 with ~/rmd-work/bin/reserve-id.sh.
+    Proof that counts in production: after the deploy, a Console Decline's serve.demand max falls from 887,329 ms to
+    under 5,000 ms, and no `ls-tree -z --name-only origin/main --` child of serve is seen in a 10-minute ps sample.

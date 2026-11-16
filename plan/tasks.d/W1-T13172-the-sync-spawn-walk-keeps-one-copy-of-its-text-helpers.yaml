@@ -1,0 +1,57 @@
+- id: W1-T13172
+  title: "The sync-spawn census test imports codeOnly and the census walk from the shared walk helper instead of keeping its own copies"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: low # test code only; the census must find the same rows before and after
+  origin: "operator-session#leftovers-2026-11-16"
+  plan_refs:
+    - W1-T9615
+    - W1-T9660
+    - W1-T9736
+  files:
+    - test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts
+    - test/the-sync-spawn-walk-keeps-one-copy-of-its-text-helpers.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The synchronous-spawn census test declares no function codeOnly, no function regexLiteralEnd and no own censusWalk cache; it imports codeOnly and loopCensusFunctions from the shared walk helper in test/helpers"
+      proof: "grep: W1-T13172 criterion 1 in test/the-sync-spawn-walk-keeps-one-copy-of-its-text-helpers.test.ts"
+    - claim: "invariant:one-walk — the census test reads its function list only through loopCensusFunctions() of the shared helper, so the census and the SRE-lane test walk the same list"
+      kind: guard
+      proof: "grep: W1-T13172 criterion 2 in test/the-sync-spawn-walk-keeps-one-copy-of-its-text-helpers.test.ts"
+    - claim: "The census test's own codeOnly assertions (its lines 685 and 810 at origin/main ef8b74910) still pass against the imported codeOnly"
+      proof: "grep: W1-T13172 criterion 3 in test/the-sync-spawn-walk-keeps-one-copy-of-its-text-helpers.test.ts"
+  rationale: |
+    WHY: two copies of the same text walk can drift. W1-T9660 asked for one walk so that the census and
+    the SRE-lane test "cannot disagree"; today that holds only because the copies are the same text.
+    READ at origin/main ef8b74910:
+    - test/helpers/daemon-loop-walk.ts:224 exports codeOnly; :267 regexLiteralEnd; :282-287 censusWalk and
+      loopCensusFunctions.
+    - test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts:616 has its own codeOnly, :659 its own
+      regexLiteralEnd, and :374-379 its own censusWalk and censusFunctions. A diff of the two codeOnly and
+      the two regexLiteralEnd bodies shows they are the same. :23 already imports other names from the
+      helper.
+    Low value, but cheap: delete about 70 lines and add one import.
+    W1-T9736 (queued) also edits the census test, to change how the walk reads property names. This task
+    changes no walk behaviour; it only removes the copies, so W1-T9736 then has one place to change.
+  design: |
+    INVARIANT one-walk: the census and the helper use one codeOnly and one census walk.
+    1. In the census test, delete codeOnly, regexLiteralEnd, censusWalk and censusFunctions, import codeOnly
+       and loopCensusFunctions from the shared helper module, and call loopCensusFunctions where the
+       test called censusFunctions.
+    2. No change to the shared helper module.
+    3. The new test reads the census test source (strings and comments stripped) for the declarations and
+       the import in criteria 1 and 2, and runs the codeOnly cases of criterion 3 against the helper's
+       codeOnly.
+    @not-a-rule-suite: the new test checks the census test's imports; it is not a census, ratchet or baseline.
+  falsifier: |
+    Leave the local copies: criterion 1 fails. Keep a local censusWalk cache: criterion 2 fails. Change the
+    codeOnly output while moving it: criterion 3 fails.
+  note: |
+    Id reserved for run-unfiled-1794837666000 with ~/rmd-work/bin/reserve-id.sh.
+    The census baseline (SYNC_SPAWN_LOOP_BASELINE) must not change in this task.

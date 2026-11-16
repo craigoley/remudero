@@ -124,7 +124,9 @@ function parkedHost() {
   const closed: string[] = [];
   let next = 99000;
   const h: ParkedPrHost = {
-    readTaskShard: (id) => id === TASK ? { relPath: SHARD_REL, text: shard } : undefined,
+    readTaskShard: async (id) => id === TASK
+      ? { outcome: "read", shard: { relPath: SHARD_REL, text: shard }, target: { owner: "o", repo: "remudero", checkoutDir: "/unused/checkout" } }
+      : { outcome: "refused", reason: "task-absent" },
     reserveTaskId: () => `W1-T${++next}`,
     landTaskFiles: async (files) => { landed.push(files.map(f => ({ relPath: f.relPath, content: f.content }))); return { prUrl: "https://github.com/o/remudero/pull/99999" }; },
     closePr: async (prUrl) => { closed.push(prUrl); },
@@ -175,17 +177,17 @@ function sweepWorld(rows: Row[], parked: ParkedPrHost, opts: { behind?: number }
 
 const yamlTask = (content: string) => (parse(content) as Record<string, unknown>[])[0]!;
 
-test("W1-T13046 criterion 2: parkedPrFacts marks only the covered unmet criteria as needing input, and ladder-spent", () => {
+test("W1-T13046 criterion 2: parkedPrFacts marks only the covered unmet criteria as needing input, and ladder-spent", async () => {
   const pr = { prNumber: PR, prUrl: PR_URL, headSha: HEAD, taskId: TASK, unmetCriteria: unmet([CLAIMS[0]!, CLAIMS[1]!]) };
   const { h } = parkedHost();
-  const covered = parkedPrFacts(pr, { redChecks: [], designQuestion: "which store?", fixModelOrder: ["fix"],
+  const covered = await parkedPrFacts(pr, { redChecks: [], designQuestion: "which store?", fixModelOrder: ["fix"],
     designCoverage: { criteria: [CLAIMS[1]!], checks: [] } }, [], h);
   assert.deepEqual(covered.unmetCriteria.map(c => [c.claim, c.needsInput, c.ladderSpent]),
     [[CLAIMS[0], false, false], [CLAIMS[1], true, true]], "the uncovered criterion stays fixable");
   assert.equal(covered.taskCriteria, 3);
-  const legacy = parkedPrFacts(pr, { redChecks: [], designQuestion: "which store?", fixModelOrder: ["fix"] }, [], h);
+  const legacy = await parkedPrFacts(pr, { redChecks: [], designQuestion: "which store?", fixModelOrder: ["fix"] }, [], h);
   assert.deepEqual(legacy.unmetCriteria.map(c => c.needsInput), [true, true], "a row without covers fields keeps today's rule");
-  const checks = parkedPrFacts({ ...pr, unmetCriteria: [] }, { redChecks: [CHECK, "other"], designQuestion: "which store?",
+  const checks = await parkedPrFacts({ ...pr, unmetCriteria: [] }, { redChecks: [CHECK, "other"], designQuestion: "which store?",
     fixModelOrder: ["fix"], designCoverage: { criteria: [], checks: [CHECK, "now green"] } }, [], h);
   assert.deepEqual(checks.designHoldChecks, [CHECK], "only a covered check that is red now counts");
 });
