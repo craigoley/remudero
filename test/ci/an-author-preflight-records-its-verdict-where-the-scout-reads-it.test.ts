@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 
 // @ts-ignore the executable .mjs module has no declaration file.
@@ -15,6 +15,7 @@ import type { GardenerDeps } from "#src/lib/gardener.js";
 import { ledgerPathFor } from "#src/lib/ledger-path.js";
 import * as scout from "#src/lib/scout-gardener.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 type Row = Record<string, unknown> & { run_id: string; task_id: string; step: string };
@@ -117,14 +118,6 @@ function scratch(t: TestContext, kind: string): string {
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   return dir;
 }
-/** A state root whose `state/` exists, as a configured ledger's does. */
-function stateRoot(t: TestContext, kind: string): string {
-  const root = scratch(t, kind);
-  mkdirSync(join(root, "state"));
-  return root;
-}
-const ledgerRows = (root: string): Row[] => !existsSync(ledgerPathFor({ root })) ? []
-  : readFileSync(ledgerPathFor({ root }), "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as Row);
 /** Run `body` with the console held: what it printed to stdout and to stderr, and what it returned. */
 function printed<T>(body: () => T): { out: string[]; err: string[]; value: T } {
   const log = console.log, error = console.error, out: string[] = [], err: string[] = [];
@@ -133,12 +126,8 @@ function printed<T>(body: () => T): { out: string[]; err: string[]; value: T } {
   try { return { out, err, value: body() }; }
   finally { console.log = log; console.error = error; }
 }
-/** A ledger that takes every row: the rows it was given, in order. */
-function takingLedger(root = "/unused-state-root") {
-  const rows: Row[] = [];
-  const context: Context = { ledger: () => ({ root }), append: (row) => { rows.push(row); return { written: true, path: "captured" }; }, log: () => {} };
-  return { rows, context };
-}
+/** The real writer, in this process instead of its bounded child: `main` appends to the ledger the context names. */
+const inProcess = (root: string): Context => ({ ledger: () => ({ root }), append: (row, at) => author.appendAuthorVerdictRow({ root: at, line: row }), log: () => {} });
 
 test("W1-T12842 criterion 1: each outcome maps to one of the three steps and carries the head ref, the task id, the first step and both times", () => {
   assert.deepEqual(author.AUTHOR_VERDICT_STEPS, { passed: "author_preflight.passed", failed: "author_preflight.failed", refused: "author_preflight.refused" });
@@ -177,12 +166,14 @@ test("W1-T12842 criterion 1: each outcome maps to one of the three steps and car
 });
 
 test("W1-T12842 criterion 1: one run appends exactly one row to a real ledger file through the repo's ledger writer", (t) => {
-  const root = stateRoot(t, "real");
+  const ledger = writeLedger([], { dir: join(scratch(t, "real"), "state") });
+  const root = dirname(ledger.dir);
   const lines: string[] = [];
   const result = author.recordAuthorVerdict(RUNS.dependencyRefused, { exitCode: 1, headRef: BRANCH, refusalClass: "dependency-precheck",
     ledger: () => ({ root }), log: (line) => lines.push(line) });
-  assert.deepEqual(result, { written: true, path: ledgerPathFor({ root }) }, lines.join("\n"));
-  const rows = ledgerRows(root);
+  assert.equal(ledger.path, ledgerPathFor({ root }), "the fixture's file is the one a configured root resolves to");
+  assert.deepEqual(result, { written: true, path: ledger.path }, lines.join("\n"));
+  const rows = readFileSync(ledger.path, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as Row);
   assert.equal(rows.length, 1, "exactly one row");
   const [row] = rows;
   assert.equal(row!.step, "author_preflight.refused");
@@ -200,54 +191,52 @@ test("W1-T12842 criterion 1: one run appends exactly one row to a real ledger fi
   author.recordAuthorVerdict(RUNS.passed, { exitCode: 0, headRef: "main", ledger: () => ({ root }), log: () => {} });
   author.recordAuthorVerdict(RUNS.dryRun, { exitCode: 0, headRef: BRANCH, ledger: () => ({ root }), log: () => {} });
   author.recordAuthorVerdict(RUNS.passed, { exitCode: 0, headRef: BRANCH, ledger: () => ({ reason: "no instance config" }), log: () => {} });
-  assert.deepEqual(ledgerRows(root).map((r) => [r.step, r.task_id]), [["author_preflight.refused", "W1-T12842"], ["author_preflight.passed", "CLI"]]);
+  const after = readFileSync(ledger.path, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as Row);
+  assert.deepEqual(after.map((r) => [r.step, r.task_id]), [["author_preflight.refused", "W1-T12842"], ["author_preflight.passed", "CLI"]]);
 });
 
 test("W1-T12842 criterion 1: the preflight's own exit appends one row for a run it refuses, and a run stopped at entry appends one too", (t) => {
   const root = scratch(t, "node-pin");
   writeFileSync(join(root, ".nvmrc"), "0.0.1\n");
-  const taken = takingLedger();
-  const run = printed(() => author.main(["--head-ref", BRANCH], { root, verdictLedger: taken.context }));
+  // Every run below appends through the real writer to this one ledger; the rows are read back once, at the end.
+  const ledger = writeLedger([], { dir: join(scratch(t, "exit-rows"), "state") });
+  const verdictLedger = inProcess(dirname(ledger.dir));
+  const run = printed(() => author.main(["--head-ref", BRANCH], { root, verdictLedger }));
   assert.equal(run.value, 1);
-  assert.equal(taken.rows.length, 1, "exactly one row for the run");
-  assert.equal(taken.rows[0]!.step, "author_preflight.refused");
-  assert.equal(taken.rows[0]!.refusal_class, "node-version");
-  assert.equal(taken.rows[0]!.task_id, "W1-T12842");
-  assert.equal(taken.rows[0]!.head_ref, BRANCH);
-  assert.equal(taken.rows[0]!.first_step, "census-precheck");
-  assert.equal(taken.rows[0]!.exit_code, 1);
-  assert.equal(typeof taken.rows[0]!.wall_ms, "number");
 
   // A memory-pressure refusal at entry never reaches main: {"reasons":["pressure:warning"],"stage":"entry"} on this Mac.
-  const entry = takingLedger();
   let reached = 0;
   const pressure: Admission = { state: "not-run", platform: "darwin", minimumFreeBytes: 10 * GiB, reasons: ["pressure:warning"], capacityChecks: [], pressure: "warning" };
   const refused = printed(() => author.runGuardedAuthor([`--head-ref=${BRANCH}`], { root, readAdmission: () => pressure,
-    runAuthor: () => { reached += 1; return 0; }, verdictLedger: entry.context }));
+    runAuthor: () => { reached += 1; return 0; }, verdictLedger }));
   assert.equal(refused.value, author.OVER_CAPACITY_EXIT);
   assert.equal(reached, 0, "positive control: the entry admission refused before the author ran");
   assert.match(refused.err.join("\n"), /author preflight NOT_RUN: /);
-  assert.equal(entry.rows.length, 1);
-  assert.deepEqual([entry.rows[0]!.step, entry.rows[0]!.first_step, entry.rows[0]!.refusal_class, entry.rows[0]!.exit_code, entry.rows[0]!.task_id],
-    ["author_preflight.refused", "entry", "other", 3, "W1-T12842"]);
-  assert.deepEqual(entry.rows[0]!.capacity_reasons, ["pressure:warning"]);
   // With no declared target the row reads the checkout itself; this scratch directory is no checkout, so it names none.
-  const bare = takingLedger();
-  printed(() => author.runGuardedAuthor([], { root, readAdmission: () => pressure, runAuthor: () => 0, verdictLedger: bare.context }));
-  assert.deepEqual([bare.rows.length, bare.rows[0]!.head_ref, bare.rows[0]!.task_id], [1, null, "CLI"]);
+  printed(() => author.runGuardedAuthor([], { root, readAdmission: () => pressure, runAuthor: () => 0, verdictLedger }));
   // An admitted entry hands the run to main, which appends its own row: the entry adds none.
-  const admitted = takingLedger();
   const ok: Admission = { ...pressure, state: "admitted", reasons: [], pressure: "normal" };
-  assert.equal(printed(() => author.runGuardedAuthor([], { root, readAdmission: () => ok, runAuthor: () => 0, verdictLedger: admitted.context })).value, 0);
-  assert.deepEqual(admitted.rows, []);
+  assert.equal(printed(() => author.runGuardedAuthor([], { root, readAdmission: () => ok, runAuthor: () => 0, verdictLedger })).value, 0);
+
+  const rows = readFileSync(ledger.path, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as Row);
+  assert.equal(rows.length, 3, "exactly one row for each of the three refused runs, and none for the admitted entry");
+  const [fromMain, fromEntry, undeclared] = rows;
+  assert.deepEqual([fromMain!.step, fromMain!.refusal_class, fromMain!.task_id, fromMain!.head_ref, fromMain!.first_step, fromMain!.exit_code],
+    ["author_preflight.refused", "node-version", "W1-T12842", BRANCH, "census-precheck", 1]);
+  assert.equal(typeof fromMain!.wall_ms, "number");
+  assert.deepEqual([fromEntry!.step, fromEntry!.first_step, fromEntry!.refusal_class, fromEntry!.exit_code, fromEntry!.task_id],
+    ["author_preflight.refused", "entry", "other", 3, "W1-T12842"]);
+  assert.deepEqual(fromEntry!.capacity_reasons, ["pressure:warning"]);
+  assert.deepEqual([undeclared!.first_step, undeclared!.head_ref, undeclared!.task_id], ["entry", null, "CLI"]);
 });
 
 test("W1-T12842 criterion 2: invariant:the-verdict-never-depends-on-the-ledger â€” a missing, unwritable or slow ledger leaves the verdict text and exit code unchanged and says so on stderr", (t) => {
   const missingState = scratch(t, "missing");
-  const unwritable = stateRoot(t, "unwritable");
+  const unwritable = scratch(t, "unwritable");
   // A directory where the ledger file belongs: the append fails for any user, with no permission bits involved.
-  mkdirSync(ledgerPathFor({ root: unwritable }));
-  const writable = stateRoot(t, "writable");
+  mkdirSync(ledgerPathFor({ root: unwritable }), { recursive: true });
+  const ledger = writeLedger([], { dir: join(scratch(t, "writable"), "state") });
+  const writable = dirname(ledger.dir);
   const config = join(scratch(t, "config"), "config.json");
   const arms: Array<[string, Context, RegExp | undefined]> = [
     ["a writable ledger", { ledger: () => ({ root: writable }) }, undefined],
@@ -289,14 +278,15 @@ test("W1-T12842 criterion 2: invariant:the-verdict-never-depends-on-the-ledger â
   const foreign = printed(() => author.runAuthorVerdictRowChild(JSON.stringify({ root: writable, line: { run_id: "x", task_id: "CLI", step: "cli.invoked" } })));
   assert.match((JSON.parse(foreign.out[0]!) as Written).reason ?? "", /not an author verdict row/);
   // Positive control: the writable arm really wrote, once; the slow and unwritable arms added nothing beside it.
-  assert.deepEqual(ledgerRows(writable).map((row) => row.step), ["author_preflight.refused"]);
-  assert.deepEqual(ledgerRows(missingState), [], "a missing state directory is never created");
-  assert.equal(existsSync(join(missingState, "state")), false);
+  const written = readFileSync(ledger.path, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as Row);
+  assert.deepEqual(written.map((r) => r.step), ["author_preflight.refused"]);
+  assert.equal(existsSync(join(missingState, "state")), false, "a missing state directory is never created");
 
   // The same holds through the preflight's own exit: a writer that throws changes neither the code nor the lines.
   const root = scratch(t, "node-pin");
   writeFileSync(join(root, ".nvmrc"), "0.0.1\n");
-  const quiet = printed(() => author.main(["--head-ref", BRANCH], { root, verdictLedger: takingLedger().context }));
+  const exits = writeLedger([], { dir: join(scratch(t, "exit-rows"), "state") });
+  const quiet = printed(() => author.main(["--head-ref", BRANCH], { root, verdictLedger: inProcess(dirname(exits.dir)) }));
   const broken = printed(() => author.main(["--head-ref", BRANCH], { root,
     verdictLedger: { ledger: () => ({ root: writable }), append: () => { throw new Error("EIO: i/o error"); } } }));
   assert.equal(broken.value, quiet.value);
@@ -309,12 +299,14 @@ test("W1-T12842 criterion 2: invariant:the-verdict-never-depends-on-the-ledger â
   const sealed = scratch(t, "no-receipt");
   writeFileSync(join(sealed, ".nvmrc"), "0.0.1\n");
   mkdirSync(join(sealed, "coverage/preflight-author.json"), { recursive: true });
-  const unwritten = takingLedger();
-  const noReceipt = printed(() => author.main(["--head-ref", BRANCH], { root: sealed, verdictLedger: unwritten.context }));
+  const noReceipt = printed(() => author.main(["--head-ref", BRANCH], { root: sealed, verdictLedger: inProcess(dirname(exits.dir)) }));
   assert.equal(noReceipt.value, 1);
   assert.match(noReceipt.err.join("\n"), /author receipt could not be written: /, "positive control: the receipt write failed");
   assert.deepEqual(noReceipt.out.filter((line) => line.startsWith("author verdict") || line.startsWith("author push-eligible")), []);
-  assert.deepEqual(unwritten.rows.map((r) => [r.step, r.refusal_class, r.exit_code]), [["author_preflight.refused", "node-version", 1]]);
+  // The quiet run and the run with no receipt each left one row; the run whose writer threw left none.
+  const exitRows = readFileSync(exits.path, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as Row);
+  assert.deepEqual(exitRows.map((r) => [r.step, r.refusal_class, r.exit_code]),
+    [["author_preflight.refused", "node-version", 1], ["author_preflight.refused", "node-version", 1]]);
 });
 
 test("W1-T12842 criterion 2: the configured ledger is the instance config's root, and a test process or a session with no config has none", (t) => {
@@ -384,41 +376,44 @@ test("W1-T12842 criterion 3: a refused or NOT_RUN run carries a refusal class fr
   }
 
   // The refusal sites themselves, each reached through main with Git and the suite line scripted.
-  const site = (root: string, deps: Record<string, unknown>, exitCode = 1) => {
-    const taken = takingLedger();
-    const run = printed(() => author.main(["--head-ref", BRANCH], { root, spawn: scriptedSpawn, select, host, verdictLedger: taken.context, ...deps }));
-    assert.equal(taken.rows.length, 1, run.err.join("\n"));
-    assert.equal(taken.rows[0]!.step, "author_preflight.refused", run.err.join("\n"));
-    assert.equal(run.value, exitCode);
-    assert.equal(taken.rows[0]!.exit_code, exitCode);
-    assert.equal(taken.rows[0]!.head_sha, HEAD);
-    return { row: taken.rows[0]!, err: run.err.join("\n") };
+  // Each appends through the real writer to one ledger, read back once after the last site.
+  const ledger = writeLedger([], { dir: join(scratch(t, "site-rows"), "state") });
+  const verdictLedger = inProcess(dirname(ledger.dir));
+  const site = (root: string, deps: Record<string, unknown>, exitCode = 1): string => {
+    const run = printed(() => author.main(["--head-ref", BRANCH], { root, spawn: scriptedSpawn, select, host, verdictLedger, ...deps }));
+    assert.equal(run.value, exitCode, run.err.join("\n"));
+    return run.err.join("\n");
   };
   const bare = site(authorTree(t, "no-deps", { dependencies: false }), {});
-  assert.match(bare.err, /installed dependency precheck unavailable/, "positive control: the dependency precheck refused");
-  assert.deepEqual([bare.row.refusal_class, bare.row.first_step], ["dependency-precheck", "census-precheck"]);
+  assert.match(bare, /installed dependency precheck unavailable/, "positive control: the dependency precheck refused");
 
   const staticRefused = site(authorTree(t, "static", { dependencies: true }), {
     testSlot: { privateParentPolicy: "require-entry-protection", log: () => {} }, enqueueTestSlot: suiteLine({ outcome: "acquired", concurrency: 1, waitedMs: 0, note: "unused" }) });
-  assert.match(staticRefused.err, /author static stage NOT_RUN/, "positive control: the static stage was not admitted");
-  assert.deepEqual([staticRefused.row.refusal_class, staticRefused.row.first_step], ["static-wait-bound", "static-preflight"]);
+  assert.match(staticRefused, /author static stage NOT_RUN/, "positive control: the static stage was not admitted");
 
   const slots = scratch(t, "slots");
   const slotRefused = site(authorTree(t, "slot", { dependencies: true }), {
     testSlot: { dir: slots, memoryHeadroom: () => 64 * GiB, log: () => {} },
     enqueueTestSlot: suiteLine({ outcome: "wait_bound_exceeded", concurrency: 1, executionAllowed: false, waitedMs: 2_700_000,
       note: "NOT_RUN: private coordination requires an admitted lease (wait_bound_exceeded); waited 2700s" }) });
-  assert.match(slotRefused.err, /author preflight NOT_RUN \(NOT_RUN: private coordination/, "positive control: the suite slot was not admitted");
-  assert.deepEqual([slotRefused.row.refusal_class, slotRefused.row.first_step], ["test-slot-wait-bound", "affected-tests"]);
-  assert.equal(slotRefused.row.admission_wait_ms as number >= 2_700_000, true, "the 45 minutes the run waited for its slot are on the row");
+  assert.match(slotRefused, /author preflight NOT_RUN \(NOT_RUN: private coordination/, "positive control: the suite slot was not admitted");
 
   // A Mac disk-reserve refusal before the static stage: NOT_RUN, exit 3, and no class in the list fits it.
   const short = { state: "not-run", platform: "darwin", minimumFreeBytes: 20 * GiB, reserveBasis: "existing-20GiB", reasons: DISK_REASONS, pressure: "normal",
     capacityChecks: [{ filesystem: "workspaceFreeBytes", requiredFreeBytes: 20 * GiB, observedFreeBytes: 20 * GiB - 13_938_688, shortfallBytes: 13_938_688 }] };
   const diskRefused = site(authorTree(t, "disk", { dependencies: true }), { enqueueTestSlot: suiteLine({ outcome: "acquired", concurrency: 1, waitedMs: 0, note: "unused" }),
     admitHost: (stage: string) => { throw new MacAuthorCapacityRefusal(stage, short); } }, author.OVER_CAPACITY_EXIT);
-  assert.match(diskRefused.err, /author preflight NOT_RUN: Mac author capacity NOT_RUN before static-preflight: /, "positive control: the capacity admission refused");
-  assert.deepEqual([diskRefused.row.refusal_class, diskRefused.row.first_step, diskRefused.row.capacity_reasons], ["other", "static-preflight", DISK_REASONS]);
+  assert.match(diskRefused, /author preflight NOT_RUN: Mac author capacity NOT_RUN before static-preflight: /, "positive control: the capacity admission refused");
+
+  const rows = readFileSync(ledger.path, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as Row);
+  assert.deepEqual(rows.map((r) => [r.step, r.refusal_class, r.first_step, r.exit_code, r.head_sha]), [
+    ["author_preflight.refused", "dependency-precheck", "census-precheck", 1, HEAD],
+    ["author_preflight.refused", "static-wait-bound", "static-preflight", 1, HEAD],
+    ["author_preflight.refused", "test-slot-wait-bound", "affected-tests", 1, HEAD],
+    ["author_preflight.refused", "other", "static-preflight", author.OVER_CAPACITY_EXIT, HEAD],
+  ], "exactly one row for each refused run, with the class its site named");
+  assert.equal(rows[2]!.admission_wait_ms as number >= 2_700_000, true, "the 45 minutes the run waited for its slot are on the row");
+  assert.deepEqual(rows[3]!.capacity_reasons, DISK_REASONS);
 });
 
 test("W1-T12842 criterion 4: the scout's catalogue names the refused and failed rows, and counts the ones the writer really appended", (t) => {
@@ -428,7 +423,8 @@ test("W1-T12842 criterion 4: the scout's catalogue names the refused and failed 
   assert.equal(scout.isFailureShapedStep(author.AUTHOR_VERDICT_STEPS.passed), false, "a passed run is not a symptom");
 
   // Rows appended by the real writer, read back by the scout's real ledger reader.
-  const root = stateRoot(t, "scout");
+  const ledger = writeLedger([], { dir: join(scratch(t, "scout"), "state") });
+  const root = dirname(ledger.dir);
   const now = Date.now(), day = 24 * 3_600_000;
   const append = (run: keyof typeof RUNS, context: Context, daysAgo: number) => {
     const written = author.appendAuthorVerdictRow({ root, line: author.authorVerdictRow(RUNS[run], { headRef: BRANCH, ...context })! },
@@ -442,8 +438,8 @@ test("W1-T12842 criterion 4: the scout's catalogue names the refused and failed 
   append("subsetFailed", {}, 1);
   append("passed", {}, 5);
   append("passed", {}, 1);
-  assert.equal(ledgerRows(root).length, 7, "positive control: seven rows are on disk");
-  const deps: GardenerDeps = { repoRoot: REPO_ROOT, stateDir: join(root, "state"), clock: fixedClock(now), log: () => {},
+  assert.equal(readFileSync(ledger.path, "utf8").split("\n").filter(Boolean).length, 7, "positive control: seven rows are on disk");
+  const deps: GardenerDeps = { repoRoot: REPO_ROOT, stateDir: ledger.dir, clock: fixedClock(now), log: () => {},
     openWorkspace: () => { throw new Error("unexpected workspace"); } };
   const spec = scout.scoutGardenSpec(deps, { clock: fixedClock(now), plan: () => ({ open: [], all: [], shards: new Map() }),
     mergedTasks: () => new Map(), mergedLastDay: () => 5, pricedSteps: () => new Set<string>(), mintTaskId: () => "W1-T99001" });
