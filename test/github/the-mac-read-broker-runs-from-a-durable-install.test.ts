@@ -1,14 +1,15 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import {
-  chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync,
-} from "node:fs";
-import { dirname, join } from "node:path";
-import { test, type TestContext } from "node:test";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { test } from "node:test";
 import { GH_BROKER_HEARTBEAT, ghBrokerDir, ghBrokerDirLive } from "#src/lib/gh-read-broker-client.js";
-import { GH_BROKER_LAUNCH_AGENT, readBrokerHeartbeat } from "#src/lib/gh-read-broker-watch.js";
+import { readBrokerHeartbeat } from "#src/lib/gh-read-broker-watch.js";
 import { GH_BROKER_HEARTBEAT_INTERVAL_S } from "#src/lib/gh-read-broker.js";
-import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
+import {
+  agentProgram, brokerInstallWorld as world, brokerSource, executable, fileLines as lines, installBroker as install, lastServedFrom, launchctlCalls,
+  MAC_BROKER_INSTALLER as INSTALLER, MAC_BROKER_LABEL as LABEL, nextBrokerVersion as nextVersion, snapshotTree as snapshot,
+} from "#test/helpers/mac-read-broker-install-world.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
@@ -19,158 +20,9 @@ import { REPO_ROOT } from "#test/helpers/repo-root.js";
 // and, on bootstrap, runs the agent file's program once the way launchd would. No real launchd, no real
 // ~/Library, no real broker, no network.
 
-const INSTALLER = join(REPO_ROOT, "deploy/mac/install-gh-read-broker.sh");
 const HOOK = join(REPO_ROOT, "hooks/deny-floor.sh");
-const LABEL = "com.remudero.gh-read-broker";
 /** The interval the real broker declares in its heartbeat; a reader calls it stale at twice this. */
 const BEAT_S = GH_BROKER_HEARTBEAT_INTERVAL_S;
-
-const LAUNCHCTL_STUB = `#!/bin/bash
-# Stands in for launchd. Records each call; on bootstrap it notes which copies exist at that moment, then
-# runs the agent file's program once, as launchd would start it.
-state="$STUB_STATE"
-printf '%s\\n' "$*" >> "$state/calls"
-case "\${1:-}" in
-  print-disabled)
-    [ ! -f "$state/disabled" ] || cat "$state/disabled"
-    exit 0 ;;
-  bootstrap)
-    nth="$(grep -c '^bootstrap ' "$state/calls")"
-    ls -A "$HOME/Library/Application Support/remudero/gh-read-broker" > "$state/copies-at-bootstrap.$nth" 2>/dev/null
-    if [ -f "$state/bootstrap-fails" ]; then echo 'Bootstrap failed: 5: Input/output error' >&2; exit 5; fi
-    program="$(sed -n '/<key>ProgramArguments<\\/key>/,/<\\/array>/p' "$3" | sed -n 's/.*<string>\\(.*\\)<\\/string>.*/\\1/p' | sed -n '1p')"
-    "$program" gh-broker serve >> "$state/agent.out" 2>&1 || true
-    exit 0 ;;
-esac
-exit 0
-`;
-
-// The fixture checkout's bin/rmd is the real launcher's last line: it runs the entry through node_modules.
-const FIXTURE_RMD = `#!/bin/bash
-DIR="$(cd -P "$(dirname "$0")/.." && pwd -P)"
-exec "$DIR/node_modules/.bin/tsx" "$DIR/src/run-task.ts" "$@"
-`;
-
-// Stands in for tsx running the broker: it needs the policy file the real CLI reads as it loads, refuses an
-// entry marked BROKEN, and writes the heartbeat the way the broker does (a new file renamed into place).
-const FIXTURE_TSX = `#!/bin/bash
-entry="$1"
-root="$(cd -P "$(dirname "$entry")/.." && pwd -P)"
-[ "\${2:-} \${3:-}" = "gh-broker serve" ] || exit 64
-[ -f "$root/plan/policy.yaml" ] || { echo "no policy file in $root" >&2; exit 1; }
-if grep -q BROKEN "$entry"; then echo "the broker cannot start" >&2; exit 1; fi
-mkdir -p "$HOME/.cache/remudero/gh-broker"
-printf '${BEAT_S}\\n' > "$HOME/.cache/remudero/gh-broker/heartbeat.tmp"
-mv -f "$HOME/.cache/remudero/gh-broker/heartbeat.tmp" "$HOME/.cache/remudero/gh-broker/heartbeat"
-printf '%s\\n' "$root" >> "$STUB_STATE/served-from"
-`;
-
-interface World {
-  home: string;
-  state: string;
-  copies: string;
-  plist: string;
-  heartbeat: string;
-  env: NodeJS.ProcessEnv;
-}
-
-function executable(path: string, text: string): void {
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, text);
-  chmodSync(path, 0o755);
-}
-
-/** A fake account: its HOME, the stub tools first on PATH, and a pace root of its own. */
-function world(t: TestContext): World {
-  const root = ownedFixtureDir(t, "broker-install").dir;
-  const home = join(root, "home");
-  const bin = join(root, "bin");
-  const state = join(root, "stub");
-  for (const dir of [home, bin, state]) mkdirSync(dir);
-  executable(join(bin, "launchctl"), LAUNCHCTL_STUB);
-  executable(join(bin, "codex"), "#!/bin/bash\necho 'codex-cli 0.0.0-fixture'\n");
-  if (process.platform !== "darwin") {
-    // The pace directory's ACL calls are BSD forms (`chmod +a`, `ls -lde`). Off a Mac two shims keep that
-    // unchanged step running: the ACL entry is kept in a file and listed back. Every other call is the real tool.
-    const real = (tool: string): string => spawnSync("sh", ["-c", `command -v ${tool}`], { encoding: "utf8" }).stdout.trim();
-    executable(join(bin, "chmod"), `#!/bin/bash\nif [ "\${1:-}" = "+a" ]; then printf '%s\\n' "$2" >> "$3/.acl"; exit 0; fi\nexec ${real("chmod")} "$@"\n`);
-    executable(join(bin, "ls"), `#!/bin/bash\nif [ "\${1:-}" = "-lde" ]; then ${real("ls")} -ld "$2" || exit 1; [ ! -f "$2/.acl" ] || sed 's/^/ 0: /' "$2/.acl"; exit 0; fi\nexec ${real("ls")} "$@"\n`);
-  }
-  const env: NodeJS.ProcessEnv = {
-    ...process.env, HOME: home, PATH: `${bin}:${process.env.PATH ?? ""}`, STUB_STATE: state,
-    REMUDERO_GH_PACE_ROOT: join(root, "shared", "gh-pace"),
-  };
-  delete env.REMUDERO_RMD_BIN;
-  delete env.REMUDERO_GH_LOGIN;
-  for (const name of ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"]) delete env[name];
-  return {
-    home, state, env,
-    copies: join(home, "Library/Application Support/remudero/gh-read-broker"),
-    plist: join(home, GH_BROKER_LAUNCH_AGENT),
-    heartbeat: join(ghBrokerDir({ HOME: home })!, GH_BROKER_HEARTBEAT),
-  };
-}
-
-/** A small checkout shaped like this one: a launcher, an entry, a policy file, a test tree, and installed (untracked) dependencies. */
-function brokerSource(t: TestContext): GitRepo {
-  const source = gitRepo({ scope: t, kind: "broker-source", seedCommit: false });
-  executable(join(source.dir, "bin/rmd"), FIXTURE_RMD);
-  executable(join(source.dir, "node_modules/.bin/tsx"), FIXTURE_TSX);
-  for (const [path, text] of [
-    ["src/run-task.ts", "// v1\n"], ["plan/policy.yaml", "values: {}\n"], ["test/a.test.ts", "// never copied\n"],
-    ["package.json", "{}\n"], [".gitignore", "node_modules\n"],
-  ] as const) {
-    mkdirSync(dirname(join(source.dir, path)), { recursive: true });
-    writeFileSync(join(source.dir, path), text);
-  }
-  commit(source, "v1");
-  return source;
-}
-
-/** Commits everything tracked or new in the fixture and returns the commit's sha. */
-function commit(source: GitRepo, message: string): string {
-  source.git("add", ".");
-  source.git("commit", "--quiet", "-m", message);
-  return source.git("rev-parse", "HEAD");
-}
-
-/** Rewrites the fixture's entry and commits it: a new source sha. `BROKEN` in the text makes the stub broker fail. */
-function nextVersion(source: GitRepo, text: string): string {
-  writeFileSync(join(source.dir, "src/run-task.ts"), `// ${text}\n`);
-  return commit(source, text);
-}
-
-function install(w: World, source: GitRepo, ...args: string[]): { status: number | null; stdout: string; stderr: string } {
-  const r = spawnSync("/bin/bash", [INSTALLER, "--rmd", join(source.dir, "bin/rmd"), "--login", "octo", ...args], { encoding: "utf8", env: w.env });
-  return { status: r.status, stdout: r.stdout, stderr: r.stderr };
-}
-
-/** The program the installed agent file runs: its first ProgramArguments string. */
-function agentProgram(w: World): string {
-  const args = /<key>ProgramArguments<\/key>\s*<array>\s*<string>([^<]*)<\/string>/.exec(readFileSync(w.plist, "utf8"));
-  assert.ok(args, "the agent file names a program");
-  return args[1]!;
-}
-
-const lines = (path: string): string[] => (existsSync(path) ? readFileSync(path, "utf8").split("\n").filter(Boolean) : []);
-const launchctlCalls = (w: World): string[] => lines(join(w.state, "calls"));
-/** The copy the stub broker last served from, as launchd would have started it. */
-const lastServedFrom = (w: World): string | undefined => lines(join(w.state, "served-from")).at(-1);
-
-/** Every path under `dir` with its size and modification time: what a run that "changes nothing" must leave equal. */
-function snapshot(dir: string): string[] {
-  const out: string[] = [];
-  const walk = (at: string): void => {
-    for (const name of readdirSync(at).sort()) {
-      const path = join(at, name);
-      const st = lstatSync(path);
-      out.push(`${path} ${st.isDirectory() ? "dir" : `${st.size} ${st.mtimeMs}`}`);
-      if (st.isDirectory()) walk(path);
-    }
-  };
-  walk(dir);
-  return out;
-}
 
 test("W1-T12938 criterion 1: the agent runs a private versioned copy under Application Support, and the copy outlives the checkout it came from", (t) => {
   const w = world(t);
