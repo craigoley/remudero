@@ -54,6 +54,8 @@
     a placeholder for EVERY interpolation. Resolve an emitter's template id against that catalog;
     do not trust an arbitrary client string merely because its field is named template. Catalog
     entries and field policies are reviewed code, never inferred by scrubbing runtime values.
+    Both incident-events.ts and sre-lane.ts must call resolveIncidentTemplate from that module
+    before fingerprinting or publication respectively; a test-only importer is insufficient.
     Fingerprint the canonical template identity/literal and static classification, not the rendered
     message, interpolation arguments or their hashes. Any frame/name information retained in the
     basis must come from the source-owned contract, not an unchecked runtime string. Distinct
@@ -84,15 +86,23 @@
     incident feedback. Existing tasks' status fields are not evidence of merge state.
     New tests import through #src/* and #test/*, use the shared repository-root helper, and confirm
     their computed placement with rmd test-place (incident-events and sre-lane map to sre).
+    In incident-template-publication.test.ts, use the four acceptance unit-test titles verbatim.
+    These are future implementation proofs, not claims that the filing ships working templates.
+    Each title must exercise its own claimed behavior through production code and fail against
+    the implementation merge base with the new tests overlaid; a passing sibling is insufficient.
   acceptance:
     - claim: "Changing a short secret, path, branch and free text changes neither a template's fingerprint basis nor any published feedback bytes; distinct templates remain distinct"
-      proof: "unit test: test/sre/incident-template-publication.test.ts"
+      proof: "unit test: W1-T13131 criterion 1: template identity and feedback exclude interpolation values"
     - claim: "HTTP ingest and direct ledger publication refuse missing, unknown and malformed templates without hashing free text or filing, and count each refused input once across repeated passes"
-      proof: "unit test: test/sre/incident-template-publication.test.ts"
+      proof: "unit test: W1-T13131 criterion 2: unresolved templates are refused and counted once"
     - claim: "A valid source-owned template reaches a real temporary plan/feedback file while a worse legacy event is refused, and arbitrary template strings or unsafe metadata never leak"
-      proof: "unit test: test/sre/incident-template-publication.test.ts"
+      proof: "unit test: W1-T13131 criterion 3: a valid template files safely beside a refused legacy event"
     - claim: "invariant:eligible-controls-and-history — Eligible templated incidents retain authorization, body bounds, sampling, pause, pacing and open-work/landed-entry dedupe; refusal leaves historical fingerprints and already-landed feedback unchanged and never initiates a fix"
-      proof: "unit test: test/sre/incident-template-publication.test.ts"
+      proof: "unit test: W1-T13131 criterion 4: eligible controls and historical evidence remain intact"
+    - claim: "HTTP ingest calls the source-owned template resolver before fingerprinting"
+      proof: "grep: resolveIncidentTemplate( in src/lib/incident-events.ts"
+    - claim: "SRE publication calls the source-owned template resolver before feedback capture"
+      proof: "grep: resolveIncidentTemplate( in src/lib/sre-lane.ts"
   falsifier: |
     Restore normalized-message fingerprinting or sampleMessages publication separately: planted
     values change the basis or appear in the temporary feedback YAML, failing the regression.
