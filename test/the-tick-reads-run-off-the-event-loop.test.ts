@@ -17,6 +17,7 @@ import { runSweep, type OpenPrView } from "#test/helpers/sweep-test.js";
 import { runReadPlaneWorker, readPlaneWorkerInput, readPlaneWorkerLog } from "#src/lib/read-plane.worker.js";
 import { boardOpenSnapshotPath } from "#src/lib/board-snapshot-cache.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
+import { createGhCallPacer, DEFAULT_GH_PACE_MIN_GAP_MS } from "#src/lib/github-transport.js";
 
 function fixture() {
   const root = makeTempDir("read-plane");
@@ -49,6 +50,10 @@ function fixtureReader() {
   let listed: number[] = [1, 2];
   let changedFiles = ["src/b.ts"];
   const fileReads: string[] = [];
+  // The producer's own pacer keeps its real gap, on a clock that moves only when the pacer sleeps.
+  let pacedAt = 0;
+  const pace = (ms: number) => { pacedAt += ms; };
+  const pacer = createGhCallPacer({ now: () => pacedAt, sleep: async (ms) => pace(ms), sleepSync: pace });
   const pull = (number: number, merged = false) => ({ number, html_url: `https://github.com/o/r/pull/${number}`,
     state: merged ? "closed" : "open", merged_at: merged ? new Date().toISOString() : null,
     title: `fix(read): implement ${number}`, body: merged ? "" : "Remudero-Task: A",
@@ -71,13 +76,13 @@ function fixtureReader() {
     },
     changedFilesFetch: async (number) => { fileReads.push(number); return changedFiles; },
     commitTrailerIndex: () => new Map(), evidenceRootFor: () => undefined,
-    pacer: { wait: () => {}, waitAsync: async () => {}, recordResult: () => {} },
     issues: { create: () => { throw new Error("write in read plane"); }, listOpen: () => [{
       number: 9, url: "https://github.com/o/r/issues/9", title: "resolved b", body: "**Task:** B",
     }] },
     viewsDeps: { requiredContexts: () => ["ci-gate"], readRequiredContextsAsync: async () => ({ kind: "contexts", contexts: ["ci-gate"] }), readCiGateRequired: () => [], fetchCiFailureEvidence: () => [] },
+    pacer,
   };
-  return { plan, options, io, calls, setListed: (next: number[]) => { listed = next; },
+  return { plan, options, io, calls, pacedMs: () => pacedAt, setListed: (next: number[]) => { listed = next; },
     setFiles: (next: string[]) => { changedFiles = next; },
     fileReads: (number: string) => fileReads.filter((n) => n === number).length };
 }
@@ -113,10 +118,7 @@ test("W1-T4075: the tick reads run off the main thread while a timer keeps firin
 test("the persistent tick reader rotates bounded probes across stable open PRs", async () => {
   const f = fixtureReader();
   f.setListed(Array.from({ length: 9 }, (_, i) => i + 10));
-  const produce = createTickReadProducer(f.options, { ...f.io,
-    // This test exercises local probe rotation against a fake API, not production request pacing.
-    pacer: { wait() {}, recordResult() {}, waitAsync: async () => {} },
-  });
+  const produce = createTickReadProducer(f.options, f.io);
   const visited = new Set<number>();
   try {
     for (let pass = 0; pass < 3; pass++) {
@@ -125,6 +127,20 @@ test("the persistent tick reader rotates bounded probes across stable open PRs",
       for (const number of facts.behindMainByPr.keys()) visited.add(number);
     }
     assert.equal(visited.size, 9);
+  } finally { rmSync(f.options.config.root, { recursive: true, force: true }); }
+});
+
+test("W1-T13129 criterion 1: the tick reads keep the pacer's real gap and wait on no real timer", async (t) => {
+  const f = fixtureReader();
+  f.setListed(Array.from({ length: 9 }, (_, i) => i + 10));
+  const produce = createTickReadProducer(f.options, f.io);
+  const began = performance.now();
+  try {
+    for (let pass = 0; pass < 3; pass++) await produce({ plan: f.plan });
+    const wallMs = performance.now() - began;
+    t.diagnostic(`paced ${f.pacedMs()} ms in ${Math.round(wallMs)} ms of wall time`);
+    assert.ok(f.pacedMs() >= 9 * DEFAULT_GH_PACE_MIN_GAP_MS, `paced ${f.pacedMs()} ms`);
+    assert.ok(wallMs < f.pacedMs(), `took ${Math.round(wallMs)} ms of wall time for ${f.pacedMs()} paced ms`);
   } finally { rmSync(f.options.config.root, { recursive: true, force: true }); }
 });
 

@@ -19,7 +19,7 @@
     - src/lib/sweep.ts
     - src/lib/tick-read-worker.ts
     - test/sweep/a-dependency-hold-on-unchanged-inputs-is-not-judged-again.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Through runSweep, a Dependabot PR that the dep-review lane holds because its checks are pending, whose W1-T9818 escalation is already filed for its head, seen again with the same head, check states, review state and mergeable state, is not judged again: depReview runs once in two passes, and the second pass's sweep.disposed row has acted false and a reason that says the hold's inputs have not changed"
