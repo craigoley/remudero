@@ -1,0 +1,67 @@
+- id: W1-T13184
+  title: "A memory overcommit row is written once per change of its values, not on every recompute, because the repeat check reads the newest row and not the last 400 ledger lines"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: low # a ledger row on the host tuner path; no memory limit changes
+  origin: "operator-session#measurements-2026-11-16"
+  plan_refs:
+    - W1-T11130
+    - W1-T11286
+  files:
+    - deploy/resource-policy.sh
+    - test/deploy/a-memory-overcommit-row-is-written-once-per-change-not-every-recompute.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "With an overcommit row for a container already in the ledger and more than 400 other lines written after it, a recompute with the same formula, own peak, deficit and kept limit appends no row"
+      proof: "grep: W1-T13184 criterion 1 in test/deploy/a-memory-overcommit-row-is-written-once-per-change-not-every-recompute.test.ts"
+    - claim: "A recompute whose formula, own peak, deficit or kept limit differs from the container's newest row appends one row"
+      proof: "grep: W1-T13184 criterion 2 in test/deploy/a-memory-overcommit-row-is-written-once-per-change-not-every-recompute.test.ts"
+    - claim: "invariant:limits-unchanged — memory.max for every container is the same as today's arithmetic for the same peaks, floors and running limits"
+      kind: guard
+      proof: "grep: W1-T13184 criterion 3 in test/deploy/a-memory-overcommit-row-is-written-once-per-change-not-every-recompute.test.ts"
+    - claim: "The repeat check reads a small per-container record beside memory-peak-<container>.json (the last written values), not the ledger, so its cost does not grow with the ledger"
+      proof: "grep: W1-T13184 criterion 4 in test/deploy/a-memory-overcommit-row-is-written-once-per-change-not-every-recompute.test.ts"
+  rationale: |
+    WHY: the host writes the same four overcommit rows again every few minutes. The row is meant to be
+    written once while the values stay the same (deploy/resource-policy.sh:263-265), and W1-T11286 will
+    open an alert issue from these rows, so a repeat would update that issue every few minutes.
+    MEASURED, core ledger (~/rmd-state2/state, 2026-11-15T23:59Z to 2026-11-16T14:28Z):
+    - 623 host.memory_max.overcommitted rows: remudero-serve 168, remudero-daemon 167,
+      remudero-console-daemon 144, remudero-site-daemon 144. Each container has ONE distinct value set all
+      day: daemon formula 16,140 own peak 24,827 kept 24,827; serve -1,308 / 7,379 / 7,680; console
+      -4,616 / 4,071 / 4,071; site -6,239 / 2,448 / 2,448; deficit 8,687 in every row.
+    - In the live ledger the remudero-daemon rows are at lines 12,623, 13,049 and 13,469: 426 and 420
+      lines apart, more than the 400 lines the repeat check reads. The core ledger grows by about 400 lines
+      a minute.
+    - The formula is not wrong. It is MemTotal 32,086 MiB less the 2,048 MiB reserve (30,038 MiB) less the
+      other containers' peaks; the peaks sum to 38,725 MiB, so the deficit is 38,725 - 30,038 = 8,687 MiB for
+      every container, and a container whose peers' peaks exceed the budget gets a negative formula. The
+      site's -6,239 MiB is that arithmetic. While overcommitted each container keeps its own peak or its
+      running limit, as the operator rulings of 2026-11-03 and 2026-11-04 say, so no limit is set from a
+      negative number.
+    READ at origin/main ef8b74910:
+    - deploy/resource-policy.sh:390 last="$(tail -n 400 "${dir}/ledger.ndjson" | grep ... | tail -n 1)";
+      :391 skips the row only when that line holds the same values. With no match in 400 lines, :392 appends.
+    - :458 calls resource_policy_overcommit_row on every recompute (each tuner tick and recycle).
+  design: |
+    INVARIANT limits-unchanged: only the row's repeat check changes; memory.max arithmetic does not.
+    1. resource_policy_overcommit_row keeps memory-overcommit-<container>.json beside the peak record, with
+       the last written formula, own peak, deficit and kept values. It appends a row only when they differ,
+       then rewrites the record atomically (tmp then mv), as resource_policy_record_peak does.
+    2. A missing or unreadable record appends a row and writes the record.
+    3. Tests run the shell function the way the existing
+       test/deploy/each-container-memory-max-comes-from-one-shared-host-budget.test.ts uses.
+  falsifier: |
+    Keep the 400-line tail: criterion 1 fails. Skip every row after the first: criterion 2 fails.
+  note: |
+    Id reserved for run-unfiled-1794838967000 with ~/rmd-work/bin/reserve-id.sh.
+    The host is overcommitted by 8,687 MiB because the core daemon's recorded peak is 24,827 MiB; whether
+    that peak (a high-water mark that includes page cache) should decay is an operator question, not this task.
+    Proof that counts in production: at most one host.memory_max.overcommitted row per container per change
+    of values in a day's ledger.
