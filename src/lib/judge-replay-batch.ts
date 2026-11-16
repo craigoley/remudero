@@ -199,7 +199,7 @@ export function judgeReplayAnswer(item: JudgeReplayCase, message: Record<string,
 export function judgeReplayTypedAnswer(model: string, item: JudgeReplayCase, answer: TypedAnswer): TypedAnswerRow {
   // The expected answer is what the current judge path is pinned to give on this case, so it is the
   // answer agreement is measured against. A single answer gets no outcome-scored figure.
-  return { role: item.role, question: item.question, model, source: "generative", questionType: "choice", options: [...item.options],
+  return { role: item.role, question: item.question, model, modelSurface: "text", source: "generative", questionType: "choice", options: [...item.options],
     inputDigest: createHash("sha256").update(item.prompt).digest("hex").slice(0, 16), answer, incumbent: item.expected, outcome: null };
 }
 
