@@ -20,10 +20,9 @@ import { createHash, randomUUID } from "node:crypto";
 import { execFileLoopBounded } from "../../lib/loop-bounded-child.js";
 import { GATEWAY_FETCH_TIMEOUT_MS } from "../../lib/git-fetch-retry.js";
 import { productionDispatchBreakJudge, productionFixProgressJudge } from "../../lib/sweep.js";
-import { configureGithubInstallationBudget, ghExec, ghJsonAsync, ghTextAsync, takeGithubBudgetThrottles } from "../../lib/github-transport.js";
-import { createInstallationBudget, createInstallationBudgetState, type InstallationBudgetThreadInput } from "../../lib/github-installation-budget.js";
-import { DEFAULT_HOST_INSTANCE_REGISTRY_PATH, installationConsumers, registryInstanceForRepo } from "../../lib/instance-registry.js";
-import { GH_APP_INSTALLATION_ID_ENV } from "../../lib/github-app.js";
+import { ghExec, ghJsonAsync, ghTextAsync, githubInstallationBudget, takeGithubBudgetThrottles } from "../../lib/github-transport.js";
+import type { InstallationBudgetThreadInput } from "../../lib/github-installation-budget.js";
+import { daemonInstallationRegistry, startProcessInstallationBudget } from "../../lib/installation-budget-start.js";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
@@ -69,7 +68,7 @@ import { daemonInstanceRegistryPath } from "../../lib/deployer.js";
 import { DEPENDABOT_REPAIR_SNAPSHOT_MAX_AGE_MS } from "../../lib/dep-review.js";
 import { withEscalationSpoolDrain } from "../../lib/host-escalation-spool.js";
 import { instanceMode, readInstanceRegistryText } from "../../lib/instance-mode.js";
-import { instanceRegistryRuntimePresent, ledgerSelectedRegistryReadTimeouts, runtimeInstanceRegistryText, selectedInstanceRegistryEnvPath, withInstanceRegistryRuntime } from "../../lib/instance-registry-selection.js";
+import { instanceRegistryRuntimePresent, ledgerSelectedRegistryReadTimeouts, selectedInstanceRegistryEnvPath, withInstanceRegistryRuntime } from "../../lib/instance-registry-selection.js";
 import { escalate, escalateWithJudge, realEscalationJudge, ghIssueGateway, ghIssueGatewayAsync, type Escalation, type EscalationJudgeVerdict } from "../../lib/escalate.js";
 import { createGhCallPacer } from "../../lib/open-prs-rest.js";
 import { buildMainHealthRung } from "../../lib/main-health-rung.js";
@@ -888,29 +887,39 @@ function isOpsCatalogSlug(slug: string): boolean {
 /** BACKSTOP: completed private evidence expires even if a successor refresh hangs. */
 export const OPS_DISPATCH_SOURCE_MAX_AGE_MS = 120_000;
 
-export function opsCatalogShadowFeed(source: { refresh(): Promise<OpsCatalogShadowInput> }, clock: Clock = systemClock): {
+/** W1-T13052: the daemon refreshes on its own timer, so evidence stays younger than the bound between slow cycles. */
+export const OPS_DISPATCH_SOURCE_REFRESH_MS = 45_000;
+
+export function opsCatalogShadowFeed(
+  source: { refresh(): Promise<OpsCatalogShadowInput> }, clock: Clock = systemClock, opts: { refreshEveryMs?: number } = {},
+): {
   current(): OpsCatalogShadowInput | undefined;
   forDispatch(): OpsCatalogShadowInput | undefined;
+  stop(): void;
 } {
   let latest: OpsCatalogShadowInput | undefined;
   let completedAt: number | undefined;
   let inFlight = false;
+  const start = (): void => {
+    if (inFlight) return;
+    inFlight = true;
+    // Age counts from the start of the read that produced the evidence, never from its slow answer.
+    const startedAt = clock.now();
+    // refresh() answers failure as an outcome; an unexpected rejection remains unreadable.
+    void source.refresh().then((input) => { latest = input; completedAt = startedAt; }, (error: unknown) => {
+      latest = { outcome: "unreadable" }; completedAt = startedAt; void error;
+    }).finally(() => { inFlight = false; });
+  };
+  const timer = opts.refreshEveryMs === undefined ? undefined : setInterval(start, opts.refreshEveryMs);
+  timer?.unref();
   return {
-    current: () => {
-      if (!inFlight) {
-        inFlight = true;
-        // refresh() answers failure as an outcome; an unexpected rejection remains unreadable.
-        void source.refresh().then((input) => { latest = input; completedAt = clock.now(); }, (error: unknown) => {
-          latest = { outcome: "unreadable" }; completedAt = clock.now(); void error;
-        }).finally(() => { inFlight = false; });
-      }
-      return latest;
-    },
+    current: () => { start(); return latest; },
     forDispatch: () => {
       if (latest?.outcome !== "ok") return latest;
       const age = completedAt === undefined ? NaN : clock.now() - completedAt;
       return !Number.isFinite(age) || age < 0 || age >= OPS_DISPATCH_SOURCE_MAX_AGE_MS ? { outcome: "stale" } : latest;
     },
+    stop: () => { if (timer !== undefined) clearInterval(timer); },
   };
 }
 
@@ -1620,9 +1629,10 @@ export async function daemonCommand(
   }
   // W1-T12239: the first tick's read needs only the token and the plan, so it starts here, before the lifetime
   // history, the lock and the adoption. The outer finally stops a plane that the cleanup list never took.
+  const budgetInput = daemonInstallationBudgetWorkerInput();
   const readOptions: TickReadOptions = {
     owner: target.owner, repo: target.repo, config, ledgerPath, checkoutRoot: targetCheckoutRoot,
-    ... (daemonInstallationBudgetInput === undefined ? {} : { githubInstallationBudget: daemonInstallationBudgetInput }),
+    ...(budgetInput === undefined ? {} : { githubInstallationBudget: budgetInput }),
   };
   let inlineProducer: ReturnType<typeof tickReadProducer> | undefined;
   const readPlane = deps.githubFactory ? undefined : (deps.startReadPlane ?? startReadPlane)({
@@ -2223,7 +2233,8 @@ export async function daemonCommand(
         return current.outcome === "on" && current.repository === opsSourceRepository
           ? source.refresh() : Promise.resolve({ outcome: "stale" as const });
       },
-    }, clockFromMillisFn(deps.now));
+    }, clockFromMillisFn(deps.now), opsSelection.outcome === "on" ? { refreshEveryMs: OPS_DISPATCH_SOURCE_REFRESH_MS } : {});
+    if (opsShadow) cleanup.push({ resource: "ops_catalog_refresh", close: opsShadow.stop });
     opsShadow?.current();
     const readOpsTaskDispatch = opsSelection.outcome === "off" ? undefined : (publicPlan: Plan): OpsTaskDispatchRead => {
       const current = opsDispatchSelection(join(config.root, "state"));
@@ -2999,75 +3010,21 @@ export async function daemonCommand(
   }
 }
 
-export const GITHUB_BUDGET_CONFIGURED_STEP = "github.budget.configured";
-
-let daemonInstallationBudgetInput: InstallationBudgetThreadInput | undefined;
-
 /** The daemon sends the same atomic budget to its read worker in the existing worker input. */
-export function daemonInstallationBudgetWorkerInput(): typeof daemonInstallationBudgetInput {
-  return daemonInstallationBudgetInput;
+export function daemonInstallationBudgetWorkerInput(): InstallationBudgetThreadInput | undefined {
+  return githubInstallationBudget().threadInput();
 }
 
-type DaemonInstallationRegistryRead = { text: string; source: string; omitsInstallationIds?: boolean };
+export { daemonInstallationRegistry };
 
-/**
- * W1-T12553: use the selected registry or the host copy; an unreadable host must reach startup's log.
- * W1-T12670: only a missing host file falls back to the checkout's copy, which names no installation IDs.
- */
-export function daemonInstallationRegistry(repoRoot: string): DaemonInstallationRegistryRead | undefined {
-  const selected = runtimeInstanceRegistryText();
-  if (selected !== undefined) return { text: selected, source: "selected" };
-  try {
-    return { text: readFileSync(DEFAULT_HOST_INSTANCE_REGISTRY_PATH, "utf8"), source: DEFAULT_HOST_INSTANCE_REGISTRY_PATH };
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") throw err;
-  }
-  const checkout = join(repoRoot, ".remudero", "daemon-instances.yaml");
-  return { text: readFileSync(checkout, "utf8"), source: checkout, omitsInstallationIds: true };
-}
-
-/**
- * W1-T12553 — give this daemon its share of the GitHub App installation it shares with the other
- * instances and hand runs. Every pacer in the process reads the budget set here. No installation id,
- * an unreadable registry or no instance on the installation sets no budget, and the row says why.
- */
+/** W1-T12553 — give this daemon its share of the GitHub App installation; the row says why when there is none. */
 export function startDaemonInstallationBudget(
-  readRegistry: () => DaemonInstallationRegistryRead | undefined,
+  readRegistry: () => ReturnType<typeof daemonInstallationRegistry>,
   env: NodeJS.ProcessEnv,
   log: (step: string, extra?: Record<string, unknown>) => void,
   clock: Clock = systemClock,
   targetRepo?: string,
   maxWaitMs?: number,
 ): void {
-  const installationId = env[GH_APP_INSTALLATION_ID_ENV]?.trim();
-  const named = env.RMD_INSTANCE_NAME?.trim();
-  let instance = named || "unknown";
-  let instanceReason = "no_registry";
-  const who = (): Record<string, unknown> => !named && instance === "unknown" ? { instance, instance_reason: instanceReason } : { instance };
-  const unset = (reason: string, extra: Record<string, unknown> = {}): void => {
-    daemonInstallationBudgetInput = undefined;
-    configureGithubInstallationBudget(undefined);
-    log(GITHUB_BUDGET_CONFIGURED_STEP, { outcome: "unconfigured", ...who(), reason, ...extra });
-  };
-  if (!installationId) return unset("no_installation_id");
-  let read: DaemonInstallationRegistryRead | undefined;
-  let consumers: number | undefined;
-  try {
-    read = readRegistry();
-    if (read !== undefined && !named) {
-      const own = targetRepo === undefined ? { reason: "no_target" } : registryInstanceForRepo(read.text, targetRepo);
-      if ("name" in own) instance = own.name;
-      else instanceReason = own.reason;
-    }
-    consumers = read === undefined ? undefined
-      : installationConsumers(read.text, installationId, { countOmitted: read.omitsInstallationIds === true });
-  } catch (err) {
-    return unset("registry_unreadable", { installation_id: installationId, error: err instanceof Error ? err.message : String(err) });
-  }
-  if (read === undefined) return unset("registry_unreadable", { installation_id: installationId });
-  if (consumers === undefined) return unset("no_instance_on_installation", { installation_id: installationId, source: read.source });
-  const state = createInstallationBudgetState();
-  daemonInstallationBudgetInput = { state, consumers, instance, ...(maxWaitMs === undefined ? {} : { maxWaitMs }) };
-  configureGithubInstallationBudget(createInstallationBudget({ consumers, instance, clock, sharedState: state, maxWaitMs }));
-  log(GITHUB_BUDGET_CONFIGURED_STEP, { outcome: "configured", ...who(), installation_id: installationId, consumers, source: read.source });
+  startProcessInstallationBudget({ role: "daemon", readRegistry, env, log, clock, targetRepo, maxWaitMs });
 }

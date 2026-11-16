@@ -23,12 +23,12 @@ const INSTALLATION = "155256285";
 const START_MS = 1_794_600_000_000;
 const RESET_S = START_MS / 1000 + 3600;
 
-/** The host registry's shape: three instances on one installation, one on another, one retired. */
+/** W1-T12950: one instance on the installation, so with the hand-run, run-child and serve shares there are 4 consumers. */
 const HOST_REGISTRY = [
   "instances:",
   "  core:", "    repo: remudero", "    github_repo: craigoley/remudero", `    gh_app_installation_id: "${INSTALLATION}"`,
-  "  site:", "    repo: remudero-site", "    github_repo: craigoley/remudero-site", `    gh_app_installation_id: "${INSTALLATION}"`,
-  "  console:", "    repo: remudero-console", "    github_repo: craigoley/remudero-console", `    gh_app_installation_id: "${INSTALLATION}"`,
+  "  site:", "    repo: remudero-site", "    github_repo: craigoley/remudero-site", '    gh_app_installation_id: "888"',
+  "  console:", "    repo: remudero-console", "    github_repo: craigoley/remudero-console", '    gh_app_installation_id: "888"',
   "  other:", "    repo: other", "    github_repo: someone/other", '    gh_app_installation_id: "999"',
   "  old:", "    repo: old", "    github_repo: craigoley/old", "    retired: true", `    gh_app_installation_id: "${INSTALLATION}"`,
   "",
@@ -101,7 +101,7 @@ afterEach(() => configureGithubInstallationBudget(undefined));
 test("W1-T12553 criterion 1: the allowance is the remaining count less the write reserve, shared by the instances and hand runs", async () => {
   const h = harness();
   const configured = h.rows.find((row) => row.step === "github.budget.configured");
-  // core, site and console share the installation; "other" is on another one and "old" is retired.
+  // core, the hand runs, the run children and serve share the installation; "old" is retired.
   assert.equal(configured?.extra?.consumers, 4);
   assert.equal(configured?.extra?.outcome, "configured");
   assert.equal(githubInstallationBudget().allowance(), undefined, "no reading yet: no allowance limit");
@@ -213,7 +213,7 @@ test("W1-T12553 criterion 5: with no reading, no headers or no registry the pace
 
   const unreadable = harness(() => { throw new Error("EACCES: permission denied"); });
   assert.deepEqual(unreadable.rows.find((row) => row.step === "github.budget.configured")?.extra,
-    { outcome: "unconfigured", instance: "core", reason: "registry_unreadable", installation_id: INSTALLATION, error: "EACCES: permission denied" });
+    { role: "daemon", outcome: "unconfigured", instance: "core", reason: "registry_unreadable", installation_id: INSTALLATION, error: "EACCES: permission denied" });
   unreadable.read(50);
   assert.equal(readsUntilStandDown(unreadable), 200, "an unreadable registry sets no budget");
 
@@ -282,7 +282,7 @@ test("W1-T12553 criterion 1: omitted and empty installation IDs never match an u
   ].join("\n");
   assert.equal(installationConsumers(registry, "999"), undefined);
   assert.equal(installationConsumers(registry, ""), undefined);
-  assert.equal(installationConsumers(registry, INSTALLATION), 2, "one matching instance and one hand-run share");
+  assert.equal(installationConsumers(registry, INSTALLATION), 4, "one matching instance and the hand-run, run-child and serve shares");
 });
 
 test("W1-T12553 criterion 2 and criterion 3: direct and paced ghExecFile reads spend exactly once and writes bypass the reserve", async () => {
@@ -384,7 +384,7 @@ test("W1-T12553 criterion 5: the actual host-registry read propagates failure an
   try {
     const h = harness(() => daemonInstallationRegistry(REPO_ROOT));
     assert.deepEqual(h.rows[0]?.extra, {
-      outcome: "unconfigured", instance: "core", reason: "registry_unreadable",
+      role: "daemon", outcome: "unconfigured", instance: "core", reason: "registry_unreadable",
       installation_id: INSTALLATION, error: failure.message,
     });
     assert.deepEqual(attempted, [DEFAULT_HOST_INSTANCE_REGISTRY_PATH], "no checkout fallback hides host read errors");

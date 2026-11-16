@@ -16,6 +16,8 @@
   files:
     - src/lib/daemon.ts
     - test/daemon.test.ts
+    - "src/lib/run-child.ts"
+    - "src/lib/sweep.ts"
   status: queued
   attempts: 0
   acceptance:

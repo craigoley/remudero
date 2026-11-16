@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
 
-type Reserve = {bytes: number; basis: string};
+type Reserve = {bytes: number; basis: string; row: string | null; measuredPeakBytes: number | null};
 type Admission = {state: string; minimumFreeBytes: number; reserveBasis?: string; reasons: string[]};
 type Workload = {selection?: string; workers?: number};
 const admissionModule = '#scripts/lib/mac-author-admission.mjs';
@@ -53,11 +53,12 @@ test("W1-T10765: a plan-only selection is admitted below 20 GiB free when its me
 });
 
 test("W1-T10765: a full or unmeasured selection still requires 20 GiB", () => {
-  for (const workload of [{selection: 'full-fallback', workers: 1}, {selection: 'over-capacity', workers: 1},
+  // W1-T12953 measured a full fallback's static stage; its whole test stage stays unmeasured.
+  for (const workload of [{selection: 'over-capacity', workers: 1}, {selection: 'over-capacity', workers: 1, overCapacitySubset: true},
     {selection: 'a-selection-nobody-measured', workers: 1}, {}, undefined]) {
     for (const stage of ['static-preflight', 'affected-tests']) {
-      assert.deepEqual(macAuthorReserveBytes({stage, ...workload}), {bytes: MAC_AUTHOR_FREE_RESERVE_BYTES, basis: 'existing-20GiB'},
-        `${stage} ${JSON.stringify(workload)}`);
+      assert.deepEqual(macAuthorReserveBytes({stage, ...workload}), {bytes: MAC_AUTHOR_FREE_RESERVE_BYTES, basis: 'existing-20GiB',
+        row: null, measuredPeakBytes: null}, `${stage} ${JSON.stringify(workload)}`);
       assert.throws(() => guardedAuthorEntry([], {root: '/w', readAdmission: host(16 * GiB), reportRefusal: quiet,
         runAuthor: (_argv, {admitHost}) => { admitHost(stage, workload); return 0; }}),
       (error: unknown) => error instanceof MacAuthorCapacityRefusal && error.stage === stage);
@@ -70,7 +71,7 @@ test("W1-T10765: a full or unmeasured selection still requires 20 GiB", () => {
     MAC_AUTHOR_FREE_RESERVE_BYTES);
   let ran = false;
   guardedAuthorEntry([], {root: '/w', readAdmission: host(MAC_AUTHOR_FREE_RESERVE_BYTES), reportRefusal: quiet,
-    runAuthor: (_argv, {admitHost}) => { admitHost('static-preflight', {selection: 'full-fallback'}); ran = true; return 0; }});
+    runAuthor: (_argv, {admitHost}) => { admitHost('affected-tests', {selection: 'full-fallback', workers: 1}); ran = true; return 0; }});
   assert.equal(ran, true, 'exactly the full reserve still admits a full run');
 });
 
