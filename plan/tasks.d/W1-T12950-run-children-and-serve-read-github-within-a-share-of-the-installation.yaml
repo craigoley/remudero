@@ -24,6 +24,9 @@
     - src/lib/instance-registry.ts
     - src/lib/ledger-steps.ts
     - test/github/run-children-and-serve-read-within-the-installation-share.test.ts
+    - test/github/the-daemon-sets-its-installation-share-from-a-registry-its-container-can-read.test.ts
+    - test/github/the-fleets-app-installation-stays-under-its-hourly-rate-limit.test.ts
+    - src/lib/config-schema.ts
   status: queued
   attempts: 0
   acceptance:
@@ -99,7 +102,16 @@
     5. src/lib/ledger-steps.ts: the github.budget.configured writer list names startProcessInstallationBudget and
        its meaning names the three roles.
     6. Add the focused test file for criteria 1 to 5. Drive runChildMain and the serve start through their
-       production entries with a fake registry file and a gh shim (test/helpers/gh-shim.ts).
+       production entries with a fake registry file and a gh shim (test/helpers/gh-shim.ts) or the
+       transport's own exec seam (the exec argument of ghJsonAsync), which parses the rate-limit headers.
+    7. Two existing test files pin the old consumer count and the old row: the W1-T12553 and W1-T12670
+       files assert installationConsumers as live instances plus 1 (for example 4 for three instances) and
+       deepEqual whole github.budget.configured rows with no role field. Update them to the new count, live
+       instances plus 3, and to the role daemon field. The W1-T12553 file keeps its share arithmetic (4
+       consumers) by putting one instance, not three, on its installation. Change no other assertion in them.
+    8. The share divisor rides the run child's environment as RMD_INSTALLATION_SHARE_DIVISOR. Register it in
+       ENV_REGISTRY in src/lib/config-schema.ts: test/env-var-registry.test.ts requires every RMD_ name in src
+       to be registered.
     NOT IN SCOPE: the Mac read broker; hand runs (they keep the hand-run share); the ETag cache (W1-T12892); the
     run children's cold board walk (W1-T12893).
   falsifier: |

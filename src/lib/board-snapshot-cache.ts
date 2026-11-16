@@ -1,8 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
-import { dirname, join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { dirname, join, sep } from "node:path";
 import type { BoardIssueRest, BoardPrRest } from "./open-prs-rest.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
+import { isTestRunner } from "./live-write-guard.js";
 
 const SNAPSHOT_SCHEMA = 1;
 const DEFAULT_MAX_BYTES = 128 * 1024 * 1024;
@@ -390,6 +392,30 @@ export function readOpenBoardSnapshot(
     return { ok: false, reason: "open snapshot holds an invalid row" };
   }
   return { ok: true, snapshot: { repository, savedAt: parsed.savedAt, rows } };
+}
+
+/** The instance root as loadConfig resolves it (the config file's `root`, else `~/Remudero`), read only:
+ *  the config is never created. Undefined with no config file or no `<root>/state`, and, under the test
+ *  runner, for a root outside the temp directory, so a test never reads or writes a real snapshot. */
+function instanceRoot(env: NodeJS.ProcessEnv): string | undefined {
+  const home = env.HOME || homedir();
+  try {
+    const parsed = JSON.parse(fs.readFileSync(join(home, ".config", "remudero", "config.json"), "utf8")) as { root?: unknown } | null;
+    const root = typeof parsed?.root === "string" && parsed.root !== "" ? parsed.root : join(home, "Remudero");
+    if (!fs.statSync(join(root, "state")).isDirectory()) return undefined;
+    if (isTestRunner(env) && !fs.realpathSync(root).startsWith(fs.realpathSync(tmpdir()) + sep)) return undefined;
+    return root;
+  } catch {
+    // deliberate: no readable config or state directory means no instance; the gateway walks GitHub as before.
+    return undefined;
+  }
+}
+
+/** W1-T12893: the instance's board snapshot, for a board gateway whose caller passed none. */
+export function instanceBoardSnapshotCache(owner: string, repo: string, env: NodeJS.ProcessEnv = process.env,
+  options: SnapshotOptions = {}): BoardSnapshotCache | undefined {
+  const root = instanceRoot(env);
+  return root === undefined ? undefined : createBoardSnapshotCache(root, owner, repo, options);
 }
 
 export function createBoardSnapshotCache(root: string, owner: string, repo: string, options: SnapshotOptions = {}): BoardSnapshotCache {

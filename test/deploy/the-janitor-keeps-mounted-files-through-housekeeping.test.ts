@@ -9,7 +9,7 @@ function mount(fx: Fixture, path: string): void {
   writeFileSync(docker, `#!/usr/bin/env bash
 case "$1" in
   ps) printf 'fixture-container\\n' ;;
-  inspect) printf '%s\\n' '${path}' ;;
+  inspect) case "$*" in *.Name*) printf '/fixture-container\\n' ;; *) printf '%s\\n' '${path}' ;; esac ;;
   *) exit 64 ;;
 esac
 `, { mode: 0o755 });
@@ -132,11 +132,13 @@ test("filesystem aliases of container mounts remain protected while unmounted pe
 test("an unreadable container mount identity keeps file candidates instead of trusting an incomplete snapshot", () => {
   const fx = fixture();
   file(join(fx.scratch, "rmd-idle", "payload")); age(join(fx.scratch, "rmd-idle"));
-  mount(fx, join(fx.root, "missing-mount-source"));
+  const missing = join(fx.root, "missing-mount-source");
+  mount(fx, missing);
   const r = run(fx, { ...scope(fx), RMD_CLEANUP_TMP_GLOBS: "rmd-idle" });
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.equal(readFileSync(join(fx.scratch, "rmd-idle", "payload"), "utf8"), "fixture\n");
-  assert.match(r.stdout, /Docker mount identity unreadable \(fail closed\)/);
+  assert.ok(r.stdout.includes(`HOLD ALL: Docker mount identity unreadable: container=fixture-container source=${missing} read=`), r.stdout);
+  assert.ok(r.stdout.includes(`KEEP ${join(fx.scratch, "rmd-idle")}: Docker mount identity unreadable (see HOLD ALL)`), r.stdout);
 });
 
 test("an unreadable archive destination identity leaves its source transcript while an unmounted peer is reaped", () => {
@@ -150,5 +152,5 @@ test("an unreadable archive destination identity leaves its source transcript wh
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.equal(readFileSync(source, "utf8"), "{}\n");
   assert.equal(existsSync(join(fx.scratch, "rmd-idle")), false, "unmounted positive control");
-  assert.match(r.stdout, /Docker mount identity unreadable \(fail closed\)/);
+  assert.ok(r.stdout.includes(`dangling symlink ${fx.archive} (read=`), r.stdout);
 });

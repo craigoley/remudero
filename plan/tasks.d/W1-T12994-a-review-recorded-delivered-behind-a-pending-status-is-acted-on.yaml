@@ -1,0 +1,59 @@
+- id: W1-T12994
+  title: "A pull request whose review status reads pending while its review is recorded delivered is acted on, so a cannot-evaluate hold with a dead owner is reviewed again and a delivered failure reaches the fix lane"
+  repo: remudero
+  priority: 0.9
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # it decides when a review is run again and when a failed pull request gets a fix round; a wrong release reviews one input twice
+  band_meaning: span
+  origin: "operator-session#pr-queue-root-causes-2026-11-15"
+  plan_refs:
+    - W1-T6047
+    - W1-T8088
+    - W1-T11729
+    - W1-T913
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/a-review-recorded-delivered-behind-a-pending-status-is-acted-on.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "When the newest review.posted row for a head and input is a pending cannot-evaluate hold and its owner is proven dead, the claim's action-time read does not dedup it as delivered: the review runs again, as the walk already decides"
+      proof: "grep: W1-T12994 criterion 1 in test/sweep/a-review-recorded-delivered-behind-a-pending-status-is-acted-on.test.ts"
+    - claim: "When a terminal verdict is recorded delivered for the head and input, a view that still reads pending is settled from that verdict: a failure takes the disposition a failed review takes, and no further review is started for that input"
+      proof: "grep: W1-T12994 criterion 2 in test/sweep/a-review-recorded-delivered-behind-a-pending-status-is-acted-on.test.ts"
+    - claim: "A freshness refusal no longer marks a pending review as refused after it began once a later verdict is recorded for the same head and input"
+      proof: "grep: W1-T12994 criterion 3 in test/sweep/a-review-recorded-delivered-behind-a-pending-status-is-acted-on.test.ts"
+    - claim: "A pass whose disposition says it is re-running the review while its claim dedups writes one row naming the contradiction and its dedup reason on the first such pass, and the disposition text no longer says a review is being re-run"
+      proof: "grep: W1-T12994 criterion 4 in test/sweep/a-review-recorded-delivered-behind-a-pending-status-is-acted-on.test.ts"
+    - claim: "invariant:one-review-per-input — a fresh pending status with a live owner is never taken over or reviewed again, and a head and input with a delivered terminal verdict is never reviewed a second time"
+      proof: "grep: W1-T12994 criterion 5 in test/sweep/a-review-recorded-delivered-behind-a-pending-status-is-acted-on.test.ts"
+  rationale: |
+    OBSERVED 2026-11-15 in the core ledger and on GitHub, read-only, by the operator session.
+
+    CASE A, #18689 (run-W1-T12527, head 9332b814, checks green).
+    - 16:19:36Z `review.post_refused` (stale reviewer code). 16:22:48Z a second review was admitted; 16:23:23Z `review.pending_posted`; 16:28:35Z `review.posted` with state pending and `decision_verdict.cannotEvaluate` true ("reviewer unable: Could not read the PR body"). GitHub's remudero-review status has read PENDING since 16:28:28Z.
+    - Every later pass writes `sweep.disposed` with disposition post-review, `acted` false, `deduped` true, `owner_gone_cause` owner-pid-dead and the reason "checks green, remudero-review owner proven dead — re-running the review lane on #18689". Its `stand_down_reason` is "a verdict was already DELIVERED for input:[W1-T12527, ..., 9332b814..., v2:a7047b50...]". `repeat_streak` was 7 at 18:39:18Z. No review started after 16:22:48Z: over two hours with a green pull request and nothing running.
+    - READ on origin/main 7e98d249df, src/lib/sweep.ts. The walk does not dedup a delivered key while the status reads pending (`deliveredVerdictDedupsPostReview`, W1-T6047). The claim's action-time read does (`claimReview`: `fresh.reviewDelivered.has(reviewKey)` with no pending exception). `reviewDelivered` is folded from `review.posted` rows in any state, a pending hold included. The one exit, `restorableDeliveredVerdict` (W1-T11729), restores only a full success or failure. The repeat bound (default 50) writes a digest row and releases nothing.
+
+    CASE B, #18701 (run-W1-T12231, head 5dd7beb1, checks green).
+    - 17:36:36Z `review.post_refused` (stale reviewer code). 18:04:58Z pending; 18:06:56Z `review.posted` failure, and GitHub's status history shows failure at 18:06:55Z.
+    - 18:14:25Z and 18:16:34Z `sweep.disposed` post-review, `acted` true, `snapshot_age_ms` 8801 and 77789: "the pending review's post was refused after it began (reviewer code cd1e5c686771 is materially behind ...) — re-running the review lane". GitHub shows the same failure posted again at 18:14:31Z and 18:15:41Z. 18:27:56Z the same disposition with `acted` false, `deduped` true and the "already DELIVERED" stand-down.
+    - No fix round was dispatched in the 40 minutes after the failure. #18679 shows the same reason with a FAILURE status on GitHub.
+    - READ: `completedRefusalRetryView` never checks for a verdict recorded after the refusal, and `reviewFreshnessRefusals` keeps the newest refusal per key whatever follows it. The post-review rule needs the view to read pending; why it read pending eight minutes after the failure status is not established.
+  design: |
+    MEASURE FIRST, in process, from these rows: build the two ledgers and views and show the walk's decision, the claim's decision and the row written, for each case. For case B, establish what the view's review state is read from and why it read pending after a failure status existed; if that is a separate defect, report it as its own item.
+
+    1. One rule decides whether a delivered key dedups, shared by the walk and the claim. A pending cannot-evaluate hold whose owner is proven dead does not dedup.
+    2. A delivered terminal verdict settles a pending view: the disposition is derived from the verdict, so a failure reaches the fix lane's rule and nothing is reviewed again.
+    3. A freshness, host-gap or timed-out refusal counts as "refused after it began" only while no later verdict is recorded for the key.
+    4. A walk decision the claim refuses is a contradiction a machine can see on its first pass: write one named row and say what is true in the reason.
+    INVARIANT one-review-per-input: no fresh pending with a live owner is taken over, and no head and input with a delivered terminal verdict is reviewed twice; W1-T913's idempotence holds for every other path.
+    NOT IN SCOPE: when reviewer code counts as materially behind (W1-T12824); how a cannot-evaluate verdict is produced; the repeat bound's value.
+  falsifier: |
+    Dedup the pending cannot-evaluate hold in the claim and criterion 1 must fail. Start a review for a head with a delivered failure and criterion 2 must fail. Let an older refusal mark the review refused after a later verdict and criterion 3 must fail. Write no row when the claim refuses the walk and criterion 4 must fail. Take over a fresh pending with a live owner and criterion 5 must fail. Restore and all pass.
+  note: |
+    reservation hand-off: run-unfiled-1794763854161 -> run-unfiled-1794763854161
+    Reserved with rmd next-task-id from a worktree at origin/main. Check refs/rmd-dispatch/W1-T12994 and any run branch before building. The test folder is the one rmd test-place computed for a stub importing src/lib/sweep.ts. #18689 and #18701 are the live cases; check whether each still stands before building.
