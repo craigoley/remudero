@@ -743,7 +743,7 @@ test("W1-T9114: the production host starts a review as a child only where the le
     const askRetro = (h: ReturnType<typeof host>) => h.spawnRetro({ decision });
     const beforeRetro = spawned.length;
     const retroLaunch = await askRetro(host("on", retroWaited));
-    assert.ok(retroLaunch);
+    if (!retroLaunch || "abandoned" in retroLaunch) assert.fail("the hosted retro child should start");
     assert.equal(retroLaunch.pid, 1, "the spawned retro launch preserves the process id for daemon overrun observations");
     assert.equal(spawned.at(-1)!.lane, "retro");
     assert.equal(spawned.at(-1)!.taskId, "DAEMON");
