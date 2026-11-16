@@ -1,0 +1,54 @@
+- id: W1-T13156
+  title: "In the light pass a head whose red is already fixed on main, and a no-commit fix that waits for a branch update, enter the refresh admission instead of standing still"
+  repo: remudero
+  priority: 1.0
+  depends_on: [W1-T12945]
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # it changes which open pull requests the daemon's own pass refreshes, and each refresh re-runs CI
+  band_meaning: span
+  origin: "operator-session#pr-queue-root-causes-2026-11-16"
+  plan_refs:
+    - W1-T12945
+    - W1-T9595
+    - W1-T8396
+    - W1-T528
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/a-light-pass-head-whose-red-main-already-fixed-enters-the-refresh-admission.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "In the daemon's light pass a head whose failing test files are already fixed on main, with the reproduction clear, enters the pass's whole-snapshot refresh selection, and its disposition no longer reads that the branch refresh is unwired"
+      proof: "grep: W1-T13156 criterion 1 in test/sweep/a-light-pass-head-whose-red-main-already-fixed-enters-the-refresh-admission.test.ts"
+    - claim: "In the light pass a no-commit CI fix that waits for a branch update for the moved main enters the same selection, and its disposition names the hand-off instead of a gateway that the pass does not have"
+      proof: "grep: W1-T13156 criterion 2 in test/sweep/a-light-pass-head-whose-red-main-already-fixed-enters-the-refresh-admission.test.ts"
+    - claim: "One head and cause is pressed at most once, and a refresh that does not take, or the same red on the head a refresh produced, keeps today's next step for that head with its cause named"
+      proof: "grep: W1-T13156 criterion 3 in test/sweep/a-light-pass-head-whose-red-main-already-fixed-enters-the-refresh-admission.test.ts"
+    - claim: "invariant:one-refresh-selection — the light pass's per pull request fan-out still presses no branch update, and every press for these two causes goes through the whole-snapshot selection with its admission, its value test and its incident hold"
+      proof: "grep: W1-T13156 criterion 4 in test/sweep/a-light-pass-head-whose-red-main-already-fixed-enters-the-refresh-admission.test.ts"
+  rationale: |
+    FOUND 2026-11-16 by the builder of W1-T12945 while reading src/lib/sweep.ts, then MEASURED the same day by the operator session, read-only, in the core ledger's rotated files.
+
+    - W1-T12945 routes two causes from the light pass's fan-out to its refresh admission: a head missing its own task record, and a base-red head whose failing check is green on main. The fan-out is built with no branch update (W1-T528), so any other arm that needs a refresh still stands still there.
+    - MEASURED over the 58 rotated ledger files from 2026-11-15T00:36Z to 2026-11-16T13:10Z, 5,796 `sweep.disposed` rows:
+      - 10 rows read "... NOT DISPATCHED this pass: failing test file(s) <path> already fixed on main <sha>; the branch refresh is unwired on this surface (light pass)". Seen from 05:14Z to 16:33Z on 2026-11-15, on heads red in rule-checks, coverage-shard and required checks.
+      - 5 rows read "... NOT DISPATCHED this pass: no-commit CI fix awaits a branch-update gateway for the moved main". Seen from 01:53Z to 02:47Z on 2026-11-16.
+      - POSITIVE CONTROL, same query: the two causes W1-T12945 routes read 5 and 26 rows, so the query saw its corpus.
+      - NOT OBSERVED in that window, and so not in this task: "deferred to full sweep (update-branch not available on this pass)" (0 rows) and the stalled-stage "branch refresh unavailable" text (0 rows).
+    - Each such row is a pass in which a head that one refresh would clear got neither a refresh nor a fix. The full pass does refresh these, but the daemon's own passes are light.
+  design: |
+    MEASURE FIRST: for the 15 rows above, list the pull requests, how many light passes each stood still, and what finally moved each one (a full pass, a hand refresh, a merge of main by its author). Put the table in the PR body. If every one was cleared by the next full pass within one pass interval, say so: the task is then worth less than it looks and the PR says that plainly.
+
+    1. The base-fixed arm with the reproduction clear, and the no-commit fix that waits for a branch update, hand the head to `runLightPassRefreshAdmission` the way W1-T12945 hands its two causes: the fan-out names the head and presses nothing.
+    2. Each press passes the existing `createRefreshAdmission`, the refresh value test and the Actions incident hold, and is recorded once per head and cause with the rows those arms already write on the full surface.
+    3. A refresh that does not take, or the same red on the refreshed head, keeps the step that arm takes today (the strike, the fix round or the escalation), with its cause named.
+    INVARIANT one-refresh-selection: no branch update is pressed from the per pull request fan-out of a light pass; every press is the whole-snapshot selection's.
+    NOT IN SCOPE: the two texts not observed above; W1-T9595's replay of heads a full pass left waiting; what the full surface does; how many refreshes a pass may press.
+  falsifier: |
+    Leave the base-fixed cause out of the selection and criterion 1 must fail. Leave the no-commit cause out and criterion 2 must fail. Press the head a refresh produced again and criterion 3 must fail. Wire a branch update into the fan-out and criterion 4 must fail. Restore and all pass.
+  note: |
+    reservation hand-off: run-unfiled-1794835016375 -> run-unfiled-1794835016375
+    Reserved with rmd next-task-id from a worktree at origin/main. Build after W1-T12945 merges: it adds the hand-off this extends. The test folder is the one rmd test-place computed for W1-T12945's suite, which this one sits beside. Reach the production hook through #test/helpers/run-task-test.js as that suite does, never through src/run-task.ts.
