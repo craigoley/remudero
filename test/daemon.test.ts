@@ -4414,6 +4414,7 @@ test("W1-T11790 criterion 1: a spawned retro's overrun row includes its child pi
   assert.equal(detachedActionInFlight("retro"), true, "observing the overrun does not stop the retro");
   release();
   await drainDetachedSweepActions({ boundMs: 5000 });
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(detachedActionInFlight("retro"), false);
 });
 
