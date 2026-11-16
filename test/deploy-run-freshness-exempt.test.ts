@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -50,7 +50,22 @@ escapedRejectionHandler = process.listeners("unhandledRejection").at(-1) as
   | ((reason: unknown) => void)
   | undefined;
 
+// W1-T12527: the deploy-run cases below set HOME (and clear the instance-registry selectors) so the
+// in-process `main()` reads nothing from the host it runs on. Snapshot those values once, restore
+// them after every case, and again in `after()` as the backstop.
+const ISOLATED_ENV_KEYS = ["HOME", "RMD_SELECTED_INSTANCE_REGISTRY", "RMD_INSTANCE_REGISTRY"] as const;
+const originalEnv: Record<string, string | undefined> = Object.fromEntries(
+  ISOLATED_ENV_KEYS.map((key) => [key, process.env[key]]),
+);
+function restoreIsolatedEnv(): void {
+  for (const key of ISOLATED_ENV_KEYS) {
+    if (originalEnv[key] === undefined) delete process.env[key];
+    else process.env[key] = originalEnv[key];
+  }
+}
+
 after(() => {
+  restoreIsolatedEnv();
   assert.deepEqual(
     escapedReasons.map((r) => String((r as Error)?.stack ?? r)),
     [],
@@ -128,8 +143,41 @@ async function runVerbUnderRefusal(
 }
 
 // ── VALIDATION 4: deploy-run ENTERS its own logic ────────────────────────────────────
-test("deploy-run on a behind-and-dirty checkout is NOT refused by the entry gate — it reaches its own logic", async (t) => {
-  const r = await runVerbUnderRefusal(t, ["deploy-run", "--dry-run"]);
+/** W1-T12527: runs `main()` for `deploy-run --dry-run` with HOME, the instance config and the state
+ *  root all under a temp dir, so `deployRunCommand` stops at its own no-op (no install checkout under
+ *  the empty state root) before any host config, install root, launchd/process-table or ledger read.
+ *  `homeFor` picks HOME: a fresh empty dir, or a path that fails on any read. The environment is
+ *  restored in `finally`, whatever happens. */
+async function runDeployRunIsolated(
+  t: { mock: { method: typeof import("node:test").mock.method } },
+  homeFor: (scratch: string) => string,
+): Promise<Awaited<ReturnType<typeof runVerbUnderRefusal>> & { logs: string[]; home: string }> {
+  const scratch = mkdtempSync(join(tmpdir(), "rmd-w1-t12527-"));
+  const stateRoot = join(scratch, "state-root");
+  mkdirSync(stateRoot);
+  const home = homeFor(scratch);
+  const logs: string[] = [];
+  t.mock.method(console, "log", (...a: unknown[]) => {
+    logs.push(a.map(String).join(" "));
+  });
+  process.env.HOME = home;
+  delete process.env.RMD_SELECTED_INSTANCE_REGISTRY;
+  delete process.env.RMD_INSTANCE_REGISTRY;
+  try {
+    const r = await runVerbUnderRefusal(t, ["deploy-run", "--dry-run", "--state-root", stateRoot]);
+    return { ...r, logs, home };
+  } finally {
+    restoreIsolatedEnv();
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+test("W1-T12527 criterion 1: deploy-run on a behind-and-dirty checkout is NOT refused by the entry gate — it reaches its own logic without reading the host", async (t) => {
+  const r = await runDeployRunIsolated(t, (scratch) => {
+    const home = join(scratch, "home");
+    mkdirSync(home);
+    return home;
+  });
 
   // THE ASSERTION THAT MATTERS: the gate's refusal message never appears, so execution
   // continued past run-task.ts:10890 into deployRunCommand rather than exiting there.
@@ -141,6 +189,41 @@ test("deploy-run on a behind-and-dirty checkout is NOT refused by the entry gate
     !r.errs.some((e) => e.includes("refusing to auto-sync")),
     "the circular refusal is gone",
   );
+  // deployRunCommand's own no-op answered, from the temp state root alone.
+  assert.ok(
+    r.logs.some((l) => l.includes("### rmd deploy-run — no-op")),
+    `deployRunCommand must have run to its own no-op; stdout was ${JSON.stringify(r.logs)}`,
+  );
+});
+
+test("W1-T12527 criterion 2: HOME and the instance config on a path that fails on any read give the same result", async (t) => {
+  // HOME is a regular FILE, so `<HOME>/.config/remudero/config.json` fails ENOTDIR on every read.
+  const r = await runDeployRunIsolated(t, (scratch) => {
+    const home = join(scratch, "home-is-a-file");
+    writeFileSync(home, "not a directory\n", "utf8");
+    return home;
+  });
+
+  assert.ok(r.reached, `the freshness refusal must NOT fire for deploy-run; stderr was ${JSON.stringify(r.errs)}`);
+  assert.ok(
+    r.logs.some((l) => l.includes("### rmd deploy-run — no-op")),
+    `an unreadable HOME must not change the outcome; stdout was ${JSON.stringify(r.logs)}`,
+  );
+  // No escaped rejection: the file's own guard recorded none (after() fails the file otherwise).
+  assert.deepEqual(escapedReasons, []);
+});
+
+test("W1-T12527 criterion 3: the deploy-run cases leave the host environment as they found it", async (t) => {
+  // The same cases pass on any host because each one supplies its own HOME, config and state root;
+  // what they must not do is leak that HOME into the next case or the process.
+  await runDeployRunIsolated(t, (scratch) => {
+    const home = join(scratch, "home");
+    mkdirSync(home);
+    return home;
+  });
+  for (const key of ISOLATED_ENV_KEYS) {
+    assert.equal(process.env[key], originalEnv[key], `${key} is restored after the isolated deploy-run case`);
+  }
 });
 
 // ── VALIDATION 7: REGRESSION LOCK — every other verb still refuses ───────────────────

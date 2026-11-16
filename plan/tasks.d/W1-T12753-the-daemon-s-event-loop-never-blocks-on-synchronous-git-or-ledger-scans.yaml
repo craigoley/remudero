@@ -22,7 +22,7 @@
     - test/daemon/the-daemon-loop-never-blocks-on-worktree-git-or-ledger-scans.test.ts
     - test/an-unattributed-loop-stall-is-profiled-live.test.ts
     - test/a-stall-profile-names-the-sync-spawns-the-meter-saw.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "routeAdaptiveLifetimePressure, driven through productionLifetimePressureHook on a ledger directory of at least 50 MB of archives and a live ledger, reads the live rows and the archived verify-human verdict rows through the async ledger reader: a 50 ms timer started before the call fires at least once in every 500 ms of the call"

@@ -18,7 +18,7 @@
     - src/lib/task-linter.ts
     - test/lint-plan-fast-scopes-to-the-merge-base.test.ts
     - test/plan/a-metadata-only-edit-to-a-task-filed-before-the-invariant-rule-is-not-refused.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "In the changed-task pass of rmd lint-plan --base, a task that exists at the base with byte-identical design text and identical acceptance claims and proofs, and whose design carries no INVARIANT or NO-INVARIANTS line, gets no design-invariant-proof violation when only its priority, verify, risk_ruling, status, attempts, note or depends_on changed"
