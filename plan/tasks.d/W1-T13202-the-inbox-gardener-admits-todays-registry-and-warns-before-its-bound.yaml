@@ -17,7 +17,7 @@
     - src/lib/inbox-gardener.ts
     - test/gardeners/the-inbox-gardener-admits-todays-registry-and-warns-before-its-bound.test.ts
     - test/the-inbox-gardener-admits-a-bounded-production-sized-registry.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A registry of 2,343 proposals and 2,448,321 bytes, the production size on 2026-11-16, is captured and judged by a pass instead of throwing \"Inbox proposal population exceeds verification bound\" or the registry byte bound"

@@ -15,7 +15,7 @@
     - W1-T13157
   files:
     - test/w1-t5319-the-acr-login-refreshes-itself-and-escalates-when-it-cannot.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Every script the suite's fixture starts runs with TMPDIR inside the fixture's own root, so a beat it runs measures no temp entry of the host"

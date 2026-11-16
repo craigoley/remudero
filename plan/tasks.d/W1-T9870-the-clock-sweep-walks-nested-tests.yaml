@@ -14,7 +14,7 @@
     - scripts/clock-sweep.mjs
     - scripts/clock-sweep-baseline.json
     - test/the-clock-sweep-walks-nested-tests.test.ts
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

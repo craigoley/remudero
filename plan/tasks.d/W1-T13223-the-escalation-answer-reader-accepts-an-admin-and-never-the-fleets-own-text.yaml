@@ -18,7 +18,7 @@
     - test/a-humans-answers-that-keep-being-ignored-raise-one-alarm.test.ts
     - test/inbox/escalation-answer-errors-name-the-failing-stage.test.ts
     - test/inbox/the-escalation-answer-reader-accepts-an-admin-and-never-the-fleets-own-text.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A non-bot comment whose author holds admin permission on the repository is accepted as an operator answer whether or not operatorGithubLogins is configured, and its panel.question_answered row names authority repository-admin"

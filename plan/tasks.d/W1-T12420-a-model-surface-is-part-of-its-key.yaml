@@ -26,7 +26,7 @@
     - src/lib/judge-calibration.ts
     - docs/model-routing.md
     - test/review/a-model-surface-is-part-of-its-key.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A 404 marks a deployment absent only on the model surface that got it. After a decisions request to the deployment gpt-6-luna answers 404, openWeightDeploymentReady still reads the worker deployment gpt-6-luna as ready"
