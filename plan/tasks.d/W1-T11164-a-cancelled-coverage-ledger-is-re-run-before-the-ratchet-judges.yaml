@@ -1,7 +1,7 @@
 - id: W1-T11164
   title: A coverage-ledger job cancelled at its ceiling is re-run once at the same head before coverage-ratchet's red reaches a fix round, because the job had finished its own steps in 19 s and was cancelled in finalization, on code and plan pull requests alike
   repo: remudero
-  depends_on: []
+  depends_on: [W1-T13175]
   priority: 2
   type: implement
   verify: auto
@@ -17,17 +17,14 @@
     - W1-T3345
     - W1-T11161
   files:
-    - .github/workflows/ci.yml
     - src/lib/sweep.ts
     - test/sweep/a-cancelled-coverage-ledger-is-re-run-before-coverage-is-judged.test.ts
   status: queued
   attempts: 0
   acceptance:
-    - claim: When the coverage-shard matrix is skipped and needs.coverage-ledger.result is cancelled, the coverage-ratchet aggregator fails with a distinct line naming coverage-ledger-cancelled and the run's head, not the generic never-ran text; any other skipped matrix keeps today's message and exit
-      proof: "unit test: test/sweep/a-cancelled-coverage-ledger-is-re-run-before-coverage-is-judged.test.ts"
     - claim: A pull request whose red at its current head is that named coverage-ledger cancellation is re-run once through the sweep's existing rerunFailedChecks gateway (rerun-failed-jobs on that workflow run) before any fix worker is dispatched for it, and the claim row keeps a second pass from re-running the same head again
       proof: "grep: W1-T11164 criterion 2 in test/sweep/a-cancelled-coverage-ledger-is-re-run-before-coverage-is-judged.test.ts"
-    - claim: A second coverage-ledger cancellation at the same head after that re-run is not re-run again; it reaches the ordinary blocked-CI path with the cancellation named, so a persistently cancelling job is visible rather than retried forever
+    - claim: "invariant:one-rerun-per-head — A second coverage-ledger cancellation at the same head after that re-run is not re-run again; it reaches the ordinary blocked-CI path with the cancellation named, so a persistently cancelling job is visible rather than retried forever"
       proof: "grep: W1-T11164 criterion 3 in test/sweep/a-cancelled-coverage-ledger-is-re-run-before-coverage-is-judged.test.ts"
   rationale: |
     MEASURED 2026-11-02/03 over the last 30 completed pull_request runs of ci.yml (GitHub REST through the broker; read-only),
@@ -51,17 +48,38 @@
     then spends the one rerunFailedChecks receipt.
     SECURITY GATES ARE UNTOUCHED: security-merge-policy and CodeQL and their required contexts are not in files:.
   design: |
-    1. coverage-ratchet-required's skipped arm reads needs.coverage-ledger.result. Cancelled prints
-       "coverage-ratchet: coverage-ledger-cancelled — the coverage ledger job was cancelled at its ceiling at <head>; the matrix never
-       ran (W1-T11164)" and exits 1. W1-T11161's evidenced PLAN_ONLY pass, where merged, is asked first and is unchanged.
+    1. MOVED to W1-T13175 (see AMENDED below): coverage-ratchet-required's skipped arm prints the coverage-ledger-cancelled line.
     2. The sweep's blocked-CI rung reads that token from the failing coverage-ratchet check's output title (the rollup's check title the
        sweep already maps) and, when it is the only failing required cause at the current head, claims a sweep.disposed receipt
        (ledger_cancel_rerun_attempted) and calls rerunFailedChecks, the same gateway the no-commit rerun uses. It does this before fix
        dispatch, once per head.
     3. With the receipt present at that head, the rung does nothing new: the existing path runs and its stand-down names the cancellation.
+    INVARIANT one-rerun-per-head: the rung re-runs a named coverage-ledger cancellation at most once per head; with its receipt present
+    at that head it changes nothing, and the existing blocked-CI path decides.
+    AMENDED 2026-11-16 (operator session): step 1 (the skipped arm of coverage-ratchet-required prints the coverage-ledger-cancelled
+    line), the first criterion as filed and the falsifier's sentence about the never-ran text moved to W1-T13175, and
+    `.github/workflows/ci.yml` left `files:`. Why: the daemon never dispatches a task whose `files:` names a path under
+    .github/workflows/ (W1-T5351, `workflowPaths` in src/lib/drain.ts: the fleet App cannot push a workflow file), so this whole
+    task waited for an operator build that nothing announced. An operator session hand-builds W1-T13175.
+    THE ORDER IS THE WORKFLOW HALF FIRST, so this task now depends on W1-T13175. Steps 2 and 3 read a token that only that
+    step prints. Built before it, the rung is dormant: it matches nothing on any pull request, and its tests would prove
+    a reader of text that no run produces. The two criteria that stay are the ones filed second and third; their proofs keep
+    the names `W1-T11164 criterion 2` and `W1-T11164 criterion 3`.
+    READ at origin/main ef8b74910f, so neither half is done:
+    - .github/workflows/ci.yml:2120 already hands the gate step `LEDGER_RESULT: ${{ needs.coverage-ledger.result }}` (7dd14a2178,
+      #16425, W1-T11161, 2026-11-03), but the `skipped)` arm (:2216) uses it only inside the PLAN_ONLY line and otherwise
+      prints `coverage-ratchet: the shard matrix never ran (matrix result: skipped)` (:2222) whatever the ledger job's result.
+    - `git grep -n -e 'coverage-ledger-cancelled' -e 'ledger_cancel_rerun_attempted'` finds no line outside plan/, and the
+      suite this task names does not exist.
+    - The sweep already reads coverage-ratchet's text from a failing check's log tail, for example src/lib/sweep.ts:6759
+      `if (!/SHARD HANG\W+the matrix was cancelled/.test(tail)) return undefined;`, so a line the gate step prints is
+      readable to step 2 without any new transport. W1-T13175 pins the exact text; read its record before writing the matcher.
+    The INVARIANT line above and the `invariant:` prefix on the last criterion are new, for the lint rule
+    design-invariant-proof; they restate step 3 and add no behaviour.
   falsifier: |
-    At origin/main a pull request whose coverage-ledger job was cancelled after its steps succeeded shows coverage-ratchet "the shard
-    matrix never ran", and nothing re-runs that job until a fix round has been dispatched and committed nothing.
+    At origin/main nothing re-runs a coverage-ledger job that was cancelled after its steps succeeded until a fix round has been
+    dispatched and committed nothing. Take the receipt check out of the rung and the last criterion must fail: the same head is
+    re-run a second time.
   note: |
     Reserved with rmd next-task-id --branch plan-file-1793665615994. Distinct from W1-T11161 (#16332): that task makes an evidenced
     plan-only diff not applicable; this one re-runs the cancelled prerequisite for every diff, code included.
