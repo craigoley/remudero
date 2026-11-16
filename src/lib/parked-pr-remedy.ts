@@ -2,6 +2,8 @@ import { posix } from "node:path";
 import { isMap, isSeq, parseDocument, stringify } from "yaml";
 
 import { stallLadderSpent, stallRemedyRows } from "./fix-progress-judge.js";
+import { isInPlanScope } from "./plan-scope.js";
+import { resolveRepoLayout } from "./repo-layout.js";
 import type { PrBlocker } from "./pr-blocker.js";
 
 /**
@@ -71,7 +73,7 @@ export interface ParkedPrTarget { owner: string; repo: string; checkoutDir: stri
 /** A task file and the repository that holds it, or the reason the remedy cannot read it. */
 export type ParkedPrShardRead =
   | { outcome: "read"; shard: ParkedPrShard; target: ParkedPrTarget }
-  | { outcome: "refused"; reason: string };
+  | { outcome: "refused"; reason: string; target?: ParkedPrTarget };
 /** The answer of the sweep's taskFileRepository: the task and the repository that holds its file, or a reason. */
 export type ParkedPrResolution =
   | { outcome: "unreadable"; reason: string }
@@ -87,12 +89,14 @@ export function readParkedPrShard(resolution: ParkedPrResolution, read: (checkou
   if (resolution.task === undefined) return { outcome: "refused", reason: "task-absent" };
   const shard = read(resolution.target.checkoutDir);
   return shard === undefined
-    ? { outcome: "refused", reason: `the task file cannot be read in ${resolution.target.owner}/${resolution.target.repo}` }
+    ? { outcome: "refused", reason: `the task file cannot be read in ${resolution.target.owner}/${resolution.target.repo}`, target: resolution.target }
     : { outcome: "read", shard, target: resolution.target };
 }
 
 /** The file writes and the one GitHub write a remedy makes. The sweep's production effects wire each one. */
 export interface ParkedPrHost {
+  /** The pull request's repository, for a plan filing with no task in either catalog. */
+  planFilingTarget?: ParkedPrTarget;
   /** W1-T13048: the task file from the repository that holds it (readParkedPrShard). */
   readTaskShard(taskId: string): Promise<ParkedPrShardRead>;
   /** R3: an id from reservePlanRepairTaskId, for the landing branch of `target`. */
@@ -101,6 +105,8 @@ export interface ParkedPrHost {
   landTaskFiles(files: readonly { relPath: string; content: string; claim: string; proof: string }[], target: ParkedPrTarget):
     Promise<{ prUrl?: string; error?: string }>;
   closePr(prUrl: string, comment: string): Promise<void>;
+  /** W1-T13047: the paths the pull request adds or changes, for a plan filing rebuilt from the pull request itself. */
+  readPrFiles?(prUrl: string): Promise<readonly string[]>;
 }
 
 export interface ParkedPrSubject {
@@ -110,6 +116,8 @@ export interface ParkedPrSubject {
   taskId?: string;
   isPlanFiling?: boolean;
   unmetCriteria: readonly { claim: string; proof?: string; reason?: string }[];
+  /** W1-T13047: the plan files a plan filing adds or changes; a rebuild with no readable task file is built from them. */
+  planFiles?: readonly string[];
 }
 
 export interface ParkedPrContext {
@@ -154,17 +162,26 @@ export async function takeParkedPrRemedy(pr: ParkedPrSubject, decision: ParkedPr
       reason: `held task ${String(prior.held_task_id)} was filed for this pull request and cause; this pass reuses it` };
   }
   try {
-    if (pr.taskId === undefined) throw new Error("the task file of the pull request cannot be read");
-    const read = await host.readTaskShard(pr.taskId);
-    if (read.outcome === "refused") throw new Error(read.reason);
-    const heldTaskId = host.reserveTaskId(read.target);
-    const files = heldTaskFiles(read.shard, pr.taskId, heldTaskId, decision, pr, ctx);
-    const landed = await host.landTaskFiles(files, read.target);
-    if (landed.error !== undefined) throw new Error(`the task files did not land: ${landed.error}`);
     const closed = decision.remedy === "close-and-rebuild";
+    const read = pr.taskId === undefined ? undefined : await host.readTaskShard(pr.taskId);
+    // W1-T13047: a plan filing with no readable task file is rebuilt from the pull request's own plan files.
+    const fromPr = read?.outcome !== "read" && closed && pr.isPlanFiling === true;
+    if (read?.outcome === "refused" && (!fromPr || (read.target === undefined && read.reason !== "task-absent"))) {
+      throw new Error(read.reason);
+    }
+    if (!fromPr && read === undefined) throw new Error("the task file of the pull request cannot be read");
+    if (fromPr && (pr.planFiles ?? []).length === 0) throw new Error("the plan files the pull request adds or changes cannot be read");
+    const target = read?.target ?? host.planFilingTarget;
+    if (target === undefined) throw new Error("the repository for the held plan rebuild cannot be resolved");
+    const heldTaskId = host.reserveTaskId(target);
+    const files = read?.outcome === "read" ? heldTaskFiles(read.shard, pr.taskId!, heldTaskId, decision, pr, ctx)
+      : heldPlanRebuildFiles(heldTaskId, decision, pr, ctx);
+    const landed = await host.landTaskFiles(files, target);
+    if (landed.error !== undefined) throw new Error(`the task files did not land: ${landed.error}`);
     if (closed) {
-      await host.closePr(pr.prUrl, `Closed by the sweep (W1-T12709): no part of this pull request can merge without operator ` +
-        `input. The held rebuild task ${heldTaskId} carries the question and this pull request's findings` +
+      await host.closePr(pr.prUrl, `Closed by the sweep (${pr.isPlanFiling === true ? "W1-T13047" : "W1-T12709"}): ` +
+        `${pr.isPlanFiling === true ? "the plan-scoped round on this plan filing is exhausted, so it" : "no part of this pull request"} ` +
+        `can merge without operator input. The held rebuild task ${heldTaskId} carries the question and this pull request's findings` +
         `${landed.prUrl === undefined ? "" : `, filed in ${landed.prUrl}`}. Answer it in the inbox and the rebuild runs.`);
     }
     ctx.append({ ...row, outcome: "taken", reason: decision.reason, held_task_id: heldTaskId,
@@ -247,6 +264,31 @@ function heldTaskFiles(shard: { relPath: string; text: string }, taskId: string,
   return files;
 }
 
+/**
+ * W1-T13047: the held rebuild of a plan filing whose task file cannot be read. Its files are the plan files the pull
+ * request adds or changes, and its rationale carries the red gates, the refusal and the plan files' paths.
+ */
+function heldPlanRebuildFiles(heldTaskId: string, decision: ParkedPrDecision, pr: ParkedPrSubject, ctx: ParkedPrContext):
+  { relPath: string; content: string; claim: string; proof: string }[] {
+  const files = [...new Set(pr.planFiles ?? [])].sort();
+  const repo = /github\.com\/[^/]+\/([^/]+)\/pull\//.exec(pr.prUrl)?.[1] ?? "remudero";
+  const title = `Rebuild the plan filing of pull request ${pr.prNumber}`;
+  const question = (`Pull request ${pr.prUrl} is a plan filing that cannot merge without your input: ${decision.reason}. ` +
+    `What it needs: ${ctx.text}`).slice(0, 1500);
+  const acceptance = files.map(path => {
+    const id = /\/tasks\.d\/(W\d+-T\d+)-/.exec(path)?.[1];
+    return { claim: `${path} carries the plan change of ${pr.prUrl}, and the plan gates pass on it`,
+      proof: id === undefined ? `manual-check: the plan gates pass on ${path}` : `grep: id: ${id} in ${path}` };
+  });
+  const held = { id: heldTaskId, title: `${title} (held rebuild)`, repo, type: "implement", files, status: "queued", attempts: 0,
+    acceptance, needs_input: { question, source_pr: pr.prUrl, asked_at: ctx.nowIso },
+    rationale: `REBUILD of the plan filing ${pr.prUrl}, filed by the sweep (W1-T13047) at ${pr.headSha}: ${decision.reason}.\n` +
+      `RED GATES AND REFUSAL: ${ctx.text}\nPLAN FILES of the pull request:\n${files.map(f => `- ${f}`).join("\n")}\n` };
+  const heldRel = posix.join(resolveRepoLayout("", () => undefined).planDir, "tasks.d", `${heldTaskId}-${slug(title)}.yaml`);
+  return [{ relPath: heldRel, content: stringify([held], { lineWidth: 0 }),
+    claim: `the held rebuild task ${heldTaskId} for ${pr.prUrl} is filed`, proof: `grep: id: ${heldTaskId} in ${heldRel}` }];
+}
+
 /** The number of criteria the task file declares for `taskId`, or undefined when it cannot be read. */
 export async function taskCriteriaCount(host: Pick<ParkedPrHost, "readTaskShard">, taskId: string | undefined): Promise<number | undefined> {
   const read = taskId === undefined ? undefined : await host.readTaskShard(taskId);
@@ -323,4 +365,50 @@ export async function remedyStalledCriterion(pr: ParkedPrSubject, criterion: str
     unmetCriteria: [{ claim: claim ?? criterion, ...(known?.reason === undefined ? {} : { reason: known.reason }), needsInput: true, ladderSpent: true }],
     ...(claim === undefined ? {} : { taskCriteria: await taskCriteriaCount(host, pr.taskId) }) });
   return takeParkedPrRemedy(pr, decision, ledger, host, { ...ctx, cause: `stall:${criterion}`, text: stalledOn });
+}
+
+/** W1-T13047: the cause of the remedy for a plan filing whose plan-scoped round is exhausted. */
+export const PLAN_ROUND_EXHAUSTED_CAUSE = "plan-round-exhausted";
+
+export interface PlanRoundExhaustedFacts {
+  /** The red gates on the pull request; empty for a merge-conflict round. */
+  redChecks: readonly string[];
+  /** The log lines planLintViolationsFromCiFailures found. */
+  violations: readonly string[];
+  /** Why the plan-scoped round is exhausted: the repeated refusal, and the judge's verdict when it gave one. */
+  refusal: string;
+  /** True when the exhausted round was the plan-scoped merge-conflict round (mergeState dirty). */
+  conflict?: boolean;
+  /** Plan files the sweep already knows, such as the conflicting paths; host.readPrFiles adds the rest. */
+  knownPlanFiles?: readonly string[];
+}
+
+/**
+ * W1-T13047: a plan filing whose plan-scoped round is exhausted is closed and rebuilt as a held task, and no person is
+ * asked through a needs-human issue. invariant:round-first, the sweep calls this only for an exhausted round.
+ * invariant:one-question, takeParkedPrRemedy reuses the held task a prior pass filed for this pull request and cause.
+ */
+export async function planRoundExhaustedRemedy(pr: ParkedPrSubject & { changedFiles?: readonly string[] }, facts: PlanRoundExhaustedFacts,
+  ledger: readonly Record<string, unknown>[], host: ParkedPrHost, ctx: Omit<ParkedPrContext, "cause" | "text">): Promise<ParkedPrSweepOutcome> {
+  const red = facts.redChecks.length > 0 ? facts.redChecks.join(", ")
+    : facts.conflict === true ? "none (a merge conflict, mergeState dirty)" : "a required check";
+  const text = `the plan-scoped ${facts.conflict === true ? "conflict " : ""}round on this plan filing is exhausted. ` +
+    `Red gates: ${red}.${facts.violations.length > 0 ? ` Its log names: ${facts.violations.join("; ")}.` : ""} ` +
+    `Refusal: ${facts.refusal}`;
+  const reason = `the plan-scoped round is exhausted, so the plan filing is closed and rebuilt as a held task`;
+  const prior = ledger.some(r => r.step === PARKED_PR_REMEDY_STEP && r.pr_number === pr.prNumber &&
+    r.cause === PLAN_ROUND_EXHAUSTED_CAUSE && r.outcome === "taken" && typeof r.held_task_id === "string");
+  let read: readonly string[] = [];
+  let readFailure = "";
+  if (!prior && host.readPrFiles !== undefined) {
+    try { read = await host.readPrFiles(pr.prUrl); } catch (error) {
+      const reason = String((error as Error)?.message ?? error);
+      readFailure = ` The pull request's file list could not be read: ${reason}.`;
+    }
+  }
+  const planFiles = [...new Set([...(pr.planFiles ?? []), ...(facts.knownPlanFiles ?? []), ...(pr.changedFiles ?? []), ...read])]
+    .filter(isInPlanScope).sort();
+  const outcome = await takeParkedPrRemedy({ ...pr, isPlanFiling: true, planFiles }, { remedy: "close-and-rebuild", reason, inputCriteria: [] },
+    ledger, host, { ...ctx, cause: PLAN_ROUND_EXHAUSTED_CAUSE, text: `${text}${readFailure}` });
+  return { ...outcome, disposition: "wait", blocker: "other" };
 }
