@@ -39,7 +39,9 @@ function host(over: { claims?: readonly string[]; landError?: string } = {}) {
   const closed: { prUrl: string; comment: string; afterLanding: boolean }[] = [];
   let next = 99000;
   const h: ParkedPrHost = {
-    readTaskShard: (id) => id === TASK ? { relPath: SHARD_REL, text: shardOf(over.claims ?? CLAIMS) } : undefined,
+    readTaskShard: async (id) => id === TASK
+      ? { outcome: "read", shard: { relPath: SHARD_REL, text: shardOf(over.claims ?? CLAIMS) }, target: { owner: "o", repo: "r", checkoutDir: "/unused" } }
+      : { outcome: "refused", reason: "task-absent" },
     reserveTaskId: () => `W1-T${++next}`,
     landTaskFiles: async (files) => {
       landed.push(files.map(f => ({ relPath: f.relPath, content: f.content })));
@@ -87,7 +89,7 @@ function parkedWithoutRemedy(rows: readonly Record<string, unknown>[]): number[]
 /** The two calls the sweep makes where it would set refused-escalate. */
 async function remedyParkedPr(pr: ParkedPrSubject, input: Parameters<typeof parkedPrFacts>[1], rows: Record<string, unknown>[],
   h: ParkedPrHost, context: ParkedPrContext) {
-  const facts = parkedPrFacts(pr, input, rows, h);
+  const facts = await parkedPrFacts(pr, input, rows, h);
   return actOnParkedPr(pr, parkedPrRemedy(facts), facts, rows, h, context);
 }
 
