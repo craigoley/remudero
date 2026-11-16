@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 2.5
   status: queued
@@ -24,3 +24,13 @@
     CI runs: 42347341710, 43181327752, 43319827682.
     Retry outcomes: 3 recovered on retry, 0 also failed on retry.
     Evidence: test.flake_retry ledger rows, 3 read from the PR coverage-shard logs and 0 from fix-round reroutes the PR's diff cannot reach.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.93
+    reasons:
+      - "Harness evidence supports the flake finding: three unrelated PR failures recovered on retry, with zero repeat failures and no reported main failure at their bases."
+      - "The declared scope is one existing test file; acceptance requires fixing the cause and adding a test that forces the failing order."
+      - "The supplied record requests no secrets, permissions, deletion, irreversible action, policy change, or operator preference decision."
+    judged_at: "2026-11-13T03:13:20.802Z"
+    pin: "39c8bf39c77b8cf44fe824a07ff2127ac24f63720f1e2f976f1bd0791a4ccd44"
