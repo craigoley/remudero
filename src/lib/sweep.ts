@@ -9028,6 +9028,13 @@ export function mainHealthHeadInconclusive(observation: MainHealthObservation): 
   return observation.state === "undetermined";
 }
 
+const ROLLUP_STILL_RUNNING = new Set(["QUEUED", "IN_PROGRESS", "WAITING", "PENDING", "REQUESTED", "EXPECTED"]);
+
+/** True when a rollup entry has not concluded: a queued or running check run, or a pending status. */
+function rollupEntryStillRuns(c: RollupCheckEntry): boolean {
+  return (c.conclusion ?? "") === "" && ROLLUP_STILL_RUNNING.has((c.state ?? c.status ?? "").toUpperCase());
+}
+
 /** Read main's rollup into a {@link MainHealthObservation}, reusing the exact dedupe and
  *  required-contexts filter {@link checksStateFromRollup} applies so the two can never disagree
  *  about which entries are in play — but judging them against a STRICTER question: skipped and
@@ -9063,6 +9070,10 @@ export function mainHealthFromRollup(
   const nonEvidenceChecks: string[] = [];
   const pendingChecks: string[] = [];
   let evidenceOfGreen = false;
+  // W1-T13130: a required name with no entry holds the head only while another check on it still runs.
+  const notRegistered = knownRequired && dedupeRollupByLatestAttempt(all).some(rollupEntryStillRuns)
+    ? [...required].filter((name) => !gate.some((c) => c.name === name || c.context === name))
+    : [];
   for (const c of gate) {
     const name = c.name ?? c.context ?? "unknown";
     const s = (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase();
@@ -9089,6 +9100,17 @@ export function mainHealthFromRollup(
       pendingChecks,
     };
   }
+  if (pendingChecks.length === 0 && notRegistered.length > 0) {
+    return {
+      state: "undetermined",
+      sha,
+      reason: `required check(s) not registered yet on main while other checks still run: ${notRegistered.join(", ")} — undetermined, not green`,
+      failingChecks,
+      nonEvidenceChecks,
+      pendingChecks: notRegistered,
+    };
+  }
+  pendingChecks.push(...notRegistered);
   if (pendingChecks.length > 0) {
     return {
       state: "undetermined",
