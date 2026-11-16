@@ -17349,6 +17349,23 @@ function readFixRoundArchiveRows(ledgerPath: string): ReadonlyArray<Record<strin
   return read.ok ? read.rows : undefined;
 }
 
+const SWEEP_REFRESH_STEPS = ["fix.base_refreshed", BASE_RED_REFRESH_STEP, BASE_FIXED_REFRESH_STEP, REFRESH_CLEARANCE_STEP];
+const SWEEP_REPAIR_HISTORY_SLICE: EscalationTriageSlice = { holder: "sweep.repair-history",
+  steps: [...SWEEP_REFRESH_STEPS, "fix.dispatch", "fix.retrigger", "fix.done", "fix.needs_design", "sweep.conflict_regenerated"] };
+const sweepRepairHistoryReaders = new Map<string, EscalationTriageHistoryReader>();
+
+/** W1-T12954: the repair rows across rotations and the live file, as a strict union read gives them (`ok` false
+ *  when incomplete). Rotations load off the loop once for each ledger directory and are kept across passes. */
+export async function readSweepRepairHistory(ledgerPath: string): Promise<LedgerUnionRecordRead> {
+  const stateDir = dirname(ledgerPath);
+  let reader = sweepRepairHistoryReaders.get(stateDir);
+  if (reader === undefined) {
+    reader = createEscalationTriageHistoryReader({ slice: SWEEP_REPAIR_HISTORY_SLICE });
+    sweepRepairHistoryReaders.set(stateDir, reader);
+  }
+  return reader(stateDir);
+}
+
 /** Bind the rung's first cached handoff to a completed round for this exact PR and head. */
 function terminalFixDesignHandoffFromLines(
   pr: Pick<OpenPrView, "taskId" | "prNumber" | "prUrl" | "headSha">,
@@ -20442,7 +20459,7 @@ export async function runSweep(
     const fixedFiles = fields.blocker === "own-red"
       ? fixedOnMainTestFiles(pr, mainTipSha, deps.behindMainByPr, reproductionCache, formerlyFailingOnMain) : undefined;
     if (fixedFiles !== undefined && mainTipSha !== undefined) {
-      readRefreshHistory(pr);
+      await readRefreshHistory(pr);
       const refreshKey = `${pr.prNumber}@${pr.headSha}`;
       const prior = currentRows.findLast(row => (row.step === BASE_FIXED_REFRESH_STEP || row.step === BASE_RED_REFRESH_STEP) &&
         row.pr_number === pr.prNumber && row.head_sha === pr.headSha);
@@ -20984,13 +21001,12 @@ export async function runSweep(
   // W1-T8396 — every refresh step, keyed by PR and red, and the refusals already decided.
   const refreshRecords = refreshRecordsFromLedger(ledgerLines);
   const refusedClearances = refusedRefreshClearancesFromLedger(ledgerLines);
-  const refreshSteps = ["fix.base_refreshed", BASE_RED_REFRESH_STEP, BASE_FIXED_REFRESH_STEP, REFRESH_CLEARANCE_STEP];
+  const refreshSteps = [...SWEEP_REFRESH_STEPS];
   // Hold ancestry and refresh clearance share one archive snapshot for this pass.
-  let repairHistory: LedgerUnionRecordRead | undefined;
-  const readRepairHistory = () => repairHistory ??= readLedgerUnionRecordsSync(dirname(deps.ledgerPath), {
-    step: [...refreshSteps, "fix.dispatch", "fix.retrigger", "fix.done", "fix.needs_design", "sweep.conflict_regenerated"], refuseIncomplete: true });
-  const readRepairArchive = () => {
-    const union = readRepairHistory();
+  let repairHistory: Promise<LedgerUnionRecordRead> | undefined;
+  const readRepairHistory = () => repairHistory ??= readSweepRepairHistory(deps.ledgerPath);
+  const readRepairArchive = async () => {
+    const union = await readRepairHistory();
     return union.ok ? union.rows : undefined;
   };
   const oldestRefreshRow = new Map<string, number>();
@@ -21001,7 +21017,7 @@ export async function runSweep(
   }
   const refreshHistory = new Map<number, { source: RefreshHistorySource; unread: string[] }>();
   // W1-T8533: retention is capped; only a live span covering the PR's whole life proves absence.
-  const readRefreshHistory = (pr: OpenPrView): { source: RefreshHistorySource; unread: string[] } => {
+  const readRefreshHistory = async (pr: OpenPrView): Promise<{ source: RefreshHistorySource; unread: string[] }> => {
     const cached = refreshHistory.get(pr.prNumber);
     if (cached !== undefined) return cached;
     const created = Date.parse(pr.createdAt ?? "");
@@ -21010,7 +21026,9 @@ export async function runSweep(
       refreshHistory.set(pr.prNumber, history);
       return history;
     }
-    const union = readRepairHistory();
+    const union = await readRepairHistory();
+    const settled = refreshHistory.get(pr.prNumber);
+    if (settled !== undefined) return settled;
     const rows = union.rows.filter(row => row.pr_number === pr.prNumber && refreshSteps.includes(String(row.step)));
     const records = refreshRecordsFromLedger(rows).get(pr.prNumber) ?? [];
     refreshRecords.set(pr.prNumber, [...records, ...(refreshRecords.get(pr.prNumber) ?? [])]);
@@ -21030,7 +21048,7 @@ export async function runSweep(
   const assessRefresh = async (
     pr: OpenPrView, arm: RefreshArm, checks: readonly string[], testFiles: readonly string[], mainSha: string,
   ): Promise<RefreshClearance> => {
-    const history = readRefreshHistory(pr);
+    const history = await readRefreshHistory(pr);
     const memo = refreshClearanceKey(pr.prNumber, pr.headSha, mainSha, testFiles);
     const decided = refusedClearances.get(memo);
     if (decided !== undefined) return { refresh: false, evidence: decided, reason: "this head's refusal at this main is already recorded" };
@@ -22997,9 +23015,10 @@ export async function runSweep(
     let escalationHoldKept: string | undefined;
     const holdable = disposition === "conflicted" || disposition === "blocked-fixable";
     const openForHead = holdable && !deps.dryRun ? await readOpenEscalations() : [];
-    const holdHead = holdable ? conflictRoundHeldHead(pr, ledgerLines, deps.ledgerPath, readRepairArchive, (head, history) => {
+    const repairArchive = holdable ? await readRepairArchive() : undefined;
+    const holdHead = holdable ? conflictRoundHeldHead(pr, ledgerLines, deps.ledgerPath, () => repairArchive, (head, history) => {
       const atHead = head === pr.headSha ? pr : { ...pr, headSha: head };
-      if (terminalFixDesignHandoff(atHead, history, readRepairArchive).kind !== "none") return true;
+      if (terminalFixDesignHandoff(atHead, history, () => repairArchive).kind !== "none") return true;
       const key = fixEscalationDedupKey(escalationTaskIdFor(pr), pr.prUrl, head,
         pr.mergeConflict !== undefined, isBlockedCi(pr), undefined);
       return openForHead.some(issue => matchDuplicateEscalation({ ...key, cause: undefined }, [issue]) !== undefined &&
@@ -23011,7 +23030,7 @@ export async function runSweep(
         !inFlightFixKeys.has(`${fixLedgerTaskIdFor(pr) ?? ""}@${pr.headSha}`) &&
         !dispatchCauseHolds.get(pr.prNumber)) {
       const handoff = terminalFixDesignHandoff(holdHead === pr.headSha ? pr : { ...pr, headSha: holdHead }, ledgerLines,
-        readRepairArchive);
+        () => repairArchive);
       if (handoff.kind === "handoff") {
         const held = handoff.producer;
         const recorded = ledgerLines.findLast(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber &&
@@ -24513,7 +24532,7 @@ export async function runSweep(
               // W1-T4351 — A RED MAIN ALSO CARRIES IS NOT THIS DIFF'S: wait while main is red, then admit a refresh.
               let baseRed = decideBaseRed(pr, mainLatestRun, baseRedHistory);
               if (baseRed.kind === "refresh") {
-                readRefreshHistory(pr);
+                await readRefreshHistory(pr);
                 baseRed = decideBaseRed(pr, mainLatestRun, baseRedHistory);
               }
               if (baseRed.kind !== "own") {
@@ -24529,7 +24548,7 @@ export async function runSweep(
                 if (baseRed.kind === "refresh" && deps.updateBranch) {
                   const check = baseRed.check;
                   const admit = { pr, arm: "base-red" as const, heldSinceMs: heldSinceMs(pr), row: { ...row, step: BASE_RED_REFRESH_STEP } };
-                  if (readRefreshHistory(pr).source === "unreadable") {
+                  if ((await readRefreshHistory(pr)).source === "unreadable") {
                     const clearance = await admissionClearance(pr, "base-red", (pr.ciFailures ?? []).map(failure => failure.name),
                       baseReproductionFiles(pr.ciFailures ?? []), mainSha);
                     if (!clearance.refresh) {
@@ -24766,7 +24785,7 @@ export async function runSweep(
                   appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: BASE_FIXED_INHERITED_STEP, pr_number: pr.prNumber,
                     head_sha: pr.headSha, main_sha: mainTipSha, basis: inheritedBasis, test_files: reproductionFiles });
                 }
-                if (verdict === "clear" && (previouslyReproduced || fixedOnMain)) readRefreshHistory(pr);
+                if (verdict === "clear" && (previouslyReproduced || fixedOnMain)) await readRefreshHistory(pr);
                 const refreshable = verdict === "clear" && (previouslyReproduced || fixedOnMain) && !baseRedHistory.refreshed.has(key);
                 // W1-T8396: a test passing on main is as consistent with "the PR broke it" as with "main
                 // fixed it" — refresh only on evidence the merge can clear it; a refusal is the PR's own red.
