@@ -1,7 +1,6 @@
 import { askDecisionModel, resolveDecisionTarget, type DecisionAnsweredRow } from "./decision-model.js";
 import type { Config } from "./config.js";
 import { loadMounts, mountsPath, type DecisionCandidate } from "./mounts.js";
-import { repoRoot } from "./repo-location.js";
 import { INSTRUMENT_SURFACE } from "./review.js";
 
 /**
@@ -12,7 +11,7 @@ import { INSTRUMENT_SURFACE } from "./review.js";
  */
 
 export const REVIEW_TRIAGE_ROLE = "code-review-triage";
-/** A pull request with more changed files than this lists the first ones and counts the rest. */
+/** BACKSTOP: a pull request with more changed files than this lists the first ones and counts the rest. */
 export const REVIEW_TRIAGE_MAX_LISTED_FILES = 200;
 
 export const REVIEW_TRIAGE_QUESTIONS = [
@@ -82,15 +81,20 @@ export function reviewTriageInput(pr: ReviewTriagePullRequest): string {
     + JSON.stringify(evidence);
 }
 
+/** The decision_models rows of the checkout at `root`, in order: the candidates a triage asks. */
+export function reviewTriageCandidates(root: string): DecisionCandidate[] {
+  return Object.values(loadMounts(mountsPath(root)).decision_models ?? {});
+}
+
 /**
  * Ask the first available decision_models candidate the triage questions about this one pull
  * request. With no available candidate the first one is asked, so its row records why it was
  * unavailable. With no candidate at all nothing is sent and nothing is written.
  */
 export async function triagePullRequest(config: Config, pr: ReviewTriagePullRequest,
-  overrides: Partial<Pick<Parameters<typeof askDecisionModel>[1], "env" | "fetchImpl">> = {},
-  /** The decision_models rows in order. Default: the mounts table of the running checkout. */
-  candidates: readonly DecisionCandidate[] = Object.values(loadMounts(mountsPath(repoRoot)).decision_models ?? {}),
+  overrides: Partial<Pick<Parameters<typeof askDecisionModel>[1], "env" | "fetchImpl">>,
+  /** The decision_models rows in order. Production passes {@link reviewTriageCandidates} of the running checkout. */
+  candidates: readonly DecisionCandidate[],
 ): Promise<DecisionAnsweredRow | undefined> {
   const env = overrides.env ?? process.env;
   const candidate = candidates.find((row) => resolveDecisionTarget(config, row, env).ok) ?? candidates[0];

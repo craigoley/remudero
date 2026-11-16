@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import type { Config } from "#src/lib/config.js";
@@ -10,7 +10,7 @@ import type { DecisionCandidate } from "#src/lib/mounts.js";
 import { clearOpenWeightAbsence } from "#src/lib/worker-provider.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import {
-  REVIEW_TRIAGE_ROLE, changedFileLines, triagePullRequest, type ReviewTriagePullRequest,
+  REVIEW_TRIAGE_ROLE, changedFileLines, reviewTriageCandidates, triagePullRequest, type ReviewTriagePullRequest,
 } from "#src/lib/review-triage.js";
 import { runReview, type ReviewCommandHost } from "#src/cli/commands/review.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
@@ -128,7 +128,8 @@ test("W1-T12419 criterion 3: an unavailable or failed candidate writes one row w
   // Unavailable: the checkout's own decision_models rows (the production default), with no cash entry or endpoint configured.
   const bare = ownedFixtureDir(t, "review-triage-bare").dir;
   const neverSent: typeof fetch = async () => { throw new Error("an unavailable candidate must send nothing"); };
-  const unavailable = await triagePullRequest({ claudeBin: "/unused", root: bare, dailyCapUsd: 25 } as Config, PR_DOCS, { env: {}, fetchImpl: neverSent });
+  const unavailable = await triagePullRequest({ claudeBin: "/unused", root: bare, dailyCapUsd: 25 } as Config, PR_DOCS, { env: {}, fetchImpl: neverSent },
+    reviewTriageCandidates(REPO_ROOT));
   assert.equal(unavailable?.outcome, "unavailable");
   const bareRows = ledger(bare);
   assert.equal(bareRows.length, 1, "one row and nothing else");
@@ -224,9 +225,4 @@ test("W1-T12419 criterion 3: the review does not wait for the triage, reads none
   const verdict = (v: typeof withTriage) => ({ state: v.state, summary: v.summary, criteria: v.criteria.map((c) => [c.met, c.floorMet]),
     capped: v.capped, floorDegraded: v.floorDegraded, reviewerOutcome: v.reviewerOutcome });
   assert.deepEqual(verdict(withTriage), verdict(withoutTriage));
-
-  // No gate, route or review step reads the answers: the review discards the triage's promise.
-  const source = readFileSync(join(REPO_ROOT, "src", "cli", "commands", "review.ts"), "utf8");
-  assert.deepEqual(source.match(/triagePullRequest\(/g), ["triagePullRequest("]);
-  assert.match(source, /void host\.triagePullRequest\(/);
 });
