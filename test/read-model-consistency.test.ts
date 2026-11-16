@@ -20,6 +20,9 @@ import {
   advanceOracleSlice,
   factColumns,
   nextOracleSlice,
+  ORACLE_MIN_ROWS_PER_MS,
+  ORACLE_SLICE_BUDGET_MS,
+  retryOracleSlice,
   readIngestMark,
   recordIngestMark,
   runConsistencyCheck,
@@ -487,7 +490,30 @@ test("oracle slices are sized by row count so a busy day splits and quiet days m
   assert.ok(windows.length < 7 + 6, "fewer slices than a fixed day each plus the busy day's split");
 });
 
-test("the next oracle slice is sized from the rate the last one measured", (t) => {
+test("W1-T13173 criterion 1: slices that cost a fixed archive read never shrink the next slice below the rate floor", (t) => {
+  // MEASURED 2026-11-16: core slices compared 1 row in about 60 s, so the measured rate fell toward zero slice by slice.
+  const f = projected(t);
+  let slice = nextOracleSlice(f.db, CHECK_AT, ORACLE_DEFAULT_WINDOW_MS, ORACLE_SLICE_BUDGET_MS);
+  for (let i = 0; i < 12; i++) {
+    advanceOracleSlice(f.db, f.lease, slice, { rows: 1, ms: 60_000 });
+    slice = nextOracleSlice(f.db, CHECK_AT, ORACLE_DEFAULT_WINDOW_MS, ORACLE_SLICE_BUDGET_MS);
+  }
+  assert.equal(slice.targetRows, ORACLE_MIN_ROWS_PER_MS * ORACLE_SLICE_BUDGET_MS, "twelve fixed-cost slices leave the floor, not one row");
+  assert.equal(slice.targetRows, 12_500);
+  assert.equal((JSON.parse(f.db.meta("oracle_slice") ?? "{}") as { rowsPerMs?: number }).rowsPerMs, ORACLE_MIN_ROWS_PER_MS, "the stored rate itself stops at the floor");
+});
+
+test("W1-T13173 criterion 2: dead oracle children halve the rate down to the floor, and a collapsed stored rate is read at the floor", (t) => {
+  const f = projected(t);
+  const slice = nextOracleSlice(f.db, CHECK_AT, ORACLE_DEFAULT_WINDOW_MS, ORACLE_SLICE_BUDGET_MS);
+  for (let i = 0; i < 12; i++) retryOracleSlice(f.db, f.lease, nextOracleSlice(f.db, CHECK_AT, ORACLE_DEFAULT_WINDOW_MS, ORACLE_SLICE_BUDGET_MS));
+  assert.equal(nextOracleSlice(f.db, CHECK_AT, ORACLE_DEFAULT_WINDOW_MS, ORACLE_SLICE_BUDGET_MS).targetRows, ORACLE_MIN_ROWS_PER_MS * ORACLE_SLICE_BUDGET_MS, "twelve dead slices stop at the floor");
+  assert.equal((JSON.parse(f.db.meta("oracle_slice") ?? "{}") as { rowsPerMs?: number }).rowsPerMs, ORACLE_MIN_ROWS_PER_MS, "the stored retry rate stops at the floor");
+  f.db.prepare("INSERT INTO meta(k, v) VALUES('oracle_slice', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").run(JSON.stringify({ ...slice.cursor, rowsPerMs: 0.0001 }));
+  assert.equal(nextOracleSlice(f.db, CHECK_AT, ORACLE_DEFAULT_WINDOW_MS, ORACLE_SLICE_BUDGET_MS).targetRows, ORACLE_MIN_ROWS_PER_MS * ORACLE_SLICE_BUDGET_MS, "a rate stored before the floor existed is read at the floor");
+});
+
+test("W1-T13173 criterion 3: the next oracle slice is sized from the rate the last one measured", (t) => {
   const f = projected(t);
   const first = nextOracleSlice(f.db, CHECK_AT, ORACLE_DEFAULT_WINDOW_MS, 0.1);
   assert.equal(first.targetRows, ORACLE_SEED_ROWS_PER_MS * 0.1, "the seed rate before any slice is measured");

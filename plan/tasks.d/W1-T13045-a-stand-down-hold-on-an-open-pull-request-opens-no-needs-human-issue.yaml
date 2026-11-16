@@ -22,7 +22,7 @@
     - test/sweep/a-stood-down-repair-is-not-re-dispatched-on-the-same-head.test.ts
     - test/sweep/an-unanswered-fix-escalation-is-rebuilt-after-its-slo.test.ts
     - test/sweep/a-stand-down-hold-opens-no-needs-human-issue.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "runSweep with the production parkedPr effect, on an open pull request whose newest fix.stood_down row (site rung.strike) read a head, task contract and body that all still stand, writes a sweep.disposed row with stand_down_hold true, never calls deps.escalate, and writes one parked_pr.remedy row whose cause is stand-down:rung.strike"

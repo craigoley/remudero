@@ -1,0 +1,44 @@
+- id: W1-T13201
+  title: "On macOS the PID namespace start is read once per process, so two boot sweeps in one process name the same instant"
+  repo: remudero
+  priority: 1.4
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the namespace start decides whether a dispatch claim is released as orphaned by a restart
+  band_meaning: span
+  origin: "operator-session#mac-author-preflight-2026-11-16"
+  plan_refs:
+    - W1-T12356
+    - W1-T12238
+    - W1-T2784
+  files:
+    - src/lib/dispatch-claim.ts
+    - test/dispatch/a-claim-minted-before-a-restart-is-released-at-boot-on-macos.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "On darwin two reads of the namespace start in one process return the same value, even when the clock and the uptime reading drift apart by milliseconds between them"
+      proof: "grep: W1-T13201 criterion 1 in test/dispatch/a-claim-minted-before-a-restart-is-released-at-boot-on-macos.test.ts"
+    - claim: "invariant:the-start-is-still-this-boots — the value is derived as W1-T12356 derives it on the first read, a read with injected readers is never served from another caller's value, a bad first reading is not remembered, and the Linux read from /proc is unchanged"
+      proof: "grep: W1-T13201 criterion 2 in test/dispatch/a-claim-minted-before-a-restart-is-released-at-boot-on-macos.test.ts"
+  rationale: |
+    OBSERVED 2026-11-16 on the operator Mac, by the operator session and the builder of W1-T12945.
+
+    - `test/dispatch/the-start-claim-sweep-runs-before-the-first-dispatch-not-before-the-first-review.test.ts`, "W1-T12238 criterion 4: the awaited sweep judges each claim as the sync sweep does, and an adopted child keeps its claim", fails on the Mac at origin/main: tests 8, pass 7, fail 1. It failed identically with the base's src/lib/sweep.ts and with the W1-T12945 branch's.
+    - The assertion text: "the same decisions", with one difference between the sync sweep's decision and the awaited sweep's: `namespace_boot: '2026-11-11T20:20:17.495Z'` against `'2026-11-11T20:20:17.490Z'`, and the same two instants in the reason text.
+    - READ src/lib/dispatch-claim.ts: `readNamespaceBootMs` on darwin returns `Math.round(now - os.uptime() * 1000)` (W1-T12356: darwin has no /proc and no pid namespace). The clock and the uptime reading are two separate reads at different resolutions, so two calls a few milliseconds apart return instants a few milliseconds apart. On Linux the value comes from /proc and does not move.
+    - Effect on the operator Mac: an author preflight whose selection holds that suite fails with one red that the change did not cause. It refused W1-T12945's ship on 2026-11-16 (8,552 tests, 1 failing: this one).
+    - Effect on a real boot sweep is small but real: every row a process writes about one boot should name one instant, and a claim minted inside the drift could be judged differently by two passes.
+  design: |
+    1. `readNamespaceBootMs`, on darwin and only when called with no injected reader, computes the value once and returns that value for the life of the process. A reading that is not finite or is negative is returned as `undefined` and not remembered.
+    2. A call that injects any reader (clock, uptime, platform) computes fresh every time, so tests and probes stay independent.
+    3. The existing macOS suite gains two tests: one that drives the production path twice with a drifting clock behind the process-level seam and reads one instant, and one for the invariant.
+    INVARIANT the-start-is-still-this-boots: the first value is W1-T12356's derivation unchanged; nothing is cached across processes or on disk.
+    NOT IN SCOPE: asking the kernel for its boot time with a spawned command (W1-T12356 ruled that out on the daemon path); the Linux read; the W1-T12238 suite, which needs no change once the two sweeps read one instant.
+  falsifier: |
+    Compute the darwin value fresh on every production call and criterion 1 must fail. Serve an injected-reader call from the remembered value, remember a bad reading, or change the Linux read, and criterion 2 must fail. Restore and both pass.
+  note: |
+    reservation hand-off: run-unfiled-1794842514852 -> run-unfiled-1794842514852
+    Reserved with rmd next-task-id from a worktree at origin/main. The operator session will hand-build this on the Mac, where the red reproduces, and will re-run the W1-T12238 suite there as the last check. The suite named in files: is an existing file in its computed folder and is edited in place.

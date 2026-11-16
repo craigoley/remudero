@@ -1,0 +1,42 @@
+- id: W1-T13202
+  title: "The Inbox gardener admits today's 2.4 MB, 2,343-proposal registry and records a warning row once a source passes three quarters of its bound, instead of refusing the whole pass"
+  repo: remudero
+  priority: 1.1
+  depends_on: []
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # raises read bounds on a gardener that is off on the host; a capped source still never reads as complete
+  band_meaning: blast-radius
+  origin: "operator-session#console-inbox-defects-2026-11-16"
+  plan_refs:
+    - W1-T9284
+    - W1-T13197
+  files:
+    - src/lib/inbox-gardener.ts
+    - test/gardeners/the-inbox-gardener-admits-todays-registry-and-warns-before-its-bound.test.ts
+    - test/the-inbox-gardener-admits-a-bounded-production-sized-registry.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A registry of 2,343 proposals and 2,448,321 bytes, the production size on 2026-11-16, is captured and judged by a pass instead of throwing \"Inbox proposal population exceeds verification bound\" or the registry byte bound"
+      proof: "grep: W1-T13202 criterion 1 in test/gardeners/the-inbox-gardener-admits-todays-registry-and-warns-before-its-bound.test.ts"
+    - claim: "When the registry, thread store or proposal count passes 75 percent of its bound, the pass appends one inbox.gardener_source_near_bound ledger row naming the source, its size and the bound, at most once per source per day, and still runs"
+      proof: "grep: W1-T13202 criterion 2 in test/gardeners/the-inbox-gardener-admits-todays-registry-and-warns-before-its-bound.test.ts"
+    - claim: "invariant:a-capped-source-is-never-complete — a source over its bound still refuses the pass (capture throws and the run reads failed, exactly as today) and retires nothing"
+      proof: "grep: W1-T13202 criterion 3 in test/gardeners/the-inbox-gardener-admits-todays-registry-and-warns-before-its-bound.test.ts"
+  rationale: |
+    OBSERVED 2026-11-16 15:25Z on the Azure host: state/inbox-proposals.json is 2,448,321 bytes and holds about 2,343 proposals (backups: 2,377,654 bytes on 11-14, 2,424,464 on 11-15).
+    READ at origin/main (src/lib/inbox-gardener.ts, from #12507 on 2026-10-17): INBOX_GARDENER_SOURCE_LIMITS sets registryBytes 2 MiB (2,097,152) and proposals 2,048, sized for "the observed 1.35-MB/1400-proposal registry". defaultInboxGardenerPorts' capture reads the registry through readInboxGardenerFile with that byte bound and throws when proposals exceed 2,048. So at today's size every pass fails before it judges anything. RMD_INBOX_GARDENER_MODE is unset on the host, so nobody saw it, and turning the gardener on (for W1-T13197's finished-task asks or the existing proof-debt asks) would retire nothing.
+    This is the repo's recurring "bound that fires on a healthy condition" defect: the registry grows with normal use, and archiving an ask does not shrink it.
+  design: |
+    1. Raise registryBytes to 8 MiB, proposals to 8,192 and threadBytes to 4 MiB; leave the per-row, relevant-row and override bounds unchanged.
+    2. In capture, compare each bounded source's measured size to its bound; at or above 75 percent append inbox.gardener_source_near_bound {source, size, bound} through the existing ledger append, keyed so one source warns at most once per UTC day (read back through the gardener's existing ledger projection or its store).
+    3. The bound check that throws stays; only its numbers move.
+    INVARIANT a-capped-source-is-never-complete: any source over its bound still makes capture throw, the run read failed, and nothing retire.
+    NOT IN SCOPE: turning the gardener on; which asks it may retire (W1-T13197); shrinking the registry.
+  falsifier: |
+    Keep the old bounds and criterion 1 must fail with the population error. Drop the warning or warn every pass and criterion 2 must fail. Let an over-bound source complete and criterion 3 must fail. Restore and all pass.
+  note: |
+    Reserved with rmd next-task-id from the operator checkout (refs/rmd-id/W1-T13202). rmd test-place computed test/gardeners/ for the new suite. The existing suites test/an-inbox-gardener-retires-only-proven-terminal-asks.test.ts and test/the-inbox-gardener-admits-a-bounded-production-sized-registry.test.ts read INBOX_GARDENER_SOURCE_LIMITS and must stay green.
