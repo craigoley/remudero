@@ -23042,6 +23042,8 @@ export async function runSweep(
     // The W1-T10339 held stand-down is the state production reaches after the fix lane stood down on an already-open
     // needs-human escalation (`fix.stood_down` at `rung.strike`), so it takes the remedy too. A fix-on-pr that was already
     // taken at this head for this cause and stood down again is not repeated: the hold stays, one row names the remedy.
+    // A hold that is NOT about an open escalation is the fix lane's own unchanged-input stand-down: a fix-on-pr round would
+    // stand down again (R4 releases only the open-escalation stand-down), so it keeps the hold; split and rebuild still act.
     if (deps.parkedPr && !deps.dryRun && !strikeLadderDue && !sloLadderDue && (disposition === "refused-escalate" ||
         disposition === "blocked-ambiguous" && ruleBlockerByIndex.get(prIndex) === "escalated")) {
       const designQuestion = terminalDesignHold !== undefined && disposition === "refused-escalate" ? reason : undefined;
@@ -23053,9 +23055,10 @@ export async function runSweep(
       const cause = designQuestion !== undefined ? "needs-design" : pr.isPlanFiling === true ? "plan-gate"
         : holdCause ?? (heldEscalationAt !== undefined ? "open-escalation" : `escalated:${disposition}`);
       const decision = parkedPrRemedy(facts);
-      const repeatedHold = standDownHold !== undefined && decision.remedy === "fix-on-pr" && ledgerLines.some(row =>
-        row.step === PARKED_PR_REMEDY_STEP && row.pr_number === pr.prNumber && row.head_sha === pr.headSha &&
-        row.cause === cause && row.remedy === "fix-on-pr" && row.outcome === "taken");
+      const repeatedHold = standDownHold !== undefined && decision.remedy === "fix-on-pr" && (cause !== "open-escalation" ||
+        ledgerLines.some(row =>
+          row.step === PARKED_PR_REMEDY_STEP && row.pr_number === pr.prNumber && row.head_sha === pr.headSha &&
+          row.cause === cause && row.remedy === "fix-on-pr" && row.outcome === "taken"));
       if (!repeatedHold) {
         const parked = await actOnParkedPr(pr, decision, facts, ledgerLines, deps.parkedPr, { runId: deps.runId, ledgerTaskId: escalationTaskIdFor(pr), nowIso: clockFromMillisFn(() => now).iso(),
           cause, text: reason, append: (row) => appendLine(deps.ledgerPath, row) });
