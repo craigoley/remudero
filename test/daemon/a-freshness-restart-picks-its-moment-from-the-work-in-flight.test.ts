@@ -400,8 +400,11 @@ test("W1-T12231 criterion 7: freshnessRestart has bounded rows likelyFraction 0.
   }
   // The loaded rows drive the daemon, and its light pass asks the daemon's own admission: the fix round of 60 minutes
   // is longer than 24 2/3 minutes to the likely restart plus the 30-minute drain.
+  const daemonOpts = freshnessRestartOpts({ ...rows, stalenessHorizonMs: 60 * MINUTE, minLifetimeMs: 0 });
+  assert.equal(daemonOpts.freshnessLikelyFraction, rows.likelyFraction);
+  assert.equal(daemonOpts.freshnessMaxDrainWaitMs, rows.maxDrainWaitMs);
   const h = restartLanes(t, (unit) => [...reviewHistory(5 * unit, unit), ...fixHistory(60 * unit, unit)], { staleUnits: 30,
-    opts: freshnessRestartOpts(rows) });
+    opts: daemonOpts });
   try {
     await h.stale(1);
     h.at(2);
