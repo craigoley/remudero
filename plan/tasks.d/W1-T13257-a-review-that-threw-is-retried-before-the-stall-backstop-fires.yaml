@@ -7,7 +7,7 @@
   verify: auto
   principles:
     tdd: strict
-  risk: medium # one backoff function in the sweep; the strike cap and its escalation are unchanged
+  risk: high # one backoff function in the sweep plus the two suites that pin its old timing; the strike cap and its escalation are unchanged
   band_meaning: blast-radius
   origin: "operator-session#console-inbox-defects-2026-11-16"
   files:
