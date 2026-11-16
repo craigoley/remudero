@@ -54,8 +54,8 @@ export const OVERSEER_LEDGER_WINDOW_MS = 14 * DAY_MS;
 export const OVERSEER_MIN_INTERVAL_MS = HOUR_MS;
 
 /** The ledger lines the overseer reads — a raw-line prefilter, so the union is not parsed whole.
- *  W1-T10728: the retro's four outcome steps match whole, never as a suffix. */
-export const OVERSEER_STEP_PATTERN = /"step":"([^"]*(\.(scorecard|gardener_failed|garden_filing_failed|garden_filing_escalated|gardener_judged)|garden\.(pass|due_failed)|evidence_coverage\.pass|selector-shadow\.report|flow\.report|fixlane\.report|machine_judge\.failed|host_resource\.failed)|retro\.(synthesized|no_op|error)|retro_aborted_integrity)"/;
+ *  W1-T10728: the retro's four outcome steps match whole, never as a suffix, as does W1-T12834's plan-PR refusal. */
+export const OVERSEER_STEP_PATTERN = /"step":"([^"]*(\.(scorecard|gardener_failed|garden_filing_failed|garden_filing_escalated|gardener_judged)|garden\.(pass|due_failed)|evidence_coverage\.pass|selector-shadow\.report|flow\.report|fixlane\.report|machine_judge\.failed|host_resource\.failed)|retro\.(synthesized|no_op|error)|retro_aborted_integrity|plan_pr\.preflight_refused)"/;
 
 /**
  * W1-T10728: loops the overseer judges by their failures alone, each with the ledger rows that are its evidence.
@@ -200,6 +200,13 @@ interface IssuedVerdict {
   sequence?: number;
 }
 
+interface FilingClassEpisode {
+  since: string;
+  blockedAt: string;
+  gardens: string[];
+  issueUrl: string | null;
+}
+
 export interface OverseerState {
   episodes: Record<string, Episode>;
   prs: Record<string, TrackedGardenerPr>;
@@ -207,6 +214,8 @@ export interface OverseerState {
   churnEscalated: Record<string, string>;
   unobservedEscalated?: Record<string, string>;
   stalledEscalated?: Record<string, string>;
+  /** W1-T12834: each failing check blocking the filings of several gardens, by check, until a quiet day clears it. */
+  filingClasses?: Record<string, FilingClassEpisode>;
   lastScorecardAt?: string;
   nextVerdictSequence?: number;
   pendingTelemetry?: Array<{ step: string; extra: Record<string, unknown> }>;
@@ -267,6 +276,9 @@ function readOverseerState(path: string): OverseerState {
       (v.sequence !== undefined && (!Number.isSafeInteger(v.sequence) || (v.sequence as number) < 1))) ||
     (parsed.nextVerdictSequence !== undefined && (!Number.isSafeInteger(parsed.nextVerdictSequence) || (parsed.nextVerdictSequence as number) < 0)) ||
     (parsed.lastScorecardAt !== undefined && !isDate(parsed.lastScorecardAt)) ||
+    (parsed.filingClasses !== undefined && (!isRecord(parsed.filingClasses) || Object.values(parsed.filingClasses).some((c) => !isRecord(c) ||
+      !isDate(c.since) || !isDate(c.blockedAt) || !Array.isArray(c.gardens) || c.gardens.some((g: unknown) => typeof g !== "string") ||
+      (c.issueUrl !== null && typeof c.issueUrl !== "string")))) ||
     (parsed.pendingTelemetry !== undefined && (!Array.isArray(parsed.pendingTelemetry) || parsed.pendingTelemetry.some((t: unknown) => !isRecord(t) || typeof t.step !== "string" || !isRecord(t.extra)))) ||
     Object.values(parsed.prs).some((p) => !isRecord(p) || typeof p.gardener !== "string" || typeof p.actionClass !== "string" ||
       typeof p.url !== "string" || !isDate(p.openedAt) || (p.info !== undefined &&
@@ -581,6 +593,66 @@ function observationEscalation(name: string, condition: "unobserved" | "stalled_
   };
 }
 
+/** W1-T12834: a filing class is judged over the trailing day, and is one when its check refuses this many gardens. */
+const FILING_CLASS_WINDOW_MS = DAY_MS;
+const FILING_CLASS_MIN_GARDENS = 3;
+const LINT_TAG = /^\[([a-z0-9][a-z0-9-]*)\]/;
+
+/** W1-T12834: the checks a `plan_pr.preflight_refused` row names — each lint tag in brackets on a failure's lines,
+ *  else the failure's own check. */
+export function refusedChecks(row: Row): string[] {
+  const checks = new Set<string>();
+  for (const failure of Array.isArray(row.failures) ? row.failures.filter(isRecord) : []) {
+    const tags = (Array.isArray(failure.lines) ? failure.lines : [])
+      .flatMap((line: unknown) => (typeof line === "string" ? LINT_TAG.exec(line.trim())?.[1] ?? [] : []));
+    if (tags.length > 0) for (const tag of tags) checks.add(tag);
+    else if (typeof failure.check === "string") checks.add(failure.check);
+  }
+  return [...checks];
+}
+
+/** The garden a refusal row came from: the gardener origin its pass stamped, else the lane that landed it. */
+function refusingGarden(row: Row): string | undefined {
+  const origin = row.gardener_origin;
+  if (isRecord(origin) && typeof origin.name === "string" && origin.name !== "") return origin.name;
+  return typeof row.lane === "string" && row.lane !== "" ? row.lane : undefined;
+}
+
+/** The trailing day's plan-PR refusals, joined across gardens by the check that refused them. */
+function refusalsByCheck(rows: readonly Row[], nowMs: number): Map<string, { gardens: Set<string>; refusals: number; firstAt: number }> {
+  const byCheck = new Map<string, { gardens: Set<string>; refusals: number; firstAt: number }>();
+  for (const row of rows) {
+    const at = tsOf(row);
+    const garden = refusingGarden(row);
+    if (row.step !== "plan_pr.preflight_refused" || !(at > nowMs - FILING_CLASS_WINDOW_MS) || garden === undefined) continue;
+    for (const check of refusedChecks(row)) {
+      const c = byCheck.get(check) ?? { gardens: new Set<string>(), refusals: 0, firstAt: at };
+      c.gardens.add(garden);
+      c.refusals++;
+      c.firstAt = Math.min(c.firstAt, at);
+      byCheck.set(check, c);
+    }
+  }
+  return byCheck;
+}
+
+function filingClassEscalation(check: string, gardens: readonly string[], refusals: number, since: string): Escalation {
+  return {
+    class: "BLOCKED",
+    taskId: `filing-class-blocked:${check}`,
+    summary: `the plan-PR preflight's \`${check}\` check refuses the filings of ${gardens.length} gardens`,
+    detail: `${refusals} \`plan_pr.preflight_refused\` rows in the trailing 24 hours name \`${check}\`, from ${gardens.map((g) => `\`${g}\``).join(", ")}; ` +
+      `the first at ${since}. One check refusing several gardens is the check's cause, not any one garden's: each garden's own ladder ` +
+      "only retries into the same refusal. This clears once 24 hours pass with no refusal naming the check.",
+    options: [
+      { label: "fix-check", detail: `repair what \`${check}\` refuses in the gardens' drafts, or the check if it refuses a healthy draft` },
+      { label: "switch-off", detail: "touch state/<GARDEN>_OFF-<class> for each garden whose filings it refuses" },
+    ],
+    recommendation: "fix-check",
+    headDedup: "independent",
+  };
+}
+
 export interface OverseerPass {
   ran: boolean;
   gardeners: string[];
@@ -676,6 +748,25 @@ export function runGardenerOverseer(deps: GardenerOverseerPorts): OverseerPass {
     if (issueUrl !== undefined) state.stalledEscalated[key] = clock.iso();
     recordTelemetry(`${OVERSEER_NAME}.stalled_cause`, { gardener: name, cause: reading.cause, costs, unit: reading.unit,
       settled_causes: reading.settled, issue_url: issueUrl ?? null });
+  }
+
+  // W1-T12834: one check refusing the filings of several gardens is ONE blocked class, raised once and keyed by the
+  // check, so the dedup is the check and not the garden; a day with no refusal naming it clears it.
+  state.filingClasses ??= {};
+  const refusing = refusalsByCheck(rows, nowMs);
+  for (const [check, episode] of Object.entries(state.filingClasses)) {
+    if (refusing.has(check)) continue;
+    delete state.filingClasses[check];
+    recordTelemetry(`${OVERSEER_NAME}.filing_class_cleared`, { check, since: episode.since, gardens: episode.gardens,
+      issue_url: episode.issueUrl, quiet_ms: FILING_CLASS_WINDOW_MS });
+  }
+  for (const [check, c] of [...refusing].sort(([a], [b]) => (a < b ? -1 : 1))) {
+    if (c.gardens.size < FILING_CLASS_MIN_GARDENS || state.filingClasses[check] !== undefined) continue;
+    const gardens = [...c.gardens].sort();
+    const since = fixedClock(c.firstAt).iso();
+    const issueUrl = deps.escalate?.(filingClassEscalation(check, gardens, c.refusals, since)) ?? null;
+    state.filingClasses[check] = { since, blockedAt: clock.iso(), gardens, issueUrl };
+    recordTelemetry(`${OVERSEER_NAME}.filing_class_blocked`, { check, gardens, refusals: c.refusals, first_refusal_at: since, issue_url: issueUrl });
   }
 
   // LIVENESS — notice, then heal, then escalate once per episode.
