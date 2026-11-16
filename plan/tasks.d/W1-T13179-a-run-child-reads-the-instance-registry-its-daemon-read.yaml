@@ -1,0 +1,75 @@
+- id: W1-T13179
+  title: "A run child reads the instance registry its daemon read, so its GitHub share is set, and a read past that share waits no longer than a bound"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # every GitHub read of a run child passes this budget; a wrong share or an unbounded wait stalls builds
+  origin: "operator-session#measurements-2026-11-16"
+  plan_refs:
+    - W1-T12950
+    - W1-T12553
+    - W1-T12670
+  files:
+    - src/run-child-main.ts
+    - src/lib/run-child.ts
+    - src/lib/installation-budget-start.ts
+    - test/github/a-run-child-reads-the-instance-registry-its-daemon-read.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A run child launched by the daemon reads the same instance registry file the daemon read at its start, and with GH_APP_INSTALLATION_ID set writes one github.budget.configured row with role run_child, outcome configured and the daemon's source path, where today it writes outcome unconfigured, reason registry_unreadable, ENOENT for <config root>/.remudero/daemon-instances.yaml"
+      proof: "grep: W1-T13179 criterion 1 in test/github/a-run-child-reads-the-instance-registry-its-daemon-read.test.ts"
+    - claim: "The daemon gives the run child the registry path it read in the child's environment at launch (beside RMD_INSTALLATION_SHARE_DIVISOR), and the run child does not derive that path from loadConfig().root"
+      proof: "grep: W1-T13179 criterion 2 in test/github/a-run-child-reads-the-instance-registry-its-daemon-read.test.ts"
+    - claim: "A run child's budget has a finite maxWaitMs: a read whose reset is further away than the bound stands down at once, as serve's maxWaitMs 0 read does, and does not wait for the hourly reset"
+      proof: "grep: W1-T13179 criterion 3 in test/github/a-run-child-reads-the-instance-registry-its-daemon-read.test.ts"
+    - claim: "invariant:no-budget-when-unconfigured — with no registry path in the environment, or a path that cannot be read, the run child writes an unconfigured row that names the path and the error, and reads as it does today"
+      kind: guard
+      proof: "grep: W1-T13179 criterion 4 in test/github/a-run-child-reads-the-instance-registry-its-daemon-read.test.ts"
+  rationale: |
+    WHY: W1-T12950 gave run children a share of the GitHub App installation, but in production the share
+    is never set. A run child reads with the installation token and no budget, so it can spend the reads
+    the daemons hold back.
+    MEASURED, core ledger (~/rmd-state2/state, today's archives and live file, 2026-11-16 00:00Z to 14:35Z):
+    - 73 github.budget.configured rows with role run_child, from 05:22:29Z to 13:40:48Z. All 73 say outcome
+      unconfigured, reason registry_unreadable, error "ENOENT: no such file or directory, open
+      '/home/node/Remudero/.remudero/daemon-instances.yaml'". None says configured.
+    - In the same window the daemon writes 4 rows with role daemon, outcome configured, source
+      /home/node/Remudero/remudero/.remudero/daemon-instances.yaml (the checkout). Serve writes 16
+      configured rows from its own generation checkouts.
+    - /home/node/Remudero is the state mount (host ~/rmd-state2). It holds no .remudero directory, and
+      /etc/remudero/daemon-instances.yaml is not mounted into remudero-daemon (docker inspect mounts).
+    READ at origin/main ef8b74910:
+    - src/cli/commands/daemon.ts:1339 calls startDaemonInstallationBudget(() => daemonInstallationRegistry(repoRoot), ...)
+      with repoRoot from src/lib/repo-location.ts:86 (the checkout), and passes opts.pollIntervalMs as maxWaitMs.
+    - src/run-child-main.ts:224 calls daemonInstallationRegistry(loadConfig().root). That is the state root,
+      so the checkout fallback at src/lib/installation-budget-start.ts:40 joins a path that does not exist.
+      The call passes no maxWaitMs.
+    - src/lib/github-installation-budget.ts:306-308 resetWaitMs returns the full wait to the reset when
+      maxWaitMs is undefined, so once the share is set a run child's over-share read waits until the
+      hourly reset with no bound. This is the same call, so it is fixed here.
+    - src/lib/run-child.ts:934 is where the daemon builds the child's environment (it already adds
+      INSTALLATION_SHARE_DIVISOR_ENV).
+  design: |
+    INVARIANT no-budget-when-unconfigured: a run child sets a budget only from a registry it read; otherwise its row says why and it reads as today.
+    1. Add an exported env name in installation-budget-start.ts for the registry path (for example
+       RMD_INSTALLATION_REGISTRY_PATH). daemonInstallationRegistry returns the source it read; the daemon
+       keeps that source and src/lib/run-child.ts:934 puts it in the child's environment beside the divisor.
+       A "selected" registry (runtimeInstanceRegistryText) passes the selected file's path.
+    2. src/run-child-main.ts reads the registry from that path. With no path it writes the unconfigured row
+       with reason registry_path_missing; it never falls back to loadConfig().root.
+    3. The run child passes a finite maxWaitMs: the daemon's poll interval, carried in the same environment,
+       else a named BACKSTOP constant of 60 s.
+    4. Tests drive runChildMain with a temp state root that has no .remudero directory and a registry file
+       elsewhere, as the daemon's real layout has, and assert the row and the wait bound.
+  falsifier: |
+    Keep loadConfig().root: criterion 1 fails (registry_unreadable). Keep no maxWaitMs: criterion 3 fails
+    (the read waits to the reset). Fall back to the state root when the path is missing: criterion 4 fails.
+  note: |
+    Id reserved for run-unfiled-1794838967000 with ~/rmd-work/bin/reserve-id.sh.
+    Proof that counts in production: run_child github.budget.configured rows with outcome configured and
+    the checkout's source path, and no registry_unreadable rows, after the deploy.
