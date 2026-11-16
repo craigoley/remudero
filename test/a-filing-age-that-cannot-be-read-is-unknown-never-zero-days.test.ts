@@ -9,9 +9,10 @@
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { performance } from "node:perf_hooks";
 import { test } from "node:test";
 
 import { plainTemplate } from "#src/lib/inbox-plain.js";
@@ -28,9 +29,13 @@ import {
 } from "#src/lib/verify-human-judge.js";
 import { createTaskFilingHistoryInvocation, resolveTaskFilingHistory, FILING_HISTORY_LIMITS,
   type FilingHistoryOptions } from "#src/lib/task-filing-history.js";
-import { hostWorktreeGit } from "#src/lib/worktree-git.js";
-import { parkedVerifyHumanShards } from "#src/run-task.js";
+import { hostWorktreeGit, hostWorktreeGitAsync } from "#src/lib/worktree-git.js";
+import { fixedClock } from "#src/lib/clock.js";
+import type { Config } from "#src/lib/config-schema.js";
+import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "#src/lib/worker.js";
+import { parkedVerifyHumanShards, parkedVerifyHumanShardsAsync, routeAdaptiveLifetimePressure } from "#src/run-task.js";
 import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "#test/helpers/git-repo.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const DAY_MS = 86_400_000;
 
@@ -63,8 +68,8 @@ function seededRepo(): { dir: string; addedAtMs: number } {
   return { dir: repo.dir, addedAtMs: Number(repo.git("log", "-1", "--format=%ct")) * 1000 };
 }
 
-function parkedById(root: string, nowMs: number): Map<string, ShardUnderJudgement> {
-  const shards = parkedVerifyHumanShards(loadPlan(join(root, "plan", "tasks.yaml")), root, clockAt(nowMs));
+async function parkedById(root: string, nowMs: number): Promise<Map<string, ShardUnderJudgement>> {
+  const shards = await parkedVerifyHumanShards(loadPlan(join(root, "plan", "tasks.yaml")), root, clockAt(nowMs));
   return new Map(shards.map((s) => [s.id, s]));
 }
 
@@ -82,9 +87,9 @@ const unknownShard: ShardUnderJudgement = {
   citedInSrc: false,
 };
 
-test("#7911: a committed embedded record and a sharded record both retain measured filing ages", () => {
+test("#7911: a committed embedded record and a sharded record both retain measured filing ages", async () => {
   const { dir, addedAtMs } = seededRepo();
-  const byId = parkedById(dir, addedAtMs + 3 * DAY_MS);
+  const byId = await parkedById(dir, addedAtMs + 3 * DAY_MS);
 
   // Positive control on the same corpus: git IS readable here, and the sharded record dates.
   assert.equal(byId.get("W1-T9001")?.ageDays, 3, "the sharded record's add-commit is three days old");
@@ -94,24 +99,60 @@ test("#7911: a committed embedded record and a sharded record both retain measur
   assert.equal(embedded.ageUnknownReason, undefined);
 });
 
-test("#7911: a root git cannot read has an unknown filing age whose reason says git failed", () => {
+test("#7911: a root git cannot read has an unknown filing age whose reason says git failed", async () => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}vh-no-git-`));
   mkdirSync(join(root, "plan"), { recursive: true });
   writeFileSync(join(root, "plan", "tasks.yaml"), ruling("W1-T9001"));
-  const shard = parkedById(root, 0).get("W1-T9001");
+  const shard = (await parkedById(root, 0)).get("W1-T9001");
   assert.ok(shard, "an unreadable age must not throw the record out of the sweep");
   assert.equal(shard.ageDays, null, "a failed git read is an UNKNOWN age, not 0");
   assert.match(shard.ageUnknownReason ?? "", /git log failed/, "and it names a different cause than a missing add-commit");
 });
 
-test("#7911: a shard filed today is a measured 0 days, distinct from an unknown age", () => {
+test("W1-T12952 criterion 4: the parked sweep and the lifetime-pressure route await the history and keep an unreadable age unknown", async () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}vh-no-git-awaited-`));
+  try {
+    mkdirSync(join(root, "plan"), { recursive: true });
+    writeFileSync(join(root, "plan", "tasks.yaml"), ruling("W1-T9001"));
+    const plan = loadPlan(join(root, "plan", "tasks.yaml"));
+    const pending = parkedVerifyHumanShards(plan, root, clockAt(0));
+    assert.ok(pending instanceof Promise, "the parked sweep hands back a promise: its history read is awaited");
+    for (const shards of [await pending, await parkedVerifyHumanShardsAsync(plan, root, clockAt(0))]) {
+      const shard = shards.find((s) => s.id === "W1-T9001");
+      assert.equal(shard?.ageDays, null, "an unreadable history is an UNKNOWN age, not 0");
+      assert.match(shard?.ageUnknownReason ?? "", /git log failed/);
+    }
+
+    // The lifetime-pressure route: no git history and no timestamped row, so the judge is told the age is unknown.
+    mkdirSync(join(root, ".remudero"), { recursive: true });
+    copyFileSync(join(REPO_ROOT, ".remudero", "mounts.yaml"), join(root, ".remudero", "mounts.yaml"));
+    mkdirSync(join(root, "state"), { recursive: true });
+    const ledgerPath = join(root, "ledger.ndjson");
+    writeFileSync(ledgerPath, JSON.stringify({ step: "run.start", task_id: "W1-T9001", run_id: "r0" }) + "\n");
+    const prompts: string[] = [];
+    const spawn: typeof spawnWorker = async (args: SpawnWorkerArgs) => {
+      prompts.push(String((args as { prompt?: string }).prompt ?? ""));
+      return { text: "VERIFY_HUMAN_DECISION: needs_operator\nVERIFY_HUMAN_REASON: fixture" } as WorkerResult;
+    };
+    await routeAdaptiveLifetimePressure([plan.byId.get("W1-T9001")!], { plan, root, config: { root } as unknown as Config,
+      ledgerPath, runId: "RUN-T12952", shadowJudgeSpawns: { primary: spawn, shadow: spawn }, clock: fixedClock(DAY_MS) });
+    assert.equal(prompts.length, 1);
+    assert.match(prompts[0]!, /^AGE: an unknown number of days since filing/m);
+    assert.match(prompts[0]!, /filing age unknown: git log failed/);
+    assert.doesNotMatch(prompts[0]!, /AGE: 0 days/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("#7911: a shard filed today is a measured 0 days, distinct from an unknown age", async () => {
   const { dir, addedAtMs } = seededRepo();
-  const sharded = parkedById(dir, addedAtMs + 3_600_000).get("W1-T9001");
+  const sharded = (await parkedById(dir, addedAtMs + 3_600_000)).get("W1-T9001");
   assert.strictEqual(sharded?.ageDays, 0, "an hour after its add-commit the age is a measured 0");
   assert.equal(sharded?.ageUnknownReason, undefined, "a measured age carries no unknown reason");
 });
 
-test("#7911: the prompt and both proposals say an unknown age is unknown, never a number of days", () => {
+test("#7911: the prompt and both proposals say an unknown age is unknown, never a number of days", async () => {
   const prompt = buildVerifyHumanJudgePrompt(unknownShard);
   const needs = proposalFromJudgedShard(unknownShard, NEEDS);
   const automate = automationProposalFromJudgedShard(unknownShard, AUTOMATE);
@@ -131,7 +172,7 @@ test("#7911: the prompt and both proposals say an unknown age is unknown, never 
   assert.match(plainTemplate(today).whatHappened, /a wait of 0 days/);
 });
 
-test("#7911: an unknown age never earns an age-band re-ask", () => {
+test("#7911: an unknown age never earns an age-band re-ask", async () => {
   assert.equal(verifyHumanAgeBandKey(unknownShard), undefined, "an unknown age sits in no age band");
   assert.ok(verifyHumanAgeBandKey({ ...unknownShard, ageDays: 61, ageUnknownReason: undefined }), "control: a 61-day age does");
 });
@@ -162,96 +203,168 @@ test("W1-T10210: exact record history survives embedded moves and renames", asyn
   writeFileSync(join(dir, "plan", "tasks.yaml"), unrelated + ruling(id));
   commitHistory(dir, "2020-01-11T12:00:00Z", "introduce the exact embedded record");
   const now = Date.parse("2020-02-10T12:00:00Z");
-  assert.equal(parkedById(dir, now).get("W1-T9001")?.ageDays, 40, "readable-history positive control");
-  await t.test("embedded introduction", () => assert.equal(parkedById(dir, now).get(id)?.ageDays, 30, "date the record, not the earlier plan file or near-id"));
+  assert.equal((await parkedById(dir, now)).get("W1-T9001")?.ageDays, 40, "readable-history positive control");
+  await t.test("embedded introduction", async () => assert.equal((await parkedById(dir, now)).get(id)?.ageDays, 30, "date the record, not the earlier plan file or near-id"));
   commitHistory(dir, "2020-01-30T12:00:00Z", "unrelated later timestamp");
   writeFileSync(join(dir, "plan", "tasks.yaml"), unrelated);
   const oldPath = join(dir, "plan", "tasks.d", "odd-name.yaml");
   writeFileSync(oldPath, ruling(id));
   commitHistory(dir, "2020-01-15T12:00:00Z", "move the exact record into a shard");
-  await t.test("embedded-to-shard move", () => assert.equal(parkedById(dir, now).get(id)?.ageDays, 30, "a move preserves introduction"));
+  await t.test("embedded-to-shard move", async () => assert.equal((await parkedById(dir, now)).get(id)?.ageDays, 30, "a move preserves introduction"));
   renameSync(oldPath, join(dir, "plan", "tasks.d", "not-the-id.yml"));
   commitHistory(dir, "2020-01-05T12:00:00Z", "rename with an older numeric timestamp");
-  await t.test("rename and non-monotone timestamp", () => assert.equal(parkedById(dir, now).get(id)?.ageDays, 30, "neither rename date nor oldest numeric timestamp is birth"));
+  await t.test("rename and non-monotone timestamp", async () => assert.equal((await parkedById(dir, now)).get(id)?.ageDays, 30, "neither rename date nor oldest numeric timestamp is birth"));
   writeFileSync(join(dir, "plan", "tasks.d", `${id}-misleading.yaml`), ruling("W1-T9999"));
   commitHistory(dir, "2020-02-07T12:00:00Z", "a matching filename holds a different identity");
-  await t.test("wrong-id filename", () => assert.equal(parkedById(dir, now).get(id)?.ageDays, 30, "a wrong-id filename cannot replace exact record provenance"));
+  await t.test("wrong-id filename", async () => assert.equal((await parkedById(dir, now)).get(id)?.ageDays, 30, "a wrong-id filename cannot replace exact record provenance"));
 });
 
-function historyCase(): { repo: ReturnType<typeof gitRepo>; plan: Plan; readAge: () => ShardUnderJudgement | undefined } {
+/** The longest time the loop went without running a 50 ms timer while `work` ran, in ms. */
+async function longestLoopGap(work: () => Promise<unknown>): Promise<number> {
+  let last = performance.now();
+  let worst = 0;
+  const timer = setInterval(() => {
+    const now = performance.now();
+    worst = Math.max(worst, now - last);
+    last = now;
+  }, 50);
+  try {
+    await work();
+  } finally {
+    clearInterval(timer);
+  }
+  return Math.max(worst, performance.now() - last);
+}
+
+test("W1-T12952 criterion 1: the lifetime-pressure route reads filing dates while the loop stays free under a slow git", async t => {
+  const repo = gitRepo({ kind: "filing-history-loop", seedCommit: false });
+  t.after(() => repo.cleanup());
+  const id = "W1-T9003";
+  mkdirSync(join(repo.dir, "plan", "tasks.d"), { recursive: true });
+  writeFileSync(join(repo.dir, "plan", "tasks.yaml"), ruling(id));
+  writeFileSync(join(repo.dir, "plan", "tasks.d", "W1-T9001-control.yaml"), ruling("W1-T9001"));
+  commitHistory(repo.dir, "2020-01-01T12:00:00Z", "file the records");
+  mkdirSync(join(repo.dir, ".remudero"), { recursive: true });
+  copyFileSync(join(REPO_ROOT, ".remudero", "mounts.yaml"), join(repo.dir, ".remudero", "mounts.yaml"));
+  mkdirSync(join(repo.dir, "state"), { recursive: true });
+  const ledgerPath = join(repo.dir, "ledger.ndjson");
+  // Attempts with no timestamp: only the git history can date the task.
+  writeFileSync(ledgerPath, [0, 1].map(i => JSON.stringify({ step: "run.start", task_id: id, run_id: `r${i}` })).join("\n") + "\n");
+  const plan = loadPlan(join(repo.dir, "plan", "tasks.yaml"));
+
+  // A git on PATH that logs each call and sleeps 2 s before it runs the real git.
+  const realGit = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+  const shim = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}slow-git-`));
+  const log = join(shim, "calls.log");
+  writeFileSync(log, "");
+  writeFileSync(join(shim, "git"), `#!/bin/sh\nprintf '%s\\n' "$*" >> '${log}'\nsleep 2\nexec '${realGit}' "$@"\n`);
+  chmodSync(join(shim, "git"), 0o755);
+  const path = process.env.PATH;
+  process.env.PATH = `${shim}:${path}`;
+  t.after(() => { process.env.PATH = path; rmSync(shim, { recursive: true, force: true }); });
+
+  const prompts: string[] = [];
+  const spawn: typeof spawnWorker = async (args: SpawnWorkerArgs) => {
+    prompts.push(String((args as { prompt?: string }).prompt ?? ""));
+    return { text: "VERIFY_HUMAN_DECISION: needs_operator\nVERIFY_HUMAN_REASON: fixture" } as WorkerResult;
+  };
+  const gap = await longestLoopGap(() => routeAdaptiveLifetimePressure([plan.byId.get(id)!], {
+    plan, root: repo.dir, config: { root: repo.dir } as unknown as Config, ledgerPath, runId: "RUN-T12952",
+    shadowJudgeSpawns: { primary: spawn, shadow: spawn }, clock: fixedClock(Date.parse("2020-01-31T12:00:00Z")),
+  }));
+  const calls = readFileSync(log, "utf8");
+  for (const read of ["rev-parse --verify", "--pretty=raw", "diff-tree --stdin", "cat-file --batch"])
+    assert.ok(calls.includes(read), `the route read the history through the slow git: ${read}`);
+  assert.equal(prompts.length, 1);
+  assert.match(prompts[0]!, /AGE: 30 days since filing/, "the date came from the git history");
+  assert.ok(gap < 500, `the 50 ms timer must fire at least once in every 500 ms; the longest gap was ${Math.round(gap)} ms`);
+
+  // Positive control: the same slow git behind the synchronous leaf holds the loop for the whole call.
+  let once = false;
+  const blocking = await longestLoopGap(() => resolveTaskFilingHistory(id, createTaskFilingHistoryInvocation(repo.dir, [id], {
+    readGit: async (root, args, opts) => {
+      if (once) throw new Error("one blocking call is enough for the control");
+      once = true;
+      return hostWorktreeGit(root, args, opts);
+    },
+  })));
+  assert.ok(blocking >= 1500, `the synchronous leaf holds the loop for the slow git; the longest gap was ${Math.round(blocking)} ms`);
+});
+
+function historyCase(): { repo: ReturnType<typeof gitRepo>; plan: Plan; readAge: () => Promise<ShardUnderJudgement | undefined> } {
   const repo = gitRepo({ kind: "filing-history-unavailable", seedCommit: false });
   mkdirSync(join(repo.dir, "plan", "tasks.d"), { recursive: true });
   writeFileSync(join(repo.dir, "plan", "tasks.yaml"), ruling("W1-T9003"));
   writeFileSync(join(repo.dir, "plan", "tasks.d", "W1-T9001-control.yaml"), ruling("W1-T9001"));
   commitHistory(repo.dir, "2020-01-01T12:00:00Z", "initial exact records");
   const plan = loadPlan(join(repo.dir, "plan", "tasks.yaml"));
-  return { repo, plan, readAge: () => parkedVerifyHumanShards(plan, repo.dir, clockAt(Date.parse("2020-01-01T13:00:00Z")))
+  return { repo, plan, readAge: async () => (await parkedVerifyHumanShards(plan, repo.dir, clockAt(Date.parse("2020-01-01T13:00:00Z"))))
     .find(shard => shard.id === "W1-T9003") };
 }
 
 test("W1-T10210: unknown history is distinct from a measured same-day zero", async t => {
-  await t.test("same-day embedded history is a measured zero", child => {
+  await t.test("same-day embedded history is a measured zero", async child => {
     const f = historyCase(); child.after(() => f.repo.cleanup());
-    assert.equal(f.readAge()?.ageDays, 0); assert.equal(f.readAge()?.ageUnknownReason, undefined);
+    assert.equal((await f.readAge())?.ageDays, 0); assert.equal((await f.readAge())?.ageUnknownReason, undefined);
   });
-  await t.test("uncommitted exact record is unknown despite readable history", child => {
+  await t.test("uncommitted exact record is unknown despite readable history", async child => {
     const f = historyCase(); child.after(() => f.repo.cleanup());
     writeFileSync(join(f.repo.dir, "plan", "tasks.yaml"), ruling("W1-T9003") + ruling("W1-T9005"));
-    const shards = parkedById(f.repo.dir, Date.parse("2020-01-02T12:00:00Z"));
+    const shards = await parkedById(f.repo.dir, Date.parse("2020-01-02T12:00:00Z"));
     assert.equal(shards.get("W1-T9001")?.ageDays, 1, "positive control in the same repository");
     assert.equal(shards.get("W1-T9005")?.ageDays, null);
     assert.ok(shards.get("W1-T9005")?.ageUnknownReason);
   });
-  await t.test("a matching filename containing only a different id is unknown", child => {
+  await t.test("a matching filename containing only a different id is unknown", async child => {
     const f = historyCase(); child.after(() => f.repo.cleanup());
     writeFileSync(join(f.repo.dir, "plan", "tasks.yaml"), "[]\n");
     writeFileSync(join(f.repo.dir, "plan", "tasks.d", "W1-T9003-wrong.yaml"), ruling("W1-T90031"));
     commitHistory(f.repo.dir, "2020-01-02T12:00:00Z", "remove exact record but keep a misleading filename");
-    assert.equal(f.readAge()?.ageDays, null);
+    assert.equal((await f.readAge())?.ageDays, null);
   });
-  await t.test("duplicate structured identity is unknown", child => {
+  await t.test("duplicate structured identity is unknown", async child => {
     const f = historyCase(); child.after(() => f.repo.cleanup());
     writeFileSync(join(f.repo.dir, "plan", "tasks.d", "W1-T9003-copy.yaml"), ruling("W1-T9003"));
     commitHistory(f.repo.dir, "2020-01-02T12:00:00Z", "ambiguous duplicated record");
-    assert.equal(f.readAge()?.ageDays, null); assert.match(f.readAge()?.ageUnknownReason ?? "", /duplicate|ambiguous/);
+    assert.equal((await f.readAge())?.ageDays, null); assert.match((await f.readAge())?.ageUnknownReason ?? "", /duplicate|ambiguous/);
   });
-  await t.test("deletion followed by reintroduction is unknown", child => {
+  await t.test("deletion followed by reintroduction is unknown", async child => {
     const f = historyCase(); child.after(() => f.repo.cleanup());
     writeFileSync(join(f.repo.dir, "plan", "tasks.yaml"), "[]\n");
     commitHistory(f.repo.dir, "2020-01-02T12:00:00Z", "delete record");
     writeFileSync(join(f.repo.dir, "plan", "tasks.d", "W1-T9003-again.yaml"), ruling("W1-T9003"));
     commitHistory(f.repo.dir, "2020-01-03T12:00:00Z", "reintroduce record");
-    assert.equal(f.readAge()?.ageDays, null); assert.match(f.readAge()?.ageUnknownReason ?? "", /reintroduc|ambiguous/);
+    assert.equal((await f.readAge())?.ageDays, null); assert.match((await f.readAge())?.ageUnknownReason ?? "", /reintroduc|ambiguous/);
   });
-  await t.test("unsupported plan-container shape is unknown", child => {
+  await t.test("unsupported plan-container shape is unknown", async child => {
     const f = historyCase(); child.after(() => f.repo.cleanup());
     writeFileSync(join(f.repo.dir, "plan", "tasks.yaml"), "tasks: []\n");
     commitHistory(f.repo.dir, "2020-01-02T12:00:00Z", "unsupported container");
-    assert.equal(f.readAge()?.ageDays, null); assert.match(f.readAge()?.ageUnknownReason ?? "", /unsupported|shape/);
+    assert.equal((await f.readAge())?.ageDays, null); assert.match((await f.readAge())?.ageUnknownReason ?? "", /unsupported|shape/);
   });
-  await t.test("shallow ancestry is unknown", child => {
+  await t.test("shallow ancestry is unknown", async child => {
     const f = historyCase(); child.after(() => f.repo.cleanup());
     commitHistory(f.repo.dir, "2020-01-02T12:00:00Z", "a later snapshot");
     const shallow = gitRepo({ kind: "filing-history-shallow", seedCommit: false }); child.after(() => shallow.cleanup());
     shallow.git("fetch", "--quiet", "--depth=1", f.repo.dir, "HEAD");
     shallow.git("checkout", "--quiet", "--detach", "FETCH_HEAD");
     assert.equal(shallow.git("rev-parse", "--is-shallow-repository").trim(), "true");
-    const age = parkedVerifyHumanShards(f.plan, shallow.dir, clockAt(Date.parse("2020-01-03T12:00:00Z")))
+    const age = (await parkedVerifyHumanShards(f.plan, shallow.dir, clockAt(Date.parse("2020-01-03T12:00:00Z"))))
       .find(shard => shard.id === "W1-T9003");
     assert.equal(age?.ageDays, null); assert.match(age?.ageUnknownReason ?? "", /shallow|incomplete/);
   });
-  await t.test("a missing original parent is unknown", child => {
+  await t.test("a missing original parent is unknown", async child => {
     const f = historyCase(); child.after(() => f.repo.cleanup());
     const parent = f.repo.git("rev-parse", "HEAD").trim();
     commitHistory(f.repo.dir, "2020-01-02T12:00:00Z", "child of missing parent");
     rmSync(join(f.repo.dir, ".git", "objects", parent.slice(0, 2), parent.slice(2)));
-    assert.equal(f.readAge()?.ageDays, null); assert.ok(f.readAge()?.ageUnknownReason);
+    assert.equal((await f.readAge())?.ageDays, null); assert.ok((await f.readAge())?.ageUnknownReason);
   });
-  await t.test("an unreadable historical blob is unknown", child => {
+  await t.test("an unreadable historical blob is unknown", async child => {
     const f = historyCase(); child.after(() => f.repo.cleanup());
     const blob = f.repo.git("rev-parse", "HEAD:plan/tasks.yaml").trim();
     rmSync(join(f.repo.dir, ".git", "objects", blob.slice(0, 2), blob.slice(2)));
-    assert.equal(f.readAge()?.ageDays, null); assert.ok(f.readAge()?.ageUnknownReason);
+    assert.equal((await f.readAge())?.ageDays, null); assert.ok((await f.readAge())?.ageUnknownReason);
   });
 });
 
@@ -259,16 +372,16 @@ test("W1-T10210: callers share one aggregate filing-history budget", async t => 
   const { dir, addedAtMs } = seededRepo(); t.after(() => rmSync(dir, { recursive: true, force: true }));
   const plan = loadPlan(join(dir, "plan", "tasks.yaml"));
   commitHistory(dir, "2020-01-01T12:00:00Z", "a second commit consumes the same invocation allowance");
-  await t.test("qualified-history positive control", () => {
-    const positive = parkedVerifyHumanShards(plan, dir, clockAt(addedAtMs + 3 * DAY_MS));
+  await t.test("qualified-history positive control", async () => {
+    const positive = await parkedVerifyHumanShards(plan, dir, clockAt(addedAtMs + 3 * DAY_MS));
     assert.deepEqual(positive.map(s => s.ageDays), [3, 3], "both exact identities qualify without exhaustion");
   });
   for (const resource of ["commitVisits", "blobReads", "decodedBytes", "metadataBytes", "stateEntries"] as const) {
-    await t.test(resource, () => {
+    await t.test(resource, async () => {
       const calls: string[][] = [];
       const options: FilingHistoryOptions = { limits: { [resource]: resource === "commitVisits" || resource === "blobReads" ? 1 : 0 },
-        readGit: (root, args, opts) => { calls.push([...args]); return hostWorktreeGit(root, args, opts); } };
-      const shards = parkedVerifyHumanShards(plan, dir, clockAt(addedAtMs + 3 * DAY_MS), undefined, options);
+        readGit: (root, args, opts) => { calls.push([...args]); return hostWorktreeGitAsync(root, args, opts); } };
+      const shards = await parkedVerifyHumanShards(plan, dir, clockAt(addedAtMs + 3 * DAY_MS), undefined, options);
       assert.equal(shards.length, 2);
       for (const shard of shards) { assert.equal(shard.ageDays, null); assert.match(shard.ageUnknownReason ?? "", /budget/); }
       const expectedPins = resource === "decodedBytes" || resource === "metadataBytes" ? 0 : 1;
@@ -279,26 +392,26 @@ test("W1-T10210: callers share one aggregate filing-history budget", async t => 
   }
 });
 
-test("W1-T10210: provenance and reuse stay bound to one immutable revision", t => {
+test("W1-T10210: provenance and reuse stay bound to one immutable revision", async t => {
   const f = historyCase(); t.after(() => f.repo.cleanup());
   const revision = f.repo.git("rev-parse", "HEAD").trim();
   const ctx = createTaskFilingHistoryInvocation(f.repo.dir, ["W1-T9003"]);
-  const birth = resolveTaskFilingHistory("W1-T9003", ctx);
+  const birth = await resolveTaskFilingHistory("W1-T9003", ctx);
   assert.deepEqual(birth, { state: "qualified", revision, completeness: "complete", commit: revision,
     path: "plan/tasks.yaml", source: "embedded", committerSeconds: Date.parse("2020-01-01T12:00:00Z") / 1000 });
   const work = { ...ctx.usage };
   writeFileSync(join(f.repo.dir, "plan", "tasks.yaml"), "[]\n");
   commitHistory(f.repo.dir, "2020-01-02T12:00:00Z", "remove record after pin");
-  assert.deepEqual(resolveTaskFilingHistory("W1-T9003", ctx), birth);
-  assert.equal(resolveTaskFilingHistory("OTHER", ctx).state, "unknown");
+  assert.deepEqual((await resolveTaskFilingHistory("W1-T9003", ctx)), birth);
+  assert.equal((await resolveTaskFilingHistory("OTHER", ctx)).state, "unknown");
   assert.deepEqual(ctx.usage, work, "neither reuse nor an out-of-population request creates more work");
-  assert.equal(resolveTaskFilingHistory("W1-T9003", createTaskFilingHistoryInvocation(f.repo.dir, ["W1-T9003"])).state, "unknown");
+  assert.equal((await resolveTaskFilingHistory("W1-T9003", createTaskFilingHistoryInvocation(f.repo.dir, ["W1-T9003"]))).state, "unknown");
   const invalid = createTaskFilingHistoryInvocation(f.repo.dir, ["W1-T9003"], { limits: { commitVisits: FILING_HISTORY_LIMITS.commitVisits + 1 } });
-  assert.match((resolveTaskFilingHistory("W1-T9003", invalid) as { reason: string }).reason, /invalid/);
+  assert.match(((await resolveTaskFilingHistory("W1-T9003", invalid)) as { reason: string }).reason, /invalid/);
   assert.equal(invalid.usage.commitVisits, 0, "the test seam cannot enlarge a production allowance");
 });
 
-test("W1-T10210: merges retain a common introduction and reject independent births", t => {
+test("W1-T10210: merges retain a common introduction and reject independent births", async t => {
   const common = historyCase(); t.after(() => common.repo.cleanup());
   const first = common.repo.git("rev-parse", "HEAD").trim();
   common.repo.git("branch", "other", first);
@@ -309,7 +422,7 @@ test("W1-T10210: merges retain a common introduction and reject independent birt
   commitHistory(common.repo.dir, "2020-01-03T12:00:00Z", "same introduction on the other parent");
   common.repo.git("checkout", "--quiet", "main");
   gitHistory(common.repo.dir, "2020-01-04T12:00:00Z", ["merge", "--quiet", "--no-edit", "--no-ff", "-s", "ours", "other"]);
-  const commonResult = resolveTaskFilingHistory("W1-T9003", createTaskFilingHistoryInvocation(common.repo.dir, ["W1-T9003"]));
+  const commonResult = await resolveTaskFilingHistory("W1-T9003", createTaskFilingHistoryInvocation(common.repo.dir, ["W1-T9003"]));
   assert.equal(commonResult.state, "qualified");
   if (commonResult.state === "qualified") assert.equal(commonResult.commit, first, "inspect all original parents without dating the merge or move");
 
@@ -326,22 +439,22 @@ test("W1-T10210: merges retain a common introduction and reject independent birt
   }
   independent.git("checkout", "--quiet", "main");
   gitHistory(independent.dir, "2020-01-13T12:00:00Z", ["merge", "--quiet", "--no-edit", "--no-ff", "-s", "ours", "other"]);
-  const shards = parkedById(independent.dir, Date.parse("2020-02-10T12:00:00Z"));
+  const shards = await parkedById(independent.dir, Date.parse("2020-02-10T12:00:00Z"));
   assert.equal(shards.get("W1-T9001")?.ageDays, 40, "same-corpus positive control survives the merge");
   assert.equal(shards.get("W1-T9003")?.ageDays, null);
   assert.match(shards.get("W1-T9003")?.ageUnknownReason ?? "", /incomparable|ambiguous/);
 });
 
-test("W1-T10210: replacement refs cannot manufacture a later introduction", t => {
+test("W1-T10210: replacement refs cannot manufacture a later introduction", async t => {
   const f = historyCase(); t.after(() => f.repo.cleanup());
   commitHistory(f.repo.dir, "2020-01-02T12:00:00Z", "child of the real introduction");
   f.repo.git("replace", "--graft", "HEAD");
-  const result = resolveTaskFilingHistory("W1-T9003", createTaskFilingHistoryInvocation(f.repo.dir, ["W1-T9003"]));
+  const result = await resolveTaskFilingHistory("W1-T9003", createTaskFilingHistoryInvocation(f.repo.dir, ["W1-T9003"]));
   assert.equal(result.state, "qualified");
   if (result.state === "qualified") assert.equal(result.committerSeconds, Date.parse("2020-01-01T12:00:00Z") / 1000);
   f.repo.git("replace", "-d", "HEAD");
   writeFileSync(join(f.repo.dir, ".git", "info", "grafts"), f.repo.git("rev-parse", "HEAD").trim() + "\n");
-  const grafted = resolveTaskFilingHistory("W1-T9003", createTaskFilingHistoryInvocation(f.repo.dir, ["W1-T9003"]));
+  const grafted = await resolveTaskFilingHistory("W1-T9003", createTaskFilingHistoryInvocation(f.repo.dir, ["W1-T9003"]));
   assert.equal(grafted.state, "unknown");
 });
 
@@ -363,27 +476,27 @@ test("W1-T10210: incomplete promisor history cannot fetch objects during an age 
   assert.ok(!missing.split("\n").includes(blob), "the filtered clone genuinely lacks the plan blob");
   hostWorktreeGit(control, ["cat-file", "-e", blob], { env: { GIT_NO_LAZY_FETCH: "0" } });
   assert.ok(localObjects(control).split("\n").includes(blob), "ordinary Git really can retrieve the promised object from this local remote");
-  for (const oldGit of [false, true]) await t.test(oldGit ? "older Git that ignores the no-lazy-fetch variable" : "the real default Git seam", () => {
+  for (const oldGit of [false, true]) await t.test(oldGit ? "older Git that ignores the no-lazy-fetch variable" : "the real default Git seam", async () => {
     const dir = clone(oldGit ? "old-git-subject" : "default-subject");
     const before = localObjects(dir);
     assert.ok(!before.split("\n").includes(blob));
     const options: FilingHistoryOptions = oldGit ? { readGit: (root, args, opts) =>
-      hostWorktreeGit(root, args, { ...opts, env: { ...opts?.env, GIT_NO_LAZY_FETCH: "0" } }) } : {};
-    const result = resolveTaskFilingHistory("W1-T9003", createTaskFilingHistoryInvocation(dir, ["W1-T9003"], options));
+      hostWorktreeGitAsync(root, args, { ...opts, env: { ...opts?.env, GIT_NO_LAZY_FETCH: "0" } }) } : {};
+    const result = await resolveTaskFilingHistory("W1-T9003", createTaskFilingHistoryInvocation(dir, ["W1-T9003"], options));
     assert.equal(result.state, "unknown", "a read must not hydrate this incomplete repository");
     if (result.state === "unknown") assert.match(result.reason, /promisor/);
     assert.equal(localObjects(dir), before, "no promised blob was fetched or written by history resolution");
   });
 });
 
-test("W1-T10210: historical containers ignore uncommitted layout overrides", t => {
+test("W1-T10210: historical containers ignore uncommitted layout overrides", async t => {
   const f = historyCase(); t.after(() => f.repo.cleanup());
-  const read = () => resolveTaskFilingHistory("W1-T9003", createTaskFilingHistoryInvocation(f.repo.dir, ["W1-T9003"]));
-  const before = read(); assert.equal(before.state, "qualified");
+  const read = async () => await resolveTaskFilingHistory("W1-T9003", createTaskFilingHistoryInvocation(f.repo.dir, ["W1-T9003"]));
+  const before = (await read()); assert.equal(before.state, "qualified");
   mkdirSync(join(f.repo.dir, ".remudero"), { recursive: true });
   for (const override of ["{ invalid", "[]", JSON.stringify({ planDir: "roadmap", planMonolith: "roadmap/tasks.yaml" })]) {
     writeFileSync(join(f.repo.dir, ".remudero", "layout.json"), override);
-    assert.deepEqual(read(), before, "working-tree layout cannot alter the pinned historical containers or birth");
+    assert.deepEqual((await read()), before, "working-tree layout cannot alter the pinned historical containers or birth");
   }
 });
 
@@ -394,17 +507,17 @@ test("W1-T10210: unsupported historical encoding, aliases and oversized blobs re
     ["not a record list", "- just-a-string\n", /record shape/],
     ["malformed YAML", "- id: [\n", /YAML/],
     ["oversized blob", "- id: W1-T9003\n  rationale: " + "x".repeat(4 * 1024 ** 2 + 1) + "\n", /budget/],
-  ] as const) await t.test(name, child => {
+  ] as const) await t.test(name, async child => {
     const f = historyCase(); child.after(() => f.repo.cleanup());
     writeFileSync(join(f.repo.dir, "plan", "tasks.yaml"), content);
     commitHistory(f.repo.dir, "2020-01-02T12:00:00Z", name);
-    const result = resolveTaskFilingHistory("W1-T9003", createTaskFilingHistoryInvocation(f.repo.dir, ["W1-T9003"]));
+    const result = await resolveTaskFilingHistory("W1-T9003", createTaskFilingHistoryInvocation(f.repo.dir, ["W1-T9003"]));
     assert.equal(result.state, "unknown");
     if (result.state === "unknown") assert.match(result.reason, reason);
   });
 });
 
-test("W1-T10210: finite defaults cover a production-shaped immutable history", t => {
+test("W1-T10210: finite defaults cover a production-shaped immutable history", async t => {
   const repo = gitRepo({ kind: "filing-history-population", seedCommit: false }); t.after(() => repo.cleanup());
   const data = (value: string): string => `data ${Buffer.byteLength(value)}\n${value}\n`;
   const { name, email } = GIT_REPO_FIXTURE_IDENTITY;
@@ -426,11 +539,11 @@ test("W1-T10210: finite defaults cover a production-shaped immutable history", t
   execFileSync("git", ["-C", repo.dir, "fast-import", "--quiet"], { input: stream, stdio: "pipe" });
   const ctx = createTaskFilingHistoryInvocation(repo.dir, candidateIds);
   const started = performance.now();
-  const first = resolveTaskFilingHistory("P0", ctx);
+  const first = await resolveTaskFilingHistory("P0", ctx);
   assert.equal(first.state, "qualified");
   const usage = { ...ctx.usage };
   for (const id of candidateIds) {
-    const result = resolveTaskFilingHistory(id, ctx);
+    const result = await resolveTaskFilingHistory(id, ctx);
     assert.equal(result.state, "qualified");
     if (result.state === "qualified" && first.state === "qualified") {
       assert.equal(result.commit, first.commit, "record edits preserve the original shared birth");
@@ -457,7 +570,7 @@ function metadataHistoryCase(): ReturnType<typeof historyCase> & { birth: string
   return { ...f, birth };
 }
 
-test("W1-T10278: unrelated duplicate metadata preserves exact filing history", t => {
+test("W1-T10278: unrelated duplicate metadata preserves exact filing history", async t => {
   const f = metadataHistoryCase(); t.after(() => f.repo.cleanup());
   writeFileSync(join(f.repo.dir, "plan", "tasks.yaml"), "[]\n");
   const moved = join(f.repo.dir, "plan", "tasks.d", "W1-T9003-moved.yaml");
@@ -468,16 +581,16 @@ test("W1-T10278: unrelated duplicate metadata preserves exact filing history", t
   commitHistory(f.repo.dir, "2020-01-05T12:00:00Z", "rename and add a wrong-id filename");
   const ctx = createTaskFilingHistoryInvocation(f.repo.dir, ["W1-T9003", "W1-T9001", "W1-T9555"]);
   const revision = f.repo.git("rev-parse", "HEAD").trim();
-  assert.deepEqual(resolveTaskFilingHistory("W1-T9003", ctx), {
+  assert.deepEqual((await resolveTaskFilingHistory("W1-T9003", ctx)), {
     state: "qualified", revision, completeness: "complete", commit: f.birth,
     path: "plan/tasks.yaml", source: "embedded", committerSeconds: 1577880000,
   });
-  const control = resolveTaskFilingHistory("W1-T9001", ctx);
+  const control = await resolveTaskFilingHistory("W1-T9001", ctx);
   assert.equal(control.state, "qualified");
   if (control.state === "qualified") {
     assert.equal(control.commit, f.birth); assert.equal(control.source, "shard");
   }
-  const reference = resolveTaskFilingHistory("W1-T9555", ctx);
+  const reference = await resolveTaskFilingHistory("W1-T9555", ctx);
   assert.equal(reference.state, "unknown", "nested metadata, prose and filenames never introduce identity");
   if (reference.state === "unknown") assert.match(reference.reason, /absent/);
 });
@@ -508,51 +621,51 @@ test("W1-T10278: ambiguous structured identity stays unknown", async t => {
     ["multiple documents", "- id: W1-T9999\n---\n- id: W1-T9003\n"],
     ["syntax error alongside duplicate metadata", "- id: W1-T9999\n  priority: 1\n  priority: 2\n  broken: [\n"],
   ];
-  for (const [name, text] of cases) await t.test(name, child => {
+  for (const [name, text] of cases) await t.test(name, async child => {
     const f = historyCase(); child.after(() => f.repo.cleanup());
     writeFileSync(join(f.repo.dir, "plan", "tasks.d", "unreadable-identity.yaml"), text);
     commitHistory(f.repo.dir, "2020-01-02T12:00:00Z", "unsupported historical identity");
-    const result = resolveTaskFilingHistory("W1-T9003", createTaskFilingHistoryInvocation(f.repo.dir, ["W1-T9003"]));
+    const result = await resolveTaskFilingHistory("W1-T9003", createTaskFilingHistoryInvocation(f.repo.dir, ["W1-T9003"]));
     assert.equal(result.state, "unknown", name);
     if (result.state === "unknown") assert.match(result.reason, /unsupported|ambiguous/, name);
   });
 });
 
 test("W1-T10278: duplicate metadata preserves shared history limits", async t => {
-  await t.test("one completed scan serves both candidates", child => {
+  await t.test("one completed scan serves both candidates", async child => {
     const f = metadataHistoryCase(); child.after(() => f.repo.cleanup());
     const calls: string[][] = [];
     const ctx = createTaskFilingHistoryInvocation(f.repo.dir, ["W1-T9003", "W1-T9001"], {
-      readGit: (root, args, options) => { calls.push([...args]); return hostWorktreeGit(root, args, options); },
+      readGit: (root, args, options) => { calls.push([...args]); return hostWorktreeGitAsync(root, args, options); },
     });
-    assert.equal(resolveTaskFilingHistory("W1-T9003", ctx).state, "qualified");
+    assert.equal((await resolveTaskFilingHistory("W1-T9003", ctx)).state, "qualified");
     const usage = { ...ctx.usage }, count = calls.length;
-    assert.equal(resolveTaskFilingHistory("W1-T9001", ctx).state, "qualified");
+    assert.equal((await resolveTaskFilingHistory("W1-T9001", ctx)).state, "qualified");
     assert.deepEqual(ctx.usage, usage); assert.equal(calls.length, count);
     for (const key of Object.keys(FILING_HISTORY_LIMITS) as (keyof typeof FILING_HISTORY_LIMITS)[])
       assert.ok(ctx.usage[key] <= FILING_HISTORY_LIMITS[key]);
   });
   // Clean-history refusal controls still exercise the real resource guards when tolerance is removed.
   for (const resource of Object.keys(FILING_HISTORY_LIMITS) as (keyof typeof FILING_HISTORY_LIMITS)[])
-    await t.test(`${resource} exhaustion still refuses`, child => {
+    await t.test(`${resource} exhaustion still refuses`, async child => {
       const f = historyCase(); child.after(() => f.repo.cleanup());
       const ctx = createTaskFilingHistoryInvocation(f.repo.dir, ["W1-T9003", "W1-T9001"], { limits: { [resource]: 0 } });
-      const result = resolveTaskFilingHistory("W1-T9003", ctx);
+      const result = await resolveTaskFilingHistory("W1-T9003", ctx);
       assert.equal(result.state, "unknown");
       if (result.state === "unknown") assert.match(result.reason, /budget exhausted/);
       const usage = { ...ctx.usage };
-      assert.equal(resolveTaskFilingHistory("W1-T9001", ctx).state, "unknown");
+      assert.equal((await resolveTaskFilingHistory("W1-T9001", ctx)).state, "unknown");
       assert.deepEqual(ctx.usage, usage); assert.equal(ctx.usage[resource], 0);
     });
 });
 
-test("W1-T10278: parked ages survive unrelated historical metadata errors", t => {
+test("W1-T10278: parked ages survive unrelated historical metadata errors", async t => {
   const f = metadataHistoryCase(); t.after(() => f.repo.cleanup());
-  const now = Date.parse("2020-01-08T12:00:00Z"), rows = parkedById(f.repo.dir, now);
+  const now = Date.parse("2020-01-08T12:00:00Z"), rows = await parkedById(f.repo.dir, now);
   const embedded = rows.get("W1-T9003")!;
   assert.equal(embedded.ageDays, 7); assert.equal(embedded.ageUnknownReason, undefined);
   assert.equal(rows.get("W1-T9001")?.ageDays, 7, "the same scan dates its sharded control");
-  assert.equal(parkedById(f.repo.dir, Date.parse("2020-01-01T13:00:00Z")).get("W1-T9003")?.ageDays, 0,
+  assert.equal((await parkedById(f.repo.dir, Date.parse("2020-01-01T13:00:00Z"))).get("W1-T9003")?.ageDays, 0,
     "a measured same-day zero is still distinct from unknown");
   assert.equal(observedStateKey(embedded), observedStateKey({ ...embedded, ageDays: null, ageUnknownReason: "unreadable" }));
   const verdict: VerifyHumanVerdict = { decision: "needs_operator", reason: "fixture" };

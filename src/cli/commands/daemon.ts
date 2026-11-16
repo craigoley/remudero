@@ -887,29 +887,39 @@ function isOpsCatalogSlug(slug: string): boolean {
 /** BACKSTOP: completed private evidence expires even if a successor refresh hangs. */
 export const OPS_DISPATCH_SOURCE_MAX_AGE_MS = 120_000;
 
-export function opsCatalogShadowFeed(source: { refresh(): Promise<OpsCatalogShadowInput> }, clock: Clock = systemClock): {
+/** W1-T13052: the daemon refreshes on its own timer, so evidence stays younger than the bound between slow cycles. */
+export const OPS_DISPATCH_SOURCE_REFRESH_MS = 45_000;
+
+export function opsCatalogShadowFeed(
+  source: { refresh(): Promise<OpsCatalogShadowInput> }, clock: Clock = systemClock, opts: { refreshEveryMs?: number } = {},
+): {
   current(): OpsCatalogShadowInput | undefined;
   forDispatch(): OpsCatalogShadowInput | undefined;
+  stop(): void;
 } {
   let latest: OpsCatalogShadowInput | undefined;
   let completedAt: number | undefined;
   let inFlight = false;
+  const start = (): void => {
+    if (inFlight) return;
+    inFlight = true;
+    // Age counts from the start of the read that produced the evidence, never from its slow answer.
+    const startedAt = clock.now();
+    // refresh() answers failure as an outcome; an unexpected rejection remains unreadable.
+    void source.refresh().then((input) => { latest = input; completedAt = startedAt; }, (error: unknown) => {
+      latest = { outcome: "unreadable" }; completedAt = startedAt; void error;
+    }).finally(() => { inFlight = false; });
+  };
+  const timer = opts.refreshEveryMs === undefined ? undefined : setInterval(start, opts.refreshEveryMs);
+  timer?.unref();
   return {
-    current: () => {
-      if (!inFlight) {
-        inFlight = true;
-        // refresh() answers failure as an outcome; an unexpected rejection remains unreadable.
-        void source.refresh().then((input) => { latest = input; completedAt = clock.now(); }, (error: unknown) => {
-          latest = { outcome: "unreadable" }; completedAt = clock.now(); void error;
-        }).finally(() => { inFlight = false; });
-      }
-      return latest;
-    },
+    current: () => { start(); return latest; },
     forDispatch: () => {
       if (latest?.outcome !== "ok") return latest;
       const age = completedAt === undefined ? NaN : clock.now() - completedAt;
       return !Number.isFinite(age) || age < 0 || age >= OPS_DISPATCH_SOURCE_MAX_AGE_MS ? { outcome: "stale" } : latest;
     },
+    stop: () => { if (timer !== undefined) clearInterval(timer); },
   };
 }
 
@@ -966,12 +976,14 @@ function startBootPhases(clock: Pick<Clock, "now">, uptimeMs: number): BootPhase
 }
 
 /** W1-T12228: `plan/policy.yaml`'s `freshnessRestart` rows as the daemon's options, beside `sweepWallClockBoundMs`. */
-export function freshnessRestartOpts(rows: FreshnessRestartValues): Pick<DaemonOpts, "freshnessScoreLimit" | "freshnessStalenessHorizonMs" | "freshnessQuietWindowMs" | "freshnessMinLifetimeMs"> {
+export function freshnessRestartOpts(rows: FreshnessRestartValues): Pick<DaemonOpts, "freshnessScoreLimit" | "freshnessStalenessHorizonMs" | "freshnessQuietWindowMs" | "freshnessMinLifetimeMs" | "freshnessLikelyFraction" | "freshnessMaxDrainWaitMs"> {
   return {
     freshnessScoreLimit: rows.scoreLimit,
     freshnessStalenessHorizonMs: rows.stalenessHorizonMs,
     freshnessQuietWindowMs: rows.quietWindowMs,
     freshnessMinLifetimeMs: rows.minLifetimeMs,
+    ...(rows.likelyFraction === undefined ? {} : { freshnessLikelyFraction: rows.likelyFraction }),
+    ...(rows.maxDrainWaitMs === undefined ? {} : { freshnessMaxDrainWaitMs: rows.maxDrainWaitMs }),
   };
 }
 
@@ -2223,7 +2235,8 @@ export async function daemonCommand(
         return current.outcome === "on" && current.repository === opsSourceRepository
           ? source.refresh() : Promise.resolve({ outcome: "stale" as const });
       },
-    }, clockFromMillisFn(deps.now));
+    }, clockFromMillisFn(deps.now), opsSelection.outcome === "on" ? { refreshEveryMs: OPS_DISPATCH_SOURCE_REFRESH_MS } : {});
+    if (opsShadow) cleanup.push({ resource: "ops_catalog_refresh", close: opsShadow.stop });
     opsShadow?.current();
     const readOpsTaskDispatch = opsSelection.outcome === "off" ? undefined : (publicPlan: Plan): OpsTaskDispatchRead => {
       const current = opsDispatchSelection(join(config.root, "state"));

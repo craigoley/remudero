@@ -17,7 +17,7 @@ import {
 } from "#src/lib/verify-human-judge.js";
 import type { Config } from "#src/lib/config-schema.js";
 import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "#src/lib/worker.js";
-import { hostWorktreeGit } from "#src/lib/worktree-git.js";
+import { hostWorktreeGitAsync } from "#src/lib/worktree-git.js";
 import { routeAdaptiveLifetimePressure } from "#src/run-task.js";
 
 // W1-T8827: the adaptive lifetime-pressure path judged every task with `ageDays: 0` and the
@@ -207,7 +207,7 @@ test("W1-T10210: callers share one aggregate filing-history budget (lifetime rou
       plan: f.plan, root: f.dir, config: f.config, ledgerPath: f.ledgerPath, runId: "RUN-T10210-SHARED",
       clock: fixedClock(NOW_MS), shadowJudgeSpawns: { primary: spawn, shadow: spawn },
       filingHistory: { limits: { blobReads: 1 }, readGit: (root, args, opts) => {
-        calls.push([...args]); return hostWorktreeGit(root, args, opts);
+        calls.push([...args]); return hostWorktreeGitAsync(root, args, opts);
       } },
     });
     assert.equal(result.judged, 2); assert.ok(prompts.length >= 2);

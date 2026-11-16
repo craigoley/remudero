@@ -1067,14 +1067,14 @@ snapshot_container_config() (
   done
   [ -d "${CONTAINER_CONFIG_DIR}" ] \
     && [ -r "${CONTAINER_CONFIG_DIR}" ] && [ -x "${CONTAINER_CONFIG_DIR}" ] || return 1
-  mkdir -m 700 -- "${dest}" && chmod 700 -- "${dest}" || return 1
+  mkdir -m 700 -- "${dest}" && chmod 700 "${dest}" || return 1
   for file in "${CONTAINER_CONFIG_DIR}"/* "${CONTAINER_CONFIG_DIR}"/.[!.]* "${CONTAINER_CONFIG_DIR}"/..?*; do
     [ ! -L "${file}" ] && [ -f "${file}" ] || continue
     [ -r "${file}" ] || return 1
     copied="${dest}/${file##*/}"
     cp -P -- "${file}" "${copied}" || return 1
     if [ -L "${copied}" ]; then rm -f -- "${copied}"; return 1; fi
-    chmod 600 -- "${copied}" || return 1
+    chmod 600 "${copied}" || return 1
   done
 )
 STATE_SNAPSHOT_ARCHIVES=()
