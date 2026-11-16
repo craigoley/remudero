@@ -29,7 +29,7 @@
     - src/lib/feedback-landing.ts
     - src/lib/ledger-steps.ts
     - test/sweep/a-pull-request-that-needs-operator-input-is-never-parked.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "For an open pull request whose fix lane would stand down on an open needs-human escalation, and whose unmet criteria a fix round or a scope or acceptance amendment can act on, the sweep dispatches that remedy on the pull request and does not stand down"

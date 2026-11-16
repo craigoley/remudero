@@ -18,7 +18,7 @@
     - src/lib/gardener.ts
     - src/lib/gardener-overseer.ts
     - test/gardeners/a-lint-check-that-refuses-several-gardens-raises-one-escalation.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "When plan_pr.preflight_refused rows in the trailing 24 hours name the same failing check (the lint tag in brackets, or the check name when there is none) for 3 or more distinct gardens, the overseer writes one gardener_overseer.filing_class_blocked row and raises one escalation naming the check, the gardens, the refusal count and the first refusal time"

@@ -24,7 +24,7 @@
     - test/sweep/the-sweep-reads-its-fix-round-history-without-blocking-the-loop.test.ts
     - test/a-merged-trailer-lookup-reads-an-index-built-once.test.ts
     - test/a-refresh-decision-reads-history-that-survives-ledger-rotation.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "runSweep reads the fix-round history for the conflict round and the terminal design handoff (the rows readRepairHistory reads today) before its PR walk, through an awaited reader that keeps a rotation memo across passes: on a ledger directory of at least 50 MB of rotations, a 50 ms timer started before the pass fires at least once in every 500 ms of the read"

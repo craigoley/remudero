@@ -17,7 +17,7 @@
     - src/lib/drain.ts
     - src/lib/daemon.ts
     - test/dispatch/released-machine-tasks-get-their-share-of-run-starts-with-a-fresh-queue-judge.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With a fresh queue judge (queueJudgeStaleMs below QUEUE_JUDGE_STALE_MS, or undefined) and complete start evidence, applyMachineShare moves the chosen released machine task ahead of the non-resumable order whenever machine starts are under MACHINE_DISPATCH_SHARE of the starts in the trailing window"
