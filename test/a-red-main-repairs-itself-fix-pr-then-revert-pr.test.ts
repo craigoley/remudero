@@ -450,7 +450,7 @@ test("W1-T6403: an unreadable fix PR decides nothing and a refused fix run goes 
   }
 });
 
-test("W1-T6403: a fix run lost to a daemon restart stalls into the revert, and a throwing revert opener is refused", async () => {
+test("W1-T6403: a fix run lost to a daemon restart is dispatched again, and lost again it stalls into the revert; a throwing revert opener is refused", async () => {
   const root = tmpRoot();
   const ledgerPath = join(root, "ledger.ndjson");
   try {
@@ -464,13 +464,23 @@ test("W1-T6403: a fix run lost to a daemon restart stalls into the revert, and a
     const lane = fakeLane(() => {
       throw new Error("push refused by the remote");
     });
-    const daemon = rig(world(), lane, ledgerPath);
+    // W1-T13134: the run this daemon dispatches again dies with it too: its openFixPr never settles.
+    lane.openFixPr = (request) => {
+      lane.fixes.push(request);
+      return new Promise<string>(() => {});
+    };
+    await rig(world(), lane, ledgerPath).observe();
+    assert.equal(lane.fixes.length, 1, "the first lost fix run is dispatched again");
+    assert.equal(lane.reverts.length, 0);
+
+    // A second restart loses that run too: the limit is reached, so the next stall goes to the revert.
+    const daemon = rig(world(), lane, ledgerPath, { runId: "DAEMON-T6403-RESTARTED" });
     await daemon.observe();
     await daemon.observe();
     await daemon.observe(MAIN_REPAIR_STALL_MS);
-    assert.equal(lane.fixes.length, 0, "the lost fix run is not re-dispatched");
+    assert.equal(lane.fixes.length, 1, "a fix run lost again is not dispatched a third time");
     assert.equal(lane.reverts.length, 1);
-    assert.match(lane.reverts[0]!.whyFixInsufficient, /dispatched before this daemon process started/);
+    assert.match(lane.reverts[0]!.whyFixInsufficient, /lost at restarts \(daemon runs DAEMON-OLD, DAEMON-T6403 ended before they reported/);
     const [refused] = rowsOf(ledgerPath, "main.repair.revert_refused");
     assert.equal(refused?.reason, "push refused by the remote");
     assert.deepEqual(refused?.conflict_paths, []);
