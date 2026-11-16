@@ -1,0 +1,100 @@
+- id: W1-T13131
+  title: "Incident identity and published evidence require a source literal template; untemplated events fail closed with a counted refusal"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  band_meaning: blast-radius
+  origin: feedback#automation-incident-template-signature-20261029
+  plan_refs: ["§7B", W1-T4383, W1-T4385, W1-T4391, W1-T9624]
+  files:
+    - src/lib/incident-templates.ts
+    - src/lib/incident-events.ts
+    - src/lib/sre-lane.ts
+    - openapi/daemon.yaml
+    - packages/api-client/src/schema.d.ts
+    - test/sre/incident-template-publication.test.ts
+    - test/incident-events.test.ts
+    - test/sre-lane.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    W1-T4383 specifies denylist scrubbing and normalized free text in the fingerprint; W1-T4385
+    specifies scrubbed samples in feedback. Neither establishes a literal-template boundary.
+    W1-T9624 addresses re-capture, not publication safety. Grounding MASTER-PLAN.md, tasks.yaml,
+    tasks.d, LEARNINGS.md and DECISIONS.md found no decision requiring this boundary.
+    The cross-repository report is an agent finding, not an operator ruling or independently
+    verified evidence of the other repository's implementation. Local source establishes the gap:
+    redactSecrets misses short values, fingerprintIncidentEvent hashes normalized message text,
+    and aggregateIncidents/incidentFeedbackRaw copy ledger messages into feedback samples.
+    Important qualification: incident-events.ts ledgerFields currently omits message and frames,
+    so an HTTP message reaching a public sample is NOT demonstrated by that route alone.
+    Internal producers such as ci-incidents.ts and incident-invariants.ts do ledger messages.
+    Open-PR sweep through the connected GitHub API on 2026-11-16 examined all 17 returned open
+    PRs (#18798, #18797, #18796, #18795, #18789, #18786, #18785, #18780, #18748, #18738,
+    #18730, #18726, #18705, #18701, #18689, #18670, #18405): complete patches plus both
+    incident-events.ts and sre-lane.ts at each API-reported head SHA. Every head retained the
+    fingerprintIncidentEvent/incidentFeedbackRaw positive controls and zero messageTemplate,
+    templateId or template_id occurrences in those files; no patch introduced this capability.
+  design: |
+    Compatibility inventory: existing ingest distinguishes accepted, sampled and rejected inputs;
+    SRE distinguishes eligible, paused, paced and deduplicated candidates. Preserve those controls
+    for eligible templated events. Legacy fingerprints and landed feedback remain historical
+    receipts, never migrated or rewritten. The deliberate default/error-path change is that
+    missing, unknown and malformed templates produce a counted refusal rather than free-text
+    identity or publication; refusal never files feedback or starts a fix. Public side effects
+    remain bounded feedback capture for eligible incidents, with no new issue-closing action.
+    INVARIANT eligible-controls-and-history: eligible templated incidents retain authorization, body bounds, sampling, pause, pacing and open-work/landed-entry dedupe; refusals leave historical fingerprints and already-landed feedback unchanged and never initiate a fix.
+    Establish one versioned template contract shared by ingest and SRE publication. A source-owned
+    catalog in incident-templates.ts binds stable template ids to literal message templates, using
+    a placeholder for EVERY interpolation. Resolve an emitter's template id against that catalog;
+    do not trust an arbitrary client string merely because its field is named template. Catalog
+    entries and field policies are reviewed code, never inferred by scrubbing runtime values.
+    Fingerprint the canonical template identity/literal and static classification, not the rendered
+    message, interpolation arguments or their hashes. Any frame/name information retained in the
+    basis must come from the source-owned contract, not an unchecked runtime string. Distinct
+    templates remain distinct even when their rendered values coincide; different values for the
+    same template share identity. Version the new basis so legacy ids are never silently reused.
+    Published bodies are constructed from the resolved literal template and explicitly named,
+    validated safe fields only. Initial safe metadata is count, timestamps, source/kind enums and
+    validated deploy SHA; template id and static classification come from the catalog. Do not
+    carry dynamic message, name, route, frame or suspect-commit text through an object spread.
+    Dynamic fields require a named policy and a negative test before publication; denylist
+    redaction is defense in depth, never the authorization to publish. Keep interpolation values
+    out of both the fingerprint basis and all captureFeedback arguments, titles and bodies.
+    Missing, unknown or malformed template identity fails closed BEFORE fingerprinting/filing:
+    no fallback to scrubbed text or a universal unknown-template incident. Return an explicit
+    refusal at ingest, and record one payload-free counted refusal per refused input at the
+    relevant boundary (bounded reason/source labels, no raw values). The SRE pass must reject
+    legacy ledger rows without a resolvable template as well as rows bypassing HTTP ingest.
+    Refusing the worst candidate must not hide a later valid candidate. Repeated passes over the
+    same refused ledger input must not inflate its refusal count; define stable cursor/dedupe
+    semantics and exercise them. No refusal creates incident feedback or initiates a fix.
+    This deliberately suspends automatic filing for unconverted emitters, including existing
+    internal producers; report which producers remain refused. Do not invent source templates
+    from their rendered messages. Seed at least one genuine source-literal contract and prove
+    successful ingest through feedback capture, so the safeguard cannot pass by refusing all.
+    Update the OpenAPI ingest/refusal contract and regenerate the client schema. Preserve existing
+    authorization, body bounds, sampling, pause, pacing and open-work/landed-entry dedupe for
+    eligible events. No new close-issue behavior, no history rewrite and no edits to already-landed
+    incident feedback. Existing tasks' status fields are not evidence of merge state.
+    New tests import through #src/* and #test/*, use the shared repository-root helper, and confirm
+    their computed placement with rmd test-place (incident-events and sre-lane map to sre).
+  acceptance:
+    - claim: "Changing a short secret, path, branch and free text changes neither a template's fingerprint basis nor any published feedback bytes; distinct templates remain distinct"
+      proof: "unit test: test/sre/incident-template-publication.test.ts"
+    - claim: "HTTP ingest and direct ledger publication refuse missing, unknown and malformed templates without hashing free text or filing, and count each refused input once across repeated passes"
+      proof: "unit test: test/sre/incident-template-publication.test.ts"
+    - claim: "A valid source-owned template reaches a real temporary plan/feedback file while a worse legacy event is refused, and arbitrary template strings or unsafe metadata never leak"
+      proof: "unit test: test/sre/incident-template-publication.test.ts"
+    - claim: "invariant:eligible-controls-and-history — Eligible templated incidents retain authorization, body bounds, sampling, pause, pacing and open-work/landed-entry dedupe; refusal leaves historical fingerprints and already-landed feedback unchanged and never initiates a fix"
+      proof: "unit test: test/sre/incident-template-publication.test.ts"
+  falsifier: |
+    Restore normalized-message fingerprinting or sampleMessages publication separately: planted
+    values change the basis or appear in the temporary feedback YAML, failing the regression.
+    Remove the no-template guard: a legacy direct-ledger row files feedback and fails the test.
+    A refuse-everything implementation fails the valid-template positive control.
