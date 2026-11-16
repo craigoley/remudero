@@ -701,6 +701,17 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   if (input.files.has(statusJsonDeadline) && files.some((f) => statusJsonDeadlineEdges.includes(f))) {
     pathReaders.push(statusJsonDeadline);
   }
+  // W1-T7703: a coverage shard failed on this suite (run 38051864963, PR #10627) and the narrow selector missed it.
+  const costOfDelay = suitePath("test/new-work-is-ordered-by-cost-of-delay.test.ts");
+  const costOfDelayEdges = [
+    "src/lib/test-gardener.ts",
+    suitePath("test/a-duration-adoption-waits-for-the-noise-to-settle.test.ts"),
+    suitePath("test/the-test-gardener-adopts-the-coverage-duration-ledger.test.ts"),
+    suitePath("test/the-test-suite-tends-itself.test.ts"),
+  ];
+  if (input.files.has(costOfDelay) && files.some((f) => costOfDelayEdges.includes(f))) {
+    pathReaders.push(costOfDelay);
+  }
   const recent = input.recentFailures ?? [];
   for (const s of pathReaders) pick(s, "reads a changed file by path");
   // W1-T6084: the OBSERVED readers and census readers, beside the source-text rules above (which still
