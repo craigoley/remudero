@@ -6,7 +6,7 @@
   verify: auto
   risk: low
   priority: 2.5
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "flake-incident:test/an-unattributed-loop-stall-is-profiled-live.test.ts#W1-T7746: a main-thread busy loop past the bound is profiled and its function is the top frame in the ledger row"
