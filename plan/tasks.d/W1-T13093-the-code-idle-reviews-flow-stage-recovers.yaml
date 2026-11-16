@@ -1,0 +1,27 @@
+- id: W1-T13093
+  title: "THE CODE PR idle_reviews STAGE SLOWED ON THE VIA SURFACE — p50 5 per PR against a 2 per PR baseline over the last 24 h"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 3.4
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "flow-regression:code:idle_reviews:via:unknown"
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/the-code-idle-reviews-flow-stage-recovers.test.ts
+  design: "INVARIANT pr-outcomes-unchanged: a code PR is merged, held or refused on the same conditions as before; the remedy changes how many idle_reviews a PR needs, not what is decided."
+  acceptance:
+    - claim: "the code idle_reviews stage on the via surface returns under 2x its baseline p50"
+      proof: "grep: test(\"the code idle_reviews stage recovers\" in test/sweep/the-code-idle-reviews-flow-stage-recovers.test.ts"
+    - claim: "invariant:pr-outcomes-unchanged — a code PR on the via surface that was held or refused before the change is still held or refused after it, and one that merged still merges"
+      proof: "grep: test(\"the code idle_reviews stage keeps its outcomes\" in test/sweep/the-code-idle-reviews-flow-stage-recovers.test.ts"
+  note: "Filed by the flow gardener (W1-T5904). MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. The gardener does not re-file this stage while this task is open."
+  rationale: |
+    code PRs, stage idle_reviews on the via surface: p50 5 per PR against a 2 per PR baseline (rolling).
+    Last 24 h: n 19, p50 5, p90 14 per PR.
+    Slowest PRs: #18427 (24 per PR), #18516 (14 per PR), #18515 (11 per PR).
+    Find what these PRs share at this stage before changing a bound.

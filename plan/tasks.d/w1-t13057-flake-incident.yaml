@@ -1,0 +1,27 @@
+- id: W1-T13057
+  title: "FLAKE INCIDENT — 'deriveAnalyticsSnapshotFromStream does not retain a response-irrelevant corpus' failed CI on 4 pull requests whose diffs do not touch it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 2.5
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "flake-incident:test/analytics-route.test.ts#deriveAnalyticsSnapshotFromStream does not retain a response-irrelevant corpus"
+  files:
+    - test/analytics-route.test.ts
+  design: "NO-INVARIANTS: the only declared path is the test file test/analytics-route.test.ts, so the fix changes test code alone and no production behaviour"
+  acceptance:
+    - claim: "the cause of the intermittent failure W1-T13057 records in test/analytics-route.test.ts is fixed, pinned by a test that forces the failing order"
+      proof: "unit test: W1-T13057 pins the cause of the intermittent failure"
+    - claim: "the test that pins the cause is added to test/analytics-route.test.ts, beside the test that failed"
+      proof: "grep: test(\"W1-T13057 pins the cause of the intermittent failure\" in test/analytics-route.test.ts"
+  note: "Filed by the flake-incident gardener (W1-T6406). MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. The SRE ruling of 2026-09-23 is that a CI flake is an incident."
+  rationale: |
+    Test: 'deriveAnalyticsSnapshotFromStream does not retain a response-irrelevant corpus' (test/analytics-route.test.ts)
+    Failed CI on 4 distinct pull requests whose changed files include neither the test file nor a module it imports: #18539, #18567, #18608, #18647.
+    CI runs: 43694578741, 43695189112, 43698652126, 43720899736, 43721249722.
+    Retry outcomes: 5 recovered on retry, 0 also failed on retry.
+    Evidence: test.flake_retry ledger rows, 5 read from the PR coverage-shard logs and 0 from fix-round reroutes the PR's diff cannot reach.
