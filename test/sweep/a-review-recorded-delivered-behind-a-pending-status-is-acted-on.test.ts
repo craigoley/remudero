@@ -350,6 +350,11 @@ test("W1-T12994 criterion 4: a claim that refuses what the walk decided writes t
   assert.equal(named[0]?.dedup_cause, "delivered");
   assert.equal(named[0]?.review_key, f.key);
   assert.deepEqual(f.modes, [], "the claim refused: no review ran");
+  // The next pass reads the verdict in its own snapshot, so the walk's arm dedups it as it always has under a status that
+  // does not read pending (W1-T2427: that dedup writes its disposed row and no other step).
+  await runSweep([f.pr], f.deps, DEFAULT_SWEEP_POLICY);
+  assert.equal(f.rows("sweep.disposed").filter(r => r.pr_number === 18689).at(-1)?.deduped, true);
+  assert.equal(f.rows(REVIEW_RERUN_CONTRADICTION_STEP).length, 1);
 });
 
 test("W1-T12994 criterion 4: the reason names each dedup cause and leaves a reason that promised no review untouched but for the cause", () => {

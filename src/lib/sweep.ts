@@ -23496,8 +23496,11 @@ export async function runSweep(
               ? `a review post was already REFUSED for ${reviewKey} — the re-post is deduped by this ` +
                 `arm, not lost to an admission and not unwired`
               : retryBackoff;
-          reason = reviewNotStarted(pr, disposition, reason, reviewKey,
-            reviewDelivered ? "delivered" : reviewDurablyRefused ? "refused" : "backoff", dedupStandDownReason ?? "", "walk");
+          // W1-T12994: under a pending status this delivered dedup was the claim's until the walk read the same rule, so it is
+          // named as the claim's refusal is. Every dedup this arm already made keeps W1-T2427's shape: no new step, no new text.
+          if (reviewDelivered && pr.reviewState === "pending") {
+            reason = reviewNotStarted(pr, disposition, reason, reviewKey, "delivered", dedupStandDownReason ?? "", "walk");
+          }
         }
         break;
       }
