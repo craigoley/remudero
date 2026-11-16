@@ -19,7 +19,7 @@
     - src/lib/github-http-read.ts
     - src/lib/github-transport.ts
     - test/github/an-unchanged-github-read-costs-none-of-the-rate-limit.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A GET the in-process client answered with an ETag is repeated with If-None-Match, and a 304 returns the stored status line, headers and body with the 304's own rate-limit headers, so the caller parses the same body and the freshest reading"

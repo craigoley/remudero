@@ -17,7 +17,7 @@
   files:
     - src/lib/main-health-rung.ts
     - test/a-red-main-whose-run-history-window-holds-no-green-reuses-its-located-culprit.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With a ledger that holds main.repair.located for offending sha X with red R and a main.repair.resolved row for X by other with closed_prs [], a red observation of red R whose push run history holds no green run (runHistoryWindowExhausted) writes main.repair.located for X with method reused-located and reused_from naming the earlier row's ts, calls openFixPr once for X, and writes no main.repair.unlocated row"

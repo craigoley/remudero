@@ -16,7 +16,7 @@
   files:
     - src/lib/main-health-rung.ts
     - test/a-culprit-proof-accepts-the-evidence-that-located-the-culprit.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A bisected record whose culprit local run fails on file A and whose parent local run passes on file A is proven, also when the two runs and the current failures name different sets of other files (the 5e3cabf0b shape: located test_files 3 files, probe runs 4 files)"
