@@ -145,7 +145,7 @@ test("review lint cancellation kills the child group including descendants", { t
   syncBuiltinESMExports();
   try {
     const result = await lintPlanForReview(repo.dir, () => "HEAD", undefined, { signal: controller.signal });
-    assert.deepEqual(result, { ran: false, reason: "lint-plan aborted" });
+    assert.deepEqual(result, { ran: false, reason: "lint-plan aborted", aborted: true });
     assert.equal(detached, true);
     assert.equal(child?.signalCode, "SIGKILL");
   } finally {
@@ -217,8 +217,10 @@ test("draining an admitted review kills its lint group without a caller-supplied
         await closed; // A live descendant holds this pipe open even if only its parent is killed.
         await work;
         assert.equal(child.signalCode, "SIGKILL");
-        assert.deepEqual(verdict?.planLint, { ran: false, reason: "lint-plan aborted" });
-        assert.equal(verdict?.state, "failure");
+        assert.deepEqual(verdict?.planLint, { ran: false, reason: "lint-plan aborted", aborted: true });
+        // W1-T13151: an aborted lane judged nothing, so it ends pending with no verdict, never a FAILURE.
+        assert.equal(verdict?.state, "pending");
+        assert.equal(verdict?.verdictWithheld, "lane aborted: lint-plan aborted");
         await new Promise<void>((resolve) => setImmediate(resolve));
         assert.equal(inFlightReviewCount(), 0);
         assert.equal(explicit?.signal.aborted ?? false, mode === "explicit abort",
@@ -247,7 +249,7 @@ test("a review cancelled during Git preparation starts no lint child", async (t)
   const controller = new AbortController();
   const result = await lintPlanForReview(repo.dir, async () => { controller.abort(); return "HEAD"; },
     async () => { assert.fail("an aborted review must not start a child"); }, { signal: controller.signal });
-  assert.deepEqual(result, { ran: false, reason: "lint-plan aborted" });
+  assert.deepEqual(result, { ran: false, reason: "lint-plan aborted", aborted: true });
 });
 
 test("review lint reports a real child start error", async (t) => {
