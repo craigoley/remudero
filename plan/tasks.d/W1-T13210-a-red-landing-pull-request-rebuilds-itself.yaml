@@ -1,8 +1,8 @@
 - id: W1-T13210
-  title: "A red landing pull request rebuilds itself from the pending edits and writes its wait as a row, so the task-files lane cannot stay wedged behind one pull request for thirteen hours"
+  title: "A red or conflicting landing pull request rebuilds itself from the pending edits and writes its wait as a row, so the task-files lane cannot stay wedged behind one pull request for thirteen hours"
   repo: remudero
   depends_on: [W1-T13209]
-  priority: 1.3
+  priority: 0.6
   type: implement
   verify: auto
   principles:
@@ -21,7 +21,7 @@
   status: queued
   attempts: 0
   acceptance:
-    - claim: "A landing pull request whose own checks are red at its head, where main alone is not red the same way, is rebuilt by the lane at its next pass from the pending edits on current main: one new commit and a body written from it, or the lane closes it and opens the next one itself"
+    - claim: "A landing pull request whose own checks are red at its head, where main alone is not red the same way, or which conflicts with current main, is rebuilt by the lane at its next pass from the pending edits on current main: one new commit and a body written from it, or the lane closes it and opens the next one itself"
       proof: "grep: W1-T13210 criterion 1 in test/inbox/a-red-landing-pull-request-rebuilds-itself.test.ts"
     - claim: "While the lane waits behind an open landing pull request it writes a waiting row that names the pull request, the state of its checks and the number of edits waiting, once for each change of that state and not once a pass"
       proof: "grep: W1-T13210 criterion 2 in test/inbox/a-red-landing-pull-request-rebuilds-itself.test.ts"
@@ -37,19 +37,21 @@
     - The wait is silent. `wait` logs `task_files_landing.waiting` only when it is given a reason (`if (reason !== undefined) { ... opts.log?.("task_files_landing.waiting", ...) }`), and the open-pull-request path calls it with none.
     - The commit message and the body both say the branch takes no push while its pull request is open, so the fix lane has nothing to push to, and the pull request is not a run branch.
     - A rebuild by close-and-reopen would lose every edit under today's rules: in the batch loop a staged file whose pull request reads `CLOSED` is set aside with "its landing pull request ... was closed without a merge". That rule is right for a pull request a person closes to decline its edits, and it is the thing a rebuild must not trip.
+    AMENDED 2026-11-16 21:55Z (operator session): the same lane wedged again, this time on a CONFLICT. Landing pull request #18902 (28 files, opened 17:40Z, review SUCCESS) went CONFLICTING after #18901 (18:35Z) withdrew W1-T9274 on main, next to a refusal amendment the landing branch adds to that record. The sweep disposed it `blocked-ambiguous` 34 times that day ("merge conflict (mergeState dirty) — head is not this PR task's rmd-owned run branch — not dispatched"). A conflicting pull request registers no check runs, so a "red checks" trigger alone never fires on it. READ on origin/main 7feb333985: the lane's open-PR listing (`pendingLandingPrArgs`) reads only `url`, so it never sees mergeability; the sweep's owned-conflict and plan-scoped conflict rounds require `isMachineLanePlanHead`, whose `MACHINE_LANE_HEAD_RE` lists `(feedback|decisions|plan-reconcile|ci-learning)-landing` but not `task-files-landing` (the regex predates W1-T12199). The lane already has the right rule for a superseded edit once it rebuilds: a staged file whose main blob moved since it was staged is set aside ("the copy on main stands"), so a rebuild on current main drops the W1-T9274 edit and keeps the other 27.
     INFERRED: that no other pass acts on a red landing pull request. Thirteen hours with no repair says so; which pass reads it and what it decides is the MEASURE FIRST.
   design: |
     MEASURE FIRST: name the daemon pass that reads a landing pull request's checks today and what it decided for #18789 between 02:51Z and 15:49Z on 2026-11-16 (its ledger rows; the operator session can read them). If a pass already routes it somewhere, build on that route and say so.
 
     1. At the seal, read the open pull request's checks at its head through the reads the sweep already has. Green or pending: wait, as today, and write the waiting row on a state change.
+    1b. Conflicting with main (read mergeability with the listing; a conflicting head has no checks): rebuild as in step 3, with no red-on-main wait. The rebuild sets aside, as today, each staged edit whose base moved on main.
     2. Red, and main alone is red the same way: wait for main to move (the W1-T5531 rule the lane already applies to a preflight refusal).
     3. Red otherwise: rebuild. Build the batch from the pending set on current main exactly as a first landing does, including the per-file preflight that sets a refused file aside. If the tree differs from the head, push it and rewrite the body (W1-T13209 makes the body follow the commit). The sealed-branch promise becomes: no push while the pull request is open and not red.
     4. If the lane must close and reopen instead (decide from the measurement, and say why), it marks the staged records before closing, so the set-aside rule can tell the lane's own close from a person's.
     5. No change to rebuild from: no push. The waiting row says red and unchanged and names the failing check, so the stuck-pull-request reading finds it.
     INVARIANT a-rebuild-loses-no-edit: the lane's own rebuild or close removes nothing from the pending directory; only main holding the bytes, a moved base, a preflight refusal or a person's close does. At most one landing pull request is open per repository.
-    NOT IN SCOPE: why the body and the commit disagreed (W1-T13209); the other landing families; a time limit on a pull request's age (the row carries its age; no number decides anything).
+    NOT IN SCOPE: why the body and the commit disagreed (W1-T13209); the other landing families; adding `task-files-landing` to the sweep's `MACHINE_LANE_HEAD_RE` (a judge round must not resolve the lane's conflicts; the lane rebuilds from its own pending set); a time limit on a pull request's age (the row carries its age; no number decides anything).
   falsifier: |
-    Leave a red pull request alone and criterion 1 must fail. Write the row on every pass, or never, and criterion 2 must fail. Push an identical tree again and criterion 3 must fail. Let the lane's own close set a file aside, or open a second pull request, and criterion 4 must fail. Restore and all pass.
+    Leave a red or a conflicting pull request alone and criterion 1 must fail. Write the row on every pass, or never, and criterion 2 must fail. Push an identical tree again and criterion 3 must fail. Let the lane's own close set a file aside, or open a second pull request, and criterion 4 must fail. Restore and all pass.
   note: |
     reservation hand-off: run-unfiled-1794847949786 -> run-unfiled-1794847949786
     Reserved on the filing branch by the operator session. The test folder is the one rmd test-place computed (test/inbox/, high) for a stub importing src/lib/feedback-landing.ts. Build after W1-T13209: both edit `taskFilesLandingSteps`. src/lib/sweep.ts is declared for the check read and the waiting row's reader; if the measurement shows the lane needs neither, leave that file untouched and say so. Do not import src/run-task.ts from the new test.

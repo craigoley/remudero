@@ -2223,6 +2223,10 @@ jobs:
                 echo "not_applicable=true" >> "${GITHUB_OUTPUT:-/dev/null}"
                 exit 0
               fi
+              if [ "${LEDGER_RESULT:-}" = "cancelled" ]; then
+                echo "::error::coverage-ratchet: coverage-ledger-cancelled — the coverage ledger job was cancelled at its ceiling at ${RUN_HEAD_SHA:-unknown}; the matrix never ran (W1-T11164)"
+                exit 1
+              fi
               echo "coverage-ratchet: the shard matrix never ran (matrix result: skipped) — nothing was measured, so nothing is certified. Open the workflow run to see which upstream job gated it."
               exit 1
               ;;

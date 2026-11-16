@@ -1,0 +1,46 @@
+- id: W1-T13241
+  title: "The silence judge takes a dispatch claim a hand session minted on the host, so a dead hand claim no longer holds a task forever"
+  repo: remudero
+  priority: 0.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # it decides when a claim another holder took may be reclaimed
+  band_meaning: span
+  origin: "operator-session#fleet-dispatch-stall-2026-11-16"
+  plan_refs:
+    - W1-T9432
+    - W1-T2784
+    - W1-T10791
+    - W1-T12114
+  files:
+    - src/lib/dispatch-claim.ts
+    - test/dispatch/the-silence-judge-takes-a-claim-a-hand-session-minted-on-the-host.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A claim whose mint row names another host than this instance's, or an operator actor, is not treated as minted by this instance's fleet: the silence judge decides it, and reclaims it once its silence passes the measured window"
+      proof: "grep: W1-T13241 criterion 1 in test/dispatch/the-silence-judge-takes-a-claim-a-hand-session-minted-on-the-host.test.ts"
+    - claim: "A claim a fleet lane of this instance minted (its mint row names this instance's host and a daemon or run-child actor) still goes to the dead-claimant arm and never to the silence judge"
+      proof: "grep: W1-T13241 criterion 2 in test/dispatch/the-silence-judge-takes-a-claim-a-hand-session-minted-on-the-host.test.ts"
+    - claim: "invariant:a-live-holder-is-never-reclaimed — a claim whose holder shows a sign of life inside the window is kept whoever minted it, and an unreadable anchor or run-branch history still yields no verdict"
+      proof: "grep: W1-T13241 criterion 3 in test/dispatch/the-silence-judge-takes-a-claim-a-hand-session-minted-on-the-host.test.ts"
+  rationale: |
+    OBSERVED 2026-11-16 by the operator session on the fleet host (core ledger, read-only), with the code path traced on origin/main by a read-only investigation.
+
+    - The fleet dispatched no new task from 14:42Z until at least 20:00Z, and none of the roughly 30 tasks filed that day was claimed. From 15:23Z every `dispatch.claim` row was W1-T12114 (priority 0.10, the highest of any queued task), each refused: "W1-T12114 is already claimed by another lane — refs/rmd-dispatch/W1-T12114 (held by f9c1e749…). Refusing before any spend".
+    - The claim's anchor: `rmd-dispatch claim 3861824@Remudero 2026-11-11T09:14:13.758Z renewed 3861824@Remudero 2026-11-11T12:59:25.435Z`, a hand session on the Azure host. Pid 3861824 does not exist; the host rebooted on 2026-11-15 14:41Z. Its mint rows are in the core ledger: `dispatch.claim` outcome created, host "Remudero", actor `operator_human`, 2026-11-11T08:26Z, 08:34Z and 09:14:15Z.
+    - READ: the container's hostname is a hex id, so `sameHost("Remudero", <container>)` is false and the dead-claimant arm (`decideDispatchClaimRelease`) cannot fire; the replaced-container arm needs a daemon or run-child actor; the 24 h backstop only escalates. The silence judge (W1-T9432, `reclaimSilentDispatchClaim`) is the arm meant for a holder that went silent, but it first computes `mine = findClaimMintRow(stateDir, taskId, anchor) !== undefined` and, when true, returns no verdict: "was minted by a fleet lane of this instance (its dispatch.claim created row), which the dead-claimant arm judges". A hand session's mint row is in the same ledger, so `mine` is true, and the claim is handed to an arm that cannot judge it. No path releases it; only an operator's `rmd claim <id> --drop` on the host.
+    - W1-T10791 (queued) makes a hand claim name its holder and escalate when it builds nothing, and releases nothing; it reads "a claim this instance's fleet minted" the same way. This task is the release path.
+  design: |
+    1. "Minted by this instance's fleet" requires the mint row's host to be this instance's host AND its actor to be a fleet actor (daemon or run_child), the same test the replaced-container arm already applies to the actor. A row from another host or an operator actor (operator_human, operator_ai, unknown) is not this instance's.
+    2. Such a claim goes to the silence judge with the existing window and sign-of-life evidence; nothing else in the judge changes.
+    3. The suite drives `reclaimSilentDispatchClaim` with injected mint rows, anchors, run-branch histories and clocks: a hand claim silent past the window, a fleet lane's claim, and a live hand claim.
+    INVARIANT a-live-holder-is-never-reclaimed: a sign of life inside the window keeps any claim.
+    NOT IN SCOPE: escalation of hand claims (W1-T10791); the dead-claimant and replaced-container arms; host identity; the daemon's re-offering of a claim-refused task (W1-T13242).
+  falsifier: |
+    Count any mint row in the ledger as this instance's again and criterion 1 must fail. Send a fleet lane's claim to the silence judge and criterion 2 must fail. Reclaim a hand claim whose run branch moved inside the window and criterion 3 must fail. Restore and all pass.
+  note: |
+    reservation hand-off: run-unfiled-1794859278751 -> run-unfiled-1794859278751
+    Reserved with rmd next-task-id from a worktree at origin/main. The operator was asked on 2026-11-16 to drop the stale W1-T12114 claim by hand to unblock the fleet; this task makes the next one release itself. The test folder is the one rmd test-place computed for a stub importing dispatch-claim.ts.

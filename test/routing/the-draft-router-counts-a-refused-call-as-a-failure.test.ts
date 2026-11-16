@@ -3,11 +3,12 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { Config } from "#src/lib/config.js";
-import { chooseDraftDeployment, createDraftStatsSession, draftStatsFromRows, readDraftStats } from "#src/lib/draft-routing.js";
+import { chooseDraftDeployment, createDraftStatsSession, draftStatsFromRows } from "#src/lib/draft-routing.js";
 import { seededRandom } from "#src/lib/knowledge-value.js";
 import { withTempDir } from "#src/lib/tmp.js";
 import { spawnWorker, type WorkerResult } from "#src/lib/worker.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { readInboxDraftStats } from "#test/helpers/run-task-test.js";
 
 const lane = "inbox-draft";
 const arms = [{ deployment: "gpt-oss-120b", estimatedCostUsd: 0.4 },
@@ -83,12 +84,12 @@ test("W1-T12147 criterion 1: only positive-cost attempts set the measured price"
   assert.equal(choice(legacy).arms[0].costPerAttemptUsd, 0.12);
 });
 
-test("W1-T12147 criterion 1: the shared snapshot learns the positive-cost denominator", () => {
+test("W1-T12147 criterion 1: the shared snapshot learns the positive-cost denominator", async () => {
   const session = createDraftStatsSession("unused", lane, () => {}, () => draftStatsFromRows([row("clean", { draft_cost_usd: 0.12 })], lane));
   session.readStats();
   session.log("draft.routing.outcome", row("refused"));
   session.log("draft.routing.outcome", row("not-clean", { draft_cost_usd: 0.04 }));
-  const selected = chooseDraftDeployment(session.readStats(), arms, seededRandom(7), now);
+  const selected = chooseDraftDeployment(await session.readStats(), arms, seededRandom(7), now);
   assert.equal(selected.arms[0].costPerAttemptUsd, 0.08);
   assert.equal(selected.arms[0].beta, 3);
 });
@@ -186,21 +187,21 @@ test("W1-T12147 criterion 3: disk and session snapshots retain the latest ten ca
   for (const history of [refusals(), budgetRefusals()]) {
     await withTempDir("rmd-refused-stats-", async (root) => {
       writeFileSync(join(root, "ledger.ndjson"), history.map((r) => JSON.stringify(r)).join("\n") + "\n");
-      const stats = readDraftStats(root, lane);
+      const stats = await readInboxDraftStats(root, lane);
       assert.equal(chooseDraftDeployment(stats, arms, seededRandom(7), now).arms.length, 1);
     });
     const session = createDraftStatsSession("unused", lane, () => {}, () => draftStatsFromRows(history.slice(0, 9), lane));
     session.readStats();
     session.log("draft.routing.outcome", history[9]!);
-    assert.equal(chooseDraftDeployment(session.readStats(), arms, seededRandom(7), now).arms.length, 1);
+    assert.equal(chooseDraftDeployment(await session.readStats(), arms, seededRandom(7), now).arms.length, 1);
     session.log("draft.routing.outcome", row("clean"));
-    assert.equal(chooseDraftDeployment(session.readStats(), arms, seededRandom(7), now).arms.length, 2);
+    assert.equal(chooseDraftDeployment(await session.readStats(), arms, seededRandom(7), now).arms.length, 2);
   }
   const live = createDraftStatsSession("unused", lane, () => {}, () => ({}));
   live.readStats();
   for (const refusal of budgetRefusals()) live.log("draft.routing.outcome", refusal);
   assert.deepEqual(live.readStats(), {});
-  assert.equal(chooseDraftDeployment(live.readStats(), arms, seededRandom(7), now).arms.length, 1);
+  assert.equal(chooseDraftDeployment(await live.readStats(), arms, seededRandom(7), now).arms.length, 1);
 });
 
 test("W1-T12147 criterion 4: a sole eligible deployment is picked despite its refusal streak", async () => {

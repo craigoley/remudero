@@ -14,7 +14,7 @@
   files:
     - src/lib/analytics-route.ts
     - test/an-analytics-checkpoint-is-written-at-most-hourly.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With a fake clock and a counting checkpoint path, the first completed refresh after a cache is created writes the checkpoint, and further completed refreshes within ANALYTICS_CHECKPOINT_WRITE_INTERVAL_MS (one hour) write nothing while current() serves each new snapshot"

@@ -1693,6 +1693,9 @@ function createLedgerLineSeen(): { has: (line: string) => boolean; add: (sightin
 export interface LedgerUnionRecordRead extends Omit<LedgerUnionRawRead, "rawLines"> {
   rows: Array<Record<string, unknown>>;
   torn: number;
+  /** W1-T13185: the raw text of each line counted in `torn`, where the reader kept it ({@link createIncrementalLedgerUnion}).
+   *  Not enumerable, so the result still compares equal to a whole read's. Absent: the lines are unknown. */
+  readonly tornLines?: readonly string[];
 }
 
 export function readLedgerUnionRecordsSync(
@@ -2164,7 +2167,11 @@ export function createIncrementalLedgerUnion(
       return { rows: [...read.rows, ...fragment.rows], torn: read.torn + fragment.torn, tornLines: [...read.tornLines, ...fragment.tornLines] };
     };
 
-    const result = readLedgerUnionRecordsSync(stateDir, { step, refuseIncomplete, requireArchives, rotationRecords, liveRecords }, fsDeps);
+    const tornLines: string[] = [];
+    const result = readLedgerUnionRecordsSync(stateDir, { step, refuseIncomplete, requireArchives, rotationRecords, liveRecords,
+      onTorn: (line) => void tornLines.push(line) }, fsDeps);
+    // W1-T13185: a caller that judges what each torn line could have been reads them here, with no second read.
+    Object.defineProperty(result, "tornLines", { value: tornLines, enumerable: false });
     Object.freeze(result.rows);
     state.rotations = kept;
     state.last = result.unread.length === 0 ? { signature, result, extraSizes } : undefined;

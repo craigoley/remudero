@@ -387,7 +387,7 @@ import {
   type RefusalCandidate,
 } from "./refusal-amendment.js";
 import { landTaskFilesAsync, landingIdentity, stagedTaskFiles, type LandTaskFilesOpts } from "./feedback-landing.js";
-import { PARKED_PR_REMEDY_STEP, openEscalationRelease, actOnParkedPr, designHoldCoverage, parkedPrFacts, parkedPrRemedy, readParkedPrShard, remedyStalledCriterion, standDownHoldRemedied, standDownHoldRemedy, takeParkedPrRemedy, type ParkedPrHost } from "./parked-pr-remedy.js";
+import { PARKED_PR_REMEDY_STEP, openEscalationRelease, actOnParkedPr, designHoldCoverage, parkedPrFacts, parkedPrRemedy, planRoundExhaustedRemedy, readParkedPrShard, remedyStalledCriterion, standDownHoldRemedied, standDownHoldRemedy, takeParkedPrRemedy, type ParkedPrHost } from "./parked-pr-remedy.js";
 
 /** W1-T6434: the bounded, already-scrubbed view of a preserved fix-owner patch. */
 export interface PriorPartialWork {
@@ -5379,6 +5379,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // draftRefusalAmendments does. A task in neither catalog on a host with no readable plan-destination.json may be in the
     // ops catalog, so it is refused as destination-unreadable; nothing falls back to the public repository.
     parkedPr: {
+      planFilingTarget: publicTaskRepository,
       readTaskShard: async (taskId) => {
         const resolved = await taskFileRepository(taskId, (reloadPlanForFix() ?? plan).byId);
         const unknownCatalog = resolved.outcome === "resolved" && resolved.task === undefined &&
@@ -5399,6 +5400,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         assertLiveWriteAllowed("gh-transport", `parked pull request close of ${prUrl}`);
         await ghTextAsync(["pr", "close", prUrl, "--comment", comment]);
       },
+      readPrFiles: (prUrl) => fetchPrDiffFilesViaGh(prUrl),
     },
     // W1-T4838 — hold each refused task, then open ONE plan-only amendment PR for it. The hold is
     // written FIRST (cheap, local, idempotent) so a slow or failed PR never lets the task re-dispatch.
@@ -8021,6 +8023,9 @@ export interface OpenPrView {
    *  review is required here, and calling its absence decidable would assume permissive on missing
    *  information. `true` routes to the catch-all — blocked-ambiguous, never mergeable. */
   requiredContextsUnreadable?: boolean;
+  /** W1-T13195 — true when this pass's read of the PR's check rollup failed (W1-T521), so
+   *  `checksState` and `reviewState` read "none" without evidence. The PR waits; it is never green. */
+  rollupUnreadable?: true;
   /** W1-T2399 — WHY the required-contexts read was unreadable, captured where the read happens so
    *  the escalation names it without a second GitHub call. Present only on a genuine read failure;
    *  protection that readably declares NO required contexts leaves this undefined. */
@@ -10414,6 +10419,8 @@ function conflictFilesFromRow(value: unknown): ConflictFileDiff[] | undefined {
  * `merge_state` alone, never `disposition`/`reason` prose — that field is written only when a pass's
  * OWN effective mergeState (observed or inherited) was known, so hysteresis composes across `unknown` reads on ONE head.
  * W1-T11173: a rung.strike conflict hand-off (`fix.stood_down`) is this head's dirty read, with its last conflict files.
+ * W1-T13195: a `sweep.merge_probe` row for this exact head is a read against its own `main_sha` (clean as clean,
+ * conflict as dirty), so a disposed row from a pass with no main tip cannot hide the probe's main.
  */
 export function lastKnownMergeStateFromLedger(
   lines: ReadonlyArray<Record<string, unknown>>,
@@ -10426,6 +10433,17 @@ export function lastKnownMergeStateFromLedger(
     if (line.step === "fix.stood_down" && line.site === "rung.strike" && line.reason === CONFLICT_REPAIR_HANDOFF_REASON &&
         (line.read_head_sha ?? line.head_sha) === headSha) {
       out = { state: "dirty", ...(typeof line.ts === "string" ? { observedAt: line.ts } : {}), ...(dirtyFiles ? { conflictFiles: dirtyFiles } : {}) };
+      continue;
+    }
+    if (line.step === "sweep.merge_probe") {
+      if (line.pr_number !== prNumber || line.head_sha !== headSha || typeof line.main_sha !== "string") continue;
+      if (line.verdict !== "clean" && line.verdict !== "conflict") continue;
+      const evidence = line.conflict_evidence as MergeConflictEvidence | undefined;
+      const probeFiles = line.verdict === "conflict" && Array.isArray(evidence?.files) && hasCapturedMergeConflictEvidence(evidence)
+        ? evidence!.files : undefined;
+      if (probeFiles) dirtyFiles = probeFiles;
+      out = { state: line.verdict === "conflict" ? "dirty" : "clean", ...(typeof line.ts === "string" ? { observedAt: line.ts } : {}),
+        ...(probeFiles ? { conflictFiles: probeFiles } : {}), mainSha: line.main_sha };
       continue;
     }
     if (line.step !== "sweep.disposed") continue;
@@ -10444,6 +10462,26 @@ export function lastKnownMergeStateFromLedger(
 
 export function mergeInheritanceRefused(known: KnownMergeState | undefined, mainTipSha: string | undefined): boolean {
   return known !== undefined && known.state !== "dirty" && mainTipSha !== undefined && known.mainSha !== mainTipSha;
+}
+
+/** W1-T13195 — the merge facts one `sweep.disposed` row records. A merge_state always names its main:
+ *  this pass's main tip, or, on a pass with no main tip, a main read from this head's newest record. A
+ *  clean or behind takes the main of the same-state record it inherited, and with none records no
+ *  merge_state. A dirty takes the main of the newest record in any state. With no such main a dirty is
+ *  still recorded, without a main: dropping it loses W1-T4470's hysteresis, so the next pass with
+ *  mergeability unread no longer sees the conflict (a-conflicted-pr-is-never-escalated-as-checkless
+ *  fails). A dirty is inherited at any main, so its missing main admits nothing. */
+function disposedMergeFacts(
+  pr: Pick<OpenPrView, "prNumber" | "headSha" | "mergeState">,
+  ledgerLines: ReadonlyArray<Record<string, unknown>>,
+  mainTipSha: string | undefined,
+): { merge_state?: MergeState; merge_main_sha?: string } {
+  if (pr.mergeState === undefined) return {};
+  if (mainTipSha !== undefined) return { merge_state: pr.mergeState, merge_main_sha: mainTipSha };
+  const known = lastKnownMergeStateFromLedger(ledgerLines, pr.prNumber, pr.headSha);
+  if (pr.mergeState === "dirty") return { merge_state: "dirty", ...(known?.mainSha !== undefined ? { merge_main_sha: known.mainSha } : {}) };
+  return known?.state === pr.mergeState && known.mainSha !== undefined
+    ? { merge_state: pr.mergeState, merge_main_sha: known.mainSha } : {};
 }
 
 /**
@@ -12145,6 +12183,9 @@ export function isFixStrikeExhausted(pr: OpenPrView, policy: SweepPolicy): boole
     (pr.priorStrikes >= fixCeilingInForce(pr, policy.strikeCap, policy.clarify) || pr.repeatedFixRefusal !== undefined);
 }
 
+/** W1-T13195 — the wait reason for a PR whose check rollup this pass could not read. */
+const ROLLUP_UNREAD_REASON = "checks and review unread this pass (rollup read failed) — re-reading next pass";
+
 export const DISPOSITION_RULES: readonly DispositionRule[] = [
   {
     // W1-T920 (DECISIONS.md #1987) — ROUTED THROUGH THE EXISTING "stale" disposition, never a new
@@ -12258,6 +12299,17 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     blocker: "other",
     reason: (_pr, policy, ageDays) =>
       `abandoned — no activity in ${Math.floor(ageDays)}d (>= ${policy.staleDays}d threshold)`,
+  },
+  {
+    // W1-T13195 — AN UNREAD ROLLUP IS NEVER GREEN AND NEVER "NONE". A failed rollup read (W1-T521) leaves
+    // checks and review at "none", which the rows below read as zero check runs and no review: an
+    // absent-checks re-push or a "checks none, review none" escalation of a PR whose checks exist.
+    // Ordered before every row that reads checks or review, so the PR is never mergeable, never armed
+    // and never merged on this pass; the next pass reads the rollup again.
+    disposition: "wait",
+    when: (pr) => pr.rollupUnreadable === true,
+    blocker: "awaiting-ci",
+    reason: () => ROLLUP_UNREAD_REASON,
   },
   {
     // W1-T54's dep lane, ROUTED. Before this row dep PRs sat ungated until an operator ran
@@ -22295,7 +22347,10 @@ export async function runSweep(
         // `lastKnownMergeStateFromLedger`, keyed pr_number+head_sha, so hysteresis persists
         // across any number of consecutive `unknown` reads on the SAME head rather than
         // resetting the moment GitHub goes quiet again.
-        ...(pr.mergeState !== undefined ? { merge_state: pr.mergeState, ...(mainTipSha !== undefined ? { merge_main_sha: mainTipSha } : {}) } : {}),
+        // W1-T13195: a clean or behind state always names its main (see `disposedMergeFacts`).
+        ...disposedMergeFacts(pr, ledgerLines, mainTipSha),
+        // W1-T13195: this pass could not read the PR's check rollup, so its checks and review are unread.
+        ...(pr.rollupUnreadable === true ? { rollup_unreadable: true } : {}),
         ...conflictEvidenceRowFields(pr),
         ...(deduped ? { deduped: true } : {}),
         // W1-T7734: how old the view was when this PR was ACTED on — now minus the generation's publish
@@ -23012,6 +23067,8 @@ export async function runSweep(
         : await tryPlanRepair(pr);
       const facts = planRoundFacts.get(pr.prNumber);
       let planRoundExhausted = false;
+      // W1-T13047: why the plan-scoped round is exhausted, for the held rebuild's question.
+      let exhaustedRefusal = "";
       if (!repair.repaired && deps.dispatchPlanGateRound && isFleetAppAuthor(facts?.authorLogin) &&
           (isMachineLanePlanHead(pr.headRefName) || facts?.filedTaskRepairReady === true && filedTaskPlanRepairCandidate(pr))) {
         const row = { pr_number: pr.prNumber, head_sha: pr.headSha, lane_head: pr.headRefName,
@@ -23037,6 +23094,7 @@ export async function runSweep(
             if (claimed.reason.includes("refused twice")) {
               repair.repaired = false;
               planRoundExhausted = true;
+              exhaustedRefusal = claimed.reason;
             }
           }
           else {
@@ -23052,7 +23110,8 @@ export async function runSweep(
                 if (!deps.fixProgressJudge) {
                   repair.repaired = false;
                   planRoundExhausted = true;
-                  repair.reason = `; ${repeatedFixRefusalReason(String(repeated.reason))}`;
+                  exhaustedRefusal = repeatedFixRefusalReason(String(repeated.reason));
+                  repair.reason = `; ${exhaustedRefusal}`;
                   return;
                 }
                 const parkedReason = `refused-twice: plan round ${String(repeated.reason)}`;
@@ -23075,7 +23134,9 @@ export async function runSweep(
                   repair.repaired = false;
                   planRoundExhausted = true;
                   repair.reason = `fix progress loop: ${progress.loop} — ${progress.reason}`;
-                  await deps.escalate(pr, repair.reason, renderClarificationQuestion(pr, repair.reason, pr.strikeHistory ?? []));
+                  exhaustedRefusal = `${repair.reason}; the plan-scoped round refused twice: ${String(repeated.reason)}`;
+                  // W1-T13047: with the parked-pr remedy wired, the exhausted round is closed and rebuilt below, not escalated.
+                  if (!deps.parkedPr) await deps.escalate(pr, repair.reason, renderClarificationQuestion(pr, repair.reason, pr.strikeHistory ?? []));
                   return;
                 }
                 if (progress.verdict === "change-approach") pr.pendingAnswer = { ...pr.pendingAnswer, constraint: progress.approach };
@@ -23112,6 +23173,19 @@ export async function runSweep(
         ? `merge conflict (mergeState dirty) — the plan-scoped conflict round on this fleet plan PR is exhausted${repair.reason} — escalating`
         : `plan-only PR is red on ${red} — the code-fix lane cannot stage outside a plan filing, so no ` +
           `fix is dispatched; the plan violation needs a plan repair${violation}${repair.reason}`;
+      // W1-T13047: invariant:round-first, only an exhausted plan-scoped round closes the plan filing. It is rebuilt as one
+      // held task (invariant:one-question) whose needs_input names the red gates and the refusal; no needs-human issue opens.
+      if (planRoundExhausted && deps.parkedPr && !deps.dryRun) {
+        const parked = await planRoundExhaustedRemedy(pr, { redChecks: redCheckNames(pr).filter(r => !r.startsWith("review:")),
+          violations: named, refusal: exhaustedRefusal || repair.reason.replace(/^; /, ""), conflict: planConflictRound,
+          knownPlanFiles: (pr.mergeConflict?.files ?? []).map((file) => file.path) }, ledgerLines, deps.parkedPr,
+        { runId: deps.runId, ledgerTaskId: escalationTaskIdFor(pr), nowIso: clockFromMillisFn(() => now).iso(),
+          append: (row) => appendLine(deps.ledgerPath, row) });
+        parkedBlockerByPr.set(pr.prNumber, parked.blocker);
+        ruleBlockerByIndex.set(prIndex, parked.blocker);
+        disposition = parked.disposition;
+        reason = `parked-pr remedy ${parked.remedy} (W1-T13047): ${parked.reason}; it replaces: ${reason.replace(/ — escalating$/, "")}`;
+      }
     }
     // W1-T3306: capped proof grades live only on `review.posted`, so the capped-green arm refusal
     // routes through the EXISTING fix rung here. #10298: it reads the #5960 escalation row's head too,

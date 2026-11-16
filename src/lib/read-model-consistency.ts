@@ -380,6 +380,9 @@ function compareSnapshot(db: ReadModelDb, ledgerDir: string, window: OracleWindo
   };
 }
 
+/** W1-T13234: the scratch copy of a whole table's stored rows, the baseline its windowed replay is compared with. */
+const ORACLE_STORED_PREFIX = "oracle_stored_";
+
 function tableColumns(db: ReadModelDb, table: string): string[] {
   return db.prepare(`PRAGMA table_info(${table})`).all().map((row) => String(row.name));
 }
@@ -434,20 +437,36 @@ function compareProjections(
         const columns = tableColumns(db, table);
         windowed.set(table, p.settle === undefined && columns.includes("ts_ms") && columns.includes("h"));
         if (windowed.get(table)) continue;
-        const insert = scratch.prepare(`INSERT OR REPLACE INTO ${table}(${columns.join(", ")}) VALUES(${columns.map(() => "?").join(", ")})`);
-        for (const row of db.prepare(`SELECT * FROM ${table}`, { bigInts: true }).all()) insert.run(...columns.map((c) => row[c]));
+        // W1-T13234: a whole table (run_activity held 742,306 rows on 2026-11-16) is streamed row by row into the
+        // scratch table AND a pristine copy, and compared there in SQL, so the JS heap holds one row, not the table.
+        const list = columns.join(", ");
+        scratch.exec(`CREATE TABLE ${ORACLE_STORED_PREFIX}${table} AS SELECT ${list} FROM ${table} WHERE 0`);
+        const values = `VALUES(${columns.map(() => "?").join(", ")})`;
+        const insert = scratch.prepare(`INSERT OR REPLACE INTO ${table}(${list}) ${values}`);
+        const keep = scratch.prepare(`INSERT INTO ${ORACLE_STORED_PREFIX}${table}(${list}) ${values}`);
+        for (const row of db.prepare(`SELECT ${list} FROM ${table}`, { bigInts: true }).iterate()) {
+          const cells = columns.map((c) => row[c]!);
+          insert.run(...cells);
+          keep.run(...cells);
+        }
       }
     }
     applyProjections(scratch, built, lines);
     for (const [table, keyed] of windowed) {
-      const range = keyed ? " WHERE ts_ms BETWEEN ? AND ?" : "";
-      const args = keyed ? [window.t0, window.t1] : [];
+      if (!keyed) {
+        const list = tableColumns(scratch, table).join(", ");
+        for (const row of scratch.prepare(`SELECT ${list} FROM ${table} EXCEPT SELECT ${list} FROM ${ORACLE_STORED_PREFIX}${table}`, { bigInts: true }).iterate()) {
+          projectionMissing.push(`${table} ${canonicalRow(row)}`);
+        }
+        continue;
+      }
+      const range = " WHERE ts_ms BETWEEN ? AND ?";
+      const args = [window.t0, window.t1];
       const stored = db.prepare(`SELECT * FROM ${table}${range}`, { bigInts: true }).all(...args);
       const want = scratch.prepare(`SELECT * FROM ${table}${range}`, { bigInts: true }).all(...args);
       const have = new Set(stored.map(canonicalRow));
       const expected = new Set(want.map(canonicalRow));
-      for (const row of want) if (!have.has(canonicalRow(row))) projectionMissing.push(`${table} ${keyed ? `${row.ts_ms}:${row.h}` : canonicalRow(row)}`);
-      if (!keyed) continue;
+      for (const row of want) if (!have.has(canonicalRow(row))) projectionMissing.push(`${table} ${row.ts_ms}:${row.h}`);
       for (const row of stored) {
         const id = { tsMs: Number(row.ts_ms), h: row.h as bigint };
         if (!expected.has(canonicalRow(row)) && !lost.has(keyOf(id))) projectionExtra.push({ table, ...id });

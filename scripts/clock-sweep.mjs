@@ -32,7 +32,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join, relative, sep } from "node:path";
 import { isMainModule } from "./lib/argv.mjs";
 import { REPO_ROOT } from "./lib/repo-root.mjs";
 
@@ -88,9 +88,57 @@ const AGE_SURFACE_RE =
 /** A date literal: an ISO-ish date, which is what a bomb is built from. */
 const DATE_LITERAL_RE = /\d{4}-\d{2}-\d{2}/;
 
-/** `test/foo.test.ts` -> `foo`. */
+/** `foo.test.ts` -> `foo`; `learning/foo.test.ts` -> `learning/foo` (the path under test/ is the suite id). */
 export function suiteName(file) {
   return file.replace(/\.test\.ts$/, "");
+}
+
+/**
+ * W1-T9870: the key an exclusion matches on. Exclusions (SPAWN_REACHING, CLOCK_ARTIFACTS and the
+ * baseline's recorded set) are keyed by the stem of the file's BASENAME, so a suite moved into a
+ * folder keeps its exclusion instead of silently losing it (mounts-wiring: a real $1.42 spend).
+ */
+export function exclusionKey(suite) {
+  return basename(String(suite));
+}
+
+/** True when `exclusions` (a Map or Set keyed by stem) names this suite, wherever it sits under test/. */
+export function isExcluded(exclusions, suite) {
+  return exclusions.has(exclusionKey(suite));
+}
+
+/** Every `*.test.ts` under `testDir` as a suite id (path under testDir, no suffix), skipping fixtures. */
+export function listSuites(testDir = TEST_DIR) {
+  const out = [];
+  const walk = (dir) => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      if (e.isDirectory()) {
+        if (e.name !== "fixtures" && e.name !== "node_modules") walk(join(dir, e.name));
+      } else if (e.isFile() && e.name.endsWith(".test.ts")) {
+        out.push(suiteName(relative(testDir, join(dir, e.name)).split(sep).join("/")));
+      }
+    }
+  };
+  walk(testDir);
+  return out.sort();
+}
+
+/**
+ * W1-T9870: how each exclusion key lines up with the files that exist. `stale` keys match no file
+ * (the exclusion rotted, or its file was renamed so it no longer protects anything) and `ambiguous`
+ * keys match several (an exclusion would widen over files it never named). Pure.
+ */
+export function exclusionFindings(suites, keys) {
+  const count = new Map();
+  for (const s of suites) count.set(exclusionKey(s), (count.get(exclusionKey(s)) ?? 0) + 1);
+  const stale = [];
+  const ambiguous = [];
+  for (const k of keys) {
+    const n = count.get(k) ?? 0;
+    if (n === 0) stale.push(k);
+    else if (n > 1) ambiguous.push(k);
+  }
+  return { stale, ambiguous };
 }
 
 /**
@@ -99,13 +147,11 @@ export function suiteName(file) {
  * A suite that grows its first date literal tomorrow is swept the next run, with no edit here.
  */
 export function deriveCandidates(testDir = TEST_DIR) {
-  return readdirSync(testDir)
-    .filter((n) => n.endsWith(".test.ts"))
-    .filter((n) => {
-      const text = readFileSync(join(testDir, n), "utf8");
+  return listSuites(testDir)
+    .filter((suite) => {
+      const text = readFileSync(join(testDir, `${suite}.test.ts`), "utf8");
       return AGE_SURFACE_RE.test(text) && DATE_LITERAL_RE.test(text);
     })
-    .map(suiteName)
     .sort();
 }
 
@@ -120,16 +166,30 @@ export function readTouchedAt(cwd = REPO, exec = execFileSync) {
   const touched = new Map();
   let when = 0;
   for (const line of String(out).split("\n")) {
-    const file = /^test\/([^/]+)\.test\.ts$/.exec(line);
+    const file = /^test\/(.+)\.test\.ts$/.exec(line);
     if (/^\d+$/.test(line)) when = Number(line);
     else if (file && !touched.has(file[1])) touched.set(file[1], when);
   }
   return touched;
 }
 
+/**
+ * W1-T9870: the never-run and expected-to-fail exclusions that no longer name exactly one file, as
+ * `{stale, ambiguous}` report lines. A stale key is REPORTED but does not fail the sweep (a throwaway
+ * checkout, like the shard test's, legitimately lacks the real suites); an ambiguous key FAILS it,
+ * because the exclusion would silently widen over a second file. Pure.
+ */
+export function exclusionProblems(suites, spawn = SPAWN_REACHING, artifacts = CLOCK_ARTIFACTS) {
+  const { stale, ambiguous } = exclusionFindings(suites, [...spawn.keys(), ...artifacts.keys()]);
+  return {
+    stale: stale.map((k) => `exclusion "${k}" is stale: no test/**/${k}.test.ts exists, so it protects nothing`),
+    ambiguous: ambiguous.map((k) => `exclusion "${k}" is ambiguous: more than one test/**/${k}.test.ts exists`),
+  };
+}
+
 /** The candidates this sweep will actually execute: derived, minus the never-run set. */
 export function runnableCandidates(candidates) {
-  return candidates.filter((s) => !SPAWN_REACHING.has(s));
+  return candidates.filter((s) => !isExcluded(SPAWN_REACHING, s));
 }
 
 /**
@@ -165,21 +225,21 @@ export function classifySweep(
   ceiling = DRIFT_CEILING,
   recorded = DRIFT_BASELINE.driftingSuitesAtCapture ?? [],
 ) {
-  const known = new Set(recorded);
+  const known = new Set(recorded.map(exclusionKey));
   const drifted = [];
   const newDrift = [];
   const staleExclusions = [];
   for (const [suite, r] of results) {
-    if (artifacts.has(suite)) {
+    if (isExcluded(artifacts, suite)) {
       // An artifact that now PASSES shifted means its stated mechanism no longer applies.
-      if (!r.failed) staleExclusions.push({ suite, reason: artifacts.get(suite) });
+      if (!r.failed) staleExclusions.push({ suite, reason: artifacts.get(exclusionKey(suite)) });
       continue;
     }
     if (r.failed) {
       const row = { suite, ...r };
       drifted.push(row);
       // A name the baseline never recorded is a suite that STARTED drifting since it was captured.
-      if (!known.has(suite)) newDrift.push(row);
+      if (!known.has(exclusionKey(suite))) newDrift.push(row);
     }
   }
   return {
@@ -279,7 +339,7 @@ export function headerLines(candidates, runnable) {
   return [
     `clock-sweep — shift +${SWEEP_SHIFT_DAYS}d`,
     `  candidates derived : ${candidates.length}`,
-    `  never run (spawn)  : ${candidates.length - runnable.length}  [${[...SPAWN_REACHING.keys()].filter((s) => candidates.includes(s)).join(", ") || "none in candidate set"}]`,
+    `  never run (spawn)  : ${candidates.length - runnable.length}  [${[...SPAWN_REACHING.keys()].filter((k) => candidates.some((c) => exclusionKey(c) === k)).join(", ") || "none in candidate set"}]`,
     `  will run           : ${runnable.length}`,
   ];
 }
@@ -347,7 +407,7 @@ export function renderReport({ drift, newDrift, staleExclusions, unreached, brow
   if (ok) {
     // Counted from what actually RAN, never `runnable.length - CLOCK_ARTIFACTS.size` (negative under
     // `--only`); drifting suites within the ceiling are not "immune" either (W1-T1128).
-    const artifactsRun = runnable.filter((s) => artifacts.has(s)).length;
+    const artifactsRun = runnable.filter((s) => isExcluded(artifacts, s)).length;
     const immune = runnable.length - artifactsRun - drift.length;
     const notes = [];
     if (artifactsRun) notes.push(`${artifactsRun} known artifact(s) still failing as expected`);
@@ -373,6 +433,7 @@ export function main({
   touchedAt = readTouchedAt,
   now = Date.now,
   readSuite = readSuiteText,
+  allSuites = listSuites,
   writeJson = writeJsonFile,
   artifacts = CLOCK_ARTIFACTS,
   log = console.log,
@@ -397,6 +458,8 @@ export function main({
     log(`clock-sweep: --shard ${shard.i}/${shard.n} needs --results-out <path>; only scripts/clock-sweep-aggregate.mjs classifies a shard`);
     return 2;
   }
+  const problems = exclusionProblems(allSuites());
+  for (const p of [...problems.stale, ...problems.ambiguous]) log(`  EXCLUSION PROBLEM  : ${p}`);
   const candidates = only ? [only] : derive();
   const runnable = runnableCandidates(candidates);
   const sharded = shard.n > 1 || resultsOut !== undefined;
@@ -405,7 +468,7 @@ export function main({
   for (const line of headerLines(candidates, runnable)) log(line);
   if (sharded) log(`  shard ${shard.i}/${shard.n}          : ${slice.length} suites`);
   if (listOnly) {
-    for (const s of slice) log(`    ${artifacts.has(s) ? "artifact" : "        "}  ${s}`);
+    for (const s of slice) log(`    ${isExcluded(artifacts, s) ? "artifact" : "        "}  ${s}`);
     return 0;
   }
 
@@ -431,13 +494,13 @@ export function main({
     const r = run(suite, SWEEP_SHIFT_DAYS);
     results.set(suite, r);
     done++;
-    const verdict = r.failed ? (artifacts.has(suite) ? "fail (known artifact)" : "FAIL") : "ok";
+    const verdict = r.failed ? (isExcluded(artifacts, suite) ? "fail (known artifact)" : "FAIL") : "ok";
     write(`  [${String(done).padStart(3)}/${slice.length}] ${verdict.padEnd(21)} ${suite}\n`);
   }
   const unreached = ordered.slice(done);
 
   if (sharded) {
-    const drift = [...results].filter(([s, r]) => r.failed && !artifacts.has(s)).map(([suite, r]) => describeDrift({ suite, ...r }, run));
+    const drift = [...results].filter(([s, r]) => r.failed && !isExcluded(artifacts, s)).map(([suite, r]) => describeDrift({ suite, ...r }, run));
     writeJson(resultsOut, {
       version: 1, shard: shard.i, of: shard.n, candidates: candidates.length, runnable: runnable.length, order,
       elapsedMs: now() - started, ran: [...results.keys()], unreached,
@@ -450,7 +513,7 @@ export function main({
 
   const { drifted, newDrift, staleExclusions, ok: classified } = classifySweep(results, artifacts, ceiling, recorded);
   const browsers = browserSuites(runnable, readSuite);
-  const ok = classified && unreached.length === 0 && browsers.length === 0;
+  const ok = classified && unreached.length === 0 && browsers.length === 0 && problems.ambiguous.length === 0;
   const drift = drifted.map((d) => describeDrift(d, run));
   for (const line of renderReport({ drift, newDrift, staleExclusions, unreached, browsers, ceiling, ok, runnable, artifacts })) log(line);
   return ok ? 0 : 1;

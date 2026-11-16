@@ -106,11 +106,12 @@ test("W1-T11405 criterion 1: each unexpected throw names its exact finite stage"
   await t.test("parse resets after a comment lands", async s => {
     const f = fixture(s); let reads = 0;
     Object.defineProperty(f.comment, "body", { get() {
-      if (++reads === 3) throw new Error("fixture later parse");
+      // W1-T13223 reads the body once more, for the fleet-authored check, before the answer lands.
+      if (++reads === 4) throw new Error("fixture later parse");
       return "continue with this constraint";
     } });
     await rejectsAt(f.run, "answer_parse");
-    assert.equal(reads, 3);
+    assert.equal(reads, 4);
     assert.equal(f.rows.filter(r => r.step === "panel.question_answered").length, 1);
   });
   await t.test("parse resets after feedback before the next issue", async s => {
