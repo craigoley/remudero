@@ -1,0 +1,93 @@
+- id: W1-T13155
+  title: "The review-replay garden's due check reads no ledger on the daemon loop: its cheap fingerprint keys on the generator revision and the hourly ledger bucket, not on the full replay inventory, so it stops blocking the loop for up to 102 s at a time"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # one garden's due-check key; the pass, its inventory and the sample it writes are unchanged
+  origin: "operator-session#loop-lag-2026-11-16"
+  plan_refs:
+    - W1-T12954
+    - W1-T11069
+    - W1-T5668
+  files:
+    - src/lib/review-replay-sample.ts
+    - test/review/the-review-replay-due-check-reads-no-ledger.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The review-replay spec's cheapFingerprint reads no ledger rows: with an injected ledger reader that counts its calls, cheapFingerprint() and gardenPassDue() call it 0 times, and the fingerprint is the same for two calls in one hour bucket while the live ledger grows between them"
+      proof: "grep: W1-T13155 criterion 1 in test/review/the-review-replay-due-check-reads-no-ledger.test.ts"
+    - claim: "The fingerprint moves when the hour bucket moves and when the generator revision changes, and a pass on a moved fingerprint still writes the same sample file that refreshReviewReplaySample writes for the same ledger"
+      proof: "grep: W1-T13155 criterion 2 in test/review/the-review-replay-due-check-reads-no-ledger.test.ts"
+    - claim: "invariant:due-check-reads-no-ledger-union — gardenPassDue on the review-replay spec performs no synchronous ledger-union read on the event loop: no readLedgerUnionRecordsSync call, and no read or gunzip of the live ledger or of any ledger archive"
+      kind: guard
+      proof: "grep: W1-T13155 criterion 3 in test/review/the-review-replay-due-check-reads-no-ledger.test.ts"
+    - claim: "invariant:one-union-read-per-pass — one review-replay pass that reads its inventory reads the ledger union exactly once (today cheapFingerprint is the inventory, so a due pass reads it twice)"
+      kind: guard
+      proof: "grep: W1-T13155 criterion 4 in test/review/the-review-replay-due-check-reads-no-ledger.test.ts"
+  rationale: |
+    WHY: the daemon loop is blocked about two thirds of the time, and most of that block is one garden's
+    due check. While the loop is blocked, the daemon does not tick, refresh its token or answer its
+    children (W1-T11069 saw the same cause starve the token refresh).
+    MEASURED, core ledger (~/rmd-state2/state/ledger.ndjson plus ledger.2026-11-16*.gz), 2026-11-16
+    06:00Z to 13:00Z, daemon.loop_stall_profile rows deduplicated on ts:
+    - 1,402 rows, 16,889 s of lag_ms: 67% of the 25,200 s window. (The operator's first count was
+      1,392 rows and 16,686 s; the shares below do not change.)
+    - 95 rows name readReviewReplaySample in top_inclusive: 5,324 s, 32% of all lag, max 101.6 s.
+    - The profile keeps only 5 top_inclusive frames, so most review-replay rows show only anonymous
+      frames. Mapped with child-entry bundles rebuilt at the two daemon builds of the window
+      (d485e46e7, 05:29Z to 09:40Z, and 346556038, 09:40Z to 12:18Z; scripts/build-child-entries.mjs):
+      run-task.mjs:287294 and :287926 are reviewReplayGardenSpec's inventory arrow, :287302 and
+      :287934 are its cheapFingerprint arrow, :314120 and :314897 are the gardenPass due arrow
+      `() => gardenPassDue(spec, d)`, and :314431 and :315208 are registeredGardenDueProbe's
+      `() => probe ? probe() : true`. Counting those frames too: 164 rows, 9,453 s, 56% of all lag.
+    - The operator's "gardenPassDue without readReviewReplaySample" group (77 rows, 4,513 s, 27%) is
+      the same defect: 67 of its rows hold the review-replay arrows above. Of the other 10, 5 rows
+      (497 s) are gardenPassDue over readLedgerUnionRecordsSync with the spec frame cut off by the
+      top-5 limit; the review-replay spec is the only garden whose cheapFingerprint reads the ledger
+      union, so these are almost certainly it too (about 9,950 s, 59%, in all). The last 5 rows are
+      about 11 s of file stats (fsChurn, readGardenState).
+    - Top self frames in these rows are parseObject and scanLedgerBuffer under readLedgerUnionRecordsSync.
+    READ at origin/main (f399024e2):
+    - src/lib/review-replay-sample.ts:252 reviewReplayGardenSpec sets `cheapFingerprint: () => inventory()`.
+      inventory (:248) is serializeReviewReplaySample(readReviewReplaySample(...)), and
+      readReviewReplaySample (:230-237) calls readLedgerUnionRecordsSync(stateDir, { requireArchives:
+      true, refuseIncomplete: true, ... }): a synchronous read and parse of the whole ledger union
+      (276 archives, 810 MB gzipped).
+    - src/lib/gardener.ts:1216 gardenPassDue calls spec.cheapFingerprint() at :1225 on each due probe;
+      src/run-task.ts:28691 wires review-replay through gardenPass, whose due is that call, on the loop.
+    - src/lib/gardener.ts:1031-1038 already states the rule this breaks: a ledger-reading garden's cheap
+      fingerprint is an hour bucket (gardenLedgerBucket), never a read of the ledger.
+    - Every other cheapFingerprint in src (knowledge, export, ci-friction, gate, hot-file, scout, test,
+      redesign, backlog, plan, queue-judge, flow-remedy, config) is stats, a small state file or the
+      bucket. None reads the ledger union, so no second task is filed.
+    - The pass itself runs in a garden child (spawnPass), so its inventory read is already off the loop;
+      only the due check is on it. The child also reads the union twice per due pass (cheapFingerprint
+      and inventory).
+  design: |
+    INVARIANT due-check-reads-no-ledger-union: the review-replay due check reads no ledger file contents on the daemon loop; it reads at most a clock and a revision string.
+    INVARIANT one-union-read-per-pass: a review-replay pass that reads its inventory reads the ledger union once.
+    1. In reviewReplayGardenSpec, set cheapFingerprint to `${generatorRevision()}:${gardenLedgerBucket(deps.clock ?? systemClock)}`,
+       the same shape W1-T11069 gave the redesign garden. Keep inventory, fingerprint (the serialized
+       sample) and candidates as they are, so the pass decides with the full read, in its child.
+    2. Let the spec take an optional readLedger (the type readReviewReplaySample already accepts), passed
+       through to inventory, so a test can count union reads. Production passes nothing.
+    3. No change to gardenPassDue, readReviewReplaySample, deriveReviewReplaySample or the sample file.
+    4. Tests, in test/review/the-review-replay-due-check-reads-no-ledger.test.ts, as
+       test/gardeners/the-redesign-due-check-reads-no-ledger.test.ts does: a temp state dir with a small
+       ledger, a fake clock, a counting readLedger; criterion 3 also stubs readLedgerUnionRecordsSync's
+       fs (or asserts through the injected reader and a missing archive dir) so any ledger read fails.
+  falsifier: |
+    Keep `cheapFingerprint: () => inventory()`: criteria 1, 3 and 4 fail (the counted reader is called on
+    each due check, and twice per pass). Key the fingerprint on the live ledger's size or mtime: criterion
+    1 fails (it changes while the ledger grows). Drop the generator revision from the key: criterion 2 fails.
+  note: |
+    Id reserved for run-unfiled-1794834619000 with ~/rmd-work/bin/reserve-id.sh.
+    Proof that counts in production: after the deploy, daemon.loop_stall_profile rows whose
+    top_inclusive names readReviewReplaySample or the review-replay spec arrows fall to 0, and the total
+    lag_ms over a 7 h window falls from about 16,900 s (67%) by about 9,500 s; a review-replay
+    garden.pass still runs at least once per hour.

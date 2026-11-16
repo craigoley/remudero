@@ -1,0 +1,45 @@
+- id: W1-T13157
+  title: "The fleet heartbeat suite dates its fixtures when each test builds them, so a host where one beat takes a hundred seconds stops reading its own fixtures as stale"
+  repo: remudero
+  priority: 0.6
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium
+  band_meaning: span
+  origin: "operator-session#mac-red-suites-2026-11-16"
+  plan_refs:
+    - W1-T13051
+    - W1-T13146
+    - W1-T9310
+  files:
+    - test/fleet-heartbeat.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A beat run long after the suite file loaded still reads a fixture row written as one minute old as one minute old: each fixture's times are taken from the child clock when its test builds it, not once when the file loads"
+      proof: "grep: W1-T13157 criterion 1 in test/fleet-heartbeat.test.ts"
+    - claim: "invariant:the-stale-cases-stay-stale — a fixture row older than the script's stale bound still reads STALE, every MUTANT test in the suite still catches its mutant, and the fixture clock is still the child process's clock, never this process's"
+      proof: "grep: W1-T13157 criterion 2 in test/fleet-heartbeat.test.ts"
+  rationale: |
+    OBSERVED 2026-11-16 on the operator Mac, by the operator session, in a worktree at origin/main plus W1-T13051's change, one file per `node --test` command, each test bounded at 120 s (the full output is kept by the operator session).
+
+    - test/fleet-heartbeat.test.ts: tests 58, pass 53, fail 5; the file took 69 minutes. Every test that runs one beat of scripts/fleet-heartbeat.sh took 95 to 105 s, and the one that runs two took 204 s.
+    - The five failures are of one kind: "the mini must reach the same verdict: 'STALE — last poll 24m ago' !== 'live'", "a working daemon must not read STALE: 'STALE — last poll 29m ago' !== 'live'", and three more after them.
+    - READ the suite: `const NOW = new Date(String(spawnSync("date", ["-u", "+%Y-%m-%dT%H:%M:%S.000Z"]).stdout).trim())` runs once when the file loads, and `iso(msAgo)` dates every fixture from it. The script compares those times with its own clock and calls a daemon stale after `DAEMON_STALE_AFTER_S=600`. The first failing test is the sixteenth; thirteen beats at about 100 s each had run before it, which is the 24 minutes the message reports.
+    - So the reds are the fixtures' age, not the script. On Linux a beat takes seconds and the whole file finishes inside the stale bound, which is why CI never sees this.
+    - NOT KNOWN: why one beat takes about 100 s in this suite on the Mac. A profile of the beat in another suite's fixture (test/w1-t5319-...) read about 4 s on the same machine. A sampling profile of one test of this suite is queued by the operator session.
+    - The same slowness is why the census suite test/w1-t5319-... exceeds the precheck's 120 s bound (W1-T13146).
+  design: |
+    MEASURE FIRST: profile one beat as this suite runs it on a Mac (which child the beat spends its time in) and put the answer in the PR body. If the time goes to a command the suite's fixture could stub or bound the way it already stubs others, that stub is in scope here; if it is in scripts/fleet-heartbeat.sh itself, report it and change nothing there.
+
+    1. The fixture times are computed when a test builds its ledger, from the same child `date` the suite reads today (the comment above `NOW` says why it must be the child's clock: a clock-shifted run).
+    2. One new test proves it: it builds a fixture after the suite's load-time clock has been left behind by more than the stale bound, and the beat still reads the row as fresh. Use an injected or simulated delay; never a real sleep.
+    INVARIANT the-stale-cases-stay-stale: the tests that expect STALE, and every mutant test, keep their meaning and their expected values.
+    NOT IN SCOPE: scripts/fleet-heartbeat.sh; the stale bound; the suites that fail on a Mac for a missing Linux tool (W1-T9310's helper is the place for those).
+  falsifier: |
+    Date the fixtures from the load-time constant again and criterion 1 must fail. Date a stale fixture so that it reads fresh, or read the fixture clock from this process, and criterion 2 must fail. Restore and all pass.
+  note: |
+    reservation hand-off: run-unfiled-1794835016375 -> run-unfiled-1794835016375
+    Reserved with rmd next-task-id from a worktree at origin/main. The whole file takes over an hour on the operator Mac today: run single tests there with --test-name-pattern, never the whole file under the shared lock. On Linux the file runs in seconds.
