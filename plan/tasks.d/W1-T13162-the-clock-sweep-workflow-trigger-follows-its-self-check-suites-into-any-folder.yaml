@@ -1,0 +1,54 @@
+- id: W1-T13162
+  title: "The clock sweep workflow's pull-request trigger follows its three self-check suites into any folder of test/"
+  repo: remudero
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # two concerns on purpose: a trigger entry that matches no file leaves the sweep's self-check silent on a pull request, and the suite it widens already guards three other workflows
+  band_meaning: span
+  origin: "operator-session#workflow-held-tasks-2026-11-16"
+  plan_refs:
+    - W1-T9870
+    - W1-T5351
+    - W1-T9873
+    - W1-T9879
+  files:
+    - .github/workflows/clock-sweep.yml
+    - test/infra/ci-workflows-find-nested-tests.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The workflow trigger follows its self-check suites into any folder"
+      proof: 'grep: test/\*\*/clock-sweep\.test\.ts in .github/workflows/clock-sweep.yml'
+    - claim: "clock-sweep.yml is one of the workflows test/infra/ci-workflows-find-nested-tests.test.ts reads, so a pull_request paths entry of it that names an exact flat test path fails that suite"
+      proof: "grep: W1-T13162 criterion 2 in test/infra/ci-workflows-find-nested-tests.test.ts"
+    - claim: "invariant:the-trigger-only-widens — the trigger's paths list is the four entries that are not tests, unchanged, plus the same three self-check suites as `test/**/<name>.test.ts` globs, and nothing else"
+      proof: "grep: W1-T13162 criterion 3 in test/infra/ci-workflows-find-nested-tests.test.ts"
+  rationale: |
+    This is the workflow half of W1-T9870 ("the clock sweep walks tests in subfolders"), cut out on 2026-11-16 so the fleet can build the rest. The daemon never dispatches a task whose `files:` names a path under .github/workflows/ (W1-T5351, `workflowPaths` in src/lib/drain.ts: the fleet App cannot push a workflow file), so W1-T9870, filed 2026-10-16 at priority 1, waited a month for an operator build that nothing announced. Its sweep and baseline work needs no workflow edit. This record is the part that does, and an operator session hand-builds it.
+
+    READ at origin/main ef8b74910f:
+    - .github/workflows/clock-sweep.yml:27-34, the `pull_request` `paths:` list has seven entries. Three name a test file by its exact flat path: `"test/clock-shift-probe.test.ts"` (:31), `"test/clock-sweep.test.ts"` (:32) and `"test/a-clock-sweep-runs-as-shards-and-merges-one-report.test.ts"` (:33). The other four are scripts/clock-shift.mjs, scripts/clock-sweep.mjs, scripts/clock-sweep-aggregate.mjs and the workflow itself.
+    - The workflow's own comment above the list says why the trigger exists: "a probe or sweep edit that breaks detection would otherwise sit undetected until the next Monday, and a broken probe reports universal immunity — a false clean, which is worse than no check."
+    - All three suites sit flat in test/ today. The test restructure (W1-T9879, the move tool, queued) moves suites into folders as pure renames. An exact path stops matching the moment its suite moves, and nothing fails: the workflow just does not run on that pull request.
+    - W1-T9873 (merged, #13360) made the same change for recovery-drill.yml, whose line 34 reads `"test/**/recovery-drill.test.ts"` while test/recovery-drill.test.ts still sits flat. Its suite, test/infra/ci-workflows-find-nested-tests.test.ts, reads `const WORKFLOWS = ["mutation-nightly.yml", "ci.yml", "recovery-drill.yml"] as const;` and its test "W1-T9873: no paths trigger names an exact flat test path" refuses a glob-free `test/....test.ts` entry in any of them. clock-sweep.yml is not on that list: W1-T9873's rationale left it to W1-T9870.
+    - Neither of that suite's other patterns matches a line of clock-sweep.yml today (`find test … -maxdepth 1`, a flat `test/*.test.ts` shell glob), so adding the workflow to the list turns exactly one existing test red on main: the paths one, on the three entries above.
+    NOT MEASURED: that GitHub's path filter matches `test/**/x.test.ts` against the flat `test/x.test.ts`. GitHub's filter-pattern reference says `**/` matches zero or more folders, and recovery-drill.yml has relied on it since #13360; no run of this workflow has been observed to prove it. Design step 3 says how to observe it.
+  design: |
+    1. RED FIRST: add `"clock-sweep.yml"` to `WORKFLOWS` in test/infra/ci-workflows-find-nested-tests.test.ts, and watch "W1-T9873: no paths trigger names an exact flat test path" fail naming the three entries. Add a test titled `W1-T13162 criterion 2: …` that asserts clock-sweep.yml is on the list the paths check walks and that the check saw at least seven entries of it, so dropping the workflow from the list cannot pass silently.
+    2. In .github/workflows/clock-sweep.yml the three `pull_request.paths` entries that name a test file become `"test/**/clock-shift-probe.test.ts"`, `"test/**/clock-sweep.test.ts"` and `"test/**/a-clock-sweep-runs-as-shards-and-merges-one-report.test.ts"`. The four other entries do not change. The `run:` lines that name two of the suites (:85, :88) are re-keyed by the move tool (W1-T9879), not here.
+       A test titled `W1-T13162 criterion 3: …` compares the parsed list with those seven strings exactly, so a mistyped file name, a dropped script entry and an added entry each fail it.
+    3. OBSERVE the filter once, since no test can: this diff edits the workflow, which the trigger also names, so the pull request's own run proves nothing about the globs. In the PR body, name the most recent clock-sweep run that a pull request touching only one of the three suites started, or say that none exists yet.
+    No new test file: the suite that already owns this check for three workflows gains the fourth. It is not a rule suite and stays where it is.
+    INVARIANT the-trigger-only-widens: after this change every path that started the workflow on a pull request before still starts it; the change only adds the same three suites at any depth under test/.
+    NOT IN SCOPE: scripts/clock-sweep.mjs, its baseline and the recursive walk (W1-T9870); the workflow's `run:` lines (W1-T9879); any other workflow; any existing assertion of the suite.
+  falsifier: |
+    On origin/main the workflow's paths: entries name exact flat paths, so the glob grep of criterion 1 misses (moved from W1-T9870). Put `"test/clock-sweep.test.ts"` back as an exact path and the suite's paths test must fail, naming it. Take `"clock-sweep.yml"` out of `WORKFLOWS` and criterion 2 must fail. Misspell one glob's file name, or drop `"scripts/clock-sweep.mjs"` from the list, and criterion 3 must fail. Restore and require all to pass.
+    GUARD that held at base and must still hold: the suite's four W1-T9873 tests pass, with their assertions unchanged, for mutation-nightly.yml, ci.yml and recovery-drill.yml.
+  note: |
+    reservation hand-off: run-unfiled-1794837205952 -> run-unfiled-1794837205952
+    Id reserved for the filing branch by the operator session. An operator session hand-builds this task: the daemon holds any task that names a workflow path (W1-T5351). Check `git ls-remote origin 'refs/rmd-dispatch/W1-T13162' 'refs/heads/run-W1-T13162-*'` before building.
+    It does not depend on W1-T9870 and W1-T9870 does not depend on it: either may land first. W1-T9879 (the move tool) depends on W1-T9870 and should not move one of the three suites before this task is merged; its record is not amended here.
+    Why an existing suite and not a new one: on 2026-11-16 `rmd test-place` put a stub that only parses the workflow in test/rules/ ("reads the repo as text"), and the lint rule new-shard-rule-suite refuses a new test/rules/ suite that brings no PRECHECK_PARITY row in scripts/census-precheck.mjs. The sibling suite already makes this exact check, so widening its list is the smaller change. A workflow diff rides alone (W1-T297): this pull request holds the workflow and that suite, nothing else.
