@@ -387,7 +387,7 @@ import {
   type RefusalCandidate,
 } from "./refusal-amendment.js";
 import { landTaskFilesAsync, landingIdentity, stagedTaskFiles, type LandTaskFilesOpts } from "./feedback-landing.js";
-import { PARKED_PR_REMEDY_STEP, openEscalationRelease, actOnParkedPr, designHoldCoverage, parkedPrFacts, parkedPrRemedy, remedyStalledCriterion, takeParkedPrRemedy, type ParkedPrHost } from "./parked-pr-remedy.js";
+import { PARKED_PR_REMEDY_STEP, openEscalationRelease, actOnParkedPr, designHoldCoverage, parkedPrFacts, parkedPrRemedy, remedyStalledCriterion, standDownHoldRemedied, standDownHoldRemedy, takeParkedPrRemedy, type ParkedPrHost } from "./parked-pr-remedy.js";
 
 /** W1-T6434: the bounded, already-scrubbed view of a preserved fix-owner patch. */
 export interface PriorPartialWork {
@@ -23348,8 +23348,11 @@ export async function runSweep(
     // needs-human escalation (`fix.stood_down` at `rung.strike`), so it takes the remedy too. A fix-on-pr that was already
     // taken at this head for this cause and stood down again is not repeated: the hold stays, one row names the remedy.
     // A hold that is NOT about an open escalation is the fix lane's own unchanged-input stand-down: a fix-on-pr round would
-    // stand down again (R4 releases only the open-escalation stand-down), so it keeps the hold; split and rebuild still act.
-    if (deps.parkedPr && !deps.dryRun && !strikeLadderDue && !sloLadderDue && (disposition === "refused-escalate" ||
+    // stand down again (R4 releases only the open-escalation stand-down). W1-T13045: that hold keeps its refused-escalate
+    // disposition, its escalated blocker and its dedup, so the held-escalation ladder still reads it, and the action arm
+    // writes its remedy row (standDownHoldRemedy) in place of the needs-human issue.
+    const ownStandDownHold = standDownHold !== undefined && !standDownHold.reason.includes("ALREADY OPEN");
+    if (deps.parkedPr && !deps.dryRun && !strikeLadderDue && !sloLadderDue && !ownStandDownHold && (disposition === "refused-escalate" ||
         disposition === "blocked-ambiguous" && ruleBlockerByIndex.get(prIndex) === "escalated")) {
       const designQuestion = terminalDesignHold !== undefined && disposition === "refused-escalate" ? reason : undefined;
       // W1-T13046: refused-escalate means the hold's one main adoption is not due (invariant main-first), so the hold's
@@ -23360,15 +23363,13 @@ export async function runSweep(
         ...(designQuestion === undefined ? {} : { designQuestion }), ...(designCoverage === undefined ? {} : { designCoverage }),
         fixModelOrder: policy.fixModelOrder ?? DEFAULT_FIX_MODEL_ORDER },
       ledgerLines, deps.parkedPr);
-      const holdCause = standDownHold === undefined ? undefined
-        : standDownHold.reason.includes("ALREADY OPEN") ? "open-escalation" : `stand-down:${standDownHold.site}`;
+      const holdCause = standDownHold === undefined ? undefined : "open-escalation";
       const cause = designQuestion !== undefined ? "needs-design" : pr.isPlanFiling === true ? "plan-gate"
         : holdCause ?? (heldEscalationAt !== undefined ? "open-escalation" : `escalated:${disposition}`);
       const decision = parkedPrRemedy(facts);
-      const repeatedHold = standDownHold !== undefined && decision.remedy === "fix-on-pr" && (cause !== "open-escalation" ||
-        ledgerLines.some(row =>
-          row.step === PARKED_PR_REMEDY_STEP && row.pr_number === pr.prNumber && row.head_sha === pr.headSha &&
-          row.cause === cause && row.remedy === "fix-on-pr" && row.outcome === "taken"));
+      const repeatedHold = standDownHold !== undefined && decision.remedy === "fix-on-pr" && ledgerLines.some(row =>
+        row.step === PARKED_PR_REMEDY_STEP && row.pr_number === pr.prNumber && row.head_sha === pr.headSha &&
+        row.cause === cause && row.remedy === "fix-on-pr" && row.outcome === "taken");
       const parked = await actOnParkedPr(pr, decision, facts, ledgerLines, deps.parkedPr, { runId: deps.runId, ledgerTaskId: escalationTaskIdFor(pr), nowIso: clockFromMillisFn(() => now).iso(),
         cause, text: reason, append: (row) => appendLine(deps.ledgerPath, row) });
       parkedBlockerByPr.set(pr.prNumber, parked.blocker);
@@ -23679,13 +23680,20 @@ export async function runSweep(
         // escalation rather than being deduped by a stale head's `acted:true` line forever.
         alreadyDone = isContradictory ? priorContradiction !== undefined || legacyContradiction
           : !strikeLadderDue && !sloLadderDue && prior.escalated.has(`${pr.prNumber}@${pr.headSha}`);
-        if (standDownHold !== undefined) alreadyDone = ledgerLines.some(row => row.step === "sweep.disposed" &&
+        // W1-T13045: a stand-down hold whose parked_pr.remedy row exists for this head and site is done too, so a later
+        // pass writes no second row.
+        const holdRemedied = standDownHold !== undefined &&
+          standDownHoldRemedied(ledgerLines, pr.prNumber, pr.headSha, standDownHold.site);
+        if (standDownHold !== undefined) alreadyDone = holdRemedied || ledgerLines.some(row => row.step === "sweep.disposed" &&
             row.pr_number === pr.prNumber && row.head_sha === pr.headSha && row.stand_down_hold === true &&
             (row.acted === true || row.stand_down_escalation_outcome === "delivered" || row.stand_down_escalation_outcome === "failed"));
         // W1-T2427: the LARGEST silent population (7,888 rows). Without this sentence the row is
         // indistinguishable from `deps.escalate` being unwired or throwing.
         if (alreadyDone) {
-          dedupStandDownReason = standDownHold !== undefined
+          dedupStandDownReason = holdRemedied
+            ? `stand-down hold: ${reason} — the parked-pr remedy fix-on-pr is already recorded for this head ` +
+              `(${pr.headSha.slice(0, 7)}) and stand-down site, no needs-human issue is opened and no worker is dispatched`
+            : standDownHold !== undefined
             ? `stand-down hold: ${reason} — escalated once for this head (${pr.headSha.slice(0, 7)}), no worker dispatched and no capacity spent`
             : `an escalation was already filed for this head (${pr.headSha.slice(0, 7)}) — the ` +
             `escalation is deduped, not skipped, and a new head re-earns its own`;
@@ -25517,8 +25525,18 @@ export async function runSweep(
                   break;
                 }
               }
+              // W1-T13045: a stand-down hold on an open pull request opens no needs-human issue. It writes one remedy row
+              // for this head and site and holds; the dedup above keeps a later pass from writing a second one.
+              if (standDownHold && deps.parkedPr && !deps.dryRun) {
+                const parked = await standDownHoldRemedy(pr, standDownHold, ledgerLines, deps.parkedPr, { runId: deps.runId,
+                  ledgerTaskId: escalationTaskIdFor(pr), nowIso: clockFromMillisFn(() => now).iso(),
+                  append: (row) => appendLine(deps.ledgerPath, row) });
+                acted = false;
+                standDownReason = `stand-down hold: ${reason} — parked-pr remedy ${parked.remedy} (W1-T13045): ${parked.reason}`;
+                break;
+              }
               try {
-                const remedied = await remedyInsteadOfEscalation(standDownHold ? `stand-down:${standDownHold.site}` : "refused-escalate");
+                const remedied = await remedyInsteadOfEscalation("refused-escalate");
                 if (remedied !== undefined) {
                   acted = false;
                   standDownReason = remedied;
