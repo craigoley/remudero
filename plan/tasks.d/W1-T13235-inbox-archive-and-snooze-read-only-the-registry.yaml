@@ -7,7 +7,8 @@
   verify: auto
   principles:
     tdd: strict
-  risk: low # the existence check of two triage verbs; their marks, ledger rows and answers are unchanged
+  risk: high # also updates W1-T13188's write test; the two verbs' marks, ledger rows and answers are unchanged
+  band_meaning: span
   origin: "operator-session#serve-oom-2026-11-16"
   plan_refs:
     - W1-T13188
