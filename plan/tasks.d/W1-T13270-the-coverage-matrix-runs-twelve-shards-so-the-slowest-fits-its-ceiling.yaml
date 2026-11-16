@@ -1,0 +1,83 @@
+- id: W1-T13270
+  title: "The coverage-shard matrix runs twelve shards instead of eight, on its own count apart from ci-shard's eight, so the slowest instrumented shard fits its 49-minute ceiling with room for the suite's growth"
+  repo: remudero
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # it changes the required coverage matrix, ci-gate's REQUIRED list and the aggregator's merge inputs together
+  band_meaning: span
+  origin: "operator-session#coverage-shard-timeouts-2026-11-16"
+  plan_refs:
+    - W1-T4436
+    - W1-T5923
+    - W1-T1009
+    - W1-T13269
+  files:
+    - .github/workflows/ci.yml
+    - .github/workflows/ci-gate.yml
+    - src/lib/ci-parity.ts
+    - scripts/coverage-floor.mjs
+    - test/ci/the-coverage-shard-count-is-one-number-everywhere.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "One coverage shard count, 12, is read the same from the coverage-shard matrix, its job name, both --shard selections, the aggregator's --shard-count and lcov and raw lists, ci-gate's REQUIRED coverage-shard entries, CI_COVERAGE_SHARD_COUNT and coverage-floor's SHARD_COUNT"
+      proof: "grep: W1-T13270 criterion 1 in test/ci/the-coverage-shard-count-is-one-number-everywhere.test.ts"
+    - claim: "invariant:ci-shard-unchanged — the ci-shard matrix, its name, its --shard selections and ci-gate's ci-shard entries stay at 8"
+      proof: "grep: W1-T13270 criterion 2 in test/ci/the-coverage-shard-count-is-one-number-everywhere.test.ts"
+    - claim: "The coverage-shard matrix lists twelve shards"
+      proof: "grep: shard: \\[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12\\] in .github/workflows/ci.yml"
+    - claim: "ci-gate requires the twelfth coverage shard"
+      proof: "grep: coverage-shard (12/12) in .github/workflows/ci-gate.yml"
+  rationale: |
+    MEASURED 2026-11-16 from the Actions jobs API (per-step times), 11 pull_request runs of ci.yml from 2026-11-14 to
+    2026-11-16, 88 coverage-shard jobs at timeout-minutes: 49:
+    - Without the two checkout stalls (W1-T13271), the slowest shard job per run was 38 to 46 minutes. "Test with
+      coverage" ran 1148-2330 s (p50 about 1750 s). "Stage this coverage shard" (W1-T5923's premap,
+      scripts/coverage-merge-ratchet.mjs --premap-output, single-threaded) ran 240-547 s. So the slowest shard has 3
+      to 11 minutes of headroom, and one slow runner or stall uses it up.
+    - From the shard logs (#18947, shards 3 and 5): the last test file completes 5m23s and 8m33s before node's
+      `--experimental-test-coverage` report prints. With the premap step, 10 to 17 minutes of each shard is coverage
+      processing after the tests end. Both scale with the files a shard runs.
+    - Test files on origin/main: 4130 on 2026-10-27, 4505 on 2026-11-10, 4792 on 2026-11-16 (+16% in 20 days). The
+      2026-10-27 census measured about 27.5 min per coverage shard; the 11-16 runs average 37-38 min.
+    - Within one run the spread is wide: run 43554232274 had shards at 1148-1229 s and others at 1711-1792 s.
+      INFERRED: the spread follows runner speed more than packing (that run's slow shards also had the slower
+      checkouts, 22-23 s against 14-15 s), so better packing cannot close it. A smaller mean per shard can.
+    WHY 12 AND NOT A HIGHER CEILING: ci-gate.yml's WAIT_CAP_SECONDS (75 min) already budgets this job's 49 min plus
+    the 20 min aggregator with 6 min to spare (test/workflow-job-timeouts.test.ts enforces it). A higher ceiling also
+    lets the suite keep growing toward the same wall. Twelve shards cut each shard's files and post-test coverage work
+    by a third: the measured 46 min worst case becomes about 31-33 min, which covers several weeks of growth at the
+    measured rate. COST: four more jobs of about 1.5 min fixed setup each, about 6 job-minutes per SOURCE run (about
+    2%). The aggregator's merge took 113 s for 8 shards (run 43963239484); its input bytes do not change with the
+    shard count.
+    READ at origin/main 5ff266eb6: the coverage count is spelled in ci.yml (matrix, job name `coverage-shard (N/8)`,
+    `--select-candidates ... --shard N/8`, `--select-all --shard N/8`, `--shard-count 8` and the eight
+    `--line-lcov`/raw paths in coverage-ratchet-required), in ci-gate.yml's REQUIRED list, in
+    src/lib/ci-parity.ts `CI_COVERAGE_SHARD_COUNT = 8`, and in scripts/coverage-floor.mjs `SHARD_COUNT = 8`.
+    ci-shard uses scripts/test-tier-manifest.mjs `DEFAULT_CI_SHARD_COUNT = 8`, which stays. W1-T4436 (#7029) made
+    both lanes one canonical 8 and needed four fix rounds for missed consumers, so the builder runs
+    `rmd census-membership` and `git grep -n -e '/8)' -e 'shard-count 8' -e 'SHARD_COUNT'` before the first push.
+  design: |
+    1. Make the coverage lane's count 12 everywhere it is spelled (list above). Keep ci-shard at 8.
+    2. coverage-nightly.yml keeps its own 8 unless a consumer reads it from the coverage constant; the builder states
+       which, with the read that shows it.
+    3. New suite test/ci/the-coverage-shard-count-is-one-number-everywhere.test.ts parses both workflows with the
+       `yaml` package and asserts criterion 1 (every coverage spelling equals CI_COVERAGE_SHARD_COUNT and
+       coverage-floor's SHARD_COUNT, and equals 12) and criterion 2 (every ci-shard spelling equals 8). Root through
+       `#test/helpers/repo-root.js`.
+    4. Update the existing suites that pin 8 for the coverage lane (test/the-coverage-entry-shards-the-way-ci-does.test.ts
+       asserts `CI_COVERAGE_SHARD_COUNT, 8`) only where they pin the coverage count, never where they pin ci-shard's.
+    INVARIANT ci-shard-unchanged: the ci-shard matrix, its job name, its --shard selections, test-tier-manifest's
+    DEFAULT_CI_SHARD_COUNT and ci-gate's ci-shard entries stay at 8; only the coverage lane's count moves.
+  falsifier: |
+    Leave any one coverage spelling at 8 (for example ci-gate's REQUIRED list) and criterion 1 fails. Move ci-shard
+    to 12 and criterion 2 fails. VALIDATION AFTER MERGE (reported in the PR or a follow-up comment): the first three
+    SOURCE pull_request runs on the new main have twelve coverage-shard jobs, each at or under 36 minutes, and a green
+    coverage-ratchet that merged twelve shards.
+  note: |
+    An operator session hand-builds this task: the daemon holds any task that names a workflow path (W1-T5351).
+    Measure again before building; if the slowest shard is already under 36 minutes on the newest ten SOURCE runs,
+    say so in the PR. W1-T13269 should merge first, so a cancellation during the move is named by its step.
