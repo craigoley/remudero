@@ -124,6 +124,9 @@ export const CLI_ONLY = {
       // W1-T3800: replays a privacy-safe offline corpus from the local filesystem;
       // it is an operator calibration report, not a production console action.
       "risk-judge-eval",
+      // W1-T12418: an operator calibration spend that replays the checked-in judge corpora
+      // through one named model; offline, no console route reads or starts it.
+      "judge-replay",
       "authority",
       "check-proof",
       "reap-branches",

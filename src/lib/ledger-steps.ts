@@ -332,6 +332,28 @@ const SEED_ROWS: readonly SeedRow[] = [
     outcomes: ["answered", "refused", "unavailable", "failed"],
   },
   {
+    // W1-T12418: offline only; no live judge, gate or route reads this row.
+    step: "judge_replay.batch",
+    meaning:
+      "One replay of a judge corpus through one named model in one Anthropic Message Batch: the corpus, " +
+      "the model, the batch id, the case count and the cases the scrub refused, the count of each result " +
+      "type, the reserved, settled and held dollars at the batch price, the usage, and the retention " +
+      "notice (batch prompts are kept 29 days). A refused, failed or unsettled replay writes the same row " +
+      "with its reason, so every replay has exactly one row.",
+    writer: ["replayJudgeCorpus"],
+    outcomes: ["ended", "refused", "failed", "unsettled"],
+  },
+  {
+    // W1-T12418: read by the judge calibration body through W1-T12414's scorer.
+    step: "judge_replay.answered",
+    meaning:
+      "One result of a judge corpus replay batch: the corpus, the case, the model, the expected answer, " +
+      "the result type and usage, and the recorded typed answer keyed by the model id. A request that " +
+      "errored, was canceled or expired has no typed answer.",
+    writer: ["replayJudgeCorpus"],
+    outcomes: ["succeeded", "errored", "canceled", "expired"],
+  },
+  {
     // W1-T12425: a record only; the judge calibration reader joins it to typed answers by head.
     step: "verdict_calibration.outcome",
     meaning:
