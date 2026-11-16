@@ -1,0 +1,49 @@
+- id: W1-T13211
+  title: "The object reaper reads the namespace start through the shared reader, so its boot-evidence suite passes on a Mac and the repo has one reading of when this pid namespace started"
+  repo: remudero
+  priority: 1.0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # boot evidence gates the reaper's deletion of store leftovers, and on macOS it changes from never readable to a derived value
+  band_meaning: span
+  origin: "operator-session#mac-reds-on-a-tree-equal-to-main-2026-11-16"
+  plan_refs:
+    - W1-T10750
+    - W1-T12356
+    - W1-T12528
+    - W1-T13201
+  files:
+    - src/lib/object-reaper.ts
+    - test/daemon/repository-maintenance-escalation-heals-itself.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The reaper's own start is the value the shared namespace-start reader gives: on a host with no /proc that the reader can answer for (macOS), boot evidence is a finite number and the existing W1-T10750 boot-evidence test passes there"
+      proof: "grep: W1-T13211 criterion 1 in test/daemon/repository-maintenance-escalation-heals-itself.test.ts"
+    - claim: "When the shared reader answers undefined, boot evidence and the boot receipt refuse as today: the reader of leftovers keeps every leftover with a reason that names the unreadable start, and the receipt error is carried on the maintenance row"
+      proof: "grep: W1-T13211 criterion 2 in test/daemon/repository-maintenance-escalation-heals-itself.test.ts"
+    - claim: "invariant:one-reading-of-the-namespace-start — src/lib/object-reaper.ts holds no parse of the init process's start time of its own, and the reaper's value is stable for the life of the process"
+      proof: "grep: W1-T13211 criterion 3 in test/daemon/repository-maintenance-escalation-heals-itself.test.ts"
+  rationale: |
+    MEASURED 2026-11-16 by the operator session on the operator Mac, on a tree equal to main (865bc4252a), one file per command under the shared test lock.
+
+    - test/daemon/repository-maintenance-escalation-heals-itself.test.ts: tests 11, pass 10, fail 1. "W1-T10750: boot evidence takes the earliest FRESH receipt of another instance and refuses a malformed one" fails with `Error: ENOENT: no such file or directory, open '/proc/1/stat'`, raised in `ownBootMs` and reached through `bootEvidenceFor`. Log: ~/Remudero-notes/handoff-1115/logs-mac-red-four/repository-maintenance-escalation-heals-itself.full.log.
+    - READ src/lib/object-reaper.ts on origin/main (2d69d3780c), line 485: `function ownBootMs(_now: number): number {` reads `readFileSync("/proc/1/stat", "utf8")` and `/proc/stat` itself, parses field 22, and throws `PID 1 start time unreadable from /proc`. Its doc comment says "THROWS when /proc cannot say".
+    - READ src/lib/dispatch-claim.ts, line 636: `export function readNamespaceBootMs(` does the same parse behind a try, returns `undefined` when /proc is unreadable ("a locked-down sandbox"), and on darwin derives the start from the uptime (W1-T12356). W1-T13201 (merged 2026-11-16) makes that darwin value stable within a process. So the repo has two parsers of the same kernel fact, and only one of them answers on a Mac.
+    - PRODUCTION ON LINUX IS UNAFFECTED, by reading: both production callers already catch the throw. `reclaimOwnerGoneLeftovers` wraps `deps.bootMs(gitDir)` and keeps every leftover with "boot evidence unreadable, so a leftover cannot be shown to predate every instance", and the maintenance loop wraps `writeBootReceipt` in `catch (error) { receiptError = ... }` and carries it on every row as boot_receipt_error. Only a test calls `bootEvidenceFor` unguarded. This task is therefore test-facing, with one benefit in production: one reader of the namespace start.
+    - The two other readers of /proc/1/stat (src/lib/host-memory-calibration.ts and src/lib/host-memory-shadow.ts) hash the init start into a cgroup generation; they do not compute a boot time and are not this fact.
+  design: |
+    1. `ownBootMs` asks `readNamespaceBootMs()` (src/lib/dispatch-claim.ts) and keeps its own per-process cache of a defined answer. `undefined` becomes the throw the two callers already handle, with a message that names the unreadable start; nothing new can reach the daemon loop.
+    2. Delete the reaper's own /proc parse and its USER_HZ constant.
+    3. The seam is the reader, not `realBootSweepHostProbe` (W1-T12528): that probe is the boot sweep's bundle of hostname, namespace start and pid presence, and the reaper already takes its hostname and process list through its own `deps`. Taking the bundle would give the reaper two sources of one hostname.
+    4. Tests go in the existing suite. Criterion 1 runs the real reader on the host it is on. Criterion 2 drives the unreadable arm through the reader's own injectable inputs or the reaper's existing `bootMs` dep, never by a host check. Criterion 3 reads the source text for a second parse and calls the reaper twice across a clock step.
+    5. SAY IN THE PR BODY what changes on a Mac: today the start is never readable there, so the reaper keeps every leftover; with the shared reader it has a start, so a leftover older than it, with no live owner, becomes removable there as it is on Linux. No remudero daemon runs on the operator Mac, so this is reached only by tests, but it is the reason this record is high risk.
+    INVARIANT one-reading-of-the-namespace-start: the reaper computes no start time of its own, and a start it cannot read keeps every leftover, exactly as on origin/main.
+    NOT IN SCOPE: the cgroup-generation readers in the host-memory modules; the reader's darwin arithmetic (W1-T12356, W1-T13201); the freshness rule for another instance's receipt.
+  falsifier: |
+    Put the reaper's own /proc parse back and criterion 1 must fail on a Mac and criterion 3 on every host. Let an undefined start reach arithmetic instead of the refusal and criterion 2 must fail. Drop the cache so two calls can differ and criterion 3 must fail. Restore and all pass.
+  note: |
+    reservation hand-off: run-unfiled-1794847949786 -> run-unfiled-1794847949786
+    Reserved on the filing branch by the operator session. No depends_on: the reaper's own cache already holds its value for the process, so this does not need W1-T13201 to land first (it is merged). The test is the existing suite, edited in place. On Linux the suite runs the real /proc path, so CI proves the Linux value is unchanged; do not add a platform skip.
