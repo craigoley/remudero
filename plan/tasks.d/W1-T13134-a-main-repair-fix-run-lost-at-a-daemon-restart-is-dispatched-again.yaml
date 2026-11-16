@@ -17,7 +17,7 @@
     - src/lib/main-health-rung.ts
     - test/a-main-repair-fix-run-lost-at-a-daemon-restart-is-dispatched-again.test.ts
     - test/a-red-main-repairs-itself-fix-pr-then-revert-pr.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A rung started under a new run id, reading a ledger whose main.repair.fix_dispatched row was written by another run id and has no main.repair.fix_opened or main.repair.fix_refused row after it, writes main.repair.fix_refused with lost true and a reason that names the old run id, and calls openFixPr once on its first red observation of the same red"

@@ -16,7 +16,7 @@
   files:
     - src/lib/review-replay-sample.ts
     - test/review/the-review-replay-due-check-reads-no-ledger.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The review-replay spec's cheapFingerprint reads no ledger rows: with an injected ledger reader that counts its calls, cheapFingerprint() and gardenPassDue() call it 0 times, and the fingerprint is the same for two calls in one hour bucket while the live ledger grows between them"

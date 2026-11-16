@@ -17,7 +17,7 @@
     - scripts/census-precheck.mjs
     - scripts/preflight-author.mjs
     - test/ci/gates/a-census-suites-time-bound-comes-from-its-own-measured-runtime.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A census suite child with a recorded history of completed runs on this host is bounded by a budget derived from that history, and a suite that completes inside it is measured, where the fixed backstop would have ended it as not measured"

@@ -17,7 +17,7 @@
     - src/lib/inbox-gardener.ts
     - src/lib/inbox-view.ts
     - test/gardeners/the-inbox-gardener-retires-an-ask-whose-task-already-shipped.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A `verify-human:<task>`, `verify-human-automate:<task>` or `machine-judge:<task>` ask whose task has a merged PR carrying the exact `Remudero-Task: <task>` trailer (or its owned run branch) with implementation credit is retired by an `act` pass, with the same merged-task proof shape a proof-debt ask needs"

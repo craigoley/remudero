@@ -21,7 +21,7 @@
     - test/every-fixed-repair-budget-defers-to-the-progress-judge.test.ts
     - test/a-dirty-fleet-plan-pr-gets-a-plan-scoped-conflict-round.test.ts
     - test/sweep/an-exhausted-plan-round-is-closed-and-rebuilt.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "runSweep with the production parkedPr effect, on a fleet plan-only pull request whose plan-scoped round was refused twice with the same reason and whose fix progress judge answers escalate, calls deps.escalate zero times, closes the pull request through parkedPr.closePr, and files one held task with a needs_input question that names the red gates and the refusal reason"

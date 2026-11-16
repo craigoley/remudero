@@ -17,7 +17,7 @@
     - src/lib/panel-graph.ts
     - test/console-api/inbox-archive-and-snooze-read-only-the-registry.test.ts
     - test/console-api/an-inbox-write-classifies-only-the-proposal-it-acts-on.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "POST /v1/inbox/archive and /v1/inbox/snooze answer 200 as before for a proposal in the registry, and 404 not_found for one absent from it, while a counting statusGithub and a plan path that does not exist show no plan read and no GitHub projection call"
