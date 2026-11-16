@@ -1,0 +1,59 @@
+- id: W1-T13050
+  title: "rmd approve mints a destination task id from the public origin/main, not from the working tree of the long-lived public clone"
+  repo: remudero
+  priority: 1.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the id mint guards against id collisions; a fix that reads a stale ceiling, or drops the local-plan check, could hand out a taken id
+  origin: "operator-session#ops-cutover-stage-3-2026-11-16"
+  plan_refs:
+    - W1-T12214
+    - W1-T12206
+    - W1-T12117
+    - W1-T2710
+    - W1-T3062
+  files:
+    - src/run-task.ts
+    - test/worker/run-task/rmd-approve-mints-a-destination-task-id-from-the-public-main.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "With plan-destination.json naming the task kind, and the public clone's checked-out main behind its origin/main by shards that add task ids, a single rmd approve of a draft with one NEW- placeholder mints and reserves an id above origin/main's highest id, writes approve.id_materialized, and writes no approve.error"
+      proof: "grep: W1-T13050 criterion 1 in test/worker/run-task/rmd-approve-mints-a-destination-task-id-from-the-public-main.test.ts"
+    - claim: "The batch form (approveBatchCommand, the path that follow-up filing uses through automaticFollowups) does the same with two payloads: both ids are above origin/main's highest id, different, and reserved under refs/rmd-id/ in the public origin"
+      proof: "grep: W1-T13050 criterion 2 in test/worker/run-task/rmd-approve-mints-a-destination-task-id-from-the-public-main.test.ts"
+    - claim: "The approve leaves the public clone as it found it: the same HEAD commit, the same branch, and no working-tree change"
+      proof: "grep: W1-T13050 criterion 3 in test/worker/run-task/rmd-approve-mints-a-destination-task-id-from-the-public-main.test.ts"
+    - claim: "invariant:mint-reads-current-public-plan — when the public origin/main cannot be read (the fetch fails), the approve refuses with a reason that names the public plan, writes no shard and reserves no id; it never falls back to the clone's checked-out plan"
+      kind: guard
+      proof: "grep: W1-T13050 criterion 4 in test/worker/run-task/rmd-approve-mints-a-destination-task-id-from-the-public-main.test.ts"
+    - claim: "With no plan-destination.json, rmd approve mints from its own fresh worktree at origin/main, as before (the same branch, worktree and ids as today)"
+      proof: "grep: W1-T13050 criterion 5 in test/worker/run-task/rmd-approve-mints-a-destination-task-id-from-the-public-main.test.ts"
+  rationale: |
+    WHY: the operator asked for ops cutover stage 3 (new tasks filed in the plan destination). At 2026-11-16T01:05Z the host's plan-destination.json listed the kinds decision, feedback and task. From then on every rmd approve that minted a task id refused. The operator had to remove the task kind again at about 01:10Z. The cutover cannot go on until this is fixed.
+    MEASURED read-only on the Azure host, 2026-11-16 (live ledger ~/rmd-state2/state/ledger.ndjson):
+    - 3 approve.error rows (01:05:21, 01:06:03 single approves; 01:06:13 the follow-up batch), each "rmd approve: refusing to materialize task id(s) ... task-id mint degraded — refusing rather than risk a collision: local-plan (this checkout's plan half is 155 id(s) behind origin's ...; pull before filing)".
+    - The retro's follow-up filing (W1-T12117) then wrote 11 followup.file_refused rows with reason "filing-unreadable: Error: rmd approve: refusing to materialize ...". These are all of the routed follow-ups of that retro.
+    - Before 01:05Z the approve lane minted normally: 18 approve.id_materialized rows from 2026-11-12 to 2026-11-15T23:07Z, the last one minted at 2026-11-15T23:07Z. In the live ledger and the archives since 2026-11-12, the only other local-plan refusals are 2 rows on 2026-11-12 (17 ids behind), before W1-T12214 merged (2026-11-15T19:47Z).
+    WHICH CHECKOUT IS 155 IDS BEHIND: the public clone, not the ops checkout. The approve container path /home/node/Remudero/repos/remudero is /mnt/scratch/rmd/rmd-state2/repos/remudero on the host. Its checked-out main was 7e98d249d (fast-forwarded 2026-11-15T18:39Z). Its origin/main was ecedf738a (fetched 01:03:50Z), 31 commits ahead. The highest allocatable shard id in its working tree was W1-T12893. On origin/main it was W1-T13048. 13048 - 12893 = 155, the number in the refusal.
+    THE CODE, src/run-task.ts on origin/main 02fe3cacd:
+    - :39524 `const idRoot = (worktreePath) => filing.destination ? approvePublicClone(config, owner, repo) : worktreePath;` and :39579 mints with `planPath: join(idRoot(worktreePath), "plan", "tasks.yaml")`.
+    - :40210 `const batchIdRoot = filing.destination ? approvePublicClone(config, owner, repo) : batchWorktree;` and :40221 mints the same way.
+    - :40088 approvePublicClone returns `join(config.root, "repos", repo)` and only clones it when it is missing. Nothing in the approve path fetches it or moves its main.
+    - mintNextTaskIdWithHistory reads the checked-out plan files at planPath (the local half) and remotePlanCeilingOnRef reads the clone's origin/main (the remote half). src/lib/task-id.ts:401-413 adds a local-plan degradation whenever the local half is behind, and src/lib/inbox.ts:4722 materializeDraftTaskIds refuses on any degradation.
+    So the refusal is the guard working as designed (W1-T2710, W1-T3062). The defect is the input: W1-T12214 points the destination mint at a working tree that no lane keeps current. Without a destination, the approve mints from its own fresh worktree at origin/main, so the local half is always current. The reflog of the clone's main shows a fast-forward only every few hours, and every merged plan pull request puts it behind again. Fast-forwarding the clone by hand would clear the refusal only until the next plan merge.
+    RELATED, not duplicated: W1-T12214 (the destination approve), W1-T12206 (the destination ids in the mint), W1-T12117 (follow-up filing through approveBatchCommand). The gardener and architect destination paths mint from their own fresh worktrees and do not have this defect.
+  design: |
+    INVARIANT mint-reads-current-public-plan: in destination mode the public half of the task-id mint reads the public repository's origin/main, fetched by this approve; never a checked-out tree that no lane keeps current.
+    1. In approveCommand and approveBatchCommand, when filing.destination is set, fetch origin main in the public clone (through publicCloneRun or hostWorktreeGitResult, the hardened leaf already used there), then add a detached, locked worktree of the public clone at origin/main under worktreesDir(config). Use that worktree as idRoot and batchIdRoot for planPath and repoRoot. Retire it on every way out, as the approve's own worktree is retired.
+    2. The id reservations (refs/rmd-id/) still run through publicCloneRun(approvePublicClone(...)), as W1-T12214 does. The destination snapshot (taskIdDestinationSnapshot) is unchanged.
+    3. A failed fetch or worktree add refuses through the existing materializeDraftTaskIds refusal (the mint callback throws), with a reason that names the public plan. No fallback to the clone's checked-out plan.
+    4. Do not move the public clone's main, change its branch, or edit its working tree.
+    5. Do not change src/lib/task-id.ts or src/lib/inbox.ts: the local-plan guard stays exactly as it is.
+    NOT IN SCOPE: keeping the long-lived clone fast-forwarded; the follow-up filing's double refusal rows (one routed follow-up can get both a filter reason and filing-unreadable); the ops-catalog dispatch read.
+  falsifier: |
+    Point idRoot back at approvePublicClone(...): criteria 1 and 2 must fail with the local-plan refusal. Fall back to the clone's checked-out plan when the fetch fails: criterion 4 must fail. Restore, and all must pass. In production: after deploy, with task back in plan-destination.json, an approve or a retro follow-up filing while the clone's main is behind its origin/main writes approve.id_materialized and no local-plan refusal. If it still refuses, this change did not fix the cause.
+  note: |
+    Id reserved for run-unfiled-1794791888000 with ~/rmd-work/bin/reserve-id.sh. Build off origin/main. Until it merges and deploys, keep task out of plan-destination.json kinds.

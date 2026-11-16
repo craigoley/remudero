@@ -1,0 +1,44 @@
+- id: W1-T13129
+  title: "The tick reader tests pace on a clock that only the pacer moves, so no test waits on the real 1.5 s gap"
+  repo: remudero
+  depends_on: []
+  priority: 1.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: low # one test file; no source path changes
+  origin: "operator-session#tick-reader-rotation-timeout-2026-11-16"
+  plan_refs:
+    - W1-T12530
+    - W1-T4075
+    - W1-T3277
+  files:
+    - test/the-tick-reads-run-off-the-event-loop.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Three tick reads over nine open PRs, through the producer built by fixtureReader, keep the pacer's real 1.5 s gap (at least nine gaps of paced time) and take less wall time than the paced time, so no read waits on a real timer"
+      proof: "grep: W1-T13129 criterion 1 in test/the-tick-reads-run-off-the-event-loop.test.ts"
+    - claim: "fixtureReader gives every producer it builds a pacer whose clock moves only when the pacer sleeps"
+      proof: "grep: createGhCallPacer({ now: () => pacedAt in test/the-tick-reads-run-off-the-event-loop.test.ts"
+    - claim: "The test \"the persistent tick reader rotates bounded probes across stable open PRs\" passes on the fixture's pacer, with no pacer of its own: three probes a pass and all nine open PRs probed in three passes"
+      kind: guard
+      proof: "grep: assert\\.equal(visited\\.size, 9) in test/the-tick-reads-run-off-the-event-loop.test.ts"
+  rationale: |
+    WHAT FAILS: the test "the persistent tick reader rotates bounded probes across stable open PRs" (test/the-tick-reads-run-off-the-event-loop.test.ts:112) times out at 180 s in CI job test-slow-shard (2/4). It fails on PRs that do not touch the tick reader: #18730 (job 133049448236, a semgrep lock bump) and #18780 (job 133037198657, a Mac author-reserve change). Both logs show `not ok 2013`, failureType testTimeoutFailure, duration 180000 ms.
+    MAIN FAILS IT TOO: every completed CI run on main from 43720700472 (d5722e1fe, 2026-11-15T13:45Z) to 43791453522 (9bb791b1b, 2026-11-16T02:19Z) is red. The last green run is 43717462798 (07b0411c3). In runs 43791453522, 43787210139 and 43785131999 the failed job is test-slow-shard (2/4) and the failed test is this one. The daemon's main repair row (main.repair.located, 2026-11-15T15:54:27Z) bisected the red to 580877d7c. The live ledger has no test.flake_retry row for this test. Fix workers on #18712, #18748 and #18730 each reported the timeout in their reports.
+    CAUSE: 580877d7c (W1-T12530, #18542) made buildOpenPrViewsAsync send every per-PR read through paceGhEntryAsync (src/lib/tick-read-worker.ts:2828, `const paced`). Before it, the reads went straight to the transport. The test's fixtureReader gives the producer no pacer, so createTickReadProducer builds the default one (`io.pacer ?? createGhCallPacer()`, src/lib/tick-read-worker.ts:244), with a 1.5 s gap (DEFAULT_GH_PACE_MIN_GAP_MS, src/lib/github-transport.ts:585) that sleeps on a real timer. The fixture also does not answer the main ref read, so stage reuse is off and every pass reads again.
+    MEASURED on the Azure host: at origin/main 8bba73cc5 the test was still running after 240 s. With a pacer on a clock that only its sleeps move, the three passes pace 259,500 ms (173 gaps of 1.5 s) and finish in 227 ms of wall time. In CI the sibling tests that use the same fixture took 45 s ("one generation serves sweep and board review ...") and 22.5 s ("warming a terminal file list ..."); with the fixture pacer they take 0.34 s and 0.08 s.
+    PARTLY FIXED SINCE: #18712 (W1-T12269, merged 2026-11-16T03:09Z as 7f6db571f) gave the rotation test alone a pacer that never waits ("test: keep tick rotation fixture off request pacing"). That clears this one test. The other tests that use fixtureReader still wait on the real gap (45 s and 22.5 s in CI), and the no-op pacer drops the gap, so no test checks that the reads are paced at all.
+    SO: the 180 s timeout is right; the tests wait on real time they do not need. The production pacing is W1-T12530's design and is not changed here.
+  design: |
+    NO-INVARIANTS: a test-only change; no source path, ledger row or guard changes.
+    1. In fixtureReader, build a pacer with createGhCallPacer({ now, sleep, sleepSync }) on a number that only its sleeps add to, and pass it as io.pacer. Keep the default gap. Expose the paced time (pacedMs).
+    2. Add the criterion 1 test: nine open PRs, three passes, paced time at least nine gaps, wall time less than paced time.
+    3. Remove the rotation test's own no-op pacer (from #18712), so it uses the fixture's pacer. Do not change its assertions, the timeout, or any file under src/.
+    NOT IN SCOPE: whether every per-PR read in production needs the full 1.5 s gap (a tick read over N open PRs now paces about 9.6 reads a PR in this fixture).
+  falsifier: |
+    Remove `pacer,` from fixtureReader's io: the rotation test and criterion 1 must time out again (the real 1.5 s gap, about 260 s for three passes). Replace the fixture pacer with one that never waits: criterion 1 must fail (no paced time). Restore it, and both must pass in well under a second. In CI: after this merges, test-slow-shard (2/4) on main passes this test, and the job no longer spends 180 s on it.
+  note: |
+    Id reserved for run-unfiled-1794798728000 with ~/rmd-work/bin/reserve-id.sh. The build is on branch run-W1-T13129-1794798790000 off origin/main.

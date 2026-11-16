@@ -1265,7 +1265,7 @@ export interface DetachedWorkChildHost {
     fixKey: string;
     /** The typed decision envelope (sweep.ts `FixDispatchEnvelope`); this module only carries it into `spec.json`, plain JSON. */
     envelope: object;
-  }) => Promise<{ runId: string; settled: Promise<unknown>; acknowledge?: (outcome: PromiseSettledResult<never>) => void } | RunChildAbandoned | undefined>;
+  }) => Promise<{ runId: string; pid?: number; settled: Promise<unknown>; acknowledge?: (outcome: PromiseSettledResult<never>) => void } | RunChildAbandoned | undefined>;
   spawnRetro: (input: { decision: Record<string, unknown> }) => ReturnType<DetachedWorkChildHost["spawnFix"]>;
 }
 
@@ -1706,7 +1706,7 @@ export function createDetachedWorkHost(input: DetachedWorkHostInput): DetachedWo
         plan: async () => ({ plan: { tasks: [] } }), options: options(), log, work,
       });
       if (!launch.started) return launch.abandoned ? launch : undefined;
-      return { runId: launch.runId, settled: launch.settled, acknowledge: launch.acknowledge };
+      return { runId: launch.runId, pid: launch.pid, settled: launch.settled, acknowledge: launch.acknowledge };
     },
   };
 }
