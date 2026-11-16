@@ -65,6 +65,9 @@ export interface GardenState<C extends string> {
   filingFailures?: { count: number; lastAt: string; reason: string };
   /** The bytes of the last drafted change a guard or the plan-PR preflight refused: never landed again. */
   refusedLanding?: { digest: string; at: string };
+  /** W1-T12834: the id a refused landing minted for each finding, by its origin key, and the branch it was reserved on.
+   *  The retry files the finding under it and mints none; the id goes back once the finding leaves the inventory. */
+  refusedFindingIds?: RefusedFindingIds;
   /** W1-T12221: the last land's files wait for the shared landing PR of task files. No class acts while they
    *  wait; the landing PR that later carries them becomes `pending`. */
   waiting?: { paths: string[]; stateRoot: string; actionClass: C; baseline: Outcome; targets?: GardenTarget<C>[]; since: string };
@@ -586,6 +589,30 @@ interface HeldGardenIds {
   mint: GardenTaskIdMinter;
   ids: string[];
   land: GardenLandState;
+  /** W1-T12834: the finding (origin key) each id was prepared for, when the pass named one. */
+  findings: Map<string, string>;
+}
+
+/** W1-T12834: the ids refused findings hold, by origin key. */
+export type RefusedFindingIds = Record<string, { id: string; branch: string; at: string }>;
+
+/** W1-T12834: the finding an action files — its origin key when it carries one, else its class and target. */
+export function gardenFindingKey(action: GardenAction<string>): string {
+  const origin = (action as { origin?: unknown }).origin;
+  return typeof origin === "string" && origin !== "" ? origin : `${action.class}:${action.target}`;
+}
+
+/** W1-T12834: what a pass tells its filing's preparation: the plan's actions and the ids refused findings hold. */
+const gardenFindingIds = new WeakMap<object, { name: string; actions: readonly GardenAction<string>[]; held: RefusedFindingIds }>();
+/** The minter each garden last reserved through, so an id whose finding left the inventory can be given back. */
+const gardenMinters = new Map<string, GardenTaskIdMinter>();
+
+/** Which finding each of `count` ids is for: every action, every action carrying no draft of its own, or the first
+ *  alone. Any other count cannot be told apart, so its ids are minted fresh as before. */
+function mintedFindings(actions: readonly GardenAction<string>[], count: number): (string | undefined)[] {
+  const fresh = actions.filter((a) => !(a as { draft?: unknown }).draft);
+  const keys = (count === actions.length ? actions : count === fresh.length ? fresh : count === 1 ? actions.slice(0, 1) : []).map(gardenFindingKey);
+  return keys.length === count && new Set(keys).size === count ? keys : [];
 }
 
 type GardenFilingWorkspace = Pick<GardenCheckout, "branch"> & { land?: (opts: GardenLandOpts) => unknown };
@@ -596,7 +623,7 @@ const gardenHeldIds = new WeakMap<object, HeldGardenIds>();
 function trackGardenIds(ws: GardenFilingWorkspace, mint: GardenTaskIdMinter): HeldGardenIds {
   const known = gardenHeldIds.get(ws);
   if (known) return known;
-  const held: HeldGardenIds = { mint, ids: [], land: "unstarted" };
+  const held: HeldGardenIds = { mint, ids: [], land: "unstarted", findings: new Map() };
   gardenHeldIds.set(ws, held);
   const land = ws.land;
   if (typeof land === "function") {
@@ -626,13 +653,58 @@ export function prepareGardenTaskIds(ws: GardenFilingWorkspace, count: number, m
   if (!ws.branch) throw new Error("gardener: filing workspace has no branch for task-id reservation (no reservation branch)");
   const branch = ws.branch;
   const held = trackGardenIds(ws, mint);
-  const keep = (id: string) => (held.ids.push(id), id);
-  if (!async) return Array.from({ length: count }, () => keep(mint(branch)));
+  // W1-T12834: a finding a refused landing already minted for files under that id again, on the branch that holds it.
+  const pass = gardenFindingIds.get(ws);
+  if (pass) gardenMinters.set(pass.name, mint);
+  const keys = pass ? mintedFindings(pass.actions, count) : [];
+  const prior = (i: number): string | undefined => {
+    const kept = keys[i] === undefined ? undefined : pass!.held[keys[i]!];
+    return kept?.branch === branch ? kept.id : undefined;
+  };
+  const keep = (i: number, id: string) => {
+    held.ids.push(id);
+    if (keys[i] !== undefined) held.findings.set(id, keys[i]!);
+    return id;
+  };
+  if (!async) return Array.from({ length: count }, (_, i) => keep(i, prior(i) ?? mint(branch)));
   return (async () => {
     const ids: string[] = [];
-    for (let i = 0; i < count; i++) ids.push(keep(await (mint.async ?? mint)(branch)));
+    for (let i = 0; i < count; i++) ids.push(keep(i, prior(i) ?? await (mint.async ?? mint)(branch)));
     return ids;
   })();
+}
+
+/**
+ * W1-T12834: what a filing leaves of the refused findings' ids. A refused landing keeps each finding's id for its
+ * retry and takes it out of the release; a landing that opened or waits carries its ids, and any other end releases
+ * them, so either way the finding holds nothing more. Returns the ids now held and those a finding stopped holding.
+ */
+function settleFindingIds(ws: object, prior: RefusedFindingIds, refused: boolean, branch: string | undefined, at: string): { held: RefusedFindingIds; dropped: string[] } {
+  const ids = gardenHeldIds.get(ws);
+  const held = { ...prior };
+  const used = new Set(ids?.findings.keys() ?? []);
+  for (const [id, key] of ids?.findings ?? []) {
+    if (refused && branch !== undefined) held[key] = { id, branch, at: prior[key]?.id === id ? prior[key]!.at : at };
+    else delete held[key];
+  }
+  if (refused && ids) ids.ids = ids.ids.filter((id) => !ids.findings.has(id));
+  const kept = new Set(Object.values(held).map((f) => f.id));
+  return { held, dropped: Object.values(prior).map((f) => f.id).filter((id) => !kept.has(id) && !used.has(id)) };
+}
+
+/** W1-T12834: gives back ids no finding holds any longer, through the minter that reserved them. Never throws. */
+function giveBackFindingIds(name: string, ids: readonly string[], reason: string, async: boolean): void | Promise<void> {
+  const mint = gardenMinters.get(name);
+  if (!mint || ids.length === 0) return;
+  if (async && mint.releaseAsync) return Promise.all(ids.map((id) => mint.releaseAsync!(id, reason))).then(() => undefined, () => undefined);
+  for (const id of ids) {
+    try {
+      mint.release?.(id, reason);
+    } catch (error) {
+      // deliberate: the minter's release ledgers its own failure, and one refusal must not keep the other ids.
+      void error;
+    }
+  }
 }
 
 /**
@@ -774,6 +846,9 @@ function gardenStateFault(parsed: unknown): string | undefined {
   if (lastCheap !== undefined && typeof lastCheap !== "string") return "`lastCheap` is not a string";
   if (filingFailures !== undefined && (!isRecord(filingFailures) || !isCount(filingFailures.count) || typeof filingFailures.lastAt !== "string" || typeof filingFailures.reason !== "string")) return "`filingFailures` is malformed";
   if (refusedLanding !== undefined && (!isRecord(refusedLanding) || typeof refusedLanding.digest !== "string" || typeof refusedLanding.at !== "string")) return "`refusedLanding` is malformed";
+  const findingIds = parsed.refusedFindingIds;
+  if (findingIds !== undefined && (!isRecord(findingIds) || Object.values(findingIds).some((f) => !isRecord(f) ||
+    typeof f.id !== "string" || typeof f.branch !== "string" || typeof f.at !== "string"))) return "`refusedFindingIds` is malformed";
   if (foldedEffects !== undefined && (!Array.isArray(foldedEffects) || foldedEffects.some((id) => typeof id !== "string"))) return "`foldedEffects` is not a list of ids";
   if (foldedLegacyEffects !== undefined && (!Array.isArray(foldedLegacyEffects) || foldedLegacyEffects.some((id) => typeof id !== "string"))) return "`foldedLegacyEffects` is not a list of ids";
   if (foldedEffectThrough !== undefined && (!Number.isSafeInteger(foldedEffectThrough) || (foldedEffectThrough as number) < 0)) return "`foldedEffectThrough` is not a sequence";
@@ -1331,15 +1406,26 @@ function* gardenPassBody<C extends string, I, A extends GardenAction<C>, W exten
     return { ran: false };
   }
   const rng = seededRandom(deps.seed ?? clock.now());
+  let seen = undefined as A[] | undefined;
   const plan: GardenPlan<C, A> = state.pending || state.waiting
     ? { actions: [], acting: [] }
     : planGarden({
         classes: spec.classes,
         state,
         rng,
-        candidates: () => spec.candidates(inventory, rng, state.declinedTargets ?? []),
+        candidates: () => (seen = spec.candidates(inventory, rng, state.declinedTargets ?? [])),
         switchedOff: (c) => existsSync(join(deps.stateDir, `${spec.name.toUpperCase()}_OFF-${c}`)),
       });
+  // W1-T12834: a refused finding no candidate names any longer has left the inventory, and its id goes back.
+  const findingIds = state.refusedFindingIds ?? {};
+  const gone = seen === undefined ? [] : Object.keys(findingIds).filter((key) => !seen!.some((a) => gardenFindingKey(a) === key));
+  if (gone.length > 0) {
+    yield* step(() => giveBackFindingIds(spec.name, gone.map((key) => findingIds[key]!.id), `${spec.name} gardener: the finding left the inventory`, async));
+    deps.log(`${spec.name}.finding_ids_released`, { findings: gone, ids: gone.map((key) => findingIds[key]!.id) });
+    const rest = Object.fromEntries(Object.entries(findingIds).filter(([key]) => !gone.includes(key)));
+    state = { ...state, refusedFindingIds: Object.keys(rest).length > 0 ? rest : undefined };
+    writeAtomic(statePath, JSON.stringify(state, null, 2) + "\n");
+  }
   const scorecard = spec.scorecard(inventory, plan);
   const acting = plan.acting[0];
   let prUrl: string | undefined;
@@ -1350,6 +1436,8 @@ function* gardenPassBody<C extends string, I, A extends GardenAction<C>, W exten
       let unfiled = "the filing ended before its PR opened";
       // W1-T12550: an opened PR or a landing failure/refusal keeps its outcome over a dispose error.
       let settled = false;
+      let refused = false;
+      gardenFindingIds.set(ws, { name: spec.name, actions: plan.actions, held: state.refusedFindingIds ?? {} });
       try {
         // A spec's apply only writes the tree; landing and disposal stay with the pass, awaited or not.
         const heldIds = yield* step(() => spec.prepare?.(ws as unknown as W, plan, async));
@@ -1386,9 +1474,18 @@ function* gardenPassBody<C extends string, I, A extends GardenAction<C>, W exten
         }
       } catch (e) {
         settled = true;
+        refused = e instanceof GardenLandingRefusedError;
         unfiled = String((e as Error)?.message ?? e);
         throw e;
       } finally {
+        // W1-T12834: a refused finding keeps the id it minted for its retry; every other id goes as before.
+        const prior = state.refusedFindingIds ?? {};
+        const findings = settleFindingIds(ws, prior, refused, ws.branch, clock.iso());
+        yield* step(() => giveBackFindingIds(spec.name, findings.dropped, `${spec.name} gardener: the finding was filed under another id`, async));
+        if (JSON.stringify(findings.held) !== JSON.stringify(prior)) {
+          state = { ...state, refusedFindingIds: Object.keys(findings.held).length > 0 ? findings.held : undefined };
+          writeAtomic(statePath, JSON.stringify(state, null, 2) + "\n");
+        }
         yield* step(() => releaseGardenTaskIds(ws, `${spec.name} gardener: ${unfiled}`, async));
         try {
           yield* step(() => ws.dispose());
