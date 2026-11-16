@@ -2177,13 +2177,15 @@ function projectInboxPlan(deps: PanelGraphDeps, plan: Plan, ledgerLines?: Ledger
  * {@link classifyAllProposalsMemo}; this path shares only the per-commit anchor grep and the per-plan-object fragment
  * verdicts, both of which answer exactly what a recompute would.
  */
-function classifyAllProposals(deps: PanelGraphDeps, loadPlanFn: (planPath: string) => Plan = deps.readPlanSnapshot ?? loadPlan): ClassifiedInbox {
+function classifyAllProposals(deps: PanelGraphDeps, loadPlanFn: (planPath: string) => Plan = deps.readPlanSnapshot ?? loadPlan, only?: string): ClassifiedInbox {
   const plan = loadPlanFn(deps.planPath);
   const { projection, boardReferents } = projectInboxPlan(deps, plan);
   const ledgerLines = readLedgerLines(deps.ledgerPath);
   const sha = (deps.inboxMainSha ?? readOriginMainSha)(deps.root);
   const pass = prepareInboxPass(deps, plan, projection, ledgerLines, anchorGrepFor(deps, sha), boardReferents);
-  return { plan, registryPath: pass.registryPath, proposals: pass.proposals, classifications: pass.proposals.map(pass.classifyOne), ledgerLines, projection };
+  // W1-T13188: a write classifies only the proposal it acts on; `proposals` stays whole for existence checks.
+  const classified = only === undefined ? pass.proposals : pass.proposals.filter((p) => p.id === only);
+  return { plan, registryPath: pass.registryPath, proposals: pass.proposals, classifications: classified.map(pass.classifyOne), ledgerLines, projection };
 }
 
 /** The plan's change stamp when it is read off disk: tasks.yaml plus every entry of its shard directory. */
@@ -3721,7 +3723,7 @@ function proposalVerdictResponse(
   actor: InboxVerbActor,
   respond: InboxVerbRespond,
 ): void {
-  const { proposals, classifications } = classifyAllProposals(deps);
+  const { proposals, classifications } = classifyAllProposals(deps, undefined, input.proposalId);
   if (refuseInformationalProposal(proposals, classifications, input.proposalId, respond)) return;
   const found = {
     exists: proposals.some((p) => p.id === input.proposalId),
@@ -3912,7 +3914,7 @@ export function buildInboxVerbActions(deps: PanelGraphDeps, causalScope?: InboxC
     }),
     reframe: validatedInboxAction(validateReframeProposal, (input, actor, respond) => {
       if (improvementReviewRequired(input.proposalId, respond)) return;
-      const { proposals, classifications } = classifyAllProposals(deps);
+      const { proposals, classifications } = classifyAllProposals(deps, undefined, input.proposalId);
       if (!proposals.some((p) => p.id === input.proposalId)) {
         respond(404, { error: "not_found", detail: `no active proposal "${input.proposalId}"` });
         return;
@@ -3932,7 +3934,7 @@ export function buildInboxVerbActions(deps: PanelGraphDeps, causalScope?: InboxC
       if (fields.reason !== undefined && typeof fields.reason !== "string") return { error: "reason must be a string" };
       return { ...id, kept: fields.kept !== false, reason: fields.reason as string | undefined };
     }, (input, actor, respond) => {
-      const classified = classifyAllProposals(deps);
+      const classified = classifyAllProposals(deps, undefined, input.proposalId);
       const proposal = classified.proposals.find(p => p.id === input.proposalId);
       if (!proposal) { respond(404, { error: "not_found", detail: `no active proposal "${input.proposalId}"` }); return; }
       const classification = classified.classifications.find(c => c.proposalId === input.proposalId);
@@ -3951,7 +3953,7 @@ export function buildInboxVerbActions(deps: PanelGraphDeps, causalScope?: InboxC
       respond(200, { ok: true, proposalId: input.proposalId, kept: input.kept, ...(input.kept ? { keptAt: at } : {}) });
     }),
     archive: validatedInboxAction(validateArchiveProposal, (input, actor, respond) => {
-      const { proposals } = classifyAllProposals(deps);
+      const { proposals } = classifyAllProposals(deps, undefined, input.proposalId);
       if (!proposals.some((p) => p.id === input.proposalId)) {
         respond(404, { error: "not_found", detail: `no active proposal "${input.proposalId}"` });
         return;
@@ -3962,7 +3964,7 @@ export function buildInboxVerbActions(deps: PanelGraphDeps, causalScope?: InboxC
       respond(200, { ok: true, proposalId: input.proposalId, archived: input.archived, ...(held?.archivedAt === undefined ? {} : { archivedAt: held.archivedAt }) });
     }),
     snooze: validatedInboxAction(validateSnoozeProposal, (input, actor, respond) => {
-      const { proposals } = classifyAllProposals(deps);
+      const { proposals } = classifyAllProposals(deps, undefined, input.proposalId);
       if (!proposals.some((p) => p.id === input.proposalId)) {
         respond(404, { error: "not_found", detail: `no active proposal "${input.proposalId}"` });
         return;
