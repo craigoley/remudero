@@ -104,7 +104,7 @@ test("W1-T13051 criterion 3: no suite carries its own chmod shim; the shared set
   // CONTROL: the recogniser matches the private stub this task removed, in the form it had. The sample is
   // assembled from two pieces so this file does not itself read as a suite with a stub of its own.
   assert.match(`  writeFileSync(join(bin, ${JSON.stringify("chmod")}), \`#!/usr/bin/env bash`, OWN_CHMOD_STUB);
-  assert.doesNotMatch('fs.writeFileSync(join(dir, "gh"), stub)', OWN_CHMOD_STUB);
+  assert.doesNotMatch('fs.writeFileSync(join(dir, "docker"), stub)', OWN_CHMOD_STUB);
   const files = testSources(join(REPO_ROOT, "test"));
   // CONTROL: the walk really read the tree, and saw the one file allowed to write the shim.
   assert.ok(files.length > 1000, `only ${files.length} test sources were walked`);
