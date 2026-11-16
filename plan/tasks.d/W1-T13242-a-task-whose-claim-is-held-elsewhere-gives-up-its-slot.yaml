@@ -1,0 +1,45 @@
+- id: W1-T13242
+  title: "A task whose dispatch claim another holder has gives up its slot, so one held task cannot take the fleet's only free slot on every tick"
+  repo: remudero
+  priority: 0.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # it changes which tasks the daemon offers a free lane
+  band_meaning: span
+  origin: "operator-session#fleet-dispatch-stall-2026-11-16"
+  plan_refs:
+    - W1-T3979
+    - W1-T13241
+    - W1-T12114
+  files:
+    - src/lib/daemon.ts
+    - test/dispatch/a-task-whose-claim-is-held-elsewhere-gives-up-its-slot.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "When a dispatched task is refused because another holder has its claim, the daemon leaves it out of selection for a bounded time and the free slot goes to the next candidate, on the same tick and the next"
+      proof: "grep: W1-T13242 criterion 1 in test/dispatch/a-task-whose-claim-is-held-elsewhere-gives-up-its-slot.test.ts"
+    - claim: "Each such deferral writes one row naming the task, the holder and when the task is offered again"
+      proof: "grep: W1-T13242 criterion 2 in test/dispatch/a-task-whose-claim-is-held-elsewhere-gives-up-its-slot.test.ts"
+    - claim: "invariant:contention-is-still-a-deferral — a claim-refused task gets no strike, no breaker count and no escalation, and is offered again once the deferral passes or its claim is gone"
+      proof: "grep: W1-T13242 criterion 3 in test/dispatch/a-task-whose-claim-is-held-elsewhere-gives-up-its-slot.test.ts"
+  rationale: |
+    OBSERVED 2026-11-16 by the operator session on the fleet host (core ledger, read-only), with the code traced on origin/main by a read-only investigation.
+
+    - From 15:23Z to at least 20:00Z every `dispatch.claim` row was W1-T12114, refused because a dead hand session held its claim (W1-T13241 is the release). In the same window no new task was claimed, `lane.idle_summary` reported 54 to 135 idle minutes per window with capacity 3, and the lane target was 2 with 1 in flight.
+    - READ src/lib/daemon.ts: a `blocked_inflight` result (the claim refusal) is settled as `report("daemon.block.inflight_contention", …); return { kind: "continue" };` with no cooldown and no exclusion (W1-T3979 made it a deferral). The tick's `excludeIds` holds only parked blockers, pending merged credit and invalidated or ill-formed admissions, so the next tick's selection offers the same task first again. With one free slot per tick (`budget = min(wipBudget, laneTarget) - occupied`), that slot went to W1-T12114 on every tick.
+    - The daemon already has a bounded deferral for environmental blocks: `environmentalBlocksThisRun` with `ENVIRONMENTAL_BLOCK_COOLDOWN_MS`, which `isIndependentFailureBlocked` honours.
+    - Selection never reads `refs/rmd-dispatch/*` by design (the claim is a spend-time guard), so the deferral has to come from the refusal.
+  design: |
+    1. In the `blocked_inflight` branch, record the task in a deferral map the selector honours, the way an environmental block is recorded. The bound is derived, not fixed: the claim's own renewal cadence if the anchor carries one, else the existing environmental cooldown; say which in the row.
+    2. One row per deferral (`dispatch.claim_held_deferred`, or the existing step if one fits): task, holder from the anchor, deferred until.
+    3. Within the same tick the refill already excludes this phase's ids; prove it still takes the next candidate.
+    INVARIANT contention-is-still-a-deferral: no strike, breaker or escalation; the task returns when the deferral passes or its claim is released.
+    NOT IN SCOPE: releasing the claim (W1-T13241); reading claims during selection; the lane target.
+  falsifier: |
+    Settle the refusal as a plain continue again and criterion 1 must fail. Write no row, or one per tick, and criterion 2 must fail. Count a strike, or keep the task out after its claim is gone, and criterion 3 must fail. Restore and all pass.
+  note: |
+    reservation hand-off: run-unfiled-1794859278751 -> run-unfiled-1794859278751
+    Reserved with rmd next-task-id from a worktree at origin/main. The test folder is the one rmd test-place computed for a stub importing daemon.ts and drain.ts. Drive the daemon through its existing injected seams; do not add a test importer of src/run-task.ts.
