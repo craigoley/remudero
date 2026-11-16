@@ -1,0 +1,92 @@
+- id: W1-T13130
+  title: "Main health does not read main green while a required check has not registered and a check on the head is still running, so the red-main repair lane does not close a located repair on a false green"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # main health decides every red-main repair and every base-red guard; a reading that stays undetermined too long delays a true green
+  origin: "operator-session#main-red-13h-2026-11-15"
+  plan_refs:
+    - W1-T11606
+    - W1-T7757
+    - W1-T6403
+    - W1-T4056
+    - W1-T11314
+  files:
+    - src/lib/sweep.ts
+    - test/a-main-head-whose-required-check-has-not-registered-is-not-green.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "mainHealthFromRollup reads undetermined, not green, when a required check has no entry on the head and any other check on the head is still queued or in progress: the 2026-11-15 18:06Z shape (ci success, test-slow absent, test-slow-shard (2/4) in progress, required set from ci-gate.yml) reads undetermined, names test-slow in pendingChecks, and its reason says the required check has not registered yet"
+      proof: "grep: W1-T13130 criterion 1 in test/a-main-head-whose-required-check-has-not-registered-is-not-green.test.ts"
+    - claim: "Through buildMainHealthRung with a ledger that holds an unresolved main.repair.located record, a pass that observes that head writes no main.repair.resolved row and keeps the record open; the same pass after test-slow concludes failure writes a red main.health.observed row"
+      proof: "grep: W1-T13130 criterion 2 in test/a-main-head-whose-required-check-has-not-registered-is-not-green.test.ts"
+    - claim: "invariant:settled-absence-is-not-pending — when every check on the head has concluded, a required name with no entry does not hold the head: the seven pull_request-only names of ci-gate.yml REQUIRED never register on a push, and a head whose registered required checks all passed still reads green"
+      kind: guard
+      proof: "grep: W1-T13130 criterion 3 in test/a-main-head-whose-required-check-has-not-registered-is-not-green.test.ts"
+    - claim: "invariant:registered-red-first — a registered required check that concluded failing still reads red while another required check has not registered"
+      kind: guard
+      proof: "grep: W1-T13130 criterion 4 in test/a-main-head-whose-required-check-has-not-registered-is-not-green.test.ts"
+  rationale: |
+    WHY: main stayed red for 13 hours on 2026-11-15/16 (d5722e1fe at 13:45Z to 9bb791b1b at 02:19Z, test-slow-shard
+    (2/4), "the persistent tick reader rotates bounded probes across stable open PRs"). The repair lane located the
+    culprit at 15:54Z and then closed that repair at 18:06Z on a false green. It never located the culprit again.
+    MEASURED, core ledger (~/rmd-state2/state, archives 2026-11-15T14 to 2026-11-16T03):
+    - 15:54:27Z main.repair.located: offending 580877d7c (W1-T12530), test-slow, bisected-first-red.
+    - 15:54:32Z main-repair.dispatching, branch run-main-repair-580877d7c6f2-1794758068045. No dispatched_worker,
+      pushed or pr_opened row follows: the daemon restarted at about 16:08Z (run DAEMON-1794758926941-7).
+    - 16:54Z and 16:58Z main.repair.revert_withheld: "local culprit proof needs a failing culprit and a passing first
+      parent on the same failing test files" (the local probe at 580877d7c had read inconclusive at 15:04Z).
+    - 18:06:06Z main.health.observed state green on 99a71759f, evidence_freshness head, pending_checks [].
+      Then main.repair.resolved by "other", closed_prs [], at the same second.
+    - 18:25:34Z the same commit 99a71759f reads red on test-slow. From 18:25Z to 03:20Z the lane wrote 40
+      main.repair.unlocated rows, all "main's push run history window holds no green run to bound the red streak".
+      No repair ran. The red ended with #18712 (W1-T12269, 03:09Z), an unrelated task.
+    READ from GitHub, check runs of 99a71759f: ci success at 18:02:56Z; test-slow-shard (2/4) in progress until
+    18:18:07Z; test-slow (the aggregate, a required name) did not exist until 18:18:10Z and concluded failure at
+    18:18:14Z. So at 18:06Z a required check had not registered while a check it waits for was still running.
+    READ at origin/main 7c3d8bb79:
+    - src/lib/sweep.ts:9017 mainHealthFromRollup judges only the required names that have an entry on the head. It
+      reads undetermined only when none has one (:9031). One passed required check (ci) is enough for green.
+    - W1-T11606 (#17434) closed the same gap for pull requests in checksStateFromRollup, but main health has its
+      own function and kept the present-only reading.
+    - ci-gate.yml REQUIRED holds seven names from pull_request-only workflows that never register on a push
+      (.github/workflows/ci.yml:2689). So "every absent required name is pending" would hold main undetermined
+      for good. An absent required name may hold the head only while some check on the head is still running.
+    - src/lib/main-health-rung.ts:2381 judges the head rollup with it; :1735 and :2030 judge a run's jobs with it.
+      resolveRepairs (main-health-rung.ts:2337) resolves every open record on a green reading.
+    NOT THIS TASK: the lost repair worker at the 16:08Z restart, and the revert withheld on an inconclusive local
+    probe. Both delayed the repair by about 2 hours; the false green ended it.
+  design: |
+    INVARIANT settled-absence-is-not-pending: an absent required name holds the head only while a check on it runs.
+    INVARIANT registered-red-first: a registered failing required check reads red before any pending reading.
+    1. src/lib/sweep.ts mainHealthFromRollup: when the required set is known and at least one required name has
+       no entry in the deduped gate, look at every entry of the rollup (review context excluded, after
+       dedupeRollupByLatestAttempt). If any is queued, in progress, waiting or pending, add each absent required
+       name to pendingChecks. The existing order stays: failing first (red), then pending (undetermined), then no
+       evidence. Add a reason for this case: "required check(s) not registered yet on main while other checks
+       still run: <names> — undetermined, not green".
+    2. No change in main-health-rung.ts: its three callers read the same function. An undetermined head already
+       walks back to the newest commit with concluded evidence (W1-T7757).
+    3. New test file. Criterion 1 calls mainHealthFromRollup with the 18:06Z rollup. Criterion 2 drives
+       buildMainHealthRung (fetch fake as in test/main-health-judges-a-newer-commit-by-its-concluded-required-checks.test.ts,
+       built with test/helpers/) with a ledger fixture that holds one main.repair.located row, first with
+       test-slow absent and its shard running, then with test-slow concluded failure. Criterion 3 uses a settled
+       rollup with the pull_request-only names absent. Criterion 4 adds a failing required check.
+    Before building, grep test/ for tests that expect green with an absent required name and a running check;
+    W1-T7757's GREEN_RUN_STILL_GOING has every required name present, so it stays green.
+  falsifier: |
+    Remove the new absent-name branch: criteria 1 and 2 must fail (green, then main.repair.resolved). Treat every
+    absent required name as pending whatever runs: criterion 3 must fail. Put the pending branch before the
+    failing branch: criterion 4 must fail. Restore and require all four to pass.
+  note: |
+    Id reserved for run-unfiled-1794801295000 with ~/rmd-work/bin/reserve-id.sh.
+    Proof that counts in production: no main.repair.resolved row whose main.health.observed row has a required
+    name missing while a check on that head was still running, and no "by other" resolve followed within 30
+    minutes by a red reading of the same sha.
+    Related, not duplicates: W1-T11314 (queued) keeps a fix PR open after a lucky green when no commit touched the
+    failing tests; here no fix PR existed and the green was not a real pass.

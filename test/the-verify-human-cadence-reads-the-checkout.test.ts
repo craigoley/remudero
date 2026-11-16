@@ -66,10 +66,10 @@ function fleetShape(): { stateRoot: string; checkout: string } {
   return { stateRoot, checkout };
 }
 
-test("the shard reader finds parked work when handed the CHECKOUT", () => {
+test("the shard reader finds parked work when handed the CHECKOUT", async () => {
   const { checkout } = fleetShape();
   const plan = loadPlan(join(checkout, "plan", "tasks.yaml"));
-  const shards = parkedVerifyHumanShards(plan, checkout, clock);
+  const shards = await parkedVerifyHumanShards(plan, checkout, clock);
   assert.ok(shards.length >= 1, "a verify:human shard in the checkout must be visible to the judge");
   assert.ok(shards.some((s) => s.id === "W1-T9001"));
 });

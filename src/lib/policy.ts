@@ -265,6 +265,12 @@ export interface FreshnessRestartValues {
   stalenessHorizonMs: number;
   quietWindowMs: number;
   minLifetimeMs: number;
+  /** W1-T12231: the share of `scoreLimit` at which the daemon treats the restart as likely and holds long work.
+   *  Present only when its row is; absent, the daemon uses deploy-judge.ts `FRESHNESS_LIKELY_FRACTION`. */
+  likelyFraction?: number;
+  /** W1-T12231: the latest a freshness drain's time limit may be after the restart decision. Present only when its
+   *  row is; absent, the daemon uses deploy-judge.ts `FRESHNESS_MAX_DRAIN_WAIT_MS`. */
+  maxDrainWaitMs?: number;
 }
 
 /** One field's provenance, as recorded on load — see this module's header. */
@@ -396,6 +402,8 @@ const EXPECTED_ORIGIN_KIND: Record<string, PolicyOriginKind> = {
   "freshnessRestart.stalenessHorizonMs": "lifted",
   "freshnessRestart.quietWindowMs": "lifted",
   "freshnessRestart.minLifetimeMs": "lifted",
+  "freshnessRestart.likelyFraction": "lifted",
+  "freshnessRestart.maxDrainWaitMs": "lifted",
 };
 
 /**
@@ -733,7 +741,7 @@ const DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS = 559_000;
 /** W1-T12228: the freshness restart's four values when `plan/policy.yaml` has no `freshnessRestart` block — today's
  *  constants in src/lib/deploy-judge.ts (`DEPLOY_RESTART_SCORE_THRESHOLD`, `DEPLOY_RESTART_RATE_CEILING_MS`,
  *  `FRESHNESS_COALESCE_WINDOW_MS`, `FRESHNESS_MIN_LIFETIME_MS`). Mirrored here, not imported, so this loader stays leaf. */
-export const DEFAULT_FRESHNESS_RESTART: FreshnessRestartValues = {
+export const DEFAULT_FRESHNESS_RESTART: Omit<FreshnessRestartValues, "likelyFraction" | "maxDrainWaitMs"> = {
   scoreLimit: 18,
   stalenessHorizonMs: 3_600_000,
   quietWindowMs: 600_000,
@@ -1014,14 +1022,19 @@ export function validatePolicy(raw: unknown): Policy {
 
   // W1-T12228: optional block, absent means today's four constants; a present row is bounds-checked like any other.
   const freshnessRestartRaw = raw.freshnessRestart as Record<string, unknown> | undefined;
-  const freshnessRow = (key: keyof FreshnessRestartValues): number => freshnessRestartRaw?.[key] !== undefined
+  const freshnessRow = (key: keyof typeof DEFAULT_FRESHNESS_RESTART): number => freshnessRestartRaw?.[key] !== undefined
     ? numberField(`freshnessRestart.${key}`, freshnessRestartRaw[key], origin, bounds)
     : DEFAULT_FRESHNESS_RESTART[key];
+  // W1-T12231: the two rows the daemon defaults itself; a present one is bounds-checked like the four above.
+  const freshnessOptionalRow = (key: "likelyFraction" | "maxDrainWaitMs"): Partial<FreshnessRestartValues> =>
+    freshnessRestartRaw?.[key] === undefined ? {} : { [key]: numberField(`freshnessRestart.${key}`, freshnessRestartRaw[key], origin, bounds) };
   const freshnessRestart: FreshnessRestartValues = {
     scoreLimit: freshnessRow("scoreLimit"),
     stalenessHorizonMs: freshnessRow("stalenessHorizonMs"),
     quietWindowMs: freshnessRow("quietWindowMs"),
     minLifetimeMs: freshnessRow("minLifetimeMs"),
+    ...freshnessOptionalRow("likelyFraction"),
+    ...freshnessOptionalRow("maxDrainWaitMs"),
   };
 
   return {

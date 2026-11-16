@@ -115,7 +115,9 @@ test("W1-T12551 criterion 2: a stale judge and machine starts below the share pu
   assert.equal(nextRunnable(plan, notMerged)?.id, "W1-T1", "without the share an operator task leads");
   assert.equal(nextRunnable(plan, notMerged, { machineShare })?.id, "W1-T40", "with no ages, the oldest id has waited longest");
   assert.equal(moved[0]?.[0], "W1-T40");
-  assert.deepEqual(moved[0]?.[1], { share: MACHINE_DISPATCH_SHARE, machine_starts: 0, starts: 4, queue_judge_stale_ms: QUEUE_JUDGE_STALE_MS + HOUR });
+  assert.deepEqual(moved[0]?.[1], {
+    share: MACHINE_DISPATCH_SHARE, machine_starts: 0, starts: 4, queue_judge_fresh: false, queue_judge_stale_ms: QUEUE_JUDGE_STALE_MS + HOUR,
+  });
 
   const context = ages([["W1-T1", HOUR], ["W1-T2", HOUR], ["W1-T40", 2 * HOUR], ["W1-T50", 30 * HOUR]]);
   assert.deepEqual(ids(runnableCandidates(plan, notMerged, 4, { machineShare, dispatchValueContext: context })).slice(0, 1), ["W1-T50"],
@@ -145,15 +147,16 @@ for (const count of [199, 200]) {
 
 // ── 3. otherwise the order is unchanged ─────────────────────────────────────────────────────────────────────────
 
-test("W1-T12551 criterion 3: with the judge available, or machine starts at the share, the order is today's", () => {
+// W1-T12835: the share no longer waits for a stale judge, so a fresh judge alone leaves nothing as it was.
+test("W1-T12551 criterion 3: with machine starts at the share, under any judge staleness, the order is today's", () => {
   const plan = planOf(shard("W1-T1"), shard("W1-T2", { priority: 2 }), shard("W1-T40", { machine: true, priority: 3 }));
   const today = ids(runnableCandidates(plan, notMerged, 3));
   assert.deepEqual(today, ["W1-T1", "W1-T2", "W1-T40"]);
   const machineAtShare = [...operatorStarts(3), { taskId: "W1-T40", authorClass: "machine" }];
   for (const machineShare of [
-    stale({ queueJudgeStaleMs: undefined }),
-    stale({ queueJudgeStaleMs: HOUR }),
-    stale({ queueJudgeStaleMs: QUEUE_JUDGE_STALE_MS }),
+    stale({ queueJudgeStaleMs: undefined, starts: machineAtShare }),
+    stale({ queueJudgeStaleMs: HOUR, starts: machineAtShare }),
+    stale({ queueJudgeStaleMs: QUEUE_JUDGE_STALE_MS, starts: machineAtShare }),
     stale({ starts: machineAtShare }),
   ]) {
     let moves = 0;
@@ -228,12 +231,14 @@ test("W1-T12551 criterion 5: the daemon gives the selector the judge's staleness
   assert.deepEqual(unavailable.spawned, ["W1-T40"], "the daemon dispatches the released machine task first");
   assert.equal(unavailable.moves.length, 1);
   assert.deepEqual(unavailable.moves[0], {
-    task_id: "W1-T40", share: MACHINE_DISPATCH_SHARE, machine_starts: 0, starts: 2, queue_judge_stale_ms: 30 * HOUR,
+    task_id: "W1-T40", share: MACHINE_DISPATCH_SHARE, machine_starts: 0, starts: 2, queue_judge_fresh: false, queue_judge_stale_ms: 30 * HOUR,
   }, "the 48-hour-old start is outside the trailing 24 hours");
 
   const available = await drive([...ledger, JSON.stringify({ ts: iso(NOW - HOUR), step: QUEUE_JUDGE_SCORECARD_STEP })]);
-  assert.deepEqual(available.spawned, ["W1-T1"], "a working judge leaves today's order");
-  assert.equal(available.moves.length, 0);
+  assert.deepEqual(available.spawned, ["W1-T40"], "W1-T12835: a working judge still gives the share");
+  assert.deepEqual(available.moves, [{
+    task_id: "W1-T40", share: MACHINE_DISPATCH_SHARE, machine_starts: 0, starts: 2, queue_judge_fresh: true, queue_judge_stale_ms: HOUR,
+  }]);
 
   for (const count of [199, 200]) {
     const complete = Array.from({ length: count }, (_, i) =>
@@ -398,7 +403,7 @@ test("W1-T12551 criterion 5, with W1-T12551 criterion 3 on refill: a lane refill
     assert.deepEqual(spawned, ["W1-T40", "W1-T1", "W1-T2"], "at the share, the refill starts today's next task, not W1-T50");
     const moves = rows.filter((r) => r.step === MACHINE_SHARE_STEP).map((r) => r.extra);
     assert.deepEqual(moves, [{
-      task_id: "W1-T40", share: MACHINE_DISPATCH_SHARE, machine_starts: 0, starts: 2, queue_judge_stale_ms: 30 * HOUR,
+      task_id: "W1-T40", share: MACHINE_DISPATCH_SHARE, machine_starts: 0, starts: 2, queue_judge_fresh: false, queue_judge_stale_ms: 30 * HOUR,
     }], "only the tick's move is logged, with the counts it was decided on");
   } finally {
     stopping = true;
@@ -477,9 +482,9 @@ for (const elapsed of [24 * HOUR, 24 * HOUR + 1, 25 * HOUR]) {
       { atMs: NOW + elapsed, finished: "W1-T2", next: expired ? "W1-T50" : "W1-T3" },
     ]);
     assert.deepEqual(rows.filter((r) => r.step === MACHINE_SHARE_STEP).map((r) => r.extra), [
-      { task_id: "W1-T40", share: MACHINE_DISPATCH_SHARE, machine_starts: 0, starts: 2, queue_judge_stale_ms: 30 * HOUR },
+      { task_id: "W1-T40", share: MACHINE_DISPATCH_SHARE, machine_starts: 0, starts: 2, queue_judge_fresh: false, queue_judge_stale_ms: 30 * HOUR },
       ...(expired ? [{ task_id: "W1-T50", share: MACHINE_DISPATCH_SHARE, machine_starts: 0, starts: 0,
-        queue_judge_stale_ms: 30 * HOUR + elapsed }] : []),
+        queue_judge_fresh: false, queue_judge_stale_ms: 30 * HOUR + elapsed }] : []),
     ], "the move log excludes expired machine starts; starts exactly 24 hours old still count");
   });
 }
@@ -487,8 +492,10 @@ for (const elapsed of [24 * HOUR, 24 * HOUR + 1, 25 * HOUR]) {
 test("W1-T12551 criterion 3 and W1-T12551 criterion 5: expired operator phase starts cannot dilute the trailing share", async () => {
   const plan = planOf(...[1, 2, 3, 4, 5].map((n) => shard(`W1-T${n}`)),
     shard("W1-T40", { machine: true, priority: 3 }), shard("W1-T50", { machine: true, priority: 3 }));
+  // A machine start 20 hours ago holds the share at NOW, so the initial wave keeps today's order; it expires by +7h.
   const rows = await clockedRefills(plan, [
     { ts: iso(NOW - HOUR), step: QUEUE_JUDGE_SCORECARD_STEP },
+    { ts: iso(NOW - 20 * HOUR), step: "run.start", run_id: "machine-earlier", task_id: "W1-T40" },
   ], ["W1-T1", "W1-T2"], [
     { atMs: NOW + 7 * HOUR, finished: "W1-T2", next: "W1-T40" },
     { atMs: NOW + 8 * HOUR, finished: "W1-T40", next: "W1-T3" },
@@ -496,6 +503,6 @@ test("W1-T12551 criterion 3 and W1-T12551 criterion 5: expired operator phase st
     { atMs: NOW + 25 * HOUR, finished: "W1-T4", next: "W1-T5" },
   ]);
   assert.deepEqual(rows.filter((r) => r.step === MACHINE_SHARE_STEP).map((r) => r.extra), [
-    { task_id: "W1-T40", share: MACHINE_DISPATCH_SHARE, machine_starts: 0, starts: 2, queue_judge_stale_ms: 8 * HOUR },
-  ], "a fresh judge preserves the initial order; later, the true 1/3 share prevents a second promotion and move log");
+    { task_id: "W1-T40", share: MACHINE_DISPATCH_SHARE, machine_starts: 0, starts: 2, queue_judge_fresh: false, queue_judge_stale_ms: 8 * HOUR },
+  ], "a start at the share preserves the initial order; later, the true 1/3 share prevents a second promotion and move log");
 });

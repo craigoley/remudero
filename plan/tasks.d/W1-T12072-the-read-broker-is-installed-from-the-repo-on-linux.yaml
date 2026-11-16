@@ -15,7 +15,7 @@
   files:
     - deploy/install-gh-read-broker.sh
     - test/deploy/the-read-broker-is-installed-from-the-repo-on-linux.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With --install the script writes the systemd user unit and its launcher under the account's config directory, from a checkout path given as an absolute path, and a second run changes nothing"

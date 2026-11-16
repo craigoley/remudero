@@ -18,7 +18,7 @@
     - src/lib/selector-shadow-gardener.ts
     - src/lib/measurement-cadence.ts
     - test/gardeners/a-machine-shard-the-plan-only-promotion-would-refuse-is-caught-where-it-is-rendered.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The shared machine-shard lint applies the plan-only promotion a new shard meets at the plan preflight, so a rendered record carrying shared-proof, proof-scope or shard-shape is refused where it is rendered, with the promoted check named"

@@ -27,7 +27,7 @@
     - src/lib/deploy-judge.ts
     - src/lib/daemon.ts
     - test/daemon/a-freshness-restart-picks-its-moment-from-the-work-in-flight.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "At the restart decision, the time limit of the drain is the predicted end of the reviews and the fix rounds in flight. `deriveDrainWait` computes it from the age of each and from the measured lengths of its kind. The row `daemon.freshness_drain.started` has the prediction for each"

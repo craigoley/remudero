@@ -202,15 +202,24 @@ test("W1-T8533: refresh history is read once per PR per pass and reused by the c
   const archive = h.rotate([h.prior, h.health]);
   writeFileSync(h.ledgerPath, JSON.stringify(h.health) + "\n");
   const read = fs.readFileSync;
+  const stream = fs.createReadStream;
   let reads = 0;
+  let streams = 0;
   t.mock.method(fs, "readFileSync", (...args: Parameters<typeof read>) => {
     if (args[0] === archive) reads++;
     return read(...args);
   });
+  t.mock.method(fs, "createReadStream", (...args: Parameters<typeof stream>) => {
+    if (args[0] === archive) streams++;
+    return stream(...args);
+  });
   syncBuiltinESMExports();
   t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
   await h.pass();
-  assert.equal(reads, 1, "the refresh candidate and its clearance share one union read");
+  // W1-T12954: the repair history loads the archive off the loop, once, for the candidate and its clearance.
+  // The other stream is the cost-anomaly scan's own read.
+  assert.equal(reads, 0, "no synchronous read of the archive");
+  assert.equal(streams, 2, "the refresh candidate and its clearance share one union read");
   assert.equal(h.clearance()?.history, "union");
   assert.deepEqual(h.refreshed, []);
 });

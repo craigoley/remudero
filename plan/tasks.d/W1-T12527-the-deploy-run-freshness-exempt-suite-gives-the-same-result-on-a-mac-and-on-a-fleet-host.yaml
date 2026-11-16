@@ -16,7 +16,7 @@
     - W1-T1134
   files:
     - test/deploy-run-freshness-exempt.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The deploy-run case reads no host config, install root, service manager or ledger: it runs `main()` with a state root, HOME and config under a temp dir, and still proves the entry gate did not refuse deploy-run"

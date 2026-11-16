@@ -17,7 +17,9 @@
     - scripts/lib/mac-author-admission.mjs
     - scripts/preflight-author.mjs
     - test/infra/a-full-fallback-author-run-on-the-mac-is-priced-by-what-it-runs.test.ts
-  status: queued
+    - test/infra/the-author-disk-reserve-is-sized-to-its-workload.test.ts
+    - test/ci/author-preflight-capacity-refusal.test.ts
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The static stage of an author run is priced by the static stage's own measured peak for every selection, full-fallback included, once a full-fallback static stage has been measured and its row recorded beside the others"
@@ -42,6 +44,9 @@
     1. `macAuthorReserveBytes` prices `static-preflight` from the static row for every selection that has a recorded static measurement.
     2. The test stage of an over-capacity subset is priced per worker from the workers the subset runs.
     3. The refusal report names the reserve basis, the row and the admitting free-byte figure.
+    MEASURED 2026-11-15 on the operator Mac, with the operator session's sampler (tree outside node_modules every 5 s, TMPDIR every 30 s): the CLI bump's full-fallback static stage grew 193.9 MiB; a second full-fallback run (hand PR 18405) grew 215.0 MiB in its static stage and 138.6 MiB in the test stage of its 295-suite over-capacity subset on one worker. Both are below the 256 MiB rows, so two rows are recorded beside the others at 256 MiB: `full-fallback-static-preflight` and `over-capacity-subset-tests-per-worker`.
+    4. `scripts/preflight-author.mjs` tells the test-stage admission that a full fallback is a cut subset (`overCapacitySubset: true`) only when the subset runs fewer suites than the selection named. A full fallback that runs whole keeps the 20 GiB reserve.
+    EXISTING TESTS: `test/infra/the-author-disk-reserve-is-sized-to-its-workload.test.ts` asserts that a full-fallback static stage keeps 20 GiB, and `test/ci/author-preflight-capacity-refusal.test.ts` forces the selection `full-fallback` to get a 20 GiB refusal before the static stage. Both change to a selection with no recorded measurement; the behavior they guard is unchanged.
     INVARIANT unmeasured-keeps-the-full-reserve: no stage or selection without a recorded measurement is priced below the 20 GiB reserve, and every priced reserve is at least the operating-system floor plus the safety factor over the measured peak.
     NOT IN SCOPE: the 10 GiB operating-system floor; the coverage gate's own 20 GiB scratch reserve in src/lib/ci-parity.ts; which changes the selector can model (W1-T12505).
   falsifier: |

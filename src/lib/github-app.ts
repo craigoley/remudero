@@ -109,8 +109,8 @@ export interface RefreshResult {
  * `recordable` is false only for `"app not configured"`, which returns before any `log` call —
  * its zero is unrecordable by construction, never a measurement. `form` is `"literal"` for an
  * exact match or `"prefix"` for a template whose real row appends a variable suffix (matching a
- * prefix reason as a literal reads a false zero). `writer` names which function's own `log` call
- * produces it — `"refresh threw: "` is {@link startInstallationTokenRefresh}'s, not
+ * prefix reason as a literal reads a false zero). `writer` names the refresh entrypoint forwarding
+ * the reason to its logger — `"refresh threw: "` is {@link startInstallationTokenRefresh}'s, not
  * {@link refreshInstallationToken}'s, so a sweep scoped to only one silently misses the other.
  */
 // Why: docs/forensics/github-app.md#tokenrefreshreasonform-and-tokenrefreshreasondeclaration
@@ -214,14 +214,42 @@ function exchangeDeadline(controller: AbortController, clock: Clock, reason: str
  */
 export async function refreshInstallationToken(opts: RefreshOptions = {}): Promise<RefreshResult> {
   const env = opts.env ?? process.env;
+  let refreshed: Record<string, unknown> | undefined;
+  const result = await mintInstallationToken({
+    appId: opts.appId ?? env[GH_APP_ID_ENV] ?? "",
+    installationId: opts.installationId ?? env[GH_APP_INSTALLATION_ID_ENV] ?? "",
+    privateKeyPath: opts.privateKeyPath ?? env[GH_APP_PRIVATE_KEY_PATH_ENV] ?? "",
+  }, { ...opts, log: (step, extra) => {
+    if (step === TOKEN_REFRESHED_STEP) refreshed = extra;
+    else opts.log?.(step, extra);
+  } });
+  if (result.ok) env.GH_TOKEN = result.token!;
+  if (refreshed !== undefined) opts.log?.(TOKEN_REFRESHED_STEP, refreshed);
+  return { ok: result.ok, ...(result.reason === undefined ? {} : { reason: result.reason }),
+    ...(result.expiresAtMs === undefined ? {} : { expiresAtMs: result.expiresAtMs }) };
+}
+
+export interface InstallationTokenConfig {
+  appId: string;
+  installationId: string;
+  privateKeyPath: string;
+}
+
+export interface InstallationTokenResult extends RefreshResult {
+  token?: string;
+}
+
+/** Mint for an explicit installation without reading or writing the process's token environment. */
+export async function mintInstallationToken(
+  config: InstallationTokenConfig,
+  opts: Pick<RefreshOptions, "now" | "fetchImpl" | "readKey" | "retainedKey" | "log"> = {},
+): Promise<InstallationTokenResult> {
   const now = opts.now ?? Date.now;
   const log = opts.log ?? (() => {});
   const fetchFn = opts.fetchImpl ?? fetch;
   const readKey = opts.readKey ?? ((p: string) => readFileSync(p, "utf8"));
 
-  const appId = opts.appId ?? env[GH_APP_ID_ENV];
-  const installationId = opts.installationId ?? env[GH_APP_INSTALLATION_ID_ENV];
-  const keyPath = opts.privateKeyPath ?? env[GH_APP_PRIVATE_KEY_PATH_ENV];
+  const { appId, installationId, privateKeyPath: keyPath } = config;
 
   if (!appId || !installationId || !keyPath) {
     // Not installed on this host (yet) — not an attempt, so no ledger noise. See file header.
@@ -304,14 +332,11 @@ export async function refreshInstallationToken(opts: RefreshOptions = {}): Promi
   const parsedExpiry = Date.parse(body.expires_at);
   const expiresAtMs = Number.isFinite(parsedExpiry) ? parsedExpiry : now() + INSTALLATION_TOKEN_LIFETIME_MS;
 
-  // The one seam from the file header: every consumer reads process.env at call/spawn time, so
-  // this line reaches all three with no call-site change.
-  env.GH_TOKEN = body.token;
   log(TOKEN_REFRESHED_STEP, {
     installation_id: installationId, expires_at: body.expires_at,
     ...(keyReadError === undefined ? {} : { private_key: "retained", key_read_error: keyReadError }),
   });
-  return { ok: true, expiresAtMs };
+  return { ok: true, token: body.token, expiresAtMs };
 }
 
 function keyReadErrorCode(err: unknown): string {

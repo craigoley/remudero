@@ -35,6 +35,8 @@ export interface Beat {
   /** With `recordGzip`: the file each `gzip` invocation was handed, in order — which rotations the
    *  beat actually OPENED, since every gzipped read goes through `gzip` on PATH. */
   gzipCalls: string[];
+  /** Runtime arguments, including the Mounts-only reads. */
+  dockerCalls: string[][];
 }
 
 /**
@@ -95,6 +97,8 @@ export interface BeatOpts {
    * the script is pointed at a path that does not exist, which is the no-runtime case.
    */
   dockerStub?: string;
+  /** Real mounted checkouts under the fixture, keyed by instance. */
+  mountedTrees?: Record<string, { tsx?: boolean; entries?: string[] }>;
   /** A `hostname` to put on PATH, so `beat_host` can be asserted against a known answer. */
   hostnameStub?: string;
   /**
@@ -145,6 +149,15 @@ export function runBeat(opts: BeatOpts = {}): Beat {
     mkdirSync(join(dir, "node_modules", ".bin"), { recursive: true });
     writeFileSync(join(dir, "node_modules", ".bin", "tsx"), "#!/bin/sh\n", { mode: 0o755 });
     chmodSync(join(dir, "node_modules", ".bin", "tsx"), 0o755);
+  }
+  for (const [name, tree] of Object.entries(opts.mountedTrees ?? {})) {
+    const modules = join(dir, "mounted trees", name, "node_modules");
+    mkdirSync(modules, { recursive: true });
+    for (const entry of tree.entries ?? []) mkdirSync(join(modules, entry), { recursive: true });
+    if (tree.tsx) {
+      mkdirSync(join(modules, ".bin"), { recursive: true });
+      writeFileSync(join(modules, ".bin", "tsx"), "#!/bin/sh\n", { mode: 0o755 });
+    }
   }
   if (opts.ledger) writeFileSync(join(root, "state", "ledger.ndjson"), opts.ledger.join("\n") + "\n");
   if (opts.rotatedLedger) {
@@ -205,7 +218,8 @@ export function runBeat(opts: BeatOpts = {}): Beat {
   // answer, so no existing expectation depends on the host.
   const dockerPath = join(binDir, "rt-stub");
   if (opts.dockerStub) {
-    writeFileSync(dockerPath, opts.dockerStub, { mode: 0o755 });
+    const record = 'printf "%s\\t" "$@" >> "$STUB_REC/docker-calls"; printf "\\n" >> "$STUB_REC/docker-calls"';
+    writeFileSync(dockerPath, `#!/usr/bin/env bash\n${record}\n${opts.dockerStub}`, { mode: 0o755 });
     chmodSync(dockerPath, 0o755);
   }
 
@@ -217,6 +231,7 @@ export function runBeat(opts: BeatOpts = {}): Beat {
       HOME: join(dir, "home"),
       RMD_ROOT: root,
       STUB_REC: rec,
+      STUB_INSTALL: dir,
       RMD_HEARTBEAT_DOCKER: opts.dockerStub ? dockerPath : join(binDir, "no-such-runtime"),
       ...(opts.env ?? {}),
     },
@@ -245,6 +260,7 @@ export function runBeat(opts: BeatOpts = {}): Beat {
     published: read("payload"),
     treeInput: read("treeinput"),
     gzipCalls: read("gzip-calls").split("\n").filter(Boolean),
+    dockerCalls: read("docker-calls").split("\n").filter(Boolean).map((line) => line.replace(/\t$/, "").split("\t")),
   };
   rmSync(dir, { recursive: true, force: true });
   rmSync(rec, { recursive: true, force: true });

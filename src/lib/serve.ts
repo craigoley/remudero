@@ -239,6 +239,7 @@ import {
 } from "./console-snapshot-cache.js";
 import { operatorIdentityFromFile, type OperatorIdentityFileIo } from "./operator-identity-file.js";
 import { DEFAULT_HOST_INSTANCE_REGISTRY_PATH, InstanceRegistryError, parseInstanceRegistry, requirePrimaryInstance } from "./instance-registry.js";
+import { daemonInstallationRegistry, startProcessInstallationBudget } from "./installation-budget-start.js";
 import { GoLiveError, readShadowEvidence, requestGoLive, type GoLiveWiring } from "./onboarding-golive.js";
 import {
   INSTANCES_VIEW_NAME,
@@ -2904,6 +2905,12 @@ function assembleServeRoutes(
     env: deps.githubAppRefresh?.env,
   });
   githubCredential.state.armed = githubAppRefresh.armed;
+  // W1-T12950: serve reads with the same token, so it reads within its share. A refused read stands down
+  // at once (no wait), so a console request never waits for the hourly reset.
+  startProcessInstallationBudget({
+    role: "serve", env: deps.githubAppRefresh?.env ?? process.env, maxWaitMs: 0,
+    readRegistry: () => daemonInstallationRegistry(deps.questionsRoot), log: deps.log ?? (() => {}),
+  });
   // W1-T4088: the thread store is wired in production at last — the SAME file the inbox thread
   // routes and the daemon's responder use — so an escalation reply is accepted, not refused.
   const readEscalationConversation = createEscalationConversationReader({ repository: deps.assistantRepository,

@@ -561,12 +561,12 @@ const PARKED_PLAN = `- id: W1-T9001
       proof: "unit test: test/x.test.ts"
 `;
 
-test("W1-T3188: parkedVerifyHumanShards selects the verify:human queued population and nothing else", () => {
+test("W1-T3188: parkedVerifyHumanShards selects the verify:human queued population and nothing else", async () => {
   const root = sweepRoot(PARKED_PLAN);
-  const shards = parkedVerifyHumanShards(loadPlan(join(root, "plan", "tasks.yaml")), root, {
+  const shards = (await parkedVerifyHumanShards(loadPlan(join(root, "plan", "tasks.yaml")), root, {
     now: () => 0,
     iso: () => "1970-01-01T00:00:00.000Z",
-  } as unknown as Parameters<typeof parkedVerifyHumanShards>[2]);
+  } as unknown as Parameters<typeof parkedVerifyHumanShards>[2]));
   assert.deepEqual(
     shards.map((s) => s.id),
     ["W1-T9001"],
@@ -684,19 +684,19 @@ test("W1-T3188: a real (non-dry-run) pass routes through the injected router, st
   );
 });
 
-test("W1-T3188: a shard whose age cannot be read is reported as an unknown age rather than throwing", () => {
+test("W1-T3188: a shard whose age cannot be read is reported as an unknown age rather than throwing", async () => {
   // `shardAgeDays` shells git for the shard file's add-date. The fixture root is not a git repo at
   // all: age is CONTEXT, so the shard still gets judged rather than the whole sweep dying on it —
   // and (#7911) its age is `null`, never a 0 that tells the operator it was filed today.
   const root = sweepRoot(PARKED_PLAN);
-  const shards = parkedVerifyHumanShards(loadPlan(join(root, "plan", "tasks.yaml")), root, {
+  const shards = (await parkedVerifyHumanShards(loadPlan(join(root, "plan", "tasks.yaml")), root, {
     now: () => 0,
     iso: () => "1970-01-01T00:00:00.000Z",
-  } as unknown as Parameters<typeof parkedVerifyHumanShards>[2]);
+  } as unknown as Parameters<typeof parkedVerifyHumanShards>[2]));
   assert.equal(shards[0].ageDays, null, "an unreadable age must not throw, and must not invent a number");
 });
 
-test("W1-T3188: a shard whose file IS in git reports a real age in days, not the unknown-age zero", () => {
+test("W1-T3188: a shard whose file IS in git reports a real age in days, not the unknown-age zero", async () => {
   // The other half of the age fallback above: with a real repo and a real add-date the number is
   // computed rather than defaulted. Both halves matter — a shard's age is what the judge reads to
   // tell "parked deliberately" from "parked and forgotten", and a silent 0 erases that distinction.
@@ -717,10 +717,10 @@ test("W1-T3188: a shard whose file IS in git reports a real age in days, not the
   repo.git("commit", "--quiet", "-m", "chore: seed");
   const addedAtMs = Number(repo.git("log", "-1", "--format=%ct")) * 1000;
 
-  const shards = parkedVerifyHumanShards(loadPlan(join(repo.dir, "plan", "tasks.yaml")), repo.dir, {
+  const shards = (await parkedVerifyHumanShards(loadPlan(join(repo.dir, "plan", "tasks.yaml")), repo.dir, {
     now: () => addedAtMs + 3 * 86_400_000,
     iso: () => "1970-01-01T00:00:00.000Z",
-  } as unknown as Parameters<typeof parkedVerifyHumanShards>[2]);
+  } as unknown as Parameters<typeof parkedVerifyHumanShards>[2]));
 
   assert.equal(shards[0].ageDays, 3, "three days after the shard was added, the age must read 3");
 });

@@ -34,7 +34,8 @@ import { loadPlanForLayout } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { fixTranscriptsFromLedger, reflectOnTranscripts, splitHeldOut } from "./prompt-evolution.js";
 import {
-  interventionFromLedgerRow, interventionKey, interventionLedgerFields, OPERATOR_INTERVENTION_STEP, prCauseClass, type OperatorInterventionRow,
+  fileEvidence, HAND_BUILD_ACTION, interventionFromLedgerRow, interventionKey, interventionLedgerFields, OPERATOR_INTERVENTION_STEP, prCauseClass,
+  type InterventionEvidence, type OperatorInterventionRow,
 } from "./operator-interventions.js";
 
 /** The `fixlane.report` row: one per pass (class, count, hours, interventions, open remedy). */
@@ -64,9 +65,16 @@ export const FIX_LANE_LADDER: LadderKind = {
   ownModules: ["src/lib/fix-lane-gardener.ts"],
 };
 
-export type InterventionKind = "push" | "close" | "unfiled-pr" | "update-branch" | "merge";
-/** `ref` is the commit or event the action was read from (W1-T8264: dedupes one finding by PR and commit/event). */
-export interface OperatorIntervention { pr: number; at: string; kind: InterventionKind; actor: string; detail: string; ref?: string }
+export type InterventionKind = "push" | "close" | "unfiled-pr" | "update-branch" | "merge" | typeof HAND_BUILD_ACTION;
+/**
+ * `ref` is the commit or event the action was read from (W1-T8264: dedupes one finding by PR and commit/event).
+ * W1-T12836: `evidence` is what the hand changed; `cause_class`, when set, is the cause the reader already knows
+ * (a hand build's fleet-run outcome) in place of the PR's sweep disposition.
+ */
+export interface OperatorIntervention {
+  pr: number; at: string; kind: InterventionKind; actor: string; detail: string; ref?: string;
+  evidence?: InterventionEvidence; cause_class?: string;
+}
 /** An unreadable source is UNKNOWN, never zero. */
 export type InterventionRead = { ok: true; interventions: readonly OperatorIntervention[] } | { ok: false; reason: string };
 
@@ -82,7 +90,9 @@ export interface FixLaneSources extends FixLaneEvidence {
   planState?: () => CiFrictionPlanState;
   prOutcomes?: (prs: readonly number[]) => ReadonlyMap<number, PrOutcome>;
   /** Pushes to / closes of fleet PRs by a non-fleet actor, and operator run-unfiled PRs touching fix-lane code. */
-  interventions?: (prs: readonly number[], sinceMs: number) => InterventionRead;
+  interventions?: (prs: readonly number[], sinceMs: number, records: readonly LedgerRecord[]) => InterventionRead;
+  /** W1-T12836 seam: one hand commit's changed files. Absent, the commit's REST read through the GitHub transport. */
+  commitFiles?: (oid: string) => Promise<ReadonlyArray<{ path: string; additions?: number; deletions?: number }>>;
   ownerSearch?: OwnerSearch;
   draftShard?: (action: FlowAction, taskId: string) => string;
   escalate?: (escalation: Escalation) => string | null;
@@ -95,7 +105,10 @@ const DAY = 24 * HOUR;
 const FLEET_ACTOR = /remudero-fleet/i;
 export const isFleetActor = (actor: string | null | undefined) => typeof actor === "string" && FLEET_ACTOR.test(actor);
 
-const STEPS = ["sweep.disposed", "fix.dispatch", "fix.done", "fix.commit_refused", "fix.stood_down", "pr.terminal", "automerge.arm_skipped"] as const;
+/** W1-T12836: `verdict`/`verdict.merged` say whether a task's fleet run ended without a merged PR (a hand build's cause), and
+ *  `operator.intervention` lets a pass see the rows it already wrote, so a hand commit's files are read once. */
+const STEPS = ["sweep.disposed", "fix.dispatch", "fix.done", "fix.commit_refused", "fix.stood_down", "pr.terminal", "automerge.arm_skipped",
+  "verdict", "verdict.merged", OPERATOR_INTERVENTION_STEP] as const;
 
 interface DefectEvent { pr: number; at: number; key: string; evidence: string; elapsedMs?: number }
 
@@ -455,7 +468,9 @@ export function fixLaneInventoryOf(records: readonly LedgerRecord[], tasks: Para
   }
   const sweepRows = records.filter(r => r.step === "sweep.disposed" && Number(r.pr_number) > 0 && Number.isFinite(tsOf(r))).sort((a, b) => tsOf(a) - tsOf(b));
   const byClass = new Map<string, number>();
-  const list = interventions.ok ? [...interventions.interventions].filter(i => Number.isFinite(Date.parse(i.at))).sort((a, b) => Date.parse(a.at) - Date.parse(b.at)) : [];
+  const read = interventions.ok ? [...interventions.interventions].filter(i => Number.isFinite(Date.parse(i.at))).sort((a, b) => Date.parse(a.at) - Date.parse(b.at)) : [];
+  // W1-T12836: a hand build answers a BUILD run the fleet ended, not a fix-lane defect, so it is recorded and never priced here.
+  const list = read.filter(i => i.kind !== HAND_BUILD_ACTION);
   const episodes: Episode[] = [];
   const weight = new Map<DefectEvent, number>();
   const standalone: Array<{ i: OperatorIntervention; key: string }> = [];
@@ -468,9 +483,10 @@ export function fixLaneInventoryOf(records: readonly LedgerRecord[], tasks: Para
   }
   // W1-T8264: one `operator.intervention` row per finding, classed by the PR's disposition at that moment, not by the action.
   const recorded = new Set(records.flatMap(r => { const row = interventionFromLedgerRow(r); return row ? [interventionKey(row)] : []; }));
-  const fresh = list.map<OperatorInterventionRow>(i => ({
-    at: i.at, surface: "pr", action: i.kind, target: i.ref ? `pr#${i.pr}@${i.ref}` : `pr#${i.pr}`, actor: i.actor,
-    cause_class: prCauseClass(sweepRows, i.pr, Date.parse(i.at)), source: "github",
+  const fresh = read.map<OperatorInterventionRow>(i => ({
+    at: i.at, surface: "pr", action: i.kind, target: prInterventionTarget(i), actor: i.actor,
+    cause_class: i.cause_class ?? prCauseClass(sweepRows, i.pr, Date.parse(i.at)), source: "github",
+    ...(i.evidence !== undefined ? { evidence: i.evidence } : {}),
   })).filter(row => !recorded.has(interventionKey(row)));
   for (const e of events) {
     const end = Math.min(Math.max(e.at, endOfEvent(e, sweepRows, terminal, outcomes, now)), now);
@@ -496,11 +512,17 @@ export function fixLaneInventoryOf(records: readonly LedgerRecord[], tasks: Para
   return { ...inventory, interventions: { read: interventions, byClass, total: list.length, fresh } };
 }
 
+/** The `target` a PR-surface intervention row carries: the PR, and the commit or event it was read from. */
+const prInterventionTarget = (i: Pick<OperatorIntervention, "pr" | "ref">) => (i.ref ? `pr#${i.pr}@${i.ref}` : `pr#${i.pr}`);
+
 /** One PR's operator interventions from a GraphQL node: a non-fleet push to, or close of, a fleet-authored PR. */
 export function interventionsFromPullRequest(pr: number, node: unknown, sinceMs: number): OperatorIntervention[] {
   const n = node as {
     author?: { login?: string } | null; state?: string; mergedAt?: string | null; mergedBy?: { login?: string } | null;
-    commits?: { nodes?: Array<{ commit?: { oid?: string; committedDate?: string; message?: string; parents?: { totalCount?: number }; author?: { name?: string; user?: { login?: string } | null } | null } }> };
+    commits?: { nodes?: Array<{ commit?: {
+      oid?: string; committedDate?: string; message?: string; additions?: number; deletions?: number;
+      parents?: { totalCount?: number; nodes?: Array<{ oid?: string } | null> }; author?: { name?: string; user?: { login?: string } | null } | null;
+    } }> };
     timelineItems?: { nodes?: Array<{ createdAt?: string; actor?: { login?: string } | null }> };
   };
   // A null author is a deleted account (not the fleet); an author the answer does not carry at all is unreadable, not "someone else".
@@ -520,8 +542,16 @@ export function interventionsFromPullRequest(pr: number, node: unknown, sinceMs:
     const ref = String(commit.oid).slice(0, 9);
     // A hand update-branch (or conflict merge) is a non-fleet merge commit of main into the head.
     const merge = (commit.parents?.totalCount ?? 0) >= 2 && HAND_MAIN_MERGE.test(commit.message ?? "");
+    // W1-T12836: a hand push carries what it changed; its file list is read once, off the loop (withHandCommitFiles).
+    const prior = commit.parents?.nodes?.[0]?.oid;
+    const evidence: InterventionEvidence = {
+      commit: String(commit.oid),
+      ...(typeof prior === "string" ? { prior_head: prior } : {}),
+      ...(typeof commit.additions === "number" ? { insertions: commit.additions } : {}),
+      ...(typeof commit.deletions === "number" ? { deletions: commit.deletions } : {}),
+    };
     out.push({ pr, at: commit.committedDate!, kind: merge ? "update-branch" : "push", actor: who, ref,
-      detail: merge ? `commit ${ref} merged main into a fleet PR head` : `commit ${ref} pushed to a fleet PR` });
+      detail: merge ? `commit ${ref} merged main into a fleet PR head` : `commit ${ref} pushed to a fleet PR`, ...(merge ? {} : { evidence }) });
   }
   const mergedAt = Date.parse(n.mergedAt ?? "");
   if (n.state === "MERGED" && n.mergedBy?.login && !isFleetActor(n.mergedBy.login) && Number.isFinite(mergedAt) && mergedAt >= sinceMs) {
@@ -538,14 +568,83 @@ const HAND_MAIN_MERGE = /^Merge (?:remote-tracking )?branch '(?:origin\/)?main'/
 
 const FIX_LANE_PATHS = /^src\/(lib\/(sweep|fix-outcome|fix-progress-judge)\.ts|run-task\.ts)$|^src\/lib\/review.*accept/;
 
+/** A filed task's run branch, `run-<taskId>-<epochMs>`; `run-unfiled-*` names no task and never matches. */
+const RUN_BRANCH = /^run-([A-Za-z0-9]+-T\d+)-\d+$/;
+/** Run verdicts that end a fleet run without completing its task (run-result.ts's union). */
+const FLEET_RUN_ENDED = /^(?:failed|no_pr|blocked(?:_[a-z_]+)?)$/;
+/** Run verdicts that complete a task, or say its PR merged. */
+const FLEET_RUN_COMPLETED: ReadonlySet<string> = new Set(["merged", "already_satisfied", "task_already_merged"]);
+
+/** One PR-list row as the intervention reader asks for it. */
+export interface ListedPullRequest {
+  number: number; headRefName: string; author?: { login?: string }; createdAt: string; state?: string; mergedAt?: string | null;
+  mergeCommit?: { oid?: string } | null; files?: Array<{ path: string; additions?: number; deletions?: number }>;
+}
+
+/**
+ * W1-T12836: a merged `run-<taskId>-<epoch>` PR a non-fleet login authored, whose task's newest fleet run before the
+ * merge ended without completing (failed, no PR, blocked) and which no fleet run completed, is a HAND BUILD — the
+ * session finished what the fleet did not. Measured 2026-11-15: human-login sessions made 423 of 824 merges in 7 days
+ * and none was in any intervention input. One row per PR; its cause class is that fleet run's last outcome.
+ */
+export function handBuildsFromPullRequests(listed: readonly ListedPullRequest[], records: readonly LedgerRecord[], sinceMs: number): OperatorIntervention[] {
+  const out: OperatorIntervention[] = [];
+  for (const p of listed) {
+    const task = RUN_BRANCH.exec(p.headRefName)?.[1];
+    const mergedAt = Date.parse(p.mergedAt ?? "");
+    const author = p.author?.login;
+    if (task === undefined || p.state !== "MERGED" || !Number.isFinite(mergedAt) || mergedAt < sinceMs || !author || isFleetActor(author)) continue;
+    const runs = records.filter(r => (r.task_id === task || r.task === task) && (r.step === "verdict" || r.step === "verdict.merged") &&
+      Number.isFinite(tsOf(r)) && tsOf(r) <= mergedAt).sort((a, b) => tsOf(a) - tsOf(b));
+    if (runs.some(r => r.step === "verdict.merged" || FLEET_RUN_COMPLETED.has(String(r.verdict)))) continue;
+    const outcome = runs.at(-1)?.verdict;
+    if (typeof outcome !== "string" || !FLEET_RUN_ENDED.test(outcome)) continue;
+    const commit = p.mergeCommit?.oid;
+    out.push({ pr: p.number, at: p.mergedAt!, kind: HAND_BUILD_ACTION, actor: author, ref: task, cause_class: `fleet-run:${outcome}`,
+      detail: `${author} merged ${task} after its fleet run ended ${outcome}`,
+      evidence: { task, ...(typeof commit === "string" ? { commit } : {}), ...fileEvidence(p.files ?? []) } });
+  }
+  return out;
+}
+
+/**
+ * W1-T12836: fills each NEW hand push's changed files from its own commit, awaited off the daemon loop. A push the
+ * ledger already holds is never re-read. An unreadable commit keeps its row and says why in `files_unread`.
+ */
+export async function withHandCommitFiles(sources: Pick<FixLaneSources, "owner" | "repo" | "commitFiles">, read: InterventionRead,
+  records: readonly LedgerRecord[]): Promise<InterventionRead> {
+  if (!read.ok) return read;
+  const recorded = new Set(records.flatMap(r => { const row = interventionFromLedgerRow(r); return row ? [interventionKey(row)] : []; }));
+  const filesOf = sources.commitFiles ?? (async (oid: string) => {
+    const body = await ghJsonAsync(["api", `repos/${sources.owner}/${sources.repo}/commits/${oid}`]) as { files?: Array<{ filename: string; additions?: number; deletions?: number }> };
+    if (!Array.isArray(body.files)) throw new Error(`commit ${oid} answered no file list`);
+    return body.files.map(f => ({ path: f.filename, additions: f.additions, deletions: f.deletions }));
+  });
+  const out: OperatorIntervention[] = [];
+  for (const i of read.interventions) {
+    const commit = i.evidence?.commit;
+    const known = recorded.has(interventionKey({ surface: "pr", action: i.kind, target: prInterventionTarget(i), at: i.at }));
+    if (i.kind !== "push" || commit === undefined || i.evidence?.files !== undefined || known) { out.push(i); continue; }
+    try {
+      const { files, files_total } = fileEvidence(await filesOf(commit));
+      out.push({ ...i, evidence: { ...i.evidence, files, files_total } });
+    } catch (error) {
+      // The push is still an intervention: its row is kept, and `files_unread` says why it names no files.
+      out.push({ ...i, evidence: { ...i.evidence, files_unread: String((error as Error)?.message ?? error).slice(0, 200) } });
+    }
+  }
+  return { ok: true, interventions: out };
+}
+
 /** Reads operator interventions through the GitHub transport; any failed read is `ok: false` (unknown), never zero. */
-export function readOperatorInterventions(sources: Pick<FixLaneSources, "owner" | "repo">, prs: readonly number[], sinceMs: number): InterventionRead {
+export function readOperatorInterventions(sources: Pick<FixLaneSources, "owner" | "repo">, prs: readonly number[], sinceMs: number,
+  records: readonly LedgerRecord[] = []): InterventionRead {
   try {
     const found: OperatorIntervention[] = [];
     for (let offset = 0; offset < prs.length; offset += 25) {
       const batch = prs.slice(offset, offset + 25);
       const query = `query { repository(owner:${JSON.stringify(sources.owner)}, name:${JSON.stringify(sources.repo)}) { ${batch.map(pr =>
-        `p${pr}:pullRequest(number:${pr}) { author { login } state mergedAt mergedBy { login } commits(last:100) { nodes { commit { oid committedDate message parents { totalCount } author { name user { login } } } } } timelineItems(itemTypes:[CLOSED_EVENT], last:5) { nodes { ... on ClosedEvent { createdAt actor { login } } } } }`).join(" ")} } }`;
+        `p${pr}:pullRequest(number:${pr}) { author { login } state mergedAt mergedBy { login } commits(last:100) { nodes { commit { oid committedDate message additions deletions parents(first:1) { totalCount nodes { oid } } author { name user { login } } } } } timelineItems(itemTypes:[CLOSED_EVENT], last:5) { nodes { ... on ClosedEvent { createdAt actor { login } } } } }`).join(" ")} } }`;
       const body = JSON.parse(ghExec(["api", "graphql", "-f", `query=${query}`], { encoding: "utf8" }));
       const repository = body.data === undefined || body.data === null ? undefined : body.data.repository;
       if (body.errors || repository === undefined || repository === null) throw new Error("fix-lane PR interventions unreadable: GraphQL errors or no repository");
@@ -556,12 +655,13 @@ export function readOperatorInterventions(sources: Pick<FixLaneSources, "owner" 
       }
     }
     const listed = JSON.parse(ghExec(["pr", "list", "--repo", `${sources.owner}/${sources.repo}`, "--state", "all", "--limit", "100",
-      "--json", "number,headRefName,author,createdAt,files"], { encoding: "utf8" })) as Array<{ number: number; headRefName: string; author?: { login?: string }; createdAt: string; files?: Array<{ path: string }> }>;
+      "--json", "number,headRefName,author,createdAt,files,state,mergedAt,mergeCommit"], { encoding: "utf8" })) as ListedPullRequest[];
     for (const p of listed) {
       if (!/^run-unfiled-\d+$/.test(p.headRefName) || isFleetActor(p.author?.login) || Date.parse(p.createdAt) < sinceMs) continue;
       const touched = (p.files ?? []).map(f => f.path).filter(f => FIX_LANE_PATHS.test(f));
       if (touched.length) found.push({ pr: p.number, at: p.createdAt, kind: "unfiled-pr", actor: p.author?.login ?? "unknown", detail: `an operator run-unfiled PR touches fix-lane code (${touched.join(", ")})` });
     }
+    found.push(...handBuildsFromPullRequests(listed, records, sinceMs));
     return { ok: true, interventions: found };
   } catch (error) {
     return { ok: false, reason: String((error as Error)?.message ?? error) };
@@ -623,14 +723,18 @@ export function fixLaneGardenSpec(deps: GardenerDeps, sources: FixLaneSources) {
     if (plan.unreadable?.length) throw new Error(`fix-lane plan shards unreadable: ${plan.unreadable.join(", ")}`);
     return { now, records, plan };
   };
-  const inventoryOf = (now: number, records: readonly LedgerRecord[], plan: CiFrictionPlanState, evidence: FixLaneEvidence) => {
+  const readsOf = (now: number, records: readonly LedgerRecord[], evidence: FixLaneEvidence) => {
     const sinceMs = now - FIX_LANE_WINDOW_MS;
     const events = defectEventsOf(records, now, evidence);
     const prs = [...new Set(events.filter(e => e.pr > 0 && e.at >= sinceMs).map(e => e.pr))];
     const openPrs = [...new Set(events.filter(e => e.pr > 0).map(e => e.pr))];
     const outcomes = sources.prOutcomes ? sources.prOutcomes(openPrs) : readOutcomes(openPrs, sources);
-    const read = sources.interventions ? sources.interventions(prs, sinceMs) : readOperatorInterventions(sources, prs, sinceMs);
-    const inventory = fixLaneInventoryOf(records, plan.tasks, outcomes, read, now, evidence);
+    const read = sources.interventions ? sources.interventions(prs, sinceMs, records) : readOperatorInterventions(sources, prs, sinceMs, records);
+    return { outcomes, read };
+  };
+  const inventoryOf = (now: number, records: readonly LedgerRecord[], plan: CiFrictionPlanState, evidence: FixLaneEvidence,
+    reads: { outcomes: ReadonlyMap<number, PrOutcome>; read: InterventionRead }) => {
+    const inventory = fixLaneInventoryOf(records, plan.tasks, reads.outcomes, reads.read, now, evidence);
     shadowInputs.set(inventory, { records, now });
     return inventory;
   };
@@ -655,12 +759,13 @@ export function fixLaneGardenSpec(deps: GardenerDeps, sources: FixLaneSources) {
           return logCache.get(head);
         },
       };
-      return inventoryOf(now, records, plan, evidence);
+      return inventoryOf(now, records, plan, evidence, readsOf(now, records, evidence));
     },
     inventoryAsync: async () => {
       const { now, records, plan } = readInputs();
       const evidence = await readFixLaneEvidence(sources, records, deps.log);
-      return inventoryOf(now, records, plan, evidence);
+      const reads = readsOf(now, records, evidence);
+      return inventoryOf(now, records, plan, evidence, { ...reads, read: await withHandCommitFiles(sources, reads.read, records) });
     },
     onScorecard: (inv, scorecard) => {
       const full = inv as FixLaneInventory;
