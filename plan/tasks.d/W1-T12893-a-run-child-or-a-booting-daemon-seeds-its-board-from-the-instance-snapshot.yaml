@@ -1,0 +1,87 @@
+- id: W1-T12893
+  title: "A run child or a booting daemon seeds its board from the instance snapshot instead of walking every closed PR"
+  repo: remudero
+  depends_on: []
+  priority: 1.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the board's closed half feeds credit and lifecycle reads; a seed that hides a newer row would misreport a PR
+  origin: "operator-session#github-reads-by-caller-2026-11-15"
+  plan_refs:
+    - W1-T12553
+    - W1-T2323
+    - W1-T8912
+    - W1-T12892
+  files:
+    - src/lib/status.ts
+    - src/lib/board-snapshot-cache.ts
+    - test/a-cold-board-gateway-seeds-from-the-instance-snapshot.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "A board gateway built by buildBatchedGithub with no snapshotCache, in a process whose instance root holds a readable closed snapshot for the repository, reads the closed half as a delta from that snapshot (mode delta, one or a few pages) and not as a full walk"
+      proof: "grep: W1-T12893 criterion 1 in test/a-cold-board-gateway-seeds-from-the-instance-snapshot.test.ts"
+    - claim: "invariant:no-hidden-newer-row — the seeded closed half equals what a full walk returns for the same GitHub answers: a PR updated after the snapshot's newest updated_at comes from the delta pages, and the delta walk stops only on the existing sort=updated rule"
+      kind: guard
+      proof: "grep: W1-T12893 criterion 2 in test/a-cold-board-gateway-seeds-from-the-instance-snapshot.test.ts"
+    - claim: "invariant:fall-back-to-the-full-walk — a missing, unreadable, oversized, other-schema or other-repository snapshot gives today's full walk, and the reason is logged once"
+      kind: guard
+      proof: "grep: W1-T12893 criterion 3 in test/a-cold-board-gateway-seeds-from-the-instance-snapshot.test.ts"
+    - claim: "invariant:one-snapshot-writer-at-a-time — a seeded gateway in a run child commits to the snapshot only through the cache's existing atomic commit, and two processes that commit at once leave a snapshot that a third process reads as valid"
+      kind: guard
+      proof: "grep: W1-T12893 criterion 4 in test/a-cold-board-gateway-seeds-from-the-instance-snapshot.test.ts"
+    - claim: "Through the real buildBatchedGithub with a gh shim (test/helpers/gh-shim.ts) that serves 140 closed pages, a cold gateway beside a snapshot made by an earlier gateway reads at most 2 closed pages, with nothing injected in place of the snapshot cache"
+      proof: "grep: W1-T12893 criterion 5 in test/a-cold-board-gateway-seeds-from-the-instance-snapshot.test.ts"
+    - claim: "buildBatchedGithub opens the instance snapshot when its caller passes none"
+      proof: "grep: instanceBoardSnapshotCache( in src/lib/status.ts"
+  rationale: |
+    WHY: a board gateway that starts cold walks every closed PR of the repository. On craigoley/remudero that is
+    about 140 REST pages and 266 MB for 13,953 PRs, spent in one burst of about 4 minutes. Run children and
+    daemon boots start cold many times a day, although the instance already keeps a durable board snapshot
+    (state/cache/board/craigoley_remudero-*.ndjson, 49 MB, written by the daemon's tick read).
+    MEASURED in the core, site and console ledgers, 2026-11-14 16:48Z to 2026-11-15 16:48Z
+    (board_gateway.fetch_bytes rows, mode full, half closed):
+    - core run children (actor run_child, lane run-task): 43 full walks, 5,996 REST calls, 11.4 GB.
+    - core daemon: 14 full walks (one per boot, 14 daemon.boot rows), 1,815 REST calls, 3.5 GB.
+    - console daemon 12 walks, 108 calls; site daemon 7 walks, 14 calls.
+    - In all, about 7,900 core reads a day (330 an hour on average) and 15 GB, in bursts of 130 to 140 reads.
+      A delta read of the same half costs 1 call (core daemon delta: 15 fetches, 15 calls).
+    SAMPLED, 2026-11-15 16:54Z to 17:03Z, from /proc: one such walk, 148 page reads of
+    `pulls?state=closed&sort=updated&direction=desc&per_page=100&page=N` between 11 s and 238 s. The ledger
+    row at 16:57:10Z names it: run W1-T12215, restCalls 140, bytes 266,834,385, prCount 13,953.
+    READ at origin/main df91bd762:
+    - src/lib/status.ts:4930-4934 seeds the closed half and the issues from opts.snapshotCache only.
+    - The comment at src/lib/status.ts (W1-T2323) says it plainly: "full walks come from COLD gateways with
+      no cache to expire, not from TTL expiry on warm ones".
+    - Gateways built with no snapshotCache include src/run-task.ts:18693, :23823, :24061, :28567, :34192,
+      :34494, src/cli/commands/sweep.ts:976 and src/lib/tick-read-worker.ts:185, :3118, :3286. Only
+      src/lib/report-commands.ts:968 and :1175, tick-read-worker.ts:290, and run-task.ts:20747, :27313 and :30421
+      pass one.
+    - src/lib/board-snapshot-cache.ts:395 createBoardSnapshotCache(root, owner, repo) takes the instance root.
+    EXPECTED SAVING: about 7,700 core reads a day (330 an hour on average, up to 140 in one burst) and about
+    15 GB of transfer. W1-T12892's ETag cache would answer few of these pages, because each walk asks 140
+    different pages from a cold process.
+  design: |
+    INVARIANT no-hidden-newer-row: a seeded closed half equals a full walk's half for the same GitHub answers.
+    INVARIANT fall-back-to-the-full-walk: any snapshot the cache refuses gives today's full walk.
+    INVARIANT one-snapshot-writer-at-a-time: commits use the cache's existing atomic commit and identity checks
+    (W1-T8912); no second write path.
+    1. src/lib/board-snapshot-cache.ts: export instanceBoardSnapshotCache(owner, repo, env), which resolves the
+       instance root the same way report-commands.ts does for config.root and returns
+       createBoardSnapshotCache(root, owner, repo), or undefined when no instance root is known (a test or a
+       hand run outside an instance).
+    2. src/lib/status.ts buildBatchedGithub: when opts.snapshotCache is undefined and opts.ttlMs is not 0 (the
+       suite's never-cache idiom), use instanceBoardSnapshotCache(owner, repo). An explicit snapshotCache still
+       wins. Every caller listed in the rationale then seeds without its own change.
+    3. Add the focused test file for criteria 1 to 5.
+    NOT IN SCOPE: the open half's TTL, the delta stop rule, the ETag cache (W1-T12892), the share split.
+  falsifier: |
+    Remove the default snapshot in buildBatchedGithub: criteria 1 and 5 must fail (a full walk). Seed from the
+    snapshot but skip the delta pages: criterion 2 must fail. Throw on an unreadable snapshot: criterion 3 must
+    fail. Restore and require all to pass.
+  note: |
+    Id reserved for run-unfiled-1794762415000 with ~/rmd-work/bin/reserve-id.sh.
+    The /proc sample is not stored on main; the ledger counts above can be read again from
+    board_gateway.fetch_bytes rows.

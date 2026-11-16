@@ -19,17 +19,17 @@
     - src/lib/feedback-landing.ts
     - test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts
     - test/inbox/a-triage-outcome-that-files-no-task-lands-through-the-feedback-landing.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
-    - claim: "A no_task triage outcome, driven through triageCommand on a fixture whose in-tree scripts/task-id-existence-check.mjs sleeps 2 s, lands its status change while a 50 ms timer started before the call fires at least once in every 500 ms of the call"
+    - claim: "A no_task triage outcome, driven through triageCommand on a fixture whose in-tree scripts/task-id-existence-check.mjs sleeps 2 s, lands its status change while a 50 ms timer started before the call fires at least once in every 500 ms while that 2 s check runs"
       proof: "grep: W1-T12790 criterion 1 in test/inbox/a-triage-outcome-that-files-no-task-lands-through-the-feedback-landing.test.ts"
     - claim: "The same holds for a grill outcome and for a private-home entry (the landPrivateTriageStatus path): each lands through the async landing, and the 50 ms timer keeps firing"
       proof: "grep: W1-T12790 criterion 2 in test/inbox/a-triage-outcome-that-files-no-task-lands-through-the-feedback-landing.test.ts"
     - claim: "invariant:same-landing — for the same entry and decision, the async landing lands the same file content on the same shared feedback landing branch, writes the same pr.opened and triage.escalation_response rows, removes the worktree and returns the same exit code as the synchronous landing does today; a refused landing still writes triage.error and leaves the entry at new"
       kind: guard
       proof: "grep: W1-T12790 criterion 3 in test/inbox/a-triage-outcome-that-files-no-task-lands-through-the-feedback-landing.test.ts"
-    - claim: "invariant:census-only-falls — the census walk from landTriageStatusOutcome and from landPrivateTriageStatus reaches neither planPrPreflightAtCommit nor runInTree; a fixture that puts the synchronous landFeedbackStatusContent call back fails with landTriageStatusOutcome's name; no row of SYNC_SPAWN_LOOP_BASELINE rises"
+    - claim: "invariant:census-only-falls — the census walk from landTriageStatusOutcome and from landPrivateTriageStatus reaches neither planPrPreflightAtCommit nor runInTree except across three named crossings that run no synchronous landing (planPrPreflight, escalation, setFeedbackStatus); each crossing is still on a seed's walk, and the walk without them does reach the preflight; a fixture that puts the synchronous landFeedbackStatusContent call back fails with landTriageStatusOutcome's name; no row of SYNC_SPAWN_LOOP_BASELINE rises"
       kind: guard
       proof: "grep: W1-T12790 criterion 4 in test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts"
   rationale: |
@@ -54,6 +54,13 @@
     3. If the synchronous landFeedbackStatusContent has no production caller left, remove it; otherwise keep it for its non-daemon callers and name them in the why-file.
     4. test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts: add a chain check like SYNC_PREFLIGHT_CHAIN: from landTriageStatusOutcome and landPrivateTriageStatus the walk reaches no planPrPreflightAtCommit and no runInTree, with a positive-control fixture. Lower the triageCommandLocked row if the change removes one of its two calls; do not raise any row.
     5. After the build, read 24 h of `daemon.loop_lag` rows on the live host and write in the why-file which callers of runInTree remain, if any.
+    AMENDED 2026-11-15 (hand build, read at origin/main d5722e1fe):
+    - Criterion 1 times the loop while the 2 s check runs, not over the whole call. Other synchronous work in triageCommandLocked (the run worktree setup, already counted by its census rows) held a 50 ms timer for 515 ms on the Mac, outside the landing.
+    - Criterion 4 names three crossings. The census walk reads every identifier as a call, so after the change it still reaches the preflight from both seeds by name only:
+      planPrPreflight is the option key landContentAsync reads (W1-T9736 fixes key reads);
+      escalation is the member read message.extra.escalation in recordEscalationIntakeOutcome, which reaches the CLI main;
+      setFeedbackStatus (src/lib/feedback.ts) lands only when its land option has no stateRoot. landPrivateTriageStatus passes a stateRoot (a queue write) and landTriageStatusOutcome passes no land (a file write).
+      The check walks around only these three names. It fails if one leaves the walk, and a walk without them must reach the preflight.
     NOT IN SCOPE: deleting the runInTree census row (W1-T9736); hostWorktreeGit and the ledger scans (W1-T12753); the triage judge itself.
   falsifier: |
     Call the synchronous landFeedbackStatusContent again in landTriageStatusOutcome: criteria 1 and 4 must fail. Do the same in landPrivateTriageStatus only: criteria 2 and 4 must fail. Skip the pr.opened row on the async path: criterion 3 must fail. Restore, and all must pass.

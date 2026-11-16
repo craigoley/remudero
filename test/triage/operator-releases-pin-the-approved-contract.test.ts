@@ -37,7 +37,8 @@ function fixture(t: TestContext) {
   mkdirSync(join(root, "state"));
   writeFileSync(join(root, "plan/tasks.yaml"), "[]\n");
   const rendered = renderMachineShard({ taskId: ID, title: "record the bounded remedy", origin: "flow-blocker:fixture",
-    files: ["docs/remedy.md"], acceptance: [{ claim: "remedy recorded", proof: "grep: remedy in docs/remedy.md" }] });
+    files: ["docs/remedy.md"], acceptance: [{ claim: "remedy recorded", proof: "grep: remedy in docs/remedy.md" }],
+    invariants: { none: "the fixture records one remedy in a docs file and changes no existing behaviour" } });
   assert.equal(rendered.refused, undefined);
   const path = join(root, "plan/tasks.d", `${ID}.yaml`);
   writeFileSync(path, rendered.text!);

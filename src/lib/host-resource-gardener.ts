@@ -10,7 +10,7 @@ import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import { gitDirOf } from "./typecheck-buildinfo.js";
 import { landedPrUrl, prepareGardenTaskIds, recordGardenMintTimeout, releaseGardenTaskIds, type GardenTaskIdMinter, runStepsEager, runStepsSyncOnly, type GardenCheckout, type GardenCheckoutAsync, type GardenWorkspacePort } from "./gardener.js";
 import { runStepsAsync, step, type Steps } from "./git-push.js";
-import { machineShardLandingRefusal, renderMachineShard } from "./machine-filing.js";
+import { machineShardLandingRefusal, renderMachineShard, type MachineShardSpec } from "./machine-filing.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 
 /**
@@ -955,7 +955,7 @@ function reserveEscalation(f: ReserveFinding): Escalation {
 /** What a filing asks of its build: the janitor file and the acceptance criterion. The proof greps the filing's
  *  ORIGIN, never the bare consumer name: a name the janitor already mentions (`rmd`) passes at origin/main, so
  *  proof-discrimination refused that filing every time it was offered. */
-function consumerFilingContract(f: ConsumerFiling): { files: string[]; acceptance: { claim: string; proof: string }[] } {
+function consumerFilingContract(f: ConsumerFiling): Pick<MachineShardSpec, "files" | "acceptance" | "invariants"> {
   const file = "deploy/rmd-host-cleanup.sh";
   return {
     files: [file],
@@ -963,6 +963,7 @@ function consumerFilingContract(f: ConsumerFiling): { files: string[]; acceptanc
       claim: `the janitor reaps ${f.consumer} on ${f.host} with a rule that cites its origin ${f.origin}, so its growth rate stops being positive`,
       proof: `grep: ${f.origin} in ${file}`,
     }],
+    invariants: { none: `the remedy adds one new janitor rule that reaps ${f.consumer}; every existing rule in ${file} is left as it is` },
   };
 }
 

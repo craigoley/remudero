@@ -24,7 +24,7 @@
     - test/a-ceiling-is-rejudged-against-current-main-before-a-merge.test.ts
     - test/gardeners/two-pull-requests-that-cross-a-ceiling-together-are-held-at-merge-time.test.ts
     - test/gardeners/an-update-that-cannot-cure-a-crossing-is-never-repeated.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:judge-counts-what-ci-enforces — the judge counts a gate only when CI runs that gate against the baseline the judge reads. scripts/source-size-ratchet.mjs exports CI_READS_BASELINE false, and its CI script source-size-signal passes no --baseline. So COUNTED_RATCHET_GATES leaves out source-size, UNCOUNTED_RATCHET_GATES names it with class ci-signal, and the judge never reads scripts/source-size-baseline.json"

@@ -108,11 +108,15 @@ test("W1-T3337: the CLI self-reexec guard never suppresses the reviewer code pro
       if (args.join(" ") === "rev-parse origin/main") return MAIN;
       if (args[0] === "merge-base") return OLD;
       if (args[0] === "diff") return "src/lib/review.ts\n";
+      // W1-T12824: the probe compares the changed reviewer file's code on both sides; a real code change is stale.
+      if (args.join(" ") === `show ${OLD}:src/lib/review.ts`) return "export const verdict = 1;\n";
+      if (args.join(" ") === `show ${MAIN}:src/lib/review.ts`) return "export const verdict = 2;\n";
       throw new Error(`unexpected git call: ${args.join(" ")}`);
     },
   });
   assert.equal(result.status, "stale");
-  assert.deepEqual(calls, ["fetch --quiet --no-tags origin +refs/heads/main:refs/remotes/origin/main", "rev-parse HEAD", "rev-parse origin/main", `merge-base ${OLD} ${MAIN}`, `diff --name-only ${OLD}..${MAIN}`]);
+  assert.deepEqual(calls, ["fetch --quiet --no-tags origin +refs/heads/main:refs/remotes/origin/main", "rev-parse HEAD", "rev-parse origin/main", `merge-base ${OLD} ${MAIN}`, `diff --name-only ${OLD}..${MAIN}`,
+    `show ${OLD}:src/lib/review.ts`, `show ${MAIN}:src/lib/review.ts`]);
 });
 
 test("W1-T3337: an unreadable guarded diff withholds the terminal verdict", () => {

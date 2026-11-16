@@ -9,7 +9,7 @@
  *      each with its class and the tree it addresses. Every class is CHECKOUT: a tree only the harness
  *      writes. The file's WIDENED_SITE_EXCEPTIONS count is this table's sum, so a site added, removed or
  *      moved between functions fails here by name, not in a review.
- *   2. THE CONVERSIONS — planCriteriaAtHeadForRepair (an exported read whose cwd any caller may name)
+ *   2. THE CONVERSIONS — planCriteriaAtMergeForRepair (an exported read whose cwd any caller may name)
  *      and materializeReviewerSnapshot (the reviewer's PR-head checkout) now reach the leaf.
  *   3. THE FIXTURES — on a PR-head tree whose `.git` pointer names a planted gitdir with a
  *      `core.fsmonitor` marker, neither function writes the marker; a raw `git -C` control proves the
@@ -102,14 +102,15 @@ export const RUN_TASK_WIDENED_SITES: Readonly<Record<string, { count: number; cl
   creditEvidenceRootFor: { count: 1, cls: "CHECKOUT", reason: `${OWN}: or a managed clone of the credited repo` },
   registeredFixWorktreeOwner: { count: 1, cls: "CHECKOUT", reason: FIX_CLONE },
   publishAbandonedFixOwnerAhead: { count: 1, cls: "CHECKOUT", reason: FIX_CLONE },
-  idCitedInSrc: { count: 1, cls: "CHECKOUT", reason: OWN },
+  idCitedInSrcSync: { count: 1, cls: "CHECKOUT", reason: `${OWN}: the sync grep kept for non-daemon callers (W1-T12753)` },
   approveCommand: { count: 6, cls: "CHECKOUT", reason: "an approve worktree cut at origin/main whose only writes are the harness's shard and skill files, and the clone it ls-remotes" },
   bundleExportCommand: { count: 1, cls: "CHECKOUT", reason: OWN },
   plannedOnOriginMain: { count: 1, cls: "CHECKOUT", reason: `${OWN}: dir defaults to repoRoot` },
 };
 
 /** The functions this task routed through the leaf: each holds no widened site and calls the leaf. */
-const CONVERTED = ["planCriteriaAtHeadForRepair", "materializeReviewerSnapshot", "removeAbandonedFixWorktreeOwner"] as const;
+/** W1-T12791: planCriteriaAtMergeForRepair replaced planCriteriaAtHeadForRepair; its merge read is converted too. */
+const CONVERTED = ["planCriteriaAtMergeForRepair", "mergeCommitForRepair", "repairCheckoutTopLevel", "materializeReviewerSnapshot", "removeAbandonedFixWorktreeOwner"] as const;
 const LEAF_CALL = /\bhostWorktreeGit(?:Async|Result|AtTopLevel)?\(/;
 
 function widenedByFunction(text: string): Record<string, number> {
@@ -192,10 +193,10 @@ describe("W1-T6135: every widened git site left in run-task.ts is a classed CHEC
   });
 
   it("a raw git -C added to a converted function, or moved into a new one, fails the table naming it", () => {
-    const grown = text.replace(/^export function planCriteriaAtHeadForRepair\(([^\n]*)\{\n/m,
-      (head) => `${head}  execFileSync("git", ["-C", cwd, "status"]);\n`);
+    const grown = text.replace(/^async function mergeCommitForRepair\(([^\n]*)\{\n/m,
+      (head) => `${head}  execFileSync("git", ["-C", top, "status"]);\n`);
     assert.notEqual(grown, text, "the fixture edit applied");
-    assert.equal(widenedByFunction(grown).planCriteriaAtHeadForRepair, 1);
+    assert.equal(widenedByFunction(grown).mergeCommitForRepair, 1);
   });
 });
 
@@ -290,17 +291,17 @@ describe("W1-T6135: the controls — each hostile route is live through a raw gi
   });
 });
 
-describe("W1-T6135: planCriteriaAtHeadForRepair reads a PR head through the leaf", () => {
-  it("resolves the task's criteria at a legitimate head, from the tree and from below its top level", () => {
+describe("W1-T6135: planCriteriaAtMergeForRepair reads a PR head through the leaf", () => {
+  it("resolves the task's criteria at a legitimate head, from the tree and from below its top level", async () => {
     const { wt, head } = cutLane();
-    assert.deepEqual(runTask.planCriteriaAtHeadForRepair(BODY, head, wt), CRITERIA);
-    assert.deepEqual(runTask.planCriteriaAtHeadForRepair(BODY, head, join(wt, "plan")), CRITERIA);
+    assert.deepEqual(await runTask.planCriteriaAtMergeForRepair(BODY, head, "main", wt), CRITERIA);
+    assert.deepEqual(await runTask.planCriteriaAtMergeForRepair(BODY, head, "main", join(wt, "plan")), CRITERIA);
   });
 
-  it("on a tree whose .git pointer names a planted gitdir, reads nothing and never writes the marker", () => {
+  it("on a tree whose .git pointer names a planted gitdir, reads nothing and never writes the marker", async () => {
     const { wt } = cutLane();
     pointAt(wt, plantGitDir("criteria"));
-    assert.deepEqual(runTask.planCriteriaAtHeadForRepair(BODY, ABSENT_SHA, wt), [], "a refused read is no cure");
+    assert.deepEqual(await runTask.planCriteriaAtMergeForRepair(BODY, ABSENT_SHA, "main", wt), [], "a refused read is no cure");
     assert.equal(existsSync(marker("planted-fsmonitor-criteria")), false, "the planted fsmonitor never ran");
   });
 });

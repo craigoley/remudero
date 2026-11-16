@@ -96,7 +96,8 @@ export type LintCheck =
   | "unminted-task-id"
   | "superseded-by"
   | "doctrine-citation-unresolved"
-  | "design-invariant-proof";
+  | "design-invariant-proof"
+  | "needs-input";
 export type LintSeverity = "block" | "warn";
 
 export interface LintViolation {
@@ -2041,6 +2042,20 @@ export interface BlockedDispositionContext {
  *  `ctx.baseTask` that was also blocked warns, and anything else blocks. A VALUE OUTSIDE {@link
  *  RETIREMENT_REASONS} IS TREATED AS ABSENT — "present" means present AND legal, so a bogus string
  *  cannot slip past, and nothing here writes or infers one. Why: W1-T2487, W1-T2474. */
+/** W1-T12715: a needs_input block holds a queued task until its question is answered, so it must ask something. */
+function needsInputViolations(task: Task): LintViolation[] {
+  if (task.needs_input === undefined) return [];
+  const out: LintViolation[] = [];
+  if (task.needs_input.question.trim() === "") {
+    out.push({ check: "needs-input", severity: "block", message: `task ${task.id} has a needs_input block with an empty question` });
+  }
+  if (task.status !== "queued") {
+    out.push({ check: "needs-input", severity: "block",
+      message: `task ${task.id} carries needs_input at status: ${task.status}; only a queued task can wait for an answer` });
+  }
+  return out;
+}
+
 export function blockedDispositionViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
   const ctx = opts.blockedDisposition;
   if (!ctx) return []; // whole-plan pass: no base to compare against, so no opinion at all
@@ -3714,6 +3729,24 @@ export function invariantSlugViolations(task: Task, opts: LintOpts = {}): LintVi
   return out;
 }
 
+/** W1-T12832 — does the design carry a declaration {@link invariantSlugViolations} reads, in either form? */
+export function declaresDesignInvariant(task: Pick<Task, "design">): boolean {
+  const design = task.design ?? "";
+  return INVARIANT_DECL_RE.test(design) || NO_INVARIANTS_RE.test(design);
+}
+
+/** W1-T12832 — was this task's contract text authored in the diff? True for a task absent at the base, a design
+ *  that differs by a byte, or acceptance that differs in length or in any claim or proof. Bookkeeping (priority,
+ *  verify, risk_ruling, status, attempts, note, depends_on) is not contract text, so a machine lane's edit to a
+ *  task filed before W1-T11746 is not asked for a declaration its edit never touched. */
+export function designContractChanged(base: Task | undefined, task: Task): boolean {
+  if (base === undefined) return true;
+  if ((base.design ?? "") !== (task.design ?? "")) return true;
+  const before = base.acceptance ?? [];
+  const after = task.acceptance ?? [];
+  return before.length !== after.length || before.some((c, i) => c.claim !== after[i]!.claim || c.proof !== after[i]!.proof);
+}
+
 export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   const violations: LintViolation[] = [];
   const sizing = sizingViolation(task, opts);
@@ -3740,6 +3773,7 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   violations.push(...newShardRuleSuiteViolations(task, opts));
   violations.push(...postMergeAmendmentViolations(task, opts));
   violations.push(...blockedDispositionViolations(task, opts));
+  violations.push(...needsInputViolations(task));
   violations.push(...invariantSlugViolations(task, opts));
   violations.push(...blockedRecordUnruledViolations(task));
   violations.push(...callSiteViolations(task, opts));

@@ -1,0 +1,45 @@
+- id: W1-T12705
+  title: "The flow-remedy ladder walks every eligible candidate, so a fileable cause behind eight unfileable ones is still drafted"
+  repo: remudero
+  depends_on:
+    - W1-T12548
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # changes which cause the flow-remedy garden files; each filing still passes the machine-filing judge and lint-plan's admission; the build also carries a test-only portability fix for the nightly state backup test
+  origin: "operator-session#pr-18582-has-no-shard-2026-11-15"
+  plan_refs:
+    - W1-T12548
+    - W1-T11097
+    - W1-T9597
+  files:
+    - src/lib/flow-remedy-gardener.ts
+    - test/gardeners/flow-remedy-skips-a-cause-it-cannot-file-and-drafts-the-next-one.test.ts
+    - test/deploy/the-nightly-state-backup-keeps-a-copy-of-the-container-config.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "invariant:every-eligible-candidate-is-walked — A garden pass whose eight costliest eligible causes cannot be filed still drafts the ninth eligible cause, and logs one flow-remedy.cause_skipped row for each of the eight"
+      kind: guard
+      proof: "grep: flow remedy files a ninth eligible cause after eight unfileable candidates in test/gardeners/flow-remedy-skips-a-cause-it-cannot-file-and-drafts-the-next-one.test.ts"
+    - claim: "ladderOf walks the whole candidate list, with no fixed cap on how many candidates it reads"
+      proof: "grep: for (const price of candidates) { in src/lib/flow-remedy-gardener.ts"
+    - claim: "The nightly state backup test runs on macOS as on Linux: its chmod stand-in drops the -- argument that BSD chmod refuses, and the fixture uses the physical temp path"
+      proof: "grep: exec /bin/chmod in test/deploy/the-nightly-state-backup-keeps-a-copy-of-the-container-config.test.ts"
+  rationale: |
+    WHY: W1-T12548 (#18499) lets the flow-remedy ladder skip a cause it cannot file and draft the next one. But ladderOf still reads only the first 8 candidates (src/lib/flow-remedy-gardener.ts:363 at origin/main, candidates.slice(0, 8)). When the 8 costliest eligible causes are all unfileable, for example 8 "plan-only PR is red on <check>" causes owned by NONE, the pass skips all 8 and files nothing, though a fileable cause stands ninth.
+    HISTORY: #18541 (branch codex/fix-18499-starvation-followup) made this change first and was closed by the sweep on 2026-11-14 as "task (unknown) already merged by #18499", because it named no task of its own. A Codex thread on the Mac then reserved W1-T12705 (holder branch codex/flow-remedy-starvation-plan, 2026-11-14 19:01Z) and opened #18582 (branch run-W1-T12705-1794690664017) with the build and the trailer Remudero-Task: W1-T12705, but never filed this shard. So every review of #18582 was refused with head-task-metadata-unavailable (missing risk, budget_usd). This shard files the task that #18582 builds.
+    The build also makes the nightly state backup test portable to the Mac lane: BSD chmod refuses "--", and macOS temp dirs sit behind the /var -> /private/var link. The host script itself does not change.
+  design: |
+    INVARIANT every-eligible-candidate-is-walked: every eligible candidate is offered to the fileable check in cost order; a cause the check refuses is still recorded as skipped with its reason, and every cause the ladder files still passes the machine-filing judge and lint-plan's admission.
+    1. In ladderOf, walk all of candidates instead of candidates.slice(0, 8). The walk still stops at the first draft or escalation that becomes next.
+    2. Change the W1-T12548 criterion 5 test to drive the production flowGardenSpec with 8 NONE-owned plan-proof-unrunnable causes before an owned own-red cause; assert that the own-red cause is filed, that 8 flow-remedy.cause_skipped rows are logged, and that none of them is the own-red cause.
+    3. In the nightly state backup test, resolve the fixture dir with realpathSync and add a chmod stand-in on PATH that drops "--" before it runs /bin/chmod.
+    NOT IN SCOPE: the fileable check itself, owners for NONE-owned blockers, the escalation rung, the retry wait.
+  falsifier: |
+    Restore candidates.slice(0, 8) in ladderOf. The criterion 1 test then files nothing (no PR lands) and fails. Restore the change and it passes.
+  note: |
+    reservation hand-off: codex/flow-remedy-starvation-plan -> run-unfiled-1794759016000
+    Id W1-T12705 was reserved by a Codex thread for codex/flow-remedy-starvation-plan and used by #18582 without a filing. This filing hands it to run-unfiled-1794759016000. The build is #18582.

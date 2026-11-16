@@ -240,8 +240,9 @@ test("W1-T7746: the profile row carries sync_spawn_ms and the unattributed remai
     const lagMs = Number(row.lag_ms);
     const syncSpawnMs = Number(row.sync_spawn_ms);
     assert.ok(syncSpawnMs >= 400, `sync_spawn_ms ${syncSpawnMs}`);
-    assert.equal(row.unattributed_ms, lagMs - syncSpawnMs);
-    assert.ok(Number(row.unattributed_ms) >= 300, `unattributed_ms ${row.unattributed_ms}`);
+    // W1-T12753: the remainder is what neither the meter nor the profile explains.
+    assert.equal(row.unattributed_ms, Math.max(0, lagMs - syncSpawnMs - Number(row.profiled_ms)));
+    assert.ok(Number(row.unattributed_ms) < lagMs - syncSpawnMs, `unattributed_ms ${row.unattributed_ms}`);
     assert.equal((row.top_frames as Frame[])[0]?.function, "busyLoopPastTheBound");
   } finally {
     stopProfiled(telemetry);

@@ -23,7 +23,7 @@
     - test/open-pr-views-read-github-and-git-off-the-loop.test.ts
     - test/dispatch/dependency-main-identity.test.ts
     - test/the-sweep-sees-a-new-head-in-the-same-pass.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The sweep_light.pre_review_timing row carries open_pr_view_stages_ms: the time of each stage of openPrViewSteps (the open-PR list, the ledger read, the plan read, and each hydrate stage), so the row names the slow stage"

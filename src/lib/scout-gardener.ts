@@ -314,6 +314,11 @@ export function scoutShard(symptom: ScoutSymptom, taskId: string, population: re
       claim: `${symptom.step} stops recurring: its cause is fixed rather than its rows hidden`,
       proof: `grep: test("${taskId}: ${symptom.step} no longer recurs" in ${testPath}`,
     }],
+    invariants: { declared: [{ slug: "symptom-still-recorded",
+      statement: `${symptom.step} is still written to the ledger whenever its failure really occurs; the fix ends the cause, not the record of it.`,
+      claim: `${symptom.step} is still written to the ledger when its failure occurs`,
+      proof: `grep: test("${taskId}: the symptom is still recorded when its failure occurs" in ${testPath}`,
+    }] },
     note: `Filed by the scout gardener (W1-T5454). The scout measures this step again once the build merges and credits or debits its class by whether the rows stopped. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person.`,
     rationale: [
       `The ledger step ${symptom.step} carries a failure shape and landed rows in both halves of the trailing ${SCOUT_WINDOW_MS / 86_400_000} days: ${symptom.older} in the older half, ${symptom.newer} in the newer.`,

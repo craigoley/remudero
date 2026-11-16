@@ -179,6 +179,7 @@ import {
 } from "./provider-routing-policy.js";
 import { appendLedger } from "./ledger.js";
 import { createServeDemand, recordServeRequest, type ServeDemandOptions } from "./serve-demand.js";
+import { startServeThreadLoad, type ServeThreadLoadOptions } from "./serve-thread-load.js";
 import {
   buildAnalyticsRoute,
   coldAnalyticsSnapshot,
@@ -557,6 +558,8 @@ export interface ServeDeps {
     /** W1-T5355: the threads whose heaps the sample reads; absent, every thread this one spawns after serve is built. */
     workers?: () => readonly TrackedWorker[];
   };
+  /** W1-T11816: the minute thread-load sampler's seams (serve-thread-load.ts); absent, this process's real counters. */
+  threadLoad?: Omit<ServeThreadLoadOptions, "workers" | "log">;
   /** W1-T8711: the seams of serve's shared producer observation (host-serve-evidence.ts); absent, this host's real store. */
   hostServeEvidence?: HostServePublishOptions;
 }
@@ -3671,9 +3674,12 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
       log: deps.log,
       incident: (line) => appendLedger(deps.ledgerPath, line),
     });
+    // W1-T11816: each thread's CPU and loop share, and the gc share, once a minute over the threads sampled above.
+    const threadLoad = startServeThreadLoad({ ...deps.threadLoad, workers: liveThreads, log: (step, extra) => deps.log?.(step, extra) });
     server.on("close", () => {
       stopInvariants();
       stopMemory();
+      threadLoad.stop();
       // A supervised generation closing at a handoff is not serve stopping: its successor publishes its own, and a
       // supervisor that really stopped is read as stale (unknown), never as an explicit stop it did not make.
       if (!deps.generation) publishServe("serve-stopped");

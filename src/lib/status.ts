@@ -22,7 +22,7 @@ import { defaultIsPidAlive } from "./drain-lock.js";
 import { NEEDS_HUMAN_LABEL } from "./poll-interval.js";
 import { isHolderStale } from "./fs-race-safe.js";
 import { isTestRunner } from "./live-write-guard.js";
-import { boardRefreshRollup, type BoardSnapshotCache } from "./board-snapshot-cache.js";
+import { boardRefreshRollup, instanceBoardSnapshotCache, type BoardSnapshotCache } from "./board-snapshot-cache.js";
 import type { ChangedFileEvidence, ChangedFilesCache } from "./changed-files-cache.js";
 import type { WorkerState } from "./worker.js";
 import {
@@ -4932,6 +4932,16 @@ export function buildBatchedGithub(
   // W1-T2222: the issue fetch's OWN cross-refresh cache, same reasoning and same untouched-on-a-throw
   // discipline — an independent map, the two deltas having independent row shapes and failure modes.
   let knownIssues: Map<number, BoardIssueRest> | undefined = snapshotCache?.issueSeed();
+  let instanceSeedDue = snapshotCache === undefined && opts.ttlMs !== 0 && opts.exec === undefined && opts.fetchAll === undefined;
+  const seedFromInstance = (): void => {
+    if (!instanceSeedDue) return;
+    instanceSeedDue = false;
+    const cache = instanceBoardSnapshotCache(owner, repo, process.env, opts.log ? { log: opts.log } : {});
+    if (!cache) return;
+    snapshotCache = cache;
+    knownBoardPrs ??= cache.closedSeed();
+    knownIssues ??= cache.issueSeed();
+  };
   /** W1-T413: per-URL changed-file memo. `null` records a read that FAILED, so one unreachable PR is read once
    *  per gateway rather than once per task. */
   const changedFilesByUrl = new Map<string, string[] | null>();
@@ -4962,6 +4972,7 @@ export function buildBatchedGithub(
       // W1-T2323: THE OPEN HALF IS GIVEN NO DELTA BASE AND WRITES NONE. It re-reads the open set completely
       // every call, so the rows it returns ARE the open set, and a PR that merged since is absent from GitHub's
       // answer rather than resurrected from a cache. Seeding it would be the bug.
+      if (half !== "open") seedFromInstance();
       const known = half === "open" ? undefined : knownBoardPrs;
       const fetched = fetchBoardPrsRest(owner, repo, fetchJson, known, half);
       if (half !== "open") {
@@ -5005,6 +5016,7 @@ export function buildBatchedGithub(
         bytes += Buffer.byteLength(raw, "utf8");
         return JSON.parse(raw);
       };
+      seedFromInstance();
       const fetched = fetchLabelledIssuesRest(owner, repo, NEEDS_HUMAN_LABEL, fetchJson, knownIssues);
       // Reassigned only on a SUCCESSFUL return, exactly like `knownBoardPrs` — a throw skips this line, so a
       // transient failure leaves the previous complete snapshot intact and the NEXT call is still a cheap delta.
@@ -5453,6 +5465,7 @@ export function buildBatchedGithub(
       reviewsWarmInFlight.clear();
       fetchInFlight = false;
     };
+    if (fetchMerged || fetchIssues) seedFromInstance();
     const budget = githubInstallationBudget().threadInput();
     const req: PrewarmWorkerRequest = {
       kind: BOARD_PREWARM_WORKER_KIND,
@@ -5701,6 +5714,7 @@ export function buildBatchedGithub(
       runPrewarmWorker();
     },
     seedBoardSnapshot(cache) {
+      instanceSeedDue = false;
       snapshotCache = cache;
       knownBoardPrs ??= cache.closedSeed();
       knownIssues ??= cache.issueSeed();

@@ -1,0 +1,91 @@
+- id: W1-T12955
+  title: "A refused Dependabot PR gets a full review instead of a needs-human issue, and a nested pip requirements lock is a manifest"
+  repo: remudero
+  depends_on: []
+  priority: 1.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # changes which lane judges a Dependabot PR that the dep-review lane refuses; a wrong route could merge an unreviewed dependency change
+  origin: "operator-session#no-pr-waits-on-the-operator-2026-11-15"
+  plan_refs:
+    - W1-T3707
+    - W1-T9797
+    - W1-T12369
+    - W1-T12709
+    - W1-T12492
+    - W1-T100
+  files:
+    - src/lib/dep-review.ts
+    - src/run-task.ts
+    - src/lib/sweep.ts
+    - test/dep-review.test.ts
+    - test/a-refused-dependabot-pr-gets-a-full-review.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "isManifestPath accepts a pip requirements lock at any depth whose file name is requirements.txt, requirements-<name>.txt or <name>-requirements.txt (.github/semgrep/build-requirements.txt, .github/semgrep/requirements.txt, requirements-dev.txt), and still refuses other files (.github/semgrep/requirements.py, docs/requirements.md, .github/semgrep/build-requirements.txt.bak, src/requirements.ts)"
+      proof: "grep: W1-T12955 criterion 1 in test/dep-review.test.ts"
+    - claim: "For a Dependabot PR that the dep-review lane refuses and for which no W1-T9797 owned-build proposal is captured (for example reason foreign-commit), the dep-review command writes dep-review.decided with decision refuse and route review, and opens no needs-human escalation issue"
+      proof: "grep: W1-T12955 criterion 2 in test/a-refused-dependabot-pr-gets-a-full-review.test.ts"
+    - claim: "Through runSweep, the next pass disposes that PR as post-review (not dep-review) and runs the review command once for its head, with blocker owner review-lane"
+      proof: "grep: W1-T12955 criterion 3 in test/a-refused-dependabot-pr-gets-a-full-review.test.ts"
+    - claim: "invariant:review-gates-unchanged — a routed Dependabot PR is armed only on a delivered passing review verdict and green required checks; a failing verdict files the W1-T9797 owned-build proposal (a rebuild) and never dispatches a fix round onto the Dependabot branch"
+      kind: guard
+      proof: "grep: W1-T12955 criterion 4 in test/a-refused-dependabot-pr-gets-a-full-review.test.ts"
+    - claim: "When the full review delivers a verdict for the PR's head, an open dep-review-refused-PR<n> escalation issue for that PR is closed with a comment that names the review; no other open issue is closed"
+      proof: "grep: W1-T12955 criterion 5 in test/a-refused-dependabot-pr-gets-a-full-review.test.ts"
+    - claim: "invariant:owned-build-first — a refused Dependabot PR for which the W1-T9797 owned-build proposal is captured keeps that route as today"
+      kind: guard
+      proof: "grep: W1-T12955 criterion 6 in test/a-refused-dependabot-pr-gets-a-full-review.test.ts"
+  rationale: |
+    WHY: a Dependabot PR that the dep-review lane refuses waits for the operator for good. The lane refuses a PR
+    whose diff touches a file outside the manifest allowlist, opens a needs-human escalation issue and posts no
+    review. The sweep keeps disposing the PR to the dep-review lane, which refuses it again. The operator's rule is
+    that no PR waits on the operator: fix and land it, file held follow-ups, or close it and file a held rebuild.
+    MEASURED, core ledger (~/rmd-state2/state), 2026-11-14 18:15Z to 2026-11-15 18:16Z, PR #18405 (setuptools
+    84.0.0 to 84.1.0 in .github/semgrep/build-requirements.txt, plus two test files that pin the version):
+    - 11 dep-review.decided rows, all refuse, reason "diff touches file(s) outside the manifest/lockfile
+      allowlist", offendingFiles .github/semgrep/build-requirements.txt and the two test files.
+    - 10 dep-review.refused_path.not_proposed rows, reason foreign-commit: the head carries repair commits, so the
+      W1-T9797 owned-build proposal is not filed.
+    - 223 sweep.disposed rows with disposition dep-review and blocker awaiting-review; 6 pr.stuck rows.
+    - GitHub at about 18:25Z: #18405 OPEN, MERGEABLE, created 2026-11-13 22:56Z (over 43 h). Issue #18409
+      ("[BLOCKED] dep-review-refused-PR18405 ...") is open with needs-human, escalation-blocked and
+      needs-question. Issue #18412 (a stage-stall clarification for the same PR) is open.
+    READ at origin/main 57ca3bba9:
+    - src/lib/dep-review.ts:389 MANIFEST_PATTERNS is root-anchored. /^requirements(-[\w.]+)?\.txt$/ matches neither
+      a nested path nor a name with a prefix (build-requirements.txt).
+    - src/run-task.ts:12686 calls reconcileDependabotRefusedPath (src/lib/dep-review.ts:2321), which returns
+      not-proposed for a foreign commit; the refuse branch then opens the escalation (dep-review.ts:2297, task id
+      dep-review-refused-PR<n>).
+    - src/lib/sweep.ts:11996 disposes every Dependabot PR to dep-review, whatever the last decision was.
+    SCOPE: W1-T100 routes blocked CI to the ci-log fix path and never touches the dep-review lane or Dependabot
+    PRs. W1-T12709 (queued) removes the needs-human stand-down for the fix lane; it does not change the
+    dep-review refuse branch. W1-T9797 left widening MANIFEST_PATTERNS out of its own scope; this task widens it
+    for pip requirements locks only. W1-T12956 lands #18405's change by hand.
+    FALSIFIER: if, after this lands, a refused Dependabot PR still has an open dep-review-refused-PR<n> issue and
+    no review verdict after two full passes, the route is not wired in production.
+  design: |
+    INVARIANT review-gates-unchanged: routing changes who judges, not what merges; the full review and the
+    required checks still gate the merge.
+    INVARIANT owned-build-first: W1-T9797's owned-build proposal keeps precedence when it is captured.
+    1. src/lib/dep-review.ts: add one pattern for pip requirements locks at any depth:
+       /(^|\/)([\w.-]+-)?requirements(-[\w.]+)?\.txt$/. Do not widen any other ecosystem.
+    2. src/run-task.ts refuse branch: when reconcileDependabotRefusedPath returns not-proposed, write
+       dep-review.decided with decision refuse and route review, and do not open the dep-review-refused escalation.
+    3. src/lib/sweep.ts: a Dependabot PR whose newest dep-review.decided row at its head has route review gets the
+       post-review disposition (a row above the dep-review row). When a review verdict for that head is delivered,
+       close an open dep-review-refused-PR<n> issue for the PR with a comment that names the review.
+    4. A failing verdict on a routed PR files the W1-T9797 owned-build proposal; the fix lane never pushes onto a
+       Dependabot branch (the rule at sweep.ts:11990).
+    5. Add criterion 1 to test/dep-review.test.ts and the focused test file for criteria 2 to 6.
+    NOT IN SCOPE: landing #18405 (W1-T12956); other ecosystems' nested manifests; the fix lane's needs-human
+    stand-down (W1-T12709).
+  falsifier: |
+    Remove the new pattern: criterion 1 must fail. Open the escalation again on not-proposed: criteria 2 and 5 must
+    fail. Keep the dep-review disposition after a routed refuse: criterion 3 must fail. Arm a routed PR on a failing
+    verdict: criterion 4 must fail. Restore and require all to pass.
+  note: |
+    Id reserved for run-unfiled-1794767168000 with ~/rmd-work/bin/reserve-id.sh.
