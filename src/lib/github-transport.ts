@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { boundChildByLoopTime, childLoopBound, execFileLoopBounded } from "./loop-bounded-child.js";
 import type { ChildProcess, ExecFileSyncOptions, ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   accessSync, constants as fsConstants, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, utimesSync,
   writeFileSync,
@@ -19,7 +19,7 @@ import { RmdError } from "./errors.js";
 import { brokerGhRead, ghBrokerClientSpawn, ghBrokerRouteFor, type GhBrokerClass, type GhBrokerResult } from "./gh-read-broker-client.js";
 import { refreshInstallationToken } from "./github-app.js";
 import { createInstallationBudget, installationBudgetForThread, type InstallationBudget, type InstallationBudgetThreadInput, type GithubBudgetThrottledRow } from "./github-installation-budget.js";
-import { ghArgvNeedsNoCredential, githubRepoOfGhArgv, resolveGithubCredential } from "./github-credential.js";
+import { ghArgvNeedsNoCredential, githubRepoOfGhArgv, resolveGithubCredential, type GithubCredentialResolution } from "./github-credential.js";
 import { githubHttpRead, githubHttpReadConfigured, ghStdoutOfHttpRead, parseGhApiRead } from "./github-http-read.js";
 import { sameHost } from "./host-identity.js";
 import { LIVE_WRITE_SENTINEL_TOKEN, LiveWriteBlockedError } from "./live-write-guard.js";
@@ -161,12 +161,28 @@ export function refuseSentinelGhToken(file: string, args: readonly string[], env
 function ghCredentialEnv(file: string, args: readonly string[], env: NodeJS.ProcessEnv | undefined): NodeJS.ProcessEnv | undefined {
   const base = env ?? process.env;
   if (basename(file) !== "gh" || base.GH_TOKEN === LIVE_WRITE_SENTINEL_TOKEN || base.GITHUB_TOKEN === LIVE_WRITE_SENTINEL_TOKEN) return env;
+  return ghCredentialResolution(file, args, base).childEnv(env);
+}
+
+function ghCredentialResolution(file: string, args: readonly string[], base: NodeJS.ProcessEnv): GithubCredentialResolution {
   return resolveGithubCredential({
     env: base,
     repo: githubRepoOfGhArgv(args),
     operation: `gh ${args.slice(0, 2).join(" ")}`,
     mayRunWithout: () => ghArgvNeedsNoCredential(args) || resolvesToTmpdirStub(file, base),
-  }).childEnv(env);
+  });
+}
+
+/**
+ * W1-T12839: the identity the in-process client keys its stored answers by. INVARIANT
+ * a-stored-answer-never-crosses-identities: two credentials share it only when they are one identity.
+ * A GitHub App reference names its installation in the resolver's referenceKey, which an hourly
+ * token rotation keeps. Every other source names no identity but its token, so a one-way digest of
+ * the token stands in; the token text itself is never part of the key, and a new token starts afresh.
+ */
+export function githubReadIdentity(credential: Pick<GithubCredentialResolution, "source" | "referenceKey">, token: string): string {
+  if (credential.referenceKey !== undefined) return `app ${credential.referenceKey}`;
+  return `${credential.source} sha256:${createHash("sha256").update(token).digest("hex")}`;
 }
 
 /** `opts` with the child's credential environment. It is `opts` itself when nothing changes. */
@@ -482,10 +498,12 @@ function ghHttpReadFor(args: readonly string[]): (() => Promise<string>) | undef
   if (read === undefined || (env.GH_HOST ?? "github.com") !== "github.com") return undefined;
   if (env.GH_TOKEN === LIVE_WRITE_SENTINEL_TOKEN || env.GITHUB_TOKEN === LIVE_WRITE_SENTINEL_TOKEN) return undefined;
   if (!githubHttpReadConfigured() && resolvesToTmpdirStub("gh", env)) return undefined;
-  const childEnv = ghCredentialEnv("gh", args, undefined) ?? env;
+  const credential = ghCredentialResolution("gh", args, env);
+  const childEnv = credential.childEnv(undefined) ?? env;
   const token = childEnv.GH_TOKEN || childEnv.GITHUB_TOKEN;
   if (!token) return undefined;
-  return async () => ghStdoutOfHttpRead(read, await githubHttpRead(read, token));
+  const identity = githubReadIdentity(credential, token);
+  return async () => ghStdoutOfHttpRead(read, await githubHttpRead(read, token, { identity }));
 }
 
 /** Bounded, paced async `gh` transport for endpoints whose response is plain text (for example

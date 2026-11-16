@@ -274,12 +274,14 @@ test("W1-T12709 criterion 4: invariant:no-parked-pr, a fix lane stand-down hold 
   assert.equal(w.dispatched.length, 0, "the hold stays: nothing it read has changed, so no worker is dispatched");
   assert.equal(w.escalated.length, 0, "no needs-human issue is opened for the hold");
   assert.deepEqual(parkedWithoutRemedy(rows), []);
-  assert.equal(rows.filter(r => r.step === "sweep.disposed" && r.run_id === "parked-test" && r.disposition === "refused-escalate").length, 0);
-  assert.equal(rows.filter(r => r.step === "sweep.disposed" && r.run_id === "parked-test" && r.blocker === "escalated").length, 0);
+  // W1-T13045: the hold keeps refused-escalate and its escalated blocker, so the held-escalation ladder still reads it;
+  // its one remedy row keeps it inside invariant:no-parked-pr.
+  assert.equal(rows.filter(r => r.step === "sweep.disposed" && r.run_id === "parked-test" && r.disposition === "refused-escalate").length, 3);
   assert.deepEqual(w.remedies().map(r => [r.pr_number, r.head_sha, r.remedy, r.cause, r.outcome]),
     [[PR, head, "fix-on-pr", "stand-down:rung.empty_review_evidence", "taken"]], "one remedy row for the pull request, head and cause");
   const held = w.disposed().findLast(r => r.stand_down_hold === true)!;
-  assert.equal(held.disposition, "wait");
+  assert.equal(held.disposition, "refused-escalate");
+  assert.equal(held.acted, false);
   assert.equal(held.stand_down_site, "rung.empty_review_evidence");
 });
 

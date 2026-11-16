@@ -172,6 +172,30 @@ export async function takeParkedPrRemedy(pr: ParkedPrSubject, decision: ParkedPr
   }
 }
 
+/** W1-T13045: the cause a stand-down hold's remedy row names, `stand-down:<site>`. */
+export function standDownHoldCause(site: string): string {
+  return `stand-down:${site}`;
+}
+
+/** True when a parked_pr.remedy row already names the stand-down hold at `site` for this pull request and head. */
+export function standDownHoldRemedied(ledger: readonly Record<string, unknown>[], prNumber: number, headSha: string, site: string): boolean {
+  return ledger.some(r => r.step === PARKED_PR_REMEDY_STEP && r.pr_number === prNumber && r.head_sha === headSha &&
+    r.cause === standDownHoldCause(site) && r.remedy === "fix-on-pr" && r.outcome === "taken");
+}
+
+/**
+ * W1-T13045: the fix lane stood down (W1-T10339) and nothing it read has changed, so a dispatch would stand down again
+ * with no worker. The hold stays, but it opens no needs-human issue: it writes one fix-on-pr row for this pull request,
+ * head and stand-down site. A new head, a new task contract or body, or the held-escalation ladder releases the hold.
+ */
+export function standDownHoldRemedy(pr: ParkedPrSubject, hold: { site: string; reason: string }, ledger: readonly Record<string, unknown>[],
+  host: ParkedPrHost, ctx: Omit<ParkedPrContext, "cause" | "text">): Promise<ParkedPrOutcome> {
+  const decision: ParkedPrDecision = { remedy: "fix-on-pr", inputCriteria: [],
+    reason: `the fix lane stood down at ${hold.site} and nothing it read has changed, so the hold stays until a new head, ` +
+      "a new task contract or body, or the held-escalation ladder releases it; no needs-human issue is opened" };
+  return takeParkedPrRemedy(pr, decision, ledger, host, { ...ctx, cause: standDownHoldCause(hold.site), text: hold.reason });
+}
+
 function slug(text: string): string {
   return text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80).replace(/-+$/, "");
 }
