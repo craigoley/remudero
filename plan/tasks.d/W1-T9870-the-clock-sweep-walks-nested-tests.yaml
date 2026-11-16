@@ -13,7 +13,6 @@
   files:
     - scripts/clock-sweep.mjs
     - scripts/clock-sweep-baseline.json
-    - .github/workflows/clock-sweep.yml
     - test/the-clock-sweep-walks-nested-tests.test.ts
   status: queued
   priority: 1
@@ -38,18 +37,29 @@
        reported as such (it already surfaces stale exclusions at ~340).
     2. THEN walk test/ recursively, excluding fixtures. The diff regex accepts nested paths, and rendering prints the
        real path.
-    3. clock-sweep.yml's paths: entries for test files become `test/**/<name>.test.ts` globs, so a moved self-check
-       still triggers the workflow. The run: lines are re-keyed by the move tool (W1-T9879), not here.
     New test flat in test/.
+    INVARIANT an-exclusion-follows-its-file: an exclusion keyed by stem matches the same one file wherever it sits
+    under test/, so walking subfolders neither drops an exclusion nor widens one.
+    AMENDED 2026-11-16 (operator session): step 3 (clock-sweep.yml's paths: entries become `test/**/<name>.test.ts`
+    globs), its criterion (the glob grep on .github/workflows/clock-sweep.yml) and its falsifier sentence moved to
+    W1-T13162, and `.github/workflows/clock-sweep.yml` left `files:`. Why: the daemon never dispatches a task whose
+    `files:` names a path under .github/workflows/ (W1-T5351, `workflowPaths` in src/lib/drain.ts: the fleet App
+    cannot push a workflow file), so this whole task waited for an operator build that nothing announced. Steps 1 and
+    2 and criteria 1 to 3 need no workflow edit and are what remains here; an operator session hand-builds W1-T13162.
+    READ at origin/main ef8b74910f, so neither half is done: scripts/clock-sweep.mjs:102 is still
+    `return readdirSync(testDir)` and :123 still `const file = /^test\/([^/]+)\.test\.ts$/.exec(line);`, and
+    .github/workflows/clock-sweep.yml:31-33 still name `"test/clock-shift-probe.test.ts"`, `"test/clock-sweep.test.ts"`
+    and `"test/a-clock-sweep-runs-as-shards-and-merges-one-report.test.ts"`. The two halves do not depend on each
+    other: the sweep's walk reads no workflow, and the glob form is the one recovery-drill.yml:34 has carried since
+    W1-T9873 (#13360) for a test that still sits flat in test/. The INVARIANT line above and the `invariant:` prefix
+    on criterion 2 are new, for the lint rule design-invariant-proof; they restate step 1 and add no behaviour.
   acceptance:
     - claim: 'a nested test is a clock-sweep candidate'
       proof: 'grep: test("W1-T9870: a nested test is a clock-sweep candidate" in test/the-clock-sweep-walks-nested-tests.test.ts'
-    - claim: 'an exclusion keyed by stem still matches the file after it moves into a folder'
+    - claim: 'invariant:an-exclusion-follows-its-file — an exclusion keyed by stem still matches the file after it moves into a folder'
       proof: 'grep: test("W1-T9870: a stem exclusion still matches a moved file" in test/the-clock-sweep-walks-nested-tests.test.ts'
     - claim: 'an exclusion matching no current file is reported stale'
       proof: 'grep: test("W1-T9870: an exclusion matching no file is reported stale" in test/the-clock-sweep-walks-nested-tests.test.ts'
-    - claim: 'the workflow trigger follows its self-check suites into any folder'
-      proof: 'grep: test/\*\*/clock-sweep\.test\.ts in .github/workflows/clock-sweep.yml'
   falsifier: |
     On origin/main readdirSync(testDir) is top-level only, so a planted nested test is not a candidate. The flat regex
-    at ~123 rejects nested diff lines. The workflow's paths: entries name exact flat paths, so the glob grep misses.
+    at ~123 rejects nested diff lines.

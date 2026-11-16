@@ -1,0 +1,71 @@
+- id: W1-T13182
+  title: "The daemon's quota row counts its core GitHub reads by call site, so the largest consumer of an instance's share can be named from the ledger"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # it adds a count to the read path of every GitHub read in the transport, the daemon and the ledger contract; it must not slow or change a read
+  origin: "operator-session#measurements-2026-11-16"
+  plan_refs:
+    - W1-T10271
+    - W1-T12951
+    - W1-T12892
+    - W1-T12950
+  files:
+    - src/lib/github-transport.ts
+    - src/lib/daemon.ts
+    - src/lib/ledger-steps.ts
+    - test/github/the-daemon-quota-row-counts-core-reads-by-call-site.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Each stamped read adds 1 to a count keyed by the first call site outside the transport (the same frame ghCallSiteOutsideTransport names), and the daemon.quota row for bucket core carries reads_by_call_site, the top 15 sites by count since the previous row, with the rest summed as other"
+      proof: "grep: W1-T13182 criterion 1 in test/github/the-daemon-quota-row-counts-core-reads-by-call-site.test.ts"
+    - claim: "The sum of reads_by_call_site (with other) equals the sum of reads_stamped on the same row"
+      proof: "grep: W1-T13182 criterion 2 in test/github/the-daemon-quota-row-counts-core-reads-by-call-site.test.ts"
+    - claim: "invariant:counting-costs-no-stack-per-read — the call site is read once per call site per bundle line from a cache keyed by the caller, or only for every Nth read with the count scaled, so a read does not build a full stack trace each time; a benchmark test bounds the added time per read"
+      kind: guard
+      proof: "grep: W1-T13182 criterion 3 in test/github/the-daemon-quota-row-counts-core-reads-by-call-site.test.ts"
+    - claim: "A call site is written as a repository-relative file and line, the shape github.pace.loop_wait rows already use"
+      proof: "grep: W1-T13182 criterion 4 in test/github/the-daemon-quota-row-counts-core-reads-by-call-site.test.ts"
+  rationale: |
+    WHY: the console daemon still spends about 1,100 core GitHub reads an hour, against the 670 an hour
+    W1-T12951 aimed for, and no ledger row says which code spends them.
+    MEASURED, console ledger (/mnt/rmd/remudero-console-state/state, 2026-11-16 archives and live file),
+    daemon.quota bucket core, sum of reads_stamped per hour: 07Z 1,049, 08Z 1,111, 09Z 1,094, 10Z 1,066,
+    11Z 1,065, 12Z 1,115, 13Z 1,323 (mean about 1,118). sweep.summary dep-review reads 0 all day: the
+    dep-review holds W1-T12951 dedups cleared at 00:22Z, before it deployed, so it saves nothing now.
+    What the rows can attribute, 08Z to 14Z (6 h):
+    - board_gateway.rollup rest_calls: 253 open/full plus 253 closed/delta = 506 (about 84 an hour).
+    - board_gateway.issue_fetch_bytes: 1 rest call per fetch, about 41 an hour.
+    - github.pace.loop_wait call_site (only reads that waited): src/lib/sweep.ts:5735 (pullFoldDebt
+      readJson) 498, src/lib/review.ts:12880 29, src/lib/review.ts:11636 14, src/lib/escalate.ts:1983 8.
+    That is about 125 of about 1,100 reads an hour by count; the rest have no consumer on any row. The
+    loop_wait rows hint that fold-debt artifact reads are large, but they count waits, not reads, so they
+    cannot rank the consumers.
+    READ at origin/main ef8b74910:
+    - src/lib/github-transport.ts:1448-1478 ghReadCadenceCounts and takeGhReadCadenceTally count reads by
+      mode only (advisory, enforce, wait); :1864 is the one place a stamped read is counted.
+    - src/lib/github-transport.ts:820-833 ghCallSiteOutsideTransport already names the caller frame for
+      loop waits (:841).
+    - src/lib/daemon.ts:7711-7721 writes the tally on the first daemon.quota row of each poll.
+  design: |
+    INVARIANT counting-costs-no-stack-per-read: attribution adds a bounded, measured cost per read and never changes a read's result or timing class.
+    1. github-transport.ts keeps a Map<string, number> beside ghReadCadenceCounts. At :1864 it adds 1 under
+       the call site. To bound cost, take the stack for 1 read in N (named BACKSTOP constant, N = 8) and
+       scale, or cache by a cheap caller key; the test pins which.
+    2. takeGhReadCadenceTally returns reads_by_call_site (top 15 plus other) and resets the map.
+    3. daemon.ts carries it on the core daemon.quota row; ledger-steps.ts documents the field.
+    4. The task that reduces the largest consumer is filed from the first day of these rows, not here.
+  falsifier: |
+    Count by mode only: criteria 1 and 2 fail. Take a full stack on every read with no bound: criterion 3
+    fails. Write an absolute container path: criterion 4 fails.
+  note: |
+    Id reserved for run-unfiled-1794838967000 with ~/rmd-work/bin/reserve-id.sh.
+    W1-T12892 and open PR #18864 (W1-T12839) make an unchanged repeated read free; this row shows how much
+    they save, per consumer.
+    Proof that counts in production: console daemon.quota core rows with reads_by_call_site whose sum
+    matches reads_stamped.

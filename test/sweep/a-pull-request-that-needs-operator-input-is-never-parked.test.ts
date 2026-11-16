@@ -272,12 +272,14 @@ test("W1-T12709 criterion 4: invariant:no-parked-pr, a fix lane stand-down hold 
   assert.equal(w.dispatched.length, 0, "the hold stays: nothing it read has changed, so no worker is dispatched");
   assert.equal(w.escalated.length, 0, "no needs-human issue is opened for the hold");
   assert.deepEqual(parkedWithoutRemedy(rows), []);
-  assert.equal(rows.filter(r => r.step === "sweep.disposed" && r.run_id === "parked-test" && r.disposition === "refused-escalate").length, 0);
-  assert.equal(rows.filter(r => r.step === "sweep.disposed" && r.run_id === "parked-test" && r.blocker === "escalated").length, 0);
+  // W1-T13045: the hold keeps refused-escalate and its escalated blocker, so the held-escalation ladder still reads it;
+  // its one remedy row keeps it inside invariant:no-parked-pr.
+  assert.equal(rows.filter(r => r.step === "sweep.disposed" && r.run_id === "parked-test" && r.disposition === "refused-escalate").length, 3);
   assert.deepEqual(w.remedies().map(r => [r.pr_number, r.head_sha, r.remedy, r.cause, r.outcome]),
     [[PR, head, "fix-on-pr", "stand-down:rung.empty_review_evidence", "taken"]], "one remedy row for the pull request, head and cause");
   const held = w.disposed().findLast(r => r.stand_down_hold === true)!;
-  assert.equal(held.disposition, "wait");
+  assert.equal(held.disposition, "refused-escalate");
+  assert.equal(held.acted, false);
   assert.equal(held.stand_down_site, "rung.empty_review_evidence");
 });
 
@@ -293,7 +295,7 @@ test("W1-T12709 criterion 6: a clarification escalation for an open pull request
   for (let pass = 0; pass < 2; pass++) await runSweep([stale()], w.deps, DEFAULT_SWEEP_POLICY);
   assert.equal(w.escalated.length, 0, "the W1-T78 rung opens no needs-human issue for an open pull request");
   assert.deepEqual(w.remedies().map(r => [r.pr_number, r.remedy, r.cause, r.outcome]), [[PR, "fix-on-pr", "clarification", "taken"]]);
-  assert.match(String(w.remedies()[0]!.text), /not positively mergeable — checks none, review none/);
+  assert.match(String(w.remedies()[0]!.text), /zero check runs on head .*review none — CI suite recovery owns the bounded re-push/);
 });
 
 test("W1-T12709 criterion 9: invariant:never-close-healthy-work, nothing unmet and nothing red is fix-on-pr and never a close", async () => {
