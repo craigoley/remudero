@@ -626,7 +626,7 @@ export interface AuthorizeArgs extends RecoveryTuple {
   reason: string;
 }
 
-export interface RecoveryDeps {
+export interface RecoveryWiring {
   ports: RecoveryPorts;
   claimKeyOf: ClaimKeyOf;
   fixRoundClaimId: (runId: string, prNumber: number, nowMs: number) => string;
@@ -650,8 +650,8 @@ function dispatchMatches(rows: readonly Row[], t: RecoveryTuple): string | undef
   return undefined;
 }
 
-export async function authorizeStaleFixDispatchRecovery(args: AuthorizeArgs, deps: RecoveryDeps): Promise<RecoveryResult> {
-  const { ports } = deps;
+export async function authorizeStaleFixDispatchRecovery(args: AuthorizeArgs, wiring: RecoveryWiring): Promise<RecoveryResult> {
+  const { ports } = wiring;
   const invalid = validTuple(args) ?? (nonEmpty(args.reason) ? undefined : "--reason is required");
   if (invalid) return { outcome: "refused", reason: invalid };
   const t: RecoveryTuple = { ...args };
@@ -668,8 +668,8 @@ export async function authorizeStaleFixDispatchRecovery(args: AuthorizeArgs, dep
   const [owner, name] = splitRepo(t.repo)!;
   const tupleHash = recoveryTupleHash(t);
   const before = await readLedgerSafe(ports);
-  const ctx: ClaimContext = { tuple: t, rows: before.rows, tupleHash, fixRoundClaimId: deps.fixRoundClaimId };
-  const claim = await acquireClaim(ports, deps.claimKeyOf(owner, name, live.branch), `PR-OWNER-AUTH:${tupleHash}:${ports.nonce()}`, ctx);
+  const ctx: ClaimContext = { tuple: t, rows: before.rows, tupleHash, fixRoundClaimId: wiring.fixRoundClaimId };
+  const claim = await acquireClaim(ports, wiring.claimKeyOf(owner, name, live.branch), `PR-OWNER-AUTH:${tupleHash}:${ports.nonce()}`, ctx);
   if (!("storedRunId" in claim)) return { outcome: "refused", reason: claim.reason };
   try {
     await ports.underClaim?.();
@@ -764,8 +764,8 @@ async function lostClaim(ports: RecoveryPorts, t: RecoveryTuple, reason: string)
   return { outcome: "held", reason, durable: false };
 }
 
-export async function applyStaleFixDispatchRecovery(args: { authorizationId: string }, deps: RecoveryDeps): Promise<RecoveryResult> {
-  const { ports } = deps;
+export async function applyStaleFixDispatchRecovery(args: { authorizationId: string }, wiring: RecoveryWiring): Promise<RecoveryResult> {
+  const { ports } = wiring;
   const first = await readLedgerSafe(ports);
   if (!first.ok) return { outcome: "unknown", reason: "ledger_unreadable" };
   const candidates = first.rows.filter((row) => row.step === PR_OWNER_RECOVERY_AUTHORIZED_STEP && row.authorization_id === args.authorizationId);
@@ -774,8 +774,8 @@ export async function applyStaleFixDispatchRecovery(args: { authorizationId: str
   const t = candidate.tuple;
   const recoveryId = staleFixDispatchRecoveryId(identityOf(t, candidate.authorizationId));
   const [owner, name] = splitRepo(t.repo) ?? ["", ""];
-  const ctx: ClaimContext = { tuple: t, rows: first.rows, tupleHash: recoveryTupleHash(t), recoveryId, fixRoundClaimId: deps.fixRoundClaimId };
-  const claim = await acquireClaim(ports, deps.claimKeyOf(owner, name, t.branch), `PR-OWNER-RECOVER:${recoveryId}:${ports.nonce()}`, ctx);
+  const ctx: ClaimContext = { tuple: t, rows: first.rows, tupleHash: recoveryTupleHash(t), recoveryId, fixRoundClaimId: wiring.fixRoundClaimId };
+  const claim = await acquireClaim(ports, wiring.claimKeyOf(owner, name, t.branch), `PR-OWNER-RECOVER:${recoveryId}:${ports.nonce()}`, ctx);
   if (!("storedRunId" in claim)) return lostClaim(ports, t, claim.reason === "competing_branch_claim_held" ? "branch_claim_held" : claim.reason);
   try {
     await ports.underClaim?.();
@@ -853,11 +853,11 @@ async function applyUnderClaim(
 /** Same-host liveness of a lock holder: dead, alive, reused (a newer process on the pid) or foreign. */
 export function defaultProbeProcess(
   holder: LockHolder,
-  deps: { hostname: () => string; isPidAlive?: (pid: number) => boolean; startTime?: (pid: number) => number | null },
+  probe: { hostname: () => string; isPidAlive?: (pid: number) => boolean; startTime?: (pid: number) => number | null },
 ): StaleFixDispatchProcess["state"] {
-  if (!sameHost(holder.host, deps.hostname())) return "foreign_host";
-  if (!(deps.isPidAlive ?? defaultIsPidAlive)(holder.pid)) return "dead";
-  const started = (deps.startTime ?? defaultGetProcessStartTime)(holder.pid);
+  if (!sameHost(holder.host, probe.hostname())) return "foreign_host";
+  if (!(probe.isPidAlive ?? defaultIsPidAlive)(holder.pid)) return "dead";
+  const started = (probe.startTime ?? defaultGetProcessStartTime)(holder.pid);
   const lockMs = Date.parse(holder.startedAt);
   return started !== null && Number.isFinite(lockMs) && started - lockMs > 2000 ? "reused" : "alive";
 }

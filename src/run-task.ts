@@ -200,7 +200,7 @@ import {
   PR_OWNER_RECOVERY_AUTHORIZED_STEP,
   PR_OWNER_RECOVERY_RECEIPT_STEP,
   splitRepo,
-  type RecoveryDeps,
+  type RecoveryWiring,
   type RecoveryPorts,
   type RecoveryResult,
 } from "./lib/stale-fix-dispatch-recovery-apply.js";
@@ -4073,7 +4073,7 @@ export function prOwnerRecoverPorts(
   const name = splitRepo(repo)?.[1] ?? "";
   const clone = join(opts.root, "repos", name);
   const repoDir = name !== "" && existsSync(clone) ? clone : repoRoot;
-  const invocation = `pr-owner-recover-${Date.now()}`;
+  const invocation = `pr-owner-recover-${systemClock.now()}`;
   const steps = ["fix.dispatch", "fix.done", PR_OWNER_RECOVERY_AUTHORIZED_STEP, PR_OWNER_RECOVERY_RECEIPT_STEP];
   return {
     stateDir,
@@ -4109,7 +4109,7 @@ export function prOwnerRecoverPorts(
     descendants: (pid) => defaultDescendants(pid),
     cwdCensus: (path) => ({ state: readProcessCwdCensus(path).state }),
     git: defaultRecoveryGit(repoDir),
-    nowIso: () => new Date().toISOString(),
+    nowIso: () => systemClock.iso(),
     nonce: () => randomUUID().replace(/-/g, ""),
     hostname,
     pid: process.pid,
@@ -4120,9 +4120,9 @@ export function prOwnerRecoverPorts(
  *  verb, so it is deliberately absent from the read-only freshness and precondition exemptions. */
 export async function prOwnerRecoverCommand(
   rest: string[],
-  deps: { config?: () => { ledgerPath: string; root: string }; gh?: (args: string[]) => Promise<unknown>; write?: (text: string) => void; error?: (text: string) => void } = {},
+  io: { config?: () => { ledgerPath: string; root: string }; gh?: (args: string[]) => Promise<unknown>; write?: (text: string) => void; error?: (text: string) => void } = {},
 ): Promise<number> {
-  const error = deps.error ?? console.error;
+  const error = io.error ?? console.error;
   const badArg = unknownArgError("pr-owner-recover", rest.slice(1), PR_OWNER_RECOVER_VALUE_FLAGS, ["--authorize", "--apply"]);
   const prNumber = parsePrOwnerNumber(rest[0]);
   const mode = rest.includes("--authorize") === rest.includes("--apply") ? undefined : rest.includes("--apply") ? "apply" : "authorize";
@@ -4131,9 +4131,9 @@ export async function prOwnerRecoverCommand(
     return 2;
   }
   const flag = (name: string) => flagValue(rest, name) ?? "";
-  const config = (deps.config ?? (() => ({ ledgerPath: ledgerPathFor(loadConfig()), root: loadConfig().root })))();
-  const recovery: RecoveryDeps = {
-    ports: prOwnerRecoverPorts(flag("--repo"), { ...config, ...(deps.gh ? { gh: deps.gh } : {}) }), claimKeyOf: fixBranchClaimKey, fixRoundClaimId,
+  const config = (io.config ?? (() => ({ ledgerPath: ledgerPathFor(loadConfig()), root: loadConfig().root })))();
+  const recovery: RecoveryWiring = {
+    ports: prOwnerRecoverPorts(flag("--repo"), { ...config, ...(io.gh ? { gh: io.gh } : {}) }), claimKeyOf: fixBranchClaimKey, fixRoundClaimId,
   };
   let result: RecoveryResult;
   if (mode === "apply") {
@@ -4144,7 +4144,7 @@ export async function prOwnerRecoverCommand(
       headSha: flag("--head"), baseSha: flag("--base"), branch: flag("--branch"), reason: flag("--reason"),
     }, recovery);
   }
-  (deps.write ?? console.log)(JSON.stringify(result));
+  (io.write ?? console.log)(JSON.stringify(result));
   return result.outcome === "authorized" || result.outcome === "released" ? 0 : 1;
 }
 
