@@ -1,0 +1,55 @@
+- id: W1-T13203
+  title: "Serve's loop-lag invariant also fires on one stall of 30 s or more, and its incident names the stalled minute's top frames, so a 15-minute freeze is caught and attributed"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: low # one invariant rule's bad() and its message; the incident row shape and the SRE lane are unchanged
+  origin: "operator-session#serve-oom-2026-11-16"
+  plan_refs:
+    - W1-T10074
+    - W1-T13187
+  files:
+    - src/lib/incident-invariants.ts
+    - test/a-single-long-serve-stall-raises-the-loop-lag-incident.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "With runtime.loop_lag rows whose p99Ms stays at 108 ms and one row with maxMs 887,447, the loop-lag rule's bad() reports bad, and its message names the max stall in ms beside the p99"
+      proof: "grep: W1-T13203 criterion 1 in test/a-single-long-serve-stall-raises-the-loop-lag-incident.test.ts"
+    - claim: "When a runtime.loop_stall_profile row shares the long row's run_id, the message also names up to 3 top_inclusive function and file pairs from it, for example panel-graph.ts classifyAllProposals"
+      proof: "grep: W1-T13203 criterion 2 in test/a-single-long-serve-stall-raises-the-loop-lag-incident.test.ts"
+    - claim: "invariant:p99-path-unchanged — a window whose p99 is over LOOP_LAG_P99_BOUND_MS and whose max stays under LOOP_LAG_MAX_STALL_BOUND_MS is judged exactly as before, and a window under both bounds is not bad"
+      kind: guard
+      proof: "grep: W1-T13203 criterion 3 in test/a-single-long-serve-stall-raises-the-loop-lag-incident.test.ts"
+  rationale: |
+    WHY: serve's request loop was blocked for 14.8 minutes on 2026-11-16, and the loop-lag invariant never named it.
+    MEASURED on the Azure host, core ledger: the runtime.loop_lag row at 14:39:37Z has p50Ms 20.4, p99Ms 108.6 and
+    maxMs 887,447.6. The rule (src/lib/incident-invariants.ts, LOOP_LAG_RULE_ID) reads only p99Ms against
+    LOOP_LAG_P99_BOUND_MS (500 ms). The histogram behind p99 holds one sample per loop turn, so one 15-minute stall is
+    one sample and p99 stays low. The incident.event loop-lag rows that did fire in that hour (14:45 to 14:50Z) came
+    from later, smaller stalls, and none named a cause.
+    The stall profiler already ledgers runtime.loop_stall_profile on the same run_id as the lag row (W1-T10074,
+    loopStallLedgerLine), with top_inclusive frames. With them, the incident points the SRE lane at the code: the
+    887 s stall was classifyAllProposals on an Inbox write (W1-T13187, W1-T13188).
+  design: |
+    INVARIANT p99-path-unchanged: below the new max bound, the rule behaves exactly as today.
+    1. Add `export const LOOP_LAG_MAX_STALL_BOUND_MS = 30_000` beside LOOP_LAG_P99_BOUND_MS, with a comment that gives
+       the 887 s measurement.
+    2. In the loop-lag rule's bad(): also read numberField(row, "maxMs"); bad when the p99 test holds OR any row's
+       maxMs exceeds LOOP_LAG_MAX_STALL_BOUND_MS. The message keeps its p99 text and adds `max=<ms>ms` when the max
+       bound fired.
+    3. Add runtime.loop_stall_profile to the rule's inputs. For the row with the largest maxMs, find a profile row
+       with the same run_id and append `top: <function> (<file basename>)` for up to 3 of its top_inclusive entries.
+       No profile row: no top text.
+    4. No new ledger step, no change to the incident row shape or the SRE lane.
+  falsifier: |
+    Keep bad() on p99 only: criterion 1 fails. Drop the profile join: criterion 2 fails. Make the max bound replace
+    the p99 test: criterion 3 fails.
+  note: |
+    Id reserved for run-unfiled-1794844054000 with ~/rmd-work/bin/reserve-id.sh.
+    Proof that counts in production: the next serve stall of 30 s or more writes an incident.event loop-lag row
+    whose message carries max= and top frames.
