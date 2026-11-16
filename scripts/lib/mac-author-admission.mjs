@@ -27,28 +27,49 @@ export const MAC_AUTHOR_PEAK_SAFETY_FACTOR = 2;
 // 150.7 MiB; an affected-narrow run of 280 suites on one worker 184.2 MiB. Each phase takes the larger
 // whole-run peak, rounded up, so no phase is priced below a run that contains it. A phase or selection with
 // no row here is unmeasured and keeps MAC_AUTHOR_FREE_RESERVE_BYTES.
+// W1-T12953, sampled the same way on 2026-11-15: two full-fallback static stages grew 193.9 and 215.0 MiB, and
+// the test stage of a 295-suite over-capacity subset of a full fallback grew 138.6 MiB on one worker.
 export const MAC_AUTHOR_MEASURED_PEAK_BYTES = Object.freeze({
   entry: 256 * 1024 ** 2,
   'static-preflight': 256 * 1024 ** 2,
   'affected-tests-per-worker': 256 * 1024 ** 2,
+  'full-fallback-static-preflight': 256 * 1024 ** 2,
+  'over-capacity-subset-tests-per-worker': 256 * 1024 ** 2,
 });
 const SIZED_SELECTIONS = new Set(['plan-only', 'affected-narrow', 'affected-floor']);
 
+/** The measured row that prices `stage` for this workload and how many times it applies, or undefined. */
+function measuredReserveRow({stage, selection, workers, overCapacitySubset}) {
+  if (stage === 'entry') return ['entry', 1];
+  const perWorker = Number.isSafeInteger(workers) && workers >= 1;
+  if (SIZED_SELECTIONS.has(selection)) {
+    if (stage === 'static-preflight') return ['static-preflight', 1];
+    if (stage === 'affected-tests' && perWorker) return ['affected-tests-per-worker', workers];
+  } else if (selection === 'full-fallback') {
+    if (stage === 'static-preflight') return ['full-fallback-static-preflight', 1];
+    if (stage === 'affected-tests' && perWorker && overCapacitySubset === true)
+      return ['over-capacity-subset-tests-per-worker', workers];
+  }
+  return undefined;
+}
+
 /** The disk reserve one author phase needs: the OS floor plus a safety factor over that phase's measured peak,
- * never above the 20 GiB full-run reserve. A full fallback, an unknown selection or an unmeasured phase keeps
- * the full reserve, so the bound only ever relaxes where a measurement backs it. */
-export function macAuthorReserveBytes({stage, selection, workers} = {}) {
-  const full = {bytes: MAC_AUTHOR_FREE_RESERVE_BYTES, basis: 'existing-20GiB'};
-  const peak = MAC_AUTHOR_MEASURED_PEAK_BYTES;
-  let measured;
-  if (stage === 'entry') measured = peak.entry;
-  else if (!SIZED_SELECTIONS.has(selection)) return full;
-  else if (stage === 'static-preflight') measured = peak['static-preflight'];
-  else if (stage === 'affected-tests' && Number.isSafeInteger(workers) && workers >= 1)
-    measured = peak['affected-tests-per-worker'] * workers;
+ * never above the 20 GiB full-run reserve. An unknown selection, an unmeasured phase or a full fallback's test
+ * stage that runs whole keeps the full reserve, so the bound only ever relaxes where a measurement backs it.
+ * `row` and `measuredPeakBytes` name the measurement behind the reserve (null when none applied). */
+export function macAuthorReserveBytes(workload = {}) {
+  const full = {bytes: MAC_AUTHOR_FREE_RESERVE_BYTES, basis: 'existing-20GiB', row: null, measuredPeakBytes: null};
+  const found = measuredReserveRow(workload);
+  if (!found) return full;
+  const [row, times] = found, measured = MAC_AUTHOR_MEASURED_PEAK_BYTES[row] * times;
   if (!Number.isSafeInteger(measured) || measured <= 0) return full;
   const bytes = MAC_AUTHOR_OS_FLOOR_BYTES + MAC_AUTHOR_PEAK_SAFETY_FACTOR * measured;
-  return bytes >= full.bytes ? full : {bytes, basis: `measured-${stage}`};
+  return bytes >= full.bytes ? full : {bytes, basis: `measured-${workload.stage}`, row, measuredPeakBytes: measured};
+}
+
+/** What a refusal says about the reserve it applied: the basis, the measured row and peak behind it. */
+function reserveRecord(reserve) {
+  return {basis: reserve.basis, row: reserve.row, measuredPeakBytes: reserve.measuredPeakBytes};
 }
 
 /** `allocations` ([{key, path, minimumFreeBytes}]) replaces the workspace/scratch pair with one check per
@@ -202,18 +223,19 @@ export function requireMacAuthorCapacity(root, stage, readAdmission = readMacAut
   const {boundedProfile, context, bound, ...sizing} = workload ?? {};
   const bounded = workload && Object.hasOwn(workload, 'boundedProfile')
     ? boundedAuthorRequirement(boundedProfile, {context, bound}) : undefined;
-  let admission;
+  let admission, reserve;
   if (bounded?.state === 'bounded') {
+    reserve = {basis: 'bounded-profile', row: null, measuredPeakBytes: null};
     admission = readAdmission(root, {reserveBasis: 'bounded-profile',
       minimumFreeBytes: Math.max(...bounded.filesystems.map(row => row.minimumFreeBytes)),
       allocations: bounded.filesystems.map(({key, path, minimumFreeBytes}) => ({key, path, minimumFreeBytes}))});
   } else {
-    const reserve = macAuthorReserveBytes({stage, ...sizing});
+    reserve = macAuthorReserveBytes({stage, ...sizing});
     admission = readAdmission(root, {minimumFreeBytes: reserve.bytes, reserveBasis: reserve.basis});
   }
   if (bounded) admission = {...admission, boundedProfile: bounded};
   if (admission.state !== 'admitted' && admission.state !== 'not-applicable')
-    throw new MacAuthorCapacityRefusal(stage, admission);
+    throw new MacAuthorCapacityRefusal(stage, {...admission, reserve: reserveRecord(reserve)});
   return {stage, ...admission};
 }
 
@@ -228,7 +250,7 @@ export function guardedAuthorEntry(argv, {root, readAdmission = readMacAuthorAdm
   const admission = readAdmission(root, {minimumFreeBytes: entry.bytes, reserveBasis: entry.basis});
   if (admission.state === 'admitted' || admission.state === 'not-applicable')
     return runAuthor(argv, {admitHost: (stage, workload) => requireMacAuthorCapacity(root, stage, readAdmission, workload)});
-  reportRefusal(root, admission);
+  reportRefusal(root, {...admission, reserve: reserveRecord(entry)});
   return 3;
 }
 
@@ -251,15 +273,24 @@ const REFUSAL_STAGE_WORK = {
 };
 
 /** W1-T12297: what a capacity refusal at `stage` tells the operator. Disk guidance only when a
- * filesystem is short or unmeasured; a pressure-only refusal gets none. */
+ * filesystem is short or unmeasured; a pressure-only refusal gets none. W1-T12953: it names the reserve
+ * applied, the measurement behind it and the free bytes that would admit the run. */
 export function macAuthorRefusalReport(stage, admission) {
   const capacityChecks = Array.isArray(admission?.capacityChecks) ? admission.capacityChecks : [];
   const diskShort = capacityChecks.some(row => row.observedFreeBytes === null || row.shortfallBytes > 0);
-  const summary = {stage, authorWorkStarted: stage !== 'entry', capacityChecks, ...(diskShort ? {recoveryGuidance:
+  const required = capacityChecks.map(row => row.requiredFreeBytes).filter(Number.isSafeInteger);
+  const reserve = {basis: admission?.reserve?.basis ?? admission?.reserveBasis ?? null, row: admission?.reserve?.row ?? null,
+    measuredPeakBytes: admission?.reserve?.measuredPeakBytes ?? null,
+    admittingFreeBytes: required.length ? Math.max(...required) : admission?.minimumFreeBytes ?? null};
+  const summary = {stage, authorWorkStarted: stage !== 'entry', capacityChecks, reserve, ...(diskShort ? {recoveryGuidance:
     {action: 'measure-free-space-again', dryRunCommand: MAC_AUTHOR_JANITOR_DRY_RUN, documentation: 'deploy/mac/JANITOR.md'}} : {})};
   const bytes = value => value === null ? 'unknown' : `${value} bytes`;
   const lines = capacityChecks.map(row => `Capacity ${row.filesystem}: required ${row.requiredFreeBytes} bytes; ` +
     `observed ${bytes(row.observedFreeBytes)}; shortfall ${bytes(row.shortfallBytes)}.`);
+  lines.push(`Reserve applied: ${reserve.basis ?? 'unknown'}; ` + (reserve.row === null
+    ? 'no recorded measurement prices this stage'
+    : `measured row ${reserve.row}, peak ${reserve.measuredPeakBytes} bytes`) +
+    `; the run is admitted with ${bytes(reserve.admittingFreeBytes)} free on each filesystem checked.`);
   lines.push(REFUSAL_STAGE_WORK[stage] ?? `Author work started before ${stage}; no cleanup or process termination started.`);
   if (diskShort) lines.push(`Safe recovery: measure free space again, review ${MAC_AUTHOR_JANITOR_DRY_RUN}, ` +
     'and follow deploy/mac/JANITOR.md. Preflight deletes nothing.');
