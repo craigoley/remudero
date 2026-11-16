@@ -183,6 +183,7 @@ const BASELINE_COMMAND_NAMES = [
   "read-model",
   "reframe",
   "risk-judge-eval",
+  "judge-replay",
   "rule", "relay", "release", "repair-ladder", "replay", "replay-goldens", "restore", "resume", "retro", "review", "review-replay", "routing-ab", "rule-efficacy", "run-task",
   "serve", "serve-plist", "skill", "skill-eval", "status", "stop", "sweep", "sync", "test-place", "trace", "triage", "triage-outcomes", "up",
   "verdict-calibration",
@@ -226,6 +227,7 @@ const BASELINE_COMMAND_NAMES = [
 // W1-T10079: `reply`, `archive`, `snooze` and `keep` — the console's inbox verbs from one verb table — join the registry.
 // W1-T10561: `improvement-action` resumes a saved planning request through the daemon-owned workflow.
 // `procedures` — a read-only census of the tool-call steps clean merged runs repeat, per task type — joins the registry.
+// W1-T12418: `judge-replay` — replays the judge corpora through one named model in one Message Batch — joins the registry.
 test("COMMANDS carries the reviewed command-name inventory", () => {
   // The reviewed edit is the NAME added to the list above, beside its line of provenance. No count
   // literal rides with it: two PRs each adding a verb raise the same number from the same base, git
