@@ -458,6 +458,7 @@ function claimFacts(path: string, ours: string, prior: HeldClaim["prior"]): Stal
   try {
     holder = parseLockHolder(readFileSync(path, "utf8"));
   } catch (error) {
+    // An unreadable claim is never clear: the decision holds on branch_claim_unknown.
     return { state: "unknown", holder: messageOf(error) };
   }
   if (holder === undefined) return { state: "unknown" };

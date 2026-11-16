@@ -4084,6 +4084,7 @@ function prOwnerRecoverPorts(repo: string): RecoveryPorts {
         try {
           rows.push(JSON.parse(line) as Record<string, unknown>);
         } catch (error) {
+          // A garbled line makes the read incomplete, so every decision over it holds.
           unread.push(`unparseable ledger line: ${String((error as Error)?.message ?? error)}`);
         }
       }
