@@ -243,7 +243,7 @@ import type {
   ReviewEvidence,
   ReviewVerdict,
 } from "./review.js";
-import { DEP_REVIEW_ENGINE_REVISION, depReviewRowEngineRevision, isDependabotAuthor, dependabotOwnRedSignal, dependabotReviewArgs, dependabotRefreshVerdict, type DependabotOwnRedSignal, type DependabotRefreshVerdict } from "./dep-review.js";
+import { DEP_REVIEW_ENGINE_REVISION, depReviewRowEngineRevision, readDepReviewHoldState, isDependabotAuthor, dependabotOwnRedSignal, dependabotReviewArgs, dependabotRefreshVerdict, type DependabotOwnRedSignal, type DependabotRefreshVerdict } from "./dep-review.js";
 import { DEP_REVIEW_REFUSED_ASK_RETIRED_STEP, retireDepReviewRefusedAsk } from "./dep-review.js";
 import { parseLedger } from "./retro.js";
 import { readReviewHostObservation, selectRuntimeReviewWidth } from "./review-capacity.js";
@@ -7812,6 +7812,8 @@ export interface OpenPrView {
   redRequiredChecks?: string[];
   /** W1-T10067 — the same contract's children that have not concluded ({@link pendingQualityGateNames}). */
   pendingRequiredChecks?: string[];
+  /** W1-T12951 — each check's own state, for a Dependabot PR only ({@link dependabotCheckStates}). */
+  checkStates?: readonly DependabotCheckState[];
   /** W1-T2340 — this head's own workflow runs, the raw input {@link stalledRunReason} reads.
    *  `undefined` when the listing could not be fetched, never degrading to `[]`, which would read
    *  as "GitHub scheduled nothing" instead of "we could not check". Not yet populated by the real
@@ -7990,6 +7992,43 @@ export const REQUIRED_CHECK_FAIL = new Set([
   "STARTUP_FAILURE",
   "STALE",
 ]);
+
+export type DependabotCheckState = Pick<RollupCheckEntry, "name" | "context" | "status" | "conclusion" | "state">;
+
+/** W1-T12951 — the rollup's per-check states the view keeps, so a held Dependabot head can tell an unchanged pass. */
+export function dependabotCheckStates(
+  isDependabot: boolean, rollup: readonly RollupCheckEntry[] | undefined,
+): DependabotCheckState[] | undefined {
+  if (!isDependabot || rollup === undefined) return undefined;
+  return rollup.map((c) => ({ name: c.name, context: c.context, status: c.status, conclusion: c.conclusion, state: c.state }));
+}
+
+/** W1-T12951 — the digest of what a dependency hold read from the view; undefined (never dedup) when a field is
+ *  missing or a check is red, since a red hold waits on main's state, which this digest does not cover. */
+export function depReviewHoldInputsDigest(pr: Pick<OpenPrView, "headSha" | "checkStates" | "checksState" |
+  "redRequiredChecks" | "ciFailures" | "cancelledRequiredChecks" | "reviewState" | "mergeable" | "mergeableState" |
+  "mergeState" | "autoMergeArmed">): string | undefined {
+  if (!pr.headSha || pr.checkStates === undefined || (pr.mergeState === undefined && pr.mergeableState === undefined)) return undefined;
+  if (pr.checksState === "red" || (pr.redRequiredChecks?.length ?? 0) > 0 || (pr.ciFailures?.length ?? 0) > 0 ||
+      (pr.cancelledRequiredChecks?.length ?? 0) > 0) return undefined;
+  if (pr.checkStates.some((c) => REQUIRED_CHECK_FAIL.has((c.state ?? c.conclusion ?? "").toUpperCase()))) return undefined;
+  const checks = pr.checkStates.map((c) => JSON.stringify([c.name ?? "", c.context ?? "", c.status ?? "", c.conclusion ?? "", c.state ?? ""])).sort();
+  return createHash("sha256").update(JSON.stringify([pr.headSha, checks, pr.reviewState, pr.mergeable ?? null,
+    pr.mergeableState ?? null, pr.mergeState ?? null, pr.autoMergeArmed, DEP_REVIEW_ENGINE_REVISION])).digest("hex");
+}
+
+/** W1-T12951 — W1-T9818's escalation is filed for this head: the hold state file holds its unretired ask. */
+function depReviewHoldEscalationFiled(ledgerPath: string, pr: Pick<OpenPrView, "prNumber" | "prUrl" | "headSha">): boolean {
+  const slug = /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/\d+$/.exec(pr.prUrl);
+  if (!slug) return false;
+  const statePath = join(dirname(ledgerPath), "dep-review-holds", slug[1], slug[2], `PR${pr.prNumber}.json`);
+  if (!existsSync(statePath)) return false;
+  try {
+    return readDepReviewHoldState(statePath, pr.headSha).asks.some((ask) => ask.headSha === pr.headSha && !ask.retired);
+  } catch {
+    return false; // an unreadable hold state cannot prove the escalation, so the hold is judged again
+  }
+}
 
 export function rollupProducerKey(c: RollupCheckEntry): { key: string; known: boolean } {
   const posted = /^(?:run:\d+:\d+:)?job:\d+$/.test(c.externalId ?? "");
@@ -15951,6 +15990,8 @@ interface PriorActions {
   escalated: Set<string>;
   /** `pr@head` keys whose dep-review reached a TERMINAL outcome (arm/escalate/refuse). */
   depReviewed: Set<string>;
+  /** W1-T12951 — `pr@head` to the input digest of the newest acted dep-review row, when it was a hold. */
+  depReviewHoldDigests: Map<string, string>;
   /** Exact-input keys with a DELIVERED verdict. NOT keyed off `sweep.disposed acted:true` like the
    *  other sets: that proves only the LANE WAS INVOKED, and keying on the attempt suppressed the
    *  same input forever after one no-op invocation. W1-T1213 split off {@link reviewRefused}. */
@@ -16910,6 +16951,7 @@ function priorActionsFromLedger(
   const closed = new Set<number>();
   const escalated = new Set<string>();
   const depReviewed = new Set<string>();
+  const depReviewHoldDigests = new Map<string, string>();
   const reviewDelivered = new Set<string>();
   // W1-T5840 — exact-input keys whose NEWEST delivered verdict is a failure, with its post time.
   const reviewDeliveredFailureAt = new Map<string, number>();
@@ -17134,6 +17176,10 @@ function priorActionsFromLedger(
             depReviewRowEngineRevision(line) === DEP_REVIEW_ENGINE_REVISION) {
           depReviewed.add(`${pr}@${typeof line.head_sha === "string" ? line.head_sha : ""}`);
         }
+        if (line.dep_review_outcome === "hold" && typeof line.dep_review_inputs_digest === "string" &&
+            depReviewRowEngineRevision(line) === DEP_REVIEW_ENGINE_REVISION) {
+          depReviewHoldDigests.set(`${pr}@${typeof line.head_sha === "string" ? line.head_sha : ""}`, line.dep_review_inputs_digest);
+        } else depReviewHoldDigests.delete(`${pr}@${typeof line.head_sha === "string" ? line.head_sha : ""}`);
         break;
       // "post-review" deliberately absent here (W1-T254): see the
       // `review.posted`/`review.post_refused` branch above.
@@ -17153,6 +17199,7 @@ function priorActionsFromLedger(
     closed,
     escalated,
     depReviewed,
+    depReviewHoldDigests,
     reviewDelivered,
     reviewRefused,
     reviewRetryableThrows,
@@ -21992,6 +22039,8 @@ export async function runSweep(
         snapshot_age_ms: snapshotAgeMs(index),
         ...(rederivedIndices.has(index) ? { rederived: true } : {}),
         ...(depReviewOutcome ? { dep_review_outcome: depReviewOutcome, dep_review_engine_revision: DEP_REVIEW_ENGINE_REVISION } : {}),
+        ...(depReviewOutcome === "hold" && depReviewHoldInputsDigest(pr) !== undefined
+          ? { dep_review_inputs_digest: depReviewHoldInputsDigest(pr) } : {}),
         ...(actionError ? { action_error: actionError } : {}),
         ...(standDownReason && !deliveredStandDownLogged ? { stand_down_reason: standDownReason } : {}),
         ...(deliveredStandDownLogged ? { stand_down_unchanged: true } : {}),
@@ -23361,6 +23410,14 @@ export async function runSweep(
           dedupStandDownReason =
             `dependency review already reached a TERMINAL outcome at this head ` +
             `(${pr.headSha.slice(0, 7)}) under engine ${DEP_REVIEW_ENGINE_REVISION} — a hold would have re-run instead of deduping`;
+        } else if (!depReviewDedupStandsAside(pr)) {
+          const holdDigest = depReviewHoldInputsDigest(pr);
+          if (holdDigest !== undefined && prior.depReviewHoldDigests.get(`${pr.prNumber}@${pr.headSha}`) === holdDigest &&
+              depReviewHoldEscalationFiled(deps.ledgerPath, pr)) {
+            alreadyDone = true;
+            dedupStandDownReason = `dependency hold inputs have not changed at this head (${pr.headSha.slice(0, 7)}) ` +
+              `since the last judgement and its escalation is filed — the hold is not judged again`;
+          }
         }
         break;
       case "post-review": {
