@@ -14,6 +14,7 @@ import { isMainThread } from "node:worker_threads";
 import { collectAtAgentWait, type AgentWaitHeap } from "./lib/agent-wait-heap.js";
 import { runsBundled } from "./lib/child-entry-argv.js";
 import { startInstallationTokenRefresh } from "./lib/github-app.js";
+import { daemonInstallationRegistry, startProcessInstallationBudget } from "./lib/installation-budget-start.js";
 import { markRunChildProcessActor } from "./lib/ledger.js";
 import { appendLedger } from "./lib/ledger.js";
 import { loadConfig } from "./lib/config.js";
@@ -216,6 +217,17 @@ export async function runChildMain(argv: readonly string[], deps: RunChildMainPo
       throw new Error(work !== undefined ? "the loaded run path exports no runDetachedWork" : "the loaded run path exports no runTask");
     }
     restoreActor = markRunChildProcessActor();
+    // W1-T12950: the run reads with the installation token, so it reads within the run children's share.
+    try {
+      startProcessInstallationBudget({
+        role: "run_child", env: deps.env ?? process.env,
+        readRegistry: () => daemonInstallationRegistry(loadConfig().root),
+        log: (step, fields) => appendLedger(ledgerPathFor(loadConfig()), { run_id: value.runId, task_id: value.taskId, step, ...fields }),
+      });
+    } catch (error) {
+      // A ledger that refuses the budget row must not end the run; the child's stderr names it.
+      stderr(`run-child: the installation budget row could not be written: ${String(error)}\n`);
+    }
     const background: Promise<unknown>[] = [];
     let phase = work !== undefined ? work.kind : "run";
     const beat = setInterval(() => status("running", phase, {}), deps.heartbeatMs ?? RUN_CHILD_HEARTBEAT_MS);
