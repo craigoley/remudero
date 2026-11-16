@@ -16,7 +16,7 @@
   files:
     - src/lib/affected-suites.ts
     - test/ci/suites/a-change-under-the-github-folder-selects-the-suites-that-name-or-read-it.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A changed file under .github selects the suites that name its path or that the read map records as reading it, and no longer forces a full run by being outside what the selector models"

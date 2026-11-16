@@ -28,9 +28,9 @@ on:
       - "scripts/clock-shift.mjs"
       - "scripts/clock-sweep.mjs"
       - "scripts/clock-sweep-aggregate.mjs"
-      - "test/clock-shift-probe.test.ts"
-      - "test/clock-sweep.test.ts"
-      - "test/a-clock-sweep-runs-as-shards-and-merges-one-report.test.ts"
+      - "test/**/clock-shift-probe.test.ts"
+      - "test/**/clock-sweep.test.ts"
+      - "test/**/a-clock-sweep-runs-as-shards-and-merges-one-report.test.ts"
       - ".github/workflows/clock-sweep.yml"
 
 permissions:

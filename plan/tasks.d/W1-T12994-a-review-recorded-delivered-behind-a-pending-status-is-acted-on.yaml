@@ -17,7 +17,7 @@
   files:
     - src/lib/sweep.ts
     - test/sweep/a-review-recorded-delivered-behind-a-pending-status-is-acted-on.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "When the newest review.posted row for a head and input is a pending cannot-evaluate hold and its owner is proven dead, the claim's action-time read does not dedup it as delivered: the review runs again, as the walk already decides"
