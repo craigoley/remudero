@@ -1,6 +1,7 @@
 import { CANNOT_TELL_OPTION, DECISION_ANSWERED_STEP, DECISION_SCORE_LEVELS } from "./decision-model.js";
 import { scoreSelfForecasts, type ReliabilityBin } from "./self-forecast.js";
 import { TYPED_JUDGMENT_SUM_TOLERANCE } from "./typed-judgment.js";
+import { MODEL_SURFACES, type ModelSurface } from "./worker-provider.js";
 
 /**
  * W1-T12414: recorded typed answers are scored per role and per model. A recorded answer comes
@@ -11,9 +12,11 @@ import { TYPED_JUDGMENT_SUM_TOLERANCE } from "./typed-judgment.js";
  *
  * THE OUTPUT IS STABLE ({@link TYPED_ANSWER_SCORES_VERSION}). Readers: the judge calibration body
  * (lib/judge-calibration.ts) now; the shadow summary and the config gardener later.
- * - A group is one (role, question, model, source). `source` is "decisions" or "generative", so the
- *   same model id answering decision questions never pools with it generating text. Two models in
- *   one role are two groups. A model with no rows has no group.
+ * - A group is one (role, question, model, model surface), keyed through {@link typedAnswerKey}
+ *   (W1-T12420). The surface is "decisions" or "text" (lib/worker-provider.ts `ModelSurface`), so
+ *   the same model id answering decision questions never pools with it generating text. Two models
+ *   in one role are two groups. A model with no rows has no group. `source` names the reader the
+ *   answer came from and is not part of the key.
  * - `agreement` compares the top option of a distribution, or the single answer, with the current
  *   judge's answer. Only answers with a current judge's answer are compared.
  * - `brier`, `logLoss` and `buckets` use only distributions with a known outcome. The current
@@ -52,6 +55,8 @@ export interface TypedAnswerRow {
   question: string | null;
   model: string;
   source: TypedAnswerSource;
+  /** W1-T12420: the surface the model answered on; part of every figure's key. */
+  modelSurface: ModelSurface;
   questionType: TypedQuestionType | null;
   /** The declared options in order (a score question's levels in order); null when not recorded. */
   options: string[] | null;
@@ -121,16 +126,29 @@ export function decisionOptionKeyFor(values: readonly unknown[], withCannotTell:
   return new Set(plain).size === plain.length || !typedUnique ? (value) => String(value) : typed;
 }
 
-/** The rows of one `decision.answered` ledger row: one per question, model = the candidate's name. */
+/** W1-T12420: the one key of a figure. A model's surface is part of it, beside its role and model id. */
+export function typedAnswerKey(role: string, model: string, modelSurface: ModelSurface, question: string | null): string {
+  return JSON.stringify([role, question, model, modelSurface]);
+}
+
+const isModelSurface = (value: unknown): value is ModelSurface => (MODEL_SURFACES as readonly unknown[]).includes(value);
+
+/** A row read back from a checkpoint written before surfaces existed reads its surface from its source. */
+const surfaceOf = (row: Pick<TypedAnswerRow, "modelSurface" | "source">): ModelSurface =>
+  isModelSurface(row.modelSurface) ? row.modelSurface : row.source === "decisions" ? "decisions" : "text";
+
+/** The rows of one `decision.answered` ledger row: one per question, model = the candidate's name.
+ *  A row with no `model_surface` field reads as the decisions surface by its step. */
 export function decisionAnsweredTypedAnswers(line: Record<string, unknown>): TypedAnswerRow[] {
   if (line.step !== DECISION_ANSWERED_STEP || line.outcome !== "answered" || !Array.isArray(line.answers)) return [];
   const role = typeof line.role === "string" && line.role ? line.role : undefined;
   const model = typeof line.candidate === "string" && line.candidate ? line.candidate : undefined;
   if (role === undefined || model === undefined) return [];
   const inputDigest = typeof line.input_digest === "string" ? line.input_digest : null;
+  const modelSurface: ModelSurface = isModelSurface(line.model_surface) ? line.model_surface : "decisions";
   return line.answers.filter(isRecord).map((raw): TypedAnswerRow => {
     const base = { role, question: typeof raw.name === "string" ? raw.name : null, model, source: "decisions" as const,
-      inputDigest, incumbent: null, outcome: null };
+      modelSurface, inputDigest, incumbent: null, outcome: null };
     if (raw.outcome === "abstained")
       return { ...base, questionType: null, options: null, answer: { kind: "abstained", reason: raw.reason === "cannot-tell" ? "cannot-tell" : "refusal" } };
     if (raw.outcome !== "distribution" || !Array.isArray(raw.distribution))
@@ -156,6 +174,7 @@ export interface TypedAnswerScoreGroup {
   question: string | null;
   model: string;
   source: TypedAnswerSource;
+  modelSurface: ModelSurface;
   answers: number;
   distributions: number;
   singles: number;
@@ -188,8 +207,9 @@ export function scoreTypedAnswers(rows: readonly TypedAnswerRow[], opts: { bins?
   if (!Number.isInteger(bins) || bins < 1) throw new RangeError("scoreTypedAnswers: bins must be a positive integer");
   const byGroup = new Map<string, Array<TypedAnswerRow & { checked: TypedAnswer }>>();
   for (const row of rows) {
-    const key = JSON.stringify([row.role, row.question, row.model, row.source]);
-    byGroup.set(key, [...(byGroup.get(key) ?? []), { ...row, checked: checkTypedAnswer(row) }]);
+    const modelSurface = surfaceOf(row);
+    const key = typedAnswerKey(row.role, row.model, modelSurface, row.question);
+    byGroup.set(key, [...(byGroup.get(key) ?? []), { ...row, modelSurface, checked: checkTypedAnswer(row) }]);
   }
   const groups = [...byGroup.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([, members]): TypedAnswerScoreGroup => {
     const count = (kind: TypedAnswer["kind"]): number => members.filter((m) => m.checked.kind === kind).length;
@@ -212,7 +232,7 @@ export function scoreTypedAnswers(rows: readonly TypedAnswerRow[], opts: { bins?
     }), { bins }).groups[0]!.reliability;
     const first = members[0]!;
     return {
-      role: first.role, question: first.question, model: first.model, source: first.source,
+      role: first.role, question: first.question, model: first.model, source: first.source, modelSurface: first.modelSurface,
       answers: members.length, distributions: distributions.length, singles: count("single"),
       abstained: count("abstained"), rejected: count("rejected"),
       abstentionRate: count("abstained") / members.length, rejectionRate: count("rejected") / members.length,

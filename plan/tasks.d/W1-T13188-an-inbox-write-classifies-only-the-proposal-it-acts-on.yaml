@@ -1,0 +1,60 @@
+- id: W1-T13188
+  title: "An Inbox write route classifies only the proposal it acts on, not all 2,343, so decline, restore, keep, reframe, archive and snooze answer in about a second instead of blocking serve"
+  repo: remudero
+  depends_on: []
+  priority: 0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # which proposals a write classifies; each verb's checks, ledger rows and answers are unchanged
+  origin: "operator-session#serve-oom-2026-11-16"
+  plan_refs:
+    - W1-T4261
+    - W1-T2604
+    - W1-T2220
+  files:
+    - src/lib/panel-graph.ts
+    - test/console-api/an-inbox-write-classifies-only-the-proposal-it-acts-on.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "With a registry of 40 proposals and a counting classifier, POST /v1/inbox/decline, /v1/inbox/restore, /v1/inbox/keep, /v1/inbox/reframe, /v1/inbox/archive and /v1/inbox/snooze each classify at most one proposal (the one named) and answer as before (200 with the same body, and the same ledger step)"
+      proof: "grep: W1-T13188 criterion 1 in test/console-api/an-inbox-write-classifies-only-the-proposal-it-acts-on.test.ts"
+    - claim: "A write naming an id absent from the registry still answers 404 not_found, and a decline of an informational age observation still answers 409 informational_only, with no classification of any other proposal"
+      proof: "grep: W1-T13188 criterion 2 in test/console-api/an-inbox-write-classifies-only-the-proposal-it-acts-on.test.ts"
+    - claim: "invariant:approve-keeps-its-full-read — POST /v1/inbox/approve still reads the plan through loadPlanAtRef and classifies through the full pass (W1-T2220), so the one irreversible verb is unchanged"
+      kind: guard
+      proof: "grep: W1-T13188 criterion 3 in test/console-api/an-inbox-write-classifies-only-the-proposal-it-acts-on.test.ts"
+  rationale: |
+    WHY: a Console Decline ran 887 s inside serve on 2026-11-16 (14:24:52Z to 14:39:35Z) and blocked serve's main loop
+    the whole time (runtime.loop_lag maxMs 887,447.6), so every Console read and GitHub webhook waited. The Console
+    reported the write as failed while it was still running. W1-T13187 removes the per-path git processes; this task
+    removes the other 2,342 classifications each write does.
+    READ at origin/main (ef8b74910), src/lib/panel-graph.ts:
+    - classifyAllProposals (:2180), "recomputed on every call", loads the plan, projects it, reads the ledger, and
+      returns `classifications: pass.proposals.map(pass.classifyOne)` for every proposal in the registry.
+    - Its write callers use the result for one proposal only: proposalVerdictResponse (decline, restore; :3724), reframe
+      (:3915), keep (:3935), archive (:3954) and snooze (:3965) look up `proposalId`, and refuseInformationalProposal
+      (:3861) filters both lists to that id. archive and snooze read `proposals` only.
+    - approve (:3891) is the one irreversible verb and reads through loadPlanAtRef; it stays on the full pass.
+    - The read routes keep their own memo (classifyAllProposalsMemo, W1-T4261), unchanged.
+  design: |
+    INVARIANT approve-keeps-its-full-read: approve's plan read and classification are unchanged.
+    1. Give classifyAllProposals an optional `only?: string` (a proposal id). With it, `classifications` holds
+       classifyOne of the matching registry entries only (zero or one); `proposals` stays the whole registry, so
+       existence checks and refuseInformationalProposal answer exactly as before.
+    2. Pass `only: input.proposalId` from proposalVerdictResponse, reframe, keep, archive and snooze. Leave approve as it is.
+    3. No change to prepareInboxPass, classifyProposal, the memo, the ledger rows or any response body.
+    4. Tests in test/console-api/an-inbox-write-classifies-only-the-proposal-it-acts-on.test.ts, built like
+       test/the-operator-can-archive-or-snooze-an-inbox-item.test.ts and test/the-console-inbox-can-decline-a-proposal.test.ts:
+       a temp inbox root with a 40-entry registry; count classifications through the draft cache the classifier reads
+       (or a counting statusGithub/fragment seam the pass already takes), and drive each route through buildPanelWriteRoutes.
+  falsifier: |
+    Drop `only` from any one write caller: criterion 1 fails for that route (40 classifications). Filter `proposals`
+    as well as `classifications`: criterion 2 fails (refuseInformationalProposal and existence change). Pass `only`
+    from approve: criterion 3 fails.
+  note: |
+    Id reserved for run-unfiled-1794841088000 with ~/rmd-work/bin/reserve-id.sh.
+    Proof that counts in production: after the deploy, serve.demand max for /v1/inbox/decline and /v1/inbox/archive is
+    under 5,000 ms at host load above 30, and runtime.loop_lag maxMs stays under 5,000 ms in the minute of each write.
