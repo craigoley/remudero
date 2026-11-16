@@ -37,8 +37,9 @@
     when the landing sets that filing aside. The release looks for the reservation in the wrong repository,
     finds nothing, and records the release as done.
     MEASURED 2026-11-16 on the Azure host, origin/main ef8b74910:
-    - git ls-remote origin 'refs/rmd-id/*' on the public repository: 9,869 reservations. Of the ids from
-      W1-T12000 up, 311 have no task file in plan/tasks.d, plan/tasks.yaml or the ops repository tree.
+    - git ls-remote origin 'refs/rmd-id/*' on the public repository: 9,869 reservations. Of the ids with
+      numeric suffix 12000 or greater, 311 have no task file in plan/tasks.d, plan/tasks.yaml or the ops
+      repository tree.
     - 5 of those 311 name the ops landing branch as holder (anchor line "rmd-id holder
       branch=task-files-landing-craigoley-remudero-ops-default-ef22dfffbeee"): W1-T13049, W1-T13143,
       W1-T13145, W1-T13160, W1-T13161. Every pull request on that branch in the ops repository is merged
@@ -84,8 +85,8 @@
   note: |
     Id reserved for run-unfiled-1794837666000 with ~/rmd-work/bin/reserve-id.sh.
     The 5 refs already burned (W1-T13049, W1-T13143, W1-T13145, W1-T13160, W1-T13161) are not part of this
-    task; this task stops new leaks. The other 306 orphan refs from W1-T12000 up are held by other branches
-    (178 by the public task-files-landing branch, the rest by run-* and garden branches) and are a different
-    cause, not measured here.
+    task; this task stops new leaks. The other 306 orphan refs with numeric suffix 12000 or greater are
+    held by other branches (178 by the public task-files-landing branch, the rest by run-* and garden
+    branches) and are a different cause, not measured here.
     Proof that counts in production: after a destination set-aside, the task_files_landing.set_aside row
     carries id_release released and git ls-remote on the public repository no longer lists that id.
