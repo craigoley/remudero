@@ -10,7 +10,7 @@ import { test } from "node:test";
 
 import { fixedClock } from "#src/lib/clock.js";
 import type { Escalation } from "#src/lib/escalate.js";
-import { gardenStatePath, prepareGardenTaskIds, runGarden, type GardenAction, type GardenCheckout, type GardenSpec, type GardenTaskIdMinter } from "#src/lib/gardener.js";
+import { gardenStatePath, prepareGardenTaskIds, runGarden, runGardenAsync, type GardenAction, type GardenCheckout, type GardenSpec, type GardenTaskIdMinter } from "#src/lib/gardener.js";
 import { OVERSEER_STEP_PATTERN, runGardenerOverseer, type GardenerOverseerPorts } from "#src/lib/gardener-overseer.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
@@ -142,19 +142,23 @@ test("W1-T12834 criterion 3: a check refusing two gardens keeps the per-garden n
 type Action = GardenAction<"file"> & { origin: string };
 
 /** A garden that files one task per finding through the shared preparation, over a landing the preflight refuses. */
-function filingGarden() {
+function filingGarden(opts: { async?: boolean; releaseThrows?: boolean } = {}) {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t12834-garden-`));
   const minted: string[] = [];
   const released: string[] = [];
   const filed: Array<Record<string, string>> = [];
   const logs: Row[] = [];
-  const world = { findings: ["scout:step-a", "scout:step-b"], opens: false, note: 0 };
+  const world = { findings: ["scout:step-a", "scout:step-b"], opens: false, note: 0, branch: "rmd-task-files-landing" };
+  const release = (id: string) => {
+    released.push(id);
+    if (opts.releaseThrows) throw new Error("the release push was refused");
+  };
   const mint = Object.assign((branch: string) => {
-    assert.equal(branch, "rmd-task-files-landing");
+    assert.equal(branch, world.branch);
     const id = `W1-T${99101 + minted.length}`;
     minted.push(id);
     return id;
-  }, { release: (id: string) => void released.push(id) }) as GardenTaskIdMinter;
+  }, opts.async ? { releaseAsync: async (id: string) => release(id) } : { release }) as GardenTaskIdMinter;
   const spec: GardenSpec<"file", string[], Action, GardenCheckout> = {
     name: "fixture", classes: ["file"],
     cheapFingerprint: () => `${world.findings.join()}:${world.note}`,
@@ -180,12 +184,12 @@ function filingGarden() {
   const run = () => {
     const root = join(dir, `ws-${++pass}`);
     mkdirSync(root, { recursive: true });
-    return runGarden(spec, {
+    return (opts.async ? runGardenAsync : runGarden)(spec, {
       stateDir: dir, repoRoot: dir, seed: 7, clock: fixedClock(T0 + pass * 2 * DAY),
       log: (step, extra) => logs.push({ step, ...extra }),
       mergedPlanLint: () => undefined,
       openWorkspace: () => ({
-        root, branch: "rmd-task-files-landing",
+        root, branch: world.branch,
         land: () => (world.opens ? "https://github.com/o/r/pull/1" : undefined),
         dispose: () => rmSync(root, { recursive: true, force: true }),
       }),
@@ -230,10 +234,42 @@ test("W1-T12834 criterion 4: a refused finding retries under the task id it alre
     g.world.opens = true;
     g.world.note = 11;
     const opened = g.run();
-    assert.equal(opened.prUrl, "https://github.com/o/r/pull/1");
+    assert.equal((opened as Awaited<typeof opened>).prUrl, "https://github.com/o/r/pull/1");
     assert.deepEqual(g.filed.at(-1), { "scout:step-a": "W1-T99101" });
     assert.equal(g.state().refusedFindingIds, undefined);
     assert.deepEqual(g.minted, ["W1-T99101", "W1-T99102"]);
     assert.deepEqual(g.released, ["W1-T99102"], "the opened landing's id is never given back");
   } finally { g.dispose(); }
+});
+
+test("a refused finding's id goes back through an awaited release, a release that throws stops no other, and a new branch mints anew", async () => {
+  const awaited = filingGarden({ async: true });
+  try {
+    await awaited.run();
+    awaited.world.findings = [];
+    await awaited.run();
+    assert.deepEqual(awaited.released, ["W1-T99101", "W1-T99102"], "both ids went back through the awaited release");
+    assert.equal(awaited.state().refusedFindingIds, undefined);
+  } finally { awaited.dispose(); }
+
+  const throwing = filingGarden({ releaseThrows: true });
+  try {
+    throwing.run();
+    throwing.world.findings = [];
+    throwing.run();
+    assert.deepEqual(throwing.released, ["W1-T99101", "W1-T99102"], "the first release threw and the second still ran");
+    assert.equal(throwing.state().refusedFindingIds, undefined);
+  } finally { throwing.dispose(); }
+
+  // An id is held on the branch that reserved it: a filing from another branch mints its own and gives the old one back.
+  const moved = filingGarden();
+  try {
+    moved.run();
+    moved.world.branch = "rmd-task-files-landing-2";
+    moved.world.note = 1;
+    moved.run();
+    assert.deepEqual(moved.minted, ["W1-T99101", "W1-T99102", "W1-T99103", "W1-T99104"]);
+    assert.deepEqual(moved.released, ["W1-T99101", "W1-T99102"]);
+    assert.deepEqual(Object.values(moved.state().refusedFindingIds ?? {}).map((f) => f.id), ["W1-T99103", "W1-T99104"]);
+  } finally { moved.dispose(); }
 });
