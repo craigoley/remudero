@@ -295,9 +295,16 @@ export function registryDrift(repoNames: readonly string[], hostNames: readonly 
 /** W1-T12553: hand `rmd` runs spend from the same installation as the daemons; they take one share. */
 export const HAND_RUN_INSTALLATION_SHARES = 1;
 
+/** W1-T12950: the run children of an instance read with the installation token; together they take one share. */
+export const RUN_CHILD_INSTALLATION_SHARES = 1;
+
+/** W1-T12950: serve reads with the installation token too; it takes one share. */
+export const SERVE_INSTALLATION_SHARES = 1;
+
 /**
  * W1-T12553 — the consumers that share one GitHub App installation: each live instance whose
- * `gh_app_installation_id` is `installationId`, plus {@link HAND_RUN_INSTALLATION_SHARES}.
+ * `gh_app_installation_id` is `installationId`, plus {@link HAND_RUN_INSTALLATION_SHARES},
+ * {@link RUN_CHILD_INSTALLATION_SHARES} and {@link SERVE_INSTALLATION_SHARES}.
  * An omitted ID establishes no installation identity, except with `countOmitted` (W1-T12670: the
  * checkout copy names no IDs; a larger count only shrinks each share). `undefined` when no live
  * instance declares the installation: the caller sets no budget.
@@ -311,7 +318,8 @@ export function installationConsumers(
     if (declared === undefined || declared === "") return opts.countOmitted === true;
     return declared === installationId;
   }).length;
-  return sharing === 0 ? undefined : sharing + HAND_RUN_INSTALLATION_SHARES;
+  return sharing === 0 ? undefined
+    : sharing + HAND_RUN_INSTALLATION_SHARES + RUN_CHILD_INSTALLATION_SHARES + SERVE_INSTALLATION_SHARES;
 }
 
 /** W1-T12670 — the one live instance whose `github_repo` (else `repo`) is `ownerRepo`, ignoring case. */
