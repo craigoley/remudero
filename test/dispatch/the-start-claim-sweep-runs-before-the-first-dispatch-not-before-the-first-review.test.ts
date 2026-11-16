@@ -119,7 +119,7 @@ async function loopUntil(done: () => boolean, turns = 2_000): Promise<boolean> {
   return done();
 }
 
-test("W1-T12238 criterion 2: the boot review and the first sweep start while the claim sweep is open", async (t) => {
+test("W1-T12238 criterion 2: the boot review starts while the claim sweep is open, and the first sweep waits for it", async (t) => {
   const hold = deferred();
   const events: string[] = [];
   const merged = new Set<string>();
@@ -133,14 +133,18 @@ test("W1-T12238 criterion 2: the boot review and the first sweep start while the
     },
     sweep: async () => { events.push("sweep"); },
     sweepLight: async () => { events.push("review"); },
-    sleep: async () => {},
+    sleep: () => new Promise((resolve) => setTimeout(resolve, 1)),
     log: () => {},
   }, { max: 1 });
-  const started = await loopUntil(() => events.includes("sweep") && events.includes("review"));
-  assert.equal(started, true, `the boot review and the first sweep started (saw ${events.join(", ")})`);
+  const started = await loopUntil(() => events.includes("review"));
+  assert.equal(started, true, `the boot review started (saw ${events.join(", ")})`);
+  await loopUntil(() => events.includes("sweep"), 200);
+  assert.equal(events.includes("sweep"), false, "the first full pass waits for the claim sweep (W1-T12707)");
   assert.deepEqual(events.filter((e) => e.startsWith("run:")), [], "nothing ran yet");
   hold.resolve();
   const summary = await loop;
+  await loopUntil(() => events.includes("sweep"));
+  assert.equal(events.includes("sweep"), true, "the first full pass starts once the claim sweep settles");
   assert.deepEqual(summary.merged, ["A"]);
 });
 
@@ -161,7 +165,7 @@ test("W1-T12238 criterion 3: the first dispatch selection waits for the claim sw
     },
     sweep: async () => {},
     sweepLight: async () => {},
-    sleep: async () => {},
+    sleep: () => new Promise((resolve) => setTimeout(resolve, 1)),
     log: () => {},
   }, { max: 1 });
   await loopUntil(() => runsWhileOpen.length > 0, 500);

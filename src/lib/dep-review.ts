@@ -4,8 +4,9 @@ import { dirname, join } from "node:path";
 import { readCiGateRequiredChecks, type CiGateWorkflowReader } from "./ci-gate-required.js";
 import { fixedClock } from "./clock.js";
 import { checkCommitMessage, CONVENTIONAL_LIMITS } from "./commit-message.js";
-import { escalate, type Escalation, type EscalateDeps } from "./escalate.js";
+import { escalate, escalationTaskId, type AsyncIssueGateway, type Escalation, type EscalateDeps } from "./escalate.js";
 import { writeAtomic } from "./fs-race-safe.js";
+import { NEEDS_HUMAN_LABEL } from "./poll-interval.js";
 import { openLedgerUnion, rotationBeforeTime, type LedgerUnionStreamIO } from "./ledger-union.js";
 import { REVIEW_CONTEXT } from "./review.js";
 import { checkRunsRestArgs, combinedStatusRestArgs, jobsForRunRestArgs, rollupFromRest, runsForHeadRestArgs, singlePrRestArgs, type GhApiFetcher } from "./open-prs-rest.js";
@@ -2351,7 +2352,7 @@ export function buildDepReviewRefusedPathEscalation(args: {
 }): Escalation {
   return {
     class: "BLOCKED",
-    taskId: `dep-review-refused-PR${args.prNumber}`,
+    taskId: depReviewRefusedTaskId(args.prNumber),
     headSha: args.headSha,
     cause: "ci",
     summary: `Dependabot PR #${args.prNumber} is refused by its own security verdict: ${args.title}`,
@@ -2375,6 +2376,35 @@ export function buildDepReviewRefusedPathEscalation(args: {
   };
 }
 
+export function depReviewRefusedTaskId(prNumber: number): string {
+  return `dep-review-refused-PR${prNumber}`;
+}
+
+export const DEP_REVIEW_REFUSED_ASK_RETIRED_STEP = "dep-review.refused_ask.retired";
+
+/** W1-T12955: a routed PR's delivered full review answers the refused-path ask, so its open issue is closed. */
+export async function retireDepReviewRefusedAsk(args: {
+  issues: Pick<AsyncIssueGateway, "listOpen" | "closeWithComment">;
+  prUrl: string;
+  prNumber: number;
+  headSha: string;
+  reviewState: string;
+  log: (step: string, extra: Record<string, unknown>) => void;
+}): Promise<string[]> {
+  if (!args.issues.listOpen || !args.issues.closeWithComment) throw new Error("refused-path ask gateway cannot list or close issues");
+  const taskId = depReviewRefusedTaskId(args.prNumber);
+  const mine = (await args.issues.listOpen(NEEDS_HUMAN_LABEL)).filter((i) => escalationTaskId(i.body) === taskId);
+  const closed: string[] = [];
+  for (const issue of mine) {
+    await args.issues.closeWithComment(issue.url, `Dependabot PR ${args.prUrl} got a full review at head ${args.headSha}: ` +
+      `remudero-review ${args.reviewState}. The review lane owns this PR now, so this ask no longer waits on the operator.`);
+    closed.push(issue.url);
+  }
+  args.log(DEP_REVIEW_REFUSED_ASK_RETIRED_STEP, { pr_number: args.prNumber, head_sha: args.headSha,
+    review_state: args.reviewState, issue_urls: closed });
+  return closed;
+}
+
 export function reconcileDependabotRefusedPath(args: {
   registryDir: string;
   owner: string;
@@ -2394,6 +2424,8 @@ export function reconcileDependabotRefusedPath(args: {
   checks?: readonly DepReviewCheck[];
   /** Opens the operator ask; returns its URL, or "" when it was not delivered. */
   escalate?: (escalation: Escalation) => string;
+  /** W1-T12955: the full review failed this head, so a foreign commit no longer stops the proposal. */
+  reviewFailed?: boolean;
 }): DependabotRefusedPathOutcome {
   const facts = { pr_number: args.prNumber, head_sha: args.headSha, offending_files: args.result.offendingFiles };
   const evidence = redCheckEvidence(args.checks ?? [], args.result);
@@ -2401,7 +2433,7 @@ export function reconcileDependabotRefusedPath(args: {
   const bumps = parseDependabotBumpFacts(args.title, args.body)
     .map((b) => ({ dependency: b.dependency, fromVersion: b.fromVersion, toVersion: b.toVersion }));
   const reason = !isDependabotAuthor(args.author) ? "non-dependabot-author"
-    : headCarriesForeignCommit(args.commits) ? "foreign-commit"
+    : headCarriesForeignCommit(args.commits) && args.reviewFailed !== true ? "foreign-commit"
       : bumps.length === 0 ? "unkeyed" : undefined;
   if (reason !== undefined) {
     args.log("dep-review.refused_path.not_proposed", { ...facts, reason });
