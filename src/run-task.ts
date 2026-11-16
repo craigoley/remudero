@@ -1325,6 +1325,7 @@ import { routingAbCommand } from "./lib/routing-experiments.js";
 import { attributeAttemptOutcome } from "./lib/attempt-outcome-attribution.js";
 import { recordRoutingExperimentResults } from "./lib/routing-experiment-result.js";
 import { askDecisionModel, decisionsCommand } from "./lib/decision-model.js";
+import { judgeReplayCommand, replayJudgeCorpus } from "./lib/judge-replay-batch.js";
 import {
   PROGRESS_WATCHDOG_READ_STEPS,
   captureDiagnosticsBundle,
@@ -43589,6 +43590,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "W1-T12416: sends ONE paid cash request to a candidate named in the decision_models section of .remudero/mounts.yaml. The questions file is a JSON array of yes-no, choice (2 to 255 typed options) and score (2 to 10 ordered levels) questions, each with a name and instructions; a bad set is refused before any reservation. The request reserves on its input size plus a 64-token output margin against the normal daily cash cap, settles from the reply's usage at the candidate's own price row, and writes one decision.answered row: role, input digest, candidate, deployment, served model, latency, reserved and settled dollars, usage, and each question's distribution, abstention or rejection. A candidate whose cashDeploymentEndpoints entry or key is missing is unavailable and sends nothing. Shadow only: no gate, route or judge reads the row. Exit 0 answered, 1 refused, unavailable or failed, 2 bad usage.",
   },
   {
+    name: "judge-replay",
+    syntax: "rmd judge-replay --model <id> --corpus <machine-judge-probes|risk-judge-dispositions|all>",
+    summary: "Replay the judge corpora through one named model in one Anthropic Message Batch.",
+    detail: "W1-T12418: reads test/fixtures/machine-judge-probes.json and the risk-judge disposition fixtures (test/fixtures/risk-judge-dispositions/) and sends each case as one request of ONE paid Message Batch to the named model on the Anthropic API, with its expected answer kept beside it. A case the risk-judge scrub flags is refused, because Message Batches are NOT zero-retention: Anthropic keeps batch prompts and results for 29 days, and the output says so. The daemon sends the batch through the secret boundary: a loopback proxy reads ANTHROPIC_API_KEY from the daemon env and puts it in x-api-key, and each decision is a value-free boundary.request row. A worker env, a missing key or a model with no price row sends nothing. The whole batch reserves at the batch price (half the standard row) against the normal daily cash cap before it is sent, polls until the batch ends, and settles from each result's usage; a result with no usage, or a batch that does not end within 25 hours, keeps the reservation held. It writes one judge_replay.answered row per result, a recorded typed answer keyed by the model id that the judge calibration body scores, and one judge_replay.batch row. Offline only: no live judge, gate or route reads the rows. Exit 0 ended, 1 refused, failed or unsettled, 2 bad usage.",
+  },
+  {
     name: "field-trials",
     syntax: "rmd field-trials [--source <label>=<owner/repo>]... [--ledger <label>=<state-dir>]... [--out-dir <dir>] [--consent <file>] [--case-files <file>] [--max-pages <n>] [--offline] [--revoke <release-id>] [--field-note <out> [--site-registry <file>]] [--json] [--refresh-step <name>=<exit-code|skipped>]... [--refresh-script-blob <sha1>] [--refresh-record-only]",
     summary: "Join the ledger union and GitHub history into observational field-trials aggregates.",
@@ -44731,6 +44738,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   )],
   ["routing-ab", async (rest) => await routingAbCommand(rest, { classifyAttempt: attributeAttemptOutcome })],
   ["decisions", async (rest) => await decisionsCommand(rest, (config, request) => askDecisionModel(config, request), { repoRoot })],
+  ["judge-replay", async (rest) => await judgeReplayCommand(rest, (config, request) => replayJudgeCorpus(config, request), { repoRoot })],
   ["progress-watchdog", (rest) => progressWatchdogCommand(rest)],
   ["live-edits", async (rest) => await liveEditsCommand(rest)],
   ["host-alert", async (rest) => hostAlertCommand(rest)],

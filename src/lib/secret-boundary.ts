@@ -41,7 +41,20 @@ import { bundledWorkerUrl } from "./child-entry-argv.js";
  *  appears only in the sentinel's own text, never logged as a secret) and helps a transcript or a
  *  stack trace name which boundary a stray sentinel belongs to. */
 export function mintSentinel(label: string): string {
-  return `rmd-sentinel-${label}-${randomBytes(24).toString("hex")}`;
+  return `${SENTINEL_PREFIX}${label}-${randomBytes(24).toString("hex")}`;
+}
+
+/** The text every {@link mintSentinel} value starts with. */
+const SENTINEL_PREFIX = "rmd-sentinel-";
+
+/**
+ * W1-T12418: true when `env` is a worker's boundary env, the env {@link secretBoundaryEnv} builds.
+ * Such an env carries a sentinel model bearer in place of a real credential. A paid lane that must
+ * read a real key from the daemon's own env refuses to run in such an env, so a key is never read
+ * from, or sent by, a worker.
+ */
+export function isWorkerBoundaryEnv(env: NodeJS.ProcessEnv): boolean {
+  return [env.ANTHROPIC_AUTH_TOKEN, env.ANTHROPIC_API_KEY].some((value) => typeof value === "string" && value.startsWith(SENTINEL_PREFIX));
 }
 
 /** The model host the sandbox's own egress allowlist deliberately excludes (settings.ts's
@@ -60,6 +73,10 @@ export interface BoundaryDestination {
   readonly sentinel: string;
   readonly upstreamBaseUrl: string;
   readonly realValue: () => string | undefined;
+  /** The header the real value goes in. Default `authorization` (as `Bearer <value>`). W1-T12418:
+   *  `x-api-key` for an Anthropic API key, which the API reads from that header; the routing key is
+   *  still the presented sentinel bearer, and a worker's own `x-api-key` is never forwarded. */
+  readonly credentialHeader?: "authorization" | "x-api-key";
 }
 
 /** Read `sandbox.network.allowedDomains` off an already-parsed worker settings object — the SAME
@@ -201,11 +218,14 @@ export async function startBoundaryProxy(opts: StartBoundaryProxyOpts): Promise<
     // refusal would have rejected, which is the only way to falsify it.
     const target = forwardedTarget(req.url, destination.upstreamBaseUrl);
     const headers = new Headers();
+    const apiKeyHeader = destination.credentialHeader === "x-api-key";
     for (const [k, v] of Object.entries(req.headers)) {
-      if (!v || k.toLowerCase() === "host" || k.toLowerCase() === "authorization") continue;
+      const name = k.toLowerCase();
+      if (!v || name === "host" || name === "authorization" || (apiKeyHeader && name === "x-api-key")) continue;
       headers.set(k, Array.isArray(v) ? v.join(", ") : v);
     }
-    headers.set("authorization", `Bearer ${real}`);
+    if (apiKeyHeader) headers.set("x-api-key", real);
+    else headers.set("authorization", `Bearer ${real}`);
     try {
       const upstream = await fetchFn(target, {
         method: req.method,

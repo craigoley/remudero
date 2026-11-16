@@ -110,7 +110,7 @@ function typedAnswersOf(line: Row): TypedAnswerRow[] {
 
 /** The fields this projection reads off one ledger row, or `undefined` for a row it never reads. */
 export function judgeCalibrationRow(line: Row): Row | undefined {
-  if (line.step === "shadow_judge.paired" || line.step === "decision.answered") {
+  if (line.step === "shadow_judge.paired" || line.step === "decision.answered" || line.step === "judge_replay.answered") {
     const typed = typedAnswersOf(line);
     return typed.length > 0 ? { step: line.step, typed_answers: typed } : undefined;
   }
@@ -199,7 +199,7 @@ export function emptyJudgeVerdictFold(): JudgeVerdictFold {
 }
 
 export function foldJudgeVerdictRow(fold: JudgeVerdictFold, row: Row): void {
-  if (row.step === "shadow_judge.paired" || row.step === "decision.answered") {
+  if (row.step === "shadow_judge.paired" || row.step === "decision.answered" || row.step === "judge_replay.answered") {
     fold.typedAnswers.push(...typedAnswersOf(row));
     return;
   }
