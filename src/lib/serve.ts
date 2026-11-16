@@ -85,7 +85,7 @@ import { INBOX_VIEW_NAME, inboxLegacyView } from "./inbox-view.js";
 import { NEEDS_YOU_VIEW_NAME, withNeedsYouView, type NeedsYouData } from "./needs-you-view.js";
 import { WORKSTREAMS_VIEW_NAME, WORKSTREAMS_VIEW_VERSION, type WorkstreamsData } from "./workstreams-view.js";
 import { ACTIONS_VIEW_NAME, ACTIONS_VIEW_VERSION, type ActionsData } from "./actions-view.js";
-import { AGENT_VIEW_NAME } from "./agent-view.js";
+import { AGENT_VIEW_NAME, agentLegacyView } from "./agent-view.js";
 import { INCIDENTS_VIEW_NAME } from "./incidents-view.js";
 import { DEMAND_VIEWS, TASK_VIEW_NAME } from "./view-demand.js";
 import { DAILY_PROGRESS_VIEW_NAME, validateDailyProgressRequest } from "./daily-progress-view.js";
@@ -3064,7 +3064,8 @@ function assembleServeRoutes(
       [CODE_HEALTH_VIEW_NAME]: (params, source) => validateCodeHealthRequest(params, source, systemClock.now()),
       [DAILY_PROGRESS_VIEW_NAME]: (params, source) => validateDailyProgressRequest(params, source, systemClock.now()),
     },
-    legacy: [navBadge, analyticsLegacy, inboxLegacyView(panelReadDeps), feedbackLegacyView(panelGraphDeps, () => deps.board.plan), hostLegacy] });
+    // W1-T13180: the agent view's legacy side runs the worker's own readers over each instance's ledger and analytics.
+    legacy: [navBadge, analyticsLegacy, inboxLegacyView(panelReadDeps), feedbackLegacyView(panelGraphDeps, () => deps.board.plan), hostLegacy, agentLegacyView({ scopes: navBadgeScopes })] });
   const served = { ...shadowed, legacy: shadowed.legacy.map((view) => view === navBadge ? navBadgeWithDecisions(navBadge, needsYouGates) : view) };
   const rawRoutes = [
     ...buildImprovementThreadRoutes({ stateDir: dirname(deps.ledgerPath) }),
