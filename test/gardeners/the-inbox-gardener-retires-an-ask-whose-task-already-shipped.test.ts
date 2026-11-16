@@ -21,7 +21,6 @@ const pr = (id: string) => ({ number: Number(id.split("T")[1]), url: "", state: 
 
 async function fixture(t: Parameters<typeof world>[0]) {
   const w = await world(t);
-  const now = Date.now();
   appendFileSync(w.planPath, [task(MERGED), task(OPEN), task(RETIRED), task(HELD, "  dispatch_hold: true\n"), task(REPLIED)].join(""));
   const registry = JSON.parse(readFileSync(w.registry, "utf8")) as { proposals: Array<Record<string, unknown>> };
   for (const id of Object.values(ASKS)) registry.proposals.push({ id, summary: `A high-risk release still needs human verification (${id})`, evidenceAnchors: [] });
@@ -31,6 +30,9 @@ async function fixture(t: Parameters<typeof world>[0]) {
     headRefName: ref => `run-W1-T${ref.split("/").at(-1)}-123456`, prBody: ref => `Remudero-Task: W1-T${ref.split("/").at(-1)}`, changedFiles: () => ["src/fix.ts"] });
   appendThreadMessage(inboxThreadIdentity(ASKS.replied), "reply", "Wait, I still need to look at this", { threadStorePath: join(w.state, "inbox-threads.jsonl") });
   await w.refresh();
+  // Read the clock AFTER the refresh: world() stamps the snapshot at refresh time less 100 ms, so a clock read before slow
+  // fixture writes can precede the snapshot, and the gardener then refuses an unqualified pass (flake-screen, #18888).
+  const now = Date.now();
   const scope: InboxGardenerScope = { repository: w.repository, instance: w.instance, root: w.root };
   const searches: string[] = [];
   const githubJson = async (args: string[]) => {
