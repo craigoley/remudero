@@ -233,7 +233,8 @@ function runDeletedFixtureShard(t: Parameters<typeof ownedFixtureDir>[0], count:
     `const gone = ${JSON.stringify(gone)};`,
     'test("an all-pass suite that loads mapped modules from a tree it then deletes", async () => {',
     "  mkdirSync(gone, { recursive: true });",
-    '  const { covered } = await import("./source.mjs");',
+    // Built from the module's own URL, so this file's text carries no location-relative specifier (W1-T9864).
+    '  const { covered } = await import(new URL("source.mjs", import.meta.url).href);',
     "  covered();",
     `  for (let i = 0; i < ${count}; i += 1) {`,
     "    const file = join(gone, `fixture-${i}.mjs`);",
