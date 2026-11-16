@@ -36,7 +36,7 @@
     - test/triage/operator-releases-pin-the-approved-contract.test.ts
     - test/triage/the-backstop-judges-path-classes-not-words.test.ts
     - test/gardeners/every-machine-shard-generator-passes-the-changed-task-plan-lint.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "renderMachineShard lints its record with the changed-task options the plan PR preflight applies (requireDesignInvariantDeclaration true), so a spec whose design declares neither form returns refused naming design-invariant-proof and is never written"

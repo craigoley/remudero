@@ -16,8 +16,8 @@
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { loadPlanFromYaml, machineFilingAdmissionViolations, parseTasksFromYaml, type TaskRisk } from "./plan.js";
-import { lintTask, taskRulingPin, type LintOpts } from "./task-linter.js";
+import { loadPlanFromYaml, machineFilingAdmissionViolations, parseTasksFromYaml, type Task, type TaskRisk } from "./plan.js";
+import { lintTask, promoteIntroducedPlanOnlyDiagnostics, taskRulingPin, type LintOpts, type LintViolation } from "./task-linter.js";
 
 /** Paths whose change is dangerous whoever makes it: secrets and credentials, auth and permissions,
  *  CI and deploy machinery, the worker settings, and the operator's own policy and rulings. */
@@ -133,12 +133,22 @@ export function machineShardInvariantClaims(invariants: MachineShardInvariants):
   return declaredOf(invariants).map((i) => ({ claim: `invariant:${i.slug} — ${i.claim}`, proof: i.proof }));
 }
 
-/** The shared lint: every blocking check on a single-record shard's text under {@link MACHINE_SHARD_LINT_OPTIONS},
+/** W1-T13035: one record's lint as its own plan pull request meets it. A machine filing is always a NEW plan-only
+ *  shard, so each warning `promoteIntroducedPlanOnlyDiagnostics` blocks there is a block here; a filer that read
+ *  such a record as clean opened a pull request the preflight refused every time. No checkout is read, so a promoted
+ *  check that needs base files reports nothing. `name` is the check, marked when only the promotion blocks it. */
+export function machineShardLint(task: Task): { check: LintViolation["check"]; severity: LintViolation["severity"]; name: string }[] {
+  const raw = lintTask(task, MACHINE_SHARD_LINT_OPTIONS).violations;
+  return promoteIntroducedPlanOnlyDiagnostics(raw, undefined, true).map((v, i) => ({
+    check: v.check, severity: v.severity, name: v.severity === raw[i]!.severity ? v.check : `${v.check} (plan-only promotion)`,
+  }));
+}
+
+/** The shared lint: every blocking finding of {@link machineShardLint} on a single-record shard's text, by name,
  *  or undefined. A filer that assembles its own text calls this before it writes. */
 export function machineShardLintRefusal(text: string, source: string): string | undefined {
   try {
-    const lint = lintTask(loadPlanFromYaml(text, source).tasks[0]!, MACHINE_SHARD_LINT_OPTIONS);
-    const blocks = lint.violations.filter((v) => v.severity === "block").map((v) => v.check);
+    const blocks = machineShardLint(loadPlanFromYaml(text, source).tasks[0]!).filter((v) => v.severity === "block").map((v) => v.name);
     return blocks.length === 0 ? undefined : blocks.join(", ");
   } catch (e) {
     const reason = `unparseable: ${(e as Error).message}`;
@@ -168,7 +178,7 @@ export interface MachineShardSpec {
 
 /**
  * Render a finding as a single-record shard with the shared header, then parse it back and lint it.
- * `refused` names every blocking lint check; a filer never writes a refused record.
+ * `refused` names every blocking lint check, the promoted ones included; a filer never writes a refused record.
  */
 export function renderMachineShard(spec: MachineShardSpec): { text: string; refused?: string } {
   const q = (v: string): string => JSON.stringify(v);

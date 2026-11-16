@@ -22,7 +22,7 @@
     - test/a-filing-age-that-cannot-be-read-is-unknown-never-zero-days.test.ts
     - test/daemon/the-filing-history-git-reads-do-not-block-the-daemon-loop.test.ts
     - test/no-daemon-loop-path-calls-the-synchronous-worktree-git-leaf.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "resolveTaskFilingHistory reads git through hostWorktreeGitAsync: with a git on PATH that sleeps 2 s for each call, a 50 ms timer started before routeAdaptiveLifetimePressure keeps firing at least once in every 500 ms while the route reads the filing dates"

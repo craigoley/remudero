@@ -18,7 +18,7 @@
   files:
     - src/lib/test-slot.ts
     - test/ci/suites/a-static-admission-record-whose-writer-is-proven-dead-is-removed.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: A static record on the waiter's own host and pid namespace whose writer pid is gone, or whose pid now has a different kernel start time, is removed by the admitStaticWork scan, its peak is not counted, and one test_slot.static_record_removed line names the record, its label, its pid and the rung own-namespace

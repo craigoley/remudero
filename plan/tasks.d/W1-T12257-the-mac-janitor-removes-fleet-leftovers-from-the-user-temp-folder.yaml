@@ -21,7 +21,7 @@
     - test/deploy/the-mac-janitor-removes-fleet-leftovers-from-the-user-temp-folder.test.ts
     - test/the-mac-reclaims-its-own-scratch.test.ts
     - test/deploy/a-tsx-alias-follows-the-candidate-and-cache-only-scans-user-roots.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "In its regular mode the pass visits the temp folder of the account and judges only the direct children whose name starts with `rmd-` or `remudero-`. One array in the script holds these patterns"

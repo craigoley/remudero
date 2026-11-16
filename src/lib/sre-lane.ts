@@ -31,6 +31,7 @@ import {
   interventionIncidentEvent,
   interventionKey,
   interventionLedgerLine,
+  INTERVENTION_INCIDENT_KIND,
   OPERATOR_INTERVENTION_STEP,
   type OperatorInterventionRow,
 } from "./operator-interventions.js";
@@ -272,7 +273,19 @@ export function sreLaneRoom(mergedLastDay: number, filedToday: number): number {
 
 // ── state ────────────────────────────────────────────────────────────────────────────────────
 
-export type SreLaneStore = Record<string, { ts: string }>;
+/** `count` (W1-T12836) is the incident's event count when it was filed: the base {@link interventionCountDoubled} reads. */
+export type SreLaneStore = Record<string, { ts: string; count?: number }>;
+
+/**
+ * W1-T12836: an intervention incident whose count has doubled since it was filed is filed again, even while its
+ * first filing is open or accepted. Measured 2026-11-15: incident-88280dcecd16e359 grew to 64 pushes after triage read
+ * it as "already decided", and its task sat held — an open entry hid a recurrence that kept costing hand actions.
+ * A store row with no recorded count (filed before this) has no base and is never re-filed on count.
+ */
+export function interventionCountDoubled(evidence: Pick<IncidentEvidence, "kind" | "count">, filed: SreLaneStore[string] | undefined): boolean {
+  const base = filed?.count;
+  return evidence.kind === INTERVENTION_INCIDENT_KIND && typeof base === "number" && base > 0 && evidence.count >= 2 * base;
+}
 
 export function sreLaneStorePath(stateDir: string): string {
   return join(stateDir, "sre-lane-decisions.json");
@@ -391,8 +404,12 @@ export async function runSreLanePass(deps: SreLaneInput): Promise<SreLanePass> {
   }
   const evidence = aggregateIncidents(events);
   const readLanded = deps.readLandedEntry ?? ((id: string) => readLandedFeedbackEntry(deps.root, id));
-  const worst = worstOpenIncident(evidence, (fp) => fingerprintAlreadyOpen(fp, openOrigins, deps.hasOpenTask) || landedIncidentOpen(fp, readLanded));
+  const byFingerprint = new Map(evidence.map((e) => [e.fingerprint, e]));
+  const doubled = (fp: string) => interventionCountDoubled(byFingerprint.get(fp)!, store[fp]);
+  const worst = worstOpenIncident(evidence, (fp) => !doubled(fp) &&
+    (fingerprintAlreadyOpen(fp, openOrigins, deps.hasOpenTask) || landedIncidentOpen(fp, readLanded)));
   if (!worst) return { room };
+  const refiled = doubled(worst.fingerprint);
 
   const runbook = runMatchingRunbook ? await runMatchingRunbook(worst) : undefined;
   if (room <= 0 || (runbook && !runbook.fileFeedback)) return { room, runbook };
@@ -402,13 +419,16 @@ export async function runSreLanePass(deps: SreLaneInput): Promise<SreLanePass> {
   const staged = stageFeedbackCapture(deps.root, deps.landingStateRoot, {
     raw: incidentFeedbackRaw(worst, suspectPrs),
     origin: incidentFeedbackOrigin(worst.fingerprint),
-    id: incidentFeedbackId(worst.fingerprint),
+    // A re-filing is its own entry: the first one's id still names the filing that is open or accepted.
+    id: refiled ? `${incidentFeedbackId(worst.fingerprint)}-n${worst.count}` : incidentFeedbackId(worst.fingerprint),
   });
-  store[worst.fingerprint] = { ts: fixedClock(now).iso() };
+  const priorCount = store[worst.fingerprint]?.count;
+  store[worst.fingerprint] = { ts: fixedClock(now).iso(), count: worst.count };
   writeAtomic(sreLaneStorePath(deps.stateDir), JSON.stringify(store) + "\n");
   deps.log("sre_lane.filed", {
     fingerprint: worst.fingerprint,
     count: worst.count,
+    ...(refiled ? { refiled: true, prior_count: priorCount } : {}),
     burn_per_hour: worst.burnPerHour,
     suspect_prs: suspectPrs.length,
     landing: staged.queued ? "queued" : "checkout",

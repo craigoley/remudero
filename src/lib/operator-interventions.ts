@@ -41,6 +41,27 @@ const FLEET_AUTOMATION_ACTORS: ReadonlySet<string> = new Set(["daemon", "service
 
 export type InterventionSurface = "control" | "pr";
 
+/** W1-T12836: a session PR that finished a task the fleet's own run ended without. */
+export const HAND_BUILD_ACTION = "hand-build";
+/** BACKSTOP on one ledger row's size: how many changed paths an intervention row keeps; `files_total` says how many there were. */
+export const MAX_EVIDENCE_FILES = 20;
+
+/**
+ * W1-T12836: what the hand changed. `files` is ordered most-changed first (insertions plus deletions, then path), so
+ * `files[0]` is the file the incident fingerprint keys on. `files_unread` names why a file list is absent when a
+ * read was attempted and failed — an absent list with no reason was never read.
+ */
+export interface InterventionEvidence {
+  commit?: string;
+  prior_head?: string;
+  task?: string;
+  files?: string[];
+  files_total?: number;
+  files_unread?: string;
+  insertions?: number;
+  deletions?: number;
+}
+
 export interface OperatorInterventionRow {
   at: string;
   surface: InterventionSurface;
@@ -51,6 +72,34 @@ export interface OperatorInterventionRow {
   invocation_id?: string;
   cause_class: string;
   source: string;
+  evidence?: InterventionEvidence;
+}
+
+/** A changed-file list as evidence: most-changed first, bounded to {@link MAX_EVIDENCE_FILES}, with the totals. */
+export function fileEvidence(files: readonly { path: string; additions?: number; deletions?: number }[]): InterventionEvidence {
+  const churn = (f: { additions?: number; deletions?: number }) => (Number(f.additions) || 0) + (Number(f.deletions) || 0);
+  const ranked = [...files].sort((a, b) => churn(b) - churn(a) || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  return {
+    files: ranked.slice(0, MAX_EVIDENCE_FILES).map((f) => f.path),
+    files_total: files.length,
+    insertions: files.reduce((n, f) => n + (Number(f.additions) || 0), 0),
+    deletions: files.reduce((n, f) => n + (Number(f.deletions) || 0), 0),
+  };
+}
+
+/** The file a PR-surface intervention's incident keys on: its most-changed file, when the row recorded one. */
+export function mostChangedFile(row: Pick<OperatorInterventionRow, "surface" | "evidence">): string | undefined {
+  return row.surface === "pr" ? row.evidence?.files?.[0] : undefined;
+}
+
+function readEvidence(value: unknown): InterventionEvidence | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const v = value as Record<string, unknown>;
+  const out: InterventionEvidence = {};
+  for (const key of ["commit", "prior_head", "task", "files_unread"] as const) if (typeof v[key] === "string") out[key] = v[key] as string;
+  for (const key of ["files_total", "insertions", "deletions"] as const) if (typeof v[key] === "number" && Number.isFinite(v[key])) out[key] = v[key] as number;
+  if (Array.isArray(v.files) && v.files.every((f) => typeof f === "string")) out.files = (v.files as string[]).slice(0, MAX_EVIDENCE_FILES);
+  return out;
 }
 
 export function isFleetAutomationActor(actor: string): boolean {
@@ -201,6 +250,7 @@ export function interventionLedgerFields(row: OperatorInterventionRow): Record<s
     ...(row.invocation_id !== undefined ? { invocation_id: row.invocation_id } : {}),
     cause_class: row.cause_class,
     source: row.source,
+    ...(row.evidence !== undefined ? { evidence: row.evidence } : {}),
   };
 }
 
@@ -229,20 +279,28 @@ export function interventionFromLedgerRow(row: Record<string, unknown>): Operato
     return undefined;
   }
   if (row.invocation_id !== undefined && typeof row.invocation_id !== "string") return undefined;
+  const evidence = readEvidence(row.evidence);
   return { at, surface, action, target, actor, cause_class: cause, source,
     ...(row.invocation_id !== undefined ? { invocation_id: row.invocation_id } : {}),
-    ...(row.actor_evidence !== undefined ? { actor_evidence: row.actor_evidence } : {}) };
+    ...(row.actor_evidence !== undefined ? { actor_evidence: row.actor_evidence } : {}),
+    ...(evidence !== undefined ? { evidence } : {}) };
 }
 
-/** The routing identity of an intervention class: kind plus name, so one class is one incident however often it recurs. */
-export function interventionFingerprint(causeClass: string): string {
-  return createHash("sha256").update(`${INTERVENTION_INCIDENT_KIND}\u0000${causeClass}`, "utf8").digest("hex");
+/**
+ * The routing identity of an intervention class: kind plus name, so one class is one incident however often it recurs.
+ * W1-T12836: a PR-surface row that recorded its most-changed file keys on that file too — measured 2026-11-15, one
+ * cause class held 64 pushes on unrelated files as a single incident. A row with no file keeps the class-only key.
+ */
+export function interventionFingerprint(causeClass: string, file?: string): string {
+  const key = file === undefined ? `${INTERVENTION_INCIDENT_KIND}\u0000${causeClass}` : `${INTERVENTION_INCIDENT_KIND}\u0000${causeClass}\u0000${file}`;
+  return createHash("sha256").update(key, "utf8").digest("hex");
 }
 
 /** The `incident.event` that carries an intervention to the SRE lane: kind `intervention`, name = cause class. */
 export function interventionIncidentEvent(row: OperatorInterventionRow, nowMs: number): LedgerLine {
+  const file = mostChangedFile(row);
   const message = `surface=${row.surface} action=${row.action} target=${row.target} actor=${row.actor} ` +
-    `cause=${row.cause_class} — a hand action answered a fleet state no lane resolved`;
+    `cause=${row.cause_class}${file === undefined ? "" : ` file=${file}`} — a hand action answered a fleet state no lane resolved`;
   return {
     run_id: `INTERVENTION-${nowMs}`,
     task_id: "INCIDENT",
@@ -250,8 +308,8 @@ export function interventionIncidentEvent(row: OperatorInterventionRow, nowMs: n
     source: "sre-lane",
     kind: INTERVENTION_INCIDENT_KIND,
     name: row.cause_class,
-    fingerprint: interventionFingerprint(row.cause_class),
-    subject: `cause=${row.cause_class}`,
+    fingerprint: interventionFingerprint(row.cause_class, file),
+    subject: file === undefined ? `cause=${row.cause_class}` : `cause=${row.cause_class} file=${file}`,
     message,
   };
 }

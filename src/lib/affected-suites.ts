@@ -104,15 +104,15 @@ const SYMBOL_SOURCE = /^(?:src|scripts|bin)\//;
 /** W1-T12506: the harness state directory, repo-relative; its layout never overrides it, so no file is read. */
 const STATE_DIR = resolveRepoLayout("", () => undefined).stateDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 /** Areas the selector models: code the graph walks, and prose the path readers cover. */
-const MODELLED = new RegExp(`^(?:src|scripts|bin|test|docs|doctrine|plan|${STATE_DIR}|hooks)/|^[^/]+\\.md$`);
+const MODELLED = new RegExp(`^(?:src|scripts|bin|test|docs|doctrine|plan|${STATE_DIR}|hooks|\\.github)/|^[^/]+\\.md$`);
 /** W1-T12506: a test/ code file that is not a suite, which the import graph walks to its importers. */
 const TEST_HELPER = /^test\/helpers\/.*\.(?:ts|mts|mjs|js|cjs)$/;
 /** W1-T12506: files no code imports, read by the suites that name them (and those the read map records). */
-const NAMED_BY_SUITES = new RegExp(`^(?:${STATE_DIR}|hooks)/`);
+const NAMED_BY_SUITES = new RegExp(`^(?:${STATE_DIR}|hooks|\\.github)/`);
 const CONTRACT_FILE = /^(?:openapi\/daemon\.yaml|packages\/api-client\/src\/schema\.d\.ts)$/;
 
-/** The non-code files whose readers the read map OBSERVES: the contract and deploy trees, and json. */
-const READ_MAPPED = /^(?:(?:openapi|deploy)\/[\s\S]*|[\s\S]*\.json)$/;
+/** The non-code files whose readers the read map OBSERVES: the contract, deploy and .github trees, and json. */
+const READ_MAPPED = /^(?:(?:openapi|deploy|\.github)\/[\s\S]*|[\s\S]*\.json)$/;
 
 /** The two modelled contracts use content readers; other contract-tree paths force a full run.
  *  Other {@link READ_MAPPED} paths force one only when `readMapUsable` is false. */

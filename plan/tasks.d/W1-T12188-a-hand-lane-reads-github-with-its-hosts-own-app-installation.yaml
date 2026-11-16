@@ -26,7 +26,7 @@
     - src/run-task.ts
     - docs/operator-guide.md
     - test/github/a-hand-lane-reads-github-with-its-hosts-own-app-installation.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "An app reference names an App id, an installation id and the path of a key file. When the read broker holds a token for it, the resolver answers a read with that token and names the reference as the source"

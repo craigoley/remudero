@@ -2,7 +2,7 @@
   title: "A pull request held as review-failed, base-red, held-draft, operator-hold or stale-reviewer-withheld is reported stuck past a measured bound"
   repo: remudero
   depends_on: []
-  priority: 0.6
+  priority: 1.3
   type: implement
   verify: auto
   principles:

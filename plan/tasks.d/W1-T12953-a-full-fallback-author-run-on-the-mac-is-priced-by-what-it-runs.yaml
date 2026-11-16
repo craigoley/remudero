@@ -19,7 +19,7 @@
     - test/infra/a-full-fallback-author-run-on-the-mac-is-priced-by-what-it-runs.test.ts
     - test/infra/the-author-disk-reserve-is-sized-to-its-workload.test.ts
     - test/ci/author-preflight-capacity-refusal.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The static stage of an author run is priced by the static stage's own measured peak for every selection, full-fallback included, once a full-fallback static stage has been measured and its row recorded beside the others"

@@ -18,7 +18,7 @@
     - test/daemon.test.ts
     - "src/lib/run-child.ts"
     - "src/lib/sweep.ts"
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: A detached retro still running after the declared shadow duration produces exactly one retro.overrun ledger row with its pid, age and the threshold, and the retro keeps running

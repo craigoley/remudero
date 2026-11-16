@@ -20,7 +20,7 @@
     - src/lib/github-transport.ts
     - src/lib/github-http-read.ts
     - test/github/daemon-github-reads-share-one-in-process-client.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A daemon read through ghJsonAsync of the form `api <path>` (GET, with the -i header form) is answered by one shared in-process HTTP client with keep-alive, starts no child process, and returns the same parsed body and the same rate-limit reading the gh path returns for the same response"

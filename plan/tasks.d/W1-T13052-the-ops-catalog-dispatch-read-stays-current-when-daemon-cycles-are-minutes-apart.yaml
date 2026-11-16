@@ -17,7 +17,7 @@
     - src/cli/commands/daemon.ts
     - src/lib/ops-catalog-source.ts
     - test/daemon/the-ops-catalog-dispatch-read-stays-current-between-slow-cycles.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With dispatch_ops_tasks true and daemon cycles 240 s apart (an injected clock), once the first catalog read completes, every later cycle's readOpsTaskDispatch answers selected, and no dispatch.ops_catalog_held row with outcome stale is written while the catalog's default branch does not move"

@@ -18,7 +18,7 @@
     - src/lib/fix-lane-gardener.ts
     - src/lib/sre-lane.ts
     - test/inbox/an-operator-intervention-row-records-what-the-hand-changed.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A PR-surface intervention row for a push carries the hand commit sha, the fleet head it followed, the changed file paths (bounded count) and the insertions and deletions, read from the PR's commits the pass already fetches"
