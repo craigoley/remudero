@@ -659,7 +659,9 @@ export async function readEscalationAnswers(
       const read = await (deps.history ?? escalationAnswerHistory())(dirname(deps.ledgerPath));
       historyReadable = read.ok;
       stage = "refusal_history_fold";
-      if (historyReadable) history.push(...read.rows);
+      // W1-T13254: one push per row, never a spread call, which overflows past ~130,000 rows. A copy, because
+      // raiseRefusalAlarms sorts the history in place and must not reorder the reader's cached array.
+      if (historyReadable) for (const row of read.rows) history.push(row);
       for (const row of history) {
         if (row.step === "escalation_answer.ignored" && (row.reason === "bot" || row.reason === "fleet-authored") && typeof row.origin === "string") rememberBotIgnored(botIgnored, row.origin);
       }
