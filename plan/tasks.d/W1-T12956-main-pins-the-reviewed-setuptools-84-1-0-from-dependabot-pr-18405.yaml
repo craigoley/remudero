@@ -18,7 +18,7 @@
     - .github/semgrep/build-requirements.txt
     - test/review/semgrep-dependency-bumps-14094.test.ts
     - test/semgrep-native-install.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The Semgrep build lock pins the reviewed wheel: setuptools 84.1.0 with the one SHA-256 that PR #18405 proposes"

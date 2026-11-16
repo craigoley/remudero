@@ -2,7 +2,7 @@ import { isMap, isScalar, isSeq, parseDocument, visit } from "yaml";
 import { join, relative, sep } from "node:path";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { resolveRepoLayout } from "./repo-layout.js";
-import { hostWorktreeGit, type HostWorktreeGitOptions } from "./worktree-git.js";
+import { hostWorktreeGitAsync, type HostWorktreeGitOptions } from "./worktree-git.js";
 
 export interface FilingHistoryLimits {
   commitVisits: number;
@@ -24,7 +24,7 @@ export const FILING_HISTORY_LIMITS: Readonly<FilingHistoryLimits> = Object.freez
 export interface FilingHistoryOptions {
   /** A caller may reduce the allowance, never enlarge the production limits. */
   limits?: Partial<FilingHistoryLimits>;
-  readGit?: typeof hostWorktreeGit;
+  readGit?: typeof hostWorktreeGitAsync;
 }
 
 type Birth = { commit: string; path: string; source: "embedded" | "shard"; committerSeconds: number };
@@ -53,11 +53,13 @@ export interface TaskFilingHistoryInvocation {
   readonly candidates: ReadonlySet<string>;
   readonly limits: Readonly<FilingHistoryLimits>;
   readonly usage: FilingHistoryLimits;
-  readonly readGit: typeof hostWorktreeGit;
+  readonly readGit: typeof hostWorktreeGitAsync;
   readonly containers: { monolith: string; shards: string };
   revision?: string;
   results?: ReadonlyMap<string, TaskFilingHistory>;
   failure?: string;
+  /** The one batch read, shared by every caller that asks while it runs. */
+  pending?: Promise<void>;
 }
 
 /** Lazy: callers that have no age candidates do no Git work. No state survives this invocation. */
@@ -72,7 +74,7 @@ export function createTaskFilingHistoryInvocation(
   // Historical containers use house defaults, never an uncommitted working-tree override.
   const layout = resolveRepoLayout(root, () => undefined);
   const gitPath = (path: string): string => relative(root, path).split(sep).join("/");
-  return { root, candidates: new Set(ids), limits, readGit: options.readGit ?? hostWorktreeGit,
+  return { root, candidates: new Set(ids), limits, readGit: options.readGit ?? hostWorktreeGitAsync,
     containers: { monolith: gitPath(layout.planMonolith), shards: gitPath(join(layout.planDir, "tasks.d")) },
     usage: { commitVisits: 0, blobReads: 0, decodedBytes: 0, metadataBytes: 0, stateEntries: 0 },
     ...(invalid ? { failure: "invalid filing-history limits" } : {}) };
@@ -84,37 +86,39 @@ function debit(ctx: TaskFilingHistoryInvocation, resource: keyof FilingHistoryLi
   ctx.usage[resource] += amount;
 }
 
-function readHistory(ctx: TaskFilingHistoryInvocation, args: string[], options: HostWorktreeGitOptions = {}): string {
+function readHistory(ctx: TaskFilingHistoryInvocation, args: string[], options: HostWorktreeGitOptions = {}): Promise<string> {
   return ctx.readGit(ctx.root, args, { ...options, encoding: "latin1",
     env: { GIT_NO_REPLACE_OBJECTS: "1", GIT_NO_LAZY_FETCH: "1", GIT_OPTIONAL_LOCKS: "0", GIT_GRAFT_FILE: undefined,
       GIT_SHALLOW_FILE: undefined, GIT_REPLACE_REF_BASE: undefined } });
 }
 
-function metadata(ctx: TaskFilingHistoryInvocation, args: string[], input?: string): string {
+async function metadata(ctx: TaskFilingHistoryInvocation, args: string[], input?: string): Promise<string> {
   const remaining = Math.min(ctx.limits.metadataBytes - ctx.usage.metadataBytes, ctx.limits.decodedBytes - ctx.usage.decodedBytes);
   if (remaining <= 0) unavailable("filing-history decodedBytes/metadataBytes budget exhausted");
   let raw: string;
-  try { raw = readHistory(ctx, args, { input, maxBuffer: remaining }); }
+  try { raw = await readHistory(ctx, args, { input, maxBuffer: remaining }); }
   catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code === "ENOBUFS") unavailable("filing-history decodedBytes/metadataBytes budget exhausted");
+    // execFileSync reports a full buffer as ENOBUFS; the async execFile reports it as this code.
+    const code = (error as NodeJS.ErrnoException)?.code;
+    if (code === "ENOBUFS" || code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") unavailable("filing-history decodedBytes/metadataBytes budget exhausted");
     throw error;
   }
   debit(ctx, "metadataBytes", raw.length); debit(ctx, "decodedBytes", raw.length);
   return raw;
 }
 
-function historyGraph(ctx: TaskFilingHistoryInvocation): Commit[] {
+async function historyGraph(ctx: TaskFilingHistoryInvocation): Promise<Commit[]> {
   // Older Git ignores GIT_NO_LAZY_FETCH. Refuse promisor configuration before any
   // object read on every version; inspect names only, never credential/remote values.
-  const configNames = metadata(ctx, ["config", "--null", "--name-only", "--list"]).split("\0");
+  const configNames = (await metadata(ctx, ["config", "--null", "--name-only", "--list"])).split("\0");
   if (configNames.some(key => /^remote\.[\s\S]+\.promisor$/.test(key) || key === "extensions.partialclone"))
     unavailable("promisor repository filing history is unsupported without fetching missing objects");
-  const pin = metadata(ctx, ["rev-parse", "--verify", "HEAD^{commit}"]).trim();
+  const pin = (await metadata(ctx, ["rev-parse", "--verify", "HEAD^{commit}"])).trim();
   if (!OID.test(pin)) unavailable("unreadable filing-history revision");
   ctx.revision = pin;
-  if (metadata(ctx, ["rev-parse", "--is-shallow-repository"]).trim() !== "false")
+  if ((await metadata(ctx, ["rev-parse", "--is-shallow-repository"])).trim() !== "false")
     unavailable("shallow or incomplete filing history");
-  const raw = metadata(ctx, ["log", "--pretty=raw", "--no-patch", "--no-notes", "--no-show-signature",
+  const raw = await metadata(ctx, ["log", "--pretty=raw", "--no-patch", "--no-notes", "--no-show-signature",
     "--no-color", "--encoding=none", "--reverse", "--topo-order", `--max-count=${ctx.limits.commitVisits + 1}`, pin, "--"]);
   const commits: Commit[] = [];
   let current: Commit | undefined;
@@ -153,9 +157,9 @@ function recognized(path: string, ctx: TaskFilingHistoryInvocation): boolean {
     (path.startsWith(prefix) && /^[^/]+\.(?:yaml|yml)$/.test(path.slice(prefix.length)));
 }
 
-function historyChanges(ctx: TaskFilingHistoryInvocation, commits: Commit[]): Map<string, Change[]> {
+async function historyChanges(ctx: TaskFilingHistoryInvocation, commits: Commit[]): Promise<Map<string, Change[]>> {
   const input = commits.map(c => [c.oid, ...c.parents.slice(0, 1)].join(" ")).join("\n") + "\n";
-  const raw = metadata(ctx, ["diff-tree", "--stdin", "-r", "--root", "--raw", "-z", "--no-renames",
+  const raw = await metadata(ctx, ["diff-tree", "--stdin", "-r", "--root", "--raw", "-z", "--no-renames",
     "--no-abbrev", "--always", "--no-ext-diff", "--no-textconv", "--",
     ctx.containers.monolith, ctx.containers.shards + "/"], input);
   const result = new Map<string, Change[]>();
@@ -210,10 +214,10 @@ function historicalRecordCounts(text: string, candidates: ReadonlySet<string>): 
   return counts;
 }
 
-function historyBlobs(ctx: TaskFilingHistoryInvocation, changes: Map<string, Change[]>): Map<string, Map<string, number>> {
+async function historyBlobs(ctx: TaskFilingHistoryInvocation, changes: Map<string, Change[]>): Promise<Map<string, Map<string, number>>> {
   const ids = [...new Set([...changes.values()].flatMap(rows => rows.flatMap(c => [c.old, c.next])).filter(id => !ZERO.test(id)))];
   debit(ctx, "blobReads", ids.length);
-  const info = ids.length ? metadata(ctx, ["cat-file", "--batch-check"], ids.join("\n") + "\n").trimEnd().split("\n") : [];
+  const info = ids.length ? (await metadata(ctx, ["cat-file", "--batch-check"], ids.join("\n") + "\n")).trimEnd().split("\n") : [];
   if (info.length !== ids.length) unavailable("incomplete plan blob census");
   const sizes = info.map((line, index) => {
     const match = /^([0-9a-f]+) blob (\d+)$/.exec(line);
@@ -233,7 +237,7 @@ function historyBlobs(ctx: TaskFilingHistoryInvocation, changes: Map<string, Cha
       bytes += expected; index++;
     }
     debit(ctx, "decodedBytes", bytes);
-    const output = Buffer.from(readHistory(ctx, ["cat-file", "--batch"], {
+    const output = Buffer.from(await readHistory(ctx, ["cat-file", "--batch"], {
       input: ids.slice(start, index).join("\n") + "\n", maxBuffer: bytes,
     }), "latin1");
     let offset = 0;
@@ -305,25 +309,30 @@ function recordStates(ctx: TaskFilingHistoryInvocation, commits: Commit[], chang
 }
 
 /** A result is qualified only after the complete bounded corpus has been read and checked. */
-export function resolveTaskFilingHistory(id: string, ctx: TaskFilingHistoryInvocation): TaskFilingHistory {
+export async function resolveTaskFilingHistory(id: string, ctx: TaskFilingHistoryInvocation): Promise<TaskFilingHistory> {
   if (!ctx.candidates.has(id)) return { state: "unknown", completeness: "incomplete", reason: "task absent from this history invocation" };
   if (!ctx.results && !ctx.failure) {
-    try {
-      const commits = historyGraph(ctx);
-      const changes = historyChanges(ctx, commits);
-      const states = recordStates(ctx, commits, changes, historyBlobs(ctx, changes));
-      ctx.results = new Map([...ctx.candidates].map(candidate => {
-        const state = states.get(candidate);
-        const result: TaskFilingHistory = state?.count === 1 && state.birth && !state.reason
-          ? { state: "qualified", revision: ctx.revision!, completeness: "complete", ...state.birth }
-          : { state: "unknown", revision: ctx.revision, completeness: "incomplete",
-            reason: state?.reason ?? "exact task record absent at the pinned revision" };
-        return [candidate, result];
-      }));
-    } catch (error) {
-      ctx.failure = error instanceof HistoryUnavailable ? error.message
-        : "git log failed: repository or complete history objects could not be read";
-    }
+    ctx.pending ??= readAllHistory(ctx);
+    await ctx.pending;
   }
   return ctx.results?.get(id) ?? { state: "unknown", revision: ctx.revision, completeness: "incomplete", reason: ctx.failure! };
+}
+
+async function readAllHistory(ctx: TaskFilingHistoryInvocation): Promise<void> {
+  try {
+    const commits = await historyGraph(ctx);
+    const changes = await historyChanges(ctx, commits);
+    const states = recordStates(ctx, commits, changes, await historyBlobs(ctx, changes));
+    ctx.results = new Map([...ctx.candidates].map(candidate => {
+      const state = states.get(candidate);
+      const result: TaskFilingHistory = state?.count === 1 && state.birth && !state.reason
+        ? { state: "qualified", revision: ctx.revision!, completeness: "complete", ...state.birth }
+        : { state: "unknown", revision: ctx.revision, completeness: "incomplete",
+          reason: state?.reason ?? "exact task record absent at the pinned revision" };
+      return [candidate, result];
+    }));
+  } catch (error) {
+    ctx.failure = error instanceof HistoryUnavailable ? error.message
+      : "git log failed: repository or complete history objects could not be read";
+  }
 }

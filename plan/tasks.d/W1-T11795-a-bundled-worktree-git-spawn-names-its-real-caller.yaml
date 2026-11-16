@@ -16,7 +16,7 @@
   files:
     - src/lib/read-plane.ts
     - test/console-api/read-model/a-bundled-worktree-git-spawn-names-its-real-caller.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: An esbuild single-file fixture (outfile run-task.mjs) that calls production hostWorktreeGit on a temporary git repository from actualCaller records actualCaller as the caller and hostWorktreeGit as the leaf for both of that call's synchronous spawns, including vetPinnedConfig's config read, and never charges hostWorktreeGit or vetPinnedConfig as a caller

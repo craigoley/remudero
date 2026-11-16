@@ -1442,6 +1442,8 @@ export function selectorShadowMissTask(miss: SelectorShadowMiss, taskId: string,
   const origin = selectorShadowCauseOrigin(miss.file);
   const edge = `${changedPaths.length ? changedPaths.join(", ") : miss.headSha} -> ${miss.file}`;
   const proofTitle = `${taskId}: the selector covers the recorded suite for every recorded edge`;
+  // W1-T13035: one proof behind both claims is shared-proof, which the plan preflight blocks on a new shard.
+  const replayTitle = `${taskId}: the shadow record reads the recorded suite as selected for every recorded edge`;
   const files = ["src/lib/affected-suites.ts", SELECTOR_SHADOW_MISS_TEST_PATH];
   const invariants = selectorKeepsItsSelections(`unit test: ${taskId}: the selector still selects every suite it selected before the repair`);
   const q = JSON.stringify;
@@ -1454,13 +1456,13 @@ export function selectorShadowMissTask(miss: SelectorShadowMiss, taskId: string,
     ...machineShardHeaderLines(files),
     `  origin: ${q(origin)}`,
     `  files: [${files.join(", ")}]`,
-    `  design: ${q(machineShardDesign(`Exercise the selector for the exact recorded suite ${miss.file} on every recorded input edge: ${edge}. The regression named "${proofTitle}" must call the selector and assert that exact suite is selected for every edge. Observation: coverage run ${miss.runId}, head ${miss.headSha}, base ${miss.baseSha ?? "unknown"}${miss.prNumber ? `, PR #${miss.prNumber}` : ""}. A filename-only assertion is not the requested repair.`, invariants))}`,
-    `  note: ${q(`W1-T4439 first observed a ${miss.selection} miss on coverage run ${miss.runId}${miss.prNumber ? ` for PR #${miss.prNumber}` : ""} at ${miss.headSha}: ${edge}. The failing shard concluded failure, so its retry did not recover it. The changed paths are candidate missing edges, not guessed import edges. Later misses of the same suite are ledgered as selector-shadow.miss_evidence rows naming this task rather than filed again. Add a test named "${proofTitle}" in ${SELECTOR_SHADOW_MISS_TEST_PATH} that calls the selector and asserts ${miss.file} is selected for each recorded edge: diff-coverage blocks an edge no test exercises.`)}`,
+    `  design: ${q(machineShardDesign(`Exercise the selector for the exact recorded suite ${miss.file} on every recorded input edge: ${edge}. The regression named "${proofTitle}" must call the selector and assert that exact suite is selected for every edge. The replay named "${replayTitle}" must pass each of those selections to shadowRecord with that suite as the failed file and assert its ${miss.selection} verdict reads selected, where the observed run read missed. Observation: coverage run ${miss.runId}, head ${miss.headSha}, base ${miss.baseSha ?? "unknown"}${miss.prNumber ? `, PR #${miss.prNumber}` : ""}. A filename-only assertion is not the requested repair.`, invariants))}`,
+    `  note: ${q(`W1-T4439 first observed a ${miss.selection} miss on coverage run ${miss.runId}${miss.prNumber ? ` for PR #${miss.prNumber}` : ""} at ${miss.headSha}: ${edge}. The failing shard concluded failure, so its retry did not recover it. The changed paths are candidate missing edges, not guessed import edges. Later misses of the same suite are ledgered as selector-shadow.miss_evidence rows naming this task rather than filed again. Add a test named "${proofTitle}" in ${SELECTOR_SHADOW_MISS_TEST_PATH} that calls the selector and asserts ${miss.file} is selected for each recorded edge: diff-coverage blocks an edge no test exercises. Beside it add a test named "${replayTitle}" that replays each recorded edge through shadowRecord and asserts ${miss.file} reads selected.`)}`,
     "  acceptance:",
     `    - claim: ${q(`the ${miss.selection} selector includes the recorded missed suite when each recorded edge is exercised`)}`,
     `      proof: ${q(`unit test: ${proofTitle}`)}`,
-    `    - claim: ${q(`a regression test calls the selector and asserts the recorded missed suite is selected for each recorded edge`)}`,
-    `      proof: ${q(`unit test: ${proofTitle}`)}`,
+    `    - claim: ${q(`the shadow record that reported the miss reads the recorded missed suite as selected when each recorded edge is replayed through the selector`)}`,
+    `      proof: ${q(`unit test: ${replayTitle}`)}`,
     ...invariantClaimLines(invariants),
     "",
   ].join("\n");

@@ -21,7 +21,7 @@
     - src/run-task.ts
     - src/lib/sweep.ts
     - test/a-refused-dependabot-pr-gets-a-full-review.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "For a Dependabot PR that the dep-review lane refuses and for which no W1-T9797 owned-build proposal is captured (for example reason foreign-commit), the dep-review command writes dep-review.decided with decision refuse and route review, and opens no needs-human escalation issue"

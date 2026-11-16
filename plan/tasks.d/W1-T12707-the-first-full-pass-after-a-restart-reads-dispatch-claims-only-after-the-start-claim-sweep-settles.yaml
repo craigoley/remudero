@@ -17,7 +17,7 @@
   files:
     - src/lib/daemon.ts
     - test/daemon/the-first-full-pass-after-a-restart-reads-dispatch-claims-only-after-the-start-claim-sweep-settles.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With the start-claim sweep still pending, the daemon's first full pass (each production start site that calls runGatedSweep: the tick, the recycle-pause tick and the retrigger) does not call deps.sweep; once claimSweepSettled settles, it calls it in the same or the next tick"

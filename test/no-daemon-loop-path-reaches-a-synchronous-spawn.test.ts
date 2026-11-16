@@ -354,7 +354,7 @@ const SYNC_LEDGER_SCAN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   runDigestCadenceReport: 1,
   runFixRung: 13,
   runReview: 1,
-  runSweep: 2,
+  runSweep: 1, // W1-T12954: the repair-history read awaits readSweepRepairHistory
   runTaskBody: 2,
   runWipeTestPair: 2,
   runWorkerStallDetectorRung: 1,
@@ -993,4 +993,20 @@ test("W1-T12753 criterion 4: the daemon's verify-human cadence reads its ledger 
   assert.deepEqual(refusals(planted, SYNC_LEDGER_SCAN_LOOP_BASELINE, LEDGER_SCAN_CENSUS), [
     "defaultVerifyHumanCadenceResult makes 1 synchronous ledger scan(s) and is reachable from the daemon loop (daemonCommand), but is not in SYNC_LEDGER_SCAN_LOOP_BASELINE — await an async ledger reader instead",
   ]);
+});
+
+test("W1-T12954 criterion 6: the sweep's repair-history read lowers its sync-ledger-scan row and no row rises", () => {
+  const fns = censusFunctions();
+  const reach = loopReachable(fns, "daemonCommand");
+  const pop = population(fns, syncScanCalls);
+  assert.ok(reach.has("runSweep") && reach.has("readSweepRepairHistory"), "the loop reaches the sweep and its repair-history reader");
+  assert.equal(SYNC_LEDGER_SCAN_LOOP_BASELINE.runSweep, 1, "the sweep's row dropped by the converted call");
+  assert.equal(pop.get("runSweep"), 1, "only the open-escalation union read stays synchronous in runSweep");
+  assert.equal(pop.get("readSweepRepairHistory") ?? 0, 0, "the repair-history reader scans nothing synchronously");
+  assert.deepEqual(refusals(fns, SYNC_LEDGER_SCAN_LOOP_BASELINE, LEDGER_SCAN_CENSUS), [], "no row rises");
+  // Falsifier: the sync union read put back in the reader is named.
+  const planted = fns.map((f) => (f.name === "readSweepRepairHistory" ? { ...f, body: `${f.body}\n  readLedgerUnionRecordsSync(stateDir);` } : f));
+  const named = refusals(planted, SYNC_LEDGER_SCAN_LOOP_BASELINE, LEDGER_SCAN_CENSUS);
+  assert.equal(named.length, 1);
+  assert.match(named[0]!, /^readSweepRepairHistory makes 1 synchronous ledger scan\(s\) and is reachable from the daemon loop/);
 });
