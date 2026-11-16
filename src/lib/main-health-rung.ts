@@ -11,7 +11,7 @@ import { systemClock, type Clock } from "./clock.js";
 import { readLedgerLines } from "./status.js";
 import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 import { StringDecoder } from "node:string_decoder";
-import { baseProbeSetupFailure, baseReproductionFiles, boundedBaseProbeReason, type BaseProbeFile, type BaseProbeResult } from "./base-reproduction.js";
+import { baseProbeSetupFailure, baseReproductionFiles, boundedBaseProbeReason, type BaseProbeFile, type BaseProbeOutcome, type BaseProbeResult } from "./base-reproduction.js";
 import { selectAffectedSuites, type AffectedSuitesInput } from "./affected-suites.js";
 import { judgeFixProgress, type FixProgressInput, type FixProgressJudge, type FixProgressVerdict } from "./fix-progress-judge.js";
 import {
@@ -490,6 +490,49 @@ function localProbeVerdict(files: readonly string[], outcomes: BaseProbeResult):
   if (files.some((file) => byFile.get(file) === "fails")) return "red";
   return files.length > 0 && outcomes.reason === undefined && outcomes.setup_error === undefined &&
     files.every((file) => byFile.get(file) === "passes" || byFile.get(file) === "absent") ? "green" : "inconclusive";
+}
+
+/** W1-T13136 — the local culprit proof, judged per failing test file. invariant:same-file-contrast: proven
+ *  only when one of `files` is red at the culprit (its local run fails it, or, with no local fail, a CI
+ *  probe run of the culprit is red on this same red) and passes at the first parent (a local pass or
+ *  absence, or a green CI probe run). invariant:timeout-is-not-a-fail: unrunnable or absent is never red.
+ *  The runs may name other files besides `files`; those decide nothing. */
+function sameFileContrast(
+  bisected: { parentSha: string; failingChecks: readonly string[]; localRuns?: ReadonlyArray<Record<string, unknown>> },
+  culprit: string,
+  files: readonly string[],
+  red: MainRedSignature,
+): { proven: true } | { proven: false; reason: string } {
+  const runs = bisected.localRuns ?? [];
+  const local = (sha: string) => runs.filter((run) => run.sha === sha && run.method === "local-test");
+  const ci = (sha: string) => runs.filter((run) => run.sha === sha && run.method !== "local-test");
+  const outcomeOf = (sha: string, file: string): BaseProbeOutcome | undefined => {
+    const seen = local(sha).flatMap((run) => Array.isArray(run.outcomes) ? (run.outcomes as BaseProbeResult) : [])
+      .filter((outcome) => outcome?.file === file).map((outcome) => outcome.outcome);
+    return seen.includes("fails") ? "fails" : seen.includes("unrunnable") ? "unrunnable" : seen[0];
+  };
+  const localFails = files.some((file) => outcomeOf(culprit, file) === "fails");
+  const ciRed = ci(culprit).some((run) => run.verdict === "red");
+  const ciRedMatches = ciRed && bisected.failingChecks.length > 0 &&
+    mainRedSignaturesMatch(mainRedSignature(bisected.failingChecks, undefined), red);
+  const ciGreenParent = ci(bisected.parentSha).some((run) => run.verdict === "green");
+  const sides = files.map((file) => {
+    const atCulprit = outcomeOf(culprit, file);
+    const atParent = outcomeOf(bisected.parentSha, file);
+    const culpritRed = atCulprit === "fails" || (!localFails && ciRedMatches);
+    const parentPass = atParent === "passes" || atParent === "absent" || (atParent === undefined && ciGreenParent);
+    const ownRun = atCulprit === undefined ? "no run" : `local ${atCulprit}`;
+    const culpritSays = atCulprit === "fails" || !ciRed || localFails ? ownRun
+      : `${atCulprit === undefined ? "" : `${ownRun}, `}CI probe red on ${bisected.failingChecks.join(", ") || "no named check"}${ciRedMatches ? "" : ` (not this repair's ${describeMainRed(red)})`}`;
+    const parentSays = atParent !== undefined ? `local ${atParent}` : ciGreenParent ? "CI probe green" : "no run";
+    return { file, contrast: culpritRed && parentPass, said: `${file}: culprit ${culpritSays}, first parent ${parentSays}` };
+  });
+  if (sides.some((side) => side.contrast)) return { proven: true };
+  return {
+    proven: false,
+    reason: `local culprit proof needs one failing test file red at the culprit \`${culprit}\` and passing at its first parent \`${bisected.parentSha}\`: ` +
+      (sides.length > 0 ? sides.map((side) => side.said).join("; ") : "no failing test file was named"),
+  };
 }
 
 /** Probes in flight: one at a time while any CI job in the repo waits for a runner; otherwise as many
@@ -1749,17 +1792,8 @@ export function buildMainHealthRung(
     const sha = record.offendingSha;
     if (record.bisected) {
       if (record.bisected.localRuns) {
-        const files = testFiles.length > 0 ? testFiles : record.bisected.testFiles;
-        const matches = (commit: string, verdict: MainProbeVerdict): boolean => {
-          const run = record.bisected!.localRuns!.find((probe) => probe.sha === commit);
-          const named = Array.isArray(run?.files) ? run.files : [];
-          return files.length > 0 && run?.method === "local-test" && run.verdict === verdict &&
-            named.length === files.length && files.every((file) => named.includes(file)) &&
-            Array.isArray(run.outcomes) && localProbeVerdict(files, run.outcomes as BaseProbeResult) === verdict;
-        };
-        if (!matches(sha, "red") || !matches(record.bisected.parentSha, "green")) {
-          return { proven: false, reason: "local culprit proof needs a failing culprit and a passing first parent on the same failing test files" };
-        }
+        const contrast = sameFileContrast(record.bisected, sha, [...new Set([...testFiles, ...record.bisected.testFiles])], red);
+        if (!contrast.proven) return { proven: false, reason: contrast.reason };
       }
       // Located by probing CI on the commits whose own push run was cancelled: the probe runs, recorded
       // on the located row, are the proof, because main's push run history holds none for them.
