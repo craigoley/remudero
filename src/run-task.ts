@@ -2614,6 +2614,7 @@ export function buildSweepEffects(
   | "readRedBaseRefreshFacts"
   | "readOpenEscalations"
   | "depReview"
+  | "retireDepReviewRefusedAsk"
   | "postReview"
   | "repushAbsent"
   | "updateBranch"
@@ -12610,13 +12611,21 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
   if (result.decision !== "hold" && !(await reconcileHold())) return 1;
 
   if (result.decision === "refuse") {
+    const reviewFailed = rest.includes("--dependabot-review-failed");
     const refused = reconcileDependabotRefusedPath({
       registryDir: dirname(holdStatePath), owner, repo, prUrl: view.url, prNumber: view.number, title: view.title ?? "",
       body: view.body ?? "", headSha: view.headRefOid, author: input.author, commits: view.commits, result, nowMs: clock.now(), log,
       capture: ({ raw, submissionKey }) => captureProposal({ root: proposalRoot, id: depReviewMigrationFeedbackId(submissionKey), raw, submissionKey }),
       checks: selectedChecks,
       escalate: (escalation) => escalate(escalation, { issues: deps.issues ?? ghIssueGateway(owner, repo), ledgerPath, runId }),
+      reviewFailed,
     });
+    if (refused === "not-proposed" && !reviewFailed) {
+      // W1-T12955: no proposal and no operator ask; the sweep sends the head to the full review.
+      log("dep-review.decided", { ...result, route: "review", pr_url: view.url, head_sha: view.headRefOid });
+      console.log(`refused, no owned-build proposal; routed to the full review: ${view.url}`);
+      return 2;
+    }
     if (refused === "failed") {
       // W1-T9797: the sweep dedups every outcome but hold, so an unfiled remedy must read as hold.
       log("dep-review.decided", { ...result, decision: "hold", review_decision: "refuse",
@@ -39520,8 +39529,9 @@ export async function approveCommand(
     }
     return repoDir;
   };
-  // The id mint and the id reservations stay on the public repository.
-  const idRoot = (worktreePath: string): string => filing.destination ? approvePublicClone(config, owner, repo) : worktreePath;
+  // The id mint and the id reservations stay on the public repository; the mint reads its fetched origin/main (W1-T13050).
+  const mintIn = <T>(worktreePath: string, mint: (root: string) => T): T =>
+    filing.destination ? mintFromPublicMain(config, owner, repo, runId, log, mint) : mint(worktreePath);
   const addApproveWorktree = (dir: string, path: string, branch: string, base: string): string => {
     addLockedRunWorktree(dir, path, branch, base, runId, log); // W1-T5356: lock before add
     return (addedWorktreePath = path);
@@ -39575,12 +39585,12 @@ export async function approveCommand(
       {
         mint: () => {
           if (approveDestinationFailure) throw new Error(approveDestinationFailure);
-          return mintNextTaskIdWithHistory({
-            planPath: join(idRoot(worktreePath), "plan", "tasks.yaml"),
-            repoRoot: idRoot(worktreePath),
+          return mintIn(worktreePath, (root) => mintNextTaskIdWithHistory({
+            planPath: join(root, "plan", "tasks.yaml"),
+            repoRoot: root,
             destinationSnapshot: approveDestinationSnapshot,
             openPrTexts: () => openPrMintTexts(owner, repo),
-          });
+          }));
         },
         reserveBlock: (startId, count) => {
           idBlock = reserveTaskIdBlock(startId, count, taskIdReservationsDir(config.root), {
@@ -40094,6 +40104,31 @@ function approvePublicClone(config: Config, owner: string, repo: string): string
   return dir;
 }
 
+/** W1-T13050: runs a destination approval's id mint in a fresh tree of the public clone at the origin/main its add just
+ *  fetched. The clone's checked-out main lags (no lane moves it), so minting from it refused as local-plan behind. The
+ *  clone's checked-out branch, HEAD and working tree stay as they are. A failed add throws: no fallback to the checkout. */
+function mintFromPublicMain<T>(
+  config: Config, owner: string, repo: string, runId: string, log: (step: string, extra?: Record<string, unknown>) => void,
+  mint: (root: string) => T,
+): T {
+  const clone = approvePublicClone(config, owner, repo);
+  const branch = `${approveRunBranch(runId)}-public-mint`;
+  const path = join(worktreesDir(config), branch);
+  try { addLockedRunWorktree(clone, path, branch, "origin/main", runId, log); }
+  catch (error) {
+    hostWorktreeGitResult(clone, ["branch", "-D", branch]);
+    throw new Error(`rmd approve: refusing to mint task id(s) — the public plan (${owner}/${repo} origin/main) cannot be read: ` +
+      String((error as Error)?.message ?? error).trim().slice(0, 300));
+  }
+  try { return mint(path); }
+  finally {
+    try { worktreeRemove(clone, path); }
+    catch (error) { console.error(`rmd approve: could not remove the public mint tree ${path}: ${String((error as Error)?.message ?? error)}`); }
+    removeRunLock(path);
+    hostWorktreeGitResult(clone, ["branch", "-D", branch]);
+  }
+}
+
 /**
  * `rmd approve <P##> <P##> ...` (N >= 2) — the EXPLICIT-BATCH counterpart of
  * {@link approveCommand} (W1-T2471): ships every READY member of a batch of NAMED proposals
@@ -40206,8 +40241,10 @@ async function approveBatchCommand(
       // fileRatificationBatch, so each member gets the single lane's refusal and written-paths list,
       // and every member's stamp folds over this worktree's own MASTER-PLAN.md in order (Q2).
       const batchWorktree = worktreePath;
-      // The id mint and the id reservations stay on the public repository.
+      // The id mint and the id reservations stay on the public repository; the mint reads its fetched origin/main (W1-T13050).
       const batchIdRoot = filing.destination ? approvePublicClone(config, owner, repo) : batchWorktree;
+      const batchMintIn = <T>(mint: (root: string) => T): T =>
+        filing.destination ? mintFromPublicMain(config, owner, repo, runId, log, mint) : mint(batchWorktree);
       const filed = fileRatificationBatch(
         batchWorktree,
         payloads,
@@ -40217,12 +40254,12 @@ async function approveBatchCommand(
             {
               mint: () => {
                 if (batchDestinationFailure) throw new Error(batchDestinationFailure);
-                return mintNextTaskIdWithHistory({
-                  planPath: join(batchIdRoot, "plan", "tasks.yaml"),
-                  repoRoot: batchIdRoot,
+                return batchMintIn((root) => mintNextTaskIdWithHistory({
+                  planPath: join(root, "plan", "tasks.yaml"),
+                  repoRoot: root,
                   destinationSnapshot: batchDestinationSnapshot,
                   openPrTexts: () => openPrMintTexts(owner, repo),
-                });
+                }));
               },
               reserveBlock: (startId, count) => {
                 const block = reserveTaskIdBlock(startId, count, taskIdReservationsDir(config.root), {
