@@ -12462,10 +12462,11 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // W1-T13193 — A REVIEW SETUP REFUSED AT THE SAME INPUT IS NOT RE-ADMITTED EVERY PASS. A refused setup writes no
     // review.posted row, so the W1-T5863 row below never trips on it. Ordered before every post-review row, this row
     // holds the demand until the head, the body or the reviewer code changes; runSweep takes one parked-PR
-    // remedy per head and digest (or, with no remedy host, escalates once). The blocker stays awaiting-review, so the
-    // #13305 stage diagnosis (which reads review.semantic_setup_refused rows for that blocker) keeps working on the hold.
+    // remedy per head and digest (or, with no remedy host, escalates once). The blocker is `other` (owner NONE), not
+    // awaiting-review: no review lane acts on a held review, so the hold climbs W1-T5690's SLO rungs like every other
+    // blocked-ambiguous row, and its reason names the refusal in the pr.stuck diagnosis.
     disposition: "blocked-ambiguous",
-    blocker: "awaiting-review",
+    blocker: "other",
     when: reviewSetupRefusalHolds,
     reason: (pr) => {
       const held = pr.reviewSetupRefused;
@@ -22610,7 +22611,7 @@ export async function runSweep(
     let { disposition, reason } = derived;
     // W1-T13193: the review-setup refusal hold, named so the dedup and action arms escalate it once per head and input.
     const setupRefusalHeld = pr.reviewSetupRefused !== undefined && derived.disposition === "blocked-ambiguous" &&
-      derived.blocker === "awaiting-review" &&
+      derived.blocker === "other" &&
       selectDispositionRule(dispositionView, policy, actNowMs, dispositionFacts).rule?.when === reviewSetupRefusalHolds;
     // W1-T9232: a build head cut before its own shard merged is refreshed from main and re-reviewed, never escalated
     // as "contradictory". A refresh that does not take, or a second miss after one, keeps the escalation, named.

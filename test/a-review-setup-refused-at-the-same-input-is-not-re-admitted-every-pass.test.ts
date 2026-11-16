@@ -115,7 +115,7 @@ test("W1-T13193 criterion 1: two refusals at the same input are not admitted, an
 
   const derived = deriveDisposition(viewFor(TWO_REFUSALS), DEFAULT_SWEEP_POLICY, NOW);
   assert.equal(derived.disposition, "blocked-ambiguous");
-  assert.equal(derived.blocker, "awaiting-review", "the held row keeps the blocker the #13305 diagnosis reads");
+  assert.equal(derived.blocker, "other", "no review lane owns the held review, so its blocker climbs the SLO rungs");
   assert.match(derived.reason, /review setup refused 2 times at head 2c199b9 \(head-task-metadata-unavailable/);
   assert.match(derived.reason, /not re-admitted until the head, body or reviewer code changes/);
 
