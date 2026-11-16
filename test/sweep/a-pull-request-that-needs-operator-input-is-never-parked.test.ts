@@ -11,7 +11,7 @@ import { reviewerFailureDigest } from "#src/lib/fix-progress-judge.js";
 import { actOnParkedPr, openEscalationRelease, PARKED_PR_REMEDY_STEP, parkedPrFacts, parkedPrRemedy, type ParkedPrContext, type ParkedPrHost,
   type ParkedPrSubject } from "#src/lib/parked-pr-remedy.js";
 import type { Plan, Task } from "#src/lib/plan.js";
-import { buildSweepEffects, DEFAULT_SWEEP_POLICY, renderClarificationQuestion, runSweep, type FixDispatchEvidence,
+import { buildSweepEffects, DEFAULT_SWEEP_POLICY, prBodyDigest, renderClarificationQuestion, runSweep, type FixDispatchEvidence,
   type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
@@ -240,6 +240,60 @@ test("W1-T12709 criterion 7: a plan-only filing red on a plan gate is not held b
   assert.deepEqual(w.remedies().map(r => [r.remedy, r.cause]), [["fix-on-pr", "plan-gate"]]);
   assert.notEqual(w.disposed()[0]!.disposition, "refused-escalate");
   assert.match(String(w.disposed()[0]!.reason), /plan-scoped round acts on 0 unmet criteria and 1 red checks/);
+  assert.equal(legacy.disposed()[0]!.blocker, "plan-proof-unrunnable", "without the remedy the plan filing is held behind plan-proof-unrunnable");
+  assert.notEqual(w.disposed()[0]!.blocker, "plan-proof-unrunnable", "the remedy's own blocker is not overwritten");
+  assert.notEqual(w.disposed()[0]!.blocker, "escalated");
+  assert.notEqual(w.disposed()[0]!.blocker_owner, "plan-repair");
+});
+
+test("W1-T12709 criterion 4: invariant:no-parked-pr, a fix lane stand-down hold keeps its hold, names a remedy and opens no needs-human issue", async () => {
+  const head = "c".repeat(40);
+  const key = `PR-${PR}`;
+  const body = "A taskless pull request.\n";
+  const at = (minutes: number) => new Date(NOW - minutes * 60_000).toISOString();
+  const rowsFor = (): Record<string, unknown>[] => [
+    { step: "sweep.disposed", pr_number: PR, head_sha: head, task_id: "SWEEP", run_id: "hold", disposition: "blocked-fixable", acted: true, ts: at(60) },
+    { step: "fix.dispatch", task_id: key, head_sha: head, run_id: "hold", mode: "proof-discrimination", ts: at(59) },
+    { step: "fix.stood_down", task_id: key, head_sha: head, run_id: "hold", site: "rung.empty_review_evidence",
+      reason: "the review read no evidence the worker could act on", read_head_sha: head, read_body_sha256: prBodyDigest(body), ts: at(50) }];
+  const heldPr = () => view({ taskId: undefined, headRefName: undefined, headSha: head, checksState: "red", reviewState: "pending", priorStrikes: 1,
+    body, ciFailures: [{ name: "test-shard (1/8)", logTail: "not ok 1 - the fixture" }] } as Partial<OpenPrView>);
+  const claimed = { claimFixAdmission: () => ({ admitted: true as const }) };
+
+  const legacyRows = rowsFor();
+  const legacy = world(legacyRows);
+  await runSweep([heldPr()], { ...legacy.deps, ...claimed }, DEFAULT_SWEEP_POLICY);
+  assert.equal(legacy.escalated.length, 1, "without the remedy the hold opens a needs-human issue");
+  assert.deepEqual(parkedWithoutRemedy(legacyRows), [PR]);
+
+  const rows = rowsFor();
+  const w = world(rows, host().h);
+  for (let pass = 0; pass < 3; pass++) await runSweep([heldPr()], { ...w.deps, ...claimed }, DEFAULT_SWEEP_POLICY);
+  assert.equal(w.dispatched.length, 0, "the hold stays: nothing it read has changed, so no worker is dispatched");
+  assert.equal(w.escalated.length, 0, "no needs-human issue is opened for the hold");
+  assert.deepEqual(parkedWithoutRemedy(rows), []);
+  assert.equal(rows.filter(r => r.step === "sweep.disposed" && r.run_id === "parked-test" && r.disposition === "refused-escalate").length, 0);
+  assert.equal(rows.filter(r => r.step === "sweep.disposed" && r.run_id === "parked-test" && r.blocker === "escalated").length, 0);
+  assert.deepEqual(w.remedies().map(r => [r.pr_number, r.head_sha, r.remedy, r.cause, r.outcome]),
+    [[PR, head, "fix-on-pr", "stand-down:rung.empty_review_evidence", "taken"]], "one remedy row for the pull request, head and cause");
+  const held = w.disposed().findLast(r => r.stand_down_hold === true)!;
+  assert.equal(held.disposition, "wait");
+  assert.equal(held.stand_down_site, "rung.empty_review_evidence");
+});
+
+test("W1-T12709 criterion 6: a clarification escalation for an open pull request becomes a remedy row with its text", async () => {
+  const stale = () => view({ checksState: "none", reviewState: "none", lastActivityAt: new Date(NOW - 60 * 60_000).toISOString() });
+  const legacy = world([]);
+  await runSweep([stale()], legacy.deps, DEFAULT_SWEEP_POLICY);
+  assert.equal(legacy.disposed()[0]!.disposition, "blocked-ambiguous");
+  assert.equal(legacy.escalated.length, 1, "without the remedy the clarification opens a needs-human issue");
+
+  const rows: Record<string, unknown>[] = [];
+  const w = world(rows, host().h);
+  for (let pass = 0; pass < 2; pass++) await runSweep([stale()], w.deps, DEFAULT_SWEEP_POLICY);
+  assert.equal(w.escalated.length, 0, "the W1-T78 rung opens no needs-human issue for an open pull request");
+  assert.deepEqual(w.remedies().map(r => [r.pr_number, r.remedy, r.cause, r.outcome]), [[PR, "fix-on-pr", "clarification", "taken"]]);
+  assert.match(String(w.remedies()[0]!.text), /not positively mergeable — checks none, review none/);
 });
 
 test("W1-T12709 criterion 9: invariant:never-close-healthy-work, nothing unmet and nothing red is fix-on-pr and never a close", async () => {

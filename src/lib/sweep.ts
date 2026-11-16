@@ -20455,6 +20455,8 @@ export async function runSweep(
   };
   const ruleBlockerByIndex = new Map<number, PrBlocker>();
   const planProofBlockedPrs = new Set<number>();
+  /** W1-T12709: the blocker a parked-pr remedy gave a pull request this pass; it outranks plan-proof-unrunnable. */
+  const parkedBlockerByPr = new Map<number, PrBlocker>();
   /** W1-T10339: taskless capped PRs, repaired in their own body by the fix lane (never plan repair). */
   const bodyProofRepairPrs = new Set<number>();
   const baseRedStandDownPrs = new Set<number>();
@@ -21879,8 +21881,8 @@ export async function runSweep(
       reviewerEvidenceUnreadable: blockerReadFailure !== undefined,
       mergeable: disposition === "mergeable",
       autoMergeArmed: pr.autoMergeArmed,
-      planProofUnrunnable: planProofBlockedPrs.has(pr.prNumber) ||
-        (isBlockedCi(pr) && pr.isPlanFiling === true) || metadataWait,
+      planProofUnrunnable: (!parkedBlockerByPr.has(pr.prNumber) && (planProofBlockedPrs.has(pr.prNumber) ||
+        (isBlockedCi(pr) && pr.isPlanFiling === true))) || metadataWait,
       strikesExhausted: disposition === "blocked-ambiguous" && isFixStrikeExhausted(pr, policy),
       ownRed: disposition === "blocked-fixable" && (isBlockedCi(pr) || bodyProofRepairPrs.has(pr.prNumber)),
       operatorHold: mergeHold !== undefined,
@@ -23059,9 +23061,17 @@ export async function runSweep(
         ledgerLines.some(row =>
           row.step === PARKED_PR_REMEDY_STEP && row.pr_number === pr.prNumber && row.head_sha === pr.headSha &&
           row.cause === cause && row.remedy === "fix-on-pr" && row.outcome === "taken"));
-      if (!repeatedHold) {
-        const parked = await actOnParkedPr(pr, decision, facts, ledgerLines, deps.parkedPr, { runId: deps.runId, ledgerTaskId: escalationTaskIdFor(pr), nowIso: clockFromMillisFn(() => now).iso(),
-          cause, text: reason, append: (row) => appendLine(deps.ledgerPath, row) });
+      const parked = await actOnParkedPr(pr, decision, facts, ledgerLines, deps.parkedPr, { runId: deps.runId, ledgerTaskId: escalationTaskIdFor(pr), nowIso: clockFromMillisFn(() => now).iso(),
+        cause, text: reason, append: (row) => appendLine(deps.ledgerPath, row) });
+      parkedBlockerByPr.set(pr.prNumber, parked.blocker);
+      if (repeatedHold) {
+        // The hold stays and no worker is dispatched, but the pull request is never parked on a person: the remedy row
+        // names it, the disposition is a wait on the fix lane, and no needs-human issue is opened for the hold.
+        disposition = "wait";
+        reason = `parked-pr remedy ${parked.remedy} (W1-T12709): the fix lane's stand-down holds this pull request while its inputs ` +
+          `are unchanged, and no needs-human issue is opened; ${parked.reason}; the hold: ${reason}`;
+        ruleBlockerByIndex.set(prIndex, facts.unmetCriteria.length > 0 ? "review-failed" : facts.redChecks.length > 0 ? "own-red" : "other");
+      } else {
         disposition = parked.disposition;
         reason = `parked-pr remedy ${parked.remedy} (W1-T12709): ${parked.reason}; it replaces: ${reason}`;
         ruleBlockerByIndex.set(prIndex, parked.blocker);
@@ -23069,6 +23079,18 @@ export async function runSweep(
         standDownHold = undefined;
       }
     }
+    // W1-T12709: the W1-T78 clarification rung opens no needs-human issue for an open pull request. The remedy row carries the
+    // question's text, and a split or rebuild puts the question into the held task's needs_input (W1-T12715).
+    const remedyInsteadOfEscalation = async (cause: string): Promise<string | undefined> => {
+      if (!deps.parkedPr || deps.dryRun) return undefined;
+      const facts = parkedPrFacts(pr, { redChecks: redCheckNames(pr).filter(r => !r.startsWith("review:")),
+        fixModelOrder: policy.fixModelOrder ?? DEFAULT_FIX_MODEL_ORDER }, ledgerLines, deps.parkedPr);
+      const parked = await actOnParkedPr(pr, parkedPrRemedy(facts), facts, ledgerLines, deps.parkedPr, { runId: deps.runId,
+        ledgerTaskId: escalationTaskIdFor(pr), nowIso: clockFromMillisFn(() => now).iso(), cause, text: reason,
+        append: (row) => appendLine(deps.ledgerPath, row) });
+      parkedBlockerByPr.set(pr.prNumber, parked.blocker);
+      return `parked-pr remedy ${parked.remedy} (W1-T12709): ${parked.reason}; no needs-human issue is opened: ${reason}`;
+    };
     // Operator ruling 2026-10-30: a fix lane that escalated to a person and got no answer for HELD_ESCALATION_SLO_MS takes the
     // ladder's rebuild rung (the fix-progress judge, then close and requeue with the findings as a note, or a digest) instead
     // of re-escalating. The age is read off the hold's own row, so neither blocker bookkeeping nor a re-escalation resets it.
@@ -25172,6 +25194,12 @@ export async function runSweep(
                 }
               }
               try {
+                const remedied = await remedyInsteadOfEscalation(standDownHold ? `stand-down:${standDownHold.site}` : "refused-escalate");
+                if (remedied !== undefined) {
+                  acted = false;
+                  standDownReason = remedied;
+                  break;
+                }
                 await deps.escalate(pr, reason, question!);
                 if (standDownHold) extraDisposedFields = { ...extraDisposedFields, stand_down_escalation_outcome: "delivered" };
               } catch (error) {
@@ -25489,8 +25517,14 @@ export async function runSweep(
                     headSha: pr.headSha, currentRed: redCheckNames(pr), ledger: ledgerLines });
                   ({ reason, question } = renderFixProgressEscalation(pr, reason, input));
                 }
-                await deps.escalate(pr, reason, question!);
-                contradictoryEscalated = isContradictory;
+                const remedied = await remedyInsteadOfEscalation("clarification");
+                if (remedied !== undefined) {
+                  acted = false;
+                  standDownReason = remedied;
+                } else {
+                  await deps.escalate(pr, reason, question!);
+                  contradictoryEscalated = isContradictory;
+                }
               }
               break;
             case "dep-review":
