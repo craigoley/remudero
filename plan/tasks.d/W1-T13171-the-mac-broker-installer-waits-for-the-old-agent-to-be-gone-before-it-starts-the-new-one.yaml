@@ -1,0 +1,50 @@
+- id: W1-T13171
+  title: "The Mac read broker installer waits for launchd to let go of the old agent before it starts the new one, so a reinstall over a running broker succeeds the first time"
+  repo: remudero
+  priority: 1.1
+  depends_on: [W1-T12938]
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the installer stops and starts the one service that paces every GitHub read on the operator Mac
+  band_meaning: span
+  origin: "operator-session#mac-read-broker-2026-11-16"
+  plan_refs:
+    - W1-T12938
+    - W1-T13158
+  files:
+    - deploy/mac/install-gh-read-broker.sh
+    - test/github/the-mac-read-broker-runs-from-a-durable-install.test.ts
+    - test/github/the-mac-broker-installer-waits-for-the-old-agent-to-be-gone.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "After it stops the old agent, the installer starts the new one only once the service manager no longer lists the service; against a stand-in whose stop command returns before the service is gone, the install succeeds where today it fails with an input/output error"
+      proof: "grep: W1-T13171 criterion 1 in test/github/the-mac-broker-installer-waits-for-the-old-agent-to-be-gone.test.ts"
+    - claim: "The wait is bounded by the same seconds the caller gives for the heartbeat wait: an old agent that never goes away ends the install with the service named, nothing replaced and the old agent still the one on disk"
+      proof: "grep: W1-T13171 criterion 2 in test/github/the-mac-broker-installer-waits-for-the-old-agent-to-be-gone.test.ts"
+    - claim: "The roll-back path waits the same way before it starts the previous agent again"
+      proof: "grep: W1-T13171 criterion 3 in test/github/the-mac-broker-installer-waits-for-the-old-agent-to-be-gone.test.ts"
+    - claim: "invariant:an-install-never-leaves-the-account-without-a-broker — a failed install still ends with the previous agent serving or with a line that says it is not, a dry run still changes nothing, and an install with no previous agent is unchanged"
+      proof: "grep: W1-T13171 criterion 4 in test/github/the-mac-broker-installer-waits-for-the-old-agent-to-be-gone.test.ts"
+  rationale: |
+    OBSERVED 2026-11-16 on the operator Mac, on the first live run of the installer W1-T12938 merged (#18834), run by the operator session with the operator's approval.
+
+    - `bash deploy/mac/install-gh-read-broker.sh --rmd <checkout>/bin/rmd` over the running broker printed "launchctl bootstrap failed: Bootstrap failed: 5: Input/output error", then "the previous agent is back, running .../read-broker-main/bin/rmd", and exited 1. `launchctl print-disabled gui/502` listed the service as enabled, so the installer's own hint did not apply. The roll-back worked: the old agent's heartbeat was fresh seconds later.
+    - READ the installer: PHASE ONE runs `launchctl bootout`, moves the staged copy into place (an instant rename) and writes the plist, then `launchctl bootstrap`. Nothing waits in between. The roll-back does remove a directory tree between its bootout and its bootstrap, and it succeeded.
+    - PROVED with a throwaway agent under its own label whose process takes 4 s to exit on TERM: `launchctl bootout` returned 0 at once; `launchctl bootstrap` straight after returned "5: Input/output error"; after waiting until `launchctl print gui/<uid>/<label>` failed (about 4 s), the same `bootstrap` returned 0.
+    - WORKAROUND used that day, the installer unchanged: boot the old agent out by hand, wait until launchd no longer lists it, then run the installer; its own bootout is then a no-op. The install succeeded and the broker serves from the durable copy.
+    - The suite W1-T12938 added drives a fake launchctl whose bootout is instant, so it could not see this.
+  design: |
+    1. One function, used by both paths: after `launchctl bootout`, poll `launchctl print "gui/$uid/$label"` until it fails, sleeping a short step between polls, for at most the seconds given by `--heartbeat-wait` (the bound the caller already chose for this install; no new number).
+    2. PHASE ONE calls it before any copy is moved. If the bound passes, the installer prints that the old agent is still loaded, names the service, changes nothing on disk and exits non-zero.
+    3. The roll-back calls it before its own bootstrap.
+    4. The fake launchctl in the suites gains a mode in which bootout returns 0 while `print` keeps succeeding for a set number of polls, and a mode in which it never stops succeeding.
+    INVARIANT an-install-never-leaves-the-account-without-a-broker: whatever fails, the account ends with a broker serving or with a line saying which agent is not; a dry run changes nothing.
+    NOT IN SCOPE: the Linux installer; how the broker itself shuts down; the staleness line (W1-T13158).
+  falsifier: |
+    Bootstrap straight after the bootout and criterion 1 must fail. Wait without a bound, or replace the copy before the wait ends, and criterion 2 must fail. Leave the roll-back without the wait and criterion 3 must fail. Let a failed install end silently with no agent loaded and criterion 4 must fail. Restore and all pass.
+  note: |
+    reservation hand-off: run-unfiled-1794837973366 -> run-unfiled-1794837973366
+    Reserved with rmd next-task-id from a worktree at origin/main. The new test sits beside W1-T12938's suite in test/github/; confirm the folder with rmd test-place on a stub. The real launchd behaviour can only be checked on a Mac: the operator session will hand-build this and re-run the live reinstall as the last check.
