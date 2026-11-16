@@ -1,0 +1,43 @@
+- id: W1-T13219
+  title: "The ci-friction gardener closes its own escalation once the escalated cause has ranked outside the top LADDER_DEPTH priced causes for seven days"
+  repo: remudero
+  priority: 1.3
+  depends_on: []
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # lets a gardener close issues it opened; only its own escalations, with a measured citation
+  band_meaning: blast-radius
+  origin: "operator-request#2026-11-16T17:24Z-issue-triage"
+  plan_refs:
+    - W1-T4435
+    - W1-T8866
+  files:
+    - src/lib/ci-friction-gardener.ts
+    - test/gardeners/the-ci-friction-gardener-closes-an-escalation-that-left-the-ladder.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "An origin in escalatedCiFrictionOrigins that has ranked outside the top LADDER_DEPTH (8) priced causes on every pass for at least seven days gets its open escalation issue closed with a comment citing its current price, its rank and the window"
+      proof: "grep: W1-T13219 criterion 1 in test/gardeners/the-ci-friction-gardener-closes-an-escalation-that-left-the-ladder.test.ts"
+    - claim: "The close writes a ci-friction.remedy_released ledger row, and the origin leaves the escalated set, so a cause that later ranks inside the top LADDER_DEPTH again is drafted or escalated like a new cause"
+      proof: "grep: W1-T13219 criterion 2 in test/gardeners/the-ci-friction-gardener-closes-an-escalation-that-left-the-ladder.test.ts"
+    - claim: "An origin whose price is unreadable, ranked inside the top LADDER_DEPTH on any pass in the window, or whose issue carries an operator comment newer than the fleet's newest is kept open"
+      proof: "grep: W1-T13219 criterion 3 in test/gardeners/the-ci-friction-gardener-closes-an-escalation-that-left-the-ladder.test.ts"
+    - claim: "invariant:at-most-five-closes-per-pass — one pass closes at most five escalations, and ranking and pricing are unchanged"
+      proof: "grep: W1-T13219 criterion 4 in test/gardeners/the-ci-friction-gardener-closes-an-escalation-that-left-the-ladder.test.ts"
+  rationale: |
+    OBSERVED 2026-11-16 via the GitHub REST API: 57 open craigoley/remudero issues are ci-friction escalations (task keys ci-friction-*), the oldest from 2026-10-08 (#10031). The ci-friction gardener holds each escalated origin as "escalated" (escalatedCiFrictionOrigins, src/lib/ci-friction-gardener.ts) and never releases it, so an issue stays open after its price has decayed.
+    The issue-revalidation garden refreshes these as still-true on weak evidence: for example on #17491 (2026-11-16 13:06Z) the only evidence was that src/lib/run-child.ts still exists on origin/main.
+    The gardener already prices every cause on a seven-day half-life, so it is the one component that can say the cause stopped costing fix rounds (W1-T8866's rule: each producer closes its own issue on recovery).
+  design: |
+    1. On each pass, for each escalated origin, read its rank in the pass's priced list. Ledger the first pass it ranked outside the top LADDER_DEPTH (ci-friction.remedy_below_ladder).
+    2. After seven days outside the ladder on every pass, close that origin's open issue through the existing issue gateway with a citation, ledger ci-friction.remedy_released, and drop the origin from the escalated set.
+    3. Keep the issue open on an unreadable price, any pass inside the ladder, or a newer operator comment.
+    INVARIANT at-most-five-closes-per-pass: one pass closes at most five escalations, and causes are ranked and priced exactly as before.
+    NOT IN SCOPE: closing the 57 issues open today by hand; changing how prices or ranks are computed.
+  falsifier: |
+    Remove the release step and criteria 1 and 2 must fail. Close after a single pass outside the ladder or ignore an operator comment and criterion 3 must fail. Remove the cap and criterion 4 must fail.
+  note: |
+    Reserved with rmd next-task-id from the operator checkout (refs/rmd-id/W1-T13219). rmd test-place computed test/gardeners/.

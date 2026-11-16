@@ -1,0 +1,56 @@
+- id: W1-T13226
+  title: "The sweep holds an implementation PR whose unmet dependency has its own open PR, instead of closing it as a plan resequence"
+  repo: remudero
+  priority: 1.1
+  depends_on: []
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # narrows a destructive close; a dependency with no open PR still closes exactly as today
+  band_meaning: blast-radius
+  origin: "operator-session#console-inbox-defects-2026-11-16"
+  plan_refs:
+    - W1-T3585
+    - W1-T4565
+    - W1-T4633
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/a-resequence-close-holds-a-pr-whose-dependency-has-an-open-pr.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "An implementation PR whose only unmet dependency is the task of another open, non-plan-filing PR is left open with planResequenceHeld naming that PR, and is not closed"
+      proof: "grep: W1-T13226 criterion 1 in test/sweep/a-resequence-close-holds-a-pr-whose-dependency-has-an-open-pr.test.ts"
+    - claim: "When one of several unmet dependencies has no open PR, the resequence close stands, and its reason names only the dependencies that have no open PR"
+      proof: "grep: W1-T13226 criterion 2 in test/sweep/a-resequence-close-holds-a-pr-whose-dependency-has-an-open-pr.test.ts"
+    - claim: "invariant:in-flight-dependency-never-closes — a PR whose every unmet dependency has an open implementation PR is never closed by the resequence row, and a PR naming itself or a plan-filing PR as the dependency's PR earns no hold"
+      proof: "grep: W1-T13226 criterion 3 in test/sweep/a-resequence-close-holds-a-pr-whose-dependency-has-an-open-pr.test.ts"
+  rationale: |
+    OBSERVED 2026-11-16 on craigoley/remudero-console, rmd sweep comment "task <id> is unmet dependency in the current plan: <dep> — the plan resequenced after this PR was admitted":
+    - #2568 (CONSOLE-T184, depends_on CONSOLE-T182) closed at 17:58:13Z. Its base branch was #2564's head; #2564 carries Remudero-Task: CONSOLE-T182, was open and green, and was waiting only on remudero-review.
+    - #2566 (CONSOLE-T178, depends_on CONSOLE-T176) closed at 14:39Z the same way. It was a fleet-built run branch, later reopened and merged.
+    - #2570 (CONSOLE-T186, depends_on CONSOLE-T185, open #2569) has the same shape and is next.
+    In each case the dependency was declared when the task was filed, so nothing resequenced. The dependency was simply in flight in its own open PR.
+    READ at origin/main c35115c49 (src/lib/sweep.ts): the resequence row (W1-T3585) closes whenever planResequenceIneligible is set. recheckResequenceCloseAgainstFreshCredit (W1-T4633) clears it only when the dependency has merged or the credit read is absent. It already receives every open PR view in `prs`, but nothing asks whether a dependency has an open PR of its own.
+    Cost: a finished, tested build is thrown away, and either an operator reopens it by hand or the drain pays to rebuild it after the dependency merges. That breaks the rule that a PR must never get stuck or be lost.
+  design: |
+    1. In recheckResequenceCloseAgainstFreshCredit, after the merged-credit narrowing, build a map from taskId to prNumber over `prs`, counting only PRs with isPlanFiling === false and a taskId, and never the PR being judged.
+
+    2. If every still-unmet dependency id is in that map, clear planResequenceIneligible and planResequenceUnmetDependencies and set planResequenceHeld to name each dependency and its open PR ("unmet dependency <id> has open PR #<n> — held until it merges or closes"). The existing sweep.plan_resequence_close.held log row then records it.
+
+    3. If any still-unmet dependency has no open PR, keep the close, and rewrite its reason to name only those dependencies.
+
+    4. Leave the candidates === undefined branch and every other stale row unchanged.
+
+    INVARIANT in-flight-dependency-never-closes: a PR whose every unmet dependency has an open implementation PR is never closed by the resequence row.
+
+    NOT IN SCOPE: retargeting a stacked PR's base after its dependency merges (GitHub does that), and the drain's choice to skip a task with an open PR.
+  falsifier: |
+    Without step 2, criterion 1 must fail: replay #2568 with a PR for CONSOLE-T184 whose unmet dependency CONSOLE-T182 is the task of open PR #2564, and the row closes it.
+    Count a plan-filing PR or the judged PR itself as the dependency's PR, and criterion 3 must fail.
+    Hold when only some dependencies have an open PR, and criterion 2 must fail.
+    Restore the fix and all three pass.
+  note: |
+    Reserved with rmd next-task-id from the operator checkout (refs/rmd-id/W1-T13226, holder claude/project-thread-cb5huh-plan-stacked-hold). rmd test-place computed test/sweep/ for the new suite (high confidence). Existing suites test/a-resequence-close-reads-fresh-merge-credit.test.ts and test/the-sweep-sees-a-new-head-in-the-same-pass.test.ts exercise this function and must stay green.
+    Open-PR sweep 2026-11-16 18:10Z: no open core PR matched resequence, stacked or "unmet dependency" (positive control: "gardener" matched 3).
