@@ -1,0 +1,64 @@
+- id: W1-T13170
+  title: "An awaited host git call that is given stdin reports git's own failure (output too large, or a nonzero exit) and not the EPIPE of the stdin write that the dead child caused"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # every awaited git call into a worker worktree goes through this leaf; a wrong change hides or changes git errors that callers classify
+  origin: "operator-session#leftovers-2026-11-16"
+  plan_refs:
+    - W1-T9550
+    - W1-T6136
+  files:
+    - src/lib/worktree-git.ts
+    - test/a-host-git-call-that-overflows-its-output-reports-the-overflow-not-epipe.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "hostWorktreeGitAsync given stdin that is larger than the pipe buffer, on a git command whose stdout goes past maxBuffer (cat-file --batch with a small maxBuffer), rejects with the child's maxBuffer error (code ERR_CHILD_PROCESS_STDIO_MAXBUFFER), not with EPIPE"
+      proof: "grep: W1-T13170 criterion 1 in test/a-host-git-call-that-overflows-its-output-reports-the-overflow-not-epipe.test.ts"
+    - claim: "hostWorktreeGitAsync given large stdin, on a git command that exits nonzero before it reads stdin, rejects with git's exit code and stderr, not with EPIPE"
+      proof: "grep: W1-T13170 criterion 2 in test/a-host-git-call-that-overflows-its-output-reports-the-overflow-not-epipe.test.ts"
+    - claim: "invariant:the-child-outcome-wins — when the git child fails, the rejection is the child's error, whatever error the stdin write had; a stdin error is reported only when the child itself exited 0"
+      kind: guard
+      proof: "grep: W1-T13170 criterion 3 in test/a-host-git-call-that-overflows-its-output-reports-the-overflow-not-epipe.test.ts"
+    - claim: "A call whose stdin git reads to the end returns its stdout as today (credential fill and cat-file --batch under maxBuffer)"
+      proof: "grep: W1-T13170 criterion 4 in test/a-host-git-call-that-overflows-its-output-reports-the-overflow-not-epipe.test.ts"
+  rationale: |
+    WHY: a caller that feeds stdin to git and gets too much output back sees "write EPIPE" and not "output
+    too large". The EPIPE comes after the overflow (node kills the child, and the rest of the stdin write
+    then fails), but it rejects first, so the real cause is lost and error classifiers get a pipe error.
+    READ at origin/main ef8b74910:
+    - src/lib/worktree-git.ts:475 hostWorktreeGitAsync starts the child with execFileLoopBounded, then
+      :479-483 writes input with stdin.end and rejects `fed` on any stdin error (:481 stdin.once("error",
+      reject)).
+    - :484 `await Promise.all([command, fed])`: Promise.all rejects with the first rejection. When stdout
+      goes past maxBuffer, node's execFile kills the child and rejects `command` only on close, while the
+      unfinished stdin write fails with EPIPE at once, so `fed` wins. The same race applies when git exits
+      nonzero before it reads its stdin.
+    - Callers that give input and a maxBuffer: src/cli/commands/fix.ts:4223 (input, maxBuffer 1 << 26) and
+      src/run-task.ts:13273 (input, default maxBuffer).
+    Not measured in the ledger; confirmed by reading the code. Low rate today, because most inputs are
+    smaller than the pipe buffer.
+  design: |
+    INVARIANT the-child-outcome-wins: the child's own failure is the error of the call; a stdin write error never hides it.
+    1. Make `fed` settle to a value and never reject: record the stdin error (EPIPE or other) instead.
+    2. Await `command`. If it rejects, throw its error unchanged (keep LoopBoundedChildTimeout and the
+       maxBuffer error as they are), and attach the stdin error as a cause field only if that is useful.
+    3. If `command` resolves and stdin had an error other than EPIPE, throw that stdin error. If it was
+       EPIPE and git exited 0, git chose not to read all of its input; return stdout as today's success
+       path would.
+    4. No change to hostWorktreeGit (sync), spawnOptions or the callers.
+    5. Tests use a real temp repository and real git: a blob larger than maxBuffer read through
+       cat-file --batch with input larger than 64 KiB (criterion 1), and a command that fails at once with
+       large input (criterion 2).
+  falsifier: |
+    Keep Promise.all([command, fed]): criteria 1 and 2 fail with code EPIPE. Swallow every stdin error,
+    also when git exits 0 after a non-EPIPE stdin error: criterion 3 fails.
+  note: |
+    Id reserved for run-unfiled-1794837666000 with ~/rmd-work/bin/reserve-id.sh.
+    Proof that counts in production: no worktree_git or fix row whose error is "write EPIPE" for a git call
+    that was given input.
