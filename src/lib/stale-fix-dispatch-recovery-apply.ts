@@ -10,11 +10,11 @@
  * It never deletes or moves a ref, never removes a worktree, never pushes to the PR branch, and never
  * writes fix.done, a credit, or a plan or source file. Every I/O goes through {@link RecoveryPorts}.
  */
-import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { gitClaimRunnerAsync } from "./dispatch-claim.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { defaultGetProcessStartTime, reclaimStaleLock } from "./fs-race-safe.js";
 import { sameHost } from "./host-identity.js";
@@ -33,6 +33,7 @@ import {
   type StaleFixDispatchReceipt,
   type StaleFixDispatchReclaimedPrior,
 } from "./stale-fix-dispatch-recovery.js";
+import { hostWorktreeGitAsync } from "./worktree-git.js";
 
 export const PR_OWNER_RECOVERY_AUTHORIZED_STEP = "pr_owner.recovery_authorized";
 export const PR_OWNER_RECOVERY_RECEIPT_STEP = STALE_FIX_DISPATCH_RECEIPT_STEP;
@@ -895,13 +896,17 @@ export function defaultDescendants(pid: number, procRoot = "/proc", platform: st
   return found.length > 0 ? { state: "present", pids: found } : { state: "none" };
 }
 
-/** `git <args>` resolving on every outcome, with an optional cwd and extra environment. */
+/** `git <args>` resolving on every outcome: repository commands through the dispatch-claim runner,
+ *  and a command addressed to a worktree through the hardened leaf (`hostWorktreeGitAsync`). */
 export function defaultRecoveryGit(repoDir: string): RecoveryGit {
-  return (args, opts = {}) =>
-    new Promise((resolve) => {
-      execFile("git", args, { cwd: opts.cwd ?? repoDir, env: { ...process.env, ...opts.env }, maxBuffer: 64 * 1024 * 1024 }, (error, stdout, stderr) => {
-        const code = (error as { code?: unknown } | null)?.code;
-        resolve({ status: error ? (typeof code === "number" ? code : 1) : 0, stdout: String(stdout), stderr: String(stderr) });
-      });
-    });
+  const atRepo = gitClaimRunnerAsync(repoDir);
+  return async (args, opts = {}) => {
+    if (opts.cwd === undefined || opts.cwd === repoDir) return atRepo(args);
+    try {
+      return { status: 0, stdout: await hostWorktreeGitAsync(opts.cwd, args, opts.env ? { env: opts.env } : {}), stderr: "" };
+    } catch (error) {
+      const code = (error as { status?: unknown; code?: unknown }).status ?? (error as { code?: unknown }).code;
+      return { status: typeof code === "number" && code !== 0 ? code : 1, stdout: "", stderr: messageOf(error) };
+    }
+  };
 }

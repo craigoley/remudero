@@ -773,7 +773,10 @@ test("W1-T12114 recovery preserves all work", async () => {
   const version = await git(["--version"]);
   assert.equal(version.status, 0);
   assert.match(version.stdout, /^git version/);
-  assert.notEqual((await git(["rev-parse", "--verify", "no-such-ref-w1-t12114"], { env: { GIT_DIR: join(tmpdir(), "no-such-git-dir-w1-t12114") } })).status, 0);
+  // A cwd that is not a harness-cut worktree is refused by the hardened leaf, as a failed answer.
+  const refused = await git(["status", "--porcelain"], { cwd: join(tmpdir(), "no-such-worktree-w1-t12114"), env: { GIT_INDEX_FILE: "x" } });
+  assert.notEqual(refused.status, 0);
+  assert.notEqual(refused.stderr, "");
 });
 
 test("W1-T12114 the registered command calls the recovery apply module", async () => {
