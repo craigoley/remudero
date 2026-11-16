@@ -683,6 +683,15 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   if (input.files.has(refusalAmendment) && files.some((f) => refusalAmendmentEdges.includes(f))) {
     pathReaders.push(refusalAmendment);
   }
+  const cappedRepair = suitePath("test/a-capped-pr-exhausts-repair-before-it-reaches-a-human.test.ts");
+  const cappedRepairEdges = [
+    "src/lib/in-tree-budget.ts",
+    "src/lib/plan-pr-emitter.ts",
+    suitePath("test/a-starved-plan-pr-preflight-leg-times-out-and-is-asked-again.test.ts"),
+  ];
+  if (input.files.has(cappedRepair) && files.some((f) => cappedRepairEdges.includes(f))) {
+    pathReaders.push(cappedRepair);
+  }
   // A coverage shard failed on this suite (run 41111628169, PR #15805) and the narrow selector missed it. The
   // suite drives scripts/openweight-probe.mjs, which reaches worker-provider's tool boundary, not a symbol it names.
   const openWeightProbe = suitePath("test/openweight-probe.test.ts");
