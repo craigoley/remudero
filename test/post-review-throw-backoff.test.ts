@@ -86,14 +86,15 @@ test("a thrown review attempt is re-admitted after the existing pending ceiling"
 test("a recent thrown attempt stands down with a timed retry reason, not a durable-refusal claim", async () => {
   const path = ledgerPath();
   const pr = reviewPr();
-  appendOutcome(path, pr, "review.post_refused", THROW_REASON, new Date(NOW - 30 * 60_000).toISOString());
+  // W1-T13257: one throw waits 5 minutes, so "recent" is inside that first backoff.
+  appendOutcome(path, pr, "review.post_refused", THROW_REASON, new Date(NOW - 3 * 60_000).toISOString());
 
   const posted: number[] = [];
   await runSweep([pr], deps(path, posted), DEFAULT_SWEEP_POLICY);
   assert.deepEqual(posted, []);
   const disposed = readLedgerLines(path).findLast((line) => line.step === "sweep.disposed");
-  assert.match(String(disposed?.stand_down_reason), /threw 30m ago/);
-  assert.match(String(disposed?.stand_down_reason), /retry backoff.*60m pending ceiling/);
+  assert.match(String(disposed?.stand_down_reason), /threw 3m ago/);
+  assert.match(String(disposed?.stand_down_reason), /retry backoff of 5m \(inside the 60m pending ceiling\)/);
   assert.doesNotMatch(String(disposed?.stand_down_reason), /already REFUSED/);
 });
 
@@ -103,7 +104,7 @@ test("a timed-outcome head does not consume the light pass review admission", as
   const eligible = reviewPr(2754, {
     lastActivityAt: new Date(NOW - 60 * 60_000).toISOString(),
   });
-  appendOutcome(path, backedOff, "review.post_refused", THROW_REASON, new Date(NOW - 30 * 60_000).toISOString());
+  appendOutcome(path, backedOff, "review.post_refused", THROW_REASON, new Date(NOW - 3 * 60_000).toISOString());
 
   const posted: number[] = [];
   await runSweepLightPass(
@@ -116,7 +117,7 @@ test("a timed-outcome head does not consume the light pass review admission", as
   const backedOffDisposition = readLedgerLines(path).findLast(
     (line) => line.step === "sweep.disposed" && line.pr_number === backedOff.prNumber,
   );
-  assert.match(String(backedOffDisposition?.stand_down_reason), /retry backoff.*60m pending ceiling/);
+  assert.match(String(backedOffDisposition?.stand_down_reason), /retry backoff of 5m \(inside the 60m pending ceiling\)/);
 });
 
 test("a second throw advances the retry clock instead of licensing per-sweep retries", async () => {
@@ -135,10 +136,11 @@ test("a second throw advances the retry clock instead of licensing per-sweep ret
   assert.deepEqual(firstAttempts, [pr.prNumber]);
   assert.equal(firstSummary.actionsFailed, 1);
 
+  // W1-T13257: the second throw on this input doubles the wait to 10 minutes.
   const earlyRetry: number[] = [];
   await runSweep(
     [pr],
-    deps(path, earlyRetry, { now: () => NOW + 30 * 60_000 }),
+    deps(path, earlyRetry, { now: () => NOW + 9 * 60_000 }),
     DEFAULT_SWEEP_POLICY,
   );
   assert.deepEqual(earlyRetry, [], "the fresh throw starts a new bounded interval");
@@ -146,7 +148,7 @@ test("a second throw advances the retry clock instead of licensing per-sweep ret
   const elapsedRetry: number[] = [];
   await runSweep(
     [pr],
-    deps(path, elapsedRetry, { now: () => NOW + 61 * 60_000 }),
+    deps(path, elapsedRetry, { now: () => NOW + 11 * 60_000 }),
     DEFAULT_SWEEP_POLICY,
   );
   assert.deepEqual(elapsedRetry, [pr.prNumber]);

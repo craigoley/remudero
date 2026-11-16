@@ -16510,22 +16510,36 @@ export function postReviewFailureHistoryDisposition(
   return undefined;
 }
 
-function retryableReviewThrowBackoffReason(
+/** W1-T13257: the first retryable throw waits this long; each further throw on the same review input doubles it. */
+export const REVIEW_THROW_FIRST_BACKOFF_MINUTES = 5;
+
+/** W1-T13257 — A REVIEW THAT THREW ONCE IS RETRIED BEFORE THE STALL BACKSTOP FIRES. The wait after the latest throw is
+ *  `min(5 * 2^(throws - 1), pendingCeilingMinutes)` minutes. A flat pending-ceiling wait (60m) outlasted the 30m
+ *  awaiting-review stage-stall backstop, so one transient host fault (2026-11-16, remudero-console PR 2591: a healed
+ *  worktree with no .git entry) cost the PR an hour and an incident. The strike cap still escalates a repeated throw. */
+export function retryableReviewThrowBackoffMinutes(throws: number, policy: Pick<SweepPolicy, "pendingCeilingMinutes">): number {
+  const n = Number.isFinite(throws) && throws >= 1 ? Math.floor(throws) : 1;
+  return Math.min(REVIEW_THROW_FIRST_BACKOFF_MINUTES * 2 ** Math.min(n - 1, 30), policy.pendingCeilingMinutes);
+}
+
+export function retryableReviewThrowBackoffReason(
   retryableThrows: ReadonlyMap<string, number | undefined>,
   reviewKey: string,
   policy: SweepPolicy,
   now: number,
+  throwCounts?: ReadonlyMap<string, number>,
 ): string | undefined {
   if (!retryableThrows.has(reviewKey)) return undefined;
   const attemptedAt = retryableThrows.get(reviewKey);
   // An undated throw cannot prove that the bound is still live. Admit once; if the condition
   // persists, the existing catch writes a fresh dated row and restores the bounded stand-down.
   if (attemptedAt === undefined) return undefined;
+  const waitMinutes = retryableReviewThrowBackoffMinutes(throwCounts?.get(reviewKey) ?? 1, policy);
   const ageMinutes = Math.max(0, (now - attemptedAt) / 60_000);
-  if (ageMinutes >= policy.pendingCeilingMinutes) return undefined;
+  if (ageMinutes >= waitMinutes) return undefined;
   return (
     `the last post-review attempt for ${reviewKey} threw ${Math.floor(ageMinutes)}m ago — ` +
-    `retry backoff remains inside the ${policy.pendingCeilingMinutes}m pending ceiling; ` +
+    `retry backoff of ${waitMinutes}m (inside the ${policy.pendingCeilingMinutes}m pending ceiling) has not elapsed; ` +
     `this is a retryable transport/process outcome, not a durable review refusal`
   );
 }
@@ -20938,6 +20952,7 @@ export async function runSweep(
       delivered: prior.reviewDelivered,
       refused: prior.reviewRefused,
       retryableThrows: prior.reviewRetryableThrows,
+      retryableThrowCounts: prior.reviewRetryableThrowCounts,
     }, "full");
   }
   // Rotation retains arm_skipped receipts; sweep.disposed may prefer an older acted:true row.
@@ -20973,6 +20988,7 @@ export async function runSweep(
       : undefined;
   const fullOutcomes: ReviewAdmissionOutcomes = {
     delivered: prior.reviewDelivered, refused: prior.reviewRefused, retryableThrows: prior.reviewRetryableThrows,
+    retryableThrowCounts: prior.reviewRetryableThrowCounts,
   };
   if (deps.repairAdmissionSurface === "full") {
     await resolveUnreadPlanLanes(openPrs.filter((pr) => !reviewAdmissionOutcomeKnown(pr, fullOutcomes, policy, now)), deps, policy, now);
@@ -21819,7 +21835,7 @@ export async function runSweep(
       const deliveredRule = deliveredKeyReviewDecision(pr, delivered, freshLines, reviewKey);
       const durableRefusal = fresh.reviewRefused.has(reviewKey);
       const retryBackoff =
-        retryableReviewThrowBackoffReason(fresh.reviewRetryableThrows, reviewKey, policy, now) ??
+        retryableReviewThrowBackoffReason(fresh.reviewRetryableThrows, reviewKey, policy, now, fresh.reviewRetryableThrowCounts) ??
         await freshnessBackoff(fresh.reviewFreshnessRefusals, pr);
       // W1-T11729: a delivered verdict GitHub's pending status contradicts is restored, not re-reviewed and not deduped silently.
       const restore = deliveredRule.dedups ? undefined : deliveredRule.restore;
@@ -23794,7 +23810,7 @@ export async function runSweep(
         const reviewDelivered = deliveredKeyReviewDecision(pr, prior.reviewDelivered.has(reviewKey), ledgerLines, reviewKey).dedups;
         const reviewDurablyRefused = prior.reviewRefused.has(reviewKey);
         const retryBackoff =
-          retryableReviewThrowBackoffReason(prior.reviewRetryableThrows, reviewKey, policy, now) ??
+          retryableReviewThrowBackoffReason(prior.reviewRetryableThrows, reviewKey, policy, now, prior.reviewRetryableThrowCounts) ??
           await freshnessBackoff(prior.reviewFreshnessRefusals, pr);
         alreadyDone = reviewDelivered || reviewDurablyRefused || retryBackoff !== undefined;
         // W1-T2427 — THE SENTENCE MUST SEPARATE FOUR STATES THAT OTHERWISE LOOK IDENTICAL: this
@@ -27304,7 +27320,7 @@ export function observeLightPassReviewEligibility(
   }
   observeReviewEligibility(views, deps, policy, now, lines, {
     delivered: prior.reviewDelivered, refused: prior.reviewRefused,
-    retryableThrows: prior.reviewRetryableThrows, freshnessBackoffs,
+    retryableThrows: prior.reviewRetryableThrows, retryableThrowCounts: prior.reviewRetryableThrowCounts, freshnessBackoffs,
   }, "light");
   return lines;
 }
@@ -27521,6 +27537,7 @@ async function runSweepLightPassCore(
     delivered: selectionPrior.reviewDelivered,
     refused: selectionPrior.reviewRefused,
     retryableThrows: selectionPrior.reviewRetryableThrows,
+    retryableThrowCounts: selectionPrior.reviewRetryableThrowCounts,
     freshnessBackoffs,
   };
   observeReviewEligibility(openPrs, deps, policy, now, selectionLedgerLines, outcomes, "light");
@@ -28128,6 +28145,8 @@ export interface ReviewAdmissionOutcomes {
   refused: ReadonlySet<string>;
   /** W1-T2753: optional for compatibility with callers predating timed throw backoff. */
   retryableThrows?: ReadonlyMap<string, number | undefined>;
+  /** W1-T13257: throws per review key, which size the retry backoff; absent reads as one throw. */
+  retryableThrowCounts?: ReadonlyMap<string, number>;
   freshnessBackoffs?: ReadonlySet<string>;
 }
 
@@ -28150,7 +28169,7 @@ function reviewAdmissionOutcomeKnown(
     outcomes.delivered.has(key) ||
     outcomes.refused.has(key) ||
     outcomes.freshnessBackoffs?.has(key) === true ||
-    retryableReviewThrowBackoffReason(outcomes.retryableThrows ?? EMPTY_RETRYABLE_REVIEW_THROWS, key, policy, now) !==
+    retryableReviewThrowBackoffReason(outcomes.retryableThrows ?? EMPTY_RETRYABLE_REVIEW_THROWS, key, policy, now, outcomes.retryableThrowCounts) !==
       undefined
   );
 }
