@@ -137,6 +137,24 @@ jobs:
           ! is_reaper_alarm "unknown" || fail "a host with no reaper raised the reaper arm"
           echo "self-check: reaper arm raises only a refused, failed or unfinished pass"
 
+          # (i-c) W1-T13177: the restart arm, on what the beat publishes for docker's two at-cap
+          # answers: a live 5 of 5 (AT_LIMIT) and an exited-134 5 of 5 (STOPPED_RETRY_EXHAUSTED).
+          # Payloads, not a stubbed runtime run through the beat, so a change to the beat's inspect
+          # line (W1-T13178) cannot wedge this workflow, which the fleet cannot edit. The predicate is
+          # the judging step's own line; test/daemon/the-heartbeat-watcher-raises-a-spent-restart-budget.test.ts
+          # pins that the two copies match.
+          is_restart_spent() { case "$1" in AT_LIMIT*|STOPPED_RETRY_EXHAUSTED*) return 0 ;; *) return 1 ;; esac; }
+          restart_verdict_of() { printf '%s\n' "$1" | sed -n 's/^restart_verdict=//p' | tail -n 1; }
+          live_at_cap=$'daemon_verdict=live\nrestart_verdict=AT_LIMIT\nrestart_count=5\nrestart_max=5\nrestart_policy=on-failure'
+          exited_134_at_cap=$'daemon_verdict=live\nrestart_verdict=STOPPED_RETRY_EXHAUSTED\nrestart_count=5\nrestart_max=5\nrestart_policy=on-failure'
+          is_restart_spent "$(restart_verdict_of "$live_at_cap")" || fail "a live container at 5 of 5 (AT_LIMIT) did not raise the restart arm"
+          is_restart_spent "$(restart_verdict_of "$exited_134_at_cap")" || fail "a container exited 134 at 5 of 5 (STOPPED_RETRY_EXHAUSTED) did not raise the restart arm"
+          for quiet in ok unlimited unknown skipped operator_stopped ""; do
+            ! is_restart_spent "$quiet" || fail "restart_verdict '${quiet}' raised the restart arm"
+          done
+          ! is_restart_spent "$(restart_verdict_of "daemon_verdict=live")" || fail "a beat with no restart_verdict line raised the restart arm"
+          echo "self-check: restart arm raises a live 5 of 5 and an exited-134 5 of 5, and stays silent on every other reading"
+
           # (ii) the beat script parses, and reports the three states it exists to separate.
           bash -n scripts/fleet-heartbeat.sh || fail "scripts/fleet-heartbeat.sh does not parse"
           work=$(mktemp -d)
@@ -261,6 +279,10 @@ jobs:
           watched=0
           absent=0
           stale=0
+          # W1-T13177: the restart record's own delivery ledger, one `<branch>\t<SPENT|OK|SILENT>`
+          # line per watched host, beside heartbeat-state.tsv rather than inside it.
+          : > heartbeat-restart.tsv
+          restart_spent=0
 
           # `supervisor_verdict` (W1-T2349) is judged FROM THE VALUE THE BEAT ITSELF PUBLISHED —
           # never re-derived from the ledger here, because this job cannot reach the host's
@@ -297,6 +319,14 @@ jobs:
           is_crash_loop() { case "$1" in CRASH_LOOP*) return 0 ;; *) return 1 ;; esac; }
           # 2026-10-23: the host's session reaper refused, failed, or never finished its last pass.
           is_reaper_alarm() { case "$1" in REFUSED*|INCOMPLETE*|FAILED*) return 0 ;; *) return 1 ;; esac; }
+          # W1-T13177: a spent restart budget. The beat's `restart_verdict` (W1-T3411) reads AT_LIMIT for
+          # a running container at its on-failure cap and STOPPED_RETRY_EXHAUSTED for any other status
+          # at the cap. On 2026-09-05 (W1-T2874) a container exited 134 at 5 of 5 while the beat was
+          # fresh and the daemon read `live`, and this job raised nothing. Judged OUTSIDE the
+          # first-match chain below, where an earlier arm would mask it, and delivered as its own
+          # record, `fleet-heartbeat:<branch>:restart`. `ok` resolves that record; `unlimited`,
+          # `unknown`, `skipped`, `operator_stopped` and a missing line neither raise nor resolve.
+          is_restart_spent() { case "$1" in AT_LIMIT*|STOPPED_RETRY_EXHAUSTED*) return 0 ;; *) return 1 ;; esac; }
 
           # THE LOOP NEVER EXITS EARLY, IN EITHER DIRECTION, AND THAT IS THE FIX. A `break` or an
           # `exit 1` on the first stale branch would hide every host after it; an early success on
@@ -326,6 +356,7 @@ jobs:
             spool_verdict=$(printf '%s\n' "$payload" | sed -n 's/^escalation_spool_verdict=//p' | tail -n 1)
             crash_verdict=$(printf '%s\n' "$payload" | sed -n 's/^crash_loop_verdict=//p' | tail -n 1)
             reaper_verdict=$(printf '%s\n' "$payload" | sed -n 's/^session_reaper_verdict=//p' | tail -n 1)
+            restart_verdict=$(printf '%s\n' "$payload" | sed -n 's/^restart_verdict=//p' | tail -n 1)
 
             # THE CONDITION LEADS THE REPORT, NAMED EXPLICITLY (design note vi) — this workflow's
             # issue title reads "the machine has stopped reporting", which is WRONG for a fresh
@@ -361,6 +392,27 @@ jobs:
             fi
             printf '%s\t%s\n' "$branch" "$kind" >> heartbeat-state.tsv
 
+            # W1-T13177: the restart judgement, beside the chain above and independent of it. Only a
+            # fresh beat is judged (a stale one may no longer hold its reading), and only for a host
+            # that runs a daemon.
+            if [ "$age_s" -gt "$threshold_s" ]; then
+              restart_state="SILENT"
+              restart_note="not judged — the beat is stale, so its restart_verdict (${restart_verdict:-absent}) may no longer hold"
+            elif ! daemon_expected "$branch"; then
+              restart_state="SILENT"
+              restart_note="not judged — ${branch} is not in DAEMON_EXPECTED_BRANCHES"
+            elif is_restart_spent "$restart_verdict"; then
+              restart_state="SPENT"
+              restart_note="SPENT — restart_verdict ${restart_verdict}, raised as its own record fleet-heartbeat:${branch}:restart"
+            elif [ "$restart_verdict" = "ok" ]; then
+              restart_state="OK"
+              restart_note="ok — under its cap"
+            else
+              restart_state="SILENT"
+              restart_note="no finding and no resolve — restart_verdict ${restart_verdict:-absent from the beat}"
+            fi
+            printf '%s\t%s\n' "$branch" "$restart_state" >> heartbeat-restart.tsv
+
             # THE LAST BEAT'S PAYLOAD, NOT JUST ITS AGE. "No beat for 71 minutes" is half an answer;
             # "and the last one said the daemon had not polled in two hours", or "and the last one
             # said node_modules was empty", is the whole one — and it is the difference between
@@ -372,6 +424,7 @@ jobs:
               echo "Condition: ${condition}"
               echo "Last beat was ${age_m} minute(s) ago (threshold: ${STALE_AFTER_MINUTES}m)."
               echo "Last beat subject: ${subject}"
+              echo "Restart budget: ${restart_note}"
               echo
               echo "Last beat payload:"
               echo "$payload"
@@ -402,10 +455,29 @@ jobs:
             else
               echo "heartbeat-watch: fresh — '${branch}' is ${age_m} minute(s) old."
             fi
+
+            if [ "$restart_state" = "SPENT" ]; then
+              restart_spent=$(( restart_spent + 1 ))
+              echo "heartbeat-watch: RESTART BUDGET SPENT — '${branch}': ${restart_verdict}" >&2
+              {
+                echo "── ${branch}: restart budget ──"
+                echo "Condition: RESTART BUDGET SPENT — docker will make no further automatic restart of the daemon container: ${restart_verdict}"
+                echo "AT_LIMIT: running at its on-failure cap, one non-zero exit from staying down. STOPPED_RETRY_EXHAUSTED: not running, and docker has stopped retrying."
+                echo "Liveness on the same beat: ${kind}, its own record fleet-heartbeat:${branch}."
+                echo "Last beat was ${age_m} minute(s) ago. Subject: ${subject}"
+                echo
+                echo "The beat's restart lines:"
+                printf '%s\n' "$payload" | sed -n '/^restart_/p'
+                echo
+              } | tee -a heartbeat-report.txt > "heartbeat-restart-${branch}.txt"
+            fi
           done
 
           cat heartbeat-report.txt
           echo "heartbeat-watch: ${watched} branch(es) watched, ${absent} not installed, ${stale} stale."
+          echo "heartbeat-watch: ${restart_spent} host(s) with a spent restart budget."
+          # W1-T13177: a spent budget fails the run like every other finding, through the same check.
+          stale=$(( stale + restart_spent ))
           [ "$stale" -eq 0 ] || exit 1
 
       # ── W1-T3367: ONE DELIVERY OF RECORD PER HOST, NOT PER WORKFLOW ────────────────────────────
@@ -482,6 +554,35 @@ jobs:
                 || echo "heartbeat-deliver: could not deliver the record for ${branch}" >&2
             fi
           done < heartbeat-state.tsv
+
+          # W1-T13177: THE RESTART RECORD, ONE PER HOST, BESIDE ITS LIVENESS RECORD. Its own source,
+          # `fleet-heartbeat:<branch>:restart`, so neither record's raise or resolve touches the
+          # other: `decideRecovery` closes only on marker containment, and neither marker contains the
+          # other. SILENT (unlimited, unknown, skipped, operator_stopped, a missing line, a stale beat,
+          # a host that runs no daemon) leaves an open restart record as it is.
+          if [ -f heartbeat-restart.tsv ]; then
+            while IFS="$(printf '\t')" read -r branch restart_state; do
+              [ -n "${branch:-}" ] || continue
+              case "$restart_state" in
+                SPENT)
+                  report="heartbeat-restart-${branch}.txt"
+                  test -s "$report" || echo "(no restart report captured for ${branch})" > "$report"
+                  node scripts/needs-human-issue.mjs \
+                    --source "fleet-heartbeat:${branch}:restart" \
+                    --title "fleet-heartbeat (${branch}): the daemon container's restart budget is spent" \
+                    --body-file "$report" \
+                    || echo "heartbeat-deliver: could not deliver the restart record for ${branch}" >&2
+                  ;;
+                OK)
+                  node scripts/needs-human-issue.mjs --resolved --source "fleet-heartbeat:${branch}:restart" \
+                    || echo "heartbeat-deliver: could not resolve the restart record for ${branch}" >&2
+                  ;;
+                *)
+                  echo "heartbeat-deliver: ${branch}'s restart record is left as it is (${restart_state})"
+                  ;;
+              esac
+            done < heartbeat-restart.tsv
+          fi
 
           # RETIRE THE UNSCOPED RECORD, ONCE. Issues raised before this change carry
           # `<!-- needs-human:fleet-heartbeat -->`, which no scoped marker contains, so nothing
