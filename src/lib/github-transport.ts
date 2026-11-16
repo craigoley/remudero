@@ -20,6 +20,7 @@ import { brokerGhRead, ghBrokerClientSpawn, ghBrokerRouteFor, type GhBrokerClass
 import { refreshInstallationToken } from "./github-app.js";
 import { createInstallationBudget, installationBudgetForThread, type InstallationBudget, type InstallationBudgetThreadInput, type GithubBudgetThrottledRow } from "./github-installation-budget.js";
 import { ghArgvNeedsNoCredential, githubRepoOfGhArgv, resolveGithubCredential } from "./github-credential.js";
+import { githubHttpRead, githubHttpReadConfigured, ghStdoutOfHttpRead, parseGhApiRead } from "./github-http-read.js";
 import { sameHost } from "./host-identity.js";
 import { LIVE_WRITE_SENTINEL_TOKEN, LiveWriteBlockedError } from "./live-write-guard.js";
 
@@ -456,7 +457,8 @@ async function ghStdoutAsync(args: string[], execArgs: string[], execAsync: type
     const brokered = await ghBrokeredAsync(execArgs, readOpts);
     if (brokered !== undefined) return brokered;
     await applyGhReadCadenceAsync(args);
-    return run();
+    const inProcess = ghHttpReadFor(execArgs);
+    return inProcess === undefined ? run() : inProcess();
   })().catch((err: unknown) => { noteInstallationRefusal(err); throw err; });
   if (key === undefined) return request;
   asyncReadInFlight.set(key, request);
@@ -465,6 +467,25 @@ async function ghStdoutAsync(args: string[], execArgs: string[], execAsync: type
   } finally {
     if (asyncReadInFlight.get(key) === request) asyncReadInFlight.delete(key);
   }
+}
+
+/**
+ * W1-T12531: the in-process read for `args`, or `undefined` when `gh` must run. The token is the one
+ * resolveGithubCredential picks for the same argv, and a call with none throws here, before any request.
+ * `gh` still runs for a form the client does not parse, another GH_HOST, gh's own stored login (no
+ * token to hand over), the test-runner sentinel, and a test's own `gh` stub unless the test pointed
+ * the client at a server of its own.
+ */
+function ghHttpReadFor(args: readonly string[]): (() => Promise<string>) | undefined {
+  const read = parseGhApiRead(args);
+  const env = process.env;
+  if (read === undefined || (env.GH_HOST ?? "github.com") !== "github.com") return undefined;
+  if (env.GH_TOKEN === LIVE_WRITE_SENTINEL_TOKEN || env.GITHUB_TOKEN === LIVE_WRITE_SENTINEL_TOKEN) return undefined;
+  if (!githubHttpReadConfigured() && resolvesToTmpdirStub("gh", env)) return undefined;
+  const childEnv = ghCredentialEnv("gh", args, undefined) ?? env;
+  const token = childEnv.GH_TOKEN || childEnv.GITHUB_TOKEN;
+  if (!token) return undefined;
+  return async () => ghStdoutOfHttpRead(read, await githubHttpRead(read, token));
 }
 
 /** Bounded, paced async `gh` transport for endpoints whose response is plain text (for example
