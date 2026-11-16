@@ -31,7 +31,7 @@ import {
   statfsSync, statSync, writeFileSync,
 } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
-import { tmpdir, userInfo } from "node:os";
+import { hostname, tmpdir, userInfo } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import {
@@ -43,7 +43,9 @@ import {
   classifyGhLimitFailure, DEFAULT_GH_CALL_TIMEOUT_MS, DEFAULT_GH_PACE_MIN_GAP_MS, DEFAULT_GH_REFUSAL_BACKOFF_FLOOR_MS, ghRunForBroker,
   ghArgvIsWrite, ghBrokerClassForActor, parseGhApiArgv, parseGhRateLimitHeaders, refuseSentinelGhToken, splitGhHeaderBlock,
 } from "./github-transport.js";
-import { ghArgvNeedsNoCredential, githubRepoOfGhArgv, resolveGithubCredential } from "./github-credential.js";
+import { ghArgvNeedsNoCredential, githubAppReferenceKey, githubRepoOfGhArgv, installGithubAppTokenHolder,
+  readGithubCredentialReferences, resolveGithubCredential, type GithubAppTokenHolder, type GithubCredentialResolution } from "./github-credential.js";
+import { mintInstallationToken, startInstallationTokenRefresh, type InstallationTokenConfig, type InstallationTokenResult } from "./github-app.js";
 import { deriveLedgerActor } from "./ledger.js";
 import { LIVE_WRITE_SENTINEL_TOKEN } from "./live-write-guard.js";
 import { execFileRouted } from "./spawn-helper.js";
@@ -467,7 +469,7 @@ export interface GhUpstreamResult {
 }
 
 /** The account's own `gh`, as a direct call would run it. Injected in tests: no real `gh`, no network. */
-export type GhUpstreamExec = (args: string[], opts: { cwd?: string; env?: NodeJS.ProcessEnv }) => Promise<GhUpstreamResult>;
+export type GhUpstreamExec = (args: string[], opts: { cwd?: string; env?: NodeJS.ProcessEnv; credential?: GithubCredentialResolution }) => Promise<GhUpstreamResult>;
 
 /** True when `gh` resolves through `env.PATH` to an executable under the OS temp dir: a test's own stub,
  *  which cannot reach GitHub. The same rule the transport applies to its own spawns (W1-T4805). */
@@ -498,17 +500,18 @@ export function ghCredentialChildEnv(args: readonly string[], env: NodeJS.Proces
   return resolveGithubCredential({
     env: base,
     repo: githubRepoOfGhArgv(args),
+    write: ghArgvIsWrite(args),
     operation: `gh ${args.slice(0, 2).join(" ")}`,
     mayRunWithout: () => ghArgvNeedsNoCredential(args) || ghResolvesToTmpdirStub(base),
   }).childEnv(env);
 }
 
 export const defaultGhUpstreamExec: GhUpstreamExec = async (args, opts) => {
-  if (!opts.env) return ghRunForBroker(args, { cwd: opts.cwd, maxBuffer: 1 << 26 });
+  if (!opts.env && !opts.credential) return ghRunForBroker(args, { cwd: opts.cwd, maxBuffer: 1 << 26 });
   try {
     refuseSentinelGhToken("gh", args, opts.env);
     // W1-T12075: a missing credential is thrown here, and the catch below hands its named sources to stderr.
-    const env = ghCredentialChildEnv(args, opts.env);
+    const env = opts.credential ? opts.credential.childEnv(opts.env) : ghCredentialChildEnv(args, opts.env);
     const result = await execFileRouted("gh", args, { cwd: opts.cwd, env, encoding: "utf8", maxBuffer: 1 << 26, timeout: DEFAULT_GH_CALL_TIMEOUT_MS });
     return { ...result, exitCode: 0 };
   } catch (cause) {
@@ -552,6 +555,15 @@ export const GH_BROKER_LOG_RETENTION_DAYS = 7;
 /** BACKSTOP: boot parses at most this many cache bytes (a third of the ~75 MB that crash-looped a ~250 MB heap). */
 export const BROKER_BOOT_PARSE_BYTES = 24 * 1024 * 1024;
 
+export interface GhBrokerCredentialOptions {
+  env?: NodeJS.ProcessEnv;
+  stateDir?: string;
+  host?: string;
+  mint?: (config: InstallationTokenConfig) => Promise<InstallationTokenResult>;
+  setTimer?: (fn: () => void, ms: number) => { unref?: () => void };
+  clearTimer?: (timer: { unref?: () => void }) => void;
+}
+
 export class GhReadBroker {
   readonly dir: string;
   readonly counts: GhReadBrokerCounts = {
@@ -561,7 +573,7 @@ export class GhReadBroker {
   opaqueFreshMs = GH_BROKER_INITIAL_FRESH_MS;
   cacheShareOfFree = GH_BROKER_CACHE_SHARE_OF_FREE;
   logRetentionDays = GH_BROKER_LOG_RETENTION_DAYS;
-  readonly pacers = new Map<GhBrokerLimiter, GhLimiterPacer>();
+  readonly pacers = new Map<string, GhLimiterPacer>();
   private readonly exec: GhUpstreamExec;
   private readonly clock: Clock;
   private readonly sleep: (ms: number) => Promise<void>;
@@ -571,8 +583,8 @@ export class GhReadBroker {
   private memoryBytes = 0;
   private memoryTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly inflight = new Map<string, InFlight>();
-  private readonly queues = new Map<GhBrokerLimiter, QueuedJob[]>();
-  private readonly draining = new Set<GhBrokerLimiter>();
+  private readonly queues = new Map<string, QueuedJob[]>();
+  private readonly draining = new Set<string>();
   private readonly lastServed = new Map<string, string>();
   /** Reads accepted and not yet answered, from every client. */
   inProgress = 0;
@@ -590,6 +602,13 @@ export class GhReadBroker {
   private readonly refusalCounts = new Map<GhBrokerLimiter, number>();
   private readonly refusalsPushed = new Map<GhBrokerLimiter, number>();
   private apiFilterCache: "unverified" | "shared" | "filter-keyed" = "unverified";
+  private readonly credentialOptions: GhBrokerCredentialOptions;
+  private credentialReady: Promise<void> | undefined;
+  private credentialStops: Array<() => void> = [];
+  private managedCredentials = false;
+  appTokens: GithubAppTokenHolder = () => ({ reason: "no broker-held token" });
+  readonly host: string;
+  private readonly credentialLimits = new Map<string, Record<string, { remaining: number; reset_ms: number }>>();
 
   /** `exec` is the account's own `gh`; `freeBytes` is the cache volume's free space, read at each write —
    *  the cache's budget is a share of it. Tests inject all four: no real `gh`, no network, no real time. */
@@ -600,10 +619,12 @@ export class GhReadBroker {
     sleep: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     freeBytes?: () => number,
     /** `sharedPaceRoot: null` keeps the pacer per account; `account` names this broker's Mac account in the shared state. */
-    options: { sharedPaceRoot?: string | null; account?: string } = {},
+    options: { sharedPaceRoot?: string | null; account?: string } & GhBrokerCredentialOptions = {},
   ) {
     this.sharedRoot = options.sharedPaceRoot === undefined ? ghPaceRoot() : options.sharedPaceRoot;
     this.account = options.account ?? userInfo().username;
+    this.host = options.host ?? hostname();
+    this.credentialOptions = options;
     this.dir = dir;
     this.exec = exec;
     this.clock = clock;
@@ -620,6 +641,74 @@ export class GhReadBroker {
     } catch {
       this.invalidationOffset = 0; // no invalidation file yet: nothing has been written
     }
+  }
+
+  startCredentials(): Promise<void> {
+    this.credentialReady ??= this.loadAppCredentials();
+    return this.credentialReady;
+  }
+
+  private async loadAppCredentials(): Promise<void> {
+    const options = this.credentialOptions;
+    let references;
+    try {
+      references = readGithubCredentialReferences(options.env, options.stateDir).filter((r) => r.kind === "app");
+    } catch (cause) {
+      // Resolver attempts carry the references-file diagnostic; startup still serves fallback reads.
+      void cause;
+      return;
+    }
+    this.managedCredentials = references.length > 0;
+    const held = new Map<string, { token: string; expiresAtMs: number } | { reason: string }>();
+    let stopped = false;
+    this.credentialStops.push(() => { stopped = true; });
+    this.appTokens = (reference) => held.get(githubAppReferenceKey(reference)) ?? { reason: "no broker-held token" };
+    const ready: Array<Promise<void>> = [];
+    for (const reference of references) {
+      const key = githubAppReferenceKey(reference);
+      const config = { appId: reference.app_id ?? "", installationId: reference.installation_id ?? "", privateKeyPath: reference.private_key_path ?? "" };
+      const loop = startInstallationTokenRefresh({
+        env: { GH_APP_ID: config.appId, GH_APP_INSTALLATION_ID: config.installationId, GH_APP_PRIVATE_KEY_PATH: config.privateKeyPath },
+        now: () => this.now(), setTimer: options.setTimer, clearTimer: options.clearTimer,
+        log: () => {},
+        refresh: async () => {
+          let result: InstallationTokenResult;
+          try {
+            result = await (options.mint ?? ((c) => mintInstallationToken(c, { now: () => this.now() })))(config);
+          } catch (cause) {
+            // Arbitrary mint errors can contain secrets. Keep a fixed cause for resolver attempts.
+            void cause;
+            result = { ok: false, reason: "App mint threw" };
+          }
+          if (stopped) return { ok: false, reason: "broker stopped" };
+          if (result.ok && result.token && result.expiresAtMs !== undefined) {
+            held.set(key, { token: result.token, expiresAtMs: result.expiresAtMs });
+            return { ok: true, expiresAtMs: result.expiresAtMs };
+          }
+          const reason = result.reason ?? "App mint failed";
+          held.set(key, { reason });
+          return { ok: false, reason };
+        },
+      });
+      if (loop.ready) ready.push(loop.ready);
+      if (loop.stop) this.credentialStops.push(loop.stop);
+    }
+    this.credentialStops.push(() => held.clear());
+    await Promise.all(ready);
+  }
+
+  stopCredentials(): void {
+    for (const stop of this.credentialStops.splice(0)) stop();
+  }
+
+  private credential(args: readonly string[], repo?: string): GithubCredentialResolution {
+    return resolveGithubCredential({ env: this.credentialOptions.env, stateDir: this.credentialOptions.stateDir,
+      repo: repo ?? githubRepoOfGhArgv(args), write: false, appTokens: this.appTokens, clock: this.clock,
+      mayRunWithout: () => true });
+  }
+
+  private attribution(credential: GithubCredentialResolution): Record<string, unknown> {
+    return { credential_source: credential.source, credential_reference: credential.reference ?? null, host: this.host };
   }
 
   /** Boot: stat only, keep the newest entries fitting BROKER_BOOT_PARSE_BYTES, evict the rest unparsed, then parse one at a time. */
@@ -664,7 +753,7 @@ export class GhReadBroker {
     return this.clock.now();
   }
 
-  pacer(limiter: GhBrokerLimiter): GhLimiterPacer {
+  pacer(limiter: string): GhLimiterPacer {
     let pacer = this.pacers.get(limiter);
     if (!pacer) this.pacers.set(limiter, pacer = new GhLimiterPacer());
     return pacer;
@@ -672,6 +761,8 @@ export class GhReadBroker {
 
   /** The login the account's token reads as: one `gh api user` per broker, so state is keyed by it. */
   login(): Promise<string> {
+    const credential = this.credential([]);
+    if (credential.kind === "app") return Promise.resolve(`app:${credential.reference}`);
     this.loginPromise ??= this.exec(["api", "user", "--jq", ".login"], {}).then((r) => {
       this.loginKnown = (r.exitCode === 0 ? r.stdout.trim() : "") || "unknown";
       return this.loginKnown;
@@ -881,7 +972,8 @@ export class GhReadBroker {
     const logDir = join(this.dir, "log");
     try {
       mkdirSync(logDir, { recursive: true, mode: 0o700 });
-      appendFileSync(join(logDir, `requests-${day}.ndjson`), `${JSON.stringify({ ts: clockFromMillisFn(() => nowMs).iso(), ...row })}\n`);
+      appendFileSync(join(logDir, `requests-${day}.ndjson`), `${JSON.stringify({ ts: clockFromMillisFn(() => nowMs).iso(),
+        credential_source: "none", credential_reference: null, host: this.host, ...row })}\n`);
       // Rotate on this process's first line and at each new day: decided in memory, never by a stat
       // of the file just written (a check-then-act race on a file another broker could touch).
       if (this.loggedDay !== day) {
@@ -900,7 +992,7 @@ export class GhReadBroker {
 
   /** The queue in serving order: classes in order; within a class, callers round-robin starting after
    *  the one served last; within a caller, FIFO. */
-  private ordered(limiter: GhBrokerLimiter): QueuedJob[] {
+  private ordered(limiter: string): QueuedJob[] {
     const queue = this.queues.get(limiter) ?? [];
     const out: QueuedJob[] = [];
     for (const cls of GH_BROKER_CLASSES) {
@@ -925,7 +1017,7 @@ export class GhReadBroker {
   }
 
   /** Tells each queued caller its position and expected wait, at most once per change. */
-  private reportPositions(limiter: GhBrokerLimiter): void {
+  private reportPositions(limiter: string): void {
     const nowMs = this.now();
     const pacer = this.pacer(limiter);
     const step = Math.max(pacer.gapMs, pacer.primarySpreadMs(nowMs));
@@ -944,14 +1036,14 @@ export class GhReadBroker {
   /** Upstream calls are SERIAL per limiter: one drainer per limiter, sleeping out the pacer's gap. With a
    *  shared pacer (W1-T10302) they are serial across every broker of the login: the start is taken under
    *  the login's per-limiter lock, on the shared gap and hold, and the outcome is published before release. */
-  private async drain(limiter: GhBrokerLimiter): Promise<void> {
-    if (this.draining.has(limiter)) return;
-    this.draining.add(limiter);
+  private async drain(limiter: GhBrokerLimiter, paceKey: string = limiter): Promise<void> {
+    if (this.draining.has(paceKey)) return;
+    this.draining.add(paceKey);
     let lockBackoffMs = 25;
     try {
-      const queue = this.queues.get(limiter)!;
+      const queue = this.queues.get(paceKey)!;
       while (queue.length > 0) {
-        let shared = await this.shared();
+        let shared = paceKey === limiter ? await this.shared() : undefined;
         if (shared) {
           try {
             this.pull(shared, limiter);
@@ -960,9 +1052,9 @@ export class GhReadBroker {
             shared = undefined;
           }
         }
-        const waitMs = this.pacer(limiter).nextStartMs(this.now()) - this.now();
+        const waitMs = this.pacer(paceKey).nextStartMs(this.now()) - this.now();
         if (waitMs > 0) {
-          this.reportPositions(limiter);
+          this.reportPositions(paceKey);
           await this.sleep(waitMs);
           continue;
         }
@@ -990,11 +1082,11 @@ export class GhReadBroker {
             shared = undefined;
           }
         }
-        const job = this.ordered(limiter)[0];
+        const job = this.ordered(paceKey)[0];
         queue.splice(queue.indexOf(job), 1);
-        this.lastServed.set(`${limiter}\0${job.cls}`, job.caller);
-        this.pacer(limiter).lastStartMs = this.now();
-        this.reportPositions(limiter);
+        this.lastServed.set(`${paceKey}\0${job.cls}`, job.caller);
+        this.pacer(paceKey).lastStartMs = this.now();
+        this.reportPositions(paceKey);
         try {
           await job.start();
         } finally {
@@ -1010,7 +1102,7 @@ export class GhReadBroker {
         }
       }
     } finally {
-      this.draining.delete(limiter);
+      this.draining.delete(paceKey);
     }
   }
 
@@ -1036,11 +1128,15 @@ export class GhReadBroker {
     c.subjects = c.subjects.map((subject) => /\{(?:owner|repo)\}/.test(subject.repo) ? { ...subject, repo: request.repo ?? "*" } : subject);
     const api = request.args[0] === "api";
     const view = JSON.stringify(request.args);
+    let credential: GithubCredentialResolution = { source: "none", tried: [], childEnv: (base) => base };
+    let rerouted = false;
     const finish = (result: GhBrokerResult, extra: Record<string, unknown> = {}): GhBrokerResult => {
+      if (rerouted) return result;
       this.counts[result.outcome] += 1;
       this.log({
         class: cls, client: this.clientOf(request), account: this.account, key: extra.key, outcome: result.outcome,
-        limiter: c.limiter, wait_ms: this.now() - startedMs, ...extra,
+        limiter: c.limiter, wait_ms: this.now() - startedMs, ...this.attribution(credential),
+        limits: this.credentialLimits.get(JSON.stringify(this.attribution(credential))), ...extra,
       });
       return result;
     };
@@ -1053,20 +1149,27 @@ export class GhReadBroker {
         outcome: "refused",
       });
     }
+    const credentialReady = this.startCredentials();
+    if (this.managedCredentials) await credentialReady;
+    credential = this.credential(request.args, this.managedCredentials ? request.repo : undefined);
+    const paceKey = credential.kind === "app"
+      ? `app:${credential.reference}:${createHash("sha256").update(credential.referenceKey!).digest("hex").slice(0, 12)}:${c.limiter}`
+      : c.limiter;
     this.applyInvalidations();
-    const login = await this.login();
+    const login = credential.kind === "app" ? `app:${credential.reference}` : await this.login();
     const host = flagValue(request.args, "--hostname") ?? "github.com";
     const identity = api && !apiUsesStdin(request.args) ? apiRequestIdentity(request) : undefined;
     if (api && identity === undefined) c.kind = "passthrough";
     const keyed = api ? [identity ?? [view, request.cwd], this.apiFilterCache === "filter-keyed" ? view : ""] : request.args;
     const key = createHash("sha256")
-      .update(JSON.stringify(["request-v2", login, host, api ? "api" : c.kind, api ? "" : request.repo ?? request.cwd ?? "", keyed]))
+      .update(JSON.stringify(["request-v2", login, host, api ? "api" : c.kind, api ? "" : request.repo ?? request.cwd ?? "", keyed,
+        ...(this.managedCredentials ? [credential.source, credential.referenceKey ?? credential.reference ?? null] : [])]))
       .digest("hex");
     const cached = c.kind === "passthrough" ? undefined : this.readEntry(key);
     if (cached && !request.fresh && this.fresh(cached, this.now())) {
       this.touch(key);
       if (api && cached.apiView !== view && !(c.kind === "api-rest" && cached.kind === "api-rest")) {
-        const result = await this.upstream(c, request, key, cached, true);
+        const result = await this.upstream(c, request, key, cached, true, credential, paceKey);
         return finish(result, { key: key.slice(0, 12), request_key: key, gh_filtered_locally: result.outcome === "hit-fresh" });
       }
       return finish(this.render(cached, c.wantsInclude, "hit-fresh"), { key: key.slice(0, 12), request_key: key, gh_filtered_locally: false });
@@ -1090,20 +1193,31 @@ export class GhReadBroker {
       listeners: onProgress ? [onProgress] : [],
       start: async () => {
         const began = this.now();
-        const result = await this.upstream(c, request, key, cached);
+        if (this.managedCredentials) {
+          const latest = this.credential(request.args, request.repo);
+          if (latest.source !== credential.source || latest.reference !== credential.reference || latest.referenceKey !== credential.referenceKey) {
+            credential = latest;
+            rerouted = true;
+            // Release this drainer before the replacement read joins a possibly identical queue.
+            void this.readOnce(request, onProgress).then(resolveResult);
+            return;
+          }
+          credential = latest;
+        }
+        const result = await this.upstream(c, request, key, cached, false, credential, paceKey);
         upstreamMs = this.now() - began;
         resolveResult(result);
       },
     };
     this.inflight.set(key, { job, promise, view });
-    const queue = this.queues.get(c.limiter) ?? [];
-    this.queues.set(c.limiter, queue);
+    const queue = this.queues.get(paceKey) ?? [];
+    this.queues.set(paceKey, queue);
     queue.push(job);
-    this.reportPositions(c.limiter);
-    void this.drain(c.limiter);
+    this.reportPositions(paceKey);
+    void this.drain(c.limiter, paceKey);
     try {
       const result = await promise;
-      return finish(result, { key: key.slice(0, 12), request_key: key, gh_filtered_locally: false, upstream_ms: upstreamMs, gap_ms: this.pacer(c.limiter).gapMs });
+      return finish(result, { key: key.slice(0, 12), request_key: key, gh_filtered_locally: false, upstream_ms: upstreamMs, gap_ms: this.pacer(paceKey).gapMs });
     } finally {
       this.inflight.delete(key);
     }
@@ -1115,6 +1229,8 @@ export class GhReadBroker {
     key: string,
     cached: GhBrokerCacheEntry | undefined,
     replay = false,
+    credential?: GithubCredentialResolution,
+    paceKey: string = c.limiter,
   ): Promise<GhBrokerResult> {
     const nowAtStart = this.now();
     const api = request.args[0] === "api" && c.kind !== "passthrough";
@@ -1128,8 +1244,8 @@ export class GhReadBroker {
       else if (conditional && cached?.lastModified) args.push("-H", `If-Modified-Since: ${cached.lastModified}`);
       else if (c.kind !== "api-rest" || replay) args.push("--cache", `${Math.max(0, replay && cached ? (cached.maxAgeMs ?? this.opaqueFreshMs) - (nowAtStart - cached.storedAtMs) : this.opaqueFreshMs)}ms`);
     }
-    const env = api || request.repo ? { ...process.env, GH_REPO: request.repo ?? "", ...(api ? { XDG_CACHE_HOME: this.ghCachePath(key) } : {}) } : undefined;
-    const raw = await this.exec(args, { cwd: request.cwd, env });
+    const env = api || request.repo ? { ...(this.credentialOptions.env ?? process.env), GH_REPO: request.repo ?? "", ...(api ? { XDG_CACHE_HOME: this.ghCachePath(key) } : {}) } : undefined;
+    const raw = await this.exec(args, { cwd: request.cwd, env, ...(this.managedCredentials ? { credential } : {}) });
     const nowMs = this.now();
     const split = api || c.kind === "api-rest" || c.wantsInclude
       ? splitGhHeaderBlock(raw.stdout, request.args.includes("--paginate") || request.args.includes("--slurp")) : { headers: "", body: raw.stdout };
@@ -1140,11 +1256,18 @@ export class GhReadBroker {
     else {
       if (expectedReplay) this.apiFilterCache = "filter-keyed";
       this.counts.upstream_calls += 1;
-      this.pacer(c.limiter).lastStartMs = nowAtStart;
-      const paced = this.pacer(c.limiter).record(nowMs, { headers: split.headers, stderr: raw.stderr, status, exitCode: raw.exitCode });
+      this.pacer(paceKey).lastStartMs = nowAtStart;
+      const paced = this.pacer(paceKey).record(nowMs, { headers: split.headers, stderr: raw.stderr, status, exitCode: raw.exitCode });
+      const reading = parseGhRateLimitHeaders(split.headers);
+      if (reading.remaining !== undefined && reading.reset !== undefined) {
+        const identity = JSON.stringify(this.attribution(credential!));
+        const limits = this.credentialLimits.get(identity) ?? {};
+        limits[c.limiter] = { remaining: reading.remaining, reset_ms: reading.reset * 1000 };
+        this.credentialLimits.set(identity, limits);
+      }
       if (paced === "secondary" || paced === "primary") {
         this.refusalCounts.set(c.limiter, (this.refusalCounts.get(c.limiter) ?? 0) + 1);
-        this.log({ event: "refusal", limiter: c.limiter, kind: paced, client: this.clientOf(request), account: this.account });
+        this.log({ event: "refusal", limiter: c.limiter, kind: paced, client: this.clientOf(request), account: this.account, ...this.attribution(credential!) });
       }
     }
     const maxAgeMs = ghMaxAgeMs(split.headers);
@@ -1176,7 +1299,7 @@ export class GhReadBroker {
     return { stdout: api && !c.wantsInclude ? split.body : raw.stdout, stderr: raw.stderr, exitCode: 0, outcome: local ? "hit-fresh" : "upstream-200" };
   }
 
-  status(): Record<string, unknown> {
+  status(sinceMs = this.now() - 86_400_000): Record<string, unknown> {
     const memoryBudget = this.trimMemory();
     const nowMs = this.now();
     const queues: Record<string, Record<string, number>> = {};
@@ -1194,6 +1317,7 @@ export class GhReadBroker {
     }
     return {
       type: "status",
+      credentials: summariseGhBrokerLog(this.dir, sinceMs).credentials,
       api_filter_cache: this.apiFilterCache,
       counts: { ...this.counts },
       queues,
@@ -1218,6 +1342,8 @@ export class GhReadBroker {
 
 /** `status --since <dur>`: the broker's own measurement over the request log. */
 export function summariseGhBrokerLog(dir: string, sinceMs: number): Record<string, unknown> {
+  const credentials = new Map<string, { credential_source: string; credential_reference: string | null; host: string;
+    requests: number; limits: Record<string, { remaining: number; reset_ms: number }> }>();
   const byOutcome: Record<string, number> = {};
   let reads = 0;
   let upstream = 0;
@@ -1229,18 +1355,28 @@ export function summariseGhBrokerLog(dir: string, sinceMs: number): Record<strin
   const since = clockFromMillisFn(() => sinceMs).iso();
   let files: string[] = [];
   try {
-    files = readdirSync(join(dir, "log")).filter((n) => /^requests-.*\.ndjson$/.test(n));
+    files = readdirSync(join(dir, "log")).filter((n) => /^requests-.*\.ndjson$/.test(n)).sort();
   } catch {
     files = []; // no log yet: a broker that has served nothing reports zeros, with `files: 0` saying so
   }
   for (const name of files) {
     for (const line of readFileSync(join(dir, "log", name), "utf8").split("\n")) {
       if (!line) continue;
-      let row: { ts?: string; event?: string; limiter?: string; client?: string; outcome?: string; class?: string; wait_ms?: number; gh_filtered_locally?: boolean };
+      let row: { ts?: string; event?: string; limiter?: string; client?: string; outcome?: string; class?: string; wait_ms?: number; gh_filtered_locally?: boolean;
+        credential_source?: string; credential_reference?: string | null; host?: string;
+        limits?: Record<string, { remaining: number; reset_ms: number }> };
       try {
         row = JSON.parse(line) as typeof row;
       } catch {
         continue; // a torn last line from a crash is not a request
+      }
+      if (row.credential_source !== undefined && row.outcome !== undefined) {
+        const key = JSON.stringify([row.credential_source, row.credential_reference, row.host]);
+        let credential = credentials.get(key);
+        if (!credential) credentials.set(key, credential = { credential_source: row.credential_source,
+          credential_reference: row.credential_reference ?? null, host: row.host ?? "unknown", requests: 0, limits: {} });
+        if (row.limits) credential.limits = row.limits;
+        if ((row.ts ?? "") >= since && row.outcome !== undefined) credential.requests++;
       }
       if ((row.ts ?? "") < since) continue;
       if (row.event === "refusal") {
@@ -1264,6 +1400,7 @@ export function summariseGhBrokerLog(dir: string, sinceMs: number): Record<strin
     served_without_upstream_share: reads === 0 ? null : (reads - upstream) / reads,
     longest_interactive_wait_ms: longestInteractiveWaitMs,
     by_client: byClient, upstream_by_client: upstreamByClient, refusals_by_limiter: refusalsByLimiter,
+    credentials: [...credentials.values()].filter((c) => c.requests > 0),
   };
 }
 
@@ -1386,7 +1523,7 @@ export async function serveGhReadBroker(opts: {
         }
         if (message.op === "status") {
           const summary = message.sinceMs === undefined ? undefined : summariseGhBrokerLog(dir, message.sinceMs);
-          conn.end(`${JSON.stringify({ ...broker.status(), heartbeat_interval_s: intervalS, since: summary })}\n`);
+          conn.end(`${JSON.stringify({ ...broker.status(message.sinceMs), heartbeat_interval_s: intervalS, since: summary })}\n`);
           return;
         }
         if (message.op === "stop") {
@@ -1405,6 +1542,8 @@ export async function serveGhReadBroker(opts: {
     server.once("error", reject);
     server.listen(socketPath, () => resolve());
   });
+  await broker.startCredentials();
+  installGithubAppTokenHolder(broker.appTokens);
   // A refused bind must not leave a heartbeat timer keeping the failed server process alive.
   const timer = setInterval(beat, intervalS * 1000);
   chmodSync(socketPath, 0o600);
@@ -1413,6 +1552,8 @@ export async function serveGhReadBroker(opts: {
   const close = (): Promise<void> => {
     closing ??= new Promise<void>((resolve) => {
       clearInterval(timer);
+      broker.stopCredentials();
+      installGithubAppTokenHolder(undefined);
       rmSync(heartbeat, { force: true });
       // A client still waiting sees a closed connection and falls back to its direct path.
       for (const conn of connections) conn.destroy();
