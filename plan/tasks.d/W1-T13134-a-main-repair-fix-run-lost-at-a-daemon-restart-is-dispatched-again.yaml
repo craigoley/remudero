@@ -1,0 +1,83 @@
+- id: W1-T13134
+  title: "A main-repair fix run that a daemon restart killed before it reported is dispatched again once, so a red main is not left with a fix attempt that never ran"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # changes when the red-main repair lane dispatches a second fix run and edits a W1-T6403 test; a wrong reading could double-dispatch
+  origin: "operator-session#main-red-13h-2026-11-15"
+  plan_refs:
+    - W1-T6403
+    - W1-T13130
+    - W1-T12231
+  files:
+    - src/lib/main-health-rung.ts
+    - test/a-main-repair-fix-run-lost-at-a-daemon-restart-is-dispatched-again.test.ts
+    - test/a-red-main-repairs-itself-fix-pr-then-revert-pr.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A rung started under a new run id, reading a ledger whose main.repair.fix_dispatched row was written by another run id and has no main.repair.fix_opened or main.repair.fix_refused row after it, writes main.repair.fix_refused with lost true and a reason that names the old run id, and calls openFixPr once on its first red observation of the same red"
+      proof: "grep: W1-T13134 criterion 1 in test/a-main-repair-fix-run-lost-at-a-daemon-restart-is-dispatched-again.test.ts"
+    - claim: "invariant:one-live-fix-run — the rung that dispatched the run does not treat its own run as lost: with the run still in flight (openFixPr not yet settled) and the same run id, two more red observations call openFixPr no more times and write no lost row"
+      kind: guard
+      proof: "grep: W1-T13134 criterion 2 in test/a-main-repair-fix-run-lost-at-a-daemon-restart-is-dispatched-again.test.ts"
+    - claim: "invariant:lost-redispatch-is-bounded — a record whose fix runs were lost MAIN_REPAIR_LOST_RUN_LIMIT (2) times is not dispatched again: the next stall goes to the revert path as today, and its reason says the fix runs were lost at restarts"
+      kind: guard
+      proof: "grep: W1-T13134 criterion 3 in test/a-main-repair-fix-run-lost-at-a-daemon-restart-is-dispatched-again.test.ts"
+    - claim: "The W1-T6403 test 'a fix run lost to a daemon restart stalls into the revert' is changed to the new reading, and its title says so ('is dispatched again, and lost again it stalls into the revert'): the first lost run is dispatched again; a revert follows only after the limit"
+      proof: "grep: lost again in test/a-red-main-repairs-itself-fix-pr-then-revert-pr.test.ts"
+  rationale: |
+    WHY: on 2026-11-15 the red-main repair lane located the culprit of a 13-hour red (580877d7c, test-slow) at
+    15:54:27Z and dispatched its fix run at 15:54:32Z. The fix run never reported. The next daemon process
+    did not run it again; it waited out the stall window and went to the revert, which was withheld. No fix
+    attempt ever ran for that red.
+    MEASURED, core ledger (~/rmd-state2/state, live file and archives 2026-11-02 to 2026-11-16):
+    - 12 main-repair.dispatching rows in 14 days. 11 have a main-repair.dispatched_worker row 0 to 44
+      minutes later. 1 has none: run-main-repair-580877d7c6f2-1794758068045 (15:54:32Z, run
+      DAEMON-1794753773792-7). No branch of that name is on origin.
+    - A restart sits between: 16:00:11Z daemon.freshness_decision "drain and restart"; the drain completed
+      at 16:00:13Z (1.6 s); daemon.freshness_exit at 16:03:40Z; daemon.start DAEMON-1794758926941-7 at
+      16:09:09Z; run_child.boot_settlement settled 0. The drain does not count the main-repair fix run.
+    - The new process wrote main.repair.same_red at 16:10Z and 16:33Z, then main.repair.revert_withheld at
+      16:54Z and 16:58Z with why_fix_insufficient "the fix run, dispatched before this daemon process
+      started, made no progress (no new head, no merge) across 15 red observations and 36 minutes".
+    READ at origin/main:
+    - src/lib/main-health-rung.ts:1631 dispatchFix runs the fix as a promise in the daemon process
+      (`void Promise.resolve().then(() => lane.openFixPr(request))`). The only live state is the in-process
+      set fixInFlight (:1510). The outcome is written only when that promise settles (fix_opened or
+      fix_refused). A process that ends first leaves a fix_dispatched row with no outcome.
+    - :1858 advanceRepair: with no fixPrUrl and no fixRefused it calls stallOf(..., "no-pr", ...). That
+      attempt is not "ended", so neither the fix-progress judge nor a new dispatch runs; after
+      MAIN_REPAIR_STALL_TICKS and MAIN_REPAIR_STALL_MS it goes straight to proveCulprit and the revert.
+    - test/a-red-main-repairs-itself-fix-pr-then-revert-pr.test.ts:453 asserts "the lost fix run is not
+      re-dispatched". This task changes that reading on purpose: the revert needs a culprit proof that is
+      often missing (7 of 7 revert_withheld rows in 14 days, see the sibling task), so a lost fix run left
+      the red with no repair at all.
+    RELATED, not duplicates: W1-T12231 (open PR #18701) makes the freshness drain wait for reviews and fix
+    rounds in flight; it does not cover the main-repair fix run, and a restart can still come from a crash
+    or a deploy. W1-T13130 stops the false green that closed this repair at 18:06Z.
+  design: |
+    INVARIANT one-live-fix-run: a fix run is dispatched again only when the process that dispatched it is gone.
+    INVARIANT lost-redispatch-is-bounded: at most MAIN_REPAIR_LOST_RUN_LIMIT lost runs are dispatched again per record.
+    1. mainRepairRecordsFromLedger: each attempt keeps the run_id of its fix_dispatched row, and a
+       fix_refused row with lost true sets the attempt outcome "lost" (count lost attempts on the record).
+    2. advanceRepair, before the "no-pr" stall: when the record's last attempt has no outcome, its run id
+       is not deps.runId, and fixInFlight does not hold the sha, write main.repair.fix_refused with
+       lost: true and reason "the fix run was lost: daemon run <old run id> ended before it reported".
+       If the record has fewer than MAIN_REPAIR_LOST_RUN_LIMIT (2) lost attempts, dispatch the fix again with
+       fixRequestFor (the reason says it repeats a lost run) and return true. Otherwise keep today's path,
+       with the stall reason naming the lost runs.
+    3. No new ledger step: main.repair.fix_refused already exists; lost is a new field on it.
+    4. Tests drive buildMainHealthRung with a fake lane and a ledger fixture (test/helpers/ledger-fixture.ts),
+       two rigs with different runId values for the restart.
+  falsifier: |
+    Remove the lost-run branch: criterion 1 fails (no openFixPr call; the revert path runs instead). Drop the
+    run-id comparison: criterion 2 fails (the live run is dispatched twice). Drop the limit: criterion 3 fails.
+  note: |
+    Id reserved for run-unfiled-1794802909000 with ~/rmd-work/bin/reserve-id.sh.
+    Proof that counts in production: no main-repair.dispatching row without a dispatched_worker row, or
+    without a later fix_refused lost row and a new dispatching row, in the 14 days after merge.
