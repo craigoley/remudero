@@ -732,6 +732,17 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   if (input.files.has(costOfDelay) && files.some((f) => costOfDelayEdges.includes(f))) {
     pathReaders.push(costOfDelay);
   }
+  // W1-T9275: recorded miss on coverage run 38438103359, PR #11434.
+  const shardSizing = suitePath("test/every-lint-pass-sizes-a-shard-by-its-own-slug.test.ts");
+  const shardSizingEdges = [
+    "docs/review-gate.md",
+    "src/lib/companion-paths.ts",
+    suitePath("test/a-test-helper-is-the-concern-its-suites-accompany.test.ts"),
+    suitePath("test/the-one-concern-arm-never-adopted-the-shared-table.test.ts"),
+  ];
+  if (input.files.has(shardSizing) && files.some((f) => shardSizingEdges.includes(f))) {
+    pathReaders.push(shardSizing);
+  }
   const recent = input.recentFailures ?? [];
   for (const s of pathReaders) pick(s, "reads a changed file by path");
   // W1-T6084: the OBSERVED readers and census readers, beside the source-text rules above (which still
