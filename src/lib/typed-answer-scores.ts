@@ -63,6 +63,8 @@ export interface TypedAnswerRow {
   /** A declared option that means the model cannot tell. */
   abstainOption?: string;
   inputDigest: string | null;
+  /** W1-T12425: the judged head, which joins the answer to its head's outcome row; null or absent when unknown. */
+  head?: string | null;
   answer: TypedAnswer;
   /** The current judge's answer for the same input, or null. */
   incumbent: string | null;

@@ -90,8 +90,10 @@ test("W1-T13188 criterion 1: each Inbox write route classifies at most the one p
     assert.equal(answer.body.ok, true);
     assert.equal(answer.body.proposalId, target);
     assert.ok(grepped.every((pattern) => pattern === `pattern-${target}`), `${path} classified only ${target}: ${grepped.join(", ")}`);
-    // A declined proposal classifies before its anchors are read, and the decline's own grep is cached, so restore greps none.
-    assert.equal(grepped.length, path === "/v1/inbox/restore" ? 0 : 1, `${path} grepped at most the one proposal's anchor`);
+    // A declined proposal classifies before its anchors are read, and the decline's own grep is cached, so restore greps
+    // none; archive and snooze check the registry alone (W1-T13235) and classify nothing.
+    const expected = ["/v1/inbox/restore", "/v1/inbox/archive", "/v1/inbox/snooze"].includes(path) ? 0 : 1;
+    assert.equal(grepped.length, expected, `${path} grepped at most the one proposal's anchor`);
   }
 });
 

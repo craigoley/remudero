@@ -4,8 +4,9 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { buildPlanReconcileCadenceInput, planReconcileCadence } from "../src/lib/measurement-cadence.js";
-import { buildPlanReconcileProductionInput, defaultCreditedMergedIds, buildCreditCandidates, buildCoverageNightlyDaemonHook } from "../src/run-task.js";
+import { buildPlanReconcileCadenceInput, planReconcileCadence, type MeasurementCadenceReportOpts } from "../src/lib/measurement-cadence.js";
+import { VERDICT_OUTCOME_STEP } from "../src/lib/verdict-calibration.js";
+import { buildPlanReconcileProductionInput, defaultCreditedMergedIds, buildCreditCandidates, buildCoverageNightlyDaemonHook, buildMeasurementCadenceDaemonHooks } from "../src/run-task.js";
 import { fixedClock } from "../src/lib/clock.js";
 import { LEDGER_FILENAME } from "../src/lib/ledger-path.js";
 import { withTempDir } from "../src/lib/tmp.js";
@@ -200,4 +201,30 @@ test("W1-T3970: the default credit projection reads the supplied checkout plan b
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("W1-T12425 criterion 3: the daemon's cadence call gives the outcome writer, and it appends the row to the daemon's ledger", async () => {
+  await withTempDir("verdict-outcome-writer", async (root) => {
+    let supplied: MeasurementCadenceReportOpts | undefined;
+    const hooks = buildMeasurementCadenceDaemonHooks({
+      config: { root } as Config,
+      verifyHumanCadenceResult: async () => ({}) as never,
+      successorWatch: async () => ({}) as never,
+      creditedMergedIds: () => new Set(),
+      proofDebtInput: () => undefined,
+      measurementReport: async (input: MeasurementCadenceReportOpts) => {
+        supplied = input;
+        input.outcomes?.writeLedgerLine({ step: VERDICT_OUTCOME_STEP, task_id: "W1-T9001", head_sha: "a".repeat(40), merge_sha: "b".repeat(40),
+          outcome: "reverted", window_days: 14 });
+        return {} as Awaited<ReturnType<typeof import("../src/lib/measurement-cadence.js").runMeasurementCadenceReportAsync>>;
+      },
+    } as Parameters<typeof buildMeasurementCadenceDaemonHooks>[0]);
+    await hooks.runMeasurementCadence();
+    assert.equal(typeof supplied?.outcomes?.writeLedgerLine, "function", "the daemon's cadence call gives an outcome writer");
+    const rows = readFileSync(join(root, "state", LEDGER_FILENAME), "utf8").trim().split("\n").map((raw) => JSON.parse(raw) as Record<string, unknown>)
+      .filter((row) => row.step === VERDICT_OUTCOME_STEP);
+    assert.equal(rows.length, 1);
+    assert.deepEqual([rows[0]!.task_id, rows[0]!.head_sha, rows[0]!.outcome, rows[0]!.window_days, rows[0]!.lane], ["W1-T9001", "a".repeat(40), "reverted", 14, "measurement-cadence"]);
+    assert.match(String(rows[0]!.run_id), /^VERDICT-OUTCOME-/);
+  });
 });

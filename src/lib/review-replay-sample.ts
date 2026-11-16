@@ -1,12 +1,13 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { systemClock } from "./clock.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { loadReviewerHealthState, reviewerHealthStatePath } from "./reviewer-health.js";
 import { classifyReviewOutcome, reviewReplayInputDigest, type ReviewOutcomeClass,
   type ReviewOutcomeDecision, type ReviewReplayInput } from "./review-outcome-class.js";
-import type { GardenAction, GardenCheckout, GardenerDeps, GardenSpec } from "./gardener.js";
+import { gardenLedgerBucket, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec } from "./gardener.js";
 
 export const REVIEW_REPLAY_SAMPLE_PATH = "test/fixtures/review-replay/sample.ndjson";
 export const REVIEW_REPLAY_READ_STEPS = ["review.replay_input", "review.posted", "review.reviewer.skipped",
@@ -243,13 +244,15 @@ export function refreshReviewReplaySample(options: { stateDir: string; root: str
   return sample;
 }
 
-export function reviewReplayGardenSpec(deps: GardenerDeps, generatorRevision: () => string):
+export function reviewReplayGardenSpec(deps: GardenerDeps, generatorRevision: () => string,
+  options: { readLedger?: typeof readLedgerUnionRecordsSync } = {}):
   GardenSpec<"refresh", string, GardenAction<"refresh"> & { content: string }, GardenCheckout> {
   const inventory = (): string => serializeReviewReplaySample(readReviewReplaySample({
-    stateDir: deps.stateDir, generatorRevision: generatorRevision(),
+    stateDir: deps.stateDir, generatorRevision: generatorRevision(), readLedger: options.readLedger,
   }));
   return { name: "review-replay", classes: ["refresh"], decision: ["refresh"],
-    cheapFingerprint: () => inventory(), inventory, fingerprint: content => content,
+    cheapFingerprint: () => `${generatorRevision()}:${gardenLedgerBucket(deps.clock ?? systemClock)}`,
+    inventory, fingerprint: content => content,
     candidates: content => {
       const path = join(deps.repoRoot, REVIEW_REPLAY_SAMPLE_PATH);
       return existsSync(path) && readFileSync(path, "utf8") === content ? [] :

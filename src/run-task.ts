@@ -1403,7 +1403,7 @@ import {
   type FetchMergedCoverageArtifactDeps,
   type FetchMergedCoverageArtifactResult,
 } from "./lib/coverage-improvement.js";
-import { mineVerdictRows, verdictCalibrationReport, type UnmeasurableCause } from "./lib/verdict-calibration.js";
+import { mineVerdictRows, verdictCalibrationReport, VERDICT_OUTCOME_STEP, type UnmeasurableCause } from "./lib/verdict-calibration.js";
 import { mineAutonomyLedgerLines, parseTrailerMerges, zeroTouchMergeRate } from "./lib/autonomy.js";
 import { decideMeasurementCadence, measurementCadenceCheck, ciLearningCadenceCheck, CI_LEARNING_MINT_CEILING, ciLearningLookbackDays, type CiLearningCadencePolicy, type CiLearningCadenceRunResult, measurementCadenceMarkerPath, ciLearningRecordVerdict, ciLearningShardYaml, fileCiLearningShards, mintCiLearningShards, readMeasurementCadenceMarker, recordCiLearningAttempt, recordCiLearningCadenceFire, recordMeasurementCadenceFire, createWipeTestEvidenceReader, wipeTestSlotDraw, recordWipeTestCadenceFire, scheduleWipeTestAblation, renderVerbCensusDigestLine, priorVerifyHumanAgeBandKeys, runMeasurementCadenceReportAsync, runVerbCensus, verifyHumanCadence, wipeTestCadenceCheck, type MeasurementCadenceDecision, buildPlanReconcileCadenceInput, type PlanReconcileHeld, type PlanReconcileCadenceOpts, type PlanReconcileCadenceInputOptions, type PlanReconcileShardRecord, type MeasurementCadenceReportOpts, type MeasurementCadenceRunResult, type VerifyHumanCadenceResult, type WipeTestCadenceDecision, type WipeTestCadencePolicy, type WipeTestCadenceRunResult } from "./lib/measurement-cadence.js";
 import {
@@ -19184,14 +19184,14 @@ export async function lintPlanForReview(
     return { ran: false, reason: `no merge base: ${String((e as Error).message).split("\n")[0]}` };
   }
   try {
-    if (options.signal?.aborted) return { ran: false, reason: "lint-plan aborted" };
+    if (options.signal?.aborted) return { ran: false, reason: "lint-plan aborted", aborted: true };
     const launch = childEntryArgv(repoRoot, "run-task", "src/run-task.ts", ["lint-plan", "--plan",
       join(headCheckoutDir, "plan", "tasks.yaml"), "--base", mergeBase, "--offline", "--repo-root", headCheckoutDir,
       ...(options.codeRoot === undefined ? [] : ["--code-root", options.codeRoot])],
       undefined, { log: options.log });
     options.log?.(CHILD_ENTRY_SPAWNED_STEP, childEntrySpawnedRow("run-task", "lint-plan", launch));
     const result = await run(launch.argv, { cwd: repoRoot, signal: options.signal });
-    if (options.signal?.aborted) return { ran: false, reason: "lint-plan aborted" };
+    if (options.signal?.aborted) return { ran: false, reason: "lint-plan aborted", aborted: true };
     if (result.error) return { ran: false, reason: `lint-plan could not start: ${result.error.message}` };
     if (result.signal) return { ran: false, reason: `lint-plan killed by ${result.signal}` };
     if (result.status === null) return { ran: false, reason: "lint-plan exited without a status" };
@@ -22540,6 +22540,17 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
               lane: "measurement-cadence",
               ...row,
               step: KNOWLEDGE_MEASURED_STEP,
+            }),
+        },
+        // W1-T12425: one `verdict_calibration.outcome` row per measured head and kind, not gated on escalate.
+        outcomes: {
+          writeLedgerLine: (row) =>
+            appendLedger(ledgerPathFor(configFor()), {
+              run_id: `VERDICT-OUTCOME-${cadenceClock.now()}`,
+              lane: "measurement-cadence",
+              ...row,
+              task_id: String(row.task_id),
+              step: VERDICT_OUTCOME_STEP,
             }),
         },
       });

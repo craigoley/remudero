@@ -354,6 +354,18 @@ const SEED_ROWS: readonly SeedRow[] = [
     outcomes: ["succeeded", "errored", "canceled", "expired"],
   },
   {
+    // W1-T12425: a record only; the judge calibration reader joins it to typed answers by head.
+    step: "verdict_calibration.outcome",
+    meaning:
+      "One merged head's outcome after its merge, from the same git read as the verdict calibration " +
+      "report: the task id, the head, the merge commit and the window in days. reverted is a revert " +
+      "inside the window, followup_fixed is a follow-up fix inside the window, and clean is a merge " +
+      "older than the window with neither. A head and kind already recorded gets no second row, and a " +
+      "head with a reverted or followup_fixed row never gets clean. No gate, route or judge reads it.",
+    writer: ["runMeasurementCadenceReport"],
+    outcomes: ["reverted", "followup_fixed", "clean"],
+  },
+  {
     // W1-T12546: a fix dispatch whose head moved before the checkout claim.
     step: "sweep.fix.head_adopted",
     meaning:
