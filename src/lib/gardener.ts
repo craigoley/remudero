@@ -596,10 +596,11 @@ interface HeldGardenIds {
 /** W1-T12834: the ids refused findings hold, by origin key. */
 export type RefusedFindingIds = Record<string, { id: string; branch: string; at: string }>;
 
-/** W1-T12834: the finding an action files — its origin key when it carries one, else its class and target. */
-export function gardenFindingKey(action: GardenAction<string>): string {
+/** W1-T12834: the finding an action files — the `origin:` key its task carries. An action with none names no finding
+ *  that outlives the pass, so its id is minted and released as before. */
+export function gardenFindingKey(action: GardenAction<string>): string | undefined {
   const origin = (action as { origin?: unknown }).origin;
-  return typeof origin === "string" && origin !== "" ? origin : `${action.class}:${action.target}`;
+  return typeof origin === "string" && origin !== "" ? origin : undefined;
 }
 
 /** W1-T12834: what a pass tells its filing's preparation: the plan's actions and the ids refused findings hold. */
@@ -612,7 +613,8 @@ const gardenMinters = new Map<string, GardenTaskIdMinter>();
 function mintedFindings(actions: readonly GardenAction<string>[], count: number): (string | undefined)[] {
   const fresh = actions.filter((a) => !(a as { draft?: unknown }).draft);
   const keys = (count === actions.length ? actions : count === fresh.length ? fresh : count === 1 ? actions.slice(0, 1) : []).map(gardenFindingKey);
-  return keys.length === count && new Set(keys).size === count ? keys : [];
+  const named = keys.filter((k) => k !== undefined);
+  return keys.length === count && new Set(named).size === named.length ? keys : [];
 }
 
 type GardenFilingWorkspace = Pick<GardenCheckout, "branch"> & { land?: (opts: GardenLandOpts) => unknown };
