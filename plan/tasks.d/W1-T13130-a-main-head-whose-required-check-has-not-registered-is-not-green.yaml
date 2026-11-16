@@ -18,7 +18,7 @@
   files:
     - src/lib/sweep.ts
     - test/a-main-head-whose-required-check-has-not-registered-is-not-green.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "mainHealthFromRollup reads undetermined, not green, when a required check has no entry on the head and any other check on the head is still queued or in progress: the 2026-11-15 18:06Z shape (ci success, test-slow absent, test-slow-shard (2/4) in progress, required set from ci-gate.yml) reads undetermined, names test-slow in pendingChecks, and its reason says the required check has not registered yet"

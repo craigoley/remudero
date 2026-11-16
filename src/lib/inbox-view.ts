@@ -1,4 +1,4 @@
-import { inboxGardenerSource, mechanicalAskPurpose, readInboxGardenerStore, inboxOperatorIntent } from "./inbox-retirement.js";
+import { inboxGardenerSource, retirementAsk, readInboxGardenerStore, inboxOperatorIntent } from "./inbox-retirement.js";
 import { readAllThreads, inboxThreadId } from "./inbox-thread.js";
 import { captureInboxOwner } from "./inbox-owner.js";
 /**
@@ -98,7 +98,7 @@ function persistedContent(classified: ClassifiedInbox, stores: InboxStores): Per
     mergedTaskIds: projection.filter(([, p]) => p.merged).map(([id]) => id), projectionIndeterminate: projection.some(([, p]) => p.indeterminate === true),
     ...(attentionEvidence ? { attentionEvidence } : {}),
     gardenerDependencyEvidence: [...new Set(classified.proposals.flatMap(p => {
-      const id = mechanicalAskPurpose(p)?.taskId;
+      const id = retirementAsk(p)?.taskId;
       return id ? classified.plan.byId.get(id)?.depends_on ?? [] : [];
     }))].sort().map(id => ({ id, merged: !classified.plan.byId.has(id) || !classified.projection.has(id) || classified.projection.get(id)?.indeterminate ? null : classified.projection.get(id)!.merged })),
     stores,

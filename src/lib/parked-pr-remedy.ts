@@ -31,6 +31,8 @@ export interface ParkedPrFacts {
   isPlanFiling: boolean;
   /** How many criteria the pull request's task has; undefined when its task file cannot be read. */
   taskCriteria?: number;
+  /** W1-T13046: the red checks a design hold covers. A red check cannot leave the task, so it is never split. */
+  designHoldChecks?: readonly string[];
 }
 
 export interface ParkedPrDecision { remedy: ParkedPrRemedy; reason: string; inputCriteria: readonly ParkedPrCriterion[] }
@@ -39,6 +41,11 @@ export interface ParkedPrDecision { remedy: ParkedPrRemedy; reason: string; inpu
 export function parkedPrRemedy(facts: ParkedPrFacts): ParkedPrDecision {
   const input = facts.unmetCriteria.filter(c => c.needsInput);
   const fixable = facts.unmetCriteria.length - input.length;
+  if (input.length === 0 && (facts.designHoldChecks?.length ?? 0) > 0) {
+    return { remedy: "close-and-rebuild", inputCriteria: [],
+      reason: `the design hold covers ${facts.designHoldChecks!.length} red checks and no criterion; a red check cannot leave ` +
+        "the task, so the pull request is closed and rebuilt as a held task" };
+  }
   if (input.length === 0) {
     const reason = fixable + facts.redChecks.length === 0
       ? "nothing is unmet and nothing is red, so the stalled stage or review runs again on the pull request"
@@ -296,17 +303,36 @@ export interface ParkedPrSweepOutcome extends ParkedPrOutcome {
   blocker: PrBlocker;
 }
 
+/** W1-T13046: what a design hold is about: the unmet claims and the red check names its fix round was given. */
+export interface DesignHoldCoverage { criteria: readonly string[]; checks: readonly string[] }
+
+/** W1-T13046: the coverage a `fix.needs_design` row records, or undefined for a row that records neither field. */
+export function designHoldCoverage(row: Record<string, unknown> | undefined): DesignHoldCoverage | undefined {
+  const names = (value: unknown) => Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : undefined;
+  const criteria = names(row?.covers_criteria), checks = names(row?.covers_checks);
+  return criteria === undefined && checks === undefined ? undefined : { criteria: criteria ?? [], checks: checks ?? [] };
+}
+
 /**
  * The facts of a pull request the sweep would set refused-escalate for, or hold on an escalated blocker. A design
- * question (W1-T12714's design kind) marks every unmet criterion as needing input. PURE apart from `host` reads.
+ * question (W1-T12714's design kind) marks the unmet criteria its hold covers as needing input and ladder-spent: the
+ * round answered NEEDS_DESIGN, so no stall round runs for them (W1-T13046). A hold with no coverage marks every unmet
+ * criterion as needing input. PURE apart from `host` reads.
  */
 export async function parkedPrFacts(pr: ParkedPrSubject, input: { redChecks: readonly string[]; designQuestion?: string;
-  fixModelOrder: readonly string[] }, ledger: readonly Record<string, unknown>[], host: Pick<ParkedPrHost, "readTaskShard">): Promise<ParkedPrFacts> {
-  const unmet = pr.unmetCriteria.map(c => ({ claim: c.claim, ...(c.proof === undefined ? {} : { proof: c.proof }),
-    ...(c.reason === undefined ? {} : { reason: c.reason }), needsInput: input.designQuestion !== undefined,
-    ladderSpent: stallLadderSpent(stallRemedyRows(ledger, pr.prNumber, `review:${c.claim}`), { fixModelOrder: input.fixModelOrder }) }));
+  designCoverage?: DesignHoldCoverage; fixModelOrder: readonly string[] }, ledger: readonly Record<string, unknown>[],
+host: Pick<ParkedPrHost, "readTaskShard">): Promise<ParkedPrFacts> {
+  const coverage = input.designQuestion === undefined ? undefined : input.designCoverage;
+  const unmet = pr.unmetCriteria.map(c => {
+    const covered = coverage?.criteria.includes(c.claim) === true;
+    return { claim: c.claim, ...(c.proof === undefined ? {} : { proof: c.proof }), ...(c.reason === undefined ? {} : { reason: c.reason }),
+      needsInput: input.designQuestion !== undefined && (coverage === undefined || covered),
+      ladderSpent: covered || stallLadderSpent(stallRemedyRows(ledger, pr.prNumber, `review:${c.claim}`), { fixModelOrder: input.fixModelOrder }) };
+  });
+  const designHoldChecks = coverage === undefined ? [] : input.redChecks.filter(name => coverage.checks.includes(name));
   return { unmetCriteria: unmet, redChecks: input.redChecks, isPlanFiling: pr.isPlanFiling === true,
-    ...(unmet.some(c => c.needsInput) ? { taskCriteria: await taskCriteriaCount(host, pr.taskId) } : {}) };
+    ...(unmet.some(c => c.needsInput) ? { taskCriteria: await taskCriteriaCount(host, pr.taskId) } : {}),
+    ...(designHoldChecks.length > 0 ? { designHoldChecks } : {}) };
 }
 
 /** Takes the sweep's remedy and names the disposition the pull request goes on with. It is never refused-escalate. */

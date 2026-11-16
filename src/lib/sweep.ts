@@ -387,7 +387,7 @@ import {
   type RefusalCandidate,
 } from "./refusal-amendment.js";
 import { landTaskFilesAsync, landingIdentity, stagedTaskFiles, type LandTaskFilesOpts } from "./feedback-landing.js";
-import { PARKED_PR_REMEDY_STEP, openEscalationRelease, actOnParkedPr, parkedPrFacts, parkedPrRemedy, planRoundExhaustedRemedy, readParkedPrShard, remedyStalledCriterion, standDownHoldRemedied, standDownHoldRemedy, takeParkedPrRemedy, type ParkedPrHost } from "./parked-pr-remedy.js";
+import { PARKED_PR_REMEDY_STEP, openEscalationRelease, actOnParkedPr, designHoldCoverage, parkedPrFacts, parkedPrRemedy, planRoundExhaustedRemedy, readParkedPrShard, remedyStalledCriterion, standDownHoldRemedied, standDownHoldRemedy, takeParkedPrRemedy, type ParkedPrHost } from "./parked-pr-remedy.js";
 
 /** W1-T6434: the bounded, already-scrubbed view of a preserved fix-owner patch. */
 export interface PriorPartialWork {
@@ -23246,7 +23246,7 @@ export async function runSweep(
         `proof-repair rounds refused twice at this head (${pr.repeatedFixRefusal}) — no strike spent — ` +
         `the plan-shard flag is the next rung`;
     }
-    let terminalDesignHold: { amended: boolean; mainAdoption?: true; mainAdoptionDecision: DesignHoldMainAdoptionDecision; revision?: string; observedRevision?: string; semantic?: { standingOn: string; observed: string }; roundId: string } | undefined;
+    let terminalDesignHold: { amended: boolean; mainAdoption?: true; mainAdoptionDecision: DesignHoldMainAdoptionDecision; revision?: string; observedRevision?: string; semantic?: { standingOn: string; observed: string }; roundId: string; producer: Record<string, unknown> } | undefined;
     // W1-T10339: a PR with no task trailer is judged on its BODY, so the body is an input a stand-down read.
     const standDownBodySha = carriesTaskTrailer(pr) ? undefined : prBodyDigest(pr.body);
     let designReleasedByBody = false;
@@ -23313,7 +23313,7 @@ export async function runSweep(
               designHoldMainAdoptionDecision(pr, ledgerLines, behindBy, mainTipSha, deps.updateBranch !== undefined);
             const mainAdoption = mainAdoptionDecision === "due";
             terminalDesignHold = { amended, mainAdoptionDecision, ...(mainAdoption ? { mainAdoption: true as const } : {}),
-              revision: standingOn ?? current, observedRevision: current, semantic, roundId: handoff.roundId };
+              revision: standingOn ?? current, observedRevision: current, semantic, roundId: handoff.roundId, producer: held };
             // W1-T12714: a report routed to an amendment waits on that amendment, never on a person.
             const awaitsAmendment = held.needs_design_remedy === "amendment-proposed";
             disposition = amended || mainAdoption ? "blocked-fixable" : awaitsAmendment ? "wait" : "refused-escalate";
@@ -23415,8 +23415,13 @@ export async function runSweep(
     if (deps.parkedPr && !deps.dryRun && !strikeLadderDue && !sloLadderDue && !ownStandDownHold && (disposition === "refused-escalate" ||
         disposition === "blocked-ambiguous" && ruleBlockerByIndex.get(prIndex) === "escalated")) {
       const designQuestion = terminalDesignHold !== undefined && disposition === "refused-escalate" ? reason : undefined;
+      // W1-T13046: refused-escalate means the hold's one main adoption is not due (invariant main-first), so the hold's
+      // coverage now picks a split of what it covers or a close and rebuild, never a fix round the fix lane stands down on.
+      const designCoverage = designQuestion === undefined || terminalDesignHold?.mainAdoption === true ? undefined
+        : designHoldCoverage(terminalDesignHold?.producer);
       const facts = await parkedPrFacts(pr, { redChecks: redCheckNames(pr).filter(r => !r.startsWith("review:")),
-        ...(designQuestion === undefined ? {} : { designQuestion }), fixModelOrder: policy.fixModelOrder ?? DEFAULT_FIX_MODEL_ORDER },
+        ...(designQuestion === undefined ? {} : { designQuestion }), ...(designCoverage === undefined ? {} : { designCoverage }),
+        fixModelOrder: policy.fixModelOrder ?? DEFAULT_FIX_MODEL_ORDER },
       ledgerLines, deps.parkedPr);
       const holdCause = standDownHold === undefined ? undefined : "open-escalation";
       const cause = designQuestion !== undefined ? "needs-design" : pr.isPlanFiling === true ? "plan-gate"

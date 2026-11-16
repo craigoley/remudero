@@ -48,7 +48,7 @@ test("W1-T5550: a worktree inside its fixture dir is gone, gitdir and all, once 
   assert.equal(existsSync(record), false, "and so did its gitdir record");
 });
 
-/** Dirs a setup-loading child reports: its GH_CONFIG_DIR and the refusal stub's PATH head. */
+/** Dirs a setup-loading child reports: its GH_CONFIG_DIR and the refusal stub's PATH entry. */
 interface SetupDirs {
   config: string;
   refuse: string;
@@ -65,8 +65,8 @@ function startSetupChild(root: string, hold: boolean): ChildProcess {
   delete env.RMD_ALLOW_LIVE_WRITES;
   delete env.RMD_SELF_SYNC_DONE;
   const script = [
-    "const head = (process.env.PATH ?? '').split(':')[0];",
-    "process.stdout.write(JSON.stringify({ config: process.env.GH_CONFIG_DIR, refuse: head }) + '\\n');",
+    `const refuse = (process.env.PATH ?? '').split(':').find(dir => dir.split('/').pop().startsWith(${JSON.stringify(GH_REFUSE_DIR_PREFIX)}));`,
+    "process.stdout.write(JSON.stringify({ config: process.env.GH_CONFIG_DIR, refuse }) + '\\n');",
     hold ? "setInterval(() => {}, 1000);" : "",
   ].join("\n");
   return spawn(process.execPath, ["--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", "-e", script], {

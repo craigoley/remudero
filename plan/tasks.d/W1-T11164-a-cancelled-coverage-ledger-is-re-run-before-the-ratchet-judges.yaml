@@ -49,8 +49,8 @@
     SECURITY GATES ARE UNTOUCHED: security-merge-policy and CodeQL and their required contexts are not in files:.
   design: |
     1. MOVED to W1-T13175 (see AMENDED below): coverage-ratchet-required's skipped arm prints the coverage-ledger-cancelled line.
-    2. The sweep's blocked-CI rung reads that token from the failing coverage-ratchet check's output title (the rollup's check title the
-       sweep already maps) and, when it is the only failing required cause at the current head, claims a sweep.disposed receipt
+    2. The sweep's blocked-CI rung reads that token from the failing coverage-ratchet job's log tail, or from the job's failure
+       annotations when the log is unreadable (amended 2026-11-16, second amendment below), and, when it is the only failing required cause at the current head, claims a sweep.disposed receipt
        (ledger_cancel_rerun_attempted) and calls rerunFailedChecks, the same gateway the no-commit rerun uses. It does this before fix
        dispatch, once per head.
     3. With the receipt present at that head, the rung does nothing new: the existing path runs and its stand-down names the cancellation.
@@ -76,6 +76,17 @@
       readable to step 2 without any new transport. W1-T13175 pins the exact text; read its record before writing the matcher.
     The INVARIANT line above and the `invariant:` prefix on the last criterion are new, for the lint rule
     design-invariant-proof; they restate step 3 and add no behaviour.
+    AMENDED 2026-11-16 (operator session, second amendment): step 2 said the rung reads the token from "the failing
+    coverage-ratchet check's output title", and the first amendment of the same day said the log tail. Only the second is true:
+    an Actions job cannot set its check run's title by printing a line. Step 2 now says what the sweep can read. No criterion
+    changes meaning.
+    - READ src/lib/sweep.ts: the matcher this rung is modelled on tests the tail, `if (!/SHARD HANG\W+the matrix was cancelled/.test(tail)) return undefined;`.
+    - READ src/lib/tick-read-worker.ts: the tail is the job's log, and when the log is unreadable or names nothing it is the check
+      run's failure annotations (`tailSource = "annotations"`, read from `check-runs/<id>/annotations` and kept where
+      `annotation_level === "failure"`; the type is `CiTailSource` in src/lib/sweep.ts).
+    - W1-T13175 therefore prints the token on an `::error::` line, as the SHARD HANG line is printed, so it is in the log and in
+      the annotations. Match the words after the prefix: a log line shows them after the runner's own error marker, and an
+      annotation message holds them alone.
   falsifier: |
     At origin/main nothing re-runs a coverage-ledger job that was cancelled after its steps succeeded until a fix round has been
     dispatched and committed nothing. Take the receipt check out of the rung and the last criterion must fail: the same head is
