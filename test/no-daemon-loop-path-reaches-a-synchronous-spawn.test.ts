@@ -324,7 +324,6 @@ const SYNC_LEDGER_SCAN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   productionOpportunityOutcomePorts: 1,
   queueGovernorGateFor: 1,
   readDocketLedgerCorpus: 1,
-  readDraftStats: 1,
   readFixRoundArchiveRows: 1,
   readFlakeIncidentRows: 1,
   readFlowLedger: 2,
