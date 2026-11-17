@@ -141,6 +141,9 @@ function daemon(gh: ReturnType<typeof fakeGithub>, ledger: Array<Record<string, 
     repoRoot: root,
     ghJsonImpl: gh.readJson,
     ghBufferImpl: gh.readZip,
+    // W1-T13183: the daemon's fold-debt pull reads through the awaited seams.
+    readJsonImpl: async (args: string[]) => gh.readJson(args),
+    readBufferImpl: async (args: string[]) => gh.readZip(args),
     ...(opts.land === false ? {} : { landFeedbackImpl: (r: string) => { landed.push(r); return opts.land ? opts.land(r) : { landed: true }; } }),
   });
   const pass = (surface?: "light" | "full") =>

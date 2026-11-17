@@ -1,0 +1,46 @@
+- id: W1-T13292
+  title: "The Inbox list reads (the /v1/views/inbox sections and /v1/inbox?section=) take shape=list and return each row's list fields only, so the Inbox loads without every proposal's full reasons and texts"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # a new opt-in shape on two read paths; default bodies are unchanged
+  band_meaning: span
+  origin: "operator-session#serve-oom-2026-11-16"
+  plan_refs:
+    - W1-T13290
+  files:
+    - src/lib/panel-graph.ts
+    - src/lib/inbox-view.ts
+    - test/console-api/the-inbox-list-shape-carries-list-fields-only.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "With shape=list, GET /v1/views/inbox (each section the Console reads: needsYou, archived, snoozed) and GET /v1/inbox?section=<lane> answer the same sections, counts and snapshot keys as without it, and each row carries only the fields the Console's mailbox row renders: proposalId, from, summary, receivedAt, lastActivityAt, groupKey, lane or state, snapshotAttention, the option count, recommendation.action and its group, snoozedUntil and awaitingCoreRefresh (no reasons, plain, draftedTasks or resolution text)"
+      proof: "grep: W1-T13292 criterion 1 in test/console-api/the-inbox-list-shape-carries-list-fields-only.test.ts"
+    - claim: "On a fixture of 200 proposals with long reasons, the list shape is at most one fifth of the default body's bytes"
+      proof: "grep: W1-T13292 criterion 2 in test/console-api/the-inbox-list-shape-carries-list-fields-only.test.ts"
+    - claim: "invariant:default-shape-unchanged — both routes with no shape, or an unknown shape, answer byte for byte as before, and ETags and 304s keep working per shape"
+      kind: guard
+      proof: "grep: W1-T13292 criterion 3 in test/console-api/the-inbox-list-shape-carries-list-fields-only.test.ts"
+  rationale: |
+    WHY: the Inbox list page needs a row per item, not every item's full reasoning. MEASURED on 2026-11-17 00:36Z:
+    GET /v1/inbox is 9.2 MB; a notReady item averages 3,110 bytes, of which reasons is 2,164 and plain 965; the list
+    shows summary, sender and time. The item page already reads /v1/inbox/thread for one item (0.1 to 0.2 s measured).
+    The Console reads the /v1/views/inbox sections through readInboxLanesLive (lib/rmd-control.ts) and falls back to
+    /v1/inbox?section=needsYou; Vercel at 00:24:47Z shows /v1/inbox timing out at 5.0 s and the inbox view at 7.6 s.
+    The Console already sends If-None-Match. It adopts shape=list in craigoley/remudero-console.
+  design: |
+    INVARIANT default-shape-unchanged: no shape means today's body.
+    1. In the /v1/inbox route (panel-graph.ts) and the inbox view's section bodies (inbox-view.ts, served at
+       /v1/views/inbox), read `shape`. For "list", map each row to the list fields above; keep counts, snapshotKey,
+       classifiedAt and staleness. Cached entries key on the URL, so the shapes cache apart and each keeps its own ETag.
+       The field list follows the Console's InboxMailboxRow (remudero-console ThreadMailbox.tsx) at console main 1415bf9.
+    2. Unknown shapes are ignored (default body).
+  falsifier: |
+    Return the full item for shape=list: criteria 1 and 2 fail. Change the default body: criterion 3 fails.
+  note: |
+    Id reserved for run-unfiled-1794875837000 with ~/rmd-work/bin/reserve-id.sh.

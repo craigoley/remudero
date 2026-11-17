@@ -107,7 +107,7 @@ import {
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { isWorkerProviderId, type Config, type WorkerProviderId, fixStrikeCap, overflowFallbackRefusal } from "./config.js";
 import { defaultGitCaptureAsync, gitPushEmptyCommit, gitPushRunBranchAsync, worktreePushExec, worktreePushExecAsync, runStepsSync, runStepsAsync, step, type Steps } from "./git-push.js";
-import { ghExec, ghJson, ghJsonAsync, ghTextAsync, GhPaceWouldBlockError, type GhJsonReadOptions } from "./github-transport.js";
+import { ghExec, ghJson, ghJsonAsync, ghTextAsync, GhPaceWouldBlockError, paceGhEntryAsync, type GhJsonReadOptions } from "./github-transport.js";
 import { withdrawStaleConflictedJudgePr } from "./machine-filing-judge.js";
 import type { AdmissionObserver, AdmissionSettings, AdmissionRead } from "./contributor-admission.js";
 import { observeContributorAdmission } from "./arm-auto-merge.js";
@@ -1590,7 +1590,7 @@ export interface BuildSweepEffectsDeps {
   armSessionPrsOverride?: boolean;
   updateBranchImpl?: (pr: ArmedStalledPr) => Promise<UpdateBranchOutcome>;
   rebaseDirtyFleetBranchImpl?: (pr: OpenPrView) => DirtyFleetRebaseOutcome | Promise<DirtyFleetRebaseOutcome>;
-  captureRepairFeedbackImpl?: (filing: RepairFilingCapture) => void;
+  captureRepairFeedbackImpl?: (filing: RepairFilingCapture) => void | Promise<void>;
   ghRunImpl?: (file: string, args: readonly string[]) => void;
   spawnWallClockBoundMsOverride?: number;
   /** W1-T4105: how often a running fix worker's PR is re-read; defaults to the daemon poll pace. */
@@ -1598,6 +1598,8 @@ export interface BuildSweepEffectsDeps {
   reclaimWorkerImpl?: (info: { runId: string; taskId: string; elapsedMs: number }) => void | Promise<void>;
   disarmImpl?: (prUrl: string) => DisarmOutcome | void;
   readJsonImpl?: (args: string[], readOpts?: GhJsonReadOptions) => Promise<unknown>;
+  /** W1-T13183: the awaited binary read (an artifact zip); defaults to a byte-keeping {@link ghTextAsync}. */
+  readBufferImpl?: (args: string[]) => Promise<Buffer>;
   fleetDeployStateImpl?: DeployStateReader;
   fleetDeploySensorsImpl?: DeployStateReader["deploy"];
   /** Shared pacer; omitted for the existing immediate CLI/test mode. */
@@ -2722,6 +2724,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     reclaimWorkerImpl = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["reclaimWorkerImpl"]>>("reclaimWorkerImpl"),
     disarmImpl = disarmAutoMerge,
     readJsonImpl = (args, readOpts) => ghJsonAsync(args, undefined, undefined, readOpts),
+    readBufferImpl = async (args) => Buffer.from(await ghTextAsync(args, { maxBuffer: 1 << 26, encoding: "latin1" }), "latin1"),
     pacer,
     fetchWorkflowRunObservationsImpl: fetchWorkflowRunObservationsForBuild = fetchWorkflowRunObservations,
     registeredWorktreeOwnerImpl = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["registeredWorktreeOwnerImpl"]>>("registeredWorktreeOwnerImpl"),
@@ -5749,13 +5752,14 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           repo,
           ingested,
           settled: settledFoldDebtArtifacts,
-          readJson: (args: string[]) => paceGhEntry(pacer, isGhRateLimitError, () => ghJsonForBuild(args)),
-          readZip: (args: string[]) => paceGhEntry(pacer, isGhRateLimitError, () => ghBufferForBuild(args)),
+          // W1-T13183: awaited and paced on timers, so the listing, merge lookups and download leave the loop free.
+          readJson: (args: string[]) => paceGhEntryAsync(pacer, isGhRateLimitError, () => readJsonImpl(args)),
+          readZip: (args: string[]) => paceGhEntryAsync(pacer, isGhRateLimitError, () => readBufferImpl(args)),
           root: repoRoot,
           log,
           land: deps.landFeedbackImpl,
         };
-        return await landFoldDebt(pullFoldDebtEntries(input), input);
+        return await landFoldDebt(await pullFoldDebtEntries(input), input);
       } catch (e) {
         log(FOLD_DEBT_PULL_ERROR_STEP, { phase: "list", error: String((e as Error)?.message ?? e) });
         return [];
@@ -5996,6 +6000,19 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
  *  completed post that it still cannot count turns the next demand into an escalation. Two is the
  *  first admission plus one retry; a loop is only provable after the retry also completed. */
 export const REVIEW_INPUT_ADMISSION_BACKSTOP = 2;
+
+/** W1-T13193 — the review setup refusals for one exact input (PR, head, body digest), counted after the PR's last
+ *  started or posted review and grouped by reason and reviewer code sha. `runningReviewerCodeSha` is the code the
+ *  next admitted review runs. A new head, body or reviewer code is a different input, so it is admitted again. */
+export interface ReviewSetupRefusal {
+  reason: string;
+  count: number;
+  reviewerCodeSha: string | null;
+  runningReviewerCodeSha: string | null;
+}
+
+/** W1-T13193 — the one escalation a held review-setup refusal files, per PR, head and body digest. */
+export const REVIEW_SETUP_REFUSAL_ESCALATED_STEP = "sweep.review_setup_refused.escalated";
 
 /** W1-T5909 — BACKSTOP: re-arms per (PR, head) after GitHub disarmed a sweep arm (W1-T4784's cap).
  *  A queue that ejects one head this often is failing its group run, not flaking. */
@@ -6419,6 +6436,34 @@ export function reviewInputLoopFacts(
   const posts = postStamps.filter((t) => !Number.isNaN(t) && t >= firstAdmission).length;
   const postsSinceLastAdmission = postStamps.filter((t) => !Number.isNaN(t) && t >= lastAdmission).length;
   return { admissions, postsSinceLastAdmission, posts, lookedUpKey };
+}
+
+/** W1-T13193 — true when the next matching rule would admit a review that the running reviewer code has already
+ *  refused to set up {@link REVIEW_INPUT_ADMISSION_BACKSTOP} times, for one reason, at this exact input. Each
+ *  admission starts a review that refuses again (#18670: 157 admissions, 142 refusals at one head and digest). One
+ *  refusal, or refusals with different reasons, never hold: a transient setup failure is retried. */
+function reviewSetupRefusalHolds(pr: OpenPrView, policy: SweepPolicy, ageDays: number, now: number, facts?: DispositionFacts): boolean {
+  const held = pr.reviewSetupRefused;
+  if (held === undefined || held.count < REVIEW_INPUT_ADMISSION_BACKSTOP ||
+      held.reviewerCodeSha !== held.runningReviewerCodeSha) return false;
+  const self = DISPOSITION_RULES.findIndex((rule) => rule.when === reviewSetupRefusalHolds);
+  return DISPOSITION_RULES.slice(self + 1).find((rule) => rule.when(pr, policy, ageDays, now, facts))?.disposition === "post-review";
+}
+
+/** W1-T13193 — the cause a held review-setup refusal's parked_pr.remedy row names, `review-setup-refused:<reason>`. */
+export function reviewSetupRefusalCause(reason: string): string {
+  return `review-setup-refused:${reason}`;
+}
+
+/** W1-T13193 — true when this ledger already holds the hold's one record for the PR's head and body digest: the taken
+ *  parked_pr.remedy row when the remedy host is wired (W1-T13045's pattern), else the legacy escalation row. A refused
+ *  remedy row is not a record, so the next pass takes the remedy again. */
+function reviewSetupRefusalRecorded(ledgerLines: ReadonlyArray<Record<string, unknown>>, pr: OpenPrView, remedied: boolean): boolean {
+  const held = pr.reviewSetupRefused;
+  return ledgerLines.some((row) => row.pr_number === pr.prNumber && row.head_sha === pr.headSha &&
+    row.review_input_digest === pr.reviewInputDigest && (remedied
+    ? row.step === PARKED_PR_REMEDY_STEP && row.cause === reviewSetupRefusalCause(held?.reason ?? "") && row.outcome === "taken"
+    : row.step === REVIEW_SETUP_REFUSAL_ESCALATED_STEP));
 }
 
 /** W1-T5863 — true when a post-review demand would re-admit an input the sweep has already admitted
@@ -8057,6 +8102,9 @@ export interface OpenPrView {
    *  leaves that count at zero and the post-review demand would re-admit the input every pass.
    *  Undefined means unwired — the bound then never fires, as before this field existed. */
   reviewInputLoop?: ReviewInputLoopFacts;
+  /** W1-T13193 — the review setup refusals at this exact input by the running reviewer code, set only when one
+   *  reason reached {@link REVIEW_INPUT_ADMISSION_BACKSTOP}. Undefined: no hold, the review is admitted as before. */
+  reviewSetupRefused?: ReviewSetupRefusal;
   /** Most recent completed `review.posted` timestamp for the same exact input counted above.
    *  Refusals never move this clock, having judged no content. Undefined means no completed
    *  attempt is known, and {@link reviewInputBackoffElapsed} then fails toward escalation. */
@@ -12467,6 +12515,22 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     },
     reason: (pr) =>
       `operator answered the clarification question — re-dispatching the fix rung with the added constraint (strike ${pr.priorStrikes + 1})`,
+  },
+  {
+    // W1-T13193 — A REVIEW SETUP REFUSED AT THE SAME INPUT IS NOT RE-ADMITTED EVERY PASS. A refused setup writes no
+    // review.posted row, so the W1-T5863 row below never trips on it. Ordered before every post-review row, this row
+    // holds the demand until the head, the body or the reviewer code changes; runSweep takes one parked-PR
+    // remedy per head and digest (or, with no remedy host, escalates once). The blocker is `other` (owner NONE), not
+    // awaiting-review: no review lane acts on a held review, so the hold climbs W1-T5690's SLO rungs like every other
+    // blocked-ambiguous row, and its reason names the refusal in the pr.stuck diagnosis.
+    disposition: "blocked-ambiguous",
+    blocker: "other",
+    when: reviewSetupRefusalHolds,
+    reason: (pr) => {
+      const held = pr.reviewSetupRefused;
+      return `review setup refused ${held?.count ?? 0} times at head ${pr.headSha.slice(0, 7)} ` +
+        `(${held?.reason ?? "unknown"}) — not re-admitted until the head, body or reviewer code changes`;
+    },
   },
   {
     // W1-T5863 — A REVIEW DEMAND CANNOT RE-ADMIT THE SAME INPUT WITHOUT BOUND. The post-review rows
@@ -22622,6 +22686,10 @@ export async function runSweep(
       deriveDisposition(dispositionView, policy, actNowMs, dispositionFacts);
     ruleBlockerByIndex.set(prIndex, derived.blocker);
     let { disposition, reason } = derived;
+    // W1-T13193: the review-setup refusal hold, named so the dedup and action arms escalate it once per head and input.
+    const setupRefusalHeld = pr.reviewSetupRefused !== undefined && derived.disposition === "blocked-ambiguous" &&
+      derived.blocker === "other" &&
+      selectDispositionRule(dispositionView, policy, actNowMs, dispositionFacts).rule?.when === reviewSetupRefusalHolds;
     // W1-T9232: a build head cut before its own shard merged is refreshed from main and re-reviewed, never escalated
     // as "contradictory". A refresh that does not take, or a second miss after one, keeps the escalation, named.
     if (ownTaskRecordMissingRow(ledgerLines, pr) !== undefined) {
@@ -23830,6 +23898,13 @@ export async function runSweep(
             ? `stand-down hold: ${reason} — escalated once for this head (${pr.headSha.slice(0, 7)}), no worker dispatched and no capacity spent`
             : `an escalation was already filed for this head (${pr.headSha.slice(0, 7)}) — the ` +
             `escalation is deduped, not skipped, and a new head re-earns its own`;
+        }
+        // W1-T13193: a held review-setup refusal takes one remedy (or one legacy escalation) per head and body digest.
+        if (setupRefusalHeld && disposition === "blocked-ambiguous" && standDownHold === undefined && !strikeLadderDue && !sloLadderDue) {
+          alreadyDone = reviewSetupRefusalRecorded(ledgerLines, pr, deps.parkedPr !== undefined);
+          dedupStandDownReason = alreadyDone
+            ? `${reason} — ${deps.parkedPr ? "the parked-pr remedy is already recorded" : "escalated once"} for this head and input ` +
+              `(${pr.headSha.slice(0, 7)}); no review admitted and no needs-human issue is opened again` : undefined;
         }
         // An unanswered escalation past its SLO reaches the ladder in the action arm; the dedup still forbids a second issue.
         if (alreadyDone && heldEscalationSlo !== undefined) {
@@ -25702,6 +25777,38 @@ export async function runSweep(
               }
               break;
             case "blocked-ambiguous":
+              if (setupRefusalHeld && standDownHold === undefined && !strikeLadderDue && !sloLadderDue) {
+                // W1-T13193: acted stays false, so a later escalation at this head for another cause is not deduped by this one.
+                const held = pr.reviewSetupRefused!;
+                if (deps.parkedPr) {
+                  // No pull request waits on the operator (W1-T13045): the hold opens no needs-human issue. It takes one
+                  // parked-PR remedy row per head and digest; the row carries the digest, so a fix-on-pr row of another
+                  // body does not stand for this one. A held task, once filed, is reused per pull request and cause.
+                  const cause = reviewSetupRefusalCause(held.reason);
+                  const facts = await parkedPrFacts(pr, { redChecks: redCheckNames(pr).filter(r => !r.startsWith("review:")),
+                    fixModelOrder: policy.fixModelOrder ?? DEFAULT_FIX_MODEL_ORDER }, ledgerLines, deps.parkedPr);
+                  const inputLedger = ledgerLines.filter((row) => !(row.step === PARKED_PR_REMEDY_STEP && row.cause === cause &&
+                    row.remedy === "fix-on-pr" && row.review_input_digest !== pr.reviewInputDigest));
+                  const parked = await takeParkedPrRemedy(pr, parkedPrRemedy(facts), inputLedger, deps.parkedPr, { runId: deps.runId,
+                    ledgerTaskId: escalationTaskIdFor(pr), nowIso: clockFromMillisFn(() => now).iso(), cause,
+                    text: `review setup refused ${held.count} times (${held.reason}) at head ${pr.headSha.slice(0, 7)}, digest ` +
+                      `${pr.reviewInputDigest ?? "unknown"}: ${reason}`,
+                    append: (row) => appendLine(deps.ledgerPath, { ...row, review_input_digest: pr.reviewInputDigest,
+                      refusals: held.count, refusal_reason: held.reason }) });
+                  acted = false;
+                  standDownReason = `${reason} — parked-pr remedy ${parked.remedy} (W1-T13193): ${parked.reason}; ` +
+                    "no needs-human issue is opened";
+                  break;
+                }
+                // Legacy, with no remedy host wired: the hold's own row keys its dedup, like the ownership escalation.
+                appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: escalationTaskIdFor(pr), step: REVIEW_SETUP_REFUSAL_ESCALATED_STEP,
+                  pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha, review_input_digest: pr.reviewInputDigest,
+                  reason: held.reason, refusals: held.count, reviewer_code_sha: held.reviewerCodeSha });
+                await deps.escalate(pr, reason, question ?? renderClarificationQuestion(pr, reason, pr.strikeHistory ?? []));
+                acted = false;
+                standDownReason = `${reason} — escalated once for this head and input; no review admitted`;
+                break;
+              }
               {
                 const dirtyFleetRebase = await applyDirtyFleetRebase(pr);
                 if (dirtyFleetRebase.handled) {
