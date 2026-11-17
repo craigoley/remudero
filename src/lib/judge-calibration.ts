@@ -29,9 +29,10 @@ import { join } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { JUDGE_REPLAY_DECISION_ROLE_PREFIX } from "./judge-replay-batch.js";
+import { JUDGE_SHADOW_COMPARED_KEY } from "./risk-judge.js";
 import { appendPanelLedger, bearerTokenId, isRecord, jsonAction, sendJson } from "./panel-actions.js";
 import type { Route } from "./service.js";
-import { decisionAnsweredTypedAnswers, scoreTypedAnswers, type TypedAnswerRow, type TypedAnswerScores } from "./typed-answer-scores.js";
+import { decisionAnsweredTypedAnswers, scoreTypedAnswers, type TypedAnswer, type TypedAnswerRow, type TypedAnswerScores } from "./typed-answer-scores.js";
 import { isVerdictOutcomeKind, VERDICT_OUTCOME_KINDS, VERDICT_OUTCOME_STEP, type VerdictOutcomeKind } from "./verdict-calibration.js";
 
 export const JUDGE_CALIBRATION_VERSION = "judge-calibration-v1" as const;
@@ -132,9 +133,44 @@ function shadowTypedAnswer(line: Row): TypedAnswerRow | undefined {
   };
 }
 
+export const JUDGE_SHADOW_REFUSED_STEP = "judge_shadow.refused";
+/** W1-T13365: the rows runJudgeShadow (lib/risk-judge.ts) writes beside a ci-judge or fix-progress judgement. */
+export const JUDGE_SHADOW_ROW_STEPS = ["judge_shadow.paired", JUDGE_SHADOW_REFUSED_STEP, "judge_shadow.unavailable"] as const;
+const isJudgeShadowStep = (step: unknown): boolean => (JUDGE_SHADOW_ROW_STEPS as readonly unknown[]).includes(step);
+const isTypedAnswerStep = (step: unknown): boolean =>
+  step === "shadow_judge.paired" || step === "decision.answered" || step === "judge_replay.answered" || isJudgeShadowStep(step);
+
+/** W1-T13365: who answered a judge_shadow row and about which input: the surface is the role, the cash deployment
+ *  is the model and it answers with text. The head follows the `@` of the decision key (`PR<n>@<head>`). */
+export function judgeShadowRowIdentity(line: Row): Pick<TypedAnswerRow, "role" | "model" | "source" | "modelSurface"> & { head: string | null; inputDigest: string | null } | undefined {
+  const role = str(line.surface);
+  const model = str(line.shadow_deployment);
+  if (role === undefined || model === undefined) return undefined;
+  const key = str(line.decision_key);
+  const head = key?.includes("@") ? key.slice(key.lastIndexOf("@") + 1) : undefined;
+  return { role, model, source: "generative", modelSurface: "text", head: head !== undefined && HEAD_SHA_RE.test(head) ? head : null,
+    inputDigest: key === undefined ? null : createHash("sha256").update(key).digest("hex").slice(0, 16) };
+}
+
+/** W1-T13365: a judge_shadow row as one answer beside the primary verdict, each reduced to its compared key. An
+ *  unavailable shadow, or a verdict with no compared key, is a rejected answer; a refused shadow is no answer. */
+function judgeShadowTypedAnswer(line: Row): TypedAnswerRow | undefined {
+  const who = judgeShadowRowIdentity(line);
+  if (who === undefined || line.step === JUDGE_SHADOW_REFUSED_STEP) return undefined;
+  const keyOf = Object.hasOwn(JUDGE_SHADOW_COMPARED_KEY, who.role) ? JUDGE_SHADOW_COMPARED_KEY[who.role as keyof typeof JUDGE_SHADOW_COMPARED_KEY] : undefined;
+  const option = keyOf?.(line.shadow_verdict);
+  const answer: TypedAnswer = line.step === "judge_shadow.unavailable" ? { kind: "rejected", reason: str(line.reason) ?? "unavailable" }
+    : option === undefined ? { kind: "rejected", reason: "the shadow verdict has no compared key" } : { kind: "single", option };
+  return { ...who, question: null, questionType: null, options: null, answer, incumbent: keyOf?.(line.primary_verdict) ?? null, outcome: null };
+}
+
 /** A ledger row's typed answers, or the ones {@link judgeCalibrationRow} already read off it. */
 function typedAnswersOf(line: Row): TypedAnswerRow[] {
   if (Array.isArray(line.typed_answers)) return line.typed_answers as TypedAnswerRow[];
+  if (isJudgeShadowStep(line.step)) {
+    const answer = judgeShadowTypedAnswer(line);
+    return answer ? [answer] : [];
+  }
   // W1-T12421: a direct judge replay's decision request; its answer, with the case's outcome, is in its judge_replay.answered row.
   if (line.step === "decision.answered" && typeof line.role === "string" && line.role.startsWith(JUDGE_REPLAY_DECISION_ROLE_PREFIX)) return [];
   if (line.step !== "shadow_judge.paired") return decisionAnsweredTypedAnswers(line).map((row) => ({ ...row, head: headOfTypedAnswerLine(line, row.role) }));
@@ -144,7 +180,7 @@ function typedAnswersOf(line: Row): TypedAnswerRow[] {
 
 /** The fields this projection reads off one ledger row, or `undefined` for a row it never reads. */
 export function judgeCalibrationRow(line: Row): Row | undefined {
-  if (line.step === "shadow_judge.paired" || line.step === "decision.answered" || line.step === "judge_replay.answered") {
+  if (isTypedAnswerStep(line.step)) {
     const typed = typedAnswersOf(line);
     return typed.length > 0 ? { step: line.step, typed_answers: typed } : undefined;
   }
@@ -243,7 +279,7 @@ export function foldJudgeVerdictRow(fold: JudgeVerdictFold, row: Row): void {
     if (!kinds.includes(row.outcome)) fold.outcomes.set(head, [...kinds, row.outcome]);
     return;
   }
-  if (row.step === "shadow_judge.paired" || row.step === "decision.answered" || row.step === "judge_replay.answered") {
+  if (isTypedAnswerStep(row.step)) {
     fold.typedAnswers.push(...typedAnswersOf(row));
     return;
   }

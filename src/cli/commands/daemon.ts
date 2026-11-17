@@ -45,7 +45,7 @@ import { startDaemonSreLane, type LightPassScope } from "../../lib/daemon.js";
 import { REGISTERED_GARDEN_NAMES, createGardenFlightRegistry, gardenAndJudgeUnits, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "../../lib/garden-registry.js";
 import { gardenSchedule } from "../../lib/garden-registry.js";
 import { createGardenerRuntimeWriter } from "../../lib/gardener-runtime.js";
-import { daemonSreLaneInput, resolveSreLaneInstance, sreLaneEnabled, sreLaneStartRow, type SreLaneInput } from "../../lib/sre-lane.js";
+import { daemonSreLaneInput, resolveSreLaneInstance, sreLaneEnabled, sreLaneStartRow, SRE_LANE_FLOW_SLICE, type SreLaneInput } from "../../lib/sre-lane.js";
 import { daemonSreRunbookHost, daemonSreRunbookPass, readRunbookReceipts, sreRunbookCatalog } from "../../lib/sre-runbooks.js";
 import { daemonBreakerRunbookHost } from "../../lib/breaker-release.js";
 import { inboxThreadStorePath, type RatifyCliHandle } from "../../lib/panel-graph.js";
@@ -99,7 +99,7 @@ import { loadCreditStore, saveCreditStore, recordCredit, refusesAsPlanOnly, buil
 import { DEFAULT_SWEEP_POLICY, productionFixPressure, readIdleLightCadence, readObservedReviewMedianMs, type OpenPrView } from "../../lib/sweep.js";
 import { startMainEntryWatch } from "../../lib/main-entry.js";
 import { createLiveSetKeeper, createPlanCopyBook, daemonHolderSource, observedPlanSync, startDaemonMemoryCensus } from "../../lib/daemon-memory-census.js";
-import { terminalUnionScans } from "../../lib/sweep.js";
+import { createEscalationTriageHistoryReader, terminalUnionScans, type EscalationTriageHistoryReader } from "../../lib/sweep.js";
 import { createDaemonFootprint, daemonFootprintPath, installDaemonFootprint } from "../../lib/daemon-footprint.js";
 import { readHeapAdmissionHoldMode } from "../../lib/daemon-heap-admission-hold.js";
 import { applyDaemonMemoryPolicy, createDaemonMemoryGovernor, createDaemonSlackReclaimer, installDaemonSlackReclaimer, readDaemonMemoryPolicy } from "../../lib/daemon-memory-policy.js";
@@ -826,6 +826,10 @@ function renderDaemonSummary(s: DaemonSummary): string {
   ].join("\n");
 }
 
+/** W1-T13367: the SRE lane's history reader, one for the daemon's lifetime: it loads rotations off the loop, keeps
+ *  a durable digest of each, and reads only the live bytes added since its last pass. */
+let sreLaneFlowHistory: EscalationTriageHistoryReader | undefined;
+
 export function startBoundedDaemonSreLane(
   input: (mergedLastDay: number) => Promise<SreLaneInput>,
   mergedLastDay: () => Promise<number>,
@@ -907,7 +911,7 @@ export function opsCatalogShadowFeed(
     const startedAt = clock.now();
     // refresh() answers failure as an outcome; an unexpected rejection remains unreadable.
     void source.refresh().then((input) => { latest = input; completedAt = startedAt; }, (error: unknown) => {
-      latest = { outcome: "unreadable" }; completedAt = startedAt; void error;
+      latest = { outcome: "unreadable", refusalStage: "source_refresh" }; completedAt = startedAt; void error;
     }).finally(() => { inFlight = false; });
   };
   const timer = opts.refreshEveryMs === undefined ? undefined : setInterval(start, opts.refreshEveryMs);
@@ -917,7 +921,7 @@ export function opsCatalogShadowFeed(
     forDispatch: () => {
       if (latest?.outcome !== "ok") return latest;
       const age = completedAt === undefined ? NaN : clock.now() - completedAt;
-      return !Number.isFinite(age) || age < 0 || age >= OPS_DISPATCH_SOURCE_MAX_AGE_MS ? { outcome: "stale" } : latest;
+      return !Number.isFinite(age) || age < 0 || age >= OPS_DISPATCH_SOURCE_MAX_AGE_MS ? { outcome: "stale", refusalStage: "snapshot_age" } : latest;
     },
     stop: () => { if (timer !== undefined) clearInterval(timer); },
   };
@@ -2674,6 +2678,7 @@ export async function daemonCommand(
                       repo: self.repo,
                       mergedLastDay: () => mergedLastDay,
                       log,
+                      flowHistory: (sreLaneFlowHistory ??= createEscalationTriageHistoryReader({ slice: SRE_LANE_FLOW_SLICE })),
                       // W1-T4386: the allowlisted, reversible runbooks each incident meets first.
                       runbookPass: daemonSreRunbookPass(
                         sreRunbookCatalog(

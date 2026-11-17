@@ -18,6 +18,7 @@
     - docs/operator-guide.md
     - test/review/the-ci-and-fix-progress-judges-shadow-a-deepseek-arm.test.ts
     - test/review/the-ci-and-fix-progress-shadow-arm-is-on.test.ts
+    - "src/lib/public-model-vocabulary.ts"
   status: queued
   attempts: 0
   acceptance:
