@@ -16,7 +16,7 @@
   files:
     - src/lib/sweep.ts
     - test/the-sweeps-arm-decision-reads-no-ledger-union-on-the-loop.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A sweep pass over a state dir whose only review.posted row for a mergeable PR's task and head is in a gzip archive gets the same arm decision as today: a capped, not plan-only verdict there still refuses the arm, a clean verdict there still arms, and a setImmediate turn counter advances while the history is read: the read is off the loop"
