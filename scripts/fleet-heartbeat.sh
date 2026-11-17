@@ -1849,24 +1849,33 @@ publish_beat() (
   push_to="$(git -C "$INSTALL_DIR" remote get-url --push "$REMOTE" 2>/dev/null)" || push_to=""
   push_to="${push_to%%$'\n'*}"
   track_ref="refs/remotes/${REMOTE}/${BRANCH}"
+  # $1 is a tip the ref had before the push and the clone holds, or empty. A ref naming an object the
+  # clone lacks goes back to that tip, or is cleared when there is none.
   heal_track_ref() {
     (
       unset GIT_OBJECT_DIRECTORY
       tip="$(git -C "$INSTALL_DIR" rev-parse --verify -q "$track_ref" 2>/dev/null)" || exit 0
       [ -n "$tip" ] || exit 0
       git -C "$INSTALL_DIR" cat-file -e "$tip" 2>/dev/null && exit 0
-      git -C "$INSTALL_DIR" update-ref -d "$track_ref" "$tip" >/dev/null 2>&1
-    ) || printf 'fleet-heartbeat: could not clear %s, which names an object this clone lacks\n' "$track_ref" >&2
+      if [ -n "${1:-}" ]; then
+        git -C "$INSTALL_DIR" update-ref "$track_ref" "$1" "$tip" >/dev/null 2>&1
+      else
+        git -C "$INSTALL_DIR" update-ref -d "$track_ref" "$tip" >/dev/null 2>&1
+      fi
+    ) || printf 'fleet-heartbeat: could not repair %s, which names an object this clone lacks\n' "$track_ref" >&2
   }
+  held_tip=""
   if [ -n "$push_to" ]; then
     heal_track_ref
+    held_tip="$(unset GIT_OBJECT_DIRECTORY; t="$(git -C "$INSTALL_DIR" rev-parse --verify -q "$track_ref" 2>/dev/null)" \
+      && git -C "$INSTALL_DIR" cat-file -e "$t" 2>/dev/null && printf '%s' "$t")" || held_tip=""
   else
     push_to="$REMOTE"
   fi
   git -C "$INSTALL_DIR" push --force "$push_to" "${commit}:refs/heads/${BRANCH}" >/dev/null 2>&1 \
     || fail "push to ${REMOTE}/${BRANCH} failed"
-  # Git also moves the tracking ref of a remote whose URL it is given; clear one left dangling.
-  heal_track_ref
+  # Some git versions also move the tracking ref of a remote whose URL they are given; put it back.
+  heal_track_ref "$held_tip"
 
   printf 'fleet-heartbeat: published %s to %s/%s — %s\n' "${commit:0:7}" "$REMOTE" "$BRANCH" "$SUBJECT"
 )
