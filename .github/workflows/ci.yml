@@ -1974,7 +1974,11 @@ jobs:
           # W1-T4398: one bounded retry of the FAILED FILES, uninstrumented — never the whole suite,
           # which is what ruling 1 above removed. Pass one alone gets NODE_V8_COVERAGE and writes the
           # lcov, so the coverage figures are pass one's; a pass on retry is reported as a flake.
-          node scripts/test-with-retry.mjs --coverage-first-pass coverage/raw \
+          # W1-T12415: a hung test fails by its name inside the job ceiling, not at a silent cancel. The
+          # wrapper adds a per-test timeout from the fast tier's duration policy over these files'
+          # instrumented durations (capped; scripts/test-tier-manifest.mjs coverageShardHangBoundArgs),
+          # and --test-force-exit, which ends a file whose tests all have results but whose handles stay open.
+          RMD_COVERAGE_HANG_MANIFEST=scripts/test-tier-coverage-manifest.json node scripts/test-with-retry.mjs --coverage-first-pass coverage/raw \
             node --enable-source-maps --experimental-test-coverage --test-coverage-exclude="test/**" \
             --test-reporter=spec --test-reporter-destination=stdout \
             --test-reporter=tap --test-reporter-destination=stderr \
