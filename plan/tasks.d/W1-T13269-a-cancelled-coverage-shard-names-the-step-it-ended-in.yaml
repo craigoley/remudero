@@ -19,7 +19,7 @@
     - .github/workflows/ci.yml
     - scripts/shard-cancel-phase.mjs
     - test/ci/a-cancelled-coverage-shard-names-the-step-it-ended-in.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A coverage shard cancelled after its test step succeeded makes the coverage gate say the tests PASSED, name the step the ceiling hit and any step that ran 5 minutes or more, and not say the tests did not run"
