@@ -21,6 +21,8 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
+// @ts-expect-error -- plain .mjs script, no type declarations
+import { NIGHTLY_SHARD_COUNT } from "#scripts/coverage-floor.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const WORKFLOW_PATH = join(REPO_ROOT, ".github", "workflows", "coverage-nightly.yml");
@@ -101,10 +103,12 @@ test("the nightly workflow has a schedule trigger and workflow_dispatch, and no 
 
 test("the nightly workflow runs the eight coverage shards with --select-all, instrumented", () => {
   const [, job] = shardJob(loadWorkflow());
-  assert.deepEqual(job.strategy?.matrix?.shard, [1, 2, 3, 4, 5, 6, 7, 8], "exactly the eight coverage shards");
-  assert.equal(job.strategy?.["fail-fast"], false, "one red shard must not cancel the other seven measurements");
+  // W1-T13275 design 3: the nightly runs ci.yml's twelve coverage shards; the title keeps its W1-T5704 proof text.
+  const width = Array.from({ length: NIGHTLY_SHARD_COUNT }, (_, k) => k + 1);
+  assert.deepEqual(job.strategy?.matrix?.shard, width, "exactly the nightly's coverage shards");
+  assert.equal(job.strategy?.["fail-fast"], false, "one red shard must not cancel the other measurements");
   const select = stepRunning(job, "--select-all").run!;
-  assert.match(select, /scripts\/test-tier-manifest\.mjs --select-all --shard \$\{\{ matrix\.shard \}\}\/8/);
+  assert.ok(select.includes(`scripts/test-tier-manifest.mjs --select-all --shard ${"${{ matrix.shard }}"}/${NIGHTLY_SHARD_COUNT}`), select);
   // The same instrumentation flags as ci.yml's coverage lane, or the two floors measure different things.
   for (const flag of ["--enable-source-maps", "--experimental-test-coverage", '--test-coverage-exclude="test/**"', "--test-reporter=lcov"]) {
     assert.ok(select.includes(flag), `the shard run must pass ${flag}`);
@@ -130,9 +134,9 @@ test("the nightly workflow merges the shards and runs the absolute-floor ratchet
   const [, mergeJob] = merge;
   const merged = stepRunning(mergeJob, "scripts/coverage-merge-ratchet.mjs").run!;
   assert.match(merged, /--output coverage\/lcov\.info/);
-  assert.match(merged, /--shard-count 8/);
+  assert.match(merged, new RegExp(`--shard-count ${NIGHTLY_SHARD_COUNT}\\b`));
   // W1-T13275: each shard's premapped copy, so the merge replays only the range merge.
-  for (let n = 1; n <= 8; n += 1) assert.ok(merged.includes(`coverage-shard-${n}/premapped`), `the merge must read shard ${n}`);
+  for (let n = 1; n <= NIGHTLY_SHARD_COUNT; n += 1) assert.ok(merged.includes(`coverage-shard-${n}/premapped`), `the merge must read shard ${n}`);
   const ratchetStep = stepRunning(mergeJob, "node scripts/coverage-ratchet.mjs --lcov");
   assert.match(ratchetStep.run!, /--lcov coverage\/lcov\.info --baseline scripts\/coverage-baseline\.json/);
   const steps = mergeJob.steps ?? [];
