@@ -83,6 +83,7 @@ export const SMOKE_PATHS = ["/v1/version", "/v1/status", "/v1/views/versions"] a
  * probe counts, a timeout or a refused connection; any HTTP status (200, 401, 503) inside the bound is alive.
  */
 export const ACTIVE_PROBE_INTERVAL_MS = 60_000;
+/** PRIMARY CONTROL: how long one probe waits for any HTTP answer before it counts as unanswered. */
 export const ACTIVE_PROBE_TIMEOUT_MS = 10_000;
 /** Consecutive unanswered probes that make a wedge: three minutes of silence, not one dropped packet. */
 export const ACTIVE_PROBE_FAILURES = 3;
