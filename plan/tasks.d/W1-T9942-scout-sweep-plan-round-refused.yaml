@@ -3,8 +3,9 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: auto
-  risk: low
+  verify: human
+  risk: high  # Rule 19 span: the scout widens its files to ledger, sweep (src/lib/ledger.ts, src/lib/sweep.ts)
+  band_meaning: span
   priority: 2.5
   status: queued
   attempts: 0
@@ -20,11 +21,3 @@
     The ledger step sweep.plan_round.refused carries a failure shape and landed rows in both halves of the trailing 7 days: 2 in the older half, 6 in the newer.
     No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
     The rows name no file of their own: locate the code that writes this step first, then fix its cause.
-  risk_ruling:
-    verdict: "rule-3-low-privilege"
-    action: proceed
-    confidence: 1
-    reasons:
-      - "rule 3 (live and low-privilege): the symptom is live, 11 occurrence(s) across 7 day(s), last seen 2026-10-26T23:48:35.887Z, and the record declares no privileged path"
-    judged_at: "2026-10-27T06:32:22.566Z"
-    pin: "835f495fde0c0fd097a52bf565d1936555310230e45b9c5349dbc8a6c16f937c"
