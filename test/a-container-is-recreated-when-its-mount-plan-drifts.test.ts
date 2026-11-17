@@ -82,6 +82,10 @@ function fixture(t: { after: (fn: () => void) => void }): Fixture {
       RMD_SCRATCH: "on",
       RMD_SCRATCH_ROOT: scratch,
       RMD_SCRATCH_MOUNTS_FILE: join(root, "mounts"),
+      // W1-T13289 criterion 1: this env replaces the process env, so NODE_TEST_CONTEXT is absent and
+      // the plan would read the host's real /etc/remudero/scratch-checkouts.on. Pin the switch off,
+      // as recycle-container.test.ts and one-gateway-serves-every-instance.test.ts do.
+      RMD_SCRATCH_CHECKOUTS: "off",
     },
   };
 }
@@ -409,4 +413,36 @@ test("a stale installed rmd-scratch-mounts is detected as drift, so the watchdog
   const stale = installUnits(f, "--check");
   assert.notEqual(stale.status, 0);
   assert.match(stale.stdout, new RegExp(`DRIFTED ${installedLib}`));
+});
+
+test("W1-T13289 criterion 1: the fixture env pins RMD_SCRATCH_CHECKOUTS off, as its sibling tests do", (t) => {
+  const f = fixture(t);
+  assert.equal(f.env.RMD_SCRATCH_CHECKOUTS, "off");
+  // The fixture env replaces the process env, so no test marker reaches the plan: the pin alone
+  // keeps the host's switch file out.
+  assert.equal(f.env.NODE_TEST_CONTEXT, undefined);
+});
+
+test("W1-T13289 criterion 2: a scratch-checkouts switch file on the host does not change the drift the shipped reader finds", (t) => {
+  const f = fixture(t);
+  const switchFile = join(f.root, "scratch-checkouts.on");
+  writeFileSync(switchFile, "");
+  const read = (env: NodeJS.ProcessEnv) =>
+    withEnv({ RMD_RESOURCE_POLICY_CONTAINER: undefined }, () =>
+      shippedReader(f, execWith(f, () => beforeTestSlots(f, IMAGE_SHA_CONTAINER), env))(),
+    );
+  const expected = [
+    { target: "/home/node/rmd-scratch/test-slots", expected: `${f.scratch}/rmd/test-slots`, actual: undefined },
+    { target: "env RMD_TEST_SLOT_DIR", expected: "/home/node/rmd-scratch/test-slots", actual: undefined },
+  ];
+
+  // With a switch file present, exactly the 2 entries a container launched before the plan lacks:
+  // no hot-checkout bind. The same as with no switch file named.
+  assert.deepEqual(read({ RMD_SCRATCH_CHECKOUTS_SWITCH: switchFile }), expected);
+  assert.deepEqual(read({}), expected);
+
+  // CONTROL: lift the pin and the same switch file adds the hot-checkout bind, so the file is live
+  // and the pin is what holds the count at 2.
+  const unpinned = read({ RMD_SCRATCH_CHECKOUTS: "auto", RMD_SCRATCH_CHECKOUTS_SWITCH: switchFile });
+  assert.equal(unpinned?.length, 3, JSON.stringify(unpinned));
 });

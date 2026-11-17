@@ -4,14 +4,14 @@ import { parseDocument } from "yaml";
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { basename, join, relative } from "node:path";
 
-import { systemClock, type Clock } from "./clock.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { checkoutHeadStamp } from "./checkout-head.js";
 import { RULE_SUITE_NAME_RE } from "./ci-parity.js";
-import type { Escalation } from "./escalate.js";
+import { ghIssueGatewayAsync, type Escalation } from "./escalate.js";
 import type { GardenAction, GardenCheckout, GardenerDeps, GardenSpec } from "./gardener.js";
 import { prepareGardenTaskIds, gardenLedgerBucket, type GardenTaskIdMinter } from "./gardener.js";
 import { writeAtomic } from "./fs-race-safe.js";
-import { ghExec } from "./github-transport.js";
+import { ghExec, ghTextAsync } from "./github-transport.js";
 import { gateFireRatesPath, type GateFireRate, type GateFireRateReport } from "./gate-fire-rate.js";
 import { ledgerLivePath, ledgerRotationDigests, ledgerRotationEntries, readLedgerUnionRecordsSync, type LedgerGrepFsDeps, type LedgerRotationHook } from "./ledger-union.js";
 import { readOriginMainSha } from "./inbox.js";
@@ -181,11 +181,13 @@ export function ciFrictionHandFixRounds(
 export const CI_FRICTION_LEDGER_STEPS: readonly string[] = [
   "pr.opened", "sweep.disposed", "test.flake_retry", "fix.dispatch", "fix.commit_refused",
   "fix.base_refreshed", "ci-friction.remedy_escalated", "ci-friction.scorecard",
+  // W1-T13219: the release step's own streak and release rows.
+  "ci-friction.remedy_below_ladder", "ci-friction.remedy_in_ladder", "ci-friction.remedy_released",
 ];
 
 /** Bump whenever {@link CI_FRICTION_LEDGER_STEPS} or {@link ciFrictionHeadWitnesses} changes: each keys a durable
  *  per-rotation digest ({@link ledgerRotationDigests}), and a stale one must not answer for the new reduction. */
-export const CI_FRICTION_DIGEST_VERSION = "1";
+export const CI_FRICTION_DIGEST_VERSION = "2";
 
 /** One rotation's head-to-PR witnesses, reduced the way the association recovery below reads them: the first
  *  row per head sha that names a pull request, as `{ step, head_sha, pr_number }`. */
@@ -1271,10 +1273,213 @@ export function gitCiFrictionOwnerSearch(git: CiFrictionGit, refName = "origin/m
   };
 }
 
-/** The origins the gardener itself escalated to a person — each holds its cause at that rung. */
+/** The origins the gardener itself escalated to a person — each holds its cause at that rung — less any
+ *  a later `ci-friction.remedy_released` row let go (W1-T13219). */
 export function escalatedCiFrictionOrigins(records: readonly LedgerRecord[]): string[] {
-  return [...new Set(records.filter((r) => r.step === "ci-friction.remedy_escalated" && typeof r.origin === "string").map((r) => r.origin as string))];
+  const held = new Set<string>();
+  for (const r of records) {
+    if (r.step === "ci-friction.remedy_escalated" && typeof r.origin === "string") held.add(r.origin);
+    if (r.step === "ci-friction.remedy_released" && Array.isArray(r.origins)) for (const o of r.origins) held.delete(String(o));
+  }
+  return [...held];
 }
+
+// ── Release: an escalated cause that left the ladder (W1-T13219) ─────────────────────────────
+
+/** How long an escalated cause must rank outside the top LADDER_DEPTH, on every pass, before its issue closes. */
+export const CI_FRICTION_RELEASE_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
+/** BACKSTOP — invariant:at-most-five-closes-per-pass: one pass releases at most this many escalations. */
+export const CI_FRICTION_MAX_RELEASES_PER_PASS = 5;
+
+/** One comment on an escalation issue, as the release step reads it. */
+export interface CiFrictionIssueComment {
+  authorLogin: string;
+  authorType: string;
+  authorAssociation: string;
+  createdAt: string;
+  body: string;
+}
+
+/** The escalation issues the release step closes. Both calls THROW (or reject) on a failed read or write. */
+export interface CiFrictionEscalationIssues {
+  listComments: (issueUrl: string) => CiFrictionIssueComment[] | Promise<CiFrictionIssueComment[]>;
+  close: (issueUrl: string, comment: string) => void | Promise<void>;
+}
+
+/** A GitHub issue URL: owner, repository and number. */
+export const CI_FRICTION_ISSUE_URL_RE = /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/issues\/(\d+)$/;
+/** The fleet's own comment text, written under whatever login the daemon's token holds. */
+export const CI_FRICTION_FLEET_COMMENT_RE = /^(?:Another escalation observed the same condition \(|Still open as of \S+ \(issue-revalidation garden, |Closed by the ci-friction gardener)/;
+
+/** The escalation issues over the awaited `gh` transport: comments read over REST, the close through the
+ *  escalation issue gateway ({@link ghIssueGatewayAsync}), the one audited write path. */
+export function ghCiFrictionEscalationIssues(exec: (args: string[]) => Promise<string> = (args) => ghTextAsync(args)): CiFrictionEscalationIssues {
+  const parts = (url: string): RegExpExecArray => {
+    const m = CI_FRICTION_ISSUE_URL_RE.exec(url);
+    if (!m) throw new Error(`not a GitHub issue URL: ${url}`);
+    return m;
+  };
+  return {
+    listComments: async (url) => {
+      const [, owner, repo, n] = parts(url);
+      const out = await exec(["api", `repos/${owner}/${repo}/issues/${n}/comments?per_page=100`, "--paginate", "--jq",
+        ".[] | {authorLogin: .user.login, authorType: .user.type, authorAssociation: .author_association, createdAt: .created_at, body: .body} | @json"]);
+      return out.split("\n").filter((line) => line.trim() !== "").map((line) => JSON.parse(line) as CiFrictionIssueComment);
+    },
+    close: async (url, comment) => {
+      const [, owner, repo] = parts(url);
+      await ghIssueGatewayAsync(owner!, repo!, { exec }).closeWithComment!(url, comment);
+    },
+  };
+}
+
+/** Whether a person (the owner or a collaborator, never a bot or the fleet's own text) wrote the newest
+ *  comment that is not the fleet's. A person mid-conversation keeps the issue open. */
+export function operatorCommentIsNewest(comments: readonly CiFrictionIssueComment[]): boolean {
+  let person = -Infinity;
+  let fleet = -Infinity;
+  for (const c of comments) {
+    const at = Date.parse(c.createdAt);
+    if (!Number.isFinite(at)) continue;
+    const bot = c.authorType.toLowerCase() === "bot" || /\[bot\]$/i.test(c.authorLogin);
+    if (bot || CI_FRICTION_FLEET_COMMENT_RE.test(c.body.trimStart())) fleet = Math.max(fleet, at);
+    else if (["OWNER", "MEMBER", "COLLABORATOR"].includes(c.authorAssociation)) person = Math.max(person, at);
+  }
+  return person > fleet;
+}
+
+/** One escalated cause the pass found due for release: its streak, price and the issue to close. */
+export interface CiFrictionDueRelease {
+  cause: string;
+  origins: string[];
+  rank: number | null;
+  minutes: number;
+  since: string;
+  issueUrl?: string;
+  citation: string;
+}
+
+/** What the release step decided for one escalated cause this pass. */
+export interface CiFrictionReleaseOutcome {
+  cause: string;
+  origins: string[];
+  decision: "inside" | "streak-started" | "waiting" | "due" | "kept";
+  reason?: string;
+}
+
+const releaseKept = (log: (step: string, extra?: Record<string, unknown>) => void, due: Pick<CiFrictionDueRelease, "cause" | "origins" | "rank">, reason: string): void => {
+  log("ci-friction.remedy_release_kept", { cause: due.cause, origins: due.origins, rank: due.rank, reason });
+};
+
+/**
+ * Walk each escalated cause and decide whether its escalation has outlived its price. Pure but for ledger rows:
+ * `remedy_below_ladder` on the first pass the cause ranks outside the top LADDER_DEPTH, `remedy_in_ladder` when a
+ * pass sees it back inside (which ends the streak). A cause outside for {@link CI_FRICTION_RELEASE_AFTER_MS} on every
+ * pass since is DUE, at most {@link CI_FRICTION_MAX_RELEASES_PER_PASS} a pass; {@link closeCiFrictionReleases}
+ * does the issue I/O. Ranking and pricing are read, never changed.
+ */
+export function releaseCiFrictionEscalations(input: {
+  records: readonly LedgerRecord[];
+  priced: readonly CiFrictionCausePrice[];
+  nowMs: number;
+  log: (step: string, extra?: Record<string, unknown>) => void;
+}): { due: CiFrictionDueRelease[]; outcomes: CiFrictionReleaseOutcome[] } {
+  const due: CiFrictionDueRelease[] = [];
+  const outcomes: CiFrictionReleaseOutcome[] = [];
+  const byCause = new Map<string, string[]>();
+  for (const origin of escalatedCiFrictionOrigins(input.records)) {
+    const parsed = parseCiFrictionOrigin(origin);
+    if (!parsed) continue;
+    byCause.set(parsed.key, [...(byCause.get(parsed.key) ?? []), origin]);
+  }
+  for (const [cause, origins] of byCause) {
+    const index = input.priced.findIndex((p) => ciFrictionCauseKey(p.cause) === cause);
+    const rank = index < 0 ? null : index + 1;
+    const minutes = index < 0 ? 0 : input.priced[index]!.minutes;
+    const keep = (reason: string): void => {
+      outcomes.push({ cause, origins, decision: "kept", reason });
+      releaseKept(input.log, { cause, origins, rank }, reason);
+    };
+    if (!Number.isFinite(minutes)) {
+      keep(`the cause's price is unreadable (${String(minutes)})`);
+      continue;
+    }
+    // The streak's newest boundary: a below-ladder row opens it; an in-ladder, escalated or released row ends it.
+    let since: string | undefined;
+    for (const r of input.records) {
+      if (r.cause !== cause && !(typeof r.origin === "string" && origins.includes(r.origin))) continue;
+      if (r.step === "ci-friction.remedy_below_ladder" && typeof r.ts === "string") since = r.ts;
+      else if (r.step === "ci-friction.remedy_in_ladder" || r.step === "ci-friction.remedy_escalated" || r.step === "ci-friction.remedy_released") since = undefined;
+    }
+    if (rank !== null && rank <= LADDER_DEPTH) {
+      if (since !== undefined) input.log("ci-friction.remedy_in_ladder", { cause, origins, rank, minutes, below_since: since });
+      outcomes.push({ cause, origins, decision: "inside" });
+      continue;
+    }
+    if (since === undefined) {
+      input.log("ci-friction.remedy_below_ladder", { cause, origins, rank, minutes });
+      outcomes.push({ cause, origins, decision: "streak-started" });
+      continue;
+    }
+    if (!(input.nowMs - Date.parse(since) >= CI_FRICTION_RELEASE_AFTER_MS)) {
+      outcomes.push({ cause, origins, decision: "waiting" });
+      continue;
+    }
+    if (due.length >= CI_FRICTION_MAX_RELEASES_PER_PASS) {
+      keep(`the pass already released ${CI_FRICTION_MAX_RELEASES_PER_PASS} escalations (cap)`);
+      continue;
+    }
+    const issueUrl = input.records.filter((r) => r.step === "ci-friction.remedy_escalated" && typeof r.origin === "string" && origins.includes(r.origin) &&
+      typeof r.issue_url === "string" && CI_FRICTION_ISSUE_URL_RE.test(r.issue_url)).at(-1)?.issue_url as string | undefined;
+    const citation = `${cause} now costs ${minutes} PR minute(s) on the seven-day half-life, ` +
+      `${rank === null ? "unranked (no priced round left)" : `rank ${rank}`} of ${input.priced.length} priced cause(s), ` +
+      `outside the top ${LADDER_DEPTH} on every pass from ${since} to ${fixedClock(input.nowMs).iso()}.`;
+    due.push({ cause, origins, rank, minutes, since, citation, ...(issueUrl ? { issueUrl } : {}) });
+    outcomes.push({ cause, origins, decision: "due" });
+  }
+  return { due, outcomes };
+}
+
+/**
+ * Close each due escalation's issue and ledger `remedy_released`, which drops its origins from the escalated set on
+ * the next pass. A person's newer comment, an unreadable thread or a failed close keeps it open (`remedy_release_kept`)
+ * and the next pass tries again. Never rejects. Returns the causes released.
+ */
+export async function closeCiFrictionReleases(due: readonly CiFrictionDueRelease[], issues: CiFrictionEscalationIssues,
+  log: (step: string, extra?: Record<string, unknown>) => void): Promise<string[]> {
+  const released: string[] = [];
+  for (const d of due) {
+    if (d.issueUrl !== undefined) {
+      let comments: CiFrictionIssueComment[];
+      try {
+        comments = await issues.listComments(d.issueUrl);
+      } catch (e) {
+        // deliberate: an unread thread may hold a person's newer word, so the issue stays open this pass.
+        releaseKept(log, d, `the issue's comments are unreadable: ${String((e as Error)?.message ?? e)}`);
+        continue;
+      }
+      if (operatorCommentIsNewest(comments)) {
+        releaseKept(log, d, "a person commented after the fleet's newest comment");
+        continue;
+      }
+      try {
+        await issues.close(d.issueUrl, `Closed by the ci-friction gardener (W1-T13219): ${d.citation} The escalation's price has decayed, so the gardener ` +
+          `releases it; if the cause climbs back into the top ${LADDER_DEPTH}, it is drafted or escalated again like a new cause.`);
+      } catch (e) {
+        // deliberate: a failed close leaves the origin escalated, so the next pass tries again.
+        releaseKept(log, d, `closing the issue failed: ${String((e as Error)?.message ?? e)}`);
+        continue;
+      }
+    }
+    log("ci-friction.remedy_released", { cause: d.cause, origins: d.origins, rank: d.rank, minutes: d.minutes, below_since: d.since,
+      issue_url: d.issueUrl ?? null, citation: d.citation, ...(d.issueUrl === undefined ? { reason: "no escalation row recorded an issue URL; nothing to close" } : {}) });
+    released.push(d.cause);
+  }
+  return released;
+}
+
+/** Causes whose release I/O is still in flight in this process, so an overlapping pass never closes one twice. */
+const releasesInFlight = new Set<string>();
 
 /** A landed filing stays decided even when its price changes or the PR is closed. The scorecard
  * is written only after `land` returns a PR URL; a pass with no PR is not a decision. */
@@ -1525,6 +1730,8 @@ export interface CiFrictionGardenSources {
   /** THE RESERVATION PATH (task-id-reservation.ts via `ciLearningTaskIdMinter`, run-task.ts),
    *  never `max(id)+1` — see that minter's own doc for why. */
   mintTaskId: GardenTaskIdMinter;
+  /** W1-T13219: closes an escalation that left the ladder; absent, the `gh api` gateway ({@link ghCiFrictionEscalationIssues}). */
+  issues?: CiFrictionEscalationIssues;
 }
 
 /** How many of the costliest causes the ladder reports and the pass considers. */
@@ -1720,6 +1927,13 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
       const rounds = [...ledgerRounds, ...ciFrictionHandFixRounds(hand?.fixes ?? [], ledgerRounds,
         priceCiFrictionCauses(ledgerRounds, gateFireRates, clock.now()), ownerSearch, gateFireRates)];
       const priced = priceCiFrictionCauses(rounds, gateFireRates, clock.now());
+      // W1-T13219: the release decision is read here; its issue I/O runs on the awaited transport, off this pass.
+      const due = releaseCiFrictionEscalations({ records, priced, nowMs: clock.now(), log: deps.log }).due.filter((d) => !releasesInFlight.has(d.cause));
+      if (due.length > 0) {
+        for (const d of due) releasesInFlight.add(d.cause);
+        void closeCiFrictionReleases(due, sources.issues ?? ghCiFrictionEscalationIssues(), deps.log)
+          .finally(() => { for (const d of due) releasesInFlight.delete(d.cause); });
+      }
       if (plan.degraded) deps.log("ci-friction.origins_degraded", { reason: plan.degraded });
       if (plan.unreadable) deps.log("ci-friction.plan_shard_unreadable", { shards: plan.unreadable });
       const { next, ladder } = ciFrictionLadder({

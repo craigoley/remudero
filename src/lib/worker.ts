@@ -1151,6 +1151,10 @@ export function workerEgressMode(raw: string | undefined): WorkerEgressMode {
   return raw === "enforce" || raw === "off" ? raw : "observe";
 }
 
+/** W1-T11075: the routing trial a judge's cash shadow call carries. Like the inbox bake-off, a single named model
+ *  pins the deployment, so the shadow asks exactly the deployment its mount row declares. */
+export const JUDGE_SHADOW_TRIAL_ID = "judge-shadow";
+
 export interface SpawnWorkerArgs {
   /** Staged/default off. Requires a fresh explicit Claude spawn and a repository-only toolkit. */
   mcpIsolation?: WorkerMcpIsolation;
@@ -3125,7 +3129,9 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         config, runId: args.runId, taskId: args.taskId,
         cashSqueezed: args.cashSqueezed === true,
         modelApprovals: config.modelApprovals,
-        ...(args.routingTrial?.id === "inbox-bakeoff" && args.routingTrial.arm === "cash" && args.routingTrial.models?.length === 1
+        // W1-T11075: a judge shadow pins its one deployment the same way, outside the capability row's candidates.
+        ...((args.routingTrial?.id === "inbox-bakeoff" || args.routingTrial?.id === JUDGE_SHADOW_TRIAL_ID) &&
+          args.routingTrial.arm === "cash" && args.routingTrial.models?.length === 1
           ? { bakeoffDeployment: args.routingTrial.models[0] } : {}),
         ...(args.routingTrial?.arm === "cash" && args.routingTrial.models ? { only: args.routingTrial.models } : {}),
       },
