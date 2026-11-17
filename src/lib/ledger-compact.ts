@@ -284,6 +284,8 @@ export function memoizedDecompressedSizeOf(fs: LedgerCompactFs, stateDir: string
     try {
       return { size: fs.sizeOf(path), mtimeMs: fs.mtimeMs(path) };
     } catch {
+      // deliberate: with no readable size and mtime there is no identity to match, so the caller measures again
+      // and never trusts a remembered size; the read that follows reports a vanished archive in its own error.
       return undefined;
     }
   };
