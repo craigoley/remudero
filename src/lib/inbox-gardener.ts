@@ -20,7 +20,10 @@ import { inboxSemanticDigest, inboxProposalRevision, mechanicalAskPurpose, retir
   inboxOperatorIntent, inboxMechanicalTaskDigest, inboxGardenerSource, inboxGardenerTaskFact, inboxGardenerMode, type InboxGardenerMode, sameInboxGardenerScope, type InboxGardenerTaskFact, type InboxTerminalProof, type RetirementProposal } from "./inbox-retirement.js";
 
 /** PRIMARY CONTROL: each pass admits bounded candidate, proof, judge and transition work. */
-export const INBOX_GARDENER_LIMITS = { candidates: 8, proofReads: 4, judges: 1, retirements: 1, ledgerBudgetMs: 25, ledgerChunkBytes: 64 * 1024 } as const;
+/** W1-T13348: ledgerCatchUpMs replaced a 25 ms tick budget. The projector gunzips a whole archive per tick and checks its
+ *  deadline only after a commit, so 25 ms advanced ONE 64 KiB chunk a pass, and the host's 240 archives (~10 GB) could never
+ *  be read. The pass runs in its own spawned process, and a caught-up store returns as soon as the live tail is read. */
+export const INBOX_GARDENER_LIMITS = { candidates: 8, proofReads: 4, judges: 1, retirements: 1, ledgerCatchUpMs: 20_000, ledgerChunkBytes: 64 * 1024 } as const;
 export { inboxGardenerMode } from "./inbox-retirement.js";
 export interface InboxGardenerCandidate {
   proposal: RetirementProposal;
@@ -225,13 +228,13 @@ const relevantProjection: LedgerRowProjection = { name: "inbox-gardener-evidence
   } };
 
 /** Byte-bounded advancement plus indexed current-proposal lookups; never a lifetime table scan. */
-export function readInboxGardenerLedger(stateDir: string, scope: InboxGardenerScope, proposalIds: readonly string[] = []) {
+export function readInboxGardenerLedger(stateDir: string, scope: InboxGardenerScope, proposalIds: readonly string[] = [], clock: Clock = systemClock) {
   const db = openProjectorReadModel(join(stateDir, "inbox-gardener-evidence"), `inbox-gardener-${inboxSemanticDigest(scope).slice(0, 16)}`);
   const acquired = acquireLease(db);
   try {
     if (!acquired.ok) return { state: "unavailable" as const, rows: [] };
-    const tick = createLedgerProjector({ ledgerDir: stateDir, db, lease: acquired.lease, factStep: () => false,
-      projections: [relevantProjection], chunkBytes: INBOX_GARDENER_LIMITS.ledgerChunkBytes }).tick({ budgetMs: INBOX_GARDENER_LIMITS.ledgerBudgetMs });
+    const tick = createLedgerProjector({ ledgerDir: stateDir, db, lease: acquired.lease, factStep: () => false, clock,
+      projections: [relevantProjection], chunkBytes: INBOX_GARDENER_LIMITS.ledgerChunkBytes }).tick({ budgetMs: INBOX_GARDENER_LIMITS.ledgerCatchUpMs });
     const quarantined = Number(db.prepare("SELECT COUNT(*) AS n FROM quarantine").get()?.n ?? 0);
     if (tick.torn || tick.quarantined) withWriteTransaction(db, acquired.lease, () => db.prepare("INSERT OR REPLACE INTO meta(k, v) VALUES('inbox-source-fault', 'torn-or-quarantined')").run());
     const live = fs.openSync(join(stateDir, LEDGER_FILENAME), "r");
