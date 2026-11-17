@@ -1,0 +1,55 @@
+- id: W1-T13352
+  title: "Find why the merge-sweep suites for W1-T6595, W1-T9212 and W1-T12059 fail their first pooled attempt in ci-shard and pass on the flake retry, when the pool's leak probe names a different file each run"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: recon
+  verify: human
+  risk: high # report only, no code change; spans the pool runner and three sweep suites
+  origin: "operator-session#ubuntu-2604-main-red-2026-11-17"
+  plan_refs:
+    - W1-T13363
+    - W1-T6085
+    - W1-T6595
+    - W1-T9212
+    - W1-T12059
+  files:
+    - docs/forensics/pooled-test-exit-latches.md
+    - docs/docs-index.json
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The report names the shared state that turns direct-merged into direct-merge-preflight-refused when these suites share one pooled process, with the file that writes it and the read that sees it"
+      proof: "demonstration: the operator reads the report and sees the writer file, the reader in src/lib/sweep.ts, and a local pooled run that reproduces the failure"
+    - claim: "The report says why the pool's leak probe named test/a-freshness-restart-can-take-an-idle-moment.test.ts on 44006635512 and test/a-no-pr-branch-of-an-ended-run-stops-blocking-dispatch.test.ts on 44022915015"
+      proof: "demonstration: the operator reads the report and sees whether the probe's narrowing is order-dependent, timing-dependent or correct"
+    - claim: "The report recommends one fix task: the census entry, a test fixture change, or a probe change"
+      proof: "demonstration: the operator reads the report and sees one recommended task with its files"
+  rationale: |
+    OBSERVED 2026-11-17 in ci-shard first attempts (FLAKE-RETRY lines):
+    - main 44006635512 (ubuntu-24.04, green): W1-T6595 x2 and W1-T9212 failed, then passed on retry. POOL DEFECT named
+      test/a-freshness-restart-can-take-an-idle-moment.test.ts with test/a-plan-pr-is-merged-only-through-the-refreshed-direct-path.test.ts.
+    - main 44012529966 (ubuntu-26.04): the same three failed with "expected direct-merged, got direct-merge-preflight-refused".
+      POOL DEFECT named test/a-no-pr-branch-of-an-ended-run-stops-blocking-dispatch.test.ts.
+    - main 44019350709 and 44022915015: W1-T12059 criteria 1 to 3 failed the same way, then passed on retry.
+    So this is not the runner image move. The retry hides it, but every shard pays a rerun and the probe's leak names
+    do not agree. A local --experimental-test-isolation=none run of the three suites with the named leaker passed
+    25/25, so the order or the rest of the pool matters.
+    FOUND (filing session, 2026-11-17): rebuilding shard 8/8's 308-file pool reproduced it; the writer is
+    test/a-freshness-restart-lets-a-running-review-finish.test.ts (runDaemon freshness stop closes direct-merge
+    admissions, reason freshness_latch), and drainInFlightReviews leaks light-pass refills the same way. The fix is
+    W1-T13363. This task's deliverable is the written report at docs/forensics/pooled-test-exit-latches.md.
+  note: |
+    Reserved with rmd next-task-id --count 3 --branch claude/project-thread-7ycldf (2026-11-17 11:40Z).
+  risk_ruling:
+    verdict: "low"
+    action: escalate
+    confidence: 0.85
+    reasons:
+      - "The task is typed recon with a report as its deliverable. The acceptance criteria ask for a report and a single recommended fix task, not for changes to merge, deploy or review policy."
+      - "The description and declared files (a pool script and three test files) show no secrets, credentials, auth, data deletion or irreversible action."
+      - "The rationale cites specific CI run IDs and a local reproduction attempt (25/25 pass), and criterion 1 requires a local pooled reproduction, so the finding can be verified from what is shown."
+      - "The gates state is clean: operator-authored, and the family track record is a Beta mean of 0.88 with 26 merged. The zero PR references in the evidence line is a minor weakness, offset by the run IDs."
+      - "the judge said proceed, but W1-T13352: at verify: auto it fails lint (proof-dialect)"
+    judged_at: "2026-11-17T12:29:34.920Z"
+    pin: "ee9cd1cb8c6c91a8bd8a78e1ea3367f0067cf2ad0597ed642dc929b02286c13b"

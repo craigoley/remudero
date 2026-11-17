@@ -1,0 +1,122 @@
+- id: W1-T13365
+  title: "The ci and fix-progress shadow rows reach judge calibration and the field-trials judge family: a judge_shadow.paired row is read as one typed answer of its surface and shadow deployment beside the primary verdict, and a refused or unreadable shadow is counted apart and never scored as wrong"
+  repo: remudero
+  depends_on: []
+  priority: 1.8
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # two readers, the shadow writer and both judge callers change together; the family is private and no gate, route or judge reads it, and the release and the field note must stay byte-identical
+  origin: "operator-ruling#shadow-judge-on-2026-11-17"
+  plan_refs:
+    - W1-T11075
+    - W1-T12414
+    - W1-T12420
+    - W1-T12423
+    - W1-T12425
+    - W1-T13364
+  files:
+    - src/lib/judge-calibration.ts
+    - src/lib/field-trials-judges.ts
+    - src/lib/risk-judge.ts
+    - src/lib/ci-escalation-judge.ts
+    - src/lib/sweep.ts
+    - docs/research/model-evidence-program.md
+    - test/routing/the-ci-and-fix-progress-shadow-rows-reach-the-judge-family.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "judgeCalibrationRow and foldJudgeVerdictRow read a judge_shadow.paired row as one typed answer: role = the row's surface, model = shadow_deployment, model surface text, source generative, the answer = the compared key of shadow_verdict, the incumbent = the compared key of primary_verdict (null when primary_verdict is null), head = the head after the @ of decision_key, input digest = the 16-hex sha256 of decision_key. A shadow_judge.paired row reads exactly as before, and neither step is renamed"
+      proof: "grep: W1-T13365 criterion 1 in test/routing/the-ci-and-fix-progress-shadow-rows-reach-the-judge-family.test.ts"
+    - claim: "invariant:one-compared-key — for rows written by the real runJudgeShadow on both surfaces, with shadows that agree and that disagree, the scorer's agreement for the typed answer equals the row's own `agreement` field. Two ci verdicts that differ only in `reason` or in the order of `add` agree; two fix-progress verdicts that differ only in `reason` agree"
+      kind: guard
+      proof: "grep: W1-T13365 criterion 2 in test/routing/the-ci-and-fix-progress-shadow-rows-reach-the-judge-family.test.ts"
+    - claim: "invariant:no-answer-is-never-wrong — a judge_shadow.unavailable row is one rejected answer of its surface and deployment, and a judge_shadow.refused row is no answer and adds 1 to its cell's `refused` count. Neither row changes the cell's agreement compared count, agreed count, Brier or log-loss, and a cell of only refused rows still appears with 0 answers"
+      kind: guard
+      proof: "grep: W1-T13365 criterion 3 in test/routing/the-ci-and-fix-progress-shadow-rows-reach-the-judge-family.test.ts"
+    - claim: "The snapshot's judge family has a live cell per source, ISO week, surface, shadow deployment and text surface for these rows. The cell's settled dollars come from the row's cost_usd, its latency has 0 observed rows, and the adoption, funnel, repair, flow, learning, guardrail and served-cohort figures are the same with or without the rows"
+      proof: "grep: W1-T13365 criterion 4 in test/routing/the-ci-and-fix-progress-shadow-rows-reach-the-judge-family.test.ts"
+    - claim: "invariant:the-release-is-byte-identical — buildFieldTrialsRelease and the field-note candidate give byte-identical output with or without judge_shadow rows, no decision key, head or input digest of these rows enters a cell, and each is in privateKeys"
+      kind: guard
+      proof: "grep: W1-T13365 criterion 5 in test/routing/the-ci-and-fix-progress-shadow-rows-reach-the-judge-family.test.ts"
+    - claim: "Both judges take their compared key from the one exported table the readers use, so the writer and the readers cannot drift"
+      proof: "grep: JUDGE_SHADOW_COMPARED_KEY in src/lib/ci-escalation-judge.ts"
+  rationale: |
+    WHY: W1-T11075 writes the ci and fix-progress shadow verdicts as judge_shadow.paired rows. The two places
+    that measure a judge (judge calibration, and the judge family of the field-trials snapshot) read only the
+    older shadow_judge.paired step. When W1-T13364 turns the arm on, its rows are written and no reader scores
+    them, so the question the operator asked (does DeepSeek-V4-Flash agree with the present judge) has no figure.
+    READ at origin/main cfbace2640. The gap is real:
+    - src/lib/risk-judge.ts:1548-1553 and :1585: a judge_shadow.paired row has surface (`ci-judge` or
+      `fix-progress`), decision_key (`PR<n>@<head>`), primary_model, primary_provider, primary_verdict (the parsed
+      verdict object, or null), shadow_deployment, shadow_effort, cost_usd, served_model, shadow_verdict (the
+      parsed verdict object) and agreement. judge_shadow.refused (:1567, :1574, :1590) adds refusal (`capacity` or
+      `budget`) and reason. judge_shadow.unavailable (:1580, :1594) adds reason.
+    - src/lib/shadow-judge.ts:44-54 and :76-86: a shadow_judge.paired row has surface (`review`, `risk` or
+      `verify-human`), decision_key, primary_model, primary_served_model, primary_effort, primary_provider,
+      primary_decision, sample_denominator, shadow_budget_usd, shadow_model, shadow_effort, shadow_provider,
+      shadow_served_model, model_comparison, shadow_decision and agreement.
+    - src/lib/judge-calibration.ts:121 `shadowTypedAnswer` reads surface, shadow_model, shadow_decision and
+      primary_decision. A judge_shadow.paired row has none of the last three, so it gives no answer. :140, :147
+      and :246 name only `shadow_judge.paired`, `decision.answered` and `judge_replay.answered`.
+    - src/lib/judge-calibration.ts:109 `headOfDecisionKey` knows the `risk` and `review` key shapes only.
+    - src/lib/field-trials-judges.ts:29 `SHADOW_JUDGE_PAIRED_STEP = "shadow_judge.paired"` and :31 JUDGE_TRIAL_STEPS
+      have no judge_shadow step. src/lib/field-trials-flow.ts:79 builds JUDGE_STEPS from that list, so the snapshot
+      does not read the rows. :72-76 `projectJudgeTrialRow` reads latency_ms and settled_usd; a judge_shadow row has
+      cost_usd and no latency.
+    - The compared keys are closures in the callers: src/lib/ci-escalation-judge.ts:366 (the sorted `add` list and
+      `escalateFull`) and src/lib/sweep.ts:2549 (`verdict`). A reader that compared the whole verdict object
+      would count two verdicts with different `reason` text as a disagreement.
+    - src/lib/worker-provider.ts:4035: a model surface is `text` or `decisions`. There is no `cash` surface. The
+      shadow arm answers with text, so its surface is `text`; the deployment id is the model id.
+    - src/lib/typed-answer-scores.ts:45-49 has the answer kinds single, distribution, abstained and rejected, and
+      :241 computes agreement over compared answers only.
+    NOT COVERED: W1-T12187 (queued) plans a summary for the config gardener that also counts the W1-T11075 rows
+    (its criterion 5). It does not touch judge calibration or the field-trials snapshot. Swept plan/tasks.d and
+    plan/tasks.yaml for judge_shadow and the 11 open pull requests on 2026-11-17: no other filing.
+  design: |
+    INVARIANT one-compared-key: the scorer's agreement for a judge_shadow.paired row equals the row's own `agreement` field.
+    INVARIANT no-answer-is-never-wrong: a refused or unreadable shadow never enters an agreement, Brier or log-loss figure.
+    INVARIANT the-release-is-byte-identical: the release and the field-note candidate do not change with judge_shadow rows.
+    1. One table of compared keys. Export JUDGE_SHADOW_COMPARED_KEY, keyed by surface: `ci-judge` gives the JSON
+       of the sorted `add` list and `escalateFull`; `fix-progress` gives `verdict`. The two callers pass the
+       table's function as `agreementKey` in place of their closures, and the readers use the same table. Put
+       the table where judge-calibration.ts can import it with no import cycle (risk-judge.ts, or a small leaf
+       module if a cycle appears).
+    2. src/lib/judge-calibration.ts: add a reader beside `shadowTypedAnswer` for the three judge_shadow steps.
+       Map exactly: role <- surface; model <- shadow_deployment; modelSurface `text`; source `generative`;
+       question, questionType and options null; answer <- { kind: single, option: key(shadow_verdict) };
+       incumbent <- key(primary_verdict), null when primary_verdict is null; head <- the part of decision_key
+       after `@` when it matches HEAD_SHA_RE, else null; inputDigest <- the first 16 hex of sha256(decision_key);
+       outcome null. A paired row whose shadow_verdict has no compared key (a shape the table cannot read) is a
+       rejected answer, not a dropped row. judge_shadow.unavailable gives { kind: rejected, reason: the row's
+       reason }. judge_shadow.refused gives no answer. Add the steps to the three step checks (:140, :147, :246).
+       Do not rename `shadow_judge.paired` or `judge_shadow.paired`.
+    3. src/lib/field-trials-judges.ts: add the three steps to JUDGE_TRIAL_STEPS as live rows. For them read
+       settledUsd from cost_usd. Carry a refused row's role, model and surface in the projection so its cell
+       exists; add `refused: number` to JudgeTrialCell (0 for every other cell). The cell key does not change.
+    4. No change to field-trials-flow.ts is needed for reading: JUDGE_STEPS comes from JUDGE_TRIAL_STEPS. The
+       family stays out of `releaseCells` and the field-note input. If the partition input hash must change
+       because a cell gained a field, bump it so an old snapshot is rebuilt and not reused.
+    5. docs/research/model-evidence-program.md: one sentence in the judge trial that the ci-judge and
+       fix-progress shadow rows are in the judge family, and what `refused` and `rejected` mean there.
+    6. TESTS build their rows with the real runJudgeShadow and an injected spawn, as
+       test/review/the-ci-and-fix-progress-judges-shadow-a-deepseek-arm.test.ts does, and build the snapshot as
+       test/routing/the-field-trials-snapshot-has-a-judge-family.test.ts does. Do not import either test file.
+       Load test/setup/tmp-hygiene.ts.
+    WHY NOT read the row's `agreement` field alone: the scorer needs the answer and the incumbent to give the
+    per-option figures and, later, an outcome join by head (W1-T12425). One key table gives both and criterion
+    2 proves they match.
+  falsifier: |
+    At origin/main a judge_shadow.paired row gives no typed answer and no cell: criteria 1 and 4 fail. Map the
+    answer to the whole verdict object: two verdicts with different `reason` disagree and criterion 2 fails. Map
+    judge_shadow.refused to a single answer with an empty option: the agreement compared count rises and
+    criterion 3 fails. Add the family to the release cells: criterion 5 fails.
+  note: |
+    Id reserved for run-unfiled-1794918373000 with ~/rmd-work/bin/reserve-id.sh.
+    The filing brief asked for surface `cash`. No such model surface exists (src/lib/worker-provider.ts:4035), so
+    this task uses `text` and keeps the cash deployment id as the model id.
+    Not a hard dependency on W1-T13364: the readers can ship first and read no rows until the arm is on.
+    Out of scope: a latency figure for the shadow call (the row records none), and an outcome map for the two
+    new roles in TYPED_ANSWER_OUTCOME_MAP.

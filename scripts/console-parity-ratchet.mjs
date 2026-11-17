@@ -83,9 +83,11 @@ function reasons(names, reason) {
  *  recording it, and is refused for that reason alone, never for the reason text's content. */
 export const CLI_ONLY = {
   "migration-preview": "operator-only pinned local Git catalogs and current ownership/PR evidence; remote console clients do not possess these local objects",
+  "pr-owner-recover": "operator-only, admin-authorized recovery of a stale host-local fix dispatch; it preserves the PR branch worktree and claim state and has no remote console mutation route",
   "pr-state": "host-local, ledger-first PR state read over the operator's ledger union, with one broker query for stale or missing fields; the remote console has no route for this host-local read",
   "improvement-action": "daemon-owned internal worker: executes an already persisted improvement operation only after daemon ownership, repository identity and ordinary admission checks; console routes save requests rather than executing this worker",
   "review-replay": "Refreshes a checked-in sample in the caller's local git checkout from its complete retained ledger and seeded reviewer-health projection; the remote console cannot write that checkout.",
+  "cash-reconcile": "Reads a manually staged Azure cost export and the local ledger to reconcile operator billing; the remote console cannot read either host-local input.",
   ...reasons(
     [
       "run-task",
@@ -144,6 +146,9 @@ export const CLI_ONLY = {
       // W1-T12416: one paid shadow request to a decision model from the daemon host, with the cash
       // key in its environment; no gate, route or judge reads the row it writes.
       "decisions",
+      // W1-T10858: reads the daemon host's ledger union and an Azure cost export file on that host; the
+      // console sees its effect as the lead-eligibility lines of the bake-off proposal.
+      "cash-reconcile",
       // W1-T5687: a progress verdict over the ledger union on the daemon host; capture-diagnostics writes a bundle under <state>/diagnostics/ (docker ps, docker logs), at most one per 15 min; it recycles nothing.
       "progress-watchdog",
       // 2026-10-11: the host watchdog's rung of the live-edit ladder over a checkout on that host; the

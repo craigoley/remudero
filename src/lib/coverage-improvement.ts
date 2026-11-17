@@ -508,35 +508,49 @@ export function fetchMergedCoverageArtifact(deps: FetchMergedCoverageArtifactDep
     return refusal(deps, "no_merged_pr", `no merged PRs were returned for ${deps.owner}/${deps.repo}`);
   }
 
+  // A merged PR's aggregator run can be green yet carry no live `coverage-merged` artifact
+  // (expired, or never uploaded): that is a reason to try the next merged PR, not to refuse.
   let selected: { prNumber: number; headSha: string; workflowRunId: number } | undefined;
+  let artifactId: number | undefined;
+  let lastWithoutArtifact: { prNumber: number; headSha: string; workflowRunId: number } | undefined;
+  let lookingUp: "workflow run" | "artifact list" = "workflow run";
   try {
     for (const pr of prs) {
+      lookingUp = "workflow run";
       const runs = ghJson(workflowRunsForHeadRestArgs(deps.owner, deps.repo, pr.headSha));
       const workflowRunId = completedAggregatorRunId(
         runs,
         (runId) => ghJson(workflowJobsForRunRestArgs(deps.owner, deps.repo, runId)),
         aggregatorJobName,
       );
-      if (workflowRunId !== undefined) {
-        selected = { prNumber: pr.number, headSha: pr.headSha, workflowRunId };
-        break;
+      if (workflowRunId === undefined) continue;
+      const candidate = { prNumber: pr.number, headSha: pr.headSha, workflowRunId };
+      lookingUp = "artifact list";
+      const found = artifactIdByName(ghJson(workflowArtifactsForRunRestArgs(deps.owner, deps.repo, workflowRunId)), artifactName);
+      if (found === undefined) {
+        lastWithoutArtifact ??= candidate;
+        continue;
       }
+      selected = candidate;
+      artifactId = found;
+      break;
     }
   } catch (e) {
-    return refusal(deps, "github_unreadable", `workflow run lookup unreadable: ${String((e as Error)?.message ?? e)}`);
+    const msg = String((e as Error)?.message ?? e);
+    return lookingUp === "workflow run"
+      ? refusal(deps, "github_unreadable", `workflow run lookup unreadable: ${msg}`)
+      : refusal(deps, "artifact_unreadable", `artifact list unreadable: ${msg}`, lastWithoutArtifact);
   }
-  if (!selected) {
+  if (!selected || artifactId === undefined) {
+    if (lastWithoutArtifact) {
+      return refusal(
+        deps,
+        "no_coverage_merged_artifact",
+        `no ${artifactName} artifact on run ${lastWithoutArtifact.workflowRunId} or any other merged PR's run`,
+        lastWithoutArtifact,
+      );
+    }
     return refusal(deps, "no_completed_coverage_ratchet_run", `no merged PR head has a completed ${aggregatorJobName} run`);
-  }
-
-  let artifactId: number | undefined;
-  try {
-    artifactId = artifactIdByName(ghJson(workflowArtifactsForRunRestArgs(deps.owner, deps.repo, selected.workflowRunId)), artifactName);
-  } catch (e) {
-    return refusal(deps, "artifact_unreadable", `artifact list unreadable: ${String((e as Error)?.message ?? e)}`, selected);
-  }
-  if (artifactId === undefined) {
-    return refusal(deps, "no_coverage_merged_artifact", `no ${artifactName} artifact on run ${selected.workflowRunId}`, selected);
   }
 
   let zip: Buffer;

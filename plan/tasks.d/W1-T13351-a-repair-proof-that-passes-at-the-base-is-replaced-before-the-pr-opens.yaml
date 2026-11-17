@@ -1,0 +1,72 @@
+- id: W1-T13351
+  title: "A red-main repair PR's proof that the gate's executor grades stale at the merge base is replaced by a grep of a line the repair adds before the PR opens, so proof-discrimination does not refuse a correct repair"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # one concern, the proofs a red-main repair or revert PR body carries; they decide whether main's repair can merge
+  origin: "operator-session#ubuntu-2604-main-red-2026-11-17"
+  plan_refs:
+    - W1-T11291
+    - W1-T8572
+    - W1-T362
+  files:
+    - src/lib/main-repair-acceptance.ts
+    - src/lib/repair-proof-grader.ts
+    - src/run-task.ts
+    - test/review/a-repair-proof-that-passes-at-the-base-is-replaced.test.ts
+    - test/a-main-repair-pr-carries-a-dispatcher-written-acceptance-block.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "#19011's body, whose two unit test proofs grade stale at the base, is rewritten to one grep of the first non-comment line the repair adds"
+      proof: "grep: W1-T13351 criterion 1 in test/review/a-repair-proof-that-passes-at-the-base-is-replaced.test.ts"
+    - claim: "A body whose proofs discriminate is opened exactly as written"
+      proof: "grep: W1-T13351 criterion 2 in test/review/a-repair-proof-that-passes-at-the-base-is-replaced.test.ts"
+    - claim: "A stale proof beside a discriminating one is dropped and the anchor grep joins the survivor"
+      proof: "grep: W1-T13351 criterion 3 in test/review/a-repair-proof-that-passes-at-the-base-is-replaced.test.ts"
+    - claim: "With no safe line to anchor, a body of only stale proofs is opened unchanged and the lane ledgers why"
+      proof: "grep: W1-T13351 criterion 4 in test/review/a-repair-proof-that-passes-at-the-base-is-replaced.test.ts"
+    - claim: "Only check-proof's executed_stale exit (5) grades a proof stale; a refusal, no-match, exec error or kill keeps the proof"
+      proof: "grep: W1-T13351 criterion 5 in test/review/a-repair-proof-that-passes-at-the-base-is-replaced.test.ts"
+    - claim: "The fix lane grades the body it is about to open and ledgers main-repair.stale_proofs with the replaced proofs"
+      proof: "grep: W1-T13351: a worker proof the gate would grade stale at the base is replaced in test/a-main-repair-pr-carries-a-dispatcher-written-acceptance-block.test.ts"
+    - claim: "The revert lane grades its body the same way before it opens the revert PR"
+      proof: 'grep: withGradedRepairProofs("main-repair\.revert" in src/run-task.ts'
+    - claim: "invariant:discriminating-body-unchanged — a body whose every proof grades discriminates or unknown opens exactly as written, and only an executed_stale proof is ever removed"
+      proof: "grep: W1-T13351: a repair body whose merge base cannot be read opens as written in test/a-main-repair-pr-carries-a-dispatcher-written-acceptance-block.test.ts"
+  rationale: |
+    OBSERVED 2026-11-17: GitHub moved ubuntu-latest from ubuntu-24.04 (image 20261111.370.1) to ubuntu-26.04
+    (20261111.196.1) between main runs 44006635512 (green) and 44008977154 (red). The 26.04 image ships bwrap and
+    24.04 did not, so the proof sandbox now runs in CI. bwrap 0.9.0 always sets PWD to its --chdir target, so
+    test/proof-spawner-env-isolation.test.ts saw PWD outside PROOF_ENV_ALLOWLIST and failed every ci-shard run.
+    The red-main lane opened #19011 with the right fix and the dispatcher-written proofs
+    "unit test: test/proof-spawner-env-isolation.test.ts" and "unit test: test/containment.test.ts".
+    The required proof-discrimination gate graded both executed_stale: inside the proof sandbox the suite passes at the
+    merge base too (reproduced locally with rmd check-proof --base: exit 5). Allowance for main-repair ids is 0, so the
+    gate failed and main stayed red until a session swapped the proofs for greps by hand (body edit 04:32Z).
+    W1-T11291 assumed a red suite "fails at the base by construction". That holds only when the red does not depend on
+    the environment the proof executor runs in. The revert lane (#19020, #19028) wrote the same unit test proofs.
+  design: |
+    1. src/lib/main-repair-acceptance.ts: withoutStaleRepairProofs({ body, diffText, grade, readFile }) grades every proof
+       with an injected BaseProofGrader. Stale proofs are dropped; diffAnchor's grep (never a comment line) is added when
+       it is not already there. No safe anchor and no survivor: the body is returned unchanged with the reason.
+    2. src/lib/repair-proof-grader.ts: checkProofBaseGrader(worktree, mergeBase) spawns the worktree's own check-proof
+       entry with --base, the same child scripts/proof-discrimination-gate.mjs runs, and maps exit 5 to stale, 0 to
+       discriminates, anything else to unknown.
+    3. src/run-task.ts: openCheckedRepairPr (fix and alert-fix lanes) and openMainRepairRevertPr grade the assembled body
+       before the REST open. The grader is an injectable dep; the default reads the worktree's merge base with origin/main
+       and ledgers <lane>.proofs_ungraded when it cannot.
+    INVARIANT discriminating-body-unchanged: a body whose every proof grades discriminates or unknown opens byte for
+    byte as before; an ungraded body (merge base unreadable) also opens as before. Only an executed_stale proof is
+    ever removed, and the PR is never refused by this step.
+  falsifier: |
+    At origin/main the dispatcher opens #19011's body with its two unit test proofs unchanged, and proof-discrimination
+    reports "2 proof(s) pass at both PR head and merge base".
+  note: |
+    Reserved with rmd next-task-id --count 3 --branch claude/project-thread-7ycldf from a detached origin/main worktree
+    on the operator's Mac mini (2026-11-17 11:40Z). Not covered by: the run-worker-opened path, where a worker opens
+    its own PR before the dispatcher sees the body.

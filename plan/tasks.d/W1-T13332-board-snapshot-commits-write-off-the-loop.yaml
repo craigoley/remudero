@@ -1,0 +1,47 @@
+- id: W1-T13332
+  title: "The board snapshot cache writes its closed-PR and issue collections off serve's event loop, so a commit stops stalling every Console read for up to a second"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # 2 concerns: when a committed collection becomes durable, and what a read sees while a write is in flight
+  band_meaning: span
+  origin: "operator-session#serve-oom-2026-11-16"
+  plan_refs:
+    - W1-T13304
+  files:
+    - src/lib/board-snapshot-cache.ts
+    - test/board-snapshot-commits-write-off-the-loop.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "commitClosed and commitIssues on a 30,000-row collection return before any write, fsync or rename of the collection file runs on the calling thread; the file on disk afterwards is byte for byte what a synchronous commit writes"
+      proof: "grep: W1-T13332 criterion 1 in test/board-snapshot-commits-write-off-the-loop.test.ts"
+    - claim: "invariant:atomic-and-ordered — two commits in quick succession leave the later collection on disk, never a mix or the earlier one; a crash between write and rename leaves the previous file intact"
+      kind: guard
+      proof: "grep: W1-T13332 criterion 2 in test/board-snapshot-commits-write-off-the-loop.test.ts"
+    - claim: "closedSeed and issueSeed answer the committed rows at once, even while their write is still in flight"
+      proof: "grep: W1-T13332 criterion 3 in test/board-snapshot-commits-write-off-the-loop.test.ts"
+  rationale: |
+    WHY: Craig on 2026-11-17: "serve should not need this much cpu", and Inbox items took 1.8 to 19 s to open cold.
+    MEASURED from serve's runtime.loop_stall_profile rows over the hour to 04:03Z (114 stalls, 140 s total): inside the
+    stalls, board-snapshot-cache.ts was 1,916 ms inclusive, commitClosed 1,020 ms, writeFully 727 ms, writeBuffer 712 ms
+    self and boundedString 397 ms self; GC was another 992 ms. Every Console read waits behind such a stall.
+    READ at origin/main, src/lib/board-snapshot-cache.ts: commit serializes the whole collection to a Buffer and writes it
+    with fs.writeSync, fsync and rename on the caller's thread (status.ts calls commitClosed and commitIssues from the
+    board pass on serve's main thread).
+  design: |
+    INVARIANT atomic-and-ordered: the file on disk is always one whole committed collection, the latest one once settled.
+    1. commit updates the in-memory state at once (seeds answer from it), then queues the durable write: serialize and
+       write with fs.promises (or a worker) to the same stage-file, fsync and rename sequence. One write in flight per
+       collection; a newer commit while one is in flight replaces the queued one.
+    2. The boolean commit returns keeps its meaning for callers (accepted for persistence); a failed write is logged and
+       retried on the next commit, as a failed sync write is today.
+  falsifier: |
+    Write synchronously: criterion 1 fails. Let two writes race to rename: criterion 2 fails. Answer seeds from disk:
+    criterion 3 fails.
+  note: |
+    Id reserved for run-unfiled-1794892389000 with ~/rmd-work/bin/reserve-id.sh.

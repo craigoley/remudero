@@ -55,6 +55,7 @@ usage:
   rmd read-model rebuild [--instance <id>] [--ledger-dir <dir>] [--window-days <n>] | status [--json] | switch <projector|<view>> <mode>   # Rebuild, inspect or switch the serve read model projected from the ledger.
   rmd hand-runs   # Print which verb sequence the operator keeps hand-running, on demand.
   rmd decisions probe --candidate <name> --input-file <file> --questions-file <file> [--role <role>]   # Ask one decision model one question set about one input, and print the row it wrote.
+  rmd cash-reconcile --day <YYYY-MM-DD> --export <csv>   # Reconcile one UTC day of metered cash cost against an Azure actual-cost export.
   rmd judge-replay [--lane batch] --model <id> --corpus <machine-judge-probes|risk-judge-dispositions|all> | rmd judge-replay --lane direct --candidate <name> --corpus <machine-judge-probes|risk-judge-dispositions|all>   # Replay the judge corpora through one named model, in one Message Batch or one request per case.
   rmd field-trials [--source <label>=<owner/repo>]... [--ledger <label>=<state-dir>]... [--out-dir <dir>] [--consent <file>] [--case-files <file>] [--max-pages <n>] [--offline] [--revoke <release-id>] [--field-note <out> [--site-registry <file>]] [--json] [--refresh-step <name>=<exit-code|skipped>]... [--refresh-script-blob <sha1>] [--refresh-record-only]   # Join the ledger union and GitHub history into observational field-trials aggregates.
   rmd ci-failures [--days N]   # Report the window's red CI gates, each paired with the commit that repaired it.
@@ -121,6 +122,7 @@ usage:
   rmd trace <id>   # Render the provenance chain: feedback -> proposal -> task -> run -> PR -> merge.
   rmd peek <runId> [--lines <n>] [--follow]   # Read-only tail of one run's retained output, with a LIVE/FINISHED verdict.
   rmd pr-owner <pr-number>   # Report whether the local ledger shows a fix lane owning one PR.
+  rmd pr-owner-recover <pr-number> --authorize --repo <owner/name> --task <id> --run <id> --round <id> --head <sha> --base <sha> --branch <name> --reason <text> | --apply --authorization <id>   # Release a dead worker's stale fix dispatch on one PR, once, after an admin's recorded authorization.
   rmd pr-state <n...> [--max-age <dur>]   # Read PR state from the ledger, revalidating stale or missing fields in one broker query.
   rmd plan --mode=create|clarify|expand [<brief>...]   # The unified Architect PLAN skill: create, clarify or expand plan tasks.
   rmd improvement-action <operation-id> --state-dir <path>   # Resume one saved planning action through the daemon's admitted workflow.
@@ -551,6 +553,16 @@ rmd decisions probe --candidate <name> --input-file <file> --questions-file <fil
 ```
 
 W1-T12416: sends ONE paid cash request to a candidate named in the decision_models section of .remudero/mounts.yaml. The questions file is a JSON array of yes-no, choice (2 to 255 typed options) and score (2 to 10 ordered levels) questions, each with a name and instructions; a bad set is refused before any reservation. The request reserves on its input size plus a 64-token output margin against the normal daily cash cap, settles from the reply's usage at the candidate's own price row, and writes one decision.answered row: role, input digest, candidate, deployment, served model, latency, reserved and settled dollars, usage, and each question's distribution, abstention or rejection. A candidate whose cashDeploymentEndpoints entry or key is missing is unavailable and sends nothing. Shadow only: no gate, route or judge reads the row. Exit 0 answered, 1 refused, unavailable or failed, 2 bad usage.
+
+### `rmd cash-reconcile`
+
+Reconcile one UTC day of metered cash cost against an Azure actual-cost export.
+
+```
+rmd cash-reconcile --day <YYYY-MM-DD> --export <csv>
+```
+
+W1-T10858: reads the day's produced cash receipts from the ledger union and an Azure Cost Management actual-cost export CSV, and compares, per deployment and per meter (input, cached input, output), the metered cost (tokens times the OPENWEIGHT_PRICES row) with the billed cost (the export rows for that deployment's account and meter). The noise band is the largest divergence among the same day's Azure OpenAI deployments (rows with unbilledAzureOpenAi429). Each open-weight deployment gets one cash.invoice.reconciled row: reconciled (inside the band), diverged (outside it, naming the meter, metered, billed and band) or unreconcilable (no traffic, no control, no export rows or incomplete receipts). The deployment bake-off proposal marks an open-weight arm not eligible to lead until its newest verdict is reconciled. Sends no request. The measurement cadence does the same for the newest .csv under <state>/cost-exports/, once per day and file. Exit 0 reconciled, 1 failed, 2 bad usage.
 
 ### `rmd judge-replay`
 
@@ -1211,6 +1223,16 @@ rmd pr-owner <pr-number>
 ```
 
 W1-T3281: answers the operator question 'is a lane already fixing this PR?' from the local ledger union only. Reports OWNED, FREE or UNKNOWN plus the corpus newest timestamp, newest relevant fix.dispatch strike/cap/mode/head evidence, and newest sweep.disposed disposition/reason/head evidence. UNKNOWN is distinct from FREE for unreadable or incomplete ledger reads, and for a corpus with no compressed rotation opened. Reads state/ledger.ndjson plus both plain and gzip rotations through the shared ledger-union reader; makes no gh/network call and spawns no worker. Makes no ledger, claim or service changes; owned temporary disk scratch is removed after the read.
+
+### `rmd pr-owner-recover`
+
+Release a dead worker's stale fix dispatch on one PR, once, after an admin's recorded authorization.
+
+```
+rmd pr-owner-recover <pr-number> --authorize --repo <owner/name> --task <id> --run <id> --round <id> --head <sha> --base <sha> --branch <name> --reason <text> | --apply --authorization <id>
+```
+
+W1-T12114: --authorize records one pr_owner.recovery_authorized row for the exact PR, task, run, round, head, base and live branch, only for an authenticated repository admin who is not a fleet actor, under the PR's fix branch claim. --apply --authorization <id> takes that claim, reads live evidence, preserves dirty or unpublished work as a create-only refs/rmd-recovery ref, reads again and writes a released pr_owner.recovery_receipt only when W1-T12113 decides recover on both reads; anything else holds. Never deletes or moves a ref, removes a worktree, pushes to the PR branch, or writes fix.done or a credit. Prints the result as JSON; exits 0 on authorized or released, 1 otherwise, 2 on bad arguments.
 
 ### `rmd pr-state`
 

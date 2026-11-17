@@ -1880,7 +1880,10 @@ function* triageRoute(
   try {
     cfg = { ...productionTriage?.(deps), ...deps.triage };
     mode = cfg?.mode === "act" ? "act" : "shadow";
-    const evidence: TriageEvidence = { classTier: ledgerClassTier(e, deps.ledgerPath), ...cfg?.evidence?.(e) };
+    // W1-T13324: a tier the evidence supplies is used as it is; only its absence costs the ledger read.
+    const supplied = cfg?.evidence?.(e);
+    const evidence: TriageEvidence = supplied && "classTier" in supplied ? supplied
+      : { classTier: ledgerClassTier(e, deps.ledgerPath), ...supplied };
     outcome = triageEscalation(e, evidence);
     if (allowAsyncJudge && cfg?.judge && outcome.kind === "deliver" && outcome.decidedBy === "default") {
       const verdict = yield* step(() => judgeEscalation(e, { judge: cfg!.judge! }));
