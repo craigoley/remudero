@@ -3029,9 +3029,12 @@ export function buildEscalationTriageRuntime(
   let pass: ReturnType<typeof newTriagePass> | undefined;
   let reportedBytes = 0, reportedRotations = 0;
   const evidenceHistory = io.evidenceHistory ?? createEscalationTriageHistoryReader({ slice: ESCALATION_TRIAGE_EVIDENCE_SLICE });
+  let tornHandled = false;
   const readRows = io.readRows ?? ((path) => {
     const read = evidenceHistory.current(dirname(path));
     if (!read.ok) throw new Error(`triage evidence history is unreadable (${read.unread.length} unread: ${read.unread.slice(0, 3).join(", ")})`);
+    // W1-T13324: a torn row that names the step could hide an operator action; unkept torn lines are unjudged.
+    tornHandled = read.tornLines ? read.tornLines.some((line) => line.includes("panel.escalation_marked_handled")) : read.torn > 0;
     return read.rows;
   });
   const clock = io.clock ?? systemClock;
@@ -3085,6 +3088,7 @@ export function buildEscalationTriageRuntime(
             reportedBytes = cost.bytesRead; reportedRotations = cost.rotationsRead;
           }
         }
+        if (tornHandled && e.class !== "MANUAL" && e.class !== "HARD_STOP") throw new Error("escalation precision history is unreadable");
         const strike = [...history].reverse().find((row) => row.step === "fix.dispatch" && row.task_id === e.taskId &&
           row.head_sha === e.headSha && row.kind !== "proof_amendment");
         const previousCause = strike?.mode === "ci-log" ? "ci" : strike?.mode === "merge-conflict" ? "conflict" :
