@@ -2,10 +2,13 @@
  * lib/field-trials-judges.ts — W1-T12423: the judge family of the field-trials snapshot.
  *
  * The snapshot (lib/field-trials-flow.ts) keeps rmd's private model evidence. This module adds the
- * judge figures beside the worker figures and apart from them. It reads four ledger steps:
+ * judge figures beside the worker figures and apart from them. It reads these ledger steps:
  * `decision.answered` (a decision model's answer), `shadow_judge.paired` (a shadow judge's answer
  * beside the current judge's), `judge_replay.answered` (one corpus case of a replay) and
- * `judge_replay.finished` (a direct replay's closing row, which names the corpus digest).
+ * `judge_replay.finished` (a direct replay's closing row, which names the corpus digest). W1-T13365
+ * adds the three `judge_shadow` steps of the ci judge and the fix-progress judge: a paired row is one
+ * answer, an unavailable row is one rejected answer, and a refused row is no answer and is counted
+ * in the cell's `refused`.
  *
  * ONE READER, ONE SCORER. A row becomes recorded typed answers through `judgeCalibrationRow`
  * (lib/judge-calibration.ts), the reader the judge calibration body uses. Agreement, Brier,
@@ -21,14 +24,15 @@
  * A RECORD, NEVER A DECISION INPUT: no gate, route or gardener reads these cells.
  */
 import { DECISION_ANSWERED_STEP } from "./decision-model.js";
-import { judgeCalibrationRow } from "./judge-calibration.js";
+import { JUDGE_SHADOW_REFUSED_STEP, JUDGE_SHADOW_ROW_STEPS, judgeCalibrationRow, judgeShadowRowIdentity } from "./judge-calibration.js";
 import { JUDGE_REPLAY_ANSWERED_STEP, JUDGE_REPLAY_FINISHED_STEP } from "./judge-replay-batch.js";
 import { scoreTypedAnswers, type TypedAnswerRow, type TypedAnswerScoreGroup } from "./typed-answer-scores.js";
 import { MODEL_SURFACES, type ModelSurface } from "./worker-provider.js";
 
 export const SHADOW_JUDGE_PAIRED_STEP = "shadow_judge.paired";
 /** The ledger steps only the judge family reads. */
-export const JUDGE_TRIAL_STEPS = [DECISION_ANSWERED_STEP, SHADOW_JUDGE_PAIRED_STEP, JUDGE_REPLAY_ANSWERED_STEP, JUDGE_REPLAY_FINISHED_STEP] as const;
+export const JUDGE_TRIAL_STEPS = [DECISION_ANSWERED_STEP, SHADOW_JUDGE_PAIRED_STEP, JUDGE_REPLAY_ANSWERED_STEP, JUDGE_REPLAY_FINISHED_STEP,
+  ...JUDGE_SHADOW_ROW_STEPS] as const;
 /** A replay answer whose replay wrote no corpus digest (the batch lane, or a replay that has not finished). */
 export const JUDGE_CORPUS_DIGEST_UNRECORDED = "unrecorded";
 
@@ -46,6 +50,8 @@ export interface JudgeTrialProjection {
   /** A shadow row's decision key. Private. */
   decisionKey: string | null;
   answers: TypedAnswerRow[];
+  /** W1-T13365: a refused shadow call. It has no answer; these fields name its cell and its private keys. */
+  refused?: NonNullable<ReturnType<typeof judgeShadowRowIdentity>>;
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -69,11 +75,16 @@ export function projectJudgeTrialRow(row: Record<string, unknown>): JudgeTrialPr
   const finished = row.step === JUDGE_REPLAY_FINISHED_STEP;
   // A direct replay's own decision.answered row reads as no answer here: its answer is in its judge_replay.answered row.
   const typed = finished ? undefined : judgeCalibrationRow(row)?.typed_answers;
+  const shadow = (JUDGE_SHADOW_ROW_STEPS as readonly unknown[]).includes(row.step);
+  const refused = row.step === JUDGE_SHADOW_REFUSED_STEP ? judgeShadowRowIdentity(row) : undefined;
   return {
     basis: replay ? "replay" : "live", finished, corpusDigest: replay ? text(row.corpus_digest) : null,
-    latencyMs: finished ? null : amount(row.latency_ms), settledUsd: finished ? null : amount(row.settled_usd),
+    latencyMs: finished ? null : amount(row.latency_ms),
+    // A judge_shadow row names its dollars cost_usd. A refused call made no request, so it has none.
+    settledUsd: finished || refused ? null : amount(shadow ? row.cost_usd : row.settled_usd),
     decisionKey: text(row.decision_key),
     answers: Array.isArray(typed) ? typed.flatMap((answer) => { const read = readTypedAnswer(answer); return read ? [read] : []; }) : [],
+    ...(refused ? { refused } : {}),
   };
 }
 
@@ -91,6 +102,8 @@ export interface JudgeTrialRow {
   latencyMs: number | null;
   settledUsd: number | null;
   answers: TypedAnswerRow[];
+  /** W1-T13365: true for a refused shadow call, which has no answer. */
+  refused: boolean;
 }
 
 /** What {@link judgeTrialRows} reads off a snapshot row. */
@@ -117,6 +130,12 @@ export function judgeTrialRows(source: string, rows: readonly JudgeTrialSourceRo
     if (judge.decisionKey !== null) privateKeys.add(judge.decisionKey);
     const corpusDigest = judge.basis === "live" ? null
       : judge.corpusDigest ?? (row.runId === null ? undefined : digestOfRun.get(row.runId)) ?? JUDGE_CORPUS_DIGEST_UNRECORDED;
+    if (judge.refused) {
+      const { role, model, modelSurface, head, inputDigest } = judge.refused;
+      for (const key of [inputDigest, head]) if (key !== null) privateKeys.add(key);
+      out.push({ source, ts: row.ts, fingerprint: row.fingerprint, basis: judge.basis, corpusDigest, role, model, modelSurface,
+        latencyMs: null, settledUsd: null, answers: [], refused: true });
+    }
     const groups = new Map<string, TypedAnswerRow[]>();
     for (const answer of judge.answers) {
       for (const key of [answer.inputDigest, answer.head]) if (typeof key === "string" && key.length > 0) privateKeys.add(key);
@@ -127,7 +146,7 @@ export function judgeTrialRows(source: string, rows: readonly JudgeTrialSourceRo
     [...groups.values()].forEach((answers, index) => {
       const first = answers[0]!;
       out.push({ source, ts: row.ts, fingerprint: row.fingerprint, basis: judge.basis, corpusDigest, role: first.role, model: first.model,
-        modelSurface: first.modelSurface, latencyMs: index === 0 ? judge.latencyMs : null, settledUsd: index === 0 ? judge.settledUsd : null, answers });
+        modelSurface: first.modelSurface, latencyMs: index === 0 ? judge.latencyMs : null, settledUsd: index === 0 ? judge.settledUsd : null, answers, refused: false });
     });
   }
   return { rows: out, privateKeys: [...privateKeys].sort() };
@@ -154,16 +173,22 @@ export interface JudgeTrialCell extends ScoredFigures {
   modelSurface: ModelSurface;
   /** Ledger rows: one per request. A request with several questions gives several answers. */
   decisions: number;
+  /** W1-T13365: shadow calls the cash provider refused for capacity or budget. They are no answer and enter no other figure. */
+  refused: number;
   latencyMs: { observed: number; median: number | null; p90: number | null };
   settledUsd: { observed: number; median: number | null };
   /** The same figures per question, because one cell can hold questions with different options. */
   questions: Array<ScoredFigures & { question: string | null }>;
 }
 
-const figuresOf = (group: TypedAnswerScoreGroup): ScoredFigures => ({
+const figuresOf = (group: ScoredFigures): ScoredFigures => ({
   answers: group.answers, distributions: group.distributions, singles: group.singles, abstained: group.abstained, rejected: group.rejected,
   abstentionRate: group.abstentionRate, rejectionRate: group.rejectionRate, agreement: group.agreement, outcomes: group.outcomes,
   brier: group.brier, logLoss: group.logLoss });
+
+/** W1-T13365: the figures of a cell that holds refused calls only. */
+const NO_ANSWERS: ScoredFigures = { answers: 0, distributions: 0, singles: 0, abstained: 0, rejected: 0, abstentionRate: 0, rejectionRate: 0,
+  agreement: { compared: 0, agreed: 0, rate: null }, outcomes: { scored: 0, unknown: 0, notDeclared: 0 }, brier: null, logLoss: null };
 
 const sortedNumbers = (values: ReadonlyArray<number | null>): number[] =>
   values.filter((value): value is number => value !== null).sort((a, b) => a - b);
@@ -186,21 +211,22 @@ export function judgeTrialCells(rows: readonly JudgeTrialRow[], periodOf: (at: s
   score: typeof scoreTypedAnswers = scoreTypedAnswers): JudgeTrialCell[] {
   const groups = new Map<string, JudgeTrialRow[]>();
   for (const row of rows) {
-    if (row.answers.length === 0) continue;
+    if (row.answers.length === 0 && !row.refused) continue;
     const key = judgeTrialCellKey(row, periodOf);
     groups.set(key, [...(groups.get(key) ?? []), row]);
   }
   return [...groups.keys()].sort().map((key): JudgeTrialCell => {
-    const members = groups.get(key)!;
-    const first = members[0]!;
+    const all = groups.get(key)!;
+    const first = all[0]!;
+    const members = all.filter((member) => !member.refused);
     const answers = members.flatMap((member) => member.answers);
     // The cell's key has no question, so its own figures pool its questions: one scorer group.
-    const pooled = score(answers.map((answer) => ({ ...answer, question: null }))).groups[0]!;
+    const pooled = score(answers.map((answer) => ({ ...answer, question: null }))).groups[0] ?? NO_ANSWERS;
     const latencies = sortedNumbers(members.map((member) => member.latencyMs));
     const dollars = sortedNumbers(members.map((member) => member.settledUsd));
     return {
       source: first.source, period: periodOf(first.ts), basis: first.basis, corpusDigest: first.corpusDigest,
-      role: first.role, model: first.model, modelSurface: first.modelSurface, decisions: members.length,
+      role: first.role, model: first.model, modelSurface: first.modelSurface, decisions: members.length, refused: all.length - members.length,
       ...figuresOf(pooled),
       latencyMs: { observed: latencies.length, median: medianOf(latencies), p90: p90Of(latencies) },
       settledUsd: { observed: dollars.length, median: medianOf(dollars) },
