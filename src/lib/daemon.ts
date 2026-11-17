@@ -1663,6 +1663,9 @@ export interface DaemonDeps {
   /** W1-T4429: the hold behind `checkPause` (owner/expiry/liveness); absent, no governor runs. It calls
    *  `clearPauseHold` once at `lapsed` and `onPauseNeedsHuman` once at `needs_human`. */
   checkPauseHold?: () => PauseHoldGovernorInput | undefined;
+  /** W1-T12939: the units the registries this loop does not hold still own — garden children and judge calls — for the
+   *  paused census. Absent, the census is partial: `daemon.pause` says so (`in_flight_unobserved`) and no
+   *  `daemon.drained` is written, because a drained claim cannot be made over units nobody counted. */
   pauseInFlight?: () => ReadonlyArray<PauseInFlightUnit>;
   clearPauseHold?: () => void | Promise<void>;
   onPauseNeedsHuman?: (info: { holdId: string; owner: PauseHoldOwner; expiresAt: string | null }) => void | Promise<void>;
@@ -5246,9 +5249,10 @@ export async function runDaemon(
       ...(census.unobserved.length > 0 ? { in_flight_unobserved: census.unobserved } : {}) };
     log("daemon.pause", { ...row, ...censusFields });
     if (census.count === 0 && !episode.drained) {
+      // A census that did not cover every unit kind is never drained: a garden child or judge call may be live.
+      if (census.unobserved.length > 0) return;
       episode.drained = true;
-      log("daemon.drained", { tick: row.tick, drain_episode: episode.id, in_flight_count: 0,
-        ...(census.unobserved.length > 0 ? { in_flight_unobserved: census.unobserved } : {}) });
+      log("daemon.drained", { tick: row.tick, drain_episode: episode.id, in_flight_count: 0 });
     } else if (census.count > 0 && episode.drained) {
       episode.drained = false;
       log("daemon.drain_reopened", { tick: row.tick, drain_episode: episode.id, in_flight_count: census.count, in_flight: censusFields.in_flight });

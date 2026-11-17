@@ -502,6 +502,9 @@ if [ "$LEDGER_STATE" = "ok" ]; then
       elif [ "$DRAIN_COUNT" -gt 0 ]; then
         DRAIN_VERDICT="draining — ${DRAIN_COUNT} in flight"
         if [ -n "$DRAIN_OLDEST_MS" ]; then DRAIN_VERDICT="${DRAIN_VERDICT}, oldest $(human_age "$((DRAIN_OLDEST_MS / 1000))")"; fi
+      elif printf '%s' "$DRAIN_PAUSE_LINE" | grep -qF '"in_flight_unobserved"'; then
+        # An empty census that names the unit kinds it could not see is not a drained claim: a garden child or judge call may be live.
+        DRAIN_VERDICT="unknown — the census does not cover every kind of in-flight unit"
       elif [ -n "$DRAIN_EPISODE" ] && [ "$DRAIN_EPISODE" = "$DRAIN_STATE_EPISODE" ] && printf '%s' "$DRAIN_STATE_LINE" | grep -qF '"step":"daemon.drained"'; then
         DRAIN_VERDICT="drained — at ${DRAIN_STATE_TS}"
       else

@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { runDaemon, type DaemonDeps, type PauseInFlightUnit } from "#src/lib/daemon.js";
+import { createGardenFlightRegistry, gardenAndJudgeUnits, startGardenOffLoop } from "#src/lib/garden-registry.js";
 import { loadPlan, type Plan } from "#src/lib/plan.js";
 import { registerChildWork, resetChildWork, trackInFlightReview } from "#src/lib/sweep.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
@@ -167,6 +168,54 @@ test("W1-T12939 criterion 2: releasing the hold ends the episode, and the next h
   assert.equal(rows.filter((r) => r.step === "daemon.pause").length, 4);
 });
 
+// ── the production census: garden children and judge calls ───────────────────────────────────────
+
+test("W1-T12939 criterion 1: the census the daemon CLI supplies names a live garden pass and a live judge call, and drained waits for both", async (t) => {
+  // The same registry the CLI hands every garden's off-loop, read by the same builder the CLI hands runDaemon.
+  const flight = createGardenFlightRegistry();
+  let finishPass!: (exit: number) => void;
+  const loop = startGardenOffLoop("plan", 3_600_000, {
+    flight, log: () => {},
+    spawnPass: () => new Promise<number>((resolve) => { finishPass = resolve; }),
+  });
+  t.after(() => { loop.stop(); finishPass(0); });
+  let judgeStartedMs: number | undefined = 1_000;
+  const rows = await heldDaemon(3, { pauseInFlight: () => gardenAndJudgeUnits(flight, judgeStartedMs, 5_000) }, (pass) => {
+    if (pass === 1) judgeStartedMs = undefined; // the judge call settles after the first paused pass
+    if (pass === 2) finishPass(0); // the garden pass settles after the second
+  });
+  const pauses = rows.filter((r) => r.step === "daemon.pause");
+  assert.ok(pauses.length >= 3, `three paused passes ran: ${pauses.length}`);
+  const named = (r: Row) => units(r).map((u) => `${u.kind}:${u.name}`);
+  assert.deepEqual(named(pauses[0]!), ["garden-child:plan", "judge-call:ci-escalation"]);
+  assert.equal(pauses[0]!.extra.in_flight_count, 2);
+  assert.equal(units(pauses[0]!)[1]!.age_ms, 4_000, "the judge call's age is read from its start");
+  assert.deepEqual(named(pauses[1]!), ["garden-child:plan"], "the judge call has settled, the garden child has not");
+  assert.deepEqual(named(pauses[2]!), [], "the garden pass has settled");
+  assert.equal(pauses[0]!.extra.in_flight_unobserved, undefined, "a supplied census covers every unit kind");
+  const steps = rows.map((r) => r.step).filter((s) => s === "daemon.pause" || s === "daemon.drained");
+  assert.deepEqual(steps.slice(0, 4), ["daemon.pause", "daemon.pause", "daemon.pause", "daemon.drained"],
+    `drained is written only on the pass whose census is empty: ${steps}`);
+});
+
+test("W1-T12939 criterion 1: a garden pass that cannot spawn leaves the registry", () => {
+  const flight = createGardenFlightRegistry();
+  const loop = startGardenOffLoop("plan", 3_600_000, { flight, log: () => {}, spawnPass: () => { throw new Error("spawn refused"); } });
+  loop.stop();
+  assert.deepEqual(flight.live(), []);
+});
+
+test("W1-T12939 criterion 2: a daemon with no garden and judge census never writes drained, and says what it could not see", async () => {
+  const rows = await heldDaemon(3, {});
+  const pauses = rows.filter((r) => r.step === "daemon.pause");
+  assert.ok(pauses.length >= 3);
+  for (const pause of pauses) {
+    assert.equal(pause.extra.in_flight_count, 0);
+    assert.deepEqual(pause.extra.in_flight_unobserved, ["garden-child", "judge-call"]);
+  }
+  assert.equal(rows.filter((r) => r.step === "daemon.drained").length, 0, "an empty census that did not cover every unit kind is not drained");
+});
+
 // ── criterion 3 ──────────────────────────────────────────────────────────────────────────────────
 
 const iso = (agoS: number) => new Date(Date.now() - agoS * 1000).toISOString().replace(/\.\d+Z$/, "Z");
@@ -211,6 +260,9 @@ test("W1-T12939 criterion 3: the beat never prints drained for an unreadable, st
   const stale = drainVerdict([row(5000, "daemon.pause", { in_flight_count: 0, drain_episode: "1-1" }), row(4990, "daemon.drained", { drain_episode: "1-1" }), row(4000, "daemon.poll")]);
   assert.match(stale, /^unknown/, `a daemon whose newest line is stale is unknown: ${stale}`);
   assert.match(drainVerdict([row(60, "daemon.pause", { tick: 3, detail: "PAUSE" }), live]), /^unknown/, "a pause row from a daemon that writes no census");
+  const partial = drainVerdict([row(60, "daemon.pause", { in_flight_count: 0, in_flight_unobserved: ["garden-child", "judge-call"], drain_episode: "1-1" }),
+    row(59, "daemon.drained", { drain_episode: "1-1" }), live]);
+  assert.match(partial, /^unknown — the census does not cover/, `an empty census that could not see every unit kind is never drained: ${partial}`);
   // an earlier hold's drained row does not answer for a hold whose census is empty but not yet marked
   const previous = drainVerdict([row(900, "daemon.drained", { drain_episode: "0-1" }), row(60, "daemon.pause", { in_flight_count: 0, drain_episode: "1-1" }), live]);
   assert.match(previous, /^draining — 0 in flight/, previous);
