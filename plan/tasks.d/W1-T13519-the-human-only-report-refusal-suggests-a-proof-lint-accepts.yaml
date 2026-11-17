@@ -7,7 +7,7 @@
   verify: auto
   principles:
     tdd: strict
-  risk: low # one message string in the plan linter and its test
+  risk: high # touches the plan linter and its suite, two concerns by Rule 19; the change is one message string
   origin: "operator-session#ubuntu-2604-main-red-2026-11-17"
   plan_refs:
     - W1-T13439
@@ -30,3 +30,5 @@
     and update the test's assertion. Add a test that builds a recon shard with the suggested proof (read from the
     message, not retyped) and asserts lintTask returns no proof-grep-safety violation. Keep criterion 2 as the existing
     refusal test, retitled.
+    INVARIANT refusal-unchanged: a new docs-only verify: human shard whose proofs are all demonstrations is still refused
+    with check human-only-report at severity block; only the example text in the message changes.
