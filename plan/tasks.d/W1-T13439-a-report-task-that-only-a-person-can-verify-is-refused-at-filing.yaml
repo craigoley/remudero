@@ -1,0 +1,44 @@
+- id: W1-T13439
+  title: "rmd lint-plan refuses a verify: human task whose proofs are all demonstration: and whose files are all under docs/, because its PR can never auto-merge"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # one new block check in the plan linter that refuses filings; it reads only new or changed shards
+  origin: "operator-session#ubuntu-2604-main-red-2026-11-17"
+  plan_refs:
+    - W1-T13352
+  files:
+    - src/lib/task-linter.ts
+    - test/plan/a-report-task-only-a-person-can-verify-is-refused-at-filing.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A verify: human task whose every proof is demonstration: and every file is under docs/ gets one block violation that says its PR can never auto-merge and shows a grep: proof over the report as the runnable form"
+      proof: "grep: W1-T13439 criterion 1 in test/plan/a-report-task-only-a-person-can-verify-is-refused-at-filing.test.ts"
+    - claim: "The same task passes when its rationale carries a NO-AUTO-VERIFY: line with a reason"
+      proof: "grep: W1-T13439 criterion 2 in test/plan/a-report-task-only-a-person-can-verify-is-refused-at-filing.test.ts"
+    - claim: "invariant:runnable-or-code-tasks-unchanged — a verify: human task with any grep: or unit test: proof, or with any file outside docs/, gets no new violation"
+      proof: "grep: W1-T13439 criterion 3 in test/plan/a-report-task-only-a-person-can-verify-is-refused-at-filing.test.ts"
+  rationale: |
+    OBSERVED 2026-11-17: W1-T13352 (a forensics report, files docs/forensics/pooled-test-exit-latches.md and
+    docs/docs-index.json) was filed verify: human with three demonstration: proofs. #19122 went green, remudero-review
+    posted success CAPPED (0/3 proofs executed), and decideAutoMergeArm refused to arm auto-merge on a CAPPED verdict
+    (automerge.arm_skipped in the host ledger). Its three siblings, filed verify: auto with runnable proofs, merged on
+    their own. The operator had to merge #19122 by hand and said he did not want to.
+    OBSERVED at origin/main 43941cf: proofDialectViolations in src/lib/task-linter.ts returns early for a demonstration:
+    proof when task.verify === "human", so such a task lints clean with no warning.
+  design: |
+    A block check in task-linter.ts, reached from lintTask beside proofDialectViolations: when task.verify is "human",
+    every acceptance proof is a demonstration: proof, every files: path starts with docs/, and the rationale has no
+    line starting NO-AUTO-VERIFY:, push one violation. Its message names the outcome (remudero-review CAPPED, auto-merge
+    never arms) and the remedy (verify: auto with grep: proofs over the report's own lines, one physical line each).
+    INVARIANT runnable-or-code-tasks-unchanged: a task with a runnable proof or a non-docs file is untouched.
+  falsifier: |
+    At origin/main, lintTask on a copy of the W1-T13352 shard returns no violation.
+  note: |
+    Reserved with rmd next-task-id --count 2 --branch claude/project-thread-7ycldf on the operator's Mac mini
+    (2026-11-17 17:04Z).

@@ -1,4 +1,5 @@
 /** The status board's plan/ledger projection runs here, never in serve's request loop. */
+import { threadName } from "./thread-names.js";
 import { MessageChannel, Worker, isMainThread, parentPort, receiveMessageOnPort, workerData, type MessagePort } from "node:worker_threads";
 import { statSync } from "node:fs";
 import { dirname } from "node:path";
@@ -224,7 +225,7 @@ export function createBoardProjectionWorker(
         delayMs: options.delayMs ?? 0,
       };
       try {
-        thread = startWorker(import.meta.url, { workerData: data, transferList: [port2] }, { override: options.workerUrl });
+        thread = startWorker(import.meta.url, { name: threadName("board"), workerData: data, transferList: [port2] }, { override: options.workerUrl });
       } catch (error) {
         // A spawn failure is not an absent projection: it is surfaced to the caller below with its
         // cause as the `worker_spawn_failed` reason, so the board falls back knowingly.

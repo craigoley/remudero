@@ -248,9 +248,9 @@ export async function evaluateStrandedTaskDetectors(input: FleetFlowInput): Prom
   const policy = detector.policy;
   const sinceMs = input.nowMs - policy.longMs;
   let rows: readonly FleetFlowRow[];
-  if (input.readRows) rows = await input.readRows(sinceMs, input.nowMs);
+  const inputs = [...detector.inputs];
+  if (input.readRows) rows = await input.readRows(sinceMs, input.nowMs, { reader: "Stranded-task", inputs });
   else {
-    const inputs = [...detector.inputs];
     const key = JSON.stringify([input.stateDir, inputs]);
     let memo = strandedReaders.get(key);
     if (!memo) {
