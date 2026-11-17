@@ -14,7 +14,7 @@ import { installFixtureDuGuard } from "#test/helpers/fixture-du.js";
 import { REAL_SCRIPT } from "#test/helpers/fleet-heartbeat-harness.js";
 import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
-const TOKEN = "ghs_FIXTURE0TOKEN0VALUE0ABCDEFGHIJKLMNOP";
+const TOKEN = "fixture-token-value-ABCDEFGHIJKLMNOP0123";
 const BRANCH = "heartbeat-fixture";
 const SCRIPT_REL = "scripts/fleet-heartbeat.sh";
 const REAL_GIT = String(spawnSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).stdout).trim();
