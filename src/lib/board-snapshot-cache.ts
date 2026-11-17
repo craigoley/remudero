@@ -686,9 +686,14 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
         for (const buffer of next.lines) { digest.update(buffer); bytes += buffer.length; }
         try {
           await writeBehind!(stage, path, next.lines);
-        } catch {
+        } catch (writeError) {
+          // Carried, not erased: the refusal row below records it, and the next commit retries the write.
+          void writeError;
           // A failed write never publishes: its stage file goes, and the earlier file stays as it was.
-          await fs.promises.unlink(stage).catch(() => undefined);
+          await fs.promises.unlink(stage).catch((unlinkError: unknown) => {
+            // Carried, not erased: a stage left by a failed write is best-effort cleanup; the refusal is logged below.
+            void unlinkError;
+          });
           log("board_snapshot.commit_refused", next.channel, next.rows, bytes, "write_failed");
           if (queued === undefined) failed = next;
           continue;
@@ -1036,15 +1041,24 @@ export async function writeSnapshotFileAsync(stage: string, path: string, buffer
     }
     await handle.sync();
   } catch (error) {
-    await handle.close().catch(() => undefined);
-    await fs.promises.unlink(stage).catch(() => undefined);
+    await handle.close().catch((closeError: unknown) => {
+      // Carried, not erased: the write's own error is rethrown below; a close failure after it adds nothing.
+      void closeError;
+    });
+    await fs.promises.unlink(stage).catch((unlinkError: unknown) => {
+      // Carried, not erased: the stage file is best-effort cleanup; the write's error is rethrown below.
+      void unlinkError;
+    });
     throw error;
   }
   await handle.close();
   try {
     await fs.promises.rename(stage, path);
   } catch (error) {
-    await fs.promises.unlink(stage).catch(() => undefined);
+    await fs.promises.unlink(stage).catch((unlinkError: unknown) => {
+      // Carried, not erased: the stage file is best-effort cleanup; the rename's error is rethrown below.
+      void unlinkError;
+    });
     throw error;
   }
 }
