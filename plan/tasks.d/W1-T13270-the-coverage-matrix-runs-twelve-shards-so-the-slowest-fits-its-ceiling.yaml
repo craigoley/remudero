@@ -24,6 +24,18 @@
     - test/the-coverage-entry-shards-the-way-ci-does.test.ts
     - test/the-live-selection-narrows-the-coverage-lane.test.ts
     - test/the-coverage-lane-critical-path-is-its-slowest-shard-plus-a-serial-merge.test.ts
+    - src/lib/selector-shadow-gardener.ts
+    - test/ci-sharding.test.ts
+    - test/a-diff-with-no-src-path-skips-coverage-but-not-its-tests.test.ts
+    - test/coverage-durations-self-correct.test.ts
+    - test/main-builds-the-test-impact-map-the-shadow-arm-reads.test.ts
+    - test/preflight-ci-parity.test.ts
+    - test/preflight-coverage-mode.test.ts
+    - test/preflight-progress-streaming.test.ts
+    - test/proof-exec-tmp-hygiene.test.ts
+    - test/the-full-suite-runs-in-the-merge-queue.test.ts
+    - test/the-test-shards-are-sized-by-wall-time.test.ts
+    - test/workflow-single-suite-run.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -73,16 +85,26 @@
        shards. So split it: `NIGHTLY_SHARD_COUNT = 8` and `CI_COVERAGE_SHARD_COUNT = 12`, with each PRODUCERS row
        carrying its own `shards`. MEASURED 2026-11-16 (run 43807112604): the nightly shards took 21 to 35 minutes of
        their 45, so they do not need more shards.
-    2a. src/lib/ci-parity.ts coverageShardConcurrency keeps a local cap of 8 concurrent shards
-       (LOCAL_COVERAGE_MAX_CONCURRENCY), so a local coverage run's memory and CPU use do not grow with CI's matrix.
+    2a. NO LOCAL CAP (amended 2026-11-17): src/lib/ci-parity.ts coverageShardConcurrency stays
+       min(cpus, CI_COVERAGE_SHARD_COUNT). W1-T5715 holds local coverage concurrency to CI's count, so a separate cap
+       of 8 would make the local entry disagree with CI; a machine with fewer cores is already bounded by its cpus.
+    2b. SELECTOR-SHADOW WIDTH (found by the build's full sweep): src/lib/selector-shadow-gardener.ts parses
+       `coverage-shard (k/N)` job names and log prefixes and hard-coded N = 8, so a 12-shard run would read as
+       incomplete. Read each run's width from its own job names (SELECTOR_SHADOW_SHARD_COUNTS = [8, 12]), refuse a
+       run that mixes widths, and keep reading 8 for logs written before this change, so archived runs still count.
     3. New suite test/ci/the-coverage-shard-count-is-one-number-everywhere.test.ts parses both workflows with the
        `yaml` package and asserts criterion 1 (every coverage spelling equals CI_COVERAGE_SHARD_COUNT and
-       coverage-floor's SHARD_COUNT, and equals 12) and criterion 2 (every ci-shard spelling equals 8). Root through
+       coverage-floor's CI_COVERAGE_SHARD_COUNT, and equals 12) and criterion 2 (every ci-shard spelling equals 8). Root through
        `#test/helpers/repo-root.js`.
     4. Update the existing suites that pin 8 for the coverage lane only where they pin the coverage count, never where
        they pin ci-shard's: test/the-coverage-entry-shards-the-way-ci-does.test.ts, the-live-selection-narrows-the-coverage-lane,
        the-coverage-lane-critical-path-is-its-slowest-shard-plus-a-serial-merge, and the merge-group fixture in
-       test/ci/coverage/the-live-coverage-flip-requires-a-fresh-nightly-floor.test.ts.
+       test/ci/coverage/the-live-coverage-flip-requires-a-fresh-nightly-floor.test.ts. The full sweep also found
+       coverage-count fixtures in test/ci-sharding, a-diff-with-no-src-path-skips-coverage-but-not-its-tests,
+       coverage-durations-self-correct, main-builds-the-test-impact-map-the-shadow-arm-reads, preflight-ci-parity,
+       preflight-coverage-mode, preflight-progress-streaming, proof-exec-tmp-hygiene,
+       the-full-suite-runs-in-the-merge-queue, the-test-shards-are-sized-by-wall-time and workflow-single-suite-run;
+       each derives the coverage count from ci.yml's coverage-ratchet matrix or CI_COVERAGE_SHARD_COUNT.
     INVARIANT ci-shard-unchanged: the ci-shard matrix, its job name, its --shard selections, test-tier-manifest's
     DEFAULT_CI_SHARD_COUNT and ci-gate's ci-shard entries stay at 8; only the coverage lane's count moves.
   falsifier: |

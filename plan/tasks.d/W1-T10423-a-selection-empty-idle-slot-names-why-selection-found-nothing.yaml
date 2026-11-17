@@ -12,7 +12,7 @@
   plan_refs: [W1-T8235, W1-T8238]
   files: [src/lib/idle-lane-accounting.ts, src/lib/idle-capacity-detector.ts, src/lib/daemon.ts, test/a-selection-empty-idle-slot-names-why-selection-found-nothing.test.ts]
   status: queued
-  priority: 2
+  priority: 0.6
   attempts: 0
   rationale: |
     Rule 19 span: one integration test must carry the daemon's selection refusal through idle-lane accounting into the detector's incident; no subsystem alone can satisfy that invariant.
