@@ -29,17 +29,20 @@ function root(t: Ctx): string {
 /** A write-behind seam that records when it runs and lets the test decide when the real write proceeds. */
 function gatedWriter() {
   const calls: Array<{ stage: string; path: string; release: () => void; done: Promise<void> }> = [];
+  const callWaiters: Array<() => void> = [];
+  const waitForCall = async (count: number): Promise<void> => {
+    while (calls.length < count) await new Promise<void>((resolve) => callWaiters.push(resolve));
+  };
   const write = (stage: string, path: string, buffers: readonly Buffer[]) => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
     const done = gate.then(() => writeSnapshotFileAsync(stage, path, buffers));
     calls.push({ stage, path, release, done });
+    for (const resolve of callWaiters.splice(0)) resolve();
     return done;
   };
-  return { write, calls };
+  return { write, calls, waitForCall };
 }
-
-const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 20));
 
 test("W1-T13332 criterion 1: a 30,000-row commit returns before any write, and the file then equals a synchronous commit's", async (t) => {
   const rows = issues(30_000);
@@ -50,7 +53,7 @@ test("W1-T13332 criterion 1: a 30,000-row commit returns before any write, and t
   assert.equal(cache.commitIssues(rows), true);
   assert.equal(writer.calls.length, 0, "no write started on the committing turn");
   assert.equal(existsSync(boardSnapshotPath(behindRoot, "o", "r")), false, "nothing on disk yet");
-  await settle();
+  await writer.waitForCall(1);
   assert.equal(writer.calls.length, 1, "the write runs after the caller's turn");
   writer.calls[0]!.release();
   await writer.calls[0]!.done;
@@ -62,14 +65,13 @@ test("W1-T13332 criterion 2: quick commits leave the latest on disk, one write a
   const writer = gatedWriter();
   const cache = createBoardSnapshotCache(dir, "o", "r", { clock, writeBehind: { write: writer.write } });
   cache.commitIssues(issues(50, "first"));
-  await settle();
+  await writer.waitForCall(1);
   cache.commitIssues(issues(50, "second"));
   cache.commitIssues(issues(50, "third"));
-  await settle();
   assert.equal(writer.calls.length, 1, "one write in flight; later commits wait behind it");
   writer.calls[0]!.release();
   await writer.calls[0]!.done;
-  await settle();
+  await writer.waitForCall(2);
   assert.equal(writer.calls.length, 2, "the queued commits collapse into one more write");
   writer.calls[1]!.release();
   await writer.calls[1]!.done;
@@ -77,12 +79,16 @@ test("W1-T13332 criterion 2: quick commits leave the latest on disk, one write a
   assert.match(file, /needs human 1 third/);
   assert.doesNotMatch(file, /second/, "the replaced commit was never written");
   // A write that fails after its stage file exists (a crash before the rename) leaves the published file untouched.
-  const failing = createBoardSnapshotCache(dir, "o", "r", { clock, writeBehind: { write: async (stage, _path, buffers) => {
+  let refuse!: () => void;
+  const refused = new Promise<void>((resolve) => { refuse = resolve; });
+  const failing = createBoardSnapshotCache(dir, "o", "r", { clock, log: (event) => {
+    if (event === "board_snapshot.commit_refused") refuse();
+  }, writeBehind: { write: async (stage, _path, buffers) => {
     writeFileSync(stage, Buffer.concat([...buffers]));
     throw new Error("disk full before the rename");
   } } });
   failing.commitIssues(issues(50, "fourth"));
-  await settle();
+  await refused;
   assert.match(readFileSync(boardSnapshotPath(dir, "o", "r"), "utf8"), /third/, "the earlier file is intact");
   assert.deepEqual(readdirSync(dirname(boardSnapshotPath(dir, "o", "r"))).filter((f) => f.includes(".tmp-")), [], "no stage file is left");
 });
@@ -91,7 +97,7 @@ test("W1-T13332 criterion 3: seeds answer the committed rows at once, while the 
   const writer = gatedWriter();
   const cache = createBoardSnapshotCache(root(t), "o", "r", { clock, writeBehind: { write: writer.write } });
   cache.commitIssues(issues(3, "seeded"));
-  await settle();
+  await writer.waitForCall(1);
   assert.equal(writer.calls.length, 1);
   const seed = cache.issueSeed();
   assert.deepEqual([...(seed?.keys() ?? [])], [1, 2, 3], "the committed rows, before the file exists");
