@@ -37,7 +37,7 @@ import { createTaskView, type ReadModelInstanceState as TaskViewInstanceState } 
 import { planFilesIdentity, threadPlanPin } from "./thread-plan.js";
 import { createWorkstreamsView, WORKSTREAMS_VIEW_NAME } from "./workstreams-view.js";
 import { ACTIONS_VIEW_NAME, createActionsView } from "./actions-view.js";
-import { createDemandBook, TASK_VIEW_NAME, type DemandBook } from "./view-demand.js";
+import { createDemandBook, TASK_VIEW_NAME, VIEW_DEMAND_EVICT_MS, type DemandBook } from "./view-demand.js";
 import {
   ORACLE_DEFAULT_WINDOW_MS,
   ORACLE_DRIFT_INTERVAL_MS,
@@ -536,6 +536,8 @@ export interface ReadModelTickerOptions {
   readers?: ReadModelViewReaders;
   lane?: "fast" | "heavy";
   restoreCosts?: boolean;
+  /** W1-T13490: how long an earlier run's demand keys are carried before an unread one is dropped; one eviction window by default. */
+  demandCarryMs?: number;
 }
 
 export interface IntegrityRequest {
@@ -1520,6 +1522,12 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
 
   const demandViews = views.filter((view) => view.demand === true).map((view) => view.name);
   const demandSwept = new Set<ViewUnit>();
+  /**
+   * W1-T13490: until one eviction window has passed since this worker started, an earlier run's persisted demand key
+   * is carried, not dropped: serve keeps answering it (stale, by W1-T13457's carried rule), and a read in the window
+   * wants it like any other. The first sweep after the window drops what nobody read.
+   */
+  const demandCarriedUntil = clock.now() + (opts.demandCarryMs ?? VIEW_DEMAND_EVICT_MS);
 
   function demandKeyBelongsTo(unit: ViewUnit, key: string): boolean {
     const instances = new URLSearchParams(key).getAll("instance");
@@ -1528,7 +1536,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   }
 
   /**
-   * Evict demand keys unread ten minutes; first sweep also drops earlier runs' persisted keys
+   * Evict demand keys unread ten minutes; the first sweep after the carry window (W1-T13490) drops earlier runs' persisted keys
    * for owned units only. Transferred units get their own first sweep.
    */
   function sweepDemand(): void {
@@ -1541,7 +1549,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       for (const { view, key } of book.expire()) {
         if (owned.some(unit => unit.view.name === view && demandKeyBelongsTo(unit, key))) drop(view, key);
       }
-      const starting = owned.filter(unit => !demandSwept.has(unit));
+      const starting = clock.now() < demandCarriedUntil ? [] : owned.filter(unit => !demandSwept.has(unit));
       for (const unit of starting) demandSwept.add(unit);
       for (const view of new Set(starting.map(unit => unit.view.name))) {
         for (const key of knownKeys(view)) {
