@@ -1790,7 +1790,14 @@ import {
 } from "./lib/proof-queue-audit.js";
 // W1-T3506: the pure write-boundary refusal (W1-T3389) `runFixRung`'s acceptance-gate body repair
 // must actually CALL before `updatePrBody`, not merely a capability sitting next to it unwired.
-import { repairedProofsAreSafeToPush, diagnoseUnrunnableProofs, renderBodyDefects, replaceBodyProofs } from "./lib/body-repair.js";
+import {
+  repairedProofsAreSafeToPush,
+  diagnoseUnrunnableProofs,
+  renderBodyDefects,
+  replaceBodyProofs,
+  planFilingAcceptanceCure,
+  type FilingDiffFile,
+} from "./lib/body-repair.js";
 import { fixRungInputFields, prBodyDigest } from "./lib/sweep.js";
 import { diagnoseBodyDefects } from "./lib/body-repair.js";
 import { criterionFieldTampered, filingSelfCreditCheck, missingReviewReuseFact, priorPostedReviewRow, proofChildEnv, proofSandboxArgv, proofSandboxStatus, ProofSandboxUnavailableError } from "./lib/review.js";
@@ -5662,6 +5669,8 @@ export async function repairPrMetadata(
     readonly AcceptanceCriterion[] | Promise<readonly AcceptanceCriterion[]> = planCriteriaAtMergeForRepair,
   /** The test files this PR head ADDS against main — absent at base, so a `unit test:` on one cannot pass there. */
   addedTestsAtHead: (headSha: string) => AddedTestsAtHead = addedTestFilesAtHead,
+  /** The complete diff and head text for added task shards, used only for the no-header filing cure. */
+  planFilingDiffAtHead: (headSha: string) => PlanFilingDiffAtHead = addedPlanFilingDiffAtHead,
 ): Promise<MetadataRepairResult> {
   const live = read(pr.prUrl);
   const fields: { title?: string; body?: string } = {};
@@ -5696,7 +5705,13 @@ export async function repairPrMetadata(
     const added: AddedTestsAtHead = pr.headSha ? addedTestsAtHead(pr.headSha) : { kind: "unreadable", reason: "no PR head sha" };
     const headOnly = added.kind === "read" ? added.files.map(addedTestCriterion) : [];
     const gate = acceptanceAuthorTimeCheck(live.body);
-    if (!gate.ok && (gate.defect === "no-header" || gate.defect === "empty-proofs") && headOnly.length === 0) {
+    const filingDiff = !gate.ok && gate.defect === "no-header" && headOnly.length === 0 && pr.headSha
+      ? planFilingDiffAtHead(pr.headSha)
+      : undefined;
+    const planFiling = filingDiff?.kind === "read"
+      ? planFilingAcceptanceCure(live.body, filingDiff.files, filingDiff.shardDir, acceptanceAuthorTimeCheck)
+      : undefined;
+    if (!gate.ok && (gate.defect === "no-header" || gate.defect === "empty-proofs") && headOnly.length === 0 && !planFiling) {
       const why = added.kind === "read" ? "the diff adds no test file" : added.reason;
       return {
         repaired: false,
@@ -5706,7 +5721,7 @@ export async function repairPrMetadata(
           "a generic block would pass at base and fail proof-discrimination",
       };
     }
-    const repair = acceptanceGateBodyRepair(live.body, headOnly, gateRed ? { planCriteria } : undefined);
+    const repair = planFiling ?? acceptanceGateBodyRepair(live.body, headOnly, gateRed ? { planCriteria } : undefined);
     if (!repair) {
       return {
         repaired: false,
@@ -5951,6 +5966,38 @@ export function addedTestFilesAtHead(headSha: string, cwd: string = process.cwd(
     return { kind: "read", files };
   } catch (err) {
     return { kind: "unreadable", reason: `the diff at ${headSha} could not be read: ${String((err as Error).message).split("\n")[0]}` };
+  }
+}
+
+/** `repairPrMetadata`'s complete PR diff plus head text for added shards; unreadable is never treated as an empty filing. */
+export type PlanFilingDiffAtHead =
+  | { kind: "read"; files: FilingDiffFile[]; shardDir: string }
+  | { kind: "unreadable"; reason: string };
+
+/** Read the whole diff so the cure can refuse mixed code/plan changes, then read only added task-shard blobs. */
+export function addedPlanFilingDiffAtHead(headSha: string, cwd: string = process.cwd()): PlanFilingDiffAtHead {
+  if (!/^[0-9a-f]{40}$/i.test(headSha)) return { kind: "unreadable", reason: "the PR head is not a full commit SHA" };
+  try {
+    const top = hostWorktreeGitAtTopLevel(cwd, ["rev-parse", "--show-toplevel"]).trim();
+    const base = hostWorktreeGitAtTopLevel(top, ["merge-base", "origin/main", headSha]).trim();
+    const shardDir = relative(top, join(resolveRepoLayout(top).planDir, "tasks.d"));
+    const names = hostWorktreeGitAtTopLevel(top, ["diff", "--name-status", "-z", "--no-renames", base, headSha, "--"], { maxBuffer: 1 << 26 })
+      .split("\0").filter((part) => part.length > 0);
+    const files: FilingDiffFile[] = [];
+    for (let i = 0; i < names.length;) {
+      const status = names[i++];
+      const path = names[i++];
+      if (!status || !path || status.length !== 1) throw new Error("the PR diff has an unreadable name-status record");
+      const added = status === "A";
+      const shardPrefix = `${shardDir.replace(/\/+$/, "")}/`;
+      const headText = added && path.startsWith(shardPrefix) && path.endsWith(".yaml")
+        ? hostWorktreeGitAtTopLevel(top, ["show", `${headSha}:${path}`], { maxBuffer: 1 << 20 })
+        : undefined;
+      files.push({ path, added, ...(headText === undefined ? {} : { headText }) });
+    }
+    return { kind: "read", files, shardDir };
+  } catch (error) {
+    return { kind: "unreadable", reason: `the PR diff at ${headSha} could not be read: ${String((error as Error).message).split("\n")[0]}` };
   }
 }
 
@@ -10900,6 +10947,9 @@ const CENSUS_BASELINE_FILES = ["scripts/clock-signature-baseline.json", "scripts
 const CENSUS_PUSH_CHECK = "pre-push census-precheck";
 const CENSUS_SNAPSHOT_ENV = "RMD_CENSUS_SNAPSHOT";
 const CENSUS_SNAPSHOT_ROOTS = [...MEASURED_ROOTS, "test", "plan"];
+/** W1-T13458: the census snapshot's file lists and blob headers name paths only, so Node's 1 MiB default would refuse
+ *  them as the repository grows; its blob read is bounded by the sizes git reports instead. */
+const CENSUS_SNAPSHOT_LIST_BOUND = 128 * 1024 * 1024;
 const COVERAGE_PUSH_CHECK = "pre-push coverage-precheck";
 const MERGED_TYPECHECK_PUSH_CHECK = "merged-tree-typecheck";
 const CENSUS_PUSH_NEVER_BYPASS =
@@ -10961,7 +11011,8 @@ function* writeFixCensusSnapshotSteps(
       (CENSUS_SNAPSHOT_ROOTS.some((dir: string) => p.startsWith(`${dir}/`)) || ["package.json", ".dependency-cruiser.cjs"].includes(p)) &&
       (/\.(?:ts|mts|mjs|js|cjs|json|ya?ml|sh|md|toml|txt)$/.test(p) || !basename(p).includes("."));
     function* paths(args: string[]): Steps<string[]> {
-      return [...new Set((yield* step(() => runGit(root, args))).split("\n").filter((p) => p && censusPath(p)))];
+      return [...new Set((yield* step(() => runGit(root, args, { maxBuffer: CENSUS_SNAPSHOT_LIST_BOUND })))
+        .split("\n").filter((p) => p && censusPath(p)))];
     }
     const headPaths = yield* paths(["ls-files"]);
     const basePaths = yield* paths(["ls-tree", "-r", "--name-only", mergeBase]);
@@ -10969,9 +11020,15 @@ function* writeFixCensusSnapshotSteps(
       .filter((p) => p.endsWith("baseline.json"));
     function* blobs(ref: string, names: string[]): Steps<Record<string, string>> {
       if (names.length === 0) return {};
-      const output = Buffer.from(yield* step(() => runGit(root, ["cat-file", "--batch"], {
-        input: names.map((p) => `${ref}:${p}\n`).join(""), maxBuffer: 128 * 1024 * 1024,
-      })));
+      const input = names.map((p) => `${ref}:${p}\n`).join("");
+      // `--batch` writes each `--batch-check` header line, then each sized object and a newline: its exact byte count.
+      const headers = yield* step(() => runGit(root, ["cat-file", "--batch-check"], { input, maxBuffer: CENSUS_SNAPSHOT_LIST_BOUND }));
+      const maxBuffer = headers.split("\n").reduce((bytes, line) => {
+        const size = /^[a-f0-9]+ \S+ (\d+)$/.exec(line)?.[1];
+        return size === undefined ? bytes : bytes + Number(size) + 1;
+      }, Buffer.byteLength(headers));
+      // latin1: the async runner then counts the bytes git wrote, which the bound above is.
+      const output = Buffer.from(yield* step(() => runGit(root, ["cat-file", "--batch"], { input, maxBuffer, encoding: "latin1" })), "latin1");
       const texts: Record<string, string> = {};
       let offset = 0;
       for (const path of names) {

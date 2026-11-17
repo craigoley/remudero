@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: auto
+  verify: human
   risk: low
   priority: 2.2
   status: queued
@@ -11,6 +11,7 @@
   author_class: machine
   origin: "scout:board_review.check_failed"
   files:
+    - "src/lib/board-review.ts"
     - test/scout-board-review-check-failed.test.ts
   acceptance:
     - claim: "board_review.check_failed stops recurring: its cause is fixed rather than its rows hidden"
@@ -20,11 +21,3 @@
     The ledger step board_review.check_failed carries a failure shape and landed rows in both halves of the trailing 7 days: 1 in the older half, 10 in the newer.
     No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
     The rows name no file of their own: locate the code that writes this step first, then fix its cause.
-  risk_ruling:
-    verdict: "operator"
-    action: proceed
-    confidence: 1
-    reasons:
-      - "released by the operator with rmd approve"
-    judged_at: "2026-10-22T03:31:39.860Z"
-    pin: "7c696221387b08dfe37c69a4120d77cc280a4022c01e68e6ee5aa4be87fd6b17"
