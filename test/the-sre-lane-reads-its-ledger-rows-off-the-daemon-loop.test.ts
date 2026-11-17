@@ -322,11 +322,11 @@ async function daemonPass(fx: Fixture, input: SreLaneInput): Promise<void> {
   daemonSreGovernorEnforcer({ ledgerPath: fx.ledgerPath, laneOffPath: join(fx.stateDir, "SRE_LANE_OFF") }).readLedger();
 }
 
-/** The live tail's guard against a rewrite in place: it reads at most this many bytes at the file's start and
- *  before its offset on every call (src/lib/live-ledger-tail.ts ANCHOR_BYTES). They are not ledger rows. */
+/** The live tail's guard against a rewrite in place (W1-T11210): after an append it reads this many bytes before
+ *  its offset, in the same read as the new bytes (src/lib/live-ledger-tail.ts ANCHOR_BYTES). */
 const TAIL_GUARD_BYTES = 64;
 
-test("W1-T13367 criterion 1: invariant:a-pass-reads-only-new-ledger-bytes — a pass over an unchanged state dir parses no ledger row, and after an append a pass reads only the new bytes", async () => {
+test("W1-T13367 criterion 1: invariant:a-pass-reads-only-new-ledger-bytes — a pass over an unchanged state dir parses no ledger row, and after an append a pass reads only the new bytes and the 64-byte anchor before them", async () => {
   const fx = fixture("bytes");
   const reader = daemonReader();
   const pass = async (minute: number) => watchLedgerReads(fx.stateDir, async () => daemonPass(fx, await laneInput(fx, NOW + minute * MIN, reader)));
@@ -347,9 +347,8 @@ test("W1-T13367 criterion 1: invariant:a-pass-reads-only-new-ledger-bytes — a 
   assert.deepEqual(unchanged.reads.whole, [], "no ledger file is read whole: no readLedgerLines, no union read of a rotation");
   assert.deepEqual(unchanged.reads.offLoop, [], "no rotation is loaded again");
   assert.equal(unchanged.reads.gunzips, 0, "no rotation is decompressed");
-  // main's live tail (W1-T11210) re-reads its two 64-byte guards on each call; no other byte of any ledger file is read.
-  assert.ok(unchanged.reads.ranges.every((r) => r.file === LEDGER_FILENAME && r.bytes <= TAIL_GUARD_BYTES &&
-    (r.position === 0 || r.position >= liveSize - TAIL_GUARD_BYTES)), `only the tail's guard bytes are read: ${JSON.stringify(unchanged.reads.ranges)}`);
+  // The live tail sees the same dev, ino, size, mtime and ctime as its last read: it reads no byte at all.
+  assert.deepEqual(unchanged.reads.ranges, [], "no byte of any ledger file is read");
 
   // k rows appended: the next pass reads from the old end of the file, and parses only those rows.
   const appended = [
@@ -362,8 +361,11 @@ test("W1-T13367 criterion 1: invariant:a-pass-reads-only-new-ledger-bytes — a 
   assert.deepEqual(after.reads.whole, [], "no ledger file is read whole");
   assert.deepEqual(after.reads.offLoop, []);
   assert.equal(after.reads.gunzips, 0);
-  assert.ok(after.reads.ranges.every((r) => r.file === LEDGER_FILENAME &&
-    (r.position >= liveSize - TAIL_GUARD_BYTES || (r.position === 0 && r.bytes <= TAIL_GUARD_BYTES))), `no byte an earlier pass read is read again: ${JSON.stringify(after.reads.ranges)}`);
+  // Each live tail reads once: the new bytes and the 64-byte anchor immediately before them, and never the file's start.
+  const newBytes = statSync(fx.ledgerPath).size - liveSize;
+  assert.ok(after.reads.ranges.length > 0, "positive control: the pass reads the appended rows");
+  assert.deepEqual(after.reads.ranges.filter((r) => !(r.file === LEDGER_FILENAME && r.position === liveSize - TAIL_GUARD_BYTES &&
+    r.bytes === newBytes + TAIL_GUARD_BYTES)), [], `each read is the 64-byte anchor and the ${newBytes} new bytes: ${JSON.stringify(after.reads.ranges)}`);
   // The tail parses each new row once; the slice reader parses only the rows that name one of its steps.
   assert.ok(after.reads.parsedRows >= appended.length && after.reads.parsedRows <= 2 * appended.length, `parsed ${after.reads.parsedRows} rows for ${appended.length} appended`);
 });

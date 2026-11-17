@@ -9,6 +9,9 @@ import { closeSync, fstatSync, openSync, readSync } from "node:fs";
  * newlines, skip blank lines, drop and report an unparseable complete line. A file whose identity (dev:ino)
  * changed, as a rotation's rename does, that shrank below what was read, or whose first or last-read bytes
  * differ from what was read (a rewrite in place), is read again from its start.
+ * W1-T13367: a call whose fstat shows the same identity, size, mtime and ctime as the last full read reads no
+ * byte. Any other call reads once, from the 64-byte anchor before `offset` to the end, and takes the next head and
+ * anchor from those bytes; it reads the head again only when the file did not grow.
  * A trailing line with no newline yet is parsed for this call but not consumed; while its bytes are unchanged,
  * later calls reuse that parse. A missing file reads as no
  * rows. Any other read error clears the state and is rethrown, so the next call starts over.
@@ -59,6 +62,8 @@ function tentativeRow(text: string): Record<string, unknown> | undefined {
 export function createLiveLedgerTail(path: string, retainMs: number, opts: { keepUntimed?: boolean } = {}): LiveLedgerTail {
   const keepUntimed = opts.keepUntimed === true;
   let identity: string | undefined;
+  // W1-T13367: the size and times of the last fstat whose bytes were all read; undefined after a short read or a reset.
+  let seenStat: { size: number; mtimeMs: number; ctimeMs: number } | undefined;
   let offset = 0;
   let head: Buffer = Buffer.alloc(0);
   let anchor: Buffer = Buffer.alloc(0);
@@ -69,6 +74,7 @@ export function createLiveLedgerTail(path: string, retainMs: number, opts: { kee
   let withPending: ReadonlyArray<Record<string, unknown>> | undefined;
   const reset = (): void => {
     identity = undefined;
+    seenStat = undefined;
     offset = 0;
     head = Buffer.alloc(0);
     anchor = Buffer.alloc(0);
@@ -94,23 +100,43 @@ export function createLiveLedgerTail(path: string, retainMs: number, opts: { kee
     try {
       const stat = fstatSync(fd);
       const seen = `${stat.dev}:${stat.ino}`;
-      const rewritten = offset > 0 && (!bytesAt(fd, 0, head.length).equals(head) ||
-        !bytesAt(fd, offset - anchor.length, anchor.length).equals(anchor));
-      if (seen !== identity || stat.size < offset || rewritten) {
-        reset();
-        identity = seen;
+      // The bytes after `offset`: complete lines not yet parsed, then the pending line.
+      let chunk: Buffer;
+      const unchanged = seen === identity && seenStat !== undefined && stat.size === seenStat.size &&
+        stat.mtimeMs === seenStat.mtimeMs && stat.ctimeMs === seenStat.ctimeMs && stat.size === offset + pendingBytes.length;
+      if (unchanged) {
+        // W1-T13367: the same file, size and times as the last full read: no byte is read again.
+        chunk = pendingBytes;
+      } else {
+        let from = 0;
+        let read: Buffer | undefined;
+        if (seen === identity && stat.size >= offset) {
+          // One read from the anchor to the end. The anchor's bytes must be unchanged; the head is read again only
+          // when the file did not grow, as a rewrite in place of the same or a smaller size can leave it so.
+          from = offset - anchor.length;
+          read = bytesAt(fd, from, stat.size - from);
+          const grew = stat.size > offset + pendingBytes.length;
+          const sameHead = from === 0 || grew || bytesAt(fd, 0, head.length).equals(head);
+          if (read.length < anchor.length || !read.subarray(0, anchor.length).equals(anchor) || !sameHead) read = undefined;
+        }
+        if (read === undefined) {
+          reset();
+          identity = seen;
+          from = 0;
+          read = bytesAt(fd, 0, stat.size);
+        }
+        chunk = read.subarray(offset - from);
+        const next = offset + chunk.lastIndexOf(NEWLINE) + 1;
+        // The new head and anchor come from the bytes just read: the read starts at most ANCHOR_BYTES before `offset`.
+        const guard = Math.min(ANCHOR_BYTES, next);
+        if (from === 0) head = Buffer.from(read.subarray(0, guard));
+        anchor = Buffer.from(read.subarray(next - from - guard, next - from));
+        seenStat = from + read.length === stat.size ? { size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs } : undefined;
       }
-      const buffer = Buffer.alloc(stat.size - offset);
-      const read = buffer.length === 0 ? 0 : readSync(fd, buffer, 0, buffer.length, offset);
-      const chunk = buffer.subarray(0, read);
       const end = chunk.lastIndexOf(NEWLINE) + 1;
       const appended: Array<Record<string, unknown>> = [];
       parseLines(path, chunk.subarray(0, end).toString("utf8"), appended);
       offset += end;
-      if (offset > 0) {
-        head = bytesAt(fd, 0, Math.min(ANCHOR_BYTES, offset));
-        anchor = bytesAt(fd, offset - Math.min(ANCHOR_BYTES, offset), Math.min(ANCHOR_BYTES, offset));
-      }
       const cutoff = nowMs - retainMs;
       // Nothing can age out of an unbounded tail that keeps untimed rows, so an unchanged read allocates nothing.
       const dropsNone = cutoff === Number.NEGATIVE_INFINITY && keepUntimed;
