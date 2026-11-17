@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { join, relative, sep } from "node:path";
 import { resolveRepoLayout } from "./repo-layout.js";
+import { OPS_CATALOG_MAX_SHARDS, OPS_CATALOG_MAX_BLOB_BYTES, OPS_CATALOG_MAX_TOTAL_BYTES, OPS_CATALOG_MAX_TREE_ENTRIES } from "./ops-catalog-source.js";
 import { parse as parseYaml } from "yaml";
 import { defaultGitRunnerAsync, readBlobsAtRefAsync, type Plan } from "./plan.js";
 import { createPlanRevisionStore } from "./plan-revision-store.js";
@@ -61,20 +62,38 @@ async function catalog(root: string, commit: string, external = false): Promise<
   // The production private reader still requires its canonical house plan paths.
   if (external && (layout.planMonolith !== defaults.planMonolith || layout.planDir !== defaults.planDir)) return unknown("catalog_incompatible");
   const monolith = within(layout.planMonolith), shardDir = within(join(layout.planDir, "tasks.d")) + "/";
-  const entries = (await git(["ls-tree", "-rz", commit, "--", monolith, shardDir])).split("\0").filter(Boolean);
+  const entries = (await git(["ls-tree", "-rlz", commit, "--", monolith, shardDir])).split("\0").filter(Boolean);
+  let declaredBytes = 0;
   const files = entries.map(line => {
-    const m = /^100644 blob ([a-f0-9]{40})\t([^\r\n]+)$/.exec(line);
+    const m = /^100644 blob ([a-f0-9]{40}) +([0-9]+)\t([^\r\n]+)$/.exec(line);
     if (!m) return unknown("catalog_unreadable");
-    const path = m[2]!;
+    const size = Number(m[2]), path = m[3]!;
+    declaredBytes += size;
+    // Refuse known oversized inputs before materializing their payloads. The private limits are
+    // the actual reader's exported contract, not a larger public-preview budget or a host override.
+    if (!Number.isSafeInteger(size) || declaredBytes > MAX_CATALOG_BYTES) return unknown("catalog_unreadable");
+    if (external && (declaredBytes > OPS_CATALOG_MAX_TOTAL_BYTES || size > OPS_CATALOG_MAX_BLOB_BYTES)) return unknown("catalog_incompatible");
     const shard = path.startsWith(shardDir) && !path.slice(shardDir.length).includes("/") && /\.ya?ml$/.test(path);
-    return path === monolith || shard ? { path, blob: m[1]!, shard } : unknown("catalog_unreadable");
+    return path === monolith || shard ? { path, blob: m[1]!, size, shard } : unknown("catalog_unreadable");
   });
   if (!files.some(f => f.path === monolith) || files.length > 10_000) return unknown("catalog_unreadable");
+  if (external) {
+    if (files.filter(file => file.shard).length > OPS_CATALOG_MAX_SHARDS) return unknown("catalog_incompatible");
+    // The API reader counts each visited immediate tree, including entries outside the selected
+    // blobs. Mirror those same three populations without fetching or interpreting unrelated files.
+    const trees = [commit, `${commit}:plan`];
+    if (files.some(file => file.shard)) trees.push(`${commit}:plan/tasks.d`);
+    let treeEntries = 0;
+    for (const tree of trees) {
+      treeEntries += (await git(["ls-tree", "-z", tree])).split("\0").filter(Boolean).length;
+      if (treeEntries > OPS_CATALOG_MAX_TREE_ENTRIES) return unknown("catalog_incompatible");
+    }
+  }
   const texts = await readBlobsAtRefAsync(git, commit, files.map(f => f.path));
   let bytes = 0;
   const blobs = files.map((file, i) => {
     const text = texts[i]!, buffer = Buffer.from(text); bytes += buffer.length;
-    if (bytes > MAX_CATALOG_BYTES || createHash("sha1").update(`blob ${buffer.length}\0`).update(buffer).digest("hex") !== file.blob) return unknown("catalog_unreadable");
+    if (buffer.length !== file.size || bytes > MAX_CATALOG_BYTES || createHash("sha1").update(`blob ${buffer.length}\0`).update(buffer).digest("hex") !== file.blob) return unknown("catalog_unreadable");
     return { label: file.path, text };
   });
   const store = createPlanRevisionStore({ strict: true, yamlLogLevel: "silent", ...(external ? { dependencyMode: "preserve-external" as const } : {}) });
