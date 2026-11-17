@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
-import type { Mount, Mounts } from "./mounts.js";
+import type { JudgeMount, Mount, Mounts } from "./mounts.js";
 import { MountsError } from "./mounts.js";
-import { capStderrExcerpt, REPORT_EXCERPT_CAP, spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
+import { capStderrExcerpt, JUDGE_SHADOW_TRIAL_ID, REPORT_EXCERPT_CAP, spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
+import { OpenWeightAllowanceExhaustedError, OpenWeightRequestTooLargeError } from "./worker-provider.js";
 import { benchmarkNonDispatchSpawn, withGuardrailAttempt } from "./benchmark-run.js";
 import { argmaxTypedJudgmentOption, runTypedJudgment, type TypedJudgmentResult } from "./typed-judgment.js";
 
@@ -1474,6 +1475,125 @@ export function resolveRiskJudgeMount(mounts: Mounts): Mount {
     throw new MountsError("no worker mount found in mounts.yaml routes to resolve the risk judge's cheapest tier from.");
   }
   return best;
+}
+
+// ── W1-T11075: the ci judge's and the fix-progress judge's own rows, and their cash shadow ──
+
+/** The risk judge's cell with its provider removed: a judge with no row of its own keeps today's subscription spawn. */
+function providerLessRiskJudgeMount(mounts: Mounts): JudgeMount {
+  const { provider: _provider, ...mount } = resolveRiskJudgeMount(mounts);
+  return mount;
+}
+
+/** The ci judge's mount: its own `ci_judge` row (which may name a provider and a shadow), else the risk judge's cell. */
+export function resolveCiJudgeMount(mounts: Mounts): JudgeMount {
+  return mounts.ci_judge ?? providerLessRiskJudgeMount(mounts);
+}
+
+/** The fix-progress judge's mount: its own `fix_progress_judge` row, else the risk judge's cell. */
+export function resolveFixProgressJudgeMount(mounts: Mounts): JudgeMount {
+  return mounts.fix_progress_judge ?? providerLessRiskJudgeMount(mounts);
+}
+
+/** The two judges a cash shadow arm may sit beside. */
+export type JudgeShadowSurface = "ci-judge" | "fix-progress";
+
+/** What one shadow call came to. `refused` is a capacity or budget refusal; nothing is acted on in any case. */
+export type JudgeShadowOutcome =
+  | { kind: "paired"; agreement: boolean }
+  | { kind: "refused"; refusal: "capacity" | "budget"; reason: string }
+  | { kind: "unavailable"; reason: string }
+  | { kind: "skipped" };
+
+export interface JudgeShadowRequest<T> {
+  surface: JudgeShadowSurface;
+  /** The judgement's identity (a PR and head), so primary and shadow rows join. */
+  key: string;
+  mount: JudgeMount;
+  /** The primary judge's spawn args; the shadow sends the same prompt to its own deployment. */
+  primaryArgs: SpawnWorkerArgs;
+  /** The verdict the caller acts on. `undefined` when the primary gave none. */
+  primaryVerdict: T | undefined;
+  parse: (text: string) => T | undefined;
+  /** Two verdicts agree when these keys are equal. */
+  agreementKey: (verdict: T) => string;
+  spawn: typeof spawnWorker;
+  log: (step: string, fields: Record<string, unknown>) => void;
+}
+
+/** The shadow's spawn args: the primary's prompt, no tools, the cash provider, pinned to the arm's deployment. The
+ *  call is billed through the ordinary cash reservation, so it spends inside the existing cash budget. */
+function judgeShadowSpawnArgs(primary: SpawnWorkerArgs, mount: JudgeMount, surface: JudgeShadowSurface): SpawnWorkerArgs | undefined {
+  const arm = mount.shadow;
+  if (arm === undefined) return undefined;
+  return {
+    ...primary, tools: [], mountProvider: "cash", effort: arm.effort ?? "default",
+    routingTrial: { id: JUDGE_SHADOW_TRIAL_ID, arm: "cash", reason: `${surface} shadow of ${mount.model}`, models: [arm.deployment] },
+  };
+}
+
+function shadowRefusal(error: unknown): { refusal: "capacity" | "budget"; reason: string } | undefined {
+  if (error instanceof OpenWeightAllowanceExhaustedError) return { refusal: "budget", reason: error.message };
+  if (error instanceof OpenWeightRequestTooLargeError) return { refusal: "capacity", reason: error.message };
+  return undefined;
+}
+
+/** ADVISORY ONLY: ask the row's cash shadow arm the same judgement and ledger both verdicts and whether they agree.
+ *  It never throws and returns nothing the caller acts on; a refusal for capacity or budget is ledgered and changes
+ *  nothing. A row with no shadow arm spends nothing. */
+export async function runJudgeShadow<T>(request: JudgeShadowRequest<T>): Promise<JudgeShadowOutcome> {
+  const args = judgeShadowSpawnArgs(request.primaryArgs, request.mount, request.surface);
+  if (args === undefined) return { kind: "skipped" };
+  const common = {
+    surface: request.surface, decision_key: request.key,
+    primary_model: request.mount.model, primary_provider: request.mount.provider ?? null,
+    primary_verdict: request.primaryVerdict ?? null,
+    shadow_deployment: request.mount.shadow!.deployment, shadow_effort: args.effort,
+  };
+  const record = (step: string, fields: Record<string, unknown>): void => {
+    try {
+      request.log(step, { ...common, ...fields });
+    } catch (error) {
+      // A failed observation must never affect the judgement being shadowed.
+      process.stderr.write(`judge shadow ledger unavailable: ${error instanceof Error ? error.message : String(error)}\n`);
+    }
+  };
+  let outcome: JudgeShadowOutcome;
+  try {
+    const result = await request.spawn(args);
+    const spend = { cost_usd: result.costUsd ?? null, served_model: result.routedModel ?? null };
+    if (result.budgetRefused === true) {
+      outcome = { kind: "refused", refusal: "budget", reason: `cash allowance refused (${result.cashAllowanceLimit ?? "fleet"})` };
+      record("judge_shadow.refused", { ...spend, refusal: outcome.refusal, reason: outcome.reason });
+      return outcome;
+    }
+    if (result.openWeightCapacityShortfall !== undefined) {
+      const shortfall = result.openWeightCapacityShortfall;
+      outcome = { kind: "refused", refusal: "capacity",
+        reason: `${shortfall.deployment} needs ${shortfall.estimatedTokens} tokens; its limit is ${shortfall.limitTokens}` };
+      record("judge_shadow.refused", { ...spend, refusal: outcome.refusal, reason: outcome.reason });
+      return outcome;
+    }
+    const verdict = result.isError || (result.subtype !== undefined && result.subtype !== "success") ? undefined : request.parse(result.text);
+    if (verdict === undefined) {
+      outcome = { kind: "unavailable", reason: result.isError ? `shadow call failed (${result.subtype ?? "error"})` : "unparseable shadow verdict" };
+      record("judge_shadow.unavailable", { ...spend, reason: outcome.reason });
+      return outcome;
+    }
+    const agreement = request.primaryVerdict !== undefined &&
+      request.agreementKey(request.primaryVerdict) === request.agreementKey(verdict);
+    record("judge_shadow.paired", { ...spend, shadow_verdict: verdict, agreement });
+    return { kind: "paired", agreement };
+  } catch (error) {
+    const refusal = shadowRefusal(error);
+    if (refusal) {
+      record("judge_shadow.refused", refusal);
+      return { kind: "refused", ...refusal };
+    }
+    const reason = error instanceof Error ? error.message : String(error);
+    record("judge_shadow.unavailable", { reason });
+    return { kind: "unavailable", reason };
+  }
 }
 
 // ── The real spawn (mirrors flight-judge.ts's spawnFlightJudgeWorker) ─────

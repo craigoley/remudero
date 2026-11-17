@@ -112,6 +112,21 @@ export interface Mount {
    */
 }
 
+/** W1-T11075: a cash deployment that answers the same judgement in shadow. Its verdict is ledgered beside the
+ *  primary's and never acted on. */
+export interface CashShadowArm {
+  provider: "cash";
+  /** The cash deployment id the shadow call is pinned to, e.g. `DeepSeek-V4-Flash`. */
+  deployment: string;
+  /** Reasoning effort for the shadow call; absent = thinking off (`default`). */
+  effort?: string;
+}
+
+/** A judge's own mount row: a {@link Mount} plus an optional {@link CashShadowArm}. */
+export interface JudgeMount extends Mount {
+  shadow?: CashShadowArm;
+}
+
 /** The three synthesis rungs (W1-T2559), exempt from the Tier Invariant — see this file's header. */
 export const SYNTHESIS_ROLES = ["retro", "triage", "inbox_draft"] as const;
 export type SynthesisRole = (typeof SYNTHESIS_ROLES)[number];
@@ -210,6 +225,10 @@ export interface Mounts {
   /** OPTIONAL — same shape and reason as {@link Mounts.escalation_judge}, for the verify-human judge and (below) the machine-filing judge. */
   verify_human_judge?: Mount;
   machine_filing_judge?: Mount;
+  /** OPTIONAL (W1-T11075) — the ci judge's and the fix-progress judge's own rows. Each may name a `provider`
+   *  and a cash `shadow` arm; absent = the risk judge's provider-less cell. */
+  ci_judge?: JudgeMount;
+  fix_progress_judge?: JudgeMount;
   /** OPTIONAL — a task's last attempt after the worker tier failed it; must stay below the Architect. */
   step_up?: Mount;
   synthesis: Record<SynthesisRole, Mount>; // the three synthesis rungs' OWN mounts (W1-T2559) — never the Architect's; REQUIRED
@@ -266,6 +285,26 @@ function parseDecisionModels(raw: unknown): Record<string, DecisionCandidate> {
       price: { inputUsdPerMillion: rate("input_usd_per_million"), outputUsdPerMillion: rate("output_usd_per_million"), readAt, source: text("source") } };
   }
   return rows;
+}
+
+const SHADOW_DEPLOYMENT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
+/** W1-T11075: a judge row — {@link parseMount} plus its optional cash `shadow` arm. */
+function parseJudgeMount(raw: unknown, where: string, tiers: Record<string, number>, efforts: Record<string, number>): JudgeMount {
+  const mount: JudgeMount = parseMount(raw, where, tiers, efforts);
+  const shadow = (raw as Record<string, unknown>).shadow;
+  if (shadow === undefined) return mount;
+  if (!isObject(shadow)) throw new MountsError(`mount ${where}: 'shadow' must be a mapping with a cash 'deployment'.`);
+  if (shadow.provider !== undefined && canonicalWorkerProviderId(String(shadow.provider)) !== "cash") {
+    throw new MountsError(`mount ${where}: 'shadow.provider' must be cash, got ${JSON.stringify(shadow.provider)}.`);
+  }
+  if (typeof shadow.deployment !== "string" || !SHADOW_DEPLOYMENT_ID.test(shadow.deployment)) {
+    throw new MountsError(`mount ${where}: 'shadow.deployment' must be a cash deployment id, got ${JSON.stringify(shadow.deployment)}.`);
+  }
+  if (shadow.effort !== undefined && (typeof shadow.effort !== "string" || shadow.effort.trim() === "")) {
+    throw new MountsError(`mount ${where}: 'shadow.effort' must be a non-empty string.`);
+  }
+  return { ...mount, shadow: { provider: "cash", deployment: shadow.deployment, ...(shadow.effort === undefined ? {} : { effort: shadow.effort as string }) } };
 }
 
 /** The plan-authorship effort floor the Architect must meet or exceed (§9). */
@@ -718,6 +757,9 @@ export function validateMounts(raw: unknown, opts: MountsOptions = {}): Mounts {
     raw.verify_human_judge === undefined ? undefined : parseMount(raw.verify_human_judge, "verify_human_judge", tiers, efforts);
   const machineFilingJudge =
     raw.machine_filing_judge === undefined ? undefined : parseMount(raw.machine_filing_judge, "machine_filing_judge", tiers, efforts);
+  const ciJudge = raw.ci_judge === undefined ? undefined : parseJudgeMount(raw.ci_judge, "ci_judge", tiers, efforts);
+  const fixProgressJudge =
+    raw.fix_progress_judge === undefined ? undefined : parseJudgeMount(raw.fix_progress_judge, "fix_progress_judge", tiers, efforts);
   const stepUp = raw.step_up === undefined ? undefined : parseMount(raw.step_up, "step_up", tiers, efforts);
   const decisionModels = raw.decision_models === undefined ? undefined : parseDecisionModels(raw.decision_models);
 
@@ -744,7 +786,7 @@ export function validateMounts(raw: unknown, opts: MountsOptions = {}): Mounts {
     }
   }
 
-  const mounts: Mounts = { tiers, efforts, ...(capabilities ? { capabilities } : {}), architect, judge, ...(escalationJudge ? { escalation_judge: escalationJudge } : {}), ...(verifyHumanJudge ? { verify_human_judge: verifyHumanJudge } : {}), ...(machineFilingJudge ? { machine_filing_judge: machineFilingJudge } : {}), ...(stepUp ? { step_up: stepUp } : {}), synthesis, routes, ...(decisionModels ? { decision_models: decisionModels } : {}) };
+  const mounts: Mounts = { tiers, efforts, ...(capabilities ? { capabilities } : {}), architect, judge, ...(escalationJudge ? { escalation_judge: escalationJudge } : {}), ...(verifyHumanJudge ? { verify_human_judge: verifyHumanJudge } : {}), ...(machineFilingJudge ? { machine_filing_judge: machineFilingJudge } : {}), ...(ciJudge ? { ci_judge: ciJudge } : {}), ...(fixProgressJudge ? { fix_progress_judge: fixProgressJudge } : {}), ...(stepUp ? { step_up: stepUp } : {}), synthesis, routes, ...(decisionModels ? { decision_models: decisionModels } : {}) };
   // G-17 FIRST: checking the step-up ahead of it MASKED the Tier Invariant's own message, so a
   // table violating G-17 reported the step-up's refusal instead. Both fire; only the order moved.
   enforceTierInvariant(mounts, opts.thinkingDefault);
@@ -776,6 +818,8 @@ function enforceSubscriptionOnly(m: Mounts): void {
     ["escalation_judge", m.escalation_judge],
     ["verify_human_judge", m.verify_human_judge],
     ["machine_filing_judge", m.machine_filing_judge],
+    ["ci_judge", m.ci_judge],
+    ["fix_progress_judge", m.fix_progress_judge],
     ["step_up", m.step_up],
     ...Object.entries(m.synthesis).map(([role, mount]): [string, Mount] => [`synthesis.${role}`, mount]),
     ...Object.entries(m.routes).flatMap(([type, byRisk]) =>
