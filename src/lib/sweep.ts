@@ -18612,9 +18612,34 @@ const detachedPhaseListeners = new Set<() => void>();
 const detachedDescriptors = new WeakMap<DetachedSweepActionDescriptor, Promise<void>>();
 const fixAdmissionSince = new Map<string, number>();
 
+/** W1-T13440 — how long a hosted fix dispatch may wait for the work host to admit its run child before a later pass releases its key.
+ *  The awaiting pass holds the key the whole wait; past this bound the wait is aborted (the run child carries its wait start forward),
+ *  the key is released and ledgered, and the next pass judges the PR afresh. Why: #19122's fix rung waited 17 minutes unexplained. */
+export const QUEUED_FIX_ADMISSION_RELEASE_MS = 15 * 60_000;
+
+/** W1-T13440 — a hosted fix dispatch whose run child is still waiting for its reservation, keyed by fix key. Set by the host's
+ *  `onPending`, cleared when `spawnFix` returns. Without it a later pass saw the key held and named no holder. */
+interface QueuedHostFix { sinceMs: number; runId: string; abort: () => Promise<void>; prNumber: number; headSha: string; releasing: boolean }
+const queuedHostFixes = new Map<string, QueuedHostFix>();
+
+function queuedHostFixHolder(fixKey: string, nowMs: number) {
+  const queued = queuedHostFixes.get(fixKey);
+  if (!queued) return undefined;
+  const ageMs = Math.max(0, nowMs - queued.sinceMs);
+  return {
+    queued, ageMs,
+    reason: `duplicate fix-dispatch key (${fixKey}) is held by its queued fix dispatch, waiting for the work host to admit run ` +
+      `${queued.runId} for ${Math.floor(ageMs / 1000)}s` + (queued.releasing ? " (released past its bound; the next pass may dispatch)" : ""),
+    fields: { in_flight_action: "fix-dispatch", in_flight_phase: "admission" as DetachedFixPhase, in_flight_age_ms: ageMs, child_run_id: queued.runId },
+  };
+}
+
 function detachedFixHolder(fixKey: string, nowMs: number) {
   const action = [...detachedSweepActions.values()].find(action => action.fixKey === fixKey);
-  if (!action) return undefined;
+  if (!action) {
+    const queued = queuedHostFixHolder(fixKey, nowMs);
+    return queued && { reason: queued.reason, fields: queued.fields };
+  }
   const ageMs = Math.max(0, nowMs - (action.phase === "admission" ? action.admissionSinceMs ?? action.startedAtMs : action.startedAtMs));
   return {
     reason: `duplicate fix-dispatch key (${fixKey}) is held by its own detached fix dispatch, ${action.phase} for ${Math.floor(ageMs / 1000)}s` +
@@ -19052,6 +19077,8 @@ export interface DetachedWorkHost {
     pr: { prNumber: number; headSha: string; taskId?: string };
     fixKey: string;
     envelope: FixDispatchEnvelope;
+    /** W1-T13440: told the run id and an abort while the run child waits for the work host's admission. */
+    onPending?: (pending: { runId: string; abort: () => Promise<void> }) => void;
   }) => Promise<FixChildLaunch | undefined>;
   /** Hosts the existing retro subprocess's settle when its measured drain cost moves it. */
   spawnRetro?: (input: { decision: Record<string, unknown> }) => Promise<FixChildLaunch | undefined>;
@@ -22069,10 +22096,20 @@ export async function runSweep(
     }
     let hosted: FixChildLaunch | undefined;
     try {
-      hosted = await host.spawnFix({ pr: { prNumber: pr.prNumber, headSha: pr.headSha, taskId: escalationTaskIdFor(pr) }, fixKey: claim.fixKey, envelope });
+      // W1-T13440: while the run child waits for admission this pass holds the key; record who holds it, and ledger it once.
+      const onPending = ({ runId, abort }: { runId: string; abort: () => Promise<void> }) => {
+        queuedHostFixes.set(claim.fixKey, { sinceMs: deps.now?.() ?? systemClock.now(), runId, abort, prNumber: pr.prNumber, headSha: pr.headSha, releasing: false });
+        appendLine(deps.ledgerPath, {
+          run_id: deps.runId, task_id: escalationTaskIdFor(pr), step: "sweep.fix.child_queued",
+          pr_number: pr.prNumber, head_sha: pr.headSha, fix_key: claim.fixKey, child_run_id: runId,
+        });
+      };
+      hosted = await host.spawnFix({ pr: { prNumber: pr.prNumber, headSha: pr.headSha, taskId: escalationTaskIdFor(pr) }, fixKey: claim.fixKey, envelope, onPending });
     } catch (error) {
       log("sweep.fix.child_spawn_failed", { pr_number: pr.prNumber, head_sha: pr.headSha, error: String((error as Error)?.message ?? error) });
       return false;
+    } finally {
+      queuedHostFixes.delete(claim.fixKey);
     }
     if (hosted === undefined) return false;
     if ("abandoned" in hosted) {
@@ -22129,9 +22166,25 @@ export async function runSweep(
     const fixTaskId = fixLedgerTaskIdFor(pr);
     const fixKey = `${fixTaskId ?? ""}@${pr.headSha}`;
     if (inFlightFixKeys.has(fixKey)) {
+      const nowMs = deps.now?.() ?? systemClock.now();
+      const queued = queuedHostFixHolder(fixKey, nowMs);
+      if (queued && !queued.queued.releasing && queued.ageMs >= QUEUED_FIX_ADMISSION_RELEASE_MS) {
+        // W1-T13440: past the bound, abandon the wait. The awaiting pass's abandoned path releases the key and ledgers
+        // `sweep.fix.dispatch_failed`; this row says why it was abandoned.
+        queued.queued.releasing = true;
+        appendLine(deps.ledgerPath, {
+          run_id: deps.runId, task_id: escalationTaskIdFor(pr), step: "sweep.fix.child_admission_released",
+          pr_number: pr.prNumber, head_sha: pr.headSha, fix_key: fixKey, child_run_id: queued.queued.runId,
+          waited_ms: queued.ageMs, bound_ms: QUEUED_FIX_ADMISSION_RELEASE_MS,
+        });
+        void queued.queued.abort().catch((error: unknown) => log("sweep.fix.child_admission_release_failed", {
+          pr_number: pr.prNumber, head_sha: pr.headSha, fix_key: fixKey, child_run_id: queued.queued.runId,
+          error: String((error as Error)?.message ?? error),
+        }));
+      }
       return {
         ok: false,
-        reason: detachedFixHolder(fixKey, deps.now?.() ?? systemClock.now())?.reason ??
+        reason: detachedFixHolder(fixKey, nowMs)?.reason ??
           `duplicate fix-dispatch key (${fixKey}) already claimed this pass — a concurrent sweep is already dispatching this PR's fix rung`,
       };
     }
