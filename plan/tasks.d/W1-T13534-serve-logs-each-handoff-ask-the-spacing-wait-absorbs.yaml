@@ -1,0 +1,44 @@
+- id: W1-T13534
+  title: "When serve's handoff spacing wait absorbs a later handoff ask, it writes a row naming the newer target and when the wait ends, so a self-sync that is hours behind main is visible in the ledger instead of silent"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: low # adds ledger rows only; when and how serve hands off is unchanged
+  band_meaning: span
+  origin: "operator-session#serve-recycle-2026-11-17"
+  plan_refs:
+    - W1-T13303
+  files:
+    - src/lib/serve-supervisor.ts
+    - test/console-api/serve/serve-logs-each-handoff-ask-the-spacing-wait-absorbs.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A handoff ask that arrives while a spacing wait is pending writes serve.handoff_spacing_absorbed with the asked sha, the remaining wait in ms and the count of asks absorbed so far"
+      proof: "grep: W1-T13534 criterion 1 in test/console-api/serve/serve-logs-each-handoff-ask-the-spacing-wait-absorbs.test.ts"
+    - claim: "When the wait ends, the one re-ask still runs exactly one handoff, as before"
+      proof: "grep: W1-T13534 criterion 2 in test/console-api/serve/serve-logs-each-handoff-ask-the-spacing-wait-absorbs.test.ts"
+    - claim: "invariant:spacing-unchanged — handoffSpacingMs and the first serve.handoff_deferred spacing row are unchanged"
+      kind: guard
+      proof: "grep: W1-T13534 criterion 3 in test/console-api/serve/serve-logs-each-handoff-ask-the-spacing-wait-absorbs.test.ts"
+  rationale: |
+    WHY: on 2026-11-17 (OBSERVED, host ledger) serve handed off at 22:18:56Z, then at 22:33:24Z wrote one
+    serve.handoff_deferred reason spacing with waitMs 12423555 (about 3.45 h; spacingMs 13291701 after pressure).
+    Handoff asks at 22:48Z and 23:03Z (target c287903b2, 9 commits behind) wrote serve.handoff_requested, but no
+    row said the pending wait absorbed them, so a merged fix (#19203) was not live and the ledger did not say why. An operator container restart was needed to load it.
+    READ at origin/main, src/lib/serve-supervisor.ts awaitSpacing: `if (spacingPending) return true;` returns before
+    any log, by design ("the wait re-asks once, however many asks arrive meanwhile").
+  design: |
+    INVARIANT spacing-unchanged: the spacing length, the pressure scaling and the single re-ask are unchanged.
+    1. In awaitSpacing, when spacingPending is already set, count the ask and write serve.handoff_spacing_absorbed
+       { sha (the asked target, when known), remainingMs, absorbed } before returning true.
+    2. Reset the count when the wait ends.
+  falsifier: |
+    Return silently on a pending wait: criterion 1 fails. Re-ask per absorbed ask: criterion 2 fails.
+  note: |
+    Id reserved for run-unfiled-1794957748028 with ~/rmd-work/bin/reserve-id.sh.
+    reservation hand-off: run-unfiled-1794957748028 -> claude/project-thread-qqxbpu
