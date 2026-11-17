@@ -29,8 +29,12 @@
  * criteria a PR is judged against. Standing rule 15's `criterionFieldTampered` refuses a
  * non-plan-only diff that edits `claim:`/`proof:`, and that refusal must keep applying to whatever
  * a later writer does with these findings — {@link refusesToAuthorAClaim} exists so that boundary
- * is testable here rather than asserted in prose.
+ * is testable here rather than asserted in prose. The one claim this module writes restates a file
+ * the diff adds ({@link planFilingAcceptanceCure}, W1-T13360).
  */
+
+import { isInPlanScope } from "./plan-scope.js";
+import { isTaskShardName } from "./task-shard-name.js";
 
 /** The run-branch shape `projectPlan` attributes an open PR by (`status.ts`'s own regex). */
 export const RUN_BRANCH_RE = /^run-(.+)-\d+$/;
@@ -373,4 +377,79 @@ export function replaceBodyProofs(body: string, replacements: readonly BodyProof
     lines[at] = lines[at]!.replace(oldProof, () => newProof);
   }
   return lines.join("\n");
+}
+
+/** One path a pull request's diff changes, as {@link planFilingAcceptanceCure} reads it. */
+export interface FilingDiffFile {
+  path: string;
+  /** True only when the diff ADDS the file, so it is absent at the merge base. */
+  added: boolean;
+  /** The file's text at the head. Read only for an added shard, for its own `id:` line. */
+  headText?: string;
+}
+
+/** The author-time gate's verdict on a body, in `acceptanceAuthorTimeCheck`'s own shape. INJECTED: the gate lives in
+ *  `review.ts`, which `plan-pr-emitter.ts` imports beside this module, so importing it here would close a ring. */
+export type BodyGate = (body: string) => { ok: boolean; defect?: string };
+
+/** {@link planFilingAcceptanceCure}'s answer: the derived criteria and the body that carries them. */
+export interface PlanFilingAcceptanceCure {
+  criteria: BodyCriterion[];
+  repairedBody: string;
+}
+
+/** A path a `grep:` proof and a `- claim | proof` bullet can both carry: no space, no `|`, no `..` segment.
+ *  Exported, like the two below, so a fixture can drive both of its arms by name. */
+export const PROOF_SAFE_PATH_RE = /^(?!.*\.\.)[A-Za-z0-9._/-]+$/;
+/** One line that is a record's bare `id:`: a quoted id would not be hit by the `id: <id>` pattern the proof greps. */
+export const SHARD_ID_LINE_RE = /^\s*(?:-\s+)?id:\s*([A-Za-z0-9-]+)\s*$/;
+/** The line a session's pull request body ends with; the derived block goes above the last one. */
+export const ATTRIBUTION_LINE_RE = /^\s*\u{1F916} Generated with /u;
+
+/**
+ * W1-T13360 — THE ACCEPTANCE BLOCK A PLAN FILING NEVER WROTE, DERIVED FROM THE SHARDS IT ADDS.
+ *
+ * MEASURED 2026-11-17: two plan pull requests sat red for 5.5 and 3.6 hours on `acceptance-author-gate: REFUSED
+ * (no-header)` with every other check green. The body repair had a cure for a body with no block only when the
+ * diff added a test file, and a plan-only diff never adds one.
+ *
+ * DERIVED, NEVER INVENTED. The one claim written here, "the <id> shard is filed", restates the diff: the file is
+ * ADDED directly under `shardDir` (the repo-relative directory the plan loader reads shards from, which the caller
+ * resolves from the repo layout), and the id is read from its own record line and must be the id its file name
+ * carries. The proof greps that line, so it hits at the head and misses at the base, where the file does not
+ * exist. Nothing else earns a claim: an EDITED shard (an amendment's claim would have to be authored), a diff with
+ * a path outside the plan, an added shard whose id cannot be read (the whole filing then gets no cure, never a
+ * partial block), and above all a body `gate` does not refuse as `no-header`. A body with an acceptance block or a
+ * task trailer comes back `undefined`, so an existing block is never rewritten. `gate` also judges the result: a
+ * body it would still refuse is not a cure.
+ */
+export function planFilingAcceptanceCure(
+  body: string,
+  diff: readonly FilingDiffFile[],
+  shardDir: string,
+  gate: BodyGate,
+): PlanFilingAcceptanceCure | undefined {
+  const text = body ?? "";
+  const refusal = gate(text);
+  if (refusal.ok || refusal.defect !== "no-header") return undefined;
+  if (!diff.every((file) => isInPlanScope(file.path))) return undefined;
+  const criteria: BodyCriterion[] = [];
+  const shardPrefix = `${shardDir.replace(/\/+$/, "")}/`;
+  for (const file of diff) {
+    if (!file.added || !file.path.startsWith(shardPrefix)) continue;
+    const shardName = file.path.slice(shardPrefix.length);
+    if (shardName.includes("/") || !shardName.endsWith(".yaml")) continue; // not a file the plan loader reads as a shard
+    const ids = (file.headText ?? "").split("\n").flatMap((line) => SHARD_ID_LINE_RE.exec(line)?.[1] ?? []);
+    const id = PROOF_SAFE_PATH_RE.test(file.path) ? ids.find((candidate) => isTaskShardName(shardName, candidate)) : undefined;
+    if (id === undefined) return undefined;
+    criteria.push({ claim: `the ${id} shard is filed`, proof: `grep: id: ${id} in ${file.path}` });
+  }
+  if (criteria.length === 0) return undefined;
+  const block = ["## Acceptance", ...criteria.map((c) => `- ${c.claim} | ${c.proof}`)].join("\n");
+  const lines = text.replace(/\s+$/, "").split("\n");
+  const attribution = lines.findLastIndex((line) => ATTRIBUTION_LINE_RE.test(line));
+  const above = (attribution < 0 ? lines : lines.slice(0, attribution)).join("\n").replace(/\s+$/, "");
+  const below = attribution < 0 ? "" : lines.slice(attribution).join("\n");
+  const repairedBody = `${[above, block, below].filter((part) => part.length > 0).join("\n\n")}\n`;
+  return gate(repairedBody).ok ? { criteria, repairedBody } : undefined;
 }

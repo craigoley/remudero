@@ -35,6 +35,7 @@ import { planFilingFixRoundRefusal, readPlanFilingFixRoundInput } from "../../li
 import { createPlanPrRest, probeExistingPlanPr, renderAcceptanceBlock } from "../../lib/plan-pr-emitter.js";
 import { findTaskShard, parseProofAmendmentProposal, requestProofAmendment, requestScopeAmendment, isUngrantableInstrumentPath, SCOPE_AMENDMENT_RETRYABLE_REFUSALS, saveScopeAmendmentWork, restoreScopeAmendmentWork, type ScopeAmendmentOutcome, type ProofAmendmentOutcome } from "../../lib/proof-amendment.js";
 import { appendLedger, isSpawnInfraBlockedError, LEDGER_COST_TAG_INFRA } from "../../lib/ledger.js";
+import { setDanglingRefRepairLog } from "../../lib/git-fetch-retry.js";
 import { systemClock } from "../../lib/clock.js";
 import { observeFeedbackInputs, type AdmissionObserver } from "../../lib/contributor-admission.js";
 import { observeContributorAdmission } from "../../lib/arm-auto-merge.js";
@@ -6155,6 +6156,8 @@ export async function fixCommand(
   const operatorRequested = rest.includes("--requested");
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: "FIX", step, lane: "fix", ...extra });
+  // Inside the daemon's process the daemon's log stays.
+  setDanglingRefRepairLog(log, true);
   const adoptionComment = flagValue(rest, "--admission-adopt-comment");
   await observeAdmissionDisposition(config.contributorAdmission, { owner, repo, prNumber }, config.root, log,
     adoptionComment === undefined ? undefined : Number(adoptionComment));
