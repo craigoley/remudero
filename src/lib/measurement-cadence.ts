@@ -29,6 +29,7 @@ import { resolveLedgerUnion, type LedgerUnionOptions, type LedgerUnionResult } f
 import {
   createIncrementalLedgerUnion,
   createLedgerRotationMemo,
+  openLedgerUnion,
   readLedgerUnionRecordsMemoized,
   readLedgerUnionRecordsSync,
   realLedgerFs,
@@ -62,7 +63,7 @@ import {
 import type { CiFailureCorpus, CiFailurePair } from "./ci-failure-corpus.js";
 import { loadPlan, loadPlanFromYaml, mergePlanBlobsQuarantiningDuplicates, PlanBlobCache, type Plan, type Task, type TaskRisk } from "./plan.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
-import { interventionKey, mostChangedFile, type OperatorInterventionRow } from "./operator-interventions.js";
+import { interventionFromLedgerRow, interventionKey, mostChangedFile, OPERATOR_INTERVENTION_STEP, type OperatorInterventionRow } from "./operator-interventions.js";
 import { foldKnowledgeGaps, KNOWLEDGE_MEASURED_STEP, type KnowledgeGapReport } from "./knowledge-gaps.js";
 import { foldLearningOutcomes, type LearningOutcomeReport } from "./knowledge-outcome.js";
 import { seededRandom, seedOf } from "./knowledge-value.js";
@@ -3260,6 +3261,38 @@ export interface HandFixInput {
   retiredOrigins?: readonly string[];
 }
 
+/** Read the scheduled rung's PR hand-fix evidence and the retired hand-fix origins it may redraft. */
+export async function ciLearningHandFixInput(stateRoot: string, checkoutRoot: string, now: Date): Promise<HandFixInput> {
+  const stateDir = join(stateRoot, "state");
+  const rows: Array<Record<string, unknown>> = [];
+  const unread: string[] = [];
+  const malformed: string[] = [];
+  if (existsSync(stateDir)) {
+    for await (const row of openLedgerUnion(stateDir, {
+      step: OPERATOR_INTERVENTION_STEP,
+      sinceTs: new Date(now.getTime() - HAND_FIX_WINDOW_DAYS * 86_400_000).toISOString(),
+      onUnreadDirectory: (path, error) => unread.push(`${path}: ${String(error)}`),
+      onUnreadArchive: (path) => unread.push(path),
+      onUnreadLive: (path) => unread.push(path),
+      onMalformedRow: (finding) => malformed.push(`${finding.path}:${finding.rowOrdinal}`),
+    })) rows.push(row);
+  }
+  if (unread.length > 0 || malformed.length > 0) {
+    throw new Error(`operator.intervention ledger is incomplete${unread.length ? `: ${unread.join(", ")}` : `: malformed rows ${malformed.join(", ")}`}`);
+  }
+  const planPath = join(checkoutRoot, "plan", "tasks.yaml");
+  const plan = existsSync(planPath) ? loadPlan(planPath) : undefined;
+  const retiredOrigins = (plan?.tasks ?? [])
+    .filter((task) => task.retirement !== undefined && task.origin?.startsWith(HAND_FIX_ORIGIN_PREFIX))
+    .map((task) => task.origin!)
+    .sort();
+  return {
+    rows: rows.map(interventionFromLedgerRow).filter((row): row is NonNullable<typeof row> => row !== undefined),
+    now,
+    retiredOrigins,
+  };
+}
+
 export function handFixClassKey(cause: string, file: string): string {
   return `${cause}@${file}`;
 }
@@ -3521,6 +3554,11 @@ export interface CiLearningFilingResult {
 /** Shard slug length, matching the `plan/tasks.d/` convention inbox.ts files under. */
 const CI_LEARNING_SLUG_MAX = 72;
 
+/** Both CI-repair and hand-fix lessons share one machine-authored, human-verified record header. */
+function ciLearningMachineHeader(files: readonly string[], count: number, population?: readonly number[]): string[] {
+  return machineShardHeaderLines(files, count, population);
+}
+
 /** Render ONE draft as a single-element YAML task list — the shard file's whole contents.
  *  `origin:` carries the finding id, so it is both Rule 17 provenance and the idempotency key. */
 export function ciLearningShardYaml(draft: CiLearningShardDraft, taskId: string, population?: readonly number[]): string {
@@ -3535,7 +3573,7 @@ export function ciLearningShardYaml(draft: CiLearningShardDraft, taskId: string,
     "  depends_on: []",
     "  type: implement",
     // Unjudged until the machine-filing judge rules (operator ruling 2026-09-29); LAW 5's mark rides it.
-    ...machineShardHeaderLines([lessonsFile], draft.prs.length, population),
+    ...ciLearningMachineHeader([lessonsFile], draft.prs.length, population),
     `  origin: ${q(draft.findingId)}`,
     // W1-T3052: store PRs as data; the highest monotonic PR is efficacy's clock-free watermark.
     // The origin's first PR alone cannot distinguish refusals after the lesson landed.
@@ -3569,7 +3607,7 @@ function handFixShardYaml(draft: CiLearningShardDraft, cls: HandFixClass, taskId
     "  repo: remudero",
     "  depends_on: []",
     "  type: implement",
-    ...machineShardHeaderLines([lessonsFile], cls.count, population),
+    ...ciLearningMachineHeader([lessonsFile], cls.count, population),
     `  origin: ${q(draft.findingId)}`,
     "  files:",
     `    - ${lessonsFile}`,
