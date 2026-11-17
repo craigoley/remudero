@@ -20,7 +20,7 @@
   acceptance:
     - claim: "SERVE_HANDOFF_SPACING_BASE_MS is 2 hours, so with no pressure a second checkout_behind request inside two hours of the last handoff is deferred with reason spacing"
       proof: "grep: W1-T13303 criterion 1 in test/serve-handoff-spacing.test.ts"
-    - claim: "An operator-requested handoff (the existing explicit request path) is not held by the spacing"
+    - claim: "A restarted supervisor, with no handoff yet, is not held by the spacing: its first handoff runs at once"
       proof: "grep: W1-T13303 criterion 2 in test/serve-handoff-spacing.test.ts"
     - claim: "invariant:pressure-still-stretches — handoffSpacingMs still grows with host pressure from the new base"
       kind: guard

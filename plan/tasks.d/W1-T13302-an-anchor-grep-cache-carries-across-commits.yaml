@@ -14,11 +14,12 @@
     - W1-T4261
   files:
     - src/lib/inbox.ts
+    - src/lib/panel-graph.ts
     - test/inbox/an-anchor-grep-cache-carries-across-commits.test.ts
   status: queued
   attempts: 0
   acceptance:
-    - claim: "When the cache moves from commit A to commit B, an anchor whose recorded matching files all lie outside `git diff --name-only A B` (and whose path scope holds no changed file) keeps its answer with no grep; a counting grep seam sees greps only for anchors a changed file can affect"
+    - claim: "When the cache moves from commit A to commit B, an anchor whose path scope holds no file in `git diff --name-only --no-renames A B` keeps its answer with no grep; a counting grep seam sees greps only for anchors a changed file can affect"
       proof: "grep: W1-T13302 criterion 1 in test/inbox/an-anchor-grep-cache-carries-across-commits.test.ts"
     - claim: "invariant:carried-equals-fresh — on a real repository, after commits that add, edit, delete and rename files under and outside anchor paths, every carried answer equals a fresh git grep at B"
       kind: guard
@@ -35,14 +36,14 @@
     re-greps every anchor (warmAnchorGrepCache, 4 at a time), although most commits touch none of the anchored files.
   design: |
     INVARIANT carried-equals-fresh: a carried answer is always what a grep at the new commit would answer.
-    1. Record, per anchor, its answer and (for a match) the files that matched (`git grep -l` in place of -q, same
-       pattern and path).
-    2. On a move A -> B, run `git diff --name-only --no-renames A B` once. Keep a true answer when at least one recorded
-       matching file is unchanged; keep a false answer when no changed file lies under the anchor's path (a path-less
-       anchor is affected by any changed file). Every other anchor is re-grepped at B, restricted to nothing (a normal
-       grep), so correctness never depends on the restriction.
-    3. Fall back to emptying the cache when the diff fails or exceeds ANCHOR_CARRY_MAX_CHANGED_FILES.
-    4. The async warm path (warmAnchorGrepCache) and the sync path share the same carry.
+    1. On a move A -> B, run `git diff --name-only --no-renames -z A B` once. Keep every answer (true or false) whose
+       anchor path holds no changed file: a grep of an unchanged path answers the same. A path-less anchor, or a
+       pathspec with glob or magic characters, is affected by any changed file. Every other anchor is re-grepped at B.
+       MEASURED 2026-11-17 in the production registry: 1,321 of 1,322 distinct anchors name one file, so recording the
+       matching files of each anchor would keep nothing more.
+    2. Fall back to emptying the cache when the diff fails or exceeds ANCHOR_CARRY_MAX_CHANGED_FILES.
+    3. The async warm path (warmAnchorGrepCache) and the sync path share the same carry. panel-graph.ts's Inbox cache
+       (serve) passes the changed-files reader, and its warm pass also snapshots the carried answers.
   falsifier: |
     Empty the cache on every new sha: criterion 1 fails (every anchor is re-grepped). Keep a false answer when a changed
     file under its path now matches: criterion 2 fails. Carry across a failed diff: criterion 3 fails.
