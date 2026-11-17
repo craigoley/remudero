@@ -13,8 +13,9 @@
   files:
     - plan/tasks.d/W1-T6372-report-where-the-host-wide-github-read-window-is-not-one.yaml
     - docs/recon/github-read-window-scope.md
-  status: queued
-  priority: 3
+  status: blocked
+  retirement: retired
+  # operator 2026-11-17T20:01Z (Inbox decision card, thread "Recommend decisions for waiting Inbox asks"): retire W1-T6372 — a 40-day-old note on a single GitHub read window, superseded by the gh broker.
   attempts: 0
   rationale: |
     OBSERVED 2026-10-07 22:30Z (host inspection, file metadata only):

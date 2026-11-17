@@ -1,7 +1,6 @@
 - id: W1-T13271
   title: "Find why two coverage shards spent about twenty minutes in actions/checkout on 2026-11-16, and recommend a bounded fix or none"
   repo: remudero
-  priority: 2
   type: recon
   verify: human
   risk: low # a report; it changes no file
@@ -12,7 +11,9 @@
     - W1-T13270
   files:
     - .github/workflows/ci.yml
-  status: queued
+  status: blocked
+  retirement: retired
+  # operator 2026-11-17T20:01Z (Inbox decision card, thread "Recommend decisions for waiting Inbox asks"): retire W1-T13271 — already answered: the recon finished 2026-11-17 and its fix W1-T13321 merged as #19016.
   attempts: 0
   acceptance:
     - claim: "The report gives, over at least seven days of coverage-shard jobs, the count of checkout steps that ran 5 minutes or more against the total, with their run ids and start times"

@@ -297,6 +297,8 @@ export interface ReadModelViewContext {
   switches?: ReadModelSwitches;
   /** Each shadowed view's diff counters and cutover readiness (view-shadow.ts). */
   shadow?: ShadowReadiness[];
+  /** W1-T13457: the body the home store last committed for a view's key, so a view can carry it across a restart instead of publishing a warming one over it. */
+  committed?(view: string, key: string): ViewBody | undefined;
 }
 
 /** A view the worker materializes. `materialize` returns one body per key (`""` when unkeyed). */
@@ -1854,7 +1856,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     const home = slots[0]?.db;
     const shadow = home ? comparator?.db === home && slots[0]?.lease !== undefined ? comparator.shadow.readiness()
       : storedShadowReadiness(viewShadowPath(opts.stateDir), home, now, qualifications, inboxPopulations, inboxPopulations ? [INBOX_VIEW_NAME] : undefined) : undefined;
-    const ctx: ReadModelViewContext = { now, switches, ...(home ? { sourceStore: home } : {}), instances: slots.map((slot) => ({ state: slot.state, ...(slot.db ? { db: slot.db } : {}), ...(slot.lease ? { lease: slot.lease } : {}) })), ...(shadow ? { shadow } : {}) };
+    const ctx: ReadModelViewContext = { now, switches, ...(home ? { sourceStore: home, committed: (view: string, key: string) => committedBody(home, view, key) } : {}), instances: slots.map((slot) => ({ state: slot.state, ...(slot.db ? { db: slot.db } : {}), ...(slot.lease ? { lease: slot.lease } : {}) })), ...(shadow ? { shadow } : {}) };
     const generation = slots.reduce((sum, slot) => sum + slot.state.generation, 0);
     if (only) return build(only, now, ctx, generation, soloMs);
     const left = passMs - (clock.now() - tickStart);
@@ -2632,6 +2634,24 @@ function storedBodyQualification(raw: string | undefined, etag: string): { quali
   }
 }
 
+/** W1-T13457: one key's last committed body in `db`, or undefined when none is stored or it cannot be read. */
+export function committedBody(db: ReadModelDb, view: string, key: string): ViewBody | undefined {
+  try {
+    const row = db.prepare("SELECT body FROM view_body WHERE view = ? AND key = ?").get(view, key);
+    return row === undefined ? undefined : JSON.parse(String(row.body)) as ViewBody;
+  } catch (error) {
+    // deliberate: no readable committed body means nothing to carry; the view builds as on a first boot.
+    void error;
+    return undefined;
+  }
+}
+
+/** W1-T13457: why a body carried across a restart reads stale until this run's worker posts its key. */
+export const CARRIED_BODY_REASON = "carried across a serve restart: this body was committed before serve started, and the read-model worker has not rebuilt it yet";
+
+/** W1-T13457: the source a carried body with no sources of its own is marked stale by. */
+export const CARRIED_BODY_SOURCE = "read-model:carried";
+
 /** The last committed bodies, read once at construction through a read-only connection. */
 export function loadCommittedViewBodies(stateDir: string, home: string, nowMs = systemClock.now()): { bodies: ReadModelBodyEntry[]; reason?: string; inboxPopulation?: ShadowPopulation; inboxQualificationReason?: string } {
   let db: ReadModelDb | undefined;
@@ -3069,24 +3089,37 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
     });
   };
 
+  const judgeSources = (sources: readonly ViewSource[], now: number, body?: { view: string; key: string }): ViewSource[] => sources.map((source) => {
+    const own = body ? bodyReadings.get(readModelBodyKey(body.view, body.key))?.get(source.name) : undefined;
+    const declaredReads = body ? ledgerReads.get(body.view)?.[source.name] : undefined;
+    const read = body ? (declaredReads !== undefined ? own ?? source : newerReading(source, own)) : undefined;
+    if (!source.name.startsWith(LEDGER_SOURCE_PREFIX)) return judgeSource(read ?? sourceClocks.get(source.name) ?? source, now);
+    const instance = source.name.slice(LEDGER_SOURCE_PREFIX.length);
+    const state = instances.get(instance);
+    if (state?.tickedAt !== undefined) return read ? builtLedgerSource(read, state, now, undefined, declaredReads) : ledgerSource(state, now);
+    const committed = committedAt.get(instance);
+    if (committed !== undefined && now - committed <= READ_MODEL_LEDGER_STALE_MS) {
+      return describeSource({ name: source.name, asOf: source.asOf, state: "fresh", lagMs: Math.max(0, now - committed) });
+    }
+    return state ? ledgerSource(state, now) : { ...describeSource(source), state: "stale", phase: "warming", reason: "read model warming: this body was committed before serve started" };
+  });
+
   const handle: ReadModelWorkerHandle = {
     bodies,
     state: () => ({ ...(at === undefined ? {} : { at }), instances, switches, ...(warm.reason ? { warmBoot: warm.reason } : {}) }),
     body: (view, key = "") => bodies.get(readModelBodyKey(view, key)),
-    judge: (sources, now, body) => sources.map((source) => {
-      const own = body ? bodyReadings.get(readModelBodyKey(body.view, body.key))?.get(source.name) : undefined;
-      const declaredReads = body ? ledgerReads.get(body.view)?.[source.name] : undefined;
-      const read = body ? (declaredReads !== undefined ? own ?? source : newerReading(source, own)) : undefined;
-      if (!source.name.startsWith(LEDGER_SOURCE_PREFIX)) return judgeSource(read ?? sourceClocks.get(source.name) ?? source, now);
-      const instance = source.name.slice(LEDGER_SOURCE_PREFIX.length);
-      const state = instances.get(instance);
-      if (state?.tickedAt !== undefined) return read ? builtLedgerSource(read, state, now, undefined, declaredReads) : ledgerSource(state, now);
-      const committed = committedAt.get(instance);
-      if (committed !== undefined && now - committed <= READ_MODEL_LEDGER_STALE_MS) {
-        return describeSource({ name: source.name, asOf: source.asOf, state: "fresh", lagMs: Math.max(0, now - committed) });
-      }
-      return state ? ledgerSource(state, now) : { ...describeSource(source), state: "stale", phase: "warming", reason: "read model warming: this body was committed before serve started" };
-    }),
+    judge: (sources, now, body) => {
+      const judged = judgeSources(sources, now, body);
+      // W1-T13457 invariant stale-says-so: a body this run's worker has not posted was carried across a restart. Its
+      // ledger sources are stale until the worker posts that key: a lease the dead serve renewed seconds ago says when
+      // the store was last written, not that this serve's projector has read the rows since. A source with its own
+      // observation clock (a probe, a scope read) is still judged by that clock and budget.
+      if (!body || posted.has(readModelBodyKey(body.view, body.key))) return judged;
+      const carried = judged.map((source): ViewSource => source.state !== "fresh" || !source.name.startsWith(LEDGER_SOURCE_PREFIX) ? source
+        : { ...source, state: "stale", phase: "warming", reason: CARRIED_BODY_REASON });
+      // A body with no sources has no clock to mark; it still says it is carried.
+      return carried.length > 0 ? carried : [{ name: CARRIED_BODY_SOURCE, asOf: null, state: "stale", phase: "warming", reason: CARRIED_BODY_REASON }];
+    },
     reload: () => {
       const again = loadCommittedViewBodies(opts.stateDir, home, clock.now());
       inboxQualification = inboxIdentityFrom(again);
