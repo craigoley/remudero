@@ -1,0 +1,61 @@
+- id: W1-T13348
+  title: "The Inbox gardener's ledger read catches up across the rotation archives, so a pass can reach observed ledger coverage"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # one concern (the ledger read catch-up budget) across 3 files: the source, its new test, and the existing limits pin
+  origin: "operator-session#inbox-gardener-shadow-2026-11-17"
+  plan_refs:
+    - W1-T13337
+    - W1-T13258
+  files:
+    - src/lib/inbox-gardener.ts
+    - test/gardeners/the-inbox-gardener-ledger-read-catches-up-across-archives.test.ts
+    - test/gardeners/the-inbox-gardener-retires-an-ask-whose-task-already-shipped.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A pass whose ledger store is behind spends up to INBOX_GARDENER_LIMITS.ledgerCatchUpMs advancing it, so a ledger whose catch-up needs many transactions reaches observed coverage in one pass"
+      proof: "grep: W1-T13348 criterion 1 in test/gardeners/the-inbox-gardener-ledger-read-catches-up-across-archives.test.ts"
+    - claim: "A catch-up that the budget cannot finish still reports the ledger as partial, and the next pass resumes from the checkpoint rather than starting over"
+      proof: "grep: W1-T13348 criterion 2 in test/gardeners/the-inbox-gardener-ledger-read-catches-up-across-archives.test.ts"
+    - claim: "invariant:partial-never-observed — an unfinished catch-up, a torn or quarantined row, or an unfinished live tail is never reported as observed"
+      proof: "grep: W1-T13348 criterion 3 in test/gardeners/the-inbox-gardener-ledger-read-catches-up-across-archives.test.ts"
+  rationale: |
+    WHY: W1-T13337 (#19054) made a refused Inbox gardener pass name its gap. After the daemon self-restarted onto it
+    (09:40Z 2026-11-17), the shadow pass at 10:38:37Z (GARDEN-inbox-1794911912664) logged gaps ["coverage:ledger"].
+    OBSERVED on the host at 10:55Z: the gardener's read model (state/inbox-gardener-evidence/read-model/
+    inbox-gardener-bbc05d8a72640333.v1.sqlite) has ONE source_file checkpoint, ledger.2026-09-15T23-59-56-911Z.ndjson.gz
+    (the OLDEST archive), at off 95086 of an uncompressed ~28 MB; inbox_gardener_latest and inbox_gardener_mirrors are
+    empty. The state dir holds 240 archives, 874,283,953 bytes compressed (about 10 GB uncompressed at that archive's
+    11.6x ratio).
+    READ at origin/main: readInboxGardenerLedger ticks the projector with budgetMs INBOX_GARDENER_LIMITS.ledgerBudgetMs
+    (25) and chunkBytes 64 KiB. The projector's deadline is checked only after a transaction commits, and an archive is
+    gunzipped whole (gunzipSync in ledger-projector.ts) on each tick. When one gunzip costs more than 25 ms, a pass
+    advances exactly one 64 KiB chunk.
+    MEASURED in the cloud container (Node 24.22.2) with the real projector, one 104 MB gz archive of 1 KB rows:
+    25 ms ticks needed 1,563 ticks and 226-234 s (one chunk each); ONE unbudgeted tick finished in 0.87 s. Narrowing
+    the projection's markers made no difference, so the cost is the per-tick gunzip, not row parsing.
+    At one chunk per pass and a pass about hourly, the store would need ~160,000 passes, so coverage:ledger can never
+    become observed and the gardener can never act, in shadow or act mode.
+  design: |
+    INVARIANT partial-never-observed: the read is observed only when the projector is fully caught up, with the same
+    incomplete conditions as today (pending, unread, torn, quarantined, source fault, unfinished live tail, caps).
+    1. Add INBOX_GARDENER_LIMITS.ledgerCatchUpMs = 20000 and use it as the tick budget in readInboxGardenerLedger,
+       replacing ledgerBudgetMs. The garden pass runs in its own spawned process, so the daemon loop does not wait on
+       it, and once the store is caught up a tick reads only the live ledger's new bytes and returns early.
+    2. readInboxGardenerLedger takes an optional clock (default systemClock) and hands it to the projector, so a test
+       can drive the deadline without real time. defaultInboxGardenerPorts passes its own clock.
+    3. Update the INBOX_GARDENER_LIMITS pin in the-inbox-gardener-retires-an-ask-whose-task-already-shipped.test.ts.
+    Not in scope: the projector re-gunzipping a whole archive on every budgeted tick (ledger-projector.ts) affects any
+    budgeted consumer; report it separately.
+  falsifier: |
+    Restore the 25 ms budget and criterion 1 fails (one transaction per pass, still partial). Report observed while
+    the projector is pending and criterion 3 fails.
+  note: |
+    Id reserved for run-unfiled-17949132863N with ~/rmd-work/bin/reserve-id.sh.
+    reservation hand-off: run-unfiled-17949132863N -> claude/project-thread-cb5huh-plan-gardener-ledger-catchup

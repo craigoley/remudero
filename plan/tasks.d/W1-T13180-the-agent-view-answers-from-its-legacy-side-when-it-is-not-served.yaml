@@ -17,7 +17,7 @@
     - src/lib/agent-view.ts
     - src/lib/serve.ts
     - test/console-api/read-model/the-agent-view-answers-from-its-legacy-side-when-it-is-not-served.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With no agent entry in read-model/switches.json (mode off), GET /v1/views/agent?instance=core&part=proposals answers 200 with a body computed by the same operator-agent readers the worker's body uses, where today it answers 404 view_disabled"

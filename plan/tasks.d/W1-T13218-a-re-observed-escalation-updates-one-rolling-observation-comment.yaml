@@ -18,7 +18,7 @@
     - src/lib/escalate.ts
     - src/lib/issue-revalidation-garden.ts
     - test/gardeners/a-re-observed-escalation-updates-one-rolling-observation-comment.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "When an escalation matches an open issue, the first match posts one observation comment; every later match in the same UTC day edits that comment in place (observation count, first and newest observed time, newest rendered body) and posts nothing new"

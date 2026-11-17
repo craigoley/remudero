@@ -17,7 +17,7 @@
     - src/lib/serve.ts
     - test/console-api/read-model/the-agent-view-answers-from-its-legacy-side-when-it-is-not-served.test.ts
     - test/the-agent-view-legacy-side-reads-no-ledger.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With the agent view not switched to serve, a request for /v1/views/agent?instance=core&part=proposals answers 503 view_not_ready for every part, with a ledger path that does not exist (any ledger read would throw or return rows)"

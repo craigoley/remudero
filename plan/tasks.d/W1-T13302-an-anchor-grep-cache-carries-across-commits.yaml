@@ -16,7 +16,7 @@
     - src/lib/inbox.ts
     - src/lib/panel-graph.ts
     - test/inbox/an-anchor-grep-cache-carries-across-commits.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "When the cache moves from commit A to commit B, an anchor whose path scope holds no file in `git diff --name-only --no-renames A B` keeps its answer with no grep; a counting grep seam sees greps only for anchors a changed file can affect"

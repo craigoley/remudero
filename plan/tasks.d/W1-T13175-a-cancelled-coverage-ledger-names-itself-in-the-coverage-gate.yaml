@@ -18,7 +18,7 @@
     - .github/workflows/ci.yml
     - test/ci/a-cancelled-coverage-ledger-names-itself-in-the-coverage-gate.test.ts
     - test/ci/a-plan-only-diff-whose-coverage-matrix-was-skipped-passes-as-not-applicable.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "When the coverage-shard matrix is skipped and needs.coverage-ledger.result is cancelled, the coverage-ratchet aggregator fails with a distinct line naming coverage-ledger-cancelled and the run's head, not the generic never-ran text"

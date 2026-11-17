@@ -129,6 +129,7 @@ import {
   cachedAnchorGrep,
   classifyProposal,
   createAnchorGrepCache,
+  gitAnchorChangedFiles,
   createFragmentMemo,
   gitGrepAnchorTrue,
   gitGrepAnchorTrueAsync,
@@ -2025,7 +2026,8 @@ const inboxClassifyStates = new WeakMap<PanelGraphDeps, InboxClassifyState>();
 function inboxClassifyState(deps: PanelGraphDeps): InboxClassifyState {
   let state = inboxClassifyStates.get(deps);
   if (state === undefined) {
-    state = { grep: createAnchorGrepCache(), fragments: createFragmentMemo() };
+    // W1-T13302: carry answers across main commits; an injected grep keeps the plain per-sha cache.
+    state = { grep: createAnchorGrepCache(deps.inboxGrepAnchor === undefined ? gitAnchorChangedFiles(deps.root) : undefined), fragments: createFragmentMemo() };
     inboxClassifyStates.set(deps, state);
   }
   return state;
@@ -2055,6 +2057,8 @@ async function warmInboxAnchors(deps: PanelGraphDeps, sha: string | undefined, p
       return answer;
     });
   for (const [key, err] of warmed) failures.set(key, err);
+  // W1-T13302: answers carried from the last commit were never grepped in this pass; snapshot them too.
+  if (cache.sha === (sha ?? "origin/main")) for (const [key, answer] of cache.results) if (!answers.has(key)) answers.set(key, answer);
 }
 
 /** One pass's inputs, read, with the per-proposal step still to run — so the same pass can run whole or in slices. */

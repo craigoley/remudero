@@ -25,3 +25,11 @@
     Last 24 h: n 53, p50 48.3, p90 302 min.
     Slowest PRs: #18575 (1093.6 min), #18545 (784.9 min), #18582 (488.5 min).
     Find what these PRs share at this stage before changing a bound.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.6
+    reasons:
+      - "high-risk verdict at confidence 0.60 — on the change's description/files alone, no diff was read — The task touches src/lib/sweep.ts, which the description ties to the review_queue_wait stage. Changing a bound or timing there could alter review or merge flow policy, which the escalation rule counts as HIGH.; on the change's description/files alone, no diff was read — The rationale says to \"find what these PRs share at this stage before changing a bound.\" The root cause is therefore unknown, and the finding is not yet verified from what is shown. Only 3 PRs are cited, and the slowest of them (up to 1093 min) may be outliers rather than a systematic cause.; on the change's description/files alone, no diff was read — The family track record is weak: 0 merged, 2 operator-approved and 2 declined, with a Beta mean of 0.50. The gates state says such families are judged more strictly.; on the change's description/files alone, no diff was read — Acceptance 1 is a \"recovers under 2x baseline\" claim, and the evidence says the test file named in it does not exist at base. The claim cannot be verified from what is shown. Acceptance 2 (outcomes unchanged) is a sensible invariant, but nothing visible shows how it would be enforced.; on the change's description/files alone, no diff was read — No bounded change view was supplied, so the actual change shape cannot be checked against the declared files."
+    judged_at: "2026-11-17T06:58:40.861Z"
+    pin: "9e51535a273b2eaffbd13ac2624e42e4a1d1613a0c567e6539d6b1e05770bc49"

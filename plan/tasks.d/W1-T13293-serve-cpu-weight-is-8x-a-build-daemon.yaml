@@ -18,7 +18,7 @@
     - test/the-console-backend-keeps-its-share-of-the-host.test.ts
     - test/a-changed-resource-policy-reaches-a-running-container.test.ts
     - test/a-changed-serve-policy-reaches-the-running-console.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "deploy/resource-policy.sh defaults RMD_SERVE_CPU_SHARES to 4096 while RMD_BUILD_CPU_SHARES stays 512, and serve-container.sh launches serve with --cpu-shares=4096 by default"

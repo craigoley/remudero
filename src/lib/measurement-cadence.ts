@@ -626,6 +626,81 @@ async function defaultAdoptionShipDateAsync(checkoutDir: string, file: string, n
   }
 }
 
+const adoptionShipDateKey = (file: string, needle?: string) => JSON.stringify([file, needle ?? null]);
+
+/** Immutable history answers only; deleting this best-effort store rebuilds it after a rewrite. */
+function adoptionShipDateStore(opts: MeasurementCadenceReportOpts, checkoutDir: string) {
+  const path = join(opts.stateDir, "adoption-ship-dates.json");
+  const dates = new Map<string, [string, string | null, string]>();
+  const row = {
+    step: "measurement_cadence.ship_dates", run_id: "MEASUREMENT-CADENCE", task_id: "measurement-cadence",
+    kept_dates_read: 0, git_lookups: 0, git_lookup_ms: 0,
+    store_read_error: undefined as string | undefined,
+    store_write_error: undefined as string | undefined,
+  };
+  try {
+    const raw = JSON.parse(readFileSync(path, "utf8"));
+    if (raw?.version !== 1 || raw.checkoutDir !== checkoutDir || !Array.isArray(raw.dates)) {
+      throw new Error("invalid ship-date store shape or checkout");
+    }
+    for (const entry of raw.dates) {
+      if (!Array.isArray(entry) || entry.length !== 3 || typeof entry[0] !== "string" ||
+          !(entry[1] === null || typeof entry[1] === "string") || typeof entry[2] !== "string" ||
+          !Number.isFinite(Date.parse(entry[2]))) throw new Error("invalid ship-date store entry");
+      if (existsSync(join(checkoutDir, entry[0]))) {
+        dates.set(adoptionShipDateKey(entry[0], entry[1] ?? undefined), [entry[0], entry[1], entry[2]]);
+      }
+    }
+  } catch (error) {
+    const reason = String(error);
+    dates.clear();
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") row.store_read_error = reason;
+  }
+  const kept = (file: string, needle?: string) => {
+    const date = dates.get(adoptionShipDateKey(file, needle));
+    if (date) row.kept_dates_read += 1;
+    return date?.[2];
+  };
+  const resolved = (file: string, needle: string | undefined, date: string, started: number) => {
+    row.git_lookup_ms += performance.now() - started;
+    if (date !== "unknown") dates.set(adoptionShipDateKey(file, needle), [file, needle ?? null, date]);
+    return date;
+  };
+  return {
+    sync: (cwd: string, file: string, needle?: string) => {
+      const date = kept(file, needle);
+      if (date !== undefined) return date;
+      row.git_lookups += 1;
+      const started = performance.now();
+      return resolved(file, needle, defaultAdoptionShipDate(cwd, file, needle), started);
+    },
+    async: async (cwd: string, file: string, needle?: string) => {
+      const date = kept(file, needle);
+      if (date !== undefined) return date;
+      row.git_lookups += 1;
+      const started = performance.now();
+      return resolved(file, needle, await defaultAdoptionShipDateAsync(cwd, file, needle), started);
+    },
+    finish: () => {
+      // The checkout can move during an async pass; prune again before publishing.
+      const entries = [...dates.values()].filter(([file]) => existsSync(join(checkoutDir, file)));
+      try {
+        writeAtomic(path, JSON.stringify({ version: 1, checkoutDir, dates: entries }));
+      } catch (error) {
+        const reason = String(error);
+        row.store_write_error = reason;
+      }
+      try {
+        if (opts.writeLedgerLine) opts.writeLedgerLine(row);
+        else appendLedger(join(opts.stateDir, LEDGER_FILENAME), row);
+      } catch (error) {
+        // An unwritable state directory must not turn a cache failure into a failed scan.
+        process.stderr.write(`${JSON.stringify({ ...row, ledger_write_error: String(error) })}\n`);
+      }
+    },
+  };
+}
+
 /** SHAPE 1 — symbol with no caller. Scans every `export function`/`export const` in `src/lib/**`
  *  (never `src/run-task.ts`, a wiring surface with exactly one caller by construction) and
  *  reports one with no reference outside its own definition, the same two shapes
@@ -1797,8 +1872,8 @@ export interface MeasurementCadenceReportOpts {
   /** Injectable only for tests/determinism; production takes the real clock. Also seeds {@link
    *  MeasurementCadenceReportOpts.driftWindow}'s default. */
   now?: Date;
-  /** W1-T3082: one row per `verdictCalibrationDriftLedgerLines` entry, only with `opts.escalate`.
-   *  Omitted by default: no ledger writes, as with `coverageImprovement`. */
+  /** Drift rows require `opts.escalate`. Production ship-date metrics use this writer on every
+   *  scan, defaulting to the state directory's ledger when omitted. */
   writeLedgerLine?: (line: Record<string, unknown>) => void;
   /** W1-T4243: opt-in, like `coverageImprovement` — the rung runs only when the caller supplies the
    *  writer for its one `knowledge.measured` row. */
@@ -2333,8 +2408,9 @@ export function buildKnowledgeMeasuredRow(result: KnowledgeMeasurementResult): R
 /**
  * Runs every measurement verb once, returning a cadence-shaped summary — wrapped by
  * `buildMeasurementCadenceDaemonHooks` and logged by `lib/daemon.ts`'s poll loop.
- * INVARIANT: never files a task or mints an id — the only writes (`escalateRepeatingRules`,
- * `mintAdoptionProposals`) are gated on `opts.escalate` via `updateProposalRegistry`. The
+ * INVARIANT: never files a task or mints an id. Proposal writes (`escalateRepeatingRules`,
+ * `mintAdoptionProposals`) are gated on `opts.escalate` via `updateProposalRegistry`;
+ * production ship-date lookups persist their store and measurement row on every scan. The
  * knowledge rung's one ledger row goes through the CALLER's `opts.knowledge.writeLedgerLine`, and
  * without that option the rung does not run.
  */
@@ -2512,12 +2588,14 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
 
   // ── the fourth verb: the adoption report (W1-T2266) ──────────────────────────────────────────
   noteMeasurementCadencePhase("adoption_report");
+  const shipDates = opts.checkoutDir && !opts.shipDateFor ? adoptionShipDateStore(opts, opts.checkoutDir) : undefined;
   const adoptionReport = runAdoptionReport({
     checkoutDir: opts.checkoutDir,
     stateDir: opts.stateDir,
-    shipDateFor: opts.shipDateFor ?? defaultAdoptionShipDate,
+    shipDateFor: opts.shipDateFor ?? shipDates?.sync ?? defaultAdoptionShipDate,
     ledgerUnion,
   });
+  shipDates?.finish();
 
   // ── the sixth verb: the verb census (W1-T2485) — see that section's own header doc above ───
   noteMeasurementCadencePhase("verb_census");
@@ -2671,7 +2749,9 @@ const ADOPTION_SHIP_DATE_CONCURRENCY = 4;
  */
 export async function runMeasurementCadenceReportAsync(opts: MeasurementCadenceReportOpts): Promise<MeasurementCadenceRunResult> {
   const resolved = new Map<string, string>();
-  const keyOf = (file: string, needle?: string) => `${file}\u0000${needle ?? ""}`;
+  const keyOf = adoptionShipDateKey;
+  const shipDates = opts.checkoutDir && !opts.shipDateFor && !opts.shipDateForAsync
+    ? adoptionShipDateStore(opts, opts.checkoutDir) : undefined;
   if (opts.checkoutDir) {
     const checkoutDir = opts.checkoutDir;
     const wanted = new Map<string, { file: string; needle?: string }>();
@@ -2684,7 +2764,7 @@ export async function runMeasurementCadenceReportAsync(opts: MeasurementCadenceR
     scanUnadoptedSymbols(checkoutDir, corpus, record);
     scanUnadoptedFields(checkoutDir, record);
     scanUnadoptedScripts(checkoutDir, corpus, record);
-    const lookup = opts.shipDateForAsync ?? defaultAdoptionShipDateAsync;
+    const lookup = opts.shipDateForAsync ?? shipDates?.async ?? defaultAdoptionShipDateAsync;
     const queue = [...wanted];
     const drain = async () => {
       for (let next = queue.shift(); next; next = queue.shift()) {
@@ -2693,11 +2773,13 @@ export async function runMeasurementCadenceReportAsync(opts: MeasurementCadenceR
     };
     await Promise.all(Array.from({ length: ADOPTION_SHIP_DATE_CONCURRENCY }, drain));
   }
-  const fallback = opts.shipDateFor ?? defaultAdoptionShipDate;
-  return runMeasurementCadenceReport({
+  const fallback = opts.shipDateFor ?? shipDates?.sync ?? defaultAdoptionShipDate;
+  const result = runMeasurementCadenceReport({
     ...opts,
     shipDateFor: (c, file, needle) => resolved.get(keyOf(file, needle)) ?? fallback(c, file, needle),
   });
+  shipDates?.finish();
+  return result;
 }
 
 /** Keys of {@link MeasurementCadenceRunResult} that must never appear on the row

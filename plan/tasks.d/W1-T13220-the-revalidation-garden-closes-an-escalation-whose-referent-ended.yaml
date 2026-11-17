@@ -16,7 +16,7 @@
   files:
     - src/lib/issue-revalidation-garden.ts
     - test/gardeners/the-revalidation-garden-closes-an-escalation-whose-referent-ended.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A BLOCKED or MANUAL escalation whose task is `PR-<n>`, whose body names a single pull URL as the PR that needs clarification, or that carries a single `<!-- Strike-Ladder-PR: <n> -->` marker is resolved with a citation naming the PR's closed or merged state and time when that PR is closed or merged"

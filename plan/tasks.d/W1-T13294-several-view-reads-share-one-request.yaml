@@ -15,6 +15,9 @@
   files:
     - src/lib/views.ts
     - test/console-api/views/several-view-reads-share-one-request.test.ts
+    - openapi/daemon.yaml
+    - packages/api-client/src/schema.d.ts
+    - test/every-view-body-matches-its-schema.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -48,6 +51,8 @@
        400 with no view read. Answer every read with the extracted function, concurrently, and reply 200 with
        {answers: [...]} in request order, each {status, etag?, body?} or {status, error, detail?}.
     3. Shadow sampling (opts.shadow) and onServed run per read as they do for a GET.
+    4. Declare POST /v1/views/batch in openapi/daemon.yaml (every served route is in the contract), regenerate the API
+       client, and leave the batch route out of the per-view schema census, which reads GET views only.
   falsifier: |
     Answer a batch read from a different code path than the GET: criterion 1's equality fails. Accept 33 reads or an
     unknown view: criterion 2 fails. Change any GET status, header or byte during the extraction: criterion 3 fails.

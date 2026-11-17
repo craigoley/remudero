@@ -1,0 +1,125 @@
+- id: W1-T13326
+  title: "The merge-time ratchet judge counts off the daemon loop: readMergedRatchetsAsync runs the gate counters (the affected-reach graph above all) in a worker thread and the loop only awaits the verdict, so judging an armed PR no longer blocks the daemon (174 stalls, 1,797 s, 13.9% of all loop lag in six hours on 2026-11-17)"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the verdict holds or releases an arm and a merge; a judgement that comes back clean when a count crossed merges a ratchet regression, and a count that fails must stay unread, never clean
+  origin: "operator-session#loop-lag-2026-11-17"
+  plan_refs:
+    - W1-T12753
+    - W1-T13155
+    - W1-T13185
+    - W1-T13288
+  files:
+    - src/lib/arm-auto-merge.ts
+    - src/lib/merged-ratchet-verdict.ts
+    - src/lib/merged-ratchet-worker.ts
+    - scripts/build-child-entries.mjs
+    - test/the-merge-time-judge-counts-off-the-daemon-loop.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "readMergedRatchetsAsync over a fixture clone returns the same verdict, rows, counted gates and reason as judgeMergedRatchets called directly on the same inputs, for a clean merge, an affected-reach crossing, a stale lowering and an unread input"
+      proof: "grep: W1-T13326 criterion 1 in test/the-merge-time-judge-counts-off-the-daemon-loop.test.ts"
+    - claim: "While readMergedRatchetsAsync judges a merge whose landing changes the import graph of a tree with several hundred modules, a setImmediate turn counter on the calling thread keeps advancing through the count: the count is off the loop"
+      proof: "grep: W1-T13326 criterion 2 in test/the-merge-time-judge-counts-off-the-daemon-loop.test.ts"
+    - claim: "invariant:failed-count-is-unread-never-clean — a worker that throws, exits before it answers or passes its time bound gives the verdict unread with the cause in reason, never clean, and a crossing or stale lowering the worker counted is returned unchanged and still holds the arm (ratchetVerdictHolds is true)"
+      kind: guard
+      proof: "grep: W1-T13326 criterion 3 in test/the-merge-time-judge-counts-off-the-daemon-loop.test.ts"
+    - claim: "invariant:no-ratchet-count-on-the-loop — readMergedRatchetsAsync, as the sweep and the arm wire it in production, runs no gate counter on the calling thread: measureReach and the other GATE_ROWS counters are not called there, and the git and gh reads stay on the async transport with no synchronous spawn"
+      kind: guard
+      proof: "grep: W1-T13326 criterion 4 in test/the-merge-time-judge-counts-off-the-daemon-loop.test.ts"
+    - claim: "The sweep.ratchet_judge.decided row still carries elapsed_ms, main_sha, head_sha, the counted and uncounted gates and the rows, with the same values as a direct judgement of the same inputs"
+      proof: "grep: W1-T13326 criterion 5 in test/the-merge-time-judge-counts-off-the-daemon-loop.test.ts"
+    - claim: "The production reader calls the worker: readMergedRatchetsAsync in src/lib/arm-auto-merge.ts judges through judgeMergedRatchetsInWorker, the one export of the new worker module"
+      proof: "grep: judgeMergedRatchetsInWorker( in src/lib/arm-auto-merge.ts"
+  rationale: |
+    WHY: before the sweep arms or merges a PR it judges the ratchets on the merged tree. The git reads are
+    already async, but the counting is not: judgeMergedRatchets runs on the daemon loop, and its affected-reach
+    gate builds the import graph of the whole merged tree there. Main moves all the time, so almost every
+    judgement is for a new pair of commits and nothing is reused. It is the largest single named cause of loop
+    lag that no task covers.
+    MEASURED, core ledger (~/rmd-state2/state), daemon.loop_stall_profile rows of the daemon process from
+    2026-11-16T22:05:00Z to 2026-11-17T04:07:46Z (three boots: d5de6540c5 at 20:44:27Z, aa891635ed at 23:50:59Z,
+    9be1ffbcb8 at 03:19:15Z):
+    - 1,898 stall rows. The loop was blocked 11,735.3 s of 21,767 s, 53.9% (overlapping stall windows counted
+      once; the plain sum of lag_ms is 12,990.6 s).
+    - judgeMergedRatchets or mergedRatchetsInClone is in the top inclusive frames of 174 rows: 1,796.7 s of lag
+      in total, 13.9% of all lag, the largest 36.3 s at 01:21:49Z. It is many middle-sized stalls, not a few
+      long ones.
+    - The 01:21:49Z row: lag 36.3 s, judgeMergedRatchets 23.9 s, of which reachRows 17.7 s and measureReach
+      17.5 s. Self time: the per-file scan called from scanSource 7.1 s, garbage collection 6.8 s, reachable
+      2.8 s, specifiers under buildAffectedSuitesGraph 2.2 s, the deps-interface seam pattern 1.6 s.
+      sync_spawn_ms is 0. The 01:01:25Z row: 24.5 s, judgeMergedRatchets 15.0 s, reachRows 10.7 s. So the
+      reach graph is about 70% of a judgement and the other counters the rest.
+    - 234 sweep.ratchet_judge.decided rows in the window: 224 clean, 10 unread, none held. 224 distinct
+      (main_sha, head_sha) pairs, so a memo keyed on the pair would save 10 judgements of 234. elapsed_ms
+      summed is 9,262.7 s (wall time, which includes waiting behind other work), the largest 260.0 s; 209 of
+      234 took more than 5 s.
+    READ at origin/main 047a84f865:
+    - src/lib/arm-auto-merge.ts:841 readMergedRatchetsAsync runs mergedRatchetsInClone (:845) under
+      runStepsAsync with ghJsonAsync and planSafetyGitAsync. At :860 it calls judgeMergedRatchets(yield*
+      readMergedRatchetInputsSteps(...)) directly: the inputs are read through awaited steps, the judgement is
+      a plain call on the loop.
+    - src/lib/merged-ratchet-verdict.ts:531 judgeMergedRatchets runs every GATE_ROWS counter (:517 to :526) in
+      turn. reachRows (:465) calls measureReach on the merged tree (:484), and on main's tree too when a count
+      is past both ceilings (:486). It needs the graph because the affected-reach baseline counts suites
+      reachable from each module, which only the whole import graph answers. reachMoves (:289) skips the gate
+      only when no landed path changes the graph.
+    - scripts/affected-reach-count.mjs:47 measureReach builds the graph over every code file of the tree and
+      walks reachability from every src module.
+    - Production callers: src/lib/sweep.ts:5330 (the armed re-judge, read at :27046) and
+      src/lib/arm-auto-merge.ts:778 (the arm, read at :1439). A read or counter that fails is unread for that
+      gate, never clean (:528 to :547), and a thrown reader becomes judgeMergedRatchets({ error }) (:1441,
+      sweep.ts:27059).
+    - Worker threads the daemon already starts: startWorker (src/lib/child-entry-argv.ts:138) starts a module's
+      worker from its bundle or its source; src/lib/board-worker.ts:227 and src/lib/tick-read-worker.ts:3435
+      use it, and scripts/build-child-entries.mjs lists the worker bundles.
+    NOT COVERED: swept origin/main plan/tasks.d and plan/tasks.yaml for mergedRatchetsInClone,
+    judgeMergedRatchets, measureReach and reachRows. W1-T9962 (merged) added the armed re-judge and moved its
+    git reads off the loop through execFileLoopBounded. W1-T12509, W1-T12526 and W1-T12792 added gates
+    and read a large population in parts; none moves the counting. W1-T10820 is the graph's alias rule.
+    W1-T13155, W1-T13185 and W1-T13183 (merged) and W1-T13288 (in review) are ledger reads. No open PR on
+    craigoley/remudero names the ratchet judge.
+  design: |
+    INVARIANT no-ratchet-count-on-the-loop: readMergedRatchetsAsync runs no gate counter on the calling thread; the daemon loop only reads inputs through the async transport and awaits the verdict.
+    INVARIANT failed-count-is-unread-never-clean: a count that throws, a worker that dies or a count past its time bound is unread with its cause, never clean, and a counted crossing or stale lowering still holds.
+    1. New src/lib/merged-ratchet-worker.ts: a worker entry that takes the read inputs as plain data (the
+       path-to-text maps for the merged tree and main, the landing and changed paths, the reach file listing,
+       the two shas and any read error), rebuilds the MergedRatchetInputs readers over them, runs
+       judgeMergedRatchets unchanged and posts the judgement back. Its one export for callers is
+       judgeMergedRatchetsInWorker(inputs), which returns a promise of the judgement. Start it with startWorker, as
+       board-worker.ts does, and add its bundle to scripts/build-child-entries.mjs so the bundled daemon can
+       start it.
+    2. mergedRatchetsInClone (src/lib/arm-auto-merge.ts:845) gets the judge as a parameter.
+       readMergedRatchetsAsync passes one that sends the inputs to the worker inside a step and awaits the
+       answer. The inputs that never count (an error, upToDate) may be judged in place: they cost nothing.
+       merged-ratchet-verdict.ts changes only as far as the inputs must be made plain data.
+    3. The worker call has a time bound, a named constant beside the judge. Past it, or on a worker error or
+       an exit with no answer, the result is judgeMergedRatchets({ error: <cause>, mainSha, headSha }): unread.
+       The worker is stopped and the next judgement starts a new one.
+    4. judgeMergedRatchets stays pure, synchronous and exported; a synchronous driver or a test that calls it
+       directly gets the same result. elapsedMs is still measured around the whole judgement. No change to the
+       gates, the baselines, the verdict rule, ratchetVerdictHolds or the ledger row.
+    5. TESTS in test/the-merge-time-judge-counts-off-the-daemon-loop.test.ts drive
+       readMergedRatchetsAsync over a real fixture clone with a fake REST reader, as the W1-T9962 and W1-T12526
+       tests do. Criterion 2 builds a tree large enough that an in-place count would hold the loop for a
+       measurable time. Criterion 4 spies on measureReach on the calling thread. Criterion 3 points the worker
+       at an entry that throws, one that exits, and one that never answers with a short bound.
+  falsifier: |
+    At origin/main the judgement is a plain call at arm-auto-merge.ts:860: the setImmediate counter reads 0
+    turns during the count (criterion 2) and the spy sees measureReach on the calling thread (criterion 4).
+    Map a worker failure to a clean verdict, or to no verdict at all: criterion 3 arms a PR whose count was
+    never made. Send the worker only the landing paths, not the whole listing: the reach count differs from the
+    direct judgement and criterion 1 fails on the crossing fixture. Measure elapsedMs only around the worker
+    call: criterion 5's row differs from a direct judgement of the same inputs.
+  note: |
+    Id reserved for run-unfiled-1794888412000 with ~/rmd-work/bin/reserve-id.sh.
+    Proof that counts in production: no daemon.loop_stall_profile row with judgeMergedRatchets, reachRows or
+    measureReach in its top inclusive frames, over a day with merges.
+    Out of scope: making the count cheaper (a per-file scan cache keyed on blob id, or reusing main's graph);
+    file that only if the worker's own time becomes the limit on how fast a PR is armed.
