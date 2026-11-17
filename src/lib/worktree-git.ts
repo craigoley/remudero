@@ -469,14 +469,16 @@ function argv(pin: PinnedWorktreeGit, args: readonly string[]): string[] {
 export function hostWorktreeGit(worktreePath: string, args: readonly string[], opts: HostWorktreeGitOptions = {}): string {
   const pin = pinWorktreeGit(worktreePath, opts.log);
   const overrides = vetPinnedConfig(pin, opts.log);
-  const gitSync = (a: readonly string[], options: ReturnType<typeof spawnOptions>): string => String(execFileSync("git", argv(pin, a), options) ?? "");
-  const run = (): string => gitSync(args, spawnOptions(pin, opts, overrides));
   try {
-    return run();
+    // The success path calls execFileSync from this frame itself: the read plane names the spawn's caller by the
+    // frames above the leaf, and a helper closure here would become the caller instead (W1-T11795).
+    return String(execFileSync("git", argv(pin, args), spawnOptions(pin, opts, overrides)) ?? "");
   } catch (error) {
     // W1-T13409: a fetch that names a ref with a missing object repairs it and runs once more; anything else rethrows.
+    const gitSync = (a: readonly string[], options: ReturnType<typeof spawnOptions>): string => String(execFileSync("git", argv(pin, a), options) ?? "");
     return retryAfterDanglingRefRepair((a, timeout) =>
-      gitSync(a, spawnOptions(pin, { timeout, maxBuffer: DANGLING_REF_MAX_BUFFER }, overrides)), args, error, run);
+      gitSync(a, spawnOptions(pin, { timeout, maxBuffer: DANGLING_REF_MAX_BUFFER }, overrides)), args, error,
+      () => gitSync(args, spawnOptions(pin, opts, overrides)));
   }
 }
 
