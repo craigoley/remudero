@@ -1,0 +1,48 @@
+- id: W1-T13290
+  title: "Serve gzips a large Console snapshot response off its request thread when the client accepts gzip, so the 9.2 MB Inbox list crosses the tunnel as about 1 MB"
+  repo: remudero
+  depends_on: []
+  priority: 0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # the bytes on the wire for large cached reads; status, headers, ETag, 304 and the JSON body are unchanged
+  origin: "operator-session#serve-oom-2026-11-16"
+  plan_refs:
+    - W1-T4261
+  files:
+    - src/lib/console-snapshot-cache.ts
+    - test/a-large-console-snapshot-is-sent-gzipped.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "A cached 200 response whose body is at least CONSOLE_GZIP_MIN_BYTES (64 KiB), to a request with Accept-Encoding containing gzip, is sent with content-encoding gzip and vary accept-encoding, and gunzips to exactly the body writeBufferedResponse sends uncompressed today"
+      proof: "grep: W1-T13290 criterion 1 in test/a-large-console-snapshot-is-sent-gzipped.test.ts"
+    - claim: "The compression runs through zlib's asynchronous gzip (the libuv thread pool), not gzipSync: with gzipSync stubbed to throw, the large response still completes compressed"
+      proof: "grep: W1-T13290 criterion 2 in test/a-large-console-snapshot-is-sent-gzipped.test.ts"
+    - claim: "invariant:small-and-304-unchanged — a body under the threshold, a request without gzip in Accept-Encoding, and an If-None-Match hit (304) are answered exactly as today"
+      kind: guard
+      proof: "grep: W1-T13290 criterion 3 in test/a-large-console-snapshot-is-sent-gzipped.test.ts"
+  rationale: |
+    WHY: Craig reported on 2026-11-17 that opening an Inbox item gave no feedback and then loaded very slowly.
+    MEASURED on the Azure host, 00:36Z: GET /v1/inbox answers 9,185,361 bytes of uncompressed JSON (2,343 proposals;
+    notReady items average 3.1 KB, mostly `reasons` and `plain`), in 0.5 to 5.4 s at the serve container; gzip -c makes it
+    1,039,748 bytes (8.8x smaller). Responses carry an ETag but no content-encoding. The Console's Vercel functions run in
+    iad1 and fetch through the Cloudflare tunnel, and Vercel logs show /v1/inbox reads timing out against budgets of
+    0.5 to 5 s (for example 00:35:25Z, elapsedMs 818).
+    READ at origin/main, src/lib/console-snapshot-cache.ts writeBufferedResponse: it writes `body` (with the per-request
+    staleness spliced in) with res.end, uncompressed, for every cached route.
+  design: |
+    INVARIANT small-and-304-unchanged: only large 200 bodies to gzip-accepting clients change.
+    1. Add CONSOLE_GZIP_MIN_BYTES = 64 * 1024. In writeBufferedResponse, after the body is built and before writeHead,
+       when status is 200, the body is at least the threshold and Accept-Encoding includes gzip: zlib.gzip(body, level 4)
+       asynchronously, then writeHead with content-encoding gzip, vary accept-encoding, the compressed content-length,
+       and end. On a gzip error, send the uncompressed body as today.
+    2. Keep the ETag as is (it names the representation's content, and the Console's If-None-Match still matches).
+    3. No change to the 304 path or to small bodies.
+  falsifier: |
+    Send the body uncompressed: criterion 1 fails. Use gzipSync: criterion 2 fails (the stub throws). Compress a 304 or
+    a small body: criterion 3 fails.
+  note: |
+    Id reserved for run-unfiled-1794875837000 with ~/rmd-work/bin/reserve-id.sh.

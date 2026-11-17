@@ -56,8 +56,10 @@
 # heartbeat that dirtied it would break the fleet it exists to watch.
 #
 # EACH BEAT IS A FRESH ROOT COMMIT (no parent) force-pushed over the branch, so the branch is
-# always exactly one commit and never grows. The superseded objects become unreachable and are
-# collected by git's ordinary `gc --auto`; nothing here needs to prune them.
+# always exactly one commit and never grows. The beat's three objects are written into an object
+# store PRIVATE to that beat (W1-T10756), created under ${RMD_ROOT}/state and removed after the push,
+# so the checkout the script runs from gains no loose objects: it is the converged install the
+# launcher fetches, and nothing there should have to gc a beat's leavings.
 #
 # ── EXIT CODES ────────────────────────────────────────────────────────────────────────────────
 # 0 = the beat was published (whatever it SAID about the fleet's health — a beat reporting a dead
@@ -1236,6 +1238,44 @@ fi
 INSTALL_SHA="$(git -C "$INSTALL_DIR" rev-parse --short HEAD 2>/dev/null)"
 [ -n "$INSTALL_SHA" ] || INSTALL_SHA="unknown"
 
+# ── probe: does this beat run the converged install's code? (W1-T10756) ───────────────────────
+# `install_dir`/`install_head_sha` above name the directory the beat RUNS FROM. A cron line that
+# names an old checkout kept reporting a healthy beat from code that stopped moving on 2026-10-16,
+# and nothing said so. This compares the RUNNING FILE's blob with the blob the converged install
+# carries at HEAD: evidence, with no time threshold. The install root is RMD_HEARTBEAT_INSTALL_ROOT,
+# else config.json's installRoot, else ${RMD_ROOT}/daemon-install (resolveInstallRoot's default).
+# A FAILED READ IS NEVER `current`: any root, sha or blob that cannot be read reports `unknown` with
+# the reason (invariant a-failed-read-is-never-current).
+CODE_INSTALL_ROOT="${RMD_HEARTBEAT_INSTALL_ROOT:-}"
+if [ -z "$CODE_INSTALL_ROOT" ]; then
+  CODE_INSTALL_ROOT="$(grep -o '"installRoot"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_FILE" 2>/dev/null | head -n 1 | sed 's/.*"\([^"]*\)"$/\1/')"
+fi
+[ -n "$CODE_INSTALL_ROOT" ] || CODE_INSTALL_ROOT="${RMD_ROOT}/daemon-install"
+# Read-only: no `-w`, so hashing the running file writes nothing anywhere. --no-filters so the blob is
+# the file's raw bytes, which is what bash is executing.
+BEAT_SCRIPT_BLOB="$(git hash-object --no-filters -- "$SOURCE" 2>/dev/null < /dev/null)" || BEAT_SCRIPT_BLOB=""
+CODE_ROOT_SHA=""
+CODE_ROOT_BLOB=""
+if [ -d "$CODE_INSTALL_ROOT" ]; then
+  # --verify -q: a bare `rev-parse` of a name it cannot resolve ECHOES THE NAME on stdout (exit 128), and
+  # that echo would be read as a blob. With --verify a failed read prints nothing, so it is `unknown`.
+  CODE_ROOT_SHA="$(git -C "$CODE_INSTALL_ROOT" rev-parse --verify -q --short HEAD 2>/dev/null)" || CODE_ROOT_SHA=""
+  CODE_ROOT_BLOB="$(git -C "$CODE_INSTALL_ROOT" rev-parse --verify -q HEAD:scripts/fleet-heartbeat.sh 2>/dev/null)" || CODE_ROOT_BLOB=""
+fi
+if [ ! -d "$CODE_INSTALL_ROOT" ]; then
+  CODE_VERDICT="unknown — no install root at ${CODE_INSTALL_ROOT}"
+elif [ -z "$CODE_ROOT_SHA" ]; then
+  CODE_VERDICT="unknown — cannot read HEAD of the install root ${CODE_INSTALL_ROOT}"
+elif [ -z "$CODE_ROOT_BLOB" ]; then
+  CODE_VERDICT="unknown — the install root ${CODE_INSTALL_ROOT} at ${CODE_ROOT_SHA} has no scripts/fleet-heartbeat.sh"
+elif [ -z "$BEAT_SCRIPT_BLOB" ]; then
+  CODE_VERDICT="unknown — cannot hash the running script ${SOURCE}"
+elif [ "$BEAT_SCRIPT_BLOB" = "$CODE_ROOT_BLOB" ]; then
+  CODE_VERDICT="current"
+else
+  CODE_VERDICT="STALE — running ${SOURCE} (${BEAT_SCRIPT_BLOB}), the converged install ${CODE_INSTALL_ROOT} at ${CODE_ROOT_SHA} carries ${CODE_ROOT_BLOB}"
+fi
+
 # ── probe: the container restart budget (W1-T483) ─────────────────────────────────────────────
 # THIS WAS PUBLISHED AS AN EARLY WARNING ONLY, UNTIL W1-T3411. Docker's `--restart=on-failure:N`
 # caps the COUNT of automatic restarts for a container instance, and nothing restores it: measured
@@ -1694,7 +1734,13 @@ escalation_spool_drain_ts=${SPOOL_DRAIN_TS:-none}${SPOOL_LINES}"
 
 PAYLOAD="${PAYLOAD}
 crash_loop_verdict=${CRASH_LOOP_VERDICT}
-session_reaper_verdict=${REAPER_VERDICT}"
+session_reaper_verdict=${REAPER_VERDICT}
+beat_script_path=${SOURCE}
+beat_script_blob=${BEAT_SCRIPT_BLOB:-unknown}
+install_root=${CODE_INSTALL_ROOT}
+install_root_head_sha=${CODE_ROOT_SHA:-unknown}
+install_script_blob=${CODE_ROOT_BLOB:-unknown}
+beat_code_verdict=${CODE_VERDICT}"
 
 # Same absent-never-zero shape as RESTART_COUNT/IMAGE_BUILD_SHA below: `supervisor_source` (in the
 # heredoc above) is always present as the diagnosis, and `supervisor_last_age_s` is appended ONLY
@@ -1755,6 +1801,22 @@ publish_beat() (
     exit 1
   }
 
+  # An object store private to THIS beat (W1-T10756): the blob, tree and commit never enter the
+  # checkout the script runs from. The commit is parentless, so nothing from that checkout's objects
+  # is needed, and the push below reads the same private store. The removal is guarded to exactly the
+  # directory this beat created.
+  OBJ_PARENT="${RMD_ROOT}/state"
+  mkdir -p "$OBJ_PARENT" 2>/dev/null || true
+  BEAT_OBJECTS="$(mktemp -d "${OBJ_PARENT}/.beat-objects.XXXXXX" 2>/dev/null)" \
+    || fail "could not create a private object store under ${OBJ_PARENT}"
+  beat_objects_cleanup() {
+    case "$BEAT_OBJECTS" in
+      "${OBJ_PARENT}/.beat-objects."?*) [ -L "$BEAT_OBJECTS" ] || rm -rf -- "$BEAT_OBJECTS" ;;
+    esac
+  }
+  trap beat_objects_cleanup EXIT
+  export GIT_OBJECT_DIRECTORY="$BEAT_OBJECTS"
+
   blob="$(printf '%s\n' "$PAYLOAD" | git -C "$INSTALL_DIR" hash-object -w --stdin 2>/dev/null)" \
     || fail "could not write the payload blob"
   [ -n "$blob" ] || fail "hash-object produced no object id"
@@ -1768,6 +1830,20 @@ publish_beat() (
     || fail "could not build the beat commit"
   [ -n "$commit" ] || fail "commit-tree produced no commit id"
 
+  # THE PUSH SUPPLIES ITS OWN CREDENTIAL (W1-T10756). The converged install has no credential helper
+  # (the old checkout had a repo-local one), and a push from it died "could not read Username". When
+  # GH_TOKEN is set, a helper that reads it is added for THIS push only. It is given through git's
+  # GIT_CONFIG_COUNT/KEY_n/VALUE_n environment, the `-c credential.helper=...` form without a `-c` in
+  # argv, so the subcommand stays the first word after `-C <dir>` for every reader of the call. The
+  # helper looks the token up from its own environment, so the token never reaches argv, the payload
+  # or the crontab. `credential.helper` is a list, so a checkout's own helper still runs first.
+  if [ -n "${GH_TOKEN:-}" ]; then
+    cfg_n="${GIT_CONFIG_COUNT:-0}"
+    case "$cfg_n" in ''|*[!0-9]*) cfg_n=0 ;; esac
+    export "GIT_CONFIG_KEY_${cfg_n}=credential.helper"
+    export "GIT_CONFIG_VALUE_${cfg_n}=!f() { echo username=x-access-token; echo \"password=\$GH_TOKEN\"; }; f"
+    export GIT_CONFIG_COUNT=$((cfg_n + 1))
+  fi
   git -C "$INSTALL_DIR" push --force "$REMOTE" "${commit}:refs/heads/${BRANCH}" >/dev/null 2>&1 \
     || fail "push to ${REMOTE}/${BRANCH} failed"
 

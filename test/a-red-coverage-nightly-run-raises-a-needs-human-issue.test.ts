@@ -26,6 +26,8 @@ import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+// @ts-expect-error -- plain .mjs script, no type declarations
+import { NIGHTLY_SHARD_COUNT } from "#scripts/coverage-floor.mjs";
 import { ghShim } from "./helpers/gh-shim.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -148,6 +150,9 @@ function context(shards: string, merge: string, floor: string): Record<string, s
   };
 }
 
+/** Every nightly shard green, at the workflow's own width (W1-T13275 design 3 moved it from 8 to 12). */
+const allGreen = () => Array.from({ length: NIGHTLY_SHARD_COUNT }, () => 0);
+
 /** Writes the shard artifacts the download step would leave: `exits[n]` is shard n's test-exit,
  *  `null` a shard that died before its upload (no artifact at all). */
 function shardArtifacts(exits: Array<number | null>) {
@@ -208,7 +213,7 @@ test("W1-T5811: only the delivery job is granted issues: write, the top level st
 });
 
 test("W1-T5811: a red shard raises one needs-human issue that names the red shard and the shard that uploaded nothing", () => {
-  const r = driveDelivery(context("failure", "skipped", ""), [0, 0, 1, 0, null, 0, 0, 0]);
+  const r = driveDelivery(context("failure", "skipped", ""), allGreen().map((code, i) => (i === 2 ? 1 : i === 4 ? null : code)));
   assert.equal(r.downloaded, true, "a red run downloads the shard exits it names");
   assert.equal(r.verdict, "red");
   assert.equal(r.resolved, undefined, "a red run must never close the escalation");
@@ -218,24 +223,25 @@ test("W1-T5811: a red shard raises one needs-human issue that names the red shar
   assert.ok(body, `expected gh issue create, got ${r.raised.gh}`);
   // The title, the label, and the source marker leading the body, so the recovery can find it.
   assert.ok(body.startsWith(`issue create --title coverage-nightly is failing --label needs-human --body ${MARKER}`), body);
-  assert.match(body, /shard 3\/8: the instrumented suite was red \(exit 1\)/);
-  assert.match(body, /shard 5\/8: no artifact/);
-  assert.doesNotMatch(body, /shard 1\/8/, "a green shard is not named");
+  assert.match(body, new RegExp(`shard 3/${NIGHTLY_SHARD_COUNT}: the instrumented suite was red \\(exit 1\\)`));
+  assert.match(body, new RegExp(`shard 5/${NIGHTLY_SHARD_COUNT}: no artifact`));
+  assert.doesNotMatch(body, new RegExp(`shard 1/${NIGHTLY_SHARD_COUNT}`), "a green shard is not named");
+  assert.doesNotMatch(body, new RegExp(`shard ${NIGHTLY_SHARD_COUNT}/${NIGHTLY_SHARD_COUNT}`), "the last green shard is not named");
   assert.match(body, /actions\/runs\/4242/, "auditable from the issue alone");
 });
 
 test("W1-T5811: a floor below the baseline raises, naming the floor", () => {
-  const r = driveDelivery(context("success", "failure", "failure"), [0, 0, 0, 0, 0, 0, 0, 0]);
+  const r = driveDelivery(context("success", "failure", "failure"), allGreen());
   assert.equal(r.verdict, "red");
   assert.equal(r.resolved, undefined);
   const body = created(r.raised);
   assert.match(body, /floor: the absolute-floor ratchet FAILED/);
-  assert.doesNotMatch(body, /shard \d\/8:/, "with every shard green, no shard is blamed");
+  assert.doesNotMatch(body, /shard \d+\/\d+:/, "with every shard green, no shard is blamed");
 });
 
 test("W1-T5811: a second red night comments on the open issue instead of filing a duplicate", () => {
   const open = [{ number: 777, body: `${MARKER} older night`, title: "coverage-nightly is failing" }];
-  const r = driveDelivery(context("success", "failure", "failure"), [0, 0, 0, 0, 0, 0, 0, 0], open);
+  const r = driveDelivery(context("success", "failure", "failure"), allGreen(), open);
   assert.equal(created(r.raised), "", "no second issue");
   assert.match(r.raised?.gh ?? "", /^issue comment 777 --body <!-- needs-human:coverage-nightly -->/m);
 });
@@ -245,7 +251,7 @@ test("W1-T5811: a green run raises nothing and closes the open coverage-nightly 
     { number: 777, body: `${MARKER} older night`, title: "coverage-nightly is failing" },
     { number: 778, body: "<!-- needs-human:mutation-nightly --> x", title: "mutation-nightly is failing" },
   ];
-  const r = driveDelivery(context("success", "success", "success"), [0, 0, 0, 0, 0, 0, 0, 0], open);
+  const r = driveDelivery(context("success", "success", "success"), allGreen(), open);
   assert.equal(r.downloaded, false, "a green night downloads nothing it will not report");
   assert.equal(r.verdict, "green");
   assert.equal(r.raised, undefined, "a green night stays silent");

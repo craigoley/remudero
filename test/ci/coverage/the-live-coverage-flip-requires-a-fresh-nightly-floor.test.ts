@@ -18,7 +18,7 @@ import { after, test } from "node:test";
 import { parse as parseYaml } from "yaml";
 
 import {
-  agreeOnFloor, buildProvenance, consumeFloor, main, MAX_AGE_HOURS, nodeMajor, policyDigest, PRODUCERS, selectFloor, sha256, verifyPin,
+  agreeOnFloor, buildProvenance, CI_COVERAGE_SHARD_COUNT, consumeFloor, main, MAX_AGE_HOURS, NIGHTLY_SHARD_COUNT, nodeMajor, policyDigest, PRODUCERS, selectFloor, sha256, verifyPin,
   // @ts-expect-error -- plain .mjs script, no type declarations
 } from "#scripts/coverage-floor.mjs";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
@@ -29,7 +29,9 @@ const REPO = "craigoley/remudero";
 const NOW = new Date("2026-10-28T12:00:00Z");
 const HEAD = "a".repeat(40);
 const LCOV = "TN:\nSF:src/a.ts\nDA:1,1\nLF:1\nLH:1\nend_of_record\nSF:src/b.ts\nDA:1,0\nLF:1\nLH:0\nend_of_record\n";
-const ALL_GREEN = Object.fromEntries(Array.from({ length: 8 }, (_, i) => [i + 1, 0]));
+const ALL_GREEN = Object.fromEntries(Array.from({ length: NIGHTLY_SHARD_COUNT }, (_, i) => [i + 1, 0]));
+// W1-T13270: the merge-group producer runs ci.yml's coverage matrix; the nightly runs its own NIGHTLY_SHARD_COUNT.
+const ALL_GREEN_MERGED = Object.fromEntries(Array.from({ length: CI_COVERAGE_SHARD_COUNT }, (_, i) => [i + 1, 0]));
 const CONSUMER = { repository: REPO, nodeMajor: nodeMajor(), policyDigest: policyDigest(REPO_ROOT) };
 
 const owned: string[] = [];
@@ -114,7 +116,8 @@ test("W1-T5892: failed, partial, expired, future, mismatched and unverifiable fl
     cases.push([name, n, files === undefined ? artifact(n.provenance) : files, why]);
   add("completed red run", nightly({ row: { conclusion: "failure" } }), undefined, /concluded failure, not success/);
   add("red shard uploaded before its exit gate", nightly({ provenance: { shard_test_exits: { ...ALL_GREEN, 3: 1 } } }), undefined, /shard\(s\) 3 exited non-zero/);
-  add("partial shard record", nightly({ provenance: { shard_test_exits: { ...ALL_GREEN, 8: undefined } } }), undefined, /7 of 8 shard exits \(partial\)/);
+  add("partial shard record", nightly({ provenance: { shard_test_exits: { ...ALL_GREEN, [NIGHTLY_SHARD_COUNT]: undefined } } }), undefined,
+    new RegExp(`${NIGHTLY_SHARD_COUNT - 1} of ${NIGHTLY_SHARD_COUNT} shard exits \\(partial\\)`));
   add("missing artifact", nightly(), null, /cannot download coverage-nightly/);
   add("legacy artifact without provenance", nightly(), { "lcov.info": LCOV }, /no provenance \(legacy or unverifiable\)/);
   add("malformed provenance", nightly(), artifact("{not json"), /provenance is malformed/);
@@ -217,7 +220,7 @@ test("W1-T5892: a newer merge-group floor is preferred, and a refused newest fal
   const mergedRow = { attempt: 1, conclusion: "success", createdAt: new Date(mergedAt.getTime() - 60_000).toISOString(),
     databaseId: 222, event: "merge_group", headBranch: "gh-readonly-queue/main/pr-1-x", headSha: "c".repeat(40),
     updatedAt: mergedAt.toISOString() };
-  const merged = buildProvenance({ producer: "coverage-merged", lcov: Buffer.from(LCOV), shardExits: ALL_GREEN, root: REPO_ROOT, now: mergedAt,
+  const merged = buildProvenance({ producer: "coverage-merged", lcov: Buffer.from(LCOV), shardExits: ALL_GREEN_MERGED, root: REPO_ROOT, now: mergedAt,
     env: { GITHUB_REPOSITORY: REPO, GITHUB_RUN_ID: "222", GITHUB_RUN_ATTEMPT: "1", GITHUB_EVENT_NAME: "merge_group",
       GITHUB_REF: "refs/heads/gh-readonly-queue/main/pr-1-x", GITHUB_SHA: "c".repeat(40) } });
   const mergedDir = join(pinDir, ".candidates", "coverage-merged-222");
@@ -270,7 +273,7 @@ test("W1-T5892: the CLI writes the decision for the shard and refuses an altered
 test("W1-T5892: a producer records its own run, runtime, policy and shard exits", () => {
   const dir = tmp("producer");
   writeFileSync(join(dir, "lcov.info"), LCOV);
-  for (let n = 1; n <= 8; n++) {
+  for (let n = 1; n <= NIGHTLY_SHARD_COUNT; n++) {
     mkdirSync(join(dir, "coverage-shards", `coverage-shard-${n}`), { recursive: true });
     writeFileSync(join(dir, "coverage-shards", `coverage-shard-${n}`, "test-exit"), n === 5 ? "1\n" : "0\n");
   }
@@ -505,7 +508,7 @@ test("W1-T5892: both producers write provenance beside the lcov they upload", ()
   assert.equal(queue.status, 0, queue.out);
   const p = JSON.parse(queue.read("coverage-merged-artifact/provenance.json"));
   assert.equal(p.producer, "coverage-merged");
-  assert.deepEqual(p.shard_test_exits, ALL_GREEN);
+  assert.deepEqual(p.shard_test_exits, ALL_GREEN_MERGED);
   assert.equal(p.lcov_sha256, sha256(Buffer.from(LCOV)));
   for (const env of [{ GITHUB_EVENT_NAME: "pull_request", MATRIX_RESULT: "success" }, { GITHUB_EVENT_NAME: "merge_group", MATRIX_RESULT: "failure" }]) {
     const none = runStep(seed + merged.run!, env);
@@ -521,7 +524,7 @@ test("W1-T5892: both producers write provenance beside the lcov they upload", ()
   const summary = step(NIGHTLY, "merge", "Write the ledgerable summary");
   const upload = step(NIGHTLY, "merge", "Upload the merged lcov and the summary");
   assert.match(String(upload.with?.path), /coverage-nightly-artifact\/provenance\.json/);
-  const shards = Array.from({ length: 8 }, (_, i) =>
+  const shards = Array.from({ length: NIGHTLY_SHARD_COUNT }, (_, i) =>
     `mkdir -p coverage-shards/coverage-shard-${i + 1} && echo ${i === 6 ? 1 : 0} > coverage-shards/coverage-shard-${i + 1}/test-exit`).join("\n");
   const night = runStep(`${seed}${shards}\n${summary.run!}`, { GITHUB_EVENT_NAME: "schedule", GITHUB_RUN_ID: "111", GITHUB_RUN_ATTEMPT: "1",
     GITHUB_REF: "refs/heads/main", GITHUB_SHA: HEAD });
@@ -605,7 +608,7 @@ test("W1-T5892: the CLI stamps provenance only for a trusted green run, and sele
     assert.equal(JSON.parse(readFileSync(out, "utf8")).run_id, 222);
     const nightlyOut = join(dir, "nightly.json");
     const shardDir = join(dir, "shards");
-    for (let n = 1; n <= 8; n++) { mkdirSync(join(shardDir, `coverage-shard-${n}`), { recursive: true }); writeFileSync(join(shardDir, `coverage-shard-${n}`, "test-exit"), "0\n"); }
+    for (let n = 1; n <= NIGHTLY_SHARD_COUNT; n++) { mkdirSync(join(shardDir, `coverage-shard-${n}`), { recursive: true }); writeFileSync(join(shardDir, `coverage-shard-${n}`, "test-exit"), "0\n"); }
     assert.equal(main(["provenance", "--producer", "coverage-nightly", "--lcov", lcov, "--out", nightlyOut, "--shards-dir", shardDir],
       { ...env, GITHUB_EVENT_NAME: "schedule", GITHUB_REF: "refs/heads/main" }), 0);
     assert.deepEqual(JSON.parse(readFileSync(nightlyOut, "utf8")).shard_test_exits, ALL_GREEN);

@@ -1,0 +1,113 @@
+- id: W1-T13288
+  title: "The sweep's arm decision reads its verdict history off the daemon loop: decideSweepArm's archive check comes from an awaited review.posted slice reader with durable digests, read at most once per pass, so a mergeable PR whose verdict rotated out of the live file no longer stalls the loop (two stalls of 79 s and 109 s on 2026-11-17)"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the read decides whether a capped or plan-only verdict refuses an arm; a read that drops a review.posted row arms a PR that must not merge, and the fail-open on an incomplete corpus must hold
+  origin: "operator-session#loop-lag-2026-11-17"
+  plan_refs:
+    - W1-T13155
+    - W1-T13185
+    - W1-T12753
+  files:
+    - src/lib/sweep.ts
+    - test/the-sweeps-arm-decision-reads-no-ledger-union-on-the-loop.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "A sweep pass over a state dir whose only review.posted row for a mergeable PR's task and head is in a gzip archive gets the same arm decision as today: a capped, not plan-only verdict there still refuses the arm, a clean verdict there still arms, and a setImmediate turn counter advances while the history is read: the read is off the loop"
+      proof: "grep: W1-T13288 criterion 1 in test/the-sweeps-arm-decision-reads-no-ledger-union-on-the-loop.test.ts"
+    - claim: "invariant:absent-verdict-still-refuses — a complete corpus (archives present, all read) with no review.posted row for the task and head still refuses the arm, and the fail-open holds: with no archives, or with a rotation the reader cannot read, the arm decision for a head with no live verdict is arm:true with today's reason, as at origin/main"
+      kind: guard
+      proof: "grep: W1-T13288 criterion 2 in test/the-sweeps-arm-decision-reads-no-ledger-union-on-the-loop.test.ts"
+    - claim: "One pass with three mergeable PRs that all miss in the live file, each reaching decideSweepArm at the capped-route check and again at the mergeable arm, loads the verdict history once, not once per call"
+      proof: "grep: W1-T13288 criterion 3 in test/the-sweeps-arm-decision-reads-no-ledger-union-on-the-loop.test.ts"
+    - claim: "A restarted process reads the verdict history from durable digests: after a first reader writes its digests, each archive is overwritten with same-length garbage and its mtime restored, and a fresh reader still finds the archived review.posted row and refuses the capped arm"
+      proof: "grep: W1-T13288 criterion 4 in test/the-sweeps-arm-decision-reads-no-ledger-union-on-the-loop.test.ts"
+    - claim: "invariant:no-sync-union-in-arm-decision — a sweep pass's arm decision, with deps.readLedgerUnion unset as in every production caller, makes no synchronous ledger-union read: no resolveLedgerUnion or readLedgerUnionRawLinesSync call and no synchronous read of a rotation file while decideSweepArm runs"
+      kind: guard
+      proof: "grep: W1-T13288 criterion 5 in test/the-sweeps-arm-decision-reads-no-ledger-union-on-the-loop.test.ts"
+  rationale: |
+    WHY: when a mergeable PR's review.posted row has rotated out of the live ledger file, the sweep's arm
+    decision reads the whole ledger union synchronously on the daemon loop. The live file rotates about every
+    20 minutes, so this is the normal case for any PR reviewed before the last rotation. While it reads, the
+    daemon does nothing else.
+    MEASURED, core ledger (~/rmd-state2/state), daemon.loop_stall_profile rows since the boot of aa891635e at
+    2026-11-16T23:50:59Z, to 2026-11-17T00:33:42Z (2,563 s, after W1-T13155 and W1-T13185 deployed):
+    - 184 stall rows. The loop was blocked 1,397.5 s, 54.5% of the time (overlapping stall windows counted
+      once; the plain sum of lag_ms is 1,565.5 s).
+    - Top inclusive frames, summed over the rows: (anonymous) 677.8 s, runStepsAsync 281.7 s, runSweep 180.9 s,
+      readLedgerUnionRecordsSync 171.9 s, judgeMergedRatchets 146.4 s, readLedgerUnionRawLinesSync 142.3 s,
+      decideSweepArm 133.2 s, resolveLedgerUnion 132.5 s.
+    - decideSweepArm is in 2 rows, 133.2 s in total. 00:09:11Z: lag 79.3 s, of which decideSweepArm 58.1 s and
+      resolveLedgerUnion > readLedgerUnionRawLinesSync 57.7 s. 00:13:05Z: lag 108.6 s, of which decideSweepArm
+      75.1 s and the union read 74.8 s. So the arm read is about 70% of each of those stalls, not all of it.
+      In both rows the anonymous frame with decideSweepArm's total is the readArmLedgerUnion closure
+      (dist/child-entries/run-task.mjs:131011 at aa891635e). sync_spawn_ms is 0 in both; no sync_spawn_by_caller
+      entry is a ledger read.
+    - Not in scope here, other owners: the 00:20:21Z stall (137.1 s, triageRoute > escalateSteps >
+      readLedgerUnionRecordsSync), the 00:30:24Z stall (106.3 s, automaticBranchReapSteps >
+      readMergeCreditedTaskIds) and judgeMergedRatchets > mergedRatchetsInClone.
+    READ at origin/main 62cb99620c:
+    - src/lib/sweep.ts:20962, in runSweep (:20352): readArmLedgerUnion defaults, when deps.readLedgerUnion is
+      unset, to a closure that calls resolveLedgerUnion(dirname(deps.ledgerPath), ".*", undefined,
+      { step: "review.posted" }) and parses every match. No production caller sets deps.readLedgerUnion
+      (src/run-task.ts:33027 and :34254 call runSweep without it; the field is declared at sweep.ts:16171).
+    - src/lib/ledger-union.ts:2193 resolveLedgerUnion is readLedgerUnionRawLinesSync (:945) over every rotation
+      plus the live file, with requireArchives and refuseIncomplete. The step filter cuts rows, not bytes: every
+      archive is still read and decompressed.
+    - src/lib/sweep.ts:13147 decideSweepArm calls readLedgerUnion() at :13163 only when
+      postedArmFactsFromLedger (src/lib/review.ts:7928) finds no review.posted row for this task and head in the
+      live lines. It needs the union because of W1-T3471: an absent live verdict is not permission to merge, so
+      a complete archive with no verdict refuses, and an archived capped verdict refuses.
+    - The closure is not memoized. Each pass calls decideSweepArm at :23220 (capped-route check), :24139
+      (mergeable arm) and :24272 (failed-arm parity), so one PR can pay two full reads in one pass, and each
+      missing PR pays its own.
+    - The pattern already in use for the same need: createEscalationTriageHistoryReader (src/lib/sweep.ts:30258),
+      a step slice with durable digests per rotation, loaded off the loop, then createIncrementalLedgerUnion.
+      sweep.ts:5554 keeps one module-level reader for FLEET_STATE_HISTORY_SLICE (:2595, W1-T6275); W1-T13185 did
+      the same for the draft stats (DRAFT_STATS_SLICE, src/lib/draft-routing.ts:227; draftStatsHistory,
+      src/run-task.ts:21245); W1-T10046 for the retro and auto-triage slices (src/run-task.ts:21225).
+    NOT COVERED: swept origin/main plan/tasks.d and plan/tasks.yaml for decideSweepArm, readArmLedgerUnion and
+    readLedgerUnionRawLinesSync. W1-T3471, W1-T6275, W1-T4710 and W1-T4355 are merged and made this read bounded,
+    not off the loop. W1-T11506 (queued) is the reader-agreement scan; W1-T9934 (queued) is the cash trial.
+    W1-T13155 and W1-T13185 (merged) are the review replay due check and the draft stats. No open PR on
+    craigoley/remudero names decideSweepArm or readArmLedgerUnion.
+  design: |
+    INVARIANT no-sync-union-in-arm-decision: a sweep pass's arm decision never calls resolveLedgerUnion or readLedgerUnionRawLinesSync, and reads no rotation file synchronously.
+    INVARIANT absent-verdict-still-refuses: a complete corpus with no review.posted row for the task and head still refuses the arm, and an incomplete one still arms, as at origin/main.
+    1. sweep.ts gets ARM_VERDICT_HISTORY_SLICE ({ holder: "sweep.arm-verdict-history", steps ["review.posted"],
+       version "1" }) and one module-level createEscalationTriageHistoryReader over it, built on first use, the
+       same shape as fleetStateHistoryReader at :5554.
+    2. The default readArmLedgerUnion at :20962 becomes a per-pass snapshot. runSweep awaits the reader at most
+       once per pass, and only when some PR that can reach decideSweepArm has no live review.posted facts for its
+       task and head (the same postedArmFactsFromLedger test decideSweepArm makes). The closure then returns that
+       snapshot with no I/O: complete is true only when the read is ok, archiveCount > 0 and nothing is unread
+       or unclassified, as the resolveLedgerUnion result is judged today. A failed load gives complete:false.
+       The snapshot holds the live rows read at load time, so a rotation later in the same pass does not hide a
+       verdict from the re-reads at :24138 and :24269.
+    3. decideSweepArm stays pure and synchronous; its readLedgerUnion parameter and deps.readLedgerUnion keep
+       their shape. No change to postedArmFactsFromLedger, cappedOverrideFromLedger, decideAutoMergeArm or the
+       reasons ledgered. No new env var, bound or window. The new holder adds one digest per rotation, pruned as
+       the others are.
+    4. TESTS in test/the-sweeps-arm-decision-reads-no-ledger-union-on-the-loop.test.ts use a fixture state dir
+       with real gzip archives and the real union, as
+       test/the-retro-and-auto-triage-reads-come-from-durable-digests.test.ts does, and drive runSweep with
+       deps.readLedgerUnion unset. Criterion 5 counts synchronous reads through the reader's fs deps or a spy on
+       the ledger-union module. Reuse the fixtures in test/an-absent-verdict-is-not-permission-to-merge.test.ts
+       where they fit.
+  falsifier: |
+    At origin/main the default closure calls resolveLedgerUnion synchronously: the setImmediate counter reads 0
+    turns during the read (criterion 1) and the sync-read count is not 0 (criterion 5). Three missing PRs read
+    the union once per decideSweepArm call, so criterion 3 counts more than one load. A fresh process over the
+    garbage archives gets an unreadable union and fails open, so the capped arm is not refused (criterion 4).
+    Treat a failed load as complete with no rows: criterion 2 refuses where it must arm.
+  note: |
+    Id reserved for run-unfiled-1794875543000 with ~/rmd-work/bin/reserve-id.sh.
+    Proof that counts in production: no daemon.loop_stall_profile row with decideSweepArm, resolveLedgerUnion or
+    readLedgerUnionRawLinesSync under runSweep in its top inclusive frames, over a day with merges.
+    Out of scope: the synchronous live-file reads readLedger(deps.ledgerPath) at sweep.ts:24138 and :24269.

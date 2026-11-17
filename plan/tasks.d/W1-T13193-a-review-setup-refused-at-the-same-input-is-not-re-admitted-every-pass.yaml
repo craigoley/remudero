@@ -18,7 +18,7 @@
     - src/lib/sweep.ts
     - src/lib/tick-read-worker.ts
     - test/a-review-setup-refused-at-the-same-input-is-not-re-admitted-every-pass.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A PR with 2 review.semantic_setup_refused rows (reason head-task-metadata-unavailable) for the same pr_url, head_sha, review_input_digest and reviewer_code_sha, and no review.pending_posted or review.posted row after the last one, is not admitted: the pass writes no sweep.review_admitted row, and its sweep.disposed row names the refusal reason and the refusal count (the #18670 shape: head run-RETRO-1794737755052, body trailer Remudero-Task: RETRO-1794737755052)"
@@ -70,7 +70,17 @@
        awaiting-review and the reason "review setup refused <count> times at head <sha7> (<reason>) — not
        re-admitted until the head, body or reviewer code changes". Escalate once per PR, head and digest, keyed
        by its own row, like the existing ownership escalation.
-    3. The #13305 diagnosis at sweep.ts:20571 keeps working: the held row keeps blocker awaiting-review.
+       AMENDED 2026-11-16 (operator session): the blocker is `other` (owner NONE), not awaiting-review. A
+       blocked-ambiguous row with blocker awaiting-review has no SLO rung, and the W1-T5690 census
+       (test/every-blocked-pr-climbs-a-rung-on-a-clock.test.ts, "every blocked-ambiguous source in
+       DISPOSITION_RULES maps to a rung with a deadline") refuses it: #18945 failed coverage-shard 6/8 on exactly
+       that ("DISPOSITION_RULES[13] (awaiting-review) has no SLO rung"). With `other` the hold climbs the SLO
+       ladder like every blocked-ambiguous row, and a refresh makes a new head, which is a new input. Not
+       `escalated`: that blocker also routes through the generic parked-PR remedy, a second remedy on top of this
+       row's own.
+    3. AMENDED 2026-11-16: the #13305 awaiting-review diagnosis does not apply to the held row (its blocker is
+       `other`), and nothing is added to it. The held row's own reason (count, head, reason) is what the pr.stuck
+       repeat diagnosis names.
     4. Tests drive runSweep with a ledger fixture holding the #18670 rows (real branch run-RETRO-<ms>, real
        trailer RETRO-<ms>), as test/a-review-demand-cannot-re-admit-the-same-input-without-bound.test.ts does.
   falsifier: |

@@ -5,7 +5,7 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createServeSupervisor, decayedPressure, handoffSpacingMs, type GenerationProcess, type PreparedSlot, type ServeSupervisorOptions } from "#src/lib/serve-supervisor.js";
+import { createServeSupervisor, decayedPressure, handoffSpacingMs, SERVE_HANDOFF_SPACING_BASE_MS, type GenerationProcess, type PreparedSlot, type ServeSupervisorOptions } from "#src/lib/serve-supervisor.js";
 import type { GenerationMessage } from "#src/lib/serve-generation.js";
 
 const MIN = 60_000;
@@ -112,4 +112,58 @@ test("handoff pressure halves every half-life and the spacing never falls below 
   assert.equal(handoffSpacingMs(0, 15 * MIN), 15 * MIN);
   assert.equal(handoffSpacingMs(1, 15 * MIN), 30 * MIN);
   assert.equal(handoffSpacingMs(-3, 15 * MIN), 15 * MIN);
+});
+
+/** A supervisor on the production spacing base, with a fake clock and sleeps the test wakes by hand. */
+function productionSpaced() {
+  const fleet = instantGenerations();
+  const state = { now: 0 };
+  let sha = 1;
+  const waits: Array<{ ms: number; wake: () => void }> = [];
+  const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const supervisor = createServeSupervisor({
+    coldSlot: { dir: "/cold", sha: "sha-1" },
+    prepare: async (activeDir) => ({ dir: activeDir === "/slot-a" ? "/slot-b" : "/slot-a", sha: `sha-${++sha}` }),
+    spawn: fleet.spawn, get: fleet.get, command: fleet.command,
+    log: (step, extra) => void logs.push({ step, extra }),
+    exit: () => {},
+    clock: { now: () => state.now, iso: () => "" } as never,
+    sleep: (ms) => new Promise<void>((resolve) => void waits.push({ ms, wake: () => ((state.now += ms), resolve()) })),
+    freeMemory: () => undefined, rss: () => undefined, peakRss: () => 1_000,
+    hostPressure: async () => ({ atMs: state.now, memAvailableBytes: 2 ** 40, swapInPagesPerSec: 0, psiSomeAvg10: 0, psiFullAvg10: 0, unread: [] }),
+    upgradeThresholds: () => ({ hostReserveBytes: 0, swapInPagesPerSecMax: 256, psiSomeAvg10Max: 10, psiFullAvg10Max: 2, staleMs: 600_000 }),
+    socketPathFor: (n) => `/sock/${n}`,
+    spacingBaseMs: SERVE_HANDOFF_SPACING_BASE_MS,
+    spacingHalfLifeMs: 60 * MIN,
+  });
+  return { supervisor, state, logs, fleet };
+}
+
+test("W1-T13303 criterion 1: on the two-hour base, a second ordinary handoff inside two hours waits with reason spacing", async () => {
+  assert.equal(SERVE_HANDOFF_SPACING_BASE_MS, 2 * 60 * MIN);
+  const { supervisor, state, logs } = productionSpaced();
+  await supervisor.start();
+  await supervisor.requestHandoff();
+  await settle();
+  assert.equal(supervisor.activeSha(), "sha-2", "positive control: the first handoff ran");
+  state.now += 90 * MIN;
+  await supervisor.requestHandoff();
+  await settle();
+  assert.equal(supervisor.activeSha(), "sha-2", "90 minutes later the next ordinary handoff waits");
+  const spaced = logs.filter((l) => l.step === "serve.handoff_deferred" && l.extra?.reason === "spacing");
+  assert.equal(spaced.length, 1);
+  assert.ok((spaced[0]!.extra!.spacingMs as number) >= 2 * 60 * MIN);
+});
+
+test("W1-T13303 criterion 2: a restarted supervisor, with no handoff yet, is never held by the spacing", async () => {
+  const { supervisor } = productionSpaced();
+  await supervisor.start();
+  await supervisor.requestHandoff();
+  await settle();
+  assert.equal(supervisor.activeSha(), "sha-2", "the first ask after a restart runs at once");
+});
+
+test("W1-T13303 criterion 3: handoff pressure still stretches the spacing from the new base", () => {
+  assert.equal(handoffSpacingMs(0, SERVE_HANDOFF_SPACING_BASE_MS), 2 * 60 * MIN);
+  assert.equal(handoffSpacingMs(1, SERVE_HANDOFF_SPACING_BASE_MS), 4 * 60 * MIN);
 });

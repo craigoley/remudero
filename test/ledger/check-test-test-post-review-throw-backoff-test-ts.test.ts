@@ -54,8 +54,9 @@ test("W1-T10975: check:test:test/post-review-throw-backoff.test.ts is prevented,
 
   const retried: number[] = [];
   const retry = { ...deps, postReview: (candidate: OpenPrView) => { retried.push(candidate.prNumber); } };
-  await runSweep([pr], { ...retry, now: () => now + 30 * 60_000 }, DEFAULT_SWEEP_POLICY);
+  // W1-T13257: the second throw on this input waits 10 minutes, not the 60-minute pending ceiling.
+  await runSweep([pr], { ...retry, now: () => now + 9 * 60_000 }, DEFAULT_SWEEP_POLICY);
   assert.deepEqual(retried, []);
-  await runSweep([pr], { ...retry, now: () => now + 61 * 60_000 }, DEFAULT_SWEEP_POLICY);
+  await runSweep([pr], { ...retry, now: () => now + 11 * 60_000 }, DEFAULT_SWEEP_POLICY);
   assert.deepEqual(retried, [2753]);
 });

@@ -1,0 +1,54 @@
+- id: W1-T13282
+  title: "The agent view's legacy side reads no ledger archive on a request: with no worker body it answers view_not_ready, so one Inbox load can no longer freeze serve for 232 s"
+  repo: remudero
+  depends_on: []
+  priority: 0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # serves the worker's agent body by default and narrows W1-T13180's legacy side; served bodies are unchanged
+  band_meaning: span
+  origin: "operator-session#serve-oom-2026-11-16"
+  plan_refs:
+    - W1-T13180
+  files:
+    - src/lib/agent-view.ts
+    - src/lib/serve.ts
+    - test/console-api/read-model/the-agent-view-answers-from-its-legacy-side-when-it-is-not-served.test.ts
+    - test/the-agent-view-legacy-side-reads-no-ledger.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "With the agent view not switched to serve, a request for /v1/views/agent?instance=core&part=proposals answers 503 view_not_ready for every part, with a ledger path that does not exist (any ledger read would throw or return rows)"
+      proof: "grep: W1-T13282 criterion 1 in test/the-agent-view-legacy-side-reads-no-ledger.test.ts"
+    - claim: "With the view switched to serve and a worker body present, the body is served as before; with the body absent, the same view_not_ready answer is given and no ledger is read"
+      proof: "grep: W1-T13282 criterion 2 in test/the-agent-view-legacy-side-reads-no-ledger.test.ts"
+    - claim: "invariant:unknown-part-still-refused — an unknown ?part= still answers 400 before anything else, as refuseUnknownPart does today"
+      kind: guard
+      proof: "grep: W1-T13282 criterion 3 in test/the-agent-view-legacy-side-reads-no-ledger.test.ts"
+  rationale: |
+    WHY: the Console was down from about 23:27Z on 2026-11-16 until a restart at 00:08:52Z, and the Inbox wedged again
+    minutes later. OBSERVED on the Azure host: serve booted on 98501c620, which carries b0b141cfc (#18942, W1-T13180).
+    A runtime.loop_stall_profile row at 00:18:50Z shows a 231,994 ms main-thread stall in serve.ts -> views.ts ->
+    route-read-rollup.ts -> service.ts -> agent-view.ts, with self time in scanLedgerBuffer, Buffer.concat and garbage
+    collection. While it ran, port 4317 held 455 connections unaccepted and 444 in CLOSE_WAIT, and every read from the
+    host timed out at 30 s.
+    READ at origin/main, src/lib/agent-view.ts agentLegacyView.compute: on each request it calls panelLedgerRows, which
+    calls readLedgerUnionRecordsSync over the instance's whole ledger union (276+ archives), synchronously, on serve's
+    request thread. Before W1-T13180 the same request answered 404 view_disabled at once.
+  design: |
+    INVARIANT unknown-part-still-refused: request validation is unchanged.
+    1. agentLegacyView.compute returns { error: "view_not_ready", status: 503 } with the reason "the agent view is built
+       by the read-model worker; no body yet", and reads no ledger and no analytics. Set Retry-After where the route
+       sends error statuses (views.ts already passes `status` through).
+    2. Keep refuseUnknownPart first.
+    3. serve.ts adds AGENT_VIEW_NAME to servedByDefault (the routes and the view-events wiring), so the worker's body
+       is served with no switches.json entry; the legacy side answers only keys the worker has not built.
+    4. W1-T13180's test now asserts the narrowed legacy side (criteria 1 to 3); its criterion 4 is unchanged.
+  falsifier: |
+    Keep the ledger read: criterion 1 fails (the counter is above 0). Read the ledger when the body is missing in serve
+    mode: criterion 2 fails. Validate after computing: criterion 3 fails.
+  note: |
+    Id reserved for run-unfiled-1794874389000 with ~/rmd-work/bin/reserve-id.sh.
+    Immediate mitigation (needs operator approval): set views.agent to "serve" in state/read-model/switches.json.

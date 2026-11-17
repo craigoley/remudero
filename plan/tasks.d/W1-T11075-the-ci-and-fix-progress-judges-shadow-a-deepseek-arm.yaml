@@ -18,7 +18,7 @@
     - src/lib/risk-judge.ts
     - .remudero/mounts.yaml
     - test/review/the-ci-and-fix-progress-judges-shadow-a-deepseek-arm.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The ci judge and the fix-progress judge resolve their own mount rows, which may name a provider, instead of the risk judge's provider-less mount. With a cash shadow arm declared on those rows, each judgement also asks the shadow deployment, inside the existing cash budget, and ledgers both verdicts and whether they agree; the verdict the sweep acts on is still the primary judge's. A shadow call that is refused for capacity or budget is ledgered and changes nothing"

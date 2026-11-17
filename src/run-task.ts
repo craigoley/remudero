@@ -796,6 +796,7 @@ import {
   resolveFeedbackExpansionMount,
   setFeedbackStatus,
   stageFeedbackCapture,
+  stageFeedbackCaptureAsync,
   FeedbackError,
   type FeedbackEntry,
   type FeedbackOrigin,
@@ -996,6 +997,7 @@ import {
   parseReservationHolderLine,
   gitRemoteRefReserver,
   gatedRemoteRefReserver,
+  gatedRemoteRefReserverAsync,
   remoteReservedTaskIds,
   reservationFloorFrom,
   reservationPolicyCurrency,
@@ -1004,10 +1006,12 @@ import {
   RESERVATION_PUSH_GRACE_MS,
   reserveTaskIdBlock,
   reserveTaskIdBlockRemote,
+  reserveTaskIdBlockRemoteAsync,
   reserveTaskIdRemote,
   taskIdReservationRef,
   taskIdReservationsDir,
   withIdReservationLogging,
+  withIdReservationLoggingAsync,
   gitReservationRunnerAsync,
 } from "./lib/task-id-reservation.js";
 import { releaseTaskIdReservation, releaseTaskIdReservationAsync, type HeldTaskIdReservation } from "./lib/task-id-release.js";
@@ -1325,7 +1329,7 @@ import { routingAbCommand } from "./lib/routing-experiments.js";
 import { attributeAttemptOutcome } from "./lib/attempt-outcome-attribution.js";
 import { recordRoutingExperimentResults } from "./lib/routing-experiment-result.js";
 import { askDecisionModel, decisionsCommand } from "./lib/decision-model.js";
-import { judgeReplayCommand, replayJudgeCorpus } from "./lib/judge-replay-batch.js";
+import { judgeReplayCommand, parseJudgeReplayLane, replayJudgeCorpus } from "./lib/judge-replay-batch.js";
 import { reviewTriageCandidates, triagePullRequest } from "./lib/review-triage.js";
 import {
   PROGRESS_WATCHDOG_READ_STEPS,
@@ -16757,6 +16761,18 @@ export function hostWorktreeGitResult(worktreePath: string, args: string[]): { s
   }
 }
 
+/** {@link hostWorktreeGitResult} off the daemon loop (W1-T13183): the reservation and release protocols read a
+ *  non-zero exit as an answer, so a failed git resolves to its status and output instead of throwing. */
+export async function hostWorktreeGitAnswerAsync(worktreePath: string, args: string[]): Promise<{ status: number; stdout: string; stderr: string }> {
+  try {
+    return { status: 0, stdout: await hostWorktreeGitAsync(worktreePath, args), stderr: "" };
+  } catch (error) {
+    if (error instanceof WorktreePointerRefusedError) throw error;
+    const failed = error as { code?: unknown; stdout?: unknown; stderr?: unknown; message?: unknown };
+    return { status: typeof failed.code === "number" ? failed.code : 1, stdout: String(failed.stdout ?? ""), stderr: String(failed.stderr || failed.message || "") };
+  }
+}
+
 /**
  * W1-T9488: what a lane's pushed branch says about the remote ids it reserved. `undefined` = no push was
  * attempted, `"unknown"` = a push started and did not report (it threw: the branch may carry any id),
@@ -16799,6 +16815,23 @@ export function releaseUnfiledReservations(
   const declared = new Set(pushed ?? []);
   for (const c of claims) {
     if (!declared.has(c.taskId)) releaseTaskIdReservation(opts.run, c, { reason: opts.reason, lane: opts.lane, log: opts.log });
+  }
+}
+
+/** {@link releaseUnfiledReservations} over an awaited git runner: triage's release, off the daemon loop. */
+export async function releaseUnfiledReservationsAsync(
+  held: HeldTaskIdReservation[],
+  pushed: LanePushedIds,
+  opts: { run: (args: string[]) => Promise<{ status: number; stdout: string; stderr: string }>; lane: string; reason: string; log: (step: string, fields: Record<string, unknown>) => void },
+): Promise<void> {
+  const claims = held.splice(0);
+  if (pushed === "unknown") {
+    for (const c of claims) opts.log("task_id.reservation_release_skipped", { reserved_id: c.taskId, sha: c.sha, lane: opts.lane, reason: opts.reason, outcome: "push_outcome_unknown" });
+    return;
+  }
+  const declared = new Set(pushed ?? []);
+  for (const c of claims) {
+    if (!declared.has(c.taskId)) await releaseTaskIdReservationAsync(opts.run, c, { reason: opts.reason, lane: opts.lane, log: opts.log });
   }
 }
 
@@ -28320,6 +28353,8 @@ export async function gardenCheckoutAsync(opts: GardenCheckoutOpts): Promise<Gar
     // W1-T12221: the seal is async only, as the landing of W1-T12199 is.
     ...(opts.taskFilesLanding ? { landTaskFiles: (inputs: TaskFileInput[], at?: PlanDestinationRepository) => landTaskFilesAsync(at?.checkoutDir ?? opts.repoDir, inputs, {
       ...opts.taskFilesLanding!, targetRepository: at ? { owner: at.owner, repo: at.repo } : { owner: opts.owner, repo: opts.repo }, log: opts.log, lane: opts.name,
+      // W1-T13169: the id was reserved in the public repository, so a destination landing releases it there.
+      ...(at ? { reservationGitAsync: (args: string[]) => gitAt(opts.repoDir)(...args) } : {}),
     }) } : {}),
     openDestination: async (at) => {
       const destRoot = join(opts.worktreesRoot, `${branch}-plan-destination`);
@@ -32975,7 +33010,18 @@ export function captureRepairFeedbackWithPriorVerdict(
   log: (step: string, extra?: Record<string, unknown>) => void,
   landingStateRoot?: string,
 ): void {
-  if (feedbackCaptured(root, filing.id, landingStateRoot)) return; // already filed this window
+  const capture = repairCaptureAfterPriorVerdict(root, filing, log, landingStateRoot);
+  if (capture) stageFeedbackCapture(root, landingStateRoot, capture);
+}
+
+/** The capture a repair filing still makes after the window dedup and the prior-verdict read, or undefined. */
+function repairCaptureAfterPriorVerdict(
+  root: string,
+  filing: RepairFilingCapture,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  landingStateRoot?: string,
+): { id: string; raw: string; origin: FeedbackOrigin } | undefined {
+  if (feedbackCaptured(root, filing.id, landingStateRoot)) return undefined; // already filed this window
   let suppressedBy: FeedbackEntry | undefined;
   try {
     const priorEntriesForOrigin = listFeedback(root).filter((e) => e.origin === filing.origin);
@@ -32995,10 +33041,21 @@ export function captureRepairFeedbackWithPriorVerdict(
       });
       repairFilingSuppressionsLogged.add(suppressionKey);
     }
-    return;
+    return undefined;
   }
-  const capture = { id: filing.id, raw: filing.raw, origin: filing.origin as FeedbackOrigin };
-  stageFeedbackCapture(root, landingStateRoot, capture);
+  return { id: filing.id, raw: filing.raw, origin: filing.origin as FeedbackOrigin };
+}
+
+/** W1-T13183: {@link captureRepairFeedbackWithPriorVerdict} for the daemon sweep: the same dedup and prior-verdict
+ *  read, then {@link stageFeedbackCaptureAsync}, so the landed-entry read and any upstream filing are awaited. */
+export async function captureRepairFeedbackWithPriorVerdictAsync(
+  root: string,
+  filing: RepairFilingCapture,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  landingStateRoot?: string,
+): Promise<void> {
+  const capture = repairCaptureAfterPriorVerdict(root, filing, log, landingStateRoot);
+  if (capture) await stageFeedbackCaptureAsync(root, landingStateRoot, capture);
 }
 
 /** The one-shot boundary owns and drains its judgment pool before returning a summary. */
@@ -35893,7 +35950,8 @@ async function triageCommandLocked(
     // unreachable remote — the conflation `classifyPushFailure` exists to prevent. `worktreePath`,
     // NOT the module-level `repoRoot`: the reservation must be pushed to the SAME `origin` this
     // filing will push its branch to.
-    const triageRemoteRefReserver = gatedRemoteRefReserver({ run: gitRunAdapter((args) => hostWorktreeGitResult(entryRoot, args)), lane: "triage", log });
+    // W1-T13183: awaited, so the reservation's ls-remote, commit-tree and push no longer hold the daemon loop.
+    const triageRemoteRefReserver = gatedRemoteRefReserverAsync({ run: (args) => hostWorktreeGitAnswerAsync(entryRoot, args), lane: "triage", log });
     // W1-T2326: THE REMOTE HALF IS TAKEN HERE, BEFORE THE PROMPT IS BUILT — and that ORDERING is
     // the whole task. It used to be taken 100+ lines below, inside `decision.action === "propose"`,
     // and its result reached nothing but the `triage.id_minted` row: the worker was prompted from
@@ -35920,8 +35978,8 @@ async function triageCommandLocked(
     // started — "a minter that cannot reserve must not spend". It is also the only half with a
     // release path (`localIdBlock?.releaseAll()` in the `finally`), which the remote half
     // deliberately does not have. This call only decides WHICH ids the worker is told about.
-    const remoteIdBlock: RemoteReservationBlock = withIdReservationLogging(log, "triage.id_reservation_failed", () =>
-      reserveTaskIdBlockRemote(localIdBlock!.ids[0], TRIAGE_MAX_NEW_TASKS, triageRemoteRefReserver),
+    const remoteIdBlock: RemoteReservationBlock = await withIdReservationLoggingAsync(log, "triage.id_reservation_failed", () =>
+      reserveTaskIdBlockRemoteAsync(localIdBlock!.ids[0], TRIAGE_MAX_NEW_TASKS, triageRemoteRefReserver),
     );
     // NAMED FOR WHAT IT IS. The old `reservedTaskId` was bound to an advisory-derived value, and
     // that name is most of why this survived review: every reader who checked "does the worker get
@@ -36167,7 +36225,7 @@ async function triageCommandLocked(
       const taskPath = changedFiles[0];
       const tasks = parseYaml(readFileSync(join(worktreePath, taskPath), "utf8")) as Array<{ id: string; origin: string }>;
       if (!Array.isArray(tasks) || tasks.length !== 1 || !reservedIds.includes(tasks[0].id) || tasks[0].origin !== `feedback#${feedbackId}`
-        || hostWorktreeGitResult(worktreePath, ["cat-file", "-e", `origin/main:${taskPath}`]).status === 0) {
+        || (await hostWorktreeGitAnswerAsync(worktreePath, ["cat-file", "-e", `origin/main:${taskPath}`])).status === 0) {
         throw new Error("private-feedback task must be new and bind its reserved id and feedback origin");
       }
       const message = triageCommitMessage({ decision, feedbackId, taskId, proposalTaskPath: taskPath, proposalTaskId: tasks[0].id });
@@ -36342,8 +36400,8 @@ async function triageCommandLocked(
   } finally {
     removeRunLock(worktreePath); // terminal ⇒ drop the liveness token
     // W1-T9488: the REMOTE half is given back too — every reserved id the pushed branch does not declare.
-    releaseUnfiledReservations(triageHeld, triagePushed, {
-      run: gitRunAdapter((args) => hostWorktreeGitResult(repoDir, args)), lane: "triage", log,
+    await releaseUnfiledReservationsAsync(triageHeld, triagePushed, {
+      run: (args) => hostWorktreeGitAnswerAsync(repoDir, args), lane: "triage", log,
       reason: laneReleaseReason(`triage ${feedbackId}`, triageEnding, triagePushed),
     });
     // Every LOCAL id is now either ON an open PR (where the mint's openPrs source sees it) or
@@ -43616,9 +43674,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "judge-replay",
-    syntax: "rmd judge-replay --model <id> --corpus <machine-judge-probes|risk-judge-dispositions|all>",
-    summary: "Replay the judge corpora through one named model in one Anthropic Message Batch.",
-    detail: "W1-T12418: reads test/fixtures/machine-judge-probes.json and the risk-judge disposition fixtures (test/fixtures/risk-judge-dispositions/) and sends each case as one request of ONE paid Message Batch to the named model on the Anthropic API, with its expected answer kept beside it. A case the risk-judge scrub flags is refused, because Message Batches are NOT zero-retention: Anthropic keeps batch prompts and results for 29 days, and the output says so. The daemon sends the batch through the secret boundary: a loopback proxy reads ANTHROPIC_API_KEY from the daemon env and puts it in x-api-key, and each decision is a value-free boundary.request row. A worker env, a missing key or a model with no price row sends nothing. The whole batch reserves at the batch price (half the standard row) against the normal daily cash cap before it is sent, polls until the batch ends, and settles from each result's usage; a result with no usage, or a batch that does not end within 25 hours, keeps the reservation held. It writes one judge_replay.answered row per result, a recorded typed answer keyed by the model id that the judge calibration body scores, and one judge_replay.batch row. Offline only: no live judge, gate or route reads the rows. Exit 0 ended, 1 refused, failed or unsettled, 2 bad usage.",
+    syntax: "rmd judge-replay [--lane batch] --model <id> --corpus <machine-judge-probes|risk-judge-dispositions|all> | rmd judge-replay --lane direct --candidate <name> --corpus <machine-judge-probes|risk-judge-dispositions|all>",
+    summary: "Replay the judge corpora through one named model, in one Message Batch or one request per case.",
+    detail: "W1-T12418: reads test/fixtures/machine-judge-probes.json and the risk-judge disposition fixtures (test/fixtures/risk-judge-dispositions/) and sends each case as one request of ONE paid Message Batch to the named model on the Anthropic API, with its expected answer kept beside it. A case the risk-judge scrub flags is refused, because Message Batches are NOT zero-retention: Anthropic keeps batch prompts and results for 29 days, and the output says so. The daemon sends the batch through the secret boundary: a loopback proxy reads ANTHROPIC_API_KEY from the daemon env and puts it in x-api-key, and each decision is a value-free boundary.request row. A worker env, a missing key or a model with no price row sends nothing. The whole batch reserves at the batch price (half the standard row) against the normal daily cash cap before it is sent, polls until the batch ends, and settles from each result's usage; a result with no usage, or a batch that does not end within 25 hours, keeps the reservation held. It writes one judge_replay.answered row per result, a recorded typed answer keyed by the model id that the judge calibration body scores, and one judge_replay.batch row. Offline only: no live judge, gate or route reads the rows. Exit 0 ended, 1 refused, failed or unsettled, 2 bad usage. W1-T12421: --lane direct --candidate <name> replays the same corpora through a decision_models candidate (through askDecisionModel, one choice question per case) or a priced cash deployment (through sendCashRequest, with the case's own prompt and the one-word parser), ONE request per case and one case at a time, waiting while the deployment's learned per-minute token limit cannot hold the next request. Before the first request it estimates the corpus at each case's reservation and refuses to start above the $1.00 replay ceiling; each request then reserves against the normal daily cash cap. A case above the candidate's input limit is counted as too large and not sent. A 429 that stays after one retry, a budget refusal or an unavailable candidate stops the replay and keeps the answers already written. Each sent case writes one judge_replay.answered row whose typed answer, keyed by role, model id and model surface (decisions or text), has the case's expected answer as its outcome; the replay writes one judge_replay.finished row with the counts sent, answered, abstained, rejected and too large, the settled dollars, the median latency or the reason it stopped. Exit 0 finished, 1 refused or stopped.",
   },
   {
     name: "field-trials",
@@ -44763,7 +44821,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   )],
   ["routing-ab", async (rest) => await routingAbCommand(rest, { classifyAttempt: attributeAttemptOutcome })],
   ["decisions", async (rest) => await decisionsCommand(rest, (config, request) => askDecisionModel(config, request), { repoRoot })],
-  ["judge-replay", async (rest) => await judgeReplayCommand(rest, (config, request) => replayJudgeCorpus(config, request), { repoRoot })],
+  ["judge-replay", async (rest) => await judgeReplayCommand(rest, (config, request) => replayJudgeCorpus(config, request), { repoRoot, lane: parseJudgeReplayLane(rest) })],
   ["progress-watchdog", (rest) => progressWatchdogCommand(rest)],
   ["live-edits", async (rest) => await liveEditsCommand(rest)],
   ["host-alert", async (rest) => hostAlertCommand(rest)],
@@ -45711,7 +45769,7 @@ function sweepCommandHost(ports: Pick<SweepCommandHost, "freshTreeGit" | "comman
     buildBaseReproductionProbe,
     buildImportClosureRead,
     updateBranchViaGh,
-    captureRepairFeedbackWithPriorVerdict,
+    captureRepairFeedbackWithPriorVerdict: captureRepairFeedbackWithPriorVerdictAsync,
     reclaimAbandonedWorker,
     registeredFixWorktreeOwner,
     captureRegisteredFixOwnerSnapshot,

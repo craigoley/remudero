@@ -1,0 +1,40 @@
+- id: W1-T13273
+  title: "The readNamespaceBootMs parse tests pin the Linux platform, so they test the /proc parse on every host instead of failing on macOS"
+  repo: remudero
+  priority: 0.8
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: low # two test arguments; no source change
+  band_meaning: span
+  origin: "operator-session#mac-author-preflight-2026-11-16"
+  plan_refs:
+    - W1-T2784
+    - W1-T13272
+    - W1-T13241
+  files:
+    - test/a-claim-minted-before-this-namespace-booted-has-no-claimant.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "W1-T13273 criterion 1: the two W1-T2784 parse tests (declines on unreadable or malformed /proc; parses a comm containing spaces AND parentheses) pass platform linux to readNamespaceBootMs, and pass on macOS and Linux"
+      proof: "grep: W1-T13273 criterion 1 in test/a-claim-minted-before-this-namespace-booted-has-no-claimant.test.ts"
+    - claim: "invariant:the-darwin-branch-stays-tested — the suite still exercises readNamespaceBootMs's darwin uptime branch with an injected platform, and no test in the file is skipped by this change"
+      proof: "grep: W1-T13273 criterion 2 in test/a-claim-minted-before-this-namespace-booted-has-no-claimant.test.ts"
+  rationale: |
+    MEASURED 2026-11-16 on the operator Mac.
+
+    - `W1-T2784: readNamespaceBootMs declines (undefined) on unreadable or malformed /proc` and `W1-T2784: readNamespaceBootMs parses a comm containing spaces AND parentheses` in test/a-claim-minted-before-this-namespace-booted-has-no-claimant.test.ts fail on macOS: tests 19, pass 15, fail 2, on a tree byte-identical to origin/main for that suite. They refused W1-T13241's author preflight (#18965, shipped on an operator waiver) and every Mac preflight that selects this suite.
+    - READ src/lib/dispatch-claim.ts `readNamespaceBootMs`: `if ((deps.platform ?? process.platform) === "darwin") { … uptime … }` returns before the injected `readFile` is read. The two tests inject `readFile` (and `clockTicks`) to test the Linux /proc parse but pass no `platform`, so on a Mac they run the darwin branch: the first gets a boot time instead of undefined, the second the uptime value instead of the btime arithmetic.
+    - Not a Linux-only test: the parse is pure and runs anywhere once the platform is pinned.
+  design: |
+    1. Pass `platform: "linux"` in both tests' deps, and add "W1-T13273 criterion 1:" to a test title or a named subtest so the proof hits one line.
+    2. If the file has no test of the darwin branch with an injected platform, add one (criterion 2); if it has one, name it with "W1-T13273 criterion 2:".
+    INVARIANT the-darwin-branch-stays-tested: the darwin branch keeps a test, and nothing is skipped.
+    NOT IN SCOPE: readNamespaceBootMs itself; other Mac-only reds (each has its own cause); the preflight rule (W1-T13272).
+  falsifier: |
+    Remove the pinned platform and criterion 1 must fail on macOS. Remove the darwin-branch test and criterion 2 must fail. Restore and both pass.
+  note: |
+    reservation hand-off: run-unfiled-1794872014449 -> run-unfiled-1794872014449
+    Reserved with rmd next-task-id from a worktree at origin/main. The suite is an existing file directly under test/ and is edited in place.

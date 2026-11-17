@@ -189,6 +189,8 @@ import {
   accountIdleLaneMinutes,
   chargeRestartGap,
   idleLaneCauseForStep,
+  selectionHoldForStep,
+  selectionRefusalReason,
   idleLaneStateChanged,
   lastIdleLaneRecord,
   newIdleLaneAccount,
@@ -205,6 +207,49 @@ type HarnessCommitRefusalResult = RunResult & {
   harnessCommitRefused?: true;
   harnessCommitRefusalReason?: string;
 };
+
+interface ClaimHeldRefusal {
+  readonly ref: string;
+  readonly refusedAtMs: number;
+  readonly holder?: string;
+  readonly holderIdentity?: string;
+}
+
+const CLAIM_DROP_STEPS: ReadonlySet<string> = new Set(["dispatch.claim_released", "dispatch.claim_reclaimed"]);
+
+function ledgerRow(raw: string): Record<string, unknown> | undefined {
+  try { return JSON.parse(raw) as Record<string, unknown>; }
+  catch (error) { void error; /* a torn row is no evidence either way */ return undefined; }
+}
+
+/** W1-T13242: set only when this run met a `taken` claim and did not drop it (a dropped claim holds nothing). */
+function claimHeldRefusalFrom(lines: readonly string[], taskId: string, runId: string): ClaimHeldRefusal | undefined {
+  const rows = lines.filter((raw) => raw.includes(runId)).flatMap((raw) => {
+    const row = ledgerRow(raw);
+    return row && row.run_id === runId && row.task_id === taskId ? [row] : [];
+  });
+  const taken = rows.find((row) => row.step === "dispatch.claim" && row.outcome === "taken" && typeof row.ref === "string");
+  if (taken === undefined || rows.some((row) => CLAIM_DROP_STEPS.has(String(row.step)) && row.dropped === true)) return undefined;
+  const holder = /\(held by ([0-9a-f]{7,64})\)/.exec(String(taken.reason ?? ""))?.[1];
+  const judged = rows.find((row) => typeof row.holder === "string" && /^\d+@\S+$/.test(row.holder));
+  const refusedAtMs = typeof taken.ts === "string" ? Date.parse(taken.ts) : NaN;
+  return {
+    ref: taken.ref as string,
+    refusedAtMs,
+    ...(holder !== undefined ? { holder } : {}),
+    ...(judged !== undefined ? { holderIdentity: judged.holder as string } : {}),
+  };
+}
+
+function claimDroppedSince(lines: readonly string[], ref: string, sinceMs: number): boolean {
+  return lines.some((raw) => {
+    if (!raw.includes(ref) || !raw.includes("dispatch.claim_re")) return false;
+    const row = ledgerRow(raw);
+    const at = typeof row?.ts === "string" ? Date.parse(row.ts) : NaN;
+    return row !== undefined && CLAIM_DROP_STEPS.has(String(row.step)) && row.ref === ref && row.dropped === true &&
+      !(at < sinceMs);
+  });
+}
 
 /** Await the daemon's merge-rate read before handing the SRE lane its synchronous input. */
 export function startDaemonSreLane(
@@ -1550,8 +1595,8 @@ export interface DaemonDeps {
    *  cadence as the headroom block, so no second rate-limit call is made per tick (W1-T372). */
   readGhQuota?: () => GhRateLimitBuckets;
   /** W1-T10271: the gh read cadence since the previous poll, carried on that poll's `daemon.quota` row:
-   *  this process's reads stamped by floor mode and slots it yielded to a waiting gated read, and every
-   *  process's admitted gated reads. Defaults to {@link takeGhReadCadenceTally}. */
+   *  this process's reads stamped by floor mode and by call site (W1-T13182), slots it yielded to a waiting
+   *  gated read, and every process's admitted gated reads. Defaults to {@link takeGhReadCadenceTally}. */
   takeGhReadCadence?: () => GhReadCadenceTally;
   /** Called at most once per bucket per exhaustion episode, on the tick a bucket first crosses from
    *  having budget to having none. Trap: a bare zero check would re-fire every tick for up to an hour,
@@ -4486,6 +4531,9 @@ export async function runDaemon(
             : String(fields?.reason),
         } : undefined;
     }
+    if (idleLaneTickHold === undefined && (cause === undefined || cause === "selection_empty")) {
+      idleLaneTickHold = selectionHoldForStep(step, fields);
+    }
     livenessPulse?.note(step);
   };
   // W1-T8235: the hold behind a pause-type cause as the PAUSE flag recorded it. The flag carries a setter pid and a
@@ -4674,6 +4722,9 @@ export async function runDaemon(
   // held in process only until its cooldown, then the projection decides, so one long-lived daemon can
   // still re-offer it; a restart on new code clears this map anyway.
   const environmentalBlocksThisRun = new Map<string, number>();
+  // W1-T13242: a claim-held task sits out selection until `untilMs` or its claim's drop, so it cannot take the only
+  // free slot every tick (2026-11-16). A deferral: never block reasoning, a strike, a breaker or an escalation.
+  const claimHeldDeferrals = new Map<string, { ref: string; sinceMs: number; untilMs: number }>();
   // A zero-cost `blocked_illformed` verdict is a pre-dispatch admission refusal, not a durable
   // independent failure. Exclude its unchanged task contract only for this process, so it cannot
   // spin on the same immutable plan; a changed contract deliberately clears the entry below and is
@@ -5977,6 +6028,35 @@ export async function runDaemon(
   // body. The plan value is a parameter, never closed over, because the binding is rebound every tick; and it
   // returns a disposition so a caller can finish every sibling's bookkeeping before parking the affected subtree.
   // Forensics: docs/forensics/daemon.md.
+  // The raw reader, as the tick's memoized snapshot predates the run. No anchor states a renewal cadence today
+  // (`rmd-dispatch claim <pid>@<host> <iso>` plus its newest `renewed` line), so the environmental cooldown bounds it.
+  const deferClaimHeldTask = (taskId: string, runId: string, report: typeof emitLog): void => {
+    if (ledgerReader === undefined) return;
+    let refusal: ClaimHeldRefusal | undefined;
+    try {
+      refusal = claimHeldRefusalFrom(ledgerReader(), taskId, runId);
+    } catch (error) {
+      report("dispatch.claim_held_evidence_unreadable", { task: taskId, run_id: runId,
+        error: String((error as Error)?.message ?? error).slice(0, 300) });
+      return;
+    }
+    if (refusal === undefined) return;
+    const nowMs = daemonClock.now();
+    const untilMs = nowMs + ENVIRONMENTAL_BLOCK_COOLDOWN_MS;
+    claimHeldDeferrals.set(taskId, { ref: refusal.ref, sinceMs: Number.isFinite(refusal.refusedAtMs) ? refusal.refusedAtMs : nowMs, untilMs });
+    report("dispatch.claim_held_deferred", {
+      task_id: taskId,
+      task: taskId,
+      run_id: runId,
+      ref: refusal.ref,
+      holder: refusal.holder ?? null,
+      ...(refusal.holderIdentity !== undefined ? { holder_identity: refusal.holderIdentity } : {}),
+      deferred_until: fixedClock(untilMs).iso(),
+      bound_ms: ENVIRONMENTAL_BLOCK_COOLDOWN_MS,
+      bound_basis: "environmental_cooldown",
+    });
+  };
+
   const processDispatchResult = async (
     planForBatch: Plan,
     task: Task,
@@ -5989,6 +6069,7 @@ export async function runDaemon(
     | { kind: "genuine_blocker"; detail: string; dependents: string[] }
   > => {
     refreshResumableHandoff(task.id, report);
+    if (result.verdict !== "blocked_inflight") claimHeldDeferrals.delete(task.id);
     if (result.verdict === "task_already_merged") {
       // This verdict is a positive merge observation by run-task, even though the run opened no PR.
       // Refresh before the next selection and retain a local hold if the daemon's projection lags.
@@ -6061,6 +6142,7 @@ export async function runDaemon(
           verdict: result.verdict,
           run_id: result.runId,
         });
+        deferClaimHeldTask(task.id, result.runId, report);
         return { kind: "continue" };
       }
       // Block reasoning: reuse the transient/strike taxonomy and the plan's DAG instead of halting on any
@@ -7707,7 +7789,8 @@ export async function runDaemon(
     if (deps.readGhQuota) {
       const quota = deps.readGhQuota();
       // W1-T10271: the read cadence the floor was sized by, measured rather than inferred from quota
-      // deltas. Taken once per poll and carried on the first row written, so a sum never double counts.
+      // deltas. Taken once per poll and carried on the first row written (core, when core reads), so a
+      // sum never double counts. W1-T13182: reads_by_call_site names which code spent those stamped reads.
       let cadence: GhReadCadenceTally | undefined = (deps.takeGhReadCadence ?? takeGhReadCadenceTally)();
       for (const bucket of ["core", "graphql"] as const) {
         const reading = quota[bucket];
@@ -7828,6 +7911,12 @@ export async function runDaemon(
     const tickReleases = resolveReleases({
       readDurableReleases: deps.readDurableReleases, readLedgerLines: readTickLedger && (() => (tickLedgerLines = readTickLedger())),
     }, planForBatch);
+    if (tickLedgerLines !== undefined) {
+      const lines = tickLedgerLines;
+      for (const [taskId, deferral] of claimHeldDeferrals) {
+        if (claimDroppedSince(lines, deferral.ref, deferral.sinceMs)) claimHeldDeferrals.delete(taskId);
+      }
+    }
     if (tickReleases.durableUnreadable !== undefined || tickReleases.ledgerUnreadable !== undefined) {
       log("dispatch.releases_unreadable", {
         ...(tickReleases.ledgerUnreadable !== undefined ? { ledger_error: tickReleases.ledgerUnreadable } : {}),
@@ -7910,6 +7999,9 @@ export async function runDaemon(
     // idle emitted about 390 bare idle lines and zero dispatch rows: the record could not distinguish
     // "starved of work" from "everything filtered". Nothing about what is eligible changes.
     const idleReasons = tallyDispatchFilters();
+    const tickPassedOver = new Set<string>();
+    const tickDeferredForPriority = new Set<string>();
+    const tickOpenPr = new Set<string>();
     // W1-T8676: every release the latch projects leaves its row, once per blocking run.
     const independentBlockReleasesThisPass = deps.independentBlockReleases?.() ?? new Map<string, IndependentBlockRelease>();
     for (const [taskId, release] of independentBlockReleasesThisPass) {
@@ -7950,9 +8042,9 @@ export async function runDaemon(
       );
       const tickMachineShareRows = await machineShareRowsFor(tickLedgerLines);
       const dispatchOpts: NextRunnableOpts = {
-      onPassedOver: observePassedOver("tick"),
+      onPassedOver: (task, detail) => { tickPassedOver.add(task.id); observePassedOver("tick")(task, detail); },
       priorityBackfill,
-      onDeferredForPriority: logPriorityDeferral,
+      onDeferredForPriority: (d) => { tickDeferredForPriority.add(d.task.id); logPriorityDeferral(d); },
       onPriorityReservationReleased: logPriorityRelease,
       dispatchValueContext: deps.buildDispatchValueContext?.(planForBatch, isMerged),
       machineShare: machineShareFor(planForBatch, tickMachineShareRows),
@@ -7997,7 +8089,7 @@ export async function runDaemon(
       releasedIds: tickReleases.ids,
       // In-flight: a legible skip on console and ledger; the daemon keeps polling rather than treating an
       // open PR as a block (W1-T80).
-      onSkip: (t, prNumber) => log("dispatch.skipped", { task: t.id, reason: "open-pr", pr_number: prNumber }),
+      onSkip: (t, prNumber) => { tickOpenPr.add(t.id); log("dispatch.skipped", { task: t.id, reason: "open-pr", pr_number: prNumber }); },
       // Wrap the injected reader so a failed or indeterminate live read is ledgered here, distinct from an
       // un-wired site that never calls it. It still resolves the same either way, so the fail-open contract
       // is unchanged (W1-T177).
@@ -8057,7 +8149,10 @@ export async function runDaemon(
         // W1-T8676: a worker-error hold defers to the ledger's provider release, so this process cannot outlast it.
         if (independentBlockReleasesThisPass.get(taskId)?.evidence === "provider_recovered") independentFailureBlocksThisRun.delete(taskId);
         const environmentalAt = environmentalBlocksThisRun.get(taskId);
+        const claimHeld = claimHeldDeferrals.get(taskId);
+        if (claimHeld !== undefined && daemonClock.now() >= claimHeld.untilMs) claimHeldDeferrals.delete(taskId);
         const heldInProcess =
+          claimHeldDeferrals.has(taskId) ||
           independentFailureBlocksThisRun.has(taskId) ||
           (environmentalAt !== undefined && daemonClock.now() - environmentalAt < ENVIRONMENTAL_BLOCK_COOLDOWN_MS);
         return heldInProcess || laneDeliveryParked(taskId) || deps.isIndependentFailureBlocked?.(taskId) === true;
@@ -8215,7 +8310,17 @@ export async function runDaemon(
           0,
         );
         const queuedUnmerged = planForBatch.tasks.filter((t) => t.status === "queued" && !isMerged(t.id)).length;
-        sampleIdleLane(0, true, Math.max(0, queuedUnmerged - filtered));
+        const dispatchableNow = Math.max(0, queuedUnmerged - filtered);
+        // W1-T10423: empty selection with dispatchable work records its own refusal reason as the hold.
+        if (dispatchableNow > 0 && idleLaneTickCause === undefined && idleLaneTickHold === undefined) {
+          const refused: Record<string, number> = { "passed-over-for-overlap": tickPassedOver.size, "priority-deferred": tickDeferredForPriority.size, "open-pr": tickOpenPr.size };
+          for (const r of Object.keys(filteredTally) as Array<keyof typeof filteredTally>) {
+            if (r !== "already-merged") refused[r] = filteredTally[r].count;
+          }
+          const reason = selectionRefusalReason(refused, "no disjoint runnable task within the lane budget");
+          if (reason !== undefined) idleLaneTickHold = { reason };
+        }
+        sampleIdleLane(0, true, dispatchableNow);
       }
       // Cadence: on change, not every tick. The idle row still fires every poll and is byte-compatible with
       // before. The reasons ride a separate step, emitted only when the picture actually changes — logging

@@ -7902,7 +7902,7 @@ if (args[0] === "label" && args[1] === "create") {
 
 // The default captures from repoRoot into the configured state queue; both copies are cleaned
 // even if an assertion fails. A queued id must deduplicate without recreating the checkout copy.
-test("buildSweepEffects.captureRepairFeedback: the DEFAULT wiring stages and deduplicates in config.root (W1-T905)", () => {
+test("buildSweepEffects.captureRepairFeedback: the DEFAULT wiring stages and deduplicates in config.root (W1-T905)", async () => {
   const stateRoot = mkdtempSync(join(tmpdir(), "rmd-repair-capture-default-"));
   const id = `fb-repair-w1t905-coverage-${Date.now()}`;
   const entryPath = feedbackEntryPath(REPO_ROOT, id);
@@ -7920,7 +7920,7 @@ test("buildSweepEffects.captureRepairFeedback: the DEFAULT wiring stages and ded
     assert.ok(effects.captureRepairFeedback, "the default wiring must expose captureRepairFeedback");
     const filing: RepairFilingCapture = { id, raw: "W1-T905 coverage fixture — repair#coverage-fixture", origin: "repair#coverage-fixture" };
 
-    effects.captureRepairFeedback!(filing);
+    await effects.captureRepairFeedback!(filing);
     assert.equal(existsSync(entryPath), false, "the checkout copy moves into the state queue");
     const queued = readQueuedFeedbackRecords(stateRoot);
     const entry = queued.get(`plan/feedback/${id}.yaml`);
@@ -7929,7 +7929,7 @@ test("buildSweepEffects.captureRepairFeedback: the DEFAULT wiring stages and ded
     assert.equal(entry.origin, "repair#coverage-fixture");
     assert.equal(entry.raw, filing.raw);
 
-    effects.captureRepairFeedback!({ ...filing, raw: "a second, different raw body that must never land" });
+    await effects.captureRepairFeedback!({ ...filing, raw: "a second, different raw body that must never land" });
     assert.deepEqual(readQueuedFeedbackRecords(stateRoot), queued, "the queued capture is untouched");
     assert.equal(existsSync(entryPath), false, "dedup must not recreate the checkout copy");
   } finally {

@@ -16,6 +16,8 @@
     - src/lib/daemon.ts
     - scripts/fleet-heartbeat.sh
     - test/daemon/a-paused-instance-says-when-it-has-drained.test.ts
+    - "src/cli/commands/daemon.ts"
+    - "src/lib/garden-registry.ts"
   status: queued
   attempts: 0
   acceptance:

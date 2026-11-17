@@ -91,12 +91,13 @@ test("daemon input reads: a symlinked census state is refused before any snapsho
   assert.deepEqual(readdirSync(target), []);
 });
 
-test("daemon input reads: async Git stdin retains output bounds and rejects a closed input pipe", async (t) => {
+test("daemon input reads: async Git stdin retains output bounds and a closed input pipe after exit 0 keeps stdout", async (t) => {
   const { repo } = fixture(t);
   const batch = await hostWorktreeGitAsync(repo.dir, ["cat-file", "--batch"], { input: "HEAD:scripts/unicode.json\n", encoding: "latin1" });
   assert.ok(batch.includes(Buffer.from('{"text":"café 🐾"}\n', "utf8").toString("latin1")));
   await assert.rejects(hostWorktreeGitAsync(repo.dir, ["cat-file", "--batch"], { input: "HEAD:scripts/unicode.json\n", maxBuffer: 1 }), { code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" });
-  await assert.rejects(hostWorktreeGitAsync(repo.dir, ["--version"], { input: "x".repeat(16 * 1024 * 1024) }), { code: "EPIPE" });
+  // W1-T13170: git exited 0 without reading its input; the EPIPE that caused is git's choice, and stdout stands.
+  assert.match(await hostWorktreeGitAsync(repo.dir, ["--version"], { input: "x".repeat(16 * 1024 * 1024) }), /^git version /);
   await assert.rejects(hostWorktreeGitAsync(repo.dir, ["cat-file", "--batch"], { timeout: 25 }), (error: unknown) => {
     assert.equal((error as { killed: boolean }).killed, true);
     return true;

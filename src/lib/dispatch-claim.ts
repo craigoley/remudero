@@ -264,7 +264,7 @@ export function decideDispatchClaimRelease(i: {
   const r = i.replaced;
   const m = r?.mintRow;
   if (a && r && m && !sameHost(a.host, r.localHost) && sameHost(m.host, a.host) &&
-      (m.actor === "daemon" || m.actor === "run_child") && a.mintedAtMs < r.lockHeldSinceMs) {
+      isFleetMintActor(m.actor) && a.mintedAtMs < r.lockHeldSinceMs) {
     return {
       arm: "dead-claimant",
       release: true,
@@ -827,6 +827,17 @@ export function findClaimMintRow(
   return undefined;
 }
 
+/** A daemon or run-child minted it: a fleet lane, never an operator session (operator_human, operator_ai, unknown). */
+function isFleetMintActor(actor: string): boolean {
+  return actor === "daemon" || actor === "run_child";
+}
+
+/** W1-T13241: a fleet lane of THIS instance minted the claim only when its mint row names this host AND a fleet
+ *  actor. A hand session's row, or another host's, sits in the same ledger but no dead-claimant arm can judge it. */
+function mintedByThisInstancesFleet(row: ClaimMintRow | undefined, localHost: string): boolean {
+  return row !== undefined && sameHost(row.host, localHost) && isFleetMintActor(row.actor);
+}
+
 export function claimMintedByRerun(
   stateDir: string,
   taskId: string,
@@ -1254,7 +1265,7 @@ export function decideClaimSilence(i: {
     return { verdict: "no-verdict", reason: `no-duration-evidence: this instance has no measured claim-to-verdict duration, so ${ref}'s silence cannot be judged` };
   if (i.anchor === undefined) return { verdict: "no-verdict", reason: `${ref}'s anchor is unreadable, so its holder's silence cannot be judged` };
   if (i.mintedByThisInstance)
-    return { verdict: "no-verdict", reason: `${ref} was minted by a fleet lane of this instance (its dispatch.claim created row), which the dead-claimant arm judges` };
+    return { verdict: "no-verdict", reason: `${ref} was minted by a fleet lane of this instance (its dispatch.claim created row names this host and a daemon or run_child actor), which the dead-claimant arm judges` };
   if (i.lastSignOfLife === undefined) return { verdict: "no-verdict", reason: `${ref}'s run branches are unreadable, so its last sign of life is unknown` };
   const silenceMs = Math.max(0, i.nowMs - i.lastSignOfLife.atMs);
   const judged = Math.max(w, CLAIM_SILENCE_FLOOR_MS);
@@ -1278,6 +1289,8 @@ export interface ClaimSilenceJudgeInputs {
   clock?: Clock;
   readRows?: (sinceIso: string) => Promise<Array<Record<string, unknown>>>;
   mintedByThisInstance?: (anchor: ClaimAnchorIdentity) => boolean;
+  /** This instance's host, which a fleet lane's mint row names; absent ⇒ `os.hostname()`. */
+  localHost?: string;
 }
 
 export interface ClaimSilenceJudgement extends ClaimSilenceDecision {
@@ -1303,7 +1316,8 @@ export async function reclaimSilentDispatchClaim(
   const judged = window.samples > 0 ? await reserver.holder(taskId) : undefined;
   const message = judged ? await reserver.anchorMessage?.(taskId) : undefined;
   const anchor = parseClaimAnchorMessage(message);
-  const mine = anchor !== undefined && (deps.mintedByThisInstance ?? ((a) => findClaimMintRow(deps.stateDir, taskId, a) !== undefined))(anchor);
+  const fleetMinted = (a: ClaimAnchorIdentity) => mintedByThisInstancesFleet(findClaimMintRow(deps.stateDir, taskId, a), deps.localHost ?? hostname());
+  const mine = anchor !== undefined && (deps.mintedByThisInstance ?? fleetMinted)(anchor);
   const branches = anchor !== undefined && !mine ? await readRunBranchActivity(taskId, deps.run) : undefined;
   const lastSignOfLife = anchor !== undefined && branches?.ok ? claimLastSignOfLife(anchor, message, branches.newest) : undefined;
   const decision = decideClaimSilence({ taskId, anchor, lastSignOfLife, mintedByThisInstance: mine, window, nowMs });

@@ -18,6 +18,7 @@
  * - Every body carries a weak `ETag`; a matching `If-None-Match` answers 304 with no body.
  */
 import { createHash } from "node:crypto";
+import { gzip } from "node:zlib";
 import type { IncomingMessage, OutgoingHttpHeaders, ServerResponse } from "node:http";
 import { RECAP_ACK_HEADER, STALE_SOURCE_HEADER } from "./board.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
@@ -163,6 +164,12 @@ export function ifNoneMatchHits(header: string | string[] | undefined, etag: str
     .some((tag) => tag === "*" || tag.replace(/^W\//, "") === opaque);
 }
 
+/**
+ * W1-T13290: a cached 200 body this large is gzipped for a client that accepts it. MEASURED 2026-11-17: /v1/inbox was
+ * 9,185,361 bytes of JSON (1,039,748 gzipped) sent uncompressed through the tunnel to the Console.
+ */
+export const CONSOLE_GZIP_MIN_BYTES = 64 * 1024;
+
 export function writeBufferedResponse(req: IncomingMessage, res: ServerResponse, cached: BufferedRouteResponse, staleness: ConsoleResponseStaleness): void {
   const headers: Record<string, string> = { ...cached.headers, ...stalenessHeaders(staleness), ...(cached.etag ? { etag: cached.etag } : {}) };
   if (cached.status === 200 && ifNoneMatchHits(req.headers?.["if-none-match"], cached.etag)) {
@@ -182,6 +189,20 @@ export function writeBufferedResponse(req: IncomingMessage, res: ServerResponse,
       // Malformed cached JSON keeps its original body; the cache headers still carry staleness.
       body = cached.body;
     }
+  }
+  if (cached.status === 200 && Buffer.byteLength(body) >= CONSOLE_GZIP_MIN_BYTES && /\bgzip\b/i.test(String(req.headers?.["accept-encoding"] ?? ""))) {
+    // W1-T13290: compressed in the libuv thread pool, never on the request thread; any failure sends the plain body.
+    gzip(body, { level: 4 }, (error, zipped) => {
+      if (error) {
+        res.writeHead(cached.status, headers);
+        res.end(body);
+        return;
+      }
+      const { "content-length": _plainLength, ...rest } = headers;
+      res.writeHead(cached.status, { ...rest, "content-encoding": "gzip", vary: "accept-encoding", "content-length": String(zipped.length) });
+      res.end(zipped);
+    });
+    return;
   }
   res.writeHead(cached.status, headers);
   res.end(body);

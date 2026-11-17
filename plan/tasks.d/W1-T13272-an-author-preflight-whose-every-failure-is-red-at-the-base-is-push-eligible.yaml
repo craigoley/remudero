@@ -1,0 +1,43 @@
+- id: W1-T13272
+  title: "An author preflight whose every failing test is also red at the merge base on the same host is push-eligible, and its receipt names those reds"
+  repo: remudero
+  priority: 0.5
+  depends_on: [W1-T13215]
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # it changes when the local preflight lets a branch be pushed
+  band_meaning: span
+  origin: "operator-session#mac-author-preflight-2026-11-16"
+  plan_refs:
+    - W1-T13215
+    - W1-T13273
+  files:
+    - scripts/preflight-author.mjs
+    - test/ci/an-author-preflight-whose-every-failure-is-red-at-the-base-is-push-eligible.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "When every failing test of the affected-tests stage is labelled also red at the base by W1-T13215's attribution, and none is red only at the head or unattributed, the verdict is push-eligible with a reason naming each pre-existing red and the base sha"
+      proof: "grep: W1-T13272 criterion 1 in test/ci/an-author-preflight-whose-every-failure-is-red-at-the-base-is-push-eligible.test.ts"
+    - claim: "The verdict row records the pre-existing reds as a list beside the counts, so the PR body and the ledger can show them"
+      proof: "grep: W1-T13272 criterion 2 in test/ci/an-author-preflight-whose-every-failure-is-red-at-the-base-is-push-eligible.test.ts"
+    - claim: "invariant:a-red-the-change-caused-still-refuses — any failing test labelled red only at the head or unattributed keeps the verdict not push-eligible with today's reason, and a run whose base attribution did not run is never pushable on this rule"
+      proof: "grep: W1-T13272 criterion 3 in test/ci/an-author-preflight-whose-every-failure-is-red-at-the-base-is-push-eligible.test.ts"
+  rationale: |
+    OPERATOR RULING 2026-11-16 23:20Z: asked whether a Mac author preflight that fails only on tests that also fail on main's code should need a per-PR waiver, Craig chose "Yes, standing rule + file fixes": a red that is already on main is not the change's, and the evidence should make the branch pushable without a human. This task is that rule in the preflight itself. W1-T13215 (queued) produces the evidence and explicitly left this decision out of scope.
+
+    - That day, four hand-built PRs needed a one-PR waiver for Mac reds that were present on main: W1-T13171 (#18927), W1-T13175's neighbours, and W1-T13241 (#18965: 2 of 4432 tests, the `readNamespaceBootMs` parse tests, red on a tree byte-identical to main for that suite). Each waiver cost an operator question and a hand attribution run under the Mac lock.
+    - Hosted Linux CI still runs every suite and gates the merge, so a host-specific red on main does not reach main through this rule; a red only at the head still refuses.
+  design: |
+    1. After W1-T13215's attribution, if failing > 0 and every failing test is "also red at the base" (none "only at the head", none "unattributed"), set push-eligible true with a reason "every failing test is also red at the merge base <sha> on this host: <list>".
+    2. The verdict row gains `preexisting_reds: [{file, test}]`.
+    3. The suite drives the verdict function with injected attribution results.
+    INVARIANT a-red-the-change-caused-still-refuses: any head-only or unattributed failure, or a missing attribution, keeps today's refusal.
+    NOT IN SCOPE: the attribution itself (W1-T13215); fixing the base reds (W1-T13273 and others); the census precheck; the hosted checks.
+  falsifier: |
+    Leave such a run not push-eligible and criterion 1 must fail. Drop the list and criterion 2 must fail. Let one head-only failure through, or pass with no attribution, and criterion 3 must fail. Restore and all pass.
+  note: |
+    reservation hand-off: run-unfiled-1794872014449 -> run-unfiled-1794872014449
+    Reserved with rmd next-task-id from a worktree at origin/main. Build after W1-T13215 (same file). The test folder follows W1-T13215's suite in test/ci/.

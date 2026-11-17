@@ -1,7 +1,7 @@
 - id: W1-T13215
   title: "An author preflight says which of its failures the change caused: it re-runs the failing files at the merge base and labels each failing test as also red at the base or red only at the head"
   repo: remudero
-  priority: 1.1
+  priority: 0.5
   type: implement
   verify: auto
   principles:
@@ -17,7 +17,7 @@
   files:
     - scripts/preflight-author.mjs
     - test/ci/an-author-preflight-says-which-of-its-failures-the-change-caused.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "When the affected-tests stage ends with failing tests, the preflight runs only the failing files again at the merge base in a scratch worktree, prints for each failing test whether it also fails at the base on this host, and removes the scratch worktree whatever the outcome"
