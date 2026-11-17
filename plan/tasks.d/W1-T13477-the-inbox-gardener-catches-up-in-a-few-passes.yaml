@@ -1,0 +1,51 @@
+- id: W1-T13477
+  title: "The Inbox gardener's ledger read catches up across the whole archive corpus in a few passes, not days"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # 1 concern: INBOX_GARDENER_LIMITS.ledgerCatchUpMs grows from 20 s to 300 s
+  origin: "operator-session#inbox-gardener-shadow-2026-11-17"
+  plan_refs:
+    - W1-T13348
+    - W1-T13337
+  files:
+    - src/lib/inbox-gardener.ts
+    - test/gardeners/the-inbox-gardener-retires-an-ask-whose-task-already-shipped.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The Inbox gardener's ledger catch-up budget per pass is 300 seconds"
+      proof: "grep: ledgerCatchUpMs: 300_000 in src/lib/inbox-gardener.ts"
+    - claim: "The pinned limits test asserts the 300-second catch-up budget"
+      proof: "grep: ledgerCatchUpMs: 300_000 in test/gardeners/the-inbox-gardener-retires-an-ask-whose-task-already-shipped.test.ts"
+    - claim: "invariant:catch-up-stays-bounded — a ledger read with a slow clock still stops at the budget and reports source_partial (the W1-T13348 catch-up test passes unchanged)"
+      proof: "unit test: W1-T13348 criterion 2"
+  rationale: |
+    WHY: Craig approved the Inbox gardener in shadow mode; act mode waits for a clean day of shadow rows, and no pass
+    can be clean until the gardener read model has read the whole ledger.
+    OBSERVED on the host 2026-11-17 (daemon booted 13:44Z with W1-T13348, again 16:06Z):
+    - inbox.gardener_pass rows 14:57Z and 18:15Z: source_partial, gaps [coverage:ledger] (18:15Z also coverage:plan).
+    - Read model source_file checkpoint: 18 archives read after the 14:57Z pass, 23 after 18:15Z, of 232 on disk
+      (~885 MB gz). 0 quarantined rows, no source fault.
+    - garden.lifecycle: the inbox pass waits 20-42 min in the admission queue and runs about every 3 h; the 14:57Z
+      pass took 42 s of which 20 s was catch-up.
+    At 5-18 archives per 20 s pass and one pass per ~3 h, full coverage takes days.
+    READ at origin/main: INBOX_GARDENER_LIMITS.ledgerCatchUpMs = 20_000 (src/lib/inbox-gardener.ts). The pass runs in
+    a garden child process (garden-registry lifecycle reports executionMs and process-completed), not in the daemon
+    loop, and garden-registry sets no execution time limit for it, so a longer catch-up does not stall the daemon.
+  design: |
+    INVARIANT catch-up-stays-bounded: the read still stops at the budget and reports source_partial until coverage
+    is complete.
+    1. Set INBOX_GARDENER_LIMITS.ledgerCatchUpMs to 300_000. At the observed rate that reads ~75-270 archives per
+       pass, so coverage completes in 1-3 passes; once caught up, a pass reads only new rotations and returns early.
+    2. Update the pinned limits assertion in the-inbox-gardener-retires-an-ask-whose-task-already-shipped.test.ts.
+    The W1-T13348 catch-up test derives its stepping clock from the constant and must pass unchanged.
+  falsifier: |
+    Leave the constant at 20_000 and the pinned limits test and the grep proofs fail.
+  note: |
+    Id reserved for run-unfiled-1794943092816 with ~/rmd-work/bin/reserve-id.sh.
+    reservation hand-off: run-unfiled-1794943092816 -> claude/project-thread-cb5huh-plan-gardener-catchup
