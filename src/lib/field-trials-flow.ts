@@ -20,6 +20,8 @@
 import { ciRemedyExecutionOf, ciRemedyExecutionReport, type CiRemedyExecution } from "./ci-remedy-execution.js";
 import { importedModuleOf, preventionRegistrationsOf, preventionAdoption, type ImportedModuleEvidence, type PreventionSourceRegistration } from "./prevention-source-evidence.js";
 import { servedTrialCohorts, trialRevisionPins, type TrialRevisionPins } from "./field-trials-cohorts.js";
+import { JUDGE_TRIAL_STEPS, judgeTrialCellKey, judgeTrialCells, judgeTrialRows, projectJudgeTrialRow, type JudgeTrialCell,
+  type JudgeTrialProjection, type JudgeTrialRow } from "./field-trials-judges.js";
 import { buildControlledFieldTrialsRelease, deriveRegisteredEpoch, SITE_SECONDARY_COMMIT, type ControlledReleaseInput,
   type ControlledReleaseResult, type LedgerEpochFacts } from "./field-trials-controlled-release.js";
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
@@ -73,6 +75,8 @@ const FLOW_STEPS = new Set(["run.start", "worker.assignment", "worker.attempt", 
   "fix.dispatch", "fix.remedy_path_execution", "escalation.issue_opened", "daemon.boot", "evidence_coverage.filed"]);
 /** W1-T10877: rows read only by the guardrails family; they stay out of every per-task family. */
 const GUARDRAIL_STEPS = new Set(["inbox.drafted", "fix.done", "fix.exhausted", "fix.commit_refused", "fix.stood_down"]);
+/** W1-T12423: rows read only by the judge family (lib/field-trials-judges.ts); they stay out of every other family and figure. */
+const JUDGE_STEPS = new Set<string>(JUDGE_TRIAL_STEPS);
 const STAGES = ["eligible", "assigned", "worker", "pr", "review", "merge", "deployment", "verified"] as const;
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -120,6 +124,8 @@ export interface FlowRow {
   lane?: string;
   lintClean?: boolean;
   fixRoundId?: string;
+  /** W1-T12423: a judge row's answers, latency and dollars; present only on a JUDGE_STEPS row. */
+  judge?: JudgeTrialProjection;
   notionalCostUsd?: number | null;
   notionalCostReported?: boolean;
   repair?: RepairCostContext;
@@ -154,7 +160,7 @@ export interface FlowRow {
 
 function flowRelevant(row: Record<string, unknown>): boolean {
   const step = String(row.step);
-  return FLOW_STEPS.has(step) || GUARDRAIL_STEPS.has(step) || step.endsWith(".scorecard") || step.endsWith(".gardener_judged")
+  return FLOW_STEPS.has(step) || GUARDRAIL_STEPS.has(step) || JUDGE_STEPS.has(step) || step.endsWith(".scorecard") || step.endsWith(".gardener_judged")
     || (row.actor === "operator" && typeof row.task_id === "string");
 }
 
@@ -217,7 +223,9 @@ export function projectFlowRow(row: Record<string, unknown>, fingerprint: string
   const nonnegativeInteger = (value: unknown) => Number.isSafeInteger(value) && Number(value) >= 0 ? value as number : null;
   const pinned = (field: string) => record(stack?.[field])?.state === "observed";
   const url = PR_URL_RE.exec(String(row.pr_url ?? ""));
+  const judge = JUDGE_STEPS.has(String(row.step)) ? projectJudgeTrialRow(row) : undefined;
   return {
+    ...(judge ? { judge } : {}),
     fingerprint, ts: iso(row.ts), step: String(row.step), host: text(row.host), actor: text(row.actor),
     taskId: text(row.task_id), runId: text(row.run_id),
     assignmentId: text(assignment?.id) ?? text(row.selection_assignment_id),
@@ -483,6 +491,8 @@ function learningCells(units: LearningUnit[]) {
     humanEffort: { state: "unavailable" as const, reason: "no-independent-human-effort-estimate" } };
 }
 
+type JudgeUnit = Unit & { row: JudgeTrialRow };
+
 type GuardrailUnit = Unit & { modelId: string; category: PublicCategory; guardrailClass: PublicGuardrailClass; fired: boolean; row: string };
 
 function guardrailCells(units: GuardrailUnit[]) {
@@ -563,6 +573,8 @@ export interface FieldTrialsFlowSnapshot {
     learning: Record<string, Partition<ReturnType<typeof learningCells>>>;
     /** W1-T10877: private fires and opportunities per model|public category|public guardrail class. */
     guardrails: Record<string, Partition<ReturnType<typeof guardrailCells>>>;
+    /** W1-T12423: private judge figures per source|week|basis|role|model|model surface|corpus digest. Never released. */
+    judges: Record<string, Partition<JudgeTrialCell>>;
   };
   rebuild: { rebuiltPartitions: string[]; reusedPartitions: number };
   /** Every private join key this snapshot saw, so a release can be refused if one leaks. */
@@ -921,7 +933,7 @@ function learningUnits(ctx: SourceContext, pullsByRepo: (repo: string) => Github
  */
 export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): FieldTrialsFlowSnapshot {
   const units = { adoption: [] as AdoptionUnit[], funnel: [] as FunnelUnit[], flow: [] as FlowUnit[], repair: [] as RepairUnit[],
-    learning: [] as LearningUnit[], guardrails: [] as GuardrailUnit[] };
+    learning: [] as LearningUnit[], guardrails: [] as GuardrailUnit[], judges: [] as JudgeUnit[] };
   const transitions: ModelTransition[] = [];
   const preventionExecutions: NonNullable<FieldTrialsFlowSnapshot["preventionExecution"]> = [];
   const preventionSources: NonNullable<FieldTrialsFlowSnapshot["preventionAdoption"]> = [];
@@ -937,7 +949,14 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
   const storeOf = (repo: string) => Object.entries(input.github.repos).find(([name]) => name.toLowerCase() === repo.toLowerCase())?.[1];
   for (const source of input.sources) {
     const store = storeOf(source.repo);
-    const { rows: ledgerRows, ...ledger } = source.ledger;
+    const { rows: readRows, ...ledger } = source.ledger;
+    // W1-T12423: judge rows enter only the judge family. Every other family and figure reads the rows without them.
+    const judgeRows = readRows.filter((row) => JUDGE_STEPS.has(row.step));
+    const ledgerRows = judgeRows.length === 0 ? readRows : readRows.filter((row) => !JUDGE_STEPS.has(row.step));
+    const judged = judgeTrialRows(source.label, judgeRows);
+    for (const key of judged.privateKeys) privateKeys.add(key);
+    for (const row of judgeRows) for (const key of [row.taskId, row.host, row.headSha]) if (key !== null) privateKeys.add(key);
+    for (const row of judged.rows) units.judges.push(withDigest({ key: judgeTrialCellKey(row, periodOf), row }));
     // Only these three bounded schemas feed the private finding fold. Avoid a second copy
     // of the entire fleet ledger and an unbounded spread-argument list on large rotations.
     for (const row of ledgerRows) if (row.step === "review.posted" || row.step === "review.reviewer" || row.step === "review.finding")
@@ -945,7 +964,7 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
     if (ledger.state !== "observed") reasons.push(`${source.label}:ledger:${ledger.reason}`);
     const pullsCursor = store?.cursors.pulls ?? null;
     if (pullsCursor?.state !== "complete") reasons.push(`${source.label}:github:${pullsCursor?.reason ?? pullsCursor?.state ?? "never-read"}`);
-    provenance.push({ label: source.label, repo: source.repo, ledger: { ...ledger, rows: ledgerRows.length },
+    provenance.push({ label: source.label, repo: source.repo, ledger: { ...ledger, rows: readRows.length },
       github: { pulls: pullsCursor, commits: store?.cursors.commits ?? null, deployments: store?.cursors.deployments ?? null,
         prs: Object.keys(store?.pulls ?? {}).length, commitsKnown: Object.keys(store?.commits ?? {}).length,
         deploymentsKnown: Object.keys(store?.deployments ?? {}).length } });
@@ -1073,6 +1092,9 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
     flow: rebuildFamily("flow", units.flow, prior?.flow, flowCells, rebuilt, reused),
     learning: rebuildFamily("learning", units.learning, prior?.learning, learningCells, rebuilt, reused),
     guardrails: rebuildFamily("guardrails", units.guardrails, prior?.guardrails, guardrailCells, rebuilt, reused),
+    // One partition is one cell, so a late row rebuilds only the cell of its own week.
+    judges: rebuildFamily("judges", units.judges, prior?.judges, (members) => judgeTrialCells(members.map((unit) => unit.row), periodOf)[0]!,
+      rebuilt, reused),
   };
   const githubFresh = (input.githubPass?.pagesRead ?? 0) > 0;
   const anyObserved = githubFresh || provenance.some((source) => source.ledger.state !== "unavailable");

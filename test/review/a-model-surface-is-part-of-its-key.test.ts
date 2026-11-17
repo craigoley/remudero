@@ -195,7 +195,11 @@ test("W1-T12420 criterion 6: a decision.answered row served by gpt-6-luna leaves
   };
   const without = await snapshotOf(worker, "without");
   const withDecision = await snapshotOf([...worker, decision], "with");
-  assert.equal(withDecision.ledger.rows.some((row) => row.step === DECISION_ANSWERED_STEP), false, "no Decisions row enters the snapshot");
+  // W1-T12423: the snapshot reads the Decisions row as a judge row, and it enters the judge family only.
+  assert.deepEqual(withDecision.ledger.rows.filter((row) => row.step === DECISION_ANSWERED_STEP).map((row) => row.judge !== undefined), [true]);
+  assert.deepEqual(Object.values(withDecision.snapshot.families.judges).map((partition) => [partition.cells.model, partition.cells.modelSurface]),
+    [[LUNA, "decisions"]]);
+  assert.deepEqual(withDecision.snapshot.families.funnel, without.snapshot.families.funnel);
   assert.deepEqual(withDecision.snapshot.families.adoption, without.snapshot.families.adoption);
   assert.deepEqual(withDecision.snapshot.families.guardrails, without.snapshot.families.guardrails);
   assert.deepEqual(withDecision.snapshot.servedTrialCohorts, without.snapshot.servedTrialCohorts);
