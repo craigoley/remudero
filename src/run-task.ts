@@ -284,6 +284,7 @@ import {
 import { LEDGER_FILENAME, ledgerPathFor, nextLaneEpochMs } from "./lib/ledger-path.js";
 export { LEDGER_FILENAME, ledgerPathFor, nextLaneEpochMs };
 import { ledgerCompactCommand, type LedgerCompactCommandDeps } from "./lib/ledger-compact.js";
+import { compactLedgerInWorker } from "./lib/ledger-compact-worker.js";
 import { readModelCommand } from "./lib/read-model-cli.js";
 export { ledgerCompactCommand } from "./lib/ledger-compact.js";
 import {
@@ -22069,7 +22070,9 @@ export function buildLedgerCompactionDaemonHooks(deps: {
   clock?: Clock;
   check?: () => LedgerCompactionDecision;
   run?: () => Promise<LedgerCompactionOutcome | undefined>;
+  /** The in-process pass, for a test; absent, the pass runs in a worker thread. */
   compact?: (rest: string[], deps: LedgerCompactCommandDeps) => number;
+  worker?: Parameters<typeof compactLedgerInWorker>[2];
 } = {}): {
   checkLedgerCompaction: () => LedgerCompactionDecision;
   runLedgerCompaction: () => Promise<LedgerCompactionOutcome | undefined>;
@@ -22094,14 +22097,21 @@ export function buildLedgerCompactionDaemonHooks(deps: {
     deps.run ??
     (async () => {
       let report: string | undefined;
-      const errors: string[] = [];
-      const code = (deps.compact ?? ledgerCompactCommand)(daemonLedgerCompactArgs(stateDirFor()), {
-        stateDir: stateDirFor(),
-        out: (line) => {
-          report = line;
-        },
-        error: (line) => errors.push(line),
-      });
+      let errors: string[] = [];
+      let code: number;
+      const rest = daemonLedgerCompactArgs(stateDirFor());
+      if (deps.compact) {
+        code = deps.compact(rest, {
+          stateDir: stateDirFor(),
+          out: (line) => {
+            report = line;
+          },
+          error: (line) => errors.push(line),
+        });
+      } else {
+        // W1-T13333: the pass runs in a worker thread; the daemon loop only awaits it.
+        ({ code, report, errors } = await compactLedgerInWorker(rest, stateDirFor(), deps.worker));
+      }
       if (code !== 0) {
         throw new Error(errors.join("\n") || `rmd ledger-compact exited ${code}`);
       }
