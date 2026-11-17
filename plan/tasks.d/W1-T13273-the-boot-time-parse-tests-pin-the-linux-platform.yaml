@@ -15,7 +15,7 @@
     - W1-T13241
   files:
     - test/a-claim-minted-before-this-namespace-booted-has-no-claimant.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "W1-T13273 criterion 1: the two W1-T2784 parse tests (declines on unreadable or malformed /proc; parses a comm containing spaces AND parentheses) pass platform linux to readNamespaceBootMs, and pass on macOS and Linux"

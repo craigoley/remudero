@@ -19,7 +19,7 @@
     - test/ci/the-nightly-coverage-merge-reads-premapped-shards.test.ts
     - test/main-builds-the-test-impact-map-the-shadow-arm-reads.test.ts
     - test/the-instrumented-suite-runs-nightly-on-main.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Each coverage-nightly shard writes premapped coverage beside its compact coverage, and the merge job's coverage-merge-ratchet.mjs call reads the premapped directories"
