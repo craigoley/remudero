@@ -17,7 +17,7 @@
 // test/check-proof-base.test.ts) already uses.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildProofEnv, defaultProofSpawner, PROOF_ENV_ALLOWLIST } from "#src/lib/review.js";
+import { buildProofEnv, defaultProofSpawner, PROOF_ENV_ALLOWLIST, proofSandboxStatus } from "#src/lib/review.js";
 
 /** Run the REAL `defaultProofSpawner` with a tiny node one-liner that dumps its own
  *  `process.env` back out as JSON, and parse the result. */
@@ -45,6 +45,11 @@ const CANARY_VAR = "RMD_RESTART_THROTTLE_S";
 // to this one measured key instead of weakening the child environment itself.
 const PLATFORM_INJECTED_ENV = process.platform === "darwin" ? new Set(["__CF_USER_TEXT_ENCODING"]) : new Set<string>();
 
+// Under bubblewrap (Linux, where it can start) the sandbox's own `--chdir <cwd>` makes the runner set PWD for the
+// child, below the env the spawn hands over. Like the CoreFoundation key, it is a sandbox artifact, not an allowlist
+// grant: it is excepted only when the proof really ran under bwrap, and only with the value of the proof's cwd.
+const SANDBOX_CHDIR_ENV = "PWD";
+
 function withCanary<T>(value: string | undefined, fn: () => T): T {
   const had = Object.prototype.hasOwnProperty.call(process.env, CANARY_VAR);
   const saved = process.env[CANARY_VAR];
@@ -71,6 +76,10 @@ test("a Darwin CoreFoundation env injection is isolated from the proof allowlist
   assert.equal(childEnv.TMPDIR, childEnv.HOME, "the temp root is derived only from this owned proof HOME");
   const inherited = { ...childEnv };
   delete inherited.TMPDIR;
+  if (proofSandboxStatus().mode === "bwrap") {
+    assert.equal(inherited[SANDBOX_CHDIR_ENV], process.cwd(), "bwrap's --chdir sets PWD to the proof's cwd, nothing else");
+    delete inherited[SANDBOX_CHDIR_ENV];
+  }
   const leaked = Object.keys(inherited).filter(
     (k) => !(PROOF_ENV_ALLOWLIST as readonly string[]).includes(k) && !PLATFORM_INJECTED_ENV.has(k),
   );
@@ -85,6 +94,20 @@ test("a Darwin CoreFoundation env injection is isolated from the proof allowlist
       true,
       "the Darwin exception must remain the exact measured CoreFoundation key",
     );
+  }
+});
+
+test("a bwrap --chdir PWD is the only sandbox-added key, and it names the proof's cwd, not a leaked parent value", () => {
+  const parentPwd = process.env.PWD;
+  try {
+    process.env.PWD = "/rmd-parent-pwd-canary";
+    const childEnv = spawnAndReadEnv();
+    assert.notEqual(childEnv.PWD, "/rmd-parent-pwd-canary", "the parent's PWD is never forwarded to the child");
+    if (proofSandboxStatus().mode === "bwrap") assert.equal(childEnv.PWD, process.cwd());
+    else assert.equal(childEnv.PWD, undefined);
+  } finally {
+    if (parentPwd === undefined) delete process.env.PWD;
+    else process.env.PWD = parentPwd;
   }
 });
 
