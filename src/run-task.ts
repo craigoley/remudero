@@ -1857,7 +1857,7 @@ import {
   type GithubPostureGateway,
 } from "./lib/github-posture.js";
 import { validateWorkerSettingsFile } from "./lib/settings.js";
-import { readCatalogStatusContext, type CatalogStatusContext, buildBatchedGithub, defaultCreditStorePath, loadCreditStore, saveCreditStore, buildCommitTrailerIndex, classifyGhFailure, createDispatchBreakerCache, deriveStatus, dispatchesWithoutNewOwnedPr, evaluateDispatchBreakerCorroboratedDetailed, type LedgerSnapshot, readLedgerSnapshot, type DispatchBreakerDetail, ghGateway, ghRequiredStatusCheckContexts, isGhRateLimitError, effectiveLifetimeDispatches, hasRepeatedTaskAttributableLifetimeDispatches, orphanedRunIds, streakRefusal, taskAttributableLifetimeDispatches, type LifetimeDispatchTally, projectPlan, readLedgerLines, type DeriveDeps, type GitHub, type GhFailureReason, preferImplementingPr, type PrRef, type BatchedPr, type OpenSiblingBuild, type StatusProjection, planBranchReap, type BranchFacts, type BranchReapPlan, BRANCH_REAP_REASON_LABEL, readLedgerUnionBounded, taskIdFromRunBranch, taskIdFromSlugBranch, readMergeCreditedTaskIds, isMergeCreditLine, readRequiredStatusCheckContexts, readRequiredStatusCheckContextsAsync, persistVerifiedCredit, type ThrownRunVerdictStage, type RefusedRunVerdictStage } from "./lib/status.js";
+import { readCatalogStatusContext, type CatalogStatusContext, buildBatchedGithub, defaultCreditStorePath, loadCreditStore, saveCreditStore, buildCommitTrailerIndex, classifyGhFailure, createDispatchBreakerCache, deriveStatus, dispatchesWithoutNewOwnedPr, evaluateDispatchBreakerCorroboratedDetailed, type LedgerSnapshot, readLedgerSnapshot, type DispatchBreakerDetail, ghGateway, ghRequiredStatusCheckContexts, isGhRateLimitError, effectiveLifetimeDispatches, hasRepeatedTaskAttributableLifetimeDispatches, orphanedRunIds, streakRefusal, taskAttributableLifetimeDispatches, type LifetimeDispatchTally, projectPlan, readLedgerLines, type DeriveDeps, type GitHub, type GhFailureReason, preferImplementingPr, type PrRef, type BatchedPr, type OpenSiblingBuild, type StatusProjection, planBranchReap, type BranchFacts, type BranchReapPlan, BRANCH_REAP_REASON_LABEL, readLedgerUnionBounded, taskIdFromRunBranch, taskIdFromSlugBranch, readMergeCreditedTaskIds, readMergeCreditedTaskIdsAsync, isMergeCreditLine, readRequiredStatusCheckContexts, readRequiredStatusCheckContextsAsync, persistVerifiedCredit, type ThrownRunVerdictStage, type RefusedRunVerdictStage } from "./lib/status.js";
 import { readyDraftPullRequest, readTaskContractAtHeadViaGit, withCodeqlAlertEvidence, CODE_SCANNING_FALSE_POSITIVE_STEP, DEFAULT_SWEEP_POLICY, decideRedBaseRefresh, isCiHarnessPath, prAddedLinesFromPullFiles, failingSourceFilesFromCiFailures, failingTestFilesFromCiFailures, projectMergedTaskCandidates, actionableGateFailuresFromReasons, armOutcomeArmed, dispatchFixSpent, checkCostGovernor, checkMemoryGovernor, installedSlackReclaim, reclaimBeforeHold, type SlackReclaim, checkQueueGovernor, productionFixPressure, deriveQueueGovernorTrailingFlow, isFleetOwnedRunBranch, checksStateFromRollup, checksPendingSinceFromRollup, CI_GATE_CHECK_NAME, supersededRedsNowPassing, dedupeRollupByLatestAttempt, deriveDayCostUsd, deriveDayUnpricedRows, deriveDisposition, diffCoverageReport, fixCeilingInForce, fixDispatchBudget, fixRoundTally, buildFixProgressInput, flakeClaimsForHead, isBlockedCi, listRetirableEscalationIssues, listRetirableEscalationIssuesAsync, createEscalationTriageHistoryReader, ESCALATION_TRIAGE_EVIDENCE_SLICE, indexEscalationTriageHistory, type EscalationTriageHistoryReader, type EscalationTriageSlice, logCostGovernorDeferral, logMemoryObservation, logQueueGovernorDeferral, renderClarificationQuestion, renderSweepSummary, type SweepSummary, REQUIRED_CHECK_FAIL, REQUIRED_CHECK_OK, runCreditBackfill, closedPrFromRef, closedPrLookup, runPrTerminalReconcile, type PrTerminalReconcileSummary, runEscalationReconcile, runStaleEscalationRejudge, buildStaleEscalationRejudgePrompt, type StaleEscalationRejudgeCandidate, runPostFixReverification, runSweep, runSweepLightPass, runLightPassReadyRefresh, runLightPassRefreshAdmission, lightPassHeadContractRefresh, runArmedRatchetRejudge, withFullSweepRepairAdmission, redQualityGateNames, stillRedRequiredNames, terminalStateReason, toQuestionEntry, usableInstrumentEntanglementPaths, type ActionableGateFailure, type ArmedStalledPr, type CiFailure, type ClarificationQuestion, type CostGovernorResult, type EscalationReconcileSummary, type FixClass, type FixDispatchEvidence, type FixOwnerResidue, type FixDispatchSnapshot, type FixSuperseded, type LiveStateResult, type MemoryGovernorResult, type MergeConflictEvidence, type OpenPrView, type PlanScopedFixRoundInput, type ReviewDispatchMode, type ReviewReuseInputs, type RollupCheckEntry, type PostFixReverificationSummary, type ProofDiscriminationEvidence, type QueueGovernorResult, type RedBaseRefreshFacts, type PostReviewStallVerdict, type RepairFilingCapture, type Disposition, type SweepDeps, type SweepPolicy, type UpdateBranchOutcome, type UncreditableHeadReason, ABSENT_REPUSH_CAP, DEFAULT_FIX_CLASSES, buildSweepEffects as buildSweepEffectsFromLib, checkJobId, RATIFIED_BASELINE_RATCHET_REPAIRS, currentPlanIneligibilityReason, defaultSweepGhRun, dispatchFixCatchOutcome, discriminateReviewReuse, discriminateReviewReuseAsync, escalationTaskIdFor, fixDispatchErrorClass, fixDispatchSignalDeath, fixHeadAcceptable, fixRungTaskFor, foreignHeadIsStuck, isDispatchedRunBranch, detectPostReviewStall, isCappedReviewOrphanEscalation, proofDiscriminationEvidenceFromCriteria, type ArmAttemptOutcome, type ArmOutcomeName, type BuildSweepEffectsDeps, type MetadataRepairResult, sweepArmTaskId, uncreditableHeadReason, planOnlyRunBranchReceipts, REGENERABLE_ARTIFACT_GENERATORS, ADDITIVE_REGISTRATION_SURFACES, isAdditiveRegistrationChange, type RegistrationChange, repairLadderCommand, trackRepairLadder, riskJudgeHandedOffHead, handedOffHeadJudgmentPool, type HandedOffHeadJudgmentPool, awaitHandedOffHeadJudgments, riskJudgeCodeScanning, hasCapturedMergeConflictEvidence, clearedConflictEscalationCause, type FixRoundBranchClaim, inFlightReviewCount } from "./lib/sweep.js";
 import { sampleDaemonMemory, workerHeapReadings } from "./lib/daemon-memory-telemetry.js";
 import { currentReviewSignal, headLacksOwnTaskRecord, OWN_TASK_RECORD_MISSING_CAUSE, reviewOnlyStandDownReason } from "./lib/sweep.js";
@@ -3029,9 +3029,12 @@ export function buildEscalationTriageRuntime(
   let pass: ReturnType<typeof newTriagePass> | undefined;
   let reportedBytes = 0, reportedRotations = 0;
   const evidenceHistory = io.evidenceHistory ?? createEscalationTriageHistoryReader({ slice: ESCALATION_TRIAGE_EVIDENCE_SLICE });
+  let tornHandled = false;
   const readRows = io.readRows ?? ((path) => {
     const read = evidenceHistory.current(dirname(path));
     if (!read.ok) throw new Error(`triage evidence history is unreadable (${read.unread.length} unread: ${read.unread.slice(0, 3).join(", ")})`);
+    // W1-T13324: a torn row that names the step could hide an operator action; unkept torn lines are unjudged.
+    tornHandled = read.tornLines ? read.tornLines.some((line) => line.includes("panel.escalation_marked_handled")) : read.torn > 0;
     return read.rows;
   });
   const clock = io.clock ?? systemClock;
@@ -3085,6 +3088,7 @@ export function buildEscalationTriageRuntime(
             reportedBytes = cost.bytesRead; reportedRotations = cost.rotationsRead;
           }
         }
+        if (tornHandled && e.class !== "MANUAL" && e.class !== "HARD_STOP") throw new Error("escalation precision history is unreadable");
         const strike = [...history].reverse().find((row) => row.step === "fix.dispatch" && row.task_id === e.taskId &&
           row.head_sha === e.headSha && row.kind !== "proof_amendment");
         const previousCause = strike?.mode === "ci-log" ? "ci" : strike?.mode === "merge-conflict" ? "conflict" :
@@ -14489,6 +14493,8 @@ function configuredLedgerPathOrUndefined(): string | undefined {
  * read, rather than falling back to a live-file-only match count — the automated form of the
  * positive control nobody writes by hand for this idiom.
  */
+type MergeCreditRead = ReturnType<typeof readMergeCreditedTaskIds>;
+
 export type ReapBranchesOpts = {
   exec?: BranchReapExec;
   /** Checkout whose `origin`, plan and source guard scan are being reaped. */
@@ -14504,7 +14510,8 @@ export type ReapBranchesOpts = {
   /** W1-T6590: the plan this tick already parsed for `root`; when it answers, `loadPlan` is never called. */
   plan?: () => Plan | undefined;
   loadPlan?: (path: string) => Plan;
-  readMergeCreditedTaskIds?: typeof readMergeCreditedTaskIds;
+  /** W1-T13325: may answer with a promise, which only an async driver awaits; the sync command keeps the sync default. */
+  readMergeCreditedTaskIds?: (path: string, opts: { candidates: string[] }) => MergeCreditRead | Promise<MergeCreditRead>;
   /** Overrides the merge-credit and handoff-receipt source. `ledgerPath` remains the optional report sink. */
   creditLedgerPath?: string;
   /** W1-T4476 design (iii): (branch name -> tip sha) already PROVEN merged by an earlier pass.
@@ -14621,7 +14628,8 @@ function* reapBranchesSteps(rest: string[], opts: ReapBranchesOpts): Steps<numbe
       }
       if (creditPath !== undefined) {
         try {
-          const creditRead = (opts.readMergeCreditedTaskIds ?? readMergeCreditedTaskIds)(creditPath, { candidates });
+          const readCredit = opts.readMergeCreditedTaskIds ?? readMergeCreditedTaskIds, readFrom = creditPath;
+          const creditRead = yield* step(() => readCredit(readFrom, { candidates }));
           creditedTaskIds = creditRead.credited;
           creditReadSucceeded = true;
         } catch (err) {
@@ -34100,6 +34108,8 @@ function* automaticBranchReapSteps(
       quiet: true,
       runId,
       creditLedgerPath: ledgerPath,
+      // W1-T13325: the scan that keeps durable digests and loads rotations off the loop.
+      readMergeCreditedTaskIds: readMergeCreditedTaskIdsAsync,
       ...(opts.clock ? { clock: opts.clock } : {}),
       ...(opts.armStaleBranchArchive !== undefined ? { armStaleBranchArchive: opts.armStaleBranchArchive } : {}),
       // W1-T4476 design (iii)/(iv): the cache this state carries in from the LAST pass, and the
