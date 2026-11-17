@@ -1,0 +1,70 @@
+- id: W1-T13321
+  title: "A stalled checkout fetch in the ci and coverage shards aborts after two minutes without data and is retried, instead of using up to 21 minutes of the shard's ceiling"
+  repo: remudero
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # it changes how the two shard lanes fetch the repository
+  band_meaning: span
+  origin: "W1-T13271 recon, operator-session#coverage-shard-timeouts-2026-11-17"
+  plan_refs:
+    - W1-T13271
+    - W1-T13269
+    - W1-T13270
+  files:
+    - .github/workflows/ci.yml
+    - test/ci/a-stalled-checkout-fetch-aborts-and-retries.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The actions/checkout step of the ci job and of the coverage-ratchet job sets GIT_HTTP_LOW_SPEED_LIMIT 1000 and GIT_HTTP_LOW_SPEED_TIME 120 in its step env, and keeps its with: inputs"
+      proof: "grep: W1-T13321 criterion 1 in test/ci/a-stalled-checkout-fetch-aborts-and-retries.test.ts"
+    - claim: "invariant:fetch-unchanged — both checkout steps keep fetch-depth 0 and the same pinned actions/checkout sha, so every history reader still sees the full history"
+      proof: "grep: W1-T13321 criterion 2 in test/ci/a-stalled-checkout-fetch-aborts-and-retries.test.ts"
+    - claim: "The low-speed variables reach git and abort a fetch whose server sends nothing: a real git fetch from a local HTTP server that stalls mid-response exits non-zero within the bound"
+      proof: "grep: W1-T13321 criterion 3 in test/ci/a-stalled-checkout-fetch-aborts-and-retries.test.ts"
+  rationale: |
+    W1-T13271 RECON, MEASURED 2026-11-17 from the Actions jobs API over every ci.yml run created 2026-11-10 to
+    2026-11-17 02:42Z (2941 runs, all attempts): 37,468 ci-shard and coverage-shard checkout steps. p50 20 s, p90
+    24 s, p99 27-28 s. 13 took 5 minutes or more (8 coverage-shard, 5 ci-shard), at 323 to 1245 s, clustered on
+    2026-11-12 21:48-23:47Z and 2026-11-16 17:30-23:52Z. 6 of the 13 jobs ended cancelled, mostly at the 49-minute
+    coverage ceiling (#18947, #18949).
+    OBSERVED in the full job logs (133645606441, 133655678507, 133537264007, 133703635042, 131516644654): each stall
+    is ONE `git -c protocol.version=2 fetch --no-tags --prune ... +refs/heads/*:refs/remotes/origin/* ...` that
+    prints nothing for 16 to 21 minutes, then completes ("From https://github.com/craigoley/remudero", about 920
+    refs) with no error and no retry. Sibling shards of the same run started the same fetch in the same second and
+    finished in 23 to 26 s, so the server and the ref set were not slow for everyone.
+    INFERRED: one HTTPS transfer stalled and later recovered. The step passes no --progress, so the log cannot show
+    whether bytes trickled or stopped; either way a 120-second window under 1000 bytes/s never happens in a healthy
+    fetch, which finishes in about 20 s.
+    READ in actions/checkout at the pinned sha 3d3c42e5aac5ba805825da76410c181273ba90b1 (v7.0.1):
+    src/git-command-manager.ts `fetch()` runs inside `retryHelper.execute` (3 attempts, 10-20 s apart) and
+    `execGit` passes `process.env` to git, so a step `env:` reaches git and an aborted fetch is retried.
+    EXPECTED EFFECT: a stall costs at most about 2 minutes plus one 20-second retry instead of up to 21 minutes,
+    which would have kept the 6 cancelled jobs inside their ceilings.
+  design: |
+    1. Add to the `actions/checkout` step of the `ci` job and of the `coverage-ratchet` job:
+       `env: { GIT_HTTP_LOW_SPEED_LIMIT: "1000", GIT_HTTP_LOW_SPEED_TIME: "120" }`. git aborts an HTTP transfer
+       whose rate stays under the limit (bytes/s) for the whole time (s); checkout's retry helper then retries.
+       The values are far from a healthy fetch: about 20 s end to end, so even upload-pack's keepalive-only phase
+       cannot fill 120 s.
+    2. Leave fetch-depth 0 and the refspecs alone (a shallower fetch breaks the history readers this repository
+       has, and sibling jobs prove the full fetch is fast).
+    3. New suite test/ci/a-stalled-checkout-fetch-aborts-and-retries.test.ts parses ci.yml with the `yaml`
+       package: criterion 1 (both steps set the two variables to those values), criterion 2 (fetch-depth 0 and the
+       pinned sha unchanged), criterion 3 (start a local HTTP server that answers git's first request and then
+       holds the connection open without data; run a real `git fetch` against it with GIT_HTTP_LOW_SPEED_LIMIT=1000
+       and GIT_HTTP_LOW_SPEED_TIME=2; it exits non-zero within 20 s; without the variables it is still running at
+       5 s). Root through `#test/helpers/repo-root.js`. Set a git identity in the fixture.
+    INVARIANT fetch-unchanged: both checkout steps keep fetch-depth 0, their refspecs and the pinned actions/checkout
+    sha, so every history reader sees the same full history; a healthy fetch's output and exit are unchanged.
+  falsifier: |
+    Drop either variable from either step and criterion 1 fails. Remove the variables from criterion 3's git call
+    and it does not exit within the bound. VALIDATION AFTER MERGE: over the next seven days, no ci-shard or
+    coverage-shard checkout step runs 5 minutes or more; a stall shows as a checkout step of about 2.5 minutes with
+    a retry line in its log.
+  note: |
+    An operator session hand-builds this task: the daemon holds any task that names a workflow path (W1-T5351). A
+    workflow diff rides alone (W1-T297). It touches only checkout steps, apart from W1-T13270's matrix lines.
