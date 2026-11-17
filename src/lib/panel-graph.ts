@@ -2819,6 +2819,28 @@ function qualifyMaintainedInbox(deps: PanelGraphDeps): ReturnType<NonNullable<Ro
   return { key: read.snapshotKey };
 }
 
+/** W1-T13292: the `shape` value that asks an Inbox list read for each row's list fields only. */
+export const INBOX_LIST_SHAPE = "list";
+
+/** W1-T13292: the fields the Console's mailbox row renders, copied from a full Inbox row when present. */
+const INBOX_LIST_ROW_FIELDS = ["proposalId", "from", "summary", "receivedAt", "lastActivityAt", "groupKey", "lane", "state", "classification",
+  "snapshotAttention", "archivedAt", "snoozedUntil", "awaitingCoreRefresh"] as const;
+
+/** W1-T13292: one Inbox row with its list fields only: no reasons, plain, draftedTasks or resolution text. The plain
+ *  text's options become `optionCount`, and the recommendation keeps its `action` and `group`. */
+export function inboxListRow<T extends object>(item: T): Record<string, unknown> {
+  const row = item as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const field of INBOX_LIST_ROW_FIELDS) if (row[field] !== undefined) out[field] = row[field];
+  const options = (row.plain as { options?: unknown } | undefined)?.options;
+  if (Array.isArray(options)) out.optionCount = options.length;
+  const recommendation = row.recommendation as { action?: unknown; group?: unknown } | undefined;
+  if (recommendation && typeof recommendation === "object") {
+    out.recommendation = { ...(recommendation.action === undefined ? {} : { action: recommendation.action }), ...(recommendation.group === undefined ? {} : { group: recommendation.group }) };
+  }
+  return out;
+}
+
 export function buildInboxRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): Route {
   const qualify: NonNullable<Route["cacheQualification"]> = (req) => {
     const source = qualifyMaintainedInbox(deps);
@@ -2851,7 +2873,14 @@ export function buildInboxRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => P
       if (deps.inboxFromSlowLane && !read.snapshotKey) {
         sendJson(res, 503, { error: "inbox_snapshot_pending", detail: "The maintained classification has no shared snapshot identity yet." }); return;
       }
-      const { ready, drafting, notReady, declined, needsYou, fleet, archived, snoozed, kept, counts } = read.lanes();
+      const full = read.lanes();
+      // W1-T13292: shape=list keeps each row's list fields only; any other shape (or none) is the full body, as before.
+      const listShape = new URL(req.url ?? "/", "http://localhost").searchParams.get("shape") === INBOX_LIST_SHAPE;
+      const rows = <T extends object>(items: T[]): T[] => (listShape ? items.map((item) => inboxListRow(item) as T) : items);
+      const { counts } = full;
+      const ready = rows(full.ready), drafting = rows(full.drafting), notReady = rows(full.notReady), declined = rows(full.declined);
+      const fleet = rows(full.fleet), archived = rows(full.archived), snoozed = rows(full.snoozed), kept = rows(full.kept);
+      const needsYou = listShape ? { ready: rows(full.needsYou.ready), drafting: rows(full.needsYou.drafting), notReady: rows(full.needsYou.notReady), declined: rows(full.needsYou.declined) } : full.needsYou;
       const lanes = { ready, drafting, notReady, declined, fleet, archived, snoozed, kept };
       const at = { ...(read.snapshotKey ? { snapshotKey: read.snapshotKey } : {}), ...(deps.inboxFromSlowLane && read.classifiedAt !== undefined ? { classifiedAt: read.classifiedAt } : {}), ...withPlanSource(deps, {}) };
       if (shape.section === undefined) sendJson(res, 200, { ready, drafting, notReady, declined, needsYou, fleet, archived, snoozed, kept, counts, ...at });
