@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Author-time feedback, not a substitute for the required hosted full-suite/coverage verdict.
 import { spawnSync } from 'node:child_process';
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { affectedSelectionOrFull, buildAffectedSuitesGraph, changedSymbols, fullRunTrigger, isPlanOnlyDiff,
@@ -662,6 +662,27 @@ export function headFilesMs(durations, files, stageMs) {
 const ATTRIBUTION_LABELS = Object.freeze({ 'also-red': 'also red at the base on this host', 'only-head': 'red only at the head' });
 const ATTRIBUTION_PRINT_MAX = 200;
 
+function linkAttributionDependencies(dir, tmpRoot, nodeModules, mergeBase, probe) {
+  const destination = join(dir, 'node_modules');
+  try {
+    symlinkSync(nodeModules, destination, 'dir');
+    return;
+  } catch (error) {
+    if (error?.code !== 'EEXIST') throw error;
+  }
+  const tracked = probe(['ls-tree', '--name-only', mergeBase, '--', 'node_modules']);
+  if (tracked?.status !== 0 || typeof tracked.stdout !== 'string' || tracked.stdout.trim() !== '') {
+    throw new Error('the base dependency destination is tracked or could not be checked');
+  }
+  const entry = lstatSync(destination);
+  if (entry.isSymbolicLink() && realpathSync(destination) === realpathSync(nodeModules)) return;
+  if (!entry.isDirectory()) throw new Error('the base dependency destination is not the author donor or a checkout directory');
+  // A post-checkout hook can prime this new worktree. Keep those dependencies in the
+  // same private scratch root until its ordinary cleanup, and run with the head donor.
+  renameSync(destination, join(tmpRoot, 'checkout-node-modules'));
+  symlinkSync(nodeModules, destination, 'dir');
+}
+
 /**
  * W1-T13215 — say which of the head's failing tests the change caused, by running only their files again at the merge
  * base in a scratch worktree that is removed whatever happens. INVARIANT a-failure-the-change-caused-is-never-pre-existing:
@@ -710,7 +731,7 @@ export function attributeFailures({ root, baseSha, headSha, failing, unnamed = 0
     added = add?.status === 0;
     if (!added) mark(open(), 'unattributed', `the scratch worktree could not be created: ${String(add?.stderr ?? 'git did not run').trim().slice(0, 200)}`);
     else {
-      symlinkSync(nodeModules, join(dir, 'node_modules'), 'dir');
+      linkAttributionDependencies(dir, tmpRoot, nodeModules, mb, probe);
       const command = lowPriorityCommand(process.execPath, runnerArgs(files, dir));
       const result = runBase({ file: command.file, args: command.args, cwd: dir, boundMs }) ?? {};
       const summary = testSummary(`${result.stdout ?? ''}\n${result.stderr ?? ''}`);
