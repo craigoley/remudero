@@ -16,7 +16,7 @@
   files:
     - .github/workflows/ci.yml
     - test/ci/a-stalled-checkout-fetch-aborts-and-retries.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The actions/checkout step of the ci job and of the coverage-ratchet job sets GIT_HTTP_LOW_SPEED_LIMIT 1000 and GIT_HTTP_LOW_SPEED_TIME 120 in its step env, and keeps its with: inputs"
