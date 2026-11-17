@@ -1,7 +1,7 @@
 /** Durable reversible lifecycle, shared by the producer, CLI eligibility and owned restore action. */
 import { createHash } from "node:crypto";
 import fs from "node:fs";
-import { hostname } from "node:os";
+import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
@@ -11,8 +11,27 @@ import { readAllThreads, inboxThreadId } from "./inbox-thread.js";
 
 export const INBOX_RETIREMENT_RESTORE_ACTION = "retirement-restore";
 export type InboxGardenerMode = "off" | "shadow" | "act";
-export function inboxGardenerMode(env: NodeJS.ProcessEnv = process.env): InboxGardenerMode {
-  return env.RMD_INBOX_GARDENER_MODE === "act" || env.RMD_INBOX_GARDENER_MODE === "shadow" ? env.RMD_INBOX_GARDENER_MODE : "off";
+const isGardenerMode = (value: unknown): value is InboxGardenerMode => value === "off" || value === "shadow" || value === "act";
+/** The durable `inboxGardenerMode` key of config.json (W1-T13258), read WITHOUT `loadConfig`: that
+ *  creates a missing file, and resolving a mode must never write. Absent, unreadable, unparsable or
+ *  invalid all read as no setting. */
+export function readConfiguredInboxGardenerMode(path: string = join(homedir(), ".config", "remudero", "config.json")): InboxGardenerMode | undefined {
+  try {
+    const parsed: unknown = JSON.parse(fs.readFileSync(path, "utf8"));
+    const mode = parsed !== null && typeof parsed === "object" ? (parsed as { inboxGardenerMode?: unknown }).inboxGardenerMode : undefined;
+    return isGardenerMode(mode) ? mode : undefined;
+  } catch {
+    // A missing or malformed file is "no durable setting": the gardener stays off, the fail-closed default.
+    return undefined;
+  }
+}
+/** A valid shadow/act env value wins; otherwise the config.json setting; otherwise off. */
+export function inboxGardenerMode(
+  env: NodeJS.ProcessEnv = process.env,
+  readConfigured: () => InboxGardenerMode | undefined = readConfiguredInboxGardenerMode,
+): InboxGardenerMode {
+  if (env.RMD_INBOX_GARDENER_MODE === "act" || env.RMD_INBOX_GARDENER_MODE === "shadow") return env.RMD_INBOX_GARDENER_MODE;
+  return readConfigured() ?? "off";
 }
 function canonical(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonical);

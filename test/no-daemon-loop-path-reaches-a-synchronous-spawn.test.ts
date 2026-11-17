@@ -20,7 +20,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { factoryNames, loopReachable, MODULE_LOAD, splitObjectLiteral, topLevelFunctions, type Fn } from "./helpers/daemon-loop-walk.js";
+import { codeOnly, factoryNames, loopCensusFunctions, loopReachable, MODULE_LOAD, splitObjectLiteral, topLevelFunctions, type Fn } from "./helpers/daemon-loop-walk.js";
 
 /** Loop-reachable functions that still call a synchronous spawn primitive or hand one over as a value,
  *  with the count recorded at build time (2026-10-10, f49ee17d3; re-recorded the same day on e91d490f1
@@ -370,14 +370,6 @@ const SYNC_LEDGER_SCAN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   withheldReviewsSince: 1,
 };
 
-let censusWalk: Fn[] | undefined;
-/** W1-T9660: the ONE walk every census test reads — object-literal consts walked, strings and comments blanked
- *  ({@link codeOnly}) — so the daemon-wide census and W1-T9615's SRE-lane test cannot disagree about reach. */
-function censusFunctions(): Fn[] {
-  censusWalk ??= topLevelFunctions({ objectLiterals: true }).map((f) => ({ ...f, body: codeOnly(f.body) }));
-  return censusWalk.slice();
-}
-
 /** A synchronous spawn or block: the node primitives, the sync gh wrappers (`ghJsonAsync`/`ghExecAsync`
  *  do not match — the `(` must follow the name), the blocking sleep, and `Atomics.wait`. */
 const SYNC_SPAWN_CALL =
@@ -478,7 +470,7 @@ function mergePlanReadRefusals(fns: Fn[]): string[] {
 }
 
 test("census: the seed and the population are real, so the walk cannot pass vacuously", () => {
-  const fns = censusFunctions();
+  const fns = loopCensusFunctions();
   assert.ok(fns.some((f) => f.name === "daemonCommand"), "the walk must find daemonCommand to seed from");
   const pop = population(fns);
   const reach = loopReachable(fns, "daemonCommand");
@@ -492,7 +484,7 @@ test("census: the seed and the population are real, so the walk cannot pass vacu
 });
 
 test("unit test: test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts — the census names a loop-reachable function that gains a synchronous spawn", () => {
-  const fns = censusFunctions();
+  const fns = loopCensusFunctions();
   assert.deepEqual(refusals(fns, SYNC_SPAWN_LOOP_BASELINE), [], "a new daemon-loop path reaches a synchronous spawn");
 
   // Falsifier, driven on the real source: a loop-reached function with NO row gains execFileSync.
@@ -525,7 +517,7 @@ test("unit test: test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts �
 });
 
 test("unit test: test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts — a count below its row fails and names the row to lower", () => {
-  const fns = censusFunctions();
+  const fns = loopCensusFunctions();
   // Exact on the real source: no row holds slack today.
   assert.deepEqual(refusals(fns, SYNC_SPAWN_LOOP_BASELINE), [], "every row equals its loop-reachable count");
 
@@ -571,7 +563,7 @@ test("unit test: test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts �
   }
 
   // The two loop stalls of 2026-10-10 that spawned through a seam default are counted and reached, never zero.
-  const fns = censusFunctions();
+  const fns = loopCensusFunctions();
   const pop = population(fns);
   const reach = loopReachable(fns, "daemonCommand");
   assert.ok((pop.get("mergeDirectViaRest") ?? 0) > 0 && reach.has("mergeDirectViaRest"), "mergeDirectViaRest hands a sync primitive to its own call and is reached");
@@ -595,87 +587,26 @@ test("unit test: test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts �
 });
 
 test("an emptied population scan fails the positive control", () => {
-  const fns = censusFunctions();
+  const fns = loopCensusFunctions();
   const blind = fns.map((f) => ({ ...f, body: f.body.replace(SYNC_SPAWN_CALL, "noop(").replace(SYNC_SPAWN_VALUE, " noop") }));
   assert.ok(!population(blind).has("syncPlanFromOrigin"), "a scan that matches nothing finds no population");
   assert.ok(population(fns).has("syncPlanFromOrigin"), "the real scan finds the positive control");
 });
 
 test("the baseline records only positive counts for real functions", () => {
-  const names = new Set(censusFunctions().map((f) => f.name));
+  const names = new Set(loopCensusFunctions().map((f) => f.name));
   for (const [name, count] of Object.entries(SYNC_SPAWN_LOOP_BASELINE)) {
     assert.ok(Number.isInteger(count) && count > 0, `${name} must carry a positive count`);
     assert.ok(names.has(name), `${name} no longer exists — delete its baseline row`);
   }
 });
 
-/** W1-T9615: `body` with string and template-literal text and trailing `//` comments blanked (a template's `${}`
- *  expressions are kept). The name walk reads every identifier-shaped word, so "origin/main" in a git argument or a
- *  comment reaches the CLI's `main`, and through it every function in src. A seeded reach only separates once they go. */
-function codeOnly(body: string): string {
-  let out = "";
-  const braces: number[] = [];
-  let inTemplate = false;
-  for (let i = 0; i < body.length; i++) {
-    const c = body[i]!;
-    if (inTemplate) {
-      if (c === "\\") i++;
-      else if (c === "`") { inTemplate = false; out += '""'; }
-      else if (c === "$" && body[i + 1] === "{") { inTemplate = false; braces.push(0); out += " "; i++; }
-      continue;
-    }
-    if (c === '"' || c === "'") {
-      let j = i + 1;
-      while (j < body.length && body[j] !== c && body[j] !== "\n") j += body[j] === "\\" ? 2 : 1;
-      out += '""';
-      i = j;
-    } else if (c === "`") inTemplate = true;
-    else if (c === "/" && body[i + 1] === "/") {
-      while (i + 1 < body.length && body[i + 1] !== "\n") i++;
-    } else if (c === "/" && body[i + 1] === "*") {
-      const close = body.indexOf("*/", i + 2);
-      i = close < 0 ? body.length : close + 1;
-      out += " ";
-    } else if (c === "/" && regexLiteralEnd(body, i, out) > i) {
-      i = regexLiteralEnd(body, i, out);
-      while (/[a-z]/.test(body[i + 1] ?? "")) i++;
-      out += '""';
-    } else if (braces.length > 0 && c === "}" && braces[braces.length - 1] === 0) {
-      braces.pop();
-      inTemplate = true;
-      out += " ";
-    } else {
-      if (braces.length > 0 && c === "{") braces[braces.length - 1]!++;
-      if (braces.length > 0 && c === "}") braces[braces.length - 1]!--;
-      out += c;
-    }
-  }
-  return out;
-}
-
-/** W1-T9660: where the regex literal opening at `body[i]` closes, or -1 for a division. Read as a string, the backtick in
- *  worker-provider's `/[;&|`$><]/` opened a template that blanked assertOpenWeightToolBoundary's real `execFileSync`. */
-function regexLiteralEnd(body: string, i: number, before: string): number {
-  let k = before.length;
-  while (k > 0 && /\s/.test(before[k - 1]!)) k--;
-  const prev = before.slice(Math.max(0, k - 8), k);
-  if (prev !== "" && !/[(,=:[!&|?{};+\-*%<>~^]$/.test(prev) && !/(?:^|[^\w$])(?:return|typeof|case|void|in|of|throw|yield|await)$/.test(prev)) return -1;
-  let inClass = false;
-  for (let j = i + 1; j < body.length && body[j] !== "\n"; j++) {
-    if (body[j] === "\\") j++;
-    else if (body[j] === "[") inClass = true;
-    else if (body[j] === "]") inClass = false;
-    else if (body[j] === "/" && !inClass) return j;
-  }
-  return -1;
-}
-
 /** The sync landing chain W1-T9615 measured: captureFeedback -> landFeedback -> syncPreflightOf -> planPrPreflightAtCommit,
  *  whose in-tree checks spawnSync in runInTree (lint-plan-precheck, task-id-existence-check, the shard census). */
 const SYNC_PREFLIGHT_CHAIN = ["landFeedback", "syncPreflightOf", "planPrPreflightAtCommit", "runInTree"] as const;
 
 test("W1-T9615: the SRE lane's daemon input reaches no synchronous plan-PR preflight", () => {
-  const fns = censusFunctions();
+  const fns = loopCensusFunctions();
   // Positive controls: this walk sees the whole chain from the inline capture, and the census's own walk cannot see runInTree.
   const fromCapture = loopReachable(fns, "captureFeedback");
   assert.deepEqual(SYNC_PREFLIGHT_CHAIN.filter((name) => !fromCapture.has(name)), [], "captureFeedback reaches the sync preflight chain");
@@ -735,7 +666,7 @@ function triageLandingRefusals(fns: Fn[]): string[] {
 }
 
 test("W1-T12790 criterion 4: the triage status landing reaches no synchronous plan-PR preflight, and no census row rises", () => {
-  const fns = censusFunctions();
+  const fns = loopCensusFunctions();
   const daemon = loopReachable(fns, "daemonCommand");
   for (const seed of TRIAGE_LANDING_SEEDS) assert.ok(daemon.has(seed), `positive control: the daemon loop reaches ${seed}`);
   assert.deepEqual(triageLandingRefusals(fns), [], "a triage status landing runs the synchronous plan-PR preflight on the loop");
@@ -758,7 +689,7 @@ test("W1-T12790 criterion 4: the triage status landing reaches no synchronous pl
 const STAGED_CAPTURE_SEEDS = ["pollIssues", "pollAlerts", "productionIssueRevalidationPorts", "feedbackEvidenceCoverageFiler"] as const;
 
 test("W1-T9696: the staged daemon-loop captures reach no inline captureFeedback", () => {
-  const fns = censusFunctions();
+  const fns = loopCensusFunctions();
   // Positive control: the CLI verbs inject the inline capture, and this walk sees it.
   assert.ok(loopReachable(fns, "issuesCommand").has("captureFeedback") && loopReachable(fns, "opsCommand").has("captureFeedback"));
   for (const seed of STAGED_CAPTURE_SEEDS) {
@@ -772,7 +703,7 @@ test("W1-T9696: the staged daemon-loop captures reach no inline captureFeedback"
 const OBJECT_LITERAL_SPAWNERS = ["runInTree"] as const;
 
 test("W1-T9660: the daemon-wide census reaches a sync spawner named only inside an object-literal const", () => {
-  const fns = censusFunctions();
+  const fns = loopCensusFunctions();
   const reach = loopReachable(fns, "daemonCommand");
   const pop = population(fns);
   assert.ok(reach.has("defaultPreflightChecks"), "the census walk reads plan-pr-emitter's defaultPreflightChecks object literal");
@@ -794,7 +725,7 @@ test("W1-T9660: the daemon-wide census reaches a sync spawner named only inside 
 const TEXT_ONLY_ROWS = ["imessageChannel", "listRuleSuites", "readPushedRunBranchesOutput", "readRunBranchClosedPrsOutput"] as const;
 
 test("W1-T9660: the daemon-wide census ignores an identifier that appears only in a string or a comment", () => {
-  const fns = censusFunctions();
+  const fns = loopCensusFunctions();
   const reach = loopReachable(fns, "daemonCommand");
   // Positive control: the same walk with text kept reaches drainCommand from daemonCommand; the census walk does not.
   assert.ok(loopReachable(topLevelFunctions({ objectLiterals: true }), "daemonCommand").has("drainCommand"), "text-keeping walk reaches drainCommand");
@@ -814,7 +745,7 @@ test("W1-T9660: the daemon-wide census ignores an identifier that appears only i
 const MODULE_LOAD_CAPTURES = ["captureImportedModule", "executingHarnessRevision"] as const;
 
 test("W1-T9701: the census attributes a const initializer call to module load, not the loop", () => {
-  const fns = censusFunctions();
+  const fns = loopCensusFunctions();
   const reach = loopReachable(fns, "daemonCommand");
   const pop = population(fns);
   const atLoad = loopReachable(fns, MODULE_LOAD);
@@ -833,7 +764,7 @@ test("W1-T9701: the census attributes a const initializer call to module load, n
 });
 
 test("W1-T9701: an object literal member function is still loop reach", () => {
-  const fns = censusFunctions();
+  const fns = loopCensusFunctions();
   // Arrow members: plan-pr-emitter's defaultPreflightChecks still reaches the in-tree spawn its arrows call.
   assert.ok(loopReachable(fns, "defaultPreflightChecks").has("runInTree"), "an arrow member's callee is reached");
   // Handed-over values: REAL_ALERT_FIX_DISPATCH_DEPS still reaches the seams it hands the dispatch.
@@ -867,7 +798,7 @@ test("W1-T9701: an object literal member function is still loop reach", () => {
 });
 
 test("W1-T9737: a factory member of a const initializer stays loop reach", () => {
-  const fns = censusFunctions();
+  const fns = loopCensusFunctions();
   const factories = factoryNames(fns);
   // The real seam: a factory whose declared return type is `typeof spawnWorker`, handed to the alert-fix dispatch.
   assert.ok(factories.has("ledgeredNonDispatchSpawn"), "a `typeof <function>` return type makes a factory");
@@ -920,7 +851,7 @@ test("W1-T9737: a data-returning initializer call stays module load", () => {
 });
 
 test("W1-T12791 criterion 4: repairPrMetadata's merge-plan read awaits the async git leaf and no row rises", () => {
-  const fns = censusFunctions();
+  const fns = loopCensusFunctions();
   const reach = loopReachable(fns, "daemonCommand");
   assert.ok(reach.has("repairPrMetadata"), "the daemon loop reaches repairPrMetadata");
   for (const name of MERGE_PLAN_READERS) assert.ok(reach.has(name), `the daemon loop reaches ${name} through repairPrMetadata`);
@@ -939,7 +870,7 @@ test("W1-T12791 criterion 4: repairPrMetadata's merge-plan read awaits the async
 });
 
 test("W1-T12753 criterion 5: the census counts synchronous ledger scans and names a loop function that gains one", () => {
-  const fns = censusFunctions();
+  const fns = loopCensusFunctions();
   assert.deepEqual(refusals(fns, SYNC_LEDGER_SCAN_LOOP_BASELINE, LEDGER_SCAN_CENSUS), [], "a new daemon-loop path scans the ledger synchronously");
   const reach = loopReachable(fns, "daemonCommand");
   const pop = population(fns, syncScanCalls);
@@ -977,7 +908,7 @@ test("W1-T12753 criterion 5: the census counts synchronous ledger scans and name
 });
 
 test("W1-T12753 criterion 4: the daemon's verify-human cadence reads its ledger rows through the async readers", () => {
-  const fns = censusFunctions();
+  const fns = loopCensusFunctions();
   const reach = loopReachable(fns, "daemonCommand");
   assert.ok(reach.has("defaultVerifyHumanCadenceResult"), "the loop reaches the verify-human cadence");
   assert.ok(!Object.hasOwn(SYNC_LEDGER_SCAN_LOOP_BASELINE, "defaultVerifyHumanCadenceResult"), "the cadence holds no sync-ledger-scan row");
@@ -995,7 +926,7 @@ test("W1-T12753 criterion 4: the daemon's verify-human cadence reads its ledger 
 });
 
 test("W1-T12954 criterion 6: the sweep's repair-history read lowers its sync-ledger-scan row and no row rises", () => {
-  const fns = censusFunctions();
+  const fns = loopCensusFunctions();
   const reach = loopReachable(fns, "daemonCommand");
   const pop = population(fns, syncScanCalls);
   assert.ok(reach.has("runSweep") && reach.has("readSweepRepairHistory"), "the loop reaches the sweep and its repair-history reader");

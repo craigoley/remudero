@@ -1,0 +1,46 @@
+- id: W1-T13271
+  title: "Find why two coverage shards spent about twenty minutes in actions/checkout on 2026-11-16, and recommend a bounded fix or none"
+  repo: remudero
+  priority: 2
+  type: recon
+  verify: human
+  risk: low # a report; it changes no file
+  band_meaning: span
+  origin: "operator-session#coverage-shard-timeouts-2026-11-16"
+  plan_refs:
+    - W1-T13269
+    - W1-T13270
+  files:
+    - .github/workflows/ci.yml
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The report gives, over at least seven days of coverage-shard jobs, the count of checkout steps that ran 5 minutes or more against the total, with their run ids and start times"
+      proof: "demonstration: the operator reads the report and sees the count, the total and one row per slow checkout"
+    - claim: "The report quotes the checkout log of at least one slow job and names what git was doing while it stalled"
+      proof: "demonstration: the operator reads the quoted log lines and the stated cause, labelled OBSERVED or INFERRED"
+    - claim: "The report recommends one bounded fix with its expected effect, or recommends none with the reason"
+      proof: "demonstration: the operator reads the recommendation and the measurement it rests on"
+  rationale: |
+    MEASURED 2026-11-16 from the Actions jobs API, 88 coverage-shard jobs in 11 runs: 86 checkouts took 14-28 s. Two
+    took 1245 s (#18947, run 43965996579, coverage-shard (4/8), 22:02:13Z-22:22:58Z) and 1236 s (#18949, run
+    43968903627, coverage-shard (3/8), job started 22:19:32Z). Both started within 17 minutes of each other, and both jobs then
+    hit the 49-minute ceiling. The checkout uses `fetch-depth: 0`, a full clone.
+    NOT YET OBSERVED: what git did during the stall. The cloud session that found this could read only the last 5000
+    log lines of a job, which do not reach the checkout step.
+    READ in actions/checkout at the pinned sha 3d3c42e5aac5ba805825da76410c181273ba90b1 (v7.0.1):
+    src/git-command-manager.ts `fetch()` runs inside `retryHelper.execute` (src/retry-helper.ts: 3 attempts, 10-20 s
+    apart), and `execGit` passes `process.env` to git. So a step `env:` such as GIT_HTTP_LOW_SPEED_LIMIT and
+    GIT_HTTP_LOW_SPEED_TIME would reach git, and a fetch that git aborts would be retried. That is one candidate fix;
+    it is right only if the stall is a dead transfer and not slow server-side work.
+  design: |
+    1. Read the full log of both slow jobs (job ids 133678879380 attempt 1 and 133655678507) from a host that can
+       download job logs, and quote the checkout lines with timestamps.
+    2. Count slow checkouts (5 minutes or more) over the newest seven days of coverage-shard jobs, and in ci-shard
+       jobs for comparison, from the jobs API.
+    3. Recommend: the low-speed abort with a value that real progress output cannot trip, a shallower fetch (with the
+       history readers it would break, from `git grep` over test/ and scripts/), or no change if the stall is rare and
+       W1-T13269's phase line already routes it to a re-run.
+  note: |
+    A recon that changes nothing. W1-T13269 makes a recurrence visible in the coverage gate as a setup-phase line
+    naming the checkout step and its duration.
