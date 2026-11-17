@@ -88,11 +88,17 @@ function inputPattern(inputs: readonly string[]): RegExp {
   return new RegExp(`"step"\\s*:\\s*"(?:${alternatives.join("|")})"`);
 }
 
+/** W1-T13367: who asks the row seam: the name its unreadable-ledger error starts with, and the steps it reads. */
+export interface FleetFlowAsker {
+  reader: string;
+  inputs: readonly string[];
+}
+
 export interface FleetFlowInput {
   stateDir: string;
   detectors: readonly FleetFlowDetector[];
   nowMs: number;
-  readRows?: (sinceMs: number, nowMs: number) => readonly FleetFlowRow[] | Promise<readonly FleetFlowRow[]>;
+  readRows?: (sinceMs: number, nowMs: number, asker: FleetFlowAsker) => readonly FleetFlowRow[] | Promise<readonly FleetFlowRow[]>;
   writeEvent?: (row: LedgerLine) => void;
 }
 
@@ -101,8 +107,8 @@ const readers = new Map<string, { signature: string; since: number; now: number;
 
 async function recentRows(input: FleetFlowInput, longMs: number): Promise<readonly FleetFlowRow[]> {
   const since = input.nowMs - longMs;
-  if (input.readRows) return input.readRows(since, input.nowMs);
   const inputs = [...new Set(input.detectors.flatMap((d) => [...d.inputs]))];
+  if (input.readRows) return input.readRows(since, input.nowMs, { reader: "Fleet-flow", inputs });
   const pattern = inputPattern(inputs);
   const signature = JSON.stringify([inputs, longMs]);
   let reader = readers.get(input.stateDir);
