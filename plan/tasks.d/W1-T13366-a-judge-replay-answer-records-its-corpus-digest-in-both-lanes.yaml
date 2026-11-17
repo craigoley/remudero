@@ -1,0 +1,79 @@
+- id: W1-T13366
+  title: "A judge replay answer records its corpus digest in both lanes: each judge_replay.answered row carries the digest and the name of the corpus its replay sent, so a batch-lane replay and a direct replay that has not finished no longer read as `unrecorded` in the field-trials judge family"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: low # two fields on ledger rows that only the private judge family reads; no request, reservation, settlement or gate changes
+  origin: "operator-session#field-trials-new-models-2026-11-12"
+  plan_refs:
+    - W1-T12418
+    - W1-T12421
+    - W1-T12423
+  files:
+    - src/lib/judge-replay-batch.ts
+    - test/routing/a-judge-replay-answer-records-its-corpus-digest-in-both-lanes.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "invariant:an-answer-names-its-corpus — every judge_replay.answered row of a batch-lane replay and of a direct-lane replay carries corpus_digest equal to judgeReplayCorpusDigest of the cases that replay loaded, and replay_corpus equal to the corpus name the replay was asked for. All answered rows of one replay carry the same digest, a row for an errored or unanswered case included"
+      proof: "grep: W1-T13366 criterion 1 in test/routing/a-judge-replay-answer-records-its-corpus-digest-in-both-lanes.test.ts"
+    - claim: "The judge family gives a batch-lane replay's cell, and the cell of a direct replay that stopped before it wrote judge_replay.finished, the digest from the answered rows and not `unrecorded`. Two replays of two different corpus contents are in two cells"
+      proof: "grep: W1-T13366 criterion 2 in test/routing/a-judge-replay-answer-records-its-corpus-digest-in-both-lanes.test.ts"
+    - claim: "invariant:the-answered-row-wins — when an answered row names a digest and the finished row of the same run names another, the cell takes the answered row's digest. An answered row with no digest, written before this task, still takes its run's finished-row digest, and reads `unrecorded` when there is none"
+      kind: guard
+      proof: "grep: W1-T13366 criterion 3 in test/routing/a-judge-replay-answer-records-its-corpus-digest-in-both-lanes.test.ts"
+    - claim: "The judge_replay.batch row carries the same corpus_digest (null for an unknown corpus), and the batch lane's request body, reservation, settled dollars and result counts for a fixture corpus are the same as before the change"
+      proof: "grep: W1-T13366 criterion 4 in test/routing/a-judge-replay-answer-records-its-corpus-digest-in-both-lanes.test.ts"
+  rationale: |
+    WHY: the judge family keys a replay cell by the digest of the corpus the replay sent, so that answers to two
+    different corpus contents never share a cell. Only the direct lane's closing row names that digest. A
+    batch-lane replay writes no such row, and a direct replay that is still running or was killed has not
+    written it yet. Their answers all fall in one cell named `unrecorded`, whatever corpus they answered.
+    READ at origin/main cfbace2640. The gap is real:
+    - src/lib/judge-replay-batch.ts:581 `judgeReplayCorpusDigest` hashes each case's id, prompt and expected answer.
+    - :625 the direct lane puts corpus_digest on its judge_replay.finished row only.
+    - :749 the direct lane's judge_replay.answered row has lane, corpus (the case's own corpus), case_id, custom_id,
+      model, deployment, model_surface, role, question, expected, result, latency_ms, settled_usd and
+      typed_answers. It has no corpus_digest.
+    - :419-432 the batch lane's judge_replay.answered row has corpus, case_id, custom_id, model, batch_id, role,
+      question, expected, result, usage and typed_answers. It has no corpus_digest. :259-275 the
+      judge_replay.batch row has none either, and the batch lane never calls judgeReplayCorpusDigest.
+    - src/lib/field-trials-judges.ts:73 `projectJudgeTrialRow` already reads corpus_digest from any replay row, and
+      :118-119 `judgeTrialRows` already prefers the row's own digest, then the finished row of the same run id
+      (:110), then JUDGE_CORPUS_DIGEST_UNRECORDED (:33). So the family needs no new join: once the answered row
+      names its digest, the family reads it first. The comment at :32 says the batch lane writes no digest.
+    - With the corpus `all`, an answered row's `corpus` is the case's own corpus and the digest covers every case
+      sent. The row needs the requested corpus name beside the digest for the two to be read together.
+    NOT COVERED: swept plan/tasks.d and plan/tasks.yaml for corpus_digest and judge_replay, and the 11 open pull
+    requests on 2026-11-17. W1-T12421 and W1-T12423 are merged and built the present rows. No other filing.
+  design: |
+    INVARIANT an-answer-names-its-corpus: every judge_replay.answered row carries the digest and the name of the corpus its replay sent.
+    INVARIANT the-answered-row-wins: the judge family takes the digest from the answered row first, then from the run's finished row, then `unrecorded`.
+    1. In both lanes compute the digest once, after the corpus loads: judgeReplayCorpusDigest(loaded.cases), null
+       when the corpus is unknown. Add `corpus_digest` and `replay_corpus` (request.corpus) to every
+       judge_replay.answered write (:419 base and :749). Keep the row's `corpus` field as it is.
+    2. Add `corpus_digest` to JudgeReplayBatchRow and to the batch lane's first row object (:322). The direct
+       lane's finished row keeps its field.
+    3. src/lib/field-trials-judges.ts does not change: the order at :118-119 is already the one this task needs,
+       and criterion 3 pins it from the test.
+    4. No migration of old rows. They keep the run-id join.
+    5. TESTS run both lanes with the injected transports the W1-T12418 and W1-T12421 tests use, read the rows
+       the replay wrote, and pass them through judgeTrialRows and judgeTrialCells. Load test/setup/tmp-hygiene.ts.
+    WHY this design and not a finished row for the batch lane: a closing row is written last, so it leaves the
+    unfinished and the killed replay `unrecorded`, and the family must join it by run id. A field on the
+    answered row needs no join, holds from the first answer, and the family already reads it first.
+  falsifier: |
+    At origin/main the batch lane's answered rows have no corpus_digest and their cell reads `unrecorded`:
+    criteria 1 and 2 fail. Compute the digest per case in place of per replay: the rows of one replay differ and
+    criterion 1 fails. Swap the order at src/lib/field-trials-judges.ts:119 so the finished row wins: criterion 3
+    fails.
+  note: |
+    Id reserved for run-unfiled-1794918373000 with ~/rmd-work/bin/reserve-id.sh.
+    Proof that counts in production: after the next `rmd judge-replay` on the batch lane, the field-trials
+    snapshot has no replay cell with corpus digest `unrecorded` for that week.
+    Left for a later touch of src/lib/field-trials-judges.ts: the comment at :32 still says the batch lane writes
+    no digest. That file is outside this task's files.

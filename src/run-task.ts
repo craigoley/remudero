@@ -1342,6 +1342,8 @@ import {
 import { routingAbCommand } from "./lib/routing-experiments.js";
 import { attributeAttemptOutcome } from "./lib/attempt-outcome-attribution.js";
 import { recordRoutingExperimentResults } from "./lib/routing-experiment-result.js";
+import { cashInvoiceAccounts, costExportDigest, newestCostExportAsync, readCashInvoiceReceipts, readCashInvoiceReceiptsAsync, reconcileCashInvoice, recordCashInvoiceFailure,
+  recordCashInvoiceVerdicts, type CashInvoiceReconciliation, type CostExportSource } from "./lib/cash-invoice-reconcile.js";
 import { askDecisionModel, decisionsCommand } from "./lib/decision-model.js";
 import { judgeReplayCommand, parseJudgeReplayLane, replayJudgeCorpus } from "./lib/judge-replay-batch.js";
 import { reviewTriageCandidates, triagePullRequest } from "./lib/review-triage.js";
@@ -1858,7 +1860,7 @@ import {
   type GithubPostureGateway,
 } from "./lib/github-posture.js";
 import { validateWorkerSettingsFile } from "./lib/settings.js";
-import { readCatalogStatusContext, type CatalogStatusContext, buildBatchedGithub, defaultCreditStorePath, loadCreditStore, saveCreditStore, buildCommitTrailerIndex, classifyGhFailure, createDispatchBreakerCache, deriveStatus, dispatchesWithoutNewOwnedPr, evaluateDispatchBreakerCorroboratedDetailed, type LedgerSnapshot, readLedgerSnapshot, type DispatchBreakerDetail, ghGateway, ghRequiredStatusCheckContexts, isGhRateLimitError, effectiveLifetimeDispatches, hasRepeatedTaskAttributableLifetimeDispatches, orphanedRunIds, streakRefusal, taskAttributableLifetimeDispatches, type LifetimeDispatchTally, projectPlan, readLedgerLines, type DeriveDeps, type GitHub, type GhFailureReason, preferImplementingPr, type PrRef, type BatchedPr, type OpenSiblingBuild, type StatusProjection, planBranchReap, type BranchFacts, type BranchReapPlan, BRANCH_REAP_REASON_LABEL, readLedgerUnionBounded, taskIdFromRunBranch, taskIdFromSlugBranch, readMergeCreditedTaskIds, isMergeCreditLine, readRequiredStatusCheckContexts, readRequiredStatusCheckContextsAsync, persistVerifiedCredit, type ThrownRunVerdictStage, type RefusedRunVerdictStage } from "./lib/status.js";
+import { readCatalogStatusContext, type CatalogStatusContext, buildBatchedGithub, defaultCreditStorePath, loadCreditStore, saveCreditStore, buildCommitTrailerIndex, classifyGhFailure, createDispatchBreakerCache, deriveStatus, dispatchesWithoutNewOwnedPr, evaluateDispatchBreakerCorroboratedDetailed, type LedgerSnapshot, readLedgerSnapshot, type DispatchBreakerDetail, ghGateway, ghRequiredStatusCheckContexts, isGhRateLimitError, effectiveLifetimeDispatches, hasRepeatedTaskAttributableLifetimeDispatches, orphanedRunIds, streakRefusal, taskAttributableLifetimeDispatches, type LifetimeDispatchTally, projectPlan, readLedgerLines, type DeriveDeps, type GitHub, type GhFailureReason, preferImplementingPr, type PrRef, type BatchedPr, type OpenSiblingBuild, type StatusProjection, planBranchReap, type BranchFacts, type BranchReapPlan, BRANCH_REAP_REASON_LABEL, readLedgerUnionBounded, taskIdFromRunBranch, taskIdFromSlugBranch, readMergeCreditedTaskIds, readMergeCreditedTaskIdsAsync, isMergeCreditLine, readRequiredStatusCheckContexts, readRequiredStatusCheckContextsAsync, persistVerifiedCredit, type ThrownRunVerdictStage, type RefusedRunVerdictStage } from "./lib/status.js";
 import { readyDraftPullRequest, readTaskContractAtHeadViaGit, withCodeqlAlertEvidence, CODE_SCANNING_FALSE_POSITIVE_STEP, DEFAULT_SWEEP_POLICY, decideRedBaseRefresh, isCiHarnessPath, prAddedLinesFromPullFiles, failingSourceFilesFromCiFailures, failingTestFilesFromCiFailures, projectMergedTaskCandidates, actionableGateFailuresFromReasons, armOutcomeArmed, dispatchFixSpent, checkCostGovernor, checkMemoryGovernor, installedSlackReclaim, reclaimBeforeHold, type SlackReclaim, checkQueueGovernor, productionFixPressure, deriveQueueGovernorTrailingFlow, isFleetOwnedRunBranch, checksStateFromRollup, checksPendingSinceFromRollup, CI_GATE_CHECK_NAME, supersededRedsNowPassing, dedupeRollupByLatestAttempt, deriveDayCostUsd, deriveDayUnpricedRows, deriveDisposition, diffCoverageReport, fixCeilingInForce, fixDispatchBudget, fixRoundTally, buildFixProgressInput, flakeClaimsForHead, isBlockedCi, listRetirableEscalationIssues, listRetirableEscalationIssuesAsync, createEscalationTriageHistoryReader, ESCALATION_TRIAGE_EVIDENCE_SLICE, indexEscalationTriageHistory, type EscalationTriageHistoryReader, type EscalationTriageSlice, logCostGovernorDeferral, logMemoryObservation, logQueueGovernorDeferral, renderClarificationQuestion, renderSweepSummary, type SweepSummary, REQUIRED_CHECK_FAIL, REQUIRED_CHECK_OK, runCreditBackfill, closedPrFromRef, closedPrLookup, runPrTerminalReconcile, type PrTerminalReconcileSummary, runEscalationReconcile, runStaleEscalationRejudge, buildStaleEscalationRejudgePrompt, type StaleEscalationRejudgeCandidate, runPostFixReverification, runSweep, runSweepLightPass, runLightPassReadyRefresh, runLightPassRefreshAdmission, lightPassHeadContractRefresh, runArmedRatchetRejudge, withFullSweepRepairAdmission, redQualityGateNames, stillRedRequiredNames, terminalStateReason, toQuestionEntry, usableInstrumentEntanglementPaths, type ActionableGateFailure, type ArmedStalledPr, type CiFailure, type ClarificationQuestion, type CostGovernorResult, type EscalationReconcileSummary, type FixClass, type FixDispatchEvidence, type FixOwnerResidue, type FixDispatchSnapshot, type FixSuperseded, type LiveStateResult, type MemoryGovernorResult, type MergeConflictEvidence, type OpenPrView, type PlanScopedFixRoundInput, type ReviewDispatchMode, type ReviewReuseInputs, type RollupCheckEntry, type PostFixReverificationSummary, type ProofDiscriminationEvidence, type QueueGovernorResult, type RedBaseRefreshFacts, type PostReviewStallVerdict, type RepairFilingCapture, type Disposition, type SweepDeps, type SweepPolicy, type UpdateBranchOutcome, type UncreditableHeadReason, ABSENT_REPUSH_CAP, DEFAULT_FIX_CLASSES, buildSweepEffects as buildSweepEffectsFromLib, checkJobId, RATIFIED_BASELINE_RATCHET_REPAIRS, currentPlanIneligibilityReason, defaultSweepGhRun, dispatchFixCatchOutcome, discriminateReviewReuse, discriminateReviewReuseAsync, escalationTaskIdFor, fixDispatchErrorClass, fixDispatchSignalDeath, fixHeadAcceptable, fixRungTaskFor, foreignHeadIsStuck, isDispatchedRunBranch, detectPostReviewStall, isCappedReviewOrphanEscalation, proofDiscriminationEvidenceFromCriteria, type ArmAttemptOutcome, type ArmOutcomeName, type BuildSweepEffectsDeps, type MetadataRepairResult, sweepArmTaskId, uncreditableHeadReason, planOnlyRunBranchReceipts, REGENERABLE_ARTIFACT_GENERATORS, ADDITIVE_REGISTRATION_SURFACES, isAdditiveRegistrationChange, type RegistrationChange, repairLadderCommand, trackRepairLadder, riskJudgeHandedOffHead, handedOffHeadJudgmentPool, type HandedOffHeadJudgmentPool, awaitHandedOffHeadJudgments, riskJudgeCodeScanning, hasCapturedMergeConflictEvidence, clearedConflictEscalationCause, type FixRoundBranchClaim, inFlightReviewCount } from "./lib/sweep.js";
 import { sampleDaemonMemory, workerHeapReadings } from "./lib/daemon-memory-telemetry.js";
 import { currentReviewSignal, headLacksOwnTaskRecord, OWN_TASK_RECORD_MISSING_CAUSE, reviewOnlyStandDownReason } from "./lib/sweep.js";
@@ -3030,9 +3032,12 @@ export function buildEscalationTriageRuntime(
   let pass: ReturnType<typeof newTriagePass> | undefined;
   let reportedBytes = 0, reportedRotations = 0;
   const evidenceHistory = io.evidenceHistory ?? createEscalationTriageHistoryReader({ slice: ESCALATION_TRIAGE_EVIDENCE_SLICE });
+  let tornHandled = false;
   const readRows = io.readRows ?? ((path) => {
     const read = evidenceHistory.current(dirname(path));
     if (!read.ok) throw new Error(`triage evidence history is unreadable (${read.unread.length} unread: ${read.unread.slice(0, 3).join(", ")})`);
+    // W1-T13324: a torn row that names the step could hide an operator action; unkept torn lines are unjudged.
+    tornHandled = read.tornLines ? read.tornLines.some((line) => line.includes("panel.escalation_marked_handled")) : read.torn > 0;
     return read.rows;
   });
   const clock = io.clock ?? systemClock;
@@ -3086,6 +3091,7 @@ export function buildEscalationTriageRuntime(
             reportedBytes = cost.bytesRead; reportedRotations = cost.rotationsRead;
           }
         }
+        if (tornHandled && e.class !== "MANUAL" && e.class !== "HARD_STOP") throw new Error("escalation precision history is unreadable");
         const strike = [...history].reverse().find((row) => row.step === "fix.dispatch" && row.task_id === e.taskId &&
           row.head_sha === e.headSha && row.kind !== "proof_amendment");
         const previousCause = strike?.mode === "ci-log" ? "ci" : strike?.mode === "merge-conflict" ? "conflict" :
@@ -14490,6 +14496,8 @@ function configuredLedgerPathOrUndefined(): string | undefined {
  * read, rather than falling back to a live-file-only match count — the automated form of the
  * positive control nobody writes by hand for this idiom.
  */
+type MergeCreditRead = ReturnType<typeof readMergeCreditedTaskIds>;
+
 export type ReapBranchesOpts = {
   exec?: BranchReapExec;
   /** Checkout whose `origin`, plan and source guard scan are being reaped. */
@@ -14505,7 +14513,8 @@ export type ReapBranchesOpts = {
   /** W1-T6590: the plan this tick already parsed for `root`; when it answers, `loadPlan` is never called. */
   plan?: () => Plan | undefined;
   loadPlan?: (path: string) => Plan;
-  readMergeCreditedTaskIds?: typeof readMergeCreditedTaskIds;
+  /** W1-T13325: may answer with a promise, which only an async driver awaits; the sync command keeps the sync default. */
+  readMergeCreditedTaskIds?: (path: string, opts: { candidates: string[] }) => MergeCreditRead | Promise<MergeCreditRead>;
   /** Overrides the merge-credit and handoff-receipt source. `ledgerPath` remains the optional report sink. */
   creditLedgerPath?: string;
   /** W1-T4476 design (iii): (branch name -> tip sha) already PROVEN merged by an earlier pass.
@@ -14622,7 +14631,8 @@ function* reapBranchesSteps(rest: string[], opts: ReapBranchesOpts): Steps<numbe
       }
       if (creditPath !== undefined) {
         try {
-          const creditRead = (opts.readMergeCreditedTaskIds ?? readMergeCreditedTaskIds)(creditPath, { candidates });
+          const readCredit = opts.readMergeCreditedTaskIds ?? readMergeCreditedTaskIds, readFrom = creditPath;
+          const creditRead = yield* step(() => readCredit(readFrom, { candidates }));
           creditedTaskIds = creditRead.credited;
           creditReadSucceeded = true;
         } catch (err) {
@@ -22580,7 +22590,8 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
   const run =
     deps.run ??
     (async () => {
-      const root = configFor().root;
+      const config = configFor();
+      const root = config.root;
       const cadenceClock = clockFromDateFn(deps.now);
       // RECORD THE FIRE FIRST, deliberately — the SAME crash-safety discipline
       // `buildAutoTriageDaemonHooks`'s `runAutoTriage` uses: if the report run throws or the
@@ -22589,6 +22600,7 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
       if (deps.recordFire !== false) recordMeasurementCadenceFire(measurementCadenceMarkerPath(root), cadenceClock.date(), 24 * 60 * 60 * 1000);
       const coverageRunId = `MEASUREMENT-CADENCE-${cadenceClock.now()}`;
       await recordRoutingExperimentResults({ stateDir: join(root, "state"), today: cadenceClock.iso().slice(0, 10) });
+      await reconcileNewestCostExport(config, cadenceClock);
       const verifyHumanRunId = `VERIFY-HUMAN-CADENCE-${cadenceClock.iso()}`;
       // `repoRoot`, NOT `root` (which is `config.root`, the state volume) — see this function's own
       // parameter doc. The sibling `coverageImprovement` below already passes `repoRoot`.
@@ -34101,6 +34113,8 @@ function* automaticBranchReapSteps(
       quiet: true,
       runId,
       creditLedgerPath: ledgerPath,
+      // W1-T13325: the scan that keeps durable digests and loads rotations off the loop.
+      readMergeCreditedTaskIds: readMergeCreditedTaskIdsAsync,
       ...(opts.clock ? { clock: opts.clock } : {}),
       ...(opts.armStaleBranchArchive !== undefined ? { armStaleBranchArchive: opts.armStaleBranchArchive } : {}),
       // W1-T4476 design (iii)/(iv): the cache this state carries in from the LAST pass, and the
@@ -43585,6 +43599,66 @@ export function capabilityInspectCommand(rest: string[], deps: Pick<AuthorityCom
   return batches.some((batch) => batch.results.some((r) => r.verdict === "refuse")) ? 1 : 0;
 }
 
+/**
+ * W1-T10858: reconcile one UTC day's metered cash receipts against one Azure actual-cost export, and ledger one
+ * `cash.invoice.reconciled` row per open-weight deployment. The one composition `rmd cash-reconcile` and the
+ * measurement cadence share. Reads files and the ledger only; it never sends a request.
+ */
+async function runCashInvoiceReconcile(config: Config, source: CostExportSource & { day: string }, runId: string): Promise<CashInvoiceReconciliation> {
+  const stateDir = join(config.root, "state");
+  const result = reconcileCashInvoice({ day: source.day, receipts: await readCashInvoiceReceipts(stateDir, source.day),
+    exportCsv: source.text, accounts: cashInvoiceAccounts(config) });
+  recordCashInvoiceVerdicts(stateDir, result, source, runId);
+  return result;
+}
+
+/** The measurement cadence's reconcile: the newest export file under `<state>/cost-exports/`, once per day and file. */
+async function reconcileNewestCostExport(config: Config, clock: Clock): Promise<void> {
+  const stateDir = join(config.root, "state");
+  const candidate = await newestCostExportAsync(stateDir, clock.iso().slice(0, 10));
+  if (candidate === undefined) return;
+  const runId = `CASH-INVOICE-CADENCE-${clock.now()}`;
+  if ("refused" in candidate) {
+    recordCashInvoiceFailure(stateDir, "unparsed", candidate, runId, new Error(candidate.refused));
+    return;
+  }
+  try {
+    const result = reconcileCashInvoice({ day: candidate.day, receipts: await readCashInvoiceReceiptsAsync(stateDir, candidate.day),
+      exportCsv: candidate.text, accounts: cashInvoiceAccounts(config) });
+    recordCashInvoiceVerdicts(stateDir, result, candidate, runId);
+  }
+  catch (error) {
+    // Recorded, not erased: the ledger row names the day, the file and the reason, the pair is not retried, and the
+    // sibling cadence work still runs.
+    recordCashInvoiceFailure(stateDir, candidate.day, candidate, runId, error);
+  }
+}
+
+/** `rmd cash-reconcile --day <YYYY-MM-DD> --export <csv>`. Exit 0 reconciled and ledgered, 1 failed, 2 bad usage. */
+export async function cashReconcileCommand(rest: string[], host: { config?: () => Config; clock?: Clock; out?: (line: string) => void;
+  err?: (line: string) => void } = {}): Promise<number> {
+  const out = host.out ?? ((line: string) => process.stdout.write(`${line}\n`));
+  const err = host.err ?? ((line: string) => process.stderr.write(`${line}\n`));
+  const bad = unknownArgError("cash-reconcile", rest, ["--day", "--export"]);
+  const day = flagValue(rest, "--day");
+  const file = flagValue(rest, "--export");
+  if (bad || !day || !/^\d{4}-\d{2}-\d{2}$/.test(day) || !file) {
+    err(`${bad ?? "rmd cash-reconcile: --day <YYYY-MM-DD> and --export <csv> are required"}\nusage: ${commandSyntax("cash-reconcile")}`);
+    return 2;
+  }
+  try {
+    const text = readFileSync(file, "utf8");
+    const result = await runCashInvoiceReconcile((host.config ?? loadConfig)(), { path: file, text, digest: costExportDigest(text), day },
+      `CASH-INVOICE-${day}-${(host.clock ?? systemClock).now()}`);
+    out(JSON.stringify(result));
+    return 0;
+  } catch (error) {
+    // Exit 1 with the reason on stderr: an unreadable export or ledger, never a silent zero.
+    err(`rmd cash-reconcile: ${error instanceof Error ? error.message : String(error)}`);
+    return 1;
+  }
+}
+
 const COMMANDS: readonly CommandSpec[] = [
   {
     name: "run-task",
@@ -43822,6 +43896,12 @@ const COMMANDS: readonly CommandSpec[] = [
     syntax: "rmd decisions probe --candidate <name> --input-file <file> --questions-file <file> [--role <role>]",
     summary: "Ask one decision model one question set about one input, and print the row it wrote.",
     detail: "W1-T12416: sends ONE paid cash request to a candidate named in the decision_models section of .remudero/mounts.yaml. The questions file is a JSON array of yes-no, choice (2 to 255 typed options) and score (2 to 10 ordered levels) questions, each with a name and instructions; a bad set is refused before any reservation. The request reserves on its input size plus a 64-token output margin against the normal daily cash cap, settles from the reply's usage at the candidate's own price row, and writes one decision.answered row: role, input digest, candidate, deployment, served model, latency, reserved and settled dollars, usage, and each question's distribution, abstention or rejection. A candidate whose cashDeploymentEndpoints entry or key is missing is unavailable and sends nothing. Shadow only: no gate, route or judge reads the row. Exit 0 answered, 1 refused, unavailable or failed, 2 bad usage.",
+  },
+  {
+    name: "cash-reconcile",
+    syntax: "rmd cash-reconcile --day <YYYY-MM-DD> --export <csv>",
+    summary: "Reconcile one UTC day of metered cash cost against an Azure actual-cost export.",
+    detail: "W1-T10858: reads the day's produced cash receipts from the ledger union and an Azure Cost Management actual-cost export CSV, and compares, per deployment and per meter (input, cached input, output), the metered cost (tokens times the OPENWEIGHT_PRICES row) with the billed cost (the export rows for that deployment's account and meter). The noise band is the largest divergence among the same day's Azure OpenAI deployments (rows with unbilledAzureOpenAi429). Each open-weight deployment gets one cash.invoice.reconciled row: reconciled (inside the band), diverged (outside it, naming the meter, metered, billed and band) or unreconcilable (no traffic, no control, no export rows or incomplete receipts). The deployment bake-off proposal marks an open-weight arm not eligible to lead until its newest verdict is reconciled. Sends no request. The measurement cadence does the same for the newest .csv under <state>/cost-exports/, once per day and file. Exit 0 reconciled, 1 failed, 2 bad usage.",
   },
   {
     name: "judge-replay",
@@ -44978,6 +45058,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   )],
   ["routing-ab", async (rest) => await routingAbCommand(rest, { classifyAttempt: attributeAttemptOutcome })],
   ["decisions", async (rest) => await decisionsCommand(rest, (config, request) => askDecisionModel(config, request), { repoRoot })],
+  ["cash-reconcile", async (rest) => await cashReconcileCommand(rest)],
   ["judge-replay", async (rest) => await judgeReplayCommand(rest, (config, request) => replayJudgeCorpus(config, request), { repoRoot, lane: parseJudgeReplayLane(rest) })],
   ["progress-watchdog", (rest) => progressWatchdogCommand(rest)],
   ["live-edits", async (rest) => await liveEditsCommand(rest)],

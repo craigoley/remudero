@@ -474,6 +474,46 @@ else
   DAEMON_VERDICT="STALE — last poll $(human_age "$DAEMON_AGE_S") ago"
 fi
 
+# ── probe: drain verdict (W1-T12939) ─────────────────────────────────────────────────────────────
+# A held instance writes `daemon.pause` each poll, carrying the in-flight census (`in_flight_count`,
+# `in_flight_oldest_age_ms`) and its hold episode (`drain_episode`); the first empty census of an episode
+# writes `daemon.drained` with the same episode, a unit appearing after it `daemon.drain_reopened`. This
+# reads the newest of them. DEGRADE TO `unknown`, NEVER TO `drained`: an unreadable ledger, a daemon whose
+# newest line is stale (the same rule as daemon_verdict), or a pause row with no census says so.
+DRAIN_VERDICT="unknown — no readable ledger"
+if [ "$LEDGER_STATE" = "ok" ]; then
+  if [ -z "$DAEMON_AGE_S" ] || [ "$DAEMON_AGE_S" -gt "$DAEMON_STALE_AFTER_S" ]; then
+    DRAIN_VERDICT="unknown — the daemon's newest ledger line is stale or absent"
+  else
+    DRAIN_PAUSE_LINE="$(grep -F '"step":"daemon.pause"' "$LEDGER" 2>/dev/null | tail -n 1)"
+    DRAIN_PAUSE_TS="$(printf '%s' "$DRAIN_PAUSE_LINE" | grep -o '"ts":"[^"]*"' | head -n 1 | cut -d'"' -f4)"
+    DRAIN_PAUSE_EPOCH="$(epoch_of "$DRAIN_PAUSE_TS")"
+    if [ -z "$DRAIN_PAUSE_LINE" ] || [ -z "$DRAIN_PAUSE_EPOCH" ] || [ "$((NOW_EPOCH - DRAIN_PAUSE_EPOCH))" -gt "$DAEMON_STALE_AFTER_S" ]; then
+      DRAIN_VERDICT="not-paused"
+    else
+      DRAIN_COUNT="$(printf '%s' "$DRAIN_PAUSE_LINE" | grep -o '"in_flight_count":[0-9]*' | head -n 1 | cut -d: -f2)"
+      DRAIN_OLDEST_MS="$(printf '%s' "$DRAIN_PAUSE_LINE" | grep -o '"in_flight_oldest_age_ms":[0-9]*' | head -n 1 | cut -d: -f2)"
+      DRAIN_EPISODE="$(printf '%s' "$DRAIN_PAUSE_LINE" | grep -o '"drain_episode":"[^"]*"' | head -n 1 | cut -d'"' -f4)"
+      DRAIN_STATE_LINE="$(grep -E '"step":"daemon\.(drained|drain_reopened)"' "$LEDGER" 2>/dev/null | tail -n 1)"
+      DRAIN_STATE_TS="$(printf '%s' "$DRAIN_STATE_LINE" | grep -o '"ts":"[^"]*"' | head -n 1 | cut -d'"' -f4)"
+      DRAIN_STATE_EPISODE="$(printf '%s' "$DRAIN_STATE_LINE" | grep -o '"drain_episode":"[^"]*"' | head -n 1 | cut -d'"' -f4)"
+      if [ -z "$DRAIN_COUNT" ]; then
+        DRAIN_VERDICT="unknown — the newest daemon.pause row carries no in-flight census"
+      elif [ "$DRAIN_COUNT" -gt 0 ]; then
+        DRAIN_VERDICT="draining — ${DRAIN_COUNT} in flight"
+        if [ -n "$DRAIN_OLDEST_MS" ]; then DRAIN_VERDICT="${DRAIN_VERDICT}, oldest $(human_age "$((DRAIN_OLDEST_MS / 1000))")"; fi
+      elif printf '%s' "$DRAIN_PAUSE_LINE" | grep -qF '"in_flight_unobserved"'; then
+        # An empty census that names the unit kinds it could not see is not a drained claim: a garden child or judge call may be live.
+        DRAIN_VERDICT="unknown — the census does not cover every kind of in-flight unit"
+      elif [ -n "$DRAIN_EPISODE" ] && [ "$DRAIN_EPISODE" = "$DRAIN_STATE_EPISODE" ] && printf '%s' "$DRAIN_STATE_LINE" | grep -qF '"step":"daemon.drained"'; then
+        DRAIN_VERDICT="drained — at ${DRAIN_STATE_TS}"
+      else
+        DRAIN_VERDICT="draining — 0 in flight, the daemon.drained row for this hold is not written yet"
+      fi
+    fi
+  fi
+fi
+
 # ── probe: deploy-supervisor liveness, the max ts over the `deploy.` prefix (W1-T2349) ───────────
 # THE GAP THIS CLOSES. The daemon probe above answers "is the daemon alive"; nothing until now
 # answered "is the thing that ADVANCES the daemon's code alive" — the deploy-supervisor went
@@ -1661,6 +1701,7 @@ PAYLOAD="$(cat <<EOF
 beat_ts=${NOW_ISO}
 beat_host=$(hostname 2>/dev/null || printf 'unknown')
 daemon_verdict=${DAEMON_VERDICT}
+drain_verdict=${DRAIN_VERDICT}
 daemon_last_ts=${DAEMON_LAST_TS:-none}
 daemon_last_step=${DAEMON_LAST_STEP:-none}
 daemon_last_age_s=${DAEMON_AGE_S:-unknown}
@@ -1844,8 +1885,38 @@ publish_beat() (
     export "GIT_CONFIG_VALUE_${cfg_n}=!f() { echo username=x-access-token; echo \"password=\$GH_TOKEN\"; }; f"
     export GIT_CONFIG_COUNT=$((cfg_n + 1))
   fi
-  git -C "$INSTALL_DIR" push --force "$REMOTE" "${commit}:refs/heads/${BRANCH}" >/dev/null 2>&1 \
+  # W1-T13327: push to the remote's URL. A push through a remote NAME moves its tracking ref to the
+  # beat commit, which only the private store holds. A tracking ref already left that way is cleared.
+  push_to="$(git -C "$INSTALL_DIR" remote get-url --push "$REMOTE" 2>/dev/null)" || push_to=""
+  push_to="${push_to%%$'\n'*}"
+  track_ref="refs/remotes/${REMOTE}/${BRANCH}"
+  # $1 is a tip the ref had before the push and the clone holds, or empty. A ref naming an object the
+  # clone lacks goes back to that tip, or is cleared when there is none.
+  heal_track_ref() {
+    (
+      unset GIT_OBJECT_DIRECTORY
+      tip="$(git -C "$INSTALL_DIR" rev-parse --verify -q "$track_ref" 2>/dev/null)" || exit 0
+      [ -n "$tip" ] || exit 0
+      git -C "$INSTALL_DIR" cat-file -e "$tip" 2>/dev/null && exit 0
+      if [ -n "${1:-}" ]; then
+        git -C "$INSTALL_DIR" update-ref "$track_ref" "$1" "$tip" >/dev/null 2>&1
+      else
+        git -C "$INSTALL_DIR" update-ref -d "$track_ref" "$tip" >/dev/null 2>&1
+      fi
+    ) || printf 'fleet-heartbeat: could not repair %s, which names an object this clone lacks\n' "$track_ref" >&2
+  }
+  held_tip=""
+  if [ -n "$push_to" ]; then
+    heal_track_ref
+    held_tip="$(unset GIT_OBJECT_DIRECTORY; t="$(git -C "$INSTALL_DIR" rev-parse --verify -q "$track_ref" 2>/dev/null)" \
+      && git -C "$INSTALL_DIR" cat-file -e "$t" 2>/dev/null && printf '%s' "$t")" || held_tip=""
+  else
+    push_to="$REMOTE"
+  fi
+  git -C "$INSTALL_DIR" push --force "$push_to" "${commit}:refs/heads/${BRANCH}" >/dev/null 2>&1 \
     || fail "push to ${REMOTE}/${BRANCH} failed"
+  # Some git versions also move the tracking ref of a remote whose URL they are given; put it back.
+  heal_track_ref "$held_tip"
 
   printf 'fleet-heartbeat: published %s to %s/%s — %s\n' "${commit:0:7}" "$REMOTE" "$BRANCH" "$SUBJECT"
 )
