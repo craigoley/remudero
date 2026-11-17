@@ -7,8 +7,10 @@
  */
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import { syncBuiltinESMExports } from "node:module";
 import { test, type TestContext } from "node:test";
+import { systemClock } from "#src/lib/clock.js";
 import { dispatchClaimRef, pidIsPresent, readNamespaceBootMs } from "#src/lib/dispatch-claim.js";
 import {
   DEAD_PID, LOCAL, MINT_ISO, TASK, anchorMessage, fakeReserver, instance, orphanRunRows, sweepRows,
@@ -142,4 +144,86 @@ test("W1-T12356: on another platform the release still declines", () => {
     assert.equal(readNamespaceBootMs({ platform, readFile: unreadable, ...kernel }), undefined, `${platform} has no boot time`);
     assert.equal(pidIsPresent(DEAD_PID, { platform, exists: unreadable, ...kernel }), true, `${platform} keeps the pid present`);
   }
+});
+
+/** W1-T13201: a fresh instance of the module, so its process-level reading starts empty. */
+let instances = 0;
+async function freshDispatchClaim(): Promise<typeof import("#src/lib/dispatch-claim.js")> {
+  return import(`${import.meta.resolve("#src/lib/dispatch-claim.js")}?W1-T13201=${++instances}`);
+}
+
+/** W1-T13201: the process-level seam the production read uses, `os.uptime` and the module clock, stepping on
+ *  every read: the k-th read of each gives its k-th entry (the last repeats). Gives how many of each were read. */
+function kernelReadings(t: TestContext, readings: Array<{ nowMs: number; uptimeSec: number }>): { reads: () => number } {
+  let clockReads = 0;
+  let uptimeReads = 0;
+  const at = (k: number) => readings[Math.min(k, readings.length - 1)]!;
+  t.mock.method(systemClock, "now", () => at(clockReads++).nowMs);
+  t.mock.method(os, "uptime", () => at(uptimeReads++).uptimeSec);
+  syncBuiltinESMExports();
+  return { reads: () => Math.max(clockReads, uptimeReads) };
+}
+
+test("W1-T13201 criterion 1: on darwin two reads of the namespace start in one process name one instant while the clock and uptime drift", async (t) => {
+  asMacOs(t);
+  const fresh = await freshDispatchClaim();
+  // Each read moves the clock 5 ms and the uptime 3 ms, so a fresh derivation would move the start 2 ms per read.
+  const kernel = kernelReadings(t, [0, 1, 2, 3].map((k) => ({ nowMs: NOW_MS + 5 * k, uptimeSec: 3600.25 + 0.003 * k })));
+  const first = fresh.readNamespaceBootMs();
+  assert.equal(first, NOW_MS - 3_600_250, "the first read is W1-T12356's derivation");
+  assert.equal(fresh.readNamespaceBootMs(), first, "a second read names the same instant");
+  assert.equal(fresh.realBootSweepHostProbe.namespaceBootMs(), first, "the boot sweep's probe names it too");
+  assert.equal(kernel.reads(), 1, "the kernel was read once");
+  // The module every other test here shares agrees with itself across reads as well.
+  const shared = readNamespaceBootMs();
+  assert.ok(shared !== undefined, "the shared module has a start");
+  assert.equal(readNamespaceBootMs(), shared);
+});
+
+/** W1-T13201: sets `process.platform` for the rest of the test; restores it, and every mock, after. */
+function onPlatform(t: TestContext): (platform: NodeJS.Platform) => void {
+  const real = Object.getOwnPropertyDescriptor(process, "platform");
+  assert.ok(real);
+  t.after(() => {
+    Object.defineProperty(process, "platform", real);
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  });
+  return (platform) => Object.defineProperty(process, "platform", { ...real, value: platform, configurable: true });
+}
+
+test("W1-T13201 criterion 2: invariant:the-start-is-still-this-boots — injected readers read fresh, a bad reading is not kept, linux reads /proc", async (t) => {
+  const setPlatform = onPlatform(t);
+  setPlatform("darwin");
+  const fresh = await freshDispatchClaim();
+  const { readFile } = noProcReads();
+  kernelReadings(t, [
+    { nowMs: NOW_MS, uptimeSec: Number.NaN },
+    { nowMs: NOW_MS, uptimeSec: NOW_MS / 1000 + 10 },
+    { nowMs: NOW_MS + 9, uptimeSec: 120.5 },
+    { nowMs: NOW_MS + 40, uptimeSec: 120.51 },
+  ]);
+  // An injected read before the first production read is its own, and fills nothing.
+  assert.equal(fresh.readNamespaceBootMs({ platform: "darwin", readFile, uptimeSec: () => 10, nowMs: () => NOW_MS }), NOW_MS - 10_000);
+  assert.equal(fresh.readNamespaceBootMs(), undefined, "a non-finite reading declines");
+  assert.equal(fresh.readNamespaceBootMs(), undefined, "a negative start declines, the bad reading was not kept");
+  const start = fresh.readNamespaceBootMs();
+  assert.equal(start, NOW_MS + 9 - 120_500, "the first good reading is W1-T12356's derivation");
+  assert.equal(fresh.readNamespaceBootMs(), start);
+  // Every injected reader computes fresh, from what it was given, never from the kept value.
+  assert.equal(fresh.readNamespaceBootMs({ platform: "darwin", readFile, uptimeSec: () => 7, nowMs: () => NOW_MS }), NOW_MS - 7_000);
+  assert.equal(fresh.readNamespaceBootMs({ uptimeSec: () => 7 }), NOW_MS + 40 - 7_000, "an injected uptime");
+  assert.equal(fresh.readNamespaceBootMs({ nowMs: () => NOW_MS + 1 }), NOW_MS + 1 - 120_510, "an injected clock");
+  assert.equal(fresh.readNamespaceBootMs({ platform: "darwin", readFile, uptimeSec: () => Number.NaN }), undefined);
+  assert.equal(fresh.readNamespaceBootMs(), start, "an injected read changed nothing kept");
+  // Linux still reads /proc on every call: a different btime gives a different start.
+  const btimes = [1762900000, 1762900500];
+  const linux = (btime: number) => (p: string) => (p === "/proc/stat" ? `btime ${btime}\n` : PROC_1_STAT);
+  for (const btime of btimes) {
+    assert.equal(fresh.readNamespaceBootMs({ platform: "linux", readFile: linux(btime) }), Math.round((btime + 4200 / 100) * 1000));
+  }
+  setPlatform("linux");
+  t.mock.method(fs, "readFileSync", ((p: fs.PathOrFileDescriptor): string | Buffer => linux(btimes[1]!)(String(p))) as typeof fs.readFileSync);
+  syncBuiltinESMExports();
+  assert.equal(fresh.readNamespaceBootMs(), Math.round((btimes[1]! + 4200 / 100) * 1000), "the production linux read is /proc's");
 });
