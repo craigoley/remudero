@@ -1663,6 +1663,9 @@ export interface DaemonDeps {
   /** W1-T4429: the hold behind `checkPause` (owner/expiry/liveness); absent, no governor runs. It calls
    *  `clearPauseHold` once at `lapsed` and `onPauseNeedsHuman` once at `needs_human`. */
   checkPauseHold?: () => PauseHoldGovernorInput | undefined;
+  /** W1-T12939: the units the daemon holds no registry for (garden children, judge calls), read once per paused pass so a
+   *  held instance counts them before it says it has drained. A throw is a census that could not be read, never an empty one. */
+  pauseInFlight?: () => ReadonlyArray<PauseInFlightUnit>;
   clearPauseHold?: () => void | Promise<void>;
   onPauseNeedsHuman?: (info: { holdId: string; owner: PauseHoldOwner; expiresAt: string | null }) => void | Promise<void>;
   workerAdmissionHold?: () => WorkerAdmissionHold | undefined;
@@ -2829,6 +2832,12 @@ export interface PauseHoldOwner {
   sessionId?: string;
   reason?: string;
 }
+
+/** W1-T12939: one unit a held instance still owns. `count` is set only for a registry that names a kind but not its members. */
+export interface PauseInFlightUnit { kind: string; name: string; age_ms?: number; count?: number }
+
+/** The most units one `daemon.pause` row names; `in_flight_count` is always the full count. */
+const PAUSE_IN_FLIGHT_UNITS_CAP = 50;
 
 export interface PauseHoldGovernorInput extends PauseTierInput {
   /** The anchor sha, or `"local"`: a NEW hold never inherits an old hold's tier. */
@@ -5198,6 +5207,61 @@ export async function runDaemon(
   const hasChildTask = (id: string): boolean => childTaskIds().includes(id);
   // W1-T10000: a run waiting for its child's admission is out-of-process work too; the restart abandons it.
   const pendingChildren = new Map<string, RunChildPending & { sinceMs: number }>();
+  // W1-T12939: what a held instance still owns, read from the registries the loop already holds; no process probe.
+  const pauseInFlightCensus = (): { units: PauseInFlightUnit[]; count: number; oldestAgeMs: number | null; unobserved: string[] } => {
+    const nowMs = daemonClock.now();
+    const units: PauseInFlightUnit[] = [];
+    const named = new Set<string>();
+    for (const child of children.values()) {
+      if (child.work !== undefined) continue;
+      units.push({ kind: "run-child", name: child.taskId });
+      named.add(child.taskId);
+    }
+    for (const [taskId, pending] of pendingChildren) {
+      units.push({ kind: "run-child-pending", name: taskId, age_ms: Math.max(0, nowMs - pending.sinceMs) });
+      named.add(taskId);
+    }
+    for (const taskId of laneCpuBuilds) if (!named.has(taskId)) units.push({ kind: "run", name: taskId });
+    for (const item of restartDrainInventory()) {
+      units.push({ kind: item.what === "detached" ? item.kind : item.what,
+        name: item.task_id ?? (item.pr === undefined ? item.kind : `pr-${item.pr}`), age_ms: Math.max(0, nowMs - item.admitted_at_ms) });
+    }
+    for (const [kind, count] of Object.entries(childWorkLeftRunning())) units.push({ kind: "child-work", name: kind, count });
+    if (deps.pauseInFlight) {
+      try {
+        units.push(...deps.pauseInFlight());
+      } catch (error) {
+        // An unreadable census is never an empty one: this unit keeps the hold from reading as drained.
+        units.push({ kind: "census-unreadable", name: String((error as Error)?.message ?? error) });
+      }
+    }
+    const ages = units.flatMap((unit) => unit.age_ms === undefined ? [] : [unit.age_ms]);
+    return { units, count: units.reduce((n, unit) => n + (unit.count ?? 1), 0),
+      oldestAgeMs: ages.length === 0 ? null : Math.max(...ages),
+      unobserved: deps.pauseInFlight ? [] : ["garden-child", "judge-call"] };
+  };
+  // One hold is one episode, keyed by the hold's own identity; the first empty census writes `daemon.drained`, a unit
+  // that appears afterwards `daemon.drain_reopened`, and an unpaused pass ends the episode (`pauseEpisode = undefined`).
+  let pauseEpisode: { id: string; key: string; drained: boolean } | undefined;
+  let pauseEpisodeSeq = 0;
+  const logPause = (detail: string, row: Record<string, unknown>, hold: PauseHoldGovernorInput | undefined): void => {
+    const key = hold?.holdId ?? detail;
+    const census = pauseInFlightCensus();
+    if (pauseEpisode?.key !== key) pauseEpisode = { id: `${daemonClock.now()}-${++pauseEpisodeSeq}`, key, drained: false };
+    const episode = pauseEpisode;
+    const censusFields = { in_flight: census.units.slice(0, PAUSE_IN_FLIGHT_UNITS_CAP), in_flight_count: census.count,
+      in_flight_oldest_age_ms: census.oldestAgeMs, drain_episode: episode.id,
+      ...(census.unobserved.length > 0 ? { in_flight_unobserved: census.unobserved } : {}) };
+    log("daemon.pause", { ...row, ...censusFields });
+    if (census.count === 0 && !episode.drained) {
+      episode.drained = true;
+      log("daemon.drained", { tick: row.tick, drain_episode: episode.id, in_flight_count: 0,
+        ...(census.unobserved.length > 0 ? { in_flight_unobserved: census.unobserved } : {}) });
+    } else if (census.count > 0 && episode.drained) {
+      episode.drained = false;
+      log("daemon.drain_reopened", { tick: row.tick, drain_episode: episode.id, in_flight_count: census.count, in_flight: censusFields.in_flight });
+    }
+  };
   if (nearLimitHeapTelemetry) {
     let sampledAttempts = attempted.length;
     let lastSample: unknown;
@@ -7206,7 +7270,8 @@ export async function runDaemon(
     const paused = deps.checkPause?.();
     if (paused) {
       ticks++;
-      log("daemon.pause", { tick: ticks, detail: paused, poll_interval_ms: pollIntervalMs });
+      const pauseHold = deps.checkPauseHold?.();
+      logPause(paused, { tick: ticks, detail: paused, poll_interval_ms: pollIntervalMs }, pauseHold);
       sampleIdleLane(0, false);
       // W1-T4685: the SAME observation, tracked as one row instead of one line per tick — see
       // `gateObservations`'s own comment above for why this sits BESIDE the line above it, not in
@@ -7231,7 +7296,6 @@ export async function runDaemon(
         }
       }
       // W1-T4429 (ii): govern a structured hold's tier; (iii): reviews keep flowing beside the sleep.
-      const pauseHold = deps.checkPauseHold?.();
       if (pauseHold) {
         const holdState = pauseHoldGovernorStates.get(pauseHold.holdId) ?? { lastTier: undefined };
         pauseHoldGovernorStates.set(pauseHold.holdId, holdState);
@@ -7250,6 +7314,7 @@ export async function runDaemon(
       reportPauseReviewPasses(pauseReviewClock.passCount());
       continue;
     }
+    pauseEpisode = undefined;
     // Guarded, never a bare await: an unpaused tick must not gain a microtask turn (W1-T343 lanes).
     if (pauseReview.clock) await stopPauseReviewClock();
     // Self-freshness, checked directly after both operator holds and before headroom and dispatch, so
@@ -8453,12 +8518,12 @@ export async function runDaemon(
     if (workerHold?.control === "PAUSE") {
       await stopInterphaseReviewClock();
       ticks++;
-      log("daemon.pause", {
+      logPause(workerHold.detail, {
         tick: ticks,
         detail: workerHold.detail,
         poll_interval_ms: pollIntervalMs,
         recheck: true,
-      });
+      }, deps.checkPauseHold?.());
       sampleIdleLane(0, false);
       await sleepUntilSweepWake(pollIntervalMs);
       continue;
@@ -8482,12 +8547,12 @@ export async function runDaemon(
     if (repaused) {
       await stopInterphaseReviewClock();
       ticks++;
-      log("daemon.pause", {
+      logPause(repaused, {
         tick: ticks,
         detail: repaused,
         poll_interval_ms: pollIntervalMs,
         recheck: true,
-      });
+      }, deps.checkPauseHold?.());
       sampleIdleLane(0, false);
       await sleepUntilSweepWake(pollIntervalMs);
       continue;
