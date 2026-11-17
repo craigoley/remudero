@@ -1409,7 +1409,8 @@ import {
 } from "./lib/coverage-improvement.js";
 import { mineVerdictRows, verdictCalibrationReport, VERDICT_OUTCOME_STEP, type UnmeasurableCause } from "./lib/verdict-calibration.js";
 import { mineAutonomyLedgerLines, parseTrailerMerges, zeroTouchMergeRate } from "./lib/autonomy.js";
-import { decideMeasurementCadence, measurementCadenceCheck, ciLearningCadenceCheck, CI_LEARNING_MINT_CEILING, ciLearningLookbackDays, type CiLearningCadencePolicy, type CiLearningCadenceRunResult, measurementCadenceMarkerPath, ciLearningRecordVerdict, ciLearningShardYaml, fileCiLearningShards, mintCiLearningShards, readMeasurementCadenceMarker, recordCiLearningAttempt, recordCiLearningCadenceFire, recordMeasurementCadenceFire, createWipeTestEvidenceReader, wipeTestSlotDraw, recordWipeTestCadenceFire, scheduleWipeTestAblation, renderVerbCensusDigestLine, priorVerifyHumanAgeBandKeys, runMeasurementCadenceReportAsync, runVerbCensus, verifyHumanCadence, wipeTestCadenceCheck, type MeasurementCadenceDecision, buildPlanReconcileCadenceInput, type PlanReconcileHeld, type PlanReconcileCadenceOpts, type PlanReconcileCadenceInputOptions, type PlanReconcileShardRecord, type MeasurementCadenceReportOpts, type MeasurementCadenceRunResult, type VerifyHumanCadenceResult, type WipeTestCadenceDecision, type WipeTestCadencePolicy, type WipeTestCadenceRunResult } from "./lib/measurement-cadence.js";
+import { decideMeasurementCadence, measurementCadenceCheck, ciLearningCadenceCheck, CI_LEARNING_MINT_CEILING, HAND_FIX_ORIGIN_PREFIX, ciLearningLookbackDays, type HandFixInput, type CiLearningCadencePolicy, type CiLearningCadenceRunResult, measurementCadenceMarkerPath, ciLearningRecordVerdict, ciLearningShardYaml, fileCiLearningShards, mintCiLearningShards, readMeasurementCadenceMarker, recordCiLearningAttempt, recordCiLearningCadenceFire, recordMeasurementCadenceFire, createWipeTestEvidenceReader, wipeTestSlotDraw, recordWipeTestCadenceFire, scheduleWipeTestAblation, renderVerbCensusDigestLine, priorVerifyHumanAgeBandKeys, runMeasurementCadenceReportAsync, runVerbCensus, verifyHumanCadence, wipeTestCadenceCheck, type MeasurementCadenceDecision, buildPlanReconcileCadenceInput, type PlanReconcileHeld, type PlanReconcileCadenceOpts, type PlanReconcileCadenceInputOptions, type PlanReconcileShardRecord, type MeasurementCadenceReportOpts, type MeasurementCadenceRunResult, type VerifyHumanCadenceResult, type WipeTestCadenceDecision, type WipeTestCadencePolicy, type WipeTestCadenceRunResult } from "./lib/measurement-cadence.js";
+import { interventionFromLedgerRow, OPERATOR_INTERVENTION_STEP } from "./lib/operator-interventions.js";
 import {
   routedModelIdsFromCheckout,
   watchSuccessorModels,
@@ -15792,6 +15793,28 @@ export function ciLearningPlanOrigins(root: string): string[] {
   }
 }
 
+/** The scheduled learning rung's PR hand-fix evidence and the retired hand-fix origins it may redraft. */
+export function ciLearningHandFixInput(stateRoot: string, checkoutRoot: string, now: Date): HandFixInput {
+  const stateDir = join(stateRoot, "state");
+  const ledger = existsSync(stateDir)
+    ? readLedgerUnionRecordsSync(stateDir, { step: OPERATOR_INTERVENTION_STEP, refuseIncomplete: true })
+    : undefined;
+  if (ledger && (!ledger.ok || ledger.unread.length > 0 || ledger.torn > 0)) {
+    throw new Error(`operator.intervention ledger is incomplete${ledger.unread.length ? `: ${ledger.unread.join(", ")}` : ""}`);
+  }
+  const planPath = join(checkoutRoot, "plan", "tasks.yaml");
+  const plan = existsSync(planPath) ? loadPlan(planPath) : undefined;
+  const retiredOrigins = (plan?.tasks ?? [])
+    .filter((task) => task.retirement !== undefined && task.origin?.startsWith(HAND_FIX_ORIGIN_PREFIX))
+    .map((task) => task.origin!)
+    .sort();
+  return {
+    rows: (ledger?.rows ?? []).map(interventionFromLedgerRow).filter((row): row is NonNullable<typeof row> => row !== undefined),
+    now,
+    retiredOrigins,
+  };
+}
+
 const gardenMintBudgets = new Map<string, GardenMintBudget>();
 
 /** The shared reservation path, with a learned deadline for CLI pushes and daemon children.
@@ -27451,6 +27474,8 @@ export function buildCiLearningDaemonHooks(deps: {
   /** Injected so a test drives lesson outcomes without the real plan; production reads only the
    *  machine filer's own shard directory. */
   loadLessons?: () => FiledCiLessonsRead;
+  /** Optional hand-fix evidence reader; production defaults to the live ledger and checkout plan. */
+  handFixInput?: (at: Date) => HandFixInput;
 } = {}): {
   checkCiLearningCadence: () => MeasurementCadenceDecision;
   runCiLearningCadence: () => Promise<CiLearningCadenceRunnerResult>;
@@ -27490,6 +27515,7 @@ export function buildCiLearningDaemonHooks(deps: {
       loadLessons: deps.loadLessons,
       fileShards: deps.fileShards,
       planOrigins: deps.planOrigins,
+      handFixInput: deps.handFixInput ?? ((at) => ciLearningHandFixInput(configFor().root, deps.checkoutRoot ?? repoRoot, at)),
       clock: deps.now ? clockFromDateFn(deps.now) : systemClock,
     }),
   };
@@ -27537,6 +27563,8 @@ export function buildCiLearningCadenceRunner(deps: {
   landShards?: CiLearningShardLander;
   gh?: LandCiLearningShardsOptions["gh"];
   planOrigins?: string[];
+  /** Test seam for scheduled hand-fix evidence; production reads the operator-intervention ledger and held plan origins. */
+  handFixInput?: (at: Date) => HandFixInput;
   pendingOrigins?: typeof ciLearningPendingOrigins;
   mergedOrigins?: (checkoutRoot: string) => string[] | Promise<string[]>;
   mintTaskId?: ((filingBranch?: string) => string) & { async?: (filingBranch: string) => Promise<string> };
@@ -27567,7 +27595,8 @@ export function buildCiLearningCadenceRunner(deps: {
     // W1-T4190: and what origin/main already holds, so a merged finding never takes a draft slot.
     const mergedOrigins = await (deps.mergedOrigins ?? ciLearningMergedOriginsAsync)(deps.checkoutRoot);
     const idempotencyOrigins = [...new Set([...planOrigins, ...pendingOrigins, ...mergedOrigins])];
-    const result = mintCiLearningShards(corpus, idempotencyOrigins);
+    const handFix = deps.handFixInput?.(at) ?? ciLearningHandFixInput(deps.root, deps.checkoutRoot, at);
+    const result = mintCiLearningShards(corpus, idempotencyOrigins, handFix);
     const filedLessons = deps.loadLessons ? deps.loadLessons() : readFiledCiLessons(join(deps.checkoutRoot, "plan", "tasks.d"));
     const lessonRecurrences =
       filedLessons.status === "measured"

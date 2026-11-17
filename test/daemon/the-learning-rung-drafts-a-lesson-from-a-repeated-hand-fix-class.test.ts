@@ -15,12 +15,17 @@ import {
   type HandFixInput,
 } from "#src/lib/measurement-cadence.js";
 import type { CiFailureCorpus, CiFailurePair } from "#src/lib/ci-failure-corpus.js";
-import type { OperatorInterventionRow } from "#src/lib/operator-interventions.js";
+import { interventionLedgerLine, type OperatorInterventionRow } from "#src/lib/operator-interventions.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { LEDGER_FILENAME } from "#src/lib/ledger-path.js";
 import { loadPlanFromYaml } from "#src/lib/plan.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fixedClock } from "#src/lib/clock.js";
+import { buildCiLearningCadenceRunner } from "#src/run-task.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const NOW = new Date("2026-11-16T12:00:00.000Z");
 const day = (n: number) => new Date(NOW.getTime() - n * 86_400_000).toISOString();
@@ -62,6 +67,37 @@ test("W1-T12837 criterion 1: a hand-fix class seen twice in 14 days drafts one s
   assert.match(yaml, /files:\n {4}- learnings\/ci\.d\/ci-learning-hand-fix-/);
   assert.match(yaml, /src\/lib\/a\.ts, src\/lib\/b\.ts/);
   assert.equal(ciLearningRecordVerdict(yaml, "hand-fix:test").ok, true, "the lint accepts the rendered record");
+});
+
+test("W1-T12837 criterion 1: the scheduled rung reads operator.intervention rows and drafts the repeated class", async () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}hand-fix-scheduled-`));
+  const stateDir = join(root, "state");
+  mkdirSync(stateDir, { recursive: true });
+  appendLedger(join(stateDir, LEDGER_FILENAME), interventionLedgerLine(row(111, 2, CAUSE, ["src/lib/a.ts"])));
+  appendLedger(join(stateDir, LEDGER_FILENAME), interventionLedgerLine(row(112, 5, CAUSE, ["src/lib/a.ts"])));
+
+  const drafted: Array<{ findingId: string; prs: number[] }> = [];
+  const run = buildCiLearningCadenceRunner({
+    root,
+    checkoutRoot: REPO_ROOT,
+    loadWindow: () => ({ prs: [] }) as never,
+    fileShards: ((drafts: Array<{ findingId: string; prs: number[] }>) => {
+      drafted.push(...drafts);
+      return { filed: [], skipped: [], refused: [] };
+    }) as never,
+    planOrigins: [],
+    pendingOrigins: () => [],
+    mergedOrigins: () => [],
+    loadLessons: () => ({ status: "unreadable" }) as never,
+    recordAttempt: () => {},
+    recordFire: () => {},
+    clock: fixedClock(NOW.getTime()),
+  });
+
+  const result = await run();
+  assert.equal(result.draftCount, 1, "the scheduled path must mine its own intervention ledger input");
+  assert.equal(drafted[0]!.findingId, `ci-learning:hand-fix:${handFixClassKey(CAUSE, "src/lib/a.ts")}#2`);
+  assert.deepEqual(drafted[0]!.prs, [111, 112]);
 });
 
 test("W1-T12837 criterion 2: the hand-fix draft is machine-authored, verify human, and writes nothing a worker prompt selects", () => {
