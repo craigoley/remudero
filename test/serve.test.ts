@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import { assertWallClockBound } from "#test/helpers/wall-clock-bound.js";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -118,6 +118,14 @@ function fakeRatifyGateway(): RatifyCliGateway & { approved: string[]; reframed:
 
 function tmpRoot(): string {
   return mkdtempSync(join(tmpdir(), "rmd-serve-"));
+}
+
+function copyCorpusLedgerTo(root: string): string {
+  const stateDir = join(root, "state");
+  mkdirSync(stateDir, { recursive: true });
+  const ledgerPath = join(stateDir, "ledger.ndjson");
+  copyFileSync(corpusLedgerPath(), ledgerPath);
+  return ledgerPath;
 }
 
 /** git-init `root`, for the one POST /v1/inbox/approve test below: W1-T2220 moved that write-
@@ -531,12 +539,13 @@ function repoRootFromThisFile(): string {
   return fileURLToPath(new URL("..", import.meta.url));
 }
 
-test("W1-T188 criterion 1: first-paint-to-data is RE-MEASURED empirically at production-corpus scale against a real server, and the result is recorded with numbers", async () => {
+test("W1-T188 criterion 1: first-paint-to-data is RE-MEASURED empirically at production-corpus scale against a real server, and the result is recorded with numbers", async (t) => {
   const plan = loadCorpusPlan();
   const github = loadCorpusGithub();
   const root = tmpRoot();
   const planPath = writePlan(root, "[]\n"); // panel-graph reloads plan/tasks.yaml fresh; unexercised here
-  const ledgerPath = corpusLedgerPath();
+  const ledgerPath = copyCorpusLedgerTo(root);
+  t.after(() => rmSync(root, { recursive: true, force: true }));
 
   const deps: ServeDeps = {
     board: { plan, ledgerPath, github, now: () => Date.parse(FIXED_NOW_ISO) },
@@ -578,7 +587,7 @@ test("W1-T188 criterion 1: first-paint-to-data is RE-MEASURED empirically at pro
   });
 });
 
-test("W1-T188 criterion 2: the first-paint-to-data budget is a REPLAYABLE golden fixture -- the committed production-scale corpus reproduces the budget check identically across independent loads and independent server instances, not a one-off manual curl", async () => {
+test("W1-T188 criterion 2: the first-paint-to-data budget is a REPLAYABLE golden fixture -- the committed production-scale corpus reproduces the budget check identically across independent loads and independent server instances, not a one-off manual curl", async (t) => {
   // REPLAYABLE requires DETERMINISM first: the fixture must be the same data every time it is
   // loaded, not regenerated randomly per run.
   assert.deepEqual(loadCorpusPlan(), loadCorpusPlan(), "the golden corpus plan must be byte-identical across independent loads");
@@ -604,7 +613,8 @@ test("W1-T188 criterion 2: the first-paint-to-data budget is a REPLAYABLE golden
     const github = loadCorpusGithub();
     const root = tmpRoot();
     const planPath = writePlan(root, "[]\n");
-    const ledgerPath = corpusLedgerPath();
+    const ledgerPath = copyCorpusLedgerTo(root);
+    t.after(() => rmSync(root, { recursive: true, force: true }));
     const deps: ServeDeps = {
       board: { plan, ledgerPath, github, now: () => Date.parse(FIXED_NOW_ISO) },
       panelGraph: { root, planPath, ledgerPath, github: fakeTraceGithub(), statusGithub: github, ratify: fakeRatifyGateway() },
