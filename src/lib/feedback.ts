@@ -1142,21 +1142,57 @@ export function readFeedbackEntry(root: string, id: string): FeedbackEntry {
   return feedbackEntryFrom(parseYaml(text), id);
 }
 
-/** List every captured entry of both roots, oldest first (id is Date.now()-prefixed, so filename sort = capture order). */
+/** W1-T13334: the text and the parse of each feedback file, by directory and file name, kept while the file's stat
+ *  identity (dev, ino, size, mtimeNs, ctimeNs) is the same. Only a file that parsed is kept. */
+const keptFeedbackFiles = new Map<string, Map<string, { identity: string; text: string; entry: FeedbackEntry }>>();
+/** A file is kept only when its last change is this old. A file system stamps a change with a clock that ticks (10 ms
+ *  on Linux, up to 2 s elsewhere), so a second write of the same size inside one tick would leave the identity equal. */
+const FEEDBACK_FILE_SETTLE_MS = 2_000;
+
+function feedbackFileStat(path: string, nowMs: number): { identity: string; settled: boolean } {
+  const st = statSync(path, { bigint: true });
+  const lastChangeMs = Number(st.mtimeMs > st.ctimeMs ? st.mtimeMs : st.ctimeMs);
+  return { identity: [st.dev, st.ino, st.size, st.mtimeNs, st.ctimeNs].join(":"), settled: nowMs - lastChangeMs >= FEEDBACK_FILE_SETTLE_MS };
+}
+
+/** List every captured entry of both roots, oldest first (id is Date.now()-prefixed, so filename sort = capture order).
+ *  W1-T13334: a file is read and parsed again only when it is new or its stat identity changed. The stat comes before
+ *  the read, so no answer is older than the file. Each call returns its own copy of every entry. */
 export function listFeedback(root: string, opts: { status?: FeedbackStatus } = {}): FeedbackEntry[] {
-  const files = new Map<string, { path: string; text: string }>();
+  const files = new Map<string, { path: string; text: string; dir: string; identity: string; settled: boolean }>();
+  const nowMs = systemClock.now();
   for (const r of hostFeedbackRoots(root)) {
     const dir = feedbackDir(r);
-    if (!existsSync(dir)) continue;
-    for (const f of readdirSync(dir).filter((name) => name.endsWith(".yaml"))) {
-      const copy = { path: join(dir, f), text: readFileSync(join(dir, f), "utf8") };
+    if (!existsSync(dir)) {
+      keptFeedbackFiles.delete(dir);
+      continue;
+    }
+    const names = new Set(readdirSync(dir).filter((name) => name.endsWith(".yaml")));
+    const kept = keptFeedbackFiles.get(dir);
+    // A file that is gone is dropped.
+    for (const name of kept?.keys() ?? []) if (!names.has(name)) kept!.delete(name);
+    for (const f of names) {
+      const path = join(dir, f);
+      const stat = feedbackFileStat(path, nowMs);
+      const same = kept?.get(f)?.identity === stat.identity ? kept.get(f) : undefined;
+      const copy = { path, dir, ...stat, text: same ? same.text : readFileSync(path, "utf8") };
       const held = files.get(f);
       if (held === undefined) files.set(f, copy);
+      // The two-root check runs on every call, over kept and fresh text alike.
       else assertOneFeedbackCopy(f.replace(/\.yaml$/, ""), held, copy);
     }
   }
-  const entries = [...files].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-    .map(([f, copy]) => feedbackEntryFrom(parseYaml(copy.text), f.replace(/\.yaml$/, "")));
+  const entries = [...files].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([f, copy]) => {
+    const kept = keptFeedbackFiles.get(copy.dir)?.get(f);
+    if (kept?.identity === copy.identity) return structuredClone(kept.entry);
+    // A parse that throws keeps nothing, so the next call reads the file and throws again.
+    const entry = feedbackEntryFrom(parseYaml(copy.text), f.replace(/\.yaml$/, ""));
+    if (copy.settled) {
+      const dirKept = keptFeedbackFiles.get(copy.dir) ?? new Map();
+      keptFeedbackFiles.set(copy.dir, dirKept.set(f, { identity: copy.identity, text: copy.text, entry }));
+    }
+    return structuredClone(entry);
+  });
   return opts.status ? entries.filter((e) => e.status === opts.status) : entries;
 }
 
