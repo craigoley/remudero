@@ -1,0 +1,38 @@
+- id: W1-T13286
+  title: "A lane refill records where its selection time goes, so a freed lane that waits minutes for its next task names the checks that took them"
+  repo: remudero
+  priority: 1.0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # observability only; no decision changes
+  band_meaning: span
+  origin: "operator-session#idle-lanes-2026-11-16"
+  plan_refs:
+    - W1-T13283
+  files:
+    - src/lib/daemon.ts
+    - test/daemon/a-refill-records-where-its-selection-time-goes.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Each tick selection and lane refill writes one row with its total time and the time spent per eligibility check, summed over the candidates it examined, and the number of candidates examined"
+      proof: "grep: W1-T13286 criterion 1 in test/daemon/a-refill-records-where-its-selection-time-goes.test.ts"
+    - claim: "invariant:measuring-changes-no-decision — the candidate chosen, its order and every hold are identical with the timing on and off"
+      proof: "grep: W1-T13286 criterion 2 in test/daemon/a-refill-records-where-its-selection-time-goes.test.ts"
+  rationale: |
+    OBSERVED 2026-11-17 by a read-only investigation of the core ledger for the operator session (INFERRED cause, hence a measurement task, not a fix).
+
+    - `daemon.tick_phases` reported `ms_to_admission: 440122` (7.3 minutes) on a tick, and the refill after W1-T9520 settled took from 00:12:49Z to 00:20:21Z before the next task started. Candidate checks appear to take about 0.3 to 1.4 s each.
+    - A freed lane therefore waits about seven minutes for its next task even when nothing is wrong. With capacity 3 that is up to about 20 slot-minutes per hour, but nothing records which check costs it, so a fix would be a guess. The operator's rule: a projected saving is a hypothesis until measured.
+  design: |
+    1. Time each eligibility probe the selection runs (the `isDispatchEligible` arms and the selector's own reads) through the daemon's clock, summed per probe name over the candidates examined, and write one `dispatch.selection_timing` row per tick selection and per refill: total ms, candidates examined, ms per probe, site.
+    2. No decision reads the row.
+    INVARIANT measuring-changes-no-decision: the candidate chosen, its order and every hold are identical with the timing on and off; no decision reads the new row.
+    NOT IN SCOPE: making any probe faster (a follow-up once the row shows where the time goes); the lane latch (W1-T13283).
+  falsifier: |
+    Drop the row, or leave a probe untimed, and criterion 1 must fail. Let timing change the chosen candidate or order and criterion 2 must fail. Restore and both pass.
+  note: |
+    reservation hand-off: run-unfiled-1794875392692 -> run-unfiled-1794875392692
+    Reserved with rmd next-task-id from a worktree at origin/main. The test folder is the one rmd test-place computed for a stub importing daemon.ts. Do not add a test importer of src/run-task.ts.

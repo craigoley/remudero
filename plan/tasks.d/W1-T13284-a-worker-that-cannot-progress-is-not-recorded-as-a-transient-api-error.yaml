@@ -1,0 +1,43 @@
+- id: W1-T13284
+  title: "A run whose worker cannot make progress is not recorded as a transient API error, so its verdict is a blocker the dispatcher holds and not a retry signal"
+  repo: remudero
+  priority: 0.6
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # it changes which verdict a run ends with
+  band_meaning: span
+  origin: "operator-session#idle-lanes-2026-11-16"
+  plan_refs:
+    - W1-T13283
+    - W1-T8677
+  files:
+    - src/cli/commands/run-task-verb.ts
+    - test/infra/a-worker-that-cannot-progress-is-not-recorded-as-a-transient-api-error.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A run whose attempts end error_codex (api_error) while the progress judge has named a no-progress or needs-operator-input loop ends with a non-transient verdict that names the loop, not blocked_transient"
+      proof: "grep: W1-T13284 criterion 1 in test/infra/a-worker-that-cannot-progress-is-not-recorded-as-a-transient-api-error.test.ts"
+    - claim: "invariant:a-real-api-error-stays-transient — repeated API errors with no progress-judge verdict still end blocked_transient as on origin/main, and a single API error is still retried"
+      proof: "grep: W1-T13284 criterion 2 in test/infra/a-worker-that-cannot-progress-is-not-recorded-as-a-transient-api-error.test.ts"
+  rationale: |
+    MEASURED 2026-11-16 by the operator session on the core ledger (read-only), with the code read on origin/main 1ad4e5a561 by a read-only investigation.
+
+    - W1-T13224 (a docs recon task): attempt 1 on claude succeeded, then the auction routed three fix rounds to codex; each ended `implement.done subtype:error_codex, api_error:true` with stdout capped near 1,048,880 bytes and about 1.25M input tokens.
+    - Its verdict at 21:18:52Z: `{"verdict":"blocked_transient","subtype":"error_codex","reason":"repeated transient API error across 4 retries — fix progress loop: needs-operator-input refusal loop … blocked on host ledger receipts outside worker read scope"}`. The reason itself says the task cannot progress (it needs operator-only host receipts), yet the verdict is transient.
+    - READ src/cli/commands/run-task-verb.ts: `implementAttemptOutcome` maps `error_codex` to an API error, and `finishTransientRetry` turns repeated API errors into `blocked_transient` whatever the progress judge concluded.
+    - Consequence: `blocked_transient` latched a fleet lane for 150 minutes (W1-T13283), and the daemon re-picked the same task at 00:20:21Z, because a transient verdict invites a retry.
+    - W1-T8677 (queued) only ledgers a codex error's message.
+  design: |
+    MEASURE FIRST (in the PR body): which live path writes this verdict (run-task-verb.ts; src/run-task.ts carries a second `implementAttemptOutcome`/`finishTransientRetry`); change the live one and say whether the other is dead.
+    1. When the progress judge's verdict for the run names a no-progress or needs-operator-input loop, the run ends with a blocking verdict naming it (the verdict the judge already writes elsewhere), even when the attempts' subtype is an API error.
+    2. The suite drives the verdict path with injected worker results and judge outcomes.
+    INVARIANT a-real-api-error-stays-transient: without such a judge verdict, API errors end as on origin/main.
+    NOT IN SCOPE: the lane latch (W1-T13283); codex's output size; the auction's routing; W1-T8677's message ledgering.
+  falsifier: |
+    End such a run blocked_transient again and criterion 1 must fail. Make a plain repeated API error blocking, or stop retrying a single one, and criterion 2 must fail. Restore and both pass.
+  note: |
+    reservation hand-off: run-unfiled-1794875392692 -> run-unfiled-1794875392692
+    Reserved with rmd next-task-id from a worktree at origin/main. rmd test-place gave no confident folder for a stub importing run-task-verb.ts; test/infra/ is the filer's choice, and the builder should re-run test-place on the real test's imports and move it if it computes another. Do not add a test importer of src/run-task.ts.
