@@ -216,7 +216,7 @@ test("the recycle reason names each drifted limit as expected and actual", () =>
     assert.deepEqual(serve, [
       { field: "Memory", expected: 7680 * MIB, actual: 0 },
       { field: "MemorySwap", expected: 9728 * MIB, actual: 0 },
-      { field: "CpuShares", expected: 512, actual: 0 },
+      { field: "CpuShares", expected: 4096, actual: 0 }, // W1-T13293: serve's weight is 8x a build daemon's
       { field: "MemoryHigh", expected: 5632 * MIB, actual: 0 }, // serve's working-set floor
     ]);
 
@@ -231,10 +231,10 @@ test("the recycle reason names each drifted limit as expected and actual", () =>
   }
 });
 
-test("W1-T12532 criterion 4: serve launched on the 512 weight reads no drift, and serve still on 4096 reads CpuShares drift", () => {
+test("W1-T12532 criterion 4, W1-T13293 criterion 2: serve launched on the 4096 weight reads no drift, and serve still on 512 reads CpuShares drift", () => {
   const { root, env } = fixture();
   const onPolicy = {
-    Memory: 7680 * MIB, MemorySwap: 9728 * MIB, CpuShares: 512, MemoryReservation: 0,
+    Memory: 7680 * MIB, MemorySwap: 9728 * MIB, CpuShares: 4096, MemoryReservation: 0,
     Annotations: { [MEMORY_HIGH_ANNOTATION]: `uint64 ${5632 * MIB}` },
   };
   let live: Record<string, unknown> = onPolicy;
@@ -245,8 +245,8 @@ test("W1-T12532 criterion 4: serve launched on the 512 weight reads no drift, an
   );
   try {
     assert.deepEqual(read(), [], "a serve container launched on the new policy reads no drift");
-    live = { ...onPolicy, CpuShares: 4096 };
-    assert.deepEqual(read(), [{ field: "CpuShares", expected: 512, actual: 4096 }], "serve still on the old weight is due a replace");
+    live = { ...onPolicy, CpuShares: 512 };
+    assert.deepEqual(read(), [{ field: "CpuShares", expected: 4096, actual: 512 }], "serve still on the equal weight is due a replace");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
