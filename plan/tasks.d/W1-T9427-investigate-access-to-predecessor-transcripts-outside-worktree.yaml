@@ -7,13 +7,13 @@
   verify: auto
   risk: high
   band_meaning: blast-radius
-  priority: 2
   # refusal-amendment (W1-T9427, run W1-T9427-1792614580201, 2026-10-21T21:25:05.112Z): the worker refused criterion 1 [proof-unexecutable-at-head] — proposed re-scope-criteria: repair the criterion's proof so it is executable at HEAD, or re-scope the criterion
   #   worker evidence: The recorded grep targets absent `scripts/fetch-transcripts.sh`; behavioral tests prove the approved staging approach.
   # refusal-amendment (W1-T9427, run W1-T9427-1792614580201, 2026-10-21T21:25:05.112Z): the worker refused criterion 2 [premise-rotted] — proposed close-unbuilt: the premise no longer holds at HEAD — close this task unbuilt, or restate the premise it should build on
   #   worker evidence: The recorded `importTranscript(` interface is absent; the approved integration uses `withPredecessorTranscriptCopies` in `src/run-task.ts`.
   #   this task is held from dispatch until its record changes; an Architect must make the change above
-  status: queued
+  status: blocked
+  retirement: retired  # premise rotted: predecessor transcripts are already staged inside the worktree by withPredecessorTranscriptCopies (src/run-task.ts, W1-T5682, #9759); the worker refusals above (run W1-T9427-1792614580201) proposed close-unbuilt; operator approval 2026-11-17 (#12574)
   # backlog gardener: band=2 evidence=c59a07d1180b405a
   attempts: 0
   files:
@@ -35,3 +35,15 @@
     outside the worktree. I did not verify whether an earlier round had a reason to put this suite
     on the roster. — from unfiled (run DAEMON-1791333830491,
     https://github.com/craigoley/remudero/pull/9724)
+  note: |
+    CLOSED UNBUILT 2026-11-17 (operator approval, escalation #12574): the premise no longer holds, so nothing
+    remains to build. The follow-up asked how a worker could read predecessor transcripts that sit outside
+    its worktree. W1-T5682 (#9759, merged 2026-10-07 as 6cada0dbc) already answers it: the fix rung spawns
+    through `withPredecessorTranscriptCopies`, which copies the readable predecessors into the worktree's
+    own state folder before dispatch. The worker of run W1-T9427-1792614580201 refused criterion 1 as
+    proof-unexecutable-at-head and criterion 2 as premise-rotted (the refusal-amendment comments above
+    `status:`). Re-verified on origin/main cbb96bc8d: `git grep -n withPredecessorTranscriptCopies
+    origin/main -- src/run-task.ts` gives 3 hits (lines 10521, 45727, 45835), and the behaviour is held by
+    test/a-fix-worker-can-read-its-predecessors-transcript.test.ts. scripts/fetch-transcripts.sh and
+    src/lib/transcript.ts do not exist, and `importTranscript(` has no hit under src/. The record has
+    carried the refusal hold since #13440 (2026-10-21). Its dependent W1-T9428 is retired with it.

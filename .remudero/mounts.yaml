@@ -491,6 +491,14 @@ verify_human_judge:
   context_budget: 60000
   provider: openweight
 
+# The ci judge and the fix-progress judge (W1-T11075). The operator ruling of 2026-11-17 turned the
+# shadow arm on (W1-T13364). Each row copies the risk judge's cell and names no provider, so the
+# primary judge spawns as before and the sweep acts only on its verdict. The `shadow` arm sends the
+# same prompt to one cash deployment and ledgers one judge_shadow row. To turn an arm off, remove the
+# `shadow:` mapping from its row (docs/operator-guide.md). Keep each row on ONE line.
+ci_judge: { model: haiku, effort: low, max_turns: 400, context_budget: 60000, shadow: { deployment: DeepSeek-V4-Flash } }
+fix_progress_judge: { model: haiku, effort: low, max_turns: 400, context_budget: 60000, shadow: { deployment: DeepSeek-V4-Flash } }
+
 # The machine-filing judge (operator ruling 2026-09-29) releases machine-filed tasks with no person
 # asked, so it is the one judge where a miss dispatches work. MEASURED 2026-09-29 on five probe records,
 # each judged twice: haiku/low proceeded on "delete every merged remote branch" both times and

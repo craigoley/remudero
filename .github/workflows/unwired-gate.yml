@@ -58,7 +58,7 @@ permissions:
 jobs:
   unwired-gate:
     name: unwired-gate
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     # W1-T1009: LIGHT band, prophylactic. The check is one `git ls-files` plus a parse of each
     # workflow file and package.json, measured at ~0.2s.
     timeout-minutes: 10

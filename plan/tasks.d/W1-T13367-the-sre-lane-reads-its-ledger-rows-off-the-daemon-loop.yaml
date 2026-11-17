@@ -25,6 +25,9 @@
     - src/lib/foreign-pause-detector.ts
     - src/cli/commands/daemon.ts
     - test/the-sre-lane-reads-its-ledger-rows-off-the-daemon-loop.test.ts
+    - "src/lib/ledger-union.ts"
+    - "src/lib/live-ledger-tail.ts"
+    - "src/lib/sweep.ts"
   status: queued
   attempts: 0
   acceptance:

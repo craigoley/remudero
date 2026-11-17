@@ -5,11 +5,11 @@
   type: implement
   verify: auto
   risk: low
-  priority: 2
   # refusal-amendment (W1-T9350, run W1-T9350-1792066416657, 2026-10-15T12:53:25.129Z): the worker refused criterion 1 [premise-rotted] — proposed close-unbuilt: the premise no longer holds at HEAD — close this task unbuilt, or restate the premise it should build on
   #   worker evidence: Declared scope `src/**/*.js` contains zero files at this HEAD; a positive control found 580 TypeScript files.
   #   this task is held from dispatch until its record changes; an Architect must make the change above
-  status: queued
+  status: blocked
+  retirement: retired  # premise rotted: the declared scope src/**/*.js holds zero files on main; the worker refusal above (run W1-T9350-1792066416657) proposed close-unbuilt; operator approval 2026-11-17 (#12008)
   # backlog gardener: band=2 evidence=1bf2c84547b60764
   attempts: 0
   files:
@@ -29,3 +29,14 @@
   
     CodeQL-Snapshot:
     {"proposalId":"codeql-quality:js/useless-expression","ruleId":"js/useless-expression","alertNumbers":["357"]}
+  note: |
+    CLOSED UNBUILT 2026-11-17 (operator approval, escalation #12008): the premise no longer holds, so nothing
+    remains to build. The worker of run W1-T9350-1792066416657 refused criterion 1 as premise-rotted (the
+    refusal-amendment comment above `status:`): the declared scope `src/**/*.js` holds zero files.
+    Re-verified on origin/main cbb96bc8d: `git ls-tree -r --name-only origin/main src | grep -c '\.js$'`
+    prints 0, and the same listing counts 764 `.ts` files (positive control). The record has carried the
+    refusal hold since #12009 (2026-10-15) and no pull request was ever opened for it. Its dependent
+    W1-T9351 is retired with it.
+    NOT RESOLVED BY THIS RETIREMENT: CodeQL alert #357 (js/useless-expression) read `open` on 2026-11-17. It
+    points at src/lib/daemon.ts:7573, a bare `outcome;` statement in a TypeScript file, which this record's
+    scope never covered. Closing it needs its own task scoped to that file.

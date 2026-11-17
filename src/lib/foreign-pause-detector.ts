@@ -362,9 +362,9 @@ export async function evaluateForeignPauseDetectors(input: FleetFlowInput): Prom
   if (!detector) return [];
   const sinceMs = input.nowMs - detector.policy.longMs;
   let rows: readonly FleetFlowRow[];
-  if (input.readRows) rows = await input.readRows(sinceMs, input.nowMs);
+  const inputs = [...detector.inputs];
+  if (input.readRows) rows = await input.readRows(sinceMs, input.nowMs, { reader: "Foreign-pause", inputs });
   else {
-    const inputs = [...detector.inputs];
     const key = JSON.stringify([input.stateDir, inputs]);
     let memo = foreignPauseReaders.get(key);
     if (!memo) {

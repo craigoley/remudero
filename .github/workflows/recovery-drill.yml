@@ -40,7 +40,7 @@ permissions:
 jobs:
   recovery-drill:
     name: recovery-drill (throwaway fixtures, real recovery code, no live fleet touched)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     # R-50: observed runs complete in well under a minute; 20m bounds a genuine hang with
     # generous headroom.
     timeout-minutes: 20

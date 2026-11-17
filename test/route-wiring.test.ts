@@ -18,6 +18,7 @@ import type { TraceGithub } from "#src/lib/trace.js";
 import type { RatifyCliGateway } from "#src/lib/panel-graph.js";
 import { dailyCostCeilingOverridePath } from "#src/lib/policy.js";
 import { operatorNoteStore } from "#src/lib/operator-notes.js";
+import { writeClassificationSnapshot } from "#src/lib/fleet-lane.js";
 import { readNativeOperatorNotes } from "#src/cli/commands/run-task-verb.js";
 import { renderImplementPrompt, renderReconPrompt } from "#src/run-task.js";
 import { renderOperatorNotes } from "#src/lib/operator-notes.js";
@@ -346,6 +347,9 @@ const COVERED: ReadonlySet<string> = new Set([
   "POST /v1/operator-agent/actions/execute-high",
 ]);
 
+// POST transports with read scope have production-wiring proofs, but must accept the read token.
+const COVERED_READ_POSTS: ReadonlySet<string> = new Set(["POST /v1/views/batch"]);
+
 // ── Production-shaped assembly ───────────────────────────────────────────────
 
 interface Harness {
@@ -571,13 +575,51 @@ test("every declared write route is either wiring-tested here or listed as expli
 
   assert.ok(declaredWrites.length >= 10, `expected the derivation to find the write routes, got ${declaredWrites.length}`);
 
-  const unaccounted = declaredWrites.filter((k) => !COVERED.has(k) && !COVERAGE_DEBT.has(k));
+  const unaccounted = declaredWrites.filter((k) => !COVERED.has(k) && !COVERED_READ_POSTS.has(k) && !COVERAGE_DEBT.has(k));
   assert.deepEqual(
     unaccounted,
     [],
     "a write route exists that is neither wiring-tested nor listed in COVERAGE_DEBT with a reason — " +
       "add it to one or the other rather than leaving it silently uncovered",
   );
+});
+
+test("every wiring-covered read POST accepts the read token and reads the fleet's view sources", async () => {
+  await withProductionServer(async (h) => {
+    writeClassificationSnapshot(join(h.fleetRoot, "state"), [
+      { proposalId: "wiring-fleet-root", state: "ready", displayOwner: "operator" },
+    ]);
+    writeClassificationSnapshot(join(h.questionsRoot, "state"), []);
+    for (const key of COVERED_READ_POSTS) {
+      const routePath = key.slice("POST ".length);
+      const body = { reads: [{ view: "nav-badge", params: {} }, { view: "agent", params: {} }] };
+      const anonymous = await post(h.base, routePath, body, "unknown-token", { tailnet: false });
+      await anonymous.arrayBuffer();
+      assert.equal(anonymous.status, 401, `${key} requires authentication`);
+      const res = await post(h.base, routePath, body, READ_TOKEN, { tailnet: false });
+      assert.equal(res.status, 200, `${key} must accept a read-only token`);
+      const { answers } = await res.json();
+      assert.equal(answers.length, 2);
+      assert.equal(answers[0].status, 200);
+      assert.equal(answers[0].body.view, "nav-badge");
+      assert.equal(typeof answers[0].etag, "string");
+      assert.equal(answers[0].body.data.inbox.ready, 1,
+        "the batch must read classification from fleetControlRoot, not questionsRoot");
+      assert.equal(answers[0].body.data.inbox.needsYou, 1);
+      assert.equal(answers[0].body.data.inbox.fleet, 0);
+      const single = await fetch(`${h.base}/v1/views/nav-badge`, {
+        headers: { authorization: `Bearer ${READ_TOKEN}` },
+      });
+      assert.equal(single.status, 200);
+      assert.deepEqual(answers[0].body.data.inbox, (await single.json()).data.inbox);
+      assert.deepEqual(answers[1], {
+        status: 400, error: "invalid_request", detail: "the agent view needs ?instance=",
+      });
+    }
+    assert.equal(ledgerSteps(h.ledgerPath).length, 0, "batch reads must not append to the ledger");
+    assertNothingUnder(h.fleetRoot, "fleetControlRoot");
+    assertNothingUnder(h.questionsRoot, "questionsRoot");
+  });
 });
 
 // ── 1. STOP — the highest-consequence control ────────────────────────────────

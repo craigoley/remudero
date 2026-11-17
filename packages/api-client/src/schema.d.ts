@@ -8624,6 +8624,26 @@ export interface paths {
         };
     };
   };
+  "/v1/views/batch": {
+    post: {
+      responses: {
+          "200": {
+            answers: ({
+              /** The status the GET would answer (200, 304, 400, 404, 503, 500). */
+              status: number;
+              etag?: string;
+              /** The view body the GET would answer with 200 (its own schema is the view's GET schema). */
+              body?: Record<string, never>;
+              error?: string;
+              detail?: string;
+            })[];
+          };
+          "400": Error;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
   "/v1/recent": {
     get: {
       responses: {

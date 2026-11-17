@@ -43,7 +43,7 @@ concurrency:
 jobs:
   main-tripwire:
     name: main-tripwire
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     # LIGHT band (W1-T1009's own banding, applied here without a Playwright install step): a
     # tripwire that could run anywhere near ci.yml's own ~37-41 minute survivors would defeat the
     # whole point of this workflow, so it is bounded well below that.
