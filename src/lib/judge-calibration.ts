@@ -28,6 +28,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
 import { writeAtomic } from "./fs-race-safe.js";
+import { JUDGE_REPLAY_DECISION_ROLE_PREFIX } from "./judge-replay-batch.js";
 import { appendPanelLedger, bearerTokenId, isRecord, jsonAction, sendJson } from "./panel-actions.js";
 import type { Route } from "./service.js";
 import { decisionAnsweredTypedAnswers, scoreTypedAnswers, type TypedAnswerRow, type TypedAnswerScores } from "./typed-answer-scores.js";
@@ -134,6 +135,8 @@ function shadowTypedAnswer(line: Row): TypedAnswerRow | undefined {
 /** A ledger row's typed answers, or the ones {@link judgeCalibrationRow} already read off it. */
 function typedAnswersOf(line: Row): TypedAnswerRow[] {
   if (Array.isArray(line.typed_answers)) return line.typed_answers as TypedAnswerRow[];
+  // W1-T12421: a direct judge replay's decision request; its answer, with the case's outcome, is in its judge_replay.answered row.
+  if (line.step === "decision.answered" && typeof line.role === "string" && line.role.startsWith(JUDGE_REPLAY_DECISION_ROLE_PREFIX)) return [];
   if (line.step !== "shadow_judge.paired") return decisionAnsweredTypedAnswers(line).map((row) => ({ ...row, head: headOfTypedAnswerLine(line, row.role) }));
   const shadow = shadowTypedAnswer(line);
   return shadow ? [shadow] : [];
