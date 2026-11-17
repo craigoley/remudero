@@ -205,6 +205,7 @@ test("W1-T12415: a deleted fixture module's source map outside the tree is dropp
   const missing = wrapper.missingFixtureSourceMaps as (output: string, cwd?: string) => string[];
   assert.deepEqual(missing(warning(fixture, fixture), REPO_ROOT), [fixture]);
   assert.deepEqual(missing(warning(inTree, fixture), REPO_ROOT), [], "a missing source inside the tree is never dropped");
+  assert.deepEqual(missing(warning("https://example.com/gone.ts", fixture), REPO_ROOT), [], "a source that is no file URL is never dropped");
   const changed = (wrapper.dropFixtureSourceMaps as (rawDir: string, scripts: string[]) => string[])(raw, [fixture]);
   assert.deepEqual(changed, [join(raw, name)], "only the report that holds the fixture's source map changes");
   const after = JSON.parse(readFileSync(join(raw, name), "utf8")) as { "source-map-cache": Record<string, unknown> };
@@ -219,7 +220,7 @@ test("W1-T12415: a deleted fixture module's source map outside the tree is dropp
  * passed: the failure the wrapper repairs. An enclosing coverage run's directory passes through to the
  * wrapper itself, so the lines it runs here are measured.
  */
-function runDeletedFixtureShard(t: Parameters<typeof ownedFixtureDir>[0], count: number) {
+function runDeletedFixtureShard(t: Parameters<typeof ownedFixtureDir>[0], count: number, truncatedReport = false) {
   const dir = realpathSync(ownedFixtureDir(t, "deleted-fixture-shard").dir);
   const work = join(dir, "work");
   const gone = join(dir, "gone");
@@ -243,6 +244,9 @@ function runDeletedFixtureShard(t: Parameters<typeof ownedFixtureDir>[0], count:
     "    (await import(pathToFileURL(file).href)).f();",
     "  }",
     "  rmSync(gone, { recursive: true, force: true });",
+    // A truncated raw report that names fixture-0's script: the repair cannot parse it to drop that source map.
+    ...(truncatedReport ? [`  writeFileSync(${JSON.stringify(join(work, "raw", "coverage-1-1794859933719-1.json"))}, ${
+      JSON.stringify(`{"source-map-cache":{${JSON.stringify(pathToFileURL(join(gone, "fixture-0.mjs")).href)}:`)});`] : []),
     "});",
     "",
   ].join("\n"));
@@ -283,4 +287,12 @@ test("W1-T12415: a shard with more deleted fixture source maps than the repair h
   assert.doesNotMatch(run.output, /FLAKE-RETRY-RECOVERED/, "a repair that never rebuilt the lcov is not announced");
   assert.notEqual(run.code, 0, "the run stays failed");
   assert.match(run.output, /FLAKE-RETRY-FILES: no failed test file could be named/, "and its verdict stands, unrepeated");
+});
+
+test("W1-T12415: a deleted fixture's source map that the repair cannot drop from a truncated raw report keeps the shard failed", (t) => {
+  const run = runDeletedFixtureShard(t, 1, true);
+  assert.match(run.output, /Could not report code coverage[^\n]*Cannot find '[^']*fixture-0\.ts'/, `the first pass could not report\n${run.output}`);
+  assert.match(run.output, /test-with-retry: could not drop deleted fixtures' source maps: /, `the failed drop is named\n${run.output}`);
+  assert.doesNotMatch(run.output, /FLAKE-RETRY-RECOVERED: dropped the source maps of deleted fixture module/, "a repair that dropped nothing is not announced");
+  assert.notEqual(run.code, 0, "the run stays failed");
 });
