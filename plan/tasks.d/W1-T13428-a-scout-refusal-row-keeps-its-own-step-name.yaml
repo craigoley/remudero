@@ -52,8 +52,8 @@
       task per concern". The 12 under sweep.plan_round.refused say the same for W1-T9942. The live ledger
       keeps 17 of each, from 2026-11-14T03:32Z to 2026-11-16T02:39Z. In the same 72 hours there were 37 real
       sweep.fix.dispatch_failed rows, none about plan lint.
-    - The refused fresh filings carry a newly minted task id each pass (W1-T12674 to W1-T13120 in these
-      rows), 108 ids that no task file uses.
+    - The refused fresh filings carry a newly minted task id each pass (ids 12674 to 13120 in these rows),
+      108 ids that no task file uses.
     - W1-T9942 and W1-T9946 are still queued at origin/main with risk low and only their test file. The
       scout's re-derivation adds the writers of their step (two modules), plan lint Rule 19 refuses two
       subsystems at risk low, and the pass tries again next time. W1-T9268 had the same refusal until a
