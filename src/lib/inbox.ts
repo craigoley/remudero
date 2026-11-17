@@ -2709,19 +2709,22 @@ export interface AnchorGrepCache {
 /** The repo-relative files that differ between commits `from` and `to` (both names of a rename), or undefined. */
 export type AnchorChangedFiles = (from: string, to: string) => readonly string[] | undefined;
 
-/** W1-T13302: past this many changed files, a move empties the cache instead of carrying it. */
+/** W1-T13302: past this many changed files, a move empties the cache instead of carrying it.
+ *  BACKSTOP: a normal main move changes a handful of files and is carried; only a bulk move trips this. */
 export const ANCHOR_CARRY_MAX_CHANGED_FILES = 2_000;
 
-/** How long the one `git diff --name-only` of a move may run before the move empties the cache instead. */
+/** How long the one `git diff --name-only` of a move may run before the move empties the cache instead.
+ *  BACKSTOP: a healthy diff of two commits returns in well under a second; only a wedged git trips this. */
 export const ANCHOR_CARRY_DIFF_TIMEOUT_MS = 10_000;
 
-/** REAL {@link AnchorChangedFiles}: `git diff --name-only --no-renames -z from to` in `cwd`. Any failure (a commit
- *  gone, a timeout) answers undefined, and the caller empties the cache as before. */
+/** REAL {@link AnchorChangedFiles}: `git diff --name-only --no-renames -z from to` in `cwd`, through the hardened
+ *  leaf (pinned gitdir, no ext-diff/textconv, no code-executing config). Any failure (a commit gone, a timeout, a
+ *  refused pin or config) answers undefined, and the caller empties the cache as before. */
 export function gitAnchorChangedFiles(cwd: string): AnchorChangedFiles {
   return (from, to) => {
     try {
-      const out = execFileSync("git", ["diff", "--name-only", "--no-renames", "-z", from, to, "--"],
-        { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: ANCHOR_CARRY_DIFF_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024 });
+      const out = hostWorktreeGit(cwd, ["diff", "--name-only", "--no-renames", "-z", from, to, "--"],
+        { timeout: ANCHOR_CARRY_DIFF_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024 });
       return out.split("\0").filter((name) => name !== "");
     } catch (_err) {
       // Carried, not erased: an unreadable diff means "do not carry", and the cache empties as it did before W1-T13302.
