@@ -85,6 +85,7 @@ export const CLI_ONLY = {
   "pr-state": "host-local, ledger-first PR state read over the operator's ledger union, with one broker query for stale or missing fields; the remote console has no route for this host-local read",
   "improvement-action": "daemon-owned internal worker: executes an already persisted improvement operation only after daemon ownership, repository identity and ordinary admission checks; console routes save requests rather than executing this worker",
   "review-replay": "Refreshes a checked-in sample in the caller's local git checkout from its complete retained ledger and seeded reviewer-health projection; the remote console cannot write that checkout.",
+  "cash-reconcile": "Reads a manually staged Azure cost export and the local ledger to reconcile operator billing; the remote console cannot read either host-local input.",
   ...reasons(
     [
       "run-task",

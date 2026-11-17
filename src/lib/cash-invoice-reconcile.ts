@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, statSync } from "node:fs";
+import { readFile as readFileAsync, readdir as readdirAsync, stat as statAsync } from "node:fs/promises";
 import { join } from "node:path";
 import { cashDeploymentEndpoint, type Config } from "./config-schema.js";
 import { appendLedger } from "./ledger.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
-import { readLedgerUnionRecords, type OpenLedgerUnionOptions } from "./ledger-union.js";
+import { readLedgerUnionRecords, readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { spendRoleOf } from "./spend-rows.js";
 import { isFoundryClaudeDeployment, OPENWEIGHT_PRICES, type OpenWeightPrice } from "./worker-provider.js";
 
@@ -193,14 +194,6 @@ function meteredRow(deployment: string, price: OpenWeightPrice, tokens: Record<s
   };
 }
 
-/** The ledger union, read off the event loop. `unread` names each file or directory the read could not open. */
-async function unionRows(stateDir: string, opts: OpenLedgerUnionOptions): Promise<{ rows: Record<string, unknown>[]; unread: string[] }> {
-  const unread: string[] = [];
-  const note = (path: string): void => { unread.push(path); };
-  const rows = await readLedgerUnionRecords(stateDir, { ...opts, onUnreadArchive: note, onUnreadLive: note, onUnreadDirectory: note });
-  return { rows, unread };
-}
-
 /** A produced cash receipt row: the unit the reconciler meters. */
 function cashReceipt(row: Record<string, unknown>): boolean {
   return row.provider === "cash" && typeof row.model === "string" && spendRoleOf(row) === "produced" &&
@@ -264,10 +257,25 @@ export function reconcileCashInvoice(input: CashInvoiceInput): CashInvoiceReconc
  *  incomplete ledger union, because a missing rotation would read as missing traffic. */
 export async function readCashInvoiceReceipts(stateDir: string, day: string): Promise<Record<string, unknown>[]> {
   if (!DAY.test(day)) throw new Error(`reconcile day must be YYYY-MM-DD, got ${JSON.stringify(day)}`);
-  const read = await unionRows(stateDir, { since: `${day}T00:00:00.000Z`,
-    where: (row) => cashReceipt(row) && String(row.ts ?? "").slice(0, 10) === day });
-  if (read.unread.length > 0) throw new Error(`cash receipts ledger unreadable: ${read.unread.join(", ")}`);
-  return read.rows;
+  const unread: string[] = [];
+  const rows = await readLedgerUnionRecords(stateDir, { since: `${day}T00:00:00.000Z`,
+    where: (row) => cashReceipt(row) && String(row.ts ?? "").slice(0, 10) === day,
+    onUnreadArchive: (path) => unread.push(path), onUnreadLive: (path) => unread.push(path),
+    onUnreadDirectory: (path) => unread.push(path) });
+  if (unread.length > 0) throw new Error(`cash receipts ledger unreadable: ${unread.join(", ")}`);
+  return rows;
+}
+
+/** The same fail-closed receipt view, streamed through the daemon's async ledger reader. */
+export async function readCashInvoiceReceiptsAsync(stateDir: string, day: string): Promise<Record<string, unknown>[]> {
+  if (!DAY.test(day)) throw new Error(`reconcile day must be YYYY-MM-DD, got ${JSON.stringify(day)}`);
+  const unread: string[] = [];
+  const rows = await readLedgerUnionRecords(stateDir, { since: `${day}T00:00:00.000Z`,
+    where: (row) => cashReceipt(row) && String(row.ts ?? "").slice(0, 10) === day,
+    onUnreadArchive: (path) => unread.push(path), onUnreadLive: (path) => unread.push(path),
+    onUnreadDirectory: (path) => unread.push(path) });
+  if (unread.length > 0) throw new Error(`cash receipts ledger unreadable: ${unread.join(", ")}`);
+  return rows;
 }
 
 /** Each priced deployment's Azure account name, from the first host label of its configured cash endpoint. */
@@ -339,6 +347,48 @@ export async function newestCostExport(stateDir: string, today: string, read: (p
   return { path: newest.path, digest, text, day };
 }
 
+/** The daemon-loop variant of {@link newestCostExport}; directory, export and ledger reads are asynchronous. */
+export async function newestCostExportAsync(stateDir: string, today: string): Promise<CostExportCandidate | undefined> {
+  const dir = join(stateDir, COST_EXPORTS_DIR);
+  let names: string[];
+  try { names = await csvPaths(dir); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+  const files = await Promise.all(names.map(async (path) => ({ path, stat: await statAsync(path) })));
+  const newest = files.filter((file) => file.stat.isFile())
+    .sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs || b.path.localeCompare(a.path))[0];
+  if (!newest) return undefined;
+  const text = await readFileAsync(newest.path, "utf8");
+  const digest = costExportDigest(text);
+  const unread: string[] = [];
+  const history = (await readLedgerUnionRecords(stateDir, { step: [CASH_INVOICE_RECONCILED_STEP, CASH_INVOICE_RECONCILE_FAILED_STEP],
+    onUnreadArchive: (path) => unread.push(path), onUnreadLive: (path) => unread.push(path),
+    onUnreadDirectory: (path) => unread.push(path) }));
+  if (unread.length > 0) throw new Error(`cash invoice history ledger unreadable: ${unread.join(", ")}`);
+  let days: string[];
+  try { days = parseCostExport(text).map((row) => row.day); }
+  catch (error) {
+    if (history.some((row) => row.export_digest === digest && row.step === CASH_INVOICE_RECONCILE_FAILED_STEP)) return undefined;
+    return { path: newest.path, digest, text, refused: error instanceof Error ? error.message : String(error) };
+  }
+  const day = days.filter((d) => d < today).sort().pop();
+  if (day === undefined || history.some((row) => row.export_digest === digest && row.day === day)) return undefined;
+  return { path: newest.path, digest, text, day };
+}
+
+async function csvPaths(dir: string): Promise<string[]> {
+  const paths: string[] = [];
+  const entries = await readdirAsync(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) paths.push(...await csvPaths(path));
+    else if (entry.isFile() && entry.name.toLowerCase().endsWith(".csv")) paths.push(path);
+  }
+  return paths;
+}
+
 export interface InvoiceVerdictRead {
   /** False when a ledger rotation could not be read; every open-weight arm is then not eligible to lead. */
   ok: boolean;
@@ -348,15 +398,34 @@ export interface InvoiceVerdictRead {
 }
 
 export async function readNewestInvoiceVerdicts(stateDir: string): Promise<InvoiceVerdictRead> {
-  const read = await unionRows(stateDir, { step: CASH_INVOICE_RECONCILED_STEP });
+  const unread: string[] = [];
+  const rows = await readLedgerUnionRecords(stateDir, { step: CASH_INVOICE_RECONCILED_STEP,
+    onUnreadArchive: (path) => unread.push(path), onUnreadLive: (path) => unread.push(path),
+    onUnreadDirectory: (path) => unread.push(path) });
   const newest = new Map<string, Record<string, unknown>>();
   const order = (row: Record<string, unknown>): string => `${String(row.day ?? "")} ${String(row.ts ?? "")}`;
-  for (const row of read.rows) {
+  for (const row of rows) {
     if (typeof row.deployment !== "string") continue;
     const prior = newest.get(row.deployment);
     if (prior === undefined || order(row) >= order(prior)) newest.set(row.deployment, row);
   }
-  return { ok: read.unread.length === 0, unread: read.unread, newest };
+  return { ok: unread.length === 0, unread, newest };
+}
+
+/** Async variant for the daemon cadence's deployment bake-off. */
+export async function readNewestInvoiceVerdictsAsync(stateDir: string): Promise<InvoiceVerdictRead> {
+  const unread: string[] = [];
+  const rows = await readLedgerUnionRecords(stateDir, { step: CASH_INVOICE_RECONCILED_STEP,
+    onUnreadArchive: (path) => unread.push(path), onUnreadLive: (path) => unread.push(path),
+    onUnreadDirectory: (path) => unread.push(path) });
+  const newest = new Map<string, Record<string, unknown>>();
+  const order = (row: Record<string, unknown>): string => `${String(row.day ?? "")} ${String(row.ts ?? "")}`;
+  for (const row of rows) {
+    if (typeof row.deployment !== "string") continue;
+    const prior = newest.get(row.deployment);
+    if (prior === undefined || order(row) >= order(prior)) newest.set(row.deployment, row);
+  }
+  return { ok: unread.length === 0, unread, newest };
 }
 
 /** An arm is open-weight when its deployment's price row does not carry `unbilledAzureOpenAi429`. */

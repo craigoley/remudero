@@ -1328,7 +1328,7 @@ import {
 import { routingAbCommand } from "./lib/routing-experiments.js";
 import { attributeAttemptOutcome } from "./lib/attempt-outcome-attribution.js";
 import { recordRoutingExperimentResults } from "./lib/routing-experiment-result.js";
-import { cashInvoiceAccounts, costExportDigest, newestCostExport, readCashInvoiceReceipts, reconcileCashInvoice, recordCashInvoiceFailure,
+import { cashInvoiceAccounts, costExportDigest, newestCostExportAsync, readCashInvoiceReceipts, readCashInvoiceReceiptsAsync, reconcileCashInvoice, recordCashInvoiceFailure,
   recordCashInvoiceVerdicts, type CashInvoiceReconciliation, type CostExportSource } from "./lib/cash-invoice-reconcile.js";
 import { askDecisionModel, decisionsCommand } from "./lib/decision-model.js";
 import { judgeReplayCommand, parseJudgeReplayLane, replayJudgeCorpus } from "./lib/judge-replay-batch.js";
@@ -22478,7 +22478,8 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
   const run =
     deps.run ??
     (async () => {
-      const root = configFor().root;
+      const config = configFor();
+      const root = config.root;
       const cadenceClock = clockFromDateFn(deps.now);
       // RECORD THE FIRE FIRST, deliberately — the SAME crash-safety discipline
       // `buildAutoTriageDaemonHooks`'s `runAutoTriage` uses: if the report run throws or the
@@ -22487,7 +22488,7 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
       if (deps.recordFire !== false) recordMeasurementCadenceFire(measurementCadenceMarkerPath(root), cadenceClock.date(), 24 * 60 * 60 * 1000);
       const coverageRunId = `MEASUREMENT-CADENCE-${cadenceClock.now()}`;
       await recordRoutingExperimentResults({ stateDir: join(root, "state"), today: cadenceClock.iso().slice(0, 10) });
-      await reconcileNewestCostExport(root, configFor, cadenceClock);
+      await reconcileNewestCostExport(config, cadenceClock);
       const verifyHumanRunId = `VERIFY-HUMAN-CADENCE-${cadenceClock.iso()}`;
       // `repoRoot`, NOT `root` (which is `config.root`, the state volume) — see this function's own
       // parameter doc. The sibling `coverageImprovement` below already passes `repoRoot`.
@@ -43450,18 +43451,21 @@ async function runCashInvoiceReconcile(config: Config, source: CostExportSource 
   return result;
 }
 
-/** The measurement cadence's reconcile: the newest export file under `<state>/cost-exports/`, once per day and file.
- *  The config is read only when a file waits, so a cadence with no export reads it no extra time. */
-async function reconcileNewestCostExport(root: string, configFor: () => Config, clock: Clock): Promise<void> {
-  const stateDir = join(root, "state");
-  const candidate = await newestCostExport(stateDir, clock.iso().slice(0, 10), (path) => readFileSync(path, "utf8"));
+/** The measurement cadence's reconcile: the newest export file under `<state>/cost-exports/`, once per day and file. */
+async function reconcileNewestCostExport(config: Config, clock: Clock): Promise<void> {
+  const stateDir = join(config.root, "state");
+  const candidate = await newestCostExportAsync(stateDir, clock.iso().slice(0, 10));
   if (candidate === undefined) return;
   const runId = `CASH-INVOICE-CADENCE-${clock.now()}`;
   if ("refused" in candidate) {
     recordCashInvoiceFailure(stateDir, "unparsed", candidate, runId, new Error(candidate.refused));
     return;
   }
-  try { await runCashInvoiceReconcile(configFor(), candidate, runId); }
+  try {
+    const result = reconcileCashInvoice({ day: candidate.day, receipts: await readCashInvoiceReceiptsAsync(stateDir, candidate.day),
+      exportCsv: candidate.text, accounts: cashInvoiceAccounts(config) });
+    recordCashInvoiceVerdicts(stateDir, result, candidate, runId);
+  }
   catch (error) {
     // Recorded, not erased: the ledger row names the day, the file and the reason, the pair is not retried, and the
     // sibling cadence work still runs.
