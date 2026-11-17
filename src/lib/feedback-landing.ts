@@ -2777,17 +2777,36 @@ function* taskFilesLandingSteps(
         return null; // main does not hold the path
       }
     };
-    /** Whether a file on main other than `relPath` holds the id that `text` files. An unreadable search says yes. */
-    const otherMainFileHoldsId = function* (text: string, relPath: string): Generator<LandingAsk, boolean, AskReply> {
+    /**
+     * W1-T13429, invariant:a-landed-id-keeps-its-reservation: why the id `text` files stays reserved, because a task
+     * file in the plan folder on the target's main declares it at any path; undefined when none does. A gate reads
+     * that reservation for every record on main. No id, or a search that cannot be read, keeps it.
+     */
+    const mainDeclaresId = function* (text: string): Generator<LandingAsk, string | undefined, AskReply> {
       const id = taskIdOfTaskFileText(text);
-      if (id === undefined) return true;
+      if (id === undefined) return "the file names no id";
       try {
         const hits = yield* net.git(["grep", "-l", "-E", `^[[:space:]]*(-[[:space:]]+)?id:[[:space:]]*["']?${id}["']?[[:space:]]*$`, yield* freshMain(), "--", relative(root, resolveRepoLayout(root).planDir)]);
-        return hits.split("\n").map((l) => l.trim()).filter((l) => l !== "").some((l) => l.slice(l.indexOf(":") + 1) !== relPath);
+        const paths = hits.split("\n").map((l) => l.trim()).filter((l) => l !== "").map((l) => l.slice(l.indexOf(":") + 1));
+        return paths.length === 0 ? undefined : `a task file on origin/main declares ${id}: ${paths.join(", ")}`;
       } catch (e) {
         // git grep exits 1 for no match; any other failure is unreadable, and unreadable keeps the id.
-        return (e as { code?: unknown; status?: unknown }).code !== 1 && (e as { status?: unknown }).status !== 1;
+        const err = e as { code?: unknown; status?: unknown; message?: unknown };
+        if (err.code === 1 || err.status === 1) return undefined;
+        return `the search of origin/main for ${id} could not be read: ${String(err.message ?? e)}`;
       }
+    };
+    /** W1-T13429: release the id of a new file `reason` refused only when main holds no file at `relPath` and declares it nowhere. */
+    const releaseUnlessMainDeclares = function* (text: string, relPath: string, mainBlob: string | null, reason: string): Generator<LandingAsk, SetAsideIdRelease, AskReply> {
+      const kept = mainBlob !== null ? `origin/main holds ${relPath}` : yield* mainDeclaresId(text);
+      if (kept !== undefined) {
+        const id = taskIdOfTaskFileText(text);
+        return id === undefined ? { id_release: "no_id" } : { reserved_id: id, id_release: "kept_main_holds_path", id_release_detail: kept };
+      }
+      return JSON.parse((yield {
+        run: () => { throw new Error("the task-file landing releases an id only under the async driver"); },
+        runAsync: async () => JSON.stringify(await releaseSetAsideTaskIdAsync(reservationGit, text, kind.branch, reason, lane, opts.log)),
+      }) as string) as SetAsideIdRelease;
     };
     const treeOf = function* (files: ReadonlyArray<{ relPath: string; blob: string }>): Generator<LandingAsk, string, AskReply> {
       yield* net.git(["read-tree", yield* freshMain()], { env });
@@ -2831,13 +2850,7 @@ function* taskFilesLandingSteps(
       `the plan preflight refused it: ${failures.map((f) => `[${f.check}] ${f.firstLine}`).join("; ")}`;
     const setAside = function* (file: StagedTaskFile, refusal: Omit<TaskFileRefusal, "path">, mainBlob: string | null): Generator<LandingAsk, void, AskReply> {
       let idRelease: SetAsideIdRelease | undefined;
-      if (file.baseBlob === null) {
-        const text = readFileSync(file.abs, "utf8");
-        idRelease = mainBlob !== null ? { id_release: "kept_main_holds_path" } : JSON.parse((yield {
-          run: () => { throw new Error("the task-file landing releases an id only under the async driver"); },
-          runAsync: async () => JSON.stringify(await releaseSetAsideTaskIdAsync(reservationGit, text, kind.branch, refusal.reason, lane, opts.log)),
-        }) as string) as SetAsideIdRelease;
-      }
+      if (file.baseBlob === null) idRelease = yield* releaseUnlessMainDeclares(readFileSync(file.abs, "utf8"), file.relPath, mainBlob, refusal.reason);
       const to = join(taskFilesRefusedRoot(stateRoot), file.relPath);
       mkdirSync(dirname(to), { recursive: true });
       renameSync(file.abs, to);
@@ -2852,13 +2865,10 @@ function* taskFilesLandingSteps(
     for (const input of inputs) {
       const { relPath, content, claim, proof } = input;
       let baseBlob: string | null | undefined;
-      const refuse = function* (reason: string, extra: Partial<TaskFileRefusal> = {}, mainHoldsBytes = false): Generator<LandingAsk, void, AskReply> {
+      const refuse = function* (reason: string, extra: Partial<TaskFileRefusal> = {}): Generator<LandingAsk, void, AskReply> {
         let idRelease: SetAsideIdRelease | undefined;
-        if ((baseBlob === null || mainHoldsBytes) && input.newFile === true && extra.timedOut !== true && !existsSync(join(taskFilesPendingRoot(stateRoot), relPath))) {
-          idRelease = JSON.parse((yield {
-            run: () => { throw new Error("the task-file landing releases an id only under the async driver"); },
-            runAsync: async () => JSON.stringify(await releaseSetAsideTaskIdAsync(reservationGit, content, kind.branch, reason, lane, opts.log)),
-          }) as string) as SetAsideIdRelease;
+        if (baseBlob !== undefined && input.newFile === true && extra.timedOut !== true && !existsSync(join(taskFilesPendingRoot(stateRoot), relPath))) {
+          idRelease = yield* releaseUnlessMainDeclares(content, relPath, baseBlob, reason);
         }
         result.refused.push({ path: relPath, reason, ...extra, ...idRelease });
       };
@@ -2891,9 +2901,8 @@ function* taskFilesLandingSteps(
       writeFileSync(tmpFile, content);
       const blob = (yield* net.git(["hash-object", "-w", tmpFile], { env })).trim();
       if (blob === baseBlob) {
-        // W1-T12456: main already carries the id in this very file, so its reservation is dead weight —
-        // unless a different file on main also holds the id, which is then not ours to free.
-        yield* refuse(`origin/main already holds these bytes at ${relPath}`, {}, !(yield* otherMainFileHoldsId(content, relPath)));
+        // W1-T13429: main declares the id in this very file, so its reservation stays (W1-T12456 released it).
+        yield* refuse(`origin/main already holds these bytes at ${relPath}`);
         continue;
       }
       const verdict = yield* verdictOf([{ relPath, blob, claim, proof }]);
