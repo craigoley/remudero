@@ -1053,7 +1053,9 @@ export interface DirectMergePreflightEvidence extends RatchetUpdateWithheldEvide
   planTouch?: PlanTouch;
   /** W1-T5472 — why a PR GitHub would merge as-is was updated instead; W1-T5748 — or held, past
    *  the refresh bound. */
-  reason?: "plan_pr_behind" | "plan_pr_refresh_bound" | "plan_pr_mergeability_unknown_bound" | "main_changed_own_files" | "plan_merge_unread" | "ratchet_collision" | "freshness_latch" | "direct_merge_in_flight";
+  reason?: "plan_pr_behind" | "plan_pr_refresh_bound" | "plan_pr_mergeability_unknown_bound" |
+    "plan_pr_mergeability_unknown_already_escalated" | "main_changed_own_files" | "plan_merge_unread" |
+    "ratchet_collision" | "freshness_latch" | "direct_merge_in_flight";
   /** W1-T9962 — the merged-tree ratchet verdict this decision consulted. */
   ratchetJudge?: MergedRatchetJudgement;
   /** W1-T9536 — why main's changes since the merge base refreshed a behind PR, and the files. */
@@ -2077,6 +2079,11 @@ function planPrUnknownElapsedMs(rows: Array<Record<string, unknown>>, prUrl: str
   return now - firstHeldAt;
 }
 
+function planPrUnknownWasEscalated(rows: Array<Record<string, unknown>>, prUrl: string, head: string): boolean {
+  return rows.some((row) => row.step === "automerge.plan_pr_mergeability_unknown_escalated" &&
+    row.pr_url === prUrl && row.prior_head_sha === head);
+}
+
 /**
  * W1-T5615 — a plan-touching (or unreadable) PR, never armed. GitHub's `mergeable_state` reads
  * `clean`, `behind`, `unstable` or `has_hooks` once required checks pass: the direct path merges a current
@@ -2151,6 +2158,16 @@ function* attemptPlanPrMergeSteps(
       }
     }
     if (head) elapsedMs = planPrUnknownElapsedMs(deps.ledgerLines?.() ?? [], prUrl, head, systemClock.now());
+    if (head && planPrUnknownWasEscalated(deps.ledgerLines?.() ?? [], prUrl, head)) {
+      return {
+        outcome: "direct-merge-preflight-refused",
+        directMergePreflight: {
+          priorHeadSha: head, mergeable: facts.mergeable, mergeableState: facts.mergeableState,
+          planTouch, remedy: "operator", reason: "plan_pr_mergeability_unknown_already_escalated",
+          mergeabilityUnknownElapsedMs: elapsedMs,
+        },
+      };
+    }
     if (elapsedMs >= PLAN_PR_UNKNOWN_HOLD_BOUND_MS) {
       deps.say(
         `automerge.plan_pr_mergeability_unknown_escalated (W1-T5733): head=${head} elapsed_ms=${elapsedMs}` +

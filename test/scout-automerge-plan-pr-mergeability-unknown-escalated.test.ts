@@ -23,14 +23,28 @@ describe("test/scout-automerge-plan-pr-mergeability-unknown-escalated.test.ts", 
     const held = { ts: new Date(NOW - 600_000).toISOString(), step: "automerge.plan_pr_held", pr_url: PR,
       prior_head_sha: HEAD, remedy: "mergeability-unknown" };
     const calls: string[] = [];
-    const result = attemptArm(PR, deps([held], calls), HEAD);
+    const ledger: Array<Record<string, unknown>> = [held];
+    const attemptDeps = deps(ledger, calls);
+    const result = attemptArm(PR, attemptDeps, HEAD);
     assert.equal(result.outcome, "direct-merge-preflight-refused");
     assert.deepEqual(calls, [], "an escalated hold never arms, merges or refreshes");
-    const rows: Array<Record<string, unknown>> = [];
-    logArmAttribution((step, extra) => { rows.push({ step, ...extra }); },
+    const firstRows: Array<Record<string, unknown>> = [];
+    logArmAttribution((step, extra) => { firstRows.push({ step, ...extra }); },
       result.outcome, PR, "W1-T9520", "review", {}, undefined, result.directMergePreflight);
-    const escalated = rows.filter((r) => r.step === "automerge.plan_pr_mergeability_unknown_escalated");
-    assert.equal(escalated.length, 1, "exactly one escalation row per attempt");
-    assert.equal(escalated[0]?.prior_head_sha, HEAD);
+    ledger.push(...firstRows);
+    const escalated = () => ledger.filter((r) => r.step === "automerge.plan_pr_mergeability_unknown_escalated");
+    assert.equal(escalated().length, 1, "the first over-bound attempt records the escalation");
+    assert.equal(escalated()[0]?.prior_head_sha, HEAD);
+
+    const repeated = attemptArm(PR, attemptDeps, HEAD);
+    assert.equal(repeated.outcome, "direct-merge-preflight-refused");
+    assert.equal(repeated.directMergePreflight?.reason, "plan_pr_mergeability_unknown_already_escalated");
+    const repeatedRows: Array<Record<string, unknown>> = [];
+    logArmAttribution((step, extra) => { repeatedRows.push({ step, ...extra }); },
+      repeated.outcome, PR, "W1-T9520", "review", {}, undefined, repeated.directMergePreflight);
+    assert.equal(repeatedRows.some((r) => r.step === "automerge.plan_pr_mergeability_unknown_escalated"), false,
+      "later passes keep the operator refusal without re-emitting the escalation");
+    assert.equal(escalated().length, 1, "the escalation remains one row for this PR head");
+    assert.deepEqual(calls, [], "an escalated head never arms, merges or refreshes");
   });
 });
