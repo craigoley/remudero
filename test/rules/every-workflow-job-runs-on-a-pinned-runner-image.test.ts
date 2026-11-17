@@ -1,3 +1,4 @@
+// @census-reads: .github/workflows/ test/rules/every-workflow-job-runs-on-a-pinned-runner-image.test.ts — every workflow file and itself.
 /**
  * W1-T13353 — EVERY WORKFLOW JOB RUNS ON A PINNED RUNNER IMAGE, NEVER A MOVING `-latest` LABEL.
  *
