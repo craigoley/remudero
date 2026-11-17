@@ -11,6 +11,7 @@
   author_class: machine
   origin: "scout:board_gateway.fetch_failed"
   files:
+    - src/lib/github-http-read.ts
     - test/scout-board-gateway-fetch-failed.test.ts
   acceptance:
     - claim: "board_gateway.fetch_failed stops recurring: its cause is fixed rather than its rows hidden"
@@ -27,4 +28,4 @@
     reasons:
       - "released by the operator with rmd approve"
     judged_at: "2026-10-22T03:31:39.860Z"
-    pin: "f53ac926d2e97bda8eb8bb069c53a0b5f1155676dc6472c0f8f85b6b04106f29"
+    pin: "a2c614690bb3548bb378d2b7ffce8e4af56de1d8fcaa94cb2c723f9818ff8a42"
