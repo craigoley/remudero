@@ -191,6 +191,30 @@ export function selectLedgerCompactionSources(
     sources.push(entry);
     selectedBytes += bytes;
   }
+  if (!repair && !oversizedOnlySource && sources.length < 2) {
+    // W1-T13370: the walk above stops at the first overflow, so a large head archive that never pairs left one source,
+    // declined as no-reduction on every pass. Outputs are per UTC day, so pack each day within the ceiling, skipping
+    // overflows, and take the day that merges the most sources (ties: the oldest).
+    const days = new Map<string, LedgerCorpusEntry[]>();
+    for (const entry of preferred) days.set(dayOf(entry), [...(days.get(dayOf(entry)) ?? []), entry]);
+    let best: LedgerCorpusEntry[] = [];
+    for (const [, entries] of [...days].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+      const pack: LedgerCorpusEntry[] = [];
+      let bytes = 0;
+      for (const entry of entries) {
+        if (pack.length >= sourceLimit) break;
+        const size = measure(entry);
+        if (bytes + size > maxArchiveBytes) continue;
+        pack.push(entry);
+        bytes += size;
+      }
+      if (pack.length > best.length) best = pack;
+    }
+    if (best.length >= 2) {
+      return { sources: best, eligibleCount: eligible.length, unparseableAge, sizeSkippedCount: eligible.length - best.length };
+    }
+    // No day packs two: keep the walk's answer, so the command declines it as before.
+  }
   if (sizeSkippedCount > 0 && !oversizedOnlySource && sources.length === 1 && isArchivePart(sources[0]!.path)) {
     // A part emitted below is already deduped and under the ceiling. If its sibling cannot fit in
     // this pass, re-reading/re-writing this lone part cannot make progress; defer the whole prefix.
