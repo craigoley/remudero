@@ -116,6 +116,14 @@ jobs:
             exit 1
           fi
           cp -- "${COMPACT_FILES[@]}" coverage-artifact/raw/
+      # W1-T13275: source-map every process report HERE, in this shard, as ci.yml's coverage shards do
+      # (W1-T5923). The merge job then replays only the range merge, byte-identically, instead of mapping
+      # all eight shards' reports serially; that serial merge took 22m44s of its 30 on 2026-11-15 and was
+      # cancelled on 9 of 13 nights from 2026-11-05. The compact copy above stays for the impact map,
+      # which needs each report's suite.
+      - name: Premap this shard's raw V8 coverage for the merge (W1-T13275)
+        run: |
+          node --expose-internals scripts/coverage-merge-ratchet.mjs --premap-output coverage-artifact/premapped coverage/raw
       - name: Upload coverage shard
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -148,12 +156,13 @@ jobs:
       - name: Merge raw V8 coverage shards into one lcov
         run: |
           mkdir -p coverage
+          # W1-T13275: the premapped shards, never the compact ones (the impact map below reads those).
           node --expose-internals scripts/coverage-merge-ratchet.mjs --output coverage/lcov.info \
             --shard-count 8 \
-            coverage-shards/coverage-shard-1/raw coverage-shards/coverage-shard-2/raw \
-            coverage-shards/coverage-shard-3/raw coverage-shards/coverage-shard-4/raw \
-            coverage-shards/coverage-shard-5/raw coverage-shards/coverage-shard-6/raw \
-            coverage-shards/coverage-shard-7/raw coverage-shards/coverage-shard-8/raw
+            coverage-shards/coverage-shard-1/premapped coverage-shards/coverage-shard-2/premapped \
+            coverage-shards/coverage-shard-3/premapped coverage-shards/coverage-shard-4/premapped \
+            coverage-shards/coverage-shard-5/premapped coverage-shards/coverage-shard-6/premapped \
+            coverage-shards/coverage-shard-7/premapped coverage-shards/coverage-shard-8/premapped
       - name: Write the ledgerable summary (totals from the ratchet's own lcov parser)
         run: |
           mkdir -p coverage-nightly-artifact
