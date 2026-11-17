@@ -166,19 +166,18 @@ test("W1-T12456 criterion 4: landing refusals and the gardener row retain reserv
   assert.equal(again.refused[0]?.id_release, "already_absent");
 });
 
-test("W1-T12456 criterion 2: bytes origin/main already holds release the id when no other file holds it", async (t) => {
+test("W1-T13429 reverses W1-T12456 criterion 2's bytes arm: bytes origin/main already holds keep the id, alone or beside another holder", async (t) => {
   const w = world(t);
   const branch = await taskFilesLandingBranchAsync(TARGET);
   const id = "W1-T95031", shared = "W1-T95032";
-  w.anchor(id, branch);
-  w.anchor(shared, branch);
+  const idSha = w.anchor(id, branch);
+  const sharedSha = w.anchor(shared, branch);
   w.commit({ [pathOf(id)]: shard(id), [pathOf(shared)]: shard(shared), "plan/tasks.d/duplicate-holder.yaml": shard(shared, "dup") });
   const result = await w.land([input(id), input(shared)]);
-  assert.match(result.refused[0]!.reason, /origin\/main already holds these bytes/);
-  assert.deepEqual([result.refused[0]?.reserved_id, result.refused[0]?.id_release], [id, "released"]);
-  assert.equal(w.refSha(id), "");
-  assert.equal(result.refused[1]?.id_release, undefined, "another file on main holds the id, so it is kept");
-  assert.notEqual(w.refSha(shared), "");
+  for (const refusal of result.refused) assert.match(refusal.reason, /origin\/main already holds these bytes/);
+  assert.deepEqual(result.refused.map((r) => [r.reserved_id, r.id_release]), [[id, "kept_main_holds_path"], [shared, "kept_main_holds_path"]]);
+  assert.deepEqual([w.refSha(id), w.refSha(shared)], [idSha, sharedSha], "main declares both ids, so both are kept");
+  assert.deepEqual(w.rows.filter((r) => r.step === "task_id.reservation_released"), []);
 });
 
 test("refusing different bytes for a new file already in the staging queue keeps its reservation", async (t) => {
@@ -193,27 +192,29 @@ test("refusing different bytes for a new file already in the staging queue keeps
   assert.equal(result.refused[0]?.id_release, undefined);
 });
 
-test("W1-T12456 criterion 2: a relocated plan keeps an id held by another file", async (t) => {
+test("W1-T13429 reverses W1-T12456 criterion 2's bytes arm: a relocated plan keeps the id of bytes main holds and of an id another file declares", async (t) => {
   const w = world(t, "roadmap");
   const branch = await taskFilesLandingBranchAsync(TARGET);
-  const sole = "W1-T95051", shared = "W1-T95052";
+  const sole = "W1-T95051", shared = "W1-T95052", refused = "W1-T95053";
   const relocated = (id: string): TaskFileInput => ({ ...input(id), relPath: `roadmap/tasks.d/${id}-fixture.yaml` });
-  w.anchor(sole, branch);
+  const soleSha = w.anchor(sole, branch);
   const sharedSha = w.anchor(shared, branch);
+  const refusedSha = w.anchor(refused, branch);
+  w.verdicts.set(refused, RED);
   w.commit({
     [relocated(sole).relPath]: shard(sole), [relocated(shared).relPath]: shard(shared),
-    "roadmap/tasks.yaml": shard(shared, "another holder outside tasks.d"),
+    "roadmap/tasks.yaml": `${shard(shared, "another holder outside tasks.d")}${shard(refused, "declared outside tasks.d")}`,
   });
-  const result = await w.land([relocated(sole), relocated(shared)]);
-  assert.deepEqual(result.refused.map((r) => r.path), [relocated(sole).relPath, relocated(shared).relPath]);
-  for (const refusal of result.refused) assert.match(refusal.reason, /origin\/main already holds these bytes/);
-  assert.deepEqual([result.refused[0]?.reserved_id, result.refused[0]?.id_release], [sole, "released"]);
-  assert.equal(w.refSha(sole), "", "the relocated plan is searched and its sole holder may release");
-  assert.equal(result.refused[1]?.id_release, undefined);
-  assert.equal(w.refSha(shared), sharedSha, "another file in the configured plan keeps the reservation");
+  const result = await w.land([relocated(sole), relocated(shared), relocated(refused)]);
+  assert.deepEqual(result.refused.map((r) => r.path), [relocated(sole).relPath, relocated(shared).relPath, relocated(refused).relPath]);
+  for (const refusal of result.refused.slice(0, 2)) assert.match(refusal.reason, /origin\/main already holds these bytes/);
+  assert.match(result.refused[2]!.reason, /the plan preflight refused it/);
+  assert.deepEqual(result.refused.map((r) => r.id_release), ["kept_main_holds_path", "kept_main_holds_path", "kept_main_holds_path"]);
+  assert.match(String(result.refused[2]?.id_release_detail), /roadmap\/tasks\.yaml/, "the configured plan is searched");
+  assert.deepEqual([w.refSha(sole), w.refSha(shared), w.refSha(refused)], [soleSha, sharedSha, refusedSha]);
 });
 
-test("W1-T12456 criterion 2: a failed holder search distinguishes no matches from unreadable main", async (t) => {
+test("W1-T12456 criterion 2: a failed holder search for a preflight-refused new file distinguishes no matches from unreadable main", async (t) => {
   for (const [name, error, releases] of [
     ["exit code 1", { code: 1 }, true],
     ["exit status 1", { status: 1 }, true],
@@ -223,7 +224,7 @@ test("W1-T12456 criterion 2: a failed holder search distinguishes no matches fro
       const w = world(t);
       const id = "W1-T95061";
       const sha = w.anchor(id, await taskFilesLandingBranchAsync(TARGET));
-      w.commit({ [pathOf(id)]: shard(id) });
+      w.verdicts.set(id, RED);
       let searches = 0;
       w.options.gitAsync = async (args, opts) => {
         if (args[0] === "grep") {
@@ -235,8 +236,8 @@ test("W1-T12456 criterion 2: a failed holder search distinguishes no matches fro
       const result = await w.land([input(id)]);
       assert.equal(searches, 1);
       assert.equal(result.refused.length, 1);
-      assert.match(result.refused[0]!.reason, /origin\/main already holds these bytes/);
-      assert.equal(result.refused[0]?.id_release, releases ? "released" : undefined);
+      assert.match(result.refused[0]!.reason, /the plan preflight refused it/);
+      assert.equal(result.refused[0]?.id_release, releases ? "released" : "kept_main_holds_path");
       assert.equal(w.refSha(id), releases ? "" : sha);
     });
   }

@@ -23690,8 +23690,17 @@ export async function runSweep(
       const repeatedHold = standDownHold !== undefined && decision.remedy === "fix-on-pr" && ledgerLines.some(row =>
         row.step === PARKED_PR_REMEDY_STEP && row.pr_number === pr.prNumber && row.head_sha === pr.headSha &&
         row.cause === cause && row.remedy === "fix-on-pr" && row.outcome === "taken");
+      // W1-T13361: the remedy's row records this head's body and red checks, so a fix-on-pr that dispatches nothing is not
+      // taken again while they stand; with no remedy left one needs-human issue is opened. A pass that may not escalate
+      // (a light pass) records and compares too, and leaves the issue to a full pass.
+      const observed = { bodyDigest: prBodyDigest(pr.body), redChecks: facts.redChecks,
+        refusalLine: (check: string) => pr.ciFailures?.find(failure => failure.name === check)?.statusDescription,
+        ...((deps.actionable?.(disposition) ?? true)
+          ? { escalate: (text: string) => deps.escalate(pr, text, renderClarificationQuestion(pr, text, pr.strikeHistory ?? [])) } : {}),
+        issueOpen: async () => (await readOpenEscalations()).some(issue => escalationHeadSha(issue.body) === pr.headSha &&
+          matchDuplicateEscalation({ ...fixEscalationDedupKey(escalationTaskIdFor(pr), pr.prUrl, pr.headSha, false, false), cause: undefined }, [issue]) !== undefined) };
       const parked = await actOnParkedPr(pr, decision, facts, ledgerLines, deps.parkedPr, { runId: deps.runId, ledgerTaskId: escalationTaskIdFor(pr), nowIso: clockFromMillisFn(() => now).iso(),
-        cause, text: reason, append: (row) => appendLine(deps.ledgerPath, row) });
+        cause, text: reason, append: (row) => appendLine(deps.ledgerPath, row), observed });
       parkedBlockerByPr.set(pr.prNumber, parked.blocker);
       if (repeatedHold) {
         // The hold stays and no worker is dispatched, but the pull request is never parked on a person: the remedy row
