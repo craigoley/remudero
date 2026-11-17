@@ -53,5 +53,6 @@
     port wrongly: criterion 2 fails. Route or authenticate the probe path: criterion 3 fails.
   note: |
     Id reserved for run-unfiled-1794949964431 with ~/rmd-work/bin/reserve-id.sh.
+    reservation hand-off: run-unfiled-1794949964431 -> claude/project-thread-qqxbpu
     Follow-up idea, not filed: a second wedge inside the restart floor could escalate to a container restart instead of
     holding.
