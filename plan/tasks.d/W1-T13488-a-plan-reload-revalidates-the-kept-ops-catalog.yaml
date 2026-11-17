@@ -1,0 +1,45 @@
+- id: W1-T13488
+  title: "Serve's plan reload revalidates its kept ops catalog with one ref GET instead of reading every tree and blob (a gh child each) on every main commit, on its request loop"
+  repo: remudero
+  depends_on: []
+  priority: 0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # when a board read reuses its last catalog read; a reused read is revalidated against the branch's current commit
+  origin: "operator-session#serve-oom-2026-11-16"
+  plan_refs:
+    - W1-T13330
+  files:
+    - src/lib/serve-plan-reload.ts
+    - test/a-plan-reload-revalidates-the-kept-ops-catalog.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A second readBoardCatalogs call with the same api, while the branch names the kept commit, makes exactly one GET (the branch ref) and answers the same ops tasks"
+      proof: "grep: W1-T13488 criterion 1 in test/a-plan-reload-revalidates-the-kept-ops-catalog.test.ts"
+    - claim: "invariant:revalidated-or-reread — a moved branch reads the whole catalog again and answers the new tasks; a failed ref GET never answers the kept plan"
+      kind: guard
+      proof: "grep: W1-T13488 criterion 2 in test/a-plan-reload-revalidates-the-kept-ops-catalog.test.ts"
+    - claim: "Kept reads belong to the api instance that made them: a call with another api reads the catalog whole"
+      proof: "grep: W1-T13488 criterion 3 in test/a-plan-reload-revalidates-the-kept-ops-catalog.test.ts"
+  rationale: |
+    WHY: Craig is hitting serve's main-loop stalls directly (the Inbox times out and shows "unavailable"; every serve
+    route timed out together at 19:03, 19:15, 19:48 and 19:49Z on 2026-11-17).
+    MEASURED from runtime.loop_stall_profile rows, 18:40 to 20:10Z on 2026-11-17: 122 stalls carrying ops-catalog-source
+    frames, 245 s in total (134 s in the 19:00Z hour), led by child-process spawn (4.6 s self) and readBlob, so whole
+    catalog reads still run after W1-T13330 revalidated the worker bridge's pool.
+    READ at origin/main, src/lib/serve-plan-reload.ts: reloadServePlan, run on every plan reload (each main commit),
+    calls readBoardCatalogs, which runs readOpsCatalogSnapshotAsync every time with a fresh default api.
+  design: |
+    INVARIANT revalidated-or-reread: a reused catalog is one whose branch still names the commit it was read at.
+    1. A module-level WeakMap from api instance to {repository -> branch, commit, plan}; a call with no api uses one
+       module-level default api, so serve's reloads share their kept reads, and tests that pass their own api never share.
+    2. Before the whole read, one readBranchSha GET: the same commit answers the kept plan; a moved branch or a failed
+       GET drops it and reads whole, as before.
+  falsifier: |
+    Read whole every time: criterion 1 fails. Answer the kept plan after a move or a failed ref GET: criterion 2 fails.
+    Share kept reads across api instances: criterion 3 fails.
+  note: |
+    Id reserved for run-unfiled-1794946045314 with ~/rmd-work/bin/reserve-id.sh.

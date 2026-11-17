@@ -1,0 +1,32 @@
+- id: W1-T13481
+  title: "A comment-compression record whose only source path is its own origin subject goes to the risk judge, not straight to a person, even on a deploy or CI path"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high # one concern across 2 files: the source change and its own new test
+  band_meaning: blast-radius
+  priority: 1.1
+  status: queued
+  files:
+    - src/lib/machine-filing.ts
+    - test/gardeners/a-token-identical-compression-is-not-parked.test.ts
+  design: |
+    INVARIANT other-privileged-paths-still-escalate: any record that declares a privileged path other than its own comment-compression subject, or whose acceptance is not the generated executable-token claim, still escalates in deterministicEscalation exactly as today.
+
+    In deterministicEscalation, treat a machine record whose origin is comment-compression:<path>, whose declared files are <path> plus test files, and whose acceptance claims are the generated executable-token claim, as a soft concern handed to the risk judge (backstopConcern), not a hard escalation. The judge then rules on a mechanical proof.
+  acceptance:
+    - claim: "A machine comment-compression record on deploy/ or .github/workflows/ with the generated executable-token claim is not hard-escalated."
+      proof: "grep: W1-T13481 criterion 1 in test/gardeners/a-token-identical-compression-is-not-parked.test.ts"
+    - claim: "invariant:other-privileged-paths-still-escalate — a compression record that also declares another privileged path still escalates"
+      proof: "grep: W1-T13481 criterion 2 in test/gardeners/a-token-identical-compression-is-not-parked.test.ts"
+  origin: "operator-session#inbox-asks-2026-11-17"
+  rationale: |
+    OBSERVED 2026-11-17: seven comment-compression asks waited on the operator (W1-T10974 src/lib/deployer.ts, W1-T10980
+    deploy/recycle-container.sh, W1-T11008 deploy/host-update.sh, W1-T11054 .github/workflows/ci.yml, W1-T11056
+    src/lib/arm-auto-merge.ts, W1-T11057 deploy/install-host-units.sh, W1-T11256 deploy/verify-image.sh), each risk_ruling
+    escalate via the deterministic backstop's privileged-path rule (src/lib/machine-filing.ts deterministicEscalation).
+    Each record's own acceptance demands an executable-token comparison against the pre-compression source, a mechanical proof.
+    Operator 2026-10-24: excess comments are high-priority follow-up work. Operator 2026-11-17 picked "re-file these so they merge
+    without me"; flipping verify: auto by hand is refused by lint (machine-author-verify, Law 5), so the release must come from a ruled judge.
+    Filed under reservation branch run-unfiled-1794945460139.
