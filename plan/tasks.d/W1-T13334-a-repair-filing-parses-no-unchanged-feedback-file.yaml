@@ -1,0 +1,109 @@
+- id: W1-T13334
+  title: "A repair filing parses no unchanged feedback file: listFeedback keeps the parse of each plan/feedback entry until that file changes, so the sweep's repair capture no longer reads and parses all 828 entries on the daemon loop for each filing (197 stalls, 314 s inside the capture in six hours on 2026-11-17)"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the read decides whether a repair filing is suppressed by an operator's rejection; a stale answer silences a filing the operator should see or refiles one they rejected, and the rule that an unreadable entry never silences a filing must hold
+  origin: "operator-session#loop-lag-2026-11-17"
+  plan_refs:
+    - W1-T13183
+    - W1-T9615
+    - W1-T12202
+  files:
+    - src/lib/feedback.ts
+    - src/run-task.ts
+    - test/a-repair-filing-parses-no-unchanged-feedback-file.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A second listFeedback call over an unchanged plan/feedback directory of 200 entries parses 0 YAML documents and returns entries deep-equal to the first call, in the same order, with and without the status filter, and captureRepairFeedbackWithPriorVerdictAsync run twice for a suppressed filing parses each entry file once in total"
+      proof: "grep: W1-T13334 criterion 1 in test/a-repair-filing-parses-no-unchanged-feedback-file.test.ts"
+    - claim: "invariant:a-changed-verdict-is-seen-at-once — after an entry file is rewritten in place with the same size (status new to rejected), replaced by rename, added or deleted, the next listFeedback call returns the new content and parses only the files that changed; a repair filing whose latest prior entry became rejected is suppressed on the next capture, and one whose rejected entry was deleted is filed"
+      kind: guard
+      proof: "grep: W1-T13334 criterion 2 in test/a-repair-filing-parses-no-unchanged-feedback-file.test.ts"
+    - claim: "invariant:an-unreadable-entry-never-silences-a-filing — with a corrupt YAML file in plan/feedback, listFeedback throws on the first call and on each repeat call (the failure is never kept as an empty or shorter list), and captureRepairFeedbackWithPriorVerdictAsync still stages the filing, as at origin/main"
+      kind: guard
+      proof: "grep: W1-T13334 criterion 3 in test/a-repair-filing-parses-no-unchanged-feedback-file.test.ts"
+    - claim: "invariant:one-copy-per-id — an id that is in both feedback roots with different bytes makes listFeedback throw the assertOneFeedbackCopy error on the first call and on a repeat call, and equal bytes give one entry"
+      kind: guard
+      proof: "grep: W1-T13334 criterion 4 in test/a-repair-filing-parses-no-unchanged-feedback-file.test.ts"
+    - claim: "invariant:a-caller-cannot-change-the-kept-parse — changing a field or the attachments list of an entry that one listFeedback call returned does not change what the next call returns"
+      kind: guard
+      proof: "grep: W1-T13334 criterion 5 in test/a-repair-filing-parses-no-unchanged-feedback-file.test.ts"
+  rationale: |
+    WHY: before the sweep files a repair, it asks whether the operator already rejected the latest filing for
+    that surface. To answer, it reads every file in plan/feedback and parses each as YAML, on the daemon loop.
+    A suppressed filing leaves no file behind, so the same question is asked again on the next sweep pass, and
+    all 828 files are read and parsed again. Almost none of them changed.
+    MEASURED, core ledger (~/rmd-state2/state, live file plus archives, rows deduplicated on ts),
+    daemon.loop_stall_profile rows since the newest two daemon.boot rows (aa891635ed at 2026-11-16T23:50:59Z and
+    9be1ffbcb8 at 2026-11-17T03:19:15Z), up to 05:43:36Z: 1,932 stall rows, 14,157.6 s plain sum of lag_ms.
+    - A repair capture frame (repairCaptureAfterPriorVerdict, captureRepairFeedbackWithPriorVerdict or its
+      Async form) is in the top inclusive frames of 197 rows. Time inside the capture: 314.0 s, 2.2% of all lag;
+      median 0.88 s a row, largest 10.9 s. Those rows hold 1,316.7 s of lag, 9.3%, largest 25.9 s.
+    - listFeedback is in 185 rows with 233.8 s inclusive; 160 of them also hold a capture frame and 9 hold the
+      SRE lane (openIncidentFeedbackOrigins calls the same function). YAML parser self time in those rows is
+      66.8 s; most of the rest is garbage collection.
+    - On the newest boot alone, which runs W1-T13183: 98 rows, 162.5 s inside the capture (2.7% of that boot's
+      lag), rows holding 656.2 s (10.8%). W1-T13183 moved the capture's git and gh calls off the loop; this
+      read stayed.
+    - The synchronous spawns in the same rows belong to other callers. sync_spawn_by_caller names
+      runTaskAdvanceTouchesReviewPath, commentOnlyChange and reviewerMainAdvance (the reviewer freshness check,
+      filed as W1-T13335) and ghExec; none is under the capture. They share stall rows because all run in
+      runSweep.
+    - plan/feedback in the daemon's checkout: 828 files, 3.9 MB.
+    READ at origin/main 3c2383143:
+    - src/run-task.ts:33027, in repairCaptureAfterPriorVerdict (:33018): `listFeedback(root).filter((e) =>
+      e.origin === filing.origin)`, then latestPriorVerdictSuppresses (:32972) picks the newest entry and
+      suppresses the filing when it is rejected. The read needs every entry because the origin is a field
+      inside the file, not part of its name. The catch around it files on any read error (fail open).
+    - The early return at :33024 (feedbackCaptured) only helps a filing that was staged. A suppressed filing
+      has no file, so every later pass reaches listFeedback again (the comment at :32980 says so).
+    - captureRepairFeedbackWithPriorVerdictAsync (:33051) is the daemon's caller (src/run-task.ts:45772,
+      src/cli/commands/sweep.ts:609); it calls repairCaptureAfterPriorVerdict synchronously at :33057.
+    - src/lib/feedback.ts:1146 listFeedback: for each root of hostFeedbackRoots (:558) it lists the directory,
+      reads each .yaml file with readFileSync, checks an id held in both roots with assertOneFeedbackCopy
+      (:587), sorts by file name and parses each text with parseYaml. Nothing is kept between calls.
+    - More than ten production callers use listFeedback, among them src/lib/sre-lane.ts:184 on the daemon loop.
+    - A file identity from one stat is already used elsewhere: src/lib/instances-view.ts:225 and
+      src/lib/nav-badge-view.ts:554 key on dev, ino, size, mtimeNs and ctimeNs.
+    NOT COVERED: W1-T13183 (merged) moved the capture's git and gh. W1-T9615 (merged) staged the SRE lane's
+    filing. Swept plan/tasks.d and plan/tasks.yaml at origin/main for listFeedback and
+    repairCaptureAfterPriorVerdict, and the 18 open pull requests on craigoley/remudero: none names this read.
+  design: |
+    INVARIANT a-changed-verdict-is-seen-at-once: a file that was rewritten, replaced, added or deleted is read again on the next call; no answer is older than the files on disk.
+    INVARIANT an-unreadable-entry-never-silences-a-filing: a corrupt entry makes listFeedback throw on every call, and the repair capture then files.
+    INVARIANT one-copy-per-id: an id in both roots with different bytes is refused on every call.
+    INVARIANT a-caller-cannot-change-the-kept-parse: what a caller does to a returned entry never reaches a later call.
+    1. In listFeedback (src/lib/feedback.ts:1146) keep, per entry path, the file's stat identity (dev, ino,
+       size, mtimeNs, ctimeNs from one bigint stat, as instances-view.ts:225 does), its text and its parsed
+       entry. On each call list the directories and stat each file as today; read and parse only a file whose
+       identity changed or that is new; drop a path that is gone. The directory listing and the stats stay
+       synchronous: they are small.
+    2. Keep only a successful parse. A file that fails to read or parse is not kept, so the next call tries it
+       again and throws again.
+    3. assertOneFeedbackCopy runs on every call over the kept texts, so the two-root check does not depend on
+       what was kept.
+    4. Return a copy of each kept entry (structuredClone), so a caller that edits an entry does not edit the
+       kept parse. The order and the status filter do not change.
+    5. repairCaptureAfterPriorVerdict needs no change beyond what the test needs to count parses. No new
+       export, option, env var or bound: the kept set is one entry per file on disk.
+    6. TESTS in test/a-repair-filing-parses-no-unchanged-feedback-file.test.ts use a temporary root with real
+       files and count parses through a spy on the yaml parse or on the file reads. Load test/setup/tmp-hygiene.ts.
+       Criterion 2 rewrites a file in place with the same byte length; ctimeNs changes on any write, which is
+       why the identity holds it.
+  falsifier: |
+    At origin/main the second call parses all 200 documents (criterion 1). Key the kept parse on size and
+    mtimeMs only: the same-size rewrite in the same millisecond is missed and criterion 2 returns the old
+    status. Keep an empty list after a parse error: the repeat call does not throw and criterion 3 fails. Skip
+    the two-root check on a repeat call: criterion 4 fails. Return the kept object itself: criterion 5 fails.
+  note: |
+    Id reserved for run-unfiled-1794894179000 with ~/rmd-work/bin/reserve-id.sh.
+    Proof that counts in production: the inclusive time of listFeedback under the repair capture in
+    daemon.loop_stall_profile rows falls from a median of 0.7 s a row to under 0.1 s, over a day.
+    Out of scope: the other listFeedback callers gain the same saving without a change; the SRE lane's ledger
+    reads and its landed-entry git are separate.

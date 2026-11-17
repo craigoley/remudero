@@ -1,0 +1,124 @@
+- id: W1-T13333
+  title: "Ledger compaction runs off the daemon loop: the daemon's compaction hook runs ledgerCompactCommand in a worker thread and the loop only awaits the outcome, so a pass no longer stops the daemon for 43 s to 173 s about every 29 minutes (12 passes, 1,107 s, 7.8% of all loop lag in six hours on 2026-11-17)"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the ledger archives are the fleet's only record of what ran; a pass that loses a row, writes it twice, or leaves an unreadable archive after a crash damages every reader, so the write-then-move order and the refusal to overwrite must hold on the new thread
+  origin: "operator-session#loop-lag-2026-11-17"
+  plan_refs:
+    - W1-T4262
+    - W1-T11141
+    - W1-T9370
+    - W1-T13326
+  files:
+    - src/lib/ledger-compact-worker.ts
+    - src/lib/ledger-compact.ts
+    - src/run-task.ts
+    - scripts/build-child-entries.mjs
+    - test/ledger-compaction-runs-off-the-daemon-loop.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The hooks from buildLedgerCompactionDaemonHooks with no injected run or compact start a worker through startWorker, the worker module is listed in WORKER_ENTRIES, and a pass over a fixture state dir of real gzip rotations leaves the same archive names, the same rows in each archive and the same outcome report (sourceCount, rowsWritten, duplicatesCollapsed, archiveName) as ledgerCompactCommand run in-process on a copy of that state dir"
+      proof: "grep: W1-T13333 criterion 1 in test/ledger-compaction-runs-off-the-daemon-loop.test.ts"
+    - claim: "invariant:no-compaction-work-on-the-loop — while the daemon hook runs a pass, the daemon thread makes no gzipSync or gunzipSync call and reads no rotation file, and a 20 ms timer on the daemon thread keeps firing through a pass whose compaction is held for one second"
+      kind: guard
+      proof: "grep: W1-T13333 criterion 2 in test/ledger-compaction-runs-off-the-daemon-loop.test.ts"
+    - claim: "invariant:no-row-lost-or-duplicated — a union read of the state dir (readLedgerUnionRecordsSync with refuseIncomplete) returns the same set of distinct rows before a completed off-loop pass and after it, no row is returned more times after than before, and each merged source is in ledger-superseded, not deleted"
+      kind: guard
+      proof: "grep: W1-T13333 criterion 3 in test/ledger-compaction-runs-off-the-daemon-loop.test.ts"
+    - claim: "invariant:a-crash-leaves-a-readable-ledger — a pass that is cut off before any output is written, after the outputs are written and before the sources move, and part-way through the move (the worker terminated, or its file writes stopped at that point) leaves in each case a state dir where every ledger.* file decompresses and parses, a union read with refuseIncomplete is ok and holds every distinct row that was there before, and the daemon ledgers ledger_compaction.run_failed and never ledger_compaction.ran"
+      kind: guard
+      proof: "grep: W1-T13333 criterion 4 in test/ledger-compaction-runs-off-the-daemon-loop.test.ts"
+    - claim: "invariant:a-new-rotation-is-untouched — a rotation archive that is written to the state dir while the worker runs is not a source of that pass, is not overwritten, and has the same bytes after the pass"
+      kind: guard
+      proof: "grep: W1-T13333 criterion 5 in test/ledger-compaction-runs-off-the-daemon-loop.test.ts"
+    - claim: "A worker that exits with a non-zero code, throws, or ends with no outcome report makes the hook reject with the same error text the in-process path gives, the daemon tick starts no second pass while one is in flight, the next due pass starts a new worker, and rmd ledger-compact on the command line still runs in-process"
+      proof: "grep: W1-T13333 criterion 6 in test/ledger-compaction-runs-off-the-daemon-loop.test.ts"
+    - claim: "The default run of buildLedgerCompactionDaemonHooks calls compactLedgerInWorker, the parent function of the new worker module, so the worker has a production caller"
+      proof: "grep: compactLedgerInWorker( in src/run-task.ts"
+  rationale: |
+    WHY: when the archive count is over its bound, the daemon compacts old ledger rotations. The whole pass runs
+    on the daemon loop: it decompresses each candidate to size it, decompresses each source again to read its
+    rows, and compresses each output, all with synchronous zlib. For one to three minutes the daemon dispatches
+    nothing, sweeps nothing and answers no health check. Eight of the twelve passes measured wrote nothing and
+    still held the loop.
+    MEASURED, core ledger (~/rmd-state2/state, live file plus archives, rows deduplicated on ts),
+    daemon.loop_stall_profile rows since the newest two daemon.boot rows (aa891635ed at 2026-11-16T23:50:59Z and
+    9be1ffbcb8 at 2026-11-17T03:19:15Z), up to 05:43:36Z:
+    - 1,932 stall rows, 14,157.6 s as the plain sum of lag_ms over 21,157 s of wall time.
+    - ledgerCompactCommand is in the top inclusive frames of 11 rows: 993.2 s of lag, 826.8 s inclusive, the
+      largest 173.2 s at 04:31:21Z. One more row (04:00:58Z, 114.2 s) shows the same pass one frame higher: its
+      top frame is the hook's `run` closure (run2 in the bundle) and its self time is the same zlib frames.
+      Together 12 passes, 1,107.4 s, 7.8% of all lag, one about every 29 minutes.
+    - Self time in those 12 rows: 866.9 s in synchronous zlib (createUnsafeBuffer, writeSync and concat called
+      through syncBufferWrapper), 75.9 s in garbage collection, 16.2 s in synchronous child processes.
+    - ledger_compaction rows in the same window: 12 fired, 4 ran (6 to 9 sources and 77,544 to 82,619 rows
+      each), 8 nothing_eligible. Each fired row has one stall. The 8 passes that wrote nothing stalled the loop
+      53.7 s to 173.2 s, 715.1 s in total. 243 ledger files were in the state dir.
+    READ at origin/main 3c2383143:
+    - src/run-task.ts:21987, in buildLedgerCompactionDaemonHooks (:21956): the default `run` calls
+      `(deps.compact ?? ledgerCompactCommand)(daemonLedgerCompactArgs(stateDirFor()), { stateDir, out, error })`
+      in-process. `run` is already async, and the daemon tick already awaits it at src/lib/daemon.ts:6464, so
+      only the body needs to move. src/cli/commands/daemon.ts:2154 builds these hooks for the self daemon.
+    - src/lib/ledger-compact.ts:309 ledgerCompactCommand. Its synchronous zlib: :249 in decompressedSizeOf
+      (gunzipSync of each candidate, only to learn its decompressed size for the 64 MiB ceiling), :384 in
+      readRows (gunzipSync of each selected source, so compactRotations can merge exact rows), :480 (gzipSync of
+      each output before writeAtomic). The safety order is there too: every output is checked against
+      unselected archives before any write (:464 to :470), all outputs are written with writeAtomic (:478 to
+      :483), and only then coldStore (:484, :495) moves the sources to ledger-superseded.
+    - ledgerCompactCommand writes no ledger row. It reports through the out and error callbacks; the daemon
+      thread writes ledger_compaction.ran, nothing_eligible and run_failed (src/lib/daemon.ts:6465 to :6481).
+    - src/lib/child-entry-argv.ts:138 startWorker starts a worker from a module's own URL, as
+      src/lib/board-worker.ts:227 does. scripts/build-child-entries.mjs:39 WORKER_ENTRIES lists each worker
+      module so the bundled daemon has a bundle for it.
+    NOT COVERED: W1-T11141 (queued) makes the archive bound reachable and stops a repeat fire after a pass that
+    found nothing eligible. It lowers the number of passes; it does not move a pass off the loop, and the four
+    passes that did write still stalled 43.2 s to 149.1 s. W1-T4262 (merged) set the age a pass compacts from.
+    W1-T13326 (filed on run-unfiled-1794888412000) moves the merge-time judge to a worker, a different caller.
+    Swept plan/tasks.d and plan/tasks.yaml at origin/main for ledgerCompactCommand, runLedgerCompaction and
+    ledger-compact.ts, and the 18 open pull requests on craigoley/remudero: none names this path.
+  design: |
+    INVARIANT no-compaction-work-on-the-loop: during a daemon pass the daemon thread calls no synchronous zlib and reads no rotation file; its timers keep firing.
+    INVARIANT no-row-lost-or-duplicated: a completed off-loop pass keeps the set of distinct rows of a union read, adds no copy of a row, and moves each merged source to ledger-superseded.
+    INVARIANT a-crash-leaves-a-readable-ledger: a pass cut off at any point leaves every ledger file readable and every earlier row in a union read, and is ledgered run_failed, never ran.
+    INVARIANT a-new-rotation-is-untouched: a rotation written while the worker runs is neither a source of that pass nor overwritten by it.
+    1. Add src/lib/ledger-compact-worker.ts: a worker entry that takes the args and the state dir as workerData,
+       calls ledgerCompactCommand with out and error callbacks that collect lines, and posts back the exit code,
+       the report line and the error lines. A parent function in the same module, compactLedgerInWorker, starts it with
+       startWorker(import.meta.url, ...) and resolves with that message. Add the module to WORKER_ENTRIES.
+    2. In buildLedgerCompactionDaemonHooks the default `run` awaits that function where it calls
+       ledgerCompactCommand today. The exit-code check, the report parse and the returned outcome stay as they
+       are, so the ledger rows do not change. daemonLedgerCompactArgs stays on the loop: it lists and stats
+       files and opens none. deps.compact stays as the test seam for the in-process path.
+    3. ledgerCompactCommand keeps its write-then-move order and its refusal to overwrite an unselected archive.
+       Do not reorder it. The worker adds one new condition: the daemon appends and rotates the live ledger
+       while a pass runs. A pass selects only rotations older than the protected age and checks each output
+       name before it writes; criterion 5 proves a rotation that lands mid-pass is left alone. If the test finds
+       a window where it is not, close the window in ledger-compact.ts; do not add a lock file.
+    4. One pass at a time: the tick awaits the hook, so no second pass starts. A worker that exits without a
+       message, or with an error, rejects the hook's promise; the tick ledgers run_failed as today. When the
+       daemon stops, terminate the worker; invariant a-crash-leaves-a-readable-ledger covers that stop.
+    5. The command line path (`rmd ledger-compact`, src/run-task.ts:44842) stays in-process. No new env var,
+       bound, ledger step or config key.
+    6. TESTS in test/ledger-compaction-runs-off-the-daemon-loop.test.ts use a temporary state dir with real
+       gzip rotations and the real worker, as test/daemon-ledger-compaction-wiring.test.ts and
+       test/ledger-compact-command.test.ts build their fixtures. Load test/setup/tmp-hygiene.ts so no test reads or
+       writes the host's config or state. Criterion 4 cuts the pass at the three points through the
+       LedgerCompactFs seam for the write and move steps and by terminating a real worker during a held pass.
+  falsifier: |
+    At origin/main the hook calls ledgerCompactCommand on the daemon thread: the zlib call count on that thread
+    is not 0 and the 20 ms timer does not fire during the held pass (criterion 2). Move the sources to cold
+    storage before the outputs are written: a pass cut off between the two steps loses rows and criterion 4
+    fails. Drop the check of an existing output name: the rotation written mid-pass is overwritten and criterion
+    5 fails. Leave the module out of WORKER_ENTRIES: criterion 1 fails.
+  note: |
+    Id reserved for run-unfiled-1794894179000 with ~/rmd-work/bin/reserve-id.sh.
+    Proof that counts in production: no daemon.loop_stall_profile row with ledgerCompactCommand or synchronous
+    zlib under the compaction hook in its top frames, over a day with ledger_compaction.fired rows.
+    Out of scope: a cheaper size check than decompressing each candidate (src/lib/ledger-compact.ts:249), and
+    the repeat fires that find nothing eligible (W1-T11141).
