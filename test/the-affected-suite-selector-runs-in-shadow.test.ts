@@ -649,3 +649,20 @@ test("the reviewer-only proof failure suite is selected in the narrow arm for ea
     assert.ok(selection.narrow?.includes(suite), `${changed} must select ${suite} in the narrow arm`);
   }
 });
+
+test("W1-T9666: the ci-friction no-owner suite is selected for each recorded miss edge (run 38752153481)", () => {
+  const suite = "test/a-ci-friction-cause-owned-by-a-test-alone-escalates-as-no-owner.test.ts";
+  const edges = [
+    "src/lib/pr-blocker.ts",
+    "src/lib/sweep.ts",
+    "test/a-security-arm-refusal-names-its-hold.test.ts",
+    "test/every-open-pr-names-one-blocker-and-its-owner.test.ts",
+  ];
+  const files = new Map([...Object.entries(TREE), [suite, ""]]);
+  for (const changed of edges) {
+    if (changed.startsWith("test/")) files.set(changed, "export {};\n");
+    const selection = selectAffectedSuites([changed], { files, pathReaders: [], symbolSuites: [] });
+    assert.equal(selection.fullRun, false, changed);
+    assert.ok(selection.suites.includes(suite), `${changed} must select ${suite} in the floor`);
+  }
+});

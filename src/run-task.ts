@@ -284,6 +284,7 @@ import {
 import { LEDGER_FILENAME, ledgerPathFor, nextLaneEpochMs } from "./lib/ledger-path.js";
 export { LEDGER_FILENAME, ledgerPathFor, nextLaneEpochMs };
 import { ledgerCompactCommand, type LedgerCompactCommandDeps } from "./lib/ledger-compact.js";
+import { compactLedgerInWorker } from "./lib/ledger-compact-worker.js";
 import { readModelCommand } from "./lib/read-model-cli.js";
 export { ledgerCompactCommand } from "./lib/ledger-compact.js";
 import {
@@ -1794,7 +1795,8 @@ import { fixRungInputFields, prBodyDigest } from "./lib/sweep.js";
 import { diagnoseBodyDefects } from "./lib/body-repair.js";
 import { criterionFieldTampered, filingSelfCreditCheck, missingReviewReuseFact, priorPostedReviewRow, proofChildEnv, proofSandboxArgv, proofSandboxStatus, ProofSandboxUnavailableError } from "./lib/review.js";
 import { inertAcceptanceProofs, PR_BODY_ACCEPTANCE_GRAMMAR } from "./lib/proof-grammar.js";
-import { diffAnchor, mainRepairAcceptanceFor } from "./lib/main-repair-acceptance.js";
+import { type BaseProofGrader, diffAnchor, mainRepairAcceptanceFor, withoutStaleRepairProofs } from "./lib/main-repair-acceptance.js";
+import { checkProofBaseGrader } from "./lib/repair-proof-grader.js";
 export { diffAnchor };
 export type { DiffAnchor, DiffAnchorUnavailableReason } from "./lib/main-repair-acceptance.js";
 import { alertFixBodyDeps, judgeOpenedAlertFixBody, type AlertFixAcceptanceCheck, type AlertFixBodyRead } from "./lib/alert-fix-body.js";
@@ -22071,7 +22073,9 @@ export function buildLedgerCompactionDaemonHooks(deps: {
   clock?: Clock;
   check?: () => LedgerCompactionDecision;
   run?: () => Promise<LedgerCompactionOutcome | undefined>;
+  /** The in-process pass, for a test; absent, the pass runs in a worker thread. */
   compact?: (rest: string[], deps: LedgerCompactCommandDeps) => number;
+  worker?: Parameters<typeof compactLedgerInWorker>[2];
 } = {}): {
   checkLedgerCompaction: () => LedgerCompactionDecision;
   runLedgerCompaction: () => Promise<LedgerCompactionOutcome | undefined>;
@@ -22096,14 +22100,21 @@ export function buildLedgerCompactionDaemonHooks(deps: {
     deps.run ??
     (async () => {
       let report: string | undefined;
-      const errors: string[] = [];
-      const code = (deps.compact ?? ledgerCompactCommand)(daemonLedgerCompactArgs(stateDirFor()), {
-        stateDir: stateDirFor(),
-        out: (line) => {
-          report = line;
-        },
-        error: (line) => errors.push(line),
-      });
+      let errors: string[] = [];
+      let code: number;
+      const rest = daemonLedgerCompactArgs(stateDirFor());
+      if (deps.compact) {
+        code = deps.compact(rest, {
+          stateDir: stateDirFor(),
+          out: (line) => {
+            report = line;
+          },
+          error: (line) => errors.push(line),
+        });
+      } else {
+        // W1-T13333: the pass runs in a worker thread; the daemon loop only awaits it.
+        ({ code, report, errors } = await compactLedgerInWorker(rest, stateDirFor(), deps.worker));
+      }
       if (code !== 0) {
         throw new Error(errors.join("\n") || `rmd ledger-compact exited ${code}`);
       }
@@ -41110,6 +41121,48 @@ export interface AlertFixDispatchDeps {
   readHeadSubject?: (worktreePath: string) => string;
   pushBranch?: (worktreePath: string, expectedHeadSha: string) => Promise<unknown>; // W1-T9667: the host push of a harness commit
   readRemoteBranchHead?: (worktreePath: string, branch: string) => Promise<string | undefined>; // W1-T9667: `git ls-remote`
+  /** W1-T13351: grades each proof of a repair body at the merge base with the proof-discrimination gate's executor;
+   *  `undefined` when the merge base cannot be read. Omitted, {@link repairProofGraderFor} runs the real check-proof. */
+  repairProofGrader?: (worktreePath: string) => BaseProofGrader | undefined;
+}
+
+/** W1-T13351 — the real repair-proof grader: check-proof from the repair worktree against its merge base with
+ *  origin/main, `undefined` when git cannot name that merge base. */
+export function repairProofGraderFor(worktreePath: string): BaseProofGrader | undefined {
+  try {
+    const mergeBase = hostWorktreeGitAtTopLevel(worktreePath, ["merge-base", "origin/main", "HEAD"]).trim();
+    return mergeBase === "" ? undefined : checkProofBaseGrader(worktreePath, mergeBase);
+  } catch (error) {
+    void error; // the caller ledgers an ungraded body as `proofs_ungraded`
+    return undefined;
+  }
+}
+
+/** W1-T13351 — drop every proof of an assembled repair body that the gate would grade executed_stale, ledgering what
+ *  changed. A body this cannot grade is returned as written. */
+async function withGradedRepairProofs(
+  lane: string,
+  body: string,
+  worktreePath: string,
+  diffText: string | undefined,
+  readFile: ((path: string) => string | undefined) | undefined,
+  grader: ((worktreePath: string) => BaseProofGrader | undefined) | undefined,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): Promise<string> {
+  const grade = (grader ?? repairProofGraderFor)(worktreePath);
+  if (grade === undefined) {
+    log(`${lane}.proofs_ungraded`, { reason: "the repair worktree's merge base with origin/main is unreadable" });
+    return body;
+  }
+  const verdict = await withoutStaleRepairProofs({ body, diffText, grade, ...(readFile ? { readFile } : {}) });
+  if (verdict.resolution === "kept") return body;
+  log(`${lane}.stale_proofs`, {
+    stale_proofs: verdict.stale,
+    resolution: verdict.resolution,
+    ...("anchor" in verdict && verdict.anchor ? { anchor: verdict.anchor } : {}),
+    ...("reason" in verdict ? { reason: verdict.reason } : {}),
+  });
+  return verdict.body;
 }
 
 export { alertFixBodyDeps, checkAlertFixAcceptance, readAlertFixPrBody } from "./lib/alert-fix-body.js";
@@ -41538,6 +41591,7 @@ async function openCheckedRepairPr(
     });
   }
   if (!("body" in checked)) return undefined;
+  const graded = await withGradedRepairProofs(lane, checked.body, worktreePath, diffText, readAtHead, deps.repairProofGrader, log);
   if (pr.pushedHead === undefined) {
     const remote = await readRepairRemoteHead(worktreePath, branch, deps);
     if (remote.head === undefined) {
@@ -41548,7 +41602,7 @@ async function openCheckedRepairPr(
   try {
     const title = (deps.readHeadSubject ?? ((wt: string) => hostWorktreeGitAtTopLevel(wt, ["log", "-1", "--format=%s", "HEAD"])))(worktreePath).trim();
     const created = (await (deps.fetch ?? ((args: string[]) => ghJsonAsync(args)))(
-      ratifyPrCreateRestArgs(owner, repo, { title: title || pr.fallbackTitle, body: withoutRepairPlaceholders(checked.body, pr.prose), head: branch, base: pr.base }),
+      ratifyPrCreateRestArgs(owner, repo, { title: title || pr.fallbackTitle, body: withoutRepairPlaceholders(graded, pr.prose), head: branch, base: pr.base }),
     )) as { html_url?: unknown };
     if (typeof created?.html_url !== "string") throw new Error(`GitHub's PR create for ${branch} returned no html_url`);
     return created.html_url;
@@ -41610,6 +41664,7 @@ export async function openMainRepairRevertPr(
   runId: string,
   fetch: GhApiFetcher = (args) => ghJsonAsync(args),
   testFiles: readonly string[] = [],
+  repairProofGrader: (worktreePath: string) => BaseProofGrader | undefined = repairProofGraderFor,
 ): Promise<MainRepairRevertOutcome> {
   const taskId = mainRepairTaskId(request.offendingSha);
   const log = (step: string, extra: Record<string, unknown> = {}) =>
@@ -41639,12 +41694,15 @@ export async function openMainRepairRevertPr(
     const evidence = { testFiles, ...(revertDiff === undefined ? {} : { revertDiff }) };
     const anchor = testFiles.length > 0 ? undefined : diffAnchor(revertDiff);
     if (anchor?.kind === "unavailable") log("main-repair.revert_anchor_unavailable", { offending_sha: request.offendingSha, reason: anchor.reason });
+    // W1-T13351: a failing suite can pass at the base under the proof executor; grade before the body is opened.
+    const body = await withGradedRepairProofs("main-repair.revert", mainRepairRevertBody(request, evidence), worktreePath,
+      revertDiff ?? diffSinceMergeBase(worktreePath), undefined, repairProofGrader, log);
     await gitPushRunBranchAsync(worktreePath, { stdio: "ignore" });
     const subject = request.offendingPr !== undefined ? `revert #${request.offendingPr}` : `revert ${request.offendingSha.slice(0, 12)}`;
     const created = (await fetch(
       ratifyPrCreateRestArgs(owner, repo, {
         title: reviewerRegressionRevertText(request)?.title ?? `revert(main): ${subject}, the first red merge on ${request.branch}`,
-        body: mainRepairRevertBody(request, evidence),
+        body,
         head: branch,
         base: request.branch,
       }),

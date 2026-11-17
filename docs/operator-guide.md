@@ -2205,6 +2205,26 @@ file, and writes `cash.invoice.reconcile_failed` with the reason when it cannot.
 rmd cash-reconcile --day 2026-11-16 --export <state>/cost-exports/<file>.csv
 ```
 
+### The cash shadow of the ci judge and the fix-progress judge (W1-T13364)
+
+`.remudero/mounts.yaml` has a `ci_judge` row and a `fix_progress_judge` row. Each row gives its judge
+the same model, effort, turn limit and context budget as the risk judge, and names no provider, so
+the judge spawns as before. Each row also has a `shadow:` mapping that names one cash deployment
+(`DeepSeek-V4-Flash`). After each judgement the daemon sends the same prompt, with no tools, to that
+deployment and writes one row to the instance ledger. The sweep acts only on the primary judge's
+verdict. The shadow call spends inside the daily cash cap.
+
+Read the rows in the instance ledger by step name:
+
+- `judge_shadow.paired`: both verdicts and whether they agree (`agreement`).
+- `judge_shadow.refused`: the cash provider refused the call for capacity or budget.
+- `judge_shadow.unavailable`: the call failed for another reason, or its answer could not be read.
+
+Each row names its judge in `surface` (`ci-judge` or `fix-progress`). To turn one arm off, remove the
+`shadow:` mapping from its row and merge that change. Removing the whole row also turns the arm off
+and returns the judge to the risk judge's cell. A day with `ci_judge.judged` rows and no
+`judge_shadow` row means the arm is not on.
+
 ### One fleet cash cap across core, site, and console
 
 The shared cash allowance is opt-in and requires a stopped-writer migration. Until it is

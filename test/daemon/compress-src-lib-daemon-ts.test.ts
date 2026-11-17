@@ -72,18 +72,49 @@ test("W1-T12263: comment compression preserves executable code", (t) => {
   assert.ok(bytes(source) < bytes(before), "comment bytes decrease too; rewrapping is insufficient");
 });
 
-test("W1-T10871: comment compression preserves executable code", () => {
-  const source = readFileSync(join(REPO_ROOT, "src/lib/daemon.ts"), "utf8");
-  const { comments } = countCommentLines(source, "src/lib/daemon.ts");
-  assert.ok(comments < BEFORE_COMMENTS, `comments must decrease from the measured ${BEFORE_COMMENTS}; got ${comments}`);
-  const before = compressionPinBase("src/lib/daemon.ts", import.meta.url);
+// `before` is the module at the PR base on the pull request that adds this pin, else undefined.
+function assertCompression(source: string, before: string | undefined) {
   if (before === undefined) return;
   // Only on the PR that adds this pin: later feature edits to the module stay free.
+  const { comments } = countCommentLines(source, "src/lib/daemon.ts");
+  assert.ok(comments < BEFORE_COMMENTS, `comments must decrease from the measured ${BEFORE_COMMENTS}; got ${comments}`);
   assert.equal(executableDigest(source), executableDigest(before), "all non-comment code lines match the PR base");
   // Independently catch ASI changes and whitespace inside multiline string/template literals.
   assert.equal(emittedDigest(source), emittedDigest(before), "emitted JavaScript matches the PR base");
   assert.ok(comments < countCommentLines(before, "src/lib/daemon.ts").comments,
     "comment lines decrease from the PR base");
+}
+
+test("W1-T10871: comment compression preserves executable code", () => {
+  const source = readFileSync(join(REPO_ROOT, "src/lib/daemon.ts"), "utf8");
+  assertCompression(source, compressionPinBase("src/lib/daemon.ts", import.meta.url));
+});
+
+test("W1-T13387 criterion 1: a pull request that does not add the pin may add comment lines", () => {
+  const source = "const value = 1;";
+  const grown = `${"// added\n".repeat(BEFORE_COMMENTS)}${source}`;
+  assert.ok(countCommentLines(grown, "src/lib/daemon.ts").comments >= BEFORE_COMMENTS);
+  assert.doesNotThrow(() => assertCompression(grown, undefined));
+});
+
+test("W1-T13387 criterion 2: the adding pull request needs fewer comment lines and the same code", () => {
+  const source = 'const s = "// kept"; const t = `/* kept */`;\nconst n = 1;';
+  const before = `// long comment\n// another long comment\n${source}`;
+  const shorter = `// short\n${source}`;
+  assert.doesNotThrow(() => assertCompression(shorter, before));
+  assert.throws(() => assertCompression(before, before), /comment lines decrease/);
+  assert.throws(() => assertCompression(`// a\n// b\n// c\n${source}`, before), /comment lines decrease/);
+  const filled = (lines: number) => `${"// filler\n".repeat(lines)}${source}`;
+  assert.throws(() => assertCompression(filled(BEFORE_COMMENTS), filled(BEFORE_COMMENTS + 1)),
+    /must decrease from the measured/);
+  assert.throws(() => assertCompression(shorter.replace("n = 1", "n = 2"), before), /non-comment code lines/);
+  assert.throws(() => assertCompression(`${shorter}\nconst extra = 2;`, before), /non-comment code lines/);
+  // Text inside a string or a template is code, however much it looks like a comment.
+  assert.throws(() => assertCompression(shorter.replace('"// kept"', '"// cut"'), before), /non-comment code lines/);
+  assert.throws(() => assertCompression(shorter.replace("`/* kept */`", "`/* cut */`"), before),
+    /non-comment code lines/);
+  assert.throws(() => assertCompression("// one\nconst text = `a\nb`;", "// one\n// two\nconst text = `a\n\nb`;"),
+    /emitted JavaScript/);
 });
 
 test("daemon compression digests ignore comments and catch executable edits", () => {

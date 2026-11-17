@@ -551,10 +551,14 @@ export function ledgerCompactCommand(rest: string[], deps: LedgerCompactCommandD
   }
 
   try {
-    for (const { name, body } of staged) {
-      const targetPath = join(stateDir, name);
+    // W1-T13333: a daemon pass runs beside the live daemon. Compress first, then check each name again, so an
+    // archive that landed on an output name during the slow compression is refused, never replaced.
+    const packed = staged.map(({ name, body }) => ({ targetPath: join(stateDir, name), bytes: fs.gzipSync(Buffer.from(body, "utf8")) }));
+    const landed = packed.find(({ targetPath }) => fs.existsSync(targetPath) && !selectedPaths.has(targetPath));
+    if (landed) throw new Error(`refusing to overwrite unselected archive ${landed.targetPath}`);
+    for (const { targetPath, bytes } of packed) {
       forgetMeasuredArchive(targetPath);
-      if (!fs.writeAtomic(targetPath, fs.gzipSync(Buffer.from(body, "utf8")))) {
+      if (!fs.writeAtomic(targetPath, bytes)) {
         throw new Error(`atomic replacement withdrew before rename: ${targetPath}`);
       }
     }

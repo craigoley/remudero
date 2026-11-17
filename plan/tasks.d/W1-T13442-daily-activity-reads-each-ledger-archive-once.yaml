@@ -1,0 +1,51 @@
+- id: W1-T13442
+  title: "The daily-progress collection reads each rotated ledger archive once and keeps it across attempts, so a collection past its deadline resumes instead of re-reading weeks of ledger every two minutes"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # one concern (the activity read's per-archive memo) across the collector and its new test
+  origin: "operator-session#serve-hot-worker-2026-11-17"
+  plan_refs:
+    - W1-T13441
+  files:
+    - src/lib/daily-progress-collector.ts
+    - test/infra/daily-activity-reads-each-ledger-archive-once.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A second activity read takes each rotated archive from the memo and reads only the live ledger from disk"
+      proof: "grep: W1-T13442 criterion 1 in test/infra/daily-activity-reads-each-ledger-archive-once.test.ts"
+    - claim: "An attempt that could not finish keeps the archives it read whole, and the next attempt reads only the rest"
+      proof: "grep: W1-T13442 criterion 2 in test/infra/daily-activity-reads-each-ledger-archive-once.test.ts"
+    - claim: "invariant:never-stale — an archive rewritten in place (new inode, size or mtime) is read again, and an archive that leaves the window is dropped from the memo"
+      kind: guard
+      proof: "grep: W1-T13442 criterion 3 in test/infra/daily-activity-reads-each-ledger-archive-once.test.ts"
+  rationale: |
+    WHY: serve's read-model slow lane burned 0.585 cores (30 s inspector profile of serve's generation on the Azure host,
+    2026-11-17 17:3xZ): parseObject, ndjsonLines and openLedgerUnion under daily-progress-collector.ts activity().
+    OBSERVED in the host ledger: read_model.daily_cancelled every 128-147 s from 17:15:41Z (7 rows, reason "ownership
+    changed or collection deadline elapsed"), and no daily_staged, daily_committed or daily_failed row. The manifest's 3
+    jobs have closedThrough 2026-10-26, lastAttemptAt 16:05:45Z and nextDueAt 17:00Z, so each job is due on every 60 s
+    pass. With closedThrough three weeks back, a run reads every archive since about 2026-10-27, outruns
+    ANALYTICS_REFRESH_TIMEOUT_MS (120 s), is aborted, records nothing and starts again from zero: a livelock.
+  design: |
+    INVARIANT never-stale: an archive is served from the memo only while its (inode, size, mtime) is unchanged.
+    1. readDailyActivity (was activity) lists the root's rotations once, skips those before the window, and reads each
+       archive whole through openLedgerUnion (corpusSnapshot of that one archive), keeping only rows that can become
+       events: step, ts, task id, repository, raw-line fingerprint and the whole-row identity hash, never the payload.
+       The since and now filters run when the candidates are used, so a memo entry does not depend on the window.
+    2. The memo (process-local, the slow lane's thread outlives its runs) is keyed by root, repository and archive path;
+       an archive read with an unread gap is not kept; entries for archives that left the window are dropped.
+    3. The live ledger is read each run as before. Events, gaps and available are unchanged for the same corpus.
+    Not in scope: why closedThrough is stuck at 2026-10-26 (required PR sources never cover the cutoffs); report it
+    separately.
+  falsifier: |
+    Ignore the memo: criteria 1 and 2 fail (the corrupted-in-place archives are read and counted as gaps). Key it by
+    path alone: criterion 3 fails.
+  note: |
+    Id reserved for run-unfiled-1794936665287 with ~/rmd-work/bin/reserve-id.sh.
+    reservation hand-off: run-unfiled-1794936665287 -> claude/project-thread-u06uh4
