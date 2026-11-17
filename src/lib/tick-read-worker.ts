@@ -577,6 +577,8 @@ export interface RawOpenPr {
   autoMergeRequest: unknown;
   contributionOrigin?: OpenPrRest["contributionOrigin"];
   statusCheckRollup?: RollupCheck[];
+  /** W1-T521: the rollup read failed (lib/open-prs-rest.ts), distinct from an observed empty rollup. */
+  rollupUnreadable?: true;
   /** W1-T528: GitHub's `draft`, carried by `mapRestPr` (lib/open-prs-rest.ts). */
   isDraft?: boolean;
   /** W1-T1201: projected to OpenPrView.createdAt for deriveDisposition's age clamp.
@@ -2565,6 +2567,8 @@ export function* openPrViewSteps(
       reviewPendingOwnerGoneReason: undefined,
       reviewVerdictPostedAt,
       checksState,
+      // W1-T13195: a failed rollup read is carried so the sweep waits instead of reading "none".
+      rollupUnreadable: pr.rollupUnreadable === true ? true : undefined,
       // W1-T4054: the pending check's own start, so a push, comment or label never resets the age.
       checksPendingSince: checksPendingSinceFromRollup(pr.statusCheckRollup, requiredContexts,
         { headSha: pr.headRefOid, workflowRuns: workflowRuns.get(pr.number) }),

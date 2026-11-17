@@ -17,7 +17,7 @@
     - deploy/mac/install-gh-read-broker.sh
     - test/github/the-mac-read-broker-runs-from-a-durable-install.test.ts
     - test/github/the-mac-broker-installer-waits-for-the-old-agent-to-be-gone.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "After it stops the old agent, the installer starts the new one only once the service manager no longer lists the service; against a stand-in whose stop command returns before the service is gone, the install succeeds where today it fails with an input/output error"

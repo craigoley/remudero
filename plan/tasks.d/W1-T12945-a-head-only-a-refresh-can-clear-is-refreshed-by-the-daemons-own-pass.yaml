@@ -17,7 +17,7 @@
     - src/lib/sweep.ts
     - src/cli/commands/sweep.ts
     - test/sweep/a-head-only-a-refresh-can-clear-is-refreshed-by-the-daemons-own-pass.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "In the daemon's light pass a build head that lacks its own task record, when that record is on main, enters the pass's whole-snapshot refresh selection and is refreshed once; it is not escalated before that refresh has been tried"

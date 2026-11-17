@@ -17,7 +17,7 @@
   files:
     - .github/workflows/clock-sweep.yml
     - test/infra/ci-workflows-find-nested-tests.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The workflow trigger follows its self-check suites into any folder"

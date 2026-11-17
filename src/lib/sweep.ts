@@ -3194,6 +3194,10 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       ...pr, ...(target.checkoutDir === repoDir ? {} : { codeRoot: repoDir, bodyProofRoot: "plan" as const }),
     }, { log }),
     ...(deps.planRepairGitImpl ? { git: (args: string[]) => planRepairGit("git", ["-C", target.checkoutDir, ...args]) } : {}),
+    // W1-T13169: task ids are reserved in the public repository, so a landing into the plan destination releases one there.
+    ...(target.checkoutDir === repoDir ? {} : {
+      reservationGitAsync: async (args: string[]) => (deps.planRepairGitImpl ?? defaultGitCaptureAsync)("git", ["-C", repoDir, ...args]),
+    }),
     ...(deps.ghJsonImpl ? { gh: (args: string[]) => {
       const out = ghJsonForBuild(args);
       return typeof out === "string" ? out : JSON.stringify(out);
@@ -8023,6 +8027,9 @@ export interface OpenPrView {
    *  review is required here, and calling its absence decidable would assume permissive on missing
    *  information. `true` routes to the catch-all — blocked-ambiguous, never mergeable. */
   requiredContextsUnreadable?: boolean;
+  /** W1-T13195 — true when this pass's read of the PR's check rollup failed (W1-T521), so
+   *  `checksState` and `reviewState` read "none" without evidence. The PR waits; it is never green. */
+  rollupUnreadable?: true;
   /** W1-T2399 — WHY the required-contexts read was unreadable, captured where the read happens so
    *  the escalation names it without a second GitHub call. Present only on a genuine read failure;
    *  protection that readably declares NO required contexts leaves this undefined. */
@@ -10416,6 +10423,8 @@ function conflictFilesFromRow(value: unknown): ConflictFileDiff[] | undefined {
  * `merge_state` alone, never `disposition`/`reason` prose — that field is written only when a pass's
  * OWN effective mergeState (observed or inherited) was known, so hysteresis composes across `unknown` reads on ONE head.
  * W1-T11173: a rung.strike conflict hand-off (`fix.stood_down`) is this head's dirty read, with its last conflict files.
+ * W1-T13195: a `sweep.merge_probe` row for this exact head is a read against its own `main_sha` (clean as clean,
+ * conflict as dirty), so a disposed row from a pass with no main tip cannot hide the probe's main.
  */
 export function lastKnownMergeStateFromLedger(
   lines: ReadonlyArray<Record<string, unknown>>,
@@ -10428,6 +10437,17 @@ export function lastKnownMergeStateFromLedger(
     if (line.step === "fix.stood_down" && line.site === "rung.strike" && line.reason === CONFLICT_REPAIR_HANDOFF_REASON &&
         (line.read_head_sha ?? line.head_sha) === headSha) {
       out = { state: "dirty", ...(typeof line.ts === "string" ? { observedAt: line.ts } : {}), ...(dirtyFiles ? { conflictFiles: dirtyFiles } : {}) };
+      continue;
+    }
+    if (line.step === "sweep.merge_probe") {
+      if (line.pr_number !== prNumber || line.head_sha !== headSha || typeof line.main_sha !== "string") continue;
+      if (line.verdict !== "clean" && line.verdict !== "conflict") continue;
+      const evidence = line.conflict_evidence as MergeConflictEvidence | undefined;
+      const probeFiles = line.verdict === "conflict" && Array.isArray(evidence?.files) && hasCapturedMergeConflictEvidence(evidence)
+        ? evidence!.files : undefined;
+      if (probeFiles) dirtyFiles = probeFiles;
+      out = { state: line.verdict === "conflict" ? "dirty" : "clean", ...(typeof line.ts === "string" ? { observedAt: line.ts } : {}),
+        ...(probeFiles ? { conflictFiles: probeFiles } : {}), mainSha: line.main_sha };
       continue;
     }
     if (line.step !== "sweep.disposed") continue;
@@ -10446,6 +10466,26 @@ export function lastKnownMergeStateFromLedger(
 
 export function mergeInheritanceRefused(known: KnownMergeState | undefined, mainTipSha: string | undefined): boolean {
   return known !== undefined && known.state !== "dirty" && mainTipSha !== undefined && known.mainSha !== mainTipSha;
+}
+
+/** W1-T13195 — the merge facts one `sweep.disposed` row records. A merge_state always names its main:
+ *  this pass's main tip, or, on a pass with no main tip, a main read from this head's newest record. A
+ *  clean or behind takes the main of the same-state record it inherited, and with none records no
+ *  merge_state. A dirty takes the main of the newest record in any state. With no such main a dirty is
+ *  still recorded, without a main: dropping it loses W1-T4470's hysteresis, so the next pass with
+ *  mergeability unread no longer sees the conflict (a-conflicted-pr-is-never-escalated-as-checkless
+ *  fails). A dirty is inherited at any main, so its missing main admits nothing. */
+function disposedMergeFacts(
+  pr: Pick<OpenPrView, "prNumber" | "headSha" | "mergeState">,
+  ledgerLines: ReadonlyArray<Record<string, unknown>>,
+  mainTipSha: string | undefined,
+): { merge_state?: MergeState; merge_main_sha?: string } {
+  if (pr.mergeState === undefined) return {};
+  if (mainTipSha !== undefined) return { merge_state: pr.mergeState, merge_main_sha: mainTipSha };
+  const known = lastKnownMergeStateFromLedger(ledgerLines, pr.prNumber, pr.headSha);
+  if (pr.mergeState === "dirty") return { merge_state: "dirty", ...(known?.mainSha !== undefined ? { merge_main_sha: known.mainSha } : {}) };
+  return known?.state === pr.mergeState && known.mainSha !== undefined
+    ? { merge_state: pr.mergeState, merge_main_sha: known.mainSha } : {};
 }
 
 /**
@@ -12147,6 +12187,9 @@ export function isFixStrikeExhausted(pr: OpenPrView, policy: SweepPolicy): boole
     (pr.priorStrikes >= fixCeilingInForce(pr, policy.strikeCap, policy.clarify) || pr.repeatedFixRefusal !== undefined);
 }
 
+/** W1-T13195 — the wait reason for a PR whose check rollup this pass could not read. */
+const ROLLUP_UNREAD_REASON = "checks and review unread this pass (rollup read failed) — re-reading next pass";
+
 export const DISPOSITION_RULES: readonly DispositionRule[] = [
   {
     // W1-T920 (DECISIONS.md #1987) — ROUTED THROUGH THE EXISTING "stale" disposition, never a new
@@ -12260,6 +12303,17 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     blocker: "other",
     reason: (_pr, policy, ageDays) =>
       `abandoned — no activity in ${Math.floor(ageDays)}d (>= ${policy.staleDays}d threshold)`,
+  },
+  {
+    // W1-T13195 — AN UNREAD ROLLUP IS NEVER GREEN AND NEVER "NONE". A failed rollup read (W1-T521) leaves
+    // checks and review at "none", which the rows below read as zero check runs and no review: an
+    // absent-checks re-push or a "checks none, review none" escalation of a PR whose checks exist.
+    // Ordered before every row that reads checks or review, so the PR is never mergeable, never armed
+    // and never merged on this pass; the next pass reads the rollup again.
+    disposition: "wait",
+    when: (pr) => pr.rollupUnreadable === true,
+    blocker: "awaiting-ci",
+    reason: () => ROLLUP_UNREAD_REASON,
   },
   {
     // W1-T54's dep lane, ROUTED. Before this row dep PRs sat ungated until an operator ran
@@ -16510,22 +16564,36 @@ export function postReviewFailureHistoryDisposition(
   return undefined;
 }
 
-function retryableReviewThrowBackoffReason(
+/** W1-T13257: the first retryable throw waits this long; each further throw on the same review input doubles it. */
+export const REVIEW_THROW_FIRST_BACKOFF_MINUTES = 5;
+
+/** W1-T13257 — A REVIEW THAT THREW ONCE IS RETRIED BEFORE THE STALL BACKSTOP FIRES. The wait after the latest throw is
+ *  `min(5 * 2^(throws - 1), pendingCeilingMinutes)` minutes. A flat pending-ceiling wait (60m) outlasted the 30m
+ *  awaiting-review stage-stall backstop, so one transient host fault (2026-11-16, remudero-console PR 2591: a healed
+ *  worktree with no .git entry) cost the PR an hour and an incident. The strike cap still escalates a repeated throw. */
+export function retryableReviewThrowBackoffMinutes(throws: number, policy: Pick<SweepPolicy, "pendingCeilingMinutes">): number {
+  const n = Number.isFinite(throws) && throws >= 1 ? Math.floor(throws) : 1;
+  return Math.min(REVIEW_THROW_FIRST_BACKOFF_MINUTES * 2 ** Math.min(n - 1, 30), policy.pendingCeilingMinutes);
+}
+
+export function retryableReviewThrowBackoffReason(
   retryableThrows: ReadonlyMap<string, number | undefined>,
   reviewKey: string,
   policy: SweepPolicy,
   now: number,
+  throwCounts?: ReadonlyMap<string, number>,
 ): string | undefined {
   if (!retryableThrows.has(reviewKey)) return undefined;
   const attemptedAt = retryableThrows.get(reviewKey);
   // An undated throw cannot prove that the bound is still live. Admit once; if the condition
   // persists, the existing catch writes a fresh dated row and restores the bounded stand-down.
   if (attemptedAt === undefined) return undefined;
+  const waitMinutes = retryableReviewThrowBackoffMinutes(throwCounts?.get(reviewKey) ?? 1, policy);
   const ageMinutes = Math.max(0, (now - attemptedAt) / 60_000);
-  if (ageMinutes >= policy.pendingCeilingMinutes) return undefined;
+  if (ageMinutes >= waitMinutes) return undefined;
   return (
     `the last post-review attempt for ${reviewKey} threw ${Math.floor(ageMinutes)}m ago — ` +
-    `retry backoff remains inside the ${policy.pendingCeilingMinutes}m pending ceiling; ` +
+    `retry backoff of ${waitMinutes}m (inside the ${policy.pendingCeilingMinutes}m pending ceiling) has not elapsed; ` +
     `this is a retryable transport/process outcome, not a durable review refusal`
   );
 }
@@ -20938,6 +21006,7 @@ export async function runSweep(
       delivered: prior.reviewDelivered,
       refused: prior.reviewRefused,
       retryableThrows: prior.reviewRetryableThrows,
+      retryableThrowCounts: prior.reviewRetryableThrowCounts,
     }, "full");
   }
   // Rotation retains arm_skipped receipts; sweep.disposed may prefer an older acted:true row.
@@ -20973,6 +21042,7 @@ export async function runSweep(
       : undefined;
   const fullOutcomes: ReviewAdmissionOutcomes = {
     delivered: prior.reviewDelivered, refused: prior.reviewRefused, retryableThrows: prior.reviewRetryableThrows,
+    retryableThrowCounts: prior.reviewRetryableThrowCounts,
   };
   if (deps.repairAdmissionSurface === "full") {
     await resolveUnreadPlanLanes(openPrs.filter((pr) => !reviewAdmissionOutcomeKnown(pr, fullOutcomes, policy, now)), deps, policy, now);
@@ -21819,7 +21889,7 @@ export async function runSweep(
       const deliveredRule = deliveredKeyReviewDecision(pr, delivered, freshLines, reviewKey);
       const durableRefusal = fresh.reviewRefused.has(reviewKey);
       const retryBackoff =
-        retryableReviewThrowBackoffReason(fresh.reviewRetryableThrows, reviewKey, policy, now) ??
+        retryableReviewThrowBackoffReason(fresh.reviewRetryableThrows, reviewKey, policy, now, fresh.reviewRetryableThrowCounts) ??
         await freshnessBackoff(fresh.reviewFreshnessRefusals, pr);
       // W1-T11729: a delivered verdict GitHub's pending status contradicts is restored, not re-reviewed and not deduped silently.
       const restore = deliveredRule.dedups ? undefined : deliveredRule.restore;
@@ -22297,7 +22367,10 @@ export async function runSweep(
         // `lastKnownMergeStateFromLedger`, keyed pr_number+head_sha, so hysteresis persists
         // across any number of consecutive `unknown` reads on the SAME head rather than
         // resetting the moment GitHub goes quiet again.
-        ...(pr.mergeState !== undefined ? { merge_state: pr.mergeState, ...(mainTipSha !== undefined ? { merge_main_sha: mainTipSha } : {}) } : {}),
+        // W1-T13195: a clean or behind state always names its main (see `disposedMergeFacts`).
+        ...disposedMergeFacts(pr, ledgerLines, mainTipSha),
+        // W1-T13195: this pass could not read the PR's check rollup, so its checks and review are unread.
+        ...(pr.rollupUnreadable === true ? { rollup_unreadable: true } : {}),
         ...conflictEvidenceRowFields(pr),
         ...(deduped ? { deduped: true } : {}),
         // W1-T7734: how old the view was when this PR was ACTED on — now minus the generation's publish
@@ -23794,7 +23867,7 @@ export async function runSweep(
         const reviewDelivered = deliveredKeyReviewDecision(pr, prior.reviewDelivered.has(reviewKey), ledgerLines, reviewKey).dedups;
         const reviewDurablyRefused = prior.reviewRefused.has(reviewKey);
         const retryBackoff =
-          retryableReviewThrowBackoffReason(prior.reviewRetryableThrows, reviewKey, policy, now) ??
+          retryableReviewThrowBackoffReason(prior.reviewRetryableThrows, reviewKey, policy, now, prior.reviewRetryableThrowCounts) ??
           await freshnessBackoff(prior.reviewFreshnessRefusals, pr);
         alreadyDone = reviewDelivered || reviewDurablyRefused || retryBackoff !== undefined;
         // W1-T2427 — THE SENTENCE MUST SEPARATE FOUR STATES THAT OTHERWISE LOOK IDENTICAL: this
@@ -27304,7 +27377,7 @@ export function observeLightPassReviewEligibility(
   }
   observeReviewEligibility(views, deps, policy, now, lines, {
     delivered: prior.reviewDelivered, refused: prior.reviewRefused,
-    retryableThrows: prior.reviewRetryableThrows, freshnessBackoffs,
+    retryableThrows: prior.reviewRetryableThrows, retryableThrowCounts: prior.reviewRetryableThrowCounts, freshnessBackoffs,
   }, "light");
   return lines;
 }
@@ -27521,6 +27594,7 @@ async function runSweepLightPassCore(
     delivered: selectionPrior.reviewDelivered,
     refused: selectionPrior.reviewRefused,
     retryableThrows: selectionPrior.reviewRetryableThrows,
+    retryableThrowCounts: selectionPrior.reviewRetryableThrowCounts,
     freshnessBackoffs,
   };
   observeReviewEligibility(openPrs, deps, policy, now, selectionLedgerLines, outcomes, "light");
@@ -28128,6 +28202,8 @@ export interface ReviewAdmissionOutcomes {
   refused: ReadonlySet<string>;
   /** W1-T2753: optional for compatibility with callers predating timed throw backoff. */
   retryableThrows?: ReadonlyMap<string, number | undefined>;
+  /** W1-T13257: throws per review key, which size the retry backoff; absent reads as one throw. */
+  retryableThrowCounts?: ReadonlyMap<string, number>;
   freshnessBackoffs?: ReadonlySet<string>;
 }
 
@@ -28150,7 +28226,7 @@ function reviewAdmissionOutcomeKnown(
     outcomes.delivered.has(key) ||
     outcomes.refused.has(key) ||
     outcomes.freshnessBackoffs?.has(key) === true ||
-    retryableReviewThrowBackoffReason(outcomes.retryableThrows ?? EMPTY_RETRYABLE_REVIEW_THROWS, key, policy, now) !==
+    retryableReviewThrowBackoffReason(outcomes.retryableThrows ?? EMPTY_RETRYABLE_REVIEW_THROWS, key, policy, now, outcomes.retryableThrowCounts) !==
       undefined
   );
 }

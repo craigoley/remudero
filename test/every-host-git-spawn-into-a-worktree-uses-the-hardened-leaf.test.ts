@@ -226,9 +226,10 @@ export const WIDENED_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; r
       "<root>/repos/<repo>; buildGitLogSupersessionSearch has no production caller",
   },
   "src/lib/sweep.ts": {
-    count: 5,
+    count: 6,
     reason:
-      "CHECKOUT (W1-T6133): buildSweepEffects's 3 address the managed checkout; renumberPlanPrIds's and " +
+      "CHECKOUT (W1-T6133): buildSweepEffects's 3 address the managed checkout, and W1-T13169's fourth reads " +
+      "the reservations of a plan-destination landing in it (-C repoDir); renumberPlanPrIds's and " +
       "rebaseDirtyFleetBranchViaGit's -C argv goes to their git seam, whose default prHeadTreeGit runs the " +
       "PR-head tree through the leaf and leaves only rebaseDirtyFleetBranchViaGit's repoDir steps raw",
   },

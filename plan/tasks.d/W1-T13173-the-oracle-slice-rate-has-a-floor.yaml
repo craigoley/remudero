@@ -14,7 +14,7 @@
   files:
     - src/lib/read-model-consistency.ts
     - test/read-model-consistency.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "After twelve slices that each compared 1 row in 60,000 ms, nextOracleSlice still sizes the next slice at ORACLE_MIN_ROWS_PER_MS x the budget rows (12,500 at the 2,500 ms default), not 1 row"

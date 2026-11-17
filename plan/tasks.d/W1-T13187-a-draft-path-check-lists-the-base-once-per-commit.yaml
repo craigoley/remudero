@@ -15,7 +15,7 @@
   files:
     - src/lib/inbox.ts
     - test/inbox/a-draft-path-check-lists-the-base-once-per-commit.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "checkoutRepoFacts(root).pathExistsAtBase, asked about 50 paths against one origin/main commit, runs git ls-tree once (a counting git seam sees 1 listing call), and answers true for a file and for each of its parent directories at origin/main and false for a path absent there"

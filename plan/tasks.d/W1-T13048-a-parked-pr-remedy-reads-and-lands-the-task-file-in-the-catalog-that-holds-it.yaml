@@ -19,7 +19,7 @@
     - src/lib/sweep.ts
     - src/lib/parked-pr-remedy.ts
     - test/sweep/a-parked-pr-remedy-files-in-the-catalog-that-holds-the-task.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "buildSweepEffects' parkedPr effect, for a task that findTaskInCatalogs finds in the ops catalog and a plan-destination.json that names that repository, reads the task file from the destination checkout and lands the held task and the acceptance amendment through landTaskFilesAsync with that repository as targetRepository"
