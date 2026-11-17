@@ -28,14 +28,16 @@ function fixture(t: TestContext, records: Record<string, string> = {"W1-T1.yaml"
   const shim=ghShim([{when:"api graphql",stdoutFile:response},{when:"",exit:97,stderr:"forbidden GitHub effect"}]);
   t.after(()=>rmSync(shim.dir,{recursive:true,force:true}));
   const home=join(root,"home");mkdirSync(home);
+  let invocation=0;
   const run=(extra:string[]=[])=>{
+    const cache=join(home,`github-fixture-${++invocation}`);mkdirSync(cache);
     save();
     const child=spawnSync(process.execPath,["--import",import.meta.resolve("tsx"),join(REPO_ROOT,"src/run-task.ts"),"migration-preview","--public-root",pub.clone.dir,"--public-commit",pubCommit,"--public-repo","fixture/remudero","--ops-root",ops.clone.dir,"--ops-commit",opsCommit,"--ops-repo","fixture/ops",...extra],{
-      cwd:pub.clone.dir,encoding:"utf8",timeout:30_000,env:{PATH:`${shim.dir}:${process.env.PATH}`,HOME:home,TMPDIR:tmpdir(),NODE_TEST_CONTEXT:process.env.NODE_TEST_CONTEXT,LANG:"C",GIT_ALLOW_PROTOCOL:"file",GIT_CONFIG_GLOBAL:"/dev/null",GIT_CONFIG_SYSTEM:"/dev/null",RMD_SELF_SYNC_DONE:"1",
+      cwd:pub.clone.dir,encoding:"utf8",timeout:30_000,env:{PATH:`${shim.dir}:${process.env.PATH}`,HOME:home,RMD_GH_CACHE_HOME:cache,TMPDIR:tmpdir(),NODE_TEST_CONTEXT:process.env.NODE_TEST_CONTEXT,LANG:"C",GIT_ALLOW_PROTOCOL:"file",GIT_CONFIG_GLOBAL:"/dev/null",GIT_CONFIG_SYSTEM:"/dev/null",RMD_SELF_SYNC_DONE:"1",
       ...(process.env.NODE_OPTIONS?{NODE_OPTIONS:process.env.NODE_OPTIONS}:{}),...(process.env.NODE_V8_COVERAGE?{NODE_V8_COVERAGE:process.env.NODE_V8_COVERAGE}:{})}});
     assert.equal(child.error,undefined);
     let answer: any;try{answer=JSON.parse(child.stdout.trim());}catch{assert.fail(`actual CLI did not return a preview: ${child.status} ${child.stdout} ${child.stderr}`);}
-    return {status:child.status,answer};
+    return {status:child.status,answer,stderr:child.stderr};
   };
   return {credit,pub,ops,pubCommit,opsCommit,run,publicAnswer,opsAnswer,shim,page,closed,records,root};
 }
@@ -43,13 +45,13 @@ function fixture(t: TestContext, records: Record<string, string> = {"W1-T1.yaml"
 test("migration preview requires current complete ownership and pinned catalog controls", t => {
   const f=fixture(t); const id="W1-T1";
   f.pub.clone.git("push","origin",`HEAD:refs/rmd-dispatch/${id}`);
-  assert.equal(f.run().answer.outcome,"none");
+  { const r=f.run();assert.equal(r.answer.outcome,"none",JSON.stringify(r)); }
   f.pub.clone.git("push","origin",`HEAD:refs/heads/run-${id}-1`);
   f.pub.clone.git("push","origin",`:refs/rmd-dispatch/${id}`);
-  assert.equal(f.run().answer.outcome,"none");
+  { const r=f.run();assert.equal(r.answer.outcome,"none",JSON.stringify(r)); }
   f.pub.clone.git("push","origin",`:refs/heads/run-${id}-1`);
   f.publicAnswer.open.nodes.push({number:2,state:"OPEN",headRefName:"operator-fix",headRefOid:f.pubCommit,body:"",files:f.page([{path:"plan/tasks.d/W1-T1.yaml"}])} as never);f.publicAnswer.open.totalCount++;
-  assert.equal(f.run().answer.outcome,"none");
+  { const r=f.run();assert.equal(r.answer.outcome,"none",JSON.stringify(r)); }
   f.publicAnswer.open.nodes=[];f.publicAnswer.open.totalCount=0;
   f.publicAnswer.open.pageInfo.hasNextPage=true;
   assert.equal(f.run().answer.outcome,"unknown");

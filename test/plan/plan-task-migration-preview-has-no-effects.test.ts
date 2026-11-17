@@ -32,14 +32,16 @@ function fixture(t: TestContext, records: Record<string, string> = {"W1-T1.yaml"
   writeFileSync(gitPath,script.replace("  *) exit 0 ;;",'  *) exec /usr/bin/git "$@" ;;'));
   t.after(()=>rmSync(gitTrap.dir,{recursive:true,force:true}));
   const home=join(root,"home");mkdirSync(home);
+  let invocation=0;
   const run=(extra:string[]=[])=>{
+    const cache=join(home,`github-fixture-${++invocation}`);mkdirSync(cache);
     save();
     const child=spawnSync(process.execPath,["--import",import.meta.resolve("tsx"),join(REPO_ROOT,"src/run-task.ts"),"migration-preview","--public-root",pub.clone.dir,"--public-commit",pubCommit,"--public-repo","fixture/remudero","--ops-root",ops.clone.dir,"--ops-commit",opsCommit,"--ops-repo","fixture/ops",...extra],{
-      cwd:pub.clone.dir,encoding:"utf8",timeout:30_000,env:{PATH:`${gitTrap.dir}:${shim.dir}:${process.env.PATH}`,HOME:home,TMPDIR:tmpdir(),NODE_TEST_CONTEXT:process.env.NODE_TEST_CONTEXT,LANG:"C",GIT_ALLOW_PROTOCOL:"file",GIT_CONFIG_GLOBAL:"/dev/null",GIT_CONFIG_SYSTEM:"/dev/null",RMD_SELF_SYNC_DONE:"1",
+      cwd:pub.clone.dir,encoding:"utf8",timeout:30_000,env:{PATH:`${gitTrap.dir}:${shim.dir}:${process.env.PATH}`,HOME:home,RMD_GH_CACHE_HOME:cache,TMPDIR:tmpdir(),NODE_TEST_CONTEXT:process.env.NODE_TEST_CONTEXT,LANG:"C",GIT_ALLOW_PROTOCOL:"file",GIT_CONFIG_GLOBAL:"/dev/null",GIT_CONFIG_SYSTEM:"/dev/null",RMD_SELF_SYNC_DONE:"1",
       ...(process.env.NODE_OPTIONS?{NODE_OPTIONS:process.env.NODE_OPTIONS}:{}),...(process.env.NODE_V8_COVERAGE?{NODE_V8_COVERAGE:process.env.NODE_V8_COVERAGE}:{})}});
     assert.equal(child.error,undefined);
     let answer: any;try{answer=JSON.parse(child.stdout.trim());}catch{assert.fail(`actual CLI did not return a preview: ${child.status} ${child.stdout} ${child.stderr}`);}
-    return {status:child.status,answer};
+    return {status:child.status,answer,stderr:child.stderr};
   };
   return {gitTrap,credit,pub,ops,pubCommit,opsCommit,run,publicAnswer,opsAnswer,shim,page,closed,records,root};
 }
@@ -51,7 +53,7 @@ test("actual migration preview has no catalog Git claim PR config or scheduler e
   assert.deepEqual([f.pub,f.ops].map(r=>[r.clone.git("show-ref"),r.clone.git("status","--porcelain"),r.origin.git("show-ref")]),before);
   assert.equal(readFileSync(join(f.pub.clone.dir,"plan/tasks.d/W1-T1.yaml"),"utf8"),text);
   assert.ok(f.gitTrap.calls().some(call=>call.includes("ls-remote")),"positive control: real Git reads crossed the mutation trap");
-  assert.ok(f.gitTrap.calls().every(call=>/\s(?:rev-parse|ls-tree|cat-file|ls-remote)\s/.test(call)),"only readonly Git commands executed");
+  assert.ok(f.gitTrap.calls().every(call=>/\s(?:rev-parse|ls-tree|cat-file|ls-remote)\s/.test(call)),`only readonly Git commands executed: ${JSON.stringify(f.gitTrap.calls())}`);
   assert.ok(f.shim.calls().length>=2); assert.ok(f.shim.calls().every(call=>call.startsWith("api graphql ")&&!call.includes("mutation")));
   const count=f.shim.calls().length;
   const help=spawnSync(process.execPath,["--import",import.meta.resolve("tsx"),join(REPO_ROOT,"src/run-task.ts"),"migration-preview","--help"],{encoding:"utf8",timeout:30_000,env:{PATH:`${f.shim.dir}:${process.env.PATH}`,HOME:join(f.root,"home"),RMD_SELF_SYNC_DONE:"1",...(process.env.NODE_OPTIONS?{NODE_OPTIONS:process.env.NODE_OPTIONS}:{})}});
