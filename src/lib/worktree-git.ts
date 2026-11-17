@@ -469,16 +469,18 @@ function argv(pin: PinnedWorktreeGit, args: readonly string[]): string[] {
 export function hostWorktreeGit(worktreePath: string, args: readonly string[], opts: HostWorktreeGitOptions = {}): string {
   const pin = pinWorktreeGit(worktreePath, opts.log);
   const overrides = vetPinnedConfig(pin, opts.log);
+  const gitSync = (a: readonly string[], options: ReturnType<typeof spawnOptions>): string =>
+    String(execFileSync("git", argv(pin, a), options) ?? "");
+  const runHostWorktreeGit = (): string => gitSync(args, spawnOptions(pin, opts, overrides));
   try {
-    return String(execFileSync("git", argv(pin, args), spawnOptions(pin, opts, overrides)) ?? "");
+    return runHostWorktreeGit();
   } catch (error) {
     // W1-T13409: a fetch that names a ref with a missing object repairs it and runs once more; anything else rethrows.
     return retryAfterDanglingRefRepair(
-      (a, timeout) => String(execFileSync("git", argv(pin, a),
-        spawnOptions(pin, { timeout, maxBuffer: DANGLING_REF_MAX_BUFFER }, overrides)) ?? ""),
+      (a, timeout) => gitSync(a, spawnOptions(pin, { timeout, maxBuffer: DANGLING_REF_MAX_BUFFER }, overrides)),
       args,
       error,
-      () => String(execFileSync("git", argv(pin, args), spawnOptions(pin, opts, overrides)) ?? ""),
+      runHostWorktreeGit,
     );
   }
 }
