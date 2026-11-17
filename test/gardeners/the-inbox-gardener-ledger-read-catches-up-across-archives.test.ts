@@ -43,6 +43,10 @@ test("W1-T13348 criterion 1: a ledger that needs many transactions is read to ob
 });
 
 test("W1-T13348 criterion 2: a catch-up the budget cannot finish reports partial, and the next pass resumes from its checkpoint", t => {
+  // W1-T13477: the stepping clock below scales with the constant, so the bounded-stop checks hold at ANY budget. This
+  // floor is what ties the proof to the resize: 20 s read 5-18 of 232 host archives a pass, 300 s reads ~75-270.
+  assert.ok(INBOX_GARDENER_LIMITS.ledgerCatchUpMs >= 300_000, "the catch-up budget covers the host's archive corpus in a few passes");
+  assert.ok(Number.isFinite(INBOX_GARDENER_LIMITS.ledgerCatchUpMs), "and it is still a bound, never an unlimited read");
   const dir = ledgerDir(t);
   const slow = () => steppingClock(INBOX_GARDENER_LIMITS.ledgerCatchUpMs / 2);
   const first = readInboxGardenerLedger(dir, SCOPE, ["ask-old", "ask-live"], slow());
