@@ -1606,6 +1606,7 @@ import {
   readRiskPolicy,
   realRiskJudge,
   resolveRiskJudgeMount,
+  resolveRiskJudgeRoleMount,
   riskJudgeDiffInputBudget,
   riskJudgePlanContext,
   riskJudgePlanContextDigest,
@@ -2767,8 +2768,8 @@ export function codeScanningJudgeDeps(
               hooksDir: join(resolveInstallRoot(config), "hooks"),
               outPath: join(config.root, "tmp", `risk-judge-settings-${runId}.json`),
             });
-            const mount = resolveRiskJudgeMount(loadMounts(mountsPath(repoRoot)));
-            return realRiskJudge({ mount, cwd: config.root, settingsFile, spawn, spend })(input);
+            const mount = resolveRiskJudgeRoleMount(loadMounts(mountsPath(repoRoot)));
+            return realRiskJudge({ mount, cwd: config.root, settingsFile, spawn, spend, shadowLog: log })(input);
           },
           escalate: () => "",
         },
@@ -2823,7 +2824,7 @@ export function handedOffHeadRiskJudge(
         diffSource: {
           read: readViewOnce,
           inputBudgetChars: (tier1Chars) =>
-            riskJudgeDiffInputBudget(resolveRiskJudgeMount(loadMounts(mountsPath(repoRoot))))(tier1Chars),
+            riskJudgeDiffInputBudget(resolveRiskJudgeRoleMount(loadMounts(mountsPath(repoRoot))))(tier1Chars),
         },
         judge: async (input) => {
           const settingsFile = renderWorkerSettings({
@@ -2831,9 +2832,9 @@ export function handedOffHeadRiskJudge(
             hooksDir: join(resolveInstallRoot(config), "hooks"),
             outPath: join(config.root, "tmp", `risk-judge-settings-${runId}.json`),
           });
-          const mount = resolveRiskJudgeMount(loadMounts(mountsPath(repoRoot)));
+          const mount = resolveRiskJudgeRoleMount(loadMounts(mountsPath(repoRoot)));
           const judged = { ...input, change: { ...input.change, changeView: withoutRiskJudgePatches(await readViewOnce()) } };
-          return realRiskJudge({ mount, cwd: config.root, settingsFile, spawn, spend, signal })(judged);
+          return realRiskJudge({ mount, cwd: config.root, settingsFile, spawn, spend, signal, shadowLog: log })(judged);
         },
         escalate: (verdict, action) =>
           escalateImpl(
@@ -28014,6 +28015,7 @@ export function plainInboxWriter(
       mount: resolveDecisionSummaryMount(loadMounts(mountsPath(repoRoot))),
       cwd: config.root,
       settingsFile,
+      shadowLog: log,
     });
   } catch (e) {
     log("inbox.plain_writer_unavailable", { error: String((e as Error)?.message ?? e) });
@@ -35953,6 +35955,7 @@ async function triageCommandLocked(
       cwd: worktreePath,
       settingsFile,
       spawn,
+      shadowLog: log,
     }),
   };
 
@@ -37049,6 +37052,7 @@ export async function planCommand(
             cwd: worktreePath,
             settingsFile,
             spawn,
+            shadowLog: log,
           }),
         });
         log("plan.grill_opened", { issue_url: issueUrl });
@@ -38938,7 +38942,8 @@ export function productionVerifyHumanRelease(
     }
   });
   const riskJudge = (input: RiskJudgeInput): Promise<RiskJudgeVerdict> => {
-    judge ??= realRiskJudge({ mount: resolveRiskJudgeMount(loadMounts(mountsPath(checkoutRoot))), cwd: checkoutRoot, settingsFile: join(checkoutRoot, "settings", "worker.json"), spawn: options.spawn ?? ledgeredNonDispatchSpawn("risk-judge") });
+    judge ??= realRiskJudge({ mount: resolveRiskJudgeRoleMount(loadMounts(mountsPath(checkoutRoot))), cwd: checkoutRoot, settingsFile: join(checkoutRoot, "settings", "worker.json"), spawn: options.spawn ?? ledgeredNonDispatchSpawn("risk-judge"),
+      shadowLog: (step, fields) => appendLedger(ledgerPath, { run_id: runId, task_id: runId, step, ...fields }) });
     return judge(input);
   };
   return async (shard, verdict) => {

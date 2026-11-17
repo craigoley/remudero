@@ -93,7 +93,7 @@ import { defaultOpenFileCountAsync, reapStaleClones, reapStaleClonesAsync, type 
 import { type ObjectReapDeps, type ObjectReapResult } from "../../lib/object-reaper.js";
 import { deriveTaskClass, implementRouteClass } from "../../lib/task-class.js";
 import { readFixRoutingRows } from "../../lib/fix-routing-learner.js";
-import { DEFAULT_RISK_POLICY, readRiskPolicy, realRiskJudge, resolveRiskJudgeMount, riskJudgeDiffInputBudget, riskJudgePlanContext, riskJudgePlanContextDigest, riskJudgeSpendCollector, runRiskJudge, type RiskJudgeChangeView, type RiskJudgeInput, type RiskJudgeVerdict, withoutRiskJudgePatches } from "../../lib/risk-judge.js";
+import { DEFAULT_RISK_POLICY, readRiskPolicy, realRiskJudge, resolveRiskJudgeRoleMount, riskJudgeDiffInputBudget, riskJudgePlanContext, riskJudgePlanContextDigest, riskJudgeSpendCollector, runRiskJudge, type RiskJudgeChangeView, type RiskJudgeInput, type RiskJudgeVerdict, withoutRiskJudgePatches } from "../../lib/risk-judge.js";
 import { runShadowJudge, SHADOW_JUDGE_MAX_BUDGET_USD } from "../../lib/shadow-judge.js";
 import { buildSkillEffectivenessReport, loadInjectableSkills, observeSkillSelection, renderSkillsPart, skillsInjectedEvent, skillWithheldForRun } from "../../lib/skill-workshop.js";
 import { ContainmentError, probeContainment, type ProbeExecutor } from "../../lib/containment.js";
@@ -113,7 +113,7 @@ import { validateWorkerSettingsFile } from "../../lib/settings.js";
 import { buildBatchedGithub, classifyGhFailure, deriveStatus, dispatchesWithoutNewOwnedPr, ghGateway, ghRequiredStatusCheckContexts, projectPlan, readLedgerLines, type GitHub, type GhFailureReason, preferImplementingPr, type PrRef, type BatchedPr, type StatusProjection, persistVerifiedCredit, type ThrownRunVerdictStage, type RefusedRunVerdictStage } from "../../lib/status.js";
 import { dedupeRollupByLatestAttempt, buildFixProgressInput, terminalStateReason, type ActionableGateFailure, type CiFailure, type FixDispatchSnapshot, type FixSuperseded, type LiveStateResult, type MergeConflictEvidence, type OpenPrView, type RollupCheckEntry, type ProofDiscriminationEvidence, type RedBaseRefreshFacts, type SweepDeps, type RegistrationChange, trackRepairLadder, type FixRoundBranchClaim } from "../../lib/sweep.js";
 import { classifyNoPrShape } from "../../lib/fix-rung-classify.js";
-import { DEFAULT_PRUNE_GRACE_MS, appendQuestion, ghJson, parseDecisionRequest, parseLearningsUsed, parseSkillsUsed, parseQuestion, parseReconReport, parseReport, pruneStaleRuns, reapStaleWorktrees, removeRunLock, renderWorkerSettings, resolveGenericRouteToolBound, harnessOwnsGitFor, IMPLEMENT_CASH_TOOLS, IMPLEMENT_CLAUDE_TOOLS, WORKER_RULE_TOOL_NAME, implementToolBound, resolveDispatchLaneToolBound, cashDivertSpawnFields, cashFallbackRefusal, runAdhocLaneReapRung, runWorktreeReapRung, spawnWorker, cacheTokenLedgerFields, capStderrExcerpt, STDERR_EXCERPT_CAP, noPrReportExcerpt, listRegisteredWorktrees, readRunLock, workerLedgerFields, workerTranscript, resolveCommitAssignment, linkWorktreeNodeModules, reprovisionWorktreeDependencies, worktreeAdd, worktreeAddAsync, worktreeLockIsPidAlive, worktreeRemove, worktreesDir, writeRunLock, WorktreeBaseStaleError, WorktreeNodeModulesRefusedError, detectWorktreeBaseUncheckableStreak, WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND, type RunLockInfo, type SpawnWorkerArgs, type RegisteredWorktree, type WorkerResult, type WorktreeReapSummary, WorkerStateTracker, DEFAULT_WORKER_QUIET_FLOOR_MS, type WorkerState, type WorkerStreamObserver, type WorkerStreamEvent, type WorkerSelectionAssignment, WorkerAbandonedError, deliverOperatorAnswerToRunningWorker, workerContinuation, renderTaskInputAnswer, taskInputAnswer } from "../../lib/worker.js";
+import { DEFAULT_PRUNE_GRACE_MS, JUDGE_SHADOW_TRIAL_ID, appendQuestion, ghJson, parseDecisionRequest, parseLearningsUsed, parseSkillsUsed, parseQuestion, parseReconReport, parseReport, pruneStaleRuns, reapStaleWorktrees, removeRunLock, renderWorkerSettings, resolveGenericRouteToolBound, harnessOwnsGitFor, IMPLEMENT_CASH_TOOLS, IMPLEMENT_CLAUDE_TOOLS, WORKER_RULE_TOOL_NAME, implementToolBound, resolveDispatchLaneToolBound, cashDivertSpawnFields, cashFallbackRefusal, runAdhocLaneReapRung, runWorktreeReapRung, spawnWorker, cacheTokenLedgerFields, capStderrExcerpt, STDERR_EXCERPT_CAP, noPrReportExcerpt, listRegisteredWorktrees, readRunLock, workerLedgerFields, workerTranscript, resolveCommitAssignment, linkWorktreeNodeModules, reprovisionWorktreeDependencies, worktreeAdd, worktreeAddAsync, worktreeLockIsPidAlive, worktreeRemove, worktreesDir, writeRunLock, WorktreeBaseStaleError, WorktreeNodeModulesRefusedError, detectWorktreeBaseUncheckableStreak, WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND, type RunLockInfo, type SpawnWorkerArgs, type RegisteredWorktree, type WorkerResult, type WorktreeReapSummary, WorkerStateTracker, DEFAULT_WORKER_QUIET_FLOOR_MS, type WorkerState, type WorkerStreamObserver, type WorkerStreamEvent, type WorkerSelectionAssignment, WorkerAbandonedError, deliverOperatorAnswerToRunningWorker, workerContinuation, renderTaskInputAnswer, taskInputAnswer } from "../../lib/worker.js";
 import { QuietRoundEndedError, createQuietBoundHistory, guardSpawnWithQuietWatchdog, productionQuietWorkerJudge, quietHistoryOptions, runQuietWorkerWatchdog, type QuietBoundHistory, type QuietWorkerJudge } from "../../lib/quiet-worker-watchdog.js";
 import { isCodexWorkerOutputLimitError } from "../../lib/worker-provider.js";
 import { type AddedTestAliasRewrite, type TestAliasRewriter } from "../../lib/added-test-alias-rewrite.js";
@@ -3134,12 +3134,13 @@ function buildSourceSizeGatePostureRuntime(
       runRiskJudge,
       spend,
       judge: realRiskJudge({
-        mount: resolveRiskJudgeMount(loadMounts(mountsPath(repoRoot))),
+        mount: resolveRiskJudgeRoleMount(loadMounts(mountsPath(repoRoot))),
         cwd: worktreePath,
         settingsFile,
         spawn,
         spend,
         log: (step, extra) => log(step, extra),
+        shadowLog: (step, extra) => log(step, extra),
       }),
       consume: (input) => sourceSizeGateFollowupConsumer(input, log, say),
     };
@@ -8363,7 +8364,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       prNumber: prNumberFromRef(prUrl),
       headSha: review.headSha,
     };
-    const riskJudgeMount = resolveRiskJudgeMount(loadMounts(mountsPath(repoRoot)));
+    const riskJudgeMount = resolveRiskJudgeRoleMount(loadMounts(mountsPath(repoRoot)));
     // W1-T4050: LIVE, per-run read of `plan/policy.yaml`'s `risk:` section — never memoized
     // (unlike `loadDefaultPolicy`), so an operator's merged policy edit governs the very next
     // unattended risk judgment with no daemon restart. Absent section ⇒ DEFAULT_RISK_POLICY,
@@ -8391,10 +8392,11 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
         change: { ...input.change, changeView: withoutRiskJudgePatches(view) },
       };
       return realRiskJudge({
-        mount: riskJudgeMount, cwd: worktreePath, settingsFile, spend: riskJudgeSpend,
+        mount: riskJudgeMount, cwd: worktreePath, settingsFile, spend: riskJudgeSpend, shadowLog: log,
         spawn: async (options) => {
           const result = await spawn(options);
-          primaryRiskServedModel = result.servedModel ?? result.routedModel ?? null;
+          // W1-T12187: the cash shadow rides this spawn too; its served model is not the primary's.
+          if (options.routingTrial?.id !== JUDGE_SHADOW_TRIAL_ID) primaryRiskServedModel = result.servedModel ?? result.routedModel ?? null;
           return result;
         },
       })(judgedRiskInput);

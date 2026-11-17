@@ -82,6 +82,18 @@ type SeedRow = Omit<LedgerStepRow, "family">;
 // `src/lib/review.ts`, `src/lib/sweep.ts` and `src/lib/panel-actions.ts` at 2026-09-07.
 const SEED_ROWS: readonly SeedRow[] = [
   {
+    step: "judge_shadow.compared",
+    meaning: "After the risk judge or the decision summary answered, the same prompt went once to a cash model in shadow and a reply came back. The row holds the role, both models and the cost of each call. A risk judge row also holds both answers and whether they agree; a decision summary row holds whether the reply parses and no agreement. Nothing acts on the row except the summary the config gardener reads.",
+    writer: ["shadowJudgeCall"],
+    outcomes: ["agreement true", "agreement false", "parses true", "parses false"],
+  },
+  {
+    step: "judge_shadow.skipped",
+    meaning: "The cash shadow of a risk judge or decision summary answer gave nothing to compare: the daily cash cap or a capacity limit refused it before any request (the row has a refusal), or the call failed, timed out or gave no usable answer. The row holds the reason. The role's own answer is unchanged.",
+    writer: ["shadowJudgeCall"],
+    outcomes: ["refusal budget", "refusal capacity", "failed", "unparseable"],
+  },
+  {
     step: "sweep_light.views_fallback",
     meaning: "A light pass could not use a fresh open-PR list: the read failed, was rate-limited or had not settled after 60 s. With a last good list younger than its age limit, the pass decides from that list, reads each head again at act time and stands a moved or unreadable head down. With no such list, the pass decides nothing, as before.",
     writer: ["createLightPassOpenPrList"],

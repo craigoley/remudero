@@ -22,6 +22,7 @@ import {
   type PromotionRecord,
 } from "./experiment-promotion.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
+import { JUDGE_SHADOW_STEPS, judgeShadowSummary, type JudgeShadowRoleSummary } from "./judge-shadow.js";
 import { gardenNeedsInventory, gardenPassDue, landedPrUrl, gardenStatePath, judgeGardenDecision, readGardenState, runGardenAsync, type GardenAction, type GardenCheckout, type GardenPassResult, type GardenSpec, type GardenerDeps, type PrState } from "./gardener.js";
 import { buildEntryWeightIndex, DEFAULT_KNOWLEDGE_BUDGET_CHARS, loadLearningsCorpus } from "./learnings.js";
 import type { LedgerLine } from "./ledger.js";
@@ -50,6 +51,8 @@ import { deriveTaskClass } from "./task-class.js";
  *     its route in the mounts table (mounts.ts's `mountsPath`).
  *   - RE-DERIVE-CAP: the learnings character cap is re-derived from the spawns measured UNDER the
  *     current cap, with the same two functions that derived it (digest.ts).
+ *   - MOVE-JUDGE-TO-CASH (W1-T12187): a judge whose cash shadow cleared {@link JUDGE_CASH_BAR} gets `provider: cash`
+ *     on its own one-line row in the mounts table.
  *
  * EVERY CHANGE IS A CANARY (experiment-promotion.ts). It is chosen only when its SHADOW evidence — what
  * it was derived from, read before anything is exposed — clears its guard. Its PR opening puts it in
@@ -63,8 +66,8 @@ import { deriveTaskClass } from "./task-class.js";
  * classes never moves on its own — the canary is the judge, never a second opinion.
  */
 
-export type ConfigGardenClass = "recalibrate-budget" | "adopt-mount" | "re-derive-cap";
-export const CONFIG_GARDEN_CLASSES: readonly ConfigGardenClass[] = ["recalibrate-budget", "adopt-mount", "re-derive-cap"];
+export type ConfigGardenClass = "recalibrate-budget" | "adopt-mount" | "re-derive-cap" | "move-judge-to-cash";
+export const CONFIG_GARDEN_CLASSES: readonly ConfigGardenClass[] = ["recalibrate-budget", "adopt-mount", "re-derive-cap", "move-judge-to-cash"];
 
 /** One whole-line replacement in a repo file. A rollback swaps `from` and `to`. */
 export interface ConfigEdit {
@@ -121,6 +124,8 @@ export interface ConfigInventory {
   queued: QueuedBudget[];
   recommendations: MountRecommendation[];
   cap?: { current: number; derivation: KnowledgeBudgetDerivation };
+  /** W1-T12187: each judge role's cash shadow record over {@link JUDGE_CASH_BAR}'s window. */
+  judgeShadows?: JudgeShadowRoleSummary[];
   active: ConfigCanary[];
   /** Scopes whose canary was rolled back or declined within {@link CANARY_TTL_MS}: re-proposing the same
    *  change on the next pass would only repeat the verdict. */
@@ -154,6 +159,13 @@ export const CANARY_TTL_MS = 21 * 24 * 3600 * 1000;
 export const CONFIG_GARDEN_BUCKET_MS = 6 * 3600 * 1000;
 /** How often the open canaries are judged. */
 export const CONFIG_TEND_INTERVAL_MS = 3600 * 1000;
+/** W1-T12187: what a judge's cash shadow must show before its row moves to cash. The three numbers are new and
+ *  unmeasured (2026-11-17): the sample floor, the least agreement and the most calls with no usable answer. */
+export const JUDGE_CASH_BAR = { windowMs: 14 * 24 * 3600 * 1000, minPaired: 200, minAgreeShare: 0.98, maxNoAnswerShare: 0.02 } as const;
+/** The mounts-table row of each shadowed role. */
+export const JUDGE_ROLE_ROWS: Readonly<Record<string, "risk_judge" | "feedback_summary" | "ci_judge" | "fix_progress_judge">> = {
+  "risk-judge": "risk_judge", "decision-summary": "feedback_summary", "ci-judge": "ci_judge", "fix-progress": "fix_progress_judge",
+};
 
 export function configCanariesPath(stateDir: string): string {
   return join(stateDir, "config-gardener-canaries.json");
@@ -315,6 +327,8 @@ export const CONFIG_GARDEN_LEDGER_STEPS: readonly string[] = [
   "review.history_guarded",
   // Automatic follow-up filing records the originating PR on this worker-priced receipt.
   "followup.filed",
+  // W1-T12187: the judges' cash shadow rows, for judgeShadowSummary.
+  ...JUDGE_SHADOW_STEPS,
 ];
 
 /** W1-T5474: the 60-day union read bounded to {@link CONFIG_GARDEN_LEDGER_STEPS}. An incomplete union fails
@@ -419,6 +433,7 @@ function buildConfigInventory(input: InventoryMeasurement): ConfigInventory {
     queued: queuedBudgets(input.repoRoot, input.stateDir),
     recommendations: input.recommendations,
     cap: { current: DEFAULT_KNOWLEDGE_BUDGET_CHARS, derivation: capDerivation(rows, weights, DEFAULT_KNOWLEDGE_BUDGET_CHARS) },
+    judgeShadows: judgeShadowSummary(rows, input.nowMs - JUDGE_CASH_BAR.windowMs),
     active: canaries.filter((c) => isPromotionActive(c.promotion.state)),
     cooling: canaries.filter((c) => c.promotion.state === "rolled_back" && input.nowMs - Date.parse(c.promotion.createdAt) < CANARY_TTL_MS).map((c) => c.promotion.scope.policyScope),
   };
@@ -632,6 +647,54 @@ export function capCandidate(inv: ConfigInventory, baselineText: string): Config
   };
 }
 
+/** W1-T12187: does this role's cash shadow record clear {@link JUDGE_CASH_BAR}? A role with no agreement figure never does. */
+export function judgeClearsCashBar(s: JudgeShadowRoleSummary): boolean {
+  return s.paired >= JUDGE_CASH_BAR.minPaired && s.agreeShare !== null && s.agreeShare >= JUDGE_CASH_BAR.minAgreeShare &&
+    s.noAnswerShare !== null && s.noAnswerShare <= JUDGE_CASH_BAR.maxNoAnswerShare;
+}
+
+/** W1-T12187: the first role that clears the bar and whose own row is one flow-map line not yet on cash: that line
+ *  with `provider: cash`. The row must name a model of the lowest tier, so cash serves it from its economy row. A
+ *  role with no row, or a row over several lines, gets no proposal: one edit replaces one line. */
+export function judgeCashCandidate(inv: ConfigInventory, repoRoot: string): ConfigGardenAction | undefined {
+  const full = mountsPath(repoRoot);
+  const clear = (inv.judgeShadows ?? []).filter(judgeClearsCashBar);
+  if (clear.length === 0 || !existsSync(full)) return undefined;
+  const path = relative(repoRoot, full).split(sep).join("/");
+  const mounts = loadMounts(full);
+  const lines = readFileSync(full, "utf8").split("\n");
+  const lowestTier = Math.min(...Object.values(mounts.tiers));
+  for (const s of clear) {
+    const key = JUDGE_ROLE_ROWS[s.role];
+    const row = key === undefined ? undefined : mounts[key];
+    const from = lines.find((line) => line.startsWith(`${key}: {`) && /^\w+: \{[^{}]*\}\s*$/.test(line));
+    if (row === undefined || from === undefined || row.provider === "cash" || mounts.tiers[row.model] !== lowestTier) continue;
+    const to = from.replace(/,\s*provider:\s*[^,}\s]+/, "").replace(/\s*\}\s*$/, ", provider: cash }");
+    const cohort: ConfigCohort = { kind: "all" };
+    const observed = { denominator: s.paired, freshness: "verified" as const, comparisonPopulation: population(cohort), observedAt: inv.nowIso };
+    return {
+      class: "move-judge-to-cash",
+      target: s.role,
+      scope: `judge:${s.role}`,
+      reason: `the cash shadow of the ${s.role} agreed on ${(s.agreeShare! * 100).toFixed(1)}% of ${s.paired} paired calls in 14 days, and ${(s.noAnswerShare! * 100).toFixed(1)}% of its calls gave no usable answer; median cost $${s.shadowMedianCostUsd ?? "?"} against $${s.primaryMedianCostUsd ?? "?"}.`,
+      edits: [{ path, from, to }],
+      cohort,
+      candidate: `${key} on ${row.model}/${row.effort} with provider cash`,
+      baseline: `${key} on ${row.model}/${row.effort} with ${row.provider ?? "no provider"}`,
+      exposure: 1,
+      shadowMetrics: [
+        { metricName: "shadow_agree_share", unit: "fraction", direction: "min", abortThreshold: JUDGE_CASH_BAR.minAgreeShare },
+        { metricName: "shadow_no_answer_share", unit: "fraction", direction: "max", abortThreshold: JUDGE_CASH_BAR.maxNoAnswerShare },
+      ],
+      shadowObservations: [
+        { metricName: "shadow_agree_share", value: s.agreeShare!, ...observed },
+        { metricName: "shadow_no_answer_share", value: s.noAnswerShare!, ...observed },
+      ],
+    };
+  }
+  return undefined;
+}
+
 /** A draft promotion for `action`, approved by the gardener's own draw and not yet exposed. */
 export function configPromotion(action: ConfigGardenAction, nowIso: string, repo = "remudero"): PromotionRecord {
   const now = Date.parse(nowIso);
@@ -660,7 +723,7 @@ const readIfPresent = (path: string): string => (existsSync(path) ? readFileSync
 /** Every change any class could make now, each already clear of its shadow guard and of any scope an
  *  active canary holds. */
 export function configCandidates(inv: ConfigInventory, repoRoot: string, rng: () => number): ConfigGardenAction[] {
-  const all = [budgetCandidate(inv, rng), mountCandidate(inv, repoRoot), capCandidate(inv, readIfPresent(join(repoRoot, "scripts", "knowledge-budget-baseline.json")))].filter((a): a is ConfigGardenAction => a !== undefined);
+  const all = [budgetCandidate(inv, rng), mountCandidate(inv, repoRoot), capCandidate(inv, readIfPresent(join(repoRoot, "scripts", "knowledge-budget-baseline.json"))), judgeCashCandidate(inv, repoRoot)].filter((a): a is ConfigGardenAction => a !== undefined);
   const held = inv.active.map((c) => ({ promotionId: c.promotion.promotionId, scope: c.promotion.scope, state: c.promotion.state }));
   return all.filter((a) => {
     const p = configPromotion(a, inv.nowIso);
@@ -733,6 +796,7 @@ const titles: Record<ConfigGardenClass, string> = {
   "recalibrate-budget": "chore(plan): the config gardener canaries recalibrated budgets",
   "adopt-mount": "chore(mounts): the config gardener canaries a recommended mount",
   "re-derive-cap": "chore(learnings): the config gardener canaries a re-derived learnings cap",
+  "move-judge-to-cash": "chore(mounts): the config gardener canaries a judge on the cash provider",
 };
 
 /** Modification times of the plan and mounts, and the current read bucket: an idle tick costs a few stats. */
@@ -749,7 +813,7 @@ export function configGardenSpec(deps: GardenerDeps, sources: ConfigGardenSource
     classes: CONFIG_GARDEN_CLASSES,
     cheapFingerprint: () => configCheapFingerprint(deps.repoRoot, (deps.clock ?? systemClock).now()),
     inventory: () => configInventory(deps, sources),
-    fingerprint: (inv) => [inv.queued.map((q) => `${q.id}=${q.budgetUsd}`).join(","), inv.recommendations.map((r) => r.cellKey).join(","), inv.cap?.derivation.recommendedCapChars, inv.runs.length].join("|"),
+    fingerprint: (inv) => [inv.queued.map((q) => `${q.id}=${q.budgetUsd}`).join(","), inv.recommendations.map((r) => r.cellKey).join(","), inv.cap?.derivation.recommendedCapChars, inv.runs.length, (inv.judgeShadows ?? []).filter(judgeClearsCashBar).map((s) => s.role).join(",")].join("|"),
     // The canary judges these classes (tendConfigCanaries settles the pending class), so the framework's
     // own metric is held still: it never credits or debits on a number the canary did not produce.
     metric: () => ({ trials: 0, successes: 0 }),

@@ -509,6 +509,15 @@ machine_filing_judge:
   max_turns: 400
   context_budget: 60000
 
+# ── The risk judge's and the decision summary's own rows (W1-T12187) ───────────
+# Each row holds the model and effort that `resolveRiskJudgeMount` returned on 2026-11-17 and names no
+# provider, so both roles spawn as before; the risk judge still fails closed. A cash model answers each
+# judgement in shadow (docs/model-routing.md, "A cash model shadows each low-stakes judge"). When a role
+# clears the bar there, the config gardener proposes `provider: cash` on its row.
+# Keep each row on ONE line: the gardener replaces one line.
+risk_judge: { model: haiku, effort: low, max_turns: 400, context_budget: 60000 }
+feedback_summary: { model: haiku, effort: low, max_turns: 400, context_budget: 60000 }
+
 # ── Decision models (W1-T12416, operator decision 2026-11-12) ──────────────────
 # A decision model answers many fixed-option questions about ONE input in one paid cash request,
 # with a probability for each option and no output text. Shadow only: `rmd decisions probe` is the
