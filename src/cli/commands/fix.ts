@@ -51,7 +51,7 @@ import { recognizeChangesetClaims, acceptanceAuthorTimeCheck, acceptanceBlockReg
 import { repairedProofsAreSafeToPush, diagnoseUnrunnableProofs, renderBodyDefects } from "../../lib/body-repair.js";
 import { recordHeadProviderAfterPush } from "../../lib/review-provider-provenance.js";
 import { ghRequiredStatusCheckContexts, readLedgerLines, taskIdFromRunBranch } from "../../lib/status.js";
-import { withCodeqlAlertEvidence, CODE_SCANNING_FALSE_POSITIVE_STEP, DEFAULT_SWEEP_POLICY, decideRedBaseRefresh, isCiHarnessPath, actionableGateFailuresFromReasons, dispatchFixSpent, fixRoundNotRunReason, checksStateFromRollup, earlyRedEvidenceRollup, checksPendingSinceFromRollup, deriveDisposition, fixRoundTally, buildFixProgressInput, flakeClaimsForHead, isBlockedCi, renderClarificationQuestion, redQualityGateNames, stillRedRequiredNames, terminalStateReason, type ActionableGateFailure, type CiFailure, type LiveStateResult, type OpenPrView, type RollupCheckEntry, type ProofDiscriminationEvidence, type SweepDeps, type SweepPolicy, proofDiscriminationEvidenceFromCriteria, ADDITIVE_REGISTRATION_SURFACES, type RegistrationChange, hasCapturedMergeConflictEvidence, clearedConflictEscalationCause } from "../../lib/sweep.js";
+import { withCodeqlAlertEvidence, CODE_SCANNING_FALSE_POSITIVE_STEP, DEFAULT_SWEEP_POLICY, decideRedBaseRefresh, isCiHarnessPath, actionableGateFailuresFromReasons, dispatchFixSpent, fixRoundNotRunReason, checksStateFromRollup, earlyRedEvidenceRollup, checksPendingSinceFromRollup, deriveDisposition, fixRoundTally, buildFixProgressInput, flakeClaimsForHead, isBlockedCi, renderClarificationQuestion, redQualityGateNames, stillRedRequiredNames, terminalStateReason, type ActionableGateFailure, type CiFailure, type LiveStateResult, type OpenPrView, type RollupCheckEntry, type ProofDiscriminationEvidence, type SweepDeps, type SweepPolicy, proofDiscriminationEvidenceFromCriteria, ADDITIVE_REGISTRATION_SURFACES, type RegistrationChange, hasCapturedMergeConflictEvidence, clearedConflictEscalationCause, withPrAddedVerbs, isVerbRegistrationPath, ownVerbRegistrationPaths, VERB_REGISTRATION_PATHS } from "../../lib/sweep.js";
 import { forcedRefreshFields, REFRESH_DECIDED_STEP } from "../../lib/refresh-value.js";
 import { detectReviewFalseBlock, detectCiLogVerdictUnchanged, shouldSelfHealNothingChanged } from "../../lib/fix-rung-classify.js";
 import { readCiGateRequiredChecks } from "../../lib/ci-gate-required.js";
@@ -2617,6 +2617,10 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       pr_number: prNumber, amendment_url: "amendmentUrl" in outcome ? outcome.amendmentUrl : undefined, ...recovery, ...extra });
     return outcome;
   };
+  // W1-T13378: the verbs a verb registration may name come from the PR's committed COMMANDS diff, read here off the loop
+  // (src/run-task.ts is past the 1 MiB default buffer), and the worker's own rows for them, read against HEAD.
+  const prVerbGit = (args: string[]) => hostWorktreeGitAsync(opts.worktreePath, args, { maxBuffer: 1 << 26 });
+  const ownVerbRows = async () => ownVerbRegistrationPaths(await withPrAddedVerbs(host.readRegistrationChanges(opts.worktreePath, VERB_REGISTRATION_PATHS), prVerbGit));
   const scopeWork = (paths: string[], amendmentNumber: number) => ({ root: opts.config.root,
     worktreePath: opts.worktreePath, taskId: opts.taskId, prNumber: prNumber!, amendmentNumber, paths });
   // W1-T2671: at most one base-gap read/update attempt per invocation. A successful update ends
@@ -3591,7 +3595,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
                 : opts.task.files,
               reachableRemedyFiles,
               currentCiFailures ?? [],
-              host.readRegistrationChanges(opts.worktreePath, currentDiffFiles, "origin/main", undefined, currentPinnedSha),
+              await withPrAddedVerbs(host.readRegistrationChanges(opts.worktreePath, currentDiffFiles, "origin/main", undefined, currentPinnedSha), prVerbGit, currentPinnedSha),
               { root: opts.worktreePath, proofs: (opts.task.acceptance ?? []).map((c) => c.proof) },
             )
           : undefined;
@@ -4410,7 +4414,8 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     const fixDeclaredPaths = proofRepairRound
       ? proofRepairStageable
       : [...new Set([
-          ...(opts.task.files ?? []), ...(baselineDiffFiles ?? []), ...reachableRemedyFiles.map((file) => file.path),
+          // W1-T13378: a log-named verb registration is never staged whole; only the PR's own verb rows are (ownVerbRows).
+          ...(opts.task.files ?? []), ...(baselineDiffFiles ?? []), ...reachableRemedyFiles.map((file) => file.path).filter((path) => !isVerbRegistrationPath(path)),
           ...(unfiledGrant?.paths ?? []),
         ])];
     // An empty filed scope can still admit a new test or a registered regenerable artifact.
@@ -4717,6 +4722,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     let harnessCommitUndeclared: readonly string[] = [];
     let harnessCommitMarkerFiles: readonly string[] = [];
     let harnessCommittedSha: string | undefined;
+    let ownRows: string[] = [];
     const harnessCommit = (report: string, options: Pick<Parameters<typeof host.harnessCommitForShellLessWorker>[0], "subjectSource" | "derivedCommit" | "fixOutcome"> = {}) => {
       if (censusCheck?.refusal) {
         harnessCommitRefusalReason = censusCheck.refusal.text;
@@ -4730,7 +4736,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         worktreePath: opts.worktreePath,
         // The prompt and pre-strike guard already permit repairs to the inherited PR diff.
         // Use that same captured baseline here; a worker's newly added paths never enter it.
-        declaredPaths: fixDeclaredPaths,
+        declaredPaths: [...fixDeclaredPaths, ...ownRows],
         acceptance: opts.task.acceptance,
         admitTests: admitFixTests,
         ...options,
@@ -4768,7 +4774,14 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       }
       return action;
     };
-    let fixAction = admitUnfiledOwnDiff(decideFixOutcomeAction(fixOutcome, { admitTests: admitFixTests, attribution: await attributeRed(fixOutcome) }));
+    // W1-T13378: a NEEDS_SCOPE naming only verb registrations the worker filled with the PR's own verb rows is a commit.
+    const admitOwnVerbRows = (action: ReturnType<typeof decideFixOutcomeAction>): ReturnType<typeof decideFixOutcomeAction> => {
+      if (action.kind !== "scope-needed" || !action.paths.every((path) => ownRows.includes(path))) return action;
+      deps.log("fix.scope_amendment", { outcome: "registration-admitted", paths: action.paths, head_sha: priorHeadSha, pr_number: prNumber, round_id: roundId });
+      return { kind: "commit" };
+    };
+    ownRows = fixHarnessOwnsGit && !proofRepairRound ? await ownVerbRows() : [];
+    let fixAction = admitUnfiledOwnDiff(admitOwnVerbRows(decideFixOutcomeAction(fixOutcome, { admitTests: admitFixTests, attribution: await attributeRed(fixOutcome) })));
     const fixLeftEdits = () => (deps.worktreeHasUncommittedChanges ?? host.worktreeHasUncommittedChanges)(opts.worktreePath);
     const outcomeCommitOptions = () => ({ fixOutcome: fixOutcome?.kind,
       derivedCommit: fixOutcome?.kind === "FIXED"
@@ -4824,7 +4837,8 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         // The last outcome in the resumed report can explicitly authorize a derived subject.
         const answeredReport = `${workerTranscript(fixResult)}\n${workerTranscript(answer)}`;
         fixOutcome = anchoredFixOutcome(answeredReport);
-        fixAction = admitUnfiledOwnDiff(decideFixOutcomeAction(fixOutcome, { admitTests: admitFixTests, attribution: await attributeRed(fixOutcome) }));
+        ownRows = fixHarnessOwnsGit && !proofRepairRound ? await ownVerbRows() : [];
+        fixAction = admitUnfiledOwnDiff(admitOwnVerbRows(decideFixOutcomeAction(fixOutcome, { admitTests: admitFixTests, attribution: await attributeRed(fixOutcome) })));
         if (["legacy", "commit"].includes(fixAction.kind) || (fixAction.kind === "scope-needed" && fixAction.testPaths.length > 0)) {
           harnessCommitCount = harnessCommit(answeredReport, { subjectSource: "re-asked", ...outcomeCommitOptions() });
         }
