@@ -37,28 +37,57 @@ above marked INFERRED therefore needs one `gh auth status` per host to become OB
 ## Attribution census
 
 Stated window: the 7 days ending 2026-11-16 (2026-11-09 to 2026-11-16).
+UTC bounds: `2026-11-09T00:00:00Z` inclusive to `2026-11-16T00:00:00Z` exclusive.
 
-Result: NOT MEASURED. The run had no GitHub API access, so the three counts (`cao825` comments,
-reactions, fleet-PR commits, each split automation versus person or session) are not stated here and
-none is invented. The only figures available are the task record's own OBSERVED API reading of
-2026-11-16: at least 105 dedup observation comments and 13 revalidation refreshes authored by `cao825`
-since 2026-11-01 (a 16-day window, not the 7-day one). Both comment kinds are written by
-`src/lib/issue-revalidation-garden.ts`, so they are automation by construction (OBSERVED: the writer).
+Comment result: 522 `cao825` issue comments in the stated window, from the GitHub REST
+`issues/comments` collection filtered to `user.login == "cao825"` and the inclusive start/exclusive
+end timestamps above. Of these, 33 carry the dated-refresh marker from
+`src/lib/issue-revalidation-garden.ts`, 368 carry the fixed duplicate-observation marker from
+`src/lib/escalate.ts`, and 10 carry the lifecycle reconciler marker from `src/lib/sweep.ts`. These 411
+comments are fleet automation by construction (OBSERVED: the writers and their fixed markers). The
+remaining 111 comments are person/session-authored text without those generated markers. The API
+read is a positive control for the comment corpus: it returned 522 matching rows over the interval.
+
+Reaction result for the GRILL-answer corpus: 8 automation, 0 person/session. The Mac runtime ledger
+has 9 `panel.question_answered` rows in the window on #18451, #18489, #18496 and #18519. The GitHub
+reaction connections for those four issues contain 8 `+1` reactions by `cao825`, each matching a
+ledger comment id and timestamp; the ninth accepted answer (#18489 comment 6878486020) has no
+reaction. The 9 open GRILL escalations listed below have no `cao825` issue or comment reactions in
+the window. The 8 observed reactions therefore come from the Mac answer automation, not a person or
+session. The local ledger's current rows extend through 2026-11-16T23:22:20Z, covering the window end.
+
+Fleet-PR commit result: 104 unique `cao825` commits, 6 automation, 98 person/session. The census
+searched fleet-authored PRs updated 2026-11-09 through 2026-11-17, then filtered commit timestamps to
+the stated window and deduplicated by commit SHA. It returned 465 PRs. The three PRs with more than
+20 commits (#18305, #18033, #17804) were read through their full 65, 23 and 21 commits. The 104
+commit SHAs were joined against the Mac ledger's `pushed_head_sha` rows (9 rows, 8 unique SHAs);
+6 matched a fleet PR commit and are automation. The other 98 had no matching automated push row and
+are person/session commits. The 6 automation matches are the evidence a GitHub login alone cannot
+provide.
+
+The task record's earlier OBSERVED figures of 105 dedup observation comments and 13 refreshes cover
+2026-11-01 onward (16 days), not this seven-day window.
 
 How to tell them apart, for whoever runs the census:
 
-1. Automation comments carry the garden's fixed marker text and dated-refresh shape
-   (`issue-revalidation-garden.ts`); a person's comment does not. Count by marker, not by login.
-2. Reactions: `escalation-answers.ts` posts only `+1`. A `+1` by `cao825` on a GRILL issue is
-   ambiguous by login alone; match its `created_at` against the ledger's `reactPlusOne` step rows.
+1. Automation comments carry fixed source markers: the dated garden refresh, duplicate escalation
+   observation, and lifecycle reconciler text. The other comments are person/session text. Count by
+   marker, not by login.
+2. `escalation-answers.ts` posts only `+1`. Match the reaction's comment id and timestamp to the
+   `panel.question_answered` ledger row and count only a reaction returned by GitHub. A ledger row
+   without a returned reaction is not a posted reaction.
 3. Fleet-PR commits: `interventionsFromPullRequest` (`src/lib/fix-lane-gardener.ts`) treats any
-   non-`remudero-fleet` login as a hand push through `isFleetActor` (`/remudero-fleet/i`). A commit by
-   `cao825` that is really the Mac mini's daemon is counted as an intervention. That is the defect the
-   nine open GRILL escalations (#17393, #17615, #17682, #17769, #17860, #17896, #17995, #18062, #18140)
-   ask about. Tell them apart by joining the commit SHA to the ledger's push rows for the same run id.
+   non-`remudero-fleet` login as a hand push through `isFleetActor` (`/remudero-fleet/i`). Join the
+   commit SHA to `pushed_head_sha` rows to distinguish a Mac daemon push from a person/session push.
+   Six matches in this window are the concrete misclassified automation commits. The nine open GRILL
+   escalations (#17393, #17615, #17682, #17769, #17860, #17896, #17995, #18062, #18140) ask about
+   this attribution defect.
 
-Query to run (needs a token): `gh api --paginate repos/craigoley/remudero/issues/comments?since=2026-11-09T00:00:00Z`
-filtered to `user.login == "cao825"`, then partition by the three rules above. Report each partition's count.
+The comment query was `gh api --paginate repos/craigoley/remudero/issues/comments?since=2026-11-09T00:00:00Z`
+filtered to `user.login == "cao825"` and the stated end timestamp. Reactions were read from GitHub
+GraphQL issue/comment reaction connections and joined to the Mac ledger. Commits were read from
+GitHub GraphQL's paginated search for `author:remudero-fleet[bot]` PRs and joined to the Mac ledger's
+`pushed_head_sha` rows.
 
 ## Proposed identity split
 
