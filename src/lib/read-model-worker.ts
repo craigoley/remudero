@@ -443,6 +443,9 @@ export const READ_MODEL_VIEW_READERS: ReadModelViewReaders = {
   [OPERATOR_AGENT_ROWS_VIEW]: [{ consumer: "the operator agent", reader: "operator-agent-read-model.ts createOperatorAgentRowsSource: legacy only on an explicit off" }],
   // W1-T13455: served with no switch entry, so the worker builds its demanded keys with none either.
   [INBOX_THREAD_VIEW_NAME]: [{ consumer: "GET /v1/views/inbox-thread", reader: "serve.ts servedByDefault" }],
+  // W1-T13455: served by default since W1-T13282, but never rebuilt with no switch entry: on 2026-11-17 the Console read
+  // an agent body built from the ledger of 2026-11-10 (stale for 7 days).
+  [AGENT_VIEW_NAME]: [{ consumer: "GET /v1/views/agent", reader: "serve.ts servedByDefault" }],
 };
 
 function readModelViewRead(view: string, switches: ReadModelSwitches, readers: ReadModelViewReaders, seen: Set<string>): boolean {

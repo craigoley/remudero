@@ -5,6 +5,7 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { AGENT_VIEW_NAME } from "#src/lib/agent-view.js";
 import { INBOX_THREAD_VIEW_NAME } from "#src/lib/inbox-thread-view.js";
 import { READ_MODEL_VIEW_READERS, readModelViewBuilt } from "#src/lib/read-model-worker.js";
 import { TASK_VIEW_NAME } from "#src/lib/view-demand.js";
@@ -14,4 +15,9 @@ test("W1-T13455 criterion 1: with no switch entry the worker builds the inbox-th
   assert.equal(readModelViewBuilt(TASK_VIEW_NAME, { projector: "on", views: {} } as never), false, "positive control: an unswitched view with no reader is not built");
   assert.equal(readModelViewBuilt(INBOX_THREAD_VIEW_NAME, { projector: "on", views: { [INBOX_THREAD_VIEW_NAME]: "off" } } as never), false, "the operator's off still wins");
   assert.deepEqual(READ_MODEL_VIEW_READERS[INBOX_THREAD_VIEW_NAME]?.map((r) => r.consumer), ["GET /v1/views/inbox-thread"]);
+});
+
+test("W1-T13455 criterion 4: the agent view, served by default, is also built with no switch entry", () => {
+  assert.equal(readModelViewBuilt(AGENT_VIEW_NAME, { projector: "on", views: {} } as never), true);
+  assert.equal(readModelViewBuilt(AGENT_VIEW_NAME, { projector: "on", views: { [AGENT_VIEW_NAME]: "off" } } as never), false, "the operator's off still wins");
 });
