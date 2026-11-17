@@ -1390,7 +1390,7 @@ import { captureSelectedRegistryIntent, qualifySelectedRegistryIntent, observeSe
   type SelectedRegistryObserver } from "./lib/selected-registry-consumers.js";
 
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-forecast.js";
-import { readPrOwnerLedgerProjection, type PrOwnerLedgerProjection } from "./lib/pr-owner-ledger.js";
+import { collectPrOwnerReceipts, matchRecoveryReceipt, readPrOwnerLedgerProjection, type PrOwnerLedgerProjection } from "./lib/pr-owner-ledger.js";
 import {
   decideStaleFixDispatchRecovery,
   staleFixDispatchShadowInputs,
@@ -3784,6 +3784,8 @@ interface PrOwnerVerdict {
   claim?: PrOwnerClaim;
   /** W1-T12113: diagnostic only — never an input to `verdict`. */
   recoveryShadow?: StaleFixDispatchShadow;
+  /** W1-T12115: the released recovery receipt that cleared this PR's newest fix.dispatch. */
+  recoveryReceipt?: { recoveryId: string; actor: string; ts: string; preservationRef: string };
 }
 
 interface PrOwnerClaim {
@@ -3917,10 +3919,11 @@ export function derivePrOwnerVerdict(
   return prOwnerVerdictFromFacts(prNumber, corpus, claimRead, {
     corpusNewestTs: stringField(newestLedgerRow(corpus.rows) ?? {}, "ts"), latestFix, latestSweep,
     relatedClaimKeys: related.map((claim) => claim.key),
+    ...collectPrOwnerReceipts(corpus.rows, prNumber),
   });
 }
 
-type PrOwnerFacts = Pick<PrOwnerLedgerProjection, "corpusNewestTs" | "latestFix" | "latestSweep" | "relatedClaimKeys">;
+type PrOwnerFacts = Pick<PrOwnerLedgerProjection, "corpusNewestTs" | "latestFix" | "latestSweep" | "relatedClaimKeys" | "receipts" | "receiptUnknown">;
 
 function prOwnerVerdictFromFacts(
   prNumber: number,
@@ -3929,7 +3932,7 @@ function prOwnerVerdictFromFacts(
   facts: PrOwnerFacts,
 ): PrOwnerVerdict {
   const verdict = prOwnerOwnershipVerdict(prNumber, corpus, claimRead, facts);
-  if (facts.latestFix === undefined) return verdict;
+  if (facts.latestFix === undefined || verdict.recoveryReceipt !== undefined) return verdict;
   // W1-T12113: the recovery decision in SHADOW — computed after, and never fed into, the verdict.
   const shadow = staleFixDispatchShadowInputs(prNumber, corpus, facts.latestFix);
   return withStaleFixDispatchShadow(verdict, decideStaleFixDispatchRecovery(shadow.expected, shadow.facts));
@@ -3969,7 +3972,27 @@ function prOwnerOwnershipVerdict(
   const related = claimRead.claims.filter((claim) => facts.relatedClaimKeys.includes(claim.key));
   const liveClaim = related.find((claim) => !claim.stale);
   const staleClaim = related.find((claim) => claim.stale);
-  if (latestFix !== undefined || liveClaim !== undefined || (latestSweep !== undefined && activeSweepRow(latestSweep))) {
+  const activeSweep = latestSweep !== undefined && activeSweepRow(latestSweep);
+  // W1-T12115: a later released recovery receipt naming this exact dispatch releases it — never a live claim or an active sweep.
+  const released = latestFix !== undefined && liveClaim === undefined && !activeSweep
+    ? matchRecoveryReceipt(prNumber, latestFix, facts.receipts, facts.receiptUnknown) : { kind: "none" as const };
+  if (released.kind === "unknown") return { ...base, verdict: "UNKNOWN", reason: released.reason, fix: summarizeFixRow(latestFix!) };
+  if (released.kind === "released" && claimRead.unreadable === undefined) {
+    const receipt = released.receipt;
+    const preservation = receipt.preservation as { recoveryRef?: unknown; state?: unknown } | undefined;
+    return {
+      ...base,
+      verdict: "FREE",
+      reason: `fix.dispatch ${String(latestFix!.run_id)} released by recovery receipt ${String(receipt.recovery_id)}`,
+      recoveryReceipt: {
+        recoveryId: String(receipt.recovery_id), actor: String(receipt.actor), ts: String(receipt.ts),
+        preservationRef: typeof preservation?.recoveryRef === "string" ? preservation.recoveryRef : `(${String(preservation?.state ?? "unknown")})`,
+      },
+      fix: summarizeFixRow(latestFix!),
+      ...(latestSweep !== undefined ? { sweep: summarizeSweepRow(latestSweep) } : {}),
+    };
+  }
+  if (latestFix !== undefined || liveClaim !== undefined || activeSweep) {
     return {
       ...base,
       verdict: "OWNED",
@@ -4008,6 +4031,9 @@ function renderPrOwnerVerdict(v: PrOwnerVerdict): string {
       `  fix.dispatch: ts=${v.fix.ts ?? "unknown"}, task=${v.fix.taskId ?? "unknown"}, run=${v.fix.runId ?? "unknown"}, ` +
         `strike=${strike}, mode=${v.fix.mode ?? "unknown"}, head=${v.fix.headSha ?? "unknown"}`,
     );
+  }
+  if (v.recoveryReceipt) {
+    lines.push(`  recovery_receipt: id=${v.recoveryReceipt.recoveryId}, actor=${v.recoveryReceipt.actor}, ts=${v.recoveryReceipt.ts}, preservation=${v.recoveryReceipt.preservationRef}`);
   }
   if (v.claim) lines.push(`  fix branch claim: ${v.claim.key}, pid=${v.claim.pid}, run=${v.claim.runId}`);
   if (v.recoveryShadow) {
