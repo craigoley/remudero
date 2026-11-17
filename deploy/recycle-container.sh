@@ -787,8 +787,7 @@ if [ -n "$INSTANCE_NAME" ]; then
       gh_app_private_key_host_path) RMD_GH_APP_PRIVATE_KEY_HOST_PATH="$value" ;;
       service_user|service_name|watchdog_service_name|watchdog_timer_name|launcher_path|revival_log) : ;;
       # W1-T4227: the fleet registry's project layer, read by `rmd serve`'s GET /v1/registry.
-      # W1-T13498: `mode` (shadow|live, W1-T4265) is read by the daemon's instanceMode, not here.
-      mode|project|github_repo|retired|primary) : ;;
+      project|github_repo|retired|primary) : ;;
       *) recycle_reason "recycle-container: REFUSING -- unknown field '${key}' in instance '${INSTANCE_NAME}'." >&2; exit 2 ;;
     esac
   done <<EOF

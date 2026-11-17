@@ -261,8 +261,7 @@ if [ -n "$INSTANCE_NAME" ]; then
       codex_dir) codex_dir="$value" ;;
       container_config_dir) container_config_dir="$value" ;;
       # W1-T4227: the fleet registry's project layer, read by `rmd serve`'s GET /v1/registry.
-      # W1-T13498: `mode` (shadow|live, W1-T4265) is read by the daemon's instanceMode, not here.
-      mode|project|github_repo|retired|primary) : ;;
+      project|github_repo|retired|primary) : ;;
       *) echo "install-host-units: FATAL -- unknown field '${key}' in instance '${INSTANCE_NAME}'." >&2; exit 2 ;;
     esac
   done <<EOF

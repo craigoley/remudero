@@ -54,8 +54,8 @@
 # W1-T13498 — `ops` (craigoley/remudero-ops) is ONBOARDED IN SHADOW (operator ruling 2026-11-17: onboard
 # remudero-ops as a managed repo, shadow daemon after a host check). `mode: shadow` (W1-T4265) means its worker
 # opens real pull requests but never arms or merges one; promotion to live is a later reviewed registry PR. Both
-# shell readers now list `mode` as known-and-ignored. The host copy (/etc/remudero/daemon-instances.yaml) needs
-# the same row, with `mode: shadow`, before `install-host-units.sh --instance ops`: an absent mode reads as live.
+# shell readers validate `mode` (shadow|live). The host copy (/etc/remudero/daemon-instances.yaml) needs the
+# same row, with `mode: shadow`, before `install-host-units.sh --instance ops`: an absent mode reads as live.
 # remudero-ops' plan holds core's tasks (`repo: remudero`); taskTargetsRepo (src/lib/drain.ts) keeps this
 # instance from dispatching them.
 instances:
