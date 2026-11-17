@@ -72,3 +72,18 @@ test("migration preview reads claims from the pinned repository even when local 
   assert.equal(result.answer.outcome, "none", "the real selected origin claim must not disappear behind a same-commit decoy");
   assert.ok(result.answer.refused.some((row: { id: string; reason: string }) => row.id === "W1-T1" && row.reason === "owned"));
 });
+
+
+test("migration preview refuses a merged credit revised while search indexing is behind", t => {
+  const f = fixture(t);
+  const response = join(f.root, "answer.json");
+  const revised = JSON.parse(readFileSync(response, "utf8"));
+  revised.data.public.merged.nodes[0].body += "\nRemudero-Task: W1-T1";
+  // The first repository read sees the old body; the candidate's actual second read sees the
+  // new authoritative credit even while both complete search connections still return no hits.
+  f.shim.addRoute({ when: "byTrailer:search", stdoutFile: response,
+    writes: { path: response, content: JSON.stringify(revised) } });
+  const result = f.run();
+  assert.equal(result.answer.outcome, "unknown", "revised authoritative credit cannot become unmerged through an indexing delay");
+  assert.equal(result.answer.permission, "not_granted");
+});
