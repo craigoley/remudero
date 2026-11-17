@@ -25,3 +25,11 @@
     Last 24 h: n 19, p50 5, p90 14 per PR.
     Slowest PRs: #18427 (24 per PR), #18516 (14 per PR), #18515 (11 per PR).
     Find what these PRs share at this stage before changing a bound.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.88
+    reasons:
+      - "high-risk verdict at confidence 0.88 — on the change's description/files alone, no diff was read — The filing reports latency aggregates and three slow PRs, but explicitly leaves their shared cause to investigation; the supplied evidence does not verify a finding supporting the proposed implementation.; on the change's description/files alone, no diff was read — Both acceptance proofs are grep checks for test declarations; those checks alone cannot establish latency recovery or unchanged hold, refusal, and merge outcomes, as required by the filed plan."
+    judged_at: "2026-11-17T06:59:07.455Z"
+    pin: "dfc9a66586db352facc04c0184f7d7326a9b8337d069b66d7eb0428cfea6a9dd"

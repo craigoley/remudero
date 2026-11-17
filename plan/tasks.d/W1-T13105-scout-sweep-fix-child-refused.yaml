@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.94
   status: queued
@@ -24,3 +24,11 @@
     The ledger step sweep.fix.child_refused carries a failure shape and landed rows in both halves of the trailing 7 days: 9 in the older half, 51 in the newer.
     No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
     The rows name no file; tracked source literals locate this step in: src/lib/sweep.ts. Start there.
+  risk_ruling:
+    verdict: "rule-3-low-privilege"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "rule 3 (live and low-privilege): the symptom is live, 71 occurrence(s) across 7 day(s), last seen 2026-11-17T00:10:08.893Z, and the record declares no privileged path"
+    judged_at: "2026-11-17T06:58:26.026Z"
+    pin: "337f2b2011b150f40da8278110e5de42f55d6ffdaeace46dcf36be124fc92f40"

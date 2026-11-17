@@ -27,3 +27,11 @@
     The ledger step automerge.direct_merge_preflight_refused carries a failure shape and landed rows in both halves of the trailing 7 days: 3 in the older half, 15 in the newer.
     No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
     The rows name no file; tracked source literals locate this step in: src/lib/flow-gardener.ts, src/lib/arm-auto-merge.ts, src/lib/analytics-route.ts. Start there.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it declares src/lib/arm-auto-merge.ts, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
+    judged_at: "2026-11-17T06:59:07.455Z"
+    pin: "946f7167007d361b464257b5d46f27c2fb2ba8fd628f06c63fe2b53219dffd30"
