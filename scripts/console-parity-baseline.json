@@ -43,10 +43,11 @@
     "hand-worktree",
     "host-alert",
     "impossible-canary",
+    "improvement-action",
     "inbox-bakeoff",
     "init",
-    "install-checkout",
     "inspect",
+    "install-checkout",
     "issues",
     "judge-replay",
     "knowledge",
@@ -57,6 +58,7 @@
     "live-edits",
     "mcp",
     "memory-lint",
+    "migration-preview",
     "next-task-id",
     "notify",
     "onboard",
@@ -100,7 +102,6 @@
     "verdict-calibration",
     "verify-human-sweep",
     "wipe-test",
-    "worktree",
-    "improvement-action"
+    "worktree"
   ]
 }
