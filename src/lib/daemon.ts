@@ -4531,7 +4531,6 @@ export async function runDaemon(
             : String(fields?.reason),
         } : undefined;
     }
-    // W1-T10423: a refill that selection left empty names the refusal it logged, so the slot is not `:unnamed`.
     if (idleLaneTickHold === undefined && (cause === undefined || cause === "selection_empty")) {
       idleLaneTickHold = selectionHoldForStep(step, fields);
     }
@@ -8000,7 +7999,6 @@ export async function runDaemon(
     // idle emitted about 390 bare idle lines and zero dispatch rows: the record could not distinguish
     // "starved of work" from "everything filtered". Nothing about what is eligible changes.
     const idleReasons = tallyDispatchFilters();
-    // W1-T10423: what selection itself refused this tick beyond the filter tally, so an empty pick names its reason.
     const tickPassedOver = new Set<string>();
     const tickDeferredForPriority = new Set<string>();
     const tickOpenPr = new Set<string>();
@@ -8313,8 +8311,7 @@ export async function runDaemon(
         );
         const queuedUnmerged = planForBatch.tasks.filter((t) => t.status === "queued" && !isMerged(t.id)).length;
         const dispatchableNow = Math.max(0, queuedUnmerged - filtered);
-        // W1-T10423: selection ran, found nothing, and work was dispatchable: record WHY as the hold. A cause another
-        // layer already named this tick (and its hold) stands.
+        // W1-T10423: empty selection with dispatchable work records its own refusal reason as the hold.
         if (dispatchableNow > 0 && idleLaneTickCause === undefined && idleLaneTickHold === undefined) {
           const refused: Record<string, number> = { "passed-over-for-overlap": tickPassedOver.size, "priority-deferred": tickDeferredForPriority.size, "open-pr": tickOpenPr.size };
           for (const r of Object.keys(filteredTally) as Array<keyof typeof filteredTally>) {
