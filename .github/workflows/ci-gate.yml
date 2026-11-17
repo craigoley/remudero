@@ -47,7 +47,7 @@ concurrency:
 jobs:
   ci-gate:
     name: ci-gate
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     # INVARIANT: this bound must exceed what it bounds. WAIT_CAP_SECONDS (4500s) plus
     # GRACE_WINDOW_SECONDS (600s) is an 85m worst case, so 90m stays a finite, loud ceiling above
     # it instead of GitHub's 360m default (R-50). FALSIFIER:

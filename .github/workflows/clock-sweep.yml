@@ -45,7 +45,7 @@ jobs:
   # test pins them equal. The report's SHARD NEAR CAP line says when to raise it.
   clock-sweep:
     name: clock-sweep shard (${{ matrix.shard }}/10)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     # R-50 backstop; the script's own 27-minute budget is the primary control.
     timeout-minutes: 30
     strategy:
@@ -119,7 +119,7 @@ jobs:
     needs: clock-sweep
     # always(): the merge is what turns a failed or cancelled shard into a named, delivered result.
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
       contents: read

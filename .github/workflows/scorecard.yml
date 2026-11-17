@@ -13,7 +13,7 @@ permissions: read-all
 jobs:
   analysis:
     name: Scorecard analysis
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     # R-50: observed runs complete in under a minute; 20m bounds a genuine hang with
     # generous headroom.
     timeout-minutes: 20
