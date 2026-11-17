@@ -7,10 +7,16 @@
  *
  * It only reads. No response, thread, limit or schedule changes: one unref'd interval, one gc observer,
  * one baseline per live thread (pruned as threads end) and two gc scalars.
+ *
+ * W1-T13441: `threads` lists only the workers THIS thread spawned. OBSERVED 2026-11-17: a WorkerThread spawned
+ * deeper (a worker's worker) burned ~0.54 cores and no row named it. `os_threads` reads every OS thread of the
+ * process from /proc/self/task, nested workers, libuv's pool and V8's own threads included, grouped by the name
+ * the thread carries (thread-names.ts gives every worker one), so no thread's CPU is outside the row.
  */
 import type { EventLoopUtilization } from "node:perf_hooks";
 import { performance, PerformanceObserver } from "node:perf_hooks";
 import { getHeapStatistics } from "node:v8";
+import { readdirSync, readFileSync } from "node:fs";
 import { systemClock, type Clock } from "./clock.js";
 import { WORKER_HEAP_PREFIX, type TrackedWorker } from "./worker-heaps.js";
 
@@ -40,9 +46,23 @@ export interface ThreadLoadReading {
   error?: string;
 }
 
+/** Every OS thread sharing one name (comm), summed over the window; `tids` is how many were seen in it. */
+export interface OsThreadLoad {
+  name: string;
+  tids: number;
+  cpu_ms: number;
+  cpu_share: number;
+}
+
+/** One OS thread's name and its total CPU so far, in ms. */
+export interface OsThreadCpu { name: string; cpu_ms: number }
+
 export interface ServeThreadLoadRow {
   window_ms: number;
   threads: ThreadLoadReading[];
+  /** Every OS thread of the process by name, hottest first; absent where /proc cannot be read (`os_threads_error`). */
+  os_threads?: OsThreadLoad[];
+  os_threads_error?: string;
   gc_ms: number;
   gc_count: number;
   gc_share: number;
@@ -67,6 +87,8 @@ export interface ServeThreadLoadOptions {
   usage?: () => NodeJS.MemoryUsage;
   heapLimit?: () => number;
   cpuTimeoutMs?: number;
+  /** Every OS thread of this process by tid. Default: /proc/self/task. Throws where there is no such file system. */
+  osThreads?: () => ReadonlyMap<string, OsThreadCpu>;
 }
 
 export interface ServeThreadLoad {
@@ -92,6 +114,47 @@ function defaultObserveGc(add: (durationMs: number) => void): () => void {
   });
   observer.observe({ entryTypes: ["gc"] });
   return () => observer.disconnect();
+}
+
+/** USER_HZ: /proc's tick, 100 on every Linux serve runs on (procCpuConsumers reads it the same way). */
+const PROC_TICKS_PER_SECOND = 100;
+
+/** Each thread of this process from /proc/self/task: its comm and its user+system CPU. A thread gone mid-read is skipped. */
+export function procSelfThreads(proc = "/proc/self/task"): Map<string, OsThreadCpu> {
+  const out = new Map<string, OsThreadCpu>();
+  for (const tid of readdirSync(proc)) {
+    let text: string;
+    try {
+      text = readFileSync(`${proc}/${tid}/stat`, "utf8");
+    } catch (_err) {
+      // Carried, not erased: a thread that ended between the listing and the read has no line left to give.
+      continue;
+    }
+    const close = text.lastIndexOf(")");
+    const rest = text.slice(close + 2).split(" ");
+    const ticks = Number(rest[11]) + Number(rest[12]);
+    if (close < 0 || !Number.isFinite(ticks)) continue;
+    out.set(tid, { name: text.slice(text.indexOf("(") + 1, close), cpu_ms: (ticks * 1000) / PROC_TICKS_PER_SECOND });
+  }
+  return out;
+}
+
+/**
+ * Each name's CPU over the window: per tid, now less its last reading. A tid first seen this window counts from its own
+ * start; a tid that ended inside it is gone from /proc and its last part of the window is lost, never invented.
+ */
+function osThreadLoads(now: ReadonlyMap<string, OsThreadCpu>, prev: ReadonlyMap<string, OsThreadCpu>, windowMs: number): OsThreadLoad[] {
+  const byName = new Map<string, OsThreadLoad>();
+  for (const [tid, thread] of now) {
+    const before = prev.get(tid);
+    const ms = Math.max(0, thread.cpu_ms - (before && before.name === thread.name ? before.cpu_ms : 0));
+    const load = byName.get(thread.name) ?? { name: thread.name, tids: 0, cpu_ms: 0, cpu_share: 0 };
+    load.tids += 1;
+    load.cpu_ms += ms;
+    byName.set(thread.name, load);
+  }
+  for (const load of byName.values()) load.cpu_share = Number(share(load.cpu_ms, windowMs).toFixed(4));
+  return [...byName.values()].sort((a, b) => b.cpu_ms - a.cpu_ms);
 }
 
 async function readCpu(thread: LoadThread, timeoutMs: number): Promise<NodeJS.CpuUsage | undefined> {
@@ -127,6 +190,16 @@ export function startServeThreadLoad(opts: ServeThreadLoadOptions): ServeThreadL
     gcCount += 1;
   });
   const workerBaselines = new Map<LoadThread, Baseline>();
+  const osThreads = opts.osThreads ?? (() => procSelfThreads());
+  const readOs = (): { threads?: ReadonlyMap<string, OsThreadCpu>; error?: string } => {
+    try {
+      return { threads: osThreads() };
+    } catch (e) {
+      // Named on the row: a process whose threads cannot be listed is unread, never read as no threads.
+      return { error: message(e) };
+    }
+  };
+  let osBaseline = readOs().threads ?? new Map<string, OsThreadCpu>();
   let since = clock.now();
   let main: Baseline = { cpu: mainCpu(), elu: mainElu() };
 
@@ -175,6 +248,9 @@ export function startServeThreadLoad(opts: ServeThreadLoadOptions): ServeThreadL
     since = now;
     const live = opts.workers();
     const mainReading = readMain(windowMs);
+    const os = readOs();
+    const osRow = os.threads ? { os_threads: osThreadLoads(os.threads, osBaseline, windowMs) } : { os_threads_error: os.error ?? "unread" };
+    if (os.threads) osBaseline = os.threads;
     const gc = { gc_ms: gcMs, gc_count: gcCount };
     gcMs = 0;
     gcCount = 0;
@@ -185,6 +261,7 @@ export function startServeThreadLoad(opts: ServeThreadLoadOptions): ServeThreadL
     return {
       window_ms: windowMs,
       threads: [mainReading, ...workers],
+      ...osRow,
       ...gc,
       gc_share: share(gc.gc_ms, windowMs),
       heap_used_bytes: memory.heapUsed,

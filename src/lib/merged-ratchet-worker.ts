@@ -3,6 +3,7 @@
  * The affected-reach gate builds the import graph of the whole merged tree. The caller sends the read
  * inputs as plain data and awaits the verdict. A count that fails is unread, never clean.
  */
+import { threadName } from "./thread-names.js";
 import { SHARE_ENV, isMainThread, parentPort, workerData, type Worker } from "node:worker_threads";
 import { startWorker } from "./child-entry-argv.js";
 import { judgeMergedRatchets, mergedRatchetReaders, type MergedRatchetBlobs, type MergedRatchetInputs, type MergedRatchetJudgement } from "./merged-ratchet-verdict.js";
@@ -30,7 +31,7 @@ export function judgeMergedRatchetsInWorker(
   return new Promise((resolve) => {
     let thread: Worker;
     try {
-      thread = startWorker(import.meta.url, { workerData: { kind: KIND, input: { ...rest, blobs } } satisfies WorkerInput, env: SHARE_ENV }, { override: options.workerUrl });
+      thread = startWorker(import.meta.url, { name: threadName("mergedRatchet"), workerData: { kind: KIND, input: { ...rest, blobs } } satisfies WorkerInput, env: SHARE_ENV }, { override: options.workerUrl });
     } catch (error) {
       // the start failure is the reading: unread with its cause.
       resolve(unread(`the ratchet worker could not start: ${String((error as Error)?.message ?? error)}`));

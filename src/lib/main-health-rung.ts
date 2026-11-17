@@ -421,6 +421,8 @@ export type MainRatchetRecordOutcome =
 export interface MainRepairPr {
   readonly state: "open" | "closed" | "merged";
   readonly headSha?: string;
+  /** W1-T13438: the commit a merged PR landed on main as, when GitHub names it. */
+  readonly mergeCommitSha?: string;
 }
 
 /** W1-T6403 — the lane's effects. Both openers cut a fresh branch off origin/main and open a PR;
@@ -1598,6 +1600,8 @@ export function buildMainHealthRung(
   let repairsMayBeActive = true;
   const fixInFlight = new Set<string>();
   const fixProgress = new Map<string, { marker: string; ticks: number; sinceMs: number }>();
+  /** W1-T13438: `<merge>@<decided-by>` pairs already ledgered as waiting, so a wait logs once per red reading. */
+  const awaitingRunLogged = new Set<string>();
   // The recorded-baseline repair of a ratchet-only red: the one open PR that owns it (this lane's
   // own, or one already open that records it), the red the opener declined, and the PRs it opened.
   let ratchetInFlight = false;
@@ -1638,10 +1642,15 @@ export function buildMainHealthRung(
         state?: unknown;
         merged?: unknown;
         head?: { sha?: unknown };
+        merge_commit_sha?: unknown;
       };
       const state = pr?.merged === true ? "merged" : pr?.state === "closed" ? "closed" : pr?.state === "open" ? "open" : undefined;
       if (!state) throw new Error(`GitHub's read of ${prUrl} carried no state`);
-      return { state, ...(typeof pr.head?.sha === "string" ? { headSha: pr.head.sha } : {}) };
+      return {
+        state,
+        ...(typeof pr.head?.sha === "string" ? { headSha: pr.head.sha } : {}),
+        ...(state === "merged" && typeof pr.merge_commit_sha === "string" ? { mergeCommitSha: pr.merge_commit_sha } : {}),
+      };
     } catch (error) {
       // An unreadable repair PR decides nothing this observation: no revert or close-out on a guess.
       deps.log("main.repair.pr_unreadable", { pr_url: prUrl, error: String((error as Error)?.message ?? error) });
@@ -1934,6 +1943,31 @@ export function buildMainHealthRung(
     });
     return result;
   };
+  /** W1-T13438 — A MERGED FIX IS JUDGED ONLY BY A RUN THAT CONTAINS IT. A merged PR's state and head never change
+   *  again, so a stall marker over them froze and read "no merge" after the stall window (#19028 reverted #19011's
+   *  culprit 36 minutes after #19011 merged, while the run of the commit holding it was still pending). True when the
+   *  red was decided by a run of a commit that contains the fix's merge; false while it was decided below the merge,
+   *  so the lane waits for main's post-merge run; undefined when GitHub names no merge commit (today's stall applies). */
+  const fixLandedUnder = async (record: MainRepairRecord, fix: MainRepairPr, decidedBySha: string): Promise<boolean | undefined> => {
+    if (!fix.mergeCommitSha) return undefined;
+    let contains = false;
+    try {
+      contains = fix.mergeCommitSha === decidedBySha || (await mergeReader.mergeBase(fix.mergeCommitSha, decidedBySha)) === fix.mergeCommitSha;
+    } catch (error) {
+      deps.log("main.repair.fix_merge_unplaced", {
+        offending_sha: record.offendingSha, merge_sha: fix.mergeCommitSha, decided_by_sha: decidedBySha,
+        error: String((error as Error)?.message ?? error),
+      });
+    }
+    if (!contains && !awaitingRunLogged.has(`${fix.mergeCommitSha}@${decidedBySha}`)) {
+      awaitingRunLogged.add(`${fix.mergeCommitSha}@${decidedBySha}`);
+      deps.log("main.repair.fix_merged_awaiting_run", {
+        offending_sha: record.offendingSha, fix_pr_url: record.fixPrUrl, merge_sha: fix.mergeCommitSha, decided_by_sha: decidedBySha,
+      });
+    }
+    if (!contains) fixProgress.delete(record.offendingSha);
+    return contains;
+  };
   /** One step of an existing repair. True while the lane still owns this red; false when it was refused. */
   const advanceRepair = async (lane: MainRepairLane, record: MainRepairRecord, ctx: RepairContext): Promise<boolean> => {
     const { sha, branch, atMs } = ctx;
@@ -1953,11 +1987,16 @@ export function buildMainHealthRung(
     if (record.fixPrUrl) {
       const fix = await readRepairPr(record.fixPrUrl);
       if (!fix) return true;
-      attemptEnded = fix.state === "closed";
+      const landed = fix.state === "merged" ? await fixLandedUnder(record, fix, ctx.observation.sha) : undefined;
+      if (landed === false) return true;
+      attemptEnded = fix.state === "closed" || landed === true;
       stalled =
         fix.state === "closed"
           ? `fix PR ${record.fixPrUrl} closed unmerged while main stayed red`
-          : stallOf(record.offendingSha, `${fix.state}:${fix.headSha ?? ""}`, atMs, `fix PR ${record.fixPrUrl}`);
+          : landed === true
+            ? `fix PR ${record.fixPrUrl} merged as ${fix.mergeCommitSha!.slice(0, 12)}, and main's completed run of ` +
+              `${ctx.observation.sha.slice(0, 12)}, which contains it, is still red`
+            : stallOf(record.offendingSha, `${fix.state}:${fix.headSha ?? ""}`, atMs, `fix PR ${record.fixPrUrl}`);
     } else if (record.fixRefused) {
       attemptEnded = true;
       stalled = `the fix run opened no fix PR: ${record.fixRefused}`;

@@ -164,16 +164,17 @@ test("W1-T9754: a throwing row writer and an unspawnable request still settle", 
   assert.deepEqual([invalid.via, invalid.exitCode, invalid.error], ["direct", null, "ERR_INVALID_ARG_TYPE"]);
 });
 
-test("W1-T9754: the boot starts and installs the helper only when the switch is on", async () => {
+test("W1-T9754: the boot starts and installs the helper unless the switch is off (W1-T13437)", async () => {
   installSpawnHelper(undefined);
   const unrouted = await runRouted({ file: "true" });
   assert.deepEqual([unrouted.via, unrouted.reason], ["direct", "helper_not_installed"]);
   const off = capture();
-  await daemonBoot(off.log, {});
-  assert.equal(off.rows.some((row) => row.step === "daemon.spawn_helper"), false);
+  await daemonBoot(off.log, { [SPAWN_HELPER_SWITCH]: "off" });
+  assert.deepEqual(off.rows.filter((row) => row.step === "daemon.spawn_helper").map((row) => [row.started, row.reason]),
+    [[false, "switch_off"]]);
   assert.equal(installedSpawnHelper(), undefined, "switch off: no helper");
   const on = capture();
-  await daemonBoot(on.log, { [SPAWN_HELPER_SWITCH]: "on" });
+  await daemonBoot(on.log, {});
   let helper: SpawnHelper | undefined;
   try {
     helper = installedSpawnHelper();

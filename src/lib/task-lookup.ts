@@ -106,6 +106,28 @@ export async function findTaskInCatalogs(taskId: string, sources: TaskLookupOpti
   return result;
 }
 
+export type TaskReleasePlan =
+  | { outcome: "found"; catalog: "public" | "ops"; plan: Plan }
+  | Extract<TaskLookupResult, { outcome: "absent" | "unreadable" }>;
+
+/**
+ * W1-T13386: the plan an operator's release of `taskId` reads and pins from. A task the public plan holds keeps
+ * that plan and opens no private reader. A task only the ops catalog holds gets the plan the daemon's tick
+ * dispatches from (`composeSecondaryPlan` over the same two plans), so the pinned record is the one the tick
+ * hashes. Two plans the tick cannot compose are `unreadable` with the reason `compose-<the tick's outcome code>`:
+ * the tick dispatches no ops task from them, so a release would pin a record no reader holds. The `compose-`
+ * prefix keeps that apart from a catalog read that failed (`ops-<outcome>`); either plan may be the cause.
+ */
+export async function findReleasePlanInCatalogs(taskId: string, publicPlan: Plan, sources: TaskLookupOptions = {}): Promise<TaskReleasePlan> {
+  const lookup = await findTaskInCatalogs(taskId, { ...sources, byId: publicPlan.byId });
+  if (lookup.outcome !== "found") return lookup;
+  if (lookup.catalog === "public") return { outcome: "found", catalog: "public", plan: publicPlan };
+  // An ops hit always kept its snapshot; were one ever missing, the composer reads it as malformed.
+  const composition = composeSecondaryPlan(publicPlan, opsPlanForLookup(lookup) as Plan);
+  if (composition.outcome !== "ok") return { outcome: "unreadable", reason: `compose-${composition.outcome}` };
+  return { outcome: "found", catalog: "ops", plan: composition.plan };
+}
+
 export type CatalogTaskContract = PlanCriteriaAtHeadResult & { taskCatalog?: "public" | "ops" };
 
 /** Private contract for review/fix, never a PR-body or status serializer. */

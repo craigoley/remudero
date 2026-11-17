@@ -6,6 +6,7 @@
  * restart emptied every in-memory cache. This reads the plan from COMMITTED OBJECTS at the sha the
  * restart diff was taken against and installs it with one assignment.
  */
+import { threadName } from "./thread-names.js";
 import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { createHash } from "node:crypto";
 import { serialize, deserialize } from "node:v8";
@@ -131,7 +132,7 @@ export function readServePlanOffLoop(repoDir: string, ref: string, workerUrl: UR
   return new Promise((resolve, reject) => {
     let worker: Worker;
     try {
-      worker = new Worker(workerUrl, { workerData: { kind: PLAN_RELOAD_WORKER_KIND, repoDir, ref } });
+      worker = new Worker(workerUrl, { name: threadName("planReload"), workerData: { kind: PLAN_RELOAD_WORKER_KIND, repoDir, ref } });
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       reject(workerFailure(reason));
