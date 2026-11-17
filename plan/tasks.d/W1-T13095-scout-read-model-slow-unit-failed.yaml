@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1
   status: queued
@@ -24,3 +24,11 @@
     The ledger step read_model.slow_unit_failed carries a failure shape and landed rows in both halves of the trailing 7 days: 1367 in the older half, 2916 in the newer.
     No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
     The rows name no file; tracked source literals locate this step in: src/lib/read-model-slow-lane.ts. Start there.
+  risk_ruling:
+    verdict: "rule-3-low-privilege"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "rule 3 (live and low-privilege): the symptom is live, 4636 occurrence(s) across 7 day(s), last seen 2026-11-16T13:26:39.541Z, and the record declares no privileged path"
+    judged_at: "2026-11-17T06:58:26.026Z"
+    pin: "5e16a5a41160009dfdedc1b00333569f101de0dd463a449f0f8ce08dbcc7e126"

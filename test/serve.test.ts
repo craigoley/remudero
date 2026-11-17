@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import { assertWallClockBound } from "#test/helpers/wall-clock-bound.js";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -26,12 +26,13 @@ import { buildBatchedGithub, type GitHub, type PrRef } from "#src/lib/status.js"
 import type { TraceGithub, TracePrView } from "#src/lib/trace.js";
 import type { IssueCloser } from "#src/lib/panel-actions.js";
 import type { RatifyCliGateway } from "#src/lib/panel-graph.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 // W1-T188 (W1-T154 re-verification): the SAME committed, production-scale corpus W1-T187's own
 // suite (test/w1-t187-*.test.ts) uses -- >= 200 tasks / >= 18,000 ledger lines, a fixed clock, all
 // checked into git rather than generated per-run. Reused here rather than duplicated so this
 // suite's re-verification measures the identical fixture, not a second one that could quietly
 // drift out of "production scale" over time.
-import { FIXED_NOW_ISO, corpusLedgerPath, loadCorpusGithub, loadCorpusLedgerLines, loadCorpusPlan } from "#test/fixtures/w1-t187/load.js";
+import { FIXED_NOW_ISO, loadCorpusGithub, loadCorpusLedgerLines, loadCorpusPlan } from "#test/fixtures/w1-t187/load.js";
 
 // ── W1-T139: rmd serve -- the front door ─────────────────────────────────────────────────
 //
@@ -531,12 +532,13 @@ function repoRootFromThisFile(): string {
   return fileURLToPath(new URL("..", import.meta.url));
 }
 
-test("W1-T188 criterion 1: first-paint-to-data is RE-MEASURED empirically at production-corpus scale against a real server, and the result is recorded with numbers", async () => {
+test("W1-T188 criterion 1: first-paint-to-data is RE-MEASURED empirically at production-corpus scale against a real server, and the result is recorded with numbers", async (t) => {
   const plan = loadCorpusPlan();
   const github = loadCorpusGithub();
   const root = tmpRoot();
   const planPath = writePlan(root, "[]\n"); // panel-graph reloads plan/tasks.yaml fresh; unexercised here
-  const ledgerPath = corpusLedgerPath();
+  const ledgerPath = writeLedger(loadCorpusLedgerLines(), { dir: join(root, "state") }).path;
+  t.after(() => rmSync(root, { recursive: true, force: true }));
 
   const deps: ServeDeps = {
     board: { plan, ledgerPath, github, now: () => Date.parse(FIXED_NOW_ISO) },
@@ -578,7 +580,7 @@ test("W1-T188 criterion 1: first-paint-to-data is RE-MEASURED empirically at pro
   });
 });
 
-test("W1-T188 criterion 2: the first-paint-to-data budget is a REPLAYABLE golden fixture -- the committed production-scale corpus reproduces the budget check identically across independent loads and independent server instances, not a one-off manual curl", async () => {
+test("W1-T188 criterion 2: the first-paint-to-data budget is a REPLAYABLE golden fixture -- the committed production-scale corpus reproduces the budget check identically across independent loads and independent server instances, not a one-off manual curl", async (t) => {
   // REPLAYABLE requires DETERMINISM first: the fixture must be the same data every time it is
   // loaded, not regenerated randomly per run.
   assert.deepEqual(loadCorpusPlan(), loadCorpusPlan(), "the golden corpus plan must be byte-identical across independent loads");
@@ -604,7 +606,8 @@ test("W1-T188 criterion 2: the first-paint-to-data budget is a REPLAYABLE golden
     const github = loadCorpusGithub();
     const root = tmpRoot();
     const planPath = writePlan(root, "[]\n");
-    const ledgerPath = corpusLedgerPath();
+    const ledgerPath = writeLedger(loadCorpusLedgerLines(), { dir: join(root, "state") }).path;
+    t.after(() => rmSync(root, { recursive: true, force: true }));
     const deps: ServeDeps = {
       board: { plan, ledgerPath, github, now: () => Date.parse(FIXED_NOW_ISO) },
       panelGraph: { root, planPath, ledgerPath, github: fakeTraceGithub(), statusGithub: github, ratify: fakeRatifyGateway() },

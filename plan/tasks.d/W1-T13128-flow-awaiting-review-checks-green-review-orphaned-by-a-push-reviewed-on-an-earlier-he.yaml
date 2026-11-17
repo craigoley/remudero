@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.31
   status: queued
@@ -30,3 +30,13 @@
     - PR #16779: 1.73 PR-hours — checks green, review orphaned by a push (reviewed on an earlier head, silent on this one) — re-running the review lane on #16779 — mergeability unread this pass; last known "clean" for head 6464c2a was read against main 9fac5a4, and main is now d733e7a, so it is not inherited (W1-T11166)
     - PR #16452: 1.02 PR-hours — checks green, review orphaned by a push (reviewed on an earlier head, silent on this one) — re-running the review lane on #16452
     Effect compares this cause's share of total PR-hours in equal windows before and after its build merge; a debit reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.85
+    reasons:
+      - "The filing targets automatic recovery through the existing review-lane owner and explicitly describes re-running review on affected PRs."
+      - "Acceptance requires clearing the named blocker while keeping other blockers held; the declared scope is src/lib/sweep.ts and one dedicated test."
+      - "The supplied record requests no review-policy change, gate waiver, destructive action, or operator-only decision. Implementation correctness remains subject to CI and review."
+    judged_at: "2026-11-17T06:59:54.213Z"
+    pin: "7f402abf73a28cd74124b8059b6b85597df5ace811280f73789e9edcf8fc5040"
