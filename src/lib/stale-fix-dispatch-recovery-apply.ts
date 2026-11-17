@@ -11,7 +11,7 @@
  * writes fix.done, a credit, or a plan or source file. Every I/O goes through {@link RecoveryPorts}.
  */
 import { createHash } from "node:crypto";
-import { lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gitClaimRunnerAsync } from "./dispatch-claim.js";
@@ -554,17 +554,23 @@ function receiptDir(stateDir: string): string {
 function readReceiptFile(stateDir: string, recoveryId: string, t: RecoveryTuple, authorizationId: string): ReceiptFile {
   const path = join(receiptDir(stateDir), `${recoveryId}.json`);
   let raw: string;
+  let fd: number | undefined;
   try {
     const dir = lstatSync(receiptDir(stateDir));
-    const st = lstatSync(path);
+    // Verify and read the same open inode. A path-based stat followed by readFileSync(path) leaves
+    // a replacement window where the bytes can come from a different file than the one checked.
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const st = fstatSync(fd);
     const uid = process.getuid?.();
     if (!dir.isDirectory() || (dir.mode & 0o777) !== 0o700) return { state: "invalid", reason: "receipt directory is not owner-only" };
     if (!st.isFile() || (st.mode & 0o777) !== 0o600 || (uid !== undefined && st.uid !== uid)) {
       return { state: "invalid", reason: "receipt file type, owner or mode mismatch" };
     }
-    raw = readFileSync(path, "utf8");
+    raw = readFileSync(fd, "utf8");
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === "ENOENT" ? { state: "absent" } : { state: "invalid", reason: messageOf(error) };
+  } finally {
+    if (fd !== undefined) closeSync(fd);
   }
   let receipt: Row;
   try {
