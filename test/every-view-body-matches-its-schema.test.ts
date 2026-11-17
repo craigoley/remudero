@@ -263,10 +263,10 @@ test("every registered view body validates against its declared schema", async (
 
   // W1-T13455 criterion 2: serve mounts /v1/views/inbox-thread and serves it with no switch entry (the switches file
   // above names every other view but not inbox-thread), so the read above answered 200 against InboxThreadView.
-  assert.equal(bodies.get(INBOX_THREAD_VIEW_NAME)?.view, INBOX_THREAD_VIEW_NAME);
+  assert.equal(bodies.get(INBOX_THREAD_VIEW_NAME)?.view, INBOX_THREAD_VIEW_NAME, "W1-T13455 criterion 2: inbox-thread answers 200 through serve with no switch entry");
   // W1-T13455 criterion 3: the view's key cannot omit the thread id.
   const noId = await fetch(`${url}/v1/views/${INBOX_THREAD_VIEW_NAME}`, { headers: READ });
-  assert.equal(noId.status, 400);
+  assert.equal(noId.status, 400, "W1-T13455 criterion 3: a read without an id is refused with 400");
   assert.match(await noId.text(), /needs \?id=/);
 
   // CONTROL: the bodies are populated, so optional fields were really validated, not skipped.
