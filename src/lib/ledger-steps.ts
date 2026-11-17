@@ -320,6 +320,20 @@ const SEED_ROWS: readonly SeedRow[] = [
     outcomes: ["reloaded"],
   },
   {
+    // W1-T10271, W1-T13182: observe only; nothing pauses dispatch on this row.
+    step: "daemon.quota",
+    meaning:
+      "One GitHub rate-limit bucket (`bucket` core or graphql) as the daemon read it on one poll: " +
+      "`remaining` and `resets_at`. The first row of a poll, core when core reads, also carries this " +
+      "process's read cadence since the previous poll: `reads_stamped` by floor mode, `slots_yielded`, " +
+      "`gated_admitted`, and `reads_by_call_site`, the same stamped reads by the code that made them " +
+      "(`file:line` from the repository root, the shape of `github.pace.loop_wait` rows). It names the " +
+      "15 largest call sites and sums the rest as `other`; its values sum to the sum of `reads_stamped`. " +
+      "The site is sampled on one read in 8, and the reads after a sample count under that sample's site.",
+    writer: ["runDaemon"],
+    outcomes: ["read"],
+  },
+  {
     // W1-T12416: shadow only; no gate, route or judge reads this row.
     step: "decision.answered",
     meaning:
