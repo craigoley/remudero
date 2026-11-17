@@ -743,6 +743,7 @@ import {
   type OpenPrRest,
   fetchSinglePrRest,
   codeqlCheckFailed,
+  SECURITY_MERGE_POLICY_CONTEXT,
   hydrateCodeqlHeadAlertsSteps,
   CODEQL_CHECK_NAME,
   fetchSinglePrRestAsync,
@@ -4686,6 +4687,21 @@ function isTerminalRed(state: string): boolean {
   return REQUIRED_CHECK_FAIL.has(state) && !NO_VERDICT_CONCLUSIONS.has(state);
 }
 
+/** W1-T13426: the `unknown` reasons src/lib/code-scanning-merge-policy.mjs gives while CodeQL has not reported at the head. */
+const POLICY_AWAITS_CODEQL_REASONS: ReadonlySet<string> = new Set(["trusted-exact-head-codeql-result-missing", "security-analysis-pending"]);
+
+/** W1-T13426: an ERROR policy status that only waits for CodeQL is pending, never red and never passed. */
+function policyStatusAwaitsCodeql(c: RollupEntry): boolean {
+  if ((c.name ?? c.context) !== SECURITY_MERGE_POLICY_CONTEXT || String(c.state ?? "").toUpperCase() !== "ERROR") return false;
+  const reason = /^unknown: (\S+)/.exec(c.description ?? "")?.[1];
+  return reason !== undefined && POLICY_AWAITS_CODEQL_REASONS.has(reason);
+}
+
+/** A poll's red vote: a terminal red conclusion that is not a policy status waiting for CodeQL. */
+function castsRedVote(c: RollupEntry): boolean {
+  return !policyStatusAwaitsCodeql(c) && isTerminalRed(String(c.conclusion ?? c.state ?? ""));
+}
+
 
 /**
  * W1-T1202: reproduce `gh pr create --fill`'s own body-derivation rule LOCALLY, over
@@ -7108,7 +7124,7 @@ export function ciGateFromRollup(
   // the common case on this fleet) must never manufacture a false green.
   const required = new Set([...(requiredContexts ?? [])].filter((name) => name !== REVIEW_CTX));
   const voters = ciGatePreReviewView(rollup, requiredContexts);
-  const red = voters.find((c) => isTerminalRed(String(c.conclusion ?? c.state ?? "")));
+  const red = voters.find(castsRedVote);
   if (red) return "red";
   if (required.size > 0) {
     // W1-T3584: the GREEN verdict, when the target's required contexts are READABLE, is derived
@@ -7127,6 +7143,7 @@ export function ciGateFromRollup(
   // Fail-closed fallback (W1-T176 design (i), unchanged): required contexts unreadable or empty —
   // GREEN still requires a check literally named `ci` reporting SUCCESS.
   const ci = voters.find((c) => (c.name ?? c.context) === "ci");
+  if (voters.some(policyStatusAwaitsCodeql)) return "pending";
   if (ci && String(ci.conclusion ?? ci.state ?? "") === "SUCCESS") return "green";
   return "pending";
 }
@@ -7293,7 +7310,7 @@ export function checkWaitStalled(readings: ReadonlyArray<RollupEntry[] | undefin
       // checksStateFromRollup reads), not the literal "SUCCESS" this used to test alone, which
       // read a cleanly-concluded NEUTRAL or SKIPPED check as still pending forever (#1698's
       // shape, one file over). A conclusion isTerminalRed already ruled out never reaches here.
-      return !REQUIRED_CHECK_OK.has(state) && !isTerminalRed(state);
+      return policyStatusAwaitsCodeql(c) || (!REQUIRED_CHECK_OK.has(state) && !isTerminalRed(state));
     })
     .map((c) => c.name ?? c.context ?? "unknown");
   return { stalled: true, pending };
@@ -7344,7 +7361,7 @@ async function waitForCiGreen(
     if (state === "red") {
       const red = boundedCiGateChecks(
         ciGatePreReviewView(roll, requiredContexts)
-          .filter((c) => isTerminalRed(String(c.conclusion ?? c.state ?? "")))
+          .filter(castsRedVote)
           .map((c) => c.name ?? c.context ?? "unknown"),
       );
       return { state: "red", sha, ...red };
