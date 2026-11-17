@@ -56,7 +56,8 @@ function gitStub(): string {
     'sub="${args[$i]}"',
     'case "$sub" in',
     '  rev-parse)    printf "abc1234\\n" ;;',
-    '  hash-object)  cat > "$STUB_REC/payload"; printf "1111111111111111111111111111111111111111\\n" ;;',
+    // Only the `--stdin` form is the publish (W1-T10756): the beat also hashes its OWN FILE read-only.
+    '  hash-object)  case " $* " in *" --stdin "*) cat > "$STUB_REC/payload" ;; esac; printf "1111111111111111111111111111111111111111\\n" ;;',
     '  mktree)       cat > "$STUB_REC/treeinput"; printf "2222222222222222222222222222222222222222\\n" ;;',
     '  commit-tree)  printf "3333333333333333333333333333333333333333\\n" ;;',
     '  push)         : ;;',

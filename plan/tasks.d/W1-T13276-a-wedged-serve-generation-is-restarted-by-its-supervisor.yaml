@@ -1,0 +1,54 @@
+- id: W1-T13276
+  title: "The serve supervisor probes its active generation's HTTP every minute and, after three unanswered probes, records the wedge and restarts it, so a serve that listens but answers nothing is down for minutes, not 40"
+  repo: remudero
+  depends_on: []
+  priority: 0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # a new automatic restart of serve's active generation; bounded and logged, never during a handoff
+  band_meaning: span
+  origin: "operator-session#serve-oom-2026-11-16"
+  plan_refs:
+    - W1-T13203
+  files:
+    - src/lib/serve-supervisor.ts
+    - test/a-wedged-serve-generation-is-restarted-by-its-supervisor.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "With a fake clock and an injected probe, the supervisor GETs one of SMOKE_PATHS on the active generation every ACTIVE_PROBE_INTERVAL_MS (60 s) with an ACTIVE_PROBE_TIMEOUT_MS (10 s) bound, and after ACTIVE_PROBE_FAILURES (3) consecutive failures writes one serve.active_wedged row (sha, failures, last error, uptime) and restarts the generation by the existing restart path"
+      proof: "grep: W1-T13276 criterion 1 in test/a-wedged-serve-generation-is-restarted-by-its-supervisor.test.ts"
+    - claim: "One answered probe resets the count; no probe runs while a handoff, a drain or the standby readiness wait is in progress; and a second wedge within ACTIVE_WEDGE_RESTART_FLOOR_MS (15 min) writes serve.active_wedged_held instead of restarting again"
+      proof: "grep: W1-T13276 criterion 2 in test/a-wedged-serve-generation-is-restarted-by-its-supervisor.test.ts"
+    - claim: "invariant:a-slow-answer-is-not-a-wedge — a probe answered with any HTTP status (200, 401, 503) inside the bound counts as alive; only a timeout or a refused connection counts as a failure"
+      kind: guard
+      proof: "grep: W1-T13276 criterion 3 in test/a-wedged-serve-generation-is-restarted-by-its-supervisor.test.ts"
+  rationale: |
+    WHY: on 2026-11-16 the Console was down for about 40 minutes and nothing noticed. OBSERVED on the Azure host:
+    remudero-serve was recreated at 23:27:45Z; its generation (pid 156) printed "listening on http://0.0.0.0:4317", kept
+    writing background rows (inbox.classification_written, board_snapshot.committed, runtime.loop_lag with p99 60-97 ms),
+    but answered no HTTP request: port 4317 held 455 connections in the accept queue and 444 in CLOSE_WAIT, every read from
+    the host itself timed out at 30 s, and the generation wrote no serve.demand row in 40 minutes. A `docker restart
+    remudero-serve` at 00:08:52Z restored reads within 30 s (instances 2-165 ms, inbox 0.2-2.3 s). The cause of the wedge
+    is unknown; the supervisor (src/lib/serve-supervisor.ts) already polls /v1/ready and SMOKE_PATHS for a standby, but
+    never for the generation that is serving.
+  design: |
+    INVARIANT a-slow-answer-is-not-a-wedge: only an unanswered probe counts.
+    1. In createServeSupervisor, while a generation is active and no handoff, drain or standby wait is in progress, run a
+       timer every ACTIVE_PROBE_INTERVAL_MS that GETs SMOKE_PATHS[0] on the active generation's address with a
+       ACTIVE_PROBE_TIMEOUT_MS bound (the probe the standby readiness check already uses, injectable for tests).
+    2. Count consecutive failures (timeout or connection refused). At ACTIVE_PROBE_FAILURES, write serve.active_wedged and
+       take the existing restart path for the active generation; if that path is unavailable, the legacy exit (docker
+       restarts the container).
+    3. Before restarting, record what can be read cheaply for the post-mortem: the generation's open socket count by state
+       for port 4317 (/proc/net/tcp) and its uptime, on the same row.
+    4. Hold further automatic restarts for ACTIVE_WEDGE_RESTART_FLOOR_MS after one, with a serve.active_wedged_held row.
+    5. Declare the new ledger steps where the repo declares steps.
+  falsifier: |
+    Never probe the active generation: criterion 1 fails. Probe during a handoff or restart twice inside the floor:
+    criterion 2 fails. Count a 401 or 503 as a failure: criterion 3 fails.
+  note: |
+    Id reserved for run-unfiled-1794874389000 with ~/rmd-work/bin/reserve-id.sh.
+    The next wedge should be diagnosed from the serve.active_wedged row; file the root cause then.

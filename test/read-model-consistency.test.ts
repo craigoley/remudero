@@ -5,7 +5,7 @@ import { test } from "node:test";
 import { gzipSync } from "node:zlib";
 import { fixedClock, type Clock } from "#src/lib/clock.js";
 import type { IssueGateway } from "#src/lib/escalate.js";
-import { ACTIVITY_RING_ROWS, createLedgerProjector, openProjectorReadModel, readModelDigest } from "#src/lib/ledger-projector.js";
+import { ACTIVITY_RING_ROWS, createLedgerProjector, LEDGER_ROW_PROJECTIONS, openProjectorReadModel, readModelDigest } from "#src/lib/ledger-projector.js";
 import { readLedgerUnionRawLinesSync, realLedgerFs, type LedgerGrepFsDeps } from "#src/lib/ledger-union.js";
 import {
   ORACLE_AGREE_INTERVAL_MS,
@@ -396,7 +396,7 @@ test("the oracle heal covers repo_row: a lost identity and its repo row come bac
   assert.equal(check(f, {}, fixedClock(CHECK_AT + 60_000)).outcome, "agree");
 });
 
-test("the oracle heal raises an instance heartbeat the daemon rows exceed", (t) => {
+test("W1-T13234 criterion 3: the oracle heal raises an instance heartbeat the daemon rows exceed", (t) => {
   const f = projected(t);
   writeFileSync(join(f.rowsDir, LIVE), text([...f.lines.slice(7), row(T0 + 20_000, "daemon.boot")]));
   const clock = fixedClock(T0 + 60_000);
@@ -408,6 +408,36 @@ test("the oracle heal raises an instance heartbeat the daemon rows exceed", (t) 
   assert.equal(run.outcome, "healed");
   assert.equal(run.mismatches.projectionMissing, 1);
   assert.equal(repoTables(f.db), clean);
+});
+
+test("W1-T13234 criterion 1: the oracle never materializes a whole stored table in the JS heap", (t) => {
+  // MEASURED 2026-11-16: run_activity held 742,306 rows; `.all()` on it took the oracle child past its 1 GB heap.
+  const f = projected(t);
+  const whole: string[] = [];
+  const projectionTables = new Set(LEDGER_ROW_PROJECTIONS.flatMap((p) => p.tables));
+  const db = new Proxy(f.db, {
+    get(target, key, receiver) {
+      if (key !== "prepare") return Reflect.get(target, key, receiver);
+      return (sql: string, opts?: { bigInts?: boolean }) => {
+        const statement = target.prepare(sql, opts);
+        const unbounded = projectionTables.has(/^SELECT .+ FROM (\w+)$/.exec(sql.trim())?.[1] ?? "");
+        return new Proxy(statement, { get: (st, k, r) => k === "all" && unbounded ? (...args: never[]) => (whole.push(sql), Reflect.apply(st.all, st, args)) : Reflect.get(st, k, r) });
+      };
+    },
+  });
+  const run = check({ ...f, db });
+  assert.equal(run.outcome, "agree", "positive control: the check ran and agreed");
+  assert.deepEqual(whole, [], `no whole-table .all(): ${whole.join("; ")}`);
+});
+
+test("W1-T13234 criterion 2: drift in a whole table is still found, from the SQL comparison", (t) => {
+  const f = projected(t);
+  writeFileSync(join(f.rowsDir, LIVE), text([...f.lines.slice(7), row(T0 + 20_000, "daemon.boot")]));
+  createLedgerProjector({ ledgerDir: f.rowsDir, db: f.db, lease: f.lease, clock: fixedClock(T0 + 60_000) }).tick();
+  f.db.exec(`UPDATE instance_heartbeat SET last_ms = ${T0 - 1}`);
+  const run = check(f);
+  assert.equal(run.mismatches.projectionMissing, 1, "the lowered heartbeat is the one missing whole-table row");
+  assert.match(run.sample.join("\n"), /instance_heartbeat/, "and the sample names its table");
 });
 
 test("a repo row whose ledger line was lost is evidence and is not deleted by a heal", (t) => {

@@ -1,0 +1,51 @@
+- id: W1-T13293
+  title: "Serve's default CPU weight is 4096, eight times a build daemon's, so the Console's API is not queued behind about 25 runnable fleet tasks on the shared host"
+  repo: remudero
+  depends_on: []
+  priority: 0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # changes the host CPU split serve and the daemons share; reverses W1-T12532's default for serve only
+  band_meaning: span
+  origin: "operator-session#serve-oom-2026-11-16"
+  plan_refs:
+    - W1-T12532
+    - W1-T4102
+  files:
+    - deploy/resource-policy.sh
+    - test/the-console-backend-keeps-its-share-of-the-host.test.ts
+    - test/a-changed-resource-policy-reaches-a-running-container.test.ts
+    - test/a-changed-serve-policy-reaches-the-running-console.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "deploy/resource-policy.sh defaults RMD_SERVE_CPU_SHARES to 4096 while RMD_BUILD_CPU_SHARES stays 512, and serve-container.sh launches serve with --cpu-shares=4096 by default"
+      proof: "grep: W1-T13293 criterion 1 in test/the-console-backend-keeps-its-share-of-the-host.test.ts"
+    - claim: "The drift readers expect 4096 for serve: a serve container on 4096 reads no drift, and one still on 512 reads CpuShares drift (expected 4096, actual 512), so the policy tick moves a running serve onto the new weight"
+      proof: "grep: W1-T13293 criterion 2 in test/a-changed-resource-policy-reaches-a-running-container.test.ts"
+    - claim: "invariant:operator-override-kept — an operator-set RMD_SERVE_CPU_SHARES still sets serve's --cpu-shares (W1-T12532 criterion 3 passes unchanged)"
+      kind: guard
+      proof: "grep: W1-T12532 criterion 3 in test/the-console-backend-keeps-its-share-of-the-host.test.ts"
+  rationale: |
+    WHY: Craig approved raising serve's CPU weight on 2026-11-17 00:58Z ("approve", to option A: set remudero-serve
+    cpu-shares to 4096, live and persisted), superseding his 2026-11-13 equal-weight ruling (W1-T12532) for serve only.
+    MEASURED on the Azure host at 00:49Z: 8 vCPU, load 24.8/30.9/30.0, CPU pressure "some" avg300 75%; every container
+    at cpu-shares 512; the daemon container at 445% CPU from fleet work (tests, reviews, builds, gardeners). Serve's own
+    main thread needs about 0.1 to 0.6 core (serve.thread_load) but at equal weight waits behind about 25 runnable tasks,
+    and Vercel showed /v1/status, /v1/daemon-health, /v1/views/instances and /v1/views/agent timing out at 5 s.
+    A live `docker update` alone is undone: the serve policy tick (serve-policy-convergence.ts) reads CpuShares drift
+    against the policy and replaces serve, which is itself an outage. So the default moves first.
+    This is a stopgap beside the code work that makes serve need less CPU (the thin API plan).
+  design: |
+    INVARIANT operator-override-kept: RMD_SERVE_CPU_SHARES still overrides.
+    1. Change the RMD_SERVE_CPU_SHARES default in deploy/resource-policy.sh to 4096 with a comment naming this task and
+       the ruling.
+    2. Update the tests that pin serve's 512 default: the launch test, the drift readers' expected value, and the
+       running-console policy test.
+  falsifier: |
+    Leave the default at 512: criteria 1 and 2 fail. Ignore an operator value: criterion 3 fails.
+  note: |
+    Id reserved for run-unfiled-1794877124000 with ~/rmd-work/bin/reserve-id.sh.
+    After deploy, run `docker update --cpu-shares 4096 remudero-serve` once so the tick reads no drift and does not replace serve.

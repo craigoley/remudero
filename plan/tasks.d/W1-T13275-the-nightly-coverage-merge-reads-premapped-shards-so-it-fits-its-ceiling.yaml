@@ -1,0 +1,78 @@
+- id: W1-T13275
+  title: "The coverage-nightly shards premap their coverage as ci.yml's shards do, so the nightly merge finishes inside its 30-minute ceiling and main's floor is measured every night"
+  repo: remudero
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # it changes how main's coverage floor is merged and the shards that produce it
+  band_meaning: span
+  origin: "operator-session#coverage-shard-timeouts-2026-11-16"
+  plan_refs:
+    - W1-T5923
+    - W1-T5704
+    - W1-T6107
+    - W1-T13270
+  files:
+    - .github/workflows/coverage-nightly.yml
+    - test/ci/the-nightly-coverage-merge-reads-premapped-shards.test.ts
+    - test/main-builds-the-test-impact-map-the-shadow-arm-reads.test.ts
+    - test/the-instrumented-suite-runs-nightly-on-main.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Each coverage-nightly shard writes premapped coverage beside its compact coverage, and the merge job's coverage-merge-ratchet.mjs call reads the premapped directories"
+      proof: "grep: W1-T13275 criterion 1 in test/ci/the-nightly-coverage-merge-reads-premapped-shards.test.ts"
+    - claim: "The test impact map is still built from the compact shards, which keep each report's suite"
+      proof: "grep: W1-T13275 criterion 2 in test/ci/the-nightly-coverage-merge-reads-premapped-shards.test.ts"
+    - claim: "invariant:nightly-floor-identity — merging one shard set from its premapped files gives the same lcov bytes as merging it from its compact files"
+      proof: "grep: W1-T13275 criterion 3 in test/ci/the-nightly-coverage-merge-reads-premapped-shards.test.ts"
+    - claim: "The nightly shard step runs the premap"
+      proof: "grep: --premap-output in .github/workflows/coverage-nightly.yml"
+  rationale: |
+    MEASURED 2026-11-17 from the Actions jobs API: 9 of the 13 coverage-nightly runs from 2026-11-05 to 2026-11-16
+    concluded cancelled. needs-human issue #18813 ("coverage-nightly is failing") is open. In run 43807112604
+    (2026-11-16) every shard passed in 23 to 38 minutes of its 45, and the merge job's "Merge raw V8 coverage shards
+    into one lcov" step was cancelled after 29m52s at the job's `timeout-minutes: 30`. In the last green run,
+    43678904515 (2026-11-15), the same step took 22m44s and the impact-map build 1m29s, so a green night already used
+    about 25 of the 30 minutes.
+    CAUSE (READ at origin/main f36fa8182): the nightly shards upload only compact coverage
+    (`--compact-output`), so the merge job source-maps every process report serially. ci.yml's coverage shards
+    premap in parallel (W1-T5923, `--premap-output` in "Stage this coverage shard for the required-check
+    aggregator"), and its aggregator's merge took 113 s for 8 shards (run 43963239484).
+    EFFECT: a cancelled nightly records no floor for that day. The floor is what W1-T5892 needs before live
+    narrowing (RMD_AFFECTED_SUITE_LIVE, now "0") can be turned on, and it is the evidence W1-T6107's impact map reads.
+    WHY NOT A HIGHER CEILING: the serial merge grows with the suite (test files +16% in 20 days), so a higher bound
+    only moves the wall. Premapping moves the work into the eight parallel shards.
+  design: |
+    1. In each nightly shard, after the compaction step, also run
+       `node --expose-internals scripts/coverage-merge-ratchet.mjs --premap-output <dir> coverage/raw` into a
+       separate artifact directory (for example coverage-artifact/premapped), and upload it in the shard's artifact.
+    2. The merge job passes the premapped directories, not the compact ones, to its `--output coverage/lcov.info
+       --shard-count` merge. The impact-map step keeps reading the compact directories (its own comment says the
+       premapped upload does not keep each report's suite).
+    3. Shard headroom: the premap step took 240 to 547 s on ci.yml's shards. The slowest nightly shard on
+       2026-11-16 ended at 37m52s of 45. MEASURE the premap's cost on a nightly shard (a workflow_dispatch run on the
+       branch is refused by the main-only guard, so measure from the first scheduled run after merge). If the
+       slowest shard would pass 42 minutes, also move the nightly matrix to CI_COVERAGE_SHARD_COUNT (12, W1-T13270)
+       and update scripts/coverage-floor.mjs NIGHTLY_SHARD_COUNT to match, and say which in the PR.
+    4. New suite test/ci/the-nightly-coverage-merge-reads-premapped-shards.test.ts parses coverage-nightly.yml with
+       the `yaml` package: criterion 1 (each shard premaps and uploads it; the merge reads every premapped shard
+       directory and no compact one), criterion 2 (the impact map reads the compact directories), criterion 3 (one
+       fixture shard set merged from premapped and from compact files gives identical lcov bytes). Root through
+       `#test/helpers/repo-root.js`.
+    5. Two existing suites pin the merge to the compact directories and move with it (amended 2026-11-17):
+       test/main-builds-the-test-impact-map-the-shadow-arm-reads.test.ts (W1-T6107) and
+       test/the-instrumented-suite-runs-nightly-on-main.test.ts (W1-T5704) now expect each shard's premapped
+       directory in the merge and its compact directory in the impact-map build.
+    INVARIANT nightly-floor-identity: the merged lcov's bytes for the same inputs do not change. W1-T5923 made the
+    premapped replay byte-identical to the serial merge; keep that proof passing.
+  falsifier: |
+    Point the merge back at the compact directories and criterion 1 fails. Point the impact map at the premapped
+    directories and criterion 2 fails. VALIDATION AFTER MERGE (reported in the PR or a follow-up comment): the next
+    three scheduled coverage-nightly runs conclude success, with the merge step under 10 minutes, and #18813 closes
+    itself on the first recovery.
+  note: |
+    An operator session hand-builds this task: the daemon holds any task that names a workflow path (W1-T5351). A
+    workflow diff rides alone (W1-T297). Build it after W1-T13270 merges if the nightly matrix also moves.

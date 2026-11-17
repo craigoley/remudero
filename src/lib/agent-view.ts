@@ -13,16 +13,16 @@
  * restart resumes from the committed pair; a refused commit keeps the in-memory fold and the last whole pair,
  * so no fact is discarded. The nav badge counts from the same fold ({@link AGENT_FOLDS}).
  */
-import { join } from "node:path";
-import { analyticsSource, snapshotInputs, ANALYTICS_SOURCE_CONSOLE_V1, ANALYTICS_SOURCE_SIGNALS, type AnalyticsConsoleSource, type AnalyticsInstanceInput } from "./analytics-view.js";
+import { dirname, join } from "node:path";
+import { analyticsSource, analyticsSourceBodies, snapshotInputs, ANALYTICS_SOURCE_CONSOLE_V1, ANALYTICS_SOURCE_SIGNALS, type AnalyticsConsoleSource, type AnalyticsInstanceInput } from "./analytics-view.js";
 import type { AnalyticsSnapshot } from "./analytics-route.js";
 import { AUTOMATION_ACTION_VERSION } from "./automation-action.js";
-import { clockFromMillisFn } from "./clock.js";
+import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { DELEGATION_PROFILE_VERSION, projectDelegationProfile } from "./delegation-profile.js";
 import { followUpHistoryFromRows } from "./follow-up-policy.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { createLedgerRotationMemo, readLedgerUnionRecordsSync, type LedgerRotationMemo } from "./ledger-union.js";
-import { AGENT_RECORD_LIMITS, operatorAgentCandidates, proposalSnapshotReason, visibleOperatorAgentProposals, type NavBadgeAnalytics, type ProposalDetail } from "./nav-badge-view.js";
+import { AGENT_RECORD_LIMITS, operatorAgentCandidates, proposalSnapshotReason, visibleOperatorAgentProposals, type NavBadgeAnalytics, type NavBadgeScope, type ProposalDetail } from "./nav-badge-view.js";
 import type { NowInstance } from "./now-view.js";
 import {
   readDelegationProfiles,
@@ -36,8 +36,9 @@ import {
   withOperatorAgentRows,
 } from "./operator-agent.js";
 import { AGENT_FOLDS, readSourceSnapshotBody, sourceSnapshotStates, type AgentFolds, type AgentFoldSlot, type ReadModelDb, type ReadModelLease } from "./read-model-db.js";
+import { describeSource } from "./view-freshness.js";
 import type { ShadowLegacy } from "./view-shadow.js";
-import { viewKey, type ViewSource } from "./views.js";
+import { viewKey, type ViewDefinition, type ViewRequestFailure, type ViewSource } from "./views.js";
 
 export const AGENT_VIEW_NAME = "agent";
 export const AGENT_VIEW_VERSION = 1;
@@ -156,6 +157,16 @@ function proposalsBody(input: { instance: string; repository?: string; now: numb
 }
 
 /**
+ * The proposal engine's input from one refresh's `console-v1` and `signals` bodies: the worker reads them from the
+ * home store's committed rows, the legacy side from serve's own analytics cache. One shape, so one engine.
+ */
+function agentAnalytics(input: { asOf: string; console: AnalyticsConsoleSource; signals: { routingTelemetry: AnalyticsSnapshot["routingTelemetry"] }; signalsAsOf: string | null | undefined; sourceInstance: string }): AgentAnalytics {
+  const analytics = { asOf: input.asOf, consoleV1: input.console?.projection, routingTelemetry: input.signals?.routingTelemetry };
+  const reason = input.signalsAsOf !== input.asOf ? "proposal source snapshots have different observation clocks" : proposalSnapshotReason(analytics);
+  return { asOf: input.asOf, console: input.console, signalsAsOf: input.signalsAsOf, sourceInstance: input.sourceInstance, ...(reason ? { reason } : { analytics }) };
+}
+
+/**
  * The proposal engine's input from the home store's committed `console-v1` and `signals` rows (one refresh
  * commits both), parsed again only when their as-of moved, and the `analytics:<i>` source judged from them.
  */
@@ -165,9 +176,7 @@ function committedAnalytics(home: ReadModelDb, instance: string, held: Map<strin
   if (row?.asOf && (held.get(instance)?.asOf !== row.asOf || held.get(instance)?.signalsAsOf !== signalsRow?.asOf)) {
     const consoleV1 = readSourceSnapshotBody(home, instance, ANALYTICS_SOURCE_CONSOLE_V1) as AnalyticsConsoleSource;
     const signals = readSourceSnapshotBody(home, instance, ANALYTICS_SOURCE_SIGNALS) as { routingTelemetry: AnalyticsSnapshot["routingTelemetry"] };
-    const analytics = { asOf: row.asOf, consoleV1: consoleV1?.projection, routingTelemetry: signals?.routingTelemetry };
-    const reason = signalsRow?.asOf !== row.asOf ? "proposal source snapshots have different observation clocks" : proposalSnapshotReason(analytics);
-    held.set(instance, { asOf: row.asOf, console: consoleV1, signalsAsOf: signalsRow?.asOf, sourceInstance: row.instance, ...(reason ? { reason } : { analytics }) });
+    held.set(instance, agentAnalytics({ asOf: row.asOf, console: consoleV1, signals, signalsAsOf: signalsRow?.asOf, sourceInstance: row.instance }));
   }
   const cached = row?.asOf ? held.get(instance) : undefined;
   const analytics = cached && signalsRow?.asOf !== row?.asOf ? { ...cached, reason: "proposal source snapshots have different observation clocks" } : cached;
@@ -203,6 +212,50 @@ interface Built {
 }
 
 const PANEL_ROW = /"step":"panel\./;
+
+/** One instance's `panel.*` rows read the routes' way (the ledger union, archive included), none newer than `untilMs`. */
+function panelLedgerRows(memos: Map<string, LedgerRotationMemo>, instance: string, ledgerDir: string, untilMs = Number.POSITIVE_INFINITY): Row[] {
+  const memo = memos.get(instance) ?? createLedgerRotationMemo((rows) => rows.filter((row) => String(row.step).startsWith("panel.")), { pattern: PANEL_ROW });
+  memos.set(instance, memo);
+  const pass = memo.pass({ parseMissing: true });
+  const union = readLedgerUnionRecordsSync(ledgerDir, { pattern: PANEL_ROW, rotationRecords: pass.rotationRecords }).rows;
+  pass.complete();
+  return union.filter((row) => String(row.step).startsWith("panel.") && !(Date.parse(String(row.ts)) > untilMs));
+}
+
+function isAgentPart(part: string | null): part is AgentViewPart {
+  return part !== null && Object.hasOwn(AGENT_VIEW_PARTS, part);
+}
+
+/** An unknown part is refused before a held body or the legacy side can answer, in every switch mode. */
+function refuseUnknownPart(params: URLSearchParams): ViewRequestFailure | undefined {
+  const part = params.get("part");
+  return part === null || isAgentPart(part) ? undefined : { error: `unknown agent part: ${part}; the parts are ${Object.keys(AGENT_VIEW_PARTS).join(",")}` };
+}
+
+/**
+ * The `agent` view's LEGACY SIDE (W1-T13180, narrowed by W1-T13282). Serve serves the read-model worker's body by
+ * default; this side answers only a key the worker has not built yet, with 503 `view_not_ready`, and reads no ledger,
+ * so a request can never pay a cold read of every ledger archive on serve's request thread.
+ */
+export function agentLegacyView(opts: { scopes: () => readonly Pick<NavBadgeScope, "instanceId" | "repository" | "analytics" | "ledgerPath">[]; clock?: Clock }): ViewDefinition<AgentViewData> {
+  return {
+    name: AGENT_VIEW_NAME,
+    version: AGENT_VIEW_VERSION,
+    validateRequest: refuseUnknownPart,
+    compute: (params) => {
+      const part = params.get("part");
+      if (!isAgentPart(part)) return refuseUnknownPart(params) ?? { error: "the agent view needs ?part=" };
+      const scopes = opts.scopes();
+      const name = params.get("instance");
+      const scope = scopes.find((candidate) => candidate.instanceId === name);
+      if (!scope) return { error: `unknown instance: ${name ?? ""}; serve has ${scopes.map((candidate) => candidate.instanceId).join(",")}` };
+      // W1-T13282: the legacy side reads no ledger on a request. A cold union read here froze serve for 232 s on
+      // 2026-11-16; serve now serves the worker's body by default, and a key it has not built yet is not ready.
+      return { error: "view_not_ready", status: 503, detail: `the agent view for ${scope.instanceId} is built by the read-model worker and has no body yet; retry shortly` };
+    },
+  };
+}
 
 /** The `agent` view as the read-model worker materializes it: one body per (instance, part). */
 export function createAgentView<S extends { instance: string; tickedAt?: number }>(opts: AgentViewOptions<S>): {
@@ -296,12 +349,7 @@ export function createAgentView<S extends { instance: string; tickedAt?: number 
       const view = data as AgentViewData;
       const info = shown.get(view);
       if (!info) return undefined;
-      const memo = legacyMemos.get(info.instance.name) ?? createLedgerRotationMemo((rows) => rows.filter((row) => String(row.step).startsWith("panel.")), { pattern: PANEL_ROW });
-      legacyMemos.set(info.instance.name, memo);
-      const pass = memo.pass({ parseMissing: true });
-      const union = readLedgerUnionRecordsSync(info.instance.ledgerDir, { pattern: PANEL_ROW, rotationRecords: pass.rotationRecords }).rows;
-      pass.complete();
-      const rows = union.filter((row) => String(row.step).startsWith("panel.") && !(Date.parse(String(row.ts)) > info.newestTsMs));
+      const rows = panelLedgerRows(legacyMemos, info.instance.name, info.instance.ledgerDir, info.newestTsMs);
       const bodies = agentPartBodies({ ledgerDir: info.instance.ledgerDir, instance: info.instance.name, ...(info.instance.repo ? { repository: info.instance.repo } : {}), now: info.builtMs, rows, ...(info.analytics ? { analytics: info.analytics } : {}) });
       return { data: { instance: view.instance, part: view.part, ...bodies[view.part] }, asOfMs: info.builtMs };
     },

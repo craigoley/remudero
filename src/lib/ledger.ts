@@ -185,6 +185,12 @@ export function ledgerRowActor(line: { actor?: unknown }): LedgerRowActor {
   }
 }
 
+/** W1-T13151: a review whose lane signal aborted (the restart drain gave up on it) ends here with no
+ *  remudero-review verdict posted, so its pending status stays and the next sweep pass reviews the head
+ *  again. Written by reviewCommand (src/cli/commands/review.ts) with pr_number, pr_url, head_sha, phase
+ *  ("plan-lint" or "posting") and reason. */
+export const REVIEW_LANE_ABORTED_STEP = "review.lane_aborted";
+
 export const LEDGER_FUTURE_STAMP_TOLERANCE_MS = 10 * 60_000;
 export const LEDGER_FUTURE_STAMP_STEP = "ledger.future_stamp";
 

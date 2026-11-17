@@ -52,6 +52,7 @@ function fixture(t: TestContext, catalog: "public" | "ops", host: "named" | "abs
   const reads: string[] = [], gh: string[][] = [], git: string[][] = [], preflights: string[] = [];
   const reserved: { cwd: string; branch: string }[] = [], rows: Record<string, unknown>[] = [];
   const opened = new Map<string, string>();
+  let red: string | undefined;
   const publicPlan = mergePlanBlobs([{ label: "fixture.yaml", text: catalog === "public" ? yaml("public") : "[]" }]);
   const deps: BuildSweepEffectsDeps = {
     owner: "fixture", repo: "remudero", repoRoot: publicDir, config: { root, claudeBin: "/bin/true" } as Config,
@@ -72,9 +73,12 @@ function fixture(t: TestContext, catalog: "public" | "ops", host: "named" | "abs
     },
     planRepairGitImpl: (_file, args) => {
       git.push([...args]);
+      // The new task file a refused landing sets aside: main holds no file at its path.
+      if (red !== undefined && args.includes("rev-parse") && args.at(-1)!.includes(`:plan/tasks.d/${red}-`)) throw new Error("fatal: path not in main");
       if (args.includes("rev-parse")) return args.at(-1) === "origin/main" ? "mainsha" : "fixture-sha";
       if (args.includes("hash-object")) return "fixture-blob";
-      if (args.includes("write-tree")) return `tree-${args[1]}`;
+      // A refusing world names each tree apart, so the landing's green-tree cache never hides the refused batch.
+      if (args.includes("write-tree")) return red === undefined ? `tree-${args[1]}` : `tree-${args[1]}-${red}-${git.length}`;
       if (args.includes("commit-tree")) return "fixture-sha";
       return "";
     },
@@ -88,7 +92,11 @@ function fixture(t: TestContext, catalog: "public" | "ops", host: "named" | "abs
     },
     planRepairReserveIdImpl: (cwd, branch) => { reserved.push({ cwd, branch }); return HELD; },
     buildPlanPrBodyImpl: buildFixturePlanPrBody,
-    planPrPreflightImpl: (dir) => { preflights.push(dir); return { ok: true, failures: [], unreadable: [] }; },
+    planPrPreflightImpl: (dir, _sha, pr) => {
+      preflights.push(dir);
+      return red !== undefined && pr.body.includes(`id: ${red} in`) ? { ok: false, failures: [{ check: "proof-discrimination", firstLine: "fixture refusal" }], unreadable: [] }
+        : { ok: true, failures: [], unreadable: [] };
+    },
   };
   const effects = buildSweepEffects(deps);
   assert.ok(effects.parkedPr, "the production sweep effects wire the remedy");
@@ -115,7 +123,7 @@ function fixture(t: TestContext, catalog: "public" | "ops", host: "named" | "abs
       sourceRepository: { owner: "fixture", repo: "remudero" } }).branch;
   };
   return { root, publicDir, publicText, opsDir, parked, reads, gh, git, preflights, reserved, rows, remedy, stalled, creates, staged,
-    stagedFiles, branchFor };
+    stagedFiles, branchFor, refuse: (id: string) => { red = id; } };
 }
 
 const remedyRows = (rows: readonly Record<string, unknown>[]) => rows.filter(r => r.step === PARKED_PR_REMEDY_STEP);
@@ -207,4 +215,23 @@ test("W1-T13048 criterion 4: taskCriteriaCount reads the ops-catalog task file, 
   assert.equal(f.creates().length, 1);
   assert.equal(f.creates()[0]![f.creates()[0]!.indexOf("--repo") + 1], OPS);
   assert.ok(!remedyRows(f.rows).some(r => r.remedy === "close-and-rebuild" || r.closed === true), "the pull request is not closed");
+});
+
+test("W1-T13169: a sweep landing into the plan destination releases a set-aside filing's reservation in the public checkout", async t => {
+  const f = fixture(t, "ops", "named");
+  // A new ops task file a gardener staged earlier; the remedy's landing tests it again and the preflight refuses it.
+  const aside = "W1-T900077", asideRel = `plan/tasks.d/${aside}-ops-fixture.yaml`;
+  const abs = join(f.root, "state", "task-files-landing-pending", asideRel);
+  mkdirSync(dirname(abs), { recursive: true });
+  writeFileSync(abs, yaml("ops").replaceAll(ID, aside));
+  writeFileSync(`${abs}.meta.json`, `${JSON.stringify({ baseBlob: null, claim: `the task ${aside} is filed`,
+    proof: `grep: id: ${aside} in ${asideRel}`, repository: OPS })}\n`);
+  f.refuse(aside);
+  await f.remedy();
+  assert.ok(!f.stagedFiles().includes(abs), "the landing sets the refused file aside");
+  const reservation = f.git.filter(args => args.some(a => a.includes("refs/rmd-id")));
+  assert.ok(reservation.length > 0, `the set-aside reads the reservation of ${aside}: ${JSON.stringify(f.git)}`);
+  assert.ok(reservation.every(args => args[0] === "-C" && args[1] === f.publicDir), "every reservation call runs in the public checkout");
+  assert.ok(f.git.filter(args => args[1] === f.opsDir).every(args => !args.some(a => a.includes("refs/rmd-id"))),
+    "no reservation call runs in the ops checkout");
 });

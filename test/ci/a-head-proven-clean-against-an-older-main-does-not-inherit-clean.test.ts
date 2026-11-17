@@ -123,8 +123,13 @@ for (const state of ["clean", "behind"] as const) {
           assert.match(String(disposed?.reason), new RegExp(`last known "${state}" for head 35fa075`));
           assert.ok(String(disposed?.reason).includes(`read against main ${recordedMain?.slice(0, 7) ?? "(unrecorded)"}`));
           assert.match(String(disposed?.reason), /main is now ab39118, so it is not inherited/);
+        } else if (mainTip === undefined) {
+          // W1-T13195: no main read and a record with no main: the pass may inherit, but its row names no main, so no state.
+          assert.equal(disposed?.merge_state, undefined, "a clean or behind row always names its main");
+          assert.equal(disposed?.merge_main_sha, undefined);
+          assert.doesNotMatch(String(disposed?.reason), /so it is not inherited/);
         } else {
-          assert.equal(disposed?.merge_state, state, "same main or no main read preserves inheritance");
+          assert.equal(disposed?.merge_state, state, "same main preserves inheritance");
           assert.equal(disposed?.merge_main_sha, mainTip);
           assert.doesNotMatch(String(disposed?.reason), /so it is not inherited/);
         }

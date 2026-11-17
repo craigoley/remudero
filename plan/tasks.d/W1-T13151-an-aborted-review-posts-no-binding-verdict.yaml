@@ -20,7 +20,7 @@
     - src/cli/commands/sweep.ts
     - src/lib/ledger.ts
     - test/an-aborted-review-posts-no-binding-verdict.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:aborted-is-not-judged — a plan-only review whose lane signal aborts before the plan lint starts, or while the lint child runs, posts no remudero-review status and writes one review.lane_aborted ledger row that names the PR, the head, the phase and the reason lint-plan aborted"

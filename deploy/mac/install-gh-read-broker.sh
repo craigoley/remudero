@@ -21,6 +21,13 @@
 # agent are put back and the exit is non-zero, naming the agent's log. `current` beside the copies records the
 # sha that is serving. The whole tree is copied because the CLI reads plan/policy.yaml as it loads; the narrow
 # entry of W1-T10369 will let a later change shrink the copy.
+#
+# W1-T13171: AN AGENT IS STARTED ONLY ONCE LAUNCHD HAS LET GO OF THE ONE BEFORE IT. `launchctl bootout` returns
+# before the service is gone, and a `launchctl bootstrap` in that window fails with "5: Input/output error"
+# (2026-11-16: the first reinstall over a running broker failed that way). So after a stop, the install and
+# its roll-back both poll `launchctl print` until it fails, for at most the --heartbeat-wait seconds. An old
+# agent still listed then ends the install before anything is replaced, naming the service. With no agent
+# file there is no previous agent, and nothing is waited for.
 set -euo pipefail
 umask 077
 label=com.remudero.gh-read-broker
@@ -52,6 +59,7 @@ copies="$HOME/Library/Application Support/remudero/gh-read-broker"
 # The agent's environment is HOME and PATH alone, so its broker writes its heartbeat under HOME's cache.
 heartbeat="$HOME/.cache/remudero/gh-broker/heartbeat"
 uid="$(id -u)"
+service="gui/$uid/$label"
 account="$(id -un)"
 acl_entry="user:$account allow list,add_file,search,add_subdirectory,delete_child,readattr,writeattr,readextattr,writeextattr,readsecurity,file_inherit,directory_inherit"
 codex_version="none found"
@@ -144,6 +152,9 @@ if [ "$dry_run" -eq 1 ]; then
   fi
   printf 'would write %s\n' "$plist"
   printf 'would run: launchctl bootout gui/%s/%s (ignored if absent)\n' "$uid" "$label"
+  if [ -n "$prev_body" ]; then
+    printf 'would wait up to %ss for launchd to stop listing %s (polling `launchctl print`) before the copy or the agent file is replaced; still listed then, nothing is replaced\n' "$heartbeat_wait" "$service"
+  fi
   printf 'would run: launchctl bootstrap gui/%s %s\n' "$uid" "$plist"
   printf 'would wait up to %ss for a fresh heartbeat at %s, then record %s in %s\n' "$heartbeat_wait" "$heartbeat" "${sha:-<source sha>}" "$copies/current"
   if [ -n "$login" ]; then
@@ -241,6 +252,23 @@ write_plist() {
   mv -f "$plist.tmp.$$" "$plist"
 }
 
+# Stops the agent, then waits until launchd no longer lists the service: `launchctl bootout` returns before
+# that, and a bootstrap while it is still listed fails with "5: Input/output error". It looks, sleeps a quarter
+# second and looks again, for at most the --heartbeat-wait seconds the caller chose for this install.
+# 0 once the service is gone; 1 if launchd still lists it when the seconds are up.
+looks_per_second=4
+stop_agent() {
+  local looked=0 limit
+  limit=$(( 10#$heartbeat_wait * looks_per_second ))
+  launchctl bootout "$service" 2>/dev/null || true
+  while launchctl print "$service" >/dev/null 2>&1; do
+    [ "$looked" -lt "$limit" ] || return 1
+    sleep 0.25
+    looked=$(( looked + 1 ))
+  done
+  return 0
+}
+
 mkdir -p "$agents" "$logs" "$copies"
 stage="$copies/.stage.$$"
 [ ! -e "$stage" ] || { printf 'a staging directory is already there: %s\n' "$stage" >&2; exit 1; }
@@ -251,8 +279,18 @@ if ! build_copy "$stage"; then
   exit 1
 fi
 
-# PHASE ONE: stop the agent, put the new copy in place, start the agent on it. The previous copy stays.
-launchctl bootout "gui/$uid/$label" 2>/dev/null || true
+# PHASE ONE: stop the agent, wait until launchd has let go of it, put the new copy in place, start the agent on
+# it. The previous copy stays. Nothing is moved or written until the old agent is gone.
+if [ -z "$prev_body" ]; then
+  # No agent file: no previous agent to wait for. A stray service is told to stop, as before, and that is all.
+  launchctl bootout "$service" 2>/dev/null || true
+elif ! stop_agent; then
+  remove_copy "$stage" || true
+  printf 'launchd still lists %s %ss after it was told to stop it: the old agent is still loaded, so nothing was replaced.\n' "$service" "$heartbeat_wait" >&2
+  printf 'The agent file %s and the program it runs, %s, are as they were, but that agent was told to stop and may not be serving.\n' "$plist" "$prev_prog" >&2
+  printf 'Once `launchctl print %s` fails, run this installer again, or start the old agent with: launchctl bootstrap gui/%s %s\n' "$service" "$uid" "$plist" >&2
+  exit 1
+fi
 kept=""
 if [ -n "$prev_copy" ] && [ -d "$prev_copy" ]; then
   if [ "$prev_copy" = "$new" ]; then
@@ -303,12 +341,18 @@ fi
 printf 'the agent log says why: %s\n' "$err_log" >&2
 # Go back only to something that can run: a kept copy, or an in-place program that is still there.
 if [ -n "$prev_body" ] && { [ -n "$kept" ] || { [ -n "$prev_prog" ] && [ -z "$prev_copy" ] && [ -x "$prev_prog" ]; }; }; then
-  launchctl bootout "gui/$uid/$label" 2>/dev/null || true
+  # The service stopped here is the new agent, or the old one still on its way out: the previous agent can
+  # be started only once launchd has let go of it, exactly as in phase one.
+  gone=1
+  stop_agent || gone=0
   remove_copy "$new" || true
   if [ -n "$kept" ] && [ "$kept" != "$prev_copy" ]; then mv "$kept" "$prev_copy"; fi
   write_plist "$prev_body"
   if launchctl bootstrap "gui/$uid" "$plist" 2>/dev/null; then
     printf 'the previous agent is back, running %s\n' "$prev_prog" >&2
+  elif [ "$gone" -eq 0 ]; then
+    printf 'the previous agent file is back (%s) but launchd still lists %s %ss after it was told to stop it, so the previous agent is NOT running\n' "$prev_prog" "$service" "$heartbeat_wait" >&2
+    printf 'Once `launchctl print %s` fails, start it with: launchctl bootstrap gui/%s %s\n' "$service" "$uid" "$plist" >&2
   else
     printf 'the previous agent file is back (%s) but launchctl would not start it\n' "$prev_prog" >&2
   fi

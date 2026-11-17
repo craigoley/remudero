@@ -15,7 +15,7 @@
   files:
     - src/lib/read-model-consistency.ts
     - test/read-model-consistency.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A consistency check over the projected fixture calls .all() on no projection table without a WHERE clause: whole tables are read with .iterate() and compared in the scratch database"

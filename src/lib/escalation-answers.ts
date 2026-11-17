@@ -134,6 +134,10 @@ export interface EscalationAnswerGateway {
   readonly ownerLogin?: string;
   /** Explicit human principals from validated config; when present replaces owner inference on both channels. */
   readonly operatorLogins?: readonly string[];
+  /** W1-T13223: whether `login` holds admin permission on this repository. An organization's owner comments as
+   *  MEMBER, never OWNER, so the owner rule alone refused the operator (#17274). THROWS on an unreadable read; the
+   *  caller then skips that comment this pass. Comments only: never consulted for a reaction. Optional. */
+  isRepoAdmin?(login: string): Promise<boolean>;
   /** Refusal alarms use the escalation writer, separate from answer acknowledgements. */
   readonly refusalIssues?: AsyncIssueGateway;
   /** Acknowledge an ACCEPTED reply with a `+1` reaction — never a posted comment (design iv).
@@ -183,6 +187,7 @@ export function ghEscalationAnswerGateway(
   const repoArg = `${owner}/${repo}`;
   const run = (args: string[]) => ghExec(args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
   const parents = new Map<number, FeedbackAdmissionSubject>();
+  const adminReads = new Map<string, Promise<boolean>>();
   let repository: FeedbackAdmissionSubject["repository"];
   const subject = (kind: FeedbackAdmissionSubject["kind"], sourceRef: string, issueNumber: number,
     item: RestCommentRow | RestReactionRow, parent?: FeedbackAdmissionSubject): FeedbackAdmissionSubject => ({
@@ -198,6 +203,21 @@ export function ghEscalationAnswerGateway(
     sourceRead: feedback?.read,
     ownerLogin: owner,
     operatorLogins,
+    isRepoAdmin(login) {
+      const key = login.toLowerCase();
+      let read = adminReads.get(key);
+      if (read === undefined) {
+        read = readText(["api", `repos/${repoArg}/collaborators/${encodeURIComponent(login)}/permission`])
+          .then((raw) => (JSON.parse(raw) as { permission?: unknown }).permission === "admin");
+        read.catch(() => {
+          // deliberate: a failed read is not cached, so the next pass reads it again rather than
+          // inheriting a refusal; the caller sees the same rejection through `read` and counts it.
+          adminReads.delete(key);
+        });
+        adminReads.set(key, read);
+      }
+      return read;
+    },
     refusalIssues: ghIssueGatewayAsync(owner, repo, { exec: readText }),
     async listOpen(label) {
       const raw = await readText(labelledIssuesRestArgs(repoArg, label, "open"));
@@ -271,6 +291,21 @@ function operatorRefusal(
       ? undefined : "not-configured-operator";
   }
   return legacyOwner ? undefined : "not-owner";
+}
+
+/** W1-T13223: text only the fleet writes on an escalation issue. Fleet automation can post as an operator's own
+ *  login (at least 105 dedup observations and 13 revalidation refreshes by cao825 since 2026-11-01), so authorship
+ *  alone cannot tell the fleet from the operator; these bodies are never an answer, whoever posted them. */
+const FLEET_AUTHORED_TEXT: readonly RegExp[] = [
+  /^Another escalation observed the same condition \(/,
+  /^Still open as of \S+ \(issue-revalidation garden, /,
+  /_Opened automatically by Remudero \(MASTER-PLAN §4 escalation taxonomy\)/,
+];
+
+/** Whether a comment body is the fleet's own writing ({@link FLEET_AUTHORED_TEXT}). Exported for a direct unit test. */
+export function isFleetAuthoredText(body: string): boolean {
+  const text = body.trimStart();
+  return FLEET_AUTHORED_TEXT.some((re) => re.test(text));
 }
 
 /** OWNER-ONLY for a reaction — a login match against `ownerLogin` (see this module's header for
@@ -624,9 +659,11 @@ export async function readEscalationAnswers(
       const read = await (deps.history ?? escalationAnswerHistory())(dirname(deps.ledgerPath));
       historyReadable = read.ok;
       stage = "refusal_history_fold";
-      if (historyReadable) history.push(...read.rows);
+      // W1-T13254: one push per row, never a spread call, which overflows past ~130,000 rows. A copy, because
+      // raiseRefusalAlarms sorts the history in place and must not reorder the reader's cached array.
+      if (historyReadable) for (const row of read.rows) history.push(row);
       for (const row of history) {
-        if (row.step === "escalation_answer.ignored" && row.reason === "bot" && typeof row.origin === "string") rememberBotIgnored(botIgnored, row.origin);
+        if (row.step === "escalation_answer.ignored" && (row.reason === "bot" || row.reason === "fleet-authored") && typeof row.origin === "string") rememberBotIgnored(botIgnored, row.origin);
       }
       if (!historyReadable) {
         unreadable++;
@@ -640,7 +677,7 @@ export async function readEscalationAnswers(
     /** Land one ACCEPTED answer (a comment or a reaction) in the shared store — design (ii)'s "one
      *  sink, whichever channel answered", now three channels deep. */
     const landAnswer = async (taskId: string, origin: string, answer: string, authorLogin: string, subject?: FeedbackAdmissionSubject,
-      replyFields: { bare_option?: boolean } = {}) => {
+      replyFields: { bare_option?: boolean } = {}, authority?: "repository-admin") => {
       stage = "answer_landing";
       const observation = gateway.admission === undefined || subject === undefined ? undefined
         : await observeFeedbackSource(gateway.admission, subject, "question-answer", (step, fields) =>
@@ -659,7 +696,7 @@ export async function readEscalationAnswers(
         answer,
         origin,
         author_login: authorLogin,
-        authority: gateway.operatorLogins === undefined ? "repository-owner" : "configured-operator",
+        authority: authority ?? (gateway.operatorLogins === undefined ? "repository-owner" : "configured-operator"),
         flows_to: "plan/questions.ndjson",
         recorded_to_question_store: recordedToQuestionStore,
         ...replyFields,
@@ -682,7 +719,24 @@ export async function readEscalationAnswers(
       const acceptedAnswers: AcceptedAnswer[] = [];
       for (const comment of comments) {
         const origin = `issue#${issue.number}:comment:${comment.id}`;
-        const refusal = operatorRefusal(comment, gateway.operatorLogins, comment.authorAssociation === "OWNER");
+        let refusal: string | undefined = operatorRefusal(comment, gateway.operatorLogins, comment.authorAssociation === "OWNER");
+        if (refusal !== "bot" && isFleetAuthoredText(comment.body)) refusal = "fleet-authored";
+        let authority: "repository-admin" | undefined;
+        // Only an organization MEMBER or a COLLABORATOR can hold admin; a public commenter costs no permission read.
+        if ((refusal === "not-owner" || refusal === "not-configured-operator") && gateway.isRepoAdmin &&
+            (comment.authorAssociation === "MEMBER" || comment.authorAssociation === "COLLABORATOR")) {
+          // W1-T13223: a repository admin is the operator, whatever GitHub's association or the configured list says.
+          let admin: boolean;
+          try {
+            admin = await gateway.isRepoAdmin(comment.authorLogin);
+          } catch {
+            // deliberate: an unreadable permission is neither an acceptance nor a refusal, so the
+            // comment is counted unreadable, left unledgered, and read again next pass.
+            unreadable++;
+            continue;
+          }
+          if (admin) { refusal = undefined; authority = "repository-admin"; }
+        }
         const accepted = (): void => {
           const text = comment.body.trim();
           if (text) acceptedAnswers.push({ origin, text, namesOption: optionLabelNamed(text, issue.body ?? "") !== undefined });
@@ -693,7 +747,7 @@ export async function readEscalationAnswers(
         }
         if (refusal !== undefined) {
           ignored++;
-          if (refusal === "bot") {
+          if (refusal === "bot" || refusal === "fleet-authored") {
             if (botIgnored.has(origin)) continue; // W1-T10335: already ledgered; still counted in `ignored`
             rememberBotIgnored(botIgnored, origin);
           }
@@ -714,7 +768,7 @@ export async function readEscalationAnswers(
         const answer = answerTextFor(comment.body, issue.body ?? "");
         if (!answer) continue;
         await landAnswer(taskId, origin, answer, comment.authorLogin, comment.sourceSubject,
-          { bare_option: replyIsBareOption(comment.body, issue.body ?? "") });
+          { bare_option: replyIsBareOption(comment.body, issue.body ?? "") }, authority);
         stage = "answer_parse";
         accepted();
         try {

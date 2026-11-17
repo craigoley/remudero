@@ -1,0 +1,58 @@
+- id: W1-T13289
+  title: "The mount-plan drift test pins the scratch-checkouts switch: its fixture env sets RMD_SCRATCH_CHECKOUTS off, so the file no longer fails 3 of 6 on a host that has /etc/remudero/scratch-checkouts.on"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: low # a test-only change: one fixture variable and one subtest; no shipped code changes
+  origin: "operator-session#loop-lag-2026-11-17"
+  plan_refs:
+    - W1-T12753
+  files:
+    - test/a-container-is-recreated-when-its-mount-plan-drifts.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The fixture env in test/a-container-is-recreated-when-its-mount-plan-drifts.test.ts sets RMD_SCRATCH_CHECKOUTS to off, as its sibling tests do"
+      proof: "grep: W1-T13289 criterion 1 in test/a-container-is-recreated-when-its-mount-plan-drifts.test.ts"
+    - claim: "invariant:drift-test-ignores-host-switch — with RMD_SCRATCH_CHECKOUTS_SWITCH pointing at an existing file in the fixture root, the shipped reader still finds exactly the bind and variable a container launched before the plan lacks (2 entries, no hot-checkout bind), and the file's other subtests still pass: the result does not depend on whether the host has /etc/remudero/scratch-checkouts.on"
+      kind: guard
+      proof: "grep: W1-T13289 criterion 2 in test/a-container-is-recreated-when-its-mount-plan-drifts.test.ts"
+  rationale: |
+    WHY: the drift test reads the host's real scratch-checkouts switch. On a host with
+    /etc/remudero/scratch-checkouts.on (the Azure fleet host has it, since 2026-10-16) the plan adds the
+    hot-checkout bind and 3 of the 6 subtests fail. CI is green only because the runners lack the file, so a
+    hand preflight on the fleet host goes red on a test the change did not touch.
+    MEASURED, 2026-11-17 on the Azure host, origin/main 62cb99620c, with
+    node --test --import tsx --import ./test/setup/tmp-hygiene.ts and an empty GIT_CONFIG_GLOBAL: tests 6,
+    pass 3, fail 3. Failing: "the shipped reader finds the bind and variable a container launched before the
+    plan lacks" (deepEqual), "mount and env differences the scratch plan does not own are not drift"
+    (deepEqual), and "an unreadable or disabled scratch plan never recycles a container to add or remove binds"
+    (3 !== 2).
+    READ at origin/main 62cb99620c:
+    - test/a-container-is-recreated-when-its-mount-plan-drifts.test.ts:79-85: the fixture env is PATH,
+      NODE_V8_COVERAGE, RMD_SCRATCH, RMD_SCRATCH_ROOT and RMD_SCRATCH_MOUNTS_FILE. It replaces the process env
+      (:148 runs bash with { ...f.env, ...env }), so NODE_TEST_CONTEXT and RMD_SCRATCH_CHECKOUTS are absent.
+    - deploy/scratch-mounts.sh:110 scratch_checkouts_enabled: RMD_SCRATCH_CHECKOUTS defaults to auto; with no
+      NODE_TEST_CONTEXT it does not return early at :115 and tests the real /etc/remudero/scratch-checkouts.on
+      at :116. Then scratch_code_dir (:149) plans the hot-checkout bind.
+    - The subtests at :243, :286 and :303 count the planned binds; :310 asserts 2.
+    - The sibling tests pin the switch: test/recycle-container.test.ts:359, test/a-recycle-finds-a-holders-worktree-where-the-container-mounts-it.test.ts:110
+      and test/one-gateway-serves-every-instance.test.ts:752 set RMD_SCRATCH_CHECKOUTS: "off".
+    NOT COVERED: swept origin/main plan/tasks.d for this test file and scratch-checkouts: no other filing.
+  design: |
+    INVARIANT drift-test-ignores-host-switch: the drift test's result is the same with and without a scratch-checkouts switch file on the host.
+    1. Add RMD_SCRATCH_CHECKOUTS: "off" to the fixture env at :79, with a W1-T13289 criterion 1 comment.
+    2. Add one subtest (W1-T13289 criterion 2) that writes an empty file in the fixture root, sets
+       RMD_SCRATCH_CHECKOUTS_SWITCH to it, and asserts the shipped reader returns the same 2 drift entries as
+       the subtest at :243. This proves the pin on a runner that has no /etc/remudero/scratch-checkouts.on.
+    3. No change to deploy/scratch-mounts.sh or to any other test.
+  falsifier: |
+    Remove RMD_SCRATCH_CHECKOUTS: "off" from the fixture env: with the switch file the criterion 2 subtest gets
+    3 entries, not 2, on every runner, and on the Azure host the three subtests named above fail again.
+  note: |
+    Id reserved for run-unfiled-1794875543000 with ~/rmd-work/bin/reserve-id.sh.
+    Proof that counts on the host: the file passes 7 of 7 on the Azure fleet host, where the switch file exists.

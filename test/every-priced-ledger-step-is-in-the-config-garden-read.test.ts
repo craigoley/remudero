@@ -62,6 +62,7 @@ const EXEMPT: Readonly<Record<string, string>> = {
   // W1-T10269: a reviewer-health shadow's would-be terminal, under the review's review-PR run id and renamed shadow.*.
   "review.shadow_verdict": A_LANE_RUN_ID,
   "review.status_restored": A_LANE_RUN_ID, // W1-T11729: written under the review lane run_id, after the status post succeeded
+  "review.lane_aborted": A_LANE_RUN_ID, // W1-T13151: written under the review lane's own run_id when its signal aborted
   "main-repair.ratchet_pr_opened": A_LANE_RUN_ID,
   "main-repair.ratchet_pr_superseded": A_LANE_RUN_ID,
   "main-repair.ratchet_standing": A_LANE_RUN_ID,
@@ -92,6 +93,7 @@ const EXEMPT: Readonly<Record<string, string>> = {
   "sweep.review_admitted": A_LANE_RUN_ID,
   "sweep.review_eligible": A_LANE_RUN_ID,
   "sweep.review_requeued": A_LANE_RUN_ID, // W1-T11847: the reviewer-code requeue names pr_url, under the sweep pass's run_id
+  "sweep.review_setup_refused.escalated": A_LANE_RUN_ID, // W1-T13193: the held setup refusal's one escalation, under the sweep pass's run_id
   "sweep.review_rerun_contradiction": A_LANE_RUN_ID, // W1-T12994: a review the disposition asked for and its dedup refused, under the sweep pass's run_id
   "sweep.review_reuse_unreadable": A_LANE_RUN_ID, // the hydration receipt's own sweep-review-reuse- run id has no run.start
   "sweep.reviewer_freshness_probe": A_LANE_RUN_ID, // W1-T5771: the freshness re-probe, under SWEEP-/DAEMON- run ids

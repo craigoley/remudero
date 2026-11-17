@@ -1,0 +1,46 @@
+- id: W1-T13277
+  title: "While serve restarts or boots, the supervisor answers every request with 503, Retry-After and a restarting state, so the Console can say \"Serve is restarting, back shortly\" from a real signal instead of \"unavailable\""
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # what the supervisor answers in the gap between generations; ready generations answer exactly as before
+  band_meaning: span
+  origin: "operator-session#serve-oom-2026-11-16"
+  plan_refs:
+    - W1-T13276
+  files:
+    - src/lib/serve-supervisor.ts
+    - test/a-restarting-serve-answers-503-with-its-state.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "When no generation is ready (container boot before the first /v1/ready, a generation restart, or a wedge restart from W1-T13276), a request to port 4317 gets 503 with Retry-After and a JSON body {state: \"restarting\" | \"starting\", since, reason, expectedReadyMs}, within 100 ms"
+      proof: "grep: W1-T13277 criterion 1 in test/a-restarting-serve-answers-503-with-its-state.test.ts"
+    - claim: "Once a generation is ready, requests reach it unchanged, and the restarting answer stops; the state, since and reason come from the supervisor's own transition, not from a timer guess"
+      proof: "grep: W1-T13277 criterion 2 in test/a-restarting-serve-answers-503-with-its-state.test.ts"
+    - claim: "invariant:writes-are-never-swallowed — a write (POST) during the restarting state gets the same 503 and is not queued or replayed, so the Console's retry is the only path"
+      kind: guard
+      proof: "grep: W1-T13277 criterion 3 in test/a-restarting-serve-answers-503-with-its-state.test.ts"
+  rationale: |
+    WHY: Craig ruled on 2026-11-16 that serve restarts are acceptable for now, but the Console must say so clearly
+    instead of showing "unavailable". Today the gap between generations (and a container restart) shows as a connection
+    failure or a 5 s header timeout, which the Console cannot tell apart from a real outage. The supervisor knows exactly
+    when it is between generations (src/lib/serve-supervisor.ts: handoff, standby readiness, restart, legacy exit).
+    The Console change (show "Serve is restarting, back shortly" on this 503 body, and keep its last snapshot) belongs to
+    craigoley/remudero-console and is filed there separately.
+  design: |
+    INVARIANT writes-are-never-swallowed: no request is held or replayed by the supervisor.
+    1. The supervisor process owns the restarting answer: while no generation is ready, it answers on port 4317 itself
+       (or, where the generation owns the socket, the generation answers 503 until its own /v1/ready is true).
+    2. Body: {state, since (ISO), reason (boot | handoff | restart | wedge), expectedReadyMs (the last measured boot)},
+       header Retry-After in seconds.
+    3. Ready generations are unaffected.
+  falsifier: |
+    Leave the gap unanswered: criterion 1 fails (connection refused or timeout). Keep answering 503 after ready:
+    criterion 2 fails. Queue a POST: criterion 3 fails.
+  note: |
+    Id reserved for run-unfiled-1794874389000 with ~/rmd-work/bin/reserve-id.sh.

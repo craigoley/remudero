@@ -20,6 +20,9 @@ type Job = {
 const doc = parseYaml(CI_YML) as { jobs: Record<string, Job> };
 const CI_SHARD_COUNT = doc.jobs.ci?.strategy?.matrix?.shard?.length ?? 0;
 assert.ok(CI_SHARD_COUNT > 0, "ci.yml must declare at least one shard");
+// W1-T13270: the coverage lane has its own count, apart from ci-shard's.
+const COVERAGE_SHARD_COUNT = doc.jobs["coverage-ratchet"]?.strategy?.matrix?.shard?.length ?? 0;
+assert.ok(COVERAGE_SHARD_COUNT > 0, "ci.yml must declare at least one coverage shard");
 
 function step(jobId: string, name: string): Step {
   const found = doc.jobs[jobId]?.steps?.find((s) => s.name === name || s.name?.startsWith(`${name} (`));
@@ -155,7 +158,7 @@ test("W1-T3207: the instrumented coverage run selects every duration-balanced sh
   assert.match(coverage, /--experimental-test-coverage/);
   assert.match(
     coverage,
-    new RegExp(`node scripts\\/test-tier-manifest\\.mjs --select-all --shard 1/${CI_SHARD_COUNT} --base HEAD\\^1`),
+    new RegExp(`node scripts\\/test-tier-manifest\\.mjs --select-all --shard 1/${COVERAGE_SHARD_COUNT} --base HEAD\\^1`),
     "each matrix child must select its duration-balanced share of the complete manifest",
   );
   assert.match(coverage, /"\$\{COVERAGE_TEST_FILES\[@\]\}"/, "the coverage runner must consume the selector's exact file list");
@@ -216,7 +219,7 @@ test("W1-T2428: SOURCE reaches both coverage setup commands rather than silently
   assert.notEqual(coverage.status, 0, coverage.stderr + coverage.stdout);
   assert.match(
     coverage.calls,
-    new RegExp(`scripts\\/test-tier-manifest\\.mjs --select-all --shard 1/${CI_SHARD_COUNT} --base HEAD\\^1`),
+    new RegExp(`scripts\\/test-tier-manifest\\.mjs --select-all --shard 1/${COVERAGE_SHARD_COUNT} --base HEAD\\^1`),
     "a SOURCE diff must select its complete duration-balanced coverage shard before running it",
   );
   assert.match(

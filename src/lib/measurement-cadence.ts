@@ -17,6 +17,8 @@ import {
   classifyVerdictDrift,
   escalateVerdictCalibrationDrift,
   verdictCalibrationDriftLedgerLines,
+  verdictOutcomeRows,
+  recordedVerdictOutcomes,
   DEFAULT_DRIFT_BANDS,
   type DriftBands,
 } from "./verdict-calibration.js";
@@ -1803,7 +1805,14 @@ export interface MeasurementCadenceReportOpts {
   knowledge?: Omit<KnowledgeMeasurementOpts, "stateDir" | "now" | "checkoutDir"> & {
     writeLedgerLine: (line: Record<string, unknown>) => void;
   };
+  /** W1-T12425: the writer of the `verdict_calibration.outcome` rows, one per measured head and
+   *  kind, built from the same git read as the verdict calibration report. Not gated on
+   *  `escalate`; omitted writes none. */
+  outcomes?: { writeLedgerLine: (line: Record<string, unknown>) => void };
 }
+
+/** The recorded outcome rows' union pattern (W1-T12425). */
+const VERDICT_OUTCOME_UNION_PATTERN = /"step":"verdict_calibration\.outcome"/;
 
 function finiteMetric(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
@@ -2409,6 +2418,17 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
       for (const line of verdictCalibrationDriftLedgerLines(driftClassification, driftWindow, vReport.minPopulationFloor)) {
         opts.writeLedgerLine({ run_id: "MEASUREMENT-CADENCE", ...line });
       }
+    }
+  }
+
+  // ── W1-T12425: one outcome row per measured head, from the same rows and git dump ─────────────
+  // A failed git read writes nothing, and so does an unreadable union: without the recorded
+  // pairs, a second row for the same head and kind could not be refused.
+  if (opts.outcomes && gitReadError === undefined) {
+    const recordedUnion = ledgerUnion(opts.stateDir, VERDICT_OUTCOME_UNION_PATTERN);
+    if (recordedUnion.ok) {
+      const recorded = recordedVerdictOutcomes(recordedUnion.matches);
+      for (const line of verdictOutcomeRows(rows, gitDump, { now: nowDate, recorded })) opts.outcomes.writeLedgerLine({ ...line });
     }
   }
 

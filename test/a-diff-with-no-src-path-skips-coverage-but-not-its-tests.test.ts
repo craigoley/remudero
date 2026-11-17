@@ -34,6 +34,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 
+import { CI_COVERAGE_SHARD_COUNT } from "#src/lib/ci-parity.js";
 import { selectorShadowReport } from "#src/lib/selector-shadow-gardener.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 // @ts-expect-error -- plain .mjs script, no type declarations
@@ -141,7 +142,7 @@ function workspace(files: string[]) {
   return { dir, run };
 }
 
-/** coverage-shard N/8 on a pull request: the real classify step, then the real "Test with coverage". */
+/** coverage-shard N/CI_COVERAGE_SHARD_COUNT on a pull request: the real classify step, then the real "Test with coverage". */
 function coverageShard(files: string[], shard: number) {
   const ws = workspace(files);
   const classify = ws.run(step("coverage-ratchet", (s) => s.id === "classify").run!);
@@ -242,20 +243,20 @@ test("W1-T5699: a diff with any src/ path or package-lock.json stays SOURCE, and
 
 test("W1-T5699: a NO_SRC skip log counts as a skipped shadow run and the required coverage aggregator accepts it", () => {
   const lines = [];
-  for (let shard = 1; shard <= 8; shard += 1) {
+  for (let shard = 1; shard <= CI_COVERAGE_SHARD_COUNT; shard += 1) {
     const { tested } = coverageShard(DEPLOY_AND_LEARNINGS, shard);
     const skip = tested.stdout.split("\n").find((l) => l.includes("skipping Test with coverage"));
     assert.ok(skip, tested.all);
-    lines.push(`coverage-shard (${shard}/8)\t${skip}`);
+    lines.push(`coverage-shard (${shard}/${CI_COVERAGE_SHARD_COUNT})\t${skip}`);
   }
   const report = selectorShadowReport([{ id: 5699, headSha: "no-src", log: lines.join("\n") }], 100);
-  assert.deepEqual([report.runsSkipped, report.runsIncomplete], [1, 0], "an eight-shard NO_SRC skip is not missing source evidence");
-  const partial = selectorShadowReport([{ id: 5700, headSha: "partial", log: lines.slice(0, 7).join("\n") }], 100);
-  assert.deepEqual([partial.runsSkipped, partial.runsIncomplete], [0, 1], "seven skips cannot hide a missing coverage shard");
+  assert.deepEqual([report.runsSkipped, report.runsIncomplete], [1, 0], "a full-width NO_SRC skip is not missing source evidence");
+  const partial = selectorShadowReport([{ id: 5700, headSha: "partial", log: lines.slice(0, -1).join("\n") }], 100);
+  assert.deepEqual([partial.runsSkipped, partial.runsIncomplete], [0, 1], "one shard short of the width cannot hide a missing coverage shard");
 
   for (const event of ["pull_request", "merge_group"]) {
     const ws = workspace(DEPLOY_AND_LEARNINGS);
-    for (let shard = 1; shard <= 8; shard += 1) {
+    for (let shard = 1; shard <= CI_COVERAGE_SHARD_COUNT; shard += 1) {
       mkdirSync(join(ws.dir, "coverage-shards", `coverage-shard-${shard}`), { recursive: true });
       writeFileSync(join(ws.dir, "coverage-shards", `coverage-shard-${shard}`, "class"), `${event}:NO_SRC\n`);
     }
