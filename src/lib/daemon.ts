@@ -1663,8 +1663,6 @@ export interface DaemonDeps {
   /** W1-T4429: the hold behind `checkPause` (owner/expiry/liveness); absent, no governor runs. It calls
    *  `clearPauseHold` once at `lapsed` and `onPauseNeedsHuman` once at `needs_human`. */
   checkPauseHold?: () => PauseHoldGovernorInput | undefined;
-  /** W1-T12939: the units the daemon holds no registry for (garden children, judge calls), read once per paused pass so a
-   *  held instance counts them before it says it has drained. A throw is a census that could not be read, never an empty one. */
   pauseInFlight?: () => ReadonlyArray<PauseInFlightUnit>;
   clearPauseHold?: () => void | Promise<void>;
   onPauseNeedsHuman?: (info: { holdId: string; owner: PauseHoldOwner; expiresAt: string | null }) => void | Promise<void>;
@@ -2833,10 +2831,8 @@ export interface PauseHoldOwner {
   reason?: string;
 }
 
-/** W1-T12939: one unit a held instance still owns. `count` is set only for a registry that names a kind but not its members. */
 export interface PauseInFlightUnit { kind: string; name: string; age_ms?: number; count?: number }
 
-/** The most units one `daemon.pause` row names; `in_flight_count` is always the full count. */
 const PAUSE_IN_FLIGHT_UNITS_CAP = 50;
 
 export interface PauseHoldGovernorInput extends PauseTierInput {
@@ -5207,7 +5203,6 @@ export async function runDaemon(
   const hasChildTask = (id: string): boolean => childTaskIds().includes(id);
   // W1-T10000: a run waiting for its child's admission is out-of-process work too; the restart abandons it.
   const pendingChildren = new Map<string, RunChildPending & { sinceMs: number }>();
-  // W1-T12939: what a held instance still owns, read from the registries the loop already holds; no process probe.
   const pauseInFlightCensus = (): { units: PauseInFlightUnit[]; count: number; oldestAgeMs: number | null; unobserved: string[] } => {
     const nowMs = daemonClock.now();
     const units: PauseInFlightUnit[] = [];
@@ -5231,7 +5226,6 @@ export async function runDaemon(
       try {
         units.push(...deps.pauseInFlight());
       } catch (error) {
-        // An unreadable census is never an empty one: this unit keeps the hold from reading as drained.
         units.push({ kind: "census-unreadable", name: String((error as Error)?.message ?? error) });
       }
     }
@@ -5240,8 +5234,6 @@ export async function runDaemon(
       oldestAgeMs: ages.length === 0 ? null : Math.max(...ages),
       unobserved: deps.pauseInFlight ? [] : ["garden-child", "judge-call"] };
   };
-  // One hold is one episode, keyed by the hold's own identity; the first empty census writes `daemon.drained`, a unit
-  // that appears afterwards `daemon.drain_reopened`, and an unpaused pass ends the episode (`pauseEpisode = undefined`).
   let pauseEpisode: { id: string; key: string; drained: boolean } | undefined;
   let pauseEpisodeSeq = 0;
   const logPause = (detail: string, row: Record<string, unknown>, hold: PauseHoldGovernorInput | undefined): void => {
