@@ -14,9 +14,10 @@
     - W1-T8864
     - W1-T4659
   files:
+    - src/lib/escalate.ts
     - src/lib/issue-revalidation-garden.ts
     - test/gardeners/the-revalidation-garden-closes-a-same-key-duplicate-escalation.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "When two or more open fleet-opened escalations share the same **Task:** line and class family, every one except the issue the fleet most recently re-observed (or the newest, when none was re-observed) is closed as not planned with a comment naming the kept issue"
@@ -38,3 +39,4 @@
     Skip grouping and criterion 1 must fail. Drop an exclusion and criterion 2 must fail. Exempt supersede closes from the cap and criterion 3 must fail.
   note: |
     Reserved with rmd next-task-id from the operator checkout (refs/rmd-id/W1-T13221). rmd test-place computed test/gardeners/.
+    Scope amended 2026-11-17: criterion 1 closes a duplicate as not planned, and the one audited close path, closeWithComment in src/lib/escalate.ts, takes no close reason today. The build adds an optional reason argument there (gh issue close --reason) and changes nothing else in that file.

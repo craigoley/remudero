@@ -21,7 +21,7 @@
     - test/operator-agent-gets-read-the-read-model.test.ts
     - test/helpers/operator-agent-corpus.ts
     - test/ci/suites/a-hung-coverage-test-fails-by-name.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The coverage shard's test command carries a per-test timeout from the same duration policy as the fast tier, so a test that hangs fails by its name inside the 49-minute job ceiling"

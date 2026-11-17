@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Author-time feedback, not a substitute for the required hosted full-suite/coverage verdict.
 import { spawnSync } from 'node:child_process';
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { affectedSelectionOrFull, buildAffectedSuitesGraph, changedSymbols, fullRunTrigger, isPlanOnlyDiff,
@@ -369,6 +369,10 @@ export function authorVerdictRow(receipt, { exitCode = null, headRef, refusalCla
     head_ref: head, head_sha: receipt.headSha ?? null, first_step: firstStep,
     ...(classed ? { refusal_class: derivedClass } : {}),
     ...(Array.isArray(capacityReasons) && capacityReasons.length > 0 ? { capacity_reasons: capacityReasons.map(String) } : {}),
+    ...(receipt.failureAttribution?.counts ? { failing_at_head: receipt.failureAttribution.counts.failingAtHead,
+      failing_also_at_base: receipt.failureAttribution.counts.alsoFailingAtBase,
+      failing_only_at_head: receipt.failureAttribution.counts.failingOnlyAtHead,
+      failing_unattributed: receipt.failureAttribution.counts.unattributed } : {}),
     wall_ms: receipt.durationMs ?? null,
     admission_wait_ms: waits.reduce((sum, ms) => sum + (Number.isFinite(ms) && ms > 0 ? ms : 0), 0),
     selection: receipt.selectedArm ?? receipt.selection ?? null,
@@ -621,6 +625,140 @@ export function readAuthorProfile(root, path) {
   catch (error) { return { unreadable: String(error.code ?? error.message) }; }
 }
 
+/**
+ * W1-T13215 — the failing tests a TAP report names, each with the file its `location:` diagnostic points at (never the
+ * lines around it: concurrent suites interleave). A leaf failure is kept; a suite's own "subtests failed" row is not,
+ * its leaves are. A file that failed as a whole is one entry titled `(whole file)`. `file` is null when the location
+ * is missing or outside `root`.
+ */
+export function failingTestsFromTap(output, root) {
+  const lines = String(output ?? '').split('\n'), tests = [], stack = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    const header = /^( *)# Subtest: (.*)$/.exec(lines[i]);
+    if (header) { stack.splice(header[1].length / 4); stack.push(header[2]); continue; }
+    const failed = /^( *)not ok [0-9]+ - (.*)$/.exec(lines[i]);
+    if (!failed) continue;
+    const block = {};
+    for (let j = i + 1; j < lines.length && lines[j].startsWith(`${failed[1]}  `) && !/^\s*\.\.\.$/.test(lines[j]); j += 1) {
+      const field = /^\s+(type|location|failureType): '?(.*?)'?$/.exec(lines[j]);
+      if (field) block[field[1]] = field[2];
+    }
+    if (block.type === 'suite' && block.failureType === 'subtestsFailed') continue;
+    const located = String(block.location ?? '').replace(/^file:\/\//, '').replace(/:[0-9]+:[0-9]+$/, '');
+    const path = located && isAbsolute(located) ? relative(root, located).split(sep).join('/') : '';
+    const file = path && path !== '..' && !path.startsWith('../') && !isAbsolute(path) ? path : null;
+    const fileLevel = file !== null && failed[2].replace(/\\/g, '/').endsWith(file);
+    tests.push({ file, title: fileLevel ? '(whole file)' : [...stack.slice(0, failed[1].length / 4), failed[2]].join(' > '), fileLevel });
+  }
+  return tests;
+}
+
+/** The time `files` took at the head: their own durations when all are recorded, else the whole stage's. */
+export function headFilesMs(durations, files, stageMs) {
+  const own = files.map((file) => durations?.files?.[file]);
+  return own.length > 0 && own.every((ms) => Number.isFinite(ms) && ms >= 0) ? own.reduce((sum, ms) => sum + ms, 0) : stageMs;
+}
+
+const ATTRIBUTION_LABELS = Object.freeze({ 'also-red': 'also red at the base on this host', 'only-head': 'red only at the head' });
+const ATTRIBUTION_PRINT_MAX = 200;
+
+/**
+ * W1-T13215 — say which of the head's failing tests the change caused, by running only their files again at the merge
+ * base in a scratch worktree that is removed whatever happens. INVARIANT a-failure-the-change-caused-is-never-pre-existing:
+ * `also-red` needs a COMPLETED base run of the same file that reported that title failing; a test that passes at the
+ * base, and one in a file the base does not hold, are `only-head`; every other doubt (no merge base, a different
+ * lockfile, no worktree, a run cut short, no summary, a failure the output does not name) is `unattributed` with its
+ * reason. Nothing here reads or sets the verdict. `git(args)` and `runBase({ file, args, cwd, boundMs })` are the seams.
+ */
+export function attributeFailures({ root, baseSha, headSha, failing, unnamed = 0, headMs, ceilingMs = AUTHOR_STEP_RUNTIME_MS,
+  git, runBase, runnerArgs, tmp = tmpdir, nodeModules = join(root, 'node_modules') }) {
+  const tests = failing.map((test) => ({ file: test.file, title: test.title }));
+  const open = () => tests.filter((test) => test.state === undefined);
+  const mark = (list, state, reason) => { for (const test of list) Object.assign(test, { state, reason }); };
+  const settle = (cleanup = { removed: true }, base = {}) => {
+    const count = (state) => tests.filter((test) => test.state === state).length + (state === 'unattributed' ? unnamed : 0);
+    return { tests, unnamed, base, cleanup, counts: { failingAtHead: tests.length + unnamed, alsoFailingAtBase: count('also-red'),
+      failingOnlyAtHead: count('only-head'), unattributed: count('unattributed') } };
+  };
+  const probe = (args) => { const result = git(args); return result?.error || result?.signal ? undefined : result; };
+  mark(open().filter((test) => test.file === null), 'unattributed', 'the failing test names no file in this checkout');
+  const mergeBase = open().length === 0 ? undefined : probe(['merge-base', baseSha, headSha]);
+  const mb = String(mergeBase?.stdout ?? '').trim();
+  if (open().length > 0 && (mergeBase?.status !== 0 || !mb)) {
+    mark(open(), 'unattributed', 'the merge base of the head and origin/main could not be read');
+    return settle();
+  }
+  for (const file of new Set(open().map((test) => test.file))) {
+    const held = probe(['cat-file', '-e', `${mb}:${file}`]);
+    if (held === undefined) mark(open().filter((test) => test.file === file), 'unattributed', 'the merge base could not be searched for this file');
+    else if (held.status !== 0) mark(open().filter((test) => test.file === file), 'only-head', 'the file is not in the merge base');
+  }
+  if (open().length === 0) return settle();
+  const lock = probe(['diff', '--quiet', mb, headSha, '--', 'package-lock.json']);
+  if (lock?.status !== 0) {
+    mark(open(), 'unattributed', lock?.status === 1 ? 'package-lock.json differs between the merge base and the head, so the head\'s dependencies are not the base\'s'
+      : 'the lockfile of the merge base and the head could not be compared');
+    return settle();
+  }
+  const files = [...new Set(open().map((test) => test.file))];
+  const boundMs = Math.ceil(Math.min(ceilingMs, Number.isFinite(headMs) && headMs > 0 ? headMs : ceilingMs));
+  let tmpRoot, dir, added = false, base = { mergeBase: mb, boundMs, files };
+  try {
+    tmpRoot = mkdtempSync(join(tmp(), 'rmd-author-base-'));
+    dir = join(tmpRoot, 'base');
+    const add = probe(['worktree', 'add', '--detach', dir, mb]);
+    added = add?.status === 0;
+    if (!added) mark(open(), 'unattributed', `the scratch worktree could not be created: ${String(add?.stderr ?? 'git did not run').trim().slice(0, 200)}`);
+    else {
+      symlinkSync(nodeModules, join(dir, 'node_modules'), 'dir');
+      const command = lowPriorityCommand(process.execPath, runnerArgs(files, dir));
+      const result = runBase({ file: command.file, args: command.args, cwd: dir, boundMs }) ?? {};
+      const summary = testSummary(`${result.stdout ?? ''}\n${result.stderr ?? ''}`);
+      if (result.error || result.signal || result.status === null || result.status === undefined || result.outputComplete === false) {
+        const cause = result.signal ?? result.error?.code ?? result.error?.message ?? 'no exit status';
+        mark(open(), 'unattributed', `the base run was cut short (${cause}) at its bound of ${boundMs}ms`);
+      } else if (summary === null) mark(open(), 'unattributed', 'the base run reported no test summary');
+      else {
+        const named = failingTestsFromTap(`${result.stdout ?? ''}\n${result.stderr ?? ''}`, dir);
+        base = { ...base, summary };
+        for (const test of open()) {
+          const here = named.filter((other) => other.file === test.file);
+          if (here.some((other) => other.title === test.title)) mark([test], 'also-red', 'reported failing in a completed base run of the same file');
+          else if (here.some((other) => other.fileLevel)) mark([test], 'unattributed', 'the file failed as a whole at the base');
+          else if (named.length < summary.fail) mark([test], 'unattributed', 'the base run failed tests its output does not name');
+          else mark([test], 'only-head', 'not failing in a completed base run of the same file');
+        }
+      }
+    }
+  } catch (error) {
+    mark(open(), 'unattributed', `the base run could not be set up: ${error?.message ?? error}`);
+  }
+  let cleanup = { removed: true };
+  if (added) {
+    const removal = probe(['worktree', 'remove', '--force', dir]);
+    if (removal?.status !== 0) cleanup = { removed: false, reason: String(removal?.stderr ?? 'git did not run').trim().slice(0, 200) };
+  }
+  if (tmpRoot) {
+    try { rmSync(tmpRoot, { recursive: true, force: true }); }
+    catch (error) { cleanup = { removed: false, reason: cleanup.reason ?? error.message }; }
+    if (cleanup.removed && existsSync(tmpRoot)) cleanup = { removed: false, reason: 'the scratch directory is still present' };
+  }
+  if (!cleanup.removed && added) probe(['worktree', 'prune']);
+  return settle({ ...cleanup, ...(tmpRoot ? { path: tmpRoot } : {}) }, base);
+}
+
+/** The lines an author run prints for an attribution: one per failing test, then the four counts. */
+export function attributionLines(result) {
+  const shown = result.tests.slice(0, ATTRIBUTION_PRINT_MAX).map((test) => `author attribution: ${test.file ?? '(no file)'} :: ${test.title}: ${
+    ATTRIBUTION_LABELS[test.state] ?? `unattributed: ${test.reason}`}`);
+  const { counts } = result;
+  return [...shown, ...(result.tests.length > shown.length ? [`author attribution: ${result.tests.length - shown.length} more failing test(s) are in the receipt`] : []),
+    ...(result.unnamed > 0 ? [`author attribution: ${result.unnamed} failing test(s) the output does not name: unattributed`] : []),
+    ...(result.cleanup.removed ? [] : [`author attribution: scratch worktree ${result.cleanup.path ?? ''} was NOT removed (${result.cleanup.reason}); remove it by hand`]),
+    `author attribution: failing at the head ${counts.failingAtHead}; also failing at the base ${counts.alsoFailingAtBase}; failing only at the head ${
+      counts.failingOnlyAtHead}; unattributed ${counts.unattributed}`];
+}
+
 export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
   select = (changed, range) => authorSelection(root, changed, range), host, admitHost = () => undefined,
   testSlot = {}, enqueueTestSlot: enqueueSuiteSlot = enqueueTestSlot, verdictLedger = {} } = {}) {
@@ -663,17 +801,17 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     { mode: 0o600, flag: 'wx', flush: true });
     renameSync(path + '.next', path);
   };
-  const runStep = (name, args, file = process.execPath, childEnvironment = {}, phaseMaxMs = AUTHOR_STEP_RUNTIME_MS, heartbeat = undefined) => {
+  const runStep = (name, args, file = process.execPath, childEnvironment = {}, phaseMaxMs = AUTHOR_STEP_RUNTIME_MS, heartbeat = undefined, cwd = root) => {
     const runtimeLimitMs = deadline === undefined ? phaseMaxMs :
       Math.min(phaseMaxMs, Math.max(1, deadline - Date.now() - AUTHOR_SHUTDOWN_RESERVE_MS));
     progress({ name, outputLimitBytes: AUTHOR_OUTPUT_LIMIT_BYTES, runtimeLimitMs });
     const logs = { stdoutPath: join(diagnosticsRoot, `${name}.stdout.log`),
       stderrPath: join(diagnosticsRoot, `${name}.stderr.log`) };
     // Injected spawn outcomes remain an explicit diagnostic seam; production owns live pipes.
-    if (spawn !== spawnSync) return run(file, args, { env: { ...authorEnvironment(process.env), ...childEnvironment } });
+    if (spawn !== spawnSync) return run(file, args, { cwd, env: { ...authorEnvironment(process.env), ...childEnvironment } });
     const resultPath = join(diagnosticsRoot, `${name}.native-result.json`);
     // W1-T9928: a slotted step's spooler beats the slot while this loop is blocked in spawnSync.
-    const result = captureStepSync(file, args, { cwd: root, env: { ...authorEnvironment(process.env), ...childEnvironment }, trackParent: true,
+    const result = captureStepSync(file, args, { cwd, env: { ...authorEnvironment(process.env), ...childEnvironment }, trackParent: true,
       ...logs, resultPath, runtimeMs: runtimeLimitMs, ...(heartbeat ? { heartbeat } : {}) });
     // A group that is not proven closed keeps its owner's slot: the finalizers below consult this list.
     if (!result.groupClosed) (receipt.unclosedGroups ??= []).push(name);
@@ -1121,6 +1259,28 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
               report(testsName, tests, testsOk, { judge: { complete: judge.verdict.complete, given: judge.verdict.given,
                 reported: judge.verdict.reported, unreported: judge.verdict.missing.slice(0, 20), lastStarted: judge.verdict.lastStarted,
                 exitSite: judge.verdict.exitSite } });
+              // W1-T13215: only a run that ended with failing tests is compared with the merge base; the verdict never reads it.
+              const headSummary = testSummary(`${tests.stdout ?? ''}\n${tests.stderr ?? ''}`);
+              if (headSummary?.fail > 0) {
+                try {
+                  const named = failingTestsFromTap(`${tests.stdout ?? ''}\n${tests.stderr ?? ''}`, root);
+                  let durations;
+                  try { durations = JSON.parse(readFileSync(join(diagnosticsRoot, 'durations.json'), 'utf8')); } catch (error) { durations = { unreadable: String(error.code ?? error.message) }; }
+                  const attribution = attributeFailures({ root, baseSha: receipt.baseSha, headSha: receipt.headSha, failing: named,
+                    unnamed: Math.max(0, headSummary.fail - named.length),
+                    headMs: headFilesMs(durations, [...new Set(named.map((test) => test.file))], tests.durationMs),
+                    git: (args) => run('git', args), runnerArgs: (files, dir) => authorTestRunnerArgs(['--test', '--test-reporter=tap',
+                      '--test-concurrency=1', '--import', 'tsx', ...(existsSync(join(dir, 'test/setup/tmp-hygiene.ts')) ? ['--import', './test/setup/tmp-hygiene.ts'] : []),
+                      ...files], files, manifest),
+                    runBase: ({ file, args, cwd, boundMs }) => runStep('affected-tests-base', args, file, {}, boundMs, slot.heartbeat, cwd) });
+                  receipt.failureAttribution = { counts: attribution.counts, base: attribution.base, cleanup: attribution.cleanup,
+                    tests: attribution.tests.map(({ file, title, state, reason }) => ({ file, title, state, reason })) };
+                  for (const line of attributionLines(attribution)) console.log(line);
+                } catch (error) {
+                  receipt.failureAttribution = { error: `the attribution could not be made: ${error?.message ?? error}` };
+                  console.log(`author attribution: NOT MADE (${receipt.failureAttribution.error}); the verdict is unaffected`);
+                }
+              }
               receipt.runtimeEvidence = { state: 'not-collected', reason: 'duration reporter unavailable in this root' };
               if (hasDurationReporter) {
                 if (!testsOk) receipt.runtimeEvidence = { state: 'incomplete', reason: 'affected-tests did not complete successfully' };

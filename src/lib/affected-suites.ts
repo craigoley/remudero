@@ -605,6 +605,21 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   if (input.files.has(precheckParity) && files.some((f) => precheckParityEdges.includes(f))) {
     pathReaders.push(precheckParity);
   }
+  // W1-T9588: coverage run 38655191772 (PR #11852) failed on this suite and the selector missed it.
+  const shippedDetector = suitePath("test/a-shipped-detector-exits-one-and-is-wired-to-nothing.test.ts");
+  const shippedDetectorEdges = [
+    "src/lib/ledger.ts",
+    "src/lib/operator-interventions.ts",
+    "src/lib/replay-harness.ts",
+    "src/lib/run-child.ts",
+    "src/run-child-main.ts",
+    "src/run-task.ts",
+    suitePath("test/a-build-run-executes-in-a-detached-child.test.ts"),
+    suitePath("test/run-child-shadow-a-probe-child-records-what-a-run-child-costs.test.ts"),
+  ];
+  if (input.files.has(shippedDetector) && files.some((f) => shippedDetectorEdges.includes(f))) {
+    pathReaders.push(shippedDetector);
+  }
   // W1-T6338: preserve the recorded dashboard/settings miss beyond the narrow arm's symbol reach.
   const viewSchemas = suitePath("test/every-view-body-matches-its-schema.test.ts");
   const viewSchemaEdges = ["src/lib/repo-dashboard-route.ts", suitePath("test/repo-settings-report-their-effective-values.test.ts")];

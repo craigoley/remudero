@@ -44,3 +44,11 @@
   note: |
     A recon that changes nothing. W1-T13269 makes a recurrence visible in the coverage gate as a setup-phase line
     naming the checkout step and its duration.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it declares .github/workflows/ci.yml, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
+    judged_at: "2026-11-17T06:59:54.215Z"
+    pin: "1fdcbed72baf7e3e3e00f992e01c5d7005c45a3f9de7d67d0786227dbc08588d"

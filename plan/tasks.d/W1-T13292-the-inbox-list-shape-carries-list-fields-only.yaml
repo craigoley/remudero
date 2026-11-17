@@ -1,5 +1,5 @@
 - id: W1-T13292
-  title: "The Inbox list reads (the /v1/views/inbox sections and /v1/inbox?section=) take shape=list and return each row's list fields only, so the Inbox loads without every proposal's full reasons and texts"
+  title: "GET /v1/inbox takes shape=list and returns each row's list fields only, so the Inbox loads without every proposal's full reasons and texts"
   repo: remudero
   depends_on: []
   priority: 1
@@ -14,14 +14,13 @@
     - W1-T13290
   files:
     - src/lib/panel-graph.ts
-    - src/lib/inbox-view.ts
     - test/console-api/the-inbox-list-shape-carries-list-fields-only.test.ts
   status: queued
   attempts: 0
   acceptance:
-    - claim: "With shape=list, GET /v1/views/inbox (each section the Console reads: needsYou, archived, snoozed) and GET /v1/inbox?section=<lane> answer the same sections, counts and snapshot keys as without it, and each row carries only the fields the Console's mailbox row renders: proposalId, from, summary, receivedAt, lastActivityAt, groupKey, lane or state, snapshotAttention, the option count, recommendation.action and its group, snoozedUntil and awaitingCoreRefresh (no reasons, plain, draftedTasks or resolution text)"
+    - claim: "With shape=list, GET /v1/inbox (whole, ?section=needsYou and ?section=<lane>) answers the same keys, counts, pages and snapshot keys as without it, and each row carries only the fields the Console's mailbox row renders: proposalId, from, summary, receivedAt, lastActivityAt, groupKey, lane or state, classification, snapshotAttention, archivedAt, snoozedUntil, awaitingCoreRefresh, the option count, and recommendation.action and its group (no reasons, plain, draftedTasks or resolution text)"
       proof: "grep: W1-T13292 criterion 1 in test/console-api/the-inbox-list-shape-carries-list-fields-only.test.ts"
-    - claim: "On a fixture of 200 proposals with long reasons, the list shape is at most one fifth of the default body's bytes"
+    - claim: "On a fixture of 200 proposals with long reasons, the list rows are at most one fifth of the default rows' bytes"
       proof: "grep: W1-T13292 criterion 2 in test/console-api/the-inbox-list-shape-carries-list-fields-only.test.ts"
     - claim: "invariant:default-shape-unchanged — both routes with no shape, or an unknown shape, answer byte for byte as before, and ETags and 304s keep working per shape"
       kind: guard
@@ -35,11 +34,14 @@
     The Console already sends If-None-Match. It adopts shape=list in craigoley/remudero-console.
   design: |
     INVARIANT default-shape-unchanged: no shape means today's body.
-    1. In the /v1/inbox route (panel-graph.ts) and the inbox view's section bodies (inbox-view.ts, served at
-       /v1/views/inbox), read `shape`. For "list", map each row to the list fields above; keep counts, snapshotKey,
-       classifiedAt and staleness. Cached entries key on the URL, so the shapes cache apart and each keeps its own ETag.
-       The field list follows the Console's InboxMailboxRow (remudero-console ThreadMailbox.tsx) at console main 1415bf9.
+    1. In the /v1/inbox route (panel-graph.ts) read `shape`. For "list", map each row to the list fields above; keep
+       counts, page, snapshotKey, classifiedAt and staleness. Serve's Console snapshot cache keys on the whole query,
+       so the shapes cache apart and each keeps its own ETag. The field list follows the Console's InboxMailboxRow
+       (remudero-console ThreadMailbox.tsx) at console main 1415bf9.
     2. Unknown shapes are ignored (default body).
+    SCOPE (2026-11-17): the /v1/views/inbox section pages stay as they are. They are already bounded to 60 KiB a page
+    and served from memory in 2 to 40 ms (measured on the host), and adding list pages to inboxViewBodies broke the
+    view's shadow population and cursor-chain checks in five suites. A cold Inbox open reads only the first page.
   falsifier: |
     Return the full item for shape=list: criteria 1 and 2 fail. Change the default body: criterion 3 fails.
   note: |

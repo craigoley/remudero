@@ -16,7 +16,7 @@
   files:
     - test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts
     - test/the-sync-spawn-walk-keeps-one-copy-of-its-text-helpers.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The synchronous-spawn census test declares no function codeOnly, no function regexLiteralEnd and no own censusWalk cache; it imports codeOnly and loopCensusFunctions from the shared walk helper in test/helpers"

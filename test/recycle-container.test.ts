@@ -558,6 +558,23 @@ function privateRecyclerFixture(extra: string[] = []) {
 }
 
 
+/**
+ * W1-T13232. The selected file's launch packet as the recycle script's own node reads it. Its file binding hashes
+ * the file's stat times, and a clock sweep moves this process's file clock (scripts/clock-shift.mjs) but never a
+ * child's, so an in-process read expects a binding no launch can carry. A child reads the host's file clock.
+ */
+function hostLaunchPacket(selected: string, instanceName = "fixture"): string {
+  const code = 'const m = await import("#src/lib/instance-registry-selection.js");'
+    + " process.stdout.write(await m.withInstanceRegistryRuntime(() => m.trustedInstanceRegistryLaunchPacket(),"
+    + " { envPath: process.argv[1], instanceName: process.argv[2] }));";
+  const r = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", code, selected, instanceName],
+    { cwd: REPO_ROOT, encoding: "utf8", env: { ...process.env, NODE_TEST_CONTEXT: undefined } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /^rmd-private-registry-v1\n/, "the host reader returns a launch packet");
+  return r.stdout;
+}
+
+
 test("selected shell shadow coexists with the active selection: the recycler's launch is unchanged and still observed", () => {
   const fixture = privateRecyclerFixture();
   const session = join(fixture.root, "session.json");
@@ -598,8 +615,7 @@ test("private registry selection reaches real host and daemon readers: recorded 
     assert.ok(launch.argv.includes("RMD_SELECTED_INSTANCE_REGISTRY=/home/node/.config/remudero/selected-registry.yaml"));
     assert.ok(launch.argv.includes("RMD_INSTANCE_REGISTRY=/home/node/.config/remudero/selected-registry.yaml"), "old-only callers preserve the in-container alias");
     assert.ok(launch.argv.some(a => /^RMD_INSTANCE_REGISTRY_DIGEST=[a-f0-9]{64}$/.test(a)));
-    const packet = await withInstanceRegistryRuntime(() => trustedInstanceRegistryLaunchPacket(),
-      { envPath: fixture.selected, instanceName: "fixture" });
+    const packet = hostLaunchPacket(fixture.selected);
     assert.ok(launch.argv.includes(`RMD_INSTANCE_REGISTRY_FILE_BINDING=${packet.split("\n")[4]}`),
       "the daemon adoption receives the original physical identity, not just equal bytes");
     assert.equal(launch.argv.includes(`type=bind,src=${fixture.root},dst=/home/node/.config/remudero/selected-registry.yaml,readonly`), false);
@@ -893,9 +909,55 @@ test("private registry selection defaults and falsifiers forbid live effects: re
     assert.ok(launch.argv.includes(`RMD_INSTANCE_REGISTRY=${legacyCatalog}`));
     assert.equal(launch.argv.includes("RMD_INSTANCE_REGISTRY=/home/node/.config/remudero/selected-registry.yaml"), false);
     assert.ok(launch.argv.includes("sha256:PULLEDID"), "the launched image must be the immutable qualified image, not a moving tag");
-    const packet = await withInstanceRegistryRuntime(() => trustedInstanceRegistryLaunchPacket(),
-      { envPath: fixture.selected, instanceName: "fixture" });
+    const packet = hostLaunchPacket(fixture.selected);
     assert.ok(launch.argv.includes(`RMD_INSTANCE_REGISTRY_FILE_BINDING=${packet.split("\n")[4]}`));
+  } finally { fixture.cleanup(); }
+});
+
+const SHIFTED_REGISTRY_TITLES = [
+  "private registry selection reaches real host and daemon readers: recorded readonly mount and image reader",
+  "private registry selection defaults and falsifiers forbid live effects: real serve assembly",
+];
+
+test("W1-T13232 criterion 1: the private registry selection tests pass with the clock a week and a year ahead", { timeout: 300000 }, () => {
+  const escape = (title: string) => title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pattern = `^(?:${SHIFTED_REGISTRY_TITLES.map(escape).join("|")})$`;
+  for (const days of [7, 400]) {
+    // A private TMPDIR: a shifted run's temp sweep would read every rmd-* directory in the shared one as stale.
+    const scratch = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}registry-shifted-`));
+    try {
+      const result = spawnSync(process.execPath, ["--test", "--test-reporter=tap", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts",
+        "--import", "./scripts/clock-shift.mjs", "--test-name-pattern", pattern, "test/recycle-container.test.ts"], {
+        cwd: REPO_ROOT, encoding: "utf8", timeout: 120000, maxBuffer: 4 * 1024 * 1024,
+        env: { ...process.env, TMPDIR: scratch, FK_SHIFT_DAYS: String(days), NODE_TEST_CONTEXT: undefined, NODE_V8_COVERAGE: undefined },
+      });
+      const tap = result.stdout + result.stderr;
+      assert.equal(result.error, undefined, `+${days} d: setup or capacity is not a result: ${result.error?.message}`);
+      assert.match(tap, /^# tests 2$/m, `+${days} d: both registry tests must really run:\n${tap}`);
+      for (const title of SHIFTED_REGISTRY_TITLES) {
+        assert.ok(tap.split("\n").some(line => /^ok \d+ - /.test(line) && line.endsWith(` - ${title}`)), `+${days} d: ${title} passes\n${tap}`);
+      }
+      assert.match(tap, /^# fail 0$/m, `+${days} d:\n${tap}`);
+      assert.equal(result.status, 0, tap);
+    } finally { rmSync(scratch, { recursive: true, force: true }); }
+  }
+});
+
+test("W1-T13232 criterion 2: the binding the registry tests expect still names the original file, so equal bytes at another file never pass", () => {
+  const fixture = privateRecyclerFixture();
+  try {
+    const twinPath = join(fixture.root, "twin-private.yaml");
+    writeFileSync(twinPath, readFileSync(fixture.selected), { mode: 0o600 });
+    const original = hostLaunchPacket(fixture.selected).split("\n");
+    const twin = hostLaunchPacket(realpathSync(twinPath)).split("\n");
+    assert.equal(twin[2], original[2], "the twin carries the same bytes");
+    assert.notEqual(twin[4], original[4], "equal bytes at another file are another physical identity");
+    const result = fixture.run("private-good");
+    assert.equal(result.status, 0, result.stderr);
+    const launch = result.calls.filter(c => isRun(c) && c.argv.includes("-d")).at(-1)!;
+    assert.ok(launch, "the positive control reaches the actual final launch");
+    assert.ok(launch.argv.includes(`RMD_INSTANCE_REGISTRY_FILE_BINDING=${original[4]}`), "the launch carries the original file's binding");
+    assert.equal(launch.argv.includes(`RMD_INSTANCE_REGISTRY_FILE_BINDING=${twin[4]}`), false, "and never a twin's");
   } finally { fixture.cleanup(); }
 });
 

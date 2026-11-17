@@ -1,0 +1,210 @@
+/**
+ * lib/field-trials-judges.ts — W1-T12423: the judge family of the field-trials snapshot.
+ *
+ * The snapshot (lib/field-trials-flow.ts) keeps rmd's private model evidence. This module adds the
+ * judge figures beside the worker figures and apart from them. It reads four ledger steps:
+ * `decision.answered` (a decision model's answer), `shadow_judge.paired` (a shadow judge's answer
+ * beside the current judge's), `judge_replay.answered` (one corpus case of a replay) and
+ * `judge_replay.finished` (a direct replay's closing row, which names the corpus digest).
+ *
+ * ONE READER, ONE SCORER. A row becomes recorded typed answers through `judgeCalibrationRow`
+ * (lib/judge-calibration.ts), the reader the judge calibration body uses. Agreement, Brier,
+ * log-loss and the abstention and rejection shares come from `scoreTypedAnswers`
+ * (lib/typed-answer-scores.ts, W1-T12414). Nothing here computes them again.
+ *
+ * THE CELL KEY is source, ISO week, basis, role, model id, model surface and corpus digest. Two
+ * models, or one model on two surfaces (W1-T12420), never share a cell. A live answer and a replay
+ * answer never share a cell. A replay cell names the corpus digest its replay sent.
+ *
+ * PRIVATE. No input digest, decision key, head or run id enters a cell. The snapshot adds them to
+ * its private keys, and no release or field note reads this family.
+ * A RECORD, NEVER A DECISION INPUT: no gate, route or gardener reads these cells.
+ */
+import { DECISION_ANSWERED_STEP } from "./decision-model.js";
+import { judgeCalibrationRow } from "./judge-calibration.js";
+import { JUDGE_REPLAY_ANSWERED_STEP, JUDGE_REPLAY_FINISHED_STEP } from "./judge-replay-batch.js";
+import { scoreTypedAnswers, type TypedAnswerRow, type TypedAnswerScoreGroup } from "./typed-answer-scores.js";
+import { MODEL_SURFACES, type ModelSurface } from "./worker-provider.js";
+
+export const SHADOW_JUDGE_PAIRED_STEP = "shadow_judge.paired";
+/** The ledger steps only the judge family reads. */
+export const JUDGE_TRIAL_STEPS = [DECISION_ANSWERED_STEP, SHADOW_JUDGE_PAIRED_STEP, JUDGE_REPLAY_ANSWERED_STEP, JUDGE_REPLAY_FINISHED_STEP] as const;
+/** A replay answer whose replay wrote no corpus digest (the batch lane, or a replay that has not finished). */
+export const JUDGE_CORPUS_DIGEST_UNRECORDED = "unrecorded";
+
+export type JudgeTrialBasis = "live" | "replay";
+
+/** The fields of one judge ledger row the snapshot keeps in memory. None of them enters a cell but the answers' figures. */
+export interface JudgeTrialProjection {
+  basis: JudgeTrialBasis;
+  /** True for a `judge_replay.finished` row: it carries its replay's corpus digest and no answer. */
+  finished: boolean;
+  /** The corpus digest this row itself names, or null. */
+  corpusDigest: string | null;
+  latencyMs: number | null;
+  settledUsd: number | null;
+  /** A shadow row's decision key. Private. */
+  decisionKey: string | null;
+  answers: TypedAnswerRow[];
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+const text = (value: unknown): string | null => (typeof value === "string" && value.length > 0 ? value : null);
+const amount = (value: unknown): number | null => (typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null);
+const isModelSurface = (value: unknown): value is ModelSurface => (MODEL_SURFACES as readonly unknown[]).includes(value);
+
+/** A typed answer read back from a ledger row is held to the shape the scorer reads; any other value is dropped. */
+function readTypedAnswer(value: unknown): TypedAnswerRow | undefined {
+  if (!isRecord(value) || text(value.role) === null || text(value.model) === null || !isRecord(value.answer)) return undefined;
+  const row = value as unknown as TypedAnswerRow;
+  // A row written before surfaces existed reads its surface from its source, as the scorer reads it.
+  return { ...row, modelSurface: isModelSurface(row.modelSurface) ? row.modelSurface : row.source === "decisions" ? "decisions" : "text" };
+}
+
+/** The judge fields of one raw ledger row, or `undefined` for a row of another step. */
+export function projectJudgeTrialRow(row: Record<string, unknown>): JudgeTrialProjection | undefined {
+  if (!(JUDGE_TRIAL_STEPS as readonly unknown[]).includes(row.step)) return undefined;
+  const replay = row.step === JUDGE_REPLAY_ANSWERED_STEP || row.step === JUDGE_REPLAY_FINISHED_STEP;
+  const finished = row.step === JUDGE_REPLAY_FINISHED_STEP;
+  // A direct replay's own decision.answered row reads as no answer here: its answer is in its judge_replay.answered row.
+  const typed = finished ? undefined : judgeCalibrationRow(row)?.typed_answers;
+  return {
+    basis: replay ? "replay" : "live", finished, corpusDigest: replay ? text(row.corpus_digest) : null,
+    latencyMs: finished ? null : amount(row.latency_ms), settledUsd: finished ? null : amount(row.settled_usd),
+    decisionKey: text(row.decision_key),
+    answers: Array.isArray(typed) ? typed.flatMap((answer) => { const read = readTypedAnswer(answer); return read ? [read] : []; }) : [],
+  };
+}
+
+/** One decision (one ledger row) of one role, model and surface, ready for a cell. */
+export interface JudgeTrialRow {
+  source: string;
+  ts: string | null;
+  fingerprint: string;
+  basis: JudgeTrialBasis;
+  /** A replay's corpus digest, or {@link JUDGE_CORPUS_DIGEST_UNRECORDED}; null for a live answer. */
+  corpusDigest: string | null;
+  role: string;
+  model: string;
+  modelSurface: ModelSurface;
+  latencyMs: number | null;
+  settledUsd: number | null;
+  answers: TypedAnswerRow[];
+}
+
+/** What {@link judgeTrialRows} reads off a snapshot row. */
+export interface JudgeTrialSourceRow {
+  fingerprint: string;
+  ts: string | null;
+  runId: string | null;
+  judge?: JudgeTrialProjection;
+}
+
+/**
+ * The judge rows of one source, each joined to its replay's corpus digest by run id, plus every
+ * private key they carry (run ids, decision keys, input digests and heads).
+ */
+export function judgeTrialRows(source: string, rows: readonly JudgeTrialSourceRow[]): { rows: JudgeTrialRow[]; privateKeys: string[] } {
+  const digestOfRun = new Map<string, string>();
+  for (const row of rows) if (row.judge?.finished && row.runId !== null && row.judge.corpusDigest !== null) digestOfRun.set(row.runId, row.judge.corpusDigest);
+  const out: JudgeTrialRow[] = [];
+  const privateKeys = new Set<string>();
+  for (const row of rows) {
+    const judge = row.judge;
+    if (judge === undefined) continue;
+    if (row.runId !== null) privateKeys.add(row.runId);
+    if (judge.decisionKey !== null) privateKeys.add(judge.decisionKey);
+    const corpusDigest = judge.basis === "live" ? null
+      : judge.corpusDigest ?? (row.runId === null ? undefined : digestOfRun.get(row.runId)) ?? JUDGE_CORPUS_DIGEST_UNRECORDED;
+    const groups = new Map<string, TypedAnswerRow[]>();
+    for (const answer of judge.answers) {
+      for (const key of [answer.inputDigest, answer.head]) if (typeof key === "string" && key.length > 0) privateKeys.add(key);
+      const key = JSON.stringify([answer.role, answer.model, answer.modelSurface]);
+      groups.set(key, [...(groups.get(key) ?? []), answer]);
+    }
+    // One ledger row is one decision. Its latency and dollars count once, with its first role, model and surface.
+    [...groups.values()].forEach((answers, index) => {
+      const first = answers[0]!;
+      out.push({ source, ts: row.ts, fingerprint: row.fingerprint, basis: judge.basis, corpusDigest, role: first.role, model: first.model,
+        modelSurface: first.modelSurface, latencyMs: index === 0 ? judge.latencyMs : null, settledUsd: index === 0 ? judge.settledUsd : null, answers });
+    });
+  }
+  return { rows: out, privateKeys: [...privateKeys].sort() };
+}
+
+/** The one key of a judge cell: two models, two surfaces or two bases never share one. */
+export function judgeTrialCellKey(row: Pick<JudgeTrialRow, "source" | "ts" | "basis" | "role" | "model" | "modelSurface" | "corpusDigest">,
+  periodOf: (at: string | null) => string): string {
+  return [row.source, periodOf(row.ts), row.basis, row.role, row.model, row.modelSurface, row.corpusDigest ?? "-"].join("|");
+}
+
+/** The scorer's figures the family copies, for the whole cell and for each question in it. */
+type ScoredFigures = Pick<TypedAnswerScoreGroup, "answers" | "distributions" | "singles" | "abstained" | "rejected" | "abstentionRate" |
+  "rejectionRate" | "agreement" | "outcomes" | "brier" | "logLoss">;
+
+export interface JudgeTrialCell extends ScoredFigures {
+  source: string;
+  /** The Monday that starts the ISO week. */
+  period: string;
+  basis: JudgeTrialBasis;
+  corpusDigest: string | null;
+  role: string;
+  model: string;
+  modelSurface: ModelSurface;
+  /** Ledger rows: one per request. A request with several questions gives several answers. */
+  decisions: number;
+  latencyMs: { observed: number; median: number | null; p90: number | null };
+  settledUsd: { observed: number; median: number | null };
+  /** The same figures per question, because one cell can hold questions with different options. */
+  questions: Array<ScoredFigures & { question: string | null }>;
+}
+
+const figuresOf = (group: TypedAnswerScoreGroup): ScoredFigures => ({
+  answers: group.answers, distributions: group.distributions, singles: group.singles, abstained: group.abstained, rejected: group.rejected,
+  abstentionRate: group.abstentionRate, rejectionRate: group.rejectionRate, agreement: group.agreement, outcomes: group.outcomes,
+  brier: group.brier, logLoss: group.logLoss });
+
+const sortedNumbers = (values: ReadonlyArray<number | null>): number[] =>
+  values.filter((value): value is number => value !== null).sort((a, b) => a - b);
+const medianOf = (sorted: readonly number[]): number | null => {
+  if (sorted.length === 0) return null;
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1 ? sorted[middle]! : (sorted[middle - 1]! + sorted[middle]!) / 2;
+};
+/** Nearest rank: the smallest value with at least 90% of the values at or below it. */
+const p90Of = (sorted: readonly number[]): number | null => (sorted.length === 0 ? null : sorted[Math.ceil(0.9 * sorted.length) - 1]!);
+
+/**
+ * THE JUDGE FAMILY. Groups the rows into cells by {@link judgeTrialCellKey} and gives each cell the
+ * scorer's figures over all its answers (pooled over its questions), the same figures per question,
+ * and the median and 90th-percentile latency and the median settled dollars over its decisions. A
+ * row with no latency or no dollars (a shadow row, a batch result) is left out of that median and
+ * `observed` says how many rows it used. Cells are sorted by their key.
+ */
+export function judgeTrialCells(rows: readonly JudgeTrialRow[], periodOf: (at: string | null) => string,
+  score: typeof scoreTypedAnswers = scoreTypedAnswers): JudgeTrialCell[] {
+  const groups = new Map<string, JudgeTrialRow[]>();
+  for (const row of rows) {
+    if (row.answers.length === 0) continue;
+    const key = judgeTrialCellKey(row, periodOf);
+    groups.set(key, [...(groups.get(key) ?? []), row]);
+  }
+  return [...groups.keys()].sort().map((key): JudgeTrialCell => {
+    const members = groups.get(key)!;
+    const first = members[0]!;
+    const answers = members.flatMap((member) => member.answers);
+    // The cell's key has no question, so its own figures pool its questions: one scorer group.
+    const pooled = score(answers.map((answer) => ({ ...answer, question: null }))).groups[0]!;
+    const latencies = sortedNumbers(members.map((member) => member.latencyMs));
+    const dollars = sortedNumbers(members.map((member) => member.settledUsd));
+    return {
+      source: first.source, period: periodOf(first.ts), basis: first.basis, corpusDigest: first.corpusDigest,
+      role: first.role, model: first.model, modelSurface: first.modelSurface, decisions: members.length,
+      ...figuresOf(pooled),
+      latencyMs: { observed: latencies.length, median: medianOf(latencies), p90: p90Of(latencies) },
+      settledUsd: { observed: dollars.length, median: medianOf(dollars) },
+      questions: score(answers).groups.map((group) => ({ question: group.question, ...figuresOf(group) })),
+    };
+  });
+}
