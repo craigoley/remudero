@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { cashDeploymentEndpoint, type Config } from "./config-schema.js";
 import { appendLedger } from "./ledger.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
-import { readLedgerUnionRecords, type OpenLedgerUnionOptions } from "./ledger-union.js";
+import { readLedgerUnionRecords } from "./ledger-union.js";
 import { spendRoleOf } from "./spend-rows.js";
 import { isFoundryClaudeDeployment, OPENWEIGHT_PRICES, type OpenWeightPrice } from "./worker-provider.js";
 
@@ -193,14 +193,6 @@ function meteredRow(deployment: string, price: OpenWeightPrice, tokens: Record<s
   };
 }
 
-/** The ledger union, read off the event loop. `unread` names each file or directory the read could not open. */
-async function unionRows(stateDir: string, opts: OpenLedgerUnionOptions): Promise<{ rows: Record<string, unknown>[]; unread: string[] }> {
-  const unread: string[] = [];
-  const note = (path: string): void => { unread.push(path); };
-  const rows = await readLedgerUnionRecords(stateDir, { ...opts, onUnreadArchive: note, onUnreadLive: note, onUnreadDirectory: note });
-  return { rows, unread };
-}
-
 /** A produced cash receipt row: the unit the reconciler meters. */
 function cashReceipt(row: Record<string, unknown>): boolean {
   return row.provider === "cash" && typeof row.model === "string" && spendRoleOf(row) === "produced" &&
@@ -264,10 +256,13 @@ export function reconcileCashInvoice(input: CashInvoiceInput): CashInvoiceReconc
  *  incomplete ledger union, because a missing rotation would read as missing traffic. */
 export async function readCashInvoiceReceipts(stateDir: string, day: string): Promise<Record<string, unknown>[]> {
   if (!DAY.test(day)) throw new Error(`reconcile day must be YYYY-MM-DD, got ${JSON.stringify(day)}`);
-  const read = await unionRows(stateDir, { since: `${day}T00:00:00.000Z`,
-    where: (row) => cashReceipt(row) && String(row.ts ?? "").slice(0, 10) === day });
-  if (read.unread.length > 0) throw new Error(`cash receipts ledger unreadable: ${read.unread.join(", ")}`);
-  return read.rows;
+  const unread: string[] = [];
+  const note = (path: string): void => { unread.push(path); };
+  const rows = await readLedgerUnionRecords(stateDir, { since: `${day}T00:00:00.000Z`,
+    where: (row) => cashReceipt(row) && String(row.ts ?? "").slice(0, 10) === day,
+    onUnreadArchive: note, onUnreadLive: note, onUnreadDirectory: note });
+  if (unread.length > 0) throw new Error(`cash receipts ledger unreadable: ${unread.join(", ")}`);
+  return rows;
 }
 
 /** Each priced deployment's Azure account name, from the first host label of its configured cash endpoint. */
@@ -348,15 +343,18 @@ export interface InvoiceVerdictRead {
 }
 
 export async function readNewestInvoiceVerdicts(stateDir: string): Promise<InvoiceVerdictRead> {
-  const read = await unionRows(stateDir, { step: CASH_INVOICE_RECONCILED_STEP });
+  const unread: string[] = [];
+  const note = (path: string): void => { unread.push(path); };
+  const rows = await readLedgerUnionRecords(stateDir, { step: CASH_INVOICE_RECONCILED_STEP,
+    onUnreadArchive: note, onUnreadLive: note, onUnreadDirectory: note });
   const newest = new Map<string, Record<string, unknown>>();
   const order = (row: Record<string, unknown>): string => `${String(row.day ?? "")} ${String(row.ts ?? "")}`;
-  for (const row of read.rows) {
+  for (const row of rows) {
     if (typeof row.deployment !== "string") continue;
     const prior = newest.get(row.deployment);
     if (prior === undefined || order(row) >= order(prior)) newest.set(row.deployment, row);
   }
-  return { ok: read.unread.length === 0, unread: read.unread, newest };
+  return { ok: unread.length === 0, unread, newest };
 }
 
 /** An arm is open-weight when its deployment's price row does not carry `unbilledAzureOpenAi429`. */
