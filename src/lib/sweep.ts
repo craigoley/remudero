@@ -1,4 +1,5 @@
 import { hasNonBotAuthor, namePathLanding, type DependencyMainIdentity } from "./dependency-main-identity.js";
+import { registerProcessExitLatch } from "./process-exit-latches.js";
 import { findTaskInCatalogs, type TaskLookupOptions, type TaskLookupResult } from "./task-lookup.js";
 import { planDestinationRepository, type PlanDestinationRepository } from "./plan-destination.js";
 import { decideLoopOutcome } from "./loop-decision.js";
@@ -27341,6 +27342,7 @@ const inFlightNote = (inFlight: number): string => (inFlight > 0 ? `, in-flight 
 // Closed by `drainInFlightReviews` (an exit), reopened by the next light pass.
 let lightPassRefillsClosed = false;
 let lightPassRefillEpoch = 0;
+registerProcessExitLatch("light-pass-refills", () => { lightPassRefillsClosed = false; }); // W1-T13363
 
 const lightPassActionScope = new AsyncLocalStorage<{ onMemoryWait: () => void }>();
 const lightPassMemoryWaits = new Map<string, { sinceMs: number }>();
