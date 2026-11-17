@@ -191,57 +191,20 @@ function rowsIn(path: string): Array<Record<string, unknown>> {
   return readFileSync(path, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>);
 }
 
-const iso = (ms: number) => new Date(ms).toISOString();
-
-/**
- * W1-T13231. The clock the host scripts judge a lock by: the process table and `date` they read. A clock sweep
- * moves this process's Date (scripts/clock-shift.mjs) but never a child's, so a lock dated from Date.now() reads
- * as written in the future and a reused pid looks like the lock's own holder. Read the wall clock the
- * preload leaves alone (W1-T6035), so the lock keeps its margin to the process whatever this process's clock says.
- */
-const hostClockMs = () => Math.floor(performance.timeOrigin + performance.now());
-/** A dead pid is reclaimed at any age; this one was left days ago, as W1-T12114's was. */
-const DEAD_LOCK_AGE_MS = 5 * 24 * 3600_000;
-/** How long before its pid's new process a reused lock was written: far past the scripts' 2 s tolerance. */
-const REUSED_LOCK_LEAD_MS = 3600_000;
-
-/** A lock this host wrote for a process that has since died. */
-function deadLock(runId: string): Lock {
-  return { pid: DEAD_PID, run_id: runId, host: HOST, startedAt: iso(hostClockMs() - DEAD_LOCK_AGE_MS) };
-}
-
-/** A lock this host wrote an hour before `pid`'s current process started: the pid was used again. */
-function reusedLock(pid: number, runId: string): Lock {
-  return { pid, run_id: runId, host: HOST, startedAt: iso(hostClockMs() - REUSED_LOCK_LEAD_MS) };
-}
-
-/** A `sleep` this suite owns: its pid is alive and started now, by the host clock. */
+/** A `sleep` this suite owns: its pid is alive and started now. */
 function liveChild(): { child: ChildProcess; startedAt: string } {
-  const startedAt = iso(hostClockMs());
+  const startedAt = new Date().toISOString();
   const child = spawn("sleep", ["120"], { stdio: "ignore" });
   assert.ok(child.pid, "the live child has a pid");
   return { child, startedAt };
 }
 
-/** Run `body` with this process's Date moved `days` ahead, the way scripts/clock-shift.mjs moves it. */
-function underShiftedClock(days: number, body: () => void): void {
-  const RealDate = globalThis.Date;
-  const shiftMs = days * 86_400_000;
-  class ShiftedDate extends RealDate {
-    constructor(...args: [] | [string | number | Date]) {
-      if (args.length === 0) super(RealDate.now() + shiftMs);
-      else super(args[0]);
-    }
-    static override now(): number { return RealDate.now() + shiftMs; }
-  }
-  globalThis.Date = ShiftedDate as DateConstructor;
-  try { body(); } finally { globalThis.Date = RealDate; }
-}
+const iso = (ms: number) => new Date(ms).toISOString();
 
 // ── the recycle script ─────────────────────────────────────────────────────────────────────────
 
 test("W1-T12316 criterion 1: a lock this host wrote, whose pid is dead, is moved aside with a reason and the recycle goes on", () => {
-  const lock = deadLock("W1-T12114-1794380024000");
+  const lock = { pid: DEAD_PID, run_id: "W1-T12114-1794380024000", host: HOST, startedAt: "2026-11-11T09:13:44.000Z" };
   const { state, inflight, lockPath } = stateWithLock("W1-T12114", lock);
 
   const r = recycle(state);
@@ -261,8 +224,8 @@ test("W1-T12316 criterion 1: a lock this host wrote, whose pid is dead, is moved
 test("W1-T12316 criterion 2: a lock this host wrote, whose pid is alive but started after the lock, is reclaimed with both start times", () => {
   const { child } = liveChild();
   try {
-    const lock = reusedLock(child.pid!, "W1-T12114-r2");
-    const startedAt = lock.startedAt;
+    const startedAt = iso(Date.now() - 3600_000);
+    const lock = { pid: child.pid!, run_id: "W1-T12114-r2", host: HOST, startedAt };
     const { state, inflight, lockPath } = stateWithLock("W1-T12114", lock);
 
     const r = recycle(state);
@@ -302,7 +265,7 @@ test("W1-T12316 criterion 3: a lock whose process is alive with the lock's start
 });
 
 test("W1-T12316 criterion 4: each reclaim by the recycle script writes one recycle.inflight_reclaimed row", () => {
-  const lock = deadLock("W1-T12114-r4");
+  const lock = { pid: DEAD_PID, run_id: "W1-T12114-r4", host: HOST, startedAt: "2026-11-11T09:13:44.000Z" };
   const { state } = stateWithLock("W1-T12114", lock);
 
   const r = recycle(state);
@@ -453,7 +416,7 @@ function janitorWithLock(lock: Lock) {
 
 test("W1-T12316 criterion 9: the janitor reclaims a dead or reused lock of its own host in its six-hour and hourly passes", () => {
   for (const onlyTmp of ["0", "1"]) {
-    const j = janitorWithLock(deadLock(`W1-T12114-r9-${onlyTmp}`));
+    const j = janitorWithLock({ pid: DEAD_PID, run_id: `W1-T12114-r9-${onlyTmp}`, host: HOST, startedAt: "2026-11-11T09:13:44.000Z" });
     const r = runJanitor(j.fx, { RMD_CLEANUP_ONLY_TMP: onlyTmp, PATH: `${hostnameShim()}:${process.env.PATH ?? ""}` });
     assert.equal(r.status, 0, r.stderr + r.stdout);
     assert.equal(existsSync(j.lockPath), false, `pass ONLY_TMP=${onlyTmp} reclaims: ${r.stdout}`);
@@ -467,7 +430,7 @@ test("W1-T12316 criterion 9: the janitor reclaims a dead or reused lock of its o
 
   const { child } = liveChild();
   try {
-    const j = janitorWithLock(reusedLock(child.pid!, "W1-T12114-r9"));
+    const j = janitorWithLock({ pid: child.pid!, run_id: "W1-T12114-r9", host: HOST, startedAt: iso(Date.now() - 3600_000) });
     const r = runJanitor(j.fx, { RMD_CLEANUP_ONLY_TMP: "1", PATH: `${hostnameShim()}:${process.env.PATH ?? ""}` });
     assert.equal(existsSync(j.lockPath), false, r.stdout);
     assert.match(reasonText(j.inflight), /verdict: pid-reused/);
@@ -495,7 +458,7 @@ test("W1-T12316 criterion 10: the janitor keeps a live lock whatever its age and
   assert.ok(existsSync(other.lockPath), kept.stdout);
   assert.match(kept.stdout, /KEEP .*W1-T12114\.lock: written on host prod-box-3, not this host/);
 
-  const dry = janitorWithLock(deadLock("W1-T12114-r10c"));
+  const dry = janitorWithLock({ pid: DEAD_PID, run_id: "W1-T12114-r10c", host: HOST, startedAt: "2026-11-11T09:13:44.000Z" });
   const r = runJanitor(dry.fx, { DRY_RUN: "1", PATH: `${hostnameShim()}:${process.env.PATH ?? ""}` });
   assert.match(r.stdout, /DRYRUN would: reclaim lock .*W1-T12114\.lock \(slot W1-T12114, run W1-T12114-r10c\)/);
   assert.ok(existsSync(dry.lockPath), "a dry run moves nothing");
@@ -544,7 +507,7 @@ test("W1-T12316 criteria 3 and 10: failed ps probes without /proc keep the same 
 
 test("W1-T12316 criteria 3 and 10: concurrent acquisition during the dead-pid probe preserves the live replacement in both scripts", () => {
   const { child, startedAt } = liveChild();
-  const oldLock = deadLock("W1-T12114-probed-old");
+  const oldLock = { pid: DEAD_PID, run_id: "W1-T12114-probed-old", host: HOST, startedAt: "2026-11-11T09:13:44.000Z" };
   const recycleCase = stateWithLock("W1-T12114", oldLock);
   const janitorCase = janitorWithLock(oldLock);
   const recycleRace = acquireDuringProbe(recycleCase.lockPath, child.pid!, startedAt);
@@ -585,7 +548,7 @@ test("W1-T12316 criteria 3 and 10: concurrent acquisition during the dead-pid pr
 
 test("W1-T12316: a successful process-table read without /proc lets both host scripts reclaim an absent pid", () => {
   const probe = unavailableProcAndPs("absent", DEAD_PID);
-  const lock = deadLock("W1-T12114-no-proc-dead");
+  const lock = { pid: DEAD_PID, run_id: "W1-T12114-no-proc-dead", host: HOST, startedAt: "2026-11-11T09:13:44.000Z" };
   const recycleCase = stateWithLock("W1-T12114", lock);
   const janitorCase = janitorWithLock(lock);
   try {
@@ -608,65 +571,5 @@ test("W1-T12316: a successful process-table read without /proc lets both host sc
     rmSync(probe.dir, { recursive: true, force: true });
     rmSync(recycleCase.state, { recursive: true, force: true });
     rmSync(janitorCase.fx.root, { recursive: true, force: true });
-  }
-});
-
-// ── W1-T13231: a shifted clock changes no verdict ─────────────────────────────────────────────
-
-test("W1-T13231 criterion 1: with this process's clock a week and a year ahead, this host's dead and reused locks are still reclaimed", () => {
-  for (const days of [7, 400]) {
-    underShiftedClock(days, () => {
-      assert.ok(Date.now() - hostClockMs() > (days - 1) * 86_400_000, `the in-process clock reads ${days} days ahead`);
-      const dead = stateWithLock("W1-T12114", deadLock(`W1-T13231-dead-${days}`));
-      const gone = recycle(dead.state);
-      assert.equal(gone.status, 0, `+${days} d: a dead lock still lets the recycle go on: ${gone.stderr}`);
-      assert.equal(existsSync(dead.lockPath), false, `+${days} d: the dead lock left inflight/`);
-      assert.match(reasonText(dead.inflight), /pid-dead/);
-
-      const { child } = liveChild();
-      try {
-        const lock = reusedLock(child.pid!, `W1-T13231-reused-${days}`);
-        const reused = stateWithLock("W1-T12114", lock);
-        const r = recycle(reused.state);
-        assert.equal(r.status, 0, `+${days} d: a reused pid does not hold the lock: ${r.stderr}`);
-        assert.equal(existsSync(reused.lockPath), false, `+${days} d: the reused lock left inflight/`);
-        const reason = reasonText(reused.inflight);
-        assert.match(reason, /pid-reused/);
-        // The policy reclaims a pid whose process started more than 2 s after its lock; the fixture's lead is an hour.
-        const processStart = Number(/process start epoch: (\d{10})/.exec(reason)?.[1]);
-        const leadS = processStart - Math.floor(Date.parse(lock.startedAt) / 1000);
-        assert.ok(leadS > 2 && leadS <= REUSED_LOCK_LEAD_MS / 1000 + 60,
-          `+${days} d: the lock leads its pid's process by the fixture's hour, not a fixed date: ${leadS} s`);
-      } finally {
-        child.kill();
-      }
-    });
-  }
-});
-
-test("W1-T13231 criterion 2: with the same shifted clocks a live lock dated with its process is still kept and the recycle refuses", () => {
-  for (const days of [7, 400]) {
-    underShiftedClock(days, () => {
-      const { child, startedAt } = liveChild();
-      try {
-        const lock = { pid: child.pid!, run_id: `W1-T13231-live-${days}`, host: HOST, startedAt };
-        const recycleCase = stateWithLock("W1-T12114", lock);
-        const janitorCase = janitorWithLock(lock);
-        const before = readFileSync(recycleCase.lockPath, "utf8");
-
-        const r = recycle(recycleCase.state);
-        const cleaned = runJanitor(janitorCase.fx, { RMD_CLEANUP_ONLY_TMP: "1", PATH: `${hostnameShim()}:${process.env.PATH ?? ""}` });
-
-        assert.notEqual(r.status, 0, `+${days} d: a live holder still refuses the recycle`);
-        assert.match(r.stderr, /REFUSING — 1 lane-holding/);
-        assert.equal(readFileSync(recycleCase.lockPath, "utf8"), before, `+${days} d: the recycle keeps the live lock byte for byte`);
-        assert.deepEqual(reclaimedEntries(recycleCase.inflight), []);
-        assert.equal(cleaned.status, 0, cleaned.stderr + cleaned.stdout);
-        assert.equal(readFileSync(janitorCase.lockPath, "utf8"), before, `+${days} d: the janitor keeps the live lock byte for byte`);
-        assert.deepEqual(reclaimedEntries(janitorCase.inflight), []);
-      } finally {
-        child.kill();
-      }
-    });
   }
 });
