@@ -225,27 +225,52 @@ test("W1-T2784: readNamespaceBootMs reads THIS namespace's init start from real 
   assert.ok(boot! <= Date.now(), "this namespace cannot have booted in the future");
 });
 
-test("W1-T2784: readNamespaceBootMs declines (undefined) on unreadable or malformed /proc", () => {
-  assert.equal(readNamespaceBootMs({ readFile: () => { throw new Error("EACCES"); } }), undefined);
-  assert.equal(readNamespaceBootMs({ readFile: () => "no btime here" }), undefined);
+// W1-T13273: the /proc parse is pure, so these pin `platform: "linux"` and run on every host. Left
+// to `process.platform`, a Mac takes the darwin uptime branch, which returns before the injected
+// `readFile` is ever read.
+test("W1-T13273 criterion 1: the W1-T2784 /proc parse tests pin platform linux and pass on any host", async (t) => {
+  await t.test("W1-T2784: readNamespaceBootMs declines (undefined) on unreadable or malformed /proc", () => {
+    assert.equal(readNamespaceBootMs({ platform: "linux", readFile: () => { throw new Error("EACCES"); } }), undefined);
+    assert.equal(readNamespaceBootMs({ platform: "linux", readFile: () => "no btime here" }), undefined);
+  });
+
+  await t.test("W1-T2784: readNamespaceBootMs parses a comm containing spaces AND parentheses", () => {
+    // `/proc/<pid>/stat` field 2 is free-form inside parens, so a whitespace split mis-indexes every
+    // later field. Slicing after the LAST ')' is the only correct parse.
+    //
+    // The fixture is built POSITIONALLY rather than hand-spaced: fields 3..21 are placeholders and
+    // field 22 (starttime) is placed by index, so the test cannot drift out of agreement with the
+    // parser by a miscounted literal — which is exactly what a hand-written version of this row
+    // got wrong on the first attempt.
+    const START_TICKS = 269880;
+    const fields3to21 = Array.from({ length: 19 }, (_, i) => String(i)); // fields 3..21 inclusive
+    const statLine = `1 (my prog (v2)) ${fields3to21.join(" ")} ${START_TICKS} 0 0 0`;
+    const boot = readNamespaceBootMs({
+      platform: "linux",
+      readFile: (p) => (p === "/proc/stat" ? "btime 1788432777\n" : statLine),
+      clockTicks: () => 100,
+    });
+    assert.equal(boot, (1788432777 + START_TICKS / 100) * 1000, "field 22 indexed from AFTER the comm");
+  });
 });
 
-test("W1-T2784: readNamespaceBootMs parses a comm containing spaces AND parentheses", () => {
-  // `/proc/<pid>/stat` field 2 is free-form inside parens, so a whitespace split mis-indexes every
-  // later field. Slicing after the LAST ')' is the only correct parse.
-  //
-  // The fixture is built POSITIONALLY rather than hand-spaced: fields 3..21 are placeholders and
-  // field 22 (starttime) is placed by index, so the test cannot drift out of agreement with the
-  // parser by a miscounted literal — which is exactly what a hand-written version of this row
-  // got wrong on the first attempt.
-  const START_TICKS = 269880;
-  const fields3to21 = Array.from({ length: 19 }, (_, i) => String(i)); // fields 3..21 inclusive
-  const statLine = `1 (my prog (v2)) ${fields3to21.join(" ")} ${START_TICKS} 0 0 0`;
-  const boot = readNamespaceBootMs({
-    readFile: (p) => (p === "/proc/stat" ? "btime 1788432777\n" : statLine),
-    clockTicks: () => 100,
-  });
-  assert.equal(boot, (1788432777 + START_TICKS / 100) * 1000, "field 22 indexed from AFTER the comm");
+test("W1-T13273 criterion 2: readNamespaceBootMs's darwin branch, with an injected platform, derives boot from uptime", () => {
+  // The darwin branch never reads /proc: a readFile that throws proves it is not consulted.
+  const readFile = (p: string): string => { throw new Error(`darwin must not read ${p}`); };
+  const NOW_MS = Date.parse("2026-11-16T12:00:00.000Z");
+  assert.equal(
+    readNamespaceBootMs({ platform: "darwin", readFile, uptimeSec: () => 7200.5, nowMs: () => NOW_MS }),
+    NOW_MS - 7_200_500,
+    "boot = now - uptime",
+  );
+  for (const bad of [Number.NaN, Number.POSITIVE_INFINITY]) {
+    assert.equal(readNamespaceBootMs({ platform: "darwin", readFile, uptimeSec: () => bad, nowMs: () => NOW_MS }), undefined);
+  }
+  assert.equal(
+    readNamespaceBootMs({ platform: "darwin", readFile, uptimeSec: () => 10, nowMs: () => 5_000 }),
+    undefined,
+    "an uptime longer than the clock is a negative boot: declined",
+  );
 });
 
 test("W1-T2784: pidIsPresent reports PRESENT on any doubt — absence is half the release proof", () => {
