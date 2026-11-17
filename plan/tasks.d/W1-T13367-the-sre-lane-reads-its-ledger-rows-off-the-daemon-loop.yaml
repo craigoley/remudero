@@ -4,7 +4,7 @@
   depends_on: []
   priority: 1
   type: implement
-  verify: auto
+  verify: human
   principles:
     tdd: strict
   risk: high # the SRE lane decides which incident is filed and which runbook acts; a reader that drops, repeats or invents a row changes those decisions, and an unreadable history must still stop the pass
@@ -28,7 +28,7 @@
   status: queued
   attempts: 0
   acceptance:
-    - claim: "invariant:a-pass-reads-only-new-ledger-bytes — with the input the daemon builds, a second SRE lane pass over an unchanged state dir reads 0 bytes of any ledger file and parses 0 ledger lines on the daemon thread. After k rows are appended to the live file, the next pass reads only those bytes. No pass calls readLedgerLines on the live ledger, and no pass calls readLedgerUnionRecordsSync without an incremental union"
+    - claim: "invariant:a-pass-reads-only-new-ledger-bytes — with the input the daemon builds, a second SRE lane pass over an unchanged state dir reads 0 bytes of any ledger file and parses 0 ledger lines on the daemon thread. After k rows are appended to the live file, the next pass reads only those bytes and the 64 bytes immediately before them, which detect a rewrite in place (W1-T11210). No pass calls readLedgerLines on the live ledger, and no pass calls readLedgerUnionRecordsSync without an incremental union"
       kind: guard
       proof: "grep: W1-T13367 criterion 1 in test/the-sre-lane-reads-its-ledger-rows-off-the-daemon-loop.test.ts"
     - claim: "invariant:the-lane-sees-the-same-rows — over a fixture state dir of real gzip rotations and a live file, the idle-capacity, stranded-task and foreign-pause detectors and the intervention router write the same incident.event and operator.intervention rows, and leave the same detector memory files, as the readers at origin/main do over a copy of that state dir. This holds on the first pass, on a repeat pass, and on a pass after a rotation"
@@ -85,7 +85,7 @@
     plan/tasks.yaml for runSreLanePass, readFlowRows, readRunbookReceipts and readGovernorIncidents, and the 11
     open pull requests on 2026-11-17: no other filing.
   design: |
-    INVARIANT a-pass-reads-only-new-ledger-bytes: a pass reads no ledger byte that an earlier pass of the same process read.
+    INVARIANT a-pass-reads-only-new-ledger-bytes: a pass reads no ledger byte that an earlier pass of the same process read, except the 64 bytes immediately before new bytes, which detect a rewrite in place (W1-T11210).
     INVARIANT the-lane-sees-the-same-rows: the detectors and the router get the same rows as today, so they write the same rows.
     INVARIANT an-unreadable-history-stops-the-pass: an unreadable rotation makes each detector fail as it does today, and nothing is written or filed.
     1. One slice for the lane. Its steps are the detectors' inputs and the intervention inputs. The daemon builds
