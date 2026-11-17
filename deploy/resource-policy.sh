@@ -27,7 +27,7 @@ RMD_MIN_BUILD_CEILING_MIB="${RMD_MIN_BUILD_CEILING_MIB:-2048}"
 RMD_SERVE_MEMORY_LIMIT_MIB="${RMD_SERVE_MEMORY_LIMIT_MIB:-}"         # empty = the shared budget; set = operator override (0 = none)
 RMD_SERVE_SWAP_MIB="${RMD_SERVE_SWAP_MIB:-2048}"                     # operator ruling 2026-10-19 (was 1024: 95% full)
 RMD_SERVE_CPUS="${RMD_SERVE_CPUS:-}"                                 # empty = no CPU quota, weight only
-RMD_SERVE_CPU_SHARES="${RMD_SERVE_CPU_SHARES:-512}"         # W1-T12532: equal to a build daemon's, never lower
+RMD_SERVE_CPU_SHARES="${RMD_SERVE_CPU_SHARES:-4096}"        # W1-T13293: 8x a build daemon (operator ruling 2026-11-17), never lower
 RMD_BUILD_CPU_SHARES="${RMD_BUILD_CPU_SHARES:-512}"
 
 # ── memory.high: A SOFT CEILING SIZED FROM ONE HOST BUDGET (2026-10-09) ─────────────────────────
