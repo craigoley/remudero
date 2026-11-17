@@ -1,7 +1,8 @@
 - id: W1-T13370
   title: "A ledger compaction pass merges the candidates that fit together instead of giving up when its first candidate cannot pair with the next"
   repo: remudero
-  depends_on: []
+  depends_on:
+    - W1-T13371
   priority: 1
   type: implement
   verify: auto
@@ -18,7 +19,7 @@
   status: queued
   attempts: 0
   acceptance:
-    - claim: "When the first preferred candidate cannot share a 64 MiB archive with the next one, the pass still selects two or more later candidates that fit together, and the apply run merges them"
+    - claim: "When the first day's candidates cannot share a 64 MiB archive, the pass selects the same-day run that merges the most sources within the ceiling, and the apply run merges them"
       proof: "grep: W1-T13370 criterion 1 in test/ledger/a-compaction-pass-merges-past-an-unpairable-archive.test.ts"
     - claim: "No selected window exceeds the decompressed archive ceiling, and a corpus where no two candidates fit together still reports nothing eligible and writes nothing"
       proof: "grep: W1-T13370 criterion 2 in test/ledger/a-compaction-pass-merges-past-an-unpairable-archive.test.ts"
@@ -42,13 +43,20 @@
   design: |
     INVARIANT ceiling-and-reduction-hold: the selection never exceeds maxArchiveBytes decompressed (except the
     existing lone oversized-repair case), and no-reduction still declines before any write.
-    1. In the window loop, a candidate that would overflow the ceiling is skipped (counted in sizeSkippedCount) and
-       the walk continues, instead of ending the window. Keep the preferred order and the source cap.
-    2. If the result has fewer than two sources and is not the oversized-repair case, return no sources, so the
+    Outputs are written per UTC day, so only two or more sources from the SAME day reduce the archive count.
+    OBSERVED host candidate order (2026-11-17 ~13:10Z, real sizes): 10-25 (50.5 MB, 39.7 MB), 10-26 (36.7, 47.7),
+    10-28 (38.4, 4.2), 10-30 (65.2, 33.5), 10-31 (50.8, 64.3, 63.8), 11-10 (34.8, 65.2, 18.1), 11-11 (48.6, 47.4),
+    11-15 (38.0 + four ~4.1 MB), then ~50 rotations of 11-16 at ~3-5 MB each. The first day never fits two sources.
+    1. Group the preferred candidates by UTC day. For each day, pack its candidates oldest first, skipping any that
+       would overflow the ceiling, up to the source cap.
+    2. Select the day whose packing merges the most sources (ties: the oldest day). On the host that is a run of
+       ~16 rotations from 11-16, not a lone 50 MB archive.
+    3. If no day packs two or more sources, and this is not the oversized-repair case, return no sources, so the
        command does not read and partition a lone archive only to decline it.
-    Keep the archive-part deferral and the repair path unchanged.
+    Keep the archive-part deferral and the repair path unchanged. Measuring every candidate's decompressed size is
+    affordable once W1-T13371 records measurements, so build T13371 first.
   falsifier: |
-    Restore the break on the first overflow and criterion 1 fails (one source, no merge). Let the window take an
+    Restore the break on the first overflow and criterion 1 fails (one source, no merge). Let a day's packing take an
     overflowing candidate and criterion 2 fails.
   note: |
     Id reserved for run-unfiled-1794920434652 with ~/rmd-work/bin/reserve-id.sh.
