@@ -1,0 +1,59 @@
+- id: W1-T13476
+  title: "The now view's decisions gate read keeps only the newest App token refresh row of each kind, so a past refresh-failure storm no longer costs every build a 774 MB digest parse"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # which ledger rows the now view's gate digests keep; the gates and operator items a body shows are unchanged
+  band_meaning: span
+  origin: "operator-session#now-view-serve-2026-11-17"
+  plan_refs:
+    - W1-T7391
+  files:
+    - src/lib/now-view.ts
+    - test/now-gate-keeps-newest-token-refresh.test.ts
+    - test/now-decisions-ledger-starts-warm.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "invariant:same-token-fallback — reducing each rotation's rows and then their union gives deriveOperatorItems the same answer as every row, including equal and unparseable stamps"
+      kind: guard
+      proof: "grep: W1-T13476 criterion 1 in test/now-gate-keeps-newest-token-refresh.test.ts"
+    - claim: "Every gate row that is not a github_app token refresh row passes unchanged and in order"
+      proof: "grep: W1-T13476 criterion 2 in test/now-gate-keeps-newest-token-refresh.test.ts"
+    - claim: "A rotation with 5,000 failed refreshes leaves one failed row in its now.gate digest (reducer version 2), and the body's human gates equal those of a ledger holding only the newest rows"
+      proof: "grep: W1-T13476 criterion 3 in test/now-gate-keeps-newest-token-refresh.test.ts"
+    - claim: "The gate reducer and the final gate rows both call the new reducer"
+      proof: "grep: keepNewestTokenRefreshRows( in src/lib/now-view.ts"
+  rationale: |
+    WHY: the now view was switched to serve on 2026-11-17 at 19:03Z and back to off at 19:08Z because its bodies could not
+    be rebuilt. MEASURED on the Azure host: serve's read_model.slow_view row for site at 19:08:39Z was 37,655 ms
+    (23,566 ms CPU), and 34,731 ms of it was decisions.ledger (gateLedger in src/lib/now-view.ts). The board stage
+    was 2,788 ms. read_model.now_gate_digests showed 63 digest hits and 0 parses, so the time is reading the digests.
+    Site's cache/rotation-digests/now%2Egate holds 774 MB for 66 ledger files of 39 MB: each rotation from a
+    2026-11-10 incident keeps about 63,300 github_app.token_refresh_failed rows (3,382,504 gate rows in all). Core's
+    is 9.5 MB.
+    REPRODUCED on a copy of site's ledger: a fresh process took 9.6 to 24.7 s and up to 2.6 GB heap per read. With
+    the newest-row reduction: 7.5 s once to rebuild the digests, then 32 to 50 ms, 5,444 rows, digests 1.8 MB.
+    READ at origin/main: the only reader of those rows is status-board's deriveOperatorItems token fallback, which
+    keeps the newest failed and the newest refreshed row by stamp (isNewer). Nothing else counts them.
+  design: |
+    INVARIANT same-token-fallback: the token fallback deriveOperatorItems derives from the reduced rows equals the one
+    it derives from every row.
+    1. New export keepNewestTokenRefreshRows(rows) in src/lib/now-view.ts: for TOKEN_REFRESH_FAILED_STEP and
+       TOKEN_REFRESHED_STEP keep only the row isNewer would pick (first row newer than every row before it; an
+       unparseable stamp is never newer, but is kept when it is the only one), and pass every other row in order.
+    2. reduceGateRows applies it per rotation (memo and durable digests); gateReducerVersion goes from "1" to "2" so
+       old digests are re-parsed once.
+    3. gateLedger applies it to the union too, so a storm in the live file is not held either.
+    4. The existing warm-start test expects reducer version "2".
+  falsifier: |
+    Drop the reduction from reduceGateRows: criterion 3 fails (the digest keeps 5,000 rows). Keep the newest by
+    position instead of by stamp: criterion 1 fails on the out-of-order cases. Keep the reducer version at "1":
+    old 774 MB digests are still read as hits.
+  note: |
+    Id reserved for run-unfiled-1794943022781 with ~/rmd-work/bin/reserve-id.sh. The site daemon's refresh-failure
+    storm itself ended on 2026-11-11 (no such row in the live file).
