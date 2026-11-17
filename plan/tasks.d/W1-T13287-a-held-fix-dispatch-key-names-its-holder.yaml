@@ -1,0 +1,87 @@
+- id: W1-T13287
+  title: "A held fix-dispatch key names its real holder: a registered fix run child or a fix child launch in progress, with its run id and age, never 'a concurrent sweep is already dispatching'"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: low # changes only the refusal reason and its ledger fields; the mutex check, the claim and every release stay as they are
+  origin: "operator-session#dispatch-oddities-2026-11-17"
+  plan_refs:
+    - W1-T2520
+    - W1-T9114
+    - W1-T9969
+    - W1-T12703
+  files:
+    - src/lib/sweep.ts
+    - test/a-held-fix-dispatch-key-names-its-holder.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "When a registered fix run child (registerChildWork with a fixKey) holds the key, claimFixDispatch refuses with a reason that names the child's run id and how long it has run, and the refusal fields carry in_flight_action fix-child, in_flight_run_id and in_flight_age_ms; the reason never says 'already claimed this pass' or 'a concurrent sweep'"
+      proof: "grep: W1-T13287 criterion 1 in test/a-held-fix-dispatch-key-names-its-holder.test.ts"
+    - claim: "While hostFixDispatch waits on host.spawnFix (the launch has not returned), a second claim of the same key refuses with a reason that says a fix child launch is in progress and for how long, with in_flight_action fix-child-launch and in_flight_age_ms; after the launch returns, the reason names the adopted child as in criterion 1"
+      proof: "grep: W1-T13287 criterion 2 in test/a-held-fix-dispatch-key-names-its-holder.test.ts"
+    - claim: "The sweep.disposed row that records such a refusal carries the in_flight_* fields, so the ledger alone tells a held key from a key with no holder"
+      proof: "grep: W1-T13287 criterion 3 in test/a-held-fix-dispatch-key-names-its-holder.test.ts"
+    - claim: "invariant:one-fix-round-per-key — in every holder shape (detached in-process dispatch, pending child launch, registered child) a second claim of the same key is refused and no second fix.dispatch or sweep.fix.child row is written; the key is free again only when its holder settles, and the text 'already claimed this pass' is written only when no detached action, no pending launch and no registered child holds the key"
+      kind: guard
+      proof: "grep: W1-T13287 criterion 4 in test/a-held-fix-dispatch-key-names-its-holder.test.ts"
+  rationale: |
+    WHY: the stand-down for a held fix-dispatch key tells the operator that "a concurrent sweep is already
+    dispatching this PR's fix rung" when in fact a run child owns the key. On 2026-11-16 at 18:58:14Z the sweep
+    disposed #18855 (W1-T13047) "judge: continue ... NOT DISPATCHED this pass: duplicate fix-dispatch key
+    (W1-T13047@669d438f...) already claimed this pass — a concurrent sweep is already dispatching this PR's fix
+    rung". No ledger row named a holder, so it looked like a claim with no owner. The holder was a fix child
+    launch started in the same daemon at 18:58:12Z (run id work-fix-dispatch-W1-T13047-1794855492491-48c7);
+    its run_child.launch_segments row has entry_ms 258200, and it spawned at 19:02:58Z (sweep.fix.child).
+    MEASURED, core ledger (~/rmd-state2/state, live file and archives, 2026-11-14T00:30Z to 2026-11-17T00:20Z,
+    2 duplicate copies kept): 527 sweep.disposed rows said "duplicate fix-dispatch key". 0 had no live holder.
+    - 521 said "already claimed this pass": 500 were held by a fix run child that was running (sweep.fix.child
+      before the row, daemon.child_work_settled after it; hold age median 14.1 min, max 45.2 min), 3 at the
+      window start were held by children spawned before the window, and 18 were held by a child launch in
+      progress (run id minted before the row, sweep.fix.child after it; 2 s to 706 s later).
+    - 6 said "is held by its own detached fix dispatch" (in-process dispatches; the text is correct).
+    So the "concurrent sweep" text was wrong for every one of its 521 rows, and no row named the child.
+    No claim outlived its holder: the key is in-process memory, so a restart clears it, and every holder
+    shape releases on settle (below).
+    READ at origin/main 62cb99620 (same lines in the running daemon-install be3f4d81e):
+    - src/lib/sweep.ts:18306 inFlightFixKeys, the one Set for all holders.
+    - src/lib/sweep.ts:21994-22010 claimFixDispatch: if the key is in the Set, the reason is
+      detachedFixHolder(...)?.reason, else the "already claimed this pass" text at :22007.
+    - src/lib/sweep.ts:18496-18505 detachedFixHolder reads only detachedSweepActions (in-process dispatches).
+    - src/lib/sweep.ts:21931-21970 hostFixDispatch holds the claim across `await host.spawnFix` (:21944) and is
+      called at :21976 before detachPassFix, so a pending launch is never in detachedSweepActions. On success
+      it calls claim.release() (:21961) and adoptChildWork, whose registerChildWork (:18834-18840) adds the same
+      key; settleChildWork (:18872-18881) deletes it when the child settles, lost or terminal. The abandoned
+      launch path releases at :21951; the in-process path releases in claim.run's finally (:22062-22067).
+    - Neither the pending launch nor childWork is consulted by detachedFixHolder, so 521 of 527 refusals fell
+      through to the generic text.
+  design: |
+    INVARIANT one-fix-round-per-key: a key has at most one holder; a refusal never dispatches, and only the holder's settle frees the key.
+    1. Add a module-scoped Map pendingFixLaunches: fixKey -> { startedAtMs }. hostFixDispatch sets it before
+       `await host.spawnFix` and deletes it in a finally (no change to when claim.release runs).
+    2. Add fixChildHolder(fixKey, nowMs): the registered childWork entry whose fixKey matches, with its run id
+       and age (store registeredAtMs in registerChildWork).
+    3. claimFixDispatch's refusal reason: detachedFixHolder, else the pending launch ("is held by a fix child
+       launch in progress for Ns"), else the registered child ("is held by fix run child <runId>, running for
+       Ns"), else today's text. Return the holder's fields and write them on the sweep.disposed row the way
+       detachedFixHolder's fields are written today.
+    4. No change to inFlightFixKeys adds or deletes, to the strike re-read, or to any release path.
+    5. Tests drive claimFixDispatch through runSweep with a fake installed DetachedWorkHost whose spawnFix
+       waits on a promise the test controls, plus registerChildWork / settleChildWork / resetChildWork.
+  falsifier: |
+    Leave detachedFixHolder as the only holder lookup: criteria 1 and 2 fail (the reason says "a concurrent
+    sweep"). Keep the fields off the sweep.disposed row: criterion 3 fails. Let the new lookup release or skip
+    the claim: criterion 4 fails (a second sweep.fix.child row for the same key).
+  note: |
+    Id reserved for run-unfiled-1794875295000 with ~/rmd-work/bin/reserve-id.sh.
+    Symptom 2 of the same session (#18956) is not a defect and is not filed: both sweep.fix.dispatch_failed
+    rows (23:11:22Z, 00:04:06Z) are the child's recheck refusing because the PR head moved
+    (sweep.ts:19052, logged by adoptChildWork); the heads were moved by commits 23490cd4 (23:10:05Z) and
+    3e6ceb73 (00:03:19Z). The 00:02:12Z dispatch.skipped (reason open-pr) is the task dispatcher declining a
+    new build of W1-T13179 because PR #18956 is open. The 23:59Z "continue" did get a child at 00:03:58Z.
+    Proof that counts in production: in the 3 days after the merge, no sweep.disposed row says "a concurrent
+    sweep is already dispatching" while a sweep.fix.child row for the same fix key has no settle before it.
