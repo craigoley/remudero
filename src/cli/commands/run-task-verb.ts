@@ -72,7 +72,7 @@ import { findTaskShard, requestScopeAmendment, readBuildScopeRecovery, saveBuild
 import { appendLedger, DECISION_RELEVANT_LEDGER_STEPS } from "../../lib/ledger.js";
 import { systemClock, type Clock } from "../../lib/clock.js";
 import { resolveReleasedIds, type ReleaseReaders } from "../../lib/drain.js";
-import { cashTrialPolicy, cashTrialSpawnFields, decideCashTrial } from "../../lib/cash-trial.js";
+import { cashTrialEligible, cashTrialModelFor, cashTrialModels, cashTrialPolicy, cashTrialSpawnFields, decideCashTrial, readCashTrialReadiness } from "../../lib/cash-trial.js";
 import { benchmarkNonDispatchSpawn, callerOwnsBenchmarkReceipt, type BenchmarkStackEvidence, dispatchTaskShape, fixLaneBenchmarkWork, type BenchmarkWorkInput } from "../../lib/benchmark-run.js";
 import { type RepairReceiptContext } from "../../lib/repair-cost-evidence.js";
 import { type CiRemedyExecution } from "../../lib/ci-remedy-execution.js";
@@ -5647,15 +5647,21 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
   // surface ONLY if it was told the harness owns git. Offering one to a worker whose prompt said
   // `git push` would hand it, on retry, a surface that cannot do what it was just asked to do.
   const implementCashTools = harnessOwnsGit ? [...IMPLEMENT_CASH_TOOLS] : undefined;
+  // W1-T12424: the cash arm's models are read from the ledger only for trial work.
+  const cashTrialArms = cashTrialEligible(task, taskClass)
+    ? cashTrialModels(cashTrialPolicy(config), await readCashTrialReadiness(dirname(ledgerPath))) : undefined;
   const cashTrial = decideCashTrial({
     task,
     taskClass,
     config,
     harnessCommits: implementCashTools !== undefined,
     stateDir: dirname(ledgerPath),
+    models: cashTrialArms,
   });
-  if (cashTrial) log("cash_trial.decided", { arm: cashTrial.arm, reason: cashTrial.reason });
-  const cashTrialSpawn = cashTrialSpawnFields(cashTrial, implementCashTools, cashTrialPolicy(config).models);
+  const cashTrialModel = cashTrial?.arm === "cash" ? cashTrialModelFor(task.id, cashTrial.models ?? []) : undefined;
+  if (cashTrial) log("cash_trial.decided", { trial: cashTrial.id, arm: cashTrial.arm, reason: cashTrial.reason, model: cashTrialModel,
+    models: cashTrial.models, stopped: cashTrial.stopped, summary: cashTrial.summary });
+  const cashTrialSpawn = cashTrialSpawnFields(cashTrial, implementCashTools, cashTrialModel === undefined ? [] : [cashTrialModel]);
 
   /**
    * The subscription probes are intentionally shell-backed, so a blocked auction cannot run
