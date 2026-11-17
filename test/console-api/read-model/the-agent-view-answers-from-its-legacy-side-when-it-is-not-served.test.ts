@@ -92,27 +92,17 @@ function serveDeps(w: ReturnType<typeof world>): ServeDeps {
   };
 }
 
-test("W1-T13180 criterion 1: with no agent switch entry serve answers /v1/views/agent from the worker's own readers, not 404 view_disabled", async (t) => {
+test("W1-T13180 criterion 1: with no agent switch entry serve routes /v1/views/agent and, with no worker body, answers 503 view_not_ready, not 404 view_disabled (W1-T13282)", async (t) => {
   t.mock.method(systemClock, "now", () => NOW);
   const w = world(t);
-  // Serve has no analytics refresh yet, so the worker's body to compare is the one built before any committed snapshot.
-  const worker = workerBodies(w);
   const routes = buildServeRoutes(serveDeps(w));
   assert.ok(routes.some((route) => route.path === `/v1/views/${AGENT_VIEW_NAME}`), "serve routes the agent view");
   const base = await listen({ after: w.onClose }, routes);
   for (const part of PARTS) {
     const res = await get(base, `/v1/views/agent?instance=core&part=${part}`);
-    assert.equal(res.status, 200, `${part}: ${JSON.stringify(res.body)}`);
-    const body = res.body as ViewBody<AgentViewData>;
-    assert.equal(body.view, AGENT_VIEW_NAME);
-    assert.deepEqual(body.data, worker.get(agentViewKey("core", part))!.data, `${part} equals the worker's body over the same facts`);
+    assert.equal(res.status, 503, `${part}: ${JSON.stringify(res.body)}`);
+    assert.equal((res.body as { error: string }).error, "view_not_ready", part);
   }
-  // CONTROL: the bodies carry the ledger's facts, so equality is not two empty reads.
-  const history = (await get(base, "/v1/views/agent?instance=core&part=history")).body as ViewBody<AgentViewData>;
-  assert.match(JSON.stringify(history.data.body), /operator-agent:repo:fix:slow-runs/);
-  const proposals = (await get(base, "/v1/views/agent?instance=core&part=proposals")).body as ViewBody<AgentViewData>;
-  assert.deepEqual(proposals.data.body, { reason: "no analytics refresh has completed yet, so no proposal is generated" });
-  assert.deepEqual(proposals.sources.map((source) => [source.name, source.state]), [["ledger:core", "fresh"], ["analytics:core", "unavailable"]]);
 });
 
 /** The agent view's routes as serve builds them, over a read model whose switch for the view is `mode`. */
@@ -131,7 +121,7 @@ function routesIn(mode: ViewSwitchMode | undefined, legacy: ReturnType<typeof ag
   });
 }
 
-test("W1-T13180 criterion 2: shadow answers from the legacy side and still offers the request to the comparator; serve answers the worker's body", async (t) => {
+test("W1-T13180 criterion 2: shadow answers from the legacy side (not ready since W1-T13282) and still offers the request to the comparator; serve answers the worker's body", async (t) => {
   const w = world(t);
   const legacy = agentLegacyView({ scopes: () => [{ instanceId: "core", repository: REPO, analytics: busySnapshot, ledgerPath: w.ledgerPath }], clock: fixedClock(NOW) });
   const key = agentViewKey("core", "history");
@@ -139,14 +129,10 @@ test("W1-T13180 criterion 2: shadow answers from the legacy side and still offer
   const workerData = { instance: "core", part: "history", repository: REPO, body: { proposals: [], source: "worker-marker" } };
   const workerBody: ViewBody = { view: AGENT_VIEW_NAME, version: 1, generatedAt: iso(0), asOf: iso(0), stale: false, sources: [{ name: "ledger:core", asOf: iso(0), state: "fresh" }], data: workerData };
   const entry: ViewBodyEntry = { view: AGENT_VIEW_NAME, key, version: 1, generation: 1, etag: viewEtag(AGENT_VIEW_NAME, 1, false, workerData), body: workerBody };
-  const expected = renderView(legacy, fixedClock(NOW), new URLSearchParams(key));
-  assert.ok(!("error" in expected));
-
   const shadowed: string[] = [];
   const shadowBase = await listen({ after: w.onClose }, routesIn("shadow", legacy, entry, shadowed));
   const inShadow = await get(shadowBase, `/v1/views/agent?${key}`);
-  assert.equal(inShadow.status, 200);
-  assert.deepEqual((inShadow.body as ViewBody).data, expected.body.data, "shadow keeps legacy primary");
+  assert.equal(inShadow.status, 503, "shadow keeps the legacy side primary, and it is not ready (W1-T13282)");
   for (let i = 0; i < 50 && shadowed.length === 0; i++) await new Promise((done) => setImmediate(done));
   assert.deepEqual(shadowed, [`${AGENT_VIEW_NAME}:${key}`], "the shadowed request is offered to the comparator once it finished");
 
@@ -159,23 +145,19 @@ test("W1-T13180 criterion 2: shadow answers from the legacy side and still offer
 
   const offBase = await listen({ after: w.onClose }, routesIn(undefined, legacy, entry, []));
   const inOff = await get(offBase, `/v1/views/agent?${key}`);
-  assert.equal(inOff.status, 200, "no switch entry answers from the legacy side");
-  assert.deepEqual((inOff.body as ViewBody).data, expected.body.data);
+  assert.equal(inOff.status, 503, "with no switch entry and no serve default here, the legacy side answers not ready");
 });
 
-test("W1-T13180 criterion 3: invariant one-proposal-engine, the legacy answer equals the worker's body for every part over the same facts", (t) => {
+test("W1-T13180 criterion 3: invariant one-proposal-engine, the worker's body is the only proposal engine and the legacy side computes none (W1-T13282)", (t) => {
   const w = world(t);
   writeSourceSnapshot(w.db, w.lease, { instance: "core", ok: true, asOf: ANALYTICS_AS_OF, bodies: analyticsSourceBodies(busySnapshot(), REPO) });
   const worker = workerBodies(w);
   const legacy = agentLegacyView({ scopes: () => [{ instanceId: "core", repository: REPO, analytics: busySnapshot, ledgerPath: w.ledgerPath }], clock: fixedClock(NOW) });
   for (const part of PARTS) {
     const rendered = renderView(legacy, fixedClock(NOW), new URLSearchParams({ instance: "core", part }));
-    assert.ok(!("error" in rendered), part);
-    const built = worker.get(agentViewKey("core", part))!;
-    assert.deepEqual(rendered.body.data, built.data, `${part}: one engine, one answer`);
-    assert.deepEqual(rendered.body.sources.map((source) => source.name), (built.sources as Array<{ name: string }>).map((source) => source.name), `${part} names the worker's sources`);
+    assert.ok("error" in rendered && rendered.error === "view_not_ready", `${part}: the legacy side ranks nothing`);
   }
-  // CONTROL: the engine really ranked proposals, so the equality covers a ranking, not two refusals.
+  // CONTROL: the engine really ranked proposals, so the worker is the one engine, not two refusals.
   const proposals = worker.get(agentViewKey("core", "proposals"))!.data.body as AgentProposalsBody;
   assert.ok((proposals.proposals ?? []).length > 0, JSON.stringify(proposals));
   assert.equal(proposals.records?.length, proposals.proposals!.length, "each ranked proposal carries its record");

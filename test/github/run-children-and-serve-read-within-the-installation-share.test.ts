@@ -16,7 +16,7 @@ import {
   configureGithubInstallationBudget, ghJson, ghJsonAsync, githubInstallationBudget, GhPaceFloorStandDownError,
 } from "#src/lib/github-transport.js";
 import { DEFAULT_HOST_INSTANCE_REGISTRY_PATH, installationConsumers } from "#src/lib/instance-registry.js";
-import { INSTALLATION_SHARE_DIVISOR_ENV, startProcessInstallationBudget } from "#src/lib/installation-budget-start.js";
+import { INSTALLATION_REGISTRY_PATH_ENV, INSTALLATION_SHARE_DIVISOR_ENV, startProcessInstallationBudget } from "#src/lib/installation-budget-start.js";
 import { ledgerPathFor } from "#src/lib/ledger-path.js";
 import type { Plan } from "#src/lib/plan.js";
 import { spawnRunChild, writePlanSnapshot } from "#src/lib/run-child.js";
@@ -145,7 +145,11 @@ test("W1-T12950 criterion 1: a run child writes its run_child budget row and rea
   hostRegistry(t, HOST_REGISTRY);
   const { dir, root } = runFixture(t, "share");
   let inside: { consumers?: number; reads: number; refusal?: string; waitMs?: number } = { reads: 0 };
-  const env = { GH_APP_INSTALLATION_ID: INSTALLATION, RMD_INSTANCE_NAME: "core", [INSTALLATION_SHARE_DIVISOR_ENV]: "2" };
+  // W1-T13179: the daemon names the registry file it read in the child's environment.
+  const env = {
+    GH_APP_INSTALLATION_ID: INSTALLATION, RMD_INSTANCE_NAME: "core", [INSTALLATION_SHARE_DIVISOR_ENV]: "2",
+    [INSTALLATION_REGISTRY_PATH_ENV]: DEFAULT_HOST_INSTANCE_REGISTRY_PATH,
+  };
   const { code, errors } = await runChild(dir, env, async () => {
     const budget = githubInstallationBudget();
     // 6 consumers, and the run-child share split by the divisor 2: 12 shares of what is left.
@@ -166,7 +170,7 @@ test("W1-T12950 criterion 1: a run child writes its run_child budget row and rea
   assert.equal(inside.consumers, 12);
   assert.equal(inside.reads, 3, "the run child read its allowance");
   assert.equal(inside.refusal, "share", "the next read is past its share");
-  assert.ok(inside.waitMs !== undefined && inside.waitMs > 0, "with no wait bound the read waits for the reset, as an unbounded daemon read does");
+  assert.equal(inside.waitMs, undefined, "W1-T13179: a reset an hour away is past the run child's wait bound, so the read stands down");
   const rows = budgetRows(root);
   assert.equal(rows.length, 1, "one row");
   assert.equal(rows[0]?.role, "run_child");
@@ -254,7 +258,9 @@ test("W1-T12950 criterion 4: the run children and serve each count one share, an
   hostRegistry(t, HOST_REGISTRY);
   const { dir, root: childRoot } = runFixture(t, "no-divisor");
   let consumers: number | undefined;
-  const { code } = await runChild(dir, { GH_APP_INSTALLATION_ID: INSTALLATION, RMD_INSTANCE_NAME: "core" }, () => {
+  const { code } = await runChild(dir, {
+    GH_APP_INSTALLATION_ID: INSTALLATION, RMD_INSTANCE_NAME: "core", [INSTALLATION_REGISTRY_PATH_ENV]: DEFAULT_HOST_INSTANCE_REGISTRY_PATH,
+  }, () => {
     consumers = githubInstallationBudget().consumers;
   });
   assert.equal(code, 0);
@@ -278,7 +284,9 @@ test("W1-T12950 criterion 5: with no installation id or an unreadable registry, 
 
   hostRegistry(t, { code: "EACCES" });
   const unreadable = runFixture(t, "unreadable");
-  const second = await runChild(unreadable.dir, { GH_APP_INSTALLATION_ID: INSTALLATION, RMD_INSTANCE_NAME: "core" }, unlimited);
+  const second = await runChild(unreadable.dir, {
+    GH_APP_INSTALLATION_ID: INSTALLATION, RMD_INSTANCE_NAME: "core", [INSTALLATION_REGISTRY_PATH_ENV]: DEFAULT_HOST_INSTANCE_REGISTRY_PATH,
+  }, unlimited);
   assert.equal(second.code, 0, second.errors.join(""));
   const [row] = budgetRows(unreadable.root);
   assert.equal(row?.role, "run_child");
