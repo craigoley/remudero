@@ -7,17 +7,20 @@
   verify: auto
   principles:
     tdd: strict
-  risk: medium # what the agent view answers when the read model has no body; served bodies are unchanged
+  risk: high # serves the worker's agent body by default and narrows W1-T13180's legacy side; served bodies are unchanged
+  band_meaning: span
   origin: "operator-session#serve-oom-2026-11-16"
   plan_refs:
     - W1-T13180
   files:
     - src/lib/agent-view.ts
+    - src/lib/serve.ts
+    - test/console-api/read-model/the-agent-view-answers-from-its-legacy-side-when-it-is-not-served.test.ts
     - test/the-agent-view-legacy-side-reads-no-ledger.test.ts
   status: queued
   attempts: 0
   acceptance:
-    - claim: "With the agent view not switched to serve, a request for /v1/views/agent?instance=core&part=proposals answers 503 view_not_ready with Retry-After, and an injected ledger reader that counts its calls is called 0 times"
+    - claim: "With the agent view not switched to serve, a request for /v1/views/agent?instance=core&part=proposals answers 503 view_not_ready for every part, with a ledger path that does not exist (any ledger read would throw or return rows)"
       proof: "grep: W1-T13282 criterion 1 in test/the-agent-view-legacy-side-reads-no-ledger.test.ts"
     - claim: "With the view switched to serve and a worker body present, the body is served as before; with the body absent, the same view_not_ready answer is given and no ledger is read"
       proof: "grep: W1-T13282 criterion 2 in test/the-agent-view-legacy-side-reads-no-ledger.test.ts"
@@ -40,7 +43,9 @@
        by the read-model worker; no body yet", and reads no ledger and no analytics. Set Retry-After where the route
        sends error statuses (views.ts already passes `status` through).
     2. Keep refuseUnknownPart first.
-    3. The read-model worker's body (createAgentView) is unchanged; operators turn `agent` on in switches.json to serve it.
+    3. serve.ts adds AGENT_VIEW_NAME to servedByDefault (the routes and the view-events wiring), so the worker's body
+       is served with no switches.json entry; the legacy side answers only keys the worker has not built.
+    4. W1-T13180's test now asserts the narrowed legacy side (criteria 1 to 3); its criterion 4 is unchanged.
   falsifier: |
     Keep the ledger read: criterion 1 fails (the counter is above 0). Read the ledger when the body is missing in serve
     mode: criterion 2 fails. Validate after computing: criterion 3 fails.
