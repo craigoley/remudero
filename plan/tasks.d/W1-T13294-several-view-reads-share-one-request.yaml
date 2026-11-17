@@ -53,3 +53,4 @@
     unknown view: criterion 2 fails. Change any GET status, header or byte during the extraction: criterion 3 fails.
   note: |
     Id reserved for run-unfiled-1794877264000 with ~/rmd-work/bin/reserve-id.sh.
+    reservation hand-off: run-unfiled-1794877264000 -> claude/project-thread-cb5huh-plan-view-batch
