@@ -23,7 +23,7 @@ import { startGarden, type GardenerDeps, type PrState } from "./gardener.js";
 import { knowledgeGardenSpec, type GardenWorkspace } from "./knowledge-gardener.js";
 import { startInboxResponder, type InboxResponderDeps } from "./inbox-responder.js";
 import { startLivenessPulse } from "./liveness-pulse.js";
-import { installSpawnHelper, startSpawnHelper } from "./spawn-helper.js";
+import { installedSpawnHelper, installSpawnHelper, startSpawnHelper } from "./spawn-helper.js";
 
 
 import type {
@@ -3877,7 +3877,7 @@ export interface LearnedCrashLoopSummary {
   incident: "none" | "opened" | "updated" | "cleared" | "open";
 }
 
-/** W1-T9754: the environment switch that starts the spawn helper at boot. Its default, off, is an operator decision. */
+/** W1-T9754: the environment switch for the spawn helper. W1-T13437: on unless set to exactly "off" (operator ruling). */
 export const SPAWN_HELPER_SWITCH = "RMD_SPAWN_HELPER";
 
 /** The daemon's startup routine (W1-T12b): the clean-env boot assertion, run once before the scheduler loop starts.
@@ -3946,12 +3946,23 @@ export async function daemonBoot(
     ...(bootHeadSha ? { head_sha: bootHeadSha } : {}),
     ...(checkoutDepth ? { checkout_shallow: checkoutDepth.shallow, checkout_commit_count: checkoutDepth.commitCount } : {}),
   });
-  // W1-T9754: the spawn helper starts here, while this process is still small, so a later routed spawn forks from
-  // it and not from a 1.5-2 GB daemon. Whether it starts is the operator's switch, off unless set to "on".
-  if (env[SPAWN_HELPER_SWITCH] === "on") {
-    const helper = startSpawnHelper({ log });
-    installSpawnHelper(helper);
-    log("daemon.spawn_helper", { started: true, pid: helper.pid, switch: SPAWN_HELPER_SWITCH });
+  // W1-T9754/W1-T13437: the helper starts while this process is small, unless the switch is "off"; one row either way.
+  const switchValue = env[SPAWN_HELPER_SWITCH] ?? "unset";
+  const helperRow = { switch: SPAWN_HELPER_SWITCH, value: switchValue };
+  if (switchValue === "off") {
+    log("daemon.spawn_helper", { started: false, reason: "switch_off", ...helperRow });
+  } else {
+    try {
+      installedSpawnHelper()?.stop();
+      const helper = startSpawnHelper({ log });
+      installSpawnHelper(helper);
+      log("daemon.spawn_helper", { started: true, pid: helper.pid, ...helperRow });
+    } catch (error) {
+      // Reason: a helper that cannot start costs no spawn; the boot continues on the direct path, named here.
+      installSpawnHelper(undefined);
+      log("daemon.spawn_helper", { started: false,
+        reason: `start_failed: ${String((error as Error)?.message ?? error).slice(0, 120)}`, ...helperRow });
+    }
   }
   // The boot-rate invariant: the shape-not-cause check. Logged either way, so the invariant's own
   // pass or fail is part of the boot record, not only its breaches (W1-T215).

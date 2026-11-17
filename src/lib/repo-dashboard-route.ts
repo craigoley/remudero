@@ -20,6 +20,7 @@
  * repository alert policy; other repositories require their own instance's summary.
  */
 
+import { threadName } from "./thread-names.js";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -635,7 +636,7 @@ function startRepoTelemetryWorker(workerUrl: URL): (req: RepoTelemetryRequest) =
     new Promise((resolve) => {
       if (!worker) {
         try {
-          const spawned = new Worker(workerUrl, { workerData: { kind: REPO_TELEMETRY_WORKER_KIND } });
+          const spawned = new Worker(workerUrl, { name: threadName("repoTelemetry"), workerData: { kind: REPO_TELEMETRY_WORKER_KIND } });
           spawned.on("message", (msg: { id: number; outcome: RepoTelemetryOutcome }) => {
             const settle = pending.get(msg.id);
             pending.delete(msg.id);

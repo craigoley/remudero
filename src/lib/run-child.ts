@@ -1267,6 +1267,8 @@ export interface DetachedWorkChildHost {
     fixKey: string;
     /** The typed decision envelope (sweep.ts `FixDispatchEnvelope`); this module only carries it into `spec.json`, plain JSON. */
     envelope: object;
+    /** W1-T13440: told the run id and an abort while the child waits for its reservation. */
+    onPending?: (pending: RunChildPending) => void;
   }) => Promise<{ runId: string; pid?: number; settled: Promise<unknown>; acknowledge?: (outcome: PromiseSettledResult<never>) => void } | RunChildAbandoned | undefined>;
   spawnRetro: (input: { decision: Record<string, unknown> }) => ReturnType<DetachedWorkChildHost["spawnFix"]>;
 }
@@ -1681,7 +1683,7 @@ export function createDetachedWorkHost(input: DetachedWorkHostInput): DetachedWo
       return { runId: launch.runId, settled: launch.settled, acknowledge: launch.acknowledge,
         readPhase: () => readOwnedChildPhase(launch.dir, launch.runId) };
     },
-    async spawnFix({ pr, fixKey, envelope }) {
+    async spawnFix({ pr, fixKey, envelope, onPending }) {
       // A fix has no shadow probe of its own: the review's probe already round-trips the contract. Only `on` moves it.
       if (mode() !== "on") return undefined;
       const placement = detachedWorkPlacement("fix-dispatch", {
@@ -1691,7 +1693,7 @@ export function createDetachedWorkHost(input: DetachedWorkHostInput): DetachedWo
       const work: DetachedWorkSpec = { kind: "fix-dispatch", prNumber: pr.prNumber, headSha: pr.headSha, fixKey, inputs: { repo: input.repo, envelope } };
       const launch = await (input.spawn ?? spawnRunChild)({
         taskId: pr.taskId ?? `PR-${pr.prNumber}`, lane: "sweep-fix", stateRoot: input.stateRoot, repoDir: input.repoDir, root: input.root,
-        plan: async () => ({ plan: { tasks: [] } }), options: options(), log, work,
+        plan: async () => ({ plan: { tasks: [] } }), options: options(), log, work, ...(onPending === undefined ? {} : { onPending }),
       });
       if (!launch.started) return launch.abandoned ? launch : undefined;
       return { runId: launch.runId, settled: launch.settled, acknowledge: launch.acknowledge };

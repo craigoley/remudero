@@ -6,6 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import { systemClock } from "./clock.js";
 import { LEDGER_FUTURE_STAMP_TOLERANCE_MS } from "./ledger.js";
 import { ledgerLivePath, listedLedgerFiles, openLedgerUnion } from "./ledger-union.js";
+import { STALE_FIX_DISPATCH_RECEIPT_STEP, staleFixDispatchRecoveryId } from "./stale-fix-dispatch-recovery.js";
 
 type Row = Record<string, unknown>;
 
@@ -20,6 +21,93 @@ export interface PrOwnerLedgerProjection {
   latestSweep?: Row;
   relatedClaimKeys: string[];
   futureStampedSkipped: number;
+  /** W1-T12115: this PR's non-future recovery receipt rows, in ledger order. */
+  receipts: Row[];
+  /** W1-T12115: a receipt for this PR was future- or invalid-stamped and skipped; it may be a release. */
+  receiptUnknown: boolean;
+}
+
+export type PrOwnerReceiptMatch =
+  | { kind: "none" }
+  | { kind: "released"; receipt: Row }
+  | { kind: "unknown"; reason: string };
+
+const FULL_SHA = /^[0-9a-f]{40}$/;
+const nonEmpty = (value: unknown): value is string => typeof value === "string" && value.length > 0;
+const msOf = (row: Row): number => (typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN);
+
+/** The injected-corpus twin of the projection's receipt admission: this PR's receipt rows, with the
+ *  W1-T11323 future-stamp skip, and whether a row had to be skipped for its timestamp. */
+export function collectPrOwnerReceipts(
+  rows: readonly Row[], targetPr: number, nowMs: number = systemClock.now(),
+): { receipts: Row[]; receiptUnknown: boolean } {
+  const receipts: Row[] = [];
+  let receiptUnknown = false;
+  for (const row of rows) {
+    if (row.step !== STALE_FIX_DISPATCH_RECEIPT_STEP || prNumber(row) !== targetPr) continue;
+    const ms = msOf(row);
+    if (!Number.isFinite(ms) || ms - nowMs > LEDGER_FUTURE_STAMP_TOLERANCE_MS) receiptUnknown = true;
+    else receipts.push(row);
+  }
+  return { receipts, receiptUnknown };
+}
+
+/** A receipt is readable only when its schema is whole and its recovery_id recomputes from its own
+ *  identity and authorization. */
+function validReceipt(row: Row): boolean {
+  if (row.outcome !== "released" && row.outcome !== "held") return false;
+  if (!nonEmpty(row.repo) || !nonEmpty(row.task_id) || !nonEmpty(row.prior_run_id) || !nonEmpty(row.prior_round_id)) return false;
+  if (!nonEmpty(row.branch) || !nonEmpty(row.authorization_id) || !nonEmpty(row.actor) || !nonEmpty(row.recovery_id)) return false;
+  if (typeof row.head_sha !== "string" || !FULL_SHA.test(row.head_sha) || typeof row.base_sha !== "string" || !FULL_SHA.test(row.base_sha)) return false;
+  if (typeof row.pr_number !== "number" || !Number.isSafeInteger(row.pr_number) || row.pr_number <= 0) return false;
+  if (!Number.isFinite(msOf(row))) return false;
+  return row.recovery_id === staleFixDispatchRecoveryId({
+    repo: row.repo, prNumber: row.pr_number, taskId: row.task_id, dispatchRunId: row.prior_run_id,
+    dispatchRoundId: row.prior_round_id, headSha: row.head_sha, baseSha: row.base_sha, branch: row.branch,
+    authorizationId: row.authorization_id,
+  });
+}
+
+function sameDispatchAsLatestFix(receipt: Row, latestFix: Row, targetPr: number): boolean {
+  return receipt.pr_number === targetPr && receipt.task_id === latestFix.task_id && receipt.prior_run_id === latestFix.run_id &&
+    receipt.prior_round_id === latestFix.round_id && receipt.head_sha === latestFix.head_sha;
+}
+
+/** W1-T12115: does one released recovery receipt, stamped strictly after the newest fix.dispatch, name that
+ *  exact dispatch (PR, task, run, round, head — and repo, base and branch where the dispatch row carries
+ *  them) with no held row at or after it? `none` leaves ownership as it was; `unknown` is any doubt. */
+export function matchRecoveryReceipt(
+  targetPr: number, latestFix: Row | undefined, receipts: readonly Row[], receiptUnknown: boolean,
+): PrOwnerReceiptMatch {
+  if (latestFix === undefined) return { kind: "none" };
+  const dispatchMs = msOf(latestFix);
+  if (!Number.isFinite(dispatchMs)) return { kind: "none" };
+  const mine = receipts.filter((row) => row.step === STALE_FIX_DISPATCH_RECEIPT_STEP && prNumber(row) === targetPr);
+  const unreadable = mine.some((row) => !validReceipt(row));
+  const exact = mine.filter((row) => validReceipt(row) && sameDispatchAsLatestFix(row, latestFix, targetPr));
+  const released = exact.filter((row) => row.outcome === "released");
+  if (released.length === 0) return { kind: "none" };
+  if (receiptUnknown) return { kind: "unknown", reason: "a recovery receipt for this pull request was future- or invalid-stamped" };
+  if (unreadable) return { kind: "unknown", reason: "an unreadable recovery receipt row exists for this pull request" };
+  const body = (row: Row) => JSON.stringify(row);
+  const first = released[0]!;
+  if (released.some((row) => body(row) !== body(first))) {
+    return { kind: "unknown", reason: "distinct released recovery receipts name this fix.dispatch" };
+  }
+  const releaseMs = msOf(first);
+  const sameIdentity = (row: Row) => ["repo", "base_sha", "branch"].every((key) => row[key] === first[key]);
+  const carried = (key: string) => latestFix[key] === undefined || latestFix[key] === first[key];
+  if (!exact.every(sameIdentity) || !carried("repo") || !carried("base_sha") || !carried("branch")) {
+    return { kind: "unknown", reason: "recovery receipts for this fix.dispatch disagree on repo, base or branch" };
+  }
+  if (first.prior_dispatch_ts !== undefined && first.prior_dispatch_ts !== latestFix.ts) {
+    return { kind: "unknown", reason: "the released recovery receipt names another dispatch timestamp" };
+  }
+  if (!(releaseMs > dispatchMs)) return { kind: "none" };
+  if (exact.some((row) => row.outcome === "held" && !(msOf(row) < releaseMs))) {
+    return { kind: "unknown", reason: "a held recovery receipt is stamped at or after the release" };
+  }
+  return { kind: "released", receipt: first };
 }
 
 function prNumber(row: Row): number | undefined {
@@ -56,7 +144,7 @@ export async function readPrOwnerLedgerProjection(
   nowMs: number = systemClock.now(),
 ): Promise<PrOwnerLedgerProjection> {
   const result: PrOwnerLedgerProjection = {
-    archiveFiles: [], liveFileRead: false, filesRead: 0, unread: [], ok: false, relatedClaimKeys: [], futureStampedSkipped: 0,
+    archiveFiles: [], liveFileRead: false, filesRead: 0, unread: [], ok: false, relatedClaimKeys: [], futureStampedSkipped: 0, receipts: [], receiptUnknown: false,
   };
   const livePath = ledgerLivePath(stateDir);
   let liveFd: number | undefined;
@@ -107,10 +195,13 @@ export async function readPrOwnerLedgerProjection(
           ordinal += 1;
           const ms = typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN;
           // W1-T11323: a row stamped past the tolerance (a clock-shifted writer) is neither newest nor evidence.
+          const targetReceipt = row.step === STALE_FIX_DISPATCH_RECEIPT_STEP && prNumber(row) === targetPr;
           if (Number.isFinite(ms) && ms - nowMs > LEDGER_FUTURE_STAMP_TOLERANCE_MS) {
             result.futureStampedSkipped += 1;
+            if (targetReceipt) result.receiptUnknown = true;
             return;
           }
+          if (targetReceipt && !Number.isFinite(ms)) result.receiptUnknown = true;
           if (Number.isFinite(ms) && ms >= newestMs) {
             if (ms > newestMs) {
               clearTies.run();
@@ -121,8 +212,8 @@ export async function readPrOwnerLedgerProjection(
             if (addTie.run(raw).changes > 0) result.corpusNewestTs = row.ts as string;
           }
           const kind = row.step;
-          if (kind !== "fix.dispatch" && !(kind === "sweep.disposed" && prNumber(row) === targetPr)) return;
-          addEvidence.run(raw, ordinal, kind, Number.isFinite(ms) ? ms : null,
+          if (kind !== "fix.dispatch" && !(kind === "sweep.disposed" && prNumber(row) === targetPr) && !targetReceipt) return;
+          addEvidence.run(raw, ordinal, kind as string, Number.isFinite(ms) ? ms : null,
             typeof row.task_id === "string" ? row.task_id : null,
             typeof row.head_sha === "string" ? row.head_sha : null,
             prNumber(row) === targetPr ? 1 : 0);
@@ -183,6 +274,9 @@ export async function readPrOwnerLedgerProjection(
       result.latestFix = latest(`(${eligibleFix})`);
       result.latestSweep = latest("kind='sweep.disposed'");
       result.relatedClaimKeys = [...related];
+      for (const found of db.prepare(`SELECT raw FROM evidence WHERE kind='${STALE_FIX_DISPATCH_RECEIPT_STEP}' AND ms IS NOT NULL ORDER BY ordinal`).iterate()) {
+        result.receipts.push(JSON.parse(found.raw as string) as Row);
+      }
     } else {
       // The synchronous strict reader discards all rows, including its newest timestamp.
       delete result.corpusNewestTs;
@@ -192,6 +286,7 @@ export async function readPrOwnerLedgerProjection(
     delete result.latestFix;
     delete result.latestSweep;
     result.relatedClaimKeys = [];
+    result.receipts = [];
     result.unread.push(String((error as Error)?.message ?? error));
     delete result.corpusNewestTs;
     return { ...result, ok: false };
