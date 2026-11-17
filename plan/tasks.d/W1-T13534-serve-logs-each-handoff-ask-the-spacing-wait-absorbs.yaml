@@ -1,5 +1,5 @@
 - id: W1-T13534
-  title: "When serve's handoff spacing wait absorbs a later handoff ask, it writes a row naming the newer target and when the wait ends, so a self-sync that is hours behind main is visible in the ledger instead of silent"
+  title: "When serve's handoff spacing wait absorbs a later handoff ask, it writes a row naming the remaining wait, and host pressure can stretch the spacing to at most twice its base, so a self-sync behind main is visible and bounded instead of silent and open-ended"
   repo: remudero
   depends_on: []
   priority: 2
@@ -7,7 +7,7 @@
   verify: auto
   principles:
     tdd: strict
-  risk: low # adds ledger rows only; when and how serve hands off is unchanged
+  risk: medium # adds ledger rows and bounds the pressure stretch of the spacing; the handoff itself is unchanged
   band_meaning: span
   origin: "operator-session#serve-recycle-2026-11-17"
   plan_refs:
@@ -22,9 +22,11 @@
       proof: "grep: W1-T13534 criterion 1 in test/console-api/serve/serve-logs-each-handoff-ask-the-spacing-wait-absorbs.test.ts"
     - claim: "When the wait ends, the one re-ask still runs exactly one handoff, as before"
       proof: "grep: W1-T13534 criterion 2 in test/console-api/serve/serve-logs-each-handoff-ask-the-spacing-wait-absorbs.test.ts"
-    - claim: "invariant:spacing-unchanged — handoffSpacingMs and the first serve.handoff_deferred spacing row are unchanged"
-      kind: guard
+    - claim: "handoffSpacingMs never exceeds SERVE_HANDOFF_SPACING_MAX_MS, twice SERVE_HANDOFF_SPACING_BASE_MS, however high the pressure"
       proof: "grep: W1-T13534 criterion 3 in test/console-api/serve/serve-logs-each-handoff-ask-the-spacing-wait-absorbs.test.ts"
+    - claim: "invariant:pressure-still-stretches — below the cap, handoffSpacingMs still grows with pressure, and the first serve.handoff_deferred spacing row is unchanged"
+      kind: guard
+      proof: "grep: W1-T13534 criterion 4 in test/console-api/serve/serve-logs-each-handoff-ask-the-spacing-wait-absorbs.test.ts"
   rationale: |
     WHY: on 2026-11-17 (OBSERVED, host ledger) serve handed off at 22:18:56Z, then at 22:33:24Z wrote one
     serve.handoff_deferred reason spacing with waitMs 12423555 (about 3.45 h; spacingMs 13291701 after pressure).
@@ -33,12 +35,15 @@
     READ at origin/main, src/lib/serve-supervisor.ts awaitSpacing: `if (spacingPending) return true;` returns before
     any log, by design ("the wait re-asks once, however many asks arrive meanwhile").
   design: |
-    INVARIANT spacing-unchanged: the spacing length, the pressure scaling and the single re-ask are unchanged.
+    INVARIANT pressure-still-stretches: below the cap the pressure scaling and the single re-ask are unchanged.
     1. In awaitSpacing, when spacingPending is already set, count the ask and write serve.handoff_spacing_absorbed
        { sha (the asked target, when known), remainingMs, absorbed } before returning true.
     2. Reset the count when the wait ends.
+    3. Add SERVE_HANDOFF_SPACING_MAX_MS = 2 * SERVE_HANDOFF_SPACING_BASE_MS (BACKSTOP) and clamp handoffSpacingMs to
+       it, so pressure can at most double the wait (W1-T13303 kept 2 h as the intent; 3.7 h was observed).
   falsifier: |
-    Return silently on a pending wait: criterion 1 fails. Re-ask per absorbed ask: criterion 2 fails.
+    Return silently on a pending wait: criterion 1 fails. Re-ask per absorbed ask: criterion 2 fails. Drop the clamp:
+    criterion 3 fails. Clamp at the base: criterion 4 fails.
   note: |
     Id reserved for run-unfiled-1794957748028 with ~/rmd-work/bin/reserve-id.sh.
     reservation hand-off: run-unfiled-1794957748028 -> claude/project-thread-qqxbpu
