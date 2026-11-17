@@ -100,13 +100,14 @@ import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized, readLedgerUni
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { InflightLockError, withInflightLock } from "./inflight-lock.js";
 import { classificationSnapshotPath, fleetLaneDecisions, fleetLaneStorePath, persistedInboxPath, readClassificationSnapshot, readFleetLaneStore, readPersistedInbox, validInboxSnapshot, type ClassificationEvidence, type DecisionStore, type FleetLaneDecision, type InboxAttentionEvidence, type InboxSourceIdentity, type PersistedInbox, type PersistedInboxContent } from "./fleet-lane.js";
-import { classifiedInboxOwner, hasUnansweredInboxQuestion, inboxOwner, inboxSender, isAgeOnlyInboxInformation, latestInstant, type InboxSender } from "./inbox-owner.js";
+import { classifiedInboxOwner, hasUnansweredInboxQuestion, inboxSender, isAgeOnlyInboxInformation, latestInstant, type InboxSender } from "./inbox-owner.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { mergeVerdictReceipts, proposalVerdictsWithReceipts, readVerdictReceipts, verdictReceiptOf, PROPOSAL_VERDICT_RECEIPT_STEPS, type VerdictReceipt } from "./inbox-verdict-receipts.js";
 import { judgementFamily } from "./machine-filing-judge.js";
 import { currentVerifyHumanRulings, currentDeclineState, declineLapse, observedStateOfProposalSummary } from "./verify-human-judge.js";
 import { projectProposalHumanGates } from "./ask-classification.js";
 import { plainInboxMessage, plainStorePath, readPlainStore, servePlainOptions, type InboxOptionLane, type PlainInboxMessage, type PlainStore, type ServedPlainInboxMessage } from "./inbox-plain.js";
+import { operatorThreadItemsOf, type ThreadListInbox } from "./inbox-thread-items.js";
 import { narrowQualification, readRecommendationSource, readRecommendationStore, recommendationFor, recommendationStorePath, type RecommendationQualification, type RecommendationStore, type ServedRecommendation } from "./inbox-recommendation.js";
 import { INBOX_STALE_AFTER_MS } from "./nav-badge-view.js";
 import {
@@ -2934,35 +2935,12 @@ function inboxShapeOf(
 
 // ── W1-T4088: the inbox as threads ─────────────────────────────────────────────────────────────
 
-/** W1-T9252: this table is the thread routes' membership, so it must name every classification `inboxLanes` puts in
- *  `needsYou`. `deferred_with_trigger` was missing: its item is listed under `notReady` (a deferred item waits
- *  on a trigger, which is the fleet's next step) but its id was refused on every thread route as not found. */
-const CLASSIFICATION_TO_THREAD_STATE: Partial<Record<string, InboxThreadItem["state"]>> = {
-  ready: "ready",
-  drafting: "drafting",
-  not_ready: "notReady",
-  deferred_with_trigger: "notReady",
-  declined: "declined",
-  retired: "retired",
-};
-
 /** Every operator-owned item with its plain message and state, off the SAME classification
- *  `GET /v1/inbox` renders. */
+ *  `GET /v1/inbox` renders. W1-T13456: the projection lives in inbox-thread-items.ts, which the
+ *  `inbox-threads` view shares. */
 function operatorThreadItems(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan, classified: ThreadListInbox = classifyAllProposalsMemo(deps, readPlanSnapshot), storedPlain?: PlainStore): InboxThreadItem[] {
-  const { proposals, classifications } = classified;
   const plainStore = storedPlain ?? readPlainStore(plainStorePath(join(deps.inboxRoot, "state")));
-  const items: InboxThreadItem[] = [];
-  for (const c of classifications) {
-    const state = CLASSIFICATION_TO_THREAD_STATE[c.state];
-    const proposal = proposals.find((p) => p.id === c.proposalId);
-    if (!state || !proposal || inboxOwner(proposal) !== "operator" && !isAgeOnlyInboxInformation(proposal) && !c.retirement) continue;
-    items.push({ proposalId: proposal.id, summary: proposal.summary, plain: plainInboxMessage(proposal, plainStore), state,
-      ...(isAgeOnlyInboxInformation(proposal) && classifiedInboxOwner(proposal, c) === "fleet" ? { informational: true } : {}),
-      ...((deps.inboxSourceIdentity ?? deps.inboxAuditScope) ? { causalScope: deps.inboxSourceIdentity ?? deps.inboxAuditScope } : {}),
-      ...(proposal.reframeHistory ? { reframeHistory: proposal.reframeHistory } : {}),
-      ...(c.requiresReview || c.retirement?.state === "restored_for_review" ? { requiresReview: true } : {}) });
-  }
-  return items;
+  return operatorThreadItemsOf(classified, plainStore, deps.inboxSourceIdentity ?? deps.inboxAuditScope);
 }
 
 /** Archive releases and judge receipts are memoized across requests; never reparse all rotations
@@ -3156,10 +3134,7 @@ function readThreadsOr500(deps: PanelGraphDeps, res: ServerResponse) {
 /** How often a built thread-list view re-warms its classification with no request in flight. */
 const INBOX_THREAD_LIST_WARM_MS = 60_000;
 
-export interface ThreadListInbox {
-  proposals: readonly Proposal[];
-  classifications: ReadonlyArray<Pick<InboxClassification, "proposalId" | "state" | "retirement" | "displayOwner"> & { requiresReview?: true }>;
-}
+export type { ThreadListInbox };
 
 export function inboxClassificationEvidence(classified: Pick<ClassifiedInbox, "projection" | "classifications">): ClassificationEvidence {
   const partial = [...classified.projection.values()].some((value) => value.indeterminate) || classified.classifications.some((value) => value.referentUnverified);

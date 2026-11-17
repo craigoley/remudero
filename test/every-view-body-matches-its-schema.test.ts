@@ -43,6 +43,7 @@ import { createTaskView, taskViewKey, type TaskViewData } from "#src/lib/task-vi
 import { createDemandBook, TASK_VIEW_NAME } from "#src/lib/view-demand.js";
 import { createInboxThreadView, INBOX_THREAD_VIEW_NAME, inboxThreadViewKey } from "#src/lib/inbox-thread-view.js";
 import { inboxThreadId } from "#src/lib/inbox-thread.js";
+import { createInboxThreadsView, INBOX_THREADS_VIEW_NAME, type InboxThreadsViewData } from "#src/lib/inbox-threads-view.js";
 import { fakeGitHub } from "#test/helpers/fake-github.js";
 import { declaredBody, resolve, violations, type Schema } from "#test/helpers/openapi-strict.js";
 import { createBoardSnapshotCache } from "#src/lib/board-snapshot-cache.js";
@@ -195,7 +196,9 @@ async function materializeAll(root: string, stateDir: string, deps: ServeDeps): 
   // W1-T13455: the inbox-thread view over the fixture's one operator proposal, built once the inbox pages below are held.
   demand.want(INBOX_THREAD_VIEW_NAME, inboxThreadViewKey(inboxThreadId("ruling:schema")));
   const inboxThread = createInboxThreadView({ inboxRoot: root, demand, clock });
-  const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir }], views: [...READ_MODEL_VIEWS, now, instances, workstreams, actions, host, agent, incidents, task, codeHealth, inboxThread], demand, clock, holder: "schema-test", post: () => {} });
+  // W1-T13456: the inbox-threads list over the same persisted classification, built once the slow lane below has run.
+  const inboxThreads = createInboxThreadsView({ inboxRoot: root });
+  const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir }], views: [...READ_MODEL_VIEWS, now, instances, workstreams, actions, host, agent, incidents, task, codeHealth, inboxThread, inboxThreads], demand, clock, holder: "schema-test", post: () => {} });
   ticker.tick();
   // W1-T5055: core's analytics refresh, committed as the slow lane hands it over, so the analytics body carries an instance's metrics.
   const analytics = deriveAnalyticsSnapshot([], clock.iso());
@@ -238,7 +241,7 @@ function codeHealthInput(): CodeHealthProjectionInput {
 }
 
 /** The query each routed view is read with; a view missing here fails the corpus check below. */
-const QUERY: Record<string, string> = { [INBOX_THREAD_VIEW_NAME]: `?${inboxThreadViewKey(inboxThreadId("ruling:schema"))}`, "nav-badge": "", "read-model": "", repositories: "", now: "?instance=core", instances: "", inbox: "?section=needsYou", feedback: "", "needs-you": "", analytics: "", "daily-progress": "?date=today", [CODE_HEALTH_VIEW_NAME]: CODE_HEALTH_QUERY, workstreams: "", actions: "", host: "", agent: "?instance=core&part=history", incidents: "", task: `?${taskViewKey("core", "W1-T1")}` };
+const QUERY: Record<string, string> = { [INBOX_THREADS_VIEW_NAME]: "", [INBOX_THREAD_VIEW_NAME]: `?${inboxThreadViewKey(inboxThreadId("ruling:schema"))}`, "nav-badge": "", "read-model": "", repositories: "", now: "?instance=core", instances: "", inbox: "?section=needsYou", feedback: "", "needs-you": "", analytics: "", "daily-progress": "?date=today", [CODE_HEALTH_VIEW_NAME]: CODE_HEALTH_QUERY, workstreams: "", actions: "", host: "", agent: "?instance=core&part=history", incidents: "", task: `?${taskViewKey("core", "W1-T1")}` };
 
 test("every registered view body validates against its declared schema", async (t) => {
   t.mock.method(systemClock, "now", clock.now);
@@ -268,6 +271,13 @@ test("every registered view body validates against its declared schema", async (
   const noId = await fetch(`${url}/v1/views/${INBOX_THREAD_VIEW_NAME}`, { headers: READ });
   assert.equal(noId.status, 400);
   assert.match(await noId.text(), /needs \?id=/);
+
+  // W1-T13456: the thread list is served with no switch entry and its rows were really validated, not an empty page.
+  const threads = bodies.get(INBOX_THREADS_VIEW_NAME)!.data as InboxThreadsViewData;
+  assert.equal(threads.state, "ok", JSON.stringify(threads));
+  assert.deepEqual(threads.state === "ok" ? threads.threads.map((row) => row.proposalId) : [], ["ruling:schema"]);
+  // W1-T13456: the view takes only a cursor.
+  assert.equal((await fetch(`${url}/v1/views/${INBOX_THREADS_VIEW_NAME}?limit=100`, { headers: READ })).status, 400);
 
   // CONTROL: the bodies are populated, so optional fields were really validated, not skipped.
   assert.equal(((bodies.get("read-model")!.data as { shadow?: unknown[] }).shadow ?? []).length, 1, "the status body carries shadow readiness");
