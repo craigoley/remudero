@@ -84,7 +84,7 @@ test("source-reader calibration accepts only skips declared for this platform", 
   const repo = fixture(t, 'test("works here", () => assert.equal(1, 1));\ntest("Linux-only probe", { skip: process.platform !== "linux" }, () => assert.fail("not on this platform"));');
   const skipped = "TAP version 13\nok 1 - works here\nok 2 - Linux-only probe # SKIP\n1..2\n# tests 2\n# pass 1\n# fail 0\n# cancelled 0\n# skipped 1\n# todo 0\n";
   const time = [0, 1000, 1001, 1002, 2002];
-  assert.deepEqual(runCensusSuitesViaChild({ root: repo.dir, files: [FILE], readerRuntimePolicy: POLICY, priority,
+  assert.deepEqual(runCensusSuitesViaChild({ root: repo.dir, files: [FILE], platform: "darwin", readerRuntimePolicy: POLICY, priority,
     now: () => time.shift()!, readContext: () => "same", run: () => ({ status: 0, stdout: skipped }) }), []);
 });
 
@@ -92,7 +92,7 @@ test("source-reader calibration still refuses unguarded or nonmatching platform 
   const skipped = "TAP version 13\nok 1 - works here\nok 2 - Linux-only probe # SKIP\n1..2\n# tests 2\n# pass 1\n# fail 0\n# cancelled 0\n# skipped 1\n# todo 0\n";
   for (const guard of ["", ', { skip: process.platform === "linux" }']) {
     const repo = fixture(t, `test("works here", () => assert.equal(1, 1));\ntest("Linux-only probe"${guard}, () => assert.fail("not on this platform"));`);
-    assert.throws(() => runCensusSuitesViaChild({ root: repo.dir, files: [FILE], readerRuntimePolicy: POLICY, priority,
+    assert.throws(() => runCensusSuitesViaChild({ root: repo.dir, files: [FILE], platform: "darwin", readerRuntimePolicy: POLICY, priority,
       readContext: () => "same", run: () => ({ status: 0, stdout: skipped }) }), /UNKNOWN: calibration has no complete unskipped pass/);
   }
 });

@@ -886,6 +886,7 @@ function hasOnlyDeclaredPlatformSkips({ root, files, stdout, summary, tests, pla
  */
 export function runCensusSuitesViaChild({ root, files, run = runCensusChild, priority = TEST_PRIORITY, snapshotPath, pathOverride, timeoutMs,
   readerRuntimePolicy, now = () => performance.now(), readContext = censusReaderContext, load1 = () => loadavg()[0],
+  platform = process.platform,
   history = { path: censusReaderHistoryPath(), mode: process.env[CENSUS_READER_HISTORY_ENV] === "act" ? "act" : "shadow" }, suiteHistory }) {
   const args = ["--test", "--test-reporter=tap", "--import", import.meta.resolve("tsx"), "--import", TMP_HYGIENE_URL, ...files];
   if (priority.reason) console.error(`census-precheck: census suites run at default priority - ${priority.reason}`);
@@ -973,7 +974,7 @@ export function runCensusSuitesViaChild({ root, files, run = runCensusChild, pri
         const matches = [...stdout.matchAll(new RegExp(`^# ${key} (\\d+)$`, "gm"))];
         return [key, matches.length === 1 ? Number(matches[0][1]) : null];
       }));
-      const platformSkipsComplete = hasOnlyDeclaredPlatformSkips({ root, files, stdout, summary, tests: Number(total[1]) });
+      const platformSkipsComplete = hasOnlyDeclaredPlatformSkips({ root, files, stdout, summary, tests: Number(total[1]), platform });
       const passed = verdict?.complete !== false && summary.pass + summary.skipped === Number(total[1]) &&
         ["fail", "cancelled", "todo"].every((key) => summary[key] === 0) && platformSkipsComplete;
       // W1-T13146: only a complete passing run is a runtime the child's next bound may be priced from.
