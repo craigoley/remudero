@@ -17,6 +17,7 @@
   files:
     - src/lib/read-model-worker.ts
     - test/view-demand.test.ts
+    - test/console-api/views/code-health-demand-lanes.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -39,6 +40,7 @@
        worker started; until then a key not in the demand book stays in the store and in serve's memory.
     2. The carried body is judged stale by W1-T13457's carried rule until the worker posts it.
     3. Update the W1-T5048 test to the new timing; it still proves the drop, one window later.
+    4. code-health-demand-lanes pins which owner the first sweep may invalidate; give its tickers demandCarryMs: 0.
   falsifier: |
     Drop on the first sweep: criterion 1 fails. Never drop: criterion 2 fails. Drop a key that was read in the
     window: criterion 3 fails.
