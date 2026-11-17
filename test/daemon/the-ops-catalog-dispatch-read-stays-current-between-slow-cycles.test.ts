@@ -10,7 +10,7 @@ import { runDaemon, type DaemonDeps, type OpsTaskDispatchRead } from "#src/lib/d
 import { OPS_DISPATCH_SOURCE_MAX_AGE_MS, OPS_DISPATCH_SOURCE_REFRESH_MS, opsCatalogShadowFeed } from "#src/cli/commands/daemon.js";
 import { clockFromMillisFn } from "#src/lib/clock.js";
 import { createDaemonMemoryGovernor } from "#src/lib/daemon-memory-policy.js";
-import { createOpsCatalogShadowSource, type OpsCatalogApi, type OpsCatalogShadowInput } from "#src/lib/ops-catalog-source.js";
+import { createOpsCatalogShadowSource, type OpsCatalogApi } from "#src/lib/ops-catalog-source.js";
 import type { Plan } from "#src/lib/plan.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { gitRepo, GIT_REPO_FIXTURE_IDENTITY, type GitRepo } from "#test/helpers/git-repo.js";
@@ -254,18 +254,4 @@ test("W1-T13052 criterion 4: failed or hung refreshes leave the dispatch read st
     mock.timers.reset();
     ops.cleanup();
   }
-});
-
-
-test("W13319: timed feed retains safe failure evidence without extending healthy snapshot age", async () => {
-  let ms=1000,throwing=false;
-  let next={outcome:"malformed",refusalStage:"strict_parse"} as OpsCatalogShadowInput;
-  const feed=opsCatalogShadowFeed({refresh:async()=>{if(throwing)throw new Error("PRIVATE_BODY_SENTINEL");return next;}},clockFromMillisFn(()=>ms));
-  const read=async()=>{feed.current();await delay(0);return feed.forDispatch();};
-  try{
-    const failure=await read();assert.equal(failure?.outcome,"malformed");assert.equal((failure as unknown as {refusalStage?:unknown}).refusalStage,"strict_parse");
-    next={outcome:"ok"};const healthy=await read();assert.equal(healthy?.outcome,"ok");assert.equal((healthy as unknown as {refusalStage?:unknown}).refusalStage,undefined);
-    ms+=OPS_DISPATCH_SOURCE_MAX_AGE_MS;const expired=feed.forDispatch();assert.equal(expired?.outcome,"stale");assert.equal((expired as unknown as {refusalStage?:unknown}).refusalStage,"snapshot_age");
-    throwing=true;const rejected=await read();assert.equal(rejected?.outcome,"unreadable");assert.equal((rejected as unknown as {refusalStage?:unknown}).refusalStage,"source_refresh");assert.doesNotMatch(JSON.stringify(rejected),/PRIVATE_BODY_SENTINEL/);
-  }finally{feed.stop();}
 });

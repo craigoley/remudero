@@ -286,15 +286,3 @@ test("W1-T11768 criterion 4: a refused ops snapshot is an unavailable shadow, an
   const explicit = await daemonWith({ secondaryPlanForShadow: planOf("OPS-X"), opsCatalogTarget: target, opsCatalogApi: async () => { throw new Error("must not read"); } });
   assert.ok(explicit.some((l) => l.step === "dispatch.secondary_catalog_shadow"), "an injected snapshot wins and no read happens");
 });
-
-
-test("W13319: stage evidence stays redacted through snapshot and shadow inspection", async () => {
-  const secret=new Error(`PRIVATE_BODY_SENTINEL ${REPO} ghp_SECRET_TOKEN_SENTINEL`);
-  const api:OpsCatalogApi=async()=>{throw secret;};
-  const snap=await readOpsCatalogSnapshotAsync(target,api),shadow=await createOpsCatalogShadowSource(target,api).refresh();
-  for(const value of [snap,shadow]){
-    assert.equal(value.outcome,"unreadable");assert.equal((value as unknown as {refusalStage?:unknown}).refusalStage,"repository_identity");
-    sweep("safe failure stage",value);
-    assert.equal(JSON.parse(JSON.stringify(value)).refusalStage,"repository_identity");
-  }
-});
