@@ -59,8 +59,10 @@ async function catalog(root: string, commit: string, external = false): Promise<
   const store = createPlanRevisionStore({ strict: true, yamlLogLevel: "silent", ...(external ? { dependencyMode: "preserve-external" as const } : {}) });
   return { plan: store.adopt({ key: commit, commit, repoDir: root, relPath: "plan/tasks.yaml" }, blobs).plan, originals };
 }
-async function refs(root: string): Promise<Map<string, string>> {
-  const text = await defaultGitRunnerAsync(root)(["ls-remote", "origin"]);
+async function refs(root: string, selectedRepository: string): Promise<Map<string, string>> {
+  // The selected API identity and ownership namespace must name the same repository.
+  // A local origin may point to a same-commit fork with no active dispatch claims.
+  const text = await defaultGitRunnerAsync(root)(["ls-remote", `https://github.com/${selectedRepository}.git`]);
   const map = new Map<string, string>();
   for (const line of text.trim().split("\n")) {
     const m = /^([a-f0-9]{40})\s+(HEAD|refs\/[^\s]+)$/.exec(line);
@@ -156,7 +158,7 @@ export async function previewPlanTaskMigration(args: readonly string[]): Promise
   const o = options(args);
   if (!o) { console.log(JSON.stringify({ outcome: "unknown", reason: "usage", permission: "not_granted" })); return 2; }
   try {
-    const publicRefs = await refs(o.publicRoot), opsRefs = await refs(o.opsRoot);
+    const publicRefs = await refs(o.publicRoot, o.publicRepo), opsRefs = await refs(o.opsRoot, o.opsRepo);
     const pub = await catalog(o.publicRoot, o.publicCommit), ops = await catalog(o.opsRoot, o.opsCommit, true);
     if (ops.plan.tasks.some(t => pub.plan.byId.has(t.id) || t.depends_on.some(id => !ops.plan.byId.has(id) && !pub.plan.byId.has(id)))) return unknown("catalog_conflict");
     const initial = await readState(o, publicRefs, opsRefs), knownMerged = new Set(initial.recent.flatMap(credited));
@@ -178,7 +180,7 @@ export async function previewPlanTaskMigration(args: readonly string[]): Promise
       break;
     }
     // Independently re-read selected ownership, both source heads and the candidate's API credit before answering.
-    const finalPublic = await refs(o.publicRoot), finalOps = await refs(o.opsRoot);
+    const finalPublic = await refs(o.publicRoot, o.publicRepo), finalOps = await refs(o.opsRoot, o.opsRepo);
     const last = await readState(o, finalPublic, finalOps, candidate ? String(candidate.id) : undefined, control); stable(initial, last);
     if (candidate && control) {
       if (searchedMerged(last, String(candidate.id), control)) return unknown("candidate_credit_changed");
