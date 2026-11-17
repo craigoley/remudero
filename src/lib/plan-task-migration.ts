@@ -145,7 +145,7 @@ async function readState(o: Options, primaryRefs: Map<string, string>, privateRe
     ...(id && control ? { trailer: searchRows(data.byTrailer, repositoryId, o.publicRepo), branch: searchRows(data.byBranch, repositoryId, o.publicRepo), control: searchRows(data.control, repositoryId, o.publicRepo) } : {}) };
 }
 function stable(before: PreviewState, after: PreviewState): void {
-  if (before.repositoryId !== after.repositoryId || before.opsId !== after.opsId || before.mergedTotal !== after.mergedTotal || JSON.stringify(before.open) !== JSON.stringify(after.open)) return unknown("ownership_changed");
+  if (before.repositoryId !== after.repositoryId || before.opsId !== after.opsId || before.mergedTotal !== after.mergedTotal || JSON.stringify(before.open) !== JSON.stringify(after.open) || JSON.stringify(before.recent) !== JSON.stringify(after.recent)) return unknown("ownership_changed");
 }
 function searchedMerged(state: PreviewState, id: string, control: Json): boolean {
   if (!state.control?.some(pr => pr.number === control.number && credited(pr).some(id => credited(control).includes(id)))) return unknown("merge_credit_control_unreadable");
@@ -169,7 +169,7 @@ export async function previewPlanTaskMigration(args: readonly string[]): Promise
     let candidate: Json | undefined, lookups = 0;
     for (const task of dispatchOrder(pub.plan.tasks).reverse()) {
       const original = pub.originals.get(task.id)!;
-      const reason = knownMerged.has(task.id) ? "merged" : taskOwned(task.id, [...(task.files ?? []), original.path], publicRefs, initial.open) ? "owned" :
+      const reason = knownMerged.has(task.id) ? "merged" : task.repo !== o.publicRepo.split("/")[1] ? "target_not_bound" : taskOwned(task.id, [...(task.files ?? []), original.path], publicRefs, initial.open) ? "owned" :
         publicPrerequisites.has(task.id) ? "public_dependants" : !original.single || !original.path.startsWith("plan/tasks.d/") ? "not_single_shard" : original.moved ? "already_moved" : undefined;
       if (reason) { refused.push({ id: task.id, reason }); continue; }
       if (!control) return unknown("merge_credit_control_unreadable");
