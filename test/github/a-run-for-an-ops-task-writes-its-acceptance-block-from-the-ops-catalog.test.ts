@@ -18,8 +18,8 @@ const { evaluateGate } = await import(gateSpecifier) as {
 };
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import type { WorkerResult } from "#src/lib/worker.js";
-import type { AcceptanceCriterion } from "#src/lib/plan.js";
-import { bindCanonicalOpsCriteria, openPullRequestCheckedAsync, PrOpenRefusedError, type CanonicalOpsCriteriaAtOpen, type AsyncOpenPullRequestProofRunner } from "#src/lib/pr-open.js";
+import { loadPlanFromYaml, type AcceptanceCriterion } from "#src/lib/plan.js";
+import { bindCanonicalCoreCriteria, bindCanonicalOpsCriteria, openPullRequestCheckedAsync, PrOpenRefusedError, type CanonicalOpsCriteriaAtOpen, type AsyncOpenPullRequestProofRunner } from "#src/lib/pr-open.js";
 
 const ID = "W1-T900008", TITLE = "Publish the approved fixture contract", PRIVATE = [
   "PRIVATE_RATIONALE_12208", "PRIVATE_DESIGN_12208", "PRIVATE_FALSIFIER_12208",
@@ -36,9 +36,20 @@ const result = (text: string): WorkerResult => ({
   tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 }, modelUsage: {}, compactionEvents: [], qualitySuspect: false,
 });
 
-async function runFixture(t: TestContext, catalog: "ops" | "public", mode: "reported" | "created" = "reported", acceptance: readonly AcceptanceCriterion[] = criteria, refusal?: "ownership" | "normalization" | "slow-write" | "target" | "body" | "race") {
+async function runFixture(t: TestContext, catalog: "ops" | "public" | "core", mode: "reported" | "created" = "reported", acceptance: readonly AcceptanceCriterion[] = criteria, refusal?: "ownership" | "normalization" | "slow-write" | "target" | "body" | "race" | "core-mismatch") {
   const root = gitRepo({ scope: t }), origin = gitRepo({ bare: true, scope: t }), seed = gitRepo({ scope: t });
   mkdirSync(join(seed.dir, "plan")); writeFileSync(join(seed.dir, "plan", "tasks.yaml"), catalog === "public" ? yaml(acceptance) : "[]\n");
+  // W1-T12936: a Core task lives only in Core's own plan (a separate repository with an origin/main); the target has none.
+  let corePlanPath: string | undefined, coreCommit: string | undefined;
+  if (catalog === "core") {
+    const coreOrigin = gitRepo({ bare: true, scope: t }), coreSeed = gitRepo({ scope: t });
+    mkdirSync(join(coreSeed.dir, "plan", "tasks.d"), { recursive: true }); writeFileSync(join(coreSeed.dir, "plan", "tasks.yaml"), "[]\n");
+    writeFileSync(join(coreSeed.dir, "plan", "tasks.d", `${ID}-publish-the-approved-fixture-contract.yaml`), yaml(acceptance));
+    coreSeed.git("add", "plan"); coreSeed.git("commit", "--quiet", "-m", "test: file the Core task");
+    coreSeed.addRemote("origin", coreOrigin.dir); coreSeed.git("push", "--quiet", "origin", "main");
+    const core = gitRepo({ cloneFrom: coreOrigin.dir, scope: t });
+    corePlanPath = join(core.dir, "plan", "tasks.yaml"); coreCommit = core.git("rev-parse", "origin/main").trim();
+  }
   seed.git("add", "plan"); seed.git("commit", "--quiet", "-m", "test: seed the actual public plan");
   seed.addRemote("origin", origin.dir); seed.git("push", "--quiet", "origin", "main");
   const repo = gitRepo({ cloneFrom: origin.dir, scope: t });
@@ -116,7 +127,12 @@ async function runFixture(t: TestContext, catalog: "ops" | "public", mode: "repo
   const prompts: Array<{ prompt: string }> = []; let workers = 0, workerRoot = "";
   const outcome = await withLiveWritesAllowed(() => runTask(ID, {
     config: { claudeBin: "/bin/true", root: root.dir, installRoot: REPO_ROOT, workerProviders: { harnessCommitsImplement: true } },
-    skipGitSync: true, planPath, handOffAtPrOpen: true,
+    ...(corePlanPath === undefined ? { skipGitSync: true, planPath } : {
+      planPath: corePlanPath,
+      planSnapshot: () => ({ staleDispatch: false, plan: loadPlanFromYaml(yaml(refusal === "core-mismatch"
+        ? [{ claim: "a body-authored contract", proof: "grep: other in src/fixture.ts" }] : acceptance), "snapshot") }),
+    }),
+    handOffAtPrOpen: true,
     github: { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined },
     claimReserver: { mintAnchor: () => "fixture-claim", attempt: () => "created", holder: () => undefined, drop: () => true },
     containmentExec: async token => ({ transcript: `touch ../${token}: Operation not permitted`, outsideWriteCreated: false, insideWriteCreated: true, costUsd: 0 }),
@@ -143,7 +159,7 @@ async function runFixture(t: TestContext, catalog: "ops" | "public", mode: "repo
     const title = / -f title=([\s\S]*?)(?: -f body=|$)/.exec(a); return title ? [title[1]!] : [];
   });
   const rows = readFileSync(join(root.dir, "state", "ledger.ndjson"), "utf8").trim().split("\n").map(line => JSON.parse(line));
-  return { outcome, bodies, titles, prompts, calls, rows, workerRoot, branch, originDir: origin.dir, publicWrites, asyncPatchObserved,
+  return { outcome, bodies, titles, prompts, calls, rows, workerRoot, branch, originDir: origin.dir, publicWrites, asyncPatchObserved, coreCommit,
     sourceReads: calls.filter(a => a.some(x => x.startsWith(base))),
     sourceReadCount: () => gh.events().filter(e => e.phase === "start" && e.args.some(x => x.startsWith(base))).length };
 }
@@ -324,4 +340,36 @@ test("the async ops normalizer refuses mismatched identity, unreadable body and 
     await assert.rejects(runFixture(t, "ops", "reported", criteria, refusal),
       refusal === "race" ? /ops public PR normalization refused \(raced\)/ : /ops public PR normalization refused \(error\)/);
   });
+});
+
+test("Core public plan criteria: binds identity, destination, criteria, and source commit", async t => {
+  // W1-T12936 criterion 1: a task filed only in Core's public plan opens in the target with its pinned criteria.
+  const f = await runFixture(t, "core", "created");
+  assert.equal(f.sourceReads.length, 0, "a Core binding reads no private catalog");
+  const pinned = f.rows.find(row => row.step === "core_criteria.pinned"); assert.ok(pinned, "the run pinned Core's criteria");
+  assert.equal(pinned.source_commit, f.coreCommit); assert.equal(pinned.target, "craigoley/remudero");
+  assert.ok(f.bodies.length > 0, "the opener wrote a body"); assert.deepEqual(parseAcceptanceBlock(f.bodies.at(-1)!), criteria);
+  assert.match(f.bodies.at(-1)!, new RegExp(`Remudero-Task: ${ID}`));
+  const bound = bindCanonicalCoreCriteria(ID, TITLE, "craigoley/remudero", f.coreCommit, criteria);
+  assert.equal(bound.catalog, "core"); assert.ok(Object.isFrozen(bound.criteria));
+});
+
+test("Core public plan criteria: refuses mismatched source or destination pins", async t => {
+  // W1-T12936 criterion 1: missing or mismatched identity, target, or source refuses before effects.
+  await assert.rejects(runFixture(t, "core", "created", criteria, "core-mismatch"), /core public-plan criteria refused/);
+  const f = openerFixture(t); let calls = 0; const runner: AsyncOpenPullRequestProofRunner = async () => { calls++; return { status: 0 }; };
+  const core = { ...f.canonical, catalog: "core" as const };
+  for (const contract of [{ ...core, taskId: "W1-T900009" }, { ...core, sourceCommit: "not-a-pin" },
+    { ...core, targetRepository: "craigoley/remudero-console" }, { ...core, criteria: [] }]) await assert.rejects(f.open(contract, runner), PrOpenRefusedError);
+  for (const pin of [undefined, "not-a-pin"]) assert.throws(() => bindCanonicalCoreCriteria(ID, TITLE, "craigoley/remudero", pin, criteria), PrOpenRefusedError);
+  assert.equal(calls, 0, "a refused Core binding never reaches proof execution");
+  assert.equal(await f.open(core, runner), f.body, "the matching Core binding opens");
+});
+
+test("Core public plan criteria: preserves destination-local precedence", async t => {
+  // W1-T12936 criterion 1: a task filed in the target keeps its local criteria over a competing Core binding.
+  const f = openerFixture(t, true);
+  const body = await f.open({ ...f.canonical, catalog: "core", criteria: [{ claim: "core must not replace local", proof: "grep: other in src/fixture.ts" }] },
+    async proof => { assert.equal(proof, criteria[0]!.proof); return { status: 0 }; });
+  assert.equal(body, f.body); assert.deepEqual(parseAcceptanceBlock(body), criteria);
 });

@@ -66,7 +66,7 @@ import { decideGatePosture, type GatePostureDecision, type GatePostureFinding, t
 import { refusalReason } from "../../lib/inbox.js";
 import { gatherRuns, parseLedger } from "../../lib/retro.js";
 import type { ChildEntryStoreOptions } from "../../lib/child-entry-argv.js";
-import { bindCanonicalOpsCriteria, partitionAcceptanceCriteria, bodyWithInconclusiveProofAtOpen, defaultProofRunnerAsync, openPullRequestCheckedAsync, PrOpenRefusedError, proposeStaleProofReplacement, readOtherOpenPrForTask, recordRefusedPrOpen, type CanonicalOpsCriteriaAtOpen, type AsyncOpenPullRequestProofRunner, type OpenPrJsonReader, type OpenPullRequestProofRunner } from "../../lib/pr-open.js";
+import { bindCanonicalCoreCriteria, bindCanonicalOpsCriteria, partitionAcceptanceCriteria, bodyWithInconclusiveProofAtOpen, defaultProofRunnerAsync, openPullRequestCheckedAsync, PrOpenRefusedError, proposeStaleProofReplacement, readOtherOpenPrForTask, recordRefusedPrOpen, type CanonicalOpsCriteriaAtOpen, type AsyncOpenPullRequestProofRunner, type OpenPrJsonReader, type OpenPullRequestProofRunner } from "../../lib/pr-open.js";
 import { createPlanPrRest, probeExistingPlanPr } from "../../lib/plan-pr-emitter.js";
 import { findTaskShard, requestScopeAmendment, readBuildScopeRecovery, saveBuildScopeRecovery, restoreBuildScopeRecovery, type ScopeAmendmentOutcome, type ScopeAmendmentRequest, type ProofAmendmentWritePorts } from "../../lib/proof-amendment.js";
 import { appendLedger, DECISION_RELEVANT_LEDGER_STEPS } from "../../lib/ledger.js";
@@ -80,7 +80,7 @@ import { PAIRED_ATTEMPT_MAX_BUDGET_USD, PAIRED_CLI_REFUSAL, runPairedTrial, seal
 import { runProspectiveAaPair } from "../../lib/benchmark-aa-prospective.js";
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "../../lib/self-forecast.js";
 import { readLedgerUnionRecordsSync } from "../../lib/ledger-union.js";
-import { releasedTaskIds, assertRunnable, loadPlan, selectTask, type AcceptanceCriterion, type TaskRisk, type Plan, type Task, taskRecordPath } from "../../lib/plan.js";
+import { releasedTaskIds, assertRunnable, loadPlan, parseTasksFromYaml, selectTask, type AcceptanceCriterion, type TaskRisk, type Plan, type Task, taskRecordPath } from "../../lib/plan.js";
 import { GENERIC_EXIT_CODE, RmdError } from "../../lib/errors.js";
 import { assertLintClean, lintTask, TaskLintError } from "../../lib/task-linter.js";
 import { readPriorRefusal, preDispatchContractRevision, writePriorRefusal, repairRefusedTask, type RefusalViolation } from "../../lib/dispatch-repair.js";
@@ -1138,6 +1138,8 @@ export interface RunTaskContext {
   spawn: typeof spawnWorker;
   task: Task & { catalog?: "public" | "ops" };
   opsCriteriaAtOpen?: CanonicalOpsCriteriaAtOpen;
+  /** W1-T12936: Core public-plan criteria pinned at one commit, for a target whose own plan lacks the task. */
+  coreCriteriaAtOpen?: CanonicalOpsCriteriaAtOpen;
   taskId: string;
   /** Resolved once by the outer run so reviewer watchdogs reuse the same policy value. */
   workerAbandonMs?: number;
@@ -1863,7 +1865,7 @@ async function ghPrCreateFillCommandAsync(
 ): Promise<PrCreateCommand> {
   const { withDiagnostics, draftPrCreate, prCreateArgv } = helperHost;
   // Preserve the public authored-title call site; private titles use the immutable catalog binding.
-  const draftTitle = canonicalOps === undefined ? title
+  const draftTitle = canonicalOps === undefined || canonicalOps.catalog !== "ops" ? title
     : prTitleForTask([], { id: canonicalOps.taskId, title: canonicalOps.title }) ?? canonicalOps.title;
   const draft = bodyOverride === undefined
     ? draftPrCreate(worktreePath, owner, repo, branch, draftTitle)
@@ -4917,6 +4919,12 @@ export async function runTask(
   const opsCriteriaAtOpen = lookup.outcome === "found" && lookup.catalog === "ops"
     ? bindCanonicalOpsCriteria(task.id, task.title, `${owner}/${task.repo}`, lookup.commit, task.acceptance ?? [])
     : undefined;
+  // W1-T12936: a synced public task is re-read from Core's exact origin/main commit before any worker starts, so a
+  // target repository that has not filed it can open its PR with these pinned criteria (and only these).
+  const coreCriteriaAtOpen = lookup.outcome === "found" && lookup.catalog === "public" && !opts.skipGitSync
+    ? pinCoreCriteriaAtOpen(planPath, task, `${owner}/${task.repo}`)
+    : undefined;
+  if (coreCriteriaAtOpen) log("core_criteria.pinned", { source_commit: coreCriteriaAtOpen.sourceCommit, target: coreCriteriaAtOpen.targetRepository });
   if (task.catalog === "ops" && !plan.byId.has(taskId)) {
     const privatePlan = opsPlanForLookup(lookup);
     if (privatePlan === undefined) throw new Error("task catalog unreadable (ops-plan-unavailable)");
@@ -5195,6 +5203,7 @@ export async function runTask(
       spawn,
       task,
       opsCriteriaAtOpen,
+      coreCriteriaAtOpen,
       taskId,
       workerAbandonMs,
       workerStateSensor,
@@ -5245,6 +5254,37 @@ export function claimRunTaskFixBranch(input: {
       return reason;
     }
   });
+}
+
+/**
+ * W1-T12936: read the selected public task's own record from Core's origin/main at one exact commit and bind its
+ * criteria for the target repository's PR opener. Missing, malformed, or different source evidence refuses here,
+ * before any worker starts. The opener uses the binding only when the target's own plan lacks the task.
+ */
+function pinCoreCriteriaAtOpen(planPath: string, task: Task, targetRepository: string): CanonicalOpsCriteriaAtOpen {
+  const refuse = (reason: string): never => { throw new Error(`core public-plan criteria refused (${reason})`); };
+  const repoDir = dirname(dirname(planPath)), planRel = relative(repoDir, planPath), shardRel = join(dirname(planRel), "tasks.d");
+  const git = (args: string[]): string => execFileSync("git", ["-C", repoDir, ...args], { encoding: "utf8", maxBuffer: 1 << 26 });
+  let commit: string, record: Task | undefined;
+  try {
+    commit = git(["rev-parse", "--verify", "origin/main^{commit}"]).trim();
+    const shard = git(["ls-tree", "--name-only", commit, `${shardRel}/`]).split("\n")
+      .find(path => basename(path).startsWith(`${task.id}-`) && /\.ya?ml$/.test(path));
+    const source = shard ?? planRel;
+    record = parseTasksFromYaml(git(["show", `${commit}:${source}`]), `${commit}:${source}`).find(t => t.id === task.id);
+  } catch (err) {
+    return refuse(`source unreadable: ${String(err)}`);
+  }
+  if (record === undefined) return refuse(`${task.id} is absent from the plan at ${commit}`);
+  if (record.title !== task.title || record.repo !== task.repo
+      || JSON.stringify(record.acceptance ?? []) !== JSON.stringify(task.acceptance ?? [])) {
+    return refuse(`${task.id} at ${commit} differs from the selected task`);
+  }
+  try {
+    return bindCanonicalCoreCriteria(task.id, task.title, targetRepository, commit, record.acceptance ?? []);
+  } catch (err) {
+    return refuse(String(err));
+  }
 }
 
 export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost): Promise<RunResult> {
@@ -5489,6 +5529,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     spawn,
     task,
     opsCriteriaAtOpen,
+    coreCriteriaAtOpen,
     taskId,
     workerAbandonMs,
     workerStateSensor,
@@ -7724,7 +7765,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
         // W1-T6034: the filed proofs run as awaited children, off the daemon loop. W1-T7952: titled after the task.
         const publication = opsCriteriaAtOpen ? opsRunPublication(taskId, opsCriteriaAtOpen.title, opsCriteriaAtOpen.criteria) : undefined;
         prCreate = await ghPrCreateFillCommandAsync(worktreePath, owner, task.repo, branch,
-          branchPrTitle(worktreePath, task), opts.prOpenProofRunner, true, { log }, publication?.body, opsCriteriaAtOpen);
+          branchPrTitle(worktreePath, task), opts.prOpenProofRunner, true, { log }, publication?.body, opsCriteriaAtOpen ?? coreCriteriaAtOpen);
       } catch (err) {
         if (!(err instanceof PrOpenRefusedError)) throw err;
         // The branch is already on origin (both push paths ran above), so a refusal names it rather than stranding it.

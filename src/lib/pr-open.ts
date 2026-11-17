@@ -519,9 +519,10 @@ function mergeBaseFor(repoRoot: string, baseRef: string): string {
     : reject(`cannot resolve merge base ${baseRef}: git returned no merge-base sha`);
 }
 
-/** Host-only canonical criteria from the pinned ops lookup. This is never a PR-body authority. */
+/** Host-only canonical criteria from a pinned lookup: the private ops catalog, or (W1-T12936) Core's public plan for a
+ *  task that targets another repository. This is never a PR-body authority. */
 export interface CanonicalOpsCriteriaAtOpen {
-  readonly catalog: "ops";
+  readonly catalog: "ops" | "core";
   readonly taskId: string;
   readonly title: string;
   readonly targetRepository: string;
@@ -544,6 +545,14 @@ export function bindCanonicalOpsCriteria(taskId: string, title: string, targetRe
   return snapshotOpsCriteria({ catalog: "ops", taskId, title, targetRepository, sourceCommit, criteria })!;
 }
 
+/** W1-T12936: the same immutable binding for a task read from Core's public plan at one exact commit. It applies only
+ *  when the target repository's own plan lacks the task; a task filed there keeps its local criteria. */
+export function bindCanonicalCoreCriteria(taskId: string, title: string, targetRepository: string,
+  sourceCommit: string | undefined, criteria: readonly AcceptanceCriterion[]): CanonicalOpsCriteriaAtOpen {
+  if (sourceCommit === undefined || !/^[a-f0-9]{40}$/.test(sourceCommit)) return reject("canonical core source pin is unreadable");
+  return snapshotOpsCriteria({ catalog: "core", taskId, title, targetRepository, sourceCommit, criteria })!;
+}
+
 /** One partition for the shared gate and the ops public serializer; credited criteria are context only. */
 export function partitionAcceptanceCriteria(criteria: readonly AcceptanceCriterion[]): { executable: AcceptanceCriterion[]; priorCredit: string } {
   const credited = criteria.filter((criterion) => criterion.satisfied_by);
@@ -562,7 +571,7 @@ function filedCriteria(taskId: string, repoRoot: string, target?: SuiteRegistryT
   let criteria = task?.acceptance ?? [];
   if (!task) {
     if (!canonicalOps) return reject(`run branch names ${taskId}, but that task is absent from the filed plan`);
-    if (canonicalOps.catalog !== "ops" || canonicalOps.taskId !== taskId || !target ||
+    if ((canonicalOps.catalog !== "ops" && canonicalOps.catalog !== "core") || canonicalOps.taskId !== taskId || !target ||
         canonicalOps.targetRepository !== `${target.owner}/${target.repo}` ||
         !/^[a-f0-9]{40}$/.test(canonicalOps.sourceCommit)) {
       return reject("canonical ops criteria do not bind this run branch and target");
