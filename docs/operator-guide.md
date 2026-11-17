@@ -1084,6 +1084,27 @@ a member of the Vercel team whose previews must accept its commits. Both are ope
 prerequisites: confirm the email is verified on the intended GitHub account and that account has
 Vercel team access **before** commissioning. This operation adds no token and calls no live service.
 
+### The daemon's spawn helper: on by default, and how to turn it off (W1-T13437)
+
+At boot the daemon starts one small helper process (`src/lib/spawn-helper.ts`). A routed child spawn forks in
+the helper, so the fork does not hold the daemon's loop. The cost of a fork grows with the size of the process
+that forks, and the daemon runs at 1.5 to 2 GB. The helper is on unless `RMD_SPAWN_HELPER` is `off`. Any other
+value, or no value, means on.
+
+To turn it off, set `RMD_SPAWN_HELPER=off` on the daemon container and recycle it (see the section above).
+`RMD_SPAWN_HELPER` is in `deploy/runtime-env-vars.sh`, so a later recycle keeps the value. To turn it on again,
+remove the value or set it to `on`, and recycle. No code change is necessary.
+
+What to watch in the ledger:
+
+- `daemon.spawn_helper`, one row for each boot. `started: true` with the helper's `pid`, or `started: false`
+  with a `reason`: `switch_off`, or `start_failed: <message>`. `value` is the switch value (`unset` when none).
+- `spawn.routed`, one row for each routed spawn. `via: helper` is the normal path. `via: direct` with a `reason`
+  such as `helper_exited: SIGKILL` means the helper is gone and spawns fork from the daemon again. That costs
+  time on the loop but no spawn fails. A request that was in flight when the helper died settles as failed
+  with `helper_died_in_flight` and is never run again.
+- `async_spawn_sync_ms` and `async_spawn_sync_by_caller` on `daemon.alive`: the fork time the loop still pays.
+
 ### Bringing up the console container (`remudero-serve`)
 
 The console the fleet is actually read from — `console.remudero.com` — is a **separate container**,
@@ -2204,6 +2225,26 @@ file, and writes `cash.invoice.reconcile_failed` with the reason when it cannot.
 ```bash
 rmd cash-reconcile --day 2026-11-16 --export <state>/cost-exports/<file>.csv
 ```
+
+### The cash shadow of the ci judge and the fix-progress judge (W1-T13364)
+
+`.remudero/mounts.yaml` has a `ci_judge` row and a `fix_progress_judge` row. Each row gives its judge
+the same model, effort, turn limit and context budget as the risk judge, and names no provider, so
+the judge spawns as before. Each row also has a `shadow:` mapping that names one cash deployment
+(`DeepSeek-V4-Flash`). After each judgement the daemon sends the same prompt, with no tools, to that
+deployment and writes one row to the instance ledger. The sweep acts only on the primary judge's
+verdict. The shadow call spends inside the daily cash cap.
+
+Read the rows in the instance ledger by step name:
+
+- `judge_shadow.paired`: both verdicts and whether they agree (`agreement`).
+- `judge_shadow.refused`: the cash provider refused the call for capacity or budget.
+- `judge_shadow.unavailable`: the call failed for another reason, or its answer could not be read.
+
+Each row names its judge in `surface` (`ci-judge` or `fix-progress`). To turn one arm off, remove the
+`shadow:` mapping from its row and merge that change. Removing the whole row also turns the arm off
+and returns the judge to the risk judge's cell. A day with `ci_judge.judged` rows and no
+`judge_shadow` row means the arm is not on.
 
 ### One fleet cash cap across core, site, and console
 

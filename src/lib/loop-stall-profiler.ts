@@ -23,6 +23,7 @@
  * A spin that keeps calling functions is named correctly, which is the shape of a scanner spin.
  */
 
+import { threadName } from "./thread-names.js";
 import { SHARE_ENV, Worker } from "node:worker_threads";
 import { performance } from "node:perf_hooks";
 
@@ -514,7 +515,7 @@ export function startLoopStallProfiler(options: LoopStallProfilerOptions = {}): 
     heartbeat.unref();
     const held = options.spawn?.(LOOP_STALL_WATCHDOG_SOURCE, { shared: shared.buffer as SharedArrayBuffer })
       ?? new Worker(LOOP_STALL_WATCHDOG_SOURCE,
-        { eval: true, execArgv: [], workerData: { shared: shared.buffer }, env: SHARE_ENV });
+        { eval: true, name: threadName("loopStallWatchdog"), execArgv: [], workerData: { shared: shared.buffer }, env: SHARE_ENV });
     worker = held;
     held.on("message", (message: WatchdogMessage) => {
       if (worker !== held) return;

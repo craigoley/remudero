@@ -1477,6 +1477,20 @@ export function resolveRiskJudgeMount(mounts: Mounts): Mount {
   return best;
 }
 
+/** W1-T13365: THE ONE TABLE of what two shadowed verdicts are compared on, by surface. The two judges and the
+ *  readers (judge-calibration.ts) use it. A value the table cannot read has no key. */
+export const JUDGE_SHADOW_COMPARED_KEY: Readonly<Record<"ci-judge" | "fix-progress", (verdict: unknown) => string | undefined>> = {
+  "ci-judge": (verdict) => {
+    const read = verdict as { add?: unknown; escalateFull?: unknown } | null | undefined;
+    return Array.isArray(read?.add) && typeof read.escalateFull === "boolean"
+      ? JSON.stringify({ add: [...read.add].sort(), escalateFull: read.escalateFull }) : undefined;
+  },
+  "fix-progress": (verdict) => {
+    const read = (verdict as { verdict?: unknown } | null | undefined)?.verdict;
+    return typeof read === "string" ? read : undefined;
+  },
+};
+
 // ── W1-T11075: the ci judge's and the fix-progress judge's own rows, and their cash shadow ──
 
 /** The risk judge's cell with its provider removed: a judge with no row of its own keeps today's subscription spawn. */

@@ -1,0 +1,102 @@
+- id: W1-T13428
+  title: "A scout refusal row keeps its own step name: the scout gardener writes each refused filing under the step name of the symptom it files, so in 72 hours 149 of its rows read as 14 other failures (12 as sweep.fix.dispatch_failed, read by the operator as plan lint failing a dispatch) and the scout counts its own rows as that symptom"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: low # one module and its test; the change renames one payload field and drops the scout's own rows from its own count, and no dispatch, merge or filing decision reads the renamed field
+  origin: "operator-session#fix-lane-flow-2026-11-17"
+  plan_refs:
+    - W1-T5454
+    - W1-T9946
+    - W1-T9942
+  files:
+    - src/lib/scout-gardener.ts
+    - test/a-scout-refusal-row-keeps-its-own-step-name.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A scout pass whose re-derived draft is refused, with its log built the way gardenRunCommand builds it (appendLedger with the payload spread after the step), appends a row whose step is scout.record_refused, whose symptom_step is the symptom's step name and whose reason is the refusal text; no row of that pass has the symptom's step name as its step"
+      proof: "grep: W1-T13428 criterion 1 in test/a-scout-refusal-row-keeps-its-own-step-name.test.ts"
+    - claim: "A scout pass whose fresh filing is refused appends the same shape of row: step scout.record_refused, symptom_step the symptom's step name, and the minted id in a field that does not replace the row's own task_id"
+      proof: "grep: W1-T13428 criterion 2 in test/a-scout-refusal-row-keeps-its-own-step-name.test.ts"
+    - claim: "invariant:a-scout-row-is-never-a-symptom — scoutSymptoms returns no symptom for a failure-shaped step whose rows in the window all carry gardener_origin name scout, and for a step with real rows and scout rows it counts the real rows only"
+      kind: guard
+      proof: "grep: W1-T13428 criterion 3 in test/a-scout-refusal-row-keeps-its-own-step-name.test.ts"
+    - claim: "invariant:a-refusal-still-files-nothing — a refused draft is left byte for byte as it was and a refused fresh filing writes no task file, as at origin/main"
+      kind: guard
+      proof: "grep: W1-T13428 criterion 4 in test/a-scout-refusal-row-keeps-its-own-step-name.test.ts"
+  rationale: |
+    WHY: the scout gardener files a task for a failure step that keeps coming back. When a filing is refused
+    it logs scout.record_refused and puts the symptom's step name in a payload field named `step`. The
+    gardener's log spreads the payload after the row's own step, so the payload wins: the row is stored with
+    the symptom's step name. A scout refusal then reads as one more row of the failure it describes. On
+    2026-11-16 the operator counted these rows as "17 tasks failed dispatch because plan lint Rule 19 refused
+    them". No dispatch failed. They were 17 scout passes that tried to widen one parked scout task
+    (W1-T9946) and were refused each time. The scout also reads these rows back: scoutSymptoms counts every
+    failure-shaped step, so its own refusals make a symptom look as if it still happens.
+    MEASURED, core ledger (~/rmd-state2/state, live file plus 111 archives, rows deduplicated on ts, run id
+    and step), 2026-11-14T16:09Z to 2026-11-17T16:09Z:
+    - 0 rows with step scout.record_refused.
+    - 149 rows from 12 scout passes (run id GARDEN-scout-*, gardener_origin name scout, a `reason` field)
+      stored under 14 other step names: 12 each under sweep.fix.dispatch_failed, sweep.plan_round.refused,
+      verify_human.release_escalated, inbox.draft_error, inbox.replay_escalated, auto_triage.run_failed,
+      daemon.sweep.failed, daemon.retro_trigger.run_failed, test.evidence_failed and
+      selector-shadow.gardener_failed, 11 under dispatch.refused_already_merged, 7 under
+      triage.relint_refused, 6 under console.kick_refused and 5 under daemon.quota_exhausted.escalated.
+    - The 12 rows under sweep.fix.dispatch_failed all read "W1-T9946: sizing: spans 2 distinct
+      subsystems/concerns (ledger, sweep) at risk:low — Rule 19: raise to risk:high or decompose into one
+      task per concern". The 12 under sweep.plan_round.refused say the same for W1-T9942. The live ledger
+      keeps 17 of each, from 2026-11-14T03:32Z to 2026-11-16T02:39Z. In the same 72 hours there were 37 real
+      sweep.fix.dispatch_failed rows, none about plan lint.
+    - The refused fresh filings carry a newly minted task id each pass (ids 12674 to 13120 in these rows),
+      108 ids that no task file uses.
+    - W1-T9942 and W1-T9946 are still queued at origin/main with risk low and only their test file. The
+      scout's re-derivation adds the writers of their step (two modules), plan lint Rule 19 refuses two
+      subsystems at risk low, and the pass tries again next time. W1-T9268 had the same refusal until a
+      scope amendment raised it to risk high on 2026-11-17.
+    - Which lint runs where: Rule 19 is part of the offline rule set. `npm run lint-plan:fast` prints
+      "offline subset" because it turns GitHub reads off and leaves out only the post-merge-amendment rule
+      (src/run-task.ts:20079). No task reached main by skipping Rule 19: the two drafts pass lint as filed
+      (one test file) and fail only with the writer files the scout wants to add.
+    READ at origin/main 15a86ac98:
+    - src/lib/scout-gardener.ts:466 `deps.log("scout.record_refused", { step: draft.step, task_id: draft.id,
+      reason: refused })` for a refused re-derivation, and :474 the same with `f.symptom.step` and
+      `f.taskId` for a refused fresh filing.
+    - src/run-task.ts:29260 the gardener log: `appendLedger(ledgerPath, { run_id: runId, task_id: "DAEMON",
+      step, lane: "daemon", ...extra })`. A payload key named step or task_id replaces the row's own.
+    - src/lib/scout-gardener.ts:215 scoutSymptoms counts each row whose step is failure-shaped; it does not
+      look at who wrote the row.
+    - test/the-scout-declares-the-writer-of-its-symptom.test.ts:233 and
+      test/a-scout-files-the-recurring-failure-no-task-tracks.test.ts:218 check the refusal through a log
+      sink that keeps the step apart from the payload, so they pass while production stores the other name.
+    NOT COVERED: swept plan/tasks.d and plan/tasks.yaml for scout.record_refused, record_refused and
+    scoutSymptoms, and the 11 open pull requests on craigoley/remudero: none names this row.
+  design: |
+    INVARIANT a-scout-row-is-never-a-symptom: scoutSymptoms does not count a row the scout gardener wrote.
+    INVARIANT a-refusal-still-files-nothing: a refused draft or filing changes no task file.
+    1. At src/lib/scout-gardener.ts:466 and :474 rename the payload fields: `symptom_step` for the symptom's
+       step name and `refused_task_id` for the task id. Pass no key named step, task_id, run_id, lane or ts
+       in any deps.log payload of this module.
+    2. scoutSymptoms skips a row whose gardener_origin has name scout. The rows already in the ledger then
+       stop counting on the next pass and need no rewrite.
+    3. Update the two existing tests that read the old payload field names. Do not change the gardener log
+       in src/run-task.ts in this task: other gardeners pass through it and are not measured here.
+    4. TESTS in test/a-scout-refusal-row-keeps-its-own-step-name.test.ts write to a ledger file in a
+       temporary directory through appendLedger with the same object shape as src/run-task.ts:29260, then
+       read the rows back. Build the refused draft as
+       test/the-scout-declares-the-writer-of-its-symptom.test.ts does. Load test/setup/tmp-hygiene.ts.
+  falsifier: |
+    At origin/main the appended row has the symptom's step name and criteria 1 and 2 fail. Rename the field
+    only at :466: the fresh filing in criterion 2 still takes the symptom's name. Leave scoutSymptoms as it
+    is: the step with only scout rows comes back as a symptom and criterion 3 fails.
+  note: |
+    Id reserved for run-unfiled-1794931694000 with ~/rmd-work/bin/reserve-id.sh.
+    Proof that counts in production: scout.record_refused rows appear after a scout pass with a refusal, and
+    no row with gardener_origin name scout has a step outside scout.*, plan_pr.* and child_entry.*.
+    Not in this task, for the operator to decide by hand: W1-T9942 and W1-T9946 stay parked until their risk
+    is raised to high with a Rule 19 reason (as W1-T9268 was) or they are retired. Also not in this task:
+    a refused fresh filing mints a new task id on every pass.

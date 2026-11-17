@@ -5,6 +5,7 @@
  * once at construction for warm boot; requests never open SQLite.
  * Loaded in both threads: `workerData.kind` gates {@link runReadModelWorker}, also testable in-process.
  */
+import { threadName } from "./thread-names.js";
 import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { closeSync, constants, existsSync, fstatSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -620,7 +621,7 @@ export function threadIntegrityCheck(workerUrl?: URL): NonNullable<ReadModelTick
   const spawnIntegrityCheck: NonNullable<ReadModelTickerOptions["integrityCheck"]> = (request, done) => {
     let settled = false;
     let failure = "";
-    const thread = startWorker(import.meta.url, { workerData: { kind: READ_MODEL_INTEGRITY_KIND, request } }, { override: workerUrl });
+    const thread = startWorker(import.meta.url, { name: threadName("readModelIntegrity"), workerData: { kind: READ_MODEL_INTEGRITY_KIND, request } }, { override: workerUrl });
     thread.unref();
     thread.on("message", (result: IntegrityResult) => {
       settled = true;
@@ -655,7 +656,7 @@ export function answerReadModelIssueRequest(request: ReadModelIssueRequest, issu
 export function threadIssueRequest(workerUrl?: URL): (request: ReadModelIssueRequest) => Promise<ReadModelIssueAnswer> {
   return (request) => new Promise((resolve) => {
     let failure = "";
-    const thread = startWorker(import.meta.url, { workerData: { kind: READ_MODEL_ISSUE_KIND, request } }, { override: workerUrl });
+    const thread = startWorker(import.meta.url, { name: threadName("readModelIssue"), workerData: { kind: READ_MODEL_ISSUE_KIND, request } }, { override: workerUrl });
     thread.unref();
     thread.on("message", (answer: ReadModelIssueAnswer) => resolve(answer));
     thread.on("error", (error) => void (failure = `: ${error.message}`));
@@ -722,7 +723,7 @@ export function threadOracle(opts: { workerUrl?: URL; escalationRepository?: str
   };
   const spawnOracle = (): Worker => {
     const data: ReadModelOracleData = { kind: READ_MODEL_ORACLE_KIND, ...(opts.escalationRepository ? { escalationRepository: opts.escalationRepository } : {}) };
-    const spawned = startWorker(import.meta.url, { workerData: data, env: SHARE_ENV, resourceLimits: { maxOldGenerationSizeMb: READ_MODEL_ORACLE_HEAP_MB } }, { override: opts.workerUrl });
+    const spawned = startWorker(import.meta.url, { name: threadName("readModelOracle"), workerData: data, env: SHARE_ENV, resourceLimits: { maxOldGenerationSizeMb: READ_MODEL_ORACLE_HEAP_MB } }, { override: opts.workerUrl });
     spawned.unref();
     spawned.on("message", (msg: { type?: string; id?: number; result?: OracleSliceResult }) => {
       if (msg.type === "done" && msg.id === pending?.id) settle(msg.result!);
@@ -2502,8 +2503,8 @@ export function threadViews(opts: {
   };
 }
 
-const spawnViews = (override: URL | undefined, data: ReadModelViewsData): Worker => startWorker(import.meta.url, { workerData: data, env: SHARE_ENV }, { override });
-const spawnHeavyViews = (override: URL | undefined, data: ReadModelViewsData): Worker => startWorker(import.meta.url, { workerData: data, env: SHARE_ENV }, { override });
+const spawnViews = (override: URL | undefined, data: ReadModelViewsData): Worker => startWorker(import.meta.url, { name: threadName("readModelViews"), workerData: data, env: SHARE_ENV }, { override });
+const spawnHeavyViews = (override: URL | undefined, data: ReadModelViewsData): Worker => startWorker(import.meta.url, { name: threadName("readModelHeavyViews"), workerData: data, env: SHARE_ENV }, { override });
 
 export interface ReadModelWorkerData {
   catalogBridgeVersion?: number;
@@ -3146,7 +3147,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       sendToken();
     } else {
       // SHARE_ENV, as on every long-lived thread here: escalations need serve's refreshed GH_TOKEN (#9156).
-      const thread = startWorker(import.meta.url, { workerData: data, env: SHARE_ENV }, { override: opts.workerUrl });
+      const thread = startWorker(import.meta.url, { name: threadName("readModel"), workerData: data, env: SHARE_ENV }, { override: opts.workerUrl });
       // A heap answer is not a sign of progress: the watchdog never hears it, so a loop that died still recycles.
       heapAnswer = askNestedThreadHeaps(thread);
       spawned = thread as unknown as ReadModelWorkerPort;

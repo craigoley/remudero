@@ -22,6 +22,7 @@
  * FALSIFIER: test/secret-boundary.test.ts.
  */
 
+import { threadName } from "./thread-names.js";
 import { createHash, randomBytes } from "node:crypto";
 import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { createServer as createNetServer, type Socket } from "node:net";
@@ -499,7 +500,7 @@ if (!isMainThread && (workerData as { kind?: unknown } | undefined)?.kind === SO
 /** On its OWN thread because the daemon's git is synchronous (`gitPushRunBranch` is an `execFileSync`): a socket on
  *  the blocked main thread never answers the helper that push spawns, and both wait forever (MEASURED, W1-T5115). */
 function startSocketThread(socketPath: string, log: DaemonLog, threadUrl: URL, identity?: HostAppIdentity): Promise<CredentialHelperSocketHandle> {
-  const worker = new Worker(threadUrl, { workerData: { kind: SOCKET_THREAD_KIND, socketPath, ...(identity ? { identity } : {}) }, env: { ...process.env } });
+  const worker = new Worker(threadUrl, { name: threadName("secretSocket"), workerData: { kind: SOCKET_THREAD_KIND, socketPath, ...(identity ? { identity } : {}) }, env: { ...process.env } });
   let closing = false;
   let onClosed: (() => void) | undefined;
   const close = (): Promise<void> =>

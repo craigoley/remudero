@@ -255,14 +255,14 @@ test("idle_starved: a detached PR action must settle before the Node process can
 
 test("daemonBoot: a clean env logs daemon.boot with env_clean=true, billing_mode=subscription", async () => {
   const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
-  const cleanEnv = { PATH: "/usr/bin:/bin", HOME: "/Users/op" };
+  const cleanEnv = { PATH: "/usr/bin:/bin", HOME: "/Users/op", RMD_SPAWN_HELPER: "off" };
   const result = await daemonBoot((step, extra = {}) => lines.push({ step, extra }), cleanEnv);
   // W1-T991: result also carries node_path/node_version (and possibly node_drift) —
   // checked precisely by the dedicated test/node-runtime-provenance.test.ts suite, so this
   // pre-existing test only pins the billing fields it was written to prove.
   assert.equal(result.env_clean, true);
   assert.equal(result.billing_mode, "subscription");
-  assert.equal(lines.length, 1);
+  assert.equal(lines.filter((line) => line.step !== "daemon.spawn_helper").length, 1);
   assert.equal(lines[0].step, "daemon.boot");
   assert.equal(lines[0].extra.env_clean, true);
   assert.equal(lines[0].extra.billing_mode, "subscription");
@@ -360,7 +360,7 @@ test("daemonBoot: defaults to checking process.env when no env is injected", asy
 
 test("daemonBoot: calls the injected sweepTmp once and logs daemon.tmp_sweep with the removed/kept COUNT", () => {
   const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
-  const cleanEnv = { PATH: "/usr/bin:/bin", HOME: "/Users/op" };
+  const cleanEnv = { PATH: "/usr/bin:/bin", HOME: "/Users/op", RMD_SPAWN_HELPER: "off" };
   let sweepCalls = 0;
   const sweepTmp = () => {
     sweepCalls += 1;
@@ -380,7 +380,7 @@ test("daemonBoot: calls the injected sweepTmp once and logs daemon.tmp_sweep wit
 
 test("daemonBoot: an empty sweep result still logs daemon.tmp_sweep with zero counts (a clean boot is legible too)", () => {
   const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
-  const cleanEnv = { PATH: "/usr/bin:/bin", HOME: "/Users/op" };
+  const cleanEnv = { PATH: "/usr/bin:/bin", HOME: "/Users/op", RMD_SPAWN_HELPER: "off" };
   const sweepTmp = () => ({ removed: [], kept: [] });
   daemonBoot((step, extra = {}) => lines.push({ step, extra }), cleanEnv, sweepTmp);
 
@@ -392,9 +392,9 @@ test("daemonBoot: an empty sweep result still logs daemon.tmp_sweep with zero co
 
 test("daemonBoot: no sweepTmp injected -> no daemon.tmp_sweep line at all (pre-W1-T115 behavior unchanged)", () => {
   const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
-  const cleanEnv = { PATH: "/usr/bin:/bin", HOME: "/Users/op" };
+  const cleanEnv = { PATH: "/usr/bin:/bin", HOME: "/Users/op", RMD_SPAWN_HELPER: "off" };
   daemonBoot((step, extra = {}) => lines.push({ step, extra }), cleanEnv);
-  assert.equal(lines.length, 1, "only daemon.boot — no sweep attempted when the dependency is omitted");
+  assert.equal(lines.filter((line) => line.step !== "daemon.spawn_helper").length, 1, "only daemon.boot — no sweep attempted when the dependency is omitted");
   assert.equal(lines[0].step, "daemon.boot");
 });
 
@@ -3187,7 +3187,7 @@ test("daemonBoot: calls the injected lock sweep once and logs daemon.lock_sweep 
     calls += 1;
     return { reaped: ["W1-T1"], kept: ["W1-T184"], live: ["W1-T184"], unverifiableForeignHost: [] };
   };
-  daemonBoot((step, extra = {}) => lines.push({ step, extra }), { PATH: "/usr/bin" }, undefined, sweepLocks);
+  daemonBoot((step, extra = {}) => lines.push({ step, extra }), { PATH: "/usr/bin", RMD_SPAWN_HELPER: "off" }, undefined, sweepLocks);
   assert.equal(calls, 1, "swept exactly once at boot, not per poll");
   const swept = lines.find((l) => l.step === "daemon.lock_sweep");
   assert.ok(swept, "the sweep is legible on its own ledger step");
@@ -3197,7 +3197,7 @@ test("daemonBoot: calls the injected lock sweep once and logs daemon.lock_sweep 
 
 test("daemonBoot: with no lock sweep injected, no daemon.lock_sweep line is written", () => {
   const lines: Array<{ step: string }> = [];
-  daemonBoot((step) => lines.push({ step }), { PATH: "/usr/bin" });
+  daemonBoot((step) => lines.push({ step }), { PATH: "/usr/bin", RMD_SPAWN_HELPER: "off" });
   assert.equal(lines.filter((l) => l.step === "daemon.lock_sweep").length, 0);
 });
 
@@ -3214,7 +3214,7 @@ test("daemonBoot: daemon.lock_sweep carries `live` and `unverifiable_foreign_hos
     live: ["W1-T184"],
     unverifiableForeignHost: ["W1-T395"],
   });
-  daemonBoot((step, extra = {}) => lines.push({ step, extra }), { PATH: "/usr/bin" }, undefined, sweepLocks);
+  daemonBoot((step, extra = {}) => lines.push({ step, extra }), { PATH: "/usr/bin", RMD_SPAWN_HELPER: "off" }, undefined, sweepLocks);
   const swept = lines.find((l) => l.step === "daemon.lock_sweep");
   assert.ok(swept, "the boot sweep is legible on its own ledger step");
   assert.equal(swept?.extra.reaped, 1);
@@ -3271,7 +3271,7 @@ test("daemonBoot: a successful resolveClaudeBin logs daemon.claude_bin with the 
   };
   daemonBoot(
     (step, extra = {}) => lines.push({ step, extra }),
-    { PATH: "/usr/bin" },
+    { PATH: "/usr/bin", RMD_SPAWN_HELPER: "off" },
     undefined,
     undefined,
     undefined,
@@ -3294,7 +3294,7 @@ test("daemonBoot: a REFUSING resolveClaudeBin logs daemon.claude_bin blocked=tru
   };
   const result = await daemonBoot(
     (step, extra = {}) => lines.push({ step, extra }),
-    { PATH: "/usr/bin" },
+    { PATH: "/usr/bin", RMD_SPAWN_HELPER: "off" },
     undefined,
     undefined,
     undefined,
@@ -3311,7 +3311,7 @@ test("daemonBoot: a REFUSING resolveClaudeBin logs daemon.claude_bin blocked=tru
 
 test("daemonBoot: with no resolveClaudeBin injected, no daemon.claude_bin line is written (pre-W1-T113 behavior unchanged)", () => {
   const lines: Array<{ step: string }> = [];
-  daemonBoot((step) => lines.push({ step }), { PATH: "/usr/bin" });
+  daemonBoot((step) => lines.push({ step }), { PATH: "/usr/bin", RMD_SPAWN_HELPER: "off" });
   assert.equal(lines.filter((l) => l.step === "daemon.claude_bin").length, 0);
 });
 
@@ -3392,7 +3392,7 @@ test("daemonBoot: calls the injected orphan sweep once and logs daemon.orphan_sw
   };
   daemonBoot(
     (step, extra = {}) => lines.push({ step, extra }),
-    { PATH: "/usr/bin" },
+    { PATH: "/usr/bin", RMD_SPAWN_HELPER: "off" },
     undefined,
     undefined,
     undefined,
@@ -3415,7 +3415,7 @@ test("daemonBoot: a THROWING orphan sweep still completes boot (never throws onw
   };
   const result = await daemonBoot(
     (step, extra = {}) => lines.push({ step, extra }),
-    { PATH: "/usr/bin" },
+    { PATH: "/usr/bin", RMD_SPAWN_HELPER: "off" },
     undefined,
     undefined,
     undefined,
@@ -3432,7 +3432,7 @@ test("daemonBoot: a THROWING orphan sweep still completes boot (never throws onw
 
 test("daemonBoot: with no orphan sweep injected, no daemon.orphan_sweep line is written (behavior unchanged from before W1-T117)", () => {
   const lines: Array<{ step: string }> = [];
-  daemonBoot((step) => lines.push({ step }), { PATH: "/usr/bin" });
+  daemonBoot((step) => lines.push({ step }), { PATH: "/usr/bin", RMD_SPAWN_HELPER: "off" });
   assert.equal(lines.filter((l) => l.step === "daemon.orphan_sweep").length, 0);
 });
 
@@ -3447,7 +3447,7 @@ test("daemonBoot: a measured checkout depth is recorded on the SAME daemon.boot 
   const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
   const result = await daemonBoot(
     (step, extra = {}) => lines.push({ step, extra }),
-    { PATH: "/usr/bin" },
+    { PATH: "/usr/bin", RMD_SPAWN_HELPER: "off" },
     undefined, // sweepTmp
     undefined, // sweepLocks
     undefined, // unlockWorkerKeychain
@@ -3473,7 +3473,7 @@ test("daemonBoot: a SHALLOW checkout is recorded on daemon.boot AND the boot sti
   const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
   const result = await daemonBoot(
     (step, extra = {}) => lines.push({ step, extra }),
-    { PATH: "/usr/bin" },
+    { PATH: "/usr/bin", RMD_SPAWN_HELPER: "off" },
     undefined,
     undefined,
     undefined,
@@ -3496,7 +3496,7 @@ test("daemonBoot: a SHALLOW checkout is recorded on daemon.boot AND the boot sti
 
 test("daemonBoot: with no checkoutDepth measurement (unreadable), the fields are OMITTED rather than a guessed value — and boot still completes", async () => {
   const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
-  const result = await daemonBoot((step, extra = {}) => lines.push({ step, extra }), { PATH: "/usr/bin" });
+  const result = await daemonBoot((step, extra = {}) => lines.push({ step, extra }), { PATH: "/usr/bin", RMD_SPAWN_HELPER: "off" });
   assert.ok(result, "an absent measurement never blocks boot");
   const boot = lines.find((l) => l.step === "daemon.boot");
   assert.ok(boot);
