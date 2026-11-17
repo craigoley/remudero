@@ -2211,9 +2211,23 @@ jobs:
               fi
               echo "::error::coverage-ratchet: SHARD HANG — the matrix was cancelled while the PR head"
               echo "  (${RUN_HEAD_SHA}) was unchanged, so nothing superseded it: a shard was killed at its"
-              echo "  timeout-minutes ceiling. THE COVERAGE TESTS DID NOT RUN — this is NOT a failure of this"
-              echo "  diff, and re-running the same sha will hang again: a cancellation is not by itself"
-              echo "  evidence of a test failure."
+              echo "  timeout-minutes ceiling."
+              # W1-T13269: name the step the ceiling hit. #18947's shard passed its tests and
+              # #18949's lost 20m36s in checkout; "the tests did not run" was wrong for both.
+              PHASE_JOBS="$(mktemp)"
+              gh api "repos/${GH_REPO_SLUG}/actions/runs/${GITHUB_RUN_ID:-0}/attempts/${GITHUB_RUN_ATTEMPT:-1}/jobs?per_page=100" \
+                --paginate --jq '.jobs[]' > "$PHASE_JOBS" 2>/dev/null || : > "$PHASE_JOBS"
+              PHASE_OUT="$(node "${GITHUB_WORKSPACE:-.}/scripts/shard-cancel-phase.mjs" --jobs "$PHASE_JOBS" --job-prefix "coverage-shard (" \
+                --test-step "Test with coverage" 2>/dev/null || true)"
+              rm -f "$PHASE_JOBS"
+              if printf '%s\n' "$PHASE_OUT" | grep -qE '^SHARD-CANCEL-PHASE: .+: (setup|tests|after-tests)$'; then
+                printf '%s\n' "$PHASE_OUT"
+                echo "  This is NOT a failure of this diff: a cancellation is not by itself evidence of a test failure."
+              else
+                echo "  THE COVERAGE TESTS DID NOT RUN to a verdict — this is NOT a failure of this diff, and"
+                echo "  re-running the same sha may hang again: a cancellation is not by itself evidence of a"
+                echo "  test failure. The step each shard was killed in could not be read."
+              fi
               print_unfinished_test_from_logs
               exit 1
               ;;
