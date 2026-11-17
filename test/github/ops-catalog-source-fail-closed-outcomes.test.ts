@@ -315,3 +315,30 @@ test("W1-T11768 criterion 2: a live broker cannot hide a moved ref or persist pr
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+
+test("W13319: real catalog refusals retain their exact outcome and name only the failed stage", async () => {
+  const mono = taskYaml("A");
+  const cases: Array<[Catalog, Parameters<typeof fixture>[1], string, string]> = [
+    [{monolith:mono},{fail:p=>p===`repos/${REPO}`?{}:undefined},"malformed","repository_identity"],
+    [{monolith:mono},{fail:p=>p.includes("/git/ref/")?{}:undefined},"malformed","branch_ref"],
+    [{monolith:mono},{fail:p=>p.includes("/git/commits/")?{}:undefined},"malformed","commit"],
+    [{monolith:mono},{fail:rootTreeIs([])},"source_absent","plan_tree"],
+    [{monolith:mono},{fail:p=>p.endsWith(`/git/trees/${sha1("root")}`)?{}:undefined},"malformed","root_tree"],
+    [{monolith:mono},{fail:p=>p.endsWith(`/git/trees/${sha1("plan")}`)?{}:undefined},"malformed","plan_tree"],
+    [{monolith:mono,shards:{"one.yaml":taskYaml("B")}},{fail:p=>p.endsWith(`/git/trees/${sha1("tasks.d")}`)?{}:undefined},"malformed","shard_tree"],
+    [{monolith:mono},{fail:p=>p.includes("/git/blobs/")?{}:undefined},"malformed","blob_verification"],
+    [{monolith:mono},{moveRefAfterBlobs:true},"ref_moved","final_ref"],
+    [{monolith:"- id: A\n  title: ["},{},"malformed","strict_parse"],
+    [{monolith:mono+mono},{},"duplicate_task_id","strict_parse"],
+    [{monolith:mono},{fail:()=>new OpsCatalogAuthMissingError()},"auth_missing","repository_identity"],
+  ];
+  for(const [catalog,hooks,outcome,stage] of cases){
+    const fx=fixture(catalog,hooks),snap=await run(fx);refused(outcome,snap);
+    assert.equal((snap as unknown as {refusalStage?:unknown}).refusalStage,stage);
+    assert.ok(fx.calls.every(p=>p.startsWith(`repos/${REPO}`)),"positive control: only declared GET routes executed");
+  }
+  const healthy=await run(fixture({monolith:mono}));assert.equal(healthy.outcome,"ok");assert.equal((healthy as unknown as {refusalStage?:unknown}).refusalStage,undefined);
+  let failed=false;const fx=fixture({monolith:mono},{fail:()=>failed?new Error("private transport error"):undefined}),source=createOpsCatalogShadowSource(target,fx.api);
+  assert.equal((await source.refresh()).outcome,"ok");failed=true;const stale=await source.refresh();assert.equal(stale.outcome,"stale");assert.equal((stale as unknown as {refusalStage?:unknown}).refusalStage,"branch_ref");assert.equal(stale.plan,undefined);
+});
