@@ -19,7 +19,7 @@
  * the request, and the request path must not block (W1-T4568's cold-read trigger).
  */
 import { createHash } from "node:crypto";
-import type { ServerResponse } from "node:http";
+import type { IncomingMessage } from "node:http";
 import { systemClock, type Clock } from "./clock.js";
 import { ifNoneMatchHits } from "./console-snapshot-cache.js";
 import type { Route } from "./service.js";
@@ -301,77 +301,155 @@ export function buildReadModelViewRoutes(opts: ReadModelViewRoutesOptions): Rout
     }
     return { body: { ...entry.body, stale, asOf: oldestAsOf(sources), sources }, etag };
   };
-  return names.map((name) => ({
+  const json = (status: number, body: unknown, extra: Record<string, string> = {}): ViewReadAnswer =>
+    ({ status, headers: { "content-type": "application/json; charset=utf-8", ...extra }, json: body });
+  /** W1-T13294: one view read, answered exactly as GET /v1/views/<name> answers it; the GET and the batch both call it. */
+  const answerRead = (name: string, params: URLSearchParams, ifNoneMatch: string | string[] | undefined): { shadowSampled: boolean; answer: ViewReadAnswer | Promise<ViewReadAnswer> } => {
+    const missing = (requiredParams[name] ?? []).find((param) => !params.get(param));
+    if (missing !== undefined) return { shadowSampled: false, answer: json(400, { error: "invalid_request", detail: `the ${name} view needs ?${missing}=` }) };
+    let mode = viewMode(opts.readModel, name) ?? (opts.servedByDefault?.includes(name) ? "serve" : "off");
+    const sampled = shadowSampled(opts.readModel?.switches().views[name]) && opts.shadow !== undefined;
+    const fallback = legacy.get(name);
+    const refused = (opts.requestValidators?.[name] ?? fallback?.validateRequest)?.(params, mode === "serve" ? opts.readModel : undefined);
+    if (refused) {
+      const { status = 400, ...body } = refused;
+      return { shadowSampled: sampled, answer: json(status, body) };
+    }
+    const key = viewKey(params);
+    let entry = mode === "serve" ? opts.readModel?.body(name, key) : undefined;
+    const required = opts.readModel?.qualificationGeneration?.(name);
+    const qualificationRefused = mode === "serve" && opts.readModel?.switches().views[name] === "auto" && required !== undefined && entry?.qualificationGeneration !== required
+      ? `no matched body for current generation ${required}` : undefined;
+    if (qualificationRefused !== undefined) { mode = "shadow"; entry = undefined; }
+    const answer = (served: ViewBodyEntry | undefined): ViewReadAnswer => {
+      const rendered = served && opts.readModel ? judged(opts.readModel, served) : fallback ? renderView(fallback, clock, params) : undefined;
+      if (rendered === undefined) return json(404, { error: NOT_SERVED[mode], view: name, ...(qualificationRefused === undefined ? {} : { reason: qualificationRefused }) });
+      if ("error" in rendered) {
+        const { status: _status, ...failure } = rendered;
+        return json(rendered.status ?? 400, rendered.status === undefined ? { error: "invalid_request", detail: rendered.error } : failure);
+      }
+      const { body, etag } = rendered;
+      opts.onServed?.(name, body);
+      if (ifNoneMatchHits(ifNoneMatch, etag)) return { status: 304, headers: { etag, "cache-control": "no-cache" } };
+      return { status: 200, headers: { "content-type": "application/json; charset=utf-8", etag, "cache-control": "no-cache" }, json: body };
+    };
+    if (mode !== "serve" || !opts.readModel || !demandViews.has(name)) return { shadowSampled: sampled, answer: answer(entry) };
+    // An on-demand view: a key it holds is re-wanted now and then so it stays; a key it lacks is asked for and awaited, off the loop.
+    if (entry) {
+      touchViewDemand(opts.readModel, name, key, clock.now());
+      return { shadowSampled: sampled, answer: answer(entry) };
+    }
+    const readModel = opts.readModel;
+    return {
+      shadowSampled: sampled,
+      answer: awaitViewDemand(readModel, name, key, { clock }).then(
+        (demanded) => demanded.ok ? answer(demanded.entry)
+          : json(404, { error: "view_not_ready", view: name, reason: demanded.reason, retryMs: demanded.retryMs }, { "retry-after": String(Math.max(1, Math.ceil(demanded.retryMs / 1000))) }))
+        .catch((error: unknown) => json(500, { error: "internal_error", detail: String((error as Error)?.message ?? error) })),
+    };
+  };
+  const routes: Route[] = names.map((name) => ({
     method: "GET",
     path: `/v1/views/${name}`,
     scope: "read",
     handler: (req, res) => {
       const params = new URL(req.url ?? "/", "http://localhost").searchParams;
-      const missing = (requiredParams[name] ?? []).find((param) => !params.get(param));
-      if (missing !== undefined) {
-        res.writeHead(400, { "content-type": "application/json; charset=utf-8" });
-        res.end(JSON.stringify({ error: "invalid_request", detail: `the ${name} view needs ?${missing}=` }));
-        return;
-      }
-      let mode = viewMode(opts.readModel, name) ?? (opts.servedByDefault?.includes(name) ? "serve" : "off");
+      const { shadowSampled: sampled, answer } = answerRead(name, params, req.headers?.["if-none-match"]);
       const shadow = opts.shadow;
-      if (shadowSampled(opts.readModel?.switches().views[name]) && shadow) res.once("finish", () => shadow(name, viewKey(params), params));
-      const fallback = legacy.get(name);
-      const refused = (opts.requestValidators?.[name] ?? fallback?.validateRequest)?.(params, mode === "serve" ? opts.readModel : undefined);
-      if (refused) {
-        const { status = 400, ...body } = refused;
-        res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
-        res.end(JSON.stringify(body));
-        return;
-      }
-      const key = viewKey(params);
-      let entry = mode === "serve" ? opts.readModel?.body(name, key) : undefined;
-      const required = opts.readModel?.qualificationGeneration?.(name);
-      const qualificationRefused = mode === "serve" && opts.readModel?.switches().views[name] === "auto" && required !== undefined && entry?.qualificationGeneration !== required
-        ? `no matched body for current generation ${required}` : undefined;
-      if (qualificationRefused !== undefined) { mode = "shadow"; entry = undefined; }
-      const answer = (served: ViewBodyEntry | undefined): void => {
-        const rendered = served && opts.readModel ? judged(opts.readModel, served) : fallback ? renderView(fallback, clock, params) : undefined;
-        if (rendered === undefined) {
-          res.writeHead(404, { "content-type": "application/json; charset=utf-8" });
-          res.end(JSON.stringify({ error: NOT_SERVED[mode], view: name, ...(qualificationRefused === undefined ? {} : { reason: qualificationRefused }) }));
-          return;
-        }
-        if ("error" in rendered) {
-          res.writeHead(rendered.status ?? 400, { "content-type": "application/json; charset=utf-8" });
-          const { status: _status, ...failure } = rendered;
-          res.end(JSON.stringify(rendered.status === undefined ? { error: "invalid_request", detail: rendered.error } : failure));
-          return;
-        }
-        const { body, etag } = rendered;
-        opts.onServed?.(name, body);
-        if (ifNoneMatchHits(req.headers["if-none-match"], etag)) {
-          res.writeHead(304, { etag, "cache-control": "no-cache" });
-          res.end();
-          return;
-        }
-        sendView(res, body, etag);
-      };
-      if (mode !== "serve" || !opts.readModel || !demandViews.has(name)) return answer(entry);
-      // An on-demand view: a key it holds is re-wanted now and then so it stays; a key it lacks is asked for and awaited, off the loop.
-      if (entry) {
-        touchViewDemand(opts.readModel, name, key, clock.now());
-        return answer(entry);
-      }
-      void awaitViewDemand(opts.readModel, name, key, { clock }).then((demanded) => {
-        if (demanded.ok) return answer(demanded.entry);
-        res.writeHead(404, { "content-type": "application/json; charset=utf-8", "retry-after": String(Math.max(1, Math.ceil(demanded.retryMs / 1000))) });
-        res.end(JSON.stringify({ error: "view_not_ready", view: name, reason: demanded.reason, retryMs: demanded.retryMs }));
-      }).catch((error: unknown) => {
+      if (sampled && shadow) res.once("finish", () => shadow(name, viewKey(params), params));
+      const write = (read: ViewReadAnswer): void => {
         if (res.headersSent) return void res.end();
-        res.writeHead(500, { "content-type": "application/json; charset=utf-8" });
-        res.end(JSON.stringify({ error: "internal_error", detail: String((error as Error)?.message ?? error) }));
-      });
+        res.writeHead(read.status, read.headers);
+        res.end(read.json === undefined ? undefined : JSON.stringify(read.json));
+      };
+      // A memory answer is written at once, as before; only an on-demand key waits.
+      if (answer instanceof Promise) void answer.then(write);
+      else write(answer);
     },
   }));
+  const known = new Set(names);
+  routes.push({
+    method: "POST",
+    path: VIEW_BATCH_PATH,
+    scope: "read",
+    handler: async (req, res) => {
+      const refuse = (detail: string): void => {
+        res.writeHead(400, { "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: "invalid_request", detail }));
+      };
+      const text = await readBoundedBody(req, VIEW_BATCH_MAX_BODY_BYTES);
+      if (text === undefined) return refuse(`the batch body must be at most ${VIEW_BATCH_MAX_BODY_BYTES} bytes`);
+      const reads = parseViewBatch(text, known);
+      if (typeof reads === "string") return refuse(reads);
+      const answers = await Promise.all(reads.map(async (read) => {
+        const params = new URLSearchParams(read.params);
+        const { shadowSampled: sampled, answer } = answerRead(read.view, params, read.ifNoneMatch);
+        const got = await answer;
+        if (sampled && opts.shadow) opts.shadow(read.view, viewKey(params), params);
+        const etag = got.headers.etag;
+        if (got.status === 200 || got.status === 304) return { status: got.status, ...(etag === undefined ? {} : { etag }), ...(got.status === 200 ? { body: got.json } : {}) };
+        return { status: got.status, ...(got.json as Record<string, unknown>) };
+      }));
+      res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-cache" });
+      res.end(JSON.stringify({ answers }));
+    },
+  });
+  return routes;
 }
 
-function sendView(res: ServerResponse, body: ViewBody, etag: string): void {
-  res.writeHead(200, { "content-type": "application/json; charset=utf-8", etag, "cache-control": "no-cache" });
-  res.end(JSON.stringify(body));
+/** W1-T13294: one view read's answer, as the GET writes it: status, headers and the JSON body (none for a 304). */
+interface ViewReadAnswer {
+  status: number;
+  headers: Record<string, string>;
+  json?: unknown;
 }
+
+/** W1-T13294: several view reads in one request. */
+export const VIEW_BATCH_PATH = "/v1/views/batch";
+/** PRIMARY CONTROL: the most reads one batch may carry (the Console's agent page reads about ten). */
+export const VIEW_BATCH_MAX_READS = 32;
+/** BACKSTOP: the largest batch body; 32 reads of short params fit in a few KiB. */
+export const VIEW_BATCH_MAX_BODY_BYTES = 64 * 1024;
+
+interface ViewBatchRead { view: string; params: Record<string, string>; ifNoneMatch?: string }
+
+/** The request body as text, or undefined once it passes `max` bytes. */
+function readBoundedBody(req: IncomingMessage, max: number): Promise<string | undefined> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let over = false;
+    req.on("data", (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > max) over = true;
+      else if (!over) chunks.push(chunk);
+    });
+    req.on("end", () => resolve(over ? undefined : Buffer.concat(chunks).toString("utf8")));
+    req.on("error", reject);
+  });
+}
+
+/** The batch's reads, or the reason it is refused; nothing is read before every read is valid. */
+export function parseViewBatch(text: string, known: ReadonlySet<string>): ViewBatchRead[] | string {
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch (_err) {
+    // Carried, not erased: the refusal names the cause.
+    return "the batch body is not JSON";
+  }
+  const reads = (body as { reads?: unknown } | null)?.reads;
+  if (!Array.isArray(reads)) return "reads must be an array";
+  if (reads.length === 0 || reads.length > VIEW_BATCH_MAX_READS) return `reads must hold 1 to ${VIEW_BATCH_MAX_READS} reads`;
+  const out: ViewBatchRead[] = [];
+  for (const [i, read] of reads.entries()) {
+    const r = (read ?? {}) as { view?: unknown; params?: unknown; ifNoneMatch?: unknown };
+    if (typeof r.view !== "string" || !known.has(r.view)) return `reads[${i}].view is not a view this server answers`;
+    const params = r.params ?? {};
+    if (typeof params !== "object" || Array.isArray(params) || Object.values(params).some((v) => typeof v !== "string")) return `reads[${i}].params must map names to strings`;
+    if (r.ifNoneMatch !== undefined && typeof r.ifNoneMatch !== "string") return `reads[${i}].ifNoneMatch must be a string`;
+    out.push({ view: r.view, params: params as Record<string, string>, ...(r.ifNoneMatch === undefined ? {} : { ifNoneMatch: r.ifNoneMatch }) });
+  }
+  return out;
+}
+
