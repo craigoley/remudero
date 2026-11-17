@@ -99,3 +99,21 @@ test("migration preview never calls a foreign target unclaimed from the public p
   assert.equal(result.answer.permission, "not_granted");
   assert.ok(result.answer.refused.some((row: { id: string; reason: string }) => row.id === "W1-T1" && row.reason === "target_not_bound"));
 });
+
+
+test("migration preview distinguishes incomplete search evidence from a complete missing positive control", t => {
+  const empty = fixture(t);
+  empty.credit.control = [];
+  const noControl = empty.run();
+  assert.equal(noControl.answer.outcome, "unknown");
+  assert.equal(noControl.answer.reason, "merge_credit_control_unreadable");
+  assert.equal(noControl.answer.permission, "not_granted");
+  const absent = fixture(t);
+  const response = JSON.parse(readFileSync(join(absent.root, "answer.json"), "utf8"));
+  delete response.data.control;
+  absent.shim.addRoute({ when: "byTrailer:search", stdout: JSON.stringify(response) });
+  const incomplete = absent.run();
+  assert.equal(incomplete.answer.outcome, "unknown");
+  assert.equal(incomplete.answer.reason, "incomplete_evidence");
+  assert.equal(incomplete.answer.permission, "not_granted");
+});

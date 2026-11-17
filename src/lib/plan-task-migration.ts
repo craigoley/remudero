@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { join, relative, sep } from "node:path";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { parse as parseYaml } from "yaml";
-import { defaultGitRunnerAsync, readBlobsAtRefAsync, parseTasksFromYaml, type Plan } from "./plan.js";
+import { defaultGitRunnerAsync, readBlobsAtRefAsync, type Plan } from "./plan.js";
 import { createPlanRevisionStore } from "./plan-revision-store.js";
 import { dispatchOrder } from "./drain.js";
 import { taskIdFromRunBranch, creditsByAnchoredTrailer } from "./status.js";
@@ -11,10 +11,11 @@ import { RmdError } from "./errors.js";
 
 type Json = Record<string, unknown>;
 type Options = { publicRoot: string; publicCommit: string; publicRepo: string; opsRoot: string; opsCommit: string; opsRepo: string };
-type Original = { path: string; text: string; blob: string; single: boolean; moved: boolean; shard: boolean };
+type Original = { path: string; text: string; blob: string; single: boolean; shard: boolean };
 // BACKSTOP: refuse a runaway explicit preview whole, never truncate a population into absence.
 const MAX_CANDIDATE_LOOKUPS = 32;
-const MAX_CATALOG_BYTES = 32 * 1024 * 1024;
+// The measured public corpus is 34,444,886 bytes. Leave 16 MiB for framing below the shared 64 MiB Git buffer.
+const MAX_CATALOG_BYTES = 48 * 1024 * 1024;
 class PreviewUnknown extends RmdError {
   constructor(readonly reason: string) { super("plan", 1, reason); }
 }
@@ -71,21 +72,26 @@ async function catalog(root: string, commit: string, external = false): Promise<
   if (!files.some(f => f.path === monolith) || files.length > 10_000) return unknown("catalog_unreadable");
   const texts = await readBlobsAtRefAsync(git, commit, files.map(f => f.path));
   let bytes = 0;
-  const originals = new Map<string, Original>();
   const blobs = files.map((file, i) => {
     const text = texts[i]!, buffer = Buffer.from(text); bytes += buffer.length;
     if (bytes > MAX_CATALOG_BYTES || createHash("sha1").update(`blob ${buffer.length}\0`).update(buffer).digest("hex") !== file.blob) return unknown("catalog_unreadable");
-    const tasks = parseTasksFromYaml(text, file.path, undefined, { logLevel: "silent" }, "preserve-external");
-    const raw: unknown = parseYaml(text, { logLevel: "silent" });
-    const moved = Array.isArray(raw) && raw.some(entry => entry !== null && typeof entry === "object" && Object.hasOwn(entry, "moved_from"));
-    for (const task of tasks) {
-      if (originals.has(task.id)) return unknown("catalog_conflict");
-      originals.set(task.id, { ...file, text, single: tasks.length === 1, moved });
-    }
     return { label: file.path, text };
   });
   const store = createPlanRevisionStore({ strict: true, yamlLogLevel: "silent", ...(external ? { dependencyMode: "preserve-external" as const } : {}) });
-  return { plan: store.adopt({ key: commit, commit, repoDir: root, relPath: monolith }, blobs).plan, originals };
+  const plan = store.adopt({ key: commit, commit, repoDir: root, relPath: monolith }, blobs).plan;
+  // The strict reader already parsed every task and bound its sourcePath. Reuse that provenance,
+  // rather than parsing the whole catalog three times just to recover the same per-file identity.
+  const byPath = new Map(files.map((file, i) => [file.path, { ...file, text: texts[i]! }]));
+  const counts = new Map<string, number>();
+  for (const task of plan.tasks) counts.set(task.sourcePath!, (counts.get(task.sourcePath!) ?? 0) + 1);
+  const originals = new Map<string, Original>(plan.tasks.map(task => [task.id,
+    { ...byPath.get(task.sourcePath!)!, single: counts.get(task.sourcePath!) === 1 }]));
+  return { plan, originals };
+}
+function alreadyMoved(original: Original): boolean {
+  // Only otherwise eligible candidates need this raw metadata; strict parsing already validated all bytes.
+  const raw: unknown = parseYaml(original.text, { logLevel: "silent" });
+  return Array.isArray(raw) && raw.some(entry => entry !== null && typeof entry === "object" && Object.hasOwn(entry, "moved_from"));
 }
 async function refs(root: string, selectedRepository: string): Promise<Map<string, string>> {
   // The selected API identity and ownership namespace must name the same repository.
@@ -176,8 +182,9 @@ function stable(before: PreviewState, after: PreviewState): void {
   if (before.repositoryId !== after.repositoryId || before.opsId !== after.opsId || before.mergedTotal !== after.mergedTotal || JSON.stringify(before.open) !== JSON.stringify(after.open) || JSON.stringify(before.recent) !== JSON.stringify(after.recent)) return unknown("ownership_changed");
 }
 function searchedMerged(state: PreviewState, id: string, control: Json): boolean {
-  if (!state.control?.some(pr => pr.number === control.number && credited(pr).some(id => credited(control).includes(id)))) return unknown("merge_credit_control_unreadable");
-  if (!state.trailer || !state.branch) return unknown("incomplete_merge_credit");
+  // Missing search evidence is incomplete; a complete search without its positive control is unreadable.
+  if (!state.trailer || !state.branch || !state.control) return unknown("incomplete_merge_credit");
+  if (!state.control.some(pr => pr.number === control.number && credited(pr).some(id => credited(control).includes(id)))) return unknown("merge_credit_control_unreadable");
   return [...state.trailer, ...state.branch].some(pr => credited(pr).includes(id));
 }
 
@@ -198,7 +205,7 @@ export async function previewPlanTaskMigration(args: readonly string[]): Promise
     for (const task of dispatchOrder(pub.plan.tasks).reverse()) {
       const original = pub.originals.get(task.id)!;
       const reason = knownMerged.has(task.id) ? "merged" : task.repo !== o.publicRepo.split("/")[1] ? "target_not_bound" : taskOwned(task.id, [...(task.files ?? []), original.path], publicRefs, initial.open) ? "owned" :
-        publicPrerequisites.has(task.id) ? "public_dependants" : !original.single || !original.shard ? "not_single_shard" : original.moved ? "already_moved" : undefined;
+        publicPrerequisites.has(task.id) ? "public_dependants" : !original.single || !original.shard ? "not_single_shard" : alreadyMoved(original) ? "already_moved" : undefined;
       if (reason) { refused.push({ id: task.id, reason }); continue; }
       if (!control) return unknown("merge_credit_control_unreadable");
       if (++lookups > MAX_CANDIDATE_LOOKUPS) return unknown("merge_credit_budget_exhausted");
