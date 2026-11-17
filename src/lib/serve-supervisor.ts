@@ -82,7 +82,7 @@ export const SMOKE_PATHS = ["/v1/version", "/v1/status", "/v1/views/versions"] a
  * spaced: a supervisor with no handoff yet hands off at once.
  */
 export const SERVE_HANDOFF_SPACING_BASE_MS = 2 * 60 * 60_000;
-/** The cap on a memory-deferred handoff's retry backoff: the old 15-minute window, kept apart from the spacing above. */
+/** BACKSTOP: the cap on a memory-deferred handoff's retry backoff: the old 15-minute window, kept apart from the spacing above. */
 export const SERVE_HANDOFF_MEMORY_RETRY_CAP_MS = 15 * 60_000;
 /** How fast handoff pressure fades: a handoff an hour ago weighs half of one just done. */
 export const SERVE_HANDOFF_PRESSURE_HALF_LIFE_MS = 60 * 60_000;
