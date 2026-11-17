@@ -1,0 +1,48 @@
+- id: W1-T13490
+  title: "After a serve restart, the on-demand views (task, inbox-thread, code-health, daily-progress) keep answering the keys the last serve committed, marked stale, for one eviction window, instead of dropping them all on the worker's first sweep"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # spans the worker sweep and the W1-T5048 demand suite that pins the first-sweep drop; an unread carried key is still dropped, one window later
+  band_meaning: span
+  origin: "operator-session#serve-views-restart-2026-11-17"
+  plan_refs:
+    - W1-T13457
+    - W1-T5048
+    - W1-T13455
+  files:
+    - src/lib/read-model-worker.ts
+    - test/view-demand.test.ts
+    - test/console-api/views/code-health-demand-lanes.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A worker restarted over a store holding an earlier run's demand key keeps serving that key's body until one eviction window has passed since it started"
+      proof: "unit test: W1-T13490 criterion 1"
+    - claim: "A carried demand key that nobody reads within that window is dropped from serve's memory and deleted from the store on the first sweep after it"
+      proof: "unit test: W1-T13490 criterion 2"
+    - claim: "invariant:carried-then-read — a carried key read within the window is wanted, rebuilt, and kept like any other read key"
+      kind: guard
+      proof: "unit test: W1-T13490 criterion 3"
+  rationale: |
+    WHY: W1-T13457 (PR #19192) keeps the read-model views' committed bodies across a serve restart, but sweepDemand's
+    first sweep still drops every earlier run's demand key (the W1-T5048 test "a body an earlier run persisted is
+    dropped unless this run is asked for it" pins it). After each restart, task pages, code-health pages and, once
+    W1-T13455 mounts it, the Console's inbox-thread reads answer 404 view_not_ready until rebuilt, which sends the
+    Console to its legacy routes. Serve restarts are frequent (18:52Z and 19:27Z on 2026-11-17).
+  design: |
+    INVARIANT carried-then-read: a carried key is kept only while someone could still want it.
+    1. In sweepDemand, a unit's first sweep of earlier runs' persisted keys waits until VIEW_DEMAND_EVICT_MS after the
+       worker started; until then a key not in the demand book stays in the store and in serve's memory.
+    2. The carried body is judged stale by W1-T13457's carried rule until the worker posts it.
+    3. Update the W1-T5048 test to the new timing; it still proves the drop, one window later.
+    4. code-health-demand-lanes pins which owner the first sweep may invalidate; give its tickers demandCarryMs: 0.
+  falsifier: |
+    Drop on the first sweep: criterion 1 fails. Never drop: criterion 2 fails. Drop a key that was read in the
+    window: criterion 3 fails.
+  note: |
+    Id reserved for run-unfiled-1794946651306 with ~/rmd-work/bin/reserve-id.sh on the Azure host.

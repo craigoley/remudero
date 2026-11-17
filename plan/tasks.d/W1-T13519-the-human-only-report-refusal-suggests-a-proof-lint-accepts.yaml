@@ -1,0 +1,34 @@
+- id: W1-T13519
+  title: "The human-only-report refusal suggests a grep proof that the proof-grep-safety lint accepts"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # touches the plan linter and its suite, two concerns by Rule 19; the change is one message string
+  origin: "operator-session#ubuntu-2604-main-red-2026-11-17"
+  plan_refs:
+    - W1-T13439
+  files:
+    - src/lib/task-linter.ts
+    - test/plan/a-report-task-only-a-person-can-verify-is-refused-at-filing.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A shard that takes the human-only-report refusal's suggested proof as written gets no proof-grep-safety violation from lintTask"
+      proof: "grep: W1-T13519 criterion 1 in test/plan/a-report-task-only-a-person-can-verify-is-refused-at-filing.test.ts"
+    - claim: "invariant:refusal-unchanged — a new docs-only verify: human shard with only demonstration proofs is still refused as human-only-report"
+      proof: "grep: W1-T13519 criterion 2 in test/plan/a-report-task-only-a-person-can-verify-is-refused-at-filing.test.ts"
+  rationale: |
+    OBSERVED 2026-11-17 while filing W1-T13518: humanOnlyReportViolations in src/lib/task-linter.ts (W1-T13439, #19183)
+    tells the author to use a proof like `grep: ^## Recommendation$ in <report>`. The proof-grep-safety check refuses
+    that pattern for its unescaped `^`, so following the advice fails lint. W1-T13518's first lint run showed it.
+  design: |
+    Change the example in the message to a pattern proof-grep-safety accepts, such as `grep: ## Recommendation in <report>`,
+    and update the test's assertion. Add a test that builds a recon shard with the suggested proof (read from the
+    message, not retyped) and asserts lintTask returns no proof-grep-safety violation. Keep criterion 2 as the existing
+    refusal test, retitled.
+    INVARIANT refusal-unchanged: a new docs-only verify: human shard whose proofs are all demonstrations is still refused
+    with check human-only-report at severity block; only the example text in the message changes.
