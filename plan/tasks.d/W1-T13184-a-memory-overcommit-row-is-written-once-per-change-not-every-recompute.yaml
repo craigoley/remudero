@@ -15,7 +15,7 @@
   files:
     - deploy/resource-policy.sh
     - test/deploy/a-memory-overcommit-row-is-written-once-per-change-not-every-recompute.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With an overcommit row for a container already in the ledger and more than 400 other lines written after it, a recompute with the same formula, own peak, deficit and kept limit appends no row"

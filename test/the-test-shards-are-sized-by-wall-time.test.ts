@@ -11,6 +11,8 @@ import { parse as parseYaml } from "yaml";
 import { DEFAULT_CI_SHARD_COUNT, proposalIsMaterial } from "#scripts/test-tier-manifest.mjs";
 // @ts-expect-error — plain .mjs, no declaration file.
 import { assertExpectedShardCount } from "#scripts/coverage-merge-ratchet.mjs";
+// W1-T13270: the coverage lane moved to its own count (12); ci-shard keeps the canonical 8.
+import { CI_COVERAGE_SHARD_COUNT } from "#src/lib/ci-parity.js";
 
 // ── W1-T4436 ──────────────────────────────────────────────────────────────────────────────────
 //
@@ -68,6 +70,7 @@ function stepNamed(job: CiJob, name: string): CiStep {
 }
 
 const SHARD_LIST = Array.from({ length: CANONICAL_SHARD_COUNT }, (_unused, i) => i + 1);
+const COVERAGE_SHARD_LIST = Array.from({ length: CI_COVERAGE_SHARD_COUNT }, (_unused, i) => i + 1);
 
 // ── acceptance 1: every shard consumer derives one shard count ─────────────────────────────────
 
@@ -82,11 +85,11 @@ test("W1-T4436: every shard consumer derives one shard count", () => {
   assert.deepEqual(ciJob.strategy?.matrix?.shard, SHARD_LIST, "the `ci` matrix must shard 1..8, not 1..4");
   assert.deepEqual(
     coverageJob.strategy?.matrix?.shard,
-    SHARD_LIST,
-    "the `coverage-ratchet` matrix must shard 1..8, not 1..4",
+    COVERAGE_SHARD_LIST,
+    "the `coverage-ratchet` matrix must shard 1..CI_COVERAGE_SHARD_COUNT",
   );
   assert.equal(ciJob.name, "ci-shard (${{ matrix.shard }}/8)");
-  assert.equal(coverageJob.name, "coverage-shard (${{ matrix.shard }}/8)");
+  assert.equal(coverageJob.name, `coverage-shard (\${{ matrix.shard }}/${CI_COVERAGE_SHARD_COUNT})`);
 
   // No stray shard-total literal left behind: every place ci.yml passed `--shard <n>/4` (or
   // `4/4` as a fallback denominator, or a loop bound `1 2 3 4`) to test-tier-manifest.mjs must
@@ -108,7 +111,10 @@ test("W1-T4436: every shard consumer derives one shard count", () => {
   const ciGateYamlText = loadCiGateYamlText();
   for (const n of SHARD_LIST) {
     assert.ok(ciGateYamlText.includes(`"ci-shard (${n}/8)"`), `ci-gate.yml must register ci-shard (${n}/8)`);
-    assert.ok(ciGateYamlText.includes(`"coverage-shard (${n}/8)"`), `ci-gate.yml must register coverage-shard (${n}/8)`);
+  }
+  for (const n of COVERAGE_SHARD_LIST) {
+    const entry = `coverage-shard (${n}/${CI_COVERAGE_SHARD_COUNT})`;
+    assert.ok(ciGateYamlText.includes(`"${entry}"`), `ci-gate.yml must register ${entry}`);
   }
   assert.ok(!ciGateYamlText.includes('"ci-shard (1/4)"'), "no stale 4-shard ci-gate.yml entry may remain");
   assert.ok(!ciGateYamlText.includes('"coverage-shard (1/4)"'), "no stale 4-shard ci-gate.yml entry may remain");
@@ -117,7 +123,7 @@ test("W1-T4436: every shard consumer derives one shard count", () => {
   // explicitly (the function it drives, proposalIsMaterial, documents that it "does not guess").
   assert.ok(
     ciYamlText.includes("--propose --proposed test-tier-manifest.next.json --shard-count 8"),
-    "the --propose call must pass --shard-count 8 explicitly, matching the real coverage matrix",
+    "the --propose call must pass --shard-count 8 explicitly, matching the ci-shard matrix the manifest shards",
   );
 
   // scripts/test-tier-manifest.mjs's own single JS-side constant — the one export a caller
@@ -169,18 +175,18 @@ test("W1-T4436: the coverage aggregator requires exactly that many shard artifac
   assert.ok(coverageRequired, "expected ci.yml to still define coverage-ratchet-required");
 
   const artifactStep = stepNamed(coverageRequired, "Require downloaded coverage shard artifacts");
-  assert.match(artifactStep.run!, /for SHARD in 1 2 3 4 5 6 7 8; do/);
+  assert.match(artifactStep.run!, /for SHARD in 1 2 3 4 5 6 7 8 9 10 11 12; do/);
   assert.ok(!/for SHARD in 1 2 3 4; do/.test(artifactStep.run!), "the artifact-count loop must not still stop at 4");
 
   const mergeStep = stepNamed(coverageRequired, "Merge raw V8 coverage shards before assigning LCOV branch indexes");
-  assert.match(mergeStep.run!, /for SHARD in 1 2 3 4 5 6 7 8; do/);
-  for (const n of SHARD_LIST) {
+  assert.match(mergeStep.run!, /for SHARD in 1 2 3 4 5 6 7 8 9 10 11 12; do/);
+  for (const n of COVERAGE_SHARD_LIST) {
     assert.ok(
       mergeStep.run!.includes(`coverage-shards/coverage-shard-${n}/raw`),
       `the merge command must list shard ${n}'s raw directory`,
     );
   }
-  assert.match(mergeStep.run!, /--shard-count 8\b/);
+  assert.match(mergeStep.run!, new RegExp(`--shard-count ${CI_COVERAGE_SHARD_COUNT}\\b`));
 
   // THE FALSIFIER, EXERCISED DIRECTLY: scripts/coverage-merge-ratchet.mjs's own artifact-count
   // guard (assertExpectedShardCount) is what ci.yml's `--shard-count 8` flag drives. If the

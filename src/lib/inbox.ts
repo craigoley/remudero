@@ -2701,14 +2701,55 @@ export function gitGrepAnchorTrueAsync(
 export interface AnchorGrepCache {
   sha?: string;
   results: Map<string, boolean>;
+  /** W1-T13302: the files changed between two commits, or undefined when that cannot be read. With it, a move to a
+   *  new sha keeps every answer whose path scope holds no changed file; without it, a new sha empties the cache. */
+  changedFiles?: AnchorChangedFiles;
+}
+
+/** The repo-relative files that differ between commits `from` and `to` (both names of a rename), or undefined. */
+export type AnchorChangedFiles = (from: string, to: string) => readonly string[] | undefined;
+
+/** W1-T13302: past this many changed files, a move empties the cache instead of carrying it.
+ *  BACKSTOP: a normal main move changes a handful of files and is carried; only a bulk move trips this. */
+export const ANCHOR_CARRY_MAX_CHANGED_FILES = 2_000;
+
+/** How long the one `git diff --name-only` of a move may run before the move empties the cache instead.
+ *  BACKSTOP: a healthy diff of two commits returns in well under a second; only a wedged git trips this. */
+export const ANCHOR_CARRY_DIFF_TIMEOUT_MS = 10_000;
+
+/** REAL {@link AnchorChangedFiles}: `git diff --name-only --no-renames -z from to` in `cwd`, through the hardened
+ *  leaf (pinned gitdir, no ext-diff/textconv, no code-executing config). Any failure (a commit gone, a timeout, a
+ *  refused pin or config) answers undefined, and the caller empties the cache as before. */
+export function gitAnchorChangedFiles(cwd: string): AnchorChangedFiles {
+  return (from, to) => {
+    try {
+      const out = hostWorktreeGit(cwd, ["diff", "--name-only", "--no-renames", "-z", from, to, "--"],
+        { timeout: ANCHOR_CARRY_DIFF_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024 });
+      return out.split("\0").filter((name) => name !== "");
+    } catch (_err) {
+      // Carried, not erased: an unreadable diff means "do not carry", and the cache empties as it did before W1-T13302.
+      return undefined;
+    }
+  };
+}
+
+/** True when a grep of `path` at the new commit could answer differently: a changed file lies in its scope. A
+ *  path-less anchor, or a pathspec with glob or magic characters, is in scope of every change. */
+function anchorScopeChanged(path: string | null, changed: ReadonlySet<string>, changedList: readonly string[]): boolean {
+  if (changedList.length === 0) return false;
+  if (path === null || path === "" || path === "." || /[*?[\]\\]/.test(path) || path.startsWith(":")) return true;
+  const scope = path.replace(/^\.\//, "").replace(/\/+$/, "");
+  if (changed.has(scope)) return true;
+  const prefix = `${scope}/`;
+  return changedList.some((name) => name.startsWith(prefix));
 }
 
 /** BACKSTOP, not the control: a new main sha is what normally empties {@link AnchorGrepCache}. This only stops one
  *  sha's map outgrowing any registry this repo has held (693 proposals, one or two anchors each, on 2026-09-23). */
 export const ANCHOR_GREP_CACHE_MAX_ENTRIES = 20_000;
 
-export function createAnchorGrepCache(): AnchorGrepCache {
-  return { results: new Map() };
+export function createAnchorGrepCache(changedFiles?: AnchorChangedFiles): AnchorGrepCache {
+  return changedFiles === undefined ? { results: new Map() } : { results: new Map(), changedFiles };
 }
 
 /** Look `anchor` up in `cache` for commit `sha`, running `grep` (against that sha) only on a miss. A throwing grep is
@@ -2734,11 +2775,26 @@ function anchorGrepKey(anchor: EvidenceAnchor): string {
   return JSON.stringify([anchor.pattern, anchor.path ?? null]);
 }
 
-/** A new sha empties the cache; so does the {@link ANCHOR_GREP_CACHE_MAX_ENTRIES} backstop. */
+/** A new sha empties the cache, unless W1-T13302's carry can keep the answers no changed file can affect; the
+ *  {@link ANCHOR_GREP_CACHE_MAX_ENTRIES} backstop always empties it. */
 function resetAnchorGrepCacheFor(cache: AnchorGrepCache, sha: string): void {
-  if (cache.sha !== sha || cache.results.size >= ANCHOR_GREP_CACHE_MAX_ENTRIES) {
-    cache.sha = sha;
+  if (cache.sha === sha && cache.results.size < ANCHOR_GREP_CACHE_MAX_ENTRIES) return;
+  const from = cache.sha;
+  cache.sha = sha;
+  if (from === undefined || from === sha || cache.changedFiles === undefined || cache.results.size === 0) {
     cache.results.clear();
+    return;
+  }
+  const changed = cache.changedFiles(from, sha);
+  if (changed === undefined || changed.length > ANCHOR_CARRY_MAX_CHANGED_FILES) {
+    cache.results.clear();
+    return;
+  }
+  // INVARIANT carried-equals-fresh: a grep of a path whose files did not change answers what it answered at `from`.
+  const changedSet = new Set(changed);
+  for (const key of [...cache.results.keys()]) {
+    const [, path] = JSON.parse(key) as [string, string | null];
+    if (anchorScopeChanged(path, changedSet, changed)) cache.results.delete(key);
   }
 }
 

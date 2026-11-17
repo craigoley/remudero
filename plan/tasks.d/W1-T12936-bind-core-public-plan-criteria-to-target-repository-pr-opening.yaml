@@ -1,0 +1,58 @@
+- id: W1-T12936
+  title: Bind Core public-plan criteria to target-repository PR opening
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: architect
+  plan_refs: ["§5B", W1-T12515]
+  files:
+    - src/lib/pr-open.ts
+    - src/cli/commands/run-task-verb.ts
+    - test/github/a-run-for-an-ops-task-writes-its-acceptance-block-from-the-ops-catalog.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    A Core task can legitimately target another repository, but the target repository's PR opener
+    currently refuses when that task id is not present in the target's local plan. W1-T12515
+    reproduced this as `branch-gap` at PR creation even after its task had been admitted and its
+    branch passed through the normal run path. The existing ops-catalog binding proves the intended
+    pattern, but the public Core plan has no equivalent immutable binding. This task addresses only
+    that Core-to-target contract; it does not repair the Console product command or release T172.
+  design: |
+    Generalize the PR-open criteria binding so a task found in Core's public plan can carry its
+    task id, title, target owner/repository, exact 40-character Core source commit, and acceptance
+    criteria into the target-repository opener. At dispatch, pin origin/main after the plan sync,
+    read the task's own plan record from that exact commit, and compare its id, title, repo, and
+    acceptance criteria with the selected in-memory task. If the source path, commit, or record
+    cannot be read or those fields differ, refuse before starting implementation or publishing a PR.
+    Pass this binding through the same guarded PR-open path used by ops-catalog tasks. In the target
+    repository, a task already filed there keeps precedence and its local criteria remain
+    authoritative. When the task is absent locally, require an exact match between the bound target
+    repository and the PR destination, require a well-formed source commit, and render the bound
+    criteria into the existing acceptance block. Preserve the current ops-catalog behavior and all
+    existing proof, body, review, and protected-merge gates.
+
+    INVARIANT core-public-task-pr: A task present in the target plan continues to use its local criteria; an absent task can use only a source-pinned Core binding whose task id, target, and criteria match. Missing or mismatched source evidence remains a refusal. Existing ops-catalog bindings, body parsing, proof execution, branch-gap outcomes, and PR-create side effects remain unchanged.
+
+    Keep this implementation to the two existing source modules and one focused test file. Extend the existing focused PR-open integration suite with three
+    individually titled tests: `Core public plan criteria: binds identity, destination, criteria, and
+    source commit`; `Core public plan criteria: refuses mismatched source or destination pins`; and
+    `Core public plan criteria: preserves destination-local precedence`. Together they must prove an
+    external Core-plan task opens only with its pinned criteria, malformed or mismatched
+    task/target/source bindings refuse, and a target-local task wins over a competing Core binding.
+    This corrects the source authority at PR opening; it does not accept a plan command in Console,
+    authorize a build, release a Wreckterra task, or count as T12515 implementation credit.
+  acceptance:
+    - claim: invariant:core-public-task-pr — target-local criteria stay authoritative; absent tasks use matching source-pinned Core criteria, and any missing or mismatched identity, target, or source refuses
+      proof: 'unit test: test/github/a-run-for-an-ops-task-writes-its-acceptance-block-from-the-ops-catalog.test.ts'
+  falsifier: |
+    The test must fail if the canonical Core binding is removed from the run-to-open call path, if a
+    mismatch is accepted, or if the destination's local task can be overridden. Run it on the exact
+    committed tree and confirm the proof resolves against the real test path. The task's successful
+    merge proves only the Core PR-open contract; T12515 must still be resumed and pass its own normal
+    source, review, hosted-check, merge, and runtime gates.

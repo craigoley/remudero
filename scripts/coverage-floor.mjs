@@ -20,7 +20,10 @@ export const PIN_SCHEMA = 1;
 export const MAX_AGE_HOURS = 24;
 /** Future-dated measurements cannot authorize narrowing. */
 export const CLOCK_SKEW_MS = 0;
-export const SHARD_COUNT = 8;
+/** coverage-nightly.yml's matrix width: 12 since W1-T13275 design 3 moved its premap into the shards (run 44033818223). */
+export const NIGHTLY_SHARD_COUNT = 12;
+/** W1-T13270: ci.yml's coverage-shard matrix width, equal to src/lib/ci-parity.ts CI_COVERAGE_SHARD_COUNT. */
+export const CI_COVERAGE_SHARD_COUNT = 12;
 /** Candidates listed per producer (created at or before the as-of time), and downloaded per producer. */
 const LIST_LIMIT = 20;
 const DOWNLOAD_LIMIT = 2;
@@ -33,9 +36,9 @@ export const COVERAGE_POLICY_FILES = [".nvmrc", "package-lock.json", "scripts/co
 /** The trusted producers: which workflow, artifact and event may measure main's floor. */
 export const PRODUCERS = [
   { artifact: "coverage-nightly", workflow: "coverage-nightly.yml", list: ["--branch", "main"],
-    events: ["schedule", "workflow_dispatch"], ref: (r) => r === "refs/heads/main" },
+    events: ["schedule", "workflow_dispatch"], ref: (r) => r === "refs/heads/main", shards: NIGHTLY_SHARD_COUNT },
   { artifact: "coverage-merged", workflow: "ci.yml", list: ["--event", "merge_group"],
-    events: ["merge_group"], ref: (r) => r.startsWith("refs/heads/gh-readonly-queue/main/") },
+    events: ["merge_group"], ref: (r) => r.startsWith("refs/heads/gh-readonly-queue/main/"), shards: CI_COVERAGE_SHARD_COUNT },
 ];
 
 export function sha256(bytes) {
@@ -137,8 +140,8 @@ export function refusal({ producer, candidate, provenance: p, lcov, consumer, no
   if (p.head_sha !== candidate.headSha) return `provenance head ${p.head_sha} is not the run's head ${candidate.headSha}`;
   const exits = p.shard_test_exits;
   const shards = exits && typeof exits === "object" ? Object.keys(exits).sort((a, b) => Number(a) - Number(b)) : [];
-  if (shards.join(",") !== Array.from({ length: SHARD_COUNT }, (_, i) => String(i + 1)).join(",")) {
-    return `records ${shards.length} of ${SHARD_COUNT} shard exits (partial)`;
+  if (shards.join(",") !== Array.from({ length: producer.shards }, (_, i) => String(i + 1)).join(",")) {
+    return `records ${shards.length} of ${producer.shards} shard exits (partial)`;
   }
   const red = shards.filter((s) => exits[s] !== 0);
   if (red.length > 0) return `shard(s) ${red.join(",")} exited non-zero`;
@@ -274,7 +277,7 @@ export function agreeOnFloor({ shardsDir, outDir }) {
   const lcovPath = verifyPin(outDir);
   const admitted = readFileSync(join(outDir, "pin.json"));
   let narrowed = false;
-  for (let n = 1; n <= SHARD_COUNT; n++) {
+  for (let n = 1; n <= CI_COVERAGE_SHARD_COUNT; n++) {
     const dir = join(shardsDir, `coverage-shard-${n}`);
     const selection = existsSync(join(dir, "selection")) ? readFileSync(join(dir, "selection"), "utf8").trim() : "";
     if (selection !== "narrow") continue;
@@ -288,10 +291,10 @@ export function agreeOnFloor({ shardsDir, outDir }) {
   return lcovPath;
 }
 
-/** Shard exits recorded under `<dir>/coverage-shard-N/test-exit`, N = 1..SHARD_COUNT; an absent one is left out. */
-export function readShardExits(dir) {
+/** Shard exits recorded under `<dir>/coverage-shard-N/test-exit`, N = 1..count; an absent one is left out. */
+export function readShardExits(dir, count = NIGHTLY_SHARD_COUNT) {
   const exits = {};
-  for (let n = 1; n <= SHARD_COUNT; n++) {
+  for (let n = 1; n <= count; n++) {
     const file = join(dir, `coverage-shard-${n}`, "test-exit");
     if (existsSync(file)) exits[n] = Number(readFileSync(file, "utf8").trim());
   }
@@ -628,8 +631,8 @@ export function main(argv = process.argv.slice(2), env = process.env) {
       return 0;
     }
     const shardExits = matrix !== undefined || argv.includes("--all-shards-succeeded")
-      ? Object.fromEntries(Array.from({ length: SHARD_COUNT }, (_, i) => [i + 1, 0]))
-      : readShardExits(flag(argv, "--shards-dir") ?? "");
+      ? Object.fromEntries(Array.from({ length: trusted.shards }, (_, i) => [i + 1, 0]))
+      : readShardExits(flag(argv, "--shards-dir") ?? "", trusted.shards);
     const record = buildProvenance({ producer, lcov: readFileSync(lcovPath), shardExits, env });
     writeFileSync(out, JSON.stringify(record, null, 2) + "\n");
     console.log(`coverage-floor: provenance for ${producer} run ${record.run_id} written to ${out}.`);

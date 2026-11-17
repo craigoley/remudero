@@ -15,7 +15,7 @@
   files:
     - src/lib/worktree-git.ts
     - test/a-host-git-call-that-overflows-its-output-reports-the-overflow-not-epipe.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "hostWorktreeGitAsync given stdin that is larger than the pipe buffer, on a git command whose stdout goes past maxBuffer (cat-file --batch with a small maxBuffer), rejects with the child's maxBuffer error (code ERR_CHILD_PROCESS_STDIO_MAXBUFFER), not with EPIPE"

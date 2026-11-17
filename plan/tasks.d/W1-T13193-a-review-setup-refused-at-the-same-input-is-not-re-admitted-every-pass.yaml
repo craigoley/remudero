@@ -18,7 +18,7 @@
     - src/lib/sweep.ts
     - src/lib/tick-read-worker.ts
     - test/a-review-setup-refused-at-the-same-input-is-not-re-admitted-every-pass.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A PR with 2 review.semantic_setup_refused rows (reason head-task-metadata-unavailable) for the same pr_url, head_sha, review_input_digest and reviewer_code_sha, and no review.pending_posted or review.posted row after the last one, is not admitted: the pass writes no sweep.review_admitted row, and its sweep.disposed row names the refusal reason and the refusal count (the #18670 shape: head run-RETRO-1794737755052, body trailer Remudero-Task: RETRO-1794737755052)"

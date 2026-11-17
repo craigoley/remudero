@@ -3,14 +3,16 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: auto
+  verify: human  # parked with the retirement: any risk ruling judged the record before this edit
   risk: low
   priority: 2.75
-  status: queued
+  status: blocked
+  retirement: retired  # retired by rule 1 (already shipped or declined) of the operator's mechanical rulings (2026-10-21, W1-T10371): a merged pull request on main carries this record's Remudero-Task trailer. Retired by the machine-filing judge, 2026-11-17T07:01:35.226Z
   attempts: 0
   author_class: machine
   origin: "scout:automerge.plan_pr_mergeability_unknown_escalated"
   files:
+    - "src/lib/arm-auto-merge.ts"
     - test/scout-automerge-plan-pr-mergeability-unknown-escalated.test.ts
   acceptance:
     - claim: "automerge.plan_pr_mergeability_unknown_escalated stops recurring: its cause is fixed rather than its rows hidden"
@@ -20,11 +22,3 @@
     The ledger step automerge.plan_pr_mergeability_unknown_escalated carries a failure shape and landed rows in both halves of the trailing 7 days: 5 in the older half, 9 in the newer.
     No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
     The rows name no file of their own: locate the code that writes this step first, then fix its cause.
-  risk_ruling:
-    verdict: "rule-3-low-privilege"
-    action: proceed
-    confidence: 1
-    reasons:
-      - "rule 3 (live and low-privilege): the symptom is live, 15 occurrence(s) across 7 day(s), last seen 2026-10-26T02:59:26.436Z, and the record declares no privileged path"
-    judged_at: "2026-10-27T05:40:05.137Z"
-    pin: "8bbd43e22f1f5c0fa498cda36b586e7e3d444d7ff00d73c0d5e931895e8370a8"

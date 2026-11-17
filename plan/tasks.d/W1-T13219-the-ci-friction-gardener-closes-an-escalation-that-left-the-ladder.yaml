@@ -16,7 +16,7 @@
   files:
     - src/lib/ci-friction-gardener.ts
     - test/gardeners/the-ci-friction-gardener-closes-an-escalation-that-left-the-ladder.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "An origin in escalatedCiFrictionOrigins that has ranked outside the top LADDER_DEPTH (8) priced causes on every pass for at least seven days gets its open escalation issue closed with a comment citing its current price, its rank and the window"
