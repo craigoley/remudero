@@ -33,7 +33,7 @@ function fixture(t: TestContext, records: Record<string, string> = {"W1-T1.yaml"
     const cache=join(home,`github-fixture-${++invocation}`);mkdirSync(cache);
     save();
     const child=spawnSync(process.execPath,["--import",import.meta.resolve("tsx"),join(REPO_ROOT,"src/run-task.ts"),"migration-preview","--public-root",pub.clone.dir,"--public-commit",pubCommit,"--public-repo","fixture/remudero","--ops-root",ops.clone.dir,"--ops-commit",opsCommit,"--ops-repo","fixture/ops",...extra],{
-      cwd:pub.clone.dir,encoding:"utf8",timeout:30_000,env:{PATH:`${shim.dir}:${process.env.PATH}`,HOME:home,RMD_GH_CACHE_HOME:cache,TMPDIR:tmpdir(),NODE_TEST_CONTEXT:process.env.NODE_TEST_CONTEXT,LANG:"C",GIT_ALLOW_PROTOCOL:"file",GIT_CONFIG_GLOBAL:"/dev/null",GIT_CONFIG_SYSTEM:"/dev/null",RMD_SELF_SYNC_DONE:"1",
+      cwd:pub.clone.dir,encoding:"utf8",timeout:30_000,env:{PATH:`${shim.dir}:${process.env.PATH}`,HOME:home,RMD_GH_CACHE_HOME:cache,TMPDIR:tmpdir(),NODE_TEST_CONTEXT:process.env.NODE_TEST_CONTEXT,LANG:"C",GIT_ALLOW_PROTOCOL:"file",GIT_CONFIG_GLOBAL:"/dev/null",GIT_CONFIG_SYSTEM:"/dev/null",RMD_SELF_SYNC_DONE:"1",GIT_CONFIG_COUNT:"2",GIT_CONFIG_KEY_0:`url.${pub.origin.dir}.insteadOf`,GIT_CONFIG_VALUE_0:"https://github.com/fixture/remudero.git",GIT_CONFIG_KEY_1:`url.${ops.origin.dir}.insteadOf`,GIT_CONFIG_VALUE_1:"https://github.com/fixture/ops.git",
       ...(process.env.NODE_OPTIONS?{NODE_OPTIONS:process.env.NODE_OPTIONS}:{}),...(process.env.NODE_V8_COVERAGE?{NODE_V8_COVERAGE:process.env.NODE_V8_COVERAGE}:{})}});
     assert.equal(child.error,undefined);
     let answer: any;try{answer=JSON.parse(child.stdout.trim());}catch{assert.fail(`actual CLI did not return a preview: ${child.status} ${child.stdout} ${child.stderr}`);}
@@ -58,4 +58,18 @@ test("migration preview requires current complete ownership and pinned catalog c
   f.publicAnswer.open.pageInfo.hasNextPage=false;
   f.opsAnswer.defaultBranchRef.target.oid="a".repeat(40);
   assert.equal(f.run().answer.outcome,"unknown");
+});
+
+
+test("migration preview reads claims from the pinned repository even when local origin is a decoy", t => {
+  const f = fixture(t);
+  f.pub.clone.git("push", "origin", "HEAD:refs/rmd-dispatch/W1-T1");
+  const decoy = join(f.root, "decoy.git");
+  f.pub.clone.git("init", "--bare", "-b", "main", decoy);
+  f.pub.clone.git("push", decoy, "HEAD:refs/heads/main");
+  f.pub.clone.git("remote", "set-url", "origin", decoy);
+  const result = f.run();
+  assert.equal(result.status, 0, JSON.stringify(result));
+  assert.equal(result.answer.outcome, "none", "the real selected origin claim must not disappear behind a same-commit decoy");
+  assert.ok(result.answer.refused.some((row: { id: string; reason: string }) => row.id === "W1-T1" && row.reason === "owned"));
 });
