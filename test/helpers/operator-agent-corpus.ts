@@ -1,7 +1,7 @@
 // The E17 operator-agent corpus (W1-T5051: shared with the agent view's parity test): every GET route has
 // something in it, half written through the routes and rotated into a gzip archive, half in the live file.
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
@@ -12,8 +12,10 @@ import { appendFollowUpCandidate, FOLLOW_UP_POLICY_VERSION, type FollowUpCandida
 import { EMERGENCY_STOP_ISSUED_LEDGER_STEP } from "../../src/lib/ledger.js";
 import { buildOperatorAgentRoutes, OPERATOR_AGENT_CONSEQUENCE_PREFLIGHT_STEP } from "../../src/lib/operator-agent.js";
 import { appendPanelLedger } from "../../src/lib/panel-actions.js";
+import { flushReadModelTransactions } from "../../src/lib/read-model-db.js";
 import { createService, type Route } from "../../src/lib/service.js";
 import { makeTempDir } from "../../src/lib/tmp.js";
+import { retainFixture } from "../setup/retained-fixtures.js";
 import { profileInput } from "./delegation-profile-fixture.js";
 import { planInput } from "./intent-plan-fixture.js";
 
@@ -22,6 +24,40 @@ export const WRITE = "e17-write-token";
 export const NOW = Date.parse("2026-09-20T11:00:00.000Z");
 export const clock: Clock = fixedClock(NOW);
 export const SCOPE = { principalId: "user_123", repository: "owner/repo" };
+
+/** A test's hooks, as corpus() and listen() register them. */
+export type CorpusHooks = { after: (fn: () => unknown) => void; ownRoot?: (root: string) => void };
+
+/**
+ * W1-T12415 — A CORPUS TEARDOWN CLOSES EVERY SERVER EVEN WHEN THE ROOT REMOVAL FAILS. node:test runs a
+ * test's `after` hooks first-in-first-out and stops at the first one that throws. corpus() registers its
+ * root removal first, so under a plain `t` the removal ran while the test's servers still listened and
+ * the read model's diagnostic publisher could still write into the root. On #14880's coverage shard
+ * (job 122319121555) it threw ENOTEMPTY, every later hook (each listen()'s server close) was skipped,
+ * and the file's child never exited: the shard waited for its 49-minute cancel.
+ *
+ * Pass this scope to corpus() and listen() in place of `t`. Its one real hook runs the closers
+ * registered after the removal in reverse order, each even when another throws, then flushes the read
+ * model's transactions, and only then runs the removal. A failed teardown keeps the root as evidence.
+ */
+export function corpusFixture(t: { after: (fn: () => unknown) => void }): Required<CorpusHooks> {
+  const cleanup: Array<() => unknown> = [];
+  const roots = new Set<string>();
+  t.after(async () => {
+    const failures: unknown[] = [];
+    for (let i = cleanup.length - 1; i > 0; i--) {
+      try { await cleanup[i]!(); } catch (error) { failures.push(error); }
+    }
+    try { await flushReadModelTransactions(); } catch (error) { failures.push(error); }
+    if (failures.length === 0) {
+      try { await cleanup[0]?.(); } catch (error) { failures.push(error); }
+    }
+    if (failures.length === 0) return;
+    for (const root of roots) if (existsSync(root)) retainFixture(root, "operator-agent corpus teardown failed");
+    throw failures.length === 1 ? failures[0] : new AggregateError(failures, "operator-agent corpus teardown failed");
+  });
+  return { after: (fn) => void cleanup.push(fn), ownRoot: (root) => void roots.add(root) };
+}
 
 export async function listen(t: { after: (fn: () => void) => void }, routes: Route[]): Promise<string> {
   const server = createService({ tokens: { read: READ, write: WRITE }, routes });

@@ -40,7 +40,7 @@ import { adoptRunChildReservation, reserveRunChild } from "./run-child-reservati
 import type { RunResult } from "./run-result.js";
 import { isWorkerProviderId, type WorkerProviderId } from "./config.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
-import { INSTALLATION_SHARE_DIVISOR_ENV } from "./installation-budget-start.js";
+import { INSTALLATION_SHARE_DIVISOR_ENV, runChildInstallationEnv } from "./installation-budget-start.js";
 import { killProcessGroup } from "./worker-containment.js";
 import { execFileLoopBounded } from "./loop-bounded-child.js";
 import type { ReviewerCodeFreshness } from "./self-sync.js";
@@ -931,7 +931,9 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
     // The daemon's growth percent rides the child's command line: NODE_OPTIONS refuses it (daemon-memory-policy.ts).
     spawnedAt = clock();
     child = (ports.spawn ?? defaultRunChildSpawn)(process.execPath, [...nodeArgs, ...launch.argv], {
-      cwd: launch.cwd, env: { ...(ports.env ?? process.env), [INSTALLATION_SHARE_DIVISOR_ENV]: String(shareDivisor) }, stderrFd,
+      // W1-T13179: beside the divisor, the registry file this daemon read at its start and its wait bound.
+      cwd: launch.cwd, env: { ...(ports.env ?? process.env), [INSTALLATION_SHARE_DIVISOR_ENV]: String(shareDivisor), ...runChildInstallationEnv() },
+      stderrFd,
     });
     if (child.pid === undefined) throw new Error("the run child has no pid (spawn failed)");
     reservation.bindRoot(child.pid);

@@ -1,0 +1,93 @@
+- id: W1-T13269
+  title: "A coverage shard cancelled at its ceiling names the step it was killed in, so a shard whose tests passed, or that stalled in checkout, is no longer reported as tests that did not run"
+  repo: remudero
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # it edits the required coverage gate's own step; the cancelled arm must stay red, and its first SHARD HANG line is matched by the sweep
+  band_meaning: span
+  origin: "operator-session#coverage-shard-timeouts-2026-11-16"
+  plan_refs:
+    - W1-T3345
+    - W1-T12415
+    - W1-T8040
+    - W1-T5921
+    - W1-T13175
+  files:
+    - .github/workflows/ci.yml
+    - scripts/shard-cancel-phase.mjs
+    - test/ci/a-cancelled-coverage-shard-names-the-step-it-ended-in.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A coverage shard cancelled after its test step succeeded makes the coverage gate say the tests PASSED, name the step the ceiling hit and any step that ran 5 minutes or more, and not say the tests did not run"
+      proof: "grep: W1-T13269 criterion 1 in test/ci/a-cancelled-coverage-shard-names-the-step-it-ended-in.test.ts"
+    - claim: "A shard cancelled before its test step started is named a setup stall that a re-run is expected to clear, and a shard cancelled inside its test step is named as stopped in the tests, with the step's elapsed time"
+      proof: "grep: W1-T13269 criterion 2 in test/ci/a-cancelled-coverage-shard-names-the-step-it-ended-in.test.ts"
+    - claim: "invariant:fails-closed — an unreadable, empty or cancellation-free jobs read keeps the did-not-run text, and every unchanged-head cancellation still exits 1 with the unchanged first SHARD HANG line"
+      proof: "grep: W1-T13269 criterion 3 in test/ci/a-cancelled-coverage-shard-names-the-step-it-ended-in.test.ts"
+    - claim: "The coverage gate step runs the phase script"
+      proof: "grep: scripts/shard-cancel-phase\\.mjs in .github/workflows/ci.yml"
+  rationale: |
+    MEASURED 2026-11-16 from the Actions jobs API (per-step started_at/completed_at), 11 pull_request runs of ci.yml
+    between 2026-11-14 and 2026-11-16, 86 coverage-shard jobs:
+    - #18947, run 43965996579: coverage-shard (4/8) spent 20m45s in actions/checkout (every other shard: 14-28 s),
+      then "Test with coverage" SUCCEEDED in 23m23s, "Stage this coverage shard" took 4m29s, and the job was cancelled
+      at the 49m ceiling in "Upload coverage shard". coverage-ratchet printed "SHARD HANG ... THE COVERAGE TESTS DID NOT
+      RUN ... re-running the same sha will hang again". The tests ran and passed. The fleet re-ran the shard at 23:02Z
+      (W1-T8040's one bounded requeue, since the log names no failing test).
+    - #18949, run 43968903627: coverage-shard (3/8) spent 20m36s in checkout and was then cancelled inside its tests.
+      coverage-shard (5/8) was cancelled in "Test with coverage" after 48m21s; its last test file completed at
+      22:49:25Z, nineteen minutes before the kill, so its tests had finished and the step was stuck after them.
+      That shape (every result reported, the file's child never exits) is the class W1-T12415 bounds with
+      --test-force-exit and a per-test timeout (#18925, open on 2026-11-16). This task does not change it; it names it.
+    The gate sees only `needs.coverage-ratchet.result == cancelled`. It cannot tell these phases apart, so it states
+    the one claim that is false for both PRs.
+
+    READ at origin/main 5ff266eb6:
+    - .github/workflows/ci.yml, job coverage-ratchet-required, step id coverage-gate, `cancelled)` arm: after the
+      SUPERSEDED and unreadable-head branches it echoes the SHARD HANG block and calls print_unfinished_test_from_logs.
+    - src/lib/sweep.ts `classifyCiTimeoutNoVerdict` (W1-T5921) and `RUNNER_TIMEOUT_LINE`, and
+      src/lib/ci-friction-gardener.ts, match `SHARD HANG\W+the matrix was cancelled`. That first line must not change.
+    - test/a-cancelled-shard-is-not-a-broken-diff.test.ts asserts /DID NOT RUN/ for all three aggregators with a gh
+      stub that answers every call with a sha, so the jobs read there is unreadable and must keep the old text.
+    - The workflow has `permissions: actions: read`, which the jobs API needs.
+  design: |
+    1. scripts/shard-cancel-phase.mjs reads the run attempt's jobs (NDJSON from
+       `gh api repos/<o>/<r>/actions/runs/<id>/attempts/<n>/jobs?per_page=100 --paginate --jq '.jobs[]'`, or one jobs
+       document). For each job whose name starts with `--job-prefix` and whose conclusion is cancelled it prints one
+       line and one machine line `SHARD-CANCEL-PHASE: <job>: setup|tests|after-tests|unknown`:
+       - after-tests: the step named by `--test-step` concluded success. "the tests PASSED ...; the ceiling was reached
+         later, in '<cancelled step>'".
+       - setup: the cancelled step comes before the test step. "before '<test step>' started, so its tests never ran";
+         a re-run is expected to pass.
+       - tests: the cancelled step is the test step, with its elapsed time.
+       - unknown: anything else. It never guesses a phase.
+       Any non-test step of 300 s or more is named with its duration. Unreadable input prints
+       `SHARD-CANCEL-PHASE: unreadable`; no cancelled match prints `SHARD-CANCEL-PHASE: none`. Exit 0 except a usage
+       error (2), so the script can never change the gate's exit code.
+    2. In the coverage gate's `cancelled)` arm, keep the first two SHARD HANG lines word for word, then read the jobs
+       and run the script. When at least one machine line is setup, tests or after-tests, print the script's output
+       and "This is NOT a failure of this diff"; otherwise print the old did-not-run text, ending "The step each shard
+       was killed in could not be read." Then print_unfinished_test_from_logs, then exit 1, as today.
+    3. Suite test/ci/a-cancelled-coverage-shard-names-the-step-it-ended-in.test.ts (the folder `rmd test-place`
+       computes: test/ci/) drives the gate step's own bash out of ci.yml with a gh stub (jobs read, head read, refused
+       log read), with fixtures copied from the measured jobs above, plus the script's functions in-process and one
+       real CLI spawn.
+    INVARIANT fails-closed: every unchanged-head cancellation still exits 1; SUPERSEDED, the unreadable head and every
+    other arm are untouched.
+    NOT IN SCOPE: the `ci` and `test-slow` aggregators' SHARD HANG text (they have no post-test steps to misreport);
+    the shard budget itself (W1-T13270); the checkout stall (W1-T13271).
+  falsifier: |
+    Restore origin/main's ci.yml with the suite in place: criteria 1, 2 and 3 fail (# fail 3), because the gate never
+    reads the jobs. Make the script report after-tests for a cancelled test step, or print the phase text for an
+    unreadable read, and criterion 2 or 3 fails. Restore and require all to pass.
+    GUARDS that hold at base and must still hold, untouched: test/a-cancelled-shard-is-not-a-broken-diff.test.ts,
+    test/a-hung-shard-does-not-read-as-a-broken-diff.test.ts and
+    test/ci/a-cancelled-coverage-ledger-names-itself-in-the-coverage-gate.test.ts.
+  note: |
+    An operator session hand-builds this task: the daemon holds any task that names a workflow path (W1-T5351).
+    A workflow diff rides alone (W1-T297): ci.yml, the script it runs, and the suite. Ids W1-T13269..13271 were
+    reserved from the operator's Mac checkout for branch claude/project-thread-y3l41p on 2026-11-16.

@@ -14,7 +14,7 @@ import { isMainThread } from "node:worker_threads";
 import { collectAtAgentWait, type AgentWaitHeap } from "./lib/agent-wait-heap.js";
 import { runsBundled } from "./lib/child-entry-argv.js";
 import { startInstallationTokenRefresh } from "./lib/github-app.js";
-import { daemonInstallationRegistry, startProcessInstallationBudget } from "./lib/installation-budget-start.js";
+import { startRunChildInstallationBudget } from "./lib/installation-budget-start.js";
 import { markRunChildProcessActor } from "./lib/ledger.js";
 import { appendLedger } from "./lib/ledger.js";
 import { loadConfig } from "./lib/config.js";
@@ -218,10 +218,10 @@ export async function runChildMain(argv: readonly string[], deps: RunChildMainPo
     }
     restoreActor = markRunChildProcessActor();
     // W1-T12950: the run reads with the installation token, so it reads within the run children's share.
+    // W1-T13179: from the registry file its daemon read, named in its environment, and with a finite wait bound.
     try {
-      startProcessInstallationBudget({
-        role: "run_child", env: deps.env ?? process.env,
-        readRegistry: () => daemonInstallationRegistry(loadConfig().root),
+      startRunChildInstallationBudget({
+        env: deps.env ?? process.env,
         log: (step, fields) => appendLedger(ledgerPathFor(loadConfig()), { run_id: value.runId, task_id: value.taskId, step, ...fields }),
       });
     } catch (error) {

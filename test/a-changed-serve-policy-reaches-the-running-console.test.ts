@@ -37,7 +37,7 @@ const TICK = { imageDriftOnly: true };
 const OLD_LIMITS = { Memory: 5120 * MIB, MemorySwap: 6144 * MIB, CpuShares: 4096, MemoryReservation: 3072 * MIB };
 /** The policy since operator ruling 2026-10-19: 2 GiB of swap, and no reservation (memory.low protected nothing).
  *  Since W1-T12532 serve's CPU weight is 512, equal to a build daemon's. */
-const ON_POLICY = { Memory: 7680 * MIB, MemorySwap: 9728 * MIB, CpuShares: 512, MemoryReservation: 0 };
+const ON_POLICY = { Memory: 7680 * MIB, MemorySwap: 9728 * MIB, CpuShares: 4096, MemoryReservation: 0 };
 const DRIFT: ResourcePolicyDrift[] = [
   { field: "Memory", expected: 7680 * MIB, actual: 5120 * MIB },
   { field: "MemorySwap", expected: 9728 * MIB, actual: 6144 * MIB },
@@ -208,8 +208,8 @@ test("the shipped serve wiring reads the serve role against remudero-serve and r
   };
   try {
     const seams = realServePolicyDeps({ installPath: root, stateRoot: root }, exec, () => gateway);
-    // The old limits carry the old 4096 weight, so the shipped reader also names CpuShares (W1-T12532).
-    assert.deepEqual(seams.servePolicyDrift!(), [DRIFT[0], DRIFT[1], { field: "CpuShares", expected: 512, actual: 4096 }, DRIFT[2]]);
+    // The old limits carry the 4096 weight, which is serve's policy again since W1-T13293, so CpuShares is not named.
+    assert.deepEqual(seams.servePolicyDrift!(), [DRIFT[0], DRIFT[1], DRIFT[2]]);
     assert.deepEqual(calls[0], ["docker", "inspect", SERVE_POLICY_CONTAINER, "--format", "{{json .HostConfig}}"]);
     assert.equal(seams.serveHealthy!(), true);
     assert.equal(seams.pausePresent!(), false);
@@ -251,7 +251,6 @@ test("operator ruling 2026-10-19: serve's 5 GiB reservation and 1 GiB of swap re
     const drift = realServePolicyDeps({ installPath: root, stateRoot: root }, exec).servePolicyDrift!();
     assert.deepEqual(drift, [
       { field: "MemorySwap", expected: 9728 * MIB, actual: 8704 * MIB },
-      { field: "CpuShares", expected: 512, actual: 4096 },
       { field: "MemoryReservation", expected: 0, actual: 5120 * MIB },
     ]);
   } finally {

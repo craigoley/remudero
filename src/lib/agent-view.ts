@@ -234,16 +234,11 @@ function refuseUnknownPart(params: URLSearchParams): ViewRequestFailure | undefi
 }
 
 /**
- * The `agent` view's LEGACY SIDE, which serve answers with while the view's switch does not serve the worker's body
- * (W1-T13180): with no `agent` entry in read-model/switches.json the view is `off`, and with no legacy side every
- * request answered 404 `view_disabled`. ONE PROPOSAL ENGINE: the body is {@link agentPartBodies} over the instance's
- * `panel.*` rows, read the way the shadow's legacy side reads them, and serve's own analytics for the instance in
- * the worker's input shape ({@link agentAnalytics}), so no second ranking exists. `scopes` is serve's per-instance
- * list (serve.ts `navBadgeScopes`).
+ * The `agent` view's LEGACY SIDE (W1-T13180, narrowed by W1-T13282). Serve serves the read-model worker's body by
+ * default; this side answers only a key the worker has not built yet, with 503 `view_not_ready`, and reads no ledger,
+ * so a request can never pay a cold read of every ledger archive on serve's request thread.
  */
 export function agentLegacyView(opts: { scopes: () => readonly Pick<NavBadgeScope, "instanceId" | "repository" | "analytics" | "ledgerPath">[]; clock?: Clock }): ViewDefinition<AgentViewData> {
-  const clock = opts.clock ?? systemClock;
-  const memos = new Map<string, LedgerRotationMemo>();
   return {
     name: AGENT_VIEW_NAME,
     version: AGENT_VIEW_VERSION,
@@ -255,19 +250,9 @@ export function agentLegacyView(opts: { scopes: () => readonly Pick<NavBadgeScop
       const name = params.get("instance");
       const scope = scopes.find((candidate) => candidate.instanceId === name);
       if (!scope) return { error: `unknown instance: ${name ?? ""}; serve has ${scopes.map((candidate) => candidate.instanceId).join(",")}` };
-      const now = clock.now();
-      const ledgerDir = dirname(scope.ledgerPath);
-      const rows = panelLedgerRows(memos, scope.instanceId, ledgerDir);
-      const snapshot = scope.analytics();
-      const bodies = snapshot.asOf === null ? undefined : analyticsSourceBodies(snapshot, scope.repository);
-      const consoleBody = bodies?.[0]!.body as AnalyticsConsoleSource | undefined;
-      const source = analyticsSource({ instanceId: scope.instanceId, ...(snapshot.asOf !== null && consoleBody ? { snapshot: { asOf: snapshot.asOf, console: consoleBody } } : {}) }, now);
-      const analytics = snapshot.asOf === null || !bodies ? undefined : { ...agentAnalytics({ asOf: snapshot.asOf, console: consoleBody!,
-        signals: bodies[1]!.body as { routingTelemetry: AnalyticsSnapshot["routingTelemetry"] }, signalsAsOf: snapshot.asOf, sourceInstance: scope.instanceId }), sourceState: source.state };
-      const body = agentPartBodies({ ledgerDir, instance: scope.instanceId, ...(scope.repository ? { repository: scope.repository } : {}), now, rows, ...(analytics ? { analytics } : {}) })[part];
-      // The ledger is read at request time, so the legacy side's ledger reading is as of now.
-      const ledger = describeSource({ name: `ledger:${scope.instanceId}`, asOf: clockFromMillisFn(() => now).iso(), state: "fresh" });
-      return { data: { instance: scope.instanceId, part, ...body }, sources: part === "proposals" ? [ledger, source] : [ledger] };
+      // W1-T13282: the legacy side reads no ledger on a request. A cold union read here froze serve for 232 s on
+      // 2026-11-16; serve now serves the worker's body by default, and a key it has not built yet is not ready.
+      return { error: "view_not_ready", status: 503, detail: `the agent view for ${scope.instanceId} is built by the read-model worker and has no body yet; retry shortly` };
     },
   };
 }
