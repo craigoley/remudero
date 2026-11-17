@@ -16,6 +16,8 @@
     - W1-T5269
   files:
     - src/lib/inbox-threads-view.ts
+    - src/lib/inbox-thread-items.ts
+    - src/lib/panel-graph.ts
     - src/lib/read-model-worker.ts
     - src/lib/serve.ts
     - openapi/daemon.yaml
