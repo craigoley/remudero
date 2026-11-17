@@ -6,6 +6,7 @@ import { writeAtomic } from "./fs-race-safe.js";
 import { updateProposalRegistry, type Proposal } from "./inbox.js";
 import { renderBakeoff, type BakeoffCandidate, type BakeoffRow } from "./inbox-bakeoff.js";
 import { CASH_RESPONSES_DEPLOYMENTS } from "./cash-responses.js";
+import { invoiceLeadEligibility, readNewestInvoiceVerdicts } from "./cash-invoice-reconcile.js";
 import { readLedgerUnionRecordsSync } from "./ledger-grep.js";
 import { isFoundryClaudeDeployment, OPENWEIGHT_REASONING_EFFORTS } from "./worker-provider.js";
 
@@ -143,7 +144,9 @@ export async function runDeploymentBakeoff(input: DeploymentBakeoffInput): Promi
       }).map(key);
       state.trialed = state.trialed.filter((id) => !skipped.includes(id));
       for (const id of skipped) delete state.readinessDigests[id];
-      summary = `Deployment bake-off for ${ids.join(", ")}. Compare the new models and thinking levels with the incumbent; the operator picks. Routing is unchanged.\n\n${renderBakeoff(rows)}`;
+      // W1-T10858: an open-weight arm is marked not eligible to lead until Azure's bill reconciles with its list price.
+      const eligibility = invoiceLeadEligibility(rows, readNewestInvoiceVerdicts(input.stateDir));
+      summary = `Deployment bake-off for ${ids.join(", ")}. Compare the new models and thinking levels with the incumbent; the operator picks. Routing is unchanged.\n\n${renderBakeoff(rows)}${eligibility ? `\n\n${eligibility}` : ""}`;
     } catch (error) {
       // Preserve the provider or replay failure verbatim in the operator-facing proposal.
       summary = `Deployment bake-off failed for ${ids.join(", ")}: ${String(error)}. No completed table is available. Re-run manually to measure it; routing is unchanged.`;

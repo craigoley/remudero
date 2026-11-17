@@ -54,6 +54,7 @@ usage:
   rmd read-model rebuild [--instance <id>] [--ledger-dir <dir>] [--window-days <n>] | status [--json] | switch <projector|<view>> <mode>   # Rebuild, inspect or switch the serve read model projected from the ledger.
   rmd hand-runs   # Print which verb sequence the operator keeps hand-running, on demand.
   rmd decisions probe --candidate <name> --input-file <file> --questions-file <file> [--role <role>]   # Ask one decision model one question set about one input, and print the row it wrote.
+  rmd cash-reconcile --day <YYYY-MM-DD> --export <csv>   # Reconcile one UTC day of metered cash cost against an Azure actual-cost export.
   rmd judge-replay [--lane batch] --model <id> --corpus <machine-judge-probes|risk-judge-dispositions|all> | rmd judge-replay --lane direct --candidate <name> --corpus <machine-judge-probes|risk-judge-dispositions|all>   # Replay the judge corpora through one named model, in one Message Batch or one request per case.
   rmd field-trials [--source <label>=<owner/repo>]... [--ledger <label>=<state-dir>]... [--out-dir <dir>] [--consent <file>] [--case-files <file>] [--max-pages <n>] [--offline] [--revoke <release-id>] [--field-note <out> [--site-registry <file>]] [--json] [--refresh-step <name>=<exit-code|skipped>]... [--refresh-script-blob <sha1>] [--refresh-record-only]   # Join the ledger union and GitHub history into observational field-trials aggregates.
   rmd ci-failures [--days N]   # Report the window's red CI gates, each paired with the commit that repaired it.
@@ -540,6 +541,16 @@ rmd decisions probe --candidate <name> --input-file <file> --questions-file <fil
 ```
 
 W1-T12416: sends ONE paid cash request to a candidate named in the decision_models section of .remudero/mounts.yaml. The questions file is a JSON array of yes-no, choice (2 to 255 typed options) and score (2 to 10 ordered levels) questions, each with a name and instructions; a bad set is refused before any reservation. The request reserves on its input size plus a 64-token output margin against the normal daily cash cap, settles from the reply's usage at the candidate's own price row, and writes one decision.answered row: role, input digest, candidate, deployment, served model, latency, reserved and settled dollars, usage, and each question's distribution, abstention or rejection. A candidate whose cashDeploymentEndpoints entry or key is missing is unavailable and sends nothing. Shadow only: no gate, route or judge reads the row. Exit 0 answered, 1 refused, unavailable or failed, 2 bad usage.
+
+### `rmd cash-reconcile`
+
+Reconcile one UTC day of metered cash cost against an Azure actual-cost export.
+
+```
+rmd cash-reconcile --day <YYYY-MM-DD> --export <csv>
+```
+
+W1-T10858: reads the day's produced cash receipts from the ledger union and an Azure Cost Management actual-cost export CSV, and compares, per deployment and per meter (input, cached input, output), the metered cost (tokens times the OPENWEIGHT_PRICES row) with the billed cost (the export rows for that deployment's account and meter). The noise band is the largest divergence among the same day's Azure OpenAI deployments (rows with unbilledAzureOpenAi429). Each open-weight deployment gets one cash.invoice.reconciled row: reconciled (inside the band), diverged (outside it, naming the meter, metered, billed and band) or unreconcilable (no traffic, no control, no export rows or incomplete receipts). The deployment bake-off proposal marks an open-weight arm not eligible to lead until its newest verdict is reconciled. Sends no request. The measurement cadence does the same for the newest .csv under <state>/cost-exports/, once per day and file. Exit 0 reconciled, 1 failed, 2 bad usage.
 
 ### `rmd judge-replay`
 
