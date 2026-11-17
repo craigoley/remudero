@@ -4,13 +4,15 @@
   depends_on: []
   type: implement
   verify: auto
-  risk: low
+  risk: high
+  band_meaning: span
   priority: 1.3
   status: queued
   attempts: 0
   author_class: machine
   origin: "scout:sweep.repeat_escalated"
   files:
+    - src/lib/ledger.ts
     - test/scout-sweep-repeat-escalated.test.ts
   acceptance:
     - claim: "sweep.repeat_escalated stops recurring: its cause is fixed rather than its rows hidden"
@@ -25,6 +27,6 @@
     action: proceed
     confidence: 1
     reasons:
-      - "released by the operator with rmd approve"
-    judged_at: "2026-10-22T03:31:39.860Z"
-    pin: "ff84d3656ef537fde65460af7bebe3eea34a55f6a30baa8c533eb83f3478341d"
+      - "operator authorized durable repeat-marker retention for PR #19166"
+    judged_at: "2026-11-17T21:04:11Z"
+    pin: "139d3f4d67120a80bb5eb1a977388c5de6cae429172b05b1a5939e6671db3931"
