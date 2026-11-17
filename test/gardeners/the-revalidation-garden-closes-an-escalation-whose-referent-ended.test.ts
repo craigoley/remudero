@@ -8,7 +8,8 @@ import {
   planTaskFactFromShard,
   planTaskStateAtOriginMain,
   productionIssueRevalidationPorts,
-  PULL_URL_RE,
+  PULL_PATH_RE,
+  pullRefsIn,
   pullStateFromRest,
   runIssueRevalidationGarden,
   STRIKE_LADDER_PR_RE,
@@ -95,11 +96,10 @@ test("W1-T13220 criterion 1: a PR-<n>, a clarification PR or a single strike-lad
   assert.equal(STRIKE_LADDER_PR_RE.test("Strike-Ladder-PR 12"), false);
   assert.equal(CLARIFICATION_PR_RE.test(`PR ${REPO}/pull/3 needs a clarification`), true);
   assert.equal(CLARIFICATION_PR_RE.test(`PR ${REPO}/pull/3 cannot be repaired`), false);
-  assert.equal([...`${REPO}/pull/3 and ${REPO}/issues/4`.matchAll(PULL_URL_RE)].length, 1);
-  PULL_URL_RE.lastIndex = 0;
-  assert.equal(PULL_URL_RE.test(`${REPO}/pull/3`), true);
-  PULL_URL_RE.lastIndex = 0;
-  assert.equal(PULL_URL_RE.test(`${REPO}/issues/4`), false);
+  assert.equal(PULL_PATH_RE.test("/o/r/pull/3"), true);
+  assert.equal(PULL_PATH_RE.test("/o/r/issues/4"), false);
+  assert.deepEqual([...pullRefsIn(`${REPO}/pull/3 and (${REPO}/pull/3). ${REPO}/issues/4`)], ["craigoley/remudero#3"]);
+  assert.equal(pullRefsIn("https://github.com.evil.example/o/r/pull/3 https://%zz https://evilgithub.com/o/r/pull/9").size, 0);
 
   // An open PR, a timeless close, or a failed read decides nothing: the issue is judged as before.
   const open = harness([escalation(1, { task: "PR-1" }), escalation(2, { task: "PR-2" }), escalation(3, { task: "PR-3" })],

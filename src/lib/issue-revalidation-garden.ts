@@ -401,7 +401,28 @@ export interface PlanTaskFact {
 export const MAX_TERMINAL_PR_READS_PER_PASS = 25;
 export const STRIKE_LADDER_PR_RE = /<!-- Strike-Ladder-PR: (\d+) -->/g;
 export const CLARIFICATION_PR_RE = /PR https:\/\/github\.com\/([^/\s]+)\/([^/\s]+)\/pull\/(\d+) needs a clarification/;
-export const PULL_URL_RE = /https:\/\/github\.com\/([^/\s]+)\/([^/\s]+)\/pull\/(\d+)/g;
+/** A pull request's URL path, `/<owner>/<repo>/pull/<n>`; the host is checked by `URL`, never by a pattern. */
+export const PULL_PATH_RE = /^\/([^/]+)\/([^/]+)\/pull\/(\d+)\/?$/;
+
+/** Every `owner/repo#n` pull request a text links on github.com, lower-cased: each whitespace-separated token is
+ *  parsed as a URL, so a host is matched exactly rather than anywhere inside a longer one. */
+export function pullRefsIn(text: string): Set<string> {
+  const refs = new Set<string>();
+  for (const token of text.split(/\s+/)) {
+    const candidate = token.replace(/^[(<'"]+|[)>.,;:'"]+$/g, "");
+    if (!candidate.startsWith("https://")) continue;
+    let url: URL;
+    try {
+      url = new URL(candidate);
+    } catch {
+      // deliberate: a token that only looks like a URL names no pull request
+      continue;
+    }
+    const path = url.hostname === "github.com" ? PULL_PATH_RE.exec(url.pathname) : null;
+    if (path) refs.add(`${path[1]}/${path[2]}#${path[3]}`.toLowerCase());
+  }
+  return refs;
+}
 const TERMINAL_RULE_CLASSES = new Set(["BLOCKED", "MANUAL"]);
 
 /** The one pull request a BLOCKED or MANUAL escalation, or a strike digest, is about, when it names exactly one:
@@ -419,8 +440,7 @@ export function terminalRulePr(issue: Pick<RevalidationIssue, "url" | "title" | 
   const text = `${issue.title}\n${issue.body}`;
   const asked = CLARIFICATION_PR_RE.exec(text);
   if (asked && `${asked[1]}/${asked[2]}`.toLowerCase() === repo) {
-    const named = new Set([...text.matchAll(PULL_URL_RE)].map((m) => `${m[1]}/${m[2]}#${m[3]}`.toLowerCase()));
-    if (named.size === 1) return Number(asked[3]);
+    if (pullRefsIn(text).size === 1) return Number(asked[3]);
   }
   return strike.length === 1 ? strike[0] : undefined;
 }
