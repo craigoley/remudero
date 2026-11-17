@@ -20,6 +20,28 @@ export const OPS_CATALOG_OUTCOMES = [
 ] as const;
 export type OpsCatalogOutcome = typeof OPS_CATALOG_OUTCOMES[number];
 
+/** Diagnostic only: a closed label never carries a private path, response or thrown text. */
+export const OPS_CATALOG_REFUSAL_STAGES = [
+  "repository_identity", "branch_ref", "commit", "root_tree", "plan_tree", "shard_tree",
+  "blob_verification", "final_ref", "strict_parse", "source_refresh", "snapshot_age",
+] as const;
+export type OpsCatalogRefusalStage = typeof OPS_CATALOG_REFUSAL_STAGES[number];
+
+/** Untrusted optional labels cannot change an outcome or become private log text. */
+export function opsCatalogRefusalStage(input: unknown): OpsCatalogRefusalStage | undefined {
+  try {
+    if (input === null || typeof input !== "object") return undefined;
+    const value = input as { outcome?: unknown; refusalStage?: unknown };
+    if (value.outcome === "ok") return undefined;
+    const stage = value.refusalStage;
+    return typeof stage === "string" && OPS_CATALOG_REFUSAL_STAGES.includes(stage as OpsCatalogRefusalStage)
+      ? stage as OpsCatalogRefusalStage : undefined;
+  } catch {
+    // An unreadable optional diagnostic is absent; the existing outcome/admission decision remains.
+    return undefined;
+  }
+}
+
 // BACKSTOP: each bound below fires only on a catalog far past anything a task plan holds, and refuses it whole.
 export const OPS_CATALOG_MAX_TREE_ENTRIES = 10_000;
 export const OPS_CATALOG_MAX_SHARDS = 500; // BACKSTOP: refuses a runaway shard directory.
@@ -46,6 +68,7 @@ export interface OpsCatalogBinding {
 export interface OpsCatalogCounts { treeEntries: number; shards: number; bytes: number }
 export interface OpsCatalogSnapshot {
   outcome: OpsCatalogOutcome;
+  refusalStage?: OpsCatalogRefusalStage;
   /** Present only when `outcome` is `ok`. */
   plan?: Plan;
   binding?: OpsCatalogBinding;
@@ -55,6 +78,7 @@ export interface OpsCatalogSnapshot {
 }
 export interface OpsCatalogShadowInput {
   outcome: OpsCatalogOutcome;
+  refusalStage?: OpsCatalogRefusalStage;
   plan?: Plan;
   opsCommit?: string;
   identityDigest?: string;
@@ -175,7 +199,9 @@ function digestOf(binding: OpsCatalogBinding): string {
 
 async function read(
   target: OpsCatalogTarget, api: OpsCatalogApi, counts: OpsCatalogCounts, store: PlanRevisionStore,
+  atStage: (stage: OpsCatalogRefusalStage) => void,
 ): Promise<OpsCatalogSnapshot> {
+  atStage("repository_identity");
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(target.repository)) throw new Refusal("unreadable");
   const repo = `repos/${target.repository}`;
   const meta = rec(await get(api, repo));
@@ -184,10 +210,14 @@ async function read(
     || typeof meta.full_name !== "string" || meta.full_name.toLowerCase() !== target.repository.toLowerCase()
     || typeof meta.default_branch !== "string" || !meta.default_branch) throw new Refusal("malformed");
   const branch = meta.default_branch;
+  atStage("branch_ref");
   const commit = await readBranchSha(api, repo, branch);
+  atStage("commit");
   const commitBody = rec(await get(api, `${repo}/git/commits/${commit}`));
   if (sha(commitBody.sha) !== commit) throw new Refusal("malformed");
+  atStage("root_tree");
   const root = await readTree(api, repo, sha(rec(commitBody.tree).sha), counts);
+  atStage("plan_tree");
   const planDir = one(root, "plan");
   if (!planDir) throw new Refusal("source_absent");
   if (planDir.type !== "tree" || planDir.mode !== "040000") throw new Refusal("malformed");
@@ -195,6 +225,7 @@ async function read(
   const monolith = one(planEntries, "tasks.yaml");
   if (!monolith) throw new Refusal("source_absent");
   if (!regular(monolith)) throw new Refusal("malformed");
+  atStage("shard_tree");
   const shardDir = one(planEntries, "tasks.d");
   if (shardDir && (shardDir.type !== "tree" || shardDir.mode !== "040000")) throw new Refusal("malformed");
   const shardEntries = shardDir ? (await readTree(api, repo, shardDir.sha, counts))
@@ -202,11 +233,13 @@ async function read(
     .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)) : [];
   if (shardEntries.length > OPS_CATALOG_MAX_SHARDS || !shardEntries.every(regular)) throw new Refusal("malformed");
   counts.shards = shardEntries.length;
+  atStage("blob_verification");
   const blobs: Array<{ label: string; text: string }> = [
     { label: "tasks.yaml", text: await readBlob(api, repo, monolith.sha, counts) },
   ];
   for (const e of shardEntries) blobs.push({ label: `tasks.d/${e.path}`, text: await readBlob(api, repo, e.sha, counts) });
   // The ref must still name the commit every read above was bound to.
+  atStage("final_ref");
   if (await readBranchSha(api, repo, branch) !== commit) throw new Refusal("ref_moved");
   const shardTreeSha = shardDir ? shardDir.sha : "";
   const binding: OpsCatalogBinding = Object.freeze({
@@ -214,6 +247,7 @@ async function read(
     shardBlobs: Object.freeze(Object.fromEntries(shardEntries.map((e) => [e.path, e.sha]))) as Record<string, string>,
   });
   const identityDigest = digestOf(binding);
+  atStage("strict_parse");
   let plan: Plan;
   try {
     plan = store.adopt({ key: `${commit}:${identityDigest}`, commit, repoDir: "", relPath: "" }, blobs).plan;
@@ -238,10 +272,11 @@ async function readSnapshot(
   target: OpsCatalogTarget, api: OpsCatalogApi, store: PlanRevisionStore,
 ): Promise<OpsCatalogSnapshot> {
   const counts: OpsCatalogCounts = { treeEntries: 0, shards: 0, bytes: 0 };
-  try { return await read(target, api, counts, store); }
+  let refusalStage: OpsCatalogRefusalStage = "repository_identity";
+  try { return await read(target, api, counts, store, stage => { refusalStage = stage; }); }
   catch (error) {
     // The outcome code is the reason: the error's own message may hold a URL or body, so it is dropped here.
-    return { outcome: error instanceof Refusal ? error.outcome : "unreadable", counts };
+    return { outcome: error instanceof Refusal ? error.outcome : "unreadable", refusalStage, counts };
   }
 }
 
@@ -274,14 +309,14 @@ export function createOpsCatalogShadowSource(
       const check = kept ? await revalidate(kept) : "moved";
       if (check === "same" && kept) return answer(kept);
       kept = undefined;
-      if (check === "failed") return { outcome: "stale" };
+      if (check === "failed") return { outcome: "stale", refusalStage: "branch_ref" };
       const snap = await readSnapshot(target, api, store);
       if (snap.outcome === "ok" && snap.binding) {
         everOk = true;
         kept = { plan: snap.plan, binding: snap.binding, identityDigest: snap.identityDigest };
         return answer(kept);
       }
-      return { outcome: everOk ? "stale" : snap.outcome };
+      return { outcome: everOk ? "stale" : snap.outcome, ...(snap.refusalStage ? { refusalStage: snap.refusalStage } : {}) };
     },
   };
 }

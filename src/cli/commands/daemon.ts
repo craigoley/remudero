@@ -907,7 +907,7 @@ export function opsCatalogShadowFeed(
     const startedAt = clock.now();
     // refresh() answers failure as an outcome; an unexpected rejection remains unreadable.
     void source.refresh().then((input) => { latest = input; completedAt = startedAt; }, (error: unknown) => {
-      latest = { outcome: "unreadable" }; completedAt = startedAt; void error;
+      latest = { outcome: "unreadable", refusalStage: "source_refresh" }; completedAt = startedAt; void error;
     }).finally(() => { inFlight = false; });
   };
   const timer = opts.refreshEveryMs === undefined ? undefined : setInterval(start, opts.refreshEveryMs);
@@ -917,7 +917,7 @@ export function opsCatalogShadowFeed(
     forDispatch: () => {
       if (latest?.outcome !== "ok") return latest;
       const age = completedAt === undefined ? NaN : clock.now() - completedAt;
-      return !Number.isFinite(age) || age < 0 || age >= OPS_DISPATCH_SOURCE_MAX_AGE_MS ? { outcome: "stale" } : latest;
+      return !Number.isFinite(age) || age < 0 || age >= OPS_DISPATCH_SOURCE_MAX_AGE_MS ? { outcome: "stale", refusalStage: "snapshot_age" } : latest;
     },
     stop: () => { if (timer !== undefined) clearInterval(timer); },
   };
