@@ -48,6 +48,7 @@ function measure(
       writeFileSync(join(bin, name), `#!/usr/bin/env bash\n${body}\n`, { mode: 0o755 });
     stub("git", `
 case "$*" in
+  *"remote get-url"*) exit 1 ;;
   *hash-object*) cat > "$FIXTURE/payload" ;;
   *mktree*) cat >/dev/null ;;
   *push*)
