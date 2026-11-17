@@ -1164,7 +1164,7 @@ serve_blue_green_swap() {
   trap 'exit 129' HUP
   if [ "${#SCRATCH_ARGS[@]}" -gt 0 ]; then scratch_fresh_tmp; fi # the replacement's own /tmp, never the live one's
   echo "serve-container: docker run -d --name ${SERVE_NEXT_NAME} ${REF} (${SERVE_NEXT_COLOR}, on ${SERVE_RUN_NETWORK} until it is ready)"
-  if [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ]; then selected_registry_recheck; fi
+  [ "${SELECTED_REGISTRY_ACTIVE}" != 1 ] || selected_registry_recheck # the replacement binds the same selected registry
   registry_shadow_observe serve "$INSTANCE_NAME" "${INSTANCE_GITHUB_REPO:-}" host "$STATE_DIR|$SERVE_NEXT_NAME"
   foreign_repos_recheck
   SERVE_PHASE_AT_S="${SECONDS}"
