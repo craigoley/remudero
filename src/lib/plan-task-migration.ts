@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { join, relative, sep } from "node:path";
+import { resolveRepoLayout } from "./repo-layout.js";
 import { parse as parseYaml } from "yaml";
 import { defaultGitRunnerAsync, readBlobsAtRefAsync, parseTasksFromYaml, type Plan } from "./plan.js";
 import { createPlanRevisionStore } from "./plan-revision-store.js";
@@ -9,7 +11,7 @@ import { RmdError } from "./errors.js";
 
 type Json = Record<string, unknown>;
 type Options = { publicRoot: string; publicCommit: string; publicRepo: string; opsRoot: string; opsCommit: string; opsRepo: string };
-type Original = { path: string; text: string; blob: string; single: boolean; moved: boolean };
+type Original = { path: string; text: string; blob: string; single: boolean; moved: boolean; shard: boolean };
 // BACKSTOP: refuse a runaway explicit preview whole, never truncate a population into absence.
 const MAX_CANDIDATE_LOOKUPS = 32;
 const MAX_CATALOG_BYTES = 32 * 1024 * 1024;
@@ -35,12 +37,38 @@ function options(args: readonly string[]): Options | undefined {
 async function catalog(root: string, commit: string, external = false): Promise<{ plan: Plan; originals: Map<string, Original> }> {
   const git = defaultGitRunnerAsync(root);
   if ((await git(["rev-parse", `${commit}^{commit}`])).trim() !== commit) return unknown("catalog_unreadable");
-  const entries = (await git(["ls-tree", "-rz", commit, "--", "plan/tasks.yaml", "plan/tasks.d/"])).split("\0").filter(Boolean);
+  const within = (path: string): string => {
+    const value = relative(root, path).split(sep).join("/");
+    return !value || value === ".." || value.startsWith("../") || /[\r\n\0\\]/.test(value) ? unknown("catalog_unreadable") : value;
+  };
+  // Resolve the maintained override path, then supply only its bytes at the selected commit.
+  // A live working-tree override cannot redirect this pinned catalog read.
+  const overridePaths: string[] = [];
+  const defaults = resolveRepoLayout(root, path => { overridePaths.push(within(path)); return undefined; });
+  if (overridePaths.length !== 1) return unknown("catalog_unreadable");
+  const overridePath = overridePaths[0]!;
+  const metadata = (await git(["ls-tree", "-z", commit, "--", overridePath])).split("\0").filter(Boolean);
+  let override: string | undefined;
+  if (metadata.length) {
+    const match = /^100644 blob ([a-f0-9]{40})\t([^\r\n]+)$/.exec(metadata[0]!);
+    if (metadata.length !== 1 || !match || match[2] !== overridePath) return unknown("catalog_unreadable");
+    override = (await readBlobsAtRefAsync(git, commit, [overridePath]))[0]!;
+    const buffer = Buffer.from(override);
+    if (buffer.length > MAX_CATALOG_BYTES || createHash("sha1").update(`blob ${buffer.length}\0`).update(buffer).digest("hex") !== match[1]) return unknown("catalog_unreadable");
+  }
+  const layout = resolveRepoLayout(root, () => override);
+  // The production private reader still requires its canonical house plan paths.
+  if (external && (layout.planMonolith !== defaults.planMonolith || layout.planDir !== defaults.planDir)) return unknown("catalog_incompatible");
+  const monolith = within(layout.planMonolith), shardDir = within(join(layout.planDir, "tasks.d")) + "/";
+  const entries = (await git(["ls-tree", "-rz", commit, "--", monolith, shardDir])).split("\0").filter(Boolean);
   const files = entries.map(line => {
-    const m = /^(100644) blob ([a-f0-9]{40})\t(plan\/tasks\.yaml|plan\/tasks\.d\/[^/\r\n]+\.ya?ml)$/.exec(line);
-    return m ? { path: m[3]!, blob: m[2]! } : unknown("catalog_unreadable");
+    const m = /^100644 blob ([a-f0-9]{40})\t([^\r\n]+)$/.exec(line);
+    if (!m) return unknown("catalog_unreadable");
+    const path = m[2]!;
+    const shard = path.startsWith(shardDir) && !path.slice(shardDir.length).includes("/") && /\.ya?ml$/.test(path);
+    return path === monolith || shard ? { path, blob: m[1]!, shard } : unknown("catalog_unreadable");
   });
-  if (!files.some(f => f.path === "plan/tasks.yaml") || files.length > 10_000) return unknown("catalog_unreadable");
+  if (!files.some(f => f.path === monolith) || files.length > 10_000) return unknown("catalog_unreadable");
   const texts = await readBlobsAtRefAsync(git, commit, files.map(f => f.path));
   let bytes = 0;
   const originals = new Map<string, Original>();
@@ -57,7 +85,7 @@ async function catalog(root: string, commit: string, external = false): Promise<
     return { label: file.path, text };
   });
   const store = createPlanRevisionStore({ strict: true, yamlLogLevel: "silent", ...(external ? { dependencyMode: "preserve-external" as const } : {}) });
-  return { plan: store.adopt({ key: commit, commit, repoDir: root, relPath: "plan/tasks.yaml" }, blobs).plan, originals };
+  return { plan: store.adopt({ key: commit, commit, repoDir: root, relPath: monolith }, blobs).plan, originals };
 }
 async function refs(root: string, selectedRepository: string): Promise<Map<string, string>> {
   // The selected API identity and ownership namespace must name the same repository.
@@ -170,7 +198,7 @@ export async function previewPlanTaskMigration(args: readonly string[]): Promise
     for (const task of dispatchOrder(pub.plan.tasks).reverse()) {
       const original = pub.originals.get(task.id)!;
       const reason = knownMerged.has(task.id) ? "merged" : task.repo !== o.publicRepo.split("/")[1] ? "target_not_bound" : taskOwned(task.id, [...(task.files ?? []), original.path], publicRefs, initial.open) ? "owned" :
-        publicPrerequisites.has(task.id) ? "public_dependants" : !original.single || !original.path.startsWith("plan/tasks.d/") ? "not_single_shard" : original.moved ? "already_moved" : undefined;
+        publicPrerequisites.has(task.id) ? "public_dependants" : !original.single || !original.shard ? "not_single_shard" : original.moved ? "already_moved" : undefined;
       if (reason) { refused.push({ id: task.id, reason }); continue; }
       if (!control) return unknown("merge_credit_control_unreadable");
       if (++lookups > MAX_CANDIDATE_LOOKUPS) return unknown("merge_credit_budget_exhausted");
