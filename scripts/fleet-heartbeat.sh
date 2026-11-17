@@ -1848,8 +1848,8 @@ publish_beat() (
   # beat commit, which only the private store holds. A tracking ref already left that way is cleared.
   push_to="$(git -C "$INSTALL_DIR" remote get-url --push "$REMOTE" 2>/dev/null)" || push_to=""
   push_to="${push_to%%$'\n'*}"
-  if [ -n "$push_to" ]; then
-    track_ref="refs/remotes/${REMOTE}/${BRANCH}"
+  track_ref="refs/remotes/${REMOTE}/${BRANCH}"
+  heal_track_ref() {
     (
       unset GIT_OBJECT_DIRECTORY
       tip="$(git -C "$INSTALL_DIR" rev-parse --verify -q "$track_ref" 2>/dev/null)" || exit 0
@@ -1857,11 +1857,16 @@ publish_beat() (
       git -C "$INSTALL_DIR" cat-file -e "$tip" 2>/dev/null && exit 0
       git -C "$INSTALL_DIR" update-ref -d "$track_ref" "$tip" >/dev/null 2>&1
     ) || printf 'fleet-heartbeat: could not clear %s, which names an object this clone lacks\n' "$track_ref" >&2
+  }
+  if [ -n "$push_to" ]; then
+    heal_track_ref
   else
     push_to="$REMOTE"
   fi
   git -C "$INSTALL_DIR" push --force "$push_to" "${commit}:refs/heads/${BRANCH}" >/dev/null 2>&1 \
     || fail "push to ${REMOTE}/${BRANCH} failed"
+  # Git also moves the tracking ref of a remote whose URL it is given; clear one left dangling.
+  heal_track_ref
 
   printf 'fleet-heartbeat: published %s to %s/%s — %s\n' "${commit:0:7}" "$REMOTE" "$BRANCH" "$SUBJECT"
 )
