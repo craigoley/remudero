@@ -79,6 +79,7 @@ test("W1-T9938: sweep.repeat_escalated no longer recurs", async () => {
         now: () => now,
         arm: () => {},
         close: () => {},
+        dispatchFix: async () => { throw new Error("repeat regression must not dispatch fixes"); },
         escalate: () => {},
         log: (step, extra = {}) => {
           if (step === "sweep.repeat_escalated") repeatTrips.push({ ...(extra as Record<string, unknown>) });
