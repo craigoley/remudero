@@ -5516,6 +5516,24 @@ export interface components {
       satisfied_by?: string;
       holdout?: boolean;
     };
+    /** GET /v1/views/inbox-thread?id= (src/lib/inbox-thread-view.ts; P4-T10, mounted by W1-T13455): one Inbox thread, built on demand from the stored needsYou classification pages and the thread store. */
+    InboxThreadView: {
+      view: "inbox-thread";
+      version: 1;
+      generatedAt: string;
+      asOf: string | null;
+      stale: boolean;
+      sources: (ViewSource)[];
+      data: InboxThreadViewData;
+    };
+    /** The actual InboxThreadViewData from src/lib/inbox-thread-view.ts. */
+    InboxThreadViewData: {
+      threadId: string;
+      found: boolean;
+      /** Why found is false */
+      reason?: string;
+      thread?: InboxThreadDetail;
+    };
     /** GET /v1/views/task?instance=&id= (src/lib/task-view.ts; W1-T6370): a demand-materialized task page. Missing tasks return 200 with found=false; unavailable inputs carry their evidence in sources and, when the body is thin, data.reason. */
     TaskView: {
       view: "task";
@@ -8565,6 +8583,23 @@ export interface paths {
           "401": Error;
           "403": Error;
           "404": undefined;
+        };
+    };
+  };
+  "/v1/views/inbox-thread": {
+    get: {
+      responses: {
+          "200": InboxThreadView;
+          "304": undefined;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": {
+            error: string;
+            view?: string;
+            reason?: string;
+            retryMs?: number;
+          };
         };
     };
   };

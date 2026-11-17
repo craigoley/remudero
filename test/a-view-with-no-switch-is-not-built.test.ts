@@ -103,11 +103,12 @@ test("an absent view's input is dropped once its only reader is switched off, an
   assert.equal(readModelViewBuilt("a", { projector: "on", views: {} }, loop), false, "a reader cycle with nothing served ends");
 });
 
-test("the declared readers keep now, the status view and the operator-agent rows built with an empty switch file, and nothing else", () => {
+test("the declared readers keep now, the status view, inbox-thread and the operator-agent rows built with an empty switch file, and nothing else", () => {
   const empty: ReadModelSwitches = { projector: "on", views: {} };
   const built = ["nav-badge", "repositories", READ_MODEL_STATUS_VIEW, NOW_VIEW_NAME, "instances", "task", "inbox-thread", "workstreams", "actions", "agent", "incidents", OPERATOR_AGENT_ROWS_VIEW, "analytics", "host"]
     .filter((view) => readModelViewBuilt(view, empty));
-  assert.deepEqual(built, [READ_MODEL_STATUS_VIEW, NOW_VIEW_NAME, OPERATOR_AGENT_ROWS_VIEW]);
+  // W1-T13455: inbox-thread is served with no switch entry, so its GET route is its declared reader.
+  assert.deepEqual(built, [READ_MODEL_STATUS_VIEW, NOW_VIEW_NAME, "inbox-thread", OPERATOR_AGENT_ROWS_VIEW]);
   assert.ok(READ_MODEL_VIEW_READERS[NEEDS_YOU_VIEW_NAME], "needs-you's readers are declared under its real name");
   assert.ok(READ_MODEL_VIEW_READERS[NEEDS_YOU_VIEW_NAME]!.some((edge) => edge.view === NAV_BADGE_VIEW_NAME));
   for (const edges of Object.values(READ_MODEL_VIEW_READERS)) for (const edge of edges) assert.ok(edge.reader.length > 0, "every edge names its reader");

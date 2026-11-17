@@ -441,6 +441,8 @@ export const READ_MODEL_VIEW_READERS: ReadModelViewReaders = {
     { consumer: NAV_BADGE_VIEW_NAME, reader: "needs-you-view.ts withNeedsYouView; serve.ts navBadgeWithDecisions", view: NAV_BADGE_VIEW_NAME },
   ],
   [OPERATOR_AGENT_ROWS_VIEW]: [{ consumer: "the operator agent", reader: "operator-agent-read-model.ts createOperatorAgentRowsSource: legacy only on an explicit off" }],
+  // W1-T13455: served with no switch entry, so the worker builds its demanded keys with none either.
+  [INBOX_THREAD_VIEW_NAME]: [{ consumer: "GET /v1/views/inbox-thread", reader: "serve.ts servedByDefault" }],
 };
 
 function readModelViewRead(view: string, switches: ReadModelSwitches, readers: ReadModelViewReaders, seen: Set<string>): boolean {
