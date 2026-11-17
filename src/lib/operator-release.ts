@@ -6,16 +6,19 @@ export function readReleaseLedgerLines(path: string): readonly string[] {
   return (readFileIfExists(path) ?? "").split("\n").filter(Boolean);
 }
 
-type ReleaseContract = { id: string; sourcePath?: unknown; attempts?: unknown;
+type ReleaseContract = { id: string; sourcePath?: unknown; attempts?: unknown; catalog?: unknown;
   risk_ruling?: { operator_release_pin?: string }; verify?: unknown };
 
 export type ReleaseEvidence = ReadonlyMap<string, unknown> | ReadonlySet<string>;
 export type ReleaseAuthor = "operator" | "machine";
 
 /** Pins the loaded contract, excluding only runtime bookkeeping and the ruling it authorizes.
- *  The human-to-auto verification transition must not invalidate its own approval. */
+ *  The human-to-auto verification transition must not invalidate its own approval.
+ *  W1-T13386: `catalog` is where a reader found the record, stamped on after the read, never a term of the
+ *  contract. The daemon's tick hashes an ops record without the stamp and the task's own run hashes it with
+ *  the stamp, so a pin that included it made one release read as two contracts. */
 export function operatorReleasePin(task: ReleaseContract): string {
-  const { sourcePath: _source, attempts: _attempts, risk_ruling: _ruling, ...contract } = task;
+  const { sourcePath: _source, attempts: _attempts, catalog: _catalog, risk_ruling: _ruling, ...contract } = task;
   const stable = (value: unknown): string => {
     if (Array.isArray(value)) return `[${value.map(stable).join(",")}]`;
     if (value !== null && typeof value === "object") {
