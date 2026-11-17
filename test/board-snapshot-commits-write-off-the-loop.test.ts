@@ -4,6 +4,7 @@
  * stalls). With writeBehind the rows are committed in memory at once and the file is written behind the caller.
  */
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -91,6 +92,58 @@ test("W1-T13332 criterion 2: quick commits leave the latest on disk, one write a
   await refused;
   assert.match(readFileSync(boardSnapshotPath(dir, "o", "r"), "utf8"), /third/, "the earlier file is intact");
   assert.deepEqual(readdirSync(dirname(boardSnapshotPath(dir, "o", "r"))).filter((f) => f.includes(".tmp-")), [], "no stage file is left");
+});
+
+test("writeSnapshotFileAsync rethrows a write error after close, even when close also fails", async (t) => {
+  const dir = root(t), stage = join(dir, "snapshot.tmp"), path = join(dir, "snapshot.json");
+  const writeError = new Error("write failed"), closeError = new Error("close failed");
+  const realOpen = fs.promises.open.bind(fs.promises);
+  t.mock.method(fs.promises, "open", async (...args: Parameters<typeof fs.promises.open>) => {
+    const handle = await realOpen(...args);
+    const realClose = handle.close.bind(handle);
+    t.mock.method(handle, "write", async () => { throw writeError; });
+    t.mock.method(handle, "close", async () => { await realClose(); throw closeError; });
+    return handle;
+  });
+
+  await assert.rejects(writeSnapshotFileAsync(stage, path, [Buffer.from("snapshot")]), (error) => error === writeError);
+  assert.equal(existsSync(stage), false, "the stage is removed after the write fails");
+});
+
+test("writeSnapshotFileAsync preserves a write error when stage cleanup fails", async (t) => {
+  const dir = root(t), stage = join(dir, "snapshot.tmp"), path = join(dir, "snapshot.json");
+  const writeError = new Error("write failed"), unlinkError = new Error("unlink failed");
+  const realOpen = fs.promises.open.bind(fs.promises), realUnlink = fs.promises.unlink.bind(fs.promises);
+  t.mock.method(fs.promises, "open", async (...args: Parameters<typeof fs.promises.open>) => {
+    const handle = await realOpen(...args);
+    t.mock.method(handle, "write", async () => { throw writeError; });
+    return handle;
+  });
+  t.mock.method(fs.promises, "unlink", async () => { throw unlinkError; });
+
+  try {
+    await assert.rejects(writeSnapshotFileAsync(stage, path, [Buffer.from("snapshot")]), (error) => error === writeError);
+    assert.equal(existsSync(stage), true, "failed cleanup leaves the stage for the caller to diagnose");
+  } finally {
+    t.mock.restoreAll();
+    await realUnlink(stage).catch(() => {});
+  }
+});
+
+test("writeSnapshotFileAsync preserves a rename error when stage cleanup fails", async (t) => {
+  const dir = root(t), stage = join(dir, "snapshot.tmp"), path = join(dir, "snapshot.json");
+  const renameError = new Error("rename failed"), unlinkError = new Error("unlink failed");
+  const realUnlink = fs.promises.unlink.bind(fs.promises);
+  t.mock.method(fs.promises, "rename", async () => { throw renameError; });
+  t.mock.method(fs.promises, "unlink", async () => { throw unlinkError; });
+
+  try {
+    await assert.rejects(writeSnapshotFileAsync(stage, path, [Buffer.from("snapshot")]), (error) => error === renameError);
+    assert.equal(existsSync(stage), true, "failed cleanup leaves the stage for the caller to diagnose");
+  } finally {
+    t.mock.restoreAll();
+    await realUnlink(stage).catch(() => {});
+  }
 });
 
 test("W1-T13332 criterion 3: seeds answer the committed rows at once, while the write is still in flight", async (t) => {
