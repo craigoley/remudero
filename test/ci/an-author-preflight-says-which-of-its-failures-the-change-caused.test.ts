@@ -208,7 +208,11 @@ function fixture() {
   repo.git("remote", "add", "origin", root);
   repo.git("checkout", "-b", "run-unfiled-author-attribution");
   writeFileSync(join(root, "test/leaf.test.ts"), leaf(2));
-  writeFileSync(join(root, "test/fresh.test.ts"), `import { test } from "node:test"; test("born red", () => { throw new Error("no"); });\n`);
+  // The base run is bounded by the time the head stage took (the fixture has no duration reporter, so the whole stage's).
+  // The head-only file runs beside leaf.test.ts and holds that stage open for a while, so the base run of leaf.test.ts
+  // alone has real headroom on a loaded host instead of racing a stage that happened to finish in a second.
+  writeFileSync(join(root, "test/fresh.test.ts"),
+    `import { test } from "node:test";\ntest("born red", async () => { await new Promise((done) => setTimeout(done, 8000)); throw new Error("no"); });\n`);
   repo.git("add", ".");
   repo.git("commit", "-m", "fix: change the leaf");
   return { root, git: repo.git, receipt: () => JSON.parse(readFileSync(join(root, "coverage/preflight-author.json"), "utf8")) as Receipt };
