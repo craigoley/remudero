@@ -1,0 +1,41 @@
+- id: W1-T13457
+  title: "After a serve restart, the Console's views answer their last committed body (marked stale) instead of 404 view_not_ready or an empty repositories list, so the Console stops falling back to legacy routes during a boot"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # which body a view answers while its worker warms; a stale body always says it is stale
+  band_meaning: span
+  origin: "operator-session#serve-oom-2026-11-16"
+  plan_refs:
+    - W1-T13455
+  files:
+    - src/lib/read-model-worker.ts
+    - src/lib/repositories-view.ts
+    - test/views-keep-their-last-good-body-across-a-restart.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A handle started over a state dir whose store holds committed bodies for repositories, instances, inbox and agent answers each of them at once, before the worker's first body, with stale true and a warming source reason"
+      proof: "grep: W1-T13457 criterion 1 in test/views-keep-their-last-good-body-across-a-restart.test.ts"
+    - claim: "The repositories view never publishes a body with an empty instances list over a committed non-empty one while an instance is warming (repositories-view.ts about :421)"
+      proof: "grep: W1-T13457 criterion 2 in test/views-keep-their-last-good-body-across-a-restart.test.ts"
+    - claim: "invariant:stale-says-so — a carried body is always judged stale until the worker posts a fresh one"
+      kind: guard
+      proof: "grep: W1-T13457 criterion 3 in test/views-keep-their-last-good-body-across-a-restart.test.ts"
+  rationale: |
+    WHY: Craig approved retiring serve's old read paths on 2026-11-17. The Console thread observed that after a serve
+    restart the views answer 404 view_not_ready, or repositories answers an empty instances list (repositories-view.ts
+    :421), and each of those sends the Console to its legacy fallback routes, which keeps them alive.
+  design: |
+    INVARIANT stale-says-so: a body carried across a restart is judged stale until the worker posts a fresh one.
+    1. Confirm which views loadCommittedViewBodies already restores at boot and which do not; restore the rest.
+    2. repositories-view.ts holds the last committed instances list while an instance warms, instead of publishing empty.
+  falsifier: |
+    Answer 404 until the first worker body: criterion 1 fails. Publish an empty instances list: criterion 2 fails. Mark a
+    carried body fresh: criterion 3 fails.
+  note: |
+    Id reserved for run-unfiled-1794939017000 with ~/rmd-work/bin/reserve-id.sh.
