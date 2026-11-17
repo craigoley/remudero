@@ -116,6 +116,13 @@ jobs:
         run: |
           echo "RMD_CI_DEPENDENCY_EVIDENCE=$RUNNER_TEMP/ci-dependency-evidence/evidence.json" >> "$GITHUB_ENV"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        # W1-T13321: a stalled fetch aborts and actions/checkout retries it (3 attempts, 10-20 s apart).
+        # 13 of 37,468 shard checkouts in 2026-11-10..17 sat in one silent fetch for 323-1245 s while
+        # sibling shards fetched in 23-26 s; a healthy fetch ends in about 20 s, so 120 s under 1 KB/s
+        # is never a healthy fetch. execGit passes process.env to git (checkout v7.0.1).
+        env:
+          GIT_HTTP_LOW_SPEED_LIMIT: "1000"
+          GIT_HTTP_LOW_SPEED_TIME: "120"
         with:
           # `origin/main` must RESOLVE on the runner: test/recon-gaps-relayed.test.ts shells
           # `git show origin/main:src/run-task.ts` against the live checkout, and a shallow fetch
@@ -1708,6 +1715,13 @@ jobs:
     timeout-minutes: 49
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        # W1-T13321: a stalled fetch aborts and actions/checkout retries it (3 attempts, 10-20 s apart).
+        # 13 of 37,468 shard checkouts in 2026-11-10..17 sat in one silent fetch for 323-1245 s while
+        # sibling shards fetched in 23-26 s; a healthy fetch ends in about 20 s, so 120 s under 1 KB/s
+        # is never a healthy fetch. execGit passes process.env to git (checkout v7.0.1).
+        env:
+          GIT_HTTP_LOW_SPEED_LIMIT: "1000"
+          GIT_HTTP_LOW_SPEED_TIME: "120"
         with:
           fetch-depth: 0
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0

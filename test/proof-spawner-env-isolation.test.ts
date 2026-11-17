@@ -43,7 +43,17 @@ const CANARY_VAR = "RMD_RESTART_THROTTLE_S";
 // receives an explicit `env` object. It is a host-runtime artifact, not a permission granted by
 // PROOF_ENV_ALLOWLIST; keep the product allowlist strict and narrow the test's platform exception
 // to this one measured key instead of weakening the child environment itself.
-const PLATFORM_INJECTED_ENV = process.platform === "darwin" ? new Set(["__CF_USER_TEXT_ENCODING"]) : new Set<string>();
+//
+// Linux likewise: the proof child runs under bubblewrap with `--chdir <cwd>` (proofSandboxArgv), and bwrap
+// itself exports `PWD` for that chdir after Node hands it the explicit env. It is the sandbox runner's own
+// artifact, not an inherited parent variable; the value is pinned to the proof cwd below so it cannot hide
+// a real leak of the orchestrator's PWD.
+const PLATFORM_INJECTED_ENV =
+  process.platform === "darwin"
+    ? new Set(["__CF_USER_TEXT_ENCODING"])
+    : process.platform === "linux"
+      ? new Set(["PWD"])
+      : new Set<string>();
 
 // Under bubblewrap (Linux, where it can start) the sandbox's own `--chdir <cwd>` makes the runner set PWD for the
 // child, below the env the spawn hands over. Like the CoreFoundation key, it is a sandbox artifact, not an allowlist
@@ -88,6 +98,9 @@ test("a Darwin CoreFoundation env injection is isolated from the proof allowlist
     [],
     "every inherited child env key must be allowlisted, except the measured CoreFoundation injection",
   );
+  if (process.platform === "linux" && childEnv.PWD !== undefined) {
+    assert.equal(childEnv.PWD, process.cwd(), "bwrap's injected PWD is the proof cwd, never an inherited value");
+  }
   if (process.platform === "darwin") {
     assert.equal(
       PLATFORM_INJECTED_ENV.has("__CF_USER_TEXT_ENCODING"),
