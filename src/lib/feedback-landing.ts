@@ -26,6 +26,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
+import { systemClock, type Clock } from "./clock.js";
 import { releaseTaskIdReservationAsync, type ReservationReleaseOutcome } from "./task-id-release.js";
 import { reservationHolderBranch, taskIdReservationRef } from "./task-id-reservation.js";
 import { loadPlanFromYaml } from "./plan.js";
@@ -101,6 +102,7 @@ const CI_LEARNING_PENDING_REL_DIR = "state/ci-learning-pending";
 const FEEDBACK_PENDING_REL_DIR = "state/feedback-landing-pending";
 const TASK_FILES_PENDING_REL_DIR = "state/task-files-landing-pending";
 const TASK_FILES_REFUSED_REL_DIR = "state/task-files-landing-refused";
+const TASK_FILES_WAITING_REL_PATH = "state/task-files-landing-waiting.json";
 const TASK_FILES_LANDING_BRANCH = "task-files-landing";
 const TASK_FILES_LANDING_PR_TITLE = "chore(plan): land pending edits of task files";
 const CI_LEARNING_SLUG_MAX = 72;
@@ -2496,6 +2498,8 @@ export interface LandTaskFilesOpts extends LandFeedbackAsyncOpts {
    * with none releases nothing and says why.
    */
   reservationGitAsync?: GitExecAsync;
+  /** W1-T13210: the clock a waiting row's pull-request age is read from; the system clock when absent. */
+  clock?: Clock;
 }
 
 interface StagedTaskFileMeta {
@@ -2579,7 +2583,8 @@ function taskFilesCommitMessage(paths: string[]): string {
     TASK_FILES_LANDING_PR_TITLE,
     "",
     "Plan-only: each file is a machine-filed edit of a task file that main already holds.",
-    "The branch takes no push while its pull request is open (W1-T12199).",
+    "The branch takes no push while its pull request is open and neither red nor conflicting;",
+    "a red or conflicting one is rebuilt from the waiting edits on current main (W1-T12199, W1-T13210).",
     "",
     ...paths.map((f) => `- ${f}`),
   ].join("\n");
@@ -2589,12 +2594,74 @@ function taskFilesPrBody(files: ReadonlyArray<Pick<StagedTaskFile, "claim" | "pr
   return [
     `Lands ${files.length} machine-filed edit(s) of task files in one pull request (W1-T12199).`,
     "",
-    "This branch takes no push while this pull request is open. A later edit waits in the",
-    "state directory and goes into the next landing pull request.",
+    "This branch takes no push while this pull request is open and neither red nor conflicting with main;",
+    "a red or conflicting one is rebuilt from the waiting edits on current main (W1-T13210). A later edit",
+    "waits in the state directory and goes into the next landing pull request or that rebuild.",
     "",
     "## Acceptance",
     ...files.map((f) => `- ${f.claim} | ${f.proof}`),
   ].join("\n");
+}
+
+/** W1-T13210: the open landing pull request as the seal lists it: its head, its mergeability and its checks. */
+interface OpenLandingPr {
+  url: string;
+  headRefOid?: string;
+  mergeable?: string;
+  createdAt?: string;
+  statusCheckRollup?: Array<{ name?: string; context?: string; status?: string; conclusion?: string; state?: string; startedAt?: string }>;
+}
+
+/** W1-T13210: what the lane reads of an open landing pull request. "unread" when the listing did not report its checks. */
+interface LandingPrChecks {
+  checks: "conflicting" | "red" | "pending" | "green" | "none" | "unread";
+  failing: string[];
+}
+
+const sealListingArgs = (branch: string, repoArgs: string[]): string[] =>
+  ["pr", "list", "--head", branch, "--state", "open", "--json", "url,headRefOid,mergeable,createdAt,statusCheckRollup", ...repoArgs];
+
+/**
+ * W1-T13210: judge a landing pull request's head in the shape of the sweep's checksStateFromRollup, which this module
+ * cannot import (src/lib/sweep.ts imports it, and the cycle ceiling is zero): the latest attempt of each check by name,
+ * the review left out, and the sweep's REQUIRED_CHECK_FAIL and REQUIRED_CHECK_OK sets. Every reported check counts, as
+ * the sweep counts them when branch protection is unread. A conflicting head registers no checks, so mergeability is
+ * read first.
+ */
+function landingPrChecks(pr: OpenLandingPr): LandingPrChecks {
+  if (pr.mergeable === "CONFLICTING") return { checks: "conflicting", failing: [] };
+  if (!Array.isArray(pr.statusCheckRollup)) return { checks: "unread", failing: [] };
+  const latest = new Map<string, NonNullable<OpenLandingPr["statusCheckRollup"]>[number]>();
+  for (const c of pr.statusCheckRollup) {
+    const name = c.name ?? c.context ?? "";
+    if (name === "remudero-review") continue;
+    const prior = latest.get(name);
+    if (prior === undefined || (c.startedAt ?? "") >= (prior.startedAt ?? "")) latest.set(name, c);
+  }
+  if (latest.size === 0) return { checks: "none", failing: [] };
+  const stateOf = (c: { status?: string; conclusion?: string; state?: string }): string => (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase();
+  const fail = new Set(["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"]);
+  const failing = [...latest].filter(([, c]) => fail.has(stateOf(c))).map(([name]) => name).sort();
+  if (failing.length > 0) return { checks: "red", failing };
+  const ok = new Set(["SUCCESS", "SKIPPED", "NEUTRAL"]);
+  return { checks: [...latest.values()].every((c) => ok.has(stateOf(c))) ? "green" : "pending", failing: [] };
+}
+
+/** W1-T13210: whether `state` differs from the last waiting state recorded for `branch`, recording it when it does. */
+function landingWaitChanged(stateRoot: string, branch: string, state: Record<string, unknown>): boolean {
+  const path = join(stateRoot, TASK_FILES_WAITING_REL_PATH);
+  let seen: Record<string, unknown> = {};
+  try {
+    seen = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+  } catch {
+    // No record yet, or an unreadable one: the state counts as new, so its row is written again rather than lost.
+  }
+  const next = JSON.parse(JSON.stringify(state)) as Record<string, unknown>;
+  if (isDeepStrictEqual(seen[branch], next)) return false;
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(`${path}.${process.pid}.tmp`, `${JSON.stringify({ ...seen, [branch]: next })}\n`, "utf8");
+  renameSync(`${path}.${process.pid}.tmp`, path);
+  return true;
 }
 
 /** As W1-T5531: a red is main's when every failing check reads the plan tree and fails on main alone too. */
@@ -2877,27 +2944,82 @@ function* taskFilesLandingSteps(
         return reason; // the sealed path names it in its waiting row
       }
     };
-    // ── the seal: an open pull request, or a listing that cannot be read, means no push ──
+    /** W1-T13210: the open pull request this pass rebuilds, because its head is red or conflicts with main. */
+    let rebuilding: (OpenLandingPr & LandingPrChecks & { headRefOid: string }) | undefined;
+    /**
+     * W1-T13210: wait behind an open landing pull request, with one row for each change of what the lane waits on:
+     * the pull request and its head, its checks, and how many edits wait. A row a pass would bury the change.
+     */
+    const waitBehind = (pr: OpenLandingPr, judged: LandingPrChecks, extra: { unchanged?: true; reason?: string } = {}): TaskFilesLandingResult => {
+      wait();
+      const state = {
+        pr_url: pr.url, head_sha: pr.headRefOid, checks: judged.checks, failing_checks: judged.failing, waiting: result.waiting.length, ...extra,
+      };
+      if (landingWaitChanged(stateRoot, kind.branch, state)) {
+        const openedMs = pr.createdAt === undefined ? NaN : Date.parse(pr.createdAt);
+        opts.log?.("task_files_landing.waiting_on_pr", {
+          branch: kind.branch, ...state, carried: result.landed.length,
+          ...(Number.isNaN(openedMs) ? {} : { opened_at: pr.createdAt, age_ms: (opts.clock ?? systemClock).now() - openedMs }),
+        });
+      }
+      return result;
+    };
+    /** W1-T13210: a wait while rebuilding is a wait behind its pull request; any other is the landing's own. */
+    const hold = (reason?: string): TaskFilesLandingResult =>
+      rebuilding ? waitBehind(rebuilding, rebuilding, reason === undefined ? {} : { reason }) : wait(reason);
+    // ── the seal: an open pull request that is neither red nor conflicting, or a listing that cannot be read, means no push ──
     const sealed = function* (): Generator<LandingAsk, TaskFilesLandingResult | undefined, AskReply> {
-      let open: Array<{ url: string }>;
+      let open: OpenLandingPr[];
       try {
-        open = JSON.parse(yield* net.gh(pendingLandingPrArgs(kind.prHead, landingRepoArgs(kind)))) as Array<{ url: string }>;
+        open = JSON.parse(yield* net.gh(sealListingArgs(kind.prHead, landingRepoArgs(kind)))) as OpenLandingPr[];
       } catch (e) {
         const reason = `the open pull requests of ${kind.branch} cannot be read, so the landing waits: ${String((e as Error)?.message ?? e)}`;
         return wait(reason);
       }
-      if (!open[0]) return undefined;
-      result.prUrl = open[0].url;
+      const pr = open[0];
+      if (rebuilding !== undefined) {
+        // The second read of a rebuild: it goes on only while GitHub still shows the head this pass judged.
+        if (pr?.url === rebuilding.url && pr.headRefOid === rebuilding.headRefOid) return undefined;
+        if (pr === undefined) return hold(`${rebuilding.url} closed while its rebuild was built, so nothing is pushed`);
+      }
+      if (!pr) return undefined;
+      result.prUrl = pr.url;
       const held = yield* headPaths();
-      if (typeof held === "string") return wait(`the head of ${kind.branch} cannot be read, so no staged file counts as carried by ${open[0].url}: ${held}`);
+      if (typeof held === "string") return wait(`the head of ${kind.branch} cannot be read, so no staged file counts as carried by ${pr.url}: ${held}`);
       result.landed = queued().map((f) => f.relPath).filter((p) => held.has(p));
-      settle(open[0].url, held);
-      return wait();
+      settle(pr.url, held);
+      const judged = landingPrChecks(pr);
+      if (rebuilding === undefined && (judged.checks === "red" || judged.checks === "conflicting") && pr.headRefOid !== undefined) {
+        rebuilding = { ...pr, ...judged, headRefOid: pr.headRefOid };
+        return undefined;
+      }
+      return waitBehind(pr, judged);
     };
     const sealedBefore = yield* sealed();
     if (sealedBefore) return sealedBefore;
 
-    // ── build the batch ──
+    /**
+     * W1-T13210: a rebuild left with no edit to carry. When nothing waits at all, every edit its head held landed on
+     * main or was set aside by a rule of its own, so the lane closes the pull request, and no waiting file names it.
+     */
+    const nothingToRebuild = function* (): Generator<LandingAsk, TaskFilesLandingResult, AskReply> {
+      if (rebuilding === undefined || queued().length > 0) return hold();
+      const reason = `every edit its head held has landed on main or been set aside, so nothing remains to land (W1-T13210)`;
+      try {
+        assertLiveWriteAllowed("gh-transport", `closing the landing PR ${rebuilding.url}`);
+        yield* net.gh(["pr", "close", rebuilding.url, "--comment", `Closed by the task-files landing: ${reason}.`, ...landingRepoArgs(kind)]);
+      } catch (e) {
+        return hold(`closing ${rebuilding.url} failed: ${String((e as Error)?.message ?? e)}`);
+      }
+      opts.log?.("task_files_landing.closed", {
+        branch: kind.branch, pr_url: rebuilding.url, head_sha: rebuilding.headRefOid, checks: rebuilding.checks, failing_checks: rebuilding.failing, reason,
+      });
+      result.prUrl = undefined;
+      result.landed = [];
+      return wait();
+    };
+
+    // ── build the batch: a first landing, or the rebuild of a red or conflicting one on current main ──
     const batch: Array<StagedTaskFile & { blob: string }> = [];
     for (const file of staged) {
       const blob = (yield* net.git(["hash-object", "-w", file.abs], { env })).trim();
@@ -2907,7 +3029,8 @@ function* taskFilesLandingSteps(
         rmSync(`${file.abs}${TASK_FILE_META_SUFFIX}`, { force: true });
         continue; // main holds the edit: it landed
       }
-      if (file.prUrl) {
+      // W1-T13210: the pull request a rebuild replaces is open, so its own files are never read as closed.
+      if (file.prUrl && file.prUrl !== rebuilding?.url) {
         let state: string;
         try {
           state = (JSON.parse(yield* net.gh(["pr", "view", file.prUrl, "--json", "state"])) as { state: string }).state;
@@ -2927,7 +3050,7 @@ function* taskFilesLandingSteps(
       }
       batch.push({ ...file, blob });
     }
-    if (batch.length === 0) return wait();
+    if (batch.length === 0) return yield* nothingToRebuild();
 
     let landing = batch;
     let verdict = yield* verdictOf(landing);
@@ -2944,14 +3067,14 @@ function* taskFilesLandingSteps(
         if (probe.mainRed) mainRed = true;
         else yield* setAside(file, { reason: refusalText(alone.failures), failures: alone.failures, mainSha: yield* freshMain(), ...probe }, file.baseBlob);
       }
-      if (mainRed) return wait(`origin/main is red at ${yield* freshMain()}, so no file was set aside and the landing waits for main to move`);
-      if (green.length === 0) return wait();
-      if (green.length === batch.length) return wait(`each file passes the plan preflight alone and the batch fails: ${refusalText(verdict.failures)}`);
+      if (mainRed) return hold(`origin/main is red at ${yield* freshMain()}, so no file was set aside and the landing waits for main to move`);
+      if (green.length === 0) return yield* nothingToRebuild();
+      if (green.length === batch.length) return hold(`each file passes the plan preflight alone and the batch fails: ${refusalText(verdict.failures)}`);
       landing = green;
       verdict = yield* verdictOf(landing);
-      if (!verdict.ok) return wait(`the files that pass alone fail together: ${refusalText(verdict.failures)}`);
+      if (!verdict.ok) return hold(`the files that pass alone fail together: ${refusalText(verdict.failures)}`);
     }
-    if (verdict.timedOut !== undefined) return wait("the plan preflight ran out of its budget, so the landing waits");
+    if (verdict.timedOut !== undefined) return hold("the plan preflight ran out of its budget, so the landing waits");
 
     // W1-T13209: the preflight takes minutes and another caller may have opened the pull request meanwhile.
     const sealedAfter = yield* sealed();
@@ -2961,7 +3084,13 @@ function* taskFilesLandingSteps(
     const paths = landing.map((f) => f.relPath);
     const treeSha = yield* treeOf(landing);
     const tipSha = (yield* refreshLandingRef(net, kind.branch)) ? (yield* net.git(["rev-parse", `origin/${kind.branch}`])).trim() : undefined;
-    if (tipSha === undefined || (yield* net.git(["rev-parse", `${tipSha}^{tree}`])).trim() !== treeSha) {
+    if (rebuilding !== undefined && tipSha !== rebuilding.headRefOid) {
+      return hold(`${kind.branch} is at ${tipSha ?? "no commit"}, not the head ${rebuilding.headRefOid} this rebuild replaces, so another writer has it`);
+    }
+    const sameTree = tipSha !== undefined && (yield* net.git(["rev-parse", `${tipSha}^{tree}`])).trim() === treeSha;
+    // W1-T13210: neither main nor the pending set changed, so a push would hand CI the same red tree again.
+    if (sameTree && rebuilding !== undefined) return waitBehind(rebuilding, rebuilding, { unchanged: true });
+    if (!sameTree) {
       const commitSha = yield* commitOf(treeSha, paths);
       assertLiveWriteAllowed("git-push", `pushing the ${kind.branch} branch`);
       try {
@@ -2985,7 +3114,10 @@ function* taskFilesLandingSteps(
     }
     result.prUrl = prUrl;
     result.landed = paths;
-    opts.log?.("task_files_landing.opened", { branch: kind.branch, pr_url: prUrl, files: paths, pushed: result.pushed });
+    opts.log?.("task_files_landing.opened", {
+      branch: kind.branch, pr_url: prUrl, files: paths, pushed: result.pushed,
+      ...(rebuilding === undefined ? {} : { rebuilt: { head_sha: rebuilding.headRefOid, checks: rebuilding.checks, failing_checks: rebuilding.failing } }),
+    });
     return wait(error);
   } catch (e) {
     result.error = String((e as Error)?.message ?? e);
