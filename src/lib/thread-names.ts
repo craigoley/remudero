@@ -17,6 +17,7 @@ export const THREAD_NAMES = {
   configMeasure: "rmd-config-meas",
   consoleProjection: "rmd-console-prj",
   heavyReadyDeadline: "rmd-heavy-ready",
+  ledgerCompact: "rmd-ledger-cmpt",
   ledgerDigestCodec: "rmd-ledger-dgst",
   loopStallWatchdog: "rmd-stall-watch",
   mergedRatchet: "rmd-merged-rtch",
