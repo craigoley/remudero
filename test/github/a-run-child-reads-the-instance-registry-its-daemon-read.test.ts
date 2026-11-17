@@ -26,6 +26,7 @@ import { RUN_CHILD_SCHEMA, runDir, writeSpec, type RunChildProbe } from "#src/li
 import type { RunResult } from "#src/lib/run-result.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { runChildMain } from "#src/run-child-main.js";
+import { assertWallClockBound } from "#test/helpers/wall-clock-bound.js";
 
 const INSTALLATION = "155256285";
 const TARGET = "craigoley/remudero";
@@ -229,7 +230,7 @@ test("W1-T13179 criterion 3: a run child's over-share read past a far reset stan
     assert.ok(seen.nearWait !== undefined && seen.nearWait <= bound, `${label}: a reset within the bound is waited for`);
     assert.equal(seen.stoodDown, true);
     assert.equal(seen.calls, 1, `${label}: the read past the share never ran`);
-    assert.ok((seen.elapsedMs ?? Infinity) < 5_000, `${label}: it stood down at once`);
+    assertWallClockBound(seen.elapsedMs ?? Infinity, 5_000, `${label}: it stood down at once`);
   }
 });
 
