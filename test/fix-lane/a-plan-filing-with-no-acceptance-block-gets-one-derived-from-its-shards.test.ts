@@ -8,12 +8,14 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
+import { addedPlanFilingDiffAtHead, repairPrMetadata } from "#src/run-task.js";
 import {
   ATTRIBUTION_LINE_RE, PROOF_SAFE_PATH_RE, SHARD_ID_LINE_RE, planFilingAcceptanceCure, repairedProofsAreSafeToPush,
   type FilingDiffFile,
 } from "#src/lib/body-repair.js";
 import { acceptanceAuthorTimeCheck, parseAcceptanceBlock, parseWhitelistedProof } from "#src/lib/review.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const ATTRIBUTION = "🤖 Generated with [Claude Code](https://claude.com/claude-code)";
 const PROSE = "File two tasks measured in the stuck-work review.\n\n## Why\nThe fleet left both red for hours.";
@@ -180,6 +182,60 @@ test("W1-T13360: a derived body the gate would still refuse is not returned as a
   // The gate is the judge of the result, not only of the input: a cure that leaves the check red is no cure.
   const stillRefused = () => ({ ok: false, defect: "no-header" });
   assert.equal(planFilingAcceptanceCure(NO_BLOCK_BODY, FILING_DIFF, SHARD_DIR, stillRefused), undefined);
+});
+
+test("W1-T13360: repairPrMetadata writes the derived filing block for an added-shard no-header red", async () => {
+  const writes: Array<{ title?: string; body?: string }> = [];
+  const result = await repairPrMetadata(
+    { prUrl: "https://github.com/acme/remudero/pull/501", headSha: "a".repeat(40) },
+    ["acceptance-author-gate"],
+    (_url, fields) => { writes.push(fields); },
+    () => ({ title: "feat(plan): file tasks", body: NO_BLOCK_BODY, base: { ref: "main" } }),
+    () => [],
+    () => ({ kind: "read", files: [] }),
+    () => ({ kind: "read", files: FILING_DIFF, shardDir: SHARD_DIR }),
+  );
+
+  assert.deepEqual(result, { repaired: true, reason: "edited body through the PR REST endpoint" });
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0]?.title, undefined, "a green title is not edited");
+  assert.equal(acceptanceAuthorTimeCheck(writes[0]?.body ?? "").ok, true);
+  assert.deepEqual(parseAcceptanceBlock(writes[0]?.body ?? "").map(({ claim, proof }) => ({ claim, proof })), [
+    { claim: "the W9-T501 shard is filed", proof: `grep: id: W9-T501 in ${SHARD_A}` },
+    { claim: "the W9-T502 shard is filed", proof: `grep: id: W9-T502 in ${SHARD_B}` },
+  ]);
+
+  const mixedWrites: Array<{ title?: string; body?: string }> = [];
+  const mixed = await repairPrMetadata(
+    { prUrl: "https://github.com/acme/remudero/pull/502", headSha: "b".repeat(40) },
+    ["acceptance-author-gate"],
+    (_url, fields) => { mixedWrites.push(fields); },
+    () => ({ body: NO_BLOCK_BODY, base: { ref: "main" } }),
+    () => [],
+    () => ({ kind: "read", files: [] }),
+    () => ({ kind: "read", files: [...FILING_DIFF, edited("src/lib/sweep.ts")], shardDir: SHARD_DIR }),
+  );
+  assert.equal(mixed.repaired, false, "a code change beside a shard is not a plan-only filing");
+  assert.equal(mixedWrites.length, 0, "the body is untouched when no claim can be derived safely");
+});
+
+test("W1-T13360: the production diff reader returns complete paths and text for added task shards", () => {
+  const repo = gitRepo({ kind: "plan-filing-diff" });
+  repo.git("remote", "add", "origin", repo.dir);
+  repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
+  const shardPath = "plan/tasks.d/W9-T501-a-new-task.yaml";
+  const shard = shardText("W9-T501");
+  mkdirSync(dirname(join(repo.dir, shardPath)), { recursive: true });
+  writeFileSync(join(repo.dir, shardPath), shard);
+  repo.git("add", shardPath);
+  repo.git("commit", "--quiet", "-m", "feat(plan): add a task shard");
+  const headSha = repo.git("rev-parse", "HEAD");
+
+  const diff = addedPlanFilingDiffAtHead(headSha, repo.dir);
+  assert.equal(diff.kind, "read");
+  if (diff.kind !== "read") return;
+  assert.equal(diff.shardDir, "plan/tasks.d");
+  assert.deepEqual(diff.files, [{ path: shardPath, added: true, headText: shard }]);
 });
 
 test("W1-T13360: each line shape the cure reads accepts its own form and refuses the near misses", () => {
