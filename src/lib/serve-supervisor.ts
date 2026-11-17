@@ -208,6 +208,9 @@ export function procCpuConsumers(pids: readonly number[], proc = "/proc", clockT
 /** W1-T13304: how often the supervisor writes `serve.cpu_budget` (incident-invariants.ts's serve-cpu-budget rule reads it). */
 export const SERVE_CPU_BUDGET_INTERVAL_MS = 60 * 60_000;
 
+/** W1-T13441: a consumer under this many cores over the hour is left off serve.cpu_budget's `threads` list. */
+export const SERVE_CPU_BUDGET_THREAD_FLOOR_CORES = 0.005;
+
 /** W1-T13304: the steps that open and close a boot window, the time serve.cpu_budget leaves out of steady CPU. */
 const CPU_BOOT_OPEN_STEPS = new Set(["serve.generation_forked"]);
 const CPU_BOOT_CLOSE_STEPS = new Set(["serve.cold_start_ready", "serve.handoff_done", "serve.handoff_aborted", "serve.handoff_failed", "serve.cold_start_failed", "serve.generation_restart_failed"]);
@@ -1349,11 +1352,14 @@ function createCpuBudgetTracker(opts: ServeSupervisorOptions): { note(step: stri
     const steady = usageUsec === undefined || window.bootUnread || steadyMs < CPU_BUDGET_MIN_STEADY_MS
       ? null : Number((((usageUsec - window.bootUsec) / 1e6) / (steadyMs / 1000)).toFixed(3));
     const nextConsumers = consumers(pids());
-    const top = [...nextConsumers].map(([name, seconds]) => ({ name, cores: Number((Math.max(0, seconds - (lastConsumers.get(name) ?? 0)) / (windowMs / 1000)).toFixed(3)) }))
-      .sort((a, b) => b.cores - a.cores).slice(0, 3);
+    const ranked = [...nextConsumers].map(([name, seconds]) => ({ name, cores: Number((Math.max(0, seconds - (lastConsumers.get(name) ?? 0)) / (windowMs / 1000)).toFixed(3)) }))
+      .sort((a, b) => b.cores - a.cores);
+    const top = ranked.slice(0, 3);
+    // W1-T13441: every named thread over the floor, not only three: a named worker below the top three still answers for its cores.
+    const threads = ranked.filter((consumer) => consumer.cores >= SERVE_CPU_BUDGET_THREAD_FLOOR_CORES);
     opts.log("serve.cpu_budget", {
       window_ms: windowMs, usage_usec: usageUsec ?? null, boot_ms: window.bootMs, boot_usage_usec: window.bootUnread ? null : window.bootUsec,
-      steady_cores: steady, prev_steady_cores: prevSteady, top,
+      steady_cores: steady, prev_steady_cores: prevSteady, top, threads,
     });
     prevSteady = steady;
     lastConsumers = nextConsumers;
