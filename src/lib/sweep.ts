@@ -21578,6 +21578,26 @@ export async function runSweep(
     }
     return { repaired: false, reason: `; plan repair (${decision.signature}) did not take: ${result.outcome}${result.reason ? ` — ${result.reason}` : ""}` };
   };
+  // W1-T13347: a plan filing red only on title/body checks, acceptance-author-gate among them, gets the title/body repair
+  // the metadata arm gives every other PR, once per head. It edits no plan file; the gate re-judges the edited body.
+  const tryPlanMetadataRepair = async (pr: OpenPrView, prior: { repaired: boolean; reason: string }) => {
+    const checks = metadataOnlyRed(pr), key = `${pr.prNumber}@${pr.headSha}@metadata`;
+    if (prior.repaired || checks === undefined || !checks.includes("acceptance-author-gate") || !deps.repairMetadata || deps.dryRun ||
+        !(deps.actionable?.("blocked-fixable") ?? true) || planRepairHistory.has(key)) return prior;
+    let result: MetadataRepairResult;
+    try {
+      result = await deps.repairMetadata(pr, checks);
+    } catch (e) {
+      result = { repaired: false, reason: String((e as Error)?.message ?? e) };
+    }
+    appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber,
+      head_sha: pr.headSha, step: PLAN_REPAIR_STEP, signature: "metadata", action: "edit-metadata", check_name: checks.join(", "),
+      outcome: result.repaired ? "repaired" : "refused", reason: result.reason });
+    planRepairHistory.add(key);
+    return result.repaired
+      ? { repaired: true, reason: `plan repair (metadata): ${result.reason}; awaiting the gate's verdict on the edited body` }
+      : { repaired: false, reason: `${prior.reason}; plan repair (metadata) did not take: ${result.reason}` };
+  };
   // W1-T2789 — unlike W1-T2620's cohort-wide release above, this is exact-path evidence for the
   // exhausted red population the disposition table would otherwise escalate before runFixRung
   // reaches its W1-T2671 pre-strike check. The write still rechecks live state and head below.
@@ -23270,7 +23290,7 @@ export async function runSweep(
         : staleGate ? { repaired: true, reason: deps.dryRun || !(deps.actionable?.("blocked-fixable") ?? true)
           ? "stale ci-gate verdict — its re-run waits for a full sweep pass"
           : await redriveStaleCiGate(deps, pr, staleGate, reaggregatedCiGateKeys) }
-        : await tryPlanRepair(pr);
+        : await tryPlanMetadataRepair(pr, await tryPlanRepair(pr));
       const facts = planRoundFacts.get(pr.prNumber);
       let planRoundExhausted = false;
       // W1-T13047: why the plan-scoped round is exhausted, for the held rebuild's question.
