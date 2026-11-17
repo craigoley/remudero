@@ -1,0 +1,54 @@
+- id: W1-T13440
+  title: "A fix-dispatch key held by a host child that has not started reports its queued state, is ledgered when queued, and is released after a bound, so a later sweep pass never stands down on an unexplained claim"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # changes when the sweep may dispatch a fix rung again
+  origin: "operator-session#ubuntu-2604-main-red-2026-11-17"
+  plan_refs:
+    - W1-T11166
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/a-queued-host-fix-dispatch-never-holds-its-key-unexplained.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "While a host fix child for a key is queued and not started, a later sweep pass that would dispatch the same key stands down with a reason naming the queued state, its run id and how long it has waited, never the words already claimed this pass"
+      proof: "grep: W1-T13440 criterion 1 in test/sweep/a-queued-host-fix-dispatch-never-holds-its-key-unexplained.test.ts"
+    - claim: "Queuing a host fix child writes one ledger row with the PR, the fix key and the run id"
+      proof: "grep: W1-T13440 criterion 2 in test/sweep/a-queued-host-fix-dispatch-never-holds-its-key-unexplained.test.ts"
+    - claim: "A key whose host child has not started within the bound is released, ledgered with the wait, and the next pass may dispatch the fix again"
+      proof: "grep: W1-T13440 criterion 3 in test/sweep/a-queued-host-fix-dispatch-never-holds-its-key-unexplained.test.ts"
+    - claim: "invariant:same-pass-race-unchanged — two claims of one key inside a single pass still refuse the second with today's already claimed this pass reason"
+      proof: "grep: W1-T13440 criterion 4 in test/sweep/a-queued-host-fix-dispatch-never-holds-its-key-unexplained.test.ts"
+  rationale: |
+    OBSERVED 2026-11-17 in the host ledger for #19122 (task W1-T13352, head e1493c7):
+    16:44:25Z sweep.disposed acted=true, dispatching the fix rung to repair the PR body (blocker plan-proof-unrunnable).
+    16:54:37Z and 17:00:19Z sweep.disposed acted=false: "duplicate fix-dispatch key (W1-T13352@e1493c7...) already claimed
+    this pass — a concurrent sweep is already dispatching this PR's fix rung". All three rows are from the same daemon
+    (pid 151, run DAEMON-1794931579534-7), on different passes, so the reason text is false.
+    17:01:44Z sweep.fix_capacity for run work-fix-dispatch-W1-T13352-1794933172319 (epoch = 16:32:52Z): the child started
+    about 29 minutes after its envelope, with 5 of 8 workers active and pressure tier fits. No row between 16:44 and 17:01
+    shows the child queued, spawned or refused. The operator merged #19122 by hand at 17:01:01Z.
+    OBSERVED at origin/main 43941cf: claimFixDispatch in src/lib/sweep.ts refuses when inFlightFixKeys has the key and
+    falls back to the "already claimed this pass" literal when detachedFixHolder finds no holder. hostFixDispatch hands the
+    key to the work host's registry, which holds it until the child settles.
+    INFERRED, not traced line by line: the key stays claimed while the host child waits in the host queue, and nothing
+    registers that wait as a holder or bounds it.
+  design: |
+    1. Record a host-queued holder when hostFixDispatch queues a child (run id, queued-at), ledger it as one row, and let
+       detachedFixHolder report it ("queued on the work host since T, run R").
+    2. Bound the queued wait (a named constant, an order of magnitude above a normal admission wait); past it, release the
+       key, ledger the release with the wait, and cancel or orphan-mark the queued child so it cannot also run.
+    3. Keep the "already claimed this pass" literal for a claim made earlier in the same pass only.
+    INVARIANT same-pass-race-unchanged: a same-pass duplicate claim is refused exactly as today.
+  falsifier: |
+    At origin/main, a fixture that queues a host fix child and runs two more sweep passes before it starts logs the
+    "already claimed this pass" reason on both and never releases the key.
+  note: |
+    Reserved with rmd next-task-id --count 2 --branch claude/project-thread-7ycldf on the operator's Mac mini
+    (2026-11-17 17:04Z).
