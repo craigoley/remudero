@@ -92,6 +92,7 @@ export type LintCheck =
   | "proof-unit-test-base-wrapper"
   | "proof-test-only-discrimination"
   | "new-shard-rule-suite"
+  | "human-only-report"
   | "shard-shape"
   | "unminted-task-id"
   | "superseded-by"
@@ -1758,6 +1759,37 @@ export function proofTestOnlyDiscriminationViolations(task: Task): LintViolation
         "the build cannot go green without a plan amendment (W1-T5527 #9103, W1-T5622 #9120). Add a " +
         "`grep:` criterion on a line the new test file introduces, which misses at base, and mark the " +
         "census/preservation criterion `kind: guard`.",
+    },
+  ];
+}
+
+/** W1-T13439 — A REPORT ONLY A PERSON CAN VERIFY NEVER MERGES ITSELF. A new verify: human shard whose every proof is
+ *  `demonstration:` and every file is under docs/ gives remudero-review nothing to execute: it posts success CAPPED
+ *  (0 proofs executed) and decideAutoMergeArm never arms, so the operator merges by hand (#19122, W1-T13352,
+ *  2026-11-17). Refused at filing unless the prose says `NO-AUTO-VERIFY: <reason>`; existing backlog is untouched. */
+export function humanOnlyReportViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
+  const isNew = opts.riskTransition
+    ? opts.riskTransition.baseTask === undefined
+    : opts.postMergeAmendment !== undefined &&
+      opts.postMergeAmendment.baseTask === undefined &&
+      opts.baseAcceptance !== undefined;
+  if (!isNew || task.verify !== "human") return [];
+  const proofs = (task.acceptance ?? []).filter((c) => !c.satisfied_by).map((c) => (c.proof ?? "").trim());
+  const files = task.files ?? [];
+  if (proofs.length === 0 || !proofs.every(isDemonstrationProof)) return [];
+  if (files.length === 0 || !files.every((f) => f.startsWith("docs/"))) return [];
+  const prose = [task.rationale, task.note, task.prompt, (task as Task & { design?: string }).design].join("\n");
+  if (/^[ \t]*NO-AUTO-VERIFY:[ \t]*\S/m.test(prose)) return [];
+  const reportPath = files.find((f) => f.endsWith(".md")) ?? files[0]!;
+  return [
+    {
+      check: "human-only-report",
+      severity: "block",
+      message:
+        `task ${task.id} is verify: human with only \`demonstration:\` proofs over docs/ files, so remudero-review executes ` +
+        "0 proofs (CAPPED) and auto-merge never arms: the operator must merge it by hand (#19122). File it verify: auto " +
+        `with \`grep:\` proofs over the report's own lines, one physical line each, e.g. \`grep: ^## Recommendation$ in ${reportPath}\`; ` +
+        "or keep the human gate and say why on a `NO-AUTO-VERIFY: <reason>` line in the rationale",
     },
   ];
 }
@@ -3771,6 +3803,7 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   violations.push(...proofUnitTestBaseWrapperViolations(task, opts));
   violations.push(...proofTestOnlyDiscriminationViolations(task));
   violations.push(...newShardRuleSuiteViolations(task, opts));
+  violations.push(...humanOnlyReportViolations(task, opts));
   violations.push(...postMergeAmendmentViolations(task, opts));
   violations.push(...blockedDispositionViolations(task, opts));
   violations.push(...needsInputViolations(task));
