@@ -189,6 +189,8 @@ import {
   accountIdleLaneMinutes,
   chargeRestartGap,
   idleLaneCauseForStep,
+  selectionHoldForStep,
+  selectionRefusalReason,
   idleLaneStateChanged,
   lastIdleLaneRecord,
   newIdleLaneAccount,
@@ -4529,6 +4531,10 @@ export async function runDaemon(
             : String(fields?.reason),
         } : undefined;
     }
+    // W1-T10423: a refill that selection left empty names the refusal it logged, so the slot is not `:unnamed`.
+    if (idleLaneTickHold === undefined && (cause === undefined || cause === "selection_empty")) {
+      idleLaneTickHold = selectionHoldForStep(step, fields);
+    }
     livenessPulse?.note(step);
   };
   // W1-T8235: the hold behind a pause-type cause as the PAUSE flag recorded it. The flag carries a setter pid and a
@@ -7994,6 +8000,10 @@ export async function runDaemon(
     // idle emitted about 390 bare idle lines and zero dispatch rows: the record could not distinguish
     // "starved of work" from "everything filtered". Nothing about what is eligible changes.
     const idleReasons = tallyDispatchFilters();
+    // W1-T10423: what selection itself refused this tick beyond the filter tally, so an empty pick names its reason.
+    const tickPassedOver = new Set<string>();
+    const tickDeferredForPriority = new Set<string>();
+    const tickOpenPr = new Set<string>();
     // W1-T8676: every release the latch projects leaves its row, once per blocking run.
     const independentBlockReleasesThisPass = deps.independentBlockReleases?.() ?? new Map<string, IndependentBlockRelease>();
     for (const [taskId, release] of independentBlockReleasesThisPass) {
@@ -8034,9 +8044,9 @@ export async function runDaemon(
       );
       const tickMachineShareRows = await machineShareRowsFor(tickLedgerLines);
       const dispatchOpts: NextRunnableOpts = {
-      onPassedOver: observePassedOver("tick"),
+      onPassedOver: (task, detail) => { tickPassedOver.add(task.id); observePassedOver("tick")(task, detail); },
       priorityBackfill,
-      onDeferredForPriority: logPriorityDeferral,
+      onDeferredForPriority: (d) => { tickDeferredForPriority.add(d.task.id); logPriorityDeferral(d); },
       onPriorityReservationReleased: logPriorityRelease,
       dispatchValueContext: deps.buildDispatchValueContext?.(planForBatch, isMerged),
       machineShare: machineShareFor(planForBatch, tickMachineShareRows),
@@ -8081,7 +8091,7 @@ export async function runDaemon(
       releasedIds: tickReleases.ids,
       // In-flight: a legible skip on console and ledger; the daemon keeps polling rather than treating an
       // open PR as a block (W1-T80).
-      onSkip: (t, prNumber) => log("dispatch.skipped", { task: t.id, reason: "open-pr", pr_number: prNumber }),
+      onSkip: (t, prNumber) => { tickOpenPr.add(t.id); log("dispatch.skipped", { task: t.id, reason: "open-pr", pr_number: prNumber }); },
       // Wrap the injected reader so a failed or indeterminate live read is ledgered here, distinct from an
       // un-wired site that never calls it. It still resolves the same either way, so the fail-open contract
       // is unchanged (W1-T177).
@@ -8302,7 +8312,18 @@ export async function runDaemon(
           0,
         );
         const queuedUnmerged = planForBatch.tasks.filter((t) => t.status === "queued" && !isMerged(t.id)).length;
-        sampleIdleLane(0, true, Math.max(0, queuedUnmerged - filtered));
+        const dispatchableNow = Math.max(0, queuedUnmerged - filtered);
+        // W1-T10423: selection ran, found nothing, and work was dispatchable: record WHY as the hold. A cause another
+        // layer already named this tick (and its hold) stands.
+        if (dispatchableNow > 0 && idleLaneTickCause === undefined && idleLaneTickHold === undefined) {
+          const refused: Record<string, number> = { "passed-over-for-overlap": tickPassedOver.size, "priority-deferred": tickDeferredForPriority.size, "open-pr": tickOpenPr.size };
+          for (const r of Object.keys(filteredTally) as Array<keyof typeof filteredTally>) {
+            if (r !== "already-merged") refused[r] = filteredTally[r].count;
+          }
+          const reason = selectionRefusalReason(refused, "no disjoint runnable task within the lane budget");
+          if (reason !== undefined) idleLaneTickHold = { reason };
+        }
+        sampleIdleLane(0, true, dispatchableNow);
       }
       // Cadence: on change, not every tick. The idle row still fires every poll and is byte-compatible with
       // before. The reasons ride a separate step, emitted only when the picture actually changes — logging
