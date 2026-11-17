@@ -12,6 +12,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
+// @ts-ignore the executable .mjs module has no declaration file.
+import { PRECHECK_PATH_TRIGGERED_SUITES } from "#scripts/census-precheck.mjs";
 
 const WORKFLOWS = join(REPO_ROOT, ".github", "workflows");
 
@@ -37,4 +39,18 @@ test("W1-T13353 criterion 2: the census reads quoted and unquoted labels and fla
   const labels = runsOnLabels(sample);
   assert.deepEqual(labels, [{ line: 3, label: "ubuntu-latest" }, { line: 5, label: "ubuntu-26.04" }, { line: 7, label: "macos-latest" }]);
   assert.deepEqual(labels.filter((l) => /-latest\b/.test(l.label)).map((l) => l.line), [3, 7]);
+});
+
+test("W1-T13353: the author precheck runs this census only for a workflow whose head text carries a -latest label", () => {
+  type Row = { testFile: string; trigger: (input: { changed: string[]; readHead?: (p: string) => string | null }) => boolean };
+  const row = (PRECHECK_PATH_TRIGGERED_SUITES as Row[]).find((r) => r.testFile === "test/rules/every-workflow-job-runs-on-a-pinned-runner-image.test.ts");
+  assert.ok(row, "the census has a PRECHECK_PATH_TRIGGERED_SUITES row");
+  const ci = ".github/workflows/ci.yml";
+  const head = (text: string) => (p: string) => (p === ci ? text : null);
+  assert.equal(row.trigger({ changed: [ci], readHead: head("jobs:\n  a:\n    runs-on: ubuntu-latest\n") }), true);
+  assert.equal(row.trigger({ changed: [ci], readHead: head("jobs:\n  a:\n    runs-on: ubuntu-26.04\n") }), false);
+  assert.equal(row.trigger({ changed: [ci], readHead: () => null }), false, "a deleted workflow carries no label");
+  assert.equal(row.trigger({ changed: [ci] }), false, "a caller without a head reader starts no child");
+  assert.equal(row.trigger({ changed: ["scripts/census-precheck.mjs"] }), true);
+  assert.equal(row.trigger({ changed: ["src/lib/x.ts"], readHead: head("runs-on: ubuntu-latest") }), false);
 });

@@ -113,9 +113,8 @@ test("W1-T5617: an untouched admitted population starts no admitted child", () =
   }) as Found;
   assert.deepEqual(empty, { violations: [], unmeasured: null });
   assert.deepEqual([loads, runs], [0, 0]);
-  // Control: a joined population IS run through the same seam. W1-T13353: a .github/workflows/ path also joins the
-  // pinned-runner path suite, so the control uses another .github/ file the WORKFLOWS stand-in walks.
-  assert.equal(evaluate([".github/dependabot.yml"], [BOUNDS, WORKFLOWS], runSuites).violations.length, 1);
+  // Control: a joined population IS run through the same seam.
+  assert.equal(evaluate([".github/workflows/ci.yml"], [BOUNDS, WORKFLOWS], runSuites).violations.length, 1);
   assert.equal(runs, 1);
 });
 
