@@ -243,9 +243,9 @@ test("coverage entry refuses a shard whose file process exited 0 before its own 
   }
 });
 
-test("coverage shard scheduling is CPU-bounded and capped at eight while CI runs twelve shards (W1-T13270)", () => {
+test("coverage shard scheduling is CPU-bounded while the shard count stays CI's twelve (W1-T13270)", () => {
   assert.equal(CI_COVERAGE_SHARD_COUNT, 12);
-  assert.equal(coverageShardConcurrency(16), 8, "a local run keeps its eight concurrent shards");
+  assert.equal(coverageShardConcurrency(16), 12);
   assert.equal(coverageShardConcurrency(8), 8);
   assert.equal(coverageShardConcurrency(4), 4);
   assert.equal(coverageShardConcurrency(2), 2);
