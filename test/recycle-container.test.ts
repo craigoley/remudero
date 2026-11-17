@@ -69,6 +69,8 @@ const DECLARED_RUNTIME_FIXTURE: Record<string, string> = {
   RMD_INSTANCE_REGISTRY: "/fixture/legacy-catalog.yaml",
   RMD_INSTANCE_REGISTRY_DIGEST: "a".repeat(64),
   RMD_INSTANCE_REGISTRY_FILE_BINDING: "b".repeat(64),
+  // W1-T13437: the spawn helper's off switch, so an operator's `off` survives a recycle.
+  RMD_SPAWN_HELPER: "off",
 };
 
 /** The image env plus every declared runtime var at its fixture value, one override or drop applied. */
@@ -2024,7 +2026,7 @@ test("W1-T1069: MUTANT: a fallback array edited out of sync with deploy/runtime-
   // Proves the consistency test above actually discriminates, rather than passing on any six names.
   const recycleSrc = readFileSync(SCRIPT, "utf8");
   const mutated = recycleSrc.replace(
-    "RMD_DAEMON_RUNTIME_ENV_VARS=(GH_TOKEN RMD_RESTART_THROTTLE_S RMD_FRESHNESS_RESTART_MAX GH_APP_ID GH_APP_INSTALLATION_ID GH_APP_PRIVATE_KEY_PATH RMD_GIT_AUTHOR_NAME RMD_GIT_AUTHOR_EMAIL NODE_OPTIONS RMD_OPENWEIGHT_API_KEY RMD_CASH_EASTUS_API_KEY RMD_FOUNDRY_CLAUDE_ENDPOINT RMD_FOUNDRY_CLAUDE_API_KEY RMD_INSTANCE_REGISTRY RMD_INSTANCE_REGISTRY_DIGEST RMD_INSTANCE_REGISTRY_FILE_BINDING)",
+    "RMD_DAEMON_RUNTIME_ENV_VARS=(GH_TOKEN RMD_RESTART_THROTTLE_S RMD_FRESHNESS_RESTART_MAX GH_APP_ID GH_APP_INSTALLATION_ID GH_APP_PRIVATE_KEY_PATH RMD_GIT_AUTHOR_NAME RMD_GIT_AUTHOR_EMAIL NODE_OPTIONS RMD_OPENWEIGHT_API_KEY RMD_CASH_EASTUS_API_KEY RMD_FOUNDRY_CLAUDE_ENDPOINT RMD_FOUNDRY_CLAUDE_API_KEY RMD_INSTANCE_REGISTRY RMD_INSTANCE_REGISTRY_DIGEST RMD_INSTANCE_REGISTRY_FILE_BINDING RMD_SPAWN_HELPER)",
     "RMD_DAEMON_RUNTIME_ENV_VARS=(GH_TOKEN RMD_RESTART_THROTTLE_S)",
   );
   assert.notEqual(mutated, recycleSrc, "the mutation target must actually be present and unique");
