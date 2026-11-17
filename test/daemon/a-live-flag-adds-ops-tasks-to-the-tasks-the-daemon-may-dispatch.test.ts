@@ -450,7 +450,7 @@ test("W1-T12209 criterion 5: rejected refresh remains unreadable using the real 
   const feed = opsCatalogShadowFeed({ refresh: async () => { throw new Error(PRIVATE); } });
   assert.equal(feed.current(), undefined);
   await delay(0);
-  assert.deepEqual(feed.forDispatch(), { outcome: "unreadable" });
+  assert.deepEqual(feed.forDispatch(), { outcome: "unreadable", refusalStage: "source_refresh" });
   assert.doesNotMatch(JSON.stringify(feed.forDispatch()), new RegExp(PRIVATE));
 });
 
