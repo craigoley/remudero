@@ -13,6 +13,7 @@ import { syncBuiltinESMExports } from "node:module";
 import { basename, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { pathToFileURL } from "node:url";
+import type { Worker } from "node:worker_threads";
 import zlib, { gunzipSync, gzipSync } from "node:zlib";
 
 import type { Config } from "#src/lib/config.js";
@@ -287,10 +288,32 @@ test("W1-T13333 criterion 4: invariant:a-crash-leaves-a-readable-ledger — a pa
     hooks: (fx) => buildLedgerCompactionDaemonHooks({ config: fx.config, compact: (rest, deps) => ledgerCompactCommand(rest, { ...deps, fs: cutFs(cut) }) }),
     error: /^rmd ledger-compact: apply failed — fixture: the file writes stopped at /,
   });
-  // A pass held before its first output, which the parent terminates at its bound.
-  const boundEntry = workerAt(t, "gunzip", "hold");
+  // A pass held before its first output, whose thread this test terminates from outside, as a stopping daemon does.
+  const heldEntry = workerAt(t, "gunzip", "hold");
+  const terminated = (fx: ReturnType<typeof world>): ReturnType<typeof buildLedgerCompactionDaemonHooks> => {
+    const hooks = buildLedgerCompactionDaemonHooks({ config: fx.config, worker: { workerUrl: heldEntry.url } });
+    const runLedgerCompaction = async (): ReturnType<typeof hooks.runLedgerCompaction> => {
+      let thread: Worker | undefined;
+      const onThread = (message: unknown): void => { thread = (message as { worker: Worker }).worker; };
+      subscribe("worker_threads", onThread);
+      try {
+        let settled = false;
+        const pass = hooks.runLedgerCompaction().then((outcome) => ({ outcome }), (error: unknown) => ({ error })).finally(() => { settled = true; });
+        await until(() => existsSync(heldEntry.held), () => settled);
+        assert.equal(settled, false, "the pass is held when its thread is terminated");
+        assert.ok(thread, "the test holds the handle of the worker thread");
+        await thread.terminate();
+        const result = await pass;
+        if ("error" in result) throw result.error;
+        return result.outcome;
+      } finally {
+        unsubscribe("worker_threads", onThread);
+      }
+    };
+    return { ...hooks, runLedgerCompaction };
+  };
   const cuts: Cut[] = [
-    { label: "terminated at the bound before any output", hooks: (fx) => buildLedgerCompactionDaemonHooks({ config: fx.config, worker: { workerUrl: boundEntry.url, boundMs: 1500 } }), error: /^the ledger compaction worker passed its 1500 ms bound$/, outputs: 0, moved: 0 },
+    { label: "the worker thread terminated from outside before any output", hooks: terminated, held: heldEntry.held, error: /^the ledger compaction worker exited with code 1 before it reported$/, outputs: 0, moved: 0 },
     { label: "the worker ended before any output", ...ended("gzip"), outputs: 0, moved: 0 },
     { label: "the worker ended after the outputs and before the moves", ...ended("cold-dir"), outputs: 2, moved: 0 },
     { label: "the worker ended part-way through the moves", ...ended("second-move"), outputs: 2, moved: 1 },
