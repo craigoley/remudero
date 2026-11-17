@@ -60,10 +60,11 @@ Fleet-PR commit result: 104 unique `cao825` commits, 6 automation, 98 person/ses
 searched fleet-authored PRs updated 2026-11-09 through 2026-11-17, then filtered commit timestamps to
 the stated window and deduplicated by commit SHA. It returned 465 PRs. The three PRs with more than
 20 commits (#18305, #18033, #17804) were read through their full 65, 23 and 21 commits. The 104
-commit SHAs were joined against the Mac ledger's `pushed_head_sha` rows (9 rows, 8 unique SHAs);
-6 matched a fleet PR commit and are automation. The other 98 had no matching automated push row and
-are person/session commits. The 6 automation matches are the evidence a GitHub login alone cannot
-provide.
+commit SHAs were joined against all Mac ledger push rows. `rmd ledger-grep pushed` found 9 `fix.done`
+rows with `pushed_head_sha` (8 unique SHAs) and no `main-repair.pushed` or `alert-fix.pushed` step in
+the window; 6 SHAs matched a fleet-PR commit and are automation. The other 98 had no matching
+automated push row and are person/session commits under this attribution rule. The 6 automation
+matches are the evidence a GitHub login alone cannot provide.
 
 The task record's earlier OBSERVED figures of 105 dedup observation comments and 13 refreshes cover
 2026-11-01 onward (16 days), not this seven-day window.
