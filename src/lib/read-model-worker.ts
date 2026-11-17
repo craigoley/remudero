@@ -5,6 +5,7 @@
  * once at construction for warm boot; requests never open SQLite.
  * Loaded in both threads: `workerData.kind` gates {@link runReadModelWorker}, also testable in-process.
  */
+import { threadName } from "./thread-names.js";
 import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { closeSync, constants, existsSync, fstatSync, openSync, readdirSync, readFileSync, statSync } from "node:fs";
@@ -36,7 +37,7 @@ import { createTaskView, type ReadModelInstanceState as TaskViewInstanceState } 
 import { planFilesIdentity, threadPlanPin } from "./thread-plan.js";
 import { createWorkstreamsView, WORKSTREAMS_VIEW_NAME } from "./workstreams-view.js";
 import { ACTIONS_VIEW_NAME, createActionsView } from "./actions-view.js";
-import { createDemandBook, TASK_VIEW_NAME, type DemandBook } from "./view-demand.js";
+import { createDemandBook, TASK_VIEW_NAME, VIEW_DEMAND_EVICT_MS, type DemandBook } from "./view-demand.js";
 import {
   ORACLE_DEFAULT_WINDOW_MS,
   ORACLE_DRIFT_INTERVAL_MS,
@@ -296,6 +297,8 @@ export interface ReadModelViewContext {
   switches?: ReadModelSwitches;
   /** Each shadowed view's diff counters and cutover readiness (view-shadow.ts). */
   shadow?: ShadowReadiness[];
+  /** W1-T13457: the body the home store last committed for a view's key, so a view can carry it across a restart instead of publishing a warming one over it. */
+  committed?(view: string, key: string): ViewBody | undefined;
 }
 
 /** A view the worker materializes. `materialize` returns one body per key (`""` when unkeyed). */
@@ -441,6 +444,11 @@ export const READ_MODEL_VIEW_READERS: ReadModelViewReaders = {
     { consumer: NAV_BADGE_VIEW_NAME, reader: "needs-you-view.ts withNeedsYouView; serve.ts navBadgeWithDecisions", view: NAV_BADGE_VIEW_NAME },
   ],
   [OPERATOR_AGENT_ROWS_VIEW]: [{ consumer: "the operator agent", reader: "operator-agent-read-model.ts createOperatorAgentRowsSource: legacy only on an explicit off" }],
+  // W1-T13455: served with no switch entry, so the worker builds its demanded keys with none either.
+  [INBOX_THREAD_VIEW_NAME]: [{ consumer: "GET /v1/views/inbox-thread", reader: "serve.ts servedByDefault" }],
+  // W1-T13455: served by default since W1-T13282, but never rebuilt with no switch entry: on 2026-11-17 the Console read
+  // an agent body built from the ledger of 2026-11-10 (stale for 7 days).
+  [AGENT_VIEW_NAME]: [{ consumer: "GET /v1/views/agent", reader: "serve.ts servedByDefault" }],
 };
 
 function readModelViewRead(view: string, switches: ReadModelSwitches, readers: ReadModelViewReaders, seen: Set<string>): boolean {
@@ -528,6 +536,8 @@ export interface ReadModelTickerOptions {
   readers?: ReadModelViewReaders;
   lane?: "fast" | "heavy";
   restoreCosts?: boolean;
+  /** W1-T13490: how long an earlier run's demand keys are carried before an unread one is dropped; one eviction window by default. */
+  demandCarryMs?: number;
 }
 
 export interface IntegrityRequest {
@@ -566,7 +576,7 @@ export function threadIntegrityCheck(workerUrl?: URL): NonNullable<ReadModelTick
   const spawnIntegrityCheck: NonNullable<ReadModelTickerOptions["integrityCheck"]> = (request, done) => {
     let settled = false;
     let failure = "";
-    const thread = startWorker(import.meta.url, { workerData: { kind: READ_MODEL_INTEGRITY_KIND, request } }, { override: workerUrl });
+    const thread = startWorker(import.meta.url, { name: threadName("readModelIntegrity"), workerData: { kind: READ_MODEL_INTEGRITY_KIND, request } }, { override: workerUrl });
     thread.unref();
     thread.on("message", (result: IntegrityResult) => {
       settled = true;
@@ -601,7 +611,7 @@ export function answerReadModelIssueRequest(request: ReadModelIssueRequest, issu
 export function threadIssueRequest(workerUrl?: URL): (request: ReadModelIssueRequest) => Promise<ReadModelIssueAnswer> {
   return (request) => new Promise((resolve) => {
     let failure = "";
-    const thread = startWorker(import.meta.url, { workerData: { kind: READ_MODEL_ISSUE_KIND, request } }, { override: workerUrl });
+    const thread = startWorker(import.meta.url, { name: threadName("readModelIssue"), workerData: { kind: READ_MODEL_ISSUE_KIND, request } }, { override: workerUrl });
     thread.unref();
     thread.on("message", (answer: ReadModelIssueAnswer) => resolve(answer));
     thread.on("error", (error) => void (failure = `: ${error.message}`));
@@ -668,7 +678,7 @@ export function threadOracle(opts: { workerUrl?: URL; escalationRepository?: str
   };
   const spawnOracle = (): Worker => {
     const data: ReadModelOracleData = { kind: READ_MODEL_ORACLE_KIND, ...(opts.escalationRepository ? { escalationRepository: opts.escalationRepository } : {}) };
-    const spawned = startWorker(import.meta.url, { workerData: data, env: SHARE_ENV, resourceLimits: { maxOldGenerationSizeMb: READ_MODEL_ORACLE_HEAP_MB } }, { override: opts.workerUrl });
+    const spawned = startWorker(import.meta.url, { name: threadName("readModelOracle"), workerData: data, env: SHARE_ENV, resourceLimits: { maxOldGenerationSizeMb: READ_MODEL_ORACLE_HEAP_MB } }, { override: opts.workerUrl });
     spawned.unref();
     spawned.on("message", (msg: { type?: string; id?: number; result?: OracleSliceResult }) => {
       if (msg.type === "done" && msg.id === pending?.id) settle(msg.result!);
@@ -1512,6 +1522,12 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
 
   const demandViews = views.filter((view) => view.demand === true).map((view) => view.name);
   const demandSwept = new Set<ViewUnit>();
+  /**
+   * W1-T13490: until one eviction window has passed since this worker started, an earlier run's persisted demand key
+   * is carried, not dropped: serve keeps answering it (stale, by W1-T13457's carried rule), and a read in the window
+   * wants it like any other. The first sweep after the window drops what nobody read.
+   */
+  const demandCarriedUntil = clock.now() + (opts.demandCarryMs ?? VIEW_DEMAND_EVICT_MS);
 
   function demandKeyBelongsTo(unit: ViewUnit, key: string): boolean {
     const instances = new URLSearchParams(key).getAll("instance");
@@ -1520,7 +1536,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   }
 
   /**
-   * Evict demand keys unread ten minutes; first sweep also drops earlier runs' persisted keys
+   * Evict demand keys unread ten minutes; the first sweep after the carry window (W1-T13490) drops earlier runs' persisted keys
    * for owned units only. Transferred units get their own first sweep.
    */
   function sweepDemand(): void {
@@ -1533,7 +1549,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       for (const { view, key } of book.expire()) {
         if (owned.some(unit => unit.view.name === view && demandKeyBelongsTo(unit, key))) drop(view, key);
       }
-      const starting = owned.filter(unit => !demandSwept.has(unit));
+      const starting = clock.now() < demandCarriedUntil ? [] : owned.filter(unit => !demandSwept.has(unit));
       for (const unit of starting) demandSwept.add(unit);
       for (const view of new Set(starting.map(unit => unit.view.name))) {
         for (const key of knownKeys(view)) {
@@ -1845,7 +1861,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     const home = slots[0]?.db;
     const shadow = home ? comparator?.db === home && slots[0]?.lease !== undefined ? comparator.shadow.readiness()
       : storedShadowReadiness(viewShadowPath(opts.stateDir), home, now, qualifications, inboxPopulations, inboxPopulations ? [INBOX_VIEW_NAME] : undefined) : undefined;
-    const ctx: ReadModelViewContext = { now, switches, ...(home ? { sourceStore: home } : {}), instances: slots.map((slot) => ({ state: slot.state, ...(slot.db ? { db: slot.db } : {}), ...(slot.lease ? { lease: slot.lease } : {}) })), ...(shadow ? { shadow } : {}) };
+    const ctx: ReadModelViewContext = { now, switches, ...(home ? { sourceStore: home, committed: (view: string, key: string) => committedBody(home, view, key) } : {}), instances: slots.map((slot) => ({ state: slot.state, ...(slot.db ? { db: slot.db } : {}), ...(slot.lease ? { lease: slot.lease } : {}) })), ...(shadow ? { shadow } : {}) };
     const generation = slots.reduce((sum, slot) => sum + slot.state.generation, 0);
     if (only) return build(only, now, ctx, generation, soloMs);
     const left = passMs - (clock.now() - tickStart);
@@ -2448,8 +2464,8 @@ export function threadViews(opts: {
   };
 }
 
-const spawnViews = (override: URL | undefined, data: ReadModelViewsData): Worker => startWorker(import.meta.url, { workerData: data, env: SHARE_ENV }, { override });
-const spawnHeavyViews = (override: URL | undefined, data: ReadModelViewsData): Worker => startWorker(import.meta.url, { workerData: data, env: SHARE_ENV }, { override });
+const spawnViews = (override: URL | undefined, data: ReadModelViewsData): Worker => startWorker(import.meta.url, { name: threadName("readModelViews"), workerData: data, env: SHARE_ENV }, { override });
+const spawnHeavyViews = (override: URL | undefined, data: ReadModelViewsData): Worker => startWorker(import.meta.url, { name: threadName("readModelHeavyViews"), workerData: data, env: SHARE_ENV }, { override });
 
 export interface ReadModelWorkerData {
   catalogBridgeVersion?: number;
@@ -2622,6 +2638,24 @@ function storedBodyQualification(raw: string | undefined, etag: string): { quali
     return { reason: "stored qualification metadata is not valid JSON" };
   }
 }
+
+/** W1-T13457: one key's last committed body in `db`, or undefined when none is stored or it cannot be read. */
+export function committedBody(db: ReadModelDb, view: string, key: string): ViewBody | undefined {
+  try {
+    const row = db.prepare("SELECT body FROM view_body WHERE view = ? AND key = ?").get(view, key);
+    return row === undefined ? undefined : JSON.parse(String(row.body)) as ViewBody;
+  } catch (error) {
+    // deliberate: no readable committed body means nothing to carry; the view builds as on a first boot.
+    void error;
+    return undefined;
+  }
+}
+
+/** W1-T13457: why a body carried across a restart reads stale until this run's worker posts its key. */
+export const CARRIED_BODY_REASON = "carried across a serve restart: this body was committed before serve started, and the read-model worker has not rebuilt it yet";
+
+/** W1-T13457: the source a carried body with no sources of its own is marked stale by. */
+export const CARRIED_BODY_SOURCE = "read-model:carried";
 
 /** The last committed bodies, read once at construction through a read-only connection. */
 export function loadCommittedViewBodies(stateDir: string, home: string, nowMs = systemClock.now()): { bodies: ReadModelBodyEntry[]; reason?: string; inboxPopulation?: ShadowPopulation; inboxQualificationReason?: string } {
@@ -3026,7 +3060,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       ...(opts.modelApprovalConfig ? { modelApprovalConfig: opts.modelApprovalConfig } : {}),
     };
     // SHARE_ENV, as on every long-lived thread here: escalations need serve's refreshed GH_TOKEN (#9156).
-    const spawned = startWorker(import.meta.url, { workerData: data, env: SHARE_ENV }, { override: opts.workerUrl });
+    const spawned = startWorker(import.meta.url, { name: threadName("readModel"), workerData: data, env: SHARE_ENV }, { override: opts.workerUrl });
     signal = new Int32Array(shared);
     worker = spawned;
     heardAt = clock.now();
@@ -3060,24 +3094,37 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
     });
   };
 
+  const judgeSources = (sources: readonly ViewSource[], now: number, body?: { view: string; key: string }): ViewSource[] => sources.map((source) => {
+    const own = body ? bodyReadings.get(readModelBodyKey(body.view, body.key))?.get(source.name) : undefined;
+    const declaredReads = body ? ledgerReads.get(body.view)?.[source.name] : undefined;
+    const read = body ? (declaredReads !== undefined ? own ?? source : newerReading(source, own)) : undefined;
+    if (!source.name.startsWith(LEDGER_SOURCE_PREFIX)) return judgeSource(read ?? sourceClocks.get(source.name) ?? source, now);
+    const instance = source.name.slice(LEDGER_SOURCE_PREFIX.length);
+    const state = instances.get(instance);
+    if (state?.tickedAt !== undefined) return read ? builtLedgerSource(read, state, now, undefined, declaredReads) : ledgerSource(state, now);
+    const committed = committedAt.get(instance);
+    if (committed !== undefined && now - committed <= READ_MODEL_LEDGER_STALE_MS) {
+      return describeSource({ name: source.name, asOf: source.asOf, state: "fresh", lagMs: Math.max(0, now - committed) });
+    }
+    return state ? ledgerSource(state, now) : { ...describeSource(source), state: "stale", phase: "warming", reason: "read model warming: this body was committed before serve started" };
+  });
+
   const handle: ReadModelWorkerHandle = {
     bodies,
     state: () => ({ ...(at === undefined ? {} : { at }), instances, switches, ...(warm.reason ? { warmBoot: warm.reason } : {}) }),
     body: (view, key = "") => bodies.get(readModelBodyKey(view, key)),
-    judge: (sources, now, body) => sources.map((source) => {
-      const own = body ? bodyReadings.get(readModelBodyKey(body.view, body.key))?.get(source.name) : undefined;
-      const declaredReads = body ? ledgerReads.get(body.view)?.[source.name] : undefined;
-      const read = body ? (declaredReads !== undefined ? own ?? source : newerReading(source, own)) : undefined;
-      if (!source.name.startsWith(LEDGER_SOURCE_PREFIX)) return judgeSource(read ?? sourceClocks.get(source.name) ?? source, now);
-      const instance = source.name.slice(LEDGER_SOURCE_PREFIX.length);
-      const state = instances.get(instance);
-      if (state?.tickedAt !== undefined) return read ? builtLedgerSource(read, state, now, undefined, declaredReads) : ledgerSource(state, now);
-      const committed = committedAt.get(instance);
-      if (committed !== undefined && now - committed <= READ_MODEL_LEDGER_STALE_MS) {
-        return describeSource({ name: source.name, asOf: source.asOf, state: "fresh", lagMs: Math.max(0, now - committed) });
-      }
-      return state ? ledgerSource(state, now) : { ...describeSource(source), state: "stale", phase: "warming", reason: "read model warming: this body was committed before serve started" };
-    }),
+    judge: (sources, now, body) => {
+      const judged = judgeSources(sources, now, body);
+      // W1-T13457 invariant stale-says-so: a body this run's worker has not posted was carried across a restart. Its
+      // ledger sources are stale until the worker posts that key: a lease the dead serve renewed seconds ago says when
+      // the store was last written, not that this serve's projector has read the rows since. A source with its own
+      // observation clock (a probe, a scope read) is still judged by that clock and budget.
+      if (!body || posted.has(readModelBodyKey(body.view, body.key))) return judged;
+      const carried = judged.map((source): ViewSource => source.state !== "fresh" || !source.name.startsWith(LEDGER_SOURCE_PREFIX) ? source
+        : { ...source, state: "stale", phase: "warming", reason: CARRIED_BODY_REASON });
+      // A body with no sources has no clock to mark; it still says it is carried.
+      return carried.length > 0 ? carried : [{ name: CARRIED_BODY_SOURCE, asOf: null, state: "stale", phase: "warming", reason: CARRIED_BODY_REASON }];
+    },
     reload: () => {
       const again = loadCommittedViewBodies(opts.stateDir, home, clock.now());
       inboxQualification = inboxIdentityFrom(again);

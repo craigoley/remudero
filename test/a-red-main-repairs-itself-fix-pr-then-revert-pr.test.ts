@@ -87,7 +87,7 @@ function fakeLane(revert: () => MainRepairRevertOutcome = () => ({ prUrl: REVERT
 interface World {
   head: string;
   ci: "failure" | "success";
-  prs: Map<string, { state: "open" | "closed"; merged: boolean; head: string }>;
+  prs: Map<string, { state: "open" | "closed"; merged: boolean; head: string; mergeCommit?: string }>;
   mutations: string[][];
   /** GitHub's read of the offending commit fails, so its diff stat cannot be named. */
   commitUnreadable?: boolean;
@@ -154,7 +154,7 @@ function rig(w: World, lane: MainRepairLane | undefined, ledgerPath: string, ove
     const pull = /^repos\/craigoley\/remudero\/pulls\/(\d+)$/.exec(path)?.[1];
     if (pull && w.prs.has(pull)) {
       const pr = w.prs.get(pull)!;
-      return { state: pr.state, merged: pr.merged, head: { sha: pr.head } };
+      return { state: pr.state, merged: pr.merged, head: { sha: pr.head }, ...(pr.mergeCommit ? { merge_commit_sha: pr.mergeCommit } : {}) };
     }
     throw new Error(`unrouted gh api call: ${args.join(" ")}`);
   }) as GhApiFetcher;
@@ -757,6 +757,111 @@ test("W1-T9583: a fix worker head passes head-identity-gate and worker-branch-sh
   } finally {
     origin.cleanup();
     seed.cleanup();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// W1-T13438 — a merged fix PR is judged only by a completed main run of a commit that contains its merge.
+const FIX_MERGE = "f1e7c0de".padEnd(40, "0");
+
+function mergedFixRig(w: World, lane: FakeLane, ledgerPath: string) {
+  const placed = { containsFix: false };
+  const logged: Array<{ step: string; fields: Record<string, unknown> }> = [];
+  const daemon = rig(w, lane, ledgerPath, {
+    mergeReader: {
+      prMerge: () => undefined,
+      prsMergedBetween: () => [],
+      mergeBase: (a, b) => (a === FIX_MERGE && b === w.head && placed.containsFix ? FIX_MERGE : GREEN),
+    },
+    log: (step: string, fields: Record<string, unknown> = {}) => void logged.push({ step, fields }),
+  });
+  return { daemon, placed, logged };
+}
+
+test("W1-T13438 criterion 1: a merged fix PR is never read as stalled while main's red is decided below its merge", async () => {
+  const root = tmpRoot();
+  const ledgerPath = join(root, "ledger.ndjson");
+  try {
+    const w = world();
+    const lane = fakeLane();
+    const { daemon, logged } = mergedFixRig(w, lane, ledgerPath);
+    await daemon.observe(); // locate + fix PR #10102
+    Object.assign(w.prs.get("10102")!, { state: "closed", merged: true, mergeCommit: FIX_MERGE });
+    for (let tick = 0; tick < 6; tick++) await daemon.observe(MAIN_REPAIR_STALL_MS);
+    assert.equal(lane.reverts.length, 0, "no revert while the only completed red run predates the fix's merge");
+    const waits = logged.filter((row) => row.step === "main.repair.fix_merged_awaiting_run");
+    assert.equal(waits.length, 1, "the wait is ledgered once per red reading, not once per tick");
+    assert.equal(waits[0]!.fields.merge_sha, FIX_MERGE);
+    assert.equal(waits[0]!.fields.decided_by_sha, HEAD);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T13438 criterion 2: a merged fix whose post-merge main run is still red reaches the revert rung", async () => {
+  const root = tmpRoot();
+  const ledgerPath = join(root, "ledger.ndjson");
+  try {
+    const w = world();
+    const lane = fakeLane();
+    const { daemon, placed } = mergedFixRig(w, lane, ledgerPath);
+    await daemon.observe();
+    Object.assign(w.prs.get("10102")!, { state: "closed", merged: true, mergeCommit: FIX_MERGE });
+    await daemon.observe(MAIN_REPAIR_STALL_MS);
+    assert.equal(lane.reverts.length, 0);
+    placed.containsFix = true; // main's completed red run is now of a commit that contains the merged fix
+    await daemon.observe();
+    assert.equal(lane.reverts.length, 1, "the post-merge red goes to the revert at once, with no stall window");
+    assert.match(lane.reverts[0]!.whyFixInsufficient, /merged as f1e7c0de0000, and main's completed run of a52dd2760000, which contains it, is still red/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T13438 criterion 3: an open fix PR with no new head still stalls into the revert exactly as before", async () => {
+  const root = tmpRoot();
+  const ledgerPath = join(root, "ledger.ndjson");
+  try {
+    const w = world();
+    const lane = fakeLane();
+    const { daemon } = mergedFixRig(w, lane, ledgerPath);
+    await daemon.observe();
+    await daemon.observe();
+    await daemon.observe();
+    await daemon.observe();
+    assert.equal(lane.reverts.length, 0, "inside the quiet window");
+    await daemon.observe(MAIN_REPAIR_STALL_MS);
+    assert.equal(lane.reverts.length, 1);
+    assert.match(lane.reverts[0]!.whyFixInsufficient, /no progress \(no new head, no merge\)/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T13438: a merge the lane cannot place is ledgered and waits; a merged PR with no merge sha keeps today's stall", async () => {
+  const root = tmpRoot();
+  const ledgerPath = join(root, "ledger.ndjson");
+  try {
+    const w = world();
+    const lane = fakeLane();
+    const logged: string[] = [];
+    const daemon = rig(w, lane, ledgerPath, {
+      mergeReader: { prMerge: () => undefined, prsMergedBetween: () => [], mergeBase: () => { throw new Error("HTTP 502"); } },
+      log: (step: string) => void logged.push(step),
+    });
+    await daemon.observe();
+    Object.assign(w.prs.get("10102")!, { state: "closed", merged: true, mergeCommit: FIX_MERGE });
+    await daemon.observe(MAIN_REPAIR_STALL_MS);
+    await daemon.observe(MAIN_REPAIR_STALL_MS);
+    assert.equal(lane.reverts.length, 0);
+    assert.ok(logged.includes("main.repair.fix_merge_unplaced"));
+
+    delete w.prs.get("10102")!.mergeCommit;
+    await daemon.observe();
+    await daemon.observe();
+    await daemon.observe(MAIN_REPAIR_STALL_MS);
+    assert.equal(lane.reverts.length, 1, "GitHub named no merge commit: the stall marker decides, as before");
+  } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });

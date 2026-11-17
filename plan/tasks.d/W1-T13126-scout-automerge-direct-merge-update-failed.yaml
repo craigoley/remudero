@@ -6,8 +6,9 @@
   verify: human
   risk: high
   band_meaning: blast-radius
-  priority: 3.95
-  status: queued
+  status: blocked
+  retirement: retired
+  # operator 2026-11-17T20:01Z (Inbox decision card, thread "Recommend decisions for waiting Inbox asks"): retire W1-T13126 — scout symptom with 2 ledger rows; too thin to act on.
   attempts: 0
   author_class: machine
   origin: "scout:automerge.direct_merge_update_failed"

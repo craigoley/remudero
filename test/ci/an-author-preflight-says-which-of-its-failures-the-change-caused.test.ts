@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { after, test } from "node:test";
+import { after, test, type TestContext } from "node:test";
 
 // @ts-ignore the executable .mjs module has no declaration file.
 import * as authorModule from "#scripts/preflight-author.mjs";
@@ -139,6 +139,80 @@ test("W1-T13215 criterion 1: a real merge base is checked out, the failing file 
   assert.equal(result.cleanup.removed, true);
   assert.equal(repo.git("worktree", "list").trim().split("\n").length, 1, "only the fixture's own worktree is left");
   rmSync(root, { recursive: true, force: true });
+});
+
+function checkoutDependencyFixture(t: TestContext,
+  layout: "primed" | "matching" | "foreign" | "tracked") {
+  const repo = gitRepo({ scope: t, kind: "author-attribution-hook", seedCommit: false });
+  const root = repo.dir;
+  const donor = join(root, "author-donor");
+  const file = "test/leaf.test.mjs";
+  mkdirSync(join(root, "test"));
+  writeFileSync(join(root, file), `import { readFileSync } from "node:fs";
+import { test } from "node:test";
+if (readFileSync("node_modules/marker", "utf8") === "author donor") {
+  test("red at both", () => { throw new Error("controlled base failure"); });
+}
+`);
+  repo.git("add", file);
+  if (layout === "tracked") {
+    mkdirSync(join(root, "node_modules"));
+    writeFileSync(join(root, "node_modules", "marker"), "tracked");
+    repo.git("add", "-f", "node_modules/marker");
+  }
+  repo.git("commit", "-m", "test: fixture base");
+  const base = repo.git("rev-parse", "HEAD");
+  mkdirSync(donor);
+  writeFileSync(join(donor, "marker"), "author donor");
+  const hooks = join(root, ".git", "hooks");
+  repo.git("config", "core.hooksPath", hooks);
+  const hook = layout === "primed" ? "mkdir node_modules && printf 'hook donor' > node_modules/marker"
+    : layout === "matching" ? 'ln -s "$RMD_ATTRIBUTION_FIXTURE_DONOR" node_modules'
+    : layout === "foreign" ? 'ln -s "$RMD_ATTRIBUTION_FIXTURE_FOREIGN" node_modules'
+    : ":";
+  writeFileSync(join(hooks, "post-checkout"), `#!/bin/sh\n${hook}\n`, { mode: 0o755 });
+  const foreign = join(root, "foreign-donor");
+  mkdirSync(foreign);
+  writeFileSync(join(foreign, "marker"), "foreign donor");
+  const git = (args: string[]) => spawnSync("git", args, { cwd: root, encoding: "utf8", env: {
+    ...process.env, RMD_ATTRIBUTION_FIXTURE_DONOR: donor, RMD_ATTRIBUTION_FIXTURE_FOREIGN: foreign,
+  } });
+  const run = (runBase: (run: Run) => Raw) => author.attributeFailures({
+    root, baseSha: base, headSha: base, failing: [{ file, title: "red at both" }],
+    headMs: 30_000, nodeModules: donor, git, runBase,
+    runnerArgs: (files: string[]) => ["--test", "--test-reporter=tap", ...files],
+  });
+  return { repo, run };
+}
+
+test("W1-T13469 reuses the author donor after the checkout hook populates the scratch base", (t) => {
+  for (const layout of ["primed", "matching"] as const) {
+    const fixture = checkoutDependencyFixture(t, layout);
+    let count = 0;
+    const result = fixture.run((run) => {
+      count++;
+      assert.equal(readFileSync(join(run.cwd, "node_modules", "marker"), "utf8"), "author donor");
+      return spawnSync(run.file, run.args, { cwd: run.cwd, encoding: "utf8", timeout: run.boundMs,
+        env: { ...process.env, NODE_V8_COVERAGE: "", NODE_TEST_CONTEXT: undefined } });
+    });
+    assert.equal(count, 1, JSON.stringify(result.tests));
+    assert.deepEqual(byTitle(result), { "red at both": "also-red" });
+    assert.equal(result.cleanup.removed, true);
+    assert.equal(fixture.repo.git("worktree", "list").split("\n").length, 1);
+  }
+});
+
+test("W1-T13469 refuses foreign or tracked destinations before running base tests", (t) => {
+  for (const layout of ["foreign", "tracked"] as const) {
+    const fixture = checkoutDependencyFixture(t, layout);
+    let count = 0;
+    const result = fixture.run(() => { count++; return ok(); });
+    assert.equal(count, 0);
+    assert.deepEqual(byTitle(result), { "red at both": "unattributed" });
+    assert.match(result.tests[0]!.reason, /dependency destination/);
+    assert.equal(result.cleanup.removed, true);
+    assert.equal(fixture.repo.git("worktree", "list").split("\n").length, 1);
+  }
 });
 
 test("W1-T13215 criterion 2: the base run is bounded by the head's time for the same files, with the stage's ceiling as the backstop", () => {

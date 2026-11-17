@@ -1,3 +1,4 @@
+import { threadName } from "./thread-names.js";
 import { SHARE_ENV, Worker } from "node:worker_threads";
 import childProcess from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
@@ -36,7 +37,8 @@ const STALL_PROFILE_CONSUMER = "loop_stall_profile";
 /** The shared spawn leaves: frames that only forward a spawn for someone else, so none is the caller. Declared
  *  once here: a module path, or plan.ts's named default runner (`loadPlanAtRef`'s `runGit` arrow). The names
  *  cover a single-file bundle, where every frame has the same file and the module path is lost (W1-T11795). */
-export const SYNC_SPAWN_LEAF_FRAME_NAMES: ReadonlySet<string> = new Set(["ghExecFile", "hostWorktreeGit", "vetPinnedConfig"]);
+export const SYNC_SPAWN_LEAF_FRAME_NAMES: ReadonlySet<string> = new Set(["ghExecFile", "gitSync", "hostWorktreeGit",
+  "runHostWorktreeGit", "vetPinnedConfig"]);
 
 export const SYNC_SPAWN_LEAF_FRAMES: readonly RegExp[] = [
   /[/\\]worktree-git\.[cm]?[jt]s/,
@@ -530,8 +532,8 @@ export function startReadPlane<I, O>(options: {
     // tsx's main-thread loader does not install itself in a worker's module loader (W1-T4075).
     // SHARE_ENV: the daemon's hourly GH_TOKEN refresh must reach the worker's reads.
     const held = options.spawn?.() ?? (options.workerUrl.pathname.endsWith(".ts")
-      ? new Worker(`const { workerData } = require('node:worker_threads'); import(${JSON.stringify(import.meta.resolve("tsx/esm/api"))}).then(({ register }) => { register(); return import(workerData.entry); });`, { eval: true, workerData, env: SHARE_ENV })
-      : new Worker(options.workerUrl, { workerData, env: SHARE_ENV }));
+      ? new Worker(`const { workerData } = require('node:worker_threads'); import(${JSON.stringify(import.meta.resolve("tsx/esm/api"))}).then(({ register }) => { register(); return import(workerData.entry); });`, { eval: true, name: threadName("readPlane"), workerData, env: SHARE_ENV })
+      : new Worker(options.workerUrl, { name: threadName("readPlane"), workerData, env: SHARE_ENV }));
     thread = held;
     held.on("message", (reply: { generation: number; facts?: O; error?: string; kind?: string; step?: string; extra?: Record<string, unknown> }) => {
       if (thread !== held) return;

@@ -1,0 +1,104 @@
+- id: W1-T13434
+  title: "A pinned git call's own child forks through the spawn helper: hostWorktreeGitAsync sends its git command, stdin included, as one helper request instead of forking from the daemon, so with the helper on no git leaf call pays the fork on the daemon loop (async forks held the loop 10,470 s on 2026-11-17)"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # every daemon git call (115 call sites) goes through this leaf; a wrong result or a re-run push after a helper death would corrupt a branch, so each failure must reject with the same error as the direct path and an in-flight request must never run twice
+  origin: "operator-session#loop-lag-2026-11-17"
+  plan_refs:
+    - W1-T9754
+    - W1-T11369
+    - W1-T13170
+    - W1-T6148
+  files:
+    - src/lib/worktree-git.ts
+    - test/daemon/a-pinned-git-call-forks-through-the-spawn-helper.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "With a spawn helper installed, hostWorktreeGitAsync runs both the pinned config read and the git command itself through the helper: the helper gets 2 requests per call, the second one with the pinned argv, env and cwd and with `input` set when the caller passed input, and the call returns the same stdout as the direct path for pipe, ignore and inherit-stdout"
+      proof: "grep: W1-T13434 criterion 1 in test/daemon/a-pinned-git-call-forks-through-the-spawn-helper.test.ts"
+    - claim: "invariant:no-fork-on-the-loop-for-a-routed-git-call — with a helper installed and routable options, a hostWorktreeGitAsync call makes 0 calls to ChildProcess.prototype.spawn and 0 synchronous child_process calls in the daemon process, and a 20 ms timer keeps firing while the helper holds the git child for one second"
+      kind: guard
+      proof: "grep: W1-T13434 criterion 2 in test/daemon/a-pinned-git-call-forks-through-the-spawn-helper.test.ts"
+    - claim: "invariant:the-child-outcome-still-wins — on the routed path a nonzero git exit, output past maxBuffer and a child stopped at its timeout each reject with the same error class and the same message start as the direct path (Command failed: git -C <wt> ..., ERR_CHILD_PROCESS_STDIO_MAXBUFFER, LoopBoundedChildTimeout), and a git that exits 0 without reading all its input still returns its stdout"
+      kind: guard
+      proof: "grep: W1-T13434 criterion 3 in test/daemon/a-pinned-git-call-forks-through-the-spawn-helper.test.ts"
+    - claim: "invariant:an-in-flight-git-call-never-runs-twice — when the helper dies after it took the git request, the call rejects with helper_died_in_flight and git runs once at most; with no helper installed, an unhealthy helper, or an option the pipe cannot carry (latin1 encoding), the call runs directly exactly as at origin/main, and a refused pinned config still throws WorktreeConfigRefusedError before any git child starts"
+      kind: guard
+      proof: "grep: W1-T13434 criterion 4 in test/daemon/a-pinned-git-call-forks-through-the-spawn-helper.test.ts"
+  rationale: |
+    WHY: an async child spawn is not free for the daemon. The fork copies the parent's page tables on the calling
+    thread, so each spawn holds the loop for a time that grows with the daemon's size (W1-T9754 measured 87 ms at
+    587 MB and 161 ms at 1.1 GB). W1-T9754 built a small long-lived spawn helper so the fork costs the helper's
+    size instead, and W1-T11369 routes the direct execFileLoopBounded callers through it. But W1-T11369 leaves the
+    git leaf direct on purpose, because hostWorktreeGitAsync writes the child's stdin through `.child`. The helper
+    protocol already carries stdin as `input`, so the git leaf, which every daemon git call goes through, keeps
+    forking on the loop for a reason that no longer holds.
+    MEASURED, core ledger (~/rmd-state2/state, ledger.2026-11-17T*.ndjson.gz plus the live file, rows deduplicated
+    on ts and step), 2026-11-17 00:09Z to 16:32Z:
+    - daemon.alive rows (async_spawn_sync_by_caller, the time the loop was held inside ChildProcess.prototype.spawn):
+      10,470 s of async fork time for the day, against 2,667 s of synchronous spawn time. The largest caller is
+      execFileLoopBounded itself: 56,588 forks, 5,773 s, 102 ms each. Since the 16:06:55Z boot (15a86ac98): 234 s,
+      of which execFileLoopBounded 1,641 forks, 125 s, 77 ms each.
+    - daemon.loop_stall_profile rows: meteredSpawn (the wrapper on ChildProcess.prototype.spawn) is the first
+      named frame of 1,035 stall rows holding 3,734 s of lag for the day, and of 25 rows holding 80 s since the
+      boot. Its self time is the `spawn` frame. Where a named caller is in the same row, it is
+      execFileLoopBounded (122 s), vetPinnedConfigAsync (80 s) and the git call of hostWorktreeGitAsync (66 s);
+      most rows (484 s) show only promise continuations above it.
+    - Each hostWorktreeGitAsync call forks twice: the pinned config read (vetPinnedConfigAsync) and the git command.
+      Only the first goes through execFileRouted.
+    - The helper is off in production: the 16:06:55Z daemon.boot row has no daemon.spawn_helper row after it, so
+      RMD_SPAWN_HELPER is not "on". Every fork above was therefore direct. This task makes the git leaf ready for
+      the helper; its effect in production needs the operator's switch.
+    READ at origin/main 882f50370e:
+    - src/lib/worktree-git.ts:487 hostWorktreeGitAsync; :489 awaits vetPinnedConfigAsync (:416, which already calls
+      execFileRouted); :490 `execFileLoopBounded("git", argv(pin, args), spawn)`; :492 writes `input` through
+      `command.child.stdin`; the result goes through childOutcomeWins (W1-T13170).
+    - src/lib/spawn-helper.ts:31 SpawnRequest.input; :264 runRouted; :270 ROUTABLE_OPTIONS (cwd, env, encoding,
+      maxBuffer, timeout, killSignal, escalateAfterMs); :304 execFileRouted, which falls back to
+      execFileLoopBounded with no helper or an unroutable option and maps a failed result to execFile's error shape.
+    - src/lib/read-plane.ts:232 meteredSpawn, the measuring wrapper.
+    - src/lib/daemon.ts:3951 starts the helper only when RMD_SPAWN_HELPER is "on"; :3880 says the default is an
+      operator decision.
+    NOT COVERED: W1-T11369 (queued) classifies worktree-git.ts as a site that must stay direct because it writes
+    `.child.stdin`. W1-T9754 (merged) built the helper and routed only vetPinnedConfigAsync here. W1-T13185,
+    W1-T13183 and W1-T13335 move synchronous calls to async ones; none routes an async fork. Swept origin/main
+    plan/tasks.d for hostWorktreeGitAsync, execFileRouted, runRouted and spawn helper, and the open pull requests
+    on craigoley/remudero: none routes the git leaf.
+  design: |
+    INVARIANT no-fork-on-the-loop-for-a-routed-git-call: with a helper installed and routable options, the git leaf starts no child in the daemon process.
+    INVARIANT the-child-outcome-still-wins: a routed call rejects and resolves exactly as the direct call does, the child's own failure first.
+    INVARIANT an-in-flight-git-call-never-runs-twice: a request the helper took is never sent again; with any doubt before the request, the call is direct as today.
+    1. In hostWorktreeGitAsync, when installedSpawnHelper() is healthy and the options are routable, send the git
+       command as one SpawnRequest (file git, the pinned argv, cwd, env, timeout, killSignal, maxBuffer and
+       `input`), and map its result with the same mapping execFileRouted uses. Reuse that mapping; do not write a
+       second one. If execFileRouted only needs to accept `input` for this, extend it there and keep its fallback.
+    2. Keep the direct path at :490-:496 for every other case: no helper, an unhealthy helper, an unroutable option
+       such as latin1 encoding, or a caller that streams stdout. A direct fallback for a reason writes the
+       existing spawn.routed row through helper.noteDirect, as execFileRouted does.
+    3. A request the helper took and lost settles as helper_died_in_flight and rejects. It is never sent again,
+       not to the helper and not directly: a push or a ref update may already have run.
+    4. The pinned config vet (W1-T6148) runs first and its refusal still throws before any child starts.
+    5. No new env var, config key or time bound. The helper's on/off switch stays the operator's decision; this task
+       does not change its default.
+    6. TESTS in test/daemon/a-pinned-git-call-forks-through-the-spawn-helper.test.ts use a real temporary git
+       repository and a real helper from startSpawnHelper (its `source` seam for the helper that dies), installed
+       with installSpawnHelper and removed after each test, as
+       test/the-daemon-measures-and-offloads-its-spawn-cost.test.ts does. Count daemon-side forks by wrapping
+       ChildProcess.prototype.spawn and the sync child_process APIs. Load test/setup/tmp-hygiene.ts.
+  falsifier: |
+    At origin/main the git command forks from the daemon process: the prototype.spawn count in criterion 2 is 1,
+    not 0, and the helper sees 1 request per call, not 2 (criterion 1). Send the request again after a helper
+    death: git runs twice and criterion 4 fails. Return the helper's stdout without the exit check: a nonzero
+    exit resolves and criterion 3 fails.
+  note: |
+    Id reserved for run-unfiled-1794933139000 with ~/rmd-work/bin/reserve-id.sh.
+    Proof that counts in production needs RMD_SPAWN_HELPER=on on core (the operator's switch, unset at the
+    2026-11-17T16:06:55Z boot): then the daemon.alive async_spawn_sync_by_caller share of execFileLoopBounded falls,
+    and spawn.routed rows name git with via helper.
+    Out of scope: the other direct execFileLoopBounded callers (W1-T11369) and the helper's default.

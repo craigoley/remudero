@@ -1,0 +1,70 @@
+- id: W1-T13498
+  title: "The fleet registry names remudero-ops as a shadow instance, and both host shell readers accept the mode field instead of refusing it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # adds a registry row every registry reader sees; a shadow row never arms or merges (W1-T4265)
+  band_meaning: span
+  origin: "human#2026-11-17-onboard-remudero-ops"
+  plan_refs:
+    - W1-T4265
+    - W1-T4227
+  files:
+    - .remudero/daemon-instances.yaml
+    - deploy/install-host-units.sh
+    - deploy/recycle-container.sh
+    - test/one-registry-for-the-fleet.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The committed registry has an ops row for craigoley/remudero-ops in the remudero project, declared mode shadow"
+      proof: "grep: github_repo: craigoley/remudero-ops in .remudero/daemon-instances.yaml"
+    - claim: "The ops row is a shadow instance, so its worker opens pull requests but never arms or merges one"
+      proof: "grep: mode: shadow in .remudero/daemon-instances.yaml"
+    - claim: "install-host-units.sh lists mode as a known field, keeping primary last so the W1-T4527 pin still matches"
+      proof: "grep: mode|project|github_repo|retired|primary) : ;; in deploy/install-host-units.sh"
+    - claim: "recycle-container.sh lists mode as a known field, keeping primary last so the W1-T4527 pin still matches"
+      proof: "grep: mode|project|github_repo|retired|primary) : ;; in deploy/recycle-container.sh"
+    - claim: "The committed-registry test pins core, site, console and ops, and the shell-reader test proves a mode field is accepted with an unknown-field control that is still refused"
+      proof: "grep: W1-T13498 in test/one-registry-for-the-fleet.test.ts"
+  rationale: |
+    WHY: Craig, 2026-11-17 20:45Z: "we need to onboard remudero-ops to be a managed repo". The Console's repository
+    picker lists a repository as managed only when core's instances view returns it registered (a live row in
+    .remudero/daemon-instances.yaml) and served (console lib/repo-dashboard.ts instancesFromView). remudero-ops has
+    no row today (OBSERVED at 5c6c8ce: rows core, site, console).
+    The onboarding gate for a new repository is a mode: shadow row (W1-T4265, src/lib/instance-mode.ts instanceMode):
+    its worker runs real tasks and opens real pull requests but never arms or merges one.
+    OBSERVED at 5c6c8ce: both shell readers REFUSE any field they do not list. install-host-units.sh and
+    recycle-container.sh list "project|github_repo|retired|primary) : ;;" and exit 2 on any other key, mode included.
+    So a shadow row cannot be installed or recycled today, and the host copy cannot carry the mode the daemon needs.
+    instanceMode falls back to live when no mode is readable, so the mode must be present in every registry the
+    daemon reads.
+    A remudero-ops daemon does not dispatch core's tasks held in remudero-ops/plan/tasks.d: isDispatchEligible in
+    src/lib/drain.ts refuses foreign-repo tasks through taskTargetsRepo (W1-T988).
+    Host convergence (state dir, /etc/remudero/daemon-instances.yaml row, install-host-units.sh --instance ops, serve
+    recreate) is an operator step after this merges, not part of this task.
+  design: |
+    1. .remudero/daemon-instances.yaml: add after console
+         ops:
+           repo: remudero-ops
+           project: remudero
+           github_repo: craigoley/remudero-ops
+           mode: shadow
+           container_name: remudero-ops-daemon
+           state_dir: /mnt/rmd/remudero-ops-state
+           claude_dir, codex_dir, container_config_dir, image: the same values as the site and console rows.
+       Update the header comment's instance list to name ops and its shadow mode.
+    2. deploy/install-host-units.sh and deploy/recycle-container.sh: change the known-and-ignored arm to
+       "mode|project|github_repo|retired|primary) : ;;". Keep primary last: the W1-T4527 test in
+       test/the-registry-names-one-primary-instance.test.ts matches "project\|github_repo\|retired\|primary\) : ;;".
+    3. test/one-registry-for-the-fleet.test.ts: the committed-registry test expects four rows, ops last with
+       repo craigoley/remudero-ops and mode shadow. Extend the shell-reader known-field checks with a fixture row
+       carrying mode: shadow that both scripts accept, beside the existing unknown-field control they refuse.
+       Name the new cases "W1-T13498 ...".
+    NO-INVARIANTS: a registry row and a known-field list; no gate, threshold or credential changes.
+  falsifier: |
+    Drop mode from either script's known list: the new shell-reader case fails (exit 2, unknown field 'mode').
+    Drop the ops row: the committed-registry case fails on the row count.

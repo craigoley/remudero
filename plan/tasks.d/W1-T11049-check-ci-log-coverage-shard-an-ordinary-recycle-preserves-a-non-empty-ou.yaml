@@ -6,8 +6,9 @@
   verify: human
   risk: high
   band_meaning: blast-radius
-  priority: 1.4
-  status: queued
+  status: blocked
+  retirement: retired
+  # operator 2026-11-17T20:01Z (Inbox decision card, thread "Recommend decisions for waiting Inbox asks"): retire W1-T11049 — ci-friction remedy; its single priced cost (5-45 PR-minutes, Oct 24-Nov 11) has decayed and the fix would need a hand verification.
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:ci-log:coverage-shard:an-ordinary-recycle-preserves-a-non-empty-outgoing-author-ov"

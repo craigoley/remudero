@@ -683,6 +683,8 @@ export interface RollupEntry {
    *  can hand these entries to {@link dedupeRollupByLatestAttempt}, which sorts on it, without
    *  the type silently erasing the only field that distinguishes one attempt from its successor. */
   startedAt?: string;
+  /** W1-T13426: a status context's description, which restRollupFor already carries. */
+  description?: string;
 }
 
 export type PrCreateDiagnostic = { step: string; extra: Record<string, unknown> };

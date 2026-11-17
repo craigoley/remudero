@@ -5,6 +5,7 @@
  */
 import { SHARE_ENV, isMainThread, parentPort, workerData } from "node:worker_threads";
 import { startWorker } from "./child-entry-argv.js";
+import { threadName } from "./thread-names.js";
 import { ledgerCompactCommand } from "./ledger-compact.js";
 
 const KIND = "remudero-ledger-compact";
@@ -23,7 +24,7 @@ export function compactLedgerInWorker(
 ): Promise<LedgerCompactPassResult> {
   return new Promise((resolve, reject) => {
     // A start that throws rejects this promise with its cause.
-    const thread = startWorker(import.meta.url, { workerData: { kind: KIND, rest, stateDir } satisfies WorkerInput, env: SHARE_ENV }, { override: options.workerUrl });
+    const thread = startWorker(import.meta.url, { name: threadName("ledgerCompact"), workerData: { kind: KIND, rest, stateDir } satisfies WorkerInput, env: SHARE_ENV }, { override: options.workerUrl });
     let crash: Error | undefined;
     // Every later settle is a no-op: the first report or exit decides.
     thread.on("message", (message: WorkerMessage) => {

@@ -6,6 +6,7 @@
  * The file holds: the per-instance path, the pragmas, the schema meta, corrupt-file recovery, and
  * the writer lease whose fence is re-checked inside every write transaction.
  */
+import { threadName } from "./thread-names.js";
 import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, opendirSync, readFileSync, readlinkSync, readSync, renameSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -249,7 +250,7 @@ let transactionWriter: {
 function transactionPublisher(file: string, failure: (reason?: string) => void, defaultIdentity: boolean): TransactionPublication {
   if (!transactionWriter) {
     const wake = new Int32Array(new SharedArrayBuffer(4));
-    const worker = new Worker(TRANSACTION_WRITER_SOURCE, { eval: true, execArgv: [], env: SHARE_ENV, workerData: { wake: wake.buffer },
+    const worker = new Worker(TRANSACTION_WRITER_SOURCE, { eval: true, name: threadName("readModelTxnWriter"), execArgv: [], env: SHARE_ENV, workerData: { wake: wake.buffer },
       resourceLimits: { maxOldGenerationSizeMb: 16, maxYoungGenerationSizeMb: 4, stackSizeMb: 1 } });
     const owner = transactionWriter = { worker, wake, entries: new Map<string, TransactionPublication>(), waiters: new Set<() => void>(), failed: false as boolean };
     worker.on("message", (message: { id: string; failed: boolean; closed: boolean; reason?: string }) => {
