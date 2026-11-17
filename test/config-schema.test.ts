@@ -80,6 +80,7 @@ test("CONFIG_SCHEMA declares the config field shape as metadata", () => {
     "claudeBin",
     "contributorAdmission",
     "selectedRegistryMode",
+    "inboxGardenerMode",
     "root",
     "diskArtifactScanRoots",
     "installRoot",
