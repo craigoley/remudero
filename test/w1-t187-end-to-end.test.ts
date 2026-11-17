@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { assertWallClockBound } from "#test/helpers/wall-clock-bound.js";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -8,7 +8,8 @@ import type { AddressInfo } from "node:net";
 import { buildServeServer, type ServeDeps } from "#src/lib/serve.js";
 import type { TraceGithub } from "#src/lib/trace.js";
 import type { IssueCloser } from "#src/lib/panel-actions.js";
-import { FIXED_NOW_ISO, corpusLedgerPath, loadCorpusGithub, loadCorpusPlan } from "#test/fixtures/w1-t187/load.js";
+import { FIXED_NOW_ISO, loadCorpusGithub, loadCorpusLedgerLines, loadCorpusPlan } from "#test/fixtures/w1-t187/load.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 /**
  * W1-T187 acceptance criterion 5 — "the measured end-to-end budget is met — first paint to
@@ -34,10 +35,12 @@ function fakeIssueCloser(): IssueCloser {
   return { close() {} };
 }
 
-test("W1-T187 criterion 5: GET / and GET /v1/status each answer in UNDER 2000ms against a real server over the production-scale corpus", async () => {
+test("W1-T187 criterion 5: GET / and GET /v1/status each answer in UNDER 2000ms against a real server over the production-scale corpus", async (t) => {
   const plan = loadCorpusPlan();
   const github = loadCorpusGithub();
   const root = mkdtempSync(join(tmpdir(), "rmd-w1t187-e2e-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const ledgerPath = writeLedger(loadCorpusLedgerLines(), { dir: join(root, "state") }).path;
   mkdirSync(join(root, "plan"), { recursive: true });
   const planPath = join(root, "plan", "tasks.yaml");
   // GET /v1/trace/GET /v1/drain/preview reload this fresh from disk on every request (their own
@@ -46,9 +49,9 @@ test("W1-T187 criterion 5: GET / and GET /v1/status each answer in UNDER 2000ms 
   writeFileSync(planPath, "[]\n");
 
   const deps: ServeDeps = {
-    board: { plan, ledgerPath: corpusLedgerPath(), github, now: () => Date.parse(FIXED_NOW_ISO) },
-    panelGraph: { root, planPath, ledgerPath: corpusLedgerPath(), github: fakeTraceGithub(), statusGithub: github, ratify: { approve() {}, reframe() {} } },
-    ledgerPath: corpusLedgerPath(),
+    board: { plan, ledgerPath, github, now: () => Date.parse(FIXED_NOW_ISO) },
+    panelGraph: { root, planPath, ledgerPath, github: fakeTraceGithub(), statusGithub: github, ratify: { approve() {}, reframe() {} } },
+    ledgerPath,
     issues: fakeIssueCloser(),
     fleetControlRoot: root,
     questionsRoot: root,
@@ -87,6 +90,6 @@ test("W1-T187 criterion 5: GET / and GET /v1/status each answer in UNDER 2000ms 
     assert.equal(secondRes.status, 200);
     assertWallClockBound(secondMs, 2000, `second GET /v1/status took ${secondMs.toFixed(1)}ms -- must be < 2000ms`);
   } finally {
-    server.close();
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
 });
