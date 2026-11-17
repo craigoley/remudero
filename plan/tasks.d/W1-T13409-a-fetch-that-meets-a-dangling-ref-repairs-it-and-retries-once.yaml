@@ -1,0 +1,182 @@
+- id: W1-T13409
+  title: "A fetch that fails on a ref naming a missing object repairs that ref and retries once: the shared git leaf and the shared fetch retry refetch the one dangling tracking branch at the point of failure, ledger it, and make no extra git call when a fetch succeeds"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the repair writes refs of a clone that every lane shares, from inside the leaf that every host git call passes through; a wrong match or a wrong ref set would move or delete a ref that work depends on, so the ref set, the compare-and-swap delete and the one-retry bound must hold
+  origin: "operator-ruling#no-repair-loop-2026-11-17"
+  plan_refs:
+    - W1-T10756
+    - W1-T13327
+    - W1-T12119
+  files:
+    - src/lib/git-fetch-retry.ts
+    - src/lib/worktree-git.ts
+    - src/lib/ledger-steps.ts
+    - src/cli/commands/daemon.ts
+    - src/cli/commands/fix.ts
+    - test/a-fetch-that-meets-a-dangling-ref-repairs-it-and-retries-once.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "invariant:a-dangling-tracking-ref-is-repaired-at-the-fetch — with real git, in a clone of a local bare remote whose tracking ref names an object the clone lacks, `fetch origin main` through hostWorktreeGitAsync, through hostWorktreeGit and through fetchOriginRetryingRefLock and its async form each ends with success. Each call runs the original fetch exactly twice, writes exactly one git.dangling_ref_repaired row (clone, ref, how refetched, ms), and leaves every ref of the clone naming an object the clone has"
+      proof: "grep: W1-T13409 criterion 1 in test/a-fetch-that-meets-a-dangling-ref-repairs-it-and-retries-once.test.ts"
+    - claim: "invariant:the-success-path-costs-nothing — a fetch that succeeds starts the same number of git processes as it does at origin/main, counted: no for-each-ref, no cat-file, no ls-remote and no row. A command that is not a fetch and fails with the same words is not repaired"
+      kind: guard
+      proof: "grep: W1-T13409 criterion 2 in test/a-fetch-that-meets-a-dangling-ref-repairs-it-and-retries-once.test.ts"
+    - claim: "invariant:only-a-missing-tracking-ref-is-touched — in a clone with a dangling tracking ref, a dangling local branch, a dangling tag, a dangling refs/rmd-dispatch ref and healthy refs of each kind, the repair leaves every ref except the dangling tracking refs at the value it had. Each of the local branch, the tag and the refs/rmd-dispatch ref is named in a git.dangling_ref_unrepaired row. A dangling tracking ref whose branch the remote no longer has is removed with how removed, and only when it still holds the missing object id"
+      kind: guard
+      proof: "grep: W1-T13409 criterion 3 in test/a-fetch-that-meets-a-dangling-ref-repairs-it-and-retries-once.test.ts"
+    - claim: "invariant:another-failure-is-unchanged — a fetch that fails with other words (a ref lock, an unreachable remote, a fetch stopped at its time bound) starts no listing, no repair and no retry from the new helper, and the caller gets the same error object. fetchOriginRetryingRefLock still retries a ref lock as it does at origin/main"
+      kind: guard
+      proof: "grep: W1-T13409 criterion 4 in test/a-fetch-that-meets-a-dangling-ref-repairs-it-and-retries-once.test.ts"
+    - claim: "invariant:a-failed-repair-changes-nothing — when the repair fetch fails, `git for-each-ref` prints the same lines as before the call, the caller gets the original error (same message, stderr and exit status) with the repair failure attached, one git.dangling_ref_unrepaired row names the ref and the reason, and an outer helper that sees that error does not repair again"
+      kind: guard
+      proof: "grep: W1-T13409 criterion 5 in test/a-fetch-that-meets-a-dangling-ref-repairs-it-and-retries-once.test.ts"
+    - claim: "invariant:the-repair-is-bounded-and-never-loops — one call makes at most one listing, one repair pass and one retry, counted. A clone with more dangling refs than the ref BACKSTOP is not repaired and one row carries the count. A listing or a repair that passes its time BACKSTOP is stopped there and counts as a failed repair. A retry that fails with the same words is thrown with no second repair"
+      kind: guard
+      proof: "grep: W1-T13409 criterion 6 in test/a-fetch-that-meets-a-dangling-ref-repairs-it-and-retries-once.test.ts"
+    - claim: "meaningOfStep returns a row for git.dangling_ref_repaired and for git.dangling_ref_unrepaired, and each row names the function that writes the step"
+      proof: "grep: W1-T13409 criterion 7 in test/a-fetch-that-meets-a-dangling-ref-repairs-it-and-retries-once.test.ts"
+    - claim: "The daemon process sends the repair rows to its ledger, so the row has a production writer"
+      proof: "grep: setDanglingRefRepairLog( in src/cli/commands/daemon.ts"
+    - claim: "The fix command sends the repair rows to its ledger"
+      proof: "grep: setDanglingRefRepairLog( in src/cli/commands/fix.ts"
+  rationale: |
+    WHY: one ref that names a missing object makes every `git fetch` in a clone fail, in the clone and in each
+    worktree that shares it. Git names the ref in its error. Nothing in the fleet reads that error: each caller
+    sees a failed fetch and gives up or waits. On 2026-11-17 the heartbeat left such a ref every 5 minutes
+    (W1-T10756; W1-T13327 fixes that cause). The same state can come from any other writer of a ref, so the
+    fleet needs the fetch itself to repair it. The operator ruled out a repair loop on a timer: repair where
+    the failure happens, and cost nothing when a fetch succeeds.
+    MEASURED on the Azure fleet host, 2026-11-17:
+    - The operator's findings: from about 03:00Z every `git fetch` in ~/rmd-state2/daemon-install and its
+      worktrees failed with `fatal: bad object refs/remotes/origin/heartbeat-azure` and `did not send all
+      necessary objects`. Hand ships failed in their prep step. The clone's automatic gc failed and left
+      .git/gc.log. Once the dangling ref equalled the remote tip, a plain fetch of that branch no longer
+      repaired it; `git fetch --refetch` of that one branch did.
+    - The core ledger for 2026-11-17 (~/rmd-state2/state, live file and that day's archives) has no row that
+      holds `bad object` or `did not send all necessary` for a fetch. The failures left no record.
+    - Scratch clones, git 2.43.0, a local bare remote:
+      a. A tracking ref set to a commit that only a removed object directory held: `git fetch origin main`
+         ends with status 1 and prints `fatal: bad object refs/remotes/origin/beat` then
+         `error: <remote> did not send all necessary objects`.
+      b. With that dangling id equal to the remote tip of the branch, a plain
+         `git fetch origin '+refs/heads/beat:refs/remotes/origin/beat'` ends with status 0 and repairs nothing.
+         `git -c gc.auto=0 -c maintenance.auto=false fetch --refetch --no-tags origin '+refs/heads/beat:refs/remotes/origin/beat'`
+         ends with status 0 and the object is then present.
+      c. For a branch the remote no longer has, the same `--refetch` ends with status 128,
+         `fatal: couldn't find remote ref refs/heads/gone`. `git ls-remote --exit-code origin refs/heads/gone`
+         ends with status 2. `git update-ref -d refs/remotes/origin/gone <the missing id>` ends with status 0.
+         After the refetch and that delete, `git fetch origin main` ends with status 0.
+      d. A dangling local branch breaks every fetch too, and then the `--refetch` of another branch also ended
+         with status 1 (`fatal: bad object refs/heads/localb`). So a clone with a dangling ref that this
+         task does not repair stays broken, and the helper must say which ref it is.
+      e. `git for-each-ref --format='%(objectname) %(refname)'` lists a dangling ref without an error, and
+         `git cat-file --batch-check` prints `<id> missing` for its id.
+    - The install clone has 9,796 refs (9,356 under refs/remotes). One pass of for-each-ref piped through
+      `sort -u` and `cat-file --batch-check` took 0.71 s under nice with the host at load 17 to 20.
+    READ at origin/main ca9031f7b5:
+    - There is no one seam. `"fetch",` is in 89 argv lines under src/, through many runners. Two seams carry
+      more fetches than any other:
+      1. The git leaf, src/lib/worktree-git.ts:468 hostWorktreeGit and :487 hostWorktreeGitAsync. About 21 fetch
+         sites reach it: the fix lane (src/cli/commands/fix.ts:4229, :5090), the review and merge paths in
+         src/run-task.ts (:2578, :2593, :5716, :5731, :18988, :19313, :41735), the sweep (src/lib/sweep.ts:2040,
+         :2281, :5989, :13521), src/lib/gardener.ts:436 and :536, src/lib/fix-round-reapply.ts:107 and
+         src/lib/retro.ts:4078.
+      2. The fetch retry, src/lib/git-fetch-retry.ts:120 fetchOriginRetryingRefLock and :134 its async form.
+         Ten callers: the self-sync (src/lib/self-sync.ts:64, :190, :519, :865), the worker's fetch of its base
+         (src/lib/worker.ts:6336, :6533), the plan sync (src/run-task.ts:4228, :4298, :32522) and
+         src/lib/machine-filing-judge.ts:631. src/run-task.ts:33020 passes through both seams.
+      git-fetch-retry.ts is a leaf module that already retries one class of failed fetch (a ref lock, :104 to
+      :109), so it is the narrowest home for a second class.
+    - The rest run git with execFile or an injected runner of their own, for example
+      src/cli/commands/daemon.ts:1447, src/lib/serve.ts:1406, src/lib/serve-slots.ts:215,
+      src/lib/host-resource-gardener.ts:1326, src/lib/hand-worktree.ts:169 and src/lib/worker.ts:6569. They
+      are not in this task.
+    - src/lib/worktree-git.ts:157: the leaf's default log writes one JSON line to stderr. The leaf has no ledger.
+      src/lib/child-entry-argv.ts:66 setWorkerEntryLog is the existing shape for a leaf that gets the process's
+      ledger log once at start (src/lib/serve.ts:3502). src/cli/commands/daemon.ts:1330 and
+      src/cli/commands/fix.ts:6156 build the ledger log of their process.
+    - src/lib/self-sync.ts:96 to :101: the self-sync has no ledger by design. Its repair row goes to stderr.
+    - src/lib/ledger-steps.ts:84: the shape of a registry row (step, meaning, writer, outcomes).
+    NOT COVERED: swept plan/tasks.d and plan/tasks.yaml at origin/main for dangling, bad object, did not send
+    all necessary and --refetch, and the 10 open pull requests. W1-T13327 (PR #19092) stops the heartbeat from
+    making the ref; it repairs only the beat's own branch, on the next beat. W1-T12119 (queued) runs a
+    connectivity fsck before a lane borrows the managed checkout and refetches the affected tracking refs: it
+    is a check before each borrow of one checkout, it looks for objects missing deeper than a ref's own
+    object, and it never removes a ref. This task acts only after a fetch has failed, in any clone the two
+    seams reach, and only on a ref whose own object is missing. The two share the `--refetch` argv.
+  design: |
+    INVARIANT a-dangling-tracking-ref-is-repaired-at-the-fetch: a fetch through either seam in a clone with a dangling tracking ref succeeds, with one row per repaired ref and exactly one retry.
+    INVARIANT the-success-path-costs-nothing: a fetch that succeeds starts no git process and writes no row beyond what it does at origin/main.
+    INVARIANT only-a-missing-tracking-ref-is-touched: the repair writes only refs under refs/remotes/ whose own object is missing; a local branch, a tag and a refs/rmd-dispatch ref are reported and never written.
+    INVARIANT another-failure-is-unchanged: a fetch that fails for any other reason is not listed, repaired or retried by this helper, and its error is the same object.
+    INVARIANT a-failed-repair-changes-nothing: a repair that fails leaves every ref at its value and the caller gets the original error with the repair failure attached.
+    INVARIANT the-repair-is-bounded-and-never-loops: one call makes at most one listing, one repair pass and one retry, inside a ref BACKSTOP and a time BACKSTOP.
+    1. In src/lib/git-fetch-retry.ts add the repair, in a sync and an async form like the two retry
+       functions there. Input: the runner for that clone, the fetch argv, and the error. It acts only when
+       the argv is a fetch and the error's stderr or message matches `bad object refs/` or
+       `did not send all necessary objects`. A call with no captured stderr (stdio ignore) does not match.
+    2. List: `for-each-ref --format='%(objectname) %(refname)'`, then one `cat-file --batch-check` over the
+       distinct ids, and keep the refs whose id reads `missing`. Run both with GIT_OBJECT_DIRECTORY and
+       GIT_ALTERNATE_OBJECT_DIRECTORIES unset. Sort the refs into two sets: refs under refs/remotes/<remote>/
+       (repair) and all others (report only).
+    3. Repair, in this order. First ask the remote once which of the dangling branches it still has
+       (`ls-remote <remote> <refs>`). For a branch the remote lacks, remove the tracking ref with
+       `update-ref -d <ref> <missing id>`; the old value makes it a compare-and-swap, so a ref that another
+       process repaired in the meantime is left alone. For the others, one
+       `-c gc.auto=0 -c maintenance.auto=false fetch --refetch --no-tags <remote> +refs/heads/<b>:refs/remotes/<remote>/<b> ...`
+       with exactly those refspecs. Never `--prune`, never a refspec with a wildcard.
+    4. Write one git.dangling_ref_repaired row per repaired ref: clone, ref, how (refetched or removed), ms.
+       Write one git.dangling_ref_unrepaired row per ref that was reported and not repaired: clone, ref, why
+       (not_a_tracking_ref, over_the_bound, repair_failed), and the count when over the bound.
+    5. Retry the original fetch once. If it fails, throw that failure. If the repair failed, or nothing was
+       repairable, throw the original error unchanged and attach what was found (the dangling refs and the
+       repair error) on a property of it. An error that carries that property is never repaired again, so
+       the nested case (src/run-task.ts:33020) repairs once.
+    6. BACKSTOP constants, named and commented: at most 16 dangling refs are repaired in one call (the
+       2026-11-17 case was 1); more than that is reported and not repaired. The listing is killed after 30 s
+       (measured 0.71 s for 9,796 refs on the loaded host). The repair is killed after 120 s, the bound the
+       hand repair used. No sleep and no loop.
+    7. Wire the two seams. hostWorktreeGit and hostWorktreeGitAsync call the repair in their failure path
+       when the first argument is `fetch`; the success path stays one execFile call. The sync leaf uses the
+       sync form and the async leaf the async form (test/no-daemon-loop-path-calls-the-synchronous-worktree-git-leaf.test.ts
+       must still pass). fetchOriginRetryingRefLock and its async form call it in their catch, before the
+       ref lock test, and keep their ref lock retries.
+    8. The rows go through a log port. The default is the stderr JSON line the leaf writes today. Add
+       setDanglingRefRepairLog in git-fetch-retry.ts, in the shape of setWorkerEntryLog, and call it once
+       where the daemon and the fix command build their ledger log. Register both steps in
+       src/lib/ledger-steps.ts with their writer and outcomes.
+    9. TESTS use real git, a local bare remote and a temporary clone; load test/setup/tmp-hygiene.ts. Make a
+       dangling ref with `git update-ref` to the id of a commit built under a GIT_OBJECT_DIRECTORY that the
+       test then removes. Count git processes with a runner that records each argv, or a `git` shim first on
+       PATH for the leaf. If real git behaves differently from MEASURED d (a refetch that fails while an
+       unrepairable ref dangles), keep the invariant and report the difference in the pull request.
+    WHY NOT the alternatives:
+    - A timer that checks every clone: the operator ruled it out. It costs git calls all day for a state
+      that is rare, and it still leaves a window.
+    - Check the refs before each fetch: one listing of 9,796 refs on every fetch, on the success path.
+    - Delete every dangling ref: a local branch or a refs/rmd-dispatch ref that dangles is evidence of lost
+      work or a lost claim. It must be seen by a person, not removed.
+    - Stop the push from moving the tracking ref with a negative fetch refspec: measured on git 2.43, it does
+      not. Only a remote with no fetch refspec does, and that is a host config edit.
+  falsifier: |
+    At origin/main the fetch in criterion 1 throws `bad object` and no row is written. Remove the retry: criterion
+    1 fails. List the refs before the first fetch: the process count of criterion 2 rises. Repair every dangling
+    ref, or drop the old value from `update-ref -d`: criterion 3 fails. Match every failed fetch: criterion 4
+    fails. Delete the ref before the refetch: criterion 5 fails, because a failed refetch leaves the ref gone.
+    Retry in a loop: criterion 6 fails.
+  note: |
+    Id reserved for run-unfiled-1794927603000 with ~/rmd-work/bin/reserve-id.sh.
+    Proof that counts on the host: with a tracking ref of ~/rmd-state2/daemon-install set to a missing id, a
+    daemon or fix lane fetch succeeds and the ledger gains one git.dangling_ref_repaired row. When this and
+    W1-T13327 are deployed, the healref.sh calls in the hand tools can go.
+    Out of scope: the fetch sites that run git through their own execFile or injected runner (listed in the
+    rationale); moving them onto the leaf is a separate change. A dangling local branch, tag or
+    refs/rmd-dispatch ref is reported here and raised by W1-T13410 through the heartbeat.
+    No timer, no cron line and no host config edit.

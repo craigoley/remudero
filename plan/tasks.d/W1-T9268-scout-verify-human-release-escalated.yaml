@@ -23,3 +23,11 @@
     The ledger step verify_human.release_escalated carries a failure shape and landed rows in both halves of the trailing 7 days: 10 in the older half, 13 in the newer.
     No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
     The rows name no file of their own: locate the code that writes this step first, then fix its cause.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.97
+    reasons:
+      - "high-risk verdict at confidence 0.97 — on the change's description/files alone, no diff was read — The record supplies recurrence counts but no individual row evidence or diagnosed cause; its rationale explicitly leaves locating the emitter and identifying the cause to implementation. The finding that these escalations warrant repair cannot be verified from what is shown.; on the change's description/files alone, no diff was read — The task requests implementation that stops recurrence, while repository instructions require a bounded observation proposal before class-wide repair based on recurrence.; on the change's description/files alone, no diff was read — The sole acceptance proof greps for a test declaration; it does not establish that the test executes or that the cause is fixed."
+    judged_at: "2026-11-17T14:44:06.607Z"
+    pin: "ac01d491e2a2dba9e21614c2a4a5c95fd100e057126ecd6686026279fba09d44"

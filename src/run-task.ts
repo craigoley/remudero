@@ -284,6 +284,7 @@ import {
 import { LEDGER_FILENAME, ledgerPathFor, nextLaneEpochMs } from "./lib/ledger-path.js";
 export { LEDGER_FILENAME, ledgerPathFor, nextLaneEpochMs };
 import { ledgerCompactCommand, type LedgerCompactCommandDeps } from "./lib/ledger-compact.js";
+import { compactLedgerInWorker } from "./lib/ledger-compact-worker.js";
 import { readModelCommand } from "./lib/read-model-cli.js";
 export { ledgerCompactCommand } from "./lib/ledger-compact.js";
 import {
@@ -1342,6 +1343,8 @@ import {
 import { routingAbCommand } from "./lib/routing-experiments.js";
 import { attributeAttemptOutcome } from "./lib/attempt-outcome-attribution.js";
 import { recordRoutingExperimentResults } from "./lib/routing-experiment-result.js";
+import { cashInvoiceAccounts, costExportDigest, newestCostExportAsync, readCashInvoiceReceipts, readCashInvoiceReceiptsAsync, reconcileCashInvoice, recordCashInvoiceFailure,
+  recordCashInvoiceVerdicts, type CashInvoiceReconciliation, type CostExportSource } from "./lib/cash-invoice-reconcile.js";
 import { askDecisionModel, decisionsCommand } from "./lib/decision-model.js";
 import { judgeReplayCommand, parseJudgeReplayLane, replayJudgeCorpus } from "./lib/judge-replay-batch.js";
 import { reviewTriageCandidates, triagePullRequest } from "./lib/review-triage.js";
@@ -1423,7 +1426,7 @@ import {
 } from "./lib/coverage-improvement.js";
 import { mineVerdictRows, verdictCalibrationReport, VERDICT_OUTCOME_STEP, type UnmeasurableCause } from "./lib/verdict-calibration.js";
 import { mineAutonomyLedgerLines, parseTrailerMerges, zeroTouchMergeRate } from "./lib/autonomy.js";
-import { decideMeasurementCadence, measurementCadenceCheck, ciLearningCadenceCheck, CI_LEARNING_MINT_CEILING, ciLearningLookbackDays, type CiLearningCadencePolicy, type CiLearningCadenceRunResult, measurementCadenceMarkerPath, ciLearningRecordVerdict, ciLearningShardYaml, fileCiLearningShards, mintCiLearningShards, readMeasurementCadenceMarker, recordCiLearningAttempt, recordCiLearningCadenceFire, recordMeasurementCadenceFire, createWipeTestEvidenceReader, wipeTestSlotDraw, recordWipeTestCadenceFire, scheduleWipeTestAblation, renderVerbCensusDigestLine, priorVerifyHumanAgeBandKeys, runMeasurementCadenceReportAsync, runVerbCensus, verifyHumanCadence, wipeTestCadenceCheck, type MeasurementCadenceDecision, buildPlanReconcileCadenceInput, type PlanReconcileHeld, type PlanReconcileCadenceOpts, type PlanReconcileCadenceInputOptions, type PlanReconcileShardRecord, type MeasurementCadenceReportOpts, type MeasurementCadenceRunResult, type VerifyHumanCadenceResult, type WipeTestCadenceDecision, type WipeTestCadencePolicy, type WipeTestCadenceRunResult } from "./lib/measurement-cadence.js";
+import { decideMeasurementCadence, measurementCadenceCheck, ciLearningCadenceCheck, CI_LEARNING_MINT_CEILING, ciLearningHandFixInput, ciLearningLookbackDays, type HandFixInput, type CiLearningCadencePolicy, type CiLearningCadenceRunResult, measurementCadenceMarkerPath, ciLearningRecordVerdict, ciLearningShardYaml, fileCiLearningShards, mintCiLearningShards, readMeasurementCadenceMarker, recordCiLearningAttempt, recordCiLearningCadenceFire, recordMeasurementCadenceFire, createWipeTestEvidenceReader, wipeTestSlotDraw, recordWipeTestCadenceFire, scheduleWipeTestAblation, renderVerbCensusDigestLine, priorVerifyHumanAgeBandKeys, runMeasurementCadenceReportAsync, runVerbCensus, verifyHumanCadence, wipeTestCadenceCheck, type MeasurementCadenceDecision, buildPlanReconcileCadenceInput, type PlanReconcileHeld, type PlanReconcileCadenceOpts, type PlanReconcileCadenceInputOptions, type PlanReconcileShardRecord, type MeasurementCadenceReportOpts, type MeasurementCadenceRunResult, type VerifyHumanCadenceResult, type WipeTestCadenceDecision, type WipeTestCadencePolicy, type WipeTestCadenceRunResult } from "./lib/measurement-cadence.js";
 import {
   routedModelIdsFromCheckout,
   watchSuccessorModels,
@@ -1792,7 +1795,8 @@ import { fixRungInputFields, prBodyDigest } from "./lib/sweep.js";
 import { diagnoseBodyDefects } from "./lib/body-repair.js";
 import { criterionFieldTampered, filingSelfCreditCheck, missingReviewReuseFact, priorPostedReviewRow, proofChildEnv, proofSandboxArgv, proofSandboxStatus, ProofSandboxUnavailableError } from "./lib/review.js";
 import { inertAcceptanceProofs, PR_BODY_ACCEPTANCE_GRAMMAR } from "./lib/proof-grammar.js";
-import { diffAnchor, mainRepairAcceptanceFor } from "./lib/main-repair-acceptance.js";
+import { type BaseProofGrader, diffAnchor, mainRepairAcceptanceFor, withoutStaleRepairProofs } from "./lib/main-repair-acceptance.js";
+import { checkProofBaseGrader } from "./lib/repair-proof-grader.js";
 export { diffAnchor };
 export type { DiffAnchor, DiffAnchorUnavailableReason } from "./lib/main-repair-acceptance.js";
 import { alertFixBodyDeps, judgeOpenedAlertFixBody, type AlertFixAcceptanceCheck, type AlertFixBodyRead } from "./lib/alert-fix-body.js";
@@ -22069,7 +22073,9 @@ export function buildLedgerCompactionDaemonHooks(deps: {
   clock?: Clock;
   check?: () => LedgerCompactionDecision;
   run?: () => Promise<LedgerCompactionOutcome | undefined>;
+  /** The in-process pass, for a test; absent, the pass runs in a worker thread. */
   compact?: (rest: string[], deps: LedgerCompactCommandDeps) => number;
+  worker?: Parameters<typeof compactLedgerInWorker>[2];
 } = {}): {
   checkLedgerCompaction: () => LedgerCompactionDecision;
   runLedgerCompaction: () => Promise<LedgerCompactionOutcome | undefined>;
@@ -22094,14 +22100,21 @@ export function buildLedgerCompactionDaemonHooks(deps: {
     deps.run ??
     (async () => {
       let report: string | undefined;
-      const errors: string[] = [];
-      const code = (deps.compact ?? ledgerCompactCommand)(daemonLedgerCompactArgs(stateDirFor()), {
-        stateDir: stateDirFor(),
-        out: (line) => {
-          report = line;
-        },
-        error: (line) => errors.push(line),
-      });
+      let errors: string[] = [];
+      let code: number;
+      const rest = daemonLedgerCompactArgs(stateDirFor());
+      if (deps.compact) {
+        code = deps.compact(rest, {
+          stateDir: stateDirFor(),
+          out: (line) => {
+            report = line;
+          },
+          error: (line) => errors.push(line),
+        });
+      } else {
+        // W1-T13333: the pass runs in a worker thread; the daemon loop only awaits it.
+        ({ code, report, errors } = await compactLedgerInWorker(rest, stateDirFor(), deps.worker));
+      }
       if (code !== 0) {
         throw new Error(errors.join("\n") || `rmd ledger-compact exited ${code}`);
       }
@@ -22587,7 +22600,8 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
   const run =
     deps.run ??
     (async () => {
-      const root = configFor().root;
+      const config = configFor();
+      const root = config.root;
       const cadenceClock = clockFromDateFn(deps.now);
       // RECORD THE FIRE FIRST, deliberately — the SAME crash-safety discipline
       // `buildAutoTriageDaemonHooks`'s `runAutoTriage` uses: if the report run throws or the
@@ -22596,6 +22610,7 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
       if (deps.recordFire !== false) recordMeasurementCadenceFire(measurementCadenceMarkerPath(root), cadenceClock.date(), 24 * 60 * 60 * 1000);
       const coverageRunId = `MEASUREMENT-CADENCE-${cadenceClock.now()}`;
       await recordRoutingExperimentResults({ stateDir: join(root, "state"), today: cadenceClock.iso().slice(0, 10) });
+      await reconcileNewestCostExport(config, cadenceClock);
       const verifyHumanRunId = `VERIFY-HUMAN-CADENCE-${cadenceClock.iso()}`;
       // `repoRoot`, NOT `root` (which is `config.root`, the state volume) — see this function's own
       // parameter doc. The sibling `coverageImprovement` below already passes `repoRoot`.
@@ -27562,6 +27577,8 @@ export function buildCiLearningDaemonHooks(deps: {
   /** Injected so a test drives lesson outcomes without the real plan; production reads only the
    *  machine filer's own shard directory. */
   loadLessons?: () => FiledCiLessonsRead;
+  /** Optional hand-fix evidence reader; production defaults to the live ledger and checkout plan. */
+  handFixInput?: (at: Date) => HandFixInput | Promise<HandFixInput>;
 } = {}): {
   checkCiLearningCadence: () => MeasurementCadenceDecision;
   runCiLearningCadence: () => Promise<CiLearningCadenceRunnerResult>;
@@ -27601,6 +27618,7 @@ export function buildCiLearningDaemonHooks(deps: {
       loadLessons: deps.loadLessons,
       fileShards: deps.fileShards,
       planOrigins: deps.planOrigins,
+      handFixInput: deps.handFixInput ?? ((at) => ciLearningHandFixInput(configFor().root, deps.checkoutRoot ?? repoRoot, at)),
       clock: deps.now ? clockFromDateFn(deps.now) : systemClock,
     }),
   };
@@ -27648,6 +27666,8 @@ export function buildCiLearningCadenceRunner(deps: {
   landShards?: CiLearningShardLander;
   gh?: LandCiLearningShardsOptions["gh"];
   planOrigins?: string[];
+  /** Test seam for scheduled hand-fix evidence; production reads the operator-intervention ledger and held plan origins. */
+  handFixInput?: (at: Date) => HandFixInput | Promise<HandFixInput>;
   pendingOrigins?: typeof ciLearningPendingOrigins;
   mergedOrigins?: (checkoutRoot: string) => string[] | Promise<string[]>;
   mintTaskId?: ((filingBranch?: string) => string) & { async?: (filingBranch: string) => Promise<string> };
@@ -27678,7 +27698,8 @@ export function buildCiLearningCadenceRunner(deps: {
     // W1-T4190: and what origin/main already holds, so a merged finding never takes a draft slot.
     const mergedOrigins = await (deps.mergedOrigins ?? ciLearningMergedOriginsAsync)(deps.checkoutRoot);
     const idempotencyOrigins = [...new Set([...planOrigins, ...pendingOrigins, ...mergedOrigins])];
-    const result = mintCiLearningShards(corpus, idempotencyOrigins);
+    const handFix = deps.handFixInput ? await deps.handFixInput(at) : await ciLearningHandFixInput(deps.root, deps.checkoutRoot, at);
+    const result = mintCiLearningShards(corpus, idempotencyOrigins, handFix);
     const filedLessons = deps.loadLessons ? deps.loadLessons() : readFiledCiLessons(join(deps.checkoutRoot, "plan", "tasks.d"));
     const lessonRecurrences =
       filedLessons.status === "measured"
@@ -41100,6 +41121,48 @@ export interface AlertFixDispatchDeps {
   readHeadSubject?: (worktreePath: string) => string;
   pushBranch?: (worktreePath: string, expectedHeadSha: string) => Promise<unknown>; // W1-T9667: the host push of a harness commit
   readRemoteBranchHead?: (worktreePath: string, branch: string) => Promise<string | undefined>; // W1-T9667: `git ls-remote`
+  /** W1-T13351: grades each proof of a repair body at the merge base with the proof-discrimination gate's executor;
+   *  `undefined` when the merge base cannot be read. Omitted, {@link repairProofGraderFor} runs the real check-proof. */
+  repairProofGrader?: (worktreePath: string) => BaseProofGrader | undefined;
+}
+
+/** W1-T13351 — the real repair-proof grader: check-proof from the repair worktree against its merge base with
+ *  origin/main, `undefined` when git cannot name that merge base. */
+export function repairProofGraderFor(worktreePath: string): BaseProofGrader | undefined {
+  try {
+    const mergeBase = hostWorktreeGitAtTopLevel(worktreePath, ["merge-base", "origin/main", "HEAD"]).trim();
+    return mergeBase === "" ? undefined : checkProofBaseGrader(worktreePath, mergeBase);
+  } catch (error) {
+    void error; // the caller ledgers an ungraded body as `proofs_ungraded`
+    return undefined;
+  }
+}
+
+/** W1-T13351 — drop every proof of an assembled repair body that the gate would grade executed_stale, ledgering what
+ *  changed. A body this cannot grade is returned as written. */
+async function withGradedRepairProofs(
+  lane: string,
+  body: string,
+  worktreePath: string,
+  diffText: string | undefined,
+  readFile: ((path: string) => string | undefined) | undefined,
+  grader: ((worktreePath: string) => BaseProofGrader | undefined) | undefined,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): Promise<string> {
+  const grade = (grader ?? repairProofGraderFor)(worktreePath);
+  if (grade === undefined) {
+    log(`${lane}.proofs_ungraded`, { reason: "the repair worktree's merge base with origin/main is unreadable" });
+    return body;
+  }
+  const verdict = await withoutStaleRepairProofs({ body, diffText, grade, ...(readFile ? { readFile } : {}) });
+  if (verdict.resolution === "kept") return body;
+  log(`${lane}.stale_proofs`, {
+    stale_proofs: verdict.stale,
+    resolution: verdict.resolution,
+    ...("anchor" in verdict && verdict.anchor ? { anchor: verdict.anchor } : {}),
+    ...("reason" in verdict ? { reason: verdict.reason } : {}),
+  });
+  return verdict.body;
 }
 
 export { alertFixBodyDeps, checkAlertFixAcceptance, readAlertFixPrBody } from "./lib/alert-fix-body.js";
@@ -41528,6 +41591,7 @@ async function openCheckedRepairPr(
     });
   }
   if (!("body" in checked)) return undefined;
+  const graded = await withGradedRepairProofs(lane, checked.body, worktreePath, diffText, readAtHead, deps.repairProofGrader, log);
   if (pr.pushedHead === undefined) {
     const remote = await readRepairRemoteHead(worktreePath, branch, deps);
     if (remote.head === undefined) {
@@ -41538,7 +41602,7 @@ async function openCheckedRepairPr(
   try {
     const title = (deps.readHeadSubject ?? ((wt: string) => hostWorktreeGitAtTopLevel(wt, ["log", "-1", "--format=%s", "HEAD"])))(worktreePath).trim();
     const created = (await (deps.fetch ?? ((args: string[]) => ghJsonAsync(args)))(
-      ratifyPrCreateRestArgs(owner, repo, { title: title || pr.fallbackTitle, body: withoutRepairPlaceholders(checked.body, pr.prose), head: branch, base: pr.base }),
+      ratifyPrCreateRestArgs(owner, repo, { title: title || pr.fallbackTitle, body: withoutRepairPlaceholders(graded, pr.prose), head: branch, base: pr.base }),
     )) as { html_url?: unknown };
     if (typeof created?.html_url !== "string") throw new Error(`GitHub's PR create for ${branch} returned no html_url`);
     return created.html_url;
@@ -41600,6 +41664,7 @@ export async function openMainRepairRevertPr(
   runId: string,
   fetch: GhApiFetcher = (args) => ghJsonAsync(args),
   testFiles: readonly string[] = [],
+  repairProofGrader: (worktreePath: string) => BaseProofGrader | undefined = repairProofGraderFor,
 ): Promise<MainRepairRevertOutcome> {
   const taskId = mainRepairTaskId(request.offendingSha);
   const log = (step: string, extra: Record<string, unknown> = {}) =>
@@ -41629,12 +41694,15 @@ export async function openMainRepairRevertPr(
     const evidence = { testFiles, ...(revertDiff === undefined ? {} : { revertDiff }) };
     const anchor = testFiles.length > 0 ? undefined : diffAnchor(revertDiff);
     if (anchor?.kind === "unavailable") log("main-repair.revert_anchor_unavailable", { offending_sha: request.offendingSha, reason: anchor.reason });
+    // W1-T13351: a failing suite can pass at the base under the proof executor; grade before the body is opened.
+    const body = await withGradedRepairProofs("main-repair.revert", mainRepairRevertBody(request, evidence), worktreePath,
+      revertDiff ?? diffSinceMergeBase(worktreePath), undefined, repairProofGrader, log);
     await gitPushRunBranchAsync(worktreePath, { stdio: "ignore" });
     const subject = request.offendingPr !== undefined ? `revert #${request.offendingPr}` : `revert ${request.offendingSha.slice(0, 12)}`;
     const created = (await fetch(
       ratifyPrCreateRestArgs(owner, repo, {
         title: reviewerRegressionRevertText(request)?.title ?? `revert(main): ${subject}, the first red merge on ${request.branch}`,
-        body: mainRepairRevertBody(request, evidence),
+        body,
         head: branch,
         base: request.branch,
       }),
@@ -43547,6 +43615,66 @@ export function capabilityInspectCommand(rest: string[], deps: Pick<AuthorityCom
   return batches.some((batch) => batch.results.some((r) => r.verdict === "refuse")) ? 1 : 0;
 }
 
+/**
+ * W1-T10858: reconcile one UTC day's metered cash receipts against one Azure actual-cost export, and ledger one
+ * `cash.invoice.reconciled` row per open-weight deployment. The one composition `rmd cash-reconcile` and the
+ * measurement cadence share. Reads files and the ledger only; it never sends a request.
+ */
+async function runCashInvoiceReconcile(config: Config, source: CostExportSource & { day: string }, runId: string): Promise<CashInvoiceReconciliation> {
+  const stateDir = join(config.root, "state");
+  const result = reconcileCashInvoice({ day: source.day, receipts: await readCashInvoiceReceipts(stateDir, source.day),
+    exportCsv: source.text, accounts: cashInvoiceAccounts(config) });
+  recordCashInvoiceVerdicts(stateDir, result, source, runId);
+  return result;
+}
+
+/** The measurement cadence's reconcile: the newest export file under `<state>/cost-exports/`, once per day and file. */
+async function reconcileNewestCostExport(config: Config, clock: Clock): Promise<void> {
+  const stateDir = join(config.root, "state");
+  const candidate = await newestCostExportAsync(stateDir, clock.iso().slice(0, 10));
+  if (candidate === undefined) return;
+  const runId = `CASH-INVOICE-CADENCE-${clock.now()}`;
+  if ("refused" in candidate) {
+    recordCashInvoiceFailure(stateDir, "unparsed", candidate, runId, new Error(candidate.refused));
+    return;
+  }
+  try {
+    const result = reconcileCashInvoice({ day: candidate.day, receipts: await readCashInvoiceReceiptsAsync(stateDir, candidate.day),
+      exportCsv: candidate.text, accounts: cashInvoiceAccounts(config) });
+    recordCashInvoiceVerdicts(stateDir, result, candidate, runId);
+  }
+  catch (error) {
+    // Recorded, not erased: the ledger row names the day, the file and the reason, the pair is not retried, and the
+    // sibling cadence work still runs.
+    recordCashInvoiceFailure(stateDir, candidate.day, candidate, runId, error);
+  }
+}
+
+/** `rmd cash-reconcile --day <YYYY-MM-DD> --export <csv>`. Exit 0 reconciled and ledgered, 1 failed, 2 bad usage. */
+export async function cashReconcileCommand(rest: string[], host: { config?: () => Config; clock?: Clock; out?: (line: string) => void;
+  err?: (line: string) => void } = {}): Promise<number> {
+  const out = host.out ?? ((line: string) => process.stdout.write(`${line}\n`));
+  const err = host.err ?? ((line: string) => process.stderr.write(`${line}\n`));
+  const bad = unknownArgError("cash-reconcile", rest, ["--day", "--export"]);
+  const day = flagValue(rest, "--day");
+  const file = flagValue(rest, "--export");
+  if (bad || !day || !/^\d{4}-\d{2}-\d{2}$/.test(day) || !file) {
+    err(`${bad ?? "rmd cash-reconcile: --day <YYYY-MM-DD> and --export <csv> are required"}\nusage: ${commandSyntax("cash-reconcile")}`);
+    return 2;
+  }
+  try {
+    const text = readFileSync(file, "utf8");
+    const result = await runCashInvoiceReconcile((host.config ?? loadConfig)(), { path: file, text, digest: costExportDigest(text), day },
+      `CASH-INVOICE-${day}-${(host.clock ?? systemClock).now()}`);
+    out(JSON.stringify(result));
+    return 0;
+  } catch (error) {
+    // Exit 1 with the reason on stderr: an unreadable export or ledger, never a silent zero.
+    err(`rmd cash-reconcile: ${error instanceof Error ? error.message : String(error)}`);
+    return 1;
+  }
+}
+
 const COMMANDS: readonly CommandSpec[] = [
   {
     name: "run-task",
@@ -43784,6 +43912,12 @@ const COMMANDS: readonly CommandSpec[] = [
     syntax: "rmd decisions probe --candidate <name> --input-file <file> --questions-file <file> [--role <role>]",
     summary: "Ask one decision model one question set about one input, and print the row it wrote.",
     detail: "W1-T12416: sends ONE paid cash request to a candidate named in the decision_models section of .remudero/mounts.yaml. The questions file is a JSON array of yes-no, choice (2 to 255 typed options) and score (2 to 10 ordered levels) questions, each with a name and instructions; a bad set is refused before any reservation. The request reserves on its input size plus a 64-token output margin against the normal daily cash cap, settles from the reply's usage at the candidate's own price row, and writes one decision.answered row: role, input digest, candidate, deployment, served model, latency, reserved and settled dollars, usage, and each question's distribution, abstention or rejection. A candidate whose cashDeploymentEndpoints entry or key is missing is unavailable and sends nothing. Shadow only: no gate, route or judge reads the row. Exit 0 answered, 1 refused, unavailable or failed, 2 bad usage.",
+  },
+  {
+    name: "cash-reconcile",
+    syntax: "rmd cash-reconcile --day <YYYY-MM-DD> --export <csv>",
+    summary: "Reconcile one UTC day of metered cash cost against an Azure actual-cost export.",
+    detail: "W1-T10858: reads the day's produced cash receipts from the ledger union and an Azure Cost Management actual-cost export CSV, and compares, per deployment and per meter (input, cached input, output), the metered cost (tokens times the OPENWEIGHT_PRICES row) with the billed cost (the export rows for that deployment's account and meter). The noise band is the largest divergence among the same day's Azure OpenAI deployments (rows with unbilledAzureOpenAi429). Each open-weight deployment gets one cash.invoice.reconciled row: reconciled (inside the band), diverged (outside it, naming the meter, metered, billed and band) or unreconcilable (no traffic, no control, no export rows or incomplete receipts). The deployment bake-off proposal marks an open-weight arm not eligible to lead until its newest verdict is reconciled. Sends no request. The measurement cadence does the same for the newest .csv under <state>/cost-exports/, once per day and file. Exit 0 reconciled, 1 failed, 2 bad usage.",
   },
   {
     name: "judge-replay",
@@ -44940,6 +45074,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   )],
   ["routing-ab", async (rest) => await routingAbCommand(rest, { classifyAttempt: attributeAttemptOutcome })],
   ["decisions", async (rest) => await decisionsCommand(rest, (config, request) => askDecisionModel(config, request), { repoRoot })],
+  ["cash-reconcile", async (rest) => await cashReconcileCommand(rest)],
   ["judge-replay", async (rest) => await judgeReplayCommand(rest, (config, request) => replayJudgeCorpus(config, request), { repoRoot, lane: parseJudgeReplayLane(rest) })],
   ["progress-watchdog", (rest) => progressWatchdogCommand(rest)],
   ["live-edits", async (rest) => await liveEditsCommand(rest)],

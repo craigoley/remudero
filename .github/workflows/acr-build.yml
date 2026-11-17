@@ -131,7 +131,7 @@ permissions:
 jobs:
   build:
     name: az acr build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     # JOB-LEVEL OVERRIDE, THIS JOB ONLY. A `permissions:` block on a job REPLACES the workflow's
     # top-level block for that job rather than merging with it — the top-level `contents: read`
     # above stays the file's committed default (and would still govern any job added later that

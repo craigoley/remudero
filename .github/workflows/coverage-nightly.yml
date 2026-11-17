@@ -38,7 +38,7 @@ concurrency:
 jobs:
   shards:
     name: coverage-nightly-shard (${{ matrix.shard }}/12)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     strategy:
       fail-fast: false
       matrix:
@@ -137,7 +137,7 @@ jobs:
 
   merge:
     name: coverage-nightly
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs: [shards]
     # ci.yml's aggregator measured a 7m merge and sits at 20m (PR #8080); this job adds the impact-map
     # build's own 10m bound below, so a slow map can never cancel the floor ratchet (run 38514060349).
@@ -258,7 +258,7 @@ jobs:
   # that dies before its upload skips `merge`, and that is exactly a night that must alarm.
   notify:
     name: coverage-nightly-notify
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs: [shards, merge]
     if: always()
     # R-50: a checkout, at most one artifact download and two gh calls; the sibling raisers run in

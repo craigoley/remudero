@@ -29,6 +29,7 @@ import { resolveLedgerUnion, type LedgerUnionOptions, type LedgerUnionResult } f
 import {
   createIncrementalLedgerUnion,
   createLedgerRotationMemo,
+  openLedgerUnion,
   readLedgerUnionRecordsMemoized,
   readLedgerUnionRecordsSync,
   realLedgerFs,
@@ -62,6 +63,7 @@ import {
 import type { CiFailureCorpus, CiFailurePair } from "./ci-failure-corpus.js";
 import { loadPlan, loadPlanFromYaml, mergePlanBlobsQuarantiningDuplicates, PlanBlobCache, type Plan, type Task, type TaskRisk } from "./plan.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
+import { interventionFromLedgerRow, interventionKey, mostChangedFile, OPERATOR_INTERVENTION_STEP, type OperatorInterventionRow } from "./operator-interventions.js";
 import { foldKnowledgeGaps, KNOWLEDGE_MEASURED_STEP, type KnowledgeGapReport } from "./knowledge-gaps.js";
 import { foldLearningOutcomes, type LearningOutcomeReport } from "./knowledge-outcome.js";
 import { seededRandom, seedOf } from "./knowledge-value.js";
@@ -3212,6 +3214,174 @@ export interface CiLearningShardDraft {
   verify: "human";
   /** {@link CI_LEARNING_REMEDY_SURFACE}. */
   remedySurface: string;
+  /** W1-T12837: present when the draft answers a repeated HAND FIX rather than a red gate. */
+  handFix?: HandFixClass;
+}
+
+// ── W1-T12837: a repeated hand-fix class is a lesson the fleet never learned ─────────────────────
+// MEASURED 2026-11-15: no commit touched learnings/ in three weeks while the ledger held 234 distinct
+// hand actions. The rung's only corpus was red-gate/green-commit pairs; operator.intervention rows
+// (W1-T12836) carry the cause class and the files the hand changed, and nothing read them.
+
+/** Trailing days one hand-fix class is counted over. */
+export const HAND_FIX_WINDOW_DAYS = 14;
+/** A class seen fewer times than this is one incident, not a pattern. */
+export const HAND_FIX_MIN_COUNT = 2;
+/** A retired class is drafted once more when its count has grown by this factor since the retirement. */
+export const HAND_FIX_RETIRED_REDRAFT_FACTOR = 2;
+/** The class marker inside an origin: `hand-fix:<class key>#<count>`. The count is the class's count AT DRAFTING.
+ *  plan.ts admits a new learnings file only for an origin starting `ci-learning:` (newLessonAllowed), so the
+ *  drafted origin is `ci-learning:hand-fix:<class key>#<count>`; {@link handFixClassOfOrigin} reads either form. */
+export const HAND_FIX_CLASS_MARKER = "hand-fix:";
+export const HAND_FIX_ORIGIN_PREFIX = `ci-learning:${HAND_FIX_CLASS_MARKER}`;
+
+/** One hand fix of a class: the PR it landed on, the hand commit and the files it changed. */
+export interface HandFixInstance {
+  target: string;
+  pr?: number;
+  commit?: string;
+  at: string;
+  files: string[];
+}
+
+/** One hand-fix class: cause class plus most-changed file. `cause` is the fleet state the last attempt left failing. */
+export interface HandFixClass {
+  key: string;
+  cause: string;
+  file: string;
+  count: number;
+  instances: HandFixInstance[];
+}
+
+/** What the rung reads to find repeated hand fixes. */
+export interface HandFixInput {
+  rows: readonly OperatorInterventionRow[];
+  now: Date;
+  /** Origins of drafts the plan holds as retired; each is redrafted only after its class's count doubles. */
+  retiredOrigins?: readonly string[];
+}
+
+/** Read the scheduled rung's PR hand-fix evidence and the retired hand-fix origins it may redraft. */
+export async function ciLearningHandFixInput(stateRoot: string, checkoutRoot: string, now: Date): Promise<HandFixInput> {
+  const stateDir = join(stateRoot, "state");
+  const rows: Array<Record<string, unknown>> = [];
+  const unread: string[] = [];
+  const malformed: string[] = [];
+  if (existsSync(stateDir)) {
+    for await (const row of openLedgerUnion(stateDir, {
+      step: OPERATOR_INTERVENTION_STEP,
+      sinceTs: fixedClock(now.getTime() - HAND_FIX_WINDOW_DAYS * 86_400_000).iso(),
+      onUnreadDirectory: (path, error) => unread.push(`${path}: ${String(error)}`),
+      onUnreadArchive: (path) => unread.push(path),
+      onUnreadLive: (path) => unread.push(path),
+      onMalformedRow: (finding) => malformed.push(`${finding.path}:${finding.rowOrdinal}`),
+    })) rows.push(row);
+  }
+  if (unread.length > 0 || malformed.length > 0) {
+    throw new Error(`operator.intervention ledger is incomplete${unread.length ? `: ${unread.join(", ")}` : `: malformed rows ${malformed.join(", ")}`}`);
+  }
+  const planPath = join(checkoutRoot, "plan", "tasks.yaml");
+  const plan = existsSync(planPath) ? loadPlan(planPath) : undefined;
+  const retiredOrigins = (plan?.tasks ?? [])
+    .filter((task) => task.retirement !== undefined && task.origin?.startsWith(HAND_FIX_ORIGIN_PREFIX))
+    .map((task) => task.origin!)
+    .sort();
+  return {
+    rows: rows.map(interventionFromLedgerRow).filter((row): row is NonNullable<typeof row> => row !== undefined),
+    now,
+    retiredOrigins,
+  };
+}
+
+export function handFixClassKey(cause: string, file: string): string {
+  return `${cause}@${file}`;
+}
+
+/** The class key a hand-fix origin names, or undefined for any other origin. */
+export function handFixClassOfOrigin(origin: string): string | undefined {
+  const bare = origin.startsWith("ci-learning:") ? origin.slice("ci-learning:".length) : origin;
+  if (!bare.startsWith(HAND_FIX_CLASS_MARKER)) return undefined;
+  return bare.slice(HAND_FIX_CLASS_MARKER.length).replace(/#\d+$/, "");
+}
+
+/** The class count an origin recorded at drafting; 0 when the origin carries none. */
+export function handFixCountOfOrigin(origin: string): number {
+  const m = /#(\d+)$/.exec(origin);
+  return m ? Number(m[1]) : 0;
+}
+
+/** Group PR-surface interventions that recorded a changed file by cause class and most-changed file, over the window. */
+export function collectHandFixClasses(input: HandFixInput): HandFixClass[] {
+  const sinceMs = input.now.getTime() - HAND_FIX_WINDOW_DAYS * 86_400_000;
+  const seen = new Set<string>();
+  const classes = new Map<string, HandFixClass>();
+  for (const row of input.rows) {
+    const file = mostChangedFile(row);
+    const atMs = Date.parse(row.at); // expiring-fixture: exempt -- a lookback window over ledger rows, not a fixture stamp
+    if (file === undefined || !Number.isFinite(atMs) || atMs < sinceMs || atMs > input.now.getTime()) continue;
+    const rowKey = interventionKey(row);
+    if (seen.has(rowKey)) continue; // one hand action is one count however many times its row was read
+    seen.add(rowKey);
+    const key = handFixClassKey(row.cause_class, file);
+    const prMatch = /^pr#(\d+)/.exec(row.target);
+    const cls = classes.get(key) ?? { key, cause: row.cause_class, file, count: 0, instances: [] };
+    cls.count += 1;
+    cls.instances.push({
+      target: row.target,
+      ...(prMatch ? { pr: Number(prMatch[1]) } : {}),
+      ...(row.evidence?.commit !== undefined ? { commit: row.evidence.commit } : {}),
+      at: row.at,
+      files: [...(row.evidence?.files ?? [])],
+    });
+    classes.set(key, cls);
+  }
+  return [...classes.values()]
+    .map((c) => ({ ...c, instances: c.instances.sort((a, b) => a.at.localeCompare(b.at)) }))
+    .sort((a, b) => (b.count !== a.count ? b.count - a.count : a.key.localeCompare(b.key)));
+}
+
+/** The classes worth a draft now: repeated, and neither held by an open/merged origin nor retired short of doubling. */
+export function qualifyingHandFixClasses(input: HandFixInput, alreadyFiledFindingIds: readonly string[]): HandFixClass[] {
+  const retired = new Set(input.retiredOrigins ?? []);
+  const held = new Set<string>();
+  const retiredCount = new Map<string, number>();
+  for (const origin of alreadyFiledFindingIds) {
+    const key = handFixClassOfOrigin(origin);
+    if (key === undefined) continue;
+    if (retired.has(origin)) retiredCount.set(key, Math.max(retiredCount.get(key) ?? 0, handFixCountOfOrigin(origin)));
+    else held.add(key); // an open draft or a merged lesson
+  }
+  for (const origin of retired) {
+    const key = handFixClassOfOrigin(origin);
+    if (key !== undefined) retiredCount.set(key, Math.max(retiredCount.get(key) ?? 0, handFixCountOfOrigin(origin)));
+  }
+  return collectHandFixClasses(input).filter((c) => {
+    if (c.count < HAND_FIX_MIN_COUNT || held.has(c.key)) return false;
+    const was = retiredCount.get(c.key);
+    return was === undefined || c.count >= was * HAND_FIX_RETIRED_REDRAFT_FACTOR;
+  });
+}
+
+function handFixDraft(c: HandFixClass): CiLearningShardDraft {
+  const fixed = [...new Set(c.instances.flatMap((i) => i.files))];
+  const prs = [...new Set(c.instances.flatMap((i) => (i.pr === undefined ? [] : [i.pr])))].sort((a, b) => a - b);
+  return {
+    findingId: `${HAND_FIX_ORIGIN_PREFIX}${c.key}#${c.count}`,
+    title:
+      `A PERSON HAND-FIXED ${c.file} ${c.count} TIMES IN ${HAND_FIX_WINDOW_DAYS} DAYS AFTER THE FLEET LEFT ` +
+      `${c.cause} FAILING — carry the lesson to the lane that keeps handing it over`,
+    gate: c.cause,
+    pr: prs[0] ?? 0,
+    prs,
+    repairFiles: fixed,
+    dominantRepairFiles: [{ file: c.file, prs: c.count }],
+    action: "unclear",
+    // LAW 5 and the operator ruling "draft automatically, you release": parked until a person releases it.
+    author_class: "machine",
+    verify: "human",
+    remedySurface: CI_LEARNING_REMEDY_SURFACE,
+    handFix: c,
+  };
 }
 
 /** One firing's outcome. */
@@ -3252,6 +3422,7 @@ export interface CiLearningCadenceRunResult {
 export function mintCiLearningShards(
   corpus: CiFailureCorpus,
   alreadyFiledFindingIds: readonly string[],
+  handFix?: HandFixInput,
 ): CiLearningMintResult {
   const unreadableShas = [...corpus.unreadableShas];
   const blind = corpus.status === "unreadable";
@@ -3293,7 +3464,21 @@ export function mintCiLearningShards(
 
   const drafts: CiLearningShardDraft[] = [];
   const excludedFindings: string[] = [];
-  for (const c of rankedClusters) {
+  // W1-T12837: hand-fix classes share this ceiling, ranked with the clusters by evidence count (a CI
+  // cluster first on a tie), so neither source can starve the other of the firing's draft slots.
+  const handFixClasses = handFix === undefined ? [] : qualifyingHandFixClasses(handFix, alreadyFiledFindingIds);
+  const candidates: ({ kind: "ci"; count: number; c: (typeof rankedClusters)[number] } | { kind: "hand-fix"; count: number; c: HandFixClass })[] = [
+    ...rankedClusters.map((c) => ({ kind: "ci" as const, count: c.prs.length, c })),
+    ...handFixClasses.map((c) => ({ kind: "hand-fix" as const, count: c.count, c })),
+  ].sort((a, b) => (b.count !== a.count ? b.count - a.count : a.kind === b.kind ? 0 : a.kind === "ci" ? -1 : 1));
+  for (const cand of candidates) {
+    if (cand.kind === "hand-fix") {
+      const draft = handFixDraft(cand.c);
+      if (drafts.length >= CI_LEARNING_MINT_CEILING) excludedFindings.push(draft.findingId);
+      else drafts.push(draft);
+      continue;
+    }
+    const c = cand.c;
     if (drafts.length >= CI_LEARNING_MINT_CEILING) {
       excludedFindings.push(c.firstId); // the CAUSE is named, never dropped
       continue;
@@ -3369,9 +3554,15 @@ export interface CiLearningFilingResult {
 /** Shard slug length, matching the `plan/tasks.d/` convention inbox.ts files under. */
 const CI_LEARNING_SLUG_MAX = 72;
 
+/** Both CI-repair and hand-fix lessons share one machine-authored, human-verified record header. */
+function ciLearningMachineHeader(files: readonly string[], count: number, population?: readonly number[]): string[] {
+  return machineShardHeaderLines(files, count, population);
+}
+
 /** Render ONE draft as a single-element YAML task list — the shard file's whole contents.
  *  `origin:` carries the finding id, so it is both Rule 17 provenance and the idempotency key. */
 export function ciLearningShardYaml(draft: CiLearningShardDraft, taskId: string, population?: readonly number[]): string {
+  if (draft.handFix !== undefined) return handFixShardYaml(draft, draft.handFix, taskId, population);
   const q = (v: string) => JSON.stringify(v); // YAML accepts JSON scalars, so this escapes correctly
   const lessonsFile = ciLearningLessonsFile(draft.findingId);
   const fixtureDir = ciLearningGoldenFixtureDir(draft.findingId);
@@ -3382,7 +3573,7 @@ export function ciLearningShardYaml(draft: CiLearningShardDraft, taskId: string,
     "  depends_on: []",
     "  type: implement",
     // Unjudged until the machine-filing judge rules (operator ruling 2026-09-29); LAW 5's mark rides it.
-    ...machineShardHeaderLines([lessonsFile], draft.prs.length, population),
+    ...ciLearningMachineHeader([lessonsFile], draft.prs.length, population),
     `  origin: ${q(draft.findingId)}`,
     // W1-T3052: store PRs as data; the highest monotonic PR is efficacy's clock-free watermark.
     // The origin's first PR alone cannot distinguish refusals after the lesson landed.
@@ -3396,6 +3587,37 @@ export function ciLearningShardYaml(draft: CiLearningShardDraft, taskId: string,
     `    - claim: ${q("the lesson carries the golden verdict prompt-surface-gate admits for a learnings path")}`,
     `      proof: ${q(`grep: ${fixtureDir} in ${lessonsFile}`)}`,
     `  note: ${q(`Filed by the ci-learning rung from ${draft.findingId}. The ${draft.gate} gate went red on #${draft.pr} and was repaired; the repair touched ${draft.repairFiles.join(", ") || "no recorded file"}. Recommended action: ${draft.action ?? "unclear"}. Remedy surface: ${draft.remedySurface}. prompt-surface-gate admits a learnings change only with a golden verdict under ${fixtureDir}/ — build it beside the entry, in the layout of test/fixtures/golden-verdicts/ci-clock-sweep-report-lesson/. Name ${fixtureDir} in the entry: this record declares the lessons file alone, so both proofs read it. MACHINE-AUTHORED AND PARKED — a person decides what guidance changes.`)}`,
+    "",
+  ].join("\n");
+}
+
+/** W1-T12837: the hand-fix draft, through the same machine header as every machine shard — `verify: human` and
+ *  `author_class: machine` come from {@link machineShardHeaderLines}, so the draft is parked until released. */
+function handFixShardYaml(draft: CiLearningShardDraft, cls: HandFixClass, taskId: string, population?: readonly number[]): string {
+  const q = (v: string) => JSON.stringify(v);
+  const lessonsFile = ciLearningLessonsFile(draft.findingId);
+  const fixtureDir = ciLearningGoldenFixtureDir(draft.findingId);
+  const fixed = draft.repairFiles.join(", ") || cls.file;
+  const cites = cls.instances
+    .map((i) => `${i.pr === undefined ? i.target : `#${i.pr}`}${i.commit === undefined ? "" : ` (${i.commit})`}`)
+    .join(", ");
+  return [
+    `- id: ${taskId}`,
+    `  title: ${q(draft.title)}`,
+    "  repo: remudero",
+    "  depends_on: []",
+    "  type: implement",
+    ...ciLearningMachineHeader([lessonsFile], cls.count, population),
+    `  origin: ${q(draft.findingId)}`,
+    "  files:",
+    `    - ${lessonsFile}`,
+    `  design: ${q(machineShardDesign(undefined, { none: `the task adds one new learnings file, ${lessonsFile}, scoped to ${fixed}, and its golden verdict fixture; no existing lesson, gate or code path changes` }))}`,
+    "  acceptance:",
+    `    - claim: ${q(`a worker editing ${fixed} is reached by a matched learnings entry that says what the fleet's last attempt left failing (${cls.cause}) and how the hand fixed it`)}`,
+    `      proof: ${q(`grep: ${cls.file} in ${lessonsFile}`)}`,
+    `    - claim: ${q("the lesson carries the golden verdict prompt-surface-gate admits for a learnings path")}`,
+    `      proof: ${q(`grep: ${fixtureDir} in ${lessonsFile}`)}`,
+    `  note: ${q(`Filed by the ci-learning rung from ${draft.findingId}. A person hand-fixed ${cls.file} ${cls.count} times in ${HAND_FIX_WINDOW_DAYS} days; the fleet's last attempt left ${cls.cause} failing. Hand fixes: ${cites}. Files changed: ${fixed}. Remedy surface: ${draft.remedySurface}. prompt-surface-gate admits a learnings change only with a golden verdict under ${fixtureDir}/ — build it beside the entry, in the layout of test/fixtures/golden-verdicts/ci-clock-sweep-report-lesson/. Name ${fixtureDir} in the entry. MACHINE-AUTHORED AND PARKED — the operator releases it; no text from it reaches a worker prompt until the record is released and merged.`)}`,
     "",
   ].join("\n");
 }

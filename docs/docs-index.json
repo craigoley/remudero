@@ -590,6 +590,12 @@
       "grepHint": "policy.ts comment forensics"
     },
     {
+      "path": "docs/forensics/pooled-test-exit-latches.md",
+      "title": "Pooled test runs and the daemon's exit latches",
+      "summary": "The merge-sweep suites for W1-T6595, W1-T9212 and W1-T12059 failed their first pooled attempt in",
+      "grepHint": "Pooled test runs and the daemon's exit latches"
+    },
+    {
       "path": "docs/forensics/proof-queue-audit.md",
       "title": "proof-queue-audit.ts forensics",
       "summary": "The measured forensics, incident narratives and design arguments removed from",

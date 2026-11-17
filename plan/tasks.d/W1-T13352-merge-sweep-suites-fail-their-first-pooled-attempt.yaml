@@ -4,7 +4,7 @@
   depends_on: []
   priority: 2
   type: recon
-  verify: human
+  verify: human  # parked with the retirement: any risk ruling judged the record before this edit
   risk: high # report only, no code change; spans the pool runner and three sweep suites
   origin: "operator-session#ubuntu-2604-main-red-2026-11-17"
   plan_refs:
@@ -16,7 +16,8 @@
   files:
     - docs/forensics/pooled-test-exit-latches.md
     - docs/docs-index.json
-  status: queued
+  status: blocked
+  retirement: retired  # retired by rule 1 (already shipped or declined) of the operator's mechanical rulings (2026-10-21, W1-T10371): a merged pull request on main carries this record's Remudero-Task trailer. Retired by the machine-filing judge, 2026-11-17T17:52:58.297Z
   attempts: 0
   acceptance:
     - claim: "The report names the shared state that turns direct-merged into direct-merge-preflight-refused when these suites share one pooled process, with the file that writes it and the read that sees it"
@@ -44,12 +45,12 @@
   risk_ruling:
     verdict: "low"
     action: escalate
-    confidence: 0.85
+    confidence: 0.9
     reasons:
-      - "The task is typed recon with a report as its deliverable. The acceptance criteria ask for a report and a single recommended fix task, not for changes to merge, deploy or review policy."
-      - "The description and declared files (a pool script and three test files) show no secrets, credentials, auth, data deletion or irreversible action."
-      - "The rationale cites specific CI run IDs and a local reproduction attempt (25/25 pass), and criterion 1 requires a local pooled reproduction, so the finding can be verified from what is shown."
-      - "The gates state is clean: operator-authored, and the family track record is a Beta mean of 0.88 with 26 merged. The zero PR references in the evidence line is a minor weakness, offset by the run IDs."
+      - "The declared files are a new forensics report and docs/docs-index.json, so the description shows a docs-only change with no code, secrets, auth, or policy surface."
+      - "The task is a recon whose report recommends a fix task. The fix itself is split out to W1-T13363, so this task does not change merge, deploy, or review policy."
+      - "The acceptance criteria are verifiable from the report (writer file, reader, local reproduction, probe analysis). The filing already names the writer and the mechanism, so the finding is checkable."
+      - "The gates state is clean: author_class is operator, filingTime is true, and the family track record is 26 merged with a Beta mean of 0.88."
       - "the judge said proceed, but W1-T13352: at verify: auto it fails lint (proof-dialect)"
-    judged_at: "2026-11-17T12:29:34.920Z"
-    pin: "ee9cd1cb8c6c91a8bd8a78e1ea3367f0067cf2ad0597ed642dc929b02286c13b"
+    judged_at: "2026-11-17T14:43:28.603Z"
+    pin: "1a1b837d1b83706e30c490742e5b9e9dfea651aa2d86c72f3476d191b437da53"

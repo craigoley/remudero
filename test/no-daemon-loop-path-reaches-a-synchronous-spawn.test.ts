@@ -615,7 +615,9 @@ test("W1-T9615: the SRE lane's daemon input reaches no synchronous plan-PR prefl
   assert.equal(codeOnly('git(["show", `origin/main:${rel(a)}`]); // main'), 'git(["",  rel(a) ""]); ', "only code is left");
 
   const pass = loopReachable(fns, "runSreLanePass");
-  assert.ok(pass.has("stageFeedbackCapture") && pass.has("readLandedFeedbackEntry"), "the pass reaches its staging capture and its landed read");
+  assert.ok(pass.has("stageFeedbackCaptureAsync") && pass.has("readLandedFeedbackEntryAsync"), "the pass reaches its staging capture and its landed read");
+  // W1-T13368: both are the awaited forms; the pass names neither synchronous one.
+  assert.ok(!pass.has("stageFeedbackCapture") && !pass.has("readLandedFeedbackEntry"), "the pass reaches a synchronous capture or landed read");
   for (const seed of ["runSreLanePass", "daemonSreLaneInput"]) {
     const reach = loopReachable(fns, seed);
     assert.deepEqual(SYNC_PREFLIGHT_CHAIN.filter((name) => reach.has(name)), [], `${seed} reaches the synchronous plan-PR preflight`);

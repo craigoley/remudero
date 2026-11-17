@@ -57,7 +57,7 @@ concurrency:
 jobs:
   plan-load:
     name: plan-load
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     # R-50: observed push runs complete in ~25-30 seconds; 20m bounds a genuine hang with
     # generous headroom.
     timeout-minutes: 20

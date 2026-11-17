@@ -11,13 +11,15 @@
  * four counts. This suite pins the daemon arm to the filing contract the CLI already honours.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
 import { fixedClock } from "#src/lib/clock.js";
 import { buildCiLearningCadenceRunner } from "#src/run-task.js";
+import { LEDGER_FILENAME } from "#src/lib/ledger-path.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 // @host-capability isolated-temp-root: each test process owns its writable ledger fixture.
 const fixture = mkdtempSync(join(tmpdir(), "rmd-test-w1t3324-"));
@@ -187,6 +189,42 @@ test("W1-T3324: every record the scheduled path drafts still carries author_clas
     assert.equal(d.author_class, "machine", "a machine-filed record must say so");
     assert.equal(d.verify, "human", "and must park until a ruling or an operator releases it");
   }
+});
+
+test("W1-T12837: the scheduled runner reads operator.intervention ledger rows and drafts the repeated hand-fix class", async () => {
+  const stateRoot = join(fixture, "hand-fix-state");
+  const stateDir = join(stateRoot, "state");
+  mkdirSync(stateDir, { recursive: true });
+  const now = new Date("2026-11-16T12:00:00.000Z");
+  const rows = [111, 112].map((pr, i) => ({
+    ts: now.toISOString(), run_id: `INTERVENTION-${pr}`, task_id: "INCIDENT", step: "operator.intervention",
+    at: new Date(now.getTime() - (i === 0 ? 2 : 5) * 86_400_000).toISOString(), surface: "pr", action: "push",
+    target: `pr#${pr}`, intervention_actor: "operator_craig", cause_class: "ci-gate:owner:lint-failed", source: "test",
+    evidence: { commit: `c${pr}`, files: ["src/lib/a.ts"], files_total: 1 },
+  }));
+  writeFileSync(join(stateDir, LEDGER_FILENAME), `${rows.map((r) => JSON.stringify(r)).join("\n")}\n`);
+
+  const filer = recordingFiler();
+  const run = buildCiLearningCadenceRunner({
+    root: stateRoot,
+    checkoutRoot: REPO_ROOT,
+    loadWindow: () => ({ prs: [] }) as never,
+    fileShards: filer.fn as never,
+    planOrigins: [],
+    pendingOrigins: () => [],
+    mergedOrigins: () => [],
+    loadLessons: () => ({ status: "unreadable" }) as never,
+    recordAttempt: () => {},
+    recordFire: () => {},
+    clock: fixedClock(now.getTime()),
+  });
+
+  const result = await run();
+  assert.equal(result.draftCount, 1);
+  assert.equal(filer.calls.length, 1, "the scheduled production path must pass the ledger-derived class to its filer");
+  const draft = filer.calls[0]!.drafts[0] as { findingId: string; prs: number[] };
+  assert.equal(draft.findingId, "ci-learning:hand-fix:ci-gate:owner:lint-failed@src/lib/a.ts#2");
+  assert.deepEqual(draft.prs, [111, 112]);
 });
 
 test("W1-T3324: the recorded fire is stamped from the injected clock, never from the wall clock", async () => {

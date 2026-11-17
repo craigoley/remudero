@@ -20,7 +20,7 @@ concurrency:
 jobs:
   dependency-review:
     name: Review
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     # R-50: a single dependency-graph diff review; observed PR runs complete in ~1-2 minutes.
     timeout-minutes: 20
     steps:
@@ -101,7 +101,7 @@ jobs:
   # reason, in `LICENSE_EXEMPTIONS` below (reviewed individually, never silently papered over).
   license-review:
     name: License Review
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     # R-50: a lockfile-diff licence scan; observed PR runs complete in ~1-2 minutes.
     timeout-minutes: 20
     steps:
