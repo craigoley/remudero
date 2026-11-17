@@ -108,7 +108,7 @@ const CANDIDATES = new RegExp(`test-tier-manifest\\.mjs --select-candidates cove
 const SELECT_ALL = new RegExp(`test-tier-manifest\\.mjs --select-all --shard 1/${SHARDS} --base HEAD\\^1`);
 
 test("W1-T5705: with the live flag at 1 a pull_request SOURCE coverage shard runs the narrow selection", () => {
-  assert.equal(SHARDS, 8, "coverage-ratchet must keep its eight-shard matrix");
+  assert.equal(SHARDS, 12, "coverage-ratchet runs its twelve-shard matrix (W1-T13270)");
   const live = run(coverageBody, { GITHUB_EVENT_NAME: "pull_request", RMD_AFFECTED_SUITE_LIVE: "1" }, nodeStub(NARROW_OUT));
   assert.equal(live.status, 0, live.out);
   assert.match(live.calls, /node --import tsx -e/, "the live flag must compute the selector's narrow set");
@@ -162,7 +162,7 @@ test("W1-T5705: each shard stages its selection for the aggregator", () => {
   assert.equal(unstaged.read("coverage-artifact/selection").trim(), "all", "a shard that never selected stages 'all'");
 });
 
-/** Seeds the eight downloaded shard artifacts' selection markers; shard `narrowShard` (0 = none) narrowed. */
+/** Seeds the downloaded shard artifacts' selection markers; shard `narrowShard` (0 = none) narrowed. */
 const seed = (narrowShard: number) => Array.from({ length: SHARDS }, (_, i) =>
   `mkdir -p coverage-shards/coverage-shard-${i + 1}; echo ${i + 1 === narrowShard ? "narrow" : "all"} > coverage-shards/coverage-shard-${i + 1}/selection`).join("\n");
 

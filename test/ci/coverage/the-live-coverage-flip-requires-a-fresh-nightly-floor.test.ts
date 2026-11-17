@@ -18,7 +18,7 @@ import { after, test } from "node:test";
 import { parse as parseYaml } from "yaml";
 
 import {
-  agreeOnFloor, buildProvenance, consumeFloor, main, MAX_AGE_HOURS, nodeMajor, policyDigest, PRODUCERS, selectFloor, sha256, verifyPin,
+  agreeOnFloor, buildProvenance, CI_COVERAGE_SHARD_COUNT, consumeFloor, main, MAX_AGE_HOURS, nodeMajor, policyDigest, PRODUCERS, selectFloor, sha256, verifyPin,
   // @ts-expect-error -- plain .mjs script, no type declarations
 } from "#scripts/coverage-floor.mjs";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
@@ -30,6 +30,8 @@ const NOW = new Date("2026-10-28T12:00:00Z");
 const HEAD = "a".repeat(40);
 const LCOV = "TN:\nSF:src/a.ts\nDA:1,1\nLF:1\nLH:1\nend_of_record\nSF:src/b.ts\nDA:1,0\nLF:1\nLH:0\nend_of_record\n";
 const ALL_GREEN = Object.fromEntries(Array.from({ length: 8 }, (_, i) => [i + 1, 0]));
+// W1-T13270: the merge-group producer runs ci.yml's 12-shard coverage matrix; the nightly runs 8.
+const ALL_GREEN_MERGED = Object.fromEntries(Array.from({ length: CI_COVERAGE_SHARD_COUNT }, (_, i) => [i + 1, 0]));
 const CONSUMER = { repository: REPO, nodeMajor: nodeMajor(), policyDigest: policyDigest(REPO_ROOT) };
 
 const owned: string[] = [];
@@ -217,7 +219,7 @@ test("W1-T5892: a newer merge-group floor is preferred, and a refused newest fal
   const mergedRow = { attempt: 1, conclusion: "success", createdAt: new Date(mergedAt.getTime() - 60_000).toISOString(),
     databaseId: 222, event: "merge_group", headBranch: "gh-readonly-queue/main/pr-1-x", headSha: "c".repeat(40),
     updatedAt: mergedAt.toISOString() };
-  const merged = buildProvenance({ producer: "coverage-merged", lcov: Buffer.from(LCOV), shardExits: ALL_GREEN, root: REPO_ROOT, now: mergedAt,
+  const merged = buildProvenance({ producer: "coverage-merged", lcov: Buffer.from(LCOV), shardExits: ALL_GREEN_MERGED, root: REPO_ROOT, now: mergedAt,
     env: { GITHUB_REPOSITORY: REPO, GITHUB_RUN_ID: "222", GITHUB_RUN_ATTEMPT: "1", GITHUB_EVENT_NAME: "merge_group",
       GITHUB_REF: "refs/heads/gh-readonly-queue/main/pr-1-x", GITHUB_SHA: "c".repeat(40) } });
   const mergedDir = join(pinDir, ".candidates", "coverage-merged-222");
@@ -505,7 +507,7 @@ test("W1-T5892: both producers write provenance beside the lcov they upload", ()
   assert.equal(queue.status, 0, queue.out);
   const p = JSON.parse(queue.read("coverage-merged-artifact/provenance.json"));
   assert.equal(p.producer, "coverage-merged");
-  assert.deepEqual(p.shard_test_exits, ALL_GREEN);
+  assert.deepEqual(p.shard_test_exits, ALL_GREEN_MERGED);
   assert.equal(p.lcov_sha256, sha256(Buffer.from(LCOV)));
   for (const env of [{ GITHUB_EVENT_NAME: "pull_request", MATRIX_RESULT: "success" }, { GITHUB_EVENT_NAME: "merge_group", MATRIX_RESULT: "failure" }]) {
     const none = runStep(seed + merged.run!, env);

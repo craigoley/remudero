@@ -17,6 +17,8 @@
   files:
     - .github/workflows/coverage-nightly.yml
     - test/ci/the-nightly-coverage-merge-reads-premapped-shards.test.ts
+    - test/main-builds-the-test-impact-map-the-shadow-arm-reads.test.ts
+    - test/the-instrumented-suite-runs-nightly-on-main.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -60,6 +62,10 @@
        directory and no compact one), criterion 2 (the impact map reads the compact directories), criterion 3 (one
        fixture shard set merged from premapped and from compact files gives identical lcov bytes). Root through
        `#test/helpers/repo-root.js`.
+    5. Two existing suites pin the merge to the compact directories and move with it (amended 2026-11-17):
+       test/main-builds-the-test-impact-map-the-shadow-arm-reads.test.ts (W1-T6107) and
+       test/the-instrumented-suite-runs-nightly-on-main.test.ts (W1-T5704) now expect each shard's premapped
+       directory in the merge and its compact directory in the impact-map build.
     INVARIANT nightly-floor-identity: the merged lcov's bytes for the same inputs do not change. W1-T5923 made the
     premapped replay byte-identical to the serial merge; keep that proof passing.
   falsifier: |
