@@ -41,6 +41,7 @@ import { serveBoardCatalogs, type BoardCatalogClient, type BoardCatalogContext }
 import { deriveLastPoll, readDiskFreeBytes, readGhRateLimitRemaining } from "./daemon-health.js";
 import { deployAutoPath, deployImageManualPath, deployMarkerPath } from "./deployer.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
+import { TOKEN_REFRESHED_STEP, TOKEN_REFRESH_FAILED_STEP } from "./github-app.js";
 import { feedbackDir, listFeedback, type FeedbackEntry } from "./feedback.js";
 import { overlayQueuedFeedbackEntries, queuedFeedbackDir } from "./feedback-landing.js";
 import { heldDependencyRoots } from "./held-dependency-roots.js";
@@ -940,6 +941,31 @@ function ledgerRowsOver(ledgerDir: string, window: { fromMs: number; toMs: numbe
   return { rows, read: { from: fixedClock(window.fromMs).iso(), rotations, unread: union.unread.map((path) => basename(path)) } };
 }
 
+
+/**
+ * W1-T13476: of the `github_app.token_refresh_failed` and `github_app.token_refreshed` rows, keeps only the one
+ * status-board's `deriveOperatorItems` picks for each step (the first row whose `ts` is newer than every row before it);
+ * every other row passes unchanged and in order. The token fallback reads only those two rows, and site's rotations
+ * held 3.4 M failed refreshes from 2026-11-10, so one decisions build parsed 774 MB of gate digests (34.7 s).
+ */
+export function keepNewestTokenRefreshRows<R extends Record<string, unknown>>(rows: R[]): R[] {
+  const newest = new Map<unknown, R>();
+  for (const row of rows) {
+    if (row.step !== TOKEN_REFRESH_FAILED_STEP && row.step !== TOKEN_REFRESHED_STEP) continue;
+    const held = newest.get(row.step);
+    if (!held || tsIsNewer(row.ts, held.ts)) newest.set(row.step, row);
+  }
+  if (newest.size === 0) return rows;
+  const kept = new Set(newest.values());
+  return rows.filter((row) => (row.step !== TOKEN_REFRESH_FAILED_STEP && row.step !== TOKEN_REFRESHED_STEP) || kept.has(row));
+}
+/** status-board's `isNewer`: an unparseable `a` is never newer; an unparseable `b` makes any parseable `a` newer. */
+const tsIsNewer = (a: unknown, b: unknown): boolean => {
+  const pa = typeof a === "string" ? Date.parse(a) : Number.NaN;
+  if (!Number.isFinite(pa)) return false;
+  const pb = typeof b === "string" ? Date.parse(b) : Number.NaN;
+  return !Number.isFinite(pb) || pa > pb;
+};
 /** The `now` view as the read-model worker materializes it: one body per instance, keyed `instance=<name>`. */
 export function createNowView(opts: NowViewOptions): {
   name: string;
@@ -1006,13 +1032,13 @@ export function createNowView(opts: NowViewOptions): {
     return `${stores}:${root ? `${mtimeOf(ratificationsPath(root)) ?? "-"}:${mtimeOf(policyPath(root)) ?? "-"}` : "none"}:${markers}`;
   };
   /** Bump this version whenever the pin/reviewer or operator step set changes. */
-  const gateReducerVersion = "1";
+  const gateReducerVersion = "2";
   const isPinReviewerRow = (row: Record<string, unknown>): boolean => row.step === "rung.unratified" || row.step === "daemon.boot" ||
     row.step === "daemon.freshness_not_stale" || row.step === "review.post_refused" || typeof row.step === "string" && row.step.startsWith("review.stale_reviewer_");
   const operatorSteps = /cost\.anomaly|daemon\.image_drift|daemon\.boot|github_app\.token_refresh/;
   const isOperatorRow = (row: Record<string, unknown>): boolean => typeof row.step === "string" && operatorSteps.test(row.step);
   const gateLinePattern = /rung\.unratified|daemon\.boot|daemon\.freshness_not_stale|review\.post_refused|review\.stale_reviewer_|cost\.anomaly|daemon\.image_drift|github_app\.token_refresh/;
-  const reduceGateRows = (rows: Array<Record<string, unknown>>) => rows.filter((row) => isPinReviewerRow(row) || isOperatorRow(row));
+  const reduceGateRows = (rows: Array<Record<string, unknown>>) => keepNewestTokenRefreshRows(rows.filter((row) => isPinReviewerRow(row) || isOperatorRow(row)));
   const gateMemos = new Map<string, ReturnType<typeof createLedgerRotationMemo>>();
   const gateRows = new Map<string, Array<Record<string, unknown>>>();
   /** The gate rows of one decisions build: complete, or the last complete read's rows with `complete: false`. */
@@ -1030,11 +1056,12 @@ export function createNowView(opts: NowViewOptions): {
     pass.complete();
     if (read.archiveCount > 0) log("read_model.now_gate_digests", { instance: instance.name, ...digests.counts() });
     const complete = read.ok && read.liveFileRead && read.torn === 0 && read.unclassified.length === 0;
+    const rows = keepNewestTokenRefreshRows(read.rows);
     if (complete) {
-      gateRows.set(instance.name, read.rows);
-      holds.account(`now:gate-rows@${instance.name}`, read.rows, read.rows.length, "rows");
+      gateRows.set(instance.name, rows);
+      holds.account(`now:gate-rows@${instance.name}`, rows, rows.length, "rows");
     }
-    return { complete, rows: complete ? read.rows : gateRows.get(instance.name) ?? read.rows };
+    return { complete, rows: complete ? rows : gateRows.get(instance.name) ?? rows };
   };
   const pinReviewerSources = (instance: NowInstance, nowMs: number, ledger: { complete: boolean; rows: Array<Record<string, unknown>> }): HumanGateSource[] => {
     const complete = ledger.complete;
