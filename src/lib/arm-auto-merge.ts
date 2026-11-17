@@ -23,6 +23,7 @@
  * decomposition step that lifts those shared REST readings into their own lib module could then
  * have both run-task.ts and this file import the ONE copy; noted as a follow-up, not done here.
  */
+import { registerProcessExitLatch } from "./process-exit-latches.js";
 import { systemClock, type Clock } from "./clock.js";
 import { RmdError } from "./errors.js";
 import { securityMergeHead, securityMergeHeadAsync, securityMetadataGhArgs } from "./security-merge-admission.js";
@@ -1809,6 +1810,7 @@ export function closeDirectMergeAdmissions(reason: string): void {
 export function openDirectMergeAdmissions(): void {
   directMergeAdmissionsClosedBy = undefined;
 }
+registerProcessExitLatch("direct-merge-admissions", openDirectMergeAdmissions); // W1-T13363
 
 export function directMergeOperationsInFlight(): DirectMergeOperation[] {
   return [...directMergeOperations.values()].map(({ settle: _settle, cancelRequested: _cancel, ...operation }) => operation);
