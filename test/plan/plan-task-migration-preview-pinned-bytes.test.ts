@@ -11,9 +11,9 @@ import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { parseTasksFromYaml } from "#src/lib/plan.js";
 
 const record = (id: string, priority = 1, deps: string[] = []) => { const text = `- id: ${id}\n  title: migration fixture\n  repo: remudero\n  type: implement\n  priority: ${priority}\n  depends_on: ${JSON.stringify(deps)}\n`; assert.equal(parseTasksFromYaml(text,"fixture")[0]!.id,id); return text; };
-function fixture(t: TestContext, records: Record<string, string> = {"W1-T1.yaml": record("W1-T1")}, opsText = "[]\n") {
+function fixture(t: TestContext, records: Record<string, string> = {"W1-T1.yaml": record("W1-T1")}, opsText = "[]\n", publicSeed: Record<string, string> = {}) {
   const root = ownedFixtureDir(t, "migration-preview").dir;
-  const seed = {"plan/tasks.yaml": "[]\n", ...Object.fromEntries(Object.entries(records).map(([p,s]) => ["plan/tasks.d/"+p,s]))};
+  const seed = {"plan/tasks.yaml": "[]\n", ...Object.fromEntries(Object.entries(records).map(([p,s]) => ["plan/tasks.d/"+p,s])), ...publicSeed};
   const pub = originWithClone(join(root,"public"), {scope:t,seed});
   const ops = originWithClone(join(root,"ops"), {scope:t,seed:{"plan/tasks.yaml":opsText}});
   const pubCommit=pub.clone.git("rev-parse","HEAD"), opsCommit=ops.clone.git("rev-parse","HEAD");
@@ -52,4 +52,20 @@ test("migration preview retains exact YAML bytes and refuses duplicate moved or 
   const duplicate=fixture(t,undefined,record("W1-T1")); assert.equal(duplicate.run().answer.outcome,"unknown");
   const malformed=fixture(t,{"W1-T1.yaml":"not: [valid"}); assert.equal(malformed.run().answer.outcome,"unknown");
   const moved=fixture(t,{"W1-T1.yaml":record("W1-T1")+"  moved_from: remudero@"+"a".repeat(40)+"\n"}); assert.equal(moved.run().answer.outcome,"none");
+});
+
+
+test("migration preview resolves only committed layout metadata and refuses incompatible private layout", t => {
+  const live = fixture(t);
+  mkdirSync(join(live.pub.clone.dir, ".remudero"));
+  writeFileSync(join(live.pub.clone.dir, ".remudero/layout.json"), "not valid JSON");
+  assert.equal(live.run().answer.candidate.id, "W1-T1", "uncommitted layout bytes cannot change the pinned catalog");
+  const moved = fixture(t, undefined, "[]\n", {
+    ".remudero/layout.json": JSON.stringify({ planDir: "backlog", planMonolith: "backlog/tasks.yaml" }),
+    "backlog/tasks.yaml": "[]\n", "backlog/tasks.d/W1-T2.yaml": record("W1-T2"),
+  });
+  const result = moved.run();
+  assert.equal(result.status, 0, JSON.stringify(result));
+  assert.equal(result.answer.candidate.id, "W1-T2");
+  assert.equal(result.answer.candidate.sourcePath, "backlog/tasks.d/W1-T2.yaml");
 });

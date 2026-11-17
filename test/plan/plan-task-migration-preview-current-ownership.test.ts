@@ -4,7 +4,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { test, type TestContext } from "node:test";
-import { originWithClone } from "#test/helpers/git-repo.js";
+import { gitRepo, originWithClone } from "#test/helpers/git-repo.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
@@ -64,10 +64,9 @@ test("migration preview requires current complete ownership and pinned catalog c
 test("migration preview reads claims from the pinned repository even when local origin is a decoy", t => {
   const f = fixture(t);
   f.pub.clone.git("push", "origin", "HEAD:refs/rmd-dispatch/W1-T1");
-  const decoy = join(f.root, "decoy.git");
-  f.pub.clone.git("init", "--bare", "-b", "main", decoy);
-  f.pub.clone.git("push", decoy, "HEAD:refs/heads/main");
-  f.pub.clone.git("remote", "set-url", "origin", decoy);
+  const decoy = gitRepo({ scope: t, bare: true, kind: "migration-decoy" });
+  f.pub.clone.git("push", decoy.dir, "HEAD:refs/heads/main");
+  f.pub.clone.git("remote", "set-url", "origin", decoy.dir);
   const result = f.run();
   assert.equal(result.status, 0, JSON.stringify(result));
   assert.equal(result.answer.outcome, "none", "the real selected origin claim must not disappear behind a same-commit decoy");
