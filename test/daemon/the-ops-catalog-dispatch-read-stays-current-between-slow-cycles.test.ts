@@ -228,7 +228,7 @@ test("W1-T13052 criterion 4: failed or hung refreshes leave the dispatch read st
     const failingSource = createOpsCatalogShadowSource({ repository: REPOSITORY }, failing.api);
     assert.equal((await failingSource.refresh()).outcome, "ok");
     failing.fail(true);
-    assert.deepEqual(await failingSource.refresh(), { outcome: "stale" });
+    assert.deepEqual(await failingSource.refresh(), { outcome: "stale", refusalStage: "branch_ref" });
     // A hung refresh: the timer never stacks a second read, and the completed evidence expires at the bound.
     const hung = catalog(ops);
     hung.publish(opsYaml("private title again"));
@@ -246,7 +246,7 @@ test("W1-T13052 criterion 4: failed or hung refreshes leave the dispatch read st
       assert.equal(feed.forDispatch()?.outcome, "ok");
       assert.deepEqual(hung.reads.slice(atHold), [REF], "one hung refresh, never a second in flight");
       await advance(1, clock);
-      assert.deepEqual(feed.forDispatch(), { outcome: "stale" });
+      assert.deepEqual(feed.forDispatch(), { outcome: "stale", refusalStage: "snapshot_age" });
     } finally {
       feed.stop();
     }
