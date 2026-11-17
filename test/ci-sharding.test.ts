@@ -21,6 +21,9 @@ const workflow = parse(readFileSync(join(REPO_ROOT, '.github/workflows/ci.yml'),
 
 const CI_SHARD_COUNT = workflow.jobs.ci?.strategy?.matrix?.shard?.length ?? 0;
 assert.ok(CI_SHARD_COUNT > 0, "ci.yml must declare at least one shard");
+// W1-T13270: the coverage lane runs its own count (12), apart from ci-shard's.
+const COVERAGE_SHARD_COUNT = workflow.jobs['coverage-ratchet']?.strategy?.matrix?.shard?.length ?? 0;
+assert.ok(COVERAGE_SHARD_COUNT > 0, "ci.yml must declare at least one coverage shard");
 
 function runBodies(jobId: string): string {
   return (workflow.jobs[jobId].steps ?? []).map((step) => step.run ?? '').join('\n');
@@ -93,12 +96,12 @@ test('duration sharding learns from structured per-file evidence without writing
 
 test('coverage sharding: every declared lossless V8 bundle is required before Node-range merge and both gates', () => {
   const shards = workflow.jobs['coverage-ratchet'];
-  assert.deepEqual(shards.strategy?.matrix?.shard, Array.from({ length: CI_SHARD_COUNT }, (_unused, index) => index + 1));
+  assert.deepEqual(shards.strategy?.matrix?.shard, Array.from({ length: COVERAGE_SHARD_COUNT }, (_unused, index) => index + 1));
   assert.equal(shards.strategy?.['fail-fast'], false);
-  assert.equal(shards.name, `coverage-shard (\${{ matrix.shard }}/${CI_SHARD_COUNT})`);
+  assert.equal(shards.name, `coverage-shard (\${{ matrix.shard }}/${COVERAGE_SHARD_COUNT})`);
   assert.match(
     runBodies('coverage-ratchet'),
-    new RegExp(String.raw`test-tier-manifest\.mjs --select-all --shard \$\{\{ matrix\.shard \}\}\/${CI_SHARD_COUNT} --base HEAD\^1`),
+    new RegExp(String.raw`test-tier-manifest\.mjs --select-all --shard \$\{\{ matrix\.shard \}\}\/${COVERAGE_SHARD_COUNT} --base HEAD\^1`),
   );
   assert.match(runBodies('coverage-ratchet'), /mapfile -t COVERAGE_TEST_FILES < coverage-test-files\.txt/);
   assert.doesNotMatch(runBodies('coverage-ratchet'), /--test-shard=/, 'coverage must use the recorded-duration selector rather than Node\'s opaque shard assignment');
@@ -146,7 +149,7 @@ test('hosted coverage admission accepts legacy bundles and bounded manifests but
       ['missing-lcov', 'coverage-premapped-1-0000000000000.json', false, /missing its independently generated lcov/],
     ] as const) {
       const directory = join(root, kind); mkdirSync(directory);
-      for (let shard = 1; shard <= CI_SHARD_COUNT; shard++) {
+      for (let shard = 1; shard <= COVERAGE_SHARD_COUNT; shard++) {
         const raw = join(directory, 'coverage-shards', `coverage-shard-${shard}`, 'raw');
         mkdirSync(raw, { recursive: true });
         if (kind !== 'missing-lcov') writeFileSync(join(raw, '..', 'lcov.info'), 'TN:\n');
