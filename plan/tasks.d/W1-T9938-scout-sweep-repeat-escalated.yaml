@@ -29,7 +29,6 @@
     action: proceed
     confidence: 1
     reasons:
-      - "operator authorized durable repeat-marker retention for PR #19166"
-      - "operator authorized platform-guarded skip handling in census calibration for PR #19166 author preflight"
-    judged_at: "2026-11-17T21:25:11Z"
+      - "released by the operator with rmd approve"
+    judged_at: "2026-10-22T03:31:39.860Z"
     pin: "a173fc52e43e8bb0e44d2460c61ce8c2bd80bb1b85a06380fe71c8ae9470c14e"
