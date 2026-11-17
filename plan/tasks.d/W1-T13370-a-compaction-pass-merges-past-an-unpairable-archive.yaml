@@ -1,0 +1,55 @@
+- id: W1-T13370
+  title: "A ledger compaction pass merges the candidates that fit together instead of giving up when its first candidate cannot pair with the next"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # 1 concern: selectLedgerCompactionSources stops ending its window at the first ceiling overflow
+  origin: "operator-session#ledger-compaction-2026-11-17"
+  plan_refs:
+    - W1-T3368
+    - W1-T4262
+  files:
+    - src/lib/ledger-compact.ts
+    - test/ledger/a-compaction-pass-merges-past-an-unpairable-archive.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "When the first preferred candidate cannot share a 64 MiB archive with the next one, the pass still selects two or more later candidates that fit together, and the apply run merges them"
+      proof: "grep: W1-T13370 criterion 1 in test/ledger/a-compaction-pass-merges-past-an-unpairable-archive.test.ts"
+    - claim: "No selected window exceeds the decompressed archive ceiling, and a corpus where no two candidates fit together still reports nothing eligible and writes nothing"
+      proof: "grep: W1-T13370 criterion 2 in test/ledger/a-compaction-pass-merges-past-an-unpairable-archive.test.ts"
+    - claim: "invariant:ceiling-and-reduction-hold — the 64 MiB per-archive ceiling, the oversized-archive repair and the no-reduction refusal behave as before"
+      proof: "grep: W1-T13370 criterion 3 in test/ledger/a-compaction-pass-merges-past-an-unpairable-archive.test.ts"
+  rationale: |
+    WHY: on 2026-11-17 the operator asked whether old ledgers should be compacted. The host already compacts
+    (W1-T3368), but almost every pass does nothing.
+    OBSERVED on the host (daemon checkout, state /home/node/Remudero/state), 2026-11-17 ~13:00Z:
+    - 246 archives, ~874 MB compressed. `rmd ledger-compact --dry-run --older-than-hours 17` reported eligibleCount 184,
+      sourceCount 0, sizeSkippedCount 49, reason "no-reduction — 1 source archive(s) would produce 1 archive(s)".
+    - selectLedgerCompactionSources with the real fs chose sources ["ledger.2026-10-25T13-34-55-882Z.ndjson.gz"] only.
+    - Ledger rows 11-15 and 11-16: 42 and 48 fired passes, ending almost always ledger_compaction.nothing_eligible;
+      ledger_compaction.ran rows on 11-17 merged 2 sources (0 duplicates) and 14 sources (2,148).
+    - 63 small rotations dated 11-16 (~0.4-0.5 MB compressed each) remain unmerged.
+    READ at origin/main, selectLedgerCompactionSources (src/lib/ledger-compact.ts): the window walks the preferred
+    candidates and BREAKS at the first one whose bytes would push the selection past maxArchiveBytes. When the head
+    candidate is large (45-65 MB decompressed, as most archives now are), the next never fits, the window holds one
+    source, and ledgerCompactCommand declines it as no-reduction. The same head is chosen on every pass, so the
+    pass is a livelock: mergeable candidates behind it are never reached.
+  design: |
+    INVARIANT ceiling-and-reduction-hold: the selection never exceeds maxArchiveBytes decompressed (except the
+    existing lone oversized-repair case), and no-reduction still declines before any write.
+    1. In the window loop, a candidate that would overflow the ceiling is skipped (counted in sizeSkippedCount) and
+       the walk continues, instead of ending the window. Keep the preferred order and the source cap.
+    2. If the result has fewer than two sources and is not the oversized-repair case, return no sources, so the
+       command does not read and partition a lone archive only to decline it.
+    Keep the archive-part deferral and the repair path unchanged.
+  falsifier: |
+    Restore the break on the first overflow and criterion 1 fails (one source, no merge). Let the window take an
+    overflowing candidate and criterion 2 fails.
+  note: |
+    Id reserved for run-unfiled-1794920434652 with ~/rmd-work/bin/reserve-id.sh.
+    reservation hand-off: run-unfiled-1794920434652 -> claude/project-thread-cb5huh-plan-compaction-progress
