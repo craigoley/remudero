@@ -1,0 +1,86 @@
+- id: W1-T13368
+  title: "The SRE lane's landed-entry read runs its git off the daemon loop: the check that origin/main already holds an incident's feedback entry, and the staging of a new one, await the host git helper, so a pass no longer runs synchronous git on the loop (32 calls and 4.5 s in the 16 stall rows of 22 minutes on 2026-11-17)"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the landed-entry check is the guard that stops a second filing of one incident, and the change crosses the lane and the feedback store; its answers must not change when its git is awaited
+  origin: "operator-session#loop-lag-2026-11-17"
+  plan_refs:
+    - W1-T9624
+    - W1-T9615
+    - W1-T13183
+    - W1-T12202
+    - W1-T13367
+  files:
+    - src/lib/sre-lane.ts
+    - src/lib/feedback.ts
+    - test/the-sre-lanes-landed-entry-read-runs-its-git-off-the-daemon-loop.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "invariant:no-synchronous-git-in-a-pass — a pass with the input the daemon builds, over a fixture with open incidents, makes no execFileSync and no spawnSync call on the daemon thread for the landed-entry read or for the staging of a filing, and a 20 ms timer on the daemon thread keeps firing while that git is held for one second"
+      kind: guard
+      proof: "grep: W1-T13368 criterion 1 in test/the-sre-lanes-landed-entry-read-runs-its-git-off-the-daemon-loop.test.ts"
+    - claim: "The awaited read gives the same answer as readLandedFeedbackEntry for each case, with real git against a local bare remote: no entry on origin/main, an open entry, a closed entry, an entry with another origin, the same bytes in the public root and the plan destination, and different bytes in the two roots (the same FeedbackError)"
+      proof: "grep: W1-T13368 criterion 2 in test/the-sre-lanes-landed-entry-read-runs-its-git-off-the-daemon-loop.test.ts"
+    - claim: "invariant:a-landed-open-incident-is-never-filed-again — a fingerprint whose entry is open on origin/main and absent from the working tree is passed over and the pass files the next worst incident, or nothing. A git failure reads as absent, never as present, as W1-T9624 ruled"
+      kind: guard
+      proof: "grep: W1-T13368 criterion 3 in test/the-sre-lanes-landed-entry-read-runs-its-git-off-the-daemon-loop.test.ts"
+    - claim: "The pass picks the same worst incident as before for a fixture of five fingerprints, reads the landed entry of a fingerprint at most once, and reads no more fingerprints than the synchronous pass read for that fixture"
+      proof: "grep: W1-T13368 criterion 4 in test/the-sre-lanes-landed-entry-read-runs-its-git-off-the-daemon-loop.test.ts"
+    - claim: "The lane's default landed-entry read is the awaited one, so it has a production caller"
+      proof: "grep: readLandedFeedbackEntryAsync( in src/lib/sre-lane.ts"
+  rationale: |
+    WHY: before it files an incident, the SRE lane asks git whether origin/main already holds that incident's
+    feedback entry. The question is a synchronous `git show`, once for each feedback root, and it runs on the
+    daemon loop for each candidate the pass looks at. The staging of a new filing is synchronous too.
+    MEASURED on the core ledger (~/rmd-state2/state), one pass over the live file on 2026-11-17,
+    daemon.loop_stall_profile rows of the newest boot (ba5bd4f639 at 09:40:09Z), 12:06:52Z to 12:28:57Z:
+    - runSreLanePass is in the top inclusive frames of 16 of 115 stall rows (85.6 s of 817.9 s of lag).
+    - Each of those 16 rows has synchronous spawn time attributed to one caller chain that ends in runStepsSync:
+      32 calls and 4.49 s in total, two calls in each row. `spawn` through execFileSync is 3.2 s of self time
+      in 15 of the rows.
+    READ at origin/main cfbace2640:
+    - src/lib/sre-lane.ts:406: `readLanded` is `deps.readLandedEntry` or readLandedFeedbackEntry(deps.root, id). The
+      daemon's input (:469) sets no readLandedEntry. :409-410: worstOpenIncident takes a synchronous test that
+      calls landedIncidentOpen (:201) for a candidate that is not open in the working tree.
+    - src/lib/feedback.ts:593 readLandedFeedbackEntry runs readLandedFeedbackEntrySteps (:597) through runStepsSync
+      with SYNC_CAPTURE_IO (:739), whose git is execFileSync (:728). :597-604 reads each host feedback root and
+      refuses two copies with different bytes (:587 assertOneFeedbackCopy). :614: a git failure returns null.
+    - src/lib/feedback.ts:740 ASYNC_CAPTURE_IO runs the same steps over hostWorktreeGitAsync, and :1013
+      stageFeedbackCaptureAsync (W1-T13183) is the awaited form of stageFeedbackCapture.
+    - src/lib/sre-lane.ts:419 still calls the synchronous stageFeedbackCapture.
+    NOT COVERED: W1-T13183 (merged) made the sweep's capture awaited and did not change the SRE lane. W1-T9624
+    (merged) added the landed-entry check. W1-T13367 moves the lane's ledger reads. W1-T13334 (queued) covers
+    `listFeedback`. Swept plan/tasks.d and plan/tasks.yaml for readLandedFeedbackEntry and stageFeedbackCaptureAsync,
+    and the 11 open pull requests on 2026-11-17: no other filing.
+  design: |
+    INVARIANT no-synchronous-git-in-a-pass: the landed-entry read and the staging of a filing run no synchronous child process on the daemon thread.
+    INVARIANT a-landed-open-incident-is-never-filed-again: an incident whose entry is open on origin/main is passed over, and a git failure reads as absent.
+    1. src/lib/feedback.ts: export readLandedFeedbackEntryAsync(root, id). It runs readLandedFeedbackEntrySteps
+       through runStepsAsync with ASYNC_CAPTURE_IO. The steps do not change, so the two-root rule and the
+       failure rule are the same code.
+    2. src/lib/sre-lane.ts: `readLandedEntry` may return a promise; the default is the new function. The choice
+       of the worst incident becomes awaited: walk the candidates in the order worstOpenIncident ranks them
+       and ask the landed question only for a candidate that is not already open in the working tree, as
+       today. Keep the answers of one pass in a map so a fingerprint is asked once. Do not read every
+       candidate ahead of time: that would run more git than today.
+    3. The filing calls stageFeedbackCaptureAsync and awaits it.
+    4. An injected synchronous readLandedEntry (the present tests) still works.
+    5. TESTS use real git and a local bare remote for criterion 2, in the shape of
+       test/a-landed-incident-is-never-re-captured-with-new-bytes.test.ts. Do not import that file. Count
+       synchronous child processes as test/the-sre-lanes-suspect-commit-read-runs-off-the-loop.test.ts does. Load
+       test/setup/tmp-hygiene.ts so no test reads or writes the host's config or state.
+  falsifier: |
+    At origin/main the pass calls execFileSync for each landed read and the 20 ms timer does not fire while git
+    is held: criterion 1 fails. Treat a rejected git promise as present: criterion 3 fails. Read every
+    candidate's landed entry before ranking: criterion 4 fails.
+  note: |
+    Id reserved for run-unfiled-1794918373000 with ~/rmd-work/bin/reserve-id.sh.
+    This is the second of two tasks from one finding; W1-T13367 is the first.
+    Proof that counts in production: over a day, no daemon.loop_stall_profile row with runSreLanePass in its
+    top frames has synchronous spawn time under runStepsSync.
