@@ -838,9 +838,10 @@ export function takeGhPaceLoopWaits(): GhPaceLoopWaitRow[] {
 
 const GH_TRANSPORT_FILE = fileURLToPath(import.meta.url);
 
-function ghCallSiteOutsideTransport(): string {
+/** W1-T13182: `frames` bounds the stack a caller builds; a loop wait keeps the whole stack. */
+function ghCallSiteOutsideTransport(frames = Infinity): string {
   const limit = Error.stackTraceLimit;
-  Error.stackTraceLimit = Infinity;
+  Error.stackTraceLimit = frames;
   const stack = new Error().stack ?? "";
   Error.stackTraceLimit = limit;
   for (const line of stack.split("\n")) {
@@ -1471,14 +1472,50 @@ export function setGhReadActorResolver(resolve: (env: NodeJS.ProcessEnv) => stri
 const ghReadCadenceCounts = { advisory: 0, enforce: 0, wait: 0, slotsYielded: 0 };
 const ghGatedCountSeen = new Map<string, number>();
 
+/** BACKSTOP: W1-T13182 takes a stack trace for one stamped read in this many. The reads after a
+ *  sample count under that sample's call site, so each sample stands for this many reads and the
+ *  counts still sum exactly to `reads_stamped`. A read never builds a full stack every time. */
+const GH_READ_CALL_SITE_SAMPLE_EVERY = 8;
+/** BACKSTOP: a sampled read's stack holds at most this many frames, so its cost does not grow with the
+ *  caller's depth. The transport's own frames under a stamp are far fewer; a site past it counts as unknown. */
+const GH_READ_CALL_SITE_STACK_FRAMES = 32;
+/** BACKSTOP: the `daemon.quota` row names at most this many call sites; the rest sum as `other`. */
+const GH_READ_CALL_SITE_TOP = 15;
+/** Stamped reads by call site since the previous {@link takeGhReadCadenceTally}, sampled as above. */
+const ghReadsByCallSite = new Map<string, number>();
+const ghReadCallSiteSample: { site: string | undefined; reads: number } = { site: undefined, reads: 0 };
+
+/** W1-T13182: add 1 stamped read under its call site, the frame {@link ghCallSiteOutsideTransport} names. */
+function countGhReadCallSite(): void {
+  if (ghReadCallSiteSample.site === undefined || ghReadCallSiteSample.reads >= GH_READ_CALL_SITE_SAMPLE_EVERY) {
+    ghReadCallSiteSample.site = ghCallSiteOutsideTransport(GH_READ_CALL_SITE_STACK_FRAMES);
+    ghReadCallSiteSample.reads = 0;
+  }
+  ghReadCallSiteSample.reads += 1;
+  const site = ghReadCallSiteSample.site;
+  ghReadsByCallSite.set(site, (ghReadsByCallSite.get(site) ?? 0) + 1);
+}
+
+/** The top {@link GH_READ_CALL_SITE_TOP} sites by count, largest first, then `other` for the rest. */
+function ghReadsByCallSiteTop(): Record<string, number> {
+  const ranked = [...ghReadsByCallSite].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+  const top: Record<string, number> = Object.fromEntries(ranked.slice(0, GH_READ_CALL_SITE_TOP));
+  const rest = ranked.slice(GH_READ_CALL_SITE_TOP).reduce((sum, [, n]) => sum + n, 0);
+  if (rest > 0) top.other = rest;
+  return top;
+}
+
 export interface GhReadCadenceTally {
   reads_stamped: { advisory: number; enforce: number; wait: number };
   gated_admitted: number;
   slots_yielded: number;
+  /** W1-T13182: the same stamped reads by call site (`file:line` from the repository root), the top
+   *  15 by count with the rest summed as `other`. Its values sum to the sum of `reads_stamped`. */
+  reads_by_call_site: Record<string, number>;
 }
 
-/** W1-T10271: what `daemon.quota` reports per poll — this process's stamped reads by mode and slots it
- *  yielded, and every process's admitted gated reads — each since the previous call, then reset. */
+/** W1-T10271: what `daemon.quota` reports per poll — this process's stamped reads by mode and by call
+ *  site (W1-T13182) and slots it yielded, and every process's admitted gated reads — each since the previous call, then reset. */
 export function takeGhReadCadenceTally(
   env: NodeJS.ProcessEnv = process.env,
   readText: (path: string | undefined) => string | undefined = readGhStampText,
@@ -1496,7 +1533,10 @@ export function takeGhReadCadenceTally(
     reads_stamped: { advisory: ghReadCadenceCounts.advisory, enforce: ghReadCadenceCounts.enforce, wait: ghReadCadenceCounts.wait },
     gated_admitted: gatedAdmitted,
     slots_yielded: ghReadCadenceCounts.slotsYielded,
+    reads_by_call_site: ghReadsByCallSiteTop(),
   };
+  ghReadsByCallSite.clear();
+  ghReadCallSiteSample.site = undefined;
   ghReadCadenceCounts.advisory = 0;
   ghReadCadenceCounts.enforce = 0;
   ghReadCadenceCounts.wait = 0;
@@ -1883,6 +1923,7 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
       const advisory = mode === "advisory";
       stamp(path, advisory ? ghAdvisoryStampText(ghCountedStampMs(readStampMs(path), readStampText(path))) : "", nowMs);
       ghReadCadenceCounts[mode] += 1;
+      countGhReadCallSite();
       if (gatedFirst) {
         const gatedPath = ghGatedStampPath(path);
         stampGated(gatedPath, `${ghGatedCount(readStampText(gatedPath)) + 1}\n`, nowMs);
