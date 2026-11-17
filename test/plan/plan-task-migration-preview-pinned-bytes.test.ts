@@ -92,3 +92,21 @@ test("migration preview preserves separate committed monolith and shard-director
   assert.equal(result.answer.candidate.id, "W1-T2");
   assert.equal(result.answer.candidate.sourcePath, "backlog/tasks.d/W1-T2.yaml");
 });
+
+
+test("migration preview reads a measured healthy catalog above 32 MiB and still refuses its bounded maximum", t => {
+  // The real 2026-11-17 public catalog is 34,444,886 bytes across 5,647 Git blobs.
+  // Repeated comment bytes compress in Git; the fixture exercises the actual CLI reader, not a fake.
+  const atSize = (mib: number) => record("W1-T1") + "#" + "x".repeat(mib * 1024 * 1024) + "\n";
+  const healthy = fixture(t, { "W1-T1.yaml": atSize(33) });
+  const result = healthy.run();
+  assert.equal(result.status, 0, JSON.stringify(result.answer));
+  assert.equal(result.answer.candidate.id, "W1-T1");
+  assert.equal(result.answer.permission, "not_granted");
+  const tooLarge = fixture(t, { "W1-T1.yaml": atSize(49) });
+  const refused = tooLarge.run();
+  assert.equal(refused.status, 1);
+  assert.equal(refused.answer.outcome, "unknown");
+  assert.equal(refused.answer.reason, "catalog_unreadable");
+  assert.equal(refused.answer.permission, "not_granted");
+});
