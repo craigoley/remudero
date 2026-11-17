@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.28
   status: queued
@@ -24,3 +24,11 @@
     The ledger step auto_triage.repair_priority_unavailable carries a failure shape and landed rows in both halves of the trailing 7 days: 97 in the older half, 108 in the newer.
     No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
     The rows name no file; tracked source literals locate this step in: src/lib/dep-review.ts. Start there.
+  risk_ruling:
+    verdict: "rule-3-low-privilege"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "rule 3 (live and low-privilege): the symptom is live, 254 occurrence(s) across 7 day(s), last seen 2026-11-17T04:34:19.834Z, and the record declares no privileged path"
+    judged_at: "2026-11-17T06:58:26.026Z"
+    pin: "0142d39d9a511193f69f8bc3dfbcf3a0246664dbe8f0bddde20d54c4a6429ba7"
