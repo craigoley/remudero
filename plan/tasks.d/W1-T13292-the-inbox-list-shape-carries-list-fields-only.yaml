@@ -1,0 +1,40 @@
+- id: W1-T13292
+  title: "GET /v1/inbox?shape=list returns each item's list fields only, so the Inbox list loads without 2,343 proposals' full reasons and texts, and the item page reads its details from the thread route"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # a new opt-in response shape; the default /v1/inbox body is unchanged
+  origin: "operator-session#serve-oom-2026-11-16"
+  plan_refs:
+    - W1-T13290
+  files:
+    - src/lib/panel-graph.ts
+    - test/console-api/the-inbox-list-shape-carries-list-fields-only.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "GET /v1/inbox?shape=list answers the same lanes and counts as GET /v1/inbox, and each item carries only proposalId, from, summary, receivedAt, lastActivityAt, groupKey, lane or state, and snapshotAttention (no reasons, plain, draftedTasks or resolution)"
+      proof: "grep: W1-T13292 criterion 1 in test/console-api/the-inbox-list-shape-carries-list-fields-only.test.ts"
+    - claim: "On a fixture of 200 proposals with long reasons, the list shape is at most one fifth of the default body's bytes"
+      proof: "grep: W1-T13292 criterion 2 in test/console-api/the-inbox-list-shape-carries-list-fields-only.test.ts"
+    - claim: "invariant:default-shape-unchanged — GET /v1/inbox with no shape, or an unknown shape, answers byte for byte as before"
+      kind: guard
+      proof: "grep: W1-T13292 criterion 3 in test/console-api/the-inbox-list-shape-carries-list-fields-only.test.ts"
+  rationale: |
+    WHY: the Inbox list page needs a row per item, not every item's full reasoning. MEASURED on 2026-11-17 00:36Z:
+    GET /v1/inbox is 9.2 MB; a notReady item averages 3,110 bytes, of which reasons is 2,164 and plain 965; the list
+    shows summary, sender and time. The item page already reads /v1/inbox/thread for one item (0.1 to 0.2 s measured).
+    The Console adopts ?shape=list in craigoley/remudero-console (filed there).
+  design: |
+    INVARIANT default-shape-unchanged: no shape means today's body.
+    1. In the /v1/inbox route, read `shape`. For "list", map every lane's items to the list fields above; keep counts,
+       snapshotKey, classifiedAt and staleness. The cached snapshot entry keys on the URL, so the two shapes cache apart.
+    2. Unknown shapes are ignored (default body).
+  falsifier: |
+    Return the full item for shape=list: criteria 1 and 2 fail. Change the default body: criterion 3 fails.
+  note: |
+    Id reserved for run-unfiled-1794875837000 with ~/rmd-work/bin/reserve-id.sh.
