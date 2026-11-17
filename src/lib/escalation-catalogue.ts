@@ -5,15 +5,17 @@ import {
   type StarvationCensus, type StarvationClearedInfo,
 } from "./daemon.js";
 import { ghRateLimitWindow, type GhRateLimitProvenance } from "./daemon-health.js";
-import { ghIssueGateway, tryEscalate, type IssueGateway } from "./escalate.js";
+import { quantileOf } from "./daemon-memory-policy.js";
+import { ghIssueGateway, ghIssueGatewayAsync, tryEscalate, tryEscalateAsync, type AsyncIssueGateway, type Escalation, type IssueGateway } from "./escalate.js";
 import { appendLedger, matchesRepoScopedTask } from "./ledger.js";
 import type { ReplayStranded } from "./inbox-replay.js";
 import type { Task } from "./plan.js";
 import { DEFAULT_MAX_TASK_LIFETIME_DISPATCHES, readLedgerLines } from "./status.js";
-import type { PostReviewStallVerdict } from "./sweep.js";
+import type { EscalationTriageSlice, PostReviewStallVerdict } from "./sweep.js";
+import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import { hostname } from "node:os";
-import { systemClock } from "./clock.js";
+import { systemClock, type Clock } from "./clock.js";
 import { deliveredEscalationUrl, spoolIssueAction, withdrawSpooledEscalation } from "./host-escalation-spool.js";
 
 /**
@@ -1091,6 +1093,205 @@ export function escalateStarvationCleared(
     delivered,
     ...(failure ? { failure } : {}),
   });
+}
+
+/**
+ * W1-T13255's rows, each carrying its `stage`. `failed` is one failing pass. `recovered` ends a streak that has no
+ * issue to close, and its `passes` is a sample for the bound. `escalated` and `cleared` are the issue's open and close.
+ */
+export const SWEEP_STAGE_FAILED_STEP = "sweep.stage.failed";
+export const SWEEP_STAGE_RECOVERED_STEP = "sweep.stage.recovered";
+export const SWEEP_STAGE_ESCALATED_STEP = "sweep.stage_failing.escalated";
+export const SWEEP_STAGE_CLEARED_STEP = "sweep.stage_failing.cleared";
+/** Those four steps as one ledger slice: every rotation and the live file, so a streak outlives a restart. */
+export const SWEEP_STAGE_STREAK_SLICE: EscalationTriageSlice = {
+  holder: "sweep.stage-failure-streaks",
+  steps: [SWEEP_STAGE_FAILED_STEP, SWEEP_STAGE_RECOVERED_STEP, SWEEP_STAGE_ESCALATED_STEP, SWEEP_STAGE_CLEARED_STEP],
+};
+/** How long a recovered streak goes on teaching the bound. */
+export const SWEEP_STAGE_STREAK_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+/** With fewer recovered streaks than this inside the window, the fallback is the bound. */
+export const SWEEP_STAGE_STREAK_MIN_SAMPLES = 5;
+/** The bound before a stage has taught one, in consecutive failing passes. A full pass starts about every quarter
+ *  of an hour, so the fifth failure in a row comes about an hour after the first. */
+export const SWEEP_STAGE_STREAK_FALLBACK_PASSES = 4;
+
+/** One stage's failure streak, as its own rows tell it. */
+export interface SweepStageStreakState {
+  /** Failing passes since the stage last recovered; 0 when it is not failing. */
+  passes: number;
+  firstFailureTs?: string;
+  lastError?: string;
+  /** The issue an `escalated` row opened and no `cleared` row has closed. */
+  issueUrl?: string;
+  /** Lengths of the streaks that recovered inside the window without a page being tried. */
+  recovered: number[];
+}
+
+/** Pure: fold one stage's rows, oldest first (the order the ledger union returns them in). */
+export function sweepStageStreakState(rows: ReadonlyArray<Record<string, unknown>>, stage: string, nowMs: number): SweepStageStreakState {
+  let state: SweepStageStreakState = { passes: 0, recovered: [] };
+  let pageTried = false;
+  const endStreak = (issueUrl: string | undefined): void => {
+    state = { passes: 0, recovered: state.recovered, ...(issueUrl === undefined ? {} : { issueUrl }) };
+    pageTried = false;
+  };
+  for (const row of rows) {
+    if (row.stage !== stage) continue;
+    if (row.step === SWEEP_STAGE_FAILED_STEP) {
+      if (state.passes === 0) state.firstFailureTs = String(row.ts);
+      state.passes++;
+      state.lastError = String(row.error);
+    } else if (row.step === SWEEP_STAGE_ESCALATED_STEP) {
+      pageTried = true;
+      if (typeof row.issue_url === "string") state.issueUrl = row.issue_url;
+    } else if (row.step === SWEEP_STAGE_RECOVERED_STEP) {
+      const inWindow = nowMs - Date.parse(String(row.ts)) <= SWEEP_STAGE_STREAK_WINDOW_MS;
+      if (!pageTried && inWindow && typeof row.passes === "number") state.recovered.push(row.passes);
+      endStreak(state.issueUrl);
+    } else if (row.step === SWEEP_STAGE_CLEARED_STEP) {
+      endStreak(undefined);
+    }
+  }
+  return state;
+}
+
+/** Pure: the streak length a stage must outlast before it pages, and where that length came from. */
+export function sweepStageStreakBound(recovered: readonly number[]): { passes: number; basis: "p90" | "fallback"; samples: number } {
+  if (recovered.length < SWEEP_STAGE_STREAK_MIN_SAMPLES) {
+    return { passes: SWEEP_STAGE_STREAK_FALLBACK_PASSES, basis: "fallback", samples: recovered.length };
+  }
+  return { passes: quantileOf(recovered, 0.9) as number, basis: "p90", samples: recovered.length };
+}
+
+function sweepStageEscalation(
+  stage: string, state: SweepStageStreakState, bound: ReturnType<typeof sweepStageStreakBound>, historyRead: boolean, runId: string,
+): Escalation {
+  const days = SWEEP_STAGE_STREAK_WINDOW_MS / (24 * 60 * 60 * 1000);
+  const fallbackWhy = historyRead
+    ? `this stage recovered on its own from ${bound.samples} failure streak(s) in the last ${days} days and a learned bound needs ${SWEEP_STAGE_STREAK_MIN_SAMPLES}`
+    : "the stage's streak history could not be read, so the count is only the passes this daemon process saw";
+  const boundText = bound.basis === "p90"
+    ? `the p90 length (${bound.passes} passes) of the ${bound.samples} failure streaks this stage recovered from on its own in the last ${days} days`
+    : `the fallback of ${bound.passes} passes (SWEEP_STAGE_STREAK_FALLBACK_PASSES), which applies because ${fallbackWhy}`;
+  return {
+    // HARD_STOP, not BLOCKED: the triage may move a BLOCKED issue to the fleet-notice digest or answer it by default.
+    class: "HARD_STOP",
+    taskId: "daemon",
+    runId,
+    // No count and no error in the title, so a later pass of the same streak never reads as a second incident.
+    summary: `sweep stage ${stage} fails on every pass`,
+    detail:
+      `W1-T13255: the full sweep's ${stage} stage has failed on ${state.passes} passes since ${state.firstFailureTs}, and no ` +
+      `pass in that time completed cleanly. Its last error: ${state.lastError}. That outlasts ` +
+      `${boundText}. The sweep carries on past a failing stage, so until now the only sign was one ledger row per pass, ` +
+      `and the stage's own work is not being done (for escalation_answers: no operator reply on an escalation is applied). ` +
+      `This issue closes itself on the stage's next clean pass.`,
+    options: [
+      {
+        label: "read the failures and fix the cause",
+        detail:
+          `Run \`rmd ledger-grep ${SWEEP_STAGE_FAILED_STEP}\` for the error on each pass, then build or file the fix. ` +
+          `Nothing retries differently in the meantime: the stage runs again, and fails again, on every full pass.`,
+      },
+      {
+        label: "acknowledge and wait",
+        detail: "If the fix is already merging, no action is needed: the issue closes itself on the stage's next clean pass.",
+      },
+    ],
+    recommendation: "read the failures and fix the cause",
+    consequence: `The ${stage} stage keeps failing on every full sweep pass and its work stays undone.`,
+  };
+}
+
+/** What one full pass saw of a stage: it threw, it completed (`clean`), or it did not run or could not read everything. */
+export type SweepStageOutcome = { error: string } | { clean: boolean };
+
+/**
+ * W1-T13255 — a sweep stage that fails on every pass. 2026-11-10 to 11-16: the escalation-answers stage threw on every
+ * full pass, no operator answer was applied for six days, and the sweep's `catch` wrote one row per pass that nobody
+ * read. Built once per daemon start; called once per stage per full pass.
+ *
+ * THE STREAK IS ITS ROWS. A failing pass appends `failed`; the streak is the `failed` rows since the stage's last
+ * `recovered` or `cleared` row, read back through the ledger slice, so a restart loses nothing. Once it is longer than
+ * {@link sweepStageStreakBound} it opens ONE issue: a later failing pass finds the open issue on the ledger and stops.
+ * An undelivered page writes its row and is tried again on the next failing pass, since a page that never arrives is
+ * the defect this exists to end.
+ *
+ * ONLY A CLEAN PASS ENDS A STREAK. It closes the open issue (`cleared`), or records the streak's length as a sample
+ * (`recovered`). A pass that returned without reading everything (`clean: false`) proves neither a failure nor a
+ * recovery, and changes nothing. A clean pass after a settled one reads nothing at all.
+ *
+ * AN UNREADABLE HISTORY NEVER SILENCES IT. The rows this process wrote since the stage's streak last ended stand in
+ * for a history that cannot be read, so a stage still pages once this process alone has seen it outlast the fallback,
+ * and the issue this process opened is still closed. What an earlier process left waits for a clean pass that can
+ * read it. A close that fails costs one `delivered: false` row and is not tried again (W1-T130).
+ */
+export function createSweepStageWatch(ctx: {
+  owner: string;
+  repo: string;
+  ledgerPath: string;
+  runId: string;
+  history: (stateDir: string) => Promise<{ ok: boolean; rows: ReadonlyArray<Record<string, unknown>> }>;
+  issues?: AsyncIssueGateway;
+  clock?: Clock;
+}): (stage: string, outcome: SweepStageOutcome) => Promise<void> {
+  const clock = ctx.clock ?? systemClock;
+  const settled = new Set<string>();
+  const ownRows = new Map<string, Array<Record<string, unknown>>>();
+  return async (stage, outcome) => {
+    const failed = "error" in outcome;
+    const own = ownRows.get(stage) ?? [];
+    ownRows.set(stage, own);
+    // One id per pass: the ledger union drops a byte-identical row as a replay, and two passes can share a millisecond.
+    const passId = randomUUID();
+    const write = (step: string, extra: Record<string, unknown>): void => {
+      const row = { ts: clock.iso(), run_id: ctx.runId, task_id: "daemon", step, stage, pass_id: passId, ...extra };
+      appendLedger(ctx.ledgerPath, row);
+      own.push(row);
+    };
+    if (failed) {
+      settled.delete(stage);
+      write(SWEEP_STAGE_FAILED_STEP, { error: outcome.error });
+    } else if (!outcome.clean || settled.has(stage)) {
+      return;
+    }
+    const read = await ctx.history(dirname(ctx.ledgerPath));
+    const state = sweepStageStreakState(read.ok ? read.rows : own, stage, clock.now());
+    const issues = ctx.issues ?? ghIssueGatewayAsync(ctx.owner, ctx.repo);
+    const streak = { first_failure_ts: state.firstFailureTs, passes: state.passes };
+    if (failed) {
+      const bound = sweepStageStreakBound(state.recovered);
+      if (state.issueUrl !== undefined || state.passes <= bound.passes) return;
+      const issueUrl = await tryEscalateAsync(sweepStageEscalation(stage, state, bound, read.ok, ctx.runId),
+        { issues, ledgerPath: ctx.ledgerPath, runId: ctx.runId });
+      write(SWEEP_STAGE_ESCALATED_STEP, {
+        ...streak, error: state.lastError, bound_passes: bound.passes, bound_basis: bound.basis, bound_samples: bound.samples,
+        history_read: read.ok, issue_url: issueUrl, delivered: issueUrl !== null,
+      });
+      return;
+    }
+    if (state.issueUrl !== undefined) {
+      let failure: string | undefined;
+      if (!issues.closeWithComment) {
+        failure = "issue gateway cannot close issues";
+      } else {
+        try {
+          await issues.closeWithComment(state.issueUrl,
+            `W1-T13255: the ${stage} stage completed a clean pass, so its failure streak has ended. Closing automatically; ` +
+            `a later streak that outlasts its bound opens its own issue.`);
+        } catch (e) {
+          // CANNOT-OBSERVE MEANS WAIT (W1-T130): never rethrown into the sweep; the row below carries the failure.
+          failure = String((e as Error)?.message ?? e);
+        }
+      }
+      write(SWEEP_STAGE_CLEARED_STEP, { ...streak, issue_url: state.issueUrl, delivered: failure === undefined, ...(failure ? { failure } : {}) });
+    } else if (state.passes > 0) {
+      write(SWEEP_STAGE_RECOVERED_STEP, streak);
+    }
+    own.length = 0;
+    if (read.ok) settled.add(stage);
+  };
 }
 
 /** The step `inbox-replay.ts` exports as `REPLAY_ESCALATED_STEP`, spelled here so this module does not load the inbox. */
