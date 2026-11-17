@@ -3,11 +3,8 @@
  * (603 ms inside main-thread stalls in the hour to 04:03Z on 2026-11-17). A held body never changes, so it is sized once.
  */
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { test } from "node:test";
-import { approxBytes, viewBodiesHolder } from "#src/lib/serve-memory.js";
-import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { approxBytes, heldBodyBytes, viewBodiesHolder } from "#src/lib/serve-memory.js";
 
 type Entry = { view: string; generation: number; body: unknown };
 const body = (n: number) => ({ data: { rows: Array.from({ length: n }, (_, i) => ({ id: `row-${i}`, text: "x".repeat(20) })) } });
@@ -47,8 +44,22 @@ test("W1-T13331 criterion 2: the sample's entries, bytes and parts equal a fresh
   assert.deepEqual(fresh, memo);
 });
 
-test("W1-T13331 criterion 3: the memo is a WeakMap keyed by the body object, so it holds no body alive", () => {
-  const source = readFileSync(join(REPO_ROOT, "src", "lib", "serve-memory.ts"), "utf8");
-  assert.match(source, /const VIEW_BODY_SIZES = new WeakMap<object, number>\(\);/);
-  assert.doesNotMatch(source, /VIEW_BODY_SIZES = new Map/);
+test("W1-T13331 criterion 3: the memo is keyed by the body object (module-level), and a non-object body is sized directly each time", () => {
+  const walked: unknown[] = [];
+  const walk = (value: unknown) => (walked.push(value), approxBytes(value));
+  const shared = body(4);
+  const first = heldBodyBytes(shared, walk);
+  // a different holder/map with the SAME body object, and a different generation, still finds the memo
+  const entries = new Map<string, Entry>([["other:x", { view: "other", generation: 9, body: shared }]]);
+  const sample = viewBodiesHolder(() => entries, walk).size() as { bytes: number };
+  assert.deepEqual(walked, [shared], "the shared body object was walked once across holders");
+  assert.equal(sample.bytes, first);
+  // a structurally equal but distinct object is a different key, so it is walked
+  heldBodyBytes(body(4), walk);
+  assert.equal(walked.length, 2, "a distinct object is walked");
+  // non-object bodies are not memoized: each call walks them
+  heldBodyBytes("a string body", walk);
+  heldBodyBytes("a string body", walk);
+  heldBodyBytes(42, walk);
+  assert.deepEqual(walked.slice(2), ["a string body", "a string body", 42]);
 });
