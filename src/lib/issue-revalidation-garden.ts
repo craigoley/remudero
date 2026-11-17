@@ -126,6 +126,8 @@ export interface RevalidationComment {
   authorType: string;
   authorAssociation: string;
   createdAt: string;
+  /** W1-T13218: the comment's last edit; a rolling observation comment is edited, not re-posted. */
+  updatedAt?: string;
   /** The comment's text; absent in fixtures that only test authorship. */
   body?: string;
 }
@@ -318,12 +320,13 @@ export function isAbsenceOnlyCitation(citation: string): boolean {
   return ABSENCE.test(citation) && !PRESENCE.test(citation);
 }
 
-/** An escalation the fleet opened, or re-observed in an appended comment, within the window before
- *  `nowMs`: its condition was seen live, whatever a judge reads from other evidence. */
+/** An escalation the fleet opened, or re-observed in an observation comment (read by its last edit,
+ *  W1-T13218), within the window before `nowMs`: its condition was seen live, whatever a judge reads
+ *  from other evidence. */
 export function conditionReobserved(issue: Pick<RevalidationIssue, "createdAt">, comments: readonly RevalidationComment[], nowMs: number): boolean {
   const recent = (at: string) => nowMs - Date.parse(at) < ISSUE_REVALIDATION_REOBSERVED_WINDOW_MS;
   if (recent(issue.createdAt)) return true;
-  return comments.some((c) => /observed the same condition/i.test(c.body ?? "") && recent(c.createdAt));
+  return comments.some((c) => /observed the same condition/i.test(c.body ?? "") && recent(c.updatedAt || c.createdAt));
 }
 
 /** The action a verdict takes, before the per-pass close cap. Pure, so the shadow table and act mode
@@ -824,6 +827,7 @@ export function parseIssueCommentsRest(raw: string): RevalidationComment[] {
         authorType: String(user.type ?? "User"),
         authorAssociation: String(r.author_association ?? "NONE"),
         createdAt: String(r.created_at ?? ""),
+        ...(r.updated_at !== undefined ? { updatedAt: String(r.updated_at) } : {}),
         body: String(r.body ?? ""),
       };
     });

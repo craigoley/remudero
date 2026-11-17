@@ -27,6 +27,23 @@ import { sameTestFile } from "./test-path-resolver.js";
 // observation, so this bounds the reads, not the evidence (30 failures in 60 runs needed a ~50% rate).
 export const SELECTOR_SHADOW_RUN_LIMIT = 60;
 export const SELECTOR_SHADOW_SHARDS = 8;
+/** W1-T13270: the coverage matrix moved from 8 to 12 shards. A run is read at the width its own job names
+ *  carry (`coverage-shard (k/N)`), so stored 8-shard runs and new 12-shard runs both stay evidence. */
+export const SELECTOR_SHADOW_SHARD_COUNTS: readonly number[] = Object.freeze([SELECTOR_SHADOW_SHARDS, 12]);
+const SHARD_PREFIX = /coverage-shard \((\d+)\/(\d+)\)/;
+
+/** The one matrix width a run's evidence lines name, or undefined when they disagree or name an unknown width.
+ *  A log with no shard prefix at all reads at the legacy width, as every reader did before W1-T13270. */
+export function selectorShadowShardCount(log: string): number | undefined {
+  const widths = new Set<number>();
+  for (const line of log.split(/\r?\n/)) {
+    const match = SHARD_PREFIX.exec(line);
+    if (match) widths.add(Number(match[2]));
+  }
+  if (widths.size === 0) return SELECTOR_SHADOW_SHARDS;
+  const [width] = [...widths];
+  return widths.size === 1 && SELECTOR_SHADOW_SHARD_COUNTS.includes(width!) ? width : undefined;
+}
 export const SELECTOR_SHADOW_MIN_FAILURES = 30;
 export const SELECTOR_SHADOW_MIN_RUNS = 40;
 /** A background pass may fetch only this many previously unseen workflow logs. */
@@ -283,25 +300,31 @@ export async function readCoverageShardLogsAsync(
   }
   const jobs = new Map<number, number>();
   const conclusions = new Map<number, string>();
+  let width: number | undefined;
   for (const job of body.jobs) {
-    const match = /^coverage-shard \(([1-8])\/8\)$/.exec(job.name ?? "");
+    const match = /^coverage-shard \((\d+)\/(\d+)\)$/.exec(job.name ?? "");
     if (!match) continue;
     const shard = Number(match[1]);
+    const of = Number(match[2]);
+    if (!SELECTOR_SHADOW_SHARD_COUNTS.includes(of) || shard < 1 || shard > of || (width !== undefined && width !== of)) {
+      throw new Error(`selector shadow: invalid coverage job ${job.name ?? ""} for run ${runId}`);
+    }
+    width = of;
     if (!nonnegativeInteger(job.id) || job.status !== "completed" || jobs.has(shard)) {
       throw new Error(`selector shadow: invalid coverage job ${shard} for run ${runId}`);
     }
     jobs.set(shard, job.id);
     if (typeof job.conclusion === "string") conclusions.set(shard, job.conclusion);
   }
-  if (jobs.size !== SELECTOR_SHADOW_SHARDS) throw new Error(`selector shadow: missing coverage jobs for run ${runId}`);
+  if (width === undefined || jobs.size !== width) throw new Error(`selector shadow: missing coverage jobs for run ${runId}`);
   const readText = io.readText ?? ((args: string[]) => ghTextAsync(args, { maxBuffer: 16 * 1024 * 1024 }));
   const evidence: string[] = [];
-  for (let shard = 1; shard <= SELECTOR_SHADOW_SHARDS; shard++) {
+  for (let shard = 1; shard <= width; shard++) {
     const conclusion = conclusions.get(shard);
-    if (conclusion !== undefined) evidence.push(`coverage-shard (${shard}/8)\t${SELECTOR_SHADOW_JOB_MARK}${conclusion}`);
+    if (conclusion !== undefined) evidence.push(`coverage-shard (${shard}/${width})\t${SELECTOR_SHADOW_JOB_MARK}${conclusion}`);
     const raw = await readText(["api", `repos/${owner}/${repo}/actions/jobs/${jobs.get(shard)}/logs`]);
     for (const line of raw.split(/\r?\n/)) {
-      if (isSelectorShadowEvidenceLine(line)) evidence.push(`coverage-shard (${shard}/8)\t${line}`);
+      if (isSelectorShadowEvidenceLine(line)) evidence.push(`coverage-shard (${shard}/${width})\t${line}`);
     }
   }
   return evidence.join("\n");
@@ -359,11 +382,11 @@ function parseFlakeTitles(label: string): string[] {
   return label.split(", ").map((t) => t.trim()).filter(Boolean);
 }
 
-/** Per-shard verdicts and retry evidence from `coverage-shard (k/8)\t`-prefixed lines. */
+/** Per-shard verdicts and retry evidence from `coverage-shard (k/N)\t`-prefixed lines. */
 function shardEvidence(log: string): Map<number, ShardEvidence> {
   const shards = new Map<number, ShardEvidence>();
   for (const line of log.split(/\r?\n/)) {
-    const prefix = /^coverage-shard \(([1-8])\/8\)\t(.*)$/.exec(line);
+    const prefix = /^coverage-shard \((\d+)\/\d+\)\t(.*)$/.exec(line);
     if (!prefix) continue;
     const shard = Number(prefix[1]);
     const body = prefix[2]!;
@@ -428,10 +451,10 @@ export function selectorShadowFlakeEvidence(log: string): SelectorShadowFlake[] 
 /** W1-T5703: every class scripts/diff-class.mjs's COVERAGE_CLASSES skips coverage on (all but SOURCE). */
 export const SELECTOR_SHADOW_SKIP_CLASSES = Object.freeze(["PLAN_ONLY", "DOCS_ONLY", "TEST_ONLY", "NO_SRC"] as const);
 const EXPLICIT_SKIP_LINE = new RegExp(
-  `coverage-shard \\(([1-8])\\/8\\).*W1-T2428 fast-lane: class=(${SELECTOR_SHADOW_SKIP_CLASSES.join("|")}) — skipping Test with coverage`,
+  `coverage-shard \\((\\d+)\\/\\d+\\).*W1-T2428 fast-lane: class=(${SELECTOR_SHADOW_SKIP_CLASSES.join("|")}) — skipping Test with coverage`,
 );
 
-/** A skip-class coverage job explicitly skips the shadow command. Require all eight
+/** A skip-class coverage job explicitly skips the shadow command. Require every shard's
  * actual skip lines before excluding a run; a missing or unreadable job is still incomplete. */
 function explicitlySkippedRun(log: string): boolean {
   const shards = new Set<number>();
@@ -439,7 +462,7 @@ function explicitlySkippedRun(log: string): boolean {
     const match = EXPLICIT_SKIP_LINE.exec(line);
     if (match) shards.add(Number(match[1]));
   }
-  return shards.size === SELECTOR_SHADOW_SHARDS && parseSelectorShadowLines(log).length === 0;
+  return shards.size === selectorShadowShardCount(log) && parseSelectorShadowLines(log).length === 0;
 }
 
 /** Synchronous reader retained for direct/offline callers. The daemon uses the async reader below. */
@@ -539,11 +562,11 @@ export async function readSelectorShadowRunsAsync(
     }
     freshReads++;
     const log = io.cachePath
-      ? fullLog.split(/\r?\n/).filter((line) => isSelectorShadowEvidenceLine(line.replace(/^coverage-shard \([1-8]\/8\)\t/, ""))).join("\n")
+      ? fullLog.split(/\r?\n/).filter((line) => isSelectorShadowEvidenceLine(line.replace(/^coverage-shard \(\d+\/\d+\)\t/, ""))).join("\n")
       : fullLog;
     runs.push({ ...run, log });
     if (io.cachePath) {
-      const complete = parseSelectorShadowLines(log).length === SELECTOR_SHADOW_SHARDS || explicitlySkippedRun(log);
+      const complete = parseSelectorShadowLines(log).length === selectorShadowShardCount(log) || explicitlySkippedRun(log);
       // Reported once: a complete run is cached and never fetched again, so its flakes are never recounted.
       // W1-T6406: no reader-version bump — a run cached before this change was already reported, and
       // re-reading it would ledger its recovered files twice.
@@ -632,18 +655,18 @@ export interface SelectorShadowObservation {
  *  A run with no marker (every run before the marker existed) counts as `all`. */
 function ranNarrowedSelection(log: string): boolean {
   return log.split(/\r?\n/).some((line) => {
-    const prefix = /^coverage-shard \([1-8]\/8\)\t(.*)$/.exec(line);
+    const prefix = /^coverage-shard \(\d+\/\d+\)\t(.*)$/.exec(line);
     return prefix !== null && COVERAGE_SELECTION_LINE.exec(prefix[1]!)?.[1] === "narrow";
   });
 }
 
 type SelectorShadowReading = { kind: "skipped" | "incomplete" } | { kind: "complete"; observation: SelectorShadowObservation };
 
-/** Only complete eight-shard runs are observations. An absent narrow decision cannot inflate its evidence. */
+/** Only runs complete at their own matrix width are observations. An absent narrow decision cannot inflate its evidence. */
 function selectorShadowReading(run: SelectorShadowRun, source: SelectorShadowObservation["source"] = "live"): SelectorShadowReading {
   if (explicitlySkippedRun(run.log)) return { kind: "skipped" };
   const records = parseSelectorShadowLines(run.log);
-  if (records.length !== SELECTOR_SHADOW_SHARDS) return { kind: "incomplete" };
+  if (records.length !== selectorShadowShardCount(run.log)) return { kind: "incomplete" };
   const impact = records[0]!;
   if (records.some((record) => record.impactSize !== impact.impactSize || record.impactFallback !== impact.impactFallback ||
       record.impactDistance !== impact.impactDistance)) {
@@ -651,7 +674,7 @@ function selectorShadowReading(run: SelectorShadowRun, source: SelectorShadowObs
   }
   const jobs = shardEvidence(run.log);
   const shards = run.log.split(/\r?\n/).filter((line) => line.includes("AFFECTED-SUITES-SHADOW: "))
-    .map((line) => Number(/^coverage-shard \(([1-8])\/8\)/.exec(line)?.[1]));
+    .map((line) => Number(/^coverage-shard \((\d+)\/\d+\)/.exec(line)?.[1]));
   const failures: SelectorShadowFailure[] = [];
   let recovered = 0;
   for (const [index, record] of records.entries()) {

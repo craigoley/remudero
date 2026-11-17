@@ -1329,7 +1329,7 @@ import { routingAbCommand } from "./lib/routing-experiments.js";
 import { attributeAttemptOutcome } from "./lib/attempt-outcome-attribution.js";
 import { recordRoutingExperimentResults } from "./lib/routing-experiment-result.js";
 import { askDecisionModel, decisionsCommand } from "./lib/decision-model.js";
-import { judgeReplayCommand, replayJudgeCorpus } from "./lib/judge-replay-batch.js";
+import { judgeReplayCommand, parseJudgeReplayLane, replayJudgeCorpus } from "./lib/judge-replay-batch.js";
 import { reviewTriageCandidates, triagePullRequest } from "./lib/review-triage.js";
 import {
   PROGRESS_WATCHDOG_READ_STEPS,
@@ -43674,9 +43674,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "judge-replay",
-    syntax: "rmd judge-replay --model <id> --corpus <machine-judge-probes|risk-judge-dispositions|all>",
-    summary: "Replay the judge corpora through one named model in one Anthropic Message Batch.",
-    detail: "W1-T12418: reads test/fixtures/machine-judge-probes.json and the risk-judge disposition fixtures (test/fixtures/risk-judge-dispositions/) and sends each case as one request of ONE paid Message Batch to the named model on the Anthropic API, with its expected answer kept beside it. A case the risk-judge scrub flags is refused, because Message Batches are NOT zero-retention: Anthropic keeps batch prompts and results for 29 days, and the output says so. The daemon sends the batch through the secret boundary: a loopback proxy reads ANTHROPIC_API_KEY from the daemon env and puts it in x-api-key, and each decision is a value-free boundary.request row. A worker env, a missing key or a model with no price row sends nothing. The whole batch reserves at the batch price (half the standard row) against the normal daily cash cap before it is sent, polls until the batch ends, and settles from each result's usage; a result with no usage, or a batch that does not end within 25 hours, keeps the reservation held. It writes one judge_replay.answered row per result, a recorded typed answer keyed by the model id that the judge calibration body scores, and one judge_replay.batch row. Offline only: no live judge, gate or route reads the rows. Exit 0 ended, 1 refused, failed or unsettled, 2 bad usage.",
+    syntax: "rmd judge-replay [--lane batch] --model <id> --corpus <machine-judge-probes|risk-judge-dispositions|all> | rmd judge-replay --lane direct --candidate <name> --corpus <machine-judge-probes|risk-judge-dispositions|all>",
+    summary: "Replay the judge corpora through one named model, in one Message Batch or one request per case.",
+    detail: "W1-T12418: reads test/fixtures/machine-judge-probes.json and the risk-judge disposition fixtures (test/fixtures/risk-judge-dispositions/) and sends each case as one request of ONE paid Message Batch to the named model on the Anthropic API, with its expected answer kept beside it. A case the risk-judge scrub flags is refused, because Message Batches are NOT zero-retention: Anthropic keeps batch prompts and results for 29 days, and the output says so. The daemon sends the batch through the secret boundary: a loopback proxy reads ANTHROPIC_API_KEY from the daemon env and puts it in x-api-key, and each decision is a value-free boundary.request row. A worker env, a missing key or a model with no price row sends nothing. The whole batch reserves at the batch price (half the standard row) against the normal daily cash cap before it is sent, polls until the batch ends, and settles from each result's usage; a result with no usage, or a batch that does not end within 25 hours, keeps the reservation held. It writes one judge_replay.answered row per result, a recorded typed answer keyed by the model id that the judge calibration body scores, and one judge_replay.batch row. Offline only: no live judge, gate or route reads the rows. Exit 0 ended, 1 refused, failed or unsettled, 2 bad usage. W1-T12421: --lane direct --candidate <name> replays the same corpora through a decision_models candidate (through askDecisionModel, one choice question per case) or a priced cash deployment (through sendCashRequest, with the case's own prompt and the one-word parser), ONE request per case and one case at a time, waiting while the deployment's learned per-minute token limit cannot hold the next request. Before the first request it estimates the corpus at each case's reservation and refuses to start above the $1.00 replay ceiling; each request then reserves against the normal daily cash cap. A case above the candidate's input limit is counted as too large and not sent. A 429 that stays after one retry, a budget refusal or an unavailable candidate stops the replay and keeps the answers already written. Each sent case writes one judge_replay.answered row whose typed answer, keyed by role, model id and model surface (decisions or text), has the case's expected answer as its outcome; the replay writes one judge_replay.finished row with the counts sent, answered, abstained, rejected and too large, the settled dollars, the median latency or the reason it stopped. Exit 0 finished, 1 refused or stopped.",
   },
   {
     name: "field-trials",
@@ -44821,7 +44821,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   )],
   ["routing-ab", async (rest) => await routingAbCommand(rest, { classifyAttempt: attributeAttemptOutcome })],
   ["decisions", async (rest) => await decisionsCommand(rest, (config, request) => askDecisionModel(config, request), { repoRoot })],
-  ["judge-replay", async (rest) => await judgeReplayCommand(rest, (config, request) => replayJudgeCorpus(config, request), { repoRoot })],
+  ["judge-replay", async (rest) => await judgeReplayCommand(rest, (config, request) => replayJudgeCorpus(config, request), { repoRoot, lane: parseJudgeReplayLane(rest) })],
   ["progress-watchdog", (rest) => progressWatchdogCommand(rest)],
   ["live-edits", async (rest) => await liveEditsCommand(rest)],
   ["host-alert", async (rest) => hostAlertCommand(rest)],
