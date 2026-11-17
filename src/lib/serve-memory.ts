@@ -162,8 +162,24 @@ export function snapshotHolder(name: string, current: () => unknown, drop?: () =
   };
 }
 
+/**
+ * W1-T13331: each held view body's {@link approxBytes}, by body object. A published body never changes (a new
+ * generation is a new object), so a sample walks only the bodies it has not sized before. A WeakMap keeps no body alive.
+ */
+const VIEW_BODY_SIZES = new WeakMap<object, number>();
+
+/** {@link approxBytes} of one held view body, walked once per body object. */
+export function heldBodyBytes(body: unknown, walk: (value: unknown) => number = approxBytes): number {
+  if (typeof body !== "object" || body === null) return walk(body);
+  const known = VIEW_BODY_SIZES.get(body);
+  if (known !== undefined) return known;
+  const size = walk(body);
+  VIEW_BODY_SIZES.set(body, size);
+  return size;
+}
+
 /** The read model's view bodies, broken down by `<view>@g<generation>` so a generation left behind is visible. */
-export function viewBodiesHolder(bodies: () => ReadonlyMap<string, { view: string; generation: number; body: unknown }>): MemoryHolder {
+export function viewBodiesHolder(bodies: () => ReadonlyMap<string, { view: string; generation: number; body: unknown }>, walk: (value: unknown) => number = approxBytes): MemoryHolder {
   return {
     name: "view-bodies",
     kind: "view-bodies",
@@ -173,7 +189,7 @@ export function viewBodiesHolder(bodies: () => ReadonlyMap<string, { view: strin
       let bytes = 0;
       for (const entry of bodies().values()) {
         const part = (parts[`${entry.view}@g${entry.generation}`] ??= { entries: 0, bytes: 0 });
-        const size = approxBytes(entry.body);
+        const size = heldBodyBytes(entry.body, walk);
         part.entries += 1;
         part.bytes += size;
         entries += 1;

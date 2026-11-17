@@ -157,7 +157,7 @@ import type { StatusProjection } from "./status.js";
 import { ENVIRONMENTAL_BLOCK_COOLDOWN_MS, INDEPENDENT_BLOCK_RELEASED_STEP, isEnvironmentalBlock, PRE_RESTORE_RUN_VERDICT_STAGES, type IndependentBlockRelease } from "./status.js";
 import { explainDispatchScore, openDependentFanout, type DispatchValueContext } from "./dispatch-value.js";
 import {
-  OPS_CATALOG_OUTCOMES, readOpsCatalogSnapshotAsync, type OpsCatalogApi, type OpsCatalogOutcome, type OpsCatalogShadowInput,
+  OPS_CATALOG_OUTCOMES, opsCatalogRefusalStage, readOpsCatalogSnapshotAsync, type OpsCatalogApi, type OpsCatalogOutcome, type OpsCatalogShadowInput,
   type OpsCatalogTarget,
 } from "./ops-catalog-source.js";
 import { GhJsonUnreadableResponseError, takeGhPaceLoopWaits, takeGhReadCadenceTally, type GhReadCadenceTally } from "./github-transport.js";
@@ -5376,14 +5376,15 @@ export async function runDaemon(
   };
   const opsDispatchContexts = new WeakMap<Plan, OpsDispatchContext>();
   let lastOpsDispatchHold: string | undefined;
-  const holdOpsDispatch = (reason: string, taskId?: string): void => {
+  const holdOpsDispatch = (reason: string, taskId?: string, source?: OpsCatalogShadowInput): void => {
     const safeReason = OPS_CATALOG_OUTCOMES.includes(reason as OpsCatalogOutcome) ||
       ["selection_unreadable", "selection_changed", "invalid_dispatch_flag", "source_pending", "source_identity_unknown",
         "primary_revision_unknown", "duplicate_task_id", "invalid_cross_catalog_dependency", "malformed"].includes(reason)
       ? reason : "selection_unreadable";
-    const signature = JSON.stringify([safeReason, taskId]);
+    const stage = opsCatalogRefusalStage(source);
+    const signature = JSON.stringify([safeReason, taskId, stage]);
     if (signature === lastOpsDispatchHold) return;
-    try { log("dispatch.ops_catalog_held", { outcome: safeReason, ...(taskId ? { task_id: taskId } : {}) }); }
+    try { log("dispatch.ops_catalog_held", { outcome: safeReason, ...(stage ? { refusal_stage: stage } : {}), ...(taskId ? { task_id: taskId } : {}) }); }
     catch (error) { void error; /* A diagnostic failure cannot authorize ops work or stop public selection. */ }
     lastOpsDispatchHold = signature;
   };
@@ -5399,12 +5400,12 @@ export async function runDaemon(
     const observation = readOpsDispatch(primary);
     if (observation.outcome === "off") { lastOpsDispatchHold = undefined; return { plan: primary, observation }; }
     if (observation.outcome === "unavailable") {
-      holdOpsDispatch(observation.reason);
+      holdOpsDispatch(observation.reason, undefined, observation.source);
       return { plan: primary, observation };
     }
     const input = observation.source;
     if (input.outcome !== "ok" || input.plan === undefined) {
-      holdOpsDispatch(input.outcome === "ok" ? "source_identity_unknown" : input.outcome);
+      holdOpsDispatch(input.outcome === "ok" ? "source_identity_unknown" : input.outcome, undefined, input);
       return { plan: primary, observation };
     }
     if (!CATALOG_COMMIT.test(observation.publicCommit)) {
@@ -5434,7 +5435,8 @@ export async function runDaemon(
     if (latest.outcome === "selected" && latest.source.outcome === "ok" &&
       latest.publicCommit === captured.publicCommit && latest.source.identityDigest === captured.source.identityDigest &&
       latest.source.opsCommit === captured.source.opsCommit) return true;
-    holdOpsDispatch(latest.outcome === "unavailable" ? latest.reason : "selection_changed");
+    holdOpsDispatch(latest.outcome === "unavailable" ? latest.reason : "selection_changed", undefined,
+      latest.outcome === "off" ? undefined : latest.source);
     return false;
   };
   // W1-T11768: the one snapshot of an injected ops target; `null` is any refusal (never a partial Plan).

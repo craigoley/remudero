@@ -125,7 +125,7 @@ import {
   capStrikeLadderNote, decideStrikeLadderRung, firstFailingTestTitle, hasUnspentLadderRefresh,
   latestStrikeLadderAttempt, rebuiltOnUtcDay, sloRungHistory, strikeCauseKey,
 } from "./strike-ladder.js";
-import { buildRiskJudgeSpawnArgs, resolveFixProgressJudgeMount, resolveRiskJudgeMount, runJudgeShadow, scrubRiskJudgeText, runRiskJudge, type RiskJudgeConfig, type RiskJudgeInput, type RiskJudgeOrchestratorDeps } from "./risk-judge.js";
+import { buildRiskJudgeSpawnArgs, JUDGE_SHADOW_COMPARED_KEY, resolveFixProgressJudgeMount, resolveRiskJudgeMount, runJudgeShadow, scrubRiskJudgeText, runRiskJudge, type RiskJudgeConfig, type RiskJudgeInput, type RiskJudgeOrchestratorDeps } from "./risk-judge.js";
 import {
   createIncrementalLedgerUnion, createLedgerRotationMemo, createSizedMemo, ledgerRotationDigests, ledgerRotationEntries, ndjsonLines,
   readLedgerUnionRecordsSync, realLedgerFs, resolveLedgerUnion,
@@ -2547,7 +2547,8 @@ export function productionFixProgressJudge(opts: {
       // Advisory: the verdict returned below is the primary's, whatever the shadow answers or refuses.
       await runJudgeShadow({
         surface: "fix-progress", key: `${input.prNumber === undefined ? input.taskId ?? "unknown" : `PR${input.prNumber}`}@${input.headSha}`,
-        mount, primaryArgs, primaryVerdict: verdict, parse: parseFixProgressVerdict, agreementKey: (v) => v.verdict,
+        mount, primaryArgs, primaryVerdict: verdict, parse: parseFixProgressVerdict,
+        agreementKey: (v) => JUDGE_SHADOW_COMPARED_KEY["fix-progress"](v) ?? "",
         spawn, log: opts.log,
       });
     }

@@ -6,6 +6,9 @@
   verify: auto
   risk: low
   priority: 2.5
+  # refusal-amendment (W1-T9948, run W1-T9948-1794938821648, 2026-11-17T19:15:39.908Z): the worker refused criterion 1 [premise-rotted] — proposed close-unbuilt: the premise no longer holds at HEAD — close this task unbuilt, or restate the premise it should build on
+  #   worker evidence: The record's evidence (PRs #12043, #11973, #12049) is far older than HEAD, `src/lib/sweep.ts` has no `time_to_merge` logic to change, and the latency recovery can't be shown by a code diff; the operator should decide whether the regression is still live.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   author_class: machine
