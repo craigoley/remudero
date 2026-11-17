@@ -10,7 +10,9 @@ import { evaluateIdleCapacityDetectors, idleCapacityDetector } from "#src/lib/id
 import { selectionHoldForStep, selectionRefusalReason } from "#src/lib/idle-lane-accounting.js";
 import { loadPlan } from "#src/lib/plan.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
-import type { RunResult } from "#src/run-task.js";
+
+/** The slice of a run result this suite's refused dispatch never produces; importing run-task's type would add a reach importer. */
+type RunResult = never;
 
 // ── W1-T10423: a selection_empty slot names why selection found nothing ─────────────────────
 //
