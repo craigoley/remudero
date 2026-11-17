@@ -36,7 +36,7 @@
     - test/the-full-suite-runs-in-the-merge-queue.test.ts
     - test/the-test-shards-are-sized-by-wall-time.test.ts
     - test/workflow-single-suite-run.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "One coverage shard count, 12, is read the same from the coverage-shard matrix, its job name, both --shard selections, the aggregator's --shard-count and lcov and raw lists, ci-gate's coverage-shard entries, CI_COVERAGE_SHARD_COUNT and coverage-floor's merge-group producer count, while coverage-floor's nightly producer count stays coverage-nightly.yml's 8"

@@ -15,7 +15,7 @@
     - W1-T13162
   files:
     - test/a-stale-inflight-lock-written-by-a-host-process-no-longer-blocks-recycles.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Every lock fixture the suite writes for a lock this host's dead or reused process left behind is dated relative to the clock the test runs under, and the suite passes with the clock shifted forward by a year"

@@ -13,7 +13,7 @@
     - W1-T6407
   files:
     - docs/forensics/fleet-github-identity.md
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "docs/forensics/fleet-github-identity.md lists, for each host (Azure, Mac mini) and each write path (issue comment, issue create or close, reaction, PR create, git push), the login it writes as today, each labelled OBSERVED with its source or INFERRED"

@@ -17,7 +17,7 @@
   files:
     - src/lib/dispatch-claim.ts
     - test/dispatch/the-silence-judge-takes-a-claim-a-hand-session-minted-on-the-host.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A claim whose mint row names another host than this instance's, or an operator actor, is not treated as minted by this instance's fleet: the silence judge decides it, and reclaims it once its silence passes the measured window"

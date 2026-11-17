@@ -16,7 +16,7 @@
   files:
     - src/lib/feedback-landing.ts
     - test/inbox/a-landing-pull-request-body-lists-exactly-what-its-commit-holds.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "When the lane pushes a commit to the landing branch while a landing pull request is already open on it, the pull request's body is rewritten from the files of the commit that was pushed: its count and its acceptance lines name those files and no other"

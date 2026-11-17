@@ -19,7 +19,7 @@
     - src/lib/config-schema.ts
     - test/config-schema.test.ts
     - test/inbox/the-inbox-gardener-mode-is-a-durable-host-setting.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With RMD_INBOX_GARDENER_MODE unset, inboxGardenerMode returns the inboxGardenerMode value of config.json (off, shadow or act), and returns off when config.json is absent, unreadable or names no mode"

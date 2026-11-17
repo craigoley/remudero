@@ -28,7 +28,7 @@
     - src/run-task.ts
     - docs/cli-reference.md
     - test/worker/spawn/the-judge-corpora-replay-one-request-at-a-time.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "`replayJudgeCorpus` takes a lane, batch or direct. The direct lane reads the same corpora as the batch lane and sends each case as one request: to a decision_models candidate through askDecisionModel, or to a cash deployment through sendCashRequest with the role's own prompt and parser"
