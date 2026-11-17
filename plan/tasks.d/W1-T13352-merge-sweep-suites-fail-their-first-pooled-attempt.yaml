@@ -38,3 +38,15 @@
     25/25, so the order or the rest of the pool matters.
   note: |
     Reserved with rmd next-task-id --count 3 --branch claude/project-thread-7ycldf (2026-11-17 11:40Z).
+  risk_ruling:
+    verdict: "low"
+    action: escalate
+    confidence: 0.85
+    reasons:
+      - "The task is typed recon with a report as its deliverable. The acceptance criteria ask for a report and a single recommended fix task, not for changes to merge, deploy or review policy."
+      - "The description and declared files (a pool script and three test files) show no secrets, credentials, auth, data deletion or irreversible action."
+      - "The rationale cites specific CI run IDs and a local reproduction attempt (25/25 pass), and criterion 1 requires a local pooled reproduction, so the finding can be verified from what is shown."
+      - "The gates state is clean: operator-authored, and the family track record is a Beta mean of 0.88 with 26 merged. The zero PR references in the evidence line is a minor weakness, offset by the run IDs."
+      - "the judge said proceed, but W1-T13352: at verify: auto it fails lint (proof-dialect)"
+    judged_at: "2026-11-17T12:29:34.920Z"
+    pin: "ee9cd1cb8c6c91a8bd8a78e1ea3367f0067cf2ad0597ed642dc929b02286c13b"
