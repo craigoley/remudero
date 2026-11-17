@@ -216,10 +216,10 @@ test("test/a-daemon-lane-reclaim-needs-current-reservation-code.test.ts", async 
       const text = readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
       const functions = [...text.matchAll(/^(?:export )?(?:async )?function (\w+)\(/gm)];
       assert.ok(functions.length > 10, `${path}: positive control must see the function population`);
-      for (const call of text.matchAll(/\b(gitRemoteRefReserver|gatedRemoteRefReserver)\s*\(/g)) {
+      for (const call of text.matchAll(/\b(gitRemoteRefReserver|gitRemoteRefReserverAsync|gatedRemoteRefReserver|gatedRemoteRefReserverAsync)\s*\(/g)) {
         const owner = functions.filter((f) => f.index! < call.index!).at(-1)?.[1];
         const tail = text.slice(call.index, functions.find((f) => f.index! > call.index!)?.index);
-        if (call[1] === "gitRemoteRefReserver") {
+        if (call[1] === "gitRemoteRefReserver" || call[1] === "gitRemoteRefReserverAsync") {
           assert.equal(owner, "nextTaskIdCommand", `${owner}: bypasses the gated factory in ${path}`);
           assert.match(text.slice(call.index, text.indexOf(";", call.index)), /policyCurrency:/);
           operator++;

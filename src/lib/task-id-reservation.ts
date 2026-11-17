@@ -2,12 +2,13 @@ import { execFile } from "node:child_process";
 import { boundChildByLoopTime } from "./loop-bounded-child.js";
 import { closeSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeSync } from "node:fs";
 import { hostname } from "node:os";
+import { randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isAllocatableTaskId, MAX_ALLOCATABLE_TASK_ID } from "./task-id.js";
-import { assertClaimRefPushAllowed } from "./live-write-guard.js";
+import { assertClaimRefPushAllowed, assertClaimRefPushAllowedAsync } from "./live-write-guard.js";
 import { systemClock, type Clock } from "./clock.js";
 import { GIT_FETCH_KILL_GRACE_MS } from "./git-fetch-retry.js";
 
@@ -22,6 +23,47 @@ import { GIT_FETCH_KILL_GRACE_MS } from "./git-fetch-retry.js";
  * discarding a torn write here IS the collision, unlike the mint's own history cache.
  * Why: docs/forensics/task-id-reservation.md#module-header. Falsifier: test/task-id-reservation.test.ts.
  */
+/** W1-T13183: one reservation protocol, two drivers. Each git or reserver call is yielded as a thunk:
+ *  {@link driveSync} calls it for the CLI and {@link driveAsync} awaits it for the daemon loop. A thunk that
+ *  throws is thrown back into the protocol at its own `yield`, so both drivers take the same catch arms. */
+type Effect = () => unknown;
+type Protocol<R> = Generator<Effect, R, unknown>;
+type AnyGitRun = (args: string[]) => GitAnswer | Promise<GitAnswer>;
+
+function* call<T>(effect: () => T | Promise<T>): Generator<Effect, T, unknown> {
+  return (yield effect) as T;
+}
+
+function driveSync<R>(protocol: Protocol<R>): R {
+  let next = protocol.next();
+  while (!next.done) {
+    let value: unknown;
+    try {
+      value = next.value();
+    } catch (error) {
+      next = protocol.throw(error);
+      continue;
+    }
+    next = protocol.next(value);
+  }
+  return next.value;
+}
+
+async function driveAsync<R>(protocol: Protocol<R>): Promise<R> {
+  let next = protocol.next();
+  while (!next.done) {
+    let value: unknown;
+    try {
+      value = await next.value();
+    } catch (error) {
+      next = protocol.throw(error);
+      continue;
+    }
+    next = protocol.next(value);
+  }
+  return next.value;
+}
+
 export function taskIdReservationsDir(root: string): string {
   return join(root, "state", "task-id-reservations");
 }
@@ -319,9 +361,13 @@ export const RESERVATION_REF_RE = /(?:^|\s)refs\/rmd-id\/W1-T([0-9]+)$/;
 export function remoteReservedTaskIds(
   run: (args: string[]) => { status: number; stdout: string; stderr: string },
 ): number[] | "unknown" {
-  let res: { status: number; stdout: string; stderr: string };
+  return driveSync(remoteReservedTaskIdsSteps(run));
+}
+
+function* remoteReservedTaskIdsSteps(run: AnyGitRun): Protocol<number[] | "unknown"> {
+  let res: GitAnswer;
   try {
-    res = run(["ls-remote", "origin", "refs/rmd-id/*"]);
+    res = yield* call(() => run(["ls-remote", "origin", "refs/rmd-id/*"]));
   } catch {
     return "unknown"; // a thrown runner reads identically to a non-zero exit: both fall back to the walk
   }
@@ -465,10 +511,14 @@ function unholderValue(v: string): string {
  *  re-resolves once the run branch that will actually file the id exists. Exported so that later
  *  caller can ask "what branch am I on NOW" without duplicating the resolution order. */
 export function currentBranch(run: RemoteReserveDeps["run"]): string {
+  return driveSync(currentBranchSteps(run));
+}
+
+function* currentBranchSteps(run: AnyGitRun): Protocol<string> {
   if (process.env.GITHUB_HEAD_REF) return process.env.GITHUB_HEAD_REF;
-  const symbolic = run(["symbolic-ref", "--quiet", "--short", "HEAD"]);
+  const symbolic = yield* call(() => run(["symbolic-ref", "--quiet", "--short", "HEAD"]));
   if (symbolic.status === 0 && symbolic.stdout.trim()) return symbolic.stdout.trim();
-  const abbrev = run(["rev-parse", "--abbrev-ref", "HEAD"]);
+  const abbrev = yield* call(() => run(["rev-parse", "--abbrev-ref", "HEAD"]));
   if (abbrev.status === 0 && abbrev.stdout.trim() && abbrev.stdout.trim() !== "HEAD") return abbrev.stdout.trim();
   return "unknown";
 }
@@ -614,9 +664,21 @@ export type ReservationPolicyCurrency =
 /** W1-T6026: is the LOADED module origin/main's blob? W1-T5997 was taken over by code 687 commits behind. */
 export function reservationPolicyCurrency(modulePath: string = fileURLToPath(import.meta.url)): ReservationPolicyCurrency {
   const git = (args: string[]) => spawnSync("git", ["-C", dirname(modulePath), ...args], { encoding: "utf8" });
-  const loaded = git(["hash-object", modulePath]);
+  return driveSync(policyCurrencySteps(modulePath, git));
+}
+
+/** {@link reservationPolicyCurrency} off the daemon loop, through {@link gitReservationRunnerAsync}. */
+export function reservationPolicyCurrencyAsync(modulePath: string = fileURLToPath(import.meta.url)): Promise<ReservationPolicyCurrency> {
+  return driveAsync(policyCurrencySteps(modulePath, gitReservationRunnerAsync(dirname(modulePath))));
+}
+
+function* policyCurrencySteps(
+  modulePath: string,
+  git: (args: string[]) => { status: number | null; stdout: string; stderr: string } | Promise<GitAnswer>,
+): Protocol<ReservationPolicyCurrency> {
+  const loaded = yield* call(() => git(["hash-object", modulePath]));
   if (loaded.status !== 0) return { status: "unprovable", reason: `git hash-object ${modulePath} failed: ${String(loaded.stderr).trim()}` };
-  const main = git(["rev-parse", "--verify", "--quiet", `origin/main:${RESERVATION_POLICY_PATH}`]);
+  const main = yield* call(() => git(["rev-parse", "--verify", "--quiet", `origin/main:${RESERVATION_POLICY_PATH}`]));
   if (main.status !== 0) return { status: "unprovable", reason: `origin/main:${RESERVATION_POLICY_PATH} is unreadable` };
   const [l, m] = [loaded.stdout.trim(), main.stdout.trim()];
   return l === m ? { status: "current" } : { status: "differs", loaded: l, main: m };
@@ -631,13 +693,10 @@ function staleTakeoverRefusal(taskId: string, c: Exclude<ReservationPolicyCurren
 
 type RemoteHolderBranchRead = { presence: ReservationHolderBranchPresence; reason?: string };
 
-function remoteHolderBranchPresence(
-  branch: string,
-  run: RemoteReserveDeps["run"],
-): RemoteHolderBranchRead {
-  let result: { status: number; stdout: string; stderr: string };
+function* remoteHolderBranchPresenceSteps(branch: string, run: AnyGitRun): Protocol<RemoteHolderBranchRead> {
+  let result: GitAnswer;
   try {
-    result = run(["ls-remote", "--exit-code", "--heads", "origin", `refs/heads/${branch}`]);
+    result = yield* call(() => run(["ls-remote", "--exit-code", "--heads", "origin", `refs/heads/${branch}`]));
   } catch (error) {
     return { presence: "unreadable", reason: `holder branch read threw: ${String(error)}` };
   }
@@ -667,19 +726,20 @@ function anchorGitFailure(step: string, res: { status: number; stderr: string })
   return `git ${step} exited ${res.status}: ${cause}. git said:\n${said}`;
 }
 
-/** W1-T8915: the anchor commit, BOTH git statuses and outputs checked; never a network diagnosis. */
-function commitReservationAnchor(
-  run: RemoteReserveDeps["run"],
-  message: () => string,
+/** W1-T8915: the anchor commit, BOTH git statuses and outputs checked; never a network diagnosis.
+ *  `message` runs after the tree is hashed and may itself read git (the filing branch). */
+function* commitReservationAnchorSteps(
+  run: AnyGitRun,
+  message: () => Protocol<string>,
   parent?: string,
-): { sha: string } | { reason: string } {
-  const tree = run(["hash-object", "-t", "tree", "/dev/null"]);
+): Protocol<{ sha: string } | { reason: string }> {
+  const tree = yield* call(() => run(["hash-object", "-t", "tree", "/dev/null"]));
   if (tree.status !== 0) return { reason: anchorGitFailure("hash-object", tree) };
   const treeSha = String(tree.stdout ?? "").trim();
   const treeProblem = reservationAnchorProblem(treeSha);
   if (treeProblem) return { reason: `git hash-object exited 0 but printed no usable tree id (${treeProblem})` };
-  const msg = message();
-  const commit = run(parent ? ["commit-tree", treeSha, "-p", parent, "-m", msg] : ["commit-tree", treeSha, "-m", msg]);
+  const msg = yield* message();
+  const commit = yield* call(() => run(parent ? ["commit-tree", treeSha, "-p", parent, "-m", msg] : ["commit-tree", treeSha, "-m", msg]));
   if (commit.status !== 0) return { reason: anchorGitFailure("commit-tree", commit) };
   const sha = String(commit.stdout ?? "").trim();
   const shaProblem = reservationAnchorProblem(sha);
@@ -687,11 +747,35 @@ function commitReservationAnchor(
   return { sha };
 }
 
-/** The real reserver: an orphan commit over the empty tree, pushed to the id's own ref. `commit-tree`
- *  with NO `-p` is what makes the payload unrelated to every other writer's (see the module-level
- *  note above); the message carries pid+host+time plus a parseable holder line, so an operator can
- *  see which branch or lane owns a stuck reservation. */
-export function gitRemoteRefReserver(deps: RemoteReserveDeps): RemoteRefReserver {
+/** A protocol step that reads no git: the anchor message once its holder fields are known. */
+function* computed<T>(value: () => T): Protocol<T> {
+  return yield* call(value);
+}
+
+/** What {@link reserverProtocol} runs over: the caller's git and claim-ref guard, sync or awaited. */
+type ReserverProtocolInput = Omit<RemoteReserveDeps, "run" | "policyCurrency"> & {
+  run: AnyGitRun;
+  guard: (ref: string) => void | Promise<void>;
+  policyCurrency?: () => ReservationPolicyCurrency | Promise<ReservationPolicyCurrency>;
+  /** A value unique to one mint, added to the anchor message. Two awaited mints in ONE process can share pid,
+   *  host and millisecond; without it their anchors are the same commit and both pushes succeed. */
+  writerToken?: () => string;
+};
+
+/** The reserver's methods as protocols; {@link gitRemoteRefReserver} drives them sync, {@link gitRemoteRefReserverAsync} awaited. */
+interface ReserverProtocol {
+  filingBranch(): Protocol<string>;
+  reservedFloor(): Protocol<number | "unknown">;
+  mintAnchor(): Protocol<string>;
+  attempt(taskId: string, anchor: string): Protocol<RemoteReserveOutcome>;
+  reclaim(taskId: string): Protocol<RemoteReserveOutcome>;
+  recordFilingBranch(taskId: string, branch: string): Protocol<boolean>;
+  lastAttemptStderr(): string | undefined;
+  takeoverOf(taskId: string): ReservationTakeover | undefined;
+  wonAnchor(taskId: string): string | undefined;
+}
+
+function reserverProtocol(deps: ReserverProtocolInput): ReserverProtocol {
   // Cached once per reserver INSTANCE, not per attempt — a block makes N calls, and the push
   // staying the claim means a stale floor only costs attempts, never a wrong id.
   let floor: number | "unknown" | undefined;
@@ -702,28 +786,33 @@ export function gitRemoteRefReserver(deps: RemoteReserveDeps): RemoteRefReserver
   // itself confirmed it holds.
   const wonAnchors = new Map<string, string>();
   const takeovers = new Map<string, ReservationTakeover>();
-  const filingBranch = () => deps.filingBranch ?? currentBranch(deps.run);
+  const run = deps.run;
+  function* filingBranch(): Protocol<string> {
+    return deps.filingBranch ?? (yield* currentBranchSteps(run));
+  }
   return {
-    filingBranch() {
-      return filingBranch();
-    },
+    filingBranch,
     lastAttemptStderr() {
       return lastStderr;
     },
-    reservedFloor() {
-      if (floor === undefined) floor = reservationFloorFrom(remoteReservedTaskIds(deps.run));
+    *reservedFloor() {
+      if (floor === undefined) floor = reservationFloorFrom(yield* remoteReservedTaskIdsSteps(run));
       return floor;
     },
-    mintAnchor() {
+    *mintAnchor() {
       const made = deps.anchor
         ? { sha: deps.anchor() }
-        : commitReservationAnchor(deps.run, () => formatReservationAnchorMessage({
-          branch: filingBranch(),
-          pid: process.pid,
-          host: hostname(),
-          startedAt: reservationNowIso(),
-          source: "automatic",
-        }));
+        : yield* commitReservationAnchorSteps(run, function* () {
+          const branch = yield* filingBranch();
+          const message = yield* computed(() => formatReservationAnchorMessage({
+            branch,
+            pid: process.pid,
+            host: hostname(),
+            startedAt: reservationNowIso(),
+            source: "automatic",
+          }));
+          return deps.writerToken ? `${message}\n\nrmd-id writer ${deps.writerToken()}` : message;
+        });
       const reason = "reason" in made ? made.reason : reservationAnchorProblem(made.sha);
       if (reason !== undefined || "reason" in made) {
         throw new TaskIdReservationError(
@@ -734,14 +823,14 @@ export function gitRemoteRefReserver(deps: RemoteReserveDeps): RemoteRefReserver
       }
       return made.sha;
     },
-    attempt(taskId, anchor) {
+    *attempt(taskId, anchor) {
       const problem = reservationAnchorProblem(anchor);
       if (problem) {
         lastStderr = `${ANCHOR_REFUSAL}: ${problem}; refused before any push`;
         return "local";
       }
-      assertClaimRefPushAllowed(deps.run, taskIdReservationRef(taskId));
-      const res = deps.run(["push", "origin", `${anchor}:${taskIdReservationRef(taskId)}`]);
+      yield* call(() => deps.guard(taskIdReservationRef(taskId)));
+      const res = yield* call(() => run(["push", "origin", `${anchor}:${taskIdReservationRef(taskId)}`]));
       if (res.status === 0) {
         lastStderr = undefined;
         wonAnchors.set(taskId, anchor);
@@ -750,14 +839,14 @@ export function gitRemoteRefReserver(deps: RemoteReserveDeps): RemoteRefReserver
       lastStderr = res.stderr;
       return classifyReservationPushFailure(res.stderr);
     },
-    reclaim(taskId) {
-      const branch = filingBranch();
+    *reclaim(taskId) {
+      const branch = yield* filingBranch();
       if (branch === "unknown" || branch === "main") {
         lastStderr = `cannot reclaim ${taskId} without a filing branch`;
         return "unknown";
       }
       const ref = taskIdReservationRef(taskId);
-      const fetched = deps.run(["fetch", "origin", ref]);
+      const fetched = yield* call(() => run(["fetch", "origin", ref]));
       if (fetched.status !== 0) {
         lastStderr = fetched.stderr;
         if (classifyReservationPushFailure(fetched.stderr) === "unreachable") return "unreachable";
@@ -767,43 +856,43 @@ export function gitRemoteRefReserver(deps: RemoteReserveDeps): RemoteRefReserver
         if (reservationRefIsConfirmedAbsent(fetched.stderr)) return "taken";
         return "unknown";
       }
-      const body = deps.run(["log", "-1", "--format=%B", "FETCH_HEAD"]);
+      const body = yield* call(() => run(["log", "-1", "--format=%B", "FETCH_HEAD"]));
       if (body.status !== 0 || !body.stdout.trim()) {
         lastStderr = body.stderr || "reservation holder is unreadable";
         return "unknown";
       }
       const parsed = parseReservationHolderLine(body.stdout);
-      const branchRead = parsed.status === "known"
-        ? remoteHolderBranchPresence(parsed.holder.branch, deps.run)
-        : { presence: "unreadable" as const };
+      let branchRead: RemoteHolderBranchRead = { presence: "unreadable" };
+      if (parsed.status === "known") branchRead = yield* remoteHolderBranchPresenceSteps(parsed.holder.branch, run);
       const drift = reservationHolderDrift(parsed, branchRead.presence, deps.clock);
       if (drift === "held") return "taken";
       if (drift === "unreadable") {
         lastStderr = branchRead.reason ?? "reservation holder is unreadable; refusing takeover";
         return "unknown";
       }
-      const currency = deps.policyCurrency?.();
+      const policyCurrency = deps.policyCurrency;
+      const currency = policyCurrency === undefined ? undefined : yield* call(() => policyCurrency());
       if (currency && currency.status !== "current") {
         (deps.say ?? console.log)(staleTakeoverRefusal(taskId, currency));
         return "taken";
       }
       const takenOverFrom = parsed.status === "known" ? parsed.holder.branch : "unknown";
-      const made = commitReservationAnchor(deps.run, () => formatReservationAnchorMessage({
+      const made = yield* commitReservationAnchorSteps(run, () => computed(() => formatReservationAnchorMessage({
         branch,
         pid: process.pid,
         host: hostname(),
         startedAt: reservationNowIso(),
         source: "reclaimed",
         takenOverFrom,
-      }), "FETCH_HEAD");
+      })), "FETCH_HEAD");
       // W1-T8915: an empty amend here would DELETE the foreign holder's ref, not take it over.
       if ("reason" in made) {
         lastStderr = `${ANCHOR_REFUSAL}: ${made.reason}`;
         return "local";
       }
       const amended = made.sha;
-      assertClaimRefPushAllowed(deps.run, ref);
-      const pushed = deps.run(["push", "origin", `${amended}:${ref}`]);
+      yield* call(() => deps.guard(ref));
+      const pushed = yield* call(() => run(["push", "origin", `${amended}:${ref}`]));
       if (pushed.status !== 0) {
         lastStderr = pushed.stderr;
         return classifyReservationPushFailure(pushed.stderr);
@@ -823,19 +912,19 @@ export function gitRemoteRefReserver(deps: RemoteReserveDeps): RemoteRefReserver
     wonAnchor(taskId) {
       return wonAnchors.get(taskId);
     },
-    recordFilingBranch(taskId, branch) {
+    *recordFilingBranch(taskId, branch) {
       if (!branch || branch === "unknown") return false;
       const previousAnchor = wonAnchors.get(taskId);
       if (!previousAnchor) return false;
-      const msg = () => formatReservationAnchorMessage({ branch, pid: process.pid, host: hostname(), startedAt: reservationNowIso(), source: "automatic" });
-      const made = commitReservationAnchor(deps.run, msg, previousAnchor);
+      const msg = () => computed(() => formatReservationAnchorMessage({ branch, pid: process.pid, host: hostname(), startedAt: reservationNowIso(), source: "automatic" }));
+      const made = yield* commitReservationAnchorSteps(run, msg, previousAnchor);
       if ("reason" in made) {
         lastStderr = `${ANCHOR_REFUSAL}: ${made.reason}`;
         return false;
       }
       const amended = made.sha;
-      assertClaimRefPushAllowed(deps.run, taskIdReservationRef(taskId));
-      const res = deps.run(["push", "origin", `${amended}:${taskIdReservationRef(taskId)}`]);
+      yield* call(() => deps.guard(taskIdReservationRef(taskId)));
+      const res = yield* call(() => run(["push", "origin", `${amended}:${taskIdReservationRef(taskId)}`]));
       if (res.status !== 0) {
         lastStderr = res.stderr;
         return false;
@@ -844,6 +933,65 @@ export function gitRemoteRefReserver(deps: RemoteReserveDeps): RemoteRefReserver
       wonAnchors.set(taskId, amended);
       return true;
     },
+  };
+}
+
+/** The real reserver: an orphan commit over the empty tree, pushed to the id's own ref. `commit-tree`
+ *  with NO `-p` is what makes the payload unrelated to every other writer's (see the module-level
+ *  note above); the message carries pid+host+time plus a parseable holder line, so an operator can
+ *  see which branch or lane owns a stuck reservation. */
+export function gitRemoteRefReserver(deps: RemoteReserveDeps): RemoteRefReserver {
+  const p = reserverProtocol({ ...deps, guard: (ref) => assertClaimRefPushAllowed(deps.run, ref) });
+  return {
+    filingBranch: () => driveSync(p.filingBranch()),
+    lastAttemptStderr: p.lastAttemptStderr,
+    reservedFloor: () => driveSync(p.reservedFloor()),
+    mintAnchor: () => driveSync(p.mintAnchor()),
+    attempt: (taskId, anchor) => driveSync(p.attempt(taskId, anchor)),
+    reclaim: (taskId) => driveSync(p.reclaim(taskId)),
+    takeoverOf: p.takeoverOf,
+    wonAnchor: p.wonAnchor,
+    recordFilingBranch: (taskId, branch) => driveSync(p.recordFilingBranch(taskId, branch)),
+  };
+}
+
+/** {@link RemoteRefReserver} with its git awaited: the daemon loop's reserver (W1-T13183). */
+export interface AsyncRemoteRefReserver {
+  mintAnchor(): Promise<string>;
+  filingBranch?(): Promise<string>;
+  attempt(taskId: string, anchor: string): Promise<RemoteReserveOutcome>;
+  reclaim?(taskId: string): Promise<RemoteReserveOutcome>;
+  takeoverOf?(taskId: string): ReservationTakeover | undefined;
+  lastAttemptStderr?(): string | undefined;
+  reservedFloor?(): Promise<number | "unknown">;
+  recordFilingBranch?(taskId: string, branch: string): Promise<boolean>;
+  wonAnchor?(taskId: string): string | undefined;
+}
+
+/** {@link RemoteReserveDeps} with an awaited git runner and policy read. */
+export type RemoteReserveAsyncInput = Omit<RemoteReserveDeps, "run" | "policyCurrency"> & {
+  run: (args: string[]) => Promise<GitAnswer>;
+  policyCurrency?: () => Promise<ReservationPolicyCurrency>;
+};
+
+/** {@link gitRemoteRefReserver} for the daemon loop: the same protocol, every git call awaited. The
+ *  create-if-absent push to `refs/rmd-id/<id>` stays the one lock, so two writers still get one holder. */
+export function gitRemoteRefReserverAsync(deps: RemoteReserveAsyncInput): AsyncRemoteRefReserver {
+  const p = reserverProtocol({
+    ...deps,
+    guard: (ref) => assertClaimRefPushAllowedAsync(deps.run, ref),
+    writerToken: () => randomBytes(8).toString("hex"),
+  });
+  return {
+    filingBranch: () => driveAsync(p.filingBranch()),
+    lastAttemptStderr: p.lastAttemptStderr,
+    reservedFloor: () => driveAsync(p.reservedFloor()),
+    mintAnchor: () => driveAsync(p.mintAnchor()),
+    attempt: (taskId, anchor) => driveAsync(p.attempt(taskId, anchor)),
+    reclaim: (taskId) => driveAsync(p.reclaim(taskId)),
+    takeoverOf: p.takeoverOf,
+    wonAnchor: p.wonAnchor,
+    recordFilingBranch: (taskId, branch) => driveAsync(p.recordFilingBranch(taskId, branch)),
   };
 }
 
@@ -875,22 +1023,38 @@ export function reservationTakeoverFields(h: Pick<RemoteReservationHandle, "task
   return { task_id: h.taskId, ref: h.ref, taken_over_from: t.from, holder_pid: t.pid ?? null, holder_host: t.host ?? null, holder_started_at: t.startedAt ?? null, age_ms: t.ageMs ?? null };
 }
 
-export function gatedRemoteRefReserver(deps: RemoteReserveDeps & {
-  lane: string;
-  log?: (step: string, fields: Record<string, unknown>) => void;
-}): RemoteRefReserver {
+type ReservationLaneLog = { lane: string; log?: (step: string, fields: Record<string, unknown>) => void };
+
+/** The `reservation.taken_over` row a gated reserver writes when a reclaim took a holder over. */
+function logTakeover(deps: ReservationLaneLog, taskId: string, outcome: RemoteReserveOutcome, takeover: ReservationTakeover | undefined): void {
+  if (outcome === "created" && takeover) {
+    deps.log?.("reservation.taken_over", {
+      lane: deps.lane,
+      ...reservationTakeoverFields({ taskId, ref: taskIdReservationRef(taskId) }, takeover),
+    });
+  }
+}
+
+export function gatedRemoteRefReserver(deps: RemoteReserveDeps & ReservationLaneLog): RemoteRefReserver {
   const base = gitRemoteRefReserver({ ...deps, policyCurrency: deps.policyCurrency ?? reservationPolicyCurrency });
   return {
     ...base,
     reclaim(taskId) {
       const outcome = base.reclaim!(taskId);
-      const takeover = base.takeoverOf!(taskId);
-      if (outcome === "created" && takeover) {
-        deps.log?.("reservation.taken_over", {
-          lane: deps.lane,
-          ...reservationTakeoverFields({ taskId, ref: taskIdReservationRef(taskId) }, takeover),
-        });
-      }
+      logTakeover(deps, taskId, outcome, base.takeoverOf!(taskId));
+      return outcome;
+    },
+  };
+}
+
+/** {@link gatedRemoteRefReserver} for the daemon loop: git and the policy read awaited (W1-T13183). */
+export function gatedRemoteRefReserverAsync(deps: RemoteReserveAsyncInput & ReservationLaneLog): AsyncRemoteRefReserver {
+  const base = gitRemoteRefReserverAsync({ ...deps, policyCurrency: deps.policyCurrency ?? (() => reservationPolicyCurrencyAsync()) });
+  return {
+    ...base,
+    async reclaim(taskId) {
+      const outcome = await base.reclaim!(taskId);
+      logTakeover(deps, taskId, outcome, base.takeoverOf!(taskId));
       return outcome;
     },
   };
@@ -917,6 +1081,21 @@ export function withIdReservationLogging<T>(
   }
 }
 
+/** {@link withIdReservationLogging} for an awaited reservation. */
+export async function withIdReservationLoggingAsync<T>(
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  step: string,
+  body: () => Promise<T>,
+  extra: Record<string, unknown> = {},
+): Promise<T> {
+  try {
+    return await body();
+  } catch (e) {
+    if (e instanceof TaskIdReservationError) log(step, { ...extra, ...idReservationFailureFields(e) });
+    throw e;
+  }
+}
+
 /**
  * Reserve the first id at or above `startId` no other writer holds ON THE REMOTE. Same policy as
  * {@link reserveTaskIdFrom}: contention advances rather than refusing. An unreachable remote
@@ -931,6 +1110,14 @@ export function reserveTaskIdRemote(
   reserver: RemoteRefReserver,
   opts: ReserveRemoteOpts = {},
 ): RemoteReservationHandle {
+  return driveSync(reserveRemoteSteps(startId, reserver, opts));
+}
+
+function* reserveRemoteSteps(
+  startId: number,
+  reserver: RemoteRefReserver | AsyncRemoteRefReserver,
+  opts: ReserveRemoteOpts,
+): Protocol<RemoteReservationHandle> {
   const maxScan = opts.maxScan ?? 50;
   const idFor = opts.idFor ?? ((n: number) => `W1-T${n}`);
   // Reject before reading the remote or minting an anchor: the sentinel range is never reservable.
@@ -943,18 +1130,18 @@ export function reserveTaskIdRemote(
   // Seeds from the namespace THIS function owns, invisible to the mint's own surfaces — without it
   // the loop rediscovers every prior reservation one failed push at a time (forensics: #reservetaskidremote-seeding).
   // `Math.max` only ever moves the floor UP, and only for the default id family.
-  const floor = opts.idFor ? "unknown" : (reserver.reservedFloor?.() ?? "unknown");
+  const floor = opts.idFor ? "unknown" : ((yield* call(() => reserver.reservedFloor?.())) ?? "unknown");
   const from = floor === "unknown" ? startId : Math.max(startId, floor);
   if (!isAllocatableTaskId(from)) {
     throw new TaskIdReservationError("task-id allocation range exhausted or invalid — refusing to reserve", { outcome: "exhausted" });
   }
-  if (reserver.filingBranch?.() === "main") {
+  if ((yield* call(() => reserver.filingBranch?.())) === "main") {
     throw new TaskIdReservationError(
       "cannot reserve a task id from main — main can never be the filing branch, so this claim would be unmatchable",
       { taskId: idFor(from), ref: taskIdReservationRef(idFor(from)), outcome: "local" },
     );
   }
-  const anchor = reserver.mintAnchor();
+  const anchor = yield* call(() => reserver.mintAnchor());
   const anchorProblem = reservationAnchorProblem(anchor);
   if (anchorProblem) {
     throw new TaskIdReservationError(
@@ -966,8 +1153,8 @@ export function reserveTaskIdRemote(
   const last = Math.min(MAX_ALLOCATABLE_TASK_ID, from + maxScan - 1);
   for (let n = from; n <= last; n++) {
     attempts++;
-    let outcome = reserver.attempt(idFor(n), anchor);
-    if (outcome === "taken" && reserver.reclaim) outcome = reserver.reclaim(idFor(n));
+    let outcome = yield* call(() => reserver.attempt(idFor(n), anchor));
+    if (outcome === "taken" && reserver.reclaim) outcome = yield* call(() => reserver.reclaim!(idFor(n)));
     if (outcome === "created") {
       const takenOver = reserver.takeoverOf?.(idFor(n));
       return { id: n, taskId: idFor(n), ref: taskIdReservationRef(idFor(n)), anchor, attempts, ...(takenOver ? { takenOver } : {}) };
@@ -1042,13 +1229,32 @@ export function reserveTaskIdBlockRemote(
   reserver: RemoteRefReserver,
   opts: ReserveRemoteOpts = {},
 ): RemoteReservationBlock {
+  return driveSync(reserveBlockRemoteSteps(startId, count, reserver, opts));
+}
+
+/** {@link reserveTaskIdBlockRemote} over an awaited reserver: triage's block, off the daemon loop. */
+export function reserveTaskIdBlockRemoteAsync(
+  startId: number,
+  count: number,
+  reserver: AsyncRemoteRefReserver,
+  opts: ReserveRemoteOpts = {},
+): Promise<RemoteReservationBlock> {
+  return driveAsync(reserveBlockRemoteSteps(startId, count, reserver, opts));
+}
+
+function* reserveBlockRemoteSteps(
+  startId: number,
+  count: number,
+  reserver: RemoteRefReserver | AsyncRemoteRefReserver,
+  opts: ReserveRemoteOpts,
+): Protocol<RemoteReservationBlock> {
   if (!Number.isInteger(count) || count < 1) {
     throw new TypeError(`reserveTaskIdBlockRemote: count must be a positive integer, got ${String(count)}`);
   }
   const handles: RemoteReservationHandle[] = [];
   let next = startId;
   for (let i = 0; i < count; i++) {
-    const h = reserveTaskIdRemote(next, reserver, opts);
+    const h = yield* reserveRemoteSteps(next, reserver, opts);
     handles.push(h);
     next = h.id + 1; // ask ABOVE the one just taken, so a block never reserves the same id twice
   }
