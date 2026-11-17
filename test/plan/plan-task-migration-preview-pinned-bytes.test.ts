@@ -111,3 +111,32 @@ test("migration preview reads a measured healthy catalog above 32 MiB and still 
   assert.equal(refused.answer.reason, "catalog_unreadable");
   assert.equal(refused.answer.permission, "not_granted");
 });
+
+test("migration preview respects the actual private reader capacity contract", async t => {
+  // Published reader limits, not host-admission overrides: 256 KiB/blob, 8 MiB total,
+  // 500 YAML shards and 10,000 cumulative tree entries. All cases use real Git and the CLI.
+  const emptyAtBytes = (bytes: number) => "[]\n#" + "x".repeat(bytes - 5) + "\n";
+  const maximum = 8 * 1024 * 1024;
+  const blob = 256 * 1024;
+  await t.test("a healthy private snapshot at the byte limit remains usable", sub => {
+    const seed = Object.fromEntries(Array.from({ length: 32 }, (_, i) =>
+      [`plan/tasks.d/empty-${i}.yaml`, emptyAtBytes(i === 31 ? blob - 3 : blob)]));
+    const result = fixture(sub, undefined, "[]\n", {}, seed).run();
+    assert.equal(Object.values(seed).reduce((sum, text) => sum + Buffer.byteLength(text), 3), maximum);
+    assert.equal(result.status, 0, JSON.stringify(result.answer));
+    assert.equal(result.answer.candidate.id, "W1-T1");
+    assert.equal(result.answer.permission, "not_granted");
+  });
+  const cases = [
+    { name: "a blob larger than the private reader accepts", text: emptyAtBytes(blob + 1), seed: {} },
+    { name: "too many private YAML shards", text: "[]\n", seed: Object.fromEntries(Array.from({ length: 501 }, (_, i) => [`plan/tasks.d/empty-${i}.yaml`, "[]\n"])) },
+    { name: "too many private snapshot bytes", text: "[]\n", seed: Object.fromEntries(Array.from({ length: 33 }, (_, i) => [`plan/tasks.d/empty-${i}.yaml`, emptyAtBytes(blob)])) },
+    { name: "unselected root entries still count toward the private tree bound", text: "[]\n", seed: Object.fromEntries(Array.from({ length: 10000 }, (_, i) => [`metadata-${i}`, ""])) },
+  ];
+  for (const entry of cases) await t.test(entry.name, sub => {
+    const result = fixture(sub, undefined, entry.text, {}, entry.seed).run();
+    assert.equal(result.status, 1, JSON.stringify(result.answer));
+    assert.equal(result.answer.outcome, "unknown");
+    assert.equal(result.answer.permission, "not_granted");
+  });
+});
