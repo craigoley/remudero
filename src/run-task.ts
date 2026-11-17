@@ -10874,6 +10874,9 @@ const CENSUS_BASELINE_FILES = ["scripts/clock-signature-baseline.json", "scripts
 const CENSUS_PUSH_CHECK = "pre-push census-precheck";
 const CENSUS_SNAPSHOT_ENV = "RMD_CENSUS_SNAPSHOT";
 const CENSUS_SNAPSHOT_ROOTS = [...MEASURED_ROOTS, "test", "plan"];
+/** W1-T13458: the census snapshot's file lists and blob headers name paths only, so Node's 1 MiB default would refuse
+ *  them as the repository grows; its blob read is bounded by the sizes git reports instead. */
+const CENSUS_SNAPSHOT_LIST_BOUND = 128 * 1024 * 1024;
 const COVERAGE_PUSH_CHECK = "pre-push coverage-precheck";
 const MERGED_TYPECHECK_PUSH_CHECK = "merged-tree-typecheck";
 const CENSUS_PUSH_NEVER_BYPASS =
@@ -10935,7 +10938,8 @@ function* writeFixCensusSnapshotSteps(
       (CENSUS_SNAPSHOT_ROOTS.some((dir: string) => p.startsWith(`${dir}/`)) || ["package.json", ".dependency-cruiser.cjs"].includes(p)) &&
       (/\.(?:ts|mts|mjs|js|cjs|json|ya?ml|sh|md|toml|txt)$/.test(p) || !basename(p).includes("."));
     function* paths(args: string[]): Steps<string[]> {
-      return [...new Set((yield* step(() => runGit(root, args))).split("\n").filter((p) => p && censusPath(p)))];
+      return [...new Set((yield* step(() => runGit(root, args, { maxBuffer: CENSUS_SNAPSHOT_LIST_BOUND })))
+        .split("\n").filter((p) => p && censusPath(p)))];
     }
     const headPaths = yield* paths(["ls-files"]);
     const basePaths = yield* paths(["ls-tree", "-r", "--name-only", mergeBase]);
@@ -10943,9 +10947,15 @@ function* writeFixCensusSnapshotSteps(
       .filter((p) => p.endsWith("baseline.json"));
     function* blobs(ref: string, names: string[]): Steps<Record<string, string>> {
       if (names.length === 0) return {};
-      const output = Buffer.from(yield* step(() => runGit(root, ["cat-file", "--batch"], {
-        input: names.map((p) => `${ref}:${p}\n`).join(""), maxBuffer: 128 * 1024 * 1024,
-      })));
+      const input = names.map((p) => `${ref}:${p}\n`).join("");
+      // `--batch` writes each `--batch-check` header line, then each sized object and a newline: its exact byte count.
+      const headers = yield* step(() => runGit(root, ["cat-file", "--batch-check"], { input, maxBuffer: CENSUS_SNAPSHOT_LIST_BOUND }));
+      const maxBuffer = headers.split("\n").reduce((bytes, line) => {
+        const size = /^[a-f0-9]+ \S+ (\d+)$/.exec(line)?.[1];
+        return size === undefined ? bytes : bytes + Number(size) + 1;
+      }, Buffer.byteLength(headers));
+      // latin1: the async runner then counts the bytes git wrote, which the bound above is.
+      const output = Buffer.from(yield* step(() => runGit(root, ["cat-file", "--batch"], { input, maxBuffer, encoding: "latin1" })), "latin1");
       const texts: Record<string, string> = {};
       let offset = 0;
       for (const path of names) {
