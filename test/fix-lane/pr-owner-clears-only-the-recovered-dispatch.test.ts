@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { gzipSync } from "node:zlib";
 import { staleFixDispatchRecoveryId, STALE_FIX_DISPATCH_RECEIPT_STEP } from "#src/lib/stale-fix-dispatch-recovery.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
-import { derivePrOwnerVerdict, fixBranchClaimKey, prOwnerCommand } from "#src/run-task.js";
+import { derivePrOwnerVerdict, fixBranchClaimKey, prOwnerCommand } from "#test/helpers/run-task-pr-owner-seam.js";
 
 type Row = Record<string, unknown>;
 
