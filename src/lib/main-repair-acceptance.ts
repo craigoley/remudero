@@ -149,12 +149,62 @@ export function mainRepairAcceptanceFor(args: {
     if (anchor.kind === "unavailable") return { defect, inert, resolution: "refused", reason: anchor.reason };
     added = [{ claim: `the pushed repair adds this line to ${anchor.path}`, proof: anchor.proof }];
   }
-  const block = renderAcceptanceBlock([...kept, ...added]);
+  return { body: withAcceptanceCriteria(body, [...kept, ...added]), defect, inert, resolution: "rewritten" };
+}
+
+/** `body` with its Acceptance block replaced by `criteria`, or the block appended when the body has none. */
+function withAcceptanceCriteria(body: string, criteria: AcceptanceCriterion[]): string {
+  const block = renderAcceptanceBlock(criteria);
   const region = acceptanceBlockRegion(body);
   const lines = body.split("\n");
-  const rewritten =
-    region === undefined
-      ? `${body.replace(/\s*$/, "")}\n\n${block}\n`
-      : [...lines.slice(0, region.headerLine), block, ...lines.slice(region.endLine)].join("\n");
-  return { body: rewritten, defect, inert, resolution: "rewritten" };
+  return region === undefined
+    ? `${body.replace(/\s*$/, "")}\n\n${block}\n`
+    : [...lines.slice(0, region.headerLine), block, ...lines.slice(region.endLine)].join("\n");
+}
+
+/** How the proof-discrimination gate's own executor grades one proof at the merge base: `stale` when it also passes
+ *  there (`rmd check-proof --base` exit 5), `discriminates` when head and base disagree, `unknown` for anything else. */
+export type BaseProofGrade = "discriminates" | "stale" | "unknown";
+export type BaseProofGrader = (proof: string) => Promise<BaseProofGrade>;
+
+export type StaleRepairProofVerdict =
+  | { body: string; stale: []; resolution: "kept" }
+  | { body: string; stale: string[]; resolution: "rewritten"; anchor?: string }
+  | { body: string; stale: string[]; resolution: "anchor-unavailable"; reason: DiffAnchorUnavailableReason };
+
+/**
+ * W1-T13351 — A REPAIR'S RED SUITE CAN PASS AT THE BASE UNDER THE PROOF EXECUTOR.
+ *
+ * W1-T11291 took the red suite as discriminating "by construction". 2026-11-17 broke that: the GitHub runner image
+ * moved to ubuntu-26.04, which ships bwrap, so test/proof-spawner-env-isolation.test.ts went red in CI. Inside the proof
+ * sandbox the same suite passes at the base, so #19011's `unit test:` proofs graded executed_stale, the required
+ * proof-discrimination gate refused the correct repair, and main stayed red until a session swapped the proofs by hand.
+ *
+ * Every proof of an assembled repair body is graded at the merge base with the gate's own executor. A stale proof is
+ * dropped, and a grep of a non-comment line the repair adds ({@link diffAnchor}) takes its place. With no safe anchor
+ * the body is returned unchanged and the caller ledgers why: no worse than before, and visible.
+ */
+export async function withoutStaleRepairProofs(args: {
+  body: string;
+  diffText: string | undefined;
+  grade: BaseProofGrader;
+  readFile?: DiffAnchorFileReader;
+}): Promise<StaleRepairProofVerdict> {
+  const { body, diffText, grade, readFile } = args;
+  const criteria = parseAcceptanceBlock(body) as AcceptanceCriterion[];
+  const stale: string[] = [];
+  for (const criterion of criteria) {
+    const proof = criterion.proof ?? "";
+    if (proof !== "" && (await grade(proof)) === "stale") stale.push(proof);
+  }
+  if (stale.length === 0) return { body, stale: [], resolution: "kept" };
+  const staleSet = new Set(stale);
+  const kept = criteria.filter((c) => !staleSet.has(c.proof ?? ""));
+  const anchor = diffAnchor(diffText, readFile);
+  if (anchor.kind === "unavailable") {
+    if (kept.length === 0) return { body, stale, resolution: "anchor-unavailable", reason: anchor.reason };
+    return { body: withAcceptanceCriteria(body, kept), stale, resolution: "rewritten" };
+  }
+  const added = kept.some((c) => c.proof === anchor.proof) ? [] : [{ claim: `the repair adds this line to ${anchor.path}`, proof: anchor.proof }];
+  return { body: withAcceptanceCriteria(body, [...kept, ...added]), stale, resolution: "rewritten", anchor: anchor.proof };
 }
