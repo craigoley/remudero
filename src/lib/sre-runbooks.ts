@@ -10,9 +10,8 @@ import { defaultIsPidAlive } from "./drain-lock.js";
 import { defaultInContainer, writeAtomic } from "./fs-race-safe.js";
 import { ghExec } from "./github-transport.js";
 import { parseInflightLockInfo } from "./inflight-lock.js";
-import { classifyRollupSupersession } from "./sweep.js";
+import { classifyRollupSupersession, readLiveLedgerRows } from "./sweep.js";
 import { isFastBurn, sreGovernorVerdict, verdictFor, governorIncidentFromLedgerRow, type IncidentEvidence, type SreGovernorControls, type SreGovernorIncident, type SreGovernorTier, type SreGovernorVerdict } from "./sre-governor.js";
-import { readLedgerLines } from "./status.js";
 
 /**
  * lib/sre-runbooks.ts (W1-T4386) — a KNOWN failure with a KNOWN, REVERSIBLE fix no longer waits for
@@ -252,14 +251,14 @@ export function receiptFromLedgerRow(row: Record<string, unknown>): SreRunbookRe
 }
 
 export function readRunbookReceipts(ledgerPath: string): SreRunbookReceipt[] {
-  return readLedgerLines(ledgerPath) // ledger-read-intent: live — the receipts this daemon wrote.
+  return readLiveLedgerRows(ledgerPath) // W1-T13367: the live file's rows, from its tail — the receipts this daemon wrote.
     .map((row) => receiptFromLedgerRow(row))
     .filter((r): r is SreRunbookReceipt => r !== undefined);
 }
 
 /** Every incident row this ledger holds, as the governor reads them. */
 export function readGovernorIncidents(ledgerPath: string): SreGovernorIncident[] {
-  return readLedgerLines(ledgerPath) // ledger-read-intent: live — the incidents this daemon ledgered.
+  return readLiveLedgerRows(ledgerPath) // W1-T13367: the live file's rows, from its tail — the incidents this daemon ledgered.
     .map((row) => governorIncidentFromLedgerRow(row))
     .filter((e): e is SreGovernorIncident => e !== undefined);
 }
@@ -630,7 +629,7 @@ function readFileIfPresent(path: string): string {
  *  the SRE instance's live ledger, the lane's pause switch, and the operator's escalation. */
 export interface SreGovernorEnforcer {
   /** Every row of the SRE instance's live ledger. */
-  readLedger(): Record<string, unknown>[];
+  readLedger(): ReadonlyArray<Record<string, unknown>>;
   /** The lane's pause switch's text while present, `undefined` while absent. */
   laneOff(): string | undefined;
   pauseLane(text: string): void;
@@ -647,7 +646,7 @@ export function daemonSreGovernorEnforcer(opts: {
   escalate?: (e: Escalation) => string | null;
 }): SreGovernorEnforcer {
   return {
-    readLedger: () => readLedgerLines(opts.ledgerPath), // ledger-read-intent: live — the governor reads this instance's own receipts.
+    readLedger: () => readLiveLedgerRows(opts.ledgerPath), // W1-T13367: the live file's rows, from its tail — this instance's own receipts.
     laneOff: () => (existsSync(opts.laneOffPath) ? readFileIfPresent(opts.laneOffPath) : undefined),
     pauseLane: (text) => writeAtomic(opts.laneOffPath, text),
     resumeLane: () => {
