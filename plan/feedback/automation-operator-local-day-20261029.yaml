@@ -35,11 +35,11 @@ raw: >-
   zone named. Ledger timestamps and spend caps stay in UTC.
 attachments: []
 origin: cli
-status: grilling
+status: answered
 reply_to: null
 proposal_pr: null
 summary: null
 expansion: null
 submission_key: cross-repo-automation:operator-local-day:20261029
 thread_id: null
-answered_by: null
+answered_by: fb-1794929600343-b15009
