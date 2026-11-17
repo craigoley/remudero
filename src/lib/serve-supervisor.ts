@@ -76,8 +76,14 @@ export const HANDOFF_NEED_MARGIN = 1.5;
 export type NeedBasis = "measured_overlap" | "boot_peak" | "unknown";
 export const SMOKE_PATHS = ["/v1/version", "/v1/status", "/v1/views/versions"] as const;
 
-/** The shortest gap between two handoffs: serve.ts's SERVE_HANDOFF_COALESCE_MS, the operator's 15-minute window. */
-export const SERVE_HANDOFF_SPACING_BASE_MS = 15 * 60_000;
+/**
+ * W1-T13303: the shortest gap between two ordinary handoffs. MEASURED 2026-11-16/17: at 15 minutes, serve handed off 12
+ * times in 10 hours (main moved 28 times in 3), and each cold boot stalled the Console for minutes. A restart is not
+ * spaced: a supervisor with no handoff yet hands off at once.
+ */
+export const SERVE_HANDOFF_SPACING_BASE_MS = 2 * 60 * 60_000;
+/** BACKSTOP: the cap on a memory-deferred handoff's retry backoff: the old 15-minute window, kept apart from the spacing above. */
+export const SERVE_HANDOFF_MEMORY_RETRY_CAP_MS = 15 * 60_000;
 /** How fast handoff pressure fades: a handoff an hour ago weighs half of one just done. */
 export const SERVE_HANDOFF_PRESSURE_HALF_LIFE_MS = 60 * 60_000;
 
@@ -555,7 +561,7 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
   const hostPressure = opts.hostPressure ?? (() => readHostPressure({ clock, sleep }));
   const upgradeThresholds = opts.upgradeThresholds ?? ((dir: string) => readServeUpgradeThresholds(dir));
   /** A refused upgrade retries on the existing deferral, doubling per refusal; never later than the spacing base. */
-  const retryCapMs = Math.max(deferMs, SERVE_HANDOFF_SPACING_BASE_MS);
+  const retryCapMs = Math.max(deferMs, SERVE_HANDOFF_MEMORY_RETRY_CAP_MS);
 
   let next = 0;
   let active: Generation | undefined;
