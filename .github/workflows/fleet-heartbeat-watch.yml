@@ -60,7 +60,7 @@ env:
 jobs:
   heartbeat-watch:
     name: heartbeat-watch (reads every host's beat branch off-machine; silent per host until installed)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     # R-50: observed runs complete in 15-30 seconds; 20m bounds a genuine hang with generous
     # headroom.
     timeout-minutes: 20

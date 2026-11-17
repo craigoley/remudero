@@ -51,7 +51,7 @@ permissions:
 jobs:
   docs-index-check:
     name: docs-index-check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     # W1-T1009-shaped LIGHT band: two pure-JS reads of docs/**/*.md, no network, measured well
     # under a minute alongside the sibling unwired-gate job's ~0.2s check.
     timeout-minutes: 10
