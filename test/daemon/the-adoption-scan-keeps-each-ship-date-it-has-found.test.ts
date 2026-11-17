@@ -10,7 +10,8 @@ import {
 import { gitRepo } from "#test/helpers/git-repo.js";
 
 const FIRST = "2026-01-02T03:04:05+00:00";
-const SECOND = "2026-02-03T04:05:06+00:00";
+// A nonzero offset avoids Git's Z/+00:00 spelling difference while preserving exact assertions.
+const SECOND = "2026-02-03T04:05:06+01:00";
 const runners = { sync: runMeasurementCadenceReport, async: runMeasurementCadenceReportAsync };
 
 function fixture(t: TestContext) {
