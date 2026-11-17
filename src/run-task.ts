@@ -1,6 +1,6 @@
 import { isImprovementBoundProposal, isReviewedImprovementDraft, runImprovementAction, type ImprovementPlanReceipt } from "./lib/improvement-thread.js";
 import { fileEligibleFollowups, followupFilingPresentation, type FollowupFinalizer } from "./lib/followup-filing.js";
-import { findTaskInCatalogs, catalogTaskContract, type TaskLookupOptions } from "./lib/task-lookup.js";
+import { findReleasePlanInCatalogs, findTaskInCatalogs, catalogTaskContract, type TaskLookupOptions } from "./lib/task-lookup.js";
 import type { OpsCatalogApi } from "./lib/ops-catalog-source.js";
 import { operatorReleaseContractChanged, operatorReleasePin, qualifyReleaseEvidence, readReleaseLedgerLines, releaseContractPins, type ReleaseEvidence } from "./lib/operator-release.js";
 import {
@@ -39571,6 +39571,8 @@ export async function approveCommand(
     inboxRoot?: string;
     inboxLedgerPath?: string;
     reviewedImprovement?: { goalDigest: string; draftDigest: string };
+    /** W1-T13386: how the release path reads the ops catalog (default: the host's own transport). */
+    taskLookup?: TaskLookupOptions;
   } = {},
 ): Promise<number> {
   const proposalId = rest[0];
@@ -39590,12 +39592,21 @@ export async function approveCommand(
     const config = deps.config ?? loadConfig();
     // W1-T10925: a consumer task's id is found in the instance's target plan, not the engine's.
     const located = deps.planPath === undefined ? verbTaskPlan(proposalId, () => join(config.root, "state")) : undefined;
-    if (located && !located.ok) {
+    // W1-T13386: a local miss asks the catalog this host names before the id is called unknown. An ops task
+    // is released against the plan the daemon's tick composes, so both read the same pin.
+    const localPlan = located?.ok ? located.plan : loadPlan(planPath);
+    const held = located?.ok ? undefined
+      : await findReleasePlanInCatalogs(proposalId, localPlan, { ...deps.taskLookup, stateDir: join(config.root, "state") });
+    if (held?.outcome === "unreadable") {
+      console.error(`rmd approve: cannot release '${proposalId}': the task catalogs cannot be read as the daemon composes them (${held.reason}) — nothing released`);
+      return 1;
+    }
+    if (located && !located.ok && held?.outcome !== "found") {
       console.error(`rmd approve: unknown task '${proposalId}' (${located.error})`);
       return 2;
     }
     const outcome = approveParkedTask(proposalId, {
-      plan: located?.ok ? located.plan : loadPlan(planPath),
+      plan: held?.outcome === "found" ? held.plan : localPlan,
       ledgerPath: ledgerPathFor(config),
       // Clock-free BY CONSTRUCTION — and the comment may not NAME the shape it avoids, because
       // clock-signature-census.test.ts counts by SOURCE TEXT, comments included. The row is already
