@@ -120,6 +120,7 @@ usage:
   rmd trace <id>   # Render the provenance chain: feedback -> proposal -> task -> run -> PR -> merge.
   rmd peek <runId> [--lines <n>] [--follow]   # Read-only tail of one run's retained output, with a LIVE/FINISHED verdict.
   rmd pr-owner <pr-number>   # Report whether the local ledger shows a fix lane owning one PR.
+  rmd pr-owner-recover <pr-number> --authorize --repo <owner/name> --task <id> --run <id> --round <id> --head <sha> --base <sha> --branch <name> --reason <text> | --apply --authorization <id>   # Release a dead worker's stale fix dispatch on one PR, once, after an admin's recorded authorization.
   rmd pr-state <n...> [--max-age <dur>]   # Read PR state from the ledger, revalidating stale or missing fields in one broker query.
   rmd plan --mode=create|clarify|expand [<brief>...]   # The unified Architect PLAN skill: create, clarify or expand plan tasks.
   rmd improvement-action <operation-id> --state-dir <path>   # Resume one saved planning action through the daemon's admitted workflow.
@@ -1200,6 +1201,16 @@ rmd pr-owner <pr-number>
 ```
 
 W1-T3281: answers the operator question 'is a lane already fixing this PR?' from the local ledger union only. Reports OWNED, FREE or UNKNOWN plus the corpus newest timestamp, newest relevant fix.dispatch strike/cap/mode/head evidence, and newest sweep.disposed disposition/reason/head evidence. UNKNOWN is distinct from FREE for unreadable or incomplete ledger reads, and for a corpus with no compressed rotation opened. Reads state/ledger.ndjson plus both plain and gzip rotations through the shared ledger-union reader; makes no gh/network call and spawns no worker. Makes no ledger, claim or service changes; owned temporary disk scratch is removed after the read.
+
+### `rmd pr-owner-recover`
+
+Release a dead worker's stale fix dispatch on one PR, once, after an admin's recorded authorization.
+
+```
+rmd pr-owner-recover <pr-number> --authorize --repo <owner/name> --task <id> --run <id> --round <id> --head <sha> --base <sha> --branch <name> --reason <text> | --apply --authorization <id>
+```
+
+W1-T12114: --authorize records one pr_owner.recovery_authorized row for the exact PR, task, run, round, head, base and live branch, only for an authenticated repository admin who is not a fleet actor, under the PR's fix branch claim. --apply --authorization <id> takes that claim, reads live evidence, preserves dirty or unpublished work as a create-only refs/rmd-recovery ref, reads again and writes a released pr_owner.recovery_receipt only when W1-T12113 decides recover on both reads; anything else holds. Never deletes or moves a ref, removes a worktree, pushes to the PR branch, or writes fix.done or a credit. Prints the result as JSON; exits 0 on authorized or released, 1 otherwise, 2 on bad arguments.
 
 ### `rmd pr-state`
 

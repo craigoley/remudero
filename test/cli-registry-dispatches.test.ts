@@ -25,7 +25,8 @@ import {
   type CommandHandler,
   type CommandSpec,
 } from "#src/cli/registry.js";
-import { HANDLERS, USAGE as REAL_USAGE, main } from "#src/run-task.js";
+import { HANDLERS, USAGE as REAL_USAGE, main, prOwnerRecoverCommand, prOwnerRecoverPorts } from "#src/run-task.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const USAGE = "usage:\n  rmd fake-verb   # a synthetic verb this test made up\n";
 
@@ -189,6 +190,52 @@ test("real HANDLERS route malformed args into their command validators before si
     const { code, printed } = await captureHandler(name, rest);
     assert.equal(code, 2, `${name} malformed args must return the usage exit code`);
     assert.match(String(printed[0]?.[0] ?? ""), pattern, `${name} should reject before real side effects`);
+  }
+});
+
+test("W1-T12114 the registered command calls the recovery apply module", async () => {
+  const out: string[] = [];
+  const err: string[] = [];
+  const io = { write: (t: string) => void out.push(t), error: (t: string) => void err.push(t) };
+  for (const argv of [[], ["4851"], ["4851", "--authorize", "--apply"], ["4851", "--apply", "--bogus"]]) {
+    assert.equal(await prOwnerRecoverCommand(argv, io), 2, JSON.stringify(argv));
+  }
+  assert.match(err.join("\n"), /rmd pr-owner-recover <pr-number> --authorize/);
+
+  const root = fs.mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t12114-cli-`));
+  try {
+    const repo = "craigoley/remudero";
+    const ledgerPath = join(root, "state", "ledger.ndjson");
+    const head = "a".repeat(40);
+    const base = "c".repeat(40);
+    const branch = "run-W1-T9001-1";
+    const run = "SWEEP-1";
+    const task = "W1-T9001";
+    const roundStart = Date.parse("2026-11-16T21:00:00.000Z");
+    const round = `${run}:1:${roundStart + 500}`;
+    const iso = (ms: number) => new Date(ms).toISOString();
+    fs.mkdirSync(join(root, "state"), { recursive: true });
+    fs.mkdirSync(join(root, "repos", "remudero"), { recursive: true });
+    fs.writeFileSync(ledgerPath, `${JSON.stringify({ ts: iso(roundStart), step: "fix.dispatch", run_id: run, task_id: task, pr_number: 4851 })}\n{"step":"fix.dispatch" torn\n`);
+    const github = async (args: string[]) => {
+      if (args[1] === "user") return { login: "craig" };
+      if (String(args[1]).endsWith("/permission")) return { permission: "admin" };
+      return { number: 4851, head: { sha: head, ref: branch }, base: { sha: base, repo: { full_name: repo } } };
+    };
+    const config = () => ({ ledgerPath, root });
+    const code = await prOwnerRecoverCommand(["4851", "--authorize", "--repo", repo, "--task", task, "--run", run, "--round", round,
+      "--head", head, "--base", base, "--branch", branch, "--reason", "dead worker"], { ...io, config, gh: github });
+    assert.equal(code, 1);
+    assert.match(JSON.parse(out.pop()!).reason, /^fleet_automation_actor:test$/);
+
+    const ports = prOwnerRecoverPorts(repo, { ledgerPath, root, gh: github });
+    assert.equal(ports.repoDir, join(root, "repos", "remudero"));
+    assert.equal(ports.inflightDir, join(root, "state", "inflight"));
+    const read = await ports.readLedger();
+    assert.equal(read.ok, false, "a torn line makes the read incomplete");
+    assert.equal(read.rows.length, 1);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });
 
