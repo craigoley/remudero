@@ -25,7 +25,7 @@
  * handoff request back into today's behaviour: drain, exit 0, and docker restarts the container.
  */
 import cluster from "node:cluster";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { request } from "node:http";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -167,6 +167,61 @@ export interface GenerationProcess {
   kill(signal: NodeJS.Signals): void;
 }
 
+/** W1-T13304: the container cgroup's total CPU (cpu.stat usage_usec), or undefined when unreadable. */
+export function cgroupCpuUsageUsec(path = "/sys/fs/cgroup/cpu.stat"): number | undefined {
+  try {
+    const match = /^usage_usec (\d+)$/m.exec(readFileSync(path, "utf8"));
+    return match ? Number(match[1]) : undefined;
+  } catch (_err) {
+    // Carried, not erased: unreadable is "unknown" (undefined), never zero.
+    return undefined;
+  }
+}
+
+/** W1-T13304: the CPU seconds each thread name of `pids` has used, plus their reaped children under "children".
+ *  Totals are cumulative; the budget row takes the hour's delta. A pid that cannot be read adds nothing. */
+export function procCpuConsumers(pids: readonly number[], proc = "/proc", clockTicks = 100): Map<string, number> {
+  const out = new Map<string, number>();
+  const add = (name: string, ticks: number): void => void out.set(name, (out.get(name) ?? 0) + ticks / clockTicks);
+  const fields = (text: string): { comm: string; rest: string[] } | undefined => {
+    const close = text.lastIndexOf(")");
+    if (close < 0) return undefined;
+    return { comm: text.slice(text.indexOf("(") + 1, close), rest: text.slice(close + 2).split(" ") };
+  };
+  for (const pid of pids) {
+    try {
+      const own = fields(readFileSync(`${proc}/${pid}/stat`, "utf8"));
+      if (own) add("children", Number(own.rest[13]) + Number(own.rest[14]));
+      for (const tid of readdirSync(`${proc}/${pid}/task`)) {
+        const thread = fields(readFileSync(`${proc}/${pid}/task/${tid}/stat`, "utf8"));
+        if (thread) add(thread.comm, Number(thread.rest[11]) + Number(thread.rest[12]));
+      }
+    } catch (_err) {
+      // Carried, not erased: a pid that exited mid-read only leaves the consumer list shorter.
+      continue;
+    }
+  }
+  return out;
+}
+
+/** W1-T13304: how often the supervisor writes `serve.cpu_budget` (incident-invariants.ts's serve-cpu-budget rule reads it). */
+export const SERVE_CPU_BUDGET_INTERVAL_MS = 60 * 60_000;
+
+/** W1-T13304: the steps that open and close a boot window, the time serve.cpu_budget leaves out of steady CPU. */
+const CPU_BOOT_OPEN_STEPS = new Set(["serve.generation_forked"]);
+const CPU_BOOT_CLOSE_STEPS = new Set(["serve.cold_start_ready", "serve.handoff_done", "serve.handoff_aborted", "serve.handoff_failed", "serve.cold_start_failed", "serve.generation_restart_failed"]);
+/** BACKSTOP: a window under a minute outside boots is too short to judge, so its steady_cores is null. */
+const CPU_BUDGET_MIN_STEADY_MS = 60_000;
+
+/** W1-T13304: the supervisor's CPU budget seams; every default reads this container. */
+export interface ServeCpuBudgetOptions {
+  usageUsec?: () => number | undefined;
+  consumers?: (pids: readonly number[]) => ReadonlyMap<string, number>;
+  /** Run `fn` every `ms`; returns a cancel. Defaults to an unref'd setInterval. */
+  every?: (ms: number, fn: () => void) => () => void;
+  intervalMs?: number;
+}
+
 export interface GenerationCommand {
   exec: string;
   execArgv: string[];
@@ -235,6 +290,8 @@ export interface ServeSupervisorOptions {
   /** W1-T13276: the post-mortem socket census; defaults to {@link socketStatesForPort} on `servePort`. */
   socketStates?: () => Record<string, number> | undefined;
   servePort?: number;
+  /** W1-T13304: the hourly serve.cpu_budget row's seams. */
+  cpuBudget?: ServeCpuBudgetOptions;
 }
 
 /** W1-T9570: the free-memory reads after a tier-2 shed: the first, the one judged, how many, and what ended them. */
@@ -585,7 +642,10 @@ function errorText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSupervisor {
+export function createServeSupervisor(input: ServeSupervisorOptions): ServeSupervisor {
+  // W1-T13304: every log line also opens or closes a boot window for the CPU budget; nothing else changes.
+  const budget = createCpuBudgetTracker(input);
+  const opts: ServeSupervisorOptions = { ...input, log: (step, extra) => { budget.note(step); input.log(step, extra); } };
   const command = opts.command ?? generationCommand(opts.serveArgs ?? ["serve"]);
   const spawn = opts.spawn ?? clusterSpawn;
   const get = opts.get ?? socketGet;
@@ -1205,6 +1265,7 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
         return;
       }
       opts.log("serve.supervisor_ready", { sha: opts.coldSlot.sha, readyMs: up.readyMs });
+      budget.start(() => [process.pid, ...(active?.process.pid === undefined ? [] : [active.process.pid])]);
       await reportAlone(up.generation, up.startedAt, up.readyMs);
     },
     requestHandoff: () => {
@@ -1233,12 +1294,85 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
       if (stopping) return;
       stopping = true;
       stopProbing?.();
+      budget.stop();
       const generation = active;
       if (generation) await drainOld(generation, reason);
       exit(0);
     },
   };
   return supervisor;
+}
+
+/**
+ * W1-T13304: serve's steady CPU. The cgroup's usage is read at each boot's start and end, so the hour's row splits
+ * usage exactly into boot and steady parts: steady_cores = (usage outside boots) / (seconds outside boots).
+ */
+function createCpuBudgetTracker(opts: ServeSupervisorOptions): { note(step: string): void; start(pids: () => number[]): void; stop(): void } {
+  const clock = opts.clock ?? systemClock;
+  const seams = opts.cpuBudget ?? {};
+  const usage = seams.usageUsec ?? (() => cgroupCpuUsageUsec());
+  const consumers = seams.consumers ?? ((pids: readonly number[]) => procCpuConsumers(pids));
+  const every = seams.every ?? ((ms: number, fn: () => void) => {
+    const timer = setInterval(fn, ms);
+    timer.unref();
+    return () => clearInterval(timer);
+  });
+  const intervalMs = seams.intervalMs ?? SERVE_CPU_BUDGET_INTERVAL_MS;
+  let started = false;
+  let cancel: (() => void) | undefined;
+  let window = { atMs: 0, usage: undefined as number | undefined, bootMs: 0, bootUsec: 0, bootUnread: false };
+  let boot: { atMs: number; usage: number | undefined } | undefined;
+  let lastConsumers: ReadonlyMap<string, number> = new Map();
+  let prevSteady: number | null = null;
+  const closeBoot = (now: number, at: number | undefined): void => {
+    if (boot === undefined) return;
+    window.bootMs += now - Math.max(boot.atMs, window.atMs);
+    if (at === undefined || boot.usage === undefined) window.bootUnread = true;
+    else window.bootUsec += at - boot.usage;
+    boot = undefined;
+  };
+  const note = (step: string): void => {
+    if (!started) return;
+    if (CPU_BOOT_OPEN_STEPS.has(step) && boot === undefined) boot = { atMs: clock.now(), usage: usage() };
+    else if (CPU_BOOT_CLOSE_STEPS.has(step)) closeBoot(clock.now(), usage());
+  };
+  const sample = (pids: () => number[]): void => {
+    const now = clock.now();
+    const at = usage();
+    // A boot still open at the hour is split there: its part so far is boot, and it reopens for the next hour.
+    const reopen = boot !== undefined && now - boot.atMs < STANDBY_READY_BOUND_MS;
+    closeBoot(now, at);
+    const windowMs = now - window.atMs;
+    const steadyMs = windowMs - window.bootMs;
+    const usageUsec = at === undefined || window.usage === undefined ? undefined : at - window.usage;
+    const steady = usageUsec === undefined || window.bootUnread || steadyMs < CPU_BUDGET_MIN_STEADY_MS
+      ? null : Number((((usageUsec - window.bootUsec) / 1e6) / (steadyMs / 1000)).toFixed(3));
+    const nextConsumers = consumers(pids());
+    const top = [...nextConsumers].map(([name, seconds]) => ({ name, cores: Number((Math.max(0, seconds - (lastConsumers.get(name) ?? 0)) / (windowMs / 1000)).toFixed(3)) }))
+      .sort((a, b) => b.cores - a.cores).slice(0, 3);
+    opts.log("serve.cpu_budget", {
+      window_ms: windowMs, usage_usec: usageUsec ?? null, boot_ms: window.bootMs, boot_usage_usec: window.bootUnread ? null : window.bootUsec,
+      steady_cores: steady, prev_steady_cores: prevSteady, top,
+    });
+    prevSteady = steady;
+    lastConsumers = nextConsumers;
+    window = { atMs: now, usage: at, bootMs: 0, bootUsec: 0, bootUnread: false };
+    if (reopen) boot = { atMs: now, usage: at };
+  };
+  return {
+    note,
+    start(pids) {
+      if (started) return;
+      started = true;
+      window = { atMs: clock.now(), usage: usage(), bootMs: 0, bootUsec: 0, bootUnread: false };
+      lastConsumers = consumers(pids());
+      cancel = every(intervalMs, () => sample(pids));
+    },
+    stop() {
+      cancel?.();
+      cancel = undefined;
+    },
+  };
 }
 
 interface UnmetCriterion {
