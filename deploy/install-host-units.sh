@@ -54,6 +54,8 @@
 #   RMD_UNIT_DIR RMD_BIN_DIR RMD_LAUNCHER_PATH RMD_REVIVAL_LOG
 #   RMD_CLEANUP_PATH RMD_CLEANUP_LOG RMD_CRONTAB_CMD   (W1-T4770: root-disk janitor + cron)
 #   RMD_TMP_SWEEP_PATH RMD_TMP_SWEEP_CRON_PATH          (W1-T5036: guarded hourly temp sweep)
+#   RMD_FLEET_CRON RMD_FLEET_INSTALL_DIR RMD_FLEET_HEARTBEAT_BRANCH RMD_FLEET_TOKEN_FILE
+#   RMD_FLEET_OFFHOST RMD_FLEET_OFFHOST_KEEP RMD_FLEET_RECLAIM_LOG  (W1-T10756: fleet cron lines)
 #   RMD_LEGACY_USER_UNIT_DIR RMD_HOST_KERNEL            (W1-T5518: legacy user janitor is drift)
 #   RMD_SYSTEMCTL_CMD                                  (W1-T10501: systemctl seam; runs on a temp tree)
 set -euo pipefail
@@ -2108,6 +2110,21 @@ for row in $UNITS; do
   fi
 done
 
+# Shared by the janitor's cron entry below and the fleet cron rows after it (W1-T10756).
+CRONTAB_CMD="${RMD_CRONTAB_CMD-crontab}"
+crontab_read() {
+  if [ -z "${RMD_CRONTAB_CMD+x}" ] && [ "$(id -u)" = 0 ]; then "$CRONTAB_CMD" -u "$SERVICE_USER" -l 2>/dev/null || true
+  else "$CRONTAB_CMD" -l 2>/dev/null || true; fi
+}
+crontab_write() {
+  if [ -z "${RMD_CRONTAB_CMD+x}" ] && [ "$(id -u)" = 0 ]; then "$CRONTAB_CMD" -u "$SERVICE_USER" -
+  else "$CRONTAB_CMD" -; fi
+}
+checkout_git() {
+  if [ "$(id -un)" = "$SERVICE_USER" ]; then git -C "$@"
+  else sudo -n -u "$SERVICE_USER" git -C "$@"; fi
+}
+
 # W1-T4770 — the root-disk janitor and its crontab entry. Not a unit: a script COPIED from this repo
 # plus one crontab line, so it sits outside the UNITS table and is compared byte for byte. The cron
 # entry is REPLACED, never appended: every line running the script's path is dropped and one written.
@@ -2141,10 +2158,6 @@ if [ -n "$CLEANUP_PATH" ]; then
   # checkout wt-reserve sits there too, so it is a live checkout and never swept.
   CLEANUP_WORKTREE_ROOTS="${RMD_CLEANUP_WORKTREE_ROOTS-/mnt/scratch/worktrees:/home/${SERVICE_USER}/rmd-work:/mnt/scratch/rmd/hand}"
   CLEANUP_LIVE_CHECKOUTS="${RMD_CLEANUP_LIVE_CHECKOUTS-/home/${SERVICE_USER}/rmd-mint:/home/${SERVICE_USER}/rmd-op:/mnt/scratch/rmd/hand/wt-reserve}"
-  checkout_git() {
-    if [ "$(id -un)" = "$SERVICE_USER" ]; then git -C "$@"
-    else sudo -n -u "$SERVICE_USER" git -C "$@"; fi
-  }
   while IFS= read -r live_checkout; do
     [ -n "$live_checkout" ] || continue
     checkout_git "$live_checkout" rev-parse --git-dir >/dev/null 2>&1 || continue
@@ -2180,16 +2193,6 @@ if [ -n "$CLEANUP_PATH" ]; then
     fi
   done < <(printf '%s\n' "$CLEANUP_LIVE_CHECKOUTS" | tr ':' '\n')
   CLEANUP_CRON_LINE="${CLEANUP_CRON_SCHEDULE} RMD_CLEANUP_WORKTREE_ROOTS=${CLEANUP_WORKTREE_ROOTS} RMD_CLEANUP_LIVE_CHECKOUTS=${CLEANUP_LIVE_CHECKOUTS} ${CLEANUP_PATH} >> ${CLEANUP_LOG} 2>&1"
-  CRONTAB_CMD="${RMD_CRONTAB_CMD-crontab}"
-
-  crontab_read() {
-    if [ -z "${RMD_CRONTAB_CMD+x}" ] && [ "$(id -u)" = 0 ]; then "$CRONTAB_CMD" -u "$SERVICE_USER" -l 2>/dev/null || true
-    else "$CRONTAB_CMD" -l 2>/dev/null || true; fi
-  }
-  crontab_write() {
-    if [ -z "${RMD_CRONTAB_CMD+x}" ] && [ "$(id -u)" = 0 ]; then "$CRONTAB_CMD" -u "$SERVICE_USER" -
-    else "$CRONTAB_CMD" -; fi
-  }
   cron_lines_for_janitor() { printf '%s\n' "$1" | grep -F -- "$CLEANUP_PATH" || true; }
   cron_without_janitor() { printf '%s\n' "$1" | grep -F -v -- "$CLEANUP_PATH" || true; }
 
@@ -2285,6 +2288,158 @@ if [ -n "$CLEANUP_PATH" ]; then
       printf '%s\n' "$CLEANUP_CRON_LINE" | crontab_write
     fi
     echo "install-host-units: wrote   crontab entry: $CLEANUP_CRON_LINE"
+  fi
+fi
+
+# W1-T10756 — the fleet's own cron lines (the five-minute heartbeat and the nightly reclaim) run the
+# CONVERGED install, ${STATE_DIR}/daemon-install, the checkout the launcher fetches and fast-forwards
+# on every healthy tick. They were hand-installed against the daemon's old tree, which stopped moving
+# when W1-T9617 put the daemon's checkout on scratch, so no change since then reached the host and
+# nothing said so. No copy is made (host-update.sh --reclaim-only resolves only sibling files and
+# never runs repo TypeScript, so it runs from the install). A row is REPLACED, never joined: every
+# NON-COMMENT line that runs the row's script from ANY directory is dropped and one line written;
+# comment lines and unrelated lines survive. Any OTHER line that runs a repo script out of a different
+# checkout is reported, never rewritten. The field-trials line stays owned by its own installer, and is
+# only converged where its line already exists (the 2026-10-13 site-idle ruling: never added).
+# The heartbeat line reads its token as `GH_TOKEN=$(cat <file>)`; no token VALUE is ever rendered, and
+# an unreadable token file is reported. Managed only where real: the default host layout on the core
+# instance, or an explicit RMD_FLEET_CRON=1, so test temp trees never touch a real crontab.
+FLEET_CRON="${RMD_FLEET_CRON-}"
+if [ -z "$FLEET_CRON" ] && [ "$UNIT_DIR" = "/etc/systemd/system" ] && { [ -z "$INSTANCE_NAME" ] || [ "$INSTANCE_NAME" = "core" ]; }; then
+  FLEET_CRON=1
+fi
+if [ "$FLEET_CRON" = 1 ]; then
+  FLEET_INSTALL="${RMD_FLEET_INSTALL_DIR-${STATE_DIR}/daemon-install}"
+  require_abs_path "RMD_FLEET_INSTALL_DIR" "$FLEET_INSTALL"
+  FLEET_BRANCH="${RMD_FLEET_HEARTBEAT_BRANCH-heartbeat-azure}"
+  FLEET_TOKEN_FILE="${RMD_FLEET_TOKEN_FILE-/home/${SERVICE_USER}/.gh-token}"
+  FLEET_OFFHOST="${RMD_FLEET_OFFHOST-azure-disk-snapshot:SYNTHWATCH-RG/remudero-data}"
+  FLEET_OFFHOST_KEEP="${RMD_FLEET_OFFHOST_KEEP-7}"
+  FLEET_RECLAIM_LOG="${RMD_FLEET_RECLAIM_LOG-/home/${SERVICE_USER}/reclaim.log}"
+  FLEET_ROWS="heartbeat reclaim"
+  # Sets ROW_SCRIPT, ROW_ARGS, ROW_NEEDLE (what identifies a line as this row's) and ROW_LINE.
+  fleet_row() {
+    case "$1" in
+      heartbeat)
+        ROW_SCRIPT="scripts/fleet-heartbeat.sh"; ROW_ARGS=""
+        # Plain, no flock: a lock around the beat deadlocked it (the W1-T3627 note in the script).
+        ROW_LINE="*/5 * * * * RMD_HEARTBEAT_BRANCH=${FLEET_BRANCH} RMD_ROOT=${STATE_DIR} GH_TOKEN=\$(cat ${FLEET_TOKEN_FILE}) ${FLEET_INSTALL}/${ROW_SCRIPT} >/dev/null 2>&1" ;;
+      reclaim)
+        ROW_SCRIPT="deploy/host-update.sh"; ROW_ARGS="--reclaim-only"
+        ROW_LINE="17 4 * * * RMD_STATE_OFFHOST=${FLEET_OFFHOST} RMD_STATE_OFFHOST_KEEP=${FLEET_OFFHOST_KEEP} ${FLEET_INSTALL}/${ROW_SCRIPT} ${ROW_ARGS} >> ${FLEET_RECLAIM_LOG} 2>&1" ;;
+    esac
+    ROW_NEEDLE="${ROW_SCRIPT}${ROW_ARGS:+ ${ROW_ARGS}}"
+  }
+  # Non-comment lines of $1 that contain the fixed string $2 / the whole table minus those lines.
+  fleet_lines_with() { printf '%s\n' "$1" | NEEDLE="$2" awk '!/^[[:space:]]*#/ && index($0, ENVIRON["NEEDLE"]) > 0'; }
+  fleet_table_without() { printf '%s\n' "$1" | NEEDLE="$2" awk '/^[[:space:]]*#/ || index($0, ENVIRON["NEEDLE"]) == 0'; }
+  fleet_install_real="$(cd -P "$FLEET_INSTALL" 2>/dev/null && pwd || true)"
+  [ -n "$fleet_install_real" ] || fleet_install_real="$FLEET_INSTALL"
+
+  fleet_cron_now="$(crontab_read)"
+  if [ ! -r "$FLEET_TOKEN_FILE" ]; then
+    if [ "$MODE" = "check" ]; then
+      echo "install-host-units: DRIFTED fleet cron heartbeat token file ${FLEET_TOKEN_FILE} is not readable (the line reads it; nothing is guessed)"
+      drift=$(( drift + 1 ))
+    else
+      echo "install-host-units: WARNING heartbeat token file ${FLEET_TOKEN_FILE} is not readable; the beat cannot push until it is" >&2
+    fi
+  fi
+
+  if [ "$MODE" = "check" ]; then
+    for fleet_name in $FLEET_ROWS; do
+      fleet_row "$fleet_name"
+      fleet_have="$(fleet_lines_with "$fleet_cron_now" "$ROW_NEEDLE")"
+      if [ -z "$fleet_have" ]; then
+        echo "install-host-units: MISSING fleet cron ${fleet_name} (${ROW_NEEDLE})"; drift=$(( drift + 1 ))
+      elif [ "$fleet_have" != "$ROW_LINE" ]; then
+        echo "install-host-units: DRIFTED fleet cron ${fleet_name} (want exactly: ${ROW_LINE})"; drift=$(( drift + 1 ))
+      else
+        echo "install-host-units: ok      fleet cron ${fleet_name}"
+      fi
+    done
+  else
+    fleet_cron_new="$fleet_cron_now"
+    for fleet_name in $FLEET_ROWS; do
+      fleet_row "$fleet_name"
+      fleet_cron_new="$(fleet_table_without "$fleet_cron_new" "$ROW_NEEDLE")"
+    done
+    for fleet_name in $FLEET_ROWS; do
+      fleet_row "$fleet_name"
+      if [ -n "$fleet_cron_new" ]; then fleet_cron_new="$(printf '%s\n%s' "$fleet_cron_new" "$ROW_LINE")"
+      else fleet_cron_new="$ROW_LINE"; fi
+    done
+    if [ "$fleet_cron_new" = "$fleet_cron_now" ]; then
+      echo "install-host-units: ok      fleet cron lines"
+    else
+      printf '%s\n' "$fleet_cron_new" | crontab_write
+      for fleet_name in $FLEET_ROWS; do
+        fleet_row "$fleet_name"
+        echo "install-host-units: wrote   fleet cron ${fleet_name}: ${ROW_LINE}"
+      done
+      fleet_cron_now="$fleet_cron_new"
+    fi
+  fi
+
+  # The census: any line that is not one of the rows and still runs a repo script out of a checkout
+  # that is not the converged install. Reported, never rewritten, so a hand-added line is visible.
+  while IFS= read -r fleet_line; do
+    [ -n "$fleet_line" ] || continue
+    fleet_is_row=0
+    for fleet_name in $FLEET_ROWS; do
+      fleet_row "$fleet_name"
+      case "$fleet_line" in *"$ROW_NEEDLE"*) fleet_is_row=1 ;; esac
+    done
+    [ "$fleet_is_row" = 0 ] || continue
+    while IFS= read -r fleet_cand; do
+      fleet_co=""
+      case "$fleet_cand" in
+        */scripts/*) fleet_co="${fleet_cand%%/scripts/*}" ;;
+        */deploy/*) fleet_co="${fleet_cand%%/deploy/*}" ;;
+        */bin/rmd) fleet_co="${fleet_cand%/bin/rmd}" ;;
+      esac
+      { [ -n "$fleet_co" ] && [ -e "${fleet_co}/.git" ]; } || continue
+      fleet_co_real="$(cd -P "$fleet_co" 2>/dev/null && pwd || true)"
+      [ -n "$fleet_co_real" ] || continue
+      [ "$fleet_co_real" != "$fleet_install_real" ] || continue
+      fleet_sha="$(git -C "$fleet_co" rev-parse --short HEAD 2>/dev/null || checkout_git "$fleet_co" rev-parse --short HEAD 2>/dev/null || true)"
+      echo "install-host-units: DRIFTED ${fleet_cand} runs ${fleet_co} at ${fleet_sha:-unknown}, not the converged install ${FLEET_INSTALL}"
+      if [ "$MODE" = "check" ]; then drift=$(( drift + 1 )); fi
+      break
+    done < <(printf '%s\n' "$fleet_line" | grep -oE '/[^[:space:]="]+' || true)
+  done < <(printf '%s\n' "$fleet_cron_now" | awk '!/^[[:space:]]*#/')
+
+  # The field-trials refresh owns its own copy and line (deploy/install-field-trials-refresh.sh). It
+  # is reported and converged only where its line already exists; it is never added here.
+  FIELD_TRIALS_TAG='# remudero-field-trials-refresh'
+  FIELD_TRIALS_INSTALLER="${SCRIPT_DIR}/install-field-trials-refresh.sh"
+  field_trials_run() {
+    if [ -n "${RMD_CRONTAB_CMD+x}" ]; then
+      # The seam: the installer calls plain `crontab`, so give it a shim that reaches the same table.
+      local shim rc=0
+      shim="$(mktemp -d)"
+      printf '#!/bin/sh\nexec "%s" "$@"\n' "$RMD_CRONTAB_CMD" > "${shim}/crontab"
+      chmod 0755 "${shim}/crontab"
+      PATH="${shim}:${PATH}" bash "$FIELD_TRIALS_INSTALLER" "$1" || rc=$?
+      rm -rf "$shim"
+      return "$rc"
+    elif [ "$(id -un)" = "$SERVICE_USER" ]; then
+      bash "$FIELD_TRIALS_INSTALLER" "$1"
+    else
+      sudo -n -u "$SERVICE_USER" env HOME="/home/${SERVICE_USER}" bash "$FIELD_TRIALS_INSTALLER" "$1"
+    fi
+  }
+  if [ -r "$FIELD_TRIALS_INSTALLER" ] && printf '%s\n' "$fleet_cron_now" | grep -qF -- "$FIELD_TRIALS_TAG"; then
+    fleet_ft_rc=0
+    fleet_ft_out="$(field_trials_run --check 2>&1)" || fleet_ft_rc=$?
+    if [ "$fleet_ft_rc" = 0 ]; then
+      echo "install-host-units: ok      field-trials refresh (${fleet_ft_out})"
+    elif [ "$MODE" = "check" ]; then
+      echo "install-host-units: DRIFTED field-trials refresh (${fleet_ft_out})"; drift=$(( drift + 1 ))
+    else
+      fleet_ft_out="$(field_trials_run --install 2>&1)" || { echo "install-host-units: FATAL -- field-trials refresh --install failed: ${fleet_ft_out}" >&2; exit 2; }
+      echo "install-host-units: wrote   field-trials refresh (${fleet_ft_out})"
+    fi
   fi
 fi
 

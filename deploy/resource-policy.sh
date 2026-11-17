@@ -27,7 +27,7 @@ RMD_MIN_BUILD_CEILING_MIB="${RMD_MIN_BUILD_CEILING_MIB:-2048}"
 RMD_SERVE_MEMORY_LIMIT_MIB="${RMD_SERVE_MEMORY_LIMIT_MIB:-}"         # empty = the shared budget; set = operator override (0 = none)
 RMD_SERVE_SWAP_MIB="${RMD_SERVE_SWAP_MIB:-2048}"                     # operator ruling 2026-10-19 (was 1024: 95% full)
 RMD_SERVE_CPUS="${RMD_SERVE_CPUS:-}"                                 # empty = no CPU quota, weight only
-RMD_SERVE_CPU_SHARES="${RMD_SERVE_CPU_SHARES:-512}"         # W1-T12532: equal to a build daemon's, never lower
+RMD_SERVE_CPU_SHARES="${RMD_SERVE_CPU_SHARES:-4096}"        # W1-T13293: 8x a build daemon (operator ruling 2026-11-17), never lower
 RMD_BUILD_CPU_SHARES="${RMD_BUILD_CPU_SHARES:-512}"
 
 # ── memory.high: A SOFT CEILING SIZED FROM ONE HOST BUDGET (2026-10-09) ─────────────────────────
@@ -261,7 +261,8 @@ resource_policy_tuned_high() {
 # "max" is a real no-ceiling, kept as such and named in the note. An unreadable running limit keeps the
 # own peak, and the note says it could not be read. Each recompute while overcommitted appends one
 # host.memory_max.overcommitted ledger row (container, formula_mib, own_peak_mib, deficit_mib = own peak
-# - formula, kept_mib) beside the tuner's rows; a repeat of the same row is not appended again. Once the
+# - formula, kept_mib) beside the tuner's rows; a repeat of the same values is not appended again (the last
+# written values are kept in <state>/memory-overcommit-<container>.json, W1-T13184). Once the
 # peaks fit, the formula governs and the limits shrink to it. The only other exception is an unreadable
 # MemTotal, where there is no budget to share and the caller keeps today's arithmetic. Whenever the
 # formula holds, its invariant is per container: its limit plus the other containers' peaks equals the
@@ -378,19 +379,36 @@ resource_policy_running_max() {
   return 0
 }
 
+# Where the last host.memory_max.overcommitted values written for container $1 are kept: beside
+# memory-peak-<container>.json in the caller's state dir, the dir whose ledger.ndjson gets the row.
+resource_policy_overcommit_file() {
+  local file
+  file="$(resource_policy_peak_file "$1")" || return 1
+  printf '%s/memory-overcommit-%s.json' "${file%/*}" "$1"
+}
+
 # Appends one host.memory_max.overcommitted row for container $1 (formula $2, own peak $3, deficit $4,
-# all MiB, and the limit it keeps, $5: MiB or "unlimited") beside the caller's tuner records. Skipped when the newest such row for the container
-# already holds the same formula and peak; never fatal and silent when the ledger cannot be written.
+# all MiB, and the limit it keeps, $5: MiB or "unlimited") beside the caller's tuner records, once per
+# change of those values. THE REPEAT CHECK (W1-T13184) reads memory-overcommit-<container>.json, which
+# holds the values of the last row written, and never the ledger: on 2026-11-16 the check read only the
+# last 400 ledger lines, the core ledger grew by about 400 lines a minute, consecutive rows were 420-426
+# lines apart, and 623 identical rows were written in one day. A missing or unreadable record appends a
+# row. After a successful append the record is rewritten atomically (tmp, then mv); when the append fails
+# the record is left as it was, so the next recompute tries again. Never fatal, and silent when the
+# ledger or the record cannot be written.
 resource_policy_overcommit_row() {
-  local container="$1" formula="$2" peak="$3" deficit="$4" kept="$5" file dir last kept_json
+  local container="$1" formula="$2" peak="$3" deficit="$4" kept="$5" file dir record kept_json values tmp
   file="$(resource_policy_tuned_file "${container}")" || return 0
   dir="${file%/*}"
   [ -d "${dir}" ] || return 0
+  record="$(resource_policy_overcommit_file "${container}")" || return 0
   case "${kept}" in unlimited) kept_json='"unlimited"' ;; *) kept_json="${kept}" ;; esac
-  last="$(tail -n 400 "${dir}/ledger.ndjson" 2>/dev/null | grep "\"step\":\"host.memory_max.overcommitted\",.*\"container\":\"${container}\"" | tail -n 1)" || last=""
-  case "${last}" in *"\"formula_mib\":${formula},\"own_peak_mib\":${peak},\"deficit_mib\":${deficit},\"kept_mib\":${kept_json}}"*) return 0 ;; esac
-  printf '{"ts":"%s","run_id":"HOST-MEMORY-MAX","task_id":"HOST","step":"host.memory_max.overcommitted","lane":"host","container":"%s","formula_mib":%s,"own_peak_mib":%s,"deficit_mib":%s,"kept_mib":%s}\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "${container}" "${formula}" "${peak}" "${deficit}" "${kept_json}" 2>/dev/null >> "${dir}/ledger.ndjson" || true
+  values="\"container\":\"${container}\",\"formula_mib\":${formula},\"own_peak_mib\":${peak},\"deficit_mib\":${deficit},\"kept_mib\":${kept_json}}"
+  if [ -r "${record}" ] && [ "$(cat "${record}" 2>/dev/null)" = "{${values}" ]; then return 0; fi
+  printf '{"ts":"%s","run_id":"HOST-MEMORY-MAX","task_id":"HOST","step":"host.memory_max.overcommitted","lane":"host",%s\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "${values}" 2>/dev/null >> "${dir}/ledger.ndjson" || return 0
+  tmp="${record}.tmp.$$"
+  printf '{%s\n' "${values}" > "${tmp}" 2>/dev/null && mv -f "${tmp}" "${record}" 2>/dev/null || rm -f "${tmp}" 2>/dev/null
   return 0
 }
 

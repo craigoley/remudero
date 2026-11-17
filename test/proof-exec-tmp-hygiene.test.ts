@@ -24,7 +24,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { defaultPreflightSpawn, type PreflightSpawn } from "#src/lib/commit-message.js";
-import { CI_PARITY_TABLE, coverageGateLockDir, coverageScratchDir, runCiParity, testWithCoverageLeaf, type CoverageResourcePort } from "#src/lib/ci-parity.js";
+import { CI_COVERAGE_SHARD_COUNT, CI_PARITY_TABLE, coverageGateLockDir, coverageScratchDir, runCiParity, testWithCoverageLeaf, type CoverageResourcePort } from "#src/lib/ci-parity.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { narrowNameFilteredArgs, parseWhitelistedProof } from "#src/lib/review.js";
 import { coverageParitySpawnResult, coverageResourceFixture } from "#test/helpers/coverage-parity-spawn.js";
@@ -112,7 +112,7 @@ function recordingSpawn(map: Record<string, { status: number; stdout?: string; s
       return { status: 0, stdout: "diff --git a/example.ts b/example.ts\n--- a/example.ts\n+++ b/example.ts\n@@ -1 +1 @@\n-old\n+new\n", stderr: "" };
     }
     if (file === process.execPath && args.some((arg) => arg.endsWith("scripts/test-tier-manifest.mjs")) && args.includes("--select-all")) {
-      const shard = args[args.indexOf("--shard") + 1]?.match(/^([1-8])\/8$/)?.[1];
+      const shard = args[args.indexOf("--shard") + 1]?.match(new RegExp(`^(\\d+)/${CI_COVERAGE_SHARD_COUNT}$`))?.[1];
       return shard ? { status: 0, stdout: `test/coverage-shard-${shard}.test.ts\n`, stderr: "" } : { status: 1, stdout: "", stderr: "invalid selector shard" };
     }
     const coverage = coverageParitySpawnResult(file, args, opts);
@@ -130,7 +130,7 @@ test("ci-parity: the coverage-ratchet full-glob test run is spawned with the tmp
     const step = result.steps.find((s) => s.name === "coverage-ratchet:test-with-coverage");
     assert.equal(step?.ok, true, step?.detail);
     const coverage = calls.filter((c) => c.args.includes("--experimental-test-coverage"));
-    assert.equal(coverage.length, 8, "expected a coverage-run invocation for every CI shard");
+    assert.equal(coverage.length, CI_COVERAGE_SHARD_COUNT, "expected a coverage-run invocation for every CI shard");
     for (const shard of coverage) assertHygienePair(shard.args, "coverage-ratchet:test-with-coverage");
   } finally { fixture.cleanup(); }
 });
@@ -172,9 +172,9 @@ test("parity coverage argv fixtures use supplied scratch through the real table"
     assert.equal(steps.length, 4);
     assert.ok(steps.every((s) => s.ok), JSON.stringify(steps));
     const children = recorded.calls.filter((c) => c.args.includes("--experimental-test-coverage"));
-    assert.equal(children.length, 8);
+    assert.equal(children.length, CI_COVERAGE_SHARD_COUNT);
     for (const c of children) assertHygienePair(c.args, "real table shard");
-    assert.deepEqual(fixture.events, [`acquire:${REPO_ROOT}`, ...Array(8).fill("refresh"), "release", "slot-release"]);
+    assert.deepEqual(fixture.events, [`acquire:${REPO_ROOT}`, ...Array(CI_COVERAGE_SHARD_COUNT).fill("refresh"), "release", "slot-release"]);
     assert.equal(existsSync(fixture.root), false);
     assert.equal(existsSync(join(sibling, "keep")), true);
   } finally { fixture.cleanup(); rmSync(sibling, { recursive: true, force: true }); }
@@ -245,7 +245,7 @@ test("parity fixture forwarding and hygiene imports are load-bearing", () => {
     assert.equal(step?.ok, true, step?.detail);
     assert.equal(fixture.events[0], `acquire:${REPO_ROOT}`, "actual dependency reaches the real table");
     const children = calls.filter((c) => c.args.includes("--experimental-test-coverage"));
-    assert.equal(children.length, 8);
+    assert.equal(children.length, CI_COVERAGE_SHARD_COUNT);
     for (const c of children) assertHygienePair(c.args, "actual coverage argv");
     assert.equal(existsSync(fixture.root), false);
   } finally { fixture.cleanup(); }

@@ -471,7 +471,7 @@ test("W1-T949: removing the per id reservation fails the N ref test", () => {
   // ONCE PER id in the block. Mutated to loop exactly once regardless of `count`, so a block of
   // N collapses to reserving only the first id — the exact defect this task exists to close,
   // reintroduced on purpose to prove the positive test actually catches it.
-  const needle = "  for (let i = 0; i < count; i++) {\n    const h = reserveTaskIdRemote(next, reserver, opts);\n";
+  const needle = "  for (let i = 0; i < count; i++) {\n    const h = yield* reserveRemoteSteps(next, reserver, opts);\n";
   const occurrences = original.split(needle).length - 1;
   assert.equal(
     occurrences,
@@ -481,7 +481,7 @@ test("W1-T949: removing the per id reservation fails the N ref test", () => {
   const mutated = original.replace(
     needle,
     "  for (let i = 0; i < 1; i++) { // W1-T949 MUTATION: per-id reservation removed, always reserves ONE\n" +
-      "    const h = reserveTaskIdRemote(next, reserver, opts);\n",
+      "    const h = yield* reserveRemoteSteps(next, reserver, opts);\n",
   );
 
   const whitelisted = parseWhitelistedProof(`unit test: ${positiveTestName}`);

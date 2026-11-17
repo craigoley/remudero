@@ -19,7 +19,7 @@ import { buildOperatorAgentRoutes, OPERATOR_AGENT_PROPOSAL_STEP } from "../src/l
 import type { ReadModelDb } from "../src/lib/read-model-db.js";
 import { createReadModelTicker, ledgerSource, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
 import type { ViewBodyEntry, ViewSource } from "../src/lib/views.js";
-import { clock, corpus, get, listen, NOW, post } from "./helpers/operator-agent-corpus.js";
+import { clock, corpus, corpusFixture, get, listen, NOW, post } from "./helpers/operator-agent-corpus.js";
 import { readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 /** Every GET route, with the query its body is read with. */
@@ -104,8 +104,9 @@ async function withSyncReadsRefused<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 test("every operator-agent GET body from the read model equals the ledger computation including archived rows", async (t) => {
-  const { stateDir, ledgerPath } = await corpus(t);
-  const legacyBase = await listen(t, buildOperatorAgentRoutes({ ledgerPath, now: () => NOW }));
+  const fixture = corpusFixture(t);
+  const { stateDir, ledgerPath } = await corpus(fixture);
+  const legacyBase = await listen(fixture, buildOperatorAgentRoutes({ ledgerPath, now: () => NOW }));
   const expected = new Map<string, unknown>();
   for (const path of GETS) {
     const answer = await get(legacyBase, path);
@@ -114,7 +115,7 @@ test("every operator-agent GET body from the read model equals the ledger comput
     expected.set(path, answer.body);
   }
   const entry = project(stateDir);
-  const servedBase = await listen(t, buildOperatorAgentRoutes({ ledgerPath, now: () => NOW, panelRows: createOperatorAgentRowsSource(readModelOf(entry), { instance: "core", clock }) }));
+  const servedBase = await listen(fixture, buildOperatorAgentRoutes({ ledgerPath, now: () => NOW, panelRows: createOperatorAgentRowsSource(readModelOf(entry), { instance: "core", clock }) }));
   await withSyncReadsRefused(async () => {
     for (const path of GETS) {
       const answer = await get(servedBase, path);
@@ -126,11 +127,12 @@ test("every operator-agent GET body from the read model equals the ledger comput
 });
 
 test("an operator-agent GET served from the read model opens no ledger file on the main thread", async (t) => {
-  const { stateDir, ledgerPath } = await corpus(t);
+  const fixture = corpusFixture(t);
+  const { stateDir, ledgerPath } = await corpus(fixture);
   const entry = project(stateDir);
   // The ledger is gone: a route that still reads it answers from nothing, or throws.
   rmSync(stateDir, { recursive: true, force: true });
-  const servedBase = await listen(t, buildOperatorAgentRoutes({ ledgerPath, now: () => NOW, panelRows: createOperatorAgentRowsSource(readModelOf(entry), { instance: "core", clock }) }));
+  const servedBase = await listen(fixture, buildOperatorAgentRoutes({ ledgerPath, now: () => NOW, panelRows: createOperatorAgentRowsSource(readModelOf(entry), { instance: "core", clock }) }));
   await withSyncReadsRefused(async () => {
     for (const path of GETS) {
       const answer = await get(servedBase, path);
@@ -141,8 +143,9 @@ test("an operator-agent GET served from the read model opens no ledger file on t
 });
 
 test("an operator-agent GET with no read-model body answers 503 with a reason and its sources", async (t) => {
-  const { ledgerPath } = await corpus(t);
-  const base = await listen(t, buildOperatorAgentRoutes({ ledgerPath, now: () => NOW, panelRows: createOperatorAgentRowsSource(readModelOf(undefined, "unavailable"), { instance: "core", clock, waitMs: 20 }) }));
+  const fixture = corpusFixture(t);
+  const { ledgerPath } = await corpus(fixture);
+  const base = await listen(fixture, buildOperatorAgentRoutes({ ledgerPath, now: () => NOW, panelRows: createOperatorAgentRowsSource(readModelOf(undefined, "unavailable"), { instance: "core", clock, waitMs: 20 }) }));
   for (const path of GETS) {
     const answer = await get(base, path);
     assert.equal(answer.status, 503, path);
@@ -156,10 +159,11 @@ test("an operator-agent GET with no read-model body answers 503 with a reason an
 });
 
 test("an operator-agent GET waits for the read model to apply this process's own write", async (t) => {
-  const { stateDir, ledgerPath } = await corpus(t);
+  const fixture = corpusFixture(t);
+  const { stateDir, ledgerPath } = await corpus(fixture);
   const before = project(stateDir);
   const readModel = readModelOf(before);
-  const base = await listen(t, buildOperatorAgentRoutes({ ledgerPath, now: () => NOW, panelRows: createOperatorAgentRowsSource(readModel, { instance: "core", clock, waitMs: 5_000 }) }));
+  const base = await listen(fixture, buildOperatorAgentRoutes({ ledgerPath, now: () => NOW, panelRows: createOperatorAgentRowsSource(readModel, { instance: "core", clock, waitMs: 5_000 }) }));
   // A write through the served routes: the body above does not hold it yet.
   assert.equal(await post(base, "/v1/operator-agent/settings", { settings: { enabled: false, confidenceThreshold: 0.99 } }), 200);
   const pending = get(base, "/v1/operator-agent/settings");
@@ -171,8 +175,9 @@ test("an operator-agent GET waits for the read model to apply this process's own
 });
 
 test("an operator-agent GET whose own write the read model never applies answers 503 naming that write", async (t) => {
-  const { stateDir, ledgerPath } = await corpus(t);
-  const base = await listen(t, buildOperatorAgentRoutes({ ledgerPath, now: () => NOW, panelRows: createOperatorAgentRowsSource(readModelOf(project(stateDir), "stale"), { instance: "core", clock, waitMs: 20 }) }));
+  const fixture = corpusFixture(t);
+  const { stateDir, ledgerPath } = await corpus(fixture);
+  const base = await listen(fixture, buildOperatorAgentRoutes({ ledgerPath, now: () => NOW, panelRows: createOperatorAgentRowsSource(readModelOf(project(stateDir), "stale"), { instance: "core", clock, waitMs: 20 }) }));
   assert.equal(await post(base, "/v1/operator-agent/settings", { settings: { enabled: false, confidenceThreshold: 0.99 } }), 200);
   const answer = await get(base, "/v1/operator-agent/settings");
   assert.equal(answer.status, 503);
@@ -182,17 +187,19 @@ test("an operator-agent GET whose own write the read model never applies answers
 });
 
 test("a stale read-model body still answers and names its stale sources in a header", async (t) => {
-  const { stateDir, ledgerPath } = await corpus(t);
-  const base = await listen(t, buildOperatorAgentRoutes({ ledgerPath, now: () => NOW, panelRows: createOperatorAgentRowsSource(readModelOf(project(stateDir), "stale"), { instance: "core", clock }) }));
+  const fixture = corpusFixture(t);
+  const { stateDir, ledgerPath } = await corpus(fixture);
+  const base = await listen(fixture, buildOperatorAgentRoutes({ ledgerPath, now: () => NOW, panelRows: createOperatorAgentRowsSource(readModelOf(project(stateDir), "stale"), { instance: "core", clock }) }));
   const answer = await get(base, "/v1/operator-agent/experiments");
   assert.equal(answer.status, 200);
   assert.equal(answer.headers.get("x-rmd-stale-sources"), "ledger:core");
 });
 
 test("an operator-agent rows view switched off answers from the ledger", async (t) => {
-  const { ledgerPath } = await corpus(t);
+  const fixture = corpusFixture(t);
+  const { ledgerPath } = await corpus(fixture);
   const readModel = { ...readModelOf(undefined), switches: () => ({ views: { [OPERATOR_AGENT_ROWS_VIEW]: "off" as const } }) };
-  const base = await listen(t, buildOperatorAgentRoutes({ ledgerPath, now: () => NOW, panelRows: createOperatorAgentRowsSource(readModel, { instance: "core", clock }) }));
+  const base = await listen(fixture, buildOperatorAgentRoutes({ ledgerPath, now: () => NOW, panelRows: createOperatorAgentRowsSource(readModel, { instance: "core", clock }) }));
   const answer = await get(base, "/v1/operator-agent/emergency/status");
   assert.equal(answer.status, 200);
   assert.ok(JSON.stringify(answer.body).includes("stop:fleet:archived"));
