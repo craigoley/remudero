@@ -8,6 +8,7 @@
  * every request; a worker that cannot start or dies is an outcome with its reason, and the caller then
  * builds the same projection synchronously.
  */
+import { threadName } from "./thread-names.js";
 import { isMainThread, parentPort, threadId, Worker, workerData } from "node:worker_threads";
 import { bundledWorkerUrl } from "./child-entry-argv.js";
 import { listFeedback, type FeedbackEntry } from "./feedback.js";
@@ -97,7 +98,7 @@ export function startConsoleProjectionWorker(options: { workerUrl?: URL } = {}):
   const ensure = (): Worker => {
     if (worker) return worker;
     const spawned = new Worker(options.workerUrl ?? bundledWorkerUrl(import.meta.url), {
-      workerData: { kind: CONSOLE_PROJECTION_WORKER_KIND },
+      name: threadName("consoleProjection"), workerData: { kind: CONSOLE_PROJECTION_WORKER_KIND },
     });
     spawned.on("message", (msg: { id: number; outcome: FeedbackProjectionOutcome }) => {
       const settle = pending.get(msg.id);

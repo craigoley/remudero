@@ -1,3 +1,4 @@
+import { threadName } from "./thread-names.js";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -381,7 +382,7 @@ export function measurementWorkerOptions(execArgv: readonly string[]): { resourc
  *  this module's URL, as before. Its .ts source cannot load in a worker of a bundled main, which has no tsx loader. */
 export function configMeasurementOffLoop<T>(input: ConfigMeasurement, workerUrl: URL = bundledWorkerUrl(import.meta.url)): Promise<T> {
   return new Promise((resolve, reject) => {
-    const worker = new Worker(workerUrl, { workerData: { kind: CONFIG_MEASUREMENT_WORKER_KIND, input }, ...measurementWorkerOptions(process.execArgv) });
+    const worker = new Worker(workerUrl, { name: threadName("configMeasure"), workerData: { kind: CONFIG_MEASUREMENT_WORKER_KIND, input }, ...measurementWorkerOptions(process.execArgv) });
     worker.once("message", (reply: MeasurementReply) => {
       void worker.terminate();
       if (reply.ok) resolve(reply.value as T);

@@ -1,6 +1,6 @@
 import { isImprovementBoundProposal, isReviewedImprovementDraft, runImprovementAction, type ImprovementPlanReceipt } from "./lib/improvement-thread.js";
 import { fileEligibleFollowups, followupFilingPresentation, type FollowupFinalizer } from "./lib/followup-filing.js";
-import { findTaskInCatalogs, catalogTaskContract, type TaskLookupOptions } from "./lib/task-lookup.js";
+import { findReleasePlanInCatalogs, findTaskInCatalogs, catalogTaskContract, type TaskLookupOptions } from "./lib/task-lookup.js";
 import type { OpsCatalogApi } from "./lib/ops-catalog-source.js";
 import { operatorReleaseContractChanged, operatorReleasePin, qualifyReleaseEvidence, readReleaseLedgerLines, releaseContractPins, type ReleaseEvidence } from "./lib/operator-release.js";
 import {
@@ -1391,7 +1391,7 @@ import { captureSelectedRegistryIntent, qualifySelectedRegistryIntent, observeSe
   type SelectedRegistryObserver } from "./lib/selected-registry-consumers.js";
 
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-forecast.js";
-import { readPrOwnerLedgerProjection, type PrOwnerLedgerProjection } from "./lib/pr-owner-ledger.js";
+import { collectPrOwnerReceipts, matchRecoveryReceipt, readPrOwnerLedgerProjection, type PrOwnerLedgerProjection } from "./lib/pr-owner-ledger.js";
 import {
   decideStaleFixDispatchRecovery,
   staleFixDispatchShadowInputs,
@@ -3786,6 +3786,8 @@ interface PrOwnerVerdict {
   claim?: PrOwnerClaim;
   /** W1-T12113: diagnostic only — never an input to `verdict`. */
   recoveryShadow?: StaleFixDispatchShadow;
+  /** W1-T12115: the released recovery receipt that cleared this PR's newest fix.dispatch. */
+  recoveryReceipt?: { recoveryId: string; actor: string; ts: string; preservationRef: string };
 }
 
 interface PrOwnerClaim {
@@ -3919,10 +3921,11 @@ export function derivePrOwnerVerdict(
   return prOwnerVerdictFromFacts(prNumber, corpus, claimRead, {
     corpusNewestTs: stringField(newestLedgerRow(corpus.rows) ?? {}, "ts"), latestFix, latestSweep,
     relatedClaimKeys: related.map((claim) => claim.key),
+    ...collectPrOwnerReceipts(corpus.rows, prNumber),
   });
 }
 
-type PrOwnerFacts = Pick<PrOwnerLedgerProjection, "corpusNewestTs" | "latestFix" | "latestSweep" | "relatedClaimKeys">;
+type PrOwnerFacts = Pick<PrOwnerLedgerProjection, "corpusNewestTs" | "latestFix" | "latestSweep" | "relatedClaimKeys" | "receipts" | "receiptUnknown">;
 
 function prOwnerVerdictFromFacts(
   prNumber: number,
@@ -3931,7 +3934,7 @@ function prOwnerVerdictFromFacts(
   facts: PrOwnerFacts,
 ): PrOwnerVerdict {
   const verdict = prOwnerOwnershipVerdict(prNumber, corpus, claimRead, facts);
-  if (facts.latestFix === undefined) return verdict;
+  if (facts.latestFix === undefined || verdict.recoveryReceipt !== undefined) return verdict;
   // W1-T12113: the recovery decision in SHADOW — computed after, and never fed into, the verdict.
   const shadow = staleFixDispatchShadowInputs(prNumber, corpus, facts.latestFix);
   return withStaleFixDispatchShadow(verdict, decideStaleFixDispatchRecovery(shadow.expected, shadow.facts));
@@ -3971,7 +3974,27 @@ function prOwnerOwnershipVerdict(
   const related = claimRead.claims.filter((claim) => facts.relatedClaimKeys.includes(claim.key));
   const liveClaim = related.find((claim) => !claim.stale);
   const staleClaim = related.find((claim) => claim.stale);
-  if (latestFix !== undefined || liveClaim !== undefined || (latestSweep !== undefined && activeSweepRow(latestSweep))) {
+  const activeSweep = latestSweep !== undefined && activeSweepRow(latestSweep);
+  // W1-T12115: a later released recovery receipt naming this exact dispatch releases it — never a live claim or an active sweep.
+  const released = latestFix !== undefined && liveClaim === undefined && !activeSweep
+    ? matchRecoveryReceipt(prNumber, latestFix, facts.receipts, facts.receiptUnknown) : { kind: "none" as const };
+  if (released.kind === "unknown") return { ...base, verdict: "UNKNOWN", reason: released.reason, fix: summarizeFixRow(latestFix!) };
+  if (released.kind === "released" && claimRead.unreadable === undefined) {
+    const receipt = released.receipt;
+    const preservation = receipt.preservation as { recoveryRef?: unknown; state?: unknown } | undefined;
+    return {
+      ...base,
+      verdict: "FREE",
+      reason: `fix.dispatch ${String(latestFix!.run_id)} released by recovery receipt ${String(receipt.recovery_id)}`,
+      recoveryReceipt: {
+        recoveryId: String(receipt.recovery_id), actor: String(receipt.actor), ts: String(receipt.ts),
+        preservationRef: typeof preservation?.recoveryRef === "string" ? preservation.recoveryRef : `(${String(preservation?.state ?? "unknown")})`,
+      },
+      fix: summarizeFixRow(latestFix!),
+      ...(latestSweep !== undefined ? { sweep: summarizeSweepRow(latestSweep) } : {}),
+    };
+  }
+  if (latestFix !== undefined || liveClaim !== undefined || activeSweep) {
     return {
       ...base,
       verdict: "OWNED",
@@ -4010,6 +4033,9 @@ function renderPrOwnerVerdict(v: PrOwnerVerdict): string {
       `  fix.dispatch: ts=${v.fix.ts ?? "unknown"}, task=${v.fix.taskId ?? "unknown"}, run=${v.fix.runId ?? "unknown"}, ` +
         `strike=${strike}, mode=${v.fix.mode ?? "unknown"}, head=${v.fix.headSha ?? "unknown"}`,
     );
+  }
+  if (v.recoveryReceipt) {
+    lines.push(`  recovery_receipt: id=${v.recoveryReceipt.recoveryId}, actor=${v.recoveryReceipt.actor}, ts=${v.recoveryReceipt.ts}, preservation=${v.recoveryReceipt.preservationRef}`);
   }
   if (v.claim) lines.push(`  fix branch claim: ${v.claim.key}, pid=${v.claim.pid}, run=${v.claim.runId}`);
   if (v.recoveryShadow) {
@@ -10874,6 +10900,9 @@ const CENSUS_BASELINE_FILES = ["scripts/clock-signature-baseline.json", "scripts
 const CENSUS_PUSH_CHECK = "pre-push census-precheck";
 const CENSUS_SNAPSHOT_ENV = "RMD_CENSUS_SNAPSHOT";
 const CENSUS_SNAPSHOT_ROOTS = [...MEASURED_ROOTS, "test", "plan"];
+/** W1-T13458: the census snapshot's file lists and blob headers name paths only, so Node's 1 MiB default would refuse
+ *  them as the repository grows; its blob read is bounded by the sizes git reports instead. */
+const CENSUS_SNAPSHOT_LIST_BOUND = 128 * 1024 * 1024;
 const COVERAGE_PUSH_CHECK = "pre-push coverage-precheck";
 const MERGED_TYPECHECK_PUSH_CHECK = "merged-tree-typecheck";
 const CENSUS_PUSH_NEVER_BYPASS =
@@ -10935,7 +10964,8 @@ function* writeFixCensusSnapshotSteps(
       (CENSUS_SNAPSHOT_ROOTS.some((dir: string) => p.startsWith(`${dir}/`)) || ["package.json", ".dependency-cruiser.cjs"].includes(p)) &&
       (/\.(?:ts|mts|mjs|js|cjs|json|ya?ml|sh|md|toml|txt)$/.test(p) || !basename(p).includes("."));
     function* paths(args: string[]): Steps<string[]> {
-      return [...new Set((yield* step(() => runGit(root, args))).split("\n").filter((p) => p && censusPath(p)))];
+      return [...new Set((yield* step(() => runGit(root, args, { maxBuffer: CENSUS_SNAPSHOT_LIST_BOUND })))
+        .split("\n").filter((p) => p && censusPath(p)))];
     }
     const headPaths = yield* paths(["ls-files"]);
     const basePaths = yield* paths(["ls-tree", "-r", "--name-only", mergeBase]);
@@ -10943,9 +10973,15 @@ function* writeFixCensusSnapshotSteps(
       .filter((p) => p.endsWith("baseline.json"));
     function* blobs(ref: string, names: string[]): Steps<Record<string, string>> {
       if (names.length === 0) return {};
-      const output = Buffer.from(yield* step(() => runGit(root, ["cat-file", "--batch"], {
-        input: names.map((p) => `${ref}:${p}\n`).join(""), maxBuffer: 128 * 1024 * 1024,
-      })));
+      const input = names.map((p) => `${ref}:${p}\n`).join("");
+      // `--batch` writes each `--batch-check` header line, then each sized object and a newline: its exact byte count.
+      const headers = yield* step(() => runGit(root, ["cat-file", "--batch-check"], { input, maxBuffer: CENSUS_SNAPSHOT_LIST_BOUND }));
+      const maxBuffer = headers.split("\n").reduce((bytes, line) => {
+        const size = /^[a-f0-9]+ \S+ (\d+)$/.exec(line)?.[1];
+        return size === undefined ? bytes : bytes + Number(size) + 1;
+      }, Buffer.byteLength(headers));
+      // latin1: the async runner then counts the bytes git wrote, which the bound above is.
+      const output = Buffer.from(yield* step(() => runGit(root, ["cat-file", "--batch"], { input, maxBuffer, encoding: "latin1" })), "latin1");
       const texts: Record<string, string> = {};
       let offset = 0;
       for (const path of names) {
@@ -39592,6 +39628,8 @@ export async function approveCommand(
     inboxRoot?: string;
     inboxLedgerPath?: string;
     reviewedImprovement?: { goalDigest: string; draftDigest: string };
+    /** W1-T13386: how the release path reads the ops catalog (default: the host's own transport). */
+    taskLookup?: TaskLookupOptions;
   } = {},
 ): Promise<number> {
   const proposalId = rest[0];
@@ -39611,12 +39649,21 @@ export async function approveCommand(
     const config = deps.config ?? loadConfig();
     // W1-T10925: a consumer task's id is found in the instance's target plan, not the engine's.
     const located = deps.planPath === undefined ? verbTaskPlan(proposalId, () => join(config.root, "state")) : undefined;
-    if (located && !located.ok) {
+    // W1-T13386: a local miss asks the catalog this host names before the id is called unknown. An ops task
+    // is released against the plan the daemon's tick composes, so both read the same pin.
+    const localPlan = located?.ok ? located.plan : loadPlan(planPath);
+    const held = located?.ok ? undefined
+      : await findReleasePlanInCatalogs(proposalId, localPlan, { ...deps.taskLookup, stateDir: join(config.root, "state") });
+    if (held?.outcome === "unreadable") {
+      console.error(`rmd approve: cannot release '${proposalId}': the task catalogs cannot be read as the daemon composes them (${held.reason}) — nothing released`);
+      return 1;
+    }
+    if (located && !located.ok && held?.outcome !== "found") {
       console.error(`rmd approve: unknown task '${proposalId}' (${located.error})`);
       return 2;
     }
     const outcome = approveParkedTask(proposalId, {
-      plan: located?.ok ? located.plan : loadPlan(planPath),
+      plan: held?.outcome === "found" ? held.plan : localPlan,
       ledgerPath: ledgerPathFor(config),
       // Clock-free BY CONSTRUCTION — and the comment may not NAME the shape it avoids, because
       // clock-signature-census.test.ts counts by SOURCE TEXT, comments included. The row is already

@@ -1,0 +1,112 @@
+- id: W1-T13427
+  title: "A fix child writes how long each step before its admission took: in 72 hours 201 of 223 fix children wrote no ledger row for more than two minutes after launch (p50 15.6 minutes, p90 22.2, max 37.6, about 3,450 minutes in total) and no row says which step took the time"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19: one concern, the timing of the fix child's steps before admission; it spans the child in the sweep module and the production ports that module is given, and the recheck order, the refusals and the release of the admission grant must not change
+  band_meaning: span
+  origin: "operator-session#fix-lane-flow-2026-11-17"
+  plan_refs:
+    - W1-T9114
+    - W1-T12497
+    - W1-T11559
+    - W1-T9709
+  files:
+    - src/lib/sweep.ts
+    - src/run-task.ts
+    - test/fix-lane/a-fix-child-writes-how-long-each-step-before-its-admission-took.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "runFixDispatchChild, run with ports whose hold, readLivePr, readTask, claimFixAdmission and dispatcher each take a known time on an injected clock, writes one sweep.fix.prepare_timing row for each of the stages child-hold, child-live-pr, child-task, child-admission and child-effects, each with pr_number, head_sha and the elapsed_ms the clock gave that port, and all five before the first sweep.fix.child_phase row"
+      proof: "grep: W1-T13427 criterion 1 in test/fix-lane/a-fix-child-writes-how-long-each-step-before-its-admission-took.test.ts"
+    - claim: "runDetachedWork with a fix-dispatch spec and its production readTask (a fixture plan, config and ledger given through the existing ports) also writes sweep.fix.prepare_timing rows for child-shared-pause, child-plan-sync, child-plan-projection and child-context-digest, and the last three sum to no more than the child-task row of the same run"
+      proof: "grep: W1-T13427 criterion 2 in test/fix-lane/a-fix-child-writes-how-long-each-step-before-its-admission-took.test.ts"
+    - claim: "invariant:a-refused-child-still-says-where-its-time-went — a child whose recheck refuses (the head moved, the task is merged, or the merge projection is unreadable) writes the timing row of every stage it finished before its sweep.fix.child_refused row, and the refusal reason and the thrown error text are the same as at origin/main"
+      kind: guard
+      proof: "grep: W1-T13427 criterion 3 in test/fix-lane/a-fix-child-writes-how-long-each-step-before-its-admission-took.test.ts"
+    - claim: "invariant:timing-changes-no-decision — with timing on, each port is called the same number of times, in the same order and with the same arguments as at origin/main, the admission grant is released on the success path and on every refusal after the claim, and dispatchFix receives the same pull request, evidence and control values"
+      kind: guard
+      proof: "grep: W1-T13427 criterion 4 in test/fix-lane/a-fix-child-writes-how-long-each-step-before-its-admission-took.test.ts"
+    - claim: "The production fix child names the plan projection stage, so the split of the task read has a production caller"
+      proof: "grep: child-plan-projection in src/run-task.ts"
+  rationale: |
+    WHY: a fix child is launched in seconds and then, for a median of 15.6 minutes, writes nothing. Its first
+    row is the admission grant. In that time it holds a fix lane slot and the pull request waits. The steps
+    it runs in that time are known from the code, but no row says how long each one took, so the slow step
+    cannot be named from the ledger and a fix cannot be filed with evidence. This task adds that one
+    measurement and changes no behaviour.
+    MEASURED, core ledger (~/rmd-state2/state, live file plus 111 archives, rows deduplicated on ts, run id
+    and step), 2026-11-14T16:09Z to 2026-11-17T16:09Z:
+    - Launch itself, from run_child.launch_segments (the daemon's own row; engine, admission wait, setup and
+      spawn-to-heartbeat added up): fix n=257, p50 9.5 s, p90 39.3 s, max 868 s, 16 over 60 s (11 by admission
+      wait, 3 by entry resolution). Review n=729, p50 11.2 s, p90 52.4 s, max 439 s, 65 over 60 s (entry
+      resolution 22, admission wait 14, spawn-to-heartbeat 10). Work n=118, p50 8.4 s, p90 54.9 s, max
+      1,385 s, 11 over 60 s (plan read 7, admission wait 2). No one cause explains the slow launches.
+    - Entry resolution over 60 s: 25 launches, the longest 595 s for a review and 258 s for a fix child
+      (W1-T13047, 2026-11-16T19:03Z, the 4.7-minute case the operator saw). Every one has entry_reason
+      source-hash-match. 9 have a child_entry.store_miss row in the wait and 16 have no build or hash row at
+      all (child_entry.spawned shows hash ms 0). Several children launched at the same instant share the same
+      wait (four reviews at 442 s on 2026-11-15T21:36:28Z). The wait is not explained by a build or a hash.
+    - After launch, inside the fix child: from run_child.spawned to the first sweep.fix_capacity row, n=223,
+      p50 936 s, p90 1,329 s, max 2,255 s; 201 over 60 s and 200 over 300 s. A second pass over every ledger
+      row those 201 processes wrote in that window (by host and pid) found only github.budget.configured
+      (86 rows) before the admission row. The silent time adds up to about 3,450 minutes.
+    - From the admission row on, the child is not slow to start its worker: sweep.fix.prepare_timing
+      (head-lookup) p50 2 s, max 4 s; worker phase to worker.assignment p50 4 s, max 23 s.
+    - 37 children were refused with a real sweep.fix.dispatch_failed row; the 23 that the recheck refused
+      for a moved head ended 3 s to 122 s after launch, before the task read.
+    - W1-T12497's rationale (merged) recorded the same silence once: "The child wrote no row for 16 min 15 s".
+    READ at origin/main 15a86ac98:
+    - src/run-task.ts:45533 runFixDispatchWork builds the child's ports. :45567 awaits prepareSharedPause
+      (src/lib/fleet-control.ts:579). :45585 readLivePr is one `gh pr view`. :45592 readTask calls planNow
+      (:45555, syncPlanOrRefuse with allowStale false, which loads the whole plan), then projectPlan (:45596,
+      src/lib/status.ts:4059) over the whole plan with a batched GitHub reader, then
+      riskJudgePlanContextDigestFor (:45599). :45571 claimFixAdmission logs sweep.fix_capacity.
+    - src/lib/sweep.ts:19196 runFixDispatchChild: recheckFixDispatch (:19156) calls hold, readLivePr and
+      readTask in that order; then the hold again, claimFixAdmission (:19225), dispatcher (:19235) and
+      dispatchFix (:19242). It logs only refusals and sweep.fix.child_phase.
+    - src/lib/sweep.ts:4418 and :20519 already write sweep.fix.prepare_timing with a `stage` field
+      (head-lookup, dispatch-call); src/lib/ledger.ts:680 keeps that step across rotation.
+    NOT COVERED: W1-T9709 (merged) made a child entry launch hash its tree once; it measures the launch, not
+    the child's recheck. W1-T12497 and W1-T11559 (merged) changed when the child reads the fleet hold. Swept
+    plan/tasks.d and plan/tasks.yaml for prepare_timing, runFixDispatchChild, recheckFixDispatch and
+    runFixDispatchWork, and the 11 open pull requests on craigoley/remudero: none times these steps.
+  design: |
+    INVARIANT a-refused-child-still-says-where-its-time-went: a refusal comes after the timing rows of the stages that finished, and its reason and error text do not change.
+    INVARIANT timing-changes-no-decision: the ports are called once each, in the same order, with the same arguments; the grant is released on every path; dispatchFix gets the same input.
+    1. In src/lib/sweep.ts add a small exported helper that runs a function, reads elapsed time from an
+       injected clock (performance.now by default) and logs sweep.fix.prepare_timing with pr_number,
+       head_sha, stage and elapsed_ms. It logs in a finally block, so a port that throws still gets its row
+       before the refusal row. Reuse the existing step name; add no new ledger step.
+    2. runFixDispatchChild and recheckFixDispatch wrap each port call with it: child-hold (the first hold
+       read), child-live-pr, child-task, child-admission, child-effects. The second and third hold reads are
+       not timed. The order of the calls does not change.
+    3. In runFixDispatchWork (src/run-task.ts) use the same helper for the steps only it can see:
+       child-shared-pause around prepareSharedPause, and inside readTask child-plan-sync around planNow,
+       child-plan-projection around projectPlan and child-context-digest around the digest. The memoised
+       second call of planNow is not timed again.
+    4. A timing row carries numbers and the stage name only: no pull request body, plan text or token.
+    5. TESTS in test/fix-lane/a-fix-child-writes-how-long-each-step-before-its-admission-took.test.ts drive
+       runFixDispatchChild with fake ports and an injected clock (criteria 1, 3, 4) and runDetachedWork with
+       a fixture plan, config and ledger in a temporary directory (criterion 2), as
+       test/reviews-and-detached-actions-run-as-run-children.test.ts builds a fix-dispatch spec. Load
+       test/setup/tmp-hygiene.ts so no test reads or writes the host's config or state.
+  falsifier: |
+    At origin/main the child writes no sweep.fix.prepare_timing row before its admission, so criteria 1 and 2
+    fail. Log the row after the port returns and not in a finally block: the refused child in criterion 3
+    has no row for the stage that threw. Time the hold by calling it a second time: the call count in
+    criterion 4 changes. Leave the admission grant unreleased when the timed dispatcher throws: criterion 4
+    fails.
+  note: |
+    Id reserved for run-unfiled-1794931694000 with ~/rmd-work/bin/reserve-id.sh.
+    Proof that counts in production: after a day of fix children, the sum of elapsed_ms by stage over the
+    child-* rows names one stage that holds most of the time between run_child.spawned and
+    sweep.fix_capacity. File the fix for that stage from those rows (for example a plan projection read
+    from the daemon's own snapshot, if child-plan-projection is the one).
+    Still missing after this task: what the daemon does inside entry_ms when a launch waits minutes on a
+    source-hash-match with no build row. That is 25 launches in 72 hours and is not filed here.
