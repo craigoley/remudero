@@ -21,7 +21,7 @@
   acceptance:
     - claim: "When the first day's candidates cannot share a 64 MiB archive, the pass selects the same-day run that merges the most sources within the ceiling, and the apply run merges them"
       proof: "grep: W1-T13370 criterion 1 in test/ledger/a-compaction-pass-merges-past-an-unpairable-archive.test.ts"
-    - claim: "No selected window exceeds the decompressed archive ceiling, and a corpus where no two candidates fit together still reports nothing eligible and writes nothing"
+    - claim: "A day's packing skips an archive that would overflow, no selected window exceeds the decompressed archive ceiling, and a corpus where no two same-day candidates fit together writes nothing"
       proof: "grep: W1-T13370 criterion 2 in test/ledger/a-compaction-pass-merges-past-an-unpairable-archive.test.ts"
     - claim: "invariant:ceiling-and-reduction-hold — the 64 MiB per-archive ceiling, the oversized-archive repair and the no-reduction refusal behave as before"
       proof: "grep: W1-T13370 criterion 3 in test/ledger/a-compaction-pass-merges-past-an-unpairable-archive.test.ts"
@@ -51,10 +51,11 @@
        would overflow the ceiling, up to the source cap.
     2. Select the day whose packing merges the most sources (ties: the oldest day). On the host that is a run of
        ~16 rotations from 11-16, not a lone 50 MB archive.
-    3. If no day packs two or more sources, and this is not the oversized-repair case, return no sources, so the
-       command does not read and partition a lone archive only to decline it.
+    3. Pack only when the existing walk ends with fewer than two sources and this is not the oversized-repair case.
+       If no day packs two or more, keep the walk's answer, so the command declines the lone source as no-reduction
+       exactly as before (test/no-union-read-decompresses-a-million-row-archive.test.ts pins that report).
     Keep the archive-part deferral and the repair path unchanged. Measuring every candidate's decompressed size is
-    affordable once W1-T13371 records measurements, so build T13371 first.
+    affordable once W1-T13371 keeps measurements across passes, so build T13371 first.
   falsifier: |
     Restore the break on the first overflow and criterion 1 fails (one source, no merge). Let a day's packing take an
     overflowing candidate and criterion 2 fails.
