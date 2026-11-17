@@ -6,6 +6,7 @@
   priority: 1.1
   type: implement
   verify: auto
+  # operator 2026-11-17T20:01Z (Inbox decision card, thread "Recommend decisions for waiting Inbox asks"): reframe — the product-routes proof named a whole existing file that already passes at base, so no PR could open; it now names a W1-T11196 test title that is absent at base.
   principles: {tdd: strict}
   budget_usd: 30
   risk: high
@@ -48,6 +49,8 @@
     is there open-head overlap? -> none by title among the 19 open PRs on 2026-11-03. Refresh the
     head-tree audit at filing review.
   design: |
+    NO-INVARIANTS: the preview is a new read-only operation; no prior output, receipt, default or side effect exists for it to preserve.
+
     Add previewRunnerConfigBootstrap to src/lib/product-target-config.ts, call it from the existing
     product route builder in src/lib/product-routes.ts, and pass it through serve's maintained
     composition. Serve one bounded read-only authenticated operation behind the existing
@@ -84,7 +87,7 @@
     - claim: the production product route invokes the preview
       proof: "grep: previewRunnerConfigBootstrap( in src/lib/product-routes.ts"
     - claim: the served preview matches its authenticated public contract
-      proof: "unit test: test/console-api/serve/product-routes.test.ts"
+      proof: "unit test: W1-T11196: the served runner-config preview matches its authenticated public contract"
     - claim: the preview operation is declared in the public contract
       proof: "grep: runner-config-preview in openapi/daemon.yaml"
   falsifier: |
