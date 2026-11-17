@@ -474,6 +474,46 @@ else
   DAEMON_VERDICT="STALE — last poll $(human_age "$DAEMON_AGE_S") ago"
 fi
 
+# ── probe: drain verdict (W1-T12939) ─────────────────────────────────────────────────────────────
+# A held instance writes `daemon.pause` each poll, carrying the in-flight census (`in_flight_count`,
+# `in_flight_oldest_age_ms`) and its hold episode (`drain_episode`); the first empty census of an episode
+# writes `daemon.drained` with the same episode, a unit appearing after it `daemon.drain_reopened`. This
+# reads the newest of them. DEGRADE TO `unknown`, NEVER TO `drained`: an unreadable ledger, a daemon whose
+# newest line is stale (the same rule as daemon_verdict), or a pause row with no census says so.
+DRAIN_VERDICT="unknown — no readable ledger"
+if [ "$LEDGER_STATE" = "ok" ]; then
+  if [ -z "$DAEMON_AGE_S" ] || [ "$DAEMON_AGE_S" -gt "$DAEMON_STALE_AFTER_S" ]; then
+    DRAIN_VERDICT="unknown — the daemon's newest ledger line is stale or absent"
+  else
+    DRAIN_PAUSE_LINE="$(grep -F '"step":"daemon.pause"' "$LEDGER" 2>/dev/null | tail -n 1)"
+    DRAIN_PAUSE_TS="$(printf '%s' "$DRAIN_PAUSE_LINE" | grep -o '"ts":"[^"]*"' | head -n 1 | cut -d'"' -f4)"
+    DRAIN_PAUSE_EPOCH="$(epoch_of "$DRAIN_PAUSE_TS")"
+    if [ -z "$DRAIN_PAUSE_LINE" ] || [ -z "$DRAIN_PAUSE_EPOCH" ] || [ "$((NOW_EPOCH - DRAIN_PAUSE_EPOCH))" -gt "$DAEMON_STALE_AFTER_S" ]; then
+      DRAIN_VERDICT="not-paused"
+    else
+      DRAIN_COUNT="$(printf '%s' "$DRAIN_PAUSE_LINE" | grep -o '"in_flight_count":[0-9]*' | head -n 1 | cut -d: -f2)"
+      DRAIN_OLDEST_MS="$(printf '%s' "$DRAIN_PAUSE_LINE" | grep -o '"in_flight_oldest_age_ms":[0-9]*' | head -n 1 | cut -d: -f2)"
+      DRAIN_EPISODE="$(printf '%s' "$DRAIN_PAUSE_LINE" | grep -o '"drain_episode":"[^"]*"' | head -n 1 | cut -d'"' -f4)"
+      DRAIN_STATE_LINE="$(grep -E '"step":"daemon\.(drained|drain_reopened)"' "$LEDGER" 2>/dev/null | tail -n 1)"
+      DRAIN_STATE_TS="$(printf '%s' "$DRAIN_STATE_LINE" | grep -o '"ts":"[^"]*"' | head -n 1 | cut -d'"' -f4)"
+      DRAIN_STATE_EPISODE="$(printf '%s' "$DRAIN_STATE_LINE" | grep -o '"drain_episode":"[^"]*"' | head -n 1 | cut -d'"' -f4)"
+      if [ -z "$DRAIN_COUNT" ]; then
+        DRAIN_VERDICT="unknown — the newest daemon.pause row carries no in-flight census"
+      elif [ "$DRAIN_COUNT" -gt 0 ]; then
+        DRAIN_VERDICT="draining — ${DRAIN_COUNT} in flight"
+        if [ -n "$DRAIN_OLDEST_MS" ]; then DRAIN_VERDICT="${DRAIN_VERDICT}, oldest $(human_age "$((DRAIN_OLDEST_MS / 1000))")"; fi
+      elif printf '%s' "$DRAIN_PAUSE_LINE" | grep -qF '"in_flight_unobserved"'; then
+        # An empty census that names the unit kinds it could not see is not a drained claim: a garden child or judge call may be live.
+        DRAIN_VERDICT="unknown — the census does not cover every kind of in-flight unit"
+      elif [ -n "$DRAIN_EPISODE" ] && [ "$DRAIN_EPISODE" = "$DRAIN_STATE_EPISODE" ] && printf '%s' "$DRAIN_STATE_LINE" | grep -qF '"step":"daemon.drained"'; then
+        DRAIN_VERDICT="drained — at ${DRAIN_STATE_TS}"
+      else
+        DRAIN_VERDICT="draining — 0 in flight, the daemon.drained row for this hold is not written yet"
+      fi
+    fi
+  fi
+fi
+
 # ── probe: deploy-supervisor liveness, the max ts over the `deploy.` prefix (W1-T2349) ───────────
 # THE GAP THIS CLOSES. The daemon probe above answers "is the daemon alive"; nothing until now
 # answered "is the thing that ADVANCES the daemon's code alive" — the deploy-supervisor went
@@ -1661,6 +1701,7 @@ PAYLOAD="$(cat <<EOF
 beat_ts=${NOW_ISO}
 beat_host=$(hostname 2>/dev/null || printf 'unknown')
 daemon_verdict=${DAEMON_VERDICT}
+drain_verdict=${DRAIN_VERDICT}
 daemon_last_ts=${DAEMON_LAST_TS:-none}
 daemon_last_step=${DAEMON_LAST_STEP:-none}
 daemon_last_age_s=${DAEMON_AGE_S:-unknown}

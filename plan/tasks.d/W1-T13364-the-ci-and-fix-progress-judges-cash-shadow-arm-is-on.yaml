@@ -1,0 +1,116 @@
+- id: W1-T13364
+  title: "The ci and fix-progress judges' cash shadow arm is on: .remudero/mounts.yaml gains a ci_judge row and a fix_progress_judge row equal to the risk judge's cell, each with a DeepSeek-V4-Flash shadow arm, so each judgement ledgers one judge_shadow row and still acts only on the primary verdict"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the change spans the mount table, the operator guide and two test files; it adds one advisory cash call beside each ci and fix-progress judgement, inside the existing daily cash cap, and the primary judge's model, provider and verdict do not change
+  origin: "operator-ruling#shadow-judge-on-2026-11-17"
+  plan_refs:
+    - W1-T11075
+    - W1-T10858
+    - W1-T12187
+  files:
+    - .remudero/mounts.yaml
+    - docs/operator-guide.md
+    - test/review/the-ci-and-fix-progress-judges-shadow-a-deepseek-arm.test.ts
+    - test/review/the-ci-and-fix-progress-shadow-arm-is-on.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "invariant:the-primary-judge-is-unchanged — over the repo's real .remudero/mounts.yaml, resolveCiJudgeMount and resolveFixProgressJudgeMount each give the model, effort, max_turns and context_budget of resolveRiskJudgeMount's cell and name no provider. A copy of the real file whose cheapest routed cell is changed makes this test fail, so a later change to that cell cannot split the judges from the risk judge without a red test"
+      kind: guard
+      proof: "grep: W1-T13364 criterion 1 in test/review/the-ci-and-fix-progress-shadow-arm-is-on.test.ts"
+    - claim: "loadMounts accepts the real file, and each of the two rows carries the shadow arm { provider: cash, deployment: DeepSeek-V4-Flash } with no shadow effort. DeepSeek-V4-Flash has a context row, a price row and a request-shape row in src/lib/worker-provider.ts"
+      proof: "grep: W1-T13364 criterion 2 in test/review/the-ci-and-fix-progress-shadow-arm-is-on.test.ts"
+    - claim: "invariant:the-shadow-is-advisory — with the real file, one ci-judge pass and one fix-progress pass through the harness of the W1-T11075 test each write exactly one judge_shadow.paired row that names DeepSeek-V4-Flash, the posted ci status and the returned fix-progress verdict are the primary's when the shadow disagrees, and the primary spawn names no mount provider"
+      proof: "grep: W1-T13364 criterion 3 in test/review/the-ci-and-fix-progress-shadow-arm-is-on.test.ts"
+    - claim: "docs/operator-guide.md says what the two rows do, that removing a row's `shadow:` mapping turns its arm off, and that the rows are read in the instance ledger as judge_shadow.paired, judge_shadow.refused and judge_shadow.unavailable. The test reads the guide for the two row names, the word `shadow:` and the three step names"
+      proof: "grep: W1-T13364 criterion 4 in test/review/the-ci-and-fix-progress-shadow-arm-is-on.test.ts"
+  rationale: |
+    WHY: W1-T11075 (#19001, merged) built a cash shadow arm for the ci judge and the fix-progress judge, and left it
+    off: the arm runs only when .remudero/mounts.yaml has a row for the judge with a `shadow:` mapping, and the file
+    has no such row. No judge_shadow row can exist until the rows do, so the agreement of DeepSeek-V4-Flash with
+    the present judge is not measured.
+    RULED by the operator on 2026-11-17: "Go with all of your recommendations". The recommendation was to turn
+    the W1-T11075 shadow judge on.
+    READ at origin/main cfbace2640:
+    - .remudero/mounts.yaml has `judge`, `escalation_judge`, `verify_human_judge` and `machine_filing_judge` rows and
+      no `ci_judge` or `fix_progress_judge` row.
+    - src/lib/mounts.ts:293 `parseJudgeMount` reads a judge row and its optional `shadow` mapping. :298 refuses a
+      shadow provider that is not cash, :301 refuses a deployment that does not match SHADOW_DEPLOYMENT_ID (:290),
+      and :307 returns `{ provider: "cash", deployment, effort? }`. :760 and :762 read the two rows; :821 and :822
+      hold them to the subscription-only rule.
+    - src/lib/risk-judge.ts:1452 `resolveRiskJudgeMount` returns the cheapest routed cell: the lowest tier, then the
+      lowest effort, first in sorted key order. In the real file that is routes.implement.low.docs: haiku, low,
+      max_turns 400, context_budget 60000, no provider. :1483 `providerLessRiskJudgeMount` is that cell without a
+      provider. :1489 `resolveCiJudgeMount` and :1494 `resolveFixProgressJudgeMount` return the judge's own row,
+      else that cell.
+    - src/lib/risk-judge.ts:1544 `runJudgeShadow` returns `skipped` when the mount has no shadow arm (:1546). With an
+      arm it sends the primary's prompt with no tools to the cash provider, pinned to the arm's deployment (:1526),
+      and writes judge_shadow.paired (:1585), judge_shadow.refused (:1567, :1574, :1590) or judge_shadow.unavailable
+      (:1580, :1594). It returns nothing the caller acts on.
+    - Callers: src/lib/ci-escalation-judge.ts:341 and :363, src/lib/sweep.ts:2502 and :2547.
+    - src/lib/worker-provider.ts:974 (context, 1,000,000 tokens), :3532 (price), :3670 (json_object), :3680 (efforts)
+      and :3720 name the deployment `DeepSeek-V4-Flash` exactly.
+    - src/lib/model-gate.ts:11: only the astra and fable families need an operator approval. haiku and
+      DeepSeek-V4-Flash are in neither. The operator checked read-only that the daemon's config already enables the
+      cash provider, so no host config edit is needed.
+    - test/review/the-ci-and-fix-progress-judges-shadow-a-deepseek-arm.test.ts:44-51: `tmpRoot` writes the real
+      mounts.yaml followed by its own `ci_judge:` and `fix_progress_judge:` rows. When the real file has these
+      rows, that text has each key twice, and the `yaml` parser refuses a duplicate key. :105-108 assert that the
+      real file gives the fix-progress judge no shadow arm. Both must change with this task.
+    - Docs and censuses: `git log -3 -- .remudero/mounts.yaml` shows W1-T12416 (#18277) changed docs/operator-guide.md
+      and docs/cli-reference.md for a new block, W1-T12172 (#17824) changed no doc, and W1-T10839 (#15342) changed
+      docs/model-routing.md for a new deployment. No script baseline and no test under test/ci names `ci_judge` or
+      `fix_progress_judge`. docs/operator-guide.md, docs/model-routing.md and docs/cli-reference.md do not name the
+      two rows or judge_shadow today. This task adds no deployment and no command, so only the operator guide
+      changes.
+    NOT COVERED: W1-T12187 (queued) adds a different shadow call for the risk judge and the decision summary, with
+    its own judge_shadow.compared rows, and a summary for the config gardener. It adds no row to mounts.yaml for
+    these two judges. Swept plan/tasks.d and plan/tasks.yaml for ci_judge, fix_progress_judge and judge_shadow, and
+    the 11 open pull requests on 2026-11-17: none turns the arm on.
+  design: |
+    INVARIANT the-primary-judge-is-unchanged: each judge's resolved mount equals resolveRiskJudgeMount's cell in model, effort, max_turns and context_budget, and names no provider.
+    INVARIANT the-shadow-is-advisory: a judgement writes one judge_shadow row and acts only on the primary verdict.
+    1. Add two rows to .remudero/mounts.yaml after `machine_filing_judge`, with a short plain comment that names
+       W1-T11075, the ruling date and how to turn the arm off:
+         ci_judge:
+           model: haiku
+           effort: low
+           max_turns: 400
+           context_budget: 60000
+           shadow:
+             deployment: DeepSeek-V4-Flash
+         fix_progress_judge: the same six lines.
+       No `provider` key and no shadow `effort` (absent means thinking off, src/lib/mounts.ts:121).
+    2. The rows copy the risk judge's cell by value. Criterion 1 is the guard that keeps the copy true: it reads
+       the real file and compares each judge's mount with resolveRiskJudgeMount's cell, field by field. Do not
+       change the resolvers.
+    3. Change the fixture of the W1-T11075 test so it still tests what it tested: `tmpRoot` removes the real
+       file's `ci_judge` and `fix_progress_judge` rows before it appends its own, and the assertions at :105-108
+       about a file with no rows read such a stripped copy. Keep that test's criterion name.
+    4. The new test file uses the same harness shape (`productionCiJudgePorts` with injected gh, suite ids, floor
+       and spawn; `productionFixProgressJudge` with injected spawn) against a temporary root that holds an
+       unchanged copy of the real file. Do not import the W1-T11075 test file: an import runs its suite again.
+       Load test/setup/tmp-hygiene.ts so no test reads or writes the host's config or state.
+    5. docs/operator-guide.md: one short section near the cash sections. It says what the two rows do, that the
+       shadow spends inside the daily cash cap, that removing a row's `shadow:` mapping turns its arm off (and
+       removing the whole row also returns the judge to the risk judge's cell), and that the rows are read in
+       the instance ledger by step name.
+    WHY NOT a `provider` key: a provider would move the primary judge off its present subscription spawn. The
+    ruling turns on the shadow only. Promotion of the arm stays behind W1-T10858 and an operator ruling.
+  falsifier: |
+    Remove the `shadow:` mapping from either row: criteria 2 and 3 fail. Add `provider: cash` to a row, or set
+    context_budget to 40000: criterion 1 fails. Change routes.implement.low.docs to effort medium in the copy
+    that criterion 1 edits and the test still passes: the guard does not guard. Leave the W1-T11075 fixture as it
+    is: that test fails on a duplicate key.
+  note: |
+    Id reserved for run-unfiled-1794918373000 with ~/rmd-work/bin/reserve-id.sh.
+    Proof that counts in production: after the deploy the operator session checks the core ledger for
+    judge_shadow.paired, judge_shadow.refused and judge_shadow.unavailable rows with surface ci-judge and
+    fix-progress. A day with ci_judge.judged rows and no judge_shadow row means the arm is not on.
+    Out of scope: reading these rows into judge calibration and the field-trials judge family (W1-T13365).

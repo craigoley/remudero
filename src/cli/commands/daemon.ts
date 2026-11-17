@@ -42,7 +42,7 @@ import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "../.
 import { readFileIfExists } from "../../lib/fs-race-safe.js";
 import { mergedInLastDayAsync } from "../../lib/fleet-lane.js";
 import { startDaemonSreLane, type LightPassScope } from "../../lib/daemon.js";
-import { REGISTERED_GARDEN_NAMES, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "../../lib/garden-registry.js";
+import { REGISTERED_GARDEN_NAMES, createGardenFlightRegistry, gardenAndJudgeUnits, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "../../lib/garden-registry.js";
 import { gardenSchedule } from "../../lib/garden-registry.js";
 import { createGardenerRuntimeWriter } from "../../lib/gardener-runtime.js";
 import { daemonSreLaneInput, resolveSreLaneInstance, sreLaneEnabled, sreLaneStartRow, type SreLaneInput } from "../../lib/sre-lane.js";
@@ -57,7 +57,7 @@ import { plannedSequence, runDrain, type DrainDeps, type MergedSet, type OpenPrC
 import { fileTargetJobStore, nativeTargetAdmission, readTargetExecution, type ProductBuildInstances } from "../../lib/product-build.js";
 import { loadManagedRepos } from "../../lib/managed-repos.js";
 import type { RunResult } from "../../lib/run-result.js";
-import { runBoundedTargetJob, type BoundedTargetJobPorts, type BoundedTargetJobOutcome, daemonBoot, daemonExitCodeForSummary, resolveFleetControlHold, runDaemon, readRestartHistoryLines, type BootPhases, type CrashLoopVerdict, type DaemonDeps, type OpsTaskDispatchRead, type DaemonKick, type DaemonOpts, type DaemonSummary, priorUnrecognisedResetStrings, daemonPushTokenSource, receivePackCredentialProbe } from "../../lib/daemon.js";
+import { runBoundedTargetJob, type BoundedTargetJobPorts, type BoundedTargetJobOutcome, daemonBoot, daemonExitCodeForSummary, resolveFleetControlHold, runDaemon, readRestartHistoryLines, type BootPhases, type CrashLoopVerdict, type DaemonDeps, type OpsTaskDispatchRead, type DaemonKick, type DaemonOpts, type DaemonSummary, priorUnrecognisedResetStrings, daemonPushTokenSource, receivePackCredentialProbe, type PauseInFlightUnit } from "../../lib/daemon.js";
 import { sweepStrandedReviewWorktreesAsync } from "../../lib/review-worktree-reclaim.js";
 import { sweepReclaimableArtifacts } from "../../lib/disk-artifact-reclaim.js";
 import { readGhRateLimitBuckets } from "../../lib/daemon-health.js";
@@ -1342,9 +1342,24 @@ export async function daemonCommand(
   // W1-T9065: the lane's approve and the responder's reframe run from a tree at origin/main.
   const fleetRatify = fleetRatifyGateway(repoRoot, join(config.root, "state", "logs"), ledgerPath, { stateRoot: config.root });
   const ciJudgeIo = deps.ciJudgeIo ?? (deps.repoRoot === undefined ? {} : undefined);
-  const kickCiJudge = ciJudgeIo && singleFlightCiJudge(() => judgeCiEscalation(productionCiJudgePorts({
+  const singleFlightKick = ciJudgeIo && singleFlightCiJudge(() => judgeCiEscalation(productionCiJudgePorts({
     owner: self.owner, repo: self.repo, repoRoot: effectiveRepoRoot, stateDir: join(config.root, "state"), log, ...ciJudgeIo,
   })), log);
+  // W1-T12939: a paused daemon's census counts the judge call from the kick until it settles. The single-flight kick
+  // returns the running call's promise only for the kick that started it, and never rejects.
+  let ciJudgeStartedMs: number | undefined;
+  const kickCiJudge = singleFlightKick && (() => {
+    const call = singleFlightKick();
+    if (call) {
+      ciJudgeStartedMs = systemClock.now();
+      const done = (): void => { ciJudgeStartedMs = undefined; };
+      call.then(done, done);
+    }
+    return call;
+  });
+  // W1-T12939: every garden's off-loop enters its passes here, so a paused daemon can name the garden children it owns.
+  const gardenFlight = createGardenFlightRegistry();
+  const pauseInFlight = (): PauseInFlightUnit[] => gardenAndJudgeUnits(gardenFlight, ciJudgeStartedMs, systemClock.now());
   log("daemon.memory_policy", {
     ...memoryPolicyApplied,
     tighten_share: memoryPolicyRead.policy.tightenShare,
@@ -1436,7 +1451,7 @@ export async function daemonCommand(
       scope: name === "host-resource" ? "host" : name === "overseer" ? "fleet" : "repository" })) });
   const offLoopGarden = (name: RegisteredGardenName) => (intervalMs: number) =>
     registeredGardenEnabled(name, target.isSelf)
-      ? startGardenOffLoop(name, intervalMs, { spawnPass: gardenPassSpawn, log, observe: (event) => gardenerRuntime.record(event), ...(injectedPassSpawn ? {} : { due: registeredGardenDueProbe(name, gardenContextFor(name)) }) })
+      ? startGardenOffLoop(name, intervalMs, { flight: gardenFlight, spawnPass: gardenPassSpawn, log, observe: (event) => gardenerRuntime.record(event), ...(injectedPassSpawn ? {} : { due: registeredGardenDueProbe(name, gardenContextFor(name)) }) })
       : { stop() {} };
   if (!target.isSelf && !flagValue(rest, "--plan")) {
     const repoDir = join(reposDir, target.repo);
@@ -2410,6 +2425,7 @@ export async function daemonCommand(
         // W1-T1062: `owner: target.owner` must reach `runTask`, else a FOREIGN `--repo owner/name` run
         // falls back to this checkout's owner and opens its PR there (test/owner-dispatch-threading).
         // W1-T9924: the same mode read `runInChildWhenOn` makes below; a run it would keep in-process reads false.
+        pauseInFlight,
         ...(childMode ? {
           adoptRunChildren: () => adoptedChildren,
           refillRunsAsChild: () => runChildModeIsOn(childPolicy, childModeTracker.evidence).on && !flagValue(rest, "--plan"),
