@@ -8,15 +8,14 @@
   risk: high # report only, no code change; spans the pool runner and three sweep suites
   origin: "operator-session#ubuntu-2604-main-red-2026-11-17"
   plan_refs:
+    - W1-T13363
     - W1-T6085
     - W1-T6595
     - W1-T9212
     - W1-T12059
   files:
-    - scripts/pure-test-pool.mjs
-    - test/a-green-reviewed-plan-pr-the-sweep-holds-merges.test.ts
-    - test/a-held-plan-pr-merges-when-its-checks-turn-green.test.ts
-    - test/a-merge-refused-for-unread-mergeability-is-read-again-in-the-same-pass.test.ts
+    - docs/forensics/pooled-test-exit-latches.md
+    - docs/docs-index.json
   status: queued
   attempts: 0
   acceptance:
@@ -36,6 +35,10 @@
     So this is not the runner image move. The retry hides it, but every shard pays a rerun and the probe's leak names
     do not agree. A local --experimental-test-isolation=none run of the three suites with the named leaker passed
     25/25, so the order or the rest of the pool matters.
+    FOUND (filing session, 2026-11-17): rebuilding shard 8/8's 308-file pool reproduced it; the writer is
+    test/a-freshness-restart-lets-a-running-review-finish.test.ts (runDaemon freshness stop closes direct-merge
+    admissions, reason freshness_latch), and drainInFlightReviews leaks light-pass refills the same way. The fix is
+    W1-T13363. This task's deliverable is the written report at docs/forensics/pooled-test-exit-latches.md.
   note: |
     Reserved with rmd next-task-id --count 3 --branch claude/project-thread-7ycldf (2026-11-17 11:40Z).
   risk_ruling:
