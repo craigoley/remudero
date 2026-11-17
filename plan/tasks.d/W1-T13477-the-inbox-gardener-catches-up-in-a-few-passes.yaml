@@ -7,7 +7,7 @@
   verify: auto
   principles:
     tdd: strict
-  risk: medium # 1 concern: INBOX_GARDENER_LIMITS.ledgerCatchUpMs grows from 20 s to 300 s
+  risk: high # 2 files: the INBOX_GARDENER_LIMITS.ledgerCatchUpMs constant (20 s -> 300 s) and its pinned limits test
   origin: "operator-session#inbox-gardener-shadow-2026-11-17"
   plan_refs:
     - W1-T13348
@@ -34,6 +34,8 @@
     - garden.lifecycle: the inbox pass waits 20-42 min in the admission queue and runs about every 3 h; the 14:57Z
       pass took 42 s of which 20 s was catch-up.
     At 5-18 archives per 20 s pass and one pass per ~3 h, full coverage takes days.
+    W1-T13348 (merged, #19080) replaced the 25 ms tick with a 20 s catch-up; this task only resizes that budget from
+    host measurements of the shipped mechanism, so the shared files are an amendment, not a second build.
     READ at origin/main: INBOX_GARDENER_LIMITS.ledgerCatchUpMs = 20_000 (src/lib/inbox-gardener.ts). The pass runs in
     a garden child process (garden-registry lifecycle reports executionMs and process-completed), not in the daemon
     loop, and garden-registry sets no execution time limit for it, so a longer catch-up does not stall the daemon.
