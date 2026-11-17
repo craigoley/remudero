@@ -137,6 +137,50 @@ export function slowTierHangBoundArgs() {
     `--import=data:text/javascript,${encodeURIComponent(childSetup)}`];
 }
 
+/**
+ * W1-T12415 — A HUNG COVERAGE TEST FAILS BY NAME too. coverage-shard (4/8) on #14880 (2026-10-27, job
+ * 122319121555) reported all eight results of test/operator-agent-gets-read-the-read-model.test.ts
+ * by 16:36:08Z, but that file's child never exited, and the unbounded shard waited 41 minutes for
+ * its 49-minute cancel. The coverage shard now carries the fast tier's duration policy
+ * ({@link derivedNodeTestTimeoutMs} over the shard's files in the instrumented manifest), and the same
+ * `--test-force-exit` and blocking-stdout child setup as the slow tier, so a file whose tests all have
+ * results exits even if a handle stays open.
+ *
+ * The policy is capped. A full shard holds files whose whole instrumented run is many minutes, so the
+ * uncapped value (24x the longest file) is hours. The cap is about 2x the longest healthy top-level
+ * test measured under coverage: 305 s, across 79,539 top-level results in 16 successful coverage-shard
+ * logs on 2026-11-16 (the six tests over 120 s set no timeout of their own, so the fast tier's 120 s
+ * would fail them). Those 16 jobs spent at most 9 minutes before the test step, so a test that hangs
+ * in the first 30 minutes of the test step fails by its name before {@link COVERAGE_SHARD_JOB_CEILING_MS}.
+ */
+export const COVERAGE_SHARD_TEST_TIMEOUT_CAP_MS = 10 * 60_000;
+
+/** W1-T12415 — coverage-shard's `timeout-minutes` in ci.yml (the coverage-ratchet job), as milliseconds. */
+export const COVERAGE_SHARD_JOB_CEILING_MS = 49 * 60_000;
+
+/** The node flags that bound a coverage-shard run of `files`: a per-test timeout from the fast tier's
+ *  duration policy, capped at {@link COVERAGE_SHARD_TEST_TIMEOUT_CAP_MS}, and an exit once every test has finished. */
+export function coverageShardHangBoundArgs(files, manifest, root = ".") {
+  const timeout = Math.min(derivedNodeTestTimeoutMs(files, manifest, root), COVERAGE_SHARD_TEST_TIMEOUT_CAP_MS);
+  return [`--test-timeout=${timeout}`, ...slowTierHangBoundArgs().filter((arg) => !arg.startsWith("--test-timeout="))];
+}
+
+/** W1-T12415 — ci.yml's coverage shard sets this on scripts/test-with-retry.mjs to the instrumented
+ *  duration manifest; the wrapper then bounds the shard's `node --test` run with {@link withCoverageHangBound}. */
+export const COVERAGE_HANG_MANIFEST_ENV = "RMD_COVERAGE_HANG_MANIFEST";
+
+/** `args` (a `node ... --test ...` argv) with {@link coverageShardHangBoundArgs} for its own test files
+ *  inserted after `--test`, priced from the manifest at `manifestPath`. A missing or unreadable manifest
+ *  throws: the shard must not run unbounded, or bounded by an empty manifest's guess. An explicit
+ *  `--test-timeout` the caller wrote is kept, and nothing is added. */
+export function withCoverageHangBound(args, manifestPath, root = ".") {
+  if (!args.includes("--test") || args.some((arg) => arg === "--test-timeout" || arg.startsWith("--test-timeout="))) return [...args];
+  const manifest = JSON.parse(readFileSync(resolve(root, manifestPath), "utf8"));
+  if (!manifest || typeof manifest.files !== "object") throw new Error(`${manifestPath} is not a duration manifest`);
+  const at = args.indexOf("--test") + 1;
+  return [...args.slice(0, at), ...coverageShardHangBoundArgs(testFilesInArgv(args, root), manifest, root), ...args.slice(at)];
+}
+
 /** W1-T11206 — test-slow-shard's `timeout-minutes` in ci.yml, as milliseconds. A shard cancelled at
  *  this ceiling prints nothing, so the shard count below keeps every shard well inside it. */
 export const SLOW_TIER_JOB_CEILING_MS = 35 * 60_000;

@@ -108,10 +108,10 @@ export interface FoldDebtPullInput {
   ingested: ReadonlySet<string>;
   /** Artifact ids read and accounted for, owned by the caller so it outlives a pass. */
   settled: Set<number>;
-  /** The sweep's paced JSON read. */
+  /** The sweep's paced JSON read; the daemon's is awaited (W1-T13183). */
   readJson: (args: string[]) => unknown;
-  /** The sweep's paced binary read, for the artifact zip. */
-  readZip: (args: string[]) => Buffer;
+  /** The sweep's paced binary read, for the artifact zip; the daemon's is awaited (W1-T13183). */
+  readZip: (args: string[]) => Buffer | Promise<Buffer>;
   /** The checkout whose `plan/feedback` {@link landFoldDebt} writes the entries into and lands from. */
   root: string;
   log: (step: string, fields: Record<string, unknown>) => void;
@@ -122,10 +122,12 @@ export interface FoldDebtPullInput {
 
 /** Pull un-ingested fold-debt artifacts, main's lane first, oldest first. A failed LIST throws: the
  *  sweep logs it and ingests nothing, rather than reading it as "no debt was filed". */
-export function pullFoldDebtEntries(deps: FoldDebtPullInput): FoldDebtOutcome[] {
+export async function pullFoldDebtEntries(deps: FoldDebtPullInput): Promise<FoldDebtOutcome[]> {
+  const mainListing = await deps.readJson(foldDebtArtifactsRestArgs(deps.owner, deps.repo, FOLD_DEBT_MAIN_ARTIFACT));
+  const prListing = await deps.readJson(foldDebtArtifactsRestArgs(deps.owner, deps.repo, FOLD_DEBT_PR_ARTIFACT));
   const pending = [
-    ...listed(deps.readJson(foldDebtArtifactsRestArgs(deps.owner, deps.repo, FOLD_DEBT_MAIN_ARTIFACT)), FOLD_DEBT_MAIN_ARTIFACT, "main", deps.ingested, deps.settled),
-    ...listed(deps.readJson(foldDebtArtifactsRestArgs(deps.owner, deps.repo, FOLD_DEBT_PR_ARTIFACT)), FOLD_DEBT_PR_ARTIFACT, "pr", deps.ingested, deps.settled),
+    ...listed(mainListing, FOLD_DEBT_MAIN_ARTIFACT, "main", deps.ingested, deps.settled),
+    ...listed(prListing, FOLD_DEBT_PR_ARTIFACT, "pr", deps.ingested, deps.settled),
   ].sort((x, y) => (x.lane !== y.lane ? (x.lane === "main" ? -1 : 1) : x.createdAt < y.createdAt ? -1 : x.createdAt > y.createdAt ? 1 : x.artifactId - y.artifactId));
   const outcomes: FoldDebtOutcome[] = [];
   let reads = 0;
@@ -137,7 +139,7 @@ export function pullFoldDebtEntries(deps: FoldDebtPullInput): FoldDebtOutcome[] 
       reads += 1;
       let standing: ReturnType<typeof mergeStanding>;
       try {
-        standing = mergeStanding(deps.readJson(pullsForCommitRestArgs(deps.owner, deps.repo, a.headSha)), a.headSha);
+        standing = mergeStanding(await deps.readJson(pullsForCommitRestArgs(deps.owner, deps.repo, a.headSha)), a.headSha);
       } catch (e) {
         outcomes.push({ ...at, kind: "unread", reason: `merge lookup: ${String((e as Error)?.message ?? e)}` });
         continue;
@@ -154,7 +156,7 @@ export function pullFoldDebtEntries(deps: FoldDebtPullInput): FoldDebtOutcome[] 
     reads += 1;
     let zip: Buffer;
     try {
-      zip = deps.readZip(mutationVerdictArtifactZipRestArgs(deps.owner, deps.repo, a.artifactId));
+      zip = await deps.readZip(mutationVerdictArtifactZipRestArgs(deps.owner, deps.repo, a.artifactId));
     } catch (e) {
       outcomes.push({ ...at, kind: "unread", reason: `download: ${String((e as Error)?.message ?? e)}` });
       continue; // a transient read: NOT settled, so the next pass tries it again

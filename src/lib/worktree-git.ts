@@ -471,17 +471,29 @@ export function hostWorktreeGit(worktreePath: string, args: readonly string[], o
   return String(execFileSync("git", argv(pin, args), spawnOptions(pin, opts, overrides)) ?? "");
 }
 
+/** W1-T13170 — INVARIANT the-child-outcome-wins: the git child's own failure is the error of the call. `stdinWrite`
+ *  settles to the stdin write's error (or undefined) and never rejects. When the child fails (output past maxBuffer,
+ *  a nonzero exit, a loop-bounded timeout) its error is thrown unchanged, whatever the write had: node kills an
+ *  overflowing child and the unfinished write then fails with EPIPE, which must not hide the overflow. A stdin error
+ *  is thrown only when the child exited 0, and EPIPE then is git's choice not to read all of its input: stdout stands. */
+export async function childOutcomeWins<T>(command: Promise<T>, stdinWrite: Promise<Error | undefined>): Promise<T> {
+  const result = await command;
+  const stdinError = await stdinWrite;
+  if (stdinError !== undefined && (stdinError as NodeJS.ErrnoException).code !== "EPIPE") throw stdinError;
+  return result;
+}
+
 /** {@link hostWorktreeGit} off the event loop. `inherit-stdout` writes stdout through on completion. */
 export async function hostWorktreeGitAsync(worktreePath: string, args: readonly string[], opts: HostWorktreeGitOptions = {}): Promise<string> {
   const pin = pinWorktreeGit(worktreePath, opts.log);
   const { stdio: _stdio, input, ...spawn } = spawnOptions(pin, opts, await vetPinnedConfigAsync(pin, opts.log ?? stderrLog, opts.configReadTimeoutMs));
   const command = execFileLoopBounded("git", argv(pin, args), spawn);
-  const fed = input === undefined ? Promise.resolve() : new Promise<void>((resolve, reject) => {
+  const fed = input === undefined ? Promise.resolve(undefined) : new Promise<Error | undefined>((resolve) => {
     const stdin = command.child.stdin!;
-    stdin.once("error", reject);
-    stdin.end(input, (error?: Error | null) => error ? reject(error) : resolve());
+    stdin.once("error", resolve);
+    stdin.end(input, (error?: Error | null) => resolve(error ?? undefined));
   });
-  const [{ stdout }] = await Promise.all([command, fed]);
+  const { stdout } = await childOutcomeWins(command, fed);
   if (opts.stdio === "inherit-stdout") {
     if (stdout) process.stdout.write(stdout);
     return "";

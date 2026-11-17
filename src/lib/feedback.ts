@@ -1,5 +1,7 @@
 import { execFileSync } from "node:child_process";
-import { ghExec } from "./github-transport.js";
+import { ghExec, ghTextAsync } from "./github-transport.js";
+import { runStepsAsync, runStepsSync, step, type Steps } from "./git-push.js";
+import { hostWorktreeGitAsync } from "./worktree-git.js";
 import { createHash, randomBytes } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { feedbackLineageAuthority, observeFeedbackAdmission } from "./authority.js";
@@ -589,20 +591,24 @@ export function assertOneFeedbackCopy(id: string, first: { path: string; text: s
 }
 
 export function readLandedFeedbackEntry(root: string, id: string, git: UpstreamGitExec = defaultUpstreamGit(root)): FeedbackEntry | null {
+  return runStepsSync(readLandedFeedbackEntrySteps(root, id, git, SYNC_CAPTURE_IO));
+}
+
+function* readLandedFeedbackEntrySteps(root: string, id: string, git: CaptureGitExec, io: CaptureIo): Steps<FeedbackEntry | null> {
   const roots = hostFeedbackRoots(root);
-  const landed = landedFeedbackText(git, root, id);
+  const landed = yield* landedFeedbackTextSteps(git, root, id);
   if (roots.length === 1) return landed?.entry ?? null;
-  const destination = landedFeedbackText(defaultUpstreamGit(roots[1]), roots[1], id);
+  const destination = yield* landedFeedbackTextSteps(io.git(roots[1]), roots[1], id);
   if (landed !== null && destination !== null) assertOneFeedbackCopy(id, landed, destination);
   return landed?.entry ?? destination?.entry ?? null;
 }
 
-function landedFeedbackText(git: UpstreamGitExec, root: string, id: string): { path: string; text: string; entry: FeedbackEntry } | null {
+function* landedFeedbackTextSteps(git: CaptureGitExec, root: string, id: string): Steps<{ path: string; text: string; entry: FeedbackEntry } | null> {
   const rel = feedbackEntryRelPath(root, id);
   let text: string;
   let parsed: unknown;
   try {
-    text = git(["show", `origin/main:${rel}`]);
+    text = yield* step(() => git(["show", `origin/main:${rel}`]));
     parsed = parseYaml(text);
   } catch {
     return null; // W1-T9624: a lagging HEAD can lack origin/main's entry; a git failure is absent, never "exists"
@@ -727,12 +733,21 @@ function defaultUpstreamGh(): UpstreamGhExec {
   return (args) => ghExec(args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 }
 
+/** W1-T13183: the capture's git and gh, sync for the CLI or awaited for the daemon loop; the steps run over either. */
+type CaptureGitExec = (args: string[]) => string | Promise<string>;
+type CaptureIo = { git: (root: string) => CaptureGitExec; gh: () => CaptureGitExec };
+const SYNC_CAPTURE_IO: CaptureIo = { git: defaultUpstreamGit, gh: defaultUpstreamGh };
+const ASYNC_CAPTURE_IO: CaptureIo = {
+  git: (root) => (args) => hostWorktreeGitAsync(root, args),
+  gh: () => (args) => ghTextAsync(args),
+};
+
 /** `root`'s own owner/repo, parsed from its git origin remote — deliberately duplicated from
  * run-task.ts's `resolveOwnerRepo()` rather than imported. `null` when it cannot be
  * determined, rather than throwing. */
-function resolveCurrentRepoFromGit(git: UpstreamGitExec): UpstreamFeedbackTarget | null {
+function* resolveCurrentRepoFromGitSteps(git: CaptureGitExec): Steps<UpstreamFeedbackTarget | null> {
   try {
-    const url = git(["config", "--get", "remote.origin.url"]).trim();
+    const url = (yield* step(() => git(["config", "--get", "remote.origin.url"]))).trim();
     const m = url.match(/[/:]([^/:]+)\/([^/]+?)(?:\.git)?$/);
     return m ? { owner: m[1], repo: m[2] } : null;
   } catch {
@@ -750,34 +765,35 @@ function isUpstreamSelfTarget(current: UpstreamFeedbackTarget | null, home: Upst
 /** Open a pull request against the home repo adding `plan/feedback/<id>.yaml` with `content` —
  * pure `gh api` plumbing, no local clone required. Never throws: any failure resolves to
  * `{ error }` rather than propagating, so {@link captureFeedback} never fails because of this. */
-function openUpstreamFeedbackPr(
+function* openUpstreamFeedbackPrSteps(
   home: UpstreamFeedbackTarget,
   entryId: string,
   content: string,
-  gh: UpstreamGhExec,
+  gh: CaptureGitExec,
   publication?: { context: FeedbackPublicationContext; contribution: unknown },
-): { prUrl?: string; error?: string } {
+): Steps<{ prUrl?: string; error?: string }> {
   const slug = `${home.owner}/${home.repo}`;
   const observation = feedbackPublicationSteps(publication?.context,
     publication === undefined ? [] : [publication.contribution], slug, "upstream-publication");
   let next = observation.next();
   while (!next.done) {
-    try { next = observation.next({ status: 200, body: JSON.parse(gh(["api", next.value])) }); }
+    const path = next.value;
+    try { next = observation.next({ status: 200, body: JSON.parse(yield* step(() => gh(["api", path]))) }); }
     catch (error) { next = observation.throw(error); }
   }
   try {
-    const repoInfo = JSON.parse(gh(["api", `repos/${slug}`])) as { default_branch: string };
+    const repoInfo = JSON.parse(yield* step(() => gh(["api", `repos/${slug}`]))) as { default_branch: string };
     const base = repoInfo.default_branch;
-    const baseRef = JSON.parse(gh(["api", `repos/${slug}/git/ref/heads/${base}`])) as { object: { sha: string } };
+    const baseRef = JSON.parse(yield* step(() => gh(["api", `repos/${slug}/git/ref/heads/${base}`]))) as { object: { sha: string } };
     const branch = `feedback/${entryId}`;
     try {
-      gh(["api", `repos/${slug}/git/refs`, "-f", `ref=refs/heads/${branch}`, "-f", `sha=${baseRef.object.sha}`]);
+      yield* step(() => gh(["api", `repos/${slug}/git/refs`, "-f", `ref=refs/heads/${branch}`, "-f", `sha=${baseRef.object.sha}`]));
     } catch {
       // The branch may already exist from a prior attempt at the SAME entry id — reuse it
       // rather than fail; the content write below is what actually matters.
     }
     const path = `plan/feedback/${entryId}.yaml`;
-    gh([
+    yield* step(() => gh([
       "api",
       `repos/${slug}/contents/${path}`,
       "--method",
@@ -788,8 +804,8 @@ function openUpstreamFeedbackPr(
       `content=${Buffer.from(content, "utf8").toString("base64")}`,
       "-f",
       `branch=${branch}`,
-    ]);
-    const prOut = gh([
+    ]));
+    const prOut = yield* step(() => gh([
       "api",
       `repos/${slug}/pulls`,
       "-f",
@@ -800,7 +816,7 @@ function openUpstreamFeedbackPr(
       `base=${base}`,
       "-f",
       `body=Filed by an rmd instance working on a different codebase — plan/feedback/${entryId}.yaml`,
-    ]);
+    ]));
     const pr = JSON.parse(prOut) as { html_url: string };
     return { prUrl: pr.html_url };
   } catch (e) {
@@ -965,7 +981,7 @@ export function findFeedbackBySubmissionKey(root: string, key: string, stateRoot
  * (W1-T397). Local writes/attachments need no network; later publication can use the network.
  * Landing/upstream failures never discard the local entry. See docs/forensics/feedback.md. */
 export function captureFeedback(root: string, opts: CaptureFeedbackOptions): FeedbackEntry {
-  const existing = existingCapture(root, opts, opts.land?.stateRoot);
+  const existing = runStepsSync(existingCaptureSteps(root, opts, opts.land?.stateRoot, false, SYNC_CAPTURE_IO));
   if (existing) return existing;
   const home = feedbackCaptureHome(root, opts.land ?? {});
   const entry = writeCapture(home.root, opts);
@@ -975,7 +991,7 @@ export function captureFeedback(root: string, opts: CaptureFeedbackOptions): Fee
   } catch {
     // landFeedback already swallows its own failures — a defensive second layer only.
   }
-  return upstreamCapture(root, entry, opts, publication, home.root);
+  return runStepsSync(upstreamCaptureSteps(root, entry, opts, publication, SYNC_CAPTURE_IO, home.root));
 }
 
 /** {@link stageFeedbackCapture}'s answer: `queued` is false for an existing entry (nothing written) or an unstaged copy. */
@@ -989,9 +1005,21 @@ export interface StagedFeedbackCapture {
  *  landing queue under `stateRoot` for the per-poll async sweep, so the sync plan-PR preflight never runs on the loop. A
  *  queued id is returned untouched. Unstaged (no `stateRoot`, or a failed move), the checkout copy waits for that sweep. */
 export function stageFeedbackCapture(root: string, stateRoot: string | undefined, opts: Omit<CaptureFeedbackOptions, "land">): StagedFeedbackCapture {
-  const existing = existingCapture(root, opts, stateRoot, true);
+  return runStepsSync(stageFeedbackCaptureSteps(root, stateRoot, opts, SYNC_CAPTURE_IO));
+}
+
+/** W1-T13183: {@link stageFeedbackCapture} with its git and gh awaited: the landed-entry read and any upstream
+ *  filing no longer hold the daemon loop. */
+export function stageFeedbackCaptureAsync(root: string, stateRoot: string | undefined, opts: Omit<CaptureFeedbackOptions, "land">): Promise<StagedFeedbackCapture> {
+  return runStepsAsync(stageFeedbackCaptureSteps(root, stateRoot, opts, ASYNC_CAPTURE_IO));
+}
+
+function* stageFeedbackCaptureSteps(
+  root: string, stateRoot: string | undefined, opts: Omit<CaptureFeedbackOptions, "land">, io: CaptureIo,
+): Steps<StagedFeedbackCapture> {
+  const existing = yield* existingCaptureSteps(root, opts, stateRoot, true, io);
   if (existing) return { entry: existing, queued: false };
-  const entry = upstreamCapture(root, writeCapture(root, opts), opts, capturePublication(opts));
+  const entry = yield* upstreamCaptureSteps(root, writeCapture(root, opts), opts, capturePublication(opts), io);
   if (stateRoot === undefined) return { entry, queued: false };
   const staged = queueFeedbackRecord(root, feedbackEntryRepoPath(entry.id), stateRoot);
   return staged.queued ? { entry, queued: true } : { entry, queued: false, error: staged.error ?? "the record was not queued" };
@@ -1003,7 +1031,9 @@ export function feedbackCaptured(root: string, id: string, stateRoot?: string): 
 }
 
 /** The entry a capture of `opts` already has: by submission key, then the checkout, the queue (`queuedIds`) and origin/main. */
-function existingCapture(root: string, opts: CaptureFeedbackOptions, stateRoot: string | undefined, queuedIds = false): FeedbackEntry | null {
+function* existingCaptureSteps(
+  root: string, opts: CaptureFeedbackOptions, stateRoot: string | undefined, queuedIds: boolean, io: CaptureIo,
+): Steps<FeedbackEntry | null> {
   if (opts.submissionKey) {
     const existing = findFeedbackBySubmissionKey(root, opts.submissionKey, stateRoot);
     if (existing) return existing;
@@ -1015,7 +1045,7 @@ function existingCapture(root: string, opts: CaptureFeedbackOptions, stateRoot: 
     const queued = readQueuedFeedbackRecords(stateRoot).get(feedbackEntryRepoPath(opts.id));
     if (queued) return queued as unknown as FeedbackEntry;
   }
-  return readLandedFeedbackEntry(root, opts.id, opts.upstream?.git);
+  return yield* readLandedFeedbackEntrySteps(root, opts.id, opts.upstream?.git ?? io.git(root), io);
 }
 
 function writeCapture(root: string, opts: CaptureFeedbackOptions): FeedbackEntry {
@@ -1061,20 +1091,20 @@ function capturePublication(opts: CaptureFeedbackOptions): FeedbackPublicationCo
 }
 
 /** The W1-T397 upstream step: a configured home repo other than this one gets a PR, recorded on the entry. */
-function upstreamCapture(
-  root: string, captured: FeedbackEntry, opts: CaptureFeedbackOptions, publication: FeedbackPublicationContext | undefined, entryRoot = root,
-): FeedbackEntry {
+function* upstreamCaptureSteps(
+  root: string, captured: FeedbackEntry, opts: CaptureFeedbackOptions, publication: FeedbackPublicationContext | undefined, io: CaptureIo, entryRoot = root,
+): Steps<FeedbackEntry> {
   let entry = captured;
   const id = entry.id;
   try {
     const home = loadHomeRepoPointer(root);
     if (home) {
-      const git = opts.upstream?.git ?? defaultUpstreamGit(root);
-      const current = resolveCurrentRepoFromGit(git);
+      const git = opts.upstream?.git ?? io.git(root);
+      const current = yield* resolveCurrentRepoFromGitSteps(git);
       if (!isUpstreamSelfTarget(current, home)) {
         observeFeedbackAdmission(entry, opts.admission, "upstream-capture");
-        const gh = opts.upstream?.gh ?? defaultUpstreamGh();
-        const { prUrl, error } = openUpstreamFeedbackPr(home, id, stringifyYaml(entry), gh,
+        const gh = opts.upstream?.gh ?? io.gh();
+        const { prUrl, error } = yield* openUpstreamFeedbackPrSteps(home, id, stringifyYaml(entry), gh,
           publication === undefined ? undefined : { context: publication, contribution: entry.contribution });
         entry = {
           ...entry,

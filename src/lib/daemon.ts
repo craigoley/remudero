@@ -1550,8 +1550,8 @@ export interface DaemonDeps {
    *  cadence as the headroom block, so no second rate-limit call is made per tick (W1-T372). */
   readGhQuota?: () => GhRateLimitBuckets;
   /** W1-T10271: the gh read cadence since the previous poll, carried on that poll's `daemon.quota` row:
-   *  this process's reads stamped by floor mode and slots it yielded to a waiting gated read, and every
-   *  process's admitted gated reads. Defaults to {@link takeGhReadCadenceTally}. */
+   *  this process's reads stamped by floor mode and by call site (W1-T13182), slots it yielded to a waiting
+   *  gated read, and every process's admitted gated reads. Defaults to {@link takeGhReadCadenceTally}. */
   takeGhReadCadence?: () => GhReadCadenceTally;
   /** Called at most once per bucket per exhaustion episode, on the tick a bucket first crosses from
    *  having budget to having none. Trap: a bare zero check would re-fire every tick for up to an hour,
@@ -7707,7 +7707,8 @@ export async function runDaemon(
     if (deps.readGhQuota) {
       const quota = deps.readGhQuota();
       // W1-T10271: the read cadence the floor was sized by, measured rather than inferred from quota
-      // deltas. Taken once per poll and carried on the first row written, so a sum never double counts.
+      // deltas. Taken once per poll and carried on the first row written (core, when core reads), so a
+      // sum never double counts. W1-T13182: reads_by_call_site names which code spent those stamped reads.
       let cadence: GhReadCadenceTally | undefined = (deps.takeGhReadCadence ?? takeGhReadCadenceTally)();
       for (const bucket of ["core", "graphql"] as const) {
         const reading = quota[bucket];
