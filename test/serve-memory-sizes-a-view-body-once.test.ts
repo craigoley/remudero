@@ -4,8 +4,10 @@
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { test } from "node:test";
 import { approxBytes, viewBodiesHolder } from "#src/lib/serve-memory.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 type Entry = { view: string; generation: number; body: unknown };
 const body = (n: number) => ({ data: { rows: Array.from({ length: n }, (_, i) => ({ id: `row-${i}`, text: "x".repeat(20) })) } });
@@ -46,7 +48,7 @@ test("W1-T13331 criterion 2: the sample's entries, bytes and parts equal a fresh
 });
 
 test("W1-T13331 criterion 3: the memo is a WeakMap keyed by the body object, so it holds no body alive", () => {
-  const source = readFileSync(new URL("../src/lib/serve-memory.ts", import.meta.url), "utf8");
+  const source = readFileSync(join(REPO_ROOT, "src", "lib", "serve-memory.ts"), "utf8");
   assert.match(source, /const VIEW_BODY_SIZES = new WeakMap<object, number>\(\);/);
   assert.doesNotMatch(source, /VIEW_BODY_SIZES = new Map/);
 });
