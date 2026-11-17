@@ -17,7 +17,7 @@ import { recyclePauseDetail } from "../../lib/recycle-yield.js";
 import { judgeDiskHeadroom, readDiskFreeBytes } from "../../lib/doctor.js";
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { execFileLoopBounded } from "../../lib/loop-bounded-child.js";
+import { execFileRouted } from "../../lib/spawn-helper.js";
 import { GATEWAY_FETCH_TIMEOUT_MS } from "../../lib/git-fetch-retry.js";
 import { productionDispatchBreakJudge, productionFixProgressJudge } from "../../lib/sweep.js";
 import { ghExec, ghJsonAsync, ghTextAsync, githubInstallationBudget, takeGithubBudgetThrottles } from "../../lib/github-transport.js";
@@ -802,7 +802,7 @@ export function readPushedRunBranchesOutputAsync(exec?: RunBranchAsyncExec, time
 export async function readPushedRunBranchesOutputAsync(
   ...args: [(string | RunBranchAsyncExec)?, (RunBranchAsyncExec | number)?, number?]
 ): Promise<string> {
-  const [cwd, exec = execFileLoopBounded, timeoutMs = GATEWAY_FETCH_TIMEOUT_MS] = typeof args[0] === "string"
+  const [cwd, exec = execFileRouted, timeoutMs = GATEWAY_FETCH_TIMEOUT_MS] = typeof args[0] === "string"
     ? [args[0], args[1] as RunBranchAsyncExec | undefined, args[2]]
     : [repoRoot, args[0], args[1] as number | undefined];
   const opts = { encoding: "utf8", cwd, timeout: timeoutMs, killSignal: "SIGKILL" } as const;

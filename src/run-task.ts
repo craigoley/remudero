@@ -224,7 +224,8 @@ import {
   type CaptureSurfaceFireRecord,
 } from "./lib/doctor.js";
 import { execFile, execFileSync, spawn, spawnSync, type SpawnSyncOptionsWithStringEncoding, type SpawnSyncReturns } from "node:child_process";
-import { boundChildByLoopTime, execFileLoopBounded, LoopBoundedChildTimeout, type LoopBound } from "./lib/loop-bounded-child.js";
+import { boundChildByLoopTime, LoopBoundedChildTimeout, type LoopBound } from "./lib/loop-bounded-child.js";
+import { execFileRouted } from "./lib/spawn-helper.js";
 import { isDeepStrictEqual, promisify } from "node:util";
 import { StringDecoder } from "node:string_decoder";
 import { mkdir as mkdirAsync, open as openAsync, readdir as readdirAsync, readFile as readFileAsync, rm as rmAsync, stat as statAsync } from "node:fs/promises";
@@ -11338,7 +11339,7 @@ const COVERAGE_RUN_MAX_BUFFER = 64 * 1024 * 1024;
 const coverageSandboxText = (reason: unknown): string => new ProofSandboxUnavailableError(String((reason as Error)?.message ?? reason).slice(0, 300)).message;
 const coverageSandboxRefusal = (reason: unknown): CoverageRunResult => ({ status: null, output: "", timedOut: false, spawnError: coverageSandboxText(reason) });
 const coverageSandboxStart = (binary: string, sandbox: string[], cwd: string, env: NodeJS.ProcessEnv): Promise<string | undefined> =>
-  execFileLoopBounded(binary, [...sandbox, process.execPath, "-e", ""], { cwd, env, encoding: "utf8", timeout: 10_000, killSignal: "SIGKILL" }).then(
+  execFileRouted(binary, [...sandbox, process.execPath, "-e", ""], { cwd, env, encoding: "utf8", timeout: 10_000, killSignal: "SIGKILL" }).then(
     () => undefined, (error: { stderr?: unknown; message: string }) => String(error.stderr ?? "").trim().split("\n")[0] || error.message);
 const realCoverageRun = async (wt: string, suites: string[], timeoutMs: number, maxOutputBytes: number): Promise<CoverageRunResult> => {
   const status = proofSandboxStatus();
@@ -15939,7 +15940,7 @@ const gardenMintBudgets = new Map<string, GardenMintBudget>();
  *  Budgets survive rebuilding a spec; a timeout never releases an id that may already be held. */
 
 export function ciLearningTaskIdMinter(root: string, log?: (step: string, fields: Record<string, unknown>) => void,
-  executeAsync: (file: string, args: string[], options: { maxBuffer: number; timeout: number; killSignal: "SIGKILL" }) => Promise<{ stdout: string; stderr?: string }> = (file, args, options) => execFileLoopBounded(file, args, { ...options, encoding: "utf8" }),
+  executeAsync: (file: string, args: string[], options: { maxBuffer: number; timeout: number; killSignal: "SIGKILL" }) => Promise<{ stdout: string; stderr?: string }> = (file, args, options) => execFileRouted(file, args, { ...options, encoding: "utf8" }),
   opts: { budget?: GardenMintBudget; clock?: Pick<Clock, "now">; pollIntervalMs?: () => number;
     loadPolicy?: () => { values: Pick<Policy["values"], "pollIntervalMs"> }; destinationSnapshot?: TaskIdDestinationSnapshot | null; destinationFailure?: string } = {}):
   ((filingBranch?: string) => string) & { async: (filingBranch: string) => Promise<string>; heldSha: (taskId: string) => string | undefined } & GardenTaskIdRelease {

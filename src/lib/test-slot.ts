@@ -29,7 +29,7 @@ import { setTimeout as sleepAsync } from "node:timers/promises";
 
 import { systemClock, type Clock } from "./clock.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
-import { execFileLoopBounded } from "./loop-bounded-child.js";
+import { execFileRouted } from "./spawn-helper.js";
 import { isHolderStale, reclaimStaleLock } from "./fs-race-safe.js";
 import { sameHost } from "./host-identity.js";
 import { RMD_TMP_PREFIX } from "./tmp.js";
@@ -113,7 +113,7 @@ export function readVmStat(file = "/usr/bin/vm_stat"): string | undefined {
 /** {@link readVmStat} without blocking the event loop: the async acquisition's darwin reading. */
 export async function readVmStatAsync(file = "/usr/bin/vm_stat"): Promise<string | undefined> {
   try {
-    return (await execFileLoopBounded(file, [], { encoding: "utf8", timeout: 5_000 })).stdout;
+    return (await execFileRouted(file, [], { encoding: "utf8", timeout: 5_000 })).stdout;
   } catch {
     // Absent, failed or over its loop-time budget: no reading, exactly as the sync reader's catch.
     return undefined;
