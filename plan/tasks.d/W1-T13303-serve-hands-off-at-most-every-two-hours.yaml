@@ -15,7 +15,7 @@
   files:
     - src/lib/serve-supervisor.ts
     - test/serve-handoff-spacing.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "SERVE_HANDOFF_SPACING_BASE_MS is 2 hours, so with no pressure a second checkout_behind request inside two hours of the last handoff is deferred with reason spacing"

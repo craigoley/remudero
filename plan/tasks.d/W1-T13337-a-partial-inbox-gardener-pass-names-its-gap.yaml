@@ -14,7 +14,7 @@
   files:
     - src/lib/inbox-gardener.ts
     - test/inbox/a-partial-inbox-gardener-pass-names-its-gap.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "When the captured pack fails qualification, the source_partial result carries gaps: a sorted list naming each failed check, from scope, code_sha, snapshot_key, generated_at, stale, and coverage:<source> for each of plan, registry, github, ledger and threads that is not observed"

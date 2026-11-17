@@ -16,7 +16,7 @@
   files:
     - src/lib/daemon.ts
     - test/dispatch/a-task-whose-claim-is-held-elsewhere-gives-up-its-slot.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "When a dispatched task is refused because another holder has its claim, the daemon leaves it out of selection for a bounded time and the free slot goes to the next candidate, on the same tick and the next"
