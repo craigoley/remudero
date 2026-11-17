@@ -1,0 +1,126 @@
+- id: W1-T13367
+  title: "The SRE lane reads its ledger rows off the daemon loop: the lane's detectors take their history from one awaited slice reader with durable digests, and its incident and receipt reads take only the bytes added to the live file since the last pass, so a pass no longer parses the whole live ledger several times on the loop (16 stalls and 85.6 s of row lag in 22 minutes on 2026-11-17)"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the SRE lane decides which incident is filed and which runbook acts; a reader that drops, repeats or invents a row changes those decisions, and an unreadable history must still stop the pass
+  origin: "operator-session#loop-lag-2026-11-17"
+  plan_refs:
+    - W1-T9615
+    - W1-T9637
+    - W1-T13288
+    - W1-T9406
+    - W1-T8236
+    - W1-T11887
+  files:
+    - src/lib/sre-lane.ts
+    - src/lib/sre-runbooks.ts
+    - src/lib/fleet-flow-detectors.ts
+    - src/lib/idle-capacity-detector.ts
+    - src/lib/stranded-task-detector.ts
+    - src/lib/foreign-pause-detector.ts
+    - src/cli/commands/daemon.ts
+    - test/the-sre-lane-reads-its-ledger-rows-off-the-daemon-loop.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "invariant:a-pass-reads-only-new-ledger-bytes — with the input the daemon builds, a second SRE lane pass over an unchanged state dir reads 0 bytes of any ledger file and parses 0 ledger lines on the daemon thread. After k rows are appended to the live file, the next pass reads only those bytes. No pass calls readLedgerLines on the live ledger, and no pass calls readLedgerUnionRecordsSync without an incremental union"
+      kind: guard
+      proof: "grep: W1-T13367 criterion 1 in test/the-sre-lane-reads-its-ledger-rows-off-the-daemon-loop.test.ts"
+    - claim: "invariant:the-lane-sees-the-same-rows — over a fixture state dir of real gzip rotations and a live file, the idle-capacity, stranded-task and foreign-pause detectors and the intervention router write the same incident.event and operator.intervention rows, and leave the same detector memory files, as the readers at origin/main do over a copy of that state dir. This holds on the first pass, on a repeat pass, and on a pass after a rotation"
+      kind: guard
+      proof: "grep: W1-T13367 criterion 2 in test/the-sre-lane-reads-its-ledger-rows-off-the-daemon-loop.test.ts"
+    - claim: "invariant:an-unreadable-history-stops-the-pass — when one rotation in a detector's window cannot be read, each detector rejects with the same error text it gives today (`Fleet-flow ledger unreadable`, `Idle-capacity ledger unreadable`, `Stranded-task ledger unreadable`, `Foreign-pause ledger unreadable` and `Operator-intervention ledger unreadable`), the pass writes no incident.event and no operator.intervention row, files nothing, and leaves every memory file unchanged"
+      kind: guard
+      proof: "grep: W1-T13367 criterion 3 in test/the-sre-lane-reads-its-ledger-rows-off-the-daemon-loop.test.ts"
+    - claim: "The lane's incident events, the runbook receipts and the governor incidents come from one tail reader of the live file. It returns the same rows as a whole read of the live file after each append, and after the live file is rotated away and replaced it starts again from the first byte and returns exactly the new file's rows. A torn last line is not returned until its newline arrives"
+      proof: "grep: W1-T13367 criterion 4 in test/the-sre-lane-reads-its-ledger-rows-off-the-daemon-loop.test.ts"
+    - claim: "The first pass after a daemon start loads the rotations it has not seen off the loop: a 20 ms timer on the daemon thread keeps firing through a pass whose rotation load is held for one second, and a second process over the same state dir answers those rotations from their durable digests and decompresses none"
+      proof: "grep: W1-T13367 criterion 5 in test/the-sre-lane-reads-its-ledger-rows-off-the-daemon-loop.test.ts"
+    - claim: "The daemon builds the lane's slice reader and hands it to the lane, so the reader has a production caller"
+      proof: "grep: createEscalationTriageHistoryReader( in src/cli/commands/daemon.ts"
+  rationale: |
+    WHY: the SRE lane runs on the daemon loop. Each pass reads the ledger eight or nine times: the detectors and
+    the intervention router each read the ledger union, and the incident reader, the runbook receipts and the
+    governor each read the whole live file. The union reads keep parsed rotations in memory but parse the whole
+    live file again on every call. While this runs, the daemon dispatches nothing and answers no health check.
+    MEASURED on the core ledger (~/rmd-state2/state):
+    - The operator's figures, 2026-11-16T23:50:59Z to 2026-11-17T05:43Z: runSreLanePass was in 139 stall rows,
+      866.0 s of row lag (6.1% of all loop lag), the largest 26.3 s, 241.1 s inclusive.
+    - Re-measured in one pass over the live file on 2026-11-17, daemon.loop_stall_profile rows of the newest boot
+      (ba5bd4f639 at 09:40:09Z). The live file held the rows from 12:06:52Z to 12:28:57Z only: 115 stall rows,
+      817.9 s of lag. runSreLanePass is in the top inclusive frames of 16 rows: 85.6 s of lag (10.5%), the largest
+      7.7 s, 24.0 s inclusive.
+    - In those 16 rows: readLedgerUnionRecordsSync 4.9 s inclusive in 7 rows (4.6 s of it under
+      readLedgerUnionRecordsMemoized), readLedgerLines 2.5 s inclusive in 6 rows, routeOperatorInterventions 1.3 s
+      in 3 rows, readRunbookReceipts 0.6 s in 2 rows. Self time: 4.1 s in parseLedgerContent called from
+      readLedgerLines (all 16 rows), 3.3 s in parseObject called from scanLedgerBuffer, 6.8 s in garbage collection.
+    - The live file was 15.9 MB at 12:29Z and held about 22 minutes of rows.
+    READ at origin/main cfbace2640:
+    - src/lib/sre-lane.ts:372 runSreLanePass calls evaluateIdleCapacityDetectors, evaluateStrandedTaskDetectors,
+      evaluateForeignPauseDetectors and routeOperatorInterventions (:380-389), each with `readRows: deps.readFlowRows`
+      (:376). The daemon's input (:469 daemonSreLaneInput) sets no readFlowRows, so each uses its own reader.
+    - The five union reads: src/lib/fleet-flow-detectors.ts:114, src/lib/idle-capacity-detector.ts:222,
+      src/lib/stranded-task-detector.ts:261, src/lib/foreign-pause-detector.ts:375 and src/lib/sre-lane.ts:670. Each
+      calls readLedgerUnionRecordsMemoized with `refuseIncomplete: true` and throws when the read is not ok
+      (fleet-flow-detectors.ts:120, idle-capacity-detector.ts:228, stranded-task-detector.ts:264, foreign-pause-detector.ts:378, sre-lane.ts:673).
+    - src/lib/ledger-union.ts:1835 readLedgerUnionRecordsMemoized: each call runs readLedgerUnionRecordsSync (:1701)
+      on the loop. The memo answers rotations; the live file is read and parsed whole every time.
+    - The whole live-file reads: src/lib/sre-lane.ts:487 (readEvents), src/lib/sre-runbooks.ts:255
+      (readRunbookReceipts), :262 (readGovernorIncidents) and :650 (the governor host's readLedger). Each is
+      marked `ledger-read-intent: live`: the lane wants the rows of the live file only.
+    - src/lib/sweep.ts:30431 createEscalationTriageHistoryReader: loads unseen rotations off the loop, leaves a
+      durable digest of a step slice, and reads the live file from where the last pass stopped
+      (src/lib/ledger-union.ts:2013 createIncrementalLedgerUnion). W1-T13288 uses it at src/lib/sweep.ts:2646 with
+      ARM_VERDICT_HISTORY_SLICE (:2620). src/lib/sre-runbooks.ts:13 already imports from sweep.js.
+    - src/lib/fleet-flow-detectors.ts:74 `matchesInput`: a detector input may end or start with `*`.
+    NOT COVERED: W1-T9615 and W1-T9637 (merged) moved the filing and the suspect-commit git off the loop.
+    W1-T13334 (queued) keeps the parse of unchanged feedback files for `listFeedback` (src/lib/sre-lane.ts:184);
+    this task does not touch it. W1-T13368 moves the lane's landed-entry git off the loop. W1-T11887 (queued)
+    changes the routing memory of routeOperatorInterventions and not its ledger read. Swept plan/tasks.d and
+    plan/tasks.yaml for runSreLanePass, readFlowRows, readRunbookReceipts and readGovernorIncidents, and the 11
+    open pull requests on 2026-11-17: no other filing.
+  design: |
+    INVARIANT a-pass-reads-only-new-ledger-bytes: a pass reads no ledger byte that an earlier pass of the same process read.
+    INVARIANT the-lane-sees-the-same-rows: the detectors and the router get the same rows as today, so they write the same rows.
+    INVARIANT an-unreadable-history-stops-the-pass: an unreadable rotation makes each detector fail as it does today, and nothing is written or filed.
+    1. One slice for the lane. Its steps are the detectors' inputs and the intervention inputs. The daemon builds
+       one reader with createEscalationTriageHistoryReader({ slice }) where it builds the lane's input
+       (src/cli/commands/daemon.ts:2653) and passes it in; the lane reads it at most once per pass and gives
+       each detector its rows through the existing `readFlowRows` seam. Each detector still filters by its own
+       steps and window, so a wider slice changes no result.
+    2. If a production detector input has a `*`, the slice cannot name it as a step. Then name the concrete
+       steps it matches today, or use the reader's `parseAll`. Say in the code which was chosen and why.
+    3. Fail closed. The seam function throws when the slice read is not ok or has an unread rotation inside the
+       caller's window, with the caller's present error text. Keep each detector's own reader for a caller that
+       passes no seam (the tests and the CLI), so only the daemon path changes.
+    4. Live-file reads. Add one tail reader for the live ledger: it keeps the parsed rows of the steps its three
+       consumers read and the byte offset; a pass reads only the bytes after the offset; when the file is
+       shorter than the offset or its inode changed, it starts again at byte 0. Its row set is the live file's
+       rows, as today. Use the live-file part of createIncrementalLedgerUnion if it can be used without the
+       rotations; do not widen these reads to the union. readEvents, readRunbookReceipts, readGovernorIncidents
+       and the governor host's readLedger read through it.
+    5. No new env var, bound, ledger step or config key. The reader's own load counters are the measure for
+       criterion 1.
+    6. TESTS use a temporary state dir with real gzip rotations, as
+       test/the-sre-lane-evaluates-fleet-flow-detectors.test.ts and the W1-T13288 test build theirs. Criterion 2
+       runs the origin/main readers (the detectors with no seam) and the new path on two copies of one fixture
+       and compares the rows written. Load test/setup/tmp-hygiene.ts so no test reads or writes the host's
+       config or state.
+  falsifier: |
+    At origin/main the second pass over an unchanged state dir parses the whole live file in each of its
+    reads: criterion 1 fails. Make the seam return the rows of a read that is not ok: criterion 3 fails. Read
+    the incident events from the union in place of the live file: rows of an old rotation appear and criterion
+    4 fails. Drop a step from the slice: a detector misses rows and criterion 2 fails.
+  note: |
+    Id reserved for run-unfiled-1794918373000 with ~/rmd-work/bin/reserve-id.sh.
+    This is the first of two tasks from one finding; W1-T13368 is the second. They touch different lines of
+    src/lib/sre-lane.ts and can build in either order.
+    Proof that counts in production: over a day, no daemon.loop_stall_profile row has readLedgerLines or
+    readLedgerUnionRecordsSync under runSreLanePass in its top frames.
+    Open question for the operator, not built here: whether the incident reader should see more than the live
+    file. At the measured rotation rate the live file holds about 22 minutes of rows.

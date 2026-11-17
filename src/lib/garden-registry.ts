@@ -323,11 +323,42 @@ export function lowYieldGardenPass(
   return Object.assign(run, { due: () => gardenPacingDue(stateDir, name, opts) && (pass.due?.() ?? true) });
 }
 
+/** W1-T12939: the garden passes a daemon has started and not yet seen settle, shared by every garden's off-loop. */
+export interface GardenFlightRegistry {
+  /** Record a pass as started; the returned function records it settled (idempotent). */
+  enter: (name: RegisteredGardenName, startedMs: number) => () => void;
+  /** The passes in flight now, oldest first. */
+  live: () => Array<{ name: RegisteredGardenName; startedMs: number }>;
+}
+
+export function createGardenFlightRegistry(): GardenFlightRegistry {
+  const passes = new Set<{ name: RegisteredGardenName; startedMs: number }>();
+  return {
+    enter: (name, startedMs) => {
+      const pass = { name, startedMs };
+      passes.add(pass);
+      return () => { passes.delete(pass); };
+    },
+    live: () => [...passes].sort((a, b) => a.startedMs - b.startedMs),
+  };
+}
+
+/** W1-T12939: the garden children and the judge call a paused daemon still owns, for its `daemon.pause` census.
+ *  `judgeStartedMs` is when the CI escalation judge's running call started, or undefined when none runs. */
+export function gardenAndJudgeUnits(flight: GardenFlightRegistry, judgeStartedMs: number | undefined, nowMs: number): Array<{ kind: string; name: string; age_ms: number }> {
+  return [
+    ...flight.live().map((pass) => ({ kind: "garden-child", name: pass.name as string, age_ms: Math.max(0, nowMs - pass.startedMs) })),
+    ...(judgeStartedMs === undefined ? [] : [{ kind: "judge-call", name: "ci-escalation", age_ms: Math.max(0, nowMs - judgeStartedMs) }]),
+  ];
+}
+
 /**
  * Start one registered garden: a pass at once, then one per interval, never two at once. The `running`
  * flag skips a tick while that garden's pass is still in flight, exactly as each in-process starter did.
  */
 export interface GardenOffLoopWiring {
+  /** W1-T12939: the passes in flight, for a paused daemon's census. Each pass enters at its start and leaves at its settle. */
+  flight?: GardenFlightRegistry;
   spawnPass: GardenPassSpawn;
   log: (step: string, extra?: Record<string, unknown>) => void;
   clock?: Clock;
@@ -388,6 +419,7 @@ export function startGardenOffLoop(name: RegisteredGardenName, intervalMs: numbe
     const passId = randomUUID();
     let admittedMs: number | undefined;
     let settled = false;
+    const leaveFlight = wiring.flight?.enter(name, startedMs);
     observe(event("queued", { passId, nextDueAt: null }));
     const passSignal = {
       passId,
@@ -401,6 +433,7 @@ export function startGardenOffLoop(name: RegisteredGardenName, intervalMs: numbe
     };
     const settle = (outcome: GardenPassOutcome, error?: string, report?: GardenReportError): void => {
       settled = true;
+      leaveFlight?.();
       const deferred = typeof outcome === "object" && outcome !== null;
       const exit = report ? report.childExit : deferred ? null : outcome;
       running = false;
