@@ -20,10 +20,10 @@ import {
   type IncidentEvidence,
   type RunbookPassResult,
 } from "./sre-runbooks.js";
-import { readLedgerLines } from "./status.js";
+import { readLiveLedgerRows } from "./sweep.js";
 import { appendLedger, type LedgerLine } from "./ledger.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
-import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized } from "./ledger-union.js";
+import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized, type LedgerUnionRecordRead } from "./ledger-union.js";
 import {
   CONTROL_INTERVENTION_STEPS,
   deriveControlInterventions,
@@ -347,6 +347,9 @@ export type SreLaneInput = Pick<FleetLaneDeps, "stateDir" | "mergedLastDay" | "c
   log: (step: string, extra?: Record<string, unknown>) => void;
   /** W1-T4386: the runbook pass is composed at the daemon boundary. Absent, incidents file as before. */
   runbookPass?: (incident: IncidentEvidence) => Promise<RunbookPassResult>;
+  /** W1-T13367: the daemon's reader of {@link SRE_LANE_FLOW_SLICE}. A pass reads it once, off the loop, and each
+   *  detector gets its rows from it. Absent, or with `readFlowRows`, each detector reads as before. */
+  flowHistory?: (stateDir: string) => Promise<LedgerUnionRecordRead>;
   detectors?: readonly FleetFlowDetector[];
   readFlowRows?: FleetFlowInput["readRows"];
   writeFlowEvent?: FleetFlowInput["writeEvent"];
@@ -373,7 +376,7 @@ export async function runSreLanePass(deps: SreLaneInput): Promise<SreLanePass> {
   if (existsSync(sreLaneOffPath(deps.stateDir))) return { room: 0 };
   const now = (deps.clock ?? systemClock).now();
   const detectors = deps.detectors ?? SRE_LANE_DETECTORS;
-  const flowInput = { stateDir: deps.stateDir, nowMs: now, readRows: deps.readFlowRows, writeEvent: deps.writeFlowEvent };
+  const flowInput = { stateDir: deps.stateDir, nowMs: now, readRows: deps.readFlowRows ?? sliceFlowRows(deps, detectors), writeEvent: deps.writeFlowEvent };
   // W1-T8240: the stranded-task detector takes its bound from the ledger and keeps its own dedupe memory, so the
   // shared evaluator (which rewrites the fleet-flow store whole each pass) never sees it.
   const flowRows = [
@@ -467,7 +470,7 @@ export function startSreLane(deps: SreLaneInput): (pollIntervalMs: number) => { 
  *  `hasOpenTask`/`framesFor` answer nothing yet — the module doc's TRAP. W1-T9615: a filing is staged in the landing
  *  queue of the daemon's state root (the parent of `stateDir` unless named), never landed on the loop. */
 export async function daemonSreLaneInput(
-  input: Pick<SreLaneInput, "stateDir" | "root" | "mergedLastDay" | "log" | "runbookPass"> & { ledgerPath: string; owner: string; repo: string; landingStateRoot?: string },
+  input: Pick<SreLaneInput, "stateDir" | "root" | "mergedLastDay" | "log" | "runbookPass" | "flowHistory"> & { ledgerPath: string; owner: string; repo: string; landingStateRoot?: string },
 ): Promise<SreLaneInput> {
   const instance = await resolveSreLaneInstance({
     stateRoot: dirname(input.stateDir),
@@ -483,8 +486,10 @@ export async function daemonSreLaneInput(
     detectors: SRE_LANE_DETECTORS.map((detector) =>
       detector.id === "idle-capacity" ? idleCapacityDetector(name)
         : detector.id === FOREIGN_PAUSE_DETECTOR_ID ? foreignPauseDetector(name) : detector),
+    flowHistory: input.flowHistory,
+    // W1-T13367: the live file's rows only, as before, from the tail that parses only the bytes added since its last read.
     readEvents: () =>
-      readLedgerLines(input.ledgerPath) // ledger-read-intent: live — this lane wants the newest incident rows only.
+      readLiveLedgerRows(input.ledgerPath)
         .filter((row) => row.task_id === "INCIDENT" && (row.step === "incident.event" || row.step === "incident.sampled"))
         .map((row) => incidentEventFromLedgerRow(row, instance.resolved ? instance.name : input.repo))
         .filter((event): event is IncidentLedgerEvent => event !== undefined),
@@ -643,6 +648,30 @@ const INTERVENTION_INPUTS: readonly string[] = [
   ...CONTROL_INTERVENTION_STEPS, "cli.invoked", "dispatch.circuit_broken", "dispatch.circuit_broken.verified", OPERATOR_INTERVENTION_STEP,
 ];
 const INTERVENTION_WINDOW_MS = 7 * DAY_MS;
+
+/** W1-T13367: the one ledger slice the daemon's lane reads: the registered detectors' inputs and the intervention
+ *  inputs. No registered input has a `*`, so each is named as a step; {@link sliceFlowRows} keeps a detector whose
+ *  input is not named here on its own reader. */
+export const SRE_LANE_FLOW_SLICE = {
+  holder: "sre-lane.flow-history",
+  steps: [...new Set([...SRE_LANE_DETECTORS.flatMap((d) => [...d.inputs]), ...INTERVENTION_INPUTS])],
+};
+
+/** W1-T13367: the row seam over {@link SreLaneInput.flowHistory}. One pass reads the slice once. Each asker gets the
+ *  rows of its own steps and window, as its own union read returns them, and fails with its own text when the slice
+ *  is not whole. Undefined with no reader, or for a detector input the slice does not name. */
+function sliceFlowRows(deps: Pick<SreLaneInput, "flowHistory" | "stateDir">, detectors: readonly FleetFlowDetector[]): FleetFlowInput["readRows"] {
+  const history = deps.flowHistory;
+  if (!history || !detectors.every((d) => d.inputs.every((input) => SRE_LANE_FLOW_SLICE.steps.includes(input)))) return undefined;
+  let read: Promise<LedgerUnionRecordRead> | undefined;
+  return async (sinceMs, _nowMs, asker) => {
+    const slice = await (read ??= history(deps.stateDir));
+    if (!slice.ok) throw new Error(`${asker.reader} ledger unreadable: ${slice.unread.join(", ")}`);
+    // The union's own `since` rule: a row with no `ts` string is dropped, and one timed before the window is.
+    return slice.rows.filter((row) => typeof row.ts === "string" && !(Date.parse(row.ts) < sinceMs) &&
+      typeof row.step === "string" && asker.inputs.includes(row.step));
+  };
+}
 const interventionReaders = new Map<string, ReturnType<typeof createLedgerRotationMemo>>();
 
 function interventionMemoryPath(stateDir: string): string {
@@ -658,7 +687,7 @@ function interventionMemoryPath(stateDir: string): string {
 export async function routeOperatorInterventions(input: FleetFlowInput): Promise<LedgerLine[]> {
   const sinceMs = input.nowMs - INTERVENTION_WINDOW_MS;
   let rows: readonly Record<string, unknown>[];
-  if (input.readRows) rows = await input.readRows(sinceMs, input.nowMs);
+  if (input.readRows) rows = await input.readRows(sinceMs, input.nowMs, { reader: "Operator-intervention", inputs: INTERVENTION_INPUTS });
   else {
     const key = JSON.stringify([input.stateDir, INTERVENTION_INPUTS]);
     let memo = interventionReaders.get(key);
