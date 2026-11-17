@@ -97,13 +97,14 @@ test("migration preview preserves separate committed monolith and shard-director
 test("migration preview reads a measured healthy catalog above 32 MiB and still refuses its bounded maximum", t => {
   // The real 2026-11-17 public catalog is 34,444,886 bytes across 5,647 Git blobs.
   // Repeated comment bytes compress in Git; the fixture exercises the actual CLI reader, not a fake.
-  const atSize = (mib: number) => "[]\n#" + "x".repeat(mib * 1024 * 1024) + "\n";
-  const healthy = fixture(t, undefined, "[]\n", { "plan/tasks.yaml": atSize(33) });
+  const atSize = (mib: number) => Object.fromEntries(Array.from({ length: mib }, (_, i) =>
+    [`plan/tasks.d/padding-${i}.yaml`, "[]\n#" + "x".repeat(1024 * 1024) + "\n"]));
+  const healthy = fixture(t, undefined, "[]\n", atSize(33));
   const result = healthy.run();
   assert.equal(result.status, 0, JSON.stringify(result.answer));
   assert.equal(result.answer.candidate.id, "W1-T1");
   assert.equal(result.answer.permission, "not_granted");
-  const tooLarge = fixture(t, undefined, "[]\n", { "plan/tasks.yaml": atSize(49) });
+  const tooLarge = fixture(t, undefined, "[]\n", atSize(49));
   const refused = tooLarge.run();
   assert.equal(refused.status, 1);
   assert.equal(refused.answer.outcome, "unknown");
