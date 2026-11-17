@@ -3270,7 +3270,7 @@ export async function ciLearningHandFixInput(stateRoot: string, checkoutRoot: st
   if (existsSync(stateDir)) {
     for await (const row of openLedgerUnion(stateDir, {
       step: OPERATOR_INTERVENTION_STEP,
-      sinceTs: new Date(now.getTime() - HAND_FIX_WINDOW_DAYS * 86_400_000).toISOString(),
+      sinceTs: fixedClock(now.getTime() - HAND_FIX_WINDOW_DAYS * 86_400_000).iso(),
       onUnreadDirectory: (path, error) => unread.push(`${path}: ${String(error)}`),
       onUnreadArchive: (path) => unread.push(path),
       onUnreadLive: (path) => unread.push(path),
