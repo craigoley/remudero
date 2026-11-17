@@ -13,6 +13,7 @@
     - W1-T11166
   files:
     - src/lib/sweep.ts
+    - src/lib/run-child.ts
     - test/sweep/a-queued-host-fix-dispatch-never-holds-its-key-unexplained.test.ts
   status: queued
   attempts: 0
@@ -40,11 +41,17 @@
     INFERRED, not traced line by line: the key stays claimed while the host child waits in the host queue, and nothing
     registers that wait as a holder or bounds it.
   design: |
-    1. Record a host-queued holder when hostFixDispatch queues a child (run id, queued-at), ledger it as one row, and let
-       detachedFixHolder report it ("queued on the work host since T, run R").
-    2. Bound the queued wait (a named constant, an order of magnitude above a normal admission wait); past it, release the
-       key, ledger the release with the wait, and cancel or orphan-mark the queued child so it cannot also run.
-    3. Keep the "already claimed this pass" literal for a claim made earlier in the same pass only.
+    OBSERVED at origin/main 43941cf: hostFixDispatch awaits host.spawnFix while this pass's claim holds the key, and
+    spawnRunChild waits for a reservation inside that await (reserveWhilePending). Nothing registers that wait as a holder,
+    so a later pass's claimFixDispatch finds the key with no detached holder and prints the same-pass literal.
+    1. run-child.ts spawnFix passes an onPending hook through to spawnRunChild (it already exists on SpawnRunChildInput).
+    2. sweep.ts records a pending holder per fix key while host.spawnFix waits: since-ms, and once onPending fires, the
+       child run id and its abort. It writes one ledger row (sweep.fix.child_queued) with the PR, fix key and run id, and
+       claimFixDispatch reports the holder ("waiting for the work host to admit run R for Ns").
+    3. Past a named bound, a later pass aborts the pending wait. reserveWhilePending's existing abandon path carries the
+       wait's start forward, hostFixDispatch releases the claim and ledgers sweep.fix.dispatch_failed, and the next pass
+       may dispatch again. The sweep also ledgers the release with the wait.
+    4. The "already claimed this pass" literal stays for a claim with no recorded holder.
     INVARIANT same-pass-race-unchanged: a same-pass duplicate claim is refused exactly as today.
   falsifier: |
     At origin/main, a fixture that queues a host fix child and runs two more sweep passes before it starts logs the
