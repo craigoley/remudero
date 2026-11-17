@@ -13,7 +13,9 @@
   origin: "scout:sweep.repeat_escalated"
   files:
     - src/lib/ledger.ts
+    - scripts/census-precheck.mjs
     - test/scout-sweep-repeat-escalated.test.ts
+    - test/census-reader-runtime-calibration.test.ts
   acceptance:
     - claim: "sweep.repeat_escalated stops recurring: its cause is fixed rather than its rows hidden"
       proof: "grep: test(\"W1-T9938: sweep.repeat_escalated no longer recurs\" in test/scout-sweep-repeat-escalated.test.ts"
@@ -28,5 +30,6 @@
     confidence: 1
     reasons:
       - "operator authorized durable repeat-marker retention for PR #19166"
-    judged_at: "2026-11-17T21:04:11Z"
-    pin: "139d3f4d67120a80bb5eb1a977388c5de6cae429172b05b1a5939e6671db3931"
+      - "operator authorized platform-guarded skip handling in census calibration for PR #19166 author preflight"
+    judged_at: "2026-11-17T21:25:11Z"
+    pin: "a173fc52e43e8bb0e44d2460c61ce8c2bd80bb1b85a06380fe71c8ae9470c14e"
