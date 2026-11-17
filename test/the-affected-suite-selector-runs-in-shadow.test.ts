@@ -634,3 +634,18 @@ test("the open-weight probe suite is selected in the narrow arm for each recorde
   const unrelated = selectAffectedSuites(["src/a.ts"], { files, pathReaders: [], symbolSuites: [], readMap });
   assert.ok(!unrelated.narrow?.includes(suite), "an unrelated source change must not select the suite");
 });
+
+test("the reviewer-only proof failure suite is selected in the narrow arm for each recorded miss edge (run 38695464139)", () => {
+  const suite = "test/a-reviewer-only-proof-failure-reaches-the-fix-worker.test.ts";
+  const edges = ["src/lib/proofExecutor.ts", "src/lib/review.ts", "test/proof-failure-tail-bounded-redacted.test.ts", "test/proof-failure-tail-recorded-on-verdict.test.ts"];
+  const files = new Map([...Object.entries(TREE), [suite, ""], ...edges.map((e): [string, string] => [e, ""])]);
+  const readMap: ReadMapInput = {
+    map: { format: READ_MAP_FORMAT, sha: "main", suites: [], reads: {}, listed: {}, unknownDescriptorSuites: [] },
+    drift: { distance: 0, changedSinceMap: [] },
+  };
+  for (const changed of edges) {
+    const selection = selectAffectedSuites([changed], { files, pathReaders: [], symbolSuites: [], readMap });
+    assert.equal(selection.fullRun, false, changed);
+    assert.ok(selection.narrow?.includes(suite), `${changed} must select ${suite} in the narrow arm`);
+  }
+});

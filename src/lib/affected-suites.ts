@@ -766,6 +766,17 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   if (input.files.has(ciFrictionFileAdmission) && files.some((f) => ciFrictionFileAdmissionEdges.includes(f))) {
     pathReaders.push(ciFrictionFileAdmission);
   }
+  // W1-T9614: recorded miss on coverage run 38695464139, PR #11951.
+  const proofFailureFix = suitePath("test/a-reviewer-only-proof-failure-reaches-the-fix-worker.test.ts");
+  const proofFailureFixEdges = [
+    "src/lib/proofExecutor.ts",
+    "src/lib/review.ts",
+    suitePath("test/proof-failure-tail-bounded-redacted.test.ts"),
+    suitePath("test/proof-failure-tail-recorded-on-verdict.test.ts"),
+  ];
+  if (input.files.has(proofFailureFix) && files.some((f) => proofFailureFixEdges.includes(f))) {
+    pathReaders.push(proofFailureFix);
+  }
   // W1-T9511: recorded miss on coverage run 38608353967, PR #11748.
   const envNames = suitePath("test/every-env-name-a-source-file-reads-is-registered.test.ts");
   const envNamesEdges = [
