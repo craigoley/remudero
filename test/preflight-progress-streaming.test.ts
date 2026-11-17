@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { runCiParity } from "#src/lib/ci-parity.js";
+import { CI_COVERAGE_SHARD_COUNT, runCiParity } from "#src/lib/ci-parity.js";
 import { defaultPreflightSpawn, type PreflightSpawn } from "#src/lib/commit-message.js";
 import { coverageParitySpawnResult } from "#test/helpers/coverage-parity-spawn.js";
 
@@ -151,7 +151,7 @@ test("W1-T3299 (supersedes the two-step shape): the full suite streams, the cove
       return { status: 0, stdout: "0123456789abcdef0123456789abcdef01234567\n", stderr: "" };
     }
     if (file === process.execPath && args.some((arg) => arg.endsWith("scripts/test-tier-manifest.mjs")) && args.includes("--select-all")) {
-      const shard = args[args.indexOf("--shard") + 1]?.match(/^([1-8])\/8$/)?.[1];
+      const shard = args[args.indexOf("--shard") + 1]?.match(new RegExp(`^(\\d+)/${CI_COVERAGE_SHARD_COUNT}$`))?.[1];
       return shard ? { status: 0, stdout: `test/coverage-shard-${shard}.test.ts\n`, stderr: "" } : { status: 1, stdout: "", stderr: "invalid selector shard" };
     }
     const coverage = coverageParitySpawnResult(file, args, opts);
@@ -175,7 +175,7 @@ test("W1-T3299 (supersedes the two-step shape): the full suite streams, the cove
   // disarm that refusal. Capture is the correct trade, and the cost — a shard runs without live
   // progress — is named here rather than left for the next reader to rediscover.
   const shards = calls.filter((c) => c.args.includes("--experimental-test-coverage") && c.args.some((a) => /^test\/coverage-shard-\d+\.test\.ts$/.test(a)));
-  assert.equal(shards.length, 8, "the coverage leaf must still run the suite under coverage, as CI's eight shards");
+  assert.equal(shards.length, CI_COVERAGE_SHARD_COUNT, "the coverage leaf must still run the suite under coverage, as CI's shards");
   for (const shard of shards) {
     assert.notEqual(
       shard.opts?.stream,

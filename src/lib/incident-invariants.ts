@@ -94,6 +94,17 @@ export const LOOP_LAG_RULE_ID = "loop-lag";
 export const NO_MERGES_WITH_GREEN_QUEUE_RULE_ID = "no-merges-with-green-queue";
 export const SERVE_MEMORY_HEADROOM_RULE_ID = "serve-memory-headroom";
 export const DAEMON_LOOP_SILENT_RULE_ID = "daemon-loop-silent";
+/** W1-T13304: serve's container uses more steady CPU than an API layer should. */
+export const SERVE_CPU_BUDGET_RULE_ID = "serve-cpu-budget";
+/** W1-T13304: the supervisor's hourly row of its container's CPU, written by serve-supervisor.ts. */
+export const SERVE_CPU_BUDGET_STEP = "serve.cpu_budget";
+/** W1-T13304: the supervisor writes {@link SERVE_CPU_BUDGET_STEP} hourly (serve-supervisor.ts's SERVE_CPU_BUDGET_INTERVAL_MS). */
+const SERVE_CPU_BUDGET_CADENCE_MS = 60 * 60_000;
+/**
+ * PRIMARY CONTROL (W1-T13304): the most CPU serve's container may use outside boots, in cores. MEASURED 2026-11-17
+ * 01:05-01:10Z: 1.58 cores, while a thin API layer should idle near zero; Craig: "serve should not need this much cpu".
+ */
+export const SERVE_STEADY_CPU_BUDGET_CORES = 0.3;
 
 /** Every step the daemon's own loop writes (`daemon.pulse`, `daemon.loop_lag`, ...) — the prefix
  *  `deriveLastPoll` reads. */
@@ -283,6 +294,28 @@ const RULES: readonly InvariantRule[] = [
       return {
         bad: serveAlive && daemonRows.length === 0,
         message: `no daemon.* row in ${window.length} row(s); newest step=${(newest && stringField(newest, "step")) ?? "unknown"}`,
+      };
+    },
+  },
+  {
+    id: SERVE_CPU_BUDGET_RULE_ID,
+    // Twelve rows long, so the short window (1/12th, 65 min) still holds the newest hourly row. Each row carries the
+    // row before it (prev_steady_cores), so "two consecutive rows over budget" is one row's own test.
+    longMs: 12 * (SERVE_CPU_BUDGET_CADENCE_MS + 5 * 60_000),
+    inputs: [SERVE_CPU_BUDGET_STEP],
+    bad: (window) => {
+      const last = window.filter((row) => row.step === SERVE_CPU_BUDGET_STEP).at(-1);
+      if (last === undefined) return { bad: false, message: "no serve.cpu_budget row in window" };
+      // INVARIANT unreadable-is-unknown: a null (or absent) reading is no evidence, so it never fires.
+      const steady = typeof last.steady_cores === "number" ? last.steady_cores : undefined;
+      const prev = typeof last.prev_steady_cores === "number" ? last.prev_steady_cores : undefined;
+      const top = Array.isArray(last.top) ? (last.top as unknown[]).slice(0, 3).map((c) => {
+        const entry = (c ?? {}) as Record<string, unknown>;
+        return `${String(entry.name)}=${typeof entry.cores === "number" ? entry.cores : "?"}`;
+      }) : [];
+      return {
+        bad: steady !== undefined && prev !== undefined && steady > SERVE_STEADY_CPU_BUDGET_CORES && prev > SERVE_STEADY_CPU_BUDGET_CORES,
+        message: `steady ${steady ?? "unread"} cores (previous hour ${prev ?? "unread"}), budget ${SERVE_STEADY_CPU_BUDGET_CORES}; top: ${top.join(", ") || "unread"}`,
       };
     },
   },

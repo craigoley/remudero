@@ -363,9 +363,25 @@ const SEED_ROWS: readonly SeedRow[] = [
     meaning:
       "One result of a judge corpus replay batch: the corpus, the case, the model, the expected answer, " +
       "the result type and usage, and the recorded typed answer keyed by the model id. A request that " +
-      "errored, was canceled or expired has no typed answer.",
+      "errored, was canceled or expired has no typed answer. W1-T12421: a direct replay writes one per " +
+      "sent case, with lane direct, the model surface and the latency; its typed answer has the case's " +
+      "expected answer as its outcome, and a failed request has no typed answer.",
     writer: ["replayJudgeCorpus"],
-    outcomes: ["succeeded", "errored", "canceled", "expired"],
+    outcomes: ["succeeded", "errored", "canceled", "expired", "failed"],
+  },
+  {
+    // W1-T12421: offline only; no live judge, gate or route reads this row.
+    step: "judge_replay.finished",
+    meaning:
+      "One direct replay of a judge corpus through one decision model or cash deployment, one request " +
+      "per case: the candidate, its deployment and model surface, the role, the corpus name and digest, " +
+      "the cost estimate and the replay ceiling, the cases sent, answered, abstained, rejected, too large " +
+      "and failed, the reserved, settled and held dollars and the median latency. A refused replay (an " +
+      "unknown corpus or candidate, or an estimate above the ceiling) and a stopped replay (a 429 that " +
+      "stays after one retry, a budget refusal, an unavailable candidate) write the same row with their " +
+      "reason, so every direct replay has exactly one row.",
+    writer: ["replayJudgeCorpus"],
+    outcomes: ["finished", "refused", "stopped"],
   },
   {
     // W1-T12425: a record only; the judge calibration reader joins it to typed answers by head.

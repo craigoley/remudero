@@ -131,7 +131,8 @@ test("the nightly workflow merges the shards and runs the absolute-floor ratchet
   const merged = stepRunning(mergeJob, "scripts/coverage-merge-ratchet.mjs").run!;
   assert.match(merged, /--output coverage\/lcov\.info/);
   assert.match(merged, /--shard-count 8/);
-  for (let n = 1; n <= 8; n += 1) assert.ok(merged.includes(`coverage-shard-${n}/raw`), `the merge must read shard ${n}`);
+  // W1-T13275: each shard's premapped copy, so the merge replays only the range merge.
+  for (let n = 1; n <= 8; n += 1) assert.ok(merged.includes(`coverage-shard-${n}/premapped`), `the merge must read shard ${n}`);
   const ratchetStep = stepRunning(mergeJob, "node scripts/coverage-ratchet.mjs --lcov");
   assert.match(ratchetStep.run!, /--lcov coverage\/lcov\.info --baseline scripts\/coverage-baseline\.json/);
   const steps = mergeJob.steps ?? [];

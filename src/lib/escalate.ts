@@ -309,7 +309,7 @@ export interface IssueGateway {
   /** Close one issue, posting `comment` as the closing citation — used only by the reconciler when
    *  the referenced task resolved, so the closure names its resolver rather than being a silent
    *  disappearance (fb-1784756088300-6a481e). Optional, like {@link ensureLabel}. */
-  closeWithComment?(url: string, comment: string): void;
+  closeWithComment?(url: string, comment: string, reason?: "not planned"): void;
   /** Post `body` as a plain comment on an OPEN issue without closing it (W1-T104) — the SECOND
    *  OBSERVER of an already-open escalation appends here rather than opening a sibling. A gateway
    *  omitting it still dedupes, but silently drops the second observation. */
@@ -318,12 +318,41 @@ export interface IssueGateway {
    *  head it appended (operator ruling 2026-11-01), so a reader of the stored body, such as the
    *  issue-revalidation garden's head-moved rule, never judges that issue against a head it superseded. */
   editBody?(url: string, body: string): void;
+  /** W1-T13218 — the issue's comments UPDATED at or after `sinceIso` (REST `?since=`), so finding
+   *  today's rolling observation reads one small page, never an issue's whole comment storm. THROWS on
+   *  a failed read; the dedup path then posts a new comment. Optional, with {@link editComment}. */
+  listCommentsSince?(url: string, sinceIso: string): IssueComment[];
+  /** W1-T13218 — replace one issue comment's body by its REST id. THROWS on failure. */
+  editComment?(commentId: number, body: string): void;
   /** Ensure ONE label exists on the repo (create-if-missing, tolerate-already-exists). Returns false
    *  when provisioning failed. Optional: a gateway omitting it is treated as "every label already
    *  exists". TRAP: an unprovisioned label used to fail the WHOLE create, losing the rendered
    *  question and killing the reconciler for every other open PR — provisioning is the transport's
    *  job, never the operator's memory. Why: the 2026-07-17 incident, docs/forensics/escalate.md. */
   ensureLabel?(label: string): boolean;
+}
+
+/** W1-T13218 — one issue comment as {@link IssueGateway.listCommentsSince} returns it. */
+export interface IssueComment {
+  id: number;
+  body: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** REST `/issues/<n>/comments` pages (bare `--paginate` output) as {@link IssueComment}s. THROWS on a
+ *  malformed payload. */
+export function parseIssueCommentRows(raw: string): IssueComment[] {
+  return splitConcatenatedJsonPages(raw).flatMap((chunk) => {
+    const page = JSON.parse(chunk) as unknown;
+    if (!Array.isArray(page)) throw new Error(`parseIssueCommentRows: expected a JSON array page, got ${typeof page}`);
+    return (page as Array<Record<string, unknown>>).map((r) => ({
+      id: Number(r.id),
+      body: String(r.body ?? ""),
+      createdAt: String(r.created_at ?? ""),
+      updatedAt: String(r.updated_at ?? r.created_at ?? ""),
+    }));
+  });
 }
 
 /** W1-T5283 — an {@link IssueGateway} whose calls may return a promise, which {@link escalateAsync}
@@ -1166,6 +1195,8 @@ export interface EscalateDeps<G extends AsyncIssueGateway = IssueGateway> {
   /** OPTIONAL (W1-T8868) — how this call triages its escalation. Absent is SHADOW mode: the would-be
    *  outcome is ledgered as `escalation.triaged` and the escalation is delivered exactly as before. */
   triage?: EscalateTriageSettings;
+  /** OPTIONAL (W1-T13218) — the clock the rolling observation comment reads; defaults to real time. */
+  clock?: Clock;
 }
 
 /** W1-T8868 — the knobs {@link triageRoute} reads. Every field is optional; an absent `execute`
@@ -1528,28 +1559,105 @@ function recordUnreadableDedup(e: Escalation, error: unknown, deps: Pick<Escalat
 }
 
 /** Append the dedup comment and the `escalation.deduped` ledger line for an already-found duplicate —
- *  extracted so {@link escalateWithJudge} shares it exactly, never a second `listOpen` read. */
+ *  extracted so {@link escalateWithJudge} shares it exactly, never a second `listOpen` read.
+ *  W1-T13218: with a gateway that can list and edit comments, the observation is ROLLING — the first
+ *  match of a UTC day posts one comment, and every later match that day edits it in place. */
 function* recordDuplicateEscalation(e: Escalation, dup: OpenIssue, deps: EscalateDeps<AsyncIssueGateway>): Steps<string> {
   const prRef = extractPrRef(`${e.summary}\n${e.detail}`);
   const observedHead = e.headDedup === "independent" && e.headSha ? `, observed head ${e.headSha}` : "";
   const observedKey = prRef
     ? `task ${e.taskId}, PR #${prRef}${observedHead}`
     : `task ${e.taskId}, class ${e.class}${e.cause ? `, cause ${e.cause}` : ""}`;
-  yield* step(() =>
-    deps.issues.comment?.(
-      dup.url,
-      `Another escalation observed the same condition (${observedKey}) while this issue ` +
-        `was already open — appending rather than opening a sibling (W1-T104/W1-T345).\n\n${renderIssueBody(e)}`,
-    ),
-  );
+  const heading =
+    `Another escalation observed the same condition (${observedKey}) while this issue ` +
+    `was already open — appending rather than opening a sibling (W1-T104/W1-T345).`;
+  const issues = deps.issues;
+  let observation: RollingObservationOutcome = "appended";
+  if (issues.listCommentsSince && issues.editComment) {
+    observation = yield* writeRollingObservation(e, dup, heading, deps);
+  } else {
+    yield* step(() => issues.comment?.(dup.url, `${heading}\n\n${renderIssueBody(e)}`));
+  }
   appendLedger(deps.ledgerPath, {
     run_id: deps.runId,
     task_id: e.taskId,
     step: "escalation.deduped",
     class: e.class,
     issue_url: dup.url,
+    observation_comment: observation,
   });
   return dup.url;
+}
+
+/** W1-T13218 — how a dedup match reached the issue: `appended` (a gateway without comment edits),
+ *  `posted` (the day's first observation), `edited` (today's comment updated in place), or
+ *  `posted-after-read-failed` / `posted-after-edit-failed` (the fallback, named so it is countable). */
+type RollingObservationOutcome = "appended" | "posted" | "edited" | "posted-after-read-failed" | "posted-after-edit-failed";
+
+/** W1-T13218 — the hidden marker line of a rolling observation comment: task id, count, first time. */
+export const ROLLING_OBSERVATION_RE = /<!-- rmd-observation:(\S+) count=(\d+) first=(\S+) -->/;
+
+/** The hidden line that keys a rolling observation comment to its task, count and first time. */
+function rollingObservationMarker(taskId: string, count: number, firstIso: string): string {
+  return `<!-- rmd-observation:${taskId} count=${count} first=${firstIso} -->`;
+}
+
+function rollingObservationBody(e: Escalation, heading: string, count: number, firstIso: string, newestIso: string): string {
+  return (
+    `${heading}\n\n` +
+    `Observed ${count} time(s) on ${newestIso.slice(0, 10)} (UTC): first ${firstIso}, newest ${newestIso}. ` +
+    `Later observations today edit this comment (W1-T13218).\n\n` +
+    `${renderIssueBody(e)}\n\n${rollingObservationMarker(e.taskId, count, firstIso)}`
+  );
+}
+
+/** Today's newest rolling observation comment for `taskId`, created at or after `dayStartIso`. */
+export function findRollingObservation(
+  comments: readonly IssueComment[],
+  taskId: string,
+  dayStartIso: string,
+): { id: number; count: number; firstIso: string } | undefined {
+  const dayStart = Date.parse(dayStartIso);
+  let best: { id: number; count: number; firstIso: string; at: number } | undefined;
+  for (const c of comments) {
+    const m = ROLLING_OBSERVATION_RE.exec(c.body);
+    if (!m || m[1] !== taskId) continue;
+    const at = Date.parse(c.createdAt);
+    if (!Number.isFinite(at) || at < dayStart || !Number.isFinite(c.id)) continue;
+    if (!best || at > best.at) best = { id: c.id, count: Number(m[2]), firstIso: m[3]!, at };
+  }
+  return best && { id: best.id, count: best.count, firstIso: best.firstIso };
+}
+
+/** INVARIANT dedup-never-blocks-the-probe: a failed read or edit falls back to posting a new comment,
+ *  the path that ran before W1-T13218, and never throws into the probe. */
+function* writeRollingObservation(e: Escalation, dup: OpenIssue, heading: string, deps: EscalateDeps<AsyncIssueGateway>): Steps<RollingObservationOutcome> {
+  const issues = deps.issues;
+  const nowIso = (deps.clock ?? systemClock).iso();
+  const dayStartIso = `${nowIso.slice(0, 10)}T00:00:00.000Z`;
+  let prior: ReturnType<typeof findRollingObservation>;
+  let fallback: RollingObservationOutcome = "posted";
+  try {
+    const comments = yield* step(() => issues.listCommentsSince!(dup.url, dayStartIso));
+    prior = findRollingObservation(comments, e.taskId, dayStartIso);
+  } catch {
+    // deliberate: an unreadable comment list must never block the probe; the observation is posted
+    // as a new comment instead, and the ledger row names the fallback as posted-after-read-failed.
+    fallback = "posted-after-read-failed";
+  }
+  if (prior) {
+    const body = rollingObservationBody(e, heading, prior.count + 1, prior.firstIso, nowIso);
+    try {
+      yield* step(() => issues.editComment!(prior!.id, body));
+      return "edited";
+    } catch {
+      // deliberate: a failed edit falls back to posting a new comment, so the observation is never
+      // lost; the ledger row names the fallback as posted-after-edit-failed.
+      fallback = "posted-after-edit-failed";
+    }
+  }
+  yield* step(() => issues.comment?.(dup.url, rollingObservationBody(e, heading, 1, nowIso, nowIso)));
+  return fallback;
 }
 
 /** The issue number out of a `gh issue create` URL — falls back to the raw url on an unrecognized
@@ -2033,11 +2141,13 @@ function issueGatewaySteps(
           return parseLabelledIssuesRest(yield* gh(labelledIssuesRestArgs(repoArg, label, "open")));
         })(),
       ),
-    closeWithComment: (url, comment) =>
+    closeWithComment: (url, comment, reason) =>
       drive(
         (function* () {
+          // W1-T13221: "not planned" marks a superseded duplicate; absent, gh closes as completed.
+          const why = reason ? ["--reason", reason] : [];
           try {
-            yield* gh(["issue", "close", url, "--repo", repoArg, "--comment", comment]);
+            yield* gh(["issue", "close", url, "--repo", repoArg, "--comment", comment, ...why]);
             return "commented";
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
@@ -2045,7 +2155,7 @@ function issueGatewaySteps(
             const cap2 = "Commenting is disabled on issues with more than 2500 comments.";
             if (msg.includes(cap1) || msg.includes(cap2)) {
               // GitHub rejects closing with a citation comment when the cap is reached; close without a comment
-              yield* gh(["issue", "close", url, "--repo", repoArg]);
+              yield* gh(["issue", "close", url, "--repo", repoArg, ...why]);
               return "comment_cap";
             }
             throw err;
@@ -2062,6 +2172,21 @@ function issueGatewaySteps(
       drive(
         (function* () {
           yield* gh(["issue", "edit", url, "--repo", repoArg, "--body", body]);
+        })(),
+      ),
+    listCommentsSince: (url, sinceIso) =>
+      drive(
+        (function* () {
+          const n = /\/issues\/(\d+)\s*$/.exec(url)?.[1];
+          if (!n) throw new Error(`listCommentsSince: no issue number in ${url}`);
+          const path = `repos/${repoArg}/issues/${n}/comments?since=${encodeURIComponent(sinceIso)}&per_page=100`;
+          return parseIssueCommentRows(yield* gh(["api", path, "--paginate"]));
+        })(),
+      ),
+    editComment: (commentId, body) =>
+      drive(
+        (function* () {
+          yield* gh(["api", "-X", "PATCH", `repos/${repoArg}/issues/comments/${commentId}`, "-f", `body=${body}`]);
         })(),
       ),
   } as AsyncIssueGateway;

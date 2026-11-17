@@ -24,7 +24,7 @@
     - src/run-task.ts
     - docs/cli-reference.md
     - test/worker/sandbox/the-judge-corpora-replay-through-a-named-model-in-a-batch.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A replay reads test/fixtures/machine-judge-probes.json and the risk-judge disposition fixtures, and sends each case as one request of one Message Batch to a named model, with its expected answer kept beside it"
