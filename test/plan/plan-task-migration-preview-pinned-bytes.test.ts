@@ -80,3 +80,15 @@ test("migration preview refuses layout paths the actual private reader cannot co
   assert.equal(result.answer.outcome, "unknown", "a layout unsupported by the real private reader is not migration permission");
   assert.equal(result.answer.permission, "not_granted");
 });
+
+
+test("migration preview preserves separate committed monolith and shard-directory layout", t => {
+  const f = fixture(t, undefined, "[]\n", {
+    ".remudero/layout.json": JSON.stringify({ planDir: "backlog", planMonolith: "manifests/task-set.yaml" }),
+    "manifests/task-set.yaml": "[]\n", "backlog/tasks.d/W1-T2.yaml": record("W1-T2"),
+  });
+  const result = f.run();
+  assert.equal(result.status, 0, JSON.stringify(result));
+  assert.equal(result.answer.candidate.id, "W1-T2");
+  assert.equal(result.answer.candidate.sourcePath, "backlog/tasks.d/W1-T2.yaml");
+});

@@ -87,3 +87,15 @@ test("migration preview refuses a merged credit revised while search indexing is
   assert.equal(result.answer.outcome, "unknown", "revised authoritative credit cannot become unmerged through an indexing delay");
   assert.equal(result.answer.permission, "not_granted");
 });
+
+
+test("migration preview never calls a foreign target unclaimed from the public plan repository", t => {
+  const f = fixture(t, { "W1-T1.yaml": record("W1-T1").replace("repo: remudero", "repo: remudero-console") });
+  const target = gitRepo({ scope: t, bare: true, kind: "migration-foreign-claim" });
+  f.pub.clone.git("push", target.dir, "HEAD:refs/rmd-dispatch/W1-T1");
+  assert.equal(target.git("rev-parse", "refs/rmd-dispatch/W1-T1"), f.pubCommit);
+  const result = f.run();
+  assert.equal(result.answer.outcome, "none", "the supplied public repository does not bind the foreign target claim namespace");
+  assert.equal(result.answer.permission, "not_granted");
+  assert.ok(result.answer.refused.some((row: { id: string; reason: string }) => row.id === "W1-T1" && row.reason === "target_not_bound"));
+});
