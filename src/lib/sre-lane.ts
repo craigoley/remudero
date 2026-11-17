@@ -6,8 +6,9 @@ import { promisify } from "node:util";
 import { fixedClock, systemClock } from "./clock.js";
 import { daemonInstanceRegistryPath, instanceForStateRoot } from "./deployer.js";
 import { writeAtomic } from "./fs-race-safe.js";
-import { listFeedback, readLandedFeedbackEntry, stageFeedbackCapture, type FeedbackEntry, type FeedbackOrigin, type FeedbackStatus } from "./feedback.js";
+import { listFeedback, readLandedFeedbackEntryAsync, stageFeedbackCaptureAsync, type FeedbackEntry, type FeedbackOrigin, type FeedbackStatus } from "./feedback.js";
 import { overlayQueuedFeedbackEntries } from "./feedback-landing.js";
+import { runStepsAsync, runStepsSync, step, type Steps } from "./git-push.js";
 import type { FleetLaneDeps } from "./fleet-lane.js";
 import { type FleetFlowDetector, type FleetFlowInput } from "./fleet-flow-detectors.js";
 import { evaluateForeignPauseDetectors, FOREIGN_PAUSE_DETECTOR_ID, foreignPauseDetector } from "./foreign-pause-detector.js";
@@ -47,7 +48,7 @@ export const SRE_LANE_DETECTORS: readonly FleetFlowDetector[] = [idleCapacityDet
  * ruling 2026-09-23). A small own-timer loop (mirrors gardener.ts, fleet-lane.ts) reads incident
  * evidence (W1-T4383 `incident.event`/`incident.sampled`, W1-T4384 invariant findings), dedupes
  * against work the fleet already has open, gathers evidence, and files one `incident#<fingerprint>`
- * entry per pass via {@link stageFeedbackCapture} (W1-T9615) — the existing feedback -> triage -> plan -> build
+ * entry per pass via {@link stageFeedbackCaptureAsync} (W1-T9615) — the existing feedback -> triage -> plan -> build
  * pipeline builds the rest.
  *
  * INVARIANT: flow incident rows and filing feedback are this lane's write surfaces besides the allowlisted, reversible
@@ -158,9 +159,20 @@ export function worstOpenIncident(
   evidence: readonly IncidentEvidence[],
   isOpen: (fingerprint: string) => boolean,
 ): IncidentEvidence | undefined {
+  return runStepsSync(worstOpenIncidentSteps(evidence, isOpen));
+}
+
+/** W1-T13368: {@link worstOpenIncident}'s walk, written once; the pass awaits an `isOpen` that reads git. */
+function* worstOpenIncidentSteps(
+  evidence: readonly IncidentEvidence[],
+  isOpen: (fingerprint: string) => boolean | Promise<boolean>,
+): Steps<IncidentEvidence | undefined> {
   // Sorted first, then the first not-open one: the same answer as filter-then-sort (the sort is stable),
   // but `isOpen` runs only until a survivor is found, since W1-T9624's landed check costs a git read.
-  return [...evidence].sort((a, b) => b.burnPerHour - a.burnPerHour).find((e) => !isOpen(e.fingerprint));
+  for (const e of [...evidence].sort((a, b) => b.burnPerHour - a.burnPerHour)) {
+    if (!(yield* step(() => isOpen(e.fingerprint)))) return e;
+  }
+  return undefined;
 }
 
 // ── dedupe against open work ─────────────────────────────────────────────────────────────────
@@ -177,7 +189,7 @@ export function incidentFeedbackOrigin(fingerprint: string): FeedbackOrigin {
 const CLOSED_FEEDBACK_STATUS: FeedbackStatus = "rejected";
 
 /** Every `incident#<fingerprint>` origin this repo has open feedback for right now — a read over
- *  {@link listFeedback}, the same store {@link stageFeedbackCapture} writes into. W1-T9615: given `stateRoot`, the
+ *  {@link listFeedback}, the same store {@link stageFeedbackCaptureAsync} writes into. W1-T9615: given `stateRoot`, the
  *  records waiting in its landing queue count too, so a filing staged last pass is seen before it lands. */
 export function openIncidentFeedbackOrigins(root: string, stateRoot?: string): Set<string> {
   const origins = new Set<string>();
@@ -199,7 +211,10 @@ export function incidentFeedbackId(fingerprint: string): string {
  *  a landed entry while the checkout's HEAD lags main, and {@link openIncidentFeedbackOrigins} reads only
  *  the working tree. */
 export function landedIncidentOpen(fingerprint: string, readLanded: (id: string) => FeedbackEntry | null): boolean {
-  const landed = readLanded(incidentFeedbackId(fingerprint));
+  return landedEntryOpen(fingerprint, readLanded(incidentFeedbackId(fingerprint)));
+}
+
+function landedEntryOpen(fingerprint: string, landed: FeedbackEntry | null): boolean {
   return landed !== null && landed.origin === incidentFeedbackOrigin(fingerprint) && landed.status !== CLOSED_FEEDBACK_STATUS;
 }
 
@@ -331,7 +346,7 @@ function incidentFeedbackRaw(evidence: IncidentEvidence, suspectPrs: readonly st
 /** `stateDir`, `mergedLastDay` and `clock` are fleet-lane.ts's own members — this lane paces and
  *  pauses exactly as that one does — so they are reused from {@link FleetLaneDeps}, not redeclared. */
 export type SreLaneInput = Pick<FleetLaneDeps, "stateDir" | "mergedLastDay" | "clock"> & {
-  /** Repo root — where {@link stageFeedbackCapture}/{@link listFeedback} read and write. */
+  /** Repo root — where {@link stageFeedbackCaptureAsync}/{@link listFeedback} read and write. */
   root: string;
   /** W1-T9615: the daemon's state root, whose landing queue the per-poll async sweep drains. A filing is staged there and
    *  never landed inline. Absent, the entry stays in `root`'s checkout for that sweep's dirty scan. */
@@ -350,8 +365,8 @@ export type SreLaneInput = Pick<FleetLaneDeps, "stateDir" | "mergedLastDay" | "c
   detectors?: readonly FleetFlowDetector[];
   readFlowRows?: FleetFlowInput["readRows"];
   writeFlowEvent?: FleetFlowInput["writeEvent"];
-  /** W1-T9624 seam: the entry origin/main holds for a feedback id. Absent, {@link readLandedFeedbackEntry}. */
-  readLandedEntry?: (id: string) => FeedbackEntry | null;
+  /** W1-T9624 seam: the entry origin/main holds for a feedback id. Absent, {@link readLandedFeedbackEntryAsync}. */
+  readLandedEntry?: (id: string) => FeedbackEntry | null | Promise<FeedbackEntry | null>;
 };
 
 export interface SreLanePass {
@@ -403,11 +418,17 @@ export async function runSreLanePass(deps: SreLaneInput): Promise<SreLanePass> {
     if (event) events.push(event);
   }
   const evidence = aggregateIncidents(events);
-  const readLanded = deps.readLandedEntry ?? ((id: string) => readLandedFeedbackEntry(deps.root, id));
+  const readLanded = deps.readLandedEntry ?? ((id: string) => readLandedFeedbackEntryAsync(deps.root, id));
   const byFingerprint = new Map(evidence.map((e) => [e.fingerprint, e]));
   const doubled = (fp: string) => interventionCountDoubled(byFingerprint.get(fp)!, store[fp]);
-  const worst = worstOpenIncident(evidence, (fp) => !doubled(fp) &&
-    (fingerprintAlreadyOpen(fp, openOrigins, deps.hasOpenTask) || landedIncidentOpen(fp, readLanded)));
+  // W1-T13368: the landed read is awaited, and one pass asks it once for a fingerprint.
+  const landedOpen = new Map<string, boolean>();
+  const landedIsOpen = async (fp: string): Promise<boolean> => {
+    if (!landedOpen.has(fp)) landedOpen.set(fp, landedEntryOpen(fp, await readLanded(incidentFeedbackId(fp))));
+    return landedOpen.get(fp)!;
+  };
+  const worst = await runStepsAsync(worstOpenIncidentSteps(evidence, (fp) => !doubled(fp) &&
+    (fingerprintAlreadyOpen(fp, openOrigins, deps.hasOpenTask) || landedIsOpen(fp))));
   if (!worst) return { room };
   const refiled = doubled(worst.fingerprint);
 
@@ -416,7 +437,7 @@ export async function runSreLanePass(deps: SreLaneInput): Promise<SreLanePass> {
 
   const frameFiles = deps.framesFor(worst.fingerprint).map((f) => f.file);
   const suspectPrs = suspectPullRequests(await deps.mergedPrsSince(worst.deployShas[0]), frameFiles);
-  const staged = stageFeedbackCapture(deps.root, deps.landingStateRoot, {
+  const staged = await stageFeedbackCaptureAsync(deps.root, deps.landingStateRoot, {
     raw: incidentFeedbackRaw(worst, suspectPrs),
     origin: incidentFeedbackOrigin(worst.fingerprint),
     // A re-filing is its own entry: the first one's id still names the filing that is open or accepted.

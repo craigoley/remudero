@@ -594,6 +594,11 @@ export function readLandedFeedbackEntry(root: string, id: string, git: UpstreamG
   return runStepsSync(readLandedFeedbackEntrySteps(root, id, git, SYNC_CAPTURE_IO));
 }
 
+/** W1-T13368: {@link readLandedFeedbackEntry} with its git awaited, for a daemon-loop caller. */
+export function readLandedFeedbackEntryAsync(root: string, id: string): Promise<FeedbackEntry | null> {
+  return runStepsAsync(readLandedFeedbackEntrySteps(root, id, ASYNC_CAPTURE_IO.git(root), ASYNC_CAPTURE_IO));
+}
+
 function* readLandedFeedbackEntrySteps(root: string, id: string, git: CaptureGitExec, io: CaptureIo): Steps<FeedbackEntry | null> {
   const roots = hostFeedbackRoots(root);
   const landed = yield* landedFeedbackTextSteps(git, root, id);
