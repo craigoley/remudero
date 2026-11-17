@@ -182,6 +182,34 @@ test("W1-T11075: a shadow that fails for another reason, or answers unparseably,
   assert.deepEqual(failed.posted, garbled.posted);
 });
 
+test("W1-T11075: an unreadable suite list ledgers the ci shadow unavailable, asks no shadow, and posts the primary's verdict", async (t) => {
+  const root = tmpRoot(t, JUDGE_ROWS);
+  for (const failure of [new Error("git ls-files exploded"), "plain string failure"]) {
+    const rows = ledger();
+    const spawned: SpawnWorkerArgs[] = [];
+    const posted: string[] = [];
+    rmSync(join(root, "state", CI_JUDGE_HEADS_FILE), { force: true });
+    const result = await judgeCiEscalation(productionCiJudgePorts({
+      owner: "o", repo: "r", repoRoot: root, stateDir: join(root, "state"), log: rows.log,
+      ghJson: async () => [{ number: 7, head: { sha: "abc1234" } }],
+      ghText: async (args) => {
+        if (args.includes("POST")) posted.push(args.find((a) => a.startsWith("description="))!);
+        return args.includes("--name-only") ? "src/a.ts\n" : "diff text";
+      },
+      // The shadow reads the list first (inside `judge`), then the pass reads it to parse the primary: only
+      // the shadow's read fails, so the primary's verdict is still parsed and posted.
+      suiteIds: (() => { let calls = 0; return async () => { if (++calls === 1) throw failure; return KNOWN; }; })(),
+      floor: () => ({ suites: ["test/a.test.ts"], fullRun: false }),
+      spawn: async (args) => { spawned.push(args); return worker(CI_PRIMARY); },
+    }));
+    assert.deepEqual(result.judged, [7]);
+    assert.equal(spawned.length, 1,"no shadow call is made without a suite list");
+    assert.deepEqual(rows.shadowRows().map((row) => [row.step, row.extra.surface, row.extra.reason]),
+      [["judge_shadow.unavailable", "ci-judge", `suite list unreadable: ${failure instanceof Error ? failure.message : failure}`]]);
+    assert.deepEqual(posted, ['description=ci-judge {"add":["test/b.test.ts"],"escalateFull":false}']);
+  }
+});
+
 test("W1-T11075: the fix-progress judge asks no shadow when it has no ledger to write it to", async (t) => {
   const root = tmpRoot(t, JUDGE_ROWS);
   const spawned: SpawnWorkerArgs[] = [];
