@@ -2463,6 +2463,8 @@ export interface TaskFileRefusal {
   timedOut?: true;
   reserved_id?: string;
   id_release?: SetAsideIdRelease["id_release"];
+  /** W1-T13169: why the id was not released, when that cause is not the outcome alone. */
+  id_release_detail?: string;
 }
 
 export interface TaskFilesLandingResult {
@@ -2487,6 +2489,13 @@ export interface LandTaskFilesOpts extends LandFeedbackAsyncOpts {
   stageOnly?: boolean;
   /** The lane the preflight rows name; defaults to the landing's own. */
   lane?: string;
+  /**
+   * W1-T13169: git in the repository that holds `refs/rmd-id`, the public repository. A set-aside or a staging
+   * refusal reads and releases a reservation only there. Absent, the landing uses its own git, which holds the
+   * reservations only when the landing target is the public repository; a landing into the plan destination
+   * with none releases nothing and says why.
+   */
+  reservationGitAsync?: GitExecAsync;
 }
 
 interface StagedTaskFileMeta {
@@ -2595,18 +2604,30 @@ function taskFileRedIsMainCaused(failures: PlanPrPreflightResult["failures"], ba
 
 const greenTaskFileTrees = new Set<string>();
 
-type SetAsideIdRelease = { reserved_id?: string; id_release: ReservationReleaseOutcome | "kept_other_holder" | "kept_main_holds_path" | "no_id" };
+type SetAsideIdRelease = {
+  reserved_id?: string;
+  id_release: ReservationReleaseOutcome | "kept_other_holder" | "kept_main_holds_path" | "no_id";
+  id_release_detail?: string;
+};
+
+/** W1-T13169: why a landing into the plan destination with no git of the public repository releases nothing. */
+const NO_RESERVATION_REPOSITORY = "the landing target is the plan destination, which holds no refs/rmd-id, and no git of the public repository was given";
 
 function taskIdOfTaskFileText(text: string): string | undefined {
   return /^\s*(?:-\s+)?id:\s*["']?(W1-T\d+)["']?\s*$/m.exec(text)?.[1];
 }
 
-/** W1-T12410: free the id of a new task file the landing sets aside. Only a reservation the landing branch holds goes. */
+/**
+ * W1-T12410: free the id of a new task file the landing sets aside. Only a reservation the landing branch holds goes.
+ * W1-T13169, invariant:release-reads-the-reservation-repository: `gitAsync` is git in the repository that holds
+ * `refs/rmd-id`; undefined means the caller has none, so nothing is read and nothing is recorded as released.
+ */
 async function releaseSetAsideTaskIdAsync(
-  gitAsync: GitExecAsync, text: string, landingBranch: string, reason: string, lane: string, log: LandTaskFilesOpts["log"],
+  gitAsync: GitExecAsync | undefined, text: string, landingBranch: string, reason: string, lane: string, log: LandTaskFilesOpts["log"],
 ): Promise<SetAsideIdRelease> {
   const taskId = taskIdOfTaskFileText(text);
   if (taskId === undefined) return { id_release: "no_id" };
+  if (gitAsync === undefined) return { reserved_id: taskId, id_release: "unreadable", id_release_detail: NO_RESERVATION_REPOSITORY };
   const run = async (args: string[]) => {
     try {
       return { status: 0, stdout: await gitAsync(args), stderr: "" };
@@ -2666,6 +2687,9 @@ function* taskFilesLandingSteps(
     const destinationKey = named.outcome === "named" ? `${named.owner}/${named.repo}` : undefined;
     queued = () => readStagedTaskFiles(stateRoot).filter((f) =>
       f.repository === undefined ? repository === undefined || repository !== destinationKey : f.repository === repository);
+    // W1-T13169: the reservations are in the public repository. A landing into the plan destination reads them
+    // only through the git its caller gives for that repository; its own git would ask the destination.
+    const reservationGit = opts.reservationGitAsync ?? (repository !== undefined && repository === destinationKey ? undefined : opts.gitAsync!);
     scratchDir = mkdtempSync(join(tmpdir(), `rmd-${kind.branch}-`));
     const scratch = scratchDir;
     const env = { ...process.env, GIT_INDEX_FILE: join(scratch, "index") };
@@ -2744,7 +2768,7 @@ function* taskFilesLandingSteps(
         const text = readFileSync(file.abs, "utf8");
         idRelease = mainBlob !== null ? { id_release: "kept_main_holds_path" } : JSON.parse((yield {
           run: () => { throw new Error("the task-file landing releases an id only under the async driver"); },
-          runAsync: async () => JSON.stringify(await releaseSetAsideTaskIdAsync(opts.gitAsync!, text, kind.branch, refusal.reason, lane, opts.log)),
+          runAsync: async () => JSON.stringify(await releaseSetAsideTaskIdAsync(reservationGit, text, kind.branch, refusal.reason, lane, opts.log)),
         }) as string) as SetAsideIdRelease;
       }
       const to = join(taskFilesRefusedRoot(stateRoot), file.relPath);
@@ -2766,7 +2790,7 @@ function* taskFilesLandingSteps(
         if ((baseBlob === null || mainHoldsBytes) && input.newFile === true && extra.timedOut !== true && !existsSync(join(taskFilesPendingRoot(stateRoot), relPath))) {
           idRelease = JSON.parse((yield {
             run: () => { throw new Error("the task-file landing releases an id only under the async driver"); },
-            runAsync: async () => JSON.stringify(await releaseSetAsideTaskIdAsync(opts.gitAsync!, content, kind.branch, reason, lane, opts.log)),
+            runAsync: async () => JSON.stringify(await releaseSetAsideTaskIdAsync(reservationGit, content, kind.branch, reason, lane, opts.log)),
           }) as string) as SetAsideIdRelease;
         }
         result.refused.push({ path: relPath, reason, ...extra, ...idRelease });

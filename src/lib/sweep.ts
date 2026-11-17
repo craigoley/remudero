@@ -3194,6 +3194,10 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       ...pr, ...(target.checkoutDir === repoDir ? {} : { codeRoot: repoDir, bodyProofRoot: "plan" as const }),
     }, { log }),
     ...(deps.planRepairGitImpl ? { git: (args: string[]) => planRepairGit("git", ["-C", target.checkoutDir, ...args]) } : {}),
+    // W1-T13169: task ids are reserved in the public repository, so a landing into the plan destination releases one there.
+    ...(target.checkoutDir === repoDir ? {} : {
+      reservationGitAsync: async (args: string[]) => (deps.planRepairGitImpl ?? defaultGitCaptureAsync)("git", ["-C", repoDir, ...args]),
+    }),
     ...(deps.ghJsonImpl ? { gh: (args: string[]) => {
       const out = ghJsonForBuild(args);
       return typeof out === "string" ? out : JSON.stringify(out);

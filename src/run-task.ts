@@ -28320,6 +28320,8 @@ export async function gardenCheckoutAsync(opts: GardenCheckoutOpts): Promise<Gar
     // W1-T12221: the seal is async only, as the landing of W1-T12199 is.
     ...(opts.taskFilesLanding ? { landTaskFiles: (inputs: TaskFileInput[], at?: PlanDestinationRepository) => landTaskFilesAsync(at?.checkoutDir ?? opts.repoDir, inputs, {
       ...opts.taskFilesLanding!, targetRepository: at ? { owner: at.owner, repo: at.repo } : { owner: opts.owner, repo: opts.repo }, log: opts.log, lane: opts.name,
+      // W1-T13169: the id was reserved in the public repository, so a destination landing releases it there.
+      ...(at ? { reservationGitAsync: (args: string[]) => gitAt(opts.repoDir)(...args) } : {}),
     }) } : {}),
     openDestination: async (at) => {
       const destRoot = join(opts.worktreesRoot, `${branch}-plan-destination`);
