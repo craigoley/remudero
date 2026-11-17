@@ -4,7 +4,7 @@
 // dir holding a `daemon-install` fixture built with the shared gitRepo helper.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -28,7 +28,7 @@ interface Fixture {
   install: string;
   env: Record<string, string>;
   cron: () => string;
-  run: (args: string[]) => ReturnType<typeof spawnSync<string>>;
+  run: (args: string[]) => SpawnSyncReturns<string>;
   cleanup: () => void;
 }
 
