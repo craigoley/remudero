@@ -38,7 +38,7 @@ permissions:
 jobs:
   mutation-nightly:
     name: mutation-nightly (full src/** scope, sampled + rotated)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     # R-50: 240m/4h — measured across recent scheduled runs (17.5-124 minutes, including one
     # legitimate non-timeout failure at 124m) and matched to this file's own ~4-hour full-tree
     # estimate above, with headroom so a real run is never truncated before its own verdict.

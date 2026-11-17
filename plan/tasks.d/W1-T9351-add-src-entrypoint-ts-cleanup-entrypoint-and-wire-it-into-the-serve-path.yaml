@@ -6,8 +6,8 @@
   verify: auto
   risk: high
   band_meaning: span
-  priority: 4
-  status: queued
+  status: blocked
+  retirement: retired  # its only dependency W1-T9350 is retired unbuilt (premise rotted: no .js file under src/), so the cleanup this task would wire in will never exist; operator approval 2026-11-17 (#12008)
   # backlog gardener: band=4 evidence=420aaec5a6f41d32
   attempts: 0
   files:
@@ -29,3 +29,10 @@
   
     CodeQL-Snapshot:
     {"proposalId":"codeql-quality:js/useless-expression","ruleId":"js/useless-expression","alertNumbers":["357"]}
+  note: |
+    CLOSED UNBUILT 2026-11-17 (operator approval, escalation #12008): retired with its only dependency
+    W1-T9350, whose premise rotted (the declared scope `src/**/*.js` holds zero files on main, so there is
+    no js/useless-expression cleanup to run). This task would add a serve-path entrypoint that calls that
+    cleanup. Re-verified on origin/main cbb96bc8d: no `.js` file exists under src/ (764 `.ts` files do),
+    src/entrypoint.ts does not exist, and `cleanUselessExpressions` has no hit under src/, test/ or
+    scripts/. No task depends on W1-T9351.

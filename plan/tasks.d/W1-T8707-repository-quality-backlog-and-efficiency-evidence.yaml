@@ -11,9 +11,6 @@
   origin: "operator console graph approval 2026-10-12; measure automated flow and self improvement"
   plan_refs: [W1-T5904, W1-T7421, W1-T8533, W1-T8667, W1-T4950]
   files: [src/lib/repository-flow.ts, src/lib/repository-flow-history.ts, src/lib/pr-open.ts, src/lib/sweep.ts, src/lib/read-model-worker.ts, src/lib/analytics-view.ts, openapi/daemon.yaml, packages/api-client/src/schema.d.ts, test/repository-flow-quality.test.ts, test/repository-flow-history.test.ts, test/repository-flow-quality-wiring.test.ts]
-  # refusal-amendment (W1-T8707, run W1-T8707-1792473097713, 2026-10-21T15:10:26.790Z): the worker refused criterion 1 [proof-unexecutable-at-head] — proposed re-scope-criteria: repair the criterion's proof so it is executable at HEAD, or re-scope the criterion
-  #   worker evidence: W1-T8707: a filed proof already passes at the merge base, so branch run-W1-T8707-1792473097713 cannot open a PR
-  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   rationale: |
@@ -96,3 +93,14 @@
     than a volume target. https://docs.github.com/en/rest/checks/runs and
     https://docs.github.com/en/rest/pulls/pulls distinguish current commit checks, attempts and
     paginated PR history; those API clocks must not be replaced with application discovery time.
+    HOLD LIFTED 2026-11-17 (operator approval, escalation #13070). No claim or proof changes. The opener
+    refused run W1-T8707-1792473097713 on 2026-10-20 because it executed criterion 6's proof
+    (`captureRepositoryFlow(` in src/lib/read-model-worker.ts), which passes at the merge base. Criterion 6
+    was already credited `satisfied_by: "#11180"` (set by #12344 on 2026-10-16); the opener of that day ran
+    credited criteria too. W1-T10087 (#13367, merged 2026-10-21) made it execute only the remaining
+    criteria, so the refusal cannot recur, but the hold stayed because #13379 added only a comment.
+    Checked on origin/main cbb96bc8d with `rmd check-proof <proof> --base origin/main`: criteria 1 to 5
+    miss (their three test files do not exist), criterion 7 misses (0 hits in src/lib/sweep.ts), and only
+    the credited criterion 6 passes on both trees. The work exists only on the kept branch
+    run-W1-T8707-1792473097713 (head 94374a931: 9 files, +946, the five tests named above and criterion 7's
+    call). That branch now conflicts with main on src/lib/sweep.ts and scripts/comment-load-baseline.json.

@@ -23,7 +23,7 @@ permissions:
 jobs:
   probe-path-filter:
     name: probe-path-filter
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     # R-50: a fast, single-file probe suite; 20m bounds a genuine hang with generous headroom.
     timeout-minutes: 20
     steps:

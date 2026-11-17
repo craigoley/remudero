@@ -409,3 +409,43 @@ test("W1-T8572: the revert body proves the revert with executable proofs", () =>
   assert.deepEqual(parseAcceptanceBlock(bodies.withTests).map((c) => c.proof), [`unit test: ${SPENT_CHECK_TEST}`]);
   assert.deepEqual(parseAcceptanceBlock(bodies.withDiff).map((c) => c.proof), ["grep: recorded 33/53 before it in census.txt"]);
 });
+
+test("W1-T13351: a worker proof the gate would grade stale at the base is replaced by a grep of the repair before the PR opens", async () => {
+  const STALE_SUITE = "test/proof-spawner-env-isolation.test.ts";
+  const req = { ...request([SPENT_CHECK_TEST]), failingTestTitles: [] };
+  const h = harness((bodyFile) => {
+    const body = readFileSync(bodyFile, "utf8");
+    writeFileSync(bodyFile, body.replace(MAIN_REPAIR_ACCEPTANCE_PLACEHOLDER, `- the red suite passes again | unit test: ${STALE_SUITE}`));
+    return "REPORT\nPUSHED: fixture\n";
+  });
+  const graded: string[] = [];
+  h.deps.repairProofGrader = () => async (proof) => {
+    graded.push(proof);
+    return proof.startsWith("unit test:") ? "stale" : "discriminates";
+  };
+  try {
+    assert.equal(await h.run(req), FIX_PR);
+    assert.deepEqual(graded, [`unit test: ${STALE_SUITE}`], "the opened body's proof was graded at the base");
+    assert.deepEqual(parseAcceptanceBlock(h.opened[0]!.body!).map((c) => c.proof), ['grep: "refresh\\.clearance", in src/lib/ledger.ts']);
+    const row = rowsOf(h.ledgerPath, "main-repair.stale_proofs").at(-1);
+    assert.deepEqual(row?.stale_proofs, [`unit test: ${STALE_SUITE}`]);
+    assert.equal(row?.resolution, "rewritten");
+    assert.equal(row?.anchor, 'grep: "refresh\\.clearance", in src/lib/ledger.ts');
+  } finally { h.cleanup(); }
+});
+
+test("W1-T13351: a repair body whose merge base cannot be read opens as written and says it was not graded", async () => {
+  const req = { ...request([SPENT_CHECK_TEST]), failingTestTitles: [] };
+  const h = harness((bodyFile) => {
+    const body = readFileSync(bodyFile, "utf8");
+    writeFileSync(bodyFile, body.replace(MAIN_REPAIR_ACCEPTANCE_PLACEHOLDER, `- it passes | unit test: ${SPENT_CHECK_TEST}`));
+    return "REPORT\nPUSHED: fixture\n";
+  });
+  h.deps.repairProofGrader = () => undefined;
+  try {
+    assert.equal(await h.run(req), FIX_PR);
+    assert.deepEqual(parseAcceptanceBlock(h.opened[0]!.body!).map((c) => c.proof), [`unit test: ${SPENT_CHECK_TEST}`]);
+    assert.equal(rowsOf(h.ledgerPath, "main-repair.proofs_ungraded").length, 1);
+    assert.equal(rowsOf(h.ledgerPath, "main-repair.stale_proofs").length, 0);
+  } finally { h.cleanup(); }
+});

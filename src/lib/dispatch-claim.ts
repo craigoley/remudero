@@ -622,6 +622,9 @@ export function gitClaimRunnerAsync(
     });
 }
 
+/** W1-T13201: the darwin start this process's first good production read derived; never written to disk. */
+let darwinNamespaceBootMs: number | undefined;
+
 /**
  * W1-T2784: epoch ms this PID namespace's init started, or `undefined` on bad input — declines
  * arm 3 rather than guessing. On linux and every platform but darwin, `/proc/stat`'s `btime` plus
@@ -643,8 +646,14 @@ export function readNamespaceBootMs(
   } = {},
 ): number | undefined {
   if ((deps.platform ?? process.platform) === "darwin") {
+    // W1-T13201: the clock and the uptime are two reads, so a fresh derivation moves by milliseconds between
+    // calls. A production read keeps its first good value for the process; an injected reader computes fresh.
+    const injected = Object.values(deps).some((reader) => reader !== undefined);
+    if (!injected && darwinNamespaceBootMs !== undefined) return darwinNamespaceBootMs;
     const bootMs = Math.round((deps.nowMs ?? (() => systemClock.now()))() - (deps.uptimeSec ?? uptime)() * 1000);
-    return Number.isFinite(bootMs) && bootMs >= 0 ? bootMs : undefined;
+    if (!Number.isFinite(bootMs) || bootMs < 0) return undefined;
+    if (!injected) darwinNamespaceBootMs = bootMs;
+    return bootMs;
   }
   const read = deps.readFile ?? ((p: string) => readFileSync(p, "utf8"));
   try {

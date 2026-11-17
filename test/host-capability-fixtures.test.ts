@@ -250,6 +250,10 @@ const DECLARED: readonly Declared[] = [
     reason: "Restores the same ownership inode to its supported private mode after the uid-independent publication-policy refusal. Subsequent real directory/link/identity controls are positive; this is not an OS denial fixture.",
   },
   {
+    kind: "chmod", file: "fix-lane/an-operator-recovers-a-stale-fix-dispatch-once.test.ts", key: "0o644", count: 1,
+    reason: "The recovery test changes a receipt's mode to exercise the explicit owner-only metadata refusal; it asserts stored mode policy, not an OS read denial, so it remains valid under uid 0.",
+  },
+  {
     kind: "chmod", file: "heavy-ready-startup.test.ts", key: "0o644", count: 1,
     reason: "The startup reader rejects group/world-readable file stat modes before parsing, independent of OS read privileges. This fixture asserts the explicit privacy policy, not EACCES, so uid 0 cannot turn it into a readable-success case.",
   },

@@ -1,0 +1,76 @@
+- id: W1-T13353
+  title: "Every workflow job runs on a pinned runner image (ubuntu-26.04), never a moving -latest label, and a rule test refuses a new -latest label"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # one concern, the runner label of every CI job; a wrong label stalls every check
+  origin: "operator-session#ubuntu-2604-main-red-2026-11-17"
+  plan_refs:
+    - W1-T13351
+  files:
+    - .github/workflows/acceptance-author-gate.yml
+    - .github/workflows/acr-build.yml
+    - .github/workflows/ci-gate.yml
+    - .github/workflows/ci.yml
+    - .github/workflows/clock-sweep.yml
+    - .github/workflows/codeql.yml
+    - .github/workflows/coverage-nightly.yml
+    - .github/workflows/coverage-session-blanking.yml
+    - .github/workflows/dependency-review.yml
+    - .github/workflows/docs-index-check.yml
+    - .github/workflows/fleet-heartbeat-watch.yml
+    - .github/workflows/gate-monotonic.yml
+    - .github/workflows/head-identity-gate.yml
+    - .github/workflows/main-plan-guard.yml
+    - .github/workflows/main-tripwire.yml
+    - .github/workflows/merge-queue-review-attest.yml
+    - .github/workflows/mutation-nightly.yml
+    - .github/workflows/osv-scanner-pr.yml
+    - .github/workflows/pr-title-lint.yml
+    - .github/workflows/probe-path-filter.yml
+    - .github/workflows/proof-discrimination-gate.yml
+    - .github/workflows/recovery-drill.yml
+    - .github/workflows/scorecard.yml
+    - .github/workflows/security-merge-policy.yml
+    - .github/workflows/unwired-gate.yml
+    - scripts/census-precheck.mjs
+    - test/census-precheck-runs-the-admitted-census-suites.test.ts
+    - test/rules/every-workflow-job-runs-on-a-pinned-runner-image.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "No runs-on line in .github/workflows names a -latest label; the rule test reads every workflow file with a positive control on the file and line counts"
+      proof: "grep: W1-T13353 criterion 1 in test/rules/every-workflow-job-runs-on-a-pinned-runner-image.test.ts"
+    - claim: "The census reads quoted and unquoted labels and flags each -latest one"
+      proof: "grep: W1-T13353 criterion 2 in test/rules/every-workflow-job-runs-on-a-pinned-runner-image.test.ts"
+    - claim: "ci.yml's jobs run on ubuntu-26.04"
+      proof: 'grep: runs-on: ubuntu-26\.04 in .github/workflows/ci.yml'
+    - claim: "invariant:no-runner-change-today — every job that ran on ubuntu-latest runs on ubuntu-26.04, the image ubuntu-latest resolves to today, and the rule test's line count still finds every runs-on line"
+      proof: "grep: positive control: runs-on lines were found in test/rules/every-workflow-job-runs-on-a-pinned-runner-image.test.ts"
+  rationale: |
+    OBSERVED 2026-11-17: GitHub moved ubuntu-latest from ubuntu-24.04 (image 20261111.370.1) to ubuntu-26.04
+    (20261111.196.1) between main runs 44006635512 (green, c5627aef8) and 44008977154 (red). The only commit between them
+    was #19000, a one-test fixture change. The 26.04 image ships bwrap, so the proof sandbox started running in CI and
+    test/proof-spawner-env-isolation.test.ts failed every ci-shard run until #19011 merged (05:16Z). The red-main lane
+    blamed #19000 and opened two reverts of it (#19020, #19028). 56 runs-on lines in 25 workflows used ubuntu-latest.
+    Main has been green on ubuntu-26.04 since e4ab090b3 (run 44022915015), so pinning that image changes no runner today.
+    A pinned label makes the next image move a reviewed PR with its own CI run, not a red main with no diff to blame.
+    The two Semgrep workflows already pin ubuntu-24.04 on purpose and keep it.
+  design: |
+    1. Replace every `runs-on: ubuntu-latest` in .github/workflows with `runs-on: ubuntu-26.04`. Leave the Semgrep pins.
+    2. test/rules/every-workflow-job-runs-on-a-pinned-runner-image.test.ts reads every workflow file and fails on a
+       runs-on label ending in -latest, with positive controls on the file and line counts.
+    3. scripts/census-precheck.mjs: every-workflow-job-runs-on-a-pinned-runner-image.test.ts gets a
+       PRECHECK_PATH_TRIGGERED_SUITES row (so PRECHECK_PARITY models it), run before a push that changes
+       .github/workflows or the suite itself.
+    INVARIANT no-runner-change-today: every job that ran on ubuntu-latest runs on the image ubuntu-latest resolves to
+    today (ubuntu-26.04); no job moves to a different image and no job is added or removed.
+  falsifier: |
+    At origin/main the rule test fails: 56 runs-on lines name ubuntu-latest.
+  note: |
+    Reserved with rmd next-task-id --count 3 --branch claude/project-thread-7ycldf (2026-11-17 11:40Z). Out of scope:
+    src/lib/project-init.ts still writes ubuntu-latest into workflows it generates for onboarded repos.

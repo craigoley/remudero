@@ -113,6 +113,7 @@ real self-sync re-exec sets on its own child, so it skips the whole check, not e
 | `rmd dep-review <pr-number> [--repo <name>]` | Deterministic Dependabot-PR review lane: minor/patch → arm auto-merge; major (or unparseable) → escalate; source outside manifests → refuse. |
 | `rmd receipt <pr> [--repo <name>]` | Print a **deterministic in-toto-style run receipt** for `<pr>`'s task, assembled purely from ledger ground truth (`src/lib/receipt.ts`'s `buildReceipt`, W1-T71, ratifies P17). Resolves the task id from the PR body's `Remudero-Task:` trailer — the same extractor `rmd review` uses — refusing rather than guessing when none resolves. Every field with no ledger source for this run prints `null` with a named reason, never a fabricated value; Sigstore signing and the published schema doc are deferred v2 rungs. Read-only: writes no ledger line, posts nothing. |
 | `rmd risk-judge-eval [--corpus <dir>]` | Replay the privacy-safe offline risk-judge disposition corpus and report deterministic agreement, fallback, and false-stop calibration metrics (W1-T3800). No LLM, network, ledger, repair, debt, or production routing is performed; a missing corpus is a refusal rather than a clean zero. |
+| `rmd cash-reconcile --day <YYYY-MM-DD> --export <csv>` | Reconcile one UTC day of metered cash cost against an Azure actual-cost export file (W1-T10858). Compares, per deployment and per meter (input, cached input, output), tokens times the `OPENWEIGHT_PRICES` row with the export's billed cost, takes the noise band from the same day's Azure OpenAI deployments, and writes one `cash.invoice.reconciled` row per open-weight deployment. Sends no request. See [Reconciling cash against the Azure bill](#reconciling-cash-against-the-azure-bill-w1-t10858). Exit 0 reconciled, 1 failed, 2 bad usage. |
 | `rmd judge-replay --model <id> --corpus <machine-judge-probes\|risk-judge-dispositions\|all>` | Replay the judge corpora through one named model in ONE paid Anthropic Message Batch (W1-T12418). The daemon sends it through the secret boundary; the batch reserves at the batch price against the daily cash cap and settles from each result's usage. A case the risk-judge scrub flags is refused, because batch prompts and results are kept for 29 days. It writes one `judge_replay.answered` row per result and one `judge_replay.batch` row; no live judge, gate or route reads them. Exit 0 ended, 1 refused, failed or unsettled, 2 bad usage. `--lane direct --candidate <name>` (W1-T12421) sends the same corpora to a `decision_models` candidate or a priced cash deployment, one request per case and one case at a time inside the deployment's learned per-minute limit. It refuses to start when the corpus estimate is above the $1.00 replay ceiling, counts a case above the input limit as too large, stops on a 429 that stays after one retry or on a budget refusal, and writes one `judge_replay.finished` row. |
 | `rmd replay <since> <until> [--task <id>] [--step <prefix>]` | Print a **deterministic, plain-text narration of a ledger window** (W1-T2296): between two ISO-8601 instants, what did the fleet decide, in what order, and for what recorded reasons — reusing `buildReceipt`'s discipline (`src/lib/ledger-replay.ts`'s `buildReplay`) over a window instead of a run. Reads the archive∪live union (`resolveLedgerUnion`, never the live `ledger.ndjson` alone), filters to `[since, until]` inclusive, orders by each row's own `ts`, and renders every row's own `outcome`/`reason` fields — a field the row does not carry prints `absent (no "<field>" field on this row)`, never a fabricated value. `--task` narrows to one task id; `--step` narrows to one step-name prefix (a family, e.g. `automerge.`). A partial ledger corpus (zero archives, or a rotation found and unreadable) is refused, never narrated as a shorter story. Read-only: writes no ledger line, no state file, posts nothing. |
 | `rmd replay-goldens --confirm-spend --ledger <path> [--limit N]` | Replay the seeded goldens through the harness and record the `replay.result` lines the retro's Self-Harness leg reads (W1-T2689). The golden-replay leg shipped with a corpus, a seam, a driver, an emitter and a retro consumer and NO production caller, so `replayGoldens` had zero callers outside tests and the leg reported *no replay run recorded* by construction. **Unlike every other retro rung this SPENDS REAL MONEY** — it dispatches workers against the sandbox — so it is opt-in per invocation (`--confirm-spend`, deliberately not an env var or config default, so a retro tick, CI job or test spawn cannot inherit it) and bounded by a declared ceiling `boundedCorpus` clamps to even against a larger `--limit`. `--ledger` is required: a spend that records nothing is worse than one that never ran, so it refuses rather than guessing at a shared path. `--limit 0` dispatches nothing and writes nothing, on purpose — the retro must still be able to render *no run recorded*, never a fabricated 0%. Exit 0 when every replayed golden matched, 1 when any regressed, 2 on any refusal. |
@@ -184,6 +185,7 @@ real self-sync re-exec sets on its own child, so it skips the whole check, not e
 | `rmd doctor [--json]` | ONE **local, read-only** health check with a meaningful exit code — `0` OK / `1` any WARN / `2` any FAIL, with bad args exiting `64` so exit 2 always means a check failed and never a typo. **No network and no healthy daemon required**: every check reads the ledger, `state/`, `plan/`, `/proc` or `ps`, so it answers from a cold ssh session while `remudero-serve` is down and the API budget is exhausted — which is exactly when the console-side checks are unavailable. Checks: ledger freshness (newest `daemon.*` row vs two poll intervals), dispatch stall (eligible pool vs THIS host's own observed cadence), dispatch liveness (consecutive `daemon.alive` rows stuck in the sweep phase), pause honoured (a `PAUSE` held while dispatch continued), lock-vs-process divergence, lane-less workers, stale git `index.lock` (report only), disk headroom, and memory/swap from `/proc/meminfo` — never a container's cgroup limit, since the freeze was the host's and one container's `memory.max`/`memory.high` headroom cannot show a host that had already frozen. Every check prints its measured value beside its threshold, with one summary line first, short enough for a cron subject. **Read-only: `--fix` is refused by name**, because every repair path already has an owner and a second actor mutating state a live daemon depends on is the measured hazard. |
 | `rmd sweep [--repo <name>] [--dry-run]` | Level-triggered PR-pipeline reconciler: re-derives every open PR's disposition and takes the one gated action (arm merge, fix, close, or escalate). The daemon runs this every poll. |
 | `rmd fix <pr-number> [--repo <name>]` | Operator verb for the fix rung sweep uses — manual override to drive a stuck PR through the same fix path. |
+| `rmd pr-owner-recover <pr-number> --authorize ...` / `--apply --authorization <id>` | Admin-only recovery for one stale fix dispatch. Authorization binds the exact PR, task, run, round, head, base and live branch; apply preserves existing work and holds when process or checkout evidence is unknown. |
 | `rmd case-file <task-id> [--json]` | Read-only, source-stamped task evidence from the local ledger union and current GitHub PR head. Assignment, review, CI, merge, deployment and runtime remain separate; missing evidence is shown as unavailable. |
 | `rmd wipe-test <task-id> [--repo remudero-sandbox] [--allow-non-sandbox]` | The P12 learning-utility A/B harness: runs `<task-id>` twice — normal learnings injection vs masked — and ledgers the turn/cost/verdict/strike deltas. Sandbox-only by default; refuses any other `--repo` (including the primary repo) without `--allow-non-sandbox`. |
 | `rmd ops [--dry-run]` | Alert intake: polls code-scanning/Dependabot/secret-scanning alerts, escalates every new critical/high exactly once, captures a feedback entry per open alert. |
@@ -2148,6 +2150,60 @@ ssh remudero 'set -e; umask 077; f="$HOME/.config/remudero-container/config.json
 Then carry the named key itself (`RMD_CASH_EASTUS_API_KEY`) into the daemon environment the same
 way the existing `RMD_OPENWEIGHT_API_KEY`/`RMD_FOUNDRY_CLAUDE_API_KEY` secrets are carried (see
 "Foundry Opus cash emergency" above) — never as a config field.
+
+### Reconciling cash against the Azure bill (W1-T10858)
+
+The fleet prices every cash request from the `OPENWEIGHT_PRICES` list price. For the Azure OpenAI
+deployments (the rows with `unbilledAzureOpenAi429`) that has matched the bill. For the open-weight
+deployments (DeepSeek, Kimi and the other rows without that flag) Microsoft Q&A reports bills far
+above the list price on cached tokens (W1-T3695). So an open-weight arm cannot lead a cash row on its
+list price alone: the deployment bake-off proposal marks it **not eligible to lead** until its newest
+invoice verdict is `reconciled`, and states the verdict and its figures. Ranking and routing do not
+change.
+
+**What the reconciler does.** For one UTC day it reads the day's cash receipts from the ledger union
+and an Azure Cost Management actual-cost export file, and compares per deployment and per meter
+(input, cached input, output) the metered cost (tokens times the price row) with the billed cost (the
+export rows for the deployment's account and meter). The account is the first host label of the
+deployment's cash endpoint; the meter is matched by the model's meter-name stem
+(`INVOICE_METER_STEMS` in `src/lib/cash-invoice-reconcile.ts`, else the deployment id). The noise band
+is the largest divergence among the same day's Azure OpenAI deployments that carried traffic and have
+export rows. It is measured each day, never a constant. Each open-weight deployment gets one
+`cash.invoice.reconciled` row:
+
+- `reconciled`: every meter is inside the band.
+- `diverged`: a meter is outside the band; the row names the meter, the metered and billed dollars,
+  and the band.
+- `unreconcilable`: no traffic that day, no control deployment that day, no export rows for it, or
+  incomplete receipts. A reconciliation never sends a request to make traffic.
+
+**One-time setup: a daily actual-cost export.** Run this once from a session signed in to the
+subscription that holds the cash accounts (it needs the `costmanagement` CLI extension and a storage
+account you own):
+
+```bash
+az costmanagement export create --name rmd-daily-actual-cost --type ActualCost \
+  --scope "subscriptions/<subscription-id>" \
+  --storage-account-id "/subscriptions/<subscription-id>/resourceGroups/<rg>/providers/Microsoft.Storage/storageAccounts/<storage-account>" \
+  --storage-container cost-exports --storage-directory remudero \
+  --timeframe MonthToDate --recurrence Daily \
+  --recurrence-period from="2026-11-17T00:00:00" to="2027-11-17T00:00:00" \
+  --schedule-status Active
+```
+
+Azure writes one CSV a day under `cost-exports/remudero/` in that storage account. The file needs
+the columns `Date`, `ResourceId`, `MeterName` and `CostInUsd` (or `CostInBillingCurrency` with a
+`BillingCurrency` of USD); a file without them is refused by name.
+
+**Where the file lands.** Copy the newest CSV to `<state>/cost-exports/` on the daemon host (the
+daemon's state directory; subdirectories are read too). Moving the file there is a manual step: this
+task does not automate the export's delivery to the host. The measurement cadence then reconciles the
+newest `.csv` there (by modification time) for the newest day in it before today, once per day and
+file, and writes `cash.invoice.reconcile_failed` with the reason when it cannot. To run it by hand:
+
+```bash
+rmd cash-reconcile --day 2026-11-16 --export <state>/cost-exports/<file>.csv
+```
 
 ### One fleet cash cap across core, site, and console
 

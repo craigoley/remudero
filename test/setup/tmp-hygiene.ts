@@ -42,6 +42,7 @@ import { TEST_PROCESS_MARKER } from "../../src/lib/tmp.js";
 import { reapableTmpPrefix } from "./reapable-prefix.js";
 import { LIVE_WRITE_SENTINEL_TOKEN } from "../../src/lib/live-write-guard.js";
 import { setTestFileSlotScope } from "../../src/lib/test-slot.js";
+import { reopenProcessExitLatches } from "../../src/lib/process-exit-latches.js";
 import { fixtureRetentionReason } from "./retained-fixtures.js";
 import { installLinuxCommandContract } from "./linux-command-contract.js";
 
@@ -73,8 +74,15 @@ if (isMainThread && runsTestFilesInThisProcess()) {
   }
   if (!GITHUB_PUSH_PREFIXES.every((prefix) => pushPrefixes.has(prefix))) missing.push("dead push URL config");
   if (missing.length > 0) throw new Error(`pooled test containment missing: ${missing.join(", ")}`);
+  // W1-T13363: a daemon exit in one pooled file left direct merges refused in every later file. Reopen each named
+  // exit latch when the pool moves on to a new file, as a fresh process per file would.
+  let latchFile: string | undefined;
   beforeEach((context) => {
     if (context.filePath !== undefined) setTestFileSlotScope(context.filePath);
+    if (context.filePath !== undefined && context.filePath !== latchFile) {
+      latchFile = context.filePath;
+      reopenProcessExitLatches();
+    }
   });
 }
 
