@@ -1,0 +1,110 @@
+- id: W1-T13501
+  title: "The judge gardener spares fail-closed judges and reads shadow rows: no cash proposal for a judge that fails closed, and one edit that keeps the shadow arm of the ci and fix-progress rows"
+  repo: remudero
+  depends_on:
+    - W1-T12187
+  priority: 1.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19: two files, one concern. The gardener and the fail-closed guard test must read one list; the gardener only proposes, and this narrows what it proposes
+  band_meaning: span
+  origin: "operator-session#judge-gardener-2026-11-17"
+  plan_refs:
+    - W1-T12187
+    - W1-T13364
+    - W1-T11075
+  files:
+    - src/lib/config-gardener.ts
+    - test/an-open-weight-provider-rides-the-capability-ladder.test.ts
+    - test/routing/the-judge-gardener-spares-fail-closed-judges-and-reads-shadow-rows.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "invariant:no-cash-for-a-fail-closed-judge — a risk_judge row on one line, of the lowest tier, with no provider, whose shadow record clears JUDGE_CASH_BAR (at least 200 paired calls, agreement 0.98 or more, no usable answer 0.02 or less) gets no move-judge-to-cash proposal, from judgeCashCandidate and from the gardener's full candidate list. The same record for feedback_summary, which fails open, still gets exactly one proposal"
+      kind: guard
+      proof: "grep: W1-T13501 criterion 1 in test/routing/the-judge-gardener-spares-fail-closed-judges-and-reads-shadow-rows.test.ts"
+    - claim: "invariant:one-list-of-fail-closed-judges — src/lib/config-gardener.ts exports FAIL_CLOSED_JUDGE_ROWS, which holds risk_judge and ruling_judge. judgeCashCandidate in that file and the fail-closed guard in test/an-open-weight-provider-rides-the-capability-ladder.test.ts both read it, and the guard checks each name in it: the row is absent or its line names no provider, and the parsed row has no provider. Neither file keeps its own literal list of fail-closed row names"
+      kind: guard
+      proof: "grep: W1-T13501 criterion 2 in test/routing/the-judge-gardener-spares-fail-closed-judges-and-reads-shadow-rows.test.ts"
+    - claim: "invariant:a-shadow-row-keeps-its-shadow — the real ci_judge line of .remudero/mounts.yaml, with a shadow record above the bar, gets exactly one edit. `from` is that whole line, `to` puts `provider: cash` before the `shadow:` key, and the file with that one line replaced passes loadMounts with ci_judge.provider equal to cash and ci_judge.shadow.deployment equal to DeepSeek-V4-Flash. The same holds for the real fix_progress_judge line"
+      proof: "grep: W1-T13501 criterion 3 in test/routing/the-judge-gardener-spares-fail-closed-judges-and-reads-shadow-rows.test.ts"
+    - claim: "A row that is not one line with at most one nested mapping gets no proposal: a row written over several lines, a row with two levels of nested braces, and a one-line row that already names any provider are each refused. A flat one-line row with no provider still gets the edit it gets today, `provider: cash` added before the closing brace"
+      proof: "grep: W1-T13501 criterion 4 in test/routing/the-judge-gardener-spares-fail-closed-judges-and-reads-shadow-rows.test.ts"
+  rationale: |
+    WHY: W1-T12187 (PR #19180, in review) adds the `move-judge-to-cash` class to the config gardener. It has two
+    defects.
+    1. It can propose `provider: cash` for the risk judge. The risk judge fails closed: when it cannot answer
+       it escalates. A flaky cash deployment would then make escalations that nobody needs. The fleet's own
+       fix commit on that branch (3b6e550819) makes the guard test refuse any provider on the `risk_judge:`
+       row. So a gardener proposal for the risk judge is a pull request that CI must fail.
+    2. It never proposes for the ci judge or the fix-progress judge. Their rows hold a nested
+       `shadow: { ... }` mapping, and the line check refuses any nested brace.
+    READ at PR #19180 head 3b6e550819 (branch run-W1-T12187-1794943717000), origin/main f4026a110e:
+    - src/lib/config-gardener.ts:166-168: JUDGE_ROLE_ROWS maps the four shadowed roles to risk_judge,
+      feedback_summary, ci_judge and fix_progress_judge.
+    - src/lib/config-gardener.ts:659-672: judgeCashCandidate. :670 accepts only a line that matches
+      /^\w+: \{[^{}]*\}\s*$/. :671 skips a row already on cash or not of the lowest tier, and nothing else. :672
+      removes any provider the row names and adds `, provider: cash` before the last brace.
+    - src/lib/config-gardener.ts:726: judgeCashCandidate is one of the four candidates of the gardener's pass.
+    - .remudero/mounts.yaml:511-519 (branch): the new one-line `risk_judge` and `feedback_summary` rows. Neither
+      names a provider.
+    - .remudero/mounts.yaml:494-500 (main, W1-T13364): `ci_judge: { model: haiku, effort: low, max_turns: 400,
+      context_budget: 60000, shadow: { deployment: DeepSeek-V4-Flash } }`, and the same for
+      `fix_progress_judge`. The comment says to keep each row on one line.
+    - src/lib/mounts.ts:115-128: CashShadowArm and JudgeMount. :297 parseJudgeMount. :764-768 parses the four
+      judge rows.
+    - test/an-open-weight-provider-rides-the-capability-ladder.test.ts:907-939 (branch): the fail-closed guard.
+      It names risk_judge and ruling_judge in literal regular expressions and messages: the `risk_judge:` line
+      must name no provider, the parsed row must have none, and no `ruling_judge:` row may exist.
+    Which judges fail closed (grep for FAIL_CLOSED and "fails closed" in src/lib):
+    - The risk judge does. src/lib/risk-judge.ts:18-19 (unavailable means escalate) and :1130-1133 (a spawn
+      error, a timeout or a thrown rejection becomes a `high` verdict).
+    - The ruling judge does. src/lib/ruling-judge.ts:75-79, FAIL_CLOSED_RULING_VERDICT is `escalate`. It has no
+      mounts row and the gardener does not read it, but the guard names it.
+    - The decision summary fails open: src/lib/feedback.ts:236-238 (a failure gives `null`).
+    - The ci judge fails open: src/lib/ci-escalation-judge.ts:109-114 (no reply or a malformed reply keeps the
+      floor).
+    - The fix-progress judge fails open: src/lib/fix-progress-judge.ts:664-671 (an unparseable reply lets the
+      round run; an error gives `unavailable`).
+    - Other FAIL_CLOSED names in src/lib (flight-judge.ts:230) belong to judges the gardener does not read.
+    So, of the four rows the gardener reads, only risk_judge fails closed.
+  design: |
+    INVARIANT no-cash-for-a-fail-closed-judge: the config gardener never proposes `provider: cash` for a row named in FAIL_CLOSED_JUDGE_ROWS.
+    INVARIANT one-list-of-fail-closed-judges: the gardener and the fail-closed guard test read the same exported list, so they cannot drift apart.
+    INVARIANT a-shadow-row-keeps-its-shadow: the cash edit of a one-line row with a nested `shadow:` mapping keeps that mapping, and the result passes loadMounts.
+    1. In src/lib/config-gardener.ts, beside JUDGE_ROLE_ROWS, export
+       `FAIL_CLOSED_JUDGE_ROWS = ["risk_judge", "ruling_judge"] as const`, with a one-line comment that names the
+       code that makes each one fail closed (risk-judge.ts and FAIL_CLOSED_RULING_VERDICT). Do not change
+       src/lib/mounts.ts: this task needs no change to how rows parse.
+    2. In judgeCashCandidate, skip a role whose row key is in FAIL_CLOSED_JUDGE_ROWS before any other check.
+    3. Line check: accept a line `key: { ... }` with zero or one nested `{ ... }` and no deeper nesting, for
+       example /^\w+: \{(?:[^{}]|\{[^{}]*\})*\}\s*$/. A row over several lines, or a row with two levels of
+       nested braces, gets no proposal, as today.
+    4. A row whose parsed mount names any provider gets no proposal. This replaces the code at :672 that
+       removes an existing provider: moving a row from another provider is not this class's job.
+    5. Edit: when the line has a ` shadow:` key at the top level of the row, insert `provider: cash, ` before
+       it. Otherwise add `, provider: cash` before the last brace, as today. The edit replaces the whole line.
+    6. The guard test imports FAIL_CLOSED_JUDGE_ROWS and loops over it. For each name: if a row line exists it
+       names no provider, and the parsed row (when Mounts has that key) has no provider. Keep the reason in
+       each message. Keep the check on the source line as well as the parsed row: the existing comment at
+       :912-913 explains why a parsed check alone can miss a row.
+    7. The new test builds the mounts file from the real .remudero/mounts.yaml text, so criterion 3 reads the
+       real ci and fix-progress lines. Use a temp directory and load test/setup/tmp-hygiene.ts as other tests do.
+       Criterion 2 reads the two source files and checks the import and the use (call-site proof).
+    WHY NOT the alternatives:
+    - A per-row `fails_closed: true` key in mounts.yaml: that is a new config key, and the guard test would
+      then trust the file it guards.
+    - Insert `provider: cash` at the end of the row: on a shadow row YAML still reads it, but the new key
+      sits after the nested mapping, which is harder to read and to check. Before `shadow:` keeps the shadow
+      arm last, as W1-T13364 wrote it.
+  falsifier: |
+    Remove the FAIL_CLOSED_JUDGE_ROWS skip from judgeCashCandidate: criterion 1 fails, because risk_judge gets a
+    proposal. Put the literal regular expression /^risk_judge:/ back in the guard in place of the list:
+    criterion 2 fails. Restore the line check /^\w+: \{[^{}]*\}\s*$/: criterion 3 fails, because the ci row gets
+    no proposal. Allow two nested levels or keep the code that removes an existing provider: criterion 4 fails.
+  note: |
+    Id reserved for run-unfiled-1794949321000 with ~/rmd-work/bin/reserve-id.sh.
+    W1-T12187 is in review as PR #19180. This task changes code that PR adds, so it must wait for that merge.
+    No time bound, environment variable or config key is added. The four numbers of JUDGE_CASH_BAR do not change.
