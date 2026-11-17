@@ -1,0 +1,45 @@
+- id: W1-T13285
+  title: "The scout's refusal row keeps its own step and task id, so a refused record is visible as scout.record_refused and never counted as a new recurrence of its symptom"
+  repo: remudero
+  priority: 0.6
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium
+  band_meaning: span
+  origin: "operator-session#scout-refusal-loop-2026-11-16"
+  plan_refs:
+    - W1-T13208
+    - W1-T9946
+  files:
+    - src/lib/scout-gardener.ts
+    - test/gardeners/the-scouts-refusal-row-keeps-its-own-step-and-task.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A record the scout refuses, both a re-derivation and a fresh filing, writes a row whose step is scout.record_refused and whose task id is the scout's own run, naming the symptom's step and the refused record's id under their own keys, through a real ledger file"
+      proof: "grep: W1-T13285 criterion 1 in test/gardeners/the-scouts-refusal-row-keeps-its-own-step-and-task.test.ts"
+    - claim: "The scout's symptom count never counts its own refusal rows as recurrences of the symptom"
+      proof: "grep: W1-T13285 criterion 2 in test/gardeners/the-scouts-refusal-row-keeps-its-own-step-and-task.test.ts"
+    - claim: "invariant:a-real-symptom-still-counts — rows the symptom's own writer produced are counted exactly as on origin/main"
+      proof: "grep: W1-T13285 criterion 3 in test/gardeners/the-scouts-refusal-row-keeps-its-own-step-and-task.test.ts"
+  rationale: |
+    MEASURED 2026-11-16 by the operator session on the core ledger (read-only), with the code read on origin/main 1ad4e5a561 by a read-only investigation.
+
+    - The live ledger held 18 rows under step `sweep.fix.dispatch_failed` for task W1-T9946 with reason "sizing: spans 2 distinct subsystems/concerns (ledger, sweep) at risk:low — Rule 19 …", but their run ids are `GARDEN-scout-*` and they carry no PR. They are the scout's refusals of its own re-derivation of W1-T9946, not fix-lane rows. W1-T9942 (`sweep.plan_round.refused`) and W1-T9268 (`verify_human.release_escalated`) show the same shape, 17 rows each over three days.
+    - READ src/lib/scout-gardener.ts: `deps.log("scout.record_refused", { step: draft.step, task_id: draft.id, reason: refused })` (and the same at the fresh-filing site with `step: f.symptom.step, task_id: f.taskId`). The payload's `step` and `task_id` overwrite the row's own, so the row lands under the SYMPTOM's step and the refused record's id. The 11-14..16 archives hold 0 `scout.record_refused` rows and 192 mis-stepped scout sizing rows.
+    - `scoutSymptoms` groups rows by `step`, so each refusal is counted as one more recurrence of the symptom, and the scout re-derives again on its next pass. Fresh filings refused this way also burn a newly minted id each time (auto_triage.run_failed as W1-T12618, W1-T13109, W1-T13073; INFERRED).
+    - test/the-scout-declares-the-writer-of-its-symptom.test.ts uses an in-memory logger, which cannot see the overwrite.
+    - W1-T13208 (queued) re-derives a scout record and says MEASURE FIRST from `scout.record_refused` rows, which do not exist under that name until this lands; its note is amended in this filing.
+  design: |
+    1. Rename the colliding payload keys (e.g. `symptom_step`, `record_task`) at both sites, so the logger's own step and task id stand.
+    2. `scoutSymptoms` excludes rows written by the scout itself (by step or run id).
+    3. The suite logs through a real ledger file, as the ledger writer does in production.
+    INVARIANT a-real-symptom-still-counts: rows from the symptom's writer count as today.
+    NOT IN SCOPE: which files a re-derivation declares and the retry without memory (W1-T13208); retiring W1-T9946, W1-T9942 or W1-T9268.
+  falsifier: |
+    Put `step` back in the payload and criterion 1 must fail. Count the scout's refusal rows as recurrences and criterion 2 must fail. Drop a real writer's rows and criterion 3 must fail. Restore and all pass.
+  note: |
+    reservation hand-off: run-unfiled-1794875392692 -> run-unfiled-1794875392692
+    Reserved with rmd next-task-id from a worktree at origin/main. The test folder is the one rmd test-place computed for a stub importing scout-gardener.ts. Build before W1-T13208 (same file), so its MEASURE FIRST reads real rows.
