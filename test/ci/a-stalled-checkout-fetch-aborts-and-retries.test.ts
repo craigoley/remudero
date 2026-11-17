@@ -4,15 +4,14 @@
 // sibling shards of the same run fetched in 23-26 s. actions/checkout v7.0.1 passes process.env to git and retries
 // a failed fetch (3 attempts, 10-20 s apart), so git's low-speed abort turns a 21-minute stall into about 2.5 min.
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { createServer, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { parse as parseYaml } from "yaml";
-import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 type Step = { uses?: string; env?: Record<string, string>; with?: Record<string, unknown> };
@@ -83,13 +82,10 @@ function fetchWithin(repo: string, url: string, extraEnv: Record<string, string>
 }
 
 test("W1-T13321 criterion 3: the low-speed variables reach git and abort a fetch whose server stops sending", async () => {
-  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}stalled-fetch-`));
+  const repo = gitRepo({ kind: "stalled-fetch" });
+  const root = repo.dir;
   const server = await stallingServer();
   try {
-    const init = spawnSync("git", ["init", "-q", root], { env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null" }, encoding: "utf8" });
-    assert.equal(init.status, 0, init.stderr);
-    spawnSync("git", ["-C", root, "config", "user.email", "fixture@example.invalid"]);
-    spawnSync("git", ["-C", root, "config", "user.name", "fixture"]);
 
     // The positive control: without the variables, the same fetch is still waiting at 5 s.
     const unbounded = await fetchWithin(root, server.url, {}, 5_000);
@@ -102,6 +98,6 @@ test("W1-T13321 criterion 3: the low-speed variables reach git and abort a fetch
     assert.ok(Date.now() - started >= 1_500, "the abort waits for the low-speed window, not an immediate refusal");
   } finally {
     await server.close();
-    rmSync(root, { recursive: true, force: true });
+    repo.cleanup();
   }
 });
