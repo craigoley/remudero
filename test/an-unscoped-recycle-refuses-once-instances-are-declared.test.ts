@@ -119,7 +119,8 @@ test("W1-T3596: every declared instance carries all seven required fields", () =
   // which is the worst place to discover it.
   const text = readFileSync(REGISTRY, "utf8");
   const names = [...text.matchAll(/^ {2}([A-Za-z0-9_-]+):\s*$/gm)].map((m) => m[1]);
-  assert.deepEqual(names.sort(), ["console", "core", "site"], "the live topology is exactly these three");
+  // W1-T13498: ops joins in shadow mode, with the same seven fields as every other row.
+  assert.deepEqual(names.sort(), ["console", "core", "ops", "site"], "the live topology is exactly these four");
 
   for (const name of names) {
     // Fields are the 4-space-indented keys following this name, up to the next 2-space key.
