@@ -12,7 +12,7 @@
   plan_refs: [W1-T5565, W1-T5325, W1-T4467, W1-T4052]
   files: [src/run-task.ts, test/fix-refusal-no-anchored-commit-message-line-in-the-report.test.ts, test/a-fix-round-never-refuses-a-missing-commit-line.test.ts]
   status: queued
-  priority: 2
+  priority: 1 # 2026-11-17 operator: the design-remedy chosen on #10031 (2026-10-13) still has 0 attempts behind about 849 queued tasks while its refusal stays live on main; was 2
   attempts: 0
   rationale: |
     OBSERVED: escalation #10031 (ci-friction, BLOCKED): fix_refusal:no-anchored-commit-message-line-in-the-report cost

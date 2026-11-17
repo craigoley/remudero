@@ -23,6 +23,7 @@
  * decomposition step that lifts those shared REST readings into their own lib module could then
  * have both run-task.ts and this file import the ONE copy; noted as a follow-up, not done here.
  */
+import { registerProcessExitLatch } from "./process-exit-latches.js";
 import { systemClock, type Clock } from "./clock.js";
 import { RmdError } from "./errors.js";
 import { securityMergeHead, securityMergeHeadAsync, securityMetadataGhArgs } from "./security-merge-admission.js";
@@ -54,7 +55,8 @@ import {
   type PlanMergeSafetyReadings,
 } from "./plan-pr-merge-safety.js";
 import { readLedgerLines } from "./status.js";
-import { describeRatchetRows, judgeMergedRatchets, ratchetJudgeLedgerFields, ratchetUpdateRefusal, ratchetVerdictHolds, readMergedRatchetInputsSteps, type MergedRatchetJudgement, type RatchetUpdateWithheldEvidence } from "./merged-ratchet-verdict.js";
+import { describeRatchetRows, judgeMergedRatchets, ratchetJudgeLedgerFields, ratchetUpdateRefusal, ratchetVerdictHolds, readMergedRatchetInputsSteps, type MergedRatchetInputs, type MergedRatchetJudgement, type RatchetUpdateWithheldEvidence } from "./merged-ratchet-verdict.js";
+import { judgeMergedRatchetsInWorker } from "./merged-ratchet-worker.js";
 import {
   closingReferenceGuardSteps,
   recordClosingReferenceToLedger,
@@ -838,8 +840,9 @@ function* planMergeSafetyInClone(
 }
 
 /** W1-T9962 — the merged-tree ratchet verdict for the sweep's armed re-judge, on the daemon's async transport. */
-export function readMergedRatchetsAsync(prUrl: string, loadConfigImpl: typeof loadConfig = loadConfig): Promise<MergedRatchetJudgement> {
-  return runStepsAsync(mergedRatchetsInClone(prUrl, loadConfigImpl, ghJsonAsync, planSafetyGitAsync));
+export function readMergedRatchetsAsync(prUrl: string, loadConfigImpl: typeof loadConfig = loadConfig,
+  worker?: Parameters<typeof judgeMergedRatchetsInWorker>[1]): Promise<MergedRatchetJudgement> {
+  return runStepsAsync(mergedRatchetsInClone(prUrl, loadConfigImpl, ghJsonAsync, planSafetyGitAsync, (input) => judgeMergedRatchetsInWorker(input, worker)));
 }
 
 function* mergedRatchetsInClone(
@@ -847,6 +850,7 @@ function* mergedRatchetsInClone(
   loadConfigImpl: typeof loadConfig,
   rest: RestReader,
   gitIn: typeof planSafetyGitSync,
+  judge: (input: MergedRatchetInputs) => MergedRatchetJudgement | Promise<MergedRatchetJudgement>,
 ): Steps<MergedRatchetJudgement> {
   const target = mergeTargetFromPrUrl(prUrl);
   if (!target) return judgeMergedRatchets({ error: `cannot resolve owner/repo/number from ${prUrl}` });
@@ -857,7 +861,8 @@ function* mergedRatchetsInClone(
     return judgeMergedRatchets({ error: `no clone to merge in: ${String((e as Error)?.message ?? e)}` });
   }
   const started = systemClock.now();
-  const judgement = judgeMergedRatchets(yield* readMergedRatchetInputsSteps(target, rest, gitIn(join(root, "repos", target.repo))));
+  const inputs = yield* readMergedRatchetInputsSteps(target, rest, gitIn(join(root, "repos", target.repo)));
+  const judgement = yield* step(() => judge(inputs));
   return { ...judgement, elapsedMs: systemClock.now() - started };
 }
 
@@ -1809,6 +1814,7 @@ export function closeDirectMergeAdmissions(reason: string): void {
 export function openDirectMergeAdmissions(): void {
   directMergeAdmissionsClosedBy = undefined;
 }
+registerProcessExitLatch("direct-merge-admissions", openDirectMergeAdmissions); // W1-T13363
 
 export function directMergeOperationsInFlight(): DirectMergeOperation[] {
   return [...directMergeOperations.values()].map(({ settle: _settle, cancelRequested: _cancel, ...operation }) => operation);

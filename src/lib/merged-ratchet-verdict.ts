@@ -227,6 +227,23 @@ export function describeRatchetRows(j: MergedRatchetJudgement): string {
   return j.rows.map((r) => `${r.gate} ${r.path}${r.field ? `#${r.field}` : ""} ${r.merged} > ${r.prCeiling} (main ${r.mainCeiling}, rederived ${r.rederived})`).join("; ");
 }
 
+/** Each read path's text on the two trees (null: absent), and the paths read once, at main, because both trees hold one blob. */
+export interface MergedRatchetBlobs {
+  merged: Map<string, string | null>;
+  main: Map<string, string | null>;
+  sameOnBoth: Set<string>;
+}
+
+/** The two readers over {@link MergedRatchetBlobs}: a path outside the read set throws, which the judge rules unread. */
+export function mergedRatchetReaders(blobs: MergedRatchetBlobs): Pick<TreeInputs, "readMerged" | "readMain"> {
+  const reader = (own: Map<string, string | null>) => (path: string): string | null => {
+    if (own.has(path)) return own.get(path)!;
+    if (blobs.sameOnBoth.has(path)) return blobs.main.get(path)!;
+    throw new Error(`${path} was not in the read set`);
+  };
+  return { readMerged: reader(blobs.merged), readMain: reader(blobs.main) };
+}
+
 /** What the merge-tree read hands the judge: the two trees as readers, or why it could not. */
 export type MergedRatchetInputs =
   | {
@@ -246,6 +263,8 @@ export type MergedRatchetInputs =
       reachFiles?: string[];
       /** Why that code tree could not be read: the affected-reach gate is then unread. */
       reachUnread?: string;
+      /** W1-T13326: the blobs behind the two readers, as plain data a worker thread can be sent. */
+      blobs?: MergedRatchetBlobs;
     }
   | { upToDate: true; mainSha: string; headSha: string }
   | { error: string; mainSha?: string; headSha?: string };
@@ -723,13 +742,8 @@ export function* readMergedRatchetInputsSteps(
     const sameOnBoth = new Set<string>();
     const partFailed = yield* readParts(mainSha, mainOnly, mainBlobs, sameOnBoth);
     if (partFailed !== undefined) population = { populationUnread: `${scope}, ${partFailed}` };
-    const reader = (blobs: Map<string, string | null>) => (path: string): string | null => {
-      if (blobs.has(path)) return blobs.get(path)!;
-      if (sameOnBoth.has(path)) return mainBlobs.get(path)!;
-      throw new Error(`${path} was not in the read set`);
-    };
-    const readMerged = reader(mergedBlobs);
-    const readMain = reader(mainBlobs);
+    const blobs: MergedRatchetBlobs = { merged: mergedBlobs, main: mainBlobs, sameOnBoth };
+    const { readMerged, readMain } = mergedRatchetReaders(blobs);
     // The reach graph reads the whole code tree, so it is listed only when the merge moves the graph.
     let reach: { reachFiles: string[] } | { reachUnread: string } | Record<string, never> = {};
     if (reachMoves([...landing], readMerged, readMain)) {
@@ -745,7 +759,7 @@ export function* readMergedRatchetInputsSteps(
       }
     }
     return { mainSha, headSha, changed: [...changed].sort(), measuredFiles, readMerged, readMain,
-      landing: [...landing].sort(), ...population, ...reach };
+      landing: [...landing].sort(), ...population, ...reach, blobs };
   } catch (e) {
     // the failure is the reading: the judge rules it unread, and the arm proceeds as before with it named.
     return { error: String((e as Error)?.message ?? e) };

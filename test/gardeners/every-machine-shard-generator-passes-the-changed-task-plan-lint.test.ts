@@ -288,8 +288,21 @@ export const CENSUS: readonly CensusMember[] = [
     [selectorShadowMissTask(MISS, "W1-T998344", ["src/run-task.ts"]), selectorShadowMissTask(MISS, "W1-T998344")] },
   { name: "selector-shadow structural", module: "src/lib/selector-shadow-gardener.ts", writer: "machineShardHeaderLines", render: () =>
     [selectorShadowStructuralTask(MISS.file, "W1-T998345", ["src/run-task.ts -> test/prompt-render.test.ts"], "W1-T998344")] },
-  { name: "CI-learning draft", module: "src/lib/measurement-cadence.ts", writer: "machineShardHeaderLines", render: () =>
-    [ciLearningShardYaml(ciLearningDraft(), "W1-T998346", [1])] },
+  { name: "CI-learning draft", module: "src/lib/measurement-cadence.ts", writer: "machineShardHeaderLines", render: () => {
+    const file = "src/lib/worker.ts";
+    const cause = "ci-gate:owner:lint-failed";
+    const findingId = `ci-learning:hand-fix:${cause}@${file}#2`;
+    const handFix = ciLearningDraft({
+      findingId,
+      title: `A PERSON HAND-FIXED ${file} 2 TIMES AFTER THE FLEET LEFT ${cause} FAILING`,
+      repairFiles: [file],
+      handFix: { key: `${cause}@${file}`, cause, file, count: 2, instances: [
+        { target: "pr#101", pr: 101, commit: "c101", at: "2026-11-13T12:00:00.000Z", files: [file] },
+        { target: "pr#102", pr: 102, commit: "c102", at: "2026-11-14T12:00:00.000Z", files: [file] },
+      ] },
+    });
+    return [ciLearningShardYaml(ciLearningDraft(), "W1-T998346", [1]), ciLearningShardYaml(handFix, "W1-T998347", [2])];
+  } },
 ];
 
 function sourceFiles(dir: string): string[] {

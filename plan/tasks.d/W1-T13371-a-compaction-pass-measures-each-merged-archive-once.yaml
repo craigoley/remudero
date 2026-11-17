@@ -1,0 +1,52 @@
+- id: W1-T13371
+  title: "A ledger compaction pass measures each merged archive's decompressed size once, not on every pass"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # 1 concern: the oversized-repair probe in selectLedgerCompactionSources reuses earlier measurements
+  origin: "operator-session#ledger-compaction-2026-11-17"
+  plan_refs:
+    - W1-T3368
+    - W1-T13370
+  files:
+    - src/lib/ledger-compact.ts
+    - test/ledger/a-compaction-pass-measures-each-merged-archive-once.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A second pass over an unchanged corpus decompresses no merged archive that an earlier pass already measured at or under the ceiling"
+      proof: "grep: W1-T13371 criterion 1 in test/ledger/a-compaction-pass-measures-each-merged-archive-once.test.ts"
+    - claim: "An archive whose name, compressed size or mtime changed since it was measured is measured again"
+      proof: "grep: W1-T13371 criterion 2 in test/ledger/a-compaction-pass-measures-each-merged-archive-once.test.ts"
+    - claim: "invariant:oversized-still-repaired — an oversized merged archive is still found and repaired, and an archive whose size or mtime cannot be read is measured on every pass, never trusted"
+      proof: "grep: W1-T13371 criterion 3 in test/ledger/a-compaction-pass-measures-each-merged-archive-once.test.ts"
+  rationale: |
+    WHY: the daemon runs a compaction pass synchronously in its cycle (daemon.ts, runLedgerCompaction ->
+    ledgerCompactCommand). MEASURED from host ledger rows (fired -> outcome gap): 42 passes and 22 min on 2026-11-15,
+    48 passes and 41 min on 2026-11-16, single passes 9-183 s, so the daemon loop stalls that long each time.
+    READ at origin/main, selectLedgerCompactionSources: the repair probe
+    `eligible.find((entry) => merged.has(entry.path) && measure(entry) > maxArchiveBytes)` gunzips every merged
+    archive (up to maxArchiveBytes + 1) until it finds an oversized one. On a healthy corpus none is oversized, so
+    every pass gunzips all of them. OBSERVED with the real fs on the host 2026-11-17: merged archives are 6-10 MB
+    compressed and 45-65 MB decompressed each, about 150 of them.
+  design: |
+    INVARIANT oversized-still-repaired: an archive is skipped by the probe only when this process measured it at or
+    under the ceiling with the same path, compressed size and mtime.
+    1. Keep the measurements in a module-level map for the life of the process: path -> { size, mtimeMs, bytes,
+       limit }. The daemon runs every pass in process (run-task.ts, runLedgerCompaction -> ledgerCompactCommand), so
+       later passes reuse earlier measurements. Write NOTHING to the state dir: test/a-compaction-pass-that-cannot-
+       reduce-writes-nothing.test.ts pins that a pass that cannot reduce writes nothing, and a record file there
+       broke 5 of its cases when tried.
+    2. A missing, mismatched or unreadable identity (size or mtime) means "measure again". A measurement taken at a
+       higher limit answers a lower one; an "over" answer never answers a higher limit.
+    3. Drop entries for paths the state dir no longer lists, and forget an output path before an apply pass writes it.
+  falsifier: |
+    Ignore the memo and criterion 1 fails (the second pass gunzips every merged archive again). Trust a memo entry
+    whose size or mtime differs and criterion 2 fails.
+  note: |
+    Id reserved for run-unfiled-1794920473534 with ~/rmd-work/bin/reserve-id.sh.
+    reservation hand-off: run-unfiled-1794920473534 -> claude/project-thread-cb5huh-plan-compaction-progress

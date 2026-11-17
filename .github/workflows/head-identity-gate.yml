@@ -9,7 +9,7 @@ permissions:
 jobs:
   head-identity-gate:
     name: head-identity-gate
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
       # A pull_request event's default ref/sha is the ephemeral test-merge commit, not the real

@@ -25,6 +25,7 @@ const OLD_HEAD = "e".repeat(40);
 const BODY = `Remudero-Task: ${TASK}`;
 // The REST fixture is one day old; this suite tests refusal routing, not wall-clock aging.
 const FIXTURE_NOW = Date.parse("2026-10-11T05:00:00.000Z");
+const UPDATED_AT = new Date(FIXTURE_NOW - 86_400_000).toISOString();
 const RULE_15 =
   "remudero-review: FAIL — Standing rule 15: a criterion was added/edited beside non-plan files — file the shard in its own plan-only PR";
 const RENUMBER = "remudero-review: FAIL — id W1-T7620 is reserved by scout-garden-1, not this PR — renumber";
@@ -45,10 +46,10 @@ function fetchFor(headSha: string) {
     const path = args.at(-1) ?? "";
     if (/state=open/.test(path)) {
       return [{ number: PR_NUMBER, html_url: PR_URL, head: { ref: `run-${TASK}-1`, sha: headSha },
-        updated_at: "2026-10-10T05:00:00.000Z", body: BODY, auto_merge: null, state: "open" }];
+        updated_at: UPDATED_AT, body: BODY, auto_merge: null, state: "open" }];
     }
     if (/\/pulls\/\d+$/.test(path)) {
-      return { number: PR_NUMBER, html_url: PR_URL, state: "open", body: BODY, updated_at: "2026-10-10T05:00:00.000Z",
+      return { number: PR_NUMBER, html_url: PR_URL, state: "open", body: BODY, updated_at: UPDATED_AT,
         head: { ref: `run-${TASK}-1`, sha: headSha }, auto_merge: null, mergeable: true, mergeable_state: "clean" };
     }
     if (/check-runs/.test(path)) return { check_runs: [{ name: "ci-gate", status: "completed", conclusion: "success" }] };
@@ -133,4 +134,14 @@ test("rmd fix hands the router the reviewer's own summary for the current head",
     rmSync(root, { recursive: true, force: true });
     rmSync(shim.dir, { recursive: true, force: true });
   }
+});
+
+test("W1-T9630: test/the-sweep-reads-the-reviewers-own-summary.test.ts stays defused across 2026-10-24T05:00:00.000Z", () => {
+  // The disposition is judged against the injected FIXTURE_NOW and the stamp is derived from it,
+  // so ageing the clock past the old crossing date moves nothing.
+  const view = viewFrom([reviewRow(HEAD, RULE_15)]);
+  const crossed = Date.parse("2026-10-24T05:00:00.000Z") + 86_400_000;
+  assert.equal(deriveDisposition(view, DEFAULT_SWEEP_POLICY, FIXTURE_NOW).disposition, "blocked-ambiguous");
+  assert.equal(UPDATED_AT, "2026-10-10T05:00:00.000Z");
+  assert.ok(crossed > FIXTURE_NOW, "the fixture clock is fixed, independent of the wall clock");
 });

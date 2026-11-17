@@ -781,13 +781,98 @@ export async function probeReviewerCodeFreshnessAsync(
   if (!match) return { status: "unreadable", reason: "ls-remote returned no unambiguous main ref" };
   const originMainSha = match[1];
   if (loadedCodeSha === originMainSha) return { status: "fresh", codeSha: loadedCodeSha, originMainSha, advance: "none" };
-  return reviewerMainAdvance(reviewerGit(repoDir, deps), loadedCodeSha, originMainSha);
+  return reviewerMainAdvanceOffLoop(repoDir, deps, loadedCodeSha, originMainSha);
 }
 
 /** `git -C <repoDir> …` for the reviewer's reads. A later `-C <absolute path>` in `args` addresses another tree. */
 export function reviewerGit(repoDir: string, deps: ReviewerCodeFreshnessOptions = {}): GitRunner {
   const options = { encoding: "utf8", stdio: "pipe", maxBuffer: REVIEWER_GIT_MAX_BUFFER } as const;
   return deps.git ?? ((args) => execFileSync("git", ["-C", repoDir, ...args], options));
+}
+
+/**
+ * W1-T13335: ONE BODY, TWO DRIVERS. A reviewer read is written once, as a generator that yields each git call.
+ * runStepsSync calls it and runStepsAsync awaits it; each sends the text back in, or throws the failure in at the
+ * same yield. git-push.ts has the same drivers, but an import of it here would put that module and all it imports
+ * into the baked supervisor closure and close an import ring through review.ts.
+ */
+type Steps<R> = Generator<() => unknown, R, unknown>;
+
+function* step<T>(effect: () => T | Promise<T>): Generator<() => unknown, T, unknown> {
+  return (yield effect) as T;
+}
+
+function runStepsSync<R>(steps: Steps<R>): R {
+  let next = steps.next();
+  while (!next.done) {
+    let value: unknown;
+    try {
+      value = next.value();
+    } catch (error) {
+      next = steps.throw(error);
+      continue;
+    }
+    next = steps.next(value);
+  }
+  return next.value;
+}
+
+async function runStepsAsync<R>(steps: Steps<R>): Promise<R> {
+  let next = steps.next();
+  while (!next.done) {
+    let value: unknown;
+    try {
+      value = await next.value();
+    } catch (error) {
+      next = steps.throw(error);
+      continue;
+    }
+    next = steps.next(value);
+  }
+  return next.value;
+}
+
+/** W1-T13335: a reviewer git read on either driver. The synchronous runner returns text, the awaited one a promise of it. */
+type ReviewerGitRead = (args: string[]) => string | Promise<string>;
+type ReviewerAdvanceRead = (
+  codeSha: string, originMainSha: string, knownBehindPaths?: readonly string[], knownDiffError?: string,
+) => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>;
+
+/** W1-T13335: the awaited reviewer git, so a read never blocks the daemon loop. An injected `deps.git` still wins.
+ *  `deps.gitAsync` stays the runner of the fetch and the ls-remote only, as it is for the service check. */
+function reviewerGitOffLoop(repoDir: string, deps: ReviewerCodeFreshnessOptions): ReviewerGitRead {
+  if (deps.git) return deps.git;
+  const run = asyncGit(repoDir, { maxBuffer: REVIEWER_GIT_MAX_BUFFER });
+  return (args) => run(args);
+}
+
+/** W1-T13335: the decided answers for one main sha, per checkout. Commits and blobs do not change, so a fresh or
+ *  stale answer for a pair of shas is final. A new main sha drops the answers of the old one. */
+const keptReviewerAdvances = new Map<string, { originMainSha: string; answers: Map<string, ReviewerCodeFreshness> }>();
+
+/** {@link reviewerMainAdvanceSteps} on the awaited git. Only a fresh or stale answer is kept: an unreadable one is read
+ *  again. An injected runner reads a repository of its own, so its answers are never kept. */
+async function reviewerMainAdvanceOffLoop(
+  repoDir: string,
+  deps: ReviewerCodeFreshnessOptions,
+  codeSha: string,
+  originMainSha: string,
+  knownBehindPaths?: readonly string[],
+  knownDiffError?: string,
+): Promise<ReviewerCodeFreshness> {
+  const read = () => runStepsAsync(reviewerMainAdvanceSteps(reviewerGitOffLoop(repoDir, deps), codeSha, originMainSha, knownBehindPaths, knownDiffError));
+  if (deps.git) return read();
+  const checkout = resolve(repoDir);
+  const key = JSON.stringify([codeSha, knownBehindPaths ?? null, knownDiffError ?? null]);
+  const kept = keptReviewerAdvances.get(checkout);
+  const hit = kept?.originMainSha === originMainSha ? kept.answers.get(key) : undefined;
+  if (hit) return structuredClone(hit);
+  const answer = await read();
+  if (answer.status === "unreadable") return answer;
+  let current = keptReviewerAdvances.get(checkout);
+  if (current?.originMainSha !== originMainSha) keptReviewerAdvances.set(checkout, (current = { originMainSha, answers: new Map() }));
+  current.answers.set(key, structuredClone(answer));
+  return answer;
 }
 
 /** W1-T11847: a full reviewer-code sha. A 12-character prefix, a blank or a missing value is incomplete evidence. */
@@ -798,10 +883,15 @@ export function isFullReviewerCodeSha(value: unknown): value is string {
 /** W1-T11847: whether a verdict's recorded reviewer code is still materially current at `originMainSha`, by the
  *  same predicate the reviewer's own freshness gate uses. Incomplete evidence is unreadable, never fresh. */
 export function reviewerCodeFreshnessAt(codeSha: unknown, originMainSha: string, git: GitRunner): ReviewerCodeFreshness {
+  return reviewerCodeAnswerWithoutGit(codeSha, originMainSha) ?? reviewerMainAdvance(git, codeSha as string, originMainSha);
+}
+
+/** The answers that need no git read: incomplete evidence, or code that is main. Undefined when git must decide. */
+function reviewerCodeAnswerWithoutGit(codeSha: unknown, originMainSha: string): ReviewerCodeFreshness | undefined {
   if (!isFullReviewerCodeSha(codeSha)) return { status: "unreadable", reason: "the verdict names no full reviewer code sha" };
   if (!isFullReviewerCodeSha(originMainSha)) return { status: "unreadable", reason: "origin/main is unresolved" };
   if (codeSha === originMainSha) return { status: "fresh", codeSha, originMainSha, advance: "none" };
-  return reviewerMainAdvance(git, codeSha, originMainSha);
+  return undefined;
 }
 
 /** W1-T11847: judges recorded reviewer-code shas against one main reading per judge, one result per sha. */
@@ -813,20 +903,20 @@ export function reviewerCodeJudge(
   let main: Promise<ReviewerCodeFreshness> | undefined;
   const judged = new Map<string, ReviewerCodeFreshness>();
   return async (codeSha) => {
-    if (!isFullReviewerCodeSha(codeSha)) return reviewerCodeFreshnessAt(codeSha, "", reviewerGit(repoDir, deps));
+    if (!isFullReviewerCodeSha(codeSha)) return reviewerCodeAnswerWithoutGit(codeSha, "")!;
     main ??= Promise.resolve().then(readMain).catch((error: unknown): ReviewerCodeFreshness =>
       ({ status: "unreadable", reason: `could not read origin/main: ${String(error)}` }));
     const reading = await main;
     if (reading.status === "unreadable") return reading;
     const cached = judged.get(codeSha);
     if (cached) return cached;
-    const result = reviewerCodeFreshnessAt(codeSha, reading.originMainSha, reviewerGit(repoDir, deps));
+    const result = reviewerCodeAnswerWithoutGit(codeSha, reading.originMainSha) ??
+      await reviewerMainAdvanceOffLoop(repoDir, deps, codeSha, reading.originMainSha);
     judged.set(codeSha, result);
     return result;
   };
 }
 
-/** Only the merge-base..main side can make loaded reviewer code stale. */
 function reviewerMainAdvance(
   git: GitRunner,
   codeSha: string,
@@ -834,9 +924,20 @@ function reviewerMainAdvance(
   knownBehindPaths?: readonly string[],
   knownDiffError?: string,
 ): ReviewerCodeFreshness {
+  return runStepsSync(reviewerMainAdvanceSteps(git, codeSha, originMainSha, knownBehindPaths, knownDiffError));
+}
+
+/** Only the merge-base..main side can make loaded reviewer code stale. W1-T13335: one body for both drivers. */
+function* reviewerMainAdvanceSteps(
+  git: ReviewerGitRead,
+  codeSha: string,
+  originMainSha: string,
+  knownBehindPaths?: readonly string[],
+  knownDiffError?: string,
+): Steps<ReviewerCodeFreshness> {
   let base: string;
   try {
-    base = git(["merge-base", codeSha, originMainSha]).trim();
+    base = (yield* step(() => git(["merge-base", codeSha, originMainSha]))).trim();
   } catch (error) {
     return { status: "unreadable", reason: `could not inspect reviewer code ancestry: ${String(error)}` };
   }
@@ -849,11 +950,11 @@ function reviewerMainAdvance(
   try {
     changedPaths = base === codeSha && knownBehindPaths !== undefined
       ? [...knownBehindPaths]
-      : git(["diff", "--name-only", `${base}..${originMainSha}`]).split("\n").map((path) => path.trim()).filter(Boolean);
+      : (yield* step(() => git(["diff", "--name-only", `${base}..${originMainSha}`]))).split("\n").map((path) => path.trim()).filter(Boolean);
   } catch (error) {
     return { status: "unreadable", reason: `could not inspect reviewer code advance: ${String(error)}` };
   }
-  if (reviewAdvanceIsMaterialAt(changedPaths, git, base, originMainSha)) {
+  if (yield* reviewAdvanceIsMaterialAtSteps(changedPaths, git, base, originMainSha)) {
     return { status: "stale", codeSha, originMainSha, changedPaths, ...(knownBehindPaths !== undefined ? { diffUnreadable: knownDiffError } : {}) };
   }
   return { status: "fresh", codeSha, originMainSha, advance: "immaterial" };
@@ -866,7 +967,7 @@ function checkGuardedReviewerCodeFreshness(repoDir: string, deps: ReviewerCodeFr
   } catch (error) {
     return { status: "unreadable", reason: `git fetch origin failed in ${repoDir}: ${String(error)}` };
   }
-  return guardedReviewerAfterFetch(repoDir, git);
+  return runStepsSync(guardedReviewerAfterFetchSteps(repoDir, git, (codeSha, originMainSha) => reviewerMainAdvance(git, codeSha, originMainSha)));
 }
 
 async function checkGuardedReviewerCodeFreshnessAsync(repoDir: string, deps: ReviewerCodeFreshnessOptions): Promise<ReviewerCodeFreshness> {
@@ -875,20 +976,21 @@ async function checkGuardedReviewerCodeFreshnessAsync(repoDir: string, deps: Rev
   } catch (error) {
     return { status: "unreadable", reason: `git fetch origin failed in ${repoDir}: ${String(error)}` };
   }
-  return guardedReviewerAfterFetch(repoDir, reviewerGit(repoDir, deps));
+  return runStepsAsync(guardedReviewerAfterFetchSteps(repoDir, reviewerGitOffLoop(repoDir, deps),
+    (codeSha, originMainSha) => reviewerMainAdvanceOffLoop(repoDir, deps, codeSha, originMainSha)));
 }
 
-function guardedReviewerAfterFetch(repoDir: string, git: GitRunner): ReviewerCodeFreshness {
+function* guardedReviewerAfterFetchSteps(repoDir: string, git: ReviewerGitRead, advance: ReviewerAdvanceRead): Steps<ReviewerCodeFreshness> {
   let codeSha: string;
   let originMainSha: string;
   try {
-    codeSha = git(["rev-parse", "HEAD"]).trim();
-    originMainSha = git(["rev-parse", "origin/main"]).trim();
+    codeSha = (yield* step(() => git(["rev-parse", "HEAD"]))).trim();
+    originMainSha = (yield* step(() => git(["rev-parse", "origin/main"]))).trim();
   } catch (error) {
     return { status: "unreadable", reason: `could not resolve HEAD/origin/main in ${repoDir}: ${String(error)}` };
   }
   if (codeSha === originMainSha) return { status: "fresh", codeSha, originMainSha, advance: "none" };
-  return reviewerMainAdvance(git, codeSha, originMainSha);
+  return yield* step(() => advance(codeSha, originMainSha));
 }
 
 /**
@@ -1226,11 +1328,19 @@ export function runTaskAdvanceTouchesReviewPath(
   codeSha: string,
   originMainSha: string,
 ): { touchesReviewPath: boolean; reason: string } {
+  return runStepsSync(runTaskAdvanceTouchesReviewPathSteps(git, codeSha, originMainSha));
+}
+
+function* runTaskAdvanceTouchesReviewPathSteps(
+  git: ReviewerGitRead,
+  codeSha: string,
+  originMainSha: string,
+): Steps<{ touchesReviewPath: boolean; reason: string }> {
   let diff: string;
-  let sides: Array<ReviewPathScan | { unreadable: string }>;
+  const sides: Array<ReviewPathScan | { unreadable: string }> = [];
   try {
-    diff = git(["diff", "-U0", `${codeSha}..${originMainSha}`, "--", RUN_TASK_PATH]);
-    sides = [codeSha, originMainSha].map((sha) => scanReviewPath(git(["show", `${sha}:${RUN_TASK_PATH}`])));
+    diff = yield* step(() => git(["diff", "-U0", `${codeSha}..${originMainSha}`, "--", RUN_TASK_PATH]));
+    for (const sha of [codeSha, originMainSha]) sides.push(scanReviewPath(yield* step(() => git(["show", `${sha}:${RUN_TASK_PATH}`]))));
   } catch (error) {
     return { touchesReviewPath: true, reason: `could not read the ${RUN_TASK_PATH} advance: ${String(error)}` };
   }
@@ -1255,24 +1365,28 @@ export function runTaskAdvanceTouchesReviewPath(
   return { touchesReviewPath: false, reason: `${headers.length} ${RUN_TASK_PATH} hunk(s) avoid the review path` };
 }
 
-function reviewAdvanceIsMaterialAt(
+function* reviewAdvanceIsMaterialAtSteps(
   changedPaths: readonly string[] | undefined,
-  git: GitRunner,
+  git: ReviewerGitRead,
   codeSha: string,
   originMainSha: string,
-): boolean {
+): Steps<boolean> {
   if (!reviewAdvanceIsMaterial(changedPaths)) return false;
-  const counted = changedPaths!.filter((path) => reviewAdvanceIsMaterial([path]) && !commentOnlyChange(git, path.trim(), codeSha, originMainSha));
+  const counted: string[] = [];
+  for (const path of changedPaths!) {
+    if (reviewAdvanceIsMaterial([path]) && !(yield* commentOnlyChangeSteps(git, path.trim(), codeSha, originMainSha))) counted.push(path);
+  }
   if (changedPaths!.length > 0 && counted.length === 0) return false;
   if (counted.some((path) => path.trim() !== RUN_TASK_PATH)) return true;
-  return runTaskAdvanceTouchesReviewPath(git, codeSha, originMainSha).touchesReviewPath;
+  return (yield* runTaskAdvanceTouchesReviewPathSteps(git, codeSha, originMainSha)).touchesReviewPath;
 }
 
 /** W1-T12824: a .ts path whose blobs at both shas have equal code tokens. A blob that cannot be read is a code change. */
-function commentOnlyChange(git: GitRunner, path: string, codeSha: string, originMainSha: string): boolean {
+function* commentOnlyChangeSteps(git: ReviewerGitRead, path: string, codeSha: string, originMainSha: string): Steps<boolean> {
   if (!path.endsWith(".ts")) return false;
   try {
-    return tokensEqualWithoutComments(git(["show", `${codeSha}:${path}`]), git(["show", `${originMainSha}:${path}`]));
+    const before = yield* step(() => git(["show", `${codeSha}:${path}`]));
+    return tokensEqualWithoutComments(before, yield* step(() => git(["show", `${originMainSha}:${path}`])));
   } catch {
     return false; // deliberate, no throw: an unreadable blob keeps the path material, the safe answer
   }
@@ -1285,7 +1399,12 @@ export function checkReviewerCodeFreshness(
 ): ReviewerCodeFreshness {
   const service = (deps.checkServiceFreshness ?? checkServiceFreshness)(repoDir, env);
   return nameVanishedCheckout(
-    reviewerFreshnessFromService(service, repoDir, env, deps, () => checkGuardedReviewerCodeFreshness(repoDir, deps)),
+    reviewerFreshnessFromService(service, env, () => checkGuardedReviewerCodeFreshness(repoDir, deps), (assessed) => {
+      const git = reviewerGit(repoDir, deps);
+      const resolveHeadSha = deps.resolveHeadSha ??
+        (() => execFileSync("git", ["-C", repoDir, "rev-parse", "HEAD"], { encoding: "utf8", stdio: "pipe" }));
+      return withFetchSource(assessed, runStepsSync(assessedReviewerFreshnessSteps(assessed, resolveHeadSha, (...advance) => reviewerMainAdvance(git, ...advance))));
+    }),
     repoDir, deps,
   );
 }
@@ -1316,43 +1435,46 @@ export async function checkReviewerCodeFreshnessAsync(
     recentFetchFallback: true,
   });
   return nameVanishedCheckout(
-    await reviewerFreshnessFromService(service, repoDir, env, deps, () => checkGuardedReviewerCodeFreshnessAsync(repoDir, deps)),
+    await reviewerFreshnessFromService(service, env, () => checkGuardedReviewerCodeFreshnessAsync(repoDir, deps), async (assessed) => {
+      // W1-T13335: the head read and the advance reads are awaited.
+      const resolveHeadSha = deps.resolveHeadSha ?? (() => asyncGit(repoDir)(["rev-parse", "HEAD"]));
+      return withFetchSource(assessed, await runStepsAsync(assessedReviewerFreshnessSteps(assessed, resolveHeadSha,
+        (...advance) => reviewerMainAdvanceOffLoop(repoDir, deps, ...advance))));
+    }),
     repoDir, deps,
   );
 }
 
 function reviewerFreshnessFromService<G extends ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>>(
   service: ServiceFreshness,
-  repoDir: string,
   env: NodeJS.ProcessEnv | Record<string, string | undefined>,
-  deps: ReviewerCodeFreshnessOptions,
   guarded: () => G,
+  assessed: (service: Extract<ServiceFreshness, { status: "assessed" }>) => G,
 ): ReviewerCodeFreshness | G {
   if (service.status === "degraded") return { status: "unreadable", reason: service.reason };
   if (service.status === "guarded" && isCiEnv(env)) {
     return { status: "unreadable", reason: "reviewer code freshness is guarded; no loaded-code provenance is available" };
   }
   if (service.status === "guarded") return guarded();
+  return assessed(service);
+}
 
-  const reading = assessedReviewerFreshness(service, repoDir, deps);
+function withFetchSource(service: Extract<ServiceFreshness, { status: "assessed" }>, reading: ReviewerCodeFreshness): ReviewerCodeFreshness {
   return service.source && reading.status !== "unreadable" ? { ...reading, source: service.source, refAgeMs: service.refAgeMs } : reading;
 }
 
-function assessedReviewerFreshness(
+function* assessedReviewerFreshnessSteps(
   service: Extract<ServiceFreshness, { status: "assessed" }>,
-  repoDir: string,
-  deps: ReviewerCodeFreshnessOptions,
-): ReviewerCodeFreshness {
+  resolveHeadSha: () => string | Promise<string>,
+  advance: ReviewerAdvanceRead,
+): Steps<ReviewerCodeFreshness> {
   if (service.behind) {
     const { oldSha, newSha, changedPaths, diffUnreadable } = service.behind;
-    return reviewerMainAdvance(reviewerGit(repoDir, deps), oldSha, newSha, changedPaths, diffUnreadable);
+    return yield* step(() => advance(oldSha, newSha, changedPaths, diffUnreadable));
   }
 
-  const resolveHeadSha =
-    deps.resolveHeadSha ??
-    (() => execFileSync("git", ["-C", repoDir, "rev-parse", "HEAD"], { encoding: "utf8", stdio: "pipe" }).trim());
   try {
-    const codeSha = resolveHeadSha().trim();
+    const codeSha = (yield* step(resolveHeadSha)).trim();
     if (codeSha.length === 0) return { status: "unreadable", reason: "could not resolve the reviewer code sha" };
     return { status: "fresh", codeSha, originMainSha: codeSha, advance: "none" };
   } catch (error) {

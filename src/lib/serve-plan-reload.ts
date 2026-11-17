@@ -6,6 +6,7 @@
  * restart emptied every in-memory cache. This reads the plan from COMMITTED OBJECTS at the sha the
  * restart diff was taken against and installs it with one assignment.
  */
+import { threadName } from "./thread-names.js";
 import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { createHash } from "node:crypto";
 import { serialize, deserialize } from "node:v8";
@@ -16,7 +17,7 @@ import { mergePlanBlobsQuarantiningDuplicates, readBlobsAtRefAsync, type Plan, t
 import { resolveRepoLayout } from "./repo-layout.js";
 import { dirname } from "node:path";
 import { planDestinationRepository } from "./plan-destination.js";
-import { defaultOpsCatalogApi, readOpsCatalogSnapshotAsync, type OpsCatalogApi } from "./ops-catalog-source.js";
+import { defaultOpsCatalogApi, readBranchSha, readOpsCatalogSnapshotAsync, type OpsCatalogApi } from "./ops-catalog-source.js";
 import type { AcceptanceCriterion, Task } from "./plan.js";
 
 const HOUSE_LAYOUT = resolveRepoLayout("", () => undefined);
@@ -131,7 +132,7 @@ export function readServePlanOffLoop(repoDir: string, ref: string, workerUrl: UR
   return new Promise((resolve, reject) => {
     let worker: Worker;
     try {
-      worker = new Worker(workerUrl, { workerData: { kind: PLAN_RELOAD_WORKER_KIND, repoDir, ref } });
+      worker = new Worker(workerUrl, { name: threadName("planReload"), workerData: { kind: PLAN_RELOAD_WORKER_KIND, repoDir, ref } });
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       reject(workerFailure(reason));
@@ -291,6 +292,8 @@ interface CatalogPoolEntry {
   attemptedAt: number;
   pending?: Promise<void>;
   reply?: BoardCatalogReply;
+  /** W1-T13330: the last whole read for this selection, kept while one ref GET says its branch still names the commit. */
+  kept?: { selection: string; repository: string; branch: string; commit: string; plan: Plan };
 }
 // Serve's two independent producers share one parent-owned read. No private Plan enters a public
 // worker body or generic log message; this channel is intercepted before either relay.
@@ -313,6 +316,8 @@ export function createBoardCatalogParentBridge(roots: readonly string[], post: (
     const selection = catalogSelection(root);
     if (selection === "off") return;
     if (selection === entry.selection && clock.now() - entry.attemptedAt < BOARD_CATALOG_REFRESH_MS) return;
+    // A changed selection never revives an earlier observation, even if it changes back.
+    if (entry.kept?.selection !== selection) entry.kept = undefined;
     entry.selection = selection;
     entry.attemptedAt = clock.now();
     entry.reply = undefined;
@@ -324,10 +329,23 @@ export function createBoardCatalogParentBridge(roots: readonly string[], post: (
       if (destination.outcome !== "named") payload = { observedAt: clock.iso(), reason: "destination-unreadable" };
       else {
         const api: OpsCatalogApi = (path) => active() ? parentCatalogApi(path) : Promise.reject(new Error("catalog consumer changed"));
-        const snapshot = await readOpsCatalogSnapshotAsync({ repository: `${destination.owner}/${destination.repo}` }, api);
-        payload = snapshot.outcome === "ok" && snapshot.plan && snapshot.binding
-          ? { observedAt: clock.iso(), plan: snapshot.plan }
-          : { observedAt: clock.iso(), reason: snapshot.outcome === "ok" ? "identity-unavailable" : snapshot.outcome };
+        const repository = `${destination.owner}/${destination.repo}`;
+        const kept = entry.kept?.repository === repository ? entry.kept : undefined;
+        // W1-T13330: while the branch still names the kept commit, one ref GET revalidates the kept catalog instead of
+        // re-reading every tree and blob (a gh child each) every BOARD_CATALOG_REFRESH_MS. A moved branch or a failed
+        // ref GET rereads it all, exactly as before.
+        const same = kept ? await readBranchSha(api, `repos/${repository}`, kept.branch).then((sha) => sha === kept.commit, () => false) : false;
+        if (same && kept) payload = { observedAt: clock.iso(), plan: kept.plan };
+        else {
+          entry.kept = undefined;
+          const snapshot = await readOpsCatalogSnapshotAsync({ repository }, api);
+          payload = snapshot.outcome === "ok" && snapshot.plan && snapshot.binding
+            ? { observedAt: clock.iso(), plan: snapshot.plan }
+            : { observedAt: clock.iso(), reason: snapshot.outcome === "ok" ? "identity-unavailable" : snapshot.outcome };
+          if (snapshot.outcome === "ok" && snapshot.plan && snapshot.binding?.ref.startsWith("refs/heads/") && active()) {
+            entry.kept = { selection, repository, branch: snapshot.binding.ref.slice("refs/heads/".length), commit: snapshot.binding.commit, plan: snapshot.plan };
+          }
+        }
       }
       if (!active()) return;
       // The source's Plan handle is deliberately non-enumerable: extract it explicitly, then share

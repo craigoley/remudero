@@ -1,3 +1,4 @@
+import { threadName } from "./thread-names.js";
 import { isMainThread, parentPort, SHARE_ENV, Worker, workerData } from "node:worker_threads";
 import { heavyReadyEscalationSink, readHeavyNewBuildHold, type HeavyReservationReading } from "./heavy-build-reservation.js";
 import { systemClock } from "./clock.js";
@@ -28,8 +29,8 @@ export function startHeavyReadyDeadlineService(opts: { enabled?: boolean; dir?: 
   const data = { kind: KIND, dir: opts.dir, entry: entry.href };
   // Same tsx worker-loader contract as read-plane.ts; the main-thread loader is not inherited.
   const worker = entry.pathname.endsWith(".ts")
-    ? new Worker(`const {workerData}=require('node:worker_threads'); import(${JSON.stringify(import.meta.resolve("tsx/esm/api"))}).then(({register})=>{register();return import(workerData.entry);});`, { eval: true, workerData: data, env: SHARE_ENV })
-    : new Worker(entry, { workerData: data, env: SHARE_ENV });
+    ? new Worker(`const {workerData}=require('node:worker_threads'); import(${JSON.stringify(import.meta.resolve("tsx/esm/api"))}).then(({register})=>{register();return import(workerData.entry);});`, { eval: true, name: threadName("heavyReadyDeadline"), workerData: data, env: SHARE_ENV })
+    : new Worker(entry, { name: threadName("heavyReadyDeadline"), workerData: data, env: SHARE_ENV });
   let latest: HeavyReadyDeadlineObservation | undefined, stopped = false;
   const fail = (reason: string): void => { latest = { atMs: systemClock.now(), reading: { state: "unavailable", reason } }; };
   worker.on("message", (value: HeavyReadyDeadlineObservation) => { if (!stopped) latest = value; });

@@ -18,7 +18,7 @@ const MIN = 60_000;
 const CORE_USEC_PER_MIN = 60 * 1e6;
 
 /** A supervisor whose generations promote at once; a boot costs `boot.ms` of clock and `boot.usec` of CPU. */
-function world(blind = false) {
+function world(blind = false, shares: Array<[string, number]> = [["node", 0.5], ["children", 0.3], ["libuv-worker", 0.2], ["V8 Worker", 0]]) {
   const state = { now: 0, usec: 0, boot: { ms: 0, usec: 0 } };
   const slots = new Map<string, PreparedSlot>();
   let forks = 0;
@@ -67,7 +67,7 @@ function world(blind = false) {
     socketPathFor: (n) => `/sock/${n}`,
     cpuBudget: {
       usageUsec: () => (blind ? undefined : state.usec),
-      consumers: () => new Map([["node", state.usec / 1e6 * 0.5], ["children", state.usec / 1e6 * 0.3], ["libuv-worker", state.usec / 1e6 * 0.2], ["V8 Worker", 0]]),
+      consumers: () => new Map(shares.map(([name, share]) => [name, state.usec / 1e6 * share])),
       every: (_ms, fn) => (ticks.push(fn), () => {}),
     },
   });
@@ -108,6 +108,21 @@ const budgetRow = (hour: number, steady: number | null, prev: number | null) => 
 });
 const fired = (rows: Record<string, unknown>[], hour: number) =>
   evaluateIncidentInvariants(rows, Date.parse(at(hour * 60 * MIN + MIN))).filter((f) => f.ruleId === SERVE_CPU_BUDGET_RULE_ID);
+
+test("W1-T13441 criterion 3: serve.cpu_budget lists every named thread over the floor, not only the top three", async () => {
+  // 1 core for the hour: views 0.54, main 0.36, then three more named threads and one under the floor.
+  const w = world(false, [["rmd-rm-views", 0.54], ["MainThread", 0.36], ["rmd-board", 0.05], ["rmd-rm-txn-wrtr", 0.03], ["V8Worker", 0.018], ["rmd-plan-reload", 0.002]]);
+  await w.supervisor.start();
+  w.state.now += 60 * MIN;
+  w.state.usec += 60 * CORE_USEC_PER_MIN;
+  w.ticks[0]!();
+  const row = w.rows().at(-1)!;
+  assert.deepEqual((row.top as Array<{ name: string }>).map((c) => c.name), ["rmd-rm-views", "MainThread", "rmd-board"], "top stays three: the serve-cpu-budget rule reads it");
+  assert.deepEqual(row.threads, [
+    { name: "rmd-rm-views", cores: 0.54 }, { name: "MainThread", cores: 0.36 }, { name: "rmd-board", cores: 0.05 },
+    { name: "rmd-rm-txn-wrtr", cores: 0.03 }, { name: "V8Worker", cores: 0.018 },
+  ], "every thread at or over SERVE_CPU_BUDGET_THREAD_FLOOR_CORES, hottest first; rmd-plan-reload's 0.002 is under it");
+});
 
 test("W1-T13304 criterion 2: serve-cpu-budget fires on two hours in a row over budget and names the top three consumers", () => {
   assert.equal(SERVE_STEADY_CPU_BUDGET_CORES, 0.3);

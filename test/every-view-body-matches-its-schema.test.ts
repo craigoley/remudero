@@ -33,6 +33,7 @@ import type { NeedsYouData } from "#src/lib/needs-you-view.js";
 import { EMERGENCY_STOP_ISSUED_LEDGER_STEP } from "#src/lib/ledger.js";
 import { OPERATOR_AGENT_PROPOSAL_STEP, OPERATOR_AGENT_SETTINGS_STEP } from "#src/lib/operator-agent.js";
 import { VIEW_EVENTS_PATH, VIEW_VERSIONS_PATH } from "#src/lib/view-events.js";
+import { VIEW_BATCH_PATH } from "#src/lib/views.js";
 import { createWorkstreamsView, type WorkstreamsData } from "#src/lib/workstreams-view.js";
 import { CODE_HEALTH_VIEW_NAME, createCodeHealthView, type CodeHealthViewData } from "#src/lib/code-health-view.js";
 import { codeHealthRepositoryStateDir, publishCodeHealthSnapshot } from "#src/lib/code-health-store.js";
@@ -238,7 +239,7 @@ test("every registered view body validates against its declared schema", async (
   t.mock.method(systemClock, "now", clock.now);
   const { root, stateDir, deps, runs } = fixture(t);
   await materializeAll(root, stateDir, deps);
-  const routed = buildServeRoutes(deps).filter((r) => r.path.startsWith("/v1/views/") && r.path !== VIEW_EVENTS_PATH && r.path !== VIEW_VERSIONS_PATH)
+  const routed = buildServeRoutes(deps).filter((r) => r.path.startsWith("/v1/views/") && r.path !== VIEW_EVENTS_PATH && r.path !== VIEW_VERSIONS_PATH && r.path !== VIEW_BATCH_PATH)
     .map((r) => r.path.slice("/v1/views/".length)).sort();
   // CORPUS CONTROL: a view routed with no query here would pass by never being read.
   assert.deepEqual(routed, Object.keys(QUERY).sort(), "every routed view is read below, and nothing else");

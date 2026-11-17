@@ -1428,6 +1428,14 @@ export const PRECHECK_PATH_TRIGGERED_SUITES = [
     trigger: (input) => input.changed.some((path) => ["scripts/coverage-session-blanking-check.mjs",
       "test/coverage-session-blanking.test.ts"].includes(path)) || addsMatch(input, TEST_TS_SCOPE_RE, childCoverageFindings),
     remedy: "explicitly blank NODE_V8_COVERAGE on the child environment when stripping NODE_TEST_CONTEXT; deleting the coverage variable is ineffective" },
+  // W1-T13353: a -latest runner label moves every job to a new image the day GitHub flips it (ubuntu-26.04, 2026-11-17).
+  // A workflow edit joins only when its head text carries a -latest runs-on label, so an unrelated workflow edit
+  // starts no child.
+  { testFile: "test/rules/every-workflow-job-runs-on-a-pinned-runner-image.test.ts", gitFree: true,
+    trigger: ({ changed, readHead }) => changed.some((p) => [
+      "scripts/census-precheck.mjs", "test/rules/every-workflow-job-runs-on-a-pinned-runner-image.test.ts",
+    ].includes(p) || (p.startsWith(".github/workflows/") && /^\s*runs-on:.*-latest\b/m.test(readHead?.(p) ?? ""))),
+    remedy: "pin each runs-on to a versioned image such as ubuntu-26.04" },
   { testFile: "test/rules/the-root-scratch-ignore-stays-root-only.test.ts",
     trigger: ({ changed }) => changed.some((p) => [".gitignore", "scripts/census-precheck.mjs",
       "test/rules/the-root-scratch-ignore-stays-root-only.test.ts"].includes(p)),

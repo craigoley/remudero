@@ -26,7 +26,7 @@ permissions:
 jobs:
   coverage-session-blanking:
     name: coverage-session-blanking
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     # W1-T1009: LIGHT band, prophylactic. The check is a `git ls-files` plus a text scan of every
     # tracked test/**/*.ts file, the same shape and order of magnitude as unwired-gate's ~0.2s.
     timeout-minutes: 10

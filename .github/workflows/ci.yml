@@ -77,7 +77,7 @@ jobs:
   squash-trailer-gate:
     name: squash-trailer-gate
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -100,7 +100,7 @@ jobs:
       RMD_CI_DEPENDENCY_DIGEST: ${{ needs.commitlint.outputs.dependency_digest }}
       RMD_CI_DEPENDENCY_PRODUCER_SHA: ${{ needs.commitlint.outputs.dependency_producer_sha }}
     # Producer failure/skip never skips the matrix; its dependency check remains fail-closed.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     strategy:
       fail-fast: false
       matrix:
@@ -575,7 +575,7 @@ jobs:
   # (so it no longer has to be ordered "before the exit 1"), and is registered ADVISORY in ci-gate.yml.
   flake-retry-aggregate:
     name: flake-retry-aggregate
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs: [ci, test-slow, coverage-ratchet] # W1-T4398: the coverage lane retries too
     if: ${{ always() }}
     timeout-minutes: 10
@@ -673,7 +673,7 @@ jobs:
 
   ci-required:
     name: ci
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs: [ci, commitlint]
     if: ${{ always() }}
     timeout-minutes: 10
@@ -799,7 +799,7 @@ jobs:
     # finish within 60% of test-slow-shard's 35-minute ceiling. No install: the planner imports
     # only node: built-ins. If it fails, test-slow-shard is skipped and test-slow fails closed.
     name: test-slow-plan
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     outputs:
       shards: ${{ steps.plan.outputs.shards }}
@@ -838,7 +838,7 @@ jobs:
     # checks as `test-slow-shard (*/*)`; the required verdict stays the stable `test-slow`.
     name: test-slow-shard (${{ matrix.shard }}/${{ needs.test-slow-plan.outputs.count }})
     needs: [test-slow-plan]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     strategy:
       fail-fast: false
       matrix:
@@ -978,7 +978,7 @@ jobs:
     name: test-slow
     needs: [test-slow-shard]
     if: ${{ always() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
       - name: Collapse both slow-tier shards into the stable required check
@@ -1114,7 +1114,7 @@ jobs:
     # W1-T5522: also on the group commit (two PRs can each bump one recorded literal from one base);
     # there every base read is GATE_BASE, the queue's landing base, never HEAD^1 (the previous entry)
     # or a stale origin/main. pull_request argv is unchanged. Test: the-merge-queue-runs-the-recorded-*.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     if: github.event_name == 'pull_request' || github.event_name == 'merge_group' # W1-T1033/W1-T5522
     timeout-minutes: 15
     outputs:
@@ -1529,7 +1529,7 @@ jobs:
     # W1-T4399: this gate now runs as a step of the `commitlint` job above (see its own header
     # comment) — this job key stays registered, permanently skipped, under its original name.
     name: leak-grep
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     if: false
     timeout-minutes: 10
     steps:
@@ -1537,7 +1537,7 @@ jobs:
 
   coverage-ledger:
     name: coverage-ledger
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     # W1-T5892: this prerequisite publishes the shared floor pin before coverage shards start.
     # 75 - 49 - 20 - 5 = 1 minute, including setup: preserve WAIT_CAP_SECONDS and its margin.
     timeout-minutes: 1
@@ -1692,7 +1692,7 @@ jobs:
     # always-registers shape rather than adding a required context that could go absent — and
     # fails when the diff adds a source line lcov marks instrumented but never hit.
     name: coverage-shard (${{ matrix.shard }}/12)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs: [coverage-ledger]
     strategy:
       fail-fast: false
@@ -2086,7 +2086,7 @@ jobs:
 
   coverage-ratchet-required:
     name: coverage-ratchet
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs: [coverage-ratchet, coverage-ledger]
     if: ${{ always() }}
     # PR #8080's eight shards passed, but merging their compact V8 reports ran past this job's
@@ -2491,7 +2491,7 @@ jobs:
     # src/lib/classify.ts; scoping it to those two gave the SAME 108 valid mutants in 54 seconds.
     # Why: the full latency measurements are in docs/forensics/ci-yml.md.
     name: mutation-ratchet
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
     # W1-T10217: a PR's first Stryker run is cold and a cancelled one caches nothing; 10m cut off 5 cold runs.
     # 32m = the slowest projected cold job (22.4m) x one head's measured pace spread (1.38x); see its test.
@@ -2577,7 +2577,7 @@ jobs:
     # W1-T4399: this gate now runs as a step of the `commitlint` job above (see its own header
     # comment) — this job key stays registered, permanently skipped, under its original name.
     name: learnings-budget-ratchet
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     if: false
     timeout-minutes: 10
     steps:
@@ -2587,7 +2587,7 @@ jobs:
     # W1-T4399: this gate now runs as a step of the `commitlint` job above (see its own header
     # comment) — this job key stays registered, permanently skipped, under its original name.
     name: jscpd-gate
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     if: false
     timeout-minutes: 10
     steps:
@@ -2597,7 +2597,7 @@ jobs:
     # W1-T4399: this gate now runs as a step of the `commitlint` job above (see its own header
     # comment) — this job key stays registered, permanently skipped, under its original name.
     name: claims
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     if: false
     timeout-minutes: 10
     steps:
@@ -2607,7 +2607,7 @@ jobs:
     # W1-T4399: this gate now runs as a step of the `commitlint` job above (see its own header
     # comment) — this job key stays registered, permanently skipped, under its original name.
     name: assertion-discrimination
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     if: false
     timeout-minutes: 10
     steps:
@@ -2617,7 +2617,7 @@ jobs:
     # W1-T4399: this gate now runs as a step of the `commitlint` job above (see its own header
     # comment) — this job key stays registered, permanently skipped, under its original name.
     name: lint-plan
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     if: false
     timeout-minutes: 10
     steps:
@@ -2627,7 +2627,7 @@ jobs:
     # W1-T4399: this gate now runs as a step of the `commitlint` job above (see its own header
     # comment) — this job key stays registered, permanently skipped, under its original name.
     name: depcruise
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     if: false
     timeout-minutes: 10
     steps:
@@ -2637,7 +2637,7 @@ jobs:
     # W1-T4399: this gate now runs as a step of the `commitlint` job above (see its own header
     # comment) — this job key stays registered, permanently skipped, under its original name.
     name: containment-probe
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     if: false
     timeout-minutes: 10
     steps:
@@ -2647,7 +2647,7 @@ jobs:
     # W1-T4399: this gate now runs as a step of the `commitlint` job above (see its own header
     # comment) — this job key stays registered, permanently skipped, under its original name.
     name: api-client-drift
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     if: false
     timeout-minutes: 10
     steps:
@@ -2657,7 +2657,7 @@ jobs:
     # W1-T4399: this gate now runs as a step of the `commitlint` job above (see its own header
     # comment) — this job key stays registered, permanently skipped, under its original name.
     name: no-hand-rolled-fetch
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     if: false
     timeout-minutes: 10
     steps:
@@ -2667,7 +2667,7 @@ jobs:
     # W1-T4399: this gate now runs as a step of the `commitlint` job above (see its own header
     # comment) — this job key stays registered, permanently skipped, under its original name.
     name: prompt-surface-gate
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     if: false
     timeout-minutes: 10
     steps:
@@ -2677,7 +2677,7 @@ jobs:
     # W1-T4399: this gate now runs as a step of the `commitlint` job above (see its own header
     # comment) — this job key stays registered, permanently skipped, under its original name.
     name: task-id-existence
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     if: false
     timeout-minutes: 10
     steps:
@@ -2687,7 +2687,7 @@ jobs:
     # W1-T4399: this gate now runs as a step of the `commitlint` job above (see its own header
     # comment) — this job key stays registered, permanently skipped, under its original name.
     name: source-size
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     if: false
     timeout-minutes: 10
     steps:
@@ -2697,7 +2697,7 @@ jobs:
     # W1-T4399: this gate now runs as a step of the `commitlint` job above (see its own header
     # comment) — this job key stays registered, permanently skipped, under its original name.
     name: comment-load-ratchet
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     if: false
     timeout-minutes: 10
     steps:
@@ -2707,7 +2707,7 @@ jobs:
     # W1-T4399: this gate now runs as a step of the `commitlint` job above (see its own header
     # comment) — this job key stays registered, permanently skipped, under its original name.
     name: baseline-monotonic
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     if: false
     timeout-minutes: 10
     steps:
@@ -2734,7 +2734,7 @@ jobs:
     # all `needs:` of this job). SHA falls back to github.sha, the group head, where the PR head sha
     # is empty. FALSIFIER: test/the-ci-gate-reports-on-the-merge-group-commit.test.ts.
     name: ci-gate
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs: [squash-trailer-gate, ci, flake-retry-aggregate, ci-required, test-slow-plan, test-slow-shard, test-slow, commitlint, leak-grep, coverage-ledger, coverage-ratchet, coverage-ratchet-required, mutation-ratchet, learnings-budget-ratchet, jscpd-gate, claims, assertion-discrimination, lint-plan, depcruise, containment-probe, api-client-drift, no-hand-rolled-fetch, prompt-surface-gate, task-id-existence, source-size, comment-load-ratchet, baseline-monotonic]
     # `always()` must still aggregate a FAILED dependency, but alone it also survives normal
     # cancellation and keeps a superseded PR run's concurrency slot occupied (W1-T4604).
