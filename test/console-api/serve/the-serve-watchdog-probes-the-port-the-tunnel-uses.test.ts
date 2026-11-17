@@ -35,6 +35,10 @@ const listen = (server: Server, at: number | string): Promise<void> =>
   });
 const close = (server: Server): Promise<void> => new Promise((resolve) => server.close(() => resolve()));
 const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+/** Polls until `ready()` holds or `ms` pass, so a slow runner waits for the row instead of racing a fixed sleep. */
+const until = async (ready: () => boolean, ms = 10_000): Promise<void> => {
+  for (const end = Date.now() + ms; !ready() && Date.now() < end; ) await wait(20);
+};
 
 /** A supervisor over one fake generation whose private socket is `socketPath`, serving `--port <port>`. */
 function supervise(socketPath: string, port: number, extra: Partial<ServeSupervisorOptions> = {}) {
@@ -98,8 +102,10 @@ test("W1-T13503 criterion 1: the default probe GETs the unrouted probe path on t
     await r.supervisor.start();
     for (let n = 0; n < ACTIVE_PROBE_FAILURES; n++) {
       r.ticks[0]?.();
-      await wait(250);
+      await until(() => publicSeen.length === n + 1);
+      await wait(250); // past the 150 ms bound, so the next tick is not skipped as still probing
     }
+    await until(() => r.rows.some((x) => x.step === "serve.active_wedged"));
     assert.deepEqual(publicSeen, Array(ACTIVE_PROBE_FAILURES).fill(ACTIVE_PROBE_PUBLIC_PATH), "every probe went to the serve port");
     assert.deepEqual(privateSeen, [SMOKE_PATHS[0]], "the private socket is asked once, for the wedge row");
     const row = r.rows.find((x) => x.step === "serve.active_wedged");
@@ -160,6 +166,7 @@ test("W1-T13503 criterion 1: a refused serve port and an absent private socket a
       r.ticks[0]?.();
       await wait(80);
     }
+    await until(() => r.rows.some((x) => x.step === "serve.active_wedged"));
     const row = r.rows.find((x) => x.step === "serve.active_wedged");
     assert.ok(row);
     assert.match(String(row.extra?.lastError), /ECONNREFUSED/);
