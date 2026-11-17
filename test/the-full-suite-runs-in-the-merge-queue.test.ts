@@ -45,6 +45,8 @@ type CiDoc = { on: Record<string, unknown>; env?: Record<string, string>; jobs: 
 const doc = parseYaml(readFileSync(CI_YAML_PATH, "utf8")) as CiDoc;
 const CI_SHARD_COUNT = doc.jobs.ci!.strategy?.matrix?.shard?.length ?? 0;
 assert.ok(CI_SHARD_COUNT > 0, "the ci matrix must declare at least one shard");
+// W1-T13270: the coverage lane has its own count, apart from ci-shard's.
+const COVERAGE_SHARD_COUNT = doc.jobs["coverage-ratchet"]!.strategy?.matrix?.shard?.length ?? 0;
 
 function findStep(jobId: string, name: string): Step {
   const found = doc.jobs[jobId]?.steps?.find((s) => s.name === name || s.name?.startsWith(`${name} (`));
@@ -114,7 +116,7 @@ test("W1-T4406: the merge group runs the full instrumented suite", () => {
   assert.notEqual(merge.status, 0, merge.out);
   assert.match(
     merge.calls,
-    new RegExp(`scripts\\/test-tier-manifest\\.mjs --select-all --shard 1/${CI_SHARD_COUNT} --base HEAD\\^1`),
+    new RegExp(`scripts\\/test-tier-manifest\\.mjs --select-all --shard 1/${COVERAGE_SHARD_COUNT} --base HEAD\\^1`),
     "a merge_group SOURCE run must select its complete duration-balanced coverage shard, exactly like a pull_request run",
   );
   assert.match(merge.calls, /test-with-retry\.mjs --coverage-first-pass/, "a merge_group run must invoke the real instrumented test runner");
