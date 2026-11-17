@@ -1,0 +1,44 @@
+- id: W1-T13304
+  title: "Serve holds itself to a CPU budget: every hour it records its container's CPU outside boots, and an incident fires when the steady average passes 0.3 core, so serve cannot drift back into being a worker"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # a new measurement row and incident rule across two modules; no runtime behavior changes
+  band_meaning: span
+  origin: "operator-session#serve-oom-2026-11-16"
+  plan_refs:
+    - W1-T13203
+  files:
+    - src/lib/incident-invariants.ts
+    - src/lib/serve-supervisor.ts
+    - test/serve-holds-a-cpu-budget.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The supervisor writes one serve.cpu_budget row an hour with the container's cgroup usage_usec delta, the boot seconds inside the hour (from serve.cold_start rows), and steady_cores = (usage outside boots) / (seconds outside boots)"
+      proof: "grep: W1-T13304 criterion 1 in test/serve-holds-a-cpu-budget.test.ts"
+    - claim: "A new invariant serve-cpu-budget fires when two consecutive serve.cpu_budget rows have steady_cores above SERVE_STEADY_CPU_BUDGET_CORES (0.3), and its message names the top three thread or child consumers the row carries"
+      proof: "grep: W1-T13304 criterion 2 in test/serve-holds-a-cpu-budget.test.ts"
+    - claim: "invariant:unreadable-is-unknown — an unreadable cgroup writes the row with steady_cores null and never fires the invariant"
+      kind: guard
+      proof: "grep: W1-T13304 criterion 3 in test/serve-holds-a-cpu-budget.test.ts"
+  rationale: |
+    WHY: Craig on 2026-11-17: "serve should not need this much cpu". MEASURED 01:05-01:10Z: serve's container averaged 1.58
+    cores (24% system time); its process 1.16 (worker threads 0.44, main thread 0.29, V8 workers 0.07), and short-lived
+    children (git grep, git fetch, gh) about 0.4. A thin API layer should idle near zero. Nothing records serve's own CPU
+    as a budget today, so it grew unseen (W1-T11974 and W1-T11975 measured the same drift on 2026-11-10).
+  design: |
+    INVARIANT unreadable-is-unknown: no reading, no alarm.
+    1. The supervisor reads its own cgroup's cpu.stat each hour and the per-thread and per-child CPU it can see (/proc),
+       and writes serve.cpu_budget.
+    2. incident-invariants.ts gets rule serve-cpu-budget over those rows.
+    3. Declare the new step where steps are declared.
+  falsifier: |
+    Count boot time as steady: criterion 1 fails. Fire on one row: criterion 2 fails. Treat unreadable as zero: criterion
+    3 fails.
+  note: |
+    Id reserved for run-unfiled-1794878208000 with ~/rmd-work/bin/reserve-id.sh.
