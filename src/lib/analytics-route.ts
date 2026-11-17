@@ -2671,6 +2671,22 @@ export function createAnalyticsSnapshotCache(deps: AnalyticsSnapshotCacheDeps): 
   let progress: AnalyticsResumePoint | undefined;
   let checkpointWrittenAt: number | undefined;
   let unwritten: AnalyticsCheckpoint | undefined;
+  // W1-T13483: a partial fold's resume point (about 80 MB of JSON on the Azure host) was written synchronously on serve's
+  // request loop after every partial refresh, several times an hour, each a 10 to 27 s stall. It is now written at most
+  // once per ANALYTICS_CHECKPOINT_WRITE_INTERVAL_MS (the first at once), and any unwritten one when serve stops; between
+  // refreshes the fold resumes from memory.
+  let progressWrittenAt: number | undefined;
+  let unwrittenProgress: AnalyticsResumePoint | undefined;
+  const persistProgress = (next: AnalyticsResumePoint, force: boolean): void => {
+    const nowMs = clock.now();
+    if (!force && progressWrittenAt !== undefined && nowMs - progressWrittenAt < ANALYTICS_CHECKPOINT_WRITE_INTERVAL_MS) {
+      unwrittenProgress = next;
+      return;
+    }
+    writeAnalyticsProgress(deps.stateDir, next);
+    progressWrittenAt = nowMs;
+    unwrittenProgress = undefined;
+  };
   const persistCheckpoint = (next: AnalyticsCheckpoint, force: boolean): void => {
     const nowMs = clock.now();
     if (!force && checkpointWrittenAt !== undefined && nowMs - checkpointWrittenAt < ANALYTICS_CHECKPOINT_WRITE_INTERVAL_MS) {
@@ -2738,7 +2754,7 @@ export function createAnalyticsSnapshotCache(deps: AnalyticsSnapshotCacheDeps): 
         if ("progress" in result) {
           // Not a snapshot: the prior value stays served, stale and dated, while the fold advances on disk.
           progress = result.progress;
-          writeAnalyticsProgress(deps.stateDir, result.progress);
+          persistProgress(result.progress, false);
           continueAfterMs = Math.max(0, clock.now() - beganAt);
           log("serve.analytics_refresh.partial", {
             duration_ms: continueAfterMs,
@@ -2756,6 +2772,7 @@ export function createAnalyticsSnapshotCache(deps: AnalyticsSnapshotCacheDeps): 
           if (hasRetainedEvidence && sourceReadable) persistCheckpoint(result.checkpoint, false);
           if (progress !== undefined) clearAnalyticsProgress(deps.stateDir);
           progress = undefined;
+          unwrittenProgress = undefined;
         }
         value = freezeAnalyticsSnapshot(next);
         shedPending = false;
@@ -2796,6 +2813,7 @@ export function createAnalyticsSnapshotCache(deps: AnalyticsSnapshotCacheDeps): 
     started = false;
     cancelTimer();
     if (unwritten !== undefined) persistCheckpoint(unwritten, true);
+    if (unwrittenProgress !== undefined) persistProgress(unwrittenProgress, true);
     controller?.abort(new Error("analytics refresh stopped with serve lifecycle"));
   };
 
@@ -2812,6 +2830,7 @@ export function createAnalyticsSnapshotCache(deps: AnalyticsSnapshotCacheDeps): 
       value = coldAnalyticsSnapshot();
       checkpoint = undefined;
       progress = undefined;
+      unwrittenProgress = undefined;
       shedPending = true;
       log("serve.analytics_shed", {});
     },
