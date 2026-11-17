@@ -77,6 +77,47 @@ export type NeedBasis = "measured_overlap" | "boot_peak" | "unknown";
 export const SMOKE_PATHS = ["/v1/version", "/v1/status", "/v1/views/versions"] as const;
 
 /**
+ * W1-T13276: the supervisor GETs SMOKE_PATHS[0] on the generation that is serving every minute. OBSERVED 2026-11-16: a
+ * generation listened, kept writing background rows and answered no HTTP request for 40 minutes (455 connections in the
+ * accept queue, 444 in CLOSE_WAIT) until a manual restart. INVARIANT a-slow-answer-is-not-a-wedge: only an UNANSWERED
+ * probe counts, a timeout or a refused connection; any HTTP status (200, 401, 503) inside the bound is alive.
+ */
+export const ACTIVE_PROBE_INTERVAL_MS = 60_000;
+export const ACTIVE_PROBE_TIMEOUT_MS = 10_000;
+/** Consecutive unanswered probes that make a wedge: three minutes of silence, not one dropped packet. */
+export const ACTIVE_PROBE_FAILURES = 3;
+/** BACKSTOP: a second wedge inside this long is recorded and held, never restarted, so a build that wedges at boot cannot loop. */
+export const ACTIVE_WEDGE_RESTART_FLOOR_MS = 15 * 60_000;
+/** The port the post-mortem socket census reads when the supervisor is not told another. */
+export const ACTIVE_WEDGE_SERVE_PORT = 4317;
+
+const TCP_STATES: Record<string, string> = {
+  "01": "ESTABLISHED", "02": "SYN_SENT", "03": "SYN_RECV", "04": "FIN_WAIT1", "05": "FIN_WAIT2", "06": "TIME_WAIT",
+  "07": "CLOSE", "08": "CLOSE_WAIT", "09": "LAST_ACK", "0A": "LISTEN", "0B": "CLOSING",
+};
+
+/** Open sockets on a local port by TCP state, from /proc/net/tcp and /proc/net/tcp6; a table that cannot be read is skipped. */
+export function socketStatesForPort(port: number, read: (path: string) => string = (path) => readFileSync(path, "utf8")): Record<string, number> {
+  const counts: Record<string, number> = {};
+  const wantPort = port.toString(16).toUpperCase().padStart(4, "0");
+  for (const table of ["/proc/net/tcp", "/proc/net/tcp6"]) {
+    let text: string;
+    try {
+      text = read(table);
+    } catch {
+      continue; // this table is absent (no IPv6, or not Linux): the other one still counts
+    }
+    for (const line of text.split("\n").slice(1)) {
+      const fields = line.trim().split(/\s+/);
+      if (fields.length < 4 || fields[1]?.split(":")[1]?.toUpperCase() !== wantPort) continue;
+      const state = TCP_STATES[fields[3]?.toUpperCase() ?? ""] ?? `0x${fields[3]}`;
+      counts[state] = (counts[state] ?? 0) + 1;
+    }
+  }
+  return counts;
+}
+
+/**
  * W1-T13303: the shortest gap between two ordinary handoffs. MEASURED 2026-11-16/17: at 15 minutes, serve handed off 12
  * times in 10 hours (main moved 28 times in 3), and each cold boot stalled the Console for minutes. A restart is not
  * spaced: a supervisor with no handoff yet hands off at once.
@@ -186,6 +227,14 @@ export interface ServeSupervisorOptions {
   /** {@link handoffSpacingMs}'s base; absent or 0, a handoff never waits on the previous one. */
   spacingBaseMs?: number;
   spacingHalfLifeMs?: number;
+  /** W1-T13276: one probe of the active generation; resolves with any HTTP status, rejects on a refusal. Defaults to {@link socketGet}. */
+  activeProbe?: (socketPath: string, path: string, timeoutMs: number) => Promise<{ status: number }>;
+  /** W1-T13276: runs `tick` every `ms` and returns its canceller; defaults to an unref'd interval. */
+  every?: (tick: () => void, ms: number) => () => void;
+  activeProbeTimeoutMs?: number;
+  /** W1-T13276: the post-mortem socket census; defaults to {@link socketStatesForPort} on `servePort`. */
+  socketStates?: () => Record<string, number> | undefined;
+  servePort?: number;
 }
 
 /** W1-T9570: the free-memory reads after a tier-2 shed: the first, the one judged, how many, and what ended them. */
@@ -203,6 +252,8 @@ interface Generation {
   process: GenerationProcess;
   exited: Promise<void>;
   isAlive: () => boolean;
+  /** When it was forked, on the supervisor's clock, so a wedge row can say how long it had lived. */
+  startedAt: number;
   /** It asked for a handoff before it was active; the ask is replayed once it is promoted. */
   asked: boolean;
   /** It dropped its caches for a handoff that has not yet replaced it. */
@@ -582,6 +633,21 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
   let pressure: HandoffPressure | undefined;
   let lastDoneAt: number | undefined;
   let spacingPending = false;
+  const activeProbe = opts.activeProbe ?? ((socketPath: string, path: string, timeoutMs: number) => socketGet(socketPath, path, timeoutMs));
+  const probeTimeoutMs = opts.activeProbeTimeoutMs ?? ACTIVE_PROBE_TIMEOUT_MS;
+  const every = opts.every ?? ((tick: () => void, ms: number) => {
+    const timer = setInterval(tick, ms);
+    timer.unref();
+    return () => clearInterval(timer);
+  });
+  const servePort = opts.servePort ?? ACTIVE_WEDGE_SERVE_PORT;
+  const socketStates = opts.socketStates ?? (() => socketStatesForPort(servePort));
+  let stopProbing: (() => void) | undefined;
+  let probing = false;
+  let probeMisses: { generation: number; count: number } = { generation: 0, count: 0 };
+  let lastWedgeRestartAt: number | undefined;
+  /** Generations the supervisor itself is killing for a wedge: not probed again, and not a crash to roll back from. */
+  const wedged = new Set<Generation>();
 
   const fork = (slot: PreparedSlot): Generation => {
     const id = ++next;
@@ -589,7 +655,7 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
     const proc = spawn(command(slot), { [SERVE_ROLE_ENV]: "standby", [SERVE_READY_SOCKET_ENV]: socketPath, [SELF_SYNC_GUARD_ENV]: "1" });
     let alive = true;
     const exited = new Promise<void>((resolve) => proc.onExit(() => ((alive = false), resolve())));
-    const generation: Generation = { id, slot, socketPath, process: proc, exited, isAlive: () => alive, asked: false };
+    const generation: Generation = { id, slot, socketPath, process: proc, exited, isAlive: () => alive, startedAt: clock.now(), asked: false };
     proc.onMessage((message) => {
       if (message.type !== GENERATION_MESSAGES.handoffRequest) return;
       if (generation === active) void supervisor.requestHandoff();
@@ -676,8 +742,79 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
     }
   };
 
+  /** One bounded probe of `generation`: any HTTP status is an answer; a timeout or a refusal is the unanswered kind. */
+  const probeOnce = async (generation: Generation): Promise<{ answered: true; status: number } | { answered: false; error: string }> => {
+    let timer: NodeJS.Timeout | undefined;
+    const bound = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`timed out after ${probeTimeoutMs} ms`)), probeTimeoutMs);
+      timer.unref();
+    });
+    try {
+      const reply = await Promise.race([activeProbe(generation.socketPath, SMOKE_PATHS[0], probeTimeoutMs), bound]);
+      return { answered: true, status: reply.status };
+    } catch (err) {
+      return { answered: false, error: errorText(err) };
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  /** W1-T13276: the active generation answered nothing for ACTIVE_PROBE_FAILURES probes: record it and restart it, at most once per floor. */
+  const handleWedge = (generation: Generation, failures: number, lastError: string): void => {
+    const now = clock.now();
+    if (lastWedgeRestartAt !== undefined && now - lastWedgeRestartAt < ACTIVE_WEDGE_RESTART_FLOOR_MS) {
+      opts.log("serve.active_wedged_held", { generation: generation.id, sha: generation.slot.sha, failures, lastError, sinceLastRestartMs: now - lastWedgeRestartAt, floorMs: ACTIVE_WEDGE_RESTART_FLOOR_MS });
+      return;
+    }
+    lastWedgeRestartAt = now;
+    let sockets: Record<string, number> | undefined;
+    try {
+      sockets = socketStates();
+    } catch (err) {
+      opts.log("serve.active_wedge_snapshot_unread", { reason: errorText(err) });
+    }
+    opts.log("serve.active_wedged", { generation: generation.id, sha: generation.slot.sha, pid: generation.process.pid, failures, lastError, uptimeMs: now - generation.startedAt, sockets });
+    wedged.add(generation);
+    try {
+      generation.process.kill("SIGKILL");
+    } catch (err) {
+      // The restart path is unavailable: the legacy exit lets docker restart the whole container.
+      opts.log("serve.active_wedge_kill_failed", { generation: generation.id, reason: errorText(err) });
+      void legacyExit("active_wedged");
+    }
+  };
+
+  /** One probe interval: probes only the generation that is serving, and never while a handoff, a drain or a restart is under way. */
+  const probeTick = async (): Promise<void> => {
+    const generation = active;
+    if (probing || stopping || !generation || inFlight || wedged.has(generation) || !generation.isAlive()) {
+      if (!probing) probeMisses = { generation: 0, count: 0 };
+      return;
+    }
+    probing = true;
+    try {
+      const result = await probeOnce(generation);
+      // A handoff, a drain or a crash began while it was in flight: that answer is about a generation that is leaving.
+      if (active !== generation || inFlight || stopping) return void (probeMisses = { generation: 0, count: 0 });
+      if (result.answered) return void (probeMisses = { generation: generation.id, count: 0 });
+      const count = (probeMisses.generation === generation.id ? probeMisses.count : 0) + 1;
+      probeMisses = { generation: generation.id, count };
+      if (count < ACTIVE_PROBE_FAILURES) return;
+      probeMisses = { generation: generation.id, count: 0 };
+      handleWedge(generation, count, result.error);
+    } finally {
+      probing = false;
+    }
+  };
+
+  const startProbing = (): void => {
+    if (stopProbing) return;
+    stopProbing = every(() => void probeTick().catch((err: unknown) => opts.log("serve.active_probe_error", { reason: errorText(err) })), ACTIVE_PROBE_INTERVAL_MS);
+  };
+
   const activate = (generation: Generation): void => {
     active = generation;
+    startProbing();
     if (generation.asked) void supervisor.requestHandoff();
   };
 
@@ -1028,7 +1165,8 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
     if (inFlight) await inFlight;
     if (active) return;
     crashes += 1;
-    const rollback = previous !== undefined && previous.sha !== dead.slot.sha;
+    // A wedge says nothing about the build: the same slot restarts, and nothing is marked failed.
+    const rollback = !wedged.has(dead) && previous !== undefined && previous.sha !== dead.slot.sha;
     const slot = rollback && previous ? previous : dead.slot;
     if (rollback) failed.add(dead.slot.sha);
     opts.log(rollback ? "serve.handoff_rolled_back" : "serve.generation_crashed", { sha: dead.slot.sha, toSha: slot.sha, code, signal, crashes });
@@ -1094,6 +1232,7 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
     shutdown: async (reason) => {
       if (stopping) return;
       stopping = true;
+      stopProbing?.();
       const generation = active;
       if (generation) await drainOld(generation, reason);
       exit(0);
