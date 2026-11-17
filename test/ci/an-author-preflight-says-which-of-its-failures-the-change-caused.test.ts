@@ -200,16 +200,14 @@ function fixture() {
   writeFileSync(join(root, "scripts/census-precheck.mjs"), "console.log('fixture census precheck passed');\n");
   writeFileSync(join(root, "test/setup/tmp-hygiene.ts"), "export {};\n");
   writeFileSync(join(root, "src/run-task.ts"), "console.log('fixture static preflight passed');\n");
-  writeFileSync(join(root, "src/leaf.ts"), "export const value = 1;\n");
-  const leaf = (value: number) => `import { test } from "node:test"; import assert from "node:assert/strict"; import { value } from "../src/leaf.js";\n` +
-    `test("red at both", () => assert.equal(1, 2));\ntest("green at the base", () => assert.equal(value, ${value}));\n`;
+  const leaf = (value: number) => `import { test } from "node:test"; import assert from "node:assert/strict";\n` +
+    `test("red at both", () => assert.equal(1, 2));\ntest("green at the base", () => assert.equal(${value}, 1));\n`;
   writeFileSync(join(root, "test/leaf.test.ts"), leaf(1));
   repo.git("add", ".");
   repo.git("commit", "-m", "test: baseline");
   repo.git("remote", "add", "origin", root);
   repo.git("checkout", "-b", "run-unfiled-author-attribution");
-  writeFileSync(join(root, "src/leaf.ts"), "export const value = 2;\n");
-  writeFileSync(join(root, "test/leaf.test.ts"), leaf(1));
+  writeFileSync(join(root, "test/leaf.test.ts"), leaf(2));
   writeFileSync(join(root, "test/fresh.test.ts"), `import { test } from "node:test"; test("born red", () => { throw new Error("no"); });\n`);
   repo.git("add", ".");
   repo.git("commit", "-m", "fix: change the leaf");
