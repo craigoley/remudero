@@ -61,6 +61,7 @@ export interface SelectedModeSettings {
 export interface Config {
   contributorAdmission?: import("./contributor-admission.js").AdmissionSettings;
   selectedRegistryMode?: SelectedModeSettings;
+  inboxGardenerMode?: "off" | "shadow" | "act";
   claudeBin: string;
   root: string;
   diskArtifactScanRoots?: string[];
@@ -330,6 +331,7 @@ const workerProvidersShape: ValueSchema = {
 };
 
 export const CONFIG_SCHEMA: readonly ConfigFieldSchema[] = [
+  configField("inboxGardenerMode", '"off" | "shadow" | "act"', true, undefined, "config.json", "Durable host setting for the bounded Inbox gardener (W1-T13258): shadow revalidates only, act retires source-proven asks reversibly; a valid RMD_INBOX_GARDENER_MODE wins. Activation still needs operator authority (W1-T9284).", { kind: "enum", values: ["off", "shadow", "act"] }),
   configField("selectedRegistryMode", "SelectedModeSettings", true, undefined, "config.json", "Opt-in SHADOW mode evidence only; never selected authority or publication permission.", {
     kind: "object", fields: [
       configField("mode", '"shadow"', false, undefined, "config.json", "Observation only.", { kind: "enum", values: ["shadow"] }),
@@ -509,7 +511,7 @@ export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
   envEntry("RMD_HARNESS_HOOKS_DIR", "Replaces the harness's own hooks/ dir whose pre-push the host push leaf runs; daemon environment, never worker input.", ["src/lib/worktree-git.ts"]),
   envEntry("RMD_HEADROOM_ENABLED", "Overrides the headroom governor on or off for this process.", ["src/lib/config.ts"]),
   envEntry("RMD_IDLE_STARVED_SUPERVISED", "Enables supervised idle-starvation handling for a daemon targeting another repository without an explicit plan.", ["src/run-task.ts"]),
-  envEntry("RMD_INBOX_GARDENER_MODE", "Controls the bounded Inbox gardener: absent/invalid is off; shadow permits advisory revalidation only, act permits source-proven reversible retirement. Host activation requires separate operator authority (W1-T9284).", ["src/lib/inbox-retirement.ts"]),
+  envEntry("RMD_INBOX_GARDENER_MODE", "Controls the bounded Inbox gardener and wins over config.json inboxGardenerMode: absent/invalid falls back to that key, then off; shadow permits advisory revalidation only, act permits source-proven reversible retirement. Host activation requires separate operator authority (W1-T9284).", ["src/lib/inbox-retirement.ts"]),
   envEntry("RMD_INSTALLATION_SHARE_DIVISOR", "Set by the daemon on each run child it spawns: the host worker budget that splits the run children's one share of the GitHub App installation (W1-T12950).", ["src/lib/run-child.ts", "src/lib/installation-budget-start.ts"]),
   envEntry("RMD_INSTANCE_NAME", "Names this daemon's registry instance inside its container; set by deploy/recycle-container.sh --instance and the installed launcher, and preferred by the SRE lane over the state-root match (W1-T9500).", ["src/lib/sre-lane.ts", "src/lib/sweep.ts", "src/run-task.ts"]),
   envEntry("RMD_INSTANCE_REGISTRY", "Path to the legacy daemon instance catalog that rmd pause/resume resolve their target instance through (W1-T7727); selected readers use this only as a compatibility alias when RMD_SELECTED_INSTANCE_REGISTRY is absent.", ["src/run-task.ts", "src/lib/sweep.ts"]),
