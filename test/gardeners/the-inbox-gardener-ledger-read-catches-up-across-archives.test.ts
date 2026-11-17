@@ -47,7 +47,7 @@ test("W1-T13348 criterion 2: a catch-up the budget cannot finish reports partial
   const slow = () => steppingClock(INBOX_GARDENER_LIMITS.ledgerCatchUpMs / 2);
   const first = readInboxGardenerLedger(dir, SCOPE, ["ask-old", "ask-live"], slow());
   assert.equal(first.state, "partial", "an unfinished catch-up is never observed");
-  let passes = 1, read = first;
+  let passes = 1, read: ReturnType<typeof readInboxGardenerLedger> = first;
   while (read.state !== "observed" && passes < 100) { read = readInboxGardenerLedger(dir, SCOPE, ["ask-old", "ask-live"], slow()); passes++; }
   assert.equal(read.state, "observed", `each pass resumes where the last stopped, so the read finishes (after ${passes} passes)`);
   assert.ok(passes > 1);
