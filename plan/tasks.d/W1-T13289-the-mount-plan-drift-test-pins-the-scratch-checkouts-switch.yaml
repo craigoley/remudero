@@ -13,7 +13,7 @@
     - W1-T12753
   files:
     - test/a-container-is-recreated-when-its-mount-plan-drifts.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The fixture env in test/a-container-is-recreated-when-its-mount-plan-drifts.test.ts sets RMD_SCRATCH_CHECKOUTS to off, as its sibling tests do"

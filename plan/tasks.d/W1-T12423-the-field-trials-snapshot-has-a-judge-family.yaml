@@ -27,7 +27,7 @@
     - src/lib/field-trials-flow.ts
     - docs/research/model-evidence-program.md
     - test/routing/the-field-trials-snapshot-has-a-judge-family.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The snapshot reads decision.answered, shadow_judge.paired and judge_replay rows beside its present steps, and these rows enter only the judge family. The adoption, funnel, repair, flow, learning, guardrail and served-cohort figures are the same with or without them"

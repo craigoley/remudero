@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 2.22
   status: queued
@@ -24,3 +24,11 @@
     The ledger step sweep.escalation_triage.failed carries a failure shape and landed rows in both halves of the trailing 7 days: 5 in the older half, 27 in the newer.
     No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
     The rows name no file; tracked source literals locate this step in: src/run-task.ts. Start there.
+  risk_ruling:
+    verdict: "rule-3-low-privilege"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "rule 3 (live and low-privilege): the symptom is live, 32 occurrence(s) across 7 day(s), last seen 2026-11-17T09:09:52.238Z, and the record declares no privileged path"
+    judged_at: "2026-11-17T10:29:25.862Z"
+    pin: "b2b5dab23c51f16fb492da074c682a3a4e3a86845b04108dfb6437de3e44c9d8"

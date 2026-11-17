@@ -108,6 +108,7 @@ export const PRODUCER_IDENTITIES: Readonly<Record<string, ProducerIdentity>> = O
   "coverage-nightly": producer("coverage-nightly", "Nightly Coverage"),
   "hand-run-census": producer("hand-run-census", "Hand-Run Census"),
   "knowledge-measurement": producer("knowledge-measurement", "Knowledge Measurement"),
+  "measurement-cadence": producer("measurement-cadence", "Measurement Cadence"),
   "field-trials-refresh": producer("field-trials-refresh", "Field Trials Refresh"),
   "RECOVERY-REFS": producer("recovery-refs", "Recovery Refs"),
   HARNESS: producer("harness", "Harness Child Launch"),

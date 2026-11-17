@@ -15,7 +15,7 @@
     - W1-T13231
   files:
     - test/recycle-container.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The private registry selection tests pass with the clock shifted forward by a week and by a year, because nothing they compare to the clock is a date written into the fixture"
