@@ -160,7 +160,8 @@ async function readBlob(api: OpsCatalogApi, repo: string, blobSha: string, count
   catch { throw new Refusal("malformed"); }
 }
 
-async function readBranchSha(api: OpsCatalogApi, repo: string, branch: string): Promise<string> {
+/** The commit a branch names now: one ref GET. `repo` is `repos/<owner>/<name>`. Throws a refusal on any failure. */
+export async function readBranchSha(api: OpsCatalogApi, repo: string, branch: string): Promise<string> {
   const ref = rec(rec(await get(api, `${repo}/git/ref/heads/${encodeURIComponent(branch)}`)).object);
   if (ref.type !== "commit") throw new Refusal("malformed");
   return sha(ref.sha);

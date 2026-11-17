@@ -190,6 +190,20 @@ import { inspectCapabilityDecision, replayCapabilityDecisions, compareCapability
   loadCapabilityInspectionSource, readInspectionJson } from "./lib/capability-inspection.js";
 import { revisionedRead, type ReadGeneration } from "./lib/read-plane.js";
 import { observeLightPassReviewEligibility } from "./lib/sweep.js";
+import { fixRoundClaimId } from "./lib/sweep.js";
+import {
+  applyStaleFixDispatchRecovery,
+  authorizeStaleFixDispatchRecovery,
+  defaultDescendants,
+  defaultProbeProcess,
+  defaultRecoveryGit,
+  PR_OWNER_RECOVERY_AUTHORIZED_STEP,
+  PR_OWNER_RECOVERY_RECEIPT_STEP,
+  splitRepo,
+  type RecoveryWiring,
+  type RecoveryPorts,
+  type RecoveryResult,
+} from "./lib/stale-fix-dispatch-recovery-apply.js";
 import { createReadyPrCompareReader } from "./lib/light-pass-compare.js";
 import { readPlaneWorkerInput } from "./lib/read-plane.worker.js";
 import { chmodSync, globSync, renameSync } from "node:fs";
@@ -4048,6 +4062,95 @@ export function prOwnerCommand(
   }
   (deps.write ?? console.log)(renderPrOwnerVerdict(derivePrOwnerVerdict(prNumber, corpus, readPrOwnerClaims(join(stateDir, "inflight")))));
   return 0;
+}
+
+const PR_OWNER_RECOVER_VALUE_FLAGS = ["--repo", "--task", "--run", "--round", "--head", "--base", "--branch", "--reason", "--authorization"];
+
+/** W1-T12114: the production ports of `rmd pr-owner-recover` — the ledger union, the gh transport,
+ *  the inflight claim directory, the /proc probes and git in the repository's own clone. */
+export function prOwnerRecoverPorts(
+  repo: string,
+  opts: { ledgerPath: string; root: string; gh?: (args: string[]) => Promise<unknown> },
+): RecoveryPorts {
+  const { ledgerPath } = opts;
+  const gh = opts.gh ?? ((args: string[]) => ghJsonAsync(args));
+  const stateDir = dirname(ledgerPath);
+  const name = splitRepo(repo)?.[1] ?? "";
+  const clone = join(opts.root, "repos", name);
+  const repoDir = name !== "" && existsSync(clone) ? clone : repoRoot;
+  const invocation = `pr-owner-recover-${systemClock.now()}`;
+  const steps = ["fix.dispatch", "fix.done", PR_OWNER_RECOVERY_AUTHORIZED_STEP, PR_OWNER_RECOVERY_RECEIPT_STEP];
+  return {
+    stateDir,
+    inflightDir: join(stateDir, "inflight"),
+    repoDir,
+    readLedger: async () => {
+      const read = await readLedgerUnionRawLinesAsync(stateDir, { refuseIncomplete: true, keep: (line) => steps.some((step) => line.includes(`"${step}"`)) });
+      const rows: Array<Record<string, unknown>> = [];
+      const unread = [...read.unread];
+      for (const line of read.rawLines) {
+        try {
+          rows.push(JSON.parse(line) as Record<string, unknown>);
+        } catch (error) {
+          // A garbled line makes the read incomplete, so every decision over it holds.
+          unread.push(`unparseable ledger line: ${String((error as Error)?.message ?? error)}`);
+        }
+      }
+      return { ok: read.ok && unread.length === 0, unread, rows };
+    },
+    appendLedger: (step, row) => appendLedger(ledgerPath, { run_id: invocation, task_id: "", ...row, step }),
+    readPr: async (target, prNumber) => {
+      const pr = (await gh(["api", `repos/${target}/pulls/${prNumber}`])) as {
+        number?: number; head?: { sha?: string; ref?: string }; base?: { sha?: string; repo?: { full_name?: string } };
+      };
+      return { repo: String(pr.base?.repo?.full_name ?? ""), prNumber: Number(pr.number), headSha: String(pr.head?.sha ?? ""),
+        baseSha: String(pr.base?.sha ?? ""), branch: String(pr.head?.ref ?? "") };
+    },
+    currentLogin: async () => String(((await gh(["api", "user"])) as { login?: string }).login ?? ""),
+    permission: async (target, login) =>
+      String(((await gh(["api", `repos/${target}/collaborators/${login}/permission`])) as { permission?: string }).permission ?? ""),
+    processActor: () => deriveLedgerActor(),
+    probeProcess: (holder) => defaultProbeProcess(holder, { hostname }),
+    descendants: (pid) => defaultDescendants(pid),
+    cwdCensus: (path) => ({ state: readProcessCwdCensus(path).state }),
+    git: defaultRecoveryGit(repoDir),
+    nowIso: () => systemClock.iso(),
+    nonce: () => randomUUID().replace(/-/g, ""),
+    hostname,
+    pid: process.pid,
+  };
+}
+
+/** W1-T12114: `rmd pr-owner-recover <pr> --authorize ...|--apply --authorization <id>`. A WRITING
+ *  verb, so it is deliberately absent from the read-only freshness and precondition exemptions. */
+export async function prOwnerRecoverCommand(
+  rest: string[],
+  io: { config?: () => { ledgerPath: string; root: string }; gh?: (args: string[]) => Promise<unknown>; write?: (text: string) => void; error?: (text: string) => void } = {},
+): Promise<number> {
+  const error = io.error ?? console.error;
+  const badArg = unknownArgError("pr-owner-recover", rest.slice(1), PR_OWNER_RECOVER_VALUE_FLAGS, ["--authorize", "--apply"]);
+  const prNumber = parsePrOwnerNumber(rest[0]);
+  const mode = rest.includes("--authorize") === rest.includes("--apply") ? undefined : rest.includes("--apply") ? "apply" : "authorize";
+  if (badArg || prNumber === undefined || mode === undefined) {
+    error(`${badArg ?? "rmd pr-owner-recover: <pr-number> and exactly one of --authorize or --apply are required"} — usage: ${commandSyntax("pr-owner-recover")}\n` + USAGE);
+    return 2;
+  }
+  const flag = (name: string) => flagValue(rest, name) ?? "";
+  const config = (io.config ?? (() => ({ ledgerPath: ledgerPathFor(loadConfig()), root: loadConfig().root })))();
+  const recovery: RecoveryWiring = {
+    ports: prOwnerRecoverPorts(flag("--repo"), { ...config, ...(io.gh ? { gh: io.gh } : {}) }), claimKeyOf: fixBranchClaimKey, fixRoundClaimId,
+  };
+  let result: RecoveryResult;
+  if (mode === "apply") {
+    result = await applyStaleFixDispatchRecovery({ authorizationId: flag("--authorization") }, recovery);
+  } else {
+    result = await authorizeStaleFixDispatchRecovery({
+      repo: flag("--repo"), prNumber, taskId: flag("--task"), runId: flag("--run"), roundId: flag("--round"),
+      headSha: flag("--head"), baseSha: flag("--base"), branch: flag("--branch"), reason: flag("--reason"),
+    }, recovery);
+  }
+  (io.write ?? console.log)(JSON.stringify(result));
+  return result.outcome === "authorized" || result.outcome === "released" ? 0 : 1;
 }
 
 /** Strips a global `--repo-root <path>` pair off argv before per-command flag
@@ -44054,6 +44157,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "W1-T3281: answers the operator question 'is a lane already fixing this PR?' from the local ledger union only. Reports OWNED, FREE or UNKNOWN plus the corpus newest timestamp, newest relevant fix.dispatch strike/cap/mode/head evidence, and newest sweep.disposed disposition/reason/head evidence. UNKNOWN is distinct from FREE for unreadable or incomplete ledger reads, and for a corpus with no compressed rotation opened. Reads state/ledger.ndjson plus both plain and gzip rotations through the shared ledger-union reader; makes no gh/network call and spawns no worker. Makes no ledger, claim or service changes; owned temporary disk scratch is removed after the read.",
   },
   {
+    name: "pr-owner-recover",
+    syntax: "rmd pr-owner-recover <pr-number> --authorize --repo <owner/name> --task <id> --run <id> --round <id> --head <sha> --base <sha> --branch <name> --reason <text> | --apply --authorization <id>",
+    summary: "Release a dead worker's stale fix dispatch on one PR, once, after an admin's recorded authorization.",
+    detail: "W1-T12114: --authorize records one pr_owner.recovery_authorized row for the exact PR, task, run, round, head, base and live branch, only for an authenticated repository admin who is not a fleet actor, under the PR's fix branch claim. --apply --authorization <id> takes that claim, reads live evidence, preserves dirty or unpublished work as a create-only refs/rmd-recovery ref, reads again and writes a released pr_owner.recovery_receipt only when W1-T12113 decides recover on both reads; anything else holds. Never deletes or moves a ref, removes a worktree, pushes to the PR branch, or writes fix.done or a credit. Prints the result as JSON; exits 0 on authorized or released, 1 otherwise, 2 on bad arguments.",
+  },
+  {
     name: "pr-state",
     syntax: "rmd pr-state <n...> [--max-age <dur>]",
     summary: "Read PR state from the ledger, revalidating stale or missing fields in one broker query.",
@@ -44977,6 +45086,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ],
   ["peek", async (rest) => await peekCommand(rest)],
   ["pr-owner", (rest) => prOwnerCommand(rest)],
+  ["pr-owner-recover", async (rest) => await prOwnerRecoverCommand(rest)],
   ["pr-state", (rest) => prStateCommand(rest, { repository: resolveOwnerRepo })],
   ["plan", async (rest) => await planCommand(rest)],
   ["improvement-action", async (rest) => await improvementActionCommand(rest)],

@@ -66,6 +66,7 @@
     "plan-reconcile",
     "pr-checks",
     "pr-owner",
+    "pr-owner-recover",
     "pr-state",
     "preflight",
     "procedures",
