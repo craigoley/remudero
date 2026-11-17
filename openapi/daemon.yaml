@@ -12976,6 +12976,58 @@ components:
         thread:
           $ref: "#/components/schemas/InboxThreadDetail"
 
+    InboxThreadsView:
+      type: object
+      description: >
+        GET /v1/views/inbox-threads[?cursor=] (src/lib/inbox-threads-view.ts; W1-T13456): one page of the Inbox's
+        thread list, the rows GET /v1/inbox/threads answers, built in the read-model view thread from the persisted
+        classification, the plain-message store, the thread store and the read marks.
+      required: [view, version, generatedAt, asOf, stale, sources, data]
+      properties:
+        view: {type: string, enum: [inbox-threads]}
+        version: {type: integer, enum: [1]}
+        generatedAt: {type: string, format: date-time}
+        asOf: {type: [string, "null"]}
+        stale: {type: boolean}
+        sources:
+          type: array
+          items:
+            $ref: "#/components/schemas/ViewSource"
+        data:
+          $ref: "#/components/schemas/InboxThreadsViewData"
+
+    InboxThreadsViewData:
+      description: The actual InboxThreadsViewData from src/lib/inbox-threads-view.ts. No clock is in it.
+      oneOf:
+        - type: object
+          required: [state, threads, snapshotKey, threadListKey, contract, instance, completeness, page]
+          properties:
+            state: {type: string, enum: [ok]}
+            threads:
+              type: array
+              items:
+                $ref: "#/components/schemas/InboxThreadSummary"
+            snapshotKey: {type: string, pattern: "^[a-f0-9]{64}$", description: The classification snapshot the rows were projected from.}
+            threadListKey: {type: string, pattern: "^[a-f0-9]{64}$", description: The list's identity; every cursor binds it.}
+            contract: {type: string, enum: [read-write, read-only]}
+            instance: {type: string}
+            repository: {type: string}
+            completeness: {type: string, enum: [complete, partial]}
+            incompleteReason: {type: string}
+            page:
+              type: object
+              required: [index, of, total]
+              properties:
+                index: {type: integer, minimum: 0}
+                of: {type: integer, minimum: 1}
+                total: {type: integer, minimum: 0}
+                nextCursor: {type: string, description: "The next page's cursor; absent on the last page."}
+        - type: object
+          required: [state, reason]
+          properties:
+            state: {type: string, enum: [unavailable]}
+            reason: {type: string, description: Why no list can be shown; never answered as an empty list.}
+
     TaskView:
       type: object
       description: >
@@ -21734,6 +21786,69 @@ paths:
                   view: {type: string}
                   reason: {type: string}
                   retryMs: {type: integer}
+
+  /v1/views/inbox-threads:
+    get:
+      summary: The Inbox's thread list, paged, materialized by the read-model worker.
+      description: >
+        W1-T13456: the rows, order and unread flags GET /v1/inbox/threads answers, built off the request path. The
+        first page has no query; each later page is read with the cursor the page before it gave. A cursor from an
+        older list answers 409 inbox_snapshot_changed with restartRequired. Any other query parameter answers 400.
+        Served with no switch entry. Served bodies follow the shared view ETag and 304 rules.
+      security:
+        - bearerRead: []
+      parameters:
+        - name: cursor
+          in: query
+          required: false
+          description: The page.nextCursor of the page before.
+          schema: {type: string, maxLength: 1024}
+        - name: If-None-Match
+          in: header
+          required: false
+          schema: {type: string}
+      responses:
+        "200":
+          description: One page of the thread list, or data.state=unavailable with the reason.
+          headers:
+            ETag:
+              description: The shared weak view ETag over version, stale and data.
+              schema: {type: string}
+            Cache-Control:
+              schema: {type: string, enum: [no-cache]}
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxThreadsView"
+        "304":
+          description: If-None-Match matched the view ETag; no body.
+          headers:
+            ETag:
+              schema: {type: string}
+            Cache-Control:
+              schema: {type: string, enum: [no-cache]}
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: The view has no body yet (`view_not_ready`).
+        "409":
+          description: The cursor belongs to an older thread list; restart at the first page.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error, restartRequired]
+                properties:
+                  error: {type: string, enum: [inbox_snapshot_changed]}
+                  restartRequired: {type: boolean, enum: [true]}
+                  snapshotKey: {type: string}
+                  detail: {type: string}
+        "503":
+          description: No thread list identity is held yet, so a cursor cannot be checked.
 
   /v1/views/task:
     get:
