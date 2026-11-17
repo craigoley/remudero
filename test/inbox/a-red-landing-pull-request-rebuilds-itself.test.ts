@@ -50,6 +50,11 @@ function landingFixture() {
   const checkout: GitRepo = gitRepo({ cloneFrom: origin.dir, kind: "w1-t13210-checkout" });
 
   const prs: Pr[] = [];
+  /** `listedHead`: the head GitHub's listing reports, when it is not the branch's tip; `closeFails`: `gh pr close` is refused. */
+  const control = {
+    preflight: async (): Promise<PlanPrPreflightResult> => GREEN, preflights: 0,
+    listedHead: undefined as string | undefined, closeFails: false,
+  };
   const patches: Array<{ url: string; body: string }> = [];
   const closes: string[] = [];
   const rows: Row[] = [];
@@ -66,7 +71,7 @@ function landingFixture() {
   const mainSha = (): string => origin.git("rev-parse", "refs/heads/main");
   const listed = (pr: Pr): Record<string, unknown> => {
     const head = branchSha();
-    return { url: pr.url, headRefOid: head, mergeable: pr.mergeable, createdAt: pr.createdAt, statusCheckRollup: head ? checks.get(head) ?? [] : [] };
+    return { url: pr.url, headRefOid: control.listedHead ?? head, mergeable: pr.mergeable, createdAt: pr.createdAt, statusCheckRollup: head ? checks.get(head) ?? [] : [] };
   };
   const gh = (args: string[]): string => {
     if (args[0] === "pr" && args[1] === "list") {
@@ -82,6 +87,7 @@ function landingFixture() {
     }
     if (args[0] === "pr" && args[1] === "view") return JSON.stringify({ state: prs.find((p) => p.url === args[2])?.state ?? "OPEN" });
     if (args[0] === "pr" && args[1] === "close") {
+      if (control.closeFails) throw new Error("GraphQL: close refused");
       prs.find((p) => p.url === args[2])!.state = "CLOSED";
       closes.push(args[2]!);
       return "";
@@ -104,7 +110,6 @@ function landingFixture() {
     }
     return out;
   };
-  const control = { preflight: async (): Promise<PlanPrPreflightResult> => GREEN, preflights: 0 };
   const opts = (): Parameters<typeof landTaskFilesAsync>[2] => ({
     stateRoot: root,
     targetRepository: { owner: "acme", repo: "remudero" },
@@ -319,6 +324,41 @@ test("W1-T13210 criterion 4: a rebuild loses no edit, a person's close sets its 
     assert.deepEqual(next.landed, [pathOf(B)]);
     assert.deepEqual(f.setAsideRows().map((r) => r.path), [pathOf(A)], "only main's own edit set A aside");
     assert.equal(f.github.maxOpen, 1, "never two landing pull requests open");
+  });
+
+  await t.test("a close GitHub refuses leaves the pull request open and writes the failure as the row's reason", async () => {
+    const f = landingFixture();
+    await f.land([A]);
+    const url = f.prs[0]!.url;
+    f.moveMain(A);
+    f.prs[0]!.mergeable = "CONFLICTING";
+    f.control.closeFails = true;
+    const held = await f.land([]);
+    assert.deepEqual(f.closes, []);
+    assert.equal(f.openPrs().length, 1, "the pull request stays open");
+    assert.equal(held.pushed, false);
+    const row = f.waitingRows().at(-1)!;
+    assert.equal(row.pr_url, url);
+    assert.match(String(row.reason), new RegExp(`closing ${url} failed: GraphQL: close refused`));
+  });
+
+  await t.test("a branch tip that is not the head the listing showed means another writer has it: no push", async () => {
+    const f = landingFixture();
+    await f.land([A]);
+    const url = f.prs[0]!.url;
+    const tip = f.branchSha()!;
+    const shown = "0".repeat(40);
+    f.control.listedHead = shown;
+    f.prs[0]!.mergeable = "CONFLICTING";
+    f.moveMain();
+    const pushesBefore = f.pushes();
+    const held = await f.land([]);
+    assert.equal(held.pushed, false);
+    assert.equal(f.pushes(), pushesBefore);
+    assert.equal(f.branchSha(), tip);
+    const row = f.waitingRows().at(-1)!;
+    assert.equal(row.pr_url, url);
+    assert.match(String(row.reason), new RegExp(`is at ${tip}, not the head ${shown} this rebuild replaces, so another writer has it`));
   });
 
   await t.test("a pull request a person closes sets its files aside, as before", async () => {
