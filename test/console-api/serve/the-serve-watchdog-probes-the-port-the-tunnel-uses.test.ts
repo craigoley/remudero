@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { createServer, request, type Server } from "node:http";
-import type { AddressInfo } from "node:net";
+import { createServer as createNetServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import {
@@ -152,13 +152,13 @@ test("W1-T13503 criterion 1: a serve port that answers any status is alive, and 
   }
 });
 
-test("W1-T13503 criterion 1: a refused serve port and an absent private socket are both recorded, and the generation is still restarted", async () => {
+test("W1-T13503 criterion 1: a serve port that drops every connection and an absent private socket are both recorded, and the generation is still restarted", async () => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-tunnel-probe-"));
-  // A port that refuses: bound once to learn a free number, then closed.
-  const probe = createServer();
-  await listen(probe, 0);
-  const port = (probe.address() as AddressInfo).port;
-  await close(probe);
+  // A listener that resets each connection: held for the whole test, so no other process can take the port
+  // (a closed port can be reused by a parallel suite and then answer).
+  const dropping = createNetServer((socket) => socket.destroy());
+  await new Promise<void>((resolve, reject) => dropping.once("error", reject).listen(0, "127.0.0.1", resolve));
+  const port = (dropping.address() as AddressInfo).port;
   try {
     const r = supervise(join(dir, "absent.sock"), port);
     await r.supervisor.start();
@@ -168,13 +168,14 @@ test("W1-T13503 criterion 1: a refused serve port and an absent private socket a
     }
     await until(() => r.rows.some((x) => x.step === "serve.active_wedged"));
     const row = r.rows.find((x) => x.step === "serve.active_wedged");
-    assert.ok(row);
-    assert.match(String(row.extra?.lastError), /ECONNREFUSED/);
+    assert.ok(row, `rows: ${JSON.stringify(r.rows.map((x) => x.step))}`);
+    assert.match(String(row.extra?.lastError), /socket hang up|ECONNRESET/);
     const answer = row.extra?.privateSocket as { answered: boolean; error?: string };
     assert.equal(answer.answered, false);
     assert.match(String(answer.error), /ENOENT/);
     assert.deepEqual(r.killed, ["SIGKILL"]);
   } finally {
+    await new Promise<void>((resolve) => dropping.close(() => resolve()));
     rmSync(dir, { recursive: true, force: true });
   }
 });
