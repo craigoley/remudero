@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { parse as parseYaml } from "yaml";
 import { defaultGitRunnerAsync, readBlobsAtRefAsync, parseTasksFromYaml, type Plan } from "./plan.js";
 import { createPlanRevisionStore } from "./plan-revision-store.js";
 import { dispatchOrder } from "./drain.js";
@@ -8,7 +9,7 @@ import { RmdError } from "./errors.js";
 
 type Json = Record<string, unknown>;
 type Options = { publicRoot: string; publicCommit: string; publicRepo: string; opsRoot: string; opsCommit: string; opsRepo: string };
-type Original = { path: string; text: string; blob: string; single: boolean };
+type Original = { path: string; text: string; blob: string; single: boolean; moved: boolean };
 // BACKSTOP: refuse a runaway explicit preview whole, never truncate a population into absence.
 const MAX_CANDIDATE_LOOKUPS = 32;
 const MAX_CATALOG_BYTES = 32 * 1024 * 1024;
@@ -47,9 +48,11 @@ async function catalog(root: string, commit: string, external = false): Promise<
     const text = texts[i]!, buffer = Buffer.from(text); bytes += buffer.length;
     if (bytes > MAX_CATALOG_BYTES || createHash("sha1").update(`blob ${buffer.length}\0`).update(buffer).digest("hex") !== file.blob) return unknown("catalog_unreadable");
     const tasks = parseTasksFromYaml(text, file.path, undefined, { logLevel: "silent" }, "preserve-external");
+    const raw: unknown = parseYaml(text, { logLevel: "silent" });
+    const moved = Array.isArray(raw) && raw.some(entry => entry !== null && typeof entry === "object" && Object.hasOwn(entry, "moved_from"));
     for (const task of tasks) {
       if (originals.has(task.id)) return unknown("catalog_conflict");
-      originals.set(task.id, { ...file, text, single: tasks.length === 1 });
+      originals.set(task.id, { ...file, text, single: tasks.length === 1, moved });
     }
     return { label: file.path, text };
   });
@@ -165,7 +168,7 @@ export async function previewPlanTaskMigration(args: readonly string[]): Promise
     for (const task of dispatchOrder(pub.plan.tasks).reverse()) {
       const original = pub.originals.get(task.id)!;
       const reason = knownMerged.has(task.id) ? "merged" : taskOwned(task.id, [...(task.files ?? []), original.path], publicRefs, initial.open) ? "owned" :
-        publicPrerequisites.has(task.id) ? "public_dependants" : !original.single || !original.path.startsWith("plan/tasks.d/") ? "not_single_shard" : /^\s+moved_from:/m.test(original.text) ? "already_moved" : undefined;
+        publicPrerequisites.has(task.id) ? "public_dependants" : !original.single || !original.path.startsWith("plan/tasks.d/") ? "not_single_shard" : original.moved ? "already_moved" : undefined;
       if (reason) { refused.push({ id: task.id, reason }); continue; }
       if (!control) return unknown("merge_credit_control_unreadable");
       if (++lookups > MAX_CANDIDATE_LOOKUPS) return unknown("merge_credit_budget_exhausted");

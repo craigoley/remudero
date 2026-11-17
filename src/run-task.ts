@@ -44873,7 +44873,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["procedures", (rest) => proceduresCommand(rest, proceduresProductionInput())],
   ["check-acceptance", (rest) => checkAcceptanceCommand(rest)],
   ["next-task-id", async (rest) => await withGhTransportFloorMode("wait", () => nextTaskIdCommand(rest))],
-  ["migration-preview", (rest) => previewPlanTaskMigration(rest)],
+  ["migration-preview", (rest) => withGhTransportFloorMode("enforce", () => previewPlanTaskMigration(rest))],
   ["plan-destination", (rest) => planDestinationCommand(rest)],
   ["hand-worktree", (rest) => handWorktreeCommand(rest)],
   ["worktree", (rest) => worktreeCommand(rest)],
