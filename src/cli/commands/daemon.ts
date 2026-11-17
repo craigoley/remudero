@@ -18,7 +18,7 @@ import { judgeDiskHeadroom, readDiskFreeBytes } from "../../lib/doctor.js";
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { execFileLoopBounded } from "../../lib/loop-bounded-child.js";
-import { GATEWAY_FETCH_TIMEOUT_MS } from "../../lib/git-fetch-retry.js";
+import { GATEWAY_FETCH_TIMEOUT_MS, setDanglingRefRepairLog } from "../../lib/git-fetch-retry.js";
 import { productionDispatchBreakJudge, productionFixProgressJudge } from "../../lib/sweep.js";
 import { ghExec, ghJsonAsync, ghTextAsync, githubInstallationBudget, takeGithubBudgetThrottles } from "../../lib/github-transport.js";
 import type { InstallationBudgetThreadInput } from "../../lib/github-installation-budget.js";
@@ -1340,6 +1340,7 @@ export async function daemonCommand(
     onMainEntryStep?.(step);
   };
   ledgerSelectedRegistryReadTimeouts(log);
+  setDanglingRefRepairLog(log);
   startDaemonInstallationBudget(() => daemonInstallationRegistry(repoRoot), process.env, log, systemClock, `${target.owner}/${target.repo}`, opts.pollIntervalMs);
   // bundlemain: which entry this main started from (bin/rmd's choice), and a bundled main's first tick settles it.
   onMainEntryStep = startMainEntryWatch({ log, root: daemonModuleRepoDir });
