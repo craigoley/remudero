@@ -11,11 +11,11 @@ import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { parseTasksFromYaml } from "#src/lib/plan.js";
 
 const record = (id: string, priority = 1, deps: string[] = []) => { const text = `- id: ${id}\n  title: migration fixture\n  repo: remudero\n  type: implement\n  priority: ${priority}\n  depends_on: ${JSON.stringify(deps)}\n`; assert.equal(parseTasksFromYaml(text,"fixture")[0]!.id,id); return text; };
-function fixture(t: TestContext, records: Record<string, string> = {"W1-T1.yaml": record("W1-T1")}, opsText = "[]\n", publicSeed: Record<string, string> = {}) {
+function fixture(t: TestContext, records: Record<string, string> = {"W1-T1.yaml": record("W1-T1")}, opsText = "[]\n", publicSeed: Record<string, string> = {}, opsSeed: Record<string, string> = {}) {
   const root = ownedFixtureDir(t, "migration-preview").dir;
   const seed = {"plan/tasks.yaml": "[]\n", ...Object.fromEntries(Object.entries(records).map(([p,s]) => ["plan/tasks.d/"+p,s])), ...publicSeed};
   const pub = originWithClone(join(root,"public"), {scope:t,seed});
-  const ops = originWithClone(join(root,"ops"), {scope:t,seed:{"plan/tasks.yaml":opsText}});
+  const ops = originWithClone(join(root,"ops"), {scope:t,seed:{"plan/tasks.yaml":opsText,...opsSeed}});
   const pubCommit=pub.clone.git("rev-parse","HEAD"), opsCommit=ops.clone.git("rev-parse","HEAD");
   const closed = {number:1,state:"MERGED",body:"Remudero-Task: W1-T999",headRefName:"run-W1-T999-1",mergeCommit:{oid:pubCommit},repository:{databaseId:42,nameWithOwner:"fixture/remudero"}};
   const page=(nodes: unknown[])=>({totalCount:nodes.length,pageInfo:{hasNextPage:false,endCursor:null},nodes});
@@ -55,7 +55,7 @@ test("migration preview retains exact YAML bytes and refuses duplicate moved or 
 });
 
 
-test("migration preview resolves only committed layout metadata and refuses incompatible private layout", t => {
+test("migration preview resolves only committed layout metadata", t => {
   const live = fixture(t);
   mkdirSync(join(live.pub.clone.dir, ".remudero"));
   writeFileSync(join(live.pub.clone.dir, ".remudero/layout.json"), "not valid JSON");
@@ -68,4 +68,15 @@ test("migration preview resolves only committed layout metadata and refuses inco
   assert.equal(result.status, 0, JSON.stringify(result));
   assert.equal(result.answer.candidate.id, "W1-T2");
   assert.equal(result.answer.candidate.sourcePath, "backlog/tasks.d/W1-T2.yaml");
+});
+
+
+test("migration preview refuses layout paths the actual private reader cannot consume", t => {
+  const f = fixture(t, undefined, "[]\n", {}, {
+    ".remudero/layout.json": JSON.stringify({ planDir: "private-backlog", planMonolith: "private-backlog/tasks.yaml" }),
+    "private-backlog/tasks.yaml": "[]\n",
+  });
+  const result = f.run();
+  assert.equal(result.answer.outcome, "unknown", "a layout unsupported by the real private reader is not migration permission");
+  assert.equal(result.answer.permission, "not_granted");
 });
