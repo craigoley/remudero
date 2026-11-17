@@ -22,8 +22,9 @@ import { inboxSemanticDigest, inboxProposalRevision, mechanicalAskPurpose, retir
 /** PRIMARY CONTROL: each pass admits bounded candidate, proof, judge and transition work. */
 /** W1-T13348: ledgerCatchUpMs replaced a 25 ms tick budget. The projector gunzips a whole archive per tick and checks its
  *  deadline only after a commit, so 25 ms advanced ONE 64 KiB chunk a pass, and the host's 240 archives (~10 GB) could never
- *  be read. The pass runs in its own spawned process, and a caught-up store returns as soon as the live tail is read. */
-export const INBOX_GARDENER_LIMITS = { candidates: 8, proofReads: 4, judges: 1, retirements: 1, ledgerCatchUpMs: 20_000, ledgerChunkBytes: 64 * 1024 } as const;
+ *  be read. The pass runs in its own spawned process, and a caught-up store returns as soon as the live tail is read.
+ *  W1-T13477: 20 s read 5-18 of 232 host archives a pass at one pass per ~3 h; 300 s covers the corpus in 1-3 passes. */
+export const INBOX_GARDENER_LIMITS = { candidates: 8, proofReads: 4, judges: 1, retirements: 1, ledgerCatchUpMs: 300_000, ledgerChunkBytes: 64 * 1024 } as const;
 export { inboxGardenerMode } from "./inbox-retirement.js";
 export interface InboxGardenerCandidate {
   proposal: RetirementProposal;
