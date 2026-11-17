@@ -1844,7 +1844,23 @@ publish_beat() (
     export "GIT_CONFIG_VALUE_${cfg_n}=!f() { echo username=x-access-token; echo \"password=\$GH_TOKEN\"; }; f"
     export GIT_CONFIG_COUNT=$((cfg_n + 1))
   fi
-  git -C "$INSTALL_DIR" push --force "$REMOTE" "${commit}:refs/heads/${BRANCH}" >/dev/null 2>&1 \
+  # W1-T13327: push to the remote's URL. A push through a remote NAME moves its tracking ref to the
+  # beat commit, which only the private store holds. A tracking ref already left that way is cleared.
+  push_to="$(git -C "$INSTALL_DIR" remote get-url --push "$REMOTE" 2>/dev/null)" || push_to=""
+  push_to="${push_to%%$'\n'*}"
+  if [ -n "$push_to" ]; then
+    track_ref="refs/remotes/${REMOTE}/${BRANCH}"
+    (
+      unset GIT_OBJECT_DIRECTORY
+      tip="$(git -C "$INSTALL_DIR" rev-parse --verify -q "$track_ref" 2>/dev/null)" || exit 0
+      [ -n "$tip" ] || exit 0
+      git -C "$INSTALL_DIR" cat-file -e "$tip" 2>/dev/null && exit 0
+      git -C "$INSTALL_DIR" update-ref -d "$track_ref" "$tip" >/dev/null 2>&1
+    ) || printf 'fleet-heartbeat: could not clear %s, which names an object this clone lacks\n' "$track_ref" >&2
+  else
+    push_to="$REMOTE"
+  fi
+  git -C "$INSTALL_DIR" push --force "$push_to" "${commit}:refs/heads/${BRANCH}" >/dev/null 2>&1 \
     || fail "push to ${REMOTE}/${BRANCH} failed"
 
   printf 'fleet-heartbeat: published %s to %s/%s — %s\n' "${commit:0:7}" "$REMOTE" "$BRANCH" "$SUBJECT"
