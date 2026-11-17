@@ -35,8 +35,8 @@
   design: |
     INVARIANT pressure-still-stretches: the pressure scaling is unchanged.
     1. Set SERVE_HANDOFF_SPACING_BASE_MS to 2 * 60 * 60_000.
-    2. Keep an explicit operator request immediate.
+    2. A restarted supervisor (no handoff yet) is never spaced: it has no last handoff to wait from.
   falsifier: |
-    Keep 15 minutes: criterion 1 fails. Hold an operator request: criterion 2 fails. Drop the pressure term: criterion 3 fails.
+    Keep 15 minutes: criterion 1 fails. Space the first handoff after a restart: criterion 2 fails. Drop the pressure term: criterion 3 fails.
   note: |
     Id reserved for run-unfiled-1794878208000 with ~/rmd-work/bin/reserve-id.sh.
