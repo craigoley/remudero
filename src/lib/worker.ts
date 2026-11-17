@@ -72,6 +72,7 @@ import {
   type WorkerProviderId,
 } from "./config.js";
 import { assertModelAllowed } from "./model-gate.js";
+import { cashTrialPinnedDeployment } from "./cash-trial.js";
 import { chooseDraftDeployment, recordDraftRouting, type DraftStats, type DraftChoice, type DraftOutcome } from "./draft-routing.js";
 import { sdkUsageReadingCase } from "./headroom.js";
 import {
@@ -3129,6 +3130,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         config, runId: args.runId, taskId: args.taskId,
         cashSqueezed: args.cashSqueezed === true,
         modelApprovals: config.modelApprovals,
+        bakeoffDeployment: cashTrialPinnedDeployment(args.routingTrial, config),
         // W1-T11075: a judge shadow pins its one deployment the same way, outside the capability row's candidates.
         ...((args.routingTrial?.id === "inbox-bakeoff" || args.routingTrial?.id === JUDGE_SHADOW_TRIAL_ID) &&
           args.routingTrial.arm === "cash" && args.routingTrial.models?.length === 1

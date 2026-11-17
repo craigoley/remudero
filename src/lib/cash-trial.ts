@@ -3,8 +3,9 @@ import { createHash } from "node:crypto";
 import type { Config } from "./config-schema.js";
 import { fixedClock, systemClock } from "./clock.js";
 import { enabledWorkerProviders } from "./config.js";
-import { effectiveCashCapUsd } from "./worker-provider.js";
-import { ledgerLivePath, readLedgerUnionRawLinesSync, realLedgerFs } from "./ledger-union.js";
+import { effectiveCashCapUsd, isFoundryClaudeDeployment, openWeightDeploymentReady } from "./worker-provider.js";
+import { ledgerLivePath, readLedgerUnionRawLinesSync, readLedgerUnionRecords, realLedgerFs } from "./ledger-union.js";
+import { readNewestInvoiceVerdictsAsync, type InvoiceVerdictRead } from "./cash-invoice-reconcile.js";
 
 /**
  * The cash-simple trial (operator ruling 2026-09-24, DECISIONS.md): a capped share of the simplest
@@ -48,6 +49,11 @@ export interface CashTrialDecision {
   id: typeof CASH_TRIAL_ID;
   arm: CashTrialArm;
   reason: string;
+  /** Cash arm only: the models left in the draw, in name order. */
+  models?: string[];
+  /** Each model the stop rule took out of the draw, with its reason. */
+  stopped?: Record<string, string>;
+  summary?: CashTrialModelSummary;
 }
 
 export function cashTrialPolicy(config: Pick<Config, "workerProviders">): CashTrialPolicy {
@@ -65,6 +71,76 @@ export function cashTrialArmFor(taskId: string, sharePercent: number): "cash" | 
   return bucket < sharePercent ? "cash" : "control";
 }
 
+/** W1-T12424: what decides the cash arm's open-weight models, read once per eligible run. */
+export interface CashTrialReadiness {
+  verdicts: InvoiceVerdictRead;
+  /** The `inbox.bakeoff` rows; `undefined` when the history could not be read whole. */
+  bakeoffRows: readonly Row[] | undefined;
+  /** Defaults to {@link openWeightDeploymentReady}. */
+  ready?: (deployment: string) => boolean;
+}
+
+/** True when the deployment's newest bake-off row ran, and ran with tools. Deployment arms (`cash:<id>:<effort>`)
+ *  always carry tools; a `-notools` arm does not; a capacity shortfall did not run. */
+function bakeoffRanWithTools(rows: readonly Row[], deployment: string): boolean {
+  let newest: Row | undefined;
+  for (const row of rows) {
+    const candidate = String(row.candidate ?? "");
+    if (!candidate.startsWith(`cash:${deployment}:`) && candidate !== `cash-${deployment}` && !candidate.startsWith(`cash-${deployment}-`)) continue;
+    if (newest === undefined || String(row.ts ?? "") >= String(newest.ts ?? "")) newest = row;
+  }
+  return newest !== undefined && newest.status !== "capacity_shortfall" && !String(newest.candidate).endsWith("-notools");
+}
+
+/**
+ * W1-T12424: the cash arm's models. The policy's models, then each ready open-weight deployment whose newest
+ * invoice verdict (W1-T10858) is `reconciled` and whose newest bake-off row ran with tools. An unreadable history
+ * admits none. A Foundry Claude deployment is not open-weight and is never added.
+ */
+export function cashTrialModels(policy: CashTrialPolicy, readiness: CashTrialReadiness): string[] {
+  const models = [...policy.models];
+  if (!readiness.verdicts.ok || readiness.bakeoffRows === undefined) return models;
+  const ready = readiness.ready ?? ((deployment: string) => openWeightDeploymentReady(deployment));
+  for (const deployment of [...readiness.verdicts.newest.keys()].sort()) {
+    if (models.includes(deployment) || isFoundryClaudeDeployment(deployment) || !ready(deployment)) continue;
+    const verdict = readiness.verdicts.newest.get(deployment)!.verdict as { verdict?: unknown } | undefined;
+    if (verdict?.verdict === "reconciled" && bakeoffRanWithTools(readiness.bakeoffRows, deployment)) models.push(deployment);
+  }
+  return models;
+}
+
+/** The ledger evidence {@link cashTrialModels} reads, through the async union reader. */
+export async function readCashTrialReadiness(stateDir: string): Promise<CashTrialReadiness> {
+  const verdicts = await readNewestInvoiceVerdictsAsync(stateDir);
+  // With no verdict there is no open-weight arm, so the bake-off history is not read.
+  if (!verdicts.ok || verdicts.newest.size === 0) return { verdicts, bakeoffRows: [] };
+  const unread: string[] = [];
+  const bakeoffRows = await readLedgerUnionRecords(stateDir, { step: "inbox.bakeoff",
+    onUnreadArchive: (path) => unread.push(path), onUnreadLive: (path) => unread.push(path),
+    onUnreadDirectory: (path) => unread.push(path) });
+  return { verdicts, bakeoffRows: unread.length > 0 ? undefined : bakeoffRows };
+}
+
+/**
+ * W1-T12424: one cash model per task. Each model gets a weight from a hash of the task id and its own name, and the
+ * largest weight wins (the earlier name on a tie). The draw has its own salt, so it does not follow the cash or
+ * control draw, and a model that leaves or joins moves only its own tasks.
+ */
+export function cashTrialModelFor(taskId: string, models: readonly string[]): string | undefined {
+  const weight = (model: string): number => createHash("sha256").update(`cash-trial-model\0${taskId}\0${model}`).digest().readUInt32BE(0);
+  return [...models].sort().reduce<string | undefined>((best, model) => best === undefined || weight(model) > weight(best) ? model : best, undefined);
+}
+
+/** The deployment a cash-arm spawn is pinned to: the one drawn model, when it is outside the policy's list. An
+ *  open-weight arm is in no capability row, so the row filter alone would leave it no candidate. */
+export function cashTrialPinnedDeployment(
+  trial: { id: string; arm: string; models?: readonly string[] } | undefined,
+  config: Pick<Config, "workerProviders">,
+): string | undefined {
+  if (trial?.id !== CASH_TRIAL_ID || trial.arm !== "cash" || trial.models?.length !== 1) return undefined;
+  return cashTrialPolicy(config).models.includes(trial.models[0]!) ? undefined : trial.models[0];
+}
+
 export interface CashTrialArmEvidence {
   runs: number;
   prs: number;
@@ -77,7 +153,71 @@ export interface CashTrialEvidence {
   spendUnavailableReason?: string;
 }
 
+export interface CashTrialModelEvidence extends CashTrialArmEvidence {
+  /** Worker assignments (attempts) of the runs counted here. */
+  assignments: number;
+  /** Assignments that another model than the drawn one served. */
+  crossovers: number;
+  merges: number;
+  /** Cash dollars of the attempts' worker-call receipts. */
+  settledUsd: number;
+}
+
+/** W1-T12424: the trial per drawn cash model, in name order, beside the control arm. */
+export interface CashTrialModelSummary {
+  models: Record<string, CashTrialModelEvidence>;
+  control: CashTrialModelEvidence;
+}
+
 type Row = Record<string, unknown>;
+
+/**
+ * Fold windowed ledger rows by drawn model. A run's drawn model is the `model` of its `cash_trial.decided` row; a
+ * cash run from before the draw existed counts for `legacyModel`. Runs and PRs follow the drawn model, whichever
+ * model served the attempt.
+ */
+export function summarizeCashTrialModels(rows: Iterable<Row>, legacyModel: string): CashTrialModelSummary {
+  const drawn = new Map<string, string>();
+  const attempts = new Map<string, { run: string; arm: "cash" | "control"; served: unknown }>();
+  const opened = new Map<string, boolean>();
+  const merged = new Set<string>();
+  const usd = new Map<string, number>();
+  for (const row of rows) {
+    const runId = typeof row.run_id === "string" ? row.run_id : undefined;
+    const assignment = row.worker_assignment as Row | undefined;
+    const decision = (assignment?.routing as Row | undefined)?.decision as Row | undefined;
+    if (row.step === "cash_trial.decided" && runId && typeof row.model === "string") drawn.set(runId, row.model);
+    else if (row.step === "worker.assignment" && runId && decision?.trial === CASH_TRIAL_ID &&
+      (decision.trialArm === "cash" || decision.trialArm === "control")) {
+      const id = typeof assignment?.id === "string" ? assignment.id : `${runId}#${attempts.size}`;
+      attempts.set(id, { run: runId, arm: decision.trialArm, served: (assignment?.selected as Row | undefined)?.model });
+    } else if (row.step === "verdict" && runId) {
+      opened.set(runId, typeof row.pr_url === "string" && row.pr_url.length > 0 && row.verdict !== "failed");
+    } else if (row.step === "pr.merged" && runId) merged.add(runId);
+    const cost = spendAmountUsd(row);
+    if ((row.step === "implement.done" || row.step === "implement.resumed") && typeof row.selection_assignment_id === "string" &&
+      row.provider === "cash" && row.billing_mode === "api" && cost !== undefined && Number.isFinite(cost) && cost >= 0 &&
+      !usd.has(row.selection_assignment_id)) usd.set(row.selection_assignment_id, cost);
+  }
+  const blank = (): CashTrialModelEvidence => ({ runs: 0, prs: 0, assignments: 0, crossovers: 0, merges: 0, settledUsd: 0 });
+  const models: Record<string, CashTrialModelEvidence> = {};
+  const control = blank();
+  const counted = new Set<string>();
+  for (const [id, attempt] of attempts) {
+    const model = attempt.arm === "cash" ? drawn.get(attempt.run) ?? legacyModel : undefined;
+    const cell = model === undefined ? control : (models[model] ??= blank());
+    cell.assignments += 1;
+    if (model !== undefined && typeof attempt.served === "string" && attempt.served !== model) cell.crossovers += 1;
+    cell.settledUsd = Math.round((cell.settledUsd + (usd.get(id) ?? 0)) * 1e6) / 1e6;
+    if (counted.has(attempt.run)) continue;
+    counted.add(attempt.run);
+    const pr = opened.get(attempt.run);
+    if (pr !== undefined) cell.runs += 1;
+    if (pr) cell.prs += 1;
+    if (merged.has(attempt.run)) cell.merges += 1;
+  }
+  return { models: Object.fromEntries(Object.keys(models).sort().map((model) => [model, models[model]!])), control };
+}
 
 /** Fold windowed ledger rows: each tagged run's arm, whether its verdict opened a PR, and today's cash spend. */
 export function summarizeCashTrial(rows: Iterable<Row>, today: string): CashTrialEvidence {
@@ -175,7 +315,7 @@ function windowedRows(stateDir: string, windowMs: number, today: string): { rows
   }
   const read = readLedgerUnionRawLinesSync(stateDir, {
     sinceTs: fixedClock(startMs).iso(),
-    pattern: /cash-simple|"step":"verdict"|selection_assignment_id/,
+    pattern: /cash-simple|"step":"verdict"|"step":"pr\.merged"|selection_assignment_id/,
     refuseIncomplete: true,
   }, {
     ...realLedgerFs,
@@ -218,6 +358,8 @@ export function decideCashTrial(
     stateDir: string;
     readRows?: (stateDir: string, windowMs: number) => Row[];
     today?: string;
+    /** The cash arm's models ({@link cashTrialModels}); the policy's models when absent. */
+    models?: readonly string[];
   },
 ): CashTrialDecision | undefined {
   if (!cashTrialEligible(input.task, input.taskClass)) return undefined;
@@ -250,9 +392,19 @@ export function decideCashTrial(
     : windowedRows(input.stateDir, windowMs, today);
   const evidence = summarizeCashTrial(read.rows, today);
   if (read.unavailableReason) evidence.spendUnavailableReason = read.unavailableReason;
-  const stop = cashTrialStopReason(evidence, policy, cap);
-  if (stop !== undefined) return held(stop);
-  return { id: CASH_TRIAL_ID, arm, reason: `${arm} arm by stable task hash at ${policy.sharePercent}% share` };
+  // W1-T12424: the stop rule runs on each cash model alone. The budget and the spend evidence are the trial's own,
+  // so they stop every model together.
+  const models = [...new Set(input.models ?? policy.models)].sort();
+  const summary = summarizeCashTrialModels(read.rows, policy.models[0] ?? "unknown");
+  const stopped: Record<string, string> = {};
+  for (const model of models) {
+    const stop = cashTrialStopReason({ ...evidence, cash: summary.models[model] ?? { runs: 0, prs: 0 } }, policy, cap);
+    if (stop !== undefined) stopped[model] = stop;
+  }
+  const open = models.filter((model) => stopped[model] === undefined);
+  const first = cashTrialModelFor(input.task.id, models);
+  if (open.length === 0) return { ...held(first === undefined ? "the cash trial has no model" : stopped[first]!), stopped, summary };
+  return { id: CASH_TRIAL_ID, arm, reason: `${arm} arm by stable task hash at ${policy.sharePercent}% share`, models: open, stopped, summary };
 }
 
 /** The spawn fields a trial decision adds to an implement spawn: the cash arm moves the run onto the trial's models. */
