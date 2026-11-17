@@ -38,6 +38,7 @@
     - .github/workflows/security-merge-policy.yml
     - .github/workflows/unwired-gate.yml
     - scripts/census-precheck.mjs
+    - test/census-precheck-runs-the-admitted-census-suites.test.ts
     - test/rules/every-workflow-job-runs-on-a-pinned-runner-image.test.ts
   status: queued
   attempts: 0
