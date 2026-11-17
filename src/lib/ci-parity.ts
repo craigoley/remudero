@@ -36,7 +36,7 @@ const BOUNDED_SUITE_SPAWN_MAX_BUFFER = 64 * 1024 * 1024;
 const SELF_SYNC_GUARD_ENV_NAME = "RMD_SELF_SYNC_DONE";
 const TSX_LOADER_PATH = require.resolve("tsx");
 const WORKER_CONTAINMENT_URL = new URL("./worker-containment.ts", import.meta.url).href;
-export const CI_COVERAGE_SHARD_COUNT = 8;
+export const CI_COVERAGE_SHARD_COUNT = 12;
 const COVERAGE_FREE_RESERVE_BYTES = 20 * 1024 ** 3;
 const MAX_COVERAGE_SCRATCH_PATH = 60;
 /** The host's scratch mount, the default scratch root when it is a mount (deploy/scratch-mounts.sh). */
@@ -169,9 +169,13 @@ export function runIsolatedLocalMergeRoute(
   }
 }
 
+/** W1-T13270: CI moved to 12 coverage shards; a local run keeps at most the 8 concurrent shards it ran before, so
+ *  the host's memory and CPU use per coverage run do not grow with CI's matrix width. */
+export const LOCAL_COVERAGE_MAX_CONCURRENCY = 8;
+
 export function coverageShardConcurrency(cpuCount: number = availableParallelism()): number {
   const finite = Number.isFinite(cpuCount) ? Math.floor(cpuCount) : 1;
-  return Math.max(1, Math.min(CI_COVERAGE_SHARD_COUNT, finite));
+  return Math.max(1, Math.min(LOCAL_COVERAGE_MAX_CONCURRENCY, CI_COVERAGE_SHARD_COUNT, finite));
 }
 
 /** The child owns the timer while the synchronous parent waits; reuse worker-containment's

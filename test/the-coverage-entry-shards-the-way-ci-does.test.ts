@@ -23,7 +23,7 @@ interface Call {
 function selectorShardNumber(args: readonly string[]): number | undefined {
   if (!args.some((arg) => arg.endsWith("scripts/test-tier-manifest.mjs")) || !args.includes("--select-all")) return undefined;
   const shard = args[args.indexOf("--shard") + 1];
-  const match = shard?.match(/^(\d+)\/8$/);
+  const match = shard?.match(new RegExp(`^(\\d+)/${CI_COVERAGE_SHARD_COUNT}$`));
   return match ? Number(match[1]) : undefined;
 }
 
@@ -101,7 +101,7 @@ function coverageSpawn(repoRoot: string, options: { emptySelectionShard?: number
   };
 }
 
-test("coverage entry runs CI's eight shard selectors, then merges the shard raw coverage into the lcov consumed by both gates", () => {
+test("coverage entry runs CI's shard selectors, then merges the shard raw coverage into the lcov consumed by both gates", () => {
   const fixtureRoot = coverageFixtureRoot();
   const { calls, spawn, cleanup } = coverageSpawn(fixtureRoot);
   try {
@@ -110,19 +110,11 @@ test("coverage entry runs CI's eight shard selectors, then merges the shard raw 
     const selectorCalls = calls.filter((c) => selectorShardNumber(c.args) !== undefined);
     assert.deepEqual(
       selectorCalls.map((c) => c.args[c.args.indexOf("--shard") + 1]).sort(),
-      ["1/8", "2/8", "3/8", "4/8", "5/8", "6/8", "7/8", "8/8"],
+      Array.from({ length: CI_COVERAGE_SHARD_COUNT }, (_, i) => `${i + 1}/${CI_COVERAGE_SHARD_COUNT}`).sort(),
     );
     const shardCalls = calls.filter((c) => shardNumber(c.args) !== undefined);
-    assert.deepEqual(shardCalls.map((c) => c.args.find((a) => a.startsWith("test/coverage-shard-"))).sort(), [
-      "test/coverage-shard-1.test.ts",
-      "test/coverage-shard-2.test.ts",
-      "test/coverage-shard-3.test.ts",
-      "test/coverage-shard-4.test.ts",
-      "test/coverage-shard-5.test.ts",
-      "test/coverage-shard-6.test.ts",
-      "test/coverage-shard-7.test.ts",
-      "test/coverage-shard-8.test.ts",
-    ]);
+    assert.deepEqual(shardCalls.map((c) => c.args.find((a) => a.startsWith("test/coverage-shard-"))).sort(),
+      Array.from({ length: CI_COVERAGE_SHARD_COUNT }, (_, i) => `test/coverage-shard-${i + 1}.test.ts`).sort());
     for (const call of shardCalls) {
       assert.equal(unwrapLowPriority(call.file, call.args).file, process.execPath, "each coverage shard shells node (under nice), as ci.yml does");
       assert.equal(call.args.includes(join(REPO_ROOT, "scripts", "test-with-retry.mjs")), false, "coverage shards do not use ci's retry wrapper");
@@ -137,7 +129,7 @@ test("coverage entry runs CI's eight shard selectors, then merges the shard raw 
     assert.deepEqual(merge.args.slice(2, 4), ["--output", join(fixtureRoot, "coverage", "lcov.info")]);
     assert.deepEqual(
       merge.args.slice(4),
-      Array.from({ length: 8 }, (_, index) => join(coverageScratchDir(fixtureRoot), "raw-shards", `shard-${index + 1}`, "compact")),
+      Array.from({ length: CI_COVERAGE_SHARD_COUNT }, (_, index) => join(coverageScratchDir(fixtureRoot), "raw-shards", `shard-${index + 1}`, "compact")),
       "all eight compact shard directories must be merge inputs",
     );
 
@@ -147,7 +139,7 @@ test("coverage entry runs CI's eight shard selectors, then merges the shard raw 
     assert.ok(diffIndex > mergeIndex, "diff-coverage must consume the merged lcov, not a per-shard lcov");
     const coverage = result.steps.find((s) => s.name === "coverage-ratchet:test-with-coverage")!;
     assert.ok(coverage.ok);
-    assert.match(coverage.detail, /8 shard\(s\)/);
+    assert.match(coverage.detail, new RegExp(`${CI_COVERAGE_SHARD_COUNT} shard\\(s\\)`));
   } finally {
     cleanup();
     rmSync(fixtureRoot, { recursive: true, force: true });
@@ -207,7 +199,7 @@ test("coverage entry refuses an empty duration-balanced selector before spawning
     const coverage = result.steps.find((s) => s.name === "coverage-ratchet:test-with-coverage")!;
 
     assert.equal(coverage.ok, false);
-    assert.match(coverage.detail, /shard 8\/8 duration-balanced test selection returned no files/);
+    assert.match(coverage.detail, new RegExp(`shard 8/${CI_COVERAGE_SHARD_COUNT} duration-balanced test selection returned no files`));
     assert.equal(calls.some((c) => shardNumber(c.args) === 8), false);
   } finally {
     cleanup();
@@ -223,7 +215,7 @@ test("coverage entry refuses a shard with no # tests summary as unverified", () 
     const coverage = result.steps.find((s) => s.name === "coverage-ratchet:test-with-coverage")!;
 
     assert.equal(coverage.ok, false);
-    assert.match(coverage.detail, /shard 8\/8 produced no # tests summary/);
+    assert.match(coverage.detail, new RegExp(`shard 8/${CI_COVERAGE_SHARD_COUNT} produced no # tests summary`));
     assert.equal(calls.some((c) => c.args.includes("--output")), false);
   } finally {
     cleanup();
@@ -241,7 +233,7 @@ test("coverage entry refuses a shard whose file process exited 0 before its own 
     const coverage = result.steps.find((s) => s.name === "coverage-ratchet:test-with-coverage")!;
 
     assert.equal(coverage.ok, false);
-    assert.match(coverage.detail, /COVERAGE SHARD 5\/8 RUN INCOMPLETE — its exit 0 is counted as FAILED/);
+    assert.match(coverage.detail, new RegExp(`COVERAGE SHARD 5/${CI_COVERAGE_SHARD_COUNT} RUN INCOMPLETE — its exit 0 is counted as FAILED`));
     assert.match(coverage.detail, /UNREPORTED FILE test\/coverage-shard-5\.test\.ts/);
     assert.equal(calls.some((c) => shardNumber(c.args) === 6), false, "no later shard runs");
     assert.equal(calls.some((c) => c.args.includes("--output")), false, "nothing is merged");
@@ -251,9 +243,9 @@ test("coverage entry refuses a shard whose file process exited 0 before its own 
   }
 });
 
-test("coverage shard scheduling is CPU-bounded while the shard count stays CI's eight", () => {
-  assert.equal(CI_COVERAGE_SHARD_COUNT, 8);
-  assert.equal(coverageShardConcurrency(16), 8);
+test("coverage shard scheduling is CPU-bounded and capped at eight while CI runs twelve shards (W1-T13270)", () => {
+  assert.equal(CI_COVERAGE_SHARD_COUNT, 12);
+  assert.equal(coverageShardConcurrency(16), 8, "a local run keeps its eight concurrent shards");
   assert.equal(coverageShardConcurrency(8), 8);
   assert.equal(coverageShardConcurrency(4), 4);
   assert.equal(coverageShardConcurrency(2), 2);
