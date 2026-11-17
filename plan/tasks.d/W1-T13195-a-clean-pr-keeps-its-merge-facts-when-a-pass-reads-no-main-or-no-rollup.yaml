@@ -18,7 +18,7 @@
     - src/lib/sweep.ts
     - src/lib/tick-read-worker.ts
     - test/a-clean-pr-keeps-its-merge-facts-when-a-pass-reads-no-main-or-no-rollup.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A sweep.disposed row written by a pass with no main tip never records merge_state without merge_main_sha: it carries the main sha of the record it inherited, or it records no merge_state. Then a later pass at main ef8b749 inherits clean for the #18726 shape (clean rows at ef8b749 at 13:20 to 13:28Z, then a row from a pass with no main tip at 13:58:41Z)"

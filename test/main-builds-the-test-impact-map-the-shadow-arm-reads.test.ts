@@ -20,6 +20,8 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
+// @ts-expect-error -- plain .mjs script, no type declarations
+import { NIGHTLY_SHARD_COUNT } from "#scripts/coverage-floor.mjs";
 import { ghShim } from "#test/helpers/gh-shim.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 
@@ -44,7 +46,7 @@ function step(job: Job, prefix: string): Step {
 const at = (job: Job, prefix: string) => job.steps.findIndex((s) => s.name?.startsWith(prefix));
 const BUILD = "Build the test impact map from the compact shards (W1-T6107";
 const FETCH = "Fetch the newest nightly test impact map for the shadow selector (W1-T6107)";
-const SHARD_DIRS = Array.from({ length: 8 }, (_, k) => `coverage-shards/coverage-shard-${k + 1}/raw`);
+const SHARD_DIRS = Array.from({ length: NIGHTLY_SHARD_COUNT }, (_, k) => `coverage-shards/coverage-shard-${k + 1}/raw`);
 
 /** A throwaway dir holding stub executables, prepended to PATH. Each stub logs "$@" and exits `code`. */
 function stubs(entries: Record<string, { code: number; body?: string }>) {
@@ -67,12 +69,14 @@ test("W1-T6107: coverage-nightly builds the impact map from the eight compact sh
   const build = step(NIGHTLY, BUILD).run!;
   assert.match(build, /--impact-map test-impact-map\.json/);
   assert.match(build, /--sha "\$GITHUB_SHA"/);
-  assert.match(build, /--shard-count 8/);
+  assert.match(build, new RegExp(`--shard-count ${NIGHTLY_SHARD_COUNT}\\b`));
   assert.match(build, /node --import tsx scripts\/coverage-merge-ratchet\.mjs/);
   const merge = step(NIGHTLY, "Merge raw V8 coverage shards into one lcov").run!;
+  // W1-T13275: the merge reads each shard's premapped copy of the same raw reports; the map keeps the compact one.
   for (const dir of SHARD_DIRS) {
-    assert.ok(merge.includes(dir), `the merge reads ${dir}`);
-    assert.ok(build.includes(dir), `the map is built from ${dir}, the same compact shard`);
+    const premapped = dir.replace(/\/raw$/, "/premapped");
+    assert.ok(merge.includes(premapped), `the merge reads ${premapped}`);
+    assert.ok(build.includes(dir), `the map is built from ${dir}, the same shard's compact copy`);
   }
   assert.ok(at(NIGHTLY, "Merge raw V8 coverage shards") < at(NIGHTLY, BUILD));
   assert.ok(at(NIGHTLY, BUILD) < at(NIGHTLY, "Coverage ratchet (main's absolute floor)"), "a red floor must not skip the map");

@@ -9,7 +9,7 @@
   risk: high  # Rule 19: one concern, the code the host's cron jobs run (which checkout, and a beat that says when it is stale); no daemon, launcher or unit change
   band_meaning: span
   priority: 1
-  status: queued
+  status: merged
   attempts: 0
   origin: "filing agent 2026-10-26: found during the W1-T10751 filing (#14527), when the live heartbeat-azure payload carried no session_reaper_verdict; re-verified read-only on the Azure host at 19:24-19:33Z"
   plan_refs: [W1-T4770, W1-T2877, W1-T9617, W1-T10751, W1-T4844, W1-T3627, W1-T2725]

@@ -20,7 +20,10 @@ import { inboxSemanticDigest, inboxProposalRevision, mechanicalAskPurpose, retir
   inboxOperatorIntent, inboxMechanicalTaskDigest, inboxGardenerSource, inboxGardenerTaskFact, inboxGardenerMode, type InboxGardenerMode, sameInboxGardenerScope, type InboxGardenerTaskFact, type InboxTerminalProof, type RetirementProposal } from "./inbox-retirement.js";
 
 /** PRIMARY CONTROL: each pass admits bounded candidate, proof, judge and transition work. */
-export const INBOX_GARDENER_LIMITS = { candidates: 8, proofReads: 4, judges: 1, retirements: 1, ledgerBudgetMs: 25, ledgerChunkBytes: 64 * 1024 } as const;
+/** W1-T13348: ledgerCatchUpMs replaced a 25 ms tick budget. The projector gunzips a whole archive per tick and checks its
+ *  deadline only after a commit, so 25 ms advanced ONE 64 KiB chunk a pass, and the host's 240 archives (~10 GB) could never
+ *  be read. The pass runs in its own spawned process, and a caught-up store returns as soon as the live tail is read. */
+export const INBOX_GARDENER_LIMITS = { candidates: 8, proofReads: 4, judges: 1, retirements: 1, ledgerCatchUpMs: 20_000, ledgerChunkBytes: 64 * 1024 } as const;
 export { inboxGardenerMode } from "./inbox-retirement.js";
 export interface InboxGardenerCandidate {
   proposal: RetirementProposal;
@@ -55,10 +58,18 @@ const protectedCandidate = (c: InboxGardenerCandidate, scope: InboxGardenerScope
   return c.task?.id === "W1-T216" || c.task?.dispatch_hold === true || c.task?.repo !== scope.repository.split("/")[1] || !ask || !c.task ||
     ask.kind === "mechanical" && ask.purpose.taskDigest !== inboxMechanicalTaskDigest(c.task);
 };
-const qualified = (p: InboxGardenerPack, scope: InboxGardenerScope, now: number) =>
-  sameInboxGardenerScope(p.scope, scope) && /^[a-f0-9]{40}$/.test(p.codeSha) && /^[a-f0-9]{64}$/.test(p.snapshotKey) &&
-  Number.isFinite(Date.parse(p.generatedAt)) && now - Date.parse(p.generatedAt) >= 0 && now - Date.parse(p.generatedAt) <= INBOX_STALE_AFTER_MS &&
-  Object.values(p.coverage).every(x => x === "observed");
+/** W1-T13337: each qualification check that fails, sorted; empty exactly when the pack qualifies. */
+export function inboxGardenerGaps(p: InboxGardenerPack, scope: InboxGardenerScope, now: number): string[] {
+  const gaps: string[] = [], at = Date.parse(p.generatedAt);
+  if (!sameInboxGardenerScope(p.scope, scope)) gaps.push("scope");
+  if (!/^[a-f0-9]{40}$/.test(p.codeSha)) gaps.push("code_sha");
+  if (!/^[a-f0-9]{64}$/.test(p.snapshotKey)) gaps.push("snapshot_key");
+  if (!Number.isFinite(at)) gaps.push("generated_at");
+  else if (now - at < 0 || now - at > INBOX_STALE_AFTER_MS) gaps.push("stale");
+  for (const [source, value] of Object.entries(p.coverage)) if (value !== "observed") gaps.push(`coverage:${source}`);
+  return gaps.sort();
+}
+const qualified = (p: InboxGardenerPack, scope: InboxGardenerScope, now: number) => inboxGardenerGaps(p, scope, now).length === 0;
 
 export async function runInboxGardener(options: { stateDir: string; scope: InboxGardenerScope; ports: InboxGardenerPorts;
   mode?: InboxGardenerMode; clock?: Clock; stopped?: () => boolean; limits?: Partial<Record<keyof typeof INBOX_GARDENER_LIMITS, number>> }) {
@@ -72,7 +83,9 @@ export async function runInboxGardener(options: { stateDir: string; scope: Inbox
     if (read.state === "unavailable") return { state: "source_unavailable", complete: false, reason: read.reason };
     const store: InboxGardenerStore = read.state === "observed" ? read.store : { version: 1, scope: options.scope, entries: {}, events: [] };
     const pack = await options.ports.capture();
-    if (!qualified(pack, options.scope, clock.now())) return { state: "source_partial", complete: false, retired: 0, judged: 0 };
+    const now = clock.now(), gaps = inboxGardenerGaps(pack, options.scope, now);
+    if (gaps.length) return { state: "source_partial", complete: false, retired: 0, judged: 0, gaps,
+      ...(gaps.includes("stale") ? { age_ms: now - Date.parse(pack.generatedAt) } : {}) };
     // Recovery reuses the prepared immutable event, including its original at and snapshot anchor.
     const pendingMirrors = store.events.filter(e => !e.mirrored);
     for (const event of pendingMirrors.slice(0, limits.candidates)) {
@@ -215,13 +228,13 @@ const relevantProjection: LedgerRowProjection = { name: "inbox-gardener-evidence
   } };
 
 /** Byte-bounded advancement plus indexed current-proposal lookups; never a lifetime table scan. */
-export function readInboxGardenerLedger(stateDir: string, scope: InboxGardenerScope, proposalIds: readonly string[] = []) {
+export function readInboxGardenerLedger(stateDir: string, scope: InboxGardenerScope, proposalIds: readonly string[] = [], clock: Clock = systemClock) {
   const db = openProjectorReadModel(join(stateDir, "inbox-gardener-evidence"), `inbox-gardener-${inboxSemanticDigest(scope).slice(0, 16)}`);
   const acquired = acquireLease(db);
   try {
     if (!acquired.ok) return { state: "unavailable" as const, rows: [] };
-    const tick = createLedgerProjector({ ledgerDir: stateDir, db, lease: acquired.lease, factStep: () => false,
-      projections: [relevantProjection], chunkBytes: INBOX_GARDENER_LIMITS.ledgerChunkBytes }).tick({ budgetMs: INBOX_GARDENER_LIMITS.ledgerBudgetMs });
+    const tick = createLedgerProjector({ ledgerDir: stateDir, db, lease: acquired.lease, factStep: () => false, clock,
+      projections: [relevantProjection], chunkBytes: INBOX_GARDENER_LIMITS.ledgerChunkBytes }).tick({ budgetMs: INBOX_GARDENER_LIMITS.ledgerCatchUpMs });
     const quarantined = Number(db.prepare("SELECT COUNT(*) AS n FROM quarantine").get()?.n ?? 0);
     if (tick.torn || tick.quarantined) withWriteTransaction(db, acquired.lease, () => db.prepare("INSERT OR REPLACE INTO meta(k, v) VALUES('inbox-source-fault', 'torn-or-quarantined')").run());
     const live = fs.openSync(join(stateDir, LEDGER_FILENAME), "r");

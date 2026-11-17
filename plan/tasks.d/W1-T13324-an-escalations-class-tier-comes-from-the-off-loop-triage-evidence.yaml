@@ -1,0 +1,101 @@
+- id: W1-T13324
+  title: "An escalation's class tier comes from the off-loop triage evidence: triageRoute no longer reads the whole ledger union synchronously for a tier that the production evidence then replaces, so raising an escalation no longer stalls the daemon loop (four stalls of 112 s to 196 s in six hours on 2026-11-17)"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the tier decides whether an escalation reaches the operator or is demoted to a digest; a wrong or missing tier hides an escalation, and the rule that unreadable evidence delivers to needs-human must hold
+  origin: "operator-session#loop-lag-2026-11-17"
+  plan_refs:
+    - W1-T12753
+    - W1-T13155
+    - W1-T13185
+    - W1-T13288
+  files:
+    - src/lib/escalate.ts
+    - src/run-task.ts
+    - test/an-escalation-reads-no-ledger-union-on-the-loop.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "An escalation raised through escalateAsync with the production triage runtime (buildEscalationTriageRuntime, refreshed) over a state dir whose panel.escalation_marked_handled rows are only in gzip archives ledgers the same escalation.triaged outcome and reason as origin/main for a class in the issue tier, the digest tier and the board tier"
+      proof: "grep: W1-T13324 criterion 1 in test/an-escalation-reads-no-ledger-union-on-the-loop.test.ts"
+    - claim: "invariant:unreadable-tier-still-delivers — when the tier evidence cannot be read (a rotation the reader cannot read) or a torn row names panel.escalation_marked_handled, the escalation.triaged row is deliver, decided by default, with the reason 'triage evidence unreadable', and the issue opens with the needs-human label, as at origin/main"
+      kind: guard
+      proof: "grep: W1-T13324 criterion 2 in test/an-escalation-reads-no-ledger-union-on-the-loop.test.ts"
+    - claim: "invariant:no-sync-union-in-escalation — an escalation driven by the async driver (escalateAsync, tryEscalateAsync, escalateWithJudge) whose configured evidence supplies a class tier makes no readLedgerUnionRecordsSync call and no synchronous read of a rotation file while escalateSteps runs"
+      kind: guard
+      proof: "grep: W1-T13324 criterion 3 in test/an-escalation-reads-no-ledger-union-on-the-loop.test.ts"
+    - claim: "A caller whose triage settings supply no class tier (no production triage configured and no deps.triage.evidence, or an evidence result with no classTier key) still gets the tier from the ledger read in ledgerClassTier, with the same outcome as origin/main, and MANUAL and HARD_STOP still get no tier from it"
+      proof: "grep: W1-T13324 criterion 4 in test/an-escalation-reads-no-ledger-union-on-the-loop.test.ts"
+  rationale: |
+    WHY: each time the daemon raises a new escalation, triageRoute reads every ledger rotation synchronously on
+    the daemon loop to work out the class tier. In production the next expression replaces that tier with the
+    one the off-loop evidence reader already holds. So the daemon stops for one to three minutes to compute a
+    value it then discards.
+    MEASURED, core ledger (~/rmd-state2/state), daemon.loop_stall_profile rows of the daemon process from
+    2026-11-16T22:05:00Z to 2026-11-17T04:07:46Z (three boots: d5de6540c5 at 20:44:27Z, aa891635ed at 23:50:59Z,
+    9be1ffbcb8 at 03:19:15Z):
+    - 1,898 stall rows. The loop was blocked 11,735.3 s of 21,767 s, 53.9% (overlapping stall windows counted
+      once; the plain sum of lag_ms is 12,990.6 s). Per boot, plain sum: 55.4%, 62.7%, 55.5%.
+    - escalateSteps under triageRoute is in the top inclusive frames of 5 rows: 580.5 s of lag in total, 4.5%
+      of all lag, the largest 196.2 s at 01:41:20Z. The four large rows: 22:34:59Z lag 131.5 s (escalateSteps
+      101.6 s), 23:21:16Z 111.6 s (88.4 s), 00:20:21Z 137.1 s (106.1 s), 01:41:20Z 196.2 s (136.4 s). In each,
+      readLedgerUnionRecordsSync has the same total as escalateSteps to within 0.3 s, and ledgerClassTier is in
+      the chain.
+    - Self time in the 01:41:20Z row: parseObject called from scanLedgerBuffer 60.8 s, garbage collection
+      51.4 s, synchronous zlib buffers (createUnsafeBuffer, writeSync, concat) 59.3 s. sync_spawn_ms is 0.
+    - 11 escalation.triaged rows in the same window: about one new escalation every 33 minutes.
+    READ at origin/main 047a84f865:
+    - src/lib/escalate.ts:1883, in triageRoute (:1872): `const evidence = { classTier: ledgerClassTier(e,
+      deps.ledgerPath), ...cfg?.evidence?.(e) }`. ledgerClassTier runs first, always.
+    - src/lib/escalate.ts:1835 ledgerClassTier calls readLedgerUnionRecordsSync(dirname(ledgerPath), { step:
+      "panel.escalation_marked_handled", refuseIncomplete: true, onTorn }) at :1840. The step filter cuts rows,
+      not bytes: every archive is read and decompressed (1,357 ledger files on the host). It needs the rows for
+      escalationClassSignal (:1845): how often the operator acted on this class decides issue, digest or board.
+      It throws when the read is not ok or a torn row names the step; triageRoute's catch (:1894) then delivers.
+    - src/run-task.ts:3086, in buildEscalationTriageRuntime's evidence callback: `classTier:
+      escalationClassSignal(history, e.class).tier`, where history is evidenceHistory.current(...) (:3017 to
+      :3021), a createEscalationTriageHistoryReader over ESCALATION_TRIAGE_EVIDENCE_SLICE
+      (src/lib/sweep.ts:30315). That slice already holds panel.escalation_marked_handled, has durable digests
+      and a shared snapshot, and is refreshed off the loop (run-task.ts:3153 and :33249, W1-T9406). Its result
+      is spread after ledgerClassTier's, so it wins.
+    - The production triage is configured for every daemon process at src/run-task.ts:45247
+      (configureEscalationTriage) and src/cli/commands/sweep.ts:740 and :1004.
+    - escalateAsync (:1830), tryEscalateAsync (:2027) and escalateWithJudge run escalateSteps (:1956) under
+      runStepsAsync on the daemon loop.
+    NOT COVERED: swept origin/main plan/tasks.d and plan/tasks.yaml for escalateSteps, ledgerClassTier and
+    triageRoute. W1-T5765 (merged) moved the GitHub calls of a judged escalation off the loop. W1-T9406 (merged)
+    moved the evidence callback's read to the slice reader and left ledgerClassTier in place. W1-T13155,
+    W1-T13185 and W1-T13183 (merged) and W1-T13288 (in review) are other reads. No open PR on craigoley/remudero
+    names escalateSteps or ledgerClassTier.
+  design: |
+    INVARIANT no-sync-union-in-escalation: an escalation under the async driver whose configured evidence supplies a class tier never calls readLedgerUnionRecordsSync and reads no rotation file synchronously.
+    INVARIANT unreadable-tier-still-delivers: tier evidence that is unreadable, or a torn row that names panel.escalation_marked_handled, still gives deliver, decided by default, to needs-human.
+    1. In triageRoute (src/lib/escalate.ts:1883) call cfg.evidence(e) first. Call ledgerClassTier only when that
+       result has no classTier key. The merged evidence object is the same as today in both cases.
+    2. The production evidence callback (src/run-task.ts:3018 readRows) already throws when the slice read is
+       not ok. Make it also throw when a torn line of that read names panel.escalation_marked_handled, so the
+       rule ledgerClassTier enforces with onTorn is kept. If the slice read does not expose its torn lines to
+       this caller, expose them from the reader; do not add a second read.
+    3. ledgerClassTier and the synchronous drivers (escalate, tryEscalate) keep their shape: a caller with no
+       tier in its evidence still reads the ledger there. No new slice, holder, env var, bound or window.
+    4. TESTS in test/an-escalation-reads-no-ledger-union-on-the-loop.test.ts use a fixture state dir with real
+       gzip archives and the real union, with the production runtime from buildEscalationTriageRuntime, as
+       test/escalation-triage-runs-off-the-loop.test.ts and
+       test/an-escalation-is-triaged-before-it-reaches-the-operator.test.ts do. Criterion 3 counts synchronous
+       reads through the ledger fs deps or a spy on the ledger-union module.
+  falsifier: |
+    At origin/main ledgerClassTier runs before the evidence callback: the sync-read count during escalateAsync
+    is not 0 (criterion 3). Skip ledgerClassTier and leave the evidence callback as it is: a torn
+    panel.escalation_marked_handled row no longer refuses, so criterion 2 gets a digest or issue outcome where
+    it must get deliver by default. Drop the fallback: a caller with no evidence gets no tier and criterion 4
+    delivers a class that origin/main demotes.
+  note: |
+    Id reserved for run-unfiled-1794888412000 with ~/rmd-work/bin/reserve-id.sh.
+    Proof that counts in production: no daemon.loop_stall_profile row with escalateSteps or ledgerClassTier
+    above readLedgerUnionRecordsSync in its top inclusive frames, over a day with new escalations.
+    Out of scope: the appendLedger calls in triageRoute and the dedup lookup's GitHub reads.

@@ -1,0 +1,51 @@
+- id: W1-T13337
+  title: "A source_partial Inbox gardener pass names which source check failed, so an operator can tell a stale snapshot from a missing coverage source"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # 1 concern: runInboxGardener's source_partial result gains the failed qualification checks
+  origin: "operator-session#inbox-gardener-shadow-2026-11-17"
+  plan_refs:
+    - W1-T13258
+  files:
+    - src/lib/inbox-gardener.ts
+    - test/inbox/a-partial-inbox-gardener-pass-names-its-gap.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "When the captured pack fails qualification, the source_partial result carries gaps: a sorted list naming each failed check, from scope, code_sha, snapshot_key, generated_at, stale, and coverage:<source> for each of plan, registry, github, ledger and threads that is not observed"
+      proof: "grep: W1-T13337 criterion 1 in test/inbox/a-partial-inbox-gardener-pass-names-its-gap.test.ts"
+    - claim: "A stale pack names stale with its age in ms, and a pack that qualifies runs exactly as before with no gaps field"
+      proof: "grep: W1-T13337 criterion 2 in test/inbox/a-partial-inbox-gardener-pass-names-its-gap.test.ts"
+    - claim: "invariant:qualification-unchanged — every pack the old qualified() accepted is still accepted, and every pack it refused is still refused before any mirror, judge or retirement"
+      kind: guard
+      proof: "grep: W1-T13337 criterion 3 in test/inbox/a-partial-inbox-gardener-pass-names-its-gap.test.ts"
+  rationale: |
+    WHY: on 2026-11-17 the operator turned the Inbox gardener to shadow mode (inboxGardenerMode, W1-T13258). Its first
+    pass on the host, 07:41:24Z, run GARDEN-inbox-1794901281843, logged inbox.gardener_pass with state source_partial,
+    complete false, retired 0, judged 0, and nothing else.
+    READ at origin/main: runInboxGardener (src/lib/inbox-gardener.ts) returns that literal when qualified(pack, scope,
+    now) is false. qualified() ANDs six checks: same scope, a 40-hex codeSha, a 64-hex snapshotKey, a parseable
+    generatedAt, an age within INBOX_STALE_AFTER_MS (10 min), and every coverage source observed. The row cannot say
+    which failed.
+    OBSERVED at 07:46Z on the host: state/inbox-classification.json was 0.2 min old, its snapshotKey 64-hex, its scope
+    core / craigoley/remudero, and its attentionCensus sources plan, registry, liveLedger and githubProjection observed
+    with archiveLedger partial. No inbox.gardener_source_unavailable or garden.due_failed rows. So the failure was a
+    coverage key or the age at 07:41Z, and only a named gap tells which, here and on every later pass.
+  design: |
+    INVARIANT qualification-unchanged: the accept or refuse decision is identical; only the result gains detail.
+    1. Replace the boolean qualified() with a function that returns the sorted list of failed checks (empty when the
+       pack qualifies): scope, code_sha, snapshot_key, generated_at, stale, and coverage:<source> for each source whose
+       value is not observed. Keep a boolean wrapper for the recheck at the retirement step.
+    2. The source_partial result adds gaps (that list) and, when stale is among them, age_ms. The pass row logs the
+       result as it does today, so the fields reach the ledger with no change to the caller.
+  falsifier: |
+    Return the bare literal again and criterion 1 fails. Name a gap for a qualifying pack, or let a refused pack
+    through, and criterion 3 fails.
+  note: |
+    Id reserved for run-unfiled-1794901621182 with ~/rmd-work/bin/reserve-id.sh.
+    reservation hand-off: run-unfiled-1794901621182 -> claude/project-thread-cb5huh-plan-gardener-partial-reason

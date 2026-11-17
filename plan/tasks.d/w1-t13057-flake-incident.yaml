@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 2.5
   status: queued
@@ -25,3 +25,13 @@
     CI runs: 43694578741, 43695189112, 43698652126, 43720899736, 43721249722.
     Retry outcomes: 5 recovered on retry, 0 also failed on retry.
     Evidence: test.flake_retry ledger rows, 5 read from the PR coverage-shard logs and 0 from fix-round reroutes the PR's diff cannot reach.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.8
+    reasons:
+      - "The declared files list is a single test file, and the acceptance criteria are a unit test and a grep, so the change is scoped to test code. Nothing in the description touches secrets, auth, deletion, merge/deploy/review policy, or irreversible actions."
+      - "The flake evidence shows 5 retries recovered and 0 failed across 4 PRs that do not touch the test, which fits an intermittent flake rather than an inherited red from main. Main's CI status at the PR bases is unread, so that point is not confirmed."
+      - "Acceptance is mechanically verifiable (a named test via grep plus a unit test), and the PR still passes CI and review. The family track record (8 merged, 6 declined) is mixed but does not outweigh the narrow scope."
+    judged_at: "2026-11-17T07:00:25.370Z"
+    pin: "afadbd74f5aca7fc4e4b295d5f9ef12b9b17af7c59ef28935662f87d1e5701c2"

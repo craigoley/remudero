@@ -309,7 +309,7 @@ export interface IssueGateway {
   /** Close one issue, posting `comment` as the closing citation — used only by the reconciler when
    *  the referenced task resolved, so the closure names its resolver rather than being a silent
    *  disappearance (fb-1784756088300-6a481e). Optional, like {@link ensureLabel}. */
-  closeWithComment?(url: string, comment: string): void;
+  closeWithComment?(url: string, comment: string, reason?: "not planned"): void;
   /** Post `body` as a plain comment on an OPEN issue without closing it (W1-T104) — the SECOND
    *  OBSERVER of an already-open escalation appends here rather than opening a sibling. A gateway
    *  omitting it still dedupes, but silently drops the second observation. */
@@ -2141,11 +2141,13 @@ function issueGatewaySteps(
           return parseLabelledIssuesRest(yield* gh(labelledIssuesRestArgs(repoArg, label, "open")));
         })(),
       ),
-    closeWithComment: (url, comment) =>
+    closeWithComment: (url, comment, reason) =>
       drive(
         (function* () {
+          // W1-T13221: "not planned" marks a superseded duplicate; absent, gh closes as completed.
+          const why = reason ? ["--reason", reason] : [];
           try {
-            yield* gh(["issue", "close", url, "--repo", repoArg, "--comment", comment]);
+            yield* gh(["issue", "close", url, "--repo", repoArg, "--comment", comment, ...why]);
             return "commented";
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
@@ -2153,7 +2155,7 @@ function issueGatewaySteps(
             const cap2 = "Commenting is disabled on issues with more than 2500 comments.";
             if (msg.includes(cap1) || msg.includes(cap2)) {
               // GitHub rejects closing with a citation comment when the cap is reached; close without a comment
-              yield* gh(["issue", "close", url, "--repo", repoArg]);
+              yield* gh(["issue", "close", url, "--repo", repoArg, ...why]);
               return "comment_cap";
             }
             throw err;
