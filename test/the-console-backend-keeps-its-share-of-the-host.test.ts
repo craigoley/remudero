@@ -145,7 +145,7 @@ function serveDryRun(env: Record<string, string> = {}): { status: number | null;
 
 const shares = (args: readonly string[]) => Number(args.find((a) => a.startsWith("--cpu-shares="))?.split("=")[1]);
 
-test("W1-T4102, W1-T12532 criterion 2: serve is launched with protected memory and at least the daemons' cpu weight", () => {
+test("W1-T4102, W1-T12532 criterion 2, W1-T13293 criterion 1: serve is launched with protected memory and 4096 cpu-shares, 8x the daemons' weight", () => {
   const serve = serveDryRun();
   assert.equal(serve.status, 0, serve.out);
   const line = serve.out.split("\n").find((l) => l.includes("docker run -d --name remudero-serve")) ?? "";
@@ -157,8 +157,9 @@ test("W1-T4102, W1-T12532 criterion 2: serve is launched with protected memory a
   assert.ok(serveArgs.some((a) => a.startsWith("--annotation=org.systemd.property.MemoryHigh=")), `serve's share is its memory.high: ${line}`);
   const build = recycle(HOST_MIB).args;
   assert.ok(shares(serveArgs) >= shares(build), `serve ${shares(serveArgs)} is never below a build daemon ${shares(build)}`);
-  assert.equal(shares(serveArgs), shares(build), "by default serve's weight equals a build daemon's");
-  assert.equal(shares(serveArgs), 512);
+  assert.ok(shares(serveArgs) >= shares(build), "serve's weight is never below a build daemon's");
+  assert.equal(shares(serveArgs), 4096, "W1-T13293 criterion 1: by default serve's weight is 4096, 8x a build daemon's 512");
+  assert.equal(shares(build), 512);
 });
 
 test("W1-T12532 criterion 3: an operator-set RMD_SERVE_CPU_SHARES still sets serve's --cpu-shares", () => {
@@ -203,7 +204,7 @@ test("operator ruling 2026-10-19: serve runs the semi-space flag and the glibc m
   const env = args.flatMap((a, i) => (args[i - 1] === "-e" ? [a] : []));
   assert.deepEqual(env.filter((e) => e.startsWith("NODE_OPTIONS=")), ["NODE_OPTIONS=--max-semi-space-size=16"]);
   assert.deepEqual(env.filter((e) => e.startsWith("GLIBC_TUNABLES=")), ["GLIBC_TUNABLES=glibc.malloc.arena_max=2:glibc.malloc.trim_threshold=131072"]);
-  assert.match(out, /resource policy — serve: cpu-shares 512, no memory\.low, NODE_OPTIONS --max-semi-space-size=16, GLIBC_TUNABLES glibc\.malloc\.arena_max=2/);
+  assert.match(out, /resource policy — serve: cpu-shares 4096, no memory\.low, NODE_OPTIONS --max-semi-space-size=16, GLIBC_TUNABLES glibc\.malloc\.arena_max=2/);
 });
 
 test("operator ruling 2026-10-19: the policy merges its semi-space flag into any NODE_OPTIONS exactly once", () => {
@@ -227,8 +228,8 @@ test("operator ruling 2026-10-19: the rollback lever — emptied ruled values ad
   ].join("\n"), "p", join(REPO_ROOT, "deploy", "resource-policy.sh")], { encoding: "utf8", env: { ...process.env, RMD_MEMINFO_PATH: "/nonexistent" } });
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /^merge=\[--max-old-space-size=8192\]$/m, "the heap ceiling alone, no trailing space");
-  assert.match(r.stdout, /^serve=--cpu-shares=512 --memory=7680m --memory-swap=9728m$/m, "no -e at all");
-  assert.match(r.stdout, /^note=serve: cpu-shares 512, no memory\.low, NODE_OPTIONS none, GLIBC_TUNABLES none/m);
+  assert.match(r.stdout, /^serve=--cpu-shares=4096 --memory=7680m --memory-swap=9728m$/m, "no -e at all");
+  assert.match(r.stdout, /^note=serve: cpu-shares 4096, no memory\.low, NODE_OPTIONS none, GLIBC_TUNABLES none/m);
   assert.match(r.stdout, /^build=--cpu-shares=512$/m);
 });
 
