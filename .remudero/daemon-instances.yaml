@@ -51,6 +51,13 @@
 # 2026-09-24: core). Exactly one live row may carry it: `parseInstanceRegistry` refuses two
 # (duplicate_primary), `requirePrimaryInstance` refuses none (no_primary), and a retired row's
 # `primary` is ignored. Both shell readers list it as known-and-ignored. No deploy behavior reads it yet.
+# W1-T13498 — `ops` (craigoley/remudero-ops) is ONBOARDED IN SHADOW (operator ruling 2026-11-17: onboard
+# remudero-ops as a managed repo, shadow daemon after a host check). `mode: shadow` (W1-T4265) means its worker
+# opens real pull requests but never arms or merges one; promotion to live is a later reviewed registry PR. Both
+# shell readers now list `mode` as known-and-ignored. The host copy (/etc/remudero/daemon-instances.yaml) needs
+# the same row, with `mode: shadow`, before `install-host-units.sh --instance ops`: an absent mode reads as live.
+# remudero-ops' plan holds core's tasks (`repo: remudero`); taskTargetsRepo (src/lib/drain.ts) keeps this
+# instance from dispatching them.
 instances:
   core:
     repo: remudero
@@ -79,6 +86,17 @@ instances:
     github_repo: craigoley/remudero-console
     container_name: remudero-console-daemon
     state_dir: /mnt/rmd/remudero-console-state
+    claude_dir: /home/craigoleyagent/.claude
+    codex_dir: /home/craigoleyagent/.codex
+    container_config_dir: /home/craigoleyagent/.config/remudero-container
+    image: synthwatcholey0620.azurecr.io/remudero:latest
+  ops:
+    repo: remudero-ops
+    project: remudero
+    github_repo: craigoley/remudero-ops
+    mode: shadow
+    container_name: remudero-ops-daemon
+    state_dir: /mnt/rmd/remudero-ops-state
     claude_dir: /home/craigoleyagent/.claude
     codex_dir: /home/craigoleyagent/.codex
     container_config_dir: /home/craigoleyagent/.config/remudero-container

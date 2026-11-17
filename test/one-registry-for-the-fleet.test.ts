@@ -286,7 +286,17 @@ test("the committed registry parses and puts core, site and console in the remud
       ["core", "remudero", "craigoley/remudero", true],
       ["site", "remudero", "craigoley/remudero-site", true],
       ["console", "remudero", "craigoley/remudero-console", true],
+      ["ops", "remudero", "craigoley/remudero-ops", true],
     ],
+  );
+});
+
+test("W1-T13498: the committed registry onboards remudero-ops in shadow, and every other row stays live", () => {
+  const text = readFileSync(join(REPO_ROOT, ".remudero", "daemon-instances.yaml"), "utf8");
+  const parsed = parseInstanceRegistry(text);
+  assert.deepEqual(
+    parsed.instances.map((i) => [i.name, i.mode ?? "live"]),
+    [["core", "live"], ["site", "live"], ["console", "live"], ["ops", "shadow"]],
   );
 });
 
@@ -376,6 +386,32 @@ test("recycle-container and install-host-units accept the project layer's fields
   const installRefused = install(refused, "refused");
   assert.notEqual(installRefused.status, 0);
   assert.match(installRefused.stderr, /unknown field 'bogus_field'/, "control: the probe sees a refusal");
+});
+
+test("W1-T13498: both shell readers accept a mode field, and an unknown field is still refused", (t) => {
+  const dir = fixtureDir(t);
+  mkdirSync(join(dir, "state", "state"), { recursive: true });
+  mkdirSync(join(dir, "claude"), { recursive: true });
+  const accepted = join(dir, "mode.yaml");
+  const refused = join(dir, "refused.yaml");
+  writeFileSync(accepted, shellRow(dir, `${PROJECT_FIELDS}\n    mode: shadow`));
+  writeFileSync(refused, shellRow(dir, "    bogus_field: x"));
+  const install = (registryPath: string, name: string) =>
+    spawnSync(BASH_BIN, [join(REPO_ROOT, "deploy", "install-host-units.sh"), "--install", "--instance", "demo"], {
+      encoding: "utf8",
+      cwd: REPO_ROOT,
+      env: { ...process.env, RMD_INSTANCE_REGISTRY: registryPath, RMD_UNIT_DIR: join(dir, "systemd", name), RMD_BIN_DIR: join(dir, "bin", name) },
+    });
+  const installed = install(accepted, "mode");
+  assert.equal(installed.status, 0, installed.stderr);
+  assert.doesNotMatch(installed.stderr, /unknown field/);
+  const installRefused = install(refused, "refused");
+  assert.notEqual(installRefused.status, 0);
+  assert.match(installRefused.stderr, /unknown field 'bogus_field'/, "control: the probe sees a refusal");
+  for (const script of ["install-host-units.sh", "recycle-container.sh"]) {
+    const src = readFileSync(join(REPO_ROOT, "deploy", script), "utf8");
+    assert.match(src, /\n {6}mode\|project\|github_repo\|retired\|primary\) : ;;\n/, `${script} must list mode as a known field`);
+  }
 });
 
 // W1-T9435: keep the old parser/route/shell controls above beside the explicit opt-in contract.
