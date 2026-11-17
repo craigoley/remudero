@@ -3,7 +3,7 @@ import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { fixedClock } from "#src/lib/clock.js";
-import { defaultInboxGardenerPorts, runInboxGardener } from "#src/lib/inbox-gardener.js";
+import { defaultInboxGardenerPorts, runInboxGardener, INBOX_GARDENER_SOURCE_LIMITS } from "#src/lib/inbox-gardener.js";
 import { inboxGardenerMode, mechanicalAskPurpose, proofDebtPopulationPermit, readInboxGardenerStore } from "#src/lib/inbox-retirement.js";
 import { parseProposalRegistry } from "#src/lib/inbox.js";
 import { appendThreadMessage, inboxThreadIdentity } from "#src/lib/inbox-thread.js";
@@ -69,8 +69,9 @@ test("W1-T10038 criterion 1: the gardener admits a representative registry witho
 });
 
 test("W1-T10038 criterion 2: an oversized registry is refused before projection or judgment", async t => {
-  const f = await fixture(t, 1400, 1600);
-  assert.ok(Buffer.byteLength(readFileSync(f.registry, "utf8")) > 2 * 1024 * 1024);
+  // W1-T13202 raised the byte bound; the fixture stays one past it, read from the bound itself.
+  const f = await fixture(t, 1400, Math.ceil(INBOX_GARDENER_SOURCE_LIMITS.registryBytes / 1400) + 64);
+  assert.ok(Buffer.byteLength(readFileSync(f.registry, "utf8")) > INBOX_GARDENER_SOURCE_LIMITS.registryBytes);
   assert.equal(parseProposalRegistry(readFileSync(f.registry, "utf8")).length, 1400, "valid JSON with an otherwise admissible item count");
   await assert.rejects(f.ports().capture(), /bound|large|size/i);
   const result = await runInboxGardener({ stateDir: f.state, scope: f.scope, ports: { ...f.ports(), proof: async () => assert.fail("oversize proof"), judge: async () => assert.fail("oversize judge") }, mode: "shadow" });
@@ -79,8 +80,9 @@ test("W1-T10038 criterion 2: an oversized registry is refused before projection 
 });
 
 test("W1-T10038 criterion 3: count and identity protections survive larger byte admission", async t => {
-  const f = await fixture(t, 2049, 0);
-  assert.ok(Buffer.byteLength(readFileSync(f.registry, "utf8")) < 512 * 1024);
+  // W1-T13202 raised the count bound; the fixture stays one past it and under the byte bound.
+  const f = await fixture(t, INBOX_GARDENER_SOURCE_LIMITS.proposals + 1, 0);
+  assert.ok(Buffer.byteLength(readFileSync(f.registry, "utf8")) < INBOX_GARDENER_SOURCE_LIMITS.registryBytes);
   await assert.rejects(f.ports().capture(), /population exceeds/);
   assert.equal(existsSync(f.index), false);
   const proposals = parseProposalRegistry(readFileSync(f.registry, "utf8")).slice(0, 1400);

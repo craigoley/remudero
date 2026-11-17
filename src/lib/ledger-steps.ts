@@ -320,6 +320,20 @@ const SEED_ROWS: readonly SeedRow[] = [
     outcomes: ["reloaded"],
   },
   {
+    // W1-T10271, W1-T13182: observe only; nothing pauses dispatch on this row.
+    step: "daemon.quota",
+    meaning:
+      "One GitHub rate-limit bucket (`bucket` core or graphql) as the daemon read it on one poll: " +
+      "`remaining` and `resets_at`. The first row of a poll, core when core reads, also carries this " +
+      "process's read cadence since the previous poll: `reads_stamped` by floor mode, `slots_yielded`, " +
+      "`gated_admitted`, and `reads_by_call_site`, the same stamped reads by the code that made them " +
+      "(`file:line` from the repository root, the shape of `github.pace.loop_wait` rows). It names the " +
+      "15 largest call sites and sums the rest as `other`; its values sum to the sum of `reads_stamped`. " +
+      "The site is sampled on one read in 8, and the reads after a sample count under that sample's site.",
+    writer: ["runDaemon"],
+    outcomes: ["read"],
+  },
+  {
     // W1-T12416: shadow only; no gate, route or judge reads this row.
     step: "decision.answered",
     meaning:
@@ -330,6 +344,56 @@ const SEED_ROWS: readonly SeedRow[] = [
       "that failed write the same row with their reason, so every request has exactly one row.",
     writer: ["askDecisionModel"],
     outcomes: ["answered", "refused", "unavailable", "failed"],
+  },
+  {
+    // W1-T12418: offline only; no live judge, gate or route reads this row.
+    step: "judge_replay.batch",
+    meaning:
+      "One replay of a judge corpus through one named model in one Anthropic Message Batch: the corpus, " +
+      "the model, the batch id, the case count and the cases the scrub refused, the count of each result " +
+      "type, the reserved, settled and held dollars at the batch price, the usage, and the retention " +
+      "notice (batch prompts are kept 29 days). A refused, failed or unsettled replay writes the same row " +
+      "with its reason, so every replay has exactly one row.",
+    writer: ["replayJudgeCorpus"],
+    outcomes: ["ended", "refused", "failed", "unsettled"],
+  },
+  {
+    // W1-T12418: read by the judge calibration body through W1-T12414's scorer.
+    step: "judge_replay.answered",
+    meaning:
+      "One result of a judge corpus replay batch: the corpus, the case, the model, the expected answer, " +
+      "the result type and usage, and the recorded typed answer keyed by the model id. A request that " +
+      "errored, was canceled or expired has no typed answer. W1-T12421: a direct replay writes one per " +
+      "sent case, with lane direct, the model surface and the latency; its typed answer has the case's " +
+      "expected answer as its outcome, and a failed request has no typed answer.",
+    writer: ["replayJudgeCorpus"],
+    outcomes: ["succeeded", "errored", "canceled", "expired", "failed"],
+  },
+  {
+    // W1-T12421: offline only; no live judge, gate or route reads this row.
+    step: "judge_replay.finished",
+    meaning:
+      "One direct replay of a judge corpus through one decision model or cash deployment, one request " +
+      "per case: the candidate, its deployment and model surface, the role, the corpus name and digest, " +
+      "the cost estimate and the replay ceiling, the cases sent, answered, abstained, rejected, too large " +
+      "and failed, the reserved, settled and held dollars and the median latency. A refused replay (an " +
+      "unknown corpus or candidate, or an estimate above the ceiling) and a stopped replay (a 429 that " +
+      "stays after one retry, a budget refusal, an unavailable candidate) write the same row with their " +
+      "reason, so every direct replay has exactly one row.",
+    writer: ["replayJudgeCorpus"],
+    outcomes: ["finished", "refused", "stopped"],
+  },
+  {
+    // W1-T12425: a record only; the judge calibration reader joins it to typed answers by head.
+    step: "verdict_calibration.outcome",
+    meaning:
+      "One merged head's outcome after its merge, from the same git read as the verdict calibration " +
+      "report: the task id, the head, the merge commit and the window in days. reverted is a revert " +
+      "inside the window, followup_fixed is a follow-up fix inside the window, and clean is a merge " +
+      "older than the window with neither. A head and kind already recorded gets no second row, and a " +
+      "head with a reverted or followup_fixed row never gets clean. No gate, route or judge reads it.",
+    writer: ["runMeasurementCadenceReport"],
+    outcomes: ["reverted", "followup_fixed", "clean"],
   },
   {
     // W1-T12546: a fix dispatch whose head moved before the checkout claim.
@@ -495,6 +559,27 @@ const SEED_ROWS: readonly SeedRow[] = [
       "No running worker is stopped and the budget is unchanged; the held work starts once no such head waits.",
     writer: ["decideReviewPrecedence"],
     outcomes: ["fix", "build"],
+  },
+  {
+    // W1-T13181: a refused request names the credential it carried and why each provider refused it.
+    step: "service.unauthorized",
+    meaning:
+      "Serve answered 401: no identity provider granted the request. `method` and `path` name the request. " +
+      "`presented` names the kinds of credential the request carried (bearer, operator_session, access, " +
+      "tailnet_identity), or none. `refusals` holds one { provider, reason } for each provider, in the order " +
+      "serve asked them. The row never holds a token, a session, a header value or a digest of one.",
+    writer: ["createRoutedServer"],
+    outcomes: [
+      "no_credential",
+      "unknown_token",
+      "malformed_header",
+      "expired_session",
+      "unknown_session",
+      "unverified_access",
+      "untrusted_identity",
+      "other_route",
+      "not_granted",
+    ],
   },
 ];
 

@@ -642,6 +642,87 @@ export function verdictCalibrationReport(
   return { policy, minPopulationFloor, classes, byLane, unmeasurable, armsSeen: verdictRows.length, armsClassified, unmeasurableByCause };
 }
 
+
+// ── W1-T12425: one outcome row per measured head ─────────────────────────────────────────────
+
+/** The ledger step of one head's post-merge outcome. Written by the measurement cadence; the
+ *  judge calibration reader joins it to typed answers by head. No gate, route or judge reads it. */
+export const VERDICT_OUTCOME_STEP = "verdict_calibration.outcome" as const;
+
+/** The three outcome kinds, worst first: a head with a reverted or followup_fixed row is never clean. */
+export const VERDICT_OUTCOME_KINDS = ["reverted", "followup_fixed", "clean"] as const;
+export type VerdictOutcomeKind = (typeof VERDICT_OUTCOME_KINDS)[number];
+
+export interface VerdictOutcomeRow {
+  step: typeof VERDICT_OUTCOME_STEP;
+  task_id: string;
+  head_sha: string;
+  merge_sha: string;
+  outcome: VerdictOutcomeKind;
+  window_days: number;
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** The key of one (head, kind) pair in {@link verdictOutcomeRows}' `recorded` set. */
+export const verdictOutcomeKey = (headSha: string, kind: VerdictOutcomeKind): string => `${headSha}\0${kind}`;
+
+export const isVerdictOutcomeKind = (value: unknown): value is VerdictOutcomeKind =>
+  typeof value === "string" && (VERDICT_OUTCOME_KINDS as readonly string[]).includes(value);
+
+/** The (head, kind) pairs already recorded in raw ledger lines (a ledger union's matches). */
+export function recordedVerdictOutcomes(rawLines: Iterable<string>): Set<string> {
+  const recorded = new Set<string>();
+  for (const raw of rawLines) {
+    const line = parseLedgerJson(raw);
+    if (line?.step !== VERDICT_OUTCOME_STEP || typeof line.head_sha !== "string" || !line.head_sha) continue;
+    if (isVerdictOutcomeKind(line.outcome)) recorded.add(verdictOutcomeKey(line.head_sha, line.outcome));
+  }
+  return recorded;
+}
+
+/**
+ * The outcome rows of every measurable verdict row: a row with a verdict class, a head and a merge
+ * commit the read history can locate. It uses the same commit index, `locateMergeCommit`,
+ * `wasReverted` and `hasFollowupFix` as {@link verdictCalibrationReport}, so the rows and the
+ * report never disagree. Per head: `reverted` for a revert inside the window, `followup_fixed`
+ * for a follow-up fix inside the window, and `clean` only when the merge is older than the window
+ * at `now` and has neither. A pair in `recorded` gives no row, and a head with a recorded
+ * reverted or followup_fixed row never gets clean. A merge younger than the window with neither
+ * gives no row yet. Pure: the caller reads the git history and the ledger.
+ */
+export function verdictOutcomeRows(
+  verdictRows: readonly VerdictRow[],
+  gitDump: string,
+  opts: { now: Date; policy?: AttributionPolicy; recorded: ReadonlySet<string> },
+): VerdictOutcomeRow[] {
+  const policy = opts.policy ?? ATTRIBUTION_POLICY;
+  const nowMs = opts.now.getTime();
+  const index = buildCommitIndex(parseGitEventDump(gitDump));
+  const heads = new Map<string, { taskId: string; mergeSha: string; kinds: Set<VerdictOutcomeKind> }>();
+  for (const row of verdictRows) {
+    if (row.verdictClass === null || !row.headSha) continue;
+    const merge = locateMergeCommit(index, row.taskId, row.armedTs);
+    if (merge === undefined) continue;
+    const kinds = new Set<VerdictOutcomeKind>();
+    if (wasReverted(index, merge, row.taskId, policy.windowDays)) kinds.add("reverted");
+    if (hasFollowupFix(index, merge, row.taskId, policy.windowDays)) kinds.add("followup_fixed");
+    if (kinds.size === 0 && nowMs > index.tsMs[merge]! + policy.windowDays * DAY_MS) kinds.add("clean");
+    const prior = heads.get(row.headSha);
+    if (prior) for (const kind of kinds) prior.kinds.add(kind);
+    else heads.set(row.headSha, { taskId: row.taskId, mergeSha: index.commits[merge]!.sha, kinds });
+  }
+  const out: VerdictOutcomeRow[] = [];
+  for (const [head, { taskId, mergeSha, kinds }] of heads) {
+    const bad = (["reverted", "followup_fixed"] as const).some((kind) => kinds.has(kind) || opts.recorded.has(verdictOutcomeKey(head, kind)));
+    for (const kind of VERDICT_OUTCOME_KINDS) {
+      if (!kinds.has(kind) || opts.recorded.has(verdictOutcomeKey(head, kind)) || (kind === "clean" && bad)) continue;
+      out.push({ step: VERDICT_OUTCOME_STEP, task_id: taskId, head_sha: head, merge_sha: mergeSha, outcome: kind, window_days: policy.windowDays });
+    }
+  }
+  return out;
+}
+
 // ── W1-T3082: drift bands, classification, escalation ──────────────────────────────────────────
 //
 // See the module header's "DRIFT NOW REACHES THE INBOX" paragraph for the design. Everything

@@ -28,9 +28,11 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
 import { writeAtomic } from "./fs-race-safe.js";
+import { JUDGE_REPLAY_DECISION_ROLE_PREFIX } from "./judge-replay-batch.js";
 import { appendPanelLedger, bearerTokenId, isRecord, jsonAction, sendJson } from "./panel-actions.js";
 import type { Route } from "./service.js";
 import { decisionAnsweredTypedAnswers, scoreTypedAnswers, type TypedAnswerRow, type TypedAnswerScores } from "./typed-answer-scores.js";
+import { isVerdictOutcomeKind, VERDICT_OUTCOME_KINDS, VERDICT_OUTCOME_STEP, type VerdictOutcomeKind } from "./verdict-calibration.js";
 
 export const JUDGE_CALIBRATION_VERSION = "judge-calibration-v1" as const;
 
@@ -73,7 +75,7 @@ export const JUDGE_CALIBRATION_METHOD = {
 
 type Row = Record<string, unknown>;
 
-const RETAINED_STEPS = new Set(["worker.assignment", "implement.done", "pr.opened", "review.posted", "risk_judge.decision"]);
+const RETAINED_STEPS = new Set(["worker.assignment", "implement.done", "pr.opened", "review.posted", "risk_judge.decision", VERDICT_OUTCOME_STEP]);
 const RETAINED_FIELDS = [
   "ts", "step", "run_id", "head_sha", "head_assignment", "pr_url", "state", "reviewer_outcome",
   "dep_review", "verdict", "availability", "model",
@@ -85,6 +87,35 @@ const record = (value: unknown): Row | undefined =>
 
 const answerText = (value: unknown): string => (typeof value === "string" ? value : JSON.stringify(value) ?? "null");
 
+/**
+ * W1-T12425: THE ONE TABLE from (role, outcome kind) to a declared option, so a typed answer's
+ * outcome is its head's measured post-merge outcome, never the current judge's answer. It starts
+ * with the risk role only: the review shadow's answer is a vector of per-criterion verdicts with no
+ * single option. A role with no entry keeps a null outcome. Moving the map is a reviewed diff, as
+ * `ATTRIBUTION_POLICY` (lib/verdict-calibration.ts) is.
+ */
+export const TYPED_ANSWER_OUTCOME_MAP: Readonly<Record<string, Readonly<Record<VerdictOutcomeKind, string>>>> = {
+  risk: { reverted: "high", followup_fixed: "high", clean: "low" },
+};
+
+/** A judged head in a decision key: 7 to 64 hex characters. */
+export const HEAD_SHA_RE = /^[0-9a-f]{7,64}$/i;
+
+/**
+ * The judged head in a shadow decision key: the risk surface's key is `<task id>:<head>`
+ * (cli/commands/run-task-verb.ts) and the review surface's is `<pull request>:<head>:<digest>`
+ * (cli/commands/review.ts). Any other role, or a key in neither shape, has no head.
+ */
+export function headOfDecisionKey(role: string, key: string | undefined): string | null {
+  const parts = key?.split(":") ?? [];
+  const head = role === "risk" && parts.length === 2 ? parts[1] : role === "review" && parts.length >= 3 ? parts[parts.length - 2] : undefined;
+  return head !== undefined && HEAD_SHA_RE.test(head) ? head : null;
+}
+
+/** A typed-answer ledger row's head: its own `head_sha`, else its decision key's head. */
+const headOfTypedAnswerLine = (line: Row, role: string): string | null =>
+  str(line.head_sha) ?? headOfDecisionKey(role, str(line.decision_key));
+
 /** W1-T12414: a paired shadow row as one generative single answer, beside the current judge's.
  *  W1-T12420: a shadow judge generates text, so its answer is on the text surface. */
 function shadowTypedAnswer(line: Row): TypedAnswerRow | undefined {
@@ -94,6 +125,7 @@ function shadowTypedAnswer(line: Row): TypedAnswerRow | undefined {
   const key = str(line.decision_key);
   return {
     role, question: null, model, source: "generative", modelSurface: "text", questionType: null, options: null,
+    head: headOfTypedAnswerLine(line, role),
     inputDigest: key === undefined ? null : createHash("sha256").update(key).digest("hex").slice(0, 16),
     answer: { kind: "single", option: answerText(line.shadow_decision) },
     incumbent: line.primary_decision === undefined ? null : answerText(line.primary_decision), outcome: null,
@@ -103,18 +135,21 @@ function shadowTypedAnswer(line: Row): TypedAnswerRow | undefined {
 /** A ledger row's typed answers, or the ones {@link judgeCalibrationRow} already read off it. */
 function typedAnswersOf(line: Row): TypedAnswerRow[] {
   if (Array.isArray(line.typed_answers)) return line.typed_answers as TypedAnswerRow[];
-  if (line.step !== "shadow_judge.paired") return decisionAnsweredTypedAnswers(line);
+  // W1-T12421: a direct judge replay's decision request; its answer, with the case's outcome, is in its judge_replay.answered row.
+  if (line.step === "decision.answered" && typeof line.role === "string" && line.role.startsWith(JUDGE_REPLAY_DECISION_ROLE_PREFIX)) return [];
+  if (line.step !== "shadow_judge.paired") return decisionAnsweredTypedAnswers(line).map((row) => ({ ...row, head: headOfTypedAnswerLine(line, row.role) }));
   const shadow = shadowTypedAnswer(line);
   return shadow ? [shadow] : [];
 }
 
 /** The fields this projection reads off one ledger row, or `undefined` for a row it never reads. */
 export function judgeCalibrationRow(line: Row): Row | undefined {
-  if (line.step === "shadow_judge.paired" || line.step === "decision.answered") {
+  if (line.step === "shadow_judge.paired" || line.step === "decision.answered" || line.step === "judge_replay.answered") {
     const typed = typedAnswersOf(line);
     return typed.length > 0 ? { step: line.step, typed_answers: typed } : undefined;
   }
   if (typeof line.step !== "string" || !RETAINED_STEPS.has(line.step)) return undefined;
+  if (line.step === VERDICT_OUTCOME_STEP) return { step: line.step, head_sha: line.head_sha, outcome: line.outcome };
   const out: Row = {};
   for (const field of RETAINED_FIELDS) if (line[field] !== undefined) out[field] = line[field];
   const assignment = record(line.worker_assignment);
@@ -192,14 +227,23 @@ export interface JudgeVerdictFold {
   candidates: JudgeCandidate[];
   excluded: Record<string, number>;
   typedAnswers: TypedAnswerRow[];
+  /** W1-T12425: each head's recorded `verdict_calibration.outcome` kinds. */
+  outcomes: Map<string, VerdictOutcomeKind[]>;
 }
 
 export function emptyJudgeVerdictFold(): JudgeVerdictFold {
-  return { models: new Map(), headAuthors: new Map(), reviewHeadsByRun: new Map(), candidates: [], excluded: {}, typedAnswers: [] };
+  return { models: new Map(), headAuthors: new Map(), reviewHeadsByRun: new Map(), candidates: [], excluded: {}, typedAnswers: [], outcomes: new Map() };
 }
 
 export function foldJudgeVerdictRow(fold: JudgeVerdictFold, row: Row): void {
-  if (row.step === "shadow_judge.paired" || row.step === "decision.answered") {
+  if (row.step === VERDICT_OUTCOME_STEP) {
+    const head = str(row.head_sha);
+    if (head === undefined || !isVerdictOutcomeKind(row.outcome)) return;
+    const kinds = fold.outcomes.get(head) ?? [];
+    if (!kinds.includes(row.outcome)) fold.outcomes.set(head, [...kinds, row.outcome]);
+    return;
+  }
+  if (row.step === "shadow_judge.paired" || row.step === "decision.answered" || row.step === "judge_replay.answered") {
     fold.typedAnswers.push(...typedAnswersOf(row));
     return;
   }
@@ -241,6 +285,7 @@ export function judgeVerdictFoldToJson(fold: JudgeVerdictFold): Row {
     candidates: fold.candidates.map((candidate) => (candidate.kind === "risk" ? { ...candidate, at: atToJson(candidate.at) } : candidate)),
     excluded: { ...fold.excluded },
     typedAnswers: [...fold.typedAnswers],
+    outcomes: [...fold.outcomes],
   };
 }
 
@@ -255,6 +300,7 @@ export function judgeVerdictFoldFromJson(json: Row): JudgeVerdictFold {
       .map((candidate) => (candidate.kind === "risk" ? { ...candidate, at: atFromJson(candidate.at) } : candidate)),
     excluded: { ...(record(json.excluded) as Record<string, number> | undefined) },
     typedAnswers: Array.isArray(json.typedAnswers) ? json.typedAnswers as TypedAnswerRow[] : [],
+    outcomes: new Map(entries<VerdictOutcomeKind[]>(json.outcomes)),
   };
 }
 
@@ -729,6 +775,25 @@ export function deriveJudgeCalibration(rows: ReadonlyArray<Row>, options: JudgeC
   return finishJudgeCalibration(fold, options);
 }
 
+/**
+ * W1-T12425: each typed answer with its head's outcome through {@link TYPED_ANSWER_OUTCOME_MAP}.
+ * The worst recorded kind wins (reverted, then followup_fixed, then clean). An answer with no head,
+ * a head with no outcome row, or a role with no map entry keeps a null outcome.
+ */
+export function typedAnswersWithOutcomes(fold: Pick<JudgeVerdictFold, "typedAnswers" | "outcomes">): TypedAnswerRow[] {
+  return fold.typedAnswers.map((row) => {
+    const map = TYPED_ANSWER_OUTCOME_MAP[row.role];
+    const kinds = row.head ? fold.outcomes.get(row.head) : undefined;
+    const kind = kinds === undefined ? undefined : VERDICT_OUTCOME_KINDS.find((k) => kinds.includes(k));
+    if (map === undefined || kind === undefined) return { ...row, outcome: null };
+    const option = map[kind];
+    // A decision row keys an option by its type and text when two options share their text.
+    const options = row.options ?? [];
+    const declared = !options.includes(option) && options.includes(`string:${option}`) ? `string:${option}` : option;
+    return { ...row, outcome: declared };
+  });
+}
+
 export function finishJudgeCalibration(fold: JudgeVerdictFold, options: JudgeCalibrationOptions): JudgeCalibration {
   const method = methodOf(options);
   const { verdicts, excluded, authorUnattributed } = finishJudgeVerdicts(fold);
@@ -748,7 +813,7 @@ export function finishJudgeCalibration(fold: JudgeVerdictFold, options: JudgeCal
     matched: human.size,
     unmatched: latest.size - human.size,
   };
-  const typedAnswerScores = scoreTypedAnswers(fold.typedAnswers);
+  const typedAnswerScores = scoreTypedAnswers(typedAnswersWithOutcomes(fold));
   if (verdicts.length === 0) {
     return { ...unavailableJudgeCalibration("no-judge-verdicts-observed", options.asOf), method, labels, excluded, authorUnattributed, typedAnswerScores };
   }

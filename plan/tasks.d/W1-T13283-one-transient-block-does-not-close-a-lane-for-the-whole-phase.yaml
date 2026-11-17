@@ -1,0 +1,46 @@
+- id: W1-T13283
+  title: "One blocked_transient run does not close its lane for the rest of the phase: the lane refills from the next candidate, and only a cross-task streak parks it, for a bounded time"
+  repo: remudero
+  priority: 0.4
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # it decides when a free lane is refilled
+  band_meaning: span
+  origin: "operator-session#idle-lanes-2026-11-16"
+  plan_refs:
+    - W1-T10423
+    - W1-T13284
+    - W1-T13242
+  files:
+    - src/lib/daemon.ts
+    - test/daemon/one-transient-block-does-not-close-a-lane-for-the-whole-phase.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "When a lane's run ends blocked_transient and the API-window guard has not tripped, the lane's next refill decision builds a candidate pool without that task and starts the next eligible task in the same phase"
+      proof: "grep: W1-T13283 criterion 1 in test/daemon/one-transient-block-does-not-close-a-lane-for-the-whole-phase.test.ts"
+    - claim: "A refill whose open-PR board read fails parks the lane and asks again on the next lane event or tick instead of ending the lane for the phase, with a row that names the read"
+      proof: "grep: W1-T13283 criterion 2 in test/daemon/one-transient-block-does-not-close-a-lane-for-the-whole-phase.test.ts"
+    - claim: "invariant:a-real-api-window-still-holds — blocked_transient runs on two or more different tasks still close refill under the existing reasonAboutApiWindow guard and its bound, exactly as on origin/main"
+      proof: "grep: W1-T13283 criterion 3 in test/daemon/one-transient-block-does-not-close-a-lane-for-the-whole-phase.test.ts"
+  rationale: |
+    MEASURED 2026-11-16/17 by the operator session on the core ledger (read-only), with the code read on origin/main 1ad4e5a561 by a read-only investigation.
+
+    - `lane.idle_summary` at 23:49:42Z (window 3.07 h, capacity 3): 150.74 slot-minutes `selection_empty`, 28.22 restart. That window had dozens of queued tasks.
+    - The cause is one lane. At 21:18:52Z W1-T13224's run ended `verdict blocked_transient` (subtype error_codex; three fix rounds on codex each ended `api_error:true`). At 21:18:58Z `dispatch.lane_refill_held {"lane":1,"finished_task":"W1-T13224","reason":"blocked_transient"}`, then `lane.idle_changed {"cause":"selection_empty","idle_slots":1,"capacity":3,"dispatchable":3}`. No further refill decision until the daemon exited at 23:49:42Z: no `dispatch.passed_over`, `serialized` or claim rows, and 21:18:58 to 23:49:42 is 150.7 minutes, one slot. The siblings kept the phase alive (W1-T12114 until 23:49:16Z; W1-T10756 past 00:20Z), and the restart that would have reset it was held by `min_lifetime` (five `daemon.freshness_coalesced` rows 23:11Z to 23:44Z).
+    - READ src/lib/daemon.ts: `let refillClosed` is phase-wide; `else if (outcome.value.verdict === "blocked_transient") refillClosed ??= "blocked_transient";` latches it on ONE task; after that every `decideRefill` returns `conclude()` with that reason and never calls `decide()`. Its comment says "only a genuine, repeated `blocked_transient`", but one run is enough. The designed guard `reasonAboutApiWindow` needs two different tasks and is bounded at 30 minutes.
+    - The same terminal effect follows "a lane rejected" and "refill read failed: open PR board count is unreadable": about 171 and 144 slot-minutes of selection_empty spans on 11-15 and 11-16.
+    - Live risk: the next daemon re-picked W1-T13224 at 00:20:21Z.
+  design: |
+    1. A single blocked_transient no longer sets `refillClosed`. The finished task is already excluded for the phase (`passIds`); the refill decides from the rest of the pool. Only `reasonAboutApiWindow`'s cross-task streak closes refill, with its bound.
+    2. A failed board read during refill parks the lane (a named hold row) and is asked again on the next lane event or tick, not latched for the phase.
+    3. "a lane rejected": read what produces it; if it is a per-task outcome, treat it like (1); if it is phase-wide by design, say why in the PR body and leave it.
+    INVARIANT a-real-api-window-still-holds: the cross-task guard and its bound behave as on origin/main.
+    NOT IN SCOPE: the idle label (W1-T10423, raised in this filing); why W1-T13224's no-progress loop is recorded as transient (W1-T13284); selection speed (W1-T13286).
+  falsifier: |
+    Latch refill on one blocked_transient again and criterion 1 must fail. End the lane on a failed board read and criterion 2 must fail. Let two tasks' blocked_transient through without closing, or drop the bound, and criterion 3 must fail. Restore and all pass.
+  note: |
+    reservation hand-off: run-unfiled-1794875392692 -> run-unfiled-1794875392692
+    Reserved with rmd next-task-id from a worktree at origin/main. The test folder is the one rmd test-place computed for a stub importing daemon.ts. Drive the lane pool through its injected seams; do not add a test importer of src/run-task.ts.

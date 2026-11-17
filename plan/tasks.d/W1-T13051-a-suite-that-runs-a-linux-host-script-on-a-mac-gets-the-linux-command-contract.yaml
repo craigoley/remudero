@@ -18,7 +18,7 @@
     - test/setup/tmp-hygiene.ts
     - test/deploy/the-nightly-state-backup-keeps-a-copy-of-the-container-config.test.ts
     - test/infra/a-suite-that-runs-a-linux-host-script-on-a-mac-gets-the-linux-command-contract.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "On macOS every test process has a directory first on PATH whose chmod accepts the end-of-options marker, so a child that runs chmod with a mode, the marker and a path succeeds; the directory is created once per test process by the setup every runner already imports"

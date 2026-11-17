@@ -1,0 +1,41 @@
+- id: W1-T13257
+  title: "A post-review attempt that threw once is retried within minutes, before the 30-minute stage-stall backstop fires, instead of waiting out the 60-minute pending ceiling"
+  repo: remudero
+  priority: 1.1
+  depends_on: []
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # one backoff function in the sweep plus the two suites that pin its old timing; the strike cap and its escalation are unchanged
+  band_meaning: blast-radius
+  origin: "operator-session#console-inbox-defects-2026-11-16"
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/a-review-that-threw-is-retried-before-the-stall-backstop-fires.test.ts
+    - test/post-review-throw-backoff.test.ts
+    - test/ledger/check-test-test-post-review-throw-backoff-test-ts.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "After the first retryable post-review throw on an unchanged review input, the sweep admits that review again once 5 minutes have passed, not only after the pending ceiling"
+      proof: "grep: W1-T13257 criterion 1 in test/sweep/a-review-that-threw-is-retried-before-the-stall-backstop-fires.test.ts"
+    - claim: "Each further throw on the same review input doubles the wait (5, 10, 20 minutes and so on), and the wait never exceeds policy.pendingCeilingMinutes"
+      proof: "grep: W1-T13257 criterion 2 in test/sweep/a-review-that-threw-is-retried-before-the-stall-backstop-fires.test.ts"
+    - claim: "invariant:throw-strike-cap-still-escalates — more throws than policy.strikeCap on one review input still escalate exactly as today, and a new head or input digest starts with no backoff"
+      proof: "grep: W1-T13257 criterion 3 in test/sweep/a-review-that-threw-is-retried-before-the-stall-backstop-fires.test.ts"
+  rationale: |
+    OBSERVED 2026-11-16 in the console fleet ledger on the Azure host (/mnt/rmd/remudero-console-state/state/ledger.ndjson), remudero-console PR 2591 at head ed0387b:
+    - 20:14:07.794Z sweep.action_failed then review.post_refused: "post-review attempt threw — standing down rather than retrying this head unbounded: worktree-git: refusing a host git call into /home/node/Remudero/worktrees/healed-ecedf738aa64-a89443307c28: the worktree has no .git entry (recorded gitdir <none>, .git entry <absent>) — nothing was run (W1-T6106)".
+    - 20:49:04.275Z pr.stuck (blocker awaiting-review, BACKSTOP 30, "checks green, review never posted" x24), an incident.event, and 20:49:37Z parked_pr.remedy cause stage-stall remedy fix-on-pr outcome taken.
+    - No review ran on that head afterwards; the PR sat green and unreviewed for 55 minutes until a new commit was pushed at 21:09Z. The throw was a one-off: it is the only "has no .git entry" row in the ledger window back to 2026-09-20.
+    READ at origin/main (src/lib/sweep.ts): retryableReviewThrowBackoffReason suppresses re-admission until the latest dated throw is policy.pendingCeilingMinutes old (default 60). The stage-stall backstop for awaiting-review is 30 minutes, so for a single transient throw the backstop always fires first, and its fix-on-pr remedy does not re-run the review lane. A one-off host fault therefore costs every affected PR at least an hour and an incident.
+  design: |
+    In retryableReviewThrowBackoffReason, size the wait from the number of dated throws already recorded for the review key (prior.reviewRetryableThrowCounts): wait = min(5 * 2^(throws - 1), policy.pendingCeilingMinutes) minutes. Thread the count from the existing callers; they already hold PriorActions or the fresh outcome view.
+    The reason text keeps saying it is a retryable transport/process outcome, and names the wait it applied.
+    INVARIANT throw-strike-cap-still-escalates: postReviewFailureHistoryDisposition still escalates once throws exceed policy.strikeCap on one review input; an undated throw still admits once; a new head or input digest has no recorded throws and no wait.
+    NOT IN SCOPE: what the stage-stall backstop's remedy does for awaiting-review; why the healed worktree lost its .git entry; the 60-minute ceiling itself.
+  falsifier: |
+    Restore the flat pending-ceiling wait and criteria 1 and 2 must fail (a 6-minute-old first throw is still suppressed). Drop the strike-cap check and criterion 3 must fail. Restore and all pass.
+  note: |
+    Reserved with rmd next-task-id from the operator checkout (refs/rmd-id/W1-T13257). rmd test-place computed test/sweep/ for the new suite. test/post-review-throw-backoff.test.ts and its check:test wrapper pin the old 60-minute timing (a throw 30m ago stands down) and move to the new waits. Unblocking evidence: the same PR was re-admitted after a new head at 21:09Z.

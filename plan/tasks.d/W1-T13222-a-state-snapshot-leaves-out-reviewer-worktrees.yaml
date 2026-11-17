@@ -15,7 +15,7 @@
   files:
     - src/lib/ledger.ts
     - test/ledger/a-state-snapshot-leaves-out-reviewer-worktrees.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "snapshotState on a state dir holding engines/worktrees/reviewer-x/ (files and a node_modules link) publishes an archive whose entries hold nothing under engines/worktrees/, and still holds ledger.ndjson, inbox-proposals.json and an engines/<64-hex>/ tree"

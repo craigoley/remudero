@@ -1,0 +1,42 @@
+- id: W1-T13254
+  title: "Escalation answers fold a refusal history of any size, so the operator's replies are applied again (every pass has failed with a stack overflow since at least 2026-11-10)"
+  repo: remudero
+  priority: 0.05
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # one line on the answers path; the pass has applied no answer for six days
+  band_meaning: span
+  origin: "operator-session#escalation-answers-overflow-2026-11-16"
+  plan_refs:
+    - W1-T11262
+    - W1-T11405
+    - W1-T13223
+  files:
+    - src/lib/escalation-answers.ts
+    - test/inbox/escalation-answers-fold-a-refusal-history-of-any-size.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "readEscalationAnswers resolves when the refusal history reader returns a readable history far larger than a spread call can take (hundreds of thousands of rows), and applies an owner's answer in that pass"
+      proof: "grep: W1-T13254 criterion 1 in test/inbox/escalation-answers-fold-a-refusal-history-of-any-size.test.ts"
+    - claim: "invariant:the-fold-reads-what-it-read-before — the fold sees the same rows in the same order as on origin/main, never reorders the reader's cached array, and an unreadable history still skips the fold and writes its alarm row as today"
+      proof: "grep: W1-T13254 criterion 2 in test/inbox/escalation-answers-fold-a-refusal-history-of-any-size.test.ts"
+  rationale: |
+    MEASURED 2026-11-16 by the operator session on the core ledger (read-only), with the code read on origin/main by a read-only investigation.
+
+    - `escalation_answers.error` rows, per day: 11-10 54 ("Maximum call stack size exceeded"), 11-11 91, 11-12 70, 11-13 72, 11-14 44, 11-15 31, 11-16 44; since W1-T11405 named the stage (11-12) they read "escalation answers failed at stage refusal_history_fold: Maximum call stack size exceeded". The passes that did not fail were `escalation_answers.unreadable` (42, 4, 6, 14, 82, 1 per day). In the same days `panel.question_answered` was written once. So for at least six days the answers pass has applied no operator answer: every pass aborts or reads nothing.
+    - READ src/lib/escalation-answers.ts (`readEscalationAnswers`): `stage = "refusal_history_fold"; if (historyReadable) history.push(...read.rows);`. A spread call passes every row as an argument, and V8 throws RangeError "Maximum call stack size exceeded" once the count passes its argument limit. `read.rows` is the whole-ledger slice of `escalation_answer.ignored`, `escalation_answer.refusal_alarm` and `panel.question_answered` (`ESCALATION_ANSWER_HISTORY_SLICE`, no time window), which grows on every pass because non-bot refusals are written again each pass.
+    - The spread came with W1-T11262 (#16645, 2026-11-04, "escalation answers read their refusal history through a cached slice"); before it rows were pushed one at a time. W1-T11405 (merged) named the stage and left the line, naming it an unverified candidate.
+    - One `try` wraps the whole pass and the sweep logs the rethrow and moves on (src/cli/commands/sweep.ts), so the failure repeats on every full pass with no backoff and no alarm (W1-T13255).
+  design: |
+    1. Copy the rows without a spread call (a loop, or `read.rows.slice()`). Keep it a copy: `raiseRefusalAlarms` sorts the history in place and must not reorder the reader's cached array.
+    2. The suite stubs `deps.history` with a readable history of several hundred thousand rows plus one owner answer, and proves the pass resolves and lands the answer; and that a small history folds to the same rows in the same order.
+    INVARIANT the-fold-reads-what-it-read-before: same rows, same order, the cached array untouched, the unreadable path unchanged.
+    NOT IN SCOPE: why non-bot refusals are rewritten on every pass (the history's growth; report the row count you can measure); answer authority (W1-T13223, queued, touches the same file: rebase onto whichever lands first); the alarm (W1-T13255).
+  falsifier: |
+    Restore the spread and criterion 1 must fail with the RangeError. Fold into the reader's own array, or reorder it, and criterion 2 must fail. Restore and both pass.
+  note: |
+    reservation hand-off: run-unfiled-1794863362836 -> run-unfiled-1794863362836
+    Reserved with rmd next-task-id from a worktree at origin/main. Priority 0.05 because the operator's replies on escalation issues and in the console have not been applied for six days. The test folder is the one rmd test-place computed for a stub importing escalation-answers.ts.

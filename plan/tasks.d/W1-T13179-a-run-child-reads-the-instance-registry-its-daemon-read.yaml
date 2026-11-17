@@ -18,7 +18,7 @@
     - src/lib/run-child.ts
     - src/lib/installation-budget-start.ts
     - test/github/a-run-child-reads-the-instance-registry-its-daemon-read.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A run child launched by the daemon reads the same instance registry file the daemon read at its start, and with GH_APP_INSTALLATION_ID set writes one github.budget.configured row with role run_child, outcome configured and the daemon's source path, where today it writes outcome unconfigured, reason registry_unreadable, ENOENT for <config root>/.remudero/daemon-instances.yaml"

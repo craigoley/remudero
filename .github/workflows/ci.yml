@@ -116,6 +116,13 @@ jobs:
         run: |
           echo "RMD_CI_DEPENDENCY_EVIDENCE=$RUNNER_TEMP/ci-dependency-evidence/evidence.json" >> "$GITHUB_ENV"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        # W1-T13321: a stalled fetch aborts and actions/checkout retries it (3 attempts, 10-20 s apart).
+        # 13 of 37,468 shard checkouts in 2026-11-10..17 sat in one silent fetch for 323-1245 s while
+        # sibling shards fetched in 23-26 s; a healthy fetch ends in about 20 s, so 120 s under 1 KB/s
+        # is never a healthy fetch. execGit passes process.env to git (checkout v7.0.1).
+        env:
+          GIT_HTTP_LOW_SPEED_LIMIT: "1000"
+          GIT_HTTP_LOW_SPEED_TIME: "120"
         with:
           # `origin/main` must RESOLVE on the runner: test/recon-gaps-relayed.test.ts shells
           # `git show origin/main:src/run-task.ts` against the live checkout, and a shallow fetch
@@ -1684,13 +1691,13 @@ jobs:
     # step below is a separate, diff-scoped check on the SAME job — sharing this job's
     # always-registers shape rather than adding a required context that could go absent — and
     # fails when the diff adds a source line lcov marks instrumented but never hit.
-    name: coverage-shard (${{ matrix.shard }}/8)
+    name: coverage-shard (${{ matrix.shard }}/12)
     runs-on: ubuntu-latest
     needs: [coverage-ledger]
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     # W1-T1033: deliberately no `if:` here, at job or step level — test/diff-coverage.test.ts asserts
     # this job body carries none at all (the #729 discipline), so the job still registers on the push
     # trigger. Its collection step opens with a plain shell guard instead, and the staging step
@@ -1708,6 +1715,13 @@ jobs:
     timeout-minutes: 49
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        # W1-T13321: a stalled fetch aborts and actions/checkout retries it (3 attempts, 10-20 s apart).
+        # 13 of 37,468 shard checkouts in 2026-11-10..17 sat in one silent fetch for 323-1245 s while
+        # sibling shards fetched in 23-26 s; a healthy fetch ends in about 20 s, so 120 s under 1 KB/s
+        # is never a healthy fetch. execGit passes process.env to git (checkout v7.0.1).
+        env:
+          GIT_HTTP_LOW_SPEED_LIMIT: "1000"
+          GIT_HTTP_LOW_SPEED_TIME: "120"
         with:
           fetch-depth: 0
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -1942,7 +1956,7 @@ jobs:
               console.log("W1-T5705: live coverage selection -> " + (narrow.length === 0 ? "FULL: " + (sel.reasons[0] ?? "no narrow set") : narrow.length + " narrow suite(s)"));
             ' changed-files.txt "${RUNNER_TEMP}/affected.diff" coverage-narrow-suites.txt || echo "full" > coverage-narrow-suites.txt
             if [ "$(head -n 1 coverage-narrow-suites.txt 2>/dev/null || true)" != "full" ] \
-              && node scripts/test-tier-manifest.mjs --select-candidates coverage-narrow-suites.txt --shard ${{ matrix.shard }}/8 --base HEAD^1 \
+              && node scripts/test-tier-manifest.mjs --select-candidates coverage-narrow-suites.txt --shard ${{ matrix.shard }}/12 --base HEAD^1 \
                 > coverage-test-files.txt 2> coverage-shard-selection.log && grep -q . coverage-test-files.txt; then
               SELECTION="narrow"
             else
@@ -1955,7 +1969,7 @@ jobs:
           # run is recorded but is never evidence about the selector's misses.
           echo "COVERAGE-SELECTION: ${SELECTION}"
           # W1-T5923: weigh the split on this lane's own instrumented durations.
-          if [ "$SELECTION" = "all" ] && ! node scripts/test-tier-manifest.mjs --select-all --shard ${{ matrix.shard }}/8 --base HEAD^1 \
+          if [ "$SELECTION" = "all" ] && ! node scripts/test-tier-manifest.mjs --select-all --shard ${{ matrix.shard }}/12 --base HEAD^1 \
             --instrumented-manifest scripts/test-tier-coverage-manifest.json --snapshot coverage/ledger-snapshot.manifest \
             --workers 3 --selection-output coverage/selected-files.json --resolved-ledger coverage/ledger-choice.json \
             > coverage-test-files.txt 2> coverage-shard-selection.log; then
@@ -1974,7 +1988,11 @@ jobs:
           # W1-T4398: one bounded retry of the FAILED FILES, uninstrumented — never the whole suite,
           # which is what ruling 1 above removed. Pass one alone gets NODE_V8_COVERAGE and writes the
           # lcov, so the coverage figures are pass one's; a pass on retry is reported as a flake.
-          node scripts/test-with-retry.mjs --coverage-first-pass coverage/raw \
+          # W1-T12415: a hung test fails by its name inside the job ceiling, not at a silent cancel. The
+          # wrapper adds a per-test timeout from the fast tier's duration policy over these files'
+          # instrumented durations (capped; scripts/test-tier-manifest.mjs coverageShardHangBoundArgs),
+          # and --test-force-exit, which ends a file whose tests all have results but whose handles stay open.
+          RMD_COVERAGE_HANG_MANIFEST=scripts/test-tier-coverage-manifest.json node scripts/test-with-retry.mjs --coverage-first-pass coverage/raw \
             node --enable-source-maps --experimental-test-coverage --test-coverage-exclude="test/**" \
             --test-reporter=spec --test-reporter-destination=stdout \
             --test-reporter=tap --test-reporter-destination=stderr \
@@ -2207,9 +2225,23 @@ jobs:
               fi
               echo "::error::coverage-ratchet: SHARD HANG — the matrix was cancelled while the PR head"
               echo "  (${RUN_HEAD_SHA}) was unchanged, so nothing superseded it: a shard was killed at its"
-              echo "  timeout-minutes ceiling. THE COVERAGE TESTS DID NOT RUN — this is NOT a failure of this"
-              echo "  diff, and re-running the same sha will hang again: a cancellation is not by itself"
-              echo "  evidence of a test failure."
+              echo "  timeout-minutes ceiling."
+              # W1-T13269: name the step the ceiling hit. #18947's shard passed its tests and
+              # #18949's lost 20m36s in checkout; "the tests did not run" was wrong for both.
+              PHASE_JOBS="$(mktemp)"
+              gh api "repos/${GH_REPO_SLUG}/actions/runs/${GITHUB_RUN_ID:-0}/attempts/${GITHUB_RUN_ATTEMPT:-1}/jobs?per_page=100" \
+                --paginate --jq '.jobs[]' > "$PHASE_JOBS" 2>/dev/null || : > "$PHASE_JOBS"
+              PHASE_OUT="$(node "${GITHUB_WORKSPACE:-.}/scripts/shard-cancel-phase.mjs" --jobs "$PHASE_JOBS" --job-prefix "coverage-shard (" \
+                --test-step "Test with coverage" 2>/dev/null || true)"
+              rm -f "$PHASE_JOBS"
+              if printf '%s\n' "$PHASE_OUT" | grep -qE '^SHARD-CANCEL-PHASE: .+: (setup|tests|after-tests)$'; then
+                printf '%s\n' "$PHASE_OUT"
+                echo "  This is NOT a failure of this diff: a cancellation is not by itself evidence of a test failure."
+              else
+                echo "  THE COVERAGE TESTS DID NOT RUN to a verdict — this is NOT a failure of this diff, and"
+                echo "  re-running the same sha may hang again: a cancellation is not by itself evidence of a"
+                echo "  test failure. The step each shard was killed in could not be read."
+              fi
               print_unfinished_test_from_logs
               exit 1
               ;;
@@ -2218,6 +2250,10 @@ jobs:
                 not_applicable_line
                 echo "not_applicable=true" >> "${GITHUB_OUTPUT:-/dev/null}"
                 exit 0
+              fi
+              if [ "${LEDGER_RESULT:-}" = "cancelled" ]; then
+                echo "::error::coverage-ratchet: coverage-ledger-cancelled — the coverage ledger job was cancelled at its ceiling at ${RUN_HEAD_SHA:-unknown}; the matrix never ran (W1-T11164)"
+                exit 1
               fi
               echo "coverage-ratchet: the shard matrix never ran (matrix result: skipped) — nothing was measured, so nothing is certified. Open the workflow run to see which upstream job gated it."
               exit 1
@@ -2255,7 +2291,7 @@ jobs:
             exit 0
           fi
           EXPECTED=""
-          for SHARD in 1 2 3 4 5 6 7 8; do
+          for SHARD in 1 2 3 4 5 6 7 8 9 10 11 12; do
             CLASS_FILE="coverage-shards/coverage-shard-${SHARD}/class"
             if [ ! -s "$CLASS_FILE" ]; then
               echo "coverage-ratchet: expected coverage-shard-${SHARD} artifact metadata; refusing a missing or partial artifact."
@@ -2279,13 +2315,13 @@ jobs:
             fi
           done
           SELECTIONS=()
-          for SHARD in 1 2 3 4 5 6 7 8; do
+          for SHARD in 1 2 3 4 5 6 7 8 9 10 11 12; do
             if [ -s "coverage-shards/coverage-shard-${SHARD}/selected-files.json" ]; then SELECTIONS+=("coverage-shards/coverage-shard-${SHARD}/selected-files.json"); fi
           done
-          if [ "${#SELECTIONS[@]}" -eq 8 ]; then
+          if [ "${#SELECTIONS[@]}" -eq 12 ]; then
             node scripts/test-tier-manifest.mjs --check-partition "${SELECTIONS[@]}" --resolved-digest '${{ needs.coverage-ledger.outputs.digest }}'
           else
-            echo "W1-T4071: ${#SELECTIONS[@]} of 8 shards recorded a full split; no partition (every file once, one ledger) to check."
+            echo "W1-T4071: ${#SELECTIONS[@]} of 12 shards recorded a full split; no partition (every file once, one ledger) to check."
           fi
           EVENT="${EXPECTED%%:*}"
           CLASS="${EXPECTED#*:}"
@@ -2300,7 +2336,7 @@ jobs:
             echo "W1-T2428 fast-lane: class=${CLASS} — no coverage shards were collected."
             exit 0
           fi
-          for SHARD in 1 2 3 4 5 6 7 8; do
+          for SHARD in 1 2 3 4 5 6 7 8 9 10 11 12; do
             RAW_DIR="coverage-shards/coverage-shard-${SHARD}/raw"
             if [ ! -s "coverage-shards/coverage-shard-${SHARD}/lcov.info" ]; then
               echo "coverage-ratchet: shard ${SHARD} is missing its independently generated lcov line evidence."
@@ -2313,7 +2349,7 @@ jobs:
           done
           mkdir -p coverage
           node --expose-internals scripts/coverage-merge-ratchet.mjs --output coverage/lcov.info \
-            --shard-count 8 \
+            --shard-count 12 \
             --line-lcov coverage-shards/coverage-shard-1/lcov.info \
             --line-lcov coverage-shards/coverage-shard-2/lcov.info \
             --line-lcov coverage-shards/coverage-shard-3/lcov.info \
@@ -2322,10 +2358,16 @@ jobs:
             --line-lcov coverage-shards/coverage-shard-6/lcov.info \
             --line-lcov coverage-shards/coverage-shard-7/lcov.info \
             --line-lcov coverage-shards/coverage-shard-8/lcov.info \
+            --line-lcov coverage-shards/coverage-shard-9/lcov.info \
+            --line-lcov coverage-shards/coverage-shard-10/lcov.info \
+            --line-lcov coverage-shards/coverage-shard-11/lcov.info \
+            --line-lcov coverage-shards/coverage-shard-12/lcov.info \
             coverage-shards/coverage-shard-1/raw coverage-shards/coverage-shard-2/raw \
             coverage-shards/coverage-shard-3/raw coverage-shards/coverage-shard-4/raw \
             coverage-shards/coverage-shard-5/raw coverage-shards/coverage-shard-6/raw \
-            coverage-shards/coverage-shard-7/raw coverage-shards/coverage-shard-8/raw
+            coverage-shards/coverage-shard-7/raw coverage-shards/coverage-shard-8/raw \
+            coverage-shards/coverage-shard-9/raw coverage-shards/coverage-shard-10/raw \
+            coverage-shards/coverage-shard-11/raw coverage-shards/coverage-shard-12/raw
       # INVARIANT (2026-08-13): Diff coverage runs BEFORE the aggregate ratchet. No step in this job
       # carries an `if:`, so a failing step skips every step after it — measured, in five of six
       # recent failing runs the ratchet concluded `failure` and `Diff coverage` was `skipped`, so the

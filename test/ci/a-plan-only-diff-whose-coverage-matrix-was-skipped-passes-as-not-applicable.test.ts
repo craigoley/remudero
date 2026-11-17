@@ -174,16 +174,19 @@ test("W1-T11161 criterion 1: the artifact consumer restores the full checkout on
 
 test("W1-T11161 criterion 2: any other skipped matrix still fails with the never-ran message", () => {
   const gate = step("coverage-gate").run!;
+  // W1-T13175: these cases skip the matrix behind a coverage ledger that FAILED, the one result of the real ledger job
+  // other than a cancellation that skips the matrix. A cancelled ledger now prints its own named line, asserted in
+  // test/ci/a-cancelled-coverage-ledger-names-itself-in-the-coverage-gate.test.ts.
   const cases: Array<[string, Record<string, string>]> = [
-    ["a SOURCE diff", { ...PLAN_PR, COVERAGE_CLASS: "SOURCE" }],
-    ["a DOCS_ONLY diff", { ...PLAN_PR, COVERAGE_CLASS: "DOCS_ONLY" }],
-    ["a TEST_ONLY diff", { ...PLAN_PR, COVERAGE_CLASS: "TEST_ONLY" }],
-    ["an unread classification", { ...PLAN_PR, COVERAGE_CLASS: "" }],
-    ["no changed file read", { ...PLAN_PR, COVERAGE_CLASS_COUNT: "0" }],
-    ["an unread count", { ...PLAN_PR, COVERAGE_CLASS_COUNT: "" }],
-    ["a push", { ...PLAN_PR, CLASS_EVENT: "push" }],
-    ["a merge group", { ...PLAN_PR, CLASS_EVENT: "merge_group" }],
-    ["a workflow dispatch", { ...PLAN_PR, CLASS_EVENT: "workflow_dispatch" }],
+    ["a SOURCE diff", { ...PLAN_PR, LEDGER_RESULT: "failure", COVERAGE_CLASS: "SOURCE" }],
+    ["a DOCS_ONLY diff", { ...PLAN_PR, LEDGER_RESULT: "failure", COVERAGE_CLASS: "DOCS_ONLY" }],
+    ["a TEST_ONLY diff", { ...PLAN_PR, LEDGER_RESULT: "failure", COVERAGE_CLASS: "TEST_ONLY" }],
+    ["an unread classification", { ...PLAN_PR, LEDGER_RESULT: "failure", COVERAGE_CLASS: "" }],
+    ["no changed file read", { ...PLAN_PR, LEDGER_RESULT: "failure", COVERAGE_CLASS_COUNT: "0" }],
+    ["an unread count", { ...PLAN_PR, LEDGER_RESULT: "failure", COVERAGE_CLASS_COUNT: "" }],
+    ["a push", { ...PLAN_PR, LEDGER_RESULT: "failure", CLASS_EVENT: "push" }],
+    ["a merge group", { ...PLAN_PR, LEDGER_RESULT: "failure", CLASS_EVENT: "merge_group" }],
+    ["a workflow dispatch", { ...PLAN_PR, LEDGER_RESULT: "failure", CLASS_EVENT: "workflow_dispatch" }],
     ["no evidence at all", {}],
   ];
   for (const [label, env] of cases) {

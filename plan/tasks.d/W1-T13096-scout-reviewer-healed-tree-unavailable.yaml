@@ -1,0 +1,26 @@
+- id: W1-T13096
+  title: "THE SCOUT'S UNCOVERED RECURRING SYMPTOM — reviewer.healed_tree_unavailable landed 585 ledger rows across the trailing window and no task cites it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.09
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "scout:reviewer.healed_tree_unavailable"
+  files:
+    - src/run-task.ts
+    - test/worker/run-task/scout-reviewer-healed-tree-unavailable.test.ts
+  design: "INVARIANT symptom-still-recorded: reviewer.healed_tree_unavailable is still written to the ledger whenever its failure really occurs; the fix ends the cause, not the record of it."
+  acceptance:
+    - claim: "reviewer.healed_tree_unavailable stops recurring: its cause is fixed rather than its rows hidden"
+      proof: "grep: test(\"W1-T13096: reviewer.healed_tree_unavailable no longer recurs\" in test/worker/run-task/scout-reviewer-healed-tree-unavailable.test.ts"
+    - claim: "invariant:symptom-still-recorded — reviewer.healed_tree_unavailable is still written to the ledger when its failure occurs"
+      proof: "grep: test(\"W1-T13096: the symptom is still recorded when its failure occurs\" in test/worker/run-task/scout-reviewer-healed-tree-unavailable.test.ts"
+  note: "Filed by the scout gardener (W1-T5454). The scout measures this step again once the build merges and credits or debits its class by whether the rows stopped. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person."
+  rationale: |
+    The ledger step reviewer.healed_tree_unavailable carries a failure shape and landed rows in both halves of the trailing 7 days: 279 in the older half, 306 in the newer.
+    No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
+    The rows name no file; tracked source literals locate this step in: src/run-task.ts. Start there.

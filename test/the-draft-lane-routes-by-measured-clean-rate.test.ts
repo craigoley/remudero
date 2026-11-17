@@ -3,13 +3,13 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
-import { chooseDraftDeployment, createDraftStatsSession, draftStatsFromRows, readDraftStats, recordDraftRouting } from "../src/lib/draft-routing.js";
+import { chooseDraftDeployment, createDraftStatsSession, draftStatsFromRows, recordDraftRouting } from "../src/lib/draft-routing.js";
 import { seededRandom } from "../src/lib/knowledge-value.js";
 import { loadMounts, mountsPath } from "../src/lib/mounts.js";
 import { inboxDraftExampleFragmentYaml } from "../src/lib/inbox.js";
 import { spawnWorker, type WorkerResult } from "../src/lib/worker.js";
 import { selectOpenWeightModel, spawnOpenWeightWorker } from "../src/lib/worker-provider.js";
-import { buildInboxDraftSpawnArgs } from "../src/run-task.js";
+import { buildInboxDraftSpawnArgs, readInboxDraftStats } from "../src/run-task.js";
 import { withTempDir } from "../src/lib/tmp.js";
 import type { Config } from "../src/lib/config.js";
 import { fixedClock } from "../src/lib/clock.js";
@@ -181,8 +181,8 @@ test("W1-T4067: malformed fences retry and dirty lint is recorded as an unsucces
 test("W1-T4067: a broken archive refuses partial stats instead of treating them as a prior", async () => {
   await withTempDir("draft-broken-stats", async (root) => {
     writeFileSync(join(root, "ledger.2026-10-01T00-00-00-000Z.ndjson.gz"), "not gzip");
-    assert.throws(() => readDraftStats(root, "inbox-draft"), /corpus incomplete/);
-    assert.throws(() => readDraftStats(join(root, "absent"), "inbox-draft"), /ENOENT/);
+    await assert.rejects(readInboxDraftStats(root, "inbox-draft"), /corpus incomplete/);
+    await assert.rejects(readInboxDraftStats(join(root, "absent"), "inbox-draft"), /ENOENT/);
   });
 });
 
@@ -273,7 +273,7 @@ test("W1-T4067: the real stats reader unions live and both rotation forms withou
     writeFileSync(join(root, "ledger.ndjson"), [a, row("luna", "2026-09-23T00:00:00Z"),
       { step: "inbox.draft_synthesized", session_id: "luna", run_id: "r", proposal_id: "P1", routed_model: "luna", cost_usd: 0.01 },
       { step: "inbox.drafted", run_id: "r", proposal_id: "P1", lint_clean: true }].map((r) => JSON.stringify(r)).join("\n") + "\n");
-    const stats = createDraftStatsSession(root, "inbox-draft", () => {}).readStats();
+    const stats = await createDraftStatsSession(root, "inbox-draft", () => {}, readInboxDraftStats).readStats();
     assert.deepEqual(Object.keys(stats).sort(), ["luna", "nano", "oss"]);
     for (const arm of Object.values(stats)) assert.deepEqual(arm, { attempts: 1, clean: 1, contractFailures: 0, costUsd: 0.01 });
   });
@@ -291,7 +291,7 @@ test("draft stats are not refused over a torn ledger row that names another step
       session_id: "s1", draft_cost_usd: 0.01, clean: true, contract_failed: false };
     writeFileSync(join(root, "ledger.2026-09-20T23-59-59-117Z.ndjson.gz"), gzipSync(SPLICED_FOREIGN_ROW + "\n"));
     writeFileSync(join(root, "ledger.ndjson"), JSON.stringify(outcome) + "\n");
-    assert.deepEqual(readDraftStats(root, "inbox-draft"), { oss: { attempts: 1, clean: 1, contractFailures: 0, costUsd: 0.01 } });
+    assert.deepEqual(await readInboxDraftStats(root, "inbox-draft"), { oss: { attempts: 1, clean: 1, contractFailures: 0, costUsd: 0.01 } });
   });
 });
 
@@ -301,7 +301,7 @@ test("draft stats still refuse a torn ledger row that could have been a draft ro
     await withTempDir("rmd-draft-stats-torn-", async (root) => {
       writeFileSync(join(root, "ledger.2026-09-20T23-59-59-117Z.ndjson.gz"), gzipSync(SPLICED_FOREIGN_ROW + "\n" + torn + "\n"));
       writeFileSync(join(root, "ledger.ndjson"), "");
-      assert.throws(() => readDraftStats(root, "inbox-draft"), /corpus incomplete: ; torn=1 of 2/);
+      await assert.rejects(readInboxDraftStats(root, "inbox-draft"), /corpus incomplete: ; torn=1 of 2/);
     });
   }
 });

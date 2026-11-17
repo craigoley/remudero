@@ -1,0 +1,109 @@
+- id: W1-T13327
+  title: "A heartbeat leaves every ref of its clone resolvable: the push goes to the remote's URL, so no tracking ref names an object that the beat's private store took with it"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: low # one push argument and one guarded ref check in a host script; the payload, the branch and the credential do not change
+  origin: "operator-session#heartbeat-tracking-ref-2026-11-17"
+  plan_refs:
+    - W1-T10756
+    - W1-T3627
+  files:
+    - scripts/fleet-heartbeat.sh
+    - test/daemon/a-heartbeat-leaves-every-ref-of-its-clone-resolvable.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "invariant:every-ref-resolves — the real script publishes one beat with real git from an install clone to a local bare remote. After it, every ref that `git for-each-ref` lists in the install clone names an object the clone has, and a `git fetch` of another branch of that remote ends with status 0 in the clone"
+      proof: "grep: W1-T13327 criterion 1 in test/daemon/a-heartbeat-leaves-every-ref-of-its-clone-resolvable.test.ts"
+    - claim: "The same beat reaches the bare remote. The beat's branch there is one commit with no parent, its heartbeat.txt is the payload the beat built, and the push still resolves the credential helper that reads GH_TOKEN for that push only"
+      proof: "grep: W1-T13327 criterion 2 in test/daemon/a-heartbeat-leaves-every-ref-of-its-clone-resolvable.test.ts"
+    - claim: "An install clone whose tracking ref for the beat's branch names an object the clone lacks heals on the next beat. After that one beat every ref of the clone resolves and the fetch of criterion 1 ends with status 0. A tracking ref that resolves is left unchanged"
+      proof: "grep: W1-T13327 criterion 3 in test/daemon/a-heartbeat-leaves-every-ref-of-its-clone-resolvable.test.ts"
+    - claim: "invariant:beat-objects-stay-out-of-the-clone — the rule of W1-T10756 still holds. After two beats the loose object count of the install clone has not moved, neither beat commit exists in the clone's own object store, and no .beat-objects directory is left under the state directory"
+      kind: guard
+      proof: "grep: W1-T13327 criterion 4 in test/daemon/a-heartbeat-leaves-every-ref-of-its-clone-resolvable.test.ts"
+  rationale: |
+    WHY: since W1-T10756 the beat builds its commit in an object store that it deletes after the push. The push
+    goes through the named remote, and git then moves that remote's tracking ref to the beat commit. The
+    commit is gone a moment later, so the install clone holds a ref that names an object it does not have.
+    A `git fetch` of any other branch then fails its connectivity check, in the install checkout and in
+    every worktree that shares it. The hand lane fetches main there before each ship.
+    MEASURED on the Azure fleet host, 2026-11-17:
+    - The operator's finding: fetches in ~/rmd-state2/daemon-install began to fail at about 03:00Z with
+      `fatal: bad object refs/remotes/origin/heartbeat-azure` and `did not send all necessary objects`. Two hand
+      ships failed in their prep step. A repair fetch of the heartbeat branch lasts at most 5 minutes.
+    - The reflog of refs/remotes/origin/heartbeat-azure in that clone has an `update by push` entry about
+      every 300 seconds (the last 14 entries: 1794886809 to 1794890112).
+    - The daemon's own ledger shows no such failure. This task claims no effect on the daemon.
+    - Reproduced with git 2.43.0 in a scratch clone of a local bare remote. A commit built under
+      GIT_OBJECT_DIRECTORY and pushed with `git push --force origin <commit>:refs/heads/heartbeat-x`, with
+      the store removed after: `git fetch origin main` ends with status 1 and the two messages above. The same
+      push to the URL from `git remote get-url --push origin` moves no tracking ref. A tracking ref that
+      was already dangling stays dangling after the URL push, and `git fetch origin main` still fails. After
+      `git update-ref -d` of that ref the fetch ends with status 0. A fetch that includes the heartbeat
+      branch also repairs the ref, because it downloads the commit.
+    READ at origin/main 047a84f865:
+    - scripts/fleet-heartbeat.sh:1803-1818: `publish_beat` makes `BEAT_OBJECTS` with
+      `mktemp -d "${OBJ_PARENT}/.beat-objects.XXXXXX"` under `${RMD_ROOT}/state`, removes it in an EXIT trap,
+      and exports it as GIT_OBJECT_DIRECTORY.
+    - scripts/fleet-heartbeat.sh:1847: `git -C "$INSTALL_DIR" push --force "$REMOTE" "${commit}:refs/heads/${BRANCH}"`.
+      `REMOTE` is `${RMD_HEARTBEAT_REMOTE:-origin}` (:155), a remote name, so git updates
+      refs/remotes/origin/<branch>.
+    - scripts/fleet-heartbeat.sh:1833-1846: the credential helper for that one push, given through
+      GIT_CONFIG_COUNT, GIT_CONFIG_KEY_n and GIT_CONFIG_VALUE_n.
+    - The change came with W1-T10756 (commit b99fde5c46, PR #18985, merged 2026-11-17T02:31Z).
+    - test/daemon/a-heartbeat-running-stale-code-says-so.test.ts:112-160: the W1-T10756 test runs the real
+      script with real git against a bare remote. It checks the loose object count and that no beat commit is
+      in the clone. It reads no ref of the clone and runs no fetch, so it did not see this defect.
+    - src/lib/host-resource-gardener.ts:1326 and :1340: the gardener fetches `heartbeat-*` itself and then reads
+      refs/remotes/origin/heartbeat-*. It does not need the push to move the tracking ref.
+    - The Mac: no file under deploy/mac starts the heartbeat. deploy/mac/install-heartbeat.sh does not
+      exist (W1-T12259 is blocked and retired). The script is one file for both systems, so a Mac job that
+      runs it takes the same `publish_beat` path and gets the same fix.
+    NOT COVERED: swept origin/main plan/tasks.d and the 12 open pull requests for the heartbeat tracking ref.
+    W1-T12119 repairs missing objects from the daemon side and does not change the beat. No other filing.
+  design: |
+    INVARIANT every-ref-resolves: after a beat ends, every ref of the install clone names an object in the clone's own object store.
+    INVARIANT beat-objects-stay-out-of-the-clone: the blob, tree and commit of a beat never enter the object store of the checkout (W1-T10756).
+    1. Push to the URL. Before the push, read `git -C "$INSTALL_DIR" remote get-url --push "$REMOTE"`. If it
+       prints a URL, push to that URL. If it prints nothing or fails (`REMOTE` is already a URL or a path, or
+       the git stub of the harness answers nothing), push to `$REMOTE` as now. A push to a URL moves no
+       tracking ref. Keep the private store, the EXIT trap, `--force`, the refspec and the credential helper
+       as they are. The helper is matched by URL, so it works the same.
+    2. Heal an old dangling ref. On each beat, when `REMOTE` is a remote name, look at
+       refs/remotes/<remote>/<branch> with GIT_OBJECT_DIRECTORY unset for that call, so the question is
+       answered by the clone's own store and not by the beat's private store. If the ref exists and
+       `git cat-file -e` says its object is missing, delete the ref with `git update-ref -d`. The ref names
+       nothing the clone has, so nothing is lost, and the gardener's next fetch writes it again. If the object
+       is present, do nothing. A failure of this step prints one line and does not fail a beat.
+    3. Criterion 3 says the next beat, because that is what the code can guarantee. A fetch cannot be
+       relied on: a fetch of main alone fails on the dangling ref (measured above), and only a fetch that
+       includes the heartbeat branch repairs it.
+    4. The new test uses real git and a bare remote, in the shape of the fixture at
+       test/daemon/a-heartbeat-running-stale-code-says-so.test.ts:36-76. Do not import that test file (an
+       import runs its suite again). Keep the fixture in the new test file. test/helpers/fleet-heartbeat-harness.ts
+       gives `REAL_SCRIPT`; its `runBeat` replaces git with a stub and cannot show this defect.
+       For criterion 3, make the dangling ref with `git update-ref` to the id of an object that only a
+       removed object directory held.
+    5. Keep new comments in the script short: scripts/comment-load-baseline.json:47 holds its comment count at 750.
+    WHY NOT the alternatives:
+    - Write the beat's objects into the clone: this is the state before W1-T10756. The install would gain three
+      loose objects every 5 minutes, which that task removed.
+    - Keep the named-remote push and delete the tracking ref after it: between the push and the delete the
+      ref dangles, and a fetch in that window fails. A beat killed in the window leaves the ref dangling.
+  falsifier: |
+    Restore the named-remote push at scripts/fleet-heartbeat.sh:1847 (`push --force "$REMOTE" ...`): criterion 1
+    fails, because refs/remotes/origin/<branch> in the install clone names a commit the clone lacks and the
+    fetch ends with status 1. Remove the heal step: criterion 3 fails and criteria 1, 2 and 4 still pass.
+  note: |
+    Id reserved for run-unfiled-1794890132000 with ~/rmd-work/bin/reserve-id.sh.
+    Until this ships, a hand fetch in ~/rmd-state2/daemon-install needs this repair first. It deletes nothing:
+    git -C ~/rmd-state2/daemon-install fetch -q origin '+refs/heads/heartbeat-azure:refs/remotes/origin/heartbeat-azure'
+    Proof that counts on the host: after the install converges to the fix, `git fetch origin main` in
+    ~/rmd-state2/daemon-install succeeds with no repair, more than 5 minutes after the last repair, and the
+    reflog of refs/remotes/origin/heartbeat-azure gets no new `update by push` entry.

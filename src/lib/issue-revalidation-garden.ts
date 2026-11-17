@@ -24,6 +24,7 @@
  */
 import { createHash } from "node:crypto";
 import { closeSync, fstatSync, openSync, readFileSync } from "node:fs";
+import { join, relative } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { attemptAssignmentJoin, benchmarkEvidenceLedgerPath, benchmarkNonDispatchSpawn, benchmarkWorkerAttemptResources, withReceiptIdentity } from "./benchmark-run.js";
 import type { Config } from "./config.js";
@@ -34,6 +35,7 @@ import {
 } from "./escalate.js";
 import { feedbackCaptured, stageFeedbackCapture } from "./feedback.js";
 import { overseerStatePath } from "./gardener-overseer.js";
+import { resolveRepoLayout } from "./repo-layout.js";
 import { ghTextAsync } from "./github-transport.js";
 import { issueFeedbackId, renderIssueRaw } from "./issues-intake.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
@@ -126,6 +128,8 @@ export interface RevalidationComment {
   authorType: string;
   authorAssociation: string;
   createdAt: string;
+  /** W1-T13218: the comment's last edit; a rolling observation comment is edited, not re-posted. */
+  updatedAt?: string;
   /** The comment's text; absent in fixtures that only test authorship. */
   body?: string;
 }
@@ -266,6 +270,72 @@ export type RevalidationGuard =
   | "operator-owned-class" | "newer-operator-comment" | "no-citation" | "close-cap" | "refresh-not-due"
   | "comments-unread" | "absence-only-citation" | "condition-reobserved";
 
+// ── Same-key duplicates (W1-T13221) ──────────────────────────────────────────────────────────────
+
+/** Task keys several unrelated escalations share by design: a duplicate there is not a duplicate. */
+const SHARED_LANE_TASK_KEYS = new Set(["daemon", "DAEMON", "PLAN-clarify", "PLAN-expand"]);
+const FLEET_OPENED_FOOTER = "_Opened automatically by Remudero (MASTER-PLAN §4 escalation taxonomy)";
+
+/** An escalation class's family: `BLOCKED-AMBIGUOUS` and `BLOCKED` are one question asked two ways. */
+export function escalationClassFamily(escalationClass: string): string {
+  return escalationClass.split("-")[0]!.toUpperCase();
+}
+
+/** The duplicate key of a fleet-opened escalation, or `undefined` when it never takes part: a GRILL, an
+ *  issue a person opened (no fleet footer), one with no **Task:** or **Class:** line, or a shared lane key. */
+export function duplicateEscalationKey(issue: Pick<RevalidationIssue, "url" | "body">): string | undefined {
+  const taskId = issueTaskId(issue);
+  const escalationClass = issueEscalationClass(issue);
+  if (!taskId || !escalationClass || !issue.body.includes(FLEET_OPENED_FOOTER)) return undefined;
+  if (escalationClassFamily(escalationClass) === "GRILL") return undefined;
+  if (SHARED_LANE_TASK_KEYS.has(taskId) || taskId.startsWith("MODEL-CATALOG")) return undefined;
+  const repo = /github\.com\/([^/]+\/[^/]+)\/issues\//i.exec(issue.url)?.[1]?.toLowerCase() ?? "";
+  return `${repo}|${taskId}|${escalationClassFamily(escalationClass)}`;
+}
+
+/** When the fleet last saw this escalation's condition: its newest observation comment (by its last
+ *  edit), else the issue's own creation — the same source {@link conditionReobserved} reads. */
+export function lastObservedMs(issue: Pick<RevalidationIssue, "createdAt">, comments: readonly RevalidationComment[]): number {
+  let newest = Date.parse(issue.createdAt);
+  for (const c of comments) {
+    if (!/observed the same condition/i.test(c.body ?? "")) continue;
+    const at = Date.parse(c.updatedAt || c.createdAt);
+    if (Number.isFinite(at) && !(at <= newest)) newest = at;
+  }
+  return newest;
+}
+
+/** For each duplicate group of two or more, the issue every other member is superseded by: the one
+ *  observed most recently, else the newest. Returns superseded issue number -> kept issue. */
+export function supersededDuplicates(
+  issues: readonly RevalidationIssue[], observedMs: (issue: RevalidationIssue) => number,
+): Map<number, RevalidationIssue> {
+  const groups = new Map<string, RevalidationIssue[]>();
+  for (const issue of issues) {
+    const key = duplicateEscalationKey(issue);
+    if (key !== undefined) groups.set(key, [...(groups.get(key) ?? []), issue]);
+  }
+  const out = new Map<number, RevalidationIssue>();
+  for (const members of groups.values()) {
+    if (members.length < 2) continue;
+    const rank = (i: RevalidationIssue) => { const at = observedMs(i); return Number.isFinite(at) ? at : -Infinity; };
+    const kept = [...members].sort((a, b) => rank(b) - rank(a) || b.number - a.number)[0]!;
+    for (const m of members) if (m.number !== kept.number) out.set(m.number, kept);
+  }
+  return out;
+}
+
+function supersededComment(kept: RevalidationIssue, issue: RevalidationIssue): string {
+  return [
+    `Closed as not planned by the issue-revalidation garden (W1-T13221): superseded by ${kept.url}.`,
+    "",
+    `**Evidence:** ${kept.url} is open with the same **Task:** ${issueTaskId(issue)} and class family ${escalationClassFamily(issueEscalationClass(issue) ?? "")}, and the fleet observed its condition more recently.`,
+    "**Why:** one open issue per task key keeps the question in one place.",
+    "",
+    "_Reopen this issue if it asks a different question than the kept one._",
+  ].join("\n");
+}
+
 export interface PriorVerdict {
   verdict: RevalidationVerdictKind;
   at: string;
@@ -318,12 +388,13 @@ export function isAbsenceOnlyCitation(citation: string): boolean {
   return ABSENCE.test(citation) && !PRESENCE.test(citation);
 }
 
-/** An escalation the fleet opened, or re-observed in an appended comment, within the window before
- *  `nowMs`: its condition was seen live, whatever a judge reads from other evidence. */
+/** An escalation the fleet opened, or re-observed in an observation comment (read by its last edit,
+ *  W1-T13218), within the window before `nowMs`: its condition was seen live, whatever a judge reads
+ *  from other evidence. */
 export function conditionReobserved(issue: Pick<RevalidationIssue, "createdAt">, comments: readonly RevalidationComment[], nowMs: number): boolean {
   const recent = (at: string) => nowMs - Date.parse(at) < ISSUE_REVALIDATION_REOBSERVED_WINDOW_MS;
   if (recent(issue.createdAt)) return true;
-  return comments.some((c) => /observed the same condition/i.test(c.body ?? "") && recent(c.createdAt));
+  return comments.some((c) => /observed the same condition/i.test(c.body ?? "") && recent(c.updatedAt || c.createdAt));
 }
 
 /** The action a verdict takes, before the per-pass close cap. Pure, so the shadow table and act mode
@@ -337,6 +408,8 @@ export function decideAction(input: {
   reobserved?: boolean;
   /** The resolution is the garden's own deterministic stage-stall rule ({@link stageStallResolution}). */
   stageStallResolved?: boolean;
+  /** The resolution is a W1-T13220 terminal-referent rule ({@link terminalPrResolution}, {@link terminalTaskResolution}). */
+  terminalReferentResolved?: boolean;
   prior: PriorVerdict | undefined;
   nowMs: number;
 }): { action: RevalidationAction; guard?: RevalidationGuard } {
@@ -350,7 +423,7 @@ export function decideAction(input: {
     if (isAbsenceOnlyCitation(verdict.citation)) return { action: "keep", guard: "absence-only-citation" };
     // A stall report is the fleet's own observation, not an operator capacity decision: its deterministic
     // resolutions may close a MANUAL issue. A GRILL, and any other MANUAL resolution, still only refreshes.
-    const fleetObservation = input.stageStallResolved === true && input.escalationClass === "MANUAL";
+    const fleetObservation = (input.stageStallResolved === true || input.terminalReferentResolved === true) && input.escalationClass === "MANUAL";
     if (operatorOwned && !fleetObservation) return refreshUnlessRecent(input.prior, input.nowMs, "operator-owned-class");
     if (input.reobserved) return { action: "keep", guard: "condition-reobserved" };
     return { action: "close" };
@@ -372,6 +445,103 @@ function refreshUnlessRecent(prior: PriorVerdict | undefined, nowMs: number, gua
     return { action: "keep", guard: guard ?? "refresh-not-due" };
   }
   return guard === undefined ? { action: "refresh" } : { action: "refresh", guard };
+}
+
+// ── Terminal referents (W1-T13220) ───────────────────────────────────────────────────────────────
+
+/** A pull request's state as one REST read reports it; `at` is when a merged or closed one ended. */
+export interface PullStateFact {
+  state: "open" | "merged" | "closed";
+  at?: string;
+}
+
+/** A plan task's shard on origin/main: `terminal` names the status or retirement that ended it, `commit` the
+ *  commit that set that line. */
+export interface PlanTaskFact {
+  path: string;
+  terminal?: string;
+  commit?: string;
+}
+
+/** BACKSTOP — at most this many pull requests are read for the terminal-PR rule in one pass; the rest are judged as before. */
+export const MAX_TERMINAL_PR_READS_PER_PASS = 25;
+export const STRIKE_LADDER_PR_RE = /<!-- Strike-Ladder-PR: (\d+) -->/g;
+export const CLARIFICATION_PR_RE = /PR https:\/\/github\.com\/([^/\s]+)\/([^/\s]+)\/pull\/(\d+) needs a clarification/;
+/** A pull request's URL path, `/<owner>/<repo>/pull/<n>`; the host is checked by `URL`, never by a pattern. */
+export const PULL_PATH_RE = /^\/([^/]+)\/([^/]+)\/pull\/(\d+)\/?$/;
+
+/** Every `owner/repo#n` pull request a text links on github.com, lower-cased: each whitespace-separated token is
+ *  parsed as a URL, so a host is matched exactly rather than anywhere inside a longer one. */
+export function pullRefsIn(text: string): Set<string> {
+  const refs = new Set<string>();
+  for (const token of text.split(/\s+/)) {
+    const candidate = token.replace(/^[(<'"]+|[)>.,;:'"]+$/g, "");
+    if (!candidate.startsWith("https://")) continue;
+    let url: URL;
+    try {
+      url = new URL(candidate);
+    } catch {
+      // deliberate: a token that only looks like a URL names no pull request
+      continue;
+    }
+    const path = url.hostname === "github.com" ? PULL_PATH_RE.exec(url.pathname) : null;
+    if (path) refs.add(`${path[1]}/${path[2]}#${path[3]}`.toLowerCase());
+  }
+  return refs;
+}
+const TERMINAL_RULE_CLASSES = new Set(["BLOCKED", "MANUAL"]);
+
+/** The one pull request a BLOCKED or MANUAL escalation, or a strike digest, is about, when it names exactly one:
+ *  its task is `PR-<n>`; it says `PR <url> needs a clarification` and every pull URL it names is that one, in this
+ *  repository; or it carries `<!-- Strike-Ladder-PR: <n> -->` markers for a single PR. A GRILL, or any other
+ *  shape, is `undefined`. */
+export function terminalRulePr(issue: Pick<RevalidationIssue, "url" | "title" | "body">): number | undefined {
+  const cls = issueEscalationClass(issue);
+  const strike = [...new Set([...issue.body.matchAll(STRIKE_LADDER_PR_RE)].map((m) => Number(m[1])))];
+  if (cls === undefined) return strike.length === 1 ? strike[0] : undefined;
+  if (!TERMINAL_RULE_CLASSES.has(cls)) return undefined;
+  const task = /^PR-(\d+)$/.exec(issueTaskId(issue) ?? "");
+  if (task) return Number(task[1]);
+  const repo = /github\.com\/([^/]+\/[^/]+)\/issues\//i.exec(issue.url)?.[1]?.toLowerCase();
+  const text = `${issue.title}\n${issue.body}`;
+  const asked = CLARIFICATION_PR_RE.exec(text);
+  if (asked && `${asked[1]}/${asked[2]}`.toLowerCase() === repo) {
+    if (pullRefsIn(text).size === 1) return Number(asked[3]);
+  }
+  return strike.length === 1 ? strike[0] : undefined;
+}
+
+/** The issue's one PR is merged or closed: resolved, citing that state and when. Open or timeless: `undefined`. */
+export function terminalPrResolution(prNumber: number, fact: PullStateFact): RevalidationVerdict | undefined {
+  if (fact.state === "open" || !fact.at) return undefined;
+  return {
+    verdict: "resolved",
+    reason: `the pull request this issue is about is ${fact.state}, so its question has no PR left to act on`,
+    citation: `PR #${prNumber} ${fact.state} at ${fact.at}`,
+  };
+}
+
+/** A BLOCKED escalation's plan task is done, merged or retired on origin/main: resolved, citing the shard and
+ *  the commit that set it. Anything else, or no commit to cite: `undefined`. */
+export function terminalTaskResolution(issue: Pick<RevalidationIssue, "body">, taskId: string, fact: PlanTaskFact | undefined): RevalidationVerdict | undefined {
+  if (issueEscalationClass(issue) !== "BLOCKED" || fact?.terminal === undefined || !fact.commit) return undefined;
+  return {
+    verdict: "resolved",
+    reason: `${taskId} is ${fact.terminal} on origin/main, so the block on it has ended`,
+    citation: `${fact.path} on origin/main reads ${fact.terminal}, set by commit ${fact.commit}`,
+  };
+}
+
+/** One shard's task record, read as `{ status, retirement }`: the plan shard is a list of task maps. */
+export function planTaskFactFromShard(path: string, text: string, taskId: string, commit: string | undefined): PlanTaskFact | undefined {
+  const parsed = parseYaml(text) as unknown;
+  const records = Array.isArray(parsed) ? parsed : [parsed];
+  const task = records.find((r): r is Record<string, unknown> => typeof r === "object" && r !== null && (r as Record<string, unknown>).id === taskId);
+  if (task === undefined) return undefined;
+  const retired = task.retirement !== undefined && task.retirement !== null && task.retirement !== "";
+  const status = typeof task.status === "string" ? task.status : "";
+  const terminal = retired ? "retired" : status === "done" || status === "merged" ? `status: ${status}` : undefined;
+  return { path, ...(terminal ? { terminal, ...(commit ? { commit } : {}) } : {}) };
 }
 
 // ── Stage-stall reports ──────────────────────────────────────────────────────────────────────────
@@ -458,7 +628,15 @@ export interface IssueRevalidationPorts {
   judge: (issue: RevalidationIssue, issueClass: IssueClass, evidence: JudgeEvidence) => Promise<RevalidationVerdict>;
   /** Each issue's newest verdict row from earlier passes, by issue number. */
   priorVerdicts: () => ReadonlyMap<number, PriorVerdict>;
-  close: (issueUrl: string, comment: string) => Promise<void>;
+  /** W1-T13220: one pull request's state and when it ended, in this repository. THROWS on a failed read.
+   *  Absent, no terminal-PR rule runs. */
+  pullState?: (prNumber: number) => Promise<PullStateFact>;
+  /** W1-T13220: a plan task's shard on origin/main and whether it is done, merged or retired, with the commit
+   *  that set it. `undefined` when no single shard names the task. THROWS on a failed read. Absent, no
+   *  terminal-task rule runs. */
+  planTaskState?: (taskId: string) => PlanTaskFact | undefined;
+  /** W1-T13221: `reason` "not planned" closes a superseded duplicate; absent closes as completed. */
+  close: (issueUrl: string, comment: string, reason?: "not planned") => Promise<void>;
   comment: (issueUrl: string, body: string) => Promise<void>;
   /** Files the issue as a feedback entry for the normal triage and filing path; returns its id. */
   fileConversion: (issue: RevalidationIssue, verdict: RevalidationVerdict) => Promise<string>;
@@ -554,9 +732,51 @@ export async function runIssueRevalidationGarden(ports: IssueRevalidationPorts):
     }
   }
 
+  // W1-T13221: read comments once for each member of a duplicate group, to rank it by its last observation.
+  const commentsByIssue = new Map<number, RevalidationComment[]>();
+  const keyed = issues.filter((i) => duplicateEscalationKey(i) !== undefined);
+  const keyCounts = new Map<string, number>();
+  for (const i of keyed) keyCounts.set(duplicateEscalationKey(i)!, (keyCounts.get(duplicateEscalationKey(i)!) ?? 0) + 1);
+  const grouped = keyed.filter((i) => (keyCounts.get(duplicateEscalationKey(i)!) ?? 0) > 1);
+  const unreadGroupMember = new Set<number>();
+  for (const i of grouped) {
+    try {
+      commentsByIssue.set(i.number, await ports.listComments(i.number));
+    } catch (e) {
+      unreadGroupMember.add(i.number);
+      ports.log(ISSUE_REVALIDATION_FAILED_STEP, { stage: "comments", issue_number: i.number, error: String((e as Error)?.message ?? e) });
+    }
+  }
+  // A group with an unreadable member is not ranked this pass: its newest observation is unknown.
+  const readable = grouped.filter((i) => !grouped.some((o) => unreadGroupMember.has(o.number) && duplicateEscalationKey(o) === duplicateEscalationKey(i)));
+  const superseded = supersededDuplicates(readable, (i) => lastObservedMs(i, commentsByIssue.get(i.number) ?? []));
+
   const nowMs = clock.now();
   let judges = 0;
   let closes = 0;
+  let pullReads = 0;
+  /** W1-T13220: a deterministic terminal-referent resolution, or `undefined` when no rule decides the issue.
+   *  A failed read decides nothing, so the issue takes the path it took before. */
+  const terminalReferent = async (issue: RevalidationIssue): Promise<RevalidationVerdict | undefined> => {
+    const pr = terminalRulePr(issue);
+    if (pr !== undefined && ports.pullState && pullReads < MAX_TERMINAL_PR_READS_PER_PASS) {
+      pullReads++;
+      try {
+        const decided = terminalPrResolution(pr, await ports.pullState(pr));
+        if (decided) return decided;
+      } catch (e) {
+        ports.log(ISSUE_REVALIDATION_FAILED_STEP, { stage: "pull-state", issue_number: issue.number, pr_number: pr, error: String((e as Error)?.message ?? e) });
+      }
+    }
+    const taskId = issueTaskId(issue);
+    if (taskId === undefined || !/^[A-Z][A-Z0-9]*-T\d+$/.test(taskId) || !ports.planTaskState || issueEscalationClass(issue) !== "BLOCKED") return undefined;
+    try {
+      return terminalTaskResolution(issue, taskId, ports.planTaskState(taskId));
+    } catch (e) {
+      ports.log(ISSUE_REVALIDATION_FAILED_STEP, { stage: "plan-task", issue_number: issue.number, task_id: taskId, error: String((e as Error)?.message ?? e) });
+      return undefined;
+    }
+  };
   let found = false;
   const rows: IssueRevalidationRow[] = [];
   for (const issue of issues) {
@@ -567,7 +787,17 @@ export async function runIssueRevalidationGarden(ports: IssueRevalidationPorts):
     let judged = false;
     let receiptSource: JudgeReceipt["source"] = "deterministic";
     let stageStallResolved = false;
-    if (issueClass === "referent") {
+    const keptBy = superseded.get(issue.number);
+    const terminal = keptBy === undefined ? await terminalReferent(issue) : undefined;
+    if (keptBy !== undefined) {
+      verdict = {
+        verdict: "resolved",
+        reason: `a newer open escalation carries the same task key (superseded by #${keptBy.number})`,
+        citation: `superseded by ${keptBy.url}: same **Task:** ${issueTaskId(issue)} and class family ${escalationClassFamily(escalationClass ?? "")}`,
+      };
+    } else if (terminal !== undefined) {
+      verdict = terminal;
+    } else if (issueClass === "referent") {
       verdict = referents.get(issue.number) ?? { verdict: "unknown", reason: "the referent could not be derived this pass" };
       // A terminal referent resolves a stall report by its PR's state alone; an open or unread one may still be
       // a stale stall report by its head or a newer twin.
@@ -607,14 +837,20 @@ export async function runIssueRevalidationGarden(ports: IssueRevalidationPorts):
     let reobserved = false;
     if (verdict.verdict !== "unknown") {
       try {
-        const comments = await ports.listComments(issue.number);
+        const comments = commentsByIssue.get(issue.number) ?? await ports.listComments(issue.number);
         spokeLast = operatorSpokeLast(comments, ports.operatorLogins);
         reobserved = escalationClass !== undefined && conditionReobserved(issue, comments, nowMs);
       } catch (e) {
         ports.log(ISSUE_REVALIDATION_FAILED_STEP, { stage: "comments", issue_number: issue.number, error: String((e as Error)?.message ?? e) });
       }
     }
-    let { action, guard } = decideAction({ verdict, escalationClass, operatorSpokeLast: spokeLast, reobserved, stageStallResolved, prior: before, nowMs });
+    // A superseded duplicate closes past the class and re-observed guards (the kept issue carries the live
+    // question), never past an unread or operator-last comment thread, and counts toward the close cap.
+    let { action, guard } = keptBy !== undefined
+      ? spokeLast === undefined ? { action: "keep" as const, guard: "comments-unread" as const }
+        : spokeLast ? { action: "keep" as const, guard: "newer-operator-comment" as const } : { action: "close" as const }
+      : decideAction({ verdict, escalationClass, operatorSpokeLast: spokeLast, reobserved, stageStallResolved,
+        terminalReferentResolved: terminal !== undefined, prior: before, nowMs });
     if (action === "close" && closes >= policy.maxClosesPerPass) {
       action = "keep";
       guard = "close-cap";
@@ -624,7 +860,8 @@ export async function runIssueRevalidationGarden(ports: IssueRevalidationPorts):
     let acted = false;
     if (policy.mode === "act" && action !== "keep") {
       try {
-        if (action === "close") await ports.close(issue.url, closeComment({ verdict, issueClass }));
+        if (action === "close" && keptBy !== undefined) await ports.close(issue.url, supersededComment(keptBy, issue), "not planned");
+        else if (action === "close") await ports.close(issue.url, closeComment({ verdict, issueClass }));
         else if (action === "refresh") await ports.comment(issue.url, refreshComment({ verdict, issueClass }, clock.iso()));
         else {
           const feedbackId = await ports.fileConversion(issue, verdict);
@@ -824,10 +1061,33 @@ export function parseIssueCommentsRest(raw: string): RevalidationComment[] {
         authorType: String(user.type ?? "User"),
         authorAssociation: String(r.author_association ?? "NONE"),
         createdAt: String(r.created_at ?? ""),
+        ...(r.updated_at !== undefined ? { updatedAt: String(r.updated_at) } : {}),
         body: String(r.body ?? ""),
       };
     });
   });
+}
+
+/** One `pulls/<n>` REST read, reduced by `--jq` to `{ state, merged_at, closed_at }`. */
+export function pullStateFromRest(raw: string): PullStateFact {
+  const row = JSON.parse(raw) as { state?: unknown; merged_at?: unknown; closed_at?: unknown };
+  if (row.state === "open") return { state: "open" };
+  if (row.state !== "closed") throw new Error(`pullStateFromRest: unexpected state ${JSON.stringify(row.state)}`);
+  if (typeof row.merged_at === "string") return { state: "merged", at: row.merged_at };
+  return { state: "closed", ...(typeof row.closed_at === "string" ? { at: row.closed_at } : {}) };
+}
+
+/** The task's one shard under origin/main's `shardsDir` (repo-relative, from {@link resolveRepoLayout}) and the commit
+ *  that last set its status or retirement line. */
+export function planTaskStateAtOriginMain(runGit: (args: string[]) => string, taskId: string, shardsDir: string): PlanTaskFact | undefined {
+  const shards = runGit(["ls-tree", "--name-only", "origin/main", `${shardsDir}/`]).split("\n")
+    .filter((p) => p.endsWith(".yaml") && (p === `${shardsDir}/${taskId}.yaml` || p.startsWith(`${shardsDir}/${taskId}-`)));
+  if (shards.length !== 1) return undefined;
+  const path = shards[0]!;
+  const fact = planTaskFactFromShard(path, runGit(["show", `origin/main:${path}`]), taskId, undefined);
+  if (fact?.terminal === undefined) return fact;
+  const commit = runGit(["log", "-1", "--format=%h", "-G", "^[[:space:]]*(status|retirement):", "origin/main", "--", path]).trim();
+  return { ...fact, ...(commit ? { commit } : {}) };
 }
 
 // ── Production ports ─────────────────────────────────────────────────────────────────────────────
@@ -887,6 +1147,7 @@ export function productionIssueRevalidationPorts(opts: ProductionIssueRevalidati
   let listed: RevalidationIssue[] = [];
   let stepRows: Array<Record<string, unknown>> | undefined;
   let commits: MainCommit[] | undefined;
+  let shardList: string | undefined;
   return {
     policy: opts.policy ?? (() => loadIssueRevalidationPolicy()),
     operatorLogins: opts.operatorLogins,
@@ -896,9 +1157,14 @@ export function productionIssueRevalidationPorts(opts: ProductionIssueRevalidati
       listed = parseOpenIssuesRest(await readText(openIssuesRestArgs(opts.owner, opts.repo)));
       stepRows = undefined;
       commits = undefined;
+      shardList = undefined;
       return listed;
     },
     listComments: async (n) => parseIssueCommentsRest(await readText(["api", `repos/${repoArg}/issues/${n}/comments?per_page=100`, "--paginate"])),
+    pullState: async (n) => pullStateFromRest(await readText(["api", `repos/${repoArg}/pulls/${n}`, "--jq", "{state: .state, merged_at: .merged_at, closed_at: .closed_at}"])),
+    // One tree listing per pass, however many BLOCKED issues ask for a shard.
+    planTaskState: (taskId) => planTaskStateAtOriginMain((args) => (args[0] === "ls-tree" ? (shardList ??= runGit(args)) : runGit(args)), taskId,
+      relative(opts.repoRoot, join(resolveRepoLayout(opts.repoRoot).planDir, "tasks.d"))),
     referentVerdicts: opts.referentVerdicts,
     hasReferent: opts.hasReferent,
     livenessVerdict: (gardener) => {
@@ -973,9 +1239,9 @@ export function productionIssueRevalidationPorts(opts: ProductionIssueRevalidati
       return { ...parsed.verdict, judgeEvidence: { version: 1, source: observed ? "model" : "legacy", ...identity,
         parser_state: parsed.parser_state, ...(parsed.parsed_verdict ? { parsed_verdict: parsed.parsed_verdict } : {}), evidence_state: parsed.evidence_state } };
     },
-    close: async (url, comment) => {
+    close: async (url, comment, reason) => {
       if (!issues.closeWithComment) throw new Error("the issue gateway cannot close");
-      await issues.closeWithComment(url, comment);
+      await issues.closeWithComment(url, comment, ...(reason ? [reason] as const : []));
     },
     comment: async (url, body) => {
       if (!issues.comment) throw new Error("the issue gateway cannot comment");

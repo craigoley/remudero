@@ -34,7 +34,7 @@ type Job = { name?: string; "timeout-minutes"?: number; steps: Step[] };
 const workflow = (path: string) => parseYaml(readFileSync(join(REPO_ROOT, path), "utf8")) as { jobs: Record<string, Job> };
 const NIGHTLY = workflow(".github/workflows/coverage-nightly.yml").jobs.merge!;
 const CI = workflow(".github/workflows/ci.yml");
-const SHARD_JOB = Object.values(CI.jobs).find((job) => job.name === "coverage-shard (${{ matrix.shard }}/8)")!;
+const SHARD_JOB = Object.values(CI.jobs).find((job) => job.name === "coverage-shard (${{ matrix.shard }}/12)")!;
 
 function step(job: Job, prefix: string): Step {
   const hit = job.steps.find((s) => s.name?.startsWith(prefix));
@@ -70,9 +70,11 @@ test("W1-T6107: coverage-nightly builds the impact map from the eight compact sh
   assert.match(build, /--shard-count 8/);
   assert.match(build, /node --import tsx scripts\/coverage-merge-ratchet\.mjs/);
   const merge = step(NIGHTLY, "Merge raw V8 coverage shards into one lcov").run!;
+  // W1-T13275: the merge reads each shard's premapped copy of the same raw reports; the map keeps the compact one.
   for (const dir of SHARD_DIRS) {
-    assert.ok(merge.includes(dir), `the merge reads ${dir}`);
-    assert.ok(build.includes(dir), `the map is built from ${dir}, the same compact shard`);
+    const premapped = dir.replace(/\/raw$/, "/premapped");
+    assert.ok(merge.includes(premapped), `the merge reads ${premapped}`);
+    assert.ok(build.includes(dir), `the map is built from ${dir}, the same shard's compact copy`);
   }
   assert.ok(at(NIGHTLY, "Merge raw V8 coverage shards") < at(NIGHTLY, BUILD));
   assert.ok(at(NIGHTLY, BUILD) < at(NIGHTLY, "Coverage ratchet (main's absolute floor)"), "a red floor must not skip the map");

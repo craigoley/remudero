@@ -17,7 +17,7 @@
     - src/lib/worker.ts
     - src/run-task.ts
     - test/a-worker-spawn-reads-no-ledger-on-the-daemon-loop.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "An inbox draft spawn over a state dir with gzip archives that hold draft.routing.outcome rows gets the same DraftStats as today's readDraftStats over the same files, and a setImmediate turn counter advances while the stats are read: the read is off the loop"

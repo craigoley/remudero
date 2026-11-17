@@ -19,7 +19,7 @@
     - src/lib/daemon.ts
     - src/lib/ledger-steps.ts
     - test/github/the-daemon-quota-row-counts-core-reads-by-call-site.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Each stamped read adds 1 to a count keyed by the first call site outside the transport (the same frame ghCallSiteOutsideTransport names), and the daemon.quota row for bucket core carries reads_by_call_site, the top 15 sites by count since the previous row, with the rest summed as other"

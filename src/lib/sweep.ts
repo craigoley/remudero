@@ -107,7 +107,7 @@ import {
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { isWorkerProviderId, type Config, type WorkerProviderId, fixStrikeCap, overflowFallbackRefusal } from "./config.js";
 import { defaultGitCaptureAsync, gitPushEmptyCommit, gitPushRunBranchAsync, worktreePushExec, worktreePushExecAsync, runStepsSync, runStepsAsync, step, type Steps } from "./git-push.js";
-import { ghExec, ghJson, ghJsonAsync, ghTextAsync, GhPaceWouldBlockError, type GhJsonReadOptions } from "./github-transport.js";
+import { ghExec, ghJson, ghJsonAsync, ghTextAsync, GhPaceWouldBlockError, paceGhEntryAsync, type GhJsonReadOptions } from "./github-transport.js";
 import { withdrawStaleConflictedJudgePr } from "./machine-filing-judge.js";
 import type { AdmissionObserver, AdmissionSettings, AdmissionRead } from "./contributor-admission.js";
 import { observeContributorAdmission } from "./arm-auto-merge.js";
@@ -124,7 +124,7 @@ import {
   capStrikeLadderNote, decideStrikeLadderRung, firstFailingTestTitle, hasUnspentLadderRefresh,
   latestStrikeLadderAttempt, rebuiltOnUtcDay, sloRungHistory, strikeCauseKey,
 } from "./strike-ladder.js";
-import { buildRiskJudgeSpawnArgs, resolveRiskJudgeMount, scrubRiskJudgeText, runRiskJudge, type RiskJudgeConfig, type RiskJudgeInput, type RiskJudgeOrchestratorDeps } from "./risk-judge.js";
+import { buildRiskJudgeSpawnArgs, resolveFixProgressJudgeMount, resolveRiskJudgeMount, runJudgeShadow, scrubRiskJudgeText, runRiskJudge, type RiskJudgeConfig, type RiskJudgeInput, type RiskJudgeOrchestratorDeps } from "./risk-judge.js";
 import {
   createIncrementalLedgerUnion, createLedgerRotationMemo, createSizedMemo, ledgerRotationDigests, ledgerRotationEntries, ndjsonLines,
   readLedgerUnionRecordsSync, realLedgerFs, resolveLedgerUnion,
@@ -146,7 +146,7 @@ import {
   type ActionsIncidentHoldRecord,
 } from "./actions-incident.js";
 import { isInPlanScope } from "./plan-scope.js";
-import { loadMounts, mountsPath, resolveMount, type Mount } from "./mounts.js";
+import { loadMounts, mountsPath, resolveMount, type JudgeMount, type Mount } from "./mounts.js";
 import { planParallelAttempts, type ShapeGain, type TaskShape } from "./parallel-attempts.js";
 import { strikeScheduleFor, type StrikePassRate } from "./strike-schedule.js";
 import {
@@ -1590,7 +1590,7 @@ export interface BuildSweepEffectsDeps {
   armSessionPrsOverride?: boolean;
   updateBranchImpl?: (pr: ArmedStalledPr) => Promise<UpdateBranchOutcome>;
   rebaseDirtyFleetBranchImpl?: (pr: OpenPrView) => DirtyFleetRebaseOutcome | Promise<DirtyFleetRebaseOutcome>;
-  captureRepairFeedbackImpl?: (filing: RepairFilingCapture) => void;
+  captureRepairFeedbackImpl?: (filing: RepairFilingCapture) => void | Promise<void>;
   ghRunImpl?: (file: string, args: readonly string[]) => void;
   spawnWallClockBoundMsOverride?: number;
   /** W1-T4105: how often a running fix worker's PR is re-read; defaults to the daemon poll pace. */
@@ -1598,6 +1598,8 @@ export interface BuildSweepEffectsDeps {
   reclaimWorkerImpl?: (info: { runId: string; taskId: string; elapsedMs: number }) => void | Promise<void>;
   disarmImpl?: (prUrl: string) => DisarmOutcome | void;
   readJsonImpl?: (args: string[], readOpts?: GhJsonReadOptions) => Promise<unknown>;
+  /** W1-T13183: the awaited binary read (an artifact zip); defaults to a byte-keeping {@link ghTextAsync}. */
+  readBufferImpl?: (args: string[]) => Promise<Buffer>;
   fleetDeployStateImpl?: DeployStateReader;
   fleetDeploySensorsImpl?: DeployStateReader["deploy"];
   /** Shared pacer; omitted for the existing immediate CLI/test mode. */
@@ -2489,11 +2491,15 @@ export const SWEEP_EFFECT_SURFACE = [
 ] as const;
 
 export function productionFixProgressJudge(opts: {
-  cwd: string; settingsFile: string; mount?: Mount;
+  cwd: string; settingsFile: string; mount?: JudgeMount;
   spawn?: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
+  /** W1-T11075: the ledger a cash shadow arm's rows go to. With none, a declared shadow is not asked: an unledgered
+   *  shadow would spend and measure nothing. */
+  log?: (step: string, fields: Record<string, unknown>) => void;
 }): FixProgressJudge {
   const judge: FixProgressJudge = async input => {
-    const mount = opts.mount ?? resolveRiskJudgeMount(loadMounts(mountsPath(opts.cwd)));
+    // W1-T11075: the judge's own row, which may name a provider and a cash shadow arm.
+    const mount = opts.mount ?? resolveFixProgressJudgeMount(loadMounts(mountsPath(opts.cwd)));
     const args = buildRiskJudgeSpawnArgs({ input: {
       change: { description: "fix progress" }, gatesState: {}, planContext: { taskId: input.taskId },
     }, mount, cwd: opts.cwd, settingsFile: opts.settingsFile });
@@ -2531,10 +2537,20 @@ export function productionFixProgressJudge(opts: {
       `Round count: ${input.rounds.length}`,
       scrubRiskJudgeText(JSON.stringify(input)).text,
     ].join("\n");
-    const result = await (opts.spawn ?? benchmarkNonDispatchSpawn("risk-judge"))({ ...args, prompt,
-      memoryShadow: { ...args.memoryShadow, ...lightPassMemoryWaitPorts() } });
-    if (result.subtype !== undefined && result.subtype !== "success") return undefined;
-    return parseFixProgressVerdict(result.text);
+    const spawn = opts.spawn ?? benchmarkNonDispatchSpawn("risk-judge");
+    const primaryArgs: SpawnWorkerArgs = { ...args, prompt, memoryShadow: { ...args.memoryShadow, ...lightPassMemoryWaitPorts() },
+      ...(mount.provider === undefined ? {} : { mountProvider: mount.provider }) };
+    const result = await spawn(primaryArgs);
+    const verdict = result.subtype !== undefined && result.subtype !== "success" ? undefined : parseFixProgressVerdict(result.text);
+    if (mount.shadow !== undefined && opts.log !== undefined) {
+      // Advisory: the verdict returned below is the primary's, whatever the shadow answers or refuses.
+      await runJudgeShadow({
+        surface: "fix-progress", key: `${input.prNumber === undefined ? input.taskId ?? "unknown" : `PR${input.prNumber}`}@${input.headSha}`,
+        mount, primaryArgs, primaryVerdict: verdict, parse: parseFixProgressVerdict, agreementKey: (v) => v.verdict,
+        spawn, log: opts.log,
+      });
+    }
+    return verdict;
   };
   PRODUCTION_FIX_PROGRESS_JUDGES.add(judge);
   return judge;
@@ -2598,6 +2614,46 @@ const FLEET_STATE_HISTORY_SLICE: EscalationTriageSlice = {
   steps: ["reconcile.repaired", "reconcile.repair_failed", "reconcile.escalated", "main.run_gap.dispatched", "deploy.ok"],
 };
 let fleetStateHistoryReader: EscalationTriageHistoryReader | undefined;
+
+/** W1-T13288: the review.posted slice the sweep's arm decision reads after a live-file miss, kept as one
+ *  durable digest per rotation. Before W1-T13288 that read was resolveLedgerUnion on the daemon loop. */
+const ARM_VERDICT_HISTORY_SLICE: EscalationTriageSlice = {
+  holder: "sweep.arm-verdict-history",
+  steps: ["review.posted"],
+  version: "1",
+};
+let armVerdictHistoryReader: EscalationTriageHistoryReader | undefined;
+
+/** What one {@link readArmVerdictHistory} call found: the arm decision's union, and what the load cost. */
+interface ArmVerdictHistory {
+  complete: boolean;
+  lines: ReadonlyArray<Record<string, unknown>>;
+  /** Present when the read itself failed: the history is then incomplete. */
+  error?: string;
+  load?: EscalationTriageHistoryLoad;
+  archiveCount: number;
+  ms: number;
+}
+
+/**
+ * W1-T13288: the arm decision's archive and live verdict history, loaded OFF the loop through the slice reader.
+ * `complete` is judged as the resolveLedgerUnion result was: the read is ok, at least one rotation exists, and
+ * nothing is unread or unclassified. A failed read is incomplete, so the W1-T3471 fail-open holds. The process
+ * keeps one reader, so a later pass reads only the rotations it has not seen; a restarted one reads digests.
+ */
+async function readArmVerdictHistory(stateDir: string): Promise<ArmVerdictHistory> {
+  const started = systemClock.now();
+  const history = armVerdictHistoryReader ??= createEscalationTriageHistoryReader({ slice: ARM_VERDICT_HISTORY_SLICE });
+  try {
+    const read = await history(stateDir);
+    const complete = read.ok && read.archiveCount > 0 && read.unread.length === 0 && read.unclassified.length === 0;
+    return { complete, lines: complete ? read.rows : [], load: history.lastLoad(), archiveCount: read.archiveCount,
+      ms: Math.max(0, systemClock.now() - started) };
+  } catch (error) {
+    const reason = String(error);
+    return { complete: false, lines: [], error: reason, archiveCount: 0, ms: Math.max(0, systemClock.now() - started) };
+  }
+}
 // W1-T12234: one commit store for each state directory, loaded once in a daemon lifetime.
 const fleetStateCommitStores = new Map<string, FleetStateCommitStore>();
 
@@ -2722,6 +2778,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     reclaimWorkerImpl = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["reclaimWorkerImpl"]>>("reclaimWorkerImpl"),
     disarmImpl = disarmAutoMerge,
     readJsonImpl = (args, readOpts) => ghJsonAsync(args, undefined, undefined, readOpts),
+    readBufferImpl = async (args) => Buffer.from(await ghTextAsync(args, { maxBuffer: 1 << 26, encoding: "latin1" }), "latin1"),
     pacer,
     fetchWorkflowRunObservationsImpl: fetchWorkflowRunObservationsForBuild = fetchWorkflowRunObservations,
     registeredWorktreeOwnerImpl = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["registeredWorktreeOwnerImpl"]>>("registeredWorktreeOwnerImpl"),
@@ -2840,7 +2897,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   // W1-T7096: ONE judge serves both the sweep's own next-round decision and the rung it dispatches.
   // Never the fix-worker spawn seam: a judge must not run through a writer's spawn (a fixture's fake commits).
   const effectsProgressJudge = deps.productionProgressJudge ? productionFixProgressJudge({ cwd: repoRoot,
-    settingsFile: join(repoRoot, "settings", "worker.json") }) : undefined;
+    settingsFile: join(repoRoot, "settings", "worker.json"), log: (step, fields) => log(step, fields) }) : undefined;
   sweepEffectsWiringObserver?.(effectsProgressJudge ? "production" : "former_bound_stand_in");
   // W1-T2609: the SAME per-task lock directory `liveInflightRuns`/`acquireInflightLock` already
   // use everywhere else in this file (see e.g. sweepCommand's own `inflightDir`, above) — the fix
@@ -3194,6 +3251,10 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       ...pr, ...(target.checkoutDir === repoDir ? {} : { codeRoot: repoDir, bodyProofRoot: "plan" as const }),
     }, { log }),
     ...(deps.planRepairGitImpl ? { git: (args: string[]) => planRepairGit("git", ["-C", target.checkoutDir, ...args]) } : {}),
+    // W1-T13169: task ids are reserved in the public repository, so a landing into the plan destination releases one there.
+    ...(target.checkoutDir === repoDir ? {} : {
+      reservationGitAsync: async (args: string[]) => (deps.planRepairGitImpl ?? defaultGitCaptureAsync)("git", ["-C", repoDir, ...args]),
+    }),
     ...(deps.ghJsonImpl ? { gh: (args: string[]) => {
       const out = ghJsonForBuild(args);
       return typeof out === "string" ? out : JSON.stringify(out);
@@ -5745,13 +5806,14 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           repo,
           ingested,
           settled: settledFoldDebtArtifacts,
-          readJson: (args: string[]) => paceGhEntry(pacer, isGhRateLimitError, () => ghJsonForBuild(args)),
-          readZip: (args: string[]) => paceGhEntry(pacer, isGhRateLimitError, () => ghBufferForBuild(args)),
+          // W1-T13183: awaited and paced on timers, so the listing, merge lookups and download leave the loop free.
+          readJson: (args: string[]) => paceGhEntryAsync(pacer, isGhRateLimitError, () => readJsonImpl(args)),
+          readZip: (args: string[]) => paceGhEntryAsync(pacer, isGhRateLimitError, () => readBufferImpl(args)),
           root: repoRoot,
           log,
           land: deps.landFeedbackImpl,
         };
-        return await landFoldDebt(pullFoldDebtEntries(input), input);
+        return await landFoldDebt(await pullFoldDebtEntries(input), input);
       } catch (e) {
         log(FOLD_DEBT_PULL_ERROR_STEP, { phase: "list", error: String((e as Error)?.message ?? e) });
         return [];
@@ -5992,6 +6054,19 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
  *  completed post that it still cannot count turns the next demand into an escalation. Two is the
  *  first admission plus one retry; a loop is only provable after the retry also completed. */
 export const REVIEW_INPUT_ADMISSION_BACKSTOP = 2;
+
+/** W1-T13193 — the review setup refusals for one exact input (PR, head, body digest), counted after the PR's last
+ *  started or posted review and grouped by reason and reviewer code sha. `runningReviewerCodeSha` is the code the
+ *  next admitted review runs. A new head, body or reviewer code is a different input, so it is admitted again. */
+export interface ReviewSetupRefusal {
+  reason: string;
+  count: number;
+  reviewerCodeSha: string | null;
+  runningReviewerCodeSha: string | null;
+}
+
+/** W1-T13193 — the one escalation a held review-setup refusal files, per PR, head and body digest. */
+export const REVIEW_SETUP_REFUSAL_ESCALATED_STEP = "sweep.review_setup_refused.escalated";
 
 /** W1-T5909 — BACKSTOP: re-arms per (PR, head) after GitHub disarmed a sweep arm (W1-T4784's cap).
  *  A queue that ejects one head this often is failing its group run, not flaking. */
@@ -6415,6 +6490,34 @@ export function reviewInputLoopFacts(
   const posts = postStamps.filter((t) => !Number.isNaN(t) && t >= firstAdmission).length;
   const postsSinceLastAdmission = postStamps.filter((t) => !Number.isNaN(t) && t >= lastAdmission).length;
   return { admissions, postsSinceLastAdmission, posts, lookedUpKey };
+}
+
+/** W1-T13193 — true when the next matching rule would admit a review that the running reviewer code has already
+ *  refused to set up {@link REVIEW_INPUT_ADMISSION_BACKSTOP} times, for one reason, at this exact input. Each
+ *  admission starts a review that refuses again (#18670: 157 admissions, 142 refusals at one head and digest). One
+ *  refusal, or refusals with different reasons, never hold: a transient setup failure is retried. */
+function reviewSetupRefusalHolds(pr: OpenPrView, policy: SweepPolicy, ageDays: number, now: number, facts?: DispositionFacts): boolean {
+  const held = pr.reviewSetupRefused;
+  if (held === undefined || held.count < REVIEW_INPUT_ADMISSION_BACKSTOP ||
+      held.reviewerCodeSha !== held.runningReviewerCodeSha) return false;
+  const self = DISPOSITION_RULES.findIndex((rule) => rule.when === reviewSetupRefusalHolds);
+  return DISPOSITION_RULES.slice(self + 1).find((rule) => rule.when(pr, policy, ageDays, now, facts))?.disposition === "post-review";
+}
+
+/** W1-T13193 — the cause a held review-setup refusal's parked_pr.remedy row names, `review-setup-refused:<reason>`. */
+export function reviewSetupRefusalCause(reason: string): string {
+  return `review-setup-refused:${reason}`;
+}
+
+/** W1-T13193 — true when this ledger already holds the hold's one record for the PR's head and body digest: the taken
+ *  parked_pr.remedy row when the remedy host is wired (W1-T13045's pattern), else the legacy escalation row. A refused
+ *  remedy row is not a record, so the next pass takes the remedy again. */
+function reviewSetupRefusalRecorded(ledgerLines: ReadonlyArray<Record<string, unknown>>, pr: OpenPrView, remedied: boolean): boolean {
+  const held = pr.reviewSetupRefused;
+  return ledgerLines.some((row) => row.pr_number === pr.prNumber && row.head_sha === pr.headSha &&
+    row.review_input_digest === pr.reviewInputDigest && (remedied
+    ? row.step === PARKED_PR_REMEDY_STEP && row.cause === reviewSetupRefusalCause(held?.reason ?? "") && row.outcome === "taken"
+    : row.step === REVIEW_SETUP_REFUSAL_ESCALATED_STEP));
 }
 
 /** W1-T5863 — true when a post-review demand would re-admit an input the sweep has already admitted
@@ -8023,6 +8126,9 @@ export interface OpenPrView {
    *  review is required here, and calling its absence decidable would assume permissive on missing
    *  information. `true` routes to the catch-all — blocked-ambiguous, never mergeable. */
   requiredContextsUnreadable?: boolean;
+  /** W1-T13195 — true when this pass's read of the PR's check rollup failed (W1-T521), so
+   *  `checksState` and `reviewState` read "none" without evidence. The PR waits; it is never green. */
+  rollupUnreadable?: true;
   /** W1-T2399 — WHY the required-contexts read was unreadable, captured where the read happens so
    *  the escalation names it without a second GitHub call. Present only on a genuine read failure;
    *  protection that readably declares NO required contexts leaves this undefined. */
@@ -8050,6 +8156,9 @@ export interface OpenPrView {
    *  leaves that count at zero and the post-review demand would re-admit the input every pass.
    *  Undefined means unwired — the bound then never fires, as before this field existed. */
   reviewInputLoop?: ReviewInputLoopFacts;
+  /** W1-T13193 — the review setup refusals at this exact input by the running reviewer code, set only when one
+   *  reason reached {@link REVIEW_INPUT_ADMISSION_BACKSTOP}. Undefined: no hold, the review is admitted as before. */
+  reviewSetupRefused?: ReviewSetupRefusal;
   /** Most recent completed `review.posted` timestamp for the same exact input counted above.
    *  Refusals never move this clock, having judged no content. Undefined means no completed
    *  attempt is known, and {@link reviewInputBackoffElapsed} then fails toward escalation. */
@@ -10416,6 +10525,8 @@ function conflictFilesFromRow(value: unknown): ConflictFileDiff[] | undefined {
  * `merge_state` alone, never `disposition`/`reason` prose — that field is written only when a pass's
  * OWN effective mergeState (observed or inherited) was known, so hysteresis composes across `unknown` reads on ONE head.
  * W1-T11173: a rung.strike conflict hand-off (`fix.stood_down`) is this head's dirty read, with its last conflict files.
+ * W1-T13195: a `sweep.merge_probe` row for this exact head is a read against its own `main_sha` (clean as clean,
+ * conflict as dirty), so a disposed row from a pass with no main tip cannot hide the probe's main.
  */
 export function lastKnownMergeStateFromLedger(
   lines: ReadonlyArray<Record<string, unknown>>,
@@ -10428,6 +10539,17 @@ export function lastKnownMergeStateFromLedger(
     if (line.step === "fix.stood_down" && line.site === "rung.strike" && line.reason === CONFLICT_REPAIR_HANDOFF_REASON &&
         (line.read_head_sha ?? line.head_sha) === headSha) {
       out = { state: "dirty", ...(typeof line.ts === "string" ? { observedAt: line.ts } : {}), ...(dirtyFiles ? { conflictFiles: dirtyFiles } : {}) };
+      continue;
+    }
+    if (line.step === "sweep.merge_probe") {
+      if (line.pr_number !== prNumber || line.head_sha !== headSha || typeof line.main_sha !== "string") continue;
+      if (line.verdict !== "clean" && line.verdict !== "conflict") continue;
+      const evidence = line.conflict_evidence as MergeConflictEvidence | undefined;
+      const probeFiles = line.verdict === "conflict" && Array.isArray(evidence?.files) && hasCapturedMergeConflictEvidence(evidence)
+        ? evidence!.files : undefined;
+      if (probeFiles) dirtyFiles = probeFiles;
+      out = { state: line.verdict === "conflict" ? "dirty" : "clean", ...(typeof line.ts === "string" ? { observedAt: line.ts } : {}),
+        ...(probeFiles ? { conflictFiles: probeFiles } : {}), mainSha: line.main_sha };
       continue;
     }
     if (line.step !== "sweep.disposed") continue;
@@ -10446,6 +10568,26 @@ export function lastKnownMergeStateFromLedger(
 
 export function mergeInheritanceRefused(known: KnownMergeState | undefined, mainTipSha: string | undefined): boolean {
   return known !== undefined && known.state !== "dirty" && mainTipSha !== undefined && known.mainSha !== mainTipSha;
+}
+
+/** W1-T13195 — the merge facts one `sweep.disposed` row records. A merge_state always names its main:
+ *  this pass's main tip, or, on a pass with no main tip, a main read from this head's newest record. A
+ *  clean or behind takes the main of the same-state record it inherited, and with none records no
+ *  merge_state. A dirty takes the main of the newest record in any state. With no such main a dirty is
+ *  still recorded, without a main: dropping it loses W1-T4470's hysteresis, so the next pass with
+ *  mergeability unread no longer sees the conflict (a-conflicted-pr-is-never-escalated-as-checkless
+ *  fails). A dirty is inherited at any main, so its missing main admits nothing. */
+function disposedMergeFacts(
+  pr: Pick<OpenPrView, "prNumber" | "headSha" | "mergeState">,
+  ledgerLines: ReadonlyArray<Record<string, unknown>>,
+  mainTipSha: string | undefined,
+): { merge_state?: MergeState; merge_main_sha?: string } {
+  if (pr.mergeState === undefined) return {};
+  if (mainTipSha !== undefined) return { merge_state: pr.mergeState, merge_main_sha: mainTipSha };
+  const known = lastKnownMergeStateFromLedger(ledgerLines, pr.prNumber, pr.headSha);
+  if (pr.mergeState === "dirty") return { merge_state: "dirty", ...(known?.mainSha !== undefined ? { merge_main_sha: known.mainSha } : {}) };
+  return known?.state === pr.mergeState && known.mainSha !== undefined
+    ? { merge_state: pr.mergeState, merge_main_sha: known.mainSha } : {};
 }
 
 /**
@@ -12147,6 +12289,9 @@ export function isFixStrikeExhausted(pr: OpenPrView, policy: SweepPolicy): boole
     (pr.priorStrikes >= fixCeilingInForce(pr, policy.strikeCap, policy.clarify) || pr.repeatedFixRefusal !== undefined);
 }
 
+/** W1-T13195 — the wait reason for a PR whose check rollup this pass could not read. */
+const ROLLUP_UNREAD_REASON = "checks and review unread this pass (rollup read failed) — re-reading next pass";
+
 export const DISPOSITION_RULES: readonly DispositionRule[] = [
   {
     // W1-T920 (DECISIONS.md #1987) — ROUTED THROUGH THE EXISTING "stale" disposition, never a new
@@ -12260,6 +12405,17 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     blocker: "other",
     reason: (_pr, policy, ageDays) =>
       `abandoned — no activity in ${Math.floor(ageDays)}d (>= ${policy.staleDays}d threshold)`,
+  },
+  {
+    // W1-T13195 — AN UNREAD ROLLUP IS NEVER GREEN AND NEVER "NONE". A failed rollup read (W1-T521) leaves
+    // checks and review at "none", which the rows below read as zero check runs and no review: an
+    // absent-checks re-push or a "checks none, review none" escalation of a PR whose checks exist.
+    // Ordered before every row that reads checks or review, so the PR is never mergeable, never armed
+    // and never merged on this pass; the next pass reads the rollup again.
+    disposition: "wait",
+    when: (pr) => pr.rollupUnreadable === true,
+    blocker: "awaiting-ci",
+    reason: () => ROLLUP_UNREAD_REASON,
   },
   {
     // W1-T54's dep lane, ROUTED. Before this row dep PRs sat ungated until an operator ran
@@ -12413,6 +12569,22 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     },
     reason: (pr) =>
       `operator answered the clarification question — re-dispatching the fix rung with the added constraint (strike ${pr.priorStrikes + 1})`,
+  },
+  {
+    // W1-T13193 — A REVIEW SETUP REFUSED AT THE SAME INPUT IS NOT RE-ADMITTED EVERY PASS. A refused setup writes no
+    // review.posted row, so the W1-T5863 row below never trips on it. Ordered before every post-review row, this row
+    // holds the demand until the head, the body or the reviewer code changes; runSweep takes one parked-PR
+    // remedy per head and digest (or, with no remedy host, escalates once). The blocker is `other` (owner NONE), not
+    // awaiting-review: no review lane acts on a held review, so the hold climbs W1-T5690's SLO rungs like every other
+    // blocked-ambiguous row, and its reason names the refusal in the pr.stuck diagnosis.
+    disposition: "blocked-ambiguous",
+    blocker: "other",
+    when: reviewSetupRefusalHolds,
+    reason: (pr) => {
+      const held = pr.reviewSetupRefused;
+      return `review setup refused ${held?.count ?? 0} times at head ${pr.headSha.slice(0, 7)} ` +
+        `(${held?.reason ?? "unknown"}) — not re-admitted until the head, body or reviewer code changes`;
+    },
   },
   {
     // W1-T5863 — A REVIEW DEMAND CANNOT RE-ADMIT THE SAME INPUT WITHOUT BOUND. The post-review rows
@@ -16510,22 +16682,36 @@ export function postReviewFailureHistoryDisposition(
   return undefined;
 }
 
-function retryableReviewThrowBackoffReason(
+/** W1-T13257: the first retryable throw waits this long; each further throw on the same review input doubles it. */
+export const REVIEW_THROW_FIRST_BACKOFF_MINUTES = 5;
+
+/** W1-T13257 — A REVIEW THAT THREW ONCE IS RETRIED BEFORE THE STALL BACKSTOP FIRES. The wait after the latest throw is
+ *  `min(5 * 2^(throws - 1), pendingCeilingMinutes)` minutes. A flat pending-ceiling wait (60m) outlasted the 30m
+ *  awaiting-review stage-stall backstop, so one transient host fault (2026-11-16, remudero-console PR 2591: a healed
+ *  worktree with no .git entry) cost the PR an hour and an incident. The strike cap still escalates a repeated throw. */
+export function retryableReviewThrowBackoffMinutes(throws: number, policy: Pick<SweepPolicy, "pendingCeilingMinutes">): number {
+  const n = Number.isFinite(throws) && throws >= 1 ? Math.floor(throws) : 1;
+  return Math.min(REVIEW_THROW_FIRST_BACKOFF_MINUTES * 2 ** Math.min(n - 1, 30), policy.pendingCeilingMinutes);
+}
+
+export function retryableReviewThrowBackoffReason(
   retryableThrows: ReadonlyMap<string, number | undefined>,
   reviewKey: string,
   policy: SweepPolicy,
   now: number,
+  throwCounts?: ReadonlyMap<string, number>,
 ): string | undefined {
   if (!retryableThrows.has(reviewKey)) return undefined;
   const attemptedAt = retryableThrows.get(reviewKey);
   // An undated throw cannot prove that the bound is still live. Admit once; if the condition
   // persists, the existing catch writes a fresh dated row and restores the bounded stand-down.
   if (attemptedAt === undefined) return undefined;
+  const waitMinutes = retryableReviewThrowBackoffMinutes(throwCounts?.get(reviewKey) ?? 1, policy);
   const ageMinutes = Math.max(0, (now - attemptedAt) / 60_000);
-  if (ageMinutes >= policy.pendingCeilingMinutes) return undefined;
+  if (ageMinutes >= waitMinutes) return undefined;
   return (
     `the last post-review attempt for ${reviewKey} threw ${Math.floor(ageMinutes)}m ago — ` +
-    `retry backoff remains inside the ${policy.pendingCeilingMinutes}m pending ceiling; ` +
+    `retry backoff of ${waitMinutes}m (inside the ${policy.pendingCeilingMinutes}m pending ceiling) has not elapsed; ` +
     `this is a retryable transport/process outcome, not a durable review refusal`
   );
 }
@@ -20888,14 +21074,23 @@ export async function runSweep(
     }
     openPrs = next;
   }
-  // W1-T3471: a live miss is not enough to call a verdict absent. Read the bounded archive∪live
-  // union only on that rare path; an unreadable or archive-free corpus stays incomplete so the
-  // historical fail-open remains intact.
-  const readArmLedgerUnion = deps.readLedgerUnion ?? (() => {
-    const union = resolveLedgerUnion(dirname(deps.ledgerPath), ".*", undefined, { step: "review.posted" });
-    if (union.archiveCount === 0 || !union.ok) return { complete: false, lines: [] };
-    return { complete: true, lines: parseLedger(union.matches.join("\n")) };
-  });
+  // W1-T3471: a live miss is not enough to call a verdict absent. W1-T13288: the archive∪live history is
+  // loaded OFF the loop, at most once a pass, before the first arm decision whose live lines miss; the
+  // closure then answers from that snapshot with no I/O. An unread or archive-free corpus stays incomplete,
+  // so the historical fail-open remains intact.
+  let armVerdictHistory: ArmVerdictHistory | undefined;
+  const readArmLedgerUnion = deps.readLedgerUnion ??
+    (() => armVerdictHistory ?? { complete: false, lines: [] });
+  const loadArmVerdictHistory = async (pr: OpenPrView, lines: ReadonlyArray<Record<string, unknown>>): Promise<void> => {
+    if (deps.readLedgerUnion || armVerdictHistory) return;
+    if (postedArmFactsFromLedger(lines, reviewLedgerKeyFor(pr.taskId, pr.prNumber), pr.headSha, pr.prUrl)) return;
+    armVerdictHistory = await readArmVerdictHistory(dirname(deps.ledgerPath));
+    const { load } = armVerdictHistory;
+    log("sweep.arm_verdict_history_read", { complete: armVerdictHistory.complete, rotations: armVerdictHistory.archiveCount,
+      verdict_rows: armVerdictHistory.lines.length, ms: armVerdictHistory.ms,
+      ...(load ? { loaded_rotations: load.rotations, digest_hits: load.digestHits, digest_misses: load.digestMisses } : {}),
+      ...(armVerdictHistory.error !== undefined ? { error: armVerdictHistory.error } : {}) });
+  };
   const prior = priorActionsFromLedger(ledgerLines, openPrs, deps.sampleLoad);
   const freshnessBackoff = async (
     refusals: ReadonlyMap<string, ReviewerCodeFreshnessRefusal>, pr: OpenPrView,
@@ -20938,6 +21133,7 @@ export async function runSweep(
       delivered: prior.reviewDelivered,
       refused: prior.reviewRefused,
       retryableThrows: prior.reviewRetryableThrows,
+      retryableThrowCounts: prior.reviewRetryableThrowCounts,
     }, "full");
   }
   // Rotation retains arm_skipped receipts; sweep.disposed may prefer an older acted:true row.
@@ -20973,6 +21169,7 @@ export async function runSweep(
       : undefined;
   const fullOutcomes: ReviewAdmissionOutcomes = {
     delivered: prior.reviewDelivered, refused: prior.reviewRefused, retryableThrows: prior.reviewRetryableThrows,
+    retryableThrowCounts: prior.reviewRetryableThrowCounts,
   };
   if (deps.repairAdmissionSurface === "full") {
     await resolveUnreadPlanLanes(openPrs.filter((pr) => !reviewAdmissionOutcomeKnown(pr, fullOutcomes, policy, now)), deps, policy, now);
@@ -21819,7 +22016,7 @@ export async function runSweep(
       const deliveredRule = deliveredKeyReviewDecision(pr, delivered, freshLines, reviewKey);
       const durableRefusal = fresh.reviewRefused.has(reviewKey);
       const retryBackoff =
-        retryableReviewThrowBackoffReason(fresh.reviewRetryableThrows, reviewKey, policy, now) ??
+        retryableReviewThrowBackoffReason(fresh.reviewRetryableThrows, reviewKey, policy, now, fresh.reviewRetryableThrowCounts) ??
         await freshnessBackoff(fresh.reviewFreshnessRefusals, pr);
       // W1-T11729: a delivered verdict GitHub's pending status contradicts is restored, not re-reviewed and not deduped silently.
       const restore = deliveredRule.dedups ? undefined : deliveredRule.restore;
@@ -22297,7 +22494,10 @@ export async function runSweep(
         // `lastKnownMergeStateFromLedger`, keyed pr_number+head_sha, so hysteresis persists
         // across any number of consecutive `unknown` reads on the SAME head rather than
         // resetting the moment GitHub goes quiet again.
-        ...(pr.mergeState !== undefined ? { merge_state: pr.mergeState, ...(mainTipSha !== undefined ? { merge_main_sha: mainTipSha } : {}) } : {}),
+        // W1-T13195: a clean or behind state always names its main (see `disposedMergeFacts`).
+        ...disposedMergeFacts(pr, ledgerLines, mainTipSha),
+        // W1-T13195: this pass could not read the PR's check rollup, so its checks and review are unread.
+        ...(pr.rollupUnreadable === true ? { rollup_unreadable: true } : {}),
         ...conflictEvidenceRowFields(pr),
         ...(deduped ? { deduped: true } : {}),
         // W1-T7734: how old the view was when this PR was ACTED on — now minus the generation's publish
@@ -22549,6 +22749,10 @@ export async function runSweep(
       deriveDisposition(dispositionView, policy, actNowMs, dispositionFacts);
     ruleBlockerByIndex.set(prIndex, derived.blocker);
     let { disposition, reason } = derived;
+    // W1-T13193: the review-setup refusal hold, named so the dedup and action arms escalate it once per head and input.
+    const setupRefusalHeld = pr.reviewSetupRefused !== undefined && derived.disposition === "blocked-ambiguous" &&
+      derived.blocker === "other" &&
+      selectDispositionRule(dispositionView, policy, actNowMs, dispositionFacts).rule?.when === reviewSetupRefusalHolds;
     // W1-T9232: a build head cut before its own shard merged is refreshed from main and re-reviewed, never escalated
     // as "contradictory". A refresh that does not take, or a second miss after one, keeps the escalation, named.
     if (ownTaskRecordMissingRow(ledgerLines, pr) !== undefined) {
@@ -23144,6 +23348,7 @@ export async function runSweep(
         : undefined;
     // W1-T7243: capped repairs keep their remedy and counters; the judge chooses whether to repeat it.
     let planShardRepairDue = false;
+    if (proofDiscrimination !== undefined) await loadArmVerdictHistory(pr, ledgerLines);
     if (proofDiscrimination !== undefined && !decideSweepArm(pr, ledgerLines, undefined, readArmLedgerUnion).arm) {
       // W1-T10339: a PR with no task trailer has no plan shard to repair; its body is the Acceptance.
       const bodyRepairOnly = !carriesTaskTrailer(pr);
@@ -23758,6 +23963,13 @@ export async function runSweep(
             : `an escalation was already filed for this head (${pr.headSha.slice(0, 7)}) — the ` +
             `escalation is deduped, not skipped, and a new head re-earns its own`;
         }
+        // W1-T13193: a held review-setup refusal takes one remedy (or one legacy escalation) per head and body digest.
+        if (setupRefusalHeld && disposition === "blocked-ambiguous" && standDownHold === undefined && !strikeLadderDue && !sloLadderDue) {
+          alreadyDone = reviewSetupRefusalRecorded(ledgerLines, pr, deps.parkedPr !== undefined);
+          dedupStandDownReason = alreadyDone
+            ? `${reason} — ${deps.parkedPr ? "the parked-pr remedy is already recorded" : "escalated once"} for this head and input ` +
+              `(${pr.headSha.slice(0, 7)}); no review admitted and no needs-human issue is opened again` : undefined;
+        }
         // An unanswered escalation past its SLO reaches the ladder in the action arm; the dedup still forbids a second issue.
         if (alreadyDone && heldEscalationSlo !== undefined) {
           heldEscalationDedup = dedupStandDownReason;
@@ -23794,7 +24006,7 @@ export async function runSweep(
         const reviewDelivered = deliveredKeyReviewDecision(pr, prior.reviewDelivered.has(reviewKey), ledgerLines, reviewKey).dedups;
         const reviewDurablyRefused = prior.reviewRefused.has(reviewKey);
         const retryBackoff =
-          retryableReviewThrowBackoffReason(prior.reviewRetryableThrows, reviewKey, policy, now) ??
+          retryableReviewThrowBackoffReason(prior.reviewRetryableThrows, reviewKey, policy, now, prior.reviewRetryableThrowCounts) ??
           await freshnessBackoff(prior.reviewFreshnessRefusals, pr);
         alreadyDone = reviewDelivered || reviewDurablyRefused || retryBackoff !== undefined;
         // W1-T2427 — THE SENTENCE MUST SEPARATE FOUR STATES THAT OTHERWISE LOOK IDENTICAL: this
@@ -24063,6 +24275,7 @@ export async function runSweep(
               // down instead — `acted:false` keeps this PR out of `prior.armed`, so the next pass
               // re-derives and arms the moment executed proof or a ledgered override lands.
               const armLines = readLedger(deps.ledgerPath);
+              await loadArmVerdictHistory(pr, armLines);
               const armDecision = decideSweepArm(pr, armLines, undefined, readArmLedgerUnion);
               if (!armDecision.arm) {
                 acted = false;
@@ -24196,6 +24409,7 @@ export async function runSweep(
                 const freshLines = readLedger(deps.ledgerPath);
                 const refused = riskRefusalStands(freshLines, priorActionsFromLedger(freshLines).riskRefused, pr);
                 const stack = deps.stackPrerequisite?.(pr);
+                await loadArmVerdictHistory(pr, freshLines);
                 const parity = decideSweepArm(pr, freshLines, undefined, readArmLedgerUnion);
                 if (automergeHoldFromLedger(freshLines, pr.prNumber) || refused ||
                     (stack && stack.state !== "ready" && stack.state !== "unstacked") || !parity.arm) {
@@ -25629,6 +25843,38 @@ export async function runSweep(
               }
               break;
             case "blocked-ambiguous":
+              if (setupRefusalHeld && standDownHold === undefined && !strikeLadderDue && !sloLadderDue) {
+                // W1-T13193: acted stays false, so a later escalation at this head for another cause is not deduped by this one.
+                const held = pr.reviewSetupRefused!;
+                if (deps.parkedPr) {
+                  // No pull request waits on the operator (W1-T13045): the hold opens no needs-human issue. It takes one
+                  // parked-PR remedy row per head and digest; the row carries the digest, so a fix-on-pr row of another
+                  // body does not stand for this one. A held task, once filed, is reused per pull request and cause.
+                  const cause = reviewSetupRefusalCause(held.reason);
+                  const facts = await parkedPrFacts(pr, { redChecks: redCheckNames(pr).filter(r => !r.startsWith("review:")),
+                    fixModelOrder: policy.fixModelOrder ?? DEFAULT_FIX_MODEL_ORDER }, ledgerLines, deps.parkedPr);
+                  const inputLedger = ledgerLines.filter((row) => !(row.step === PARKED_PR_REMEDY_STEP && row.cause === cause &&
+                    row.remedy === "fix-on-pr" && row.review_input_digest !== pr.reviewInputDigest));
+                  const parked = await takeParkedPrRemedy(pr, parkedPrRemedy(facts), inputLedger, deps.parkedPr, { runId: deps.runId,
+                    ledgerTaskId: escalationTaskIdFor(pr), nowIso: clockFromMillisFn(() => now).iso(), cause,
+                    text: `review setup refused ${held.count} times (${held.reason}) at head ${pr.headSha.slice(0, 7)}, digest ` +
+                      `${pr.reviewInputDigest ?? "unknown"}: ${reason}`,
+                    append: (row) => appendLine(deps.ledgerPath, { ...row, review_input_digest: pr.reviewInputDigest,
+                      refusals: held.count, refusal_reason: held.reason }) });
+                  acted = false;
+                  standDownReason = `${reason} — parked-pr remedy ${parked.remedy} (W1-T13193): ${parked.reason}; ` +
+                    "no needs-human issue is opened";
+                  break;
+                }
+                // Legacy, with no remedy host wired: the hold's own row keys its dedup, like the ownership escalation.
+                appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: escalationTaskIdFor(pr), step: REVIEW_SETUP_REFUSAL_ESCALATED_STEP,
+                  pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha, review_input_digest: pr.reviewInputDigest,
+                  reason: held.reason, refusals: held.count, reviewer_code_sha: held.reviewerCodeSha });
+                await deps.escalate(pr, reason, question ?? renderClarificationQuestion(pr, reason, pr.strikeHistory ?? []));
+                acted = false;
+                standDownReason = `${reason} — escalated once for this head and input; no review admitted`;
+                break;
+              }
               {
                 const dirtyFleetRebase = await applyDirtyFleetRebase(pr);
                 if (dirtyFleetRebase.handled) {
@@ -27304,7 +27550,7 @@ export function observeLightPassReviewEligibility(
   }
   observeReviewEligibility(views, deps, policy, now, lines, {
     delivered: prior.reviewDelivered, refused: prior.reviewRefused,
-    retryableThrows: prior.reviewRetryableThrows, freshnessBackoffs,
+    retryableThrows: prior.reviewRetryableThrows, retryableThrowCounts: prior.reviewRetryableThrowCounts, freshnessBackoffs,
   }, "light");
   return lines;
 }
@@ -27521,6 +27767,7 @@ async function runSweepLightPassCore(
     delivered: selectionPrior.reviewDelivered,
     refused: selectionPrior.reviewRefused,
     retryableThrows: selectionPrior.reviewRetryableThrows,
+    retryableThrowCounts: selectionPrior.reviewRetryableThrowCounts,
     freshnessBackoffs,
   };
   observeReviewEligibility(openPrs, deps, policy, now, selectionLedgerLines, outcomes, "light");
@@ -28128,6 +28375,8 @@ export interface ReviewAdmissionOutcomes {
   refused: ReadonlySet<string>;
   /** W1-T2753: optional for compatibility with callers predating timed throw backoff. */
   retryableThrows?: ReadonlyMap<string, number | undefined>;
+  /** W1-T13257: throws per review key, which size the retry backoff; absent reads as one throw. */
+  retryableThrowCounts?: ReadonlyMap<string, number>;
   freshnessBackoffs?: ReadonlySet<string>;
 }
 
@@ -28150,7 +28399,7 @@ function reviewAdmissionOutcomeKnown(
     outcomes.delivered.has(key) ||
     outcomes.refused.has(key) ||
     outcomes.freshnessBackoffs?.has(key) === true ||
-    retryableReviewThrowBackoffReason(outcomes.retryableThrows ?? EMPTY_RETRYABLE_REVIEW_THROWS, key, policy, now) !==
+    retryableReviewThrowBackoffReason(outcomes.retryableThrows ?? EMPTY_RETRYABLE_REVIEW_THROWS, key, policy, now, outcomes.retryableThrowCounts) !==
       undefined
   );
 }

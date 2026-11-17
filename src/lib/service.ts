@@ -153,6 +153,30 @@ export interface IdentityProvider {
   /** W1-T4244 — a PER-REQUEST grant, used instead of `grant` when present: its own `tier`/`actor`
    *  replace {@link writeTier}. `undefined` means "not mine"; answer it synchronously (see {@link grantedScopes}). */
   authorize?(req: IncomingMessage, allowQueryToken: boolean): IdentityResolution | undefined | Promise<IdentityResolution | undefined>;
+  /** W1-T13181 — why this provider granted nothing to `req`, read only once every provider has
+   *  refused it (401). A fixed word, never a credential value; absent reads as `not_granted`. */
+  refusalReason?(req: IncomingMessage, allowQueryToken: boolean): ProviderRefusalReason;
+}
+
+/** W1-T13181 — the kinds of credential a request carried. Names a kind only, never a value. */
+export type PresentedCredential = "bearer" | "operator_session" | "access" | "tailnet_identity" | "none";
+
+/** W1-T13181 — the fixed words a provider uses to say why it granted nothing. */
+export type ProviderRefusalReason =
+  | "no_credential"
+  | "unknown_token"
+  | "malformed_header"
+  | "expired_session"
+  | "unknown_session"
+  | "unverified_access"
+  | "untrusted_identity"
+  | "other_route"
+  | "not_granted";
+
+/** W1-T13181 — one provider's answer on a `service.unauthorized` row. */
+export interface ProviderRefusal {
+  provider: string;
+  reason: ProviderRefusalReason;
 }
 
 /** What an {@link IdentityProvider.authorize} hands back for a request it verified (W1-T4244). */
@@ -439,6 +463,8 @@ function tailscaleIdentityProvider(identity: IdentityAuth): IdentityProvider {
   return {
     name: "tailscale-identity",
     grant: (req) => identityGrantedScopes(identity, req),
+    // An identity header on an untrusted address, unparsed, or without the capability: all untrusted.
+    refusalReason: (req) => (headerValue(req, "tailscale-app-capabilities") ? "untrusted_identity" : "no_credential"),
     // W1-T404: the interface+allowlist gates are stronger than a pasted secret, so this grantor keeps
     // reaching every tier.
     writeTier: "high",
@@ -456,6 +482,11 @@ function bearerTokenProvider(tokens: ServiceTokens): IdentityProvider {
       if (safeEqual(token, tokens.write)) return READ_WRITE;
       if (safeEqual(token, tokens.read)) return READ_ONLY;
       return undefined;
+    },
+    // Read only on a 401, when no provider granted: a token present here matched no configured token.
+    refusalReason: (req, allowQueryToken) => {
+      if (bearerToken(req) ?? (allowQueryToken ? queryToken(req) : undefined)) return "unknown_token";
+      return req.headers.authorization !== undefined ? "malformed_header" : "no_credential";
     },
     // W1-T404 design (v), THE SHARPEST RULING: an EXISTING write credential resolves to `"low"`, never
     // higher — a deliberate break from one token reaching every write route. Defaulting to `"high"`
@@ -475,6 +506,11 @@ export function ingestTokenProvider(opts: { token: string; method: Method; path:
       const path = new URL(req.url ?? "/", "http://localhost").pathname;
       if (method !== opts.method || path !== opts.path) return undefined;
       return READ_WRITE;
+    },
+    refusalReason: (req) => {
+      const token = bearerToken(req);
+      if (!token) return "no_credential";
+      return safeEqual(token, opts.token) ? "other_route" : "unknown_token";
     },
     writeTier: "low",
   };
@@ -607,6 +643,7 @@ export function cloudflareAccessIdentityProvider(opts: CloudflareAccessOptions):
         return undefined;
       }
     },
+    refusalReason: (req) => (headerValue(req, "cf-access-jwt-assertion") ? "unverified_access" : "no_credential"),
     // design (v), PROPOSED and argued on merits, not copied from either built-in grantor: the
     // identity here is strongly verified (a signed assertion, not a bearer secret a header could
     // forge) but reachable from ANY network, unlike `tailscaleIdentityProvider` (`high`, gated on
@@ -836,31 +873,47 @@ export async function verifyOperatorSession(
 export function operatorSessionIdentityProvider(opts: OperatorSessionOptions): IdentityProvider {
   const clock = opts.clock ?? systemClock;
   const log = opts.log ?? (() => {});
+  // W1-T13181: each refused request's reason, kept until the 401 row reads it; weak, so it dies with the request.
+  const refused = new WeakMap<IncomingMessage, ProviderRefusalReason>();
   return {
     name: "operator-session",
     grant: () => undefined,
     authorize: (req) => {
-      const raw = req.headers[OPERATOR_SESSION_HEADER];
-      const token = Array.isArray(raw) ? raw[0] : raw;
+      const token = headerValue(req, OPERATOR_SESSION_HEADER);
       if (!token) return undefined; // not my credential -- answered synchronously, see grantedScopes.
-      return verifyAndResolve(token);
+      return verifyAndResolve(req, token);
+    },
+    refusalReason: (req) => {
+      if (!headerValue(req, OPERATOR_SESSION_HEADER)) return "no_credential";
+      return refused.get(req) ?? "unknown_session";
     },
   };
 
-  async function verifyAndResolve(token: string): Promise<IdentityResolution | undefined> {
+  async function verifyAndResolve(req: IncomingMessage, token: string): Promise<IdentityResolution | undefined> {
     try {
       const verdict = await verifyOperatorSession(token, opts, clock.now());
       if (!verdict.ok) {
+        refused.set(req, operatorSessionRefusalReason(verdict.reason));
         log("service.operator_session_refused", { reason: verdict.reason });
         return undefined;
       }
       return { scopes: READ_WRITE, tier: verdict.tier, actor: `operator:${verdict.sub}` };
     } catch (e) {
       // A token that cannot even be decoded is refused and recorded, never thrown into dispatch.
+      refused.set(req, "malformed_header");
       log("service.operator_session_refused", { reason: "malformed", error: String((e as Error)?.message ?? e) });
       return undefined;
     }
   }
+}
+
+/** W1-T13181 — the `service.unauthorized` word for an {@link OperatorSessionRefusal}: a session past
+ *  its time window is `expired_session`, one that cannot be parsed is `malformed_header`, and one no
+ *  key, issuer, origin or operator list vouches for is `unknown_session`. */
+function operatorSessionRefusalReason(reason: OperatorSessionRefusal): ProviderRefusalReason {
+  if (reason === "expired" || reason === "not_yet_valid") return "expired_session";
+  if (reason === "malformed") return "malformed_header";
+  return "unknown_session";
 }
 
 /**
@@ -890,6 +943,28 @@ function grantedScopes(
     if (scopes) return { scopes, provider: provider.name, tier: provider.writeTier, readSensitivity: provider.readSensitivity };
   }
   return undefined;
+}
+
+/** One header's first value, or `undefined` when absent or empty. */
+function headerValue(req: IncomingMessage, name: string): string | undefined {
+  const raw = req.headers[name];
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  return value ? value : undefined;
+}
+
+/** W1-T13181 — the credential KINDS `req` carried, by header presence alone: no value is read out. */
+function presentedCredentials(req: IncomingMessage, allowQuery: boolean): PresentedCredential[] {
+  const kinds: PresentedCredential[] = [];
+  if (req.headers.authorization !== undefined || (allowQuery && queryToken(req))) kinds.push("bearer");
+  if (headerValue(req, OPERATOR_SESSION_HEADER)) kinds.push("operator_session");
+  if (headerValue(req, "cf-access-jwt-assertion")) kinds.push("access");
+  if (headerValue(req, "tailscale-app-capabilities")) kinds.push("tailnet_identity");
+  return kinds.length > 0 ? kinds : ["none"];
+}
+
+/** W1-T13181 — every provider's fixed refusal word for a request none of them granted. */
+function providerRefusals(providers: readonly IdentityProvider[], req: IncomingMessage, allowQuery: boolean): ProviderRefusal[] {
+  return providers.map((p) => ({ provider: p.name, reason: p.refusalReason?.(req, allowQuery) ?? "not_granted" }));
 }
 
 function toGrant(provider: IdentityProvider, resolved: IdentityResolution): IdentityGrant {
@@ -1040,7 +1115,13 @@ function createRoutedServer(opts: ServiceOptions): Server {
       const pending = grantedScopes(providers, req, allowQuery);
       const granted = pending instanceof Promise ? await pending : pending;
       if (!granted) {
-        log("service.unauthorized", { method, path });
+        // W1-T13181: name the credential kinds and each provider's reason -- never a value or digest.
+        log("service.unauthorized", {
+          method,
+          path,
+          presented: presentedCredentials(req, allowQuery),
+          refusals: providerRefusals(providers, req, allowQuery),
+        });
         sendJson(res, 401, { error: "unauthorized" });
         return;
       }

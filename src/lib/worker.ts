@@ -72,7 +72,7 @@ import {
   type WorkerProviderId,
 } from "./config.js";
 import { assertModelAllowed } from "./model-gate.js";
-import { chooseDraftDeployment, readDraftStats, recordDraftRouting, type DraftStats, type DraftChoice, type DraftOutcome } from "./draft-routing.js";
+import { chooseDraftDeployment, recordDraftRouting, type DraftStats, type DraftChoice, type DraftOutcome } from "./draft-routing.js";
 import { sdkUsageReadingCase } from "./headroom.js";
 import {
   detectCompactionEvents,
@@ -1151,6 +1151,10 @@ export function workerEgressMode(raw: string | undefined): WorkerEgressMode {
   return raw === "enforce" || raw === "off" ? raw : "observe";
 }
 
+/** W1-T11075: the routing trial a judge's cash shadow call carries. Like the inbox bake-off, a single named model
+ *  pins the deployment, so the shadow asks exactly the deployment its mount row declares. */
+export const JUDGE_SHADOW_TRIAL_ID = "judge-shadow";
+
 export interface SpawnWorkerArgs {
   /** Staged/default off. Requires a fresh explicit Claude spawn and a repository-only toolkit. */
   mcpIsolation?: WorkerMcpIsolation;
@@ -1323,7 +1327,8 @@ export interface SpawnWorkerArgs {
     proposalId: string;
     log: (step: string, extra?: Record<string, unknown>) => void;
     evaluate: (result: WorkerResult) => { clean: boolean; contractFailed: boolean };
-    readStats?: () => DraftStats;
+    /** W1-T13185: the lane's stats, read off the daemon loop: a batch's loaded snapshot, or an awaited slice read. */
+    readStats: () => DraftStats | Promise<DraftStats>;
     random?: () => number;
   };
   /** A departing cash-ladder rung or outer fallback selection, before its successor. A routing
@@ -3124,7 +3129,9 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         config, runId: args.runId, taskId: args.taskId,
         cashSqueezed: args.cashSqueezed === true,
         modelApprovals: config.modelApprovals,
-        ...(args.routingTrial?.id === "inbox-bakeoff" && args.routingTrial.arm === "cash" && args.routingTrial.models?.length === 1
+        // W1-T11075: a judge shadow pins its one deployment the same way, outside the capability row's candidates.
+        ...((args.routingTrial?.id === "inbox-bakeoff" || args.routingTrial?.id === JUDGE_SHADOW_TRIAL_ID) &&
+          args.routingTrial.arm === "cash" && args.routingTrial.models?.length === 1
           ? { bakeoffDeployment: args.routingTrial.models[0] } : {}),
         ...(args.routingTrial?.arm === "cash" && args.routingTrial.models ? { only: args.routingTrial.models } : {}),
       },
@@ -3138,7 +3145,8 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
     if (args.draftRouting) {
       let stats: DraftStats | undefined;
       try {
-        stats = (args.draftRouting.readStats ?? (() => readDraftStats(join(config.root, "state"), args.draftRouting!.lane)))();
+        // W1-T13185: awaited, never a synchronous ledger union on the loop (a 143 s stall on 2026-11-16).
+        stats = await args.draftRouting.readStats();
       } catch (error) {
         draftReadError = String(error);
         recordDraftRouting(args.draftRouting.log, "draft.routing.error", { lane: args.draftRouting.lane, proposal_id: args.draftRouting.proposalId,

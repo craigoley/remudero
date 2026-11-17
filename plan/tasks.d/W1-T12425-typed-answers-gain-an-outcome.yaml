@@ -28,7 +28,7 @@
     - src/lib/typed-answer-scores.ts
     - test/an-analytics-checkpoint-keeps-folds-not-rows.test.ts
     - test/review/typed-answers-gain-an-outcome.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "For each measurable verdict row, the outcome join gives one verdict_calibration.outcome row with the task id, the head sha, the merge sha and the window: reverted for a revert inside the window, followup_fixed for a follow-up fix inside the window, and clean when the merge is older than the window and has neither. A merge younger than the window with neither, and every unmeasurable row, gives no row"
