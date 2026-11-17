@@ -16,7 +16,7 @@
   files:
     - src/lib/escalation-answers.ts
     - test/inbox/escalation-answers-fold-a-refusal-history-of-any-size.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "readEscalationAnswers resolves when the refusal history reader returns a readable history far larger than a spread call can take (hundreds of thousands of rows), and applies an owner's answer in that pass"

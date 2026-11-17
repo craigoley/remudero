@@ -21,7 +21,7 @@
     - src/lib/fold-debt-pull.ts
     - src/lib/sweep.ts
     - test/triage-and-task-id-reservation-run-their-git-and-gh-off-the-daemon-loop.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Triage's remote id reservation (gatedRemoteRefReserver, reserveTaskIdRemote, reserveTaskIdBlockRemote) and releaseTaskIdReservation run their git through hostWorktreeGitAsync when called from the daemon process, and a daemon-loop triage makes 0 calls to hostWorktreeGitResult"

@@ -2422,7 +2422,8 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
   // W1-T7096: production call sites opt into the LLM judge. A caller that wires none (a test
   // fixture) keeps the former bounds as an explicit, judge-shaped stand-in — never a silent LLM spawn.
   const progressJudge: FixProgressJudge = deps.fixProgressJudge ?? (opts.useProductionProgressJudge
-    ? productionFixProgressJudge({ cwd: opts.worktreePath, settingsFile: opts.settingsFile })
+    ? productionFixProgressJudge({ cwd: opts.worktreePath, settingsFile: opts.settingsFile,
+      log: (step, extra) => deps.log(step, extra) })
     : formerBoundStandIn(() => standInEscalates, (step, extra) => deps.log(step, extra), deps.say));
   // W1-T7096: the stand-in reproduces the pre-judge rung EXACTLY — it rules "escalate" at each site where the
   // former fixed rung stopped (a reached bound, an unchanged tree, a ci-log or review false-block) and "continue"

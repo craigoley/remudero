@@ -1,0 +1,106 @@
+- id: W1-T13325
+  title: "The automatic branch reap reads merge credit off the daemon loop: the daemon's reap pass awaits the credit scan that keeps durable digests, not the synchronous whole-union read, so the first reap after a daemon start no longer stalls the loop (106 s and 127 s after the two starts on 2026-11-17)"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # the credit set feeds the reaper's reasons for slug and run branches; a credit read that wrongly names a task as credited mislabels a branch, and a failed read must still leave those branches held
+  origin: "operator-session#loop-lag-2026-11-17"
+  plan_refs:
+    - W1-T12753
+    - W1-T13155
+    - W1-T13185
+    - W1-T13288
+  files:
+    - src/run-task.ts
+    - test/the-automatic-branch-reap-reads-merge-credit-off-the-loop.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "An automatic branch reap pass (runAutomaticBranchReapRung with its production defaults) over a state dir whose merge-credit rows are only in gzip archives reports the same facts as origin/main: a slug branch and a run branch of a credited task are reported credited, those of an uncredited task are not, and a setImmediate turn counter advances while the credit is read: the read is off the loop"
+      proof: "grep: W1-T13325 criterion 1 in test/the-automatic-branch-reap-reads-merge-credit-off-the-loop.test.ts"
+    - claim: "invariant:failed-credit-read-holds — a credit read that throws or rejects leaves the pass without a credit answer: no branch is reported credited or uncredited, slug and run branches are held as at origin/main, and the pass still finishes and ledgers its result"
+      kind: guard
+      proof: "grep: W1-T13325 criterion 2 in test/the-automatic-branch-reap-reads-merge-credit-off-the-loop.test.ts"
+    - claim: "A restarted process reads merge credit from durable digests: after a first pass writes its digests, each archive is overwritten with same-length garbage and its mtime restored, and a pass with a fresh memo still reports the archived credit"
+      proof: "grep: W1-T13325 criterion 3 in test/the-automatic-branch-reap-reads-merge-credit-off-the-loop.test.ts"
+    - claim: "invariant:no-sync-credit-union-in-automatic-reap — the automatic branch reap, with opts.readMergeCreditedTaskIds unset as in its production caller, makes no readLedgerUnionRecordsSync call and no synchronous read of a rotation file while reapBranchesSteps runs"
+      kind: guard
+      proof: "grep: W1-T13325 criterion 4 in test/the-automatic-branch-reap-reads-merge-credit-off-the-loop.test.ts"
+    - claim: "The synchronous command form (reapBranches under runStepsSync, as rmd reap-branches runs it) still reads credit with readMergeCreditedTaskIds and reports the same facts; no promise reaches the synchronous driver"
+      proof: "grep: W1-T13325 criterion 5 in test/the-automatic-branch-reap-reads-merge-credit-off-the-loop.test.ts"
+  rationale: |
+    WHY: the daemon's automatic branch reap asks which plan tasks have merge credit. It asks with the
+    synchronous reader, whose memo lives only in memory. After every daemon start the memo is empty, so the
+    first reap reads and decompresses every ledger rotation on the daemon loop. The daemon restarts on every
+    deploy, about every three hours on 2026-11-16.
+    MEASURED, core ledger (~/rmd-state2/state), daemon.loop_stall_profile rows of the daemon process from
+    2026-11-16T22:05:00Z to 2026-11-17T04:07:46Z (three boots: d5de6540c5 at 20:44:27Z, aa891635ed at 23:50:59Z,
+    9be1ffbcb8 at 03:19:15Z):
+    - 1,898 stall rows. The loop was blocked 11,735.3 s of 21,767 s, 53.9% (overlapping stall windows counted
+      once; the plain sum of lag_ms is 12,990.6 s).
+    - readMergeCreditedTaskIds under automaticBranchReapSteps is in the top inclusive frames of 9 rows: 266.1 s
+      of lag in total, 2.1% of all lag, the largest 126.8 s at 03:41:35Z.
+    - Two rows carry almost all of it, each the first reap after a boot: 00:30:23Z lag 106.3 s
+      (readMergeCreditedTaskIds 64.8 s; boot at 23:50:59Z) and 03:41:35Z lag 126.8 s (77.6 s; boot at
+      03:19:15Z). In both, readLedgerUnionRecordsSync has the same total to within 0.2 s; self time is garbage
+      collection (37.6 s and 44.2 s) and synchronous zlib buffers. sync_spawn_ms is 0.
+    - The other 7 rows are warm passes: readMergeCreditedTaskIds 0.1 s to 2.8 s each. 10
+      branch_reap.sweep.started rows in the window.
+    READ at origin/main 047a84f865:
+    - src/run-task.ts:14521, in reapBranchesSteps (:14456): `(opts.readMergeCreditedTaskIds ??
+      readMergeCreditedTaskIds)(creditPath, { candidates })`, a plain synchronous call inside a Steps
+      generator. candidates is every task id in the plan, so the early stop never fires and the whole union is
+      walked. The reaper needs the answer to say whether a slug branch or a run branch names a credited task
+      (:14601, :14768). A throw leaves creditReadSucceeded false (:14497) and those branches stay held.
+    - src/run-task.ts:33988: automaticBranchReapSteps (:33932) runs reapBranchesSteps with creditLedgerPath and
+      no reader, so the daemon gets the synchronous default. runAutomaticBranchReapRung (:33897) drives it with
+      runStepsEager, which awaits a step that returns a promise.
+    - src/lib/status.ts:834 readMergeCreditedTaskIds reads through readLedgerUnionRecordsSync (:874) with
+      syncCreditScanMemo (:909), a memo with no durable digest: a new process parses every rotation again.
+    - src/lib/status.ts:911 readMergeCreditedTaskIdsAsync answers the same question through
+      readLedgerUnionRecordsMemoized and createCreditScanMemo (:903), whose holder "status.credit-scan" keeps a
+      durable digest per rotation and loads off the loop (W1-T10048). The sweep's credit rung already uses it
+      (src/lib/sweep.ts:29316).
+    - src/run-task.ts:14442 reapBranches runs the same steps under runStepsSync for the rmd reap-branches
+      command, which is not on the daemon loop.
+    NOT COVERED: swept origin/main plan/tasks.d and plan/tasks.yaml for readMergeCreditedTaskIds,
+    automaticBranchReapSteps and reapBranchesSteps. W1-T2720 (merged) wired the credit read into the reaper.
+    W1-T10048 (merged) gave the async scan its digests and did not change this caller. W1-T3019, W1-T2280 and
+    W1-T3223 are about what counts as credit. W1-T13155, W1-T13185 and W1-T13183 (merged) and W1-T13288 (in
+    review) are other reads. No open PR on craigoley/remudero names the branch reap's credit read.
+  design: |
+    INVARIANT no-sync-credit-union-in-automatic-reap: the daemon's automatic branch reap never calls readLedgerUnionRecordsSync and reads no rotation file synchronously for merge credit.
+    INVARIANT failed-credit-read-holds: a credit read that throws or rejects gives no credit answer, so slug and run branches stay held, as at origin/main.
+    1. ReapBranchesOpts.readMergeCreditedTaskIds (src/run-task.ts:14404) may return its result or a promise of
+       it. reapBranchesSteps reads it with `yield* step(() => read(creditPath, { candidates }))` inside the
+       existing try at :14520, so runStepsAsync and runStepsEager await it and a rejection reaches the same
+       catch.
+    2. automaticBranchReapSteps (:33988) passes readMergeCreditedTaskIdsAsync (src/lib/status.ts:911) as the
+       reader. Nothing else changes for the daemon: same candidates, same credited set, same ledger rows.
+    3. The synchronous form (reapBranches, :14442) keeps the synchronous default, so runStepsSync never gets a
+       promise. reapBranchesAsync (:14447) may take the async reader too if its callers run on the daemon loop;
+       say which in the PR.
+    4. No new memo, holder, env var, bound or window. src/lib/status.ts does not change: the async reader's
+       result has every field the synchronous one has.
+    5. TESTS in test/the-automatic-branch-reap-reads-merge-credit-off-the-loop.test.ts use a fixture state dir
+       with real gzip archives and the real union, and drive runAutomaticBranchReapRung with a fake exec for
+       git and gh, as test/branch-reap-batched-facts.test.ts and
+       test/the-branch-reap-reuses-the-parsed-plan.test.ts do. Criterion 3 passes a fresh createCreditScanMemo,
+       as the W1-T10048 tests do. Criterion 4 counts synchronous reads through the ledger fs deps or a spy on
+       the ledger-union module.
+  falsifier: |
+    At origin/main the automatic pass calls the synchronous reader: the setImmediate counter reads 0 turns
+    during the read (criterion 1) and the sync-read count is not 0 (criterion 4). A fresh process over the
+    garbage archives parses them and finds no credit (criterion 3). Give the async reader to the synchronous
+    driver: reapBranches gets a promise where it expects a credit set and criterion 5 fails. Treat a rejected
+    read as an empty credit set: criterion 2 reports branches as uncredited where it must report nothing.
+  note: |
+    Id reserved for run-unfiled-1794888412000 with ~/rmd-work/bin/reserve-id.sh.
+    Proof that counts in production: no daemon.loop_stall_profile row with readMergeCreditedTaskIds under
+    automaticBranchReapSteps above 5 s, over a day with at least one daemon start.
+    Out of scope: the other synchronous callers of readMergeCreditedTaskIds (src/run-task.ts:22303 and :38866,
+    src/lib/tick-read-worker.ts:2520), which did not appear in a stall profile in this window.

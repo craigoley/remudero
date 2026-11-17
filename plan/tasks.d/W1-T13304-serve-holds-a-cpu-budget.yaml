@@ -16,7 +16,7 @@
     - src/lib/incident-invariants.ts
     - src/lib/serve-supervisor.ts
     - test/serve-holds-a-cpu-budget.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The supervisor writes one serve.cpu_budget row an hour with the container's cgroup usage_usec delta, the boot seconds inside the hour (from serve.cold_start rows), and steady_cores = (usage outside boots) / (seconds outside boots)"

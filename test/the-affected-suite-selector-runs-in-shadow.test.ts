@@ -480,6 +480,31 @@ test("W1-T6751: the precheck census is selected for each recorded miss edge", ()
   assert.ok(!absent.narrow?.includes(census), "the narrow candidate also excludes an absent suite");
 });
 
+test("W1-T9588: the shipped-detector suite is selected for each recorded miss edge", () => {
+  const suite = "test/a-shipped-detector-exits-one-and-is-wired-to-nothing.test.ts";
+  const edges = [
+    "src/lib/ledger.ts",
+    "src/lib/operator-interventions.ts",
+    "src/lib/replay-harness.ts",
+    "src/lib/run-child.ts",
+    "src/run-child-main.ts",
+    "src/run-task.ts",
+    "test/a-build-run-executes-in-a-detached-child.test.ts",
+    "test/run-child-shadow-a-probe-child-records-what-a-run-child-costs.test.ts",
+  ];
+  const files = new Map([...Object.entries(TREE), [suite, ""]]);
+  for (const changed of edges) {
+    if (changed.startsWith("test/")) files.set(changed, "export {};\n");
+    const selection = selectAffectedSuites([changed], { files, pathReaders: [], symbolSuites: [] });
+    assert.equal(selection.fullRun, false, changed);
+    assert.ok(selection.suites.includes(suite), `${changed} must select ${suite} in the floor`);
+  }
+  const unrelated = selectAffectedSuites(["src/a.ts"], { files, pathReaders: [], symbolSuites: [] });
+  assert.ok(!unrelated.suites.includes(suite), "an unrelated change must not select the suite");
+  const absent = selectAffectedSuites([edges[0]!], { files: new Map(Object.entries(TREE)), pathReaders: [], symbolSuites: [] });
+  assert.ok(!absent.suites.includes(suite), "a suite absent from the tree cannot be selected");
+});
+
 test("W1-T4404: a config or lockfile change selects the full suite", () => {
   for (const file of ["package.json", "package-lock.json", "tsconfig.json", ".github/workflows/ci.yml", "test/helpers/git-repo.ts", "test/fixtures/x.json", ".nvmrc"]) {
     const sel = select(["src/a.ts", file]);

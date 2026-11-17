@@ -15,7 +15,7 @@
     - test/sweep/a-review-that-threw-is-retried-before-the-stall-backstop-fires.test.ts
     - test/post-review-throw-backoff.test.ts
     - test/ledger/check-test-test-post-review-throw-backoff-test-ts.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "After the first retryable post-review throw on an unchanged review input, the sweep admits that review again once 5 minutes have passed, not only after the pending ceiling"

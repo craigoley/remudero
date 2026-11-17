@@ -328,6 +328,26 @@ export function idleLaneCauseForStep(
   }
 }
 
+/**
+ * W1-T10423: the hold a `selection_empty` slot carries, so the detector names it instead of `selection_empty:unnamed`.
+ * Refusals are summarised by count per reason; a reason with a zero count is not a refusal. Undefined when none was
+ * recorded, which is the only case that still reads `:unnamed`.
+ */
+export function selectionRefusalReason(counts: Readonly<Record<string, number>>, fallback?: string): string | undefined {
+  const parts = Object.entries(counts).filter(([, n]) => n > 0).map(([reason, n]) => `${reason}=${n}`);
+  if (parts.length > 0) return `selection refused: ${parts.join(", ")}`;
+  return fallback;
+}
+
+/**
+ * W1-T10423: the hold a refill's own `dispatch.lane_refill_held` reason names when selection found nothing — the text
+ * behind `no disjoint runnable task...` or a priority reservation. Other reasons have their own cause and hold.
+ */
+export function selectionHoldForStep(step: string, fields?: { reason?: unknown }): IdleLaneHold | undefined {
+  if (step !== "dispatch.lane_refill_held" || typeof fields?.reason !== "string") return undefined;
+  return /^(?:no disjoint runnable task|priority reservation)/.test(fields.reason) ? { reason: fields.reason } : undefined;
+}
+
 /** A PAUSE detail naming the container recycle is the fleet's own drain; any other detail is an operator's hold; none is `pause`. */
 function pauseCauseOf(detail: unknown): IdleLaneCause {
   if (typeof detail !== "string" || detail.length === 0) return "pause";
