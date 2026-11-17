@@ -173,7 +173,9 @@ test("W1-T12142 criterion 6: the production cadence invokes the real result pass
       now: () => new Date(ts), verifyHumanCadenceResult: async () => { throw new Error("fixture stops sibling work"); } });
     await assert.rejects(hooks.runMeasurementCadence(), /fixture stops sibling work/);
     const rows = readFileSync(join(root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map(line => JSON.parse(line));
-    assert.equal(rows.length, ROUTING_EXPERIMENTS.length);
+    // W1-T13445: an experiment that starts after `today` writes no row yet (routing-experiment-result.ts skips it),
+    // so the count is every experiment already started by the fixture day, not the whole table.
+    assert.equal(rows.length, ROUTING_EXPERIMENTS.filter(e => e.startedOn <= today).length);
     assert.ok(rows.every(row => row.step === "routing.experiment.result" && row.day === today));
     await assert.rejects(hooks.runMeasurementCadence(), /fixture stops sibling work/);
     assert.equal(readFileSync(join(root, "state", "ledger.ndjson"), "utf8").trim().split("\n").length, rows.length);
