@@ -18,6 +18,7 @@
     - openapi/daemon.yaml
     - packages/api-client/src/schema.d.ts
     - test/every-view-body-matches-its-schema.test.ts
+    - test/a-view-with-no-switch-is-not-built.test.ts
     - test/the-inbox-thread-view-is-built-with-no-switch.test.ts
   status: queued
   attempts: 0
