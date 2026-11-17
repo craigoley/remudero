@@ -5,8 +5,9 @@
   type: implement
   verify: auto
   risk: "medium"
-  priority: 2
-  status: queued
+  status: blocked
+  retirement: retired
+  # operator 2026-11-17T20:01Z (Inbox decision card, thread "Recommend decisions for waiting Inbox asks"): retire W1-T9392 — title, rationale and proof disagree, and it depends on W1-T9391, which was never built.
   # backlog gardener: band=2 evidence=0e079ac997fd547e
   attempts: 0
   files:

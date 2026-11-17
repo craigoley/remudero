@@ -1,9 +1,13 @@
 import { operatorReleasePin } from "#src/lib/operator-release.js";
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { createHash } from "node:crypto";
+import { test, type TestContext } from "node:test";
 
-import { RELEASE_LEDGER_STEP, assertRunnable, parseTasksFromYaml, releasedTaskIds as readReleasedTaskIds } from "#src/lib/plan.js";
-import { nextRunnable, resolveReleasedIds, runDrain } from "#src/lib/drain.js";
+import { RELEASE_LEDGER_STEP, assertRunnable, loadPlan, parseTasksFromYaml, releasedTaskIds as readReleasedTaskIds } from "#src/lib/plan.js";
+import { nextRunnable, resolveReleasedIds, resolveReleases, runDrain } from "#src/lib/drain.js";
+import { OPERATOR_RELEASES_FILE, readOperatorReleaseRecords } from "#src/lib/machine-filing-judge.js";
+import { readOpsCatalogSnapshotAsync, type OpsCatalogApi } from "#src/lib/ops-catalog-source.js";
+import { composeSecondaryPlan } from "#src/lib/task-lookup.js";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -334,4 +338,198 @@ test("W1-T3216: an unknown but well-formed task id is refused AS A TASK, not as 
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
+});
+
+// ══ W1-T13386 — A PARKED TASK THAT ONLY THE SECOND CATALOG HOLDS ═══════════════════════════════
+//
+// The symptom, on the fleet host: `rmd approve <id>` said "unknown task '<id>' (not found in
+// …/plan/tasks.yaml)" for a queued verify:human task that the host's second catalog holds. The verb
+// read the local checkouts only, so it could release no such task. Each test below drives the real command.
+
+const OPS_REPOSITORY = "fixture-private/ops", OPS_ID = "W1-T900201", PUBLIC_ID = "W1-T1041", NOWHERE_ID = "W1-T900299";
+const shardText = (id: string): string =>
+  `- id: ${id}\n  title: Fixture ${id}\n  repo: remudero\n  depends_on: []\n  type: implement\n  verify: human\n  status: queued\n`;
+
+/** The release pin as origin/main computed it before W1-T13386, written out: sorted keys, undefined dropped,
+ *  verify forced to auto, and only sourcePath, attempts and risk_ruling left out. */
+function pinBeforeThisTask(task: object): string {
+  const stable = (value: unknown): string => {
+    if (Array.isArray(value)) return `[${value.map(stable).join(",")}]`;
+    if (value !== null && typeof value === "object") {
+      const record = value as Record<string, unknown>;
+      return `{${Object.keys(record).filter(k => record[k] !== undefined).sort().map(k => `${JSON.stringify(k)}:${stable(record[k])}`).join(",")}}`;
+    }
+    return JSON.stringify(value) ?? "null";
+  };
+  const { sourcePath: _source, attempts: _attempts, risk_ruling: _ruling, ...contract } = task as Record<string, unknown>;
+  return createHash("sha256").update(stable({ ...contract, verify: "auto" })).digest("hex");
+}
+
+/** Everything the verb prints, on either stream, for the length of one test. Called once per test. */
+function everythingSaid(t: TestContext): string[] {
+  const said: string[] = [];
+  const say = (...args: unknown[]) => void said.push(args.map(String).join(" "));
+  t.mock.method(console, "log", say);
+  t.mock.method(console, "error", say);
+  return said;
+}
+
+/** A host root: a public plan holding one parked task, a state directory that names the second catalog,
+ *  and that catalog's read-only routes. `transport: "down"` makes every route fail. */
+function hostWithSecondCatalog(t: TestContext, opts: { opsText?: string; destination?: string; transport?: "down" } = {}) {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t13386-`));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const stateDir = join(root, "state"), planPath = join(root, "plan", "tasks.yaml");
+  mkdirSync(join(root, "plan")); mkdirSync(stateDir);
+  writeFileSync(planPath, shardText(PUBLIC_ID));
+  writeFileSync(join(stateDir, "plan-destination.json"), opts.destination ?? JSON.stringify({ repository: OPS_REPOSITORY, kinds: [] }));
+  const text = opts.opsText ?? shardText(OPS_ID);
+  const hash = (s: string) => createHash("sha1").update(s).digest("hex");
+  const commit = hash(text), tree = hash(commit + "root"), plan = hash(commit + "plan");
+  const blob = hash(`blob ${Buffer.byteLength(text)}\0${text}`), calls: string[] = [];
+  const api: OpsCatalogApi = async path => {
+    calls.push(path);
+    if (opts.transport === "down") throw new Error("fixture transport is down");
+    const base = `repos/${OPS_REPOSITORY}`;
+    if (path === base) return { id: 42, full_name: OPS_REPOSITORY, default_branch: "main" };
+    if (path === `${base}/git/ref/heads/main`) return { object: { type: "commit", sha: commit } };
+    if (path === `${base}/git/commits/${commit}`) return { sha: commit, tree: { sha: tree } };
+    if (path === `${base}/git/trees/${tree}`) return { sha: tree, truncated: false, tree: [{ path: "plan", sha: plan, type: "tree", mode: "040000" }] };
+    if (path === `${base}/git/trees/${plan}`) return { sha: plan, truncated: false, tree: [{ path: "tasks.yaml", sha: blob, type: "blob", mode: "100644" }] };
+    assert.equal(path, `${base}/git/blobs/${blob}`, "only pinned read-only fixture routes may run");
+    return { sha: blob, encoding: "base64", size: Buffer.byteLength(text), content: Buffer.from(text).toString("base64") };
+  };
+  const config = { root } as never;
+  const storePath = ledgerPathFor(config), durablePath = join(stateDir, OPERATOR_RELEASES_FILE);
+  return {
+    root, stateDir, planPath, api, calls, config, durablePath,
+    wroteAnything: () => existsSync(storePath) || existsSync(durablePath),
+    rawLines: () => existsSync(storePath) ? readFileSync(storePath, "utf8").split("\n").filter(Boolean) : [],
+    releaseRows(id: string) {
+      return this.rawLines().map(line => JSON.parse(line) as Record<string, unknown>).filter(r => r.step === RELEASE_LEDGER_STEP && r.task_id === id);
+    },
+    durableRecords: () => (JSON.parse(readFileSync(durablePath, "utf8")) as { releases: Record<string, { pin?: string }> }).releases,
+    /** The plan and pin as the daemon's tick has them: its own reader, composed over the public plan. */
+    async tick() {
+      const snapshot = await readOpsCatalogSnapshotAsync({ repository: OPS_REPOSITORY }, api);
+      assert.equal(snapshot.outcome, "ok");
+      const composed = composeSecondaryPlan(loadPlan(planPath), snapshot.plan!);
+      assert.equal(composed.outcome, "ok");
+      if (composed.outcome !== "ok") throw new Error("unreachable");
+      return { plan: composed.plan, pin: operatorReleasePin(composed.plan.byId.get(OPS_ID)!) };
+    },
+  };
+}
+
+/** `rmd --repo-root <host root> approve <rest>`: no plan is handed in, so the verb searches that checkout's own
+ *  plan first, misses, and only then asks the catalogs. This is the order it runs in on a host. */
+async function approveAsTheHostRunsIt(host: ReturnType<typeof hostWithSecondCatalog>, rest: string[]): Promise<number> {
+  const argv = [...process.argv];
+  process.argv.push("--repo-root", host.root);
+  try {
+    return await approveCommand(rest, { config: host.config, taskLookup: { api: host.api } });
+  } finally {
+    process.argv.splice(0, process.argv.length, ...argv);
+  }
+}
+
+test("W1-T13386 criterion 1: approve releases a parked task found only in the ops catalog, with one release row and one durable record pinned as the tick composes it", async t => {
+  const host = hostWithSecondCatalog(t), said = everythingSaid(t);
+  const deps = { config: host.config, planPath: host.planPath, taskLookup: { api: host.api } };
+  const tick = await host.tick();
+  assert.equal(loadPlan(host.planPath).byId.has(OPS_ID), false, "control: the public plan lacks the id");
+
+  assert.equal(await approveCommand([OPS_ID], deps), 0, said.join("\n"));
+  assert.match(said.join("\n"), new RegExp(`${OPS_ID} RELEASED`));
+  const rows = host.releaseRows(OPS_ID);
+  assert.equal(rows.length, 1, "exactly one release row");
+  assert.equal(rows[0]!.run_id, `APPROVE-${OPS_ID}`);
+  assert.equal(rows[0]!.release_pin, tick.pin, "pinned from the record the tick hashes");
+  assert.deepEqual(Object.keys(host.durableRecords()), [OPS_ID], "exactly one durable release record");
+  assert.equal(host.durableRecords()[OPS_ID]!.pin, tick.pin);
+  // The reader the release is for: the tick's release read over its composed plan, from both stores and from each.
+  const stores = { readLedgerLines: () => host.rawLines(), readDurableReleases: () => readOperatorReleaseRecords(host.stateDir) };
+  assert.equal(resolveReleases(stores, tick.plan).ids.has(OPS_ID), true);
+  assert.equal(resolveReleases({ readLedgerLines: stores.readLedgerLines }, tick.plan).ids.has(OPS_ID), true);
+  assert.equal(resolveReleases({ readDurableReleases: stores.readDurableReleases }, tick.plan).ids.has(OPS_ID), true);
+  assert.equal(resolveReleases(stores, tick.plan).ids.has(PUBLIC_ID), false, "the unnamed sibling stays parked");
+
+  // A second bit is not a second release.
+  const ledgerBefore = host.rawLines().join("\n"), durableBefore = readFileSync(host.durablePath, "utf8");
+  assert.equal(await approveCommand([OPS_ID], deps), 0);
+  assert.match(said.at(-1)!, /already released — no second row written/);
+  assert.equal(host.rawLines().join("\n"), ledgerBefore, "the second approve writes no row of any kind");
+  assert.equal(readFileSync(host.durablePath, "utf8"), durableBefore, "and leaves the durable record as it was");
+});
+
+test("W1-T13386 criterion 1: the verb as the host runs it, with no plan path handed in, finds the ops task after its own checkout misses", async t => {
+  const host = hostWithSecondCatalog(t), said = everythingSaid(t);
+  const tick = await host.tick();
+  assert.equal(await approveAsTheHostRunsIt(host, [OPS_ID]), 0, said.join("\n"));
+  assert.match(said.join("\n"), new RegExp(`${OPS_ID} RELEASED`));
+  const rows = host.releaseRows(OPS_ID);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]!.release_pin, tick.pin);
+  assert.deepEqual(Object.keys(host.durableRecords()), [OPS_ID]);
+});
+
+test("W1-T13386 criterion 3: approve names an unreadable ops catalog, writes nothing, and does not call the task unknown", async t => {
+  const cases: Array<{ name: string; host: Parameters<typeof hostWithSecondCatalog>[1]; reason: RegExp; reads: boolean }> = [
+    { name: "the transport fails", host: { transport: "down" }, reason: /\(ops-unreadable\)/, reads: true },
+    { name: "the host file that names the catalog is not JSON", host: { destination: "{not json" }, reason: /\(destination-unreadable\)/, reads: false },
+    { name: "the catalog repeats a public id, so the tick composes no plan from the two", host: { opsText: shardText(OPS_ID) + shardText(PUBLIC_ID) },
+      reason: /\(compose-duplicate_task_id\)/, reads: true },
+  ];
+  const everything = everythingSaid(t);
+  for (const { name, host: shape, reason, reads } of cases) {
+    // With the plan handed in, and as the host runs the verb, searching its own checkout first.
+    for (const handed of [true, false]) {
+      const host = hostWithSecondCatalog(t, shape), from = everything.length;
+      const code = handed
+        ? await approveCommand([OPS_ID], { config: host.config, planPath: host.planPath, taskLookup: { api: host.api } })
+        : await approveAsTheHostRunsIt(host, [OPS_ID]);
+      const said = everything.slice(from).join("\n"), label = `${name}${handed ? "" : " (no plan path)"}: ${said}`;
+      assert.notEqual(code, 0, label);
+      assert.match(said, reason, `the refusal names the outcome — ${label}`);
+      assert.match(said, new RegExp(`cannot release '${OPS_ID}'.*cannot be read`), label);
+      assert.doesNotMatch(said, /unknown task/, `an unread catalog is not an absent task — ${label}`);
+      assert.equal(host.wroteAnything(), false, `no row and no record — ${label}`);
+      assert.equal(host.calls.length > 0, reads, `control: the catalog read ${reads ? "was" : "was not"} attempted — ${label}`);
+    }
+  }
+});
+
+test("W1-T13386 criterion 4: an id in neither catalog is refused as unknown and nothing is written", async t => {
+  const host = hostWithSecondCatalog(t), said = everythingSaid(t);
+  assert.equal(await approveCommand([NOWHERE_ID], { config: host.config, planPath: host.planPath, taskLookup: { api: host.api } }), 2);
+  assert.match(said.join("\n"), new RegExp(`unknown task '${NOWHERE_ID}' — not in the plan`), "the message origin/main prints for a handed plan");
+  assert.ok(host.calls.length > 4, "control: the ops catalog was read in full before the id was called unknown");
+  assert.equal(host.wroteAnything(), false, "no row and no record");
+
+  const onHost = hostWithSecondCatalog(t), from = said.length;
+  assert.equal(await approveAsTheHostRunsIt(onHost, [NOWHERE_ID]), 2);
+  assert.equal(said.slice(from).join("\n"), `rmd approve: unknown task '${NOWHERE_ID}' (not found in ${onHost.planPath})`,
+    "the message origin/main prints when it searched the checkout itself, word for word");
+  assert.ok(onHost.calls.length > 4, "control: the ops catalog was read here too");
+  assert.equal(onHost.wroteAnything(), false);
+});
+
+test("W1-T13386 criterion 4: a task in the public plan is located, pinned and released as before, with no read of the ops catalog", async t => {
+  const host = hostWithSecondCatalog(t, { transport: "down" }), said = everythingSaid(t);
+  const record = loadPlan(host.planPath).byId.get(PUBLIC_ID)!;
+  assert.equal(await approveCommand([PUBLIC_ID], { config: host.config, planPath: host.planPath, taskLookup: { api: host.api } }), 0, said.join("\n"));
+  assert.equal(host.calls.length, 0, "a public hit opens no private reader");
+  const rows = host.releaseRows(PUBLIC_ID);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]!.run_id, `APPROVE-${PUBLIC_ID}`);
+  assert.equal(rows[0]!.release_pin, pinBeforeThisTask(record), "the pin of a public record is the one origin/main wrote");
+  assert.deepEqual(Object.keys(host.durableRecords()), [PUBLIC_ID]);
+  assert.equal(host.durableRecords()[PUBLIC_ID]!.pin, pinBeforeThisTask(record));
+
+  // And as the host runs the verb: its own checkout holds the id, so the catalogs are never asked.
+  const onHost = hostWithSecondCatalog(t, { transport: "down" });
+  assert.equal(await approveAsTheHostRunsIt(onHost, [PUBLIC_ID]), 0, said.join("\n"));
+  assert.equal(onHost.calls.length, 0);
+  assert.equal(onHost.releaseRows(PUBLIC_ID).length, 1);
+  assert.equal(onHost.releaseRows(PUBLIC_ID)[0]!.release_pin, pinBeforeThisTask(record));
 });

@@ -1,3 +1,4 @@
+import { threadName } from "./thread-names.js";
 import { execFileSync } from "node:child_process";
 import { ghExec, ghExecFile, ghTextAsync } from "./github-transport.js";
 import { DEFAULT_GH_CALL_TIMEOUT_MS, configureGithubInstallationBudget, createNonBlockingGhCallPacer, githubInstallationBudget, parseGhRateLimitHeaders, splitGhHeaderBlock, type GhRateLimitReading } from "./github-transport.js";
@@ -5514,7 +5515,7 @@ export function buildBatchedGithub(
     };
     let worker: Worker;
     try {
-      worker = startWorker(import.meta.url, { workerData: req }, { override: opts.workerUrl });
+      worker = startWorker(import.meta.url, { name: threadName("statusChannels"), workerData: req }, { override: opts.workerUrl });
     } catch (err) {
       // Spawning itself failed (e.g. no worker_threads support) — fall back to the SAME channel walk
       // synchronously on THIS thread, applied through the SAME bookkeeping a landed message uses. The ONE place

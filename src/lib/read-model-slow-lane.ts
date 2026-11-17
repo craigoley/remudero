@@ -16,6 +16,7 @@
  * THIS FILE IS LOADED TWICE, as read-model-worker.ts is: `workerData.kind` gates the thread's
  * branch, whose body is {@link runSlowLaneWorker}, named so a test can run it in-process.
  */
+import { threadName } from "./thread-names.js";
 import { join } from "node:path";
 import { collectCodeHealth } from "./code-health-collector.js";
 import { CODE_HEALTH_INTERVAL_MS, CODE_HEALTH_VIEW_NAME, readCodeHealthInventory } from "./code-health-view.js";
@@ -534,7 +535,7 @@ export function threadSlowLane(opts: {
   let respawn: NodeJS.Timeout | undefined;
   const spawn = (): void => {
     const data: SlowLaneData = { ...opts.config, kind: SLOW_LANE_KIND };
-    const spawned = startWorker(import.meta.url, { workerData: data, resourceLimits: { maxOldGenerationSizeMb: SLOW_LANE_HEAP_MB } }, { override: opts.workerUrl });
+    const spawned = startWorker(import.meta.url, { name: threadName("readModelSlowLane"), workerData: data, resourceLimits: { maxOldGenerationSizeMb: SLOW_LANE_HEAP_MB } }, { override: opts.workerUrl });
     worker = spawned;
     spawned.unref();
     // What the thread said it was doing, held HERE, so a thread that dies mid-unit still names it.

@@ -1,3 +1,4 @@
+import { threadName } from "./thread-names.js";
 import { recordCashAccounting, validCashIdentity, cashIdentityMatches, cashEndpointIdentity, type CashRequestIdentity, type CashReservation, type CashAccountingEvidence } from "./cash-accounting.js";
 import { assertCurrentCanaryPilotReservation, assertCurrentCanaryPilotSettlement,
   reserveCurrentCanaryPilotRequest, settleCurrentCanaryPilotRequest } from "./model-canary-pilot-budget.js";
@@ -1999,7 +2000,7 @@ export function readCodexRuntimeOffThread(
       // `tsx` resolves from the process cwd, which is the target checkout, and that may carry no tsx.
       const loader = pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href;
       probe = workerFactory(new URL("./codex-capacity-probe.mjs", import.meta.url), {
-        workerData: { bin, codexHome: codexHome(config), timeoutMs },
+        name: threadName("codexProbe"), workerData: { bin, codexHome: codexHome(config), timeoutMs },
         execArgv: ["--import", loader],
       });
     } catch (error) {

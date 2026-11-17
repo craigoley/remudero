@@ -1084,6 +1084,27 @@ a member of the Vercel team whose previews must accept its commits. Both are ope
 prerequisites: confirm the email is verified on the intended GitHub account and that account has
 Vercel team access **before** commissioning. This operation adds no token and calls no live service.
 
+### The daemon's spawn helper: on by default, and how to turn it off (W1-T13437)
+
+At boot the daemon starts one small helper process (`src/lib/spawn-helper.ts`). A routed child spawn forks in
+the helper, so the fork does not hold the daemon's loop. The cost of a fork grows with the size of the process
+that forks, and the daemon runs at 1.5 to 2 GB. The helper is on unless `RMD_SPAWN_HELPER` is `off`. Any other
+value, or no value, means on.
+
+To turn it off, set `RMD_SPAWN_HELPER=off` on the daemon container and recycle it (see the section above).
+`RMD_SPAWN_HELPER` is in `deploy/runtime-env-vars.sh`, so a later recycle keeps the value. To turn it on again,
+remove the value or set it to `on`, and recycle. No code change is necessary.
+
+What to watch in the ledger:
+
+- `daemon.spawn_helper`, one row for each boot. `started: true` with the helper's `pid`, or `started: false`
+  with a `reason`: `switch_off`, or `start_failed: <message>`. `value` is the switch value (`unset` when none).
+- `spawn.routed`, one row for each routed spawn. `via: helper` is the normal path. `via: direct` with a `reason`
+  such as `helper_exited: SIGKILL` means the helper is gone and spawns fork from the daemon again. That costs
+  time on the loop but no spawn fails. A request that was in flight when the helper died settles as failed
+  with `helper_died_in_flight` and is never run again.
+- `async_spawn_sync_ms` and `async_spawn_sync_by_caller` on `daemon.alive`: the fork time the loop still pays.
+
 ### Bringing up the console container (`remudero-serve`)
 
 The console the fleet is actually read from — `console.remudero.com` — is a **separate container**,
