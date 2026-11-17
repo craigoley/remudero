@@ -270,6 +270,72 @@ export type RevalidationGuard =
   | "operator-owned-class" | "newer-operator-comment" | "no-citation" | "close-cap" | "refresh-not-due"
   | "comments-unread" | "absence-only-citation" | "condition-reobserved";
 
+// ── Same-key duplicates (W1-T13221) ──────────────────────────────────────────────────────────────
+
+/** Task keys several unrelated escalations share by design: a duplicate there is not a duplicate. */
+const SHARED_LANE_TASK_KEYS = new Set(["daemon", "DAEMON", "PLAN-clarify", "PLAN-expand"]);
+const FLEET_OPENED_FOOTER = "_Opened automatically by Remudero (MASTER-PLAN §4 escalation taxonomy)";
+
+/** An escalation class's family: `BLOCKED-AMBIGUOUS` and `BLOCKED` are one question asked two ways. */
+export function escalationClassFamily(escalationClass: string): string {
+  return escalationClass.split("-")[0]!.toUpperCase();
+}
+
+/** The duplicate key of a fleet-opened escalation, or `undefined` when it never takes part: a GRILL, an
+ *  issue a person opened (no fleet footer), one with no **Task:** or **Class:** line, or a shared lane key. */
+export function duplicateEscalationKey(issue: Pick<RevalidationIssue, "url" | "body">): string | undefined {
+  const taskId = issueTaskId(issue);
+  const escalationClass = issueEscalationClass(issue);
+  if (!taskId || !escalationClass || !issue.body.includes(FLEET_OPENED_FOOTER)) return undefined;
+  if (escalationClassFamily(escalationClass) === "GRILL") return undefined;
+  if (SHARED_LANE_TASK_KEYS.has(taskId) || taskId.startsWith("MODEL-CATALOG")) return undefined;
+  const repo = /github\.com\/([^/]+\/[^/]+)\/issues\//i.exec(issue.url)?.[1]?.toLowerCase() ?? "";
+  return `${repo}|${taskId}|${escalationClassFamily(escalationClass)}`;
+}
+
+/** When the fleet last saw this escalation's condition: its newest observation comment (by its last
+ *  edit), else the issue's own creation — the same source {@link conditionReobserved} reads. */
+export function lastObservedMs(issue: Pick<RevalidationIssue, "createdAt">, comments: readonly RevalidationComment[]): number {
+  let newest = Date.parse(issue.createdAt);
+  for (const c of comments) {
+    if (!/observed the same condition/i.test(c.body ?? "")) continue;
+    const at = Date.parse(c.updatedAt || c.createdAt);
+    if (Number.isFinite(at) && !(at <= newest)) newest = at;
+  }
+  return newest;
+}
+
+/** For each duplicate group of two or more, the issue every other member is superseded by: the one
+ *  observed most recently, else the newest. Returns superseded issue number -> kept issue. */
+export function supersededDuplicates(
+  issues: readonly RevalidationIssue[], observedMs: (issue: RevalidationIssue) => number,
+): Map<number, RevalidationIssue> {
+  const groups = new Map<string, RevalidationIssue[]>();
+  for (const issue of issues) {
+    const key = duplicateEscalationKey(issue);
+    if (key !== undefined) groups.set(key, [...(groups.get(key) ?? []), issue]);
+  }
+  const out = new Map<number, RevalidationIssue>();
+  for (const members of groups.values()) {
+    if (members.length < 2) continue;
+    const rank = (i: RevalidationIssue) => { const at = observedMs(i); return Number.isFinite(at) ? at : -Infinity; };
+    const kept = [...members].sort((a, b) => rank(b) - rank(a) || b.number - a.number)[0]!;
+    for (const m of members) if (m.number !== kept.number) out.set(m.number, kept);
+  }
+  return out;
+}
+
+function supersededComment(kept: RevalidationIssue, issue: RevalidationIssue): string {
+  return [
+    `Closed as not planned by the issue-revalidation garden (W1-T13221): superseded by ${kept.url}.`,
+    "",
+    `**Evidence:** ${kept.url} is open with the same **Task:** ${issueTaskId(issue)} and class family ${escalationClassFamily(issueEscalationClass(issue) ?? "")}, and the fleet observed its condition more recently.`,
+    "**Why:** one open issue per task key keeps the question in one place.",
+    "",
+    "_Reopen this issue if it asks a different question than the kept one._",
+  ].join("\n");
+}
+
 export interface PriorVerdict {
   verdict: RevalidationVerdictKind;
   at: string;
@@ -569,7 +635,8 @@ export interface IssueRevalidationPorts {
    *  that set it. `undefined` when no single shard names the task. THROWS on a failed read. Absent, no
    *  terminal-task rule runs. */
   planTaskState?: (taskId: string) => PlanTaskFact | undefined;
-  close: (issueUrl: string, comment: string) => Promise<void>;
+  /** W1-T13221: `reason` "not planned" closes a superseded duplicate; absent closes as completed. */
+  close: (issueUrl: string, comment: string, reason?: "not planned") => Promise<void>;
   comment: (issueUrl: string, body: string) => Promise<void>;
   /** Files the issue as a feedback entry for the normal triage and filing path; returns its id. */
   fileConversion: (issue: RevalidationIssue, verdict: RevalidationVerdict) => Promise<string>;
@@ -665,6 +732,25 @@ export async function runIssueRevalidationGarden(ports: IssueRevalidationPorts):
     }
   }
 
+  // W1-T13221: read comments once for each member of a duplicate group, to rank it by its last observation.
+  const commentsByIssue = new Map<number, RevalidationComment[]>();
+  const keyed = issues.filter((i) => duplicateEscalationKey(i) !== undefined);
+  const keyCounts = new Map<string, number>();
+  for (const i of keyed) keyCounts.set(duplicateEscalationKey(i)!, (keyCounts.get(duplicateEscalationKey(i)!) ?? 0) + 1);
+  const grouped = keyed.filter((i) => (keyCounts.get(duplicateEscalationKey(i)!) ?? 0) > 1);
+  const unreadGroupMember = new Set<number>();
+  for (const i of grouped) {
+    try {
+      commentsByIssue.set(i.number, await ports.listComments(i.number));
+    } catch (e) {
+      unreadGroupMember.add(i.number);
+      ports.log(ISSUE_REVALIDATION_FAILED_STEP, { stage: "comments", issue_number: i.number, error: String((e as Error)?.message ?? e) });
+    }
+  }
+  // A group with an unreadable member is not ranked this pass: its newest observation is unknown.
+  const readable = grouped.filter((i) => !grouped.some((o) => unreadGroupMember.has(o.number) && duplicateEscalationKey(o) === duplicateEscalationKey(i)));
+  const superseded = supersededDuplicates(readable, (i) => lastObservedMs(i, commentsByIssue.get(i.number) ?? []));
+
   const nowMs = clock.now();
   let judges = 0;
   let closes = 0;
@@ -701,8 +787,15 @@ export async function runIssueRevalidationGarden(ports: IssueRevalidationPorts):
     let judged = false;
     let receiptSource: JudgeReceipt["source"] = "deterministic";
     let stageStallResolved = false;
-    const terminal = await terminalReferent(issue);
-    if (terminal !== undefined) {
+    const keptBy = superseded.get(issue.number);
+    const terminal = keptBy === undefined ? await terminalReferent(issue) : undefined;
+    if (keptBy !== undefined) {
+      verdict = {
+        verdict: "resolved",
+        reason: `a newer open escalation carries the same task key (superseded by #${keptBy.number})`,
+        citation: `superseded by ${keptBy.url}: same **Task:** ${issueTaskId(issue)} and class family ${escalationClassFamily(escalationClass ?? "")}`,
+      };
+    } else if (terminal !== undefined) {
       verdict = terminal;
     } else if (issueClass === "referent") {
       verdict = referents.get(issue.number) ?? { verdict: "unknown", reason: "the referent could not be derived this pass" };
@@ -744,15 +837,20 @@ export async function runIssueRevalidationGarden(ports: IssueRevalidationPorts):
     let reobserved = false;
     if (verdict.verdict !== "unknown") {
       try {
-        const comments = await ports.listComments(issue.number);
+        const comments = commentsByIssue.get(issue.number) ?? await ports.listComments(issue.number);
         spokeLast = operatorSpokeLast(comments, ports.operatorLogins);
         reobserved = escalationClass !== undefined && conditionReobserved(issue, comments, nowMs);
       } catch (e) {
         ports.log(ISSUE_REVALIDATION_FAILED_STEP, { stage: "comments", issue_number: issue.number, error: String((e as Error)?.message ?? e) });
       }
     }
-    let { action, guard } = decideAction({ verdict, escalationClass, operatorSpokeLast: spokeLast, reobserved, stageStallResolved,
-      terminalReferentResolved: terminal !== undefined, prior: before, nowMs });
+    // A superseded duplicate closes past the class and re-observed guards (the kept issue carries the live
+    // question), never past an unread or operator-last comment thread, and counts toward the close cap.
+    let { action, guard } = keptBy !== undefined
+      ? spokeLast === undefined ? { action: "keep" as const, guard: "comments-unread" as const }
+        : spokeLast ? { action: "keep" as const, guard: "newer-operator-comment" as const } : { action: "close" as const }
+      : decideAction({ verdict, escalationClass, operatorSpokeLast: spokeLast, reobserved, stageStallResolved,
+        terminalReferentResolved: terminal !== undefined, prior: before, nowMs });
     if (action === "close" && closes >= policy.maxClosesPerPass) {
       action = "keep";
       guard = "close-cap";
@@ -762,7 +860,8 @@ export async function runIssueRevalidationGarden(ports: IssueRevalidationPorts):
     let acted = false;
     if (policy.mode === "act" && action !== "keep") {
       try {
-        if (action === "close") await ports.close(issue.url, closeComment({ verdict, issueClass }));
+        if (action === "close" && keptBy !== undefined) await ports.close(issue.url, supersededComment(keptBy, issue), "not planned");
+        else if (action === "close") await ports.close(issue.url, closeComment({ verdict, issueClass }));
         else if (action === "refresh") await ports.comment(issue.url, refreshComment({ verdict, issueClass }, clock.iso()));
         else {
           const feedbackId = await ports.fileConversion(issue, verdict);
@@ -1140,9 +1239,9 @@ export function productionIssueRevalidationPorts(opts: ProductionIssueRevalidati
       return { ...parsed.verdict, judgeEvidence: { version: 1, source: observed ? "model" : "legacy", ...identity,
         parser_state: parsed.parser_state, ...(parsed.parsed_verdict ? { parsed_verdict: parsed.parsed_verdict } : {}), evidence_state: parsed.evidence_state } };
     },
-    close: async (url, comment) => {
+    close: async (url, comment, reason) => {
       if (!issues.closeWithComment) throw new Error("the issue gateway cannot close");
-      await issues.closeWithComment(url, comment);
+      await issues.closeWithComment(url, comment, ...(reason ? [reason] as const : []));
     },
     comment: async (url, body) => {
       if (!issues.comment) throw new Error("the issue gateway cannot comment");
