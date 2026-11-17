@@ -19145,9 +19145,32 @@ export interface FixDispatchChildPorts {
   onPhase?: (phase: string) => void;
   /** W1-T12545: merge facts with their response's head SHA. Absent, the child reads fresh REST facts. */
   readMergeFacts?: (prUrl: string) => Promise<{ mergeable?: string; headSha?: string }>;
+  /** W1-T13427: the clock each step's elapsed_ms is read from; absent, performance.now. */
+  stageClock?: () => number;
 }
 
-export type FixDispatchRecheckPorts = Pick<FixDispatchChildPorts, "readLivePr" | "readTask" | "hold" | "readMergeFacts">;
+export type FixDispatchRecheckPorts = Pick<FixDispatchChildPorts, "readLivePr" | "readTask" | "hold" | "readMergeFacts" | "log" | "stageClock">;
+
+/** W1-T13427: runs one step before the fix child's admission and writes its sweep.fix.prepare_timing row, also when the step throws. */
+export function timedFixStage<T>(
+  log: FixDispatchChildPorts["log"], stageClock: (() => number) | undefined,
+  pr: { prNumber: number; headSha: string }, stage: string, run: () => T,
+): T {
+  const clock = stageClock ?? (() => performance.now());
+  const started = clock();
+  const write = (): void => log("sweep.fix.prepare_timing", { pr_number: pr.prNumber, head_sha: pr.headSha, stage, elapsed_ms: clock() - started });
+  let later = false;
+  try {
+    const out = run();
+    if (out instanceof Promise) {
+      later = true;
+      return out.finally(write) as T;
+    }
+    return out;
+  } finally {
+    if (!later) write();
+  }
+}
 
 /** W1-T12545: the envelope at the live head, only for a conflicted decision whose PR still reads CONFLICTING there. */
 export async function conflictedChildHeadAdoption(
@@ -19186,10 +19209,11 @@ export async function recheckFixDispatch(
   envelope: FixDispatchEnvelope, ports: FixDispatchRecheckPorts,
 ): Promise<{ ok: true; adopted?: FixDispatchEnvelope } | { ok: false; reason: string }> {
   const refuse = (reason: string) => ({ ok: false as const, reason });
+  const timed = <T>(stage: string, run: () => T): T => timedFixStage(ports.log, ports.stageClock, envelope.pr, stage, run);
   try {
-    const hold = ports.hold();
+    const hold = timed("child-hold", () => ports.hold());
     if (hold !== undefined) return refuse(`worker admission is held: ${hold}`);
-    const live = await ports.readLivePr(envelope.pr.prUrl);
+    const live = await timed("child-live-pr", () => ports.readLivePr(envelope.pr.prUrl));
     if (live === undefined) return refuse("the PR's live state could not be read");
     if (live.merged === true || live.state.toLowerCase() !== "open") return refuse(`the PR is no longer open (${live.merged === true ? "merged" : live.state})`);
     let adopted: FixDispatchEnvelope | undefined;
@@ -19200,7 +19224,7 @@ export async function recheckFixDispatch(
     }
     const taskId = envelope.pr.taskId;
     if (taskId !== undefined) {
-      const task = ports.readTask(taskId);
+      const task = timed("child-task", () => ports.readTask(taskId));
       if (task.found && task.merged) return refuse(`task ${taskId} is already merged`);
       if (task.found && task.retired) return refuse(`task ${taskId} is retired`);
       if (envelope.planContextDigest !== undefined && (!task.found || task.contextDigest !== envelope.planContextDigest)) {
@@ -19251,7 +19275,7 @@ export async function runFixDispatchChild(inputs: Record<string, unknown>, deps:
   refuseOnHold("before the admission grant");
   let grant: ReturnType<FixDispatchChildPorts["claimFixAdmission"]>;
   try {
-    grant = deps.claimFixAdmission(envelope.pr);
+    grant = timedFixStage(deps.log, deps.stageClock, envelope.pr, "child-admission", () => deps.claimFixAdmission(envelope.pr));
     if (grant?.admitted !== true) throw new Error(grant?.reason ?? "no readable admission grant");
   } catch (error) {
     const reason = `worker admission refused (${String((error as Error)?.message ?? error)})`;
@@ -19261,7 +19285,7 @@ export async function runFixDispatchChild(inputs: Record<string, unknown>, deps:
   try {
     let effects: ReturnType<FixDispatchChildPorts["dispatcher"]>;
     try {
-      effects = deps.dispatcher();
+      effects = timedFixStage(deps.log, deps.stageClock, envelope.pr, "child-effects", () => deps.dispatcher());
     } catch (error) {
       const reason = `the live dependencies could not be reconstructed (${String((error as Error)?.message ?? error)})`;
       deps.log("sweep.fix.child_refused", { pr_number: envelope.pr.prNumber, head_sha: envelope.pr.headSha, reason });
