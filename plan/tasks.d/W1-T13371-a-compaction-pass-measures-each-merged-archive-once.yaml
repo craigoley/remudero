@@ -22,7 +22,7 @@
       proof: "grep: W1-T13371 criterion 1 in test/ledger/a-compaction-pass-measures-each-merged-archive-once.test.ts"
     - claim: "An archive whose name, compressed size or mtime changed since it was measured is measured again"
       proof: "grep: W1-T13371 criterion 2 in test/ledger/a-compaction-pass-measures-each-merged-archive-once.test.ts"
-    - claim: "invariant:oversized-still-repaired — an oversized merged archive is still found and repaired, and an unreadable or corrupt measurement record is ignored, never trusted"
+    - claim: "invariant:oversized-still-repaired — an oversized merged archive is still found and repaired, and an archive whose size or mtime cannot be read is measured on every pass, never trusted"
       proof: "grep: W1-T13371 criterion 3 in test/ledger/a-compaction-pass-measures-each-merged-archive-once.test.ts"
   rationale: |
     WHY: the daemon runs a compaction pass synchronously in its cycle (daemon.ts, runLedgerCompaction ->
@@ -34,15 +34,18 @@
     every pass gunzips all of them. OBSERVED with the real fs on the host 2026-11-17: merged archives are 6-10 MB
     compressed and 45-65 MB decompressed each, about 150 of them.
   design: |
-    INVARIANT oversized-still-repaired: an archive is skipped by the probe only when a record proves it was measured
-    at or under the ceiling with the same basename, compressed size and mtime.
-    1. Keep a small JSON record in the state dir (e.g. ledger-compact-measured.json, not matching ledger.* so union
-       reads never list it): basename -> { size, mtimeMs, bytes }. Write it with writeAtomic after the selection.
-    2. measure() consults the record first and records new measurements. A missing, unparseable or mismatched record
-       entry means "measure again".
-    3. Drop entries whose archive no longer exists, so the record stays bounded by the corpus.
+    INVARIANT oversized-still-repaired: an archive is skipped by the probe only when this process measured it at or
+    under the ceiling with the same path, compressed size and mtime.
+    1. Keep the measurements in a module-level map for the life of the process: path -> { size, mtimeMs, bytes,
+       limit }. The daemon runs every pass in process (run-task.ts, runLedgerCompaction -> ledgerCompactCommand), so
+       later passes reuse earlier measurements. Write NOTHING to the state dir: test/a-compaction-pass-that-cannot-
+       reduce-writes-nothing.test.ts pins that a pass that cannot reduce writes nothing, and a record file there
+       broke 5 of its cases when tried.
+    2. A missing, mismatched or unreadable identity (size or mtime) means "measure again". A measurement taken at a
+       higher limit answers a lower one; an "over" answer never answers a higher limit.
+    3. Drop entries for paths the state dir no longer lists, and forget an output path before an apply pass writes it.
   falsifier: |
-    Ignore the record and criterion 1 fails (the second pass gunzips every merged archive again). Trust a record
+    Ignore the memo and criterion 1 fails (the second pass gunzips every merged archive again). Trust a memo entry
     whose size or mtime differs and criterion 2 fails.
   note: |
     Id reserved for run-unfiled-1794920473534 with ~/rmd-work/bin/reserve-id.sh.
