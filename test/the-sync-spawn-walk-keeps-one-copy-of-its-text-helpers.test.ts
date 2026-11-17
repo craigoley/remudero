@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
-import { codeOnly } from "./helpers/daemon-loop-walk.js";
+import { codeOnly } from "#test/helpers/daemon-loop-walk.js";
 
 const CENSUS = "test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts";
 const HELPER = "./helpers/daemon-loop-walk.js";
