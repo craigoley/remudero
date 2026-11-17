@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { cashDeploymentEndpoint, type Config } from "./config-schema.js";
 import { appendLedger } from "./ledger.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
-import { readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { readLedgerUnionRecords, type OpenLedgerUnionOptions } from "./ledger-union.js";
 import { spendRoleOf } from "./spend-rows.js";
 import { isFoundryClaudeDeployment, OPENWEIGHT_PRICES, type OpenWeightPrice } from "./worker-provider.js";
 
@@ -193,6 +193,14 @@ function meteredRow(deployment: string, price: OpenWeightPrice, tokens: Record<s
   };
 }
 
+/** The ledger union, read off the event loop. `unread` names each file or directory the read could not open. */
+async function unionRows(stateDir: string, opts: OpenLedgerUnionOptions): Promise<{ rows: Record<string, unknown>[]; unread: string[] }> {
+  const unread: string[] = [];
+  const note = (path: string): void => { unread.push(path); };
+  const rows = await readLedgerUnionRecords(stateDir, { ...opts, onUnreadArchive: note, onUnreadLive: note, onUnreadDirectory: note });
+  return { rows, unread };
+}
+
 /** A produced cash receipt row: the unit the reconciler meters. */
 function cashReceipt(row: Record<string, unknown>): boolean {
   return row.provider === "cash" && typeof row.model === "string" && spendRoleOf(row) === "produced" &&
@@ -254,11 +262,11 @@ export function reconcileCashInvoice(input: CashInvoiceInput): CashInvoiceReconc
 
 /** The produced cash receipts from the day's start onward; the reconciler keeps the day itself. Refuses an
  *  incomplete ledger union, because a missing rotation would read as missing traffic. */
-export function readCashInvoiceReceipts(stateDir: string, day: string): Record<string, unknown>[] {
+export async function readCashInvoiceReceipts(stateDir: string, day: string): Promise<Record<string, unknown>[]> {
   if (!DAY.test(day)) throw new Error(`reconcile day must be YYYY-MM-DD, got ${JSON.stringify(day)}`);
-  const read = readLedgerUnionRecordsSync(stateDir, { refuseIncomplete: true, since: `${day}T00:00:00.000Z`,
+  const read = await unionRows(stateDir, { since: `${day}T00:00:00.000Z`,
     where: (row) => cashReceipt(row) && String(row.ts ?? "").slice(0, 10) === day });
-  if (!read.ok) throw new Error(`cash receipts ledger unreadable: ${read.unread.join(", ")}`);
+  if (read.unread.length > 0) throw new Error(`cash receipts ledger unreadable: ${read.unread.join(", ")}`);
   return read.rows;
 }
 
@@ -309,7 +317,7 @@ export type CostExportCandidate = CostExportSource & ({ day: string } | { refuse
  * file has no such day, or when that day and file were already reconciled; so each day and file runs once. A file the
  * parser refuses comes back once as `refused`, so the cadence ledgers why, and is not read again until it changes.
  */
-export function newestCostExport(stateDir: string, today: string, read: (path: string) => string): CostExportCandidate | undefined {
+export async function newestCostExport(stateDir: string, today: string, read: (path: string) => string): Promise<CostExportCandidate | undefined> {
   const dir = join(stateDir, COST_EXPORTS_DIR);
   if (!existsSync(dir)) return undefined;
   const newest = readdirSync(dir, { recursive: true, encoding: "utf8" }).filter((name) => name.toLowerCase().endsWith(".csv"))
@@ -318,7 +326,7 @@ export function newestCostExport(stateDir: string, today: string, read: (path: s
   if (!newest) return undefined;
   const text = read(newest.path);
   const digest = costExportDigest(text);
-  const history = readLedgerUnionRecordsSync(stateDir, { step: [CASH_INVOICE_RECONCILED_STEP, CASH_INVOICE_RECONCILE_FAILED_STEP] }).rows
+  const history = (await readLedgerUnionRecords(stateDir, { step: [CASH_INVOICE_RECONCILED_STEP, CASH_INVOICE_RECONCILE_FAILED_STEP] }))
     .filter((row) => row.export_digest === digest);
   let days: string[];
   try { days = parseCostExport(text).map((row) => row.day); }
@@ -339,8 +347,8 @@ export interface InvoiceVerdictRead {
   newest: Map<string, Record<string, unknown>>;
 }
 
-export function readNewestInvoiceVerdicts(stateDir: string): InvoiceVerdictRead {
-  const read = readLedgerUnionRecordsSync(stateDir, { refuseIncomplete: true, step: CASH_INVOICE_RECONCILED_STEP });
+export async function readNewestInvoiceVerdicts(stateDir: string): Promise<InvoiceVerdictRead> {
+  const read = await unionRows(stateDir, { step: CASH_INVOICE_RECONCILED_STEP });
   const newest = new Map<string, Record<string, unknown>>();
   const order = (row: Record<string, unknown>): string => `${String(row.day ?? "")} ${String(row.ts ?? "")}`;
   for (const row of read.rows) {
@@ -348,7 +356,7 @@ export function readNewestInvoiceVerdicts(stateDir: string): InvoiceVerdictRead 
     const prior = newest.get(row.deployment);
     if (prior === undefined || order(row) >= order(prior)) newest.set(row.deployment, row);
   }
-  return { ok: read.ok, unread: read.unread, newest };
+  return { ok: read.unread.length === 0, unread: read.unread, newest };
 }
 
 /** An arm is open-weight when its deployment's price row does not carry `unbilledAzureOpenAi429`. */

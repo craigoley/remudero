@@ -22487,7 +22487,7 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
       if (deps.recordFire !== false) recordMeasurementCadenceFire(measurementCadenceMarkerPath(root), cadenceClock.date(), 24 * 60 * 60 * 1000);
       const coverageRunId = `MEASUREMENT-CADENCE-${cadenceClock.now()}`;
       await recordRoutingExperimentResults({ stateDir: join(root, "state"), today: cadenceClock.iso().slice(0, 10) });
-      reconcileNewestCostExport(configFor(), cadenceClock);
+      await reconcileNewestCostExport(root, configFor, cadenceClock);
       const verifyHumanRunId = `VERIFY-HUMAN-CADENCE-${cadenceClock.iso()}`;
       // `repoRoot`, NOT `root` (which is `config.root`, the state volume) — see this function's own
       // parameter doc. The sibling `coverageImprovement` below already passes `repoRoot`.
@@ -43442,25 +43442,26 @@ export function capabilityInspectCommand(rest: string[], deps: Pick<AuthorityCom
  * `cash.invoice.reconciled` row per open-weight deployment. The one composition `rmd cash-reconcile` and the
  * measurement cadence share. Reads files and the ledger only; it never sends a request.
  */
-function runCashInvoiceReconcile(config: Config, source: CostExportSource & { day: string }, runId: string): CashInvoiceReconciliation {
+async function runCashInvoiceReconcile(config: Config, source: CostExportSource & { day: string }, runId: string): Promise<CashInvoiceReconciliation> {
   const stateDir = join(config.root, "state");
-  const result = reconcileCashInvoice({ day: source.day, receipts: readCashInvoiceReceipts(stateDir, source.day),
+  const result = reconcileCashInvoice({ day: source.day, receipts: await readCashInvoiceReceipts(stateDir, source.day),
     exportCsv: source.text, accounts: cashInvoiceAccounts(config) });
   recordCashInvoiceVerdicts(stateDir, result, source, runId);
   return result;
 }
 
-/** The measurement cadence's reconcile: the newest export file under `<state>/cost-exports/`, once per day and file. */
-function reconcileNewestCostExport(config: Config, clock: Clock): void {
-  const stateDir = join(config.root, "state");
-  const candidate = newestCostExport(stateDir, clock.iso().slice(0, 10), (path) => readFileSync(path, "utf8"));
+/** The measurement cadence's reconcile: the newest export file under `<state>/cost-exports/`, once per day and file.
+ *  The config is read only when a file waits, so a cadence with no export reads it no extra time. */
+async function reconcileNewestCostExport(root: string, configFor: () => Config, clock: Clock): Promise<void> {
+  const stateDir = join(root, "state");
+  const candidate = await newestCostExport(stateDir, clock.iso().slice(0, 10), (path) => readFileSync(path, "utf8"));
   if (candidate === undefined) return;
   const runId = `CASH-INVOICE-CADENCE-${clock.now()}`;
   if ("refused" in candidate) {
     recordCashInvoiceFailure(stateDir, "unparsed", candidate, runId, new Error(candidate.refused));
     return;
   }
-  try { runCashInvoiceReconcile(config, candidate, runId); }
+  try { await runCashInvoiceReconcile(configFor(), candidate, runId); }
   catch (error) {
     // Recorded, not erased: the ledger row names the day, the file and the reason, the pair is not retried, and the
     // sibling cadence work still runs.
@@ -43469,8 +43470,8 @@ function reconcileNewestCostExport(config: Config, clock: Clock): void {
 }
 
 /** `rmd cash-reconcile --day <YYYY-MM-DD> --export <csv>`. Exit 0 reconciled and ledgered, 1 failed, 2 bad usage. */
-export function cashReconcileCommand(rest: string[], host: { config?: () => Config; clock?: Clock; out?: (line: string) => void;
-  err?: (line: string) => void } = {}): number {
+export async function cashReconcileCommand(rest: string[], host: { config?: () => Config; clock?: Clock; out?: (line: string) => void;
+  err?: (line: string) => void } = {}): Promise<number> {
   const out = host.out ?? ((line: string) => process.stdout.write(`${line}\n`));
   const err = host.err ?? ((line: string) => process.stderr.write(`${line}\n`));
   const bad = unknownArgError("cash-reconcile", rest, ["--day", "--export"]);
@@ -43482,7 +43483,7 @@ export function cashReconcileCommand(rest: string[], host: { config?: () => Conf
   }
   try {
     const text = readFileSync(file, "utf8");
-    const result = runCashInvoiceReconcile((host.config ?? loadConfig)(), { path: file, text, digest: costExportDigest(text), day },
+    const result = await runCashInvoiceReconcile((host.config ?? loadConfig)(), { path: file, text, digest: costExportDigest(text), day },
       `CASH-INVOICE-${day}-${(host.clock ?? systemClock).now()}`);
     out(JSON.stringify(result));
     return 0;
@@ -44886,7 +44887,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   )],
   ["routing-ab", async (rest) => await routingAbCommand(rest, { classifyAttempt: attributeAttemptOutcome })],
   ["decisions", async (rest) => await decisionsCommand(rest, (config, request) => askDecisionModel(config, request), { repoRoot })],
-  ["cash-reconcile", (rest) => cashReconcileCommand(rest)],
+  ["cash-reconcile", async (rest) => await cashReconcileCommand(rest)],
   ["judge-replay", async (rest) => await judgeReplayCommand(rest, (config, request) => replayJudgeCorpus(config, request), { repoRoot, lane: parseJudgeReplayLane(rest) })],
   ["progress-watchdog", (rest) => progressWatchdogCommand(rest)],
   ["live-edits", async (rest) => await liveEditsCommand(rest)],

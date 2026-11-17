@@ -143,6 +143,9 @@ export const CLI_ONLY = {
       // W1-T12416: one paid shadow request to a decision model from the daemon host, with the cash
       // key in its environment; no gate, route or judge reads the row it writes.
       "decisions",
+      // W1-T10858: reads the daemon host's ledger union and an Azure cost export file on that host; the
+      // console sees its effect as the lead-eligibility lines of the bake-off proposal.
+      "cash-reconcile",
       // W1-T5687: a progress verdict over the ledger union on the daemon host; capture-diagnostics writes a bundle under <state>/diagnostics/ (docker ps, docker logs), at most one per 15 min; it recycles nothing.
       "progress-watchdog",
       // 2026-10-11: the host watchdog's rung of the live-edit ladder over a checkout on that host; the

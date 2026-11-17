@@ -145,7 +145,7 @@ export async function runDeploymentBakeoff(input: DeploymentBakeoffInput): Promi
       state.trialed = state.trialed.filter((id) => !skipped.includes(id));
       for (const id of skipped) delete state.readinessDigests[id];
       // W1-T10858: an open-weight arm is marked not eligible to lead until Azure's bill reconciles with its list price.
-      const eligibility = invoiceLeadEligibility(rows, readNewestInvoiceVerdicts(input.stateDir));
+      const eligibility = invoiceLeadEligibility(rows, await readNewestInvoiceVerdicts(input.stateDir));
       summary = `Deployment bake-off for ${ids.join(", ")}. Compare the new models and thinking levels with the incumbent; the operator picks. Routing is unchanged.\n\n${renderBakeoff(rows)}${eligibility ? `\n\n${eligibility}` : ""}`;
     } catch (error) {
       // Preserve the provider or replay failure verbatim in the operator-facing proposal.

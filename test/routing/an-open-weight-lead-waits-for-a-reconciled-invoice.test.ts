@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { CASH_INVOICE_RECONCILED_STEP, COST_EXPORTS_DIR, invoiceLeadEligibility, readNewestInvoiceVerdicts, reconcileCashInvoice,
+import { CASH_INVOICE_RECONCILED_STEP, COST_EXPORTS_DIR, cashInvoiceAccounts, invoiceLeadEligibility, readNewestInvoiceVerdicts, reconcileCashInvoice,
   recordCashInvoiceVerdicts, type CashInvoiceDeploymentVerdict } from "#src/lib/cash-invoice-reconcile.js";
 import { runDeploymentBakeoff, type DeployedModel, type DeploymentBakeoffCandidate } from "#src/lib/bakeoff-trigger.js";
 import { renderBakeoff, type BakeoffRow } from "#src/lib/inbox-bakeoff.js";
@@ -141,7 +141,7 @@ test("W1-T10858: an unreconciled open-weight arm is not eligible to lead", async
     const rows = readFileSync(join(judged, "ledger.ndjson"), "utf8").trim().split("\n").map((line) => JSON.parse(line) as Row)
       .filter((row) => row.step === CASH_INVOICE_RECONCILED_STEP);
     assert.ok(rows.length > 0);
-    const text = invoiceLeadEligibility(held.rows, readNewestInvoiceVerdicts(judged));
+    const text = invoiceLeadEligibility(held.rows, await readNewestInvoiceVerdicts(judged));
     assert.match(text, /not eligible to lead: cash Kimi-K2\.6 \(thinking off\) — unreconcilable on 2026-11-15: no traffic/);
   } finally {
     rmSync(fresh, { recursive: true, force: true });
@@ -174,11 +174,91 @@ test("W1-T10858: the rmd verb and the measurement cadence reconcile an export an
     const out: string[] = [];
     const err: string[] = [];
     const host = { config: () => config, out: (line: string) => void out.push(line), err: (line: string) => void err.push(line) };
-    assert.equal(cashReconcileCommand(["--day", day, "--export", file], host), 0);
+    assert.equal(await cashReconcileCommand(["--day", day, "--export", file], host), 0);
     assert.equal((JSON.parse(out[0]!) as { day: string }).day, day);
     assert.equal(verdictRows().length, cadence.length * 2, "the verb runs on demand");
-    assert.equal(cashReconcileCommand(["--day", "yesterday", "--export", file], host), 2);
-    assert.equal(cashReconcileCommand(["--day", day, "--export", join(root, "missing.csv")], host), 1);
+    assert.equal(await cashReconcileCommand(["--day", "yesterday", "--export", file], host), 2);
+    assert.equal(await cashReconcileCommand(["--day", day, "--export", join(root, "missing.csv")], host), 1);
     assert.equal(err.length, 2);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("cash invoice: an export with US dates is read, and one the price table cannot be compared with is refused by name", () => {
+  const line = (meter: string, cost: number) => `11/14/2026,${resource()},${meter},${cost}`;
+  const result = reconcileCashInvoice({ day, accounts, receipts: [nano, deepseek], exportCsv: ["UsageDate,InstanceId,MeterName,CostInUsd",
+    line("gpt-5-nano Inp glbl Tokens", 0.102), line("gpt-5-nano Outp glbl Tokens", 0.4), line("V4 Flash Inp glbl Tokens", 0.19),
+    line("V4 Flash cached glbl Tokens", 0.028), line("V4 Flash Outp glbl Tokens", 0.51), line("V4 Flash Provisioned Hours", 3)].join("\n") });
+  assert.equal(verdictOf(result.verdicts, "DeepSeek-V4-Flash").verdict, "reconciled");
+  assert.equal(result.unattributedExportRows, 1, "a meter that is neither input, cached nor output is billed to nobody");
+  const refused = (exportCsv: string, why: RegExp) => assert.throws(() => reconcileCashInvoice({ day, receipts: [], exportCsv }), why);
+  refused(`Date,ResourceId,MeterName,Cost,Currency\n${day},${resource()},V4 Flash Inp glbl Tokens,1,EUR\n`, /row 2 is billed in EUR, not USD/);
+  refused(`Date,MeterName\n${day},V4 Flash Inp glbl Tokens\n`, /lacks the column\(s\) ResourceId, CostInUsd or CostInBillingCurrency/);
+  refused("", /cost export is empty/);
+  assert.throws(() => reconcileCashInvoice({ day: "yesterday", receipts: [], exportCsv: csv([]) }), /reconcile day must be YYYY-MM-DD/);
+});
+
+test("cash invoice: a deployment's account is its endpoint's first host label, and a malformed endpoint names none", () => {
+  const named = cashInvoiceAccounts({ workerProviders: { cashEndpoint: `https://${account}.openai.azure.com/`,
+    cashDeploymentEndpoints: { "Kimi-K2.6": { endpoint: "not a url" } } } } as unknown as Config);
+  assert.equal(named["DeepSeek-V4-Flash"], account);
+  assert.ok(!Object.hasOwn(named, "Kimi-K2.6"), "the deployment is then matched on its meter name alone");
+  assert.deepEqual(cashInvoiceAccounts({} as Config), {});
+});
+
+const failedRows = (stateDir: string): Row[] => readFileSync(join(stateDir, "ledger.ndjson"), "utf8").trim().split("\n")
+  .map((text) => JSON.parse(text) as Row).filter((row) => row.step === "cash.invoice.reconcile_failed");
+
+test("cash invoice: the cadence ledgers once why an export was refused or its reconcile failed", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-invoice-refused-"));
+  try {
+    const stateDir = join(root, "state");
+    mkdirSync(join(stateDir, COST_EXPORTS_DIR), { recursive: true });
+    const file = join(stateDir, COST_EXPORTS_DIR, "export.csv");
+    const twice = async (config: Config) => {
+      const hooks = buildMeasurementCadenceDaemonHooks({ config, now: () => new Date("2026-11-15T06:00:00.000Z"),
+        verifyHumanCadenceResult: async () => { throw new Error("fixture stops sibling work"); } });
+      await assert.rejects(hooks.runMeasurementCadence(), /fixture stops sibling work/);
+      await assert.rejects(hooks.runMeasurementCadence(), /fixture stops sibling work/);
+    };
+
+    writeFileSync(file, `Date,MeterName\n${day},V4 Flash Inp glbl Tokens\n`);
+    await twice({ root } as Config);
+    const refused = failedRows(stateDir);
+    assert.equal(refused.length, 1, "an unchanged refused file is ledgered once");
+    assert.equal(refused[0]!.day, "unparsed");
+    assert.equal(refused[0]!.export_file, file);
+    assert.match(String(refused[0]!.reason), /lacks the column\(s\) ResourceId/);
+
+    // A readable export whose reconcile throws: the day and the file are ledgered with the reason, and not retried.
+    writeFileSync(file, csv([...controlBill(0.102, 0.396), ...deepseekBill(0.1919, 0.02828, 0.5151)]));
+    await twice({ root, get workerProviders(): never { throw new Error("fixture config has no providers"); } } as unknown as Config);
+    const failed = failedRows(stateDir).filter((row) => row.day === day);
+    assert.equal(failed.length, 1, "the same day and file are not retried");
+    assert.match(String(failed[0]!.reason), /fixture config has no providers/);
+    assert.equal(failedRows(stateDir).length, 2);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("cash invoice: an unreadable ledger rotation fails the verb and holds every open-weight arm", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-invoice-unread-"));
+  try {
+    const stateDir = join(root, "state");
+    // A directory where a rotation should be: the union cannot read it.
+    const rotation = "ledger.2026-11-14T12-00-00-000Z.ndjson";
+    mkdirSync(join(stateDir, rotation), { recursive: true });
+    const file = join(root, "export.csv");
+    writeFileSync(file, csv(controlBill(0.102, 0.4)));
+    const err: string[] = [];
+    const host = { config: () => ({ root }) as Config, out: () => undefined, err: (text: string) => void err.push(text) };
+    assert.equal(await cashReconcileCommand(["--day", day, "--export", file], host), 1);
+    assert.ok(err[0]!.includes("cash receipts ledger unreadable") && err[0]!.includes(rotation), err[0]);
+
+    const verdicts = await readNewestInvoiceVerdicts(stateDir);
+    assert.equal(verdicts.ok, false);
+    const arm = { candidate: "cash:DeepSeek-V4-Flash:off", label: "cash DeepSeek-V4-Flash (thinking off)", billing: "cash" };
+    const held = invoiceLeadEligibility([arm, { candidate: "incumbent", label: "incumbent", billing: "subscription" }], verdicts);
+    assert.match(held, /- not eligible to lead: cash DeepSeek-V4-Flash \(thinking off\) — invoice verdicts unreadable \(/);
+    assert.ok(held.includes(rotation), "the line names the file that could not be read");
+    assert.equal(invoiceLeadEligibility([{ candidate: "incumbent", label: "incumbent", billing: "cash" }], verdicts), "", "no open-weight cash arm, no lines");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
