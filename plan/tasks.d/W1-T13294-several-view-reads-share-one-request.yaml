@@ -1,0 +1,55 @@
+- id: W1-T13294
+  title: "POST /v1/views/batch answers up to 32 view reads in one request, each exactly as its own GET /v1/views/<name> would, so the Console reads the agent parts for every instance in one round trip instead of about ten"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # 2 concerns: extracting the single-view answer from buildReadModelViewRoutes, and a new read-scoped batch route over it
+  origin: "operator-session#console-responsiveness-2026-11-17"
+  plan_refs:
+    - W1-T13290
+    - W1-T13292
+  files:
+    - src/lib/views.ts
+    - test/console-api/views/several-view-reads-share-one-request.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "POST /v1/views/batch with {reads: [{view, params, ifNoneMatch?}]} answers {answers: [{status, etag?, body?, error?}]} in request order, and each answer equals what GET /v1/views/<view>?<params> answers for the same key (200 body and ETag, 304 on a matching ifNoneMatch, 400 or 404 refusals)"
+      proof: "grep: W1-T13294 criterion 1 in test/console-api/views/several-view-reads-share-one-request.test.ts"
+    - claim: "A batch of more than 32 reads, a non-array reads, an unknown view name, or a body over 64 KiB is refused with 400 before any view is read"
+      proof: "grep: W1-T13294 criterion 2 in test/console-api/views/several-view-reads-share-one-request.test.ts"
+    - claim: "invariant:single-read-unchanged — GET /v1/views/<name> answers byte for byte, status for status and header for header as before the extraction"
+      kind: guard
+      proof: "grep: W1-T13294 criterion 3 in test/console-api/views/several-view-reads-share-one-request.test.ts"
+  rationale: |
+    WHY: Craig reported on 2026-11-17 00:26Z that opening an Inbox item gave no feedback and then loaded very slowly.
+    MEASURED, Vercel production logs, 2026-11-17 00:46:26Z: one Console GET /api/console/agent/proposals made nine
+    /v1/views/agent reads (request tspbw-1794876381105), all timing out at 5 s in the headers phase. The Console route
+    (craigoley/remudero-console app/api/console/agent/proposals/route.ts) reads the agent view's proposals, history and
+    settings parts for each instance, plus inventory and read-model, through lib/rmd-control.ts readAgentViewPart, one
+    GET /v1/views/agent?instance=&part= each. The Inbox page reads three /v1/views/inbox sections the same way.
+    READ at origin/main a1381ff2b: buildReadModelViewRoutes (src/lib/views.ts) serves one key per request; the agent
+    view's legacy side (agentLegacyView, src/lib/agent-view.ts) computes every part's body with agentPartBodies and
+    returns one, so each per-part request re-reads the ledger and recomputes all ten parts. Each request also pays the
+    Cloudflare tunnel round trip from Vercel iad1, and at 00:49Z the host's load average was 23.8 to 31.4 on 8 cores.
+    The Console adopts the batch in a separate CONSOLE task.
+  design: |
+    INVARIANT single-read-unchanged: a GET /v1/views/<name> answers exactly as today.
+    1. Extract the handler body of buildReadModelViewRoutes into one function that answers a (name, params,
+       ifNoneMatch) read as {status, headers, body}: the required-params check, mode and switch lookup, validator,
+       held body or legacy render, qualification refusal, demand wait, judged staleness and the 304 check. The GET
+       route calls it and writes its result, so its output is unchanged.
+    2. Add POST /v1/views/batch, scope read. Parse a JSON body of at most 64 KiB: {reads: [{view: string, params:
+       Record<string, string>, ifNoneMatch?: string}]}, 1 to 32 reads, each view one of the routes' names; otherwise
+       400 with no view read. Answer every read with the extracted function, concurrently, and reply 200 with
+       {answers: [...]} in request order, each {status, etag?, body?} or {status, error, detail?}.
+    3. Shadow sampling (opts.shadow) and onServed run per read as they do for a GET.
+  falsifier: |
+    Answer a batch read from a different code path than the GET: criterion 1's equality fails. Accept 33 reads or an
+    unknown view: criterion 2 fails. Change any GET status, header or byte during the extraction: criterion 3 fails.
+  note: |
+    Id reserved for run-unfiled-1794877264000 with ~/rmd-work/bin/reserve-id.sh.
