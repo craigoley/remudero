@@ -256,6 +256,55 @@ function decompressedSizeOf(fs: LedgerCompactFs, entry: LedgerCorpusEntry, maxAr
   }
 }
 
+interface MeasuredArchive { size: number; mtimeMs: number; bytes: number; limit: number }
+
+/**
+ * W1-T13371: measured decompressed sizes, kept for the life of the process. The daemon runs every compaction pass in
+ * process, so a pass reuses what earlier passes measured. Nothing is written to the state dir: a pass that cannot
+ * reduce still writes nothing.
+ */
+const measuredArchives = new Map<string, MeasuredArchive>();
+
+/**
+ * W1-T13371: the oversized-repair probe gunzipped every merged archive on every pass. On the host (2026-11-17) that was
+ * 79 archives of 45-65 MB, and passes of 9-183 s ran in the daemon cycle 42-48 times a day. A measurement is reused only
+ * when the archive's path, compressed size and mtime are unchanged, and its byte count still answers the question at
+ * this limit: exact when it was at or under the limit it was measured with, and only "over" otherwise.
+ */
+export function memoizedDecompressedSizeOf(fs: LedgerCompactFs, stateDir: string, names: readonly string[],
+  measure: (entry: LedgerCorpusEntry, maxArchiveBytes: number) => number,
+): (entry: LedgerCorpusEntry, maxArchiveBytes: number) => number {
+  // Forget archives this state dir no longer holds, so the memo stays bounded by the corpus.
+  const present = new Set(names.map((name) => join(stateDir, name)));
+  for (const path of [...measuredArchives.keys()]) {
+    if (dirname(path) === stateDir && !present.has(path)) measuredArchives.delete(path);
+  }
+  const identity = (path: string): { size: number; mtimeMs: number } | undefined => {
+    if (!fs.sizeOf || !fs.mtimeMs) return undefined;
+    try {
+      return { size: fs.sizeOf(path), mtimeMs: fs.mtimeMs(path) };
+    } catch {
+      return undefined;
+    }
+  };
+  return (entry, maxArchiveBytes) => {
+    const id = identity(entry.path), seen = measuredArchives.get(entry.path);
+    if (id && seen && seen.size === id.size && seen.mtimeMs === id.mtimeMs
+      && (seen.bytes <= seen.limit || maxArchiveBytes <= seen.limit)) {
+      return seen.bytes <= seen.limit ? seen.bytes : maxArchiveBytes + 1;
+    }
+    const bytes = measure(entry, maxArchiveBytes);
+    if (id) measuredArchives.set(entry.path, { ...id, bytes: Math.min(bytes, maxArchiveBytes + 1), limit: maxArchiveBytes });
+    else measuredArchives.delete(entry.path);
+    return bytes;
+  };
+}
+
+/** W1-T13371: an archive this process wrote is measured again, whatever its size and mtime now read. */
+export function forgetMeasuredArchive(path: string): void {
+  measuredArchives.delete(path);
+}
+
 function splitArchiveBody(body: string, maxArchiveBytes: number): string[] {
   const rows = body.endsWith("\n") ? body.slice(0, -1).split("\n") : body.split("\n");
   if (rows.length === 1 && rows[0] === "") return [];
@@ -353,14 +402,15 @@ export function ledgerCompactCommand(rest: string[], deps: LedgerCompactCommandD
   let selection: LedgerCompactSelection;
   const now = (deps.clock ?? systemClock).date();
   try {
+    const names = fs.readdirSync(stateDir);
     selection = selectLedgerCompactionSources(
-      fs.readdirSync(stateDir),
+      names,
       stateDir,
       olderThanDays,
       maxSources,
       now,
       fs.sizeOf,
-      (entry, limit) => decompressedSizeOf(fs, entry, limit),
+      memoizedDecompressedSizeOf(fs, stateDir, names, (entry, limit) => decompressedSizeOf(fs, entry, limit)),
       maxArchiveBytes,
     );
   } catch (err) {
@@ -477,6 +527,7 @@ export function ledgerCompactCommand(rest: string[], deps: LedgerCompactCommandD
   try {
     for (const { name, body } of staged) {
       const targetPath = join(stateDir, name);
+      forgetMeasuredArchive(targetPath);
       if (!fs.writeAtomic(targetPath, fs.gzipSync(Buffer.from(body, "utf8")))) {
         throw new Error(`atomic replacement withdrew before rename: ${targetPath}`);
       }
