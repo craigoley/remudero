@@ -6947,7 +6947,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
         driverResult = { outcome: "success", strikes: 0, transientRetries: 0, diagnosed: false, attempts: 0 };
       } else {
         driverResult = await runDiagnoseThenRetry({
-          fixProgressJudge: ctx.spawnInjected ? undefined : productionFixProgressJudge({ cwd: worktreePath, settingsFile }),
+          fixProgressJudge: ctx.spawnInjected ? undefined : productionFixProgressJudge({ cwd: worktreePath, settingsFile, log }),
           progressInput: buildFixProgressInput({ taskId, headSha: "implement", currentRed: [], ledger: [] }),
           attempt: attemptImplement,
           diagnose: dispatchDiagnose,
@@ -7154,7 +7154,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       const decision = await judgeCheckpointStop(checkpointStops, {
         readHead: () => hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"]),
         makeJudge: () => (checkpointJudge ??= opts.productionProgressJudge === true || !spawnInjected
-          ? productionFixProgressJudge({ cwd: worktreePath, settingsFile }) : undefined),
+          ? productionFixProgressJudge({ cwd: worktreePath, settingsFile, log }) : undefined),
       });
       log("implement.checkpoint_judged", { stop: checkpointStops.length, resume: decision.resume, by: decision.by, reason: decision.reason });
       if (!decision.resume) break;

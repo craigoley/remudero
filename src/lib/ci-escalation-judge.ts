@@ -19,7 +19,7 @@ import { affectedSelectionOrFullAsync, readAffectedSuitesInputAsync } from "./af
 import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
 import { ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import { loadMounts, mountsPath } from "./mounts.js";
-import { resolveRiskJudgeMount } from "./risk-judge.js";
+import { resolveCiJudgeMount, runJudgeShadow } from "./risk-judge.js";
 import { spawnWorker } from "./worker.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
 
@@ -198,8 +198,8 @@ export interface CiJudgePorts {
   diff: (pr: CiJudgePr) => Promise<string>;
   suiteIds: () => readonly string[] | Promise<readonly string[]>;
   floor: (changed: readonly string[]) => CiJudgeFloor | Promise<CiJudgeFloor>;
-  /** One model call: the prompt in, the raw reply out. */
-  judge: (prompt: string) => Promise<string>;
+  /** One model call: the prompt in, the raw reply out. `pr` names the judgement, so a shadow row joins it. */
+  judge: (prompt: string, pr?: CiJudgePr) => Promise<string>;
   post: (pr: CiJudgePr, description: string) => Promise<void>;
   log: (step: string, extra?: Record<string, unknown>) => void;
   maxPerPass?: number;
@@ -254,7 +254,7 @@ export async function judgeCiEscalation(ports: CiJudgePorts): Promise<CiJudgePas
       const changed = await ports.changedFiles(pr);
       const floor = await ports.floor(changed);
       const prompt = buildCiJudgePrompt({ pr: pr.number, headSha: pr.headSha, changed, floor, diff: await ports.diff(pr) });
-      const parsed = parseCiJudgeOutput(await ports.judge(prompt), await ports.suiteIds());
+      const parsed = parseCiJudgeOutput(await ports.judge(prompt, pr), await ports.suiteIds());
       if (parsed.kind === "malformed") {
         ports.log("ci_judge.malformed", { pr: pr.number, head_sha: pr.headSha, reason: parsed.reason });
         continue;
@@ -320,6 +320,9 @@ export function productionCiJudgePorts(opts: {
   const readJson = opts.ghJson ?? ((args: string[]) => ghJsonAsync(args));
   const ghText = opts.ghText ?? ((args: string[]) => ghTextAsync(args, { maxBuffer: 64 * 1024 * 1024 }));
   const slug = `${opts.owner}/${opts.repo}`;
+  const suiteIds: CiJudgePorts["suiteIds"] = opts.suiteIds ?? (async () =>
+    (await hostWorktreeGitAsync(opts.repoRoot, ["ls-files", "--", "test"], { maxBuffer: 1 << 26 }))
+      .split("\n").filter((path) => SUITE.test(path)));
   return {
     stateDir: opts.stateDir,
     openPrs: async () => {
@@ -331,19 +334,40 @@ export function productionCiJudgePorts(opts: {
     changedFiles: async (pr) =>
       (await ghText(["pr", "diff", String(pr.number), "--repo", slug, "--name-only"])).split("\n").map((l) => l.trim()).filter(Boolean),
     diff: (pr) => ghText(["pr", "diff", String(pr.number), "--repo", slug]),
-    suiteIds: opts.suiteIds ?? (async () =>
-      (await hostWorktreeGitAsync(opts.repoRoot, ["ls-files", "--", "test"], { maxBuffer: 1 << 26 }))
-        .split("\n").filter((path) => SUITE.test(path))),
+    suiteIds,
     floor: opts.floor ?? ((changed) => affectedSelectionOrFullAsync(changed, () => readAffectedSuitesInputAsync(opts.repoRoot, changed))),
-    judge: async (prompt) => {
-      const mount = resolveRiskJudgeMount(loadMounts(mountsPath(opts.repoRoot)));
+    judge: async (prompt, pr) => {
+      // W1-T11075: the ci judge's own row, which may name a provider and a cash shadow arm.
+      const mount = resolveCiJudgeMount(loadMounts(mountsPath(opts.repoRoot)));
       const rawSpawn = opts.spawn ?? spawnWorker;
       const spawn = benchmarkNonDispatchSpawn("ci-judge", rawSpawn);
-      const result = await spawn({
-        cwd: opts.repoRoot, permissionMode: "bypassPermissions", settingsFile: join(opts.repoRoot, "settings", "worker.json"),
+      const args = {
+        cwd: opts.repoRoot, permissionMode: "bypassPermissions" as const, settingsFile: join(opts.repoRoot, "settings", "worker.json"),
         prompt, model: mount.model, effort: mount.effort, maxTurns: mount.maxTurns, tools: [],
-      });
-      opts.log("ci_judge.spend", { cost_usd: result.costUsd, num_turns: result.numTurns, model: mount.model, effort: mount.effort });
+        ...(mount.provider === undefined ? {} : { mountProvider: mount.provider }),
+      };
+      const result = await spawn(args);
+      opts.log("ci_judge.spend", { cost_usd: result.costUsd, num_turns: result.numTurns, model: mount.model, effort: mount.effort,
+        provider: mount.provider ?? null });
+      if (mount.shadow !== undefined) {
+        // Advisory: the verdict the pass posts is the primary's text, whatever the shadow answers or refuses.
+        let known: readonly string[] | undefined;
+        try {
+          known = await suiteIds();
+        } catch (error) {
+          opts.log("judge_shadow.unavailable", { surface: "ci-judge", reason: `suite list unreadable: ${String((error as Error)?.message ?? error)}` });
+        }
+        if (known !== undefined) {
+          const suites = known;
+          const parse = (text: string) => { const parsed = parseCiJudgeOutput(text, suites); return parsed.kind === "parsed" ? parsed.output : undefined; };
+          await runJudgeShadow({
+            surface: "ci-judge", key: pr ? `PR${pr.number}@${pr.headSha}` : "unknown", mount, primaryArgs: args,
+            primaryVerdict: parse(result.text), parse,
+            agreementKey: (output) => JSON.stringify({ add: [...output.add].sort(), escalateFull: output.escalateFull }),
+            spawn, log: opts.log,
+          });
+        }
+      }
       return result.text;
     },
     post: async (pr, description) => {

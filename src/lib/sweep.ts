@@ -124,7 +124,7 @@ import {
   capStrikeLadderNote, decideStrikeLadderRung, firstFailingTestTitle, hasUnspentLadderRefresh,
   latestStrikeLadderAttempt, rebuiltOnUtcDay, sloRungHistory, strikeCauseKey,
 } from "./strike-ladder.js";
-import { buildRiskJudgeSpawnArgs, resolveRiskJudgeMount, scrubRiskJudgeText, runRiskJudge, type RiskJudgeConfig, type RiskJudgeInput, type RiskJudgeOrchestratorDeps } from "./risk-judge.js";
+import { buildRiskJudgeSpawnArgs, resolveFixProgressJudgeMount, resolveRiskJudgeMount, runJudgeShadow, scrubRiskJudgeText, runRiskJudge, type RiskJudgeConfig, type RiskJudgeInput, type RiskJudgeOrchestratorDeps } from "./risk-judge.js";
 import {
   createIncrementalLedgerUnion, createLedgerRotationMemo, createSizedMemo, ledgerRotationDigests, ledgerRotationEntries, ndjsonLines,
   readLedgerUnionRecordsSync, realLedgerFs, resolveLedgerUnion,
@@ -146,7 +146,7 @@ import {
   type ActionsIncidentHoldRecord,
 } from "./actions-incident.js";
 import { isInPlanScope } from "./plan-scope.js";
-import { loadMounts, mountsPath, resolveMount, type Mount } from "./mounts.js";
+import { loadMounts, mountsPath, resolveMount, type JudgeMount, type Mount } from "./mounts.js";
 import { planParallelAttempts, type ShapeGain, type TaskShape } from "./parallel-attempts.js";
 import { strikeScheduleFor, type StrikePassRate } from "./strike-schedule.js";
 import {
@@ -2491,11 +2491,15 @@ export const SWEEP_EFFECT_SURFACE = [
 ] as const;
 
 export function productionFixProgressJudge(opts: {
-  cwd: string; settingsFile: string; mount?: Mount;
+  cwd: string; settingsFile: string; mount?: JudgeMount;
   spawn?: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
+  /** W1-T11075: the ledger a cash shadow arm's rows go to. With none, a declared shadow is not asked: an unledgered
+   *  shadow would spend and measure nothing. */
+  log?: (step: string, fields: Record<string, unknown>) => void;
 }): FixProgressJudge {
   const judge: FixProgressJudge = async input => {
-    const mount = opts.mount ?? resolveRiskJudgeMount(loadMounts(mountsPath(opts.cwd)));
+    // W1-T11075: the judge's own row, which may name a provider and a cash shadow arm.
+    const mount = opts.mount ?? resolveFixProgressJudgeMount(loadMounts(mountsPath(opts.cwd)));
     const args = buildRiskJudgeSpawnArgs({ input: {
       change: { description: "fix progress" }, gatesState: {}, planContext: { taskId: input.taskId },
     }, mount, cwd: opts.cwd, settingsFile: opts.settingsFile });
@@ -2533,10 +2537,20 @@ export function productionFixProgressJudge(opts: {
       `Round count: ${input.rounds.length}`,
       scrubRiskJudgeText(JSON.stringify(input)).text,
     ].join("\n");
-    const result = await (opts.spawn ?? benchmarkNonDispatchSpawn("risk-judge"))({ ...args, prompt,
-      memoryShadow: { ...args.memoryShadow, ...lightPassMemoryWaitPorts() } });
-    if (result.subtype !== undefined && result.subtype !== "success") return undefined;
-    return parseFixProgressVerdict(result.text);
+    const spawn = opts.spawn ?? benchmarkNonDispatchSpawn("risk-judge");
+    const primaryArgs: SpawnWorkerArgs = { ...args, prompt, memoryShadow: { ...args.memoryShadow, ...lightPassMemoryWaitPorts() },
+      ...(mount.provider === undefined ? {} : { mountProvider: mount.provider }) };
+    const result = await spawn(primaryArgs);
+    const verdict = result.subtype !== undefined && result.subtype !== "success" ? undefined : parseFixProgressVerdict(result.text);
+    if (mount.shadow !== undefined && opts.log !== undefined) {
+      // Advisory: the verdict returned below is the primary's, whatever the shadow answers or refuses.
+      await runJudgeShadow({
+        surface: "fix-progress", key: `${input.prNumber === undefined ? input.taskId ?? "unknown" : `PR${input.prNumber}`}@${input.headSha}`,
+        mount, primaryArgs, primaryVerdict: verdict, parse: parseFixProgressVerdict, agreementKey: (v) => v.verdict,
+        spawn, log: opts.log,
+      });
+    }
+    return verdict;
   };
   PRODUCTION_FIX_PROGRESS_JUDGES.add(judge);
   return judge;
@@ -2883,7 +2897,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   // W1-T7096: ONE judge serves both the sweep's own next-round decision and the rung it dispatches.
   // Never the fix-worker spawn seam: a judge must not run through a writer's spawn (a fixture's fake commits).
   const effectsProgressJudge = deps.productionProgressJudge ? productionFixProgressJudge({ cwd: repoRoot,
-    settingsFile: join(repoRoot, "settings", "worker.json") }) : undefined;
+    settingsFile: join(repoRoot, "settings", "worker.json"), log: (step, fields) => log(step, fields) }) : undefined;
   sweepEffectsWiringObserver?.(effectsProgressJudge ? "production" : "former_bound_stand_in");
   // W1-T2609: the SAME per-task lock directory `liveInflightRuns`/`acquireInflightLock` already
   // use everywhere else in this file (see e.g. sweepCommand's own `inflightDir`, above) — the fix
