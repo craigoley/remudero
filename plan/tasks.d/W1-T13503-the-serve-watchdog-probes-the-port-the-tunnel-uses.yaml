@@ -1,0 +1,57 @@
+- id: W1-T13503
+  title: "The serve watchdog probes the TCP port the tunnel connects to, not the generation's private socket, and records what the private socket said, so a wedge where serve stops accepting while its loop runs is caught"
+  repo: remudero
+  depends_on: []
+  priority: 0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # changes what the automatic restart of serve's active generation listens to; bounded and logged as before
+  band_meaning: span
+  origin: "operator-session#serve-watchdog-2026-11-17"
+  plan_refs:
+    - W1-T13276
+    - W1-T13278
+  files:
+    - src/lib/serve-supervisor.ts
+    - test/a-wedged-serve-generation-is-restarted-by-its-supervisor.test.ts
+    - test/console-api/serve/the-serve-watchdog-probes-the-port-the-tunnel-uses.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "With its real default probes, the supervisor GETs ACTIVE_PROBE_PUBLIC_PATH over TCP on 127.0.0.1 and the port serve's own --port argument binds; a port that answers nothing for ACTIVE_PROBE_FAILURES probes writes serve.active_wedged with probedPort and the private socket's answer (answered and status, or the error) and restarts the generation, even while the private socket answers"
+      proof: "grep: W1-T13503 criterion 1 in test/console-api/serve/the-serve-watchdog-probes-the-port-the-tunnel-uses.test.ts"
+    - claim: "The probed port is parsed from serveArgs (--port N) and falls back to ACTIVE_WEDGE_SERVE_PORT (4317) when it is absent or not a valid port"
+      proof: "grep: W1-T13503 criterion 2 in test/console-api/serve/the-serve-watchdog-probes-the-port-the-tunnel-uses.test.ts"
+    - claim: "invariant:the-probe-needs-no-credential — serve answers ACTIVE_PROBE_PUBLIC_PATH 404 before any credential check and writes no service.unauthorized row, and no source file other than the supervisor names that path"
+      kind: guard
+      proof: "grep: W1-T13503 criterion 3 in test/console-api/serve/the-serve-watchdog-probes-the-port-the-tunnel-uses.test.ts"
+  rationale: |
+    WHY: W1-T13276 (merged) probes the active generation through its PRIVATE unix socket
+    (/tmp/rmd-serve-gen-<pid>-<n>.sock), which has its own listener. The wedge it was built for did not look like that.
+    OBSERVED on the Azure host 2026-11-16: the generation kept writing background rows with runtime.loop_lag p99 60-97 ms
+    while port 4317 held 455 connections in the accept queue and every read from the host timed out at 30 s.
+    INFERRED (not measured, the private socket was not probed then): an event loop that is running would have answered
+    the private socket, so the watchdog as merged would likely not have fired. cloudflared reaches serve by TCP on 4317
+    (http://remudero-serve:4317 on rmd-net), so the probe has to take that path.
+    The path is unrouted on purpose: OBSERVED in src/lib/service.ts createRoutedServer, an unrouted path is answered
+    404 before the credential providers run, so the probe needs no token and writes no service.unauthorized row.
+  design: |
+    INVARIANT the-probe-needs-no-credential: the probe never carries or needs a token.
+    1. Add ACTIVE_PROBE_PUBLIC_PATH ("/v1/supervisor-probe"), tcpGet(port, path, timeoutMs, host) and
+       servePortOf(serveArgs, fallback) to src/lib/serve-supervisor.ts.
+    2. The default activeProbe becomes tcpGet(servePort, ACTIVE_PROBE_PUBLIC_PATH), where servePort is opts.servePort or
+       servePortOf(opts.serveArgs). Any HTTP status still counts as alive (a-slow-answer-is-not-a-wedge).
+    3. When the failure count is reached, GET SMOKE_PATHS[0] once on the private socket (new privateProbe seam, default
+       socketGet, bounded by ACTIVE_PRIVATE_PROBE_TIMEOUT_MS = 2 s) and put probedPort and privateSocket on the
+       serve.active_wedged and serve.active_wedged_held rows, so the next wedge says whether the generation itself still
+       answered.
+    4. Update the W1-T13276 tests for the new default and the new row fields.
+  falsifier: |
+    Keep the default probe on the private socket: criterion 1's stalled-port test sees no wedge and fails. Parse the
+    port wrongly: criterion 2 fails. Route or authenticate the probe path: criterion 3 fails.
+  note: |
+    Id reserved for run-unfiled-1794949964431 with ~/rmd-work/bin/reserve-id.sh.
+    Follow-up idea, not filed: a second wedge inside the restart floor could escalate to a container restart instead of
+    holding.
