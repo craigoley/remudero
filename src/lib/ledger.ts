@@ -934,6 +934,10 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   EMERGENCY_STOP_CLEARED_LEDGER_STEP,
   OPERATOR_PREFERENCE_PROPOSED_LEDGER_STEP,
   OPERATOR_PREFERENCE_EVENT_LEDGER_STEP,
+  // W1-T12114: `rmd pr-owner-recover` (stale-fix-dispatch-recovery-apply.ts) reads both back: a rotated
+  // authorization is re-issuable twice, and a rotated release makes the recovered PR OWNED again.
+  "pr_owner.recovery_authorized",
+  "pr_owner.recovery_receipt",
   "review.finding", // W1-T5019: verifiedReviewFindingsForFix (run-task.ts) feeds repair prompts.
   // KEEP THE W1-T964 TRIO LAST, immediately before the Set's close: test/ledger-rotation.test.ts
   // anchors its mutation check on those three lines followed by `]);` and asserts the needle occurs

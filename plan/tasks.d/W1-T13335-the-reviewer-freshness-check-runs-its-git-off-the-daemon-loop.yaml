@@ -1,0 +1,110 @@
+- id: W1-T13335
+  title: "The reviewer freshness check runs its git off the daemon loop: the async freshness entry points await their merge-base, diff and blob reads and keep a decided answer for one pair of shas, so the sweep no longer blocks on 888 synchronous git spawns (212 s in six hours on 2026-11-17)"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the answer decides whether a reviewer's verdict counts; a wrong fresh lets stale reviewer code approve a pull request, so every unreadable read must still refuse and a failed read must never be kept
+  origin: "operator-session#loop-lag-2026-11-17"
+  plan_refs:
+    - W1-T11847
+    - W1-T12824
+    - W1-T13183
+  files:
+    - src/lib/self-sync.ts
+    - test/the-reviewer-freshness-check-runs-its-git-off-the-daemon-loop.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "For a fixture repository with five advances of main (none, a comment-only .ts change, a src/run-task.ts hunk that avoids the review path, a src/run-task.ts hunk that meets it, a change to another material path) checkReviewerCodeFreshnessAsync, probeReviewerCodeFreshnessAsync and reviewerCodeJudge return the same status, advance and changedPaths as the synchronous checkReviewerCodeFreshness and reviewerCodeFreshnessAt"
+      proof: "grep: W1-T13335 criterion 1 in test/the-reviewer-freshness-check-runs-its-git-off-the-daemon-loop.test.ts"
+    - claim: "invariant:no-sync-git-in-the-async-freshness-check — with their production defaults (no deps.git) the three async entry points make 0 synchronous git spawns for the ancestry, diff, blob and head reads of a main advance, and a 20 ms timer keeps firing while a git child of the check is held for one second"
+      kind: guard
+      proof: "grep: W1-T13335 criterion 2 in test/the-reviewer-freshness-check-runs-its-git-off-the-daemon-loop.test.ts"
+    - claim: "invariant:an-unreadable-read-still-refuses — on the async path a failing merge-base or diff gives unreadable with the reason text of origin/main, a failing git show of a changed .ts path keeps that path material, and a failing read of src/run-task.ts gives stale, the same answers as the synchronous path"
+      kind: guard
+      proof: "grep: W1-T13335 criterion 3 in test/the-reviewer-freshness-check-runs-its-git-off-the-daemon-loop.test.ts"
+    - claim: "invariant:only-a-decided-answer-is-kept — a second check of the same code sha and main sha spawns no git and returns the same fresh or stale answer; an unreadable answer is not kept, so the next check reads again and returns the real answer; a new main sha is read again"
+      kind: guard
+      proof: "grep: W1-T13335 criterion 4 in test/the-reviewer-freshness-check-runs-its-git-off-the-daemon-loop.test.ts"
+    - claim: "The synchronous entry points (checkReviewerCodeFreshness, reviewerCodeFreshnessAt and runTaskAdvanceTouchesReviewPath with an injected synchronous git) keep their signatures and give the same results for the five advances of criterion 1"
+      proof: "grep: W1-T13335 criterion 5 in test/the-reviewer-freshness-check-runs-its-git-off-the-daemon-loop.test.ts"
+  rationale: |
+    WHY: the sweep checks whether the reviewer's loaded code is still current against main before it trusts a
+    verdict. The entry points it calls are async, but once main has advanced they classify the advance with
+    synchronous git: one merge-base, one diff, two `git show` per changed .ts file, and two `git show` of
+    src/run-task.ts plus a diff. Each spawn blocks the daemon loop, and the same pair of shas is classified
+    again on later passes.
+    MEASURED, core ledger (~/rmd-state2/state, live file plus archives, rows deduplicated on ts),
+    daemon.loop_stall_profile rows since the newest two daemon.boot rows (aa891635ed at 2026-11-16T23:50:59Z and
+    9be1ffbcb8 at 2026-11-17T03:19:15Z), up to 05:43:36Z: 1,932 stall rows, 14,157.6 s plain sum of lag_ms,
+    944.3 s of sync_spawn_ms.
+    - sync_spawn_by_caller, summed by the caller chain above the reviewerGit closure:
+      runTaskAdvanceTouchesReviewPath 390 calls, 106.8 s; commentOnlyChange 260 calls, 69.1 s;
+      reviewerMainAdvance 238 calls, 35.9 s. Together 888 calls, 211.8 s, 22% of all synchronous spawn time.
+    - 79 stall rows hold one of these callers: 1,012.6 s of lag, 7.2% of all lag. The frames beside them are
+      runSweep (38 rows), reviewerMainAdvance (38), reviewAdvanceIsMaterialAt (35) and reviewerCodeFreshnessAt
+      (15).
+    - On the newest boot alone: 348 calls, 90.9 s, in 33 rows holding 316.6 s of lag (5.2% of that boot).
+    - The first measurement put these spawns under the repair capture (listFeedback) because both run in
+      runSweep and share stall rows. The caller chains show they are this check; the capture's own cost is
+      filed as W1-T13334.
+    READ at origin/main 3c2383143 (src/lib/self-sync.ts):
+    - :788 reviewerGit returns `deps.git ?? ((args) => execFileSync("git", ["-C", repoDir, ...args], options))`.
+    - :830 reviewerMainAdvance: git merge-base (:839), git diff --name-only (:852), then
+      reviewAdvanceIsMaterialAt (:856, defined :1258). It needs them to tell an advance that changes review
+      code from one that does not; only a material advance makes the reviewer stale.
+    - :1272 commentOnlyChange: two `git show <sha>:<path>` per changed .ts path (:1275), compared without
+      comments. An unreadable blob keeps the path material.
+    - :1224 runTaskAdvanceTouchesReviewPath: one git diff -U0 (:1232) and two git show of src/run-task.ts
+      (:1233), then a scan of both versions for the review path. Any unreadable read says the path is touched.
+    - The async entry points reach that synchronous code: probeReviewerCodeFreshnessAsync (:764) calls
+      reviewerMainAdvance(reviewerGit(...)) at :785; checkReviewerCodeFreshnessAsync (:1309) goes through
+      reviewerFreshnessFromService to assessedReviewerFreshness (:1341), which calls reviewerMainAdvance and a
+      synchronous git rev-parse HEAD; checkGuardedReviewerCodeFreshnessAsync (:872) calls
+      guardedReviewerAfterFetch (:881) with reviewerGit; reviewerCodeJudge (:808) calls
+      reviewerCodeFreshnessAt with reviewerGit and keeps answers only for the life of one judge.
+    - Daemon callers: src/cli/commands/sweep.ts:291 and :292 (the sweep's freshness read and its judge),
+      src/run-task.ts:45329 (the review gate), src/lib/sweep.ts:21045 and src/lib/review.ts:12666 (the probe).
+    - :53 asyncGit(repoDir, options) is the awaited git runner this file already has; deps.gitAsync is its seam.
+    - Commits and blobs do not change, so the answer for one code sha and one main sha is fixed once the reads
+      succeed.
+    NOT COVERED: W1-T11847 (merged) added the judge and W1-T12824 (merged) the comment-only rule; both use the
+    synchronous git. W1-T13183 (merged) moved other git and gh calls. Swept plan/tasks.d and plan/tasks.yaml at
+    origin/main for reviewerGit, reviewerMainAdvance, commentOnlyChange and runTaskAdvanceTouchesReviewPath, and
+    the 18 open pull requests on craigoley/remudero: none names this check.
+  design: |
+    INVARIANT no-sync-git-in-the-async-freshness-check: the async entry points spawn no synchronous git for the ancestry, diff, blob and head reads.
+    INVARIANT an-unreadable-read-still-refuses: every read that fails gives the same unreadable, material or stale answer as the synchronous path.
+    INVARIANT only-a-decided-answer-is-kept: only a fresh or stale answer is kept for a pair of shas; an unreadable answer is read again.
+    1. Give reviewerMainAdvance, reviewAdvanceIsMaterialAt, commentOnlyChange and
+       runTaskAdvanceTouchesReviewPath one body that runs over a synchronous or an awaited git runner, the way
+       readLandedFeedbackEntrySteps (src/lib/feedback.ts:597) serves both drivers. Do not copy the hunk and
+       token logic into a second function.
+    2. The async entry points (probeReviewerCodeFreshnessAsync, checkReviewerCodeFreshnessAsync through
+       assessedReviewerFreshness, checkGuardedReviewerCodeFreshnessAsync, reviewerCodeJudge) run that body over
+       `deps.gitAsync ?? asyncGit(repoDir, { maxBuffer: REVIEWER_GIT_MAX_BUFFER })`. An injected deps.git still
+       wins, so existing tests keep working. The head read in assessedReviewerFreshness is awaited too.
+    3. Keep the decided answer per process, keyed by the code sha, the main sha and the known behind paths.
+       Keep only fresh and stale. When the main sha changes, drop the answers for the old one, so the kept set
+       stays as small as the shas in use; no size constant.
+    4. The synchronous entry points keep their signatures for the command line callers.
+    5. No new export for production use beyond what the callers above already import, no env var, no bound.
+    6. TESTS in test/the-reviewer-freshness-check-runs-its-git-off-the-daemon-loop.test.ts build a real
+       temporary git repository, as test/a-run-task-advance-is-classified-by-review-path.test.ts does, and
+       record synchronous spawns by replacing the node:child_process sync APIs. Load test/setup/tmp-hygiene.ts.
+  falsifier: |
+    At origin/main the async entry points spawn git synchronously for an advance: the recorder count is not 0
+    and the timer does not fire during the held child (criterion 2). Keep every answer, unreadable too: after a
+    failed merge-base the next check returns unreadable without reading and criterion 4 fails. Treat a failed
+    git show as comment-only: criterion 3 gets fresh where it must get stale. Change a synchronous signature:
+    criterion 5 fails.
+  note: |
+    Id reserved for run-unfiled-1794894179000 with ~/rmd-work/bin/reserve-id.sh.
+    Proof that counts in production: no sync_spawn_by_caller entry names runTaskAdvanceTouchesReviewPath,
+    commentOnlyChange or reviewerMainAdvance in daemon.loop_stall_profile rows over a day.
+    Out of scope: the processor time of the review-path scan and the token comparison, which the kept answer
+    cuts to once per pair of shas; the fetch and ls-remote of the check, which are already awaited.

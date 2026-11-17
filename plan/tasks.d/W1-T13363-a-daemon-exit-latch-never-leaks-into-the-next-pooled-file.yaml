@@ -1,0 +1,65 @@
+- id: W1-T13363
+  title: "A daemon exit latch (direct-merge admissions, light-pass refills) is reopened when a pooled test run moves to a new file, so one file's daemon exit no longer refuses every later file's merge"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # one concern, process-global exit latches in pooled test runs; touches the shared test setup every run imports
+  origin: "operator-session#ubuntu-2604-main-red-2026-11-17"
+  plan_refs:
+    - W1-T13352
+    - W1-T6085
+    - W1-T11503
+    - W1-T9114
+  files:
+    - src/lib/process-exit-latches.ts
+    - src/lib/arm-auto-merge.ts
+    - src/lib/sweep.ts
+    - test/setup/tmp-hygiene.ts
+    - test/github/a-daemon-exit-latch-never-leaks-into-the-next-pooled-file.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Every registered exit latch is reopened in registration order, and registering a name again replaces it"
+      proof: "grep: W1-T13363 criterion 1 in test/github/a-daemon-exit-latch-never-leaks-into-the-next-pooled-file.test.ts"
+    - claim: "arm-auto-merge registers direct-merge-admissions and sweep registers light-pass-refills"
+      proof: "grep: W1-T13363 criterion 2 in test/github/a-daemon-exit-latch-never-leaks-into-the-next-pooled-file.test.ts"
+    - claim: "A pooled run of test/a-freshness-restart-lets-a-running-review-finish.test.ts then test/a-green-reviewed-plan-pr-the-sweep-holds-merges.test.ts reports # fail 0"
+      proof: "grep: W1-T13363 criterion 3 in test/github/a-daemon-exit-latch-never-leaks-into-the-next-pooled-file.test.ts"
+    - claim: "invariant:isolated-runs-unchanged — the reset runs only inside the pooled-run branch of test/setup/tmp-hygiene.ts and only when the test file changes, so an isolated run and a file's own tests see the latch exactly as before"
+      proof: 'grep: context\.filePath !== latchFile in test/setup/tmp-hygiene.ts'
+    - claim: "arm-auto-merge.ts calls registerProcessExitLatch, so the new module has a production call site"
+      proof: 'grep: registerProcessExitLatch("direct-merge-admissions" in src/lib/arm-auto-merge.ts'
+
+  rationale: |
+    OBSERVED 2026-11-17 (W1-T13352 recon, done in the filing session): in ci-shard first attempts on both runner images
+    (main 44006635512 on 24.04, 44012529966, 44019350709 and 44022915015 on 26.04), W1-T6595, W1-T9212 and W1-T12059
+    failed with "expected direct-merged, got direct-merge-preflight-refused" and passed on the flake retry.
+    Shard 8/8's pool for main cf7db0e was rebuilt locally with the repo's own partitionPool (308 files, matching CI's
+    "308/308 file(s)"). The pooled run reproduced the three failures. Bisecting the other 307 files named
+    test/a-freshness-restart-lets-a-running-review-finish.test.ts. Instrumenting the armer printed
+    directMergePreflight.reason "freshness_latch": that file's runDaemon stops for freshness, which calls
+    closeDirectMergeAdmissions("freshness_latch"). runDaemon reopens it on entry, but a test that never starts a daemon
+    never reopens it. A second leak of the same shape: drainInFlightReviews closes light-pass refills, so
+    test/daemon/a-recycle-wait-admits-a-review-that-ends-before-the-wait-does.test.ts failed 3 tests after
+    test/a-no-pr-branch-of-an-ended-run-stops-blocking-dispatch.test.ts (bisected from 71 files). The pool's own
+    leak probe named a different file each run because each probe ran a different prefix of the pool.
+    241 test files call runDaemon, so refusing them from the pool would cost the pool much of its saving.
+  design: |
+    1. src/lib/process-exit-latches.ts: registerProcessExitLatch(name, reopen) and reopenProcessExitLatches(), held on a
+       globalThis Symbol.for registry so one registry serves every module copy.
+    2. arm-auto-merge.ts registers "direct-merge-admissions" (openDirectMergeAdmissions); sweep.ts registers
+       "light-pass-refills".
+    3. test/setup/tmp-hygiene.ts: the pooled-run beforeEach (already used for setTestFileSlotScope) reopens every latch
+       when context.filePath changes.
+    INVARIANT isolated-runs-unchanged: production never calls reopenProcessExitLatches; an isolated test run and the
+    tests inside one pooled file see each latch exactly as before.
+  falsifier: |
+    At origin/main a pooled run of the freshness-restart file then the W1-T6595 file fails 2 tests with
+    direct-merge-preflight-refused (reason freshness_latch).
+  note: |
+    Reserved with rmd next-task-id --count 1 --branch claude/project-thread-7ycldf on the operator's Mac mini
+    (2026-11-17 12:16Z).

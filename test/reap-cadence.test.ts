@@ -155,11 +155,12 @@ test("automatic branch cadence: the remote write is wired to the full sweep hook
   assert.doesNotMatch(light, /runAutomaticBranchReapRung\(/);
 });
 
-function rungCompletedRow(exec: (cmd: string, args: string[]) => string, prior: AutomaticBranchReapState = {}): Record<string, unknown> {
+// W1-T13325: the pass awaits its merge-credit read, so it is awaited here.
+async function rungCompletedRow(exec: (cmd: string, args: string[]) => string, prior: AutomaticBranchReapState = {}): Promise<Record<string, unknown>> {
   const logs: Array<[string, Record<string, unknown>]> = [];
   const scratch = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}reap-cause-`));
   try {
-    runAutomaticBranchReapRung(
+    await runAutomaticBranchReapRung(
       "other-owner",
       "target-repo",
       { root: REPO_ROOT, claudeBin: "/bin/true" } as Config,
@@ -177,25 +178,25 @@ function rungCompletedRow(exec: (cmd: string, args: string[]) => string, prior: 
   return row[1];
 }
 
-test("a reap pass names the trigger apart from the cause of its non-zero exit", () => {
+test("a reap pass names the trigger apart from the cause of its non-zero exit", async () => {
   // The fleet pushes branches all day, so the trigger is branch-set-changed on nearly every pass;
   // on 09-30 all 130 completed rows read reason=branch-set-changed and hid the guard-list drift.
   const prior: AutomaticBranchReapState = { lastRunAtMs: 4000, lastBranchFingerprint: "main" };
-  const row = rungCompletedRow(fakeExec(() => ["main", "run-W1-T3720-1790578461549"], []), prior);
+  const row = await rungCompletedRow(fakeExec(() => ["main", "run-W1-T3720-1790578461549"], []), prior);
   assert.equal(row.trigger, "branch-set-changed");
   assert.equal(row.code, 1);
   assert.match(String(row.reason), /^guard-list drift: .*orphan_declarations=\d+/);
 });
 
-test("a reap pass names a failed or refused prune as its cause", () => {
+test("a reap pass names a failed or refused prune as its cause", async () => {
   const names = () => ["main", "old"];
   const failing = fakeExec(names, []);
-  const failedPush = rungCompletedRow((cmd, args) => {
+  const failedPush = await rungCompletedRow((cmd, args) => {
     if (args.includes("--delete")) throw new Error("remote rejected");
     return failing(cmd, args);
   });
   assert.match(String(failedPush.reason), /^prune-failed: 1 branch\(es\) still on origin/);
-  const refused = rungCompletedRow((cmd, args) => {
+  const refused = await rungCompletedRow((cmd, args) => {
     if (cmd === "gh" && args.some((a) => a.includes("state=open"))) throw new Error("HTTP 403");
     return failing(cmd, args);
   });
