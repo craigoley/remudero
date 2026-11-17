@@ -81,8 +81,8 @@ async function catalog(root: string, commit: string, external = false): Promise<
     if (files.filter(file => file.shard).length > OPS_CATALOG_MAX_SHARDS) return unknown("catalog_incompatible");
     // The API reader counts each visited immediate tree, including entries outside the selected
     // blobs. Mirror those same three populations without fetching or interpreting unrelated files.
-    const trees = [commit, `${commit}:plan`];
-    if (files.some(file => file.shard)) trees.push(`${commit}:plan/tasks.d`);
+    const trees = [commit, `${commit}:${within(layout.planDir)}`];
+    if (files.some(file => file.shard)) trees.push(`${commit}:${shardDir.slice(0, -1)}`);
     let treeEntries = 0;
     for (const tree of trees) {
       treeEntries += (await git(["ls-tree", "-z", tree])).split("\0").filter(Boolean).length;
