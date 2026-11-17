@@ -1277,7 +1277,9 @@ function rotationDigestCodec<T>(operation: DigestCodecRequest["operation"], valu
   return new Promise((resolve, reject) => {
     if (!digestCodecWorker) {
       const spawned = new Worker(new URL(import.meta.url), {
-        execArgv: ["--import", "tsx"], workerData: { kind: ROTATION_DIGEST_CODEC },
+        // A literal, not threadName(): this module is in the baked supervisor's closure, and thread-names.ts is not.
+        // The census in serve-names-every-worker-thread-and-reads-every-os-thread.test.ts holds it to THREAD_NAMES.
+        name: "rmd-ledger-dgst", execArgv: ["--import", "tsx"], workerData: { kind: ROTATION_DIGEST_CODEC },
       });
       digestCodecWorker = spawned;
       const failed = (error: Error): void => {

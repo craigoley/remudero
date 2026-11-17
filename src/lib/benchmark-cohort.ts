@@ -1,3 +1,4 @@
+import { threadName } from "./thread-names.js";
 import { createHash, randomUUID, type Hash } from "node:crypto";
 import { closeSync, createReadStream, existsSync, fstatSync, ftruncateSync, openSync, readFileSync, readSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
@@ -1220,7 +1221,7 @@ type CohortWorkerReply = { ok: true; result: BenchmarkCohortPassResult } | { ok:
  * the GC of its parsed graph, belong to the worker's isolate; the daemon thread only waits for one message. */
 export function runBenchmarkCohortPassOffLoop(
   stateDir: string, opts: CohortWorkerData["opts"] = {},
-  start: (data: CohortWorkerData) => Worker = (data) => startWorker(import.meta.url, { workerData: data, env: SHARE_ENV }),
+  start: (data: CohortWorkerData) => Worker = (data) => startWorker(import.meta.url, { name: threadName("benchmarkCohort"), workerData: data, env: SHARE_ENV }),
 ): Promise<BenchmarkCohortPassResult> {
   return new Promise((resolve, reject) => {
     let settled = false;

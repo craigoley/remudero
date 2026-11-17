@@ -19,7 +19,7 @@ import { affectedSelectionOrFullAsync, readAffectedSuitesInputAsync } from "./af
 import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
 import { ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import { loadMounts, mountsPath } from "./mounts.js";
-import { resolveCiJudgeMount, runJudgeShadow } from "./risk-judge.js";
+import { JUDGE_SHADOW_COMPARED_KEY, resolveCiJudgeMount, runJudgeShadow } from "./risk-judge.js";
 import { spawnWorker } from "./worker.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
 
@@ -355,7 +355,7 @@ export function productionCiJudgePorts(opts: {
         try {
           known = await suiteIds();
         } catch (error) {
-          opts.log("judge_shadow.unavailable", { surface: "ci-judge", reason: `suite list unreadable: ${String((error as Error)?.message ?? error)}` });
+          opts.log("judge_shadow.unavailable", { surface: "ci-judge", shadow_deployment: mount.shadow.deployment, reason: `suite list unreadable: ${String((error as Error)?.message ?? error)}` });
         }
         if (known !== undefined) {
           const suites = known;
@@ -363,7 +363,8 @@ export function productionCiJudgePorts(opts: {
           await runJudgeShadow({
             surface: "ci-judge", key: pr ? `PR${pr.number}@${pr.headSha}` : "unknown", mount, primaryArgs: args,
             primaryVerdict: parse(result.text), parse,
-            agreementKey: (output) => JSON.stringify({ add: [...output.add].sort(), escalateFull: output.escalateFull }),
+            // W1-T13365: the shared table's key; a parsed verdict always has one.
+            agreementKey: (output) => JUDGE_SHADOW_COMPARED_KEY["ci-judge"](output) ?? "",
             spawn, log: opts.log,
           });
         }

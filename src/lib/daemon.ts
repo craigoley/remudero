@@ -23,7 +23,7 @@ import { startGarden, type GardenerDeps, type PrState } from "./gardener.js";
 import { knowledgeGardenSpec, type GardenWorkspace } from "./knowledge-gardener.js";
 import { startInboxResponder, type InboxResponderDeps } from "./inbox-responder.js";
 import { startLivenessPulse } from "./liveness-pulse.js";
-import { installSpawnHelper, startSpawnHelper } from "./spawn-helper.js";
+import { installedSpawnHelper, installSpawnHelper, startSpawnHelper } from "./spawn-helper.js";
 
 
 import type {
@@ -157,7 +157,7 @@ import type { StatusProjection } from "./status.js";
 import { ENVIRONMENTAL_BLOCK_COOLDOWN_MS, INDEPENDENT_BLOCK_RELEASED_STEP, isEnvironmentalBlock, PRE_RESTORE_RUN_VERDICT_STAGES, type IndependentBlockRelease } from "./status.js";
 import { explainDispatchScore, openDependentFanout, type DispatchValueContext } from "./dispatch-value.js";
 import {
-  OPS_CATALOG_OUTCOMES, readOpsCatalogSnapshotAsync, type OpsCatalogApi, type OpsCatalogOutcome, type OpsCatalogShadowInput,
+  OPS_CATALOG_OUTCOMES, opsCatalogRefusalStage, readOpsCatalogSnapshotAsync, type OpsCatalogApi, type OpsCatalogOutcome, type OpsCatalogShadowInput,
   type OpsCatalogTarget,
 } from "./ops-catalog-source.js";
 import { GhJsonUnreadableResponseError, takeGhPaceLoopWaits, takeGhReadCadenceTally, type GhReadCadenceTally } from "./github-transport.js";
@@ -1663,6 +1663,7 @@ export interface DaemonDeps {
   /** W1-T4429: the hold behind `checkPause` (owner/expiry/liveness); absent, no governor runs. It calls
    *  `clearPauseHold` once at `lapsed` and `onPauseNeedsHuman` once at `needs_human`. */
   checkPauseHold?: () => PauseHoldGovernorInput | undefined;
+  pauseInFlight?: () => ReadonlyArray<PauseInFlightUnit>; // W1-T12939: garden children + judge calls; absent = partial census, never drained
   clearPauseHold?: () => void | Promise<void>;
   onPauseNeedsHuman?: (info: { holdId: string; owner: PauseHoldOwner; expiresAt: string | null }) => void | Promise<void>;
   workerAdmissionHold?: () => WorkerAdmissionHold | undefined;
@@ -2830,6 +2831,10 @@ export interface PauseHoldOwner {
   reason?: string;
 }
 
+export interface PauseInFlightUnit { kind: string; name: string; age_ms?: number; count?: number }
+
+const PAUSE_IN_FLIGHT_UNITS_CAP = 50;
+
 export interface PauseHoldGovernorInput extends PauseTierInput {
   /** The anchor sha, or `"local"`: a NEW hold never inherits an old hold's tier. */
   holdId: string;
@@ -3872,7 +3877,7 @@ export interface LearnedCrashLoopSummary {
   incident: "none" | "opened" | "updated" | "cleared" | "open";
 }
 
-/** W1-T9754: the environment switch that starts the spawn helper at boot. Its default, off, is an operator decision. */
+/** W1-T9754: the environment switch for the spawn helper. W1-T13437: on unless set to exactly "off" (operator ruling). */
 export const SPAWN_HELPER_SWITCH = "RMD_SPAWN_HELPER";
 
 /** The daemon's startup routine (W1-T12b): the clean-env boot assertion, run once before the scheduler loop starts.
@@ -3941,12 +3946,23 @@ export async function daemonBoot(
     ...(bootHeadSha ? { head_sha: bootHeadSha } : {}),
     ...(checkoutDepth ? { checkout_shallow: checkoutDepth.shallow, checkout_commit_count: checkoutDepth.commitCount } : {}),
   });
-  // W1-T9754: the spawn helper starts here, while this process is still small, so a later routed spawn forks from
-  // it and not from a 1.5-2 GB daemon. Whether it starts is the operator's switch, off unless set to "on".
-  if (env[SPAWN_HELPER_SWITCH] === "on") {
-    const helper = startSpawnHelper({ log });
-    installSpawnHelper(helper);
-    log("daemon.spawn_helper", { started: true, pid: helper.pid, switch: SPAWN_HELPER_SWITCH });
+  // W1-T9754/W1-T13437: the helper starts while this process is small, unless the switch is "off"; one row either way.
+  const switchValue = env[SPAWN_HELPER_SWITCH] ?? "unset";
+  const helperRow = { switch: SPAWN_HELPER_SWITCH, value: switchValue };
+  if (switchValue === "off") {
+    log("daemon.spawn_helper", { started: false, reason: "switch_off", ...helperRow });
+  } else {
+    try {
+      installedSpawnHelper()?.stop();
+      const helper = startSpawnHelper({ log });
+      installSpawnHelper(helper);
+      log("daemon.spawn_helper", { started: true, pid: helper.pid, ...helperRow });
+    } catch (error) {
+      // Reason: a helper that cannot start costs no spawn; the boot continues on the direct path, named here.
+      installSpawnHelper(undefined);
+      log("daemon.spawn_helper", { started: false,
+        reason: `start_failed: ${String((error as Error)?.message ?? error).slice(0, 120)}`, ...helperRow });
+    }
   }
   // The boot-rate invariant: the shape-not-cause check. Logged either way, so the invariant's own
   // pass or fail is part of the boot record, not only its breaches (W1-T215).
@@ -5198,6 +5214,57 @@ export async function runDaemon(
   const hasChildTask = (id: string): boolean => childTaskIds().includes(id);
   // W1-T10000: a run waiting for its child's admission is out-of-process work too; the restart abandons it.
   const pendingChildren = new Map<string, RunChildPending & { sinceMs: number }>();
+  const pauseInFlightCensus = (): { units: PauseInFlightUnit[]; count: number; oldestAgeMs: number | null; unobserved: string[] } => {
+    const nowMs = daemonClock.now();
+    const units: PauseInFlightUnit[] = [];
+    const named = new Set<string>();
+    for (const child of children.values()) {
+      if (child.work !== undefined) continue;
+      units.push({ kind: "run-child", name: child.taskId });
+      named.add(child.taskId);
+    }
+    for (const [taskId, pending] of pendingChildren) {
+      units.push({ kind: "run-child-pending", name: taskId, age_ms: Math.max(0, nowMs - pending.sinceMs) });
+      named.add(taskId);
+    }
+    for (const taskId of laneCpuBuilds) if (!named.has(taskId)) units.push({ kind: "run", name: taskId });
+    for (const item of restartDrainInventory()) {
+      units.push({ kind: item.what === "detached" ? item.kind : item.what,
+        name: item.task_id ?? (item.pr === undefined ? item.kind : `pr-${item.pr}`), age_ms: Math.max(0, nowMs - item.admitted_at_ms) });
+    }
+    for (const [kind, count] of Object.entries(childWorkLeftRunning())) units.push({ kind: "child-work", name: kind, count });
+    if (deps.pauseInFlight) {
+      try {
+        units.push(...deps.pauseInFlight());
+      } catch (error) {
+        units.push({ kind: "census-unreadable", name: String((error as Error)?.message ?? error) });
+      }
+    }
+    const ages = units.flatMap((unit) => unit.age_ms === undefined ? [] : [unit.age_ms]);
+    return { units, count: units.reduce((n, unit) => n + (unit.count ?? 1), 0),
+      oldestAgeMs: ages.length === 0 ? null : Math.max(...ages),
+      unobserved: deps.pauseInFlight ? [] : ["garden-child", "judge-call"] };
+  };
+  let pauseEpisode: { id: string; key: string; drained: boolean } | undefined;
+  let pauseEpisodeSeq = 0;
+  const logPause = (detail: string, row: Record<string, unknown>, hold: PauseHoldGovernorInput | undefined): void => {
+    const key = hold?.holdId ?? detail;
+    const census = pauseInFlightCensus();
+    if (pauseEpisode?.key !== key) pauseEpisode = { id: `${daemonClock.now()}-${++pauseEpisodeSeq}`, key, drained: false };
+    const episode = pauseEpisode;
+    const censusFields = { in_flight: census.units.slice(0, PAUSE_IN_FLIGHT_UNITS_CAP), in_flight_count: census.count,
+      in_flight_oldest_age_ms: census.oldestAgeMs, drain_episode: episode.id,
+      ...(census.unobserved.length > 0 ? { in_flight_unobserved: census.unobserved } : {}) };
+    log("daemon.pause", { ...row, ...censusFields });
+    if (census.count === 0 && !episode.drained) {
+      if (census.unobserved.length > 0) return; // partial census: a garden child or judge call may be live
+      episode.drained = true;
+      log("daemon.drained", { tick: row.tick, drain_episode: episode.id, in_flight_count: 0 });
+    } else if (census.count > 0 && episode.drained) {
+      episode.drained = false;
+      log("daemon.drain_reopened", { tick: row.tick, drain_episode: episode.id, in_flight_count: census.count, in_flight: censusFields.in_flight });
+    }
+  };
   if (nearLimitHeapTelemetry) {
     let sampledAttempts = attempted.length;
     let lastSample: unknown;
@@ -5320,14 +5387,15 @@ export async function runDaemon(
   };
   const opsDispatchContexts = new WeakMap<Plan, OpsDispatchContext>();
   let lastOpsDispatchHold: string | undefined;
-  const holdOpsDispatch = (reason: string, taskId?: string): void => {
+  const holdOpsDispatch = (reason: string, taskId?: string, source?: OpsCatalogShadowInput): void => {
     const safeReason = OPS_CATALOG_OUTCOMES.includes(reason as OpsCatalogOutcome) ||
       ["selection_unreadable", "selection_changed", "invalid_dispatch_flag", "source_pending", "source_identity_unknown",
         "primary_revision_unknown", "duplicate_task_id", "invalid_cross_catalog_dependency", "malformed"].includes(reason)
       ? reason : "selection_unreadable";
-    const signature = JSON.stringify([safeReason, taskId]);
+    const stage = opsCatalogRefusalStage(source);
+    const signature = JSON.stringify([safeReason, taskId, stage]);
     if (signature === lastOpsDispatchHold) return;
-    try { log("dispatch.ops_catalog_held", { outcome: safeReason, ...(taskId ? { task_id: taskId } : {}) }); }
+    try { log("dispatch.ops_catalog_held", { outcome: safeReason, ...(stage ? { refusal_stage: stage } : {}), ...(taskId ? { task_id: taskId } : {}) }); }
     catch (error) { void error; /* A diagnostic failure cannot authorize ops work or stop public selection. */ }
     lastOpsDispatchHold = signature;
   };
@@ -5343,12 +5411,12 @@ export async function runDaemon(
     const observation = readOpsDispatch(primary);
     if (observation.outcome === "off") { lastOpsDispatchHold = undefined; return { plan: primary, observation }; }
     if (observation.outcome === "unavailable") {
-      holdOpsDispatch(observation.reason);
+      holdOpsDispatch(observation.reason, undefined, observation.source);
       return { plan: primary, observation };
     }
     const input = observation.source;
     if (input.outcome !== "ok" || input.plan === undefined) {
-      holdOpsDispatch(input.outcome === "ok" ? "source_identity_unknown" : input.outcome);
+      holdOpsDispatch(input.outcome === "ok" ? "source_identity_unknown" : input.outcome, undefined, input);
       return { plan: primary, observation };
     }
     if (!CATALOG_COMMIT.test(observation.publicCommit)) {
@@ -5378,7 +5446,8 @@ export async function runDaemon(
     if (latest.outcome === "selected" && latest.source.outcome === "ok" &&
       latest.publicCommit === captured.publicCommit && latest.source.identityDigest === captured.source.identityDigest &&
       latest.source.opsCommit === captured.source.opsCommit) return true;
-    holdOpsDispatch(latest.outcome === "unavailable" ? latest.reason : "selection_changed");
+    holdOpsDispatch(latest.outcome === "unavailable" ? latest.reason : "selection_changed", undefined,
+      latest.outcome === "off" ? undefined : latest.source);
     return false;
   };
   // W1-T11768: the one snapshot of an injected ops target; `null` is any refusal (never a partial Plan).
@@ -7206,7 +7275,8 @@ export async function runDaemon(
     const paused = deps.checkPause?.();
     if (paused) {
       ticks++;
-      log("daemon.pause", { tick: ticks, detail: paused, poll_interval_ms: pollIntervalMs });
+      const pauseHold = deps.checkPauseHold?.();
+      logPause(paused, { tick: ticks, detail: paused, poll_interval_ms: pollIntervalMs }, pauseHold);
       sampleIdleLane(0, false);
       // W1-T4685: the SAME observation, tracked as one row instead of one line per tick — see
       // `gateObservations`'s own comment above for why this sits BESIDE the line above it, not in
@@ -7231,7 +7301,6 @@ export async function runDaemon(
         }
       }
       // W1-T4429 (ii): govern a structured hold's tier; (iii): reviews keep flowing beside the sleep.
-      const pauseHold = deps.checkPauseHold?.();
       if (pauseHold) {
         const holdState = pauseHoldGovernorStates.get(pauseHold.holdId) ?? { lastTier: undefined };
         pauseHoldGovernorStates.set(pauseHold.holdId, holdState);
@@ -7250,6 +7319,7 @@ export async function runDaemon(
       reportPauseReviewPasses(pauseReviewClock.passCount());
       continue;
     }
+    pauseEpisode = undefined;
     // Guarded, never a bare await: an unpaused tick must not gain a microtask turn (W1-T343 lanes).
     if (pauseReview.clock) await stopPauseReviewClock();
     // Self-freshness, checked directly after both operator holds and before headroom and dispatch, so
@@ -8453,12 +8523,12 @@ export async function runDaemon(
     if (workerHold?.control === "PAUSE") {
       await stopInterphaseReviewClock();
       ticks++;
-      log("daemon.pause", {
+      logPause(workerHold.detail, {
         tick: ticks,
         detail: workerHold.detail,
         poll_interval_ms: pollIntervalMs,
         recheck: true,
-      });
+      }, deps.checkPauseHold?.());
       sampleIdleLane(0, false);
       await sleepUntilSweepWake(pollIntervalMs);
       continue;
@@ -8482,12 +8552,12 @@ export async function runDaemon(
     if (repaused) {
       await stopInterphaseReviewClock();
       ticks++;
-      log("daemon.pause", {
+      logPause(repaused, {
         tick: ticks,
         detail: repaused,
         poll_interval_ms: pollIntervalMs,
         recheck: true,
-      });
+      }, deps.checkPauseHold?.());
       sampleIdleLane(0, false);
       await sleepUntilSweepWake(pollIntervalMs);
       continue;

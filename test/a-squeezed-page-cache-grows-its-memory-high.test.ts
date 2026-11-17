@@ -243,6 +243,11 @@ test("a first sample, or a recycled container, holds until it has a delta", () =
   }
 });
 
+/** The learned-value record, stamped from the caller's clock so no calendar date is baked into the fixture. */
+function tunedRecord(clockMs: number): string {
+  return `{"container":"${CONSOLE}","high_mib":3072,"policy_mib":2048,"updated_at":"${new Date(clockMs).toISOString()}","reason":"grow"}\n`;
+}
+
 test("the drift check treats a learned memory.high as current, and a recycle starts from it", () => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}memory-high-learned-`));
   try {
@@ -271,7 +276,7 @@ test("the drift check treats a learned memory.high as current, and a recycle sta
 
     writeFileSync(
       join(root, "cfg", "state", `memory-high-tuned-${CONSOLE}.json`),
-      `{"container":"${CONSOLE}","high_mib":3072,"policy_mib":2048,"updated_at":"2026-10-09T22:00:00Z","reason":"grow"}\n`,
+      tunedRecord(Date.now()),
     );
     // Learned 3072: the container that started from policy, from an earlier step, or from the learned
     // value is current — the tuner owns its live memory.high now.
@@ -467,6 +472,38 @@ test("the tuner's swap-in counts what zswap serves: its counter is pswpin plus z
       assert.equal(sample[5], "65000", "the stored counter is the sum, so the next tick's delta counts zswap too");
     } finally {
       rmSync(h.root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("W1-T9629: test/a-squeezed-page-cache-grows-its-memory-high.test.ts stays defused across 2026-10-23T22:00:00.000Z", () => {
+  const crossing = Date.parse("2026-10-23T22:00:00.000Z");
+  for (const clock of [crossing - 1000, crossing + 1000, Date.now()]) {
+    const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}memory-high-cross-`));
+    try {
+      mkdirSync(join(root, "deploy"), { recursive: true });
+      mkdirSync(join(root, "cfg", "state"), { recursive: true });
+      copyFileSync(join(REPO_ROOT, "deploy", "resource-policy.sh"), join(root, "deploy", "resource-policy.sh"));
+      writeFileSync(join(root, "meminfo"), `MemTotal:       ${HOST_KB} kB\n`);
+      const env = { PATH: process.env.PATH, RMD_MEMINFO_PATH: join(root, "meminfo"), ...hostIndependentPolicyEnv(root) };
+      seedPeaks(join(root, "cfg"), { "remudero-daemon": 2048, "remudero-serve": 2048, "remudero-site-daemon": 1024 });
+      const limits = { Memory: CONSOLE_MAX_MIB * MIB, MemorySwap: (CONSOLE_MAX_MIB + 4096) * MIB, CpuShares: 512, MemoryReservation: 0 };
+      const record = tunedRecord(clock);
+      assert.equal(JSON.parse(record).updated_at, new Date(clock).toISOString());
+      writeFileSync(join(root, "cfg", "state", `memory-high-tuned-${CONSOLE}.json`), record);
+      const drift = readResourcePolicyDrift(
+        (cmd, args) =>
+          cmd === "bash"
+            ? execFileSync(cmd, args, { encoding: "utf8", env })
+            : JSON.stringify({ ...limits, Annotations: { [MEMORY_HIGH_ANNOTATION]: `uint64 ${3072 * MIB}` } }),
+        root,
+        "build",
+        CONSOLE,
+        join(root, "cfg"),
+      );
+      assert.deepEqual(drift, [], `clock ${new Date(clock).toISOString()}`);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   }
 });

@@ -634,3 +634,35 @@ test("the open-weight probe suite is selected in the narrow arm for each recorde
   const unrelated = selectAffectedSuites(["src/a.ts"], { files, pathReaders: [], symbolSuites: [], readMap });
   assert.ok(!unrelated.narrow?.includes(suite), "an unrelated source change must not select the suite");
 });
+
+test("the reviewer-only proof failure suite is selected in the narrow arm for each recorded miss edge (run 38695464139)", () => {
+  const suite = "test/a-reviewer-only-proof-failure-reaches-the-fix-worker.test.ts";
+  const edges = ["src/lib/proofExecutor.ts", "src/lib/review.ts", "test/proof-failure-tail-bounded-redacted.test.ts", "test/proof-failure-tail-recorded-on-verdict.test.ts"];
+  const files = new Map([...Object.entries(TREE), [suite, ""], ...edges.map((e): [string, string] => [e, ""])]);
+  const readMap: ReadMapInput = {
+    map: { format: READ_MAP_FORMAT, sha: "main", suites: [], reads: {}, listed: {}, unknownDescriptorSuites: [] },
+    drift: { distance: 0, changedSinceMap: [] },
+  };
+  for (const changed of edges) {
+    const selection = selectAffectedSuites([changed], { files, pathReaders: [], symbolSuites: [], readMap });
+    assert.equal(selection.fullRun, false, changed);
+    assert.ok(selection.narrow?.includes(suite), `${changed} must select ${suite} in the narrow arm`);
+  }
+});
+
+test("W1-T9666: the ci-friction no-owner suite is selected for each recorded miss edge (run 38752153481)", () => {
+  const suite = "test/a-ci-friction-cause-owned-by-a-test-alone-escalates-as-no-owner.test.ts";
+  const edges = [
+    "src/lib/pr-blocker.ts",
+    "src/lib/sweep.ts",
+    "test/a-security-arm-refusal-names-its-hold.test.ts",
+    "test/every-open-pr-names-one-blocker-and-its-owner.test.ts",
+  ];
+  const files = new Map([...Object.entries(TREE), [suite, ""]]);
+  for (const changed of edges) {
+    if (changed.startsWith("test/")) files.set(changed, "export {};\n");
+    const selection = selectAffectedSuites([changed], { files, pathReaders: [], symbolSuites: [] });
+    assert.equal(selection.fullRun, false, changed);
+    assert.ok(selection.suites.includes(suite), `${changed} must select ${suite} in the floor`);
+  }
+});

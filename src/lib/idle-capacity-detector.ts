@@ -205,9 +205,9 @@ export async function evaluateIdleCapacityDetectors(input: FleetFlowInput) {
   const policy = IDLE_CAPACITY_POLICY;
   const since = input.nowMs - policy.longMs;
   let rows: readonly FleetFlowRow[];
-  if (input.readRows) rows = await input.readRows(input.nowMs - policy.longMs * policy.maxSamples, input.nowMs);
+  const inputs = [...new Set(input.detectors.flatMap((d) => [...d.inputs]))];
+  if (input.readRows) rows = await input.readRows(input.nowMs - policy.longMs * policy.maxSamples, input.nowMs, { reader: "Idle-capacity", inputs });
   else {
-    const inputs = [...new Set(input.detectors.flatMap((d) => [...d.inputs]))];
     const key = JSON.stringify([input.stateDir, inputs]);
     let memo = idleReaders.get(key);
     if (!memo) {

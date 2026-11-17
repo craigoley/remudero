@@ -7,8 +7,8 @@
   verify: auto
   risk: high
   band_meaning: blast-radius
-  priority: 4
-  status: queued
+  status: blocked
+  retirement: retired  # its only dependency W1-T9427 is retired unbuilt (premise rotted: withPredecessorTranscriptCopies in src/run-task.ts already stages predecessor transcripts, W1-T5682, #9759); operator approval 2026-11-17 (#12574)
   # backlog gardener: band=4 evidence=ec01324e8e546f64
   attempts: 0
   files:
@@ -28,3 +28,10 @@
     outside the worktree. I did not verify whether an earlier round had a reason to put this suite
     on the roster. — from unfiled (run DAEMON-1791333830491,
     https://github.com/craigoley/remudero/pull/9724)
+  note: |
+    CLOSED UNBUILT 2026-11-17 (operator approval, escalation #12574): retired with its only dependency
+    W1-T9427, whose premise rotted. This task would build an ingestion pipeline on the findings of that
+    investigation, but predecessor transcripts already reach a worker: W1-T5682 (#9759) stages them inside
+    the worktree through `withPredecessorTranscriptCopies` in src/run-task.ts. Re-verified on origin/main
+    cbb96bc8d: 3 hits for `withPredecessorTranscriptCopies` in src/run-task.ts, src/lib/transcript.ts does
+    not exist, and `ingestTranscript(` has no hit under src/. No task depends on W1-T9428.

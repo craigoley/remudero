@@ -1,3 +1,4 @@
+import { threadName } from "./thread-names.js";
 import { hydrateDependencyMainIdentitiesSteps } from "./dependency-main-identity.js";
 /** W1-T9722/W1-T4075: narrow read-plane entry; run-task.ts re-exports it, never import that CLI
  * transitively. Only read-plane workers install the producer. Graph/worker falsifier:
@@ -3438,9 +3439,9 @@ export function startTickReadWorker(input: TickReadOptions, opts: { url?: URL; s
   const workerData = { kind: READ_PLANE_KIND, input: budget === undefined ? input : { ...input, githubInstallationBudget: budget }, entry: url.href };
   // SHARE_ENV: the daemon's hourly GH_TOKEN refresh must reach the worker's reads. startWorker decides the entry
   // and, for a bundle, the execArgv without tsx; the boot imports whichever entry it chose.
-  return (opts.start ?? startWorker)(url, { workerData, env: SHARE_ENV }, {
+  return (opts.start ?? startWorker)(url, { name: threadName("tickRead"), workerData, env: SHARE_ENV }, {
     construct: (entry, given: WorkerOptions) => new Worker(tickReadWorkerBoot(String(entry)), {
-      eval: true, env: SHARE_ENV, execArgv: given.execArgv, workerData: { ...workerData, entry: String(entry) },
+      eval: true, name: given.name, env: SHARE_ENV, execArgv: given.execArgv, workerData: { ...workerData, entry: String(entry) },
     }),
   });
 }

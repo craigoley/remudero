@@ -1,0 +1,127 @@
+- id: W1-T13458
+  title: "The fix census snapshot sizes its git reads from the repository: its blob read is bounded by the bytes git reports for those blobs, and its file lists get the snapshot's own bound, not the 1 MiB default"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: low # the read options of one snapshot writer in src/run-task.ts; the snapshot's fields, its file and its ledger rows do not change
+  origin: "operator-session#fix-lane-flow-2026-11-17"
+  plan_refs:
+    - W1-T7182
+    - W1-T9550
+  files:
+    - src/run-task.ts
+    - test/a-fix-census-snapshot-reads-a-repository-of-any-size.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "invariant:blob-read-sized-from-the-repository — a fixture repository whose census blobs at the merge base make more than 134,217,728 bytes (128 MiB) of `git cat-file --batch` output (for example two census paths that name one 68 MiB blob) gets an `available` snapshot from writeFixCensusSnapshotAsync with the production git runner. baseBlobs holds each of those paths with its full length and the blob's exact bytes"
+      proof: "grep: W1-T13458 criterion 1 in test/a-fix-census-snapshot-reads-a-repository-of-any-size.test.ts"
+    - claim: "invariant:file-lists-past-the-runner-default — a fixture repository whose `git ls-files` output is more than 1,048,576 bytes (build the index with `git update-index --index-info` from long census paths that share one small blob, then commit it) gets an `available` snapshot from both writeFixCensusSnapshotAsync and writeFixCensusSnapshot with the production git runners. headPaths and basePaths each hold every census path of that tree"
+      proof: "grep: W1-T13458 criterion 2 in test/a-fix-census-snapshot-reads-a-repository-of-any-size.test.ts"
+    - claim: "A small repository's snapshot content does not change. For a fixture with census files in src, scripts and test (one of them non-ASCII UTF-8 text) and a scripts/*baseline.json on main, the snapshot's version, headSha, mainSha, mergeBase, headPaths, basePaths, baseBlobs and mainBlobs are equal to values the test reads from git itself, and the sync and async writers give equal snapshots"
+      proof: "grep: W1-T13458 criterion 3 in test/a-fix-census-snapshot-reads-a-repository-of-any-size.test.ts"
+    - claim: "A real git failure keeps today's result. In a fixture with no refs/remotes/origin/main, both writers return undefined without throwing and log exactly one `fix.census_snapshot` row with outcome `unavailable` and a reason that holds git's own message for the missing ref. fix.ts:4388 treats undefined as no snapshot, so the round goes on as it does today"
+      proof: "grep: W1-T13458 criterion 4 in test/a-fix-census-snapshot-reads-a-repository-of-any-size.test.ts"
+    - claim: "invariant:every-snapshot-read-passes-its-bound — a recording runner that passes each call to hostWorktreeGitAsync shows that every `ls-files` and `ls-tree` call and the `cat-file --batch-check` call pass maxBuffer 134,217,728, and that the `cat-file --batch` call passes a maxBuffer equal to the exact byte length of the output that call returned"
+      kind: guard
+      proof: "grep: W1-T13458 criterion 5 in test/a-fix-census-snapshot-reads-a-repository-of-any-size.test.ts"
+  rationale: |
+    WHY: a fix round with no census snapshot loses four things in src/cli/commands/fix.ts. (1) :4392-4404, the
+    inherited-census check: readInheritedCensusContextAsync, then checkFixCensusSnapshotAsync, then
+    refreshInheritedCensusRefusal, which asks for a base refresh or stands the round down when main itself
+    gives the census refusal. Without it the worker spends a strike on a refusal its branch did not cause.
+    (2) :4424, the prompt's `RMD_CENSUS_SNAPSHOT=... node scripts/census-precheck.mjs` command, the only
+    census check a worker with no git can run. (3) :4485, the RMD_CENSUS_SNAPSHOT env of the worker.
+    (4) :4705-4706, the census check of the worker's edits before the harness commits them:
+    checkFixCensusSnapshotAsync returns undefined at once for no path (src/run-task.ts:11083).
+    MEASURED on the Azure fleet host, 2026-11-17 (ledger.ndjson plus the 11-14 to 11-17 .gz files):
+    - fix.census_snapshot rows: 329 `available` from 2026-11-14 to 15:12Z on 11-17 (97, 97, 68, 67 a day). From
+      15:13:07Z to 18:01:18Z there are 7 `unavailable` rows, each with reason `RangeError
+      [ERR_CHILD_PROCESS_STDIO_MAXBUFFER]: stdout maxBuffer length exceeded` (W1-T13333 three times, W1-T12115
+      twice, W1-T13367, W1-T13364), and 1 `available` row (W1-T13319 at 16:54:50Z). So the failure is not every
+      round: it depends on the merge base of the round's branch.
+    - The file lists are NOT the cause. `git ls-files | wc -c` is 824,101 at origin/main b9024116de, and
+      `git ls-tree -r --name-only` is 822,606 to 822,742 at the failing branches' merge bases. All are below the
+      runner's 1,048,576-byte default (78.6% of it).
+    - The blob read IS the cause. The exact `cat-file --batch` output for the snapshot's census paths (header
+      line + bytes + newline for each, with the real CENSUS_SNAPSHOT_ROOTS filter) is 134,878,860 bytes for 12,946
+      paths at origin/main, 134,580,837 at merge base 15a86ac987 (W1-T12115, W1-T13364) and 134,597,938 at
+      cb11951417 (W1-T13367). The bound is 128 * 1024 * 1024 = 134,217,728. On first-parent main the output
+      first went over it at 07f538e6dd (2026-11-17T12:57:09Z, 134,312,945 bytes). A branch based before that
+      commit still gets a snapshot, which is why W1-T13319 did.
+    READ at origin/main b9024116de:
+    - src/run-task.ts:10923-10977 writeFixCensusSnapshotSteps. `paths()` (:10937-10939) runs `ls-files`,
+      `ls-tree -r --name-only <mergeBase>` and `ls-tree -r --name-only <mainSha> -- scripts` with no options.
+      `blobs()` (:10944-10963) runs `cat-file --batch` with `maxBuffer: 128 * 1024 * 1024`, decodes stdout as
+      UTF-8 and turns it back into a Buffer to walk the headers. The catch at :10974-10976 logs `unavailable`.
+    - src/lib/worktree-git.ts:446-458 spawnOptions passes maxBuffer only when the caller gives one.
+      hostWorktreeGit (:468) calls execFileSync; hostWorktreeGitAsync (:487) calls execFileLoopBounded
+      (src/lib/loop-bounded-child.ts:160), which is promisify(execFile) (:22) with the options as given.
+      So the limit with no maxBuffer is Node's own default for execFile and execFileSync: 1024 * 1024 =
+      1,048,576 bytes (Node v24.22.2 on the host). Nothing in Remudero sets a different default.
+    - Node's execFile counts stdout as Buffer.byteLength(chunk, encoding) of the decoded chunk. With utf8, an
+      invalid byte becomes U+FFFD (3 bytes) and counts as 3, so a bound equal to git's exact byte count holds
+      only when the read is decoded as latin1. HostWorktreeGitOptions.encoding already offers latin1 for blob
+      reads (worktree-git.ts:437-439). execFileSync counts raw bytes.
+    - The production caller: fix.ts:4388 `deps.writeFixCensusSnapshot`, wired to writeFixCensusSnapshotAsync
+      (src/run-task.ts:46047). The sync writer is used by tests and by the sync census path.
+    NOT COVERED: swept origin/main plan/tasks.d for census snapshot and maxBuffer tasks. W1-T13170 makes an
+    async git overflow report itself as the overflow (not EPIPE); it does not change any bound. No open pull
+    request touches the snapshot writer. No other filing.
+  design: |
+    INVARIANT blob-read-sized-from-the-repository: the snapshot's blob read never fails on output size while git reports the blobs' sizes truly.
+    INVARIANT file-lists-past-the-runner-default: the snapshot's file lists never fail at Node's 1 MiB default.
+    INVARIANT every-snapshot-read-passes-its-bound: each git read of the snapshot names its bound at the call site.
+    1. One read bound for the lists. Name the existing 128 MiB value once, as a module constant of
+       src/run-task.ts (for example CENSUS_SNAPSHOT_LIST_BOUND = 128 * 1024 * 1024), and pass it as maxBuffer to
+       every call in `paths()` and to the check read of step 2. These reads hold only path names and object
+       headers: 824,101 bytes today, so the bound is about 160 times the measured size and stays a guard
+       against runaway output, not an estimate.
+    2. The blob read's bound comes from git. Before `cat-file --batch`, run `cat-file --batch-check` with the
+       same input. Its output for each name is the same header line that `--batch` writes (`<oid> <type> <size>`,
+       or `<name> missing`). The bound for the batch read is the byte length of that output plus, for each line
+       with a size, size + 1 (the blob and its newline). That is the exact byte count `--batch` writes. Both
+       reads name immutable commits (mergeBase and mainSha are object ids), so the sizes cannot change between
+       them.
+    3. Read the batch with `encoding: "latin1"` and use Buffer.from(output, "latin1"), so the async runner's
+       count is the byte count and the header walk sees git's bytes. Decode each blob as UTF-8 as today, so
+       the snapshot's text is unchanged for valid UTF-8 (criterion 3).
+    4. MEMORY: the batch bound admits exactly the bytes of the blobs the snapshot keeps. The snapshot already
+       holds each of those bytes in memory and writes them to snapshot.json, so the new bound adds no byte
+       that today's successful read did not hold; it only removes the fixed ceiling. Output past the bound is
+       still an error, and the catch still logs `unavailable` with that error. The extra check read costs one
+       more git child and about 60 bytes per census path (under 1 MB today).
+    5. Do NOT add an env var or a config key. Do not change the snapshot's fields, the file mode, or the
+       `fix.census_snapshot` row shapes. Do not change worktree-git.ts or Node's defaults for other callers.
+    6. The test: a new file, importing the writers from #test/helpers/run-task-test.js (not src/run-task.ts
+       directly), the repo root from #test/helpers/repo-root.js, and fixtures from #test/helpers/git-repo.js.
+       Criterion 1: write a 68 MiB blob once with `git hash-object -w --stdin` and name it from two census
+       paths with `git update-index --index-info`; compare lengths and a hash, not strings in assert messages.
+       Criterion 2: about 3,000 index entries with paths of about 400 bytes under test/ (each path component
+       below 255 bytes), all naming one small blob; no files on disk are needed. Run the heavy tests one at a
+       time; set refs/remotes/origin/main with `git update-ref`.
+       The test's basename matches the census name pattern only by its words; its header declares
+       `@not-a-rule-suite: it tests one writer's git read bounds on fixture repositories and walks no tracked population`.
+    WHY NOT the alternatives:
+    - Give the lists the same 128 MiB and keep the fixed blob bound (the first idea for this defect): the
+      lists are not over any limit; the blob read is, and it would fail the same way.
+    - Raise the fixed blob bound to a bigger number: another guess; the blob output grew about 0.4 MB on main
+      from the last commit before 15:00Z to 18:15Z and would reach any fixed number again.
+    - Stream the batch read: the snapshot must hold every blob to write its JSON, so streaming saves no memory,
+      and the git leaves give no streaming read today.
+  falsifier: |
+    Put back `maxBuffer: 128 * 1024 * 1024` on the `cat-file --batch` call: criterion 1 fails with
+    ERR_CHILD_PROCESS_STDIO_MAXBUFFER, the fleet's own reason, and criterion 5 fails at the blob read. Remove the
+    bound from the `paths()` calls: criterion 2 fails with the same error and criterion 5 fails at the list
+    calls. In both cases criteria 3 and 4 still pass.
+  note: |
+    Id reserved for run-unfiled-1794938795000 with ~/rmd-work/bin/reserve-id.sh.
+    The operator's first reading was that `git ls-files` outgrew the runner's default. The measurement above
+    shows the listing at 824,101 of 1,048,576 bytes and the blob read over its fixed 128 MiB, so this task
+    sizes the blob read from git and also bounds the lists before they reach 1 MiB.
+    Proof that counts on the host: after the daemon converges to the fix, fix.census_snapshot rows are all
+    `available` again, with no ERR_CHILD_PROCESS_STDIO_MAXBUFFER reason.

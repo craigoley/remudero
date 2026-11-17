@@ -138,7 +138,7 @@ test("assertCleanBoot: defaults the runtime reading to THIS process's own execPa
 
 test("daemonBoot: the daemon.boot ledger line carries node_path/node_version, and a named node_drift when the runtime is foreign", async () => {
   const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
-  const env = { PATH: "/usr/bin:/bin", HOME: "/Users/craigoleyagent" };
+  const env = { PATH: "/usr/bin:/bin", HOME: "/Users/craigoleyagent", RMD_SPAWN_HELPER: "off" };
   const result = await daemonBoot(
     (step, extra = {}) => lines.push({ step, extra }),
     env,
@@ -168,7 +168,7 @@ test("daemonBoot: the daemon.boot ledger line carries node_path/node_version, an
 
 test("daemonBoot: drift is ADVISORY ONLY — a daemon on a drifting runtime still boots and returns normally, never throws", () => {
   const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
-  const env = { PATH: "/usr/bin:/bin", HOME: "/Users/craigoleyagent" };
+  const env = { PATH: "/usr/bin:/bin", HOME: "/Users/craigoleyagent", RMD_SPAWN_HELPER: "off" };
   assert.doesNotThrow(() =>
     daemonBoot(
       (step, extra = {}) => lines.push({ step, extra }),
@@ -186,12 +186,12 @@ test("daemonBoot: drift is ADVISORY ONLY — a daemon on a drifting runtime stil
       "22.22.3",
     ),
   );
-  assert.equal(lines.length, 1, "a drifted boot still logs exactly one daemon.boot line and proceeds");
+  assert.equal(lines.filter((line) => line.step !== "daemon.spawn_helper").length, 1, "a drifted boot still logs exactly one daemon.boot line and proceeds");
 });
 
 test("daemonBoot: a runtime in the daemon's own roots, matching the pin, logs NO node_drift key at all", async () => {
   const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
-  const env = { PATH: "/usr/bin:/bin", HOME: "/Users/craigoleyagent" };
+  const env = { PATH: "/usr/bin:/bin", HOME: "/Users/craigoleyagent", RMD_SPAWN_HELPER: "off" };
   const result = await daemonBoot(
     (step, extra = {}) => lines.push({ step, extra }),
     env,
@@ -217,7 +217,7 @@ test("daemonBoot: a runtime in the daemon's own roots, matching the pin, logs NO
 
 test("daemonBoot: with no nodeRuntime/declaredNodeVersion injected, defaults to THIS process's own runtime (real production wiring)", async () => {
   const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
-  const result = await daemonBoot((step, extra = {}) => lines.push({ step, extra }), { PATH: "/usr/bin:/bin", HOME: "/Users/op" });
+  const result = await daemonBoot((step, extra = {}) => lines.push({ step, extra }), { PATH: "/usr/bin:/bin", HOME: "/Users/op", RMD_SPAWN_HELPER: "off" });
   assert.equal(result.node_path, process.execPath);
   assert.equal(result.node_version, process.version);
   const bootLine = lines.find((l) => l.step === "daemon.boot");
