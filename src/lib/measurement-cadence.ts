@@ -3284,7 +3284,7 @@ export function collectHandFixClasses(input: HandFixInput): HandFixClass[] {
   const classes = new Map<string, HandFixClass>();
   for (const row of input.rows) {
     const file = mostChangedFile(row);
-    const atMs = Date.parse(row.at);
+    const atMs = Date.parse(row.at); // expiring-fixture: exempt -- a lookback window over ledger rows, not a fixture stamp
     if (file === undefined || !Number.isFinite(atMs) || atMs < sinceMs || atMs > input.now.getTime()) continue;
     const rowKey = interventionKey(row);
     if (seen.has(rowKey)) continue; // one hand action is one count however many times its row was read
