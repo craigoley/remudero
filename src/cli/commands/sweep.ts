@@ -21,7 +21,7 @@ import type { BoardSnapshotCache } from "../../lib/board-snapshot-cache.js";
 import type { PanelGraphDeps } from "../../lib/panel-graph.js";
 import { createGhCallPacer, createPlanFilingFileCache, loadPlanFilingFileCache, type GhCallPacer } from "../../lib/open-prs-rest.js";
 import { configureEscalationTriage, ghIssueGateway, tryEscalate } from "../../lib/escalate.js";
-import { escalatePostReviewStall } from "../../lib/escalation-catalogue.js";
+import { createSweepStageWatch, escalatePostReviewStall, SWEEP_STAGE_STREAK_SLICE, type SweepStageOutcome } from "../../lib/escalation-catalogue.js";
 import { ghPrDiffAsync } from "../../lib/pr-diff.js";
 import { riskJudgePlanContextDigestFor } from "../../lib/risk-judge.js";
 import { fixRebaseMergeFactsFromRest, ghUpdateBranch, readHeadShaRest } from "../../lib/arm-auto-merge.js";
@@ -997,8 +997,23 @@ export function buildSweepHook(
   const branchReapStatePath = join(config.root, "state", automaticBranchReapStateFileName(repo));
   const branchReapState: AutomaticBranchReapState = readAutomaticBranchReapState(branchReapStatePath);
   const nextDistanceProbe = createDistanceProbeSequence();
+  // W1-T13255: each contained prelude stage's failure streak, read from its own ledger rows for this daemon's life.
+  const watchStage = createSweepStageWatch({ owner, repo, ledgerPath, runId,
+    history: createEscalationTriageHistoryReader({ slice: SWEEP_STAGE_STREAK_SLICE }) });
   return async (continueReviewAdmissions = () => true) => {
     const prelude = createFullPreludeTimer((fields) => log("sweep.full_prelude", fields));
+    // W1-T13255: a contained stage logs its throw and the pass carries on, exactly as before; what the pass saw of
+    // it (threw, completed, or `false` for not run or not fully read) is kept for the watch below.
+    const stageOutcomes = new Map<string, SweepStageOutcome>();
+    const contained = (stage: string, errorStep: string, run: () => Promise<boolean>): Promise<void> => prelude.time(stage, async () => {
+      try {
+        stageOutcomes.set(stage, { clean: await run() });
+      } catch (e) {
+        const error = String((e as Error)?.message ?? e);
+        log(errorStep, { error });
+        stageOutcomes.set(stage, { error });
+      }
+    });
     const triageRuntime = buildEscalationTriageRuntime({ root: targetCheckoutRoot ?? repoRoot, config, owner, repo },
       { evidenceHistory: escalationTriageEvidence });
     if (!github) configureEscalationTriage(triageRuntime);
@@ -1008,26 +1023,31 @@ export function buildSweepHook(
       prelude.time("triage_evidence", async () => {
         if (!github) await refreshEscalationTriageEvidence(triageRuntime, ledgerPath, log);
       }),
-      prelude.time("main_health", async () => {
-        try {
-          await mainHealthRung?.();
-        } catch (e) {
-          log("main.health.error", { error: String((e as Error)?.message ?? e) });
-        }
+      contained("main_health", "main.health.error", async () => {
+        await mainHealthRung?.();
+        return mainHealthRung !== undefined;
       }),
       // W1-T4471: land owner replies in `plan/questions.ndjson` BEFORE `buildOpenPrViews` reads it,
       // so a reply steers this same tick. Contained like `mainHealthRung` above.
-      prelude.time("escalation_answers", async () => {
-        if (!escalationAnswerGateway) return;
-        try {
-          const answers = await readEscalationAnswers(repoRoot, runId, escalationAnswerGateway,
-            { ledgerPath, ...(escalationFeedbackReply ? { feedback: escalationFeedbackReply } : {}) });
-          if (answers.unreadable > 0) log("escalation_answers.unreadable", { ...answers });
-        } catch (e) {
-          log("escalation_answers.error", { error: String((e as Error)?.message ?? e) });
-        }
+      contained("escalation_answers", "escalation_answers.error", async () => {
+        if (!escalationAnswerGateway) return false;
+        const answers = await readEscalationAnswers(repoRoot, runId, escalationAnswerGateway,
+          { ledgerPath, ...(escalationFeedbackReply ? { feedback: escalationFeedbackReply } : {}) });
+        if (answers.unreadable > 0) log("escalation_answers.unreadable", { ...answers });
+        return answers.unreadable === 0;
       }),
     ]);
+    // W1-T13255: a stage whose streak outlasts the streaks it has recovered from opens one needs-human issue, and its
+    // next clean pass closes it. After the stages, one at a time: they share one history reader.
+    await prelude.time("stage_watch", async () => {
+      for (const [stage, outcome] of stageOutcomes) {
+        try {
+          await watchStage(stage, outcome);
+        } catch (e) {
+          log("sweep.stage_watch.error", { stage, error: String((e as Error)?.message ?? e) });
+        }
+      }
+    });
     // W1-T12754: why the published generation was not used, and a joined read's own publish time.
     const serve = tickReadFor === undefined ? { source: "none" as const, miss: "no_plane" as const } : tickReadFor.lastServe?.();
     const servedAtMs = serve?.source === "joined" ? serve.publishedAtMs : tickRead?.servedPublishedAtMs;
