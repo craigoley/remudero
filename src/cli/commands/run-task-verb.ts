@@ -140,7 +140,7 @@ import { managedCheckoutInstallEscalation, stagedInstall, type StagedInstallFail
 import { buildIntoStore, childEntryStoreRoot } from "../../lib/child-entry-store.js";
 import { buildEngineAfterStore } from "../../lib/engine-tree.js";
 import { chainAbortSignal } from "../../lib/run-child.js";
-import { type RollupCheck, fetchCiFailures, fetchCiFailuresAsync } from "../../lib/tick-read-worker.js";
+import { type RollupCheck, fetchCiFailures, fetchCiFailuresAsync, planSyncGitRunnerAsync } from "../../lib/tick-read-worker.js";
 
 export type GitRunner = (args: string[], stdin?: string) => string;
 
@@ -4955,7 +4955,7 @@ export async function runTask(
   // W1-T12936: a synced public task is re-read from Core's exact origin/main commit before any worker starts, so a
   // target repository that has not filed it can open its PR with these pinned criteria (and only these).
   const coreCriteriaAtOpen = lookup.outcome === "found" && lookup.catalog === "public" && !opts.skipGitSync
-    ? pinCoreCriteriaAtOpen(planPath, task, `${owner}/${task.repo}`)
+    ? await pinCoreCriteriaAtOpen(planPath, task, `${owner}/${task.repo}`)
     : undefined;
   if (coreCriteriaAtOpen) log("core_criteria.pinned", { source_commit: coreCriteriaAtOpen.sourceCommit, target: coreCriteriaAtOpen.targetRepository });
   if (task.catalog === "ops" && !plan.byId.has(taskId)) {
@@ -5294,17 +5294,18 @@ export function claimRunTaskFixBranch(input: {
  * criteria for the target repository's PR opener. Missing, malformed, or different source evidence refuses here,
  * before any worker starts. The opener uses the binding only when the target's own plan lacks the task.
  */
-function pinCoreCriteriaAtOpen(planPath: string, task: Task, targetRepository: string): CanonicalOpsCriteriaAtOpen {
+async function pinCoreCriteriaAtOpen(planPath: string, task: Task, targetRepository: string): Promise<CanonicalOpsCriteriaAtOpen> {
   const refuse = (reason: string): never => { throw new Error(`core public-plan criteria refused (${reason})`); };
   const repoDir = dirname(dirname(planPath)), planRel = relative(repoDir, planPath), shardRel = join(dirname(planRel), "tasks.d");
-  const git = (args: string[]): string => execFileSync("git", ["-C", repoDir, ...args], { encoding: "utf8", maxBuffer: 1 << 26 });
+  // Off the daemon loop: the plan sync's own awaited git runner, never a synchronous spawn.
+  const git = planSyncGitRunnerAsync(repoDir);
   let commit: string, record: Task | undefined;
   try {
-    commit = git(["rev-parse", "--verify", "origin/main^{commit}"]).trim();
-    const shard = git(["ls-tree", "--name-only", commit, `${shardRel}/`]).split("\n")
+    commit = (await git(["rev-parse", "--verify", "origin/main^{commit}"])).trim();
+    const shard = (await git(["ls-tree", "--name-only", commit, `${shardRel}/`])).split("\n")
       .find(path => basename(path).startsWith(`${task.id}-`) && /\.ya?ml$/.test(path));
     const source = shard ?? planRel;
-    record = parseTasksFromYaml(git(["show", `${commit}:${source}`]), `${commit}:${source}`).find(t => t.id === task.id);
+    record = parseTasksFromYaml(await git(["show", `${commit}:${source}`]), `${commit}:${source}`).find(t => t.id === task.id);
   } catch (err) {
     return refuse(`source unreadable: ${String(err)}`);
   }
