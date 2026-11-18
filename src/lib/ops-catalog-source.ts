@@ -169,7 +169,35 @@ function one(entries: TreeEntry[], name: string): TreeEntry | undefined {
 
 const regular = (e: TreeEntry): boolean => e.type === "blob" && (e.mode === "100644" || e.mode === "100755");
 
-async function readBlob(api: OpsCatalogApi, repo: string, blobSha: string, counts: OpsCatalogCounts): Promise<string> {
+// W1-T13673: blob texts already verified against their SHA-1, per api and repository id. Memory only.
+interface KeptBlob { text: string; bytes: number }
+const keptBlobs = new WeakMap<OpsCatalogApi, Map<number, Map<string, KeptBlob>>>();
+function knownBlobText(api: OpsCatalogApi, repositoryId: number, blobSha: string): KeptBlob | undefined {
+  return keptBlobs.get(api)?.get(repositoryId)?.get(blobSha);
+}
+function keepBlob(api: OpsCatalogApi, repositoryId: number, blobSha: string, blob: KeptBlob): void {
+  let byRepo = keptBlobs.get(api);
+  if (!byRepo) keptBlobs.set(api, byRepo = new Map());
+  let bySha = byRepo.get(repositoryId);
+  if (!bySha) byRepo.set(repositoryId, bySha = new Map());
+  bySha.set(blobSha, blob);
+}
+function keepOnlyBound(api: OpsCatalogApi, binding: OpsCatalogBinding): void {
+  const bySha = keptBlobs.get(api)?.get(binding.repositoryId);
+  if (!bySha) return;
+  const named = new Set([binding.tasksYamlBlob, ...Object.values(binding.shardBlobs)]);
+  for (const blobSha of [...bySha.keys()]) if (!named.has(blobSha)) bySha.delete(blobSha);
+}
+
+async function readBlob(
+  api: OpsCatalogApi, repo: string, repositoryId: number, blobSha: string, counts: OpsCatalogCounts,
+): Promise<string> {
+  const known = knownBlobText(api, repositoryId, blobSha);
+  if (known) {
+    counts.bytes += known.bytes;
+    if (counts.bytes > OPS_CATALOG_MAX_TOTAL_BYTES) throw new Refusal("malformed");
+    return known.text;
+  }
   const blob = rec(await get(api, `${repo}/git/blobs/${blobSha}`));
   if (blob.sha !== blobSha || blob.encoding !== "base64" || typeof blob.content !== "string") throw new Refusal("malformed");
   const encoded = blob.content.replace(/[\r\n]/g, "");
@@ -180,8 +208,11 @@ async function readBlob(api: OpsCatalogApi, repo: string, blobSha: string, count
   if (bytes.length > OPS_CATALOG_MAX_BLOB_BYTES || counts.bytes > OPS_CATALOG_MAX_TOTAL_BYTES
     || blob.size !== bytes.length) throw new Refusal("malformed");
   if (createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex") !== blobSha) throw new Refusal("malformed");
-  try { return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes); }
+  let text: string;
+  try { text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes); }
   catch { throw new Refusal("malformed"); }
+  keepBlob(api, repositoryId, blobSha, { text, bytes: bytes.length });
+  return text;
 }
 
 /** The commit a branch names now: one ref GET. `repo` is `repos/<owner>/<name>`. Throws a refusal on any failure. */
@@ -236,9 +267,9 @@ async function read(
   counts.shards = shardEntries.length;
   atStage("blob_verification");
   const blobs: Array<{ label: string; text: string }> = [
-    { label: "tasks.yaml", text: await readBlob(api, repo, monolith.sha, counts) },
+    { label: "tasks.yaml", text: await readBlob(api, repo, repositoryId, monolith.sha, counts) },
   ];
-  for (const e of shardEntries) blobs.push({ label: `tasks.d/${e.path}`, text: await readBlob(api, repo, e.sha, counts) });
+  for (const e of shardEntries) blobs.push({ label: `tasks.d/${e.path}`, text: await readBlob(api, repo, repositoryId, e.sha, counts) });
   // The ref must still name the commit every read above was bound to.
   atStage("final_ref");
   if (await readBranchSha(api, repo, branch) !== commit) throw new Refusal("ref_moved");
@@ -255,8 +286,13 @@ async function read(
   } catch (error) {
     throw new Refusal(error instanceof PlanError && /^duplicate task id /.test(error.message) ? "duplicate_task_id" : "malformed");
   }
+  keepOnlyBound(api, binding);
   return privateHandles({ outcome: "ok" as const, identityDigest, counts: Object.freeze(counts) }, { plan, binding });
 }
+
+// W1-T13673: one default api per process, so every default reader shares one pacer and the kept blobs.
+let processDefaultApi: OpsCatalogApi | undefined;
+const sharedDefaultOpsCatalogApi = (): OpsCatalogApi => (processDefaultApi ??= defaultOpsCatalogApi());
 
 /**
  * Read the target's catalog once at one pinned commit. Never throws and never returns a partial Plan: every
@@ -264,7 +300,7 @@ async function read(
  */
 export async function readOpsCatalogSnapshotAsync(
   target: OpsCatalogTarget,
-  api: OpsCatalogApi = defaultOpsCatalogApi(),
+  api: OpsCatalogApi = sharedDefaultOpsCatalogApi(),
 ): Promise<OpsCatalogSnapshot> {
   return readSnapshot(target, api, snapshotStore);
 }
@@ -288,7 +324,7 @@ async function readSnapshot(
  */
 export function createOpsCatalogShadowSource(
   target: OpsCatalogTarget,
-  api: OpsCatalogApi = defaultOpsCatalogApi(),
+  api: OpsCatalogApi = sharedDefaultOpsCatalogApi(),
 ): { refresh(): Promise<OpsCatalogShadowInput> } {
   let everOk = false;
   let kept: { plan?: Plan; binding: OpsCatalogBinding; identityDigest?: string } | undefined;
