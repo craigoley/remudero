@@ -60,10 +60,14 @@ export const SERVE_POLICY_FAILED_FILE = "SERVE_POLICY_FAILED";
 
 /** Supervisor rows that open a handoff, and rows after which none is in flight. W1-T9504: a deferral (W1-T8311's
  *  `deferUpgrade`) forks no standby, holds no lock and keeps the active generation, so nothing is mid-swap after it;
- *  counting it open held the replace for as long as a handoff that never fits kept deferring (2026-10-14). */
+ *  counting it open held the replace for as long as a handoff that never fits kept deferring (2026-10-14).
+ *  W1-T13534: an ask a pending spacing wait absorbs writes `serve.handoff_spacing_absorbed` after its own
+ *  `serve.handoff_requested`; it forks nothing either. On 2026-11-17/18 two absorbed asks (00:10Z, 00:25Z) left the
+ *  hold open for the whole 3.45 h wait, so the image replace waited behind a handoff that was never in flight. */
 const HANDOFF_OPEN_STEPS = ["serve.handoff_requested", "serve.handoff_shed"];
 const HANDOFF_CLOSED_STEPS = [
   "serve.handoff_deferred",
+  "serve.handoff_spacing_absorbed",
   "serve.handoff_done",
   "serve.handoff_aborted",
   "serve.handoff_skipped",

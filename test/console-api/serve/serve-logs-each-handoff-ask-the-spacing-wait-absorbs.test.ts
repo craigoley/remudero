@@ -16,6 +16,7 @@ import {
   type ServeSupervisorOptions,
 } from "#src/lib/serve-supervisor.js";
 import { GENERATION_MESSAGES, type GenerationMessage } from "#src/lib/serve-generation.js";
+import { serveHandoffOpen } from "#src/lib/serve-policy-convergence.js";
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -204,4 +205,13 @@ test("W1-T13534 criterion 4: invariant:pressure-still-stretches — below the ca
     sinceLastMs: 15 * MIN,
     sha: "sha-2",
   });
+});
+
+test("W1-T13534: an ask the spacing wait absorbed does not hold serve's image replace open", () => {
+  const row = (step: string, extra: Record<string, unknown> = {}) => JSON.stringify({ task_id: "SERVE", step, lane: "serve", ...extra });
+  const deferred = [row("serve.handoff_requested", { reason: "checkout_behind" }), row("serve.handoff_deferred", { reason: "spacing" })];
+  const asked = [...deferred, row("serve.handoff_requested", { reason: "checkout_behind" })];
+  // positive control: an ask with nothing after it is still a handoff in flight
+  assert.equal(serveHandoffOpen(asked.join("\n")), true);
+  assert.equal(serveHandoffOpen([...asked, row("serve.handoff_spacing_absorbed", { absorbed: 1 })].join("\n")), false);
 });
