@@ -508,6 +508,8 @@ async function productionCensusCaller(t: TestContext, competingOwner: boolean | 
     }
   };
   copyTrusted(REACH); copyTrusted("test/setup/tmp-hygiene.ts");
+  // census-precheck resolves these source modules dynamically, outside the static import closure.
+  for (const path of ["src/lib/trust-root-text.ts", "src/lib/rule-suites.ts", "src/lib/test-slot.ts"]) copyTrusted(path);
   // The census loads this data file at runtime, outside the static import closure above.
   copyTrusted("scripts/house-layout-split-table.json");
   repo.git("add", "plan", "package.json", "package-lock.json", "src", "scripts", "test");
