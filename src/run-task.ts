@@ -1872,7 +1872,7 @@ import {
   type GithubPostureGateway,
 } from "./lib/github-posture.js";
 import { validateWorkerSettingsFile } from "./lib/settings.js";
-import { readCatalogStatusContext, type CatalogStatusContext, buildBatchedGithub, defaultCreditStorePath, loadCreditStore, saveCreditStore, buildCommitTrailerIndex, classifyGhFailure, createDispatchBreakerCache, deriveStatus, dispatchesWithoutNewOwnedPr, evaluateDispatchBreakerCorroboratedDetailed, type LedgerSnapshot, readLedgerSnapshot, type DispatchBreakerDetail, ghGateway, ghRequiredStatusCheckContexts, isGhRateLimitError, effectiveLifetimeDispatches, hasRepeatedTaskAttributableLifetimeDispatches, orphanedRunIds, streakRefusal, taskAttributableLifetimeDispatches, type LifetimeDispatchTally, projectPlan, readLedgerLines, type DeriveDeps, type GitHub, type GhFailureReason, preferImplementingPr, type PrRef, type BatchedPr, type OpenSiblingBuild, type StatusProjection, planBranchReap, type BranchFacts, type BranchReapPlan, BRANCH_REAP_REASON_LABEL, readLedgerUnionBounded, taskIdFromRunBranch, taskIdFromSlugBranch, readMergeCreditedTaskIds, readMergeCreditedTaskIdsAsync, isMergeCreditLine, readRequiredStatusCheckContexts, readRequiredStatusCheckContextsAsync, persistVerifiedCredit, type ThrownRunVerdictStage, type RefusedRunVerdictStage } from "./lib/status.js";
+import { readCatalogStatusContext, type CatalogStatusContext, buildBatchedGithub, defaultCreditStorePath, loadCreditStore, saveCreditStore, buildCommitTrailerIndex, classifyGhFailure, createDispatchBreakerCache, deriveStatus, dispatchesWithoutNewOwnedPr, evaluateDispatchBreakerCorroboratedDetailed, type LedgerSnapshot, type LedgerIndex, readLedgerSnapshot, type DispatchBreakerDetail, ghGateway, ghRequiredStatusCheckContexts, isGhRateLimitError, effectiveLifetimeDispatches, hasRepeatedTaskAttributableLifetimeDispatches, orphanedRunIds, streakRefusal, taskAttributableLifetimeDispatches, type LifetimeDispatchTally, projectPlan, readLedgerLines, type DeriveDeps, type GitHub, type GhFailureReason, preferImplementingPr, type PrRef, type BatchedPr, type OpenSiblingBuild, type StatusProjection, planBranchReap, type BranchFacts, type BranchReapPlan, BRANCH_REAP_REASON_LABEL, readLedgerUnionBounded, taskIdFromRunBranch, taskIdFromSlugBranch, readMergeCreditedTaskIds, readMergeCreditedTaskIdsAsync, isMergeCreditLine, readRequiredStatusCheckContexts, readRequiredStatusCheckContextsAsync, persistVerifiedCredit, type ThrownRunVerdictStage, type RefusedRunVerdictStage } from "./lib/status.js";
 import { readyDraftPullRequest, readTaskContractAtHeadViaGit, withCodeqlAlertEvidence, CODE_SCANNING_FALSE_POSITIVE_STEP, DEFAULT_SWEEP_POLICY, decideRedBaseRefresh, isCiHarnessPath, prAddedLinesFromPullFiles, failingSourceFilesFromCiFailures, failingTestFilesFromCiFailures, projectMergedTaskCandidates, actionableGateFailuresFromReasons, armOutcomeArmed, dispatchFixSpent, checkCostGovernor, checkMemoryGovernor, installedSlackReclaim, reclaimBeforeHold, type SlackReclaim, checkQueueGovernor, productionFixPressure, deriveQueueGovernorTrailingFlow, isFleetOwnedRunBranch, checksStateFromRollup, checksPendingSinceFromRollup, CI_GATE_CHECK_NAME, supersededRedsNowPassing, dedupeRollupByLatestAttempt, deriveDayCostUsd, deriveDayUnpricedRows, deriveDisposition, diffCoverageReport, fixCeilingInForce, fixDispatchBudget, fixRoundTally, buildFixProgressInput, flakeClaimsForHead, isBlockedCi, listRetirableEscalationIssues, listRetirableEscalationIssuesAsync, createEscalationTriageHistoryReader, ESCALATION_TRIAGE_EVIDENCE_SLICE, indexEscalationTriageHistory, type EscalationTriageHistoryReader, type EscalationTriageSlice, logCostGovernorDeferral, logMemoryObservation, logQueueGovernorDeferral, renderClarificationQuestion, renderSweepSummary, type SweepSummary, REQUIRED_CHECK_FAIL, REQUIRED_CHECK_OK, runCreditBackfill, closedPrFromRef, closedPrLookup, runPrTerminalReconcile, type PrTerminalReconcileSummary, runEscalationReconcile, runStaleEscalationRejudge, buildStaleEscalationRejudgePrompt, type StaleEscalationRejudgeCandidate, runPostFixReverification, runSweep, runSweepLightPass, runLightPassReadyRefresh, runLightPassRefreshAdmission, lightPassHeadContractRefresh, runArmedRatchetRejudge, withFullSweepRepairAdmission, redQualityGateNames, stillRedRequiredNames, terminalStateReason, toQuestionEntry, usableInstrumentEntanglementPaths, type ActionableGateFailure, type ArmedStalledPr, type CiFailure, type ClarificationQuestion, type CostGovernorResult, type EscalationReconcileSummary, type FixClass, type FixDispatchEvidence, type FixOwnerResidue, type FixDispatchSnapshot, type FixSuperseded, type LiveStateResult, type MemoryGovernorResult, type MergeConflictEvidence, type OpenPrView, type PlanScopedFixRoundInput, type ReviewDispatchMode, type ReviewReuseInputs, type RollupCheckEntry, type PostFixReverificationSummary, type ProofDiscriminationEvidence, type QueueGovernorResult, type RedBaseRefreshFacts, type PostReviewStallVerdict, type RepairFilingCapture, type Disposition, type SweepDeps, type SweepPolicy, type UpdateBranchOutcome, type UncreditableHeadReason, ABSENT_REPUSH_CAP, DEFAULT_FIX_CLASSES, buildSweepEffects as buildSweepEffectsFromLib, checkJobId, RATIFIED_BASELINE_RATCHET_REPAIRS, currentPlanIneligibilityReason, defaultSweepGhRun, dispatchFixCatchOutcome, discriminateReviewReuse, discriminateReviewReuseAsync, escalationTaskIdFor, fixDispatchErrorClass, fixDispatchSignalDeath, fixHeadAcceptable, fixRungTaskFor, foreignHeadIsStuck, isDispatchedRunBranch, detectPostReviewStall, isCappedReviewOrphanEscalation, proofDiscriminationEvidenceFromCriteria, type ArmAttemptOutcome, type ArmOutcomeName, type BuildSweepEffectsDeps, type MetadataRepairResult, sweepArmTaskId, uncreditableHeadReason, planOnlyRunBranchReceipts, REGENERABLE_ARTIFACT_GENERATORS, ADDITIVE_REGISTRATION_SURFACES, isAdditiveRegistrationChange, type RegistrationChange, repairLadderCommand, trackRepairLadder, riskJudgeHandedOffHead, handedOffHeadJudgmentPool, type HandedOffHeadJudgmentPool, awaitHandedOffHeadJudgments, riskJudgeCodeScanning, hasCapturedMergeConflictEvidence, clearedConflictEscalationCause, type FixRoundBranchClaim, inFlightReviewCount } from "./lib/sweep.js";
 import { sampleDaemonMemory, workerHeapReadings } from "./lib/daemon-memory-telemetry.js";
 import { currentReviewSignal, headLacksOwnTaskRecord, OWN_TASK_RECORD_MISSING_CAUSE, reviewOnlyStandDownReason } from "./lib/sweep.js";
@@ -25544,14 +25544,21 @@ function lifetimeAccounting(onUnavailable?: (failure: LifetimeIndexFailure) => v
     unavailableReason: indexed.unavailableReason,
     error: indexed.error,
     close: indexed.close,
-    tallyFor(taskId: string, rows: ReadonlyArray<Record<string, unknown>>): LifetimeDispatchTally | undefined {
+    tallyFor(taskId: string, rows: ReadonlyArray<Record<string, unknown>>, index?: LedgerIndex): LifetimeDispatchTally | undefined {
       if (indexed.unavailableReason() !== undefined) return undefined;
-      const orphans = orphanedRunIds(rows, taskId);
-      const visible = new Set(rows.filter((row) => row.task_id === taskId).map((row) => row.run_id));
+      // W1-T13608: the snapshot's index holds the ledger clock and this task's rows, so a dispatch pass makes no full
+      // scan per candidate task. An index built over other rows is never trusted: those rows are scanned as before.
+      const own = index?.rows === rows ? index : undefined;
+      const orphans = orphanedRunIds(rows, taskId, own);
+      const taskRows = own === undefined ? rows : own.byTask.get(taskId) ?? [];
+      const visible = new Set(taskRows.filter((row) => row.task_id === taskId).map((row) => row.run_id));
       return indexed.tallyFor(taskId, visible, orphans);
     },
   };
 }
+
+/** W1-T13608: the pass-shared read; its index, when present, is used only if it was built over its `lines`. */
+type LifetimeLiveSnapshot = Pick<LedgerSnapshot, "identity" | "content" | "lines"> & Partial<Pick<LedgerSnapshot, "index">>;
 
 /** The live overlay is incremental while a daemon is running. On a rotation its inode changes;
  * replayed retained rows are skipped by the archive-seeded window and only genuinely new lines
@@ -25560,7 +25567,7 @@ function lifetimeAccounting(onUnavailable?: (failure: LifetimeIndexFailure) => v
 export interface LifetimeHistory {
   close?: () => boolean;
   /** W1-T6358: `live` is a pass-shared read; absent, the overlay reads the file itself. */
-  tallyFor: (taskId: string, live?: Pick<LedgerSnapshot, "identity" | "content" | "lines">) => LifetimeDispatchTally | undefined;
+  tallyFor: (taskId: string, live?: LifetimeLiveSnapshot) => LifetimeDispatchTally | undefined;
 }
 
 function lifetimeHistory(
@@ -25570,8 +25577,8 @@ function lifetimeHistory(
 ): LifetimeHistory {
   let identity: string | undefined;
   let offsetChars = 0;
-  const refresh = (supplied?: Pick<LedgerSnapshot, "identity" | "content" | "lines">) => {
-    let snapshot: Pick<LedgerSnapshot, "identity" | "content" | "lines">;
+  const refresh = (supplied?: LifetimeLiveSnapshot) => {
+    let snapshot: LifetimeLiveSnapshot;
     if (supplied) {
       snapshot = supplied;
     } else try {
@@ -25582,7 +25589,7 @@ function lifetimeHistory(
         reason: error instanceof Error ? error.message : "live ledger unreadable",
       };
     }
-    if (snapshot.identity === undefined) return { ok: true, rows: snapshot.lines };
+    if (snapshot.identity === undefined) return { ok: true, rows: snapshot.lines, index: snapshot.index };
     const nextIdentity = snapshot.identity;
     const content = snapshot.content;
     const sameFile = identity === nextIdentity && content.length >= offsetChars;
@@ -25608,14 +25615,14 @@ function lifetimeHistory(
     }
     identity = nextIdentity;
     offsetChars = sameFile ? offsetChars + completedAt + 1 : completedAt + 1;
-    return { ok: true, rows: snapshot.lines };
+    return { ok: true, rows: snapshot.lines, index: snapshot.index };
   };
   return {
     close: accounting.close,
     tallyFor(taskId, supplied) {
       const refreshed = refresh(supplied);
       if (!refreshed.ok) return undefined;
-      return accounting.tallyFor(taskId, refreshed.rows ?? []);
+      return refreshed.rows === undefined ? accounting.tallyFor(taskId, []) : accounting.tallyFor(taskId, refreshed.rows, refreshed.index);
     },
   };
 }
