@@ -1,0 +1,53 @@
+- id: W1-T13668
+  title: "The Inbox gardener's sweep resumes after its cursor when the registry changes, instead of restarting at the first id"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # 2 files: the cursor resume in runInboxGardener (src/lib/inbox-gardener.ts) and one new test
+  origin: "operator-session#inbox-gardener-shadow-2026-11-18"
+  plan_refs:
+    - W1-T13586
+    - W1-T13337
+  files:
+    - src/lib/inbox-gardener.ts
+    - test/gardeners/the-inbox-gardener-sweep-survives-a-registry-change.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A registry change between passes resumes the sweep after the cursor's id instead of restarting at the first id"
+      proof: "grep: W1-T13668 criterion 1 in test/gardeners/the-inbox-gardener-sweep-survives-a-registry-change.test.ts"
+    - claim: "After the last id the next pass starts at the first id, so an id added behind the cursor is reached on the next sweep"
+      proof: "grep: W1-T13668 criterion 2 in test/gardeners/the-inbox-gardener-sweep-survives-a-registry-change.test.ts"
+    - claim: "invariant:cursor-past-end-wraps — a cursor past every remaining id wraps to the first id and the pass completes"
+      proof: "grep: W1-T13668 criterion 3 in test/gardeners/the-inbox-gardener-sweep-survives-a-registry-change.test.ts"
+  rationale: |
+    WHY: Craig approved the Inbox gardener in shadow mode, with act mode after a clean day of shadow rows. Its job is
+    the finished-task asks stuck in the Inbox (verify-human, machine-judge, proof-debt ids). Today it can never reach them.
+    OBSERVED on the host 2026-11-18 11:35Z, daemon on main with W1-T13586:
+    - inbox.gardener_pass rows 07:27Z, 07:56Z, 09:46Z, 10:47Z: state pending, gaps [], evaluated 8 each, retired 0, judged 0.
+    - state/inbox-gardener.json: 16 entries, every one an adoption: id, and cursor.after
+      "adoption:script-no-invoker:scripts/credit-surface-gate.mjs:..." at position 9 of 2,429 sorted proposal ids.
+    - The registry (state/inbox-proposals.json) holds 2,429 proposals: adoption 553, followup 461, verify-human 422,
+      proof-debt 405, machine-judge 312, verify-human-automate 238, others 38.
+    READ at origin/main, runInboxGardener: the cursor stores generation, a digest over every candidate's semantic input,
+    and resumes only when the new pass's generation matches. Any one proposal change anywhere between passes resets the
+    start to the first id. With passes about an hour apart and the registry changing within that hour, 32 evaluations
+    touched 16 ids and the sweep never passes the adoption prefix.
+  design: |
+    INVARIANT cursor-past-end-wraps: when no candidate sorts after the cursor's id (the tail was removed), the pass
+    starts at the first id, as it does today.
+    1. Resume after cursor.after by id, whatever the stored generation. The generation stays in the cursor as a record.
+    2. Nothing about a decision changes: each candidate's own digest (store.entries) still decides whether it is re-read,
+       re-proven or re-judged, and every retirement still needs its fresh capture and proof.
+    3. "complete" now means the sweep reached the last id. An id added behind the cursor mid-sweep waits for the next
+       sweep, which starts at the first id. At 8 candidates a pass a full sweep is about 304 passes; the per-pass
+       bound is unchanged here.
+  falsifier: |
+    Keep the generation-matched resume in runInboxGardener: criteria 1 and 2 fail (measured: fail 2, pass 1).
+  note: |
+    Id reserved for run-unfiled-1795001781000 with ~/rmd-work/bin/reserve-id.sh.
+    reservation hand-off: run-unfiled-1795001781000 -> claude/project-thread-cb5huh-plan-gardener-cursor
