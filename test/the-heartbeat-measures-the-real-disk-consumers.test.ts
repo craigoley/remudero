@@ -343,7 +343,7 @@ test("a consumer walk stops at its time budget and publishes the cut consumer an
 });
 
 test("a walk that finishes inside its budget is unchanged, and a malformed budget falls back to the default", () => {
-  const slow = budgeted({ SLOW_DU: "/var/lib/containerd", SLOW_DU_S: "1", RMD_CONSUMER_WALK_BUDGET_S: "30" }).beat;
+  const slow = budgeted({ SLOW_DU: "/var/lib/containerd", SLOW_DU_S: "0.1", RMD_CONSUMER_WALK_BUDGET_S: "30" }).beat;
   assert.equal(slow.consumer_containerd_kb, "27200000", "a slow walk that ends in time is measured, not cut");
   assert.equal(slow.consumer_npm_cache_kb, "10");
   assert.equal(slow.consumer_walk_state, "walked");
