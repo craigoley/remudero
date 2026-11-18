@@ -48,6 +48,11 @@ export const OPS_CATALOG_MAX_TREE_ENTRIES = 10_000;
 export const OPS_CATALOG_MAX_SHARDS = 500; // BACKSTOP: refuses a runaway shard directory.
 export const OPS_CATALOG_MAX_BLOB_BYTES = 256 * 1024; // BACKSTOP: the W1-T9493 per-blob bound.
 export const OPS_CATALOG_MAX_TOTAL_BYTES = 8 * 1024 * 1024; // BACKSTOP: caps one snapshot's memory.
+/** BACKSTOP: the stdout buffer for one git read of a whole destination catalog: the byte bound plus one
+ *  `cat-file --batch` frame (`<oid> blob <size>\n` + `\n`, a SHA-256 oid) per blob, the monolith
+ *  and every shard. Node's default 1 MiB refused the ops catalog once it grew past it (2026-11-19). */
+export const TASK_ID_DESTINATION_GIT_MAX_BUFFER = OPS_CATALOG_MAX_TOTAL_BYTES
+  + (OPS_CATALOG_MAX_SHARDS + 1) * `${"0".repeat(64)} blob ${OPS_CATALOG_MAX_TOTAL_BYTES}\n\n`.length;
 
 export interface OpsCatalogTarget { repository: string }
 /** A GET-only seam: the path is relative to the API root and the result is the parsed JSON body. */
