@@ -105,7 +105,7 @@ import { writeAtomic } from "./fs-race-safe.js";
 import { mergeVerdictReceipts, proposalVerdictsWithReceipts, readVerdictReceipts, verdictReceiptOf, PROPOSAL_VERDICT_RECEIPT_STEPS, type VerdictReceipt } from "./inbox-verdict-receipts.js";
 import { judgementFamily } from "./machine-filing-judge.js";
 import { currentVerifyHumanRulings, currentDeclineState, declineLapse, observedStateOfProposalSummary } from "./verify-human-judge.js";
-import { projectProposalHumanGates } from "./ask-classification.js";
+import { foldedTwinAsks, projectProposalHumanGates } from "./ask-classification.js";
 import { plainInboxMessage, plainStorePath, readPlainStore, servePlainOptions, type InboxOptionLane, type PlainInboxMessage, type PlainStore, type ServedPlainInboxMessage } from "./inbox-plain.js";
 import { operatorThreadItemsOf, type ThreadListInbox } from "./inbox-thread-items.js";
 import { narrowQualification, readRecommendationSource, readRecommendationStore, recommendationFor, recommendationStorePath, type RecommendationQualification, type RecommendationStore, type ServedRecommendation } from "./inbox-recommendation.js";
@@ -2762,7 +2762,9 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
   const humanGates = projectProposalHumanGates(classifications.filter((c) => byId.has(c.proposalId)), "core", ownerOf);
   const asks = new Set(humanGates.gates.map((gate) => decodeURIComponent(gate.key.split(":")[2]!)));
   const isAsk = (item: { proposalId: string }) => asks.has(item.proposalId);
-  const operatorItems = <T extends { proposalId: string }>(items: T[]) => items.filter(isOperator)
+  // W1-T13479: a verify-human ask whose machine-judge twin is present is the same question; list it once.
+  const folded = foldedTwinAsks(classifications.filter((c) => byId.has(c.proposalId)).map((c) => c.proposalId));
+  const operatorItems = <T extends { proposalId: string }>(items: T[]) => items.filter((item) => isOperator(item) && !folded.has(item.proposalId))
     .map((item) => ({ ...item, classification: isAsk(item) ? "ASK" as const : "RECORD" as const }));
   const fleetDecisions = fleetLaneDecisions(ledgerLines as never, stores.fleetDecisions);
   const needsYou = {
