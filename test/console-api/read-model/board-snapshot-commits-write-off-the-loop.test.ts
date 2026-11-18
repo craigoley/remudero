@@ -9,9 +9,9 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { boardSnapshotPath, createBoardSnapshotCache, writeSnapshotFileAsync } from "#src/lib/board-snapshot-cache.js";
+import { boardObservationPath, boardSnapshotPath, createBoardSnapshotCache, writeSnapshotFileAsync } from "#src/lib/board-snapshot-cache.js";
 import { fixedClock } from "#src/lib/clock.js";
-import type { BoardIssueRest } from "#src/lib/open-prs-rest.js";
+import type { BoardIssueRest, BoardPrRest } from "#src/lib/open-prs-rest.js";
 
 type Ctx = { after: (fn: () => void) => void };
 const clock = fixedClock(Date.parse("2026-11-17T18:00:00.000Z"));
@@ -20,6 +20,9 @@ const TAGS = ["a", "first", "second", "third", "fourth", "seeded"];
 const issue = (n: number, tag = "a"): BoardIssueRest => ({ number: n, url: `https://github.com/o/r/issues/${n}`, state: "open", title: `needs human ${n} ${tag}`,
   updatedAt: `2026-11-17T0${n % 10}:${String(TAGS.indexOf(tag)).padStart(2, "0")}:00Z` });
 const issues = (count: number, tag = "a") => Array.from({ length: count }, (_, i) => issue(i + 1, tag));
+const closed = (n: number, tag: string): BoardPrRest => ({ number: n, url: `https://github.com/o/r/pull/${n}`, state: "MERGED",
+  headRefName: `run-W1-T${n}-1700000000000`, headRefOid: `sha-${n}`, body: `Remudero-Task: W1-T${n}`, title: `merged ${n} ${tag}`,
+  updatedAt: `2026-11-17T0${n % 10}:${String(TAGS.indexOf(tag)).padStart(2, "0")}:00Z` });
 
 function root(t: Ctx): string {
   const dir = mkdtempSync(join(tmpdir(), "rmd-board-write-behind-"));
@@ -143,6 +146,67 @@ test("writeSnapshotFileAsync preserves a rename error when stage cleanup fails",
   } finally {
     t.mock.restoreAll();
     await realUnlink(stage).catch(() => {});
+  }
+});
+
+test("a repeated closed commit while its replacement is writing does not certify the old file", async (t) => {
+  const dir = root(t), writer = gatedWriter();
+  const first = createBoardSnapshotCache(dir, "o", "r", { clock });
+  assert.equal(first.commitClosed([closed(1, "first")]), true);
+  const cache = createBoardSnapshotCache(dir, "o", "r", { clock, writeBehind: { write: writer.write } });
+  const next = [closed(1, "second")];
+  assert.equal(cache.commitClosed(next), true);
+  await writer.waitForCall(1);
+  assert.equal(cache.commitClosed(next), true, "the unchanged commit is accepted while the write is in flight");
+  assert.equal(existsSync(boardObservationPath(dir, "o", "r")), false, "the old on-disk identity is not certified");
+  writer.calls[0]!.release();
+  await writer.calls[0]!.done;
+});
+
+test("an unchanged commit retries a failed queued write after cleanup refusal", async (t) => {
+  const dir = root(t), target = boardSnapshotPath(dir, "o", "r");
+  const unlinkError = new Error("cleanup failed"), realUnlink = fs.promises.unlink.bind(fs.promises);
+  let stage = "", writes = 0, signalRefusal!: () => void, signalCommit!: () => void;
+  const unlinkAttempts: string[] = [];
+  const refused = new Promise<void>((resolve) => { signalRefusal = resolve; });
+  const committed = new Promise<void>((resolve) => { signalCommit = resolve; });
+  const rows = issues(2, "fourth");
+  t.mock.method(fs.promises, "unlink", async (path: Parameters<typeof fs.promises.unlink>[0]) => {
+    const target = String(path);
+    unlinkAttempts.push(target);
+    if (target.includes(".tmp-")) throw unlinkError;
+    return realUnlink(path);
+  });
+  const cache = createBoardSnapshotCache(dir, "o", "r", {
+    clock,
+    log: (event) => {
+      if (event === "board_snapshot.commit_refused") signalRefusal();
+      if (event === "board_snapshot.committed") signalCommit();
+    },
+    writeBehind: { write: async (nextStage, path, buffers) => {
+      writes++;
+      if (writes === 1) {
+        stage = nextStage;
+        fs.mkdirSync(dirname(stage), { recursive: true });
+        writeFileSync(stage, Buffer.concat([...buffers]));
+        throw new Error("write failed");
+      }
+      await writeSnapshotFileAsync(nextStage, path, buffers);
+    } },
+  });
+
+  try {
+    assert.equal(cache.commitIssues(rows), true);
+    await refused;
+    assert.deepEqual(unlinkAttempts, [stage], "the queued write attempts to remove its stage");
+    assert.equal(existsSync(stage), true, "the failed cleanup is observed and the stage remains for diagnosis");
+    assert.equal(cache.commitIssues(rows), true, "an unchanged commit retries the previous failure");
+    await committed;
+    assert.equal(writes, 2);
+    assert.match(readFileSync(target, "utf8"), /needs human 1 fourth/);
+  } finally {
+    t.mock.restoreAll();
+    if (stage) await realUnlink(stage).catch(() => {});
   }
 });
 
