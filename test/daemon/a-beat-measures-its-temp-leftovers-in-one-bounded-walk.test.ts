@@ -75,7 +75,7 @@ printf 'Filesystem 1024-blocks Used Available Capacity Mounted\\n%s 100000 1000 
     stub("du", `
 for a in "$@"; do printf '%s\\t' "$a" >> "$FIXTURE/du-calls"; done; printf '\\n' >> "$FIXTURE/du-calls"
 case "\${@: -1}" in
-  "$FIXTURE"/system-tmp/rmd-leak-*) [ "\${SLOW:-}" = 1 ] && sleep 10 ;;
+  "$FIXTURE"/system-tmp/rmd-leak-*) [ "\${SLOW:-}" = 1 ] && exec sleep 120 ;;
 esac
 case "\${@: -1}" in
   "$FIXTURE"/root/*) printf '1\\t%s\\n' "\${@: -1}" ;;
@@ -89,7 +89,7 @@ esac`);
         FIXTURE: dir, HOME: join(dir, "home"), RMD_ROOT: join(dir, "root"), TMPDIR: join(dir, "account-tmp"),
         RMD_HEARTBEAT_LOCK_HELD: "1", RMD_HEARTBEAT_DRY_RUN: "1",
         RMD_HEARTBEAT_DOCKER: join(dir, "bin/docker"), RMD_HEARTBEAT_SYSTEMCTL: join(dir, "bin/systemctl"),
-        RMD_CONSUMER_WALK_BUDGET_S: opts.slowSystem ? "2" : "120", SLOW: opts.slowSystem ? "1" : "",
+        RMD_CONSUMER_WALK_BUDGET_S: opts.slowSystem ? "6" : "120", SLOW: opts.slowSystem ? "1" : "",
       },
     });
     assert.equal(result.error, undefined);
