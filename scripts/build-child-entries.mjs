@@ -49,6 +49,8 @@ export const WORKER_ENTRIES = Object.freeze([
   "src/lib/merged-ratchet-worker.ts",
   // W1-T13333: the daemon's ledger compaction pass.
   "src/lib/ledger-compact-worker.ts",
+  // W1-T13685: serve's analytics refresh worker (the ledger fold, snapshot build and checkpoint write).
+  "src/lib/analytics-route.ts",
 ]);
 /** A worker module's bundle file name: `src/lib/board-worker.ts` → `worker-lib-board-worker.mjs`. */
 export const workerBundleName = (module) => `worker-${module.replace(/^src\//, "").replace(/\.[cm]?[jt]sx?$/, "").replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.mjs`;
