@@ -16,7 +16,7 @@
     - src/lib/board-snapshot-cache.ts
     - src/run-task.ts
     - test/board-snapshot-commits-write-off-the-loop.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "commitClosed and commitIssues on a 30,000-row collection return before any write, fsync or rename of the collection file runs on the calling thread; the file on disk afterwards is byte for byte what a synchronous commit writes"

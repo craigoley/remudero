@@ -20,7 +20,7 @@
     - src/cli/commands/daemon.ts
     - src/cli/commands/fix.ts
     - test/a-fetch-that-meets-a-dangling-ref-repairs-it-and-retries-once.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:a-dangling-tracking-ref-is-repaired-at-the-fetch — with real git, in a clone of a local bare remote whose tracking ref names an object the clone lacks, `fetch origin main` through hostWorktreeGitAsync, through hostWorktreeGit and through fetchOriginRetryingRefLock and its async form each ends with success. Each call runs the original fetch exactly twice, writes exactly one git.dangling_ref_repaired row (clone, ref, how refetched, ms), and leaves every ref of the clone naming an object the clone has"

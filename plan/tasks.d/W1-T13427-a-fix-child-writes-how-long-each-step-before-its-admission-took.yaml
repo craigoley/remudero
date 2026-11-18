@@ -19,7 +19,7 @@
     - src/lib/sweep.ts
     - src/run-task.ts
     - test/fix-lane/a-fix-child-writes-how-long-each-step-before-its-admission-took.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "runFixDispatchChild, run with ports whose hold, readLivePr, readTask, claimFixAdmission and dispatcher each take a known time on an injected clock, writes one sweep.fix.prepare_timing row for each of the stages child-hold, child-live-pr, child-task, child-admission and child-effects, each with pr_number, head_sha and the elapsed_ms the clock gave that port, and all five before the first sweep.fix.child_phase row"

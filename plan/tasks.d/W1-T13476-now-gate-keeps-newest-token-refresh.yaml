@@ -16,7 +16,7 @@
     - src/lib/now-view.ts
     - test/now-gate-keeps-newest-token-refresh.test.ts
     - test/now-decisions-ledger-starts-warm.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:same-token-fallback — reducing each rotation's rows and then their union gives deriveOperatorItems the same answer as every row, including equal and unparseable stamps"

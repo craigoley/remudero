@@ -16,7 +16,7 @@
     - src/lib/inbox-gardener.ts
     - test/gardeners/the-inbox-gardener-ledger-read-catches-up-across-archives.test.ts
     - test/gardeners/the-inbox-gardener-retires-an-ask-whose-task-already-shipped.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A pass whose ledger store is behind spends up to INBOX_GARDENER_LIMITS.ledgerCatchUpMs advancing it, so a ledger whose catch-up needs many transactions reaches observed coverage in one pass"

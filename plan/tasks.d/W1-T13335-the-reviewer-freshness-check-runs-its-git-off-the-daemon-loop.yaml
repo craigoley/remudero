@@ -16,7 +16,7 @@
   files:
     - src/lib/self-sync.ts
     - test/the-reviewer-freshness-check-runs-its-git-off-the-daemon-loop.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "For a fixture repository with five advances of main (none, a comment-only .ts change, a src/run-task.ts hunk that avoids the review path, a src/run-task.ts hunk that meets it, a change to another material path) checkReviewerCodeFreshnessAsync, probeReviewerCodeFreshnessAsync and reviewerCodeJudge return the same status, advance and changedPaths as the synchronous checkReviewerCodeFreshness and reviewerCodeFreshnessAt"

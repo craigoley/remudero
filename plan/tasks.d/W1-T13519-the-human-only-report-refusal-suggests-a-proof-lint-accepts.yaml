@@ -14,7 +14,7 @@
   files:
     - src/lib/task-linter.ts
     - test/plan/a-report-task-only-a-person-can-verify-is-refused-at-filing.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A shard that takes the human-only-report refusal's suggested proof as written gets no proof-grep-safety violation from lintTask"

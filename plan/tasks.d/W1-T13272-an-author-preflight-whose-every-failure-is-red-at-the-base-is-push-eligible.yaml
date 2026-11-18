@@ -16,7 +16,7 @@
   files:
     - scripts/preflight-author.mjs
     - test/ci/an-author-preflight-whose-every-failure-is-red-at-the-base-is-push-eligible.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "When every failing test of the affected-tests stage is labelled also red at the base by W1-T13215's attribution, and none is red only at the head or unattributed, the verdict is push-eligible with a reason naming each pre-existing red and the base sha"

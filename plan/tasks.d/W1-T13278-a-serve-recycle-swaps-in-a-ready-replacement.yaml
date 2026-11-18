@@ -17,7 +17,7 @@
     - deploy/scratch-mounts.sh
     - src/lib/deployer.ts
     - test/console-api/serve/a-serve-recycle-swaps-in-a-ready-replacement.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With RMD_SERVE_BLUE_GREEN=on, recycling serve starts the replacement container under the alternate name off the tunnel's network, waits for its /v1/ready and every SMOKE_PATHS route to answer 200, points the tunnel origin (the service name cloudflared reaches) at it with a network alias, and only then stops the old container and renames the replacement"

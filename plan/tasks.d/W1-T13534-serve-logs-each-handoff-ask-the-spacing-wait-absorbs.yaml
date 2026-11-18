@@ -15,7 +15,7 @@
   files:
     - src/lib/serve-supervisor.ts
     - test/console-api/serve/serve-logs-each-handoff-ask-the-spacing-wait-absorbs.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A handoff ask that arrives while a spacing wait is pending writes serve.handoff_spacing_absorbed with the asked sha, the remaining wait in ms and the count of asks absorbed so far"

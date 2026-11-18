@@ -38,7 +38,7 @@
     - src/lib/worker.ts
     - src/lib/worktree-git.ts
     - test/daemon/every-loop-bounded-child-forks-through-the-spawn-helper.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: A census over src/** refuses every direct execFileLoopBounded call outside loop-bounded-child.ts and spawn-helper.ts unless it is classified with a reason the helper's pipe cannot carry (it writes or reads the child's stdio through .child), and a planted unclassified call proves the census detects one

@@ -22,7 +22,7 @@
     - src/lib/cash-trial.ts
     - src/cli/commands/run-task-verb.ts
     - test/routing/the-cash-simple-trial-draws-each-task-s-cash-model.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The cash arm's models are the policy's models plus each ready open-weight deployment whose newest cash.invoice.reconciled verdict is reconciled and whose newest bake-off row ran with tools. A deployment with no verdict, or a diverged or unreconcilable one, is not an arm"

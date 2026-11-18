@@ -20,7 +20,7 @@
     - src/lib/host-resource-gardener.ts
     - src/lib/ledger-steps.ts
     - test/daemon/a-clone-that-cannot-fetch-is-counted-by-the-beat-and-raised-once.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:the-count-is-read-not-constant — the real script, run with real git on an install clone of a local bare remote, publishes `unresolvable_refs=0` and `unresolvable_ref_first=none` when every ref resolves. With two refs set to an id the clone lacks it publishes `unresolvable_refs=2` and the first of those ref names. The probe changes no ref: `git for-each-ref` prints the same lines before and after the beat's probe"

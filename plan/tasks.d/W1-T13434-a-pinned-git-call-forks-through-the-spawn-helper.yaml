@@ -17,7 +17,7 @@
   files:
     - src/lib/worktree-git.ts
     - test/daemon/a-pinned-git-call-forks-through-the-spawn-helper.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With a spawn helper installed, hostWorktreeGitAsync runs both the pinned config read and the git command itself through the helper: the helper gets 2 requests per call, the second one with the pinned argv, env and cwd and with `input` set when the caller passed input, and the call returns the same stdout as the direct path for pipe, ignore and inherit-stdout"

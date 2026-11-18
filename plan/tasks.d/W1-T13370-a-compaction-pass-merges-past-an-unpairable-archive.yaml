@@ -16,7 +16,7 @@
   files:
     - src/lib/ledger-compact.ts
     - test/ledger/a-compaction-pass-merges-past-an-unpairable-archive.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "When the first day's candidates cannot share a 64 MiB archive, the pass selects the same-day run that merges the most sources within the ceiling, and the apply run merges them"

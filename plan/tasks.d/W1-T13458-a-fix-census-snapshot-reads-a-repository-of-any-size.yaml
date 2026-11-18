@@ -15,7 +15,7 @@
   files:
     - src/run-task.ts
     - test/a-fix-census-snapshot-reads-a-repository-of-any-size.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:blob-read-sized-from-the-repository — a fixture repository whose census blobs at the merge base make more than 134,217,728 bytes (128 MiB) of `git cat-file --batch` output (for example two census paths that name one 68 MiB blob) gets an `available` snapshot from writeFixCensusSnapshotAsync with the production git runner. baseBlobs holds each of those paths with its full length and the blob's exact bytes"
