@@ -112,6 +112,12 @@ import { ghExec, ghJson, ghJsonAsync, ghTextAsync, GhPaceWouldBlockError, paceGh
 import { withdrawStaleConflictedJudgePr } from "./machine-filing-judge.js";
 import type { AdmissionObserver, AdmissionSettings, AdmissionRead } from "./contributor-admission.js";
 import { observeContributorAdmission } from "./arm-auto-merge.js";
+// @ts-expect-error — pure ESM policy constant shared with the dependency-free producer; tsconfig includes TS only.
+import { CODEQL_CONFIGURATION_NOT_FOUND } from "./code-scanning-merge-policy.mjs";
+// @ts-expect-error — pure ESM read-only adapter, the read path security-merge-admission.ts already uses.
+import { readSecurityMergeDecision } from "./code-scanning-merge-adapter.mjs";
+// @ts-expect-error — pure ESM argv mapping shared with the dependency-free producer.
+import { securityMetadataGhArgs } from "./security-metadata-gh-args.mjs";
 import { distanceRefreshCause, type BaseChangedFiles } from "./plan-pr-merge-safety.js";
 import { armedBodyNeedsGuard, rememberCleanArmedBody, type ClosingReferenceGuardResult } from "./closing-reference-guard.js";
 import { observeAdmissionDisposition } from "./action-executor.js";
@@ -2431,6 +2437,8 @@ export const SWEEP_EFFECT_SURFACE = [
   "liveCiRunForHead",
   "refreshCiRunForHead",
   "reaggregateCiGate",
+  "readSecurityMergeObservation", // W1-T13470
+  "readCodeqlWorkflowRuns", // W1-T13470
   "readMainTip",
   "readMainRepair",
   "mainInheritance", // W1-T8042
@@ -2712,6 +2720,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "liveCiRunForHead"
   | "refreshCiRunForHead"
   | "reaggregateCiGate"
+  | "readSecurityMergeObservation"
+  | "readCodeqlWorkflowRuns"
   | "readMainTip"
   | "readMainRepair"
   | "mainInheritance"
@@ -3980,6 +3990,11 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         });
       }
     },
+    // W1-T13470: two GET reads, the first through the security metadata mapping. No write.
+    readSecurityMergeObservation: (pr) => readSecurityMergeDecision({ owner, repo, prNumber: pr.prNumber, expectedHead: pr.headSha },
+      (path: string) => readJsonImpl(securityMetadataGhArgs(path))),
+    readCodeqlWorkflowRuns: (pr) =>
+      readJsonImpl(["api", `repos/${owner}/${repo}/actions/workflows/codeql.yml/runs?head_sha=${pr.headSha}&per_page=100`]),
 
     // W1-T78 — the CLARIFICATION-QUESTION rung's real wiring: `question` is
     // ALREADY rendered (deterministically, from ledger ground truth) by the
@@ -12654,6 +12669,14 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     },
   },
   {
+    // W1-T13470 — a source edit cannot clear GitHub's own "configuration not found" CodeQL state, so a head whose only
+    // red is that policy UNKNOWN waits: no fix round, no strike. runSweep captures and escalates it.
+    disposition: "wait",
+    blocker: "security-unknown-hold",
+    when: codeqlConfigurationWarningWait,
+    reason: () => CODEQL_CONFIGURATION_WAIT_REASON,
+  },
+  {
     // W1-T3078 — a worker can DECLINE a criterion under review.ts's closed grammar, but it may
     // never choose its own remedy or spend another attempt. This must sit above an answered
     // clarification and the shared strike-cap row: a pre-existing answer or a prior strike cannot
@@ -16223,6 +16246,11 @@ export interface SweepDeps {
    *  {@link requeueCheck} uses, when {@link staleCiGateTransition} names a sibling that reached a
    *  terminal success LATER than the gate's own verdict. AT MOST ONCE per (head, transition). */
   reaggregateCiGate?: (pr: OpenPrView, transition: StaleCiGateTransition) => void | Promise<void>;
+  /** W1-T13470 — the read-only security decision for this PR at its head (readSecurityMergeDecision). Omitted, a
+   *  configuration-not-found wait captures and escalates nothing. */
+  readSecurityMergeObservation?: (pr: OpenPrView) => Promise<SecurityMergeObservation>;
+  /** W1-T13470 — this head's runs of the CodeQL workflow (`actions/workflows/codeql.yml/runs`), raw. */
+  readCodeqlWorkflowRuns?: (pr: OpenPrView) => Promise<unknown>;
   /** W1-T177 — an OPTIONAL fresh re-read of ONE PR's live state, consulted immediately before a
    *  blocked-fixable disposition SPENDS a strike, never the snapshot this pass started from (#388:
    *  merged mid-sweep, dispatched anyway). Omitted, or a failed read, behaves exactly as before —
@@ -17364,6 +17392,115 @@ export function withCodeqlAlertEvidence(pr: Pick<OpenPrView, "headSha" | "codeql
     const what = policy ? `security-merge-policy failed at this head (${verdict})` : "CodeQL failed at this head";
     return [{ ...failure, logTail: `${what}; its alerts were not read: ${why}` }];
   });
+}
+
+/* W1-T13470 — GITHUB'S "N CONFIGURATION(S) NOT FOUND" CODEQL STATE IS OBSERVED, NEVER REPAIRED. The policy keeps it
+ * UNKNOWN under its own reason; a head whose only red is that status waits instead of entering a fix round. A full
+ * pass reads the decision through the read-only adapter and writes its receipt once per head and check generation, and
+ * a CodeQL workflow completion GitHub re-judged with the warning still standing is escalated once. Nothing here
+ * grants, merges, dispatches or writes a status: GitHub's refresh reaches the producer through its own triggers. */
+export const CODE_SCANNING_CONFIGURATION_WARNING_STEP = "security.codeql_configuration_warning_captured";
+export const CODE_SCANNING_CONFIGURATION_WARNING_ESCALATED_STEP = "security.codeql_configuration_warning_escalated";
+const CODEQL_CONFIGURATION_WAIT_REASON = `security-merge-policy unknown at this head: ${CODEQL_CONFIGURATION_NOT_FOUND} — ` +
+  "GitHub's CodeQL check reports a missing configuration, a GitHub-side state no source edit clears — " +
+  "waiting for GitHub's refresh, no fix round and no strike";
+
+/** W1-T13470 — the adapter's receipt for the configuration-not-found shape: GitHub's check text only. */
+export interface CodeqlConfigurationWarningReceipt {
+  checkId: number; headSha: string; completedAt: string | null; conclusion: string; title: string;
+  summary: string | null; summarySha256: string | null; truncated: boolean; alertsLink: string | null;
+}
+/** W1-T13470 — what readSecurityMergeDecision answers; the sweep reads its receipt and generation, never a permission. */
+export interface SecurityMergeObservation {
+  headSha?: string;
+  decision: { state: string; mergeAllowed: boolean; reason: string };
+  observation?: { latest?: { id?: number }; configurationWarning?: CodeqlConfigurationWarningReceipt };
+}
+
+/** W1-T13470 — the only red is the policy status at this reason (positively named), the review has not failed, and no
+ *  open high CodeQL alert was read at this head. Anything else keeps today's route. */
+export function codeqlConfigurationWarningWait(pr: OpenPrView): boolean {
+  if (pr.securityMergePolicy?.state !== "unknown" || pr.securityMergePolicy.reason !== CODEQL_CONFIGURATION_NOT_FOUND) return false;
+  if (!isBlockedCi(pr) || pr.reviewState === "failure" || (pr.cancelledRequiredChecks?.length ?? 0) > 0) return false;
+  const reds = [...(pr.redRequiredChecks ?? []), ...(pr.ciFailures ?? []).map((failure) => failure.name)];
+  const highAtHead = pr.codeqlHeadAlerts?.headSha === pr.headSha && pr.codeqlHeadAlerts.alerts.length > 0;
+  return reds.length > 0 && reds.every((name) => name === SECURITY_MERGE_POLICY_CONTEXT) && !highAtHead;
+}
+
+/** A completed CodeQL workflow run at this head that finished after the first capture and before GitHub's check that
+ *  still reads the warning: CodeQL completed again and GitHub re-judged it. Unparseable times never match. */
+function codeqlRunCompletedAgain(body: unknown, headSha: string, since: number, standing: number):
+  { id: number; run_attempt?: number; updated_at: string } | undefined {
+  const runs = (body as { workflow_runs?: unknown } | null)?.workflow_runs;
+  if (!Array.isArray(runs) || !Number.isFinite(since) || !Number.isFinite(standing)) return undefined;
+  return runs.find((run) => run?.head_sha === headSha && run.status === "completed" && Number.isSafeInteger(run.id) &&
+    Date.parse(run.updated_at) > since && Date.parse(run.updated_at) <= standing);
+}
+
+/** W1-T13470 — one full pass over a configuration-not-found wait; returns the wait's reason with what this pass did. */
+export async function observeCodeqlConfigurationWarning(deps: SweepDeps, lines: ReadonlyArray<Record<string, unknown>>,
+  pr: OpenPrView, waitReason: string): Promise<string> {
+  if (!deps.readSecurityMergeObservation) return waitReason;
+  const appendLine = deps.appendLine ?? appendLedger;
+  const failed = (error: unknown) => String((error as Error)?.message ?? error);
+  let observed: SecurityMergeObservation;
+  try {
+    observed = await deps.readSecurityMergeObservation(pr);
+  } catch (error) {
+    // Named in the disposed row; nothing is captured or escalated, and the next pass reads again.
+    return `${waitReason} — the security decision was not read this pass (${failed(error)})`;
+  }
+  if (observed.headSha !== pr.headSha) {
+    return `${waitReason} — the decision read answered ${observed.decision.state}: ${observed.decision.reason} at ` +
+      `${observed.headSha?.slice(0, 7) ?? "no head"}, not this head — re-read next pass`;
+  }
+  const row = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha };
+  const atHead = (step: string) => lines.filter((line) => line.step === step && line.pr_number === pr.prNumber && line.head_sha === pr.headSha);
+  const captures = atHead(CODE_SCANNING_CONFIGURATION_WARNING_STEP);
+  const notes: string[] = [];
+  const warning = observed.observation?.configurationWarning;
+  if (warning !== undefined && !captures.some((line) => line.check_id === warning.checkId)) {
+    const capture = { ...row, step: CODE_SCANNING_CONFIGURATION_WARNING_STEP, check_id: warning.checkId,
+      decision: `${observed.decision.state}: ${observed.decision.reason}`, receipt: warning };
+    appendLine(deps.ledgerPath, capture);
+    captures.push(capture);
+    notes.push(`captured check ${warning.checkId}'s warning verbatim`);
+  }
+  const first = captures.reduce<Record<string, unknown> | undefined>((a, b) => a === undefined || Number(b.check_id) < Number(a.check_id) ? b : a, undefined);
+  if (atHead(CODE_SCANNING_CONFIGURATION_WARNING_ESCALATED_STEP).length > 0) {
+    notes.push("the standing warning was already escalated once at this head");
+  } else if (warning !== undefined && first !== undefined && deps.readCodeqlWorkflowRuns) {
+    let runs: unknown;
+    try {
+      runs = await deps.readCodeqlWorkflowRuns(pr);
+    } catch (error) {
+      // Named in the disposed row; no escalation is judged without the runs, and the next pass reads them again.
+      notes.push(`CodeQL workflow runs unread (${failed(error)})`);
+    }
+    const run = codeqlRunCompletedAgain(runs, pr.headSha,
+      Date.parse(String((first.receipt as { completedAt?: unknown } | undefined)?.completedAt)), Date.parse(String(warning.completedAt)));
+    if (run !== undefined) {
+      const owner = pr.taskId ?? "security-policy";
+      const reason = `CodeQL configuration-not-found persists at head ${pr.headSha.slice(0, 7)} of #${pr.prNumber}: CodeQL workflow ` +
+        `run ${run.id} (attempt ${run.run_attempt ?? "unknown"}) completed at ${run.updated_at}, and GitHub's trusted CodeQL check ` +
+        `${warning.checkId} completed at ${warning.completedAt} still reads "${warning.title}" — security-merge-policy stays unknown ` +
+        `and no fix round was spent. Receipt: ${JSON.stringify(warning)}`;
+      appendLine(deps.ledgerPath, { ...row, step: CODE_SCANNING_CONFIGURATION_WARNING_ESCALATED_STEP, check_id: warning.checkId,
+        workflow_run_id: run.id, workflow_run_attempt: run.run_attempt ?? null, owner, receipt: warning });
+      try {
+        await deps.escalate(pr, reason, { taskId: owner, prNumber: pr.prNumber, prUrl: pr.prUrl, question: reason, criterion: "",
+          reviewerRequirement: reason, specText: "", strikeHistory: pr.strikeHistory ?? [], resolutions: [
+            { label: "re-run CodeQL", detail: "Re-run CodeQL at this head; its completion re-runs the trusted producer through that workflow's own trigger." },
+            { label: "file the recovery rule", detail: "Read the captured receipt and file the operator-reviewed recovery task it supports." },
+          ] });
+        notes.push(`CodeQL run ${run.id} completed again with the warning standing — escalated once to ${owner}`);
+      } catch (error) {
+        // Named in the disposed row; its pre-written escalation row keeps the escalation to once per head.
+        notes.push(`its escalation to ${owner} failed (${failed(error)}) and is not repeated at this head`);
+      }
+    }
+  }
+  return notes.length > 0 ? `${waitReason} — ${notes.join("; ")}` : waitReason;
 }
 
 type CodeScanningGate =
@@ -24258,6 +24395,11 @@ export async function runSweep(
         // W1-T1116 — the fourth silent guard. Forcing `alreadyDone` true is BY DESIGN, since there
         // is no refusal to distinguish, but the row still read `acted:false` with nothing saying
         // why. `reason` already narrates what is being waited on, reused verbatim.
+        // W1-T13470: a full pass observes a configuration-not-found wait; it still acts on nothing the arms own.
+        if (ruleBlockerByIndex.get(prIndex) === "security-unknown-hold" && codeqlConfigurationWarningWait(pr) &&
+            !deps.dryRun && deps.repairAdmissionSurface !== "light") {
+          reason = await observeCodeqlConfigurationWarning(deps, ledgerLines, pr, reason);
+        }
         dedupStandDownReason = reason;
         break;
       case "held-draft":
