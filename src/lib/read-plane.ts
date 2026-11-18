@@ -37,7 +37,8 @@ const STALL_PROFILE_CONSUMER = "loop_stall_profile";
 /** The shared spawn leaves: frames that only forward a spawn for someone else, so none is the caller. Declared
  *  once here: a module path, or plan.ts's named default runner (`loadPlanAtRef`'s `runGit` arrow). The names
  *  cover a single-file bundle, where every frame has the same file and the module path is lost (W1-T11795). */
-export const SYNC_SPAWN_LEAF_FRAME_NAMES: ReadonlySet<string> = new Set(["ghExecFile", "hostWorktreeGit", "vetPinnedConfig"]);
+export const SYNC_SPAWN_LEAF_FRAME_NAMES: ReadonlySet<string> = new Set(["ghExecFile", "gitSync", "hostWorktreeGit",
+  "runHostWorktreeGit", "vetPinnedConfig"]);
 
 export const SYNC_SPAWN_LEAF_FRAMES: readonly RegExp[] = [
   /[/\\]worktree-git\.[cm]?[jt]s/,

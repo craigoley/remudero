@@ -91,7 +91,8 @@ test("demand lane ownership preserves expiry and key limits", async () => {
           .map(key => ({ key, data: { fixture: key }, sources: [] })) }];
       if (withPeer) views.push({ name: "peer-view", version: 1, demand: true, materialize: () =>
         book.keys("peer-view").map(key => ({ key, data: { fixture: key }, sources: [] })) });
-      const ticker = createReadModelTicker({ stateDir, instances: selected, views, viewsOnly: true, lane: "fast", holder, clock, oracle: "off", demand: book, post: relay });
+      // W1-T13490: no carry window, so this suite still pins which owner the first sweep may invalidate.
+      const ticker = createReadModelTicker({ stateDir, instances: selected, views, viewsOnly: true, lane: "fast", holder, clock, oracle: "off", demand: book, post: relay, demandCarryMs: 0 });
       tickers.push(ticker); ticker.start(); observe(ticker); ticker.tick(); return ticker;
     };
     const has = (view: string, key: string) => bodies.has(readModelBodyKey(view, key));

@@ -12946,6 +12946,36 @@ components:
         holdout:
           type: boolean
 
+    InboxThreadView:
+      type: object
+      description: >
+        GET /v1/views/inbox-thread?id= (src/lib/inbox-thread-view.ts; P4-T10, mounted by W1-T13455): one Inbox
+        thread, built on demand from the stored needsYou classification pages and the thread store.
+      required: [view, version, generatedAt, asOf, stale, sources, data]
+      properties:
+        view: {type: string, enum: [inbox-thread]}
+        version: {type: integer, enum: [1]}
+        generatedAt: {type: string, format: date-time}
+        asOf: {type: [string, "null"]}
+        stale: {type: boolean}
+        sources:
+          type: array
+          items:
+            $ref: "#/components/schemas/ViewSource"
+        data:
+          $ref: "#/components/schemas/InboxThreadViewData"
+
+    InboxThreadViewData:
+      type: object
+      description: The actual InboxThreadViewData from src/lib/inbox-thread-view.ts.
+      required: [threadId, found]
+      properties:
+        threadId: {type: string}
+        found: {type: boolean}
+        reason: {type: string, description: Why found is false, or an input could not be read.}
+        thread:
+          $ref: "#/components/schemas/InboxThreadDetail"
+
     TaskView:
       type: object
       description: >
@@ -21640,6 +21670,70 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           description: The view is dark (`view_disabled`), shadowed (`view_shadow`), or has no body yet (`view_not_ready`).
+
+  /v1/views/inbox-thread:
+    get:
+      summary: One Inbox thread's page, materialized on demand from the stored classification and thread store.
+      description: >
+        W1-T13455 mounts src/lib/inbox-thread-view.ts (P4-T10), which the read-model worker has built on demand
+        since it was written but serve never routed. The id is the thread id and forms the view key. It is served
+        with no switch entry. A missing key is requested from the worker and awaited for up to 300 ms; a demand
+        miss answers 404 view_not_ready with reason, retryMs and Retry-After. An unknown thread answers 200 with
+        data.found=false and data.reason. Served bodies follow the shared view ETag and 304 rules.
+      security:
+        - bearerRead: []
+      parameters:
+        - name: id
+          in: query
+          required: true
+          description: The inbox thread id (thread:<proposalId>::...).
+          schema: {type: string, minLength: 1}
+        - name: If-None-Match
+          in: header
+          required: false
+          schema: {type: string}
+      responses:
+        "200":
+          description: The thread view, including found=false for a thread with no Inbox item.
+          headers:
+            ETag:
+              description: The shared weak view ETag over version, stale and data.
+              schema: {type: string}
+            Cache-Control:
+              schema: {type: string, enum: [no-cache]}
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxThreadView"
+        "304":
+          description: If-None-Match matched the view ETag; no body.
+          headers:
+            ETag:
+              schema: {type: string}
+            Cache-Control:
+              schema: {type: string, enum: [no-cache]}
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: The demanded key has no body yet.
+          headers:
+            Retry-After:
+              description: retryMs rounded up to seconds, with a minimum of one.
+              schema: {type: string}
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error]
+                properties:
+                  error: {type: string}
+                  view: {type: string}
+                  reason: {type: string}
+                  retryMs: {type: integer}
 
   /v1/views/task:
     get:
