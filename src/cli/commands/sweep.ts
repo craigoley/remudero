@@ -6,7 +6,8 @@ import { appendLedger, deriveLedgerActor } from "../../lib/ledger.js";
 import { systemClock, type Clock } from "../../lib/clock.js";
 import { loadPlan, type Plan, type MergedResolver } from "../../lib/plan.js";
 import { repoRoot, resolveOwnerRepo } from "../../lib/repo-location.js";
-import { resolveCiGateRequiredSource } from "../../lib/ci-gate-required.js";
+import { resolveCiGateRequiredSource, type CiGateRequiredSource } from "../../lib/ci-gate-required.js";
+import { resolveTargetOwnerRepo } from "../../lib/onboard/inventory.js";
 import { flagValue, unknownArgError } from "../../lib/cli-args.js";
 import { instanceMode, readInstanceRegistryText } from "../../lib/instance-mode.js";
 import { checkReviewerCodeFreshnessAsync, reviewerCodeJudge, type ReviewerCodeFreshness } from "../../lib/self-sync.js";
@@ -949,9 +950,7 @@ export function buildSweepHook(
   const resolvedReadMainPlan = legacyResequenceShape
     ? (isMergedOrReadMainPlan as ((root: string) => Plan) | undefined)
     : readMainPlan;
-  const ciGateSource = resolveCiGateRequiredSource({ owner, repo }, {
-    self: resolveOwnerRepo(), selfRoot: repoRoot, configRoot: config.root, checkoutRoot: targetCheckoutRoot,
-  });
+  let ciGateSourceRead: Promise<CiGateRequiredSource> | undefined;
   // W1-T192: the daemon-side draft rung, built ONCE per daemon start (mirrors this
   // function's own once-per-daemon-start construction) — see buildInboxDraftHook's doc for
   // why it rides THIS seam rather than a second, separately-scheduled loop.
@@ -1076,6 +1075,11 @@ export function buildSweepHook(
     let thisPassReviewInputViews: NonNullable<SweepCycleOutcome["reviewInputViews"]> = [];
     try {
       if (tickRead?.openPrError) throw new Error(tickRead.openPrError);
+      ciGateSourceRead ??= resolveTargetOwnerRepo(repoRoot).then((self) =>
+        resolveCiGateRequiredSource({ owner, repo }, {
+          self, selfRoot: repoRoot, configRoot: config.root, checkoutRoot: targetCheckoutRoot,
+        }));
+      const ciGateSource = await ciGateSourceRead;
       const openPrs = tickRead ? structuredClone(tickRead.openPrViews) : await prelude.time("open_pr_views", () =>
         buildOpenPrViewsAsync(owner, repo, ledgerPath, {
           ciGateSource, log,
