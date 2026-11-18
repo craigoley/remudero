@@ -2,7 +2,7 @@ import { DISK_FAIL_BYTES, DISK_WARN_BYTES, humanBytes } from "./doctor.js";
 import {
   classifyEndedDaemonProcesses, crashLoopRunOf, DAEMON_ABNORMAL_EXIT_STEP, DAEMON_CLEAN_EXIT_OBSERVED_STEP, learnedCleanLifetime,
   type CrashLoopVerdict, type DaemonLifetimeRecord, type DaemonProcessEnd, type LearnedCleanLifetime, type LearnedCrashLoopSummary,
-  type StarvationCensus, type StarvationClearedInfo,
+  type ClaimStallClearedInfo, type ClaimStallInfo, type StarvationCensus, type StarvationClearedInfo,
 } from "./daemon.js";
 import { ghRateLimitWindow, type GhRateLimitProvenance } from "./daemon-health.js";
 import { quantileOf } from "./daemon-memory-policy.js";
@@ -1089,6 +1089,126 @@ export function escalateStarvationCleared(
     task_id: info.taskId ?? "daemon",
     step: "dispatch.starvation.cleared",
     reason: info.reason,
+    issue_url: issueUrl,
+    delivered,
+    ...(failure ? { failure } : {}),
+  });
+}
+
+/** W1-T13248: the ledger markers of the claim-stall page — one per open, one per clear. */
+export const CLAIM_STALL_ESCALATED_STEP = "dispatch.claim_stall.escalated";
+export const CLAIM_STALL_CLEARED_STEP = "dispatch.claim_stall.cleared";
+
+/**
+ * W1-T13248: the page for a fleet whose free slots went only to runs refused before spend (2026-11-16: 14:42Z to
+ * 20:30Z, nothing alerted). DEDUP IS ON THE NEWEST CLAIM-PASSING RUN, never `run.start`: a refused run writes a
+ * fresh `run.start` every tick, so keying on it re-armed the page each tick. If the newest
+ * `dispatch.claim_stall.escalated` row postdates the newest `dispatch.claim` `created` row, the stall was already
+ * reported. The marker is written whether or not delivery succeeded (`escalateStarvation`'s discipline).
+ */
+export function escalateClaimStall(
+  info: ClaimStallInfo,
+  ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway },
+): void {
+  const lines = readLedgerLines(ctx.ledgerPath);
+  let lastEscalatedIdx = -1;
+  let lastPassedIdx = -1;
+  lines.forEach((l, i) => {
+    if (l.step === CLAIM_STALL_ESCALATED_STEP) lastEscalatedIdx = i;
+    if (l.step === "dispatch.claim" && l.outcome === "created") lastPassedIdx = i;
+  });
+  if (lastEscalatedIdx !== -1 && lastEscalatedIdx > lastPassedIdx) return;
+
+  const minutes = (ms: number): string => `${Math.round(ms / 60_000)} min`;
+  const bound = info.boundSource === "claim-silence-window"
+    ? `the fleet's claim-silence window (p90 of ${info.samples} measured claim-to-verdict builds, floored at two renewal intervals)`
+    : `the p90 of ${info.samples} gaps between runs that passed their claim (no claim-to-verdict sample yet)`;
+  const release = `rmd claim ${info.taskId} --drop`;
+  const where = info.holderHost !== undefined ? ` on ${info.holderHost}` : " on the holder's host";
+  const issueUrl = tryEscalate(
+    {
+      class: "BLOCKED",
+      taskId: info.taskId,
+      runId: ctx.runId,
+      summary: `fleet is starting no work — ${info.taskId}'s dispatch claim (held by ${info.holder}) refuses every run`,
+      detail:
+        `W1-T13248: for ${info.refusedTicks} consecutive ticks every admitted run was refused before spend and none passed ` +
+        `its dispatch claim, so the free slots are going to refused runs and no work is starting. ${info.taskId}'s claim ` +
+        `${info.ref} is held by ${info.holder}; its newest sign of life is ${minutes(info.claimAgeMs)} old` +
+        `${info.lastSignOfLife !== undefined ? ` (${info.lastSignOfLife})` : ""}, past ${minutes(info.boundMs)} — ` +
+        `bound: ${bound}. The daemon is live; it will close this issue when a run next passes its claim.`,
+      options: [
+        {
+          label: "release the claim",
+          detail: `If the holder is gone, drop the claim from its host: \`${release}\`${where}.`,
+        },
+        {
+          label: "acknowledge and wait",
+          detail: "If the holder is working, no action is needed — the issue closes itself when a run next passes its claim.",
+        },
+      ],
+      recommendation: "release the claim",
+    },
+    {
+      issues: ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo),
+      ledgerPath: ctx.ledgerPath,
+      runId: ctx.runId,
+    },
+  );
+  appendLedger(ctx.ledgerPath, {
+    run_id: ctx.runId,
+    task_id: info.taskId,
+    step: CLAIM_STALL_ESCALATED_STEP,
+    ref: info.ref,
+    holder: info.holder,
+    claim_age_ms: info.claimAgeMs,
+    bound_ms: info.boundMs,
+    bound_source: info.boundSource,
+    samples: info.samples,
+    refused_ticks: info.refusedTicks,
+    release_command: release,
+    issue_url: issueUrl,
+    delivered: issueUrl !== null,
+  });
+}
+
+/**
+ * W1-T13248: the cleared half — closes the issue the newest `dispatch.claim_stall.escalated` row named, unless a later
+ * cleared row already did. The referent is the ledger, never a lookup; absent means a silent no-op. CANNOT-OBSERVE
+ * MEANS WAIT (W1-T130): a gateway that cannot close, or whose close throws, leaves the issue open and costs one
+ * `delivered: false` row.
+ */
+export function escalateClaimStallCleared(
+  info: ClaimStallClearedInfo,
+  ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway },
+): void {
+  let issueUrl: string | null = null;
+  for (const l of readLedgerLines(ctx.ledgerPath)) {
+    if (l.step === CLAIM_STALL_ESCALATED_STEP) issueUrl = typeof l.issue_url === "string" ? l.issue_url : null;
+    else if (l.step === CLAIM_STALL_CLEARED_STEP) issueUrl = null;
+  }
+  if (!issueUrl) return;
+  const comment =
+    `W1-T13248: a run${info.runId !== undefined ? ` (${info.runId})` : ""} passed its dispatch claim` +
+    `${info.taskId !== undefined ? ` for ${info.taskId}` : ""}, so the fleet is starting work again. Closing automatically; ` +
+    `a fresh stall opens its own issue.`;
+  const issues = ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo);
+  let delivered = false;
+  let failure: string | undefined;
+  if (!issues.closeWithComment) {
+    failure = "issue gateway cannot close issues";
+  } else {
+    try {
+      issues.closeWithComment(issueUrl, comment);
+      delivered = true;
+    } catch (e) {
+      failure = String((e as Error)?.message ?? e);
+    }
+  }
+  appendLedger(ctx.ledgerPath, {
+    run_id: ctx.runId,
+    task_id: info.taskId ?? "daemon",
+    step: CLAIM_STALL_CLEARED_STEP,
     issue_url: issueUrl,
     delivered,
     ...(failure ? { failure } : {}),

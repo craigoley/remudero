@@ -156,6 +156,7 @@ import { resolveReleases, closedUnmergedRunBranchRefs, type DispatchFilterReason
 import type { StatusProjection } from "./status.js";
 import { ENVIRONMENTAL_BLOCK_COOLDOWN_MS, INDEPENDENT_BLOCK_RELEASED_STEP, isEnvironmentalBlock, PRE_RESTORE_RUN_VERDICT_STAGES, type IndependentBlockRelease } from "./status.js";
 import { explainDispatchScore, openDependentFanout, type DispatchValueContext } from "./dispatch-value.js";
+import { CLAIM_SILENCE_FLOOR_MS, claimSilenceWindow } from "./dispatch-claim.js";
 import {
   OPS_CATALOG_OUTCOMES, opsCatalogRefusalStage, readOpsCatalogSnapshotAsync, type OpsCatalogApi, type OpsCatalogOutcome, type OpsCatalogShadowInput,
   type OpsCatalogTarget,
@@ -1264,6 +1265,108 @@ export interface StarvationClearedInfo {
   taskId?: string;
 }
 
+/** W1-T13248: a fleet whose free slots went only to runs refused before spend, past the claim-silence bound. */
+export interface ClaimStallInfo {
+  taskId: string;
+  ref: string;
+  /** `pid@host` from the claim's anchor (the silence judge's report), or the held-by sha when only that is known. */
+  holder: string;
+  holderHost?: string;
+  /** The refusing claim's age: now minus its newest sign of life (fallback: minus its first refusal). */
+  claimAgeMs: number;
+  boundMs: number;
+  /** Which bound fired: the fleet's claim-to-verdict window, or the p90 of gaps between claim-passing runs. */
+  boundSource: "claim-silence-window" | "claim-pass-gap-p90";
+  samples: number;
+  lastSignOfLife?: string;
+  /** Consecutive refused-only ticks seen when the condition opened. */
+  refusedTicks: number;
+}
+
+/** A claim-passing run (a `dispatch.claim` `created` row) is what ends a stall; the clear names it when known. */
+export interface ClaimStallClearedInfo {
+  taskId?: string;
+  runId?: string;
+}
+
+/** One refused-before-spend run of a tick, with the evidence its own ledger rows carried. */
+export interface ClaimRefusedRun {
+  taskId: string;
+  runId: string;
+  refusal?: ClaimHeldRefusal;
+}
+
+/** Fewer claim-to-claim gaps than this is no measurement of a cadence, so the fallback bound does not exist. */
+export const CLAIM_STALL_MIN_GAPS = 3;
+
+/**
+ * PURE (W1-T13248). Whether any refused run's claim has been silent past the bound. The bound is the fleet's own
+ * claim-to-verdict window floored as `decideClaimSilence` floors it; with no such sample, the p90 of the gaps between
+ * runs that passed their claim (floored the same way). A claim whose holder renewed shows a different held-by sha
+ * than the one the silence judge reported on, so a live holder never matches a stale report. Nothing it cannot read
+ * is a page: the answer is then `undefined`.
+ */
+export function decideClaimStall(
+  lines: readonly string[],
+  refused: readonly ClaimRefusedRun[],
+  nowMs: number,
+  refusedTicks: number,
+): ClaimStallInfo | undefined {
+  const rows: Record<string, unknown>[] = [];
+  for (const raw of lines) {
+    if (!raw.includes('"dispatch.claim') && !raw.includes('"verdict"')) continue;
+    const row = ledgerRow(raw);
+    if (row !== undefined) rows.push(row);
+  }
+  const window = claimSilenceWindow(rows);
+  let best: ClaimStallInfo | undefined;
+  const offer = (info: ClaimStallInfo): void => {
+    if (best === undefined || info.claimAgeMs > best.claimAgeMs) best = info;
+  };
+  let gapBound: { boundMs: number; samples: number } | undefined;
+  if (window.windowMs === undefined) {
+    const created = rows.flatMap((row) => row.step === "dispatch.claim" && row.outcome === "created" && typeof row.ts === "string"
+      ? [Date.parse(row.ts)] : []).filter(Number.isFinite).sort((a, b) => a - b);
+    const gaps = created.slice(1).map((at, i) => at - created[i]!);
+    if (gaps.length >= CLAIM_STALL_MIN_GAPS) {
+      gaps.sort((a, b) => a - b);
+      gapBound = { boundMs: Math.max(gaps[Math.ceil(0.9 * gaps.length) - 1]!, CLAIM_SILENCE_FLOOR_MS), samples: gaps.length };
+    }
+  }
+  for (const run of refused) {
+    const held = run.refusal;
+    if (held === undefined || held.holder === undefined) continue;
+    if (window.windowMs !== undefined) {
+      const report = rows.findLast((row) => row.step === "dispatch.claim_unrenewed" && row.ref === held.ref && row.sha === held.holder);
+      const lastAt = typeof report?.last_sign_of_life === "string" ? Date.parse(report.last_sign_of_life) : NaN;
+      if (report === undefined || !Number.isFinite(lastAt)) continue;
+      const boundMs = Math.max(window.windowMs, CLAIM_SILENCE_FLOOR_MS);
+      const claimAgeMs = Math.max(0, nowMs - lastAt);
+      if (claimAgeMs < boundMs) continue;
+      const identity = typeof report.holder === "string" && /^\d+@\S+$/.test(report.holder) ? report.holder : held.holderIdentity;
+      offer({
+        taskId: run.taskId, ref: held.ref, holder: identity ?? held.holder,
+        ...(identity !== undefined ? { holderHost: identity.slice(identity.indexOf("@") + 1) } : {}),
+        claimAgeMs, boundMs, boundSource: "claim-silence-window", samples: window.samples,
+        lastSignOfLife: report.last_sign_of_life as string, refusedTicks,
+      });
+    } else if (gapBound !== undefined) {
+      const first = rows.find((row) => row.step === "dispatch.claim" && row.outcome === "taken" && row.ref === held.ref &&
+        typeof row.reason === "string" && row.reason.includes(`(held by ${held.holder})`) && typeof row.ts === "string");
+      const firstAt = Date.parse(String(first?.ts));
+      if (!Number.isFinite(firstAt)) continue;
+      const claimAgeMs = Math.max(0, nowMs - firstAt);
+      if (claimAgeMs < gapBound.boundMs) continue;
+      offer({
+        taskId: run.taskId, ref: held.ref, holder: held.holderIdentity ?? held.holder,
+        ...(held.holderIdentity !== undefined ? { holderHost: held.holderIdentity.slice(held.holderIdentity.indexOf("@") + 1) } : {}),
+        claimAgeMs, boundMs: gapBound.boundMs, boundSource: "claim-pass-gap-p90", samples: gapBound.samples, refusedTicks,
+      });
+    }
+  }
+  return best;
+}
+
 /** Same shape/truncation discipline as {@link tallyDispatchFilters}'s own buckets, applied to
  *  the circuit-broken ids collected outside that tally (see {@link StarvationCensus}'s doc). */
 function bucketFromIds(ids: readonly string[]): IdleReasonBucket {
@@ -1639,6 +1742,12 @@ export interface DaemonDeps {
    *  exactly: optional, same try/catch, fired from the same two sites, and on the edge rather than per
    *  tick, so a daemon never escalated stays silent and a long quiet stretch closes nothing repeatedly. */
   onStarvationCleared?: (info: StarvationClearedInfo) => void | Promise<void>;
+  /** W1-T13248: two consecutive ticks whose every admitted run was refused before spend by a claim silent past the
+   *  claim-silence bound. Idle ticks never reach `onStarvation`, so this is the page for a fleet that starts no work
+   *  while its slots go to refused runs. Fires once per stall (the catalogue entry dedups across boots). Optional. */
+  onClaimStall?: (info: ClaimStallInfo) => void | Promise<void>;
+  /** The cleared half: the first run that passes its claim after the page. Optional, edge-triggered. */
+  onClaimStallCleared?: (info: ClaimStallClearedInfo) => void | Promise<void>;
   /** W1-T3691 (design v) — called once per stuck sha, the FIRST tick a freshness restart already
    *  requested for this exact code sha reports coming back unchanged: the target looks genuinely
    *  pinned behind origin/main rather than transiently behind it, so this is a "needs a human"
@@ -4741,6 +4850,14 @@ export async function runDaemon(
   // W1-T13242: a claim-held task sits out selection until `untilMs` or its claim's drop, so it cannot take the only
   // free slot every tick (2026-11-16). A deferral: never block reasoning, a strike, a breaker or an escalation.
   const claimHeldDeferrals = new Map<string, { ref: string; sinceMs: number; untilMs: number }>();
+  // W1-T13248: this dispatch batch's admitted runs, and the streak of consecutive batches that were refused before
+  // spend throughout. An idle tick zeroes the streak; a run that passed its claim zeroes it and closes the page.
+  const claimStallBatch: { admitted: number; passed: number; passedRun?: { taskId: string; runId: string }; refused: ClaimRefusedRun[] } =
+    { admitted: 0, passed: 0, refused: [] };
+  let claimStallStreak = 0;
+  let claimStallPaged = false;
+  // Armed at boot and on every page, so a boot after a page still closes it; the catalogue no-ops with none open.
+  let claimStallCloseArmed = true;
   // A zero-cost `blocked_illformed` verdict is a pre-dispatch admission refusal, not a durable
   // independent failure. Exclude its unchanged task contract only for this process, so it cannot
   // spin on the same immutable plan; a changed contract deliberately clears the entry below and is
@@ -6126,6 +6243,75 @@ export async function runDaemon(
     });
   };
 
+  // W1-T13248: counts one settled run toward this batch. Refused before spend is a held or unreachable claim; a run
+  // that passed its claim minted a `dispatch.claim` created row; anything else is neither and breaks the streak.
+  const noteClaimOutcome = (task: Task, result: RunResult, report: typeof emitLog): void => {
+    claimStallBatch.admitted++;
+    if (result.verdict === "blocked_inflight" || result.verdict === "blocked_git_fetch") {
+      let refusal: ClaimHeldRefusal | undefined;
+      try {
+        refusal = ledgerReader === undefined ? undefined : claimHeldRefusalFrom(ledgerReader(), task.id, result.runId);
+      } catch (error) {
+        report("dispatch.claim_stall.evidence_unreadable", { task: task.id, run_id: result.runId,
+          error: String((error as Error)?.message ?? error).slice(0, 300) });
+      }
+      claimStallBatch.refused.push({ taskId: task.id, runId: result.runId, ...(refusal !== undefined ? { refusal } : {}) });
+      return;
+    }
+    try {
+      const passed = ledgerReader !== undefined && ledgerReader().some((raw) => {
+        if (!raw.includes(result.runId) || !raw.includes('"dispatch.claim"')) return false;
+        const row = ledgerRow(raw);
+        return row?.step === "dispatch.claim" && row.outcome === "created" && row.run_id === result.runId;
+      });
+      if (passed) {
+        claimStallBatch.passed++;
+        claimStallBatch.passedRun ??= { taskId: task.id, runId: result.runId };
+      }
+    } catch (error) {
+      report("dispatch.claim_stall.evidence_unreadable", { task: task.id, run_id: result.runId,
+        error: String((error as Error)?.message ?? error).slice(0, 300) });
+    }
+  };
+
+  // W1-T13248: the batch's verdict on the stall. Two consecutive batches that admitted work, every run of which was
+  // refused before spend, with a refusing claim silent past the bound, page once; the first claim-passing run closes it.
+  const settleClaimStall = async (): Promise<void> => {
+    const batch = { admitted: claimStallBatch.admitted, passed: claimStallBatch.passed, passedRun: claimStallBatch.passedRun,
+      refused: claimStallBatch.refused.slice() };
+    claimStallBatch.admitted = 0;
+    claimStallBatch.passed = 0;
+    claimStallBatch.passedRun = undefined;
+    claimStallBatch.refused.length = 0;
+    if (batch.admitted === 0) return;
+    const failed = (error: unknown): void => log("daemon.escalation.failed", { task: "daemon", error: String((error as Error)?.message ?? error) });
+    if (batch.passed > 0) {
+      claimStallStreak = 0;
+      claimStallPaged = false;
+      if (!claimStallCloseArmed) return;
+      claimStallCloseArmed = false;
+      try { await deps.onClaimStallCleared?.({ ...batch.passedRun }); } catch (error) { failed(error); }
+      return;
+    }
+    if (batch.refused.length !== batch.admitted) { claimStallStreak = 0; return; }
+    claimStallStreak++;
+    if (claimStallStreak < 2 || claimStallPaged || deps.onClaimStall === undefined) return;
+    let info: ClaimStallInfo | undefined;
+    try {
+      info = decideClaimStall(ledgerReader?.() ?? [], batch.refused, daemonClock.now(), claimStallStreak);
+    } catch (error) {
+      log("dispatch.claim_stall.evidence_unreadable", { error: String((error as Error)?.message ?? error).slice(0, 300) });
+      return;
+    }
+    if (info === undefined) return;
+    claimStallPaged = true;
+    claimStallCloseArmed = true;
+    log("dispatch.claim_stall.detected", { task_id: info.taskId, task: info.taskId, ref: info.ref, holder: info.holder,
+      claim_age_ms: info.claimAgeMs, bound_ms: info.boundMs, bound_source: info.boundSource, samples: info.samples,
+      refused_ticks: info.refusedTicks });
+    try { await deps.onClaimStall(info); } catch (error) { failed(error); }
+  };
+
   const processDispatchResult = async (
     planForBatch: Plan,
     task: Task,
@@ -6138,6 +6324,7 @@ export async function runDaemon(
     | { kind: "genuine_blocker"; detail: string; dependents: string[] }
   > => {
     refreshResumableHandoff(task.id, report);
+    noteClaimOutcome(task, result, report);
     if (result.verdict !== "blocked_inflight") claimHeldDeferrals.delete(task.id);
     if (result.verdict === "task_already_merged") {
       // This verdict is a positive merge observation by run-task, even though the run opened no PR.
@@ -8395,6 +8582,7 @@ export async function runDaemon(
       // Cadence: on change, not every tick. The idle row still fires every poll and is byte-compatible with
       // before. The reasons ride a separate step, emitted only when the picture actually changes — logging
       // the tally on all ~390 ticks would be 390 identical lines that bury the one that matters.
+      claimStallStreak = 0; // W1-T13248: a tick that admitted nothing breaks "consecutive refused ticks"
       const idleSignature = idleReasons.signature();
       if (idleSignature !== lastIdleSignature) {
         lastIdleSignature = idleSignature;
@@ -9353,6 +9541,7 @@ export async function runDaemon(
         }
       }
     }
+    await settleClaimStall();
     if (fatalError || phaseFaults.length > 0 || reporting.faults.length > 0) {
       // A pool fault closes starts, but genuine workers still earn their result/cost/merge credit.
       // Preserve original classification/detail; named logging faults remain separate secondary facts.
