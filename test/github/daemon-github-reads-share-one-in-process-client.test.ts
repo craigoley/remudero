@@ -258,7 +258,7 @@ test("W1-T12531 criterion 5: an argument form the client does not parse still sp
     ["api", "-X", "PATCH", "repos/o/r/pulls/51", "-f", "title=x"],
     ["api", "--method=POST", "repos/o/r/issues"],
     ["api", "repos/o/r/issues", "-F", "n=1"],
-    ["api", "--paginate", "repos/o/r/pulls"],
+    ["api", "--paginate", "--slurp", "repos/o/r/pulls"],
     ["api", "repos/o/r/pulls", "--jq", ".[0]"],
     ["api", "graphql", "-f", "query={viewer{login}}"],
     ["api", "repos/{owner}/{repo}/pulls"],

@@ -21,7 +21,10 @@ import { brokerGhRead, ghBrokerClientSpawn, ghBrokerRouteFor, type GhBrokerClass
 import { refreshInstallationToken } from "./github-app.js";
 import { createInstallationBudget, installationBudgetForThread, type InstallationBudget, type InstallationBudgetThreadInput, type GithubBudgetThrottledRow } from "./github-installation-budget.js";
 import { ghArgvNeedsNoCredential, githubRepoOfGhArgv, resolveGithubCredential, type GithubCredentialResolution } from "./github-credential.js";
-import { githubHttpRead, githubHttpReadConfigured, ghStdoutOfHttpRead, parseGhApiRead } from "./github-http-read.js";
+import {
+  ghIncludeHeaderBlock, githubHttpPagedRead, githubHttpRead, githubHttpReadConfigured, ghStdoutOfHttpRead, parseGhApiRead,
+  takeGithubHttpReadConditionalTally,
+} from "./github-http-read.js";
 import { sameHost } from "./host-identity.js";
 import { LIVE_WRITE_SENTINEL_TOKEN, LiveWriteBlockedError } from "./live-write-guard.js";
 
@@ -475,7 +478,7 @@ async function ghStdoutAsync(args: string[], execArgs: string[], execAsync: type
     if (brokered !== undefined) return brokered;
     await applyGhReadCadenceAsync(args);
     const inProcess = ghHttpReadFor(execArgs);
-    return inProcess === undefined ? run() : inProcess();
+    return inProcess === undefined ? run() : inProcess.send();
   })().catch((err: unknown) => { noteInstallationRefusal(err); throw err; });
   if (key === undefined) return request;
   asyncReadInFlight.set(key, request);
@@ -493,7 +496,7 @@ async function ghStdoutAsync(args: string[], execArgs: string[], execAsync: type
  * token to hand over), the test-runner sentinel, and a test's own `gh` stub unless the test pointed
  * the client at a server of its own.
  */
-function ghHttpReadFor(args: readonly string[]): (() => Promise<string>) | undefined {
+function ghHttpReadFor(args: readonly string[], timeoutMs?: number): { paged: boolean; send(): Promise<string> } | undefined {
   const read = parseGhApiRead(args);
   const env = process.env;
   if (read === undefined || (env.GH_HOST ?? "github.com") !== "github.com") return undefined;
@@ -504,7 +507,13 @@ function ghHttpReadFor(args: readonly string[]): (() => Promise<string>) | undef
   const token = childEnv.GH_TOKEN || childEnv.GITHUB_TOKEN;
   if (!token) return undefined;
   const identity = githubReadIdentity(credential, token);
-  return async () => ghStdoutOfHttpRead(read, await githubHttpRead(read, token, { identity }));
+  const opts = { identity, ...(timeoutMs === undefined ? {} : { timeoutMs }) };
+  // W1-T12892: each page after the first claims its own read; every page records its own reading.
+  if (read.paginate) {
+    return { paged: true, send: () => githubHttpPagedRead(read, token, { ...opts, beforePage: () => admitInstallationReadAsync(args),
+      afterPage: (page) => githubInstallationBudget().record(parseGhRateLimitHeaders(ghIncludeHeaderBlock(page))) }) };
+  }
+  return { paged: false, send: async () => ghStdoutOfHttpRead(read, await githubHttpRead(read, token, opts)) };
 }
 
 /** Bounded, paced async `gh` transport for endpoints whose response is plain text (for example
@@ -549,7 +558,13 @@ export async function ghTextAsync(
     const brokered = encoding === "utf8" ? await ghBrokeredAsync(args, opts, env) : undefined;
     if (brokered !== undefined) return rememberHeaders(brokered);
     await applyGhReadCadenceAsync(args);
-    return rememberHeaders(await read());
+    const inProcess = encoding === "utf8" && env === undefined ? ghHttpReadFor(args, timeout) : undefined;
+    if (inProcess === undefined) return rememberHeaders(await read());
+    const stdout = await inProcess.send();
+    if (Buffer.byteLength(stdout) > maxBuffer) {
+      throw Object.assign(new RangeError("stdout maxBuffer length exceeded"), { code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER", stdout: "", stderr: "" });
+    }
+    return inProcess.paged ? stdout : rememberHeaders(stdout);
   })().catch((err: unknown) => { noteInstallationRefusal(err); throw err; });
   if (key === undefined) return request;
   asyncReadInFlight.set(key, request);
@@ -1513,6 +1528,8 @@ export interface GhReadCadenceTally {
   /** W1-T13182: the same stamped reads by call site (`file:line` from the repository root), the top
    *  15 by count with the rest summed as `other`. Its values sum to the sum of `reads_stamped`. */
   reads_by_call_site: Record<string, number>;
+  /** W1-T12892: this process's reads sent with an ETag, and the 304s that answered them. */
+  conditional: { sent: number; not_modified: number };
 }
 
 /** W1-T10271: what `daemon.quota` reports per poll — this process's stamped reads by mode and by call
@@ -1535,6 +1552,7 @@ export function takeGhReadCadenceTally(
     gated_admitted: gatedAdmitted,
     slots_yielded: ghReadCadenceCounts.slotsYielded,
     reads_by_call_site: ghReadsByCallSiteTop(),
+    conditional: takeGithubHttpReadConditionalTally(),
   };
   ghReadsByCallSite.clear();
   ghReadCallSiteSample.site = undefined;
