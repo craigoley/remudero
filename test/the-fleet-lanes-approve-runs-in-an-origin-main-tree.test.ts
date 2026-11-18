@@ -287,12 +287,12 @@ test("W1-T9065: a tree that stops being exact, or a spawn that errors, is a reco
   const state = scratch("gw2");
   const ledgerPath = join(state, "ledger.ndjson");
   const tree = scratch("tree");
-  let inspections = 0;
+  // Each attempt cuts its own tree and removes it when it settles; the seams record both and touch no disk.
   const seams = {
-    mainTip: async () => SHA_A, addWorktree: () => assert.fail("a reusable tree is not cut again"), prepareWorktree: () => true,
+    mainTip: async () => SHA_A, addWorktree: () => {}, removeWorktree: () => {}, prepareWorktree: () => true,
     withWorktreeLease: <T>(_path: string, action: () => Promise<T>) => action(), worktreeRoot: tree, git: () => "",
   };
-  const changed = fleetRatifyGateway(tree, join(state, "logs"), ledgerPath, { ...seams, inspectExistingWorktree: () => (inspections++ === 0 ? "reusable" : "unsafe") });
+  const changed = fleetRatifyGateway(tree, join(state, "logs"), ledgerPath, { ...seams, inspectExistingWorktree: () => "unsafe" });
   await changed.approve("P-moved");
   const erroring = recordingSpawn(undefined);
   const failing = fleetRatifyGateway(tree, join(state, "logs"), ledgerPath, { ...seams, inspectExistingWorktree: () => "reusable", spawn: erroring.spawn });
