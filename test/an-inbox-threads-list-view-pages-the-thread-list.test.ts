@@ -20,6 +20,7 @@ import {
   type InboxThreadsViewData,
 } from "#src/lib/inbox-threads-view.js";
 import { refreshInboxClassification } from "#src/lib/inbox-view.js";
+import { snapshotCursor } from "#src/lib/read-page.js";
 import type { Proposal } from "#src/lib/inbox.js";
 import { buildInboxThreadsRoute, type PanelGraphDeps } from "#src/lib/panel-graph.js";
 import { flushReadModelTransactions } from "#src/lib/read-model-db.js";
@@ -145,6 +146,11 @@ test("W1-T13456 criterion 2: each page carries snapshotKey, threadListKey and a 
   assert.equal(validateInboxThreadsRequest(new URLSearchParams(), heldBodies(before)), undefined);
   assert.equal(validateInboxThreadsRequest(new URLSearchParams({ limit: "100" }), heldBodies(before))?.status, 400);
   assert.equal(validateInboxThreadsRequest(new URLSearchParams({ cursor: "not a cursor!" }), heldBodies(before))?.status, 400);
+  // A cursor bound to this list at an offset no page starts at is outside the list: restart, never a guessed page.
+  const stray = snapshotCursor({ snapshotKey: pages[0]!.threadListKey, section: "threads", offset: 99999 });
+  const outside = validateInboxThreadsRequest(new URLSearchParams({ cursor: stray }), heldBodies(before));
+  assert.equal(outside?.status, 409, JSON.stringify(outside));
+  assert.equal(outside?.restartRequired, true);
   // A reply moves the list: the old cursor now belongs to an older list.
   f.write(1, "reply", "A new answer.", systemClock.now());
   const after = view.materialize({ now: systemClock.now() });
