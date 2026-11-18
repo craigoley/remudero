@@ -265,9 +265,10 @@ export function runRouted(request: SpawnRequest): Promise<SpawnResult> {
   return installed ? installed.run(request) : runDirect(request, undefined, "helper_not_installed");
 }
 
-export type ExecFileRoutedOptions = ExecFileOptionsWithStringEncoding & { escalateAfterMs?: number };
+/** `input` is the child's whole stdin, carried as {@link SpawnRequest.input} (W1-T13434). */
+export type ExecFileRoutedOptions = ExecFileOptionsWithStringEncoding & { escalateAfterMs?: number; input?: string };
 
-const ROUTABLE_OPTIONS = new Set(["cwd", "env", "encoding", "maxBuffer", "timeout", "killSignal", "escalateAfterMs"]);
+const ROUTABLE_OPTIONS = new Set(["cwd", "env", "encoding", "maxBuffer", "timeout", "killSignal", "escalateAfterMs", "input"]);
 
 /** Why an execFile call's options cannot be carried over the helper's pipe; undefined when they can. */
 function unroutable(options: ExecFileRoutedOptions): string | undefined {
@@ -279,6 +280,23 @@ function unroutable(options: ExecFileRoutedOptions): string | undefined {
   return undefined;
 }
 
+/** W1-T13434 — the installed helper, and why a call with `options` would not go through it now (undefined: it would). */
+export function spawnRoute(options: ExecFileRoutedOptions): { helper: SpawnHelper | undefined; why: string | undefined } {
+  const helper = installed;
+  return { helper, why: helper === undefined ? "helper_not_installed" : helper.unhealthy() ?? unroutable(options) };
+}
+
+/** The direct fallback: `execFileLoopBounded`, with any `input` written to the child's stdin as runDirect does. */
+function loopBoundedDirect(file: string, args: readonly string[], { input, ...options }: ExecFileRoutedOptions):
+  Promise<{ stdout: string; stderr: string }> {
+  const command = execFileLoopBounded(file, args, options);
+  if (input !== undefined) {
+    command.child.stdin?.on("error", () => { /* Reason: a child that exits before reading its input settles by its exit. */ });
+    command.child.stdin?.end(input);
+  }
+  return command;
+}
+
 /** What a failed routed spawn rejects with: `execFile`'s own shape (`code`, `signal`, `stdout`, `stderr`), or the
  *  named {@link LoopBoundedChildTimeout} for a child stopped at its budget. */
 function failure(file: string, args: readonly string[], result: SpawnResult, options: ExecFileRoutedOptions): Error {
@@ -287,6 +305,12 @@ function failure(file: string, args: readonly string[], result: SpawnResult, opt
     const sent = typeof options.killSignal === "string" ? options.killSignal : "SIGTERM";
     return new LoopBoundedChildTimeout(label, options.timeout ?? 0,
       { signal: result.signal ?? sent, exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr });
+  }
+  if (result.error === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
+    // execFile's own overflow error: a RangeError naming the stream; the larger-than-budget stream is the one.
+    const stream = options.maxBuffer !== undefined && Buffer.byteLength(result.stderr) >= options.maxBuffer ? "stderr" : "stdout";
+    return Object.assign(new RangeError(`${stream} maxBuffer length exceeded`), { code: result.error, signal: result.signal,
+      killed: true, cmd: label, stdout: result.stdout, stderr: result.stderr });
   }
   const error = new Error(result.error !== undefined && result.exitCode === null && result.signal === null
     ? `spawn ${file} ${result.error}` : `Command failed: ${label}\n${result.stderr}`);
@@ -304,17 +328,17 @@ function failure(file: string, args: readonly string[], result: SpawnResult, opt
 export function execFileRouted(file: string, args: readonly string[], options: ExecFileRoutedOptions):
   Promise<{ stdout: string; stderr: string }> {
   const helper = installed;
-  if (helper === undefined) return execFileLoopBounded(file, args, options);
+  if (helper === undefined) return loopBoundedDirect(file, args, options);
   const why = unroutable(options);
   if (why !== undefined) {
     const began = performance.now();
-    const direct = execFileLoopBounded(file, args, options);
+    const direct = loopBoundedDirect(file, args, options);
     helper.noteDirect(file, performance.now() - began, why);
     return direct;
   }
   return helper.run({ file, args, cwd: options.cwd === undefined ? undefined : String(options.cwd), env: options.env,
     timeoutMs: options.timeout, killSignal: typeof options.killSignal === "string" ? options.killSignal : undefined,
-    maxBuffer: options.maxBuffer }).then((result) => {
+    maxBuffer: options.maxBuffer, input: options.input }).then((result) => {
     if (result.exitCode === 0 && result.error === undefined && !result.timedOut) return { stdout: result.stdout, stderr: result.stderr };
     throw failure(file, args, result, options);
   });

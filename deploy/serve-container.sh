@@ -403,6 +403,69 @@ if [ -f "${SCRIPT_ROOT}/deploy/scratch-mounts.sh" ]; then
   SERVE_DAEMON_CHECKOUT="$(scratch_daemon_checkout "${STATE_DIR}" "${DAEMON_CONTAINER}")" || SERVE_DAEMON_CHECKOUT="${STATE_DIR}/remudero"
 fi
 
+# ── W1-T13278: A REPLACE SWAPS IN A WARM REPLACEMENT BEFORE THE OLD CONSOLE STOPS ────────────────
+# Inside one container the supervisor already hands serve over with no gap; a container replace
+# (an image deploy, a policy change) stopped the only listener and the console was dark through a
+# cold boot (2026-11-15 to 11-17: 13 replaces, each about 75 s of refused or 503 answers). With the
+# switch on, the replacement starts as ${CONTAINER_NAME}-next OFF the tunnel's network, is polled
+# from inside until its active generation answers /v1/ready and every smoke route with 200 (the
+# supervisor's own standby check), then joins the network under the alias the tunnel resolves.
+# Only then is the old container stopped, and the replacement renamed to the name every other
+# tool uses. Docker's embedded DNS answers the alias with both while both run, so no request
+# finds nobody (measured on Docker 29.10: 0 failed of about 1,000 requests across four swaps,
+# against 9 to 11 failed for one plain restart). A replacement not ready inside the bound is
+# removed and the old container keeps serving (`serve.recycle_aborted`).
+# The replacement runs beside the live container, so it gets its own code checkout, generations
+# dir and /tmp: the colour (label rmd.serve.color, absent is blue) alternates on each swap, and
+# green's dirs are blue's with a -green suffix.
+# INVARIANT switch-off-is-today: with RMD_SERVE_BLUE_GREEN unset and no switch file, every
+# argument and step below is what it was before this block.
+SERVE_BLUE_GREEN_MODE="${RMD_SERVE_BLUE_GREEN:-auto}"
+SERVE_BLUE_GREEN_SWITCH="${RMD_SERVE_BLUE_GREEN_SWITCH:-/etc/remudero/serve-blue-green.on}"
+SERVE_NEXT_NAME="${CONTAINER_NAME}-next"
+SERVE_COLOR_LABEL="rmd.serve.color"
+# BACKSTOP: the supervisor's STANDBY_READY_BOUND_MS (330 s), about 5x the slowest boot measured.
+SERVE_BLUE_GREEN_READY_S="${RMD_SERVE_BLUE_GREEN_READY_S:-330}"
+SERVE_BLUE_GREEN_POLL_S="${RMD_SERVE_BLUE_GREEN_POLL_S:-3}"
+SERVE_BLUE_GREEN_WARM_NETWORK="${RMD_SERVE_BLUE_GREEN_WARM_NETWORK:-bridge}"
+# The supervisor's SMOKE_PATHS (src/lib/serve-supervisor.ts); a test holds the two lists equal.
+SERVE_SMOKE_PATHS=(/v1/version /v1/status /v1/views/versions)
+serve_blue_green_switch_on() {
+  case "${SERVE_BLUE_GREEN_MODE}" in
+    on) return 0 ;;
+    off) return 1 ;;
+  esac
+  # Like the scratch switches, a test process never reads the host's real switch file.
+  [ -z "${NODE_TEST_CONTEXT:-}" ] || [ -n "${RMD_SERVE_BLUE_GREEN_SWITCH:-}" ] || return 1
+  [ -e "${SERVE_BLUE_GREEN_SWITCH}" ]
+}
+SERVE_BLUE_GREEN=0
+SERVE_LIVE_COLOR=blue
+SERVE_NEXT_COLOR=blue
+SERVE_COLOR_SUFFIX=""
+if serve_blue_green_switch_on; then
+  if [ "${DRY_RUN}" -ne 1 ] && ! docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1 &&
+    [ "$(docker inspect --format '{{.State.Running}}' "${SERVE_NEXT_NAME}" 2>/dev/null || true)" = "true" ] &&
+    docker rename "${SERVE_NEXT_NAME}" "${CONTAINER_NAME}"; then
+    # A swap that ended between removing the old console and the rename left the replacement
+    # serving under the alias alone (edge-heal would otherwise start a second console beside it).
+    # Finishing the rename makes it the console; nothing is replaced.
+    echo "serve-container: finished an interrupted swap — ${SERVE_NEXT_NAME} is now ${CONTAINER_NAME}; run again to replace it" >&2
+    exit 0
+  elif [ "${REPLACE}" -ne 1 ] || [ -n "${INSTANCE_NAME}" ] || [ "${SERVE_SUPERVISOR}" != "on" ]; then
+    echo "serve-container: blue-green swap not used — it needs --replace of the core console with the supervisor on" >&2
+  elif [ "$(docker inspect --format '{{.State.Running}}' "${CONTAINER_NAME}" 2>/dev/null || true)" != "true" ]; then
+    echo "serve-container: blue-green swap not used — ${CONTAINER_NAME} is not running, so there is no console to keep up" >&2
+  else
+    SERVE_BLUE_GREEN=1
+    SERVE_LIVE_COLOR="$(docker inspect --format "{{index .Config.Labels \"${SERVE_COLOR_LABEL}\"}}" "${CONTAINER_NAME}" 2>/dev/null || true)"
+    [ "${SERVE_LIVE_COLOR}" = green ] || SERVE_LIVE_COLOR=blue
+    if [ "${SERVE_LIVE_COLOR}" = green ]; then SERVE_NEXT_COLOR=blue; else SERVE_NEXT_COLOR=green; SERVE_COLOR_SUFFIX="-green"; fi
+    SERVE_REPO_DIR="${SERVE_REPO_DIR}${SERVE_COLOR_SUFFIX}"
+    echo "serve-container: blue-green swap ON — live ${CONTAINER_NAME} is ${SERVE_LIVE_COLOR}; the replacement is ${SERVE_NEXT_COLOR}, code ${SERVE_REPO_DIR}"
+  fi
+fi
+
 { ! declare -F registry_shadow_mount_root >/dev/null 2>&1 || registry_shadow_mount_root "${STATE_DIR}" "${SERVE_REPO_DIR}" "${SERVE_GENS_DIR}"; }
 if [ -L "${SERVE_REPO_DIR}" ]; then
   echo "serve-container: REFUSING — RMD_SERVE_REPO_DIR must be a real directory, not a symlink." >&2
@@ -872,7 +935,8 @@ serve_replace_admission() {
   awk -v a="${some}" -v b="${some_max}" -v c="${full}" -v d="${full_max}" 'BEGIN { exit !(a > b || c > d) }' &&
     serve_replace_hold psi "memory PSI some avg10 ${some} (max ${some_max}), full avg10 ${full} (max ${full_max}) (${stage})"
   local freed need
-  freed="$(serve_resident_mib || true)"
+  # W1-T13278: a blue-green swap runs the replacement BESIDE the live console, which frees nothing.
+  if [ "${SERVE_ADMIT_OVERLAP:-0}" = 1 ]; then freed=0; else freed="$(serve_resident_mib || true)"; fi
   admit_number "${freed}" || freed=0
   need="$(awk -v r="${reserve}" -v c="${candidate}" -v f="${freed}" 'BEGIN { x = c - f; if (x < 0) x = 0; printf "%d\n", r + x }')"
   [ "${avail}" -ge "${need}" ] ||
@@ -884,13 +948,16 @@ SCRATCH_ARGS=() # deploy/scratch-mounts.sh: rebuildable I/O on the local NVMe; d
 if [ -f "${SCRIPT_ROOT}/deploy/scratch-mounts.sh" ]; then
   . "${SCRIPT_ROOT}/deploy/scratch-mounts.sh"
   if scratch_plan "${STATE_DIR}" "${CONTAINER_NAME}"; then
-    SERVE_SCRATCH_GENS_DIR="${SCRATCH_CONTAINER_TMP%/containers/*/tmp}/serve-gens"
+    SERVE_SCRATCH_GENS_DIR="${SCRATCH_CONTAINER_TMP%/containers/*/tmp}/serve-gens${SERVE_COLOR_SUFFIX}"
+    [ -z "${SERVE_COLOR_SUFFIX}" ] || scratch_serve_colour "${SERVE_COLOR_SUFFIX}" # W1-T13278
     if [ -z "${SERVE_GENS_DIR_OVERRIDE}" ] && [ "${SERVE_SUPERVISOR}" = "on" ]; then SCRATCH_DIRS+=("${SERVE_SCRATCH_GENS_DIR}"); fi
     if [ "${DRY_RUN}" -ne 1 ]; then scratch_prepare || true; fi
     if [ -z "${SERVE_GENS_DIR_OVERRIDE}" ] && [ "${#SCRATCH_ARGS[@]}" -gt 0 ]; then SERVE_GENS_DIR="${SERVE_SCRATCH_GENS_DIR}"; fi
   fi
   echo "serve-container: scratch mounts ${SCRATCH_NOTE}"
 fi
+# W1-T13278: off scratch (or with the scratch plan unusable) green's generations sit beside blue's.
+case "${SERVE_GENS_DIR}" in *"${SERVE_COLOR_SUFFIX}") ;; *) SERVE_GENS_DIR="${SERVE_GENS_DIR}${SERVE_COLOR_SUFFIX}" ;; esac
 
 SERVE_GENS_ARGS=()
 SERVE_CMD=(./bin/rmd serve --host "${SERVE_BIND_HOST}" --port "${SERVE_PORT}")
@@ -898,10 +965,21 @@ if [ "${SERVE_SUPERVISOR}" = "on" ]; then
   SERVE_GENS_ARGS=(-v "${SERVE_GENS_DIR}:${SERVE_GENS_MOUNT_DEST}" -e "RMD_SERVE_GENS_DIR=${SERVE_GENS_MOUNT_DEST}")
   SERVE_CMD=(sh -c "if [ -f ${SERVE_SUPERVISOR_ENTRY} ]; then exec node --import /app/node_modules/tsx/dist/loader.mjs ${SERVE_SUPERVISOR_ENTRY} -- serve --host ${SERVE_BIND_HOST} --port ${SERVE_PORT}; fi; echo 'rmd-serve: this image has no serve supervisor; serving directly' >&2; exec ./bin/rmd serve --host ${SERVE_BIND_HOST} --port ${SERVE_PORT}")
 fi
+# W1-T13278: a blue-green replacement starts under its own name, off the tunnel's network, carrying
+# its colour; with the switch off these are the container's name, the network and nothing.
+SERVE_RUN_NAME="${CONTAINER_NAME}"
+SERVE_RUN_NETWORK="${NETWORK}"
+SERVE_LABEL_ARGS=()
+if [ "${SERVE_BLUE_GREEN}" -eq 1 ]; then
+  SERVE_RUN_NAME="${SERVE_NEXT_NAME}"
+  SERVE_RUN_NETWORK="${SERVE_BLUE_GREEN_WARM_NETWORK}"
+  SERVE_LABEL_ARGS=(--label "${SERVE_COLOR_LABEL}=${SERVE_NEXT_COLOR}")
+fi
 RUN_ARGS=(
-  run -d --name "${CONTAINER_NAME}"
+  run -d --name "${SERVE_RUN_NAME}"
   --restart=unless-stopped
-  --network "${NETWORK}"
+  --network "${SERVE_RUN_NETWORK}"
+  "${SERVE_LABEL_ARGS[@]+"${SERVE_LABEL_ARGS[@]}"}"
   --user 1000:1000
   "${RESOURCE_POLICY_SERVE_ARGS[@]+"${RESOURCE_POLICY_SERVE_ARGS[@]}"}"
   -e GH_TOKEN
@@ -1013,6 +1091,146 @@ fi
 SERVE_OUTGOING_READS="" # W1-T9617: the replaced generation's reads per disk, read before it stops
 SERVE_CHECKOUT_COLD=false
 [ -e "${SERVE_REPO_DIR}/.git" ] || SERVE_CHECKOUT_COLD=true
+
+# ── W1-T13278: the blue-green swap's steps (see the block that turns it on) ─────────────────────
+serve_ledger_row() { # <step> <extra json fields, without braces>; a failed write never stops a replace
+  printf '{"ts":"%s","run_id":"RECYCLE-%s","task_id":"RECYCLE","step":"%s","lane":"deploy","container":"%s",%s}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "$$" "$1" "${CONTAINER_NAME}" "$2" >> "${STATE_DIR}/state/ledger.ndjson" 2>/dev/null || true
+}
+json_text() { printf '%s' "$1" | tr -d '\000-\037' | cut -c1-400 | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+serve_run_arg_set() { # <flag> <value>: replace the value after <flag> in RUN_ARGS
+  local i
+  for i in "${!RUN_ARGS[@]}"; do
+    if [ "${RUN_ARGS[i]}" = "$1" ]; then RUN_ARGS[i + 1]="$2"; return 0; fi
+  done
+  return 1
+}
+# Runs inside the replacement as its own user: the newest generation socket's /v1/ready, then each
+# smoke route through that socket (which adds the read token), exactly the supervisor's cold check.
+# Prints one JSON line; exits 0 only when every answer is 200.
+SERVE_READY_PROBE_JS='
+const fs = require("fs"), http = require("http");
+const dir = process.env.RMD_SERVE_PROBE_DIR || "/tmp", paths = process.argv.slice(2);
+let socks = [];
+try {
+  socks = fs.readdirSync(dir).filter((n) => /^rmd-serve-gen-.+\.sock$/.test(n)).map((n) => dir + "/" + n)
+    .map((p) => [p, fs.statSync(p).mtimeMs]).sort((a, b) => b[1] - a[1]).map((x) => x[0]);
+} catch (e) { /* no /tmp listing yet: no socket */ }
+if (socks.length === 0) { console.log(JSON.stringify({ ok: false, reason: "no_generation_socket" })); process.exit(4); }
+const get = (path) => new Promise((done) => {
+  const q = http.request({ socketPath: socks[0], path, timeout: 10000 }, (res) => { res.resume(); res.on("end", () => done(res.statusCode)); });
+  q.on("timeout", () => q.destroy(new Error("timeout")));
+  q.on("error", (e) => done(String(e.code || e.message)));
+  q.end();
+});
+(async () => {
+  const out = { socket: socks[0], ready: await get("/v1/ready"), smoke: {} };
+  if (out.ready === 200) for (const p of paths) out.smoke[p] = await get(p);
+  out.ok = out.ready === 200 && paths.every((p) => out.smoke[p] === 200);
+  console.log(JSON.stringify(out));
+  process.exit(out.ok ? 0 : 3);
+})();
+'
+SERVE_BLUE_GREEN_PROMOTED=0
+serve_blue_green_cleanup() { # an exit before promotion never leaves a half-started replacement
+  if [ "${SERVE_BLUE_GREEN}" -eq 1 ] && [ "${SERVE_BLUE_GREEN_PROMOTED}" -eq 0 ]; then
+    docker rm -f "${SERVE_NEXT_NAME}" >/dev/null 2>&1 || true
+  fi
+}
+serve_blue_green_abort() { # <reason> <waited_s> <last probe>
+  echo "serve-container: ABORTED — ${SERVE_NEXT_NAME} was not ready (${1}) after ${2}s; it is removed and ${CONTAINER_NAME} keeps serving." >&2
+  [ -z "${3}" ] || echo "  last readiness probe: ${3}" >&2
+  serve_ledger_row serve.recycle_aborted "\"replacement\":\"${SERVE_NEXT_NAME}\",\"reason\":\"$(json_text "$1")\",\"waited_s\":${2},\"bound_s\":${SERVE_READY_BOUND_S},\"live_color\":\"${SERVE_LIVE_COLOR}\",\"next_color\":\"${SERVE_NEXT_COLOR}\",\"probe\":\"$(json_text "$3")\""
+  docker rm -f "${SERVE_NEXT_NAME}" >/dev/null 2>&1 || true
+  SERVE_BLUE_GREEN_PROMOTED=1 # removed already; nothing left for the exit trap
+  exit 1
+}
+serve_blue_green_swap() {
+  local waited=0 probe="" started_s="${SECONDS}"
+  SERVE_READY_BOUND_S="${SERVE_BLUE_GREEN_READY_S}"
+  # A cold checkout clones and installs before it boots; give its first boot twice the bound.
+  if [ "${SERVE_CHECKOUT_COLD}" = true ]; then SERVE_READY_BOUND_S=$((SERVE_READY_BOUND_S * 2)); fi
+  if docker inspect "${SERVE_NEXT_NAME}" >/dev/null 2>&1; then
+    echo "serve-container: removing a leftover ${SERVE_NEXT_NAME} from an unfinished swap; ${CONTAINER_NAME} is serving"
+    docker rm -f "${SERVE_NEXT_NAME}" >/dev/null
+  fi
+  # Chain any EXIT trap already set (the selected-registry diagnostics), and turn a TERM from the
+  # watchdog's deadline into an exit, so the cleanup runs on it too.
+  eval "set -- $(trap -p EXIT)"
+  SERVE_PREV_EXIT_TRAP="${3:-}"
+  trap "serve_blue_green_cleanup; ${SERVE_PREV_EXIT_TRAP}" EXIT
+  trap 'exit 143' TERM
+  trap 'exit 130' INT
+  trap 'exit 129' HUP
+  if [ "${#SCRATCH_ARGS[@]}" -gt 0 ]; then scratch_fresh_tmp; fi # the replacement's own /tmp, never the live one's
+  echo "serve-container: docker run -d --name ${SERVE_NEXT_NAME} ${REF} (${SERVE_NEXT_COLOR}, on ${SERVE_RUN_NETWORK} until it is ready)"
+  [ "${SELECTED_REGISTRY_ACTIVE}" != 1 ] || selected_registry_recheck # the replacement binds the same selected registry
+  registry_shadow_observe serve "$INSTANCE_NAME" "${INSTANCE_GITHUB_REPO:-}" host "$STATE_DIR|$SERVE_NEXT_NAME"
+  foreign_repos_recheck
+  SERVE_PHASE_AT_S="${SECONDS}"
+  docker "${RUN_ARGS[@]}" >/dev/null
+  serve_phase_row start_replacement
+  while :; do
+    if [ "$(docker inspect --format '{{.State.Running}}' "${SERVE_NEXT_NAME}" 2>/dev/null || true)" != "true" ]; then
+      serve_blue_green_abort exited "${waited}" "${probe}"
+    fi
+    if probe="$(printf '%s' "${SERVE_READY_PROBE_JS}" | docker exec -i "${SERVE_NEXT_NAME}" node - "${SERVE_SMOKE_PATHS[@]}" 2>&1)"; then
+      break
+    fi
+    if [ "${waited}" -ge "${SERVE_READY_BOUND_S}" ]; then
+      serve_blue_green_abort not_ready "${waited}" "${probe}"
+    fi
+    sleep "${SERVE_BLUE_GREEN_POLL_S}"
+    waited=$((SECONDS - started_s))
+  done
+  serve_phase_row ready
+  echo "serve-container: ${SERVE_NEXT_NAME} is ready (/v1/ready and ${#SERVE_SMOKE_PATHS[@]} smoke routes 200) after ${waited}s"
+  if [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ]; then
+    "${SCRIPT_ROOT}/deploy/container-runtime-contract.sh" --container "${SERVE_NEXT_NAME}" \
+      --expect "${SELECTED_REGISTRY_HOST_FILE}" "${SELECTED_REGISTRY_CONTAINER_FILE}" ro ||
+      serve_blue_green_abort runtime_contract "${waited}" ""
+  fi
+  # The tunnel resolves ${CONTAINER_NAME} on ${NETWORK}: from here Docker's DNS answers it with both.
+  if ! docker network connect --alias "${CONTAINER_NAME}" "${NETWORK}" "${SERVE_NEXT_NAME}" >/dev/null; then
+    serve_blue_green_abort network_connect_failed "${waited}" ""
+  fi
+  SERVE_BLUE_GREEN_PROMOTED=1
+  serve_phase_row alias
+  if command -v scratch_outgoing_reads >/dev/null 2>&1; then
+    SERVE_OUTGOING_READS="$(scratch_outgoing_reads "${CONTAINER_NAME}" 2>/dev/null || true)"
+  fi
+  echo "serve-container: docker stop ${CONTAINER_NAME} (the replacement already answers for it)"
+  registry_shadow_observe serve "$INSTANCE_NAME" "${INSTANCE_GITHUB_REPO:-}" host "$STATE_DIR|$CONTAINER_NAME"
+  docker stop "${CONTAINER_NAME}" >/dev/null || echo "serve-container: WARNING — docker stop ${CONTAINER_NAME} failed; removing it anyway" >&2
+  serve_phase_row stop
+  docker rm -f "${CONTAINER_NAME}" >/dev/null
+  serve_phase_row remove
+  docker rename "${SERVE_NEXT_NAME}" "${CONTAINER_NAME}"
+  serve_phase_row rename
+  serve_ledger_row serve.recycle_swapped "\"from_color\":\"${SERVE_LIVE_COLOR}\",\"to_color\":\"${SERVE_NEXT_COLOR}\",\"ready_s\":${waited},\"total_s\":$((SECONDS - started_s))"
+  if [ -n "${SERVE_PREV_EXIT_TRAP}" ]; then trap -- "${SERVE_PREV_EXIT_TRAP}" EXIT; else trap - EXIT; fi
+  trap - TERM INT HUP
+}
+
+if [ "${SERVE_BLUE_GREEN}" -eq 1 ]; then
+  # Both consoles run through the swap; the live one's memory is not freed until it ends.
+  if SERVE_BLUE_GREEN_ADMISSION="$( (SERVE_ADMIT_OVERLAP=1 serve_replace_admission "beside the live console") 2>&1)"; then
+    [ -z "${SERVE_BLUE_GREEN_ADMISSION}" ] || echo "${SERVE_BLUE_GREEN_ADMISSION}"
+    foreign_repos_recheck
+    if [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ]; then selected_registry_image "${SERVE_SELECTED_IMAGE}"; fi
+    serve_blue_green_swap
+  else
+    # Never stuck on memory: the old stop-then-start replace, under its own admission, still runs.
+    echo "${SERVE_BLUE_GREEN_ADMISSION}" >&2
+    echo "serve-container: blue-green swap held for memory — replacing the old way (stop, then start)" >&2
+    serve_ledger_row serve.recycle_blue_green_fallback "\"reason\":\"$(json_text "${SERVE_BLUE_GREEN_ADMISSION}")\""
+    SERVE_BLUE_GREEN=0
+    serve_run_arg_set --name "${CONTAINER_NAME}"
+    serve_run_arg_set --network "${NETWORK}"
+  fi
+fi
+
+if [ "${SERVE_BLUE_GREEN}" -eq 0 ]; then
 if [ "${CONTAINER_EXISTS}" -eq 1 ]; then
   serve_replace_admission "before docker stop"
   foreign_repos_recheck
@@ -1038,6 +1256,7 @@ registry_shadow_observe serve "$INSTANCE_NAME" "${INSTANCE_GITHUB_REPO:-}" host 
 foreign_repos_recheck
 docker "${RUN_ARGS[@]}" >/dev/null
 serve_phase_row start
+fi # W1-T13278: the classic replace
 if [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ]; then
   "${SCRIPT_ROOT}/deploy/container-runtime-contract.sh" --container "${CONTAINER_NAME}" \
     --expect "${SELECTED_REGISTRY_HOST_FILE}" "${SELECTED_REGISTRY_CONTAINER_FILE}" ro

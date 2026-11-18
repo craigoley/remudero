@@ -91,6 +91,25 @@ export const ACTIVE_PROBE_FAILURES = 3;
 export const ACTIVE_WEDGE_RESTART_FLOOR_MS = 15 * 60_000;
 /** The port the post-mortem socket census reads when the supervisor is not told another. */
 export const ACTIVE_WEDGE_SERVE_PORT = 4317;
+/**
+ * W1-T13503: THE PROBE GOES WHERE THE TUNNEL GOES, the serve port over TCP, never the generation's private socket. The
+ * 2026-11-16 wedge left the generation's loop healthy (runtime.loop_lag p99 60-97 ms, background rows still written)
+ * while 455 connections sat unaccepted on 4317: the private socket has its own listener and would have answered.
+ * The path is unrouted on purpose: serve answers it 404 before any credential check, so the probe carries no token and
+ * writes no `service.unauthorized` row. Any status is an answer (a-slow-answer-is-not-a-wedge).
+ */
+export const ACTIVE_PROBE_PUBLIC_PATH = "/v1/supervisor-probe";
+/** W1-T13503: what the generation's private socket said when the public port went unanswered. */
+type PrivateProbeAnswer = { answered: true; status: number } | { answered: false; error: string };
+/** BACKSTOP (W1-T13503): the private-socket comparison on a wedge row waits at most this long, so a restart is never held up by it; a healthy socket answers in milliseconds. */
+export const ACTIVE_PRIVATE_PROBE_TIMEOUT_MS = 2_000;
+
+/** W1-T13503: the port serve's own arguments bind (`--port N`), or {@link ACTIVE_WEDGE_SERVE_PORT}. */
+export function servePortOf(serveArgs: readonly string[] | undefined, fallback = ACTIVE_WEDGE_SERVE_PORT): number {
+  const at = serveArgs?.indexOf("--port") ?? -1;
+  const port = at >= 0 ? Number(serveArgs?.[at + 1]) : Number.NaN;
+  return Number.isInteger(port) && port > 0 && port < 65_536 ? port : fallback;
+}
 
 const TCP_STATES: Record<string, string> = {
   "01": "ESTABLISHED", "02": "SYN_SENT", "03": "SYN_RECV", "04": "FIN_WAIT1", "05": "FIN_WAIT2", "06": "TIME_WAIT",
@@ -293,13 +312,19 @@ export interface ServeSupervisorOptions {
   /** {@link handoffSpacingMs}'s base; absent or 0, a handoff never waits on the previous one. */
   spacingBaseMs?: number;
   spacingHalfLifeMs?: number;
-  /** W1-T13276: one probe of the active generation; resolves with any HTTP status, rejects on a refusal. Defaults to {@link socketGet}. */
+  /**
+   * W1-T13276: one probe of the active generation; resolves with any HTTP status, rejects on a refusal. W1-T13503: defaults
+   * to {@link tcpGet} of {@link ACTIVE_PROBE_PUBLIC_PATH} on the serve port, the path the tunnel's connections take.
+   */
   activeProbe?: (socketPath: string, path: string, timeoutMs: number) => Promise<{ status: number }>;
+  /** W1-T13503: after an unanswered public probe, one GET of the generation's private socket, recorded on the wedge row. Defaults to {@link socketGet}. */
+  privateProbe?: (socketPath: string, path: string, timeoutMs: number) => Promise<{ status: number }>;
   /** W1-T13276: runs `tick` every `ms` and returns its canceller; defaults to an unref'd interval. */
   every?: (tick: () => void, ms: number) => () => void;
   activeProbeTimeoutMs?: number;
   /** W1-T13276: the post-mortem socket census; defaults to {@link socketStatesForPort} on `servePort`. */
   socketStates?: () => Record<string, number> | undefined;
+  /** W1-T13503: defaults to {@link servePortOf} of `serveArgs`. */
   servePort?: number;
   /** W1-T13304: the hourly serve.cpu_budget row's seams. */
   cpuBudget?: ServeCpuBudgetOptions;
@@ -368,6 +393,21 @@ export function clusterSpawn(command: GenerationCommand, env: Record<string, str
     onExit: (listener) => void worker.on("exit", (code, signal) => listener(code, signal)),
     kill: (signal) => void worker.process.kill(signal),
   };
+}
+
+/** W1-T13503: one HTTP GET over TCP to this container's own serve port, the accept queue the tunnel's connections enter. */
+export function tcpGet(port: number, path: string, timeoutMs = 30_000, host = "127.0.0.1"): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const req = request({ host, port, path, agent: false, timeout: timeoutMs }, (res) => {
+      let body = "";
+      res.setEncoding("utf8");
+      res.on("data", (chunk: string) => (body += chunk));
+      res.on("end", () => resolve({ status: res.statusCode ?? 0, body }));
+    });
+    req.on("timeout", () => req.destroy(new Error(`timed out after ${timeoutMs} ms`)));
+    req.on("error", reject);
+    req.end();
+  });
 }
 
 export function socketGet(socketPath: string, path: string, timeoutMs = 30_000): Promise<{ status: number; body: string }> {
@@ -713,14 +753,15 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
   /** W1-T13534: when the pending spacing wait re-asks, and how many asks it has absorbed meanwhile. */
   let spacingWakeAt = 0;
   let spacingAbsorbed = 0;
-  const activeProbe = opts.activeProbe ?? ((socketPath: string, path: string, timeoutMs: number) => socketGet(socketPath, path, timeoutMs));
+  const servePort = opts.servePort ?? servePortOf(opts.serveArgs);
+  const activeProbe = opts.activeProbe ?? ((_socketPath: string, path: string, timeoutMs: number) => tcpGet(servePort, path, timeoutMs));
+  const privateProbe = opts.privateProbe ?? ((socketPath: string, path: string, timeoutMs: number) => socketGet(socketPath, path, timeoutMs));
   const probeTimeoutMs = opts.activeProbeTimeoutMs ?? ACTIVE_PROBE_TIMEOUT_MS;
   const every = opts.every ?? ((tick: () => void, ms: number) => {
     const timer = setInterval(tick, ms);
     timer.unref();
     return () => clearInterval(timer);
   });
-  const servePort = opts.servePort ?? ACTIVE_WEDGE_SERVE_PORT;
   const socketStates = opts.socketStates ?? (() => socketStatesForPort(servePort));
   let stopProbing: (() => void) | undefined;
   let probing = false;
@@ -830,7 +871,7 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
       timer.unref();
     });
     try {
-      const reply = await Promise.race([activeProbe(generation.socketPath, SMOKE_PATHS[0], probeTimeoutMs), bound]);
+      const reply = await Promise.race([activeProbe(generation.socketPath, ACTIVE_PROBE_PUBLIC_PATH, probeTimeoutMs), bound]);
       return { answered: true, status: reply.status };
     } catch (err) {
       return { answered: false, error: errorText(err) };
@@ -840,10 +881,10 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
   };
 
   /** W1-T13276: the active generation answered nothing for ACTIVE_PROBE_FAILURES probes: record it and restart it, at most once per floor. */
-  const handleWedge = (generation: Generation, failures: number, lastError: string): void => {
+  const handleWedge = (generation: Generation, failures: number, lastError: string, privateSocket?: PrivateProbeAnswer): void => {
     const now = clock.now();
     if (lastWedgeRestartAt !== undefined && now - lastWedgeRestartAt < ACTIVE_WEDGE_RESTART_FLOOR_MS) {
-      opts.log("serve.active_wedged_held", { generation: generation.id, sha: generation.slot.sha, failures, lastError, sinceLastRestartMs: now - lastWedgeRestartAt, floorMs: ACTIVE_WEDGE_RESTART_FLOOR_MS });
+      opts.log("serve.active_wedged_held", { generation: generation.id, sha: generation.slot.sha, failures, lastError, sinceLastRestartMs: now - lastWedgeRestartAt, floorMs: ACTIVE_WEDGE_RESTART_FLOOR_MS, privateSocket });
       return;
     }
     lastWedgeRestartAt = now;
@@ -853,7 +894,7 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
     } catch (err) {
       opts.log("serve.active_wedge_snapshot_unread", { reason: errorText(err) });
     }
-    opts.log("serve.active_wedged", { generation: generation.id, sha: generation.slot.sha, pid: generation.process.pid, failures, lastError, uptimeMs: now - generation.startedAt, sockets });
+    opts.log("serve.active_wedged", { generation: generation.id, sha: generation.slot.sha, pid: generation.process.pid, failures, lastError, uptimeMs: now - generation.startedAt, sockets, probedPort: servePort, privateSocket });
     wedged.add(generation);
     try {
       generation.process.kill("SIGKILL");
@@ -861,6 +902,23 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
       // The restart path is unavailable: the legacy exit lets docker restart the whole container.
       opts.log("serve.active_wedge_kill_failed", { generation: generation.id, reason: errorText(err) });
       void legacyExit("active_wedged");
+    }
+  };
+
+  /** W1-T13503: one bounded GET of the generation's private socket, never thrown: `{answered,status}` or `{answered:false,error}`. */
+  const probePrivately = async (generation: Generation): Promise<PrivateProbeAnswer> => {
+    let timer: NodeJS.Timeout | undefined;
+    const bound = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`timed out after ${ACTIVE_PRIVATE_PROBE_TIMEOUT_MS} ms`)), ACTIVE_PRIVATE_PROBE_TIMEOUT_MS);
+      timer.unref();
+    });
+    try {
+      const reply = await Promise.race([privateProbe(generation.socketPath, SMOKE_PATHS[0], ACTIVE_PRIVATE_PROBE_TIMEOUT_MS), bound]);
+      return { answered: true, status: reply.status };
+    } catch (err) {
+      return { answered: false, error: errorText(err) };
+    } finally {
+      clearTimeout(timer);
     }
   };
 
@@ -881,7 +939,10 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
       probeMisses = { generation: generation.id, count };
       if (count < ACTIVE_PROBE_FAILURES) return;
       probeMisses = { generation: generation.id, count: 0 };
-      handleWedge(generation, count, result.error);
+      // W1-T13503: the private socket's answer separates a stalled accept on the public port from a stalled generation.
+      const privateSocket = await probePrivately(generation);
+      if (active !== generation || inFlight || stopping || wedged.has(generation)) return;
+      handleWedge(generation, count, result.error, privateSocket);
     } finally {
       probing = false;
     }

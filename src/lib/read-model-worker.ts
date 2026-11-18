@@ -37,7 +37,7 @@ import { createTaskView, type ReadModelInstanceState as TaskViewInstanceState } 
 import { planFilesIdentity, threadPlanPin } from "./thread-plan.js";
 import { createWorkstreamsView, WORKSTREAMS_VIEW_NAME } from "./workstreams-view.js";
 import { ACTIONS_VIEW_NAME, createActionsView } from "./actions-view.js";
-import { createDemandBook, TASK_VIEW_NAME, type DemandBook } from "./view-demand.js";
+import { createDemandBook, TASK_VIEW_NAME, VIEW_DEMAND_EVICT_MS, type DemandBook } from "./view-demand.js";
 import {
   ORACLE_DEFAULT_WINDOW_MS,
   ORACLE_DRIFT_INTERVAL_MS,
@@ -80,7 +80,7 @@ import { createDailyProgressView, DAILY_PROGRESS_VIEW_NAME } from "./daily-progr
 import { readModelCommand } from "./read-model-cli.js";
 import { createRepositoriesReadModelView } from "./repositories-view.js";
 import { answerThreadHeaps, askNestedThreadHeaps, workerThreads, type ThreadHeapsAnswer, type ThreadHolds, type ThreadHoldsSnapshot } from "./worker-heaps.js";
-import { createViewShadow, fileShadowStore, readShadowEvidence, storedShadowReadiness, viewShadowPath, type ShadowLegacy, type ShadowPopulation, type ShadowReadiness, type ShadowRequest, type ShadowSample, type ShadowSampleIdentity, type ViewShadow } from "./view-shadow.js";
+import { createViewShadow, fileShadowStore, readShadowEvidence, storedShadowReadinessReader, viewShadowPath, type ShadowLegacy, type ShadowPopulation, type ShadowReadiness, type ShadowRequest, type ShadowSample, type ShadowSampleIdentity, type ViewShadow } from "./view-shadow.js";
 import { INBOX_VIEW_NAME, INBOX_QUALIFICATION_ERROR_META, INBOX_QUALIFICATION_PENDING, INBOX_QUALIFICATION_POPULATION_META, inboxQualificationPolicy, inboxShadowPopulation, inboxShadowSampleKey, parseInboxShadowPopulation, restoreInboxShadowPopulation, type InboxQualificationScope } from "./inbox-view.js";
 import { effectiveViewMode, oldestAsOf, READ_MODEL_STATUS_VIEW, shadowSampled, shownReadiness, viewEtag, viewKey, type EffectiveViewMode, type ViewBody, type ViewBodyEntry, type ViewSource, type ViewSwitchMode } from "./views.js";
 import { describeSource, judgeLedgerReads, judgeSource, type SourcePhase } from "./view-freshness.js";
@@ -536,6 +536,8 @@ export interface ReadModelTickerOptions {
   readers?: ReadModelViewReaders;
   lane?: "fast" | "heavy";
   restoreCosts?: boolean;
+  /** W1-T13490: how long an earlier run's demand keys are carried before an unread one is dropped; one eviction window by default. */
+  demandCarryMs?: number;
 }
 
 export interface IntegrityRequest {
@@ -1520,6 +1522,12 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
 
   const demandViews = views.filter((view) => view.demand === true).map((view) => view.name);
   const demandSwept = new Set<ViewUnit>();
+  /**
+   * W1-T13490: until one eviction window has passed since this worker started, an earlier run's persisted demand key
+   * is carried, not dropped: serve keeps answering it (stale, by W1-T13457's carried rule), and a read in the window
+   * wants it like any other. The first sweep after the window drops what nobody read.
+   */
+  const demandCarriedUntil = clock.now() + (opts.demandCarryMs ?? VIEW_DEMAND_EVICT_MS);
 
   function demandKeyBelongsTo(unit: ViewUnit, key: string): boolean {
     const instances = new URLSearchParams(key).getAll("instance");
@@ -1528,7 +1536,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   }
 
   /**
-   * Evict demand keys unread ten minutes; first sweep also drops earlier runs' persisted keys
+   * Evict demand keys unread ten minutes; the first sweep after the carry window (W1-T13490) drops earlier runs' persisted keys
    * for owned units only. Transferred units get their own first sweep.
    */
   function sweepDemand(): void {
@@ -1541,7 +1549,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       for (const { view, key } of book.expire()) {
         if (owned.some(unit => unit.view.name === view && demandKeyBelongsTo(unit, key))) drop(view, key);
       }
-      const starting = owned.filter(unit => !demandSwept.has(unit));
+      const starting = clock.now() < demandCarriedUntil ? [] : owned.filter(unit => !demandSwept.has(unit));
       for (const unit of starting) demandSwept.add(unit);
       for (const view of new Set(starting.map(unit => unit.view.name))) {
         for (const key of knownKeys(view)) {
@@ -1840,6 +1848,8 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   }
   /** W1-T11934: a demand unit is due only while the book holds a key of its view; its default keys alone rebuilt it every tick. */
   const demanded = (unit: ViewUnit): boolean => unit.view.demand !== true || !opts.demand || opts.demand.keys(unit.view.name).length > 0;
+  /** W1-T13536: a view thread asks on every pass; the counter store is re-read at most once per refresh interval. */
+  const storedReadiness = storedShadowReadinessReader(clock);
   const dueUnits = (now: number): ViewUnit[] => units.filter((unit) => owns(unit) && built(unit.view.name) && unit.dueAt <= now && demanded(unit)).sort((a, b) => a.dueAt - b.dueAt);
 
   /**
@@ -1852,7 +1862,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     sweepDemand();
     const home = slots[0]?.db;
     const shadow = home ? comparator?.db === home && slots[0]?.lease !== undefined ? comparator.shadow.readiness()
-      : storedShadowReadiness(viewShadowPath(opts.stateDir), home, now, qualifications, inboxPopulations, inboxPopulations ? [INBOX_VIEW_NAME] : undefined) : undefined;
+      : storedReadiness(viewShadowPath(opts.stateDir), home, now, qualifications, inboxPopulations, inboxPopulations ? [INBOX_VIEW_NAME] : undefined) : undefined;
     const ctx: ReadModelViewContext = { now, switches, ...(home ? { sourceStore: home, committed: (view: string, key: string) => committedBody(home, view, key) } : {}), instances: slots.map((slot) => ({ state: slot.state, ...(slot.db ? { db: slot.db } : {}), ...(slot.lease ? { lease: slot.lease } : {}) })), ...(shadow ? { shadow } : {}) };
     const generation = slots.reduce((sum, slot) => sum + slot.state.generation, 0);
     if (only) return build(only, now, ctx, generation, soloMs);

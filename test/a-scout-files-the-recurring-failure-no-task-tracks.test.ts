@@ -217,7 +217,7 @@ test("W1-T5454: a record the lint refuses is logged and never written", (t) => {
   assert.equal(spec.apply(workspace(root), plan, {}), undefined, "nothing written means nothing to land");
   const refused = logs.find((l) => l.step === "scout.record_refused");
   assert.ok(refused, "the refusal is logged");
-  assert.equal(refused.fields?.step, "widget.sync_failed");
+  assert.equal(refused.fields?.symptom_step, "widget.sync_failed");
   assert.match(String(refused.fields?.reason), /^unparseable: /);
   assert.equal(existsSync(join(root, "plan")), false, "no shard directory was created");
 });
