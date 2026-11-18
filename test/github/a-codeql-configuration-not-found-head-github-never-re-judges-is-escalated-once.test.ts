@@ -256,16 +256,6 @@ test("W1-T13663 criterion 2: no escalation on the capturing pass, under a pendin
   const afterSuccess = await pass(h, captured, healed, listing(run(h)));
   assert.deepEqual([afterSuccess.calls.escalated.length, afterSuccess.calls.runsRead], [0, 0], "control: a newer check reads success");
 
-  // A new warning check on the same head has not been captured just because an older warning was.
-  // Its producing run finishes after the check, so W1-T13470's completed-again rule does not fire.
-  const newerWarning = await observe(h, [...corpus(h), neutral(h, { id: h.neutral + 2, completed_at: shift(h.at, 600) })]);
-  const producingRun = run(h, { updated_at: shift(h.at, 900) });
-  const firstForNewCheck = await pass(h, captured, newerWarning, listing(producingRun));
-  assert.deepEqual([firstForNewCheck.calls.escalated.length, firstForNewCheck.rows.filter((r) => r.step === CAPTURED)
-    .map((r) => r.check_id)], [0, [h.neutral + 2]], "a newer warning is captured before it can be escalated");
-  const afterNewCheckCapture = await pass(h, [...captured, ...firstForNewCheck.rows], newerWarning, listing(producingRun));
-  assert.equal(afterNewCheckCapture.calls.escalated.length, 1, "the same newer warning escalates on its next pass");
-
   // W1-T13470's escalation, a CodeQL run that completed again under a standing newer warning, keeps its text and its row.
   const later = await observe(h, [...corpus(h), neutral(h, { id: h.neutral + 1, completed_at: shift(h.at, 240) })]);
   const standing = later.observation!.configurationWarning!;

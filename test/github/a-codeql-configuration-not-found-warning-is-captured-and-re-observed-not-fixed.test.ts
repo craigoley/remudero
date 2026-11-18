@@ -220,7 +220,8 @@ test("W1-T13470 criterion 3: the head waits with no fix round or strike, GitHub'
     "the only security row the waits wrote is the one capture");
 
   // Escalation: a CodeQL run that completed after the first capture, which GitHub re-judged and still warns on.
-  const run = (over: Record<string, unknown>) => ({ id: 700, run_attempt: 1, head_sha: HEAD, status: "completed", conclusion: "success", updated_at: T2, ...over });
+  const run = (over: Record<string, unknown>) => ({ id: 700, run_attempt: 1, head_sha: HEAD, status: "completed", conclusion: "success",
+    created_at: T1, run_started_at: T1, updated_at: T2, ...over });
   const escalation = async (prior: Record<string, unknown>[], runs: unknown, answer = gen3warn) => {
     const h = harness(prior, async () => answer, runs);
     const reason = await sweep.observeCodeqlConfigurationWarning(h.deps, prior, view(), "wait");
@@ -228,7 +229,8 @@ test("W1-T13470 criterion 3: the head waits with no fix round or strike, GitHub'
   };
   const captured = ledger.filter((r) => r.step === CAPTURED);
   for (const [why, runs] of [
-    ["a run GitHub has not re-judged yet", { workflow_runs: [run({ updated_at: "2026-11-17T03:27:00Z" })] }],
+    ["a completed re-run began after the standing check", { workflow_runs: [run({ created_at: "2026-11-17T03:27:00Z",
+      run_started_at: "2026-11-17T03:27:00Z", updated_at: "2026-11-17T03:27:00Z" })] }],
     ["a run still in progress", { workflow_runs: [run({ status: "in_progress" })] }],
     ["an unreadable listing", { message: "Not Found" }],
   ] as const) {
