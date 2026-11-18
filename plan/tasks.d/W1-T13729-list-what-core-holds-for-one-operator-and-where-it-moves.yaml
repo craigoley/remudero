@@ -1,0 +1,56 @@
+- id: W1-T13729
+  title: "List every file public core holds only for one operator or one fleet's instances, name each file's readers in code, and say which can move to the private home repo without a daemon, serve or the Console noticing"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: recon
+  verify: auto
+  risk: high # Rule 19 sizing: a report and its docs index entry (or skill text and its plan section), two concerns; it changes no code path a worker or daemon runs
+  origin: "operator-session#pocock-rescan-2026-11-18"
+  plan_refs:
+    - W1-T13727
+    - W1-T13700
+    - W1-T13705
+  files:
+    - docs/research/what-core-holds-for-one-operator.md
+    - docs/docs-index.json
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The report lists each file in core that serves one operator or one fleet's instances, with every reader in code and the symbol that reads it"
+      proof: "grep: ## Every file and its readers in docs/research/what-core-holds-for-one-operator.md"
+    - claim: "The report gives a move order in which no reader loses its input: each reader is first pointed at the new location, then the file moves"
+      proof: "grep: ## Move order in docs/research/what-core-holds-for-one-operator.md"
+    - claim: "The report recommends one task per move, each with its files and the check that proves no daemon, serve or Console read changed"
+      proof: "grep: ## Recommendation in docs/research/what-core-holds-for-one-operator.md"
+  rationale: |
+    The operator chose the private overlay repository as the home repository (the Home Repo pattern, MASTER-PLAN
+    §4I) and asked that operator-only material leave public core in steps that disrupt no running process. Plan records already move to the overlay through the task-move path. Other files are read by code today:
+    for example the Console's repository picker needs a row in core's `.remudero/daemon-instances.yaml`, and
+    `.remudero/managed-repos.json` lists managed repositories. Deleting either before its readers move would break a
+    live read.
+  design: |
+    1. Find candidates: `.remudero/*`, `deploy/mac/*`, operator guides and any file naming one operator's machines or
+       instances. For each, list its readers (`git grep` for the path and its basename across src/, scripts/, deploy/
+       and .github/) and whether a host, serve or the Console reads it at run time.
+    2. Say for each: stays in core (a product default or example a customer needs), moves to the home repository, or
+       splits (a public example in core, the real values in the home repository).
+    3. Give the move order inside this agreed sequence:
+       Phase 0 (in flight): core's overlay catalog read works again (W1-T13705 names why it fails); the overlay merges
+       non-plan changes through the fleet reviewer (W1-T13733, W1-T13599, then one operator step); the overlay's
+       instance goes live (W1-T13700 and its host step).
+       Phase 1: the plan-record movers (W1-T13680, W1-T13681) start only after core's overlay read works.
+       Phase 2: the overlay's pointer file lands first. Then one task per file, in three steps: copy it to the overlay
+       and point its reader at the overlay copy with core's copy as fallback; prove it from a fresh session or a fresh
+       daemon start; delete core's copy. Order: unread files (docs, skills), then session tooling, then daemon readers.
+       A reader that fetches from GitHub waits for core's overlay read; `.remudero/daemon-instances.yaml` goes last,
+       after the overlay instance is live.
+       Phase 3: retire each core copy only after its reader has run on the overlay copy for a day.
+       Name the check that proves each step changed no read.
+    Write the report with the three headings the proofs name, each on its own line, label claims OBSERVED or INFERRED,
+    and add it to docs/docs-index.json. Name no secret, host path or ledger row in the report; it is public.
+  note: |
+    Id reserved for run-unfiled-1795042200001 with ~/rmd-work/bin/reserve-id.sh.
+    reservation hand-off: run-unfiled-1795042200001 -> claude/project-thread-eatx1y
+    Sequence agreed 2026-11-18 with the private overlay's plan-move work (design step 3). Each recommended move is its
+    own task, never a step of the plan-record move path.
