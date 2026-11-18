@@ -9,6 +9,12 @@ const path = value => typeof value === 'string' && value.length > 0 && value.len
 // Matches the existing CodeQL workflow's ignored surface; rename predecessors are checked too.
 const ignored = value => value.endsWith('.md') || ['plan/', 'docs/', 'learnings/'].some(prefix => value.startsWith(prefix));
 const unknown = reason => ({state:'unknown',mergeAllowed:false,reason});
+/** W1-T13470: GitHub's neutral "N configuration(s) not found" CodeQL state. It stays UNKNOWN and grants nothing; only its
+ *  reason is its own, so the sweep waits for GitHub's refresh instead of a fix round. The title is the only matcher: the
+ *  summary's wording has never been captured, and the adapter's receipt exists to capture it. */
+export const CODEQL_CONFIGURATION_NOT_FOUND = 'codeql-configuration-not-found';
+export const isCodeqlConfigurationWarning = check => check?.status === 'completed' && check.conclusion === 'neutral' &&
+  typeof check.output?.title === 'string' && /^[1-9][0-9]* configurations? not found$/.test(check.output.title);
 // GitHub's real wording: a plural level above 1, 'Other Alerts:', and one exact optional 'too large' paragraph.
 const HEAD = String.raw`^### New alerts in code changed by this pull request\n\n`, QUALITY_ROW = String.raw` \* [1-9][0-9]* (?:error|warning|note)s?\n`;
 const TOO_LARGE = String.raw`_Alerts not introduced by this pull request might have been detected because the code changes were too large\._\n\n`;
@@ -78,5 +84,6 @@ export function classifyCodeScanningMergePolicy(input) {
       completeBelowThresholdSections(sections, latest.output.title)) {
     return {state:'safe',mergeAllowed:true,reason:'trusted-complete-exact-head-below-security-threshold'};
   }
+  if (isCodeqlConfigurationWarning(latest)) return unknown(CODEQL_CONFIGURATION_NOT_FOUND);
   return unknown('security-analysis-failed-or-unrecognized');
 }

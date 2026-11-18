@@ -1,7 +1,6 @@
 - id: W1-T13285
   title: "The scout's refusal row keeps its own step and task id, so a refused record is visible as scout.record_refused and never counted as a new recurrence of its symptom"
   repo: remudero
-  priority: 0.6
   type: implement
   verify: auto
   principles:
@@ -15,7 +14,9 @@
   files:
     - src/lib/scout-gardener.ts
     - test/gardeners/the-scouts-refusal-row-keeps-its-own-step-and-task.test.ts
-  status: queued
+  status: blocked
+  retirement: retired  # covered: W1-T13428 (#19230, merged 11c0aa31be on 2026-11-18) renamed both payload keys and skips the scout's own rows in scoutSymptoms; see the note
+  superseded_by: W1-T13428
   attempts: 0
   acceptance:
     - claim: "A record the scout refuses, both a re-derivation and a fresh filing, writes a row whose step is scout.record_refused and whose task id is the scout's own run, naming the symptom's step and the refused record's id under their own keys, through a real ledger file"
@@ -43,3 +44,22 @@
   note: |
     reservation hand-off: run-unfiled-1794875392692 -> run-unfiled-1794875392692
     Reserved with rmd next-task-id from a worktree at origin/main. The test folder is the one rmd test-place computed for a stub importing scout-gardener.ts. Build before W1-T13208 (same file), so its MEASURE FIRST reads real rows.
+    RETIRED 2026-11-18 (operator session): W1-T13428 (PR #19230, merge commit 11c0aa31be) covers this task.
+    Compared on origin/main 73fdd456e3, criterion by criterion:
+    - Criterion 1 (both refusal sites write step scout.record_refused, the row's own task id stands, the
+      symptom's step and the refused id under their own keys, through a real ledger file): met.
+      src/lib/scout-gardener.ts:469 (re-derivation) and :477 (fresh filing) now log
+      `{ symptom_step, refused_task_id, reason }`, so the gardener log's own step and task id are kept.
+      This task suggested `record_task`; W1-T13428 named the key `refused_task_id`. The row keeps the
+      task id the gardener log writes (DAEMON, with run id GARDEN-scout-*), which is the scout run's own.
+      Proved by W1-T13428 criteria 1 and 2 in test/a-scout-refusal-row-keeps-its-own-step-name.test.ts,
+      which log through appendLedger into a temporary ledger file, the way gardenRunCommand does, and
+      assert step, symptom_step, refused_task_id, task_id DAEMON and no row under the symptom's step.
+    - Criterion 2 (the symptom count never counts the scout's own refusal rows): met twice. The refusal
+      rows no longer carry the symptom's step, and scoutSymptoms skips every row whose gardener_origin name
+      is scout (scout-gardener.ts:215 scoutWrote, used at :225); appendLedger stamps gardener_origin on
+      every row of a gardener pass (src/lib/ledger.ts:263). Proved by W1-T13428 criterion 3.
+    - Criterion 3 (invariant a-real-symptom-still-counts): met. W1-T13428 criterion 3 counts only the real
+      rows of a step that also has scout rows (older 1, newer 2, total 3) and still counts another
+      gardener's rows.
+    W1-T13208's note says to build after W1-T13285; W1-T13428 is the change it waits for, and it is merged.

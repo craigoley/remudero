@@ -63,7 +63,7 @@ const SYNC_PRIMITIVE = "(?:execFileSync|spawnSync|execSync|ghExecFile|ghExec)";
  *  loop-available budget. */
 function withoutSyncOrBoundedCalls(body: string): string {
   const shadowed = [...body.matchAll(new RegExp(`([A-Za-z_$][\\w$]*)\\s*(?::\\s*typeof\\s+[\\w$]+\\s*)?=\\s*${SYNC_PRIMITIVE}(?![\\w$])`, "g"))].map((m) => m[1]!);
-  const names = ["execFileSync", "spawnSync", "execSync", "execFileLoopBounded", "boundChildByLoopTime", ...shadowed];
+  const names = ["execFileSync", "spawnSync", "execSync", "execFileLoopBounded", "execFileRouted", "boundChildByLoopTime", ...shadowed];
   const call = new RegExp(`(?<![\\w$])(?:${names.join("|")})\\(`, "g");
   const spans: Array<[number, number]> = [];
   for (const m of body.matchAll(call)) {
@@ -91,7 +91,7 @@ function seamsOver(body: string, childNames: readonly string[]): string[] {
  *  DEFAULT is an arrow or function that calls a child primitive or the loop-bounded helpers (the `executeAsync`
  *  seam of ciLearningTaskIdMinter). The default is not a bare child name, so `seamsOver` cannot see it. */
 function wrapperSeams(body: string, childNames: readonly string[]): string[] {
-  const calls = new RegExp(`(?<![\\w$])(?:${[...childNames, "execFileLoopBounded", "boundChildByLoopTime"].join("|")})\\(`);
+  const calls = new RegExp(`(?<![\\w$])(?:${[...childNames, "execFileLoopBounded", "execFileRouted", "boundChildByLoopTime"].join("|")})\\(`);
   const line = /(?:^|[(,])\s*([A-Za-z_$][\w$]*)\s*\??\s*:\s*\(.*[^=]=(?!>)\s*(?:async\s*)?(?:function\b[^(]*\([^)]*\)\s*\{|\([^)]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)(.*)$/gm;
   return [...body.matchAll(line)].filter((m) => calls.test(m[2]!)).map((m) => m[1]!);
 }
@@ -103,7 +103,7 @@ function wrapperSeams(body: string, childNames: readonly string[]): string[] {
 function abortKills(body: string, childNames: readonly string[]): number {
   const timers = (body.match(/\bsetTimeout\(|\bAbortSignal\.timeout\(/g) ?? []).length;
   if (timers === 0) return 0;
-  const callees = [...childNames, ...seamsOver(body, childNames), ...wrapperSeams(body, childNames), "execFileLoopBounded", "boundChildByLoopTime"];
+  const callees = [...childNames, ...seamsOver(body, childNames), ...wrapperSeams(body, childNames), "execFileLoopBounded", "execFileRouted", "boundChildByLoopTime"];
   const call = new RegExp(`(?<![\\w$])(?:${callees.join("|")})\\(`, "g");
   const spans = [...body.matchAll(call)].map((m) => parenSpan(body, m.index! + m[0].length - 1));
   const aborted = [...body.matchAll(/\b([A-Za-z_$][\w$]*)\s*\.abort\(/g)].map((m) => m[1]!);

@@ -733,6 +733,11 @@ export interface OperatorIdentityConfig {
   allowedOrigins: string[];
   operatorUserIds: string[];
   stepUpWindowMinutes?: number;
+  /** W1-T13552: LOGIN IS THE ONLY GATE unless this is `true`. Craig, 2026-11-18 00:37Z: "Login
+   *  should be the only gate" / "If we want to add more security later, we can". Off (the default),
+   *  a verified allowlisted session earns `high`; on, `high` needs a factor verified within
+   *  `stepUpWindowMinutes`. */
+  requireStepUp?: boolean;
 }
 
 export function operatorJwksUrl(config: Pick<OperatorIdentityConfig, "issuer" | "jwksUrl">): string {
@@ -863,13 +868,15 @@ export async function verifyOperatorSession(
   }
   if (typeof claims.azp !== "string" || !opts.allowedOrigins.includes(claims.azp)) return { ok: false, reason: "origin" };
   if (typeof claims.sub !== "string" || !opts.operatorUserIds.includes(claims.sub)) return { ok: false, reason: "unknown_user" };
+  if (opts.requireStepUp !== true) return { ok: true, sub: claims.sub, tier: "high" };
   const window = opts.stepUpWindowMinutes ?? DEFAULT_OPERATOR_STEP_UP_WINDOW_MINUTES;
   const tier: WriteTier = operatorStepUpIsFresh(claims.fva, claims.iat, nowMs, window) ? "high" : "middle";
   return { ok: true, sub: claims.sub, tier };
 }
 
 /** The operator-session grantor (W1-T4244), via `authorize` only. A failed check is "not mine" (the
- *  bearer, still `low`, answers next) and is ledgered. Grants `middle`, or `high` after a step-up. */
+ *  bearer, still `low`, answers next) and is ledgered. Grants `high` (W1-T13552), or with
+ *  `requireStepUp` on, `middle` until a step-up. */
 export function operatorSessionIdentityProvider(opts: OperatorSessionOptions): IdentityProvider {
   const clock = opts.clock ?? systemClock;
   const log = opts.log ?? (() => {});

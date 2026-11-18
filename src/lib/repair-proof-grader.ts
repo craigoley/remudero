@@ -5,7 +5,8 @@
  * reads exit 5 (`CHECK_PROOF_EXIT.executedStale`) as "passes at both head and base". This grader spawns the same entry
  * from the repair worktree's own tree, so a repair lane and the gate cannot disagree about one proof.
  */
-import { LoopBoundedChildTimeout, execFileLoopBounded } from "./loop-bounded-child.js";
+import { LoopBoundedChildTimeout } from "./loop-bounded-child.js";
+import { execFileRouted } from "./spawn-helper.js";
 import { CHECK_PROOF_EXIT, checkProofChildArgv, checkProofTimeoutMs } from "./check-proof.js";
 import type { BaseProofGrade, BaseProofGrader } from "./main-repair-acceptance.js";
 
@@ -16,7 +17,7 @@ export type CheckProofChildRun = (argv: string[], opts: { cwd: string; timeoutMs
  *  time (execFileLoopBounded), never wall clock, so a suspended host does not kill a healthy child on wake (W1-T9651). */
 export const runCheckProofChild: CheckProofChildRun = async (argv, { cwd, timeoutMs }) => {
   try {
-    await execFileLoopBounded(process.execPath, argv, {
+    await execFileRouted(process.execPath, argv, {
       cwd,
       encoding: "utf8",
       maxBuffer: 16 * 1024 * 1024,

@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { execFileLoopBounded } from "./loop-bounded-child.js";
+import { execFileRouted } from "./spawn-helper.js";
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
@@ -367,7 +367,7 @@ export function realSharedPauseGitDeps(repoRoot: string): SharedPauseGitDeps {
     run,
     runAsync: (args) => new Promise((resolve) => {
       if (args[0] === "push") assertLiveWriteAllowed("git-push", `${args.at(-1)} on ${repoRoot}'s origin`);
-      execFileLoopBounded("git", argv(args), {
+      execFileRouted("git", argv(args), {
         encoding: "utf8",
         timeout: SHARED_PAUSE_GIT_TIMEOUT_MS,
         killSignal: "SIGTERM",

@@ -16,7 +16,7 @@ import { spawn } from "node:child_process";
 import { BoundedOutput } from "./bounded-file-tail.js";
 import { RmdError } from "./errors.js";
 import { inboxGardenerMode } from "./inbox-retirement.js";
-import { execFileLoopBounded } from "./loop-bounded-child.js";
+import { execFileRouted } from "./spawn-helper.js";
 import { readFileSync } from "node:fs";
 import { homedir, setPriority as osSetPriority } from "node:os";
 import { join, resolve } from "node:path";
@@ -715,7 +715,7 @@ export function childGardenPassSpawn(
         } catch (e) {
           if (firstRefusal("nice")) log(GARDEN_PRIORITY_DEGRADED_STEP, refusal("nice", e));
         }
-        lowered = execFileLoopBounded(opts.ionice ?? "ionice", ["-c", "3", "-p", String(pid)], { encoding: "utf8", timeout: 5_000 }).then(
+        lowered = execFileRouted(opts.ionice ?? "ionice", ["-c", "3", "-p", String(pid)], { encoding: "utf8", timeout: 5_000 }).then(
           () => undefined,
           (e: Error) => {
             // A child that already exited cannot be re-classed; that is not the host refusing.
