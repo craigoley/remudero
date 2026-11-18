@@ -186,7 +186,8 @@ capabilities:
   # - Sol was initially absent from balanced; the 2026-09-24 follow-up below supersedes this.
   # - frontier leads with gpt-6-sol, but `provider_preference` below sends frontier work to Claude
   #   (Opus 5.5) whenever Claude has headroom, so this row is reached only when Claude is blocked.
-  # gpt-6-astra is deliberately NOT routed: no operator ruling places it yet.
+  # gpt-6-astra is deliberately NOT routed: no operator ruling places it yet. gpt-6.2-astra
+  # (listed 2026-11-17) is not routed either, for the same reason.
   #
   # 2026-09-24 (operator ruling, DECISIONS.md): SOL vs SONNET IS AN A/B on `balanced.high`.
   # Every sonnet/high assignment that could use either arm carries routing.decision.ab
@@ -200,6 +201,8 @@ capabilities:
   # not a claim that the anecdotal failure rates generalize to this fleet. The existing high-effort
   # A/B remains live; low/medium balanced work also remains a headroom auction, without an A/B tag.
   # 2026-10-02: Sol 6.1 leads Sol seats; 6.0 trails for availability/effort rollback.
+  # 2026-11-17: Sol 6.2 leads Sol seats; 6.1 is next for availability and effort rollback; older
+  # Sols trail as before (ruling 2026-10-08: every Sol seat runs the current Sol).
   # New concrete-model experiment epochs keep Field Trials history separate (DECISIONS.md).
   codex:
     economy:
@@ -207,13 +210,13 @@ capabilities:
       medium: [gpt-6-luna, gpt-5.3-codex-spark, gpt-5.6-luna, gpt-5.4-mini]
       high:   [gpt-5.3-codex-spark, gpt-6-luna, gpt-5.6-luna, gpt-5.4-mini]
     balanced:
-      low:    [gpt-6.1-sol, gpt-6-sol, gpt-5.6-sol]
-      medium: [gpt-6.1-sol, gpt-6-sol, gpt-5.6-sol]
-      high:   [gpt-6.1-sol, gpt-6-sol, gpt-5.6-sol]
+      low:    [gpt-6.2-sol, gpt-6.1-sol, gpt-6-sol, gpt-5.6-sol]
+      medium: [gpt-6.2-sol, gpt-6.1-sol, gpt-6-sol, gpt-5.6-sol]
+      high:   [gpt-6.2-sol, gpt-6.1-sol, gpt-6-sol, gpt-5.6-sol]
     frontier:
-      low:    [gpt-6.1-sol, gpt-6-sol, gpt-5.6-sol, gpt-5.5]
-      medium: [gpt-6.1-sol, gpt-6-sol, gpt-5.6-sol, gpt-5.5]
-      high:   [gpt-6.1-sol, gpt-6-sol, gpt-5.6-sol, gpt-5.5]
+      low:    [gpt-6.2-sol, gpt-6.1-sol, gpt-6-sol, gpt-5.6-sol, gpt-5.5]
+      medium: [gpt-6.2-sol, gpt-6.1-sol, gpt-6-sol, gpt-5.6-sol, gpt-5.5]
+      high:   [gpt-6.2-sol, gpt-6.1-sol, gpt-6-sol, gpt-5.6-sol, gpt-5.5]
   # FRONTIER PREFERS CLAUDE. MEASURED over the retained ledger 2026-09-22: 84 of 127 Opus-requested
   # runs (retro, retro preflight repair, plan synthesis) were routed to Codex gpt-5.6-sol, because
   # the auction splits a capability by headroom alone. The operator's direction is Opus 5.5 first
