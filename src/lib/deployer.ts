@@ -1,4 +1,4 @@
-import { execFileLoopBounded } from "./loop-bounded-child.js";
+import { execFileRouted } from "./spawn-helper.js";
 /**
  * lib/deployer.ts — the OUT-OF-PROCESS deploy supervisor's decision core.
  *
@@ -2766,7 +2766,7 @@ export function realDeploySensorsAsync(o: RealDeployOpts, gh: (args: string[]) =
   return realDeployDeps(o, (cmd, args) => {
     if (o.execFile) return Promise.resolve(o.execFile(cmd, args));
     return cmd === "gh" ? gh(args)
-      : execFileLoopBounded(cmd, args, { encoding: "utf8",
+      : execFileRouted(cmd, args, { encoding: "utf8",
         ...(cmd === "docker" && args[0] === "inspect" ? { timeout: 10_000, maxBuffer: 64 * 1024 } : {}) }).then(({ stdout }) => stdout);
   });
 }

@@ -11,7 +11,6 @@ import { test } from "node:test";
 import { readPushedRunBranchesOutputAsync } from "#src/cli/commands/daemon.js";
 import { workerAcceptanceProofSpawner } from "#src/cli/commands/fix.js";
 import { gitHeartbeatSource } from "#src/lib/host-resource-gardener.js";
-import { BAKED_RUNTIME_SOURCE_PATHS } from "#src/lib/baked-runtime-inputs.js";
 import { runBuildScriptInChild } from "#src/lib/child-entry-store.js";
 import { LoopBoundedChildTimeout } from "#src/lib/loop-bounded-child.js";
 import { defaultGateContainment } from "#src/lib/preopen-gate.js";
@@ -26,17 +25,11 @@ type Site = { file: string; line: number };
 /** The defining modules: loop-bounded-child.ts is the primitive, spawn-helper.ts is its routed seam. */
 const DEFINING = new Set(["src/lib/loop-bounded-child.ts", "src/lib/spawn-helper.ts"]);
 
-type Reason = "writes-child-stdin" | "baked-supervisor-closure";
-
-/** A direct call stays only where the helper cannot carry it. Each entry is a count, a kind and its reason. */
-const CLASSIFIED: Record<string, { count: number; kind: Reason; reason: string }> = {
-  "src/lib/proof-amendment.ts": { count: 1, kind: "writes-child-stdin", reason: "writes the python3 script's input through command.child.stdin" },
-  "src/lib/serve-plan-reload.ts": { count: 1, kind: "writes-child-stdin", reason: "writes cat-file --batch input through command.child.stdin" },
-  "src/lib/worktree-git.ts": { count: 1, kind: "writes-child-stdin", reason: "writes git's input through command.child.stdin (the git leaf, W1-T13434)" },
-  // The deploy supervisor installs no helper, and spawn-helper.ts is not an input of its baked image.
-  "src/lib/deployer.ts": { count: 1, kind: "baked-supervisor-closure", reason: "deploy sensors run in the baked deploy supervisor" },
-  "src/lib/fleet-control.ts": { count: 1, kind: "baked-supervisor-closure", reason: "the shared pause read runs in the baked deploy supervisor" },
-  "src/lib/git-lock-reclaim.ts": { count: 1, kind: "baked-supervisor-closure", reason: "the process list runs in the baked deploy supervisor" },
+/** A direct call stays only where the helper cannot carry it. Each entry is a count and its reason. */
+const CLASSIFIED: Record<string, { count: number; reason: string }> = {
+  "src/lib/proof-amendment.ts": { count: 1, reason: "writes the python3 script's input through command.child.stdin" },
+  "src/lib/serve-plan-reload.ts": { count: 1, reason: "writes cat-file --batch input through command.child.stdin" },
+  "src/lib/worktree-git.ts": { count: 1, reason: "writes git's input through command.child.stdin (the git leaf, W1-T13434)" },
 };
 
 function sources(dir: string): string[] {
@@ -81,8 +74,7 @@ test("W1-T11369 criterion 1: the census refuses every direct execFileLoopBounded
   for (const [file, entry] of Object.entries(CLASSIFIED)) {
     const found = all.filter((site) => site.file === file).length;
     assert.equal(found, entry.count, `positive control: ${file} still holds its ${entry.count} classified call (${entry.reason})`);
-    if (entry.kind === "writes-child-stdin") assert.match(readFileSync(join(REPO_ROOT, file), "utf8"), /\.child\.stdin/, `${file} reads .child, the reason it stays direct`);
-    else assert.ok(BAKED_RUNTIME_SOURCE_PATHS.includes(file) && !BAKED_RUNTIME_SOURCE_PATHS.includes("src/lib/spawn-helper.ts"), `${file} is a baked supervisor input and the helper is not`);
+    assert.match(readFileSync(join(REPO_ROOT, file), "utf8"), /\.child\.stdin/, `${file} reads .child, the reason it stays direct`);
   }
   assert.deepEqual(unclassified(all), [], "route each call through execFileRouted, or classify it with a reason the pipe cannot carry");
 });
