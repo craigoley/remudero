@@ -18026,16 +18026,21 @@ export function conflictRoundHeldHead(pr: Pick<OpenPrView, "taskId" | "prNumber"
   }
 }
 
-/** The production `archive` reader: the fix-round rows across rotations and the live file, or undefined if incomplete. */
+const FIX_ROUND_ARCHIVE_STEPS: readonly string[] = ["fix.dispatch", "fix.retrigger", "fix.done", "fix.needs_design", "sweep.conflict_regenerated"];
+
+/** W1-T13712: the fix-round rows of a strict union read, or undefined if it is incomplete. Both archive readers keep these steps. */
+export function fixRoundArchiveRows(read: LedgerUnionRecordRead): ReadonlyArray<Record<string, unknown>> | undefined {
+  return read.ok ? read.rows.filter((row) => typeof row.step === "string" && FIX_ROUND_ARCHIVE_STEPS.includes(row.step)) : undefined;
+}
+
+/** The synchronous `archive` reader: the fix-round rows across rotations and the live file, or undefined if incomplete. */
 function readFixRoundArchiveRows(ledgerPath: string): ReadonlyArray<Record<string, unknown>> | undefined {
-  const read = readLedgerUnionRecordsSync(dirname(ledgerPath), {
-    step: ["fix.dispatch", "fix.retrigger", "fix.done", "fix.needs_design", "sweep.conflict_regenerated"], refuseIncomplete: true });
-  return read.ok ? read.rows : undefined;
+  return fixRoundArchiveRows(readLedgerUnionRecordsSync(dirname(ledgerPath), { step: [...FIX_ROUND_ARCHIVE_STEPS], refuseIncomplete: true }));
 }
 
 const SWEEP_REFRESH_STEPS = ["fix.base_refreshed", BASE_RED_REFRESH_STEP, BASE_FIXED_REFRESH_STEP, REFRESH_CLEARANCE_STEP];
 const SWEEP_REPAIR_HISTORY_SLICE: EscalationTriageSlice = { holder: "sweep.repair-history",
-  steps: [...SWEEP_REFRESH_STEPS, "fix.dispatch", "fix.retrigger", "fix.done", "fix.needs_design", "sweep.conflict_regenerated"] };
+  steps: [...SWEEP_REFRESH_STEPS, ...FIX_ROUND_ARCHIVE_STEPS] };
 const sweepRepairHistoryReaders = new Map<string, EscalationTriageHistoryReader>();
 
 /** W1-T12954: the repair rows across rotations and the live file, as a strict union read gives them (`ok` false
