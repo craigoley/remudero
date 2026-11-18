@@ -19,6 +19,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
+import { askPrimaryCandidate, JUDGE_SHADOW_QUESTIONS, judgeShadowOnlyArm, judgeShadowOnlyPrimary, shadowJudgeCall, type ShadowJudgeCall } from "./judge-shadow.js";
 import { loadMounts, mountsPath } from "./mounts.js";
 import { resolveRiskJudgeMount } from "./risk-judge.js";
 import { spawnWorker } from "./worker.js";
@@ -324,6 +325,8 @@ export function productionRefreshJudge(opts: {
   diff: (prNumber: number) => Promise<string>;
   spawn?: typeof spawnWorker;
   log?: (step: string, fields: Record<string, unknown>) => void;
+  /** W1-T12417: the decision-model seams of the judge's shadow, for a test; production reads the host config. */
+  shadowDecisions?: ShadowJudgeCall<unknown>["decisions"];
 }): RefreshJudge {
   const heads = new Map<string, "overlap" | "independent">();
   let inFlight = false;
@@ -336,13 +339,27 @@ export function productionRefreshJudge(opts: {
     inFlight = true;
     try {
       const prompt = buildRefreshJudgePrompt(question, await opts.diff(question.prNumber));
-      const mount = resolveRiskJudgeMount(loadMounts(mountsPath(opts.repoRoot)));
+      const mounts = loadMounts(mountsPath(opts.repoRoot));
+      const mount = resolveRiskJudgeMount(mounts);
+      // W1-T12417: a decision model named as this judge's primary answers first; the judge below answers when it does not.
+      const primary = judgeShadowOnlyPrimary(mounts, "refresh-value");
+      if (primary !== undefined && opts.log !== undefined) {
+        const answered = await askPrimaryCandidate({ role: "refresh-value", key, primary, question: JUDGE_SHADOW_QUESTIONS["refresh-value"], input: prompt,
+          head: { sha: question.headSha, prNumber: question.prNumber }, cwd: opts.repoRoot, log: opts.log,
+          ...(opts.shadowDecisions === undefined ? {} : { decisions: opts.shadowDecisions }) });
+        const option = answered?.option;
+        if (option === "overlap" || option === "independent") {
+          heads.set(key, option);
+          return option;
+        }
+      }
       const raw = opts.spawn ?? spawnWorker;
       const spawn = benchmarkNonDispatchSpawn("refresh-judge", raw);
-      const result = await spawn({
-        cwd: opts.repoRoot, permissionMode: "bypassPermissions", settingsFile: join(opts.repoRoot, "settings", "worker.json"),
+      const args = {
+        cwd: opts.repoRoot, permissionMode: "bypassPermissions" as const, settingsFile: join(opts.repoRoot, "settings", "worker.json"),
         prompt, model: mount.model, effort: mount.effort, maxTurns: mount.maxTurns, tools: [],
-      });
+      };
+      const result = await spawn(args);
       opts.log?.("sweep.refresh.judge_spend", { pr_number: question.prNumber, head_sha: question.headSha,
         cost_usd: result.costUsd, num_turns: result.numTurns, model: mount.model, effort: mount.effort });
       if (result.subtype !== "success" || result.isError || result.apiError ||
@@ -351,6 +368,13 @@ export function productionRefreshJudge(opts: {
       }
       const verdict = parseRefreshJudgeReply(result.text);
       heads.set(key, verdict);
+      const arm = judgeShadowOnlyArm(mounts, "refresh-value");
+      if (arm !== undefined && opts.log !== undefined) {
+        // W1-T12417, not awaited: the ruling returned below is the judge's own. A reply the parser refuses is an unusable answer.
+        void shadowJudgeCall({ role: "refresh-value", key, mount: { ...mount, shadow: arm }, primaryArgs: args, primary: result,
+          primaryAnswer: verdict, parse: parseRefreshJudgeReply, agreementKey: (v) => v,
+          head: { sha: question.headSha, prNumber: question.prNumber }, spawn, log: opts.log, ...(opts.shadowDecisions === undefined ? {} : { decisions: opts.shadowDecisions }) });
+      }
       return verdict;
     } finally {
       inFlight = false;

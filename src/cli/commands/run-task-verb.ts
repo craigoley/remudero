@@ -1580,7 +1580,7 @@ function watchDispatchSpawn(
     fallbackBoundMs: watch.fallbackBoundMs,
     quietFloorMs: DEFAULT_WORKER_QUIET_FLOOR_MS,
     ledger: (step, fields) => log(step, fields),
-    judge: seams.judge ?? productionQuietWorkerJudge({ cwd: spawnArgs.cwd, settingsFile: spawnArgs.settingsFile }),
+    judge: seams.judge ?? productionQuietWorkerJudge({ cwd: spawnArgs.cwd, settingsFile: spawnArgs.settingsFile, log: (step, fields) => log(step, fields) }),
     nudge: (message) => (seams.deliver ?? deliverOperatorAnswerToRunningWorker)(taskId, message, { ledger: (event, fields) => log(event, fields ?? {}) })
       === "delivered" ? "delivered" : "unsupported",
     ...(watch.recyclePending ? { recyclePending: watch.recyclePending } : {}),

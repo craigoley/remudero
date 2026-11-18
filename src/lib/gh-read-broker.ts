@@ -1572,6 +1572,79 @@ export async function serveGhReadBroker(opts: {
 
 export const GH_COMMAND_USAGE = "usage: rmd gh [--class interactive|agent|background] [--fresh] -- <gh args>";
 
+// Broker dependencies and CLI startup inputs. The Mac installer copies this list into the installed metadata.
+export const GH_READ_BROKER_SOURCE_PATHS = `
+bin/rmd
+package.json
+package-lock.json
+plan/policy.yaml
+src/run-task.ts
+src/lib/action-reconciliation.ts
+src/lib/clock.ts
+src/lib/config-schema.ts
+src/lib/config.ts
+src/lib/drain-lock.ts
+src/lib/errors.ts
+src/lib/fs-race-safe.ts
+src/lib/gh-read-broker-client.ts
+src/lib/gh-read-broker.ts
+src/lib/git-fetch-retry.ts
+src/lib/github-app.ts
+src/lib/github-credential.ts
+src/lib/github-http-read.ts
+src/lib/github-installation-budget.ts
+src/lib/github-transport.ts
+src/lib/host-identity.ts
+src/lib/ledger-carry.ts
+src/lib/ledger-key-manifest.ts
+src/lib/ledger-path.ts
+src/lib/ledger-union.ts
+src/lib/ledger.ts
+src/lib/live-write-guard.ts
+src/lib/log-rotation.ts
+src/lib/loop-bounded-child.ts
+src/lib/policy.ts
+src/lib/producer-identity.ts
+src/lib/spawn-helper.ts
+src/lib/state-backup-engine-links.ts
+src/lib/worker-containment.ts
+src/lib/worktree-git.ts
+`;
+
+async function installedBrokerWarning(env: NodeJS.ProcessEnv, checkout: string): Promise<string | undefined> {
+  const cache = ghBrokerDir(env);
+  if (!env.HOME || cache === undefined || !existsSync(join(checkout, ".git"))) return undefined;
+  const copies = join(env.HOME, "Library/Application Support/remudero/gh-read-broker");
+  const commit = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+  try {
+    const installed = readFileSync(join(copies, "current"), "utf8").trim();
+    if (!commit.test(installed)) return undefined;
+    const pin = pinWorktreeGit(checkout, () => {});
+    const gitEnv = hostWorktreeGitEnv(pin, { GIT_NO_LAZY_FETCH: "1", GIT_ALLOW_PROTOCOL: "" }, env);
+    const git = (args: string[]) => execFileRouted("git", ["--literal-pathspecs", ...args], {
+      env: gitEnv, encoding: "utf8", timeout: 1_000, killSignal: "SIGKILL",
+    });
+    const head = (await git(["rev-parse", "--verify", "HEAD^{commit}"])).stdout.trim();
+    if (!commit.test(head) || installed === head) return undefined;
+    // Include paths added since installation and keep pre-manifest installs comparable.
+    const manifest = join(copies, installed, "source-paths");
+    const installedPaths = existsSync(manifest) ? readFileSync(manifest, "utf8") : "";
+    const paths = new Set(`${GH_READ_BROKER_SOURCE_PATHS}\n${installedPaths}`.split("\n").filter(Boolean));
+    const pathspecs = Array.from(paths, (path) => join(pin.worktree, path));
+    const changed = await git(["diff", "--quiet", "--no-ext-diff", "--no-textconv", installed, head, "--", ...pathspecs])
+      .then(() => false, (error: { code?: number | string }) => error.code === 1);
+    if (!changed) return undefined;
+    mkdirSync(cache, { recursive: true, mode: 0o700 });
+    const stamp = join(cache, `warned-install-drift-${head}`);
+    writeFileSync(stamp, "", { flag: "wx", mode: 0o600 });
+    const installer = join(checkout, "deploy/mac/install-gh-read-broker.sh").replaceAll("'", "'\\''");
+    return `rmd gh: installed Mac broker ${installed.slice(0, 12)} differs from checkout ${head.slice(0, 12)}. Reinstall it: bash '${installer}'\n`;
+  } catch {
+    // Missing or unreadable install metadata, a racing writer, or an unwritable cache cannot affect the read.
+    return undefined;
+  }
+}
+
 /** {@link brokerGhRead} that also tells the broker WHICH client is reading (W1-T10302). The client library
  *  predates the field, so the request is built here; the broker reads an absent client from the class. */
 export type GhBrokerClientRead = (
@@ -1627,13 +1700,19 @@ export function runGhDirect(args: string[]): Promise<number> {
   });
 }
 
-/** `rmd gh [--class c] [--fresh] -- <gh args>`: prints exactly what `gh` would and exits with its code. */
+function writeGhCommandOutput(stream: "stdout" | "stderr", text: string): void {
+  process[stream].write(text);
+}
+
+/** `rmd gh [--class c] [--fresh] -- <gh args>`: preserves `gh` stdout and exit status. */
 export async function ghCommand(
   rest: string[],
   env: NodeJS.ProcessEnv = process.env,
   runDirect: (args: string[]) => number | Promise<number> = runGhDirect,
   read: GhBrokerClientRead = brokerGhReadAs,
-  write: (stream: "stdout" | "stderr", text: string) => void = (stream, text) => void process[stream].write(text),
+  write = writeGhCommandOutput,
+  // A caller that captures stderr can opt in. Otherwise it could consume the CLI's one warning.
+  checkout = write === writeGhCommandOutput ? resolve(import.meta.dirname, "../..") : undefined,
 ): Promise<number> {
   const out = (t: string) => write("stdout", t);
   const err = (t: string) => write("stderr", t);
@@ -1668,8 +1747,9 @@ export async function ghCommand(
     err("  Run it as a plain `gh` call, where the deny floor judges it.\n");
     return 2;
   }
-  if (apiUsesStdin(args)) return runDirect(args);
-  const socketPath = ghReadBrokerLive(env);
+  const socketPath = apiUsesStdin(args) ? undefined : ghReadBrokerLive(env);
+  const warning = checkout === undefined ? undefined : await installedBrokerWarning(env, checkout);
+  if (warning !== undefined) err(warning);
   if (socketPath === undefined) return runDirect(args);
   try {
     const result = await read(socketPath, args, {
