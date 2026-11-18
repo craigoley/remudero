@@ -51,6 +51,8 @@ export const WORKER_ENTRIES = Object.freeze([
   "src/lib/merged-ratchet-worker.ts",
   // W1-T13333: the daemon's ledger compaction pass.
   "src/lib/ledger-compact-worker.ts",
+  // W1-T13692: serve's inbox build, which panel-graph.ts starts by inbox-view.ts's URL.
+  "src/lib/inbox-view.ts",
 ]);
 /** A worker module's bundle file name: `src/lib/board-worker.ts` → `worker-lib-board-worker.mjs`. */
 export const workerBundleName = (module) => `worker-${module.replace(/^src\//, "").replace(/\.[cm]?[jt]sx?$/, "").replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.mjs`;
