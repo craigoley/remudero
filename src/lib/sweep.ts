@@ -15,7 +15,7 @@ import { buildFixProgressInput as buildBaseFixProgressInput, fixRedClass, resolv
   sameCriterionStall, nextStallRemedy, stallRemedyRows, failedApproaches, rowPrNumber, type StallRemedy,
   type FixProgressReaskResult } from "./fix-progress-judge.js";
 import type { DispatchBreakJudge } from "./stall-verifier.js";
-import { readCiGateRequiredChecks } from "./ci-gate-required.js";
+import { readCiGateRequiredNames, resolveCiGateRequiredSource, type CiGateRequiredSource } from "./ci-gate-required.js";
 import { createHeadRehomePorts, headIdentityRed, headRehomePlan, type HeadRehomePorts } from "./head-rehome.js";
 import { argmaxTypedJudgmentOption, runTypedJudgment } from "./typed-judgment.js";
 import { judgeShadowOnlyArm, judgeShadowOnlyPrimary, shadowJudgeCall, type ShadowJudgeCall } from "./judge-shadow.js";
@@ -171,7 +171,8 @@ import {
 import {
   DEFAULT_RISK,
   RETIREMENT_REASONS,
-  loadPlan,
+  loadPlanReusingParses,
+  PlanBlobCache,
   transitiveDependents,
   unmetDependencies,
   type AcceptanceCriterion,
@@ -1557,6 +1558,8 @@ export interface BuildSweepEffectsDeps {
   repoMode?: "shadow" | "live";
   repoRoot?: string;
   localRepoName?: string;
+  ciGateSource?: CiGateRequiredSource;
+  ciGateRequired?: string[];
   nowMsImpl?: () => number;
   config: Config;
   ledgerPath: string;
@@ -2680,6 +2683,9 @@ async function readArmVerdictHistory(stateDir: string): Promise<ArmVerdictHistor
 // W1-T12234: one commit store for each state directory, loaded once in a daemon lifetime.
 const fleetStateCommitStores = new Map<string, FleetStateCommitStore>();
 
+/** W1-T13669: the fix rung's plan re-read keeps its parses for the process; a changed file is parsed again. */
+export const FIX_PLAN_BLOB_CACHE = new PlanBlobCache();
+
 export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   SweepDeps,
   | "readerAgreement"
@@ -2909,7 +2915,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     reloadPlanForFixImpl ??
     (() => {
       try {
-        return loadPlan(join(repoDir, "plan", "tasks.yaml"));
+        return loadPlanReusingParses(join(repoDir, "plan", "tasks.yaml"), FIX_PLAN_BLOB_CACHE);
       } catch {
         // A torn read, a missing checkout or a duplicate-id refusal on this ONE opportunistic
         // re-read is never this dispatch's problem to raise — the caller degrades to its stale
@@ -2918,6 +2924,10 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       }
     });
   const repoRoot = entrypointRepoRoot;
+  const ciGateSource = deps.ciGateSource ?? resolveCiGateRequiredSource({ owner, repo }, {
+    self: { owner, repo: localRepoName }, selfRoot: repoRoot, configRoot: config.root,
+  });
+  const requiredChecks = deps.ciGateRequired ?? readCiGateRequiredNames(ciGateSource, log);
   // W1-T10772: resolved per call (the store verifies its state directory's identity), never cached.
   const ladderNoteStore = () => operatorNoteStore({ stateDir: join(config.root, "state"), repository: `${owner}/${repo}`, legacyRoot: repoRoot });
   // W1-T7096: ONE judge serves both the sweep's own next-round decision and the rung it dispatches.
@@ -2931,6 +2941,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   // than a second lock location.
   const inflightDir = join(config.root, "state", "inflight");
   const issues = issuesImpl ?? ghIssueGateway(owner, repo);
+  const openEscalationIssues = issuesImpl ?? ghIssueGatewayAsync(owner, repo);
   const primaryShadowAlerts = primaryShadowOperatorChannel({ owner, repo, ledgerPath, runId, issues: issuesImpl,
     clock: clockFromMillisFn(nowMsImpl), readPrState: ghLiveState,
     selection: () => {
@@ -3290,7 +3301,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     readerAgreement: { owner, repo, plan, readJson: readJsonImpl },
     fixDispatchFleetHold: () => checkSharedPause(config.root, { run: pauseGit.run, mintAnchor: pauseGit.mintAnchor }),
     reconcilePrimaryShadowAlert: () => primaryShadowAlerts.reconcile().catch(primaryShadowAlertFailed),
-    readOpenEscalations: () => issues.listOpen?.(NEEDS_HUMAN_LABEL) ?? [],
+    readOpenEscalations: () => openEscalationIssues.listOpen?.(NEEDS_HUMAN_LABEL) ?? [],
     fixProgressJudge: effectsProgressJudge,
     readHostedProofResults: (headSha, proofs) => readHostedFixProofResults({ owner, repo, headSha, proofs },
       { json: readJsonImpl, text: ghTextAsync }),
@@ -3667,7 +3678,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
 
     headRehome: deps.headRehomeImpl ?? createHeadRehomePorts({
       owner, repo, readJson: ghJsonForBuild, latestChecks: dedupeRollupByLatestAttempt,
-      requiredChecks: readCiGateRequiredChecks(repoRoot),
+      requiredChecks,
       judgeQuiet: async (pr) => {
         if (repoMode === "shadow") return { quiet: false, reason: "shadow repository" };
         const mounts = loadMounts(mountsPath(repoRoot));
@@ -3951,7 +3962,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // simply never fires for this PR on this pass, rather than aborting the whole sweep loop over
     // one PR's rollup read.
     // W1-T5979: a ci-gate timeout's rollup-sourced not-ready list is filtered to this list.
-    readCiGateRequired: () => readCiGateRequiredChecks(repoRoot),
+    readCiGateRequired: () => requiredChecks,
 
     readCiGateRollup: async (pr) => {
       try {
@@ -6678,12 +6689,9 @@ export function pendingViewSettledFromDeliveredFailure(
   reviewKey: string,
 ): { view: OpenPrView; basis: "verdict-after-pending" | "restore-spent"; deliveredAt: string } | undefined {
   if (!delivered || pr.reviewState !== "pending") return undefined;
-  const row = postedRowsForInput(pr, lines).at(-1);
-  const verdict = row?.decision_verdict as ReviewVerdict | undefined;
-  if (row === undefined || row.state !== "failure" || verdict?.state !== "failure" || verdict.cannotEvaluate === true) return undefined;
-  if (row.instrument_entangled === true || row.failure_class === "instrument_entangled") return undefined;
-  const claims = Array.isArray(row.unmet_criteria) ? row.unmet_criteria.map(String) : [];
-  if (claims.length === 0) return undefined;
+  const settled = deliveredFailureView(pr, lines);
+  if (settled === undefined) return undefined;
+  const { row } = settled;
   const deliveredAtMs = typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN;
   const pendingSinceMs = pr.reviewPendingSince ? Date.parse(pr.reviewPendingSince) : Number.NaN;
   const restoreSpent = lines.some(r => r.step === REVIEW_STATUS_RESTORED_STEP &&
@@ -6691,6 +6699,33 @@ export function pendingViewSettledFromDeliveredFailure(
   const basis = Number.isFinite(deliveredAtMs) && Number.isFinite(pendingSinceMs) && pendingSinceMs <= deliveredAtMs
     ? "verdict-after-pending" as const : restoreSpent ? "restore-spent" as const : undefined;
   if (basis === undefined) return undefined;
+  return { view: settled.view, basis, deliveredAt: String(row.ts) };
+}
+
+/** W1-T13706 — a view that reads no review status is settled the same way: GitHub never removes a status, so a view that reads
+ *  none beside a delivered verdict for its exact head and input was read before that review's pending post. */
+export function reviewViewSettledFromDeliveredFailure(
+  pr: OpenPrView,
+  delivered: boolean,
+  lines: ReadonlyArray<Record<string, unknown>>,
+  reviewKey: string,
+): { view: OpenPrView; basis: "verdict-after-pending" | "restore-spent" | "verdict-without-status"; deliveredAt: string } | undefined {
+  if (pr.reviewState !== "none") return pendingViewSettledFromDeliveredFailure(pr, delivered, lines, reviewKey);
+  if (!delivered || pr.rollupUnreadable === true) return undefined;
+  const settled = deliveredFailureView(pr, lines);
+  return settled === undefined ? undefined : { view: settled.view, basis: "verdict-without-status", deliveredAt: String(settled.row.ts) };
+}
+
+function deliveredFailureView(
+  pr: OpenPrView,
+  lines: ReadonlyArray<Record<string, unknown>>,
+): { view: OpenPrView; row: Record<string, unknown> } | undefined {
+  const row = postedRowsForInput(pr, lines).at(-1);
+  const verdict = row?.decision_verdict as ReviewVerdict | undefined;
+  if (row === undefined || row.state !== "failure" || verdict?.state !== "failure" || verdict.cannotEvaluate === true) return undefined;
+  if (row.instrument_entangled === true || row.failure_class === "instrument_entangled") return undefined;
+  const claims = Array.isArray(row.unmet_criteria) ? row.unmet_criteria.map(String) : [];
+  if (claims.length === 0) return undefined;
   // The same reading the view producer makes of a failing row (`unmetFromLedger`), for this one row.
   const reasons = Array.isArray(row.reasons) ? row.reasons.map(String) : [];
   const judged = new Map<string, Partial<CriterionVerdict>>();
@@ -6711,8 +6746,7 @@ export function pendingViewSettledFromDeliveredFailure(
   return {
     view: { ...pr, reviewState: "failure", unmetCriteria, reviewSummary: typeof summary === "string" && summary !== "" ? summary : undefined,
       reviewPendingSince: undefined, reviewPendingOwnerDead: undefined, reviewPendingOwnerGone: undefined, reviewPendingOwnerGoneReason: undefined },
-    basis,
-    deliveredAt: String(row.ts),
+    row,
   };
 }
 
@@ -6929,7 +6963,7 @@ export type CiTimeoutNotReadySource =
 /** Checks whose latest attempt still waits for a runner. */
 const CI_TIMEOUT_NOT_STARTED = new Set(["QUEUED", "PENDING", "WAITING", "REQUESTED", "EXPECTED"]);
 
-/** W1-T5979: `required` is ci-gate's REQUIRED list ({@link readCiGateRequiredChecks}); an empty one
+/** W1-T5979: `required` is ci-gate's REQUIRED list ({@link readCiGateRequiredNames}); an empty one
  *  is that reader's unreadable answer, never an empty set. A required name with no rollup entry is
  *  the never-started check the gate waits on, so it is named and listed in `neverRegistered`. */
 export function ciTimeoutNotReadyChecks(
@@ -23410,8 +23444,8 @@ export async function runSweep(
     if (pr.planResequenceHeld !== undefined) {
       log("sweep.plan_resequence_close.held", { pr_number: pr.prNumber, task_id: pr.taskId, reason: pr.planResequenceHeld });
     }
-    // W1-T12994: a delivered failure settles a view that still reads pending, before anything below reads the review state.
-    const settledView = pendingViewSettledFromDeliveredFailure(pr, prior.reviewDelivered.has(reviewOutcomeKeyForPr(pr)),
+    // W1-T12994/W1-T13706: a delivered failure settles a view that reads pending or none, before anything reads the review state.
+    const settledView = reviewViewSettledFromDeliveredFailure(pr, prior.reviewDelivered.has(reviewOutcomeKeyForPr(pr)),
       ledgerLines, reviewOutcomeKeyForPr(pr));
     if (settledView !== undefined) pr = settledView.view;
     const hostGapRefusal = prior.reviewHostGapRefusals.get(reviewOutcomeKeyForPr(pr));
@@ -24214,14 +24248,20 @@ export async function runSweep(
               revision: standingOn ?? current, observedRevision: current, semantic, roundId: handoff.roundId, producer: held };
             // W1-T12714: a report routed to an amendment waits on that amendment, never on a person.
             const awaitsAmendment = held.needs_design_remedy === "amendment-proposed";
-            disposition = amended || mainAdoption ? "blocked-fixable" : awaitsAmendment ? "wait" : "refused-escalate";
+            const producedAt = typeof held.ts === "string" ? held.ts : undefined;
+            const amendmentUnanswered = awaitsAmendment && !amended && !mainAdoption && producedAt !== undefined &&
+              now - Date.parse(producedAt) >= HELD_ESCALATION_SLO_MS;
+            disposition = amended || mainAdoption ? "blocked-fixable" : awaitsAmendment && !amendmentUnanswered ? "wait" : "refused-escalate";
             reason = amended ? "task contract amended under this terminal design handoff — adopting main before any fix admission"
+              : amendmentUnanswered ? `fix needs a task contract amendment at this exact head (round ${handoff.roundId}) — ` +
+                `unanswered past the held-escalation SLO, so the ladder's rebuild acts: ${handoff.reason}`
               : awaitsAmendment ? `fix needs a task contract amendment at this exact head (round ${handoff.roundId}) — the fix ` +
                 `lane proposed it from the worker's ${String(held.needs_design_kind)} report; a changed contract releases this head: ${handoff.reason}`
               : mainAdoption ? `fix needs design at this exact head (round ${handoff.roundId}), which is ${behindBy} commit(s) ` +
                 `behind main — taking main into the branch once before a person is asked: ${handoff.reason}`
               : `fix needs design at this exact head (round ${handoff.roundId}) — ${handoff.reason}`;
             if (mainAdoption) designMainAdoptionSpent = true;
+            if (amendmentUnanswered) heldEscalationAt = producedAt;
             if (!amended && !mainAdoption && !awaitsAmendment) {
               ruleBlockerByIndex.set(prIndex, "escalated");
               heldEscalationAt = typeof handoff.producer.ts === "string" ? handoff.producer.ts : undefined;

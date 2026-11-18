@@ -74,6 +74,7 @@ import {
 import { assertModelAllowed } from "./model-gate.js";
 import { cashTrialPinnedDeployment } from "./cash-trial.js";
 import { chooseDraftDeployment, recordDraftRouting, type DraftStats, type DraftChoice, type DraftOutcome } from "./draft-routing.js";
+import { cashAdmission, type CashAdmissionDecision } from "./cash-lane-billing.js";
 import { sdkUsageReadingCase } from "./headroom.js";
 import {
   detectCompactionEvents,
@@ -533,6 +534,8 @@ export interface WorkerSelectionAssignment {
     };
     excludeProviders?: WorkerProviderId[];
     exclusion_unhonoured?: { reason: "no-eligible-alternative"; excludedProviders: WorkerProviderId[] };
+    /** W1-T13672: the cash route this subscription spawn was deferred from, with its expected cost, share and sources. */
+    cash_deferred?: CashAdmissionDecision;
     tightestRemainingPercent?: number;
     allocationSharePercent?: number;
     preferenceBypass?: { provider: WorkerProviderId; reason: string };
@@ -1225,6 +1228,9 @@ export interface SpawnWorkerArgs {
   /** Set only by the two blocked-auction fallbacks, so the retried spawn records the rule and the
    *  subscription readings that sent it there rather than claiming plain mount affinity. */
   routingFallback?: { rule: "cash-fallback" | "cash-opus-fallback" | "cash-sonnet-fallback" | "overflow-fallback"; capacities: ProviderCapacity[] };
+  /** W1-T13672: set only on the auction re-entry of a cash-mount spawn whose expected cost missed its allowance share.
+   *  A blocked auction then hands the spawn back to its own cash route instead of a squeeze fallback. */
+  cashDeferred?: CashAdmissionDecision;
   /** The cash-simple trial's decision for this run; the cash arm also restricts the cash ladder. */
   routingTrial?: { id: string; arm: string; reason: string; models?: readonly string[] };
   /** Reasoning effort (mount-resolved, §9): 'low'|'medium'|'high'|'xhigh'|'max'. */
@@ -1620,6 +1626,28 @@ export function cashFallbackRefusal(
   return undefined;
 }
 
+/** W1-T13672: trial pins, emergency spawns, routing fallbacks and a lane with no subscription to defer to keep cash first. */
+function cashAdmissionApplies(args: SpawnWorkerArgs, routable: readonly WorkerProviderId[]): boolean {
+  return args.routingTrial === undefined && args.routingFallback === undefined && args.cashOpusEmergency !== true &&
+    args.cashSonnetEmergency !== true && args.cashDeferred === undefined && routable.some((provider) => provider !== "cash");
+}
+
+/** The deferral when this cash-mount spawn's cheapest holding candidate misses its share; an unreadable allowance keeps
+ *  the cash-first route, since the adapter's own reservation stays binding there. */
+function cashDeferral(config: Config, args: SpawnWorkerArgs, candidates: readonly string[], prompt: string,
+  draftStats: DraftStats | undefined): CashAdmissionDecision | undefined {
+  const nowIso = fixedClock((args.providerRouting?.now ?? Date.now)()).iso();
+  let decision: CashAdmissionDecision;
+  try {
+    const reading = readOpenWeightAllowance(config, { deployments: candidates, atIso: nowIso, squeezed: args.cashSqueezed === true });
+    decision = cashAdmission({ candidates, reading, draftStats, promptBytes: Buffer.byteLength(prompt, "utf8"), nowIso });
+  } catch (error) {
+    console.error(JSON.stringify({ event: "worker.provider.cash_admission_unread", reason: String((error as Error).message).slice(0, 512) }));
+    return undefined;
+  }
+  return decision.verdict === "defer" ? decision : undefined;
+}
+
 /** Refuse only when every candidate's first-request lower bound exceeds its observed room. */
 export function cashAllowanceFallbackRefusal(config: Config, prompt: string, deployments: readonly string[], atIso: string): string | undefined {
   try {
@@ -1638,7 +1666,7 @@ export function cashAllowanceFallbackRefusal(config: Config, prompt: string, dep
 export function cashSonnetAlternatives(prompt: string, config: Config, ctx: { runId?: string; taskId?: string }): string[] {
   hydrateCashCapacity(config);
   const estimatedTokens = openWeightEstimatedTokens(Buffer.byteLength(prompt, "utf8"));
-  return ["gpt-6.1-terra", "gpt-6.1-sol"].filter((deployment) => {
+  return ["gpt-6.1-terra", "gpt-6.2-sol", "gpt-6.1-sol"].filter((deployment) => {
     if (!openWeightDeploymentReady(deployment)) return false;
     const limitTokens = learnedCashLimit(deployment, cashDeploymentEndpoint(config, deployment));
     if (openWeightDeploymentHolds(deployment, estimatedTokens, limitTokens)) return true;
@@ -1772,6 +1800,7 @@ export function workerSelectionAssignment(
       },
       ...(args.excludeProviders?.length ? { excludeProviders: [...new Set(args.excludeProviders)] } : {}),
       ...(input.exclusion_unhonoured ? { exclusion_unhonoured: input.exclusion_unhonoured } : {}),
+      ...(args.cashDeferred ? { cash_deferred: args.cashDeferred } : {}),
       ...(input.selection ? { tightestRemainingPercent: input.selection.tightestRemainingPercent } : {}),
       ...(input.selection?.allocationSharePercent !== undefined
         ? { allocationSharePercent: input.selection.allocationSharePercent }
@@ -2815,7 +2844,9 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
             ...(args.routingTrial?.arm === "cash" && args.routingTrial.models ? { only: args.routingTrial.models } : {}) });
         return [choice.model, ...choice.alternatives];
       };
-      if (error instanceof ProviderCapacityBlockedError && args.mountProvider === undefined && subscriptionOnly) {
+      // W1-T13672: a deferred cash-mount spawn returns to its own cash route, never to a squeeze or overflow fallback.
+      const deferred = args.cashDeferred !== undefined;
+      if (error instanceof ProviderCapacityBlockedError && args.mountProvider === undefined && subscriptionOnly && !deferred) {
         const divertTools = args.cashTools ?? args.tools;
         const env = args.env ?? process.env;
         const bothSubscriptionsObserved = capacities.some((row) => row.provider === "claude") &&
@@ -2838,7 +2869,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         }
         console.error(JSON.stringify({ event: "worker.provider.subscription_only_hold", requested_model: args.model, reason: refusal }));
         error.message += `; ${refusal}`;
-      } else if (error instanceof ProviderCapacityBlockedError && args.mountProvider === undefined) {
+      } else if (error instanceof ProviderCapacityBlockedError && args.mountProvider === undefined && !deferred) {
         // The surface the DIVERTED spawn would actually run, which is what eligibility must be
         // judged on -- asking about `tools` here would refuse a lane that declared a perfectly
         // serveable cash equivalent, and admit one whose equivalent was never declared.
@@ -3145,8 +3176,8 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
     if (!avoidExhausted) openWeight = { ...openWeight, model: remaining[0]!, alternatives: remaining.slice(1) };
     let draftChoice: DraftChoice | undefined;
     let draftReadError: string | undefined;
+    let stats: DraftStats | undefined;
     if (args.draftRouting) {
-      let stats: DraftStats | undefined;
       try {
         // W1-T13185: awaited, never a synchronous ledger union on the loop (a 143 s stall on 2026-11-16).
         stats = await args.draftRouting.readStats();
@@ -3155,6 +3186,27 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         recordDraftRouting(args.draftRouting.log, "draft.routing.error", { lane: args.draftRouting.lane, proposal_id: args.draftRouting.proposalId,
           error: draftReadError, reason: "stats-read-failed-row-order" });
       }
+    }
+    // W1-T13672: ordinary mount work runs on cash first only while its measured cost fits its share of the day; otherwise
+    // the Claude and Codex auction runs it, and a blocked auction hands it back to this route unchanged.
+    if (cashAdmissionApplies(args, routingPolicy.routableProviders) && !(args.draftRouting && stats === undefined)) {
+      const deferral = cashDeferral(config, args, [openWeight.model, ...openWeight.alternatives], executionPrompt, stats);
+      if (deferral) {
+        console.error(JSON.stringify({ event: "worker.provider.cash_deferred", ...deferral }));
+        try {
+          return await spawnWorker({
+            ...args,
+            mountProvider: undefined,
+            cashDeferred: deferral,
+          });
+        } catch (error) {
+          if (!(error instanceof ProviderCapacityBlockedError)) throw error;
+          console.error(JSON.stringify({ event: "worker.provider.cash_deferral_unserved", deployment: deferral.deployment,
+            reason: String(error.message).slice(0, 512) }));
+        }
+      }
+    }
+    if (args.draftRouting) {
       if (stats) {
         draftChoice = chooseDraftDeployment(stats, [openWeight.model, ...openWeight.alternatives].map((deployment) => ({
           deployment, estimatedCostUsd: openWeightUsageUsd(deployment, openWeight.estimatedTokens ?? 1, OPENWEIGHT_MAX_COMPLETION_TOKENS),

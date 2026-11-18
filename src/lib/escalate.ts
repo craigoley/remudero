@@ -2107,6 +2107,77 @@ export function ghIssueGatewayAsync(
   return issueGatewaySteps(`${owner}/${repo}`, opts.exec ?? ((args: string[]) => ghTextAsync(args)), runStepsAsync);
 }
 
+const OPEN_ISSUES_BY_LABEL_QUERY =
+  "query($owner:String!,$name:String!,$label:String!,$cursor:String){repository(owner:$owner,name:$name){" +
+  "issues(labels:[$label],states:OPEN,first:100,after:$cursor){nodes{number url title body}pageInfo{hasNextPage endCursor}}}}";
+
+const CREATE_ISSUE_MUTATION =
+  "mutation($repositoryId:ID!,$title:String!,$body:String!,$labelIds:[ID!]){" +
+  "createIssue(input:{repositoryId:$repositoryId,title:$title,body:$body,labelIds:$labelIds}){issue{url}}}";
+
+/** W1-T13690: an issue gateway that reads and opens issues through `gh api graphql` only, so it spends
+ *  none of the core budget. The quota notice uses it for a core exhaustion. `listOpen` returns the shape
+ *  {@link parseLabelledIssuesRest} returns; `create` reads the repository id and every label id in one
+ *  query, then calls the createIssue mutation. There is no `ensureLabel`: a label with no id fails the create. */
+export function ghIssueGatewayGraphql(
+  owner: string,
+  repo: string,
+  opts: { exec?: (args: string[]) => Promise<string> } = {},
+): AsyncIssueGateway {
+  const repoArg = `${owner}/${repo}`;
+  const run = opts.exec ?? ((args: string[]) => ghTextAsync(args));
+  const graphql = async (query: string, vars: Record<string, string>): Promise<Record<string, unknown>> => {
+    const args = ["api", "graphql", "-f", `query=${query}`];
+    for (const [key, value] of Object.entries(vars)) args.push("-f", `${key}=${value}`);
+    const answer = JSON.parse(await run(args)) as { data?: Record<string, unknown> | null; errors?: unknown };
+    if (answer.errors !== undefined || !answer.data) {
+      throw new Error(`GraphQL answer for ${repoArg} carried no data: ${JSON.stringify(answer.errors ?? null)}`);
+    }
+    return answer.data;
+  };
+  return {
+    async listOpen(label) {
+      const issues: LabelledIssue[] = [];
+      let cursor: string | undefined;
+      do {
+        const data = await graphql(OPEN_ISSUES_BY_LABEL_QUERY, { owner, name: repo, label, ...(cursor === undefined ? {} : { cursor }) });
+        const page = (data.repository as { issues?: { nodes?: unknown; pageInfo?: { hasNextPage?: unknown; endCursor?: unknown } } } | null)?.issues;
+        if (!page || !Array.isArray(page.nodes)) throw new Error(`GraphQL issue list for ${repoArg} carried no nodes`);
+        for (const node of page.nodes as Array<{ number: number; url: string; title?: string; body?: string }>) {
+          issues.push({ number: node.number, url: node.url, state: "open", title: node.title, body: node.body });
+        }
+        const next = page.pageInfo?.endCursor;
+        if (page.pageInfo?.hasNextPage === true && typeof next !== "string") throw new Error(`GraphQL issue list for ${repoArg} has a next page and no cursor`);
+        cursor = page.pageInfo?.hasNextPage === true ? next as string : undefined;
+      } while (cursor !== undefined);
+      return issues;
+    },
+    async create(title, body, labels) {
+      assertLiveWriteAllowed("gh-issue-create", `filing an issue on ${repoArg}`);
+      const decl = labels.map((_, i) => `,$l${i}:String!`).join("");
+      const fields = labels.map((_, i) => `l${i}:label(name:$l${i}){id}`).join(" ");
+      const ids = await graphql(`query($owner:String!,$name:String!${decl}){repository(owner:$owner,name:$name){id ${fields}}}`,
+        { owner, name: repo, ...Object.fromEntries(labels.map((label, i) => [`l${i}`, label])) });
+      const repository = ids.repository as Record<string, unknown> | null;
+      if (typeof repository?.id !== "string") throw new Error(`GraphQL read of ${repoArg} carried no repository id`);
+      const labelIds = labels.map((label, i) => {
+        const id = (repository[`l${i}`] as { id?: unknown } | null | undefined)?.id;
+        if (typeof id !== "string") throw new Error(`label ${label} has no id on ${repoArg}`);
+        return id;
+      });
+      const args = ["api", "graphql", "-f", `query=${CREATE_ISSUE_MUTATION}`, "-f", `repositoryId=${repository.id}`,
+        "-f", `title=${title}`, "-f", `body=${body}`];
+      for (const id of labelIds) args.push("-f", `labelIds[]=${id}`);
+      const answer = JSON.parse(await run(args)) as { data?: { createIssue?: { issue?: { url?: unknown } } } | null; errors?: unknown };
+      const url = answer.data?.createIssue?.issue?.url;
+      if (answer.errors !== undefined || typeof url !== "string") {
+        throw new Error(`GraphQL createIssue on ${repoArg} returned no issue: ${JSON.stringify(answer.errors ?? null)}`);
+      }
+      return url;
+    },
+  };
+}
+
 function issueGatewaySteps(
   repoArg: string,
   run: (args: string[]) => string | Promise<string>,

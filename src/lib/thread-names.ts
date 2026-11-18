@@ -11,6 +11,7 @@
 export const OS_THREAD_NAME_MAX = 15;
 
 export const THREAD_NAMES = {
+  analyticsRefresh: "rmd-analytics",
   benchmarkCohort: "rmd-bench-cohrt",
   board: "rmd-board",
   codexProbe: "rmd-codex-probe",

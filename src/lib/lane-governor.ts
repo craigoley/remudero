@@ -101,6 +101,11 @@ export interface LaneTarget {
   /** The container projection at the target, and the onset it is judged against; null when not read. */
   projectionMib: number | null;
   onsetMib: number | null;
+  /** W1-T13658: the numbers the host bound was cut from, fit(hostBaseAvailableMib - hostReserveMib) over perLaneMib;
+   *  each null when the memory reading is unread (and the base alone when MemAvailable is). */
+  hostBaseAvailableMib: number | null;
+  hostReserveMib: number | null;
+  perLaneMib: number | null;
   unread?: string;
   next: LaneTargetPrevious;
 }
@@ -148,6 +153,9 @@ export function laneTarget(inputs: LaneTargetInputs): LaneTarget {
     pressed,
     projectionMib: projectionBase === null ? null : projectionBase + Math.max(0, target - inFlight) * perLaneMib,
     onsetMib,
+    hostBaseAvailableMib: "unread" in memory ? null : memory.hostBaseAvailableMib,
+    hostReserveMib: "unread" in memory ? null : memory.hostReserveMib,
+    perLaneMib: "unread" in memory ? null : perLaneMib,
     ...(unread !== undefined ? { unread } : {}),
     next: { target, ...(highEvents !== undefined ? { highEvents } : {}) },
   };
@@ -259,6 +267,9 @@ export function laneTargetPayload(
     binding: result.binding,
     projection_mib: result.projectionMib === null ? null : Math.round(result.projectionMib),
     onset_mib: result.onsetMib === null ? null : Math.round(result.onsetMib),
+    host_base_available_mib: result.hostBaseAvailableMib === null ? null : Math.round(result.hostBaseAvailableMib),
+    host_reserve_mib: result.hostReserveMib === null ? null : Math.round(result.hostReserveMib),
+    per_lane_mib: result.perLaneMib === null ? null : Math.round(result.perLaneMib),
     in_flight: context.inFlight,
     pressed: result.pressed,
     ...(result.unread !== undefined ? { unread: result.unread } : {}),

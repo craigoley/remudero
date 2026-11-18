@@ -1264,6 +1264,13 @@ export function stampLineViolations(proposalId: string, stampLine: string, fragm
   return out;
 }
 
+/** W1-T13693: the other ask a parked task can hold, `verify-human:<id>` for `machine-judge:<id>` and back. */
+export function parkedTaskTwinAsk(proposalId: string): string | undefined {
+  const match = /^(verify-human|machine-judge):([A-Za-z0-9][A-Za-z0-9-]*)$/.exec(proposalId);
+  if (!match) return undefined;
+  return `${match[1] === "verify-human" ? "machine-judge" : "verify-human"}:${match[2]}`;
+}
+
 /** The PURE readiness predicate. Trigger-deferral is checked first and unconditionally: an unfired trigger means
  *  DEFERRED_WITH_TRIGGER whatever the other clauses say (the dead-consumer discipline). Every other branch collects
  *  EVERY failing predicate, never the first. */
@@ -1275,6 +1282,12 @@ export function classifyProposal(
   // W1-T190: the ledger's ratify.approved receipt is checked FIRST and overrides every predicate below. This heals an
   // existing drifted entry, because it never trusts a stored flag at all.
   if (ctx.isRatified(proposal.id)) {
+    return { proposalId: proposal.id, state: "ratified", reasons: [] };
+  }
+  // W1-T13693: verify-human:<id> and machine-judge:<id> ask one question, so a ratified twin settles this ask too.
+  // The ratified twin is pruned from the registry, which once let this ask resurface on its own (W1-T12032).
+  const twin = parkedTaskTwinAsk(proposal.id);
+  if (twin !== undefined && ctx.isRatified(twin)) {
     return { proposalId: proposal.id, state: "ratified", reasons: [] };
   }
   // W1-T2604: an operator's decline is checked next and overrides everything below. It is recorded ONCE by an
@@ -1654,6 +1667,8 @@ export function inboxDraftPrompt(proposal: Proposal, currentPlanText: string, ru
       "First check whether releasing this shard as it stands satisfies the proposal and every reframe round.",
       `Whenever the reframe rounds do not ask for different work, print RELEASE: ${parked.id} instead of a FRAGMENT.`,
       "A RELEASE files no new task. Do not rewrite this shard as invented new tasks.", ""] : []),
+    ...(parkedProposalTaskId(proposal.id) ? ["Approving this ask IS the operator's human judgment, so every task you file is",
+      "`verify: auto` with proofs an agent can run. A `verify: human` task re-asks the question and never dispatches.", ""] : []),
     "=== GROUND ===",
     "Grep/Read MASTER-PLAN.md, LEARNINGS.md, and DECISIONS.md for what is already decided; an",
     "INDEX of the current plan/tasks.yaml is pasted below so you cite REAL existing task ids in",
@@ -2379,6 +2394,13 @@ export function lintDraftedFragment(
       if (directory(path)) violations.push({ check: "draft-directory-files", severity: "block",
         message: `${task.id} files entry ${JSON.stringify(path)} is a directory${directoryGuidance}` });
     }
+    // An approval of a verify-human, verify-human-automate or machine-judge ask IS the operator's judgment. A task it
+    // files as `verify: human` re-asks the same question, and drain's isDispatchEligible holds it as verify-not-auto
+    // until a second release, so the approved work never runs (W1-T13650, 2026-11-18).
+    if (task.verify === "human" && parkedProposalTaskId(proposalId) !== undefined) violations.push({
+      check: "draft-human-ask-repeated", severity: "block",
+      message: `${task.id} is verify: human, but approving ${proposalId} already gives the human judgment; file it verify: auto ` +
+        "with proofs an agent can run, or RELEASE the parked task when no new work is needed" });
     for (const criterion of task.acceptance ?? []) {
       const path = /^grep:\s*[\s\S]*\s+in\s+(\S+)\s*$/i.exec(criterion.proof.trim())?.[1];
       if (path && directory(path)) violations.push({ check: "draft-directory-grep", severity: "block",

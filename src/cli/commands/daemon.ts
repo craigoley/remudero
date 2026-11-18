@@ -30,7 +30,7 @@ import { fileURLToPath } from "node:url";
 import { configPath, isWorkerProviderId, loadConfig, providerRoutingOwnsHeadroom, resolveHeadroomEnabled, workerHomeDir, type Config } from "../../lib/config.js";
 import { cashDeploymentTarget } from "../../lib/config-schema.js";
 import { ledgerPathFor } from "../../lib/ledger-path.js";
-import { daemonCrashSentinel, escalateClaimStall, escalateClaimStallCleared, escalateCrashLoop, escalateDiskHeadroomBreach, escalateHeadroomParkCeiling, escalateHeadroomReserve, escalateQuotaExhaustion, escalateReplayStranded, escalateStarvation, escalateStarvationCleared } from "../../lib/escalation-catalogue.js";
+import { daemonCrashSentinel, deliverQuotaExhaustionLate, escalateClaimStall, escalateClaimStallCleared, escalateCrashLoop, escalateDiskHeadroomBreach, escalateHeadroomParkCeiling, escalateHeadroomReserve, escalateQuotaExhaustion, escalateReplayStranded, escalateStarvation, escalateStarvationCleared } from "../../lib/escalation-catalogue.js";
 import { lostWorkerProviders, resolveProviderRoutingPolicy, type EffectiveProviderRoutingPolicy } from "../../lib/provider-routing-policy.js";
 import {
   FOUNDRY_CLAUDE_API_KEY_ENV,
@@ -70,7 +70,7 @@ import { withEscalationSpoolDrain } from "../../lib/host-escalation-spool.js";
 import { instanceMode, readInstanceRegistryText } from "../../lib/instance-mode.js";
 import { instanceRegistryRuntimePresent, ledgerSelectedRegistryReadTimeouts, selectedInstanceRegistryEnvPath, withInstanceRegistryRuntime } from "../../lib/instance-registry-selection.js";
 import { escalate, escalateWithJudge, realEscalationJudge, ghIssueGateway, ghIssueGatewayAsync, type Escalation, type EscalationJudgeVerdict } from "../../lib/escalate.js";
-import { createGhCallPacer } from "../../lib/open-prs-rest.js";
+import { createGhCallPacer, prStateFromRest, singlePrRestArgs } from "../../lib/open-prs-rest.js";
 import { buildMainHealthRung } from "../../lib/main-health-rung.js";
 import { ghEscalationAnswerGateway } from "../../lib/escalation-answers.js";
 import { feedbackLandingSweepRungs, type LandingReviewRequest } from "../../lib/feedback-landing.js";
@@ -779,6 +779,19 @@ export function daemonTargetCheckoutRoot(target: { repo: string; isSelf: boolean
  */
 type RunBranchSyncExec = (cmd: string, args: string[], opts: { encoding: "utf8"; cwd: string }) => string;
 type RunBranchAsyncExec = (cmd: string, args: string[], opts: { encoding: "utf8"; cwd: string; timeout: number; killSignal: "SIGKILL" }) => Promise<{ stdout: string }>;
+
+/** W1-T13671: the tick's live PR state over the async transport, the same REST row and fold as
+ *  run-task.ts's ghLiveStateByNumberAsync; a failed read is unknown (`undefined`). */
+export function daemonLiveStateReader(owner: string, repo: string): (taskId: string, prNumber: number) => Promise<string | undefined> {
+  return async (_taskId, prNumber) => {
+    try {
+      return prStateFromRest((await ghJsonAsync(singlePrRestArgs(owner, repo, prNumber))) as Parameters<typeof prStateFromRest>[0]);
+    } catch (e) {
+      void e; // unreadable => undefined; the tick ledgers dispatch.live_state_indeterminate
+      return undefined;
+    }
+  };
+}
 
 /** W1-T10897: a leading checkout path names the repo whose `origin` is listed; without one it is this engine checkout. */
 export function readPushedRunBranchesOutput(checkout: string, exec?: RunBranchSyncExec): string;
@@ -2353,7 +2366,7 @@ export async function daemonCommand(
         ),
         // W1-T177: a fresh `gh pr view` re-read, consulted only when isOpenPr
         // reports a task in-flight — see NextRunnableOpts.readLiveState's doc.
-        readLiveState: (_taskId, prNumber) => ghLiveStateByNumber(target.owner, target.repo, prNumber),
+        readLiveState: daemonLiveStateReader(target.owner, target.repo),
         isIndeterminate,
         releaseLandedClaims: async (isMerged) => {
           await releaseLandedDispatchClaims(deps.tickClaimReserver ?? dispatchClaimReserverAsyncFor(join(config.root, "repos", target.repo)), {
@@ -2500,6 +2513,8 @@ export async function daemonCommand(
         // W1-T372: observe-and-surface only — dispatch is NOT paused by this hook (unlike
         // onHeadroomBreach above); see escalateQuotaExhaustion's own doc for why.
         onQuotaExhausted: (info) => escalateQuotaExhaustion(info, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
+        // W1-T13690: a notice that could not be sent at the exhaustion is sent once after the reset.
+        onQuotaRecovered: (info) => deliverQuotaExhaustionLate(info, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
         // W1-T1082: real free space + verdict, read on the SAME `startInFlightTicker` cadence as
         // `daemon.alive` itself — the SAME root `rmd doctor` reads (`readDiskFreeBytes(config.root)`,
         // `doctorCommand`, above) and the SAME `judgeDiskHeadroom` it judges against, one read call

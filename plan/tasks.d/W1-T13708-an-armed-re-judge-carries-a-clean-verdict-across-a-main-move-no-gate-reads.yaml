@@ -1,0 +1,88 @@
+- id: W1-T13708
+  title: "An armed pull request whose clean ratchet verdict is for an older main is not judged again when main has changed no path a counted gate reads"
+  repo: remudero
+  priority: 1.2
+  depends_on: []
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # it decides when the merge-time ratchet judge runs again for an armed pull request, across the sweep, the verdict module and the arm reader
+  origin: "operator-session#sweep-pass-speed-2026-11-18"
+  plan_refs:
+    - W1-T9962
+    - W1-T12717
+    - W1-T13326
+  files:
+    - src/lib/sweep.ts
+    - src/lib/merged-ratchet-verdict.ts
+    - src/lib/arm-auto-merge.ts
+    - test/sweep/an-armed-re-judge-carries-a-clean-verdict-across-a-main-move-no-gate-reads.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "When the newest sweep.ratchet_judge.decided row for an armed pull request's head is clean with no rows and remedy proceed, and every path changed between the main that row judged (merged_main_sha when present, else main_sha) and the current main tip is outside every path a counted gate reads, runArmedRatchetRejudge does not call readMergedRatchets for it. It writes one sweep.ratchet_judge.decided row for the current main tip with the same verdict, remedy proceed, and carried_from_main_sha naming the judged main"
+      proof: "grep: W1-T13708 criterion 1 in test/sweep/an-armed-re-judge-carries-a-clean-verdict-across-a-main-move-no-gate-reads.test.ts"
+    - claim: "invariant:any-measured-path-rejudges — for each gate in COUNTED_RATCHET_GATES, a main move that changes one path that gate reads (a file under each MEASURED_ROOTS root, under test/ and learnings/, CLAUDE.md, package.json, and each baseline file the judge reads) makes runArmedRatchetRejudge call readMergedRatchets as origin/main does"
+      kind: guard
+      proof: "grep: W1-T13708 criterion 2 in test/sweep/an-armed-re-judge-carries-a-clean-verdict-across-a-main-move-no-gate-reads.test.ts"
+    - claim: "invariant:only-a-clean-verdict-carries — a newest row that is unread, has rows, or has a remedy other than proceed, and a changed-path read that fails (an unknown commit, a git error), each make runArmedRatchetRejudge call readMergedRatchets as origin/main does"
+      kind: guard
+      proof: "grep: W1-T13708 criterion 3 in test/sweep/an-armed-re-judge-carries-a-clean-verdict-across-a-main-move-no-gate-reads.test.ts"
+    - claim: "A judge row whose merged_main_sha differs from its main_sha counts as judged for the merged_main_sha: when the current main tip equals that merged_main_sha, armedRatchetRejudgeTargets does not select that pull request and head"
+      proof: "grep: W1-T13708 criterion 4 in test/sweep/an-armed-re-judge-carries-a-clean-verdict-across-a-main-move-no-gate-reads.test.ts"
+    - claim: "Through runArmedRatchetRejudge with the changed-path reader that buildSweepEffects builds, run in a real git repository made with test/helpers/git-repo.ts, a main move that changes only plan/ files writes the carried row and a move that changes a src/ file calls readMergedRatchets, with nothing injected in place of the changed-path reader"
+      proof: "grep: W1-T13708 criterion 5 in test/sweep/an-armed-re-judge-carries-a-clean-verdict-across-a-main-move-no-gate-reads.test.ts"
+    - claim: "runArmedRatchetRejudge, the production path of the light pass's armed_ratchet_rejudge phase and of the full sweep, asks the new path check before it judges"
+      proof: "grep: ratchetReadsAnyPath( in src/lib/sweep.ts"
+  rationale: |
+    WHY: the light pass re-judges every armed pull request when main moves. The step took p50 1.7 s, p75 38 s and
+    p90 132 s per light pass (676 passes, 2026-11-16 17:30Z to 2026-11-18 16:23Z), and p50 46 s, p90 146 s in the 15
+    passes after the 16:23Z deploy. It is often the longest step before reviews start.
+    READ at origin/main 8b3b458c2: runArmedRatchetRejudge (src/lib/sweep.ts:27838) judges its targets one at a time.
+    Each judgement (readMergedRatchetsAsync, src/lib/arm-auto-merge.ts:843, and readMergedRatchetInputsSteps,
+    src/lib/merged-ratchet-verdict.ts:662) fetches main and the pull request head, merges them with git merge-tree,
+    reads the measured files of both trees, and counts them in a worker thread. The affected-reach gate reads the whole
+    code tree (about 6,000 files, 100 MB) and builds its import graph; that count alone took 6.1 s on the host.
+    armedRatchetRejudgeTargets (:27819) selects a head again whenever no judge row has its exact (head, main tip) pair.
+    MEASURED in the core ledger, same 48 h: 844 armed judgements, p50 31 s, p90 80 s, 9.3 h in all. Every one was
+    clean (0 rows). 474 of 584 judgements that followed another in the same pass started after it ended, so they ran
+    in series. 617 judged a head that had been judged before. For 195 of those (32%, 142 min), every path main changed
+    since the earlier judgement was outside the paths the gates read (src, scripts, deploy, .github/workflows, bin,
+    hooks, test, learnings, CLAUDE.md, package.json); the verdict could not differ. 206 of the 470 main commits in the
+    window changed no such path (most are plan filings).
+    204 rows (24%) carry merged_main_sha: the judge fetched a newer main than the tip the row is keyed by. The next
+    pass then sees no row for that newer tip and judges the same tree again; 91 judgements (70 min) were such repeats.
+    They are inside the 195.
+    EXPECTED SAVING: about a third of the armed re-judge time, about 70 min a day of light-pass time, and the CPU of
+    the same number of worker counts.
+  design: |
+    INVARIANT any-measured-path-rejudges: a carried verdict needs every changed path to be outside the paths the
+    counted gates read. A path the check cannot place is a measured path.
+    INVARIANT only-a-clean-verdict-carries: only a clean verdict with no rows and remedy proceed carries. Anything else,
+    and any read that fails, judges as today.
+    1. In src/lib/merged-ratchet-verdict.ts, export ratchetReadsAnyPath(paths): true when any path is under a root in
+       MEASURED_ROOTS, under test/ or learnings/, matches the affected-reach code pattern, or is one of the single-file
+       reads and path-keyed baselines the read set uses. Build it from those same constants, so a gate added later is
+       covered. True for an empty-string path.
+    2. Add a changed-path reader on the same seam as readMergedRatchets: in the managed clone, fetch main once per
+       runArmedRatchetRejudge call (git fetch --no-tags --quiet origin <base>), then git diff --name-only --no-renames
+       <judged main> <main tip>. It returns undefined on any failure. Wire it in buildSweepEffects next to
+       readMergedRatchets (src/lib/sweep.ts:5427) and add its key next to "readMergedRatchets" in the deps key list
+       (src/lib/sweep.ts:2500).
+    3. In runArmedRatchetRejudge, before read(pr): find the newest judge row for the pull request and head. If it is
+       clean with no rows and remedy proceed, read the changed paths from its judged main to the tip. When the reader
+       answers and ratchetReadsAnyPath is false, append the carried row and go to the next target.
+    4. In armedRatchetRejudgeTargets, add the key `${pr}@${head}@${merged_main_sha}` for a row that has merged_main_sha.
+    5. Add no counter, bound or config key. Run test/sweep/compress-src-lib-sweep-ts.test.ts; src/lib/sweep.ts has a
+       comment cap, so put explanations in the why-file. Grep test/ for tests that count readMergedRatchets calls or
+       assert the whole sweep.ratchet_judge.decided row; one outside `files` needs an amendment.
+    NOT IN SCOPE: running judgements side by side, reusing main's blobs across pull requests, and the review lane's
+    ratchet judge.
+  falsifier: |
+    Make ratchetReadsAnyPath always false: criterion 2 must fail. Carry an unread verdict: criterion 3 must fail. Drop
+    the merged_main_sha key: criterion 4 must fail. Remove the carry: criteria 1 and 5 must fail. Restore and require
+    all to pass.
+  note: |
+    Id reserved for run-unfiled-1795023528000 with ~/rmd-work/bin/reserve-id.sh.
+    A test must build its repository with test/helpers/git-repo.ts and load test/setup/tmp-hygiene.ts.

@@ -66,6 +66,8 @@ import {
   type PushedRunRef,
   type PlanOnlyRunBranchReceipt,
   type OpenPrCheck,
+  prefetchLiveStates,
+  type LiveStateReader,
   tallyDispatchFilters,
   type IdleReasonBucket,
   IDLE_REASON_ID_CAP,
@@ -1537,7 +1539,7 @@ export interface DaemonDeps {
   /** An optional fresh, live re-read of one candidate in-flight PR's state, consulted only when
    *  `isOpenPr` reports a task in-flight. See drain.ts's `readLiveState` for the full contract
    *  (W1-T177, the terminal-state check at every spending site). */
-  readLiveState?: (taskId: string, prNumber: number) => string | undefined;
+  readLiveState?: LiveStateReader;
   /** The per-task dispatch circuit breaker: true when a task has been dispatched the policy-capped
    *  number of times with no new owned PR since. Re-derived from the ledger each call, so it persists
    *  across restarts, unlike this loop's in-memory flip below (P29(ii)). */
@@ -1706,6 +1708,7 @@ export interface DaemonDeps {
    *  so the loop latches per bucket. Unlike `onHeadroomBreach` this never pauses dispatch: it observes
    *  and surfaces (W1-T372). Forensics: docs/forensics/daemon.md. */
   onQuotaExhausted?: (info: { bucket: "core" | "graphql"; remaining: number; resetsAt: string }) => void | Promise<void>;
+  onQuotaRecovered?: (info: { bucket: "core" | "graphql"; remaining: number; resetsAt: string }) => void | Promise<void>;
   /** Real free disk space for this tick, pre-judged against the same thresholds `rmd doctor` reports
    *  against. Judged in the CLI wiring, never here, because a daemon alarming at a different number
    *  than `rmd doctor` is a contradiction an operator must adjudicate mid-incident. An unreadable read
@@ -8074,7 +8077,15 @@ export async function runDaemon(
         // resets, so alerting on the raw value would re-fire up to once a minute for an hour. The latch fires
         // only on the tick a bucket first reads exhausted, and clears the instant it reads positive.
         if (reading.remaining > 0) {
+          const recovered = quotaExhaustedEscalated[bucket];
           quotaExhaustedEscalated[bucket] = false;
+          if (recovered) {
+            try {
+              await deps.onQuotaRecovered?.({ bucket, remaining: reading.remaining, resetsAt: reading.resetsAt });
+            } catch (e) {
+              log("daemon.escalation.failed", { error: String((e as Error)?.message ?? e) });
+            }
+          }
           continue;
         }
         if (quotaExhaustedEscalated[bucket]) continue;
@@ -8308,6 +8319,16 @@ export async function runDaemon(
         lazyClosedUnmerged(deps.readClosedRunBranchPrs),
       );
       const tickMachineShareRows = await machineShareRowsFor(tickLedgerLines);
+      const prefetchLive = (passPlan: Plan, passMerged: MergedSet) =>
+        deps.readLiveState ? prefetchLiveStates(passPlan, passMerged, deps.isOpenPr, deps.readLiveState) : Promise.resolve(undefined);
+      const liveStateLogged = (live: Awaited<ReturnType<typeof prefetchLive>>): NextRunnableOpts["readLiveState"] => live
+        ? (taskId, prNumber) => {
+            const state = live.read(taskId, prNumber);
+            if (state === undefined) log("dispatch.live_state_indeterminate", { task: taskId, pr_number: prNumber });
+            return state;
+          }
+        : undefined;
+      const tickLive = deps.readLiveState ? await prefetchLive(planForBatch, isMerged) : undefined;
       const dispatchOpts: NextRunnableOpts = {
       onPassedOver: (task, detail) => { tickPassedOver.add(task.id); observePassedOver("tick")(task, detail); },
       priorityBackfill,
@@ -8360,13 +8381,7 @@ export async function runDaemon(
       // Wrap the injected reader so a failed or indeterminate live read is ledgered here, distinct from an
       // un-wired site that never calls it. It still resolves the same either way, so the fail-open contract
       // is unchanged (W1-T177).
-      readLiveState: deps.readLiveState
-        ? (taskId, prNumber) => {
-            const state = deps.readLiveState!(taskId, prNumber);
-            if (state === undefined) log("dispatch.live_state_indeterminate", { task: taskId, pr_number: prNumber });
-            return state;
-          }
-        : undefined,
+      readLiveState: liveStateLogged(tickLive),
       // The cached in-flight snapshot was stale, so this task is not actually blocked. Ledgered distinctly,
       // naming the freshly observed terminal state (W1-T177).
       onStoodDown: (t, prNumber, state) =>
@@ -9032,7 +9047,7 @@ export async function runDaemon(
         let refillEligible: Task[] = [];
         let refillContext: DispatchValueContext | undefined;
         let boardUnreadable = false;
-        const decide = (snapshot: { plan: Plan; isMerged: MergedSet }): void => {
+        const decide = (snapshot: { plan: Plan; isMerged: MergedSet }, live?: Awaited<ReturnType<typeof prefetchLive>>): void => {
           let openPrCount: number | undefined;
           try { openPrCount = deps.openPrCount?.(); } catch (e) { boardUnreadable = true; throw e; }
           const budget = laneDispatchBudget({ laneCount, wipLimit: opts.wipLimit, openPrCount, queueAdmission: deps.readQueueAdmission?.() });
@@ -9043,6 +9058,7 @@ export async function runDaemon(
           const selection = captureDispatchFrontier(snapshot.plan, {
             ...dispatchOpts,
             ...runBranchDispatchOpts(runBranchState, planOnlyReceiptsThisTick, log, reportedRunBranchReleases),
+            readLiveState: liveStateLogged(live),
             dispatchValueContext: deps.buildDispatchValueContext?.(snapshot.plan, snapshot.isMerged),
             machineShare: machineShareFor(snapshot.plan, tickMachineShareRows, phaseStarts),
             // Re-read at each refill: a lane that settled since the tick began may have written or spent a receipt.
@@ -9072,6 +9088,9 @@ export async function runDaemon(
         const readFailed = (e: unknown): void => {
           reason = `refill read failed: ${String((e as Error)?.message ?? e)}`;
         };
+        const decideLive = (refillPlan: Plan, isMerged: MergedSet): Promise<Task | undefined> =>
+          prefetchLive(refillPlan, isMerged).then((live) => decide({ plan: refillPlan, isMerged }, live))
+            .then(conclude, (e) => { readFailed(e); return conclude(); });
         const conclude = (): Task | undefined | Promise<Task | undefined> => {
           if (boardUnreadable && inFlightTasks.size > 0) return parkLane(lane, finished, reason!, phaseAgeMs);
           laneParkedFor.delete(lane);
@@ -9114,13 +9133,16 @@ export async function runDaemon(
             if (deps.refreshMergedAsync) {
               return deps.refreshMergedAsync(refillPlan).then(
                 (isMerged) => {
+                  if (deps.readLiveState) return decideLive(refillPlan, isMerged);
                   try { decide({ plan: refillPlan, isMerged }); } catch (e) { /* the failure is carried as the held reason */ readFailed(e); }
                   return conclude();
                 },
                 (e) => { readFailed(e); return conclude(); },
               );
             }
-            decide({ plan: refillPlan, isMerged: deps.refreshMerged(refillPlan) });
+            const isMerged = deps.refreshMerged(refillPlan);
+            if (deps.readLiveState) return decideLive(refillPlan, isMerged);
+            decide({ plan: refillPlan, isMerged });
           } catch (e) {
             // The failure is carried as the reason: an unreadable board parks the lane (W1-T13283), any other read holds it.
             readFailed(e);

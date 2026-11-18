@@ -623,6 +623,8 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // W1-T372: `escalateQuotaExhaustion`'s (run-task.ts) dedup marker, read per bucket; dropping it
   // re-opens one duplicate quota-exhaustion notice per tick while the bucket stays exhausted.
   "daemon.quota_exhausted.escalated",
+  // W1-T13690: `deliverQuotaExhaustionLate`'s marker; dropping it re-sends the late notice after a restart.
+  "daemon.quota_exhausted.delivered_late",
   // W1-T1082: `escalateDiskHeadroomBreach`'s (run-task.ts) dedup marker, compared against an
   // episode window; it is what stops a daemon RESTART mid-episode from re-opening the issue.
   "daemon.disk_headroom.escalated",
@@ -2064,6 +2066,15 @@ function rotateLedgerLocked(
     byStep.set(key, group);
   }
   const capped: ParsedLedgerLine[] = [];
+  // W1-T12756: the heads a KEPT sweep.absent_repush row minted. Their first sweep.review_eligible
+  // row is the key W1-T12534 reads, so the cap below keeps it (one extra row per kept repush row).
+  const repushHeads = new Set<string>();
+  const repushGroup = byStep.get("sweep.absent_repush") ?? [];
+  const repushKept = repushGroup.length <= MAX_RETAINED_LINES_PER_STEP
+    ? repushGroup : repushGroup.slice(repushGroup.length - MAX_RETAINED_LINES_PER_STEP);
+  for (const p of repushKept) {
+    if (typeof p.json?.new_head === "string") repushHeads.add(`${String(p.json.pr_number)}@${p.json.new_head}`);
+  }
   for (const [step, group] of byStep.entries()) {
     if (
       step === "sweep.disposed" ||
@@ -2076,8 +2087,17 @@ function rotateLedgerLocked(
     }
     // group is in file order (chronological); drop the oldest excess, keep the newest cap.
     const excess = group.length - (step === "review.posted" ? REVIEW_POSTED_RETAINED_ROWS : MAX_RETAINED_LINES_PER_STEP);
-    archivedLineCount += excess;
-    capped.push(...group.slice(excess));
+    const dropped = group.slice(0, excess);
+    const rescued = new Set<ParsedLedgerLine>();
+    if (step === "sweep.review_eligible" && repushHeads.size > 0) {
+      const seen = new Set<string>();
+      for (const p of dropped) {
+        const key = `${String(p.json?.pr_number)}@${String(p.json?.head_sha)}`;
+        if (repushHeads.has(key) && !seen.has(key)) { seen.add(key); rescued.add(p); }
+      }
+    }
+    archivedLineCount += excess - rescued.size;
+    capped.push(...dropped.filter((p) => rescued.has(p)), ...group.slice(excess));
   }
 
   // Restore original file order — every pass above regrouped by key/step, losing it. Filtering

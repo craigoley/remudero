@@ -1876,6 +1876,7 @@ export interface InboxReadyItem extends InboxSender {
   plain: ServedPlainInboxMessage;
   /** W1-T8950: an operator item's current recommended decision, with its route; absent when it has none. */
   recommendation?: ServedRecommendation;
+  /** The line an approval would record, served as a preview: "on approval", never "RATIFIED <date>" (W1-T13694). */
   stampLine?: string;
   draftedTasks: InboxDraftedTask[];
   /** W1-T10077: set when an operator's decline lapsed because the state it was given on changed; says what changed. */
@@ -2656,6 +2657,11 @@ export function snapshotAttentionProjection(content: PersistedInboxContent, scop
   };
 }
 
+/** W1-T13694: a ready card is not ratified yet, so its stamp reads as what approval would record, not as done. */
+export function pendingStampLine(stampLine: string | undefined): string | undefined {
+  return stampLine?.replace(/ — RATIFIED \d{4}-\d{2}-\d{2} -> /, " — on approval -> ");
+}
+
 /** GET /v1/inbox's lanes over one pass and the stores the slow lane persisted with it (none carried: the stores now). */
 export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "classifications" | "ledgerLines"> & { plan?: Pick<Plan, "byId">; stores?: InboxStores }, inboxRoot: string,
   snapshot?: { content: PersistedInboxContent; scope?: { repository?: string; instance?: string } }) {
@@ -2700,7 +2706,7 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
         plain: servedPlain(proposal, "ready"),
         ...recommended(proposal, "ready"),
         ...reopened(classification),
-        stampLine: classification.draft?.stampLine,
+        stampLine: pendingStampLine(classification.draft?.stampLine),
         draftedTasks: classification.draft ? draftedTaskSummaries(classification.draft.fragmentYaml, proposal.id) : [],
       });
     } else if (classification.state === "drafting") {
@@ -2750,10 +2756,13 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
     }
     return [{ ...item, ...(keptChanged ? { keptChanged } : {}) }];
   });
-  const ready = unsetAside(allReady, "ready");
-  const drafting = unsetAside(allDrafting, "drafting");
-  const notReady = unsetAside(allNotReady, "notReady");
-  const declined = unsetAside(allDeclined, "declined");
+  // W1-T13694: a folded twin leaves every lane, not only needsYou, so section=ready and its count list a task once.
+  const folded = foldedTwinAsks(classifications.filter((c) => byId.has(c.proposalId)));
+  const unfolded = <T extends { proposalId: string }>(items: T[]) => items.filter((item) => !folded.has(item.proposalId));
+  const ready = unsetAside(unfolded(allReady), "ready");
+  const drafting = unsetAside(unfolded(allDrafting), "drafting");
+  const notReady = unsetAside(unfolded(allNotReady), "notReady");
+  const declined = unsetAside(unfolded(allDeclined), "declined");
   // W1-T4086: split every lane by who must act. `needsYou` holds only the operator's items;
   // `fleet` holds the fleet's own findings with the lane each sits in. The top-level
   // lanes retain records; only the shared projection selects the operator's asks (W1-T5340).
@@ -2762,9 +2771,8 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
   const humanGates = projectProposalHumanGates(classifications.filter((c) => byId.has(c.proposalId)), "core", ownerOf);
   const asks = new Set(humanGates.gates.map((gate) => decodeURIComponent(gate.key.split(":")[2]!)));
   const isAsk = (item: { proposalId: string }) => asks.has(item.proposalId);
-  // W1-T13479: a verify-human ask and its machine-judge twin are the same question; list the one the operator can act on.
-  const folded = foldedTwinAsks(classifications.filter((c) => byId.has(c.proposalId)));
-  const operatorItems = <T extends { proposalId: string }>(items: T[]) => items.filter((item) => isOperator(item) && !folded.has(item.proposalId))
+  // W1-T13479: a verify-human ask and its machine-judge twin are the same question; the lanes above already list one.
+  const operatorItems = <T extends { proposalId: string }>(items: T[]) => items.filter((item) => isOperator(item))
     .map((item) => ({ ...item, classification: isAsk(item) ? "ASK" as const : "RECORD" as const }));
   const fleetDecisions = fleetLaneDecisions(ledgerLines as never, stores.fleetDecisions);
   const needsYou = {

@@ -18,7 +18,7 @@
     - src/lib/daemon.ts
     - src/lib/escalation-catalogue.ts
     - test/inbox/a-fleet-that-starts-no-work-pages-the-operator-within-two-ticks.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "When two consecutive ticks admit work and every admitted run is refused before spend (its dispatch claim held elsewhere or unreachable), with no run passing its claim, and the refusing claim's newest sign of life is older than the measured claim-silence window, the daemon opens one needs-human issue naming the task, the holder, the claim's age and the release command"

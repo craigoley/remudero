@@ -18,7 +18,7 @@
     - src/lib/redesign-gardener.ts
     - src/lib/sweep.ts
     - test/sweep/a-hold-that-waits-on-an-amendment-is-never-idle.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The redesign gardener asks the Architect about a live PR whose newest sweep.disposed row has disposition wait and a reason that starts 'fix needs a task contract amendment at this exact head', once that hold has stood unbroken at one head for REDESIGN_AFTER_MS; the prompt names the PR, the head and the hold reason"
