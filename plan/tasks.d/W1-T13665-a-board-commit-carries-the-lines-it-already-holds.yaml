@@ -1,0 +1,58 @@
+- id: W1-T13665
+  title: "Serve's board snapshot cache reuses the lines it read at load and the checks a commit already made, and its collection receipt hashes each row once, so a board commit stops re-serializing and re-hashing ~50 MB of unchanged rows on serve's loop"
+  repo: remudero
+  depends_on: []
+  priority: 0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the bytes of the board snapshot file and the collection receipt's digest format (version 2; version 1 still reads)
+  band_meaning: span
+  origin: "operator-session#serve-oom-2026-11-16"
+  plan_refs:
+    - W1-T11266
+    - W1-T13332
+    - W1-T13616
+  files:
+    - src/lib/board-snapshot-cache.ts
+    - test/a-board-commit-carries-the-lines-it-already-holds.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The first commit after a load reuses the lines the load read and serializes only the changed row"
+      proof: "grep: W1-T13665: the first commit after a load reuses the lines it read in test/a-board-commit-carries-the-lines-it-already-holds.test.ts"
+    - claim: "invariant:byte-identical — a snapshot file written from carried lines equals the file a fresh cache writes for the same rows, including after a load of rows in another key order"
+      kind: guard
+      proof: "grep: W1-T13665: invariant:byte-identical in test/a-board-commit-carries-the-lines-it-already-holds.test.ts"
+    - claim: "A commit of one channel carries the other channel's lines without serializing or comparing its rows"
+      proof: "grep: W1-T13665: an issues commit carries every closed line in test/a-board-commit-carries-the-lines-it-already-holds.test.ts"
+    - claim: "invariant:receipt-compatible — a version 2 receipt hashes only the changed row, and a version 1 receipt written before this task still certifies its rows"
+      kind: guard
+      proof: "grep: W1-T13665: a version 2 receipt hashes only the changed row in test/a-board-commit-carries-the-lines-it-already-holds.test.ts"
+  rationale: |
+    WHY: Craig wants serve under 0.3 cores even while the Console is open, and the Inbox still times out during
+    serve's main-loop stalls.
+    MEASURED on 2026-11-18: board commits are about 25% of serve's main-thread stall time (runtime.loop_stall_profile
+    frames sameFlatRow, hash update, commitClosed and recordClosedAttempt in board-snapshot-cache.ts).
+    On a copy of the live snapshot (14,504 closed rows, 4,784 issues, 51 MB) in an idle process: the first closed
+    commit after a load took 494 ms (every row serialized, because the load kept no lines); later commits took 33 to
+    56 ms (each row's disk form built and compared twice); each collection receipt after a commit took 92 to 136 ms
+    (the digest concatenated and hashed every row's whole JSON). Serve runs these on a loaded 1 GB process, so its
+    stalls are several times longer. With this change the same copy measured 35 ms, 18 to 24 ms and 16 to 25 ms.
+  design: |
+    INVARIANT byte-identical: a carried line is used only for a row whose disk form equals the row the line holds, so
+    the file's bytes equal the bytes a fresh write makes.
+    INVARIANT receipt-compatible: a receipt's version names its digest; version 1 receipts still read.
+    1. The load keeps each row's line as read (a copy, with its newline). A closed row's line is kept only when the
+       parsed row equals the commit's own disk form of the loaded row.
+    2. The commit's checks record which rows are unchanged (kept) and each changed closed row's disk form. The lines
+       pass reuses a kept row's held line, and a channel the commit does not touch carries its held lines while its
+       row map is still the one the lines describe.
+    3. The receipt (version 2) digests each row's number and the sha256 of its disk JSON; the per-row hash is
+       memoized. readBoardClosedCollectionReceipt accepts version 1 with the old digest and version 2 with the new.
+  falsifier: |
+    No lines kept at load: criterion 1 fails. A carried line for a row in another key order: criterion 2 fails. The
+    other channel compared again: criterion 3 fails. A whole-JSON digest, or a version 1 receipt refused: criterion 4 fails.
+  note: |
+    Id reserved for run-unfiled-1795001290572 with ~/rmd-work/bin/reserve-id.sh.
