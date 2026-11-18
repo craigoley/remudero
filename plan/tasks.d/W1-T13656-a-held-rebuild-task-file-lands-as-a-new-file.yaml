@@ -18,7 +18,7 @@
   files:
     - src/lib/parked-pr-remedy.ts
     - test/sweep/a-held-rebuild-task-file-lands-as-a-new-file.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A close-and-rebuild remedy on a PR whose task file origin/main holds hands the landing its held task file (plan/tasks.d/<held id>-*.yaml, which origin/main does not hold) marked newFile, and the real landTaskFilesAsync stages it instead of refusing it with 'this landing takes only an edit of a task file that exists': the parked_pr.remedy row has outcome taken and a held_task_id, and the PR is closed"

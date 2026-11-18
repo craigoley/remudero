@@ -14,7 +14,7 @@
   files:
     - src/lib/analytics-route.ts
     - test/console-api/serve/an-unanchored-analytics-fold-keeps-the-anchored-checkpoint.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "After an anchored fold, an unanchored fold's snapshot is served, an anchor_kept row is logged, and the next refresh resumes from the anchored checkpoint"

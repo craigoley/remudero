@@ -17,7 +17,7 @@
     - src/lib/serve-supervisor.ts
     - src/lib/serve-supervisor-main.ts
     - test/console-api/serve/a-fresh-serve-supervisor-spaces-its-first-handoff-from-its-own-boot.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Replaying 2026-11-18 (boot ready 06:01:29Z), a checkout_behind ask at 06:21:51Z is deferred with reason spacing for the base window less the 20 minutes since boot, and hands off when that wait ends"

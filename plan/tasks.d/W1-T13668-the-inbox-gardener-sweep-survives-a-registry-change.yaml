@@ -15,7 +15,7 @@
   files:
     - src/lib/inbox-gardener.ts
     - test/gardeners/the-inbox-gardener-sweep-survives-a-registry-change.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A registry change between passes resumes the sweep after the cursor's id instead of restarting at the first id"

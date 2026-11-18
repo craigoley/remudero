@@ -23,7 +23,7 @@
     - src/cli/commands/daemon.ts
     - src/lib/ledger.ts
     - test/daemon/the-github-budget-exhaustion-notice-reaches-the-operator.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:no-core-read-on-a-core-alert — for a core exhaustion, escalateQuotaExhaustion reads the open needs-human issues and opens its issue through `gh api graphql` calls only: with a gh shim that records every argv, no call other than `api graphql` is made, and the daemon.quota_exhausted.escalated row has delivered true and the new issue's url"

@@ -16,7 +16,7 @@
   files:
     - src/lib/panel-graph.ts
     - test/inbox/an-approve-reads-the-board-plan-when-it-is-a-committed-read.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With a plan source of state loaded and an identity beginning ref:, approvePlanReader answers the held board plan and runs no git (a git read in the test's non-repository directory would throw)"
