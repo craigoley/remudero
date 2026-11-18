@@ -291,7 +291,8 @@ function isFixtureCopyPath(path: string): boolean {
 
 const isShardPath = (path: string): boolean => (shardPathsInListing([path]) as string[]).length === 1;
 const landsLearnings = (landing: readonly string[]): boolean => landing.some(isShardPath) || landing.includes(LEARNINGS_BASELINE);
-type PopulationRoot = "src" | "test" | "learnings";
+const POPULATION_ROOTS = ["src", "test", "learnings"] as const;
+type PopulationRoot = (typeof POPULATION_ROOTS)[number];
 
 /** The population roots a landing diff makes the judge count: src for deps-interface and house-layout,
  *  test for fixture-copy, learnings for learnings-budget. */
@@ -613,6 +614,39 @@ export function parseBlobBatchAllowingMissing(raw: string, paths: readonly strin
 
 const inPopulation = (path: string): boolean => CLOCK_SCOPE_RE.test(path) || isFixtureCopyPath(path) || isShardPath(path);
 const inReachTree = (path: string): boolean => REACH_CODE_RE.test(path) as boolean;
+
+/** W1-T13708 — each counted gate's reads on either tree, from its own scope and baseline constants. A Record, so a gate
+ *  added to RATCHET_COUNTER_GATES names its reads before a verdict can carry past it. */
+const GATE_READS: Record<CountedRatchetGate, (path: string) => boolean> = {
+  "clock-signature": (p) => CLOCK_SCOPE_RE.test(p) || p === CLOCK_BASELINE,
+  "source-size": (p) => CLOCK_SCOPE_RE.test(p) || p === SOURCE_SIZE_BASELINE,
+  "fixture-copy": (p) => isFixtureCopyPath(p) || p === FIXTURE_COPY_BASELINE,
+  "deps-interface": (p) => CLOCK_SCOPE_RE.test(p) || p === DEPS_INTERFACE_BASELINE,
+  "claude-md-budget": (p) => p === CLAUDE_MD || p === CLAUDE_MD_BASELINE,
+  "learnings-budget": (p) => isShardPath(p) || p === LEARNINGS_BASELINE,
+  "affected-reach": (p) => inReachTree(p) || p === REACH_BASELINE || p === PACKAGE_JSON,
+  "house-layout": (p) => CLOCK_SCOPE_RE.test(p),
+};
+
+/** W1-T13708 — whether the judge could read any of these paths on either tree: under a measured or population root, in
+ *  the reach code tree, a single-file read, a path-keyed baseline, or a counted gate's own read. A gate with no declared
+ *  reads, and a path the check cannot place (""), count as read. */
+export function ratchetReadsAnyPath(paths: readonly string[]): boolean {
+  const roots: readonly string[] = [...(MEASURED_ROOTS as string[]), ...POPULATION_ROOTS];
+  return paths.some((p) => p === "" || roots.some((r) => p.startsWith(`${r}/`)) || inReachTree(p) || SINGLE_FILE_READS.includes(p) ||
+    PATH_KEYED_BASELINES.includes(p) || COUNTED_RATCHET_GATES.some((g) => (GATE_READS[g] as ((path: string) => boolean) | undefined)?.(p) ?? true));
+}
+
+/** W1-T13708 — the paths main changed from `fromSha` to `toSha`, renames as a delete and an add. Undefined when either is
+ *  not a commit in the clone, `fromSha` is not an ancestor of `toSha`, or git fails. */
+export function* mainChangedPathsSteps(run: PlanSafetyGit, fromSha: string, toSha: string): Steps<string[] | undefined> {
+  const sha = /^[0-9a-f]{40,64}$/;
+  if (!sha.test(fromSha) || !sha.test(toSha)) return undefined;
+  const ancestor = yield* git(run, ["merge-base", "--is-ancestor", fromSha, toSha]);
+  if (ancestor.status !== 0) return undefined;
+  const diff = yield* git(run, ["diff", "--name-only", "--no-renames", "-z", fromSha, toSha]);
+  return diff.status === 0 ? diff.stdout.split("\0").filter((p) => p !== "") : undefined;
+}
 
 /** `git ls-tree -r -l -z` rows in one scope: regular blobs only, as the census walks see them, with each one's size. */
 function parsePopulationListing(raw: string, inScope: (path: string) => boolean): { paths: string[]; bytes: number; sizes: Map<string, number> } | { error: string } {
