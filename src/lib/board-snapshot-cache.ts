@@ -303,9 +303,16 @@ export interface BoardClosedCollectionReceipt {
 }
 
 /** A closed-row identity survives unrelated issue updates in the shared snapshot file. */
-export function boardClosedRowsDigest(rows: Iterable<BoardPrRest>): string {
+export function boardClosedRowsDigest(rows: Iterable<BoardPrRest>, memo?: Map<number, { row: ClosedDiskRow; json: string }>): string {
   const digest = createHash("sha256");
-  for (const row of [...rows].sort((a, b) => a.number - b.number)) digest.update(JSON.stringify(closedForDisk(row)) + "\n");
+  for (const row of [...rows].sort((a, b) => a.number - b.number)) {
+    const disk = closedForDisk(row);
+    // W1-T13616: a row unchanged since the last digest reuses its JSON text; the bytes hashed are the same.
+    const held = memo?.get(row.number);
+    const json = held && sameFlatRow(held.row, disk) ? held.json : JSON.stringify(disk);
+    memo?.set(row.number, { row: disk, json });
+    digest.update(json + "\n");
+  }
   return digest.digest("hex");
 }
 
@@ -721,12 +728,20 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
       if (channel === "closed") {
         const closed = rows as readonly BoardPrRest[];
         for (const row of closed) {
-          if (!isClosedDiskRow(closedForDisk(row), maxStringBytes)) throw new SnapshotRefusal("invalid_row");
+          const disk = closedForDisk(row);
+          // W1-T13616: a row whose disk form equals the one last committed was validated then; check only what changed.
+          const held = rowLines.closed.get(row.number);
+          if (held && sameFlatRow(held.row, disk)) continue;
+          if (!isClosedDiskRow(disk, maxStringBytes)) throw new SnapshotRefusal("invalid_row");
         }
         nextRows = new Map(closed.map((row) => [row.number, { ...row }]));
       } else {
         const issues = rows as readonly BoardIssueRest[];
-        for (const row of issues) if (!isIssueRow(row, maxStringBytes)) throw new SnapshotRefusal("invalid_row");
+        for (const row of issues) {
+          const held = rowLines.issues.get(row.number);
+          if (held && sameFlatRow(held.row, row)) continue;
+          if (!isIssueRow(row, maxStringBytes)) throw new SnapshotRefusal("invalid_row");
+        }
         nextRows = new Map(issues.map((row) => [row.number, { ...row }]));
       }
       if (nextRows.size !== rows.length) throw new SnapshotRefusal("duplicate_row");
@@ -882,13 +897,16 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
   let collectionSuccessAt = state.closedObservedAt ?? null;
   let digestRows: ReadonlyMap<number, BoardPrRest> | undefined;
   let rowsDigest: string | null = null;
+  // W1-T13616: each closed row's JSON as the last digest hashed it, so a digest after a few changed rows stringifies only those.
+  const digestJson = new Map<number, { row: ClosedDiskRow; json: string }>();
   const cache: BoardSnapshotCache = {
     recordClosedAttempt(outcome) {
       const at = clock.iso(), complete = outcome.ok && outcome.truncated !== true && outcome.persisted === true && state.closed !== undefined;
       if (complete) collectionSuccessAt = at;
       if (state.closed !== digestRows) {
         digestRows = state.closed;
-        rowsDigest = digestRows ? boardClosedRowsDigest(digestRows.values()) : null;
+        rowsDigest = digestRows ? boardClosedRowsDigest(digestRows.values(), digestJson) : null;
+        if (digestRows) for (const number of digestJson.keys()) if (!digestRows.has(number)) digestJson.delete(number);
       }
       const receipt: BoardClosedCollectionReceipt = { version: 1, repository, lastAttemptAt: at, lastSuccessAt: collectionSuccessAt,
         state: complete ? "complete" : outcome.ok && outcome.truncated ? "partial" : "unavailable",
