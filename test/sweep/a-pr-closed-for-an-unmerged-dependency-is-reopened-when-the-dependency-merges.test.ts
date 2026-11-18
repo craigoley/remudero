@@ -8,9 +8,9 @@
  * reopened them by hand. Each fixture below drives real sweep passes over a real ledger in a private directory.
  */
 import assert from "node:assert/strict";
-import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
@@ -430,28 +430,33 @@ test("W1-T12891 criterion 2: a lifecycle whose events exceed one page cannot rul
 });
 
 test("W1-T12891 criterion 4: a kept close the sweep cannot remove is not attempted, so no later pass repeats an attempt", async () => {
-  const gh = reversalPort();
-  const h = await closedForUnmetDependency(gh);
-  const logged: string[] = [];
-  h.deps.log = (step) => { logged.push(step); };
-  try {
-    h.merged(DEP_ID);
-    const keptDir = dirname(readKeptResequenceCloses(h.ledgerPath).kept[0]!.path);
-    const readOnly = async () => {
-      chmodSync(keptDir, 0o500);
-      try { await runSweep([], h.deps, DEFAULT_SWEEP_POLICY); } finally { chmodSync(keptDir, 0o700); }
-    };
-    await readOnly();
-    assert.equal(gh.reopened.length, 0, "no attempt without the claim");
-    assert.ok(logged.includes("sweep.resequence_close.unclaimed"));
-    assert.equal(h.rows(REVERSED).length + h.rows(REVERSE_FAILED).length, 0);
-    // A drop that cannot remove its file holds the close too, rather than acting on it.
-    gh.events.push({ event: "reopened", at: "2026-11-15T00:10:00Z" }, { event: "closed", at: "2026-11-15T00:30:00Z" });
-    await readOnly();
-    assert.equal(readKeptResequenceCloses(h.ledgerPath).kept.length, 1);
-    assert.equal(gh.reopened.length, 0);
-  } finally {
-    h.cleanup();
+  // The claim's removal fails for every uid when the file is already gone: the double removes it mid-read, as a
+  // concurrent sweep that claimed first would. (A permission denial would not hold under uid 0.)
+  for (const personClosedAfter of [false, true]) {
+    const gh = reversalPort();
+    const h = await closedForUnmetDependency(gh);
+    const logged: string[] = [];
+    h.deps.log = (step) => { logged.push(step); };
+    try {
+      h.merged(DEP_ID);
+      if (personClosedAfter) {
+        // A drop that cannot remove its file holds the close too, rather than acting on it.
+        gh.events.push({ event: "reopened", at: "2026-11-15T00:10:00Z" }, { event: "closed", at: "2026-11-15T00:30:00Z" });
+      }
+      const keptPath = readKeptResequenceCloses(h.ledgerPath).kept[0]!.path;
+      const readLifecycle = gh.port.readLifecycle;
+      gh.port.readLifecycle = async (kept) => {
+        const lifecycle = await readLifecycle(kept);
+        rmSync(keptPath);
+        return lifecycle;
+      };
+      await runSweep([], h.deps, DEFAULT_SWEEP_POLICY);
+      assert.equal(gh.reopened.length, 0, "no attempt without the claim");
+      assert.ok(logged.includes("sweep.resequence_close.unclaimed"));
+      assert.equal(h.rows(REVERSED).length + h.rows(REVERSE_FAILED).length, 0);
+    } finally {
+      h.cleanup();
+    }
   }
 });
 
