@@ -170,7 +170,7 @@ test("the registry reader takes only the instances block, and an explicit instan
     ],
   );
   // A sibling top-level section ends the block — never read as another instance's fields.
-  assert.deepEqual([...daemonInstanceStateDirs(`${REGISTRY}other:\n  core:\n    state_dir: /wrong\n`)].length, 3);
+  assert.deepEqual([...daemonInstanceStateDirs(`${registry}other:\n  core:\n    state_dir: /wrong\n`)].length, 3);
   // Two instances on one state dir is AMBIGUOUS, and ambiguous is not a match.
   assert.equal(
     instanceForStateRoot("instances:\n  a:\n    state_dir: /same\n  b:\n    state_dir: /same\n", "/same"),
