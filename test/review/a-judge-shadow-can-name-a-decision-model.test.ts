@@ -204,8 +204,10 @@ test("W1-T12417 criterion 3: the same shadow serves every fixed-option judge, ea
   const roleOf = async (start: (log: (step: string, fields: Record<string, unknown>) => void) => Promise<unknown>) => {
     const book = ledger();
     await start(book.log);
-    // Bounded by event-loop turns, not time: a judge that never calls the shadow fails here instead of hanging.
-    for (let turn = 0; turn < 500 && book.rows.filter(isShadowRow).length === 0; turn++) await new Promise<void>((resolve) => setImmediate(resolve));
+    // The decision request resolves the pull request's URL through a real `git remote` subprocess, which takes wall-clock
+    // time, so the wait is bounded by a deadline: a judge that never calls the shadow fails here instead of hanging.
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline && book.rows.filter(isShadowRow).length === 0) await new Promise<void>((resolve) => setTimeout(resolve, 5));
     return book.rows.find(isShadowRow)?.role;
   };
   const decisionsRow = (row: Record<string, unknown>) => ({ ...row, shadow: "decisions-eastus" });
