@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.56
   status: queued
@@ -24,3 +24,11 @@
     The ledger step sweep.escalation_reconcile.list_failed carries a failure shape and landed rows in both halves of the trailing 7 days: 45 in the older half, 94 in the newer.
     No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
     The rows name no file; tracked source literals locate this step in: src/lib/tick-read-worker.ts. Start there.
+  risk_ruling:
+    verdict: "rule-3-low-privilege"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "rule 3 (live and low-privilege): the symptom is live, 139 occurrence(s) across 7 day(s), last seen 2026-11-18T04:00:08.956Z, and the record declares no privileged path"
+    judged_at: "2026-11-18T04:00:39.189Z"
+    pin: "8239f3e04ac799d2418496681f68bf84d35c6b7ba983379da31975a79ae38cda"
