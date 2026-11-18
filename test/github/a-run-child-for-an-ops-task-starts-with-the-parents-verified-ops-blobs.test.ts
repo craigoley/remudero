@@ -523,6 +523,77 @@ test("W1-T13691 criterion 7: through the default spawn and the real child entry,
   assert.ok(callsAfterSpawn.some((c) => c.includes("/git/trees/")) && callsAfterSpawn.some((c) => c.includes("/git/ref/heads/main")));
 });
 
+/** runChildMain in this process for a spec that says a pipe is offered; the stderr text, the exit code and the offer rows. */
+async function offeredRun(label: string, offerPipe: (() => PassThrough) | undefined, breakLedger = false) {
+  const root = tmp(`offer-${label}`);
+  mkdirSync(dirname(configPath()), { recursive: true });
+  writeFileSync(configPath(), JSON.stringify({ claudeBin: "/bin/true", root }, null, 2) + "\n");
+  const ledgerFile = ledgerPathFor({ root } as Config);
+  if (breakLedger) mkdirSync(ledgerFile, { recursive: true });
+  const dir = runDir(join(root, "state"), `run-${label}`);
+  mkdirSync(dir, { recursive: true });
+  writeSpec(dir, {
+    schema: RUN_CHILD_SCHEMA, taskId: OPS_TASK, runId: `run-${label}`, instance: "core", engine: { sourceHash: HASH, sha: SHA },
+    planSnapshotPath: join(root, "none.json"), reservationId: "reservation-1", options: { skipGitSync: true },
+    opsCatalogBlobsOffered: true,
+  });
+  let ran = 0;
+  const errors: string[] = [];
+  const code = await runChildMain(["--run-dir", dir], {
+    signals: { on() {}, off() {} }, probe, env: {}, stderr: (text) => { errors.push(text); }, loadRunPath: async () => ({}),
+    ...(offerPipe ? { offerPipe } : {}),
+    runTask: async (taskId) => { ran++; return { taskId, runId: "r1", merged: false, costUsd: 0, verdict: "no_pr" }; },
+  });
+  let rows: Row[] = [];
+  if (!breakLedger) {
+    rows = readFileSync(ledgerFile, "utf8").trim().split("\n").map((line) => JSON.parse(line) as Row)
+      .filter((row) => row.step === OPS_CATALOG_BLOBS_OFFERED_STEP);
+  }
+  return { code, ran, errors: errors.join(""), rows };
+}
+
+test("W1-T13691 criterion 6: the entry reads the offer, keeps the verified blobs and ledgers the counts before the task runs", async () => {
+  const payload = await parentOffer();
+  const { code, ran, errors, rows } = await offeredRun("taken", () => {
+    const stream = new PassThrough();
+    stream.end(payload);
+    return stream;
+  });
+  assert.equal(code, 0);
+  assert.equal(ran, 1, "the task runs");
+  assert.equal(errors, "");
+  assert.equal(rows.length, 1);
+  assert.deepEqual([rows[0]?.offered, rows[0]?.kept, rows[0]?.refused], [4, 4, 0]);
+  assert.equal(rows[0]?.task_id, OPS_TASK);
+});
+
+test("W1-T13691 criterion 4: an entry whose fd 3 cannot be opened still runs the task and ledgers an empty offer", async () => {
+  const { code, ran, errors, rows } = await offeredRun("no-fd", () => { throw new Error("EBADF: no fd 3"); });
+  assert.equal(code, 0);
+  assert.equal(ran, 1, "the task runs");
+  assert.match(errors, /no ops catalog offer pipe on fd 3: Error: EBADF/);
+  assert.deepEqual([rows[0]?.offered, rows[0]?.kept, rows[0]?.refused], [0, 0, 0]);
+});
+
+test("W1-T13691 criterion 4: an entry that cannot write the offer row still runs the task", async () => {
+  const payload = await parentOffer();
+  const { code, ran, errors } = await offeredRun("ledger", () => {
+    const stream = new PassThrough();
+    stream.end(payload);
+    return stream;
+  }, true);
+  assert.equal(code, 0);
+  assert.equal(ran, 1, "the task runs");
+  assert.match(errors, /the offered ops catalog blobs were not taken/);
+});
+
+test("W1-T13691 criterion 4: the entry's default offer pipe is fd 3, and whatever fd 3 is, the task runs", { skip: process.channel !== undefined }, async () => {
+  const { code, ran, rows } = await offeredRun("default", undefined);
+  assert.equal(code, 0);
+  assert.equal(ran, 1, "the task runs");
+  assert.equal(rows.length, 1, "one offer row, with whatever counts the pipe gave");
+});
+
 test("W1-T13691 criterion 8: a child that took offered blobs refuses as a child that took none", async () => {
   const payload = await parentOffer();
   type Scenario = { label: string; outcome: string; stage: string; arrange(r: Remote): void };

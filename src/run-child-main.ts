@@ -85,6 +85,8 @@ export interface RunChildMainPorts {
   /** The collection at the start of each agent wait; the default is src/lib/agent-wait-heap.ts's. */
   atAgentWait?: () => Promise<AgentWaitHeap>;
   selectedRegistryRecord?: RegistryObservationSink;
+  /** W1-T13691: opens the parent's ops catalog offer; the default is the inherited fd 3. */
+  offerPipe?: () => Readable;
 }
 
 const defaultLoadRunPath = (): Promise<unknown> => import("./run-task.js");
@@ -118,11 +120,15 @@ export function readOfferedOpsCatalogBlobs(source: Readable): Promise<Buffer | u
   });
 }
 
+const openOfferFd = (): Readable => new Socket({ fd: 3, readable: true, writable: false });
+
 /** W1-T13691: read the parent's offer on fd 3, keep the blobs that pass the checks, and ledger the counts. Never throws. */
-async function takeOfferedOpsCatalogBlobs(spec: RunChildSpec, stderr: (text: string) => void): Promise<void> {
+async function takeOfferedOpsCatalogBlobs(
+  spec: RunChildSpec, stderr: (text: string) => void, openPipe: () => Readable = openOfferFd,
+): Promise<void> {
   try {
-    let pipe: Socket | undefined;
-    try { pipe = new Socket({ fd: 3, readable: true, writable: false }); }
+    let pipe: Readable | undefined;
+    try { pipe = openPipe(); }
     catch (error) {
       // No fd 3 pipe is no offer: the run reads every blob from GitHub, as before.
       stderr(`run-child: no ops catalog offer pipe on fd 3: ${String(error)}\n`);
@@ -248,7 +254,7 @@ export async function runChildMain(argv: readonly string[], deps: RunChildMainPo
       status("failed", "spec", {}, contractMismatchFailure("spec names detached work this entry cannot read"));
       return 1;
     }
-    if (value.opsCatalogBlobsOffered) await takeOfferedOpsCatalogBlobs(value, stderr);
+    if (value.opsCatalogBlobsOffered) await takeOfferedOpsCatalogBlobs(value, stderr, deps.offerPipe);
     let planSnapshot: PlanSnapshotSeam | undefined;
     if (work === undefined && !options.skipGitSync) {
       const handOver = planSnapshotHandOver(spec.value.planSnapshotPath);
