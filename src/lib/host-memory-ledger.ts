@@ -16,7 +16,9 @@
  * RELEASE happens only on VERIFIED termination: (a) the occupancy is over and every recorded
  * (pid, start) is gone, checked by the owner in the same container generation; (b) the owner sees
  * the recorded container generation has ended; (c) spawn never bound a process and the occupancy
- * is over. Age, missed heartbeats and mtime NEVER release. An entry another container owns is never
+ * is over; (d) W1-T13658: an entry held for an incomplete walk, once its occupancy is over, a complete
+ * listing shows every recorded identity gone and no orphan started since its earliest root (see
+ * {@link orphansSince}). Age, missed heartbeats and mtime NEVER release. An entry another container owns is never
  * released here; once its owner's last verification is old it is reported "uncertain".
  *
  * BEST-EFFORT: every exported operation catches its own failure and logs one deduplicated
@@ -91,6 +93,9 @@ export interface MemoryReservationEntry {
   walk?: { at: string; complete: boolean; reason?: string };
   /** Set when the owner could not read a recorded identity, so the entry is held as uncertain. */
   holdReason?: string;
+  /** W1-T13658: on a finished entry held for an incomplete walk whose recorded tree is gone, the orphans (and their
+   *  descendants) that may be its escaped processes. Absent: the entry reads exactly as before this field existed. */
+  orphans?: ProcessIdentity[];
 }
 
 export type ProbeResult = { state: "alive"; start: string } | { state: "gone" } | { state: "unknown"; reason: string };
@@ -197,7 +202,7 @@ export interface HostMemoryReading {
 }
 
 export interface SweepResult {
-  released: Array<{ id: string; rule: "tree-gone" | "generation-ended" | "never-spawned" }>;
+  released: Array<{ id: string; rule: "tree-gone" | "tree-gone-after-gap" | "generation-ended" | "never-spawned" }>;
   reading: HostMemoryReading;
 }
 
@@ -531,7 +536,7 @@ function mergeAndPersist(ctx: Context, entry: MemoryReservationEntry, deps: Host
     tree: union(onDisk.tree, entry.tree),
     walk: onDisk.walk,
     verifiedAt: onDisk.verifiedAt > entry.verifiedAt ? onDisk.verifiedAt : entry.verifiedAt,
-    ...(onDisk.holdReason ? { holdReason: onDisk.holdReason } : {}),
+    ...(onDisk.holdReason ? { holdReason: onDisk.holdReason, ...(onDisk.orphans ? { orphans: onDisk.orphans } : {}) } : {}),
   } : entry);
 }
 
@@ -664,12 +669,81 @@ function walkDescendants(entry: MemoryReservationEntry, listing: ProcessListing)
 
 type Verdict = { release: SweepResult["released"][number]["rule"] } | { keep: MemoryReservationEntry };
 
-function judgeOwned(ctx: Context, entry: MemoryReservationEntry, listing: ProcessListing): Verdict {
+/** The incomplete-walk hold: an entry whose ancestry a walk once missed. */
+export const INCOMPLETE_WALK_HOLD = "incomplete-process-walk";
+/** The container's reaper: tini is pid 1 (deploy/Dockerfile ENTRYPOINT), and nothing in the image sets a subreaper, so a
+ *  process whose parent exits is reparented to it. */
+const REAPER_PID = 1;
+
+/** W1-T13658: whether a reservation file is a finished entry held only for an incomplete walk whose tree the owner found
+ *  gone, so what it can still hold is its recorded orphans, not its tree. */
+export function heldOnlyForOrphans(entry: Pick<MemoryReservationEntry, "occupancyReleasedAt" | "holdReason" | "orphans">): boolean {
+  return entry.occupancyReleasedAt !== undefined && entry.holdReason === INCOMPLETE_WALK_HOLD && Array.isArray(entry.orphans);
+}
+
+/** A `proc:` start, the kernel's start tick, or undefined when the start is not one (and so not comparable). */
+function procTick(start: string): number | undefined {
+  const tick = /^proc:([0-9]+)$/.exec(start)?.[1];
+  return tick === undefined ? undefined : Number(tick);
+}
+
+/**
+ * W1-T13658: the processes a once-missed walk could have lost. A descendant whose parent exits is reparented to the
+ * container's reaper, and a descendant starts after its tree's root, so a lost process can only be a live child of the
+ * reaper started at or after the entry's earliest root. One held by a live entry (in its tree, or its owner) is that
+ * entry's. Each candidate counts with every descendant. A candidate start that is not a `proc:` tick counts (fail
+ * closed); an entry whose own root start is not one gets undefined, and is never released by this rule.
+ */
+function orphansSince(entry: MemoryReservationEntry, listing: ProcessListing, live: readonly MemoryReservationEntry[]): ProcessIdentity[] | undefined {
+  const ticks = entry.roots.map((root) => procTick(root.start));
+  if (ticks.length === 0 || ticks.some((tick) => tick === undefined)) return undefined;
+  const earliest = Math.min(...(ticks as number[]));
+  const held = new Set<string>();
+  for (const other of live) {
+    held.add(keyOf(other.owner));
+    if (other.id !== entry.id) for (const identity of other.tree) held.add(keyOf(identity));
+  }
+  const children = new Map<number, ProcessRow[]>();
+  for (const row of listing.rows) children.set(row.parent, [...(children.get(row.parent) ?? []), row]);
+  const queue = (children.get(REAPER_PID) ?? []).filter((row) => {
+    if (row.pid === REAPER_PID || held.has(keyOf(row))) return false;
+    const tick = procTick(row.start);
+    return tick === undefined || tick >= earliest;
+  });
+  const found = new Map<string, ProcessIdentity>();
+  while (queue.length > 0) {
+    const row = queue.shift() as ProcessRow;
+    const identity = { pid: row.pid, start: row.start };
+    if (found.has(keyOf(identity))) continue;
+    found.set(keyOf(identity), identity);
+    queue.push(...(children.get(row.pid) ?? []));
+  }
+  return [...found.values()];
+}
+
+/** W1-T13658: an entry held for a once-missed walk, judged against a COMPLETE listing. It is released only when its
+ *  occupancy is over, every recorded identity is verified gone, and no orphan survives; otherwise it stays held. */
+function judgeAfterGap(
+  ctx: Context, entry: MemoryReservationEntry, walked: MemoryReservationEntry, listing: ProcessListing,
+  live: readonly MemoryReservationEntry[],
+): Verdict {
+  const hold: MemoryReservationEntry = { ...walked, holdReason: INCOMPLETE_WALK_HOLD };
+  const occupancyOver = entry.occupancyReleasedAt !== undefined || identityState(ctx, entry.owner) === "gone";
+  if (!occupancyOver) return { keep: hold };
+  if (!walked.tree.every((identity) => identityState(ctx, identity) === "gone")) return { keep: hold };
+  const orphans = orphansSince(entry, listing, live);
+  if (orphans === undefined) return { keep: hold };
+  if (orphans.length === 0) return { release: "tree-gone-after-gap" };
+  return { keep: { ...hold, orphans } };
+}
+
+function judgeOwned(ctx: Context, entry: MemoryReservationEntry, listing: ProcessListing, live: readonly MemoryReservationEntry[]): Verdict {
   const nowIso = ctx.clock.iso();
   // Once ancestry was missed, a later complete /proc snapshot cannot reconstruct descendants
   // that have already been reparented. Preserve that uncertainty across retries, including when
-  // the incomplete snapshot happened before occupancy ended.
-  const hadIncompleteWalk = entry.walk?.complete === false || entry.holdReason?.startsWith("incomplete-process-walk") === true;
+  // the incomplete snapshot happened before occupancy ended, until a complete listing shows the
+  // whole tree gone and no reparented process that could be one of them (judgeAfterGap).
+  const hadIncompleteWalk = entry.walk?.complete === false || entry.holdReason?.startsWith(INCOMPLETE_WALK_HOLD) === true;
   const tree = union(entry.tree, walkDescendants(entry, listing));
   const walked: MemoryReservationEntry = {
     ...entry,
@@ -678,9 +752,9 @@ function judgeOwned(ctx: Context, entry: MemoryReservationEntry, listing: Proces
     walk: { at: nowIso, complete: listing.complete, ...(listing.reason ? { reason: listing.reason } : {}) },
   };
   delete walked.holdReason;
-  if (entry.roots.length > 0 && (!listing.complete || hadIncompleteWalk)) {
-    return { keep: { ...walked, holdReason: "incomplete-process-walk" } };
-  }
+  delete walked.orphans;
+  if (entry.roots.length > 0 && !listing.complete) return { keep: { ...walked, holdReason: INCOMPLETE_WALK_HOLD } };
+  if (entry.roots.length > 0 && hadIncompleteWalk) return judgeAfterGap(ctx, entry, walked, listing, live);
   const occupancyOver = entry.occupancyReleasedAt !== undefined || identityState(ctx, entry.owner) === "gone";
   if (!occupancyOver) return { keep: walked };
   if (entry.roots.length === 0) return { release: "never-spawned" };
@@ -868,7 +942,7 @@ function sweepWith(ctx: Context, deps: HostMemoryLedgerOptions): SweepResult {
         }
         continue;
       }
-      const verdict = judgeOwned(ctx, entry, listing);
+      const verdict = judgeOwned(ctx, entry, listing, owned.map((own) => own.entry));
       if ("release" in verdict) {
         if (mayRelease) {
           ctx.remove(path);

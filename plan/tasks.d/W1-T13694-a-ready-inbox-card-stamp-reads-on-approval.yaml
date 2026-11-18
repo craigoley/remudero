@@ -1,0 +1,30 @@
+- id: W1-T13694
+  title: "A ready Inbox card's stamp reads as what approval would record, not RATIFIED with today's date, and every Inbox section folds a parked task's twin asks"
+  repo: remudero
+  depends_on: []
+  plan_refs:
+    - W1-T13621
+  type: implement
+  verify: auto
+  risk: high # one concern across 2 files: the inbox lanes that serve cards and its test
+  priority: 1.2
+  status: queued
+  # Id reserved for run-unfiled-1795005000002 with ~/rmd-work/bin/reserve-id.sh
+  # reservation hand-off: run-unfiled-1795005000002 -> claude/project-thread-3etqkx
+  files:
+    - src/lib/panel-graph.ts
+    - test/console-api/a-ready-card-stamp-and-every-section-fold.test.ts
+  design: |
+    INVARIANT needs-you-fold-unchanged: needsYou lists the same rows as under W1-T13621.
+
+    pendingStampLine serves a ready card's stamp with "— RATIFIED <date> ->" replaced by "— on approval ->"; the stored draft stamp that approval writes is unchanged. inboxLanes applies foldedTwinAsks to the top-level ready, drafting, notReady and declined lanes before set-aside, so section=ready and counts.ready list a task once.
+  acceptance:
+    - claim: "A ready card's served stamp reads on approval and never RATIFIED with a date."
+      proof: "grep: W1-T13694 criterion 1 in test/console-api/a-ready-card-stamp-and-every-section-fold.test.ts"
+    - claim: "invariant:needs-you-fold-unchanged — section ready and its count list a task with both asks once, and needsYou is unchanged"
+      proof: "grep: W1-T13694 criterion 2 in test/console-api/a-ready-card-stamp-and-every-section-fold.test.ts"
+  origin: "operator-session#inbox-asks-2026-11-17"
+  rationale: |
+    OBSERVED 2026-11-18 (read-only host check by the Inbox thread): machine-judge:W1-T13113 is open and was redrafted after the
+    00:35Z reframe, yet its card read "RATIFIED <today> -> NEW-1"; composeStampLine writes the line approval would record and
+    panel-graph served it as is. inbox-view sectionItems folds twins only in needsYou, so section=ready counted W1-T13113 twice.

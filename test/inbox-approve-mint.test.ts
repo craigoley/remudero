@@ -10,6 +10,8 @@ import {
   draftPlaceholderIds,
   inboxDraftPrompt,
   materializeDraftTaskIds,
+  RATIFIED_TASK_DEFAULT_PRIORITY,
+  stampDraftedPriority,
   substitutePlaceholderIds,
   type DraftedCandidate,
   type InboxClassification,
@@ -18,7 +20,7 @@ import {
   type RatifyGateway,
   type ReadinessContext,
 } from "../src/lib/inbox.js";
-import type { Task } from "../src/lib/plan.js";
+import { parseTasksFromYaml, type Task } from "../src/lib/plan.js";
 import { reserveTaskIdBlock, TaskIdReservationError } from "../src/lib/task-id-reservation.js";
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -294,4 +296,22 @@ test("classifyProposal: a lint-clean, placeholder-carrying drafted fragment clas
     `expected READY, got ${classification.state}: ${JSON.stringify(classification.reasons)}`,
   );
   assert.deepEqual(classification.reasons, []);
+});
+
+// 2026-11-18: W1-T13650 was filed through rmd approve with no `priority`. Dispatch sorts ascending and reads a
+// missing priority as +Infinity, so every operator-approved filing queued behind all 716 prioritized tasks.
+test("an approved draft that names no priority files at the ratified default, and a stated priority is kept", () => {
+  const stated = P34_STYLE_FRAGMENT.replace("- id: NEW-2\n", "- id: NEW-2\n  priority: 0.5\n");
+  const stamped = stampDraftedPriority(stated);
+  const tasks = parseTasksFromYaml(stamped, "stamped draft");
+  assert.deepEqual(tasks.map((task) => [task.id, task.priority]), [["NEW-1", RATIFIED_TASK_DEFAULT_PRIORITY], ["NEW-2", 0.5]]);
+  assert.equal(RATIFIED_TASK_DEFAULT_PRIORITY, 1);
+  assert.equal(stamped.replace("  priority: 1\n", ""), stated, "only the one priority line is added; no other byte moves");
+  assert.equal(stampDraftedPriority(stamped), stamped, "stamping twice changes nothing");
+});
+
+test("a draft that is not a task list comes back unchanged for the lint to refuse", () => {
+  for (const text of ["not: a list", "- id: [unclosed", ""]) assert.equal(stampDraftedPriority(text), text);
+  const last = "- id: NEW-1\n  title: no trailing newline";
+  assert.equal(stampDraftedPriority(last), "- id: NEW-1\n  priority: 1\n  title: no trailing newline");
 });

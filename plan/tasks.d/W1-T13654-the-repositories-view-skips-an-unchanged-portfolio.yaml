@@ -1,0 +1,52 @@
+- id: W1-T13654
+  title: "The repositories read-model view declares its inputs, so a heavy-lane pass over an unchanged portfolio skips the rebuild instead of rebuilding about every 2 s"
+  repo: remudero
+  depends_on: []
+  priority: 0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # when the repositories body is rebuilt; its content, sources and recompute cadence are unchanged
+  origin: "operator-session#serve-hot-worker-2026-11-17"
+  plan_refs:
+    - W1-T13622
+  files:
+    - src/lib/repositories-view.ts
+    - test/console-api/views/the-repositories-view-skips-an-unchanged-portfolio.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Through the real read-model ticker, ten passes inside the recompute cadence build the repositories body no more times, and a pass past the 60 s cadence or after a registry rewrite builds it again"
+      proof: "grep: W1-T13654 criterion 1 in test/console-api/views/the-repositories-view-skips-an-unchanged-portfolio.test.ts"
+    - claim: "invariant:inputs-cover-the-body: the fingerprint moves with the sources file, the registry file and each summary recompute, holds when none moved, and is undefined when no store locates the sources"
+      kind: guard
+      proof: "grep: W1-T13654 criterion 2 in test/console-api/views/the-repositories-view-skips-an-unchanged-portfolio.test.ts"
+  rationale: |
+    WHY: on the Azure host on 2026-11-18 with a Console open, read_model.view_builds for the heavy lane
+    (10:51-11:01Z, serve pid 60693, sha a065bef91) showed repositories at 293 calls, 293 builds, 0 skipped, reason
+    no_declaration, 14,044 cpuMs: about 0.023 cores, the largest view cost. Serve was at 0.30-0.36 cores against a
+    0.3 target. The body changes only when `refresh` recomputes an instance summary (the #7926 cadence: 30 s after an
+    input moves, else 60 s) or when the published sources file or the registry file moves. Every other pass rebuilds
+    an identical body. A view that declares `inputsFingerprint` lets read-model-worker skip an unchanged build, and the
+    worker's audit backstop (READ_MODEL_SKIP_AUDIT_EVERY) still rebuilds every 20th would-be skip and turns skipping off
+    for the view on any etag mismatch.
+  design: |
+    INVARIANT inputs-cover-the-body: after `prepare`, the body `materialize` builds is a function of each instance's
+    held summary entry (stamped `atMs` by `refresh`), the published sources file, the registry file and each slot's
+    readiness. The fingerprint names all of these.
+    1. createRepositoriesReadModelView gains `inputsFingerprint({ instances })`: undefined when no store locates the
+       sources file or none is published. Otherwise JSON of [the sources file's identity (dev, ino, size, mtimeNs), the
+       registry file's identity or null, and for each published instance: id, its computed entry's atMs, whether it has
+       a slot, an open store, a first tick, and a catch-up in flight].
+    2. A small `fileIdentity(path)` helper: null on ENOENT, rethrows anything else.
+    3. The worker already runs `prepare` before it takes the digest, so a due recompute moves `atMs` before the skip
+       check. Sources that are not fresh already force a rebuild (reusableSources).
+    Not in scope: operator-agent-rows and inbox-threads, which also declare no inputs. Each gets its own task.
+  falsifier: |
+    Remove inputsFingerprint: criterion 1 fails (every pass rebuilds), and criterion 2 fails at its first call.
+  note: |
+    Id reserved for run-unfiled-1795000856781 with ~/rmd-work/bin/reserve-id.sh.
+    reservation hand-off: run-unfiled-1795000856781 -> claude/project-thread-u06uh4
+    Proof that counts in production: read_model.view_builds rows for repositories show skipped > 0 and not_skipped
+    without no_declaration, and heavy-lane cpuMs for repositories falls from about 14 s per 10 min with a Console open.
