@@ -17,7 +17,7 @@
   files:
     - src/lib/plan-pr-merge-safety.ts
     - test/plan/a-merge-safety-read-parses-only-the-plan-shards-that-changed.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:parse-only-changed-shards — two merge-safety reads in one process over merged trees of 200 shards that differ in one shard (and in their ref labels) parse 200 shards on the first read and 1 on the second (PlanBlobCache parsedBlobs 1, reusedBlobs 199), so an unchanged shard is not parsed again"

@@ -407,8 +407,8 @@ import { flowGardenSpec } from "./lib/flow-remedy-gardener.js";
 import { fixLaneGardenSpec } from "./lib/fix-lane-gardener.js";
 import { conflictedFilePaths, hotFileGardenSpec, readMainHistory, type HotFileGardenSources } from "./lib/hot-file-gardener.js";
 import {
-  gardenFamilyRecord, isRulingShaped, machineJudgeFoundWork, machineJudgeInputsAsync, mechanicalDecisions, operatorRulingTimes, parkedEscalation, readOperatorReleaseRecords,
-  recordOperatorRelease, runMachineFilingJudge, type MachineJudgePorts, type MechanicalPort,
+  gardenFamilyRecord, isRulingShaped, ledgerCorpusSpan, machineJudgeFoundWork, machineJudgeInputsAsync, mechanicalDecisions, operatorRulingTimes, parkedEscalation, readOperatorReleaseRecords,
+  recordOperatorRelease, runMachineFilingJudge, unionTaskActivity, type MachineJudgePorts, type MechanicalPort,
 } from "./lib/machine-filing-judge.js";
 import { countRounds, countStepRows, filingEvidenceOf, type SymptomReading } from "./lib/mechanical-rulings.js";
 import { parseCiFrictionOrigin } from "./lib/ci-friction-remedy.js";
@@ -1134,7 +1134,8 @@ import {
 } from "./lib/inbox.js";
 import { declinedWithReceipts } from "./lib/inbox-verdict-receipts.js";
 import { learnedBakeoffLimit, renderBakeoff, runInboxBakeoff, type BakeoffCandidate } from "./lib/inbox-bakeoff.js";
-import type { DeployedModel, DeploymentBakeoffCandidate } from "./lib/bakeoff-trigger.js";
+import type { DeployedModel, DeploymentBakeoffCandidate, JudgeReplayOutcome } from "./lib/bakeoff-trigger.js";
+import { judgeShadowAutoRoles, judgeShadowReplayCorpus } from "./lib/judge-shadow.js";
 import { CASH_RESPONSES_DEPLOYMENTS } from "./lib/cash-responses.js";
 import { runSweepBakeoff } from "./lib/sweep.js";
 import { OPENWEIGHT_PRICES, OPENWEIGHT_CONTEXT_WINDOWS, OPENWEIGHT_TEMPERATURE, openWeightDeploymentReady, OpenWeightAllowanceExhaustedError } from "./lib/worker-provider.js";
@@ -22804,7 +22805,9 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
         runInboxBakeoff, deps.bakeoff?.repoClone);
       await runSweepBakeoff({
         stateDir: join(root, "state"),
-        deployed: measurementBakeoffDeployments(bakeoffMounts),
+        // W1-T12422: the decision models join the deployed list; each new or changed model gets the direct judge replay.
+        deployed: [...measurementBakeoffDeployments(bakeoffMounts), ...decisionBakeoffDeployments(bakeoffMounts)],
+        judgeReplay: createJudgeShadowReplay(bakeoffConfig, repoRoot, bakeoffMounts),
         incumbent: { id: "incumbent", label: `incumbent ${baseMount.model} (${baseMount.effort})`,
           model: baseMount.model, billing: baseMount.provider === "cash" ? "cash" : "subscription",
           effort: baseMount.effort, tools: true },
@@ -37658,6 +37661,34 @@ export async function inboxBakeoffCommand(
   return 0;
 }
 
+/** W1-T12422: each decision_models row as a bake-off model keyed `decisions:<candidate>`, with a readiness digest over
+ *  its mounts row, so a new or changed row is replayed once. It gets the direct judge replay only. */
+export function decisionBakeoffDeployments(mounts: Mounts): DeployedModel[] {
+  return Object.values(mounts.decision_models ?? {}).map((candidate): DeployedModel => ({
+    model: candidate.name, billing: "decisions", efforts: [],
+    readinessDigest: createHash("sha256").update(JSON.stringify(candidate)).digest("hex"),
+  }));
+}
+
+/** W1-T12422: the bake-off's direct judge replay of one model: one W1-T12421 direct replay per corpus the `shadow: auto`
+ *  roles read, one at a time, each bounded by JUDGE_REPLAY_CEILING_USD. With no auto role there is nothing to replay. */
+export function createJudgeShadowReplay(config: Config, repoRoot: string, mounts: Mounts,
+  replay: typeof replayJudgeCorpus = replayJudgeCorpus): ((model: DeployedModel) => Promise<JudgeReplayOutcome[]>) | undefined {
+  const roles = judgeShadowAutoRoles(mounts);
+  if (roles.length === 0) return undefined;
+  const byCorpus = new Map<string, string[]>();
+  for (const role of roles) byCorpus.set(judgeShadowReplayCorpus(role), [...(byCorpus.get(judgeShadowReplayCorpus(role)) ?? []), role]);
+  return async (model) => {
+    const outcomes: JudgeReplayOutcome[] = [];
+    for (const [corpus, corpusRoles] of byCorpus) {
+      const row = await replay(config, { lane: "direct", model: model.model, corpus, repoRoot });
+      outcomes.push({ roles: corpusRoles, row });
+      if (row.outcome === "stopped") break;
+    }
+    return outcomes;
+  };
+}
+
 export function measurementBakeoffDeployments(mounts: Mounts): DeployedModel[] {
   const efforts = ["low", "medium", "high"];
   return [
@@ -38904,6 +38935,7 @@ export function priorVerifyHumanVerdicts(rows: readonly Record<string, unknown>[
  * {@link SCOUT_WINDOW_MS}) and a ci-friction record's cause key (rounds across {@link CI_FRICTION_HALF_LIFE_MS}). Every
  * other family reads as undefined, which the rules treat as undecided, so it keeps the judge path it had.
  * A release goes through {@link approveParkedTask}, whose every guard stands.
+ * W1-T12838: each reading names its corpus span ({@link ledgerCorpusSpan}); activity is {@link unionTaskActivity}.
  */
 export function productionMechanicalPort(opts: {
   repoRoot: string;
@@ -38922,6 +38954,8 @@ export function productionMechanicalPort(opts: {
       const scoutSteps = [...new Set(tasks.flatMap((t) => (t.origin?.startsWith("scout:") ? [t.origin.slice("scout:".length)] : [])))];
       let scoutRows: readonly Record<string, unknown>[] | undefined;
       let ciRounds: ReturnType<typeof ciFrictionRoundsFromLedger> | undefined;
+      let span: { value: SymptomReading["corpus"] } | undefined;
+      const corpus = (): Pick<SymptomReading, "corpus"> => (span ??= { value: ledgerCorpusSpan(opts.stateDir, nowMs) }).value === undefined ? {} : { corpus: span.value };
       // ledger-read-intent: live — a decline or restore the receipts store has not retained yet.
       const declinedOf = declinedWithReceipts(readLedgerLines(ledgerPath) as unknown as Record<string, unknown>[], opts.stateDir);
       return {
@@ -38935,7 +38969,7 @@ export function productionMechanicalPort(opts: {
             }
             const step = origin.slice("scout:".length);
             const filing = filingEvidenceOf(task, SCOUT_WINDOW_MS);
-            return { ...countStepRows(scoutRows, step, nowMs, SCOUT_WINDOW_MS), ...(filing ? { filing } : {}) };
+            return { ...countStepRows(scoutRows, step, nowMs, SCOUT_WINDOW_MS), ...(filing ? { filing } : {}), ...corpus() };
           }
           const cause = parseCiFrictionOrigin(origin);
           if (cause === undefined) return undefined;
@@ -38943,9 +38977,10 @@ export function productionMechanicalPort(opts: {
           const filing = filingEvidenceOf(task, CI_FRICTION_HALF_LIFE_MS);
           const matches = (r: { cause: Parameters<typeof ciFrictionCauseKey>[0]; pr: number; evidence?: Parameters<typeof ciFrictionRoundMatchesCause>[0]["evidence"] }): boolean =>
             ciFrictionRoundMatchesCause({ pr: r.pr, causeKey: ciFrictionCauseKey(r.cause), ...(r.evidence ? { evidence: r.evidence } : {}) }, cause.key);
-          return { ...countRounds(ciRounds, matches, nowMs, CI_FRICTION_HALF_LIFE_MS), ...(filing ? { filing } : {}) };
+          return { ...countRounds(ciRounds, matches, nowMs, CI_FRICTION_HALF_LIFE_MS), ...(filing ? { filing } : {}), ...corpus() };
         },
         declined: (task) => declinedOf(`machine-judge:${task.id}`) !== undefined || declinedOf(`verify-human:${task.id}`) !== undefined,
+        activity: unionTaskActivity(reader, opts.stateDir, new Set(tasks.map((t) => t.id))),
       };
     },
     release: (task, provenance) => approveParkedTask(task.id, {

@@ -29,10 +29,11 @@ import { stampVerificationAsk } from "./inbox-retirement.js";
  * more, one that keeps failing less, and either recovers as its outcomes move.
  */
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 
 import { fixedClock, type Clock } from "./clock.js";
+import { rotationStampIso, type readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import { fetchOriginRetryingRefLock } from "./git-fetch-retry.js";
 import { ghExec } from "./github-transport.js";
@@ -60,7 +61,7 @@ import {
 } from "./flake-incident-gardener.js";
 import {
   isMechanicalDecision, mechanicalReleaseProvenance, mechanicalRetirementReason, mechanicalRuleName, mechanicalRuling, mechanicalRulingRow,
-  RULE_3_LOW_PRIVILEGE, type MechanicalDecision, type MechanicalReleaseProvenance, type SymptomReading,
+  corpusCoversWindow, queuedStoppedCauseRuling, RULE_3_LOW_PRIVILEGE, TASK_ACTIVITY_STEPS, taskActivity, type MechanicalDecision, type MechanicalReleaseProvenance, type SymptomReading,
 } from "./mechanical-rulings.js";
 import { lintTask, promoteIntroducedPlanOnlyDiagnostics, rulingVerifyViolation, taskRulingPin, type LintViolation } from "./task-linter.js";
 
@@ -194,6 +195,13 @@ export function needsMachineJudgement(task: Task, operatorReleases: ReadonlySet<
   const unjudged = task.risk_ruling === undefined || task.risk_ruling.pin !== taskRulingPin(task);
   if (task.author_class === "machine") return unjudged;
   return task.verify === "human" && !isRulingShaped(task) && unjudged;
+}
+
+/** W1-T12838: a machine record already released into the queue (`verify: auto`), not released by the operator, which
+ *  rule 2 re-measures: a remedy for a symptom that has stopped is retired before it is built. */
+export function releasedQueuedMachineTask(task: Task, operatorReleases: ReadonlySet<string> = new Set()): boolean {
+  return task.status === "queued" && task.retirement === undefined && task.author_class === "machine" && task.verify === "auto" &&
+    shardRelPath(task) !== undefined && !operatorReleases.has(task.id);
 }
 
 /** A record this judge parked under an escalate pin that still matches it: the records a re-ask reads (W1-T8830). */
@@ -706,9 +714,41 @@ function readState(path: string): MachineJudgeState {
 export interface MechanicalPort {
   /** Read once per pass: a record's symptom reading (undefined when its family has no reader) and whether the
    *  operator declined its ask. A reader that throws leaves the whole pass with no rule applied. */
-  read: (tasks: readonly Task[]) => { symptom: (task: Task) => SymptomReading | undefined; declined: (task: Task) => boolean };
+  read: (tasks: readonly Task[]) => {
+    symptom: (task: Task) => SymptomReading | undefined;
+    declined: (task: Task) => boolean;
+    /** W1-T12838: why a queued task is busy (a live claim, a run in flight, a pull request that may be open), or
+     *  undefined when it is idle. Absent or throwing: no released queued task is retired. */
+    activity?: (task: Task) => string | undefined;
+  };
   /** Writes rule 3's `ratify.approved` row through `approveParkedTask`, whose every guard stands: a non-zero code means no row. */
   release: (task: Task, provenance: MechanicalReleaseProvenance) => { code: number; message: string; released?: boolean };
+}
+
+/**
+ * W1-T12838: the span of history a ledger union in `stateDir` provably holds, from the OLDEST rotation's stamp (a
+ * rotation holds rows up to its stamp, so every later row is in a newer rotation or the live file) through `nowMs`.
+ * No rotation proves no span: undefined. An unlistable directory throws, so the reading built on it is unreadable.
+ */
+export function ledgerCorpusSpan(stateDir: string, nowMs: number, list: (dir: string) => string[] = readdirSync): SymptomReading["corpus"] {
+  const from = list(stateDir).flatMap((name) => rotationStampIso(name) ?? []).sort()[0];
+  return from === undefined ? undefined : { from, through: fixedClock(nowMs).iso() };
+}
+
+/**
+ * W1-T12838: {@link MechanicalPort}'s `activity`, read from the claim, run and pull-request rows of `ids` across the
+ * whole union: once, and only when a released record first asks. An incomplete union throws, so nothing is retired.
+ */
+export function unionTaskActivity(reader: typeof readLedgerUnionRecordsSync, stateDir: string, ids: ReadonlySet<string>): (task: Task) => string | undefined {
+  let rows: readonly Record<string, unknown>[] | undefined;
+  return (task) => {
+    if (rows === undefined) {
+      const read = reader(stateDir, { step: [...TASK_ACTIVITY_STEPS], refuseIncomplete: true, where: (row) => typeof row.task_id === "string" && ids.has(row.task_id) });
+      if (!read.ok) throw new Error(`incomplete ledger union: ${read.unread.join(", ")}`);
+      rows = read.rows;
+    }
+    return taskActivity(rows, task.id);
+  };
 }
 
 export interface MachineJudgePorts {
@@ -1141,6 +1181,8 @@ export function mechanicalDecisions(c: {
   port: MechanicalPort;
   plan: Plan;
   candidates: readonly Task[];
+  /** W1-T12838: released queued machine records, for which only rule 2's retirement is read ({@link queuedStoppedCauseRuling}). */
+  queued?: readonly Task[];
   released: ReadonlySet<string>;
   isMerged: (id: string) => boolean;
   log: MachineJudgePorts["log"];
@@ -1149,7 +1191,7 @@ export function mechanicalDecisions(c: {
   const live = c.plan.tasks.filter((t) => t.status === "queued" && t.verify === "human" && t.retirement === undefined);
   let read: ReturnType<MechanicalPort["read"]>;
   try {
-    read = c.port.read([...new Set([...live, ...c.candidates])]);
+    read = c.port.read([...new Set([...live, ...c.candidates, ...(c.queued ?? [])])]);
   } catch (e) {
     c.log("machine_judge.mechanical_unavailable", { reason: `the rules' evidence is unreadable: ${String((e as Error)?.message ?? e)}` });
     return decisions;
@@ -1171,6 +1213,22 @@ export function mechanicalDecisions(c: {
     if (!familyCounts.has(family)) familyCounts.set(family, live.filter((t) => machineFamily(t) === family).flatMap((t) => reading(t)?.count ?? []));
     return familyCounts.get(family)!;
   };
+  // W1-T12838: a released (`verify: auto`) record can be dispatched at any moment, so a rule retires it only while no
+  // claim, run or pull request is live for it, and a rule-2 zero only across a window its reader's corpus covers.
+  const retirable = (task: Task, ruling: MechanicalDecision): boolean => {
+    if (task.verify === "human" || ruling.verdict !== "retire") return true;
+    let busy: string | undefined;
+    if (ruling.rule === 2 && !corpusCoversWindow(reading(task) ?? { windowMs: 0 })) busy = "its symptom reading does not cover the rule's whole window";
+    else {
+      try {
+        busy = read.activity === undefined ? "no reader says whether it is claimed, in flight or has an open pull request" : read.activity(task);
+      } catch (e) {
+        busy = `its claims, runs and pull requests are unreadable: ${String((e as Error)?.message ?? e)}`;
+      }
+    }
+    if (busy !== undefined) c.log("machine_judge.mechanical_skipped", { task_id: task.id, rule: ruling.rule, reason: busy });
+    return busy === undefined;
+  };
   for (const task of c.candidates) {
     const ruling = mechanicalRuling(task, {
       operatorReleased: c.released.has(task.id), shipped: c.isMerged(task.id), declined: read.declined(task), symptom: reading(task),
@@ -1178,7 +1236,15 @@ export function mechanicalDecisions(c: {
     });
     if (!isMechanicalDecision(ruling)) continue;
     if (ruling.verdict === "release" && task.verify !== "human") continue;
+    if (!retirable(task, ruling)) continue;
     decisions.set(task.id, ruling);
+  }
+  for (const task of c.queued ?? []) {
+    if (decisions.has(task.id)) continue;
+    const ruling = queuedStoppedCauseRuling(task, {
+      operatorReleased: c.released.has(task.id), shipped: c.isMerged(task.id), declined: read.declined(task), symptom: reading(task), familyCounts: [],
+    });
+    if (ruling !== undefined && retirable(task, ruling)) decisions.set(task.id, ruling);
   }
   return decisions;
 }
@@ -1187,6 +1253,8 @@ export function mechanicalDecisions(c: {
  * W1-T10371: apply the rules to every record this pass would judge or re-ask (a due record or a parked
  * escalation), BEFORE any model is asked. Each decision is ledgered as `machine_judge.mechanical_ruling`; a
  * hold only when its symptom count moved, so a quiet record is not re-recorded every pass.
+ * W1-T12838: rule 2 also re-measures every released machine record still waiting in the queue, unless the operator
+ * declined the judge PR that retired it at its current pin.
  */
 function decideMechanically(c: {
   ports: MachineJudgePorts;
@@ -1204,7 +1272,11 @@ function decideMechanically(c: {
     !c.reapproval.has(t.id) && (dueIds.has(t.id) || parkedEscalation(t, c.released)) &&
     !c.excluded.has(judgementFamily(t)) && shardRelPath(t) !== undefined &&
     !(t.risk_ruling !== undefined && c.state.declined?.[t.id] === t.risk_ruling.pin));
-  const decisions = mechanicalDecisions({ port: c.ports.mechanical, plan: c.plan, candidates, released: c.released, isMerged: c.isMerged, log: c.ports.log });
+  const candidateIds = new Set(candidates.map((t) => t.id));
+  const queued = c.plan.tasks.filter((t) =>
+    !candidateIds.has(t.id) && !c.reapproval.has(t.id) && releasedQueuedMachineTask(t, c.released) &&
+    !c.excluded.has(judgementFamily(t)) && c.state.declined?.[t.id] !== taskRulingPin(t));
+  const decisions = mechanicalDecisions({ port: c.ports.mechanical, plan: c.plan, candidates, queued, released: c.released, isMerged: c.isMerged, log: c.ports.log });
   const held: Record<string, number> = {};
   for (const [id, decision] of decisions) {
     if (decision.verdict === "hold") {

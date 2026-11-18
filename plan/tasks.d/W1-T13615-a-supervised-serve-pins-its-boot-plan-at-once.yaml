@@ -15,7 +15,7 @@
   files:
     - src/lib/serve.ts
     - test/console-api/serve/a-supervised-serve-pins-its-boot-plan-at-once.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A gate built with pinBootPlan reloads the plan at the boot sha at construction, before any re-check"

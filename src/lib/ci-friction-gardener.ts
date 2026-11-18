@@ -19,7 +19,9 @@ import { loadPlanFromYaml, newTestPath, type Task } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { lintTask, proofResolvabilityViolations } from "./task-linter.js";
 import { MACHINE_SHARD_LINT_OPTIONS, machineShardFilingRefusal, machineShardLandingGuard, renderMachineShard } from "./machine-filing.js";
+import { retirementReopensAt, type RetirementDated } from "./mechanical-rulings.js";
 import {
+  CI_FRICTION_ESCALATE_RUNG,
   CI_FRICTION_REMEDIES_DOC,
   ciFrictionCauseState,
   ciFrictionRemedyRationale,
@@ -902,7 +904,7 @@ export function ciFrictionOrigin(cause: CiFrictionCause): string {
 
 /** What the plan says about every ci-friction cause: each task naming one, with when its build merged. */
 export interface CiFrictionPlanState {
-  tasks: CiFrictionRemedyTask[];
+  tasks: Array<CiFrictionRemedyTask & RetirementDated>;
   /** Shards naming a ci-friction origin that did not parse, with why. */
   unreadable?: string[];
   /** Set when the fetch failed and the last fetched main was read instead — named, never silent. */
@@ -955,7 +957,7 @@ export function pathTimesFromLog(text: string, pick: "oldest" | "newest"): Map<s
 
 /** Read every task whose `origin:` names a ci-friction cause from `refName`, and when each one's build
  *  merged: the commit whose body carries its `Remudero-Task:` line, else the commit that set it `merged`. */
-export function readCiFrictionPlanTasks(git: CiFrictionGit, shardsDir: string, refName = "origin/main", onUnreadable: (path: string, reason: string) => void = () => {}): CiFrictionRemedyTask[] {
+export function readCiFrictionPlanTasks(git: CiFrictionGit, shardsDir: string, refName = "origin/main", onUnreadable: (path: string, reason: string) => void = () => {}): Array<CiFrictionRemedyTask & RetirementDated> {
   let listed = "";
   try {
     listed = git(["grep", "-l", "-E", "^[[:space:]]*origin:[[:space:]]*[\"']?ci-friction:", refName, "--", shardsDir]);
@@ -980,11 +982,13 @@ export function readCiFrictionPlanTasks(git: CiFrictionGit, shardsDir: string, r
       group.push(commit);
     }
   }
-  const tasks: CiFrictionRemedyTask[] = [];
+  const tasks: Array<CiFrictionRemedyTask & RetirementDated> = [];
   for (const path of paths) {
     let parsed: ReturnType<typeof loadPlanFromYaml>;
+    let text = "";
     try {
-      parsed = loadPlanFromYaml(git(["show", `${refName}:${path}`]), path);
+      text = git(["show", `${refName}:${path}`]);
+      parsed = loadPlanFromYaml(text, path);
     } catch (error) {
       // One unparseable shard is reported by name, never fatal: the rest of the plan still decides.
       onUnreadable(path, String((error as Error)?.message ?? error).split("\n")[0]!);
@@ -993,7 +997,8 @@ export function readCiFrictionPlanTasks(git: CiFrictionGit, shardsDir: string, r
     for (const task of parsed.tasks) {
       if (typeof task.origin !== "string" || parseCiFrictionOrigin(task.origin) === undefined) continue;
       const retired = (task as { retirement?: unknown }).retirement !== undefined;
-      tasks.push({ id: task.id, origin: task.origin, status: String(task.status ?? "queued"), retired, files: [...(task.files ?? [])], path });
+      const reopensAt = retired ? retirementReopensAt(text) : undefined;
+      tasks.push({ id: task.id, origin: task.origin, status: String(task.status ?? "queued"), retired, files: [...(task.files ?? [])], path, ...(reopensAt ? { reopensAt } : {}) });
     }
   }
   const merges = bodyCreditedMergeTimes(git, refName, tasks.map(task => task.id));
@@ -1744,6 +1749,28 @@ export function remedyRoundsOf(rounds: readonly CiFrictionRound[]): GardenRemedy
 }
 
 /**
+ * W1-T12838: a cause whose top record was retired by rule 2 (cause stopped) or withdrawn unanswered reads as open again
+ * once a round of it lands after that retirement: the note said the symptom stopped or could be re-filed, and it costs
+ * again. It drafts at the next rung no record holds (a filing receipt there holds it in progress), escalating past the
+ * ladder's last rung as a debit does. Any other retirement is a decision and stays retired.
+ */
+export function reopenedCiFrictionCause(
+  s: CiFrictionCauseState, tasks: readonly (CiFrictionRemedyTask & RetirementDated)[], rounds: readonly RemedyRound[], receipts: ReadonlySet<string>,
+): CiFrictionCauseState {
+  if (s.state !== "retired") return s;
+  const at = Date.parse(tasks.find((t) => t.id === s.task.id)?.reopensAt ?? "");
+  if (!Number.isFinite(at) || !rounds.some((r) => r.causeKey === s.key && Date.parse(r.at ?? "") > at)) return s;
+  const rung = Math.max(...tasks.flatMap((t) => {
+    const o = parseCiFrictionOrigin(t.origin);
+    return o?.key === s.key ? [o.rung] : [];
+  })) + 1;
+  const origin = ciFrictionRungOrigin(s.key, rung);
+  if (receipts.has(origin)) return { state: "in_progress", key: s.key, task: { id: "(filing PR open)", origin, status: "filing", retired: false, files: [] } };
+  const prior = { task: s.task };
+  return rung >= CI_FRICTION_ESCALATE_RUNG ? { state: "escalate", key: s.key, rung, prior } : { state: "draft", key: s.key, rung, prior };
+}
+
+/**
  * Walk the costliest causes in price order and decide each one's place on the ladder. A merge conflict
  * is the hot-file gardener's (W1-T4803) and is never drafted here. The first cause that needs a draft or
  * a person is the pass's `next`; a draft whose owner cannot be located goes to a person rather than
@@ -1752,7 +1779,7 @@ export function remedyRoundsOf(rounds: readonly CiFrictionRound[]): GardenRemedy
 export function ciFrictionLadder(input: {
   priced: readonly CiFrictionCausePrice[];
   rounds: readonly CiFrictionRound[];
-  tasks: readonly CiFrictionRemedyTask[];
+  tasks: readonly (CiFrictionRemedyTask & RetirementDated)[];
   receipts: ReadonlySet<string>;
   escalated: ReadonlySet<string>;
   holds?: readonly LedgerRecord[];
@@ -1773,7 +1800,7 @@ export function ciFrictionLadder(input: {
       line.state = "delegated";
       continue;
     }
-    const s = ciFrictionCauseState(key, input.tasks, remedyRounds, input.nowMs, input.receipts);
+    const s = reopenedCiFrictionCause(ciFrictionCauseState(key, input.tasks, remedyRounds, input.nowMs, input.receipts), input.tasks, remedyRounds, input.receipts);
     line.state = s.state;
     if ("task" in s) line.task = s.task.id;
     if ("effect" in s) line.effect = s.effect.reason;

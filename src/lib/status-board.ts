@@ -9,7 +9,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { isQueueDispatchRunStart } from "./ledger.js";
+import { isQueueDispatchRunStart, queueDispatchRunStarts } from "./ledger.js";
 // Keep DEFAULT fs and call-time lookups: non-configurable ESM named bindings defeat spies.
 // Why: the TOCTOU-race test — docs/forensics/status-board.md
 import fs from "node:fs";
@@ -1468,10 +1468,10 @@ function distinctDispatchedTaskIds(lines: Array<Record<string, unknown>>): strin
  *  timestamps it discards. An unparseable row is skipped rather than allowed to corrupt a derived cadence. */
 function dispatchRunStarts(lines: Array<Record<string, unknown>>): Array<{ ts: string; parsed: number }> {
   const out: Array<{ ts: string; parsed: number }> = [];
-  for (const line of lines) {
+  // W1-T13249: and a run its dispatch claim refused before spend is not one either (`queueDispatchRunStarts`).
+  for (const line of queueDispatchRunStarts(lines)) {
     // W1-T2383 rank 3: QUEUE dispatches only — this cadence's own doc calls the bound "the longest observed gap between
     // DISPATCHES", and a lane run is not one.
-    if (!isQueueDispatchRunStart(line)) continue;
     const ts = typeof line.ts === "string" ? line.ts : undefined;
     const parsed = ts !== undefined ? Date.parse(ts) : NaN;
     if (ts !== undefined && Number.isFinite(parsed)) out.push({ ts, parsed });

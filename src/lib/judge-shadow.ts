@@ -1,9 +1,18 @@
+import { createHash } from "node:crypto";
+import { join } from "node:path";
 import { loadConfig, type Config } from "./config.js";
 import { askDecisionModel, DECISION_MODEL_SURFACE, DECISION_OUTPUT_MARGIN_TOKENS, resolveDecisionTarget, type DecisionAnsweredRow } from "./decision-model.js";
+import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
+import {
+  loadMounts, mountsPath, type CashShadowArm, type DecisionCandidate, type DecisionShadowArm, type JudgeMount, type JudgePrimary, type JudgeShadowArm,
+  type JudgeShadowOnlyRole, type JudgeThreshold, type Mounts,
+} from "./mounts.js";
 import { resolveOwnerRepoAtAsync } from "./owner-repo.js";
-import type { CashShadowArm, DecisionShadowArm, JudgeMount, JudgePrimary, JudgeShadowArm, JudgeShadowOnlyRole, JudgeThreshold, Mounts } from "./mounts.js";
 import { JUDGE_SHADOW_TRIAL_ID, type spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
-import { cashCapacityReadiness, learnedCashLimit, OpenWeightAllowanceExhaustedError, OpenWeightRequestTooLargeError, type ModelSurface } from "./worker-provider.js";
+import {
+  cashCapacityReadiness, isFoundryClaudeDeployment, learnedCashLimit, OPENWEIGHT_PRICES, openWeightDeploymentReady, OpenWeightAllowanceExhaustedError,
+  OpenWeightRequestTooLargeError, type ModelSurface,
+} from "./worker-provider.js";
 
 /**
  * lib/judge-shadow.ts — a cash model answers the same judgement beside a judge, in shadow.
@@ -16,6 +25,8 @@ import { cashCapacityReadiness, learnedCashLimit, OpenWeightAllowanceExhaustedEr
  * W1-T12417: a role's shadow may name a decision model (`shadow: <decision_models row>`); the role's fixed options go
  * to it as one choice question ({@link JUDGE_SHADOW_QUESTIONS}), and every fixed-option judge of
  * {@link FIXED_OPTION_JUDGE_ROLES} calls the same shadow.
+ * W1-T12422: `shadow: auto` draws one member of the role's pool per call ({@link shadowPoolMember}); a member is a
+ * decision model or a ready cash deployment whose direct judge replay for the role cleared {@link JUDGE_SHADOW_POOL_BAR}.
  * Every shadow is advisory: the caller acts on the primary's answer only.
  */
 
@@ -195,8 +206,8 @@ function shadowRecorder(log: ShadowLog, common: Record<string, unknown>): Shadow
 export async function runJudgeShadow<T>(request: JudgeShadowRequest<T>): Promise<JudgeShadowOutcome> {
   const arm = request.mount.shadow;
   if (arm === undefined) return { kind: "skipped" };
-  if (arm.provider === "decisions") {
-    // W1-T12417: not awaited, so the caller never waits on the decision model.
+  if (arm.provider === "decisions" || arm.provider === "auto") {
+    // W1-T12417: not awaited, so the caller never waits on the decision model. W1-T12422: nor on its pool's member.
     void shadowJudgeCall({ role: request.surface as FixedOptionJudgeRole, key: request.key, mount: request.mount, primaryArgs: request.primaryArgs,
       primary: {}, primaryAnswer: request.primaryVerdict, parse: request.parse, agreementKey: request.agreementKey,
       decisionAnswer: request.surface === "ci-judge" ? ciJudgeDecisionAnswer : request.agreementKey,
@@ -261,6 +272,8 @@ export interface ShadowJudgeCall<T> {
     learnedLimit?: typeof learnedCashLimit;
     /** The owner and repo of the checkout at a root, for the URL of a judged pull request. */
     ownerRepo?: (root: string) => Promise<{ owner: string; repo: string }>;
+    /** W1-T12422: the role's pool; production builds it from the mounts table, the ready cash rows and the replay record. */
+    pool?: (role: string) => JudgeShadowPoolMember[];
   };
 }
 
@@ -285,6 +298,7 @@ async function pullRequestUrl(root: string | undefined, number: number, ownerRep
  *  own answer before any shadow request is made. It never throws. */
 export async function shadowJudgeCall<T>(call: ShadowJudgeCall<T>): Promise<void> {
   const arm = call.mount.shadow;
+  if (arm?.provider === "auto") return poolShadow(call);
   if (arm?.provider === "decisions") return decisionShadow(call, arm);
   if (call.mount.provider === "cash" || (arm === undefined && !CASH_ROW_SHADOW_ROLES.has(call.role))) return;
   await new Promise<void>((resolve) => setImmediate(resolve));
@@ -483,3 +497,139 @@ export function judgeShadowSummary(rows: ReadonlyArray<Record<string, unknown>>,
   }));
 }
 
+
+// ── W1-T12422: the pool of `shadow: auto` ───────────────────────────────────────────────────
+
+/** PRIMARY CONTROL: what a member's newest judge replay for a role must show. Both numbers are the design's:
+ *  10% rejected cases, and W1-T12187's measured median judge call of $0.003 on gpt-6-luna as the cost ceiling. */
+export const JUDGE_SHADOW_POOL_BAR = { maxRejectedShare: 0.1, maxMedianCaseUsd: 0.003 } as const;
+/** The replay record under the state directory: role → member key → that member's newest replay figures. */
+export const JUDGE_SHADOW_POOL_FILE = "judge-shadow-pool.json";
+
+/** One member's newest direct judge replay for one role (W1-T12421's `judge_replay.finished` row). */
+export interface JudgeReplayFigures {
+  corpus: string;
+  sent: number;
+  rejected: number;
+  medianCaseUsd: number | null;
+  finishedAt: string;
+}
+
+export interface JudgeShadowPoolRecord {
+  replays: Record<string, Record<string, JudgeReplayFigures>>;
+}
+
+/** A pool member: its key (`decisions:<candidate>` or `cash:<deployment>`, the bake-off's key), its name and its arm. */
+export interface JudgeShadowPoolMember {
+  key: string;
+  name: string;
+  arm: CashShadowArm | DecisionShadowArm;
+}
+
+const isObjectRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+
+/** The replay record; an absent file is an empty record. A record that does not parse throws: no pool is guessed. */
+export function readJudgeShadowPoolRecord(stateDir: string): JudgeShadowPoolRecord {
+  const raw = readFileIfExists(join(stateDir, JUDGE_SHADOW_POOL_FILE));
+  if (raw === undefined) return { replays: {} };
+  const parsed = JSON.parse(raw) as unknown;
+  if (!isObjectRecord(parsed) || !isObjectRecord(parsed.replays)) throw new Error(`${JUDGE_SHADOW_POOL_FILE} is unreadable`);
+  return parsed as unknown as JudgeShadowPoolRecord;
+}
+
+/** Store one member's newest replay figures for one role. */
+export function recordJudgeReplayFigures(stateDir: string, role: string, key: string, figures: JudgeReplayFigures): void {
+  const record = readJudgeShadowPoolRecord(stateDir);
+  record.replays[role] = { ...record.replays[role], [key]: figures };
+  writeAtomic(join(stateDir, JUDGE_SHADOW_POOL_FILE), `${JSON.stringify(record, null, 2)}\n`);
+}
+
+/** Why replay figures keep a member out of the pool, or `undefined` when they clear {@link JUDGE_SHADOW_POOL_BAR}. */
+export function judgeReplayPoolRefusal(figures: JudgeReplayFigures | undefined): string | undefined {
+  if (figures === undefined) return "no judge replay for this role";
+  if (figures.sent === 0) return "its replay sent no case";
+  const share = figures.rejected / figures.sent;
+  if (share > JUDGE_SHADOW_POOL_BAR.maxRejectedShare)
+    return `its replay rejected ${(share * 100).toFixed(1)}% of ${figures.sent} cases, above ${JUDGE_SHADOW_POOL_BAR.maxRejectedShare * 100}%`;
+  if (figures.medianCaseUsd === null) return "its replay has no settled cost per case";
+  if (figures.medianCaseUsd > JUDGE_SHADOW_POOL_BAR.maxMedianCaseUsd)
+    return `its median settled cost per case is $${figures.medianCaseUsd.toFixed(4)}, above $${JUDGE_SHADOW_POOL_BAR.maxMedianCaseUsd}`;
+  return undefined;
+}
+
+/** The ready cash deployments a pool may hold: each priced, shaped and bounded deployment, except a Foundry Claude one. */
+export function readyCashShadowDeployments(): string[] {
+  return Object.keys(OPENWEIGHT_PRICES).filter((deployment) => openWeightDeploymentReady(deployment) && !isFoundryClaudeDeployment(deployment));
+}
+
+/** W1-T12422: a role's pool: every decision model and every ready cash deployment (not Foundry Claude) whose replay
+ *  for this role clears the bar, in name order. `excluded` names each other candidate with its reason. */
+export function judgeShadowPool(role: string, input: {
+  decisionModels: Readonly<Record<string, DecisionCandidate>>; cashDeployments: readonly string[]; record: JudgeShadowPoolRecord;
+}): { members: JudgeShadowPoolMember[]; excluded: Array<{ key: string; reason: string }> } {
+  const candidates: JudgeShadowPoolMember[] = [
+    ...Object.values(input.decisionModels).map((candidate): JudgeShadowPoolMember => ({ key: `decisions:${candidate.name}`, name: candidate.name,
+      arm: { provider: "decisions", deployment: candidate.deployment, candidate } })),
+    ...input.cashDeployments.filter((deployment) => !isFoundryClaudeDeployment(deployment)).map((deployment): JudgeShadowPoolMember => ({
+      key: `cash:${deployment}`, name: deployment, arm: { provider: "cash", deployment } })),
+  ];
+  const members: JudgeShadowPoolMember[] = [];
+  const excluded: Array<{ key: string; reason: string }> = [];
+  for (const candidate of candidates) {
+    const refusal = judgeReplayPoolRefusal(input.record.replays[role]?.[candidate.key]);
+    if (refusal === undefined) members.push(candidate);
+    else excluded.push({ key: candidate.key, reason: refusal });
+  }
+  const order = (m: JudgeShadowPoolMember) => `${m.name}\u0000${m.key}`;
+  return { members: members.sort((a, b) => order(a).localeCompare(order(b))), excluded };
+}
+
+/** W1-T12422: the pool member one call asks: a draw seeded on the role and the input digest over the members in name
+ *  order. The same input always draws the same member; over many inputs each member gets about the same share. */
+export function shadowPoolMember(role: string, inputDigest: string, pool: readonly JudgeShadowPoolMember[]): JudgeShadowPoolMember | undefined {
+  if (pool.length === 0) return undefined;
+  const order = (m: JudgeShadowPoolMember) => `${m.name}\u0000${m.key}`;
+  const sorted = [...pool].sort((a, b) => order(a).localeCompare(order(b)));
+  return sorted[createHash("sha256").update(JSON.stringify([role, inputDigest])).digest().readUInt32BE(0) % sorted.length];
+}
+
+/** The production pool: the decision models of the mounts table the judge runs from, the ready cash rows and the
+ *  replay record under the host's state directory. */
+function productionPool<T>(call: ShadowJudgeCall<T>, config: () => Config): (role: string) => JudgeShadowPoolMember[] {
+  return (role) => judgeShadowPool(role, {
+    decisionModels: loadMounts(mountsPath(call.primaryArgs.cwd)).decision_models ?? {},
+    cashDeployments: readyCashShadowDeployments(),
+    record: readJudgeShadowPoolRecord(join(config().root, "state")),
+  }).members;
+}
+
+/** W1-T12422, ADVISORY ONLY: draw one member of the role's pool and ask it as a named candidate is asked. An empty pool
+ *  asks nothing and writes nothing; a pool that cannot be read writes one skipped row. It never throws. */
+async function poolShadow<T>(call: ShadowJudgeCall<T>): Promise<void> {
+  let pool: JudgeShadowPoolMember[];
+  try {
+    pool = (call.decisions?.pool ?? productionPool(call, call.decisions?.config ?? loadConfig))(call.role);
+  } catch (error) {
+    shadowRecorder(call.log, { role: call.role, decision_key: call.key, shadow_model: "auto" })("judge_shadow.skipped",
+      { shadow_cost_usd: 0, reason: `the shadow pool is unreadable: ${error instanceof Error ? error.message : String(error)}` });
+    return;
+  }
+  const input = call.input ?? call.primaryArgs.prompt;
+  const member = shadowPoolMember(call.role, createHash("sha256").update(input).digest("hex"), pool);
+  if (member === undefined) return;
+  return shadowJudgeCall({ ...call, mount: { ...call.mount, shadow: member.arm } });
+}
+
+/** W1-T12422: the roles whose shadow is `auto` in this mounts table, by their shadow role name. */
+export function judgeShadowAutoRoles(mounts: Mounts): string[] {
+  const rows: Array<[string, JudgeMount | undefined]> = [["risk-judge", mounts.risk_judge], ["ci-judge", mounts.ci_judge],
+    ["fix-progress", mounts.fix_progress_judge], ["verify-human", mounts.verify_human_judge]];
+  return [...rows.filter(([, row]) => row?.shadow?.provider === "auto").map(([role]) => role),
+    ...Object.entries(mounts.judge_shadows ?? {}).filter(([, arm]) => arm?.provider === "auto").map(([role]) => role)];
+}
+
+/** W1-T12422: the corpus a role's direct judge replay reads (W1-T12421's corpora). The risk judge has its own; every
+ *  other role is screened on all of them, since no corpus of its own exists yet. */
+export function judgeShadowReplayCorpus(role: string): "risk-judge-dispositions" | "all" {
+  return role === "risk-judge" ? "risk-judge-dispositions" : "all";
+}
