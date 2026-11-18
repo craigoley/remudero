@@ -226,16 +226,19 @@ export function boardComputedProbe(
 }
 
 /**
- * `?bodies=N`: the supervisor passes the active generation's body count, so a standby is never thinner.
+ * `?bodies=N`: the supervisor passes the active generation's committed body count, so a standby is never thinner.
  * A failed warm load reads 0 bodies, so it blocks exactly when the active generation had some to serve.
+ * W1-T13600: `committed` counts only the bodies the store still holds. A fresh standby loads the store, so bodies the
+ * active built on demand and the store no longer holds can never appear in it; the supervisor's bar leaves them out.
  */
-export function readModelWarmProbe(readModel: Pick<ReadModelWorkerHandle, "bodies" | "state"> | undefined): ReadinessProbe {
+export function readModelWarmProbe(readModel: Pick<ReadModelWorkerHandle, "bodies" | "state" | "committedBodies"> | undefined): ReadinessProbe {
   return (query) => {
     if (!readModel) return { name: "read_model_warm", ok: true, detail: { readModel: false } };
     const bodies = readModel.bodies.size;
     const wanted = Number(query.get("bodies") ?? 0);
+    const committed = readModel.committedBodies?.();
     const warmBoot = readModel.state().warmBoot;
-    return { name: "read_model_warm", ok: bodies >= wanted, detail: { bodies, wanted, ...(warmBoot ? { warmBoot } : {}) } };
+    return { name: "read_model_warm", ok: bodies >= wanted, detail: { bodies, wanted, ...(committed === undefined ? {} : { committed }), ...(warmBoot ? { warmBoot } : {}) } };
   };
 }
 
