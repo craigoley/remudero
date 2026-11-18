@@ -52,7 +52,7 @@ import { goalObservationFromRow, type GoalObservation } from "./goals.js";
 import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { basename, join } from "node:path";
-import { Worker, isMainThread, parentPort, workerData } from "node:worker_threads";
+import { SHARE_ENV, Worker, isMainThread, parentPort, workerData } from "node:worker_threads";
 import { bundledWorkerUrl } from "./child-entry-argv.js";
 import { threadName } from "./thread-names.js";
 import { isQueueDispatchRunStart, MAX_RETAINED_LINES_PER_STEP } from "./ledger.js";
@@ -2854,7 +2854,7 @@ function startAnalyticsWorker(url: URL): AnalyticsWorkerCall {
     worker = undefined;
   };
   const spawn = (): Worker => {
-    const spawned = new Worker(url, { name: threadName("analyticsRefresh"), workerData: { kind: ANALYTICS_REFRESH_WORKER_KIND } });
+    const spawned = new Worker(url, { name: threadName("analyticsRefresh"), workerData: { kind: ANALYTICS_REFRESH_WORKER_KIND }, env: SHARE_ENV });
     spawned.on("message", (reply: AnalyticsWorkerReply) => {
       const waiting = pending.get(reply.id);
       pending.delete(reply.id);
