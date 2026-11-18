@@ -1659,7 +1659,10 @@ test("W1-T9114: the fix run path reads real fleet holds and ledgers each refusal
     ] as const) {
       const ctx = { taskId: FIX_TASK, runId };
       await assert.rejects(runDetachedWork(work, ctx, ports), { message: `fix dispatch refused: worker admission is held: ${reason}` });
-      const rows = readFileSync(ledgerPathFor({ root: f.root }), "utf8").trim().split("\n").map(line => JSON.parse(line));
+      const all = readFileSync(ledgerPathFor({ root: f.root }), "utf8").trim().split("\n").map(line => JSON.parse(line));
+      // W1-T13427: the hold read writes its timing row before the refusal.
+      assert.equal(all.at(-2)?.stage, "child-hold");
+      const rows = all.filter(row => row.step !== "sweep.fix.prepare_timing");
       const row = rows.at(-1);
       assert.equal(rows.length, runId === "work-fix-stop" ? 1 : 2);
       assert.deepEqual({ run_id: row.run_id, task_id: row.task_id, lane: row.lane, step: row.step,
