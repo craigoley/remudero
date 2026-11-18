@@ -21,7 +21,7 @@ const issue = (n: number, tag = "a"): BoardIssueRest => ({ number: n, url: `http
   updatedAt: `2026-11-17T0${n % 10}:${String(TAGS.indexOf(tag)).padStart(2, "0")}:00Z` });
 const issues = (count: number, tag = "a") => Array.from({ length: count }, (_, i) => issue(i + 1, tag));
 const closed = (n: number, tag: string): BoardPrRest => ({ number: n, url: `https://github.com/o/r/pull/${n}`, state: "MERGED",
-  headRefName: `run-W1-T${n}-1700000000000`, headRefOid: `sha-${n}`, body: `Remudero-Task: W1-T${n}`, title: `merged ${n} ${tag}`,
+  headRefName: `run-W1-T${n}-1700000000000`, headRefOid: `sha-${n}`, body: `Remudero-Task: W1-T${n}`, autoMergeRequest: null, title: `merged ${n} ${tag}`,
   updatedAt: `2026-11-17T0${n % 10}:${String(TAGS.indexOf(tag)).padStart(2, "0")}:00Z` });
 
 function root(t: Ctx): string {
