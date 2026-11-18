@@ -38,6 +38,8 @@ export interface InboxGardenerCandidate {
   successor?: { proposal: RetirementProposal; open: boolean };
   /** W1-T13682: the snapshot could not verify this proposal's board referent, so the pass leaves it alone. */
   referentUnverified?: boolean;
+  /** W1-T13714: this proposal's plan, registry or intent facts differ from the snapshot's, so the pass leaves it alone. */
+  sourceChanged?: boolean;
 }
 export interface InboxGardenerPack {
   scope: InboxGardenerScope; snapshotKey: string; generatedAt: string; checkedAt: string; codeSha: string;
@@ -110,10 +112,12 @@ export async function runInboxGardener(options: { stateDir: string; scope: Inbox
       if (existing && store.events.some(e => e.receipt.kind === "restore" && e.receipt.retirementId === existing.receipt.id)) {
         after = p.id; evaluated++; continue; // An unrelated change cannot undo an operator restoration.
       }
-      if (candidate.referentUnverified) {
-        // W1-T13682: never acted on. The marked digest can never equal a real one, so a later verified read re-judges it.
-        store.entries[p.id] = { digest: inboxSemanticDigest([inboxGardenerSemanticInput(candidate), "referent-unverified"]), decision: "defer_source",
-          reason: "Its referent could not be verified, so this pass skips it and records the gap" };
+      if (candidate.referentUnverified || candidate.sourceChanged) {
+        // W1-T13682 / W1-T13714: never acted on. The marked digest can never equal a real one, so a later matching read re-judges it.
+        const mark = candidate.referentUnverified ? "referent-unverified" : "source-changed";
+        store.entries[p.id] = { digest: inboxSemanticDigest([inboxGardenerSemanticInput(candidate), mark]), decision: "defer_source",
+          reason: candidate.referentUnverified ? "Its referent could not be verified, so this pass skips it and records the gap"
+            : "Its plan, registry or operator facts differ from the snapshot's, so this pass skips it and records the gap" };
         after = p.id; evaluated++; continue;
       }
       if (protectedCandidate(candidate, options.scope) || candidate.unansweredReply || candidate.resolvedByOperator || !candidate.task) {
@@ -181,8 +185,9 @@ export async function runInboxGardener(options: { stateDir: string; scope: Inbox
     }
     const complete = candidates.length === 0 || after === candidates.at(-1)?.proposal.id;
     store.cursor = { generation, after: complete ? "" : after }; writeInboxGardenerStore(options.stateDir, store);
-    const unverified = pack.candidates.filter(c => c.referentUnverified).length;
-    return { state: complete ? "complete" : "pending", complete, evaluated, retired, judged, proofReads, ...(unverified ? { unverified_referents: unverified } : {}) };
+    const unverified = pack.candidates.filter(c => c.referentUnverified).length, changed = pack.candidates.filter(c => c.sourceChanged).length;
+    return { state: complete ? "complete" : "pending", complete, evaluated, retired, judged, proofReads, ...(unverified ? { unverified_referents: unverified } : {}),
+      ...(changed ? { source_changed: changed } : {}) };
   }, clock).catch(error => ({ state: "failed", delivery: "unknown", complete: false, reason: String(error) }));
 }
 
@@ -331,8 +336,15 @@ export function defaultInboxGardenerPorts(options: { stateDir: string; scope: In
     const unverifiedReferents = new Set((snapshot?.classifications ?? []).filter(c => c.referentUnverified).map(c => c.proposalId));
     const censusGithub = snapshot?.attentionCensus?.sources.githubProjection ?? "unavailable";
     const github = censusGithub === "partial" && snapshot?.projectionIndeterminate === false && unverifiedReferents.size > 0 ? "observed" : censusGithub;
+    // W1-T13714: serve reloads its plan at each plan-only merge while the daemon's checkout moves only at boot, so the
+    // whole-population identity differed for hours (host 2026-11-18: 4 of 5 passes refused coverage:plan). With the same
+    // scope and per-proposal digests on both sides, only the proposals whose facts differ are skipped and counted.
+    const ownSource = inboxGardenerSource(proposals, plan.byId, options.scope, operatorIntents), snapshotSource = snapshot?.gardenerSource;
+    const sourceChanged = snapshotSource && snapshotSource.identity !== ownSource.identity && snapshotSource.items &&
+      JSON.stringify(snapshotSource.scope) === JSON.stringify(ownSource.scope)
+      ? new Set(Object.keys(ownSource.items).filter(id => snapshotSource.items![id] !== ownSource.items[id])) : undefined;
     return { scope: options.scope, snapshotKey: snapshot?.snapshotKey ?? "", generatedAt: snapshot?.generatedAt ?? "", checkedAt: clock.iso(), codeSha: options.codeSha,
-      coverage: { plan: snapshot?.gardenerSource?.identity === inboxGardenerSource(proposals, plan.byId, options.scope, operatorIntents).identity ? snapshot?.attentionCensus?.sources.plan ?? "unavailable" : "unavailable", registry: raw.kind === "ok" && ownership &&
+      coverage: { plan: snapshotSource?.identity === ownSource.identity || sourceChanged ? snapshot?.attentionCensus?.sources.plan ?? "unavailable" : "unavailable", registry: raw.kind === "ok" && ownership &&
         inboxSemanticDigest(snapshot?.proposals) === inboxSemanticDigest(proposals) ? "observed" : "unavailable", github,
         ledger: ledger.state, threads: threads.status === "ok" ? "observed" : "unavailable" },
       candidates: proposals.map(proposal => {
@@ -348,7 +360,8 @@ export function defaultInboxGardenerPorts(options: { stateDir: string; scope: In
             dependencyMerge: task.depends_on.map(id => ({ id, merged: !plan.byId.has(id) || snapshot?.gardenerDependencyEvidence === undefined ? null : snapshot.gardenerDependencyEvidence.find(value => value.id === id)?.merged ?? null })) } : {}),
           operatorIntent: inboxOperatorIntent(messages), unansweredReply: last?.role === "reply" && last.extra?.event === undefined,
           resolvedByOperator: verdicts.isRatified(proposal.id) || verdicts.isDeclined(proposal.id) !== undefined,
-          ...(unverifiedReferents.has(proposal.id) ? { referentUnverified: true } : {}) };
+          ...(unverifiedReferents.has(proposal.id) ? { referentUnverified: true } : {}),
+          ...(sourceChanged?.has(proposal.id) ? { sourceChanged: true } : {}) };
       }), ledgerEventIds: new Set(ledger.rows.flatMap(row => typeof row.dismissalAuditReceipt?.id === "string" ? [row.dismissalAuditReceipt.id] : [])) };
   };
   return { capture, judge: options.judge,
