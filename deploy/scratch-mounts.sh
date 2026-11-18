@@ -219,6 +219,30 @@ EOF
   return 0
 }
 
+# W1-T13278: a blue-green serve replacement runs BESIDE the live one, so it cannot share the live
+# container's /tmp (each supervisor names its generation sockets by its own pid, and both pids are
+# small numbers in their own pid namespaces) or its code checkout (the entrypoint checks out main in
+# it). Call after scratch_plan with the colour's suffix ("" is blue, today's placement): it moves
+# the per-container /tmp and the serve code dir to their suffixed twins, and nothing else, so both
+# colours share every other scratch bind. The moved dirs stay in SCRATCH_DIRS, so scratch_prepare
+# records them for the boot-time restore.
+scratch_serve_colour() {
+  local suffix="${1:-}" old_tmp="${SCRATCH_CONTAINER_TMP}" old_code="${SCRATCH_CODE_DIR:-}" new_tmp i
+  [ -n "${suffix}" ] && [ -n "${old_tmp}" ] || return 0
+  new_tmp="${old_tmp%/tmp}${suffix}/tmp"
+  SCRATCH_CONTAINER_TMP="${new_tmp}"
+  SCRATCH_BINDS="${SCRATCH_BINDS//"${old_tmp}	/tmp"/"${new_tmp}	/tmp"}"
+  for i in "${!SCRATCH_ARGS[@]}"; do
+    [ "${SCRATCH_ARGS[i]}" = "${old_tmp}:/tmp" ] && SCRATCH_ARGS[i]="${new_tmp}:/tmp"
+  done
+  for i in "${!SCRATCH_DIRS[@]}"; do
+    if [ "${SCRATCH_DIRS[i]}" = "${old_tmp}" ]; then SCRATCH_DIRS[i]="${new_tmp}"
+    elif [ -n "${old_code}" ] && [ "${SCRATCH_DIRS[i]}" = "${old_code}" ]; then SCRATCH_DIRS[i]="${old_code}${suffix}"; fi
+  done
+  [ -z "${old_code}" ] || SCRATCH_CODE_DIR="${old_code}${suffix}"
+  return 0
+}
+
 # Creates the planned directories and records them in <state-dir>/.scratch-mounts (the boot-time
 # restore's list). On any failure the plan is dropped, so the caller launches without the binds.
 scratch_prepare() {
