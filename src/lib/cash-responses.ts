@@ -1,5 +1,8 @@
 /** Deployment-specific Responses efforts; transport selection and request validation share this table. */
 export const CASH_RESPONSES_DEPLOYMENTS: Readonly<Partial<Record<string, readonly string[]>>> = {
+  // No per-effort probe is recorded (a worker has no cash key): only the efforts a cash row or the
+  // bake-off requests (mounts.yaml ladder), never a level copied from 6.1 Sol.
+  "gpt-6.2-sol": ["low", "medium", "high"],
   "gpt-6.1-sol": ["low", "medium", "high", "xhigh", "max"],
   "gpt-6.1-terra": ["none", "low", "medium", "high", "xhigh", "max"],
 };
