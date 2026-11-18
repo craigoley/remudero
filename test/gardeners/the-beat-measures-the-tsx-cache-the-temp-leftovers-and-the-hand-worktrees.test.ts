@@ -91,12 +91,14 @@ args=()
 for a in "$@"; do
   case "$a" in "$FIXTURE"/*|"$HOME"/*)
     args+=("$a")
-    printf '%s\\n' "$a" >> "$FIXTURE/walks"
-    if [ "$a" = "$FIXTURE/\${SLOW:-never}" ]; then touch "$FIXTURE/budget-spent"; exec sleep 10; fi
     ;;
   esac
 done
 printf '%s\\t' "\${args[@]}" >> "$FIXTURE/du-calls"; printf '\\n' >> "$FIXTURE/du-calls"
+for a in "\${args[@]}"; do
+  printf '%s\\n' "$a" >> "$FIXTURE/walks"
+  if [ "$a" = "$FIXTURE/\${SLOW:-never}" ]; then touch "$FIXTURE/budget-spent"; exec sleep 10; fi
+done
 p="\${@: -1}"
 case "$p" in
   "$FIXTURE"/account-tmp/*|"$FIXTURE"/system-tmp/*|"$FIXTURE"/scratch-tmp/*|"$HOME"/rmd-work)
