@@ -41,6 +41,8 @@ import type { CodeHealthProjectionInput } from "#src/lib/code-health-projection.
 import { createActionsView, type ActionsData } from "#src/lib/actions-view.js";
 import { createTaskView, taskViewKey, type TaskViewData } from "#src/lib/task-view.js";
 import { createDemandBook, TASK_VIEW_NAME } from "#src/lib/view-demand.js";
+import { createInboxThreadView, INBOX_THREAD_VIEW_NAME, inboxThreadViewKey } from "#src/lib/inbox-thread-view.js";
+import { inboxThreadId } from "#src/lib/inbox-thread.js";
 import { fakeGitHub } from "#test/helpers/fake-github.js";
 import { declaredBody, resolve, violations, type Schema } from "#test/helpers/openapi-strict.js";
 import { createBoardSnapshotCache } from "#src/lib/board-snapshot-cache.js";
@@ -190,7 +192,10 @@ async function materializeAll(root: string, stateDir: string, deps: ServeDeps): 
   assert.equal(published.state, "published", JSON.stringify(published));
   demand.want(CODE_HEALTH_VIEW_NAME, CODE_HEALTH_QUERY.slice(1));
   const codeHealth = createCodeHealthView({ stateDir, keys: () => demand.keys(CODE_HEALTH_VIEW_NAME) });
-  const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir }], views: [...READ_MODEL_VIEWS, now, instances, workstreams, actions, host, agent, incidents, task, codeHealth], demand, clock, holder: "schema-test", post: () => {} });
+  // W1-T13455: the inbox-thread view over the fixture's one operator proposal, built once the inbox pages below are held.
+  demand.want(INBOX_THREAD_VIEW_NAME, inboxThreadViewKey(inboxThreadId("ruling:schema")));
+  const inboxThread = createInboxThreadView({ inboxRoot: root, demand, clock });
+  const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir }], views: [...READ_MODEL_VIEWS, now, instances, workstreams, actions, host, agent, incidents, task, codeHealth, inboxThread], demand, clock, holder: "schema-test", post: () => {} });
   ticker.tick();
   // W1-T5055: core's analytics refresh, committed as the slow lane hands it over, so the analytics body carries an instance's metrics.
   const analytics = deriveAnalyticsSnapshot([], clock.iso());
@@ -233,7 +238,7 @@ function codeHealthInput(): CodeHealthProjectionInput {
 }
 
 /** The query each routed view is read with; a view missing here fails the corpus check below. */
-const QUERY: Record<string, string> = { "nav-badge": "", "read-model": "", repositories: "", now: "?instance=core", instances: "", inbox: "?section=needsYou", feedback: "", "needs-you": "", analytics: "", "daily-progress": "?date=today", [CODE_HEALTH_VIEW_NAME]: CODE_HEALTH_QUERY, workstreams: "", actions: "", host: "", agent: "?instance=core&part=history", incidents: "", task: `?${taskViewKey("core", "W1-T1")}` };
+const QUERY: Record<string, string> = { [INBOX_THREAD_VIEW_NAME]: `?${inboxThreadViewKey(inboxThreadId("ruling:schema"))}`, "nav-badge": "", "read-model": "", repositories: "", now: "?instance=core", instances: "", inbox: "?section=needsYou", feedback: "", "needs-you": "", analytics: "", "daily-progress": "?date=today", [CODE_HEALTH_VIEW_NAME]: CODE_HEALTH_QUERY, workstreams: "", actions: "", host: "", agent: "?instance=core&part=history", incidents: "", task: `?${taskViewKey("core", "W1-T1")}` };
 
 test("every registered view body validates against its declared schema", async (t) => {
   t.mock.method(systemClock, "now", clock.now);
@@ -255,6 +260,14 @@ test("every registered view body validates against its declared schema", async (
     assert.deepEqual(violations(body, declaredBody(`/v1/views/${name}`, "GET", 200)), [], `${name} sent ${JSON.stringify(body)}`);
     bodies.set(name, body);
   }
+
+  // W1-T13455 criterion 2: serve mounts /v1/views/inbox-thread and serves it with no switch entry (the switches file
+  // above names every other view but not inbox-thread), so the read above answered 200 against InboxThreadView.
+  assert.equal(bodies.get(INBOX_THREAD_VIEW_NAME)?.view, INBOX_THREAD_VIEW_NAME, "W1-T13455 criterion 2: inbox-thread answers 200 through serve with no switch entry");
+  // W1-T13455 criterion 3: the view's key cannot omit the thread id.
+  const noId = await fetch(`${url}/v1/views/${INBOX_THREAD_VIEW_NAME}`, { headers: READ });
+  assert.equal(noId.status, 400, "W1-T13455 criterion 3: a read without an id is refused with 400");
+  assert.match(await noId.text(), /needs \?id=/);
 
   // CONTROL: the bodies are populated, so optional fields were really validated, not skipped.
   assert.equal(((bodies.get("read-model")!.data as { shadow?: unknown[] }).shadow ?? []).length, 1, "the status body carries shadow readiness");

@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 
 import type { Config } from "../src/lib/config.js";
 import type { Plan } from "../src/lib/plan.js";
 import { buildSweepEffects, DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
-import { addedTestFilesAtHead, prMetadataRestArgs, repairPrMetadata, scopeAmendmentFromFixReport } from "../src/run-task.js";
+import { addedPlanFilingDiffAtHead, addedTestFilesAtHead, prMetadataRestArgs, repairPrMetadata, scopeAmendmentFromFixReport } from "../src/run-task.js";
 import { gitRepo } from "./helpers/git-repo.js";
 import { ghShim } from "./helpers/gh-shim.js";
 
@@ -161,6 +161,67 @@ test("metadata repair writes a live title and body in one PR edit", async () => 
     "api", "-X", "PATCH", "repos/acme/remudero/pulls/4459",
     "-f", `title=${writes[0].title}`, "-f", `body=${writes[0].body}`,
   ]);
+});
+
+test("W1-T13360: metadata repair writes a shard-derived block only for a plan-only no-header diff", async () => {
+  const attribution = "🤖 Generated with [Claude Code](https://claude.com/claude-code)";
+  const body = `File two tasks measured in the stuck-work review.\n\n## Why\nThe fleet left both red for hours.\n\n${attribution}\n`;
+  const shardDir = "plan/tasks.d";
+  const shardA = `${shardDir}/W9-T501-a-first-filed-task.yaml`;
+  const shardB = `${shardDir}/w9-t502-a-second-filed-task.yaml`;
+  const shardText = (id: string) => `- id: ${id}\n  title: "a fixture task"\n  repo: remudero\n  status: queued\n`;
+  const diff = [
+    { path: shardA, added: true, headText: shardText("W9-T501") },
+    { path: shardB, added: true, headText: shardText("W9-T502") },
+  ];
+  const writes: Array<{ title?: string; body?: string }> = [];
+  const result = await repairPrMetadata(
+    { prUrl: "https://github.com/acme/remudero/pull/501", headSha: "a".repeat(40) },
+    ["acceptance-author-gate"],
+    (_url, fields) => { writes.push(fields); },
+    () => ({ title: "feat(plan): file tasks", body, base: { ref: "main" } }),
+    () => [],
+    () => ({ kind: "read", files: [] }),
+    () => ({ kind: "read", files: diff, shardDir }),
+  );
+
+  assert.deepEqual(result, { repaired: true, reason: "edited body through the PR REST endpoint" });
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0]?.title, undefined, "a green title is not edited");
+  assert.match(writes[0]?.body ?? "", /- the W9-T501 shard is filed \| grep: id: W9-T501 in plan\/tasks\.d\/W9-T501-a-first-filed-task\.yaml/);
+  assert.match(writes[0]?.body ?? "", /- the W9-T502 shard is filed \| grep: id: W9-T502 in plan\/tasks\.d\/w9-t502-a-second-filed-task\.yaml/);
+
+  const mixedWrites: Array<{ title?: string; body?: string }> = [];
+  const mixed = await repairPrMetadata(
+    { prUrl: "https://github.com/acme/remudero/pull/502", headSha: "b".repeat(40) },
+    ["acceptance-author-gate"],
+    (_url, fields) => { mixedWrites.push(fields); },
+    () => ({ body, base: { ref: "main" } }),
+    () => [],
+    () => ({ kind: "read", files: [] }),
+    () => ({ kind: "read", files: [...diff, { path: "src/lib/sweep.ts", added: false }], shardDir }),
+  );
+  assert.equal(mixed.repaired, false, "a code change beside a shard is not a plan-only filing");
+  assert.equal(mixedWrites.length, 0, "the body is untouched when no claim can be derived safely");
+});
+
+test("W1-T13360: the production diff reader returns complete paths and text for added task shards", () => {
+  const repo = gitRepo({ kind: "plan-filing-diff" });
+  repo.git("remote", "add", "origin", repo.dir);
+  repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
+  const shardPath = "plan/tasks.d/W9-T501-a-new-task.yaml";
+  const shard = "- id: W9-T501\n  title: \"a fixture task\"\n  repo: remudero\n  status: queued\n";
+  mkdirSync(dirname(join(repo.dir, shardPath)), { recursive: true });
+  writeFileSync(join(repo.dir, shardPath), shard);
+  repo.git("add", shardPath);
+  repo.git("commit", "--quiet", "-m", "feat(plan): add a task shard");
+  const headSha = repo.git("rev-parse", "HEAD");
+
+  const diff = addedPlanFilingDiffAtHead(headSha, repo.dir);
+  assert.equal(diff.kind, "read");
+  if (diff.kind !== "read") return;
+  assert.equal(diff.shardDir, "plan/tasks.d");
+  assert.deepEqual(diff.files, [{ path: shardPath, added: true, headText: shard }]);
 });
 
 test("a body red with no safe mechanical repair escalates without writing metadata", async () => {
