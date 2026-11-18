@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { parseTasksFromYaml, TASK_RISKS, TASK_STATUSES, TASK_TYPES, type Plan, type Task } from "./plan.js";
 import { planDestinationRepository } from "./plan-destination.js";
 import { readOpsCatalogSnapshotAsync, type OpsCatalogApi, type OpsCatalogSnapshot } from "./ops-catalog-source.js";
@@ -34,6 +35,40 @@ function isParsedPlanTask(value: unknown): value is Task {
     (task.priority === undefined || typeof task.priority === "number");
 }
 
+/** W1-T13610: the canonical parser's verdict per serialized tasks text, so an unchanged plan is parsed once. Keyed on
+ *  the content, never the object: an in-place change makes a new key. The public plan, the ops plan and one previous
+ *  of each; the oldest entry goes first. A bound on entries, not on time. */
+const KEPT_SNAPSHOT_VERDICTS = 4;
+const snapshotVerdicts = new Map<string, boolean>();
+let snapshotParses = 0;
+
+/** How many canonical parses the snapshot check has run in this process: the W1-T13610 tests' counting seam. */
+export function snapshotParseCount(): number {
+  return snapshotParses;
+}
+
+function canonicalParseVerdict(serializedTasks: string, taskCount: number): boolean {
+  const key = `${taskCount}:${createHash("sha256").update(serializedTasks, "utf8").digest("hex")}`;
+  const kept = snapshotVerdicts.get(key);
+  if (kept !== undefined) {
+    snapshotVerdicts.delete(key);
+    snapshotVerdicts.set(key, kept);
+    return kept;
+  }
+  snapshotParses++;
+  let verdict: boolean;
+  try {
+    verdict = parseTasksFromYaml(serializedTasks, "secondary catalog shadow snapshot").length === taskCount;
+  } catch (error: unknown) {
+    // The parser refuses this text whenever it sees it, so its refusal is the verdict.
+    void error;
+    verdict = false;
+  }
+  snapshotVerdicts.set(key, verdict);
+  if (snapshotVerdicts.size > KEPT_SNAPSHOT_VERDICTS) snapshotVerdicts.delete(snapshotVerdicts.keys().next().value!);
+  return verdict;
+}
+
 function isParsedPlanSnapshot(value: unknown): value is Plan {
   try {
     if (value === null || typeof value !== "object") return false;
@@ -42,7 +77,7 @@ function isParsedPlanSnapshot(value: unknown): value is Plan {
     // A manually constructed snapshot can bypass parse-time constraints such as not_before and precondition.
     // Revalidate a detached serialization through the canonical plan parser before trusting any task.
     const serializedTasks = JSON.stringify(plan.tasks);
-    if (typeof serializedTasks !== "string" || parseTasksFromYaml(serializedTasks, "secondary catalog shadow snapshot").length !== plan.tasks.length) return false;
+    if (typeof serializedTasks !== "string" || !canonicalParseVerdict(serializedTasks, plan.tasks.length)) return false;
     const seen = new Set<string>();
     for (const value of plan.tasks) {
       if (!isParsedPlanTask(value)) return false;
