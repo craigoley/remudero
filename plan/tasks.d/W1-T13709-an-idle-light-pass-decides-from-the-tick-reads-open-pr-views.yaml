@@ -77,7 +77,8 @@
     5. AMENDED (2026-11-18): W1-T12236 criterion 3 in
        test/sweep/a-restart-reads-each-open-pull-request-once-before-the-first-review.test.ts asserts that idle
        and drain passes read their own views even when a fresh generation exists, which this task changes on
-       purpose. Narrow that test to the pass with no scope (the refill read); criteria 1, 2 and 4 here cover
+       purpose for scoped passes.
+       Narrow that test to the pass with no scope (the refill read); criteria 1, 2 and 4 here cover
        the idle and drain behaviour.
     NOT IN SCOPE: the pacer gap, the budget, the tick read itself, and the deadline value.
   falsifier: |
