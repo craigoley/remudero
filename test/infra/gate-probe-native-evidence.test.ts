@@ -58,7 +58,7 @@ test("gate probe diagnostics preserve the real missing-executable refusal", () =
   assert.ok(native.stdout === null || native.stdout === undefined);
   assert.ok(native.stderr === null || native.stderr === undefined);
   assert.throws(() => assertGateProbeRan("fixture", native), /status null; signal none; code ENOENT/);
-  assert.match(runRealGateCaller(), /source-size-signal ran \(status null; signal none; code ENOENT\)/);
+  assert.match(runRealGateCaller(), /source-size-signal(?: \([^\n]*\))? ran \(status null; signal none; code ENOENT\)/);
 });
 
 test("gate probe diagnostics preserve the real native timeout and signal", () => {
@@ -68,7 +68,7 @@ test("gate probe diagnostics preserve the real native timeout and signal", () =>
   assert.equal(native.stdout, null);
   assert.equal(native.stderr, null);
   assert.throws(() => assertGateProbeRan("fixture", native), /status null; signal SIGTERM; code ETIMEDOUT/);
-  assert.match(runRealGateCaller(), /source-size-signal ran \(status null; signal none; code ENOENT\)/);
+  assert.match(runRealGateCaller(), /source-size-signal(?: \([^\n]*\))? ran \(status null; signal none; code ENOENT\)/);
 });
 
 test("gate probe diagnostics retain ordinary real zero and one exits", () => {
