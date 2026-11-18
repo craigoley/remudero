@@ -589,10 +589,23 @@ fi
 DISPATCH_LAST_TS=""
 DISPATCH_BLOCK_REASON="none"
 if [ -f "$LEDGER" ]; then
-  DISPATCH_LINE="$(grep -F '"step":"run.start"' "$LEDGER" 2>/dev/null | grep -F '"lane":"run-task"' | tail -n 1)"
-  if [ -n "$DISPATCH_LINE" ]; then
-    DISPATCH_LAST_TS="$(printf '%s' "$DISPATCH_LINE" | grep -o '"ts":"[^"]*"' | head -n 1 | cut -d'"' -f4)"
-  fi
+  # W1-T13249: the newest run that PASSED its dispatch claim (`dispatch.claim` with proceed true), or the newest run.start
+  # of a run that took no claim — never a run the claim refused before spend (run.start is logged before the claim).
+  DISPATCH_LAST_TS="$(grep -E '"step":"(run\.start|dispatch\.claim)"' "$LEDGER" 2>/dev/null | awk '
+    function field(line, key,    m, v) {
+      if (!match(line, "\"" key "\":\"[^\"]*\"")) return ""
+      v = substr(line, RSTART, RLENGTH); sub("^\"" key "\":\"", "", v); sub("\"$", "", v); return v
+    }
+    index($0, "\"step\":\"dispatch.claim\"") {
+      rid = field($0, "run_id"); if (rid != "") claimed[rid] = 1
+      if (index($0, "\"proceed\":true") && (best == "" || field($0, "ts") > best)) best = field($0, "ts")
+      next
+    }
+    index($0, "\"lane\":\"run-task\"") { n++; rids[n] = field($0, "run_id"); tss[n] = field($0, "ts") }
+    END {
+      for (i = 1; i <= n; i++) if ((rids[i] == "" || !(rids[i] in claimed)) && tss[i] > best) best = tss[i]
+      print best
+    }')"
   BLOCK_LINE="$(grep -E '"step":"(daemon_selfrestart_for_freshness|daemon\.pause|dispatch\.skipped)"' "$LEDGER" 2>/dev/null | tail -n 1)"
   if [ -n "$BLOCK_LINE" ]; then
     BLOCK_STEP="$(printf '%s' "$BLOCK_LINE" | grep -o '"step":"[^"]*"' | head -n 1 | cut -d'"' -f4)"

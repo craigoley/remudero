@@ -2516,3 +2516,28 @@ export function isQueueDispatchRunStart(line: Record<string, unknown>): boolean 
   const type = line.type;
   return type === undefined || type === "implement";
 }
+
+/** W1-T13249: run ids whose dispatch claim REFUSED them before spend — a `dispatch.claim` row with `proceed: false` and
+ * none with `proceed: true` (a reclaimed silent claim logs a second, proceeding row for the same run). A run on a path
+ * that takes no claim has no such row and is never in this set. */
+export function claimRefusedRunIds(lines: Iterable<Record<string, unknown>>): Set<string> {
+  const refused = new Set<string>();
+  const passed = new Set<string>();
+  for (const line of lines) {
+    if (line.step !== "dispatch.claim" || typeof line.run_id !== "string") continue;
+    if (line.proceed === true) passed.add(line.run_id);
+    else if (line.proceed === false) refused.add(line.run_id);
+  }
+  for (const id of passed) refused.delete(id);
+  return refused;
+}
+
+/** W1-T13249: the queue dispatches in `lines` — {@link isQueueDispatchRunStart} rows, minus runs the dispatch claim
+ * refused before spend (`run.start` is logged BEFORE the claim, so a refused run left one). The one predicate every
+ * dispatch-stall reader shares. A claim-passed run, and a run on a path that takes no claim, count as before. */
+export function queueDispatchRunStarts<T extends Record<string, unknown>>(lines: readonly T[]): T[] {
+  const refused = claimRefusedRunIds(lines);
+  return lines.filter(
+    (line) => isQueueDispatchRunStart(line) && !(typeof line.run_id === "string" && refused.has(line.run_id)),
+  );
+}
