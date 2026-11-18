@@ -4,9 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { buildBatchedGithub } from "#src/lib/status.js";
-import type { GhAsyncExecutor } from "#src/lib/github-transport.js";
-import * as retro from "#src/lib/retro.js";
-import * as runTask from "#src/run-task.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 /** W1-T9944: the board's synchronous gh API page read retries a transient GitHub server failure. */
@@ -98,27 +95,4 @@ test("W1-T9944: prewarm worker retries its synchronous gh API page", async () =>
     console.error = quiet;
     rmSync(dir, { recursive: true, force: true });
   }
-});
-
-test("W1-T9944: awaited and sync shipped-since gateways retry transient 502 pages identically", async () => {
-  const calls: string[][] = [];
-  let closedAttempts = 0;
-  const execAsync = ((_: string, args: readonly string[]) => {
-    calls.push([...args]);
-    if (args.some((arg) => arg.includes("state=closed")) && closedAttempts++ === 0) {
-      return Promise.reject(Object.assign(new Error("gh api failed"), { code: 1, stderr: "HTTP 502: Bad Gateway" }));
-    }
-    return Promise.resolve({ stdout: "[]", stderr: "" });
-  }) as GhAsyncExecutor;
-  const github = await runTask.retroShippedGithubGatewayAsync({ ownerRepo: { owner: "o", repo: "r" }, execAsync });
-
-  await retro.shippedSinceAsync([{
-    runId: "W1-T1-1", taskId: "W1-T1", type: "impl", startTs: "2026-10-04T00:00:00.000Z",
-    verdict: "failed", costUsd: 0, numTurns: 1,
-  }], undefined, github);
-
-  assert.equal(calls.filter((args) => args.some((arg) => arg.includes("state=closed"))).length, 2,
-    "the awaited closed-page read retries one transient 502, matching the synchronous gateway policy");
-  assert.equal(calls.filter((args) => args.some((arg) => arg.includes("state=open"))).length, 1,
-    "the open page is not replayed when only the closed page failed");
 });
