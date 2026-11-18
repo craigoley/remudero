@@ -7,7 +7,9 @@
 // spec's reservation, as the actor `run_child`. It awaits the run's fire-and-forget work (the paired trials) before its terminal
 // status, and SIGTERM aborts the run through the AbortController the worker spawns chain (ADR 0007 A.7).
 import { readFileSync } from "node:fs";
+import { Socket } from "node:net";
 import { basename } from "node:path";
+import type { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { isMainThread } from "node:worker_threads";
 
@@ -19,6 +21,7 @@ import { markRunChildProcessActor } from "./lib/ledger.js";
 import { appendLedger } from "./lib/ledger.js";
 import { loadConfig } from "./lib/config.js";
 import { ledgerPathFor } from "./lib/ledger-path.js";
+import { acceptOfferedOpsCatalogBlobs, OPS_CATALOG_MAX_OFFER_BYTES } from "./lib/ops-catalog-source.js";
 import { observeSelectedRegistry, selectedRegistryObserverFromIntent, withSelectedRegistryContext,
   type RegistryObservationSink } from "./lib/selected-registry-consumers.js";
 import type { Plan, Task } from "./lib/plan.js";
@@ -85,6 +88,52 @@ export interface RunChildMainPorts {
 }
 
 const defaultLoadRunPath = (): Promise<unknown> => import("./run-task.js");
+
+/** W1-T13691: how long a run child waits for its parent's ops catalog offer to end. A later offer is dropped. */
+const RUN_CHILD_OPS_OFFER_WAIT_MS = 5_000;
+export const OPS_CATALOG_BLOBS_OFFERED_STEP = "ops_catalog.blobs_offered";
+
+/** W1-T13691: the offer read to its end, or undefined when it ends late, fails, or passes the byte bound. Never rejects. */
+export function readOfferedOpsCatalogBlobs(source: Readable): Promise<Buffer | undefined> {
+  return new Promise((resolve) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let done = false;
+    const finish = (payload: Buffer | undefined): void => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      source.destroy();
+      resolve(payload);
+    };
+    const timer = setTimeout(() => finish(undefined), RUN_CHILD_OPS_OFFER_WAIT_MS);
+    source.on("data", (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > OPS_CATALOG_MAX_OFFER_BYTES) finish(undefined);
+      else chunks.push(chunk);
+    });
+    source.on("end", () => finish(Buffer.concat(chunks)));
+    source.on("error", () => finish(undefined));
+    source.on("close", () => finish(undefined));
+  });
+}
+
+/** W1-T13691: read the parent's offer on fd 3, keep the blobs that pass the checks, and ledger the counts. Never throws. */
+async function takeOfferedOpsCatalogBlobs(spec: RunChildSpec, stderr: (text: string) => void): Promise<void> {
+  try {
+    let pipe: Socket | undefined;
+    try { pipe = new Socket({ fd: 3, readable: true, writable: false }); }
+    catch (error) {
+      // No fd 3 pipe is no offer: the run reads every blob from GitHub, as before.
+      stderr(`run-child: no ops catalog offer pipe on fd 3: ${String(error)}\n`);
+    }
+    const counts = acceptOfferedOpsCatalogBlobs(pipe ? await readOfferedOpsCatalogBlobs(pipe) : undefined);
+    appendLedger(ledgerPathFor(loadConfig()), { run_id: spec.runId, task_id: spec.taskId, step: OPS_CATALOG_BLOBS_OFFERED_STEP, ...counts });
+  } catch (error) {
+    // The run goes on with no kept blobs and reads them from GitHub; the child's stderr names the failure.
+    stderr(`run-child: the offered ops catalog blobs were not taken: ${String(error)}\n`);
+  }
+}
 
 function argValue(argv: readonly string[], flag: string): string | undefined {
   const at = argv.indexOf(flag);
@@ -199,6 +248,7 @@ export async function runChildMain(argv: readonly string[], deps: RunChildMainPo
       status("failed", "spec", {}, contractMismatchFailure("spec names detached work this entry cannot read"));
       return 1;
     }
+    if (value.opsCatalogBlobsOffered) await takeOfferedOpsCatalogBlobs(value, stderr);
     let planSnapshot: PlanSnapshotSeam | undefined;
     if (work === undefined && !options.skipGitSync) {
       const handOver = planSnapshotHandOver(spec.value.planSnapshotPath);

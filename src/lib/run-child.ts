@@ -43,6 +43,7 @@ import { hostWorktreeGitAsync } from "./worktree-git.js";
 import { INSTALLATION_SHARE_DIVISOR_ENV, runChildInstallationEnv } from "./installation-budget-start.js";
 import { killProcessGroup } from "./worker-containment.js";
 import { execFileRouted } from "./spawn-helper.js";
+import { keptOpsCatalogBlobsForChild } from "./ops-catalog-source.js";
 import type { ReviewerCodeFreshness } from "./self-sync.js";
 
 export const RUN_CHILD_SHADOW_STEP = "run_child.shadow";
@@ -689,7 +690,8 @@ export interface SpawnRunChildPorts {
   /** The pin lock's wait and clock seams (engine-tree.ts pinEngineForRun); default the real ones. */
   enginePin?: EnginePinOptions;
   launch?: (engine: EngineRef, args: readonly string[], log: Log) => EngineChildLaunch;
-  spawn?: (command: string, args: readonly string[], options: { cwd: string; env: NodeJS.ProcessEnv; stderrFd: number }) => ChildProcess;
+  /** `offerPipe` adds fd 3 as a pipe, for the verified ops catalog blobs (W1-T13691). */
+  spawn?: (command: string, args: readonly string[], options: { cwd: string; env: NodeJS.ProcessEnv; stderrFd: number; offerPipe?: true }) => ChildProcess;
   /** Admission and the reservation, in the daemon, before the spawn. The default is {@link reserveRunChild}. */
   reserve?: (entryKind: RunChildEntryKind, runId: string, admission: { signal: AbortSignal; sinceMs?: number }) => Promise<LearnedReservation>;
   /** W1-T10001: the fleet STOP/PAUSE hold, read again once the reservation admits and before the spawn. Default: the local flag files under `input.root`. */
@@ -813,7 +815,26 @@ async function reserveWhilePending(
 }
 
 const defaultRunChildSpawn: NonNullable<SpawnRunChildPorts["spawn"]> = (command, args, options) =>
-  nodeSpawn(command, [...args], { cwd: options.cwd, env: options.env, detached: true, stdio: ["ignore", "ignore", options.stderrFd] });
+  nodeSpawn(command, [...args], {
+    cwd: options.cwd, env: options.env, detached: true,
+    stdio: options.offerPipe ? ["ignore", "ignore", options.stderrFd, "pipe"] : ["ignore", "ignore", options.stderrFd],
+  });
+
+export const RUN_CHILD_OPS_BLOBS_UNSENT_STEP = "run_child.ops_blobs_unsent";
+
+/** W1-T13691: write the offer to the child's fd 3 with the async stream API and end it. A failed write is ledgered once. */
+function offerOpsCatalogBlobs(child: ChildProcess, payload: Buffer, row: { task_id: string; run_id: string }, log: Log): void {
+  let recorded = false;
+  const unsent = (reason: string): void => {
+    if (recorded) return;
+    recorded = true;
+    log(RUN_CHILD_OPS_BLOBS_UNSENT_STEP, { ...row, reason });
+  };
+  const pipe = child.stdio?.[3];
+  if (!pipe || !("write" in pipe)) return unsent("the child has no fd 3 pipe");
+  pipe.on("error", (error: unknown) => unsent(reasonOf(error)));
+  pipe.end(payload);
+}
 
 /**
  * W1-T12950: the run children of an instance split one installation share by the host worker budget the
@@ -874,6 +895,9 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
     const entryResolvedAt = clock();
     entryMs = entryResolvedAt - engineResolvedAt;
     const admitted = await input.plan();
+    // W1-T13691: a task the public plan holds never reads the ops catalog, so its child is offered nothing.
+    const offer = admitted.plan.tasks.some((task) => (task as { id?: unknown } | null)?.id === input.taskId)
+      ? undefined : keptOpsCatalogBlobsForChild(input.taskId);
     dir = runDir(input.stateRoot, runId);
     launch = { ...entry, argv: [...entry.argv, "--run-dir", dir] };
     log(CHILD_ENTRY_SPAWNED_STEP, childEntrySpawnedRow(RUN_CHILD_ENTRY.name, "run", launch));
@@ -914,6 +938,7 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
         engine: current, planSnapshotPath: snapshot.path,
         reservationId: runReservation.id ?? "", options,
         ...(input.work ? { work: input.work } : {}),
+        ...(offer ? { opsCatalogBlobsOffered: true } : {}),
       } as RunChildSpec), ports.enginePin);
     } catch (error) {
       inFlightRunDirs.delete(dir);
@@ -933,10 +958,11 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
     child = (ports.spawn ?? defaultRunChildSpawn)(process.execPath, [...nodeArgs, ...launch.argv], {
       // W1-T13179: beside the divisor, the registry file this daemon read at its start and its wait bound.
       cwd: launch.cwd, env: { ...(ports.env ?? process.env), [INSTALLATION_SHARE_DIVISOR_ENV]: String(shareDivisor), ...runChildInstallationEnv() },
-      stderrFd,
+      stderrFd, ...(offer ? { offerPipe: true as const } : {}),
     });
     if (child.pid === undefined) throw new Error("the run child has no pid (spawn failed)");
     reservation.bindRoot(child.pid);
+    if (offer) offerOpsCatalogBlobs(child, offer, { task_id: input.taskId, run_id: runId }, log);
   } catch (error) {
     inFlightRunDirs.delete(runDir(input.stateRoot, runId));
     try {
