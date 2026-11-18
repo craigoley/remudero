@@ -13,6 +13,7 @@ import { ghExec } from "./github-transport.js";
 import { PR_TERMINAL_STEP } from "./ledger-carry.js";
 import { ledgerRotationEntries, readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { machineShardFilingRefusal, machineShardLandingGuard, renderMachineShard } from "./machine-filing.js";
+import { retirementReopensAt, type RetirementDated } from "./mechanical-rulings.js";
 import { loadPlanFromYaml, newTestPath, parseTasksFromYaml } from "./plan.js";
 import { blockerOwnerModule, PR_BLOCKERS, type PrBlocker } from "./pr-blocker.js";
 import { resolveRepoLayout } from "./repo-layout.js";
@@ -213,17 +214,19 @@ export function readLadderPlan(repoRoot: string, kind: LadderKind): CiFrictionPl
   let listed = "";
   try { listed = git(["grep", "-l", "-E", `^[[:space:]]*origin:[[:space:]]*[\"']?${kind.prefix}:`, "origin/main", "--", shards]); }
   catch (error) { if ((error as { status?: number }).status !== 1) throw error; }
-  const tasks: CiFrictionRemedyTask[] = [];
+  const tasks: Array<CiFrictionRemedyTask & RetirementDated> = [];
   const unreadable: string[] = [];
   for (const path of listed.trim().split("\n").filter(Boolean).map(p => p.replace("origin/main:", ""))) {
     try {
       // W1-T12025: one shard is not a plan. `loadPlanFromYaml` resolves depends_on and superseded_by inside the blob
       // it is given, so a ladder shard naming a task in another shard read as unreadable and failed the pass
       // (W1-T11062 superseded_by W1-T11172, 2026-11-10). The shard's own schema is still checked here.
-      for (const task of parseTasksFromYaml(git(["show", `origin/main:${path}`]), path)) {
+      const text = git(["show", `origin/main:${path}`]);
+      for (const task of parseTasksFromYaml(text, path)) {
         if (!task.origin || !parseOrigin(kind, task.origin)) continue;
+        const reopensAt = task.retirement !== undefined ? retirementReopensAt(text) : undefined;
         tasks.push({ id: task.id, origin: task.origin, status: task.status, retired: task.retirement !== undefined,
-          files: [...(task.files ?? [])], path });
+          files: [...(task.files ?? [])], path, ...(reopensAt ? { reopensAt } : {}) });
       }
     } catch (error) {
       const reason = `${path}: ${String(error)}`;
@@ -346,8 +349,10 @@ function inventoryOf(records: readonly LedgerRecord[], tasks: readonly CiFrictio
  * The shared rung logic: price the episodes' cause keys, find each cause's remedy among the plan's tasks, measure the
  * effect of a merged one, and name the next draft or escalation. A cause with a remedy still open drafts nothing.
  * W1-T12548: a draft `fileable` refuses is `skipped` with its reason and the walk goes on; an escalation is never skipped.
+ * W1-T12838: a top record retired by rule 2 (cause stopped) or withdrawn reads as retired only until a charge on its cause
+ * ends after that retirement; from then the cause drafts at the next rung, as a debit does.
  */
-export function ladderOf(kind: LadderKind, episodes: Episode[], records: readonly LedgerRecord[], tasks: readonly CiFrictionRemedyTask[],
+export function ladderOf(kind: LadderKind, episodes: Episode[], records: readonly LedgerRecord[], tasks: readonly (CiFrictionRemedyTask & RetirementDated)[],
   now: number, thresholds: ReadonlyMap<string, number> = new Map(), fileable?: LadderFileable): Inventory {
   const charges = episodes.flatMap(e => e.charges);
   const priced = priceEpisodes(episodes, now);
@@ -369,7 +374,11 @@ export function ladderOf(kind: LadderKind, episodes: Episode[], records: readonl
     let prior: Prior | undefined;
     let unverifiable: string | undefined;
     if (mine.some(t => !t.retired && !t.mergedAt)) state = "in_progress";
-    else if (top?.retired && !top.mergedAt) state = "retired";
+    else if (top?.retired && !top.mergedAt) {
+      const reopensAt = Date.parse(top.reopensAt ?? "");
+      if (Number.isFinite(reopensAt) && charges.some(c => c.key === price.key && c.end > reopensAt)) { rung++; prior = { task: top }; }
+      else state = "retired";
+    }
     else if (top?.mergedAt) {
       // expiring-fixture: exempt -- effect fixtures use an injected fixed Clock, independent of wall time
       const merge = Date.parse(top.mergedAt);
