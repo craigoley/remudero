@@ -21194,6 +21194,8 @@ export async function retroShippedGithubGatewayAsync(
     appendLedger(ledgerPathFor(loadConfig()), { run_id: "RETRO-SHIPPED", task_id: "retro", step, ...fields }));
   const pageTimeoutMs = opts.pageTimeoutMs ?? RETRO_SHIPPED_PAGE_TIMEOUT_MS;
   const commitTimeoutMs = opts.commitTimeoutMs ?? RETRO_MERGED_COMMITS_TIMEOUT_MS;
+  const ghServerRetryAttempts = 3;
+  const ghServerRetryDelayMs = 250;
   const commitGit = asyncGit(opts.commitCwd ?? process.cwd(), { maxBuffer: 1 << 24 });
   // boundGitCall aborts the signal it hands the runner exactly when the bound fires, so an aborted one names a timeout.
   let commitSignal: AbortSignal | undefined;
@@ -21213,17 +21215,23 @@ export async function retroShippedGithubGatewayAsync(
     return answer.out;
   };
   const ghPage = async (args: string[]): Promise<string> => {
-    try {
-      const out = await ghTextAsync(args, { timeout: pageTimeoutMs, maxBuffer: 1 << 26 }, opts.execAsync);
-      answers.set(keyOf("gh", args), { out });
-      return out;
-    } catch (e) {
-      const err = e as { killed?: boolean; code?: unknown; stderr?: unknown; message?: string };
-      if (err.killed) throw new ShippedReadTimeoutError(`retro shipped-since read: gh ${args.slice(0, 2).join(" ")} timed out after ${pageTimeoutMs}ms and was killed`);
-      // The sync gateway classifies `status` and `stderr`; an async exec carries the exit status as `code`.
-      const failure = Object.assign(new Error(err.message ?? String(e)), { status: typeof err.code === "number" ? err.code : null, stderr: String(err.stderr ?? "") });
-      answers.set(keyOf("gh", args), { error: failure });
-      throw failure;
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        const out = await ghTextAsync(args, { timeout: pageTimeoutMs, maxBuffer: 1 << 26 }, opts.execAsync);
+        answers.set(keyOf("gh", args), { out });
+        return out;
+      } catch (e) {
+        const err = e as { killed?: boolean; code?: unknown; stderr?: unknown; message?: string };
+        if (err.killed) throw new ShippedReadTimeoutError(`retro shipped-since read: gh ${args.slice(0, 2).join(" ")} timed out after ${pageTimeoutMs}ms and was killed`);
+        // The sync gateway classifies `status` and `stderr`; an async exec carries the exit status as `code`.
+        const failure = Object.assign(new Error(err.message ?? String(e)), { status: typeof err.code === "number" ? err.code : null, stderr: String(err.stderr ?? "") });
+        if (/\bHTTP\s+(?:502|503|504)\b/i.test(`${failure.stderr}\n${failure.message}`) && attempt + 1 < ghServerRetryAttempts) {
+          await new Promise((resolve) => setTimeout(resolve, ghServerRetryDelayMs * (attempt + 1)));
+          continue;
+        }
+        answers.set(keyOf("gh", args), { error: failure });
+        throw failure;
+      }
     }
   };
   const load = async (miss: { tool: "gh" | "git"; args: string[] }): Promise<void> => {
