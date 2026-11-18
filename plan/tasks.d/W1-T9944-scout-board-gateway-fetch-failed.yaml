@@ -15,7 +15,7 @@
     - test/console-api/board/scout-board-gateway-fetch-failed.test.ts
   acceptance:
     - claim: "board_gateway.fetch_failed stops recurring: its cause is fixed rather than its rows hidden"
-      proof: "grep: test(\"W1-T9944: board_gateway.fetch_failed no longer recurs\" in test/console-api/board/scout-board-gateway-fetch-failed.test.ts"
+      proof: "grep: test(\"W1-T9944: board_gateway.fetch_failed no longer recurs\" in test/scout-board-gateway-fetch-failed.test.ts"
   note: "Filed by the scout gardener (W1-T5454). The scout measures this step again once the build merges and credits or debits its class by whether the rows stopped. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person."
   rationale: |
     The ledger step board_gateway.fetch_failed carries a failure shape and landed rows in both halves of the trailing 7 days: 1 in the older half, 2 in the newer.
