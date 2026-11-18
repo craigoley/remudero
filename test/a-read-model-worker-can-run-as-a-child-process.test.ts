@@ -3,7 +3,7 @@
  * RMD_READ_MODEL_PROCESS=on it runs as a child process: the same entry, the same message stream, its own heap.
  */
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -11,6 +11,7 @@ import { pathToFileURL } from "node:url";
 import { forkWorkerEntry } from "#src/lib/child-entry-argv.js";
 import { createReadModelWorker, READ_MODEL_PROCESS_CHILD_ARG, READ_MODEL_PROCESS_STOP_WAIT_MS, READ_MODEL_PROCESS_SWITCH, threadViews } from "#src/lib/read-model-worker.js";
 import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 type TestCtx = { after: (fn: () => void | Promise<void>) => void };
 const LIVE = "ledger.ndjson";
@@ -123,6 +124,26 @@ test("W1-T13205 criterion 3: a refreshed GH_TOKEN reaches the child before its n
   for (const run of ticks) run();
   writeFileSync(join(w.ledgerDir, LIVE), `${JSON.stringify({ ts: new Date().toISOString(), step: "run.start", task_id: "W1-T2", run_id: "again" })}\n`, { flag: "a" });
   await until(() => token() === "token-two", "the refreshed token reached the child", 60_000);
+});
+
+test("W1-T13205: the child entry run directly takes its init, writes the stop receipt, and exits 0 by itself", async (t) => {
+  const w = world(t, "child-direct");
+  const receipt = join(readModelFixtureDir(t, "child-direct-receipt").dir, "stopped");
+  const url = pathToFileURL(join(REPO_ROOT, "src", "lib", "read-model-worker.ts"));
+  const { child } = forkWorkerEntry(url, [READ_MODEL_PROCESS_CHILD_ARG],
+    { execArgv: [...process.execArgv], serialization: "advanced", stdio: ["ignore", "inherit", "inherit", "ipc"] });
+  t.after(() => void child.kill("SIGKILL"));
+  const messages: Array<{ type?: string; step?: string }> = [];
+  child.on("message", (m: { type?: string; step?: string }) => void messages.push(m));
+  const exited = new Promise<number | null>((resolve) => child.once("exit", (code) => resolve(code)));
+  child.send({ type: "init", stopReceipt: receipt, data: { catalogBridgeVersion: 1, kind: "remudero-read-model", stateDir: w.stateDir,
+    instances: [{ name: "core", ledgerDir: w.ledgerDir }], tickMs: 100, viewsModule: w.viewsModule } } as never);
+  await until(() => messages.some((m) => m.type === "state"), "the child ran the worker main and sent state");
+  child.send({ type: "env", GH_TOKEN: "direct-token" } as never);
+  child.send({ type: "stop" } as never);
+  assert.equal(await exited, 0, "the child left on its own after releasing its leases, with no kill");
+  assert.ok(messages.some((m) => m.type === "log" && m.step === "read_model.stopped"), "the stop was reported");
+  assert.equal(readFileSync(receipt, "utf8"), "stopped\n", "the receipt was written");
 });
 
 test("the real view-lane worker enters through the read-model worker module", async (t) => {
