@@ -8,6 +8,7 @@ import { test } from "node:test";
 import { parse as parseYaml } from "yaml";
 import { canonicalWorkerProviderId, ConfigValidationError, enabledWorkerProviders, validateConfig, type Config } from "#src/lib/config.js";
 import { loadMounts, mountsPath, MountsError, TierInvariantError, validateMounts } from "#src/lib/mounts.js";
+import { FAIL_CLOSED_JUDGE_ROWS } from "#src/lib/config-gardener.js";
 import {
   ProviderRoutingPolicyError,
   writeProviderRoutingPolicyOverride,
@@ -913,30 +914,22 @@ test("the verify-human judge rides openweight, and the fail-closed judges delibe
   // parsed object could never fail. Verified by adding a routed `risk_judge:` row and watching the
   // object-based form still pass; this source-text form catches it.
   const mountsSrc = readFileSync(join(REPO_ROOT, ".remudero", "mounts.yaml"), "utf8");
-  // Spelled out per lane rather than looped. A loop interpolates the lane name at RUNTIME, so the
-  // source text never contains it, and this criterion's proof -- which greps this file for the very
-  // claim it makes -- could not see the assertion that substantiates it. Identical force: one
-  // `doesNotMatch` against the same source per lane; only the message is now a literal.
-  // W1-T12187 gave the risk judge a row of its own (the model and effort it already rode, so nothing
-  // moves). The claim therefore narrows from "no row" to "no provider on the row": a row naming a
-  // provider routes the judge off the subscription, which is what this guard forbids.
-  const riskJudgeRow = /^risk_judge:(.*)$/m.exec(mountsSrc);
-  assert.ok(riskJudgeRow, "the risk judge's own row must be present for this guard to measure it");
-  assert.doesNotMatch(
-    riskJudgeRow![1]!,
-    /provider\s*:/,
-    "risk_judge must NOT be routed while it fails closed — a flaky deployment would manufacture escalations, not permissive defaults",
-  );
-  assert.equal(
-    mounts.risk_judge?.provider,
-    undefined,
-    "the parsed risk_judge row must carry no provider while it fails closed",
-  );
-  assert.doesNotMatch(
-    mountsSrc,
-    /^ruling_judge:/m,
-    "ruling_judge must NOT be routed while it fails closed — a flaky deployment would refuse rulings rather than fall back to permissive ones",
-  );
+  // W1-T13501: one list. The config gardener's cash class skips the same FAIL_CLOSED_JUDGE_ROWS, so the
+  // two cannot drift apart. For each name: a row line, when present, names no provider, and the parsed row
+  // (when Mounts declares that key) has none. A row naming a provider routes the judge off the subscription.
+  const parsed = mounts as unknown as Record<string, { provider?: string } | undefined>;
+  let measured = 0;
+  for (const name of FAIL_CLOSED_JUDGE_ROWS) {
+    const rowLine = new RegExp(`^${name}:(.*)$`, "m").exec(mountsSrc);
+    if (rowLine) {
+      measured++;
+      assert.doesNotMatch(rowLine[1]!, /provider\s*:/,
+        `${name} must NOT be routed while it fails closed — a flaky deployment would manufacture escalations or refused rulings, not permissive defaults`);
+    }
+    assert.equal(parsed[name]?.provider, undefined, `the parsed ${name} row must carry no provider while it fails closed`);
+  }
+  // The risk judge's own row (W1-T12187) is on the list, so the line check above measured at least one row.
+  assert.ok(measured > 0, "a fail-closed judge's own row must be present for this guard to measure it");
   // And the positive control: the same form DOES see the rows that are routed, so a zero above is
   // a measurement rather than a pattern that matches nothing.
   assert.match(mountsSrc, /^verify_human_judge:/m, "the source-text form must be able to see a routed row at all");
