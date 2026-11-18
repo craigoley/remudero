@@ -31,6 +31,7 @@
     Filed in the public plan because core cannot yet read a core task filed in the private catalog, which is the
     failure this task diagnoses. It re-files private W1-T13699 under a new id with this public contract.
     Reservation note: refs/rmd-id/W1-T13705 was reserved before filing.
+    reservation hand-off: run-unfiled-1795011600001 -> claude/project-thread-vtlqln
   design: |
     1. src/lib/ops-catalog-source.ts: a closed OpsCatalogHttpStatusClass ("4xx" | "5xx" | "auth" | "transport").
        defaultOpsCatalogApi classifies gh's status (HTTP_DIAGNOSTIC) before it drops the message; get() keeps the

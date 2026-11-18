@@ -41,6 +41,7 @@
     Filed in the public plan on purpose: rmd review exits task-metadata-unavailable when the private catalog is
     unreadable (src/cli/commands/review.ts, review.catalog.unreadable), and core cannot read it yet.
     Reservation note: refs/rmd-id/W1-T13700 was reserved before filing.
+    reservation hand-off: run-unfiled-1795010400001 -> claude/project-thread-vtlqln
   design: |
     1. .remudero/daemon-instances.yaml: the ops row's `mode: shadow` becomes `mode: live`. Add a header note under
        the W1-T13498 note naming the ruling and the host step.
