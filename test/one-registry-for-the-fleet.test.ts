@@ -388,6 +388,47 @@ test("recycle-container and install-host-units accept the project layer's fields
   assert.match(installRefused.stderr, /unknown field 'bogus_field'/, "control: the probe sees a refusal");
 });
 
+test("W1-T13498 both shell readers accept a mode: shadow row and still refuse an unknown field", (t) => {
+  const dir = fixtureDir(t);
+  mkdirSync(join(dir, "state", "state"), { recursive: true });
+  mkdirSync(join(dir, "claude"), { recursive: true });
+  const accepted = join(dir, "shadow.yaml");
+  const refused = join(dir, "unknown.yaml");
+  writeFileSync(accepted, shellRow(dir, "    mode: shadow"));
+  writeFileSync(refused, shellRow(dir, "    mode: shadow\n    bogus_field: x"));
+
+  const reader = (registryPath: string) =>
+    spawnSync(BASH_BIN, ["-c",
+      'source "$1"; selected_registry_init "$2" demo fixture || exit; printf selected-reader-ready',
+      "selected-reader-control", join(REPO_ROOT, "deploy", "recycle-container.sh"), REPO_ROOT], {
+      encoding: "utf8", cwd: REPO_ROOT, env: { ...process.env, RMD_INSTANCE_REGISTRY: registryPath },
+    });
+  const recycleOk = reader(accepted);
+  assert.equal(recycleOk.status, 0, recycleOk.stderr);
+  assert.equal(recycleOk.stdout, "selected-reader-ready", "recycle-container accepts mode: shadow");
+  const recycleRefused = reader(refused);
+  assert.notEqual(recycleRefused.status, 0, "control: an unknown field beside mode is still refused");
+  assert.match(recycleRefused.stderr, /REFUSING -- selected registry unavailable \(malformed\)/);
+
+  const install = (registryPath: string, name: string) =>
+    spawnSync(BASH_BIN, [join(REPO_ROOT, "deploy", "install-host-units.sh"), "--install", "--instance", "demo"], {
+      encoding: "utf8",
+      cwd: REPO_ROOT,
+      env: {
+        ...process.env,
+        RMD_INSTANCE_REGISTRY: registryPath,
+        RMD_UNIT_DIR: join(dir, "systemd", name),
+        RMD_BIN_DIR: join(dir, "bin", name),
+      },
+    });
+  const installed = install(accepted, "shadow");
+  assert.equal(installed.status, 0, installed.stderr);
+  assert.doesNotMatch(installed.stderr, /unknown field|mode must be/);
+  const installRefused = install(refused, "unknown");
+  assert.notEqual(installRefused.status, 0, "control: install-host-units refuses the unknown field");
+  assert.match(installRefused.stderr, /unknown field 'bogus_field'/);
+});
+
 // W1-T9435: keep the old parser/route/shell controls above beside the explicit opt-in contract.
 test("selected registry precedence never falls back after explicit failure", async (t) => {
   const { readSelectedInstanceRegistry } = await import("../src/lib/instance-registry-selection.js");
