@@ -9,13 +9,26 @@ import { CASH_RESPONSES_DEPLOYMENTS } from "./cash-responses.js";
 import { invoiceLeadEligibility, readNewestInvoiceVerdictsAsync } from "./cash-invoice-reconcile.js";
 import { readLedgerUnionRecordsSync } from "./ledger-grep.js";
 import { isFoundryClaudeDeployment, OPENWEIGHT_REASONING_EFFORTS } from "./worker-provider.js";
+import { systemClock } from "./clock.js";
+import { judgeReplayPoolRefusal, recordJudgeReplayFigures, type JudgeReplayFigures } from "./judge-shadow.js";
+import type { JudgeReplayFinishedRow } from "./judge-replay-batch.js";
 
+/** W1-T12422: a decision model is billed `decisions` and keyed `decisions:<candidate>`, apart from `cash:<deployment>`. */
 export interface DeployedModel {
   model: string;
-  billing: BakeoffCandidate["billing"];
+  billing: BakeoffCandidate["billing"] | "decisions";
   efforts: readonly string[];
   readinessDigest?: string;
 }
+
+/** W1-T12422: one direct judge replay of one model, and the shadow roles whose pool its figures decide. */
+export interface JudgeReplayOutcome {
+  roles: readonly string[];
+  row: Pick<JudgeReplayFinishedRow, "corpus" | "outcome" | "reason" | "sent" | "rejected" | "median_case_settled_usd" | "settled_usd">;
+}
+
+/** A replay stopped by a 429 or a budget refusal bought no trial: the model stays untrialed and is tried on a later pass. */
+const RETRIED_STOPS: ReadonlySet<string> = new Set(["rate-limited", "budget-refused"]);
 export interface DeploymentBakeoffCandidate extends BakeoffCandidate {
   /** The deployment's pinned thinking level; the incumbent may omit it for legacy mounts. */
   effort?: string;
@@ -34,7 +47,8 @@ export function findUntrialedModels(deployed: readonly DeployedModel[], trialed:
 }
 
 export function deploymentCandidates(models: readonly DeployedModel[], incumbent: DeploymentBakeoffCandidate): DeploymentBakeoffCandidate[] {
-  return [incumbent, ...models.flatMap((model) => {
+  // A decision model answers typed questions only: it has no inbox-draft arm.
+  return [incumbent, ...models.filter((model): model is DeployedModel & { billing: BakeoffCandidate["billing"] } => model.billing !== "decisions").flatMap((model) => {
     // Responses and Foundry Claude send effort natively; a chat deployment with no effort row drops reasoning_effort
     // at transport, so its effort arms would only repeat thinking off.
     const native = CASH_RESPONSES_DEPLOYMENTS[model.model] !== undefined || isFoundryClaudeDeployment(model.model);
@@ -47,7 +61,11 @@ export function deploymentCandidates(models: readonly DeployedModel[], incumbent
   })];
 }
 
-interface TrialState { trialed: string[]; readinessDigests?: Record<string, string>; pending?: { id: string; models: string[]; proposal?: Proposal } }
+interface TrialState {
+  trialed: string[]; readinessDigests?: Record<string, string>; pending?: { id: string; models: string[]; proposal?: Proposal };
+  /** W1-T12422: the models whose direct judge replay ran, and the readiness digest it ran at. */
+  judgeTrialed?: string[]; judgeDigests?: Record<string, string>;
+}
 
 export function readBakeoffTrialState(stateDir: string): TrialState {
   let raw: string;
@@ -60,6 +78,9 @@ export function readBakeoffTrialState(stateDir: string): TrialState {
   if (!Array.isArray(state.trialed) || state.trialed.some((id) => typeof id !== "string") ||
     (state.readinessDigests !== undefined && (state.readinessDigests === null || typeof state.readinessDigests !== "object" ||
       Array.isArray(state.readinessDigests) || Object.values(state.readinessDigests).some((digest) => typeof digest !== "string"))) ||
+    (state.judgeTrialed !== undefined && (!Array.isArray(state.judgeTrialed) || state.judgeTrialed.some((id) => typeof id !== "string"))) ||
+    (state.judgeDigests !== undefined && (state.judgeDigests === null || typeof state.judgeDigests !== "object" || Array.isArray(state.judgeDigests) ||
+      Object.values(state.judgeDigests).some((digest) => typeof digest !== "string"))) ||
     (state.pending && (typeof state.pending.id !== "string" || !Array.isArray(state.pending.models) ||
       state.pending.models.some((id) => typeof id !== "string") ||
       (state.pending.proposal && (state.pending.proposal.id !== state.pending.id || typeof state.pending.proposal.summary !== "string"))))) {
@@ -73,6 +94,28 @@ export interface DeploymentBakeoffInput {
   deployed: readonly DeployedModel[];
   incumbent: DeploymentBakeoffCandidate;
   replay?: (candidates: readonly DeploymentBakeoffCandidate[]) => Promise<BakeoffRow[]>;
+  /** W1-T12422: the direct judge replay of one cash deployment or decision model, for each `shadow: auto` role. */
+  judgeReplay?: (model: DeployedModel) => Promise<JudgeReplayOutcome[]>;
+}
+
+/** W1-T12422: the replay figures one finished replay stores for the pool. */
+function replayFigures(row: JudgeReplayOutcome["row"], finishedAt: string): JudgeReplayFigures {
+  return { corpus: row.corpus, sent: row.sent, rejected: row.rejected, medianCaseUsd: row.median_case_settled_usd, finishedAt };
+}
+
+/** W1-T12422: the proposal's table of judge replay figures, one line per model and corpus, naming each pool refusal. */
+export function renderJudgeReplays(outcomes: ReadonlyArray<{ key: string; outcome: JudgeReplayOutcome }>): string {
+  if (outcomes.length === 0) return "";
+  const lines = outcomes.map(({ key: id, outcome: { roles, row } }) => {
+    const refusal = judgeReplayPoolRefusal(replayFigures(row, ""));
+    const share = row.sent === 0 ? "-" : `${((row.rejected / row.sent) * 100).toFixed(1)}%`;
+    const median = row.median_case_settled_usd === null ? "-" : `$${row.median_case_settled_usd.toFixed(4)}`;
+    const verdict = row.outcome !== "finished" ? `not trialed: ${row.outcome}${row.reason ? ` (${row.reason})` : ""}`
+      : refusal === undefined ? "joins the pool" : `stays out: ${refusal}`;
+    return `| ${id} | ${roles.join(", ")} | ${row.corpus} | ${row.sent} | ${share} | ${median} | ${verdict} |`;
+  });
+  return ["Judge replays (W1-T12421's direct lane) for the `shadow: auto` roles:", "",
+    "| Model | Roles | Corpus | Cases sent | Rejected | Median $ per case | Pool |", "| --- | --- | --- | --- | --- | --- | --- |", ...lines].join("\n");
 }
 
 /** Claim before spending: an abandoned sweep or a restart cannot buy a second trial. */
@@ -102,7 +145,7 @@ export async function runDeploymentBakeoff(input: DeploymentBakeoffInput): Promi
     };
     // Recover the report write independently of the paid replay.
     if (state.pending) return [publish()];
-    if (!input.replay) return [];
+    if (!input.replay && !input.judgeReplay) return [];
     if (missing) {
       const history = readLedgerUnionRecordsSync(input.stateDir, { step: "inbox.bakeoff", refuseIncomplete: true });
       if (!history.ok) throw new Error(`bake-off ledger history is unreadable; refusing to spend: ${history.unread.join(", ")}`);
@@ -124,19 +167,27 @@ export async function runDeploymentBakeoff(input: DeploymentBakeoffInput): Promi
       if (state.trialed.includes(key(model)) && model.readinessDigest && state.readinessDigests[key(model)] === undefined)
         state.readinessDigests[key(model)] = model.readinessDigest;
     }
-    const models = findUntrialedModels(input.deployed, state.trialed, state.readinessDigests);
+    // W1-T12422: a decision model gets the judge replay only; a cash deployment gets both; Foundry Claude neither.
+    const models = input.replay ? findUntrialedModels(input.deployed.filter((model) => model.billing !== "decisions"), state.trialed, state.readinessDigests) : [];
+    state.judgeTrialed ??= [];
+    state.judgeDigests ??= {};
+    const judged = input.judgeReplay ? findUntrialedModels(input.deployed.filter((model) => model.billing !== "subscription" &&
+      !isFoundryClaudeDeployment(model.model)), state.judgeTrialed, state.judgeDigests) : [];
     save();
-    if (models.length === 0) return [];
+    if (models.length === 0 && judged.length === 0) return [];
     const ids = models.map(key);
+    const judgedIds = judged.map(key);
     const id = `bakeoff:${randomUUID()}`;
     state.trialed = [...new Set([...state.trialed, ...ids])];
     for (const model of models) if (model.readinessDigest) state.readinessDigests[key(model)] = model.readinessDigest;
-    state.pending = { id, models: ids };
+    state.judgeTrialed = [...new Set([...state.judgeTrialed, ...judgedIds])];
+    for (const model of judged) if (model.readinessDigest) state.judgeDigests[key(model)] = model.readinessDigest;
+    state.pending = { id, models: [...new Set([...ids, ...judgedIds])] };
     save();
     let summary: string;
     try {
       const candidates = deploymentCandidates(models, input.incumbent);
-      const rows = await input.replay(candidates);
+      const rows = models.length > 0 && input.replay ? await input.replay(candidates) : [];
       // Capacity refusals bought no trial. Keep them eligible when the learned quota changes.
       const skipped = models.filter((model) => {
         const arms = candidates.filter((c) => c.id.startsWith(`${key(model)}:`));
@@ -145,8 +196,25 @@ export async function runDeploymentBakeoff(input: DeploymentBakeoffInput): Promi
       state.trialed = state.trialed.filter((id) => !skipped.includes(id));
       for (const id of skipped) delete state.readinessDigests[id];
       // W1-T10858: an open-weight arm is marked not eligible to lead until Azure's bill reconciles with its list price.
-      const eligibility = invoiceLeadEligibility(rows, await readNewestInvoiceVerdictsAsync(input.stateDir));
-      summary = `Deployment bake-off for ${ids.join(", ")}. Compare the new models and thinking levels with the incumbent; the operator picks. Routing is unchanged.\n\n${renderBakeoff(rows)}${eligibility ? `\n\n${eligibility}` : ""}`;
+      const eligibility = models.length === 0 ? "" : invoiceLeadEligibility(rows, await readNewestInvoiceVerdictsAsync(input.stateDir));
+      // W1-T12422: one replay at a time; a 429 or a budget stop leaves the model untrialed for a later pass.
+      const replays: Array<{ key: string; outcome: JudgeReplayOutcome }> = [];
+      for (const model of judged) {
+        const outcomes = await input.judgeReplay!(model);
+        for (const outcome of outcomes) {
+          replays.push({ key: key(model), outcome });
+          if (outcome.row.outcome === "finished") {
+            for (const role of outcome.roles) recordJudgeReplayFigures(input.stateDir, role, key(model), replayFigures(outcome.row, systemClock.iso()));
+          }
+        }
+        if (outcomes.some((o) => o.row.outcome === "stopped" && RETRIED_STOPS.has(o.row.reason ?? ""))) {
+          state.judgeTrialed = state.judgeTrialed.filter((trialed) => trialed !== key(model));
+          state.judgeDigests = Object.fromEntries(Object.entries(state.judgeDigests).filter(([trialed]) => trialed !== key(model)));
+        }
+      }
+      const inbox = models.length === 0 ? "" : `${renderBakeoff(rows)}${eligibility ? `\n\n${eligibility}` : ""}`;
+      const judgeTable = renderJudgeReplays(replays);
+      summary = `Deployment bake-off for ${[...new Set([...ids, ...judgedIds])].join(", ")}. Compare the new models and thinking levels with the incumbent; the operator picks. Routing is unchanged.\n\n${[inbox, judgeTable].filter(Boolean).join("\n\n")}`;
     } catch (error) {
       // Preserve the provider or replay failure verbatim in the operator-facing proposal.
       summary = `Deployment bake-off failed for ${ids.join(", ")}: ${String(error)}. No completed table is available. Re-run manually to measure it; routing is unchanged.`;

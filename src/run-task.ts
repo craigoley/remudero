@@ -1134,7 +1134,8 @@ import {
 } from "./lib/inbox.js";
 import { declinedWithReceipts } from "./lib/inbox-verdict-receipts.js";
 import { learnedBakeoffLimit, renderBakeoff, runInboxBakeoff, type BakeoffCandidate } from "./lib/inbox-bakeoff.js";
-import type { DeployedModel, DeploymentBakeoffCandidate } from "./lib/bakeoff-trigger.js";
+import type { DeployedModel, DeploymentBakeoffCandidate, JudgeReplayOutcome } from "./lib/bakeoff-trigger.js";
+import { judgeShadowAutoRoles, judgeShadowReplayCorpus } from "./lib/judge-shadow.js";
 import { CASH_RESPONSES_DEPLOYMENTS } from "./lib/cash-responses.js";
 import { runSweepBakeoff } from "./lib/sweep.js";
 import { OPENWEIGHT_PRICES, OPENWEIGHT_CONTEXT_WINDOWS, OPENWEIGHT_TEMPERATURE, openWeightDeploymentReady, OpenWeightAllowanceExhaustedError } from "./lib/worker-provider.js";
@@ -22804,7 +22805,9 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
         runInboxBakeoff, deps.bakeoff?.repoClone);
       await runSweepBakeoff({
         stateDir: join(root, "state"),
-        deployed: measurementBakeoffDeployments(bakeoffMounts),
+        // W1-T12422: the decision models join the deployed list; each new or changed model gets the direct judge replay.
+        deployed: [...measurementBakeoffDeployments(bakeoffMounts), ...decisionBakeoffDeployments(bakeoffMounts)],
+        judgeReplay: createJudgeShadowReplay(bakeoffConfig, repoRoot, bakeoffMounts),
         incumbent: { id: "incumbent", label: `incumbent ${baseMount.model} (${baseMount.effort})`,
           model: baseMount.model, billing: baseMount.provider === "cash" ? "cash" : "subscription",
           effort: baseMount.effort, tools: true },
@@ -37656,6 +37659,34 @@ export async function inboxBakeoffCommand(
   }
   console.log(renderBakeoff(await replayCandidates()));
   return 0;
+}
+
+/** W1-T12422: each decision_models row as a bake-off model keyed `decisions:<candidate>`, with a readiness digest over
+ *  its mounts row, so a new or changed row is replayed once. It gets the direct judge replay only. */
+export function decisionBakeoffDeployments(mounts: Mounts): DeployedModel[] {
+  return Object.values(mounts.decision_models ?? {}).map((candidate): DeployedModel => ({
+    model: candidate.name, billing: "decisions", efforts: [],
+    readinessDigest: createHash("sha256").update(JSON.stringify(candidate)).digest("hex"),
+  }));
+}
+
+/** W1-T12422: the bake-off's direct judge replay of one model: one W1-T12421 direct replay per corpus the `shadow: auto`
+ *  roles read, one at a time, each bounded by JUDGE_REPLAY_CEILING_USD. With no auto role there is nothing to replay. */
+export function createJudgeShadowReplay(config: Config, repoRoot: string, mounts: Mounts,
+  replay: typeof replayJudgeCorpus = replayJudgeCorpus): ((model: DeployedModel) => Promise<JudgeReplayOutcome[]>) | undefined {
+  const roles = judgeShadowAutoRoles(mounts);
+  if (roles.length === 0) return undefined;
+  const byCorpus = new Map<string, string[]>();
+  for (const role of roles) byCorpus.set(judgeShadowReplayCorpus(role), [...(byCorpus.get(judgeShadowReplayCorpus(role)) ?? []), role]);
+  return async (model) => {
+    const outcomes: JudgeReplayOutcome[] = [];
+    for (const [corpus, corpusRoles] of byCorpus) {
+      const row = await replay(config, { lane: "direct", model: model.model, corpus, repoRoot });
+      outcomes.push({ roles: corpusRoles, row });
+      if (row.outcome === "stopped") break;
+    }
+    return outcomes;
+  };
 }
 
 export function measurementBakeoffDeployments(mounts: Mounts): DeployedModel[] {
