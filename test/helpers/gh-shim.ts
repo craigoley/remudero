@@ -134,8 +134,9 @@ function renderScript(routes: GhShimRoute[], callsPath: string, eventsPath: stri
 }
 
 /** Build a `gh` PATH shim answering from `routes` (checked in order; see {@link GhShimRoute}). */
-export function ghShim(routes: GhShimRoute[] = [], opts: { kind?: string; command?: string } = {}): GhShim {
-  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}${opts.kind ?? "gh-shim"}-`));
+export function ghShim(routes: GhShimRoute[] = [], opts: { kind?: string; command?: string; parent?: string } = {}): GhShim {
+  // `parent`: a child that runs with its own TMPDIR sees this shim as a test stub only inside it.
+  const dir = mkdtempSync(join(opts.parent ?? tmpdir(), `${RMD_TMP_PREFIX}${opts.kind ?? "gh-shim"}-`));
   const ghPath = join(dir, opts.command ?? "gh");
   const callsPath = join(dir, "calls.log");
   const eventsPath = join(dir, "events.log");
