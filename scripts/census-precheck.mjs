@@ -485,11 +485,18 @@ export function evaluateInstrumentSurface(input) {
 }
 
 const SCRIPT_REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+// Keep literal runtime import edges so isolated source snapshots can follow the scanner dependencies.
+const PRECHECK_MODULE_IMPORTS = {
+  "trust-root-text.ts": () => import("../src/lib/trust-root-text.ts"),
+  "rule-suites.ts": () => import("../src/lib/rule-suites.ts"),
+};
 
 async function importPrecheckModule(moduleName) {
   const url = pathToFileURL(join(SCRIPT_REPO, "src", "lib", moduleName)).href;
   // An active tsx resolver remaps the graph's .js imports to .ts, including API-registered loaders.
-  if (import.meta.resolve(url.replace(/\.ts$/, ".js")) === url) return import(url);
+  if (import.meta.resolve(url.replace(/\.ts$/, ".js")) === url) {
+    return PRECHECK_MODULE_IMPORTS[moduleName]?.() ?? import(url);
+  }
   const { tsImport } = await import("tsx/esm/api");
   return tsImport(url, import.meta.url);
 }
