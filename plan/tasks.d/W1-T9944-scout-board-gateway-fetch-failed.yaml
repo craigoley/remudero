@@ -6,6 +6,9 @@
   verify: auto
   risk: low
   priority: 3.4
+  # refusal-amendment (W1-T9944, run stall-19199@f0d19e1be9216f512194869fb5479a77dd845e08, 2026-11-18T08:56:39.801Z): the worker refused criterion 1 [proof-unexecutable-at-head] — proposed re-scope-criteria: repair the criterion's proof so it is executable at HEAD, or re-scope the criterion
+  #   worker evidence: 4 fix rounds left "board_gateway.fetch_failed stops recurring: its cause is fixed rather than its rows hidden" unmet with the same failure at f0d19e1be9216f512194869fb5479a77dd845e08, so it cannot be met as written at this head. Approaches that did not work: round work-fix-dispatch-W1-T9944-1794950524398-0427:1:1794951833555 at dcc5863f52179a578d4a55d2dd052bedf65022fc: diff []; outcome NEEDS_DESIGN | round work-fix-dispatch-W1-T9944-1794972508570-3300:1:1794973552195 at 61eb24e5bb343ca394b45d42f8daa24d4da564ac: diff []; outcome NEEDS_SCOPE | round work-fix-dispatch-W1-T9944-1794976957500-e326:1:1794978597935 at 61eb24e5bb343ca394b45d42f8daa24d4da564ac: diff []; outcome NEEDS_SCOPE | round work-fix-dispatch-W1-T9944-1794990836755-ae30:1:1794991562357 at f0d19e1be9216f512194869fb5479a77dd845e08: diff []; outcome NEEDS_SCOPE
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   author_class: machine
