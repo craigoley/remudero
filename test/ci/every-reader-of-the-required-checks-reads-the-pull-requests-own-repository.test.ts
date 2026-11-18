@@ -4,13 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { parse } from "yaml";
+import { fixCommand, type FixCommandHost } from "#src/cli/commands/fix.js";
 import {
   readCiGateRequiredContract, readCiGateRequiredNames, resolveCiGateRequiredSource,
 } from "#src/lib/ci-gate-required.js";
 import { ledgerPathFor } from "#src/lib/ledger-path.js";
 import { classifyMergeRefusal, ciTimeoutNotReadyChecks, buildSweepEffects, runSweep, type OpenPrView } from "#src/lib/sweep.js";
+import { buildOpenPrViewsAsync } from "#src/lib/tick-read-worker.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
-import { buildOpenPrViews, fixCommand } from "#src/run-task.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const owner = "craigoley";
@@ -109,10 +110,14 @@ test("W1-T12942 criterion 2: board and fix views report the managed repository's
     return [];
   };
   const requiredContexts = () => ["ci-gate"];
-  const [board] = buildOpenPrViews(owner, repo, ledgerPath, {
-    fetch, requiredContexts, readMainPlan: () => plan, fetchCiFailureEvidence: () => [],
+  const [board] = await buildOpenPrViewsAsync(owner, repo, ledgerPath, {
+    fetchAsync: fetch, requiredContexts, readMainPlan: () => plan, fetchCiFailureEvidence: () => [],
   });
   assert.ok(board);
+  const fixHost = {
+    workerBoundaryStack: { loadedModule: undefined },
+    buildSweepEffects,
+  } as FixCommandHost;
   let fixView: OpenPrView | undefined;
   await fixCommand(["8", "--repo", repo], {
     config, self: { owner, repo: "remudero" }, fetch, readRequiredContexts: requiredContexts,
@@ -121,7 +126,7 @@ test("W1-T12942 criterion 2: board and fix views report the managed repository's
       fixView = view;
       return Promise.resolve({ outcome: "refused" as const, reason: "fixture" });
     },
-  });
+  }, fixHost);
   assert.ok(fixView);
   for (const view of [board, fixView]) {
     assert.deepEqual(view.redRequiredChecks, ["managed-build"]);
