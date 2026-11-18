@@ -16,7 +16,7 @@
     - src/lib/read-model-worker.ts
     - src/lib/read-model-cli.ts
     - test/read-model-process-mode-is-a-switch.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:env-wins — RMD_READ_MODEL_PROCESS on or off decides; otherwise switches.json's process key decides; an absent or unreadable key runs the thread"

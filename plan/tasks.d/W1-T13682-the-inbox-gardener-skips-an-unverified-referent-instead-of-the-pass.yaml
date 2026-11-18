@@ -15,7 +15,7 @@
   files:
     - src/lib/inbox-gardener.ts
     - test/gardeners/the-inbox-gardener-skips-an-unverified-referent-instead-of-the-pass.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "When the snapshot's only GitHub gap is unverified referents, the gardener's GitHub coverage is observed and each such candidate is marked"

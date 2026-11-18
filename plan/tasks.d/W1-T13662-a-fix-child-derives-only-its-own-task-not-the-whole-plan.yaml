@@ -19,7 +19,7 @@
     - src/lib/status.ts
     - src/run-task.ts
     - test/fix-lane/a-fix-child-derives-only-its-own-task.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "projectTask(plan, taskId, deps), given a fixture plan of several tasks, returns a map that holds the named task only, and the projection it holds equals the entry projectPlan(plan, deps) gives for that task when the task is merged by a trailer, has an open pull request, and has neither"

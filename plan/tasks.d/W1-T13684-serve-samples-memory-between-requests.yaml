@@ -18,7 +18,7 @@
     - src/lib/serve.ts
     - test/serve-samples-memory-between-requests.test.ts
     - test/serve-memory-names-where-rss-lives.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Serve's memory monitor takes its sample with sampleServeMemorySliced"

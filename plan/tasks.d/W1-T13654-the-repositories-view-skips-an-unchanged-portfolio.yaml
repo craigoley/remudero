@@ -14,7 +14,7 @@
   files:
     - src/lib/repositories-view.ts
     - test/console-api/views/the-repositories-view-skips-an-unchanged-portfolio.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Through the real read-model ticker, ten passes inside the recompute cadence build the repositories body no more times, and a pass past the 60 s cadence or after a registry rewrite builds it again"
