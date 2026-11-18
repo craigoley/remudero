@@ -29,6 +29,7 @@ usage:
   rmd worktree add <dir> -b <branch> <base> [--donor <abs dir>]   # Add a disposable worktree whose unchanged files are cloned copy-on-write from the operator checkout.
   rmd next-task-id [--plan <path>] [--offline] [--no-reserve] [--audit [--reap [--apply | --reconcile]]] [--audit-age-days <days>] [--prefix <P> --repo <owner/name>] [--branch <name>] [--count <n>] [--max-scan <1..200>]   # Claim the next task id, or preview orphan cleanup with --audit --reap; --apply deletes under leases.
   rmd migration-preview --public-root <path> --public-commit <sha> --public-repo <owner/remudero> --ops-root <path> --ops-commit <sha> --ops-repo <owner/name>   # Preview the lowest-priority safe public task without moving it.
+  rmd move-task --public-root <path> --public-commit <sha> --public-repo <owner/remudero> --ops-root <path> --ops-commit <sha> --ops-repo <owner/name> [--apply]   # Take one recoverable step of moving a preview-admitted public task into the ops catalog.
   rmd plan-destination <decision|feedback|task>   # Print the repository and checkout that take a new plan file of this kind on this host.
   rmd emissions [--days N]   # Which CLI verbs wrote no ledger line in the window -- dead-capability detection.
   rmd receipt <pr> [--repo <name>]   # Print a deterministic in-toto-style run receipt from ledger ground truth.
@@ -291,6 +292,16 @@ rmd migration-preview --public-root <path> --public-commit <sha> --public-repo <
 ```
 
 Read-only explicit migration preview. Both pinned commits must already exist locally and remain current in their origins and API identities. Uses strict batched Git catalog reads, complete candidate-specific merge searches with authoritative recent-PR controls, current claims/run branches and complete open-PR/file controls. Orders by reverse maintained default dispatch order. Every remaining public dependant excludes its prerequisite, even a merged dependant. A candidate retains original YAML bytes, path, blob, commit and prospective moved_from. Changed, incomplete, duplicate or incompatible evidence returns UNKNOWN. Permission is never granted. No fetch, catalog write, reservation, claim, push, PR operation, registry/config change, scheduler or default background work. Help performs no preview reads. A mutating move needs separate transaction approval.
+
+### `rmd move-task`
+
+Take one recoverable step of moving a preview-admitted public task into the ops catalog.
+
+```
+rmd move-task --public-root <path> --public-commit <sha> --public-repo <owner/remudero> --ops-root <path> --ops-commit <sha> --ops-repo <owner/name> [--apply]
+```
+
+W1-T13680. Reads both mains at the pinned commits (which must be current in their origins and API identities) and takes at most one step, printing it and the evidence it read. WAIT while a plan-move- pull request is open in either repository. CONVERGE an id both mains hold: when the ops copy equals the bound original once its moved_from line is removed and the public copy is unchanged and unowned, open the public removal pull request (its commit carries Remudero-Moved-To: <ops repo>@<ops commit> <id> path=<path> blob=<blob>); when the public copy was amended, is claimed, has a run branch or an open pull request, open an ops pull request removing the ops copy. RESTORE the bound original bytes in a public pull request when neither main holds an id public history names a mover removal for. COPY, when nothing is pending, the migration preview's candidate into one ops pull request at its public path, byte for byte plus one moved_from: remudero@<public commit> line after its id line. COMPLETE when only ops holds a removed id, confirming its refs/rmd-id ref is unchanged. Mover pull requests use plan-move-<id>-<epochMs> branches and carry no Remudero-Task line, so neither merge credits the task as built. Pushes, deletes and mints no reservation ref. Each step writes one plan.move.step ledger row. Without --apply it prints the step it would take and writes nothing. Unreadable or changed evidence prints UNKNOWN and takes no step. Exits 0 when the read completed, 1 unknown or a failed write, 2 bad usage.
 
 ### `rmd plan-destination`
 
