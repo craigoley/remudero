@@ -49,6 +49,8 @@ export function parseOperatorIdentity(raw: string): Parsed {
   if (window !== undefined && !(typeof window === "number" && Number.isFinite(window) && window > 0)) {
     return { reason: "step_up_window_not_positive_number" };
   }
+  const requireStepUp = record.requireStepUp;
+  if (requireStepUp !== undefined && typeof requireStepUp !== "boolean") return { reason: "require_step_up_not_boolean" };
   const config: OperatorIdentityConfig = {
     issuer: record.issuer,
     allowedOrigins: record.allowedOrigins,
@@ -56,6 +58,7 @@ export function parseOperatorIdentity(raw: string): Parsed {
   };
   if (record.jwksUrl !== undefined) config.jwksUrl = record.jwksUrl;
   if (window !== undefined) config.stepUpWindowMinutes = window;
+  if (requireStepUp !== undefined) config.requireStepUp = requireStepUp;
   return { config };
 }
 

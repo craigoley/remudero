@@ -179,6 +179,22 @@ export const FAIL_CLOSED_JUDGE_ROLES: ReadonlySet<string> = new Set(["risk-judge
 export const JUDGE_ROLE_ROWS: Readonly<Record<string, "risk_judge" | "feedback_summary" | "ci_judge" | "fix_progress_judge">> = {
   "risk-judge": "risk_judge", "decision-summary": "feedback_summary", "ci-judge": "ci_judge", "fix-progress": "fix_progress_judge",
 };
+/** W1-T13501: the judge rows that fail closed (risk-judge.ts escalates when it cannot answer; ruling-judge.ts has
+ *  FAIL_CLOSED_RULING_VERDICT). The gardener never moves one to cash, and the fail-closed guard test reads this list. */
+export const FAIL_CLOSED_JUDGE_ROWS = ["risk_judge", "ruling_judge"] as const;
+/** W1-T13501: one flow-map line with at most one nested mapping, e.g. `ci_judge: { ..., shadow: { ... } }`. */
+const ONE_LINE_ROW = /^\w+: \{(?:[^{}]|\{[^{}]*\})*\}\s*$/;
+
+/** W1-T13501: `line` with `provider: cash` before its top-level `shadow:` key, or before its last brace. */
+function withCashProvider(line: string): string {
+  let depth = 0;
+  for (let i = 0; i < line.length; i++) {
+    if (line[i] === "{") depth++;
+    else if (line[i] === "}") depth--;
+    else if (depth === 1 && line.startsWith("shadow:", i) && /[{,\s]/.test(line[i - 1] ?? "")) return `${line.slice(0, i)}provider: cash, ${line.slice(i)}`;
+  }
+  return line.replace(/\s*\}\s*$/, ", provider: cash }");
+}
 
 export function configCanariesPath(stateDir: string): string {
   return join(stateDir, "config-gardener-canaries.json");
@@ -667,9 +683,9 @@ export function judgeClearsCashBar(s: JudgeShadowRoleSummary): boolean {
     s.noAnswerShare !== null && s.noAnswerShare <= JUDGE_CASH_BAR.maxNoAnswerShare;
 }
 
-/** W1-T12187: the first role that clears the bar and whose own row is one flow-map line not yet on cash: that line
- *  with `provider: cash`. The row must name a model of the lowest tier, so cash serves it from its economy row. A
- *  role with no row, or a row over several lines, gets no proposal: one edit replaces one line. */
+/** W1-T12187: the first role that clears the bar and whose own row is one flow-map line that names no provider: that
+ *  line with `provider: cash`. The row must name a model of the lowest tier, so cash serves it from its economy row. A
+ *  role with no row, a fail-closed role, or a row over several lines gets no proposal: one edit replaces one line. */
 export function judgeCashCandidate(inv: ConfigInventory, repoRoot: string): ConfigGardenAction | undefined {
   const full = mountsPath(repoRoot);
   const clear = (inv.judgeShadows ?? []).filter(judgeClearsCashBar);
@@ -680,10 +696,12 @@ export function judgeCashCandidate(inv: ConfigInventory, repoRoot: string): Conf
   const lowestTier = Math.min(...Object.values(mounts.tiers));
   for (const s of clear) {
     const key = JUDGE_ROLE_ROWS[s.role];
-    const row = key === undefined ? undefined : mounts[key];
-    const from = lines.find((line) => line.startsWith(`${key}: {`) && /^\w+: \{[^{}]*\}\s*$/.test(line));
-    if (row === undefined || from === undefined || row.provider === "cash" || mounts.tiers[row.model] !== lowestTier) continue;
-    const to = from.replace(/,\s*provider:\s*[^,}\s]+/, "").replace(/\s*\}\s*$/, ", provider: cash }");
+    if (key === undefined || (FAIL_CLOSED_JUDGE_ROWS as readonly string[]).includes(key)) continue;
+    const row = mounts[key];
+    const from = lines.find((line) => line.startsWith(`${key}: {`) && ONE_LINE_ROW.test(line));
+    // A row that names any provider is not this class's to move: it only takes a provider-less row to cash.
+    if (row === undefined || from === undefined || row.provider !== undefined || mounts.tiers[row.model] !== lowestTier) continue;
+    const to = withCashProvider(from);
     const cohort: ConfigCohort = { kind: "all" };
     const observed = { denominator: s.paired, freshness: "verified" as const, comparisonPopulation: population(cohort), observedAt: inv.nowIso };
     return {

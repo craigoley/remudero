@@ -11,7 +11,7 @@
  *    snapshot has it.
  * An OPEN PR's list can change with a push, so it is memoised in memory only, never on disk.
  */
-import { execFileLoopBounded } from "./loop-bounded-child.js";
+import { execFileRouted } from "./spawn-helper.js";
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import { dirname, join } from "node:path";
@@ -111,7 +111,7 @@ export function createChangedFilesCache(
   const fetchFiles: (prNumber: string, bound?: boolean) => Promise<string[] | undefined> =
     options.fetch ??
     (async (prNumber: string, bound?: boolean): Promise<string[] | undefined> => {
-      const { stdout } = await execFileLoopBounded(
+      const { stdout } = await execFileRouted(
         options.ghBin ?? "gh",
         ["api", "--paginate", `repos/${owner}/${repo}/pulls/${prNumber}/files`, "--jq", bound ? ".[].filename | @json" : ".[].filename"],
         { encoding: "utf8", maxBuffer: 1 << 26, timeout: DEFAULT_GH_CALL_TIMEOUT_MS },
