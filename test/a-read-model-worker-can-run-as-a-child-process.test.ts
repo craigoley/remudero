@@ -9,7 +9,7 @@ import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 import { forkWorkerEntry } from "#src/lib/child-entry-argv.js";
-import { createReadModelWorker, READ_MODEL_PROCESS_CHILD_ARG, READ_MODEL_PROCESS_STOP_WAIT_MS, READ_MODEL_PROCESS_SWITCH } from "#src/lib/read-model-worker.js";
+import { createReadModelWorker, READ_MODEL_PROCESS_CHILD_ARG, READ_MODEL_PROCESS_STOP_WAIT_MS, READ_MODEL_PROCESS_SWITCH, threadViews } from "#src/lib/read-model-worker.js";
 import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 type TestCtx = { after: (fn: () => void | Promise<void>) => void };
@@ -123,4 +123,17 @@ test("W1-T13205 criterion 3: a refreshed GH_TOKEN reaches the child before its n
   for (const run of ticks) run();
   writeFileSync(join(w.ledgerDir, LIVE), `${JSON.stringify({ ts: new Date().toISOString(), step: "run.start", task_id: "W1-T2", run_id: "again" })}\n`, { flag: "a" });
   await until(() => token() === "token-two", "the refreshed token reached the child", 60_000);
+});
+
+test("the real view-lane worker enters through the read-model worker module", async (t) => {
+  const messages: unknown[] = [];
+  const lane = threadViews({
+    data: { stateDir: readModelFixtureDir(t, "view-entry").dir, instances: [], tickMs: 20, holder: "view-entry" },
+    relay: (message) => messages.push(message),
+    log: () => {},
+  });
+  onReadModelClose(t, () => lane.close());
+  lane.state([]);
+  lane.want("task", "");
+  await until(() => messages.length > 0, "the view-lane worker sent its first message");
 });
