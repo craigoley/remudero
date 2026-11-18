@@ -125,6 +125,9 @@ export interface EscalationAnswerGateway {
   /** Every comment on one issue, oldest first (GitHub's own order). THROWS on a `gh` read
    *  failure; the caller skips just that issue this pass. */
   listComments(issueNumber: number): EscalationIssueComment[] | Promise<EscalationIssueComment[]>;
+  /** W1-T13710: the repository's comments created or edited at or after `since`. THROWS on a failed or odd read; the
+   *  caller then reads every issue. With no since, gives only the newest comment's updated_at. Optional. */
+  listCommentsSince?(since: string | undefined): Promise<CommentsSinceRead>;
   /** Every reaction on the issue ITSELF, oldest first. THROWS on a `gh` read failure; the caller
    *  skips just that issue's reactions this pass. Optional — see the interface's own header. */
   listReactions?(issueNumber: number): EscalationIssueReaction[] | Promise<EscalationIssueReaction[]>;
@@ -153,6 +156,12 @@ export interface EscalationAnswerGateway {
 export interface ListedIssue extends OpenIssue {
   listedComments?: unknown;
   listedReactions?: unknown;
+}
+
+/** W1-T13710: what one since read gave. `issueNumbers` is absent for a read with no since. */
+export interface CommentsSinceRead {
+  issueNumbers?: number[];
+  newestUpdatedAt?: string;
 }
 
 /** W1-T13688: true only for a listed count of exactly 0; a missing or odd count reads as before. */
@@ -275,6 +284,29 @@ export function ghEscalationAnswerGateway(
         authorType: r.user?.type ?? "User",
         ...(feedback === undefined ? {} : { sourceSubject: subject("issue-comment", `${repoArg}#${issueNumber}/comment/${r.id}`, issueNumber, r) }),
       }));
+    },
+    async listCommentsSince(since) {
+      const raw = await readText(since === undefined
+        ? ["api", `repos/${repoArg}/issues/comments?sort=updated&direction=desc&per_page=1`]
+        : ["api", `repos/${repoArg}/issues/comments?since=${encodeURIComponent(since)}&per_page=100`, "--paginate"]);
+      const rows = splitConcatenatedJsonPages(raw).flatMap((chunk) => {
+        const page = JSON.parse(chunk) as unknown;
+        if (!Array.isArray(page)) throw new Error(`listCommentsSince: expected a JSON array page, got ${typeof page}`);
+        return page as Array<{ issue_url?: unknown; updated_at?: unknown }>;
+      });
+      let newestUpdatedAt: string | undefined;
+      const issueNumbers = new Set<number>();
+      for (const row of rows) {
+        if (typeof row.updated_at !== "string" || Number.isNaN(Date.parse(row.updated_at))) {
+          throw new Error("listCommentsSince: a comment row has no updated_at");
+        }
+        if (newestUpdatedAt === undefined || Date.parse(row.updated_at) > Date.parse(newestUpdatedAt)) newestUpdatedAt = row.updated_at;
+        if (since === undefined) continue;
+        const issueNumber = Number(/\/issues\/(\d+)$/.exec(typeof row.issue_url === "string" ? row.issue_url : "")?.[1]);
+        if (!Number.isSafeInteger(issueNumber) || issueNumber <= 0) throw new Error("listCommentsSince: a comment row names no issue");
+        issueNumbers.add(issueNumber);
+      }
+      return since === undefined ? { newestUpdatedAt } : { issueNumbers: [...issueNumbers], newestUpdatedAt };
     },
     async listReactions(issueNumber) {
       const raw = await readText(["api", `repos/${repoArg}/issues/${issueNumber}/reactions?per_page=100`, "--paginate"]);
@@ -626,6 +658,35 @@ function rememberBotIgnored(origins: Set<string>, origin: string): void {
   if (origins.size > BOT_IGNORED_ORIGINS_MAX) origins.delete(origins.values().next().value as string);
 }
 
+/**
+ * W1-T13710: each issue's comments as last read, with the count its list row gave then, and the since of the next
+ * walk. Held per gateway (the daemon builds one per repository) for the process lifetime.
+ */
+interface KeptCommentReads {
+  since?: string;
+  issues: Map<number, { listed: number; comments: EscalationIssueComment[] }>;
+}
+const keptCommentReadsByGateway = new WeakMap<EscalationAnswerGateway, KeptCommentReads>();
+function keptCommentReads(gateway: EscalationAnswerGateway): KeptCommentReads {
+  let kept = keptCommentReadsByGateway.get(gateway);
+  if (!kept) keptCommentReadsByGateway.set(gateway, kept = { issues: new Map() });
+  return kept;
+}
+
+/** W1-T13710: the issues the since read names, or undefined when this walk may skip none. */
+async function issuesNamedSince(gateway: EscalationAnswerGateway, kept: KeptCommentReads): Promise<Set<number> | undefined> {
+  if (!gateway.listCommentsSince) return undefined;
+  const since = kept.since;
+  let read: CommentsSinceRead;
+  try {
+    read = await gateway.listCommentsSince(since);
+  } catch {
+    return undefined; // deliberate: a failed since read reads every issue and keeps the previous since
+  }
+  if (read.newestUpdatedAt !== undefined) kept.since = read.newestUpdatedAt;
+  return since === undefined || read.issueNumbers === undefined ? undefined : new Set(read.issueNumbers);
+}
+
 let escalationAnswerHistoryReader: EscalationTriageHistoryReader | undefined;
 /** Created on first use: sweep.ts and this module import each other, so nothing of sweep.ts runs at load. */
 export function escalationAnswerHistory(): EscalationTriageHistoryReader {
@@ -670,6 +731,10 @@ export async function readEscalationAnswers(
   } catch {
     return { accepted, ignored, unreadable: 1 }; // the list itself was unreadable this pass
   }
+  const kept = keptCommentReads(gateway);
+  const open = new Set(issues.map(issue => issue.number));
+  for (const issueNumber of kept.issues.keys()) if (!open.has(issueNumber)) kept.issues.delete(issueNumber);
+  const namedSince = await issuesNamedSince(gateway, kept);
   let stage: EscalationAnswerStage = "refusal_history_read";
   try {
     const history: Record<string, unknown>[] = [];
@@ -729,8 +794,17 @@ export async function readEscalationAnswers(
       const taskId = escalationTaskId(issue.body);
       if (!taskId) continue; // an issue with no recoverable task referent steers nothing
       let comments: EscalationIssueComment[];
+      const keptRead = kept.issues.get(issue.number);
+      const listed = issue.listedComments;
       try {
-        comments = listedNone(issue.listedComments) ? [] : await gateway.listComments(issue.number);
+        if (listedNone(listed)) comments = [];
+        else if (namedSince !== undefined && keptRead !== undefined && keptRead.listed === listed && !namedSince.has(issue.number)) {
+          comments = keptRead.comments;
+        } else {
+          kept.issues.delete(issue.number);
+          comments = await gateway.listComments(issue.number);
+          if (gateway.listCommentsSince && Number.isSafeInteger(listed)) kept.issues.set(issue.number, { listed: listed as number, comments });
+        }
       } catch {
         unreadable++; // counted, then just this issue is skipped this pass
         continue;

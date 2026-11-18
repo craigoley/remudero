@@ -42,7 +42,7 @@ import type { DigestCadenceRunResult } from "./digest.js";
 import type { LedgerCompactionDecision, LedgerCompactionOutcome } from "./ledger-compaction-rung.js";
 import type { BenchmarkCohortPassResult } from "./benchmark-cohort.js";
 import {
-  DETACHED_WORK_KINDS, detachedWorkPlacement, measureDrainCosts, planSha, runChildOutsideKill,
+  DETACHED_WORK_KINDS, detachedWorkPlacement, measureDrainCosts, planSha, priorChildPlacements, runChildOutsideKill,
   type AdoptedRunChild, type DetachedWorkEvidence, type DetachedWorkKind, type DetachedWorkMode, type RunChildHandle, type RunChildPending,
 } from "./run-child.js";
 import type { RunResult } from "./run-result.js";
@@ -5761,10 +5761,11 @@ export async function runDaemon(
   const detachedWorkPlacements = (): Record<string, ReturnType<typeof detachedWorkPlacement>> => {
     const installed = installedDetachedWorkHost();
     const mode = deps.detachedWorkMode?.() ?? installed?.mode() ?? "off";
+    const lines = mode === "on" ? deps.readLedgerLines?.() ?? [] : [];
     const evidence: DetachedWorkEvidence = {
       mode,
       hosted: deps.detachedWorkHosts?.() ?? new Set<DetachedWorkKind>(DETACHED_WORK_KINDS.filter((kind) => installed?.hosts.has(kind) === true)),
-      measured: mode === "on" ? measureDrainCosts(deps.readLedgerLines?.() ?? []) : {},
+      measured: measureDrainCosts(lines), priorChild: priorChildPlacements(lines),
     };
     return Object.fromEntries(DETACHED_WORK_KINDS.map((kind) => [kind, detachedWorkPlacement(kind, evidence)]));
   };
