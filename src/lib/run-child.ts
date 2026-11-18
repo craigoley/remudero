@@ -43,6 +43,7 @@ import { hostWorktreeGitAsync } from "./worktree-git.js";
 import { INSTALLATION_SHARE_DIVISOR_ENV, runChildInstallationEnv } from "./installation-budget-start.js";
 import { killProcessGroup } from "./worker-containment.js";
 import { execFileRouted } from "./spawn-helper.js";
+import { keptOpsCatalogBlobsForChild } from "./ops-catalog-source.js";
 import type { ReviewerCodeFreshness } from "./self-sync.js";
 
 export const RUN_CHILD_SHADOW_STEP = "run_child.shadow";
@@ -689,7 +690,8 @@ export interface SpawnRunChildPorts {
   /** The pin lock's wait and clock seams (engine-tree.ts pinEngineForRun); default the real ones. */
   enginePin?: EnginePinOptions;
   launch?: (engine: EngineRef, args: readonly string[], log: Log) => EngineChildLaunch;
-  spawn?: (command: string, args: readonly string[], options: { cwd: string; env: NodeJS.ProcessEnv; stderrFd: number }) => ChildProcess;
+  /** `offerPipe` adds fd 3 as a pipe, for the verified ops catalog blobs (W1-T13691). */
+  spawn?: (command: string, args: readonly string[], options: { cwd: string; env: NodeJS.ProcessEnv; stderrFd: number; offerPipe?: true }) => ChildProcess;
   /** Admission and the reservation, in the daemon, before the spawn. The default is {@link reserveRunChild}. */
   reserve?: (entryKind: RunChildEntryKind, runId: string, admission: { signal: AbortSignal; sinceMs?: number }) => Promise<LearnedReservation>;
   /** W1-T10001: the fleet STOP/PAUSE hold, read again once the reservation admits and before the spawn. Default: the local flag files under `input.root`. */
@@ -813,7 +815,26 @@ async function reserveWhilePending(
 }
 
 const defaultRunChildSpawn: NonNullable<SpawnRunChildPorts["spawn"]> = (command, args, options) =>
-  nodeSpawn(command, [...args], { cwd: options.cwd, env: options.env, detached: true, stdio: ["ignore", "ignore", options.stderrFd] });
+  nodeSpawn(command, [...args], {
+    cwd: options.cwd, env: options.env, detached: true,
+    stdio: options.offerPipe ? ["ignore", "ignore", options.stderrFd, "pipe"] : ["ignore", "ignore", options.stderrFd],
+  });
+
+export const RUN_CHILD_OPS_BLOBS_UNSENT_STEP = "run_child.ops_blobs_unsent";
+
+/** W1-T13691: write the offer to the child's fd 3 with the async stream API and end it. A failed write is ledgered once. */
+function offerOpsCatalogBlobs(child: ChildProcess, payload: Buffer, row: { task_id: string; run_id: string }, log: Log): void {
+  let recorded = false;
+  const unsent = (reason: string): void => {
+    if (recorded) return;
+    recorded = true;
+    log(RUN_CHILD_OPS_BLOBS_UNSENT_STEP, { ...row, reason });
+  };
+  const pipe = child.stdio?.[3];
+  if (!pipe || !("write" in pipe)) return unsent("the child has no fd 3 pipe");
+  pipe.on("error", (error: unknown) => unsent(reasonOf(error)));
+  pipe.end(payload);
+}
 
 /**
  * W1-T12950: the run children of an instance split one installation share by the host worker budget the
@@ -874,6 +895,9 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
     const entryResolvedAt = clock();
     entryMs = entryResolvedAt - engineResolvedAt;
     const admitted = await input.plan();
+    // W1-T13691: a task the public plan holds never reads the ops catalog, so its child is offered nothing.
+    const offer = admitted.plan.tasks.some((task) => (task as { id?: unknown } | null)?.id === input.taskId)
+      ? undefined : keptOpsCatalogBlobsForChild(input.taskId);
     dir = runDir(input.stateRoot, runId);
     launch = { ...entry, argv: [...entry.argv, "--run-dir", dir] };
     log(CHILD_ENTRY_SPAWNED_STEP, childEntrySpawnedRow(RUN_CHILD_ENTRY.name, "run", launch));
@@ -914,6 +938,7 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
         engine: current, planSnapshotPath: snapshot.path,
         reservationId: runReservation.id ?? "", options,
         ...(input.work ? { work: input.work } : {}),
+        ...(offer ? { opsCatalogBlobsOffered: true } : {}),
       } as RunChildSpec), ports.enginePin);
     } catch (error) {
       inFlightRunDirs.delete(dir);
@@ -933,10 +958,11 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
     child = (ports.spawn ?? defaultRunChildSpawn)(process.execPath, [...nodeArgs, ...launch.argv], {
       // W1-T13179: beside the divisor, the registry file this daemon read at its start and its wait bound.
       cwd: launch.cwd, env: { ...(ports.env ?? process.env), [INSTALLATION_SHARE_DIVISOR_ENV]: String(shareDivisor), ...runChildInstallationEnv() },
-      stderrFd,
+      stderrFd, ...(offer ? { offerPipe: true as const } : {}),
     });
     if (child.pid === undefined) throw new Error("the run child has no pid (spawn failed)");
     reservation.bindRoot(child.pid);
+    if (offer) offerOpsCatalogBlobs(child, offer, { task_id: input.taskId, run_id: runId }, log);
   } catch (error) {
     inFlightRunDirs.delete(runDir(input.stateRoot, runId));
     try {
@@ -1541,11 +1567,42 @@ export function measureDrainCosts(rows: ReadonlyArray<string | Record<string, un
   return costs;
 }
 
+/**
+ * W1-T13711: the kinds the newest `*_drain.completed` row's `detached_work_placement` names as "child". A kind that runs as a run
+ * child never makes a drain wait, so its measured wait leaves the live ledger and it would fall back to the daemon process. Rotation
+ * keeps the newest drain rows, and every drain writes this field again, so the placement carries across rotations and restarts.
+ * A torn newest drain row, or one without the field, gives no kinds.
+ */
+export function priorChildPlacements(rows: ReadonlyArray<string | Record<string, unknown>>): ReadonlySet<DetachedWorkKind> {
+  const drainStep = (step: unknown): boolean => step === "daemon.freshness_drain.completed" || step === "daemon.memory_drain.completed";
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const entry = rows[i];
+    let row: unknown = entry;
+    if (typeof entry === "string") {
+      if (!entry.includes("_drain.completed")) continue;
+      try {
+        row = JSON.parse(entry);
+      } catch (error) {
+        void error; // A torn line may be the newest drain row: it names no placement, so no kind is kept in a child on it.
+        if (/"step"\s*:\s*"daemon\.(?:freshness|memory)_drain\.completed"/.test(entry)) return new Set();
+        continue;
+      }
+    }
+    if (row === null || typeof row !== "object" || !drainStep((row as Record<string, unknown>).step)) continue;
+    const placed = (row as Record<string, unknown>).detached_work_placement;
+    if (placed === null || typeof placed !== "object" || Array.isArray(placed)) return new Set();
+    return new Set(DETACHED_WORK_KINDS.filter((kind) => (placed as Record<string, unknown>)[kind] === "child"));
+  }
+  return new Set();
+}
+
 export interface DetachedWorkEvidence {
   mode: DetachedWorkMode;
   /** The kinds a run-child entry can host in this process: what the composition root wired, not what the design intends. */
   hosted: ReadonlySet<DetachedWorkKind>;
   measured: MeasuredDrainCosts;
+  /** W1-T13711: the kinds the newest drain row placed in a run child ({@link priorChildPlacements}). */
+  priorChild?: ReadonlySet<DetachedWorkKind>;
 }
 
 export interface DetachedWorkPlacement {
@@ -1555,7 +1612,7 @@ export interface DetachedWorkPlacement {
   reason: string;
 }
 
-/** A kind moves when the ledger measures a non-zero drain wait, the mode is on and an entry hosts it. */
+/** A kind moves when the mode is on, an entry hosts it, and the ledger measures a non-zero drain wait or the last drain placed it in a child. */
 export function detachedWorkPlacement(
   kind: DetachedWorkKind | string, evidence: DetachedWorkEvidence, inventory: Readonly<Record<string, DetachedWorkRow>> = DETACHED_WORK_INVENTORY,
 ): DetachedWorkPlacement {
@@ -1567,8 +1624,10 @@ export function detachedWorkPlacement(
   if (evidence.mode === "shadow") return stay("run-child mode is shadow: a probe round-trips the contract and the work stays in process");
   const known = DETACHED_WORK_KINDS.find((k) => k === kind);
   const waitedMs = known === undefined ? 0 : evidence.measured[known]?.waitedMs ?? 0;
-  if (waitedMs <= 0) return stay("it never held a drain over the measured window");
+  const prior = waitedMs <= 0 && known !== undefined && evidence.priorChild?.has(known) === true;
+  if (waitedMs <= 0 && !prior) return stay("it never held a drain over the measured window");
   if (known === undefined || !evidence.hosted.has(known)) return stay("no run-child entry hosts it yet");
+  if (prior) return { kind, placement: "child", reason: "it ran as a run child at the last drain" };
   return { kind, placement: "child", reason: `it held drains for ${waitedMs} ms over the measured window` };
 }
 
@@ -1644,6 +1703,10 @@ export function createDetachedWorkHost(input: DetachedWorkHostInput): DetachedWo
     tracker()?.observe(step, extra);
   };
   let probing = false;
+  const ledgerEvidence = (): Pick<DetachedWorkEvidence, "measured" | "priorChild"> => {
+    const rows = input.readLedger();
+    return { measured: measureDrainCosts(rows), priorChild: priorChildPlacements(rows) };
+  };
   return {
     hosts: HOSTED_DETACHED_WORK_KINDS,
     mode,
@@ -1671,9 +1734,7 @@ export function createDetachedWorkHost(input: DetachedWorkHostInput): DetachedWo
         return undefined;
       }
       if (current !== "on") return undefined;
-      const placement = detachedWorkPlacement("review", {
-        mode: current, hosted: HOSTED_DETACHED_WORK_KINDS, measured: measureDrainCosts(input.readLedger()),
-      });
+      const placement = detachedWorkPlacement("review", { mode: current, hosted: HOSTED_DETACHED_WORK_KINDS, ...ledgerEvidence() });
       if (placement.placement !== "child") return undefined;
       const launch = await (input.spawn ?? spawnRunChild)({
         taskId: pr.taskId ?? `PR-${pr.prNumber}`, lane: "review", stateRoot: input.stateRoot, repoDir: input.repoDir, root: input.root,
@@ -1686,9 +1747,7 @@ export function createDetachedWorkHost(input: DetachedWorkHostInput): DetachedWo
     async spawnFix({ pr, fixKey, envelope, onPending }) {
       // A fix has no shadow probe of its own: the review's probe already round-trips the contract. Only `on` moves it.
       if (mode() !== "on") return undefined;
-      const placement = detachedWorkPlacement("fix-dispatch", {
-        mode: "on", hosted: HOSTED_DETACHED_WORK_KINDS, measured: measureDrainCosts(input.readLedger()),
-      });
+      const placement = detachedWorkPlacement("fix-dispatch", { mode: "on", hosted: HOSTED_DETACHED_WORK_KINDS, ...ledgerEvidence() });
       if (placement.placement !== "child") return undefined;
       const work: DetachedWorkSpec = { kind: "fix-dispatch", prNumber: pr.prNumber, headSha: pr.headSha, fixKey, inputs: { repo: input.repo, envelope } };
       const launch = await (input.spawn ?? spawnRunChild)({
@@ -1700,9 +1759,7 @@ export function createDetachedWorkHost(input: DetachedWorkHostInput): DetachedWo
     },
     async spawnRetro({ decision }) {
       if (mode() !== "on") return undefined;
-      const placement = detachedWorkPlacement("retro", {
-        mode: "on", hosted: HOSTED_DETACHED_WORK_KINDS, measured: measureDrainCosts(input.readLedger()),
-      });
+      const placement = detachedWorkPlacement("retro", { mode: "on", hosted: HOSTED_DETACHED_WORK_KINDS, ...ledgerEvidence() });
       if (placement.placement !== "child") return undefined;
       const work: DetachedWorkSpec = { kind: "retro", inputs: { decision } };
       const launch = await (input.spawn ?? spawnRunChild)({

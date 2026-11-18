@@ -1666,7 +1666,7 @@ export function cashAllowanceFallbackRefusal(config: Config, prompt: string, dep
 export function cashSonnetAlternatives(prompt: string, config: Config, ctx: { runId?: string; taskId?: string }): string[] {
   hydrateCashCapacity(config);
   const estimatedTokens = openWeightEstimatedTokens(Buffer.byteLength(prompt, "utf8"));
-  return ["gpt-6.1-terra", "gpt-6.1-sol"].filter((deployment) => {
+  return ["gpt-6.1-terra", "gpt-6.2-sol", "gpt-6.1-sol"].filter((deployment) => {
     if (!openWeightDeploymentReady(deployment)) return false;
     const limitTokens = learnedCashLimit(deployment, cashDeploymentEndpoint(config, deployment));
     if (openWeightDeploymentHolds(deployment, estimatedTokens, limitTokens)) return true;
