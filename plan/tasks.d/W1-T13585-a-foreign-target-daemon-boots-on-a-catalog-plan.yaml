@@ -1,0 +1,51 @@
+- id: W1-T13585
+  title: "A foreign-target daemon boots on a plan whose other-repo tasks depend on tasks it cannot see"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # loosens one validation on the daemon's boot read, only for tasks this daemon can never dispatch
+  band_meaning: span
+  origin: "human#2026-11-17-onboard-remudero-ops"
+  plan_refs:
+    - W1-T13498
+    - W1-T4409
+    - W1-T988
+  files:
+    - src/run-task.ts
+    - src/lib/plan.ts
+    - src/cli/commands/daemon.ts
+    - test/plan/a-foreign-target-daemon-boots-on-a-catalog-plan.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A daemon whose target is remudero-ops loads a plan where a repo: remudero task depends on an id absent from that plan, and the loaded plan still holds that task"
+      proof: 'grep: test("W1-T13585: a foreign-target daemon loads a plan whose other-repo task names an unseen dependency" in test/plan/a-foreign-target-daemon-boots-on-a-catalog-plan.test.ts'
+    - claim: "invariant:own-repo-dependencies-stay-strict — a task whose repo IS the daemon's target and names an unknown dependency still throws the same PlanError as today"
+      proof: 'grep: test("W1-T13585: an own-repo task with an unknown dependency still fails the boot read" in test/plan/a-foreign-target-daemon-boots-on-a-catalog-plan.test.ts'
+  rationale: |
+    WHY: onboarding remudero-ops (W1-T13498). On 2026-11-18 at 02:07Z and 02:24Z (host, OBSERVED), the ops shadow
+    daemon exited 1 at boot:
+      PlanError: task W1-T12996: depends_on unknown task 'W1-T12185'
+    The trace runs from validatedPlan (src/lib/plan.ts) through loadDaemonPlan (src/run-task.ts) to daemonCommand's
+    foreign-target branch (src/cli/commands/daemon.ts, `plan = loadDaemonPlan(target.planPath, ...)`).
+    remudero-ops' plan/tasks.d is core's private task catalog: 133 tasks, all `repo: remudero`, depending on core
+    public tasks the ops checkout does not hold. Every other reader of that catalog already uses
+    `dependencyMode: "preserve-external"` (src/lib/ops-catalog-source.ts, src/lib/task-linter.ts). The daemon's
+    boot read is the one strict reader, so the ops daemon crash-loops (120 s sleep, docker restart) and does no work.
+    A task whose repo is not the daemon's target can never dispatch here: isDispatchEligible refuses it through
+    taskTargetsRepo (src/lib/drain.ts, W1-T988). Validating its dependencies against a plan that cannot hold them
+    protects nothing.
+  design: |
+    Give the daemon's boot plan read the target repo name. For a task whose `repo` differs from the target, an
+    unknown depends_on id is preserved (the existing "preserve-external" behaviour), not thrown. For a task whose
+    `repo` equals the target, or that has no `repo`, validation stays strict. Both foreign-target call sites in
+    daemonCommand pass the target, and the self-target path is unchanged.
+    INVARIANT own-repo-dependencies-stay-strict: a task this daemon could dispatch still fails the boot read on an
+    unknown dependency, with the same PlanError text; duplicate-id and invalid-shard quarantine (W1-T4409) are
+    unchanged; the self-target boot read is byte-for-byte unchanged.
+  falsifier: |
+    Revert the boot read to strict: the first test fails with "depends_on unknown task". Make preserve-external
+    apply to every task: the invariant test fails, because the own-repo task no longer throws.
