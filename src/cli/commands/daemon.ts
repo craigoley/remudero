@@ -83,6 +83,7 @@ import { sweepInflightLocksWithReceipts } from "../../lib/benchmark-run.js";
 import { ledgerMemoHolders, readLedgerUnionRecordsSync } from "../../lib/ledger-union.js";
 import { childMeasurementCadenceSpawn, measurementCadenceChildRunner } from "../../lib/measurement-cadence.js";
 import { loadPlan, type Plan } from "../../lib/plan.js";
+import { createPlanTaskMover, opsCatalogOutcomeReader, planTaskMovePorts, type PlanTaskMoveFlag, type PlanTaskMoveSwitch } from "../../lib/plan-task-move-janitor.js";
 import { PLAN_DESTINATION_KINDS, planDestinationRepository, planDestinationPath, resolvePlanDestination, type PlanDestinationRepository } from "../../lib/plan-destination.js";
 import { readOperatorReleaseRecords } from "../../lib/machine-filing-judge.js";
 import { readReleaseLedgerLines } from "../../lib/operator-release.js";
@@ -956,30 +957,40 @@ export function opsCatalogShadowFeed(
   };
 }
 
-type OpsDispatchSelection = { outcome: "off" } | { outcome: "on"; repository: string }
-  | { outcome: "unavailable"; reason: string };
+type OpsDispatchSelection = PlanTaskMoveFlag;
 
-/** Read the new flag, reusing canonical repository validation and refusing a changed file. */
-function opsDispatchSelection(stateDir: string): OpsDispatchSelection {
+/** Read one flag of the selection file, reusing canonical repository validation and refusing a changed file. */
+function planDestinationFlag(stateDir: string, name: "dispatch_ops_tasks" | "move_public_tasks", invalid: string,
+  readFile: (path: string) => string | undefined = readFileIfExists): OpsDispatchSelection {
   try {
-    const path = planDestinationPath(stateDir), before = readFileIfExists(path);
+    const path = planDestinationPath(stateDir), before = readFile(path);
     if (before === undefined) return { outcome: "off" };
     const record: unknown = JSON.parse(before);
     if (record === null || typeof record !== "object" || Array.isArray(record)) return { outcome: "unavailable", reason: "selection_unreadable" };
-    const flag = (record as Record<string, unknown>).dispatch_ops_tasks;
+    const flag = (record as Record<string, unknown>)[name];
     if (flag === undefined || flag === false) return { outcome: "off" };
-    if (flag !== true) return { outcome: "unavailable", reason: "invalid_dispatch_flag" };
+    if (flag !== true) return { outcome: "unavailable", reason: invalid };
     const named = planDestinationRepository(stateDir);
-    if (before !== readFileIfExists(path)) return { outcome: "unavailable", reason: "selection_changed" };
+    if (before !== readFile(path)) return { outcome: "unavailable", reason: "selection_changed" };
     if (named.outcome !== "named" || (record as Record<string, unknown>).repository !== `${named.owner}/${named.repo}`) {
       return { outcome: "unavailable", reason: "selection_unreadable" };
     }
-    return { outcome: "on", repository: `${named.owner}/${named.repo}` };
+    return { outcome: "on", repository: `${named.owner}/${named.repo}`, checkoutDir: named.checkoutDir };
   } catch (error) {
     // A local selection failure is UNKNOWN, never a public fallback for a private task.
     void error;
     return { outcome: "unavailable", reason: "selection_unreadable" };
   }
+}
+
+function opsDispatchSelection(stateDir: string): OpsDispatchSelection {
+  return planDestinationFlag(stateDir, "dispatch_ops_tasks", "invalid_dispatch_flag");
+}
+
+/** W1-T13681: `move_public_tasks` beside `dispatch_ops_tasks`, each read with the same rules on every tick. */
+export function planTaskMoveSwitch(stateDir: string, readFile?: (path: string) => string | undefined): PlanTaskMoveSwitch {
+  return { move: planDestinationFlag(stateDir, "move_public_tasks", "invalid_move_flag", readFile),
+    dispatch: planDestinationFlag(stateDir, "dispatch_ops_tasks", "invalid_dispatch_flag", readFile) };
 }
 
 /** W1-T12244: the parts of the time from the process start to the first tick, on the daemon clock. */
@@ -2333,6 +2344,13 @@ export async function daemonCommand(
           daemonPlanCopies.observe(fresh);
         },
         ...(readOpsTaskDispatch ? { readOpsTaskDispatch } : {}),
+        // W1-T13681: the move janitor reads move_public_tasks on every tick; absent or false, it does nothing.
+        planTaskMover: createPlanTaskMover(planTaskMovePorts({
+          publicRoot: targetCheckoutRoot, publicRepository: `${target.owner}/${target.repo}`,
+          readSwitch: () => planTaskMoveSwitch(join(config.root, "state")),
+          readOpsCatalog: opsCatalogOutcomeReader(opsShadow),
+          cliEntry: fileURLToPath(new URL(`../../run-task${import.meta.url.endsWith(".ts") ? ".ts" : ".js"}`, import.meta.url)),
+        })),
         ...(opsShadow ? {
           secondaryCatalogShadowSource: opsShadow.current,
           primaryPlanCommit: () => planReaders.revisions.revisionOf(activePlanRef.current)?.commit,

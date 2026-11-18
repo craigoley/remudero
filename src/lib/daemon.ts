@@ -122,6 +122,7 @@ import {
   type StaleReviewerRecurrenceState,
   type StaleReviewerSkipObservation,
 } from "./sweep.js";
+import { PLAN_TASK_MOVE_ACTION, runPlanTaskMoveTick, type PlanTaskMover } from "./plan-task-move-janitor.js";
 // The same cycle-free sweep.ts value edge (W1-T2744).
 import {
   adoptChildWork,
@@ -1458,6 +1459,8 @@ interface OpsDispatchContext {
 export interface DaemonDeps {
   /** Absent by default. This reads completed state only; it never awaits a private source on the tick. */
   readOpsTaskDispatch?: (publicPlan: Plan) => OpsTaskDispatchRead;
+  /** W1-T13681: the move janitor, one detached movePlanTask tick per iteration; absent, no tick runs. */
+  planTaskMover?: PlanTaskMover;
   /** W1-T11600: an optional, already-parsed second catalog used only for shadow comparison. No source
    *  reader is installed here; absence preserves the single-plan path exactly, and this snapshot
    *  can never contribute work to the actual dispatch set. */
@@ -5558,6 +5561,9 @@ export async function runDaemon(
     catch (error) { void error; /* A diagnostic failure cannot authorize ops work or stop public selection. */ }
     lastOpsDispatchHold = signature;
   };
+  /** W1-T13681: why ops dispatch is held this iteration (the hold's own outcome label), or undefined while it is not. */
+  const opsDispatchHoldReason = (): string | undefined => deps.readOpsTaskDispatch === undefined ? "ops_dispatch_unwired"
+    : lastOpsDispatchHold === undefined ? undefined : String((JSON.parse(lastOpsDispatchHold) as unknown[])[0]);
   const readOpsDispatch = (primary: Plan): OpsTaskDispatchRead => {
     try { return deps.readOpsTaskDispatch?.(primary) ?? { outcome: "off" }; }
     catch (error) {
@@ -7605,6 +7611,11 @@ export async function runDaemon(
       const captured = captureOpsDispatchPlan(publicPlanForBatch);
       planForBatch = captured.plan;
       opsDispatchObservation = captured.observation;
+    }
+    // W1-T13681: at most one move-task tick in flight, detached after this iteration's ops hold is read; never gates dispatch.
+    if (deps.planTaskMover && !detachedActionInFlight(PLAN_TASK_MOVE_ACTION)) {
+      detachSweepAction(runPlanTaskMoveTick({ opsDispatchHold: opsDispatchHoldReason(), log }, deps.planTaskMover),
+        { actionKind: PLAN_TASK_MOVE_ACTION, taskId: "DAEMON" });
     }
     const isMerged = deps.refreshMergedAsync ? await deps.refreshMergedAsync(planForBatch) : deps.refreshMerged(planForBatch);
     for (const taskId of pendingMergedCredit) {
