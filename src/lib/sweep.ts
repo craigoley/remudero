@@ -18813,12 +18813,50 @@ export function detachSweepAction(
  *  action and settles once they all have. W1-T2744: an explicit daemon-lifetime seam, never part of
  *  a phase-local ticker's stop. W1-T2913: a bounded drain reports stragglers. */
 export async function drainDetachedSweepActions(
+  opts?: {
+    boundMs: number;
+    freshness?: boolean;
+    onWait?: (item: RestartDrainInventoryEntry) => void;
+    onRelease?: (action: DetachedSweepActionDescriptor & { phase: DetachedSweepActionRegistration["phase"]; reason: string }, work: Promise<void>) => void;
+  },
+): Promise<DetachedSweepActionDescriptor[]> {
+  if (opts === undefined) return drainDetachedSweepActionsOrThrow();
+  return drainDetachedSweepActionsWithin(opts);
+}
+
+/** BACKSTOP: how long a drain called with no options waits before it names what never settled (W1-T13546's
+ *  shard hang waited without end on a retro an earlier test leaked). Production always passes its own bound. */
+export const DETACHED_DRAIN_DEFAULT_BOUND_MS = 30_000;
+
+/** A drain with no options: the same wait, bounded, and a stall throws with each unsettled action named. */
+async function drainDetachedSweepActionsOrThrow(): Promise<DetachedSweepActionDescriptor[]> {
+  // Actions that settle within this turn are awaited with no timer, as before: a drain that has its answer at once
+  // schedules nothing. Only a drain still waiting after the turn arms the bound.
+  while (detachedSweepActions.size > 0) {
+    const waiting = Promise.all(detachedSweepActions.keys()).then(() => true);
+    const turnEnded = new Promise<false>((resolve) => setImmediate(() => resolve(false)));
+    if (!(await Promise.race([waiting, turnEnded]))) break;
+  }
+  if (detachedSweepActions.size === 0) return [];
+  const stalled = await drainDetachedSweepActionsWithin({ boundMs: DETACHED_DRAIN_DEFAULT_BOUND_MS });
+  if (stalled.length === 0) return [];
+  const named = stalled.map((a) => `${a.actionKind} for ${a.taskId} (${Math.round(a.ageMs / 1000)}s old)`).join(", ");
+  // The drain that found the stall reports it, and no later drain waits on it again.
+  for (const descriptor of stalled) {
+    const work = detachedDescriptors.get(descriptor);
+    if (work) detachedSweepActions.delete(work);
+  }
+  throw new Error(`drainDetachedSweepActions: ${stalled.length} detached action(s) did not settle within ` +
+    `${DETACHED_DRAIN_DEFAULT_BOUND_MS} ms: ${named}. An earlier caller in this process left it running; later drains no longer wait on it.`);
+}
+
+async function drainDetachedSweepActionsWithin(
   opts: {
     boundMs: number;
     freshness?: boolean;
     onWait?: (item: RestartDrainInventoryEntry) => void;
     onRelease?: (action: DetachedSweepActionDescriptor & { phase: DetachedSweepActionRegistration["phase"]; reason: string }, work: Promise<void>) => void;
-  } = { boundMs: Number.POSITIVE_INFINITY },
+  },
 ): Promise<DetachedSweepActionDescriptor[]> {
   const detachedDrainBoundMs = Math.max(0, opts.boundMs);
   const released = new Set<Promise<void>>();
