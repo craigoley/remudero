@@ -71,7 +71,7 @@ test("W1-T7391: a fresh now view reads the gate rows from durable rotation diges
   for (const [name, rows] of f.archives) {
     const digest = JSON.parse(readFileSync(join(directory, name + ".json"), "utf8"));
     assert.equal(digest.holder, "now.gate");
-    assert.equal(digest.reducerVersion, "1");
+    assert.equal(digest.reducerVersion, "2");
     assert.deepEqual(digest.read.rows, rows.filter((r) => r.step !== "heartbeat.tick"));
     assert.equal(digest.read.torn, name.endsWith(".ndjson") ? 1 : 0, "the durable digest retains all torn evidence");
   }
@@ -103,7 +103,7 @@ test("now gate digests reparse damaged or stale caches and preserve incomplete e
   const baseline = f.build();
   const digest = join(f.ledgerDir, "cache", "rotation-digests", "now%2Egate", f.archives[0][0] + ".json");
   const saved = readFileSync(digest, "utf8");
-  for (const content of ["broken", saved.replace('"reducerVersion":"1"', '"reducerVersion":"old"')]) {
+  for (const content of ["broken", saved.replace('"reducerVersion":"2"', '"reducerVersion":"old"')]) {
     writeFileSync(digest, content);
     assert.deepEqual(f.build().humanGates, baseline.humanGates);
     assert.deepEqual(f.counts.at(-1), { instance: "core", hits: 2, parsed: 1, writeFailed: 0, pruned: 0 });
