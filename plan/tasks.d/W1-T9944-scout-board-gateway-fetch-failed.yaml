@@ -17,6 +17,7 @@
   files:
     - src/lib/status.ts
     - src/run-task.ts
+    - test/the-retro-shipped-since-read-runs-off-the-loop.test.ts
     - test/console-api/board/scout-board-gateway-fetch-failed.test.ts
   acceptance:
     - claim: "board_gateway.fetch_failed stops recurring: its cause is fixed rather than its rows hidden"
@@ -24,7 +25,7 @@
     - claim: "invariant:transient-5xx-retry"
       proof: "grep: test(\"W1-T9944: prewarm worker retries its synchronous gh API page\" in test/console-api/board/scout-board-gateway-fetch-failed.test.ts"
     - claim: "invariant:awaited-5xx-retry"
-      proof: "grep: test(\"W1-T9944: awaited and sync shipped-since gateways retry transient 502 pages identically\" in test/console-api/board/scout-board-gateway-fetch-failed.test.ts"
+      proof: "grep: test(\"W1-T9944: awaited and sync shipped-since gateways retry transient 502 pages identically\" in test/the-retro-shipped-since-read-runs-off-the-loop.test.ts"
   design: |
     INVARIANT transient-5xx-retry: a transient GitHub server error on a synchronous board API page is retried before failure is emitted; persistent errors remain visible.
     INVARIANT awaited-5xx-retry: the awaited retro board replay retries a transient GitHub server error with the same bounded policy, preserving parity with the synchronous gateway.
@@ -40,4 +41,4 @@
     reasons:
       - "the operator approved expanding this task to include src/run-task.ts and the awaited gateway retry parity fix"
     judged_at: "2026-11-18T00:00:00.000Z"
-    pin: "1cd21b42faf19576ddf8ab46a6573f0ab870959a816b945d053f8027cec9d536"
+    pin: "2f9ee51282f032b5dd9e308b2ceca5700e0123e8932ee318758dc50c906097dc"
