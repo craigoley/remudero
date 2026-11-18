@@ -82,6 +82,18 @@ type SeedRow = Omit<LedgerStepRow, "family">;
 // `src/lib/review.ts`, `src/lib/sweep.ts` and `src/lib/panel-actions.ts` at 2026-09-07.
 const SEED_ROWS: readonly SeedRow[] = [
   {
+    step: "git.dangling_ref_repaired",
+    meaning: "A fetch through the git leaf or the fetch retry failed because a tracking ref named an object the clone lacks. The fetch refetched that one branch, or removed the tracking ref of a branch the remote no longer has (only while it still held the missing id), and then ran the fetch once more. One row per ref, with the clone, the ref, how and the milliseconds the repair took.",
+    writer: ["danglingRefRepairPlan"],
+    outcomes: ["refetched", "removed"],
+  },
+  {
+    step: "git.dangling_ref_unrepaired",
+    meaning: "A fetch failed on a ref that names a missing object, and this ref was not repaired, so the fetch was not run again. A local branch, a tag or any ref outside refs/remotes is only reported. Other reasons: the refetch, the removal or the listing failed or passed its time limit, more than 16 tracking refs dangled (the row carries the count), or no ref with a missing object was found.",
+    writer: ["danglingRefRepairPlan"],
+    outcomes: ["not_a_tracking_ref", "repair_failed", "over_the_bound", "no_dangling_ref"],
+  },
+  {
     step: "sweep_light.views_fallback",
     meaning: "A light pass could not use a fresh open-PR list: the read failed, was rate-limited or had not settled after 60 s. With a last good list younger than its age limit, the pass decides from that list, reads each head again at act time and stands a moved or unreadable head down. With no such list, the pass decides nothing, as before.",
     writer: ["createLightPassOpenPrList"],
