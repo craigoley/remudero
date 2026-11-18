@@ -9,6 +9,7 @@ import {
   assertRatificationDraftFileable,
   checkoutRepoFacts,
   inboxDraftExampleFragmentYaml,
+  inboxDraftPrompt,
   inboxDraftRelintPrompt,
   lintDraftedFragment,
   RatificationDraftRefusedError,
@@ -88,3 +89,26 @@ test("W1-T9162: approve still refuses a directory files entry", () => {
   assert.doesNotThrow(() => assertRatificationDraftFileable(fragment(["src/lib/plan.ts", "test/plan/example.test.ts"]),
     PROPOSAL, STAMP, KNOWN, ROOT));
 });
+
+// 2026-11-18: approving verify-human:W1-T12032 filed W1-T13650 as `verify: human`, which drain holds as verify-not-auto,
+// so the work the operator approved could never be dispatched.
+test("a draft that answers a human ask may not file another verify: human task", () => {
+  const human = fragment(["src/lib/plan.ts", "test/plan/example.test.ts"]).replace("verify: auto", "verify: human");
+  assert.ok(human.includes("verify: human"), human);
+  for (const asked of ["verify-human:W1-T12032", "verify-human-automate:W1-T12032", "machine-judge:W1-T12032"]) {
+    const stamp = `- ${asked} (refuse directory drafts) — RATIFIED 2026-11-18 -> NEW-1.`;
+    const violations = lintDraftedFragment(human, asked, stamp, KNOWN, facts.moduleExists, facts.readGrepProofFile, isDirectory);
+    const violation = violations.find((v) => v.check === "draft-human-ask-repeated");
+    assert.equal(violation?.severity, "block", JSON.stringify(violations));
+    assert.ok(violation.message.includes(`approving ${asked} already gives the human judgment`), violation.message);
+    assert.deepEqual(lintDraftedFragment(human.replace("verify: human", "verify: auto"), asked, stamp, KNOWN,
+      facts.moduleExists, facts.readGrepProofFile, isDirectory), [], "the same task at verify: auto is clean");
+  }
+  assert.deepEqual(lint(human).filter((v) => v.check === "draft-human-ask-repeated"), [],
+    "a proposal that is not a human ask may still file verify: human work");
+  const ask = { id: "verify-human:W1-T12032", summary: "W1-T12032 still needs you", evidenceAnchors: [] };
+  const planText = inboxDraftExampleFragmentYaml().replace("NEW-1", "W1-T1");
+  assert.match(inboxDraftPrompt(ask, planText, "run-1"), /every task you file is\n`verify: auto`/);
+  assert.doesNotMatch(inboxDraftPrompt({ ...ask, id: PROPOSAL }, planText, "run-1"), /every task you file is/);
+});
+
