@@ -64,7 +64,8 @@ test('security decision receipts bind the exact native generation and summary wi
  assert.equal(result.observation.trustedCodeqlCount,2);assert.equal(result.observation.latest.id,2);
  assert.equal(result.observation.latest.conclusion,'neutral');assert.equal(result.observation.latest.title,'1 configuration not found');
  assert.equal(result.observation.latest.summarySha256,'b9a1072a9117a12327e25988081e5b13dd04fc9cee4c9a4a7433f569afa869fc');
- assert.equal(JSON.stringify(result.observation).includes('unrecognized comparison state'),false);
+ assert.equal(result.observation.latest.summarySha256 !== null && !JSON.stringify(result.observation.latest).includes('unrecognized comparison state'), true);
+ assert.equal(result.observation.configurationWarning.summary, 'unrecognized comparison state');
  const changed=await readSecurityMergeDecision(target,fixture({checks:[{...latest,output:{...latest.output,summary:'new comparison state'}}]}).read);
  assert.notEqual(changed.observation.latest.summarySha256,result.observation.latest.summarySha256);
  assert.equal(changed.decision.mergeAllowed,false);

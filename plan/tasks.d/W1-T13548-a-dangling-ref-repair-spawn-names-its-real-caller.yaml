@@ -1,0 +1,94 @@
+- id: W1-T13548
+  title: "The spawn-cost meter charges a dangling-ref repair's git spawns to the code that called hostWorktreeGit, bundled and from source"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19: the change spans the meter (src/lib/read-plane.ts), the git leaf (src/lib/worktree-git.ts) and a read-model test; it only names one arrow and two meter frames, and no git call, error or retry changes
+  origin: "operator-session#followups-2026-11-18"
+  plan_refs:
+    - W1-T13409
+    - W1-T11795
+    - W1-T11410
+  files:
+    - src/lib/read-plane.ts
+    - src/lib/worktree-git.ts
+    - test/console-api/read-model/a-dangling-ref-repair-spawn-names-its-real-caller.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "invariant:bundled-repair-names-its-caller — in a single-file esbuild bundle (keepNames, like the daemon's run-task.mjs), `function actualCaller()` calls hostWorktreeGit(clone, [\"fetch\", \"origin\", \"main\"]) on a clone whose refs/remotes/origin/<branch> names an object the clone lacks (W1-T13409's fixture: a commit pushed from a private object directory that is then deleted), and the repair succeeds. sync_spawn_by_caller has exactly one row; its caller is actualCaller in run-task.mjs and its leaf is hostWorktreeGit. No row of sync_spawn_by_caller or sync_spawn_top has a caller of `<anonymous>`, retryAfterDanglingRefRepair, gitSync or runHostWorktreeGit"
+      proof: "grep: W1-T13548 criterion 1 in test/console-api/read-model/a-dangling-ref-repair-spawn-names-its-real-caller.test.ts"
+    - claim: "invariant:source-repair-names-its-caller — the same repaired fetch from a source function (tsx, no bundle) gives exactly one sync_spawn_by_caller row; its caller names that function and its leaf is hostWorktreeGit. No row's caller or leaf names retryAfterDanglingRefRepair, git-fetch-retry or `<anonymous>`"
+      proof: "grep: W1-T13548 criterion 2 in test/console-api/read-model/a-dangling-ref-repair-spawn-names-its-real-caller.test.ts"
+    - claim: "invariant:repair-frames-named-not-broad — SYNC_SPAWN_LEAF_FRAME_NAMES holds retryAfterDanglingRefRepair and the repair runner's own function name, the repair runner hostWorktreeGit passes to retryAfterDanglingRefRepair has that name as its `name` property, and SYNC_SPAWN_LEAF_FRAMES has no pattern that matches git-fetch-retry"
+      kind: guard
+      proof: "grep: W1-T13548 criterion 3 in test/console-api/read-model/a-dangling-ref-repair-spawn-names-its-real-caller.test.ts"
+  rationale: |
+    WHY: W1-T13409 (#19184) made a fetch that meets a dangling ref repair it and run once more, from the catch of
+    the git leaf hostWorktreeGit. The spawns of that repair go through frames the meter does not know, so the
+    meter charges them to its own plumbing, not to the code that called hostWorktreeGit. A loop-stall reading
+    taken during a repair then names the wrong caller. The path runs only during a rare repair, so priority 2.
+    MEASURED on the Azure host at origin/main 8f9b27588a, 2026-11-18, with a throwaway probe (not committed) that
+    used W1-T13409's dangling-ref fixture and the meter's 3000 ms clock step from
+    a-bundled-worktree-git-spawn-names-its-real-caller.test.ts:
+    - Bundled: three rows. `actualCaller`, leaf hostWorktreeGit, calls 2 (config read and first fetch);
+      `<anonymous> (run-task.mjs)`, leaf gitSync, calls 5 (the repair's git calls); `retryAfterDanglingRefRepair`,
+      leaf runHostWorktreeGit, calls 1 (the retry).
+    - From source: three rows. `actualSourceCaller`, leaf hostWorktreeGit, calls 2; `retryAfterDanglingRefRepair
+      (git-fetch-retry.ts)`, leaf `<anonymous>`, calls 5; `retryAfterDanglingRefRepair (git-fetch-retry.ts)`,
+      leaf runHostWorktreeGit, calls 1.
+    So 6 of 8 spawns are charged to the wrong caller on both paths.
+    READ at origin/main 8f9b27588a:
+    - src/lib/read-plane.ts:40-41 SYNC_SPAWN_LEAF_FRAME_NAMES: ghExecFile, gitSync, hostWorktreeGit,
+      runHostWorktreeGit, vetPinnedConfig. :43-47 SYNC_SPAWN_LEAF_FRAMES matches worktree-git, github-transport
+      and plan.ts's runGit by path; nothing matches git-fetch-retry. :111 callerFrame skips a frame by its
+      function name (:119) or by those paths and takes the first other frame as the caller.
+    - src/lib/worktree-git.ts:469 hostWorktreeGit. :472 `const gitSync`, :474 `const runHostWorktreeGit`. The
+      catch at :479-484 calls retryAfterDanglingRefRepair with an unnamed arrow at :480,
+      `(a, timeout) => gitSync(a, ...)`, whose V8 function name is "". From source the path pattern skips it;
+      in a bundle every frame is in run-task.mjs, so nothing skips it and it becomes the caller.
+    - src/lib/git-fetch-retry.ts:334 retryAfterDanglingRefRepair runs the repair calls at :343 and the retry at
+      :351. It is in neither the name set nor the path patterns, so from source it is the caller of all six,
+      and in a bundle it is the caller of the retry.
+    - The fixture to reuse: test/console-api/read-model/a-bundled-worktree-git-spawn-names-its-real-caller.test.ts
+      (buildSync with keepNames, packages external, the 3000 ms clock step) and the dangling-ref fixture in
+      test/a-fetch-that-meets-a-dangling-ref-repairs-it-and-retries-once.test.ts (pushDangling).
+    NOT COVERED: swept origin/main plan/tasks.d for SYNC_SPAWN_LEAF_FRAME_NAMES and retryAfterDanglingRefRepair:
+    only W1-T11410 and W1-T11795 (both done, neither has the repair path). Open PR #19235 (W1-T13434) changes only
+    hostWorktreeGitAsync, which the sync meter does not see. No other filing.
+  design: |
+    INVARIANT bundled-repair-names-its-caller: in a bundle, every spawn of a repaired hostWorktreeGit call is charged to the function that called hostWorktreeGit.
+    INVARIANT source-repair-names-its-caller: from source, every spawn of a repaired hostWorktreeGit call is charged to the function that called hostWorktreeGit.
+    INVARIANT repair-frames-named-not-broad: the meter skips the repair frames by their own specific names, not by a module path or a broad name.
+    1. In hostWorktreeGit (worktree-git.ts:479-484), give the repair runner a name: a `const` arrow such as
+       `repairHostWorktreeGit = (a, timeout) => gitSync(a, ...)`, passed to retryAfterDanglingRefRepair in place
+       of the unnamed arrow. Its body does not change.
+    2. Add `retryAfterDanglingRefRepair` and that runner's name to SYNC_SPAWN_LEAF_FRAME_NAMES (read-plane.ts:40)
+       and extend the comment above it to say why. With these, the frames between execFileSync and
+       hostWorktreeGit are all named leaves in a bundle and from source, so the caller is the frame beyond
+       hostWorktreeGit and the outermost leaf stays hostWorktreeGit.
+    3. Do NOT add a path pattern for git-fetch-retry to SYNC_SPAWN_LEAF_FRAMES. That module also holds
+       fetchOriginRetryingRefLock and its callers' arrows (git-fetch-retry.ts:133), and a path rule would change
+       how those are charged. Leave that path and the async repair as they are; the sync meter does not see
+       hostWorktreeGitAsync.
+    4. Do not change any git call, timeout, error, retry or log row of the repair. No env var, config key or
+       time bound.
+    5. The test: a new file next to a-bundled-worktree-git-spawn-names-its-real-caller.test.ts, with the same
+       bundle and clock fixture. Build the dangling-ref clone before the meter starts (originWithClone from
+       #test/helpers/git-repo.js, then push a commit from a private object directory and delete it, as
+       pushDangling does) and check after the call that the fetch succeeded. Criterion 3 imports
+       SYNC_SPAWN_LEAF_FRAME_NAMES and SYNC_SPAWN_LEAF_FRAMES; to read the runner's name it may wrap
+       retryAfterDanglingRefRepair through a module mock or read the `name` of the function it receives.
+  falsifier: |
+    Remove retryAfterDanglingRefRepair from SYNC_SPAWN_LEAF_FRAME_NAMES: criterion 2 fails with the
+    retryAfterDanglingRefRepair rows of today, criterion 1 fails on the retry row, criterion 3 fails. Put back the
+    unnamed arrow: criterion 1 fails with the `<anonymous>` row of today and criterion 3 fails. Add a
+    git-fetch-retry path pattern in place of the names: criteria 1 and 2 may pass, criterion 3 fails.
+  note: |
+    Id reserved for run-unfiled-1794961378000 with ~/rmd-work/bin/reserve-id.sh.
+    Counts to expect on the fixture: 8 spawns in one row (config read, first fetch, 5 repair calls, retry), if the
+    fixture has the same refs as the probe; the test should assert one row, not the number 8.

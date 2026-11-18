@@ -34,6 +34,7 @@ export const BAKED_RUNTIME_SOURCE_PATHS: readonly string[] = [
   "src/lib/serve-slots.ts",
   "src/lib/serve-supervisor-main.ts",
   "src/lib/serve-supervisor.ts",
+  "src/lib/spawn-helper.ts",
   "src/lib/state-backup-engine-links.ts",
   "src/lib/worker-containment.ts",
 ];

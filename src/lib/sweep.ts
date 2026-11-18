@@ -24,7 +24,7 @@ import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale } from "./fs-race-safe.js";
 import { readBoundedProcessCwdCensus } from "./process-cwd-census.js";
 import { HOST_GIT_CONFIG, hostWorktreeGit, hostWorktreeGitAsync, WorktreePointerRefusedError } from "./worktree-git.js";
-import { execFileLoopBounded } from "./loop-bounded-child.js";
+import { execFileRouted } from "./spawn-helper.js";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { runDeploymentBakeoff, type DeploymentBakeoffInput } from "./bakeoff-trigger.js";
 import { setTimeout as delay } from "node:timers/promises";
@@ -112,6 +112,12 @@ import { ghExec, ghJson, ghJsonAsync, ghTextAsync, GhPaceWouldBlockError, paceGh
 import { withdrawStaleConflictedJudgePr } from "./machine-filing-judge.js";
 import type { AdmissionObserver, AdmissionSettings, AdmissionRead } from "./contributor-admission.js";
 import { observeContributorAdmission } from "./arm-auto-merge.js";
+// @ts-expect-error — pure ESM policy constant shared with the dependency-free producer; tsconfig includes TS only.
+import { CODEQL_CONFIGURATION_NOT_FOUND } from "./code-scanning-merge-policy.mjs";
+// @ts-expect-error — pure ESM read-only adapter, the read path security-merge-admission.ts already uses.
+import { readSecurityMergeDecision } from "./code-scanning-merge-adapter.mjs";
+// @ts-expect-error — pure ESM argv mapping shared with the dependency-free producer.
+import { securityMetadataGhArgs } from "./security-metadata-gh-args.mjs";
 import { distanceRefreshCause, type BaseChangedFiles } from "./plan-pr-merge-safety.js";
 import { armedBodyNeedsGuard, rememberCleanArmedBody, type ClosingReferenceGuardResult } from "./closing-reference-guard.js";
 import { observeAdmissionDisposition } from "./action-executor.js";
@@ -2171,7 +2177,7 @@ export async function regenerateConflictViaGit(
           if (status.mode !== "bwrap") throw new Error(`conflict generator sandbox unavailable: ${status.reason}`);
           const sandbox = proofSandboxArgv({ cwd: copy, home });
           for (const { action } of generated) {
-            await execFileLoopBounded(status.binary, [...sandbox, "npm", "run", "--silent", action], {
+            await execFileRouted(status.binary, [...sandbox, "npm", "run", "--silent", action], {
               cwd: copy, env: { ...proofChildEnv(home), TMPDIR: "/tmp" }, encoding: "utf8",
             });
           }
@@ -2431,6 +2437,8 @@ export const SWEEP_EFFECT_SURFACE = [
   "liveCiRunForHead",
   "refreshCiRunForHead",
   "reaggregateCiGate",
+  "readSecurityMergeObservation", // W1-T13470
+  "readCodeqlWorkflowRuns", // W1-T13470
   "readMainTip",
   "readMainRepair",
   "mainInheritance", // W1-T8042
@@ -2712,6 +2720,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "liveCiRunForHead"
   | "refreshCiRunForHead"
   | "reaggregateCiGate"
+  | "readSecurityMergeObservation"
+  | "readCodeqlWorkflowRuns"
   | "readMainTip"
   | "readMainRepair"
   | "mainInheritance"
@@ -3980,6 +3990,11 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         });
       }
     },
+    // W1-T13470: two GET reads, the first through the security metadata mapping. No write.
+    readSecurityMergeObservation: (pr) => readSecurityMergeDecision({ owner, repo, prNumber: pr.prNumber, expectedHead: pr.headSha },
+      (path: string) => readJsonImpl(securityMetadataGhArgs(path))),
+    readCodeqlWorkflowRuns: (pr) =>
+      readJsonImpl(["api", `repos/${owner}/${repo}/actions/workflows/codeql.yml/runs?head_sha=${pr.headSha}&per_page=100`]),
 
     // W1-T78 — the CLARIFICATION-QUESTION rung's real wiring: `question` is
     // ALREADY rendered (deterministically, from ledger ground truth) by the
@@ -7300,14 +7315,28 @@ export const ADDITIVE_REGISTRATION_SURFACES = Object.freeze([
   { path: "src/lib/spend-rows.ts", literal: "SPEND_STEP_ROLES" },
   { path: "src/lib/config-schema.ts", literal: "ENV_REGISTRY" },
   { path: "src/lib/authority.ts", literal: "AUTHORITY_TABLE" },
-  { path: "scripts/bound-kind-baseline.json", literal: "grandfathered", shrinkOnly: true },
+  { path: "scripts/bound-kind-baseline.json", literal: "grandfathered", format: "json", shrinkOnly: true },
+  // W1-T13378: rows added only for the COMMANDS verbs the pull request's own diff adds (prAddedVerbs).
+  { path: "scripts/console-parity-ratchet.mjs", literal: "CLI_ONLY", prVerbsOnly: true },
+  { path: "scripts/console-parity-baseline.json", literal: "uncoveredVerbs", format: "json", prVerbsOnly: true },
+  { path: "docs/operator-guide.md", literal: "| Command | What it does |", format: "markdown", prVerbsOnly: true },
 ] as const);
 
-export type RegistrationChange = { path: string; before?: string; after?: string; error?: string };
+/** W1-T13378: the registry whose diff, merge base to head, names the verbs a pull request adds. */
+export const COMMAND_REGISTRY = Object.freeze({ path: "src/run-task.ts", literal: "COMMANDS" });
 
-function registrationLiteral(source: string, literal: string, json: boolean) {
-  const declaration = new RegExp(json ? `^ *"${literal}": *\\[` :
-    `^export const ${literal}\\b[^\\n=]*=\\s*(?:new Set\\()?([\\[{])`, "gm");
+export const VERB_REGISTRATION_PATHS: readonly string[] = ADDITIVE_REGISTRATION_SURFACES
+  .filter((row) => "prVerbsOnly" in row).map((row) => row.path);
+
+/** `prAddedVerbs` is set only by {@link withPrAddedVerbs} from git, never from a worker's report. */
+export type RegistrationChange = { path: string; before?: string; after?: string; error?: string; prAddedVerbs?: readonly string[] };
+
+type RegistrationFormat = "ts" | "json" | "markdown";
+
+function registrationLiteral(source: string, literal: string, format: RegistrationFormat, exported = true) {
+  if (format === "markdown") return markdownRegistrationTable(source, literal);
+  const declaration = new RegExp(format === "json" ? `^ *"${literal}": *\\[` :
+    `^${exported ? "export " : "(?:export )?"}const ${literal}\\b[^\\n=]*=\\s*(?:new Set\\()?([\\[{])`, "gm");
   const matches = [...source.matchAll(declaration)];
   if (matches.length !== 1) return undefined;
   const start = matches[0].index! + matches[0][0].length;
@@ -7336,9 +7365,49 @@ function registrationLiteral(source: string, literal: string, json: boolean) {
   return undefined;
 }
 
+/** W1-T13378: the one table under `header`; its rows are the `|` lines after the separator line. */
+function markdownRegistrationTable(source: string, header: string) {
+  const lines = source.split("\n");
+  const at = lines.flatMap((line, index) => line === header ? [index] : []);
+  if (at.length !== 1 || !/^\|(?:-+\|)+$/.test(lines[at[0] + 1] ?? "")) return undefined;
+  let end = at[0] + 2;
+  while (end < lines.length && lines[end].startsWith("|")) end++;
+  return { prefix: lines.slice(0, at[0] + 2).join("\n"), suffix: lines.slice(end).join("\n"), rows: lines.slice(at[0] + 2, end) };
+}
+
 function registrationKey(row: string, literal: string): string | undefined {
+  if (literal.startsWith("|")) {
+    const key = /^\| `rmd ([a-z][a-z0-9-]*)[ `]/.exec(row)?.[1];
+    const named = [...row.matchAll(/\brmd ([a-z][a-z0-9-]*)/g)].map((match) => match[1]);
+    return key !== undefined && row.endsWith(" |") && named.every((verb) => verb === key) ? key : undefined;
+  }
   const scanner = createScanner(true, undefined, row);
   const first = scanner.scan();
+  if (literal === "CLI_ONLY") {
+    const key = first === SyntaxKind.StringLiteral || first === SyntaxKind.Identifier ? scanner.getTokenValue() : undefined;
+    if (scanner.scan() !== SyntaxKind.ColonToken || scanner.scan() !== SyntaxKind.StringLiteral) return undefined;
+    for (let token = scanner.scan(); token !== SyntaxKind.EndOfFile; token = scanner.scan()) {
+      if (token !== SyntaxKind.PlusToken || scanner.scan() !== SyntaxKind.StringLiteral) return undefined;
+    }
+    return key;
+  }
+  if (literal === "uncoveredVerbs") {
+    const key = first === SyntaxKind.StringLiteral ? scanner.getTokenValue() : undefined;
+    return scanner.scan() === SyntaxKind.EndOfFile ? key : undefined;
+  }
+  if (literal === COMMAND_REGISTRY.literal) {
+    if (first !== SyntaxKind.OpenBraceToken) return undefined;
+    let depth = 1;
+    let previous: SyntaxKind = first;
+    for (let token = scanner.scan(); token !== SyntaxKind.EndOfFile; previous = token, token = scanner.scan()) {
+      if ([SyntaxKind.OpenBraceToken, SyntaxKind.OpenBracketToken, SyntaxKind.OpenParenToken].includes(token)) depth++;
+      else if ([SyntaxKind.CloseBraceToken, SyntaxKind.CloseBracketToken, SyntaxKind.CloseParenToken].includes(token)) depth--;
+      else if (depth === 1 && scanner.getTokenValue() === "name" && [SyntaxKind.OpenBraceToken, SyntaxKind.CommaToken].includes(previous)) {
+        return scanner.scan() === SyntaxKind.ColonToken && scanner.scan() === SyntaxKind.StringLiteral ? scanner.getTokenValue() : undefined;
+      }
+    }
+    return undefined;
+  }
   if (literal === "ENV_REGISTRY") {
     if (first !== SyntaxKind.Identifier || scanner.getTokenValue() !== "envEntry" || scanner.scan() !== SyntaxKind.OpenParenToken) return undefined;
     return scanner.scan() === SyntaxKind.StringLiteral ? scanner.getTokenValue() : undefined;
@@ -7359,10 +7428,24 @@ function registrationKey(row: string, literal: string): string | undefined {
     ? scanner.getTokenValue() : undefined;
 }
 
-function registrationSubsequence(small: readonly string[], large: readonly string[]): boolean {
+/** The rows of `large` that `small` lacks, when `small` is a subsequence of it; otherwise undefined. */
+function registrationAdditions(small: readonly string[], large: readonly string[]): string[] | undefined {
   let index = 0;
-  for (const value of large) if (value === small[index]) index++;
-  return index === small.length;
+  const added: string[] = [];
+  for (const value of large) if (value === small[index]) index++; else added.push(value);
+  return index === small.length ? added : undefined;
+}
+
+function registrationSubsequence(small: readonly string[], large: readonly string[]): boolean {
+  return registrationAdditions(small, large) !== undefined;
+}
+
+/** W1-T13378: every added row is keyed by a verb the PR's own diff adds, once, and no kept row has that key. */
+function addsOnlyPrVerbs(added: readonly string[], kept: readonly string[], literal: string, verbs: readonly string[] | undefined): boolean {
+  const existing = new Set(kept.map((row) => registrationKey(row, literal)));
+  const keys = added.map((row) => registrationKey(row, literal));
+  return verbs !== undefined && new Set(keys).size === keys.length &&
+    keys.every((key) => key !== undefined && verbs.includes(key) && !existing.has(key));
 }
 
 /** W1-T5691: preserve every existing row and every byte outside the named literal. */
@@ -7370,15 +7453,61 @@ export function isAdditiveRegistrationChange(change: RegistrationChange): boolea
   const surface = ADDITIVE_REGISTRATION_SURFACES.find((row) => row.path === change.path);
   if (!surface || change.before === undefined || change.after === undefined || change.error) return false;
   const shrink = "shrinkOnly" in surface;
-  const before = registrationLiteral(change.before, surface.literal, shrink);
-  const after = registrationLiteral(change.after, surface.literal, shrink);
+  const format = "format" in surface ? surface.format : "ts";
+  const before = registrationLiteral(change.before, surface.literal, format);
+  const after = registrationLiteral(change.after, surface.literal, format);
   if (!before || !after || before.prefix !== after.prefix || before.suffix !== after.suffix) return false;
   const [small, large] = shrink ? [after, before] : [before, after];
   const [smallText, largeText] = shrink ? [change.after, change.before] : [change.before, change.after];
-  if (small.rows.length >= large.rows.length || !registrationSubsequence(small.rows, large.rows) ||
-      !registrationSubsequence(smallText.split("\n"), largeText.split("\n"))) return false;
+  const added = registrationAdditions(small.rows, large.rows);
+  if (added === undefined || added.length === 0 || !registrationSubsequence(smallText.split("\n"), largeText.split("\n"))) return false;
+  if ("prVerbsOnly" in surface) return addsOnlyPrVerbs(added, small.rows, surface.literal, change.prAddedVerbs);
   const keys = large.rows.map((row) => registrationKey(row, surface.literal));
   return keys.every((key) => key !== undefined) && new Set(keys).size === keys.length;
+}
+
+/** W1-T13378: the COMMANDS verbs `after` names and `before` does not; undefined when either has a row with no
+ *  top-level string `name`, so an unreadable registry admits no verb. */
+export function commandVerbsAddedByDiff(before: string, after: string): string[] | undefined {
+  const names = (source: string) => {
+    const keys = registrationLiteral(source, COMMAND_REGISTRY.literal, "ts", false)?.rows
+      .map((row) => registrationKey(row, COMMAND_REGISTRY.literal));
+    return keys?.every((key) => key !== undefined) ? keys as string[] : undefined;
+  };
+  const was = names(before);
+  const now = names(after);
+  return was && now ? [...new Set(now.filter((verb) => !was.includes(verb)))] : undefined;
+}
+
+export function isVerbRegistrationPath(path: string): boolean {
+  return VERB_REGISTRATION_PATHS.includes(path);
+}
+
+/** W1-T13378: attach the verbs the PR's committed diff (merge base of `baseRef` and `headRef`, to `headRef`) adds to
+ *  COMMANDS to each changed verb-registration change. A failed read marks those changes unreadable, so none is admitted. */
+export async function withPrAddedVerbs(
+  changes: readonly RegistrationChange[],
+  git: (args: string[]) => string | Promise<string>,
+  headRef = "HEAD",
+  baseRef = "origin/main",
+): Promise<RegistrationChange[]> {
+  if (!changes.some((change) => isVerbRegistrationPath(change.path) && change.before !== change.after)) return [...changes];
+  let evidence: { verbs: string[] } | { error: string };
+  try {
+    const base = (await git(["merge-base", baseRef, headRef])).trim();
+    const verbs = commandVerbsAddedByDiff(await git(["show", `${base}:${COMMAND_REGISTRY.path}`]), await git(["show", `${headRef}:${COMMAND_REGISTRY.path}`]));
+    evidence = verbs ? { verbs } : { error: `${COMMAND_REGISTRY.literal} in ${COMMAND_REGISTRY.path} has a row with no name` };
+  } catch (error) {
+    evidence = { error: String(error) };
+  }
+  return changes.map((change) => !isVerbRegistrationPath(change.path) ? change
+    : "verbs" in evidence ? { ...change, prAddedVerbs: evidence.verbs }
+    : { ...change, error: `PR verb evidence unreadable: ${evidence.error}` });
+}
+
+/** W1-T13378: the verb-registration paths whose change is the PR's own verb rows and nothing else. */
+export function ownVerbRegistrationPaths(changes: readonly RegistrationChange[]): string[] {
+  return changes.filter((change) => isVerbRegistrationPath(change.path) && isAdditiveRegistrationChange(change)).map((change) => change.path);
 }
 
 /** W1-T2548 — PURE, deterministic (rule 2), admitted ALONGSIDE and never instead of
@@ -12540,6 +12669,14 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     },
   },
   {
+    // W1-T13470 — a source edit cannot clear GitHub's own "configuration not found" CodeQL state, so a head whose only
+    // red is that policy UNKNOWN waits: no fix round, no strike. runSweep captures and escalates it.
+    disposition: "wait",
+    blocker: "security-unknown-hold",
+    when: codeqlConfigurationWarningWait,
+    reason: () => CODEQL_CONFIGURATION_WAIT_REASON,
+  },
+  {
     // W1-T3078 — a worker can DECLINE a criterion under review.ts's closed grammar, but it may
     // never choose its own remedy or spend another attempt. This must sit above an answered
     // clarification and the shared strike-cap row: a pre-existing answer or a prior strike cannot
@@ -16109,6 +16246,11 @@ export interface SweepDeps {
    *  {@link requeueCheck} uses, when {@link staleCiGateTransition} names a sibling that reached a
    *  terminal success LATER than the gate's own verdict. AT MOST ONCE per (head, transition). */
   reaggregateCiGate?: (pr: OpenPrView, transition: StaleCiGateTransition) => void | Promise<void>;
+  /** W1-T13470 — the read-only security decision for this PR at its head (readSecurityMergeDecision). Omitted, a
+   *  configuration-not-found wait captures and escalates nothing. */
+  readSecurityMergeObservation?: (pr: OpenPrView) => Promise<SecurityMergeObservation>;
+  /** W1-T13470 — this head's runs of the CodeQL workflow (`actions/workflows/codeql.yml/runs`), raw. */
+  readCodeqlWorkflowRuns?: (pr: OpenPrView) => Promise<unknown>;
   /** W1-T177 — an OPTIONAL fresh re-read of ONE PR's live state, consulted immediately before a
    *  blocked-fixable disposition SPENDS a strike, never the snapshot this pass started from (#388:
    *  merged mid-sweep, dispatched anyway). Omitted, or a failed read, behaves exactly as before —
@@ -17250,6 +17392,115 @@ export function withCodeqlAlertEvidence(pr: Pick<OpenPrView, "headSha" | "codeql
     const what = policy ? `security-merge-policy failed at this head (${verdict})` : "CodeQL failed at this head";
     return [{ ...failure, logTail: `${what}; its alerts were not read: ${why}` }];
   });
+}
+
+/* W1-T13470 — GITHUB'S "N CONFIGURATION(S) NOT FOUND" CODEQL STATE IS OBSERVED, NEVER REPAIRED. The policy keeps it
+ * UNKNOWN under its own reason; a head whose only red is that status waits instead of entering a fix round. A full
+ * pass reads the decision through the read-only adapter and writes its receipt once per head and check generation, and
+ * a CodeQL workflow completion GitHub re-judged with the warning still standing is escalated once. Nothing here
+ * grants, merges, dispatches or writes a status: GitHub's refresh reaches the producer through its own triggers. */
+export const CODE_SCANNING_CONFIGURATION_WARNING_STEP = "security.codeql_configuration_warning_captured";
+export const CODE_SCANNING_CONFIGURATION_WARNING_ESCALATED_STEP = "security.codeql_configuration_warning_escalated";
+const CODEQL_CONFIGURATION_WAIT_REASON = `security-merge-policy unknown at this head: ${CODEQL_CONFIGURATION_NOT_FOUND} — ` +
+  "GitHub's CodeQL check reports a missing configuration, a GitHub-side state no source edit clears — " +
+  "waiting for GitHub's refresh, no fix round and no strike";
+
+/** W1-T13470 — the adapter's receipt for the configuration-not-found shape: GitHub's check text only. */
+export interface CodeqlConfigurationWarningReceipt {
+  checkId: number; headSha: string; completedAt: string | null; conclusion: string; title: string;
+  summary: string | null; summarySha256: string | null; truncated: boolean; alertsLink: string | null;
+}
+/** W1-T13470 — what readSecurityMergeDecision answers; the sweep reads its receipt and generation, never a permission. */
+export interface SecurityMergeObservation {
+  headSha?: string;
+  decision: { state: string; mergeAllowed: boolean; reason: string };
+  observation?: { latest?: { id?: number }; configurationWarning?: CodeqlConfigurationWarningReceipt };
+}
+
+/** W1-T13470 — the only red is the policy status at this reason (positively named), the review has not failed, and no
+ *  open high CodeQL alert was read at this head. Anything else keeps today's route. */
+export function codeqlConfigurationWarningWait(pr: OpenPrView): boolean {
+  if (pr.securityMergePolicy?.state !== "unknown" || pr.securityMergePolicy.reason !== CODEQL_CONFIGURATION_NOT_FOUND) return false;
+  if (!isBlockedCi(pr) || pr.reviewState === "failure" || (pr.cancelledRequiredChecks?.length ?? 0) > 0) return false;
+  const reds = [...(pr.redRequiredChecks ?? []), ...(pr.ciFailures ?? []).map((failure) => failure.name)];
+  const highAtHead = pr.codeqlHeadAlerts?.headSha === pr.headSha && pr.codeqlHeadAlerts.alerts.length > 0;
+  return reds.length > 0 && reds.every((name) => name === SECURITY_MERGE_POLICY_CONTEXT) && !highAtHead;
+}
+
+/** A completed CodeQL workflow run at this head that finished after the first capture and before GitHub's check that
+ *  still reads the warning: CodeQL completed again and GitHub re-judged it. Unparseable times never match. */
+function codeqlRunCompletedAgain(body: unknown, headSha: string, since: number, standing: number):
+  { id: number; run_attempt?: number; updated_at: string } | undefined {
+  const runs = (body as { workflow_runs?: unknown } | null)?.workflow_runs;
+  if (!Array.isArray(runs) || !Number.isFinite(since) || !Number.isFinite(standing)) return undefined;
+  return runs.find((run) => run?.head_sha === headSha && run.status === "completed" && Number.isSafeInteger(run.id) &&
+    Date.parse(run.updated_at) > since && Date.parse(run.updated_at) <= standing);
+}
+
+/** W1-T13470 — one full pass over a configuration-not-found wait; returns the wait's reason with what this pass did. */
+export async function observeCodeqlConfigurationWarning(deps: SweepDeps, lines: ReadonlyArray<Record<string, unknown>>,
+  pr: OpenPrView, waitReason: string): Promise<string> {
+  if (!deps.readSecurityMergeObservation) return waitReason;
+  const appendLine = deps.appendLine ?? appendLedger;
+  const failed = (error: unknown) => String((error as Error)?.message ?? error);
+  let observed: SecurityMergeObservation;
+  try {
+    observed = await deps.readSecurityMergeObservation(pr);
+  } catch (error) {
+    // Named in the disposed row; nothing is captured or escalated, and the next pass reads again.
+    return `${waitReason} — the security decision was not read this pass (${failed(error)})`;
+  }
+  if (observed.headSha !== pr.headSha) {
+    return `${waitReason} — the decision read answered ${observed.decision.state}: ${observed.decision.reason} at ` +
+      `${observed.headSha?.slice(0, 7) ?? "no head"}, not this head — re-read next pass`;
+  }
+  const row = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha };
+  const atHead = (step: string) => lines.filter((line) => line.step === step && line.pr_number === pr.prNumber && line.head_sha === pr.headSha);
+  const captures = atHead(CODE_SCANNING_CONFIGURATION_WARNING_STEP);
+  const notes: string[] = [];
+  const warning = observed.observation?.configurationWarning;
+  if (warning !== undefined && !captures.some((line) => line.check_id === warning.checkId)) {
+    const capture = { ...row, step: CODE_SCANNING_CONFIGURATION_WARNING_STEP, check_id: warning.checkId,
+      decision: `${observed.decision.state}: ${observed.decision.reason}`, receipt: warning };
+    appendLine(deps.ledgerPath, capture);
+    captures.push(capture);
+    notes.push(`captured check ${warning.checkId}'s warning verbatim`);
+  }
+  const first = captures.reduce<Record<string, unknown> | undefined>((a, b) => a === undefined || Number(b.check_id) < Number(a.check_id) ? b : a, undefined);
+  if (atHead(CODE_SCANNING_CONFIGURATION_WARNING_ESCALATED_STEP).length > 0) {
+    notes.push("the standing warning was already escalated once at this head");
+  } else if (warning !== undefined && first !== undefined && deps.readCodeqlWorkflowRuns) {
+    let runs: unknown;
+    try {
+      runs = await deps.readCodeqlWorkflowRuns(pr);
+    } catch (error) {
+      // Named in the disposed row; no escalation is judged without the runs, and the next pass reads them again.
+      notes.push(`CodeQL workflow runs unread (${failed(error)})`);
+    }
+    const run = codeqlRunCompletedAgain(runs, pr.headSha,
+      Date.parse(String((first.receipt as { completedAt?: unknown } | undefined)?.completedAt)), Date.parse(String(warning.completedAt)));
+    if (run !== undefined) {
+      const owner = pr.taskId ?? "security-policy";
+      const reason = `CodeQL configuration-not-found persists at head ${pr.headSha.slice(0, 7)} of #${pr.prNumber}: CodeQL workflow ` +
+        `run ${run.id} (attempt ${run.run_attempt ?? "unknown"}) completed at ${run.updated_at}, and GitHub's trusted CodeQL check ` +
+        `${warning.checkId} completed at ${warning.completedAt} still reads "${warning.title}" — security-merge-policy stays unknown ` +
+        `and no fix round was spent. Receipt: ${JSON.stringify(warning)}`;
+      appendLine(deps.ledgerPath, { ...row, step: CODE_SCANNING_CONFIGURATION_WARNING_ESCALATED_STEP, check_id: warning.checkId,
+        workflow_run_id: run.id, workflow_run_attempt: run.run_attempt ?? null, owner, receipt: warning });
+      try {
+        await deps.escalate(pr, reason, { taskId: owner, prNumber: pr.prNumber, prUrl: pr.prUrl, question: reason, criterion: "",
+          reviewerRequirement: reason, specText: "", strikeHistory: pr.strikeHistory ?? [], resolutions: [
+            { label: "re-run CodeQL", detail: "Re-run CodeQL at this head; its completion re-runs the trusted producer through that workflow's own trigger." },
+            { label: "file the recovery rule", detail: "Read the captured receipt and file the operator-reviewed recovery task it supports." },
+          ] });
+        notes.push(`CodeQL run ${run.id} completed again with the warning standing — escalated once to ${owner}`);
+      } catch (error) {
+        // Named in the disposed row; its pre-written escalation row keeps the escalation to once per head.
+        notes.push(`its escalation to ${owner} failed (${failed(error)}) and is not repeated at this head`);
+      }
+    }
+  }
+  return notes.length > 0 ? `${waitReason} — ${notes.join("; ")}` : waitReason;
 }
 
 type CodeScanningGate =
@@ -21602,6 +21853,26 @@ export async function runSweep(
     }
     return { repaired: false, reason: `; plan repair (${decision.signature}) did not take: ${result.outcome}${result.reason ? ` — ${result.reason}` : ""}` };
   };
+  // W1-T13347: a plan filing red only on title/body checks, acceptance-author-gate among them, gets the title/body repair
+  // the metadata arm gives every other PR, once per head. It edits no plan file; the gate re-judges the edited body.
+  const tryPlanMetadataRepair = async (pr: OpenPrView, prior: { repaired: boolean; reason: string }) => {
+    const checks = metadataOnlyRed(pr), key = `${pr.prNumber}@${pr.headSha}@metadata`;
+    if (prior.repaired || checks === undefined || !checks.includes("acceptance-author-gate") || !deps.repairMetadata || deps.dryRun ||
+        !(deps.actionable?.("blocked-fixable") ?? true) || planRepairHistory.has(key)) return prior;
+    let result: MetadataRepairResult;
+    try {
+      result = await deps.repairMetadata(pr, checks);
+    } catch (e) {
+      result = { repaired: false, reason: String((e as Error)?.message ?? e) };
+    }
+    appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber,
+      head_sha: pr.headSha, step: PLAN_REPAIR_STEP, signature: "metadata", action: "edit-metadata", check_name: checks.join(", "),
+      outcome: result.repaired ? "repaired" : "refused", reason: result.reason });
+    planRepairHistory.add(key);
+    return result.repaired
+      ? { repaired: true, reason: `plan repair (metadata): ${result.reason}; awaiting the gate's verdict on the edited body` }
+      : { repaired: false, reason: `${prior.reason}; plan repair (metadata) did not take: ${result.reason}` };
+  };
   // W1-T2789 — unlike W1-T2620's cohort-wide release above, this is exact-path evidence for the
   // exhausted red population the disposition table would otherwise escalate before runFixRung
   // reaches its W1-T2671 pre-strike check. The write still rechecks live state and head below.
@@ -23294,7 +23565,7 @@ export async function runSweep(
         : staleGate ? { repaired: true, reason: deps.dryRun || !(deps.actionable?.("blocked-fixable") ?? true)
           ? "stale ci-gate verdict — its re-run waits for a full sweep pass"
           : await redriveStaleCiGate(deps, pr, staleGate, reaggregatedCiGateKeys) }
-        : await tryPlanRepair(pr);
+        : await tryPlanMetadataRepair(pr, await tryPlanRepair(pr));
       const facts = planRoundFacts.get(pr.prNumber);
       let planRoundExhausted = false;
       // W1-T13047: why the plan-scoped round is exhausted, for the held rebuild's question.
@@ -24124,6 +24395,11 @@ export async function runSweep(
         // W1-T1116 — the fourth silent guard. Forcing `alreadyDone` true is BY DESIGN, since there
         // is no refusal to distinguish, but the row still read `acted:false` with nothing saying
         // why. `reason` already narrates what is being waited on, reused verbatim.
+        // W1-T13470: a full pass observes a configuration-not-found wait; it still acts on nothing the arms own.
+        if (ruleBlockerByIndex.get(prIndex) === "security-unknown-hold" && codeqlConfigurationWarningWait(pr) &&
+            !deps.dryRun && deps.repairAdmissionSurface !== "light") {
+          reason = await observeCodeqlConfigurationWarning(deps, ledgerLines, pr, reason);
+        }
         dedupStandDownReason = reason;
         break;
       case "held-draft":

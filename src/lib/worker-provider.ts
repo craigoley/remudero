@@ -8,7 +8,7 @@ import { createWorkerToolLineage, observeWorkerToolLineage } from "./worker-tool
 import { CASH_RESPONSES_DEPLOYMENTS, CashResponsesConversation } from "./cash-responses.js";
 import { randomUUID } from "node:crypto";
 import { execFileSync, spawn as spawnChild, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { execFileLoopBounded } from "./loop-bounded-child.js";
+import { execFileRouted } from "./spawn-helper.js";
 import { constants as fsConstants, accessSync, appendFileSync, closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
@@ -4888,7 +4888,7 @@ export async function runOpenWeightCheck(input: OpenWeightCheckInput): Promise<s
   const cwd = realpathSync(input.cwd);
   let stdout: string;
   try {
-    ({ stdout } = await execFileLoopBounded(OPENWEIGHT_CHECK_SANDBOX, openWeightCheckSandboxArgv({ ...input, argv }), {
+    ({ stdout } = await execFileRouted(OPENWEIGHT_CHECK_SANDBOX, openWeightCheckSandboxArgv({ ...input, argv }), {
       cwd,
       env: input.env,
       encoding: "utf8",
@@ -5122,7 +5122,7 @@ export async function selectOpenWeightUnitTestSuitesOffLoop(cwd: string, env: Re
   const code = "const m = await import(process.argv[1]);" +
     "process.stdout.write(JSON.stringify(m.selectOpenWeightUnitTestSuites(process.argv[2])));";
   try {
-    const { stdout } = await execFileLoopBounded(
+    const { stdout } = await execFileRouted(
       process.execPath,
       ["--import", "tsx", "--input-type=module", "--eval", code, import.meta.url, cwd],
       { cwd: HARNESS_ROOT, env, encoding: "utf8", timeout: OPENWEIGHT_UNIT_TEST_SELECTION_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024 },

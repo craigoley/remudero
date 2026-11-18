@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { appendLedger } from "./ledger.js";
-import { readLedgerUnionRawLinesSync } from "./ledger-union.js";
+import { readLedgerUnionRawLinesAsync, type LedgerGrepFsDeps, type LedgerUnionRawRead, type LedgerUnionRawReadOptions } from "./ledger-union.js";
 import { TASK_STATUSES, type Plan } from "./plan.js";
 import {
   buildBatchedGithub, buildLedgerIndex, dispatchesWithoutNewOwnedPr, infrastructureRefusal,
@@ -33,8 +33,10 @@ export interface ReaderAgreementOptions {
   appendLine?: (path: string, row: Row & { run_id: string; task_id: string; step: string }) => void;
   /** W1-T9981: the board figures' corpus reader; omitted, {@link readLedgerUnionBounded}. */
   boardCorpus?: typeof readLedgerUnionBounded;
-  /** W1-T9981: the independent figures' corpus reader; omitted, {@link readLedgerUnionRawLinesSync}. */
-  independentCorpus?: typeof readLedgerUnionRawLinesSync;
+  /** W1-T9981: the independent figures' corpus reader; omitted, {@link readLedgerUnionRawLinesAsync} (W1-T11506),
+   *  which yields the loop between slices. A synchronous reader is still accepted. */
+  independentCorpus?: (stateDir: string, opts?: LedgerUnionRawReadOptions, fsDeps?: LedgerGrepFsDeps) =>
+    LedgerUnionRawRead | Promise<LedgerUnionRawRead>;
 }
 
 export interface ReaderDisagreement {
@@ -209,11 +211,11 @@ export function independentQueueGateway(owner: string, repo: string): GitHub {
 }
 
 async function independentFigures(options: ReaderAgreementOptions, stats: ReaderStats): Promise<ReaderFigures> {
-  const read = options.independentCorpus ?? readLedgerUnionRawLinesSync;
+  const read = options.independentCorpus ?? readLedgerUnionRawLinesAsync;
   const scan: WindowScan = { scanned: 0 };
   // Each pass parses only the lines it kept, and its raw lines are dropped once parsed.
-  const readRows = (keep: (line: string) => boolean): Row[] => {
-    const union = read(dirname(options.ledgerPath), {
+  const readRows = async (keep: (line: string) => boolean): Promise<Row[]> => {
+    const union = await read(dirname(options.ledgerPath), {
       liveFirst: true, order: "newest-first", rotationWindowMs: STATUS_BOARD_WINDOW_MS,
       minRotations: STATUS_BOARD_MIN_ROTATIONS, refuseIncomplete: true, keep,
     });
@@ -227,9 +229,9 @@ async function independentFigures(options: ReaderAgreementOptions, stats: Reader
       return row as Row;
     });
   };
-  const steps = readRows(keepFigureSteps(scan));
+  const steps = await readRows(keepFigureSteps(scan));
   const halted = haltedTasks(steps);
-  const rows = halted.length > 0 ? readRows(keepNamed(scan, halted.map(token))) : [];
+  const rows = halted.length > 0 ? await readRows(keepNamed(scan, halted.map(token))) : [];
   const dispatchStreaks = Object.fromEntries(halted.map(id => [id, independentStreak(rows, id)]));
   const healthyDeploys: Record<string, string> = {};
   const deploys = steps.filter(row => row.step === "deploy.ok" && typeof row.ts === "string")
@@ -253,7 +255,7 @@ async function independentFigures(options: ReaderAgreementOptions, stats: Reader
     // W1-T6246: a cross-check never waits on GitHub. Until the off-loop walk has fresh facts the figure is absent.
     if (github.factsStale?.() !== false) return { dispatchStreaks, healthyDeploys, openPrCount, queuedTaskCount };
     // W1-T9981: the projection reads the plan tasks' own rows and the steps it reads by step, never the whole window.
-    const projected = readRows(keepNamed(scan, [...PROJECTION_STEP_READS].map(token), namesPlanTask(options.plan)));
+    const projected = await readRows(keepNamed(scan, [...PROJECTION_STEP_READS].map(token), namesPlanTask(options.plan)));
     const projections = projectPlan(options.plan, {
       ledgerPath: options.ledgerPath, readLedger: () => projected,
       github, writeCreditStore: () => {},
