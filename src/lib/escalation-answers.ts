@@ -121,7 +121,7 @@ export interface EscalationAnswerGateway {
   readonly sourceRead?: AdmissionRead;
   /** OPEN issues carrying `label` — the same REST read {@link "./escalate.js".IssueGateway.listOpen}
    *  makes. THROWS on a `gh` read failure; the caller degrades to "nothing new this pass". */
-  listOpen(label: string): OpenIssue[] | Promise<OpenIssue[]>;
+  listOpen(label: string): ListedIssue[] | Promise<ListedIssue[]>;
   /** Every comment on one issue, oldest first (GitHub's own order). THROWS on a `gh` read
    *  failure; the caller skips just that issue this pass. */
   listComments(issueNumber: number): EscalationIssueComment[] | Promise<EscalationIssueComment[]>;
@@ -147,6 +147,17 @@ export interface EscalationAnswerGateway {
    *  mirrors {@link reactPlusOne} for a channel with no comment id to react to. Best-effort, and
    *  optional — see the interface's own header. */
   reactPlusOneOnIssue?(issueNumber: number): void;
+}
+
+/** W1-T13688: an open issue with the comment and reaction counts its list row gave, as given (absent when not). */
+export interface ListedIssue extends OpenIssue {
+  listedComments?: unknown;
+  listedReactions?: unknown;
+}
+
+/** W1-T13688: true only for a listed count of exactly 0; a missing or odd count reads as before. */
+function listedNone(count: unknown): boolean {
+  return Number.isSafeInteger(count) && count === 0;
 }
 
 /** One raw comment row as GitHub's REST `/issues/{n}/comments` endpoint returns it. */
@@ -221,7 +232,18 @@ export function ghEscalationAnswerGateway(
     refusalIssues: ghIssueGatewayAsync(owner, repo, { exec: readText }),
     async listOpen(label) {
       const raw = await readText(labelledIssuesRestArgs(repoArg, label, "open"));
-      const issues = parseLabelledIssuesRest(raw);
+      const listed = parseLabelledIssuesRest(raw);
+      const rows = splitConcatenatedJsonPages(raw).flatMap(chunk => JSON.parse(chunk)) as Array<RestCommentRow & {
+        number: number; title?: string; labels?: unknown; pull_request?: unknown; comments?: unknown;
+        reactions?: { total_count?: unknown } | null;
+      }>;
+      const counts = new Map(rows.map(item => [item.number, item]));
+      const issues: ListedIssue[] = listed.map(issue => {
+        const row = counts.get(issue.number);
+        return { ...issue,
+          ...(row?.comments === undefined ? {} : { listedComments: row.comments }),
+          ...(row?.reactions?.total_count === undefined ? {} : { listedReactions: row.reactions.total_count }) };
+      });
       if (feedback === undefined) return issues;
       repository = undefined;
       parents.clear();
@@ -231,9 +253,7 @@ export function ghEscalationAnswerGateway(
         if (response.status === 200 && row?.full_name === repoArg && Number.isSafeInteger(row.id) && row.id! > 0
           && typeof row.private === "boolean") repository = { id: row.id, fullName: row.full_name, private: row.private };
       } catch { /* Unreadable identity stays missing; accepted legacy replies still land in shadow. */ }
-      for (const item of splitConcatenatedJsonPages(raw).flatMap(chunk => JSON.parse(chunk)) as Array<RestCommentRow & {
-        number: number; title?: string; labels?: unknown; pull_request?: unknown;
-      }>) {
+      for (const item of rows) {
         if ("pull_request" in item) continue;
         parents.set(item.number, { ...subject("issue", `${repoArg}#${item.number}`, item.number, item),
           revision: { updatedAt: item.updated_at, contentDigest: feedbackContentDigest([item.title, item.body, item.labels]) } });
@@ -644,7 +664,7 @@ export async function readEscalationAnswers(
   let accepted = 0;
   let ignored = 0;
   let unreadable = 0;
-  let issues: OpenIssue[];
+  let issues: ListedIssue[];
   try {
     issues = await gateway.listOpen(NEEDS_QUESTION_LABEL);
   } catch {
@@ -710,7 +730,7 @@ export async function readEscalationAnswers(
       if (!taskId) continue; // an issue with no recoverable task referent steers nothing
       let comments: EscalationIssueComment[];
       try {
-        comments = await gateway.listComments(issue.number);
+        comments = listedNone(issue.listedComments) ? [] : await gateway.listComments(issue.number);
       } catch {
         unreadable++; // counted, then just this issue is skipped this pass
         continue;
@@ -781,7 +801,7 @@ export async function readEscalationAnswers(
       if (gateway.listReactions && (gateway.ownerLogin || gateway.operatorLogins !== undefined)) {
         let reactions: EscalationIssueReaction[] = [];
         try {
-          reactions = await gateway.listReactions(issue.number);
+          reactions = listedNone(issue.listedReactions) ? [] : await gateway.listReactions(issue.number);
         } catch {
           unreadable++; // counted, then just this issue's reactions are skipped this pass
         }

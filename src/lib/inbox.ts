@@ -1654,6 +1654,8 @@ export function inboxDraftPrompt(proposal: Proposal, currentPlanText: string, ru
       "First check whether releasing this shard as it stands satisfies the proposal and every reframe round.",
       `Whenever the reframe rounds do not ask for different work, print RELEASE: ${parked.id} instead of a FRAGMENT.`,
       "A RELEASE files no new task. Do not rewrite this shard as invented new tasks.", ""] : []),
+    ...(parkedProposalTaskId(proposal.id) ? ["Approving this ask IS the operator's human judgment, so every task you file is",
+      "`verify: auto` with proofs an agent can run. A `verify: human` task re-asks the question and never dispatches.", ""] : []),
     "=== GROUND ===",
     "Grep/Read MASTER-PLAN.md, LEARNINGS.md, and DECISIONS.md for what is already decided; an",
     "INDEX of the current plan/tasks.yaml is pasted below so you cite REAL existing task ids in",
@@ -2379,6 +2381,13 @@ export function lintDraftedFragment(
       if (directory(path)) violations.push({ check: "draft-directory-files", severity: "block",
         message: `${task.id} files entry ${JSON.stringify(path)} is a directory${directoryGuidance}` });
     }
+    // An approval of a verify-human, verify-human-automate or machine-judge ask IS the operator's judgment. A task it
+    // files as `verify: human` re-asks the same question, and drain's isDispatchEligible holds it as verify-not-auto
+    // until a second release, so the approved work never runs (W1-T13650, 2026-11-18).
+    if (task.verify === "human" && parkedProposalTaskId(proposalId) !== undefined) violations.push({
+      check: "draft-human-ask-repeated", severity: "block",
+      message: `${task.id} is verify: human, but approving ${proposalId} already gives the human judgment; file it verify: auto ` +
+        "with proofs an agent can run, or RELEASE the parked task when no new work is needed" });
     for (const criterion of task.acceptance ?? []) {
       const path = /^grep:\s*[\s\S]*\s+in\s+(\S+)\s*$/i.exec(criterion.proof.trim())?.[1];
       if (path && directory(path)) violations.push({ check: "draft-directory-grep", severity: "block",

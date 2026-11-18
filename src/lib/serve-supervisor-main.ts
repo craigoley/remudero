@@ -56,6 +56,7 @@ export async function runServeSupervisor(argv: readonly string[], opts: Supervis
     serveArgs: serveArgsOf(argv),
     handoffEnabled: handoffSwitch(env, gensDir),
     spacingBaseMs: SERVE_HANDOFF_SPACING_BASE_MS,
+    spaceFromBoot: true,
     log,
   });
   const onSignal = opts.onSignal ?? ((signal, handler) => void process.once(signal, handler));

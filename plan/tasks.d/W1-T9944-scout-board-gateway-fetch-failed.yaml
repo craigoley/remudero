@@ -4,7 +4,8 @@
   depends_on: []
   type: implement
   verify: auto
-  risk: low
+  risk: high
+  band_meaning: span
   priority: 3.4
   # refusal-amendment (W1-T9944, run stall-19199@f0d19e1be9216f512194869fb5479a77dd845e08, 2026-11-18T08:56:39.801Z): the worker refused criterion 1 [proof-unexecutable-at-head] — proposed re-scope-criteria: repair the criterion's proof so it is executable at HEAD, or re-scope the criterion
   #   worker evidence: 4 fix rounds left "board_gateway.fetch_failed stops recurring: its cause is fixed rather than its rows hidden" unmet with the same failure at f0d19e1be9216f512194869fb5479a77dd845e08, so it cannot be met as written at this head. Approaches that did not work: round work-fix-dispatch-W1-T9944-1794950524398-0427:1:1794951833555 at dcc5863f52179a578d4a55d2dd052bedf65022fc: diff []; outcome NEEDS_DESIGN | round work-fix-dispatch-W1-T9944-1794972508570-3300:1:1794973552195 at 61eb24e5bb343ca394b45d42f8daa24d4da564ac: diff []; outcome NEEDS_SCOPE | round work-fix-dispatch-W1-T9944-1794976957500-e326:1:1794978597935 at 61eb24e5bb343ca394b45d42f8daa24d4da564ac: diff []; outcome NEEDS_SCOPE | round work-fix-dispatch-W1-T9944-1794990836755-ae30:1:1794991562357 at f0d19e1be9216f512194869fb5479a77dd845e08: diff []; outcome NEEDS_SCOPE
@@ -15,14 +16,19 @@
   origin: "scout:board_gateway.fetch_failed"
   files:
     - src/lib/status.ts
+    - src/run-task.ts
+    - test/the-retro-shipped-since-read-runs-off-the-loop.test.ts
     - test/console-api/board/scout-board-gateway-fetch-failed.test.ts
   acceptance:
     - claim: "board_gateway.fetch_failed stops recurring: its cause is fixed rather than its rows hidden"
       proof: "grep: test(\"W1-T9944: board_gateway\\.fetch_failed no longer recurs\" in test/console-api/board/scout-board-gateway-fetch-failed.test.ts"
     - claim: "invariant:transient-5xx-retry"
       proof: "grep: test(\"W1-T9944: prewarm worker retries its synchronous gh API page\" in test/console-api/board/scout-board-gateway-fetch-failed.test.ts"
-  design: >-
+    - claim: "invariant:awaited-5xx-retry"
+      proof: "grep: test(\"W1-T9944: awaited and sync shipped-since gateways retry transient 502 pages identically\" in test/the-retro-shipped-since-read-runs-off-the-loop.test.ts"
+  design: |
     INVARIANT transient-5xx-retry: a transient GitHub server error on a synchronous board API page is retried before failure is emitted; persistent errors remain visible.
+    INVARIANT awaited-5xx-retry: the awaited retro board replay retries a transient GitHub server error with the same bounded policy, preserving parity with the synchronous gateway.
   note: "Filed by the scout gardener (W1-T5454). The scout measures this step again once the build merges and credits or debits its class by whether the rows stopped. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person."
   rationale: |
     The ledger step board_gateway.fetch_failed carries a failure shape and landed rows in both halves of the trailing 7 days: 1 in the older half, 2 in the newer.
@@ -33,6 +39,6 @@
     action: proceed
     confidence: 1
     reasons:
-      - "released by the operator with rmd approve"
-    judged_at: "2026-10-22T03:31:39.860Z"
-    pin: "8f22f2f62484af90440e8750391023fb37a706a1b830fd344529ff7461a16c2a"
+      - "the operator approved expanding this task to include src/run-task.ts and the awaited gateway retry parity fix"
+    judged_at: "2026-11-18T00:00:00.000Z"
+    pin: "2f9ee51282f032b5dd9e308b2ceca5700e0123e8932ee318758dc50c906097dc"

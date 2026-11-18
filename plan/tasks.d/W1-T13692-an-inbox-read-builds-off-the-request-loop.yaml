@@ -1,0 +1,74 @@
+- id: W1-T13692
+  title: "Serve builds a changed persisted Inbox in a worker thread and answers Inbox reads from the last build, so the Console's parallel Inbox reads stop timing out while one request parses, checks, lanes and pages the 6.7 MB classification on serve's loop"
+  repo: remudero
+  depends_on: []
+  priority: 0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # which build an Inbox read answers from while a newer file is being built; bounded by INBOX_STALE_AFTER_MS and the existing 503 rules
+  band_meaning: span
+  origin: "operator-session#serve-oom-2026-11-16"
+  plan_refs:
+    - W1-T5897
+    - W1-T13606
+    - W1-T13292
+  files:
+    - src/lib/panel-graph.ts
+    - src/lib/inbox-build-worker.ts
+    - src/lib/inbox-view.ts
+    - src/lib/thread-names.ts
+    - src/lib/serve.ts
+    - src/lib/instance-gateway.ts
+    - test/an-inbox-read-builds-off-the-request-loop.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Two PanelGraphDeps that name one inbox share one parse of the persisted file and one build of its lanes"
+      proof: "grep: W1-T13692: two deps that name one inbox share one read in test/an-inbox-read-builds-off-the-request-loop.test.ts"
+    - claim: "invariant:off-loop — with the build off the loop, a changed file is answered from the last build while one build runs, and many reads start one build"
+      kind: guard
+      proof: "grep: W1-T13692: invariant:off-loop in test/an-inbox-read-builds-off-the-request-loop.test.ts"
+    - claim: "A failed build is logged as serve.inbox_build_failed, and reads take the in-place path until INBOX_BUILD_RETRY_MS passes"
+      proof: "grep: W1-T13692: a failed build is logged in test/an-inbox-read-builds-off-the-request-loop.test.ts"
+    - claim: "The worker builds the same read, lanes and view pages an in-place read builds, and the inbox view answers from the worker's pages"
+      proof: "grep: W1-T13692: the worker builds the read, the lanes and the pages in test/an-inbox-read-builds-off-the-request-loop.test.ts"
+    - claim: "Serve's core Inbox and every instance's Inbox read off the loop"
+      proof: 'grep: inboxBuildOffLoop: true in src/lib/serve.ts'
+    - claim: "invariant:boot-in-place — serve's boot read takes a changed file in place under the off-loop flag and starts no build"
+      kind: guard
+      proof: "grep: W1-T13692: serve's boot read is in place under the off-loop flag in test/an-inbox-read-builds-off-the-request-loop.test.ts"
+    - claim: "Serve's Inbox reads start the worker build from panel-graph's read path"
+      proof: "grep: buildInboxInWorker( in src/lib/panel-graph.ts"
+  rationale: |
+    WHY: Craig is hitting Console Inbox timeouts: Vercel logs show bursts where every serve read times out at once
+    (11:05:20 to 11:05:35Z and 12:13:18 to 12:13:27Z on 2026-11-18), each at a Console Inbox page load of about five
+    parallel reads, and a 502 partway through a walk of /v1/views/inbox at about 12:20Z.
+    MEASURED: serve.demand 12:13 to 12:18Z had /v1/inbox p95 7.4 s. Stall rows in the bursts carry inbox-view
+    renderView (4.7 to 5.0 s stalls), panel-graph inboxLanes and fleet-lane checkInboxSnapshot to read-page
+    classificationSnapshotKey (1.0 s self). After the 12:19:22Z generation handoff, one stall of 9.3 s carried
+    inboxLanes. On a copy of the live state (inbox-classification.json, 6.7 MB): the in-place read took 132 to 462 ms
+    (parse 142 ms, then its checks), lanes 287 to 919 ms and the view's pages 112 to 640 ms, all on the loop of the
+    request that first saw the file, and again for every PanelGraphDeps (a WeakMap keyed by deps).
+  design: |
+    INVARIANT boot-in-place: serve's boot read is in place, so a generation starts from the file on disk.
+    INVARIANT off-loop: once a build exists, no Inbox read parses, checks, lanes or pages a changed persisted file on
+    the request loop; it answers from the last build (its own generatedAt still judged by INBOX_STALE_AFTER_MS and the
+    existing 503 rules) while one build runs.
+    1. panel-graph holds one read per inbox root, source identity and scope (shared by every deps), with its lanes and
+       the view pages of those lanes. An operator write that moves the plain or fleet store still rebuilds the lanes
+       at once, as before.
+    2. buildSlowLaneInbox(input) is the whole build (read, check, lanes). inbox-build-worker.ts runs it in a worker
+       thread (thread name rmd-inbox-build) and sends the read, the lanes and the view pages as three messages, so
+       serve takes each copy in its own turn. N reads that see a new file start one build.
+    3. The first read of a slot is in place, as before. Serve's boot reads the core Inbox and builds its lanes in place
+       (readSlowLaneInbox(deps, { inPlace: true })) before the generation takes a request, so a new generation never
+       answers an older generation's build. A failed build is logged and reads go in place for INBOX_BUILD_RETRY_MS (30 s).
+    4. The deps flag inboxBuildOffLoop turns this on: serve's core panel deps and every instance's inbox deps.
+  falsifier: |
+    A deps object parses its own copy: criterion 1 fails. A request builds a changed file in place, or each read starts
+    a build: criterion 2 fails. A failed worker loops or goes silent: criterion 3 fails. The worker's pages differ from
+    in-place pages: criterion 4 fails.
+  note: |
+    Id reserved for run-unfiled-1795004954899 with ~/rmd-work/bin/reserve-id.sh.

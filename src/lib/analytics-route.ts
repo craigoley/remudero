@@ -2663,7 +2663,7 @@ function errorText(error: unknown): string {
 /** W1-T13685: what one refresh produced. A partial fold keeps the prior value served; a snapshot replaces it. */
 export type AnalyticsRefreshOutcome =
   | { kind: "partial"; scan: AnalyticsScanReport }
-  | { kind: "snapshot"; snapshot: AnalyticsSnapshot; scan?: AnalyticsScanReport };
+  | { kind: "snapshot"; snapshot: AnalyticsSnapshot; scan?: AnalyticsScanReport; anchorKept?: { keptAsOf: string | null } };
 
 /** W1-T13685: the owner of one state directory's checkpoint, fold and their throttled writes. The cache drives it on
  *  its own thread, or through {@link createWorkerAnalyticsRefreshEngine} on a worker thread. */
@@ -2732,17 +2732,32 @@ export function createAnalyticsRefreshEngine(stateDir: string, clock: Clock, rea
         return { kind: "partial", scan: result.scan };
       }
       const next = "snapshot" in result ? result.snapshot : result;
+      let anchorKept: { keptAsOf: string | null } | undefined;
       if ("snapshot" in result) {
         const sourceReadable = next.benchmarkEvidence?.reason !== "ledger-source-unreadable";
-        if (sourceReadable) checkpoint = result.checkpoint;
+        // W1-T13667: a fold whose live file rotated while it read cannot anchor its live position. Adopting that
+        // checkpoint made the next refresh refuse it (live-position-unanchored) and rescan every rotation from
+        // scratch: on 2026-11-18 a 19 s core refresh at 11:28Z led to nine 65 s legs over 241 rotations, 76 s of
+        // serve main-thread stall. The previous anchored checkpoint still resumes exactly, so it is kept; the new
+        // snapshot is served either way.
+        const unanchored = result.checkpoint.source.live !== null && result.checkpoint.source.live !== undefined
+          && result.checkpoint.source.liveAnchor === undefined;
+        const keepAnchored = unanchored && checkpoint?.source.liveAnchor !== undefined;
+        if (keepAnchored) anchorKept = { keptAsOf: checkpoint!.snapshot?.asOf ?? null };
+        if (sourceReadable && !keepAnchored) checkpoint = result.checkpoint;
         const hasRetainedEvidence = result.checkpoint.source.archives.length > 0 ||
           (result.checkpoint.source.live?.size ?? 0) > 0;
-        if (hasRetainedEvidence && sourceReadable) persistCheckpoint(result.checkpoint, false);
+        if (hasRetainedEvidence && sourceReadable && !keepAnchored) persistCheckpoint(result.checkpoint, false);
         if (progress !== undefined) clearAnalyticsProgress(stateDir);
         progress = undefined;
         unwrittenProgress = undefined;
       }
-      return { kind: "snapshot", snapshot: next, ...("snapshot" in result && result.scan !== undefined ? { scan: result.scan } : {}) };
+      return {
+        kind: "snapshot",
+        snapshot: next,
+        ...("snapshot" in result && result.scan !== undefined ? { scan: result.scan } : {}),
+        ...(anchorKept !== undefined ? { anchorKept } : {}),
+      };
     },
     flush() {
       if (unwritten !== undefined) persistCheckpoint(unwritten, true);
@@ -2766,7 +2781,7 @@ type AnalyticsWorkerRequest =
 type AnalyticsWorkerResult =
   | { kind: "done" }
   | { kind: "partial"; scan: AnalyticsScanReport }
-  | { kind: "snapshot"; wire: WireSnapshot; scan?: AnalyticsScanReport };
+  | { kind: "snapshot"; wire: WireSnapshot; scan?: AnalyticsScanReport; anchorKept?: { keptAsOf: string | null } };
 type AnalyticsWorkerReply = { id: number; ok: true; result: AnalyticsWorkerResult } | { id: number; ok: false; error: string };
 
 function toWire(snapshot: AnalyticsSnapshot): WireSnapshot {
@@ -2804,7 +2819,12 @@ export function serveAnalyticsRefresh(
       running.set(msg.id, controller);
       return engine.refresh(controller.signal, yieldAtMs)
         .then((outcome): AnalyticsWorkerResult => outcome.kind === "partial" ? outcome
-          : { kind: "snapshot", wire: toWire(outcome.snapshot), ...(outcome.scan !== undefined ? { scan: outcome.scan } : {}) })
+          : {
+            kind: "snapshot",
+            wire: toWire(outcome.snapshot),
+            ...(outcome.scan !== undefined ? { scan: outcome.scan } : {}),
+            ...(outcome.anchorKept !== undefined ? { anchorKept: outcome.anchorKept } : {}),
+          })
         .finally(() => running.delete(msg.id));
     };
     Promise.resolve().then(work).then(reply, fail);
@@ -2885,7 +2905,12 @@ export function createWorkerAnalyticsRefreshEngine(stateDir: string, workerUrl?:
     refresh: (signal, yieldAtMs) => run({ op: "refresh", stateDir, yieldAtMs }, signal).then((result): AnalyticsRefreshOutcome => {
       if (result.kind === "partial") return result;
       if (result.kind !== "snapshot") throw new Error(`analytics worker answered a refresh with ${result.kind}`);
-      return { kind: "snapshot", snapshot: fromWire(result.wire), ...(result.scan !== undefined ? { scan: result.scan } : {}) };
+      return {
+        kind: "snapshot",
+        snapshot: fromWire(result.wire),
+        ...(result.scan !== undefined ? { scan: result.scan } : {}),
+        ...(result.anchorKept !== undefined ? { anchorKept: result.anchorKept } : {}),
+      };
     }),
     flush: () => void run({ op: "flush", stateDir }).catch((error: unknown) => {
       // Reason: a stop cannot wait; a lost flush leaves the older checkpoint, which the next boot resumes from.
@@ -2980,6 +3005,9 @@ export function createAnalyticsSnapshotCache(deps: AnalyticsSnapshotCacheDeps): 
             ...scanFields(outcome.scan),
           });
           return;
+        }
+        if (outcome.anchorKept !== undefined) {
+          log("serve.analytics_refresh.anchor_kept", { kept_as_of: outcome.anchorKept.keptAsOf, reason: "live-unanchored" });
         }
         value = freezeAnalyticsSnapshot(outcome.snapshot);
         shedPending = false;

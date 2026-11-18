@@ -30,7 +30,7 @@ import { fileURLToPath } from "node:url";
 import { configPath, isWorkerProviderId, loadConfig, providerRoutingOwnsHeadroom, resolveHeadroomEnabled, workerHomeDir, type Config } from "../../lib/config.js";
 import { cashDeploymentTarget } from "../../lib/config-schema.js";
 import { ledgerPathFor } from "../../lib/ledger-path.js";
-import { daemonCrashSentinel, escalateClaimStall, escalateClaimStallCleared, escalateCrashLoop, escalateDiskHeadroomBreach, escalateHeadroomParkCeiling, escalateHeadroomReserve, escalateQuotaExhaustion, escalateReplayStranded, escalateStarvation, escalateStarvationCleared } from "../../lib/escalation-catalogue.js";
+import { daemonCrashSentinel, deliverQuotaExhaustionLate, escalateClaimStall, escalateClaimStallCleared, escalateCrashLoop, escalateDiskHeadroomBreach, escalateHeadroomParkCeiling, escalateHeadroomReserve, escalateQuotaExhaustion, escalateReplayStranded, escalateStarvation, escalateStarvationCleared } from "../../lib/escalation-catalogue.js";
 import { lostWorkerProviders, resolveProviderRoutingPolicy, type EffectiveProviderRoutingPolicy } from "../../lib/provider-routing-policy.js";
 import {
   FOUNDRY_CLAUDE_API_KEY_ENV,
@@ -2500,6 +2500,8 @@ export async function daemonCommand(
         // W1-T372: observe-and-surface only — dispatch is NOT paused by this hook (unlike
         // onHeadroomBreach above); see escalateQuotaExhaustion's own doc for why.
         onQuotaExhausted: (info) => escalateQuotaExhaustion(info, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
+        // W1-T13690: a notice that could not be sent at the exhaustion is sent once after the reset.
+        onQuotaRecovered: (info) => deliverQuotaExhaustionLate(info, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
         // W1-T1082: real free space + verdict, read on the SAME `startInFlightTicker` cadence as
         // `daemon.alive` itself — the SAME root `rmd doctor` reads (`readDiskFreeBytes(config.root)`,
         // `doctorCommand`, above) and the SAME `judgeDiskHeadroom` it judges against, one read call

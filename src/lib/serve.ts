@@ -223,7 +223,7 @@ import type { Config, ModelApproval } from "./config-schema.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { createServeDrain, exitWithin } from "./serve-drain.js";
 import { publishHostServeEvidence, HOST_SERVE_ERROR_STEP, type HostServePublishOptions } from "./host-serve-evidence.js";
-import { createServeMemoryRegistry, droppableRouteCache, LEGACY_CACHE_VIEWS, readWorkerHeaps, sampleServeMemory, snapshotHolder, startServeMemoryMonitor, viewBodiesHolder,
+import { createServeMemoryRegistry, droppableRouteCache, LEGACY_CACHE_VIEWS, readWorkerHeaps, sampleServeMemorySliced, snapshotHolder, startServeMemoryMonitor, viewBodiesHolder,
   withoutRestore, workerThreads, type CgroupHeadroom, type ServeMemoryMonitorOptions, type ServeMemoryRegistry, type TrackedWorker } from "./serve-memory.js";
 import { githubAuthProbe, gatewayPrimedProbe, planLoadedProbe, readModelWarmProbe, type ReadinessProbe, type WorkerShedOutcome } from "./serve-generation.js";
 import type { ConsoleProjectionWorker, FeedbackProjectionInput } from "./console-projection-worker.js";
@@ -3688,7 +3688,8 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
       ...deps.serveMemory,
       holders: memory.holders,
       sample: async (holders) => {
-        const sample = sampleServeMemory(holders, {
+        // W1-T13684: each holder in its own turn, a large one in slices, so the sample never holds the request loop.
+        const sample = await sampleServeMemorySliced(holders, {
           usage: deps.serveMemory?.usage, headroom: deps.serveMemory?.headroom, workerHeaps: await readWorkerHeaps(liveThreads()),
         });
         publishServe("serve-steady");
