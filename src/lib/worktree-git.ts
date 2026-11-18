@@ -4,8 +4,10 @@ import { dirname, join, relative, resolve, sep, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { execFileLoopBounded } from "./loop-bounded-child.js";
-import { execFileRouted } from "./spawn-helper.js";
+import { performance } from "node:perf_hooks";
+import { execFileRouted, spawnRoute } from "./spawn-helper.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
+import { DANGLING_REF_MAX_BUFFER, retryAfterDanglingRefRepair, retryAfterDanglingRefRepairAsync } from "./git-fetch-retry.js";
 
 /**
  * W1-T6106 — THE ONE WAY HOST CODE RUNS GIT WITH A WORKER WORKTREE AS ITS REPOSITORY.
@@ -468,7 +470,20 @@ function argv(pin: PinnedWorktreeGit, args: readonly string[]): string[] {
 export function hostWorktreeGit(worktreePath: string, args: readonly string[], opts: HostWorktreeGitOptions = {}): string {
   const pin = pinWorktreeGit(worktreePath, opts.log);
   const overrides = vetPinnedConfig(pin, opts.log);
-  return String(execFileSync("git", argv(pin, args), spawnOptions(pin, opts, overrides)) ?? "");
+  const gitSync = (a: readonly string[], options: ReturnType<typeof spawnOptions>): string =>
+    String(execFileSync("git", argv(pin, a), options) ?? "");
+  const runHostWorktreeGit = (): string => gitSync(args, spawnOptions(pin, opts, overrides));
+  try {
+    return runHostWorktreeGit();
+  } catch (error) {
+    // W1-T13409: a fetch that names a ref with a missing object repairs it and runs once more; anything else rethrows.
+    return retryAfterDanglingRefRepair(
+      (a, timeout) => gitSync(a, spawnOptions(pin, { timeout, maxBuffer: DANGLING_REF_MAX_BUFFER }, overrides)),
+      args,
+      error,
+      runHostWorktreeGit,
+    );
+  }
 }
 
 /** W1-T13170 — INVARIANT the-child-outcome-wins: the git child's own failure is the error of the call. `stdinWrite`
@@ -483,22 +498,45 @@ export async function childOutcomeWins<T>(command: Promise<T>, stdinWrite: Promi
   return result;
 }
 
-/** {@link hostWorktreeGit} off the event loop. `inherit-stdout` writes stdout through on completion. */
-export async function hostWorktreeGitAsync(worktreePath: string, args: readonly string[], opts: HostWorktreeGitOptions = {}): Promise<string> {
-  const pin = pinWorktreeGit(worktreePath, opts.log);
-  const { stdio: _stdio, input, ...spawn } = spawnOptions(pin, opts, await vetPinnedConfigAsync(pin, opts.log ?? stderrLog, opts.configReadTimeoutMs));
+/** The git child forked from this process, exactly as before the helper; a helper that was passed over notes why. */
+function directGit(pin: PinnedWorktreeGit, args: readonly string[], spawn: Omit<ReturnType<typeof spawnOptions>, "stdio" | "input">,
+  input: string | undefined, route: ReturnType<typeof spawnRoute>): Promise<{ stdout: string }> {
+  const began = performance.now();
   const command = execFileLoopBounded("git", argv(pin, args), spawn);
+  route.helper?.noteDirect("git", performance.now() - began, route.why ?? "helper_passed_over");
   const fed = input === undefined ? Promise.resolve(undefined) : new Promise<Error | undefined>((resolve) => {
     const stdin = command.child.stdin!;
     stdin.once("error", resolve);
     stdin.end(input, (error?: Error | null) => resolve(error ?? undefined));
   });
-  const { stdout } = await childOutcomeWins(command, fed);
-  if (opts.stdio === "inherit-stdout") {
-    if (stdout) process.stdout.write(stdout);
-    return "";
+  return childOutcomeWins(command, fed);
+}
+
+/** {@link hostWorktreeGit} off the event loop. `inherit-stdout` writes stdout through on completion. */
+export async function hostWorktreeGitAsync(worktreePath: string, args: readonly string[], opts: HostWorktreeGitOptions = {}): Promise<string> {
+  const pin = pinWorktreeGit(worktreePath, opts.log);
+  const overrides = await vetPinnedConfigAsync(pin, opts.log ?? stderrLog, opts.configReadTimeoutMs);
+  const { stdio: _stdio, input, ...spawn } = spawnOptions(pin, opts, overrides);
+  const run = async (): Promise<string> => {
+    // W1-T13434: through a healthy helper the git child forks there; a request it took is never sent again.
+    const route = spawnRoute(spawn);
+    const { stdout } = route.helper !== undefined && route.why === undefined
+      ? await execFileRouted("git", argv(pin, args), { ...spawn, cwd: pin.worktree, ...(input === undefined ? {} : { input }) })
+      : await directGit(pin, args, spawn, input, route);
+    if (opts.stdio === "inherit-stdout") {
+      if (stdout) process.stdout.write(stdout);
+      return "";
+    }
+    return opts.stdio === "ignore" ? "" : stdout;
+  };
+  try {
+    return await run();
+  } catch (error) {
+    // The same repair as the sync leaf, off the loop; anything else rethrows.
+    const { stdio: _repairStdio, ...repair } = spawnOptions(pin, {}, overrides);
+    return retryAfterDanglingRefRepairAsync(async (a, timeout) =>
+      (await execFileRouted("git", argv(pin, a), { ...repair, cwd: pin.worktree, timeout, maxBuffer: DANGLING_REF_MAX_BUFFER })).stdout, args, error, run);
   }
-  return opts.stdio === "ignore" ? "" : stdout;
 }
 
 /** One config value from the pinned repository's OWN files (no overrides applied), or undefined

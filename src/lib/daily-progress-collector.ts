@@ -233,7 +233,7 @@ export async function readDailyActivity(source: DailyProgressInstance, fleetStat
 export async function collectDailyProgress(config: DailyProgressCollectionConfig, clock: Clock = systemClock, signal?: AbortSignal,
   activityMemo: DailyActivityMemo = processActivityMemo):
   Promise<ReturnType<typeof prepareDailyProgressPublication> | undefined> {
-  const now = clock.now(), at = fixedClock(now).iso(), timeZone = config.timeZone ?? DEFAULT_DAILY_PROGRESS_ZONE;
+  const now = clock.now(), timeZone = config.timeZone ?? DEFAULT_DAILY_PROGRESS_ZONE;
   const today = dailyDateAt(now, timeZone), yesterday = shiftDailyDate(today, -1);
   const expected = [...new Set((config.expectedRepositories ?? readDailyProgressRepositories(config.stateDir)).map(r => r.toLowerCase()))].sort();
   if (!expected.length || expected.length > 256 || expected.some(r => !REPOSITORY.test(r))) throw new Error("invalid server-owned daily repository inventory");
@@ -268,11 +268,15 @@ export async function collectDailyProgress(config: DailyProgressCollectionConfig
       const receipt = readBoardClosedCollectionReceipt(instance.root, owner, repo, rows);
       return { instance, saved, rows, receipt, open: readOpenBoardSnapshot(instance.root, owner, repo) };
     });
-    const activities = await Promise.all(instances.map(async instance => ({ instance, ...await readDailyActivity(instance, config.stateDir, earliest, now, signal, activityMemo) })));
+    // W1-T13454: each repository is judged at the time its files were read, never at the pass's start. OBSERVED
+    // 2026-11-17: the console's closed-PR receipt is rewritten every minute and was read minutes into the pass (behind
+    // core's ledger read), so every console report read "The source receipt is newer than this report's cutoff".
+    const readAt = Math.max(now, clock.now()), at = fixedClock(readAt).iso();
+    const activities = await Promise.all(instances.map(async instance => ({ instance, ...await readDailyActivity(instance, config.stateDir, earliest, readAt, signal, activityMemo) })));
     signal?.throwIfAborted();
     let closedThrough = previousJob?.closedThrough ?? shiftDailyDate(yesterday, -1), requiredFailed = false;
     for (const reportDate of ordered) {
-      const window = dailyWindow(reportDate, timeZone), end = Date.parse(window.windowEnd), start = Date.parse(window.windowStart), cutoff = Math.min(now, end);
+      const window = dailyWindow(reportDate, timeZone), end = Date.parse(window.windowEnd), start = Date.parse(window.windowStart), cutoff = Math.min(readAt, end);
       const day = manifest.days[dailyProgressDayKey(repository, timeZone, reportDate)];
       const old = day ? readDailyProgressRevision(config.stateDir, day) : undefined;
       const sources: SourceCoverage[] = [], events = new Map<string, DailyProgressEvent>();
@@ -280,9 +284,9 @@ export async function collectDailyProgress(config: DailyProgressCollectionConfig
       for (const source of raw) {
         const receipt = source.receipt.ok ? source.receipt.receipt : undefined;
         const success = receipt?.lastSuccessAt ?? source.saved.closedObservedAt ?? null;
-        const sane = success !== null && Date.parse(success) <= now;
+        const sane = success !== null && Date.parse(success) <= readAt;
         const attempted = receipt?.lastAttemptAt ?? (sane ? success : null);
-        const validClock = attempted === null || Date.parse(attempted) <= now;
+        const validClock = attempted === null || Date.parse(attempted) <= readAt;
         const covers = sane && Date.parse(success) >= cutoff;
         const full = source.receipt.ok && receipt?.state === "complete" && validClock && covers;
         const state: SourceCoverage["state"] = full ? "complete" : receipt?.state === "unavailable" ? "unavailable" : source.saved.closed !== undefined ? "partial" : "not_collected";
@@ -290,14 +294,19 @@ export async function collectDailyProgress(config: DailyProgressCollectionConfig
           lastAttemptAt: validClock ? attempted : null, lastSuccessAt: sane && validClock ? success : null,
           coverageStart: sane && validClock && Date.parse(success) >= start ? window.windowStart : null,
           coverageThrough: sane && validClock && Date.parse(success) >= start ? fixedClock(Math.min(Date.parse(success), end)).iso() : null,
-          nextDueAt: fixedClock(nextDailyDue(now, timeZone)).iso(), reason: full ? null : !validClock ? "The source receipt is newer than this report's cutoff." : receipt?.reason === "fetch_failed" ? "The latest PR collection failed; saved evidence is retained." : "The saved PR source does not certify complete coverage through this report's cutoff." };
+          nextDueAt: fixedClock(nextDailyDue(readAt, timeZone)).iso(), reason: full ? null : !validClock ? "The source receipt is newer than this report's cutoff." : receipt?.reason === "fetch_failed" ? "The latest PR collection failed; saved evidence is retained." : "The saved PR source does not certify complete coverage through this report's cutoff." };
         sources.push(coverage);
         for (const pr of source.rows) {
           if (!prIdentity(pr, repository)) { invalid++; continue; }
           if (pr.state !== "MERGED") continue;
           if (pr.authorType === "Bot" && ["dependabot[bot]", "renovate[bot]"].includes(pr.authorLogin?.toLowerCase() ?? "")) continue;
           const occurredAt = stamp(pr.mergedAt);
-          if (!occurredAt || Date.parse(occurredAt) > now) { invalid++; continue; }
+          // W1-T13454: GitHub moves updatedAt at a merge, so a merge with no saved time whose last update precedes this
+          // window merged before it and is no evidence about this day. OBSERVED 2026-11-17: 8,452 legacy core rows
+          // (and 131 site, 561 console) carry no mergedAt, which made every required PR source partial for every day.
+          const updatedAt = stamp(pr.updatedAt);
+          if (!occurredAt && updatedAt && Date.parse(updatedAt) < start) continue;
+          if (!occurredAt || Date.parse(occurredAt) > readAt) { invalid++; continue; }
           if (Date.parse(occurredAt) < start || Date.parse(occurredAt) >= end) continue;
           const ids = taskIds(pr), eventId = `merged:${repository}:${pr.number}`;
           events.set(eventId, { id: eventId, repository, kind: "merged", sourceId: coverage.id, occurredAt, observedAt: at,
@@ -313,11 +322,11 @@ export async function collectDailyProgress(config: DailyProgressCollectionConfig
         });
       }
       if (!configuredInstances.length) sources.push({ id: `${repository}:prs:missing`, repository, instanceId: null, kind: "pull_requests", required: true, state: "not_collected", lastAttemptAt: null, lastSuccessAt: null,
-        coverageStart: null, coverageThrough: null, nextDueAt: fixedClock(nextDailyDue(now, timeZone)).iso(), reason: "No configured PR source is available for this repository." });
+        coverageStart: null, coverageThrough: null, nextDueAt: fixedClock(nextDailyDue(readAt, timeZone)).iso(), reason: "No configured PR source is available for this repository." });
       if (invalid) for (const source of sources) if (source.required && source.state === "complete") { source.state = "partial"; source.reason = "Some saved PR identities or clocks are invalid; complete totals are unavailable."; }
       for (const observed of activities) {
         sources.push({ id: `${repository}:ledger:${observed.instance.name}`, repository, instanceId: observed.instance.name, kind: "ledger_activity", required: false, state: observed.available ? "partial" : "unavailable", lastAttemptAt: at, lastSuccessAt: observed.available ? at : null,
-          coverageStart: observed.available ? window.windowStart : null, coverageThrough: observed.available ? fixedClock(cutoff).iso() : null, nextDueAt: fixedClock(nextDailyDue(now, timeZone)).iso(),
+          coverageStart: observed.available ? window.windowStart : null, coverageThrough: observed.available ? fixedClock(cutoff).iso() : null, nextDueAt: fixedClock(nextDailyDue(readAt, timeZone)).iso(),
           reason: `Retained ledger observations do not establish complete activity history.${observed.gaps ? ` ${observed.gaps} source or parse gaps were observed.` : ""}` });
         for (const event of observed.events) if (Date.parse(event.occurredAt) >= start && Date.parse(event.occurredAt) < end) events.set(event.id, event);
       }
@@ -343,16 +352,16 @@ export async function collectDailyProgress(config: DailyProgressCollectionConfig
         items: present.rows.slice(0, 200).map(pr => ({ repository, id: `pr:${repository}:${pr.number}`, title: pr.title.slice(0, 2048) || "Open pull request", url: pr.url })) } : null;
       const included = raw.some(s => s.saved.closed !== undefined) || activities.some(s => s.available) || old;
       records.push({ version: "daily-progress-v1", scope: { kind: "repository", repository }, ...window, generatedAt: at,
-        phase: end <= now ? complete ? "complete" : "finalizing" : "provisional", coverage: { state: included ? "partial" : "not_collected", expectedRepositories: [repository],
+        phase: end <= readAt ? complete ? "complete" : "finalizing" : "provisional", coverage: { state: included ? "partial" : "not_collected", expectedRepositories: [repository],
           includedRepositories: included ? [repository] : [], expectedSources: reportExpectedSources, sources },
         totals: { mergedChanges: { value: precision === "unavailable" ? null : confirmed.length, precision }, completedTasks: { value: precision === "unavailable" ? null : 0, precision } },
         events: [...events.values()], currentWork });
-      if (end <= now && complete && reportDate === shiftDailyDate(closedThrough, 1)) closedThrough = reportDate;
+      if (end <= readAt && complete && reportDate === shiftDailyDate(closedThrough, 1)) closedThrough = reportDate;
       if (!complete) requiredFailed = true;
     }
     const catchingUp = closing < today && closedThrough >= shiftDailyDate(closing, -1);
     jobs.push({ id, lastAttemptAt: at, lastSuccessAt: requiredFailed ? previousJob?.lastSuccessAt ?? null : at,
-      nextDueAt: catchingUp ? at : fixedClock(nextDailyDue(now, timeZone)).iso(), closedThrough,
+      nextDueAt: catchingUp ? at : fixedClock(nextDailyDue(readAt, timeZone)).iso(), closedThrough,
       error: requiredFailed ? "Some required PR sources do not yet cover the requested report cutoffs." : null });
   }
   signal?.throwIfAborted();
