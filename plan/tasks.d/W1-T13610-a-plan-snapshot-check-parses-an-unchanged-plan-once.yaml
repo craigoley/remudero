@@ -1,0 +1,73 @@
+- id: W1-T13610
+  title: "The secondary-catalog composer's snapshot check keeps its canonical-parser verdict for plan content it has already checked, so a dispatch tick no longer re-parses the whole public plan on the daemon loop"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # changes isParsedPlanSnapshot in src/lib/task-lookup.ts, the check that keeps a hand-built or altered plan snapshot out of ops dispatch and rmd approve; a snapshot the parser refuses must still be refused, also after an in-place change
+  origin: "operator-session#loop-lag-2026-11-18"
+  plan_refs:
+    - W1-T11600
+    - W1-T13386
+  files:
+    - src/lib/task-lookup.ts
+    - test/daemon/a-plan-snapshot-check-parses-an-unchanged-plan-once.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "invariant:parse-unchanged-once — three composeSecondaryPlan calls in one process over the same primary and secondary plans (2,000 and 20 tasks) run parseTasksFromYaml on each plan's serialized tasks once in all, and a fourth call after one task field changes in place parses only the plan that changed"
+      proof: "grep: W1-T13610 criterion 1 in test/daemon/a-plan-snapshot-check-parses-an-unchanged-plan-once.test.ts"
+    - claim: "invariant:same-verdict — for a parsed plan, a plan whose task fails a parse-time rule (an invalid not_before or precondition), a byId map that does not match tasks, a duplicate id and a getter that throws, the check with the kept verdicts returns the same composeSecondaryPlan outcome (ok, malformed, duplicate_task_id, invalid_cross_catalog_dependency) as without them, on the first call and on a repeat call"
+      proof: "grep: W1-T13610 criterion 2 in test/daemon/a-plan-snapshot-check-parses-an-unchanged-plan-once.test.ts"
+    - claim: "invariant:same-failure-rule — a snapshot first checked as valid and then changed in place to fail the parser is malformed on the next call; the structural checks (isParsedPlanTask, byId identity, seen ids) still run on every call; and the kept verdicts are keyed on the serialized content, never on the object, so a new object with already checked content reuses the verdict"
+      proof: "grep: W1-T13610 criterion 3 in test/daemon/a-plan-snapshot-check-parses-an-unchanged-plan-once.test.ts"
+  rationale: |
+    WHY: the daemon composes the public plan with the ops catalog on each dispatch tick (captureOpsDispatchPlan,
+    src/lib/daemon.ts:5429) and in the shadow comparison (:2232). composeSecondaryPlan checks both plans with
+    isParsedPlanSnapshot, which serializes every task to JSON and parses that text again with the canonical
+    YAML parser, to refuse a hand-built snapshot. For the public plan that is a full plan parse each time, on
+    the daemon loop, though the plan content has not changed since the last tick.
+    MEASURED on the Azure host, 2026-11-18, one nice'd pass over the daemon.loop_stall_profile rows since the
+    03:23:47Z boot (9b4f43779d) and the 04:09:18Z boot (04f6dd8235, which did not change this path), in
+    ~/rmd-state2/state/ledger.ndjson and the ledger.2026-11-18T*.ndjson.gz archives, deduplicated on ts, step
+    and command: 163 rows, 725.4 s of loop lag in 62.5 minutes.
+    - composeSecondaryPlan with isParsedPlanSnapshot and parseTasksFromYaml under it is in the top inclusive
+      frames of 5 rows (3 of them after 04:00Z, under both boots): 48.8 s of lag, max 14.6 s (03:45:22Z),
+      about 18.0 s (2.5 percent of all lag) by inclusive share. It is the first named frame in 4 rows, 42.0 s.
+    - The self frames in those rows are garbage collection (16.4 s) and YAML parser work (detachStrings 3.3 s,
+      doubleQuotedValue under resolveFlowScalar 1.9 s, next under parse 1.2 s, parseFlowCollection 0.6 s).
+    READ at origin/main b79ad9e16d:
+    - src/lib/task-lookup.ts:37 isParsedPlanSnapshot; :44 JSON.stringify(plan.tasks); :45 parseTasksFromYaml of
+      that text, then the count check; :46-55 the per-task and byId checks; :56-60 any throw is malformed.
+    - src/lib/task-lookup.ts:69-70 composeSecondaryPlan checks both plans on every call; :126 the release path.
+    - src/lib/daemon.ts:5429 captureOpsDispatchPlan; :2232 compareSecondaryCatalogShadow.
+    NOT COVERED: swept origin/main plan/tasks.d for isParsedPlanSnapshot and composeSecondaryPlan: no task names
+    either. No open pull request touches task-lookup.ts.
+  design: |
+    INVARIANT parse-unchanged-once: the canonical parse runs at most once for each serialized plan content in a process.
+    INVARIANT same-verdict: the check gives the same verdict with the kept parse verdicts as without them.
+    INVARIANT same-failure-rule: a snapshot changed to fail the parser is still malformed, and the structural checks still run on every call.
+    1. Keep a small map in task-lookup.ts from the sha256 of the serialized tasks text to the parse verdict
+       (parseTasksFromYaml(...).length === plan.tasks.length). Look it up before :45 and store the verdict after.
+       Keep it to a few entries (the public plan, the ops plan, and one previous of each); this is a bound on
+       entries, not a time bound.
+    2. Keep JSON.stringify on every call: the key is the content, so an in-place change of any task field makes
+       a new key and a new parse. Keep the per-task, byId and duplicate checks and the try/catch exactly as
+       they are, on every call.
+    3. Change nothing else: not composeSecondaryPlan's outcomes, the daemon callers, the release path or
+       plan.ts. No env var, config key or time bound.
+    4. The test counts canonical parses with an injected counter or a count export in the style of
+       ledgerIndexBuildCount (src/lib/status.ts:1306); it builds plans in memory with loadPlanFromYaml and
+       isolates HOME with test/setup/tmp-hygiene.ts.
+  falsifier: |
+    Leave the parse on every call: criterion 1 counts three parses of each plan. Key the kept verdict on the
+    plan object: criterion 3's in-place change stays valid. Skip the structural checks when the verdict is
+    kept: criterion 2's mismatched byId case returns ok.
+  note: |
+    Id reserved for run-unfiled-1794976017000 with ~/rmd-work/bin/reserve-id.sh.
+    JSON.stringify of the plan stays on the loop; the profile rows show the parse and its garbage, not the
+    serialization, as the cost. Proof that counts on the host: after the daemon converges, no
+    daemon.loop_stall_profile row shows parseTasksFromYaml under isParsedPlanSnapshot except after a plan change.
