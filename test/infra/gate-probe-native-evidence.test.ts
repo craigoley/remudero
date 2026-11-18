@@ -8,6 +8,8 @@ import { test } from "node:test";
 import { assertGateProbeRan } from "#test/helpers/gate-probe-evidence.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
+const CALIBRATION_ENOENT = /source-size-signal \(calibration run, hang ceiling \d+ ms\) ran \(status null; signal none; code ENOENT\)/;
+
 // Added test helpers are overlaid onto the base by the proof runner. Exercise the existing
 // caller in its own checkout too, so a copied helper cannot certify an unchanged caller.
 let callerOutput: string | undefined;
@@ -58,7 +60,7 @@ test("gate probe diagnostics preserve the real missing-executable refusal", () =
   assert.ok(native.stdout === null || native.stdout === undefined);
   assert.ok(native.stderr === null || native.stderr === undefined);
   assert.throws(() => assertGateProbeRan("fixture", native), /status null; signal none; code ENOENT/);
-  assert.match(runRealGateCaller(), /source-size-signal ran \(status null; signal none; code ENOENT\)/);
+  assert.match(runRealGateCaller(), CALIBRATION_ENOENT);
 });
 
 test("gate probe diagnostics preserve the real native timeout and signal", () => {
@@ -68,7 +70,7 @@ test("gate probe diagnostics preserve the real native timeout and signal", () =>
   assert.equal(native.stdout, null);
   assert.equal(native.stderr, null);
   assert.throws(() => assertGateProbeRan("fixture", native), /status null; signal SIGTERM; code ETIMEDOUT/);
-  assert.match(runRealGateCaller(), /source-size-signal ran \(status null; signal none; code ENOENT\)/);
+  assert.match(runRealGateCaller(), CALIBRATION_ENOENT);
 });
 
 test("gate probe diagnostics retain ordinary real zero and one exits", () => {
