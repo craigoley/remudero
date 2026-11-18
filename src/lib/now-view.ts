@@ -944,8 +944,9 @@ function ledgerRowsOver(ledgerDir: string, window: { fromMs: number; toMs: numbe
 
 /**
  * W1-T13476: of the `github_app.token_refresh_failed` and `github_app.token_refreshed` rows, keeps only the one
- * status-board's `deriveOperatorItems` picks for each step. A refreshed row with a missing/empty `ts` leaves its scan
- * state unset, so the next refreshed row replaces it. Every other row passes unchanged and in order. The token fallback reads only those two rows, and site's rotations
+ * status-board's `deriveOperatorItems` picks for each step. A refreshed row with a non-string, missing or empty `ts`
+ * leaves its scan state unset, so the next refreshed row replaces it. Every other row passes unchanged and in order.
+ * The token fallback reads only those two rows, and site's rotations
  * held 3.4 M failed refreshes from 2026-11-10, so one decisions build parsed 774 MB of gate digests (34.7 s).
  */
 export function keepNewestTokenRefreshRows<R extends Record<string, unknown>>(rows: R[]): R[] {
@@ -953,7 +954,9 @@ export function keepNewestTokenRefreshRows<R extends Record<string, unknown>>(ro
   for (const row of rows) {
     if (row.step !== TOKEN_REFRESH_FAILED_STEP && row.step !== TOKEN_REFRESHED_STEP) continue;
     const held = newest.get(row.step);
-    if (!held || (row.step === TOKEN_REFRESHED_STEP && !held.ts) || tsIsNewer(row.ts, held.ts)) newest.set(row.step, row);
+    const heldTs = typeof held?.ts === "string" ? held.ts : undefined;
+    const rowTs = typeof row.ts === "string" ? row.ts : undefined;
+    if (!held || (row.step === TOKEN_REFRESHED_STEP && !heldTs) || tsIsNewer(rowTs, heldTs)) newest.set(row.step, row);
   }
   if (newest.size === 0) return rows;
   const kept = new Set(newest.values());

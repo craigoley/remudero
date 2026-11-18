@@ -27,6 +27,7 @@ const cases: Record<string, Array<Array<Record<string, unknown>>>> = {
   "equal stamps keep the first": [[failed(at(10), "first")], [failed(at(10), "second"), refreshed(at(10))]],
   "unparseable stamps": [[failed("not a time", "bad"), failed(undefined, "none")], [failed(at(3), "good"), refreshed("garbage")]],
   "missing then unparseable success stamp": [[refreshed(undefined), refreshed("garbage"), failed(at(1), "newer than the unparseable success")]],
+  "non-string then missing then unparseable success stamp": [[refreshed(123), refreshed(undefined), refreshed("garbage"), failed(at(1), "newer than the unparseable success")]],
   "only unparseable stamps": [[failed("x", "first-bad")], [failed("y", "second-bad")]],
   "no token rows": [[{ ts: at(1), step: "daemon.boot", head_sha: "abc" }], []],
 };
