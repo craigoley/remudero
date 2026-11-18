@@ -36,9 +36,11 @@ const STALL_PROFILE_CONSUMER = "loop_stall_profile";
 
 /** The shared spawn leaves: frames that only forward a spawn for someone else, so none is the caller. Declared
  *  once here: a module path, or plan.ts's named default runner (`loadPlanAtRef`'s `runGit` arrow). The names
- *  cover a single-file bundle, where every frame has the same file and the module path is lost (W1-T11795). */
+ *  cover a single-file bundle, where every frame has the same file and the module path is lost (W1-T11795).
+ *  W1-T13548: hostWorktreeGit's dangling-ref repair runs through retryAfterDanglingRefRepair and the runner it is handed,
+ *  repairHostWorktreeGit. Both are named here, not by git-fetch-retry's path, which also holds other callers' frames. */
 export const SYNC_SPAWN_LEAF_FRAME_NAMES: ReadonlySet<string> = new Set(["ghExecFile", "gitSync", "hostWorktreeGit",
-  "runHostWorktreeGit", "vetPinnedConfig"]);
+  "repairHostWorktreeGit", "retryAfterDanglingRefRepair", "runHostWorktreeGit", "vetPinnedConfig"]);
 
 export const SYNC_SPAWN_LEAF_FRAMES: readonly RegExp[] = [
   /[/\\]worktree-git\.[cm]?[jt]s/,
