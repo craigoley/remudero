@@ -26,7 +26,7 @@
     - test/recycle-container.test.ts
     - test/daemon.test.ts
     - test/node-runtime-provenance.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:helper-on-by-default — `daemonBoot` with an env that does not set RMD_SPAWN_HELPER starts the helper, installs it, and writes one `daemon.spawn_helper` row with `started: true`, the installed helper's pid, `switch: RMD_SPAWN_HELPER` and the switch value `unset`. Any value other than `off` (for example `on`, `1` or an empty string) does the same and records that value"

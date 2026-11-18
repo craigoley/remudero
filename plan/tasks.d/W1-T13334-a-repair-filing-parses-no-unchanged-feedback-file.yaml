@@ -17,7 +17,7 @@
     - src/lib/feedback.ts
     - src/run-task.ts
     - test/a-repair-filing-parses-no-unchanged-feedback-file.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A second listFeedback call over an unchanged plan/feedback directory of 200 entries parses 0 YAML documents and returns entries deep-equal to the first call, in the same order, with and without the status filter, and captureRepairFeedbackWithPriorVerdictAsync run twice for a suppressed filing parses each entry file once in total"

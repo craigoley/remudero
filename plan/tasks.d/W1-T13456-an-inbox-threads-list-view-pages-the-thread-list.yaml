@@ -24,7 +24,7 @@
     - packages/api-client/src/schema.d.ts
     - test/every-view-body-matches-its-schema.test.ts
     - test/an-inbox-threads-list-view-pages-the-thread-list.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "On a fixture inbox with a thread store and read marks, GET /v1/views/inbox-threads pages the same ThreadSummaryView rows, in the same order, with the same unread counts as GET /v1/inbox/threads?limit= over the same classification"

@@ -19,7 +19,7 @@
     - src/lib/config-gardener.ts
     - test/an-open-weight-provider-rides-the-capability-ladder.test.ts
     - test/routing/the-judge-gardener-spares-fail-closed-judges-and-reads-shadow-rows.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:no-cash-for-a-fail-closed-judge — a risk_judge row on one line, of the lowest tier, with no provider, whose shadow record clears JUDGE_CASH_BAR (at least 200 paired calls, agreement 0.98 or more, no usable answer 0.02 or less) gets no move-judge-to-cash proposal, from judgeCashCandidate and from the gardener's full candidate list. The same record for feedback_summary, which fails open, still gets exactly one proposal"

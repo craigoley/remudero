@@ -14,7 +14,7 @@
   files:
     - src/lib/measurement-cadence.ts
     - test/daemon/the-adoption-scan-keeps-each-ship-date-it-has-found.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A ship date the scan resolved for a file and needle is kept in the state directory, and a later run with the same file and needle reads it from there and starts no git process for it"

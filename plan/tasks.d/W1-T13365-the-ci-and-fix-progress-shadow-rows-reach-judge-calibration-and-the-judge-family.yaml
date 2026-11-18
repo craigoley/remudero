@@ -24,7 +24,7 @@
     - src/lib/sweep.ts
     - docs/research/model-evidence-program.md
     - test/routing/the-ci-and-fix-progress-shadow-rows-reach-the-judge-family.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "judgeCalibrationRow and foldJudgeVerdictRow read a judge_shadow.paired row as one typed answer: role = the row's surface, model = shadow_deployment, model surface text, source generative, the answer = the compared key of shadow_verdict, the incumbent = the compared key of primary_verdict (null when primary_verdict is null), head = the head after the @ of decision_key, input digest = the 16-hex sha256 of decision_key. A shadow_judge.paired row reads exactly as before, and neither step is renamed"

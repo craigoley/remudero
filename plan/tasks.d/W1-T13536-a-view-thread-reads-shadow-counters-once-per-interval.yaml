@@ -15,7 +15,7 @@
     - src/lib/view-shadow.ts
     - src/lib/read-model-worker.ts
     - test/console-api/views/a-view-thread-reads-shadow-counters-once-per-interval.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Passes inside the refresh interval reuse one read of the counter store, and readiness is still computed at each pass's now"

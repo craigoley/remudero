@@ -16,7 +16,7 @@
   files:
     - src/lib/daemon.ts
     - test/daemon/one-transient-block-does-not-close-a-lane-for-the-whole-phase.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "When a lane's run ends blocked_transient and the API-window guard has not tripped, the lane's next refill decision builds a candidate pool without that task and starts the next eligible task in the same phase"

@@ -17,7 +17,7 @@
     - src/cli/commands/sweep.ts
     - src/lib/escalation-catalogue.ts
     - test/inbox/a-sweep-stage-that-fails-on-every-pass-pages-the-operator.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "When a sweep prelude stage (escalation answers first) fails on every pass for longer than the bound derived from its own past failure streaks, the sweep opens one needs-human issue naming the stage, the error, the first failure and the pass count"

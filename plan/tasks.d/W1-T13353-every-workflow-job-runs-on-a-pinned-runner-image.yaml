@@ -40,7 +40,7 @@
     - scripts/census-precheck.mjs
     - test/census-precheck-runs-the-admitted-census-suites.test.ts
     - test/rules/every-workflow-job-runs-on-a-pinned-runner-image.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "No runs-on line in .github/workflows names a -latest label; the rule test reads every workflow file with a positive control on the file and line counts"

@@ -18,7 +18,7 @@
     - openapi/daemon.yaml
     - packages/api-client/src/schema.d.ts
     - test/every-view-body-matches-its-schema.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "POST /v1/views/batch with {reads: [{view, params, ifNoneMatch?}]} answers {answers: [{status, etag?, body?, error?}]} in request order, and each answer equals what GET /v1/views/<view>?<params> answers for the same key (200 body and ETag, 304 on a matching ifNoneMatch, 400 or 404 refusals)"
