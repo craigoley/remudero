@@ -1,0 +1,66 @@
+- id: W1-T13720
+  title: "The host units converge owns its nodejs package: it moves a hold, returns a Node past the pin, re-holds it, and raises host-node-behind while the host Node is off .nvmrc"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # 5 files: the converge and launcher in deploy/install-host-units.sh, one alert condition, the preflight refusal text, one changed and one new test
+  origin: "operator-session#host-node-version-2026-11-18"
+  plan_refs:
+    - W1-T6251
+    - W1-T10844
+  files:
+    - deploy/install-host-units.sh
+    - src/lib/launcher-host-alerts.ts
+    - scripts/preflight-author.mjs
+    - test/the-hosts-own-node-follows-nvmrc.test.ts
+    - test/deploy/a-host-node-off-its-pin-raises-a-host-alert.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A hand-held nodejs below the pin is installed at the pin and stays held"
+      proof: "grep: W1-T13720 criterion 1 in test/the-hosts-own-node-follows-nvmrc.test.ts"
+    - claim: "A host Node moved past the pin is returned to it and held"
+      proof: "grep: W1-T13720 criterion 2 in test/the-hosts-own-node-follows-nvmrc.test.ts"
+    - claim: "invariant:host-node-never-blocks-units — an in-step host that is not held is held, and a failed hold is named without blocking units"
+      proof: "grep: W1-T13720 criterion 3 in test/the-hosts-own-node-follows-nvmrc.test.ts"
+    - claim: "host-node-behind is a launcher alert condition that escalates once it persists and clears on recovery"
+      proof: "grep: W1-T13720 criterion 4 in test/deploy/a-host-node-off-its-pin-raises-a-host-alert.test.ts"
+    - claim: "A watchdog tick with the host Node off its pin raises host-node-behind, naming a hold, and an in-step tick clears it"
+      proof: "grep: W1-T13720 criterion 5 in test/deploy/a-host-node-off-its-pin-raises-a-host-alert.test.ts"
+  rationale: |
+    OBSERVED on the fleet host 2026-11-18 (read-only, by the host lane): #19390 moved .nvmrc to 24.22.3 at 14:17Z.
+    Every units converge since 14:20:16Z logged "E: Held packages were changed and -y was used without
+    --allow-change-held-packages", then "host-node: apt-get install failed for 24.22.3-1nodesource1; staying on
+    24.22.2, retried next converge". nodejs had been held by hand on 2026-11-15 15:15Z, right after a hand
+    `apt-get install -y --allow-downgrades nodejs=24.22.2-1nodesource1` moved it DOWN from 24.22.3. apt-cache policy
+    lists 24.22.3 as the candidate. unattended-upgrades is on and does not blacklist nodejs. Every full author preflight
+    on the host refused "Node 24.22.3 required; got 24.22.2".
+    INFERRED: unattended-upgrades took NodeSource's 24.22.3 while .nvmrc still pinned 24.22.2 (#16732, 2026-11-04 to
+    2026-11-18), so the preflight refused the other way, and the hand downgrade and hold were the workaround.
+    READ at origin/main 0888a2c: converge_host_node in deploy/install-host-units.sh installs with
+    `apt-get install -y nodejs=<pin>-1nodesource1`, which a hold refuses and which cannot downgrade. It reports each
+    failure and returns 0, so units still install. Nothing raises an alert. The watchdog's host_alert_raise path
+    (src/lib/launcher-host-alerts.ts) has no condition for it. The preflight's node-version refusal names only the
+    version pair.
+  design: |
+    INVARIANT host-node-never-blocks-units: every host-node outcome, including a failed install or a failed hold, is one
+    reported line and returns 0, so the units still install (as W1-T6251 ruled); check mode still never calls apt.
+    1. converge_host_node installs with `-y --allow-downgrades --allow-change-held-packages`. After a verified install,
+       and on the in-step path, host_node_hold runs `apt-mark hold nodejs` unless `apt-mark showhold` already lists it.
+       A failed hold is one reported line and never blocks units. The converge is the only thing that moves the package.
+    2. launcher-host-alerts.ts gains `host-node-behind` with the refusal tiers (persisting, then escalated).
+    3. The rendered launcher gains host_node_alert, run right after converge_host_units on a non-boot tick. It compares
+       `node --version` with $CHECKOUT/.nvmrc. Off the pin, it prints one journal line and raises host-node-behind,
+       naming an apt-mark hold when there is one. In step, it clears the alert (rmd spawns only while a run is open).
+    4. The preflight's node-version refusal keeps its "Node <pin> required; got <actual>" prefix and adds the remedy:
+       the units converge installs the pin and raises host-node-behind while it cannot.
+  falsifier: |
+    Restore origin/main's deploy/install-host-units.sh and src/lib/launcher-host-alerts.ts: criteria 1 to 5 fail, plus 4
+    W1-T6251 cases whose exact apt calls changed (measured: fail 9 of 15; restored: fail 0).
+  note: |
+    Id reserved on the host with ~/rmd-work/bin/reserve-id.sh for run-unfiled-1795030300000.
+    reservation hand-off: run-unfiled-1795030300000 -> claude/project-thread-tf5btw

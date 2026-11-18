@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { parseTasksFromYaml, TASK_RISKS, TASK_STATUSES, TASK_TYPES, type Plan, type Task } from "./plan.js";
+import { MOVED_FROM_VALUE, parseTasksFromYaml, TASK_RISKS, TASK_STATUSES, TASK_TYPES, type Plan, type Task } from "./plan.js";
 import { planDestinationRepository } from "./plan-destination.js";
 import { readOpsCatalogSnapshotAsync, type OpsCatalogApi, type OpsCatalogSnapshot } from "./ops-catalog-source.js";
 import type { PlanCriteriaAtHeadResult } from "./review.js";
@@ -97,23 +97,28 @@ function isParsedPlanSnapshot(value: unknown): value is Plan {
 }
 
 type SecondaryComposition =
-  | { outcome: "ok"; plan: Plan; secondaryIds: ReadonlySet<string> }
+  | { outcome: "ok"; plan: Plan; secondaryIds: ReadonlySet<string>; pendingMoveIds: ReadonlySet<string> }
   | { outcome: "malformed" | "duplicate_task_id" | "invalid_cross_catalog_dependency"; taskId?: string };
 
-/** One atomic graph rule shared by observation and explicit live selection. */
+/** One atomic graph rule shared by observation and explicit live selection.
+ *  W1-T13680: an id both catalogs hold whose ops copy carries a valid moved_from is a PENDING MOVE: it is in neither
+ *  the composed tasks nor secondaryIds, so neither copy is a dispatch candidate, and every other ops task still
+ *  composes. A shared id without that provenance is still a duplicate. */
 export function composeSecondaryPlan(primary: Plan, secondary: Plan): SecondaryComposition {
   if (!isParsedPlanSnapshot(primary) || !isParsedPlanSnapshot(secondary)) return { outcome: "malformed" };
   const primaryIds = new Set(primary.tasks.map(task => task.id));
-  const duplicate = secondary.tasks.find(task => primaryIds.has(task.id));
+  const shared = secondary.tasks.filter(task => primaryIds.has(task.id));
+  const duplicate = shared.find(task => task.moved_from === undefined || !MOVED_FROM_VALUE.test(task.moved_from));
   if (duplicate) return { outcome: "duplicate_task_id", taskId: duplicate.id };
-  const secondaryIds = new Set(secondary.tasks.map(task => task.id));
+  const pendingMoveIds = new Set(shared.map(task => task.id));
+  const secondaryIds = new Set(secondary.tasks.filter(task => !pendingMoveIds.has(task.id)).map(task => task.id));
   if (primary.tasks.some(task => task.depends_on.some(id => secondaryIds.has(id))) ||
     secondary.tasks.some(task => task.depends_on.some(id => !primaryIds.has(id) && !secondaryIds.has(id)))) {
     return { outcome: "invalid_cross_catalog_dependency" };
   }
-  return { outcome: "ok", secondaryIds, plan: {
-    tasks: [...primary.tasks, ...secondary.tasks], byId: new Map([...primary.byId, ...secondary.byId]),
-  } };
+  const settled = (task: Task) => !pendingMoveIds.has(task.id);
+  const tasks = [...primary.tasks.filter(settled), ...secondary.tasks.filter(settled)];
+  return { outcome: "ok", secondaryIds, pendingMoveIds, plan: { tasks, byId: new Map(tasks.map(task => [task.id, task])) } };
 }
 
 /** Resolve a host-private task. The existing public reader owns its reads; only a proven miss opens ops. */

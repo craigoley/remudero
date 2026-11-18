@@ -1,0 +1,41 @@
+- id: W1-T13727
+  title: "Decide whether onboarding a fleet should create a private home repository of pointers, shared skills and steering files for the customer, and what it holds"
+  repo: remudero
+  depends_on: []
+  priority: 3
+  type: recon
+  verify: auto
+  risk: high # Rule 19 sizing: a report and its docs index entry (or skill text and its plan section), two concerns; it changes no code path a worker or daemon runs
+  origin: "operator-session#pocock-rescan-2026-11-18"
+  plan_refs:
+    - W1-T13726
+  files:
+    - docs/research/a-home-repo-for-each-fleet.md
+    - docs/docs-index.json
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The report states the Home Repo pattern from its source with the date read, and what an operator gains from one"
+      proof: "grep: ## The pattern in docs/research/a-home-repo-for-each-fleet.md"
+    - claim: "The report says what a fleet's home repository would hold and what must stay out of it, including secrets and private plan records"
+      proof: "grep: ## What it holds in docs/research/a-home-repo-for-each-fleet.md"
+    - claim: "The report recommends build, park or refuse, with the onboarding step it would change"
+      proof: "grep: ## Recommendation in docs/research/a-home-repo-for-each-fleet.md"
+  rationale: |
+    aihero.dev "The Home Repo Pattern" (updated 2026-11-12): one private repository holds the skills, the agent
+    instruction file and shared docs, with one pointer line per working repository ("Clone from ... if missing") and
+    no submodules; code stays in each repository. It suits a mix of public and private repositories. A customer
+    running a fleet over many repositories has the same problem: an operator session started in one repository sees
+    none of the others' rules or tools. Onboarding (Connect existing / Start new) could create that home repository
+    for them.
+  design: |
+    1. Read the pattern at source and state it with the date read.
+    2. List what a fleet's home repository would hold (pointers to every managed repository, operator macros,
+       steering files) and what it must not (secrets, ledger state, private plan records), and how it differs from
+       the instance registry.
+    3. Recommend build, park or refuse, and name the onboarding step it would change.
+    Write the report with the three headings the proofs name, each on its own line, label claims OBSERVED or INFERRED,
+    and add it to docs/docs-index.json.
+  note: |
+    Id reserved for run-unfiled-1795041800004 with ~/rmd-work/bin/reserve-id.sh.
+    reservation hand-off: run-unfiled-1795041800004 -> claude/project-thread-eatx1y

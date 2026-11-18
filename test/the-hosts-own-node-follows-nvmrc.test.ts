@@ -33,11 +33,15 @@ case "$1 $2" in
     printf '%s\\n' "nodejs | \${HOST_PACKAGE:-24.21.0-1nodesource1} | https://deb.nodesource.com/node_24.x nodistro/main amd64 Packages" ;;
   'apt-get install')
     [ "\${HOST_INSTALL_STATUS:-0}" = 0 ] || exit "$HOST_INSTALL_STATUS"
-    package="\${4#nodejs=}"
+    package="\${*: -1}"; package="\${package#nodejs=}"
+    if [ -f "$HOST_HOLD" ]; then case " $* " in *" --allow-change-held-packages "*) ;; *) echo 'E: Held packages were changed and -y was used without --allow-change-held-packages.' >&2; exit 100 ;; esac; fi
+    if [ "\${HOST_NEWER:-0}" = 1 ]; then case " $* " in *" --allow-downgrades "*) ;; *) echo 'E: Packages were downgraded and -y was used without --allow-downgrades.' >&2; exit 100 ;; esac; fi
     [ "\${HOST_NO_CHANGE:-0}" = 1 ] || printf 'v%s\\n' "\${package%-1nodesource1}" > "$HOST_VERSION" ;;
+  'apt-mark showhold') [ -f "$HOST_HOLD" ] && echo nodejs; exit 0 ;;
+  'apt-mark hold') [ "\${HOST_HOLD_STATUS:-0}" = 0 ] || exit "$HOST_HOLD_STATUS"; touch "$HOST_HOLD" ;;
   *) exit 90 ;;
 esac`);
-  for (const name of ["apt-get", "apt-cache"]) stub(name, `exec "$HOST_APT" "${name}" "$@"`);
+  for (const name of ["apt-get", "apt-cache", "apt-mark"]) stub(name, `exec "$HOST_APT" "${name}" "$@"`);
   const env = {
     ...process.env,
     PATH: `${bin}:${process.env.PATH}`,
@@ -51,9 +55,10 @@ esac`);
     HOST_APT: join(bin, "apt"),
     HOST_VERSION: actual,
     HOST_CALLS: calls,
+    HOST_HOLD: join(root, "held"),
   };
   return {
-    root, source, sourceText, actual,
+    root, source, sourceText, actual, hold: join(root, "held"),
     run: (mode: "check" | "install", overrides: Record<string, string> = {}) =>
       spawnSync("bash", [join(root, "deploy", "install-host-units.sh"), `--${mode}`], {
         encoding: "utf8", env: { ...env, ...overrides }, timeout: 15_000,
@@ -68,13 +73,13 @@ test("W1-T6251: install converges the host node to the pinned NodeSource package
     const result = h.run("install");
     assert.equal(result.status, 0, result.stderr);
     assert.equal(readFileSync(h.source, "utf8"), h.sourceText.replace("node_22.x", "node_24.x"));
-    assert.deepEqual(h.calls(), ["apt-get update", "apt-cache madison nodejs", "apt-get install -y nodejs=24.21.0-1nodesource1"]);
+    assert.deepEqual(h.calls(), ["apt-get update", "apt-cache madison nodejs", "apt-get install -y --allow-downgrades --allow-change-held-packages nodejs=24.21.0-1nodesource1", "apt-mark showhold", "apt-mark hold nodejs"]);
     assert.equal(readFileSync(h.actual, "utf8"), "v24.21.0\n");
     assert.match(result.stdout, /host-node: installed 24\.21\.0/);
     assert.ok(h.unitsInstalled());
     assert.equal(h.run("check").status, 0);
     assert.equal(h.run("install").status, 0);
-    assert.equal(h.calls().length, 3, "an in-step host needs no further apt calls");
+    assert.deepEqual(h.calls().slice(5), ["apt-mark showhold"], "an in-step, held host only reads its hold");
   });
 });
 
@@ -85,7 +90,7 @@ test("W1-T6251: check mode names host-node drift as DRIFTED", () => {
     const result = h.run("check");
     assert.equal(result.status, 1);
     assert.match(result.stdout, /install-host-units: DRIFTED host-node 22\.23\.2 != 24\.21\.0/);
-    assert.equal(h.calls().length, 3, "check must never call apt");
+    assert.equal(h.calls().length, 5, "check must never call apt");
     assert.equal(readFileSync(h.actual, "utf8"), "v22.23.2\n");
     assert.equal(readFileSync(h.source, "utf8"), h.sourceText.replace("node_22.x", "node_24.x"));
   });
@@ -111,7 +116,7 @@ test("W1-T6251: a same-major patch refreshes apt and uses the default command se
     writeFileSync(h.actual, "v24.20.0\n");
     const result = h.run("install", { RMD_HOST_APT_CMD: "" });
     assert.equal(result.status, 0, result.stderr);
-    assert.deepEqual(h.calls(), ["apt-get update", "apt-cache madison nodejs", "apt-get install -y nodejs=24.21.0-1nodesource1"]);
+    assert.deepEqual(h.calls(), ["apt-get update", "apt-cache madison nodejs", "apt-get install -y --allow-downgrades --allow-change-held-packages nodejs=24.21.0-1nodesource1", "apt-mark showhold", "apt-mark hold nodejs"]);
     assert.equal(readFileSync(h.actual, "utf8"), "v24.21.0\n");
   });
 });
@@ -176,7 +181,7 @@ test("W1-T6251: the checkout pin determines the package, including a v prefix", 
     const result = h.run("install", { HOST_PACKAGE: "26.1.2-1nodesource1" });
     assert.equal(result.status, 0, result.stderr);
     assert.equal(readFileSync(h.source, "utf8"), h.sourceText.replace("node_22.x", "node_26.x"));
-    assert.deepEqual(h.calls(), ["apt-get update", "apt-cache madison nodejs", "apt-get install -y nodejs=26.1.2-1nodesource1"]);
+    assert.deepEqual(h.calls(), ["apt-get update", "apt-cache madison nodejs", "apt-get install -y --allow-downgrades --allow-change-held-packages nodejs=26.1.2-1nodesource1", "apt-mark showhold", "apt-mark hold nodejs"]);
     assert.equal(readFileSync(h.actual, "utf8"), "v26.1.2\n");
     assert.match(result.stdout, /host-node: installed 26\.1\.2/);
     assert.equal(h.run("check").status, 0);
@@ -195,5 +200,51 @@ test("W1-T6251: missing or invalid inputs are reported without blocking units", 
     assert.deepEqual(h.calls(), []);
     assert.equal(readFileSync(h.actual, "utf8"), "v22.23.2\n");
     assert.ok(h.unitsInstalled());
+  });
+});
+
+test("W1-T13720 criterion 1: a hand-held nodejs below the pin is installed at the pin and stays held", () => {
+  host((h) => {
+    writeFileSync(h.source, h.sourceText.replace("node_22.x", "node_24.x"));
+    writeFileSync(h.actual, "v24.20.0\n");
+    writeFileSync(h.hold, "");
+    const result = h.run("install");
+    assert.equal(result.status, 0, result.stderr);
+    assert.doesNotMatch(result.stdout, /apt-get install failed/);
+    assert.deepEqual(h.calls(), ["apt-get update", "apt-cache madison nodejs",
+      "apt-get install -y --allow-downgrades --allow-change-held-packages nodejs=24.21.0-1nodesource1", "apt-mark showhold"]);
+    assert.equal(readFileSync(h.actual, "utf8"), "v24.21.0\n");
+    assert.ok(existsSync(h.hold), "the package stays held at the pin");
+    assert.equal(h.run("check").status, 0);
+  });
+});
+
+test("W1-T13720 criterion 2: a host Node moved past the pin is returned to it and held", () => {
+  host((h) => {
+    writeFileSync(h.source, h.sourceText.replace("node_22.x", "node_24.x"));
+    writeFileSync(h.actual, "v24.22.0\n");
+    const result = h.run("install", { HOST_NEWER: "1" });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(readFileSync(h.actual, "utf8"), "v24.21.0\n");
+    assert.match(result.stdout, /host-node: installed 24\.21\.0/);
+    assert.match(result.stdout, /host-node: nodejs held at the pin/);
+    assert.ok(existsSync(h.hold));
+  });
+});
+
+test("W1-T13720 criterion 3: an in-step host that is not held is held, and a failed hold is named without blocking units", () => {
+  host((h) => {
+    writeFileSync(h.source, h.sourceText.replace("node_22.x", "node_24.x"));
+    writeFileSync(h.actual, "v24.21.0\n");
+    const failed = h.run("install", { HOST_HOLD_STATUS: "1" });
+    assert.equal(failed.status, 0, failed.stderr);
+    assert.match(failed.stdout, /host-node: apt-mark hold nodejs failed; unattended-upgrades may move it, retried next converge/);
+    assert.ok(h.unitsInstalled());
+    assert.equal(existsSync(h.hold), false);
+    const held = h.run("install");
+    assert.equal(held.status, 0, held.stderr);
+    assert.match(held.stdout, /host-node: in step 24\.21\.0/);
+    assert.ok(existsSync(h.hold));
+    assert.deepEqual(h.calls().filter((c) => !c.startsWith("apt-mark")), [], "an in-step host never installs");
   });
 });
