@@ -340,9 +340,11 @@ test("default direct and sweep wiring records shadow results before protected ef
     const effects = buildSweepEffects({ owner: "example", repo: "core", config, ledgerPath: join(root, "state", "ledger.ndjson"),
       runId: "default", plan: { tasks: [], byId: new Map() } as Plan, policy: DEFAULT_SWEEP_POLICY,
       log: (event) => events.push(event), reviewRunner: async () => { events.push("effect"); return 0; } });
+    const reviewStart = events.length;
     await effects.postReview!({ ...pr(), headSha: checkoutSha });
-    assert.equal(events[0], "contributor_admission.shadow");
-    assert.ok(events.includes("effect"));
+    const reviewEvents = events.slice(reviewStart);
+    assert.equal(reviewEvents[0], "contributor_admission.shadow");
+    assert.ok(reviewEvents.includes("effect"));
     await assert.rejects(reviewCommand("42", ["--repo", "example/core"], {
       loadConfig: () => config, resolveOwnerRepo: () => ({ owner: "example", repo: "core" }),
       fetchView: () => ({ ...row(1, "User", checkoutSha), body: "Remudero-Task: W1-T7753", html_url: pr().prUrl }), fetchHead: () => {},

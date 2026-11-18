@@ -51,11 +51,13 @@ describe("test/every-fixed-repair-budget-defers-to-the-progress-judge.test.ts", 
     const attempt = implementAttemptOutcome(worker);
     assert.equal(attempt.success, false);
     assert.equal(attempt.success ? undefined : attempt.evidence.apiError, true);
-    // The driver result runDiagnoseThenRetry returns when the judge escalates a transient loop
-    // after two continues past MAX_TRANSIENT_RETRIES (asserted against the real driver in classify.test.ts).
+    // The driver result runDiagnoseThenRetry returns when the transient budget is spent with no judge
+    // verdict. A judge-escalated loop ("fix progress loop: …") now ends a non-transient `blocked`
+    // (W1-T13284, asserted in test/infra/a-worker-that-cannot-progress-…); the real driver's half of
+    // the class-keeping is asserted in classify.test.ts.
     const driver: Parameters<typeof finishTransientRetry>[0] = { outcome: "gave_up", exhaustedClass: "transient",
       strikes: 0, transientRetries: 5, attempts: 6, diagnosed: false,
-      reason: "fix progress loop: same provider outage — no new evidence" };
+      reason: "same provider outage — no new evidence" };
     for (const cleanupFails of [false, true]) {
       const rows: Record<string, unknown>[] = [];
       const messages: string[] = [];
