@@ -50,7 +50,7 @@ test("W1-T10839: Terra 6.1 is priced, shaped and ready on the cash lane", () => 
 test("W1-T10839: the Responses deployment set carries Sol and Terra and its errors name the deployment", async (t) => {
   const declared = responses.CASH_RESPONSES_DEPLOYMENTS;
   assert.deepEqual(declared[SOL], EFFORTS);
-  assert.deepEqual(declared[SOL62], EFFORTS);
+  assert.deepEqual(declared[SOL62], ["low", "medium", "high"]);
   assert.deepEqual(declared[TERRA], ["none", ...EFFORTS]);
   const conversation = new responses.CashResponsesConversation("contract", "prompt");
   for (const model of [SOL, SOL62, TERRA]) {
@@ -211,11 +211,14 @@ test("W1-T13446: the cash lane prices, shapes and bounds gpt-6.2-sol and the bak
   assert.equal(price.inputUsdPerMillion, 2);
   assert.equal(price.outputUsdPerMillion, 10);
   assert.equal(price.readAt, "2026-11-18");
-  assert.equal(OPENWEIGHT_CONTEXT_WINDOWS[SOL62]?.totalTokens, 922_000);
-  assert.deepEqual(OPENWEIGHT_RESPONSE_FORMATS[SOL62], ["json_object"]);
+  assert.equal(OPENWEIGHT_CONTEXT_WINDOWS[SOL62]?.totalTokens, 128_000);
+  assert.equal(OPENWEIGHT_RESPONSE_FORMATS[SOL62], undefined);
   assert.equal(OPENWEIGHT_TEMPERATURE[SOL62], null);
   assert.equal(openWeightDeploymentReady(SOL62), true);
-  assert.equal(openWeightUsageUsd(SOL62, 100, 20, 60, 10), openWeightUsageUsd(SOL, 100, 20, 60, 10));
+  // Threshold -1 prices every request at the long-context tier, 6.1 Sol's rates (the gap is named in the row).
+  assert.equal(OPENWEIGHT_PRICES[SOL62]!.longContext?.thresholdInputTokens, -1);
+  // 30 uncached x $4 + 60 cached x $0.20 + 10 cache-write x $5 + 20 output x $15, per million.
+  assert.ok(Math.abs(openWeightUsageUsd(SOL62, 100, 20, 60, 10) - 0.000482) < 1e-12);
   const sol = BAKEOFF_CANDIDATES.filter((candidate) => candidate.model === SOL62);
   assert.deepEqual(sol.map((candidate) => candidate.effort), ["low", "medium", "high"]);
   assert.ok(sol.every((candidate) => candidate.tools && candidate.billing === "cash"));
