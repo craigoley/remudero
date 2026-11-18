@@ -8,12 +8,11 @@
  * reopened them by hand. Each fixture below drives real sweep passes over a real ledger in a private directory.
  */
 import assert from "node:assert/strict";
-import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 
-import { readLedgerLines } from "#src/lib/status.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import {
   DEFAULT_SWEEP_POLICY,
@@ -66,27 +65,37 @@ function resequencedPr(over: Partial<OpenPrView> = {}): OpenPrView {
   };
 }
 
-interface FakeGithub {
+/** Every row the fixture's ledger holds, parsed as the sweep wrote it. */
+function readLedgerLines(ledgerPath: string): Array<Record<string, unknown>> {
+  return readFileSync(ledgerPath, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
+interface PortDouble {
   state: ResequenceCloseLifecycle["state"];
   events: Array<{ event: "closed" | "reopened"; at: string }>;
   head: boolean;
   reopenError?: Error;
   lifecycleError?: Error;
+  headError?: Error;
+  truncated?: boolean;
   reads: number;
   reopened: Array<{ prUrl: string; comment: string }>;
 }
 
-function fakeGithub(over: Partial<FakeGithub> = {}): FakeGithub & { port: ResequenceCloseReversalPort } {
-  const gh: FakeGithub = { state: "closed", events: [{ event: "closed", at: new Date(CLOSED_AT_MS).toISOString() }], head: true,
+function reversalPort(over: Partial<PortDouble> = {}): PortDouble & { port: ResequenceCloseReversalPort } {
+  const gh: PortDouble = { state: "closed", events: [{ event: "closed", at: new Date(CLOSED_AT_MS).toISOString() }], head: true,
     reads: 0, reopened: [], ...over };
   return Object.assign(gh, {
     port: {
       readLifecycle: async () => {
         gh.reads++;
         if (gh.lifecycleError) throw gh.lifecycleError;
-        return { state: gh.state, events: gh.events };
+        return { state: gh.state, events: gh.events, ...(gh.truncated ? { truncated: true } : {}) };
       },
-      headExists: async () => gh.head,
+      headExists: async () => {
+        if (gh.headError) throw gh.headError;
+        return gh.head;
+      },
       reopen: async (kept: KeptResequenceClose, comment: string) => {
         if (gh.reopenError) throw gh.reopenError;
         gh.reopened.push({ prUrl: kept.prUrl, comment });
@@ -95,7 +104,7 @@ function fakeGithub(over: Partial<FakeGithub> = {}): FakeGithub & { port: Resequ
   });
 }
 
-function harness(gh: ReturnType<typeof fakeGithub>, over: Partial<SweepDeps> = {}) {
+function harness(gh: ReturnType<typeof reversalPort>, over: Partial<SweepDeps> = {}) {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t12891-`));
   const ledgerPath = join(dir, "ledger.ndjson");
   writeFileSync(ledgerPath, "");
@@ -123,7 +132,7 @@ function harness(gh: ReturnType<typeof fakeGithub>, over: Partial<SweepDeps> = {
 }
 
 /** Pass one closes the PR for its unmet dependency; the returned harness is positioned after that close. */
-async function closedForUnmetDependency(gh: ReturnType<typeof fakeGithub>, over: Partial<SweepDeps> = {}) {
+async function closedForUnmetDependency(gh: ReturnType<typeof reversalPort>, over: Partial<SweepDeps> = {}) {
   const h = harness(gh, over);
   const pr = resequencedPr();
   assert.equal(deriveDisposition(pr, DEFAULT_SWEEP_POLICY, CLOSED_AT_MS).disposition, "stale", "precondition: the resequence row closes it");
@@ -135,12 +144,12 @@ async function closedForUnmetDependency(gh: ReturnType<typeof fakeGithub>, over:
 }
 
 test("W1-T12891 criterion 1: a resequence close is reopened once every named dependency reads merged, and one sweep.resequence_close_reversed row names it", async () => {
-  const gh = fakeGithub();
+  const gh = reversalPort();
   const h = await closedForUnmetDependency(gh);
   try {
     // While W1-T12209 is unmerged nothing happens; once its merge credit lands the next full pass reopens.
     await runSweep([], h.deps, DEFAULT_SWEEP_POLICY);
-    assert.deepEqual(gh.reopened, [], "no reopen while the dependency is unmerged");
+    assert.equal(gh.reopened.length, 0, "no reopen while the dependency is unmerged");
     h.merged(DEP_ID);
     await runSweep([], h.deps, DEFAULT_SWEEP_POLICY);
     assert.deepEqual(gh.reopened.map((r) => r.prUrl), [PR_URL], "the PR is reopened");
@@ -162,7 +171,7 @@ test("W1-T12891 criterion 1: a resequence close is reopened once every named dep
 });
 
 test("W1-T12891 criterion 1: a light pass and a dry run never reverse a kept close", async () => {
-  const gh = fakeGithub();
+  const gh = reversalPort();
   const h = await closedForUnmetDependency(gh);
   try {
     h.merged(DEP_ID);
@@ -185,7 +194,7 @@ test("W1-T12891 criterion 2: invariant:only-a-resequence-close-is-reversed — a
       planResequenceUnmetDependencies: undefined })],
   ];
   for (const [why, pr] of others) {
-    const gh = fakeGithub();
+    const gh = reversalPort();
     const h = harness(gh);
     try {
       assert.equal(deriveDisposition(pr, DEFAULT_SWEEP_POLICY, CLOSED_AT_MS).disposition, "stale", `${why}: precondition, it is closed`);
@@ -211,7 +220,7 @@ test("W1-T12891 criterion 2: a close with no marker beside the ledger, or a pers
     PLAN_RESEQUENCE_CLOSE_MARKER, CLOSED_AT_MS)), /names no unmet dependency/);
   assert.match(String(keptResequenceCloseFor({ ...pr, headRefName: undefined }, PLAN_RESEQUENCE_CLOSE_MARKER, CLOSED_AT_MS)), /no head branch/);
   assert.equal(typeof keptResequenceCloseFor(pr, PLAN_RESEQUENCE_CLOSE_MARKER, CLOSED_AT_MS), "object");
-  const gh = fakeGithub();
+  const gh = reversalPort();
   const h = harness(gh);
   try {
     // A kept file can only come from the resequence close; a hand-written one for a PR the sweep never closed
@@ -231,7 +240,7 @@ test("W1-T12891 criterion 2: a close with no marker beside the ledger, or a pers
 });
 
 test("W1-T12891 criterion 2: a close the sweep made that a person later re-closed is left closed", async () => {
-  const gh = fakeGithub();
+  const gh = reversalPort();
   const h = await closedForUnmetDependency(gh);
   try {
     // A person reopened the PR and closed it again after the sweep's close.
@@ -242,7 +251,7 @@ test("W1-T12891 criterion 2: a close the sweep made that a person later re-close
     assert.equal(h.rows(REVERSED).length + h.rows(REVERSE_FAILED).length, 0);
     assert.equal(readKeptResequenceCloses(h.ledgerPath).kept.length, 0, "the entry is dropped");
     // An already reopened PR is dropped too: there is nothing left to reverse.
-    const reopenedByHand = fakeGithub({ state: "open" });
+    const reopenedByHand = reversalPort({ state: "open" });
     const h2 = await closedForUnmetDependency(reopenedByHand);
     try {
       h2.merged(DEP_ID);
@@ -258,7 +267,7 @@ test("W1-T12891 criterion 2: a close the sweep made that a person later re-close
 });
 
 test("W1-T12891 criterion 2: a task that merged by another PR is not revived", async () => {
-  const gh = fakeGithub();
+  const gh = reversalPort();
   const h = await closedForUnmetDependency(gh);
   try {
     h.merged(DEP_ID);
@@ -280,7 +289,7 @@ test("W1-T12891 criterion 3: while a dependency is unmerged, unreadable or indet
     ["absent from the read", async () => new Map()],
   ];
   for (const [why, readTaskMergeStates] of reads) {
-    const gh = fakeGithub();
+    const gh = reversalPort();
     const h = await closedForUnmetDependency(gh, { readTaskMergeStates });
     try {
       const before = readLedgerLines(h.ledgerPath).length;
@@ -299,7 +308,7 @@ test("W1-T12891 criterion 3: while a dependency is unmerged, unreadable or indet
   for (const port of [
     { lifecycleError: new Error("HTTP 502") },
   ]) {
-    const gh = fakeGithub(port);
+    const gh = reversalPort(port);
     const h = await closedForUnmetDependency(gh);
     try {
       h.merged(DEP_ID);
@@ -314,7 +323,7 @@ test("W1-T12891 criterion 3: while a dependency is unmerged, unreadable or indet
 });
 
 test("W1-T12891 criterion 4: a refused reopen writes one sweep.resequence_close_reverse_failed row with its cause and is not retried", async () => {
-  const gh = fakeGithub({ reopenError: new Error("GraphQL: Could not reopen the pull request") });
+  const gh = reversalPort({ reopenError: new Error("GraphQL: Could not reopen the pull request") });
   const h = await closedForUnmetDependency(gh);
   try {
     h.merged(DEP_ID);
@@ -334,7 +343,7 @@ test("W1-T12891 criterion 4: a refused reopen writes one sweep.resequence_close_
 });
 
 test("W1-T12891 criterion 4: a head branch that is gone writes one sweep.resequence_close_reverse_failed row and is not retried", async () => {
-  const gh = fakeGithub({ head: false });
+  const gh = reversalPort({ head: false });
   const h = await closedForUnmetDependency(gh);
   try {
     h.merged(DEP_ID);
@@ -384,4 +393,128 @@ test("W1-T12891 criterion 4: the production port reads GitHub fresh and reopens 
 test("W1-T12891 criterion 2: the close comment that a kept close is matched on carries the resequence marker", () => {
   const reason = deriveDisposition(resequencedPr(), DEFAULT_SWEEP_POLICY, CLOSED_AT_MS).reason;
   assert.ok(reason.includes(PLAN_RESEQUENCE_CLOSE_MARKER));
+});
+
+test("W1-T12891 criterion 3: a task whose own merge state is indeterminate, or a head read that fails, holds the close and writes nothing", async () => {
+  const taskIndeterminate: SweepDeps["readTaskMergeStates"] = async (ids) =>
+    new Map(ids.map((id) => [id, (id === DEP_ID ? "merged" : "indeterminate") as ResequenceDependencyState]));
+  for (const [why, gh, over] of [
+    ["task indeterminate", reversalPort(), { readTaskMergeStates: taskIndeterminate }],
+    ["head read failed", reversalPort({ headError: new Error("HTTP 502") }), {}],
+  ] as const) {
+    const h = await closedForUnmetDependency(gh, over);
+    try {
+      h.merged(DEP_ID);
+      await runSweep([], h.deps, DEFAULT_SWEEP_POLICY);
+      assert.equal(gh.reopened.length, 0, `${why}: stays closed`);
+      assert.equal(h.rows(REVERSED).length + h.rows(REVERSE_FAILED).length, 0, `${why}: nothing written`);
+      assert.equal(readKeptResequenceCloses(h.ledgerPath).kept.length, 1, `${why}: still kept`);
+    } finally {
+      h.cleanup();
+    }
+  }
+});
+
+test("W1-T12891 criterion 2: a lifecycle whose events exceed one page cannot rule out a later close, so it is never reopened", async () => {
+  const gh = reversalPort({ truncated: true });
+  const h = await closedForUnmetDependency(gh);
+  try {
+    h.merged(DEP_ID);
+    await runSweep([], h.deps, DEFAULT_SWEEP_POLICY);
+    assert.equal(gh.reopened.length, 0);
+    assert.equal(readKeptResequenceCloses(h.ledgerPath).kept.length, 0, "dropped without acting");
+    assert.equal(h.rows(REVERSED).length + h.rows(REVERSE_FAILED).length, 0);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("W1-T12891 criterion 4: a kept close the sweep cannot remove is not attempted, so no later pass repeats an attempt", async () => {
+  const gh = reversalPort();
+  const h = await closedForUnmetDependency(gh);
+  const logged: string[] = [];
+  h.deps.log = (step) => { logged.push(step); };
+  try {
+    h.merged(DEP_ID);
+    const keptDir = dirname(readKeptResequenceCloses(h.ledgerPath).kept[0]!.path);
+    const readOnly = async () => {
+      chmodSync(keptDir, 0o500);
+      try { await runSweep([], h.deps, DEFAULT_SWEEP_POLICY); } finally { chmodSync(keptDir, 0o700); }
+    };
+    await readOnly();
+    assert.equal(gh.reopened.length, 0, "no attempt without the claim");
+    assert.ok(logged.includes("sweep.resequence_close.unclaimed"));
+    assert.equal(h.rows(REVERSED).length + h.rows(REVERSE_FAILED).length, 0);
+    // A drop that cannot remove its file holds the close too, rather than acting on it.
+    gh.events.push({ event: "reopened", at: "2026-11-15T00:10:00Z" }, { event: "closed", at: "2026-11-15T00:30:00Z" });
+    await readOnly();
+    assert.equal(readKeptResequenceCloses(h.ledgerPath).kept.length, 1);
+    assert.equal(gh.reopened.length, 0);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("W1-T12891 criterion 4: unreadable or unwritable bookkeeping is recorded and never stops the pass or reopens anything", async () => {
+  const gh = reversalPort();
+  const h = harness(gh);
+  const logged: Array<{ step: string; reason: string }> = [];
+  h.deps.log = (step, extra) => { logged.push({ step, reason: String(extra?.reason ?? "") }); };
+  try {
+    // A close that names no head is not kept, and says why.
+    await runSweep([resequencedPr({ headRefName: undefined })], h.deps, DEFAULT_SWEEP_POLICY);
+    assert.equal(h.closed.length, 1, "precondition: it was closed");
+    assert.match(logged.find((l) => l.step === "sweep.resequence_close.not_kept")?.reason ?? "", /no head branch/);
+    assert.match(String(keptResequenceCloseFor(resequencedPr({ prUrl: "https://example.com/pr/1" }), PLAN_RESEQUENCE_CLOSE_MARKER, CLOSED_AT_MS)),
+      /names no repository/);
+    // Files beside the ledger that are not a kept close are named and skipped.
+    const repoDir = join(h.dir, "resequence-closes", "craigoley", "remudero");
+    mkdirSync(repoDir, { recursive: true });
+    writeFileSync(join(repoDir, "PR1.json"), "{torn");
+    writeFileSync(join(repoDir, "PR2.json"), JSON.stringify({ prNumber: 3, prUrl: PR_URL.replace(/\d+$/, "3"), taskId: TASK_ID,
+      dependencies: [DEP_ID], headRef: HEAD_REF, closedAt: new Date(CLOSED_AT_MS).toISOString() }));
+    writeFileSync(join(repoDir, "PR4.json"), JSON.stringify({ prNumber: 4 }));
+    writeFileSync(join(repoDir, "notes.txt"), "not a kept close");
+    h.merged(DEP_ID);
+    await runSweep([], h.deps, DEFAULT_SWEEP_POLICY);
+    assert.equal(logged.filter((l) => l.step === "sweep.resequence_close.unreadable").length, 3);
+    assert.equal(gh.reads, 0);
+    assert.equal(gh.reopened.length, 0);
+    // A kept-close path that is not a directory: the close cannot be kept, and the read names it.
+    rmSync(join(h.dir, "resequence-closes"), { recursive: true });
+    writeFileSync(join(h.dir, "resequence-closes"), "");
+    logged.length = 0;
+    await runSweep([resequencedPr({ prNumber: 18601, prUrl: PR_URL.replace(/\d+$/, "18601") })], h.deps, DEFAULT_SWEEP_POLICY);
+    assert.match(logged.find((l) => l.step === "sweep.resequence_close.not_kept")?.reason ?? "", /could not be written/);
+    assert.match(logged.find((l) => l.step === "sweep.resequence_close.unreadable")?.reason ?? "", /resequence-closes/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("W1-T12891 criterion 4: a reversal step that throws is recorded and the pass still disposes its open PRs", async () => {
+  const gh = reversalPort();
+  const h = await closedForUnmetDependency(gh);
+  const logged: string[] = [];
+  h.deps.log = (step) => { logged.push(step); };
+  h.deps.appendLine = (path, line) => {
+    if (String(line.step).startsWith("sweep.resequence_close")) throw new Error("disk full");
+    appendFileSync(path, `${JSON.stringify(line)}\n`);
+  };
+  try {
+    h.merged(DEP_ID);
+    await runSweep([resequencedPr({ prNumber: 18600, prUrl: PR_URL.replace(/\d+$/, "18600") })], h.deps, DEFAULT_SWEEP_POLICY);
+    assert.ok(logged.includes("sweep.resequence_close.reversal_failed"));
+    assert.ok(h.rows("sweep.disposed").some((row) => row.pr_number === 18600), "the pass went on to dispose its open PR");
+    assert.equal(readKeptResequenceCloses(h.ledgerPath).kept.some((k) => k.prNumber === PR_NUMBER), false, "the close was claimed: no second attempt");
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("W1-T12891 criterion 4: the production port refuses a pull request url that names no repository", async () => {
+  const port = createResequenceCloseReversalPort({ readJson: async () => [], ghRun: () => {} });
+  const kept: KeptResequenceClose = { prNumber: 1, prUrl: "https://example.com/pr/1", taskId: TASK_ID, dependencies: [DEP_ID],
+    headRef: HEAD_REF, closedAt: new Date(CLOSED_AT_MS).toISOString() };
+  await assert.rejects(() => port.readLifecycle(kept), /names no repository/);
 });

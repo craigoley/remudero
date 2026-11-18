@@ -20868,7 +20868,7 @@ export function keptResequenceCloseFor(pr: OpenPrView, reason: string, closedAtM
   if (!pr.headRefName) return "the close names no head branch";
   if (resequenceCloseSlug(pr.prUrl) === undefined) return `the pull request url ${pr.prUrl} names no repository`;
   return { prNumber: pr.prNumber, prUrl: pr.prUrl, taskId: pr.taskId, dependencies, headRef: pr.headRefName,
-    closedAt: new Date(closedAtMs).toISOString() };
+    closedAt: clockFromMillisFn(() => closedAtMs).iso() };
 }
 
 /** W1-T12891 — record a kept close beside the ledger, one file per PR, written whole before it is renamed in. */
@@ -20895,14 +20895,22 @@ export function readKeptResequenceCloses(ledgerPath: string): { kept: Array<Kept
   if (!existsSync(root)) return { kept: [], unreadable: [] };
   const kept: Array<KeptResequenceClose & { path: string }> = [];
   const unreadable: string[] = [];
-  for (const entry of readdirSync(root, { recursive: true, encoding: "utf8" })) {
+  let entries: string[];
+  try {
+    entries = readdirSync(root, { recursive: true, encoding: "utf8" });
+  } catch (error) {
+    const reason = `${root}: ${String(error)}`;
+    return { kept, unreadable: [reason] };
+  }
+  for (const entry of entries) {
     if (!/^PR\d+\.json$/.test(basename(entry))) continue;
     const path = join(root, entry);
     let row: KeptResequenceClose | undefined;
     try {
       row = parseKeptResequenceClose(readFileSync(path, "utf8"));
     } catch (error) {
-      unreadable.push(`${path}: ${String(error)}`);
+      const reason = `${path}: ${String(error)}`;
+      unreadable.push(reason);
       continue;
     }
     if (row === undefined || resequenceClosePath(ledgerPath, row) !== path) unreadable.push(`${path}: not a kept close`);
@@ -20988,7 +20996,8 @@ export async function reverseResequenceCloses(input: {
   try {
     states = await (input.readTaskMergeStates ?? ((t) => ledgerTaskMergeStates(input.ledgerPath, t)))(ids);
   } catch (error) {
-    mergeReadError = `the merge-state read failed: ${String(error)}`;
+    const reason = `the merge-state read failed: ${String(error)}`;
+    mergeReadError = reason;
   }
   const outcomes: ResequenceReversalOutcome[] = [];
   for (const close of kept) {
@@ -21013,7 +21022,8 @@ export async function reverseResequenceCloses(input: {
     try {
       lifecycle = await input.port.readLifecycle(close);
     } catch (error) {
-      held(`the pull request's lifecycle was unreadable: ${String(error)}`);
+      const reason = `the pull request's lifecycle was unreadable: ${String(error)}`;
+      held(reason);
       continue;
     }
     const after = Date.parse(close.closedAt) + RESEQUENCE_CLOSE_EVENT_SKEW_MS;
@@ -21030,7 +21040,8 @@ export async function reverseResequenceCloses(input: {
     try {
       exists = await input.port.headExists(close);
     } catch (error) {
-      held(`the head branch read failed: ${String(error)}`);
+      const reason = `the head branch read failed: ${String(error)}`;
+      held(reason);
       continue;
     }
     // The claim: a close whose file cannot be removed is not attempted, so no later pass repeats an attempt.
@@ -21209,8 +21220,13 @@ export async function runSweep(
   // {@link decideSweepArm}'s head-bound recovery, so arming parity costs no extra read.
   // W1-T12891: a closed PR is not in the open list, so a full pass reads the resequence closes it kept.
   if (deps.resequenceCloseReversal && !deps.dryRun && deps.repairAdmissionSurface !== "light") {
-    await reverseResequenceCloses({ ledgerPath: deps.ledgerPath, runId: deps.runId, port: deps.resequenceCloseReversal,
-      readTaskMergeStates: deps.readTaskMergeStates, appendLine, log });
+    try {
+      await reverseResequenceCloses({ ledgerPath: deps.ledgerPath, runId: deps.runId, port: deps.resequenceCloseReversal,
+        readTaskMergeStates: deps.readTaskMergeStates, appendLine, log });
+    } catch (error) {
+      // The reversal never decides this pass's dispositions: its failure is recorded and the pass goes on.
+      log("sweep.resequence_close.reversal_failed", { reason: String(error) });
+    }
   }
   deps.markPrelude?.("armed_body_guard");
   if (endsForRestart("armed_body_guard")) return endedEarly();
@@ -26476,11 +26492,14 @@ export async function runSweep(
               } else await deps.close(pr, reason);
               // W1-T12891: the close calls itself reversible, so the facts that reverse it are kept once it returns.
               if (acted && deps.resequenceCloseReversal && reason.includes(PLAN_RESEQUENCE_CLOSE_MARKER)) {
-                const kept = keptResequenceCloseFor(pr, reason, deps.now ? deps.now() : Date.now());
+                const kept = keptResequenceCloseFor(pr, reason, deps.now ? deps.now() : systemClock.now());
                 let notKept = typeof kept === "string" ? kept : undefined;
                 if (typeof kept !== "string") {
                   try { keepResequenceClose(deps.ledgerPath, kept); }
-                  catch (error) { notKept = `the kept close could not be written: ${String(error)}`; }
+                  catch (error) {
+                    const reason = `the kept close could not be written: ${String(error)}`;
+                    notKept = reason;
+                  }
                 }
                 if (notKept !== undefined) log("sweep.resequence_close.not_kept", { pr_number: pr.prNumber, task_id: pr.taskId, reason: notKept });
               }
