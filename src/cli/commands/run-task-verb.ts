@@ -134,6 +134,7 @@ import { shouldRecordDecision, reversibilityFactor, type DiffFileChange } from "
 import { assertLiveWriteAllowed } from "../../lib/live-write-guard.js";
 import { runChildCredentialSocket } from "../../lib/secret-boundary.js";
 import { repoRoot, resolveOwnerRepo } from "../../lib/repo-location.js";
+import { resolveOwnerRepoAtAsync } from "../../lib/owner-repo.js";
 import { flagValue } from "../../lib/cli-args.js";
 import { resolveReviewTarget } from "../../lib/report-commands.js";
 import { managedCheckoutInstallEscalation, stagedInstall, type StagedInstallFailure } from "../../lib/staged-install.js";
@@ -4952,10 +4953,10 @@ export async function runTask(
   const opsCriteriaAtOpen = lookup.outcome === "found" && lookup.catalog === "ops"
     ? bindCanonicalOpsCriteria(task.id, task.title, `${owner}/${task.repo}`, lookup.commit, task.acceptance ?? [])
     : undefined;
-  // W1-T12936: a synced public task is re-read from Core's exact origin/main commit before any worker starts, so a
-  // target repository that has not filed it can open its PR with these pinned criteria (and only these).
+  // Local working-tree snapshots still go through the destination's filed criteria check.
   const coreCriteriaAtOpen = lookup.outcome === "found" && lookup.catalog === "public" && !opts.skipGitSync
-    ? await pinCoreCriteriaAtOpen(planPath, task, `${owner}/${task.repo}`, log)
+    && !(opts.planSnapshot && isAbsolute(task.sourcePath ?? "") && task.repo === resolveOwnerRepo().repo)
+    ? await pinCoreCriteriaAtOpen(planPath, task, `${owner}/${task.repo}`, log, boundedVerdictReason)
     : undefined;
   if (coreCriteriaAtOpen) log("core_criteria.pinned", { source_commit: coreCriteriaAtOpen.sourceCommit, target: coreCriteriaAtOpen.targetRepository });
   if (task.catalog === "ops" && !plan.byId.has(taskId)) {
@@ -5289,35 +5290,34 @@ export function claimRunTaskFixBranch(input: {
   });
 }
 
-/**
- * W1-T12936: read the selected public task's own record from Core's origin/main at one exact commit and bind its
- * criteria for the target repository's PR opener. A record that is absent or different at that commit refuses here,
- * before any worker starts. A plan with no readable origin/main yields no binding (recorded), so the opener keeps
- * today's refusal for a task the target has not filed. The opener uses a binding only when the target's plan lacks the task.
- */
+/** Cross-repository dispatch pins the selected record before any worker starts. Same-repository runs use the local opener. */
 async function pinCoreCriteriaAtOpen(planPath: string, task: Task, targetRepository: string,
-  log: (step: string, extra?: Record<string, unknown>) => void): Promise<CanonicalOpsCriteriaAtOpen | undefined> {
-  const refuse = (reason: string): never => { throw new Error(`core public-plan criteria refused (${reason})`); };
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  boundReason: (reason: string) => string): Promise<CanonicalOpsCriteriaAtOpen | undefined> {
   const repoDir = dirname(dirname(planPath)), planRel = relative(repoDir, planPath), shardRel = join(dirname(planRel), "tasks.d");
-  // Off the daemon loop: the plan sync's own awaited git runner, never a synchronous spawn.
   const git = planSyncGitRunnerAsync(repoDir);
-  let commit: string, record: Task | undefined;
   try {
-    commit = (await git(["rev-parse", "--verify", "origin/main^{commit}"])).trim();
-    const shard = (await git(["ls-tree", "--name-only", commit, `${shardRel}/`])).split("\n")
-      .find(path => basename(path).startsWith(`${task.id}-`) && /\.ya?ml$/.test(path));
-    const source = shard ?? planRel;
-    record = parseTasksFromYaml(await git(["show", `${commit}:${source}`]), `${commit}:${source}`).find(t => t.id === task.id);
+    const { owner, repo } = await resolveOwnerRepoAtAsync(repoDir);
+    if (`${owner}/${repo}` === targetRepository) return undefined;
+
+    const source = /^origin\/main:(.+)$/.exec(task.sourcePath ?? "")?.[1];
+    if (source === undefined || (source !== planRel && (dirname(source) !== shardRel || !/\.ya?ml$/.test(source)))) {
+      throw new Error(`${task.id} has no readable source record path`);
+    }
+    const commit = (await git(["rev-parse", "--verify", "origin/main^{commit}"])).trim();
+    const label = `${commit}:${source}`;
+    const record = parseTasksFromYaml(await git(["show", label]), label).find(t => t.id === task.id);
+    if (record === undefined) throw new Error(`${task.id} is absent from the plan at ${commit}`);
+    if (record.title !== task.title || record.repo !== task.repo
+        || JSON.stringify(record.acceptance ?? []) !== JSON.stringify(task.acceptance ?? [])) {
+      throw new Error(`${task.id} at ${commit} differs from the selected task`);
+    }
+    return bindCanonicalCoreCriteria(record.id, record.title, targetRepository, commit, record.acceptance ?? []);
   } catch (err) {
-    log("core_criteria.unpinned", { task_id: task.id, reason: String(err).slice(0, 500) });
-    return undefined;
+    const reason = boundReason(String(err));
+    log("core_criteria.refused", { task_id: task.id, reason });
+    throw new Error(`core public-plan criteria refused (${reason})`, { cause: err });
   }
-  if (record === undefined) return refuse(`${task.id} is absent from the plan at ${commit}`);
-  if (record.title !== task.title || record.repo !== task.repo
-      || JSON.stringify(record.acceptance ?? []) !== JSON.stringify(task.acceptance ?? [])) {
-    return refuse(`${task.id} at ${commit} differs from the selected task`);
-  }
-  return bindCanonicalCoreCriteria(task.id, task.title, targetRepository, commit, record.acceptance ?? []);
 }
 
 export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost): Promise<RunResult> {
