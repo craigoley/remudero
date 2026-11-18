@@ -186,9 +186,10 @@ export function inboxGardenerSource(proposals: RetirementProposal[], tasks: Read
     return [p.id, inboxProposalRevision(p), task ? inboxGardenerTaskFact(task) : null,
       task?.depends_on.map(dep => tasks.get(dep) ? inboxGardenerTaskFact(tasks.get(dep)!) : null) ?? [], operatorIntents.get(p.id) ?? inboxSemanticDigest([])]; });
   const owned = { repository: scope.repository, instance: scope.instance, root: scope.root };
-  // W1-T13714: one short digest per proposal, so a reader holding another plan revision can tell WHICH proposals differ.
-  const items: Record<string, string> = Object.fromEntries(facts.map(fact => [fact[0] as string, inboxSemanticDigest(fact).slice(0, 16)]));
-  return { scope: owned, identity: inboxSemanticDigest([owned, facts]), items };
+  // W1-T13714: one short digest per proposal over its registry revision and plan facts, so a reader holding another plan
+  // revision can tell WHICH proposals differ. Operator input stays whole-population: unpublished input still refuses the pass.
+  const items: Record<string, string> = Object.fromEntries(facts.map(fact => [fact[0] as string, inboxSemanticDigest(fact.slice(0, 4)).slice(0, 16)]));
+  return { scope: owned, identity: inboxSemanticDigest([owned, facts]), items, intents: inboxSemanticDigest(facts.map(fact => [fact[0], fact[4]])) };
 }
 
 /** Qualify and consume one owned descriptor; a path replacement cannot bypass the byte bound. */

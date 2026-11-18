@@ -38,7 +38,7 @@ export interface InboxGardenerCandidate {
   successor?: { proposal: RetirementProposal; open: boolean };
   /** W1-T13682: the snapshot could not verify this proposal's board referent, so the pass leaves it alone. */
   referentUnverified?: boolean;
-  /** W1-T13714: this proposal's plan, registry or intent facts differ from the snapshot's, so the pass leaves it alone. */
+  /** W1-T13714: this proposal's plan facts differ from the snapshot's, so the pass leaves it alone. */
   sourceChanged?: boolean;
 }
 export interface InboxGardenerPack {
@@ -117,7 +117,7 @@ export async function runInboxGardener(options: { stateDir: string; scope: Inbox
         const mark = candidate.referentUnverified ? "referent-unverified" : "source-changed";
         store.entries[p.id] = { digest: inboxSemanticDigest([inboxGardenerSemanticInput(candidate), mark]), decision: "defer_source",
           reason: candidate.referentUnverified ? "Its referent could not be verified, so this pass skips it and records the gap"
-            : "Its plan, registry or operator facts differ from the snapshot's, so this pass skips it and records the gap" };
+            : "Its plan facts differ from the snapshot's, so this pass skips it and records the gap" };
         after = p.id; evaluated++; continue;
       }
       if (protectedCandidate(candidate, options.scope) || candidate.unansweredReply || candidate.resolvedByOperator || !candidate.task) {
@@ -340,12 +340,13 @@ export function defaultInboxGardenerPorts(options: { stateDir: string; scope: In
     // whole-population identity differed for hours (host 2026-11-18: 4 of 5 passes refused coverage:plan). With the same
     // scope and per-proposal digests on both sides, only the proposals whose facts differ are skipped and counted.
     const ownSource = inboxGardenerSource(proposals, plan.byId, options.scope, operatorIntents), snapshotSource = snapshot?.gardenerSource;
-    const sourceChanged = snapshotSource && snapshotSource.identity !== ownSource.identity && snapshotSource.items &&
-      JSON.stringify(snapshotSource.scope) === JSON.stringify(ownSource.scope)
+    // Only plan facts may differ per item: a registry or operator-input change still refuses the whole pass, as before.
+    const registry = raw.kind === "ok" && ownership && inboxSemanticDigest(snapshot?.proposals) === inboxSemanticDigest(proposals) ? "observed" : "unavailable";
+    const sourceChanged = registry === "observed" && snapshotSource && snapshotSource.identity !== ownSource.identity && snapshotSource.items &&
+      snapshotSource.intents === ownSource.intents && JSON.stringify(snapshotSource.scope) === JSON.stringify(ownSource.scope)
       ? new Set(Object.keys(ownSource.items).filter(id => snapshotSource.items![id] !== ownSource.items[id])) : undefined;
     return { scope: options.scope, snapshotKey: snapshot?.snapshotKey ?? "", generatedAt: snapshot?.generatedAt ?? "", checkedAt: clock.iso(), codeSha: options.codeSha,
-      coverage: { plan: snapshotSource?.identity === ownSource.identity || sourceChanged ? snapshot?.attentionCensus?.sources.plan ?? "unavailable" : "unavailable", registry: raw.kind === "ok" && ownership &&
-        inboxSemanticDigest(snapshot?.proposals) === inboxSemanticDigest(proposals) ? "observed" : "unavailable", github,
+      coverage: { plan: snapshotSource?.identity === ownSource.identity || sourceChanged ? snapshot?.attentionCensus?.sources.plan ?? "unavailable" : "unavailable", registry, github,
         ledger: ledger.state, threads: threads.status === "ok" ? "observed" : "unavailable" },
       candidates: proposals.map(proposal => {
         const taskId = retirementAsk(proposal)?.taskId;
