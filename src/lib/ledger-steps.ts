@@ -593,6 +593,36 @@ const SEED_ROWS: readonly SeedRow[] = [
       "not_granted",
     ],
   },
+  {
+    // W1-T13410: the gardener raises refs of the install clone that name an object the clone lacks.
+    step: "host_resource.clone_refs_unresolvable",
+    meaning:
+      "A host's beat counted refs of its install clone that name an object the clone lacks, so a fetch there " +
+      "fails. One escalation was raised for this episode. `count`, `first` and `install_dir` are from the beat; " +
+      "`issue_url` is the escalation.",
+    writer: ["observeCloneHealth"],
+    outcomes: ["raised"],
+  },
+  {
+    step: "host_resource.clone_refs_recovered",
+    meaning: "A beat counted 0 refs that name a missing object after an escalation was raised. The episode ends.",
+    writer: ["observeCloneHealth"],
+    outcomes: ["recovered"],
+  },
+  {
+    step: "host_resource.clone_gc_disabled",
+    meaning:
+      "The install clone's .git/gc.log has stayed with the same reason across beats that span 30 minutes, so " +
+      "automatic gc does not run. One escalation was raised. `since` is the beat that first showed the reason.",
+    writer: ["observeCloneHealth"],
+    outcomes: ["raised"],
+  },
+  {
+    step: "host_resource.clone_gc_recovered",
+    meaning: "A beat read gc_verdict=ok after a gc.log escalation was raised. The episode ends.",
+    writer: ["observeCloneHealth"],
+    outcomes: ["recovered"],
+  },
 ];
 
 /** THE REGISTRY — every step this task has decoded so far, `family` derived from `step` (never

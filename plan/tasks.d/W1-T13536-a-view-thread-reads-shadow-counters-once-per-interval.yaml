@@ -1,0 +1,52 @@
+- id: W1-T13536
+  title: "A read-model view thread reads the stored shadow counters once per refresh interval, not on every 250 ms pass, so the views threads stop re-opening the counter store and parsing every state four times a second"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # one concern (how often a view thread re-reads stored readiness) in view-shadow.ts, its one caller and a new test
+  origin: "operator-session#serve-hot-worker-2026-11-17"
+  plan_refs:
+    - W1-T13441
+  files:
+    - src/lib/view-shadow.ts
+    - src/lib/read-model-worker.ts
+    - test/console-api/views/a-view-thread-reads-shadow-counters-once-per-interval.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Passes inside the refresh interval reuse one read of the counter store, and readiness is still computed at each pass's now"
+      proof: "grep: W1-T13536 criterion 1 in test/console-api/views/a-view-thread-reads-shadow-counters-once-per-interval.test.ts"
+    - claim: "The store is read again once the interval passes, when the qualifications change, and when the clock goes back"
+      proof: "grep: W1-T13536 criterion 2 in test/console-api/views/a-view-thread-reads-shadow-counters-once-per-interval.test.ts"
+    - claim: "invariant:never-kept-on-failure — a read that throws or finds no store is never kept, so the next pass reads again"
+      kind: guard
+      proof: "grep: W1-T13536 criterion 3 in test/console-api/views/a-view-thread-reads-shadow-counters-once-per-interval.test.ts"
+    - claim: "The default reader reads the real store on the system clock"
+      proof: "grep: W1-T13536 criterion 4 in test/console-api/views/a-view-thread-reads-shadow-counters-once-per-interval.test.ts"
+  rationale: |
+    WHY: after W1-T13442 and W1-T13454, the read-model view threads are serve's largest steady cost (host /proc, 30 s,
+    2026-11-17 23:27Z on c287903b2: rmd-rm-views 0.084 cores, rmd-rm-heavy-vw 0.083). A 30 s inspector profile of both
+    threads (same time) puts about 70% of each in src/lib/view-shadow-store.ts readShadowCounters: DatabaseSync open and
+    close, prepare, `SELECT view, state FROM shadow_counter` and JSON.parse of every state. OBSERVED at head:
+    read-model-worker.ts materialize() calls storedShadowReadiness on every pass when the thread is not the home
+    comparator, and the ticker passes every READ_MODEL_TICK_MS (250 ms), so each view thread opens the store and parses
+    every state four times a second. Readiness turns on a day of samples, so a pass gains nothing from counters fresher
+    than a few seconds.
+  design: |
+    INVARIANT never-kept-on-failure: a counter read that throws or finds no store is never reused; the next pass reads again.
+    1. view-shadow.ts exports STORED_READINESS_REFRESH_MS (10 s) and storedShadowReadinessReader(clock, refreshMs,
+       read), which has storedShadowReadiness's signature. It keeps the last counters read for one (path, qualifications)
+       and reads again when the interval has passed, the key changed, or the clock went back. Readiness is computed from
+       the kept counters at each call's nowMs. A read that throws or returns no store is not kept.
+    2. storedShadowReadiness is unchanged for its other callers; both share readinessFromCounters.
+    3. The view ticker in read-model-worker.ts makes one reader on its clock and uses it in materialize().
+    Not in scope: the home comparator's live readiness, and the slow lane's anchor git grep (measure first).
+  falsifier: |
+    Make the reader read on every call: criteria 1 and 2 fail. Drop the clock-went-back check: criterion 2 fails.
+  note: |
+    Id reserved for run-unfiled-1794958312826 with ~/rmd-work/bin/reserve-id.sh.
+    reservation hand-off: run-unfiled-1794958312826 -> claude/project-thread-u06uh4

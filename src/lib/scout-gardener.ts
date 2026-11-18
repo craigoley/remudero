@@ -211,6 +211,9 @@ function rowFiles(r: Record<string, unknown>): string[] {
   return [r.file, r.module].filter((v): v is string => typeof v === "string" && /^[\w.@-]+(?:\/[\w.@-]+)+$/.test(v) && !v.startsWith("/") && !v.includes(".."));
 }
 
+/** W1-T13428: a row the scout gardener itself wrote, which is never a symptom. */
+const scoutWrote = (r: Record<string, unknown>): boolean => (r.gardener_origin as { name?: unknown } | undefined)?.name === "scout";
+
 /** Failure-shaped steps whose rows both halves of the window hold, the newer at least as many as the older. */
 export function scoutSymptoms(rows: readonly Record<string, unknown>[], nowMs: number, fileExists: (path: string) => boolean): ScoutSymptom[] {
   const since = nowMs - SCOUT_WINDOW_MS;
@@ -219,7 +222,7 @@ export function scoutSymptoms(rows: readonly Record<string, unknown>[], nowMs: n
   for (const r of rows) {
     const step = r.step;
     const t = rowMs(r);
-    if (typeof step !== "string" || !isFailureShapedStep(step) || !Number.isFinite(t) || t < since || t > nowMs) continue;
+    if (typeof step !== "string" || !isFailureShapedStep(step) || !Number.isFinite(t) || t < since || t > nowMs || scoutWrote(r)) continue;
     const e = by.get(step) ?? { older: 0, newer: 0, files: new Map<string, number>() };
     if (t < mid) e.older += 1;
     else e.newer += 1;
@@ -463,7 +466,7 @@ export function scoutGardenSpec(
           pathExistsAtBase: path => existsSync(join(deps.repoRoot, path)),
         });
         if (refused !== undefined) {
-          deps.log("scout.record_refused", { step: draft.step, task_id: draft.id, reason: refused });
+          deps.log("scout.record_refused", { symptom_step: draft.step, refused_task_id: draft.id, reason: refused });
           continue;
         }
         writeFileSync(path, text + "\n");
@@ -471,7 +474,7 @@ export function scoutGardenSpec(
       }
       for (const f of filings) {
         if (f.refused !== undefined) {
-          deps.log("scout.record_refused", { step: f.symptom.step, task_id: f.taskId, reason: f.refused });
+          deps.log("scout.record_refused", { symptom_step: f.symptom.step, refused_task_id: f.taskId, reason: f.refused });
           continue;
         }
         mkdirSync(shardDir, { recursive: true });
