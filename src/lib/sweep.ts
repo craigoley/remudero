@@ -171,7 +171,8 @@ import {
 import {
   DEFAULT_RISK,
   RETIREMENT_REASONS,
-  loadPlan,
+  loadPlanReusingParses,
+  PlanBlobCache,
   transitiveDependents,
   unmetDependencies,
   type AcceptanceCriterion,
@@ -2680,6 +2681,9 @@ async function readArmVerdictHistory(stateDir: string): Promise<ArmVerdictHistor
 // W1-T12234: one commit store for each state directory, loaded once in a daemon lifetime.
 const fleetStateCommitStores = new Map<string, FleetStateCommitStore>();
 
+/** W1-T13669: the fix rung's plan re-read keeps its parses for the process; a changed file is parsed again. */
+export const FIX_PLAN_BLOB_CACHE = new PlanBlobCache();
+
 export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   SweepDeps,
   | "readerAgreement"
@@ -2909,7 +2913,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     reloadPlanForFixImpl ??
     (() => {
       try {
-        return loadPlan(join(repoDir, "plan", "tasks.yaml"));
+        return loadPlanReusingParses(join(repoDir, "plan", "tasks.yaml"), FIX_PLAN_BLOB_CACHE);
       } catch {
         // A torn read, a missing checkout or a duplicate-id refusal on this ONE opportunistic
         // re-read is never this dispatch's problem to raise — the caller degrades to its stale

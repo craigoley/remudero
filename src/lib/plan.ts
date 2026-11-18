@@ -899,6 +899,16 @@ export function loadPlan(
   return readMergedPlan(path, io, shardDir);
 }
 
+/** W1-T13669 — {@link loadPlan} that reuses `cache`'s parse of each file whose content is unchanged. */
+export function loadPlanReusingParses(path: string, cache: PlanBlobCache): Plan {
+  const next = new Map<string, CachedPlanBlob>();
+  const counts = { parsedBlobs: 0, reusedBlobs: 0 };
+  const plan = readMergedPlan(path, defaultIntegrityIO, join(dirname(path), "tasks.d"), undefined, undefined, cachedBlobParser(cache, next, counts));
+  cache.entries = next;
+  Object.assign(cache, counts);
+  return plan;
+}
+
 export interface QuarantinedTask {
   id: string;
   files: string[];
@@ -1053,6 +1063,7 @@ function readMergedPlan(
   shardDir: string,
   onDuplicate?: (id: string, earlierPath: string | undefined, laterPath: string) => void,
   onInvalidShard?: OnInvalidShard,
+  parse: typeof parseTasksFromYaml = parseTasksFromYaml,
 ): Plan {
   let text: string;
   try {
@@ -1060,7 +1071,7 @@ function readMergedPlan(
   } catch (err) {
     throw new PlanError(`cannot read plan file (${path}): ${String(err)}`);
   }
-  const tasks = parseTasksFromYaml(text, path, onDuplicate && ((id) => onDuplicate(id, path, path)));
+  const tasks = [...parse(text, path, onDuplicate && ((id) => onDuplicate(id, path, path)))];
   const byId = new Map(tasks.map((t) => [t.id, t]));
 
   for (const file of listShardFiles(shardDir)) {
@@ -1075,7 +1086,7 @@ function readMergedPlan(
       if ((err as NodeJS.ErrnoException)?.code === "ENOENT") continue;
       throw new PlanError(`cannot read plan shard (${shardPath}): ${String(err)}`);
     }
-    for (const t of parseShard(shardText, shardPath, onDuplicate && ((id) => onDuplicate(id, shardPath, shardPath)), onInvalidShard)) {
+    for (const t of parseShard(shardText, shardPath, onDuplicate && ((id) => onDuplicate(id, shardPath, shardPath)), onInvalidShard, parse)) {
       const earlier = byId.get(t.id);
       if (earlier) {
         if (!onDuplicate) {
