@@ -24,7 +24,7 @@ import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale } from "./fs-race-safe.js";
 import { readBoundedProcessCwdCensus } from "./process-cwd-census.js";
 import { HOST_GIT_CONFIG, hostWorktreeGit, hostWorktreeGitAsync, WorktreePointerRefusedError } from "./worktree-git.js";
-import { execFileLoopBounded } from "./loop-bounded-child.js";
+import { execFileRouted } from "./spawn-helper.js";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { runDeploymentBakeoff, type DeploymentBakeoffInput } from "./bakeoff-trigger.js";
 import { setTimeout as delay } from "node:timers/promises";
@@ -2171,7 +2171,7 @@ export async function regenerateConflictViaGit(
           if (status.mode !== "bwrap") throw new Error(`conflict generator sandbox unavailable: ${status.reason}`);
           const sandbox = proofSandboxArgv({ cwd: copy, home });
           for (const { action } of generated) {
-            await execFileLoopBounded(status.binary, [...sandbox, "npm", "run", "--silent", action], {
+            await execFileRouted(status.binary, [...sandbox, "npm", "run", "--silent", action], {
               cwd: copy, env: { ...proofChildEnv(home), TMPDIR: "/tmp" }, encoding: "utf8",
             });
           }

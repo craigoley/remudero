@@ -1,6 +1,6 @@
 import { writeAtomic, writeAtomicIoFrom } from "../fs-race-safe.js";
 import { ghExec } from "../github-transport.js";
-import { execFileLoopBounded } from "../loop-bounded-child.js";
+import { execFileRouted } from "../spawn-helper.js";
 // Imported as the module's DEFAULT export (a plain, mutable object), never as named
 // bindings (`import { existsSync } from "node:fs"`) — the same W1-T115 "assert via
 // injected fs" discipline src/lib/status.ts and src/lib/ledger.ts already follow (see
@@ -344,7 +344,7 @@ export interface GitRemoteDeps {
 
 export const realGitRemoteDeps: GitRemoteDeps = {
   getRemoteUrl: async (targetDir) =>
-    (await execFileLoopBounded("git", ["-C", targetDir, "config", "--get", "remote.origin.url"], { encoding: "utf8" })).stdout.trim(),
+    (await execFileRouted("git", ["-C", targetDir, "config", "--get", "remote.origin.url"], { encoding: "utf8" })).stdout.trim(),
 };
 
 /** Resolve owner/repo from the TARGET checkout's own `git remote.origin.url` —

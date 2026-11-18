@@ -1,5 +1,6 @@
 import { execFile, execFileSync, spawnSync } from "node:child_process";
-import { boundChildByLoopTime, execFileLoopBounded } from "./loop-bounded-child.js";
+import { boundChildByLoopTime } from "./loop-bounded-child.js";
+import { execFileRouted } from "./spawn-helper.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { classifyGhLimitFailure, defaultGhRetryAfterSeconds, ghExec, ghJson, ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import { refreshInstallationToken, type RefreshOptions } from "./github-app.js";
@@ -7518,7 +7519,7 @@ async function replayPublisher(
     const token = process.env[REVIEWER_TOKEN_ENV];
     const env = token ? { ...process.env, GH_TOKEN: token, GITHUB_TOKEN: token } : process.env;
     const user = await ghJsonAsync(["api", "user"], (file, args, options) =>
-      execFileLoopBounded(file, args, { ...options, env })) as { login?: string };
+      execFileRouted(file, args, { ...options, env })) as { login?: string };
     canPublish = resolveReviewProvenance({ state: "success", posterLogin: user.login }, trustedLogin) === "success";
   }
   return { trusted, canPublish, evidence };

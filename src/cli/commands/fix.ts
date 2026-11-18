@@ -7,7 +7,7 @@ import { conflictRoundProgressVerdict, judgeFixProgress, resolveFixProgress, typ
 import { openEscalationRelease, PARKED_PR_REMEDY_STEP } from "../../lib/parked-pr-remedy.js";
 import { buildFixProgressInputWithHostedProofs, conflictRoundHeldHead, readHostedFixProofResults, reservePlanRepairTaskId, type HostedFixProofReader } from "../../lib/sweep.js";
 import { parseWhitelistedProof, execWhitelistedProofAsync, proofChildCommand, buildProofEnv, type AsyncProofSpawner } from "../../lib/review.js";
-import { execFileLoopBounded } from "../../lib/loop-bounded-child.js";
+import { execFileRouted } from "../../lib/spawn-helper.js";
 import { BASE_REPRODUCTION_MAX_FILES, boundedBaseProbeReason, baseReproductionFiles, decideBaseReproduction, type BaseProbeResult } from "../../lib/base-reproduction.js";
 import { assessRefreshClearance, mainPathsReachingRed, REFRESH_CLEARANCE_STEP, refreshClearanceFields, refreshedOnSameRed, refreshRecordsFromLedger } from "../../lib/base-reproduction.js";
 import { anchoredFixOutcome, decideFixOutcomeAction, fixRoundFlakeRetryRows, readRedAttribution, scopeReroutedFields, type FixOutcome as TypedFixOutcome } from "../../lib/fix-outcome.js";
@@ -148,7 +148,7 @@ const ACCEPTANCE_AUTHOR_GATE_CHECK_NAME = "acceptance-author-gate";
 export const workerAcceptanceProofSpawner: AsyncProofSpawner = async (command, args, cwd, timeoutMs) => {
   const child = proofChildCommand(command, args);
   try {
-    const result = await execFileLoopBounded(child.file, child.args, { cwd, encoding: "utf8",
+    const result = await execFileRouted(child.file, child.args, { cwd, encoding: "utf8",
       env: { ...buildProofEnv(), NODE_V8_COVERAGE: undefined }, timeout: timeoutMs, killSignal: "SIGKILL" });
     return result.stdout;
   } catch (error) {
