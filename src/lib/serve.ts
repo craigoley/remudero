@@ -1599,6 +1599,10 @@ export interface StaleCodeExitDeps {
   drain?: () => Promise<void>;
   changedPathsSince?: ChangedPathsReader;
   reloadPlan?: (ref: string) => Promise<boolean>;
+  /** W1-T13615: a supervised generation's tree never moves (E43), so its threads follow a pin, not their files. Pin the
+   *  plan at {@link bootSha} at once: until main's next plan change, every thread with no pin re-stats each plan shard
+   *  on every pass (37 ms on the host, 2026-11-18). */
+  pinBootPlan?: boolean;
   requestHandoff?: (detail: Record<string, unknown>) => void;
   /** When this generation booted, the first anchor of {@link SERVE_HANDOFF_COALESCE_MS}; defaults to construction. */
   bootedAt?: number;
@@ -1769,7 +1773,7 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
   let advanceRefused: string | undefined;
   const readChangedPaths = deps.changedPathsSince ?? ((boot, target) => changedPathsSince(boot, target, serveRepoDir()));
   const relevance = new Map<string, boolean | "pending">();
-  let headPlanRef: string | undefined;
+  let headPlanRef: string | undefined = deps.pinBootPlan === true && deps.bootSha !== CONSOLE_SHA_UNKNOWN ? deps.bootSha : undefined;
   let originPlanRef: string | undefined;
   let planLoadedRef: string | undefined;
   let planReloading = false;
@@ -1928,6 +1932,7 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
   // re-check that is supposed to notice that would itself never be scheduled.
   let stopped = false;
   const stopTimer = scheduleRecheck(() => void recheck(), RECYCLE_RECHECK_MS);
+  syncPlan();
   const stopRecheck = (): void => {
     if (stopped) return;
     stopped = true;
@@ -3521,6 +3526,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     ...(keepWarm ? { github: { serve: keepWarm, ...walk } } : {}), ...deps.readModel, modelApprovalConfig }));
   const staleExit = gateStaleCodeExit({
     bootSha: consoleSha,
+    pinBootPlan: deps.generation !== undefined,
     // The caller's "current sha" is what the gate compares against; absent, the gate re-reads git.
     ...(deps.resolveCurrentSha ? { resolveCurrentSha: deps.resolveCurrentSha } : {}),
     log: deps.log,
