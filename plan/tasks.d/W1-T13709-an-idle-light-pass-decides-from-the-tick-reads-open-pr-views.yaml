@@ -1,0 +1,82 @@
+- id: W1-T13709
+  title: "A light pass of any scope decides from the open pull request views the tick read already published, when they are fresh, instead of reading them from GitHub a second time"
+  repo: remudero
+  priority: 1.2
+  depends_on: []
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the light pass reviews and merges from this list; an older list must keep the act-time head guards
+  origin: "operator-session#sweep-pass-speed-2026-11-18"
+  plan_refs:
+    - W1-T12236
+    - W1-T12755
+    - W1-T12530
+  files:
+    - src/cli/commands/daemon.ts
+    - src/cli/commands/sweep.ts
+    - src/lib/light-pass-open-pr-list.ts
+    - test/sweep/an-idle-light-pass-decides-from-the-tick-reads-open-pr-views.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A light pass with the scope idle, given a tick-read generation that freshReadGeneration serves, that holds no openPrError, and whose read started after the read of the last good list, decides from those views: the hook makes no GitHub read for its open pull request list, writes views_source tick_read, and writes views_age_ms (the age of the list) on sweep_light.pre_review_timing"
+      proof: "grep: W1-T13709 criterion 1 in test/sweep/an-idle-light-pass-decides-from-the-tick-reads-open-pr-views.test.ts"
+    - claim: "invariant:own-read-without-a-fresh-tick-read — with no generation, a generation older than TICK_READ_MAX_AGE_MS, a generation holding openPrError, or a generation whose read started before the read of the last good list, the pass reads its own views exactly as origin/main does, with the same deadline and last good list"
+      kind: guard
+      proof: "grep: W1-T13709 criterion 2 in test/sweep/an-idle-light-pass-decides-from-the-tick-reads-open-pr-views.test.ts"
+    - claim: "invariant:a-served-list-is-guarded-at-act — a pass with any scope but boot that decides from a served list acts as a pass on the last good list does: each acting head is read at act time, a head that moved stands down as sweep.head_moved, and a direct merge names the list's head"
+      kind: guard
+      proof: "grep: W1-T13709 criterion 3 in test/sweep/an-idle-light-pass-decides-from-the-tick-reads-open-pr-views.test.ts"
+    - claim: "invariant:boot-unchanged — the boot light pass is served the tick read on exactly the W1-T12236 rule (published after the current tick started), and a refill read, which passes no scope, still reads its own views"
+      kind: guard
+      proof: "grep: W1-T13709 criterion 4 in test/sweep/an-idle-light-pass-decides-from-the-tick-reads-open-pr-views.test.ts"
+    - claim: "Through the servedOpenPrViews function that daemonCommand passes to buildSweepLightHook, with the real createLightPassOpenPrList and a gh shim (test/helpers/gh-shim.ts) that counts calls, an idle pass after a fresh published generation sends no pulls list, check-runs or status read, and an idle pass with no fresh generation sends them as today"
+      proof: "grep: W1-T13709 criterion 5 in test/sweep/an-idle-light-pass-decides-from-the-tick-reads-open-pr-views.test.ts"
+    - claim: "createLightPassOpenPrList compares the served generation's read start with the read start of its last good list"
+      proof: "grep: servedReadStartedAtMs in src/lib/light-pass-open-pr-list.ts"
+  rationale: |
+    WHY: in 351 of 676 light passes (2026-11-16 17:30Z to 2026-11-18 16:23Z) the open pull request read missed its
+    60 s deadline or failed, and the pass decided from its last good list (age p50 237 s, p90 627 s). The
+    open_pr_views step took p50 47 s, p90 65 s; after the 16:23Z deploy, p50 62 s, p90 112 s (15 passes).
+    WHY THE READ IS SLOW: every read of the views goes through one pacer with a 1.5 s gap
+    (DEFAULT_GH_PACE_MIN_GAP_MS, src/lib/github-transport.ts:628). waitAsync claims each slot in turn, so reads a
+    stage starts together still go one every 1.5 s. The list costs 1 + 2N reads (the list, then check runs and
+    status for each head; src/lib/tick-read-worker.ts rollupPrefetchRead), then merge states, workflow runs and CI
+    failures follow. MEASURED: the open_pr_list stage took 1.75 s per read at the median (p25 1.44 s, p90 2.98 s;
+    325 passes, with the open pull request count from the same run's views_fallback row, p50 10, p90 17). A direct
+    `gh api` read of the same list took 0.54 s on the host. So at 16 open pull requests the list alone is about 50 s,
+    and the whole read cannot meet 60 s. Pagination and GraphQL are not the cause (the read is REST, one page).
+    THE SAME READ RUNS TWICE: the read-plane worker builds the same views with the same buildOpenPrViewsAsync on
+    every tick (src/lib/tick-read-worker.ts, createTickReadProducer), with its own pacer. servedOpenPrViews
+    (src/cli/commands/daemon.ts:882) gives them only to the boot pass; W1-T12236 left the other scopes out of scope.
+    Idle passes (1,156 of 1,262 light passes) read their own. views_source was tick_read in 17 passes only.
+    EXPECTED SAVING: most of the open_pr_views step (p50 47 s) of an idle pass when a fresh generation exists, and
+    about 3N GitHub reads a pass (about 50 at 16 open pull requests; 4 to 12 passes an hour). The list a pass decides
+    from is at most TICK_READ_MAX_AGE_MS (5 min) old, not older than the last good list it uses today (up to 15 min).
+  design: |
+    INVARIANT own-read-without-a-fresh-tick-read: a pass reads its own views as today unless a fresh, error-free
+    generation newer than its last good list exists.
+    INVARIANT a-served-list-is-guarded-at-act: a served list is older than the pass, so a pass of any scope but boot
+    on it uses the act-time guards of the last good list (mergeAtListHead, headReadOrStandDown, guardEveryHeadAtAct).
+    INVARIANT boot-unchanged: the boot pass keeps the W1-T12236 rule, and a refill read (no scope) reads its own views.
+    1. servedOpenPrViews (src/cli/commands/daemon.ts:882): keep the boot rule. For any other scope, serve the
+       generation that freshReadGeneration returns when it holds no openPrError, with its publishedAtMs (the start of
+       its read). A call with no scope (the refill read) serves nothing, as today.
+    2. createLightPassOpenPrList (src/lib/light-pass-open-pr-list.ts): keep the start time of the read behind the last
+       good list. read() takes the served generation's read start (servedReadStartedAtMs) and uses the served list
+       only when it is later; otherwise it runs the own read as today. A used served list becomes the last good list.
+    3. buildSweepLightHook (src/cli/commands/sweep.ts:1329): treat a served list in a pass whose scope is not boot as
+       onLastGoodList is treated for the act-time guards. Write views_age_ms on sweep_light.pre_review_timing.
+    4. Add no counter, bound or config key; TICK_READ_MAX_AGE_MS and LIGHT_PASS_VIEWS_FALLBACK_MAX_AGE_MS are not
+       changed. Grep test/ for tests that assert servedOpenPrViews serves nothing for idle, or the whole
+       pre_review_timing row; one outside `files` needs an amendment. W1-T12888 and W1-T13237 (queued) also change
+       the last good list path; rebase on whichever merges first.
+    NOT IN SCOPE: the pacer gap, the budget, the tick read itself, and the deadline value.
+  falsifier: |
+    Serve an idle pass a generation older than its last good list: criterion 2 must fail. Drop the act-time guards for
+    a served list: criterion 3 must fail. Serve the refill read: criterion 4 must fail. Restore and require all to pass.
+  note: |
+    Id reserved for run-unfiled-1795023528000 with ~/rmd-work/bin/reserve-id.sh.
+    A test must build its gh answers with test/helpers/gh-shim.ts and load test/setup/tmp-hygiene.ts.

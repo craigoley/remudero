@@ -1,0 +1,76 @@
+- id: W1-T13711
+  title: "A detached-work kind the last drain placed in a run child stays in a run child when its drain-wait evidence leaves the live ledger"
+  repo: remudero
+  depends_on: []
+  priority: 0.9
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # where fix rounds run (run child or daemon process); a wrong placement blocks the daemon loop or moves work the mode has not cleared
+  band_meaning: span
+  origin: "operator-session#fleet-fix-effects-2026-11-18"
+  plan_refs:
+    - W1-T9114
+    - W1-T9087
+    - W1-T13440
+  files:
+    - src/lib/run-child.ts
+    - src/lib/daemon.ts
+    - test/reviews-and-detached-actions-run-as-run-children.test.ts
+    - test/a-kind-the-last-drain-placed-in-a-run-child-stays-there.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Replaying the 2026-11-18 16:20Z live ledger shape (mode on; the newest drain row's detached_work_placement names fix-dispatch as child; no drain row waited on a fix-dispatch), the work host's spawnFix starts a run child, and the placement reason says the kind ran as a run child at the last drain"
+      proof: "grep: W1-T13711 criterion 1 in test/a-kind-the-last-drain-placed-in-a-run-child-stays-there.test.ts"
+    - claim: "The drain's own placement reads the same prior placement: a drain row written after a drain row that placed fix-dispatch in a child also places it in a child (the 16:20:56Z and 16:20:57Z pair placed it child, then process)"
+      proof: "grep: W1-T13711 criterion 2 in test/a-kind-the-last-drain-placed-in-a-run-child-stays-there.test.ts"
+    - claim: "invariant:moves-only-on-evidence — a kind that no drain waited on and that no drain row placed in a child stays in process, as W1-T9114 decides today"
+      kind: guard
+      proof: "grep: W1-T13711 criterion 3 in test/a-kind-the-last-drain-placed-in-a-run-child-stays-there.test.ts"
+    - claim: "invariant:mode-still-gates — with the mode off or shadow, or for a kind no run-child entry hosts, the kind stays in process even when the newest drain row placed it in a child"
+      kind: guard
+      proof: "grep: W1-T13711 criterion 4 in test/a-kind-the-last-drain-placed-in-a-run-child-stays-there.test.ts"
+    - claim: "The work host's spawn decisions and the daemon's drain read the prior placement through one function"
+      proof: "grep: priorChildPlacements( in src/lib/daemon.ts"
+  rationale: |
+    WHY: OBSERVED in the core ledger (~/rmd-state2/state) on 2026-11-18. After the daemon boot at 16:23:26Z
+    (c072d307bb, run DAEMON-1795018965355-8), every fix round ran inside the daemon process. Between the
+    14:43Z boot and 16:20Z, all 7 fix.dispatch rows came from sweep-fix run children (12 sweep.fix.child rows).
+    From 16:23Z to 17:38Z, 4 of 4 new fix.dispatch rows have lane daemon and the daemon's pid (#19439, #19362,
+    #19427, #19450), with no sweep.fix.child row and no sweep-fix run_child.spawned row.
+    CAUSE (from the code and the rows): createDetachedWorkHost's spawnFix (src/lib/run-child.ts) asks
+    detachedWorkPlacement, which moves a kind only when measureDrainCosts finds a non-zero drain wait for it in
+    the live ledger. A fix that runs as a run child never makes a drain wait, so it never renews that evidence.
+    The last drain that waited on an in-process fix was 2026-11-16T05:33Z. The drain at 16:20:56.221Z still
+    placed fix-dispatch in a child; the drain one second later (16:20:57.510Z) placed it in process. The live
+    ledger now gives review 279,727 ms, light-pass-action 400,565 ms and fix-dispatch 0. So the placement
+    decays back to process whenever the old wait row leaves the live ledger, and returns only after in-process
+    fixes have held a drain again.
+    COST: since the boot, 16 daemon.loop_stall_profile rows name runFixRung in top_inclusive, with 786 s of
+    loop lag: 34% of all daemon loop lag in that window. Single stalls were 89 s to 212 s (W1-T13712 has the
+    read inside them). Daemon loop lag was 52.2% of wall time after the boot (2,334 s of 4,474 s), against
+    24.3% from 09Z to 14Z.
+  design: |
+    INVARIANT moves-only-on-evidence: a kind moves to a run child only when the mode is on, a run-child entry
+    hosts it, and the ledger shows evidence: a measured drain wait for it, or the newest drain row placed it in
+    a run child.
+    INVARIANT mode-still-gates: mode off or shadow, and a kind no entry hosts, stay in process as today. The
+    run-child mode tracker (W1-T9087) still demotes the mode on a lost or misidentified child.
+    1. In src/lib/run-child.ts add priorChildPlacements(rows): the kinds that the newest
+       daemon.freshness_drain.completed or daemon.memory_drain.completed row's detached_work_placement names as
+       "child". An unparseable row or a row without that field gives no kinds.
+    2. Add an optional priorChild set to DetachedWorkEvidence. In detachedWorkPlacement, when the measured wait
+       is zero and the kind is in priorChild (and the mode and hosted checks pass), place it in a child with the
+       reason "it ran as a run child at the last drain".
+    3. createDetachedWorkHost's spawnReview, spawnFix and spawnRetro read input.readLedger() once per decision
+       and pass both measureDrainCosts and priorChildPlacements of those rows. detachedWorkPlacements in
+       src/lib/daemon.ts does the same with deps.readLedgerLines, so the drain row and the spawn agree.
+    src/lib/daemon.ts is at its comment cap: add no comment lines there.
+  falsifier: |
+    Ignore the prior placement: criterion 1 and 2 fail. Treat any drain row as evidence for every kind:
+    criterion 3 fails. Skip the mode or hosted check for a prior placement: criterion 4 fails.
+  note: |
+    Id reserved for run-unfiled-1795024278000 with ~/rmd-work/bin/reserve-id.sh. Filed from an operator analysis
+    session. W1-T13712 removes the synchronous read that made the in-process fix rounds stall the loop.

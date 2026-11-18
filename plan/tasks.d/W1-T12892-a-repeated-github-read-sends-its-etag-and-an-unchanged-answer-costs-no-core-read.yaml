@@ -22,6 +22,8 @@
     - src/lib/github-http-read.ts
     - src/lib/github-transport.ts
     - test/github/a-repeated-github-read-sends-its-etag.test.ts
+    - test/github/an-unchanged-github-read-costs-none-of-the-rate-limit.test.ts
+    - test/github/daemon-github-reads-share-one-in-process-client.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -103,6 +105,10 @@
     4. Run test/github/compress-src-lib-github-transport-ts.test.ts and the W1-T12839 test file
        (test/github/an-unchanged-github-read-costs-none-of-the-rate-limit.test.ts); grep test/ for tests that
        expect a --paginate read to spawn gh or that assert the whole takeGhReadCadenceTally object.
+       Two do: W1-T12531 criterion 5 (test/github/daemon-github-reads-share-one-in-process-client.test.ts)
+       and W1-T12839 criterion 5 (test/github/an-unchanged-github-read-costs-none-of-the-rate-limit.test.ts)
+       list a bare `--paginate` read among the forms that still spawn gh. In both lists, the paged form
+       becomes `api --paginate --slurp <path>`, which this task leaves to gh.
     NOT IN SCOPE: --jq and --slurp forms, synchronous ghJson and ghExec callers, writes, GraphQL, the read
     broker, the ops catalog reader, and the share split.
   falsifier: |
