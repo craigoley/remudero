@@ -47,15 +47,37 @@ export { fetchOriginRetryingRefLock, type GitRunner } from "./git-fetch-retry.js
 import { boundGitCall, fetchOriginRetryingRefLock, fetchOriginRetryingRefLockAsync, GATEWAY_FETCH_TIMEOUT_MS, killAfterGrace, type AsyncGitRunner, type GitRunner } from "./git-fetch-retry.js";
 import { systemClock, type Clock } from "./clock.js";
 import { isTestRunner } from "./live-write-guard.js";
+import { execFileRouted, spawnRoute } from "./spawn-helper.js";
+
+/** W1-T13664: the error a direct `execFile` rejects with when its signal aborts, for a routed call that settles at it. */
+function abortError(signal: AbortSignal): Error {
+  return Object.assign(new Error("The operation was aborted"), { name: "AbortError", code: "ABORT_ERR", cause: signal.reason });
+}
 
 /** The real {@link AsyncGitRunner}: `git -C <repoDir>` off the loop, killed (SIGTERM, then SIGKILL
- *  after grace) when its bound aborts. Exported for the retro trigger merged-commits read. */
+ *  after grace) when its bound aborts. Exported for the retro trigger merged-commits read.
+ *  W1-T13664: with a spawn helper installed, a call with no signal, or one that names its `boundMs`, forks through it
+ *  (the helper stops the child at the bound, and the call settles at its abort as a direct one does). A signalled call
+ *  with no bound keeps its direct child, which only its signal can stop. */
 export function asyncGit(repoDir: string, options: { maxBuffer?: number } = {}): AsyncGitRunner {
-  return (args, signal, env) =>
-    new Promise((resolve, reject) => {
-      const child = execFile("git", ["-C", repoDir, ...args], { encoding: "utf8", ...options, signal, env }, (err, stdout) => (err ? reject(err) : resolve(stdout)));
+  return (args, signal, env, boundMs) => {
+    const argv = ["-C", repoDir, ...args];
+    const routed = { encoding: "utf8" as const, ...options, env, ...(boundMs === undefined ? {} : { timeout: boundMs }) };
+    if ((signal === undefined || boundMs !== undefined) && spawnRoute(routed).why === undefined) {
+      if (signal?.aborted) return Promise.reject(abortError(signal));
+      const run = execFileRouted("git", argv, routed).then(({ stdout }) => stdout);
+      if (signal === undefined) return run;
+      return new Promise((resolve, reject) => {
+        const onAbort = (): void => reject(abortError(signal));
+        signal.addEventListener("abort", onAbort, { once: true });
+        run.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+      });
+    }
+    return new Promise((resolve, reject) => {
+      const child = execFile("git", argv, { encoding: "utf8", ...options, signal, env }, (err, stdout) => (err ? reject(err) : resolve(stdout)));
       signal?.addEventListener("abort", () => killAfterGrace(child), { once: true });
     });
+  };
 }
 
 const inFlightFreshnessFetches = new Map<string, Promise<void>>();

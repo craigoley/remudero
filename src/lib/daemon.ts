@@ -23,7 +23,7 @@ import { startGarden, type GardenerDeps, type PrState } from "./gardener.js";
 import { knowledgeGardenSpec, type GardenWorkspace } from "./knowledge-gardener.js";
 import { startInboxResponder, type InboxResponderDeps } from "./inbox-responder.js";
 import { startLivenessPulse } from "./liveness-pulse.js";
-import { installedSpawnHelper, installSpawnHelper, startSpawnHelper } from "./spawn-helper.js";
+import { bootSpawnHelper, SPAWN_HELPER_SWITCH } from "./spawn-helper.js";
 
 
 import type {
@@ -3989,8 +3989,8 @@ export interface LearnedCrashLoopSummary {
   incident: "none" | "opened" | "updated" | "cleared" | "open";
 }
 
-/** W1-T9754: the environment switch for the spawn helper. W1-T13437: on unless set to exactly "off" (operator ruling). */
-export const SPAWN_HELPER_SWITCH = "RMD_SPAWN_HELPER";
+/** W1-T9754: the spawn helper's environment switch, now defined beside the boot routine it gates (W1-T13664). */
+export { SPAWN_HELPER_SWITCH };
 
 /** The daemon's startup routine (W1-T12b): the clean-env boot assertion, run once before the scheduler loop starts.
  * Takes the log sink and the env as injectable inputs, so it is provable in-process with a fake env and no real
@@ -4059,23 +4059,7 @@ export async function daemonBoot(
     ...(checkoutDepth ? { checkout_shallow: checkoutDepth.shallow, checkout_commit_count: checkoutDepth.commitCount } : {}),
   });
   // W1-T9754/W1-T13437: the helper starts while this process is small, unless the switch is "off"; one row either way.
-  const switchValue = env[SPAWN_HELPER_SWITCH] ?? "unset";
-  const helperRow = { switch: SPAWN_HELPER_SWITCH, value: switchValue };
-  if (switchValue === "off") {
-    log("daemon.spawn_helper", { started: false, reason: "switch_off", ...helperRow });
-  } else {
-    try {
-      installedSpawnHelper()?.stop();
-      const helper = startSpawnHelper({ log });
-      installSpawnHelper(helper);
-      log("daemon.spawn_helper", { started: true, pid: helper.pid, ...helperRow });
-    } catch (error) {
-      // Reason: a helper that cannot start costs no spawn; the boot continues on the direct path, named here.
-      installSpawnHelper(undefined);
-      log("daemon.spawn_helper", { started: false,
-        reason: `start_failed: ${String((error as Error)?.message ?? error).slice(0, 120)}`, ...helperRow });
-    }
-  }
+  bootSpawnHelper(log, env, "daemon.spawn_helper");
   // The boot-rate invariant: the shape-not-cause check. Logged either way, so the invariant's own
   // pass or fail is part of the boot record, not only its breaches (W1-T215).
   if (crashLoopCheck) {
