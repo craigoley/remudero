@@ -265,6 +265,8 @@ export interface ReadModelViewRoutesOptions {
   servedByDefault?: readonly string[];
   /** Told of each view response answered with a body (200 or 304), so stale answers are counted by source. */
   onServed?: (view: string, body: ViewBody) => void;
+  /** W1-T13602: told of every view read's final answer (GET or one batch entry): status, error code (`ok` below 400) and judged staleness. */
+  onAnswer?: (view: string, status: number, code: string, stale: boolean) => void;
 }
 
 /**
@@ -303,8 +305,21 @@ export function buildReadModelViewRoutes(opts: ReadModelViewRoutesOptions): Rout
   };
   const json = (status: number, body: unknown, extra: Record<string, string> = {}): ViewReadAnswer =>
     ({ status, headers: { "content-type": "application/json; charset=utf-8", ...extra }, json: body });
+  /** W1-T13602: the judged staleness of each 200/304 answer, read back when the answer is reported. */
+  const staleOf = new WeakMap<ViewReadAnswer, boolean>();
+  const report = (name: string, read: ViewReadAnswer): ViewReadAnswer => {
+    const code = read.status < 400 ? "ok" : String((read.json as { error?: unknown } | undefined)?.error ?? "error");
+    opts.onAnswer?.(name, read.status, code, staleOf.get(read) ?? false);
+    return read;
+  };
   /** W1-T13294: one view read, answered exactly as GET /v1/views/<name> answers it; the GET and the batch both call it. */
   const answerRead = (name: string, params: URLSearchParams, ifNoneMatch: string | string[] | undefined): { shadowSampled: boolean; answer: ViewReadAnswer | Promise<ViewReadAnswer> } => {
+    const read = unreportedRead(name, params, ifNoneMatch);
+    if (!opts.onAnswer) return read;
+    const { answer } = read;
+    return { shadowSampled: read.shadowSampled, answer: answer instanceof Promise ? answer.then((got) => report(name, got)) : report(name, answer) };
+  };
+  const unreportedRead = (name: string, params: URLSearchParams, ifNoneMatch: string | string[] | undefined): { shadowSampled: boolean; answer: ViewReadAnswer | Promise<ViewReadAnswer> } => {
     const missing = (requiredParams[name] ?? []).find((param) => !params.get(param));
     if (missing !== undefined) return { shadowSampled: false, answer: json(400, { error: "invalid_request", detail: `the ${name} view needs ?${missing}=` }) };
     let mode = viewMode(opts.readModel, name) ?? (opts.servedByDefault?.includes(name) ? "serve" : "off");
@@ -330,8 +345,10 @@ export function buildReadModelViewRoutes(opts: ReadModelViewRoutesOptions): Rout
       }
       const { body, etag } = rendered;
       opts.onServed?.(name, body);
-      if (ifNoneMatchHits(ifNoneMatch, etag)) return { status: 304, headers: { etag, "cache-control": "no-cache" } };
-      return { status: 200, headers: { "content-type": "application/json; charset=utf-8", etag, "cache-control": "no-cache" }, json: body };
+      const read: ViewReadAnswer = ifNoneMatchHits(ifNoneMatch, etag) ? { status: 304, headers: { etag, "cache-control": "no-cache" } }
+        : { status: 200, headers: { "content-type": "application/json; charset=utf-8", etag, "cache-control": "no-cache" }, json: body };
+      staleOf.set(read, body.stale === true);
+      return read;
     };
     if (mode !== "serve" || !opts.readModel || !demandViews.has(name)) return { shadowSampled: sampled, answer: answer(entry) };
     // An on-demand view: a key it holds is re-wanted now and then so it stays; a key it lacks is asked for and awaited, off the loop.

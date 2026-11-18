@@ -8,6 +8,7 @@ export const SERVE_DEMAND_FAMILY_CAP = 40;
 // Percentiles report bucket upper bounds, capped at the observed maximum.
 const LATENCY_BOUNDS_MS = [1, 5, 10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000, 30_000, 60_000, Infinity];
 type Statuses = Record<"1xx" | "2xx" | "3xx" | "4xx" | "5xx", number>;
+interface ViewTally { n: number; stale: number; codes: Record<string, number> }
 interface Tally {
   n: number; ok: number; error: number; aborted: number; statuses: Statuses;
   histogram: number[]; max: number;
@@ -46,6 +47,8 @@ export function createServeDemand(options: ServeDemandOptions) {
   let windowStart = now();
   let families = new Map<string, Tally>();
   let namedFamilies = 0;
+  /** W1-T13602: each view's answers this window, by `<status> <code>`, and how many were stale; capped like families. */
+  let views = new Map<string, ViewTally>();
   let stopTimer: (() => void) | undefined;
 
   function record(family: string, status: number, elapsed: number, aborted: boolean, at = now()): void {
@@ -72,16 +75,29 @@ export function createServeDemand(options: ServeDemandOptions) {
     tally.max = Math.max(tally.max, ms);
   }
 
+  /** W1-T13602: one view read's final answer (a GET or one batch entry), counted under the same window as {@link record}. */
+  function recordView(view: string, status: number, code: string, stale: boolean, at = now()): void {
+    flush(at);
+    if (view !== "other" && !views.has(view) && [...views.keys()].filter(name => name !== "other").length >= SERVE_DEMAND_FAMILY_CAP) view = "other";
+    let tally = views.get(view);
+    if (!tally) { tally = { n: 0, stale: 0, codes: {} }; views.set(view, tally); }
+    tally.n++;
+    if (stale) tally.stale++;
+    const answer = `${status} ${code}`;
+    tally.codes[answer] = (tally.codes[answer] ?? 0) + 1;
+  }
+
   function flush(at = now()): void {
     if (at < windowStart + SERVE_DEMAND_WINDOW_MS) return;
     const windowEnd = windowStart + SERVE_DEMAND_WINDOW_MS;
-    if (families.size > 0) {
+    if (families.size > 0 || views.size > 0) {
       const row = {
         run_id: "serve", task_id: "", step: "serve.demand", windowStart, windowEnd,
         families: Object.fromEntries([...families].map(([family, tally]) => {
           const { histogram: _histogram, ...counts } = tally;
           return [family, { ...counts, p50: percentile(tally, 0.5), p95: percentile(tally, 0.95) }];
         })),
+        ...(views.size > 0 ? { views: Object.fromEntries(views) } : {}),
       };
       try {
         appendLedger(options.ledgerPath, row);
@@ -96,7 +112,7 @@ export function createServeDemand(options: ServeDemandOptions) {
         }
       }
     }
-    families = new Map(); namedFamilies = 0;
+    families = new Map(); namedFamilies = 0; views = new Map();
     windowStart += Math.floor((at - windowStart) / SERVE_DEMAND_WINDOW_MS) * SERVE_DEMAND_WINDOW_MS;
   }
 
@@ -123,7 +139,7 @@ export function createServeDemand(options: ServeDemandOptions) {
     if (path !== "/v1" && !path.startsWith("/v1/")) return undefined;
     return routeFamilies.get(`${(req.method ?? "GET").toUpperCase()} ${path}`) ?? "other";
   }
-  return { now, record, flush, start, familyFor };
+  return { now, record, recordView, flush, start, familyFor };
 }
 
 export type ServeDemand = ReturnType<typeof createServeDemand>;
