@@ -77,6 +77,48 @@ const HANDOFF_CLOSED_STEPS = [
   "serve.supervisor_ready",
 ];
 
+/**
+ * W1-T13623: the shortest gap between a serve restart and an automatic replace for image drift ALONE: the supervisor's
+ * own handoff spacing base (serve-supervisor.ts SERVE_HANDOFF_SPACING_BASE_MS, pinned equal by test). OBSERVED
+ * 2026-11-18: with every new image swapping serve, serve restarted at 06:00:41Z, 06:06:29Z and 06:22:02Z, each a cold
+ * fold of the ledger (1.02 cores for serve), while the in-process handoff spacing held self-syncs to about 09:14Z. A held
+ * replace takes the newest image when it runs, so every image built meanwhile rides one restart.
+ */
+export const SERVE_IMAGE_REPLACE_SPACING_MS = 2 * 60 * 60_000;
+/** W1-T13623: the rows a serve restart writes: a cold or blue-green boot, a generation handoff, a container swap. */
+export const SERVE_RESTART_STEPS = ["serve.supervisor_ready", "serve.cold_start_ready", "serve.handoff_done", "serve.recycle_swapped"];
+
+/** The newest restart row's time in `lines`, or null when none carries a readable ts. */
+export function newestServeRestartMs(lines: readonly string[]): number | null {
+  let newest: number | null = null;
+  for (const line of lines) {
+    const step = /"step":"(serve\.[a-z_]+)"/.exec(line)?.[1];
+    if (step === undefined || !SERVE_RESTART_STEPS.includes(step)) continue;
+    const at = Date.parse(String((JSON.parse(line) as { ts?: unknown }).ts));
+    if (!Number.isNaN(at) && (newest === null || at > newest)) newest = at;
+  }
+  return newest;
+}
+
+/**
+ * W1-T13623: when serve last restarted, from the restart rows of the live ledger and the rotations cut within the spacing
+ * of the newest. Null is a complete read with no restart in it; undefined (an unread source or a read that throws) is
+ * unknown, which holds an image-only replace as an unknown handoff does.
+ */
+export function serveLastRestartMsFromLedger(stateDir: string, fsDeps: LedgerGrepFsDeps = realLedgerFs): number | null | undefined {
+  try {
+    const union = readLedgerUnionRawLinesSync(stateDir, {
+      step: SERVE_RESTART_STEPS,
+      rotationWindowMs: SERVE_IMAGE_REPLACE_SPACING_MS,
+      minRotations: 1,
+      refuseIncomplete: true,
+    }, fsDeps);
+    return union.ok ? newestServeRestartMs(union.rawLines) : undefined;
+  } catch {
+    return undefined; // an unreadable ledger leaves the last restart unknown, which holds an image-only replace
+  }
+}
+
 /** deploy/serve-container.sh's exit when fresh host pressure refuses the replace; nothing was changed. */
 export const SERVE_REPLACE_HELD_EXIT = 75;
 
@@ -112,6 +154,8 @@ export interface ServePolicyInputs {
   handoffInProgress: boolean | undefined;
   healthy: boolean | undefined;
   lastFailedAtMs: number | undefined;
+  /** W1-T13623: when serve last restarted; null when the ledger holds none, undefined when unknown. Absent, never read. */
+  lastRestartAtMs?: number | null | undefined;
   nowMs: number;
   dryRun?: boolean;
 }
@@ -211,6 +255,14 @@ export function decideServePolicyConvergence(i: ServePolicyInputs): { replace: b
   if (i.lastFailedAtMs !== undefined && i.nowMs - i.lastFailedAtMs < IMAGE_RECYCLE_FAILURE_BACKOFF_MS) {
     return { replace: false, reason: `${details}; a serve replace failed under an hour ago — backing off` };
   }
+  // W1-T13623: an image is the one drift a later image also fixes, so image drift ALONE waits out the restart spacing.
+  if ("lastRestartAtMs" in i && known.length === 1 && i.imageDrift && "expected" in i.imageDrift) {
+    if (i.lastRestartAtMs === undefined) return { replace: false, reason: `${details}, but serve's last restart is unreadable — an image-only replace waits for it` };
+    const waitMs = i.lastRestartAtMs === null ? 0 : i.lastRestartAtMs + SERVE_IMAGE_REPLACE_SPACING_MS - i.nowMs;
+    if (waitMs > 0) {
+      return { replace: false, reason: `${details}, but serve restarted ${Math.round((i.nowMs - i.lastRestartAtMs!) / 60_000)} min ago — an image-only replace waits out the ${SERVE_IMAGE_REPLACE_SPACING_MS / 60_000} min restart spacing (${Math.ceil(waitMs / 60_000)} min left) and then takes the newest image` };
+    }
+  }
   if (i.handoffInProgress !== false) {
     return { replace: false, reason: `${details}, but a serve handoff is in progress or unreadable — waiting for it to finish` };
   }
@@ -270,6 +322,8 @@ export function runServePolicyCycle(
     serveMountPlanDrift?: () => MountPlanDrift[] | undefined;
     serveImageDrift?: () => ServeImageDrift | undefined;
     serveImageInputs?: () => ServeImageInputs | undefined;
+    /** W1-T13623: when serve last restarted ({@link serveLastRestartMsFromLedger}); absent, image drift is never spaced. */
+    serveLastRestartAtMs?: () => number | null | undefined;
   },
   opts: { dryRun?: boolean; imageDriftOnly?: boolean } = {}): ServePolicyOutcome {
   if (opts.imageDriftOnly !== true || !deps.servePolicyDrift || !deps.replaceServe) {
@@ -288,6 +342,7 @@ export function runServePolicyCycle(
     handoffInProgress: deps.serveHandoffInProgress?.(),
     healthy: deps.serveHealthy?.(),
     lastFailedAtMs: deps.servePolicyLastFailedAtMs?.(),
+    ...(deps.serveLastRestartAtMs ? { lastRestartAtMs: deps.serveLastRestartAtMs() } : {}),
     nowMs,
     dryRun: opts.dryRun,
   });
@@ -401,6 +456,7 @@ export function realServePolicyDeps(
     },
     pausePresent: () => isPaused(o.stateRoot),
     serveHandoffInProgress: () => serveHandoffInProgressFromLedger(dirname(ledgerPath)),
+    serveLastRestartAtMs: () => serveLastRestartMsFromLedger(dirname(ledgerPath)),
     serveHealthy: () => {
       try {
         return exec("docker", ["inspect", SERVE_POLICY_CONTAINER, "--format", "{{.State.Running}} {{.State.Restarting}}"]).trim() === "true false";
