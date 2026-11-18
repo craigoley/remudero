@@ -877,18 +877,18 @@ export async function daemonSreLaneEnabled(
   return sreLaneEnabled(sreLane);
 }
 
-/** W1-T12236: the boot light sweep takes the open pull request views of a tick read that started in this tick.
- * Any other scope, no tick read, an older one, or one whose open list failed gives undefined: the hook reads its own. */
+/** W1-T12236 / W1-T13709: boot keeps its tick rule; scoped passes may use a fresh, clean tick read.
+ * A no-scope refill, no tick read, an older one, or one whose open list failed reads its own views. */
 export function servedOpenPrViews(
   published: () => ReadGeneration<TickReadFacts> | undefined,
   tickStartedAtMs: () => number | undefined,
-): (scope?: LightPassScope) => Promise<OpenPrView[]> | undefined {
+): (scope?: LightPassScope) => (Promise<OpenPrView[]> & { servedReadStartedAtMs?: number }) | undefined {
   return (scope) => {
     const generation = published();
     const startedAtMs = tickStartedAtMs();
-    if (scope?.scope !== "boot" || !generation || startedAtMs === undefined) return undefined;
+    if (scope === undefined || !generation || startedAtMs === undefined) return undefined;
     if (generation.publishedAtMs < startedAtMs || generation.facts.openPrError !== undefined) return undefined;
-    return Promise.resolve(structuredClone(generation.facts.openPrViews));
+    return Object.assign(Promise.resolve(structuredClone(generation.facts.openPrViews)), { servedReadStartedAtMs: generation.publishedAtMs });
   };
 }
 
