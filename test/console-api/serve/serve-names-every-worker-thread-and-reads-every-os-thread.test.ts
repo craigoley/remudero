@@ -12,6 +12,7 @@ import { OS_THREAD_NAME_MAX, THREAD_NAMES } from "#src/lib/thread-names.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 type Row = { step: string } & Record<string, unknown>;
+const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 10));
 /** A sampler whose OS-thread reads come from `reads` in order; a function entry throws. */
 function osSampler(reads: Array<ReadonlyMap<string, OsThreadCpu> | (() => never)>) {
   let now = 0, at = 0, run: () => void = () => {};
