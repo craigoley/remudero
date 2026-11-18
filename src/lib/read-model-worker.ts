@@ -3330,10 +3330,10 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
         // W1-T13205: no shared memory with a child, so its receipt is a file, polled for up to the stop wait.
         running.postMessage({ type: "stop" });
         const receipt = stopReceipt;
-        const deadline = Date.now() + (opts.stopWaitMs ?? READ_MODEL_PROCESS_STOP_WAIT_MS);
+        const deadline = systemClock.now() + (opts.stopWaitMs ?? READ_MODEL_PROCESS_STOP_WAIT_MS);
         const nap = new Int32Array(new SharedArrayBuffer(4));
         let confirmed = existsSync(receipt);
-        while (!confirmed && Date.now() < deadline) {
+        while (!confirmed && systemClock.now() < deadline) {
           Atomics.wait(nap, 0, 0, 20);
           confirmed = existsSync(receipt);
         }
