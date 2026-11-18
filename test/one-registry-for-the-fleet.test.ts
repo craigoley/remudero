@@ -286,7 +286,17 @@ test("the committed registry parses and puts core, site and console in the remud
       ["core", "remudero", "craigoley/remudero", true],
       ["site", "remudero", "craigoley/remudero-site", true],
       ["console", "remudero", "craigoley/remudero-console", true],
+      ["ops", "remudero", "craigoley/remudero-ops", true],
     ],
+  );
+});
+
+test("W1-T13498: the committed registry onboards remudero-ops in shadow, and every other row stays live", () => {
+  const text = readFileSync(join(REPO_ROOT, ".remudero", "daemon-instances.yaml"), "utf8");
+  const parsed = parseInstanceRegistry(text);
+  assert.deepEqual(
+    parsed.instances.map((i) => [i.name, i.mode ?? "live"]),
+    [["core", "live"], ["site", "live"], ["console", "live"], ["ops", "shadow"]],
   );
 });
 
