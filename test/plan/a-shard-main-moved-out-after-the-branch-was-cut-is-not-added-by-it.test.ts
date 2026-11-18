@@ -66,3 +66,12 @@ test("W1-T13739 criterion 3: an unreadable merge base leaves every shard main la
   const occurrences = new Map([["W1-T1", [{ file: "plan/tasks.d/W1-T1.yaml" }]]]);
   assert.deepEqual(gate.addedIdsAtHead(occurrences, gate.resolveBaseDeclaredIds("main", root), new Set(), changed).ids, ["W1-T1"]);
 });
+
+test("a shard the working tree adds before any commit still counts as added", (t) => {
+  const root = movedAfterCut(t);
+  writeFileSync(join(root, "plan", "tasks.d", "W1-T4.yaml"), "- id: W1-T4\n  title: uncommitted\n");
+  const occurrences = new Map([["W1-T4", [{ file: "plan/tasks.d/W1-T4.yaml" }]]]);
+  const changed = gate.resolveBranchChangedPlanFiles("main", root);
+  assert.equal(changed.readable, true);
+  assert.deepEqual(gate.addedIdsAtHead(occurrences, gate.resolveBaseDeclaredIds("main", root), new Set(), changed).ids, ["W1-T4"]);
+});

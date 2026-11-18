@@ -550,9 +550,13 @@ export function resolveDeletedPlanFiles(baseRef, cwd) {
 export function resolveBranchChangedPlanFiles(baseRef, cwd) {
   const mergeBase = git(["merge-base", baseRef, "HEAD"], { cwd });
   if (mergeBase.error || mergeBase.status !== 0 || !mergeBase.stdout.trim()) return { readable: false, files: new Set() };
-  const result = git(["diff", "--no-renames", "--name-only", mergeBase.stdout.trim(), "HEAD", "--", "plan/tasks.yaml", "plan/tasks.d/"], { cwd });
-  if (result.error || result.status !== 0) return { readable: false, files: new Set() };
-  return { readable: true, files: new Set(result.stdout.split("\n").filter(Boolean)) };
+  // The gate scans the working tree, so the branch's changes are the merge base against the working
+  // tree (no HEAD), plus untracked shards, which no diff lists.
+  const paths = ["--", "plan/tasks.yaml", "plan/tasks.d/"];
+  const changed = git(["diff", "--no-renames", "--name-only", mergeBase.stdout.trim(), ...paths], { cwd });
+  const untracked = git(["ls-files", "--others", "--exclude-standard", ...paths], { cwd });
+  if (changed.error || changed.status !== 0 || untracked.error || untracked.status !== 0) return { readable: false, files: new Set() };
+  return { readable: true, files: new Set(`${changed.stdout}\n${untracked.stdout}`.split("\n").filter(Boolean)) };
 }
 
 /** owner/repo, parsed from `remote`'s url at `cwd`, mirroring src/lib/repo-location.ts. Duplicated,
