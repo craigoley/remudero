@@ -4077,6 +4077,14 @@ export function buildCommitTrailerIndex(opts: {
   };
 }
 
+/** W1-T13662: {@link projectPlan} over a plan of the one named task, with the same deps; an id not in the plan
+ *  gives an empty map. Task-less escalations are skipped: in a one-task plan every other task would count as one. */
+export function projectTask(plan: Plan, taskId: string, deps: DeriveDeps): Map<string, StatusProjection> {
+  const task = plan.byId.get(taskId);
+  if (task === undefined) return new Map();
+  return projectPlan({ tasks: [task], byId: new Map([[taskId, task]]) }, { ...deps, skipTasklessEscalations: true });
+}
+
 /** Derive every task in a plan and cache the projection to `cachePath` (state/status.json). Returns a taskId ->
  *  projection map. Writes ONLY the cache. */
 export function projectPlan(
