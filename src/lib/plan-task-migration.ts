@@ -226,6 +226,10 @@ export async function previewPlanTaskMigration(args: readonly string[]): Promise
       const reason = knownMerged.has(task.id) ? "merged" : task.repo !== o.publicRepo.split("/")[1] ? "target_not_bound" : taskOwned(task.id, [...(task.files ?? []), original.path], publicRefs, initial.open) ? "owned" :
         publicPrerequisites.has(task.id) ? "public_dependants" : !original.single || !original.shard ? "not_single_shard" : alreadyMoved(original) ? "already_moved" : undefined;
       if (reason) { refused.push({ id: task.id, reason }); continue; }
+      if (task.retirement !== undefined) {
+        refused.push({ id: task.id, reason: "retired" });
+        continue;
+      }
       if (!control) return unknown("merge_credit_control_unreadable");
       if (++lookups > MAX_CANDIDATE_LOOKUPS) return unknown("merge_credit_budget_exhausted");
       const checked = await readState(o, publicRefs, opsRefs, task.id, control); stable(initial, checked);
