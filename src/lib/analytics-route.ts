@@ -2766,10 +2766,19 @@ export function createAnalyticsSnapshotCache(deps: AnalyticsSnapshotCacheDeps): 
         const next = "snapshot" in result ? result.snapshot : result;
         if ("snapshot" in result) {
           const sourceReadable = next.benchmarkEvidence?.reason !== "ledger-source-unreadable";
-          if (sourceReadable) checkpoint = result.checkpoint;
+          // W1-T13667: a fold whose live file rotated while it read cannot anchor its live position. Adopting that
+          // checkpoint made the next refresh refuse it (live-position-unanchored) and rescan every rotation from
+          // scratch: on 2026-11-18 a 19 s core refresh at 11:28Z led to nine 65 s legs over 241 rotations, 76 s of
+          // serve main-thread stall. The previous anchored checkpoint still resumes exactly, so it is kept; the new
+          // snapshot is served either way.
+          const unanchored = result.checkpoint.source.live !== null && result.checkpoint.source.live !== undefined
+            && result.checkpoint.source.liveAnchor === undefined;
+          const keepAnchored = unanchored && checkpoint?.source.liveAnchor !== undefined;
+          if (keepAnchored) log("serve.analytics_refresh.anchor_kept", { kept_as_of: checkpoint!.snapshot?.asOf ?? null, reason: "live-unanchored" });
+          if (sourceReadable && !keepAnchored) checkpoint = result.checkpoint;
           const hasRetainedEvidence = result.checkpoint.source.archives.length > 0 ||
             (result.checkpoint.source.live?.size ?? 0) > 0;
-          if (hasRetainedEvidence && sourceReadable) persistCheckpoint(result.checkpoint, false);
+          if (hasRetainedEvidence && sourceReadable && !keepAnchored) persistCheckpoint(result.checkpoint, false);
           if (progress !== undefined) clearAnalyticsProgress(deps.stateDir);
           progress = undefined;
           unwrittenProgress = undefined;
