@@ -11,7 +11,9 @@
 // Real shapes: PR numbers, head prefixes, check ids, sibling ids and the 364-character summary are GitHub's (read
 // 2026-11-18). #15133 c5580fc2 and #17217 ffcf9ce1 are wholly real: full head, the check's completed_at, and the
 // codeql.yml run that produced the warning, created before the check and UPDATED AFTER it (the run finishes after
-// uploading the analysis), so a later updated_at is no new judgement. Modeled, for the other two heads: the head's
+// uploading the analysis), so a later updated_at alone is no new judgement; a run counts as after the check only when
+// its attempt BEGAN after it (created_at, or a re-run's restarted run_started_at, modeled equal to created_at for a first
+// attempt). Modeled, for the other two heads: the head's
 // 32-hex tail, the clock time, and that run (created a minute before the check, updated five minutes after). The shared
 // check suite id is modeled everywhere.
 import assert from "node:assert/strict";
@@ -78,7 +80,8 @@ const input = (h: Head, checks: Check[]) => ({ prNumber: h.pr, headSha: h.sha, o
 const classify = (x: unknown) => policy.classifyCodeScanningMergePolicy(x) as { state: string; mergeAllowed: boolean; reason: string };
 /** A CodeQL workflow run at the head; by default the completed one that produced the warning. */
 const run = (h: Head, over: Record<string, unknown> = {}) => ({ id: h.producer.id, run_attempt: 1, head_sha: h.sha, event: "pull_request",
-  status: "completed", conclusion: "success", created_at: h.producer.created, updated_at: h.producer.updated, ...over });
+  status: "completed", conclusion: "success", created_at: h.producer.created, run_started_at: h.producer.created,
+  updated_at: h.producer.updated, ...over });
 const listing = (...runs: unknown[]) => ({ total_count: runs.length, workflow_runs: runs });
 
 const ROOT = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t13663-`));
@@ -225,6 +228,11 @@ test("W1-T13663 criterion 2: no escalation on the capturing pass, under a pendin
     ["a run queued with an earlier stamp",
       listing(run(h, { status: "queued", conclusion: null, created_at: shift(h.at, -900), updated_at: shift(h.at, -600) }))],
     ["a new run created after the standing check", listing(run(h), run(h, { id: 2, created_at: shift(h.at, 1), updated_at: shift(h.at, 400) }))],
+    // A re-run keeps its created_at (before the check) but restarts run_started_at; its finished attempt may not have
+    // produced a visible check yet, so it is not "never re-judged".
+    ["a finished re-run begun after the standing check (created_at kept, run_started_at new)",
+      listing(run(h, { run_attempt: 2, run_started_at: shift(h.at, 60), updated_at: shift(h.at, 400) }))],
+    ["a re-run with an unreadable start time", listing(run(h, { run_started_at: "soon" }))],
     ["a run with an unreadable creation time", listing(run(h, { created_at: "soon" }))],
     ["a run with no creation time", listing({ ...run(h), created_at: undefined })],
     ["a truncated listing", { total_count: 101, workflow_runs: [run(h)] }],

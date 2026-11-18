@@ -17496,16 +17496,22 @@ function codeqlRunCompletedAgain(body: unknown, headSha: string, since: number, 
     Date.parse(run.updated_at) > since && Date.parse(run.updated_at) <= standing);
 }
 
-/** W1-T13663 — this head's CodeQL runs read whole, none open now and none CREATED after GitHub's standing check:
- *  nothing at this head will re-judge it. The run that produced the warning finishes after uploading it, so its later
- *  updated_at is no new judgement (#15133, #17217). An unread or truncated listing, or an unparseable time, never matches. */
+/** W1-T13663 — this head's CodeQL runs read whole, none open now and none whose attempt BEGAN (created_at, or a re-run's
+ *  run_started_at) after GitHub's standing check: nothing at this head will re-judge it, and no finished re-run is
+ *  waiting on a check not yet visible. The run that produced the warning began before it and finishes after uploading
+ *  it, so its later updated_at alone is no new judgement (#15133, #17217). An unread or truncated listing, or an
+ *  unparseable time, never matches. */
 function codeqlNeverRejudged(body: unknown, headSha: string, standing: number): number | undefined {
   const listing = body as { total_count?: unknown; workflow_runs?: unknown } | null;
   const runs = listing?.workflow_runs;
   if (!Array.isArray(runs) || !Number.isFinite(standing)) return undefined;
   if (typeof listing?.total_count === "number" && listing.total_count > runs.length) return undefined;
   const atHead = runs.filter((run) => run?.head_sha === headSha);
-  return atHead.some((run) => run.status !== "completed" || !(Date.parse(run.created_at) <= standing)) ? undefined : atHead.length;
+  // A re-run keeps its created_at but restarts run_started_at, so the later of the two is when this attempt began.
+  const began = (run: { created_at?: unknown; run_started_at?: unknown }) =>
+    Math.max(Date.parse(String(run.created_at)), run.run_started_at === undefined || run.run_started_at === null ? -Infinity
+      : Date.parse(String(run.run_started_at)));
+  return atHead.some((run) => run.status !== "completed" || !(began(run) <= standing)) ? undefined : atHead.length;
 }
 
 /** W1-T13470 — one full pass over a configuration-not-found wait; returns the wait's reason with what this pass did. */
@@ -17581,12 +17587,12 @@ export async function observeCodeqlConfigurationWarning(deps: SweepDeps, lines: 
       ], `CodeQL run ${run.id} completed again with the warning standing`);
     } else if (quietRuns !== undefined) {
       // W1-T13663 — GitHub does not re-judge an unchanged head on its own (all 4 real heads read 2026-11-18), so a warning
-      // captured on an earlier pass with no CodeQL run here open or created after it waits on nothing. The remedy is the
+      // captured on an earlier pass with no CodeQL run here open or begun (created or re-run) after it waits on nothing. The remedy is the
       // owner's: the sweep pushes nothing, re-runs nothing and writes no status.
       const reason = `CodeQL configuration-not-found stands at head ${pr.headSha.slice(0, 7)} of #${pr.prNumber}: GitHub's trusted ` +
         `CodeQL check ${warning.checkId} completed at ${warning.completedAt} still reads "${warning.title}", first captured on an ` +
         `earlier pass from check ${String(first.check_id)}, and GitHub has not re-judged it at this head: of ${quietRuns} CodeQL ` +
-        "workflow run(s) listed at this head, none is open or was created after it. Nothing at an unchanged head " +
+        "workflow run(s) listed at this head, none is open or began after it. Nothing at an unchanged head " +
         "re-judges it; push a new commit or re-run CodeQL at this head. security-merge-policy stays unknown and no fix round " +
         `was spent. Receipt: ${JSON.stringify(warning)}`;
       await escalateOnce(reason, { first_check_id: first.check_id, workflow_run_id: null, workflow_runs_at_head: quietRuns,
