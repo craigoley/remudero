@@ -1,0 +1,83 @@
+- id: W1-T13669
+  title: "The sweep's plan re-read for a task that is not in the tick's plan parses only the plan shards whose content changed, through a PlanBlobCache kept for the process, so it no longer parses all of tasks.d on the daemon loop on each sweep"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the fix rung and the escalation contract line read tasks through this re-read; the tasks it returns, their order and sourcePath, and the errors it throws must stay the same; it spans plan.ts and sweep.ts
+  origin: "operator-session#loop-lag-2026-11-18b"
+  plan_refs:
+    - W1-T4460
+    - W1-T6262
+    - W1-T13609
+    - W1-T13610
+  files:
+    - src/lib/plan.ts
+    - src/lib/sweep.ts
+    - test/sweep/the-sweep-plan-re-read-parses-only-the-shards-that-changed.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "invariant:parse-only-changed-shards — two calls of the new plan.ts loader with one shared PlanBlobCache, over a temp plan of a monolith and 200 shards where one shard changes between the calls, parse every file on the first call and only the changed shard on the second (the cache's parsedBlobs is 1 after the second call)"
+      proof: "grep: W1-T13669 criterion 1 in test/sweep/the-sweep-plan-re-read-parses-only-the-shards-that-changed.test.ts"
+    - claim: "invariant:same-plan — for the same files the new loader returns the same Plan as loadPlan (same tasks, order and sourcePath), also on a reused parse; a duplicate id across two shards and a shard that is not valid YAML still throw the same PlanError, also when the shard text was seen before; a shard removed between calls is gone from the result, and a torn read is still refused"
+      proof: "grep: W1-T13669 criterion 2 in test/sweep/the-sweep-plan-re-read-parses-only-the-shards-that-changed.test.ts"
+    - claim: "invariant:sweep-uses-the-cache — buildSweepEffects with no reloadPlanForFixImpl, over a temp checkout, asked twice (two sweeps, two effects objects) for the contract revision of a task that is not in the tick's plan, parses the plan's shards on the first ask and none on the second when the files did not change; with a shard of that task added between the asks, the second ask finds the task"
+      proof: "grep: W1-T13669 criterion 3 in test/sweep/the-sweep-plan-re-read-parses-only-the-shards-that-changed.test.ts"
+  rationale: |
+    WHY: each sweep reads the whole plan again from disk, on the daemon loop, when an open pull request's
+    task is not in the plan the tick handed it. readContractTask (src/lib/sweep.ts:3239-3246) then calls
+    reloadPlanForFix (:2908-2919), whose default is loadPlan(join(repoDir, "plan", "tasks.yaml")). loadPlan
+    (src/lib/plan.ts:894) goes to readMergedPlan (:1050), which reads the monolith and all 5,707 shards
+    (37 MB) with readWholeFile (:873, a stat, a read and a stat each) and parses each one as YAML with no
+    cache. Such tasks are always present: filing pull requests (W1-T13656, W1-T13662 on 2026-11-18) and
+    tasks from another catalog (W1-T13446, pull request 19362) are not in the main plan. The re-read is kept
+    once per sweep (reloadedForContract), but buildSweepEffects runs again on each sweep, so the parse runs
+    again on each sweep. The fix rung's two other re-reads (:5483, :5513) go through the same reader.
+    MEASURED on the Azure host, 2026-11-18, one nice'd pass over the daemon.loop_stall_profile rows since the
+    09:23:58Z boot (d225eda7e0) to 11:35:45Z, in ~/rmd-state2/state/ledger.ndjson and the
+    ledger.2026-11-18T*.ndjson.gz archives (sort -u): 291 rows, 1,153.5 s of loop lag in 132 minutes.
+    - readContractTask (bundle :124088) over loadPlan is in the top inclusive frames of 44 rows: 92.3 s of
+      sampled time (about 42 s an hour; 15.8 s, 25.7 s and 50.9 s in the 09Z, 10Z and 11Z parts), median
+      2.0 s and max 3.9 s each (11:20:17Z, a stall of 8.9 s). The 44 stalls hold 256.1 s of lag in all.
+      loadPlan is in 53 rows in all (110.2 s); the other 9 are the inbox draft (draftProposalBatch).
+    - The leaf: the self frames in the loadPlan rows are garbage collection (41.3 s), the yaml parser (`next`
+      under `parse` 18.0 s, parseDocument 2.8 s), detachStrings in parseTasksFromYaml (8.9 s); the file
+      stats are under 1 s.
+    - PlanBlobCache (plan.ts:937, cachedBlobParser :943) already reuses a parse when a path's sha256 content
+      is unchanged, and W1-T13609 and W1-T13610 (merged 2026-11-18, both in the running build) gave the
+      merge-safety read and the snapshot check a cache. This re-read does not pass one.
+    NOT COVERED: swept origin/main plan/tasks.d for reloadPlanForFix, readContractTask, PlanBlobCache and
+    loadPlan(: W1-T4460 (merged) added the re-read; W1-T6262, W1-T13609 and W1-T13610 (merged) cache other
+    readers; W1-T11966 (queued) is a doctor command. No queued task changes this reader.
+  design: |
+    INVARIANT parse-only-changed-shards: the sweep's plan re-read parses only files whose path or content changed since the last re-read in this process.
+    INVARIANT same-plan: the re-read returns the same tasks, order, sourcePath and errors as loadPlan for the same files.
+    INVARIANT sweep-uses-the-cache: the default reloadPlanForFix in buildSweepEffects uses the cached loader, so the fix rung and the contract line see a fresh plan at a lower cost.
+    1. In src/lib/plan.ts, add one exported loader, loadPlanReusingParses(path, cache), that reads the same
+       files as loadPlan (the same listShardFiles and readWholeFile, the same ENOENT skip) and parses each
+       file through cachedBlobParser with the given PlanBlobCache. It keeps loadPlan's strict rules: a
+       duplicate id throws and validatedPlan runs on every call. Route it through readMergedPlan with an
+       optional parse argument if that is the smallest change; parseShard already takes one.
+    2. In src/lib/sweep.ts, keep one module-level PlanBlobCache for this re-read and make the default
+       reloadPlanForFix call loadPlanReusingParses(join(repoDir, "plan", "tasks.yaml"), <that cache>). The
+       reloadPlanForFixImpl seam, the catch that returns undefined, and readContractTask stay as they are.
+    3. No env var, config key, time bound or new cache class. Do not change the tick's plan reader.
+    4. src/lib/sweep.ts and src/lib/plan.ts have comment cap tests (test/sweep/compress-src-lib-sweep-ts.test.ts,
+       test/plan/compress-src-lib-plan-ts.test.ts): add as few comment lines as possible and run both.
+    5. Tests build the temp plan with test/helpers/ and isolate HOME with test/setup/tmp-hygiene.ts; no network.
+       Read the parse counts from the cache's parsedBlobs and reusedBlobs.
+  falsifier: |
+    Leave the cache out of the sweep's default reader: criterion 3 parses every shard on the second ask. Key
+    the cache on the path only, not the content: criterion 2 returns the old task after a shard changes.
+    Skip the duplicate check for reused shards: criterion 2 does not throw.
+  note: |
+    Id reserved for run-unfiled-1795002083000 with ~/rmd-work/bin/reserve-id.sh.
+    The re-read still reads and hashes the 37 MB of plan files on the loop; the measured cost is the parse
+    and the garbage it makes. If the reads still show in daemon.loop_stall_profile after this ships, a
+    follow-up can skip the re-read while the plan files are unchanged. Proof that counts on the host: after
+    the daemon converges, no daemon.loop_stall_profile row shows readContractTask over loadPlan above yaml
+    parser frames.
