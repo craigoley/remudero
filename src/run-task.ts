@@ -1938,6 +1938,9 @@ export type FreshTreeReviewSeams = {
     store?: { storeRoot?: string }, onExit?: (exit: FreshTreeExit) => void) => Promise<number>;
   /** Tests may replace ownership; production holds the general reaper's real run-lock token. */
   withWorktreeLease?: <T>(worktree: string, action: () => Promise<T>) => Promise<T>;
+  /** Remove a tree this process cut for one attempt (`git worktree remove --force` through the
+   *  hardened leaf by default). Only ever handed a path whose `addWorktree` this process saw succeed. */
+  removeWorktree?: (repoDir: string, worktreePath: string) => void;
   /**
    * Classify the stable reviewer path before an add. `unsafe` deliberately combines a registered
    * path with a wrong ref, a branch checkout, dirt, a missing checkout, or an unreadable registry:
@@ -2089,18 +2092,58 @@ function freshTreeInspector(deps: FreshTreeTools): NonNullable<FreshTreeTools["i
   return deps.inspectExistingWorktree ?? ((dir, path, revision) => inspectFreshReviewerWorktree(dir, path, revision, deps.git));
 }
 
-/** `<worktreeRoot>/<prefix>-<sha12>`: cut, or proven an exact clean detached checkout of `sha`, then made runnable. */
+/** Does anything at all sit at `path`? `lstat`, so a dangling symlink still counts as occupied. */
+function pathOccupied(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error; // an unreadable parent is not proof of absence; the caller's named refusal carries it
+  }
+}
+
+/** A sibling name no other attempt, process or container can derive: `<prefix>-<sha12>-<pid>-<random>`. */
+function perAttemptTreePath(deps: FreshTreeTools, prefix: string, sha: string): string {
+  return `${deps.worktreeRoot}/${prefix}-${sha.slice(0, 12)}-${process.pid}-${randomUUID().slice(0, 8)}`;
+}
+
+function makeTreeRunnable(repoDir: string, deps: FreshTreeTools, prefix: string, worktree: string): void {
+  if (!(deps.prepareWorktree ?? prepareWorktreeToolchain)(repoDir, worktree)) {
+    throw new Error(`${prefix} worktree at ${worktree} has no runnable canonical node_modules link`);
+  }
+}
+
+/** `<worktreeRoot>/<prefix>-<sha12>`: cut, or proven an exact clean detached checkout of `sha`, then made runnable.
+ *  A directory at that path which THIS repository does not register (another clone's tree over a shared mount, or
+ *  debris a reaper has not reached) is never touched and never re-added over: the tree is cut at a per-attempt
+ *  sibling instead, so a leftover cannot block every cut until main moves (the 2026-11-18 W1-T12032 approve). */
 function prepareFreshOriginMainTree(repoDir: string, deps: FreshTreeTools, prefix: string, sha: string): string {
   const worktree = `${deps.worktreeRoot}/${prefix}-${sha.slice(0, 12)}`;
   const existing = freshTreeInspector(deps)(repoDir, worktree, sha);
   if (existing === "unsafe") {
     throw new Error(`${prefix} worktree at ${worktree} is not an exact clean detached checkout of ${sha}`);
   }
-  if (existing === "absent") deps.addWorktree(repoDir, worktree, sha);
-  if (!(deps.prepareWorktree ?? prepareWorktreeToolchain)(repoDir, worktree)) {
-    throw new Error(`${prefix} worktree at ${worktree} has no runnable canonical node_modules link`);
+  if (existing === "absent" && pathOccupied(worktree)) {
+    const sibling = perAttemptTreePath(deps, prefix, sha);
+    process.stderr.write(`prepareFreshOriginMainTree: ${worktree} is occupied by a directory this repository does not register; cutting ${sibling}\n`);
+    deps.addWorktree(repoDir, sibling, sha);
+    makeTreeRunnable(repoDir, deps, prefix, sibling);
+    return sibling;
   }
+  if (existing === "absent") deps.addWorktree(repoDir, worktree, sha);
+  makeTreeRunnable(repoDir, deps, prefix, worktree);
   return worktree;
+}
+
+/** Remove a per-attempt tree once its attempt settles. A failed removal never replaces the attempt's own outcome:
+ *  the tree is registered and detached, so the general worktree reaper collects it on a later pass. */
+function removePerAttemptTree(repoDir: string, deps: FreshTreeTools, worktree: string): void {
+  try {
+    (deps.removeWorktree ?? worktreeRemove)(repoDir, worktree);
+  } catch (error) {
+    process.stderr.write(`freshOriginMainTreeRunner: left ${worktree} for the worktree reaper: ${scrubGitCredentialText(String(error))}\n`);
+  }
 }
 
 /**
@@ -2109,15 +2152,25 @@ function prepareFreshOriginMainTree(repoDir: string, deps: FreshTreeTools, prefi
  * approve before the verb ran, and setting the guard there would classify against a stale plan. Here
  * the child's repoRoot IS origin/main, so its plan, policy and grep reads are fresh by construction.
  * The tree is leased until `action` settles; every failure is rethrown with credentials scrubbed.
+ *
+ * ONE TREE PER ATTEMPT, REMOVED WHEN IT SETTLES. A path keyed on the sha alone is shared by every
+ * approve and reframe at that sha, in the daemon AND in serve, which share the worktree root: a
+ * refused approve left `approve-<sha12>` behind and the next approve at that sha died on `git worktree
+ * add … already exists` (2026-11-18, W1-T12032). A per-attempt name cannot collide with a leftover,
+ * a concurrent attempt or another process's tree, and the attempt's own removal stops the leak.
  */
 export function freshOriginMainTreeRunner(
   repoDir: string,
   deps: FreshTreeTools & { mainTip?: (repoDir: string) => Promise<string> },
 ): RatifyCliTree["freshTree"] {
   return async (action) => {
+    let cut: string | undefined;
     try {
       const sha = await (deps.mainTip ?? mainTipViaGit)(repoDir);
-      const path = prepareFreshOriginMainTree(repoDir, deps, "approve", sha);
+      const path = perAttemptTreePath(deps, "approve", sha);
+      deps.addWorktree(repoDir, path, sha);
+      cut = path; // only a path whose add succeeded is ever removed: this attempt made it
+      makeTreeRunnable(repoDir, deps, "approve", path);
       return await (deps.withWorktreeLease ?? withReviewerWorktreeLease)(path, async () => {
         if (freshTreeInspector(deps)(repoDir, path, sha) !== "reusable") {
           throw new Error(`approve worktree at ${path} is no longer an exact clean detached checkout of ${sha}`);
@@ -2126,6 +2179,8 @@ export function freshOriginMainTreeRunner(
       });
     } catch (err) {
       throw new Error(freshTreeFailureText(String((err as Error)?.message ?? err)));
+    } finally {
+      if (cut !== undefined) removePerAttemptTree(repoDir, deps, cut);
     }
   };
 }
