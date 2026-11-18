@@ -13,7 +13,7 @@
 # `assertPinnedNodeVersion` (scripts/coverage-merge-ratchet.mjs) throws on any string mismatch, so
 # a moved floating tag reddened six merge-lcov tests with no change in this repo (W1-T2770).
 # test/merge-lcov-node-drift-cluster-and-image-pin.test.ts reads this line against `.nvmrc`.
-FROM node:24.22.2-bookworm-slim@sha256:01d566e8d94d8c619591d78652babfccd3c6992a3dffa9ed5ab39e11cf6c70e9
+FROM node:24.22.3-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54
 
 # ── REQ 1: an init that reaps ────────────────────────────────────────────────────────────────
 # tini must be PID 1. `spawnDetachedGroup` (src/lib/worker-containment.ts) spawns detached, so each
