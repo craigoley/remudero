@@ -4357,10 +4357,16 @@ export type LanePoolOutcome<T, R> = {
   externalFault?: { phase: string; reason: unknown };
 };
 
-export type LanePoolControl<R = unknown> = {
+export type LanePoolControl<R = unknown, T = unknown> = {
   close?: (reason: unknown, phase?: string) => void;
   occupied?: ReadonlyMap<string | object, Promise<R>>;
   detach?: (isChild: (id: string) => boolean) => void;
+  /** W1-T13695: set by the pool. The lanes from the first wave's length up to `laneCount` it never started and is not
+   *  deciding; none once it settled, closed, detached or faulted. */
+  unstarted?: (laneCount: number) => number[];
+  /** W1-T13695: set by the pool. Offers one of those lanes a promised task, counted as a refill while `decide` resolves;
+   *  the task starts through `admit` as a refill does. False, and `decide` is never called, for any other lane. */
+  offer?: (lane: number, decide: () => Promise<T | undefined>, after?: (started: boolean) => void) => boolean;
 };
 
 export function runLanePool<T extends { id: string }, R>(
@@ -4393,7 +4399,7 @@ export function runLanePool<T extends { id: string }, R>(
   lanes: { inFlight: number } | undefined,
   admit: ((task: T, lane: number, isRefill: boolean) => boolean) | undefined,
   onStarted: ((task: T, lane: number, isRefill: boolean) => void) | undefined,
-  control: LanePoolControl<R>,
+  control: LanePoolControl<R, T>,
 ): Promise<LanePoolOutcome<T, R>>;
 export function runLanePool<T extends { id: string }, R>(
   tasks: T[],
@@ -4406,7 +4412,7 @@ export function runLanePool<T extends { id: string }, R>(
   // Synchronous, but only AFTER the pool owns the worker promise and its settlement handlers.
   onStarted?: (task: T, lane: number, isRefill: boolean) => void,
   // Installed synchronously, before the first wave. Closes starts, never cancels real workers.
-  control?: LanePoolControl<R>,
+  control?: LanePoolControl<R, T>,
 ): Promise<PromiseSettledResult<R>[] | LanePoolOutcome<T, R>> {
   if (admit || onStarted || control) {
     const initial = tasks.splice(0);
@@ -4417,10 +4423,15 @@ export function runLanePool<T extends { id: string }, R>(
     const owned = new Map<number, string>();
     let detaching = false;
     let detachable: ((id: string) => boolean) | undefined;
+    // W1-T13695: lanes past the first wave that an offer is deciding or started; `done` once the pool resolved.
+    const grown = new Set<number>();
+    let done = false;
     return new Promise<LanePoolOutcome<T, R>>((resolve) => {
       const finishIfIdle = (): void => {
-        if (!initializing && active === 0 && refilling === 0) resolve({ settled,
-          ...(fault ? { fault } : {}), ...(externalFault ? { externalFault } : {}) });
+        if (!initializing && active === 0 && refilling === 0) {
+          done = true;
+          resolve({ settled, ...(fault ? { fault } : {}), ...(externalFault ? { externalFault } : {}) });
+        }
       };
       const fail = (task: T, lane: number, phase: NonNullable<typeof fault>["phase"], reason: unknown): void => {
         // Presence, never truthiness of reason: undefined/null/false are still genuine thrown values.
@@ -4489,6 +4500,31 @@ export function runLanePool<T extends { id: string }, R>(
         );
         try { onStarted?.(task, lane, isRefill); }
         catch (reason) { /* Retain telemetry failure after owning the actual worker. */ fail(task, lane, "onStarted", reason); }
+      };
+      if (control) control.unstarted = (laneCount) => {
+        const free: number[] = [];
+        if (done || initializing || detaching || fault || externalFault) return free;
+        for (let lane = initial.length; lane < laneCount; lane++) if (!grown.has(lane)) free.push(lane);
+        return free;
+      };
+      if (control) control.offer = (lane, decide, after) => {
+        if (!control.unstarted!(lane + 1).includes(lane)) return false;
+        grown.add(lane);
+        refilling++;
+        void decide().then(
+          (value): PromiseSettledResult<T | undefined> => ({ status: "fulfilled", value }),
+          (reason: unknown): PromiseSettledResult<T | undefined> => ({ status: "rejected", reason }),
+        ).then((proposal) => {
+          if (detaching || fault || externalFault) return; // as a promised refill: no late start once starts closed
+          refilling--;
+          const before = active;
+          if (proposal.status === "rejected") control.close!(proposal.reason, "lane-grow");
+          else take(lane, proposal.value, true);
+          const started = active > before;
+          if (!started) grown.delete(lane);
+          after?.(started);
+        });
+        return true;
       };
       for (let lane = 0; lane < initial.length && !fault && !externalFault; lane++) take(lane, initial[lane], false);
       initializing = false;
@@ -8892,9 +8928,11 @@ export async function runDaemon(
     const passIds = new Set<string>();
     const phaseStarts: MachineShareStart[] = [];
     const inFlightTasks = new Set<Task>();
+    // W1-T13695: a grow is a never-started lane's proposal: no finished task, and the reading that admitted it.
+    type LaneGrow = { target: number; inFlight: number };
     const refillAdmissions = new WeakMap<Task, {
-      snapshot: { plan: Plan; isMerged: MergedSet }; finishedTaskId: string;
-      eligible: Task[]; context: DispatchValueContext | undefined;
+      snapshot: { plan: Plan; isMerged: MergedSet }; finishedTaskId: string | null;
+      eligible: Task[]; context: DispatchValueContext | undefined; grow?: LaneGrow;
     }>();
     // A promised handoff owns only its proposal, never an attempt or active-worker slot.
     // Other freed lanes must not choose its ID/scope before the pool accepts it.
@@ -8998,16 +9036,25 @@ export async function runDaemon(
       wakeParkedLanes();
       return decision;
     };
-    const decideRefill = (lane: number, finished: Task): Task | undefined | Promise<Task | undefined> => {
+    // W1-T13695: a grow is never parked. Its hold is the refill path's own row, once per lane and reason; the next
+    // in-flight tick decides the lane again.
+    const growHeldFor = new Map<number, string>();
+    const holdGrow = (lane: number, reason: string, extra: Record<string, unknown> = {}): undefined => {
+      if (growHeldFor.get(lane) !== reason) log("dispatch.lane_refill_held", { lane, finished_task: null, reason, ...extra, grow: true });
+      growHeldFor.set(lane, reason);
+      return undefined;
+    };
+    const decideRefill = (lane: number, finished: Task | undefined, grow?: LaneGrow): Task | undefined | Promise<Task | undefined> => {
       const phaseAgeMs = daemonClock.now() - dispatchPhaseStartedAtMs;
       const phaseBound = !refillClosed && phaseBoundHolds() ? "phase bound" : undefined;
       // With no history no sibling can ever read slow, so parking could only end as a hold: hold now (W1-T5761).
       if (phaseBound && measuredRefillBound && inFlightTasks.size > 0) {
-        log("dispatch.lane_parked", { lane, finished_task: finished.id, reason: phaseBound, phase_age_ms: phaseAgeMs,
+        if (grow) return holdGrow(lane, phaseBound, { phase_age_ms: phaseAgeMs, refill_bound_ms: refillBoundMs });
+        log("dispatch.lane_parked", { lane, finished_task: finished!.id, reason: phaseBound, phase_age_ms: phaseAgeMs,
           refill_bound_ms: refillBoundMs, waiting_on: [...inFlightTasks].map((t) => t.id) });
         sampleLaneChange();
         laneParkedFor.delete(lane);
-        return new Promise<Task | undefined>((wake) => parkedLanes.push({ lane, finished, wake }));
+        return new Promise<Task | undefined>((wake) => parkedLanes.push({ lane, finished: finished!, wake }));
       }
       const apiWindow = daemonClock.now() < apiWindowHeldUntilMs ? "blocked_transient" : undefined;
       const governed = refillClosed || phaseBound || apiWindow ? undefined : checkDispatchGovernors(deps, dailyCostCeilingUsd);
@@ -9026,6 +9073,8 @@ export async function runDaemon(
       if (freshnessAction === "restart" && freshness?.stale) decideRestart(freshness);
       let reason =
         refillClosed ??
+        // W1-T13695: a pass past a decided restart grows nothing, whether or not the task would run as a child.
+        (grow && restartDecided ? "stale code: a restart was decided" : undefined) ??
         phaseBound ??
         (opts.max !== undefined && attempted.length >= opts.max ? "max reached" : undefined) ??
         holdWorkerAdmission("lane-refill")?.reason ??
@@ -9037,7 +9086,7 @@ export async function runDaemon(
       // 2026-10-12 09:00: one container-short WIP reading held lane 2 for good while two siblings ran on past the hour.
       // A governor reading is re-taken each tick and an API-window hold lapses, so a lane held by either one parks.
       if (reason !== undefined && (reason === apiWindow || reason === governorReason || reason === "lane target") && inFlightTasks.size > 0)
-        return parkLane(lane, finished, reason, phaseAgeMs);
+        return grow ? holdGrow(lane, reason) : parkLane(lane, finished!, reason, phaseAgeMs);
       // W1-T5805: the refill decides on its OWN branch read, never the tick's: a branch pushed since the
       // tick began must refuse its task here. A failed read decides on the tick-start reading instead.
       const chooseRefill = (runBranchListing: string | undefined): Task | undefined | Promise<Task | undefined> => {
@@ -9093,11 +9142,11 @@ export async function runDaemon(
           prefetchLive(refillPlan, isMerged).then((live) => decide({ plan: refillPlan, isMerged }, live))
             .then(conclude, (e) => { readFailed(e); return conclude(); });
         const conclude = (): Task | undefined | Promise<Task | undefined> => {
-          if (boardUnreadable && inFlightTasks.size > 0) return parkLane(lane, finished, reason!, phaseAgeMs);
+          if (boardUnreadable && inFlightTasks.size > 0) return grow ? holdGrow(lane, reason!) : parkLane(lane, finished!, reason!, phaseAgeMs);
           laneParkedFor.delete(lane);
           // W1-T6274: the reads above are awaited; a restart, stop or pause decided meanwhile still holds the lane.
           if (next) {
-            const latched = refillClosed ?? (restartDecided && !runsAsChild(next) ? "stale code" : undefined) ??
+            const latched = refillClosed ?? (restartDecided && (grow || !runsAsChild(next)) ? "stale code" : undefined) ??
               (deps.checkStop?.() ? "stop" : undefined) ?? (deps.checkPause?.() ? "pause" : undefined);
             if (latched !== undefined) {
               reason = `${latched} (decided while the refill read was in flight)`;
@@ -9105,23 +9154,23 @@ export async function runDaemon(
             }
           }
           if (!next) {
-            log("dispatch.lane_refill_held", {
-              lane,
-              finished_task: finished.id,
-              reason: reason ?? (heldForRestart ? "stale code: no candidate runs as a child" : refillDeferrals.length > 0
-                ? `priority reservation: ${refillDeferrals.map((d) => `${d.task.id} deferred for waiting ${d.waiting.id}`).join(", ")}`
-                : "no disjoint runnable task within the lane budget"),
+            const heldReason = reason ?? (heldForRestart ? "stale code: no candidate runs as a child" : refillDeferrals.length > 0
+              ? `priority reservation: ${refillDeferrals.map((d) => `${d.task.id} deferred for waiting ${d.waiting.id}`).join(", ")}`
+              : "no disjoint runnable task within the lane budget");
+            const heldFields = {
               ...(reason === "phase bound" ? { phase_age_ms: phaseAgeMs, ...(measuredRefillBound ? { refill_bound_ms: refillBoundMs } : {}) } : {}),
               ...(freshnessAction ? { freshness_action: freshnessAction } : {}),
-            });
+            };
+            if (grow) return holdGrow(lane, heldReason, heldFields);
+            log("dispatch.lane_refill_held", { lane, finished_task: finished!.id, reason: heldReason, ...heldFields });
             sampleLaneChange();
             return undefined;
           }
           // A promised refill still crosses the pool's handoff before it actually starts. No
           // attempt/snapshot/overlap slot is committed here. Give concurrent decisions distinct keys.
           const candidate = { ...next };
-          refillAdmissions.set(candidate, { snapshot: nextSnapshot!, finishedTaskId: finished.id,
-            eligible: refillEligible, context: refillContext });
+          refillAdmissions.set(candidate, { snapshot: nextSnapshot!, finishedTaskId: finished?.id ?? null,
+            eligible: refillEligible, context: refillContext, ...(grow ? { grow } : {}) });
           refillProposals.add(candidate);
           return candidate;
         };
@@ -9164,17 +9213,50 @@ export async function runDaemon(
       if (freshness.stale && decideFreshness(freshness, inFlightTasks.size) === "restart") decideRestart(freshness);
       wakeParkedLanes();
     };
-    const onDispatchTick = checkFreshness || restartCyclePending || (deps.reloadPlan && deps.sweepLight) ? (): void | Promise<void> => {
+    // W1-T13695: 2026-11-18, a pass that read a lane target of 1 at its start ran one lane for two hours while later
+    // readings fitted three: a lane the pool never started was never offered again. Each in-flight tick now reads the
+    // target once and offers such a lane a task through decideRefill's own choice and admitAtStart's refill checks,
+    // never more lanes than that reading. It decides only through the async merged-set read (no sync read on the loop).
+    const growsOnTick = laneGovernorMode === "enforce" && laneCount >= 2 && deps.refreshMergedAsync !== undefined;
+    let growsDeciding = 0;
+    const growIdleLanes = (): void => {
+      if (!growsOnTick || inFlightTasks.size === 0) return;
+      const target = enforcedLaneTarget(inFlightTasks.size, deps.readQueueAdmission?.()?.wipLimit);
+      const idle = poolControl.unstarted?.(laneCount) ?? [];
+      const growNext = (k: number): void => {
+        const lane = idle[k];
+        if (lane === undefined || inFlightTasks.size + refillProposals.size + growsDeciding >= target) return;
+        poolControl.offer?.(lane, () => {
+          growsDeciding++;
+          return Promise.resolve().then(() => decideRefill(lane, undefined, { target, inFlight: inFlightTasks.size }))
+            .catch((reason: unknown) => {
+              phaseFaults.push({ phase: "dispatch.lane_grow", reason: reason });
+              poolControl.close?.(reason, "dispatch.lane_grow");
+              return undefined;
+            })
+            .finally(() => { growsDeciding--; });
+        }, (started) => { if (started) growNext(k + 1); });
+      };
+      growNext(0);
+    };
+    const tickReloads = Boolean(checkFreshness || restartCyclePending || (deps.reloadPlan && deps.sweepLight));
+    const onDispatchTick = tickReloads || growsOnTick ? (): void | Promise<void> => {
       tickLedgerActive = restartCyclePending;
       tickLedger = undefined;
       observeRestartCycle();
       wakeParkedLanes();
-      if (inFlightTasks.size === 0 || deps.checkPause?.()) return;
+      if (inFlightTasks.size === 0) return;
+      // A paused pass grows nothing: the grow writes the refill path's own pause hold.
+      if (deps.checkPause?.()) return growIdleLanes();
       // W1-T11327: a requested restart releases child lanes and awaits in-process ones, as a decided restart does.
       const requestedRestart = restartDecided || deps.checkStop?.() ? undefined : takeRestartRequest("dispatch_tick");
       if (requestedRestart) decideRestart(requestedRestart);
       // The light sweep reads this live binding; admitted workers retain their captured planForBatch.
-      const reload = (): void | Promise<void> => deps.reloadPlan ? reloadPlanBinding() : undefined;
+      // W1-T13695: the grow decides after this tick's restart, freshness and plan reload were read.
+      const reload = (): void | Promise<void> => {
+        const reloaded = tickReloads && deps.reloadPlan ? reloadPlanBinding() : undefined;
+        return reloaded ? reloaded.then(growIdleLanes) : growIdleLanes();
+      };
       if (restartDecided || !checkFreshness) return reload();
       const read = checkFreshness();
       if (!isPendingFreshness(read)) {
@@ -9200,13 +9282,15 @@ export async function runDaemon(
           laneCount, wipLimit: opts.wipLimit, openPrCount: deps.openPrCount?.(), queueAdmission: deps.readQueueAdmission?.(),
         });
         const reason = refillClosed ??
-          (restartDecided && !runsAsChild(task) ? "stale code" : undefined) ??
+          (restartDecided && (refill?.grow || !runsAsChild(task)) ? "stale code" : undefined) ??
           (deps.checkStop?.() ? "stop" : undefined) ?? (deps.checkPause?.() ? "pause" : undefined) ??
           (!refill ? "missing refill snapshot" : undefined) ??
           (passIds.has(task.id) ? "already dispatched this phase" : undefined) ??
           (opts.max !== undefined && attempted.length >= opts.max ? "max reached" : undefined) ??
           (budget <= inFlightTasks.size ? "lane budget" : undefined) ??
           (enforcedLaneTarget(inFlightTasks.size, deps.readQueueAdmission?.()?.wipLimit) <= inFlightTasks.size ? "lane target" : undefined) ??
+          // W1-T13695: a grow never starts past the target read at its tick.
+          (refill?.grow && refill.grow.target <= inFlightTasks.size ? "lane target" : undefined) ??
           (!partitionByFileOverlap([...inFlightTasks, task], deps.observedByTask ?? NO_OBSERVED_SCOPE).dispatch.includes(task)
             ? "file overlap at start" : undefined);
         if (reason !== undefined) {
@@ -9279,7 +9363,10 @@ export async function runDaemon(
         forcedKick = undefined;
         log("console.kick_dispatched", { task: task.id, origin: kick.origin, ...kickRepoField(kick) });
       }
-      if (isRefill) log("dispatch.lane_refilled", { lane, finished_task: refill!.finishedTaskId, next_task: task.id,
+      if (isRefill && refill?.grow) {
+        growHeldFor.delete(lane);
+        log("dispatch.lane_grow", { lane, target: refill.grow.target, in_flight: refill.grow.inFlight, task: task.id });
+      } else if (isRefill) log("dispatch.lane_refilled", { lane, finished_task: refill!.finishedTaskId, next_task: task.id,
         ...(restartDecided ? { restart_decided: true } : {}) });
       if (isRefill) log("dispatch.pick_scored", dispatchPickPayload(task, "lane-refill", refill!.eligible, refill!.context,
         [task], [...inFlightTasks].filter(t => t !== task), deps.observedByTask ?? NO_OBSERVED_SCOPE));
@@ -9289,7 +9376,7 @@ export async function runDaemon(
       if (isRefill) sampleLaneChange();
     };
     const batchChildren = new Map(occupiedChildren);
-    const poolControl: LanePoolControl<RunResult> = { occupied: new Map([...occupiedChildren].map(([task, child]) => [task, child.settled])) };
+    const poolControl: LanePoolControl<RunResult, Task> = { occupied: new Map([...occupiedChildren].map(([task, child]) => [task, child.settled])) };
     let childDrain: Promise<void> | undefined;
     let childDrainDone = false;
     releaseChildren = () => {

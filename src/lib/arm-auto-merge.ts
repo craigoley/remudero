@@ -55,7 +55,7 @@ import {
   type PlanMergeSafetyReadings,
 } from "./plan-pr-merge-safety.js";
 import { readLedgerLines } from "./status.js";
-import { describeRatchetRows, judgeMergedRatchets, ratchetJudgeLedgerFields, ratchetUpdateRefusal, ratchetVerdictHolds, readMergedRatchetInputsSteps, type MergedRatchetInputs, type MergedRatchetJudgement, type RatchetUpdateWithheldEvidence } from "./merged-ratchet-verdict.js";
+import { describeRatchetRows, judgeMergedRatchets, ratchetJudgeLedgerFields, ratchetUpdateRefusal, ratchetVerdictHolds, mainChangedPathsSteps, readMergedRatchetInputsSteps, type MergedRatchetInputs, type MergedRatchetJudgement, type RatchetUpdateWithheldEvidence } from "./merged-ratchet-verdict.js";
 import { judgeMergedRatchetsInWorker } from "./merged-ratchet-worker.js";
 import {
   closingReferenceGuardSteps,
@@ -843,6 +843,30 @@ function* planMergeSafetyInClone(
 export function readMergedRatchetsAsync(prUrl: string, loadConfigImpl: typeof loadConfig = loadConfig,
   worker?: Parameters<typeof judgeMergedRatchetsInWorker>[1]): Promise<MergedRatchetJudgement> {
   return runStepsAsync(mergedRatchetsInClone(prUrl, loadConfigImpl, ghJsonAsync, planSafetyGitAsync, (input) => judgeMergedRatchetsInWorker(input, worker)));
+}
+
+/** W1-T13708 — the armed re-judge's changed-path reader. Make one per re-judge: it fetches main into each clone once.
+ *  Undefined is a failed read, and the re-judge then judges. */
+export function mainChangedPathsReader(loadConfigImpl: typeof loadConfig = loadConfig):
+  (prUrl: string, fromSha: string, toSha: string) => Promise<string[] | undefined> {
+  const fetches = new Map<string, Promise<boolean>>();
+  return async (prUrl, fromSha, toSha) => {
+    try {
+      const target = mergeTargetFromPrUrl(prUrl);
+      if (!target) return undefined;
+      const clone = join(loadConfigImpl().root, "repos", target.repo);
+      const run = planSafetyGitAsync(clone);
+      let fetched = fetches.get(clone);
+      if (fetched === undefined) {
+        fetched = Promise.resolve(run(["fetch", "--no-tags", "--quiet", "origin", "main"])).then((res) => res.status === 0);
+        fetches.set(clone, fetched);
+      }
+      return (await fetched) ? await runStepsAsync(mainChangedPathsSteps(run, fromSha, toSha)) : undefined;
+    } catch {
+      // A failed read is undefined, never a throw: the re-judge then judges as it did before W1-T13708.
+      return undefined;
+    }
+  };
 }
 
 function* mergedRatchetsInClone(

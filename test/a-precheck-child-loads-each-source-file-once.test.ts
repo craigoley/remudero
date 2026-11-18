@@ -92,6 +92,85 @@ function merger(...args: string[]): string {
   return execFileSync(process.execPath, ["--expose-internals", MERGER, ...args], { cwd: ROOT, encoding: "utf8", stdio: "pipe" });
 }
 
+const SCANNERS = ["src/lib/trust-root-text.ts", "src/lib/rule-suites.ts"] as const;
+
+test("W1-T13604 criterion 1: each loader mode maps each scanner exactly once", (t) => {
+  const root = scratch(t);
+  const modes = [
+    { name: "plain", args: [], options: "", prefix: "" },
+    { name: "cli", args: ["--import", "tsx"], options: "", prefix: "" },
+    { name: "env", args: [], options: `--import=${TSX}`, prefix: "" },
+    { name: "registered", args: [], options: "", prefix: 'const {register} = await import("tsx/esm/api"); register();' },
+  ];
+  for (const mode of modes) {
+    const raw = join(root, mode.name);
+    child(raw, mode.args, mode.prefix + PRECHECK_PROBE, mode.options);
+    const evidence = reports(raw);
+    for (const file of SCANNERS) {
+      const url = normalizedFileUrl(pathToFileURL(join(ROOT, file)).href);
+      const loads = evidence.flatMap(report => report.result
+        .filter(script => normalizedFileUrl(script.url) === url)
+        .map(script => Boolean(report["source-map-cache"]?.[script.url])));
+      assert.deepEqual(loads, [true], `${mode.name}: ${file} must be loaded once with a real source map`);
+    }
+  }
+});
+
+function scannerRecord(lcov: string, file: typeof SCANNERS[number]): string {
+  const record = lcov.split("end_of_record").find(block => block.split("\n")
+    .some(line => line === `SF:${file}` || (line.startsWith("SF:") && line.endsWith(`/${file}`))));
+  assert.ok(record, `must include an SF record for ${file}`);
+  return record;
+}
+
+function scannerTotals(lcov: string): unknown {
+  return Object.fromEntries(SCANNERS.map(file => [file, scannerRecord(lcov, file).split("\n")
+    .filter(line => /^(LH|LF|BRH|BRF):/.test(line))]));
+}
+
+function scannerShards(root: string, t: TestContext) {
+  return [
+    { name: "plain", args: [] },
+    { name: "tsx", args: ["--import", TSX] },
+  ].map(({ name, args }) => {
+    const raw = join(root, name);
+    child(raw, args, PRECHECK_PROBE);
+    const lcov = join(root, `${name}.info`);
+    const premapped = join(root, `${name}-premapped`);
+    merger("--output", lcov, raw);
+    t.diagnostic(`${name} shard scanner counts: ${JSON.stringify(scannerTotals(readFileSync(lcov, "utf8")))}`);
+    merger("--premap-output", premapped, raw);
+    return { raw, premapped, lcov };
+  });
+}
+
+test("W1-T13604 criterion 2: real raw and premapped shard coverage merges in both orders", (t) => {
+  const root = scratch(t);
+  const shards = scannerShards(root, t);
+  for (const representation of ["raw", "premapped"] as const) {
+    for (const ordered of [shards, [...shards].reverse()]) {
+      const output = join(root, "aggregate.info");
+      merger("--output", output, "--shard-count", "2",
+        ...ordered.flatMap(shard => ["--line-lcov", shard.lcov]),
+        ...ordered.map(shard => shard[representation]));
+      const lcov = readFileSync(output, "utf8");
+      for (const file of SCANNERS) assert.match(scannerRecord(lcov, file), /^DA:\d+,[1-9]/m);
+      t.diagnostic(`${representation} aggregate scanner counts: ${JSON.stringify(scannerTotals(lcov))}`);
+    }
+  }
+});
+
+test("W1-T13604 criterion 3: positive shard evidence outside the aggregate still refuses", (t) => {
+  const root = scratch(t);
+  const raw = join(root, "mapped");
+  child(raw, ["--import", TSX], PRECHECK_PROBE);
+  const file = SCANNERS[0];
+  const lcov = join(root, "invalid.info");
+  writeFileSync(lcov, `SF:${file}\nDA:1000000,1\nend_of_record\n`);
+  assert.throws(() => merger("--output", join(root, "refused.info"), "--line-lcov", lcov, raw),
+    /shard LCOV reports a positive hit outside aggregate source src\/lib\/trust-root-text\.ts:1000000/);
+});
+
 test("W1-T6180: the merge summary counts the repeated instances it dropped", (t) => {
   const root = scratch(t);
   const probe = join(root, "probe.ts");
