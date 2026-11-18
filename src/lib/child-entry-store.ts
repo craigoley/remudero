@@ -6,7 +6,7 @@
 // main revision (buildIntoStore, a child process), and childEntryArgv copies a stored build into a tree that has
 // no current bundle (materializeFromStore). Every stored and staged payload is judged by
 // scripts/build-child-entries.mjs's own childEntryIsCurrent, never by a second guard here.
-import { execFileLoopBounded } from "./loop-bounded-child.js";
+import { execFileRouted } from "./spawn-helper.js";
 import {
   constants, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync,
 } from "node:fs";
@@ -201,7 +201,7 @@ export type StoreBuildResult =
 /** Runs `node <script> ...args` in a CHILD process and resolves its stdout; rejects on a non-zero exit. */
 export type RunBuildScript = (script: string, args: readonly string[], cwd: string) => Promise<string>;
 export const runBuildScriptInChild: RunBuildScript = (script, args, cwd) =>
-  execFileLoopBounded(process.execPath, [script, ...args], { cwd, encoding: "utf8", maxBuffer: 4 * 1024 * 1024, timeout: 10 * 60 * 1000 }).then(
+  execFileRouted(process.execPath, [script, ...args], { cwd, encoding: "utf8", maxBuffer: 4 * 1024 * 1024, timeout: 10 * 60 * 1000 }).then(
     ({ stdout }) => stdout,
     // The script's own stderr names why it failed; the spawn error's message is only the command line.
     (err: { stderr?: unknown; message: string }) => { throw new Error(String(err.stderr ?? "").trim().slice(-400) || err.message); },

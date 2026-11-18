@@ -15,7 +15,7 @@ import { defaultTestSlots, lowPriorityCommand, readHostLoad, testRunArgv, testRu
 import { machineShardLandingGuard, renderMachineShard } from "./machine-filing.js";
 import { loadPlan, loadPlanFromYaml, machineFilingAdmissionViolations, retirementHoldsOrigin, taskLandedArgs, newTestPath, loadPlanForLayout } from "./plan.js";
 import { hostWorktreeGit, hostWorktreeGitAsync } from "./worktree-git.js";
-import { execFileLoopBounded } from "./loop-bounded-child.js";
+import { execFileRouted } from "./spawn-helper.js";
 import { RMD_TMP_PREFIX } from "./tmp.js";
 import { loadPolicy } from "./policy.js";
 import { sameTestFile } from "./test-path-resolver.js";
@@ -748,7 +748,7 @@ async function jscpdHeadroom(root: string): Promise<HeadroomFinding[]> {
     const dirs = ["src", "scripts"].filter((d) => existsSync(join(root, d)));
     const cmd = lowPriorityCommand(process.execPath, [bin, ...dirs, "--config", limitFile, "--reporters", "json", "--output", out, "--silent"]);
     // jscpd exits non-zero over its threshold and still writes the report; only a missing report is a failure.
-    const exit = await execFileLoopBounded(cmd.file, cmd.args, { cwd: root, encoding: "utf8", timeout: JSCPD_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024 })
+    const exit = await execFileRouted(cmd.file, cmd.args, { cwd: root, encoding: "utf8", timeout: JSCPD_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024 })
       .then(() => "exit 0", (e: unknown) => String(e));
     const reportPath = join(out, "jscpd-report.json");
     if (!existsSync(reportPath)) throw new Error(`gate gardener: jscpd wrote no report (${exit})`);

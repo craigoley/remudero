@@ -1,4 +1,4 @@
-import { execFileLoopBounded } from "./loop-bounded-child.js";
+import { execFileRouted } from "./spawn-helper.js";
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
@@ -1404,7 +1404,7 @@ export function startHostResourceGardener(ports: HostResourcePorts, intervalMs: 
 
 /** Production heartbeat source: one `git fetch` of every `heartbeat-*` head, then each payload off its ref. */
 export function gitHeartbeatSource(repoRoot: string): () => Promise<HeartbeatRead[]> {
-  const git = (args: string[]) => execFileLoopBounded("git", ["-C", repoRoot, ...args], { encoding: "utf8", timeout: 60_000 });
+  const git = (args: string[]) => execFileRouted("git", ["-C", repoRoot, ...args], { encoding: "utf8", timeout: 60_000 });
   return async () => {
     const fetchHeartbeats = () => git(["fetch", "--quiet", "--no-tags", "origin", "+refs/heads/heartbeat-*:refs/remotes/origin/heartbeat-*"]);
     try {

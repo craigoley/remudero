@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { execFile, execFileSync, spawn } from "node:child_process";
-import { boundChildByLoopTime, childLoopBound, execFileLoopBounded } from "./loop-bounded-child.js";
+import { boundChildByLoopTime, childLoopBound } from "./loop-bounded-child.js";
+import { execFileRouted } from "./spawn-helper.js";
 import type { ChildProcess, ExecFileSyncOptions, ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -331,7 +332,7 @@ const execFileAsync = (
   file: string,
   args: readonly string[],
   opts: { encoding: BufferEncoding; maxBuffer: number; timeout: number; env?: NodeJS.ProcessEnv },
-): Promise<{ stdout: string; stderr: string }> => execFileLoopBounded(file, args, withGhCredentialEnv(file, args, opts));
+): Promise<{ stdout: string; stderr: string }> => execFileRouted(file, args, withGhCredentialEnv(file, args, opts));
 
 export type GhAsyncExecutor = typeof execFileAsync;
 

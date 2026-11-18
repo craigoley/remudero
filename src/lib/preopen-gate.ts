@@ -32,7 +32,7 @@ import { systemClock, type Clock } from "./clock.js";
 import { loadConfig } from "./config.js";
 import { appendLedger } from "./ledger.js";
 import { ledgerPathFor } from "./ledger-path.js";
-import { execFileLoopBounded } from "./loop-bounded-child.js";
+import { execFileRouted } from "./spawn-helper.js";
 import { PROOF_ENV_ALLOWLIST, PROOF_SANDBOX_BINARY, proofChildEnv, proofLinkedModuleRoots, proofSandboxArgv } from "./review.js";
 import { redactProofOutput } from "./proofExecutor.js";
 import { TEST_SLOT_DIR_ENV, TEST_SLOTS_ENV } from "./test-slot.js";
@@ -480,7 +480,7 @@ export async function defaultGateContainment(
   } catch (error) {
     return { mode: "unavailable", reason: `the sandbox argv could not be built: ${boundFailureLine(String((error as Error)?.message ?? error))}` };
   }
-  return execFileLoopBounded(binary, [...argv, process.execPath, "-e", ""], { cwd: input.cwd, env: input.env, encoding: "utf8", timeout: 10_000, killSignal: "SIGKILL" }).then(
+  return execFileRouted(binary, [...argv, process.execPath, "-e", ""], { cwd: input.cwd, env: input.env, encoding: "utf8", timeout: 10_000, killSignal: "SIGKILL" }).then(
     (): GateContainment => ({ mode: "sandboxed", file: binary, argv }),
     (error: unknown): GateContainment => ({ mode: "unavailable", reason: `${binary} cannot start here (${sandboxFailureText(error, binary)})` }),
   );
@@ -667,7 +667,7 @@ export function defaultRunGate(
         deadline_enforced_by: armedEnforcers(timeoutBin), launcher: "harness", containment: "sandboxed", env_allowlist: PREOPEN_GATE_ENV_ALLOWLIST_NAME,
       }, extraArgs)
       : preopenGateCommand(cwd, harnessRmd, extraArgs);
-    return execFileLoopBounded(process.execPath, deadlineRunnerArgs(sandbox.file, [...sandbox.argv, file, ...args], deadlineAt, timeoutBin),
+    return execFileRouted(process.execPath, deadlineRunnerArgs(sandbox.file, [...sandbox.argv, file, ...args], deadlineAt, timeoutBin),
       { cwd, env, encoding: "utf8", timeout: backstopMs + 2 * GATE_KILL_GRACE_MS, maxBuffer: 64 * 1024 * 1024 }).then(
       () => classifyGateExit(null, ""),
       (error: Error & { code?: unknown; killed?: boolean; stderr?: unknown }) => classifyGateExit(error, String(error.stderr ?? "")),
