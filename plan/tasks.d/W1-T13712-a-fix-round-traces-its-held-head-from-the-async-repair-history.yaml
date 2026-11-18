@@ -1,0 +1,63 @@
+- id: W1-T13712
+  title: "A fix round traces its held head from the async repair history, not from a synchronous read of every ledger rotation"
+  repo: remudero
+  depends_on: []
+  priority: 0.9
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the held-head trace decides which head a fix round treats as held by a design or escalation question
+  band_meaning: span
+  origin: "operator-session#fleet-fix-effects-2026-11-18"
+  plan_refs:
+    - W1-T12544
+    - W1-T12954
+    - W1-T13711
+  files:
+    - src/cli/commands/fix.ts
+    - src/lib/sweep.ts
+    - test/fix-lane/a-fix-round-traces-its-held-head-without-blocking-the-loop.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "On a ledger directory with at least 50 MB of rotations, runFixRung's held-head trace for a PR whose head no conflict round pushed lets a 50 ms timer started before the round fire at least once in every 500 ms of the history read"
+      proof: "grep: W1-T13712 criterion 1 in test/fix-lane/a-fix-round-traces-its-held-head-without-blocking-the-loop.test.ts"
+    - claim: "invariant:same-held-head — for the same ledger directory, runFixRung traces the same held head, and its hold callback sees the same rows in the same order, as with today's readFixRoundArchiveRows; an incomplete corpus still traces from the live rows only"
+      kind: guard
+      proof: "grep: W1-T13712 criterion 2 in test/fix-lane/a-fix-round-traces-its-held-head-without-blocking-the-loop.test.ts"
+    - claim: "A second fix round in the same process parses only the live file and any rotation cut since the first round"
+      proof: "grep: W1-T13712 criterion 3 in test/fix-lane/a-fix-round-traces-its-held-head-without-blocking-the-loop.test.ts"
+    - claim: "runFixRung reads the history through the sweep's async repair-history reader"
+      proof: "grep: readSweepRepairHistory( in src/cli/commands/fix.ts"
+  rationale: |
+    WHY: OBSERVED in the core ledger (~/rmd-state2/state) on 2026-11-18 after the 16:23:26Z boot. Six
+    daemon.loop_stall_profile rows have the stack runFixRung -> conflictRoundHeldHead ->
+    readFixRoundArchiveRows -> readLedgerUnionRecordsSync, with parseObject under scanLedgerBuffer as the top
+    self frame: lags of 91 s (16:32:23Z), 89 s (16:37:24Z), 131 s (16:44:45Z), 100 s (16:59:56Z), 212 s
+    (17:10:42Z) and 104 s (17:26:48Z). These rows hold 728 s of loop lag in 75 minutes. The state directory has
+    1,531 ledger files.
+    CAUSE (from the code): W1-T12954 moved the sweep's call of conflictRoundHeldHead onto the async
+    readSweepRepairHistory. The fix rung's own call (src/cli/commands/fix.ts, the W1-T12544 hold trace in
+    runFixRung) still passes deps.ledgerPath and no archive reader. So conflictRoundHeldHead falls back to
+    readFixRoundArchiveRows, a synchronous union read of every rotation, whenever the current head was not
+    pushed by a conflict round: most rounds.
+    COST: in the daemon process (where W1-T13711 shows fix rounds run after a placement decay) each round
+    stops the loop for 1.5 to 3.5 minutes. In a run child the same read adds that time to every fix round.
+  design: |
+    INVARIANT same-held-head: the traced head and the rows the hold callback sees do not change for the same
+    ledger directory.
+    1. In runFixRung (src/cli/commands/fix.ts), when prNumber is defined, await
+       readSweepRepairHistory(deps.ledgerPath) before the hold trace. Pass conflictRoundHeldHead an archive
+       reader that gives the read's rows restricted to the five steps readFixRoundArchiveRows reads
+       (fix.dispatch, fix.retrigger, fix.done, fix.needs_design, sweep.conflict_regenerated), or undefined when
+       the read is not ok. Keep the live rows and roundRows exactly as today.
+    2. If src/lib/sweep.ts needs to expose the five-step list or a filter for it, export one helper there and
+       use it in readFixRoundArchiveRows too, so the two readers cannot drift.
+    3. Do not change conflictRoundHeldHead's own logic.
+  falsifier: |
+    Keep the synchronous fallback: criterion 1 fails. Pass the unrestricted repair-history rows or drop the
+    incomplete-corpus rule: criterion 2 fails. Build a new reader for each round: criterion 3 fails.
+  note: |
+    Id reserved for run-unfiled-1795024278000 with ~/rmd-work/bin/reserve-id.sh. Filed from an operator analysis
+    session.
