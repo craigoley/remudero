@@ -2,10 +2,14 @@
 // exited 1 — a hand-off reported as a failure — and ledgered approve.skill_written before the commit
 // that then failed. These pin the exit mapping and the ledger ordering.
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { test } from "node:test";
 
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
+
 import { RETRO_HANDOFF_EXIT_CODES } from "../src/lib/retro-subprocess.js";
-import { approveCiNotGreenExit, approveExitWhenCiNotGreen, commitThenLedgerSkillWrite } from "../src/run-task.js";
+import { approveCiNotGreenExit, approveExitWhenCiNotGreen, commitThenLedgerSkillWrite, mergedBeforeGate } from "../src/run-task.js";
 
 test("W1-T4688: an approve whose PR is left for the sweep exits with the hand-off code", () => {
   assert.equal(approveExitWhenCiNotGreen("timeout"), 3);
@@ -50,4 +54,43 @@ test("W1-T4688: the skill write is ledgered only after its commit", () => {
     /commitlint refused/,
   );
   assert.deepEqual(failed, ["commit"], "a commit that fails ledgers no write");
+});
+
+// 2026-11-18: the W1-T12032 approve filed its task in remudero-ops#127, which the ops repository merged on its own
+// before review ran. Review declined the closed PR (exit 2), the arm found no review row, and the approve exited 2
+// although the filing had landed.
+const OPS_PR = "https://github.com/craigoley/remudero-ops/pull/127";
+const row = (fields: Record<string, unknown>) => () => ({ number: 127, html_url: OPS_PR, head: { sha: "a".repeat(40) }, ...fields });
+
+test("a plan PR its repository merged before review is the lane's success, ledgered once", () => {
+  const rows: Array<[string, Record<string, unknown> | undefined]> = [];
+  const asked: string[][] = [];
+  const merged = mergedBeforeGate(OPS_PR, 2, (step, extra) => rows.push([step, extra]), (args) => {
+    asked.push(args);
+    return row({ state: "closed", merged_at: "2026-11-18T10:55:43Z" })();
+  });
+  assert.equal(merged, true);
+  assert.equal(asked.length, 1, "one live read of the PR");
+  assert.ok(asked[0]!.some((arg) => arg.includes("remudero-ops/pulls/127")), asked[0]!.join(" "));
+  assert.deepEqual(rows, [["gate.merged_before_review", { pr_url: OPS_PR, review_code: 2, merged_at: "2026-11-18T10:55:43Z" }]]);
+});
+
+test("only a merge excuses a failed review: open, closed unmerged and unreadable PRs keep the review's code", () => {
+  const rows: string[] = [];
+  const log = (step: string) => void rows.push(step);
+  assert.equal(mergedBeforeGate(OPS_PR, 2, log, row({ state: "closed", merged_at: null })), false);
+  assert.equal(mergedBeforeGate(OPS_PR, 1, log, row({ state: "open", merged_at: null })), false);
+  assert.equal(mergedBeforeGate(OPS_PR, 2, log, () => { throw new Error("gh: 502"); }), false);
+  assert.equal(mergedBeforeGate(OPS_PR, 0, log, () => assert.fail("a passed review needs no read")), false);
+  assert.deepEqual(rows, []);
+});
+
+test("every gate that reviews a destination plan PR checks for a self-merge before it arms", () => {
+  const src = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
+  const sites = [...src.matchAll(/const reviewCode = await reviewCommand\(([^)]*prUrl[^)]*)\);\n([^\n]*)\n/g)];
+  assert.deepEqual(sites.map((m) => m[1]), [
+    "view === undefined ? prNum : prUrl", "isPublic ? prNum : prUrl",
+    "filing.destination ? result.prUrl : prNum", "filing.destination ? result.prUrl : prNum",
+  ], "the triage, plan, approve and approve-batch gates");
+  for (const site of sites) assert.match(site[2]!, /^\s*if \(mergedBeforeGate\((result\.)?prUrl, reviewCode, log\)\) \{$/, site[0]);
 });
