@@ -23,6 +23,7 @@
     - src/lib/instance-gateway.ts
     - test/inbox/an-inbox-read-builds-off-the-request-loop.test.ts
     - "scripts/build-child-entries.mjs"
+    - test/a-bundled-parent-starts-its-workers-from-bundled-worker-entries.test.ts
   status: queued
   attempts: 0
   acceptance:
