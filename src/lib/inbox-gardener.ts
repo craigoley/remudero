@@ -95,9 +95,13 @@ export async function runInboxGardener(options: { stateDir: string; scope: Inbox
     if (pendingMirrors.length > limits.candidates) return { state: "pending_mirrors", complete: false, retired: 0, judged: 0 };
     const candidates = [...pack.candidates].sort((a, b) => a.proposal.id.localeCompare(b.proposal.id));
     const generation = inboxSemanticDigest(candidates.map(c => [c.proposal.id, inboxGardenerSemanticInput(c)]));
-    const start = store.cursor?.generation === generation ? Math.max(0, candidates.findIndex(c => c.proposal.id > store.cursor!.after)) : 0;
+    // W1-T13668: resume after the cursor's id whatever the generation. Restarting at the first id on every registry change
+    // re-read the same 8-16 ids for good on the host (2,429 proposals, one change or more between hourly passes). Each
+    // candidate's own digest still decides whether it is re-judged, and the next sweep starts at the first id again.
+    const resume = store.cursor?.after ? candidates.findIndex(c => c.proposal.id > store.cursor!.after) : 0;
+    const start = Math.max(0, resume);
     const selected = candidates.slice(start, start + limits.candidates);
-    let retired = 0, judged = 0, proofReads = 0, evaluated = 0, after = store.cursor?.generation === generation ? store.cursor.after : "";
+    let retired = 0, judged = 0, proofReads = 0, evaluated = 0, after = resume < 0 ? "" : store.cursor?.after ?? "";
     for (const candidate of selected) {
       if (options.stopped?.()) return { state: "cancelled", complete: false, evaluated, retired, judged };
       const p = candidate.proposal, existing = [...store.events].reverse().find(e => e.receipt.kind === "retire" && e.receipt.scope.proposalId === p.id);
