@@ -3905,9 +3905,11 @@ export function buildInboxVerbActions(deps: PanelGraphDeps, causalScope?: InboxC
       }
       // The one call site among classifyAllProposals's consumers that hands off to an
       // irreversible spawn, so it alone reads via loadPlanAtRef, "cannot be partial" (W1-T2220).
+      // W1-T13605: like every other write, it classifies only the proposal it names. The full pass ran every
+      // anchor's git grep on serve's main thread after a cold start: a 123 s loop stall on 2026-11-18.
       const { proposals, classifications } = classifyAllProposals(deps, (planPath) =>
         loadPlanAtRef(deps.root, relative(deps.root, planPath)),
-      );
+      input.proposalId);
       if (!proposals.some((p) => p.id === input.proposalId)) {
         respond(404, { error: "not_found", detail: `no active proposal "${input.proposalId}"` });
         return;
