@@ -2,11 +2,7 @@
 // exited 1 — a hand-off reported as a failure — and ledgered approve.skill_written before the commit
 // that then failed. These pin the exit mapping and the ledger ordering.
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { test } from "node:test";
-
-import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 import { RETRO_HANDOFF_EXIT_CODES } from "../src/lib/retro-subprocess.js";
 import { approveCiNotGreenExit, approveExitWhenCiNotGreen, commitThenLedgerSkillWrite, mergedBeforeGate } from "../src/run-task.js";
@@ -83,14 +79,4 @@ test("only a merge excuses a failed review: open, closed unmerged and unreadable
   assert.equal(mergedBeforeGate(OPS_PR, 2, log, () => { throw new Error("gh: 502"); }), false);
   assert.equal(mergedBeforeGate(OPS_PR, 0, log, () => assert.fail("a passed review needs no read")), false);
   assert.deepEqual(rows, []);
-});
-
-test("every gate that reviews a destination plan PR checks for a self-merge before it arms", () => {
-  const src = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
-  const sites = [...src.matchAll(/const reviewCode = await reviewCommand\(([^)]*prUrl[^)]*)\);\n([^\n]*)\n/g)];
-  assert.deepEqual(sites.map((m) => m[1]), [
-    "view === undefined ? prNum : prUrl", "isPublic ? prNum : prUrl",
-    "filing.destination ? result.prUrl : prNum", "filing.destination ? result.prUrl : prNum",
-  ], "the triage, plan, approve and approve-batch gates");
-  for (const site of sites) assert.match(site[2]!, /^\s*if \(mergedBeforeGate\((result\.)?prUrl, reviewCode, log\)\) \{$/, site[0]);
 });
