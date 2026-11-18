@@ -26,7 +26,8 @@ const ORIGIN_CODEX_ECONOMY = {
   high: ["gpt-5.3-codex-spark", "gpt-6-luna", "gpt-5.6-luna", "gpt-5.4-mini"],
 };
 const CASH_ECONOMY = ["gpt-oss-120b", "gpt-5-nano", "gpt-6-luna", "gpt-5.6-luna", "claude-haiku-5-5"];
-const CASH_BALANCED = ["gpt-5-nano", "gpt-oss-120b", "gpt-6-luna", "gpt-5.6-luna", "gpt-6.1-terra", SOL61];
+// W1-T13446 then put gpt-6.2-sol directly ahead of gpt-6.1-sol in every balanced cash row.
+const CASH_BALANCED = ["gpt-5-nano", "gpt-oss-120b", "gpt-6-luna", "gpt-5.6-luna", "gpt-6.1-terra", SOL62, SOL61];
 const CASH_FRONTIER = ["gpt-6-luna", "gpt-5.6-luna", "gpt-6.1-terra", "gpt-5.6-terra"];
 const ORIGIN_CASH = {
   economy: { low: CASH_ECONOMY, medium: CASH_ECONOMY, high: CASH_ECONOMY },
