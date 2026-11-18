@@ -3479,6 +3479,8 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   // (each defaulting on its own) would issue nonces into a store the dispatch never consults.
   const confirmNonces = deps.confirmNonces ?? createConfirmNonceStore();
   const analyticsCache = createAnalyticsSnapshotCache({
+    // W1-T13685: the fold, its snapshot and the checkpoint write run on the analytics worker, not this request loop.
+    offThread: true,
     ...deps.analytics,
     stateDir: dirname(deps.ledgerPath),
     log: deps.log,

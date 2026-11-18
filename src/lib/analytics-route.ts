@@ -52,6 +52,9 @@ import { goalObservationFromRow, type GoalObservation } from "./goals.js";
 import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { basename, join } from "node:path";
+import { Worker, isMainThread, parentPort, workerData } from "node:worker_threads";
+import { bundledWorkerUrl } from "./child-entry-argv.js";
+import { threadName } from "./thread-names.js";
 import { isQueueDispatchRunStart, MAX_RETAINED_LINES_PER_STEP } from "./ledger.js";
 import { LEDGER_CARRIED_PREFIX_SUFFIX, LEDGER_FILENAME } from "./ledger-path.js";
 import { LEDGER_COLD_STORE_DIRNAME } from "./ledger-compact.js";
@@ -2440,6 +2443,11 @@ export interface AnalyticsSnapshotCacheDeps {
   refreshTimeoutMs?: number;
   schedule?: (callback: () => void, delayMs: number) => AnalyticsTimer;
   log?: (step: string, extra?: Record<string, unknown>) => void;
+  /** W1-T13685: fold, snapshot and persist on a worker thread; this thread receives only each finished snapshot.
+   *  Ignored with an injected `readSnapshot`, which always runs here. */
+  offThread?: boolean;
+  /** W1-T13685 test seam: the worker's module URL; absent, this module. */
+  workerUrl?: URL;
 }
 
 /** One process-owned analytics value and its lifecycle. `refresh` is public for deterministic
@@ -2652,22 +2660,34 @@ function errorText(error: unknown): string {
 /** Build the specialised analytics cache. Exactly one timer exists at a time: the safety timer
  * while reading, then the refresh-delay timer after settlement. This is deliberately not a
  * generic route cache; its AbortController and evidence semantics are analytics-specific. */
-export function createAnalyticsSnapshotCache(deps: AnalyticsSnapshotCacheDeps): AnalyticsSnapshotCache {
-  const clock = deps.clock ?? systemClock;
-  const readSnapshot: AnalyticsSnapshotReader = deps.readSnapshot ?? ((stateDir, refreshClock, signal, priorCheckpoint, scan) =>
-    scanAnalyticsLedger(stateDir, refreshClock, signal, priorCheckpoint, { ...scan }));
-  const refreshIntervalMs = deps.refreshIntervalMs ?? ANALYTICS_REFRESH_INTERVAL_MS;
-  const refreshTimeoutMs = deps.refreshTimeoutMs ?? ANALYTICS_REFRESH_TIMEOUT_MS;
-  const schedule = deps.schedule ?? systemSchedule;
-  const log = deps.log ?? (() => {});
-  let checkpoint = readAnalyticsCheckpoint(deps.stateDir);
-  let value = checkpoint === undefined || checkpoint.state.usage?.costAccountingVersion !== 1 || checkpoint.state.usage?.cashAccountingVersion !== 1 || checkpoint.state.usage?.trialAccountingVersion !== 1 ? coldAnalyticsSnapshot() : freezeAnalyticsSnapshot(attachUsageProjection(restoreCacheReuseTokens(checkpoint.snapshot, checkpoint.state), checkpoint.state.usage));
-  let timer: AnalyticsTimer | undefined;
-  let controller: AbortController | undefined;
-  let inFlight: Promise<void> | undefined;
-  let started = false;
-  let stopped = false;
-  let shedPending = false;
+/** W1-T13685: what one refresh produced. A partial fold keeps the prior value served; a snapshot replaces it. */
+export type AnalyticsRefreshOutcome =
+  | { kind: "partial"; scan: AnalyticsScanReport }
+  | { kind: "snapshot"; snapshot: AnalyticsSnapshot; scan?: AnalyticsScanReport };
+
+/** W1-T13685: the owner of one state directory's checkpoint, fold and their throttled writes. The cache drives it on
+ *  its own thread, or through {@link createWorkerAnalyticsRefreshEngine} on a worker thread. */
+export interface AnalyticsRefreshEngine {
+  /** The persisted checkpoint's snapshot, when it is current-format; undefined serves cold. Read on the calling thread
+   *  while serve builds its server, before it listens, so the first request is answered exactly as before W1-T13685. */
+  boot(): AnalyticsSnapshot | undefined;
+  refresh(signal: AbortSignal, yieldAtMs: number): Promise<AnalyticsRefreshOutcome>;
+  /** Writes any checkpoint or progress the write interval held back. */
+  flush(): void;
+  /** Drops the held checkpoint and fold under memory pressure. */
+  shed(): void;
+}
+
+function bootSnapshot(checkpoint: AnalyticsCheckpoint | undefined): AnalyticsSnapshot | undefined {
+  return checkpoint === undefined || checkpoint.state.usage?.costAccountingVersion !== 1 || checkpoint.state.usage?.cashAccountingVersion !== 1 ||
+    checkpoint.state.usage?.trialAccountingVersion !== 1
+    ? undefined
+    : attachUsageProjection(restoreCacheReuseTokens(checkpoint.snapshot, checkpoint.state), checkpoint.state.usage);
+}
+
+/** The refresh engine on the calling thread: the cache's behaviour before W1-T13685, moved here unchanged. */
+export function createAnalyticsRefreshEngine(stateDir: string, clock: Clock, readSnapshot: AnalyticsSnapshotReader): AnalyticsRefreshEngine {
+  let checkpoint: AnalyticsCheckpoint | undefined;
   let progress: AnalyticsResumePoint | undefined;
   let checkpointWrittenAt: number | undefined;
   let unwritten: AnalyticsCheckpoint | undefined;
@@ -2683,7 +2703,7 @@ export function createAnalyticsSnapshotCache(deps: AnalyticsSnapshotCacheDeps): 
       unwrittenProgress = next;
       return;
     }
-    writeAnalyticsProgress(deps.stateDir, next);
+    writeAnalyticsProgress(stateDir, next);
     progressWrittenAt = nowMs;
     unwrittenProgress = undefined;
   };
@@ -2693,10 +2713,213 @@ export function createAnalyticsSnapshotCache(deps: AnalyticsSnapshotCacheDeps): 
       unwritten = next;
       return;
     }
-    writeAnalyticsCheckpoint(deps.stateDir, next);
+    writeAnalyticsCheckpoint(stateDir, next);
     checkpointWrittenAt = nowMs;
     unwritten = undefined;
   };
+
+  return {
+    boot: () => bootSnapshot(checkpoint = readAnalyticsCheckpoint(stateDir)),
+    async refresh(signal, yieldAtMs) {
+      const result = await readSnapshot(stateDir, clock, signal, (checkpoint ??= readAnalyticsCheckpoint(stateDir)), {
+        progress: (progress ??= readAnalyticsProgress(stateDir)),
+        yieldAtMs,
+      });
+      signal.throwIfAborted();
+      if ("progress" in result) {
+        progress = result.progress;
+        persistProgress(result.progress, false);
+        return { kind: "partial", scan: result.scan };
+      }
+      const next = "snapshot" in result ? result.snapshot : result;
+      if ("snapshot" in result) {
+        const sourceReadable = next.benchmarkEvidence?.reason !== "ledger-source-unreadable";
+        if (sourceReadable) checkpoint = result.checkpoint;
+        const hasRetainedEvidence = result.checkpoint.source.archives.length > 0 ||
+          (result.checkpoint.source.live?.size ?? 0) > 0;
+        if (hasRetainedEvidence && sourceReadable) persistCheckpoint(result.checkpoint, false);
+        if (progress !== undefined) clearAnalyticsProgress(stateDir);
+        progress = undefined;
+        unwrittenProgress = undefined;
+      }
+      return { kind: "snapshot", snapshot: next, ...("snapshot" in result && result.scan !== undefined ? { scan: result.scan } : {}) };
+    },
+    flush() {
+      if (unwritten !== undefined) persistCheckpoint(unwritten, true);
+      if (unwrittenProgress !== undefined) persistProgress(unwrittenProgress, true);
+    },
+    shed() {
+      checkpoint = undefined;
+      progress = undefined;
+      unwrittenProgress = undefined;
+    },
+  };
+}
+
+const ANALYTICS_REFRESH_WORKER_KIND = "remudero-analytics-refresh" as const;
+/** A snapshot across the thread boundary: structured clone drops non-enumerable fields, so they travel beside it. */
+interface WireSnapshot { snapshot: AnalyticsSnapshot; hidden: HiddenSnapshotFields }
+type AnalyticsWorkerRequest =
+  | { id: number; op: "flush" | "shed"; stateDir: string }
+  | { id: number; op: "refresh"; stateDir: string; yieldAtMs: number }
+  | { id: number; op: "abort"; target: number };
+type AnalyticsWorkerResult =
+  | { kind: "done" }
+  | { kind: "partial"; scan: AnalyticsScanReport }
+  | { kind: "snapshot"; wire: WireSnapshot; scan?: AnalyticsScanReport };
+type AnalyticsWorkerReply = { id: number; ok: true; result: AnalyticsWorkerResult } | { id: number; ok: false; error: string };
+
+function toWire(snapshot: AnalyticsSnapshot): WireSnapshot {
+  return { snapshot, hidden: { top: hiddenFields(snapshot), routingTelemetry: hiddenFields(snapshot.routingTelemetry) } };
+}
+
+function fromWire(wire: WireSnapshot): AnalyticsSnapshot {
+  restoreHiddenFields(wire.snapshot, wire.hidden.top);
+  restoreHiddenFields(wire.snapshot.routingTelemetry, wire.hidden.routingTelemetry);
+  return wire.snapshot;
+}
+
+/** The worker branch's body, named so the parent can cover it: one engine per state directory, all on this thread. */
+export function serveAnalyticsRefresh(
+  port: { on(event: "message", run: (msg: AnalyticsWorkerRequest) => void): unknown; postMessage(value: AnalyticsWorkerReply): void } | null,
+  makeEngine: (stateDir: string) => AnalyticsRefreshEngine = (stateDir) => createAnalyticsRefreshEngine(stateDir, systemClock,
+    (dir, refreshClock, signal, prior, scan) => scanAnalyticsLedger(dir, refreshClock, signal, prior, { ...scan })),
+): void {
+  const engines = new Map<string, AnalyticsRefreshEngine>();
+  const running = new Map<number, AbortController>();
+  port?.on("message", (msg) => {
+    if (msg.op === "abort") {
+      running.get(msg.target)?.abort(new Error("analytics refresh aborted by its cache"));
+      return;
+    }
+    let engine = engines.get(msg.stateDir);
+    if (engine === undefined) engines.set(msg.stateDir, (engine = makeEngine(msg.stateDir)));
+    const reply = (result: AnalyticsWorkerResult): void => port.postMessage({ id: msg.id, ok: true, result });
+    const fail = (error: unknown): void => port.postMessage({ id: msg.id, ok: false, error: errorText(error) });
+    const yieldAtMs = msg.op === "refresh" ? msg.yieldAtMs : 0;
+    const work = (): Promise<AnalyticsWorkerResult> => {
+      if (msg.op === "flush") { engine.flush(); return Promise.resolve({ kind: "done" }); }
+      if (msg.op === "shed") { engine.shed(); return Promise.resolve({ kind: "done" }); }
+      const controller = new AbortController();
+      running.set(msg.id, controller);
+      return engine.refresh(controller.signal, yieldAtMs)
+        .then((outcome): AnalyticsWorkerResult => outcome.kind === "partial" ? outcome
+          : { kind: "snapshot", wire: toWire(outcome.snapshot), ...(outcome.scan !== undefined ? { scan: outcome.scan } : {}) })
+        .finally(() => running.delete(msg.id));
+    };
+    Promise.resolve().then(work).then(reply, fail);
+  });
+}
+
+if (!isMainThread && (workerData as { kind?: unknown } | undefined)?.kind === ANALYTICS_REFRESH_WORKER_KIND) serveAnalyticsRefresh(parentPort);
+
+type AnalyticsWorkerCall = (
+  request: { op: "flush" | "shed"; stateDir: string } | { op: "refresh"; stateDir: string; yieldAtMs: number },
+  signal?: AbortSignal,
+) => Promise<AnalyticsWorkerResult>;
+
+/** One PERSISTENT worker per module URL for every cache in this process. It respawns after it dies; every pending call
+ *  settles exactly once, and the worker holds the process open only while a call is pending. */
+const analyticsWorkers = new Map<string, AnalyticsWorkerCall>();
+
+function startAnalyticsWorker(url: URL): AnalyticsWorkerCall {
+  let worker: Worker | undefined;
+  let nextId = 1;
+  const pending = new Map<number, { resolve: (result: AnalyticsWorkerResult) => void; reject: (error: Error) => void }>();
+  const track = (): void => void (pending.size > 0 ? worker?.ref() : worker?.unref());
+  const failAll = (from: Worker, reason: string): void => {
+    if (from !== worker) return;
+    for (const waiting of pending.values()) waiting.reject(new Error(reason));
+    pending.clear();
+    worker = undefined;
+  };
+  const spawn = (): Worker => {
+    const spawned = new Worker(url, { name: threadName("analyticsRefresh"), workerData: { kind: ANALYTICS_REFRESH_WORKER_KIND } });
+    spawned.on("message", (reply: AnalyticsWorkerReply) => {
+      const waiting = pending.get(reply.id);
+      pending.delete(reply.id);
+      track();
+      if (reply.ok) waiting?.resolve(reply.result);
+      else waiting?.reject(new Error(reply.error));
+    });
+    spawned.on("error", (error) => failAll(spawned, `analytics worker failed: ${errorText(error)}`));
+    spawned.on("exit", (code) => failAll(spawned, `analytics worker exited with code ${code} before reporting`));
+    worker = spawned;
+    return spawned;
+  };
+  return (request, signal) => new Promise<AnalyticsWorkerResult>((resolve, reject) => {
+    let target: Worker;
+    try {
+      target = worker ?? spawn();
+    } catch (error) {
+      reject(error instanceof Error ? error : new Error(errorText(error)));
+      return;
+    }
+    const id = nextId++;
+    const onAbort = (): void => {
+      if (!pending.delete(id)) return;
+      track();
+      target.postMessage({ id: nextId++, op: "abort", target: id } satisfies AnalyticsWorkerRequest);
+      reject(signal?.reason instanceof Error ? signal.reason : new Error("analytics refresh aborted"));
+    };
+    pending.set(id, {
+      resolve: (result) => { signal?.removeEventListener("abort", onAbort); resolve(result); },
+      reject: (error) => { signal?.removeEventListener("abort", onAbort); reject(error); },
+    });
+    track();
+    target.postMessage({ ...request, id } as AnalyticsWorkerRequest);
+    if (signal?.aborted) onAbort();
+    else signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/** W1-T13685: the refresh engine on the shared analytics worker. This thread holds no checkpoint and no fold. */
+export function createWorkerAnalyticsRefreshEngine(stateDir: string, workerUrl?: URL): AnalyticsRefreshEngine {
+  const url = workerUrl ?? bundledWorkerUrl(import.meta.url);
+  let call = analyticsWorkers.get(url.href);
+  if (call === undefined) analyticsWorkers.set(url.href, (call = startAnalyticsWorker(url)));
+  const run = call;
+  return {
+    // The worker reads its own copy at its first refresh; this thread keeps only the snapshot, not the checkpoint.
+    boot: () => bootSnapshot(readAnalyticsCheckpoint(stateDir)),
+    refresh: (signal, yieldAtMs) => run({ op: "refresh", stateDir, yieldAtMs }, signal).then((result): AnalyticsRefreshOutcome => {
+      if (result.kind === "partial") return result;
+      if (result.kind !== "snapshot") throw new Error(`analytics worker answered a refresh with ${result.kind}`);
+      return { kind: "snapshot", snapshot: fromWire(result.wire), ...(result.scan !== undefined ? { scan: result.scan } : {}) };
+    }),
+    flush: () => void run({ op: "flush", stateDir }).catch((error: unknown) => {
+      // Reason: a stop cannot wait; a lost flush leaves the older checkpoint, which the next boot resumes from.
+      void error;
+    }),
+    shed: () => void run({ op: "shed", stateDir }).catch((error: unknown) => {
+      // Reason: a dead worker holds nothing to shed; the next refresh respawns it and reads from disk.
+      void error;
+    }),
+  };
+}
+
+export function createAnalyticsSnapshotCache(deps: AnalyticsSnapshotCacheDeps): AnalyticsSnapshotCache {
+  const clock = deps.clock ?? systemClock;
+  const readSnapshot: AnalyticsSnapshotReader = deps.readSnapshot ?? ((stateDir, refreshClock, signal, priorCheckpoint, scan) =>
+    scanAnalyticsLedger(stateDir, refreshClock, signal, priorCheckpoint, { ...scan }));
+  const refreshIntervalMs = deps.refreshIntervalMs ?? ANALYTICS_REFRESH_INTERVAL_MS;
+  const refreshTimeoutMs = deps.refreshTimeoutMs ?? ANALYTICS_REFRESH_TIMEOUT_MS;
+  const schedule = deps.schedule ?? systemSchedule;
+  const log = deps.log ?? (() => {});
+  let timer: AnalyticsTimer | undefined;
+  let controller: AbortController | undefined;
+  let inFlight: Promise<void> | undefined;
+  let started = false;
+  let stopped = false;
+  let shedPending = false;
+  // W1-T13685: the engine holds the checkpoint and the fold. Off the loop, a worker thread holds them and this thread
+  // receives only each finished snapshot; serve folded, serialized and wrote the ~85 MB checkpoint on its request loop.
+  const engine = deps.offThread === true && deps.readSnapshot === undefined
+    ? createWorkerAnalyticsRefreshEngine(deps.stateDir, deps.workerUrl)
+    : createAnalyticsRefreshEngine(deps.stateDir, clock, readSnapshot);
+  // INVARIANT no-cold-before-load: the persisted snapshot is read here, synchronously, as before; never a cold one first.
+  const booted = engine.boot();
+  let value = booted === undefined ? coldAnalyticsSnapshot() : freezeAnalyticsSnapshot(booted);
 
   const cancelTimer = (): void => {
     timer?.cancel();
@@ -2745,41 +2968,25 @@ export function createAnalyticsSnapshotCache(deps: AnalyticsSnapshotCacheDeps): 
     let operation!: Promise<void>;
     operation = Promise.resolve()
       // Half the bound is the scan's budget; the rest covers the rotation in hand and persisting the fold.
-      .then(() => readSnapshot(deps.stateDir, clock, refreshController.signal, (checkpoint ??= readAnalyticsCheckpoint(deps.stateDir)), {
-        progress: (progress ??= readAnalyticsProgress(deps.stateDir)),
-        yieldAtMs: beganAt + refreshTimeoutMs / 2,
-      }))
-      .then((result) => {
+      .then(() => engine.refresh(refreshController.signal, beganAt + refreshTimeoutMs / 2))
+      .then((outcome) => {
         refreshController.signal.throwIfAborted();
-        if ("progress" in result) {
+        if (outcome.kind === "partial") {
           // Not a snapshot: the prior value stays served, stale and dated, while the fold advances on disk.
-          progress = result.progress;
-          persistProgress(result.progress, false);
           continueAfterMs = Math.max(0, clock.now() - beganAt);
           log("serve.analytics_refresh.partial", {
             duration_ms: continueAfterMs,
             retained_as_of: value.asOf,
-            ...scanFields(result.scan),
+            ...scanFields(outcome.scan),
           });
           return;
         }
-        const next = "snapshot" in result ? result.snapshot : result;
-        if ("snapshot" in result) {
-          const sourceReadable = next.benchmarkEvidence?.reason !== "ledger-source-unreadable";
-          if (sourceReadable) checkpoint = result.checkpoint;
-          const hasRetainedEvidence = result.checkpoint.source.archives.length > 0 ||
-            (result.checkpoint.source.live?.size ?? 0) > 0;
-          if (hasRetainedEvidence && sourceReadable) persistCheckpoint(result.checkpoint, false);
-          if (progress !== undefined) clearAnalyticsProgress(deps.stateDir);
-          progress = undefined;
-          unwrittenProgress = undefined;
-        }
-        value = freezeAnalyticsSnapshot(next);
+        value = freezeAnalyticsSnapshot(outcome.snapshot);
         shedPending = false;
         log("serve.analytics_refresh.completed", {
           duration_ms: Math.max(0, clock.now() - beganAt),
           as_of: value.asOf,
-          ...scanFields("snapshot" in result ? result.scan : undefined),
+          ...scanFields(outcome.scan),
         });
       })
       .catch((error: unknown) => {
@@ -2812,8 +3019,7 @@ export function createAnalyticsSnapshotCache(deps: AnalyticsSnapshotCacheDeps): 
     stopped = true;
     started = false;
     cancelTimer();
-    if (unwritten !== undefined) persistCheckpoint(unwritten, true);
-    if (unwrittenProgress !== undefined) persistProgress(unwrittenProgress, true);
+    engine.flush();
     controller?.abort(new Error("analytics refresh stopped with serve lifecycle"));
   };
 
@@ -2828,9 +3034,7 @@ export function createAnalyticsSnapshotCache(deps: AnalyticsSnapshotCacheDeps): 
     stop,
     shed: () => {
       value = coldAnalyticsSnapshot();
-      checkpoint = undefined;
-      progress = undefined;
-      unwrittenProgress = undefined;
+      engine.shed();
       shedPending = true;
       log("serve.analytics_shed", {});
     },
