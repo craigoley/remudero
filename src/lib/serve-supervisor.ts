@@ -319,6 +319,12 @@ export interface ServeSupervisorOptions {
    */
   spaceFromBoot?: boolean;
   /**
+   * W1-T13744: space the next handoff by the pressure of the handoffs BEFORE the last one, so the handoff just done does
+   * not stretch its own gap. OBSERVED 2026-11-18: one handoff at about 21:02Z after a quiet spell held the next for the
+   * full 4 h cap (wake 01:02Z), never the 2 h base W1-T13303 meant. serve.handoff_done still carries the full pressure.
+   */
+  spaceByEarlierHandoffs?: boolean;
+  /**
    * W1-T13276: one probe of the active generation; resolves with any HTTP status, rejects on a refusal. W1-T13503: defaults
    * to {@link tcpGet} of {@link ACTIVE_PROBE_PUBLIC_PATH} on the serve port, the path the tunnel's connections take.
    */
@@ -754,6 +760,8 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
   let crashes = 0;
   const failed = new Set<string>();
   let pressure: HandoffPressure | undefined;
+  /** W1-T13744: the pressure before the last handoff's +1, decayed to it; read by the spacing under spaceByEarlierHandoffs. */
+  let spacingPressure: HandoffPressure | undefined;
   let lastDoneAt: number | undefined;
   let spacingPending = false;
   /** W1-T13534: when the pending spacing wait re-asks, and how many asks it has absorbed meanwhile. */
@@ -1224,7 +1232,7 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
   const awaitSpacing = (from: Generation, ask: HandoffAsk | undefined): boolean => {
     if (spacingBaseMs <= 0 || lastDoneAt === undefined) return false;
     const now = clock.now();
-    const level = decayedPressure(pressure, now, spacingHalfLifeMs);
+    const level = decayedPressure(opts.spaceByEarlierHandoffs === true ? spacingPressure : pressure, now, spacingHalfLifeMs);
     const spacingMs = handoffSpacingMs(level, spacingBaseMs);
     const waitMs = lastDoneAt + spacingMs - now;
     if (waitMs <= 0) return false;
@@ -1314,7 +1322,8 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
       largestOverlapGeneration = up.generation.id;
     }
     lastDoneAt = clock.now();
-    pressure = { value: decayedPressure(pressure, lastDoneAt, spacingHalfLifeMs) + 1, at: lastDoneAt };
+    spacingPressure = { value: decayedPressure(pressure, lastDoneAt, spacingHalfLifeMs), at: lastDoneAt };
+    pressure = { value: spacingPressure.value + 1, at: lastDoneAt };
     opts.log("serve.handoff_done", {
       fromSha: from.slot.sha, toSha: slot.sha, deps: slot.deps, prepMs, readyMs: up.readyMs, drainMs, peakBytes: largestRss || undefined, pressure: Number(pressure.value.toFixed(3)),
       overlapPeakBytes: measured.overlapPeakBytes, overlapSamples: measured.overlapSamples,
