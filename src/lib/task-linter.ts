@@ -2,7 +2,7 @@ import { operatorReleaseContractChanged } from "./operator-release.js";
 import { createHash } from "node:crypto";
 import { relative, sep } from "node:path";
 import type { AcceptanceCriterion, MachineFilingAdmissionContext, Plan, Task, TaskStatus } from "./plan.js";
-import { PlanError, RETIREMENT_REASONS, machineFilingAdmissionViolations, mergePlanBlobs, unmetDependencies } from "./plan.js";
+import { PlanError, RETIREMENT_REASONS, machineFilingAdmissionViolations, mergePlanBlobs, unmetDependencies, withoutOneMovedFromLine } from "./plan.js";
 import { isInPlanScope } from "./plan-architect.js";
 import {
   isDemonstrationProof,
@@ -4044,21 +4044,23 @@ export function assertDependenciesKnown(tasks: readonly Task[], known: ReadonlyS
 }
 
 /** The tasks whose file has the same bytes as the file at the same path in the code root's plan: moved tasks.
+ *  W1-T13680: a file equal to it once its one moved_from line is removed (the ops gate's strip rule) is moved too.
  *  `root` is the plan checkout that `task.sourcePath` is under. */
 export function movedTaskIds(tasks: readonly Task[], root: string, planFiles: PlanFiles, codeFiles: PlanFiles): Set<string> {
   const moved = new Set<string>();
   for (const task of tasks) {
     if (task.sourcePath === undefined) continue;
     const rel = relative(root, task.sourcePath);
-    const text = planFiles.get(rel);
-    if (text !== undefined && codeFiles.get(rel) === text) moved.add(task.id);
+    const text = planFiles.get(rel), code = codeFiles.get(rel);
+    if (text !== undefined && code !== undefined && (code === text || withoutOneMovedFromLine(text) === code)) moved.add(task.id);
   }
   return moved;
 }
 
 export interface PlanSourceConflict { id: string; planPath: string; codePath: string }
 
-/** The ids that both plans hold with different record bytes, with the path of each record, sorted by id. */
+/** The ids that both plans hold with different record bytes, with the path of each record, sorted by id.
+ *  W1-T13680: a plan record equal to the code root's once its one moved_from line is removed is a move, not a conflict. */
 export function planSourceConflicts(planFiles: PlanFiles, codeFiles: PlanFiles): PlanSourceConflict[] {
   const records = (files: PlanFiles) => {
     const byId = new Map<string, { path: string; block: string }>();
@@ -4069,7 +4071,8 @@ export function planSourceConflicts(planFiles: PlanFiles, codeFiles: PlanFiles):
   const conflicts: PlanSourceConflict[] = [];
   for (const [id, held] of records(planFiles)) {
     const other = code.get(id);
-    if (other !== undefined && other.block !== held.block) conflicts.push({ id, planPath: held.path, codePath: other.path });
+    if (other === undefined || other.block === held.block || withoutOneMovedFromLine(held.block)?.trimEnd() === other.block) continue;
+    conflicts.push({ id, planPath: held.path, codePath: other.path });
   }
   return conflicts.sort((a, b) => a.id.localeCompare(b.id));
 }

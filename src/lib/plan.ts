@@ -134,6 +134,20 @@ function validateSymptomQuery(value: unknown, id: string): SymptomQuery | undefi
   return { pattern, direction };
 }
 
+/** W1-T13680: the ops gate's provenance shape for a moved record (remudero-ops scripts/ops-gate.rb, MOVED_FROM_RE):
+ *  `moved_from: remudero@<40-hex public commit>`. */
+export const MOVED_FROM_VALUE = /^remudero@([0-9a-f]{40})$/;
+/** The ops gate's strip rule (MOVED_FROM_LINE_RE): an indented `moved_from:` line, anywhere in the text. */
+const MOVED_FROM_LINE = /^[ \t]+moved_from:[^\n]*\n?/gm;
+
+/** `text` with its one moved_from line removed, or undefined when it holds none or more than one: the gate
+ *  verifies a move only when exactly one line differs, so two lines are never a move. */
+export function withoutOneMovedFromLine(text: string): string | undefined {
+  let removed = 0;
+  const stripped = text.replace(MOVED_FROM_LINE, () => { removed++; return ""; });
+  return removed === 1 ? stripped : undefined;
+}
+
 export interface Task {
   id: string;
   title: string;
@@ -201,6 +215,9 @@ export interface Task {
   retirement?: RetirementReason;
   /** W1-T9729: the task a retirement hands its origin to; the origin stays held until that task lands. */
   superseded_by?: string;
+  /** W1-T13680: the public commit an ops copy was moved from, as `remudero@<40-hex sha>` on one line of its own
+   *  (the ops gate's shape). Present only on an ops copy; a shared id carrying it is a pending move. */
+  moved_from?: string;
   /** W1-T2920: {@link parseTasksFromYaml}'s `sourceLabel` enables constant-time {@link taskRecordPath}.
    *  Monolith/shard path or git-ref label; optional for hand-built tasks that were never parsed. */
   sourcePath?: string;
@@ -776,6 +793,7 @@ export function parseTasksFromYaml(
       files: Array.isArray(e.files) ? (e.files as string[]) : undefined,
       retirement,
       superseded_by: supersededBy,
+      ...(typeof e.moved_from === "string" ? { moved_from: e.moved_from } : {}),
       // W1-T2920: capture provenance once so taskRecordPath needs no reread (see Task.sourcePath).
       sourcePath: sourceLabel,
       ...(e.needs_input !== undefined ? { needs_input: readNeedsInput(e.needs_input) } : {}),
