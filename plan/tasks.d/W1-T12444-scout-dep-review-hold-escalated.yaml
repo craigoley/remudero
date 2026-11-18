@@ -21,3 +21,11 @@
     The ledger step dep-review.hold_escalated carries a failure shape and landed rows in both halves of the trailing 7 days: 1 in the older half, 3 in the newer.
     No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
     The rows name no file; tracked source literals locate this step in: src/lib/dep-review.ts. Start there.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.98
+    reasons:
+      - "high-risk verdict at confidence 0.98 — on the change's description/files alone, no diff was read — The filing reports four dep-review.hold_escalated rows and locates the event literal in src/lib/dep-review.ts. It supplies zero PR references and no per-event evidence from which to verify a shared cause, yet requests an implementation to stop recurrence across the class.; on the change's description/files alone, no diff was read — The sole acceptance proof is a grep for a proposed test declaration, which can verify the declaration's presence but cannot establish that the test runs or that the underlying cause is fixed."
+    judged_at: "2026-11-18T16:14:04.829Z"
+    pin: "9adae3f2dfffcfd878f3694c26616f562c97ecd2562d1e1f28722022c2136412"
