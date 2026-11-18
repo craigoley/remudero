@@ -381,9 +381,11 @@ export class ProductPlanOperationService {
       const sameBrief = Object.values(journal.operations).filter((entry) => entry.productId === product.id &&
         entry.objectiveRevision === product.objectiveRevision && entry.briefDigest === briefDigest);
       // The same product, objective and brief never gets a second plan while one is in flight or its fate is unknown.
+      // A refused operation is resolved: once the target head moves, a fresh request plans again at the new head.
       const reusable = journal.operations[operationId] ?? sameBrief.find((entry) => {
         const state = this.state(entry, product, head);
-        return state === "pending" || state === "unknown" || state === "stale-target";
+        if (state === "stale-target") return this.state(entry, product, undefined) !== "refused";
+        return state === "pending" || state === "unknown";
       });
       if (reusable) {
         record = reusable;
