@@ -1,0 +1,62 @@
+- id: W1-T13685
+  title: "Serve's analytics cache folds the ledger, builds the snapshot and writes the checkpoint on a worker thread, so a refresh and a stop no longer hold serve's request loop"
+  repo: remudero
+  depends_on: []
+  priority: 0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # which thread folds analytics and writes its ~85 MB checkpoint; the served snapshot and the boot read are unchanged
+  band_meaning: span
+  origin: "operator-session#serve-oom-2026-11-16"
+  plan_refs:
+    - W1-T13174
+    - W1-T13483
+    - W1-T13667
+  files:
+    - src/lib/analytics-route.ts
+    - src/lib/serve.ts
+    - src/lib/instance-gateway.ts
+    - src/lib/thread-names.ts
+    - test/console-api/serve/the-analytics-fold-runs-off-the-request-loop.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "With offThread, the fold and its checkpoint write run on the worker; this thread serializes no checkpoint-sized text"
+      proof: "grep: W1-T13685: the fold and its checkpoint write run off this thread in test/console-api/serve/the-analytics-fold-runs-off-the-request-loop.test.ts"
+    - claim: "A refresh of a bench-sized ledger spends under 500 ms of this thread's CPU (3,174 ms in-process), which bounds every turn on it"
+      proof: "grep: W1-T13685: a refresh of a bench-sized ledger spends under 500 ms in test/console-api/serve/the-analytics-fold-runs-off-the-request-loop.test.ts"
+    - claim: "stop() serializes nothing on this thread, and the worker writes the held-back checkpoint"
+      proof: "grep: W1-T13685: stop() writes the held-back checkpoint on the worker in test/console-api/serve/the-analytics-fold-runs-off-the-request-loop.test.ts"
+    - claim: "invariant:no-cold-before-load — a cache built over a saved checkpoint serves that snapshot before any refresh, never a cold one"
+      kind: guard
+      proof: "grep: W1-T13685: invariant:no-cold-before-load in test/console-api/serve/the-analytics-fold-runs-off-the-request-loop.test.ts"
+    - claim: "Serve and every instance cache run off the loop"
+      proof: "grep: offThread: true in src/lib/serve.ts"
+  rationale: |
+    WHY: Craig wants serve under 0.3 cores even while the Console is open, and the Inbox still times out during
+    serve's main-loop stalls.
+    MEASURED on 2026-11-18: analytics frames (scanAnalyticsLedger, snapshotFromAccumulator, writeJsonAtomic,
+    writeAnalyticsCheckpoint, hydrateCheckpointState) were in 107 of 619 serve main-thread stalls, 202 of 851 s, in
+    the two hours to 12:15Z. A core resume refresh takes about 5 s wall, mostly on the loop. On a copy of the Azure
+    core ledger (1.9 GB) and checkpoint (84 MB): in-process, a refresh held the loop up to 1.1 to 1.9 s per turn and
+    stop() blocked 3.6 s; with the worker, the worst loop gap was 102 to 123 ms (host load) and stop() 0 ms.
+    WHAT THIS DOES THAT W1-T13667 DOES NOT: W1-T13667 keeps an anchored checkpoint so a refresh resumes instead of
+    rescanning; it does not change which thread folds, serializes or writes. This task moves that work off the loop.
+    Whichever lands second carries the other's completed-fold branch into its own code; the engine below is the
+    cache's former body moved unchanged, so the rebase is mechanical.
+  design: |
+    INVARIANT no-cold-before-load: the cache reads the saved snapshot synchronously at construction, before serve
+    listens, as before; the worker reads its own copy at its first refresh.
+    1. createAnalyticsRefreshEngine holds the checkpoint, the fold and the throttled writes (the cache's former body).
+    2. createWorkerAnalyticsRefreshEngine runs that engine on one shared worker thread per process (one engine per state
+       dir); refresh, flush (stop) and shed are messages; an abort reaches the worker's refresh. A snapshot crosses with
+       its non-enumerable fields beside it. The worker respawns after it dies.
+    3. createAnalyticsSnapshotCache takes offThread (ignored with an injected readSnapshot); serve.ts and
+       instance-gateway.ts pass it.
+  falsifier: |
+    The fold or write on this thread: criteria 1 and 2 fail. stop() writes here: criterion 3 fails. A cold snapshot
+    before the first refresh: criterion 4 fails.
+  note: |
+    Id reserved for run-unfiled-1795004145095 with ~/rmd-work/bin/reserve-id.sh.

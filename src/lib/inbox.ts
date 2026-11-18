@@ -1654,6 +1654,8 @@ export function inboxDraftPrompt(proposal: Proposal, currentPlanText: string, ru
       "First check whether releasing this shard as it stands satisfies the proposal and every reframe round.",
       `Whenever the reframe rounds do not ask for different work, print RELEASE: ${parked.id} instead of a FRAGMENT.`,
       "A RELEASE files no new task. Do not rewrite this shard as invented new tasks.", ""] : []),
+    ...(parkedProposalTaskId(proposal.id) ? ["Approving this ask IS the operator's human judgment, so every task you file is",
+      "`verify: auto` with proofs an agent can run. A `verify: human` task re-asks the question and never dispatches.", ""] : []),
     "=== GROUND ===",
     "Grep/Read MASTER-PLAN.md, LEARNINGS.md, and DECISIONS.md for what is already decided; an",
     "INDEX of the current plan/tasks.yaml is pasted below so you cite REAL existing task ids in",
@@ -2301,6 +2303,35 @@ export function draftFilingLintOptions(facts: DraftRepoFacts, knownRepos?: Reado
     moduleExists: facts.moduleExists, readGrepProofFile: facts.readGrepProofFile, knownRepos };
 }
 
+/** The priority an operator-approved ratification files at when its draft names none. Dispatch sorts ascending and
+ *  reads a missing priority as +Infinity, so an unstamped filing always ran last. 1 sits inside the 0.4..4 band most
+ *  queued tasks use. */
+export const RATIFIED_TASK_DEFAULT_PRIORITY = 1;
+
+/** Give every drafted task that names no `priority` the {@link RATIFIED_TASK_DEFAULT_PRIORITY}, inserted as its own
+ *  line right after the task's `id`, so no other byte of the draft moves. A priority the draft states is kept. A
+ *  fragment that does not parse as a sequence comes back unchanged, for the lint that follows to refuse. */
+export function stampDraftedPriority(fragmentYaml: string, priority: number = RATIFIED_TASK_DEFAULT_PRIORITY): string {
+  const document = parseDocument(fragmentYaml);
+  if (document.errors.length > 0 || !isSeq(document.contents)) return fragmentYaml;
+  const inserts: Array<{ at: number; text: string }> = [];
+  for (const node of document.contents.items) {
+    if (!isMap(node) || node.has("priority")) continue;
+    const first = node.items[0];
+    const keyRange = isNode(first?.key) ? first.key.range : undefined;
+    const valueRange = isNode(first?.value) ? first.value.range : undefined;
+    if (!keyRange || !valueRange) continue;
+    const lineStart = fragmentYaml.lastIndexOf("\n", keyRange[0] - 1) + 1;
+    const indent = " ".repeat(keyRange[0] - lineStart);
+    const lineEnd = fragmentYaml.indexOf("\n", valueRange[1]);
+    if (lineEnd < 0) inserts.push({ at: fragmentYaml.length, text: `\n${indent}priority: ${priority}` });
+    else inserts.push({ at: lineEnd + 1, text: `${indent}priority: ${priority}\n` });
+  }
+  let stamped = fragmentYaml;
+  for (const { at, text } of inserts.sort((a, b) => b.at - a.at)) stamped = `${stamped.slice(0, at)}${text}${stamped.slice(at)}`;
+  return stamped;
+}
+
 /** W1-T9039: a drafted `status: blocked` with no legal retirement is the plan index copied, so the harness queues it. */
 export function queueDraftedBlockedTasks(fragmentYaml: string): string {
   const document = parseDocument(fragmentYaml);
@@ -2350,6 +2381,13 @@ export function lintDraftedFragment(
       if (directory(path)) violations.push({ check: "draft-directory-files", severity: "block",
         message: `${task.id} files entry ${JSON.stringify(path)} is a directory${directoryGuidance}` });
     }
+    // An approval of a verify-human, verify-human-automate or machine-judge ask IS the operator's judgment. A task it
+    // files as `verify: human` re-asks the same question, and drain's isDispatchEligible holds it as verify-not-auto
+    // until a second release, so the approved work never runs (W1-T13650, 2026-11-18).
+    if (task.verify === "human" && parkedProposalTaskId(proposalId) !== undefined) violations.push({
+      check: "draft-human-ask-repeated", severity: "block",
+      message: `${task.id} is verify: human, but approving ${proposalId} already gives the human judgment; file it verify: auto ` +
+        "with proofs an agent can run, or RELEASE the parked task when no new work is needed" });
     for (const criterion of task.acceptance ?? []) {
       const path = /^grep:\s*[\s\S]*\s+in\s+(\S+)\s*$/i.exec(criterion.proof.trim())?.[1];
       if (path && directory(path)) violations.push({ check: "draft-directory-grep", severity: "block",
