@@ -26,6 +26,7 @@ import { ghIssueGateway, tryEscalate, type EscalateDeps, type Escalation, type I
 import { createHostView, HOST_VIEW_NAME, hostViewConfig, type HostViewConfig } from "./host-view.js";
 import { createIncidentsView, INCIDENTS_VIEW_NAME } from "./incidents-view.js";
 import { createInboxThreadView, INBOX_THREAD_VIEW_NAME } from "./inbox-thread-view.js";
+import { createInboxThreadsView, INBOX_THREADS_VIEW_NAME } from "./inbox-threads-view.js";
 import { createInstancesView, INSTANCES_VIEW_NAME, INSTANCES_QUALIFICATION_GENERATION } from "./instances-view.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { FUTURE_ROW_TOLERANCE_MS, LEDGER_PROJECTOR_SCHEMA_VERSION, createLedgerProjector, openProjectorReadModel, type LedgerProjector, type ProjectorTickResult } from "./ledger-projector.js";
@@ -503,6 +504,8 @@ export const READ_MODEL_VIEW_READERS: ReadModelViewReaders = {
   // W1-T13455: served by default since W1-T13282, but never rebuilt with no switch entry: on 2026-11-17 the Console read
   // an agent body built from the ledger of 2026-11-10 (stale for 7 days).
   [AGENT_VIEW_NAME]: [{ consumer: "GET /v1/views/agent", reader: "serve.ts servedByDefault" }],
+  // W1-T13456: served with no switch entry, so it is built with none.
+  [INBOX_THREADS_VIEW_NAME]: [{ consumer: "GET /v1/views/inbox-threads", reader: "serve.ts servedByDefault" }],
 };
 
 function readModelViewRead(view: string, switches: ReadModelSwitches, readers: ReadModelViewReaders, seen: Set<string>): boolean {
@@ -2293,6 +2296,7 @@ export function readModelLaneViews(
     { name: INSTANCES_VIEW_NAME, qualificationGeneration: INSTANCES_QUALIFICATION_GENERATION, create: () => createInstancesView({ instances, ...data.registry, ledgerSource }) },
     { name: TASK_VIEW_NAME, demand: true, create: () => createTaskView({ instances, ledgerSource, clock, demand, log }) },
     { name: INBOX_THREAD_VIEW_NAME, demand: true, create: () => createInboxThreadView({ ...(data.inboxRoot ? { inboxRoot: data.inboxRoot } : {}), clock, demand, log }) },
+    { name: INBOX_THREADS_VIEW_NAME, create: () => createInboxThreadsView({ ...(data.inboxRoot ? { inboxRoot: data.inboxRoot } : {}), log }) },
     { name: WORKSTREAMS_VIEW_NAME, create: () => createWorkstreamsView({ instances, ledgerSource, clock, log }) },
     { name: ACTIONS_VIEW_NAME, create: () => createActionsView({ instances, ledgerSource }) },
     { name: HOST_VIEW_NAME, create: () => createHostView({ ...(data.host ? { config: data.host } : {}), ledgerSource, clock }) },

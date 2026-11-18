@@ -110,6 +110,7 @@ export interface Config {
       allowedOrigins: string[];
       operatorUserIds: string[];
       stepUpWindowMinutes?: number;
+      requireStepUp?: boolean;
     };
   };
   relay?: { url?: string; token?: string };
@@ -429,6 +430,7 @@ export const CONFIG_SCHEMA: readonly ConfigFieldSchema[] = [
           configField("allowedOrigins", "string[]", false, undefined, "config.json", "Console origins accepted in azp.", stringArrayShape),
           configField("operatorUserIds", "string[]", false, undefined, "config.json", "Clerk user ids allowed to act.", stringArrayShape),
           configField("stepUpWindowMinutes", "number", true, 10, "config.json", "Minutes a verified factor keeps high tier.", numberShape),
+          configField("requireStepUp", "boolean", true, false, "config.json", "When true, high tier needs a recent verified factor; off, sign-in is the only gate.", booleanShape),
         ],
       }),
     ],

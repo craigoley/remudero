@@ -42,7 +42,7 @@ import { isWorkerProviderId, type WorkerProviderId } from "./config.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
 import { INSTALLATION_SHARE_DIVISOR_ENV, runChildInstallationEnv } from "./installation-budget-start.js";
 import { killProcessGroup } from "./worker-containment.js";
-import { execFileLoopBounded } from "./loop-bounded-child.js";
+import { execFileRouted } from "./spawn-helper.js";
 import type { ReviewerCodeFreshness } from "./self-sync.js";
 
 export const RUN_CHILD_SHADOW_STEP = "run_child.shadow";
@@ -55,7 +55,7 @@ export const DETACHED_WORK_CAPABILITY = "detached-work-v1";
 
 async function requireDetachedWorkEntry(launch: EngineChildLaunch, kind: DetachedWorkKind): Promise<void> {
   // No --run-dir: an older entry must never mistake this capability query for permission to run a build.
-  const { stdout } = await execFileLoopBounded(process.execPath, [...launch.argv, "--detached-work-capability", kind], {
+  const { stdout } = await execFileRouted(process.execPath, [...launch.argv, "--detached-work-capability", kind], {
     cwd: launch.cwd, encoding: "utf8", timeout: PROBE_TIMEOUT_MS, maxBuffer: STDERR_TAIL_BYTES,
   }).catch((error: unknown) => {
     throw new Error(`detached-work capability unavailable: ${reasonOf(error)}`);

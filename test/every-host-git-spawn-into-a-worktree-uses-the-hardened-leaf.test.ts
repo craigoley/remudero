@@ -361,6 +361,8 @@ function childProcessPrimitives(code: string): Set<string> {
   }
   // W1-T9651: the loop-bounded execFile is execFile with a loop-available budget, not a git helper.
   if (/import\s*\{[^}]*\bexecFileLoopBounded\b[^}]*\}\s*from\s*["'][./]*(?:lib\/)?loop-bounded-child\.js["']/.test(code)) names.add("execFileLoopBounded");
+  // W1-T11369: execFileRouted is execFileLoopBounded through the spawn helper.
+  if (/import\s*\{[^}]*\bexecFileRouted\b[^}]*\}\s*from\s*["'][./]*(?:lib\/)?spawn-helper\.js["']/.test(code)) names.add("execFileRouted");
   return names;
 }
 

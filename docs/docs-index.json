@@ -338,6 +338,12 @@
       "grepHint": "Forensics: scripts/coverage-merge-ratchet.mjs hand fixes"
     },
     {
+      "path": "docs/forensics/coverage-merge-shard-line-outside-aggregate.md",
+      "title": "Coverage merge: a shard hit outside the aggregate's line list",
+      "summary": "A shard whose only loads of the scanner are native-shaped child processes reports `DA:23`; the aggregate cannot list it.",
+      "grepHint": "Coverage merge: a shard hit outside the aggregate's line list"
+    },
+    {
       "path": "docs/forensics/coverage-session-blanking-check.md",
       "title": "coverage-session-blanking-check.mjs comment forensics",
       "summary": "The measured incidents, design arguments and rejected alternatives that were removed from",
