@@ -81,7 +81,12 @@ const blobOf = (text: string): string => { const b = Buffer.from(text); return c
 /** The original bytes plus one moved_from line after the id line, or unknown when the record has no plain id line. */
 export function withMovedFromLine(original: string, id: string, publicCommit: string): string {
   const lines = original.split(/(?<=\n)/);
-  const at = lines.findIndex(line => new RegExp(`^- id:[ \\t]*${id.replace(/[-]/g, "\\-")}[ \\t]*\\r?\\n?$`).test(line));
+  // The id line is matched as text, never compiled into a RegExp, so no character of the id can act as a pattern.
+  const isIdLine = (line: string): boolean => {
+    const body = line.replace(/\r?\n?$/, "");
+    return body.startsWith("- id:") && body.slice("- id:".length).replace(/^[ \t]*/, "").replace(/[ \t]*$/, "") === id;
+  };
+  const at = lines.findIndex(isIdLine);
   const indent = /^([ \t]+)\S/.exec(lines[at + 1] ?? "")?.[1];
   if (at < 0 || indent === undefined) return unknown("copy_shape");
   const copy = [...lines.slice(0, at + 1), `${indent}moved_from: remudero@${publicCommit}\n`, ...lines.slice(at + 1)].join("");
