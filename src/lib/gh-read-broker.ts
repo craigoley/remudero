@@ -1606,9 +1606,6 @@ async function installedBrokerWarning(env: NodeJS.ProcessEnv, checkout: string):
     });
     const head = (await git(["rev-parse", "--verify", "HEAD^{commit}"])).stdout.trim();
     if (!commit.test(head) || installed === head) return undefined;
-    const stamp = join(cache, `warned-install-drift-${head}`);
-    if (existsSync(stamp)) return undefined;
-
     // Include paths added since installation and keep pre-manifest installs comparable.
     const manifest = join(copies, installed, "source-paths");
     const installedPaths = existsSync(manifest) ? readFileSync(manifest, "utf8") : "";
@@ -1618,6 +1615,7 @@ async function installedBrokerWarning(env: NodeJS.ProcessEnv, checkout: string):
       .then(() => false, (error: { code?: number | string }) => error.code === 1);
     if (!changed) return undefined;
     mkdirSync(cache, { recursive: true, mode: 0o700 });
+    const stamp = join(cache, `warned-install-drift-${head}`);
     writeFileSync(stamp, "", { flag: "wx", mode: 0o600 });
     const installer = join(checkout, "deploy/mac/install-gh-read-broker.sh").replaceAll("'", "'\\''");
     return `rmd gh: installed Mac broker ${installed.slice(0, 12)} differs from checkout ${head.slice(0, 12)}. Reinstall it: bash '${installer}'\n`;
