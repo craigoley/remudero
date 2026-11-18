@@ -20,7 +20,7 @@ import { buildFreshTreeReviewRunner, freshOriginMainTreeRunner, type FreshTreeTo
 import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 /** One bare origin and two clones of it (the daemon's and serve's), both at the same main sha. */
-function twoClonesOneRoot(): { daemon: GitRepo; serve: GitRepo; sha: string; root: string } {
+function daemonAndServeSharingOneRoot(): { daemon: GitRepo; serve: GitRepo; sha: string; root: string } {
   const origin = gitRepo({ bare: true, kind: "approve-tree-origin" });
   const author = gitRepo({ kind: "approve-tree-author" });
   author.addRemote("origin", origin.dir);
@@ -47,7 +47,7 @@ function seams(repo: GitRepo, root: string, sha: string, extra: Partial<FreshTre
 const approveTrees = (root: string) => readdirSync(root).filter((name) => name.startsWith("approve-") && !name.endsWith(".lock"));
 
 test("an approve at a sha another clone's leftover tree already names still runs", { timeout: 60_000 }, async () => {
-  const { daemon, serve, sha, root } = twoClonesOneRoot();
+  const { daemon, serve, sha, root } = daemonAndServeSharingOneRoot();
   // The daemon's approve is refused by its child, the 03:54Z adoption approve's shape.
   const refused = await freshOriginMainTreeRunner(daemon.dir, seams(daemon, root, sha))(async () => {
     throw new Error("ratify.approve_refused: duplicate");
@@ -70,7 +70,7 @@ test("an approve at a sha another clone's leftover tree already names still runs
 });
 
 test("two concurrent approves at one sha each run in their own tree", { timeout: 60_000 }, async () => {
-  const { daemon, sha, root } = twoClonesOneRoot();
+  const { daemon, sha, root } = daemonAndServeSharingOneRoot();
   const runner = freshOriginMainTreeRunner(daemon.dir, seams(daemon, root, sha));
   let release!: () => void;
   const barrier = new Promise<void>((resolve) => { release = resolve; });
@@ -87,7 +87,7 @@ test("two concurrent approves at one sha each run in their own tree", { timeout:
 });
 
 test("an attempt's failed tree removal never replaces the attempt's outcome", { timeout: 60_000 }, async () => {
-  const { daemon, sha, root } = twoClonesOneRoot();
+  const { daemon, sha, root } = daemonAndServeSharingOneRoot();
   const removed: string[] = [];
   const runner = freshOriginMainTreeRunner(daemon.dir, seams(daemon, root, sha, {
     removeWorktree: (_dir, path) => { removed.push(path); throw new Error("worktree remove: busy"); },
@@ -98,7 +98,7 @@ test("an attempt's failed tree removal never replaces the attempt's outcome", { 
 });
 
 test("an approve whose add fails removes nothing it did not make", { timeout: 60_000 }, async () => {
-  const { daemon, sha, root } = twoClonesOneRoot();
+  const { daemon, sha, root } = daemonAndServeSharingOneRoot();
   const removed: string[] = [];
   const runner = freshOriginMainTreeRunner(daemon.dir, seams(daemon, root, sha, {
     addWorktree: () => { throw new Error("fatal: add refused"); },
@@ -109,7 +109,7 @@ test("an approve whose add fails removes nothing it did not make", { timeout: 60
 });
 
 test("a reviewer tree's stable path held by a directory its clone does not register is cut beside it", { timeout: 60_000 }, async () => {
-  const { daemon, serve, sha, root } = twoClonesOneRoot();
+  const { daemon, serve, sha, root } = daemonAndServeSharingOneRoot();
   const stable = join(root, `reviewer-${sha.slice(0, 12)}`);
   daemon.git("worktree", "add", "--detach", stable, sha); // registered by the OTHER clone
   const spawnedIn: string[] = [];
