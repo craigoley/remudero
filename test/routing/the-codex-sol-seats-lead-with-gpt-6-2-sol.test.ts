@@ -19,14 +19,15 @@ const ORIGIN_SOL_ROWS: Record<(typeof SOL_TIERS)[number], string[]> = {
   balanced: [SOL61, "gpt-6-sol", "gpt-5.6-sol"],
   frontier: [SOL61, "gpt-6-sol", "gpt-5.6-sol", "gpt-5.5"],
 };
-// Everything the bump must leave alone, copied from the committed table at the same base.
+// The Codex economy rows remain as they stood on origin/main.
 const ORIGIN_CODEX_ECONOMY = {
   low: ["gpt-5.3-codex-spark", "gpt-6-luna", "gpt-5.6-luna", "gpt-5.4-mini"],
   medium: ["gpt-6-luna", "gpt-5.3-codex-spark", "gpt-5.6-luna", "gpt-5.4-mini"],
   high: ["gpt-5.3-codex-spark", "gpt-6-luna", "gpt-5.6-luna", "gpt-5.4-mini"],
 };
 const CASH_ECONOMY = ["gpt-oss-120b", "gpt-5-nano", "gpt-6-luna", "gpt-5.6-luna", "claude-haiku-5-5"];
-const CASH_BALANCED = ["gpt-5-nano", "gpt-oss-120b", "gpt-6-luna", "gpt-5.6-luna", "gpt-6.1-terra", SOL61];
+// Cash keeps its prior order with Sol 6.2 inserted directly before Sol 6.1.
+const CASH_BALANCED = ["gpt-5-nano", "gpt-oss-120b", "gpt-6-luna", "gpt-5.6-luna", "gpt-6.1-terra", SOL62, SOL61];
 const CASH_FRONTIER = ["gpt-6-luna", "gpt-5.6-luna", "gpt-6.1-terra", "gpt-5.6-terra"];
 const ORIGIN_CASH = {
   economy: { low: CASH_ECONOMY, medium: CASH_ECONOMY, high: CASH_ECONOMY },
@@ -106,10 +107,10 @@ test("W1-T13445 criterion 2: selectCodexModel serves gpt-6.2-sol when the accoun
   assert.equal(picks, 12, "twelve sonnet/opus requests were replayed");
 });
 
-test("W1-T13445 criterion 3: invariant:only-the-sol-version-moves", () => {
+test("W1-T13445 criterion 3: cash inserts Sol 6.2 before Sol 6.1; all other rows stay unchanged", () => {
   const table = ladder();
   assert.deepEqual(table.codex.economy, ORIGIN_CODEX_ECONOMY, "the Codex economy rows are as on origin/main");
-  assert.deepEqual(table.cash, ORIGIN_CASH, "every cash row is as on origin/main");
+  assert.deepEqual(table.cash, ORIGIN_CASH, "the cash rows add Sol 6.2 immediately ahead of Sol 6.1");
   assert.deepEqual(table.providerPreference, { frontier: "claude" });
   assert.deepEqual(table.rolePreference, { reviewer: "claude" });
   assert.deepEqual(table.subscriptionOnly, ["frontier"]);

@@ -406,6 +406,8 @@ export function buildInstanceGatewayRoutes(coreRoutes: readonly Route[], opts: I
         // No core snapshot or core reader is passed across this boundary. Each cache reads only
         // the mounted instance's state/ ledger union and owns its own 15-minute refresh timer.
         const cache = createAnalyticsSnapshotCache({
+          // W1-T13685: each instance's fold runs on the shared analytics worker, not serve's request loop.
+          offThread: true,
           stateDir: join(root.root, "state"),
           log: (step, extra) => opts.log?.(step, { ...extra, instance: instance.name, repository: instance.repo }),
         });

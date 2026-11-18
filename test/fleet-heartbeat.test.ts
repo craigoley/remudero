@@ -27,7 +27,7 @@
  * and the guard must fail. The substitution target is asserted UNIQUE before each mutation.
  */
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import childProcess, { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -51,32 +51,30 @@ function sub(call: Call): string {
   return call.argv[i] ?? "";
 }
 
-// `fleet-heartbeat.sh` runs as a REAL bash subprocess (`spawnSync("bash", ...)`, `runBeat` below)
-// and computes its own "now" through a REAL `date -u` call (`epoch_of`'s GNU/BSD branches, and
-// every stub above that falls through to the platform `date` binary) — a syscall the probe
-// cannot reach, since `scripts/clock-shift.mjs` monkeypatches only THIS process's global `Date`,
-// never a child process's. Building these fixtures from `new Date()` under a shift stamped every
-// ledger row's `ts` days into the FUTURE relative to the script's own real clock, so
-// `now_epoch - epoch_of(ts)` went NEGATIVE (measured: `-604739` at +7d) instead of a real age —
-// the ledger-`ts`-vs-reader-clock mismatch #2250 fixed, except here the reader is a subprocess no
-// injected JS clock can shift at all. Deriving NOW from the SAME real `date -u` the script itself
-// calls keeps the fixture's clock and the subject's clock the same one, regardless of shift.
-const NOW = new Date(String(spawnSync("date", ["-u", "+%Y-%m-%dT%H:%M:%S.000Z"]).stdout).trim());
-// MILLISECONDS ARE KEPT. `appendLedger` writes `new Date().toISOString()`, so every real ledger
-// ts looks like `2026-07-20T08:20:00.000Z`. A fixture that stripped them would exercise a format
-// the script never actually meets — and the BSD branch of `epoch_of` exists precisely because
-// `date -j -f` cannot read a fraction or the trailing Z.
-const iso = (msAgo: number): string => new Date(NOW.getTime() - msAgo).toISOString();
+// `clock-shift.mjs` patches the test process's Date, so read the clock from `date -u` just as
+// the heartbeat subprocess does. Keep milliseconds like appendLedger does.
+function fixtureClock(): (msAgo: number) => string {
+  const now = Date.parse(
+    childProcess.execFileSync("date", ["-u", "+%Y-%m-%dT%H:%M:%S.000Z"], { encoding: "utf8" }).trim(),
+  );
+  return (msAgo) => new Date(now - msAgo).toISOString();
+}
+
+type RelativeRow = readonly [msAgo: number, fields: Record<string, unknown>];
+
+function timestampRows(rows: readonly RelativeRow[], iso = fixtureClock()): string[] {
+  return rows.map(([msAgo, fields]) => JSON.stringify({ ts: iso(msAgo), ...fields }));
+}
 
 /** A ledger whose newest `daemon.`-prefixed line is NOT the last line and NOT the newest line. */
-const MIXED_LEDGER = [
-  `{"ts":"${iso(9 * 60_000)}","step":"daemon.iteration","note":"older daemon line"}`,
+const MIXED_ROWS: readonly RelativeRow[] = [
+  [9 * 60_000, { step: "daemon.iteration", note: "older daemon line" }],
   // The NEWEST daemon line, deliberately NOT last in the file.
-  `{"ts":"${iso(60_000)}","step":"daemon.idle","note":"newest daemon line"}`,
+  [60_000, { step: "daemon.idle", note: "newest daemon line" }],
   // NEWER than every daemon line, but NOT a daemon step — must be ignored.
-  `{"ts":"${iso(0)}","step":"run.start","note":"not a daemon step"}`,
+  [0, { step: "run.start", note: "not a daemon step" }],
   // LAST in the file, but older than the newest daemon line — `sort | tail` must beat append order.
-  `{"ts":"${iso(5 * 60_000)}","step":"daemon.headroom","note":"last line, not newest"}`,
+  [5 * 60_000, { step: "daemon.headroom", note: "last line, not newest" }],
 ];
 
 test("bash -n: the committed script parses", () => {
@@ -93,7 +91,7 @@ test("retired heartbeat-mini exits before reading state or publishing", () => {
 });
 
 test("a beat publishes via git PLUMBING only — no porcelain, so a live checkout is never dirtied", () => {
-  const beat = runBeat({ ledger: MIXED_LEDGER });
+  const beat = runBeat({ ledger: timestampRows(MIXED_ROWS) });
   assert.equal(beat.status, 0, `${beat.stdout}\n${beat.stderr}`);
 
   const subs = beat.calls.map(sub);
@@ -113,7 +111,7 @@ test("a beat publishes via git PLUMBING only — no porcelain, so a live checkou
 });
 
 test("each beat is a PARENTLESS root commit, so the branch stays one commit and never grows", () => {
-  const beat = runBeat({ ledger: MIXED_LEDGER });
+  const beat = runBeat({ ledger: timestampRows(MIXED_ROWS) });
   const commitTree = beat.calls.find((c) => sub(c) === "commit-tree");
   assert.ok(commitTree, "fixture must reach commit-tree");
   assert.ok(
@@ -128,17 +126,34 @@ test("daemon liveness is the MAX ts over daemon.-prefixed steps — not the last
   // MIRRORS `deriveLastPoll` rather than inventing a second rule. The fixture is built so that all
   // three wrong answers are distinguishable: the last LINE is older, the newest LINE is not a
   // daemon step, and only a MAX over the prefix picks the right one.
-  const beat = runBeat({ ledger: MIXED_LEDGER });
+  const iso = fixtureClock();
+  const beat = runBeat({ ledger: timestampRows(MIXED_ROWS, iso) });
   assert.equal(field(beat.published, "daemon_last_ts"), iso(60_000), "the newest daemon. line wins");
   assert.equal(field(beat.published, "daemon_last_step"), "daemon.idle");
   assert.equal(field(beat.published, "daemon_verdict"), "live");
+});
+
+test("W1-T13157 criterion 1: a fixture built after a simulated 15-minute delay still reads one minute old", (t) => {
+  const iso = fixtureClock();
+  const later = iso(-15 * 60_000);
+  const laterEpoch = Date.parse(later) / 1_000;
+  t.mock.method(childProcess, "execFileSync", () => later);
+
+  const beat = runBeat({
+    ledger: timestampRows(MIXED_ROWS),
+    // Advance the beat's clock too, leaving its timestamp parser and stale decision in use.
+    mutate: ['NOW_EPOCH="$(date -u +%s)"', `NOW_EPOCH=${laterEpoch}`],
+  });
+  assert.equal(beat.status, 0, beat.stderr);
+  assert.equal(field(beat.published, "daemon_verdict"), "live");
+  assert.equal(field(beat.published, "daemon_last_age_s"), "60");
 });
 
 test("the beat carries since_prev_beat_s, so the watcher threshold can be fitted to data later", () => {
   // The 30-minute watcher threshold is 6x the 5-minute cadence, chosen on an UNMEASURED
   // distribution. A force-pushed single-commit branch keeps no history of its own, so this field is
   // the ONLY record of the observed gap — a beat without it silently forecloses ever fitting it.
-  const beat = runBeat({ ledger: MIXED_LEDGER });
+  const beat = runBeat({ ledger: timestampRows(MIXED_ROWS) });
   const v = field(beat.published, "since_prev_beat_s");
   assert.ok(v !== undefined && v !== "" && v !== "unknown", `since_prev_beat_s must be present and real, got ${v}`);
   assert.match(v!, /^\d+$/, "and a number of seconds");
@@ -148,7 +163,7 @@ test("a BROKEN INSTALL is reported as broken WHILE still carrying daemon livenes
   // THE THIRD CASE, and the reason this script is bash rather than an rmd verb: an emptied
   // node_modules kills every verb and the launchd supervisor while the already-running daemon keeps
   // serving from resident memory. A verb-based heartbeat goes SILENT here and reads as a power cut.
-  const beat = runBeat({ ledger: MIXED_LEDGER, tsx: false });
+  const beat = runBeat({ ledger: timestampRows(MIXED_ROWS), tsx: false });
   assert.equal(beat.status, 0, "a broken install still publishes a beat — the verdict rides in the payload");
   assert.equal(field(beat.published, "tsx_present"), "no");
   assert.match(field(beat.published, "rmd_verdict") ?? "", /^BROKEN/, "the install is named broken");
@@ -161,7 +176,7 @@ test("a BROKEN INSTALL is reported as broken WHILE still carrying daemon livenes
 });
 
 test("RMD_HEARTBEAT_DRY_RUN=1 prints and exits without touching the remote", () => {
-  const beat = runBeat({ ledger: MIXED_LEDGER, env: { RMD_HEARTBEAT_DRY_RUN: "1" } });
+  const beat = runBeat({ ledger: timestampRows(MIXED_ROWS), env: { RMD_HEARTBEAT_DRY_RUN: "1" } });
   assert.equal(beat.status, 0);
   assert.match(beat.stdout, /beat_ts=/, "it prints the payload");
   assert.equal(beat.calls.filter((c) => sub(c) === "push").length, 0, "and pushes NOTHING");
@@ -172,7 +187,7 @@ test("RMD_HEARTBEAT_DRY_RUN=1 prints and exits without touching the remote", () 
 
 test("MUTANT: a commit-tree that takes a parent is caught", () => {
   const beat = runBeat({
-    ledger: MIXED_LEDGER,
+    ledger: timestampRows(MIXED_ROWS),
     mutate: ['commit-tree "$tree" -m "$SUBJECT"', 'commit-tree -p "$tree" "$tree" -m "$SUBJECT"'],
   });
   const commitTree = beat.calls.find((c) => sub(c) === "commit-tree");
@@ -182,8 +197,9 @@ test("MUTANT: a commit-tree that takes a parent is caught", () => {
 test("MUTANT: keying liveness on ONE daemon step instead of the prefix is caught", () => {
   // The defect the design explicitly avoided — `runDaemon` has no single step that fires every
   // tick, so a single-step rule reports a stale or absent poll on a perfectly live daemon.
+  const iso = fixtureClock();
   const beat = runBeat({
-    ledger: MIXED_LEDGER,
+    ledger: timestampRows(MIXED_ROWS, iso),
     mutate: [`line ~ /"step":"daemon\\./)`, `line ~ /"step":"daemon\\.iteration"/)`],
   });
   assert.notEqual(
@@ -197,8 +213,9 @@ test("MUTANT: keying liveness on ONE daemon step instead of the prefix is caught
 test("MUTANT: taking the LAST daemon line instead of the max is caught", () => {
   // The one-pass union read (ledger_union_answers) keeps a running MAX; the mutant drops the
   // comparison, so every daemon line read simply overwrites the answer — the last line wins.
+  const iso = fixtureClock();
   const beat = runBeat({
-    ledger: MIXED_LEDGER,
+    ledger: timestampRows(MIXED_ROWS, iso),
     mutate: [`if (!haveMax || ts > max) { max = ts; haveMax = 1 }`, `{ max = ts; haveMax = 1 }`],
   });
   assert.equal(
@@ -210,7 +227,7 @@ test("MUTANT: taking the LAST daemon line instead of the max is caught", () => {
 
 test("MUTANT: dropping since_prev_beat_s is caught", () => {
   const beat = runBeat({
-    ledger: MIXED_LEDGER,
+    ledger: timestampRows(MIXED_ROWS),
     mutate: ["since_prev_beat_s=${SINCE_PREV_S:-unknown}\n", ""],
   });
   assert.equal(field(beat.published, "since_prev_beat_s"), undefined, "the mutant must really drop the field");
@@ -218,7 +235,7 @@ test("MUTANT: dropping since_prev_beat_s is caught", () => {
 
 test("MUTANT: a heartbeat that cannot tell a broken install from a healthy one is caught", () => {
   const beat = runBeat({
-    ledger: MIXED_LEDGER,
+    ledger: timestampRows(MIXED_ROWS),
     tsx: false,
     mutate: ['if [ -x "$TSX_PATH" ]; then TSX_PRESENT="yes"; else TSX_PRESENT="no"; fi', 'TSX_PRESENT="yes"'],
   });
@@ -228,7 +245,7 @@ test("MUTANT: a heartbeat that cannot tell a broken install from a healthy one i
 
 test("MUTANT: a dry run that still pushes is caught", () => {
   const beat = runBeat({
-    ledger: MIXED_LEDGER,
+    ledger: timestampRows(MIXED_ROWS),
     env: { RMD_HEARTBEAT_DRY_RUN: "1" },
     mutate: ['if [ "${RMD_HEARTBEAT_DRY_RUN:-}" = "1" ]; then', 'if [ "${RMD_HEARTBEAT_DRY_RUN:-}" = "never" ]; then'],
   });
@@ -272,8 +289,9 @@ const BSD_DATE = [
 ].join("\n");
 
 test("the BSD/macOS branch of epoch_of computes the SAME age the GNU branch does", () => {
-  const gnu = runBeat({ ledger: MIXED_LEDGER });
-  const bsd = runBeat({ ledger: MIXED_LEDGER, dateStub: BSD_DATE });
+  const ledger = timestampRows(MIXED_ROWS);
+  const gnu = runBeat({ ledger });
+  const bsd = runBeat({ ledger, dateStub: BSD_DATE });
   assert.equal(bsd.status, 0, `${bsd.stdout}\n${bsd.stderr}`);
   assert.equal(field(bsd.published, "daemon_verdict"), "live", "the mini must reach the same verdict");
   assert.equal(
@@ -281,8 +299,7 @@ test("the BSD/macOS branch of epoch_of computes the SAME age the GNU branch does
     field(gnu.published, "daemon_last_ts"),
     "and read the same timestamp",
   );
-  // The ages are computed a second apart at worst; equality of the VERDICT is the claim, and the
-  // age must be a real number rather than the `unknown` an unparsed timestamp would produce.
+  // The beats run sequentially, so the ages can differ. Both must read the same timestamp as live.
   assert.match(field(bsd.published, "daemon_last_age_s") ?? "", /^\d+$/, "the BSD branch must parse, not give up");
 });
 
@@ -303,7 +320,7 @@ test("FINDING: a `date` that ACCEPTS -d but ignores it makes every beat report a
     `exec ${SYSTEM_DATE} "$@"`,
     "",
   ].join("\n");
-  const stale = [`{"ts":"${iso(72 * 3600_000)}","step":"daemon.idle","note":"three days old"}`];
+  const stale = timestampRows([[72 * 3600_000, { step: "daemon.idle", note: "three days old" }]]);
 
   const honest = runBeat({ ledger: stale });
   assert.match(field(honest.published, "daemon_verdict") ?? "", /^STALE/, "a three-day-old poll IS stale");
@@ -345,24 +362,21 @@ test("FINDING: a `date` that ACCEPTS -d but ignores it makes every beat report a
 // BOTH DIRECTIONS, DELIBERATELY PAIRED: a change that reported "live" unconditionally would pass
 // the first test and is exactly what the second exists to catch.
 
-/** A daemon that dispatched 21 minutes ago and is STILL INSIDE that dispatch — the live case. */
-const MID_DISPATCH_LEDGER = [
-  `{"ts":"${iso(9000 * 1000)}","step":"daemon.boot","head_sha":"0123456789abcdef0123456789abcdef01234567"}`,
-  `{"ts":"${iso(21 * 60_000)}","step":"daemon.iteration","task":"W1-T409"}`,
-  `{"ts":"${iso(20 * 60_000)}","step":"run.start","task_id":"W1-T409"}`,
-  // The in-dispatch heartbeat: no tick has CLOSED, but the loop is demonstrably running.
-  `{"ts":"${iso(30_000)}","step":"daemon.alive","phase":"dispatch","poll_interval_ms":60000}`,
+/** A daemon that dispatched 21 minutes ago. */
+const DISPATCH_ROWS: readonly RelativeRow[] = [
+  [9_000_000, { step: "daemon.boot", head_sha: "0123456789abcdef0123456789abcdef01234567" }],
+  [21 * 60_000, { step: "daemon.iteration", task: "W1-T409" }],
+  [20 * 60_000, { step: "run.start", task_id: "W1-T409" }],
 ];
 
-/** The SAME dispatch, with the daemon dead: the ticker stopped, so no `daemon.alive` follows. */
-const DIED_MID_DISPATCH_LEDGER = [
-  `{"ts":"${iso(9000 * 1000)}","step":"daemon.boot","head_sha":"0123456789abcdef0123456789abcdef01234567"}`,
-  `{"ts":"${iso(21 * 60_000)}","step":"daemon.iteration","task":"W1-T409"}`,
-  `{"ts":"${iso(20 * 60_000)}","step":"run.start","task_id":"W1-T409"}`,
+/** The in-dispatch heartbeat shows the daemon is still running. */
+const MID_DISPATCH_ROWS: readonly RelativeRow[] = [
+  ...DISPATCH_ROWS,
+  [30_000, { step: "daemon.alive", phase: "dispatch", poll_interval_ms: 60_000 }],
 ];
 
 test("a daemon INSIDE a long dispatch reads LIVE — the busy-versus-dead case that published a false STALE", () => {
-  const beat = runBeat({ ledger: MID_DISPATCH_LEDGER });
+  const beat = runBeat({ ledger: timestampRows(MID_DISPATCH_ROWS) });
   assert.equal(field(beat.published, "daemon_verdict"), "live", "a working daemon must not read STALE");
   assert.equal(field(beat.published, "daemon_last_step"), "daemon.alive", "the in-dispatch row is what won the max");
   assert.match(beat.stdout, /daemon live/, "and the phone-readable subject says so");
@@ -371,16 +385,16 @@ test("a daemon INSIDE a long dispatch reads LIVE — the busy-versus-dead case t
 test("THE OTHER DIRECTION: a daemon that DIED mid-dispatch still reads STALE — the fix does not report live unconditionally", () => {
   // Same 21-minute-old dispatch, minus the liveness row. If this ever reads `live`, the signal has
   // become an unconditional green light, which is worse than the bug it replaced.
-  const beat = runBeat({ ledger: DIED_MID_DISPATCH_LEDGER });
+  const beat = runBeat({ ledger: timestampRows(DISPATCH_ROWS) });
   const v = field(beat.published, "daemon_verdict");
-  assert.ok(v?.startsWith("STALE"), `a dead daemon must still read STALE, got ${v}`);
+  assert.ok(v?.startsWith("STALE"), `W1-T13157 criterion 2: a dead daemon must still read STALE, got ${v}`);
   assert.equal(field(beat.published, "daemon_last_step"), "daemon.iteration", "the newest row is the dispatch itself");
   assert.match(beat.stdout, /daemon STALE/, "and the subject still carries the alarm");
 });
 
 test("MUTANT: a reader that excludes daemon.alive from the prefix is caught — the whole fix rides on that prefix", () => {
   const beat = runBeat({
-    ledger: MID_DISPATCH_LEDGER,
+    ledger: timestampRows(MID_DISPATCH_ROWS),
     mutate: [`line ~ /"step":"daemon\\./)`, `line ~ /"step":"daemon\\.(idle|iteration|headroom)"/)`],
   });
   const v = field(beat.published, "daemon_verdict");
@@ -400,13 +414,13 @@ test("MUTANT: a reader that excludes daemon.alive from the prefix is caught — 
 /** A container-runtime stub that answers the one `inspect --format` line the script asks for. */
 const runtimeStub = (line: string): string => `#!/usr/bin/env bash\nprintf '%s\\n' ${JSON.stringify(line)}\n`;
 
-const FRESH_LEDGER = [
-  `{"ts":"${iso(9_000_000)}","step":"daemon.boot","head_sha":"0123456789abcdef0123456789abcdef01234567"}`,
-  `{"ts":"${iso(45_000)}","step":"daemon.alive","tick":3,"poll_interval_ms":60000}`,
+const FRESH_ROWS: readonly RelativeRow[] = [
+  [9_000_000, { step: "daemon.boot", head_sha: "0123456789abcdef0123456789abcdef01234567" }],
+  [45_000, { step: "daemon.alive", tick: 3, poll_interval_ms: 60_000 }],
 ];
 
 test("the beat carries the container restart budget ALONGSIDE daemon liveness — both, or the field is worthless", () => {
-  const beat = runBeat({ ledger: FRESH_LEDGER, dockerStub: runtimeStub("1 5 on-failure") });
+  const beat = runBeat({ ledger: timestampRows(FRESH_ROWS), dockerStub: runtimeStub("1 5 on-failure") });
   assert.equal(beat.status, 0, "a beat that reads a budget must still publish");
   assert.equal(field(beat.published, "restart_count"), "1");
   assert.equal(field(beat.published, "restart_max"), "5");
@@ -421,7 +435,7 @@ test("an UNREADABLE restart budget is ABSENT, never zero — the reassuring valu
   // No runtime stub: the script is pointed at a path that does not exist, which is exactly what a
   // host without docker looks like. Shadowing `docker` on PATH could not produce this, because the
   // real /usr/bin/docker would still answer `command -v`.
-  const beat = runBeat({ ledger: FRESH_LEDGER });
+  const beat = runBeat({ ledger: timestampRows(FRESH_ROWS) });
   assert.equal(beat.status, 0, "an unreadable budget must not fail the beat");
   assert.equal(field(beat.published, "restart_count"), undefined, "a failed read must publish NO count");
   assert.equal(field(beat.published, "restart_max"), undefined, "and no maximum either");
@@ -433,14 +447,14 @@ test("an UNREADABLE restart budget is ABSENT, never zero — the reassuring valu
 });
 
 test("a runtime that answers with JUNK publishes no count either — a parse failure is a failed read", () => {
-  const beat = runBeat({ ledger: FRESH_LEDGER, dockerStub: runtimeStub("notanumber 5 on-failure") });
+  const beat = runBeat({ ledger: timestampRows(FRESH_ROWS), dockerStub: runtimeStub("notanumber 5 on-failure") });
   assert.equal(field(beat.published, "restart_count"), undefined, "a non-numeric count must be dropped");
   assert.equal(field(beat.published, "restart_max"), undefined, "and the maximum with it — a lone bound is not a budget");
   assert.match(String(field(beat.published, "restart_source")), /gave no numeric RestartCount/);
 });
 
 test("an UNCAPPED policy says `unlimited` — docker reports 0 there, which would read as no restarts left", () => {
-  const beat = runBeat({ ledger: FRESH_LEDGER, dockerStub: runtimeStub("3 0 unless-stopped") });
+  const beat = runBeat({ ledger: timestampRows(FRESH_ROWS), dockerStub: runtimeStub("3 0 unless-stopped") });
   assert.equal(field(beat.published, "restart_count"), "3");
   assert.equal(field(beat.published, "restart_max"), "unlimited", "0 means NO CAP for unless-stopped, not an exhausted one");
   assert.equal(field(beat.published, "restart_policy"), "unless-stopped");
@@ -448,7 +462,7 @@ test("an UNCAPPED policy says `unlimited` — docker reports 0 there, which woul
 
 test("MUTANT: defaulting the restart count to 0 when the read fails is caught", () => {
   const beat = runBeat({
-    ledger: FRESH_LEDGER,
+    ledger: timestampRows(FRESH_ROWS),
     mutate: ["if [ -n \"$RESTART_COUNT\" ]; then", 'RESTART_COUNT="${RESTART_COUNT:-0}"; if true; then'],
   });
   // THE MUTANT MUST PRODUCE THE DEFECT, which is what proves the real guard is load-bearing: with
@@ -469,7 +483,7 @@ test("MUTANT: defaulting the restart count to 0 when the read fails is caught", 
 
 test("the beat names the host it runs on AND carries that host's own ledger reading", () => {
   const beat = runBeat({
-    ledger: FRESH_LEDGER,
+    ledger: timestampRows(FRESH_ROWS),
     hostnameStub: "#!/usr/bin/env bash\nprintf 'test-host-alpha\\n'\n",
     dockerStub: runtimeStub("2 5 on-failure"),
   });
@@ -483,7 +497,7 @@ test("the beat names the host it runs on AND carries that host's own ledger read
 
 test("MUTANT: a beat_host pinned to a constant is caught — a hard-coded name is the defect in miniature", () => {
   const beat = runBeat({
-    ledger: FRESH_LEDGER,
+    ledger: timestampRows(FRESH_ROWS),
     hostnameStub: "#!/usr/bin/env bash\nprintf 'test-host-alpha\\n'\n",
     mutate: ["beat_host=$(hostname 2>/dev/null || printf 'unknown')", "beat_host=Craigs-Mac-mini"],
   });
@@ -496,7 +510,7 @@ test("MUTANT: a beat_host pinned to a constant is caught — a hard-coded name i
 
 test("A DEAD DAEMON STILL PUBLISHES — the beat is the reporter, and a reporter that goes quiet with its subject is useless", () => {
   const beat = runBeat({
-    ledger: [`{"ts":"${iso(8_040_000)}","step":"daemon.iteration","task":"W1-T1"}`],
+    ledger: timestampRows([[8_040_000, { step: "daemon.iteration", task: "W1-T1" }]]),
     hostnameStub: "#!/usr/bin/env bash\nprintf 'test-host-alpha\\n'\n",
     dockerStub: runtimeStub("5 5 on-failure"),
   });
