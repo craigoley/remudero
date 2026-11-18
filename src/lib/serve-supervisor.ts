@@ -91,6 +91,25 @@ export const ACTIVE_PROBE_FAILURES = 3;
 export const ACTIVE_WEDGE_RESTART_FLOOR_MS = 15 * 60_000;
 /** The port the post-mortem socket census reads when the supervisor is not told another. */
 export const ACTIVE_WEDGE_SERVE_PORT = 4317;
+/**
+ * W1-T13503: THE PROBE GOES WHERE THE TUNNEL GOES, the serve port over TCP, never the generation's private socket. The
+ * 2026-11-16 wedge left the generation's loop healthy (runtime.loop_lag p99 60-97 ms, background rows still written)
+ * while 455 connections sat unaccepted on 4317: the private socket has its own listener and would have answered.
+ * The path is unrouted on purpose: serve answers it 404 before any credential check, so the probe carries no token and
+ * writes no `service.unauthorized` row. Any status is an answer (a-slow-answer-is-not-a-wedge).
+ */
+export const ACTIVE_PROBE_PUBLIC_PATH = "/v1/supervisor-probe";
+/** W1-T13503: what the generation's private socket said when the public port went unanswered. */
+type PrivateProbeAnswer = { answered: true; status: number } | { answered: false; error: string };
+/** BACKSTOP (W1-T13503): the private-socket comparison on a wedge row waits at most this long, so a restart is never held up by it; a healthy socket answers in milliseconds. */
+export const ACTIVE_PRIVATE_PROBE_TIMEOUT_MS = 2_000;
+
+/** W1-T13503: the port serve's own arguments bind (`--port N`), or {@link ACTIVE_WEDGE_SERVE_PORT}. */
+export function servePortOf(serveArgs: readonly string[] | undefined, fallback = ACTIVE_WEDGE_SERVE_PORT): number {
+  const at = serveArgs?.indexOf("--port") ?? -1;
+  const port = at >= 0 ? Number(serveArgs?.[at + 1]) : Number.NaN;
+  return Number.isInteger(port) && port > 0 && port < 65_536 ? port : fallback;
+}
 
 const TCP_STATES: Record<string, string> = {
   "01": "ESTABLISHED", "02": "SYN_SENT", "03": "SYN_RECV", "04": "FIN_WAIT1", "05": "FIN_WAIT2", "06": "TIME_WAIT",
@@ -124,6 +143,12 @@ export function socketStatesForPort(port: number, read: (path: string) => string
  * spaced: a supervisor with no handoff yet hands off at once.
  */
 export const SERVE_HANDOFF_SPACING_BASE_MS = 2 * 60 * 60_000;
+/**
+ * BACKSTOP (W1-T13534): the most handoff pressure may stretch the spacing, twice its base. W1-T13303 meant a 2 h
+ * window; OBSERVED 2026-11-17 a wait of 3.45 h (spacingMs 13291701) held a merged fix out of serve. A base set
+ * above it is never cut below that base.
+ */
+export const SERVE_HANDOFF_SPACING_MAX_MS = 2 * SERVE_HANDOFF_SPACING_BASE_MS;
 /** BACKSTOP: the cap on a memory-deferred handoff's retry backoff: the old 15-minute window, kept apart from the spacing above. */
 export const SERVE_HANDOFF_MEMORY_RETRY_CAP_MS = 15 * 60_000;
 /** How fast handoff pressure fades: a handoff an hour ago weighs half of one just done. */
@@ -150,13 +175,14 @@ export function decayedPressure(pressure: HandoffPressure | undefined, now: numb
  * 471 source files, and no src/ merge in that span touched only the other 11.
  *
  * So the gap after a handoff is `base x (1 + pressure)`, where pressure counts the handoffs done
- * and halves every {@link SERVE_HANDOFF_PRESSURE_HALF_LIFE_MS}. No cap and no cliff: a busy fleet
- * settles where the gaps balance the decay (about 1.4 an hour on the measured merges, from 2.8), and
- * a quiet one returns to the base window on its own. The deferred handoff prepares the newest main
- * when it finally runs, so every merge meanwhile rides it.
+ * and halves every {@link SERVE_HANDOFF_PRESSURE_HALF_LIFE_MS}. No cliff: a busy fleet settles where
+ * the gaps balance the decay (about 1.4 an hour on the measured merges, from 2.8), and a quiet one
+ * returns to the base window on its own. W1-T13534 caps the stretch at
+ * {@link SERVE_HANDOFF_SPACING_MAX_MS}, so a self-sync is never held behind main past twice the base.
+ * The deferred handoff prepares the newest main when it finally runs, so every merge meanwhile rides it.
  */
 export function handoffSpacingMs(pressure: number, baseMs: number): number {
-  return baseMs * (1 + Math.max(0, pressure));
+  return Math.min(baseMs * (1 + Math.max(0, pressure)), Math.max(baseMs, SERVE_HANDOFF_SPACING_MAX_MS));
 }
 
 /** One forked generation, as the supervisor sees it. */
@@ -286,13 +312,19 @@ export interface ServeSupervisorOptions {
   /** {@link handoffSpacingMs}'s base; absent or 0, a handoff never waits on the previous one. */
   spacingBaseMs?: number;
   spacingHalfLifeMs?: number;
-  /** W1-T13276: one probe of the active generation; resolves with any HTTP status, rejects on a refusal. Defaults to {@link socketGet}. */
+  /**
+   * W1-T13276: one probe of the active generation; resolves with any HTTP status, rejects on a refusal. W1-T13503: defaults
+   * to {@link tcpGet} of {@link ACTIVE_PROBE_PUBLIC_PATH} on the serve port, the path the tunnel's connections take.
+   */
   activeProbe?: (socketPath: string, path: string, timeoutMs: number) => Promise<{ status: number }>;
+  /** W1-T13503: after an unanswered public probe, one GET of the generation's private socket, recorded on the wedge row. Defaults to {@link socketGet}. */
+  privateProbe?: (socketPath: string, path: string, timeoutMs: number) => Promise<{ status: number }>;
   /** W1-T13276: runs `tick` every `ms` and returns its canceller; defaults to an unref'd interval. */
   every?: (tick: () => void, ms: number) => () => void;
   activeProbeTimeoutMs?: number;
   /** W1-T13276: the post-mortem socket census; defaults to {@link socketStatesForPort} on `servePort`. */
   socketStates?: () => Record<string, number> | undefined;
+  /** W1-T13503: defaults to {@link servePortOf} of `serveArgs`. */
   servePort?: number;
   /** W1-T13304: the hourly serve.cpu_budget row's seams. */
   cpuBudget?: ServeCpuBudgetOptions;
@@ -323,9 +355,15 @@ interface Generation {
   workersShedAt?: number;
 }
 
+/** What a handoff ask says about itself. */
+export interface HandoffAsk {
+  targetSha?: string;
+}
+
 export interface ServeSupervisor {
   start(): Promise<void>;
-  requestHandoff(): Promise<void>;
+  /** `ask.targetSha`, when the asker knows it, names the build it wants; the spacing ledger carries it. */
+  requestHandoff(ask?: HandoffAsk): Promise<void>;
   shutdown(reason: string): Promise<void>;
   /** The sha the active generation runs, for tests and the ledger. */
   activeSha(): string | undefined;
@@ -355,6 +393,21 @@ export function clusterSpawn(command: GenerationCommand, env: Record<string, str
     onExit: (listener) => void worker.on("exit", (code, signal) => listener(code, signal)),
     kill: (signal) => void worker.process.kill(signal),
   };
+}
+
+/** W1-T13503: one HTTP GET over TCP to this container's own serve port, the accept queue the tunnel's connections enter. */
+export function tcpGet(port: number, path: string, timeoutMs = 30_000, host = "127.0.0.1"): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const req = request({ host, port, path, agent: false, timeout: timeoutMs }, (res) => {
+      let body = "";
+      res.setEncoding("utf8");
+      res.on("data", (chunk: string) => (body += chunk));
+      res.on("end", () => resolve({ status: res.statusCode ?? 0, body }));
+    });
+    req.on("timeout", () => req.destroy(new Error(`timed out after ${timeoutMs} ms`)));
+    req.on("error", reject);
+    req.end();
+  });
 }
 
 export function socketGet(socketPath: string, path: string, timeoutMs = 30_000): Promise<{ status: number; body: string }> {
@@ -697,14 +750,18 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
   let pressure: HandoffPressure | undefined;
   let lastDoneAt: number | undefined;
   let spacingPending = false;
-  const activeProbe = opts.activeProbe ?? ((socketPath: string, path: string, timeoutMs: number) => socketGet(socketPath, path, timeoutMs));
+  /** W1-T13534: when the pending spacing wait re-asks, and how many asks it has absorbed meanwhile. */
+  let spacingWakeAt = 0;
+  let spacingAbsorbed = 0;
+  const servePort = opts.servePort ?? servePortOf(opts.serveArgs);
+  const activeProbe = opts.activeProbe ?? ((_socketPath: string, path: string, timeoutMs: number) => tcpGet(servePort, path, timeoutMs));
+  const privateProbe = opts.privateProbe ?? ((socketPath: string, path: string, timeoutMs: number) => socketGet(socketPath, path, timeoutMs));
   const probeTimeoutMs = opts.activeProbeTimeoutMs ?? ACTIVE_PROBE_TIMEOUT_MS;
   const every = opts.every ?? ((tick: () => void, ms: number) => {
     const timer = setInterval(tick, ms);
     timer.unref();
     return () => clearInterval(timer);
   });
-  const servePort = opts.servePort ?? ACTIVE_WEDGE_SERVE_PORT;
   const socketStates = opts.socketStates ?? (() => socketStatesForPort(servePort));
   let stopProbing: (() => void) | undefined;
   let probing = false;
@@ -722,7 +779,7 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
     const generation: Generation = { id, slot, socketPath, process: proc, exited, isAlive: () => alive, startedAt: clock.now(), asked: false };
     proc.onMessage((message) => {
       if (message.type !== GENERATION_MESSAGES.handoffRequest) return;
-      if (generation === active) void supervisor.requestHandoff();
+      if (generation === active) void supervisor.requestHandoff(typeof message.targetSha === "string" ? { targetSha: message.targetSha } : undefined);
       else generation.asked = true;
     });
     proc.onExit((code, signal) => {
@@ -814,7 +871,7 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
       timer.unref();
     });
     try {
-      const reply = await Promise.race([activeProbe(generation.socketPath, SMOKE_PATHS[0], probeTimeoutMs), bound]);
+      const reply = await Promise.race([activeProbe(generation.socketPath, ACTIVE_PROBE_PUBLIC_PATH, probeTimeoutMs), bound]);
       return { answered: true, status: reply.status };
     } catch (err) {
       return { answered: false, error: errorText(err) };
@@ -824,10 +881,10 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
   };
 
   /** W1-T13276: the active generation answered nothing for ACTIVE_PROBE_FAILURES probes: record it and restart it, at most once per floor. */
-  const handleWedge = (generation: Generation, failures: number, lastError: string): void => {
+  const handleWedge = (generation: Generation, failures: number, lastError: string, privateSocket?: PrivateProbeAnswer): void => {
     const now = clock.now();
     if (lastWedgeRestartAt !== undefined && now - lastWedgeRestartAt < ACTIVE_WEDGE_RESTART_FLOOR_MS) {
-      opts.log("serve.active_wedged_held", { generation: generation.id, sha: generation.slot.sha, failures, lastError, sinceLastRestartMs: now - lastWedgeRestartAt, floorMs: ACTIVE_WEDGE_RESTART_FLOOR_MS });
+      opts.log("serve.active_wedged_held", { generation: generation.id, sha: generation.slot.sha, failures, lastError, sinceLastRestartMs: now - lastWedgeRestartAt, floorMs: ACTIVE_WEDGE_RESTART_FLOOR_MS, privateSocket });
       return;
     }
     lastWedgeRestartAt = now;
@@ -837,7 +894,7 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
     } catch (err) {
       opts.log("serve.active_wedge_snapshot_unread", { reason: errorText(err) });
     }
-    opts.log("serve.active_wedged", { generation: generation.id, sha: generation.slot.sha, pid: generation.process.pid, failures, lastError, uptimeMs: now - generation.startedAt, sockets });
+    opts.log("serve.active_wedged", { generation: generation.id, sha: generation.slot.sha, pid: generation.process.pid, failures, lastError, uptimeMs: now - generation.startedAt, sockets, probedPort: servePort, privateSocket });
     wedged.add(generation);
     try {
       generation.process.kill("SIGKILL");
@@ -845,6 +902,23 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
       // The restart path is unavailable: the legacy exit lets docker restart the whole container.
       opts.log("serve.active_wedge_kill_failed", { generation: generation.id, reason: errorText(err) });
       void legacyExit("active_wedged");
+    }
+  };
+
+  /** W1-T13503: one bounded GET of the generation's private socket, never thrown: `{answered,status}` or `{answered:false,error}`. */
+  const probePrivately = async (generation: Generation): Promise<PrivateProbeAnswer> => {
+    let timer: NodeJS.Timeout | undefined;
+    const bound = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`timed out after ${ACTIVE_PRIVATE_PROBE_TIMEOUT_MS} ms`)), ACTIVE_PRIVATE_PROBE_TIMEOUT_MS);
+      timer.unref();
+    });
+    try {
+      const reply = await Promise.race([privateProbe(generation.socketPath, SMOKE_PATHS[0], ACTIVE_PRIVATE_PROBE_TIMEOUT_MS), bound]);
+      return { answered: true, status: reply.status };
+    } catch (err) {
+      return { answered: false, error: errorText(err) };
+    } finally {
+      clearTimeout(timer);
     }
   };
 
@@ -865,7 +939,10 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
       probeMisses = { generation: generation.id, count };
       if (count < ACTIVE_PROBE_FAILURES) return;
       probeMisses = { generation: generation.id, count: 0 };
-      handleWedge(generation, count, result.error);
+      // W1-T13503: the private socket's answer separates a stalled accept on the public port from a stalled generation.
+      const privateSocket = await probePrivately(generation);
+      if (active !== generation || inFlight || stopping || wedged.has(generation)) return;
+      handleWedge(generation, count, result.error, privateSocket);
     } finally {
       probing = false;
     }
@@ -1127,29 +1204,38 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
     await supervisor.shutdown(reason);
   };
 
-  /** True when this ask must wait out the spacing; the wait re-asks once, however many asks arrive meanwhile. */
-  const awaitSpacing = (from: Generation): boolean => {
+  /**
+   * True when this ask must wait out the spacing; the wait re-asks once, however many asks arrive meanwhile.
+   * W1-T13534: each ask it absorbs writes `serve.handoff_spacing_absorbed`, so a self-sync held behind main says why.
+   */
+  const awaitSpacing = (from: Generation, ask: HandoffAsk | undefined): boolean => {
     if (spacingBaseMs <= 0 || lastDoneAt === undefined) return false;
     const now = clock.now();
     const level = decayedPressure(pressure, now, spacingHalfLifeMs);
     const spacingMs = handoffSpacingMs(level, spacingBaseMs);
     const waitMs = lastDoneAt + spacingMs - now;
     if (waitMs <= 0) return false;
-    if (spacingPending) return true;
+    if (spacingPending) {
+      spacingAbsorbed += 1;
+      opts.log("serve.handoff_spacing_absorbed", { sha: ask?.targetSha, remainingMs: Math.max(0, spacingWakeAt - now), absorbed: spacingAbsorbed });
+      return true;
+    }
     spacingPending = true;
+    spacingWakeAt = now + waitMs;
     opts.log("serve.handoff_deferred", { reason: "spacing", waitMs, spacingMs, pressure: Number(level.toFixed(3)), sinceLastMs: now - lastDoneAt, sha: from.slot.sha });
     void sleep(waitMs).then(() => {
       spacingPending = false;
+      spacingAbsorbed = 0;
       return supervisor.requestHandoff();
     });
     return true;
   };
 
-  const handoff = async (): Promise<void> => {
+  const handoff = async (ask?: HandoffAsk): Promise<void> => {
     if (!handoffEnabled()) return legacyExit("handoff_off");
     const from = active;
     if (!from) return;
-    if (awaitSpacing(from)) return;
+    if (awaitSpacing(from, ask)) return;
     const startedAt = clock.now();
     let slot: PreparedSlot;
     try {
@@ -1272,7 +1358,7 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
       budget.start(() => [process.pid, ...(active?.process.pid === undefined ? [] : [active.process.pid])]);
       await reportAlone(up.generation, up.startedAt, up.readyMs);
     },
-    requestHandoff: () => {
+    requestHandoff: (ask) => {
       if (stopping) return Promise.resolve();
       if (inFlight) {
         askedAgain = true;
@@ -1281,7 +1367,7 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
       // A memory refusal owns one retry. An external/coalesced ask must not skip its backoff and
       // prepare/shed/restore again; that retry prepares the newest main when it actually wakes.
       if (retryPending && handoffEnabled()) return Promise.resolve();
-      inFlight = handoff()
+      inFlight = handoff(ask)
         .catch((err: unknown) => opts.log("serve.handoff_failed", { reason: errorText(err) }))
         // Whatever ended the handoff without replacing the generation, its worker threads come back.
         .then(() => restoreWorkers("handoff_abandoned"))

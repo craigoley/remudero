@@ -81,7 +81,7 @@ import { createDailyProgressView, DAILY_PROGRESS_VIEW_NAME } from "./daily-progr
 import { readModelCommand } from "./read-model-cli.js";
 import { createRepositoriesReadModelView } from "./repositories-view.js";
 import { answerThreadHeaps, askNestedThreadHeaps, workerThreads, type ThreadHeapsAnswer, type ThreadHolds, type ThreadHoldsSnapshot } from "./worker-heaps.js";
-import { createViewShadow, fileShadowStore, readShadowEvidence, storedShadowReadiness, viewShadowPath, type ShadowLegacy, type ShadowPopulation, type ShadowReadiness, type ShadowRequest, type ShadowSample, type ShadowSampleIdentity, type ViewShadow } from "./view-shadow.js";
+import { createViewShadow, fileShadowStore, readShadowEvidence, storedShadowReadinessReader, viewShadowPath, type ShadowLegacy, type ShadowPopulation, type ShadowReadiness, type ShadowRequest, type ShadowSample, type ShadowSampleIdentity, type ViewShadow } from "./view-shadow.js";
 import { INBOX_VIEW_NAME, INBOX_QUALIFICATION_ERROR_META, INBOX_QUALIFICATION_PENDING, INBOX_QUALIFICATION_POPULATION_META, inboxQualificationPolicy, inboxShadowPopulation, inboxShadowSampleKey, parseInboxShadowPopulation, restoreInboxShadowPopulation, type InboxQualificationScope } from "./inbox-view.js";
 import { effectiveViewMode, oldestAsOf, READ_MODEL_STATUS_VIEW, shadowSampled, shownReadiness, viewEtag, viewKey, type EffectiveViewMode, type ViewBody, type ViewBodyEntry, type ViewSource, type ViewSwitchMode } from "./views.js";
 import { describeSource, judgeLedgerReads, judgeSource, type SourcePhase } from "./view-freshness.js";
@@ -1902,6 +1902,8 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   }
   /** W1-T11934: a demand unit is due only while the book holds a key of its view; its default keys alone rebuilt it every tick. */
   const demanded = (unit: ViewUnit): boolean => unit.view.demand !== true || !opts.demand || opts.demand.keys(unit.view.name).length > 0;
+  /** W1-T13536: a view thread asks on every pass; the counter store is re-read at most once per refresh interval. */
+  const storedReadiness = storedShadowReadinessReader(clock);
   const dueUnits = (now: number): ViewUnit[] => units.filter((unit) => owns(unit) && built(unit.view.name) && unit.dueAt <= now && demanded(unit)).sort((a, b) => a.dueAt - b.dueAt);
 
   /**
@@ -1914,7 +1916,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     sweepDemand();
     const home = slots[0]?.db;
     const shadow = home ? comparator?.db === home && slots[0]?.lease !== undefined ? comparator.shadow.readiness()
-      : storedShadowReadiness(viewShadowPath(opts.stateDir), home, now, qualifications, inboxPopulations, inboxPopulations ? [INBOX_VIEW_NAME] : undefined) : undefined;
+      : storedReadiness(viewShadowPath(opts.stateDir), home, now, qualifications, inboxPopulations, inboxPopulations ? [INBOX_VIEW_NAME] : undefined) : undefined;
     const ctx: ReadModelViewContext = { now, switches, ...(home ? { sourceStore: home, committed: (view: string, key: string) => committedBody(home, view, key) } : {}), instances: slots.map((slot) => ({ state: slot.state, ...(slot.db ? { db: slot.db } : {}), ...(slot.lease ? { lease: slot.lease } : {}) })), ...(shadow ? { shadow } : {}) };
     const generation = slots.reduce((sum, slot) => sum + slot.state.generation, 0);
     if (only) return build(only, now, ctx, generation, soloMs);

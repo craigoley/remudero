@@ -38,7 +38,7 @@ test("W1-T13439 criterion 1: a new verify: human docs-only shard with only demon
   assert.equal(found[0]!.severity, "block");
   assert.match(found[0]!.message, /CAPPED/);
   assert.match(found[0]!.message, /auto-merge never arms/);
-  assert.ok(found[0]!.message.includes(`grep: ^## Recommendation$ in ${REPORT}`), found[0]!.message);
+  assert.ok(found[0]!.message.includes(`grep: ## Recommendation in ${REPORT}`), found[0]!.message);
   assert.ok(
     lintTask(task(), NEW).violations.some((v) => v.check === "human-only-report"),
     "lintTask reaches the check",
@@ -67,4 +67,24 @@ test("W1-T13439 criterion 3: a runnable proof, a non-docs file, verify: auto, or
   assert.deepEqual(humanOnlyReportViolations(task(), {}), [], "no base to compare against reads as not new");
   const amended = { postMergeAmendment: { baseTask: undefined }, baseAcceptance: [] } as unknown as Parameters<typeof humanOnlyReportViolations>[1];
   assert.equal(humanOnlyReportViolations(task(), amended).length, 1, "a shard new against the merge base is new");
+});
+
+// W1-T13519 — the refusal's own example proof must pass the proof-grep-safety lint, or following the advice fails lint
+// (W1-T13518's first lint run: `grep: ^## Recommendation$` was refused for its unescaped `^`).
+test("W1-T13519 criterion 1: a shard that takes the refusal's suggested proof as written passes proof-grep-safety", () => {
+  const message = humanOnlyReportViolations(task(), NEW)[0]!.message;
+  const suggested = /`(grep: [^`]+)`/.exec(message)?.[1];
+  assert.ok(suggested, `the refusal names a grep: proof: ${message}`);
+  const followed = task({ verify: "auto", acceptance: [{ claim: "the report recommends a task", proof: suggested }] });
+  const grepSafety = lintTask(followed, NEW).violations.filter((v) => v.check === "proof-grep-safety");
+  assert.deepEqual(grepSafety, [], `the suggested proof ${suggested} is refused: ${JSON.stringify(grepSafety)}`);
+  const control = task({ verify: "auto", acceptance: [{ claim: "the report recommends a task", proof: `grep: ^## Recommendation$ in ${REPORT}` }] });
+  assert.ok(lintTask(control, NEW).violations.some((v) => v.check === "proof-grep-safety"), "positive control: the old example is refused");
+});
+
+test("W1-T13519 criterion 2: invariant:refusal-unchanged — a new docs-only verify: human shard with only demonstration proofs is still refused", () => {
+  const found = humanOnlyReportViolations(task(), NEW);
+  assert.equal(found.length, 1);
+  assert.equal(found[0]!.check, "human-only-report");
+  assert.equal(found[0]!.severity, "block");
 });
