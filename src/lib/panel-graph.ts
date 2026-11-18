@@ -3875,6 +3875,20 @@ export function buildPanelReadRoutes(deps: PanelGraphDeps, readPlanSnapshot?: ()
   ];
 }
 
+/**
+ * W1-T13651: the plan an Approve gates on. Approve must never read a torn working tree (W1-T2220 remedy (c)), so it read
+ * the plan at HEAD through git: on the Azure host that git read plus a YAML parse of every shard held serve's request loop
+ * for about 25 s (2026-11-18 10:53:55Z, and the Console gave up at 25 s). Serve's board already holds a plan read from a
+ * committed ref (plan source "loaded", identity "ref:..."), which is never torn either, so Approve uses it when it is;
+ * any other source state keeps the git read at HEAD.
+ */
+export function approvePlanReader(deps: Pick<PanelGraphDeps, "root" | "readPlanSnapshot" | "readPlanSource">): (planPath: string) => Plan {
+  const source = deps.readPlanSource?.();
+  const held = deps.readPlanSnapshot;
+  if (held && source?.state === "loaded" && source.identity.startsWith("ref:")) return () => held();
+  return (planPath) => loadPlanAtRef(deps.root, relative(deps.root, planPath));
+}
+
 /** A readable age observation is not a decision or execution request, including through old options. */
 function refuseInformationalProposal(proposals: Proposal[], classifications: InboxClassification[], proposalId: string, respond: InboxVerbRespond): boolean {
   const matches = proposals.filter(proposal => proposal.id === proposalId);
@@ -3913,9 +3927,7 @@ export function buildInboxVerbActions(deps: PanelGraphDeps, causalScope?: InboxC
       // irreversible spawn, so it alone reads via loadPlanAtRef, "cannot be partial" (W1-T2220).
       // W1-T13605: like every other write, it classifies only the proposal it names. The full pass ran every
       // anchor's git grep on serve's main thread after a cold start: a 123 s loop stall on 2026-11-18.
-      const { proposals, classifications } = classifyAllProposals(deps, (planPath) =>
-        loadPlanAtRef(deps.root, relative(deps.root, planPath)),
-      input.proposalId);
+      const { proposals, classifications } = classifyAllProposals(deps, approvePlanReader(deps), input.proposalId);
       if (!proposals.some((p) => p.id === input.proposalId)) {
         respond(404, { error: "not_found", detail: `no active proposal "${input.proposalId}"` });
         return;
