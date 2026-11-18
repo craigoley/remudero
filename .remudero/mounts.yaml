@@ -186,7 +186,8 @@ capabilities:
   # - Sol was initially absent from balanced; the 2026-09-24 follow-up below supersedes this.
   # - frontier leads with gpt-6-sol, but `provider_preference` below sends frontier work to Claude
   #   (Opus 5.5) whenever Claude has headroom, so this row is reached only when Claude is blocked.
-  # gpt-6-astra is deliberately NOT routed: no operator ruling places it yet.
+  # gpt-6-astra is deliberately NOT routed: no operator ruling places it yet. gpt-6.2-astra
+  # (listed 2026-11-17) is not routed either, for the same reason.
   #
   # 2026-09-24 (operator ruling, DECISIONS.md): SOL vs SONNET IS AN A/B on `balanced.high`.
   # Every sonnet/high assignment that could use either arm carries routing.decision.ab
@@ -200,6 +201,8 @@ capabilities:
   # not a claim that the anecdotal failure rates generalize to this fleet. The existing high-effort
   # A/B remains live; low/medium balanced work also remains a headroom auction, without an A/B tag.
   # 2026-10-02: Sol 6.1 leads Sol seats; 6.0 trails for availability/effort rollback.
+  # 2026-11-17: Sol 6.2 leads Sol seats; 6.1 is next for availability and effort rollback; older
+  # Sols trail as before (ruling 2026-10-08: every Sol seat runs the current Sol).
   # New concrete-model experiment epochs keep Field Trials history separate (DECISIONS.md).
   codex:
     economy:
@@ -207,13 +210,13 @@ capabilities:
       medium: [gpt-6-luna, gpt-5.3-codex-spark, gpt-5.6-luna, gpt-5.4-mini]
       high:   [gpt-5.3-codex-spark, gpt-6-luna, gpt-5.6-luna, gpt-5.4-mini]
     balanced:
-      low:    [gpt-6.1-sol, gpt-6-sol, gpt-5.6-sol]
-      medium: [gpt-6.1-sol, gpt-6-sol, gpt-5.6-sol]
-      high:   [gpt-6.1-sol, gpt-6-sol, gpt-5.6-sol]
+      low:    [gpt-6.2-sol, gpt-6.1-sol, gpt-6-sol, gpt-5.6-sol]
+      medium: [gpt-6.2-sol, gpt-6.1-sol, gpt-6-sol, gpt-5.6-sol]
+      high:   [gpt-6.2-sol, gpt-6.1-sol, gpt-6-sol, gpt-5.6-sol]
     frontier:
-      low:    [gpt-6.1-sol, gpt-6-sol, gpt-5.6-sol, gpt-5.5]
-      medium: [gpt-6.1-sol, gpt-6-sol, gpt-5.6-sol, gpt-5.5]
-      high:   [gpt-6.1-sol, gpt-6-sol, gpt-5.6-sol, gpt-5.5]
+      low:    [gpt-6.2-sol, gpt-6.1-sol, gpt-6-sol, gpt-5.6-sol, gpt-5.5]
+      medium: [gpt-6.2-sol, gpt-6.1-sol, gpt-6-sol, gpt-5.6-sol, gpt-5.5]
+      high:   [gpt-6.2-sol, gpt-6.1-sol, gpt-6-sol, gpt-5.6-sol, gpt-5.5]
   # FRONTIER PREFERS CLAUDE. MEASURED over the retained ledger 2026-09-22: 84 of 127 Opus-requested
   # runs (retro, retro preflight repair, plan synthesis) were routed to Codex gpt-5.6-sol, because
   # the auction splits a capability by headroom alone. The operator's direction is Opus 5.5 first
@@ -490,6 +493,17 @@ verify_human_judge:
   max_turns: 400
   context_budget: 60000
   provider: openweight
+  # W1-T12417: a decision model answers the same three options in shadow (docs/model-routing.md).
+  # W1-T12422: `auto` draws each call's shadow from the pool of models whose judge replay passed.
+  shadow: auto
+
+# The ci judge and the fix-progress judge (W1-T11075). The operator ruling of 2026-11-17 turned the
+# shadow arm on (W1-T13364). Each row copies the risk judge's cell and names no provider, so the
+# primary judge spawns as before and the sweep acts only on its verdict. The `shadow` arm sends the
+# same prompt to one cash deployment and ledgers one judge_shadow row. To turn an arm off, remove the
+# `shadow:` mapping from its row (docs/operator-guide.md). Keep each row on ONE line.
+ci_judge: { model: haiku, effort: low, max_turns: 400, context_budget: 60000, shadow: { deployment: DeepSeek-V4-Flash } }
+fix_progress_judge: { model: haiku, effort: low, max_turns: 400, context_budget: 60000, shadow: { deployment: DeepSeek-V4-Flash } }
 
 # The machine-filing judge (operator ruling 2026-09-29) releases machine-filed tasks with no person
 # asked, so it is the one judge where a miss dispatches work. MEASURED 2026-09-29 on five probe records,
@@ -500,6 +514,18 @@ machine_filing_judge:
   effort: low
   max_turns: 400
   context_budget: 60000
+
+# ── The risk judge's and the decision summary's own rows (W1-T12187) ───────────
+# Each row holds the model and effort that `resolveRiskJudgeMount` returned on 2026-11-17 and names no
+# provider, so both roles spawn as before; the risk judge still fails closed. A cash model answers each
+# judgement in shadow (docs/model-routing.md, "A cash model shadows each low-stakes judge"). When a role
+# clears the bar there, the config gardener proposes `provider: cash` on its row.
+# Keep each row on ONE line: the gardener replaces one line.
+# W1-T12417: a row may say `shadow: <name>`: a decision_models row asks the role's options as one
+# choice question, and any other name is a cash deployment. A row that names none, like these two,
+# keeps the shadow above. A shadow never names a provider for the row itself.
+risk_judge: { model: haiku, effort: low, max_turns: 400, context_budget: 60000 }
+feedback_summary: { model: haiku, effort: low, max_turns: 400, context_budget: 60000 }
 
 # ── Decision models (W1-T12416, operator decision 2026-11-12) ──────────────────
 # A decision model answers many fixed-option questions about ONE input in one paid cash request,
@@ -515,6 +541,22 @@ machine_filing_judge:
 decision_models:
   decisions-eastus: { deployment: gpt-6-luna, shape: openai-decisions, endpoint: { cash-entry: gpt-6.1-terra }, input_usd_per_million: 0.10, output_usd_per_million: 0, read_at: "2026-11-12", source: "OpenAI Decisions guide: $0.10 per 1M uncached input, output not charged. Azure publishes no Decisions price; this is the gpt-6-luna Global input rate on the Azure OpenAI pricing page." }
   systemone-eastus2: { deployment: decision-1, shape: microsoft-systemone, endpoint: cash-default, input_usd_per_million: 0.042, output_usd_per_million: 0.042, read_at: "2026-11-12", source: "Azure Foundry Microsoft models pricing page: $0.042 per 1M input; output is listed as N/A, but replies carry output tokens, so output is priced at the input rate until W1-T10858 reconciles an invoice." }
+
+# ── The shadow of each fixed-option judge with no row of its own (W1-T12417) ─────
+# Same `shadow:` names as above. Each judge acts on its own answer only; the shadow writes one
+# judge_shadow row. A typed-judgment spawn with no entry of its own (head-rehome) uses
+# `typed-judgment`'s. Remove a line to turn that shadow off. Keep each entry on ONE line.
+# The config gardener may replace a line of refresh-value, head-rehome or typed-judgment with
+# `{ primary: <name>, threshold: { model: <deployment>, surface: decisions, value: <0 to 1> } }`: that
+# decision model then answers first when its top option reaches the threshold, and the judge's own
+# spawn answers when it does not.
+# W1-T12422: `auto` draws each call's shadow from the role's pool: every decision model and every
+# ready cash deployment whose direct judge replay for the role passed (docs/model-routing.md).
+judge_shadows:
+  refresh-value: auto
+  quiet-worker-watchdog: auto
+  head-rehome: auto
+  typed-judgment: auto
 
 # ── max_turns is a RUNAWAY CLIFF, not a work limit (§9 tripwire re-base) ────────
 # The implement/reviewer/fix/diagnose worker lanes stay at a FLAT 400 — a tripwire

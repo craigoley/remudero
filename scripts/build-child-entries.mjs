@@ -45,8 +45,12 @@ export const WORKER_ENTRIES = Object.freeze([
   // test/worker/the-daemon-main-starts-from-its-bundle.test.ts keeps this list complete.
   "src/lib/benchmark-cohort.ts", "src/lib/secret-boundary.ts", "src/lib/config-gardener.ts", "src/lib/console-projection-worker.ts",
   "src/lib/repo-dashboard-route.ts", "src/lib/serve-plan-reload.ts",
+  // W1-T13685: serve's analytics fold and checkpoint writer.
+  "src/lib/analytics-route.ts",
   // W1-T13326: the merge-time ratchet judge's count, which the daemon's sweep and arm start per judgement.
   "src/lib/merged-ratchet-worker.ts",
+  // W1-T13333: the daemon's ledger compaction pass.
+  "src/lib/ledger-compact-worker.ts",
 ]);
 /** A worker module's bundle file name: `src/lib/board-worker.ts` → `worker-lib-board-worker.mjs`. */
 export const workerBundleName = (module) => `worker-${module.replace(/^src\//, "").replace(/\.[cm]?[jt]sx?$/, "").replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.mjs`;

@@ -1,3 +1,4 @@
+import { threadName } from "./thread-names.js";
 import { recordCashAccounting, validCashIdentity, cashIdentityMatches, cashEndpointIdentity, type CashRequestIdentity, type CashReservation, type CashAccountingEvidence } from "./cash-accounting.js";
 import { assertCurrentCanaryPilotReservation, assertCurrentCanaryPilotSettlement,
   reserveCurrentCanaryPilotRequest, settleCurrentCanaryPilotRequest } from "./model-canary-pilot-budget.js";
@@ -7,7 +8,7 @@ import { createWorkerToolLineage, observeWorkerToolLineage } from "./worker-tool
 import { CASH_RESPONSES_DEPLOYMENTS, CashResponsesConversation } from "./cash-responses.js";
 import { randomUUID } from "node:crypto";
 import { execFileSync, spawn as spawnChild, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { execFileLoopBounded } from "./loop-bounded-child.js";
+import { execFileRouted } from "./spawn-helper.js";
 import { constants as fsConstants, accessSync, appendFileSync, closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
@@ -838,8 +839,8 @@ interface CodexModelListResult {
  * Real routing uses {@link CapabilityLadder.codex}; missing data preserves fail-soft dispatch. */
 const FALLBACK_CODEX_MODELS: Record<CodexModelTier, string[]> = {
   economy: ["gpt-6-luna", "gpt-5.6-luna", "gpt-5.3-codex-spark", "gpt-5.4-mini"],
-  balanced: ["gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol"],
-  frontier: ["gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol", "gpt-5.5"],
+  balanced: ["gpt-6.2-sol", "gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol"],
+  frontier: ["gpt-6.2-sol", "gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol", "gpt-5.5"],
 };
 const SAFE_CODEX_MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,95}$/;
 // Same deployment-id grammar as Codex. The Azure deployment id reaches a URL path, so accepting
@@ -1999,7 +2000,7 @@ export function readCodexRuntimeOffThread(
       // `tsx` resolves from the process cwd, which is the target checkout, and that may carry no tsx.
       const loader = pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href;
       probe = workerFactory(new URL("./codex-capacity-probe.mjs", import.meta.url), {
-        workerData: { bin, codexHome: codexHome(config), timeoutMs },
+        name: threadName("codexProbe"), workerData: { bin, codexHome: codexHome(config), timeoutMs },
         execArgv: ["--import", loader],
       });
     } catch (error) {
@@ -3090,7 +3091,7 @@ function codexWriterProfileArgs(nativeCacheRoot: string | undefined, env: NodeJS
 
 function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<ProviderCapacity, "model" | "effort">, privateProfile?: PrivateRegistryCodexProfile, nativeCacheRoot?: string): string[] {
   const model = selection?.model ?? config.workerProviders?.codexModel;
-  // Never unnamed: with no --model, Codex runs the ACCOUNT default, which is gpt-6-astra (2026-09-22).
+  // Never unnamed: with no --model, Codex runs the ACCOUNT default, which is gpt-6.2-sol (2026-11-17).
   if (!model) throw new Error("refusing a Codex spawn with no model: the account default would run unreviewed");
   assertModelAllowed(model, config);
   const effort = selection?.effort === "default" ? undefined : selection?.effort;
@@ -3599,6 +3600,8 @@ export const OPENWEIGHT_PRICES: Readonly<Record<string, OpenWeightPrice>> = {
 /** Codex analytics only; these rows never admit a cash deployment (W1-T5664). */
 export const CODEX_NOTIONAL_PRICES: Readonly<Record<string, OpenWeightPrice>> = {
   ...OPENWEIGHT_PRICES,
+  // OpenAI's GPT-6.2 Sol announcement, 2026-11-17: the API keeps 6.1 Sol's base prices.
+  "gpt-6.2-sol": { inputUsdPerMillion: 2, outputUsdPerMillion: 10, cachedInputUsdPerMillion: 0.1, readAt: "2026-11-17" },
   // https://developers.openai.com/api/docs/models/gpt-6-sol
   "gpt-6-sol": { inputUsdPerMillion: 2, outputUsdPerMillion: 10, cachedInputUsdPerMillion: 0.2, readAt: "2026-10-08" },
   // https://developers.openai.com/api/docs/models/gpt-5.6-sol
@@ -4313,7 +4316,9 @@ export function openWeightReservationUsd(
 }
 
 /** Raised INSTEAD of sending a paid request. It is thrown before the transport, never after, so a
- *  caller that sees it knows no money was spent on the refused attempt. */
+ *  caller that sees it knows no money was spent on the refused REQUEST; earlier turns of the same
+ *  attempt may already have been paid and settled (W1-T13672: 2026-11-18 08:03Z, gpt-6-luna settled
+ *  $3.4473 before its next turn was refused). */
 export class OpenWeightAllowanceExhaustedError extends RmdError {
   readonly committedUsd: number;
   readonly capUsd: number;
@@ -4406,13 +4411,37 @@ function cashAllowanceLimits(state: OpenWeightAllowanceState, cap: number, deplo
   return limits;
 }
 
+/** One read of the day's allowance: each deployment's tightest limit, and today's cash attempts from the same file. */
+export interface CashAllowanceObservation {
+  resetAt: string;
+  deployments: Array<{ deployment: string; committedUsd: number; capUsd: number; limit: CashAllowanceLimitName; remainingUsd: number }>;
+  /** W1-T13672: distinct cash attempts in today's allowance (a request's identity.attemptId, else its request id). */
+  attemptsToday: number;
+  /** Per deployment, today's attempts with a settled request and the dollars they settled, every paid turn counted. */
+  settledToday: Record<string, { attempts: number; settledUsd: number }>;
+}
+
 /** Observe without locking, reserving or writing; the adapter's later reservation remains binding. */
 export function readOpenWeightAllowance(config: Config,
-  input: { deployments: readonly string[]; atIso: string; squeezed?: boolean }) {
+  input: { deployments: readonly string[]; atIso: string; squeezed?: boolean }): CashAllowanceObservation {
   const utcDay = openWeightUtcDay(input.atIso), path = openWeightAllowancePath(config);
   const state = parseOpenWeightAllowance(readFileIfExists(path), path, utcDay, sharedCashAllowancePath(config) !== undefined);
   const cap = configuredCashCap(config, input.squeezed);
-  return { resetAt: openWeightAllowanceReset(utcDay), deployments: input.deployments.map(deployment => {
+  // A refused request is never written, so an attempt the allowance stopped mid-loop keeps only its paid turns here.
+  const attempts = new Set<string>();
+  const settledAttempts = new Map<string, Set<string>>();
+  const settledToday: CashAllowanceObservation["settledToday"] = {};
+  for (const [requestId, row] of Object.entries(state.reservations)) {
+    const attempt = row.identity?.attemptId ?? requestId;
+    attempts.add(attempt);
+    if (row.settledUsd === null || row.deployment === undefined) continue;
+    const seen = settledAttempts.get(row.deployment) ?? new Set<string>();
+    settledAttempts.set(row.deployment, seen.add(attempt));
+    const into = settledToday[row.deployment] ??= { attempts: 0, settledUsd: 0 };
+    into.attempts = seen.size;
+    into.settledUsd += row.settledUsd;
+  }
+  return { resetAt: openWeightAllowanceReset(utcDay), attemptsToday: attempts.size, settledToday, deployments: input.deployments.map(deployment => {
     const limits = cashAllowanceLimits(state, cap, deployment, input.squeezed);
     const tightest = limits.reduce((a, b) => a.capUsd - a.committedUsd <= b.capUsd - b.committedUsd ? a : b);
     return { deployment, ...tightest, remainingUsd: tightest.capUsd - tightest.committedUsd };
@@ -4885,7 +4914,7 @@ export async function runOpenWeightCheck(input: OpenWeightCheckInput): Promise<s
   const cwd = realpathSync(input.cwd);
   let stdout: string;
   try {
-    ({ stdout } = await execFileLoopBounded(OPENWEIGHT_CHECK_SANDBOX, openWeightCheckSandboxArgv({ ...input, argv }), {
+    ({ stdout } = await execFileRouted(OPENWEIGHT_CHECK_SANDBOX, openWeightCheckSandboxArgv({ ...input, argv }), {
       cwd,
       env: input.env,
       encoding: "utf8",
@@ -5119,7 +5148,7 @@ export async function selectOpenWeightUnitTestSuitesOffLoop(cwd: string, env: Re
   const code = "const m = await import(process.argv[1]);" +
     "process.stdout.write(JSON.stringify(m.selectOpenWeightUnitTestSuites(process.argv[2])));";
   try {
-    const { stdout } = await execFileLoopBounded(
+    const { stdout } = await execFileRouted(
       process.execPath,
       ["--import", "tsx", "--input-type=module", "--eval", code, import.meta.url, cwd],
       { cwd: HARNESS_ROOT, env, encoding: "utf8", timeout: OPENWEIGHT_UNIT_TEST_SELECTION_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024 },
@@ -6162,8 +6191,9 @@ export async function spawnOpenWeightWorker(
         budgetReservedUsd,
         budgetSettledUsd,
         budgetHeldUsd,
-        // A refusal is a distinct outcome from a transport failure: no paid request was made, so the
-        // operator reading the ledger can tell "we declined to spend" from "we spent and it failed".
+        // A refusal is a distinct outcome from a transport failure: the refused request was never sent, so
+        // the operator can tell "we declined to spend" from "we spent and it failed". It refuses ONE request:
+        // earlier turns of this attempt may have been paid, and budgetSettledUsd carries them (W1-T13672).
         budgetRefused: error instanceof OpenWeightAllowanceExhaustedError,
         ...(error instanceof OpenWeightDeploymentNotFoundError ? { deploymentAbsent: selection.model } : {}),
         webSearchAttempted,

@@ -182,17 +182,56 @@ test("W1-T5720: a boot's light pass and review admission run before any tick-1 c
 });
 
 test("W1-T5720: a first full pass that never settles releases the tick-1 cadences at the backstop bound", async () => {
-  const { events, lines } = await bootOnce(new Promise<void>(() => {}), { bootCadenceGateBoundMs: 80, sweepWallClockBoundMs: 1_500 });
-  assert.ok(!events.includes("first-pass-settled"), "fixture: the first pass never settled");
-  const opened = lines.find((l) => l.step === "daemon.boot_gate.opened");
-  assert.equal(opened?.extra.trigger, "backstop", "the backstop, not the pass's own wall-clock bound, released the gate");
-  assert.equal(opened?.extra.pass_in_flight, true, "the row says the pass was still running");
-  const openedAt = lines.indexOf(opened!);
-  const abandonedAt = lines.findIndex((l) => l.step === "daemon.sweep.abandoned");
-  assert.ok(abandonedAt < 0 || abandonedAt > openedAt, "the gate did not wait the pass out to its own bound");
-  for (const cadence of ["measurement", "retro", "garden"]) {
-    assert.ok(events.includes(cadence), `${cadence} still runs once the backstop releases it (saw ${events.join(", ")})`);
+  // W1-T13546: the pass stays unsettled while the daemon runs, then the test settles it. A pass left pending holds
+  // the process-wide in-flight ticker, so a later daemon in a pooled test process never starts its own clock.
+  let releaseFirstPass!: () => void;
+  const firstPass = new Promise<void>((resolve) => (releaseFirstPass = resolve));
+  const { events, lines } = await bootOnce(firstPass, { bootCadenceGateBoundMs: 80, sweepWallClockBoundMs: 1_500 });
+  try {
+    assert.ok(!events.includes("first-pass-settled"), "fixture: the first pass never settled");
+    const opened = lines.find((l) => l.step === "daemon.boot_gate.opened");
+    assert.equal(opened?.extra.trigger, "backstop", "the backstop, not the pass's own wall-clock bound, released the gate");
+    assert.equal(opened?.extra.pass_in_flight, true, "the row says the pass was still running");
+    const openedAt = lines.indexOf(opened!);
+    const abandonedAt = lines.findIndex((l) => l.step === "daemon.sweep.abandoned");
+    assert.ok(abandonedAt < 0 || abandonedAt > openedAt, "the gate did not wait the pass out to its own bound");
+    for (const cadence of ["measurement", "retro", "garden"]) {
+      assert.ok(events.includes(cadence), `${cadence} still runs once the backstop releases it (saw ${events.join(", ")})`);
+    }
+  } finally {
+    releaseFirstPass();
+    for (let turn = 0; turn < 50 && !events.includes("first-pass-settled"); turn++) await new Promise<void>((resolve) => setImmediate(resolve));
   }
+  assert.ok(events.includes("first-pass-settled"), "the abandoned pass settles once the test releases it");
+});
+
+test("W1-T13546 criterion 1: a daemon booted after the backstop test still runs its own dispatch ticker", async () => {
+  const lines: Line[] = [];
+  let lightPasses = 0;
+  const dispatchBeat = () => lines.some((l) => l.step === "daemon.alive" && l.extra.phase === "dispatch");
+  const summary = await daemon.runDaemon(
+    fixturePlan(),
+    {
+      refreshMerged: () => () => false,
+      runOne: async (id) => {
+        // Hold the one lane until this daemon's own ticker ledgers a dispatch heartbeat, or a bound passes.
+        const deadline = Date.now() + 5_000;
+        while (!dispatchBeat() && Date.now() < deadline) await new Promise<void>((resolve) => setTimeout(resolve, 5));
+        return okResult(id);
+      },
+      sweepLight: async () => {
+        lightPasses++;
+      },
+      checkStop: () => undefined,
+      checkPause: () => undefined,
+      sleep: () => new Promise<void>((resolve) => setTimeout(resolve, 5)),
+      log: (step, extra = {}) => lines.push({ step, extra }),
+    },
+    { max: 1, pollIntervalMs: 5 },
+  );
+  assert.equal(summary.stopReason, "max_reached");
+  assert.ok(dispatchBeat(), "this daemon's dispatch ticker ran: no earlier test in the process still holds it");
+  assert.ok(lightPasses >= 1, "the ticker's light pass ran");
 });
 
 test("W1-T5720: a daemon with no full pass wired has nothing to wait for and starts its gardens at boot", async () => {

@@ -1,0 +1,56 @@
+- id: W1-T13456
+  title: "An inbox-threads read-model view pages the thread list the Console renders, so GET /v1/i/core/inbox/threads (read on every render and every 30 s refresh) can retire"
+  repo: remudero
+  depends_on:
+    - W1-T13455
+  priority: 0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # a new view that must answer the same rows, order and paging as the live route it replaces
+  band_meaning: span
+  origin: "operator-session#serve-oom-2026-11-16"
+  plan_refs:
+    - W1-T13455
+    - W1-T5269
+  files:
+    - src/lib/inbox-threads-view.ts
+    - src/lib/inbox-thread-items.ts
+    - src/lib/panel-graph.ts
+    - src/lib/read-model-worker.ts
+    - src/lib/serve.ts
+    - openapi/daemon.yaml
+    - packages/api-client/src/schema.d.ts
+    - test/every-view-body-matches-its-schema.test.ts
+    - test/an-inbox-threads-list-view-pages-the-thread-list.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "On a fixture inbox with a thread store and read marks, GET /v1/views/inbox-threads pages the same ThreadSummaryView rows, in the same order, with the same unread counts as GET /v1/inbox/threads?limit= over the same classification"
+      proof: "grep: W1-T13456 criterion 1 in test/an-inbox-threads-list-view-pages-the-thread-list.test.ts"
+    - claim: "Each page carries snapshotKey, threadListKey and a continuation cursor, and a cursor from an older snapshot is refused with 409 restartRequired, as the route's pager does"
+      proof: "grep: W1-T13456 criterion 2 in test/an-inbox-threads-list-view-pages-the-thread-list.test.ts"
+    - claim: "The read-model worker's view thread builds the view: read-model-worker.ts calls createInboxThreadsView( beside createInboxThreadView("
+      proof: "grep: createInboxThreadsView( in src/lib/read-model-worker.ts"
+    - claim: "invariant:inputs-not-clock — a body is rebuilt only when the classification pages, the thread store or the read marks move, so an unchanged list keeps its ETag across worker passes"
+      kind: guard
+      proof: "grep: W1-T13456 criterion 3 in test/an-inbox-threads-list-view-pages-the-thread-list.test.ts"
+  rationale: |
+    WHY: Craig approved retiring serve's old read paths on 2026-11-17. The Console reads GET /v1/i/core/inbox/threads on
+    every render and every 30 s refresh (24,228 Console reads in route-reads.json at 18:10Z); it is computed in serve
+    from the classification, the thread store and the read marks. The Console thread (recon at console 032b751) cannot
+    move off it until a view answers the same rows.
+  design: |
+    INVARIANT inputs-not-clock: no clock in data; the same inputs give the same ETag.
+    1. A read-model view built in the view thread, like inbox-thread-view.ts: inputs are the stored classification
+       snapshot (readPersistedInbox: proposals and classifications), the plain store, the thread store and the read
+       marks; rows come from the same operator-item and thread-summary functions the route uses, never a copy.
+    2. Pages bounded like pageInboxThreads (INBOX_THREAD_PAGE_MAX_BYTES), keyed section-free: first page key "", later
+       pages by cursor; the envelope keeps snapshotKey, threadListKey and contract.
+    3. Mount it as W1-T13455 mounts inbox-thread (served by default, reader entry, contract, census).
+  falsifier: |
+    Build rows with a separate copy of the summary logic: criterion 1 drifts. Accept an old cursor: criterion 2 fails.
+    Put a clock in data: criterion 3 fails.
+  note: |
+    Id reserved for run-unfiled-1794939017000 with ~/rmd-work/bin/reserve-id.sh.

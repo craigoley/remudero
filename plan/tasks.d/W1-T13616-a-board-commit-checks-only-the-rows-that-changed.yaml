@@ -1,0 +1,45 @@
+- id: W1-T13616
+  title: "A board snapshot commit validates, and the closed-rows digest serializes, only the rows that changed since the last commit, so serve's board pass stops spending 0.14 to 0.16 cores and 3.5 to 5.1 s stalls on its request loop"
+  repo: remudero
+  depends_on: []
+  priority: 0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # which rows skip validation and re-serialization; a skipped row's disk form equals one already checked
+  origin: "operator-session#serve-oom-2026-11-16"
+  plan_refs:
+    - W1-T13332
+  files:
+    - src/lib/board-snapshot-cache.ts
+    - test/a-board-commit-checks-only-the-rows-that-changed.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "After a 500-row closed commit, a commit with one changed row measures (Buffer.byteLength) at most that row's strings, where the first commit measured every row's"
+      proof: "grep: W1-T13616 criterion 1 in test/a-board-commit-checks-only-the-rows-that-changed.test.ts"
+    - claim: "invariant:same-digest — boardClosedRowsDigest with its memo equals the digest without it, before and after a change, and stringifies only the changed rows"
+      kind: guard
+      proof: "grep: W1-T13616 criterion 2 in test/a-board-commit-checks-only-the-rows-that-changed.test.ts"
+    - claim: "A changed row that breaks a bound is still refused while the unchanged rows are reused"
+      proof: "grep: W1-T13616 criterion 3 in test/a-board-commit-checks-only-the-rows-that-changed.test.ts"
+  rationale: |
+    WHY: Craig is hitting serve's main-loop stalls directly (the Inbox times out and shows "unavailable").
+    MEASURED after the write-behind (W1-T13332) went live at 03:43Z on 2026-11-18: a host profile at 04:41 to 04:53Z put
+    status.ts -> recordClosedAttempt / commitClosed at 0.14 to 0.16 cores, blocking 3.5 to 5.1 s every 2 to 5 minutes;
+    runtime.loop_stall_profile rows since 04:10Z (27 stalls, 65 s) rank boundedString's callee (1,021 ms self), GC
+    (870 ms), recordClosedAttempt (809 ms) and boardClosedRowsDigest (321 ms + 571 ms inclusive).
+    READ at origin/main: commit("closed") runs isClosedDiskRow (Buffer.byteLength over every string) on every row on
+    every commit, and recordClosedAttempt re-stringifies every row for boardClosedRowsDigest whenever any row changed.
+  design: |
+    INVARIANT same-digest: the memoized digest hashes exactly the bytes a fresh digest hashes.
+    1. commit skips validation for a row whose disk form equals the held row line (sameFlatRow), for closed rows and
+       issues alike; every other row is validated as before.
+    2. boardClosedRowsDigest takes an optional memo (number -> disk row and its JSON); the cache keeps one and drops
+       rows no longer held. Without a memo it behaves exactly as before.
+  falsifier: |
+    Validate every row: criterion 1 fails. Hash a different text for a memoized row: criterion 2 fails. Skip validation
+    for a changed row: criterion 3 fails.
+  note: |
+    Id reserved for run-unfiled-1794978187464 with ~/rmd-work/bin/reserve-id.sh.

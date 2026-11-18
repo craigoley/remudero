@@ -1,0 +1,32 @@
+- id: W1-T13621
+  title: "A folded Inbox twin keeps the ask the operator can act on: verify-human:<id> and machine-judge:<id> fold into the one whose state is answered or ready, not always machine-judge"
+  repo: remudero
+  depends_on: []
+  plan_refs:
+    - W1-T13479
+  type: implement
+  verify: auto
+  risk: high # one concern across 3 files: the fold helper, the needsYou lanes that call it, and its test
+  priority: 1.2
+  status: merged
+  # reservation hand-off: run-unfiled-1794981500000 -> claude/project-thread-3etqkx
+  files:
+    - src/lib/ask-classification.ts
+    - src/lib/panel-graph.ts
+    - test/inbox/one-parked-task-shows-one-ask.test.ts
+  design: |
+    INVARIANT answered-twin-stays-settled: when either ask of the pair is answered (declined, ratified, retired or drafting), the other never resurfaces as a fresh ask.
+
+    foldedTwinAsks takes each proposal's state and keeps the pair member with the higher rank: answered (declined, ratified, retired), then drafting, then ready, then not ready (not_ready, deferred_with_trigger). Only a tie keeps machine-judge:<id>. inboxLanes and projectProposalHumanGates pass their classifications, so needsYou rows, its counts and every badge agree.
+  acceptance:
+    - claim: "When verify-human:<id> is ready and machine-judge:<id> is not ready, needsYou lists the verify-human ask in its ready lane and counts the task once."
+      proof: "grep: W1-T13621 criterion 1 in test/inbox/one-parked-task-shows-one-ask.test.ts"
+    - claim: "invariant:answered-twin-stays-settled — an answered verify-human ask hides its ready machine-judge twin, and a tie keeps machine-judge"
+      proof: "grep: W1-T13621 criterion 2 in test/inbox/one-parked-task-shows-one-ask.test.ts"
+  origin: "operator-session#inbox-asks-2026-11-17"
+  rationale: |
+    OBSERVED 2026-11-18 05:56Z in the live Console inbox view after W1-T13479 (#19295) reached serve: needsYou held only
+    machine-judge:W1-T12032, in the notReady lane (high-risk verdict, confidence 0.55), so it could not be approved;
+    the approvable verify-human:W1-T12032 was in the ready lane but folded out of needsYou. The operator had no visible
+    way to approve the task. Cause: W1-T13479's foldedTwinAsks always hid verify-human:<id> when machine-judge:<id> was present, whatever their states.
+    This task changes only which member of the pair W1-T13479 keeps; W1-T13479 built the fold itself and is merged (#19295).

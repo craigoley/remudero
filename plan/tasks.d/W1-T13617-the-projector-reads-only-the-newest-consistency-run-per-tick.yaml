@@ -1,0 +1,49 @@
+- id: W1-T13617
+  title: "Serve's read-model projector reads only the newest consistency run when it asks whether a check is due, instead of every run ever recorded, on every tick"
+  repo: remudero
+  depends_on: []
+  priority: 0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the oracle schedule every instance's consistency check runs on; its intervals and outcomes are unchanged
+  origin: "operator-session#serve-hot-worker-2026-11-17"
+  plan_refs:
+    - W1-T8866
+  files:
+    - src/lib/read-model-consistency.ts
+    - test/console-api/read-model/the-projector-reads-only-the-newest-consistency-run-per-tick.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "With 5,000 recorded runs, consistencyCheckDue reads one row with LIMIT 1 and calls all() on no statement"
+      proof: "grep: W1-T13617 criterion 1 in test/console-api/read-model/the-projector-reads-only-the-newest-consistency-run-per-tick.test.ts"
+    - claim: "invariant:schedule-unchanged — the check is due with no run, an hour after an agreement and ten minutes after any other outcome, judged from the newest run by id"
+      kind: guard
+      proof: "grep: W1-T13617 criterion 2 in test/console-api/read-model/the-projector-reads-only-the-newest-consistency-run-per-tick.test.ts"
+  rationale: |
+    WHY: serve's projector thread (rmd-read-model) rose to about 0.10 cores on the Azure host on 2026-11-18, while its
+    caught_up rows show it applies ledger rows at 12,873 rows in 861 ms. A 30 s inspector CPU profile of the thread
+    at about 05:03Z (serve pid 25641) put consistencyCheckDue at 2,169 of 4,715 sampled ms inclusive (46%), all of it in
+    history(): SELECT ... FROM consistency_run ORDER BY id with no LIMIT, mapped to objects, plus a share of the
+    762 ms of GC. read-model-worker.ts tickSlot asks it on every tick of every instance.
+    consistency_run is never pruned. Read-only counts on the host: console 11,714 rows, site 7,635, core 5,911, ops 3,
+    all since 2026-10-01, growing by about 120-250 a day per instance. So the cost grows every day.
+    consistencyCheckDue uses only history(db).at(-1), the newest row by id.
+  design: |
+    INVARIANT schedule-unchanged: due with no run, ORACLE_AGREE_INTERVAL_MS after an agreement, ORACLE_DRIFT_INTERVAL_MS
+    after anything else, judged from the newest run by id.
+    1. consistencyCheckDue reads `SELECT at_ms, outcome FROM consistency_run ORDER BY id DESC LIMIT 1`, after the same
+       sqlite_master existence check history() makes.
+    2. history() and its two callers in runConsistencyCheck are unchanged: they run once per check, not per tick.
+    3. A new test counts the statements the due check reads through a recording ReadModelDb proxy.
+    Not in scope: pruning consistency_run, and history()'s use inside a check.
+  falsifier: |
+    Restore history(db).at(-1): criterion 1 fails (an all() over 5,000 rows). Order by at_ms or drop DESC: criterion 2
+    fails.
+  note: |
+    Id reserved for run-unfiled-1794978381246 with ~/rmd-work/bin/reserve-id.sh.
+    reservation hand-off: run-unfiled-1794978381246 -> claude/project-thread-u06uh4
+    Proof that counts in production: a repeat profile of rmd-read-model shows no history() under consistencyCheckDue,
+    and the thread's /proc CPU falls from about 0.10 cores.

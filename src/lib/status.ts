@@ -1,3 +1,4 @@
+import { threadName } from "./thread-names.js";
 import { execFileSync } from "node:child_process";
 import { ghExec, ghExecFile, ghTextAsync } from "./github-transport.js";
 import { DEFAULT_GH_CALL_TIMEOUT_MS, configureGithubInstallationBudget, createNonBlockingGhCallPacer, githubInstallationBudget, parseGhRateLimitHeaders, splitGhHeaderBlock, type GhRateLimitReading } from "./github-transport.js";
@@ -144,6 +145,28 @@ export function isGhRateLimitError(err: unknown): boolean {
 /** Bound synchronous gh calls within the poll interval; degrade on timeout to avoid daemon hangs.
  * Unbounded sweep: 10:57-11:54, docs/forensics/status.md. */
 export const GH_CALL_TIMEOUT_MS = DEFAULT_GH_CALL_TIMEOUT_MS;
+
+/** A single GitHub API page can fail transiently while the rest of a board walk is healthy. */
+const BOARD_GH_SERVER_RETRY_ATTEMPTS = 3;
+const BOARD_GH_SERVER_RETRY_DELAY_MS = 250;
+
+function isTransientGhServerFailure(err: unknown): boolean {
+  const e = err as { message?: unknown; stderr?: unknown } | null;
+  const detail = `${String(e?.stderr ?? "")}\n${String(e?.message ?? "")}`;
+  return /\bHTTP\s+(?:502|503|504)\b/i.test(detail);
+}
+
+/** Retry only an individual, idempotent board API page; persistent errors still reach the gateway catch. */
+function runBoardApiRead<T>(read: () => T, sleepSync?: (ms: number) => void): T {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return read();
+    } catch (err) {
+      if (!isTransientGhServerFailure(err) || attempt + 1 >= BOARD_GH_SERVER_RETRY_ATTEMPTS) throw err;
+      sleepSync?.(BOARD_GH_SERVER_RETRY_DELAY_MS * (attempt + 1));
+    }
+  }
+}
 
 /** A PR's identity + GitHub merge state, as seen by the {@link GitHub} gateway. */
 export interface PrRef {
@@ -4054,6 +4077,14 @@ export function buildCommitTrailerIndex(opts: {
   };
 }
 
+/** W1-T13662: {@link projectPlan} over a plan of the one named task, with the same deps; an id not in the plan
+ *  gives an empty map. Task-less escalations are skipped: in a one-task plan every other task would count as one. */
+export function projectTask(plan: Plan, taskId: string, deps: DeriveDeps): Map<string, StatusProjection> {
+  const task = plan.byId.get(taskId);
+  if (task === undefined) return new Map();
+  return projectPlan({ tasks: [task], byId: new Map([[taskId, task]]) }, { ...deps, skipTasklessEscalations: true });
+}
+
 /** Derive every task in a plan and cache the projection to `cachePath` (state/status.json). Returns a taskId ->
  *  projection map. Writes ONLY the cache. */
 export function projectPlan(
@@ -4718,7 +4749,8 @@ function runPrewarmChannelsSync(req: PrewarmWorkerRequest): PrewarmWorkerRespons
     return {
       fetchJson: (args: string[]): unknown => {
         response.calls = (response.calls ?? 0) + 1;
-        const { headers, body } = splitGhHeaderBlock(paceGhEntry(walkPacer, isGhRateLimitError, () => runSync(["api", "-i", ...args.slice(1)])));
+        const { headers, body } = splitGhHeaderBlock(paceGhEntry(walkPacer, isGhRateLimitError, () =>
+          runBoardApiRead(() => runSync(["api", "-i", ...args.slice(1)]), walkPacer.sleepSync)));
         const reading = parseGhRateLimitHeaders(headers);
         if (reading.remaining !== undefined) response.rateLimit = reading;
         bytes += Buffer.byteLength(body, "utf8");
@@ -4986,7 +5018,7 @@ export function buildBatchedGithub(
       // at the head of UP NEXT. The three decoration fields still ride the SAME fetch.
       let bytes = 0;
       const fetchJson = (args: string[]): unknown => {
-        const raw = run(args);
+        const raw = runBoardApiRead(() => run(args), pacer.sleepSync);
         bytes += Buffer.byteLength(raw, "utf8");
         return JSON.parse(raw);
       };
@@ -5514,7 +5546,7 @@ export function buildBatchedGithub(
     };
     let worker: Worker;
     try {
-      worker = startWorker(import.meta.url, { workerData: req }, { override: opts.workerUrl });
+      worker = startWorker(import.meta.url, { name: threadName("statusChannels"), workerData: req }, { override: opts.workerUrl });
     } catch (err) {
       // Spawning itself failed (e.g. no worker_threads support) — fall back to the SAME channel walk
       // synchronously on THIS thread, applied through the SAME bookkeeping a landed message uses. The ONE place

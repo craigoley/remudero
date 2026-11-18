@@ -1,0 +1,155 @@
+- id: W1-T13410
+  title: "A clone that cannot fetch is counted by the beat and raised once: the heartbeat publishes how many refs of the install clone name a missing object, and the host-resource gardener raises one incident for that count, and one for a gc.log that stays, with the repair command in it"
+  repo: remudero
+  depends_on: []
+  priority: 1.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # one concern, a clone that cannot fetch is reported, across the host script that counts and the gardener that raises (Rule 19); a count that is wrong reads as a false incident or a missed one. The probe is read-only and changes no ref and no file of the clone
+  origin: "operator-ruling#no-repair-loop-2026-11-17"
+  plan_refs:
+    - W1-T10756
+    - W1-T13327
+    - W1-T2529
+    - W1-T13176
+    - W1-T13409
+  files:
+    - scripts/fleet-heartbeat.sh
+    - src/lib/host-resource-gardener.ts
+    - src/lib/ledger-steps.ts
+    - test/daemon/a-clone-that-cannot-fetch-is-counted-by-the-beat-and-raised-once.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "invariant:the-count-is-read-not-constant — the real script, run with real git on an install clone of a local bare remote, publishes `unresolvable_refs=0` and `unresolvable_ref_first=none` when every ref resolves. With two refs set to an id the clone lacks it publishes `unresolvable_refs=2` and the first of those ref names. The probe changes no ref: `git for-each-ref` prints the same lines before and after the beat's probe"
+      proof: "grep: W1-T13410 criterion 1 in test/daemon/a-clone-that-cannot-fetch-is-counted-by-the-beat-and-raised-once.test.ts"
+    - claim: "invariant:the-count-is-bounded — a probe whose git call does not end inside its time BACKSTOP is stopped there, the beat publishes `unresolvable_refs=unknown` and never 0, and the beat still publishes its other fields"
+      kind: guard
+      proof: "grep: W1-T13410 criterion 2 in test/daemon/a-clone-that-cannot-fetch-is-counted-by-the-beat-and-raised-once.test.ts"
+    - claim: "invariant:one-incident-per-episode — a gardener pass over a beat with `unresolvable_refs` above zero raises one escalation for that host through ports.escalate and writes one host_resource.clone_refs_unresolvable row. Later passes over newer beats with a count above zero raise nothing more. The first beat with a count of 0 writes one host_resource.clone_refs_recovered row and ends the episode, and a later count above zero raises again. A beat with `unknown`, or with no such field, neither raises nor ends an episode"
+      proof: "grep: W1-T13410 criterion 3 in test/daemon/a-clone-that-cannot-fetch-is-counted-by-the-beat-and-raised-once.test.ts"
+    - claim: "The escalation text names the host, the install directory, the count, the first ref and the one repair command for a tracking ref (`fetch --refetch` of that one branch), and says that a local branch, a tag or a refs/rmd-dispatch ref is not to be deleted without a look"
+      proof: "grep: W1-T13410 criterion 4 in test/daemon/a-clone-that-cannot-fetch-is-counted-by-the-beat-and-raised-once.test.ts"
+    - claim: "invariant:a-gc-log-that-stays-is-raised-once — beats whose `gc_verdict` starts with DISABLED and whose `gc_disabled_reason` is the same raise one escalation once the beat times span the set time, and none before it. A changed reason starts the time again. `gc_verdict=ok` writes one host_resource.clone_gc_recovered row and ends the episode. The text carries git's own first line and the command that removes the file after the cause is repaired"
+      proof: "grep: W1-T13410 criterion 5 in test/daemon/a-clone-that-cannot-fetch-is-counted-by-the-beat-and-raised-once.test.ts"
+    - claim: "meaningOfStep returns a row for each of the four new host_resource steps"
+      proof: "grep: W1-T13410 criterion 6 in test/daemon/a-clone-that-cannot-fetch-is-counted-by-the-beat-and-raised-once.test.ts"
+  rationale: |
+    WHY: on 2026-11-17 the fleet's shared clone could not fetch from about 03:00Z until a hand repair, and nothing told the
+    operator. The beat did publish the one sign it had, and nothing reads that field. W1-T13409 repairs a
+    dangling tracking ref at the fetch that fails. This task makes the state visible: a ref that W1-T13409 does
+    not repair (a local branch, a tag, a refs/rmd-dispatch ref), a clone that only hand tools fetch in, and a
+    gc.log that stays.
+    MEASURED on the Azure fleet host, 2026-11-17:
+    - What the beat showed. The beat of 13:55:01Z (commit still in ~/rmd-state2/daemon-install, read from the
+      reflog of refs/remotes/origin/heartbeat-azure) published
+      `gc_verdict=DISABLED — .git/gc.log is present, automatic gc will not run until it is removed` and
+      `gc_disabled_reason=fatal: bad object refs/remotes/origin/heartbeat-azure`. So the gc field did show
+      it, with git's own reason. The six later beats in that reflog (14:00:01Z to 15:00:01Z) and the branch tip
+      at 15:00:01Z publish `gc_verdict=ok` and `gc_disabled_reason=none`: the file was gone by then. The branch
+      keeps one commit, so earlier beats cannot be read.
+    - No field of the beat counts refs. A dangling ref with no gc.log (the state before the first automatic gc
+      fails) publishes nothing.
+    - What was raised: nothing. The core ledger for 2026-11-17 (~/rmd-state2/state/ledger.ndjson and that
+      day's archives) has no row for the install clone that holds `bad object`, `did not send all necessary`,
+      gc.log or gc_disabled. The 1,138 incident.event rows of that day are 1,136 sre-lane interventions for
+      other fingerprints and 2 gateway rows. The 10 serve.slot_git_lock_reclaimed rows remove a gc.log from
+      the Serve container's own clone (/home/node/Remudero/remudero/.git), a different clone.
+    - Cost of the count: the install clone has 9,796 refs. `git for-each-ref --format='%(objectname)' | sort -u |
+      git cat-file --batch-check | grep -c ' missing$'` took 0.71 s under nice with the host at load 17 to 20.
+      In a scratch clone (git 2.43.0) for-each-ref lists a dangling ref without an error and cat-file prints
+      `<id> missing` for it.
+    READ at origin/main ca9031f7b5:
+    - scripts/fleet-heartbeat.sh:1469 to :1497 (W1-T2529, merged): the beat reads `${INSTALL_DIR}/.git/gc.log`,
+      and publishes `gc_verdict` and `gc_disabled_reason` (git's first line of the file) at :1691 and :1692. So
+      "an existing gc.log is reported with its first line" is already on main. This task adds no gc field.
+    - Nothing reads those two fields: `gc_verdict` and `gc_disabled_reason` are in scripts/fleet-heartbeat.sh and
+      in no file under src/ or .github/.
+    - scripts/fleet-heartbeat.sh:1435: the shape of a bounded probe (`timeout 20` when the command exists).
+      :1792 to :1818: publish_beat exports GIT_OBJECT_DIRECTORY for the beat's private store, inside its own
+      subshell; the probes run before it.
+    - src/lib/host-resource-gardener.ts:1323 gitHeartbeatSource reads every heartbeat branch. :1060 to :1122: the
+      pass already raises one escalation per host for `acr_login_result=failed` and for a failed
+      `backup_verdict`, each once per episode (escalatedAt in the state file, :871 and :872), each with the
+      command to run in the text, and writes a recovered row when the field is good again (:1070, :1099). This
+      is the existing incident path. src/run-task.ts:29116 to :29127 wires its ports for the daemon.
+    - src/lib/host-resource-gardener.ts:66: a pass runs at most every 30 minutes, and a beat every 5. A pass
+      reads the newest beat only, so "how long" must come from the beat times the gardener stores, not from a
+      count of passes.
+    - src/lib/sre-lane.ts and src/lib/sre-runbooks.ts read no heartbeat field. An SRE runbook acts by itself
+      inside the daemon container; the install clone is on the host. The repair here stays a command in the
+      escalation text.
+    BUILDS ON, AND WHAT IS LEFT TO OTHERS:
+    - W1-T2529 (merged): the gc.log fields. Used as they are.
+    - W1-T10751 (queued) moves the gc verdict to the git stores the containers mount, and W1-T13176 (queued,
+      depends on W1-T10751, an operator hand build because it edits a workflow) raises a gc issue from the
+      hourly watcher workflow. Neither counts refs, and neither reads the `gc_verdict` line that main
+      publishes today. This task raises from inside the daemon on today's line. If W1-T10751 has merged
+      when this is built, read the merged script first and take the gc line that covers the install clone;
+      if it no longer publishes one, build criteria 1 to 4 and 6, and say so in the pull request.
+    - W1-T13327 (PR #19092) stops the beat from making the dangling ref. W1-T13409 repairs one at the fetch.
+    Swept plan/tasks.d and plan/tasks.yaml at origin/main for unresolvable_refs, dangling, bad object, gc.log
+    and gc_verdict, and the 10 open pull requests: no filing counts unresolvable refs or raises on them.
+  design: |
+    INVARIANT the-count-is-read-not-constant: a clone whose refs all resolve publishes 0, a clone with n dangling refs publishes n and a ref name, and the probe writes nothing to the clone.
+    INVARIANT the-count-is-bounded: the probe ends inside its time BACKSTOP, and a probe that did not finish publishes unknown, never 0.
+    INVARIANT one-incident-per-episode: a count above zero raises one escalation per host and episode, and the episode ends on the first beat with a count of 0.
+    INVARIANT a-gc-log-that-stays-is-raised-once: the same gc failure across beats that span the set time raises one escalation, and gc_verdict=ok ends the episode.
+    1. The beat. Add one probe beside the gc.log probe. With GIT_OBJECT_DIRECTORY and
+       GIT_ALTERNATE_OBJECT_DIRECTORIES unset, run `git -C "$INSTALL_DIR" for-each-ref --format='%(objectname) %(refname)'`,
+       pass the distinct ids to one `git cat-file --batch-check`, and count the refs whose id reads `missing`.
+       Publish `unresolvable_refs=<n>` and `unresolvable_ref_first=<the first such ref in for-each-ref order, or none>`.
+       Run it under `timeout` (BACKSTOP 20 s; measured 0.71 s) and nice. If timeout is absent, or a git call
+       fails or is killed, publish `unresolvable_refs=unknown`. The probe runs no fetch, no fsck, no gc and no
+       update-ref. One count per beat, in the beat that already runs: no new timer.
+    2. Keep new comments in the script short: scripts/comment-load-baseline.json:47 holds its comment count.
+    3. The gardener. In hostResourcePassSteps, beside the acr and backup blocks, add a clone episode per
+       host in the state file: the beat time, the count, the first ref, the gc reason, the beat time at
+       which that gc reason was first seen, and one escalatedAt for refs and one for gc. Old state files
+       with no such key must load.
+    4. Refs. A beat newer than the stored one with a count above zero: if the episode has no escalatedAt, call
+       ports.escalate (class MANUAL, taskId `host-clone-refs-<host>`, headDedup independent, one
+       operator-only option) and write host_resource.clone_refs_unresolvable. The detail gives host,
+       `install_dir` from the payload, the count, the first ref, and for a ref under refs/remotes/origin/
+       the command
+       `git -C <install_dir> -c gc.auto=0 -c maintenance.auto=false fetch --refetch --no-tags origin '+refs/heads/<b>:refs/remotes/origin/<b>'`.
+       For any other ref it says to look at the ref first and not to delete it. A count of 0: if an
+       escalation was raised, write host_resource.clone_refs_recovered; clear the episode. `unknown` or a
+       missing field changes nothing.
+    5. gc. `gc_verdict` that starts with DISABLED: store the reason and the beat time when that reason was first
+       seen. When the newest beat is at least CLONE_GC_RAISE_AFTER_MS later (a BACKSTOP constant, 30 minutes:
+       six beats, so a gc.log that the next automatic gc clears raises nothing) and no escalation is open,
+       raise one (taskId `host-clone-gc-<host>`) and write host_resource.clone_gc_disabled. The detail
+       carries `gc_disabled_reason` and says: repair the cause named there, then `rm <install_dir>/.git/gc.log`.
+       A changed reason starts the time again. `gc_verdict=ok` writes host_resource.clone_gc_recovered when an
+       escalation was raised and clears the episode.
+    6. Closing. An episode ends as the acr and backup episodes do: the recovered row, and the state cleared so
+       a new episode raises again. This task adds no new way to close a GitHub issue.
+    7. Register the four steps in src/lib/ledger-steps.ts.
+    8. TESTS. Criteria 1 and 2 run the real script with real git against a bare remote, with the fixture
+       shape of test/daemon/a-heartbeat-running-stale-code-says-so.test.ts:36-76 kept in the new file (do not
+       import that test file). The `runBeat` of test/helpers/fleet-heartbeat-harness.ts replaces git with a stub
+       and cannot show the count. For criterion 2 put a `git` shim first on PATH that sleeps on
+       `cat-file`, with the BACKSTOP lowered through the script's own variable. Criteria 3 to 5 call
+       runHostResourcePass with fixture payloads, a fixed clock and recording ports, as
+       test/w1-t5319-the-acr-login-refreshes-itself-and-escalates-when-it-cannot.test.ts does. Load
+       test/setup/tmp-hygiene.ts so no test reads or writes the host's config or state.
+    WHY NOT the alternatives:
+    - A repair by the beat or by a timer: the operator ruled out a repair loop. The beat reports; the fetch
+      repairs (W1-T13409).
+    - `git fsck` in the beat: it reads far more than the refs and is not bounded on a clone this size.
+    - Count passes in the gardener: passes are 30 minutes apart and can be skipped, so a count of passes is
+      not a time. The beat times are.
+  falsifier: |
+    Publish a fixed `unresolvable_refs=0`: the second half of criterion 1 fails. Publish 0 when the probe is
+    killed: criterion 2 fails. Drop escalatedAt from the episode: criterion 3 sees one escalation per pass. End
+    the episode on `unknown`: criterion 3 fails. Raise on the first DISABLED beat: criterion 5 fails.
+  note: |
+    Id reserved for run-unfiled-1794927603000 with ~/rmd-work/bin/reserve-id.sh.
+    Proof that counts on the host: the published beat carries `unresolvable_refs=0` for the install clone, and
+    with one ref set to a missing id the next beat carries 1 and the next gardener pass raises one escalation.
+    A raise can be up to one gardener pass (30 minutes or more) after the beat that first shows the count.
+    Out of scope: the watcher workflow (W1-T13176), the per-tree gc lines (W1-T10751), any repair, any host
+    config edit, and any clone other than the install clone.

@@ -1,3 +1,4 @@
+import { threadName } from "./thread-names.js";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -22,6 +23,9 @@ import {
   type PromotionRecord,
 } from "./experiment-promotion.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
+import { JUDGE_SHADOW_STEPS, judgeShadowSummary, type JudgeShadowRoleSummary } from "./judge-shadow.js";
+import { scoreTypedAnswers, type TypedAnswer, type TypedAnswerRow, type TypedAnswerScoreGroup } from "./typed-answer-scores.js";
+import { openWeightCandidatesForCapability, openWeightCapabilityForRequestedModel, type ModelSurface } from "./worker-provider.js";
 import { gardenNeedsInventory, gardenPassDue, landedPrUrl, gardenStatePath, judgeGardenDecision, readGardenState, runGardenAsync, type GardenAction, type GardenCheckout, type GardenPassResult, type GardenSpec, type GardenerDeps, type PrState } from "./gardener.js";
 import { buildEntryWeightIndex, DEFAULT_KNOWLEDGE_BUDGET_CHARS, loadLearningsCorpus } from "./learnings.js";
 import type { LedgerLine } from "./ledger.js";
@@ -29,7 +33,7 @@ import { ledgerRotationEntries, readLedgerUnionRecordsSync } from "./ledger-unio
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import type { BillingMode } from "./env.js";
 import { recommendMounts, type MountHeadroomCell, type MountRecommendation } from "./mount-recommender.js";
-import { loadMounts, mountsPath } from "./mounts.js";
+import { loadMounts, mountsPath, type JudgeShadowOnlyRole } from "./mounts.js";
 import { loadPlan } from "./plan.js";
 import { planShards } from "./plan-gardener.js";
 import { resolveRepoLayout } from "./repo-layout.js";
@@ -50,6 +54,10 @@ import { deriveTaskClass } from "./task-class.js";
  *     its route in the mounts table (mounts.ts's `mountsPath`).
  *   - RE-DERIVE-CAP: the learnings character cap is re-derived from the spawns measured UNDER the
  *     current cap, with the same two functions that derived it (digest.ts).
+ *   - MOVE-JUDGE-TO-CASH (W1-T12187): a judge whose cash shadow cleared {@link JUDGE_CASH_BAR} gets `provider: cash`
+ *     on its own one-line row in the mounts table. W1-T12417: when one shadow model of a role clears
+ *     {@link JUDGE_SWITCH_BAR} on W1-T12414's per-model scores, the same edit if it is a cash model cash serves that row
+ *     with, or, for a decision model, the role's `judge_shadows` line made `{ primary, threshold }`.
  *
  * EVERY CHANGE IS A CANARY (experiment-promotion.ts). It is chosen only when its SHADOW evidence — what
  * it was derived from, read before anything is exposed — clears its guard. Its PR opening puts it in
@@ -63,8 +71,8 @@ import { deriveTaskClass } from "./task-class.js";
  * classes never moves on its own — the canary is the judge, never a second opinion.
  */
 
-export type ConfigGardenClass = "recalibrate-budget" | "adopt-mount" | "re-derive-cap";
-export const CONFIG_GARDEN_CLASSES: readonly ConfigGardenClass[] = ["recalibrate-budget", "adopt-mount", "re-derive-cap"];
+export type ConfigGardenClass = "recalibrate-budget" | "adopt-mount" | "re-derive-cap" | "move-judge-to-cash";
+export const CONFIG_GARDEN_CLASSES: readonly ConfigGardenClass[] = ["recalibrate-budget", "adopt-mount", "re-derive-cap", "move-judge-to-cash"];
 
 /** One whole-line replacement in a repo file. A rollback swaps `from` and `to`. */
 export interface ConfigEdit {
@@ -121,6 +129,12 @@ export interface ConfigInventory {
   queued: QueuedBudget[];
   recommendations: MountRecommendation[];
   cap?: { current: number; derivation: KnowledgeBudgetDerivation };
+  /** W1-T12187: each judge role's cash shadow record over {@link JUDGE_CASH_BAR}'s window. */
+  judgeShadows?: JudgeShadowRoleSummary[];
+  /** W1-T12417: W1-T12414's scores of each role's shadow models over the same window, one group per role, model and surface. */
+  judgeShadowScores?: TypedAnswerScoreGroup[];
+  /** W1-T12417: the least top-option probability each decision model clears the bar at, per role ({@link judgeShadowThresholds}). */
+  judgeShadowThresholds?: JudgeShadowThreshold[];
   active: ConfigCanary[];
   /** Scopes whose canary was rolled back or declined within {@link CANARY_TTL_MS}: re-proposing the same
    *  change on the next pass would only repeat the verdict. */
@@ -154,6 +168,36 @@ export const CANARY_TTL_MS = 21 * 24 * 3600 * 1000;
 export const CONFIG_GARDEN_BUCKET_MS = 6 * 3600 * 1000;
 /** How often the open canaries are judged. */
 export const CONFIG_TEND_INTERVAL_MS = 3600 * 1000;
+/** W1-T12187: what a judge's cash shadow must show before its row moves to cash. The three numbers are new and
+ *  unmeasured (2026-11-17): the sample floor, the least agreement and the most calls with no usable answer. */
+export const JUDGE_CASH_BAR = { windowMs: 14 * 24 * 3600 * 1000, minPaired: 200, minAgreeShare: 0.98, maxNoAnswerShare: 0.02 } as const;
+/** W1-T12417: the per-model bar. The first three numbers are {@link JUDGE_CASH_BAR}'s; the Brier ceiling is new and
+ *  unmeasured (2026-11-17: no shadow answer has a known outcome yet). It applies to a model with a Brier figure; a
+ *  single answer has none (W1-T12414), and is judged on agreement. */
+export const JUDGE_SWITCH_BAR = { minCompared: JUDGE_CASH_BAR.minPaired, minAgreeShare: JUDGE_CASH_BAR.minAgreeShare,
+  maxNoAnswerShare: JUDGE_CASH_BAR.maxNoAnswerShare, maxBrier: 0.1 } as const;
+/** W1-T12417: judges that fail closed. No gardener proposal moves their primary off the subscription. */
+export const FAIL_CLOSED_JUDGE_ROLES: ReadonlySet<string> = new Set(["risk-judge"]);
+/** The mounts-table row of each shadowed role. */
+export const JUDGE_ROLE_ROWS: Readonly<Record<string, "risk_judge" | "feedback_summary" | "ci_judge" | "fix_progress_judge">> = {
+  "risk-judge": "risk_judge", "decision-summary": "feedback_summary", "ci-judge": "ci_judge", "fix-progress": "fix_progress_judge",
+};
+/** W1-T13501: the judge rows that fail closed (risk-judge.ts escalates when it cannot answer; ruling-judge.ts has
+ *  FAIL_CLOSED_RULING_VERDICT). The gardener never moves one to cash, and the fail-closed guard test reads this list. */
+export const FAIL_CLOSED_JUDGE_ROWS = ["risk_judge", "ruling_judge"] as const;
+/** W1-T13501: one flow-map line with at most one nested mapping, e.g. `ci_judge: { ..., shadow: { ... } }`. */
+const ONE_LINE_ROW = /^\w+: \{(?:[^{}]|\{[^{}]*\})*\}\s*$/;
+
+/** W1-T13501: `line` with `provider: cash` before its top-level `shadow:` key, or before its last brace. */
+function withCashProvider(line: string): string {
+  let depth = 0;
+  for (let i = 0; i < line.length; i++) {
+    if (line[i] === "{") depth++;
+    else if (line[i] === "}") depth--;
+    else if (depth === 1 && line.startsWith("shadow:", i) && /[{,\s]/.test(line[i - 1] ?? "")) return `${line.slice(0, i)}provider: cash, ${line.slice(i)}`;
+  }
+  return line.replace(/\s*\}\s*$/, ", provider: cash }");
+}
 
 export function configCanariesPath(stateDir: string): string {
   return join(stateDir, "config-gardener-canaries.json");
@@ -315,6 +359,8 @@ export const CONFIG_GARDEN_LEDGER_STEPS: readonly string[] = [
   "review.history_guarded",
   // Automatic follow-up filing records the originating PR on this worker-priced receipt.
   "followup.filed",
+  // W1-T12187: the judges' cash shadow rows, for judgeShadowSummary.
+  ...JUDGE_SHADOW_STEPS,
 ];
 
 /** W1-T5474: the 60-day union read bounded to {@link CONFIG_GARDEN_LEDGER_STEPS}. An incomplete union fails
@@ -381,7 +427,7 @@ export function measurementWorkerOptions(execArgv: readonly string[]): { resourc
  *  this module's URL, as before. Its .ts source cannot load in a worker of a bundled main, which has no tsx loader. */
 export function configMeasurementOffLoop<T>(input: ConfigMeasurement, workerUrl: URL = bundledWorkerUrl(import.meta.url)): Promise<T> {
   return new Promise((resolve, reject) => {
-    const worker = new Worker(workerUrl, { workerData: { kind: CONFIG_MEASUREMENT_WORKER_KIND, input }, ...measurementWorkerOptions(process.execArgv) });
+    const worker = new Worker(workerUrl, { name: threadName("configMeasure"), workerData: { kind: CONFIG_MEASUREMENT_WORKER_KIND, input }, ...measurementWorkerOptions(process.execArgv) });
     worker.once("message", (reply: MeasurementReply) => {
       void worker.terminate();
       if (reply.ok) resolve(reply.value as T);
@@ -419,6 +465,9 @@ function buildConfigInventory(input: InventoryMeasurement): ConfigInventory {
     queued: queuedBudgets(input.repoRoot, input.stateDir),
     recommendations: input.recommendations,
     cap: { current: DEFAULT_KNOWLEDGE_BUDGET_CHARS, derivation: capDerivation(rows, weights, DEFAULT_KNOWLEDGE_BUDGET_CHARS) },
+    judgeShadows: judgeShadowSummary(rows, input.nowMs - JUDGE_CASH_BAR.windowMs),
+    judgeShadowScores: scoreTypedAnswers(judgeShadowTypedAnswers(rows, input.nowMs - JUDGE_CASH_BAR.windowMs)).groups,
+    judgeShadowThresholds: judgeShadowThresholds(rows, input.nowMs - JUDGE_CASH_BAR.windowMs),
     active: canaries.filter((c) => isPromotionActive(c.promotion.state)),
     cooling: canaries.filter((c) => c.promotion.state === "rolled_back" && input.nowMs - Date.parse(c.promotion.createdAt) < CANARY_TTL_MS).map((c) => c.promotion.scope.policyScope),
   };
@@ -632,6 +681,206 @@ export function capCandidate(inv: ConfigInventory, baselineText: string): Config
   };
 }
 
+/** W1-T12187: does this role's cash shadow record clear {@link JUDGE_CASH_BAR}? A role with no agreement figure never does. */
+export function judgeClearsCashBar(s: JudgeShadowRoleSummary): boolean {
+  return s.paired >= JUDGE_CASH_BAR.minPaired && s.agreeShare !== null && s.agreeShare >= JUDGE_CASH_BAR.minAgreeShare &&
+    s.noAnswerShare !== null && s.noAnswerShare <= JUDGE_CASH_BAR.maxNoAnswerShare;
+}
+
+/** W1-T12187: the first role that clears the bar and whose own row is one flow-map line that names no provider: that
+ *  line with `provider: cash`. The row must name a model of the lowest tier, so cash serves it from its economy row. A
+ *  role with no row, a fail-closed role, or a row over several lines gets no proposal: one edit replaces one line. */
+export function judgeCashCandidate(inv: ConfigInventory, repoRoot: string): ConfigGardenAction | undefined {
+  const full = mountsPath(repoRoot);
+  const clear = (inv.judgeShadows ?? []).filter(judgeClearsCashBar);
+  if (clear.length === 0 || !existsSync(full)) return undefined;
+  const path = relative(repoRoot, full).split(sep).join("/");
+  const mounts = loadMounts(full);
+  const lines = readFileSync(full, "utf8").split("\n");
+  const lowestTier = Math.min(...Object.values(mounts.tiers));
+  for (const s of clear) {
+    const key = JUDGE_ROLE_ROWS[s.role];
+    if (key === undefined || (FAIL_CLOSED_JUDGE_ROWS as readonly string[]).includes(key)) continue;
+    const row = mounts[key];
+    const from = lines.find((line) => line.startsWith(`${key}: {`) && ONE_LINE_ROW.test(line));
+    // A row that names any provider is not this class's to move: it only takes a provider-less row to cash.
+    if (row === undefined || from === undefined || row.provider !== undefined || mounts.tiers[row.model] !== lowestTier) continue;
+    const to = withCashProvider(from);
+    const cohort: ConfigCohort = { kind: "all" };
+    const observed = { denominator: s.paired, freshness: "verified" as const, comparisonPopulation: population(cohort), observedAt: inv.nowIso };
+    return {
+      class: "move-judge-to-cash",
+      target: s.role,
+      scope: `judge:${s.role}`,
+      reason: `the cash shadow of the ${s.role} agreed on ${(s.agreeShare! * 100).toFixed(1)}% of ${s.paired} paired calls in 14 days, and ${(s.noAnswerShare! * 100).toFixed(1)}% of its calls gave no usable answer; median cost $${s.shadowMedianCostUsd ?? "?"} against $${s.primaryMedianCostUsd ?? "?"}.`,
+      edits: [{ path, from, to }],
+      cohort,
+      candidate: `${key} on ${row.model}/${row.effort} with provider cash`,
+      baseline: `${key} on ${row.model}/${row.effort} with ${row.provider ?? "no provider"}`,
+      exposure: 1,
+      shadowMetrics: [
+        { metricName: "shadow_agree_share", unit: "fraction", direction: "min", abortThreshold: JUDGE_CASH_BAR.minAgreeShare },
+        { metricName: "shadow_no_answer_share", unit: "fraction", direction: "max", abortThreshold: JUDGE_CASH_BAR.maxNoAnswerShare },
+      ],
+      shadowObservations: [
+        { metricName: "shadow_agree_share", value: s.agreeShare!, ...observed },
+        { metricName: "shadow_no_answer_share", value: s.noAnswerShare!, ...observed },
+      ],
+    };
+  }
+  return undefined;
+}
+
+/**
+ * W1-T12417: each shadow row since `sinceMs` as one W1-T12414 typed answer, keyed by role, shadow model and model
+ * surface, so `scoreTypedAnswers` gives each role and model its own figures. A refusal sent no request and gives no
+ * answer. A skipped request is a rejection, an abstention is an abstention, and a decision row keeps its distribution.
+ * A W1-T11075 paired row records agreement only, so its answer is `agree` or `disagree` against `agree`.
+ */
+export function judgeShadowTypedAnswers(rows: ReadonlyArray<Record<string, unknown>>, sinceMs?: number): TypedAnswerRow[] {
+  const out: TypedAnswerRow[] = [];
+  for (const row of rows) {
+    const role = row.role ?? row.surface;
+    const model = row.shadow_model ?? row.shadow_deployment;
+    if (typeof row.step !== "string" || !JUDGE_SHADOW_STEPS.includes(row.step) || typeof role !== "string" || typeof model !== "string") continue;
+    if (sinceMs !== undefined && !(Date.parse(String(row.ts)) >= sinceMs)) continue;
+    if (row.step === "judge_shadow.refused" || row.refusal !== undefined) continue;
+    const modelSurface: ModelSurface = row.model_surface === "decisions" ? "decisions" : "text";
+    const distribution = Array.isArray(row.distribution) ? (row.distribution as Array<{ option: string; probability: number }>) : undefined;
+    const base = { role, question: null, model, source: modelSurface === "decisions" ? "decisions" as const : "generative" as const, modelSurface,
+      questionType: null, inputDigest: null, outcome: null };
+    let answer: TypedAnswer;
+    let incumbent: string | null = typeof row.primary_answer === "string" ? row.primary_answer : null;
+    let options: string[] | null = distribution?.map((entry) => entry.option) ?? null;
+    if (typeof row.abstained === "string") answer = { kind: "abstained", reason: row.abstained === "refusal" ? "refusal" : "cannot-tell" };
+    else if (row.step === "judge_shadow.skipped" || row.step === "judge_shadow.unavailable" || row.parses === false) answer = { kind: "rejected", reason: String(row.reason ?? "no usable answer") };
+    else if (typeof row.agreement !== "boolean") continue;
+    else if (distribution !== undefined) answer = { kind: "distribution", distribution };
+    else if (typeof row.shadow_answer === "string") answer = { kind: "single", option: row.shadow_answer };
+    else {
+      answer = { kind: "single", option: row.agreement ? "agree" : "disagree" };
+      incumbent = "agree";
+      options = ["agree", "disagree"];
+    }
+    out.push({ ...base, options, answer, incumbent });
+  }
+  return out;
+}
+
+/** W1-T12417: does one shadow model of one role clear {@link JUDGE_SWITCH_BAR}? */
+export function judgeShadowModelClears(g: TypedAnswerScoreGroup): boolean {
+  return g.agreement.compared >= JUDGE_SWITCH_BAR.minCompared && g.agreement.rate !== null && g.agreement.rate >= JUDGE_SWITCH_BAR.minAgreeShare &&
+    (g.rejected + g.abstained) / g.answers <= JUDGE_SWITCH_BAR.maxNoAnswerShare && (g.brier === null || g.brier <= JUDGE_SWITCH_BAR.maxBrier);
+}
+
+/** W1-T12417: one tuned threshold figure: the least top-option probability among the answers that cleared
+ *  {@link JUDGE_SWITCH_BAR}, for one role, model and model surface. */
+export interface JudgeShadowThreshold {
+  role: string;
+  model: string;
+  surface: ModelSurface;
+  value: number;
+}
+
+/** W1-T12417: per role and decision model whose compared answers number {@link JUDGE_SWITCH_BAR}'s floor and agree with the
+ *  judge's own at its agreement share, the lowest top-option probability among them (to three places, rounded down): the
+ *  confidence the model was validated down to, below which its answer is not taken as primary. Any other model has no
+ *  figure. A single generated answer has no probability, so a `text` surface gets none. */
+export function judgeShadowThresholds(rows: ReadonlyArray<Record<string, unknown>>, sinceMs?: number): JudgeShadowThreshold[] {
+  const groups = new Map<string, { role: string; model: string; answers: Array<{ top: number; agree: boolean }> }>();
+  for (const row of rows) {
+    const role = row.role;
+    const model = row.shadow_model;
+    if (row.step !== "judge_shadow.compared" || row.model_surface !== "decisions" || typeof role !== "string" || typeof model !== "string" ||
+      typeof row.agreement !== "boolean" || !Array.isArray(row.distribution) || row.refusal !== undefined) continue;
+    if (sinceMs !== undefined && !(Date.parse(String(row.ts)) >= sinceMs)) continue;
+    const top = Math.max(...(row.distribution as Array<{ probability: number }>).map((entry) => entry.probability));
+    if (!Number.isFinite(top)) continue;
+    const key = `${role}\u0000${model}`;
+    const group = groups.get(key) ?? { role, model, answers: [] };
+    group.answers.push({ top, agree: row.agreement });
+    groups.set(key, group);
+  }
+  const out: JudgeShadowThreshold[] = [];
+  for (const { role, model, answers } of groups.values()) {
+    const agreeing = answers.filter((a) => a.agree).length;
+    // The bar was cleared over every one of these answers, so the least top probability among them is the least cut that clears it.
+    if (answers.length < JUDGE_SWITCH_BAR.minCompared || agreeing / answers.length < JUDGE_SWITCH_BAR.minAgreeShare) continue;
+    out.push({ role, model, surface: "decisions", value: Math.floor(Math.min(...answers.map((a) => a.top)) * 1000 + 1e-9) / 1000 });
+  }
+  return out;
+}
+
+/** W1-T12417: the judges whose own answer is exactly one option, so a decision model can be their primary. Their
+ *  `judge_shadows` entry is the one line {@link judgeShadowSwitchCandidate} replaces. */
+export const DECISION_PRIMARY_ROLES: readonly JudgeShadowOnlyRole[] = ["refresh-value", "head-rehome", "typed-judgment"];
+
+/** W1-T12417: the first role and shadow model that clear {@link JUDGE_SWITCH_BAR}, as one edit that makes the model the
+ *  role's primary. A decision model on a judge whose answer is one option (see {@link DECISION_PRIMARY_ROLES}) replaces the
+ *  role's `judge_shadows` line with `{ primary: <model>, threshold: { model: <deployment>, surface: decisions, value } }`;
+ *  the threshold is the model's own figure ({@link judgeShadowThresholds}) and is read only for that model id and surface.
+ *  A cash model on a role's one-line row gets `provider: cash` when cash serves that row with it first. A fail-closed
+ *  judge, a role with no such line, a role already on its candidate and a model with no threshold figure get nothing. */
+export function judgeShadowSwitchCandidate(inv: ConfigInventory, repoRoot: string): ConfigGardenAction | undefined {
+  const full = mountsPath(repoRoot);
+  const clear = (inv.judgeShadowScores ?? []).filter((g) => !FAIL_CLOSED_JUDGE_ROLES.has(g.role) && judgeShadowModelClears(g));
+  if (clear.length === 0 || !existsSync(full)) return undefined;
+  const path = relative(repoRoot, full).split(sep).join("/");
+  const mounts = loadMounts(full);
+  const lines = readFileSync(full, "utf8").split("\n");
+  for (const g of clear) {
+    const edit = g.modelSurface === "decisions" ? decisionPrimaryEdit(g, inv, mounts, lines) : cashPrimaryEdit(g, mounts, lines);
+    if (edit === undefined) continue;
+    const cohort: ConfigCohort = { kind: "all" };
+    const noAnswer = (g.rejected + g.abstained) / g.answers;
+    const observed = { denominator: g.agreement.compared, freshness: "verified" as const, comparisonPopulation: population(cohort), observedAt: inv.nowIso };
+    return {
+      class: "move-judge-to-cash", target: g.role, scope: `judge:${g.role}`,
+      reason: `the ${g.model} shadow of the ${g.role} agreed on ${(g.agreement.rate! * 100).toFixed(1)}% of ${g.agreement.compared} compared calls in 14 days, ` +
+        `${(noAnswer * 100).toFixed(1)}% of its calls gave no usable answer${g.brier === null ? "" : `, and its Brier score is ${g.brier.toFixed(3)}`}; ${edit.why}`,
+      edits: [{ path, from: edit.from, to: edit.to }], cohort,
+      candidate: `${g.role} on ${g.model} (${g.modelSurface} surface)`,
+      baseline: `${g.role} on its own judge`,
+      exposure: 1,
+      shadowMetrics: [
+        { metricName: "shadow_agree_share", unit: "fraction", direction: "min", abortThreshold: JUDGE_SWITCH_BAR.minAgreeShare },
+        { metricName: "shadow_no_answer_share", unit: "fraction", direction: "max", abortThreshold: JUDGE_SWITCH_BAR.maxNoAnswerShare },
+      ],
+      shadowObservations: [
+        { metricName: "shadow_agree_share", value: g.agreement.rate!, ...observed },
+        { metricName: "shadow_no_answer_share", value: noAnswer, ...observed },
+      ],
+    };
+  }
+  return undefined;
+}
+
+type PrimaryEdit = { from: string; to: string; why: string };
+
+/** A decision model that clears the bar on a judge whose answer is one option: that judge's `judge_shadows` line made a primary. */
+function decisionPrimaryEdit(g: TypedAnswerScoreGroup, inv: ConfigInventory, mounts: ReturnType<typeof loadMounts>, lines: readonly string[]): PrimaryEdit | undefined {
+  const role = (DECISION_PRIMARY_ROLES as readonly string[]).includes(g.role) ? g.role as JudgeShadowOnlyRole : undefined;
+  const candidate = mounts.decision_models !== undefined && Object.hasOwn(mounts.decision_models, g.model) ? mounts.decision_models[g.model] : undefined;
+  const figure = (inv.judgeShadowThresholds ?? []).find((t) => t.role === g.role && t.model === g.model && t.surface === g.modelSurface);
+  if (role === undefined || candidate === undefined || figure === undefined || mounts.judge_primaries?.[role] !== undefined) return undefined;
+  const entries = lines.filter((line) => new RegExp(`^ {2}${role}: \\S`).test(line));
+  if (entries.length !== 1 || mounts.judge_shadows?.[role] === undefined) return undefined;
+  return { from: entries[0]!,
+    to: `  ${role}: { primary: ${g.model}, threshold: { model: ${candidate.deployment}, surface: ${figure.surface}, value: ${figure.value} } }`,
+    why: `${g.model} becomes the primary of ${role}, answering when its top option has at least ${figure.value}, and the judge it replaces answers when it does not.` };
+}
+
+/** A cash model that clears the bar on a role's one-line row: `provider: cash`, when cash serves the row with that model first. */
+function cashPrimaryEdit(g: TypedAnswerScoreGroup, mounts: ReturnType<typeof loadMounts>, lines: readonly string[]): PrimaryEdit | undefined {
+  const key = JUDGE_ROLE_ROWS[g.role];
+  const row = key === undefined ? undefined : mounts[key];
+  const from = key === undefined ? undefined : lines.find((line) => line.startsWith(`${key}: {`) && line.trimEnd().endsWith("}"));
+  if (key === undefined || row === undefined || from === undefined || row.provider === "cash") return undefined;
+  const served = openWeightCandidatesForCapability(mounts.capabilities, openWeightCapabilityForRequestedModel(mounts.capabilities, row.model), row.effort)[0];
+  if (served !== g.model) return undefined;
+  return { from, to: from.replace(/\s*\}\s*$/, ", provider: cash }"), why: `cash serves ${key} on ${row.model}/${row.effort} with ${g.model} first.` };
+}
+
 /** A draft promotion for `action`, approved by the gardener's own draw and not yet exposed. */
 export function configPromotion(action: ConfigGardenAction, nowIso: string, repo = "remudero"): PromotionRecord {
   const now = Date.parse(nowIso);
@@ -660,7 +909,8 @@ const readIfPresent = (path: string): string => (existsSync(path) ? readFileSync
 /** Every change any class could make now, each already clear of its shadow guard and of any scope an
  *  active canary holds. */
 export function configCandidates(inv: ConfigInventory, repoRoot: string, rng: () => number): ConfigGardenAction[] {
-  const all = [budgetCandidate(inv, rng), mountCandidate(inv, repoRoot), capCandidate(inv, readIfPresent(join(repoRoot, "scripts", "knowledge-budget-baseline.json")))].filter((a): a is ConfigGardenAction => a !== undefined);
+  const all = [budgetCandidate(inv, rng), mountCandidate(inv, repoRoot), capCandidate(inv, readIfPresent(join(repoRoot, "scripts", "knowledge-budget-baseline.json"))), judgeCashCandidate(inv, repoRoot),
+    judgeShadowSwitchCandidate(inv, repoRoot)].filter((a): a is ConfigGardenAction => a !== undefined);
   const held = inv.active.map((c) => ({ promotionId: c.promotion.promotionId, scope: c.promotion.scope, state: c.promotion.state }));
   return all.filter((a) => {
     const p = configPromotion(a, inv.nowIso);
@@ -733,6 +983,7 @@ const titles: Record<ConfigGardenClass, string> = {
   "recalibrate-budget": "chore(plan): the config gardener canaries recalibrated budgets",
   "adopt-mount": "chore(mounts): the config gardener canaries a recommended mount",
   "re-derive-cap": "chore(learnings): the config gardener canaries a re-derived learnings cap",
+  "move-judge-to-cash": "chore(mounts): the config gardener canaries a judge's primary on a candidate model",
 };
 
 /** Modification times of the plan and mounts, and the current read bucket: an idle tick costs a few stats. */
@@ -749,7 +1000,8 @@ export function configGardenSpec(deps: GardenerDeps, sources: ConfigGardenSource
     classes: CONFIG_GARDEN_CLASSES,
     cheapFingerprint: () => configCheapFingerprint(deps.repoRoot, (deps.clock ?? systemClock).now()),
     inventory: () => configInventory(deps, sources),
-    fingerprint: (inv) => [inv.queued.map((q) => `${q.id}=${q.budgetUsd}`).join(","), inv.recommendations.map((r) => r.cellKey).join(","), inv.cap?.derivation.recommendedCapChars, inv.runs.length].join("|"),
+    fingerprint: (inv) => [inv.queued.map((q) => `${q.id}=${q.budgetUsd}`).join(","), inv.recommendations.map((r) => r.cellKey).join(","), inv.cap?.derivation.recommendedCapChars, inv.runs.length, (inv.judgeShadows ?? []).filter(judgeClearsCashBar).map((s) => s.role).join(","),
+      (inv.judgeShadowScores ?? []).filter(judgeShadowModelClears).map((g) => `${g.role}/${g.model}/${g.modelSurface}`).join(",")].join("|"),
     // The canary judges these classes (tendConfigCanaries settles the pending class), so the framework's
     // own metric is held still: it never credits or debits on a number the canary did not produce.
     metric: () => ({ trials: 0, successes: 0 }),

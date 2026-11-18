@@ -81,7 +81,7 @@ test("W1-T11768 criterion 1: a readable catalog yields one frozen plan bound to 
     42, "refs/heads/main", fx.commit, b.tasksYamlBlob, b.shardTreeSha, Object.entries(b.shardBlobs),
   ])).digest("hex"));
   const bytes = [taskYaml("OPS-T1"), taskYaml("OPS-T2", "second"), taskYaml("OPS-T3", "third")].reduce((n, t) => n + Buffer.byteLength(t), 0);
-  assert.deepEqual(snap.counts, { treeEntries: 5, shards: 2, bytes });
+  assert.deepEqual(snap.counts, { treeEntries: 5, shards: 2, bytes, passes: 1, fetchedObjects: [7], cachedObjects: 0 });
   const refReads = fx.calls.map((c, i) => c.includes("/git/ref/heads/") ? i : -1).filter((i) => i >= 0);
   const blobReads = fx.calls.map((c, i) => c.includes("/git/blobs/") ? i : -1).filter((i) => i >= 0);
   assert.equal(refReads.length, 2, "the ref is read before and after the blobs");

@@ -1,0 +1,62 @@
+- id: W1-T13602
+  title: "A serve demand window counts each view's answers by error code and staleness, batch reads included, so a serve swap can be audited from the ledger"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # one concern across three serve files (Rule 19): what a serve.demand row says about view answers; the window, its cap and its write path are unchanged
+  band_meaning: span
+  origin: "operator-session#serve-recycle-2026-11-18"
+  plan_refs:
+    - W1-T13600
+  files:
+    - src/lib/views.ts
+    - src/lib/serve-demand.ts
+    - src/lib/serve.ts
+    - test/console-api/serve/a-serve-window-counts-each-views-answers-by-error-and-staleness.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "A window with view reads answering 200 fresh, 200 stale, 404 view_not_ready and 404 view_disabled writes one serve.demand row whose views section counts each view by answer code and stale"
+      proof: "grep: W1-T13602 criterion 1 in test/console-api/serve/a-serve-window-counts-each-views-answers-by-error-and-staleness.test.ts"
+    - claim: "A POST /v1/views/batch counts each inner view read under its own view and code, not only the batch's one transport status"
+      proof: "grep: W1-T13602 criterion 2 in test/console-api/serve/a-serve-window-counts-each-views-answers-by-error-and-staleness.test.ts"
+    - claim: "invariant:bounded-views — view names past the family cap share `other`, and a window with no view reads writes no views section"
+      kind: guard
+      proof: "grep: W1-T13602 criterion 3 in test/console-api/serve/a-serve-window-counts-each-views-answers-by-error-and-staleness.test.ts"
+  rationale: |
+    WHY: on 2026-11-18 serve swapped generations three times (02:25Z, 03:33Z, 03:43Z). The only evidence of what clients
+    saw during a swap was an operator's live poll of /v1/version every 0.5 s, which found about 2 s with no answer at
+    03:33:14.8-03:33:16.6Z. No ledger row says which view reads answered view_not_ready, view_disabled or stale in the
+    minutes around a swap.
+    OBSERVED, host ledger /home/craigoleyagent/rmd-state2/state/ledger.ndjson at 03:54Z: serve already writes one
+    serve.demand row per 5-minute window (src/lib/serve-demand.ts createServeDemand, wired in src/lib/serve.ts by
+    recordServeRequest). Its row for 03:48:37-03:53:37Z held families /v1/views/instances (15, all 2xx),
+    /v1/views/inbox (119, all 2xx) and /v1/views/batch (8, all 2xx). So the gap is narrower than "nothing is logged":
+    a family counts only status classes, so 404 view_not_ready, 404 view_disabled and 404 view_shadow read the same;
+    a 200 body that is stale reads as healthy; and a batch hides every inner read behind its one 200.
+    READ at origin/main: src/lib/views.ts buildReadModelViewRoutes answerRead is the one place both GET
+    /v1/views/<name> and the batch answer a view read, and it already knows the code (NOT_SERVED, demand refusal,
+    renderer error) and the judged `stale`.
+    NOT IN SCOPE: requests refused while no generation is listening (the 2 s gap) never reach serve, so no server row
+    can count them; the console's client side owns that evidence.
+  design: |
+    INVARIANT bounded-views: a row's views section has at most SERVE_DEMAND_FAMILY_CAP names; the rest share `other`.
+    1. ReadModelViewRoutesOptions gains onAnswer(view, status, code, stale). answerRead calls it once per view read with
+       the final status, the error code (`ok` for 200 and 304), and the judged stale flag; the batch path calls it per
+       inner read through the same function.
+    2. createServeDemand gains recordView(view, status, code, stale) under the same window and flush as record; the
+       flushed serve.demand row adds `views: { <view>: { n, stale, codes: { <status> <code>: count } } }` only when the
+       window had a view read.
+    3. serve.ts passes demand.recordView as onAnswer. The family tallies, the window length and the write-failure path
+       are unchanged.
+  falsifier: |
+    Count only transport statuses: criteria 1 and 2 fail. Count a batch as one read: criterion 2 fails. Drop the cap or
+    write an empty views section: criterion 3 fails.
+  note: |
+    Id reserved for run-unfiled-1794973900000 with ~/rmd-work/bin/reserve-id.sh.
+    Proposed by the "Keep serve views alive across restarts" thread as one aggregated row per view per minute; filed
+    against the existing 5-minute serve.demand window instead, because that row already exists and is written live.

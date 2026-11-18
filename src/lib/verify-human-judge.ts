@@ -18,7 +18,8 @@ import { stampVerificationAsk } from "./inbox-retirement.js";
  */
 
 import type { Proposal } from "./inbox.js";
-import type { Mount, Mounts } from "./mounts.js";
+import type { JudgeMount, Mount, Mounts } from "./mounts.js";
+import { shadowJudgeCall } from "./judge-shadow.js";
 import { canonicalWorkerProviderId, enabledWorkerProviders, type Config, type WorkerProviderId } from "./config.js";
 import { resolveRiskJudgeMount } from "./risk-judge.js";
 import { createHash } from "node:crypto";
@@ -468,7 +469,7 @@ export async function spawnVerifyHumanJudgeWorker(opts: {
 export function resolveVerifyHumanJudgeMount(
   mounts: Mounts,
   config?: Pick<Config, "workerProviders">,
-): Mount {
+): JudgeMount {
   const mount = mounts.verify_human_judge ?? resolveRiskJudgeMount(mounts);
   if (config === undefined || mount.provider === undefined) return mount;
   const provider = canonicalWorkerProviderId(mount.provider) as WorkerProviderId;
@@ -485,13 +486,28 @@ export function realVerifyHumanJudge(opts: {
   cwd: string;
   settingsFile: string;
   spawn?: typeof spawnWorker;
+  /** W1-T12417: the ledger the shadow's row goes to. With one, each answered verdict is asked of the row's shadow
+   *  afterwards (judge-shadow.ts); the verdict returned is the judge's own. */
+  shadowLog?: (step: string, fields: Record<string, unknown>) => void;
 }): (shard: ShardUnderJudgement) => Promise<VerifyHumanVerdict> {
   const mount = resolveVerifyHumanJudgeMount(opts.mounts, opts.config);
   return async (shard: ShardUnderJudgement) => {
+    const spawn = opts.spawn ?? benchmarkNonDispatchSpawn("verify-human-judge");
     const result = await spawnVerifyHumanJudgeWorker({
-      shard, mount, cwd: opts.cwd, settingsFile: opts.settingsFile, spawn: opts.spawn,
+      shard, mount, cwd: opts.cwd, settingsFile: opts.settingsFile, spawn,
     });
-    return parseVerifyHumanVerdict(result.text);
+    const verdict = parseVerifyHumanVerdict(result.text);
+    if (opts.shadowLog !== undefined && verdict.judgeFailed !== true) {
+      const answered = (text: string): VerifyHumanVerdict | undefined => {
+        const read = parseVerifyHumanVerdict(text);
+        return read.judgeFailed === true ? undefined : read;
+      };
+      // Not awaited: the verdict returned below is the judge's own.
+      void shadowJudgeCall({ role: "verify-human", key: observedStateKey(shard), mount,
+        primaryArgs: buildVerifyHumanJudgeSpawnArgs({ shard, mount, cwd: opts.cwd, settingsFile: opts.settingsFile }),
+        primary: result, primaryAnswer: verdict, parse: answered, agreementKey: (v) => v.decision, spawn, log: opts.shadowLog });
+    }
+    return verdict;
   };
 }
 

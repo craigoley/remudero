@@ -1,0 +1,109 @@
+- id: W1-T13691
+  title: "A run child for an ops task starts with its parent's verified ops catalog blobs, so its first lookup reads no blob again"
+  repo: remudero
+  depends_on: []
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # a run child's task contract comes from this catalog; a wrong kept blob would run or judge the wrong task
+  band_meaning: blast-radius
+  origin: "operator-session#github-budget-2026-11-18"
+  plan_refs:
+    - W1-T11768
+    - W1-T12950
+    - W1-T13673
+  files:
+    - src/lib/ops-catalog-source.ts
+    - src/lib/run-child.ts
+    - src/lib/run-child-contract.ts
+    - src/run-child-main.ts
+    - src/lib/daemon.ts
+    - test/github/a-run-child-for-an-ops-task-starts-with-the-parents-verified-ops-blobs.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "When the daemon spawns a run child for a task the ops catalog holds, and its process holds verified ops blobs from an ok catalog read, the child starts with those blob texts on an inherited pipe, and the child's first findTaskInCatalogs at the same commit sends no git/blobs GET and returns the same task as a cold read"
+      proof: "grep: W1-T13691 criterion 1 in test/github/a-run-child-for-an-ops-task-starts-with-the-parents-verified-ops-blobs.test.ts"
+    - claim: "invariant:the-child-verifies-every-byte — the child keeps an offered blob text only after the checks readBlob makes on a GitHub answer (the git blob SHA-1 of the bytes equals the offered sha, the per-blob and total byte bounds); a text that fails is dropped and that blob is read from GitHub. The child still reads the repository, the branch ref, the commit, the trees and the final ref, so every outcome and refusalStage equals origin/main's for the same GitHub answers"
+      kind: guard
+      proof: "grep: W1-T13691 criterion 2 in test/github/a-run-child-for-an-ops-task-starts-with-the-parents-verified-ops-blobs.test.ts"
+    - claim: "invariant:memory-only — no blob byte is written to a file: the child spec, the plan snapshot and the run directory hold no blob text; the spec says at most that a pipe is offered"
+      kind: guard
+      proof: "grep: W1-T13691 criterion 3 in test/github/a-run-child-for-an-ops-task-starts-with-the-parents-verified-ops-blobs.test.ts"
+    - claim: "A child with no pipe, or with an empty, closed, truncated, oversized or malformed payload, reads the catalog as origin/main does and fails no step; a parent whose write fails (the child exited) records it once and goes on, and the write never blocks the daemon loop"
+      proof: "grep: W1-T13691 criterion 4 in test/github/a-run-child-for-an-ops-task-starts-with-the-parents-verified-ops-blobs.test.ts"
+    - claim: "A run child for a task the public plan holds is spawned with the same stdio as origin/main and is offered no blobs"
+      proof: "grep: W1-T13691 criterion 5 in test/github/a-run-child-for-an-ops-task-starts-with-the-parents-verified-ops-blobs.test.ts"
+    - claim: "The child writes one ops_catalog.blobs_offered row with counts only (offered, kept, refused), never a sha, path or byte"
+      proof: "grep: W1-T13691 criterion 6 in test/github/a-run-child-for-an-ops-task-starts-with-the-parents-verified-ops-blobs.test.ts"
+    - claim: "Through spawnRunChild's default spawn and the child entry's real reader, with a gh shim (test/helpers/gh-shim.ts) and nothing injected in place of the pipe, the child's catalog read spawns no `gh api .../git/blobs/...`"
+      proof: "grep: W1-T13691 criterion 7 in test/github/a-run-child-for-an-ops-task-starts-with-the-parents-verified-ops-blobs.test.ts"
+    - claim: "invariant:refusals-unchanged — for the same GitHub answers, a child that took offered blobs returns the same outcome and refusalStage (ref_moved, auth_missing, unreadable, malformed, source_absent, duplicate_task_id) as a child that took none, and a read that ends ref_moved keeps only blobs it verified"
+      kind: guard
+      proof: "grep: W1-T13691 criterion 8 in test/github/a-run-child-for-an-ops-task-starts-with-the-parents-verified-ops-blobs.test.ts"
+    - claim: "The child entry, the production path of every run child, takes the offered blobs"
+      proof: "grep: acceptOfferedOpsCatalogBlobs( in src/run-child-main.ts"
+    - claim: "spawnRunChild, the production path of every daemon run child, offers the kept blobs"
+      proof: "grep: keptOpsCatalogBlobsForChild( in src/lib/run-child.ts"
+  rationale: |
+    WHY: W1-T13673 keeps verified ops catalog blob texts per api and shares one default api in a process, so a
+    long-lived reader rereads only the blobs an ops merge changed. A run child is a new process. It holds no
+    kept blobs, so its first lookup of an ops task still reads the whole catalog: about 183 core reads, 176 of
+    them git/blobs GETs (remudero-ops holds 175 shards plus plan/tasks.yaml), out of the one installation's
+    15,000 an hour.
+    READ at origin/main 1f902f383:
+    - src/lib/task-lookup.ts:131 findTaskInCatalogs reads the ops catalog for every task the public plan does
+      not hold. Its callers on a run child's path include src/cli/commands/run-task-verb.ts:4916 (start of a run),
+      src/run-task.ts:12385 (the fix rung's task contract; it passes an empty public map, so it reads the ops
+      catalog whenever the head plan has no criteria for the task), src/cli/commands/review.ts:2374 and
+      src/cli/commands/fix.ts:6129.
+    - src/lib/run-child.ts:815 spawns each child detached with stdio ["ignore", "ignore", <stderr file>]. The
+      child spec (src/lib/run-child-contract.ts, written to the run directory) carries options and a plan
+      snapshot path only.
+    - src/lib/ops-catalog-source.ts header: "Private bytes stay in memory: no clone, worktree, mirror or file
+      write." So the blobs cannot go through the spec, the plan snapshot or any other file. An inherited pipe
+      keeps them in memory.
+    MEASURED in the core ledger, 2026-11-18 00:38Z to 10:53Z: 32 run_child.spawned rows for the 9 ops catalog
+    tasks that ran (task ids taken from the remudero-ops plan/tasks.d listing), about 3.1 an hour, out of 257
+    run_child.spawned rows that day. Each child makes at least one ops lookup.
+    EXPECTED SAVING after W1-T13673: about 176 core reads for each ops task child, about 550 an hour at
+    today's rate (3.7% of the hourly limit), more when the ops queue is busier. A child's later lookups already
+    reuse its own kept blobs after W1-T13673.
+  design: |
+    INVARIANT the-child-verifies-every-byte: an offered blob is kept only after the readBlob checks pass in the
+    child. The parent is not trusted for content; it only saves the GET.
+    INVARIANT memory-only: blob texts pass through an inherited pipe and live in memory in both processes.
+    INVARIANT refusals-unchanged: the child still reads the repository identity, refs, commit and trees on each
+    read; only the blob GETs for kept, verified blobs are skipped, as W1-T13673 does in one process.
+    1. In src/lib/ops-catalog-source.ts (after W1-T13673) export keptOpsCatalogBlobsForChild(): the repository
+       id and the [sha, text] pairs of the default api's kept blobs for its newest ok binding, or undefined.
+       Export acceptOfferedOpsCatalogBlobs(payload): parse the payload, run the readBlob checks on each pair
+       (the git blob SHA-1 of the text equals the sha, OPS_CATALOG_MAX_BLOB_BYTES per blob,
+       OPS_CATALOG_MAX_TOTAL_BYTES in all), put each pair that passes into the default api's kept blobs, and
+       return the counts {offered, kept, refused}. Share the check with readBlob, never a second copy of it.
+    2. In src/lib/run-child.ts spawnRunChild: when the task comes from the ops catalog (the daemon passes the
+       catalog it dispatched the task from; add that input in src/lib/daemon.ts with no new comment lines) and
+       keptOpsCatalogBlobsForChild() gives blobs, spawn with a fourth stdio entry "pipe", write the payload to
+       it with the async stream API, end it, and ignore a write error after recording it once. Set a spec field
+       (src/lib/run-child-contract.ts, a minor schema bump) that says a pipe is offered, so a child built before
+       this change, which never reads fd 3, still runs.
+    3. In src/run-child-main.ts: when the spec says a pipe is offered, read fd 3 to its end before the task
+       starts, under OPS_CATALOG_MAX_TOTAL_BYTES plus framing and a short loop-safe deadline, call
+       acceptOfferedOpsCatalogBlobs, and write the ops_catalog.blobs_offered row. Any failure leaves the kept
+       blobs empty and the run goes on.
+    4. A test must not import #src/run-task.js directly or through a child script (census:affected-reach). Reach
+       the child entry's reader through the lib functions; run every census:* script and
+       test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts.
+    NOT IN SCOPE: adopting children across a daemon restart (an adopted child keeps what it has), serve, and
+    the in-process readers W1-T13673 covers.
+  falsifier: |
+    Spawn without the pipe: criteria 1 and 7 must fail. Keep an offered text without its SHA-1 check: criterion 2
+    must fail. Write the payload into the spec: criterion 3 must fail. Restore and require all to pass.
+  note: |
+    Id reserved for run-unfiled-1795004596000 with ~/rmd-work/bin/reserve-id.sh.
+    Build only after W1-T13673 merges (it is filed in #19380 and not yet on main, so it cannot be a
+    depends_on entry here); re-read its kept-blob names; the function names in criteria 9 and 10 are
+    this task's own.
+    src/lib/daemon.ts is at its comment cap: run test/daemon/compress-src-lib-daemon-ts.test.ts.

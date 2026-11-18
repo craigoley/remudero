@@ -1,0 +1,60 @@
+- id: W1-T13605
+  title: "An Inbox Approve classifies only the proposal it names, like every other Inbox write, so one Approve after a serve cold start no longer runs every anchor's git grep on serve's main thread"
+  repo: remudero
+  depends_on: []
+  priority: 0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the one irreversible Inbox verb: which proposals it classifies; its plan read, checks, ledger rows and answers are unchanged
+  origin: "operator-session#serve-hot-worker-2026-11-17"
+  plan_refs:
+    - W1-T13188
+    - W1-T2220
+  files:
+    - src/lib/panel-graph.ts
+    - test/inbox/an-inbox-approve-classifies-only-the-proposal-it-names.test.ts
+    - test/console-api/an-inbox-write-classifies-only-the-proposal-it-acts-on.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "With a registry of 30 proposals and a counting anchor grep, POST /v1/inbox/approve greps only the named proposal's anchor and answers as before"
+      proof: "grep: W1-T13605 criterion 1 in test/inbox/an-inbox-approve-classifies-only-the-proposal-it-names.test.ts"
+    - claim: "An approve naming an id the registry lacks still answers 404 not_found and classifies nothing"
+      proof: "grep: W1-T13605 criterion 2 in test/inbox/an-inbox-approve-classifies-only-the-proposal-it-names.test.ts"
+    - claim: "invariant:approve-reads-at-ref — approve still reads the committed plan through loadPlanAtRef, so a torn working-tree plan is never read (W1-T2220)"
+      kind: guard
+      proof: "grep: W1-T13605 criterion 3 in test/inbox/an-inbox-approve-classifies-only-the-proposal-it-names.test.ts"
+  rationale: |
+    WHY: on the Azure host, 2026-11-18, serve's main thread stalled for 123 s (runtime.loop_stall_profile at
+    03:55:47.575Z, lag_ms 123021, chunks 175). Its top inclusive frames were classifyAllProposals (panel-graph.ts) and
+    classifyProposal, and its top self frame was spawn under gitGrepAnchorTrue through execFileSync. The one
+    panel.proposal_approve_requested row of that hour (verify-human:W1-T12032) is stamped 03:55:42.684Z, and approve
+    appends it after its classification. The serve container had cold-started at 03:43Z, so the main thread's anchor
+    cache was empty, and the pass ran about 1,337 synchronous git grep children over 2,395 proposals. Inbox view pages
+    returned 502 around 03:58Z, and an earlier Approve aborted after 24.8 s.
+    READ at origin/main, src/lib/panel-graph.ts: W1-T13188 gave classifyAllProposals an `only` id and passed it from
+    every Inbox write except approve, which it kept on the full pass under invariant approve-keeps-its-full-read.
+    Approve uses the result for the named proposal only: an existence check on `proposals` (kept whole by `only`),
+    refuseInformationalProposal, which filters both lists to that id, and that proposal's classification.
+    prepareInboxPass builds every pass-wide input before classifyOne runs, so classifyOne of one proposal is the same
+    with or without the others.
+  design: |
+    INVARIANT approve-reads-at-ref: approve still reads the plan through loadPlanAtRef (W1-T2220).
+    1. approve passes `input.proposalId` as classifyAllProposals' `only`. No other change to the route.
+    2. This supersedes W1-T13188's invariant approve-keeps-its-full-read (W1-T13188 is merged, so its shard is not
+       amended). Its criterion 3 test keeps the loadPlanAtRef half and now asserts approve classifies only the named
+       proposal; its title names W1-T13605.
+    3. A new test, built like W1-T13188's: a 30-entry registry, a counting inboxGrepAnchor seam, and the route
+       driven through buildPanelGraphRoutes.
+    Not in scope: the slow lane's anchor cache across boots, and other main-thread stalls (board snapshot cache,
+    ledger rotation, analytics scan).
+  falsifier: |
+    Drop `only` from approve: criteria 1 and 2 fail (30 greps). Read the plan without loadPlanAtRef: criterion 3
+    fails (the torn working-tree plan is read).
+  note: |
+    Id reserved for run-unfiled-1794974548094 with ~/rmd-work/bin/reserve-id.sh.
+    reservation hand-off: run-unfiled-1794974548094 -> claude/project-thread-u06uh4
+    Proof that counts in production: after the deploy, no runtime.loop_stall_profile row with classifyAllProposals in
+    top_inclusive coincides with a panel.proposal_approve_requested row.

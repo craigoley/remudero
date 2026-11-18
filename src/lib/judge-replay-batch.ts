@@ -259,6 +259,8 @@ export function judgeReplayTypedAnswer(model: string, item: JudgeReplayCase, ans
 /** The one `judge_replay.batch` row a replay writes, whatever happened to it. */
 export interface JudgeReplayBatchRow {
   corpus: string;
+  /** W1-T13366: the digest of the corpus as sent ({@link judgeReplayCorpusDigest}); null for an unknown corpus. */
+  corpus_digest: string | null;
   model: string;
   outcome: "ended" | "refused" | "failed" | "unsettled";
   reason?: string;
@@ -319,7 +321,9 @@ async function replayJudgeCorpusBatch(config: Config, request: JudgeReplayReques
   const ledgerPath = ledgerPathFor(config);
   const runId = `judge-replay-${clock.now()}-${randomUUID()}`;
   const loaded = loadJudgeReplayCorpus(request.repoRoot, request.corpus);
-  const row: JudgeReplayBatchRow = { corpus: request.corpus, model: request.model, outcome: "refused", batch_id: null,
+  // W1-T13366: one digest per replay, stamped on its batch row and on every answered row.
+  const corpusDigest = loaded ? judgeReplayCorpusDigest(loaded.cases) : null;
+  const row: JudgeReplayBatchRow = { corpus: request.corpus, corpus_digest: corpusDigest, model: request.model, outcome: "refused", batch_id: null,
     case_count: loaded?.cases.length ?? 0, refused_cases: loaded?.refused ?? [], result_counts: {}, reserved_usd: 0, settled_usd: 0,
     held_usd: 0, usage: null, retention: JUDGE_REPLAY_RETENTION };
   const write = (step: string, fields: Record<string, unknown>): void => {
@@ -416,7 +420,8 @@ async function replayJudgeCorpusBatch(config: Config, request: JudgeReplayReques
       const type = typeof result.type === "string" ? result.type : "unreadable";
       row.result_counts[type] = (row.result_counts[type] ?? 0) + 1;
       if (!item) continue;
-      const base = { corpus: item.corpus, case_id: item.caseId, custom_id: item.customId, model: request.model, batch_id: row.batch_id,
+      const base = { corpus: item.corpus, replay_corpus: request.corpus, corpus_digest: corpusDigest, case_id: item.caseId, custom_id: item.customId,
+        model: request.model, batch_id: row.batch_id,
         role: item.role, question: item.question, expected: item.expected, result: type };
       // An errored, canceled or expired request is not billed and is not an answer: its row has no typed answer.
       if (type !== "succeeded" || !isRecord(result.message)) {
@@ -499,6 +504,8 @@ export interface JudgeReplayFinishedRow {
   settled_usd: number;
   held_usd: number;
   median_latency_ms: number | null;
+  /** W1-T12422: the median settled dollars of one sent case, its retry included; the judge shadow pool's cost bar reads it. */
+  median_case_settled_usd: number | null;
 }
 
 /** The candidate a direct replay sends to: a decision model or a cash deployment. */
@@ -625,13 +632,14 @@ async function replayJudgeCorpusDirect(config: Config, request: JudgeReplayReque
     role: roles.length > 0 ? roles.join(",") : null, corpus: request.corpus, corpus_digest: loaded ? judgeReplayCorpusDigest(loaded.cases) : null,
     outcome: "refused", case_count: loaded?.cases.length ?? 0, refused_cases: loaded?.refused ?? [], estimated_usd: 0,
     ceiling_usd: JUDGE_REPLAY_CEILING_USD, sent: 0, answered: 0, abstained: 0, rejected: 0, too_large: 0, too_large_cases: [], failed: 0,
-    reserved_usd: 0, settled_usd: 0, held_usd: 0, median_latency_ms: null };
+    reserved_usd: 0, settled_usd: 0, held_usd: 0, median_latency_ms: null, median_case_settled_usd: null };
   const write = (step: string, fields: Record<string, unknown>): void => {
     appendProducerLedger(ledgerPath, JUDGE_REPLAY_SENDER, { run_id: runId, step, ...fields });
   };
   const latencies: number[] = [];
+  const caseCosts: number[] = [];
   const finish = (patch: Partial<JudgeReplayFinishedRow>): JudgeReplayFinishedRow => {
-    Object.assign(row, patch, { median_latency_ms: median(latencies) });
+    Object.assign(row, patch, { median_latency_ms: median(latencies), median_case_settled_usd: median(caseCosts) });
     write(JUDGE_REPLAY_FINISHED_STEP, { ...row });
     return row;
   };
@@ -724,7 +732,9 @@ async function replayJudgeCorpusDirect(config: Config, request: JudgeReplayReque
       row.too_large = row.too_large_cases.length;
       continue;
     }
+    let caseUsd = 0;
     const account = (result: DirectResult): void => {
+      caseUsd += result.settledUsd;
       window.push({ at: clock.now(), tokens: need });
       row.sent += 1;
       row.reserved_usd += result.reservedUsd;
@@ -740,13 +750,15 @@ async function replayJudgeCorpusDirect(config: Config, request: JudgeReplayReque
       result = await sendOne(plan);
       account(result);
     }
+    caseCosts.push(caseUsd);
     const { item } = plan;
     const kind = result.typed ? checkTypedAnswer(result.typed).kind : undefined;
     if (kind === "abstained") row.abstained += 1;
     else if (kind === "rejected") row.rejected += 1;
     else if (kind !== undefined) row.answered += 1;
     else row.failed += 1;
-    write(JUDGE_REPLAY_ANSWERED_STEP, { lane: "direct", corpus: item.corpus, case_id: item.caseId, custom_id: item.customId, model: candidate.name,
+    write(JUDGE_REPLAY_ANSWERED_STEP, { lane: "direct", corpus: item.corpus, replay_corpus: request.corpus, corpus_digest: row.corpus_digest,
+      case_id: item.caseId, custom_id: item.customId, model: candidate.name,
       deployment: candidate.deployment, model_surface: candidate.surface, role: item.role, question: item.question, expected: item.expected,
       result: result.ok ? "succeeded" : "failed", ...(result.reason === undefined ? {} : { reason: result.reason }),
       ...(result.status === undefined ? {} : { status: result.status }), latency_ms: result.latencyMs, settled_usd: result.settledUsd,

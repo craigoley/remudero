@@ -19,7 +19,7 @@
     - src/lib/sre-lane.ts
     - src/lib/feedback.ts
     - test/the-sre-lanes-landed-entry-read-runs-its-git-off-the-daemon-loop.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:no-synchronous-git-in-a-pass — a pass with the input the daemon builds, over a fixture with open incidents, makes no execFileSync and no spawnSync call on the daemon thread for the landed-entry read or for the staging of a filing, and a 20 ms timer on the daemon thread keeps firing while that git is held for one second"

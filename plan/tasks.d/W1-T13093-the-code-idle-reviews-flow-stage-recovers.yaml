@@ -5,8 +5,9 @@
   type: implement
   verify: human
   risk: low
-  priority: 3.4
-  status: queued
+  status: blocked
+  retirement: retired
+  # operator 2026-11-17T20:01Z (Inbox decision card, thread "Recommend decisions for waiting Inbox asks"): retire W1-T13093 — flow/fix-lane snapshot; its 24 h measurement window is long past and no root cause was identified.
   attempts: 0
   author_class: machine
   origin: "flow-regression:code:idle_reviews:via:unknown"

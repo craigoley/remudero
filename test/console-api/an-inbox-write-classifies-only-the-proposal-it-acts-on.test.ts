@@ -1,7 +1,7 @@
 /**
  * W1-T13188: a Console Decline ran 887 s inside serve on 2026-11-16 and blocked its loop, because every Inbox write
  * route re-classified all 2,343 proposals to act on one. A write now classifies only the proposal it names; the
- * registry stays whole for existence checks, and approve keeps its full read (W1-T2220).
+ * registry stays whole for existence checks, and approve keeps its plan read at the ref (W1-T2220).
  * Each proposal carries its own evidence anchor, so the anchor grep seam counts classifications.
  */
 import assert from "node:assert/strict";
@@ -110,9 +110,9 @@ test("W1-T13188 criterion 2: an absent id is still 404 and an age observation st
   assert.deepEqual(age.grepped, [`pattern-${AGE}`], "only the age observation was classified");
 });
 
-test("W1-T13188 criterion 3: approve still classifies the whole registry through its full read", async (t) => {
+test("W1-T13188 criterion 3: approve still reads the plan at its ref (W1-T2220) and, since W1-T13605, classifies only the proposal it names", async (t) => {
   const { deps, grepped } = world(t);
   const answer = await post(deps, "/v1/inbox/approve", { proposalId: target });
   assert.equal(answer.status, 409, `positive control: approve read and judged the proposal: ${JSON.stringify(answer.body)}`);
-  assert.equal(new Set(grepped).size, ids.length + 1, "approve classified every proposal, as W1-T2220 requires");
+  assert.deepEqual(grepped, [`pattern-${target}`], "approve classified only the proposal it names");
 });

@@ -1,0 +1,135 @@
+- id: W1-T13426
+  title: "A CI wait reads the security policy status that still waits for CodeQL as pending, not red: in 72 hours 102 of 104 fix rounds ended their CI wait within 60 s of their own push on `unknown: trusted-exact-head-codeql-result-missing`, and 16 fix children then stood down because the branch had advanced to their own push"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the wait decides when a fix round or a run reads its checks; a status read as pending when it is a real refusal would hold a lane on a pull request that can never pass, and one read as passed would be a false green, so only the two reasons that mean CodeQL has not reported yet may change and never to green
+  origin: "operator-session#fix-lane-flow-2026-11-17"
+  plan_refs:
+    - W1-T12546
+    - W1-T11776
+    - W1-T12281
+    - W1-T11146
+    - W1-T2804
+  files:
+    - src/run-task.ts
+    - src/cli/commands/run-task-verb.ts
+    - test/fix-lane/a-ci-wait-reads-a-policy-status-that-awaits-codeql-as-pending.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "ciGateFromRollup reads pending, not red, for a rollup whose newest required security-merge-policy status has state ERROR and a description that starts with `unknown: trusted-exact-head-codeql-result-missing` or with `unknown: security-analysis-pending`, while the other required contexts are in progress or passed; RollupEntry declares the description field the REST rollup already carries"
+      proof: "grep: W1-T13426 criterion 1 in test/fix-lane/a-ci-wait-reads-a-policy-status-that-awaits-codeql-as-pending.test.ts"
+    - claim: "invariant:a-policy-refusal-stays-red — ciGateFromRollup still reads red when the newest policy status is FAILURE with `blocked: new-high-or-critical-security-alert`, when it is ERROR with any other `unknown:` reason (changed-file-corpus-incomplete is the case tested), and when it is ERROR with no description or one that does not parse"
+      kind: guard
+      proof: "grep: W1-T13426 criterion 2 in test/fix-lane/a-ci-wait-reads-a-policy-status-that-awaits-codeql-as-pending.test.ts"
+    - claim: "invariant:a-waiting-policy-status-is-never-green — with every other required context passed and the policy status still waiting for CodeQL, ciGateFromRollup reads pending; and waitForCiGreen, given that same reading for the whole stall window with no check running, returns timeout with security-merge-policy among its pending checks and never returns green"
+      kind: guard
+      proof: "grep: W1-T13426 criterion 3 in test/fix-lane/a-ci-wait-reads-a-policy-status-that-awaits-codeql-as-pending.test.ts"
+    - claim: "invariant:another-red-check-still-ends-the-wait — with the policy status waiting for CodeQL and another required context concluded FAILURE, ciGateFromRollup reads red and waitForCiGreen returns red at that poll, naming the failed context and not security-merge-policy"
+      kind: guard
+      proof: "grep: W1-T13426 criterion 4 in test/fix-lane/a-ci-wait-reads-a-policy-status-that-awaits-codeql-as-pending.test.ts"
+    - claim: "waitForCiGreen, driven through its readJson and sleep seams, with a first poll where the policy status waits for CodeQL and ci-gate is in progress and a second poll where both passed, returns green with the head sha it read; with a second poll where ci-gate concluded FAILURE it returns red naming ci-gate; in neither case does it return at the first poll"
+      proof: "grep: W1-T13426 criterion 5 in test/fix-lane/a-ci-wait-reads-a-policy-status-that-awaits-codeql-as-pending.test.ts"
+    - claim: "invariant:a-foreign-head-still-stands-the-round-down — a fix rung whose published branch head is neither the snapshot head nor the head its worktree holds (a hand push, or a move that rewrote the snapshot's history) still logs fix.stood_down with site rung.evidence_head and starts no worker"
+      kind: guard
+      proof: "grep: W1-T13426 criterion 6 in test/fix-lane/a-ci-wait-reads-a-policy-status-that-awaits-codeql-as-pending.test.ts"
+  rationale: |
+    WHY: after every push the trusted producer publishes the required status security-merge-policy as ERROR
+    with the description `unknown: trusted-exact-head-codeql-result-missing`, because CodeQL has not reported
+    at the new head yet. Four to six minutes later it publishes success. The fix child's CI wait reads that
+    first ERROR as red CI and ends about 20 s after the child's own push. The child then starts its next
+    strike against a head whose real checks have not run. It finds the published branch at its own pushed
+    commit, cannot read failure evidence there once the status has turned to success, and stands down with
+    "published branch advanced from <sha> to <sha> before the worker started". The child never reads the real
+    result of its own fix. The sweep must find the pull request again and start a new child.
+    MEASURED, core ledger (~/rmd-state2/state, live file plus 111 archives, rows deduplicated on ts, run id
+    and step), 2026-11-14T16:09Z to 2026-11-17T16:09Z:
+    - 104 fix.ci_not_green rows. 102 came within 60 s of the fix.done row of the same round.
+    - 16 fix.stood_down rows with site rung.evidence_head and the "published branch advanced" reason. In all
+      16 the new head was the head the child's own worktree held (15 were its own fix commit, 1 its own merge
+      commit after fix.round_reapplied). None was a hand push. In all 16 fix.ci_not_green named the new head
+      17 s to 30 s after fix.done, and the last fix.progress_judged row named red class security-merge-policy.
+    - The stand-down came 241 s to 480 s after fix.ci_not_green (5,634 s in total), after a progress judge
+      call, a census snapshot and a step up to the stronger model. The 16 children had run 13.8 to 56.7
+      minutes each (538 minutes in total) and their fix rounds cost 2.97 dollars. 5 of the 16 pull requests
+      got a second fix child at the same head 30 to 112 minutes later.
+    - 32 more rounds took the other branch: fix.evidence_head_adopted, each with red_checks
+      [security-merge-policy] only. 15 of those children then stood down at rung.strike because the check's
+      later attempt was in flight or green. 19 of the 24 rung.strike stand-downs name security-merge-policy.
+    - GitHub statuses at three of the 16 heads (0001836c, 2489a77b, 016981e4): six ERROR statuses
+      `unknown: trusted-exact-head-codeql-result-missing` in the first 40 s, then one success
+      `safe: trusted-complete-exact-head-no-new-alerts` 4.3, 4.8 and 5.9 minutes after the first.
+    - W1-T11075 on 2026-11-17: 04:43:24Z fix.done, 04:43:42Z fix.ci_not_green (red at 0001836c), 04:48:24Z
+      the status turned success, 04:48:42Z fix.stood_down. 0001836c was the child's own merge commit: the
+      sweep had updated the branch at 04:32:20Z and the child had carried its commit onto the new tip
+      (fix.round_reapplied at 04:33:15Z). That is the only one of the 16 with a branch update during the run.
+    READ at origin/main 15a86ac98:
+    - src/run-task.ts:7243 waitForCiGreen. :7266 judges each poll with ciGateFromRollup and :7269 returns red
+      at once. src/cli/commands/fix.ts:5440 is the fix rung's wait after its push; :5450 logs
+      fix.ci_not_green.
+    - src/run-task.ts:7022 ciGateFromRollup: any required context whose state is terminal red (isTerminalRed,
+      :4650) makes the gate red. It does not look at the description. :7204 checkWaitStalled decides a wait
+      that no longer moves.
+    - src/lib/code-scanning-merge-policy.mjs:47 returns unknown('trusted-exact-head-codeql-result-missing')
+      when no trusted CodeQL check exists at the head yet, and :51 unknown('security-analysis-pending') when
+      it exists and has not completed.
+    - src/lib/open-prs-rest.ts:1188 securityMergePolicyRefusal already parses the `<state>: <reason>`
+      description of the newest policy status; :164 is the description field of RestRollupEntry.
+      src/cli/commands/run-task-verb.ts:674 RollupEntry does not declare it.
+    - src/cli/commands/fix.ts:4565 to :4590: a round whose worktree head descends from the snapshot reads the
+      published head. :4572 adopts it only when it is the worktree's own head and adoptableEvidenceHead
+      (:2317) still reads the rollup red with readable failures; otherwise :4586 stands down.
+      src/lib/fix-round-reapply.ts:60 already carries a round's commit onto a branch that moved while the
+      round ran, so no rebase step is missing.
+    NOT COVERED: W1-T11776 (queued) makes the producer look again when CodeQL arrives late; the status stays
+    ERROR until then, so the wait still ends early. W1-T12281 (queued, filed by the CI friction gardener)
+    asks the sweep not to dispatch a round for this status; it does not change the wait inside a running
+    child. W1-T11146 (queued) keeps a check with no conclusion out of the progress judge's input. W1-T12546
+    (merged) added the adoption at :4572, which fails here by timing. Swept plan/tasks.d and plan/tasks.yaml
+    for waitForCiGreen, ciGateFromRollup, codeql-result-missing and rung.evidence_head, and the 11 open pull
+    requests on craigoley/remudero: none changes how the wait reads this status.
+  design: |
+    INVARIANT a-policy-refusal-stays-red: a blocked policy status, an unknown one with any other reason, and an ERROR with no readable description are red as today.
+    INVARIANT a-waiting-policy-status-is-never-green: a policy status that waits for CodeQL is pending; a wait that stops moving on it ends as timeout, never green.
+    INVARIANT another-red-check-still-ends-the-wait: any other required context that concluded red ends the wait at that poll.
+    INVARIANT a-foreign-head-still-stands-the-round-down: a published head that is not the round's own still stands the fix round down at rung.evidence_head.
+    1. Add one predicate in src/run-task.ts beside ciGateFromRollup: an entry awaits CodeQL when its context
+       is security-merge-policy, its state is ERROR, and its description starts with `unknown: ` followed by
+       trusted-exact-head-codeql-result-missing or security-analysis-pending. Import the context name from
+       src/lib/open-prs-rest.ts (SECURITY_MERGE_POLICY_CONTEXT); do not write the string a second time. Keep
+       the two reasons in one named list with a comment that points at code-scanning-merge-policy.mjs.
+    2. ciGateFromRollup skips such an entry when it looks for a red voter and never counts it as passed, so
+       the gate reads pending. The red-name filter in waitForCiGreen (:7269) and the pending list of
+       checkWaitStalled use the same predicate, so the three agree. Declare `description?: string` on
+       RollupEntry; restRollupFor already returns it.
+    3. Do not change checksStateFromRollup in src/lib/sweep.ts, the sweep's fix decision, the merge gate or
+       the producer. Branch protection still requires the status itself, so a pull request cannot merge
+       while it is ERROR.
+    4. Do not change runFixRung. With the wait fixed, a child waits for the real checks at its own pushed
+       head and takes its next strike from their failures. Criterion 6 pins the stand-down for a head the
+       round did not make; model it on test/sweep/a-sweep-fix-round-adopts-a-moved-head.test.ts.
+    5. TESTS in test/fix-lane/a-ci-wait-reads-a-policy-status-that-awaits-codeql-as-pending.test.ts build
+       rollups in the REST shape (state, description, startedAt) with the real description texts above, and
+       drive waitForCiGreen through its readJson, sleep and requiredContexts seams. Load
+       test/setup/tmp-hygiene.ts. No new env var, ledger step or config key.
+  falsifier: |
+    At origin/main ciGateFromRollup reads the ERROR status as red, so criterion 1 fails and waitForCiGreen
+    returns red at the first poll (criterion 5). Skip every ERROR policy status without reading its
+    description: the changed-file-corpus-incomplete case reads pending and criterion 2 fails. Count the
+    waiting status as passed: criterion 3 reads green. Leave checkWaitStalled unchanged: the wait in
+    criterion 3 never ends as timeout.
+  note: |
+    Id reserved for run-unfiled-1794931694000 with ~/rmd-work/bin/reserve-id.sh.
+    Proof that counts in production: over a day with fix rounds, the gap from fix.done to fix.ci_not_green
+    is minutes, not under 60 s, and no fix.stood_down row at rung.evidence_head names the child's own pushed
+    head as the new head.
+    Not filed, by the same measurement: the sweep holding its branch update while a fix child runs. Only 1
+    of the 16 stand-downs had a branch update during the run, and that child carried its commit onto the new
+    tip. 23 sweep.fix.dispatch_failed rows "the PR head moved" in the same 72 hours are the child's recheck
+    refusing in seconds before any worker starts (7 after a fleet fix push, 7 after a fleet merge of main,
+    9 after a hand push).

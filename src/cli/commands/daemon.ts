@@ -17,8 +17,8 @@ import { recyclePauseDetail } from "../../lib/recycle-yield.js";
 import { judgeDiskHeadroom, readDiskFreeBytes } from "../../lib/doctor.js";
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { execFileLoopBounded } from "../../lib/loop-bounded-child.js";
-import { GATEWAY_FETCH_TIMEOUT_MS } from "../../lib/git-fetch-retry.js";
+import { execFileRouted } from "../../lib/spawn-helper.js";
+import { GATEWAY_FETCH_TIMEOUT_MS, setDanglingRefRepairLog } from "../../lib/git-fetch-retry.js";
 import { productionDispatchBreakJudge, productionFixProgressJudge } from "../../lib/sweep.js";
 import { ghExec, ghJsonAsync, ghTextAsync, githubInstallationBudget, takeGithubBudgetThrottles } from "../../lib/github-transport.js";
 import type { InstallationBudgetThreadInput } from "../../lib/github-installation-budget.js";
@@ -30,7 +30,7 @@ import { fileURLToPath } from "node:url";
 import { configPath, isWorkerProviderId, loadConfig, providerRoutingOwnsHeadroom, resolveHeadroomEnabled, workerHomeDir, type Config } from "../../lib/config.js";
 import { cashDeploymentTarget } from "../../lib/config-schema.js";
 import { ledgerPathFor } from "../../lib/ledger-path.js";
-import { daemonCrashSentinel, escalateCrashLoop, escalateDiskHeadroomBreach, escalateHeadroomParkCeiling, escalateHeadroomReserve, escalateQuotaExhaustion, escalateReplayStranded, escalateStarvation, escalateStarvationCleared } from "../../lib/escalation-catalogue.js";
+import { daemonCrashSentinel, deliverQuotaExhaustionLate, escalateClaimStall, escalateClaimStallCleared, escalateCrashLoop, escalateDiskHeadroomBreach, escalateHeadroomParkCeiling, escalateHeadroomReserve, escalateQuotaExhaustion, escalateReplayStranded, escalateStarvation, escalateStarvationCleared } from "../../lib/escalation-catalogue.js";
 import { lostWorkerProviders, resolveProviderRoutingPolicy, type EffectiveProviderRoutingPolicy } from "../../lib/provider-routing-policy.js";
 import {
   FOUNDRY_CLAUDE_API_KEY_ENV,
@@ -45,7 +45,7 @@ import { startDaemonSreLane, type LightPassScope } from "../../lib/daemon.js";
 import { REGISTERED_GARDEN_NAMES, createGardenFlightRegistry, gardenAndJudgeUnits, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "../../lib/garden-registry.js";
 import { gardenSchedule } from "../../lib/garden-registry.js";
 import { createGardenerRuntimeWriter } from "../../lib/gardener-runtime.js";
-import { daemonSreLaneInput, resolveSreLaneInstance, sreLaneEnabled, sreLaneStartRow, type SreLaneInput } from "../../lib/sre-lane.js";
+import { daemonSreLaneInput, resolveSreLaneInstance, sreLaneEnabled, sreLaneStartRow, SRE_LANE_FLOW_SLICE, type SreLaneInput } from "../../lib/sre-lane.js";
 import { daemonSreRunbookHost, daemonSreRunbookPass, readRunbookReceipts, sreRunbookCatalog } from "../../lib/sre-runbooks.js";
 import { daemonBreakerRunbookHost } from "../../lib/breaker-release.js";
 import { inboxThreadStorePath, type RatifyCliHandle } from "../../lib/panel-graph.js";
@@ -70,7 +70,7 @@ import { withEscalationSpoolDrain } from "../../lib/host-escalation-spool.js";
 import { instanceMode, readInstanceRegistryText } from "../../lib/instance-mode.js";
 import { instanceRegistryRuntimePresent, ledgerSelectedRegistryReadTimeouts, selectedInstanceRegistryEnvPath, withInstanceRegistryRuntime } from "../../lib/instance-registry-selection.js";
 import { escalate, escalateWithJudge, realEscalationJudge, ghIssueGateway, ghIssueGatewayAsync, type Escalation, type EscalationJudgeVerdict } from "../../lib/escalate.js";
-import { createGhCallPacer } from "../../lib/open-prs-rest.js";
+import { createGhCallPacer, prStateFromRest, singlePrRestArgs } from "../../lib/open-prs-rest.js";
 import { buildMainHealthRung } from "../../lib/main-health-rung.js";
 import { ghEscalationAnswerGateway } from "../../lib/escalation-answers.js";
 import { feedbackLandingSweepRungs, type LandingReviewRequest } from "../../lib/feedback-landing.js";
@@ -99,7 +99,7 @@ import { loadCreditStore, saveCreditStore, recordCredit, refusesAsPlanOnly, buil
 import { DEFAULT_SWEEP_POLICY, productionFixPressure, readIdleLightCadence, readObservedReviewMedianMs, type OpenPrView } from "../../lib/sweep.js";
 import { startMainEntryWatch } from "../../lib/main-entry.js";
 import { createLiveSetKeeper, createPlanCopyBook, daemonHolderSource, observedPlanSync, startDaemonMemoryCensus } from "../../lib/daemon-memory-census.js";
-import { terminalUnionScans } from "../../lib/sweep.js";
+import { createEscalationTriageHistoryReader, terminalUnionScans, type EscalationTriageHistoryReader } from "../../lib/sweep.js";
 import { createDaemonFootprint, daemonFootprintPath, installDaemonFootprint } from "../../lib/daemon-footprint.js";
 import { readHeapAdmissionHoldMode } from "../../lib/daemon-heap-admission-hold.js";
 import { applyDaemonMemoryPolicy, createDaemonMemoryGovernor, createDaemonSlackReclaimer, installDaemonSlackReclaimer, readDaemonMemoryPolicy } from "../../lib/daemon-memory-policy.js";
@@ -780,6 +780,19 @@ export function daemonTargetCheckoutRoot(target: { repo: string; isSelf: boolean
 type RunBranchSyncExec = (cmd: string, args: string[], opts: { encoding: "utf8"; cwd: string }) => string;
 type RunBranchAsyncExec = (cmd: string, args: string[], opts: { encoding: "utf8"; cwd: string; timeout: number; killSignal: "SIGKILL" }) => Promise<{ stdout: string }>;
 
+/** W1-T13671: the tick's live PR state over the async transport, the same REST row and fold as
+ *  run-task.ts's ghLiveStateByNumberAsync; a failed read is unknown (`undefined`). */
+export function daemonLiveStateReader(owner: string, repo: string): (taskId: string, prNumber: number) => Promise<string | undefined> {
+  return async (_taskId, prNumber) => {
+    try {
+      return prStateFromRest((await ghJsonAsync(singlePrRestArgs(owner, repo, prNumber))) as Parameters<typeof prStateFromRest>[0]);
+    } catch (e) {
+      void e; // unreadable => undefined; the tick ledgers dispatch.live_state_indeterminate
+      return undefined;
+    }
+  };
+}
+
 /** W1-T10897: a leading checkout path names the repo whose `origin` is listed; without one it is this engine checkout. */
 export function readPushedRunBranchesOutput(checkout: string, exec?: RunBranchSyncExec): string;
 export function readPushedRunBranchesOutput(exec?: RunBranchSyncExec): string;
@@ -802,7 +815,7 @@ export function readPushedRunBranchesOutputAsync(exec?: RunBranchAsyncExec, time
 export async function readPushedRunBranchesOutputAsync(
   ...args: [(string | RunBranchAsyncExec)?, (RunBranchAsyncExec | number)?, number?]
 ): Promise<string> {
-  const [cwd, exec = execFileLoopBounded, timeoutMs = GATEWAY_FETCH_TIMEOUT_MS] = typeof args[0] === "string"
+  const [cwd, exec = execFileRouted, timeoutMs = GATEWAY_FETCH_TIMEOUT_MS] = typeof args[0] === "string"
     ? [args[0], args[1] as RunBranchAsyncExec | undefined, args[2]]
     : [repoRoot, args[0], args[1] as number | undefined];
   const opts = { encoding: "utf8", cwd, timeout: timeoutMs, killSignal: "SIGKILL" } as const;
@@ -825,6 +838,10 @@ function renderDaemonSummary(s: DaemonSummary): string {
     "──────────────────────────────────────────────────────────",
   ].join("\n");
 }
+
+/** W1-T13367: the SRE lane's history reader, one for the daemon's lifetime: it loads rotations off the loop, keeps
+ *  a durable digest of each, and reads only the live bytes added since its last pass. */
+let sreLaneFlowHistory: EscalationTriageHistoryReader | undefined;
 
 export function startBoundedDaemonSreLane(
   input: (mergedLastDay: number) => Promise<SreLaneInput>,
@@ -907,7 +924,7 @@ export function opsCatalogShadowFeed(
     const startedAt = clock.now();
     // refresh() answers failure as an outcome; an unexpected rejection remains unreadable.
     void source.refresh().then((input) => { latest = input; completedAt = startedAt; }, (error: unknown) => {
-      latest = { outcome: "unreadable" }; completedAt = startedAt; void error;
+      latest = { outcome: "unreadable", refusalStage: "source_refresh" }; completedAt = startedAt; void error;
     }).finally(() => { inFlight = false; });
   };
   const timer = opts.refreshEveryMs === undefined ? undefined : setInterval(start, opts.refreshEveryMs);
@@ -917,7 +934,7 @@ export function opsCatalogShadowFeed(
     forDispatch: () => {
       if (latest?.outcome !== "ok") return latest;
       const age = completedAt === undefined ? NaN : clock.now() - completedAt;
-      return !Number.isFinite(age) || age < 0 || age >= OPS_DISPATCH_SOURCE_MAX_AGE_MS ? { outcome: "stale" } : latest;
+      return !Number.isFinite(age) || age < 0 || age >= OPS_DISPATCH_SOURCE_MAX_AGE_MS ? { outcome: "stale", refusalStage: "snapshot_age" } : latest;
     },
     stop: () => { if (timer !== undefined) clearInterval(timer); },
   };
@@ -1336,6 +1353,7 @@ export async function daemonCommand(
     onMainEntryStep?.(step);
   };
   ledgerSelectedRegistryReadTimeouts(log);
+  setDanglingRefRepairLog(log);
   startDaemonInstallationBudget(() => daemonInstallationRegistry(repoRoot), process.env, log, systemClock, `${target.owner}/${target.repo}`, opts.pollIntervalMs);
   // bundlemain: which entry this main started from (bin/rmd's choice), and a bundled main's first tick settles it.
   onMainEntryStep = startMainEntryWatch({ log, root: daemonModuleRepoDir });
@@ -2348,7 +2366,7 @@ export async function daemonCommand(
         ),
         // W1-T177: a fresh `gh pr view` re-read, consulted only when isOpenPr
         // reports a task in-flight — see NextRunnableOpts.readLiveState's doc.
-        readLiveState: (_taskId, prNumber) => ghLiveStateByNumber(target.owner, target.repo, prNumber),
+        readLiveState: daemonLiveStateReader(target.owner, target.repo),
         isIndeterminate,
         releaseLandedClaims: async (isMerged) => {
           await releaseLandedDispatchClaims(deps.tickClaimReserver ?? dispatchClaimReserverAsyncFor(join(config.root, "repos", target.repo)), {
@@ -2495,6 +2513,8 @@ export async function daemonCommand(
         // W1-T372: observe-and-surface only — dispatch is NOT paused by this hook (unlike
         // onHeadroomBreach above); see escalateQuotaExhaustion's own doc for why.
         onQuotaExhausted: (info) => escalateQuotaExhaustion(info, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
+        // W1-T13690: a notice that could not be sent at the exhaustion is sent once after the reset.
+        onQuotaRecovered: (info) => deliverQuotaExhaustionLate(info, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
         // W1-T1082: real free space + verdict, read on the SAME `startInFlightTicker` cadence as
         // `daemon.alive` itself — the SAME root `rmd doctor` reads (`readDiskFreeBytes(config.root)`,
         // `doctorCommand`, above) and the SAME `judgeDiskHeadroom` it judges against, one read call
@@ -2541,6 +2561,9 @@ export async function daemonCommand(
         // This task: the cleared half — closes the escalation `escalateStarvation` opened, on
         // the SAME edge `runDaemon` already resets `starvationEscalated` at.
         onStarvationCleared: (info) => escalateStarvationCleared(info, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
+        // W1-T13248: the page for a fleet whose slots go only to refused runs, and its close on the next claim-passing run.
+        onClaimStall: (info) => escalateClaimStall(info, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
+        onClaimStallCleared: (info) => escalateClaimStallCleared(info, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
         checkStop,
         // W1-T1216: LOCAL FIRST (design (i)), falling through to the shared cross-host hold
         // (`refs/rmd-pause/hold`) only when the local file is silent — see checkSharedPause's
@@ -2674,6 +2697,7 @@ export async function daemonCommand(
                       repo: self.repo,
                       mergedLastDay: () => mergedLastDay,
                       log,
+                      flowHistory: (sreLaneFlowHistory ??= createEscalationTriageHistoryReader({ slice: SRE_LANE_FLOW_SLICE })),
                       // W1-T4386: the allowlisted, reversible runbooks each incident meets first.
                       runbookPass: daemonSreRunbookPass(
                         sreRunbookCatalog(

@@ -1,0 +1,49 @@
+- id: W1-T13483
+  title: "Serve writes a partial analytics fold's resume point at most once an hour and at stop, so an 80 MB synchronous JSON write stops stalling every Console read for 10 to 27 s several times an hour"
+  repo: remudero
+  depends_on: []
+  priority: 0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # when the resume point reaches disk; a crash loses at most an hour of resume position, never a fold result
+  origin: "operator-session#serve-oom-2026-11-16"
+  plan_refs:
+    - W1-T13174
+  files:
+    - src/lib/analytics-route.ts
+    - test/an-analytics-fold-progress-is-written-at-most-hourly.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "The first partial refresh writes its resume point at once; partial refreshes within ANALYTICS_CHECKPOINT_WRITE_INTERVAL_MS write nothing; the first one past it writes the newest resume point"
+      proof: "grep: W1-T13483 criterion 1 in test/an-analytics-fold-progress-is-written-at-most-hourly.test.ts"
+    - claim: "stop() writes a resume point the interval held back"
+      proof: "grep: W1-T13483 criterion 2 in test/an-analytics-fold-progress-is-written-at-most-hourly.test.ts"
+    - claim: "invariant:finished-fold-leaves-no-progress — a fold that finishes removes its progress file and stop() never writes a stale resume point back"
+      kind: guard
+      proof: "grep: W1-T13483 criterion 3 in test/an-analytics-fold-progress-is-written-at-most-hourly.test.ts"
+  rationale: |
+    WHY: Craig is hitting serve's main-loop stalls directly: the Inbox times out and shows "unavailable", and Vercel logs
+    show every serve route timing out together at 19:03, 19:15, 19:48 and 19:49Z on 2026-11-17.
+    MEASURED from runtime.loop_stall_profile rows, 2026-11-17 18:56 to 19:50Z: the largest stalls (12.7 s, 13.6 s,
+    11.4 s, 12.7 s, 27.1 s) carry analytics-route.ts writeJsonAtomic under writeAnalyticsProgress (and once
+    writeAnalyticsCheckpoint); analytics writes were 85 to 105 s of stall per hour from 16:00 to 19:00Z. The checkpoint
+    file is 82 MB; serve.analytics_refresh.partial rows came every 1 to 2 minutes from 19:23 to 19:37Z, because each
+    ledger rotation (about every 20 minutes) forces a rescan ("archive-rewritten").
+    READ at origin/main, src/lib/analytics-route.ts createAnalyticsSnapshotCache: the checkpoint is held to one write an
+    hour (W1-T13174), but every partial result calls writeAnalyticsProgress at once.
+  design: |
+    INVARIANT finished-fold-leaves-no-progress: a finished fold's progress file is gone and never rewritten after.
+    1. persistProgress(next, force), like persistCheckpoint: write when forced, when nothing was written yet, or when
+       the interval since the last progress write has passed; otherwise hold the newest one in memory.
+    2. stop() writes a held resume point; a finished fold and a shed clear the held one.
+    3. Between refreshes the fold resumes from the in-memory resume point, as it already does.
+  falsifier: |
+    Write every partial: criterion 1 fails. Drop the held point at stop: criterion 2 fails. Keep a held point after
+    the fold finishes: criterion 3 fails.
+  note: |
+    Id reserved for run-unfiled-1794945624167 with ~/rmd-work/bin/reserve-id.sh.
+    Proof that counts in production: writeAnalyticsProgress frames leave runtime.loop_stall_profile rows except about
+    once an hour, and the analytics-write share of stall seconds per hour falls from about 100 s.

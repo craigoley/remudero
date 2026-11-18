@@ -17,7 +17,7 @@
   files:
     - src/run-task.ts
     - test/the-automatic-branch-reap-reads-merge-credit-off-the-loop.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "An automatic branch reap pass (runAutomaticBranchReapRung with its production defaults) over a state dir whose merge-credit rows are only in gzip archives reports the same facts as origin/main: a slug branch and a run branch of a credited task are reported credited, those of an uncredited task are not, and a setImmediate turn counter advances while the credit is read: the read is off the loop"

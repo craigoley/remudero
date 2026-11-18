@@ -5516,6 +5516,59 @@ export interface components {
       satisfied_by?: string;
       holdout?: boolean;
     };
+    /** GET /v1/views/inbox-thread?id= (src/lib/inbox-thread-view.ts; P4-T10, mounted by W1-T13455): one Inbox thread, built on demand from the stored needsYou classification pages and the thread store. */
+    InboxThreadView: {
+      view: "inbox-thread";
+      version: 1;
+      generatedAt: string;
+      asOf: string | null;
+      stale: boolean;
+      sources: (ViewSource)[];
+      data: InboxThreadViewData;
+    };
+    /** The actual InboxThreadViewData from src/lib/inbox-thread-view.ts. */
+    InboxThreadViewData: {
+      threadId: string;
+      found: boolean;
+      /** Why found is false */
+      reason?: string;
+      thread?: InboxThreadDetail;
+    };
+    /** GET /v1/views/inbox-threads[?cursor=] (src/lib/inbox-threads-view.ts; W1-T13456): one page of the Inbox's thread list, the rows GET /v1/inbox/threads answers, built in the read-model view thread from the persisted classification, the plain-message store, the thread store and the read marks. */
+    InboxThreadsView: {
+      view: "inbox-threads";
+      version: 1;
+      generatedAt: string;
+      asOf: string | null;
+      stale: boolean;
+      sources: (ViewSource)[];
+      data: InboxThreadsViewData;
+    };
+    /** The actual InboxThreadsViewData from src/lib/inbox-threads-view.ts. No clock is in it. */
+    InboxThreadsViewData: ({
+      state: "ok";
+      threads: (InboxThreadSummary)[];
+      /** The classification snapshot the rows were projected from. */
+      snapshotKey: string;
+      /** The list's identity; every cursor binds it. */
+      threadListKey: string;
+      contract: "read-write" | "read-only";
+      instance: string;
+      repository?: string;
+      completeness: "complete" | "partial";
+      incompleteReason?: string;
+      page: {
+        index: number;
+        of: number;
+        total: number;
+        /** The next page's cursor; absent on the last page. */
+        nextCursor?: string;
+      };
+    }) | ({
+      state: "unavailable";
+      /** Why no list can be shown; never answered as an empty list. */
+      reason: string;
+    });
     /** GET /v1/views/task?instance=&id= (src/lib/task-view.ts; W1-T6370): a demand-materialized task page. Missing tasks return 200 with found=false; unavailable inputs carry their evidence in sources and, when the body is thin, data.reason. */
     TaskView: {
       view: "task";
@@ -8565,6 +8618,42 @@ export interface paths {
           "401": Error;
           "403": Error;
           "404": undefined;
+        };
+    };
+  };
+  "/v1/views/inbox-thread": {
+    get: {
+      responses: {
+          "200": InboxThreadView;
+          "304": undefined;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": {
+            error: string;
+            view?: string;
+            reason?: string;
+            retryMs?: number;
+          };
+        };
+    };
+  };
+  "/v1/views/inbox-threads": {
+    get: {
+      responses: {
+          "200": InboxThreadsView;
+          "304": undefined;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": undefined;
+          "409": {
+            error: "inbox_snapshot_changed";
+            restartRequired: true;
+            snapshotKey?: string;
+            detail?: string;
+          };
+          "503": undefined;
         };
     };
   };

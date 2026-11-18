@@ -1,0 +1,49 @@
+- id: W1-T13667
+  title: "An analytics refresh whose live ledger rotated while it read serves its snapshot but keeps the previous anchored checkpoint, so the next refresh resumes instead of rescanning every rotation"
+  repo: remudero
+  depends_on: []
+  priority: 0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # which checkpoint an analytics refresh resumes from; the served snapshot is unchanged
+  origin: "operator-session#serve-hot-worker-2026-11-17"
+  plan_refs:
+    - W1-T13483
+  files:
+    - src/lib/analytics-route.ts
+    - test/console-api/serve/an-unanchored-analytics-fold-keeps-the-anchored-checkpoint.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "After an anchored fold, an unanchored fold's snapshot is served, an anchor_kept row is logged, and the next refresh resumes from the anchored checkpoint"
+      proof: "grep: W1-T13667 criterion 1 in test/console-api/serve/an-unanchored-analytics-fold-keeps-the-anchored-checkpoint.test.ts"
+    - claim: "invariant:resume-from-an-anchor: with no anchored checkpoint to keep, an unanchored fold is still adopted, as before"
+      kind: guard
+      proof: "grep: W1-T13667 criterion 2 in test/console-api/serve/an-unanchored-analytics-fold-keeps-the-anchored-checkpoint.test.ts"
+  rationale: |
+    WHY: on the Azure host on 2026-11-18 (serve pid 60693, sha a065bef91), the core analytics refresh at 11:28:27Z ran
+    19 s in resume mode. The next one at 11:43:46Z started a FULL scan with scan_reason live-position-unanchored and
+    needed nine legs of about 65 s each (31, 17, 11, 9, 11, 15, 18, 17 and 113 of 241 rotations) to finish at 12:02:02Z.
+    runtime.loop_stall_profile rows with analytics frames summed 76 s of main-thread stall in that chain, and serve
+    measured 0.86-0.94 cores at 12:15-12:20Z. scanAnalyticsLedger takes the live anchor with liveAnchor(stateDir, ino,
+    offset), which returns undefined when the live file's ino no longer matches the one the fold read, that is when the
+    live ledger rotated during the read. createAnalyticsSnapshotCache then adopted that checkpoint, and
+    resumeLivePosition answers "live-position-unanchored" for any unanchored checkpoint once a rotation exists.
+  design: |
+    INVARIANT resume-from-an-anchor: the checkpoint a refresh resumes from carries a live anchor whenever an anchored
+    one exists.
+    1. In createAnalyticsSnapshotCache's completed-fold branch: when the new checkpoint has a live source but no
+       liveAnchor and the held checkpoint has one, keep the held checkpoint (in memory and on disk), log
+       serve.analytics_refresh.anchor_kept, and still serve the new snapshot.
+    2. Otherwise adopt and persist as before.
+    Not in scope: the size of the checkpoint (84 MB for core) and the time a resume refresh costs.
+  falsifier: |
+    Adopt every completed checkpoint again: criterion 1 fails (no anchor_kept row, and the third refresh resumes from
+    the unanchored checkpoint).
+  note: |
+    Id reserved for run-unfiled-1795001574338 with ~/rmd-work/bin/reserve-id.sh.
+    reservation hand-off: run-unfiled-1795001574338 -> claude/project-thread-u06uh4
+    Proof that counts in production: no serve.analytics_refresh row with scan_reason live-position-unanchored after a
+    serve.analytics_refresh.anchor_kept row.

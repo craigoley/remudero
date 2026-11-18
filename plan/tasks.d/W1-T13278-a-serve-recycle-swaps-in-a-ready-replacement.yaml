@@ -14,34 +14,51 @@
     - W1-T13277
   files:
     - deploy/serve-container.sh
-    - deploy/recycle-container.sh
-    - test/a-serve-recycle-swaps-in-a-ready-replacement.test.ts
-  status: queued
+    - deploy/scratch-mounts.sh
+    - src/lib/deployer.ts
+    - test/console-api/serve/a-serve-recycle-swaps-in-a-ready-replacement.test.ts
+  status: merged
   attempts: 0
   acceptance:
-    - claim: "With RMD_SERVE_BLUE_GREEN=on, recycling serve starts the replacement container under the alternate name on the same network, waits for its /v1/ready and every SMOKE_PATHS route to answer 200, points the tunnel origin (the service name cloudflared reaches) at it, and only then stops the old container"
-      proof: "grep: W1-T13278 criterion 1 in test/a-serve-recycle-swaps-in-a-ready-replacement.test.ts"
+    - claim: "With RMD_SERVE_BLUE_GREEN=on, recycling serve starts the replacement container under the alternate name off the tunnel's network, waits for its /v1/ready and every SMOKE_PATHS route to answer 200, points the tunnel origin (the service name cloudflared reaches) at it with a network alias, and only then stops the old container and renames the replacement"
+      proof: "grep: W1-T13278 criterion 1 in test/console-api/serve/a-serve-recycle-swaps-in-a-ready-replacement.test.ts"
     - claim: "A replacement that is not ready within the standby bound (STANDBY_READY_BOUND_MS) is removed and the old container keeps serving, with a serve.recycle_aborted row"
-      proof: "grep: W1-T13278 criterion 2 in test/a-serve-recycle-swaps-in-a-ready-replacement.test.ts"
-    - claim: "invariant:switch-off-is-today — with the switch unset, recycle-container.sh recycles serve exactly as today"
+      proof: "grep: W1-T13278 criterion 2 in test/console-api/serve/a-serve-recycle-swaps-in-a-ready-replacement.test.ts"
+    - claim: "invariant:switch-off-is-today — with the switch unset, serve-container.sh --replace recycles serve exactly as today"
       kind: guard
-      proof: "grep: W1-T13278 criterion 3 in test/a-serve-recycle-swaps-in-a-ready-replacement.test.ts"
+      proof: "grep: W1-T13278 criterion 3 in test/console-api/serve/a-serve-recycle-swaps-in-a-ready-replacement.test.ts"
   rationale: |
     WHY: Craig asked on 2026-11-16 for no-outage serve restarts and deploys. Inside one container the supervisor already
     swaps generations with a readiness check (serve-supervisor.ts: standby -> /v1/ready and smoke routes -> promote), but a
     container recreate (an image deploy, `docker restart`, a recycle) stops the only listener on 4317: on 2026-11-16 a
     recreate at 23:27:45Z was followed by about 40 minutes with no answers, and the restart at 00:08:52Z by about 15 s
     of refused connections. cloudflared reaches serve by service name (originService http://remudero-serve:4317).
+    MEASURED on the Azure host 2026-11-17 20:39Z: 13 serve container recreates (recycle.phase start rows) from
+    2026-11-15 03:27Z to 2026-11-17 18:52Z, each a cold boot that listens at about +18 s and answers 503 until about
+    +75 s. MEASURED locally on Docker 29.10 (host runs 29.1.3) with a keep-alive Go client at 10 requests/s: an alias
+    swap failed 0 requests, a plain restart or stop-then-start failed 9 to 41.
   design: |
     INVARIANT switch-off-is-today: the default recycle is unchanged.
-    1. Behind RMD_SERVE_BLUE_GREEN=on, give the serve network alias remudero-serve to whichever of two containers
-       (remudero-serve-a, remudero-serve-b) is active; start the other, wait for ready and smoke, move the alias with
-       docker network disconnect/connect, then stop the old one after its drain bound.
-    2. Abort and keep the old one when the new one is not ready in the standby bound.
-    3. Both containers share the state mounts read-write; only the active one runs the read-model lease holder (the lease
-       already serializes writers).
+    1. Behind RMD_SERVE_BLUE_GREEN=on (or the host file /etc/remudero/serve-blue-green.on), serve-container.sh --replace of
+       the core console starts the replacement as remudero-serve-next on the default bridge network (outbound only, so
+       the tunnel cannot reach it), polls it with `docker exec ... node -` until its newest generation socket answers
+       /v1/ready and every SMOKE_PATHS route with 200 (the supervisor's own cold check), then runs
+       `docker network connect --alias remudero-serve rmd-net remudero-serve-next`. Docker's embedded DNS answers the
+       alias with both containers while both run; only then is the old container stopped and removed and the
+       replacement renamed to remudero-serve, the name every other tool reads.
+    2. The replacement runs beside the live one, so it cannot share its code checkout (the entrypoint checks out main in
+       it), generations dir or /tmp (supervisor sockets are named by pid, and both pids are small). A colour label
+       (rmd.serve.color, absent = blue) alternates on each swap; green's dirs are blue's with a -green suffix
+       (scratch-mounts.sh scratch_serve_colour), and deployer.ts readMountPlanDrift reads a green console against
+       green's plan, so a swap is not read as mount drift.
+    3. Abort and keep the old one when the new one is not ready in the standby bound, exits, or cannot join the network
+       (serve.recycle_aborted). A swap the host has no memory for (both consoles at once, nothing freed) falls back to
+       the old stop-then-start replace (serve.recycle_blue_green_fallback), so a deploy is never held by it. A leftover
+       replacement is removed first; one left serving after the old console was removed is renamed, not replaced.
+    4. Both containers share the state mounts read-write, as two generations in one container already do during a
+       handoff; the read-model lease already serializes writers.
   falsifier: |
-    Stop the old container before the new one is ready: criterion 1 fails. Promote an unready replacement: criterion 2
+    Stop the old container before the new one is ready, or read a green console against blue's plan: criterion 1 fails. Promote an unready replacement: criterion 2
     fails. Change the default path: criterion 3 fails.
   note: |
     Id reserved for run-unfiled-1794874389000 with ~/rmd-work/bin/reserve-id.sh.

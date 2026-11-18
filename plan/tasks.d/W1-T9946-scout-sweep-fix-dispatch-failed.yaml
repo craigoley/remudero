@@ -3,14 +3,16 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: auto
-  risk: low
+  verify: human
+  risk: high # Rule 19 span: the scout widens its files to ledger, sweep (src/lib/ledger.ts, src/lib/sweep.ts)
+  band_meaning: span
   priority: 3.4
   status: queued
   attempts: 0
   author_class: machine
   origin: "scout:sweep.fix.dispatch_failed"
   files:
+    - "src/lib/task-lookup.ts"
     - test/scout-sweep-fix-dispatch-failed.test.ts
   acceptance:
     - claim: "sweep.fix.dispatch_failed stops recurring: its cause is fixed rather than its rows hidden"
@@ -21,10 +23,10 @@
     No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
     The rows name no file of their own: locate the code that writes this step first, then fix its cause.
   risk_ruling:
-    verdict: "rule-3-low-privilege"
-    action: proceed
-    confidence: 1
+    verdict: "low"
+    action: escalate
+    confidence: 0.6
     reasons:
-      - "rule 3 (live and low-privilege): the symptom is live, 20 occurrence(s) across 7 day(s), last seen 2026-10-27T04:01:05.316Z, and the record declares no privileged path"
-    judged_at: "2026-10-27T05:40:05.137Z"
-    pin: "fbfe46e9ef191954d23a78659cc1c52815970946d4e99e4f6d925bc507b782e4"
+      - "low-confidence verdict (0.60 < 0.6926829268292682) — on the change's description/files alone, no diff was read — The description and declared files (src/lib/task-lookup.ts plus a new test file) show a bounded bug fix with a grep-verifiable acceptance test. They do not touch secrets, auth, permissions, merge/deploy/infra policy, or data deletion.; on the change's description/files alone, no diff was read — The task asks for no operator-only decision (priorities, budget, policy), and the declared acceptance is a test named in a file, so it can be checked from what is shown.; on the change's description/files alone, no diff was read — Caveats: the rationale says the rows name no file, so the cause is unlocated, and the declared src/lib/task-lookup.ts may not be the code that writes this step. The scout family's record is mixed (11 merged, 19 declined). These are quality concerns that CI and review will catch, not escalation criteria."
+    judged_at: "2026-11-18T01:54:17.988Z"
+    pin: "057bb21403fc3bc81f340c4f6f333c04fe3b7979baf17b0e3f37897276c42381"

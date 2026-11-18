@@ -1,0 +1,113 @@
+- id: W1-T13437
+  title: "The daemon's spawn helper is on by default: the boot starts it unless RMD_SPAWN_HELPER is off, the boot row records the switch in every case, and the switch survives a recycle"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # flips a boot default in production across eight concerns (boot, registry, three deploy lists, docs, tests); every helper failure falls back to a direct spawn, and RMD_SPAWN_HELPER=off turns it off
+  origin: "operator-ruling#spawn-helper-on-2026-11-17"
+  plan_refs:
+    - W1-T9754
+    - W1-T11369
+    - W1-T13434
+    - W1-T11629
+  files:
+    - src/lib/daemon.ts
+    - src/lib/config-schema.ts
+    - deploy/runtime-env-vars.sh
+    - deploy/recycle-container.sh
+    - deploy/host-update.sh
+    - docs/operator-guide.md
+    - test/daemon/the-daemon-s-spawn-helper-is-on-by-default.test.ts
+    - test/the-daemon-measures-and-offloads-its-spawn-cost.test.ts
+    - test/recycle-container.test.ts
+    - test/daemon.test.ts
+    - test/node-runtime-provenance.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "invariant:helper-on-by-default — `daemonBoot` with an env that does not set RMD_SPAWN_HELPER starts the helper, installs it, and writes one `daemon.spawn_helper` row with `started: true`, the installed helper's pid, `switch: RMD_SPAWN_HELPER` and the switch value `unset`. Any value other than `off` (for example `on`, `1` or an empty string) does the same and records that value"
+      proof: "grep: W1-T13437 criterion 1 in test/daemon/the-daemon-s-spawn-helper-is-on-by-default.test.ts"
+    - claim: "With RMD_SPAWN_HELPER=off, `daemonBoot` starts no helper and installs none. It writes one `daemon.spawn_helper` row with `started: false`, `reason: switch_off` and the value `off`. A routed spawn after that boot runs directly and its result names `helper_not_installed`"
+      proof: "grep: W1-T13437 criterion 2 in test/daemon/the-daemon-s-spawn-helper-is-on-by-default.test.ts"
+    - claim: "invariant:helper-failure-falls-back — a helper that cannot start at boot leaves no helper installed and writes `started: false` with a reason that starts with `start_failed`, and the boot continues. After a default boot whose helper then dies, the next routed spawn runs directly with the same result a direct spawn gives and a reason that names the death. A request in flight when the helper dies settles as failed with `helper_died_in_flight` and is never run a second time"
+      kind: guard
+      proof: "grep: W1-T13437 criterion 3 in test/daemon/the-daemon-s-spawn-helper-is-on-by-default.test.ts"
+    - claim: "RMD_SPAWN_HELPER is in deploy/runtime-env-vars.sh's RMD_DAEMON_RUNTIME_ENV_VARS, in both fallback copies (deploy/recycle-container.sh and deploy/host-update.sh) and in the names `host-update.sh --print-daemon-run` passes through, and the three lists stay equal"
+      proof: "grep: W1-T13437 criterion 4 in test/daemon/the-daemon-s-spawn-helper-is-on-by-default.test.ts"
+    - claim: "invariant:callers-unchanged — the default changes only whether the helper runs, not which callers use it. After a default boot, a caller that already routes (merge-probe's git) writes a `spawn.routed` row with `via: helper`, and a direct `execFileLoopBounded` call writes no `spawn.routed` row"
+      kind: guard
+      proof: "grep: W1-T13437 criterion 5 in test/daemon/the-daemon-s-spawn-helper-is-on-by-default.test.ts"
+  rationale: |
+    WHY: the operator's ruling on 2026-11-17, in the operator's words: "Turn it on via a task". The option chosen
+    said: "a small task that makes the helper's default on, with a test and a way to switch it off. It ships
+    through review and deploys like any change, so no config edit or manual restart. If the helper dies, a
+    request in flight fails cleanly and new spawns fall back to direct forks."
+    MEASURED on the Azure host, core daemon, 2026-11-17 (operator session):
+    - `daemon.alive` rows record 10,470 s of async fork time on the loop (`async_spawn_sync_by_caller`) that day,
+      against 2,667 s for all synchronous spawns.
+    - `execFileLoopBounded` alone forked 56,588 times for 5,773 s, 102 ms each.
+    - The synchronous part of a fork grows with the parent's resident size. W1-T9754's own measure: p50 2 ms at
+      50 MB, 87 ms at 587 MB, 161 ms at 1.1 GB. The daemon runs at 1.5 to 2 GB.
+    - No `daemon.spawn_helper` row follows the 2026-11-17T16:06Z boot, so the helper is off in production.
+    - W1-T11369 (the other direct execFileLoopBounded callers) and W1-T13434 (the pinned git leaf) route more
+      forks through the helper. Both do nothing while the helper is off.
+    READ at origin/main 598f52e421:
+    - src/lib/daemon.ts:3880-3881: `SPAWN_HELPER_SWITCH = "RMD_SPAWN_HELPER"`, with the comment "Its default,
+      off, is an operator decision".
+    - src/lib/daemon.ts:3949-3955: the boot starts the helper only when `env[SPAWN_HELPER_SWITCH] === "on"`, and
+      writes `daemon.spawn_helper` only then, so an off boot leaves no row.
+    - src/lib/spawn-helper.ts:176-187: `die` settles every waiting request as `helper_died_in_flight` and never
+      re-runs it. :220-228: an unhealthy helper sends the request to `runDirect` with the reason.
+      :264-266 and :304-307: with no helper installed, `runRouted` and `execFileRouted` run directly.
+    - src/lib/spawn-helper.ts:168-169: `startSpawnHelper` calls `spawn` with no try; a spawn that throws would
+      throw out of `daemonBoot` today.
+    - src/lib/read-plane.ts:21-23: the meter that writes `async_spawn_sync_ms` and `async_spawn_sync_by_caller`.
+      It measures; it does not choose the path. The choice is in spawn-helper.ts.
+    - src/cli/commands/daemon.ts:1997-1999: the real boot passes `process.env` to `daemonBoot`.
+    - src/lib/config-schema.ts:550: the env registry entry says "unset or off keeps every spawn direct".
+    - deploy/runtime-env-vars.sh:34-51, deploy/recycle-container.sh:455, deploy/host-update.sh:142 and :524-539:
+      the passthrough list, its two fallbacks and the printed `-e` names. RMD_SPAWN_HELPER is in none of them,
+      so a recycle refuses a container that carries it (deploy/recycle-container.sh:1498).
+    - test/recycle-container.test.ts:50 and :1815-1839: the fixture list and the test that keeps the lists equal.
+    - test/the-daemon-measures-and-offloads-its-spawn-cost.test.ts:167-191: proves the helper starts only when the
+      switch is "on". This task changes that test's expectation.
+    NOT COVERED: swept origin/main plan/tasks.d and the open pull requests for a task that turns the helper on.
+    W1-T10291, W1-T11369 and W1-T13434 route callers through the helper; none changes its default. No other filing.
+    W1-T11629 also edits src/lib/daemon.ts and test/daemon.test.ts, for a refused GitHub read ending only its lane.
+    It does not touch the boot's helper block; this task changes only that block and the boot tests' row counts.
+  design: |
+    INVARIANT helper-on-by-default: a daemon boot starts the helper unless RMD_SPAWN_HELPER is exactly `off`.
+    INVARIANT helper-failure-falls-back: no helper failure costs a spawn; a request in flight at a death is failed, never re-run.
+    INVARIANT callers-unchanged: this task changes no caller of execFileRouted, runRouted or execFileLoopBounded.
+    1. In `daemonBoot`, start the helper unless `env[SPAWN_HELPER_SWITCH] === "off"`. Write `daemon.spawn_helper`
+       in every case, with `started`, `switch` and `value` (the env value, or `unset`). When started, add `pid`.
+       When not, add `reason`: `switch_off`, or `start_failed: <message>` when `startSpawnHelper` throws. Catch
+       that throw, install nothing, and let the boot continue.
+    2. Change the comment at src/lib/daemon.ts:3880 and the registry text at src/lib/config-schema.ts:550: on
+       unless `off`.
+    3. Add RMD_SPAWN_HELPER to deploy/runtime-env-vars.sh, both fallback arrays and the printed `-e` block of
+       host-update.sh, and to the fixture in test/recycle-container.test.ts.
+    4. docs/operator-guide.md: how to turn the helper off (set RMD_SPAWN_HELPER=off on the daemon container,
+       then recycle), and what to watch: the `daemon.spawn_helper` boot row, `spawn.routed` rows with
+       `via: direct` and their `reason`, and `async_spawn_sync_ms` on `daemon.alive`.
+    5. A boot now always writes `daemon.spawn_helper`. Tests that count a boot's rows exactly (test/daemon.test.ts,
+       test/node-runtime-provenance.test.ts) pass RMD_SPAWN_HELPER=off and leave that row out of the count. A
+       second boot in one process stops the helper the first boot installed, and the helper exits when its
+       parent's pipe closes, so no test leaves a helper process behind.
+    6. No new time bound, env var or config key. The one switch keeps its name; only its default changes.
+    TESTS (one per criterion) in test/daemon/the-daemon-s-spawn-helper-is-on-by-default.test.ts. Each test that
+    starts a helper stops it in a `finally`. For criterion 3, a start failure can be made without a new seam:
+    `spawn` throws at once on an executable path that holds a NUL byte, so set `process.execPath` for that one
+    call and restore it. For the in-flight rule, use `startSpawnHelper`'s `source` seam with a helper that records
+    the request and exits without an answer.
+  falsifier: |
+    Leave the default off (restore `env[SPAWN_HELPER_SWITCH] === "on"` at src/lib/daemon.ts:3951): criterion 1
+    fails, because a boot with the switch unset installs no helper and writes `started: false`.
+  note: |
+    Id reserved for run-unfiled-1794934702000 with ~/rmd-work/bin/reserve-id.sh.
+    After it deploys, the first `daemon.spawn_helper` row on the Azure core daemon should read `started: true`.
+    The operator turns it off with RMD_SPAWN_HELPER=off on the container and a recycle; no code change.

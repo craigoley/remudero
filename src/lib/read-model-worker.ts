@@ -5,9 +5,11 @@
  * once at construction for warm boot; requests never open SQLite.
  * Loaded in both threads: `workerData.kind` gates {@link runReadModelWorker}, also testable in-process.
  */
+import { threadName } from "./thread-names.js";
 import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { closeSync, constants, existsSync, fstatSync, openSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { isMainThread, parentPort, SHARE_ENV, Worker, workerData } from "node:worker_threads";
 import { setLedgerMemoRetentionContext } from "./ledger-union.js";
@@ -24,6 +26,7 @@ import { ghIssueGateway, tryEscalate, type EscalateDeps, type Escalation, type I
 import { createHostView, HOST_VIEW_NAME, hostViewConfig, type HostViewConfig } from "./host-view.js";
 import { createIncidentsView, INCIDENTS_VIEW_NAME } from "./incidents-view.js";
 import { createInboxThreadView, INBOX_THREAD_VIEW_NAME } from "./inbox-thread-view.js";
+import { createInboxThreadsView, INBOX_THREADS_VIEW_NAME } from "./inbox-threads-view.js";
 import { createInstancesView, INSTANCES_VIEW_NAME, INSTANCES_QUALIFICATION_GENERATION } from "./instances-view.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { FUTURE_ROW_TOLERANCE_MS, LEDGER_PROJECTOR_SCHEMA_VERSION, createLedgerProjector, openProjectorReadModel, type LedgerProjector, type ProjectorTickResult } from "./ledger-projector.js";
@@ -36,7 +39,7 @@ import { createTaskView, type ReadModelInstanceState as TaskViewInstanceState } 
 import { planFilesIdentity, threadPlanPin } from "./thread-plan.js";
 import { createWorkstreamsView, WORKSTREAMS_VIEW_NAME } from "./workstreams-view.js";
 import { ACTIONS_VIEW_NAME, createActionsView } from "./actions-view.js";
-import { createDemandBook, TASK_VIEW_NAME, type DemandBook } from "./view-demand.js";
+import { createDemandBook, TASK_VIEW_NAME, VIEW_DEMAND_EVICT_MS, type DemandBook } from "./view-demand.js";
 import {
   ORACLE_DEFAULT_WINDOW_MS,
   ORACLE_DRIFT_INTERVAL_MS,
@@ -79,7 +82,7 @@ import { createDailyProgressView, DAILY_PROGRESS_VIEW_NAME } from "./daily-progr
 import { readModelCommand } from "./read-model-cli.js";
 import { createRepositoriesReadModelView } from "./repositories-view.js";
 import { answerThreadHeaps, askNestedThreadHeaps, workerThreads, type ThreadHeapsAnswer, type ThreadHolds, type ThreadHoldsSnapshot } from "./worker-heaps.js";
-import { createViewShadow, fileShadowStore, readShadowEvidence, storedShadowReadiness, viewShadowPath, type ShadowLegacy, type ShadowPopulation, type ShadowReadiness, type ShadowRequest, type ShadowSample, type ShadowSampleIdentity, type ViewShadow } from "./view-shadow.js";
+import { createViewShadow, fileShadowStore, readShadowEvidence, storedShadowReadinessReader, viewShadowPath, type ShadowLegacy, type ShadowPopulation, type ShadowReadiness, type ShadowRequest, type ShadowSample, type ShadowSampleIdentity, type ViewShadow } from "./view-shadow.js";
 import { INBOX_VIEW_NAME, INBOX_QUALIFICATION_ERROR_META, INBOX_QUALIFICATION_PENDING, INBOX_QUALIFICATION_POPULATION_META, inboxQualificationPolicy, inboxShadowPopulation, inboxShadowSampleKey, parseInboxShadowPopulation, restoreInboxShadowPopulation, type InboxQualificationScope } from "./inbox-view.js";
 import { effectiveViewMode, oldestAsOf, READ_MODEL_STATUS_VIEW, shadowSampled, shownReadiness, viewEtag, viewKey, type EffectiveViewMode, type ViewBody, type ViewBodyEntry, type ViewSource, type ViewSwitchMode } from "./views.js";
 import { describeSource, judgeLedgerReads, judgeSource, type SourcePhase } from "./view-freshness.js";
@@ -98,6 +101,59 @@ export const READ_MODEL_SWITCH_RECHECK_MS = 5_000;
 export const READ_MODEL_MAX_BACKOFF_MS = 60_000;
 /** BACKSTOP: how long a stopping serve waits for the worker to release its leases. */
 export const READ_MODEL_STOP_WAIT_MS = 2_000;
+/**
+ * W1-T13205: "on" runs serve's read-model worker as a child process instead of a thread, so its view builds, projector
+ * and their garbage collection stop sharing serve's heap and memory lock. Default off: the thread path is unchanged.
+ */
+export const READ_MODEL_PROCESS_SWITCH = "RMD_READ_MODEL_PROCESS";
+/** W1-T13205: the argv marker the read-model child process starts under. */
+export const READ_MODEL_PROCESS_CHILD_ARG = "--rmd-read-model-process";
+/**
+ * W1-T13205: how long stop() waits for a read-model child's stopped receipt. MEASURED 2026-11-17 on the Azure host at
+ * load 25 to 30: a child confirmed in 3.1 s, past the thread's 2 s, because its message is read only between ticks.
+ * stop() runs only at serve's shutdown, inside the drain's 30 s backstop.
+ */
+export const READ_MODEL_PROCESS_STOP_WAIT_MS = 10_000;
+
+/** W1-T13205: the slice of a Worker the handle uses, which a thread and the child-process adapter both give. */
+interface ReadModelWorkerPort {
+  postMessage(value: unknown): void;
+  on(event: "message", run: (msg: ReadModelWorkerMessage) => void): unknown;
+  on(event: "error", run: (error: Error) => void): unknown;
+  on(event: "exit", run: (code: number | null) => void): unknown;
+  unref(): void;
+  terminate(): Promise<unknown> | void;
+}
+
+/** A board-catalog reply carries a SharedArrayBuffer, which no process boundary passes: it crosses as bytes. */
+function catalogReplyForChild(msg: unknown): unknown {
+  return isBoardCatalogReply(msg) ? { ...msg, buffer: Buffer.from(new Uint8Array(msg.buffer)) } : msg;
+}
+
+/** The child's side of {@link catalogReplyForChild}: the bytes become a SharedArrayBuffer again. */
+function catalogReplyFromParent(msg: unknown): unknown {
+  const reply = msg as { type?: unknown; buffer?: unknown } | null;
+  if (reply?.type !== "ops_catalog_snapshot" || !(reply.buffer instanceof Uint8Array)) return msg;
+  const shared = new SharedArrayBuffer(reply.buffer.byteLength);
+  new Uint8Array(shared).set(reply.buffer);
+  return { ...reply, buffer: shared };
+}
+
+/** W1-T13205: wrap a forked read-model child as a {@link ReadModelWorkerPort}. */
+function childPort(child: ChildProcess): ReadModelWorkerPort {
+  const port: ReadModelWorkerPort = {
+    postMessage: (value) => {
+      if (child.connected) child.send(catalogReplyForChild(value) as never);
+    },
+    on: (event: string, run: (...args: never[]) => void) => (event === "message" ? child.on("message", run as never) : event === "error" ? child.on("error", run as never) : child.on("exit", run as never)),
+    unref: () => {
+      child.unref();
+      (child.channel as { unref?: () => void } | undefined)?.unref?.();
+    },
+    terminate: () => void child.kill(),
+  };
+  return port;
+}
 export const READ_MODEL_SWITCHES_FILE = "switches.json";
 /** The share of worker time the oracle's slices may take: the next slice waits cost / share. */
 export const READ_MODEL_CHECK_SHARE = 0.02;
@@ -182,6 +238,8 @@ export interface ReadModelSwitches {
   push?: "on" | "off";
   /** Who keeps GitHub facts warm (Phase 1 cutover); absent reads `serve`, and `worker` falls back to serve while the worker is not live. */
   github?: "serve" | "worker";
+  /** W1-T13683: where the worker runs; absent reads `thread`. Read once per handle, so a generation handoff applies it. */
+  process?: "thread" | "child";
 }
 
 /** Which keep-warm took over serve's gateway, and why. */
@@ -238,7 +296,7 @@ export function readReadModelSwitches(path: string): { ok: true; switches: ReadM
   } catch (error) {
     return { ok: false, reason: `switch file is not JSON: ${(error as Error).message}` };
   }
-  const obj = (raw ?? {}) as { projector?: unknown; views?: unknown; push?: unknown; github?: unknown };
+  const obj = (raw ?? {}) as { projector?: unknown; views?: unknown; push?: unknown; github?: unknown; process?: unknown };
   const views: Record<string, ReadModelViewMode> = {};
   for (const [name, mode] of Object.entries(typeof obj.views === "object" && obj.views !== null ? obj.views : {})) {
     if (mode !== "serve" && mode !== "shadow" && mode !== "off" && mode !== "auto") return { ok: false, reason: `view ${name} has mode ${JSON.stringify(mode)}` };
@@ -248,7 +306,27 @@ export function readReadModelSwitches(path: string): { ok: true; switches: ReadM
   if (projector !== "on" && projector !== "off") return { ok: false, reason: `projector has mode ${JSON.stringify(projector)}` };
   if (obj.push !== undefined && obj.push !== "on" && obj.push !== "off") return { ok: false, reason: `push has mode ${JSON.stringify(obj.push)}` };
   if (obj.github !== undefined && obj.github !== "serve" && obj.github !== "worker") return { ok: false, reason: `github has mode ${JSON.stringify(obj.github)}` };
-  return { ok: true, switches: { projector, views, ...(obj.push !== undefined ? { push: obj.push } : {}), ...(obj.github !== undefined ? { github: obj.github } : {}) }, mtimeMs };
+  if (obj.process !== undefined && obj.process !== "thread" && obj.process !== "child") return { ok: false, reason: `process has mode ${JSON.stringify(obj.process)}` };
+  return { ok: true, switches: { projector, views, ...(obj.push !== undefined ? { push: obj.push } : {}), ...(obj.github !== undefined ? { github: obj.github } : {}),
+    ...(obj.process !== undefined ? { process: obj.process } : {}) }, mtimeMs };
+}
+
+/** W1-T13683: the step that names where a read-model handle runs its worker, and which switch chose it. */
+export const READ_MODEL_PROCESS_MODE_STEP = "read_model.process_mode";
+
+/**
+ * W1-T13683: where a new handle runs its worker. The environment switch (W1-T13205) wins when it is `on` or `off`;
+ * otherwise switches.json's `process` decides, so a trial needs no container change, only the next generation.
+ * An unreadable switch file runs the thread, as before.
+ */
+export function readModelProcessMode(env: NodeJS.ProcessEnv, switchesPath: string):
+  { mode: "thread" | "child"; source: "env" | "switches" | "default"; reason?: string } {
+  const value = env[READ_MODEL_PROCESS_SWITCH];
+  if (value === "on") return { mode: "child", source: "env" };
+  if (value === "off") return { mode: "thread", source: "env" };
+  const read = readReadModelSwitches(switchesPath);
+  if (!read.ok) return { mode: "thread", source: "default", reason: read.reason };
+  return read.switches.process === undefined ? { mode: "thread", source: "default" } : { mode: read.switches.process, source: "switches" };
 }
 
 /** One instance's projector, as the worker last saw it. Posted to the main thread every tick. */
@@ -296,6 +374,8 @@ export interface ReadModelViewContext {
   switches?: ReadModelSwitches;
   /** Each shadowed view's diff counters and cutover readiness (view-shadow.ts). */
   shadow?: ShadowReadiness[];
+  /** W1-T13457: the body the home store last committed for a view's key, so a view can carry it across a restart instead of publishing a warming one over it. */
+  committed?(view: string, key: string): ViewBody | undefined;
 }
 
 /** A view the worker materializes. `materialize` returns one body per key (`""` when unkeyed). */
@@ -441,6 +521,13 @@ export const READ_MODEL_VIEW_READERS: ReadModelViewReaders = {
     { consumer: NAV_BADGE_VIEW_NAME, reader: "needs-you-view.ts withNeedsYouView; serve.ts navBadgeWithDecisions", view: NAV_BADGE_VIEW_NAME },
   ],
   [OPERATOR_AGENT_ROWS_VIEW]: [{ consumer: "the operator agent", reader: "operator-agent-read-model.ts createOperatorAgentRowsSource: legacy only on an explicit off" }],
+  // W1-T13455: served with no switch entry, so the worker builds its demanded keys with none either.
+  [INBOX_THREAD_VIEW_NAME]: [{ consumer: "GET /v1/views/inbox-thread", reader: "serve.ts servedByDefault" }],
+  // W1-T13455: served by default since W1-T13282, but never rebuilt with no switch entry: on 2026-11-17 the Console read
+  // an agent body built from the ledger of 2026-11-10 (stale for 7 days).
+  [AGENT_VIEW_NAME]: [{ consumer: "GET /v1/views/agent", reader: "serve.ts servedByDefault" }],
+  // W1-T13456: served with no switch entry, so it is built with none.
+  [INBOX_THREADS_VIEW_NAME]: [{ consumer: "GET /v1/views/inbox-threads", reader: "serve.ts servedByDefault" }],
 };
 
 function readModelViewRead(view: string, switches: ReadModelSwitches, readers: ReadModelViewReaders, seen: Set<string>): boolean {
@@ -528,6 +615,8 @@ export interface ReadModelTickerOptions {
   readers?: ReadModelViewReaders;
   lane?: "fast" | "heavy";
   restoreCosts?: boolean;
+  /** W1-T13490: how long an earlier run's demand keys are carried before an unread one is dropped; one eviction window by default. */
+  demandCarryMs?: number;
 }
 
 export interface IntegrityRequest {
@@ -566,7 +655,7 @@ export function threadIntegrityCheck(workerUrl?: URL): NonNullable<ReadModelTick
   const spawnIntegrityCheck: NonNullable<ReadModelTickerOptions["integrityCheck"]> = (request, done) => {
     let settled = false;
     let failure = "";
-    const thread = startWorker(import.meta.url, { workerData: { kind: READ_MODEL_INTEGRITY_KIND, request } }, { override: workerUrl });
+    const thread = startWorker(import.meta.url, { name: threadName("readModelIntegrity"), workerData: { kind: READ_MODEL_INTEGRITY_KIND, request } }, { override: workerUrl });
     thread.unref();
     thread.on("message", (result: IntegrityResult) => {
       settled = true;
@@ -601,7 +690,7 @@ export function answerReadModelIssueRequest(request: ReadModelIssueRequest, issu
 export function threadIssueRequest(workerUrl?: URL): (request: ReadModelIssueRequest) => Promise<ReadModelIssueAnswer> {
   return (request) => new Promise((resolve) => {
     let failure = "";
-    const thread = startWorker(import.meta.url, { workerData: { kind: READ_MODEL_ISSUE_KIND, request } }, { override: workerUrl });
+    const thread = startWorker(import.meta.url, { name: threadName("readModelIssue"), workerData: { kind: READ_MODEL_ISSUE_KIND, request } }, { override: workerUrl });
     thread.unref();
     thread.on("message", (answer: ReadModelIssueAnswer) => resolve(answer));
     thread.on("error", (error) => void (failure = `: ${error.message}`));
@@ -668,7 +757,7 @@ export function threadOracle(opts: { workerUrl?: URL; escalationRepository?: str
   };
   const spawnOracle = (): Worker => {
     const data: ReadModelOracleData = { kind: READ_MODEL_ORACLE_KIND, ...(opts.escalationRepository ? { escalationRepository: opts.escalationRepository } : {}) };
-    const spawned = startWorker(import.meta.url, { workerData: data, env: SHARE_ENV, resourceLimits: { maxOldGenerationSizeMb: READ_MODEL_ORACLE_HEAP_MB } }, { override: opts.workerUrl });
+    const spawned = startWorker(import.meta.url, { name: threadName("readModelOracle"), workerData: data, env: SHARE_ENV, resourceLimits: { maxOldGenerationSizeMb: READ_MODEL_ORACLE_HEAP_MB } }, { override: opts.workerUrl });
     spawned.unref();
     spawned.on("message", (msg: { type?: string; id?: number; result?: OracleSliceResult }) => {
       if (msg.type === "done" && msg.id === pending?.id) settle(msg.result!);
@@ -1512,6 +1601,12 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
 
   const demandViews = views.filter((view) => view.demand === true).map((view) => view.name);
   const demandSwept = new Set<ViewUnit>();
+  /**
+   * W1-T13490: until one eviction window has passed since this worker started, an earlier run's persisted demand key
+   * is carried, not dropped: serve keeps answering it (stale, by W1-T13457's carried rule), and a read in the window
+   * wants it like any other. The first sweep after the window drops what nobody read.
+   */
+  const demandCarriedUntil = clock.now() + (opts.demandCarryMs ?? VIEW_DEMAND_EVICT_MS);
 
   function demandKeyBelongsTo(unit: ViewUnit, key: string): boolean {
     const instances = new URLSearchParams(key).getAll("instance");
@@ -1520,7 +1615,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   }
 
   /**
-   * Evict demand keys unread ten minutes; first sweep also drops earlier runs' persisted keys
+   * Evict demand keys unread ten minutes; the first sweep after the carry window (W1-T13490) drops earlier runs' persisted keys
    * for owned units only. Transferred units get their own first sweep.
    */
   function sweepDemand(): void {
@@ -1533,7 +1628,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       for (const { view, key } of book.expire()) {
         if (owned.some(unit => unit.view.name === view && demandKeyBelongsTo(unit, key))) drop(view, key);
       }
-      const starting = owned.filter(unit => !demandSwept.has(unit));
+      const starting = clock.now() < demandCarriedUntil ? [] : owned.filter(unit => !demandSwept.has(unit));
       for (const unit of starting) demandSwept.add(unit);
       for (const view of new Set(starting.map(unit => unit.view.name))) {
         for (const key of knownKeys(view)) {
@@ -1832,6 +1927,8 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   }
   /** W1-T11934: a demand unit is due only while the book holds a key of its view; its default keys alone rebuilt it every tick. */
   const demanded = (unit: ViewUnit): boolean => unit.view.demand !== true || !opts.demand || opts.demand.keys(unit.view.name).length > 0;
+  /** W1-T13536: a view thread asks on every pass; the counter store is re-read at most once per refresh interval. */
+  const storedReadiness = storedShadowReadinessReader(clock);
   const dueUnits = (now: number): ViewUnit[] => units.filter((unit) => owns(unit) && built(unit.view.name) && unit.dueAt <= now && demanded(unit)).sort((a, b) => a.dueAt - b.dueAt);
 
   /**
@@ -1844,8 +1941,8 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     sweepDemand();
     const home = slots[0]?.db;
     const shadow = home ? comparator?.db === home && slots[0]?.lease !== undefined ? comparator.shadow.readiness()
-      : storedShadowReadiness(viewShadowPath(opts.stateDir), home, now, qualifications, inboxPopulations, inboxPopulations ? [INBOX_VIEW_NAME] : undefined) : undefined;
-    const ctx: ReadModelViewContext = { now, switches, ...(home ? { sourceStore: home } : {}), instances: slots.map((slot) => ({ state: slot.state, ...(slot.db ? { db: slot.db } : {}), ...(slot.lease ? { lease: slot.lease } : {}) })), ...(shadow ? { shadow } : {}) };
+      : storedReadiness(viewShadowPath(opts.stateDir), home, now, qualifications, inboxPopulations, inboxPopulations ? [INBOX_VIEW_NAME] : undefined) : undefined;
+    const ctx: ReadModelViewContext = { now, switches, ...(home ? { sourceStore: home, committed: (view: string, key: string) => committedBody(home, view, key) } : {}), instances: slots.map((slot) => ({ state: slot.state, ...(slot.db ? { db: slot.db } : {}), ...(slot.lease ? { lease: slot.lease } : {}) })), ...(shadow ? { shadow } : {}) };
     const generation = slots.reduce((sum, slot) => sum + slot.state.generation, 0);
     if (only) return build(only, now, ctx, generation, soloMs);
     const left = passMs - (clock.now() - tickStart);
@@ -2221,6 +2318,7 @@ export function readModelLaneViews(
     { name: INSTANCES_VIEW_NAME, qualificationGeneration: INSTANCES_QUALIFICATION_GENERATION, create: () => createInstancesView({ instances, ...data.registry, ledgerSource }) },
     { name: TASK_VIEW_NAME, demand: true, create: () => createTaskView({ instances, ledgerSource, clock, demand, log }) },
     { name: INBOX_THREAD_VIEW_NAME, demand: true, create: () => createInboxThreadView({ ...(data.inboxRoot ? { inboxRoot: data.inboxRoot } : {}), clock, demand, log }) },
+    { name: INBOX_THREADS_VIEW_NAME, create: () => createInboxThreadsView({ ...(data.inboxRoot ? { inboxRoot: data.inboxRoot } : {}), log }) },
     { name: WORKSTREAMS_VIEW_NAME, create: () => createWorkstreamsView({ instances, ledgerSource, clock, log }) },
     { name: ACTIONS_VIEW_NAME, create: () => createActionsView({ instances, ledgerSource }) },
     { name: HOST_VIEW_NAME, create: () => createHostView({ ...(data.host ? { config: data.host } : {}), ledgerSource, clock }) },
@@ -2448,8 +2546,8 @@ export function threadViews(opts: {
   };
 }
 
-const spawnViews = (override: URL | undefined, data: ReadModelViewsData): Worker => startWorker(import.meta.url, { workerData: data, env: SHARE_ENV }, { override });
-const spawnHeavyViews = (override: URL | undefined, data: ReadModelViewsData): Worker => startWorker(import.meta.url, { workerData: data, env: SHARE_ENV }, { override });
+const spawnViews = (override: URL | undefined, data: ReadModelViewsData): Worker => startWorker(import.meta.url, { name: threadName("readModelViews"), workerData: data, env: SHARE_ENV }, { override });
+const spawnHeavyViews = (override: URL | undefined, data: ReadModelViewsData): Worker => startWorker(import.meta.url, { name: threadName("readModelHeavyViews"), workerData: data, env: SHARE_ENV }, { override });
 
 export interface ReadModelWorkerData {
   catalogBridgeVersion?: number;
@@ -2478,6 +2576,40 @@ function hostOf(slowLane: SlowLaneConfig | undefined): { host?: HostViewConfig }
 }
 
 /** The worker branch's body: tick on a timer until asked to stop, then release and signal. */
+/**
+ * W1-T13205: the read-model child process. The parent sends {type:"init", data, stopReceipt} first; this runs the same
+ * {@link runReadModelWorker} over the IPC channel, writes the stop receipt once the leases are released, applies
+ * {type:"env"} token updates, and exits when the parent goes away.
+ */
+export function runReadModelProcessChild(): void {
+  const send = (value: unknown): void => { if (process.connected) process.send!(value as never); };
+  process.on("disconnect", () => process.exit(0));
+  process.once("message", (first: { type?: string; data?: Omit<ReadModelWorkerData, "signal">; stopReceipt?: string }) => {
+    if (first?.type !== "init" || !first.data) return void process.exit(1);
+    const receipt = first.stopReceipt;
+    const listeners: Array<(msg: { type?: string }) => void> = [];
+    process.on("message", (raw: unknown) => {
+      const msg = catalogReplyFromParent(raw) as { type?: string; GH_TOKEN?: string | null };
+      if (msg?.type === "env") {
+        if (typeof msg.GH_TOKEN === "string") process.env.GH_TOKEN = msg.GH_TOKEN;
+        else delete process.env.GH_TOKEN;
+        return;
+      }
+      for (const listener of listeners) listener(msg);
+    });
+    const port = {
+      on: (_event: "message", run: (msg: { type?: string }) => void) => void listeners.push(run),
+      postMessage: (value: unknown) => {
+        send(value);
+        const log = value as { type?: string; step?: string };
+        if (receipt && log?.type === "log" && log.step === "read_model.stopped") writeFileSync(receipt, "stopped\n");
+      },
+      close: () => { if (process.connected) process.disconnect(); },
+    };
+    runReadModelWorker(port, { ...first.data, signal: new SharedArrayBuffer(8) } as ReadModelWorkerData);
+  });
+}
+
 export function runReadModelWorker(
   port: { on(event: "message", run: (msg: { type?: string }) => void): unknown; postMessage(value: unknown): void; close(): void },
   data: ReadModelWorkerData,
@@ -2591,6 +2723,9 @@ export function runReadModelWorker(
 if (!isMainThread && (workerData as { kind?: unknown } | undefined)?.kind === READ_MODEL_WORKER_KIND && parentPort) {
   runReadModelWorker(parentPort, workerData as ReadModelWorkerData);
 }
+if (isMainThread && process.argv[2] === READ_MODEL_PROCESS_CHILD_ARG && process.send) {
+  runReadModelProcessChild();
+}
 if (!isMainThread && (workerData as { kind?: unknown } | undefined)?.kind === READ_MODEL_VIEWS_KIND && parentPort) {
   runReadModelViewWorker(parentPort, workerData as ReadModelViewsData);
 }
@@ -2622,6 +2757,24 @@ function storedBodyQualification(raw: string | undefined, etag: string): { quali
     return { reason: "stored qualification metadata is not valid JSON" };
   }
 }
+
+/** W1-T13457: one key's last committed body in `db`, or undefined when none is stored or it cannot be read. */
+export function committedBody(db: ReadModelDb, view: string, key: string): ViewBody | undefined {
+  try {
+    const row = db.prepare("SELECT body FROM view_body WHERE view = ? AND key = ?").get(view, key);
+    return row === undefined ? undefined : JSON.parse(String(row.body)) as ViewBody;
+  } catch (error) {
+    // deliberate: no readable committed body means nothing to carry; the view builds as on a first boot.
+    void error;
+    return undefined;
+  }
+}
+
+/** W1-T13457: why a body carried across a restart reads stale until this run's worker posts its key. */
+export const CARRIED_BODY_REASON = "carried across a serve restart: this body was committed before serve started, and the read-model worker has not rebuilt it yet";
+
+/** W1-T13457: the source a carried body with no sources of its own is marked stale by. */
+export const CARRIED_BODY_SOURCE = "read-model:carried";
 
 /** The last committed bodies, read once at construction through a read-only connection. */
 export function loadCommittedViewBodies(stateDir: string, home: string, nowMs = systemClock.now()): { bodies: ReadModelBodyEntry[]; reason?: string; inboxPopulation?: ShadowPopulation; inboxQualificationReason?: string } {
@@ -2678,6 +2831,11 @@ export function committedTickTimes(stateDir: string, instances: readonly ReadMod
 export interface ReadModelWorkerHandle {
   /** Keyed `<view>\u0000<key>`; loaded from the DB at construction, then replaced by each posted body. */
   readonly bodies: ReadonlyMap<string, ReadModelBodyEntry>;
+  /**
+   * W1-T13600: how many held bodies the last committed load also read. Bodies this generation built and posted
+   * but the store no longer holds (demand-built keys) are left out: a fresh standby loads only the store.
+   */
+  committedBodies?(): number;
   /** Each instance's last posted state, and the switches the worker last read. */
   state(): { at?: number; instances: ReadonlyMap<string, ReadModelInstanceState>; switches: ReadModelSwitches; warmBoot?: string };
   body(view: string, key?: string): ReadModelBodyEntry | undefined;
@@ -2717,6 +2875,8 @@ export interface ReadModelWorkerOptions {
   tickMs?: number;
   registry?: ReadModelWorkerData["registry"];
   stopWaitMs?: number;
+  /** W1-T13205: forks the child entry; defaults to {@link forkWorkerEntry}. */
+  fork?: typeof forkWorkerEntry;
   workerUrl?: URL;
   log?: (step: string, extra?: Record<string, unknown>) => void;
   escalationRepository?: string;
@@ -2773,6 +2933,8 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
   let inboxQualification = inboxIdentityFrom(warm);
   let inboxQualificationSnapshot = inboxQualification === INBOX_QUALIFICATION_PENDING ? undefined : warm.inboxPopulation?.snapshotKey;
   for (const entry of warm.bodies) bodies.set(readModelBodyKey(entry.view, entry.key), entry);
+  /** W1-T13600: the keys the last committed load read, so a handoff's warm bar can leave out bodies only this generation built. */
+  let committedKeys = new Set(warm.bodies.map(entry => readModelBodyKey(entry.view, entry.key)));
   opts.log?.("read_model.warm_boot", { bodies: warm.bodies.length, ...(warm.reason ? { reason: warm.reason } : {}) });
   for (const entry of warm.bodies) if (entry.qualificationReason !== undefined) opts.log?.("read_model.qualification_unknown", { view: entry.view, key: entry.key, reason: entry.qualificationReason });
   if (warm.inboxQualificationReason) opts.log?.("read_model.qualification_unknown", { view: INBOX_VIEW_NAME, reason: warm.inboxQualificationReason });
@@ -2855,8 +3017,22 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
     }
   };
 
-  let worker: Worker | undefined;
+  let worker: ReadModelWorkerPort | undefined;
   let signal: Int32Array | undefined;
+  // W1-T13205: the child path's stop receipt (a file the child writes once its leases are released) and the token
+  // last handed to it.
+  let stopReceipt: string | undefined;
+  let sentToken: string | undefined;
+  // W1-T13683: the environment switch, or else switches.json's `process`; one row names which.
+  const processMode = readModelProcessMode(process.env, readModelSwitchesPath(opts.stateDir));
+  opts.log?.(READ_MODEL_PROCESS_MODE_STEP, processMode);
+  const asChild = processMode.mode === "child";
+  const sendToken = (): void => {
+    const token = process.env.GH_TOKEN;
+    if (!asChild || !worker || token === sentToken) return;
+    sentToken = token;
+    worker.postMessage({ type: "env", GH_TOKEN: token ?? null });
+  };
   let stopping = false;
   let paused = false;
   let started = false;
@@ -3025,15 +3201,33 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       ...(opts.viewsModule ? { viewsModule: opts.viewsModule } : {}),
       ...(opts.modelApprovalConfig ? { modelApprovalConfig: opts.modelApprovalConfig } : {}),
     };
-    // SHARE_ENV, as on every long-lived thread here: escalations need serve's refreshed GH_TOKEN (#9156).
-    const spawned = startWorker(import.meta.url, { workerData: data, env: SHARE_ENV }, { override: opts.workerUrl });
-    signal = new Int32Array(shared);
-    worker = spawned;
+    let spawned: ReadModelWorkerPort;
+    let heapAnswer: (msg: unknown) => boolean = () => false;
+    if (asChild) {
+      // W1-T13205: the same entry in a child process; the data arrives as the first message, and stop is confirmed by a
+      // receipt file because no memory is shared.
+      stopReceipt = join(tmpdir(), `rmd-read-model-stop-${process.pid}-${randomUUID()}`);
+      const { signal: _signal, ...plain } = data;
+      const launched = (opts.fork ?? forkWorkerEntry)(import.meta.url, [READ_MODEL_PROCESS_CHILD_ARG],
+        { execArgv: [...process.execArgv], serialization: "advanced", stdio: ["ignore", "inherit", "inherit", "ipc"] }, { override: opts.workerUrl });
+      spawned = childPort(launched.child);
+      sentToken = undefined;
+      launched.child.send({ type: "init", data: plain, stopReceipt } as never);
+      signal = undefined;
+      worker = spawned;
+      sendToken();
+    } else {
+      // SHARE_ENV, as on every long-lived thread here: escalations need serve's refreshed GH_TOKEN (#9156).
+      const thread = startWorker(import.meta.url, { name: threadName("readModel"), workerData: data, env: SHARE_ENV }, { override: opts.workerUrl });
+      // A heap answer is not a sign of progress: the watchdog never hears it, so a loop that died still recycles.
+      heapAnswer = askNestedThreadHeaps(thread);
+      spawned = thread as unknown as ReadModelWorkerPort;
+      signal = new Int32Array(shared);
+      worker = spawned;
+    }
     heardAt = clock.now();
     phase = undefined;
     spawned.unref();
-    // A heap answer is not a sign of progress: the watchdog never hears it, so a loop that died still recycles.
-    const heapAnswer = askNestedThreadHeaps(spawned);
     const catalogBridge = createBoardCatalogParentBridge(opts.instances.map(instance => instance.ledgerDir), reply => {
       if (worker === spawned && !stopping && !paused) spawned.postMessage(reply);
     }, clock);
@@ -3060,24 +3254,42 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
     });
   };
 
+  const judgeSources = (sources: readonly ViewSource[], now: number, body?: { view: string; key: string }): ViewSource[] => sources.map((source) => {
+    const own = body ? bodyReadings.get(readModelBodyKey(body.view, body.key))?.get(source.name) : undefined;
+    const declaredReads = body ? ledgerReads.get(body.view)?.[source.name] : undefined;
+    const read = body ? (declaredReads !== undefined ? own ?? source : newerReading(source, own)) : undefined;
+    if (!source.name.startsWith(LEDGER_SOURCE_PREFIX)) return judgeSource(read ?? sourceClocks.get(source.name) ?? source, now);
+    const instance = source.name.slice(LEDGER_SOURCE_PREFIX.length);
+    const state = instances.get(instance);
+    if (state?.tickedAt !== undefined) return read ? builtLedgerSource(read, state, now, undefined, declaredReads) : ledgerSource(state, now);
+    const committed = committedAt.get(instance);
+    if (committed !== undefined && now - committed <= READ_MODEL_LEDGER_STALE_MS) {
+      return describeSource({ name: source.name, asOf: source.asOf, state: "fresh", lagMs: Math.max(0, now - committed) });
+    }
+    return state ? ledgerSource(state, now) : { ...describeSource(source), state: "stale", phase: "warming", reason: "read model warming: this body was committed before serve started" };
+  });
+
   const handle: ReadModelWorkerHandle = {
     bodies,
+    committedBodies: () => {
+      let held = 0;
+      for (const key of bodies.keys()) if (committedKeys.has(key)) held++;
+      return held;
+    },
     state: () => ({ ...(at === undefined ? {} : { at }), instances, switches, ...(warm.reason ? { warmBoot: warm.reason } : {}) }),
     body: (view, key = "") => bodies.get(readModelBodyKey(view, key)),
-    judge: (sources, now, body) => sources.map((source) => {
-      const own = body ? bodyReadings.get(readModelBodyKey(body.view, body.key))?.get(source.name) : undefined;
-      const declaredReads = body ? ledgerReads.get(body.view)?.[source.name] : undefined;
-      const read = body ? (declaredReads !== undefined ? own ?? source : newerReading(source, own)) : undefined;
-      if (!source.name.startsWith(LEDGER_SOURCE_PREFIX)) return judgeSource(read ?? sourceClocks.get(source.name) ?? source, now);
-      const instance = source.name.slice(LEDGER_SOURCE_PREFIX.length);
-      const state = instances.get(instance);
-      if (state?.tickedAt !== undefined) return read ? builtLedgerSource(read, state, now, undefined, declaredReads) : ledgerSource(state, now);
-      const committed = committedAt.get(instance);
-      if (committed !== undefined && now - committed <= READ_MODEL_LEDGER_STALE_MS) {
-        return describeSource({ name: source.name, asOf: source.asOf, state: "fresh", lagMs: Math.max(0, now - committed) });
-      }
-      return state ? ledgerSource(state, now) : { ...describeSource(source), state: "stale", phase: "warming", reason: "read model warming: this body was committed before serve started" };
-    }),
+    judge: (sources, now, body) => {
+      const judged = judgeSources(sources, now, body);
+      // W1-T13457 invariant stale-says-so: a body this run's worker has not posted was carried across a restart. Its
+      // ledger sources are stale until the worker posts that key: a lease the dead serve renewed seconds ago says when
+      // the store was last written, not that this serve's projector has read the rows since. A source with its own
+      // observation clock (a probe, a scope read) is still judged by that clock and budget.
+      if (!body || posted.has(readModelBodyKey(body.view, body.key))) return judged;
+      const carried = judged.map((source): ViewSource => source.state !== "fresh" || !source.name.startsWith(LEDGER_SOURCE_PREFIX) ? source
+        : { ...source, state: "stale", phase: "warming", reason: CARRIED_BODY_REASON });
+      // A body with no sources has no clock to mark; it still says it is carried.
+      return carried.length > 0 ? carried : [{ name: CARRIED_BODY_SOURCE, asOf: null, state: "stale", phase: "warming", reason: CARRIED_BODY_REASON }];
+    },
     reload: () => {
       const again = loadCommittedViewBodies(opts.stateDir, home, clock.now());
       inboxQualification = inboxIdentityFrom(again);
@@ -3087,6 +3299,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       let removed = 0;
       if (again.reason === undefined) {
         const committed = new Set(again.bodies.map(entry => readModelBodyKey(entry.view, entry.key)));
+        committedKeys = committed;
         // Inbox pages are posted only after their commit, so a qualified committed population bounds even posted ones.
         const members = inboxQualification === INBOX_QUALIFICATION_PENDING ? undefined : new Set(again.inboxPopulation?.pages.map(page => readModelBodyKey(INBOX_VIEW_NAME, page.key)));
         for (const [key, entry] of bodies) if ((!posted.has(key) && !committed.has(key)) || (members && entry.view === INBOX_VIEW_NAME && !members.has(key))) {
@@ -3140,6 +3353,8 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       spawn();
       handGithub();
       stopSwitchWatch = (opts.every ?? everyUnref)(() => {
+        // W1-T13205 invariant child-sees-the-refreshed-token: a changed GH_TOKEN reaches the child within one recheck.
+        sendToken();
         refreshSwitches();
         watchWorker();
         handGithub();
@@ -3155,6 +3370,22 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       const running = worker;
       worker = undefined;
       handGithub();
+      if (running && asChild && stopReceipt) {
+        // W1-T13205: no shared memory with a child, so its receipt is a file, polled for up to the stop wait.
+        running.postMessage({ type: "stop" });
+        const receipt = stopReceipt;
+        const deadline = clock.now() + (opts.stopWaitMs ?? READ_MODEL_PROCESS_STOP_WAIT_MS);
+        const nap = new Int32Array(new SharedArrayBuffer(4));
+        let confirmed = existsSync(receipt);
+        while (!confirmed && clock.now() < deadline) {
+          Atomics.wait(nap, 0, 0, 20);
+          confirmed = existsSync(receipt);
+        }
+        rmSync(receipt, { force: true });
+        void running.terminate();
+        opts.log?.("read_model.stop", { confirmed });
+        return confirmed;
+      }
       if (!running || !signal) return false;
       Atomics.store(signal, 0, 1);
       running.postMessage({ type: "stop" });
@@ -3173,8 +3404,8 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       worker = undefined;
       handGithub();
       const flag = signal;
-      if (!running || !flag) return false;
-      Atomics.store(flag, 0, 1);
+      if (!running || (!flag && !asChild)) return false;
+      if (flag) Atomics.store(flag, 0, 1);
       const confirmed = await new Promise<boolean>((resolve) => {
         const bound = setTimeout(() => resolve(false), opts.stopWaitMs ?? READ_MODEL_STOP_WAIT_MS);
         bound.unref();

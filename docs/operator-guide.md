@@ -155,6 +155,7 @@ real self-sync re-exec sets on its own child, so it skips the whole check, not e
 | `rmd hand-worktree <taskId> [--parent <abs dir>]` | Create a hand build's `run-<taskId>-<epochMs>` worktree from fresh origin/main with no upstream, at an absolute path, and node_modules hard-linked (`cp -al`) from a worktree on the same filesystem with an identical package-lock.json. With no such donor it prints `npm ci` as the next step and the free space. See [the CLI reference](cli-reference.md#rmd-hand-worktree). |
 | `rmd pr-checks <pr-number> [--repo <name>]` | Print a pull request head's checks — check runs unioned with commit statuses such as `remudero-review`, latest attempt per name — and exit 1 if any is red, 2 on a failed read (never "no red checks"). An outcome the classifier cannot name prints as pending. See [the CLI reference](cli-reference.md#rmd-pr-checks). |
 | `rmd plan-destination <decision\|feedback\|task>` | Print where a new plan file of this kind goes on this host: the outcome, the repository and the checkout. An unreadable host file prints its reason and exits 1 (W1-T12216). See [Filing in the plan destination](#filing-in-the-plan-destination). |
+| `rmd migration-preview --public-root <path> --public-commit <sha> --public-repo <owner/remudero> --ops-root <path> --ops-commit <sha> --ops-repo <owner/name>` | Read-only preview of the lowest-priority safe public task, without moving it. Both pinned commits must already exist locally and remain current; changed, incomplete or incompatible evidence prints UNKNOWN, and permission is never granted. It writes no catalog, claim, reservation, branch or PR. See [the CLI reference](cli-reference.md#rmd-migration-preview). |
 | `rmd next-task-id --branch <filing-branch>` | Reserve the next free `W1-T<n>` on origin as `refs/rmd-id/<id>` and record the branch that will file it. A normal invocation claims the id; `--offline` and `--no-reserve` do not. An unreadable source refuses the reservation. See [the CLI reference](cli-reference.md#rmd-next-task-id) for all flags and [minting a task id](#minting-a-task-id) for the host procedure. |
 | `rmd note <id> <text...>` | Record an operator guidance note against a task or proposal, into `plan/operator-notes.ndjson` — the weekly feedback docket's fifth capture surface, gathered across **all** tasks (the task scoping applies to prompt injection only). The text is **positional**: `rmd reframe`'s required `--feedback` flag is why that surface reads zero. Also available as `rmd approve <id> --note "<text>"`, which chains this exact write **after** the ratification lands. State-side only: no git, no gh, no PR. |
 | `rmd retro [--dry-run]` | Sync the plan from the ledger (the Architect retro's deterministic gather half). `--dry-run` prints the gather + calibration table only. |
@@ -1083,6 +1084,27 @@ git will write. They do not prove that GitHub maps that email to an account, or 
 a member of the Vercel team whose previews must accept its commits. Both are operational
 prerequisites: confirm the email is verified on the intended GitHub account and that account has
 Vercel team access **before** commissioning. This operation adds no token and calls no live service.
+
+### The daemon's spawn helper: on by default, and how to turn it off (W1-T13437)
+
+At boot the daemon starts one small helper process (`src/lib/spawn-helper.ts`). A routed child spawn forks in
+the helper, so the fork does not hold the daemon's loop. The cost of a fork grows with the size of the process
+that forks, and the daemon runs at 1.5 to 2 GB. The helper is on unless `RMD_SPAWN_HELPER` is `off`. Any other
+value, or no value, means on.
+
+To turn it off, set `RMD_SPAWN_HELPER=off` on the daemon container and recycle it (see the section above).
+`RMD_SPAWN_HELPER` is in `deploy/runtime-env-vars.sh`, so a later recycle keeps the value. To turn it on again,
+remove the value or set it to `on`, and recycle. No code change is necessary.
+
+What to watch in the ledger:
+
+- `daemon.spawn_helper`, one row for each boot. `started: true` with the helper's `pid`, or `started: false`
+  with a `reason`: `switch_off`, or `start_failed: <message>`. `value` is the switch value (`unset` when none).
+- `spawn.routed`, one row for each routed spawn. `via: helper` is the normal path. `via: direct` with a `reason`
+  such as `helper_exited: SIGKILL` means the helper is gone and spawns fork from the daemon again. That costs
+  time on the loop but no spawn fails. A request that was in flight when the helper died settles as failed
+  with `helper_died_in_flight` and is never run again.
+- `async_spawn_sync_ms` and `async_spawn_sync_by_caller` on `daemon.alive`: the fork time the loop still pays.
 
 ### Bringing up the console container (`remudero-serve`)
 
@@ -2204,6 +2226,26 @@ file, and writes `cash.invoice.reconcile_failed` with the reason when it cannot.
 ```bash
 rmd cash-reconcile --day 2026-11-16 --export <state>/cost-exports/<file>.csv
 ```
+
+### The cash shadow of the ci judge and the fix-progress judge (W1-T13364)
+
+`.remudero/mounts.yaml` has a `ci_judge` row and a `fix_progress_judge` row. Each row gives its judge
+the same model, effort, turn limit and context budget as the risk judge, and names no provider, so
+the judge spawns as before. Each row also has a `shadow:` mapping that names one cash deployment
+(`DeepSeek-V4-Flash`). After each judgement the daemon sends the same prompt, with no tools, to that
+deployment and writes one row to the instance ledger. The sweep acts only on the primary judge's
+verdict. The shadow call spends inside the daily cash cap.
+
+Read the rows in the instance ledger by step name:
+
+- `judge_shadow.paired`: both verdicts and whether they agree (`agreement`).
+- `judge_shadow.refused`: the cash provider refused the call for capacity or budget.
+- `judge_shadow.unavailable`: the call failed for another reason, or its answer could not be read.
+
+Each row names its judge in `surface` (`ci-judge` or `fix-progress`). To turn one arm off, remove the
+`shadow:` mapping from its row and merge that change. Removing the whole row also turns the arm off
+and returns the judge to the risk judge's cell. A day with `ci_judge.judged` rows and no
+`judge_shadow` row means the arm is not on.
 
 ### One fleet cash cap across core, site, and console
 

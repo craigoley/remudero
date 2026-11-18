@@ -252,7 +252,7 @@ parentPort.on("message", message => { if (message.type === "stop") { clearInterv
   const standby = createReadModelWorker({ stateDir: active, instances, every: () => () => {} });
   workers.push(standby);
   const report = readModelWarmProbe(standby)(q(wanted));
-  assert.deepEqual([report.ok, report.detail], [true, { bodies: wanted, wanted }], "a standby on the same committed population meets the unchanged floor");
+  assert.deepEqual([report.ok, report.detail], [true, { bodies: wanted, wanted, committed: wanted }], "a standby on the same committed population meets the unchanged floor (W1-T13600: and reports it all as committed)");
   assert.equal(readModelWarmProbe(standby)(q(before)).ok, false, "the unchanged floor still refuses the unconverged count");
   const activeView = withNeedsYouView(serving), standbyView = withNeedsYouView(standby);
   assert.equal(committed.bodies.some(entry => entry.view === NEEDS_YOU_VIEW_NAME), false, "the composed needs-you body is absent from SQLite");

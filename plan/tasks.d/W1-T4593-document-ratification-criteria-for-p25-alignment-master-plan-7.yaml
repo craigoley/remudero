@@ -4,8 +4,7 @@
   depends_on:
     - W1-T4592
   type: implement
-  verify:
-    proof: "manual-check: ensure criteria align with plan/tasks.yaml and existing decisions"
+  verify: human  # 2026-11-17: was a mapping (proof: "manual-check: ensure criteria align with plan/tasks.yaml and existing decisions"); the ops composer refuses any verify other than auto or human, which held all ops dispatch since 2026-11-16
   risk: low
   status: blocked
   retirement: withdrawn

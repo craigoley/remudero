@@ -1,0 +1,83 @@
+- id: W1-T13710
+  title: "The escalation answer walk reads the comments of only the issues that have a comment created or edited since its last walk"
+  repo: remudero
+  priority: 1.2
+  depends_on: []
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # which per-issue reads one sweep stage sends; an answer must never be missed
+  origin: "operator-session#sweep-pass-speed-2026-11-18"
+  plan_refs:
+    - W1-T4471
+    - W1-T13688
+    - W1-T12892
+  files:
+    - src/lib/escalation-answers.ts
+    - test/inbox/the-escalation-answer-walk-reads-only-issues-with-a-new-or-edited-comment.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "On a walk after the first in the same process, an issue whose listed comment count equals its kept read and that the since read does not name is not read again: listComments is not called for it, and the result (accepted, ignored, unreadable), every ledger row and every applyGrilledFeedbackAnswer call are the same as when listComments answers the kept comments"
+      proof: "grep: W1-T13710 criterion 1 in test/inbox/the-escalation-answer-walk-reads-only-issues-with-a-new-or-edited-comment.test.ts"
+    - claim: "invariant:an-edited-comment-is-read — an issue that the since read names, for a new comment or for an edited one with the comment count unchanged, has listComments called, and an operator answer edited into an existing comment lands in plan/questions.ndjson as origin/main lands it"
+      kind: guard
+      proof: "grep: W1-T13710 criterion 2 in test/inbox/the-escalation-answer-walk-reads-only-issues-with-a-new-or-edited-comment.test.ts"
+    - claim: "invariant:no-kept-read-reads — the first walk in a process, an issue with no kept read, an issue whose listed comment count differs from its kept read, and every issue of a walk whose since read failed or could not be parsed, have listComments called as origin/main calls it (the W1-T13688 skip of a listed count of 0 still applies)"
+      kind: guard
+      proof: "grep: W1-T13710 criterion 3 in test/inbox/the-escalation-answer-walk-reads-only-issues-with-a-new-or-edited-comment.test.ts"
+    - claim: "invariant:since-from-github-times — the since of a walk is the newest updated_at that GitHub gave in the previous since read, or on the first walk the updated_at of the newest comment read before any issue; an empty answer keeps the previous since; the host clock is never used"
+      kind: guard
+      proof: "grep: W1-T13710 criterion 4 in test/inbox/the-escalation-answer-walk-reads-only-issues-with-a-new-or-edited-comment.test.ts"
+    - claim: "Through the real ghEscalationAnswerGateway and a gh shim (test/helpers/gh-shim.ts), a second walk with unchanged counts sends one `issues/comments?since=` read and no `issues/<n>/comments` read, and a second walk after one comment on issue A is edited sends the since read and one comment read, for issue A only, with nothing injected in place of the gateway"
+      proof: "grep: W1-T13710 criterion 5 in test/inbox/the-escalation-answer-walk-reads-only-issues-with-a-new-or-edited-comment.test.ts"
+    - claim: "readEscalationAnswers, the production path of the full sweep's escalation_answers stage, sends the since read before the per-issue reads"
+      proof: "grep: listCommentsSince( in src/lib/escalation-answers.ts"
+  rationale: |
+    WHY: full sweeps run one after another. From the settle of one to the start of the next took p50 0.6 min, p90
+    5.4 min (138 gaps, 2026-11-16 17:30Z to 2026-11-18 17:38Z), so the length of a full sweep is the space between
+    them (start to start p50 8.1 min, p90 41.6 min). The prelude took p50 331 s, p90 1,293 s (153 rows). Its
+    escalation_answers stage took p50 166 s, p90 929 s, and was the longest stage of the prelude's first group
+    (it runs beside tick_read, p50 12 s, and main_health, p50 7 s). After the 16:23Z deploy, which has W1-T13688,
+    the two full preludes measured 196 s and 437 s in that stage.
+    READ at origin/main 8b3b458c2, src/lib/escalation-answers.ts: readEscalationAnswers (:648) lists the open
+    needs-question issues, then for each one reads `/issues/<n>/comments` (:263, through the loop at :728) in turn.
+    Each read waits its turn at the 1.5 s read gap. MEASURED on the live list, 2026-11-18 17:50Z (the operator's own
+    user token): 135 open needs-question issues, 106 with one or more comments, 1 with a reaction. So a walk still
+    sends about 107 reads after W1-T13688; 166 s / 107 is 1.55 s a read.
+    GitHub's `GET /repos/{owner}/{repo}/issues/comments?since=` gives every comment created or edited at or after
+    `since` across the repository. MEASURED the same day: 7 comments in 30 min and 9 in 60 min across all issues and
+    pull requests, so one page answers a walk.
+    W1-T13688 did not skip an issue whose counts did not change, because an edited comment keeps the count. The since
+    read names an edited comment, so this skip is safe. W1-T12892 (queued) makes a repeated read cost no core
+    budget, but each page is still paced as one read, so it does not shorten the walk.
+    EXPECTED SAVING: about 105 paced reads a full sweep, about 160 s of the escalation_answers stage, and so about a
+    third of the prelude median and of the gap between full sweeps.
+  design: |
+    INVARIANT an-edited-comment-is-read: an issue with a comment created or edited since the last walk is read in
+    full, as today.
+    INVARIANT no-kept-read-reads: an issue is skipped only when this process holds a read of it, its listed comment
+    count is that read's count, and a since read that succeeded does not name it.
+    INVARIANT since-from-github-times: the since value comes only from updated_at values GitHub returned.
+    1. Add listCommentsSince(since) to the gateway (optional on the interface, like listReactions). It reads
+       `repos/<repo>/issues/comments?since=<since>&per_page=100` with --paginate and returns the issue numbers it
+       names (from each comment's issue_url) and the newest updated_at. With no since (the first walk), it reads
+       `issues/comments?sort=updated&direction=desc&per_page=1` and returns only that updated_at.
+    2. Keep per repository, for the process lifetime, each issue's comment list as read and its listed count, and
+       the next since. Hold them like botIgnoredByLedger. Drop an issue that is no longer in the open list.
+    3. In readEscalationAnswers, call listCommentsSince before the loop. Inside the loop, use the kept comments when
+       the skip invariant holds; otherwise call listComments as today and keep the answer. A failed since read makes
+       every issue read as today and keeps the previous since.
+    4. Add no counter, bound or config key. Grep test/ for tests that count listComments calls or the gh argv of
+       ghEscalationAnswerGateway (test/inbox/*escalation*); one outside `files` needs an amendment.
+    NOT IN SCOPE: the reaction reads (one issue has a reaction), the issue list read, the refusal history reader, and
+    the other prelude stages.
+  falsifier: |
+    Skip an issue the since read names: criterion 2 must fail. Skip on the first walk: criterion 3 must fail. Take the
+    since from the host clock: criterion 4 must fail. Remove the skip: criteria 1 and 5 must fail. Restore and require
+    all to pass.
+  note: |
+    Id reserved for run-unfiled-1795023528000 with ~/rmd-work/bin/reserve-id.sh.
+    The live counts came from the operator's user token (its own 5,000-an-hour limit), not the installation.
+    A test must build its gh answers with test/helpers/gh-shim.ts and load test/setup/tmp-hygiene.ts.

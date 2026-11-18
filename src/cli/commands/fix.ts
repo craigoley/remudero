@@ -7,7 +7,7 @@ import { conflictRoundProgressVerdict, judgeFixProgress, resolveFixProgress, typ
 import { openEscalationRelease, PARKED_PR_REMEDY_STEP } from "../../lib/parked-pr-remedy.js";
 import { buildFixProgressInputWithHostedProofs, conflictRoundHeldHead, readHostedFixProofResults, reservePlanRepairTaskId, type HostedFixProofReader } from "../../lib/sweep.js";
 import { parseWhitelistedProof, execWhitelistedProofAsync, proofChildCommand, buildProofEnv, type AsyncProofSpawner } from "../../lib/review.js";
-import { execFileLoopBounded } from "../../lib/loop-bounded-child.js";
+import { execFileRouted } from "../../lib/spawn-helper.js";
 import { BASE_REPRODUCTION_MAX_FILES, boundedBaseProbeReason, baseReproductionFiles, decideBaseReproduction, type BaseProbeResult } from "../../lib/base-reproduction.js";
 import { assessRefreshClearance, mainPathsReachingRed, REFRESH_CLEARANCE_STEP, refreshClearanceFields, refreshedOnSameRed, refreshRecordsFromLedger } from "../../lib/base-reproduction.js";
 import { anchoredFixOutcome, decideFixOutcomeAction, fixRoundFlakeRetryRows, readRedAttribution, scopeReroutedFields, type FixOutcome as TypedFixOutcome } from "../../lib/fix-outcome.js";
@@ -35,6 +35,7 @@ import { planFilingFixRoundRefusal, readPlanFilingFixRoundInput } from "../../li
 import { createPlanPrRest, probeExistingPlanPr, renderAcceptanceBlock } from "../../lib/plan-pr-emitter.js";
 import { findTaskShard, parseProofAmendmentProposal, requestProofAmendment, requestScopeAmendment, isUngrantableInstrumentPath, SCOPE_AMENDMENT_RETRYABLE_REFUSALS, saveScopeAmendmentWork, restoreScopeAmendmentWork, type ScopeAmendmentOutcome, type ProofAmendmentOutcome } from "../../lib/proof-amendment.js";
 import { appendLedger, isSpawnInfraBlockedError, LEDGER_COST_TAG_INFRA } from "../../lib/ledger.js";
+import { setDanglingRefRepairLog } from "../../lib/git-fetch-retry.js";
 import { systemClock } from "../../lib/clock.js";
 import { observeFeedbackInputs, type AdmissionObserver } from "../../lib/contributor-admission.js";
 import { observeContributorAdmission } from "../../lib/arm-auto-merge.js";
@@ -50,10 +51,11 @@ import { recognizeChangesetClaims, acceptanceAuthorTimeCheck, acceptanceBlockReg
 import { repairedProofsAreSafeToPush, diagnoseUnrunnableProofs, renderBodyDefects } from "../../lib/body-repair.js";
 import { recordHeadProviderAfterPush } from "../../lib/review-provider-provenance.js";
 import { ghRequiredStatusCheckContexts, readLedgerLines, taskIdFromRunBranch } from "../../lib/status.js";
-import { withCodeqlAlertEvidence, CODE_SCANNING_FALSE_POSITIVE_STEP, DEFAULT_SWEEP_POLICY, decideRedBaseRefresh, isCiHarnessPath, actionableGateFailuresFromReasons, dispatchFixSpent, fixRoundNotRunReason, checksStateFromRollup, earlyRedEvidenceRollup, checksPendingSinceFromRollup, deriveDisposition, fixRoundTally, buildFixProgressInput, flakeClaimsForHead, isBlockedCi, renderClarificationQuestion, redQualityGateNames, stillRedRequiredNames, terminalStateReason, type ActionableGateFailure, type CiFailure, type LiveStateResult, type OpenPrView, type RollupCheckEntry, type ProofDiscriminationEvidence, type SweepDeps, type SweepPolicy, proofDiscriminationEvidenceFromCriteria, ADDITIVE_REGISTRATION_SURFACES, type RegistrationChange, hasCapturedMergeConflictEvidence, clearedConflictEscalationCause } from "../../lib/sweep.js";
+import { withCodeqlAlertEvidence, CODE_SCANNING_FALSE_POSITIVE_STEP, DEFAULT_SWEEP_POLICY, decideRedBaseRefresh, isCiHarnessPath, actionableGateFailuresFromReasons, dispatchFixSpent, fixRoundNotRunReason, checksStateFromRollup, earlyRedEvidenceRollup, checksPendingSinceFromRollup, deriveDisposition, fixRoundTally, buildFixProgressInput, flakeClaimsForHead, isBlockedCi, renderClarificationQuestion, redQualityGateNames, stillRedRequiredNames, terminalStateReason, type ActionableGateFailure, type CiFailure, type LiveStateResult, type OpenPrView, type RollupCheckEntry, type ProofDiscriminationEvidence, type SweepDeps, type SweepPolicy, proofDiscriminationEvidenceFromCriteria, ADDITIVE_REGISTRATION_SURFACES, type RegistrationChange, hasCapturedMergeConflictEvidence, clearedConflictEscalationCause, withPrAddedVerbs, isVerbRegistrationPath, ownVerbRegistrationPaths, VERB_REGISTRATION_PATHS } from "../../lib/sweep.js";
 import { forcedRefreshFields, REFRESH_DECIDED_STEP } from "../../lib/refresh-value.js";
 import { detectReviewFalseBlock, detectCiLogVerdictUnchanged, shouldSelfHealNothingChanged } from "../../lib/fix-rung-classify.js";
-import { readCiGateRequiredChecks } from "../../lib/ci-gate-required.js";
+import { readCiGateRequiredNames, resolveCiGateRequiredSource } from "../../lib/ci-gate-required.js";
+import { pendingQualityGateNames } from "../../lib/sweep.js";
 import { dropDerivativeAggregateCiFailure } from "../../lib/derivative-ci-failure.js";
 import { ghJson, parseReport, foreignTreeStandDownReason, workerTranscript, worktreeAdd, worktreeRemove, type SpawnWorkerArgs, type ForeignTreeStandDown, type RegisteredWorktree, type WorkerResult, workerContinuation } from "../../lib/worker.js";
 import { hostWorktreeGit, hostWorktreeGitAsync } from "../../lib/worktree-git.js";
@@ -147,7 +149,7 @@ const ACCEPTANCE_AUTHOR_GATE_CHECK_NAME = "acceptance-author-gate";
 export const workerAcceptanceProofSpawner: AsyncProofSpawner = async (command, args, cwd, timeoutMs) => {
   const child = proofChildCommand(command, args);
   try {
-    const result = await execFileLoopBounded(child.file, child.args, { cwd, encoding: "utf8",
+    const result = await execFileRouted(child.file, child.args, { cwd, encoding: "utf8",
       env: { ...buildProofEnv(), NODE_V8_COVERAGE: undefined }, timeout: timeoutMs, killSignal: "SIGKILL" });
     return result.stdout;
   } catch (error) {
@@ -2585,7 +2587,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
   const unfiledScope = opts.taskId === `PR-${prNumber}` && (branchTaskId === undefined || branchTaskId === UNFILED_RUN_SENTINEL);
   const unfiledGrantNow = async () => unfiledScope && prNumber !== undefined
     ? unfiledScopeGrant(deps.ledgerLines ? deps.ledgerLines() : await readFixScopeHistory(deps.ledgerPath, prNumber), { prNumber }) : undefined;
-  const amendScope = async (paths: string[], changedPaths: string[], headSha: string, saveWork = false, extra: { retry?: 1 } = {}): Promise<ScopeAmendmentOutcome> => {
+  const amendScope = async (paths: string[], changedPaths: string[], headSha: string, saveWork = false, extra: { retry?: 1; dropped_paths?: string[] } = {}): Promise<ScopeAmendmentOutcome> => {
     let outcome: ScopeAmendmentOutcome;
     try {
       const body = await (deps.fetchPrBody ?? host.fetchPrBodyViaGh)(opts.prUrl);
@@ -2616,6 +2618,10 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       pr_number: prNumber, amendment_url: "amendmentUrl" in outcome ? outcome.amendmentUrl : undefined, ...recovery, ...extra });
     return outcome;
   };
+  // W1-T13378: the verbs a verb registration may name come from the PR's committed COMMANDS diff, read here off the loop
+  // (src/run-task.ts is past the 1 MiB default buffer), and the worker's own rows for them, read against HEAD.
+  const prVerbGit = (args: string[]) => hostWorktreeGitAsync(opts.worktreePath, args, { maxBuffer: 1 << 26 });
+  const ownVerbRows = async () => ownVerbRegistrationPaths(await withPrAddedVerbs(host.readRegistrationChanges(opts.worktreePath, VERB_REGISTRATION_PATHS), prVerbGit));
   const scopeWork = (paths: string[], amendmentNumber: number) => ({ root: opts.config.root,
     worktreePath: opts.worktreePath, taskId: opts.taskId, prNumber: prNumber!, amendmentNumber, paths });
   // W1-T2671: at most one base-gap read/update attempt per invocation. A successful update ends
@@ -3590,7 +3596,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
                 : opts.task.files,
               reachableRemedyFiles,
               currentCiFailures ?? [],
-              host.readRegistrationChanges(opts.worktreePath, currentDiffFiles, "origin/main", undefined, currentPinnedSha),
+              await withPrAddedVerbs(host.readRegistrationChanges(opts.worktreePath, currentDiffFiles, "origin/main", undefined, currentPinnedSha), prVerbGit, currentPinnedSha),
               { root: opts.worktreePath, proofs: (opts.task.acceptance ?? []).map((c) => c.proof) },
             )
           : undefined;
@@ -4409,7 +4415,8 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     const fixDeclaredPaths = proofRepairRound
       ? proofRepairStageable
       : [...new Set([
-          ...(opts.task.files ?? []), ...(baselineDiffFiles ?? []), ...reachableRemedyFiles.map((file) => file.path),
+          // W1-T13378: a log-named verb registration is never staged whole; only the PR's own verb rows are (ownVerbRows).
+          ...(opts.task.files ?? []), ...(baselineDiffFiles ?? []), ...reachableRemedyFiles.map((file) => file.path).filter((path) => !isVerbRegistrationPath(path)),
           ...(unfiledGrant?.paths ?? []),
         ])];
     // An empty filed scope can still admit a new test or a registered regenerable artifact.
@@ -4716,6 +4723,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     let harnessCommitUndeclared: readonly string[] = [];
     let harnessCommitMarkerFiles: readonly string[] = [];
     let harnessCommittedSha: string | undefined;
+    let ownRows: string[] = [];
     const harnessCommit = (report: string, options: Pick<Parameters<typeof host.harnessCommitForShellLessWorker>[0], "subjectSource" | "derivedCommit" | "fixOutcome"> = {}) => {
       if (censusCheck?.refusal) {
         harnessCommitRefusalReason = censusCheck.refusal.text;
@@ -4729,7 +4737,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         worktreePath: opts.worktreePath,
         // The prompt and pre-strike guard already permit repairs to the inherited PR diff.
         // Use that same captured baseline here; a worker's newly added paths never enter it.
-        declaredPaths: fixDeclaredPaths,
+        declaredPaths: [...fixDeclaredPaths, ...ownRows],
         acceptance: opts.task.acceptance,
         admitTests: admitFixTests,
         ...options,
@@ -4767,7 +4775,14 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       }
       return action;
     };
-    let fixAction = admitUnfiledOwnDiff(decideFixOutcomeAction(fixOutcome, { admitTests: admitFixTests, attribution: await attributeRed(fixOutcome) }));
+    // W1-T13378: a NEEDS_SCOPE naming only verb registrations the worker filled with the PR's own verb rows is a commit.
+    const admitOwnVerbRows = (action: ReturnType<typeof decideFixOutcomeAction>): ReturnType<typeof decideFixOutcomeAction> => {
+      if (action.kind !== "scope-needed" || !action.paths.every((path) => ownRows.includes(path))) return action;
+      deps.log("fix.scope_amendment", { outcome: "registration-admitted", paths: action.paths, head_sha: priorHeadSha, pr_number: prNumber, round_id: roundId });
+      return { kind: "commit" };
+    };
+    ownRows = fixHarnessOwnsGit && !proofRepairRound ? await ownVerbRows() : [];
+    let fixAction = admitUnfiledOwnDiff(admitOwnVerbRows(decideFixOutcomeAction(fixOutcome, { admitTests: admitFixTests, attribution: await attributeRed(fixOutcome) })));
     const fixLeftEdits = () => (deps.worktreeHasUncommittedChanges ?? host.worktreeHasUncommittedChanges)(opts.worktreePath);
     const outcomeCommitOptions = () => ({ fixOutcome: fixOutcome?.kind,
       derivedCommit: fixOutcome?.kind === "FIXED"
@@ -4823,7 +4838,8 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         // The last outcome in the resumed report can explicitly authorize a derived subject.
         const answeredReport = `${workerTranscript(fixResult)}\n${workerTranscript(answer)}`;
         fixOutcome = anchoredFixOutcome(answeredReport);
-        fixAction = admitUnfiledOwnDiff(decideFixOutcomeAction(fixOutcome, { admitTests: admitFixTests, attribution: await attributeRed(fixOutcome) }));
+        ownRows = fixHarnessOwnsGit && !proofRepairRound ? await ownVerbRows() : [];
+        fixAction = admitUnfiledOwnDiff(admitOwnVerbRows(decideFixOutcomeAction(fixOutcome, { admitTests: admitFixTests, attribution: await attributeRed(fixOutcome) })));
         if (["legacy", "commit"].includes(fixAction.kind) || (fixAction.kind === "scope-needed" && fixAction.testPaths.length > 0)) {
           harnessCommitCount = harnessCommit(answeredReport, { subjectSource: "re-asked", ...outcomeCommitOptions() });
         }
@@ -5311,7 +5327,14 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         const ask = async (extra: { retry?: 1 }): Promise<ScopeAmendmentOutcome> => {
           scopeAsks++;
           try {
-            return await amendScope(fixAction.paths, readWorkerChanged(), priorHeadSha, true, extra);
+            const changed = readWorkerChanged();
+            // W1-T10900: requestScopeAmendment refuses the WHOLE ask when any one path is untouched by the worker's
+            // diff (path-not-changed), and a refusal is not retried. Drop the untouched paths first and amend the
+            // rest; when nothing is touched the original ask stands, so the refusal stays named, not hidden.
+            const touched = fixAction.paths.filter((path) => changed.includes(path));
+            const dropped = fixAction.paths.filter((path) => !changed.includes(path));
+            if (touched.length === 0 || dropped.length === 0) return await amendScope(fixAction.paths, changed, priorHeadSha, true, extra);
+            return await amendScope(touched, changed, priorHeadSha, true, { ...extra, dropped_paths: dropped });
           } catch (error) {
             const refused = { kind: "refused" as const, reason: "worker-diff-unreadable", detail: String(error) };
             deps.log("fix.scope_amendment", { outcome: refused.kind, ...refused, paths: fixAction.paths, head_sha: priorHeadSha, ...extra });
@@ -6155,6 +6178,8 @@ export async function fixCommand(
   const operatorRequested = rest.includes("--requested");
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: "FIX", step, lane: "fix", ...extra });
+  // Inside the daemon's process the daemon's log stays.
+  setDanglingRefRepairLog(log, true);
   const adoptionComment = flagValue(rest, "--admission-adopt-comment");
   await observeAdmissionDisposition(config.contributorAdmission, { owner, repo, prNumber }, config.root, log,
     adoptionComment === undefined ? undefined : Number(adoptionComment));
@@ -6191,7 +6216,8 @@ export async function fixCommand(
   // checksStateFromRollup's doc.
   const requiredContexts = (deps.readRequiredContexts ?? ghRequiredStatusCheckContexts)(owner, repo);
   const checksState = checksStateFromRollup(raw.statusCheckRollup, requiredContexts);
-  const ciGateRequired = readCiGateRequiredChecks(repoRoot);
+  const ciGateSource = resolveCiGateRequiredSource({ owner, repo }, { self, selfRoot: repoRoot, configRoot: config.root });
+  const ciGateRequired = readCiGateRequiredNames(ciGateSource, log);
   const redRequiredChecks = redQualityGateNames(raw.statusCheckRollup, ciGateRequired);
   const falsePositive = ledger.some(row => row.step === CODE_SCANNING_FALSE_POSITIVE_STEP &&
     row.pr_number === raw.number && row.head_sha === raw.headRefOid);
@@ -6245,6 +6271,7 @@ export async function fixCommand(
       : codeqlHeadAlerts ? [{ name: CODEQL_CHECK_NAME, logTail: "The CodeQL results check failed at this head." }] : undefined,
     codeqlHeadAlerts,
     redRequiredChecks,
+    pendingRequiredChecks: pendingQualityGateNames(raw.statusCheckRollup, ciGateRequired),
     mergeConflictSource: undefined,
   };
 
@@ -6287,6 +6314,8 @@ export async function fixCommand(
     plan: plan,
     log: log,
     policy: DEFAULT_SWEEP_POLICY,
+    ciGateSource,
+    ciGateRequired,
     // Already resolved above (or injected): do not make buildSweepEffects read origin a second time.
     localRepoName: self.repo,
   });

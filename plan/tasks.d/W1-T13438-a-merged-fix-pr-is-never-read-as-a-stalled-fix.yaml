@@ -1,0 +1,47 @@
+- id: W1-T13438
+  title: "A merged fix PR is never read as a stalled fix: the red-main repair lane waits for main's post-merge run instead of opening a revert"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # changes when the red-main lane opens a revert PR on main
+  origin: "operator-session#ubuntu-2604-main-red-2026-11-17"
+  plan_refs:
+    - W1-T6403
+    - W1-T13351
+  files:
+    - src/lib/main-health-rung.ts
+    - test/a-red-main-repairs-itself-fix-pr-then-revert-pr.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "A fix PR that reads merged never yields a stall reason, however many red observations follow, while no run of a commit containing its merge has concluded"
+      proof: "grep: W1-T13438 criterion 1 in test/a-red-main-repairs-itself-fix-pr-then-revert-pr.test.ts"
+    - claim: "A merged fix whose post-merge main run concludes red with the same failing test still reaches the revert rung"
+      proof: "grep: W1-T13438 criterion 2 in test/a-red-main-repairs-itself-fix-pr-then-revert-pr.test.ts"
+    - claim: "invariant:open-fix-stall-unchanged — an OPEN fix PR with no new head still stalls after MAIN_REPAIR_STALL_TICKS and MAIN_REPAIR_STALL_MS exactly as before"
+      proof: "grep: W1-T13438 criterion 3 in test/a-red-main-repairs-itself-fix-pr-then-revert-pr.test.ts"
+  rationale: |
+    OBSERVED 2026-11-17: fix PR #19011 merged at 05:16Z (e4ab090b3). At 05:52Z the lane opened revert #19028 with the reason
+    "fix PR #19011 made no progress (no new head, no merge) across 21 red observations and 31 minutes", citing main red at
+    3c2383143 (which contains e4ab090b3). That commit's ci check run completed SUCCESS at 06:08:49Z; at 05:52Z it had not concluded.
+    OBSERVED in advanceRepair (src/lib/main-health-rung.ts): a fix PR that reads "merged" goes to
+    stallOf(record.offendingSha, `${fix.state}:${fix.headSha}`, ...). A merged PR's state and head never change again, so the
+    marker freezes and the stall fires after the tick and time windows, with a reason that says "no merge".
+    INFERRED, not verified against the host ledger: the lane kept observing red because main's newest concluded run was still
+    a pre-fix red while the post-merge runs were pending. The host's main.repair.* rows for 9be1ffbcb82a would confirm it.
+    Craig closed #19020 and #19028 by hand.
+  design: |
+    In advanceRepair, a fix PR in state "merged" is not passed to stallOf. The repair stays owned (return true) until a run of a
+    commit that contains the fix's merge commit concludes. Green resolves the record as today; red with the same failing tests
+    hands the record to the existing judge/revert path with a reason naming the post-merge run.
+    INVARIANT open-fix-stall-unchanged: open and closed fix PRs keep today's stall and close-out behaviour.
+  falsifier: |
+    At origin/main, a fixture whose fix PR reads merged and whose main stays red-by-old-run for MAIN_REPAIR_STALL_TICKS ticks over
+    MAIN_REPAIR_STALL_MS opens a revert PR whose reason says "no merge".
+  note: |
+    Reserved with rmd next-task-id --count 1 --branch claude/project-thread-7ycldf on the operator's Mac mini
+    (2026-11-17 17:02Z).

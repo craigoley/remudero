@@ -23,7 +23,7 @@ import { startGarden, type GardenerDeps, type PrState } from "./gardener.js";
 import { knowledgeGardenSpec, type GardenWorkspace } from "./knowledge-gardener.js";
 import { startInboxResponder, type InboxResponderDeps } from "./inbox-responder.js";
 import { startLivenessPulse } from "./liveness-pulse.js";
-import { installSpawnHelper, startSpawnHelper } from "./spawn-helper.js";
+import { installedSpawnHelper, installSpawnHelper, startSpawnHelper } from "./spawn-helper.js";
 
 
 import type {
@@ -66,6 +66,8 @@ import {
   type PushedRunRef,
   type PlanOnlyRunBranchReceipt,
   type OpenPrCheck,
+  prefetchLiveStates,
+  type LiveStateReader,
   tallyDispatchFilters,
   type IdleReasonBucket,
   IDLE_REASON_ID_CAP,
@@ -156,8 +158,9 @@ import { resolveReleases, closedUnmergedRunBranchRefs, type DispatchFilterReason
 import type { StatusProjection } from "./status.js";
 import { ENVIRONMENTAL_BLOCK_COOLDOWN_MS, INDEPENDENT_BLOCK_RELEASED_STEP, isEnvironmentalBlock, PRE_RESTORE_RUN_VERDICT_STAGES, type IndependentBlockRelease } from "./status.js";
 import { explainDispatchScore, openDependentFanout, type DispatchValueContext } from "./dispatch-value.js";
+import { CLAIM_SILENCE_FLOOR_MS, claimSilenceWindow } from "./dispatch-claim.js";
 import {
-  OPS_CATALOG_OUTCOMES, readOpsCatalogSnapshotAsync, type OpsCatalogApi, type OpsCatalogOutcome, type OpsCatalogShadowInput,
+  OPS_CATALOG_OUTCOMES, opsCatalogRefusalStage, readOpsCatalogSnapshotAsync, type OpsCatalogApi, type OpsCatalogOutcome, type OpsCatalogShadowInput,
   type OpsCatalogTarget,
 } from "./ops-catalog-source.js";
 import { GhJsonUnreadableResponseError, takeGhPaceLoopWaits, takeGhReadCadenceTally, type GhReadCadenceTally } from "./github-transport.js";
@@ -1264,6 +1267,108 @@ export interface StarvationClearedInfo {
   taskId?: string;
 }
 
+/** W1-T13248: a fleet whose free slots went only to runs refused before spend, past the claim-silence bound. */
+export interface ClaimStallInfo {
+  taskId: string;
+  ref: string;
+  /** `pid@host` from the claim's anchor (the silence judge's report), or the held-by sha when only that is known. */
+  holder: string;
+  holderHost?: string;
+  /** The refusing claim's age: now minus its newest sign of life (fallback: minus its first refusal). */
+  claimAgeMs: number;
+  boundMs: number;
+  /** Which bound fired: the fleet's claim-to-verdict window, or the p90 of gaps between claim-passing runs. */
+  boundSource: "claim-silence-window" | "claim-pass-gap-p90";
+  samples: number;
+  lastSignOfLife?: string;
+  /** Consecutive refused-only ticks seen when the condition opened. */
+  refusedTicks: number;
+}
+
+/** A claim-passing run (a `dispatch.claim` `created` row) is what ends a stall; the clear names it when known. */
+export interface ClaimStallClearedInfo {
+  taskId?: string;
+  runId?: string;
+}
+
+/** One refused-before-spend run of a tick, with the evidence its own ledger rows carried. */
+export interface ClaimRefusedRun {
+  taskId: string;
+  runId: string;
+  refusal?: ClaimHeldRefusal;
+}
+
+/** Fewer claim-to-claim gaps than this is no measurement of a cadence, so the fallback bound does not exist. */
+export const CLAIM_STALL_MIN_GAPS = 3;
+
+/**
+ * PURE (W1-T13248). Whether any refused run's claim has been silent past the bound. The bound is the fleet's own
+ * claim-to-verdict window floored as `decideClaimSilence` floors it; with no such sample, the p90 of the gaps between
+ * runs that passed their claim (floored the same way). A claim whose holder renewed shows a different held-by sha
+ * than the one the silence judge reported on, so a live holder never matches a stale report. Nothing it cannot read
+ * is a page: the answer is then `undefined`.
+ */
+export function decideClaimStall(
+  lines: readonly string[],
+  refused: readonly ClaimRefusedRun[],
+  nowMs: number,
+  refusedTicks: number,
+): ClaimStallInfo | undefined {
+  const rows: Record<string, unknown>[] = [];
+  for (const raw of lines) {
+    if (!raw.includes('"dispatch.claim') && !raw.includes('"verdict"')) continue;
+    const row = ledgerRow(raw);
+    if (row !== undefined) rows.push(row);
+  }
+  const window = claimSilenceWindow(rows);
+  let best: ClaimStallInfo | undefined;
+  const offer = (info: ClaimStallInfo): void => {
+    if (best === undefined || info.claimAgeMs > best.claimAgeMs) best = info;
+  };
+  let gapBound: { boundMs: number; samples: number } | undefined;
+  if (window.windowMs === undefined) {
+    const created = rows.flatMap((row) => row.step === "dispatch.claim" && row.outcome === "created" && typeof row.ts === "string"
+      ? [Date.parse(row.ts)] : []).filter(Number.isFinite).sort((a, b) => a - b);
+    const gaps = created.slice(1).map((at, i) => at - created[i]!);
+    if (gaps.length >= CLAIM_STALL_MIN_GAPS) {
+      gaps.sort((a, b) => a - b);
+      gapBound = { boundMs: Math.max(gaps[Math.ceil(0.9 * gaps.length) - 1]!, CLAIM_SILENCE_FLOOR_MS), samples: gaps.length };
+    }
+  }
+  for (const run of refused) {
+    const held = run.refusal;
+    if (held === undefined || held.holder === undefined) continue;
+    if (window.windowMs !== undefined) {
+      const report = rows.findLast((row) => row.step === "dispatch.claim_unrenewed" && row.ref === held.ref && row.sha === held.holder);
+      const lastAt = typeof report?.last_sign_of_life === "string" ? Date.parse(report.last_sign_of_life) : NaN;
+      if (report === undefined || !Number.isFinite(lastAt)) continue;
+      const boundMs = Math.max(window.windowMs, CLAIM_SILENCE_FLOOR_MS);
+      const claimAgeMs = Math.max(0, nowMs - lastAt);
+      if (claimAgeMs < boundMs) continue;
+      const identity = typeof report.holder === "string" && /^\d+@\S+$/.test(report.holder) ? report.holder : held.holderIdentity;
+      offer({
+        taskId: run.taskId, ref: held.ref, holder: identity ?? held.holder,
+        ...(identity !== undefined ? { holderHost: identity.slice(identity.indexOf("@") + 1) } : {}),
+        claimAgeMs, boundMs, boundSource: "claim-silence-window", samples: window.samples,
+        lastSignOfLife: report.last_sign_of_life as string, refusedTicks,
+      });
+    } else if (gapBound !== undefined) {
+      const first = rows.find((row) => row.step === "dispatch.claim" && row.outcome === "taken" && row.ref === held.ref &&
+        typeof row.reason === "string" && row.reason.includes(`(held by ${held.holder})`) && typeof row.ts === "string");
+      const firstAt = Date.parse(String(first?.ts));
+      if (!Number.isFinite(firstAt)) continue;
+      const claimAgeMs = Math.max(0, nowMs - firstAt);
+      if (claimAgeMs < gapBound.boundMs) continue;
+      offer({
+        taskId: run.taskId, ref: held.ref, holder: held.holderIdentity ?? held.holder,
+        ...(held.holderIdentity !== undefined ? { holderHost: held.holderIdentity.slice(held.holderIdentity.indexOf("@") + 1) } : {}),
+        claimAgeMs, boundMs: gapBound.boundMs, boundSource: "claim-pass-gap-p90", samples: gapBound.samples, refusedTicks,
+      });
+    }
+  }
+  return best;
+}
+
 /** Same shape/truncation discipline as {@link tallyDispatchFilters}'s own buckets, applied to
  *  the circuit-broken ids collected outside that tally (see {@link StarvationCensus}'s doc). */
 function bucketFromIds(ids: readonly string[]): IdleReasonBucket {
@@ -1434,7 +1539,7 @@ export interface DaemonDeps {
   /** An optional fresh, live re-read of one candidate in-flight PR's state, consulted only when
    *  `isOpenPr` reports a task in-flight. See drain.ts's `readLiveState` for the full contract
    *  (W1-T177, the terminal-state check at every spending site). */
-  readLiveState?: (taskId: string, prNumber: number) => string | undefined;
+  readLiveState?: LiveStateReader;
   /** The per-task dispatch circuit breaker: true when a task has been dispatched the policy-capped
    *  number of times with no new owned PR since. Re-derived from the ledger each call, so it persists
    *  across restarts, unlike this loop's in-memory flip below (P29(ii)). */
@@ -1603,6 +1708,7 @@ export interface DaemonDeps {
    *  so the loop latches per bucket. Unlike `onHeadroomBreach` this never pauses dispatch: it observes
    *  and surfaces (W1-T372). Forensics: docs/forensics/daemon.md. */
   onQuotaExhausted?: (info: { bucket: "core" | "graphql"; remaining: number; resetsAt: string }) => void | Promise<void>;
+  onQuotaRecovered?: (info: { bucket: "core" | "graphql"; remaining: number; resetsAt: string }) => void | Promise<void>;
   /** Real free disk space for this tick, pre-judged against the same thresholds `rmd doctor` reports
    *  against. Judged in the CLI wiring, never here, because a daemon alarming at a different number
    *  than `rmd doctor` is a contradiction an operator must adjudicate mid-incident. An unreadable read
@@ -1639,6 +1745,12 @@ export interface DaemonDeps {
    *  exactly: optional, same try/catch, fired from the same two sites, and on the edge rather than per
    *  tick, so a daemon never escalated stays silent and a long quiet stretch closes nothing repeatedly. */
   onStarvationCleared?: (info: StarvationClearedInfo) => void | Promise<void>;
+  /** W1-T13248: two consecutive ticks whose every admitted run was refused before spend by a claim silent past the
+   *  claim-silence bound. Idle ticks never reach `onStarvation`, so this is the page for a fleet that starts no work
+   *  while its slots go to refused runs. Fires once per stall (the catalogue entry dedups across boots). Optional. */
+  onClaimStall?: (info: ClaimStallInfo) => void | Promise<void>;
+  /** The cleared half: the first run that passes its claim after the page. Optional, edge-triggered. */
+  onClaimStallCleared?: (info: ClaimStallClearedInfo) => void | Promise<void>;
   /** W1-T3691 (design v) — called once per stuck sha, the FIRST tick a freshness restart already
    *  requested for this exact code sha reports coming back unchanged: the target looks genuinely
    *  pinned behind origin/main rather than transiently behind it, so this is a "needs a human"
@@ -3877,7 +3989,7 @@ export interface LearnedCrashLoopSummary {
   incident: "none" | "opened" | "updated" | "cleared" | "open";
 }
 
-/** W1-T9754: the environment switch that starts the spawn helper at boot. Its default, off, is an operator decision. */
+/** W1-T9754: the environment switch for the spawn helper. W1-T13437: on unless set to exactly "off" (operator ruling). */
 export const SPAWN_HELPER_SWITCH = "RMD_SPAWN_HELPER";
 
 /** The daemon's startup routine (W1-T12b): the clean-env boot assertion, run once before the scheduler loop starts.
@@ -3946,12 +4058,23 @@ export async function daemonBoot(
     ...(bootHeadSha ? { head_sha: bootHeadSha } : {}),
     ...(checkoutDepth ? { checkout_shallow: checkoutDepth.shallow, checkout_commit_count: checkoutDepth.commitCount } : {}),
   });
-  // W1-T9754: the spawn helper starts here, while this process is still small, so a later routed spawn forks from
-  // it and not from a 1.5-2 GB daemon. Whether it starts is the operator's switch, off unless set to "on".
-  if (env[SPAWN_HELPER_SWITCH] === "on") {
-    const helper = startSpawnHelper({ log });
-    installSpawnHelper(helper);
-    log("daemon.spawn_helper", { started: true, pid: helper.pid, switch: SPAWN_HELPER_SWITCH });
+  // W1-T9754/W1-T13437: the helper starts while this process is small, unless the switch is "off"; one row either way.
+  const switchValue = env[SPAWN_HELPER_SWITCH] ?? "unset";
+  const helperRow = { switch: SPAWN_HELPER_SWITCH, value: switchValue };
+  if (switchValue === "off") {
+    log("daemon.spawn_helper", { started: false, reason: "switch_off", ...helperRow });
+  } else {
+    try {
+      installedSpawnHelper()?.stop();
+      const helper = startSpawnHelper({ log });
+      installSpawnHelper(helper);
+      log("daemon.spawn_helper", { started: true, pid: helper.pid, ...helperRow });
+    } catch (error) {
+      // Reason: a helper that cannot start costs no spawn; the boot continues on the direct path, named here.
+      installSpawnHelper(undefined);
+      log("daemon.spawn_helper", { started: false,
+        reason: `start_failed: ${String((error as Error)?.message ?? error).slice(0, 120)}`, ...helperRow });
+    }
   }
   // The boot-rate invariant: the shape-not-cause check. Logged either way, so the invariant's own
   // pass or fail is part of the boot record, not only its breaches (W1-T215).
@@ -4730,6 +4853,15 @@ export async function runDaemon(
   // W1-T13242: a claim-held task sits out selection until `untilMs` or its claim's drop, so it cannot take the only
   // free slot every tick (2026-11-16). A deferral: never block reasoning, a strike, a breaker or an escalation.
   const claimHeldDeferrals = new Map<string, { ref: string; sinceMs: number; untilMs: number }>();
+  // W1-T13248: this dispatch batch's admitted runs, and the streak of consecutive batches that were refused before
+  // spend throughout. An idle tick zeroes the streak; a run that passed its claim zeroes it and closes the page.
+  const claimStallBatch: { admitted: number; others: Array<{ taskId: string; runId: string }>; refused: ClaimRefusedRun[] } =
+    { admitted: 0, others: [], refused: [] };
+  let claimStallStreak = 0;
+  let claimStallPaged = false;
+  // Armed on every page and at boot when the boot ledger read carries an escalation marker, so a boot after a page
+  // still closes it; the catalogue no-ops with none open. Unarmed, a non-refused run costs no ledger read.
+  let claimStallCloseArmed = false;
   // A zero-cost `blocked_illformed` verdict is a pre-dispatch admission refusal, not a durable
   // independent failure. Exclude its unchanged task contract only for this process, so it cannot
   // spin on the same immutable plan; a changed contract deliberately clears the entry below and is
@@ -4810,7 +4942,9 @@ export async function runDaemon(
   // survives the very process replacement it caused (design v); updated once per tick below from
   // that tick's own `sweepCycleOutcome.reviewerCodeStale` reading.
   const bootLedgerLines = deps.readLedgerLines?.() ?? [];
-  const restartLedger = restartCycleLedgerRows(bootLedgerLines);
+  // W1-T13248: a page left open by an earlier process (a marker row in the boot read) keeps its close armed.
+  claimStallCloseArmed = bootLedgerLines.some((raw) => raw.includes("dispatch.claim_stall.escalated"));
+  const restartLedger =restartCycleLedgerRows(bootLedgerLines);
   const restartBoots = restartLedger.rows.filter(row => row.step === "daemon.boot" && typeof row.ts === "string")
     .map(row => Date.parse(String(row.ts))).filter(Number.isFinite).sort((a, b) => a - b);
   const restartStartedAtMs = restartBoots.at(-1) ?? clockFromDateFn(deps.now).now();
@@ -5376,14 +5510,15 @@ export async function runDaemon(
   };
   const opsDispatchContexts = new WeakMap<Plan, OpsDispatchContext>();
   let lastOpsDispatchHold: string | undefined;
-  const holdOpsDispatch = (reason: string, taskId?: string): void => {
+  const holdOpsDispatch = (reason: string, taskId?: string, source?: OpsCatalogShadowInput): void => {
     const safeReason = OPS_CATALOG_OUTCOMES.includes(reason as OpsCatalogOutcome) ||
       ["selection_unreadable", "selection_changed", "invalid_dispatch_flag", "source_pending", "source_identity_unknown",
         "primary_revision_unknown", "duplicate_task_id", "invalid_cross_catalog_dependency", "malformed"].includes(reason)
       ? reason : "selection_unreadable";
-    const signature = JSON.stringify([safeReason, taskId]);
+    const stage = opsCatalogRefusalStage(source);
+    const signature = JSON.stringify([safeReason, taskId, stage]);
     if (signature === lastOpsDispatchHold) return;
-    try { log("dispatch.ops_catalog_held", { outcome: safeReason, ...(taskId ? { task_id: taskId } : {}) }); }
+    try { log("dispatch.ops_catalog_held", { outcome: safeReason, ...(stage ? { refusal_stage: stage } : {}), ...(taskId ? { task_id: taskId } : {}) }); }
     catch (error) { void error; /* A diagnostic failure cannot authorize ops work or stop public selection. */ }
     lastOpsDispatchHold = signature;
   };
@@ -5399,12 +5534,12 @@ export async function runDaemon(
     const observation = readOpsDispatch(primary);
     if (observation.outcome === "off") { lastOpsDispatchHold = undefined; return { plan: primary, observation }; }
     if (observation.outcome === "unavailable") {
-      holdOpsDispatch(observation.reason);
+      holdOpsDispatch(observation.reason, undefined, observation.source);
       return { plan: primary, observation };
     }
     const input = observation.source;
     if (input.outcome !== "ok" || input.plan === undefined) {
-      holdOpsDispatch(input.outcome === "ok" ? "source_identity_unknown" : input.outcome);
+      holdOpsDispatch(input.outcome === "ok" ? "source_identity_unknown" : input.outcome, undefined, input);
       return { plan: primary, observation };
     }
     if (!CATALOG_COMMIT.test(observation.publicCommit)) {
@@ -5434,7 +5569,8 @@ export async function runDaemon(
     if (latest.outcome === "selected" && latest.source.outcome === "ok" &&
       latest.publicCommit === captured.publicCommit && latest.source.identityDigest === captured.source.identityDigest &&
       latest.source.opsCommit === captured.source.opsCommit) return true;
-    holdOpsDispatch(latest.outcome === "unavailable" ? latest.reason : "selection_changed");
+    holdOpsDispatch(latest.outcome === "unavailable" ? latest.reason : "selection_changed", undefined,
+      latest.outcome === "off" ? undefined : latest.source);
     return false;
   };
   // W1-T11768: the one snapshot of an injected ops target; `null` is any refusal (never a partial Plan).
@@ -6113,6 +6249,82 @@ export async function runDaemon(
     });
   };
 
+  // W1-T13248: counts one settled run toward this batch. Refused before spend is a held or unreachable claim; a run
+  // that passed its claim minted a `dispatch.claim` created row; anything else is neither and breaks the streak.
+  const noteClaimOutcome = (task: Task, result: RunResult, report: typeof emitLog): void => {
+    claimStallBatch.admitted++;
+    if (result.verdict === "blocked_inflight" || result.verdict === "blocked_git_fetch") {
+      let refusal: ClaimHeldRefusal | undefined;
+      try {
+        refusal = ledgerReader === undefined ? undefined : claimHeldRefusalFrom(ledgerReader(), task.id, result.runId);
+      } catch (error) {
+        report("dispatch.claim_stall.evidence_unreadable", { task: task.id, run_id: result.runId,
+          error: String((error as Error)?.message ?? error).slice(0, 300) });
+      }
+      claimStallBatch.refused.push({ taskId: task.id, runId: result.runId, ...(refusal !== undefined ? { refusal } : {}) });
+      return;
+    }
+    // Whether this run passed its claim is only read (once, at settle) while a page is open and could close.
+    claimStallBatch.others.push({ taskId: task.id, runId: result.runId });
+  };
+
+  // The first of this batch's non-refused runs that minted a `dispatch.claim` created row, if the ledger shows one.
+  const firstClaimPassingRun = (others: ReadonlyArray<{ taskId: string; runId: string }>):
+    { taskId: string; runId: string } | undefined => {
+    if (ledgerReader === undefined || others.length === 0) return undefined;
+    try {
+      const created = new Set<string>();
+      for (const raw of ledgerReader()) {
+        if (!raw.includes('"dispatch.claim"') || !raw.includes("created")) continue;
+        const row = ledgerRow(raw);
+        if (row?.step === "dispatch.claim" && row.outcome === "created" && typeof row.run_id === "string") created.add(row.run_id);
+      }
+      return others.find((o) => created.has(o.runId));
+    } catch (error) {
+      log("dispatch.claim_stall.evidence_unreadable", { error: String((error as Error)?.message ?? error).slice(0, 300) });
+      return undefined;
+    }
+  };
+
+  // W1-T13248: the batch's verdict on the stall. Two consecutive batches that admitted work, every run of which was
+  // refused before spend, with a refusing claim silent past the bound, page once; the first claim-passing run closes it.
+  const settleClaimStall = async (): Promise<void> => {
+    const batch = { admitted: claimStallBatch.admitted, others: claimStallBatch.others.slice(),
+      refused: claimStallBatch.refused.slice() };
+    claimStallBatch.admitted = 0;
+    claimStallBatch.others.length = 0;
+    claimStallBatch.refused.length = 0;
+    if (batch.admitted === 0) return;
+    if (batch.others.length > 0) {
+      claimStallStreak = 0;
+      if (!claimStallCloseArmed) return;
+      const passedRun = firstClaimPassingRun(batch.others);
+      if (passedRun === undefined) return;
+      claimStallPaged = false;
+      claimStallCloseArmed = false;
+      try { await deps.onClaimStallCleared?.({ ...passedRun }); }
+      catch (error) { log("daemon.escalation.failed", { task: "daemon", error: String((error as Error)?.message ?? error) }); }
+      return;
+    }
+    claimStallStreak++;
+    if (claimStallStreak < 2 || claimStallPaged || deps.onClaimStall === undefined) return;
+    let info: ClaimStallInfo | undefined;
+    try {
+      info = decideClaimStall(ledgerReader?.() ?? [], batch.refused, daemonClock.now(), claimStallStreak);
+    } catch (error) {
+      log("dispatch.claim_stall.evidence_unreadable", { error: String((error as Error)?.message ?? error).slice(0, 300) });
+      return;
+    }
+    if (info === undefined) return;
+    claimStallPaged = true;
+    claimStallCloseArmed = true;
+    log("dispatch.claim_stall.detected", { task_id: info.taskId, task: info.taskId, ref: info.ref, holder: info.holder,
+      claim_age_ms: info.claimAgeMs, bound_ms: info.boundMs, bound_source: info.boundSource, samples: info.samples,
+      refused_ticks: info.refusedTicks });
+    try { await deps.onClaimStall(info); }
+    catch (error) { log("daemon.escalation.failed", { task: "daemon", error: String((error as Error)?.message ?? error) }); }
+  };
+
   const processDispatchResult = async (
     planForBatch: Plan,
     task: Task,
@@ -6125,6 +6337,7 @@ export async function runDaemon(
     | { kind: "genuine_blocker"; detail: string; dependents: string[] }
   > => {
     refreshResumableHandoff(task.id, report);
+    noteClaimOutcome(task, result, report);
     if (result.verdict !== "blocked_inflight") claimHeldDeferrals.delete(task.id);
     if (result.verdict === "task_already_merged") {
       // This verdict is a positive merge observation by run-task, even though the run opened no PR.
@@ -7864,7 +8077,15 @@ export async function runDaemon(
         // resets, so alerting on the raw value would re-fire up to once a minute for an hour. The latch fires
         // only on the tick a bucket first reads exhausted, and clears the instant it reads positive.
         if (reading.remaining > 0) {
+          const recovered = quotaExhaustedEscalated[bucket];
           quotaExhaustedEscalated[bucket] = false;
+          if (recovered) {
+            try {
+              await deps.onQuotaRecovered?.({ bucket, remaining: reading.remaining, resetsAt: reading.resetsAt });
+            } catch (e) {
+              log("daemon.escalation.failed", { error: String((e as Error)?.message ?? e) });
+            }
+          }
           continue;
         }
         if (quotaExhaustedEscalated[bucket]) continue;
@@ -8098,6 +8319,16 @@ export async function runDaemon(
         lazyClosedUnmerged(deps.readClosedRunBranchPrs),
       );
       const tickMachineShareRows = await machineShareRowsFor(tickLedgerLines);
+      const prefetchLive = (passPlan: Plan, passMerged: MergedSet) =>
+        deps.readLiveState ? prefetchLiveStates(passPlan, passMerged, deps.isOpenPr, deps.readLiveState) : Promise.resolve(undefined);
+      const liveStateLogged = (live: Awaited<ReturnType<typeof prefetchLive>>): NextRunnableOpts["readLiveState"] => live
+        ? (taskId, prNumber) => {
+            const state = live.read(taskId, prNumber);
+            if (state === undefined) log("dispatch.live_state_indeterminate", { task: taskId, pr_number: prNumber });
+            return state;
+          }
+        : undefined;
+      const tickLive = deps.readLiveState ? await prefetchLive(planForBatch, isMerged) : undefined;
       const dispatchOpts: NextRunnableOpts = {
       onPassedOver: (task, detail) => { tickPassedOver.add(task.id); observePassedOver("tick")(task, detail); },
       priorityBackfill,
@@ -8150,13 +8381,7 @@ export async function runDaemon(
       // Wrap the injected reader so a failed or indeterminate live read is ledgered here, distinct from an
       // un-wired site that never calls it. It still resolves the same either way, so the fail-open contract
       // is unchanged (W1-T177).
-      readLiveState: deps.readLiveState
-        ? (taskId, prNumber) => {
-            const state = deps.readLiveState!(taskId, prNumber);
-            if (state === undefined) log("dispatch.live_state_indeterminate", { task: taskId, pr_number: prNumber });
-            return state;
-          }
-        : undefined,
+      readLiveState: liveStateLogged(tickLive),
       // The cached in-flight snapshot was stale, so this task is not actually blocked. Ledgered distinctly,
       // naming the freshly observed terminal state (W1-T177).
       onStoodDown: (t, prNumber, state) =>
@@ -8382,6 +8607,7 @@ export async function runDaemon(
       // Cadence: on change, not every tick. The idle row still fires every poll and is byte-compatible with
       // before. The reasons ride a separate step, emitted only when the picture actually changes — logging
       // the tally on all ~390 ticks would be 390 identical lines that bury the one that matters.
+      claimStallStreak = 0; // W1-T13248: a tick that admitted nothing breaks "consecutive refused ticks"
       const idleSignature = idleReasons.signature();
       if (idleSignature !== lastIdleSignature) {
         lastIdleSignature = idleSignature;
@@ -8674,6 +8900,8 @@ export async function runDaemon(
     const refillProposals = new Set<Task>();
     let newBuildHeld = false;
     let refillClosed: string | undefined;
+    let phaseApiWindow = apiWindowHoldState;
+    let apiWindowHeldUntilMs = 0;
     // W1-T9089 (ADR 0007 A.10): a restart decided mid-phase is no latch. A child run keeps running for the next boot to
     // adopt, a refill is taken only when it runs as a child, and an in-process lane is awaited, never asked to yield.
     let restartDecided: Extract<DaemonFreshness, { stale: true }> | undefined;
@@ -8705,7 +8933,16 @@ export async function runDaemon(
     // 2026-10-10 19:38: both freed lanes were held for good while the lane that later held the phase was 5 min old.
     // A measured bound parks such a lane instead; a dispatch tick or a sibling's finish re-decides it.
     const parkedLanes: Array<{ lane: number; finished: Task; wake: (next: Promise<Task | undefined>) => void }> = [];
-    const governorParked = new Map<number, string>();
+    const laneParkedFor = new Map<number, string>();
+    // One row per lane and reason, not per tick; the row for a closed API window names when the lane is asked again.
+    const parkLane = (lane: number, finished: Task, reason: string, phaseAgeMs: number): Promise<Task | undefined> => {
+      if (laneParkedFor.get(lane) !== reason) log("dispatch.lane_parked", { lane, finished_task: finished.id, reason, phase_age_ms: phaseAgeMs,
+        ...(reason === "blocked_transient" ? { resumes_at_ms: apiWindowHeldUntilMs, consecutive_different_tasks: phaseApiWindow.streak } : {}),
+        waiting_on: [...inFlightTasks].map((t) => t.id) });
+      sampleLaneChange();
+      laneParkedFor.set(lane, reason);
+      return new Promise<Task | undefined>((wake) => parkedLanes.push({ lane, finished, wake }));
+    };
     const wakeParkedLanes = (): void => {
       if (inFlightTasks.size > 0 && !refillClosed && phaseBoundHolds()) return;
       const waking = parkedLanes.splice(0, parkedLanes.length);
@@ -8750,9 +8987,12 @@ export async function runDaemon(
           refillClosed ??= "a lane rejected";
         }
       }
-      // W1-T4662: `handed_off` (a healthy freshness yield) deliberately does NOT match here — only
-      // a genuine, repeated `blocked_transient` API failure closes this lane's refill.
-      else if (outcome.value.verdict === "blocked_transient") refillClosed ??= "blocked_transient";
+      else {
+        // W1-T13283: one blocked task never closes refill. Only the cross-task streak does, for the guard's own hold.
+        const disposition = reasonAboutApiWindow(phaseApiWindow, finished.id, outcome.value.verdict, pollIntervalMs, maxApiWindowHoldMs);
+        phaseApiWindow = disposition.state;
+        apiWindowHeldUntilMs = disposition.holdMs > 0 ? daemonClock.now() + disposition.holdMs : 0;
+      }
       const decision = decideRefill(lane, finished);
       wakeParkedLanes();
       return decision;
@@ -8765,10 +9005,11 @@ export async function runDaemon(
         log("dispatch.lane_parked", { lane, finished_task: finished.id, reason: phaseBound, phase_age_ms: phaseAgeMs,
           refill_bound_ms: refillBoundMs, waiting_on: [...inFlightTasks].map((t) => t.id) });
         sampleLaneChange();
-        governorParked.delete(lane);
+        laneParkedFor.delete(lane);
         return new Promise<Task | undefined>((wake) => parkedLanes.push({ lane, finished, wake }));
       }
-      const governed = refillClosed || phaseBound ? undefined : checkDispatchGovernors(deps, dailyCostCeilingUsd);
+      const apiWindow = daemonClock.now() < apiWindowHeldUntilMs ? "blocked_transient" : undefined;
+      const governed = refillClosed || phaseBound || apiWindow ? undefined : checkDispatchGovernors(deps, dailyCostCeilingUsd);
       const memoryPressure = governed?.kind === "queue" && governed.result.measuredBound === 0
         ? governed.result.pressure : undefined;
       const governorReason = memoryPressure
@@ -8777,7 +9018,7 @@ export async function runDaemon(
       const stopped = deps.checkStop?.();
       const paused = deps.checkPause?.();
       // W1-T5083: the same restart decision the top of tick asks; a sibling lane in flight makes it busy.
-      const freshness = refillClosed || phaseBound ? undefined : freshnessReadsAsync ? settledFreshness : (checkFreshness?.() as DaemonFreshness | undefined);
+      const freshness = refillClosed || phaseBound || apiWindow ? undefined : freshnessReadsAsync ? settledFreshness : (checkFreshness?.() as DaemonFreshness | undefined);
       if (!freshnessReadsAsync) logNotStaleFreshness(freshness);
       const freshnessAction = freshness?.stale ? decideFreshness(freshness, inFlightTasks.size) : undefined;
       // W1-T9089: a restart decided here holds only the refills that would not run as a child.
@@ -8789,18 +9030,13 @@ export async function runDaemon(
         holdWorkerAdmission("lane-refill")?.reason ??
         (stopped ? `stop: ${stopped}` : undefined) ??
         (paused ? `pause: ${paused}` : undefined) ??
+        apiWindow ??
         governorReason ??
         (enforcedLaneTarget(inFlightTasks.size, deps.readQueueAdmission?.()?.wipLimit) <= inFlightTasks.size ? "lane target" : undefined);
       // 2026-10-12 09:00: one container-short WIP reading held lane 2 for good while two siblings ran on past the hour.
-      // A governor reading is re-taken each tick, so a lane it holds parks; one row per lane and reason, not per tick.
-      if (reason !== undefined && (reason === governorReason || reason === "lane target") && inFlightTasks.size > 0) {
-        if (governorParked.get(lane) !== reason) log("dispatch.lane_parked", { lane, finished_task: finished.id, reason,
-          phase_age_ms: phaseAgeMs, waiting_on: [...inFlightTasks].map((t) => t.id) });
-        sampleLaneChange();
-        governorParked.set(lane, reason);
-        return new Promise<Task | undefined>((wake) => parkedLanes.push({ lane, finished, wake }));
-      }
-      governorParked.delete(lane);
+      // A governor reading is re-taken each tick and an API-window hold lapses, so a lane held by either one parks.
+      if (reason !== undefined && (reason === apiWindow || reason === governorReason || reason === "lane target") && inFlightTasks.size > 0)
+        return parkLane(lane, finished, reason, phaseAgeMs);
       // W1-T5805: the refill decides on its OWN branch read, never the tick's: a branch pushed since the
       // tick began must refuse its task here. A failed read decides on the tick-start reading instead.
       const chooseRefill = (runBranchListing: string | undefined): Task | undefined | Promise<Task | undefined> => {
@@ -8810,10 +9046,11 @@ export async function runDaemon(
         let nextSnapshot: { plan: Plan; isMerged: MergedSet } | undefined;
         let refillEligible: Task[] = [];
         let refillContext: DispatchValueContext | undefined;
-        const decide = (snapshot: { plan: Plan; isMerged: MergedSet }): void => {
-          const budget = laneDispatchBudget({
-            laneCount, wipLimit: opts.wipLimit, openPrCount: deps.openPrCount?.(), queueAdmission: deps.readQueueAdmission?.(),
-          });
+        let boardUnreadable = false;
+        const decide = (snapshot: { plan: Plan; isMerged: MergedSet }, live?: Awaited<ReturnType<typeof prefetchLive>>): void => {
+          let openPrCount: number | undefined;
+          try { openPrCount = deps.openPrCount?.(); } catch (e) { boardUnreadable = true; throw e; }
+          const budget = laneDispatchBudget({ laneCount, wipLimit: opts.wipLimit, openPrCount, queueAdmission: deps.readQueueAdmission?.() });
           const runBranchState = runBranchStateFrom(
             runBranchListing, readRunBranchEvidence(), resumableHandoffs,
             lazyClosedUnmerged(deps.readClosedRunBranchPrs),
@@ -8821,6 +9058,7 @@ export async function runDaemon(
           const selection = captureDispatchFrontier(snapshot.plan, {
             ...dispatchOpts,
             ...runBranchDispatchOpts(runBranchState, planOnlyReceiptsThisTick, log, reportedRunBranchReleases),
+            readLiveState: liveStateLogged(live),
             dispatchValueContext: deps.buildDispatchValueContext?.(snapshot.plan, snapshot.isMerged),
             machineShare: machineShareFor(snapshot.plan, tickMachineShareRows, phaseStarts),
             // Re-read at each refill: a lane that settled since the tick began may have written or spent a receipt.
@@ -8850,7 +9088,12 @@ export async function runDaemon(
         const readFailed = (e: unknown): void => {
           reason = `refill read failed: ${String((e as Error)?.message ?? e)}`;
         };
+        const decideLive = (refillPlan: Plan, isMerged: MergedSet): Promise<Task | undefined> =>
+          prefetchLive(refillPlan, isMerged).then((live) => decide({ plan: refillPlan, isMerged }, live))
+            .then(conclude, (e) => { readFailed(e); return conclude(); });
         const conclude = (): Task | undefined | Promise<Task | undefined> => {
+          if (boardUnreadable && inFlightTasks.size > 0) return parkLane(lane, finished, reason!, phaseAgeMs);
+          laneParkedFor.delete(lane);
           // W1-T6274: the reads above are awaited; a restart, stop or pause decided meanwhile still holds the lane.
           if (next) {
             const latched = refillClosed ?? (restartDecided && !runsAsChild(next) ? "stale code" : undefined) ??
@@ -8890,15 +9133,18 @@ export async function runDaemon(
             if (deps.refreshMergedAsync) {
               return deps.refreshMergedAsync(refillPlan).then(
                 (isMerged) => {
+                  if (deps.readLiveState) return decideLive(refillPlan, isMerged);
                   try { decide({ plan: refillPlan, isMerged }); } catch (e) { /* the failure is carried as the held reason */ readFailed(e); }
                   return conclude();
                 },
                 (e) => { readFailed(e); return conclude(); },
               );
             }
-            decide({ plan: refillPlan, isMerged: deps.refreshMerged(refillPlan) });
+            const isMerged = deps.refreshMerged(refillPlan);
+            if (deps.readLiveState) return decideLive(refillPlan, isMerged);
+            decide({ plan: refillPlan, isMerged });
           } catch (e) {
-            // the failure is carried as the held reason, logged by `dispatch.lane_refill_held`
+            // The failure is carried as the reason: an unreadable board parks the lane (W1-T13283), any other read holds it.
             readFailed(e);
           }
           return conclude();
@@ -9327,6 +9573,7 @@ export async function runDaemon(
         }
       }
     }
+    await settleClaimStall();
     if (fatalError || phaseFaults.length > 0 || reporting.faults.length > 0) {
       // A pool fault closes starts, but genuine workers still earn their result/cost/merge credit.
       // Preserve original classification/detail; named logging faults remain separate secondary facts.

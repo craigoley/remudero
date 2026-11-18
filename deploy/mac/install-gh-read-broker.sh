@@ -157,6 +157,7 @@ if [ "$dry_run" -eq 1 ]; then
   fi
   printf 'would run: launchctl bootstrap gui/%s %s\n' "$uid" "$plist"
   printf 'would wait up to %ss for a fresh heartbeat at %s, then record %s in %s\n' "$heartbeat_wait" "$heartbeat" "${sha:-<source sha>}" "$copies/current"
+  printf 'would record the broker source paths in %s\n' "$new/source-paths"
   if [ -n "$login" ]; then
     valid_login "$login" || { printf 'not a GitHub login: %s\n' "$login" >&2; exit 2; }
     if [ -d "$pace_root/$login" ]; then
@@ -174,6 +175,15 @@ fi
 # Everything that can refuse does so here, before a directory, a copy or the running agent is touched.
 [ -z "$refusal" ] || { printf 'refusing to install: %s\n' "$refusal" >&2; exit 2; }
 command -v launchctl >/dev/null 2>&1 || { printf 'launchctl not found: this installs a macOS launchd agent and runs on a Mac only\n' >&2; exit 2; }
+# Read the chosen commit's exported list as data. Older commits use the installer's checkout list.
+broker_source_paths() {
+  sed -n '/^export const GH_READ_BROKER_SOURCE_PATHS = `$/,/^`;$/ { /^export /d; /^`;$/d; p; }'
+}
+source_paths="$(src_git show "$sha:src/lib/gh-read-broker.ts" 2>/dev/null | broker_source_paths)" || source_paths=""
+if [ -z "$source_paths" ]; then
+  source_paths="$(broker_source_paths < "$here/../../src/lib/gh-read-broker.ts")"
+fi
+[ -n "$source_paths" ] || { printf 'could not read the broker source path list\n' >&2; exit 1; }
 enable_hint="launchctl enable gui/$uid/$label"
 # A service launchd holds DISABLED cannot be bootstrapped, and launchctl says only "5: Input/output error"
 # (2026-11-15: every com.remudero agent on the operator Mac was disabled). Name the state and its one command.
@@ -234,6 +244,7 @@ build_copy() {
   stray="$(find "$stage/node_modules" -maxdepth 2 -type l -lname '/*' -print 2>/dev/null | sed -n '1p' || true)"
   [ -z "$stray" ] || { printf 'the copied node_modules links outside the copy (%s); install real dependencies in %s first\n' "$stray" "$src" >&2; return 1; }
   [ -x "$stage/bin/rmd" ] || { printf 'commit %s has no executable bin/rmd\n' "$sha" >&2; return 1; }
+  printf '%s\n' "$source_paths" > "$stage/source-paths" || return 1
   printf 'sha=%s\nsource=%s\n' "$sha" "$src" > "$stage/.gh-read-broker-source" || return 1
 }
 

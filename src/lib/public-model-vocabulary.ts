@@ -28,7 +28,7 @@ const LANE_CATEGORIES: Readonly<Record<string, PublicCategory | null>> = {
   fix: "repository-change", "step-up": "repository-change",
   review: "code-review", reviewer: "code-review",
   "risk-judge": "short-judgment", "ci-judge": "short-judgment", "refresh-judge": "short-judgment",
-  "verify-human-judge": "short-judgment", "escalation-judge": "short-judgment",
+  "verify-human-judge": "short-judgment", "escalation-judge": "short-judgment", "fix-progress-judge": "short-judgment",
   "feedback-summary": "summarization", "escalation-summary": "summarization",
   "inbox-draft": "long-context-drafting",
   triage: "diagnosis-triage", diagnose: "diagnosis-triage",

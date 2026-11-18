@@ -434,6 +434,148 @@ refuses missing or unreadable state. The read-only `--report` mode of
 `deploy/migrate-fleet-cash-allowance.sh` shows the combined UTC-day commitment and source mtime;
 it does not report an invoice or grant permission to raise the $50 ceiling.
 
+## A cash model shadows each low-stakes judge
+
+W1-T12187. The risk judge and the decision summary each have a row of their own in
+`.remudero/mounts.yaml`: `risk_judge` and `feedback_summary`. Each row is on one line and has the
+shape of `escalation_judge`. Today each row names the model and effort that the cheapest routed
+cell gives (`haiku`, `low`) and no provider, so neither role changed model when the rows were
+added. A host with no row falls back to that cell with its provider removed.
+
+After the role answers, the same prompt goes once to a cash model in shadow
+(`shadowJudgeCall` in `src/lib/judge-shadow.ts`):
+
+- The caller already holds the role's own answer. It does not wait for the shadow, and the shadow
+  changes nothing.
+- The call asks the first ready model of the cash row for the row's tier, at low effort. For the
+  rows above, that is the cash economy row. A `shadow: { deployment }` arm on the row pins one
+  deployment, as on the `ci_judge` and `fix_progress_judge` rows of W1-T11075.
+- The call reserves against the normal figure of the daily cash cap. It never sets the squeezed
+  figure. When the cap refuses, no request is sent.
+- A role whose row already names `provider: cash` is not shadowed.
+
+Each call writes one ledger row:
+
+| Step | When | Fields |
+| --- | --- | --- |
+| `judge_shadow.compared` | a reply came back | `role`, `primary_model`, `primary_cost_usd`, `shadow_model`, `shadow_cost_usd`; the risk judge adds `primary_answer`, `shadow_answer` and `agreement`; the decision summary adds `parses` and no agreement |
+| `judge_shadow.skipped` | the cap or a capacity limit refused the call (`refusal`), or the call failed, timed out or gave no usable answer | `role`, `reason` |
+
+`judgeShadowSummary` reads those rows and the `judge_shadow.paired`, `judge_shadow.refused` and
+`judge_shadow.unavailable` rows of the ci judge and the fix-progress judge. For each role it gives
+the number of paired calls, the share that agree, the share of calls with no usable shadow answer,
+the number of refused calls and the median cost of each model. A refused call made no request, so
+it is not counted as a call. The decision summary has no agreement figure.
+
+The config gardener reads that summary over the last 14 days. Its class `move-judge-to-cash`
+proposes one change: `provider: cash` on the one-line row of one role. The bar is:
+
+| Figure | Bar |
+| --- | --- |
+| Paired calls in 14 days | at least 200 |
+| Agreement | at least 98% |
+| Calls with no usable shadow answer | at most 2% |
+
+These three numbers are new and are not measured yet. A role with no agreement figure, a role with
+no one-line row of its own and a row that is not on the lowest tier get no proposal. The change is
+a canary like a mount change: the gardener compares implement runs after the merge with the equal
+window before it, and a guardrail breach opens a pull request that reverts the line.
+
+## A judge's shadow can name a decision model
+
+W1-T12417. A judge row may name its shadow by name: `shadow: <name>`. When a `decision_models` row
+has that name, the shadow is that decision model. Any other name is a cash deployment, as
+`shadow: { deployment }` is. A role that names no shadow keeps the shadow above.
+
+The fixed-option judges call the same shadow, in this order, and each writes its rows under its own
+role name: `risk-judge`, `ci-judge`, `fix-progress`, `verify-human`, `refresh-value`,
+`quiet-worker-watchdog`, `head-rehome` and `typed-judgment` (each single-question typed-judgment
+spawn). The risk judge and the decision summary have the cash shadow above when they name none; the
+other roles are shadowed only when a shadow is named. The judges with no row of their own name theirs
+in the `judge_shadows` section, one line each. A typed-judgment spawn with no entry of its own uses
+the `typed-judgment` entry. The ruling, machine-filing and flight judges have no shadow.
+
+A decision-model shadow:
+
+- starts after the judge answered. The judge acts on its own answer only, and the shadow never
+  changes it.
+- sends the judge's own prompt as the one input and the role's options as one choice question
+  (`JUDGE_SHADOW_QUESTIONS`; a typed-judgment spawn sends its own question and options). It is one
+  `askDecisionModel` request, which reserves against the normal figure of the daily cash cap.
+- sends nothing when the deployment's learned per-minute limit cannot hold the request.
+- passes the judged head and, where there is one, the pull request. The `decision.answered` row
+  records them as `head_sha` and `pr_url`, so W1-T12425's outcome rows join it by head. A shadow
+  with no judged head records neither. A judge that holds a pull request number (the risk judge,
+  the ci judge, fix-progress and refresh-value) passes it with the head, and the shadow turns it
+  into the pull request's URL from the origin of the judge's checkout. A checkout whose origin
+  cannot be read records the head with no pull request.
+
+It writes one `judge_shadow` row with `model_surface: decisions`:
+
+| Step | When | Fields added |
+| --- | --- | --- |
+| `judge_shadow.compared` | a distribution came back | `distribution`, `latency_ms`, `shadow_cost_usd`, `primary_answer`, `shadow_answer`, `agreement` |
+| `judge_shadow.skipped` | the candidate is unavailable, a 429 rate-limited it, the cap refused it (`refusal: budget`), the learned limit is too small (`refusal: capacity`), the request failed, the answer was rejected, or it abstained (`abstained`) | `reason` |
+
+A row may store a tuned threshold: `threshold: { model, surface, value }`. It is read only for that
+model id and that surface (`decisions` or `text`, see "Model surfaces"). Below it, the top option of
+a distribution counts as an abstention. No other model or surface reads it.
+
+The config gardener also scores each role's shadow models with W1-T12414's scorer, one figure per
+role, model and surface, over the last 14 days. When one model clears the per-model bar, it proposes
+one edit that makes that model the role's primary. The bar is the table above, plus a Brier
+score of at most 0.1 for a model with a Brier figure. The ceiling is new and unmeasured: no shadow
+answer had a known outcome on 2026-11-17. A judge that fails closed (the risk judge) gets no proposal.
+
+- A decision model, on a judge whose own answer is exactly one option (`refresh-value`,
+  `head-rehome`, `typed-judgment`): the role's `judge_shadows` line becomes
+  `{ primary: <name>, threshold: { model: <deployment>, surface: decisions, value } }`. The value is
+  the lowest top-option probability among the answers that cleared the bar, so the stored threshold
+  names the model id (its deployment) and the surface it was measured on, and is read only for that
+  pair. The judge asks the decision model first. It answers when its top option reaches the
+  threshold. When it is unavailable, rate-limited, refused, rejected, abstaining or below the
+  threshold, one `judge_shadow.skipped` row (`served_as: primary`) says why and the judge's own spawn
+  answers as before. The role's shadow line is replaced, so the role is no longer shadowed.
+- A cash model, on a role's one-line row: `provider: cash`, when cash serves that row with that
+  model first. A generated answer has no probability, so no threshold is stored for it.
+
+A decision model on `ci-judge` or `fix-progress` gets no proposal: their verdicts carry a reason, a
+suite list or an approach that a decision model cannot give. The edit is a canary like a mount
+change and goes through the fleet's review and merge; a guardrail breach opens a pull request that
+reverts the line.
+
+## A new model joins each judge's shadow pool by itself
+
+W1-T12422. A role's shadow may be `shadow: auto` (on its row, or in `judge_shadows`). Its pool is
+every `decision_models` candidate and every ready cash deployment (priced, shaped and bounded, not a
+Foundry Claude deployment) whose newest direct judge replay for that role passed the pool bar. No
+model is named in code. A role that names one candidate keeps the behaviour above.
+
+For each shadowed call the shadow draws one member: `sha256(role, input digest)` over the members in
+name order (`shadowPoolMember` in `src/lib/judge-shadow.ts`). The same input always draws the same
+member, and over many inputs each member gets about the same share. The drawn member is asked as a
+named candidate is asked, so the number of paid shadow calls does not grow with the pool. An empty
+pool asks nothing and writes nothing. A cash member drawn for a role whose primary already runs on
+cash (the verify-human judge) is not asked, as above.
+
+The pool bar, read from the member's newest replay for the role:
+
+| Figure | Bar |
+| --- | --- |
+| Rejected cases | at most 10% of the cases sent |
+| Median settled cost of one case | at most $0.003 (W1-T12187's measured median judge call) |
+
+The measurement cadence's bake-off runs the replays with no operator step. It keys a decision model
+as `decisions:<candidate>`, apart from `cash:<deployment>`, with a readiness digest over its
+`decision_models` row. For each new or changed key it runs W1-T12421's direct replay once per corpus
+the auto roles read: the risk judge reads `risk-judge-dispositions`, and every other role reads
+`all`, since no corpus of its own exists yet. Each replay is bounded by W1-T12421's $1.00 ceiling and
+reserves against the normal daily cash cap. A cash deployment gets the inbox-draft trial and the
+judge replay; a decision model gets the judge replay only. A replay that stopped on a 429 or a budget
+refusal is not marked trialed and is tried again on a later pass. The figures are kept in
+`state/judge-shadow-pool.json`, and the proposal adds a table of them beside the inbox-draft table,
+naming each model that stays out and why.
+
 ## Rollback
 
 The policy switch is the candidate membership and order of `capabilities.codex.balanced` in

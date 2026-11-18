@@ -22,8 +22,9 @@ import { inboxSemanticDigest, inboxProposalRevision, mechanicalAskPurpose, retir
 /** PRIMARY CONTROL: each pass admits bounded candidate, proof, judge and transition work. */
 /** W1-T13348: ledgerCatchUpMs replaced a 25 ms tick budget. The projector gunzips a whole archive per tick and checks its
  *  deadline only after a commit, so 25 ms advanced ONE 64 KiB chunk a pass, and the host's 240 archives (~10 GB) could never
- *  be read. The pass runs in its own spawned process, and a caught-up store returns as soon as the live tail is read. */
-export const INBOX_GARDENER_LIMITS = { candidates: 8, proofReads: 4, judges: 1, retirements: 1, ledgerCatchUpMs: 20_000, ledgerChunkBytes: 64 * 1024 } as const;
+ *  be read. The pass runs in its own spawned process, and a caught-up store returns as soon as the live tail is read.
+ *  W1-T13477: 20 s read 5-18 of 232 host archives a pass at one pass per ~3 h; 300 s covers the corpus in 1-3 passes. */
+export const INBOX_GARDENER_LIMITS = { candidates: 8, proofReads: 4, judges: 1, retirements: 1, ledgerCatchUpMs: 300_000, ledgerChunkBytes: 64 * 1024 } as const;
 export { inboxGardenerMode } from "./inbox-retirement.js";
 export interface InboxGardenerCandidate {
   proposal: RetirementProposal;
@@ -35,6 +36,8 @@ export interface InboxGardenerCandidate {
   dependencyMerge?: Array<{ id: string; merged: boolean | null }>;
   sourcePolicy?: string;
   successor?: { proposal: RetirementProposal; open: boolean };
+  /** W1-T13682: the snapshot could not verify this proposal's board referent, so the pass leaves it alone. */
+  referentUnverified?: boolean;
 }
 export interface InboxGardenerPack {
   scope: InboxGardenerScope; snapshotKey: string; generatedAt: string; checkedAt: string; codeSha: string;
@@ -94,14 +97,24 @@ export async function runInboxGardener(options: { stateDir: string; scope: Inbox
     if (pendingMirrors.length > limits.candidates) return { state: "pending_mirrors", complete: false, retired: 0, judged: 0 };
     const candidates = [...pack.candidates].sort((a, b) => a.proposal.id.localeCompare(b.proposal.id));
     const generation = inboxSemanticDigest(candidates.map(c => [c.proposal.id, inboxGardenerSemanticInput(c)]));
-    const start = store.cursor?.generation === generation ? Math.max(0, candidates.findIndex(c => c.proposal.id > store.cursor!.after)) : 0;
+    // W1-T13668: resume after the cursor's id whatever the generation. Restarting at the first id on every registry change
+    // re-read the same 8-16 ids for good on the host (2,429 proposals, one change or more between hourly passes). Each
+    // candidate's own digest still decides whether it is re-judged, and the next sweep starts at the first id again.
+    const resume = store.cursor?.after ? candidates.findIndex(c => c.proposal.id > store.cursor!.after) : 0;
+    const start = Math.max(0, resume);
     const selected = candidates.slice(start, start + limits.candidates);
-    let retired = 0, judged = 0, proofReads = 0, evaluated = 0, after = store.cursor?.generation === generation ? store.cursor.after : "";
+    let retired = 0, judged = 0, proofReads = 0, evaluated = 0, after = resume < 0 ? "" : store.cursor?.after ?? "";
     for (const candidate of selected) {
       if (options.stopped?.()) return { state: "cancelled", complete: false, evaluated, retired, judged };
       const p = candidate.proposal, existing = [...store.events].reverse().find(e => e.receipt.kind === "retire" && e.receipt.scope.proposalId === p.id);
       if (existing && store.events.some(e => e.receipt.kind === "restore" && e.receipt.retirementId === existing.receipt.id)) {
         after = p.id; evaluated++; continue; // An unrelated change cannot undo an operator restoration.
+      }
+      if (candidate.referentUnverified) {
+        // W1-T13682: never acted on. The marked digest can never equal a real one, so a later verified read re-judges it.
+        store.entries[p.id] = { digest: inboxSemanticDigest([inboxGardenerSemanticInput(candidate), "referent-unverified"]), decision: "defer_source",
+          reason: "Its referent could not be verified, so this pass skips it and records the gap" };
+        after = p.id; evaluated++; continue;
       }
       if (protectedCandidate(candidate, options.scope) || candidate.unansweredReply || candidate.resolvedByOperator || !candidate.task) {
         store.entries[p.id] = { digest: inboxGardenerSemanticInput(candidate), decision: "keep_protected", reason: "Current hold, human purpose, operator intent, or missing task forbids automatic retirement" };
@@ -168,7 +181,8 @@ export async function runInboxGardener(options: { stateDir: string; scope: Inbox
     }
     const complete = candidates.length === 0 || after === candidates.at(-1)?.proposal.id;
     store.cursor = { generation, after: complete ? "" : after }; writeInboxGardenerStore(options.stateDir, store);
-    return { state: complete ? "complete" : "pending", complete, evaluated, retired, judged, proofReads };
+    const unverified = pack.candidates.filter(c => c.referentUnverified).length;
+    return { state: complete ? "complete" : "pending", complete, evaluated, retired, judged, proofReads, ...(unverified ? { unverified_referents: unverified } : {}) };
   }, clock).catch(error => ({ state: "failed", delivery: "unknown", complete: false, reason: String(error) }));
 }
 
@@ -206,7 +220,15 @@ export function warnInboxGardenerNearBound(stateDir: string, clock: Clock, measu
   }
   return warned;
 }
-const relevantProjection: LedgerRowProjection = { name: "inbox-gardener-evidence", version: 2,
+/** W1-T13586: quarantined rows that can reach a verdict. The scanned step may be empty or a nested one, so the body is
+ *  checked too; a quarantined row of any other step (the W1-T5407 future-stamped `cli.invoked` rows) is never read. */
+function relevantQuarantineCount(db: ReturnType<typeof openProjectorReadModel>): number {
+  const marks = RELEVANT_STEPS.map(step => `"step":"${step}"`);
+  return Number(db.prepare(`SELECT COUNT(*) AS n FROM quarantine WHERE step = '' OR step IN (${RELEVANT_STEPS.map(() => "?").join(",")}) OR ${marks.map(() => "instr(body, ?) > 0").join(" OR ")}`)
+    .get(...RELEVANT_STEPS, ...marks)?.n ?? 0);
+}
+// W1-T13586: version 3 re-reads every archive under the relevant-quarantine rule.
+const relevantProjection: LedgerRowProjection = { name: "inbox-gardener-evidence", version: 3,
   tables: ["inbox_gardener_latest", "inbox_gardener_mirrors"],
   ddl: "CREATE TABLE IF NOT EXISTS inbox_gardener_latest(slot TEXT PRIMARY KEY, proposal TEXT NOT NULL, ts TEXT NOT NULL, body TEXT NOT NULL) WITHOUT ROWID; CREATE INDEX IF NOT EXISTS inbox_gardener_proposal ON inbox_gardener_latest(proposal); CREATE TABLE IF NOT EXISTS inbox_gardener_mirrors(id TEXT PRIMARY KEY) WITHOUT ROWID;",
   markers: [""],
@@ -233,15 +255,19 @@ export function readInboxGardenerLedger(stateDir: string, scope: InboxGardenerSc
   const acquired = acquireLease(db);
   try {
     if (!acquired.ok) return { state: "unavailable" as const, rows: [] };
+    // W1-T13586: a fault an older projection recorded goes with the rows that projection read, which this tick re-reads.
+    if (db.prepare("SELECT v FROM meta WHERE k = ?").get(`projection:${relevantProjection.name}`)?.v !== String(relevantProjection.version))
+      withWriteTransaction(db, acquired.lease, () => db.prepare("DELETE FROM meta WHERE k = 'inbox-source-fault'").run());
     const tick = createLedgerProjector({ ledgerDir: stateDir, db, lease: acquired.lease, factStep: () => false, clock,
       projections: [relevantProjection], chunkBytes: INBOX_GARDENER_LIMITS.ledgerChunkBytes }).tick({ budgetMs: INBOX_GARDENER_LIMITS.ledgerCatchUpMs });
-    const quarantined = Number(db.prepare("SELECT COUNT(*) AS n FROM quarantine").get()?.n ?? 0);
-    if (tick.torn || tick.quarantined) withWriteTransaction(db, acquired.lease, () => db.prepare("INSERT OR REPLACE INTO meta(k, v) VALUES('inbox-source-fault', 'torn-or-quarantined')").run());
+    // W1-T13586: relevant quarantine persists in its own table, so only a torn read needs the sticky fault.
+    const quarantined = relevantQuarantineCount(db);
+    if (tick.torn) withWriteTransaction(db, acquired.lease, () => db.prepare("INSERT OR REPLACE INTO meta(k, v) VALUES('inbox-source-fault', 'torn-source')").run());
     const live = fs.openSync(join(stateDir, LEDGER_FILENAME), "r");
     let unfinishedTail = false;
     try { const size = fs.fstatSync(live).size; if (size) { const last = Buffer.alloc(1); fs.readSync(live, last, 0, 1, size - 1); unfinishedTail = last[0] !== 10; } }
     finally { fs.closeSync(live); }
-    let incomplete = !!(unfinishedTail || tick.pending || tick.unread.length || tick.torn || tick.quarantined || quarantined || db.meta("inbox-source-fault"));
+    let incomplete = !!(unfinishedTail || tick.pending || tick.unread.length || tick.torn || quarantined || db.meta("inbox-source-fault"));
     const rows: Array<Record<string, any>> = []; let bytes = 0;
     // Each indexed slot has one latest row per relevant step, independent of lifetime ledger size.
     for (const id of proposalIds.slice(0, INBOX_GARDENER_SOURCE_LIMITS.proposals)) {
@@ -299,9 +325,15 @@ export function defaultInboxGardenerPorts(options: { stateDir: string; scope: In
     const verdicts = ledgerProposalVerdicts([...ledger.rows].sort((a, b) => Date.parse(String(a.ts)) - Date.parse(String(b.ts))));
     const ownership = snapshot?.snapshotScope?.repository === options.scope.repository && snapshot.snapshotScope.instance === options.scope.instance;
     const operatorIntents = new Map(proposals.map(p => [p.id, inboxOperatorIntent(threads.status === "ok" ? threads.threads.get(inboxThreadId(p.id)) ?? [] : [])]));
+    // W1-T13682: a referent the snapshot could not verify used to stop every pass through coverage:github (two test
+    // proposals did, 2026-11-18). When no projection value is indeterminate and only referents are unverified, GitHub
+    // counts as observed for the pass and each such candidate is skipped and counted instead.
+    const unverifiedReferents = new Set((snapshot?.classifications ?? []).filter(c => c.referentUnverified).map(c => c.proposalId));
+    const censusGithub = snapshot?.attentionCensus?.sources.githubProjection ?? "unavailable";
+    const github = censusGithub === "partial" && snapshot?.projectionIndeterminate === false && unverifiedReferents.size > 0 ? "observed" : censusGithub;
     return { scope: options.scope, snapshotKey: snapshot?.snapshotKey ?? "", generatedAt: snapshot?.generatedAt ?? "", checkedAt: clock.iso(), codeSha: options.codeSha,
       coverage: { plan: snapshot?.gardenerSource?.identity === inboxGardenerSource(proposals, plan.byId, options.scope, operatorIntents).identity ? snapshot?.attentionCensus?.sources.plan ?? "unavailable" : "unavailable", registry: raw.kind === "ok" && ownership &&
-        inboxSemanticDigest(snapshot?.proposals) === inboxSemanticDigest(proposals) ? "observed" : "unavailable", github: snapshot?.attentionCensus?.sources.githubProjection ?? "unavailable",
+        inboxSemanticDigest(snapshot?.proposals) === inboxSemanticDigest(proposals) ? "observed" : "unavailable", github,
         ledger: ledger.state, threads: threads.status === "ok" ? "observed" : "unavailable" },
       candidates: proposals.map(proposal => {
         const taskId = retirementAsk(proposal)?.taskId;
@@ -315,7 +347,8 @@ export function defaultInboxGardenerPorts(options: { stateDir: string; scope: In
           ...(task ? { dependencies: task.depends_on.flatMap(id => plan.byId.has(id) ? [inboxGardenerTaskFact(plan.byId.get(id)!)] : []),
             dependencyMerge: task.depends_on.map(id => ({ id, merged: !plan.byId.has(id) || snapshot?.gardenerDependencyEvidence === undefined ? null : snapshot.gardenerDependencyEvidence.find(value => value.id === id)?.merged ?? null })) } : {}),
           operatorIntent: inboxOperatorIntent(messages), unansweredReply: last?.role === "reply" && last.extra?.event === undefined,
-          resolvedByOperator: verdicts.isRatified(proposal.id) || verdicts.isDeclined(proposal.id) !== undefined };
+          resolvedByOperator: verdicts.isRatified(proposal.id) || verdicts.isDeclined(proposal.id) !== undefined,
+          ...(unverifiedReferents.has(proposal.id) ? { referentUnverified: true } : {}) };
       }), ledgerEventIds: new Set(ledger.rows.flatMap(row => typeof row.dismissalAuditReceipt?.id === "string" ? [row.dismissalAuditReceipt.id] : [])) };
   };
   return { capture, judge: options.judge,

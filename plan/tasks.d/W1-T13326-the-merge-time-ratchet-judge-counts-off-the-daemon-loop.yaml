@@ -20,7 +20,7 @@
     - src/lib/merged-ratchet-worker.ts
     - scripts/build-child-entries.mjs
     - test/the-merge-time-judge-counts-off-the-daemon-loop.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "readMergedRatchetsAsync over a fixture clone returns the same verdict, rows, counted gates and reason as judgeMergedRatchets called directly on the same inputs, for a clean merge, an affected-reach crossing, a stale lowering and an unread input"

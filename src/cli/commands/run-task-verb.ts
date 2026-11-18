@@ -72,7 +72,7 @@ import { findTaskShard, requestScopeAmendment, readBuildScopeRecovery, saveBuild
 import { appendLedger, DECISION_RELEVANT_LEDGER_STEPS } from "../../lib/ledger.js";
 import { systemClock, type Clock } from "../../lib/clock.js";
 import { resolveReleasedIds, type ReleaseReaders } from "../../lib/drain.js";
-import { cashTrialPolicy, cashTrialSpawnFields, decideCashTrial } from "../../lib/cash-trial.js";
+import { cashTrialEligible, cashTrialModelFor, cashTrialModels, cashTrialPolicy, cashTrialSpawnFields, decideCashTrial, readCashTrialReadiness } from "../../lib/cash-trial.js";
 import { benchmarkNonDispatchSpawn, callerOwnsBenchmarkReceipt, type BenchmarkStackEvidence, dispatchTaskShape, fixLaneBenchmarkWork, type BenchmarkWorkInput } from "../../lib/benchmark-run.js";
 import { type RepairReceiptContext } from "../../lib/repair-cost-evidence.js";
 import { type CiRemedyExecution } from "../../lib/ci-remedy-execution.js";
@@ -93,7 +93,7 @@ import { defaultOpenFileCountAsync, reapStaleClones, reapStaleClonesAsync, type 
 import { type ObjectReapDeps, type ObjectReapResult } from "../../lib/object-reaper.js";
 import { deriveTaskClass, implementRouteClass } from "../../lib/task-class.js";
 import { readFixRoutingRows } from "../../lib/fix-routing-learner.js";
-import { DEFAULT_RISK_POLICY, readRiskPolicy, realRiskJudge, resolveRiskJudgeMount, riskJudgeDiffInputBudget, riskJudgePlanContext, riskJudgePlanContextDigest, riskJudgeSpendCollector, runRiskJudge, type RiskJudgeChangeView, type RiskJudgeInput, type RiskJudgeVerdict, withoutRiskJudgePatches } from "../../lib/risk-judge.js";
+import { DEFAULT_RISK_POLICY, readRiskPolicy, realRiskJudge, resolveRiskJudgeRoleMount, riskJudgeDiffInputBudget, riskJudgePlanContext, riskJudgePlanContextDigest, riskJudgeSpendCollector, runRiskJudge, type RiskJudgeChangeView, type RiskJudgeInput, type RiskJudgeVerdict, withoutRiskJudgePatches } from "../../lib/risk-judge.js";
 import { runShadowJudge, SHADOW_JUDGE_MAX_BUDGET_USD } from "../../lib/shadow-judge.js";
 import { buildSkillEffectivenessReport, loadInjectableSkills, observeSkillSelection, renderSkillsPart, skillsInjectedEvent, skillWithheldForRun } from "../../lib/skill-workshop.js";
 import { ContainmentError, probeContainment, type ProbeExecutor } from "../../lib/containment.js";
@@ -113,7 +113,7 @@ import { validateWorkerSettingsFile } from "../../lib/settings.js";
 import { buildBatchedGithub, classifyGhFailure, deriveStatus, dispatchesWithoutNewOwnedPr, ghGateway, ghRequiredStatusCheckContexts, projectPlan, readLedgerLines, type GitHub, type GhFailureReason, preferImplementingPr, type PrRef, type BatchedPr, type StatusProjection, persistVerifiedCredit, type ThrownRunVerdictStage, type RefusedRunVerdictStage } from "../../lib/status.js";
 import { dedupeRollupByLatestAttempt, buildFixProgressInput, terminalStateReason, type ActionableGateFailure, type CiFailure, type FixDispatchSnapshot, type FixSuperseded, type LiveStateResult, type MergeConflictEvidence, type OpenPrView, type RollupCheckEntry, type ProofDiscriminationEvidence, type RedBaseRefreshFacts, type SweepDeps, type RegistrationChange, trackRepairLadder, type FixRoundBranchClaim } from "../../lib/sweep.js";
 import { classifyNoPrShape } from "../../lib/fix-rung-classify.js";
-import { DEFAULT_PRUNE_GRACE_MS, appendQuestion, ghJson, parseDecisionRequest, parseLearningsUsed, parseSkillsUsed, parseQuestion, parseReconReport, parseReport, pruneStaleRuns, reapStaleWorktrees, removeRunLock, renderWorkerSettings, resolveGenericRouteToolBound, harnessOwnsGitFor, IMPLEMENT_CASH_TOOLS, IMPLEMENT_CLAUDE_TOOLS, WORKER_RULE_TOOL_NAME, implementToolBound, resolveDispatchLaneToolBound, cashDivertSpawnFields, cashFallbackRefusal, runAdhocLaneReapRung, runWorktreeReapRung, spawnWorker, cacheTokenLedgerFields, capStderrExcerpt, STDERR_EXCERPT_CAP, noPrReportExcerpt, listRegisteredWorktrees, readRunLock, workerLedgerFields, workerTranscript, resolveCommitAssignment, linkWorktreeNodeModules, reprovisionWorktreeDependencies, worktreeAdd, worktreeAddAsync, worktreeLockIsPidAlive, worktreeRemove, worktreesDir, writeRunLock, WorktreeBaseStaleError, WorktreeNodeModulesRefusedError, detectWorktreeBaseUncheckableStreak, WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND, type RunLockInfo, type SpawnWorkerArgs, type RegisteredWorktree, type WorkerResult, type WorktreeReapSummary, WorkerStateTracker, DEFAULT_WORKER_QUIET_FLOOR_MS, type WorkerState, type WorkerStreamObserver, type WorkerStreamEvent, type WorkerSelectionAssignment, WorkerAbandonedError, deliverOperatorAnswerToRunningWorker, workerContinuation, renderTaskInputAnswer, taskInputAnswer } from "../../lib/worker.js";
+import { DEFAULT_PRUNE_GRACE_MS, JUDGE_SHADOW_TRIAL_ID, appendQuestion, ghJson, parseDecisionRequest, parseLearningsUsed, parseSkillsUsed, parseQuestion, parseReconReport, parseReport, pruneStaleRuns, reapStaleWorktrees, removeRunLock, renderWorkerSettings, resolveGenericRouteToolBound, harnessOwnsGitFor, IMPLEMENT_CASH_TOOLS, IMPLEMENT_CLAUDE_TOOLS, WORKER_RULE_TOOL_NAME, implementToolBound, resolveDispatchLaneToolBound, cashDivertSpawnFields, cashFallbackRefusal, runAdhocLaneReapRung, runWorktreeReapRung, spawnWorker, cacheTokenLedgerFields, capStderrExcerpt, STDERR_EXCERPT_CAP, noPrReportExcerpt, listRegisteredWorktrees, readRunLock, workerLedgerFields, workerTranscript, resolveCommitAssignment, linkWorktreeNodeModules, reprovisionWorktreeDependencies, worktreeAdd, worktreeAddAsync, worktreeLockIsPidAlive, worktreeRemove, worktreesDir, writeRunLock, WorktreeBaseStaleError, WorktreeNodeModulesRefusedError, detectWorktreeBaseUncheckableStreak, WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND, type RunLockInfo, type SpawnWorkerArgs, type RegisteredWorktree, type WorkerResult, type WorktreeReapSummary, WorkerStateTracker, DEFAULT_WORKER_QUIET_FLOOR_MS, type WorkerState, type WorkerStreamObserver, type WorkerStreamEvent, type WorkerSelectionAssignment, WorkerAbandonedError, deliverOperatorAnswerToRunningWorker, workerContinuation, renderTaskInputAnswer, taskInputAnswer } from "../../lib/worker.js";
 import { QuietRoundEndedError, createQuietBoundHistory, guardSpawnWithQuietWatchdog, productionQuietWorkerJudge, quietHistoryOptions, runQuietWorkerWatchdog, type QuietBoundHistory, type QuietWorkerJudge } from "../../lib/quiet-worker-watchdog.js";
 import { isCodexWorkerOutputLimitError } from "../../lib/worker-provider.js";
 import { type AddedTestAliasRewrite, type TestAliasRewriter } from "../../lib/added-test-alias-rewrite.js";
@@ -683,6 +683,8 @@ export interface RollupEntry {
    *  can hand these entries to {@link dedupeRollupByLatestAttempt}, which sorts on it, without
    *  the type silently erasing the only field that distinguishes one attempt from its successor. */
   startedAt?: string;
+  /** W1-T13426: a status context's description, which restRollupFor already carries. */
+  description?: string;
 }
 
 export type PrCreateDiagnostic = { step: string; extra: Record<string, unknown> };
@@ -1580,7 +1582,7 @@ function watchDispatchSpawn(
     fallbackBoundMs: watch.fallbackBoundMs,
     quietFloorMs: DEFAULT_WORKER_QUIET_FLOOR_MS,
     ledger: (step, fields) => log(step, fields),
-    judge: seams.judge ?? productionQuietWorkerJudge({ cwd: spawnArgs.cwd, settingsFile: spawnArgs.settingsFile }),
+    judge: seams.judge ?? productionQuietWorkerJudge({ cwd: spawnArgs.cwd, settingsFile: spawnArgs.settingsFile, log: (step, fields) => log(step, fields) }),
     nudge: (message) => (seams.deliver ?? deliverOperatorAnswerToRunningWorker)(taskId, message, { ledger: (event, fields) => log(event, fields ?? {}) })
       === "delivered" ? "delivered" : "unsupported",
     ...(watch.recyclePending ? { recyclePending: watch.recyclePending } : {}),
@@ -2598,7 +2600,14 @@ function implementAttemptOutcome(helperHost: Pick<RunTaskHelperHost, "workerSign
   return { success: true };
 }
 
-function finishTransientRetry(
+/**
+ * W1-T13284: the prefix `runDiagnoseThenRetry` puts on `DiagnoseThenRetryResult.reason` ONLY when the
+ * progress judge ruled "escalate" on the exhausted retry loop (classify.ts), i.e. it named a
+ * no-progress or needs-operator-input loop. A bare exhausted budget never carries it.
+ */
+const JUDGED_PROGRESS_LOOP_REASON = /^fix progress loop: /;
+
+export function finishTransientRetry(
   helperHost: Pick<RunTaskHelperHost, "terminalVerdictFields">, driverResult: DiagnoseThenRetryResult,
   context: { taskId: string; runId: string; repoDir: string; worktreePath: string; costUsd: number;
     worker: WorkerResult; log: RunTaskContext["log"]; say: RunTaskContext["say"] },
@@ -2607,15 +2616,38 @@ function finishTransientRetry(
   const { terminalVerdictFields } = helperHost;
   if (driverResult.outcome !== "gave_up" || driverResult.exhaustedClass !== "transient") return undefined;
   const { taskId, runId, repoDir, worktreePath, costUsd, worker, log, say } = context;
+  // W1-T13284: a worker the progress judge says cannot progress is a BLOCKER, not a flake. The
+  // attempts' subtype is an API error (codex `error_codex`), but the judge has named the loop (e.g.
+  // needs-operator-input), so recording `blocked_transient` invited the daemon to retry the same
+  // task and latched a lane. Without a judge verdict (cash allowance, plain exhausted retries) the
+  // transient verdict below is unchanged.
+  const judgedLoop = !driverResult.cashAllowanceExhausted && driverResult.reason !== undefined
+    && JUDGED_PROGRESS_LOOP_REASON.test(driverResult.reason);
   if (driverResult.cashAllowanceExhausted) {
     log("worktree.retained", { on: "cash_allowance_exhausted", reason: "a later tool turn may have left unpublished edits" });
   } else {
     try {
       removeWorktree(repoDir, worktreePath);
-      log("worktree.remove", { on: "blocked_transient" });
+      log("worktree.remove", { on: judgedLoop ? "blocked" : "blocked_transient" });
     } catch (e) {
-      log("worktree.remove.error", { on: "blocked_transient", error: String((e as Error)?.message ?? e) });
+      log("worktree.remove.error", { on: judgedLoop ? "blocked" : "blocked_transient", error: String((e as Error)?.message ?? e) });
     }
+  }
+  if (judgedLoop) {
+    const reason = driverResult.reason as string;
+    log("verdict", {
+      verdict: "blocked",
+      stage: "implement",
+      subtype: worker.subtype,
+      num_turns: worker.numTurns,
+      cost_usd: costUsd,
+      billing_mode: billingMode(worker.childEnvKeys),
+      account_label: worker.accountLabel,
+      reason,
+      ...terminalVerdictFields(worker),
+    });
+    say(`verdict: blocked — ${reason}`);
+    return { taskId, runId, merged: false, costUsd, verdict: "blocked" };
   }
   log("verdict", {
     verdict: "blocked_transient",
@@ -3136,12 +3168,13 @@ function buildSourceSizeGatePostureRuntime(
       runRiskJudge,
       spend,
       judge: realRiskJudge({
-        mount: resolveRiskJudgeMount(loadMounts(mountsPath(repoRoot))),
+        mount: resolveRiskJudgeRoleMount(loadMounts(mountsPath(repoRoot))),
         cwd: worktreePath,
         settingsFile,
         spawn,
         spend,
         log: (step, extra) => log(step, extra),
+        shadowLog: (step, extra) => log(step, extra),
       }),
       consume: (input) => sourceSizeGateFollowupConsumer(input, log, say),
     };
@@ -5688,15 +5721,21 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
   // surface ONLY if it was told the harness owns git. Offering one to a worker whose prompt said
   // `git push` would hand it, on retry, a surface that cannot do what it was just asked to do.
   const implementCashTools = harnessOwnsGit ? [...IMPLEMENT_CASH_TOOLS] : undefined;
+  // W1-T12424: the cash arm's models are read from the ledger only for trial work.
+  const cashTrialArms = cashTrialEligible(task, taskClass)
+    ? cashTrialModels(cashTrialPolicy(config), await readCashTrialReadiness(dirname(ledgerPath))) : undefined;
   const cashTrial = decideCashTrial({
     task,
     taskClass,
     config,
     harnessCommits: implementCashTools !== undefined,
     stateDir: dirname(ledgerPath),
+    models: cashTrialArms,
   });
-  if (cashTrial) log("cash_trial.decided", { arm: cashTrial.arm, reason: cashTrial.reason });
-  const cashTrialSpawn = cashTrialSpawnFields(cashTrial, implementCashTools, cashTrialPolicy(config).models);
+  const cashTrialModel = cashTrial?.arm === "cash" ? cashTrialModelFor(task.id, cashTrial.models ?? []) : undefined;
+  if (cashTrial) log("cash_trial.decided", { trial: cashTrial.id, arm: cashTrial.arm, reason: cashTrial.reason, model: cashTrialModel,
+    models: cashTrial.models, stopped: cashTrial.stopped, summary: cashTrial.summary });
+  const cashTrialSpawn = cashTrialSpawnFields(cashTrial, implementCashTools, cashTrialModel === undefined ? [] : [cashTrialModel]);
 
   /**
    * The subscription probes are intentionally shell-backed, so a blocked auction cannot run
@@ -8398,7 +8437,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       prNumber: prNumberFromRef(prUrl),
       headSha: review.headSha,
     };
-    const riskJudgeMount = resolveRiskJudgeMount(loadMounts(mountsPath(repoRoot)));
+    const riskJudgeMount = resolveRiskJudgeRoleMount(loadMounts(mountsPath(repoRoot)));
     // W1-T4050: LIVE, per-run read of `plan/policy.yaml`'s `risk:` section — never memoized
     // (unlike `loadDefaultPolicy`), so an operator's merged policy edit governs the very next
     // unattended risk judgment with no daemon restart. Absent section ⇒ DEFAULT_RISK_POLICY,
@@ -8426,10 +8465,11 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
         change: { ...input.change, changeView: withoutRiskJudgePatches(view) },
       };
       return realRiskJudge({
-        mount: riskJudgeMount, cwd: worktreePath, settingsFile, spend: riskJudgeSpend,
+        mount: riskJudgeMount, cwd: worktreePath, settingsFile, spend: riskJudgeSpend, shadowLog: log,
         spawn: async (options) => {
           const result = await spawn(options);
-          primaryRiskServedModel = result.servedModel ?? result.routedModel ?? null;
+          // W1-T12187: the cash shadow rides this spawn too; its served model is not the primary's.
+          if (options.routingTrial?.id !== JUDGE_SHADOW_TRIAL_ID) primaryRiskServedModel = result.servedModel ?? result.routedModel ?? null;
           return result;
         },
       })(judgedRiskInput);

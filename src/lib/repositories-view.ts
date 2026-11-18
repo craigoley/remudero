@@ -186,6 +186,30 @@ interface InstanceSummary {
   partial?: true;
   /** No summary yet because the instance's projector has not ticked: the read model is still warming. */
   warming?: true;
+  /** W1-T13457: the summary is the one the store committed before serve restarted; no recompute has succeeded since. */
+  carried?: true;
+}
+
+/** W1-T13457: what a view's context offers to read its last committed body (read-model-worker.ts's `ReadModelViewContext.committed`). */
+type CommittedReader = (view: string, key: string) => { version?: unknown; generatedAt?: unknown; sources?: unknown; data?: unknown } | undefined;
+
+/**
+ * W1-T13457: each instance's summary in the last committed `repositories` body, restamped with its
+ * `repositories:<instance>` source's as-of, so a restarted worker starts from it instead of from nothing.
+ */
+export function committedRepositorySummaries(committed: CommittedReader | undefined): Map<string, RepoDashboardResult> {
+  const carried = new Map<string, RepoDashboardResult>();
+  const body = committed?.("repositories", "");
+  if (body?.version !== REPOSITORIES_VIEW_VERSION) return carried;
+  const data = body.data as Partial<RepositoriesData> | null | undefined;
+  const sources = Array.isArray(body.sources) ? body.sources as ViewSource[] : [];
+  for (const entry of Array.isArray(data?.instances) ? data.instances : []) {
+    if (typeof entry?.instanceId !== "string" || entry.summary === null || typeof entry.summary !== "object" || !Array.isArray(entry.summary.repos)) continue;
+    const asOf = sources.find((source) => source.name === `repositories:${entry.instanceId}`)?.asOf ?? (typeof body.generatedAt === "string" ? body.generatedAt : null);
+    if (asOf === null) continue;
+    carried.set(entry.instanceId, { ...entry.summary, generated_at: asOf } as RepoDashboardResult);
+  }
+  return carried;
 }
 
 type ShadowFactsByInstance = Record<string, Record<string, RepoShadowFacts>>;
@@ -313,8 +337,9 @@ function planReader(): { read: (path: string) => Plan; held: (path: string) => P
 export function createRepositoriesReadModelView<S extends { instance: string; tickedAt?: number; generation: number; catchUp?: unknown }>(ledgerSource: (state: S, now: number) => ViewSource, selectedRegistryObserver?: SelectedRegistryObserver): {
   name: string;
   version: number;
-  prepare(ctx: { now: number; instances: ReadonlyArray<{ state: S; db?: ReadModelDb }> }, more: () => boolean): boolean;
-  materialize(ctx: { now: number; instances: ReadonlyArray<{ state: S; db?: ReadModelDb }> }): Array<{ key: string; data: RepositoriesData; sources: ViewSource[] }>;
+  prepare(ctx: { now: number; instances: ReadonlyArray<{ state: S; db?: ReadModelDb }>; committed?: CommittedReader }, more: () => boolean): boolean;
+  materialize(ctx: { now: number; instances: ReadonlyArray<{ state: S; db?: ReadModelDb }>; committed?: CommittedReader }): Array<{ key: string; data: RepositoriesData; sources: ViewSource[] }>;
+  inputsFingerprint(ctx: { now: number; instances: ReadonlyArray<{ state: S; db?: ReadModelDb }> }): string | undefined;
   legacy(key: string, now: number, data: unknown): ShadowLegacy | undefined;
   heldSizes(): ThreadHolds;
 } {
@@ -322,6 +347,10 @@ export function createRepositoriesReadModelView<S extends { instance: string; ti
   const sourcesFile = readOnMtimeChange(readSources);
   const registryFile = readOnMtimeChange(readRegistry);
   const computed = new Map<string, InstanceSummary>();
+  /** W1-T13457: the last committed body's summaries, read once from the first context that can read the store. */
+  let carried: Map<string, RepoDashboardResult> | undefined;
+  const carriedFrom = (committed: CommittedReader | undefined): Map<string, RepoDashboardResult> | undefined =>
+    carried ?? (committed ? (carried = committedRepositorySummaries(committed)) : undefined);
   const plans = planReader();
   /** Each published body's per-instance summary instant, shadow facts and plan, keyed by the very `data` it published. */
   type Pair = {
@@ -340,8 +369,10 @@ export function createRepositoriesReadModelView<S extends { instance: string; ti
     const moved = prior.generation !== (slot?.state.generation ?? -1) || prior.sourcesMtimeMs !== sourcesMtimeMs;
     return ageMs >= REPO_TELEMETRY_CACHE_TTL_MS || (moved && ageMs >= REPO_TELEMETRY_MIN_AGE_MS);
   };
-  const refresh = (instanceId: string, slot: Slot, options: RepositoriesInstanceOptions, sourcesMtimeMs: number, now: number): void => {
-    const prior = computed.get(instanceId);
+  const refresh = (instanceId: string, slot: Slot, options: RepositoriesInstanceOptions, sourcesMtimeMs: number, now: number, committed?: CommittedReader): void => {
+    // W1-T13457: an instance this run has not summarized yet starts from the summary committed before the restart.
+    const kept = slot === undefined ? undefined : carriedFrom(committed)?.get(instanceId);
+    const prior = computed.get(instanceId) ?? (kept ? { atMs: Number.NEGATIVE_INFINITY, generation: -1, sourcesMtimeMs: -1, summary: kept, carried: true as const } : undefined);
     const generation = slot?.state.generation ?? -1;
     let read: PlanRead | undefined;
     const next = summarize(slot, options, now, (path) => {
@@ -357,7 +388,8 @@ export function createRepositoriesReadModelView<S extends { instance: string; ti
       ? { atMs: now, generation, sourcesMtimeMs, summary: next.summary, ...(next.shadow ? { shadow: next.shadow } : {}), ...(read ? { plan: read } : {}), ...(next.fileReads ? { fileReads: next.fileReads } : {}),
         ...(next.through ? { through: next.through } : {}), ...partial }
       : { atMs: now, generation, sourcesMtimeMs, reason: next.reason, ...warming, ...(prior?.summary ? { summary: prior.summary, ...(prior.shadow ? { shadow: prior.shadow } : {}), ...(prior.plan ? { plan: prior.plan } : {}),
-        ...(prior.fileReads ? { fileReads: prior.fileReads } : {}), ...(prior.through ? { through: prior.through } : {}), ...(prior.partial ? { partial: true as const } : {}) } : {}) });
+        ...(prior.fileReads ? { fileReads: prior.fileReads } : {}), ...(prior.through ? { through: prior.through } : {}), ...(prior.partial ? { partial: true as const } : {}),
+        ...(prior.carried ? { carried: true as const } : {}) } : {}) });
   };
   const published = (instances: ReadonlyArray<{ db?: ReadModelDb }>): { path: string; sources?: RepositoriesSources } | undefined => {
     const dbPath = instances.find((slot) => slot.db)?.db?.path;
@@ -393,7 +425,8 @@ export function createRepositoriesReadModelView<S extends { instance: string; ti
       return { data: legacy.data, asOfMs: legacy.asOfMs, inputs, ...repositoriesShadowPairing(legacy.facts, pair!.facts, data as RepositoriesData) };
     },
     /** Each due instance's plan read and summary, one step each, so a cold build is never one unit. */
-    prepare: ({ now, instances }, more) => {
+    prepare: (ctx, more) => {
+      const { now, instances } = ctx;
       const at = published(instances);
       if (at?.sources === undefined) return true;
       const sourcesMtimeMs = statSync(at.path).mtimeMs;
@@ -410,15 +443,39 @@ export function createRepositoriesReadModelView<S extends { instance: string; ti
           }
         }
         if (!more()) return false;
-        refresh(instanceId, slot, options, sourcesMtimeMs, now);
+        refresh(instanceId, slot, options, sourcesMtimeMs, now, ctx.committed);
       }
       return true;
     },
-    materialize: ({ now, instances }) => observeSelectedRegistrySync(selectedRegistryObserver, "repositories-view",
+    /**
+     * W1-T13654: what the body below is built from once `prepare` has run. Between recomputes the body is a pure function
+     * of each instance's held summary (changed only by `refresh`, which stamps `atMs`), the published sources file and
+     * the registry file. Serve reads this view about every 2 s while a Console is open (293 builds in 10 min on
+     * 2026-11-18, 14 s of heavy-lane CPU), so an unchanged portfolio is skipped instead of rebuilt.
+     */
+    inputsFingerprint: ({ instances }) => {
+      const at = published(instances);
+      if (at?.sources === undefined) return undefined;
+      const registryPath = at.sources.instances.find((i) => i.options.repoRegistryPath)?.options.repoRegistryPath;
+      const held = at.sources.instances.map(({ instanceId }) => {
+        const current = computed.get(instanceId);
+        const slot = instances.find((candidate) => candidate.state.instance === instanceId);
+        return [instanceId, current?.atMs ?? null, slot !== undefined, slot?.db !== undefined, slot?.state.tickedAt !== undefined, slot?.state.catchUp !== undefined];
+      });
+      return JSON.stringify([fileIdentity(at.path), registryPath === undefined ? null : fileIdentity(registryPath), held]);
+    },
+    materialize: ({ now, instances, committed }) => observeSelectedRegistrySync(selectedRegistryObserver, "repositories-view",
       { instanceName: instances.length === 1 ? instances[0]!.state.instance : undefined }, () => {
       const at = published(instances);
       if (at === undefined) return [];
-      if (at.sources === undefined) return [{ key: "", data: { instances: [], projects: [], reason: "serve has not published the repository sources yet" }, sources: [] }];
+      if (at.sources === undefined) {
+        const reason = "serve has not published the repository sources yet";
+        // W1-T13457: an empty list never replaces committed summaries: the committed portfolio is kept, stale, and says why.
+        const last = (carriedFrom(committed)?.size ?? 0) > 0 ? committed?.("repositories", "") : undefined;
+        if (last) return [{ key: "", data: { ...(last.data as RepositoriesData), reason },
+          sources: (last.sources as ViewSource[]).map((source) => ({ ...source, state: source.state === "fresh" ? "stale" as const : source.state, phase: "warming" as const, reason })) }];
+        return [{ key: "", data: { instances: [], projects: [], reason }, sources: [] }];
+      }
       const sourcesMtimeMs = statSync(at.path).mtimeMs;
       const sources: ViewSource[] = [];
       const data: RepositoriesData = { instances: [], projects: [] };
@@ -426,7 +483,7 @@ export function createRepositoriesReadModelView<S extends { instance: string; ti
       for (const { instanceId, options } of at.sources.instances) {
         const slot = instances.find((candidate) => candidate.state.instance === instanceId);
         if (slot) sources.push(ledgerSource(slot.state, now));
-        if (due(instanceId, slot, sourcesMtimeMs, now)) refresh(instanceId, slot, options, sourcesMtimeMs, now);
+        if (due(instanceId, slot, sourcesMtimeMs, now)) refresh(instanceId, slot, options, sourcesMtimeMs, now, committed);
         const current = computed.get(instanceId)!;
         if (current.summary) pair.at[instanceId] = Date.parse(current.summary.generated_at);
         pair.facts[instanceId] = current.shadow ?? {};
@@ -437,10 +494,23 @@ export function createRepositoriesReadModelView<S extends { instance: string; ti
         data.instances.push({ instanceId, ...(current.summary ? { summary: unstampedSummary(current.summary) } : {}), ...(current.reason ? { reason: current.reason } : {}) });
       }
       Object.assign(data, repositoriesPortfolio(at.sources, data, (path) => (pair.registry = { read: registryFile(path) }).read));
-      shown.set(data, pair);
+      // A carried summary has no shadow facts or reads of this run's to pair: its body is not sampled.
+      const carrying = at.sources.instances.some(({ instanceId }) => computed.get(instanceId)?.carried === true);
+      if (!carrying) shown.set(data, pair);
       return [{ key: "", data, sources }];
     }),
   };
+}
+
+/** A file's identity for a fingerprint: device, inode, size and mtime, or null when it is absent. */
+function fileIdentity(path: string): string[] | null {
+  try {
+    const st = statSync(path, { bigint: true });
+    return [st.dev, st.ino, st.size, st.mtimeNs].map(String);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
 }
 
 /** The registry core's summary route reads names each instance's project and repository. */
@@ -493,6 +563,7 @@ function summarySource(instanceId: string, current: InstanceSummary): ViewSource
   const asOf = current.summary?.generated_at ?? null;
   if (current.summary === undefined) return { name, asOf, state: "unavailable", reason: current.reason, ...(current.warming ? { phase: "warming" as const } : {}) };
   if (current.partial) return { name, asOf, state: "stale", phase: "catching_up", reason: "computed while the ledger projector was catching up" };
+  if (current.carried) return { name, asOf, state: "stale", phase: "warming", reason: `showing the summary committed before serve restarted${current.reason ? `; ${current.reason}` : ""}` };
   if (current.reason) return { name, asOf, state: "stale", reason: current.reason, ...(current.warming ? { phase: "warming" as const } : {}) };
   return { name, asOf, state: "fresh" };
 }

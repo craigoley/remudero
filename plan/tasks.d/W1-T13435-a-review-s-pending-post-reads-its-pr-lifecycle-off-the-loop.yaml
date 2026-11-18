@@ -1,0 +1,84 @@
+- id: W1-T13435
+  title: "A review's pending post reads its pull request lifecycle off the daemon loop: reviewCommand gives postReviewPending the awaited fetchPrLifecycleAsync, as its other pending post already does, so the read no longer runs a synchronous gh call and a blocking cadence wait on the loop (the largest ghJson caller since the 16:06Z boot on 2026-11-17)"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # one callback changes transport; the lifecycle answer decides whether a pending status is posted on a merged or closed pull request, so the answer and the existing catch must stay the same
+  origin: "operator-session#loop-lag-2026-11-17"
+  plan_refs:
+    - W1-T9549
+    - W1-T11664
+    - W1-T7747
+    - W1-T12123
+  files:
+    - src/cli/commands/review.ts
+    - test/review/a-review-s-pending-post-reads-its-pr-lifecycle-off-the-loop.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "The fetchLifecycle that reviewCommand passes to its injected postReviewPending for the pending post returns a promise, and for an open, a merged and a closed pull request row it gives the same merged, closed, baseRef and reviewInputDigest as the synchronous fetchPrLifecycle of origin/main"
+      proof: "grep: W1-T13435 criterion 1 in test/review/a-review-s-pending-post-reads-its-pr-lifecycle-off-the-loop.test.ts"
+    - claim: "invariant:no-sync-gh-in-the-pending-post-lifecycle-read — calling that fetchLifecycle makes 0 synchronous child_process calls (execFileSync, spawnSync, execSync recorded) and 0 Atomics.wait cadence sleeps, and a 20 ms timer keeps firing while its gh read is held for one second"
+      kind: guard
+      proof: "grep: W1-T13435 criterion 2 in test/review/a-review-s-pending-post-reads-its-pr-lifecycle-off-the-loop.test.ts"
+    - claim: "invariant:a-failed-lifecycle-read-still-only-skips-the-pending-post — when the awaited lifecycle read rejects, reviewCommand writes review.pending_post.error with the error text and goes on to review the pull request, as at origin/main; when it reports merged or closed, no pending status is posted"
+      kind: guard
+      proof: "grep: W1-T13435 criterion 3 in test/review/a-review-s-pending-post-reads-its-pr-lifecycle-off-the-loop.test.ts"
+  rationale: |
+    WHY: before a review starts, reviewCommand posts a pending status. postReviewPending first reads the pull
+    request's lifecycle, so it never posts pending on a merged or closed pull request. reviewCommand passes it the
+    synchronous fetchPrLifecycle, whose default fetch is ghJson: an execFileSync of gh, plus the read cadence,
+    which on the daemon loop may sleep with Atomics.wait. postReviewPending already awaits its fetchLifecycle and
+    accepts a promise, and fetchPrLifecycleAsync (W1-T9549) is the same request and the same fold over
+    ghJsonAsync. The other pending post in the same file already uses it.
+    MEASURED, core ledger (~/rmd-state2/state, ledger.2026-11-17T*.ndjson.gz plus the live file, rows deduplicated
+    on ts and step), 2026-11-17 00:09Z to 16:32Z:
+    - daemon.alive sync_spawn_by_caller: ghJson 894 synchronous calls, 602 s for the day (674 ms each); since the
+      16:06:55Z boot (15a86ac98) 29 calls, 25 s.
+    - daemon.loop_stall_profile rows: ghJson is the first named frame of 174 rows holding 1,026 s of lag for the
+      day (100 to 146 s in each of the 07Z to 11Z hours) and of 7 rows holding 29 s since the boot. Its inclusive
+      time is 521 s for the day, and the blocking cadence sleep (defaultBlockingSleepSync) has 409 s of self time.
+    - ghJson inclusive time by the first named frame above it, day: the sweep (runSweep closures 178 s,
+      baseBranchRequiresMergeQueue 45 s, redBaseRefreshFactsFromRest 26 s), dispatch eligibility 76 s,
+      postReviewPending 39 s, publishReviewStatusLocked 30 s, fetchPrLifecycle 20 s, readHeadShaRest 15 s.
+      Since the boot: postReviewPending 4 s of 11 s, the largest; runGhReadSteps 2 s, the rest 1 s or less.
+    READ at origin/main 882f50370e:
+    - src/cli/commands/review.ts:2530-:2541, in reviewCommand (:2086): `await postReviewPendingDep({ ...,
+      fetchLifecycle: () => fetchPrLifecycle(view.url) })`, inside a try whose catch (:2543) writes
+      review.pending_post.error and lets the review go on.
+    - src/cli/commands/review.ts:759 already passes `() => fetchPrLifecycleAsync(prUrl)` to its own pending post.
+    - src/lib/review.ts:11626 fetchPrLifecycle defaults its fetch to ghJson; :11643 fetchPrLifecycleAsync is its
+      awaited twin; :12802 postReviewPending awaits readReviewLifecycle (:11676), which retries a transient failure
+      with a timer; :12766 types fetchLifecycle as `() => PrLifecycleState | Promise<PrLifecycleState>`.
+    NOT COVERED: W1-T11664 (queued) changes only the replay restoration callback at review.ts:2686 and calls the
+    pending callback a non-finding for its own question (a fatal escape), not for loop time. W1-T7747 (queued)
+    covers the sweep's own gh calls, including the fetchPrLifecycle calls in buildSweepEffects
+    (src/cli/commands/sweep.ts:356, :468, :573). Swept origin/main plan/tasks.d for fetchPrLifecycle,
+    postReviewPending and fetchLifecycle, and the open pull requests on craigoley/remudero: none moves this
+    callback.
+  design: |
+    INVARIANT no-sync-gh-in-the-pending-post-lifecycle-read: the pending post's lifecycle read runs no synchronous gh child and no blocking cadence wait.
+    INVARIANT a-failed-lifecycle-read-still-only-skips-the-pending-post: a failed read is caught as today and the review goes on; a merged or closed answer still posts nothing.
+    1. In reviewCommand, change the pending post's fetchLifecycle to `() => fetchPrLifecycleAsync(view.url)`. The
+       import is already there. Change nothing else in the call.
+    2. Leave the replay restoration callback at :2686 to W1-T11664 and the sweep's calls to W1-T7747.
+    3. No new export, env var, config key or time bound: the awaited read keeps the retry and cadence that
+       readReviewLifecycle and ghJsonAsync already have.
+    4. TESTS in test/review/a-review-s-pending-post-reads-its-pr-lifecycle-off-the-loop.test.ts drive reviewCommand
+       with an injected postReviewPending that captures its options, as the existing reviewCommand tests inject
+       their deps, then call the captured fetchLifecycle with gh answered by a stub through the transport's existing
+       async executor seam. Record synchronous spawns by replacing the node:child_process sync APIs. Load
+       test/setup/tmp-hygiene.ts.
+  falsifier: |
+    At origin/main the captured fetchLifecycle returns a plain object, not a promise, and calling it runs gh with
+    execFileSync: the recorder count in criterion 2 is not 0 and the timer does not fire during the held read.
+    Remove the catch or rethrow from it: a failed read stops the review and criterion 3 fails.
+  note: |
+    Id reserved for run-unfiled-1794933139000 with ~/rmd-work/bin/reserve-id.sh.
+    Proof that counts in production: no daemon.loop_stall_profile row over a day has ghJson under postReviewPending.
+    The other ghJson callers are larger over the whole day but are the sweep's (W1-T7747); dispatch eligibility
+    (76 s for the day, none since the boot) is not filed here.

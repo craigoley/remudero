@@ -6,6 +6,8 @@ import { appendLedger, deriveLedgerActor } from "../../lib/ledger.js";
 import { systemClock, type Clock } from "../../lib/clock.js";
 import { loadPlan, type Plan, type MergedResolver } from "../../lib/plan.js";
 import { repoRoot, resolveOwnerRepo } from "../../lib/repo-location.js";
+import { resolveCiGateRequiredSource, type CiGateRequiredSource } from "../../lib/ci-gate-required.js";
+import { resolveTargetOwnerRepo } from "../../lib/onboard/inventory.js";
 import { flagValue, unknownArgError } from "../../lib/cli-args.js";
 import { instanceMode, readInstanceRegistryText } from "../../lib/instance-mode.js";
 import { checkReviewerCodeFreshnessAsync, reviewerCodeJudge, type ReviewerCodeFreshness } from "../../lib/self-sync.js";
@@ -21,7 +23,7 @@ import type { BoardSnapshotCache } from "../../lib/board-snapshot-cache.js";
 import type { PanelGraphDeps } from "../../lib/panel-graph.js";
 import { createGhCallPacer, createPlanFilingFileCache, loadPlanFilingFileCache, type GhCallPacer } from "../../lib/open-prs-rest.js";
 import { configureEscalationTriage, ghIssueGateway, tryEscalate } from "../../lib/escalate.js";
-import { escalatePostReviewStall } from "../../lib/escalation-catalogue.js";
+import { createSweepStageWatch, escalatePostReviewStall, SWEEP_STAGE_STREAK_SLICE, type SweepStageOutcome } from "../../lib/escalation-catalogue.js";
 import { ghPrDiffAsync } from "../../lib/pr-diff.js";
 import { riskJudgePlanContextDigestFor } from "../../lib/risk-judge.js";
 import { fixRebaseMergeFactsFromRest, ghUpdateBranch, readHeadShaRest } from "../../lib/arm-auto-merge.js";
@@ -734,6 +736,7 @@ export async function sweepCommand(host: SweepCommandHost & Required<Pick<SweepC
   const repo = flagValue(rest, "--repo") ?? self.repo;
   const owner = self.owner;
   const runId = `SWEEP-${Date.now()}`;
+  const ciGateSource = resolveCiGateRequiredSource({ owner, repo }, { self, selfRoot: repoRoot, configRoot: config.root });
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: "SWEEP", step, lane: "sweep", ...extra });
   const triageRuntime = buildEscalationTriageRuntime({ root: repoRoot, config, owner, repo });
@@ -753,6 +756,7 @@ export async function sweepCommand(host: SweepCommandHost & Required<Pick<SweepC
   let openPrs: OpenPrView[];
   try {
     openPrs = buildOpenPrViews(owner, repo, ledgerPath, {
+      ciGateSource, log,
       planFilingFileCache: createPlanFilingFileCache(),
       onPlanFilingClassification: createPlanFilingClassificationTelemetry(log),
     });
@@ -782,6 +786,7 @@ export async function sweepCommand(host: SweepCommandHost & Required<Pick<SweepC
     plan: plan,
     log: log,
     policy: DEFAULT_SWEEP_POLICY,
+    ciGateSource,
   });
   // W1-T528: "in flight" for `selectUpdateBranchTarget` means exactly what it means everywhere
   // else in the fleet (see `liveInflightRuns`'s own doc) — the SAME per-task lock directory the
@@ -945,6 +950,7 @@ export function buildSweepHook(
   const resolvedReadMainPlan = legacyResequenceShape
     ? (isMergedOrReadMainPlan as ((root: string) => Plan) | undefined)
     : readMainPlan;
+  let ciGateSourceRead: Promise<CiGateRequiredSource> | undefined;
   // W1-T192: the daemon-side draft rung, built ONCE per daemon start (mirrors this
   // function's own once-per-daemon-start construction) — see buildInboxDraftHook's doc for
   // why it rides THIS seam rather than a second, separately-scheduled loop.
@@ -997,8 +1003,23 @@ export function buildSweepHook(
   const branchReapStatePath = join(config.root, "state", automaticBranchReapStateFileName(repo));
   const branchReapState: AutomaticBranchReapState = readAutomaticBranchReapState(branchReapStatePath);
   const nextDistanceProbe = createDistanceProbeSequence();
+  // W1-T13255: each contained prelude stage's failure streak, read from its own ledger rows for this daemon's life.
+  const watchStage = createSweepStageWatch({ owner, repo, ledgerPath, runId,
+    history: createEscalationTriageHistoryReader({ slice: SWEEP_STAGE_STREAK_SLICE }) });
   return async (continueReviewAdmissions = () => true) => {
     const prelude = createFullPreludeTimer((fields) => log("sweep.full_prelude", fields));
+    // W1-T13255: a contained stage logs its throw and the pass carries on, exactly as before; what the pass saw of
+    // it (threw, completed, or `false` for not run or not fully read) is kept for the watch below.
+    const stageOutcomes = new Map<string, SweepStageOutcome>();
+    const contained = (stage: string, errorStep: string, run: () => Promise<boolean>): Promise<void> => prelude.time(stage, async () => {
+      try {
+        stageOutcomes.set(stage, { clean: await run() });
+      } catch (e) {
+        const error = String((e as Error)?.message ?? e);
+        log(errorStep, { error });
+        stageOutcomes.set(stage, { error });
+      }
+    });
     const triageRuntime = buildEscalationTriageRuntime({ root: targetCheckoutRoot ?? repoRoot, config, owner, repo },
       { evidenceHistory: escalationTriageEvidence });
     if (!github) configureEscalationTriage(triageRuntime);
@@ -1008,26 +1029,31 @@ export function buildSweepHook(
       prelude.time("triage_evidence", async () => {
         if (!github) await refreshEscalationTriageEvidence(triageRuntime, ledgerPath, log);
       }),
-      prelude.time("main_health", async () => {
-        try {
-          await mainHealthRung?.();
-        } catch (e) {
-          log("main.health.error", { error: String((e as Error)?.message ?? e) });
-        }
+      contained("main_health", "main.health.error", async () => {
+        await mainHealthRung?.();
+        return mainHealthRung !== undefined;
       }),
       // W1-T4471: land owner replies in `plan/questions.ndjson` BEFORE `buildOpenPrViews` reads it,
       // so a reply steers this same tick. Contained like `mainHealthRung` above.
-      prelude.time("escalation_answers", async () => {
-        if (!escalationAnswerGateway) return;
-        try {
-          const answers = await readEscalationAnswers(repoRoot, runId, escalationAnswerGateway,
-            { ledgerPath, ...(escalationFeedbackReply ? { feedback: escalationFeedbackReply } : {}) });
-          if (answers.unreadable > 0) log("escalation_answers.unreadable", { ...answers });
-        } catch (e) {
-          log("escalation_answers.error", { error: String((e as Error)?.message ?? e) });
-        }
+      contained("escalation_answers", "escalation_answers.error", async () => {
+        if (!escalationAnswerGateway) return false;
+        const answers = await readEscalationAnswers(repoRoot, runId, escalationAnswerGateway,
+          { ledgerPath, ...(escalationFeedbackReply ? { feedback: escalationFeedbackReply } : {}) });
+        if (answers.unreadable > 0) log("escalation_answers.unreadable", { ...answers });
+        return answers.unreadable === 0;
       }),
     ]);
+    // W1-T13255: a stage whose streak outlasts the streaks it has recovered from opens one needs-human issue, and its
+    // next clean pass closes it. After the stages, one at a time: they share one history reader.
+    await prelude.time("stage_watch", async () => {
+      for (const [stage, outcome] of stageOutcomes) {
+        try {
+          await watchStage(stage, outcome);
+        } catch (e) {
+          log("sweep.stage_watch.error", { stage, error: String((e as Error)?.message ?? e) });
+        }
+      }
+    });
     // W1-T12754: why the published generation was not used, and a joined read's own publish time.
     const serve = tickReadFor === undefined ? { source: "none" as const, miss: "no_plane" as const } : tickReadFor.lastServe?.();
     const servedAtMs = serve?.source === "joined" ? serve.publishedAtMs : tickRead?.servedPublishedAtMs;
@@ -1049,8 +1075,14 @@ export function buildSweepHook(
     let thisPassReviewInputViews: NonNullable<SweepCycleOutcome["reviewInputViews"]> = [];
     try {
       if (tickRead?.openPrError) throw new Error(tickRead.openPrError);
+      ciGateSourceRead ??= resolveTargetOwnerRepo(repoRoot).then((self) =>
+        resolveCiGateRequiredSource({ owner, repo }, {
+          self, selfRoot: repoRoot, configRoot: config.root, checkoutRoot: targetCheckoutRoot,
+        }));
+      const ciGateSource = await ciGateSourceRead;
       const openPrs = tickRead ? structuredClone(tickRead.openPrViews) : await prelude.time("open_pr_views", () =>
         buildOpenPrViewsAsync(owner, repo, ledgerPath, {
+          ciGateSource, log,
           pacer,
           planFilingFileCache,
           onPlanFilingClassification: reportPlanFilingClassification,
@@ -1081,6 +1113,7 @@ export function buildSweepHook(
         plan,
         log: log,
         policy: DEFAULT_SWEEP_POLICY,
+        ciGateSource,
         feedbackLandingStateRoot: config.root,
         pacer,
         // W1-T5115: the SAME spawn sweep.ts defaults to, carrying the socket as a git-only handle.
@@ -1118,7 +1151,7 @@ export function buildSweepHook(
           rereadPrAtAct: buildRereadPrAtAct(owner, repo, ledgerPath, {
             pacer,
             views: { planFilingFileCache, onPlanFilingClassification: reportPlanFilingClassification, isMerged,
-              readMainPlan: resolvedReadMainPlan },
+              readMainPlan: resolvedReadMainPlan, ciGateSource, log },
           }),
           ...(servedAtMs !== undefined ? { snapshotPublishedAtMs: servedAtMs } : {}),
           markPrelude: prelude.mark,
@@ -1259,6 +1292,9 @@ export function buildSweepLightHook(
   const resolvedReadMainPlan = legacyResequenceShape
     ? (isMergedOrReadMainPlan as ((root: string) => Plan) | undefined)
     : readMainPlan;
+  const ciGateSource = resolveCiGateRequiredSource({ owner, repo }, {
+    self: resolveOwnerRepo(), selfRoot: repoRoot, configRoot: config.root,
+  });
   const planFilingFileCache = loadPlanFilingFileCache(join(config.root, "state"));
   if (planFilingFileCache.unreadable !== undefined) {
     log("plan_filing_files.store_unreadable", { reason: planFilingFileCache.unreadable });
@@ -1292,6 +1328,7 @@ export function buildSweepLightHook(
       // W1-T12236: only the first read passes the scope; a refill read reads its own views.
       const ownViews = async () => {
         const views = await buildOpenPrViewsAsync(owner, repo, ledgerPath, {
+          ciGateSource, log,
           planFilingFileCache,
           onPlanFilingClassification: reportPlanFilingClassification,
           isMerged,
@@ -1329,6 +1366,7 @@ export function buildSweepLightHook(
         log: log,
         policy,
         feedbackLandingStateRoot: config.root,
+        ciGateSource,
         ...(onLastGoodList ? mergeAtListHead(new Map(openPrs.map((pr) => [pr.prNumber, pr.headSha])), ledgerPath) : {}),
       }));
       // W1-T1211: ONE read per tick. `readLedgerLines` is the same reader every other rung in this
@@ -1385,7 +1423,7 @@ export function buildSweepLightHook(
           },
           rereadPrAtAct: effects.rereadPrAtAct ?? buildRereadPrAtAct(owner, repo, ledgerPath, {
             views: { planFilingFileCache, onPlanFilingClassification: reportPlanFilingClassification, isMerged,
-              readMainPlan: resolvedReadMainPlan },
+              readMainPlan: resolvedReadMainPlan, ciGateSource, log },
           }),
           judgeHandedOffHead: handedOffHeadRiskJudge(owner, repo, config, activePlan, ledgerPath, runId, log),
           planContextDigestFor: riskJudgePlanContextDigestFor(activePlan),

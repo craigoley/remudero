@@ -255,6 +255,14 @@ function writeFully(io: BoardSnapshotIo, fd: number, buffer: Buffer): void {
   }
 }
 
+/** W1-T13665: a row's line as read, copied out of the read buffer, with its newline. */
+function lineCopy(raw: Buffer): Buffer {
+  const line = Buffer.allocUnsafe(raw.length + 1);
+  raw.copy(line);
+  line[raw.length] = 0x0a;
+  return line;
+}
+
 function lineBuffer(value: unknown, maxLineBytes: number): Buffer {
   const buffer = Buffer.from(`${JSON.stringify(value)}\n`, "utf8");
   if (buffer.length > maxLineBytes) throw new SnapshotRefusal("line_too_large");
@@ -297,13 +305,31 @@ export function boardClosedCollectionPath(root: string, owner: string, repo: str
 }
 
 export interface BoardClosedCollectionReceipt {
-  version: 1; repository: string; lastAttemptAt: string; lastSuccessAt: string | null;
+  version: 1 | 2; repository: string; lastAttemptAt: string; lastSuccessAt: string | null;
   state: "complete" | "partial" | "unavailable"; reason: "fetch_failed" | "truncated" | "snapshot_unavailable" | null;
   rowsDigest: string | null;
 }
 
-/** A closed-row identity survives unrelated issue updates in the shared snapshot file. */
-export function boardClosedRowsDigest(rows: Iterable<BoardPrRest>): string {
+/**
+ * A closed-row identity survives unrelated issue updates in the shared snapshot file. W1-T13665: a version 2 receipt
+ * hashes each row's number and the sha256 of its disk JSON, so a digest after a few changed rows hashes only those
+ * rows' text, not all ~50 MB of it again.
+ */
+export function boardClosedRowsDigest(rows: Iterable<BoardPrRest>, memo?: Map<number, { row: ClosedDiskRow; hash: string }>): string {
+  const digest = createHash("sha256");
+  for (const row of [...rows].sort((a, b) => a.number - b.number)) {
+    const disk = closedForDisk(row);
+    // W1-T13616: a row unchanged since the last digest reuses its hash; the row's JSON text is the same.
+    const held = memo?.get(row.number);
+    const hash = held && sameFlatRow(held.row, disk) ? held.hash : createHash("sha256").update(JSON.stringify(disk)).digest("hex");
+    memo?.set(row.number, { row: disk, hash });
+    digest.update(`${row.number}:${hash}\n`);
+  }
+  return digest.digest("hex");
+}
+
+/** The version 1 receipt's digest: every row's whole disk JSON, in number order. Read only, for receipts written before W1-T13665. */
+function boardClosedRowsDigestV1(rows: Iterable<BoardPrRest>): string {
   const digest = createHash("sha256");
   for (const row of [...rows].sort((a, b) => a.number - b.number)) digest.update(JSON.stringify(closedForDisk(row)) + "\n");
   return digest.digest("hex");
@@ -317,10 +343,10 @@ export function readBoardClosedCollectionReceipt(root: string, owner: string, re
     const stat = fs.fstatSync(fd);
     if (!stat.isFile() || stat.size > OBSERVATION_MAX_BYTES) return { ok: false, reason: "collection receipt is not a bounded regular file" };
     const value = JSON.parse(fs.readFileSync(fd, "utf8")) as BoardClosedCollectionReceipt;
-    if (!value || value.version !== 1 || value.repository !== `${owner}/${repo}` || stampMs(value.lastAttemptAt) === undefined ||
+    if (!value || (value.version !== 1 && value.version !== 2) || value.repository !== `${owner}/${repo}` || stampMs(value.lastAttemptAt) === undefined ||
         !(value.lastSuccessAt === null || stampMs(value.lastSuccessAt) !== undefined && value.lastSuccessAt <= value.lastAttemptAt) ||
         !["complete", "partial", "unavailable"].includes(value.state) || ![null, "fetch_failed", "truncated", "snapshot_unavailable"].includes(value.reason) ||
-        value.rowsDigest !== boardClosedRowsDigest(rows) || value.state === "complete" && (value.lastSuccessAt === null || value.reason !== null)) return { ok: false, reason: "collection receipt does not certify these saved rows" };
+        value.rowsDigest !== (value.version === 1 ? boardClosedRowsDigestV1(rows) : boardClosedRowsDigest(rows)) || value.state === "complete" && (value.lastSuccessAt === null || value.reason !== null)) return { ok: false, reason: "collection receipt does not certify these saved rows" };
     return { ok: true, receipt: value };
   } catch (error) {
     return { ok: false, reason: `collection receipt unavailable (${(error as NodeJS.ErrnoException).code ?? "invalid data"})` };
@@ -454,6 +480,8 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
     });
   };
 
+  // W1-T13665: each row's line as the load read it, so the first commit after a boot reuses unchanged rows' bytes.
+  const loadedLines: Record<keyof SnapshotRows, RowLines> = { closed: new Map(), issues: new Map() };
   const load = (): SnapshotState => {
     let size = 0;
     try {
@@ -502,13 +530,17 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
           throw new SnapshotRefusal("invalid_row");
         }
         if (closed.has(record.row.number)) throw new SnapshotRefusal("duplicate_row");
-        closed.set(record.row.number, { ...record.row, autoMergeRequest: null });
+        const held = { ...record.row, autoMergeRequest: null };
+        closed.set(record.row.number, held);
+        // Held only when the parsed row is the commit's own disk form, so a reused line is byte-for-byte the fresh one.
+        if (sameFlatRow(record.row, closedForDisk(held))) loadedLines.closed.set(record.row.number, { row: record.row, line: lineCopy(raw) });
       } else if (record.type === "issues") {
         if (!header.channels.issues.complete || !isIssueRow(record.row, maxStringBytes)) {
           throw new SnapshotRefusal("invalid_row");
         }
         if (issues.has(record.row.number)) throw new SnapshotRefusal("duplicate_row");
         issues.set(record.row.number, { ...record.row });
+        loadedLines.issues.set(record.row.number, { row: record.row, line: lineCopy(raw) });
       } else {
         throw new SnapshotRefusal("invalid_row");
       }
@@ -546,6 +578,8 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
       };
       dataIdentity = { sha256: digest.digest("hex"), bytes };
       headerObservedAt = loaded.closedObservedAt;
+      if (!header.channels.closed.complete) loadedLines.closed.clear();
+      if (!header.channels.issues.complete) loadedLines.issues.clear();
       log("board_snapshot.loaded", "snapshot", closed.size + issues.size, bytes);
       return loaded;
     } catch (error) {
@@ -624,7 +658,8 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
 
   /** A successful complete read that matched the held rows: persist WHEN it was seen, never the rows again. */
   const observeUnchangedClosed = (): void => {
-    if (!dataIdentity || !state.closed) return;
+    // W1-T13332: while a write is in flight or queued, the file on disk is not yet the held rows: certify nothing.
+    if (!dataIdentity || !state.closed || writing || queued !== undefined) return;
     const rows = state.closed.size;
     const nowMs = clock.now();
     const prior = stampMs(state.closedObservedAt);
@@ -657,7 +692,15 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
   // W1-T11266: each row's serialized line from the last commit, keyed by PR or issue number. Serve rewrote the
   // 43 MB file about 23 times an hour and stringified every row twice per rewrite, including the channel that did
   // not change. A row whose disk form is unchanged reuses its line; the bytes written are the same.
-  const rowLines: Record<keyof SnapshotRows, RowLines> = { closed: new Map(), issues: new Map() };
+  const rowLines: Record<keyof SnapshotRows, RowLines> = loadedLines;
+  // W1-T13665: the row maps rowLines describe. A channel the commit does not touch keeps its map, so its lines carry over.
+  let linesState: Pick<SnapshotState, "closed" | "issues"> = { closed: state.closed, issues: state.issues };
+  // W1-T13332: the write-behind queue: the one write in flight and the latest commit waiting behind it.
+  const writeBehind = options.writeBehind ? (options.writeBehind === true ? writeSnapshotFileAsync : options.writeBehind.write ?? writeSnapshotFileAsync) : undefined;
+  let writing = false;
+  let queued: { lines: Buffer[]; channel: keyof SnapshotRows; rows: number; observedAt?: string } | undefined;
+  // A write that failed: the next commit retries it, even an unchanged one, so the file cannot stay behind memory.
+  let failed: typeof queued;
   const rowLine = (channel: keyof SnapshotRows, disk: DiskRow, next: RowLines): Buffer => {
     const held = rowLines[channel].get(disk.number);
     const line = held && sameFlatRow(held.row, disk) ? held.line : lineBuffer({ type: channel, row: disk }, maxLineBytes);
@@ -665,19 +708,73 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
     return line;
   };
 
+  /** W1-T13332: write queued commits one at a time until none waits; each publishes the latest committed rows. */
+  const drainWrites = async (): Promise<void> => {
+    writing = true;
+    try {
+      // Let the committing turn finish first: no write, fsync or rename runs on the caller's turn.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      for (let next = queued; next !== undefined; next = queued) {
+        queued = undefined;
+        const stage = `${path}.tmp-${process.pid}-${randomUUID()}`;
+        const digest = createHash("sha256");
+        let bytes = 0;
+        for (const buffer of next.lines) { digest.update(buffer); bytes += buffer.length; }
+        try {
+          await writeBehind!(stage, path, next.lines);
+        } catch (writeError) {
+          // Carried, not erased: the refusal row below records it, and the next commit retries the write.
+          void writeError;
+          // A failed write never publishes: its stage file goes, and the earlier file stays as it was.
+          await fs.promises.unlink(stage).catch((unlinkError: unknown) => {
+            // Carried, not erased: a stage left by a failed write is best-effort cleanup; the refusal is logged below.
+            void unlinkError;
+          });
+          log("board_snapshot.commit_refused", next.channel, next.rows, bytes, "write_failed");
+          if (queued === undefined) failed = next;
+          continue;
+        }
+        failed = undefined;
+        // A replaced data file is a new identity: no earlier sidecar can certify it.
+        dataIdentity = { sha256: digest.digest("hex"), bytes };
+        headerObservedAt = next.observedAt;
+        try {
+          io.unlink(observationPath);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") log("board_snapshot.observation_refused", "closed", next.rows, 0, "write_failed");
+        }
+        log("board_snapshot.committed", next.channel, next.rows, bytes);
+      }
+    } finally {
+      writing = false;
+    }
+  };
+
   const commit = (channel: keyof SnapshotRows, rows: readonly (BoardPrRest | BoardIssueRest)[]): boolean => {
     let nextRows: Map<number, BoardPrRest> | Map<number, BoardIssueRest>;
+    // W1-T13665: what the checks below learned, so the lines pass neither re-derives nor re-compares a row.
+    const kept = new Set<number>();
+    const changed = new Map<number, ClosedDiskRow>();
     try {
       if (rows.length > maxRows) throw new SnapshotRefusal("row_limit");
       if (channel === "closed") {
         const closed = rows as readonly BoardPrRest[];
         for (const row of closed) {
-          if (!isClosedDiskRow(closedForDisk(row), maxStringBytes)) throw new SnapshotRefusal("invalid_row");
+          const disk = closedForDisk(row);
+          // W1-T13616: a row whose disk form equals the one last committed was validated then; check only what changed.
+          const held = rowLines.closed.get(row.number);
+          if (held && sameFlatRow(held.row, disk)) { kept.add(row.number); continue; }
+          if (!isClosedDiskRow(disk, maxStringBytes)) throw new SnapshotRefusal("invalid_row");
+          changed.set(row.number, disk);
         }
         nextRows = new Map(closed.map((row) => [row.number, { ...row }]));
       } else {
         const issues = rows as readonly BoardIssueRest[];
-        for (const row of issues) if (!isIssueRow(row, maxStringBytes)) throw new SnapshotRefusal("invalid_row");
+        for (const row of issues) {
+          const held = rowLines.issues.get(row.number);
+          if (held && sameFlatRow(held.row, row)) { kept.add(row.number); continue; }
+          if (!isIssueRow(row, maxStringBytes)) throw new SnapshotRefusal("invalid_row");
+        }
         nextRows = new Map(issues.map((row) => [row.number, { ...row }]));
       }
       if (nextRows.size !== rows.length) throw new SnapshotRefusal("duplicate_row");
@@ -688,6 +785,11 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
     }
 
     if (channel === "closed" ? sameVersions(state.closed, rows as readonly BoardPrRest[]) : sameVersions(state.issues, rows as readonly BoardIssueRest[])) {
+      if (failed && !writing && queued === undefined) {
+        queued = failed;
+        failed = undefined;
+        void drainWrites();
+      }
       rollup?.snapshotUnchanged(channel);
       if (!unchangedWritten.has(channel)) {
         log("board_snapshot.unchanged", channel, rows.length, 0);
@@ -721,10 +823,21 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
     // Serialized once: the size pass keeps each line and the write pass writes the same buffers.
     const lines: Buffer[] = [];
     const nextLines: Record<keyof SnapshotRows, RowLines> = { closed: new Map(), issues: new Map() };
+    /** The held line of a row known unchanged: one this commit checked, or one of a channel it does not touch. */
+    const carriedLine = (lineChannel: keyof SnapshotRows, number: number, rowsOf: ReadonlyMap<number, unknown> | undefined,
+      next: RowLines): Buffer | undefined => {
+      const known = lineChannel === channel ? kept.has(number) : rowsOf !== undefined && rowsOf === linesState[lineChannel];
+      const held = known ? rowLines[lineChannel].get(number) : undefined;
+      if (held === undefined) return undefined;
+      next.set(number, held);
+      return held.line;
+    };
     const records = function* (): Generator<() => Buffer> {
       yield () => lineBuffer(header, maxLineBytes);
-      for (const row of nextState.closed?.values() ?? []) yield () => rowLine("closed", closedForDisk(row), nextLines.closed);
-      for (const row of nextState.issues?.values() ?? []) yield () => rowLine("issues", row, nextLines.issues);
+      for (const row of nextState.closed?.values() ?? []) yield () => carriedLine("closed", row.number, nextState.closed, nextLines.closed) ??
+        rowLine("closed", changed.get(row.number) ?? closedForDisk(row), nextLines.closed);
+      for (const row of nextState.issues?.values() ?? []) yield () => carriedLine("issues", row.number, nextState.issues, nextLines.issues) ??
+        rowLine("issues", row, nextLines.issues);
       yield () => lineBuffer(footer, maxLineBytes);
     };
 
@@ -740,6 +853,17 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
       const reason = error instanceof SnapshotRefusal ? error.reason : "invalid_row";
       log("board_snapshot.commit_refused", channel, rows.length, expectedBytes, reason);
       return false;
+    }
+
+    if (writeBehind) {
+      // INVARIANT atomic-and-ordered: memory moves now; the file follows, latest commit last, via stage and rename.
+      state = nextState;
+      rowLines.closed = nextLines.closed;
+      rowLines.issues = nextLines.issues;
+      linesState = { closed: nextState.closed, issues: nextState.issues };
+      queued = { lines, channel, rows: rows.length, ...(nextState.closedObservedAt === undefined ? {} : { observedAt: nextState.closedObservedAt }) };
+      if (!writing) void drainWrites();
+      return true;
     }
 
     const stage = `${path}.tmp-${process.pid}-${randomUUID()}`;
@@ -761,6 +885,7 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
       state = nextState;
       rowLines.closed = nextLines.closed;
       rowLines.issues = nextLines.issues;
+      linesState = { closed: nextState.closed, issues: nextState.issues };
       // A replaced data file is a new identity: no earlier sidecar can certify it.
       dataIdentity = { sha256: digest.digest("hex"), bytes: writtenBytes };
       headerObservedAt = nextState.closedObservedAt;
@@ -818,15 +943,18 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
   let collectionSuccessAt = state.closedObservedAt ?? null;
   let digestRows: ReadonlyMap<number, BoardPrRest> | undefined;
   let rowsDigest: string | null = null;
+  // W1-T13616/W1-T13665: each closed row's hash as the last digest took it, so a digest after a few changed rows hashes only those.
+  const digestJson = new Map<number, { row: ClosedDiskRow; hash: string }>();
   const cache: BoardSnapshotCache = {
     recordClosedAttempt(outcome) {
       const at = clock.iso(), complete = outcome.ok && outcome.truncated !== true && outcome.persisted === true && state.closed !== undefined;
       if (complete) collectionSuccessAt = at;
       if (state.closed !== digestRows) {
         digestRows = state.closed;
-        rowsDigest = digestRows ? boardClosedRowsDigest(digestRows.values()) : null;
+        rowsDigest = digestRows ? boardClosedRowsDigest(digestRows.values(), digestJson) : null;
+        if (digestRows) for (const number of digestJson.keys()) if (!digestRows.has(number)) digestJson.delete(number);
       }
-      const receipt: BoardClosedCollectionReceipt = { version: 1, repository, lastAttemptAt: at, lastSuccessAt: collectionSuccessAt,
+      const receipt: BoardClosedCollectionReceipt = { version: 2, repository, lastAttemptAt: at, lastSuccessAt: collectionSuccessAt,
         state: complete ? "complete" : outcome.ok && outcome.truncated ? "partial" : "unavailable",
         reason: complete ? null : !outcome.ok ? "fetch_failed" : outcome.truncated ? "truncated" : "snapshot_unavailable", rowsDigest };
       const target = boardClosedCollectionPath(root, owner, repo), stage = `${target}.tmp-${process.pid}-${randomUUID()}`;
@@ -954,6 +1082,49 @@ interface SnapshotOptions {
   io?: BoardSnapshotIo;
   log?: (event: string, extra?: Record<string, unknown>) => void;
   bounds?: { maxBytes?: number; maxRows?: number; maxLineBytes?: number };
+  /**
+   * W1-T13332: write a committed collection behind the caller. The rows are committed in memory at once and the
+   * file write, fsync and rename run later through {@link writeSnapshotFileAsync} (libuv's thread pool), one in flight
+   * per cache, the latest commit replacing any queued one. Serve sets it: its board pass runs on the request loop.
+   */
+  writeBehind?: boolean | { write?: (stage: string, path: string, buffers: readonly Buffer[]) => Promise<void> };
+}
+
+/**
+ * W1-T13332: the asynchronous stage-write-fsync-rename of one snapshot file: `stage` is created exclusively (0o600),
+ * every buffer is written in order, the file is fsynced and closed, then renamed over `path`. A failure removes the
+ * stage file and rejects, leaving `path` as it was.
+ */
+export async function writeSnapshotFileAsync(stage: string, path: string, buffers: readonly Buffer[]): Promise<void> {
+  await fs.promises.mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  const handle = await fs.promises.open(stage, "wx", 0o600);
+  try {
+    for (const buffer of buffers) {
+      let offset = 0;
+      while (offset < buffer.length) offset += (await handle.write(buffer, offset, buffer.length - offset)).bytesWritten;
+    }
+    await handle.sync();
+  } catch (error) {
+    await handle.close().catch((closeError: unknown) => {
+      // Carried, not erased: the write's own error is rethrown below; a close failure after it adds nothing.
+      void closeError;
+    });
+    await fs.promises.unlink(stage).catch((unlinkError: unknown) => {
+      // Carried, not erased: the stage file is best-effort cleanup; the write's error is rethrown below.
+      void unlinkError;
+    });
+    throw error;
+  }
+  await handle.close();
+  try {
+    await fs.promises.rename(stage, path);
+  } catch (error) {
+    await fs.promises.unlink(stage).catch((unlinkError: unknown) => {
+      // Carried, not erased: the stage file is best-effort cleanup; the rename's error is rethrown below.
+      void unlinkError;
+    });
+    throw error;
+  }
 }
 
 interface SnapshotHeader {

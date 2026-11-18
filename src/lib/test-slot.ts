@@ -29,7 +29,7 @@ import { setTimeout as sleepAsync } from "node:timers/promises";
 
 import { systemClock, type Clock } from "./clock.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
-import { execFileLoopBounded } from "./loop-bounded-child.js";
+import { execFileRouted } from "./spawn-helper.js";
 import { isHolderStale, reclaimStaleLock } from "./fs-race-safe.js";
 import { sameHost } from "./host-identity.js";
 import { RMD_TMP_PREFIX } from "./tmp.js";
@@ -113,7 +113,7 @@ export function readVmStat(file = "/usr/bin/vm_stat"): string | undefined {
 /** {@link readVmStat} without blocking the event loop: the async acquisition's darwin reading. */
 export async function readVmStatAsync(file = "/usr/bin/vm_stat"): Promise<string | undefined> {
   try {
-    return (await execFileLoopBounded(file, [], { encoding: "utf8", timeout: 5_000 })).stdout;
+    return (await execFileRouted(file, [], { encoding: "utf8", timeout: 5_000 })).stdout;
   } catch {
     // Absent, failed or over its loop-time budget: no reading, exactly as the sync reader's catch.
     return undefined;
@@ -1208,7 +1208,7 @@ export interface TestSlotOptions {
   /** Exact pinned cgroup evidence for a complete foreign-pid-namespace owner identity. */
   cgroupIdentityProbe?: (held: TestSlotHolder) => ReservedTreeEvidence;
   pidNamespaceProbe?: (held: TestSlotHolder) => ReservedTreeEvidence;
-  /** Every kernel start on this boot, for a static record from another namespace; default {@link scanProcessStarts}. */
+  /** Every kernel start on this boot, for a static record or an aged slot hold from another namespace; default {@link scanProcessStarts}. */
   processStartScan?: () => ProcessStartScan;
   /** This waiter's cgroup namespace, named in an aged hold's diagnostic; default {@link readCgroupNamespace}. */
   cgroupNamespace?: () => string | undefined;
@@ -2113,7 +2113,21 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
             try { evidence = (opts.pidNamespaceProbe ?? probeRecordedPidNamespace)(structuredClone(held)); }
             catch (error) { evidence = { state: "unknown", coverage: "pid-namespace-ended", reason: `pid namespace probe failed: ${String(error)}` }; }
             if (evidence.state === "ended") { quiescent = { held, evidence }; return true; }
-            return retainUnknown(held, probeReason, evidence.reason);
+            if (evidence.state === "live" || !/^proc:[0-9]+$/.test(held.processStart ?? "")) return retainUnknown(held, probeReason, evidence.reason);
+            // W1-T12825: one kernel clock spans every pid namespace on a boot, so a complete scan lacking the start proves it ended.
+            let scan: ProcessStartScan;
+            try {
+              // The default scan reads THIS kernel: it speaks only for a record of this kernel's own boot id.
+              scan = opts.processStartScan?.() ?? (held.bootId === readBootId() ? scanProcessStarts()
+                : { complete: false, reason: "record boot id is not this kernel's" });
+            } catch (error) { scan = { complete: false, reason: `process start scan failed: ${String(error)}` }; }
+            if (scan.complete && !scan.starts.has(held.processStart!)) {
+              quiescent = { held, evidence: { state: "ended", complete: true, coverage: "boot-start-scan",
+                reason: `no process on boot ${held.bootId} started at ${held.processStart}`, reservation: testSlotReservationIdentity(held) } };
+              return true;
+            }
+            return retainUnknown(held, probeReason, `${evidence.reason}; process start scan: ${scan.complete
+              ? `a process started at ${held.processStart} is live` : scan.reason}`);
           };
           const reclaim = reclaimStaleLock(path, {
             parseHolder: parseTestSlotHolder,

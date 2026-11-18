@@ -5,6 +5,7 @@ import { stallLadderSpent, stallRemedyRows } from "./fix-progress-judge.js";
 import { isInPlanScope } from "./plan-scope.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import type { PrBlocker } from "./pr-blocker.js";
+import type { TaskFileInput } from "./feedback-landing.js";
 
 /**
  * W1-T12709: an open pull request is never left with "a person must answer" as its only next action. Where the
@@ -38,31 +39,40 @@ export interface ParkedPrFacts {
 export interface ParkedPrDecision { remedy: ParkedPrRemedy; reason: string; inputCriteria: readonly ParkedPrCriterion[] }
 
 /** W1-T12709: the remedy for a pull request that would wait on a person. It never returns "wait". PURE. */
-export function parkedPrRemedy(facts: ParkedPrFacts): ParkedPrDecision {
+export function parkedPrRemedy(facts: ParkedPrFacts): ParkedPrDecision;
+/**
+ * W1-T13361: the ladder with `spent` skipped, the remedies that were taken and left the pull request unchanged. It names
+ * the first remedy that applies and is not spent, or undefined when none is left.
+ */
+export function parkedPrRemedy(facts: ParkedPrFacts, spent: readonly ParkedPrRemedy[]): ParkedPrDecision | undefined;
+export function parkedPrRemedy(facts: ParkedPrFacts, spent: readonly ParkedPrRemedy[] = []): ParkedPrDecision | undefined {
+  const left = (remedy: ParkedPrRemedy): boolean => !spent.includes(remedy);
   const input = facts.unmetCriteria.filter(c => c.needsInput);
   const fixable = facts.unmetCriteria.length - input.length;
-  if (input.length === 0 && (facts.designHoldChecks?.length ?? 0) > 0) {
+  if (input.length === 0 && (facts.designHoldChecks?.length ?? 0) > 0 && left("close-and-rebuild")) {
     return { remedy: "close-and-rebuild", inputCriteria: [],
       reason: `the design hold covers ${facts.designHoldChecks!.length} red checks and no criterion; a red check cannot leave ` +
         "the task, so the pull request is closed and rebuilt as a held task" };
   }
   if (input.length === 0) {
+    if (!left("fix-on-pr")) return undefined;
     const reason = fixable + facts.redChecks.length === 0
       ? "nothing is unmet and nothing is red, so the stalled stage or review runs again on the pull request"
       : `a ${facts.isPlanFiling ? "plan-scoped" : "fix"} round acts on ${fixable} unmet criteria and ` +
         `${facts.redChecks.length} red checks on the pull request`;
     return { remedy: "fix-on-pr", reason, inputCriteria: [] };
   }
-  if (!facts.isPlanFiling && facts.taskCriteria !== undefined && input.length < facts.taskCriteria) {
+  if (!facts.isPlanFiling && facts.taskCriteria !== undefined && input.length < facts.taskCriteria && left("split-follow-up")) {
     return { remedy: "split-follow-up", inputCriteria: input,
       reason: `${input.length} of the task's ${facts.taskCriteria} criteria need operator input; they move to a held ` +
         "follow-up task and the pull request merges on the rest" };
   }
-  if (input.some(c => c.ladderSpent)) {
+  if (input.some(c => c.ladderSpent) && left("close-and-rebuild")) {
     return { remedy: "close-and-rebuild", inputCriteria: input,
       reason: "no part of the pull request can merge without operator input, and the stall remedies were tried; " +
         "the pull request is closed and rebuilt as a held task" };
   }
+  if (!left("fix-on-pr")) return undefined;
   return { remedy: "fix-on-pr", inputCriteria: input,
     reason: "the criteria that need operator input have not had the stall remedies yet, so a fix round runs on the pull request" };
 }
@@ -102,7 +112,7 @@ export interface ParkedPrHost {
   /** R3: an id from reservePlanRepairTaskId, for the landing branch of `target`. */
   reserveTaskId(target: ParkedPrTarget): string;
   /** R3: lands new and amended task files through landTaskFilesAsync, in `target`. */
-  landTaskFiles(files: readonly { relPath: string; content: string; claim: string; proof: string }[], target: ParkedPrTarget):
+  landTaskFiles(files: readonly TaskFileInput[], target: ParkedPrTarget):
     Promise<{ prUrl?: string; error?: string }>;
   closePr(prUrl: string, comment: string): Promise<void>;
   /** W1-T13047: the paths the pull request adds or changes, for a plan filing rebuilt from the pull request itself. */
@@ -129,6 +139,40 @@ export interface ParkedPrContext {
   /** The escalation text the remedy replaces. */
   text: string;
   append: (row: { run_id: string; task_id: string; step: string } & Record<string, unknown>) => void;
+  /**
+   * W1-T13361: what this pass read of the pull request. With it a fix-on-pr row records the body digest and the red
+   * checks, and actOnParkedPr does not take a fix-on-pr that dispatches nothing a second time at the same head, body and
+   * red checks. Without it the remedy is judged per head and cause, as before.
+   */
+  observed?: ParkedPrObserved;
+}
+
+/** W1-T13361: the state a later pass compares, and the sweep's own escalation for a ladder with no remedy left. */
+export interface ParkedPrObserved {
+  /** The digest of the pull request's body; undefined when the pass read no body. */
+  bodyDigest: string | undefined;
+  /** The red checks of the pull request, without the review's criteria. */
+  redChecks: readonly string[];
+  /** A red check's refusal line, where the check rollup carries one. */
+  refusalLine(check: string): string | undefined;
+  /** Opens one needs-human issue through the sweep's escalation. Absent on a pass that may not escalate (a light pass). */
+  escalate?: (text: string) => void | Promise<void>;
+  /** True when an open needs-human issue already names this pull request and head. */
+  issueOpen(): boolean | Promise<boolean>;
+}
+
+/**
+ * W1-T13361: true when the last fix-on-pr row taken for this pull request and cause recorded the head, the body digest
+ * and the red checks this pass reads: the remedy left the pull request unchanged. A row that recorded no red checks was
+ * written before the state was kept, and proves nothing. PURE.
+ */
+export function parkedPrUnchanged(ledger: readonly Record<string, unknown>[], pr: Pick<ParkedPrSubject, "prNumber" | "headSha">,
+  cause: string, observed: Pick<ParkedPrObserved, "bodyDigest" | "redChecks">): boolean {
+  const last = ledger.findLast(r => r.step === PARKED_PR_REMEDY_STEP && r.pr_number === pr.prNumber && r.cause === cause &&
+    r.remedy === "fix-on-pr" && r.outcome === "taken");
+  const names = (checks: readonly unknown[]) => JSON.stringify([...checks].map(String).sort());
+  return last !== undefined && last.head_sha === pr.headSha && last.body_digest === observed.bodyDigest &&
+    Array.isArray(last.red_checks) && names(last.red_checks) === names(observed.redChecks);
 }
 
 export interface ParkedPrOutcome { remedy: ParkedPrRemedy; reason: string; heldTaskId?: string; error?: string }
@@ -144,15 +188,23 @@ export function openEscalationRelease(pendingAnswer: { spent?: true } | undefine
     row.head_sha === headSha && row.remedy === "fix-on-pr" && row.outcome === "taken") ? {} : undefined;
 }
 
+/** W1-T13361: the fields a row keeps of the state a pass read; none when the pass handed no state over. */
+function observedFields(observed: ParkedPrObserved | undefined): Record<string, unknown> {
+  if (observed === undefined) return {};
+  return { ...(observed.bodyDigest === undefined ? {} : { body_digest: observed.bodyDigest }), red_checks: [...observed.redChecks].sort() };
+}
+
 /** Acts on `decision`: one row, and for a split or a close one held task. A later pass reuses that task. */
 export async function takeParkedPrRemedy(pr: ParkedPrSubject, decision: ParkedPrDecision, ledger: readonly Record<string, unknown>[],
   host: ParkedPrHost, ctx: ParkedPrContext): Promise<ParkedPrOutcome> {
   const row = { run_id: ctx.runId, task_id: ctx.ledgerTaskId, step: PARKED_PR_REMEDY_STEP, pr_number: pr.prNumber,
     head_sha: pr.headSha, cause: ctx.cause, remedy: decision.remedy, text: ctx.text.slice(0, 2000) };
   if (decision.remedy === "fix-on-pr") {
-    const written = ledger.some(r => r.step === PARKED_PR_REMEDY_STEP && r.pr_number === pr.prNumber &&
-      r.head_sha === pr.headSha && r.cause === ctx.cause && r.remedy === "fix-on-pr" && r.outcome === "taken");
-    if (!written) ctx.append({ ...row, outcome: "taken", reason: decision.reason });
+    // W1-T13361: with the pass's state in hand the row records it, and a changed body or red check writes a new row.
+    const written = ctx.observed !== undefined ? parkedPrUnchanged(ledger, pr, ctx.cause, ctx.observed)
+      : ledger.some(r => r.step === PARKED_PR_REMEDY_STEP && r.pr_number === pr.prNumber &&
+        r.head_sha === pr.headSha && r.cause === ctx.cause && r.remedy === "fix-on-pr" && r.outcome === "taken");
+    if (!written) ctx.append({ ...row, outcome: "taken", reason: decision.reason, ...observedFields(ctx.observed) });
     return { remedy: decision.remedy, reason: decision.reason };
   }
   const prior = ledger.findLast(r => r.step === PARKED_PR_REMEDY_STEP && r.pr_number === pr.prNumber && r.cause === ctx.cause &&
@@ -226,7 +278,7 @@ function slug(text: string): string {
 
 /** The held task, and for a split the amended task file that no longer carries the moved criteria. */
 function heldTaskFiles(shard: { relPath: string; text: string }, taskId: string, heldTaskId: string, decision: ParkedPrDecision,
-  pr: ParkedPrSubject, ctx: ParkedPrContext): { relPath: string; content: string; claim: string; proof: string }[] {
+  pr: ParkedPrSubject, ctx: ParkedPrContext): TaskFileInput[] {
   const doc = parseDocument(shard.text);
   const seq = doc.contents;
   const index = isSeq(seq) ? seq.items.findIndex(node => isMap(node) && (node.toJSON() as { id?: unknown }).id === taskId) : -1;
@@ -251,8 +303,8 @@ function heldTaskFiles(shard: { relPath: string; text: string }, taskId: string,
       `${typeof task.rationale === "string" ? task.rationale : ""}` };
   const dir = shard.relPath.includes("/tasks.d/") ? posix.dirname(shard.relPath) : posix.join(posix.dirname(shard.relPath), "tasks.d");
   const heldRel = `${dir}/${heldTaskId}-${slug(String(task.title))}.yaml`;
-  const files = [{ relPath: heldRel, content: stringify([held], { lineWidth: 0 }),
-    claim: `the held ${split ? "follow-up" : "rebuild"} task ${heldTaskId} for ${pr.prUrl} is filed`, proof: `grep: id: ${heldTaskId} in ${heldRel}` }];
+  const files: TaskFileInput[] = [{ relPath: heldRel, content: stringify([held], { lineWidth: 0 }),
+    claim: `the held ${split ? "follow-up" : "rebuild"} task ${heldTaskId} for ${pr.prUrl} is filed`, proof: `grep: id: ${heldTaskId} in ${heldRel}`, newFile: true }];
   if (split) {
     const node = item.get("acceptance", true);
     if (isSeq(node)) node.items = node.items.filter(c => !(isMap(c) && claims.has(String((c.toJSON() as { claim?: unknown }).claim))));
@@ -269,7 +321,7 @@ function heldTaskFiles(shard: { relPath: string; text: string }, taskId: string,
  * request adds or changes, and its rationale carries the red gates, the refusal and the plan files' paths.
  */
 function heldPlanRebuildFiles(heldTaskId: string, decision: ParkedPrDecision, pr: ParkedPrSubject, ctx: ParkedPrContext):
-  { relPath: string; content: string; claim: string; proof: string }[] {
+  TaskFileInput[] {
   const files = [...new Set(pr.planFiles ?? [])].sort();
   const repo = /github\.com\/[^/]+\/([^/]+)\/pull\//.exec(pr.prUrl)?.[1] ?? "remudero";
   const title = `Rebuild the plan filing of pull request ${pr.prNumber}`;
@@ -286,7 +338,7 @@ function heldPlanRebuildFiles(heldTaskId: string, decision: ParkedPrDecision, pr
       `RED GATES AND REFUSAL: ${ctx.text}\nPLAN FILES of the pull request:\n${files.map(f => `- ${f}`).join("\n")}\n` };
   const heldRel = posix.join(resolveRepoLayout("", () => undefined).planDir, "tasks.d", `${heldTaskId}-${slug(title)}.yaml`);
   return [{ relPath: heldRel, content: stringify([held], { lineWidth: 0 }),
-    claim: `the held rebuild task ${heldTaskId} for ${pr.prUrl} is filed`, proof: `grep: id: ${heldTaskId} in ${heldRel}` }];
+    claim: `the held rebuild task ${heldTaskId} for ${pr.prUrl} is filed`, proof: `grep: id: ${heldTaskId} in ${heldRel}`, newFile: true }];
 }
 
 /** The number of criteria the task file declares for `taskId`, or undefined when it cannot be read. */
@@ -335,21 +387,81 @@ host: Pick<ParkedPrHost, "readTaskShard">): Promise<ParkedPrFacts> {
     ...(designHoldChecks.length > 0 ? { designHoldChecks } : {}) };
 }
 
-/** Takes the sweep's remedy and names the disposition the pull request goes on with. It is never refused-escalate. */
+/** The disposition and blocker the pull request goes on with once `remedy` is taken. PURE. */
+function parkedPrAnswer(remedy: ParkedPrRemedy, facts: ParkedPrFacts): Pick<ParkedPrSweepOutcome, "disposition" | "blocker"> {
+  const fixableUnmet = facts.unmetCriteria.some(c => !c.needsInput);
+  if (remedy === "close-and-rebuild") return { disposition: "wait", blocker: "other" };
+  if (remedy === "split-follow-up") {
+    return fixableUnmet || facts.redChecks.length > 0
+      ? { disposition: "blocked-fixable", blocker: fixableUnmet ? "review-failed" : "own-red" }
+      : { disposition: "wait", blocker: "awaiting-review" };
+  }
+  if (facts.isPlanFiling) return { disposition: "wait", blocker: "own-red" };
+  if (facts.unmetCriteria.length > 0) return { disposition: "blocked-fixable", blocker: "review-failed" };
+  return facts.redChecks.length > 0 ? { disposition: "blocked-fixable", blocker: "own-red" }
+    : { disposition: "post-review", blocker: "awaiting-review" };
+}
+
+/**
+ * Takes the sweep's remedy and names the disposition the pull request goes on with. It is never refused-escalate.
+ * W1-T13361: a fix-on-pr answered with a wait dispatches nothing, so one that left the head, the body and the red checks
+ * unchanged is not taken again. The ladder's next remedy is taken, or with none left one needs-human issue is opened. A
+ * fix-on-pr that hands the pull request to the fix lane or to review is that lane's to bound, and is judged as before.
+ */
 export async function actOnParkedPr(pr: ParkedPrSubject, decision: ParkedPrDecision, facts: ParkedPrFacts,
   ledger: readonly Record<string, unknown>[], host: ParkedPrHost, ctx: ParkedPrContext): Promise<ParkedPrSweepOutcome> {
-  const outcome = await takeParkedPrRemedy(pr, decision, ledger, host, ctx);
-  const fixableUnmet = facts.unmetCriteria.some(c => !c.needsInput);
-  if (outcome.error !== undefined || outcome.remedy === "close-and-rebuild") return { ...outcome, disposition: "wait", blocker: "other" };
-  if (outcome.remedy === "split-follow-up") {
-    return fixableUnmet || facts.redChecks.length > 0
-      ? { ...outcome, disposition: "blocked-fixable", blocker: fixableUnmet ? "review-failed" : "own-red" }
-      : { ...outcome, disposition: "wait", blocker: "awaiting-review" };
+  if (ctx.observed !== undefined && decision.remedy === "fix-on-pr" && parkedPrAnswer("fix-on-pr", facts).disposition === "wait" &&
+      parkedPrUnchanged(ledger, pr, ctx.cause, ctx.observed)) {
+    const next = parkedPrRemedy(facts, ["fix-on-pr"]);
+    return next === undefined ? askPerson(pr, facts, ledger, ctx, ctx.observed) : actOnParkedPr(pr, next, facts, ledger, host, ctx);
   }
-  if (facts.isPlanFiling) return { ...outcome, disposition: "wait", blocker: "own-red" };
-  if (facts.unmetCriteria.length > 0) return { ...outcome, disposition: "blocked-fixable", blocker: "review-failed" };
-  return facts.redChecks.length > 0 ? { ...outcome, disposition: "blocked-fixable", blocker: "own-red" }
-    : { ...outcome, disposition: "post-review", blocker: "awaiting-review" };
+  const outcome = await takeParkedPrRemedy(pr, decision, ledger, host, ctx);
+  if (outcome.error !== undefined) return { ...outcome, disposition: "wait", blocker: "other" };
+  return { ...outcome, ...parkedPrAnswer(outcome.remedy, facts) };
+}
+
+/**
+ * W1-T13361: no remedy is left for a pull request that fix-on-pr left unchanged. One needs-human issue is opened for
+ * this head and body, through the sweep's escalation, and one row records it. The issue is opened before the row is
+ * written, so an escalation that failed is tried again on the next pass. A pass that may not escalate leaves it to one
+ * that may. The pull request keeps its wait.
+ */
+async function askPerson(pr: ParkedPrSubject, facts: ParkedPrFacts, ledger: readonly Record<string, unknown>[], ctx: ParkedPrContext,
+  observed: ParkedPrObserved): Promise<ParkedPrSweepOutcome> {
+  const answer = { remedy: "fix-on-pr" as const, ...parkedPrAnswer("fix-on-pr", facts) };
+  const held = `fix-on-pr was taken at head ${pr.headSha.slice(0, 7)} and left the head, the body and the red checks unchanged, ` +
+    "so it is not taken again (W1-T13361), and no remedy is left";
+  if (ledger.some(r => r.step === PARKED_PR_REMEDY_STEP && r.pr_number === pr.prNumber && r.needs_human === true &&
+      r.head_sha === pr.headSha && r.body_digest === observed.bodyDigest)) {
+    return { ...answer, reason: `${held}; one needs-human issue was opened for this head and body` };
+  }
+  const escalate = observed.escalate;
+  if (escalate === undefined) return { ...answer, reason: `${held}; the needs-human issue waits for a pass that may escalate` };
+  const row = { run_id: ctx.runId, task_id: ctx.ledgerTaskId, step: PARKED_PR_REMEDY_STEP, pr_number: pr.prNumber, head_sha: pr.headSha,
+    cause: ctx.cause, remedy: answer.remedy, outcome: "refused", text: ctx.text.slice(0, 2000), ...observedFields(observed) };
+  const counts = new Map<string, number>();
+  for (const r of ledger) {
+    if (r.step === PARKED_PR_REMEDY_STEP && r.pr_number === pr.prNumber && r.outcome === "taken") {
+      counts.set(String(r.remedy), (counts.get(String(r.remedy)) ?? 0) + 1);
+    }
+  }
+  const tried = [...counts].map(([remedy, count]) => `${count} x ${remedy}`).join(", ");
+  const red = observed.redChecks.map(check => {
+    const line = observed.refusalLine(check);
+    return line === undefined ? check : `${check} (${line})`;
+  }).join("; ") || "none";
+  try {
+    const open = await observed.issueOpen();
+    if (!open) await escalate(`${ctx.text} — ${held}. Red checks: ${red}. Remedies tried: ${tried}.`);
+    const asked = open ? "an open needs-human issue already names this head, so no second one is opened"
+      : `one needs-human issue is opened, naming the red checks (${red}) and the remedies tried (${tried})`;
+    ctx.append({ ...row, needs_human: true, tried, reason: `${held}; ${asked}` });
+    return { ...answer, reason: `${held}; ${asked}` };
+  } catch (error) {
+    const reason = String((error as Error)?.message ?? error);
+    ctx.append({ ...row, reason: `the needs-human issue could not be opened: ${reason}` });
+    return { ...answer, error: reason, reason: `${held}; the needs-human issue could not be opened, and the next pass tries it again: ${reason}` };
+  }
 }
 
 /**

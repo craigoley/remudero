@@ -22,8 +22,9 @@ import {
   landFeedback, landFeedbackStatusContent, planDestinationLandingOpts, queueFeedbackRecord, queuedFeedbackDir, readQueuedFeedbackRecords,
   type LandFeedbackOpts,
 } from "./feedback-landing.js";
-import type { Mount, Mounts } from "./mounts.js";
-import { resolveRiskJudgeMount } from "./risk-judge.js";
+import type { JudgeMount, Mount, Mounts } from "./mounts.js";
+import { shadowJudgeCall } from "./judge-shadow.js";
+import { providerLessRiskJudgeMount, resolveRiskJudgeMount } from "./risk-judge.js";
 import { spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
 import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
 import type { ConsoleCorrection } from "./console-feedback.js";
@@ -287,7 +288,20 @@ export function buildDecisionSummarySpawnArgs(opts: {
     effort: opts.mount.effort,
     maxTurns: opts.mount.maxTurns,
     tools: [], // everything it needs is in the prompt — no exploration, mirrors RISK_JUDGE_TOOLS
+    // W1-T12187: a `feedback_summary` row may name a provider; the cell a host falls back to carries none.
+    ...(opts.mount.provider === undefined ? {} : { mountProvider: opts.mount.provider }),
   };
+}
+
+/** The JSON object in a decision-summary reply, or `null` when it holds none. */
+function decisionSummaryJson(text: string): unknown {
+  const match = /\{[\s\S]*\}/.exec(text);
+  if (!match) return null;
+  try {
+    return JSON.parse(match[0]);
+  } catch {
+    return null;
+  }
 }
 
 /** Wire a real {@link SummarizeDeps.summarize} to an actual worker spawn — the production
@@ -298,25 +312,29 @@ export function realDecisionSummarizer(opts: {
   cwd: string;
   settingsFile: string;
   spawn?: typeof spawnWorker;
+  /** W1-T12187: where the cash shadow of each summary writes its row. With none, no shadow is asked. */
+  shadowLog?: (step: string, fields: Record<string, unknown>) => void;
 }): (input: SummarizeInput) => Promise<unknown> {
   const spawn = opts.spawn ?? benchmarkNonDispatchSpawn("feedback-summary");
   return async (input: SummarizeInput) => {
-    const result: WorkerResult = await spawn(
-      buildDecisionSummarySpawnArgs({ input, mount: opts.mount, cwd: opts.cwd, settingsFile: opts.settingsFile }),
-    );
-    const match = /\{[\s\S]*\}/.exec(result.text);
-    if (!match) return null;
-    try {
-      return JSON.parse(match[0]);
-    } catch {
-      return null;
+    const args = buildDecisionSummarySpawnArgs({ input, mount: opts.mount, cwd: opts.cwd, settingsFile: opts.settingsFile });
+    const result: WorkerResult = await spawn(args);
+    const summary = decisionSummaryJson(result.text);
+    if (opts.shadowLog !== undefined) {
+      // Not awaited: the summary returned below is the primary's. The row records cost and parse, never agreement.
+      void shadowJudgeCall({
+        role: "decision-summary", key: createHash("sha256").update(args.prompt).digest("hex").slice(0, 16), mount: opts.mount,
+        primaryArgs: args, primary: result, primaryAnswer: summary, parse: (text) => decisionSummaryJson(text) ?? undefined,
+        spawn, log: opts.shadowLog,
+      });
     }
+    return summary;
   };
 }
 
-/** The cheapest configured mount for a decision-summary rung (reuses risk-judge.ts's scanner). */
-export function resolveDecisionSummaryMount(mounts: Mounts): Mount {
-  return resolveRiskJudgeMount(mounts);
+/** The decision summary's mount: its own `feedback_summary` row (W1-T12187), else the cheapest cell with no provider. */
+export function resolveDecisionSummaryMount(mounts: Mounts): JudgeMount {
+  return mounts.feedback_summary ?? providerLessRiskJudgeMount(mounts);
 }
 
 // ── Feedback expansions (W1-T350) ────────────────────────────────────────────
@@ -592,6 +610,11 @@ export function assertOneFeedbackCopy(id: string, first: { path: string; text: s
 
 export function readLandedFeedbackEntry(root: string, id: string, git: UpstreamGitExec = defaultUpstreamGit(root)): FeedbackEntry | null {
   return runStepsSync(readLandedFeedbackEntrySteps(root, id, git, SYNC_CAPTURE_IO));
+}
+
+/** W1-T13368: {@link readLandedFeedbackEntry} with its git awaited, for a daemon-loop caller. */
+export function readLandedFeedbackEntryAsync(root: string, id: string): Promise<FeedbackEntry | null> {
+  return runStepsAsync(readLandedFeedbackEntrySteps(root, id, ASYNC_CAPTURE_IO.git(root), ASYNC_CAPTURE_IO));
 }
 
 function* readLandedFeedbackEntrySteps(root: string, id: string, git: CaptureGitExec, io: CaptureIo): Steps<FeedbackEntry | null> {
@@ -1142,21 +1165,57 @@ export function readFeedbackEntry(root: string, id: string): FeedbackEntry {
   return feedbackEntryFrom(parseYaml(text), id);
 }
 
-/** List every captured entry of both roots, oldest first (id is Date.now()-prefixed, so filename sort = capture order). */
+/** W1-T13334: the text and the parse of each feedback file, by directory and file name, kept while the file's stat
+ *  identity (dev, ino, size, mtimeNs, ctimeNs) is the same. Only a file that parsed is kept. */
+const keptFeedbackFiles = new Map<string, Map<string, { identity: string; text: string; entry: FeedbackEntry }>>();
+/** A file is kept only when its last change is this old. A file system stamps a change with a clock that ticks (10 ms
+ *  on Linux, up to 2 s elsewhere), so a second write of the same size inside one tick would leave the identity equal. */
+const FEEDBACK_FILE_SETTLE_MS = 2_000;
+
+function feedbackFileStat(path: string, nowMs: number): { identity: string; settled: boolean } {
+  const st = statSync(path, { bigint: true });
+  const lastChangeMs = Number(st.mtimeMs > st.ctimeMs ? st.mtimeMs : st.ctimeMs);
+  return { identity: [st.dev, st.ino, st.size, st.mtimeNs, st.ctimeNs].join(":"), settled: nowMs - lastChangeMs >= FEEDBACK_FILE_SETTLE_MS };
+}
+
+/** List every captured entry of both roots, oldest first (id is Date.now()-prefixed, so filename sort = capture order).
+ *  W1-T13334: a file is read and parsed again only when it is new or its stat identity changed. The stat comes before
+ *  the read, so no answer is older than the file. Each call returns its own copy of every entry. */
 export function listFeedback(root: string, opts: { status?: FeedbackStatus } = {}): FeedbackEntry[] {
-  const files = new Map<string, { path: string; text: string }>();
+  const files = new Map<string, { path: string; text: string; dir: string; identity: string; settled: boolean }>();
+  const nowMs = systemClock.now();
   for (const r of hostFeedbackRoots(root)) {
     const dir = feedbackDir(r);
-    if (!existsSync(dir)) continue;
-    for (const f of readdirSync(dir).filter((name) => name.endsWith(".yaml"))) {
-      const copy = { path: join(dir, f), text: readFileSync(join(dir, f), "utf8") };
+    if (!existsSync(dir)) {
+      keptFeedbackFiles.delete(dir);
+      continue;
+    }
+    const names = new Set(readdirSync(dir).filter((name) => name.endsWith(".yaml")));
+    const kept = keptFeedbackFiles.get(dir);
+    // A file that is gone is dropped.
+    for (const name of kept?.keys() ?? []) if (!names.has(name)) kept!.delete(name);
+    for (const f of names) {
+      const path = join(dir, f);
+      const stat = feedbackFileStat(path, nowMs);
+      const same = kept?.get(f)?.identity === stat.identity ? kept.get(f) : undefined;
+      const copy = { path, dir, ...stat, text: same ? same.text : readFileSync(path, "utf8") };
       const held = files.get(f);
       if (held === undefined) files.set(f, copy);
+      // The two-root check runs on every call, over kept and fresh text alike.
       else assertOneFeedbackCopy(f.replace(/\.yaml$/, ""), held, copy);
     }
   }
-  const entries = [...files].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-    .map(([f, copy]) => feedbackEntryFrom(parseYaml(copy.text), f.replace(/\.yaml$/, "")));
+  const entries = [...files].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([f, copy]) => {
+    const kept = keptFeedbackFiles.get(copy.dir)?.get(f);
+    if (kept?.identity === copy.identity) return structuredClone(kept.entry);
+    // A parse that throws keeps nothing, so the next call reads the file and throws again.
+    const entry = feedbackEntryFrom(parseYaml(copy.text), f.replace(/\.yaml$/, ""));
+    if (copy.settled) {
+      const dirKept = keptFeedbackFiles.get(copy.dir) ?? new Map();
+      keptFeedbackFiles.set(copy.dir, dirKept.set(f, { identity: copy.identity, text: copy.text, entry }));
+    }
+    return structuredClone(entry);
+  });
   return opts.status ? entries.filter((e) => e.status === opts.status) : entries;
 }
 

@@ -3,13 +3,14 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: auto
+  verify: human  # parked with the retirement: any risk ruling judged the record before this edit
   risk: low
   priority: 1.12
   # refusal-amendment (W1-T9394, run W1-T9394-1793138692684, 2026-10-27T23:09:35.927Z): the worker refused criterion 1 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
   #   worker evidence: The remedy has to go in `src/cli/commands/fix.ts` or `src/lib/fix-outcome.ts`, and the task declares only `src/run-task.ts` and the new test; `src/run-task.ts` doesn't contain the refusal.
   #   this task is held from dispatch until its record changes; an Architect must make the change above
-  status: queued
+  status: blocked
+  retirement: retired  # retired by rule 2 (cause stopped) of the operator's mechanical rulings (2026-10-21, W1-T10371): the symptom had 0 occurrence(s) across 7 day(s), never seen. Retired by the machine-filing judge, 2026-11-18T10:56:18.830Z
   attempts: 0
   author_class: machine
   origin: "ci-friction:fix_refusal:non-test-paths-need-scope"

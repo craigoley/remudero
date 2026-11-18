@@ -119,3 +119,75 @@ test("idle_starved: a fresh shell pulse is live but not a stalled build; an old 
   assert.match(dead.daemon_verdict, /^STALE/);
   assert.match(dead.dispatch_verdict, /^STALLED/, "an old pulse cannot mask a dead sleeper");
 });
+
+test("W1-T13249 criterion 2: the last dispatch is the newest run that passed its claim, not the newest run.start", () => {
+  const rs = (ago: number, runId: string) =>
+    JSON.stringify({ ts: isoAgo(ago), run_id: runId, step: "run.start", lane: "run-task", task_id: "W1-T12114" });
+  const claim = (ago: number, runId: string, proceed: boolean) =>
+    JSON.stringify({ ts: isoAgo(ago), run_id: runId, step: "dispatch.claim", outcome: proceed ? "created" : "taken", proceed });
+  // A real build 48 h ago, then a refused run.start every tick since: the beat must still read STALLED.
+  const ledger = [
+    rs(48 * 3600, "real"), claim(48 * 3600 - 1, "real", true),
+    rs(120, "refused-1"), claim(119, "refused-1", false),
+    rs(60, "refused-2"), claim(59, "refused-2", false),
+  ];
+  const stalled = beat([...POLLING(), ...ledger]);
+  assert.match(stalled.dispatch_verdict, /^STALLED/, "a claim-refused run.start is not a dispatch");
+  assert.ok(Number(stalled.dispatch_last_age_s) > 47 * 3600, `last dispatch is the real build, got age ${stalled.dispatch_last_age_s}`);
+
+  // A run that took no claim, and a run that passed its claim, both still count.
+  const noClaim = beat([...POLLING(), ...ledger, rs(30, "no-claim")]);
+  assert.equal(noClaim.dispatch_verdict, "building");
+  const passed = beat([...POLLING(), ...ledger, rs(40, "ok"), claim(39, "ok", true)]);
+  assert.equal(passed.dispatch_verdict, "building");
+});
+
+// W1-T13256: dispatches every 30 minutes (12 of them, so 11 gaps), the newest `lastAgo` seconds old.
+const CADENCE = (lastAgo: number, count = 12, gapS = 1800) =>
+  Array.from({ length: count }, (_, i) =>
+    JSON.stringify({ ts: isoAgo(lastAgo + i * gapS), run_id: `cad-${i}`, step: "run.start", lane: "run-task", task_id: "W1-T1" }),
+  );
+
+test("W1-T13256 criterion 1: the stalled bound is derived from the recent gaps between dispatches and published with its source", () => {
+  // Gaps of 30 min -> p90 1800 s -> bound 5400 s. 2 h without a dispatch is far under the old fixed
+  // 6 h, so only a derived bound reads it as stalled.
+  const stalled = beat([...POLLING(), ...CADENCE(2 * 3600)]);
+  assert.equal(stalled.dispatch_stall_bound_s, "5400", "the bound is three times the p90 gap");
+  assert.match(stalled.dispatch_stall_bound_source, /^derived:p90x3\(gaps=11,p90=1800s\)$/);
+  assert.match(stalled.dispatch_verdict, /^STALLED/, "2 h against a 30-minute cadence is stalled");
+
+  // Inside the derived bound the same fleet still reads building.
+  const building = beat([...POLLING(), ...CADENCE(3000)]);
+  assert.equal(building.dispatch_stall_bound_s, "5400");
+  assert.equal(building.dispatch_verdict, "building");
+
+  // A burst of back-to-back dispatches cannot derive a bound below the floor.
+  const burst = beat([...POLLING(), ...CADENCE(600, 12, 20)]);
+  assert.equal(burst.dispatch_stall_bound_s, "1800");
+  assert.match(burst.dispatch_stall_bound_source, /^derived:floor1800\(/);
+  assert.equal(burst.dispatch_verdict, "building");
+});
+
+test("W1-T13256 criterion 2: too little history keeps the fixed 6 h bound and says so, and an empty queue reads idle", () => {
+  // Seven dispatches = six gaps, under the eight needed.
+  const few = beat([...POLLING(), ...CADENCE(2 * 3600, 7)]);
+  assert.equal(few.dispatch_stall_bound_s, "21600", "too few gaps: today's fixed bound");
+  assert.match(few.dispatch_stall_bound_source, /^fixed-fallback:too-few-gaps\(6<8\)$/);
+  assert.equal(few.dispatch_verdict, "building", "2 h is inside the fixed 6 h");
+
+  const old = beat([...POLLING(), ...CADENCE(7 * 3600, 7)]);
+  assert.match(old.dispatch_verdict, /^STALLED/, "past the fixed 6 h it still stalls");
+
+  // No dispatch rows at all: still the fallback.
+  const none = beat([...POLLING()]);
+  assert.equal(none.dispatch_stall_bound_s, "21600");
+  assert.match(none.dispatch_stall_bound_source, /^fixed-fallback:too-few-gaps\(0<8\)$/);
+
+  // A fleet with no queued work reads idle even when ample history derives a bound it has crossed.
+  const idle = beat([
+    ...CADENCE(2 * 3600),
+    JSON.stringify({ ts: isoAgo(60), step: "daemon.idle_starved.pulse", task_id: "DAEMON" }),
+  ]);
+  assert.equal(idle.dispatch_stall_bound_s, "5400");
+  assert.match(idle.dispatch_verdict, /^idle_starved/);
+});

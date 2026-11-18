@@ -1,0 +1,56 @@
+- id: W1-T13455
+  title: "Serve mounts the inbox-thread view and serves it with no switch entry, so the Console's thread page reads a stored body instead of falling back to GET /v1/i/core/inbox/thread"
+  repo: remudero
+  depends_on: []
+  priority: 0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # 2 concerns: a new mounted view route with its contract entry, and the worker building a view with no switch
+  band_meaning: span
+  origin: "operator-session#serve-oom-2026-11-16"
+  plan_refs:
+    - W1-T13205
+  files:
+    - src/lib/serve.ts
+    - src/lib/read-model-worker.ts
+    - openapi/daemon.yaml
+    - packages/api-client/src/schema.d.ts
+    - test/every-view-body-matches-its-schema.test.ts
+    - test/a-view-with-no-switch-is-not-built.test.ts
+    - test/the-inbox-thread-view-is-built-with-no-switch.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "With no switch entry, readModelViewBuilt says the worker builds inbox-thread (READ_MODEL_VIEW_READERS names its GET route as the reader), an explicit off still stops it, and an unswitched view with no reader (task) is still not built"
+      proof: "grep: W1-T13455 criterion 1 in test/the-inbox-thread-view-is-built-with-no-switch.test.ts"
+    - claim: "Through serve's own routes, GET /v1/views/inbox-thread?id=<thread id> answers 200 against the InboxThreadView contract while the switches file has no inbox-thread entry"
+      proof: "grep: W1-T13455 criterion 2 in test/every-view-body-matches-its-schema.test.ts"
+    - claim: "GET /v1/views/inbox-thread without an id is refused with 400 before any body is read"
+      proof: "grep: W1-T13455 criterion 3 in test/every-view-body-matches-its-schema.test.ts"
+    - claim: "The agent view, served by default since W1-T13282, is also built with no switch entry (a READ_MODEL_VIEW_READERS entry for GET /v1/views/agent); an explicit off still stops it"
+      proof: "grep: W1-T13455 criterion 4 in test/the-inbox-thread-view-is-built-with-no-switch.test.ts"
+  rationale: |
+    WHY: Craig approved the lightweight serve on 2026-11-17 ("Let's get the lightweight serve running and decomission
+    the old"). The Console thread observed on live serve at 18:08Z that /v1/views/inbox-thread answers 404: the worker
+    builds the view (read-model-worker.ts, P4-T10) but serve.ts's readModelViews list omits INBOX_THREAD_VIEW_NAME, so
+    the Console reads GET /v1/i/core/inbox/thread instead (10,306 Console reads in route-reads.json at 18:10Z).
+    MEASURED 2026-11-17 19:19 to 19:49Z: GET /v1/views/agent answered stale=true on all 629 polls, its body built from the
+    ledger of 2026-11-10T12:22Z; agent is served by default (W1-T13282) but, with no switch and no declared reader, the
+    worker never rebuilds it.
+    READ at origin/main: readModelViewBuilt builds an unswitched view only when READ_MODEL_VIEW_READERS names a reader
+    for it, so mounting the route alone would answer view_not_ready forever.
+  design: |
+    NO-INVARIANTS: the change mounts a view the worker already builds; no existing route, body or switch changes meaning.
+    1. serve.ts: add INBOX_THREAD_VIEW_NAME to readModelViews, demandViews, servedByDefault and requiredParams (id), in
+       the view routes and in the view-events list.
+    2. read-model-worker.ts: READ_MODEL_VIEW_READERS gains inbox-thread, read by GET /v1/views/inbox-thread, and agent,
+       read by GET /v1/views/agent.
+    3. Declare the route and its InboxThreadView / InboxThreadViewData schemas (data.thread is InboxThreadDetail) in
+       openapi/daemon.yaml, regenerate the API client, and add the view to the per-view schema census.
+  falsifier: |
+    Mount the route without the reader entry: criterion 1 fails and the census read answers 404. Leave it off the
+    mounted list: criterion 2 fails. Drop the required id: criterion 3 fails.
+  note: |
+    Id reserved for run-unfiled-1794939017000 with ~/rmd-work/bin/reserve-id.sh.

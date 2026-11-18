@@ -41,12 +41,17 @@ fix_progress_judge:
 `;
 const KNOWN = ["test/a.test.ts", "test/b.test.ts", "test/c.test.ts"];
 
+/** The real file without its own ci_judge and fix_progress_judge rows (W1-T13364 added them). */
+function realMountsWithoutJudgeRows(): string {
+  return readFileSync(mountsPath(REPO_ROOT), "utf8").replace(/^(?:ci_judge|fix_progress_judge):.*\n(?:[ \t]+.*\n)*/gm, "");
+}
+
 function tmpRoot(t: { after: (fn: () => void) => void }, rows: string): string {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}judge-shadow-`));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   mkdirSync(join(dir, ".remudero"), { recursive: true });
   mkdirSync(join(dir, "state"), { recursive: true });
-  writeFileSync(mountsPath(dir), `${readFileSync(mountsPath(REPO_ROOT), "utf8")}\n${rows}`);
+  writeFileSync(mountsPath(dir), `${realMountsWithoutJudgeRows()}\n${rows}`);
   return dir;
 }
 
@@ -102,7 +107,9 @@ test("W1-T11075 criterion 1: the ci and fix-progress judges resolve their own mo
   assert.equal(resolveCiJudgeMount(mounts).provider, "claude");
   assert.deepEqual(resolveCiJudgeMount(mounts).shadow, { provider: "cash", deployment: DEEPSEEK });
   assert.equal(resolveFixProgressJudgeMount(mounts).provider, "claude");
-  const plain = loadMounts(mountsPath(REPO_ROOT));
+  const plain = loadMounts(mountsPath(tmpRoot(t, "")));
+  assert.equal(plain.ci_judge, undefined);
+  assert.equal(plain.fix_progress_judge, undefined);
   assert.equal(resolveCiJudgeMount(plain).model, resolveRiskJudgeMount(plain).model);
   assert.equal(resolveCiJudgeMount(plain).provider, undefined);
   assert.equal(resolveFixProgressJudgeMount(plain).shadow, undefined);
@@ -224,7 +231,9 @@ test("W1-T11075: a judge row's shadow arm must be a cash deployment", () => {
   const row = (shadow: unknown) => ({ ...base, ci_judge: { model: "haiku", effort: "low", max_turns: 400, context_budget: 60000, shadow } });
   assert.deepEqual(validateMounts(row({ deployment: DEEPSEEK, effort: "low", provider: "openweight" })).ci_judge?.shadow,
     { provider: "cash", deployment: DEEPSEEK, effort: "low" });
-  assert.throws(() => validateMounts(row("DeepSeek")), MountsError);
+  // W1-T12417: a bare name is a decision_models row or a cash deployment id; a name that is neither is refused.
+  assert.deepEqual(validateMounts(row(DEEPSEEK)).ci_judge?.shadow, { provider: "cash", deployment: DEEPSEEK });
+  assert.throws(() => validateMounts(row("not a deployment")), MountsError);
   assert.throws(() => validateMounts(row({ deployment: DEEPSEEK, provider: "claude" })), /shadow.provider' must be cash/);
   assert.throws(() => validateMounts(row({ deployment: "bad id!" })), /shadow.deployment/);
   assert.throws(() => validateMounts(row({ deployment: DEEPSEEK, effort: "" })), /shadow.effort/);

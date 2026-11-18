@@ -521,6 +521,9 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "code_scanning.judged_fix",
   "code_scanning.judged_false_positive",
   "code_scanning.fix_dispatch",
+  // W1-T13470: a capture once per head and check id, an escalation once per head; archived, each would repeat.
+  "security.codeql_configuration_warning_captured",
+  "security.codeql_configuration_warning_escalated",
   "automerge.rearmed_after_disarm",
   "automerge.rearm_exhausted",
   "automerge.stale_rollup_refreshed", // W1-T6404: the once-per-PR refresh bound; forgotten, it loops.
@@ -620,6 +623,8 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // W1-T372: `escalateQuotaExhaustion`'s (run-task.ts) dedup marker, read per bucket; dropping it
   // re-opens one duplicate quota-exhaustion notice per tick while the bucket stays exhausted.
   "daemon.quota_exhausted.escalated",
+  // W1-T13690: `deliverQuotaExhaustionLate`'s marker; dropping it re-sends the late notice after a restart.
+  "daemon.quota_exhausted.delivered_late",
   // W1-T1082: `escalateDiskHeadroomBreach`'s (run-task.ts) dedup marker, compared against an
   // episode window; it is what stops a daemon RESTART mid-episode from re-opening the issue.
   "daemon.disk_headroom.escalated",
@@ -1331,6 +1336,10 @@ function boundSweepRows(rows: readonly ParsedLedgerLine[], nowMs: number): Parse
   const newest = [newestWhere(() => true), newestWhere((j) => typeof j.main_tip_sha === "string"), newestWhere((j) => typeof j.blocker === "string")];
   return rows.filter((p) => {
     const j = p.json;
+    // W1-T9938: the repeat guard reads this marker from the disposed row itself. Unlike ordinary
+    // sweep history, dropping it at the standing-window boundary re-arms the same unchanged head.
+    // PASS 3 limits this to the newest marked head for a PR, so this is one durable bit per PR.
+    if (p.step === "sweep.disposed" && j?.repeat_escalated === true) return true;
     const ageMs = p.tsMs === undefined ? undefined : nowMs - p.tsMs;
     if (p.step !== "sweep.disposed" || !j || ageMs === undefined || ageMs <= SWEEP_DISPOSED_RECENT_WINDOW_MS) return true;
     if (typeof j.keep_head_branch === "string") return true; // keepReversiblyClosedHeads, at any age
@@ -2006,14 +2015,17 @@ function rotateLedgerLocked(
   archivedLineCount += candidates.length - carried.length;
   candidates = carried;
 
-  // ── PASS 3: sweep.disposed dedup — one line per `pr@head` (its newest acted:true, else its newest);
-  // every other is a same-outcome re-poll (W1-T244). Then W1-T5517's age bound, boundSweepRows. ─
+  // ── PASS 3: sweep.disposed dedup — newest per `pr@head`, plus the repeat marker the same-head
+  // guard needs to survive rotation. An unchanged head's escalation marker is durable; an older
+  // head's marker is obsolete once this PR records a different head. Then W1-T5517's age bound. ─
   const sweepGroups = new Map<string, ParsedLedgerLine[]>();
   const nonSweepCandidates: ParsedLedgerLine[] = [];
+  const newestSweepHeadByPr = new Map<string, string>();
   for (const p of candidates) {
     if (p.step === "sweep.disposed" && p.json) {
       const prNumber = typeof p.json.pr_number === "number" ? p.json.pr_number : "?";
       const headSha = typeof p.json.head_sha === "string" ? p.json.head_sha : "";
+      newestSweepHeadByPr.set(String(prNumber), headSha);
       const key = `${prNumber}@${headSha}`;
       const group = sweepGroups.get(key) ?? [];
       group.push(p);
@@ -2023,12 +2035,19 @@ function rotateLedgerLocked(
     }
   }
   const dedupedSweep: ParsedLedgerLine[] = [];
-  for (const group of sweepGroups.values()) {
+  for (const [key, group] of sweepGroups) {
     const actedTrue = group.filter((p) => p.json?.acted === true);
-    // group is in file order (push preserves it); the LAST entry of whichever pool applies
-    // is the most recent — the acted:true evidence line if one exists, else the latest poll.
-    dedupedSweep.push(actedTrue.length > 0 ? actedTrue[actedTrue.length - 1] : group[group.length - 1]);
-    archivedLineCount += group.length - 1;
+    // group is in file order (push preserves it). Keep the latest acted:true evidence when it
+    // exists (otherwise the latest poll), preserving the existing one-row contract. The latest
+    // marker is one additional row only while this is the PR's newest head.
+    const selected = actedTrue.length > 0 ? actedTrue[actedTrue.length - 1]! : group[group.length - 1]!;
+    const keep = new Set<ParsedLedgerLine>([selected]);
+    const marker = group.findLast((p) => p.json?.repeat_escalated === true);
+    const prKey = key.slice(0, key.indexOf("@"));
+    const head = typeof selected.json?.head_sha === "string" ? selected.json.head_sha : "";
+    if (marker && newestSweepHeadByPr.get(prKey) === head) keep.add(marker);
+    dedupedSweep.push(...group.filter((p) => keep.has(p)));
+    archivedLineCount += group.length - keep.size;
   }
   candidates = [...nonSweepCandidates, ...dedupedSweep];
   const passed = new Set(candidates);
@@ -2047,6 +2066,15 @@ function rotateLedgerLocked(
     byStep.set(key, group);
   }
   const capped: ParsedLedgerLine[] = [];
+  // W1-T12756: the heads a KEPT sweep.absent_repush row minted. Their first sweep.review_eligible
+  // row is the key W1-T12534 reads, so the cap below keeps it (one extra row per kept repush row).
+  const repushHeads = new Set<string>();
+  const repushGroup = byStep.get("sweep.absent_repush") ?? [];
+  const repushKept = repushGroup.length <= MAX_RETAINED_LINES_PER_STEP
+    ? repushGroup : repushGroup.slice(repushGroup.length - MAX_RETAINED_LINES_PER_STEP);
+  for (const p of repushKept) {
+    if (typeof p.json?.new_head === "string") repushHeads.add(`${String(p.json.pr_number)}@${p.json.new_head}`);
+  }
   for (const [step, group] of byStep.entries()) {
     if (
       step === "sweep.disposed" ||
@@ -2059,8 +2087,17 @@ function rotateLedgerLocked(
     }
     // group is in file order (chronological); drop the oldest excess, keep the newest cap.
     const excess = group.length - (step === "review.posted" ? REVIEW_POSTED_RETAINED_ROWS : MAX_RETAINED_LINES_PER_STEP);
-    archivedLineCount += excess;
-    capped.push(...group.slice(excess));
+    const dropped = group.slice(0, excess);
+    const rescued = new Set<ParsedLedgerLine>();
+    if (step === "sweep.review_eligible" && repushHeads.size > 0) {
+      const seen = new Set<string>();
+      for (const p of dropped) {
+        const key = `${String(p.json?.pr_number)}@${String(p.json?.head_sha)}`;
+        if (repushHeads.has(key) && !seen.has(key)) { seen.add(key); rescued.add(p); }
+      }
+    }
+    archivedLineCount += excess - rescued.size;
+    capped.push(...dropped.filter((p) => rescued.has(p)), ...group.slice(excess));
   }
 
   // Restore original file order — every pass above regrouped by key/step, losing it. Filtering
@@ -2084,7 +2121,8 @@ function rotateLedgerLocked(
 
   // ── THE CONVERGENCE INVARIANT (W1-T244). Even after every bound above the retained core can
   // still exceed the ceiling. Post-rotation the live ledger MUST be strictly below it, or rotation
-  // cannot terminate. Shed the OLDEST retained lines by `ts`, never the newest nor a correction (W1-T5551),
+  // cannot terminate. Shed the OLDEST retained lines by `ts`, never the newest, a correction (W1-T5551),
+  // nor W1-T9938's durable repeat-escalation marker,
   // and leave one pointer line naming the archive. Falsifier: test/ledger-rotation-convergence.test.ts. Why: the
   // core once exceeded the ceiling live (docs/forensics/ledger.md#rotateledger). ───────────────
   let shedCount = 0;
@@ -2106,7 +2144,8 @@ function rotateLedgerLocked(
     // headroom — otherwise the very next append could put it straight back over. The invariant is
     // strictly enforced either way; this makes "converged" durable rather than a hair's-width pass.
     const targetBytes = Math.floor(ceilingBytes * 0.9);
-    const sheddable = keptCandidates.filter((p) => p.step !== "correction.provenance");
+    const sheddable = keptCandidates.filter((p) => p.step !== "correction.provenance" &&
+      !(p.step === "sweep.disposed" && p.json?.repeat_escalated === true));
     const byAge = sheddable.sort((a, b) => (a.tsMs ?? 0) - (b.tsMs ?? 0));
     const stillKept = new Set(keptCandidates);
     for (const victim of byAge) {
@@ -2496,4 +2535,29 @@ export function isQueueDispatchRunStart(line: Record<string, unknown>): boolean 
   if (line.step !== "run.start") return false;
   const type = line.type;
   return type === undefined || type === "implement";
+}
+
+/** W1-T13249: run ids whose dispatch claim REFUSED them before spend — a `dispatch.claim` row with `proceed: false` and
+ * none with `proceed: true` (a reclaimed silent claim logs a second, proceeding row for the same run). A run on a path
+ * that takes no claim has no such row and is never in this set. */
+export function claimRefusedRunIds(lines: Iterable<Record<string, unknown>>): Set<string> {
+  const refused = new Set<string>();
+  const passed = new Set<string>();
+  for (const line of lines) {
+    if (line.step !== "dispatch.claim" || typeof line.run_id !== "string") continue;
+    if (line.proceed === true) passed.add(line.run_id);
+    else if (line.proceed === false) refused.add(line.run_id);
+  }
+  for (const id of passed) refused.delete(id);
+  return refused;
+}
+
+/** W1-T13249: the queue dispatches in `lines` — {@link isQueueDispatchRunStart} rows, minus runs the dispatch claim
+ * refused before spend (`run.start` is logged BEFORE the claim, so a refused run left one). The one predicate every
+ * dispatch-stall reader shares. A claim-passed run, and a run on a path that takes no claim, count as before. */
+export function queueDispatchRunStarts<T extends Record<string, unknown>>(lines: readonly T[]): T[] {
+  const refused = claimRefusedRunIds(lines);
+  return lines.filter(
+    (line) => isQueueDispatchRunStart(line) && !(typeof line.run_id === "string" && refused.has(line.run_id)),
+  );
 }

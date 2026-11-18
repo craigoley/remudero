@@ -3,8 +3,8 @@ import { readFileSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
 import type { JudgeMount, Mount, Mounts } from "./mounts.js";
 import { MountsError } from "./mounts.js";
-import { capStderrExcerpt, JUDGE_SHADOW_TRIAL_ID, REPORT_EXCERPT_CAP, spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
-import { OpenWeightAllowanceExhaustedError, OpenWeightRequestTooLargeError } from "./worker-provider.js";
+import { capStderrExcerpt, REPORT_EXCERPT_CAP, spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
+import { shadowJudgeCall, type ShadowJudgeCall } from "./judge-shadow.js";
 import { benchmarkNonDispatchSpawn, withGuardrailAttempt } from "./benchmark-run.js";
 import { argmaxTypedJudgmentOption, runTypedJudgment, type TypedJudgmentResult } from "./typed-judgment.js";
 
@@ -1477,10 +1477,24 @@ export function resolveRiskJudgeMount(mounts: Mounts): Mount {
   return best;
 }
 
+/** W1-T13365: THE ONE TABLE of what two shadowed verdicts are compared on, by surface. The two judges and the
+ *  readers (judge-calibration.ts) use it. A value the table cannot read has no key. */
+export const JUDGE_SHADOW_COMPARED_KEY: Readonly<Record<"ci-judge" | "fix-progress", (verdict: unknown) => string | undefined>> = {
+  "ci-judge": (verdict) => {
+    const read = verdict as { add?: unknown; escalateFull?: unknown } | null | undefined;
+    return Array.isArray(read?.add) && typeof read.escalateFull === "boolean"
+      ? JSON.stringify({ add: [...read.add].sort(), escalateFull: read.escalateFull }) : undefined;
+  },
+  "fix-progress": (verdict) => {
+    const read = (verdict as { verdict?: unknown } | null | undefined)?.verdict;
+    return typeof read === "string" ? read : undefined;
+  },
+};
+
 // ── W1-T11075: the ci judge's and the fix-progress judge's own rows, and their cash shadow ──
 
 /** The risk judge's cell with its provider removed: a judge with no row of its own keeps today's subscription spawn. */
-function providerLessRiskJudgeMount(mounts: Mounts): JudgeMount {
+export function providerLessRiskJudgeMount(mounts: Mounts): JudgeMount {
   const { provider: _provider, ...mount } = resolveRiskJudgeMount(mounts);
   return mount;
 }
@@ -1495,105 +1509,12 @@ export function resolveFixProgressJudgeMount(mounts: Mounts): JudgeMount {
   return mounts.fix_progress_judge ?? providerLessRiskJudgeMount(mounts);
 }
 
-/** The two judges a cash shadow arm may sit beside. */
-export type JudgeShadowSurface = "ci-judge" | "fix-progress";
+// W1-T12187: the shadow itself lives in judge-shadow.ts; its W1-T11075 callers still import it from here.
+export { runJudgeShadow, type JudgeShadowOutcome, type JudgeShadowRequest, type JudgeShadowSurface } from "./judge-shadow.js";
 
-/** What one shadow call came to. `refused` is a capacity or budget refusal; nothing is acted on in any case. */
-export type JudgeShadowOutcome =
-  | { kind: "paired"; agreement: boolean }
-  | { kind: "refused"; refusal: "capacity" | "budget"; reason: string }
-  | { kind: "unavailable"; reason: string }
-  | { kind: "skipped" };
-
-export interface JudgeShadowRequest<T> {
-  surface: JudgeShadowSurface;
-  /** The judgement's identity (a PR and head), so primary and shadow rows join. */
-  key: string;
-  mount: JudgeMount;
-  /** The primary judge's spawn args; the shadow sends the same prompt to its own deployment. */
-  primaryArgs: SpawnWorkerArgs;
-  /** The verdict the caller acts on. `undefined` when the primary gave none. */
-  primaryVerdict: T | undefined;
-  parse: (text: string) => T | undefined;
-  /** Two verdicts agree when these keys are equal. */
-  agreementKey: (verdict: T) => string;
-  spawn: typeof spawnWorker;
-  log: (step: string, fields: Record<string, unknown>) => void;
-}
-
-/** The shadow's spawn args: the primary's prompt, no tools, the cash provider, pinned to the arm's deployment. The
- *  call is billed through the ordinary cash reservation, so it spends inside the existing cash budget. */
-function judgeShadowSpawnArgs(primary: SpawnWorkerArgs, mount: JudgeMount, surface: JudgeShadowSurface): SpawnWorkerArgs | undefined {
-  const arm = mount.shadow;
-  if (arm === undefined) return undefined;
-  return {
-    ...primary, tools: [], mountProvider: "cash", effort: arm.effort ?? "default",
-    routingTrial: { id: JUDGE_SHADOW_TRIAL_ID, arm: "cash", reason: `${surface} shadow of ${mount.model}`, models: [arm.deployment] },
-  };
-}
-
-function shadowRefusal(error: unknown): { refusal: "capacity" | "budget"; reason: string } | undefined {
-  if (error instanceof OpenWeightAllowanceExhaustedError) return { refusal: "budget", reason: error.message };
-  if (error instanceof OpenWeightRequestTooLargeError) return { refusal: "capacity", reason: error.message };
-  return undefined;
-}
-
-/** ADVISORY ONLY: ask the row's cash shadow arm the same judgement and ledger both verdicts and whether they agree.
- *  It never throws and returns nothing the caller acts on; a refusal for capacity or budget is ledgered and changes
- *  nothing. A row with no shadow arm spends nothing. */
-export async function runJudgeShadow<T>(request: JudgeShadowRequest<T>): Promise<JudgeShadowOutcome> {
-  const args = judgeShadowSpawnArgs(request.primaryArgs, request.mount, request.surface);
-  if (args === undefined) return { kind: "skipped" };
-  const common = {
-    surface: request.surface, decision_key: request.key,
-    primary_model: request.mount.model, primary_provider: request.mount.provider ?? null,
-    primary_verdict: request.primaryVerdict ?? null,
-    shadow_deployment: request.mount.shadow!.deployment, shadow_effort: args.effort,
-  };
-  const record = (step: string, fields: Record<string, unknown>): void => {
-    try {
-      request.log(step, { ...common, ...fields });
-    } catch (error) {
-      // A failed observation must never affect the judgement being shadowed.
-      process.stderr.write(`judge shadow ledger unavailable: ${error instanceof Error ? error.message : String(error)}\n`);
-    }
-  };
-  let outcome: JudgeShadowOutcome;
-  try {
-    const result = await request.spawn(args);
-    const spend = { cost_usd: result.costUsd ?? null, served_model: result.routedModel ?? null };
-    if (result.budgetRefused === true) {
-      outcome = { kind: "refused", refusal: "budget", reason: `cash allowance refused (${result.cashAllowanceLimit ?? "fleet"})` };
-      record("judge_shadow.refused", { ...spend, refusal: outcome.refusal, reason: outcome.reason });
-      return outcome;
-    }
-    if (result.openWeightCapacityShortfall !== undefined) {
-      const shortfall = result.openWeightCapacityShortfall;
-      outcome = { kind: "refused", refusal: "capacity",
-        reason: `${shortfall.deployment} needs ${shortfall.estimatedTokens} tokens; its limit is ${shortfall.limitTokens}` };
-      record("judge_shadow.refused", { ...spend, refusal: outcome.refusal, reason: outcome.reason });
-      return outcome;
-    }
-    const verdict = result.isError || (result.subtype !== undefined && result.subtype !== "success") ? undefined : request.parse(result.text);
-    if (verdict === undefined) {
-      outcome = { kind: "unavailable", reason: result.isError ? `shadow call failed (${result.subtype ?? "error"})` : "unparseable shadow verdict" };
-      record("judge_shadow.unavailable", { ...spend, reason: outcome.reason });
-      return outcome;
-    }
-    const agreement = request.primaryVerdict !== undefined &&
-      request.agreementKey(request.primaryVerdict) === request.agreementKey(verdict);
-    record("judge_shadow.paired", { ...spend, shadow_verdict: verdict, agreement });
-    return { kind: "paired", agreement };
-  } catch (error) {
-    const refusal = shadowRefusal(error);
-    if (refusal) {
-      record("judge_shadow.refused", refusal);
-      return { kind: "refused", ...refusal };
-    }
-    const reason = error instanceof Error ? error.message : String(error);
-    record("judge_shadow.unavailable", { reason });
-    return { kind: "unavailable", reason };
-  }
+/** W1-T12187: the risk judge's mount: its own `risk_judge` row, else the cheapest cell with no provider. */
+export function resolveRiskJudgeRoleMount(mounts: Mounts): JudgeMount {
+  return mounts.risk_judge ?? providerLessRiskJudgeMount(mounts);
 }
 
 // ── The real spawn (mirrors flight-judge.ts's spawnFlightJudgeWorker) ─────
@@ -1668,6 +1589,18 @@ export async function typedRiskJudgment(opts: {
   });
 }
 
+/** W1-T12187: the identity one risk judgement's primary and shadow rows share. */
+function riskJudgeDecisionKey(input: RiskJudgeInput): string {
+  if (input.prNumber !== undefined) return `PR${input.prNumber}@${input.headSha ?? "unknown"}`;
+  return input.planContext.taskId ?? "unknown";
+}
+
+/** The risk judge's own parser, for a shadow reply: the parsed verdict, or `undefined`. */
+function parsedRiskJudgeVerdict(text: string): RiskJudgeVerdict | undefined {
+  const outcome = parseRiskJudgeResponse(text);
+  return outcome.kind === "parsed" ? outcome.verdict : undefined;
+}
+
 /** BACKSTOP (W1-T1266): the healthy path — any parsed verdict, adverse or not — returns
  *  on attempt 1, always. Fires only once the judge repeatedly returns unparseable output. */
 export const RISK_JUDGE_MAX_ATTEMPTS = 3;
@@ -1691,6 +1624,11 @@ export function realRiskJudge(opts: {
   spend?: RiskJudgeSpendCollector;
   /** W1-T5659: passed to every spawn; once aborted no further spawn starts and the judgment throws. */
   signal?: AbortSignal;
+  /** W1-T12187: set for the risk judge role only. The spawn then uses the provider `mount` names, and each parsed
+   *  verdict is asked of the cash shadow afterwards, with its row written here. The verdict never waits on it. */
+  shadowLog?: (step: string, fields: Record<string, unknown>) => void;
+  /** W1-T12417: the decision-model seams of that shadow, for a test; production reads the host config. */
+  shadowDecisions?: ShadowJudgeCall<unknown>["decisions"];
 }): (input: RiskJudgeInput) => Promise<RiskJudgeVerdict> {
   const spawn = opts.spawn ?? benchmarkNonDispatchSpawn("risk-judge");
   const maxAttempts = opts.maxAttempts ?? RISK_JUDGE_MAX_ATTEMPTS;
@@ -1699,7 +1637,9 @@ export function realRiskJudge(opts: {
     // Built once, reused by reference every attempt — the byte-identical request
     // test/unparseable-verdict-third-state.test.ts pins.
     const built = buildRiskJudgeSpawnArgs({ input, mount: opts.mount, cwd: opts.cwd, settingsFile: opts.settingsFile });
-    const spawnArgs = opts.signal === undefined ? built : { ...built, signal: opts.signal };
+    const provider = opts.shadowLog === undefined ? undefined : opts.mount.provider;
+    const spawnArgs: SpawnWorkerArgs = { ...built, ...(opts.signal === undefined ? {} : { signal: opts.signal }),
+      ...(provider === undefined ? {} : { mountProvider: provider }) };
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       if (opts.signal?.aborted) throw new Error("risk judgment cancelled before its spawn");
       const result = await withGuardrailAttempt("judge-retry", attempt, () => spawn(spawnArgs));
@@ -1716,7 +1656,18 @@ export function realRiskJudge(opts: {
       if (opts.signal?.aborted) throw new Error("risk judgment cancelled during its spawn");
       const outcome = parseRiskJudgeResponse(result.text);
       opts.log?.("risk_judge.parse_attempt", { attempt, max_attempts: maxAttempts, kind: outcome.kind });
-      if (outcome.kind === "parsed") return outcome.verdict;
+      if (outcome.kind === "parsed") {
+        if (opts.shadowLog !== undefined) {
+          // Not awaited: the verdict returned below is the primary's, whatever the shadow answers or refuses.
+          void shadowJudgeCall({
+            role: "risk-judge", key: riskJudgeDecisionKey(input), mount: opts.mount, primaryArgs: spawnArgs, primary: result,
+            primaryAnswer: outcome.verdict, parse: parsedRiskJudgeVerdict, agreementKey: (verdict) => verdict.verdict,
+            ...(input.headSha === undefined ? {} : { head: { sha: input.headSha, ...(input.prNumber === undefined ? {} : { prNumber: input.prNumber }) } }),
+            spawn, log: opts.shadowLog, ...(opts.shadowDecisions === undefined ? {} : { decisions: opts.shadowDecisions }),
+          });
+        }
+        return outcome.verdict;
+      }
       if (attempt === maxAttempts) {
         // W1-T478: keep the LAST attempt's raw text (the one that actually exhausted the
         // bound) under a length cap — a read that FAILED must not throw away why.

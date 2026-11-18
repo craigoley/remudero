@@ -12,7 +12,10 @@ import { gitWorkTreeAncestor } from "../src/lib/worker-home.js";
 // W1-T6360: the fix-lane learner re-read Codex for ANY historical selected_model whose draw won, so after the
 // 2026-10-02 Sol 6.1 switch it kept routing the lane back to gpt-6-sol (W1-T6028 measured gpt-6-sol at 0.53 and
 // gpt-6.1-sol at 0.39 here). The operator ruled 2026-10-08 to use Sol 6.1 everywhere: the learner's candidate arms
-// are now only the models the lane's CURRENT capability row mounts.
+// are now only the models the lane's CURRENT capability row mounts. W1-T13450 narrowed them again to the mounted arms
+// AHEAD of the served model in that row (a trailing entry is only an availability fallback), so the row
+// [gpt-6.1-sol, gpt-6-sol] keeps the lead now; that reversal is asserted in
+// test/fix-lane/the-fix-lane-learner-never-moves-a-round-down-the-codex-row.test.ts.
 
 const REPO_ROOT = join(import.meta.dirname, "..");
 const NOW = Date.parse("2026-10-08T12:00:00.000Z");
@@ -62,11 +65,15 @@ function codexResult(): WorkerResult {
  * One balanced (sonnet) fix spawn through the real auction. Claude is below reserve, so Codex carries the round;
  * the Codex read serves gpt-6.1-sol, the mounts' lead, unless the learner asks it for another model.
  */
-async function spawnFix(root: string, taskId: string): Promise<{ decision: Record<string, unknown> | undefined; asked: string[]; assignment: WorkerSelectionAssignment }> {
+async function spawnFix(
+  root: string,
+  taskId: string,
+  rows: ReadonlyArray<Record<string, unknown>> = MEASURED,
+): Promise<{ decision: Record<string, unknown> | undefined; asked: string[]; assignment: WorkerSelectionAssignment }> {
   const assignments: WorkerSelectionAssignment[] = [];
   const decisions: Array<Record<string, unknown>> = [];
   const asked: string[] = [];
-  const evidence = fixArmEvidence(MEASURED, NOW);
+  const evidence = fixArmEvidence(rows, NOW);
   const learnedArms: FixLearnedArms = {
     evidence,
     weigh: (candidates, seed) => fixRoutingWeights(evidence, candidates, seed),
@@ -134,13 +141,15 @@ test("W1-T6360: an unmounted arm is never selected", async () => {
 });
 
 test("W1-T6360: the learner still ranks mounted arms", async () => {
-  const root = checkoutMounting(["gpt-6.1-sol", "gpt-6-sol"]);
+  // W1-T13450: the served gpt-6.1-sol is a FALLBACK here (the lead gpt-6.2-sol could not serve), so the mounted arm
+  // ahead of it still competes; the trailing gpt-6-sol does not.
+  const root = checkoutMounting(["gpt-6.2-sol", "gpt-6.1-sol", "gpt-6-sol"]);
   try {
-    const { decision, asked, assignment } = await spawnFix(root, "W1-T9361");
+    const { decision, asked, assignment } = await spawnFix(root, "W1-T9361", [...MEASURED, ...codexArm("gpt-6.2-sol", 900, 100)]);
     assert.equal(decision?.applied, true);
     assert.equal(assignment.selected.provider, "codex");
-    assert.deepEqual(asked, ["gpt-6-sol"], "the higher-weighted mounted arm out-draws the served one and is re-read");
-    assert.equal(decision?.selected_model, "gpt-6-sol", "among mounted arms the higher-weighted one wins");
+    assert.deepEqual(asked, ["gpt-6.2-sol"], "the higher-weighted mounted arm ahead of the served one out-draws it and is re-read");
+    assert.equal(decision?.selected_model, "gpt-6.2-sol", "among the mounted arms ahead, the higher-weighted one wins");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

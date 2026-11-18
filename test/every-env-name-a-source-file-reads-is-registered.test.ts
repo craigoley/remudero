@@ -11,12 +11,13 @@ const DOT_READERS = {
   RMD_GH_TRANSPORT_FLOOR: ["src/lib/github-transport.ts"],
   RMD_OPERATOR_MCP_URL: ["src/lib/operator-mcp.ts"],
   RMD_PROVIDER_AUTH_PROFILES: ["src/lib/provider-auth-sessions.ts"],
+  RMD_READ_MODEL_PROCESS: ["src/lib/read-model-worker.ts"],
   RMD_RESOURCE_POLICY_CONTAINER: ["src/lib/deployer.ts"],
   RMD_RESOURCE_POLICY_ROLE: ["src/lib/deployer.ts"],
   RMD_WORKER_EGRESS: ["src/lib/worker.ts"],
 };
 
-test("test/every-env-name-a-source-file-reads-is-registered.test.ts: dot reads and all nine names join the registry census", () => {
+test("test/every-env-name-a-source-file-reads-is-registered.test.ts: dot reads and registered names join the registry census", () => {
   const declared = declaredHarnessEnvNames();
   assert.deepEqual(ENV_REGISTRY.map((entry) => entry.name).sort(), declared);
   for (const [name, readers] of Object.entries(DOT_READERS)) {

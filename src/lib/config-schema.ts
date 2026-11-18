@@ -110,6 +110,7 @@ export interface Config {
       allowedOrigins: string[];
       operatorUserIds: string[];
       stepUpWindowMinutes?: number;
+      requireStepUp?: boolean;
     };
   };
   relay?: { url?: string; token?: string };
@@ -429,6 +430,7 @@ export const CONFIG_SCHEMA: readonly ConfigFieldSchema[] = [
           configField("allowedOrigins", "string[]", false, undefined, "config.json", "Console origins accepted in azp.", stringArrayShape),
           configField("operatorUserIds", "string[]", false, undefined, "config.json", "Clerk user ids allowed to act.", stringArrayShape),
           configField("stepUpWindowMinutes", "number", true, 10, "config.json", "Minutes a verified factor keeps high tier.", numberShape),
+          configField("requireStepUp", "boolean", true, false, "config.json", "When true, high tier needs a recent verified factor; off, sign-in is the only gate.", booleanShape),
         ],
       }),
     ],
@@ -530,6 +532,7 @@ export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
   envEntry("RMD_PREPUSH_GATES", "Disarms hooks/pre-push only when exactly \"0\"; the one daemon variable the host push gate's allowlisted env keeps.", ["src/lib/git-push.ts"]),
   envEntry("RMD_PROVIDER_AUTH_PROFILES", "Supplies the server-side JSON catalog of provider authentication profiles.", ["src/lib/provider-auth-sessions.ts"]),
   envEntry("RMD_READ_MODEL_DB_DIR", "Maps one state dir to the directory holding its read-model DB files as <stateDir>:<dir>; set by deploy/scratch-mounts.sh.", ["src/lib/read-model-db.ts"]),
+  envEntry("RMD_READ_MODEL_PROCESS", "Set to on to run serve's read-model worker as a child process instead of a thread; default off.", ["src/lib/read-model-worker.ts"]),
   envEntry("RMD_DEPLOY_STEP_ENDS_AT", "Carries the epoch second at which the watchdog tick ends its deploy step; set by the launcher that deploy/install-host-units.sh renders.", ["src/lib/deployer.ts"]),
   envEntry("RMD_RECYCLE_WAIT_S", "Sets the operator's own wait for runs in flight in a recycle; the deployer compares it with the time its deploy step has left.", ["src/lib/deployer.ts"]),
   envEntry("RMD_RESTART_THROTTLE_S", "Documents restart throttling excluded from proof environments.", ["src/lib/review.ts"]),
@@ -547,7 +550,7 @@ export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
   envEntry("RMD_SERVE_NETWORK", "Declares container-network context for serve wildcard binds.", ["src/lib/serve.ts"]),
   envEntry("RMD_SERVE_READY_SOCKET", "Names the private unix socket a supervised standby serve answers readiness on.", ["src/lib/serve-generation.ts"]),
   envEntry("RMD_SERVE_ROLE", "Set to standby by the serve supervisor so serve warms and waits for promotion before binding its port.", ["src/lib/serve-generation.ts"]),
-  envEntry("RMD_SPAWN_HELPER", "Switch that starts the daemon's small long-lived spawn helper at boot so awaited child spawns route through it; unset or off keeps every spawn direct.", ["src/lib/daemon.ts"]),
+  envEntry("RMD_SPAWN_HELPER", "Switch for the daemon's small long-lived spawn helper, which awaited child spawns route through; the boot starts it unless the value is off, and off keeps every spawn direct.", ["src/lib/daemon.ts"]),
   envEntry("RMD_SRE_LANE", "Opts a daemon instance into running the SRE lane.", ["src/run-task.ts"]),
   envEntry("RMD_TASK_PRECONDITION_READ", "Set to 1 on a task precondition read subprocess so a nested precondition check refuses as recursive-read instead of spawning again.", ["src/lib/plan.ts"]),
   envEntry("RMD_WORKER_EGRESS", "Selects the worker egress mode when the spawn arguments do not specify one.", ["src/lib/worker.ts"]),

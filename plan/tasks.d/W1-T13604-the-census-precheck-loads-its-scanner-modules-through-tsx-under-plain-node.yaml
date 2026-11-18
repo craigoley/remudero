@@ -1,0 +1,52 @@
+- id: W1-T13604
+  title: "The census precheck loads its two scanner modules through tsx even under plain Node, so every coverage shard reports them in one shape"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # scripts/census-precheck.mjs plus its test suite, two concerns by Rule 19; the coverage gate's refusal and thresholds are unchanged
+  origin: "operator-session#coverage-merge-shape-defect-2026-11-17"
+  plan_refs:
+    - W1-T13518
+  files:
+    - scripts/census-precheck.mjs
+    - test/a-precheck-child-loads-each-source-file-once.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A census precheck child started under plain Node reports src/lib/trust-root-text.ts and src/lib/rule-suites.ts through tsx (a source-map-cache entry in its V8 report), and in each of the plain, CLI, env and registered loader modes each file is loaded once"
+      proof: "grep: W1-T13604 criterion 1 in test/a-precheck-child-loads-each-source-file-once.test.ts"
+    - claim: "scripts/coverage-merge-ratchet.mjs, given one shard from a plain-Node precheck child and one tsx shard, exits 0 in both orders, raw and premapped"
+      proof: "grep: W1-T13604 criterion 2 in test/a-precheck-child-loads-each-source-file-once.test.ts"
+    - claim: "invariant:refusal-kept — a hand-built shard LCOV with a positive DA on a line the aggregate lacks is still refused with the same hit-outside-aggregate message"
+      proof: "grep: W1-T13604 criterion 3 in test/a-precheck-child-loads-each-source-file-once.test.ts"
+  rationale: |
+    OBSERVED in the W1-T13518 report (docs/forensics/coverage-merge-shard-line-outside-aggregate.md, merged in #19289,
+    measured on pinned Node 24.22.2): scripts/census-precheck.mjs statically imports src/lib/trust-root-text.ts and
+    src/lib/rule-suites.ts. When a test starts the precheck under plain Node (the W1-T6180 plain-probe test, and the
+    src/run-task.ts census-child spawns), Node loads those two files by native type stripping, with no source map. Its
+    V8 report then counts their type-only lines (for example trust-root-text.ts:23) as hit lines. A shard made only of
+    tsx-loaded suites has no DA record for those lines. When a coverage shard holds a native-only suite and no
+    tsx-loading one, coverage-merge-ratchet.mjs's merge refuses that shard's line as "hit outside aggregate", which is
+    what refused #19183. The refusal is correct; the producer of the second shape is the defect.
+    The report recommends option (a), this task. It rejects (b), a union line list, which changes every mixed-shape
+    file's inventory, and (c), dropping shard hits on type-only lines, which loosens the refusal and would need the
+    operator's yes.
+  design: |
+    In scripts/census-precheck.mjs, replace the static imports of ../src/lib/trust-root-text.ts and
+    ../src/lib/rule-suites.ts with a top-level await of the same tsImport(url, import.meta.url) route that
+    defaultImportTestSlot already uses for test-slot.ts. When tsx is already the active loader, keep a plain import so
+    the module is not compiled twice (the W1-T6180 property that the suite's first test asserts).
+    Extend test/a-precheck-child-loads-each-source-file-once.test.ts: (1) a plain-Node precheck child's V8 report maps
+    both files, and each of the four loader modes loads each file once; (2) the real merger CLI, given a plain-probe
+    shard and a tsx shard, exits 0 in both orders, raw and premapped; (3) a negative control keeps the refusal.
+    Verify by deleting the loader change: criterion 2 must turn red.
+    INFERRED effect on the gate: the aggregate LINE hits for the two files fall by about their header length, because
+    they are now counted on the same mapped basis as every other tsx-only src file. The coverage ratchet's floor is on
+    BRANCH coverage, and a comment line holds no branch, so the floor should not move. Report the measured branch and
+    line figures for both files before and after in the PR.
+    INVARIANT refusal-kept: coverage-merge-ratchet.mjs still refuses a shard line hit the aggregate has no DA record for,
+    with the same message; this task changes no file under the gate.

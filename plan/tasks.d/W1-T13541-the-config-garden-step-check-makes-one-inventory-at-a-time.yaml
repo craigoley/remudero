@@ -1,0 +1,105 @@
+- id: W1-T13541
+  title: "The config garden's step check makes one inventory at a time and with no measurement worker, so its test file needs about 0.5 GB, not 6 GB"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: low # test files only: one check changes how it makes its inventories, a corpus moves to a helper; src/ does not change
+  origin: "operator-session#ci-memory-2026-11-17"
+  plan_refs:
+    - W1-T5474
+    - W1-T4969
+    - W1-T12187
+  files:
+    - test/the-config-gardener-reads-only-the-ledger-steps-it-prices.test.ts
+    - test/helpers/the-config-gardener-reads-only-the-ledger-steps-it-prices.ts
+    - test/the-config-garden-step-check-makes-one-inventory-at-a-time.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "invariant:one-inventory-at-a-time — the step check moves to the new test file. For the shared corpus (test/helpers/the-config-gardener-reads-only-the-ledger-steps-it-prices.ts), the inventory without the rows outside CONFIG_GARDEN_LEDGER_STEPS is equal to the whole inventory, and for every step in CONFIG_GARDEN_LEDGER_STEPS the inventory without that step's rows is different from the whole inventory (the inert list is []). The test makes each inventory in this process with serveConfigMeasurement and a port that keeps the reply, one after the other (a for loop with await, no Promise.all), so it starts no Worker. Positive control: CONFIG_GARDEN_LEDGER_STEPS has more than 30 steps"
+      proof: "grep: W1-T13541 criterion 1 in test/the-config-garden-step-check-makes-one-inventory-at-a-time.test.ts"
+    - claim: "The inventories do not change. For the whole corpus and for the corpus without the rows of each of `run.start`, `learnings.injected` and `followup.filed`, the inventory that criterion 1's in-process helper makes is deepEqual to the inventory that configInventory makes on its measurement worker (one call at a time). The result of the step check is the same as the old check's result on origin/main: an empty inert list"
+      proof: "grep: W1-T13541 criterion 2 in test/the-config-garden-step-check-makes-one-inventory-at-a-time.test.ts"
+    - claim: "invariant:step-check-memory-bounded — a child `node --import tsx --import ./test/setup/tmp-hygiene.ts --import <preload> --test --test-isolation=none --test-name-pattern=\"W1-T13541 criterion 1\" <this file>` runs criterion 1 alone. The preload (written to the test's own tmp dir) writes process.resourceUsage().maxRSS (KB) to a file on exit. The test fails when the child fails or when its maxRSS is above STEP_CHECK_RSS_CEILING_MB = 1536 MB. The constant's comment says BACKSTOP and gives the numbers it comes from"
+      kind: guard
+      proof: "grep: W1-T13541 criterion 3 in test/the-config-garden-step-check-makes-one-inventory-at-a-time.test.ts"
+  rationale: |
+    WHY: test/the-config-gardener-reads-only-the-ledger-steps-it-prices.test.ts needs about 6 GB of memory on
+    origin/main. That is a defect: each PR whose coverage shard holds this file can fail when the GitHub runner
+    runs out of memory. On PR #19180 (W1-T12187) coverage-shard (8/12) failed three times with no failing
+    test: once it stopped with no output, once the runner got a shutdown signal, and once the job ended at 15
+    minutes. Each time this file was the last unfinished file.
+    MEASURED (2026-11-17):
+    - Azure host, the file alone, no coverage: max RSS 5,896,144 KB on origin/main and 6,361,480 KB on the head
+      of #19180. The difference, 465,336 KB, is about 93 MB for each of the 5 steps that #19180 adds.
+    - Mac agent account (16 GB), origin/main bb4e85a357, the file alone under nice -n 19: max RSS 3,637,690,368
+      bytes (3.6 GB), 19 s. #19180 head 3b6e550819: 3,728,277,504 bytes. Each test alone (--test-name-pattern):
+      W1-T10962 251 MB, "the read is filtered" 413 MB, "every step in CONFIG_GARDEN_LEDGER_STEPS" 1,926 MB on
+      main and 4,397 MB on #19180's head, "refuses an incomplete" 318 MB, "heap cap" 198 MB, "small fraction"
+      481 MB. So one test holds almost all of the memory. The peak changes from run to run, because it
+      depends on how many workers are alive at the same time.
+    - The dominant allocation is one measurement Worker for each concurrent configInventory call. A probe
+      that made N configInventory calls at the same time with a one-row ledger: N=1 +145 MB, N=8 +1,112 MB
+      (139 MB a worker), N=24 +2,305 MB, N=47 +2,096 MB above a base that had grown to 3,015 MB (peak 5,111
+      MB). Each worker is its own V8 isolate, and under tsx it loads and compiles config-gardener.ts and all
+      its imports again. The ledger rows are NOT the cost: the corpus has a few hundred rows.
+    - The same test with the steps made one at a time (a for loop with await on configInventory): 441 MB
+      alone and 496 MB for the whole file (all 6 pass, 25 s), against 1,926 MB and 3,638 MB.
+    - judgeShadowSummary on #19180's head does NOT read the ledger window a second time. It takes the rows
+      that buildConfigInventory already has (`judgeShadowSummary(rows, input.nowMs - JUDGE_CASH_BAR.windowMs)`).
+      The cost that #19180 adds is 5 more steps in CONFIG_GARDEN_LEDGER_STEPS (47 on main, 52 on the head), so
+      5 more concurrent workers in this test.
+    READ at origin/main bb4e85a357:
+    - test/the-config-gardener-reads-only-the-ledger-steps-it-prices.test.ts:165-176. The test makes the whole
+      inventory, then `await Promise.all(steps().map(async (step) => gardener.configInventory(...)))` at :171,
+      47 configInventory calls at the same time.
+    - src/lib/config-gardener.ts:330-340 configInventory always calls configMeasurementOffLoop (:336).
+      :383-395 configMeasurementOffLoop starts `new Worker(...)` (:385) for each call. It ends the worker only
+      after its reply.
+    - src/lib/config-gardener.ts:397-411 serveConfigMeasurement is the worker's body. It is exported "so tests
+      can also exercise the read and error replies". With `kind: "inventory"` it calls buildConfigInventory
+      (:413), the same function the worker runs, so an in-process inventory is the worker's inventory.
+    - Production makes one inventory for each pass: src/lib/config-gardener.ts:752 (the spec's inventory) and
+      :878 (tendConfigCanaries). No production caller makes concurrent inventories, so the production read is
+      not the cause and src/ does not change.
+    NOT COVERED: swept origin/main plan/tasks.d for this test file and for the config garden's memory. W1-T5474
+    filtered the read to the steps; W1-T4969 moved the read to a worker. No task changes this check. The only
+    open PR that touches the file is #19180, which adds rows to corpus().
+  design: |
+    INVARIANT one-inventory-at-a-time: the step check never has more than one inventory in progress, and it starts no Worker for each step.
+    INVARIANT step-check-memory-bounded: the step check alone stays below a stated RSS ceiling.
+    1. Move fixture(), corpus(), sources() and the constants they use (NOW_MS, at, WEIGHTS) from the existing
+       test file to test/helpers/the-config-gardener-reads-only-the-ledger-steps-it-prices.ts, with no change to the rows. The existing file
+       imports them. Its other tests do not change.
+    2. Move the test at :165-176 to the new file as criterion 1. Make each inventory with a helper
+       `inventoryOf(f, rows)` that calls serveConfigMeasurement({ kind: "inventory", stateDir, repoRoot, nowMs,
+       rows, weights, recommendations: [] }, { postMessage: (reply) => ... }) and returns the value (it throws
+       on `ok: false`). Use a for loop with await. Do not use Promise.all for inventories.
+    3. Criterion 2 is the proof that the helper's inventory is the worker's inventory, so criterion 1 keeps the
+       meaning of the old check.
+    4. Criterion 3: the ceiling. With one inventory at a time the test needs 441 MB alone on the Mac (496 MB for
+       the whole old file). With 47 at once it needed 1,926 to 4,397 MB on the Mac. 1,536 MB is about 3 times
+       the one-at-a-time value, so coverage instrumentation and a slower host can fit, and it is below every
+       concurrent value that was measured. It is a BACKSTOP: the primary control is invariant
+       one-inventory-at-a-time.
+    5. Do NOT add an env var or a config key. Do not change src/. Do not change any row of the corpus.
+    6. If #19180 (W1-T12187) merges first, its rows in corpus() (one judge-shadow row of each JUDGE_SHADOW_STEPS
+       step) move to the helper as they are.
+    WHY NOT the alternatives:
+    - Keep configInventory and run it one at a time: measured at 441 MB, but it starts 48 workers in series
+      (23 s on the Mac). The in-process helper needs no worker for each step.
+    - Limit the workers in configMeasurementOffLoop: production starts one at a time already, so this would
+      add a control that has no production use.
+    - Give the coverage shard more memory: the test stays at 6 GB and the next 5 steps make it larger.
+  falsifier: |
+    Put back `await Promise.all(steps().map(async (step) => gardener.configInventory(...)))` in criterion 1:
+    the child of criterion 3 goes above 1,536 MB (1,926 MB or more on the Mac) and criterion 3 fails. Give the
+    helper other inputs than configInventory gives the worker (for example no weights): criterion 2 fails. Remove a step's rows from the corpus: criterion 1 fails with that step in the inert list.
+  note: |
+    Id reserved for run-unfiled-1794959448000 with ~/rmd-work/bin/reserve-id.sh.
+    Proof that counts in CI: the coverage shard that holds the old file finishes, and the file's max RSS alone
+    on the Azure host is below 1 GB (it was 5,896,144 KB).

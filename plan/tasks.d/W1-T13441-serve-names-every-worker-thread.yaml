@@ -1,0 +1,76 @@
+- id: W1-T13441
+  title: "Serve names every worker thread it runs, nested ones included, so serve.thread_load and serve.cpu_budget account for every core by name"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # one concern (naming each worker's OS thread and reading them all) across the 18 spawn sites, two telemetry modules and their tests
+  band_meaning: span
+  origin: "operator-session#serve-hot-worker-2026-11-17"
+  plan_refs:
+    - W1-T11816
+    - W1-T13304
+  files:
+    - src/lib/thread-names.ts
+    - src/lib/serve-thread-load.ts
+    - src/lib/serve-supervisor.ts
+    - src/lib/benchmark-cohort.ts
+    - src/lib/board-worker.ts
+    - src/lib/config-gardener.ts
+    - src/lib/console-projection-worker.ts
+    - src/lib/heavy-ready-deadline.ts
+    - src/lib/ledger-union.ts
+    - src/lib/loop-stall-profiler.ts
+    - src/lib/merged-ratchet-worker.ts
+    - src/lib/read-model-db.ts
+    - src/lib/read-model-slow-lane.ts
+    - src/lib/read-model-worker.ts
+    - src/lib/read-plane.ts
+    - src/lib/repo-dashboard-route.ts
+    - src/lib/secret-boundary.ts
+    - src/lib/serve-plan-reload.ts
+    - src/lib/status.ts
+    - src/lib/tick-read-worker.ts
+    - src/lib/worker-provider.ts
+    - test/console-api/serve/serve-names-every-worker-thread-and-reads-every-os-thread.test.ts
+    - test/serve-holds-a-cpu-budget.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "Every worker spawn site in src passes name: threadName(<site>) from THREAD_NAMES (unique, at most 15 bytes), and on Node 24 that name reaches the OS thread's comm, for a nested worker too"
+      proof: "grep: W1-T13441 criterion 1 in test/console-api/serve/serve-names-every-worker-thread-and-reads-every-os-thread.test.ts"
+    - claim: "The slow lane, serve's hottest worker on 2026-11-17, spawns its thread with its name"
+      proof: "grep: threadName(\"readModelSlowLane\") in src/lib/read-model-slow-lane.ts"
+    - claim: "serve.thread_load carries os_threads, every OS thread of the process from /proc/self/task grouped by name with its CPU over the window, hottest first, and os_threads_error when /proc cannot be read"
+      proof: "grep: W1-T13441 criterion 2 in test/console-api/serve/serve-names-every-worker-thread-and-reads-every-os-thread.test.ts"
+    - claim: "serve.cpu_budget keeps its three-entry top list and adds threads, every consumer at or over SERVE_CPU_BUDGET_THREAD_FLOOR_CORES"
+      proof: "grep: W1-T13441 criterion 3 in test/serve-holds-a-cpu-budget.test.ts"
+    - claim: "invariant:unread-is-not-idle — a /proc that cannot be listed is named on the row as os_threads_error, never written as an empty thread list"
+      kind: guard
+      proof: "grep: an unreadable /proc is named on the row in test/console-api/serve/serve-names-every-worker-thread-and-reads-every-os-thread.test.ts"
+  rationale: |
+    WHY: serve's steady CPU goal is under 0.3 cores; it measured 1.33-1.43 on 2026-11-17. OBSERVED on the Azure host at
+    17:20Z (60 s /proc per-thread sample of serve's generation): one WorkerThread at 0.516 cores and main at 0.756, but
+    the serve.thread_load row named only threads 0, 2, 4, 6 and 14, the workers serve's main thread spawned itself. The
+    hot thread was a worker's worker, and every unnamed worker reads "WorkerThread" in /proc, so neither row could name
+    it. A 30 s inspector profile then showed it was the read-model slow lane (fixed by W1-T13442).
+    MEASURED in the cloud container on Node 24.22.2 (serve's runtime): new Worker(..., { name }) sets the OS thread's
+    comm (cut at 15 bytes), nested workers included.
+  design: |
+    INVARIANT unread-is-not-idle: a thread list that could not be read is never an empty list.
+    1. New leaf src/lib/thread-names.ts: THREAD_NAMES, one unique name of at most 15 bytes per spawn site, and
+       threadName(site), the lookup every spawn site calls.
+    2. Every new Worker / startWorker call in src passes name: threadName("<site>") (tick-read-worker's construct
+       forwards given.name). A census test fails on any spawn site without one.
+    3. serve-thread-load.ts reads /proc/self/task each sample (procSelfThreads) and adds os_threads to the row,
+       grouped by comm, per-tid deltas; a tid reused under another name counts from its own start.
+    4. serve-supervisor.ts adds threads (every consumer at or over 0.005 cores) beside the unchanged top three.
+  falsifier: |
+    Drop the name from one spawn site: criterion 1's census fails. Return [] instead of os_threads_error when /proc
+    throws: the guard fails. Cut threads to three: criterion 3 fails.
+  note: |
+    Id reserved for run-unfiled-1794936598244 with ~/rmd-work/bin/reserve-id.sh.
+    reservation hand-off: run-unfiled-1794936598244 -> claude/project-thread-u06uh4

@@ -1,12 +1,13 @@
 import { createHash } from "node:crypto";
 import { improvementEffectNamespaceDir, projectGardenerOpportunityEvidence } from "./gardener-opportunity-evidence.js";
-import { closeSync, constants, fstatSync, openSync, readSync, lstatSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readdirSync, readSync, lstatSync, statSync } from "node:fs";
+import { basename } from "node:path";
 import { createBoardSnapshotReader, readBoardClosedCollectionReceipt, readOpenBoardSnapshot } from "./board-snapshot-cache.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { dailyDateAt, dailyWindow, DEFAULT_DAILY_PROGRESS_ZONE, nextDailyDue, shiftDailyDate } from "./daily-progress-calendar.js";
 import { validateRepositoryEvidenceInventory, type DailyProgressEvent, type DailyProgressReport, type SourceCoverage, type ExpectedDailySource } from "./daily-progress-contract.js";
 import { dailyProgressDayKey, prepareDailyProgressPublication, readDailyProgressManifest, readDailyProgressRevision, type DailyProgressJob, type DailyProgressRecord } from "./daily-progress-store.js";
-import { fingerprintLedgerLine, openLedgerUnion } from "./ledger-union.js";
+import { fingerprintLedgerLine, listedLedgerFiles, openLedgerUnion, rotationStampIso, type LedgerCorpusEntry } from "./ledger-union.js";
 import type { BoardPrRest } from "./open-prs-rest.js";
 import { taskIdFromRunBranch } from "./status.js";
 import { HAND_WORKTREE_TASK_ID_RE } from "./hand-worktree.js";
@@ -85,7 +86,89 @@ function improvementActivity(row: Record<string, unknown>, repository: string, o
   return { title, taskIds: effect.taskIds, url: effect.mergePrUrls[0] ?? effect.planPrUrl };
 }
 
-async function activity(source: DailyProgressInstance, fleetStateDir: string, since: string, now: number, signal?: AbortSignal): Promise<{ events: DailyProgressEvent[]; gaps: number; available: boolean }> {
+/**
+ * One ledger row the activity read keeps: only what can become a displayed event, never the row's payload (a worker row
+ * can carry tens of KiB). `rowId` is the row's whole-row identity hash, computed once; an improvement row keeps the few
+ * fields its projection reads.
+ */
+interface ActivityCandidate {
+  ts: unknown; step: string; taskId: unknown; repository: unknown; fingerprint: string;
+  rowId?: string; improvement?: Record<string, unknown>;
+}
+/** What one immutable rotation archive gave the activity read, kept for the archive's (path, size, mtime). */
+interface ArchiveActivity { identity: string; sinceMs: number; candidates: ActivityCandidate[]; malformed: number; newestMs: number }
+
+/**
+ * W1-T13442: each rotated archive's activity candidates, read once per (root, repository, archive). OBSERVED 2026-11-17 on
+ * the Azure host: with closedThrough stuck at 2026-10-26 the collection read three weeks of archives on every attempt,
+ * outran its 120 s deadline, was cancelled (read_model.daily_cancelled every 128-147 s, nothing staged) and started over
+ * from zero, holding the slow lane at ~0.58 cores. An archive never changes once rotated, so a cancelled attempt now keeps
+ * every archive it finished, the next attempt resumes past them, and a due run re-reads only the live ledger.
+ * Process-local (the slow lane's thread outlives its runs); entries for archives no longer in a run's window are dropped.
+ */
+export type DailyActivityMemo = Map<string, ArchiveActivity>;
+export function createDailyActivityMemo(): DailyActivityMemo { return new Map(); }
+const processActivityMemo: DailyActivityMemo = createDailyActivityMemo();
+
+const ACTIVITY_STEPS = new Set([...Object.keys(activityLabel), "opportunity_outcome.effect_observed"]);
+/** Whether a row can ever become an event for `repository`; everything else is dropped before it is kept. */
+const candidateRow = (row: Record<string, unknown>, repository: string): boolean =>
+  typeof row.step === "string" && ACTIVITY_STEPS.has(row.step) && (row.repository === undefined || row.repository === repository);
+/** Producer metadata differs between the native and projection ledgers: an identity hashes keys in a fixed order. */
+const stable = (value: unknown): unknown => Array.isArray(value) ? value.map(stable) : value && typeof value === "object"
+  ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([key, child]) => [key, stable(child)])) : value;
+const identityHash = (identity: unknown): string => createHash("sha256").update(JSON.stringify(stable(identity))).digest("hex");
+function candidate(row: Record<string, unknown>, repository: string, raw: string): ActivityCandidate {
+  const kept: ActivityCandidate = { ts: row.ts, step: row.step as string, taskId: row.task_id, repository: row.repository, fingerprint: fingerprintLedgerLine(raw) };
+  if (row.step === "opportunity_outcome.effect_observed") {
+    kept.improvement = { step: row.step, proposal_id: row.proposal_id, opportunity_key: row.opportunity_key, source_snapshot_id: row.source_snapshot_id,
+      improvement_source: row.improvement_source, effect: row.effect };
+  }
+  // A native row's identity is the whole row; hashed now so its payload is never retained.
+  kept.rowId = identityHash([repository, row]);
+  return kept;
+}
+
+/** The rotated archives of `root` whose rows can reach `sinceMs`, oldest first, as openLedgerUnion orders them. */
+function archivesInWindow(root: string, sinceMs: number, unreadDirectory: () => void): LedgerCorpusEntry[] {
+  return listedLedgerFiles(root, { readdirSync: (dir) => readdirSync(dir) }, unreadDirectory).rotations.filter((entry) => {
+    const stamp = rotationStampIso(basename(entry.path));
+    return stamp === undefined || !(Date.parse(stamp) < sinceMs);
+  });
+}
+
+async function readArchive(root: string, entry: LedgerCorpusEntry, repository: string, memo: DailyActivityMemo, key: string,
+  since: string, signal: AbortSignal | undefined): Promise<ArchiveActivity | undefined> {
+  let identity: string;
+  try {
+    const stat = statSync(entry.path);
+    identity = `${stat.ino}:${stat.size}:${Math.trunc(stat.mtimeMs)}`;
+  } catch (_err) {
+    // Rotated away (compacted or pruned) between the listing and the stat: openLedgerUnion names it unread below.
+    identity = "unstattable";
+  }
+  const held = memo.get(key);
+  // An entry read from a later `since` lacks the rows before it; the window only moves later, so this is a rare re-read.
+  if (held && held.identity === identity && held.sinceMs <= Date.parse(since)) return held;
+  const read: ArchiveActivity = { identity, sinceMs: Date.parse(since), candidates: [], malformed: 0, newestMs: Number.NEGATIVE_INFINITY };
+  let unread = false, acceptedRaw = "";
+  for await (const row of openLedgerUnion(root, { since, dedupe: false, includeLive: false, corpusSnapshot: { rotations: [entry], unclassified: [], auxiliary: [] },
+    ...(signal ? { signal } : {}), onAcceptedRecord: (_row, raw) => { acceptedRaw = raw; },
+    onUnreadArchive: () => { unread = true; }, onUnreadDirectory: () => { unread = true; }, onMalformedRow: () => { read.malformed++; } })) {
+    const raw = acceptedRaw; acceptedRaw = "";
+    signal?.throwIfAborted();
+    const ts = typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN;
+    if (ts > read.newestMs) read.newestMs = ts;
+    if (candidateRow(row, repository)) read.candidates.push(candidate(row, repository, raw));
+  }
+  // An archive that could not be read is a gap this run and is read again next run: only a whole read is kept.
+  if (unread || identity === "unstattable") return undefined;
+  memo.set(key, read);
+  return read;
+}
+
+export async function readDailyActivity(source: DailyProgressInstance, fleetStateDir: string, since: string, now: number, signal?: AbortSignal,
+  memo: DailyActivityMemo = processActivityMemo): Promise<{ events: DailyProgressEvent[]; gaps: number; available: boolean }> {
   const events: DailyProgressEvent[] = [];
   let gaps = 0, rowsRead = 0;
   const roots = [source.stateDir], isolated = improvementEffectNamespaceDir(fleetStateDir, source.repository, source.name);
@@ -95,46 +178,62 @@ async function activity(source: DailyProgressInstance, fleetStateDir: string, si
     // namespace is a gap; absence does not imply a complete native activity corpus.
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") gaps++;
   }
+  const sinceMs = Date.parse(since);
   for (const root of roots) {
     const selectedReplay = new Set<string>();
-    let acceptedRaw = "";
-    for await (const row of openLedgerUnion(root, { since, dedupe: false, ...(signal ? { signal } : {}),
-      onAcceptedRecord: (_row, raw) => { acceptedRaw = raw; },
-      onUnreadArchive: () => gaps++, onUnreadLive: () => gaps++, onUnreadDirectory: () => gaps++, onMalformedRow: () => gaps++ })) {
-      const raw = acceptedRaw; acceptedRaw = "";
-      signal?.throwIfAborted();
-      rowsRead++;
-      const occurredAt = stamp(row.ts);
-      if (!occurredAt || Date.parse(occurredAt) > now) continue;
-      const improvement = improvementActivity(row, source.repository, occurredAt, now);
-      const label = improvement?.title ?? (typeof row.step === "string" ? activityLabel[row.step] : undefined);
-      if (!label) continue;
-      if (row.repository !== undefined && row.repository !== source.repository) continue;
+    const accept = (kept: ActivityCandidate): void => {
+      const { fingerprint } = kept;
+      const occurredAt = stamp(kept.ts);
+      if (!occurredAt || Date.parse(occurredAt) > now || Date.parse(occurredAt) < sinceMs) return;
+      const improvement = kept.improvement ? improvementActivity(kept.improvement, source.repository, occurredAt, now) : undefined;
+      const label = improvement?.title ?? activityLabel[kept.step];
+      if (!label) return;
+      if (kept.repository !== undefined && kept.repository !== source.repository) return;
       // Keep exact raw replay accounting per root, before semantic reconciliation. Only displayed
       // activity needs an identity inventory; unrelated payloads live for this iteration alone.
-      const fingerprint = fingerprintLedgerLine(raw);
-      if (selectedReplay.has(fingerprint)) continue;
+      if (selectedReplay.has(fingerprint)) return;
       selectedReplay.add(fingerprint);
       // The reader catches callback exceptions as read gaps. Refuse here so no partial result can publish.
       if (events.length >= 100_000) throw new Error("Daily activity exceeds the bounded collection population; retained history is unchanged.");
-      const task = typeof row.task_id === "string" && TASK.test(row.task_id) ? row.task_id : undefined;
-      // Producer metadata differs between the native and projection ledgers. Bind duplicate
-      // observations to their source/effect identity instead of the append location or actor.
-      const stable = (value: unknown): unknown => Array.isArray(value) ? value.map(stable) : value && typeof value === "object"
-        ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([key, child]) => [key, stable(child)])) : value;
-      const identity = improvement ? [source.repository, occurredAt, row.proposal_id, row.improvement_source, row.effect] : [source.repository, row];
-      const id = createHash("sha256").update(JSON.stringify(stable(identity))).digest("hex");
+      const task = typeof kept.taskId === "string" && TASK.test(kept.taskId) ? kept.taskId : undefined;
+      // Bind duplicate observations to their source/effect identity instead of the append location or actor.
+      const id = improvement
+        ? identityHash([source.repository, occurredAt, kept.improvement!.proposal_id, kept.improvement!.improvement_source, kept.improvement!.effect])
+        : kept.rowId!;
       events.push({ id: `activity:${source.repository}:${id}`, repository: source.repository, kind: "activity", sourceId: `${source.repository}:ledger:${source.name}`,
         occurredAt, observedAt: fixedClock(now).iso(), fleetAttribution: "confirmed", taskIds: improvement?.taskIds ?? (task ? [task] : []), title: improvement ? label : task ? `${label} · ${task}` : label, url: improvement?.url ?? null });
+    };
+    const kept = new Set<string>();
+    for (const entry of archivesInWindow(root, sinceMs, () => gaps++)) {
+      const key = `${root}\u0000${source.repository}\u0000${entry.path}`;
+      kept.add(key);
+      const archive = await readArchive(root, entry, source.repository, memo, key, since, signal);
+      if (!archive) { gaps++; continue; }
+      gaps += archive.malformed;
+      if (archive.newestMs >= sinceMs) rowsRead++;
+      for (const candidate of archive.candidates) accept(candidate);
+    }
+    // Archives that left the window (or the directory) are never read again by this root: their entries go.
+    for (const key of memo.keys()) if (key.startsWith(`${root}\u0000${source.repository}\u0000`) && !kept.has(key)) memo.delete(key);
+    // The live ledger grows between runs, so it is read whole each run, as before.
+    let acceptedRaw = "";
+    for await (const row of openLedgerUnion(root, { since, dedupe: false, corpusSnapshot: { rotations: [], unclassified: [], auxiliary: [] }, ...(signal ? { signal } : {}),
+      onAcceptedRecord: (_row, raw) => { acceptedRaw = raw; },
+      onUnreadLive: () => gaps++, onUnreadDirectory: () => gaps++, onMalformedRow: () => gaps++ })) {
+      const raw = acceptedRaw; acceptedRaw = "";
+      signal?.throwIfAborted();
+      rowsRead++;
+      if (candidateRow(row, source.repository)) accept(candidate(row, source.repository, raw));
     }
   }
   return { events, gaps, available: gaps === 0 || rowsRead > 0 };
 }
 
 /** Reconcile cached sources only. The existing PR collector remains the sole GitHub fetcher. */
-export async function collectDailyProgress(config: DailyProgressCollectionConfig, clock: Clock = systemClock, signal?: AbortSignal):
+export async function collectDailyProgress(config: DailyProgressCollectionConfig, clock: Clock = systemClock, signal?: AbortSignal,
+  activityMemo: DailyActivityMemo = processActivityMemo):
   Promise<ReturnType<typeof prepareDailyProgressPublication> | undefined> {
-  const now = clock.now(), at = fixedClock(now).iso(), timeZone = config.timeZone ?? DEFAULT_DAILY_PROGRESS_ZONE;
+  const now = clock.now(), timeZone = config.timeZone ?? DEFAULT_DAILY_PROGRESS_ZONE;
   const today = dailyDateAt(now, timeZone), yesterday = shiftDailyDate(today, -1);
   const expected = [...new Set((config.expectedRepositories ?? readDailyProgressRepositories(config.stateDir)).map(r => r.toLowerCase()))].sort();
   if (!expected.length || expected.length > 256 || expected.some(r => !REPOSITORY.test(r))) throw new Error("invalid server-owned daily repository inventory");
@@ -169,11 +268,15 @@ export async function collectDailyProgress(config: DailyProgressCollectionConfig
       const receipt = readBoardClosedCollectionReceipt(instance.root, owner, repo, rows);
       return { instance, saved, rows, receipt, open: readOpenBoardSnapshot(instance.root, owner, repo) };
     });
-    const activities = await Promise.all(instances.map(async instance => ({ instance, ...await activity(instance, config.stateDir, earliest, now, signal) })));
+    // W1-T13454: each repository is judged at the time its files were read, never at the pass's start. OBSERVED
+    // 2026-11-17: the console's closed-PR receipt is rewritten every minute and was read minutes into the pass (behind
+    // core's ledger read), so every console report read "The source receipt is newer than this report's cutoff".
+    const readAt = Math.max(now, clock.now()), at = fixedClock(readAt).iso();
+    const activities = await Promise.all(instances.map(async instance => ({ instance, ...await readDailyActivity(instance, config.stateDir, earliest, readAt, signal, activityMemo) })));
     signal?.throwIfAborted();
     let closedThrough = previousJob?.closedThrough ?? shiftDailyDate(yesterday, -1), requiredFailed = false;
     for (const reportDate of ordered) {
-      const window = dailyWindow(reportDate, timeZone), end = Date.parse(window.windowEnd), start = Date.parse(window.windowStart), cutoff = Math.min(now, end);
+      const window = dailyWindow(reportDate, timeZone), end = Date.parse(window.windowEnd), start = Date.parse(window.windowStart), cutoff = Math.min(readAt, end);
       const day = manifest.days[dailyProgressDayKey(repository, timeZone, reportDate)];
       const old = day ? readDailyProgressRevision(config.stateDir, day) : undefined;
       const sources: SourceCoverage[] = [], events = new Map<string, DailyProgressEvent>();
@@ -181,9 +284,9 @@ export async function collectDailyProgress(config: DailyProgressCollectionConfig
       for (const source of raw) {
         const receipt = source.receipt.ok ? source.receipt.receipt : undefined;
         const success = receipt?.lastSuccessAt ?? source.saved.closedObservedAt ?? null;
-        const sane = success !== null && Date.parse(success) <= now;
+        const sane = success !== null && Date.parse(success) <= readAt;
         const attempted = receipt?.lastAttemptAt ?? (sane ? success : null);
-        const validClock = attempted === null || Date.parse(attempted) <= now;
+        const validClock = attempted === null || Date.parse(attempted) <= readAt;
         const covers = sane && Date.parse(success) >= cutoff;
         const full = source.receipt.ok && receipt?.state === "complete" && validClock && covers;
         const state: SourceCoverage["state"] = full ? "complete" : receipt?.state === "unavailable" ? "unavailable" : source.saved.closed !== undefined ? "partial" : "not_collected";
@@ -191,14 +294,19 @@ export async function collectDailyProgress(config: DailyProgressCollectionConfig
           lastAttemptAt: validClock ? attempted : null, lastSuccessAt: sane && validClock ? success : null,
           coverageStart: sane && validClock && Date.parse(success) >= start ? window.windowStart : null,
           coverageThrough: sane && validClock && Date.parse(success) >= start ? fixedClock(Math.min(Date.parse(success), end)).iso() : null,
-          nextDueAt: fixedClock(nextDailyDue(now, timeZone)).iso(), reason: full ? null : !validClock ? "The source receipt is newer than this report's cutoff." : receipt?.reason === "fetch_failed" ? "The latest PR collection failed; saved evidence is retained." : "The saved PR source does not certify complete coverage through this report's cutoff." };
+          nextDueAt: fixedClock(nextDailyDue(readAt, timeZone)).iso(), reason: full ? null : !validClock ? "The source receipt is newer than this report's cutoff." : receipt?.reason === "fetch_failed" ? "The latest PR collection failed; saved evidence is retained." : "The saved PR source does not certify complete coverage through this report's cutoff." };
         sources.push(coverage);
         for (const pr of source.rows) {
           if (!prIdentity(pr, repository)) { invalid++; continue; }
           if (pr.state !== "MERGED") continue;
           if (pr.authorType === "Bot" && ["dependabot[bot]", "renovate[bot]"].includes(pr.authorLogin?.toLowerCase() ?? "")) continue;
           const occurredAt = stamp(pr.mergedAt);
-          if (!occurredAt || Date.parse(occurredAt) > now) { invalid++; continue; }
+          // W1-T13454: GitHub moves updatedAt at a merge, so a merge with no saved time whose last update precedes this
+          // window merged before it and is no evidence about this day. OBSERVED 2026-11-17: 8,452 legacy core rows
+          // (and 131 site, 561 console) carry no mergedAt, which made every required PR source partial for every day.
+          const updatedAt = stamp(pr.updatedAt);
+          if (!occurredAt && updatedAt && Date.parse(updatedAt) < start) continue;
+          if (!occurredAt || Date.parse(occurredAt) > readAt) { invalid++; continue; }
           if (Date.parse(occurredAt) < start || Date.parse(occurredAt) >= end) continue;
           const ids = taskIds(pr), eventId = `merged:${repository}:${pr.number}`;
           events.set(eventId, { id: eventId, repository, kind: "merged", sourceId: coverage.id, occurredAt, observedAt: at,
@@ -214,11 +322,11 @@ export async function collectDailyProgress(config: DailyProgressCollectionConfig
         });
       }
       if (!configuredInstances.length) sources.push({ id: `${repository}:prs:missing`, repository, instanceId: null, kind: "pull_requests", required: true, state: "not_collected", lastAttemptAt: null, lastSuccessAt: null,
-        coverageStart: null, coverageThrough: null, nextDueAt: fixedClock(nextDailyDue(now, timeZone)).iso(), reason: "No configured PR source is available for this repository." });
+        coverageStart: null, coverageThrough: null, nextDueAt: fixedClock(nextDailyDue(readAt, timeZone)).iso(), reason: "No configured PR source is available for this repository." });
       if (invalid) for (const source of sources) if (source.required && source.state === "complete") { source.state = "partial"; source.reason = "Some saved PR identities or clocks are invalid; complete totals are unavailable."; }
       for (const observed of activities) {
         sources.push({ id: `${repository}:ledger:${observed.instance.name}`, repository, instanceId: observed.instance.name, kind: "ledger_activity", required: false, state: observed.available ? "partial" : "unavailable", lastAttemptAt: at, lastSuccessAt: observed.available ? at : null,
-          coverageStart: observed.available ? window.windowStart : null, coverageThrough: observed.available ? fixedClock(cutoff).iso() : null, nextDueAt: fixedClock(nextDailyDue(now, timeZone)).iso(),
+          coverageStart: observed.available ? window.windowStart : null, coverageThrough: observed.available ? fixedClock(cutoff).iso() : null, nextDueAt: fixedClock(nextDailyDue(readAt, timeZone)).iso(),
           reason: `Retained ledger observations do not establish complete activity history.${observed.gaps ? ` ${observed.gaps} source or parse gaps were observed.` : ""}` });
         for (const event of observed.events) if (Date.parse(event.occurredAt) >= start && Date.parse(event.occurredAt) < end) events.set(event.id, event);
       }
@@ -244,16 +352,16 @@ export async function collectDailyProgress(config: DailyProgressCollectionConfig
         items: present.rows.slice(0, 200).map(pr => ({ repository, id: `pr:${repository}:${pr.number}`, title: pr.title.slice(0, 2048) || "Open pull request", url: pr.url })) } : null;
       const included = raw.some(s => s.saved.closed !== undefined) || activities.some(s => s.available) || old;
       records.push({ version: "daily-progress-v1", scope: { kind: "repository", repository }, ...window, generatedAt: at,
-        phase: end <= now ? complete ? "complete" : "finalizing" : "provisional", coverage: { state: included ? "partial" : "not_collected", expectedRepositories: [repository],
+        phase: end <= readAt ? complete ? "complete" : "finalizing" : "provisional", coverage: { state: included ? "partial" : "not_collected", expectedRepositories: [repository],
           includedRepositories: included ? [repository] : [], expectedSources: reportExpectedSources, sources },
         totals: { mergedChanges: { value: precision === "unavailable" ? null : confirmed.length, precision }, completedTasks: { value: precision === "unavailable" ? null : 0, precision } },
         events: [...events.values()], currentWork });
-      if (end <= now && complete && reportDate === shiftDailyDate(closedThrough, 1)) closedThrough = reportDate;
+      if (end <= readAt && complete && reportDate === shiftDailyDate(closedThrough, 1)) closedThrough = reportDate;
       if (!complete) requiredFailed = true;
     }
     const catchingUp = closing < today && closedThrough >= shiftDailyDate(closing, -1);
     jobs.push({ id, lastAttemptAt: at, lastSuccessAt: requiredFailed ? previousJob?.lastSuccessAt ?? null : at,
-      nextDueAt: catchingUp ? at : fixedClock(nextDailyDue(now, timeZone)).iso(), closedThrough,
+      nextDueAt: catchingUp ? at : fixedClock(nextDailyDue(readAt, timeZone)).iso(), closedThrough,
       error: requiredFailed ? "Some required PR sources do not yet cover the requested report cutoffs." : null });
   }
   signal?.throwIfAborted();

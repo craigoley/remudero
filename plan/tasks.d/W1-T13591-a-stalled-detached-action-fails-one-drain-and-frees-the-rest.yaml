@@ -1,0 +1,46 @@
+- id: W1-T13591
+  title: "A drain with no options fails once, at a bound, naming the detached action that never settled, and frees later drains"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # src/lib/sweep.ts plus a new test suite, two concerns by Rule 19; production drains pass their own bound and are unchanged
+  origin: "operator-session#ci-shard-3-hang-2026-11-17"
+  plan_refs:
+    - W1-T13546
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/a-stalled-detached-action-fails-one-drain-and-frees-the-rest.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "drainDetachedSweepActions() called with no options waits DETACHED_DRAIN_DEFAULT_BOUND_MS, then rejects with an error that names each detached action that never settled"
+      proof: "grep: W1-T13591 criterion 1 in test/sweep/a-stalled-detached-action-fails-one-drain-and-frees-the-rest.test.ts"
+    - claim: "After that drain reports a stalled action, the next drain with no options does not wait on it, and still settles with an action that does settle"
+      proof: "grep: W1-T13591 criterion 2 in test/sweep/a-stalled-detached-action-fails-one-drain-and-frees-the-rest.test.ts"
+    - claim: "invariant:explicit-bound-unchanged — a drain given its own bound still returns its stragglers without throwing and keeps tracking them"
+      proof: "grep: W1-T13591 criterion 3 in test/sweep/a-stalled-detached-action-fails-one-drain-and-frees-the-rest.test.ts"
+  rationale: |
+    OBSERVED 2026-11-17/18 (W1-T13546, #19273): one test left a detached retro running in ci-shard 3's pooled process,
+    and every later test that called drainDetachedSweepActions() with no options waited on it until its own 120 s test
+    timeout. Dozens of tests did, so the shard ran until it was cancelled at about 35 minutes, and no failure named
+    the leaked action. W1-T13546 fixed that one leak. Any other fixture that throws before it settles its work can
+    cause the same hang.
+    OBSERVED at origin/main 5c5c9dc30: no src caller uses the no-options form. src/lib/daemon.ts passes boundMs 0 and its
+    own drain bound. The 60 test files that import drainDetachedSweepActions are the only users of the unbounded
+    default.
+  design: |
+    In src/lib/sweep.ts, a call with no options goes through a new path. Actions that settle within the current
+    turn are awaited with no timer, as now; test/light-pass-tick-is-not-bounded-by-ci.test.ts acceptance 4 asserts
+    such a drain schedules no timer. A drain still waiting after the turn runs the existing bounded drain with
+    DETACHED_DRAIN_DEFAULT_BOUND_MS (30 s). If any action is still unsettled, the drain stops tracking those actions
+    and throws an error naming each one's kind, task id and age. A call with options is unchanged.
+    Tests: criterion 1 uses node:test mock timers to show the drain still waits 1 ms inside the bound and rejects at
+    it, naming the action. Criterion 2 runs after it in the same file, so criterion 1's stalled action is the leak: the
+    registry is empty, and a later drain settles with a new action that settles. Criterion 3 shows a drain given a
+    bound returns its straggler and keeps tracking it.
+    INVARIANT explicit-bound-unchanged: a drain called with options behaves as at origin/main; it returns its
+    stragglers, never throws for them, and leaves them tracked.

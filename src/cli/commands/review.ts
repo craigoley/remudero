@@ -2537,7 +2537,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
       prUrl: view.url,
       reviewInputDigest: inputDigest,
       reviewEngineRevision: REVIEW_ENGINE_REVISION,
-      fetchLifecycle: () => fetchPrLifecycle(view.url),
+      fetchLifecycle: () => fetchPrLifecycleAsync(view.url),
     });
   } catch (e) {
     log("review.pending_post.error", { error: String((e as Error)?.message ?? e) });

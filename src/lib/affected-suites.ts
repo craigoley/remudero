@@ -620,6 +620,34 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   if (input.files.has(shippedDetector) && files.some((f) => shippedDetectorEdges.includes(f))) {
     pathReaders.push(shippedDetector);
   }
+  // W1-T9666: coverage run 38752153481 (PR #12044) failed on this suite and the selector missed it.
+  const ciFrictionNoOwner = suitePath("test/a-ci-friction-cause-owned-by-a-test-alone-escalates-as-no-owner.test.ts");
+  const ciFrictionNoOwnerEdges = [
+    "src/lib/pr-blocker.ts",
+    "src/lib/sweep.ts",
+    suitePath("test/a-security-arm-refusal-names-its-hold.test.ts"),
+    suitePath("test/every-open-pr-names-one-blocker-and-its-owner.test.ts"),
+  ];
+  if (input.files.has(ciFrictionNoOwner) && files.some((f) => ciFrictionNoOwnerEdges.includes(f))) {
+    pathReaders.push(ciFrictionNoOwner);
+  }
+  // W1-T10111: coverage run 39071533441 (c5782eda9e6a) failed on this suite and the selector missed it.
+  const resolverDivergence = suitePath("test/resolver-divergence-detector.test.ts");
+  const resolverDivergenceEdges = ["src/lib/proof-amendment.ts", "src/run-task.ts"];
+  if (input.files.has(resolverDivergence) && files.some((f) => resolverDivergenceEdges.includes(f))) {
+    pathReaders.push(resolverDivergence);
+  }
+  // W1-T10183: coverage run 39182261499 (PR #12863) recorded a narrow miss on the run-task suite.
+  const runTask = suitePath("test/run-task.test.ts");
+  const runTaskEdges = [
+    "docs/security-merge-policy.md",
+    "src/lib/security-merge-admission.ts",
+    suitePath("test/security-merge-admission.test.ts"),
+    suitePath("test/security-merge-effectors.test.ts"),
+  ];
+  if (input.files.has(runTask) && files.some((f) => runTaskEdges.includes(f))) {
+    pathReaders.push(runTask);
+  }
   // W1-T6338: preserve the recorded dashboard/settings miss beyond the narrow arm's symbol reach.
   const viewSchemas = suitePath("test/every-view-body-matches-its-schema.test.ts");
   const viewSchemaEdges = ["src/lib/repo-dashboard-route.ts", suitePath("test/repo-settings-report-their-effective-values.test.ts")];

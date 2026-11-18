@@ -505,6 +505,51 @@ test("W1-T9588: the shipped-detector suite is selected for each recorded miss ed
   assert.ok(!absent.suites.includes(suite), "a suite absent from the tree cannot be selected");
 });
 
+test("W1-T10111: the resolver-divergence suite is selected for each recorded miss edge", () => {
+  const suite = "test/resolver-divergence-detector.test.ts";
+  const edges = ["src/lib/proof-amendment.ts", "src/run-task.ts"];
+  const files = new Map([...Object.entries(TREE), [suite, ""]]);
+  for (const changed of edges) {
+    const selection = selectAffectedSuites([changed], { files, pathReaders: [], symbolSuites: [] });
+    assert.equal(selection.fullRun, false, changed);
+    assert.ok(selection.suites.includes(suite), `${changed} must select ${suite} in the floor`);
+  }
+  const unrelated = selectAffectedSuites(["src/a.ts"], { files, pathReaders: [], symbolSuites: [] });
+  assert.ok(!unrelated.suites.includes(suite), "an unrelated change must not select the suite");
+  const absent = selectAffectedSuites([edges[0]!], { files: new Map(Object.entries(TREE)), pathReaders: [], symbolSuites: [] });
+  assert.ok(!absent.suites.includes(suite), "a suite absent from the tree cannot be selected");
+});
+
+test("W1-T10183: the narrow selector includes the run-task suite for each recorded miss edge", () => {
+  const suite = "test/run-task.test.ts";
+  const edges = [
+    "docs/security-merge-policy.md",
+    "src/lib/security-merge-admission.ts",
+    "test/security-merge-admission.test.ts",
+    "test/security-merge-effectors.test.ts",
+  ];
+  const files = new Map(Object.entries(TREE));
+  for (const edge of edges) files.set(edge, "");
+  files.set(suite, "");
+  const input = { files, pathReaders: [], symbolSuites: [] };
+
+  for (const changed of edges) {
+    const selection = selectAffectedSuites([changed], input);
+    assert.equal(selection.fullRun, false, changed);
+    assert.deepEqual(shadowRecord(selection, [suite]).failures, [
+      { file: suite, floor: "selected", narrow: "selected" },
+    ], changed);
+  }
+
+  const unrelated = selectAffectedSuites(["src/a.ts"], input);
+  assert.ok(!unrelated.suites.includes(suite));
+  assert.ok(!unrelated.narrow?.includes(suite));
+  files.delete(suite);
+  const absent = selectAffectedSuites([edges[0]!], input);
+  assert.ok(!absent.suites.includes(suite));
+  assert.ok(!absent.narrow?.includes(suite));
+});
+
 test("W1-T4404: a config or lockfile change selects the full suite", () => {
   for (const file of ["package.json", "package-lock.json", "tsconfig.json", ".github/workflows/ci.yml", "test/helpers/git-repo.ts", "test/fixtures/x.json", ".nvmrc"]) {
     const sel = select(["src/a.ts", file]);
@@ -647,5 +692,22 @@ test("the reviewer-only proof failure suite is selected in the narrow arm for ea
     const selection = selectAffectedSuites([changed], { files, pathReaders: [], symbolSuites: [], readMap });
     assert.equal(selection.fullRun, false, changed);
     assert.ok(selection.narrow?.includes(suite), `${changed} must select ${suite} in the narrow arm`);
+  }
+});
+
+test("W1-T9666: the ci-friction no-owner suite is selected for each recorded miss edge (run 38752153481)", () => {
+  const suite = "test/a-ci-friction-cause-owned-by-a-test-alone-escalates-as-no-owner.test.ts";
+  const edges = [
+    "src/lib/pr-blocker.ts",
+    "src/lib/sweep.ts",
+    "test/a-security-arm-refusal-names-its-hold.test.ts",
+    "test/every-open-pr-names-one-blocker-and-its-owner.test.ts",
+  ];
+  const files = new Map([...Object.entries(TREE), [suite, ""]]);
+  for (const changed of edges) {
+    if (changed.startsWith("test/")) files.set(changed, "export {};\n");
+    const selection = selectAffectedSuites([changed], { files, pathReaders: [], symbolSuites: [] });
+    assert.equal(selection.fullRun, false, changed);
+    assert.ok(selection.suites.includes(suite), `${changed} must select ${suite} in the floor`);
   }
 });

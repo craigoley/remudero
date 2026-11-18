@@ -34,7 +34,7 @@ function recorder() {
 }
 
 test("an operator identity file supplies the identity when config has none", () => {
-  const full = { ...FILE_IDENTITY, jwksUrl: "https://clerk.example.test/keys", stepUpWindowMinutes: 5 };
+  const full = { ...FILE_IDENTITY, jwksUrl: "https://clerk.example.test/keys", stepUpWindowMinutes: 5, requireStepUp: true };
   withIdentityFile(JSON.stringify(full), (path) => {
     const { lines, log } = recorder();
     assert.deepEqual(operatorIdentityConfig(() => ({}), { path, log }), full);
@@ -60,6 +60,19 @@ test("an operator identity file supplies the identity when config has none", () 
   assert.deepEqual(lines, []);
 });
 
+test("W1-T13552 criterion 3: a requireStepUp that is not a boolean leaves identity off, never read as on or off", () => {
+  for (const value of ["true", 1, null]) {
+    const { lines, log } = recorder();
+    const body = JSON.stringify({ ...FILE_IDENTITY, requireStepUp: value });
+    assert.equal(operatorIdentityConfig(() => ({}), { path: "/fake/identity.json", readFile: () => body, log }), undefined);
+    assert.equal(lines[0]?.extra?.reason, "require_step_up_not_boolean", String(value));
+  }
+  for (const value of [true, false]) {
+    const body = JSON.stringify({ ...FILE_IDENTITY, requireStepUp: value });
+    assert.equal(operatorIdentityConfig(() => ({}), { path: "/fake/identity.json", readFile: () => body })?.requireStepUp, value);
+  }
+});
+
 test("config's own operator identity wins over the file", () => {
   withIdentityFile(JSON.stringify(FILE_IDENTITY), (path) => {
     const { lines, log } = recorder();
@@ -81,6 +94,7 @@ test("an invalid operator identity file leaves identity off with the reason", ()
     [JSON.stringify({ ...FILE_IDENTITY, jwksUrl: "ftp://x" }), "jwks_url_not_https_url"],
     [JSON.stringify({ ...FILE_IDENTITY, stepUpWindowMinutes: 0 }), "step_up_window_not_positive_number"],
     [JSON.stringify({ ...FILE_IDENTITY, stepUpWindowMinutes: "5" }), "step_up_window_not_positive_number"],
+    [JSON.stringify({ ...FILE_IDENTITY, requireStepUp: "true" }), "require_step_up_not_boolean"],
   ];
   for (const [body, reason] of cases) {
     const { lines, log } = recorder();

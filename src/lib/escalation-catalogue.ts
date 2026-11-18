@@ -2,18 +2,22 @@ import { DISK_FAIL_BYTES, DISK_WARN_BYTES, humanBytes } from "./doctor.js";
 import {
   classifyEndedDaemonProcesses, crashLoopRunOf, DAEMON_ABNORMAL_EXIT_STEP, DAEMON_CLEAN_EXIT_OBSERVED_STEP, learnedCleanLifetime,
   type CrashLoopVerdict, type DaemonLifetimeRecord, type DaemonProcessEnd, type LearnedCleanLifetime, type LearnedCrashLoopSummary,
-  type StarvationCensus, type StarvationClearedInfo,
+  type ClaimStallClearedInfo, type ClaimStallInfo, type StarvationCensus, type StarvationClearedInfo,
 } from "./daemon.js";
 import { ghRateLimitWindow, type GhRateLimitProvenance } from "./daemon-health.js";
-import { ghIssueGateway, tryEscalate, type IssueGateway } from "./escalate.js";
+import { quantileOf } from "./daemon-memory-policy.js";
+import { readLedgerUnionRecords } from "./ledger-union.js";
+import { ghIssueGateway, ghIssueGatewayAsync, ghIssueGatewayGraphql, tryEscalate, tryEscalateAsync, type AsyncIssueGateway, type Escalation, type IssueGateway } from "./escalate.js";
 import { appendLedger, matchesRepoScopedTask } from "./ledger.js";
 import type { ReplayStranded } from "./inbox-replay.js";
 import type { Task } from "./plan.js";
 import { DEFAULT_MAX_TASK_LIFETIME_DISPATCHES, readLedgerLines } from "./status.js";
-import type { PostReviewStallVerdict } from "./sweep.js";
+import type { EscalationTriageSlice, PostReviewStallVerdict } from "./sweep.js";
+import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
+import { readFile } from "node:fs/promises";
 import { hostname } from "node:os";
-import { systemClock } from "./clock.js";
+import { systemClock, type Clock } from "./clock.js";
 import { deliveredEscalationUrl, spoolIssueAction, withdrawSpooledEscalation } from "./host-escalation-spool.js";
 
 /**
@@ -881,7 +885,7 @@ export function escalateQuotaExhaustion(
   info: { bucket: "core" | "graphql"; remaining: number; resetsAt: string },
   ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway },
   deps: { provenanceBracket?: { start: GhRateLimitProvenance; end: GhRateLimitProvenance } } = {},
-): void {
+): void | Promise<void> {
   if (deps.provenanceBracket && !ghRateLimitWindow(deps.provenanceBracket.start, deps.provenanceBracket.end)) {
     appendLedger(ctx.ledgerPath, {
       run_id: ctx.runId,
@@ -896,48 +900,110 @@ export function escalateQuotaExhaustion(
     (l) => l.step === "daemon.quota_exhausted.escalated" && l.bucket === info.bucket && l.resets_at === info.resetsAt,
   );
   if (already) return;
+  const escalated = (issueUrl: string | null): void => appendLedger(ctx.ledgerPath, {
+    run_id: ctx.runId,
+    task_id: "daemon",
+    step: "daemon.quota_exhausted.escalated",
+    bucket: info.bucket,
+    resets_at: info.resetsAt,
+    issue_url: issueUrl,
+    delivered: issueUrl !== null,
+  });
+  const notice = quotaExhaustionNotice(info, ctx.runId);
+  // W1-T13690: a core exhaustion reads and opens its issue through GraphQL, which spends none of core.
+  if (info.bucket === "core" && ctx.issues === undefined) {
+    return tryEscalateAsync(notice, { issues: ghIssueGatewayGraphql(ctx.owner, ctx.repo), ledgerPath: ctx.ledgerPath, runId: ctx.runId })
+      .then(escalated);
+  }
+  escalated(tryEscalate(notice, { issues: ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo), ledgerPath: ctx.ledgerPath, runId: ctx.runId }));
+}
+
+/** The quota notice. `late`, when set, is the window a notice sent after the reset names (W1-T13690). */
+function quotaExhaustionNotice(
+  info: { bucket: "core" | "graphql"; remaining: number; resetsAt: string },
+  runId: string,
+  late?: { firstSeenAt: string },
+): Escalation {
   const spent =
     info.bucket === "graphql"
       ? "`gh pr create`, `gh pr view --json`, and therefore `rmd review` — a run that finishes its work and " +
         "then cannot open or update its own PR at this bucket's exhaustion loses that work silently, exactly " +
         "as W1-T333 did"
       : "the board's own `gh pr view`/`pr list`/`issue view` reads (status.ts's `ghGateway`/`buildBatchedGithub`)";
-  const issueUrl = tryEscalate(
-    {
-      class: "HARD_STOP",
-      taskId: "daemon",
-      runId: ctx.runId,
-      summary: `gh api rate_limit ${info.bucket} bucket exhausted — resets ${info.resetsAt}`,
-      detail:
-        `W1-T372: the daemon's tick observed the ${info.bucket} bucket cross from having budget to ${info.remaining} ` +
-        `remaining. This bucket backs ${spent}. This is a NOTICE, not a hold: dispatch is not paused and no ` +
-        `existing consumer's behavior changed — the bucket refills on its own at ${info.resetsAt}, and this notice ` +
-        `is self-clearing at that instant with no action required; a human reading this after that time can close ` +
-        `it on sight.`,
-      options: [
-        {
-          label: "wait for reset",
-          detail: `The bucket refills on its own at ${info.resetsAt} — no action needed.`,
-        },
-        {
-          label: "check what spent it",
-          detail: "`gh api rate_limit` shows the live figure; a runaway caller against this bucket is the thing worth finding, not this notice.",
-        },
-      ],
-      recommendation: "wait for reset",
-    },
-    {
-      issues: ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo),
-      ledgerPath: ctx.ledgerPath,
-      runId: ctx.runId,
-    },
-  );
+  return {
+    class: "HARD_STOP",
+    taskId: "daemon",
+    runId,
+    summary: late
+      ? `gh api rate_limit ${info.bucket} bucket was exhausted from ${late.firstSeenAt} to ${info.resetsAt} — sent after the reset`
+      : `gh api rate_limit ${info.bucket} bucket exhausted — resets ${info.resetsAt}`,
+    detail:
+      `W1-T372: the daemon's tick observed the ${info.bucket} bucket cross from having budget to ${info.remaining} ` +
+      `remaining. This bucket backs ${spent}. This is a NOTICE, not a hold: dispatch is not paused and no ` +
+      `existing consumer's behavior changed — the bucket refills on its own at ${info.resetsAt}, and this notice ` +
+      `is self-clearing at that instant with no action required; a human reading this after that time can close ` +
+      `it on sight.`,
+    options: [
+      {
+        label: "wait for reset",
+        detail: `The bucket refills on its own at ${info.resetsAt} — no action needed.`,
+      },
+      {
+        label: "check what spent it",
+        detail: "`gh api rate_limit` shows the live figure; a runaway caller against this bucket is the thing worth finding, not this notice.",
+      },
+    ],
+    recommendation: "wait for reset",
+  };
+}
+
+/** The live ledger's quota notice rows. Both steps are kept across a rotation, so the live file holds them. */
+async function quotaNoticeRows(ledgerPath: string): Promise<Record<string, unknown>[]> {
+  let text: string;
+  try {
+    text = await readFile(ledgerPath, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+  const rows: Record<string, unknown>[] = [];
+  for (const line of text.split("\n")) {
+    if (!line.includes("daemon.quota_exhausted.")) continue;
+    try {
+      rows.push(JSON.parse(line) as Record<string, unknown>);
+    } catch {
+      // deliberate: a torn line is no row, as readLedgerLines reads it.
+    }
+  }
+  return rows;
+}
+
+/**
+ * W1-T13690: the daemon's `onQuotaRecovered` hook, called on the tick a bucket reads positive after it read 0
+ * in this process. When the newest `daemon.quota_exhausted.escalated` row for the bucket says the notice was
+ * not delivered, and no `daemon.quota_exhausted.delivered_late` row has the same bucket and reset, it sends
+ * the notice once, naming the window, through the same gateway choice as {@link escalateQuotaExhaustion}.
+ * It writes the `delivered_late` row whatever the outcome, so a later tick or a restart sends nothing.
+ */
+export async function deliverQuotaExhaustionLate(
+  info: { bucket: "core" | "graphql" },
+  ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway },
+): Promise<void> {
+  const rows = await quotaNoticeRows(ctx.ledgerPath);
+  const newest = rows.filter((l) => l.step === "daemon.quota_exhausted.escalated" && l.bucket === info.bucket).at(-1);
+  if (newest === undefined || newest.delivered !== false || typeof newest.resets_at !== "string") return;
+  const resetsAt = newest.resets_at;
+  if (rows.some((l) => l.step === "daemon.quota_exhausted.delivered_late" && l.bucket === info.bucket && l.resets_at === resetsAt)) return;
+  const firstSeenAt = typeof newest.ts === "string" ? newest.ts : "an unrecorded time";
+  const notice = quotaExhaustionNotice({ bucket: info.bucket, remaining: 0, resetsAt }, ctx.runId, { firstSeenAt });
+  const issues = ctx.issues ?? (info.bucket === "core" ? ghIssueGatewayGraphql(ctx.owner, ctx.repo) : ghIssueGateway(ctx.owner, ctx.repo));
+  const issueUrl = await tryEscalateAsync(notice, { issues, ledgerPath: ctx.ledgerPath, runId: ctx.runId });
   appendLedger(ctx.ledgerPath, {
     run_id: ctx.runId,
     task_id: "daemon",
-    step: "daemon.quota_exhausted.escalated",
+    step: "daemon.quota_exhausted.delivered_late",
     bucket: info.bucket,
-    resets_at: info.resetsAt,
+    resets_at: resetsAt,
     issue_url: issueUrl,
     delivered: issueUrl !== null,
   });
@@ -1091,6 +1157,333 @@ export function escalateStarvationCleared(
     delivered,
     ...(failure ? { failure } : {}),
   });
+}
+
+/** W1-T13248: the ledger markers of the claim-stall page — one per open, one per clear. */
+export const CLAIM_STALL_ESCALATED_STEP = "dispatch.claim_stall.escalated";
+export const CLAIM_STALL_CLEARED_STEP = "dispatch.claim_stall.cleared";
+
+type ClaimStallCtx = { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway };
+
+/** The stall's own rows, read off the event loop from the ledger union (live file and rotations). */
+async function claimStallRows(ctx: ClaimStallCtx, steps: readonly string[]): Promise<Array<Record<string, unknown>>> {
+  return readLedgerUnionRecords(dirname(ctx.ledgerPath), { step: steps });
+}
+
+/**
+ * W1-T13248: the page for a fleet whose free slots went only to runs refused before spend (2026-11-16: 14:42Z to
+ * 20:30Z, nothing alerted). DEDUP IS ON THE NEWEST CLAIM-PASSING RUN, never `run.start`: a refused run writes a
+ * fresh `run.start` every tick, so keying on it re-armed the page each tick. If the newest
+ * `dispatch.claim_stall.escalated` row postdates the newest `dispatch.claim` `created` row, the stall was already
+ * reported. The marker is written whether or not delivery succeeded (`escalateStarvation`'s discipline).
+ */
+export async function escalateClaimStall(
+  info: ClaimStallInfo,
+  ctx: ClaimStallCtx,
+): Promise<void> {
+  const lines = await claimStallRows(ctx, [CLAIM_STALL_ESCALATED_STEP, "dispatch.claim"]);
+  let lastEscalatedIdx = -1;
+  let lastPassedIdx = -1;
+  lines.forEach((l, i) => {
+    if (l.step === CLAIM_STALL_ESCALATED_STEP) lastEscalatedIdx = i;
+    if (l.step === "dispatch.claim" && l.outcome === "created") lastPassedIdx = i;
+  });
+  if (lastEscalatedIdx !== -1 && lastEscalatedIdx > lastPassedIdx) return;
+
+  const minutes = (ms: number): string => `${Math.round(ms / 60_000)} min`;
+  const bound = info.boundSource === "claim-silence-window"
+    ? `the fleet's claim-silence window (p90 of ${info.samples} measured claim-to-verdict builds, floored at two renewal intervals)`
+    : `the p90 of ${info.samples} gaps between runs that passed their claim (no claim-to-verdict sample yet)`;
+  const release = `rmd claim ${info.taskId} --drop`;
+  const where = info.holderHost !== undefined ? ` on ${info.holderHost}` : " on the holder's host";
+  const issueUrl = tryEscalate(
+    {
+      class: "BLOCKED",
+      taskId: info.taskId,
+      runId: ctx.runId,
+      summary: `fleet is starting no work — ${info.taskId}'s dispatch claim (held by ${info.holder}) refuses every run`,
+      detail:
+        `W1-T13248: for ${info.refusedTicks} consecutive ticks every admitted run was refused before spend and none passed ` +
+        `its dispatch claim, so the free slots are going to refused runs and no work is starting. ${info.taskId}'s claim ` +
+        `${info.ref} is held by ${info.holder}; its newest sign of life is ${minutes(info.claimAgeMs)} old` +
+        `${info.lastSignOfLife !== undefined ? ` (${info.lastSignOfLife})` : ""}, past ${minutes(info.boundMs)} — ` +
+        `bound: ${bound}. The daemon is live; it will close this issue when a run next passes its claim.`,
+      options: [
+        {
+          label: "release the claim",
+          detail: `If the holder is gone, drop the claim from its host: \`${release}\`${where}.`,
+        },
+        {
+          label: "acknowledge and wait",
+          detail: "If the holder is working, no action is needed — the issue closes itself when a run next passes its claim.",
+        },
+      ],
+      recommendation: "release the claim",
+    },
+    {
+      issues: ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo),
+      ledgerPath: ctx.ledgerPath,
+      runId: ctx.runId,
+    },
+  );
+  appendLedger(ctx.ledgerPath, {
+    run_id: ctx.runId,
+    task_id: info.taskId,
+    step: CLAIM_STALL_ESCALATED_STEP,
+    ref: info.ref,
+    holder: info.holder,
+    claim_age_ms: info.claimAgeMs,
+    bound_ms: info.boundMs,
+    bound_source: info.boundSource,
+    samples: info.samples,
+    refused_ticks: info.refusedTicks,
+    release_command: release,
+    issue_url: issueUrl,
+    delivered: issueUrl !== null,
+  });
+}
+
+/**
+ * W1-T13248: the cleared half — closes the issue the newest `dispatch.claim_stall.escalated` row named, unless a later
+ * cleared row already did. The referent is the ledger, never a lookup; absent means a silent no-op. CANNOT-OBSERVE
+ * MEANS WAIT (W1-T130): a gateway that cannot close, or whose close throws, leaves the issue open and costs one
+ * `delivered: false` row.
+ */
+export async function escalateClaimStallCleared(
+  info: ClaimStallClearedInfo,
+  ctx: ClaimStallCtx,
+): Promise<void> {
+  let issueUrl: string | null = null;
+  for (const l of await claimStallRows(ctx, [CLAIM_STALL_ESCALATED_STEP, CLAIM_STALL_CLEARED_STEP])) {
+    if (l.step === CLAIM_STALL_ESCALATED_STEP) issueUrl = typeof l.issue_url === "string" ? l.issue_url : null;
+    else if (l.step === CLAIM_STALL_CLEARED_STEP) issueUrl = null;
+  }
+  if (!issueUrl) return;
+  const comment =
+    `W1-T13248: a run${info.runId !== undefined ? ` (${info.runId})` : ""} passed its dispatch claim` +
+    `${info.taskId !== undefined ? ` for ${info.taskId}` : ""}, so the fleet is starting work again. Closing automatically; ` +
+    `a fresh stall opens its own issue.`;
+  const issues = ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo);
+  let delivered = false;
+  let failure: string | undefined;
+  if (!issues.closeWithComment) {
+    failure = "issue gateway cannot close issues";
+  } else {
+    try {
+      issues.closeWithComment(issueUrl, comment);
+      delivered = true;
+    } catch (e) {
+      // CANNOT-OBSERVE MEANS WAIT (W1-T130): never rethrown into the daemon loop; the row below carries it as `failure`.
+      failure = String((e as Error)?.message ?? e);
+    }
+  }
+  appendLedger(ctx.ledgerPath, {
+    run_id: ctx.runId,
+    task_id: info.taskId ?? "daemon",
+    step: CLAIM_STALL_CLEARED_STEP,
+    issue_url: issueUrl,
+    delivered,
+    ...(failure ? { failure } : {}),
+  });
+}
+
+/**
+ * W1-T13255's rows, each carrying its `stage`. `failed` is one failing pass. `recovered` ends a streak that has no
+ * issue to close, and its `passes` is a sample for the bound. `escalated` and `cleared` are the issue's open and close.
+ */
+export const SWEEP_STAGE_FAILED_STEP = "sweep.stage.failed";
+export const SWEEP_STAGE_RECOVERED_STEP = "sweep.stage.recovered";
+export const SWEEP_STAGE_ESCALATED_STEP = "sweep.stage_failing.escalated";
+export const SWEEP_STAGE_CLEARED_STEP = "sweep.stage_failing.cleared";
+/** Those four steps as one ledger slice: every rotation and the live file, so a streak outlives a restart. */
+export const SWEEP_STAGE_STREAK_SLICE: EscalationTriageSlice = {
+  holder: "sweep.stage-failure-streaks",
+  steps: [SWEEP_STAGE_FAILED_STEP, SWEEP_STAGE_RECOVERED_STEP, SWEEP_STAGE_ESCALATED_STEP, SWEEP_STAGE_CLEARED_STEP],
+};
+/** How long a recovered streak goes on teaching the bound. */
+export const SWEEP_STAGE_STREAK_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+/** With fewer recovered streaks than this inside the window, the fallback is the bound. */
+export const SWEEP_STAGE_STREAK_MIN_SAMPLES = 5;
+/** The bound before a stage has taught one, in consecutive failing passes. A full pass starts about every quarter
+ *  of an hour, so the fifth failure in a row comes about an hour after the first. */
+export const SWEEP_STAGE_STREAK_FALLBACK_PASSES = 4;
+
+/** One stage's failure streak, as its own rows tell it. */
+export interface SweepStageStreakState {
+  /** Failing passes since the stage last recovered; 0 when it is not failing. */
+  passes: number;
+  firstFailureTs?: string;
+  lastError?: string;
+  /** The issue an `escalated` row opened and no `cleared` row has closed. */
+  issueUrl?: string;
+  /** Lengths of the streaks that recovered inside the window without a page being tried. */
+  recovered: number[];
+}
+
+/** Pure: fold one stage's rows, oldest first (the order the ledger union returns them in). */
+export function sweepStageStreakState(rows: ReadonlyArray<Record<string, unknown>>, stage: string, nowMs: number): SweepStageStreakState {
+  let state: SweepStageStreakState = { passes: 0, recovered: [] };
+  let pageTried = false;
+  const endStreak = (issueUrl: string | undefined): void => {
+    state = { passes: 0, recovered: state.recovered, ...(issueUrl === undefined ? {} : { issueUrl }) };
+    pageTried = false;
+  };
+  for (const row of rows) {
+    if (row.stage !== stage) continue;
+    if (row.step === SWEEP_STAGE_FAILED_STEP) {
+      if (state.passes === 0) state.firstFailureTs = String(row.ts);
+      state.passes++;
+      state.lastError = String(row.error);
+    } else if (row.step === SWEEP_STAGE_ESCALATED_STEP) {
+      pageTried = true;
+      if (typeof row.issue_url === "string") state.issueUrl = row.issue_url;
+    } else if (row.step === SWEEP_STAGE_RECOVERED_STEP) {
+      const inWindow = nowMs - Date.parse(String(row.ts)) <= SWEEP_STAGE_STREAK_WINDOW_MS;
+      if (!pageTried && inWindow && typeof row.passes === "number") state.recovered.push(row.passes);
+      endStreak(state.issueUrl);
+    } else if (row.step === SWEEP_STAGE_CLEARED_STEP) {
+      endStreak(undefined);
+    }
+  }
+  return state;
+}
+
+/** Pure: the streak length a stage must outlast before it pages, and where that length came from. */
+export function sweepStageStreakBound(recovered: readonly number[]): { passes: number; basis: "p90" | "fallback"; samples: number } {
+  if (recovered.length < SWEEP_STAGE_STREAK_MIN_SAMPLES) {
+    return { passes: SWEEP_STAGE_STREAK_FALLBACK_PASSES, basis: "fallback", samples: recovered.length };
+  }
+  return { passes: quantileOf(recovered, 0.9) as number, basis: "p90", samples: recovered.length };
+}
+
+function sweepStageEscalation(
+  stage: string, state: SweepStageStreakState, bound: ReturnType<typeof sweepStageStreakBound>, historyRead: boolean, runId: string,
+): Escalation {
+  const days = SWEEP_STAGE_STREAK_WINDOW_MS / (24 * 60 * 60 * 1000);
+  const fallbackWhy = historyRead
+    ? `this stage recovered on its own from ${bound.samples} failure streak(s) in the last ${days} days and a learned bound needs ${SWEEP_STAGE_STREAK_MIN_SAMPLES}`
+    : "the stage's streak history could not be read, so the count is only the passes this daemon process saw";
+  const boundText = bound.basis === "p90"
+    ? `the p90 length (${bound.passes} passes) of the ${bound.samples} failure streaks this stage recovered from on its own in the last ${days} days`
+    : `the fallback of ${bound.passes} passes (SWEEP_STAGE_STREAK_FALLBACK_PASSES), which applies because ${fallbackWhy}`;
+  return {
+    // HARD_STOP, not BLOCKED: the triage may move a BLOCKED issue to the fleet-notice digest or answer it by default.
+    class: "HARD_STOP",
+    taskId: "daemon",
+    runId,
+    // No count and no error in the title, so a later pass of the same streak never reads as a second incident.
+    summary: `sweep stage ${stage} fails on every pass`,
+    detail:
+      `W1-T13255: the full sweep's ${stage} stage has failed on ${state.passes} passes since ${state.firstFailureTs}, and no ` +
+      `pass in that time completed cleanly. Its last error: ${state.lastError}. That outlasts ` +
+      `${boundText}. The sweep carries on past a failing stage, so until now the only sign was one ledger row per pass, ` +
+      `and the stage's own work is not being done (for escalation_answers: no operator reply on an escalation is applied). ` +
+      `This issue closes itself on the stage's next clean pass.`,
+    options: [
+      {
+        label: "read the failures and fix the cause",
+        detail:
+          `Run \`rmd ledger-grep ${SWEEP_STAGE_FAILED_STEP}\` for the error on each pass, then build or file the fix. ` +
+          `Nothing retries differently in the meantime: the stage runs again, and fails again, on every full pass.`,
+      },
+      {
+        label: "acknowledge and wait",
+        detail: "If the fix is already merging, no action is needed: the issue closes itself on the stage's next clean pass.",
+      },
+    ],
+    recommendation: "read the failures and fix the cause",
+    consequence: `The ${stage} stage keeps failing on every full sweep pass and its work stays undone.`,
+  };
+}
+
+/** What one full pass saw of a stage: it threw, it completed (`clean`), or it did not run or could not read everything. */
+export type SweepStageOutcome = { error: string } | { clean: boolean };
+
+/**
+ * W1-T13255 — a sweep stage that fails on every pass. 2026-11-10 to 11-16: the escalation-answers stage threw on every
+ * full pass, no operator answer was applied for six days, and the sweep's `catch` wrote one row per pass that nobody
+ * read. Built once per daemon start; called once per stage per full pass.
+ *
+ * THE STREAK IS ITS ROWS. A failing pass appends `failed`; the streak is the `failed` rows since the stage's last
+ * `recovered` or `cleared` row, read back through the ledger slice, so a restart loses nothing. Once it is longer than
+ * {@link sweepStageStreakBound} it opens ONE issue: a later failing pass finds the open issue on the ledger and stops.
+ * An undelivered page writes its row and is tried again on the next failing pass, since a page that never arrives is
+ * the defect this exists to end.
+ *
+ * ONLY A CLEAN PASS ENDS A STREAK. It closes the open issue (`cleared`), or records the streak's length as a sample
+ * (`recovered`). A pass that returned without reading everything (`clean: false`) proves neither a failure nor a
+ * recovery, and changes nothing. A clean pass after a settled one reads nothing at all.
+ *
+ * AN UNREADABLE HISTORY NEVER SILENCES IT. The rows this process wrote since the stage's streak last ended stand in
+ * for a history that cannot be read, so a stage still pages once this process alone has seen it outlast the fallback,
+ * and the issue this process opened is still closed. What an earlier process left waits for a clean pass that can
+ * read it. A close that fails costs one `delivered: false` row and is not tried again (W1-T130).
+ */
+export function createSweepStageWatch(ctx: {
+  owner: string;
+  repo: string;
+  ledgerPath: string;
+  runId: string;
+  history: (stateDir: string) => Promise<{ ok: boolean; rows: ReadonlyArray<Record<string, unknown>> }>;
+  issues?: AsyncIssueGateway;
+  clock?: Clock;
+}): (stage: string, outcome: SweepStageOutcome) => Promise<void> {
+  const clock = ctx.clock ?? systemClock;
+  const settled = new Set<string>();
+  const ownRows = new Map<string, Array<Record<string, unknown>>>();
+  return async (stage, outcome) => {
+    const failed = "error" in outcome;
+    const own = ownRows.get(stage) ?? [];
+    ownRows.set(stage, own);
+    // One id per pass: the ledger union drops a byte-identical row as a replay, and two passes can share a millisecond.
+    const passId = randomUUID();
+    const write = (step: string, extra: Record<string, unknown>): void => {
+      const row = { ts: clock.iso(), run_id: ctx.runId, task_id: "daemon", step, stage, pass_id: passId, ...extra };
+      appendLedger(ctx.ledgerPath, row);
+      own.push(row);
+    };
+    if (failed) {
+      settled.delete(stage);
+      write(SWEEP_STAGE_FAILED_STEP, { error: outcome.error });
+    } else if (!outcome.clean || settled.has(stage)) {
+      return;
+    }
+    const read = await ctx.history(dirname(ctx.ledgerPath));
+    const state = sweepStageStreakState(read.ok ? read.rows : own, stage, clock.now());
+    const issues = ctx.issues ?? ghIssueGatewayAsync(ctx.owner, ctx.repo);
+    const streak = { first_failure_ts: state.firstFailureTs, passes: state.passes };
+    if (failed) {
+      const bound = sweepStageStreakBound(state.recovered);
+      if (state.issueUrl !== undefined || state.passes <= bound.passes) return;
+      const issueUrl = await tryEscalateAsync(sweepStageEscalation(stage, state, bound, read.ok, ctx.runId),
+        { issues, ledgerPath: ctx.ledgerPath, runId: ctx.runId });
+      write(SWEEP_STAGE_ESCALATED_STEP, {
+        ...streak, error: state.lastError, bound_passes: bound.passes, bound_basis: bound.basis, bound_samples: bound.samples,
+        history_read: read.ok, issue_url: issueUrl, delivered: issueUrl !== null,
+      });
+      return;
+    }
+    if (state.issueUrl !== undefined) {
+      let failure: string | undefined;
+      if (!issues.closeWithComment) {
+        failure = "issue gateway cannot close issues";
+      } else {
+        try {
+          await issues.closeWithComment(state.issueUrl,
+            `W1-T13255: the ${stage} stage completed a clean pass, so its failure streak has ended. Closing automatically; ` +
+            `a later streak that outlasts its bound opens its own issue.`);
+        } catch (e) {
+          // CANNOT-OBSERVE MEANS WAIT (W1-T130): never rethrown into the sweep; the row below carries the failure.
+          failure = String((e as Error)?.message ?? e);
+        }
+      }
+      write(SWEEP_STAGE_CLEARED_STEP, { ...streak, issue_url: state.issueUrl, delivered: failure === undefined, ...(failure ? { failure } : {}) });
+    } else if (state.passes > 0) {
+      write(SWEEP_STAGE_RECOVERED_STEP, streak);
+    }
+    own.length = 0;
+    if (read.ok) settled.add(stage);
+  };
 }
 
 /** The step `inbox-replay.ts` exports as `REPLAY_ESCALATED_STEP`, spelled here so this module does not load the inbox. */

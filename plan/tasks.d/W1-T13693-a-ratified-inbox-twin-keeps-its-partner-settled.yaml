@@ -1,0 +1,30 @@
+- id: W1-T13693
+  title: "A ratified Inbox twin keeps its partner settled: when verify-human:<id> or machine-judge:<id> is ratified, the other classifies as ratified even after the first is pruned"
+  repo: remudero
+  depends_on: []
+  plan_refs:
+    - W1-T13621
+  type: implement
+  verify: auto
+  risk: high # one concern across 2 files: the classifier's ledger check and its test
+  priority: 1.2
+  status: queued
+  # Id reserved for run-unfiled-1795005000001 with ~/rmd-work/bin/reserve-id.sh
+  # reservation hand-off: run-unfiled-1795005000001 -> claude/project-thread-3etqkx
+  files:
+    - src/lib/inbox.ts
+    - test/inbox/a-ratified-twin-keeps-its-partner-settled.test.ts
+  design: |
+    INVARIANT unrelated-asks-unaffected: an ask that is not a verify-human/machine-judge pair, or whose twin is a different task, classifies exactly as before.
+
+    classifyProposal already reads the ledger's ratify.approved for the proposal itself first. It also reads it for the parked-task twin (verify-human:<id> for machine-judge:<id> and back) and returns ratified when the twin is ratified, so every consumer agrees and pruneRatifiedProposals removes the survivor.
+  acceptance:
+    - claim: "A machine-judge ask whose verify-human twin carries ratify.approved classifies as ratified and is pruned, and the reverse holds."
+      proof: "grep: W1-T13693 criterion 1 in test/inbox/a-ratified-twin-keeps-its-partner-settled.test.ts"
+    - claim: "invariant:unrelated-asks-unaffected — another task's twin or a non-twin ask is not settled"
+      proof: "grep: W1-T13693 criterion 2 in test/inbox/a-ratified-twin-keeps-its-partner-settled.test.ts"
+  origin: "operator-session#inbox-asks-2026-11-17"
+  rationale: |
+    OBSERVED 2026-11-18 (read-only host check by the Inbox thread): machine-judge:W1-T12032 returned to Needs you as notReady
+    after its twin verify-human:W1-T12032 was ratified. pruneRatifiedProposals deleted the ratified twin from the registry,
+    and foldedTwinAsks folds only while both ids are present, so W1-T13621's answered-twin-stays-settled invariant broke.

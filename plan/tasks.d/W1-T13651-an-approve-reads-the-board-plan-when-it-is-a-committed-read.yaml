@@ -1,0 +1,47 @@
+- id: W1-T13651
+  title: "An Inbox Approve gates on serve's board plan when that plan was read from a committed ref, instead of re-reading and YAML-parsing the whole plan through git on serve's request loop (about 25 s, past the Console's 25 s limit)"
+  repo: remudero
+  depends_on: []
+  priority: 0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # which plan an irreversible Approve is judged against; a committed-ref read is never torn, any other source keeps the git read
+  band_meaning: span
+  origin: "operator-session#serve-oom-2026-11-16"
+  plan_refs:
+    - W1-T13605
+    - W1-T2220
+  files:
+    - src/lib/panel-graph.ts
+    - test/inbox/an-approve-reads-the-board-plan-when-it-is-a-committed-read.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "With a plan source of state loaded and an identity beginning ref:, approvePlanReader answers the held board plan and runs no git (a git read in the test's non-repository directory would throw)"
+      proof: "grep: W1-T13651 criterion 1 in test/inbox/an-approve-reads-the-board-plan-when-it-is-a-committed-read.test.ts"
+    - claim: "invariant:never-torn — with no source, a stale or unavailable source, a non-ref identity, or no held plan, approvePlanReader reads the committed plan at HEAD through git, as before"
+      kind: guard
+      proof: "grep: W1-T13651 criterion 2 in test/inbox/an-approve-reads-the-board-plan-when-it-is-a-committed-read.test.ts"
+    - claim: "The Approve route uses it: panel-graph.ts's approve action calls approvePlanReader(deps)"
+      proof: "grep: approvePlanReader(deps) in src/lib/panel-graph.ts"
+  rationale: |
+    WHY: the live W1-T12032 Approve test on 2026-11-18 at 10:52Z: the Console gave up at 25 s and fell back to pending.
+    MEASURED on the Azure host: serve.demand for 10:53 to 10:58Z holds one /v1/inbox/approve request, aborted at
+    24,824 ms; panel.proposal_approve_requested is stamped 10:54:17.6Z, inside a 29,582 ms main-thread stall
+    (runtime.loop_stall_profile at 10:54:20.1Z) whose frames are classifyAllProposals -> mergePlanBlobs /
+    parseTasksFromYaml and spawn under readBlobsAtRef. W1-T13605 (classify only the named proposal) was live.
+    READ at origin/main: the approve action passes (planPath) => loadPlanAtRef(deps.root, ...) to classifyAllProposals
+    (W1-T2220 remedy (c), so an irreversible action never reads a torn working tree). Serve's board already holds a plan
+    read from a committed ref in a worker (reloadServePlan, plan source "loaded" with identity "ref:<repo>@<ref>").
+  design: |
+    INVARIANT never-torn: Approve is judged against a plan read from a committed ref, the held one or git's at HEAD.
+    1. approvePlanReader(deps) returns the held board plan when readPlanSource() is loaded with a ref: identity and
+       readPlanSnapshot exists; otherwise the git read at HEAD, unchanged.
+    2. The approve action passes approvePlanReader(deps) to classifyAllProposals.
+  falsifier: |
+    Keep the git read always: criterion 1 fails. Use the held plan from a stale or file source: criterion 2 fails.
+  note: |
+    Id reserved for run-unfiled-1794999729254 with ~/rmd-work/bin/reserve-id.sh.
+    The first ~110 s of the 2-minute delay happened before serve received the request (Console or tunnel side).

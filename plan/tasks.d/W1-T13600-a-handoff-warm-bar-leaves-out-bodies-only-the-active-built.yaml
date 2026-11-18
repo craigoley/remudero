@@ -1,0 +1,59 @@
+- id: W1-T13600
+  title: "A serve handoff's warm bar counts only the active's bodies the store still holds, so a standby that loads the whole store is not refused for bodies only the active built"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # one concern across three serve files (Rule 19): the standby readiness bar; an active on older code keeps the old bar
+  band_meaning: span
+  origin: "operator-session#serve-recycle-2026-11-18"
+  plan_refs:
+    - W1-T13534
+  files:
+    - src/lib/read-model-worker.ts
+    - src/lib/serve-generation.ts
+    - src/lib/serve-supervisor.ts
+    - test/console-api/serve/a-handoff-warm-bar-leaves-out-bodies-only-the-active-built.test.ts
+    - test/serve-generation.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "An active holding 235 bodies of which 226 are committed sets the bar at 226, so a standby holding the 226 the store gives it hands off"
+      proof: "grep: W1-T13600 criterion 1 in test/console-api/serve/a-handoff-warm-bar-leaves-out-bodies-only-the-active-built.test.ts"
+    - claim: "An active on older code reports no committed count, so the bar stays its total and the 226-body standby still aborts on ready_bound"
+      proof: "grep: W1-T13600 criterion 2 in test/console-api/serve/a-handoff-warm-bar-leaves-out-bodies-only-the-active-built.test.ts"
+    - claim: "invariant:never-thinner — a standby with fewer bodies than the active's committed count still aborts"
+      kind: guard
+      proof: "grep: W1-T13600 criterion 3 in test/console-api/serve/a-handoff-warm-bar-leaves-out-bodies-only-the-active-built.test.ts"
+    - claim: "committedBodies counts only held bodies the committed load read; a body the worker posted that the store lacks is left out, and a fresh standby meets that count"
+      proof: "grep: W1-T13600 criterion 4 in test/console-api/serve/a-handoff-warm-bar-leaves-out-bodies-only-the-active-built.test.ts"
+  rationale: |
+    WHY: on 2026-11-18 (OBSERVED, host ledger and read model) serve's container was recreated at 02:23Z and its
+    active cold-started on 2ff68cf14 at 02:24Z. Every handoff after that (02:45Z, 03:01Z, 03:16Z, 03:31Z) wrote
+    serve.handoff_aborted criterion ready_bound with read_model_warm false, bodies 226 of wanted 235; every other
+    criterion was ok. Each abort kept two generations resident for about 5.5 minutes, every 15 minutes, and no newer
+    code reached serve.
+    The 9 bodies were the agent view for instance=ops (another thread compared /v1/views/versions on both sockets).
+    The active warm-booted with 225, took all 4 read-model leases, and built agent@ops afterwards. Candidates hold no
+    lease, so they serve only their warm snapshot and never gained those 9 in 50 minutes. At 03:35Z core.v1.sqlite
+    view_body held 234 rows, including 10 agent keys for instance=ops.
+    READ at origin/main: src/lib/serve-supervisor.ts activeBodies passes the active's read_model_warm detail.bodies,
+    which is readModel.bodies.size (src/lib/serve-generation.ts readModelWarmProbe). The active's map holds what it
+    loaded plus every body its worker posted since (src/lib/read-model-worker.ts, the `posted` set, kept across
+    reloads), so the bar grows past anything a lease-less standby can reach from its own load.
+  design: |
+    INVARIANT never-thinner: a standby with fewer bodies than the active's committed count is still refused.
+    1. The read-model handle keeps the key set of its last successful committed load (warm boot, then each reload) and
+       exposes committedBodies(): how many held bodies are in that set.
+    2. readModelWarmProbe adds `committed` to its detail when the handle provides it. Its own verdict is unchanged.
+    3. The supervisor's activeBodies uses detail.committed when the active reports a number, else detail.bodies, so an
+       active on older code keeps today's bar.
+  falsifier: |
+    Keep the total as the bar: criterion 1 fails. Ignore a missing committed count instead of falling back: criterion 2
+    fails. Drop the bar: criterion 3 fails. Count every held body as committed: criterion 4 fails.
+  note: |
+    Id reserved for run-unfiled-1794972340182 with ~/rmd-work/bin/reserve-id.sh.
+    reservation hand-off: run-unfiled-1794972340182 -> claude/project-thread-qqxbpu

@@ -1,0 +1,40 @@
+- id: W1-T13618
+  title: "Serve's plan reload skips the ops-catalog ref GET for a kept read confirmed within BOARD_CATALOG_REFRESH_MS, so a plan reload stops forking a gh child from serve's whole process on its request loop"
+  repo: remudero
+  depends_on: []
+  priority: 0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # how long a kept catalog read may answer without a ref GET; bounded by the pool's existing 120 s cadence
+  band_meaning: span
+  origin: "operator-session#serve-oom-2026-11-16"
+  plan_refs:
+    - W1-T13488
+  files:
+    - src/lib/serve-plan-reload.ts
+    - test/a-plan-reload-revalidates-the-kept-ops-catalog.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "Five plan reloads within BOARD_CATALOG_REFRESH_MS of a confirmed read make no GET; the first one past it makes exactly one ref GET"
+      proof: "grep: W1-T13618 criterion 1 in test/a-plan-reload-revalidates-the-kept-ops-catalog.test.ts"
+    - claim: "invariant:bounded-staleness — a branch that moved inside the window is read whole at the first check past it"
+      kind: guard
+      proof: "grep: W1-T13618 criterion 2 in test/a-plan-reload-revalidates-the-kept-ops-catalog.test.ts"
+  rationale: |
+    WHY: Craig is hitting serve's main-loop stalls directly (the Inbox times out and shows "unavailable").
+    MEASURED from runtime.loop_stall_profile rows after W1-T13488 went live (03:45 to 05:00Z on 2026-11-18): 51 stalls,
+    58 s, still carry ops-catalog-source frames, now only the gh child spawn of the one ref GET (0.7 to 1.2 s each),
+    because serve reloads its plan on every main commit and each reload makes that GET.
+  design: |
+    INVARIANT bounded-staleness: a kept read answers without a GET only within BOARD_CATALOG_REFRESH_MS (120 s, the
+    worker bridge pool's own cadence) of its last confirmation.
+    1. The kept entry records checkedAtMs; a read within the window answers the kept plan with no GET; a confirmed ref
+       GET restarts the window; a whole read sets it.
+    2. W1-T13488's test moves onto a clock it advances past the window, so its one-ref-GET claims still hold.
+  falsifier: |
+    GET on every reload: criterion 1 fails. Never revalidate: criterion 2 fails.
+  note: |
+    Id reserved for run-unfiled-1794978787428 with ~/rmd-work/bin/reserve-id.sh.

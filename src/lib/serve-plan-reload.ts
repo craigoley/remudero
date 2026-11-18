@@ -6,6 +6,7 @@
  * restart emptied every in-memory cache. This reads the plan from COMMITTED OBJECTS at the sha the
  * restart diff was taken against and installs it with one assignment.
  */
+import { threadName } from "./thread-names.js";
 import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { createHash } from "node:crypto";
 import { serialize, deserialize } from "node:v8";
@@ -131,7 +132,7 @@ export function readServePlanOffLoop(repoDir: string, ref: string, workerUrl: UR
   return new Promise((resolve, reject) => {
     let worker: Worker;
     try {
-      worker = new Worker(workerUrl, { workerData: { kind: PLAN_RELOAD_WORKER_KIND, repoDir, ref } });
+      worker = new Worker(workerUrl, { name: threadName("planReload"), workerData: { kind: PLAN_RELOAD_WORKER_KIND, repoDir, ref } });
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       reject(workerFailure(reason));
@@ -212,6 +213,11 @@ export function publicOpsTaskFields(task: Task): {
   })) };
 }
 
+/** W1-T13488: the one default catalog api a board read uses when its caller passes none, so its kept reads persist. */
+const defaultBoardCatalogApi = defaultOpsCatalogApi();
+/** W1-T13488: per api, the last whole catalog read for each repository, revalidated by one ref GET. */
+const keptBoardCatalogs = new WeakMap<OpsCatalogApi, Map<string, { branch: string; commit: string; plan: Plan; checkedAtMs: number }>>();
+
 /** Current disk selection and one actual pinned reader observation; never starts a writer/selector. */
 export async function readBoardCatalogs(readPublic: () => Plan | undefined, stateDir: string | undefined,
   api?: OpsCatalogApi, clock: Clock = systemClock): Promise<BoardCatalogContext | undefined> {
@@ -227,13 +233,33 @@ export async function readBoardCatalogs(readPublic: () => Plan | undefined, stat
   const refused = (reason: string): BoardCatalogContext => catalogContext({ outcome: "unreadable", observedAt: clock.iso(), reason }, primary);
   if (primary === undefined) return refused("public-unreadable");
   if (destination.outcome === "unreadable") return refused("destination-unreadable");
-  const snapshot = await readOpsCatalogSnapshotAsync({ repository: `${destination.owner}/${destination.repo}` }, api);
-  if (snapshot.outcome !== "ok" || snapshot.plan === undefined) return refused(snapshot.outcome === "ok" ? "missing-plan" : snapshot.outcome);
-  if (snapshot.binding === undefined) return refused("identity-unavailable");
+  const repository = `${destination.owner}/${destination.repo}`;
+  // W1-T13488: serve reloads its plan on every main commit; each reload read the whole ops catalog, a gh child per tree
+  // and blob, on its request loop. While the branch still names the kept commit, one ref GET answers the kept plan;
+  // a moved branch or a failed ref GET reads it all, as before.
+  const reader = api ?? defaultBoardCatalogApi;
+  let kept = keptBoardCatalogs.get(reader);
+  if (!kept) keptBoardCatalogs.set(reader, kept = new Map());
+  const held = kept.get(repository);
+  // W1-T13618: each ref GET is a gh child forked from serve's whole process (a 0.7 to 1.2 s request-loop stall on the
+  // Azure host); a kept read confirmed within BOARD_CATALOG_REFRESH_MS answers with no GET, the cadence the pool keeps.
+  const fresh = held !== undefined && clock.now() - held.checkedAtMs < BOARD_CATALOG_REFRESH_MS;
+  const same = fresh || (held ? await readBranchSha(reader, `repos/${repository}`, held.branch).then((sha) => sha === held.commit, () => false) : false);
+  if (same && held && !fresh) held.checkedAtMs = clock.now();
+  let opsPlan: Plan;
+  if (same && held) opsPlan = held.plan;
+  else {
+    kept.delete(repository);
+    const snapshot = await readOpsCatalogSnapshotAsync({ repository }, reader);
+    if (snapshot.outcome !== "ok" || snapshot.plan === undefined) return refused(snapshot.outcome === "ok" ? "missing-plan" : snapshot.outcome);
+    if (snapshot.binding === undefined) return refused("identity-unavailable");
+    opsPlan = snapshot.plan;
+    if (snapshot.binding.ref.startsWith("refs/heads/")) kept.set(repository, { branch: snapshot.binding.ref.slice("refs/heads/".length), commit: snapshot.binding.commit, plan: snapshot.plan, checkedAtMs: clock.now() });
+  }
   const after = planDestinationRepository(stateDir);
   if (after.outcome !== "named" || after.owner !== destination.owner || after.repo !== destination.repo ||
     after.checkoutDir !== destination.checkoutDir) return refused("destination-changed");
-  return composeBoardCatalog(primary, snapshot.plan, clock.iso());
+  return composeBoardCatalog(primary, opsPlan, clock.iso());
 }
 
 function composeBoardCatalog(primary: Plan, ops: Plan, observedAt: string): BoardCatalogContext {

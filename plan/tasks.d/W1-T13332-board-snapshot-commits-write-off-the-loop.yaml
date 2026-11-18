@@ -14,8 +14,9 @@
     - W1-T13304
   files:
     - src/lib/board-snapshot-cache.ts
+    - src/run-task.ts
     - test/board-snapshot-commits-write-off-the-loop.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "commitClosed and commitIssues on a 30,000-row collection return before any write, fsync or rename of the collection file runs on the calling thread; the file on disk afterwards is byte for byte what a synchronous commit writes"
@@ -35,11 +36,13 @@
     board pass on serve's main thread).
   design: |
     INVARIANT atomic-and-ordered: the file on disk is always one whole committed collection, the latest one once settled.
-    1. commit updates the in-memory state at once (seeds answer from it), then queues the durable write: serialize and
-       write with fs.promises (or a worker) to the same stage-file, fsync and rename sequence. One write in flight per
-       collection; a newer commit while one is in flight replaces the queued one.
-    2. The boolean commit returns keeps its meaning for callers (accepted for persistence); a failed write is logged and
-       retried on the next commit, as a failed sync write is today.
+    1. A new SnapshotOptions.writeBehind makes commit update the in-memory state at once (seeds answer from it), then
+       queue the durable write: writeSnapshotFileAsync (fs.promises: exclusive stage file, every buffer, fsync, close,
+       rename), started after the committing turn. One write in flight per cache; a newer commit replaces the queued
+       one. A failed write removes its stage file, keeps the earlier file, and is retried by the next commit.
+    2. While a write is in flight or queued, the closed channel's observation sidecar certifies nothing.
+    3. Serve's one board cache (run-task.ts, the cache its board pass commits through) sets writeBehind. Every other
+       caller keeps today's synchronous commit, so their meaning of the returned boolean is unchanged.
   falsifier: |
     Write synchronously: criterion 1 fails. Let two writes race to rename: criterion 2 fails. Answer seeds from disk:
     criterion 3 fails.

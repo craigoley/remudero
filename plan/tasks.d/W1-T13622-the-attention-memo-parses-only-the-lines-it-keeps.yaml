@@ -1,0 +1,51 @@
+- id: W1-T13622
+  title: "Serve's Inbox attention memo parses only ledger lines naming the four steps it keeps, so each boot's fold of every ledger archive skips the other 99.97% of lines unparsed"
+  repo: remudero
+  depends_on: []
+  priority: 0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # which ledger lines the Inbox's human-release and verdict-receipt reads parse; the rows they keep are unchanged
+  origin: "operator-session#serve-hot-worker-2026-11-17"
+  plan_refs:
+    - W1-T6263
+  files:
+    - src/lib/panel-graph.ts
+    - test/ledger/the-attention-memo-parses-only-the-lines-it-keeps.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "Over an archive of 500 filler rows, the four kept steps and a torn filler line, the attention memo keeps exactly the four kept rows and counts no torn row"
+      proof: "grep: W1-T13622 criterion 1 in test/ledger/the-attention-memo-parses-only-the-lines-it-keeps.test.ts"
+    - claim: "invariant:kept-steps-admitted — the line pattern admits every step the memo keeps, derived from one list, and skips other steps"
+      kind: guard
+      proof: "grep: W1-T13622 criterion 2 in test/ledger/the-attention-memo-parses-only-the-lines-it-keeps.test.ts"
+  rationale: |
+    WHY: on the Azure host on 2026-11-18, serve's slow lane (rmd-rm-slowlane) ran at 0.52 cores three minutes after a
+    boot (serve 1.02 cores). Two 30 s inspector profiles, at 06:02Z and 06:27Z on two different boots, put about 75% of
+    its busy time in the ledger-union fold: parseObject 5.3-7.4 s self, GC 3.7-5.2 s, ndjsonLines, consume, gunzip.
+    The inclusive path is readRetainedHumanReleases -> attentionLedgerMemo (panel-graph.ts).
+    attentionLedgerMemo calls createLedgerRotationMemo with no options, so its first load parses every line of every
+    archive, and the memo lives only in memory, so every boot repeats it, once per instance unit. Its reducer keeps
+    only ratify.approved, verify_human.judged and the PROPOSAL_VERDICT_RECEIPT_STEPS. Read-only counts over the host's
+    core union (212 .gz archives, 901 MB, plus live): 10,748,340 lines, of which 2,977 carry one of those steps
+    exactly and 3,026 name one anywhere. createLedgerRotationMemo's `pattern` option exists for this: "Only lines
+    matching this are parsed by load; reduce must drop every row it would reject."
+  design: |
+    INVARIANT kept-steps-admitted: every step the reducer keeps matches the pattern, because both come from one list.
+    1. ATTENTION_LEDGER_STEPS = ["ratify.approved", "verify_human.judged", ...PROPOSAL_VERDICT_RECEIPT_STEPS], and
+       ATTENTION_LEDGER_LINE is a regex of those names, escaped. The memo passes it as `pattern`; the reducer is
+       unchanged and still decides by step. readRetainedHumanReleases' step filter uses the same list.
+    2. attentionLedgerMemo is exported for the test.
+    3. A new test loads one gzip archive through the memo and reads its kept rows and retention.
+    Not in scope: a durable digest for this memo, and the other memos with no pattern.
+  falsifier: |
+    Drop the pattern: criterion 1 fails (the torn filler line is parsed and counted). Drop a step from the list:
+    criterion 2 fails.
+  note: |
+    Id reserved for run-unfiled-1794983330102 with ~/rmd-work/bin/reserve-id.sh.
+    reservation hand-off: run-unfiled-1794983330102 -> claude/project-thread-u06uh4
+    Proof that counts in production: a slow-lane profile in the first minutes after a boot no longer shows parseObject
+    under readRetainedHumanReleases, and the slow lane's /proc CPU after a boot falls from about 0.5 cores.

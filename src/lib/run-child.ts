@@ -42,7 +42,7 @@ import { isWorkerProviderId, type WorkerProviderId } from "./config.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
 import { INSTALLATION_SHARE_DIVISOR_ENV, runChildInstallationEnv } from "./installation-budget-start.js";
 import { killProcessGroup } from "./worker-containment.js";
-import { execFileLoopBounded } from "./loop-bounded-child.js";
+import { execFileRouted } from "./spawn-helper.js";
 import type { ReviewerCodeFreshness } from "./self-sync.js";
 
 export const RUN_CHILD_SHADOW_STEP = "run_child.shadow";
@@ -55,7 +55,7 @@ export const DETACHED_WORK_CAPABILITY = "detached-work-v1";
 
 async function requireDetachedWorkEntry(launch: EngineChildLaunch, kind: DetachedWorkKind): Promise<void> {
   // No --run-dir: an older entry must never mistake this capability query for permission to run a build.
-  const { stdout } = await execFileLoopBounded(process.execPath, [...launch.argv, "--detached-work-capability", kind], {
+  const { stdout } = await execFileRouted(process.execPath, [...launch.argv, "--detached-work-capability", kind], {
     cwd: launch.cwd, encoding: "utf8", timeout: PROBE_TIMEOUT_MS, maxBuffer: STDERR_TAIL_BYTES,
   }).catch((error: unknown) => {
     throw new Error(`detached-work capability unavailable: ${reasonOf(error)}`);
@@ -1267,6 +1267,8 @@ export interface DetachedWorkChildHost {
     fixKey: string;
     /** The typed decision envelope (sweep.ts `FixDispatchEnvelope`); this module only carries it into `spec.json`, plain JSON. */
     envelope: object;
+    /** W1-T13440: told the run id and an abort while the child waits for its reservation. */
+    onPending?: (pending: RunChildPending) => void;
   }) => Promise<{ runId: string; pid?: number; settled: Promise<unknown>; acknowledge?: (outcome: PromiseSettledResult<never>) => void } | RunChildAbandoned | undefined>;
   spawnRetro: (input: { decision: Record<string, unknown> }) => ReturnType<DetachedWorkChildHost["spawnFix"]>;
 }
@@ -1681,7 +1683,7 @@ export function createDetachedWorkHost(input: DetachedWorkHostInput): DetachedWo
       return { runId: launch.runId, settled: launch.settled, acknowledge: launch.acknowledge,
         readPhase: () => readOwnedChildPhase(launch.dir, launch.runId) };
     },
-    async spawnFix({ pr, fixKey, envelope }) {
+    async spawnFix({ pr, fixKey, envelope, onPending }) {
       // A fix has no shadow probe of its own: the review's probe already round-trips the contract. Only `on` moves it.
       if (mode() !== "on") return undefined;
       const placement = detachedWorkPlacement("fix-dispatch", {
@@ -1691,7 +1693,7 @@ export function createDetachedWorkHost(input: DetachedWorkHostInput): DetachedWo
       const work: DetachedWorkSpec = { kind: "fix-dispatch", prNumber: pr.prNumber, headSha: pr.headSha, fixKey, inputs: { repo: input.repo, envelope } };
       const launch = await (input.spawn ?? spawnRunChild)({
         taskId: pr.taskId ?? `PR-${pr.prNumber}`, lane: "sweep-fix", stateRoot: input.stateRoot, repoDir: input.repoDir, root: input.root,
-        plan: async () => ({ plan: { tasks: [] } }), options: options(), log, work,
+        plan: async () => ({ plan: { tasks: [] } }), options: options(), log, work, ...(onPending === undefined ? {} : { onPending }),
       });
       if (!launch.started) return launch.abandoned ? launch : undefined;
       return { runId: launch.runId, settled: launch.settled, acknowledge: launch.acknowledge };

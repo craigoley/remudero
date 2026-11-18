@@ -1,4 +1,4 @@
-import { execFileLoopBounded } from "./loop-bounded-child.js";
+import { execFileRouted } from "./spawn-helper.js";
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
@@ -870,7 +870,19 @@ interface GardenState {
   filed: Record<string, FiledRecord>;
   acrLogin: Record<string, { ts: string; result: "ok" | "failed"; escalatedAt?: string }>;
   stateBackup: Record<string, { ts: string; verdict: string; escalatedAt?: string }>;
+  cloneHealth: Record<string, CloneEpisode>;
 }
+
+/** W1-T13410: the install clone of one host, as its newest beats read. */
+interface CloneEpisode {
+  beatTs: string;
+  refs?: { count: number; first: string; escalatedAt?: string };
+  /** `since` is the beat time at which this gc reason was first seen. */
+  gc?: { reason: string; since: string; escalatedAt?: string };
+}
+
+/** BACKSTOP: six beats, so a gc.log that the next automatic gc clears raises nothing. */
+export const CLONE_GC_RAISE_AFTER_MS = 30 * 60_000;
 
 export function hostResourceStatePath(stateDir: string): string {
   return join(stateDir, "host-resource-state.json");
@@ -882,15 +894,15 @@ export function hostResourceOffPath(stateDir: string): string {
 
 function readState(stateDir: string): GardenState {
   const path = hostResourceStatePath(stateDir);
-  if (!existsSync(path)) return { episodes: {}, filed: {}, acrLogin: {}, stateBackup: {} };
+  if (!existsSync(path)) return { episodes: {}, filed: {}, acrLogin: {}, stateBackup: {}, cloneHealth: {} };
   try {
     const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<GardenState>;
-    return { episodes: parsed.episodes ?? {}, filed: parsed.filed ?? {}, acrLogin: parsed.acrLogin ?? {}, stateBackup: parsed.stateBackup ?? {} };
+    return { episodes: parsed.episodes ?? {}, filed: parsed.filed ?? {}, acrLogin: parsed.acrLogin ?? {}, stateBackup: parsed.stateBackup ?? {}, cloneHealth: parsed.cloneHealth ?? {} };
   } catch (error) {
     // deliberate: an unreadable state file restarts every episode; the worst case is one repeat
     // handoff, which the open-feedback and plan-origin checks turn into a no-op.
     void error;
-    return { episodes: {}, filed: {}, acrLogin: {}, stateBackup: {} };
+    return { episodes: {}, filed: {}, acrLogin: {}, stateBackup: {}, cloneHealth: {} };
   }
 }
 
@@ -1034,6 +1046,76 @@ function* consumerFilingSteps(openWorkspace: GardenWorkspacePort, mintTaskId: Ga
   }
 }
 
+/** The escalation text for refs of the install clone that name an object the clone lacks. */
+function cloneRefsDetail(host: string, installDir: string, beatTs: string, count: number, first: string): string {
+  const branch = /^refs\/remotes\/origin\/(.+)$/.exec(first)?.[1];
+  const repair = branch
+    ? `Run on that host: git -C ${installDir} -c gc.auto=0 -c maintenance.auto=false fetch --refetch --no-tags origin '+refs/heads/${branch}:refs/remotes/origin/${branch}'`
+    : `Look at ${first} first (git -C ${installDir} reflog show ${first}), and do not delete it.`;
+  return [
+    `Host ${host}, install clone ${installDir}, beat ${beatTs}: ${count} refs name an object the clone lacks, so a fetch there fails. The first is ${first}.`,
+    repair,
+    "Do not delete a local branch, a tag or a refs/rmd-dispatch ref without a look.",
+  ].join("\n");
+}
+
+/** One episode per host for refs that name a missing object, and one for a gc.log that stays (W1-T13410). */
+function observeCloneHealth(state: GardenState, host: string, payload: Record<string, string>, ports: HostResourcePorts, clock: Clock): void {
+  const beatTs = payload["beat_ts"];
+  const beatMs = Date.parse(beatTs ?? "");
+  const episode = state.cloneHealth[host];
+  if (!beatTs || !Number.isFinite(beatMs) || (episode && beatMs <= Date.parse(episode.beatTs))) return;
+  const next: CloneEpisode = { ...episode, beatTs };
+  const installDir = payload["install_dir"] || "<install dir>";
+  const rawCount = payload["unresolvable_refs"];
+  if (rawCount !== undefined && /^\d+$/.test(rawCount)) {
+    const count = Number(rawCount);
+    if (count === 0) {
+      if (next.refs?.escalatedAt) ports.log(`${HOST_RESOURCE}.clone_refs_recovered`, { host, ts: beatTs, install_dir: installDir });
+      delete next.refs;
+    } else {
+      const first = payload["unresolvable_ref_first"] || "none";
+      const refs = (next.refs = { ...next.refs, count, first });
+      if (!refs.escalatedAt && ports.escalate) {
+        const issueUrl = ports.escalate({
+          class: "MANUAL",
+          taskId: `host-clone-refs-${host}`,
+          summary: `host ${host}: ${count} refs of the install clone name a missing object, and a fetch there fails`,
+          detail: cloneRefsDetail(host, installDir, beatTs, count, first),
+          options: [{ label: "repair-ref", detail: `repair the ref ${first} of ${installDir} on ${host}`, kind: { type: "operator-only" } }],
+          recommendation: "repair-ref",
+          headDedup: "independent",
+        });
+        refs.escalatedAt = clock.iso();
+        ports.log(`${HOST_RESOURCE}.clone_refs_unresolvable`, { host, ts: beatTs, install_dir: installDir, count, first, issue_url: issueUrl });
+      }
+    }
+  }
+  const gcVerdict = payload["gc_verdict"];
+  if (gcVerdict?.startsWith("DISABLED")) {
+    const reason = payload["gc_disabled_reason"] || "none";
+    const gc = (next.gc = next.gc?.reason === reason ? next.gc : { reason, since: beatTs, escalatedAt: next.gc?.escalatedAt });
+    if (!gc.escalatedAt && ports.escalate && beatMs - Date.parse(gc.since) >= CLONE_GC_RAISE_AFTER_MS) {
+      const command = `rm ${installDir}/.git/gc.log`;
+      const issueUrl = ports.escalate({
+        class: "MANUAL",
+        taskId: `host-clone-gc-${host}`,
+        summary: `host ${host}: automatic gc of the install clone stays disabled by .git/gc.log`,
+        detail: `Host ${host}, install clone ${installDir}: .git/gc.log has stayed from beat ${gc.since} to beat ${beatTs}, so automatic gc does not run.\ngit's first line: ${reason}\nRepair the cause named there, then run on that host: ${command}`,
+        options: [{ label: "repair-gc", detail: `repair the cause, then ${command} on ${host}`, kind: { type: "operator-only" } }],
+        recommendation: "repair-gc",
+        headDedup: "independent",
+      });
+      gc.escalatedAt = clock.iso();
+      ports.log(`${HOST_RESOURCE}.clone_gc_disabled`, { host, ts: beatTs, since: gc.since, install_dir: installDir, reason, issue_url: issueUrl });
+    }
+  } else if (gcVerdict === "ok") {
+    if (next.gc?.escalatedAt) ports.log(`${HOST_RESOURCE}.clone_gc_recovered`, { host, ts: beatTs, install_dir: installDir });
+    delete next.gc;
+  }
+  state.cloneHealth[host] = next;
+}
+
 export interface PassResult {
   ran: boolean;
   appended: number;
@@ -1117,6 +1199,7 @@ function* hostResourcePassSteps(ports: HostResourcePorts): Steps<PassResult> {
         }
       }
     }
+    observeCloneHealth(state, beat.host, payload, ports, clock);
     const sample = sampleFromPayload(beat.host, payload);
     if (sample) incoming.push(sample);
   }
@@ -1321,7 +1404,7 @@ export function startHostResourceGardener(ports: HostResourcePorts, intervalMs: 
 
 /** Production heartbeat source: one `git fetch` of every `heartbeat-*` head, then each payload off its ref. */
 export function gitHeartbeatSource(repoRoot: string): () => Promise<HeartbeatRead[]> {
-  const git = (args: string[]) => execFileLoopBounded("git", ["-C", repoRoot, ...args], { encoding: "utf8", timeout: 60_000 });
+  const git = (args: string[]) => execFileRouted("git", ["-C", repoRoot, ...args], { encoding: "utf8", timeout: 60_000 });
   return async () => {
     const fetchHeartbeats = () => git(["fetch", "--quiet", "--no-tags", "origin", "+refs/heads/heartbeat-*:refs/remotes/origin/heartbeat-*"]);
     try {

@@ -1,0 +1,67 @@
+- id: W1-T13670
+  title: "The sweep reads the open escalation issues through the async issue gateway, not the synchronous gh issue list, so the read no longer blocks the daemon loop for one to three seconds on each sweep"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # the fix rung's open-escalation stand-down and the duplicate-escalation match read this list; the list, and what a failed read does, must stay the same
+  origin: "operator-session#loop-lag-2026-11-18b"
+  plan_refs:
+    - W1-T10343
+    - W1-T11458
+    - W1-T5283
+    - W1-T5765
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/the-sweep-reads-open-escalations-through-the-async-issue-gateway.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "invariant:read-off-the-loop — buildSweepEffects with no issuesImpl, over a gh shim from test/helpers/ that answers the label's issue list after a delay, returns a pending promise from readOpenEscalations, and a timer set just before the call runs before the read resolves (the read starts no synchronous child)"
+      proof: "grep: W1-T13670 criterion 1 in test/sweep/the-sweep-reads-open-escalations-through-the-async-issue-gateway.test.ts"
+    - claim: "invariant:same-list — for the same gh answer the async read gives the same OpenIssue list (numbers, titles, bodies, labels) as the synchronous ghIssueGateway listOpen gave for the needs-human label; a gh failure rejects, so the sweep's reader logs sweep.open_escalations.read_error and returns an empty list as before"
+      proof: "grep: W1-T13670 criterion 2 in test/sweep/the-sweep-reads-open-escalations-through-the-async-issue-gateway.test.ts"
+    - claim: "invariant:injected-gateway-kept — with issuesImpl given, readOpenEscalations still reads that gateway's listOpen and calls no gh"
+      proof: "grep: W1-T13670 criterion 3 in test/sweep/the-sweep-reads-open-escalations-through-the-async-issue-gateway.test.ts"
+  rationale: |
+    WHY: once per sweep the fix rung and the duplicate-escalation check read the open needs-human issues.
+    buildSweepEffects wires readOpenEscalations (src/lib/sweep.ts:3293) as issues.listOpen, and `issues` is
+    issuesImpl ?? ghIssueGateway(owner, repo) (:2933), the synchronous gateway: its listOpen runs ghExec
+    (execFileSync of gh) through runStepsSync, and the read cadence can add a blocking wait
+    (defaultBlockingSleepSync, src/lib/github-transport.ts:868, which loopSafeGhSleep :859 still allows up to
+    the normal gap). The consumer already awaits the read (:21172-21179), and ghIssueGatewayAsync is already
+    used in this file (:3567, :4226).
+    MEASURED on the Azure host, 2026-11-18, one nice'd pass over the daemon.loop_stall_profile rows since the
+    09:23:58Z boot (d225eda7e0) to 11:35:45Z, in ~/rmd-state2/state/ledger.ndjson and the
+    ledger.2026-11-18T*.ndjson.gz archives (sort -u): 291 rows, 1,153.5 s of loop lag in 132 minutes.
+    - The readOpenEscalations closure (bundle :124135) is in the top inclusive frames of 25 rows, over
+      listOpen (escalate.ts), runStepsSync and ghExec: 36.9 s of sampled time (about 17 s an hour), median
+      1.4 s and max 2.9 s each (11:14:12Z, a stall of 4.9 s). The 25 stalls hold 106.4 s of lag in all.
+    - The leaf: the self frames in those rows are the child spawn (36.7 s) and the blocking cadence sleep
+      (6.8 s).
+    NOT COVERED: swept origin/main plan/tasks.d for readOpenEscalations, listOpen(NEEDS_HUMAN and
+    ghIssueGateway: W1-T10343 (merged) added this read; W1-T11458, W1-T5283 and W1-T5765 (merged) moved
+    other issue reads off the loop. No queued task changes this one.
+  design: |
+    INVARIANT read-off-the-loop: the sweep's open-escalation read starts no synchronous child process.
+    INVARIANT same-list: the read returns the same list as before, and a failed read still ends as a logged read_error and an empty list.
+    INVARIANT injected-gateway-kept: an injected issuesImpl is still the gateway that is read.
+    1. In buildSweepEffects (src/lib/sweep.ts), wire readOpenEscalations to issuesImpl's listOpen when
+       issuesImpl is given, else to the listOpen of one ghIssueGatewayAsync(owner, repo) built for the
+       effects (reuse it if the file already builds one in that scope). Keep the NEEDS_HUMAN_LABEL argument.
+    2. Change nothing else: not the consumer at :21172, not the strike-ladder digest, not the sync gateway.
+       No env var, config key or time bound.
+    3. src/lib/sweep.ts has a comment cap test (test/sweep/compress-src-lib-sweep-ts.test.ts): add as few
+       comment lines as possible and run it.
+    4. Tests use the gh shim and fake GitHub helpers in test/helpers/ and isolate HOME with
+       test/setup/tmp-hygiene.ts; no network.
+  falsifier: |
+    Keep the sync gateway: criterion 1's timer runs only after the read. Drop the label: criterion 2 gives a
+    different list. Ignore issuesImpl: criterion 3 sees a gh call.
+  note: |
+    Id reserved for run-unfiled-1795002083000 with ~/rmd-work/bin/reserve-id.sh.
+    Proof that counts on the host: after the daemon converges, no daemon.loop_stall_profile row shows
+    readOpenEscalations over ghExec.

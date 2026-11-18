@@ -37,7 +37,7 @@
     - .remudero/mounts.yaml
     - docs/model-routing.md
     - test/review/a-judge-shadow-can-name-a-decision-model.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A role's mount row can name a shadow candidate, either a decision model from the decision_models section or any configured cash deployment. A role with no named candidate keeps W1-T12187's shadow unchanged"

@@ -16,12 +16,14 @@
   files:
     - src/lib/read-model-worker.ts
     - test/a-read-model-worker-can-run-as-a-child-process.test.ts
-  status: queued
+    - "src/lib/config-schema.ts"
+    - "src/lib/serve.ts"
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With RMD_READ_MODEL_PROCESS=on, the read-model handle starts its worker with forkWorkerEntry (serialization advanced), receives the same ReadModelWorkerMessage stream (state, bodies, body, log), and handle.body(view, key) serves a body the child built; with the switch unset the worker is a thread exactly as before"
       proof: "grep: W1-T13205 criterion 1 in test/a-read-model-worker-can-run-as-a-child-process.test.ts"
-    - claim: "stop() on the child path sends a stop message, waits up to READ_MODEL_STOP_WAIT_MS for the child's stopped receipt or exit, then kills it, and reports confirmed true when the receipt came; a child that exits on its own is respawned with the same backoff as a dead thread"
+    - claim: "stop() on the child path sends a stop message, waits up to READ_MODEL_PROCESS_STOP_WAIT_MS (10 s) for the child's stopped receipt, then kills it, and reports confirmed true when the receipt came; a child that exits on its own is respawned with the same backoff as a dead thread"
       proof: "grep: W1-T13205 criterion 2 in test/a-read-model-worker-can-run-as-a-child-process.test.ts"
     - claim: "invariant:child-sees-the-refreshed-token — when the parent's GH_TOKEN changes, the child receives it by message before its next escalation, as SHARE_ENV gives the thread today (#9156)"
       kind: guard
@@ -45,9 +47,12 @@
        forkWorkerEntry (as childOracle does), passes the worker data as the first message instead of workerData, and
        wraps the child in a small adapter exposing postMessage/on("message")/on("exit")/terminate, so the rest of the
        handle is unchanged.
-    2. Replace the SharedArrayBuffer stop flag on the child path with the existing {type:"stop"} message plus the
-       stopped receipt; stop() waits up to READ_MODEL_STOP_WAIT_MS with a synchronous poll of the receipt flag set by
-       the message handler, then kills. Keep the thread path's Atomics protocol as it is.
+    2. Replace the SharedArrayBuffer stop flag on the child path with the existing {type:"stop"} message plus a
+       stopped receipt: the child writes a receipt file once its leases are released, and stop() polls for it
+       synchronously for up to READ_MODEL_PROCESS_STOP_WAIT_MS (10 s; a message handler cannot run inside a
+       synchronous wait, and MEASURED on the Azure host 2026-11-17 a child confirmed in 3.1 s at load 25 to 30, past
+       the thread's 2 s), then kills. Keep the thread path's Atomics protocol as it is. A board-catalog reply's
+       SharedArrayBuffer crosses the process boundary as bytes and becomes a SharedArrayBuffer again in the child.
     3. Push GH_TOKEN to the child in a {type:"env"} message at start and whenever serve refreshes it; the child sets
        process.env.GH_TOKEN.
     4. The child entry runs the same runReadModelWorker main. Nested view threads stay threads inside the child.

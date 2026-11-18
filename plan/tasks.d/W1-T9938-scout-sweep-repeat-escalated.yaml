@@ -4,14 +4,21 @@
   depends_on: []
   type: implement
   verify: auto
-  risk: low
+  risk: high
+  band_meaning: span
   priority: 1.3
-  status: queued
+  # refusal-amendment (W1-T9938, run work-fix-dispatch-W1-T9938-1794944550980-ce58@4e04f8ee19f6445fafa23753ec9c77b6b6ae8f22, 2026-11-17T20:20:19.893Z): the worker refused criterion 1 [needs-operator-input] — proposed add-precondition: record the operator decision the worker needs as a precondition, then re-dispatch
+  #   worker evidence: Stopping recurrence requires evidence identifying its cause and, if rotation re-arming is responsible, a ruling revisiting W1-T2382’s accepted behavior.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
+  status: merged
   attempts: 0
   author_class: machine
   origin: "scout:sweep.repeat_escalated"
   files:
+    - src/lib/ledger.ts
+    - scripts/census-precheck.mjs
     - test/scout-sweep-repeat-escalated.test.ts
+    - test/census-reader-runtime-calibration.test.ts
   acceptance:
     - claim: "sweep.repeat_escalated stops recurring: its cause is fixed rather than its rows hidden"
       proof: "grep: test(\"W1-T9938: sweep.repeat_escalated no longer recurs\" in test/scout-sweep-repeat-escalated.test.ts"
@@ -27,4 +34,4 @@
     reasons:
       - "released by the operator with rmd approve"
     judged_at: "2026-10-22T03:31:39.860Z"
-    pin: "ff84d3656ef537fde65460af7bebe3eea34a55f6a30baa8c533eb83f3478341d"
+    pin: "a173fc52e43e8bb0e44d2460c61ce8c2bd80bb1b85a06380fe71c8ae9470c14e"

@@ -82,9 +82,11 @@ import { NOW_VIEW_NAME } from "./now-view.js";
 import { HOST_VIEW_NAME, hostLegacyView, providerPolicyConfigFromStatus, providerRoutingBody, type HostViewData } from "./host-view.js";
 import { FEEDBACK_VIEW_NAME, feedbackLegacyView } from "./feedback-view.js";
 import { INBOX_VIEW_NAME, inboxLegacyView } from "./inbox-view.js";
+import { INBOX_THREADS_VIEW_NAME, validateInboxThreadsRequest } from "./inbox-threads-view.js";
 import { NEEDS_YOU_VIEW_NAME, withNeedsYouView, type NeedsYouData } from "./needs-you-view.js";
 import { WORKSTREAMS_VIEW_NAME, WORKSTREAMS_VIEW_VERSION, type WorkstreamsData } from "./workstreams-view.js";
 import { ACTIONS_VIEW_NAME, ACTIONS_VIEW_VERSION, type ActionsData } from "./actions-view.js";
+import { INBOX_THREAD_VIEW_NAME } from "./inbox-thread-view.js";
 import { AGENT_VIEW_NAME, agentLegacyView } from "./agent-view.js";
 import { INCIDENTS_VIEW_NAME } from "./incidents-view.js";
 import { DEMAND_VIEWS, TASK_VIEW_NAME } from "./view-demand.js";
@@ -221,7 +223,7 @@ import type { Config, ModelApproval } from "./config-schema.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { createServeDrain, exitWithin } from "./serve-drain.js";
 import { publishHostServeEvidence, HOST_SERVE_ERROR_STEP, type HostServePublishOptions } from "./host-serve-evidence.js";
-import { createServeMemoryRegistry, droppableRouteCache, LEGACY_CACHE_VIEWS, readWorkerHeaps, sampleServeMemory, snapshotHolder, startServeMemoryMonitor, viewBodiesHolder,
+import { createServeMemoryRegistry, droppableRouteCache, LEGACY_CACHE_VIEWS, readWorkerHeaps, sampleServeMemorySliced, snapshotHolder, startServeMemoryMonitor, viewBodiesHolder,
   withoutRestore, workerThreads, type CgroupHeadroom, type ServeMemoryMonitorOptions, type ServeMemoryRegistry, type TrackedWorker } from "./serve-memory.js";
 import { githubAuthProbe, gatewayPrimedProbe, planLoadedProbe, readModelWarmProbe, type ReadinessProbe, type WorkerShedOutcome } from "./serve-generation.js";
 import type { ConsoleProjectionWorker, FeedbackProjectionInput } from "./console-projection-worker.js";
@@ -384,6 +386,8 @@ export interface ServeDeps {
   /** Forwarded to `createService` — one ledger line per auth decision/SSE lifecycle/handler error. */
   log?: ServiceOptions["log"];
   demand?: Pick<ServeDemandOptions, "clock" | "every">;
+  /** W1-T13602: told of each view read's final answer; assembleServeServer points it at the serve.demand window. */
+  onViewAnswer?: (view: string, status: number, code: string, stale: boolean) => void;
   /**
    * W1-T163: per-token recap markers (last-seen.ts), shared with digest.ts's
    * `sendMarkerAwareDigest` so push and pull read/advance the same state. Injectable; otherwise
@@ -1597,6 +1601,10 @@ export interface StaleCodeExitDeps {
   drain?: () => Promise<void>;
   changedPathsSince?: ChangedPathsReader;
   reloadPlan?: (ref: string) => Promise<boolean>;
+  /** W1-T13615: a supervised generation's tree never moves (E43), so its threads follow a pin, not their files. Pin the
+   *  plan at {@link bootSha} at once: until main's next plan change, every thread with no pin re-stats each plan shard
+   *  on every pass (37 ms on the host, 2026-11-18). */
+  pinBootPlan?: boolean;
   requestHandoff?: (detail: Record<string, unknown>) => void;
   /** When this generation booted, the first anchor of {@link SERVE_HANDOFF_COALESCE_MS}; defaults to construction. */
   bootedAt?: number;
@@ -1767,7 +1775,7 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
   let advanceRefused: string | undefined;
   const readChangedPaths = deps.changedPathsSince ?? ((boot, target) => changedPathsSince(boot, target, serveRepoDir()));
   const relevance = new Map<string, boolean | "pending">();
-  let headPlanRef: string | undefined;
+  let headPlanRef: string | undefined = deps.pinBootPlan === true && deps.bootSha !== CONSOLE_SHA_UNKNOWN ? deps.bootSha : undefined;
   let originPlanRef: string | undefined;
   let planLoadedRef: string | undefined;
   let planReloading = false;
@@ -1926,6 +1934,7 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
   // re-check that is supposed to notice that would itself never be scheduled.
   let stopped = false;
   const stopTimer = scheduleRecheck(() => void recheck(), RECYCLE_RECHECK_MS);
+  syncPlan();
   const stopRecheck = (): void => {
     if (stopped) return;
     stopped = true;
@@ -2883,8 +2892,8 @@ function assembleServeRoutes(
     ...badgeScopes];
   const modelApprovals = deps.modelApprovals ?? [];
   const routeReads = deps.routeReadRollup ?? createRouteReadRollup();
-  const viewEvents = createViewEvents({ names: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME, INBOX_VIEW_NAME, FEEDBACK_VIEW_NAME, NEEDS_YOU_VIEW_NAME, WORKSTREAMS_VIEW_NAME, ACTIONS_VIEW_NAME, HOST_VIEW_NAME, AGENT_VIEW_NAME, INCIDENTS_VIEW_NAME, TASK_VIEW_NAME, CODE_HEALTH_VIEW_NAME],
-    servedByDefault: [readModelStatusView.name, AGENT_VIEW_NAME],
+  const viewEvents = createViewEvents({ names: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME, INBOX_VIEW_NAME, FEEDBACK_VIEW_NAME, NEEDS_YOU_VIEW_NAME, WORKSTREAMS_VIEW_NAME, ACTIONS_VIEW_NAME, HOST_VIEW_NAME, AGENT_VIEW_NAME, INCIDENTS_VIEW_NAME, TASK_VIEW_NAME, CODE_HEALTH_VIEW_NAME, INBOX_THREAD_VIEW_NAME, INBOX_THREADS_VIEW_NAME],
+    servedByDefault: [readModelStatusView.name, AGENT_VIEW_NAME, INBOX_THREAD_VIEW_NAME, INBOX_THREADS_VIEW_NAME],
     ...(readModel ? { readModel } : {}), every: deps.readModel?.every, log: deps.log, onSubscribers: (change, n, reason) => routeReads.stream("views", change, n, reason) });
   // CAPTURED ONCE, HERE. buildServeRoutes runs exactly once per `rmd serve` process, so this is
   // server start; both the shell span and GET /v1/version close over this one value and neither
@@ -3056,13 +3065,15 @@ function assembleServeRoutes(
   // W1-T5055: the analytics view's legacy side merges serve's own per-instance caches, as the worker merges their snapshots.
   const analyticsLegacy = analyticsLegacyView({ scopes: () => navBadgeScopes().map((scope) => ({ instanceId: scope.instanceId, repository: scope.repository, analytics: scope.analytics })), modelApprovalConfig: deps.modelApprovalConfig });
   // The shadow compares the worker's badge with the undecorated legacy one; only the served badge carries decisions.
-  const shadowed = withViewShadow(readModel, { readModel, servedByDefault: [readModelStatusView.name, AGENT_VIEW_NAME], onServed: routeReads.served,
-    readModelViews: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME, INBOX_VIEW_NAME, FEEDBACK_VIEW_NAME, NEEDS_YOU_VIEW_NAME, WORKSTREAMS_VIEW_NAME, ACTIONS_VIEW_NAME, HOST_VIEW_NAME, AGENT_VIEW_NAME, INCIDENTS_VIEW_NAME, TASK_VIEW_NAME, CODE_HEALTH_VIEW_NAME],
-    demandViews: [...DEMAND_VIEWS, CODE_HEALTH_VIEW_NAME, DAILY_PROGRESS_VIEW_NAME],
-    requiredParams: { [NOW_VIEW_NAME]: ["instance"], [INBOX_VIEW_NAME]: ["section"], [AGENT_VIEW_NAME]: ["instance", "part"] },
+  // W1-T13455: the inbox-thread view (built on demand by the worker since P4-T10) is mounted and served with no switch entry.
+  const shadowed = withViewShadow(readModel, { readModel, servedByDefault: [readModelStatusView.name, AGENT_VIEW_NAME, INBOX_THREAD_VIEW_NAME, INBOX_THREADS_VIEW_NAME], onServed: routeReads.served, onAnswer: deps.onViewAnswer,
+    readModelViews: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME, INBOX_VIEW_NAME, FEEDBACK_VIEW_NAME, NEEDS_YOU_VIEW_NAME, WORKSTREAMS_VIEW_NAME, ACTIONS_VIEW_NAME, HOST_VIEW_NAME, AGENT_VIEW_NAME, INCIDENTS_VIEW_NAME, TASK_VIEW_NAME, CODE_HEALTH_VIEW_NAME, INBOX_THREAD_VIEW_NAME, INBOX_THREADS_VIEW_NAME],
+    demandViews: [...DEMAND_VIEWS, CODE_HEALTH_VIEW_NAME, DAILY_PROGRESS_VIEW_NAME, INBOX_THREAD_VIEW_NAME],
+    requiredParams: { [NOW_VIEW_NAME]: ["instance"], [INBOX_VIEW_NAME]: ["section"], [AGENT_VIEW_NAME]: ["instance", "part"], [INBOX_THREAD_VIEW_NAME]: ["id"] },
     requestValidators: {
       [CODE_HEALTH_VIEW_NAME]: (params, source) => validateCodeHealthRequest(params, source, systemClock.now()),
       [DAILY_PROGRESS_VIEW_NAME]: (params, source) => validateDailyProgressRequest(params, source, systemClock.now()),
+      [INBOX_THREADS_VIEW_NAME]: (params, source) => validateInboxThreadsRequest(params, source),
     },
     // W1-T13180: the agent view's legacy side runs the worker's own readers over each instance's ledger and analytics.
     legacy: [navBadge, analyticsLegacy, inboxLegacyView(panelReadDeps), feedbackLegacyView(panelGraphDeps, () => deps.board.plan), hostLegacy, agentLegacyView({ scopes: navBadgeScopes })] });
@@ -3468,6 +3479,8 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   // (each defaulting on its own) would issue nonces into a store the dispatch never consults.
   const confirmNonces = deps.confirmNonces ?? createConfirmNonceStore();
   const analyticsCache = createAnalyticsSnapshotCache({
+    // W1-T13685: the fold, its snapshot and the checkpoint write run on the analytics worker, not this request loop.
+    offThread: true,
     ...deps.analytics,
     stateDir: dirname(deps.ledgerPath),
     log: deps.log,
@@ -3517,6 +3530,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     ...(keepWarm ? { github: { serve: keepWarm, ...walk } } : {}), ...deps.readModel, modelApprovalConfig }));
   const staleExit = gateStaleCodeExit({
     bootSha: consoleSha,
+    pinBootPlan: deps.generation !== undefined,
     // The caller's "current sha" is what the gate compares against; absent, the gate re-reads git.
     ...(deps.resolveCurrentSha ? { resolveCurrentSha: deps.resolveCurrentSha } : {}),
     log: deps.log,
@@ -3571,6 +3585,8 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
       confirmNonces,
       githubEventWake: deps.githubEventWake && { ...deps.githubEventWake, counters: wakeCounters },
       routeReadRollup: routeReads,
+      // W1-T13602: bound late; the demand window is built from the routes this call returns, and is read only at request time.
+      onViewAnswer: (view, status, code, stale) => demand.recordView(view, status, code, stale),
       liveMetrics: deps.liveMetrics ?? liveAnalyticsCache.current,
       // W1-T4229: /v1/daemon-health reports the SAME reading the restart decision acts on.
       daemonHealth: { ...deps.daemonHealth, gatewayCheckout: deps.daemonHealth?.gatewayCheckout ?? staleExit.checkout },
@@ -3672,7 +3688,8 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
       ...deps.serveMemory,
       holders: memory.holders,
       sample: async (holders) => {
-        const sample = sampleServeMemory(holders, {
+        // W1-T13684: each holder in its own turn, a large one in slices, so the sample never holds the request loop.
+        const sample = await sampleServeMemorySliced(holders, {
           usage: deps.serveMemory?.usage, headroom: deps.serveMemory?.headroom, workerHeaps: await readWorkerHeaps(liveThreads()),
         });
         publishServe("serve-steady");

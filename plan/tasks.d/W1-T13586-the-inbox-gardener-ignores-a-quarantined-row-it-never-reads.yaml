@@ -1,0 +1,62 @@
+- id: W1-T13586
+  title: "A quarantined ledger row the Inbox gardener never reads does not keep its ledger coverage partial forever"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # 2 files: readInboxGardenerLedger in src/lib/inbox-gardener.ts and one new test
+  origin: "operator-session#inbox-gardener-shadow-2026-11-18"
+  plan_refs:
+    - W1-T13477
+    - W1-T13348
+    - W1-T5407
+  files:
+    - src/lib/inbox-gardener.ts
+    - test/gardeners/the-inbox-gardener-ignores-a-quarantined-row-it-never-reads.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "A future-stamped row of a step the gardener never reads is quarantined, and the gardener's ledger read is still observed"
+      proof: "grep: W1-T13586 criterion 1 in test/gardeners/the-inbox-gardener-ignores-a-quarantined-row-it-never-reads.test.ts"
+    - claim: "invariant:relevant-quarantine-stays-partial — a future-stamped row of a step the gardener reads keeps the ledger read partial"
+      proof: "grep: W1-T13586 criterion 2 in test/gardeners/the-inbox-gardener-ignores-a-quarantined-row-it-never-reads.test.ts"
+    - claim: "A store holding the old projection's sticky torn-or-quarantined fault re-reads under the new projection version and reaches observed"
+      proof: "grep: W1-T13586 criterion 3 in test/gardeners/the-inbox-gardener-ignores-a-quarantined-row-it-never-reads.test.ts"
+  rationale: |
+    WHY: Craig approved the Inbox gardener in shadow mode; act mode waits for a clean day of shadow rows. No pass can be
+    clean while coverage:ledger is partial, and today it is partial for good.
+    OBSERVED on the host 2026-11-18 02:20-02:45Z, daemon running main at 31eb42ea7 (includes W1-T13477, 300 s budget):
+    - inbox.gardener_pass rows 01:06Z, 01:20Z, 01:45Z, 02:03Z: source_partial, gaps include coverage:ledger. Each pass
+      ran about 5 s (garden.lifecycle executionMs 4631), so the read budget is not the limit.
+    - The gardener read model (state/inbox-gardener-evidence/read-model/inbox-gardener-bbc05d8a72640333.v1.sqlite):
+      source_file has 194 rows, every one read to its end (off = size), against 194 archives on disk. The catch-up is done.
+    - Its quarantine table holds 5 rows, ingested 01:04:59Z: the W1-T5407 cli.invoked rows stamped 2027-10-14 (verbs
+      onboard, alert-fix, daemon, wipe-test, peek) from an old test process with a skewed clock. They now sit in archive
+      ledger.2026-11-17T16-21-21-036Z.ndjson.gz. meta inbox-source-fault = torn-or-quarantined.
+    READ at origin/main, readInboxGardenerLedger: any tick.quarantined writes the sticky meta fault, and any quarantine
+    row at all marks the read incomplete. cli.invoked is not in RELEVANT_STEPS, so these rows can never change a verdict,
+    yet nothing ever clears the fault, and a projection rebuild empties the tables but keeps meta. Coverage:ledger can
+    never be observed again on this host.
+    W1-T13348's invariant partial-never-observed names "a torn or quarantined row"; this task narrows the quarantine half
+    to rows the gardener reads. Its criterion 3 test is unaffected: its torn row is a malformed relevant row, which the
+    projection records as malformed-source-row, not a projector quarantine.
+  design: |
+    INVARIANT relevant-quarantine-stays-partial: a quarantined row whose step the gardener reads (or whose step the
+    projector could not name) still makes the read partial.
+    1. Count only relevant quarantine: rows whose scanned step is in RELEVANT_STEPS or is empty, or whose body names a
+       relevant step (an ambiguous row may carry it nested). That count, read on every pass, replaces both the
+       tick.quarantined check and the whole-table count.
+    2. The sticky meta fault is written only for a torn read, with its own value (torn-source). Relevant quarantine needs
+       no sticky flag, because the quarantine table already persists it.
+    3. Bump relevantProjection to version 3, so the projector re-reads every archive under these rules. Before the tick,
+       when the stored projection:inbox-gardener-evidence is not 3, delete meta inbox-source-fault in a write
+       transaction: a fault recorded by an older projection goes with the rows that projection read. At the measured
+       rate a full re-read takes 1-3 passes of the 300 s budget.
+  falsifier: |
+    Leave readInboxGardenerLedger counting every quarantine row and keeping the sticky fault: criteria 1 and 3 fail.
+  note: |
+    Id reserved for run-unfiled-1794968958640 with ~/rmd-work/bin/reserve-id.sh.
+    reservation hand-off: run-unfiled-1794968958640 -> claude/project-thread-cb5huh-plan-gardener-quarantine

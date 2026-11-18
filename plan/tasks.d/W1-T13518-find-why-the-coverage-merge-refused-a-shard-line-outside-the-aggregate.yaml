@@ -1,0 +1,57 @@
+- id: W1-T13518
+  title: "Find why coverage-ratchet's merge refused a shard line hit on src/lib/trust-root-text.ts:23 that the aggregate does not list, and recommend a fix that keeps the gate"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: recon
+  verify: auto
+  risk: high # a report and its docs index entry, two concerns; it changes no code
+  origin: "operator-session#ubuntu-2604-main-red-2026-11-17"
+  plan_refs:
+    - W1-T9481
+    - W1-T13439
+  files:
+    - docs/forensics/coverage-merge-shard-line-outside-aggregate.md
+    - docs/docs-index.json
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "The report names the shard whose LCOV carries the hit on src/lib/trust-root-text.ts line 23, and the test process that loaded the file in that shape"
+      proof: "grep: ## Which shard and which process in docs/forensics/coverage-merge-shard-line-outside-aggregate.md"
+    - claim: "The report says why the raw-range aggregate for that file has no line 23, and whether that depends on the order the merge reads process reports"
+      proof: "grep: ## Why the aggregate has no line 23 in docs/forensics/coverage-merge-shard-line-outside-aggregate.md"
+    - claim: "The report recommends one fix task with its files, and says whether that fix changes what the coverage gate counts"
+      proof: "grep: ## Recommendation in docs/forensics/coverage-merge-shard-line-outside-aggregate.md"
+  rationale: |
+    OBSERVED on PR #19183 (W1-T13439), run 44164276361, head 14174986b, 2026-11-17: coverage-ratchet failed at 20:33Z
+    and again on its re-run at 20:47Z with "coverage-merge-ratchet: shard LCOV reports a positive hit outside aggregate
+    source src/lib/trust-root-text.ts:23" (thrown by mergeShardLineHits in scripts/coverage-merge-ratchet.mjs). The PR
+    changed only src/lib/task-linter.ts and one new test. Line 23 of src/lib/trust-root-text.ts is
+    `import type { RepoLayout } from "./repo-layout.js";`, which is erased when the file runs.
+    OBSERVED in the 12 shard logs' coverage tables for that run: shards 4, 5 and 7 report trust-root-text.ts at 100%
+    lines; shards 2 and 6 report lines 1-20 uncovered; shard 8 reports 0% functions. So the shards loaded the file in
+    different shapes. scripts/census-precheck.mjs:34 imports "../src/lib/trust-root-text.ts" directly (plain node, type
+    stripping, every line kept); test/ci/an-instruction-file-holds-no-hidden-text.test.ts and
+    test/rules/trust-root-hidden-text-census.test.ts import it through tsx (source-mapped).
+    OBSERVED: after merging origin/main into the branch (c874b33e0), the next run's merge did not throw; that PR merged at
+    22:26Z. Other PRs' coverage-ratchet runs that afternoon passed.
+    INFERRED, not traced: the raw-range aggregate kept the tsx shape for this file, which lists no line 23, while one
+    shard's LCOV came from the native shape. Whether the aggregate's shape depends on report order is not known.
+    NOT OBSERVED: the shard LCOV files themselves. A cloud session cannot download Actions artifacts (the blob host
+    answers 403), so this needs a host that can.
+  design: |
+    1. From a host that can download Actions artifacts, fetch coverage-shard-1..12 of run 44164276361 and find each
+       shard's SF record for src/lib/trust-root-text.ts and its DA lines 20-25.
+    2. Name the test process that produced the hit on line 23 (the raw report URL and the suite identity from
+       reportSuiteIdentity), and the shape (native strip-types or tsx).
+    3. Read how the --output merge builds the aggregate's line list for a file loaded in two shapes (W1-T9481's hits
+       records), and say whether reading the reports in another order changes it. Reproduce locally if you can.
+    4. Recommend one fix. Candidates: (a) load the file one way everywhere, for example census-precheck imports the
+       scanner through the same loader the tests use; (b) build the aggregate's line list as the union across shapes;
+       (c) drop shard hits on lines the aggregate treats as non-code, counted and logged. Say which ones change what
+       the gate counts: (c) loosens a refusal and needs the operator's yes before it is built.
+    Write the report at docs/forensics/coverage-merge-shard-line-outside-aggregate.md with the three headings the
+    proofs name, each on its own line, and label each claim OBSERVED or INFERRED. Add it to docs/docs-index.json.
+  note: |
+    Filed from the thread that built W1-T13439, whose PR hit this. Verify is auto with grep proofs over the report's
+    headings so the fleet can review and merge it without the operator (see the 2026-11-17 #19122 hand merge).

@@ -120,7 +120,7 @@ test(`${proof}: every lane factory declares what its view is, in the order the l
   const dir = readModelFixtureDir(t, "lane-owned-list").dir;
   const clock: Clock = { now: () => 0, date: () => new Date(0), iso: () => new Date(0).toISOString() };
   const list = readModelLaneViews({ instances: [{ name: "core", ledgerDir: dir }] }, clock, () => {}, createDemandBook({ clock }));
-  assert.deepEqual(list.map((view) => view.name), ["nav-badge", "repositories", "code-health", "analytics", "daily-progress", "read-model", "now", "instances", "task", "inbox-thread",
+  assert.deepEqual(list.map((view) => view.name), ["nav-badge", "repositories", "code-health", "analytics", "daily-progress", "read-model", "now", "instances", "task", "inbox-thread", "inbox-threads",
     "workstreams", "actions", "host", "agent", "incidents", "operator-agent-rows"]);
   for (const spec of list) {
     if (!("create" in spec)) continue;

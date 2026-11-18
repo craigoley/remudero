@@ -1,0 +1,90 @@
+- id: W1-T13657
+  title: "A PR that waits on a task contract amendment reaches the Architect, then the held-escalation ladder"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # two subsystems (the redesign garden and the sweep disposition); lets an unanswered amendment wait take the rebuild rung, which closes PRs
+  origin: "operator-session#stuck-review-failed-prs-2026-11-18"
+  plan_refs:
+    - W1-T12714
+    - W1-T12709
+    - W1-T10653
+    - W1-T13656
+  files:
+    - src/lib/redesign-gardener.ts
+    - src/lib/sweep.ts
+    - test/sweep/a-hold-that-waits-on-an-amendment-is-never-idle.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "The redesign gardener asks the Architect about a live PR whose newest sweep.disposed row has disposition wait and a reason that starts 'fix needs a task contract amendment at this exact head', once that hold has stood unbroken at one head for REDESIGN_AFTER_MS; the prompt names the PR, the head and the hold reason"
+      proof: "grep: W1-T13657 criterion 1 in test/sweep/a-hold-that-waits-on-an-amendment-is-never-idle.test.ts"
+    - claim: "invariant:young-holds-stay-with-the-fix-lane — an amendment wait younger than REDESIGN_AFTER_MS, or one at another head, is not asked, and the existing refused-escalate holds are asked as today"
+      kind: guard
+      proof: "grep: W1-T13657 criterion 2 in test/sweep/a-hold-that-waits-on-an-amendment-is-never-idle.test.ts"
+    - claim: "In the sweep, an amendment-proposed terminal design hold whose round row is older than HELD_ESCALATION_SLO_MS, with the task contract unchanged, is read as a held escalation: its disposition is refused-escalate with heldEscalationAt at that row, so the held-escalation ladder (fix-progress judge, then the parked-PR remedy) acts on it"
+      proof: "grep: W1-T13657 criterion 3 in test/sweep/a-hold-that-waits-on-an-amendment-is-never-idle.test.ts"
+    - claim: "invariant:an-amendment-wait-opens-no-issue — an amendment-proposed hold opens no needs-human issue at any age, stays wait while younger than HELD_ESCALATION_SLO_MS, and a changed task contract still releases it as blocked-fixable"
+      kind: guard
+      proof: "grep: W1-T13657 criterion 4 in test/sweep/a-hold-that-waits-on-an-amendment-is-never-idle.test.ts"
+    - claim: "The redesign gardener's hold matcher names the amendment wait"
+      proof: "grep: fix needs a task contract amendment at this exact head in src/lib/redesign-gardener.ts"
+    - claim: "The new test runs green under the house test setup"
+      proof: "unit test: test/sweep/a-hold-that-waits-on-an-amendment-is-never-idle.test.ts"
+  rationale: |
+    WHY: W1-T12714 made a fix round whose worker reports a contract problem wait on an amendment "never on a
+    person". Nothing makes that amendment and nothing ages the wait, so the PR sits with a failed review and no
+    owner for as long as nobody looks.
+    OBSERVED 2026-11-18 in /mnt/rmd/state2/state, PR #19296 (W1-T10148, a scout task to make pr.open_refused
+    stop recurring, scope test/scout-pr-open-refused.test.ts only):
+    - fix.needs_design at 04:59:44Z and 07:34:31Z: "pr.open_refused is the designed refusal record; fixing its
+      cause needs production changes outside the declared scope". refusal_amendment.drafted at 07:00:02Z
+      landed PR #19340 (merged), which adds only the refusal-amendment pointer comment to the shard; the
+      pointer ends "an Architect must make the change above". The comment does not change the contract.
+    - sweep.disposed on every pass after the 07:34Z round, still at 11:18Z: disposition wait, blocker_owner fix-lane, reason
+      "fix needs a task contract amendment at this exact head (round work-fix-dispatch-W1-T10148-1794986401127-f4a9:1:1794987235080)".
+      No redesign.judged row for W1-T10148, no escalation, no parked_pr.remedy row.
+    - The shadow loop.decision on the same rows says route close-and-rebuild; it is shadow only.
+    READ at origin/main 535ac6c87:
+    - src/lib/sweep.ts (terminal design handoff, awaitsAmendment): needs_design_remedy amendment-proposed sets
+      disposition wait and, unlike the refused-escalate branch, sets neither ruleBlockerByIndex nor
+      heldEscalationAt. The held-escalation SLO (HELD_ESCALATION_SLO_MS, 6 h) reads only refused-escalate,
+      and the W1-T10653 bridge reads only blocked-fixable, so the wait never reaches the ladder.
+    - src/lib/redesign-gardener.ts: HOLD_REASON matches only "fix needs design at this exact head" and "fix
+      stood down at ", and the loop skips any row whose disposition is not refused-escalate. The live wait row
+      keeps "W1-T10148#19296" in the waiting set, so the shard-pointer path also skips W1-T10148. The Architect
+      that the pointer names can never see this task while its PR is open: a deadlock.
+    CHECKED for duplicates (2026-11-18, plan/tasks.d on origin/main and open PR titles): none.
+  design: |
+    INVARIANT an-amendment-wait-opens-no-issue: the amendment-proposed hold never opens a needs-human issue.
+    INVARIANT young-holds-stay-with-the-fix-lane: holds younger than their thresholds behave as today.
+    1. src/lib/redesign-gardener.ts: the hold matcher also accepts a sweep.disposed row with disposition wait
+       whose reason starts "fix needs a task contract amendment at this exact head", in both the newest-row
+       check and the unbroken-run walk; refused-escalate rows with the two existing reasons are unchanged.
+       Standing rule 16 checks and the signature dedup are unchanged, so a GRILL answer is not asked again.
+    2. src/lib/sweep.ts, the awaitsAmendment branch: when the producer row (handoff.producer.ts) is older than
+       HELD_ESCALATION_SLO_MS and the contract is not amended, set disposition refused-escalate and
+       heldEscalationAt to that ts, with a reason that keeps the "fix needs a task contract amendment at this
+       exact head" prefix and adds "unanswered past the held-escalation SLO, so the ladder's rebuild acts" (the
+       W1-T10653 wording). Do not set ruleBlockerByIndex, so no needs-human issue opens. Add zero net comment
+       lines to sweep.ts if it has a comment cap test; put the why in the PR body.
+    3. One test file, one test per criterion titled "W1-T13657 criterion <k>": the gardener half through the
+       redesign garden's own entry with the house fixtures (as
+       test/gardeners/the-redesign-architect-amends-a-task-its-fix-lane-stood-down-on.test.ts does), and the
+       sweep half through runSweep with a terminal design handoff row marked amendment-proposed (as
+       test/fix-lane/a-needs-design-outcome-is-sorted-by-kind-and-gets-its-remedy.test.ts and
+       test/sweep/flow-review-failed-n-unmet-criterion.test.ts set them up), aged under and over the SLO.
+  falsifier: |
+    Drop the new reason from the gardener's matcher: criterion 1 fails (no Architect prompt). Drop the SLO
+    branch in sweep.ts: criterion 3 fails (the hold stays wait at 7 h). Set ruleBlockerByIndex there: criterion
+    4 fails (a needs-human issue opens).
+  note: |
+    Id reserved for run-unfiled-1795000890000 with ~/rmd-work/bin/reserve-id.sh.
+    The ladder's close-and-rebuild rung depends on W1-T13656 to land its held task file; this task does not
+    depend on it to build. Proof that counts in production: over 7 days after merge, no sweep.disposed run with
+    reason "fix needs a task contract amendment at this exact head" lasts longer than HELD_ESCALATION_SLO_MS at
+    one head without a redesign.judged row or a parked_pr.remedy row for that PR.
