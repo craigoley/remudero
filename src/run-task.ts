@@ -1126,6 +1126,7 @@ import {
   type SkillLifecycleAction,
   fileRatificationBatch,
   fileRatificationDraft,
+  stampDraftedPriority,
   joinedRatificationPrBody,
   knownPlanRepos,
   ratificationPrBody,
@@ -40053,7 +40054,7 @@ export async function approveCommand(
     // reservation failure REFUSES (throws) before any write, so no partial union ever reaches
     // the worktree.
     const materialized = materializeDraftTaskIds(
-      { fragmentYaml: payload.fragmentYaml, stampLine: payload.stampLine },
+      { fragmentYaml: stampDraftedPriority(payload.fragmentYaml), stampLine: payload.stampLine },
       {
         mint: () => {
           if (approveDestinationFailure) throw new Error(approveDestinationFailure);
@@ -40728,7 +40729,7 @@ async function approveBatchCommand(
         payloads,
         (payload) => {
           const materialized = materializeDraftTaskIds(
-            { fragmentYaml: payload.fragmentYaml, stampLine: payload.stampLine },
+            { fragmentYaml: stampDraftedPriority(payload.fragmentYaml), stampLine: payload.stampLine },
             {
               mint: () => {
                 if (batchDestinationFailure) throw new Error(batchDestinationFailure);

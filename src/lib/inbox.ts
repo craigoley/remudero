@@ -2301,6 +2301,35 @@ export function draftFilingLintOptions(facts: DraftRepoFacts, knownRepos?: Reado
     moduleExists: facts.moduleExists, readGrepProofFile: facts.readGrepProofFile, knownRepos };
 }
 
+/** The priority an operator-approved ratification files at when its draft names none. Dispatch sorts ascending and
+ *  reads a missing priority as +Infinity, so an unstamped filing always ran last. 1 sits inside the 0.4..4 band most
+ *  queued tasks use. */
+export const RATIFIED_TASK_DEFAULT_PRIORITY = 1;
+
+/** Give every drafted task that names no `priority` the {@link RATIFIED_TASK_DEFAULT_PRIORITY}, inserted as its own
+ *  line right after the task's `id`, so no other byte of the draft moves. A priority the draft states is kept. A
+ *  fragment that does not parse as a sequence comes back unchanged, for the lint that follows to refuse. */
+export function stampDraftedPriority(fragmentYaml: string, priority: number = RATIFIED_TASK_DEFAULT_PRIORITY): string {
+  const document = parseDocument(fragmentYaml);
+  if (document.errors.length > 0 || !isSeq(document.contents)) return fragmentYaml;
+  const inserts: Array<{ at: number; text: string }> = [];
+  for (const node of document.contents.items) {
+    if (!isMap(node) || node.has("priority")) continue;
+    const first = node.items[0];
+    const keyRange = isNode(first?.key) ? first.key.range : undefined;
+    const valueRange = isNode(first?.value) ? first.value.range : undefined;
+    if (!keyRange || !valueRange) continue;
+    const lineStart = fragmentYaml.lastIndexOf("\n", keyRange[0] - 1) + 1;
+    const indent = " ".repeat(keyRange[0] - lineStart);
+    const lineEnd = fragmentYaml.indexOf("\n", valueRange[1]);
+    if (lineEnd < 0) inserts.push({ at: fragmentYaml.length, text: `\n${indent}priority: ${priority}` });
+    else inserts.push({ at: lineEnd + 1, text: `${indent}priority: ${priority}\n` });
+  }
+  let stamped = fragmentYaml;
+  for (const { at, text } of inserts.sort((a, b) => b.at - a.at)) stamped = `${stamped.slice(0, at)}${text}${stamped.slice(at)}`;
+  return stamped;
+}
+
 /** W1-T9039: a drafted `status: blocked` with no legal retirement is the plan index copied, so the harness queues it. */
 export function queueDraftedBlockedTasks(fragmentYaml: string): string {
   const document = parseDocument(fragmentYaml);
