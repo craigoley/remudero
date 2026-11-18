@@ -21,24 +21,25 @@
     - src/lib/thread-names.ts
     - src/lib/serve.ts
     - src/lib/instance-gateway.ts
-    - test/an-inbox-read-builds-off-the-request-loop.test.ts
+    - test/inbox/an-inbox-read-builds-off-the-request-loop.test.ts
+    - "scripts/build-child-entries.mjs"
   status: queued
   attempts: 0
   acceptance:
     - claim: "Two PanelGraphDeps that name one inbox share one parse of the persisted file and one build of its lanes"
-      proof: "grep: W1-T13692: two deps that name one inbox share one read in test/an-inbox-read-builds-off-the-request-loop.test.ts"
+      proof: "grep: W1-T13692: two deps that name one inbox share one read in test/inbox/an-inbox-read-builds-off-the-request-loop.test.ts"
     - claim: "invariant:off-loop — with the build off the loop, a changed file is answered from the last build while one build runs, and many reads start one build"
       kind: guard
-      proof: "grep: W1-T13692: invariant:off-loop in test/an-inbox-read-builds-off-the-request-loop.test.ts"
+      proof: "grep: W1-T13692: invariant:off-loop in test/inbox/an-inbox-read-builds-off-the-request-loop.test.ts"
     - claim: "A failed build is logged as serve.inbox_build_failed, and reads take the in-place path until INBOX_BUILD_RETRY_MS passes"
-      proof: "grep: W1-T13692: a failed build is logged in test/an-inbox-read-builds-off-the-request-loop.test.ts"
+      proof: "grep: W1-T13692: a failed build is logged in test/inbox/an-inbox-read-builds-off-the-request-loop.test.ts"
     - claim: "The worker builds the same read, lanes and view pages an in-place read builds, and the inbox view answers from the worker's pages"
-      proof: "grep: W1-T13692: the worker builds the read, the lanes and the pages in test/an-inbox-read-builds-off-the-request-loop.test.ts"
+      proof: "grep: W1-T13692: the worker builds the read, the lanes and the pages in test/inbox/an-inbox-read-builds-off-the-request-loop.test.ts"
     - claim: "Serve's core Inbox and every instance's Inbox read off the loop"
       proof: 'grep: inboxBuildOffLoop: true in src/lib/serve.ts'
     - claim: "invariant:boot-in-place — serve's boot read takes a changed file in place under the off-loop flag and starts no build"
       kind: guard
-      proof: "grep: W1-T13692: serve's boot read is in place under the off-loop flag in test/an-inbox-read-builds-off-the-request-loop.test.ts"
+      proof: "grep: W1-T13692: serve's boot read is in place under the off-loop flag in test/inbox/an-inbox-read-builds-off-the-request-loop.test.ts"
     - claim: "Serve's Inbox reads start the worker build from panel-graph's read path"
       proof: "grep: buildInboxInWorker( in src/lib/panel-graph.ts"
   rationale: |
