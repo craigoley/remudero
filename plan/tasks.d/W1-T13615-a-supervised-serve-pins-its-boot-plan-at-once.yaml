@@ -1,0 +1,56 @@
+- id: W1-T13615
+  title: "A supervised serve generation pins its plan at the boot sha when it starts, so its worker threads stop re-reading every plan shard's file status on every pass until main's next plan change"
+  repo: remudero
+  depends_on: []
+  priority: 0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # which plan serve's threads follow from boot: the committed boot tree instead of the same files, read once
+  origin: "operator-session#serve-hot-worker-2026-11-17"
+  plan_refs:
+    - W1-T4481
+    - W1-T5894
+  files:
+    - src/lib/serve.ts
+    - test/console-api/serve/a-supervised-serve-pins-its-boot-plan-at-once.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A gate built with pinBootPlan reloads the plan at the boot sha at construction, before any re-check"
+      proof: "grep: W1-T13615 criterion 1 in test/console-api/serve/a-supervised-serve-pins-its-boot-plan-at-once.test.ts"
+    - claim: "invariant:unsupervised-follows-files — a serve outside a generation, or one whose boot sha is unknown, pins nothing at boot"
+      kind: guard
+      proof: "grep: W1-T13615 criterion 2 in test/console-api/serve/a-supervised-serve-pins-its-boot-plan-at-once.test.ts"
+    - claim: "The boot pin loads once, and a later plan-only advance still reloads at the new sha without a restart"
+      proof: "grep: W1-T13615 criterion 3 in test/console-api/serve/a-supervised-serve-pins-its-boot-plan-at-once.test.ts"
+  rationale: |
+    WHY: on the Azure host, 2026-11-18, serve booted at 04:13:54Z (container pid 25641). Its first
+    serve.plan_pin_adopted row came 29 minutes later, at 04:42:41Z, and no views thread adopted a pin at all. pid 197,
+    the generation before it, had 0 pin rows in its 30-minute life. A pin is published only by the stale-code gate's
+    syncPlan, when main moves with a plan change (W1-T4481).
+    Without a pin, the views thread's inputDigest (read-model-worker.ts) and the board worker fall back to
+    planFilesIdentity (thread-plan.ts): a readdir and a stat of every plan shard. In the generation's directory that
+    is 5,689 shards, measured at 36-38 ms of CPU per pass on the host. It runs on every call of every core-scoped
+    view. read_model.view_builds for 04:24:23-04:34:23Z: instances 404 calls for 21,991 cpu ms, read-model 411 calls
+    for 20,255 cpu ms. Solving the two windows since boot gives about 50 ms per SKIPPED call and about 59 ms per
+    build for instances, so the per-call identity pass, not materialize, is most of each view's cost.
+    E43 (thread-plan.ts) already says a generation's working tree never moves, so its threads follow a pin and not
+    their files. The gap is only that no pin exists until main's next plan change.
+  design: |
+    INVARIANT unsupervised-follows-files: a serve with no generation, or an unknown boot sha, pins nothing at boot.
+    1. StaleCodeExitDeps gains `pinBootPlan?: boolean`. When true and bootSha is not CONSOLE_SHA_UNKNOWN, the gate
+       seeds headPlanRef with bootSha and calls syncPlan once at construction, through the same reloadPlan path a
+       plan-only advance uses. syncPlan's existing guards keep it to one load per ref.
+    2. serve passes `pinBootPlan: deps.generation !== undefined`.
+    3. A new test drives gateStaleCodeExit with a recording reloadPlan.
+    Not in scope: what the two views build on each generation bump, and the views thread's warm-up after a boot.
+  falsifier: |
+    Drop the construction-time syncPlan or the seeded headPlanRef: criteria 1 and 3 fail (no boot reload).
+    Seed it unconditionally: criterion 2 fails.
+  note: |
+    Id reserved for run-unfiled-1794977305806 with ~/rmd-work/bin/reserve-id.sh.
+    reservation hand-off: run-unfiled-1794977305806 -> claude/project-thread-u06uh4
+    Proof that counts in production: after the deploy, a serve.plan_pin_adopted row for each worker role within a
+    minute of each boot, and read_model.view_builds cpuMs per call for instances and read-model falls from about 50 ms.
