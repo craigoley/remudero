@@ -36,24 +36,29 @@ function fakeInstall(registry?: string): string {
   return root;
 }
 
-const REGISTRY = [
-  "# a comment, and a blank line, both of which the reader must skip",
-  "",
-  "instances:",
-  "  core:",
-  "    repo: remudero",
-  "    container_name: remudero-daemon",
-  "    state_dir: /home/craigoleyagent/rmd-state2",
-  "  site:",
-  "    repo: remudero-site",
-  "    container_name: remudero-site-daemon",
-  "    state_dir: /home/craigoleyagent/rmd-site-state",
-  "  console:",
-  "    repo: remudero-console",
-  "    container_name: remudero-console-daemon",
-  "    state_dir: /mnt/rmd/remudero-console-state",
-  "",
-].join("\n");
+function registryFor(root: string): string {
+  const core = join(root, "state-core");
+  const site = join(root, "state-site");
+  const console = join(root, "state-console");
+  return [
+    "# a comment, and a blank line, both of which the reader must skip",
+    "",
+    "instances:",
+    "  core:",
+    "    repo: remudero",
+    "    container_name: remudero-daemon",
+    `    state_dir: ${core}`,
+    "  site:",
+    "    repo: remudero-site",
+    "    container_name: remudero-site-daemon",
+    `    state_dir: ${site}`,
+    "  console:",
+    "    repo: remudero-console",
+    "    container_name: remudero-console-daemon",
+    `    state_dir: ${console}`,
+    "",
+  ].join("\n");
+}
 
 /** Drives the real factory and returns every argv the restart handed to bash. */
 function restartArgv(o: { installPath: string; stateRoot: string; instance?: string }): string[][] {
@@ -92,18 +97,19 @@ test("the recycle invocation carries the instance matching this deployment's sta
   // THE ASSERTION THE WHOLE TASK RESTS ON, and it is about the ARGV: a test that only checked a
   // resolver would pass for a supervisor that resolved the name and still invoked the script bare,
   // which is exactly the shape that was live.
-  const root = fakeInstall(REGISTRY);
-  const argv = restartArgv({ installPath: root, stateRoot: "/home/craigoleyagent/rmd-state2" });
+  const stateRoots = mkdtempSync(join(tmpdir(), "rmd-state-roots-"));
+  const root = fakeInstall(registryFor(stateRoots));
+  const argv = restartArgv({ installPath: root, stateRoot: join(stateRoots, "state-core") });
   assert.equal(argv.length, 1);
   assert.deepEqual(argv[0].slice(1), [join(root, "deploy", "recycle-container.sh"), "--instance", "core"]);
 
   // The site daemon's own state root selects ITS instance, never core's — the misattribution
   // W1-T3596's registry exists to forbid, now on the automated path too.
-  const site = restartArgv({ installPath: root, stateRoot: "/home/craigoleyagent/rmd-site-state" });
+  const site = restartArgv({ installPath: root, stateRoot: join(stateRoots, "state-site") });
   assert.deepEqual(site[0].slice(2), ["--instance", "site"]);
 
   // A trailing separator is not a different directory.
-  const slashed = restartArgv({ installPath: root, stateRoot: "/mnt/rmd/remudero-console-state/" });
+  const slashed = restartArgv({ installPath: root, stateRoot: `${join(stateRoots, "state-console")}/` });
   assert.deepEqual(slashed[0].slice(2), ["--instance", "console"]);
 });
 
@@ -111,15 +117,16 @@ test("an unmatched state root invokes the script unchanged", () => {
   // The guard is never bypassed: with no answer the script is invoked exactly as it was before
   // this task and refuses exactly as it does today. A blanket `--instance core` fallback would
   // recycle the core daemon whenever the site or console supervisor ran.
-  const root = fakeInstall(REGISTRY);
+  const stateRoots = mkdtempSync(join(tmpdir(), "rmd-state-roots-"));
+  const root = fakeInstall(registryFor(stateRoots));
   const script = join(root, "deploy", "recycle-container.sh");
-  const unmatched = restartArgv({ installPath: root, stateRoot: "/home/craigoleyagent/some-other-state" });
+  const unmatched = restartArgv({ installPath: root, stateRoot: join(stateRoots, "some-other-state") });
   assert.deepEqual(unmatched[0].slice(1), [script], "an unmatched state root must add no flag");
 
   // THE CORPUS CONTROL, and it is why this test discriminates rather than passing on any tree:
   // "adds no flag" is also true of a supervisor that never names an instance at all — which is
   // exactly the state this task found. The same fixture with a DECLARED state root must name one.
-  const matched = restartArgv({ installPath: root, stateRoot: "/home/craigoleyagent/rmd-state2" });
+  const matched = restartArgv({ installPath: root, stateRoot: join(stateRoots, "state-core") });
   assert.deepEqual(matched[0].slice(1), [script, "--instance", "core"], "a declared state root must name its instance");
 });
 
@@ -128,7 +135,8 @@ test("an unreadable registry names no instance", () => {
   // exists to forbid. Absent file, and a file that parses to nothing, both read as no match —
   // while the SAME state root against a readable registry names `core`, which is the control that
   // keeps this from being an assertion every tree satisfies.
-  const stateRoot = "/home/craigoleyagent/rmd-state2";
+  const stateRoots = mkdtempSync(join(tmpdir(), "rmd-state-roots-"));
+  const stateRoot = join(stateRoots, "state-core");
 
   const absent = fakeInstall(undefined);
   assert.deepEqual(restartArgv({ installPath: absent, stateRoot })[0].slice(1), [
@@ -140,7 +148,7 @@ test("an unreadable registry names no instance", () => {
     join(garbage, "deploy", "recycle-container.sh"),
   ]);
 
-  const readable = fakeInstall(REGISTRY);
+  const readable = fakeInstall(registryFor(stateRoots));
   assert.deepEqual(restartArgv({ installPath: readable, stateRoot })[0].slice(1), [
     join(readable, "deploy", "recycle-container.sh"),
     "--instance",
@@ -151,12 +159,14 @@ test("an unreadable registry names no instance", () => {
 // ── Supporting coverage beyond the three named proofs ────────────────────────────────────────
 
 test("the registry reader takes only the instances block, and an explicit instance overrides it", () => {
+  const stateRoots = mkdtempSync(join(tmpdir(), "rmd-state-roots-"));
+  const registry = registryFor(stateRoots);
   assert.deepEqual(
-    [...daemonInstanceStateDirs(REGISTRY)],
+    [...daemonInstanceStateDirs(registry)],
     [
-      ["core", "/home/craigoleyagent/rmd-state2"],
-      ["site", "/home/craigoleyagent/rmd-site-state"],
-      ["console", "/mnt/rmd/remudero-console-state"],
+      ["core", join(stateRoots, "state-core")],
+      ["site", join(stateRoots, "state-site")],
+      ["console", join(stateRoots, "state-console")],
     ],
   );
   // A sibling top-level section ends the block — never read as another instance's fields.
@@ -167,9 +177,9 @@ test("the registry reader takes only the instances block, and an explicit instan
     undefined,
   );
 
-  const root = fakeInstall(REGISTRY);
+  const root = fakeInstall(registry);
   assert.deepEqual(
-    restartArgv({ installPath: root, stateRoot: "/home/craigoleyagent/rmd-state2", instance: "console" })[0].slice(2),
+    restartArgv({ installPath: root, stateRoot: join(stateRoots, "state-core"), instance: "console" })[0].slice(2),
     ["--instance", "console"],
   );
 });
