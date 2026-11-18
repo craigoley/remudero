@@ -1,0 +1,80 @@
+- id: W1-T13608
+  title: "The dispatch lifetime tally reads the ledger clock and each task's rows from the snapshot's index, so a dispatch pass no longer scans the whole ledger once per candidate task on the daemon loop"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # changes how lifetimeAccounting().tallyFor finds the ledger clock and a task's run ids; the lifetime pressure feeds isLifetimeCapExceeded in every dispatch decision, so each tally and the unavailable-history rule must stay the same
+  origin: "operator-session#loop-lag-2026-11-18"
+  plan_refs:
+    - W1-T3523
+    - W1-T6358
+    - W1-T8164
+    - W1-T12235
+  files:
+    - src/run-task.ts
+    - test/daemon/the-dispatch-lifetime-tally-reads-the-ledger-clock-once-per-snapshot.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "invariant:one-clock-scan-per-snapshot — over one LedgerSnapshot with 20,000 rows and 50 candidate tasks, 50 lifetime tallies make no full pass over the rows: the ledger clock comes from the snapshot's LedgerIndex.latestTsMs and each task's rows from its byTask bucket, so a rows proxy that counts element reads sees fewer reads than one pass over the rows for the 50 tallies together, and no new LedgerIndex is built (ledgerIndexBuildCount does not change)"
+      proof: "grep: W1-T13608 criterion 1 in test/daemon/the-dispatch-lifetime-tally-reads-the-ledger-clock-once-per-snapshot.test.ts"
+    - claim: "invariant:same-tally — on a temporary ledger with orphaned run.start rows (older than DEFAULT_LIVENESS_BOUND_MS against the newest ts), live runs, verdict rows and other tasks' rows, the indexed tally and today's unindexed tally (orphanedRunIds(rows, taskId) and rows.filter over every row) give an equal LifetimeDispatchTally for every task, including a task with no rows and a ledger with no parseable ts"
+      proof: "grep: W1-T13608 criterion 2 in test/daemon/the-dispatch-lifetime-tally-reads-the-ledger-clock-once-per-snapshot.test.ts"
+    - claim: "invariant:same-failure-rule — when the lifetime index is unavailable tallyFor still returns undefined and lifetimeCapExceededFor still falls back to hasRepeatedTaskAttributableLifetimeDispatches on the live rows; a supplied snapshot without an index, or with an index built over a different rows array, gives the same tally as today by building the clock from the rows it is given"
+      proof: "grep: W1-T13608 criterion 3 in test/daemon/the-dispatch-lifetime-tally-reads-the-ledger-clock-once-per-snapshot.test.ts"
+  rationale: |
+    WHY: each dispatch decision asks isLifetimeCapExceeded for each candidate task (src/lib/drain.ts:770, inside
+    isDispatchEligible at :672). That reaches lifetimeAccounting().tallyFor, which calls orphanedRunIds with no
+    index, so latestLedgerTsMs reads every ledger row to find the ledger clock, and then filters every row again
+    for the task's run ids. That is two full passes over the live ledger per candidate task, on the daemon loop.
+    The snapshot already carries a LedgerIndex with the clock and per-task rows, and orphanedRunIds already
+    accepts it; the lifetime path does not pass it.
+    MEASURED on the Azure host, 2026-11-18, one nice'd pass over the daemon.loop_stall_profile rows since the
+    03:23:47Z boot (9b4f43779d; a 04:09:18Z boot at 04f6dd8235 changed none of these paths), in
+    ~/rmd-state2/state/ledger.ndjson and the ledger.2026-11-18T*.ndjson.gz archives, deduplicated on ts, step
+    and command: 163 rows, 725.4 s of loop lag in 62.5 minutes.
+    - runnableCandidates > dispatchEligibleCandidates > isDispatchEligible is in the top inclusive frames of 3
+      rows: 56.8 s of lag, max 23.3 s (03:49:05Z), about 48.8 s (6.7 percent of all lag) by inclusive share.
+    - In those rows the self time of latestLedgerTsMs (caller orphanedRunIds), orphanedRunIds (caller tallyFor)
+      and tallyFor is 18.2 s of samples; scaled to lag that is about 19.6 s, 2.7 percent of all lag. The rest
+      of those rows is the open-head GitHub read with its blocking retry sleep, which W1-T2318 covers.
+    READ at origin/main b79ad9e16d:
+    - src/run-task.ts:25539 lifetimeAccounting; :25547 tallyFor; :25549 orphanedRunIds(rows, taskId) with no
+      index; :25550 the visible set from rows.filter over every row.
+    - src/run-task.ts:25566 lifetimeHistory; :25615-25618 its tallyFor hands accounting the supplied
+      snapshot's lines but not its index.
+    - src/run-task.ts:25775 the gate reads one readLedgerSnapshot per pass; :25818-25824 lifetimeCapExceededFor
+      calls auditedLifetimeHistory.tallyFor(taskId, snap) once per task and caches only per task.
+    - src/lib/status.ts:1080 readLedgerSnapshot returns index: buildLedgerIndex(lines); :1254 byTask; :1264
+      latestTsMs; :1497 latestLedgerTsMs; :1515 orphanedRunIds; :1523 it reuses index.latestTsMs when
+      index.rows === lines.
+    NOT COVERED: swept origin/main plan/tasks.d for lifetimeAccounting, auditedLifetimeHistory and
+    latestLedgerTsMs: W1-T12235 (merged) reads each rotated file once, W1-T8164 (merged) built the audited
+    history; neither touches the per-task clock scan. No open pull request touches lifetimeAccounting.
+  design: |
+    INVARIANT one-clock-scan-per-snapshot: the lifetime tallies of one pass read the ledger clock and each task's rows from the snapshot's index, never by a full scan per task.
+    INVARIANT same-tally: the indexed tally equals today's unindexed tally on the same rows.
+    INVARIANT same-failure-rule: an unavailable lifetime index still gives undefined and the live-only fallback; a missing or foreign index falls back to today's scan.
+    1. Let lifetimeHistory's refresh pass the supplied snapshot's index through with its rows when the snapshot
+       has one (the Pick at :25563 and :25573 widens to include index), and keep the self-read path's
+       readLedgerSnapshot index too.
+    2. In lifetimeAccounting().tallyFor take that index: call orphanedRunIds(rows, taskId, index), which already
+       uses index.latestTsMs when index.rows === rows, and build the visible set from index.byTask for the task
+       instead of rows.filter. When there is no index, or index.rows !== rows, keep today's code.
+    3. Change nothing else: not the orphan rule, DEFAULT_LIVENESS_BOUND_MS, the record path, the replay window,
+       effectiveLifetimeDispatches, the per-task cache at :25818, or the dispatch order. No env var, config key,
+       time bound or new cache.
+    4. The test builds rows in memory and a temporary ledger under a tmp HOME loaded with test/setup/tmp-hygiene.ts;
+       it counts element reads with a Proxy over the rows array and reads ledgerIndexBuildCount (status.ts:1306).
+  falsifier: |
+    Drop the index from the orphanedRunIds call: criterion 1 counts at least one full pass per task. Build the
+    visible set from the index but forget the run ids of rows without task_id handling: criterion 2 differs
+    for one task. Make a foreign index trusted: criterion 3 gives a different clock and tally.
+  note: |
+    Id reserved for run-unfiled-1794976017000 with ~/rmd-work/bin/reserve-id.sh.
+    Proof that counts on the host: after the daemon converges, no daemon.loop_stall_profile row shows
+    latestLedgerTsMs or orphanedRunIds with tallyFor as caller.
