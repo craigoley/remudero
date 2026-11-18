@@ -7,7 +7,7 @@ import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { performance } from "node:perf_hooks";
 import { execFileRouted, spawnRoute } from "./spawn-helper.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
-import { DANGLING_REF_MAX_BUFFER, retryAfterDanglingRefRepair, retryAfterDanglingRefRepairAsync } from "./git-fetch-retry.js";
+import { DANGLING_REF_MAX_BUFFER, retryAfterDanglingRefRepair, retryAfterDanglingRefRepairAsync, type RepairGit } from "./git-fetch-retry.js";
 
 /**
  * W1-T6106 — THE ONE WAY HOST CODE RUNS GIT WITH A WORKER WORKTREE AS ITS REPOSITORY.
@@ -477,8 +477,11 @@ export function hostWorktreeGit(worktreePath: string, args: readonly string[], o
     return runHostWorktreeGit();
   } catch (error) {
     // W1-T13409: a fetch that names a ref with a missing object repairs it and runs once more; anything else rethrows.
+    // W1-T13548: the runner is named so the spawn meter knows it as a leaf, as it knows gitSync.
+    const repairHostWorktreeGit: RepairGit = (a, timeout) =>
+      gitSync(a, spawnOptions(pin, { timeout, maxBuffer: DANGLING_REF_MAX_BUFFER }, overrides));
     return retryAfterDanglingRefRepair(
-      (a, timeout) => gitSync(a, spawnOptions(pin, { timeout, maxBuffer: DANGLING_REF_MAX_BUFFER }, overrides)),
+      repairHostWorktreeGit,
       args,
       error,
       runHostWorktreeGit,
