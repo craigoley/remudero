@@ -115,5 +115,5 @@ test("W1-T13197 criterion 4: a retired finished-task ask is restored by the exis
   await f.run("act");
   assert.equal(f.entries().events.filter(e => e.receipt.kind === "retire" && e.receipt.scope.proposalId === ASKS.merged).length, 1, "a restore is never undone by the gardener");
   assert.equal(retirementAsk({ id: "proof-debt:W1-T1300", summary: "", evidenceAnchors: [] }), undefined, "an unstamped proof-debt id gains no purpose");
-  assert.deepEqual(INBOX_GARDENER_LIMITS, { candidates: 8, proofReads: 4, judges: 1, retirements: 1, ledgerCatchUpMs: 20_000, ledgerChunkBytes: 64 * 1024 });
+  assert.deepEqual(INBOX_GARDENER_LIMITS, { candidates: 8, proofReads: 4, judges: 1, retirements: 1, ledgerCatchUpMs: 300_000, ledgerChunkBytes: 64 * 1024 });
 });

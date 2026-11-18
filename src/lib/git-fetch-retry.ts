@@ -32,7 +32,9 @@ export const LATE_TIMER_GRACE_MS = 2_000;
  *  not the runner honours it, so a hung fetch reads as a failed one and never holds its awaiter forever.
  *  W1-T5964: a timer that fires late first waits `lateGraceMs`, since timers run before the poll phase
  *  that would deliver a finished child's exit; #9460's review was withheld for a fetch that had finished. */
-export async function boundGitCall(git: AsyncGitRunner, args: string[], timeoutMs: number, lateGraceMs = LATE_TIMER_GRACE_MS): Promise<string> {
+export async function boundGitCall(
+  git: AsyncGitRunner, args: string[], timeoutMs: number, lateGraceMs = LATE_TIMER_GRACE_MS, baseEnv: NodeJS.ProcessEnv = process.env,
+): Promise<string> {
   const controller = new AbortController();
   const traceDir = mkdtempSync(join(tmpdir(), "rmd-fetch-trace-"));
   const tracePath = join(traceDir, "events.json");
@@ -54,7 +56,7 @@ export async function boundGitCall(git: AsyncGitRunner, args: string[], timeoutM
         if (lateMs > LATE_TIMER_SLACK_MS) timer = setTimeout(() => fail(lateMs), lateGraceMs);
         else fail(lateMs);
       }, timeoutMs);
-      Promise.resolve().then(() => git(args, controller.signal, { ...process.env, GIT_TRACE2_EVENT: tracePath })).then(resolve, reject);
+      Promise.resolve().then(() => git(args, controller.signal, { ...baseEnv, GIT_TRACE2_EVENT: tracePath })).then(resolve, reject);
     });
   } finally {
     clearTimeout(timer);
@@ -118,12 +120,24 @@ function timerSleep(ms: number): Promise<void> {
 
 /** `git fetch origin`, retried briefly on a transient ref lock (#8017 lost ~1h to one); anything else throws. */
 export function fetchOriginRetryingRefLock(git: GitRunner, sleep: (ms: number) => void = blockingSleep, attempts = 3, scope: "all" | "main" = "all"): void {
+  const args = fetchArgs(scope);
   for (let attempt = 1; ; attempt++) {
     try {
-      git(fetchArgs(scope));
+      git(args);
       return;
     } catch (error) {
-      if (attempt >= attempts || !isRefLockFailure(error)) throw error;
+      let failure = error;
+      // W1-T13409: the first failure only. A GitRunner takes no time bound, so the repair's calls run as its fetch does.
+      if (attempt === 1) {
+        try {
+          retryAfterDanglingRefRepair((a) => git(a), args, error, () => git(args));
+          return;
+        } catch (after) {
+          // The retry's failure, or the original error: the ref lock test reads that one.
+          failure = after;
+        }
+      }
+      if (attempt >= attempts || !isRefLockFailure(failure)) throw failure;
       sleep(1_000 * attempt);
     }
   }
@@ -138,13 +152,230 @@ export async function fetchOriginRetryingRefLockAsync(
   timeoutMs = GATEWAY_FETCH_TIMEOUT_MS,
   scope: "all" | "main" = "all",
 ): Promise<void> {
+  const args = fetchArgs(scope);
   for (let attempt = 1; ; attempt++) {
     try {
-      await boundGitCall(git, fetchArgs(scope), timeoutMs);
+      await boundGitCall(git, args, timeoutMs);
       return;
     } catch (error) {
-      if (attempt >= attempts || !isRefLockFailure(error)) throw error;
+      let failure = error;
+      if (attempt === 1) {
+        try {
+          await retryAfterDanglingRefRepairAsync((a, ms) => boundGitCall(git, a, ms, undefined, repairEnv()), args, error,
+            () => boundGitCall(git, args, timeoutMs));
+          return;
+        } catch (after) {
+          // The retry's failure, or the original error: the ref lock test reads that one.
+          failure = after;
+        }
+      }
+      if (attempt >= attempts || !isRefLockFailure(failure)) throw failure;
       await sleep(1_000 * attempt);
     }
+  }
+}
+
+// ── W1-T13409: a fetch that meets a ref naming a missing object repairs that ref and retries once. ──
+
+/** BACKSTOP: at most this many dangling tracking refs are repaired in one call; more are reported only (2026-11-17 had 1). */
+const DANGLING_REF_MAX_REFS = 16;
+/** BACKSTOP: the listing is killed after this (one pass over 9,796 refs took 0.71 s on the loaded host). */
+const DANGLING_REF_LIST_TIMEOUT_MS = 30_000;
+/** BACKSTOP: the repair pass is killed after this, the bound the hand repair used. */
+const DANGLING_REF_REPAIR_TIMEOUT_MS = 120_000;
+/** BACKSTOP: a listing holds one line per ref; a clone of 9,796 refs prints about 1 MB. */
+export const DANGLING_REF_MAX_BUFFER = 64 * 1024 * 1024;
+
+interface DanglingRefBounds { maxRefs: number; listMs: number; repairMs: number }
+const DANGLING_REF_BOUNDS: DanglingRefBounds = {
+  maxRefs: DANGLING_REF_MAX_REFS, listMs: DANGLING_REF_LIST_TIMEOUT_MS, repairMs: DANGLING_REF_REPAIR_TIMEOUT_MS,
+};
+
+/** One git call of the repair, killed at `timeoutMs` when the runner can. */
+export type RepairGit = (args: string[], timeoutMs: number) => string;
+export type RepairGitAsync = (args: string[], timeoutMs: number) => Promise<string>;
+export type DanglingRefRepairLog = (step: string, extra: Record<string, unknown>) => void;
+
+const stderrRepairLog: DanglingRefRepairLog = (step, extra) => console.error(JSON.stringify({ event: step, ...extra }));
+let repairLog: DanglingRefRepairLog = stderrRepairLog;
+
+/** Where the repair rows go; a process sets its ledger log once (setWorkerEntryLog's shape). `keepSet` leaves a
+ *  log already set, since the daemon runs `rmd fix` in its own process. */
+export function setDanglingRefRepairLog(log: DanglingRefRepairLog | undefined, keepSet = false): void {
+  if (keepSet && repairLog !== stderrRepairLog) return;
+  repairLog = log ?? stderrRepairLog;
+}
+
+/** The property a repaired-at error carries: what was found. An error with it is never repaired again. */
+const FINDING = "danglingRefRepair";
+interface DanglingRefFinding { dangling: string[]; repairError?: unknown; retried?: boolean }
+
+const DANGLING_REF_FAILURE = /bad object refs\/|did not send all necessary objects/;
+const REPAIRED = "git.dangling_ref_repaired";
+const UNREPAIRED = "git.dangling_ref_unrepaired";
+
+/** The env of a repair call: no object directory of a caller's own. */
+function repairEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const env = { ...base };
+  delete env.GIT_OBJECT_DIRECTORY;
+  delete env.GIT_ALTERNATE_OBJECT_DIRECTORIES;
+  return env;
+}
+
+function isFetchArgv(args: readonly string[]): boolean {
+  for (let at = 0; at < args.length; at++) {
+    const arg = args[at]!;
+    if (arg === "-C" || arg === "-c") at++;
+    else if (!arg.startsWith("-")) return arg === "fetch";
+  }
+  return false;
+}
+
+function isDanglingRefFailure(args: readonly string[], error: unknown): error is Record<string, unknown> {
+  if (typeof error !== "object" || error === null || FINDING in error || !isFetchArgv(args)) return false;
+  const e = error as { stderr?: unknown; message?: unknown };
+  return DANGLING_REF_FAILURE.test(`${String(e.stderr ?? "")}\n${String(e.message ?? "")}`);
+}
+
+function reason(error: unknown): string {
+  return String((error as { message?: unknown } | null)?.message ?? error).slice(0, 500);
+}
+
+type RepairCall = { args: string[]; timeoutMs: number };
+type RepairAnswer = { out: string } | { error: unknown };
+interface ListedRef { id: string; ref: string }
+
+/** Lists the refs, keeps those whose own object is missing, and repairs the tracking ones: one listing, one pass.
+ *  Yields each git call; returns whether every dangling ref was repaired, so the caller retries once. */
+function* danglingRefRepairPlan(error: Record<string, unknown>, bounds: DanglingRefBounds): Generator<RepairCall, boolean, RepairAnswer> {
+  const finding: DanglingRefFinding = { dangling: [] };
+  error[FINDING] = finding;
+  const until = (start: number, ms: number): number => Math.max(1, Math.round(start + ms - performance.now()));
+  const listed = performance.now();
+  const dir = yield { args: ["rev-parse", "--path-format=absolute", "--git-common-dir"], timeoutMs: bounds.listMs };
+  const clone = "out" in dir ? dir.out.trim() : "unknown";
+  const failed = (refs: readonly (string | null)[], cause: unknown): false => {
+    finding.repairError = cause;
+    for (const ref of refs) repairLog(UNREPAIRED, { clone, ref, why: "repair_failed", error: reason(cause) });
+    return false;
+  };
+  const list = yield { args: ["for-each-ref", "--format=%(objectname) %(refname) %(symref)"], timeoutMs: until(listed, bounds.listMs) };
+  if (!("out" in list)) return failed([null], list.error);
+  const refs: ListedRef[] = [];
+  for (const line of list.out.split("\n")) {
+    const [id, ref, symref] = line.split(" ");
+    if (id && ref && !symref) refs.push({ id, ref });
+  }
+  const ids = [...new Set(refs.map((r) => r.id))];
+  const check = yield {
+    args: ["rev-list", "--objects", "--no-walk", "--ignore-missing", "--filter=tree:0", ...ids], timeoutMs: until(listed, bounds.listMs),
+  };
+  if (!("out" in check)) return failed([null], check.error);
+  const present = new Set(check.out.split("\n").map((line) => line.split(" ")[0]));
+  const dangling = refs.filter((r) => !present.has(r.id));
+  finding.dangling = dangling.map((r) => r.ref);
+  const tracking: Array<ListedRef & { remote: string; branch: string }> = [];
+  for (const r of dangling) {
+    const m = /^refs\/remotes\/([^/]+)\/(.+)$/.exec(r.ref);
+    if (m) tracking.push({ ...r, remote: m[1]!, branch: m[2]! });
+    else repairLog(UNREPAIRED, { clone, ref: r.ref, why: "not_a_tracking_ref" });
+  }
+  if (dangling.length === 0) {
+    repairLog(UNREPAIRED, { clone, ref: null, why: "no_dangling_ref" });
+    return false;
+  }
+  if (tracking.length > bounds.maxRefs) {
+    repairLog(UNREPAIRED, { clone, ref: tracking[0]!.ref, why: "over_the_bound", count: tracking.length });
+    return false;
+  }
+  if (tracking.length === 0) return false;
+  const start = performance.now();
+  let all = tracking.length === dangling.length;
+  for (const remote of [...new Set(tracking.map((r) => r.remote))]) {
+    const group = tracking.filter((r) => r.remote === remote);
+    const heads = yield { args: ["ls-remote", remote, ...group.map((r) => `refs/heads/${r.branch}`)], timeoutMs: until(start, bounds.repairMs) };
+    if (!("out" in heads)) {
+      all = failed(group.map((r) => r.ref), heads.error);
+      continue;
+    }
+    const has = new Set(heads.out.split("\n").map((line) => line.split("\t")[1]));
+    const kept = group.filter((r) => has.has(`refs/heads/${r.branch}`));
+    if (kept.length > 0) {
+      const fetched = yield {
+        args: ["-c", "gc.auto=0", "-c", "maintenance.auto=false", "fetch", "--refetch", "--no-tags", remote,
+          ...kept.map((r) => `+refs/heads/${r.branch}:${r.ref}`)],
+        timeoutMs: until(start, bounds.repairMs),
+      };
+      // The removals wait for the refetch: a failed refetch leaves every ref as it was.
+      if (!("out" in fetched)) {
+        all = failed(group.map((r) => r.ref), fetched.error);
+        continue;
+      }
+      for (const r of kept) repairLog(REPAIRED, { clone, ref: r.ref, how: "refetched", ms: Math.round(performance.now() - start) });
+    }
+    for (const r of group.filter((g) => !kept.includes(g))) {
+      // The old value makes the delete a compare-and-swap: a ref repaired meanwhile is left alone.
+      const removed = yield { args: ["update-ref", "-d", r.ref, r.id], timeoutMs: until(start, bounds.repairMs) };
+      if ("out" in removed) repairLog(REPAIRED, { clone, ref: r.ref, how: "removed", ms: Math.round(performance.now() - start) });
+      else all = failed([r.ref], removed.error);
+    }
+  }
+  return all;
+}
+
+function markRetried(error: unknown): void {
+  if (typeof error === "object" && error !== null && !(FINDING in error)) {
+    (error as Record<string, unknown>)[FINDING] = { dangling: [], retried: true } satisfies DanglingRefFinding;
+  }
+}
+
+/** The fetch `args` failed with `error`: when git names a ref whose object is missing, repair it and run `retry` once;
+ *  otherwise throw `error` itself. A failed repair throws `error` with what was found on its `danglingRefRepair`. */
+export function retryAfterDanglingRefRepair<T>(
+  git: RepairGit, args: readonly string[], error: unknown, retry: () => T, bounds: DanglingRefBounds = DANGLING_REF_BOUNDS,
+): T {
+  if (!isDanglingRefFailure(args, error)) throw error;
+  const plan = danglingRefRepairPlan(error, bounds);
+  let step = plan.next();
+  while (!step.done) {
+    let answer: RepairAnswer;
+    try {
+      answer = { out: git(step.value.args, step.value.timeoutMs) };
+    } catch (failure) {
+      answer = { error: failure };
+    }
+    step = plan.next(answer);
+  }
+  if (!step.value) throw error;
+  try {
+    return retry();
+  } catch (after) {
+    markRetried(after);
+    throw after;
+  }
+}
+
+/** {@link retryAfterDanglingRefRepair} with awaited git calls. */
+export async function retryAfterDanglingRefRepairAsync<T>(
+  git: RepairGitAsync, args: readonly string[], error: unknown, retry: () => Promise<T>, bounds: DanglingRefBounds = DANGLING_REF_BOUNDS,
+): Promise<T> {
+  if (!isDanglingRefFailure(args, error)) throw error;
+  const plan = danglingRefRepairPlan(error, bounds);
+  let step = plan.next();
+  while (!step.done) {
+    let answer: RepairAnswer;
+    try {
+      answer = { out: await git(step.value.args, step.value.timeoutMs) };
+    } catch (failure) {
+      answer = { error: failure };
+    }
+    step = plan.next(answer);
+  }
+  if (!step.value) throw error;
+  try {
+    return await retry();
+  } catch (after) {
+    markRetried(after);
+    throw after;
   }
 }
