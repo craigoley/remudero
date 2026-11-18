@@ -54,7 +54,8 @@ import { ghRequiredStatusCheckContexts, readLedgerLines, taskIdFromRunBranch } f
 import { withCodeqlAlertEvidence, CODE_SCANNING_FALSE_POSITIVE_STEP, DEFAULT_SWEEP_POLICY, decideRedBaseRefresh, isCiHarnessPath, actionableGateFailuresFromReasons, dispatchFixSpent, fixRoundNotRunReason, checksStateFromRollup, earlyRedEvidenceRollup, checksPendingSinceFromRollup, deriveDisposition, fixRoundTally, buildFixProgressInput, flakeClaimsForHead, isBlockedCi, renderClarificationQuestion, redQualityGateNames, stillRedRequiredNames, terminalStateReason, type ActionableGateFailure, type CiFailure, type LiveStateResult, type OpenPrView, type RollupCheckEntry, type ProofDiscriminationEvidence, type SweepDeps, type SweepPolicy, proofDiscriminationEvidenceFromCriteria, ADDITIVE_REGISTRATION_SURFACES, type RegistrationChange, hasCapturedMergeConflictEvidence, clearedConflictEscalationCause, withPrAddedVerbs, isVerbRegistrationPath, ownVerbRegistrationPaths, VERB_REGISTRATION_PATHS } from "../../lib/sweep.js";
 import { forcedRefreshFields, REFRESH_DECIDED_STEP } from "../../lib/refresh-value.js";
 import { detectReviewFalseBlock, detectCiLogVerdictUnchanged, shouldSelfHealNothingChanged } from "../../lib/fix-rung-classify.js";
-import { readCiGateRequiredChecks } from "../../lib/ci-gate-required.js";
+import { readCiGateRequiredNames, resolveCiGateRequiredSource } from "../../lib/ci-gate-required.js";
+import { pendingQualityGateNames } from "../../lib/sweep.js";
 import { dropDerivativeAggregateCiFailure } from "../../lib/derivative-ci-failure.js";
 import { ghJson, parseReport, foreignTreeStandDownReason, workerTranscript, worktreeAdd, worktreeRemove, type SpawnWorkerArgs, type ForeignTreeStandDown, type RegisteredWorktree, type WorkerResult, workerContinuation } from "../../lib/worker.js";
 import { hostWorktreeGit, hostWorktreeGitAsync } from "../../lib/worktree-git.js";
@@ -6215,7 +6216,8 @@ export async function fixCommand(
   // checksStateFromRollup's doc.
   const requiredContexts = (deps.readRequiredContexts ?? ghRequiredStatusCheckContexts)(owner, repo);
   const checksState = checksStateFromRollup(raw.statusCheckRollup, requiredContexts);
-  const ciGateRequired = readCiGateRequiredChecks(repoRoot);
+  const ciGateSource = resolveCiGateRequiredSource({ owner, repo }, { self, selfRoot: repoRoot, configRoot: config.root });
+  const ciGateRequired = readCiGateRequiredNames(ciGateSource, log);
   const redRequiredChecks = redQualityGateNames(raw.statusCheckRollup, ciGateRequired);
   const falsePositive = ledger.some(row => row.step === CODE_SCANNING_FALSE_POSITIVE_STEP &&
     row.pr_number === raw.number && row.head_sha === raw.headRefOid);
@@ -6269,6 +6271,7 @@ export async function fixCommand(
       : codeqlHeadAlerts ? [{ name: CODEQL_CHECK_NAME, logTail: "The CodeQL results check failed at this head." }] : undefined,
     codeqlHeadAlerts,
     redRequiredChecks,
+    pendingRequiredChecks: pendingQualityGateNames(raw.statusCheckRollup, ciGateRequired),
     mergeConflictSource: undefined,
   };
 
@@ -6311,6 +6314,8 @@ export async function fixCommand(
     plan: plan,
     log: log,
     policy: DEFAULT_SWEEP_POLICY,
+    ciGateSource,
+    ciGateRequired,
     // Already resolved above (or injected): do not make buildSweepEffects read origin a second time.
     localRepoName: self.repo,
   });

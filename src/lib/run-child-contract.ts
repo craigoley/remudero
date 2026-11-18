@@ -23,7 +23,7 @@ import type { RunResult } from "./run-result.js";
 
 /** The contract's schema version. The schema only grows within a major: a reader refuses an unknown major and
  *  ignores unknown minor fields. */
-export const RUN_CHILD_SCHEMA = { major: 1, minor: 2 } as const;
+export const RUN_CHILD_SCHEMA = { major: 1, minor: 3 } as const;
 
 export interface RunChildSchema {
   major: number;
@@ -51,6 +51,8 @@ export interface RunChildSpec {
   planSnapshotPath: string;
   reservationId: string;
   options: RunChildSpecOptions;
+  /** W1-T13691 (minor 3): the parent offers verified ops catalog blobs on fd 3. The spec never holds a blob. */
+  opsCatalogBlobsOffered?: true;
 }
 
 export type RunChildState = "starting" | "running" | "done" | "failed" | "aborted";
@@ -234,6 +236,7 @@ export function parseSpec(raw: unknown): RunChildRead<RunChildSpec> {
     value: {
       schema: schema.value, taskId, runId, instance, planSnapshotPath, reservationId, options,
       engine: { sourceHash: engine.sourceHash as string, sha: engine.sha as string },
+      ...(raw.opsCatalogBlobsOffered === true ? { opsCatalogBlobsOffered: true as const } : {}),
     },
   };
 }
