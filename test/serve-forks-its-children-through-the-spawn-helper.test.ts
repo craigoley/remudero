@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import test from "node:test";
 import { boundGitCall } from "#src/lib/git-fetch-retry.js";
 import { defaultOpsCatalogApi } from "#src/lib/ops-catalog-source.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 import { asyncGit } from "#src/lib/self-sync.js";
 import { bootSpawnHelper, installedSpawnHelper, installSpawnHelper, SPAWN_HELPER_SWITCH, startSpawnHelper,
   stopBootedSpawnHelper, type SpawnHelper } from "#src/lib/spawn-helper.js";
@@ -80,10 +81,10 @@ test("W1-T13664: the switch set to off starts no helper, and a start that throws
 });
 
 test("W1-T13664: a git read and a bounded fetch fork through the installed helper, and the helper stops a fetch's child at its bound", async () => {
-  const repo = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}serve-helper-repo-`));
+  const fixture = gitRepo();
+  const repo = fixture.dir;
   const slow = shim("git", "exec sleep 5");
   try {
-    execFileSync("git", ["init", "--quiet", repo]);
     installSpawnHelper(undefined);
     const seen = capture();
     installSpawnHelper(startSpawnHelper({ log: seen.log }));
@@ -102,7 +103,7 @@ test("W1-T13664: a git read and a bounded fetch fork through the installed helpe
   } finally {
     stopInstalled();
     slow.cleanup();
-    rmSync(repo, { recursive: true, force: true });
+    fixture.cleanup();
   }
 });
 
@@ -167,13 +168,13 @@ test("W1-T13664: a signalled call with no bound keeps its direct child, which it
 });
 
 test("W1-T13664: the catalog's default api forks gh through the installed helper", async () => {
-  const cli = shim("gh", `echo '{"ok":true}'`);
+  const cli = ghShim([{ when: "", stdout: '{"ok":true}' }]);
   const savedPath = process.env.PATH;
   try {
     installSpawnHelper(undefined);
     const seen = capture();
     installSpawnHelper(startSpawnHelper({ log: seen.log }));
-    process.env.PATH = cli.env.PATH;
+    process.env.PATH = `${cli.dir}${delimiter}${savedPath}`;
     const pacer = { wait: () => undefined, waitAsync: async () => undefined, recordResult: () => undefined };
     const api = defaultOpsCatalogApi({ pacer: pacer as unknown as NonNullable<Parameters<typeof defaultOpsCatalogApi>[0]>["pacer"] });
     assert.deepEqual(await api("repos/o/r/git/ref/heads/main"), { ok: true });
@@ -181,6 +182,5 @@ test("W1-T13664: the catalog's default api forks gh through the installed helper
   } finally {
     process.env.PATH = savedPath;
     stopInstalled();
-    cli.cleanup();
   }
 });
