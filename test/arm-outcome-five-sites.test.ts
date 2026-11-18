@@ -278,7 +278,7 @@ test("every gate that reviews a destination plan PR checks for a self-merge befo
     "view === undefined ? prNum : prUrl", "isPublic ? prNum : prUrl",
     "filing.destination ? result.prUrl : prNum", "filing.destination ? result.prUrl : prNum",
   ], "the triage, plan, approve and approve-batch gates");
-  for (const site of sites) assert.match(site[2]!, /^\s*if \(mergedBeforeGate\((result\.)?prUrl, reviewCode, log\)\) \{$/, site[0]);
+  for (const site of sites) assert.match(site[2]!, /^\s*if \(await mergedBeforeGate\((result\.)?prUrl, reviewCode, log\)\) \{$/, site[0]);
 });
 
 test("SITE sweep arm fold returns the outcome shape the sweep can read", () => {

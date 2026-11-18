@@ -56,27 +56,28 @@ test("W1-T4688: the skill write is ledgered only after its commit", () => {
 // before review ran. Review declined the closed PR (exit 2), the arm found no review row, and the approve exited 2
 // although the filing had landed.
 const OPS_PR = "https://github.com/craigoley/remudero-ops/pull/127";
-const row = (fields: Record<string, unknown>) => () => ({ number: 127, html_url: OPS_PR, head: { sha: "a".repeat(40) }, ...fields });
+const row = (fields: Record<string, unknown>) => async () => ({ number: 127, html_url: OPS_PR, head: { sha: "a".repeat(40) }, ...fields });
 
-test("a plan PR its repository merged before review is the lane's success, ledgered once", () => {
+test("a plan PR its repository merged before review is the lane's success, ledgered once", async () => {
   const rows: Array<[string, Record<string, unknown> | undefined]> = [];
   const asked: string[][] = [];
-  const merged = mergedBeforeGate(OPS_PR, 2, (step, extra) => rows.push([step, extra]), (args) => {
+  const merged = await mergedBeforeGate(OPS_PR, 2, (step, extra) => rows.push([step, extra]), async (args) => {
     asked.push(args);
-    return row({ state: "closed", merged_at: "2026-11-18T10:55:43Z" })();
+    return await row({ state: "closed", merged_at: "2026-11-18T10:55:43Z" })();
   });
   assert.equal(merged, true);
   assert.equal(asked.length, 1, "one live read of the PR");
   assert.ok(asked[0]!.some((arg) => arg.includes("remudero-ops/pulls/127")), asked[0]!.join(" "));
-  assert.deepEqual(rows, [["gate.merged_before_review", { pr_url: OPS_PR, review_code: 2, merged_at: "2026-11-18T10:55:43Z" }]]);
+  assert.deepEqual(rows, [["gate.merged_before_review", { merged_pr: OPS_PR, review_code: 2, merged_at: "2026-11-18T10:55:43Z" }]]);
 });
 
-test("only a merge excuses a failed review: open, closed unmerged and unreadable PRs keep the review's code", () => {
+test("only a merge excuses a failed review: open, closed unmerged and unreadable PRs keep the review's code", async () => {
   const rows: string[] = [];
   const log = (step: string) => void rows.push(step);
-  assert.equal(mergedBeforeGate(OPS_PR, 2, log, row({ state: "closed", merged_at: null })), false);
-  assert.equal(mergedBeforeGate(OPS_PR, 1, log, row({ state: "open", merged_at: null })), false);
-  assert.equal(mergedBeforeGate(OPS_PR, 2, log, () => { throw new Error("gh: 502"); }), false);
-  assert.equal(mergedBeforeGate(OPS_PR, 0, log, () => assert.fail("a passed review needs no read")), false);
+  assert.equal(await mergedBeforeGate(OPS_PR, 2, log, row({ state: "closed", merged_at: null })), false);
+  assert.equal(await mergedBeforeGate(OPS_PR, 1, log, row({ state: "open", merged_at: null })), false);
+  assert.equal(await mergedBeforeGate(OPS_PR, 2, log, async () => { throw new Error("gh: 502"); }), false);
+  assert.equal(await mergedBeforeGate(OPS_PR, 0, log, async () => assert.fail("a passed review needs no read")), false);
+  assert.equal(await mergedBeforeGate(OPS_PR, 0, log), false, "the real async default is never called for a passed review");
   assert.deepEqual(rows, []);
 });

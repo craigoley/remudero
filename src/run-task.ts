@@ -12323,21 +12323,21 @@ export function headShaRestArgs(prUrl: string): string[] {
  * `gate.merged_before_review`. Only a merge counts: an open PR, a closed unmerged one and an unreadable read all
  * keep the review's own code, so an unreadable PR still reads as the review failure it was before this check.
  */
-export function mergedBeforeGate(
+export async function mergedBeforeGate(
   prUrl: string,
   reviewCode: number,
   log: (step: string, extra?: Record<string, unknown>) => void,
-  fetch: GhApiFetcher = ghJson,
-): boolean {
+  fetch: (args: string[]) => Promise<unknown> = ghJsonAsync,
+): Promise<boolean> {
   if (reviewCode === 0) return false;
   let row: RestPullRow;
   try {
-    row = fetch(headShaRestArgs(prUrl)) as RestPullRow;
+    row = (await fetch(headShaRestArgs(prUrl))) as RestPullRow;
   } catch {
     return false; // unreadable: the review's own failure stands, exactly as before this check existed
   }
   if (typeof row?.merged_at !== "string") return false;
-  log("gate.merged_before_review", { pr_url: prUrl, review_code: reviewCode, merged_at: row.merged_at });
+  log("gate.merged_before_review", { merged_pr: prUrl, review_code: reviewCode, merged_at: row.merged_at });
   return true;
 }
 
@@ -36696,7 +36696,7 @@ async function triageCommandLocked(
 
       const prNum = prUrl.match(/\/pull\/(\d+)/)?.[1] ?? prUrl;
       const reviewCode = await reviewCommand(view === undefined ? prNum : prUrl);
-      if (mergedBeforeGate(prUrl, reviewCode, log)) {
+      if (await mergedBeforeGate(prUrl, reviewCode, log)) {
         say(`triage PR merged by its repository before review — nothing to arm: ${prUrl}`);
         continue;
       }
@@ -37382,7 +37382,7 @@ export async function planCommand(
       }
       const prNum = prUrl.match(/\/pull\/(\d+)/)?.[1] ?? prUrl;
       const reviewCode = await reviewCommand(isPublic ? prNum : prUrl);
-      if (mergedBeforeGate(prUrl, reviewCode, log)) {
+      if (await mergedBeforeGate(prUrl, reviewCode, log)) {
         say(`plan PR merged by its repository before review — nothing to arm: ${prUrl}`);
         continue;
       }
@@ -40485,7 +40485,7 @@ export async function approveCommand(
     if (notGreenExit !== undefined) return notGreenExit;
     const prNum = result.prUrl.match(/\/pull\/(\d+)/)?.[1] ?? result.prUrl;
     const reviewCode = await reviewCommand(filing.destination ? result.prUrl : prNum);
-    if (mergedBeforeGate(result.prUrl, reviewCode, log)) {
+    if (await mergedBeforeGate(result.prUrl, reviewCode, log)) {
       removeApproveWorktree();
       console.log(`rmd approve: ${proposalId} — plan PR merged by its repository before review, nothing to arm: ${result.prUrl}`);
       approveNoteChain(rest, proposalId, config, deps);
@@ -40888,7 +40888,7 @@ async function approveBatchCommand(
     if (notGreenExit !== undefined) return notGreenExit;
     const prNum = result.prUrl.match(/\/pull\/(\d+)/)?.[1] ?? result.prUrl;
     const reviewCode = await reviewCommand(filing.destination ? result.prUrl : prNum);
-    if (mergedBeforeGate(result.prUrl, reviewCode, log)) {
+    if (await mergedBeforeGate(result.prUrl, reviewCode, log)) {
       removeApproveWorktree();
       console.log(`rmd approve: batch of ${result.accepted.length} — plan PR merged by its repository before review, nothing to arm: ${result.prUrl}`);
       return 0;
