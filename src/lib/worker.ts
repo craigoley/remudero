@@ -1940,7 +1940,8 @@ async function applyFixLearner(input: {
   if (codexIndex >= 0 && capability && !input.codexPreference) {
     const current = capacities[codexIndex];
     // W1-T6360: only arms the lane's current capability row mounts compete; with no rival to the served model, no draw.
-    const rivals = mountedFixArms(learned.evidence, "codex", codexCandidatesForCapability(capabilities, capability, args.effort))
+    // W1-T13450: and only those AHEAD of the served model in that row; a trailing entry is an availability fallback.
+    const rivals = mountedFixArms(learned.evidence, "codex", codexCandidatesForCapability(capabilities, capability, args.effort), current.model)
       .filter((arm) => arm.model !== current.model);
     const drawn = rivals.length > 0 ? learned.weigh([...rivals, { provider: "codex", model: current.model }], seed).arms : [];
     const beat = drawn.find((arm) => arm.model === (current.model ?? ""))?.draw ?? 0;

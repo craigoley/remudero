@@ -9,7 +9,7 @@ import { runSweep, type HandedOffHeadJudgment, type OpenPrView, type SweepDeps, 
 import * as sweepModule from "#test/helpers/sweep-test.js";
 import * as runTaskModule from "#src/run-task.js";
 import type { RiskJudgeChangeView, RiskJudgeVerdict } from "#src/lib/risk-judge.js";
-import type { WorkerResult } from "#src/lib/worker.js";
+import { JUDGE_SHADOW_TRIAL_ID, type WorkerResult } from "#src/lib/worker.js";
 import type { Plan, Task } from "#src/lib/plan.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
@@ -348,7 +348,7 @@ test("W1-T5523: the daemon's judge reads the change view through the async trans
       "SWEEP-5523",
       () => {},
       async (args) => {
-        spawns.push(String(args.prompt));
+        if (args.routingTrial?.id !== JUDGE_SHADOW_TRIAL_ID) spawns.push(String(args.prompt)); // W1-T12187: not the cash shadow
         return { text: "RISK_VERDICT: low\nRISK_CONFIDENCE: 0.95", costUsd: 0, numTurns: 1 } as unknown as WorkerResult;
       },
       () => "https://github.com/craigoley/remudero/issues/1",

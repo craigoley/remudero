@@ -21,6 +21,10 @@ import type { GitHub } from "#src/lib/status.js";
 import type { ProbeExecResult } from "#src/lib/containment.js";
 import type { ProbeExecResult as IsolationProbeExecResult } from "#src/lib/isolation.js";
 import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "#src/lib/worker.js";
+import { JUDGE_SHADOW_TRIAL_ID } from "#src/lib/worker.js";
+
+/** W1-T12187: the risk judge's cash shadow is one more spawn after its verdict; these counts are of the run's own workers. */
+const notJudgeShadow = (args: SpawnWorkerArgs): boolean => args.routingTrial?.id !== JUDGE_SHADOW_TRIAL_ID;
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
@@ -932,7 +936,7 @@ test(
 
       assert.equal(res.verdict, "blocked", "a HIGH-risk judge verdict escalates and refuses to proceed to pollToGate");
       assert.equal(res.merged, false);
-      assert.equal(spawnCalls.length, 3, "recon, implement, THEN the risk judge's own spawn — pollToGate never spawns anything");
+      assert.equal(spawnCalls.filter(notJudgeShadow).length, 3, "recon, implement, THEN the risk judge's own spawn — pollToGate never spawns anything");
 
       const ledger = readLedger(root);
       // ── THE FALSIFIER: no automerge.armed line at all. Under W1-T125 this PR was already
@@ -1250,7 +1254,7 @@ async function runArmVerdictFixture(t: TestContext, mode: "live" | "shadow") {
     assert.equal(res.verdict, mode === "live" ? "merged" : "blocked_ci");
     assert.equal(res.merged, mode === "live");
     assert.equal(
-      spawnCalls.length,
+      spawnCalls.filter(notJudgeShadow).length,
       3,
       "recon, implement, and the risk judge — no fix rung, no reviewer LLM spawn (review was injected)",
     );

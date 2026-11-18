@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: [W1-T11423]
   type: implement
-  verify: human
+  verify: auto
   principles: {tdd: strict}
   budget_usd: 5.00
   risk: high
@@ -57,3 +57,13 @@
     Restore the synchronous default while keeping awaited reductions: criterion 1 must fail the
     pending-read timer control. Drop an await: publication-before-completion fails. Drop a keep
     filter or incomplete refusal: criterion 2's sync-equivalence and unreadable controls fail.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.88
+    reasons:
+      - "The description states the work is a switch from readLedgerUnionRawLinesSync to the existing readLedgerUnionRawLinesAsync in reader-agreement.ts, a read-only scan path, with no mention of secrets, auth, deletion, or merge/deploy/review policy."
+      - "Acceptance criteria include an invariant that figures, scan counts and incomplete/unreadable refusal semantics stay identical, and they are checkable via a test file, so the finding is verifiable from what is shown."
+      - "The declared files are only src/lib/reader-agreement.ts and one new test file, which is a narrow scope consistent with the plan refs. The gates state is clean (author_class operator, family Beta mean 0.83)."
+    judged_at: "2026-11-18T01:17:17.558Z"
+    pin: "660136ceb6e46f029e40a8d1259bf58a1784249b298b101ee9f8f653194f81cf"

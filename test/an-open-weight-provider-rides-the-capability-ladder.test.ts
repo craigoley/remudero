@@ -917,10 +917,20 @@ test("the verify-human judge rides openweight, and the fail-closed judges delibe
   // source text never contains it, and this criterion's proof -- which greps this file for the very
   // claim it makes -- could not see the assertion that substantiates it. Identical force: one
   // `doesNotMatch` against the same source per lane; only the message is now a literal.
+  // W1-T12187 gave the risk judge a row of its own (the model and effort it already rode, so nothing
+  // moves). The claim therefore narrows from "no row" to "no provider on the row": a row naming a
+  // provider routes the judge off the subscription, which is what this guard forbids.
+  const riskJudgeRow = /^risk_judge:(.*)$/m.exec(mountsSrc);
+  assert.ok(riskJudgeRow, "the risk judge's own row must be present for this guard to measure it");
   assert.doesNotMatch(
-    mountsSrc,
-    /^risk_judge:/m,
+    riskJudgeRow![1]!,
+    /provider\s*:/,
     "risk_judge must NOT be routed while it fails closed — a flaky deployment would manufacture escalations, not permissive defaults",
+  );
+  assert.equal(
+    mounts.risk_judge?.provider,
+    undefined,
+    "the parsed risk_judge row must carry no provider while it fails closed",
   );
   assert.doesNotMatch(
     mountsSrc,
