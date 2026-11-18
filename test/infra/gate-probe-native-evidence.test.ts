@@ -52,6 +52,7 @@ function runRealGateCaller(): string {
 }
 
 
+// The real caller labels a failed probe `<step> (calibration run, hang ceiling <n> ms)` since #19469 (W1-T13243).
 test("gate probe diagnostics preserve the real missing-executable refusal", () => {
   const native = spawnSync(join(tmpdir(), `rmd-absent-probe-${randomUUID()}`), [], { stdio: "ignore", timeout: 2000, env: { ...process.env, NODE_V8_COVERAGE: "" } });
   assert.equal(native.error && "code" in native.error ? native.error.code : undefined, "ENOENT");
