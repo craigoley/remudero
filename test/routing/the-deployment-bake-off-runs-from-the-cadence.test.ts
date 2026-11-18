@@ -281,7 +281,8 @@ test("an empty inbox defers trials but still recovers an interrupted report", as
     }));
     await f.hooks().runMeasurementCadence();
     assert.equal(f.calls.length, 0);
-    assert.match(loadProposalRegistry(f.registry)[0].summary, /interrupted/);
+    // W1-T12422: the cadence's judge replays may have published their own proposal first; the interrupted one is still recovered.
+    assert.ok(loadProposalRegistry(f.registry).some((proposal) => /interrupted/.test(proposal.summary)));
     assert.equal(readBakeoffTrialState(f.stateDir).pending, undefined);
   } finally { f.clean(); }
 });

@@ -10,7 +10,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { parse as parseYaml } from "yaml";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 
 import { fixedClock } from "#src/lib/clock.js";
 import type { Config } from "#src/lib/config.js";
@@ -120,10 +120,11 @@ test("W1-T12417 criterion 1: a role's row names a decision model or a cash deplo
   assert.equal(judgeShadowOnlyArm(named, "quiet-worker-watchdog"), undefined);
   assert.throws(() => table({ judge_shadows: { "ruling-judge": "decisions-eastus" } }), MountsError, "the ruling judge is not a judge_shadows role");
   assert.throws(() => table({ risk_judge: { ...ROW, shadow: "not a name" } }), MountsError);
-  // The repo's own table names a decision model for the judges with no row of their own and for the verify-human judge.
-  assert.equal(MOUNTS.verify_human_judge!.shadow?.provider, "decisions");
+  // The repo's own table names a shadow for the judges with no row of their own and for the verify-human judge
+  // (W1-T12422 made each of them `auto`).
+  assert.ok(MOUNTS.verify_human_judge!.shadow);
   for (const role of ["refresh-value", "quiet-worker-watchdog", "head-rehome", "typed-judgment"] as const) {
-    assert.equal(MOUNTS.judge_shadows![role]?.provider, "decisions", role);
+    assert.ok(MOUNTS.judge_shadows![role], role);
   }
 
   // No candidate on the risk judge's row: the same prompt goes to the first ready model of the cash row, unpinned.
@@ -211,6 +212,14 @@ test("W1-T12417 criterion 3: the same shadow serves every fixed-option judge, ea
     return book.rows.find(isShadowRow)?.role;
   };
   const decisionsRow = (row: Record<string, unknown>) => ({ ...row, shadow: "decisions-eastus" });
+  // Each judge here names the decision model, whatever the repo's own table names today.
+  const raw = parseYaml(TABLE) as Record<string, Record<string, unknown>>;
+  const named = table({ verify_human_judge: decisionsRow(raw.verify_human_judge!), judge_shadows: Object.fromEntries(
+    ["refresh-value", "quiet-worker-watchdog", "head-rehome", "typed-judgment"].map((role) => [role, "decisions-eastus"])) });
+  const { dir: root } = ownedFixtureDir(t, "judge-shadow-root");
+  mkdirSync(join(root, ".remudero"), { recursive: true });
+  writeFileSync(mountsPath(root), stringifyYaml({ ...raw, judge_shadows: Object.fromEntries(
+    ["refresh-value", "quiet-worker-watchdog"].map((role) => [role, "decisions-eastus"])) }));
   assert.equal(await roleOf((log) => realRiskJudge({ mount: riskMount(), cwd: REPO_ROOT, settingsFile: SETTINGS, shadowLog: log,
     spawn: async () => worker(LOW) })(INPUT)), "risk-judge");
   assert.equal(await roleOf((log) => runJudgeShadow({ surface: "ci-judge", key: "PR9@def5678", mount: riskMount(), primaryArgs: { prompt: "p" } as SpawnWorkerArgs,
@@ -219,14 +228,14 @@ test("W1-T12417 criterion 3: the same shadow serves every fixed-option judge, ea
     mount: table({ fix_progress_judge: decisionsRow(ROW) }).fix_progress_judge,
     spawn: async () => worker('FIX_PROGRESS: {"verdict":"continue","reason":"the red shrank"}') })(
     buildFixProgressInput({ taskId: "W1-T1", prNumber: 9, headSha: "def5678", currentRed: ["ci"], ledger: [] }))), "fix-progress");
-  assert.equal(await roleOf((log) => realVerifyHumanJudge({ mounts: MOUNTS, cwd: REPO_ROOT, settingsFile: SETTINGS, shadowLog: log,
+  assert.equal(await roleOf((log) => realVerifyHumanJudge({ mounts: named, cwd: REPO_ROOT, settingsFile: SETTINGS, shadowLog: log,
     spawn: async () => worker("VERIFY_HUMAN_DECISION: automate\nVERIFY_HUMAN_REASON: a test proves it") })(
     { id: "W1-T1", title: "t", rationale: "r", acceptance: ["a"], ageDays: 3, depsAllMerged: true, citedInSrc: false })), "verify-human");
   const { dir } = ownedFixtureDir(t, "judge-shadow-refresh");
-  assert.equal(await roleOf((log) => productionRefreshJudge({ repoRoot: REPO_ROOT, stateDir: dir, log, diff: async () => "diff",
+  assert.equal(await roleOf((log) => productionRefreshJudge({ repoRoot: root, stateDir: dir, log, diff: async () => "diff",
     spawn: async () => worker('{"verdict":"independent","reason":"no shared file"}') })(
     { prNumber: 9, headSha: "def5678", prFiles: ["a"], baseFiles: ["b"], baseTruncated: false, cause: "tests", ciInFlight: false })), "refresh-value");
-  assert.equal(await roleOf((log) => productionQuietWorkerJudge({ cwd: REPO_ROOT, settingsFile: SETTINGS, log,
+  assert.equal(await roleOf((log) => productionQuietWorkerJudge({ cwd: root, settingsFile: SETTINGS, log,
     spawn: async () => worker('QUIET_JUDGE: {"verdict":"wait","reason":"progress is plausible"}') })(
     { taskId: "W1-T1" } as Parameters<ReturnType<typeof productionQuietWorkerJudge>>[0])), "quiet-worker-watchdog");
   // A cash deployment named for a role reads the reply with the role's own parser.
@@ -249,7 +258,7 @@ test("W1-T12417 criterion 3: the same shadow serves every fixed-option judge, ea
   for (const role of ["head-rehome", "typed-judgment"] as const) {
     assert.equal(await roleOf((log) => runTypedJudgment({ question: "Is the author quiet?", options: ["wait", "trailer"] as const, mount: riskMount({ shadow: undefined }),
       cwd: REPO_ROOT, settingsFile: SETTINGS, spawn: async () => worker('TYPED_JUDGMENT: {"wait":0.3,"trailer":0.7}'),
-      shadow: { role, key: "PR9@def5678", arm: judgeShadowOnlyArm(MOUNTS, role), log } })), role);
+      shadow: { role, key: "PR9@def5678", arm: judgeShadowOnlyArm(named, role), log } })), role);
   }
 });
 
@@ -358,14 +367,16 @@ test("W1-T12417 criterion 5: the config gardener proposes a role's shadow model 
   assert.deepEqual(decisionClear.judgeShadowThresholds, [{ role: "refresh-value", model: "decisions-eastus", surface: "decisions", value: 0.6 }]);
   const primary = judgeShadowSwitchCandidate(decisionClear, REPO_ROOT)!;
   assert.equal(primary.scope, "judge:refresh-value");
-  assert.deepEqual(primary.edits, [{ path: ".remudero/mounts.yaml", from: "  refresh-value: decisions-eastus",
+  // The repo's table shadows the role from its pool (W1-T12422), and that line is the one replaced.
+  assert.deepEqual(primary.edits, [{ path: ".remudero/mounts.yaml", from: "  refresh-value: auto",
     to: `  refresh-value: { primary: decisions-eastus, threshold: { model: ${CANDIDATE.deployment}, surface: decisions, value: 0.6 } }` }]);
   const switched = validateMounts(parseYaml(TABLE.replace(primary.edits[0]!.from, primary.edits[0]!.to)));
   assert.deepEqual(switched.judge_primaries!["refresh-value"], { arm: decisionsArm, threshold: { model: CANDIDATE.deployment, surface: "decisions", value: 0.6 } });
   assert.equal(switched.judge_shadows!["refresh-value"], undefined, "the line that shadowed the role now makes the model its primary");
   assert.ok(configCandidates(decisionClear, REPO_ROOT, () => 0.5).some((a) => a.scope === "judge:refresh-value" && a.edits[0]!.to === primary.edits[0]!.to));
   // The rollback of the canary swaps the two lines, so the table reads as it did.
-  assert.deepEqual(validateMounts(parseYaml(TABLE.replace(primary.edits[0]!.from, primary.edits[0]!.to).replace(primary.edits[0]!.to, primary.edits[0]!.from))).judge_shadows!["refresh-value"], decisionsArm);
+  assert.deepEqual(validateMounts(parseYaml(TABLE.replace(primary.edits[0]!.from, primary.edits[0]!.to).replace(primary.edits[0]!.to, primary.edits[0]!.from))).judge_shadows!["refresh-value"],
+    { provider: "auto", deployment: "auto" });
   // A role that is already on its candidate gets no second proposal.
   const { dir } = ownedFixtureDir(t, "judge-primary-switched");
   mkdirSync(join(dir, ".remudero"));
@@ -469,7 +480,7 @@ test("W1-T12417 criterion 6: a judge's decision request passes the judged head a
   execFileSync("git", ["-C", checkout, "init", "-q"]);
   execFileSync("git", ["-C", checkout, "remote", "add", "origin", "git@github.com:craigoley/remudero.git"]);
   mkdirSync(join(checkout, ".remudero"));
-  writeFileSync(mountsPath(checkout), TABLE);
+  writeFileSync(mountsPath(checkout), stringifyYaml({ ...(parseYaml(TABLE) as Record<string, unknown>), judge_shadows: { "refresh-value": "decisions-eastus" } }));
   const requestOf = async (start: (seams: DecisionShadowDeps, log: (step: string, fields: Record<string, unknown>) => void) => Promise<unknown>) => {
     const book = ledger();
     const seams = decisions(answered(distribution(0.9)));

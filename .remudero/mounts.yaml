@@ -494,7 +494,8 @@ verify_human_judge:
   context_budget: 60000
   provider: openweight
   # W1-T12417: a decision model answers the same three options in shadow (docs/model-routing.md).
-  shadow: decisions-eastus
+  # W1-T12422: `auto` draws each call's shadow from the pool of models whose judge replay passed.
+  shadow: auto
 
 # The ci judge and the fix-progress judge (W1-T11075). The operator ruling of 2026-11-17 turned the
 # shadow arm on (W1-T13364). Each row copies the risk judge's cell and names no provider, so the
@@ -549,11 +550,13 @@ decision_models:
 # `{ primary: <name>, threshold: { model: <deployment>, surface: decisions, value: <0 to 1> } }`: that
 # decision model then answers first when its top option reaches the threshold, and the judge's own
 # spawn answers when it does not.
+# W1-T12422: `auto` draws each call's shadow from the role's pool: every decision model and every
+# ready cash deployment whose direct judge replay for the role passed (docs/model-routing.md).
 judge_shadows:
-  refresh-value: decisions-eastus
-  quiet-worker-watchdog: decisions-eastus
-  head-rehome: decisions-eastus
-  typed-judgment: decisions-eastus
+  refresh-value: auto
+  quiet-worker-watchdog: auto
+  head-rehome: auto
+  typed-judgment: auto
 
 # ── max_turns is a RUNAWAY CLIFF, not a work limit (§9 tripwire re-base) ────────
 # The implement/reviewer/fix/diagnose worker lanes stay at a FLAT 400 — a tripwire

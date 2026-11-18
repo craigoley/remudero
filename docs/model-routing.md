@@ -544,6 +544,38 @@ suite list or an approach that a decision model cannot give. The edit is a canar
 change and goes through the fleet's review and merge; a guardrail breach opens a pull request that
 reverts the line.
 
+## A new model joins each judge's shadow pool by itself
+
+W1-T12422. A role's shadow may be `shadow: auto` (on its row, or in `judge_shadows`). Its pool is
+every `decision_models` candidate and every ready cash deployment (priced, shaped and bounded, not a
+Foundry Claude deployment) whose newest direct judge replay for that role passed the pool bar. No
+model is named in code. A role that names one candidate keeps the behaviour above.
+
+For each shadowed call the shadow draws one member: `sha256(role, input digest)` over the members in
+name order (`shadowPoolMember` in `src/lib/judge-shadow.ts`). The same input always draws the same
+member, and over many inputs each member gets about the same share. The drawn member is asked as a
+named candidate is asked, so the number of paid shadow calls does not grow with the pool. An empty
+pool asks nothing and writes nothing. A cash member drawn for a role whose primary already runs on
+cash (the verify-human judge) is not asked, as above.
+
+The pool bar, read from the member's newest replay for the role:
+
+| Figure | Bar |
+| --- | --- |
+| Rejected cases | at most 10% of the cases sent |
+| Median settled cost of one case | at most $0.003 (W1-T12187's measured median judge call) |
+
+The measurement cadence's bake-off runs the replays with no operator step. It keys a decision model
+as `decisions:<candidate>`, apart from `cash:<deployment>`, with a readiness digest over its
+`decision_models` row. For each new or changed key it runs W1-T12421's direct replay once per corpus
+the auto roles read: the risk judge reads `risk-judge-dispositions`, and every other role reads
+`all`, since no corpus of its own exists yet. Each replay is bounded by W1-T12421's $1.00 ceiling and
+reserves against the normal daily cash cap. A cash deployment gets the inbox-draft trial and the
+judge replay; a decision model gets the judge replay only. A replay that stopped on a 429 or a budget
+refusal is not marked trialed and is tried again on a later pass. The figures are kept in
+`state/judge-shadow-pool.json`, and the proposal adds a table of them beside the inbox-draft table,
+naming each model that stays out and why.
+
 ## Rollback
 
 The policy switch is the candidate membership and order of `capabilities.codex.balanced` in

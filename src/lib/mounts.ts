@@ -130,8 +130,15 @@ export interface DecisionShadowArm {
   candidate: DecisionCandidate;
 }
 
-/** W1-T12417: what a role's `shadow:` names: a cash deployment, or a decision model. */
-export type JudgeShadowArm = CashShadowArm | DecisionShadowArm;
+/** W1-T12422: `shadow: auto`. Each shadowed call draws one member of the role's pool (judge-shadow.ts): every decision
+ *  model and every ready cash deployment whose judge replay passed. `deployment` names no deployment; it reads `auto`. */
+export interface AutoShadowArm {
+  provider: "auto";
+  deployment: "auto";
+}
+
+/** W1-T12417: what a role's `shadow:` names: a cash deployment, or a decision model. W1-T12422: or its pool. */
+export type JudgeShadowArm = CashShadowArm | DecisionShadowArm | AutoShadowArm;
 
 /** W1-T12417: a tuned threshold, stored beside the model id and the model surface (W1-T12420) it was tuned on. It is
  *  read only for that pair: the least probability a top option needs before it counts as an answer. */
@@ -332,6 +339,7 @@ const SHADOW_DEPLOYMENT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 /** W1-T12417: a `shadow:` value. A name is a `decision_models` row when one has that name, else a cash deployment id. */
 function parseShadowArm(shadow: unknown, where: string, decisionModels: Record<string, DecisionCandidate> | undefined): JudgeShadowArm {
+  if (shadow === "auto") return { provider: "auto", deployment: "auto" };
   if (typeof shadow === "string") {
     const candidate = decisionModels !== undefined && Object.hasOwn(decisionModels, shadow) ? decisionModels[shadow] : undefined;
     if (candidate !== undefined) return { provider: "decisions", deployment: candidate.deployment, candidate };
