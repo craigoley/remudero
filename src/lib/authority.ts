@@ -334,6 +334,29 @@ export const AUTHORITY_TABLE: readonly AuthorityRow[] = [
     verb: "node src/spike.ts (the WS-0 sandbox spike)",
     note: "The only caller today is the one-shot sandbox spike tool (craigoley/remudero-sandbox), never the live repo, and a human runs it deliberately.",
   },
+  // ── src/lib/plan-task-move.ts ────────────────────────────────────────────────────────────
+  {
+    id: "push-plan-move-branch",
+    action: "push one plan-move-<id>-<epochMs> branch holding a single plan-record change (copy, removal, rollback or restore) to the public or ops repository",
+    module: "src/lib/plan-task-move.ts",
+    symbol: "movePlanTask",
+    boundary: "git-push",
+    gate: "operator-verb",
+    ledgerSteps: ["plan.move.step"],
+    verb: "rmd move-task --apply",
+    note: "W1-T13680: at most one push per run, after the plan-PR emitter's preflight allows the exact commit; never a run- branch and never a refs/rmd-id reservation. Without --apply nothing is written.",
+  },
+  {
+    id: "open-plan-move-pr",
+    action: "open the one plan pull request a move step needs, over GitHub's REST create",
+    module: "src/lib/plan-task-move.ts",
+    symbol: "movePlanTask (defaultCreatePull)",
+    boundary: "gh-pr-create",
+    gate: "operator-verb",
+    ledgerSteps: ["plan.move.step"],
+    verb: "rmd move-task --apply",
+    note: "W1-T13680: no Remudero-Task line, so a merge credits no task as built; WAIT while any plan-move- pull request is open in either repository.",
+  },
   // ── src/spike.ts ─────────────────────────────────────────────────────────────────────────
   {
     id: "open-sandbox-spike-pr",

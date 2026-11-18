@@ -78,6 +78,10 @@ function tree(count: number, monolith = "[]\n"): Map<string, string> {
 }
 
 test("W1-T13609 criterion 1: two merge-safety reads over 200 shards that differ in one shard parse 200 shards, then 1", () => {
+  // MERGED_PLAN_BLOB_CACHE is process-wide, and the pure-test pool runs many files in one process: an earlier
+  // file's read can leave the identical "[]\n" monolith cached, which this read would then REUSE (200 parsed, not 201).
+  // The criterion is about a cold first read, so start cold.
+  MERGED_PLAN_BLOB_CACHE.entries.clear();
   // The counts include the monolith, blobs[0], which the cache keeps like a shard.
   const first = tree(200);
   assert.deepEqual(read(first), { state: "loads" });

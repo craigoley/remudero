@@ -31,8 +31,6 @@
  */
 import { spawnSync } from "node:child_process";
 import { parse, parseExpressionAt } from "acorn";
-import { isTrustRootPath, scanTrustRootText, trustRootFor } from "../src/lib/trust-root-text.ts";
-import { isRuleSuitePath } from "../src/lib/rule-suites.ts";
 import { createHash } from "node:crypto";
 import { appendFileSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { availableParallelism, homedir, loadavg, tmpdir } from "node:os";
@@ -487,6 +485,25 @@ export function evaluateInstrumentSurface(input) {
 }
 
 const SCRIPT_REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+// Keep literal runtime import edges so isolated source snapshots can follow the scanner dependencies.
+const PRECHECK_MODULE_IMPORTS = {
+  "trust-root-text.ts": () => import("../src/lib/trust-root-text.ts"),
+  "rule-suites.ts": () => import("../src/lib/rule-suites.ts"),
+};
+
+async function importPrecheckModule(moduleName) {
+  const url = pathToFileURL(join(SCRIPT_REPO, "src", "lib", moduleName)).href;
+  // An active tsx resolver remaps the graph's .js imports to .ts, including API-registered loaders.
+  if (import.meta.resolve(url.replace(/\.ts$/, ".js")) === url) {
+    return PRECHECK_MODULE_IMPORTS[moduleName]?.() ?? import(url);
+  }
+  const { tsImport } = await import("tsx/esm/api");
+  return tsImport(url, import.meta.url);
+}
+
+// Use one source-map shape for the census scanners even when the precheck starts under plain Node.
+const { isTrustRootPath, scanTrustRootText, trustRootFor } = await importPrecheckModule("trust-root-text.ts");
+const { isRuleSuitePath } = await importPrecheckModule("rule-suites.ts");
 const TMP_HYGIENE_URL = pathToFileURL(join(SCRIPT_REPO, "test", "setup", "tmp-hygiene.ts")).href;
 const ADMISSION_TABLE = "src/lib/ci-parity.ts";
 // BACKSTOP only: this ends a hung child as not measured. The seven admitted suites take 6-10 s together on an 8-core
@@ -610,12 +627,8 @@ export async function loadTestPriority(importSlot = defaultImportTestSlot) {
   }
 }
 
-async function defaultImportTestSlot() {
-  const url = pathToFileURL(join(SCRIPT_REPO, "src", "lib", "test-slot.ts")).href;
-  // An active tsx resolver remaps the graph's .js imports to .ts, including API-registered loaders.
-  if (import.meta.resolve(url.replace(/\.ts$/, ".js")) === url) return import(url);
-  const { tsImport } = await import("tsx/esm/api");
-  return tsImport(url, import.meta.url);
+function defaultImportTestSlot() {
+  return importPrecheckModule("test-slot.ts");
 }
 
 const TEST_PRIORITY = await loadTestPriority();

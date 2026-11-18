@@ -1,0 +1,43 @@
+- id: W1-T13725
+  title: "Sort every CLAUDE.md headline by the stage that needs it (a check already refuses it, review needs it, or the implementer needs it) and measure what each stage's agent reads, before moving any rule"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: recon
+  verify: auto
+  risk: high # Rule 19 sizing: a report and its docs index entry (or skill text and its plan section), two concerns; it changes no code path a worker or daemon runs
+  origin: "operator-session#pocock-rescan-2026-11-18"
+  plan_refs:
+    - W1-T13724
+  files:
+    - docs/research/claude-md-headlines-by-stage.md
+    - docs/docs-index.json
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The report lists every CLAUDE.md headline with its stage: CHECK (name the check that refuses it), REVIEW, or IMPLEMENT"
+      proof: "grep: ## Every headline by stage in docs/research/claude-md-headlines-by-stage.md"
+    - claim: "The report measures the bytes CLAUDE.md, AGENTS.md and the reviewer's doctrine input put in each agent's context"
+      proof: "grep: ## What each agent reads in docs/research/claude-md-headlines-by-stage.md"
+    - claim: "The report recommends the moves, each with its falsifier, and files nothing"
+      proof: "grep: ## Recommendation in docs/research/claude-md-headlines-by-stage.md"
+  rationale: |
+    mattpocock/skills `retro` (5863806, 2026-11-12) argues the implementer has the most context pressure and the
+    reviewer the least, so standards belong in what review reads, and CLAUDE.md should carry navigation pointers.
+    OBSERVED at 09cc4cfb6: CLAUDE.md is 14,725 bytes with 63 bolded headlines, all loaded on every interactive turn;
+    AGENTS.md (10,475 bytes, generated from those headlines) is the compact doc every dispatched Codex worker reads.
+    Many headlines govern proof writing, coverage and ledger reads, which only some stages perform. Nobody has
+    measured which stage needs which headline, or which already have a refusing check (a headline whose check
+    exists is a cache of it).
+  design: |
+    1. For each headline, find whether a test, census or CI step refuses the mistake by name (CHECK), else whether
+       remudero-review applies it to a diff (REVIEW), else IMPLEMENT. Cite the symbol or test for each.
+    2. Measure bytes per stage: interactive session, Claude worker (settingSources: []), Codex worker (AGENTS.md), and
+       the review prompt's doctrine input.
+    3. Recommend moves (for example: CHECK headlines shrink to a pointer; REVIEW-only headlines leave AGENTS.md). Keep
+       the frozen W1-T3323 bodies verbatim. Name what each move would make worse.
+    Write the report with the three headings the proofs name, each on its own line, label claims OBSERVED or INFERRED,
+    and add it to docs/docs-index.json.
+  note: |
+    Id reserved for run-unfiled-1795041800002 with ~/rmd-work/bin/reserve-id.sh.
+    reservation hand-off: run-unfiled-1795041800002 -> claude/project-thread-eatx1y
