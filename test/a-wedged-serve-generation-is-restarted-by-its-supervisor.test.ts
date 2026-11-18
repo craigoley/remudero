@@ -6,11 +6,13 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   ACTIVE_PROBE_FAILURES,
   ACTIVE_PROBE_INTERVAL_MS,
+  ACTIVE_PROBE_PUBLIC_PATH,
   ACTIVE_PROBE_TIMEOUT_MS,
   ACTIVE_WEDGE_RESTART_FLOOR_MS,
   SMOKE_PATHS,
@@ -105,6 +107,7 @@ function rig(extra: Partial<ServeSupervisorOptions> = {}, probe: (socketPath: st
       return () => void (entry.cancelled = true);
     },
     socketStates: () => ({ CLOSE_WAIT: 444, LISTEN: 1 }),
+    privateProbe: async () => ({ status: 200 }),
     ...extra,
   });
   return {
@@ -139,11 +142,12 @@ test("W1-T13276 criterion 1: an active generation that answers nothing three tim
   assert.equal(r.gens.length, 1);
   await r.fire();
 
-  assert.deepEqual(r.probes[0], { socketPath: "/fake/gen-1.sock", path: SMOKE_PATHS[0], timeoutMs: ACTIVE_PROBE_TIMEOUT_MS });
+  assert.deepEqual(r.probes[0], { socketPath: "/fake/gen-1.sock", path: ACTIVE_PROBE_PUBLIC_PATH, timeoutMs: ACTIVE_PROBE_TIMEOUT_MS });
   const rows = r.steps("serve.active_wedged");
   assert.equal(rows.length, 1, "exactly one row");
   assert.deepEqual(rows[0]?.extra, {
     generation: 1, sha: "sha-1", pid: 100, failures: 3, lastError: "ECONNREFUSED", uptimeMs: 3 * ACTIVE_PROBE_INTERVAL_MS, sockets: { CLOSE_WAIT: 444, LISTEN: 1 },
+    probedPort: 4317, privateSocket: { answered: true, status: 200 },
   });
   assert.deepEqual(r.gens[0]?.killed, ["SIGKILL"]);
   assert.equal(r.gens.length, 2, "the generation was replaced by the existing restart path");
@@ -322,7 +326,7 @@ test("W1-T13276 criterion 3: a slow answer inside the bound is not a wedge, and 
   assert.equal(refused.steps("serve.active_wedged")[0]?.extra?.lastError, "connect ECONNREFUSED");
 });
 
-test("W1-T13276 criterion 3: the default probe really GETs the generation's socket and counts a 503 as alive", async () => {
+test("W1-T13276 criterion 3: the default probe really GETs the serve port and counts a 503 as alive", async () => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-wedge-"));
   const socketPath = join(dir, "g.sock");
   const seen: string[] = [];
@@ -331,7 +335,9 @@ test("W1-T13276 criterion 3: the default probe really GETs the generation's sock
     res.statusCode = 503;
     res.end("warming");
   });
-  await new Promise<void>((resolve, reject) => server.once("error", reject).listen(socketPath, resolve));
+  // W1-T13503: the default probe goes to the TCP port serve binds, the accept queue the tunnel's connections enter.
+  await new Promise<void>((resolve, reject) => server.once("error", reject).listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
   try {
     const ticks: Array<() => void> = [];
     const r = createServeSupervisor({
@@ -347,6 +353,7 @@ test("W1-T13276 criterion 3: the default probe really GETs the generation's sock
       get: async (_s, path) => ({ status: 200, body: path === "/v1/version" ? JSON.stringify({ sha: "sha-1" }) : "{}" }),
       command: (slot) => ({ exec: "gen", execArgv: [], args: [], cwd: slot.dir }),
       socketPathFor: () => socketPath,
+      serveArgs: ["serve", "--port", String(port)],
       log: () => undefined,
       exit: () => undefined,
       every: (tick) => {
@@ -357,7 +364,7 @@ test("W1-T13276 criterion 3: the default probe really GETs the generation's sock
     await r.start();
     ticks[0]?.();
     for (let i = 0; i < 20 && seen.length === 0; i++) await new Promise<void>((resolve) => setTimeout(resolve, 10));
-    assert.deepEqual(seen, [SMOKE_PATHS[0]]);
+    assert.deepEqual(seen, [ACTIVE_PROBE_PUBLIC_PATH]);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     rmSync(dir, { recursive: true, force: true });

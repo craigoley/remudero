@@ -292,6 +292,9 @@ export function readMountPlanDrift(
     const plan = exec("bash", [
       "-c",
       '(source "$1" || exit 2; scratch_plan "$2" "$3" || exit 3; ' +
+        // W1-T13278: a green serve (a blue-green swap's replacement) owns the -green /tmp, so its plan is green's.
+        "case \"$3\" in *-serve) [ \"$(docker inspect --format '{{index .Config.Labels \"rmd.serve.color\"}}' \"$3\" 2>/dev/null)\" != green ] || " +
+        "scratch_serve_colour -green ;; esac; " +
         'for d in "${SCRATCH_DIRS[@]}"; do [ "$d" = "$(scratch_test_slot_dir)" ] && continue; p="$d"; ' +
         'while [ ! -e "$p" ]; do p="$(dirname "$p")"; done; { [ -d "$p" ] && [ -w "$p" ]; } || exit 4; done; ' +
         "printf '%s\\n' \"$SCRATCH_BINDS\" | while IFS=\"$(printf '\\t')\" read -r s t; do " +
