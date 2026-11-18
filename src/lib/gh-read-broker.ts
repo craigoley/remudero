@@ -1572,22 +1572,42 @@ export async function serveGhReadBroker(opts: {
 
 export const GH_COMMAND_USAGE = "usage: rmd gh [--class interactive|agent|background] [--fresh] -- <gh args>";
 
-// The Mac installer copies this newline-delimited list into the installed copy's metadata.
+// Broker dependencies and CLI startup inputs. The Mac installer copies this list into the installed metadata.
 export const GH_READ_BROKER_SOURCE_PATHS = `
 bin/rmd
 package.json
 package-lock.json
 plan/policy.yaml
 src/run-task.ts
+src/lib/action-reconciliation.ts
 src/lib/clock.ts
-src/lib/gh-read-broker.ts
+src/lib/config-schema.ts
+src/lib/config.ts
+src/lib/drain-lock.ts
+src/lib/errors.ts
+src/lib/fs-race-safe.ts
 src/lib/gh-read-broker-client.ts
+src/lib/gh-read-broker.ts
+src/lib/git-fetch-retry.ts
 src/lib/github-app.ts
 src/lib/github-credential.ts
+src/lib/github-http-read.ts
+src/lib/github-installation-budget.ts
 src/lib/github-transport.ts
+src/lib/host-identity.ts
+src/lib/ledger-carry.ts
+src/lib/ledger-key-manifest.ts
+src/lib/ledger-path.ts
+src/lib/ledger-union.ts
 src/lib/ledger.ts
 src/lib/live-write-guard.ts
+src/lib/log-rotation.ts
+src/lib/loop-bounded-child.ts
+src/lib/policy.ts
+src/lib/producer-identity.ts
 src/lib/spawn-helper.ts
+src/lib/state-backup-engine-links.ts
+src/lib/worker-containment.ts
 src/lib/worktree-git.ts
 `;
 

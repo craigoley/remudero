@@ -175,8 +175,14 @@ fi
 # Everything that can refuse does so here, before a directory, a copy or the running agent is touched.
 [ -z "$refusal" ] || { printf 'refusing to install: %s\n' "$refusal" >&2; exit 2; }
 command -v launchctl >/dev/null 2>&1 || { printf 'launchctl not found: this installs a macOS launchd agent and runs on a Mac only\n' >&2; exit 2; }
-# Read the client's exported list as data so staging needs no TypeScript runtime.
-source_paths="$(sed -n '/^export const GH_READ_BROKER_SOURCE_PATHS = `$/,/^`;$/ { /^export /d; /^`;$/d; p; }' "$here/../../src/lib/gh-read-broker.ts")"
+# Read the chosen commit's exported list as data. Older commits use the installer's checkout list.
+broker_source_paths() {
+  sed -n '/^export const GH_READ_BROKER_SOURCE_PATHS = `$/,/^`;$/ { /^export /d; /^`;$/d; p; }'
+}
+source_paths="$(src_git show "$sha:src/lib/gh-read-broker.ts" 2>/dev/null | broker_source_paths)" || source_paths=""
+if [ -z "$source_paths" ]; then
+  source_paths="$(broker_source_paths < "$here/../../src/lib/gh-read-broker.ts")"
+fi
 [ -n "$source_paths" ] || { printf 'could not read the broker source path list\n' >&2; exit 1; }
 enable_hint="launchctl enable gui/$uid/$label"
 # A service launchd holds DISABLED cannot be bootstrapped, and launchctl says only "5: Input/output error"

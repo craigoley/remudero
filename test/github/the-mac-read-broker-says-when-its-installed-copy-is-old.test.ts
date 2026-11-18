@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { stripTypeScriptTypes } from "node:module";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { ghCommand, type GhBrokerClientRead } from "#src/lib/gh-read-broker.js";
+import { GH_READ_BROKER_SOURCE_PATHS, ghCommand, type GhBrokerClientRead } from "#src/lib/gh-read-broker.js";
 import { ghArgvIsWrite } from "#src/lib/github-transport.js";
+import { runtimeSpecifiers } from "#src/lib/source-text-readers.js";
 import {
   brokerInstallWorld, brokerSource, installBroker, launchctlCalls, MAC_BROKER_INSTALLER, nextBrokerVersion,
   type BrokerInstallWorld,
@@ -13,6 +15,18 @@ import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const READ = ["pr", "view", "7"];
 const RESPONSE = { stdout: '{"number":7}\n', stderr: "upstream diagnostic\n", exitCode: 7, outcome: "upstream-error" } as const;
+
+// @source-text-subject: src/** — the broker's local import graph defines the installed manifest.
+function assertManifestCoversBroker(paths: string[]): void {
+  const required = new Set(["src/lib/gh-read-broker.ts", "src/lib/config.ts", "src/lib/policy.ts"]);
+  for (const path of required) {
+    const source = readFileSync(join(REPO_ROOT, path), "utf8");
+    for (const specifier of runtimeSpecifiers(stripTypeScriptTypes(source, { mode: "transform" }))) {
+      if (specifier.startsWith(".")) required.add(join(dirname(path), specifier).replace(/\.js$/, ".ts"));
+    }
+  }
+  assert.deepEqual([...required].filter((path) => !paths.includes(path)).sort(), [], "broker dependencies missing from the installed manifest");
+}
 
 async function clientRead(w: BrokerInstallWorld, checkout: string) {
   let stdout = "";
@@ -40,19 +54,28 @@ function installedFixture(w: BrokerInstallWorld, source: ReturnType<typeof broke
 test("W1-T13158 criterion 1: a broker source change warns once per checkout commit and preserves the read result", async (t) => {
   const w = brokerInstallWorld(t);
   const source = brokerSource(t);
+  const dependency = "src/lib/github-http-read.ts";
+  const oldPath = "broker-policy.yaml";
+  mkdirSync(join(source.dir, "src/lib"));
+  writeFileSync(join(source.dir, "src/lib/gh-read-broker.ts"),
+    `export const GH_READ_BROKER_SOURCE_PATHS = \`\n${GH_READ_BROKER_SOURCE_PATHS.trim()}\n${oldPath}\n\`;\n`);
+  writeFileSync(join(source.dir, dependency), "// v1\n");
+  source.git("add", "src/lib");
+  source.git("commit", "--quiet", "-m", "add the broker manifest and a served dependency");
   const installed = installedFixture(w, source);
   const calls = launchctlCalls(w);
-  const changedSource = nextBrokerVersion(source, "v2");
+  writeFileSync(join(source.dir, dependency), "// v2\n");
+  source.git("add", dependency);
+  source.git("commit", "--quiet", "-m", "change only a transitive broker dependency");
+  const changedSource = source.git("rev-parse", "HEAD");
   const manifest = join(w.copies, installed, "source-paths");
   const paths = readFileSync(manifest, "utf8").trim().split("\n");
-  assert.ok(paths.includes("src/lib/gh-read-broker.ts"));
   assert.ok(paths.includes("src/run-task.ts"));
 
   // A path the installed broker used can still matter after the client drops it from its own list.
-  writeFileSync(manifest, "broker-policy.yaml\n");
   source.git("checkout", "--quiet", "-b", "old-path", installed);
-  writeFileSync(join(source.dir, "broker-policy.yaml"), "values: {}\n");
-  source.git("add", "broker-policy.yaml");
+  writeFileSync(join(source.dir, oldPath), "values: {}\n");
+  source.git("add", oldPath);
   source.git("commit", "--quiet", "-m", "change a path from the installed manifest");
   const changedOldPath = source.git("rev-parse", "HEAD");
   for (const head of [changedOldPath, changedSource]) {
@@ -72,6 +95,7 @@ test("W1-T13158 criterion 1: a broker source change warns once per checkout comm
   }
   source.git("checkout", "--quiet", changedOldPath);
   assert.equal((await clientRead(w, source.dir)).stderr, RESPONSE.stderr, "returning to a warned commit stays quiet");
+  assertManifestCoversBroker(paths);
   assert.deepEqual(launchctlCalls(w), calls);
 });
 
