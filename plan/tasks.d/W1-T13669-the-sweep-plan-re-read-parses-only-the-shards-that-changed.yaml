@@ -18,7 +18,7 @@
     - src/lib/plan.ts
     - src/lib/sweep.ts
     - test/sweep/the-sweep-plan-re-read-parses-only-the-shards-that-changed.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:parse-only-changed-shards — two calls of the new plan.ts loader with one shared PlanBlobCache, over a temp plan of a monolith and 200 shards where one shard changes between the calls, parse every file on the first call and only the changed shard on the second (the cache's parsedBlobs is 1 after the second call)"
