@@ -1,0 +1,72 @@
+- id: W1-T13671
+  title: "The daemon tick reads the live state of each in-flight task's open pull request with the async gh read before its selection pass, as drain already does, so the pass no longer runs a synchronous gh pr read and its cadence wait on the daemon loop"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the live read decides whether an in-flight task is skipped, stood down or dispatched; an unknown read must still never dispatch, and the dispatch rows must stay the same
+  origin: "operator-session#loop-lag-2026-11-18b"
+  plan_refs:
+    - W1-T177
+    - W1-T5719
+    - W1-T10028
+    - W1-T11458
+  files:
+    - src/lib/daemon.ts
+    - src/cli/commands/daemon.ts
+    - test/daemon/the-tick-reads-open-pr-live-states-before-its-selection-pass.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "invariant:read-off-the-loop — a daemon tick through the production wiring (the reader src/cli/commands/daemon.ts passes, over a gh shim from test/helpers/ that answers the pull request read after a delay) with an in-flight task whose pull request is open reads that live state with no synchronous child: a timer set just before the tick runs before the read answers, and the task is skipped with a dispatch.skipped row whose reason is open-pr, as before"
+      proof: "grep: W1-T13671 criterion 1 in test/daemon/the-tick-reads-open-pr-live-states-before-its-selection-pass.test.ts"
+    - claim: "invariant:same-outcomes — a MERGED or CLOSED live state still gives the same dispatch.stood_down row; a read that fails, rejects or times out still gives a dispatch.live_state_indeterminate row and the task is not dispatched"
+      proof: "grep: W1-T13671 criterion 2 in test/daemon/the-tick-reads-open-pr-live-states-before-its-selection-pass.test.ts"
+    - claim: "invariant:one-read-per-pass — in one selection pass each in-flight task's open pull request is read once, and a task with no open pull request or one already merged is not read"
+      proof: "grep: W1-T13671 criterion 3 in test/daemon/the-tick-reads-open-pr-live-states-before-its-selection-pass.test.ts"
+  rationale: |
+    WHY: the daemon's selection pass reads each in-flight task's pull request synchronously. In the tick
+    (src/lib/daemon.ts:8363) readLiveState wraps deps.readLiveState, whose type is synchronous (:1540), and
+    src/cli/commands/daemon.ts:2356 wires it as ghLiveStateByNumber (src/run-task.ts:8114), a sync gh read.
+    isDispatchEligible calls it inside runnableCandidates (daemon.ts:8481, :9057). The gh read's cadence can
+    add a blocking wait (defaultBlockingSleepSync, src/lib/github-transport.ts:868; loopSafeGhSleep :859
+    still allows it up to the normal gap). W1-T5719 (merged) added prefetchLiveStates (src/lib/drain.ts:1433),
+    which reads these states with an async reader before the sync selection, and drain uses it (:1973,
+    :2485); its commit notes the daemon.ts path was left sync. ghLiveStateByNumberAsync (run-task.ts:8133)
+    exists.
+    MEASURED on the Azure host, 2026-11-18, one nice'd pass over the daemon.loop_stall_profile rows since the
+    09:23:58Z boot (d225eda7e0) to 11:35:45Z, in ~/rmd-state2/state/ledger.ndjson and the
+    ledger.2026-11-18T*.ndjson.gz archives (sort -u): 291 rows, 1,153.5 s of loop lag in 132 minutes.
+    - runDaemon over dispatchEligibleCandidates, isDispatchEligible and ghJson is in the top inclusive frames
+      of 4 rows: 20.2 s of sampled time (about 9 s an hour), median 4.9 s and max 10.9 s each. The worst
+      (11:15:57Z) froze the loop for 13.7 s.
+    - The leaf: the self frames are the blocking cadence sleep (13.7 s; 8.5 s in the worst row alone) and the
+      child spawn (6.0 s).
+    NOT COVERED: swept origin/main plan/tasks.d for ghLiveStateByNumber, readLiveState, prefetchLiveStates and
+    isDispatchEligible: W1-T5719 (merged) fixed drain only; W1-T526 (blocked) is about review order; W1-T13286
+    (queued) records where a refill's selection time goes and does not move the read.
+  design: |
+    INVARIANT read-off-the-loop: the daemon's selection pass starts no synchronous gh child for a live state.
+    INVARIANT same-outcomes: skipped, stood-down and indeterminate give the same rows as before, and an unknown state never dispatches.
+    INVARIANT one-read-per-pass: each in-flight open pull request is read once per selection pass.
+    1. Let the daemon's readLiveState dep take drain.ts's LiveStateReader (sync or a promise). Before each
+       selection pass that passes readLiveState (the tick at :8481 and the lane refill at :9057, and any other
+       runnableCandidates call in daemon.ts that carries it), await prefetchLiveStates over that pass's plan,
+       isMerged and isOpenPr, and pass the prefetched read into the eligibility options in place of the
+       direct reader. Keep the wrapper that logs dispatch.live_state_indeterminate.
+    2. In src/cli/commands/daemon.ts:2356, wire ghLiveStateByNumberAsync in place of ghLiveStateByNumber.
+    3. Use prefetchLiveStates' existing per-read bound (DEFAULT_LIVE_STATE_TIMEOUT_MS, or the daemon's
+       liveStateTimeoutMs if it has one); add no new bound, env var or config key.
+    4. src/lib/daemon.ts is at its comment cap: add zero net comment lines and run
+       test/daemon/compress-src-lib-daemon-ts.test.ts. Run test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts.
+    5. Tests use the gh shim helpers in test/helpers/ and isolate HOME with test/setup/tmp-hygiene.ts; no network.
+  falsifier: |
+    Keep the sync reader: criterion 1's timer runs only after the read. Dispatch on an unknown state:
+    criterion 2 sees a dispatch. Prefetch inside the per-task walk: criterion 3 counts more than one read.
+  note: |
+    Id reserved for run-unfiled-1795002083000 with ~/rmd-work/bin/reserve-id.sh.
+    Proof that counts on the host: after the daemon converges, no daemon.loop_stall_profile row shows
+    isDispatchEligible over ghJson.

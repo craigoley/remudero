@@ -1126,6 +1126,7 @@ import {
   type SkillLifecycleAction,
   fileRatificationBatch,
   fileRatificationDraft,
+  stampDraftedPriority,
   joinedRatificationPrBody,
   knownPlanRepos,
   ratificationPrBody,
@@ -1873,7 +1874,7 @@ import {
   type GithubPostureGateway,
 } from "./lib/github-posture.js";
 import { validateWorkerSettingsFile } from "./lib/settings.js";
-import { readCatalogStatusContext, type CatalogStatusContext, buildBatchedGithub, defaultCreditStorePath, loadCreditStore, saveCreditStore, buildCommitTrailerIndex, classifyGhFailure, createDispatchBreakerCache, deriveStatus, dispatchesWithoutNewOwnedPr, evaluateDispatchBreakerCorroboratedDetailed, type LedgerSnapshot, type LedgerIndex, readLedgerSnapshot, type DispatchBreakerDetail, ghGateway, ghRequiredStatusCheckContexts, isGhRateLimitError, effectiveLifetimeDispatches, hasRepeatedTaskAttributableLifetimeDispatches, orphanedRunIds, streakRefusal, taskAttributableLifetimeDispatches, type LifetimeDispatchTally, projectPlan, readLedgerLines, type DeriveDeps, type GitHub, type GhFailureReason, preferImplementingPr, type PrRef, type BatchedPr, type OpenSiblingBuild, type StatusProjection, planBranchReap, type BranchFacts, type BranchReapPlan, BRANCH_REAP_REASON_LABEL, readLedgerUnionBounded, taskIdFromRunBranch, taskIdFromSlugBranch, readMergeCreditedTaskIds, readMergeCreditedTaskIdsAsync, isMergeCreditLine, readRequiredStatusCheckContexts, readRequiredStatusCheckContextsAsync, persistVerifiedCredit, type ThrownRunVerdictStage, type RefusedRunVerdictStage } from "./lib/status.js";
+import { readCatalogStatusContext, type CatalogStatusContext, buildBatchedGithub, defaultCreditStorePath, loadCreditStore, saveCreditStore, buildCommitTrailerIndex, classifyGhFailure, createDispatchBreakerCache, deriveStatus, dispatchesWithoutNewOwnedPr, evaluateDispatchBreakerCorroboratedDetailed, type LedgerSnapshot, type LedgerIndex, readLedgerSnapshot, type DispatchBreakerDetail, ghGateway, ghRequiredStatusCheckContexts, isGhRateLimitError, effectiveLifetimeDispatches, hasRepeatedTaskAttributableLifetimeDispatches, orphanedRunIds, streakRefusal, taskAttributableLifetimeDispatches, type LifetimeDispatchTally, projectPlan, projectTask, readLedgerLines, type DeriveDeps, type GitHub, type GhFailureReason, preferImplementingPr, type PrRef, type BatchedPr, type OpenSiblingBuild, type StatusProjection, planBranchReap, type BranchFacts, type BranchReapPlan, BRANCH_REAP_REASON_LABEL, readLedgerUnionBounded, taskIdFromRunBranch, taskIdFromSlugBranch, readMergeCreditedTaskIds, readMergeCreditedTaskIdsAsync, isMergeCreditLine, readRequiredStatusCheckContexts, readRequiredStatusCheckContextsAsync, persistVerifiedCredit, type ThrownRunVerdictStage, type RefusedRunVerdictStage } from "./lib/status.js";
 import { readyDraftPullRequest, readTaskContractAtHeadViaGit, withCodeqlAlertEvidence, CODE_SCANNING_FALSE_POSITIVE_STEP, DEFAULT_SWEEP_POLICY, decideRedBaseRefresh, isCiHarnessPath, prAddedLinesFromPullFiles, failingSourceFilesFromCiFailures, failingTestFilesFromCiFailures, projectMergedTaskCandidates, actionableGateFailuresFromReasons, armOutcomeArmed, dispatchFixSpent, checkCostGovernor, checkMemoryGovernor, installedSlackReclaim, reclaimBeforeHold, type SlackReclaim, checkQueueGovernor, productionFixPressure, deriveQueueGovernorTrailingFlow, isFleetOwnedRunBranch, checksStateFromRollup, checksPendingSinceFromRollup, CI_GATE_CHECK_NAME, supersededRedsNowPassing, dedupeRollupByLatestAttempt, deriveDayCostUsd, deriveDayUnpricedRows, deriveDisposition, diffCoverageReport, fixCeilingInForce, fixDispatchBudget, fixRoundTally, buildFixProgressInput, flakeClaimsForHead, isBlockedCi, listRetirableEscalationIssues, listRetirableEscalationIssuesAsync, createEscalationTriageHistoryReader, ESCALATION_TRIAGE_EVIDENCE_SLICE, indexEscalationTriageHistory, type EscalationTriageHistoryReader, type EscalationTriageSlice, logCostGovernorDeferral, logMemoryObservation, logQueueGovernorDeferral, renderClarificationQuestion, renderSweepSummary, type SweepSummary, REQUIRED_CHECK_FAIL, REQUIRED_CHECK_OK, runCreditBackfill, closedPrFromRef, closedPrLookup, runPrTerminalReconcile, type PrTerminalReconcileSummary, runEscalationReconcile, runStaleEscalationRejudge, buildStaleEscalationRejudgePrompt, type StaleEscalationRejudgeCandidate, runPostFixReverification, runSweep, runSweepLightPass, runLightPassReadyRefresh, runLightPassRefreshAdmission, lightPassHeadContractRefresh, runArmedRatchetRejudge, withFullSweepRepairAdmission, redQualityGateNames, stillRedRequiredNames, terminalStateReason, toQuestionEntry, usableInstrumentEntanglementPaths, type ActionableGateFailure, type ArmedStalledPr, type CiFailure, type ClarificationQuestion, type CostGovernorResult, type EscalationReconcileSummary, type FixClass, type FixDispatchEvidence, type FixOwnerResidue, type FixDispatchSnapshot, type FixSuperseded, type LiveStateResult, type MemoryGovernorResult, type MergeConflictEvidence, type OpenPrView, type PlanScopedFixRoundInput, type ReviewDispatchMode, type ReviewReuseInputs, type RollupCheckEntry, type PostFixReverificationSummary, type ProofDiscriminationEvidence, type QueueGovernorResult, type RedBaseRefreshFacts, type PostReviewStallVerdict, type RepairFilingCapture, type Disposition, type SweepDeps, type SweepPolicy, type UpdateBranchOutcome, type UncreditableHeadReason, ABSENT_REPUSH_CAP, DEFAULT_FIX_CLASSES, buildSweepEffects as buildSweepEffectsFromLib, checkJobId, RATIFIED_BASELINE_RATCHET_REPAIRS, currentPlanIneligibilityReason, defaultSweepGhRun, dispatchFixCatchOutcome, discriminateReviewReuse, discriminateReviewReuseAsync, escalationTaskIdFor, fixDispatchErrorClass, fixDispatchSignalDeath, fixHeadAcceptable, fixRungTaskFor, foreignHeadIsStuck, isDispatchedRunBranch, detectPostReviewStall, isCappedReviewOrphanEscalation, proofDiscriminationEvidenceFromCriteria, type ArmAttemptOutcome, type ArmOutcomeName, type BuildSweepEffectsDeps, type MetadataRepairResult, sweepArmTaskId, uncreditableHeadReason, planOnlyRunBranchReceipts, REGENERABLE_ARTIFACT_GENERATORS, ADDITIVE_REGISTRATION_SURFACES, isAdditiveRegistrationChange, type RegistrationChange, repairLadderCommand, trackRepairLadder, riskJudgeHandedOffHead, handedOffHeadJudgmentPool, type HandedOffHeadJudgmentPool, awaitHandedOffHeadJudgments, riskJudgeCodeScanning, hasCapturedMergeConflictEvidence, clearedConflictEscalationCause, type FixRoundBranchClaim, inFlightReviewCount } from "./lib/sweep.js";
 import { sampleDaemonMemory, workerHeapReadings } from "./lib/daemon-memory-telemetry.js";
 import { currentReviewSignal, headLacksOwnTaskRecord, OWN_TASK_RECORD_MISSING_CAUSE, reviewOnlyStandDownReason } from "./lib/sweep.js";
@@ -12315,6 +12316,32 @@ export function headShaRestArgs(prUrl: string): string[] {
  * than the rate-limit failure this replaces: the caller would judge and post a verdict against an
  * empty head instead of failing. So an absent sha is raised here, where it is attributable.
  */
+/**
+ * A plan PR in a repository that merges its own plan PRs (the ops repo does) can land while this lane still waits on
+ * CI or review. Review then declines the PR as closed and posts no verdict, the arm finds no review row to join
+ * (automerge.ledger_refused) and the lane exited non-zero although its filing landed (2026-11-18, remudero-ops#127).
+ * A merge is the outcome the gate exists to reach, so it is the lane's success, ledgered as
+ * `gate.merged_before_review`. Only a merge counts: an open PR, a closed unmerged one and an unreadable read all
+ * keep the review's own code, so an unreadable PR still reads as the review failure it was before this check.
+ */
+export async function mergedBeforeGate(
+  prUrl: string,
+  reviewCode: number,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  fetch: (args: string[]) => Promise<unknown> = ghJsonAsync,
+): Promise<boolean> {
+  if (reviewCode === 0) return false;
+  let row: RestPullRow;
+  try {
+    row = (await fetch(headShaRestArgs(prUrl))) as RestPullRow;
+  } catch {
+    return false; // unreadable: the review's own failure stands, exactly as before this check existed
+  }
+  if (typeof row?.merged_at !== "string") return false;
+  log("gate.merged_before_review", { merged_pr: prUrl, review_code: reviewCode, merged_at: row.merged_at });
+  return true;
+}
+
 export function readHeadShaRest(prUrl: string, fetch: GhApiFetcher = ghJson): string {
   const sha = mapRestPr(fetch(headShaRestArgs(prUrl)) as RestPullRow).headRefOid;
   if (!sha) {
@@ -36670,6 +36697,10 @@ async function triageCommandLocked(
 
       const prNum = prUrl.match(/\/pull\/(\d+)/)?.[1] ?? prUrl;
       const reviewCode = await reviewCommand(view === undefined ? prNum : prUrl);
+      if (await mergedBeforeGate(prUrl, reviewCode, log)) {
+        say(`triage PR merged by its repository before review — nothing to arm: ${prUrl}`);
+        continue;
+      }
       // W1-T230: reviewCommand resolved this PR's task id off its own
       // `Remudero-Task: <taskId>` trailer (ensureTaskTrailer above), so its
       // review.posted ledger line is keyed to the SAME `taskId` armAutoMerge
@@ -37352,6 +37383,10 @@ export async function planCommand(
       }
       const prNum = prUrl.match(/\/pull\/(\d+)/)?.[1] ?? prUrl;
       const reviewCode = await reviewCommand(isPublic ? prNum : prUrl);
+      if (await mergedBeforeGate(prUrl, reviewCode, log)) {
+        say(`plan PR merged by its repository before review — nothing to arm: ${prUrl}`);
+        continue;
+      }
       // W1-T230: reviewCommand resolved this PR's task id off its own
       // `Remudero-Task: <taskId>` trailer (ensureTaskTrailer above), so its
       // review.posted ledger line is keyed to the SAME `taskId` armAutoMerge
@@ -40019,7 +40054,7 @@ export async function approveCommand(
     // reservation failure REFUSES (throws) before any write, so no partial union ever reaches
     // the worktree.
     const materialized = materializeDraftTaskIds(
-      { fragmentYaml: payload.fragmentYaml, stampLine: payload.stampLine },
+      { fragmentYaml: stampDraftedPriority(payload.fragmentYaml), stampLine: payload.stampLine },
       {
         mint: () => {
           if (approveDestinationFailure) throw new Error(approveDestinationFailure);
@@ -40451,6 +40486,12 @@ export async function approveCommand(
     if (notGreenExit !== undefined) return notGreenExit;
     const prNum = result.prUrl.match(/\/pull\/(\d+)/)?.[1] ?? result.prUrl;
     const reviewCode = await reviewCommand(filing.destination ? result.prUrl : prNum);
+    if (await mergedBeforeGate(result.prUrl, reviewCode, log)) {
+      removeApproveWorktree();
+      console.log(`rmd approve: ${proposalId} — plan PR merged by its repository before review, nothing to arm: ${result.prUrl}`);
+      approveNoteChain(rest, proposalId, config, deps);
+      return 0;
+    }
     // W1-T230: a ratification PR carries NO Remudero-Task trailer by design
     // (see the no-trailer comment above) — reviewCommand's own taskId resolve
     // therefore falls back to `PR-${view.number}` and its review.posted ledger
@@ -40688,7 +40729,7 @@ async function approveBatchCommand(
         payloads,
         (payload) => {
           const materialized = materializeDraftTaskIds(
-            { fragmentYaml: payload.fragmentYaml, stampLine: payload.stampLine },
+            { fragmentYaml: stampDraftedPriority(payload.fragmentYaml), stampLine: payload.stampLine },
             {
               mint: () => {
                 if (batchDestinationFailure) throw new Error(batchDestinationFailure);
@@ -40848,6 +40889,11 @@ async function approveBatchCommand(
     if (notGreenExit !== undefined) return notGreenExit;
     const prNum = result.prUrl.match(/\/pull\/(\d+)/)?.[1] ?? result.prUrl;
     const reviewCode = await reviewCommand(filing.destination ? result.prUrl : prNum);
+    if (await mergedBeforeGate(result.prUrl, reviewCode, log)) {
+      removeApproveWorktree();
+      console.log(`rmd approve: batch of ${result.accepted.length} — plan PR merged by its repository before review, nothing to arm: ${result.prUrl}`);
+      return 0;
+    }
     let armHeadSha: string | undefined;
     try {
       armHeadSha = readHeadShaRest(result.prUrl);
@@ -45862,7 +45908,7 @@ async function runFixDispatchWork(work: DetachedWorkSpec, ctx: { runId: string; 
     if ("error" in synced) throw new Error(synced.error);
     return planMemo = synced.plan;
   };
-  let projection: Map<string, StatusProjection> | undefined;
+  const projections = new Map<string, Map<string, StatusProjection>>();
   let childPauseGit: SharedPauseGitDeps | undefined;
   if (envelope !== undefined && !ports.hold && stopDetail(cfg().root) === undefined) {
     childPauseGit = ports.sharedPauseGit ?? realDeps().sharedPauseGit;
@@ -45897,7 +45943,8 @@ async function runFixDispatchWork(work: DetachedWorkSpec, ctx: { runId: string; 
       const plan = planNow();
       const task = plan.byId.get(taskId);
       if (task === undefined) return { found: false };
-      projection ??= timed("child-plan-projection", () => projectPlan(plan, { ledgerPath: ledgerPath(), github: ports.github ?? buildBatchedGithub(ownerName(), repoName()) }));
+      const projection = projections.get(taskId) ?? timed("child-plan-projection", () => projectTask(plan, taskId, { ledgerPath: ledgerPath(), github: ports.github ?? buildBatchedGithub(ownerName(), repoName()) }));
+      projections.set(taskId, projection);
       const status = projection.get(taskId);
       if (!status || status.indeterminate) throw new Error(`task ${taskId}'s merge projection is unreadable`);
       const digest = timed("child-context-digest", () => riskJudgePlanContextDigestFor(plan)({ taskId }));
