@@ -14,7 +14,7 @@
   files:
     - src/lib/read-model-consistency.ts
     - test/console-api/read-model/the-projector-reads-only-the-newest-consistency-run-per-tick.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With 5,000 recorded runs, consistencyCheckDue reads one row with LIMIT 1 and calls all() on no statement"

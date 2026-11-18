@@ -1,0 +1,54 @@
+- id: W1-T13700
+  title: "The fleet registry runs remudero-ops live, with its mode written out"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  priority: 0.3
+  principles:
+    tdd: strict
+  risk: high # promotes an instance from shadow to live: its worker may arm and merge its own pull requests
+  band_meaning: span
+  origin: "human#2026-11-18-ops-go-live"
+  plan_refs:
+    - W1-T13498
+    - W1-T4265
+  files:
+    - .remudero/daemon-instances.yaml
+    - test/one-registry-for-the-fleet.test.ts
+    - test/an-unscoped-recycle-refuses-once-instances-are-declared.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The committed registry declares the ops row for craigoley/remudero-ops with an explicit mode live"
+      proof: "grep: mode: live in .remudero/daemon-instances.yaml"
+    - claim: "The committed-registry test pins core, site, console and ops all live, and requires the ops row to write its mode"
+      proof: "unit test: W1-T13700: the committed registry runs remudero-ops live"
+    - claim: "The registry header records the promotion and the host step that follows it"
+      proof: "grep: W1-T13700 in .remudero/daemon-instances.yaml"
+  rationale: |
+    WHY: Craig, 2026-11-18 13:40:10Z, on a decision card: chose "Yes, go live" on "Switch the ops repo from shadow
+    to live on the host and in the core registry?". W1-T13498 onboarded remudero-ops with `mode: shadow` and its
+    header says "promotion to live is a later reviewed registry PR"; this is that PR.
+    OBSERVED at a69143a6: the ops row carries `mode: shadow` (.remudero/daemon-instances.yaml), and
+    test/one-registry-for-the-fleet.test.ts's W1-T13498 case pins ops as "shadow".
+    instanceMode (src/lib/instance-mode.ts) reads an absent mode as live, so writing `mode: live` keeps the
+    promotion explicit and lets the test tell the ruling from a dropped key.
+    Both shell readers (install-host-units.sh, recycle-container.sh) already validate `mode` as shadow|live
+    (W1-T13498 amendment), so no script changes.
+    Host convergence (the host registry copy's ops row to `mode: live`, then an ops daemon relaunch) is an
+    operator step after this merges, not part of this task.
+    Filed in the public plan on purpose: rmd review exits task-metadata-unavailable when the private catalog is
+    unreadable (src/cli/commands/review.ts, review.catalog.unreadable), and core cannot read it yet.
+    Reservation note: refs/rmd-id/W1-T13700 was reserved before filing.
+    reservation hand-off: run-unfiled-1795010400001 -> claude/project-thread-vtlqln
+  design: |
+    1. .remudero/daemon-instances.yaml: the ops row's `mode: shadow` becomes `mode: live`. Add a header note under
+       the W1-T13498 note naming the ruling and the host step.
+    2. test/one-registry-for-the-fleet.test.ts: the W1-T13498 case becomes "W1-T13700: the committed registry runs
+       remudero-ops live, ..." expecting ops "live", plus a match that the ops block writes `mode: live`.
+    3. test/an-unscoped-recycle-refuses-once-instances-are-declared.test.ts: comment says ops runs live.
+    NO-INVARIANTS: one registry value and the pin that reads it; no gate, threshold, script or credential changes.
+  falsifier: |
+    Restore `mode: shadow`: the W1-T13700 case fails (ops reads shadow).
+    Drop the ops row's mode key: the W1-T13700 case fails on the explicit-mode match although ops reads live.

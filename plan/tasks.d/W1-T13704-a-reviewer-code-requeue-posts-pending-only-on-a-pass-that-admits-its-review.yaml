@@ -1,0 +1,52 @@
+- id: W1-T13704
+  title: "A reviewer-code requeue posts remudero-review pending only on a pass that admits the review, so its own pending never holds the PR for the 60 min ceiling with no reviewer"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # one sweep function (reviewerCodeRequeue): when the W1-T11847 requeue may post its pending; the review itself is unchanged
+  band_meaning: span
+  origin: "operator-session#review-claim-stall-2026-11-18"
+  plan_refs:
+    - W1-T11847
+    - W1-T913
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/a-reviewer-code-requeue-posts-pending-only-on-a-pass-that-admits-its-review.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Replaying 2026-11-18 13:00Z, a pass that does not admit a requeued plan PR's review posts no pending and leaves the delivered verdict showing; its row says the requeue waits for an admitting pass"
+      proof: "grep: W1-T13704 criterion 1 in test/sweep/a-reviewer-code-requeue-posts-pending-only-on-a-pass-that-admits-its-review.test.ts"
+    - claim: "A pass that admits the requeued review posts pending and starts the review in that same pass"
+      proof: "grep: W1-T13704 criterion 2 in test/sweep/a-reviewer-code-requeue-posts-pending-only-on-a-pass-that-admits-its-review.test.ts"
+    - claim: "invariant:requeue-still-once — the W1-T11847 requeue still writes one sweep.review_requeued row per head and reviewer-code sha, and a PR already showing pending is admitted without a second post"
+      kind: guard
+      proof: "grep: W1-T13704 criterion 3 in test/sweep/a-reviewer-code-requeue-posts-pending-only-on-a-pass-that-admits-its-review.test.ts"
+  rationale: |
+    WHY: OBSERVED in the core ledger 2026-11-18. After the daemon reboot (run DAEMON-1795006451613-7, pid 200), the
+    sweep's W1-T11847 requeue posted remudero-review=pending at 13:00:47Z (#19375) and 13:00:48Z (#19372), taking over
+    the dead runs. Neither review was admitted in that pass. No review row for either followed until 14:04:32Z, when
+    the 60 min pendingCeilingMinutes made deriveDisposition read the pending as stale and a light pass admitted both.
+    In between, light passes stood both down with "not admitted this pass: plan-lane bound N, in-flight M" while
+    writing no sweep.plan_lane_bound row (zero plan candidates): the fallback label for a PR selection never counted.
+    CAUSE (from the code): reviewerCodeRequeue runs inside runSweep's per-PR walk and calls postPending before it is
+    known whether this pass admits the PR. Once pending shows, deriveDisposition's W1-T913 "wait" row treats it as a
+    review in flight until the ceiling. Its owner is the live daemon pid, so owner-dead never fires either.
+    COST: up to 60 min of a re-review held by a claim with no reviewer behind it, on every daemon reboot or reviewer
+    code advance that lands on a pass not admitting the PR. A plan-only first review takes about 3 minutes.
+  design: |
+    INVARIANT requeue-still-once: the requeue row and its dedupe are unchanged.
+    1. In reviewerCodeRequeue (src/lib/sweep.ts), post pending only when the pass would act on post-review
+       (deps.actionable?.("post-review") !== false, and not a dry run). Otherwise append nothing new, return
+       admit: false with a reason naming the requeue as waiting for an admitting pass, and leave the delivered
+       verdict showing. The delivered outcome is still cleared when admit is true, as today.
+    2. The pending-already-showing branch (admit without a post) is unchanged.
+  falsifier: |
+    Post pending regardless of admission: criterion 1 fails. Never post: criterion 2 fails. Write a second requeue
+    row or a second post on a pending head: criterion 3 fails.
+  note: |
+    Id reserved for run-unfiled-1795011000001 with ~/rmd-work/bin/reserve-id.sh. Filed from a cloud session.

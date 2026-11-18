@@ -15,7 +15,7 @@
   files:
     - src/lib/task-lookup.ts
     - test/daemon/a-plan-snapshot-check-parses-an-unchanged-plan-once.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:parse-unchanged-once — three composeSecondaryPlan calls in one process over the same primary and secondary plans (2,000 and 20 tasks) run parseTasksFromYaml on each plan's serialized tasks once in all, and a fourth call after one task field changes in place parses only the plan that changed"

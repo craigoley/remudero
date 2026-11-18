@@ -1,0 +1,45 @@
+- id: W1-T13683
+  title: "switches.json's process key chooses whether serve's read-model worker runs as a thread or a child process, read when a handle starts, so the W1-T13205 trial needs no container change and applies at the next generation handoff"
+  repo: remudero
+  depends_on: []
+  priority: 0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # which process runs serve's read model; the environment switch still wins, and an unreadable file runs the thread
+  band_meaning: span
+  origin: "operator-session#serve-oom-2026-11-16"
+  plan_refs:
+    - W1-T13205
+  files:
+    - src/lib/read-model-worker.ts
+    - src/lib/read-model-cli.ts
+    - test/read-model-process-mode-is-a-switch.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "invariant:env-wins — RMD_READ_MODEL_PROCESS on or off decides; otherwise switches.json's process key decides; an absent or unreadable key runs the thread"
+      kind: guard
+      proof: "grep: W1-T13683: the environment switch wins in test/read-model-process-mode-is-a-switch.test.ts"
+    - claim: "rmd read-model switch process thread|child sets the key, keeps every other switch and writes a ledger row"
+      proof: "grep: W1-T13683: rmd read-model switch process child sets the key in test/read-model-process-mode-is-a-switch.test.ts"
+    - claim: "A handle started under process child forks its worker as a child process and writes one read_model.process_mode row naming the switch"
+      proof: "grep: W1-T13683: a handle started under process child forks its worker in test/read-model-process-mode-is-a-switch.test.ts"
+  rationale: |
+    WHY: Craig wants serve under 0.3 cores while the Console is open. W1-T13205 (merged in #19212) lets the read
+    model run in its own process, with its own heap and garbage collector, but only behind RMD_READ_MODEL_PROCESS
+    in serve's environment. Setting it means recreating the serve container with deploy/serve-container.sh, which is
+    an outage. serve.cpu_budget on 2026-11-18 11:41Z put serve at 0.51 cores, and its V8 worker threads share the
+    main thread's heap and memory lock.
+  design: |
+    INVARIANT env-wins: the environment switch, when set to on or off, decides exactly as before.
+    1. ReadModelSwitches gets process?: "thread" | "child", validated by readReadModelSwitches.
+    2. readModelProcessMode(env, switchesPath) returns the mode and its source; createReadModelWorker reads it once
+       per handle and logs read_model.process_mode. A generation handoff starts a new handle, so the switch applies
+       with no outage.
+    3. The CLI takes switch process thread|child, like the projector switch.
+  falsifier: |
+    The file key ignored: criterion 3 fails. The env no longer wins: criterion 1 fails. The CLI drops other keys: criterion 2 fails.
+  note: |
+    Id reserved for run-unfiled-1795004118674 with ~/rmd-work/bin/reserve-id.sh.

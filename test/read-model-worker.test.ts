@@ -447,7 +447,7 @@ test("a restarted worker serves its last committed bodies before its first tick"
   delete stored.buildStartedMs;
   assert.deepEqual(warm, stored, "the committed body is served as the worker posted it");
   assert.equal(restarted.state().at, undefined, "no tick has run");
-  assert.deepEqual(logs, ["read_model.warm_boot", "read_model.switch_absent"], "no switch file: every view dark, and the reason ledgered");
+  assert.deepEqual(logs, ["read_model.warm_boot", "read_model.switch_absent", "read_model.process_mode"], "no switch file: every view dark, the reason and the process mode ledgered");
   assert.equal(restarted.stop(), false, "a never-started worker has nothing to confirm");
 
   const cold = loadCommittedViewBodies(scratch(t, "rmw-cold"), "core");

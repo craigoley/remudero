@@ -36,6 +36,8 @@ export interface InboxGardenerCandidate {
   dependencyMerge?: Array<{ id: string; merged: boolean | null }>;
   sourcePolicy?: string;
   successor?: { proposal: RetirementProposal; open: boolean };
+  /** W1-T13682: the snapshot could not verify this proposal's board referent, so the pass leaves it alone. */
+  referentUnverified?: boolean;
 }
 export interface InboxGardenerPack {
   scope: InboxGardenerScope; snapshotKey: string; generatedAt: string; checkedAt: string; codeSha: string;
@@ -95,14 +97,24 @@ export async function runInboxGardener(options: { stateDir: string; scope: Inbox
     if (pendingMirrors.length > limits.candidates) return { state: "pending_mirrors", complete: false, retired: 0, judged: 0 };
     const candidates = [...pack.candidates].sort((a, b) => a.proposal.id.localeCompare(b.proposal.id));
     const generation = inboxSemanticDigest(candidates.map(c => [c.proposal.id, inboxGardenerSemanticInput(c)]));
-    const start = store.cursor?.generation === generation ? Math.max(0, candidates.findIndex(c => c.proposal.id > store.cursor!.after)) : 0;
+    // W1-T13668: resume after the cursor's id whatever the generation. Restarting at the first id on every registry change
+    // re-read the same 8-16 ids for good on the host (2,429 proposals, one change or more between hourly passes). Each
+    // candidate's own digest still decides whether it is re-judged, and the next sweep starts at the first id again.
+    const resume = store.cursor?.after ? candidates.findIndex(c => c.proposal.id > store.cursor!.after) : 0;
+    const start = Math.max(0, resume);
     const selected = candidates.slice(start, start + limits.candidates);
-    let retired = 0, judged = 0, proofReads = 0, evaluated = 0, after = store.cursor?.generation === generation ? store.cursor.after : "";
+    let retired = 0, judged = 0, proofReads = 0, evaluated = 0, after = resume < 0 ? "" : store.cursor?.after ?? "";
     for (const candidate of selected) {
       if (options.stopped?.()) return { state: "cancelled", complete: false, evaluated, retired, judged };
       const p = candidate.proposal, existing = [...store.events].reverse().find(e => e.receipt.kind === "retire" && e.receipt.scope.proposalId === p.id);
       if (existing && store.events.some(e => e.receipt.kind === "restore" && e.receipt.retirementId === existing.receipt.id)) {
         after = p.id; evaluated++; continue; // An unrelated change cannot undo an operator restoration.
+      }
+      if (candidate.referentUnverified) {
+        // W1-T13682: never acted on. The marked digest can never equal a real one, so a later verified read re-judges it.
+        store.entries[p.id] = { digest: inboxSemanticDigest([inboxGardenerSemanticInput(candidate), "referent-unverified"]), decision: "defer_source",
+          reason: "Its referent could not be verified, so this pass skips it and records the gap" };
+        after = p.id; evaluated++; continue;
       }
       if (protectedCandidate(candidate, options.scope) || candidate.unansweredReply || candidate.resolvedByOperator || !candidate.task) {
         store.entries[p.id] = { digest: inboxGardenerSemanticInput(candidate), decision: "keep_protected", reason: "Current hold, human purpose, operator intent, or missing task forbids automatic retirement" };
@@ -169,7 +181,8 @@ export async function runInboxGardener(options: { stateDir: string; scope: Inbox
     }
     const complete = candidates.length === 0 || after === candidates.at(-1)?.proposal.id;
     store.cursor = { generation, after: complete ? "" : after }; writeInboxGardenerStore(options.stateDir, store);
-    return { state: complete ? "complete" : "pending", complete, evaluated, retired, judged, proofReads };
+    const unverified = pack.candidates.filter(c => c.referentUnverified).length;
+    return { state: complete ? "complete" : "pending", complete, evaluated, retired, judged, proofReads, ...(unverified ? { unverified_referents: unverified } : {}) };
   }, clock).catch(error => ({ state: "failed", delivery: "unknown", complete: false, reason: String(error) }));
 }
 
@@ -312,9 +325,15 @@ export function defaultInboxGardenerPorts(options: { stateDir: string; scope: In
     const verdicts = ledgerProposalVerdicts([...ledger.rows].sort((a, b) => Date.parse(String(a.ts)) - Date.parse(String(b.ts))));
     const ownership = snapshot?.snapshotScope?.repository === options.scope.repository && snapshot.snapshotScope.instance === options.scope.instance;
     const operatorIntents = new Map(proposals.map(p => [p.id, inboxOperatorIntent(threads.status === "ok" ? threads.threads.get(inboxThreadId(p.id)) ?? [] : [])]));
+    // W1-T13682: a referent the snapshot could not verify used to stop every pass through coverage:github (two test
+    // proposals did, 2026-11-18). When no projection value is indeterminate and only referents are unverified, GitHub
+    // counts as observed for the pass and each such candidate is skipped and counted instead.
+    const unverifiedReferents = new Set((snapshot?.classifications ?? []).filter(c => c.referentUnverified).map(c => c.proposalId));
+    const censusGithub = snapshot?.attentionCensus?.sources.githubProjection ?? "unavailable";
+    const github = censusGithub === "partial" && snapshot?.projectionIndeterminate === false && unverifiedReferents.size > 0 ? "observed" : censusGithub;
     return { scope: options.scope, snapshotKey: snapshot?.snapshotKey ?? "", generatedAt: snapshot?.generatedAt ?? "", checkedAt: clock.iso(), codeSha: options.codeSha,
       coverage: { plan: snapshot?.gardenerSource?.identity === inboxGardenerSource(proposals, plan.byId, options.scope, operatorIntents).identity ? snapshot?.attentionCensus?.sources.plan ?? "unavailable" : "unavailable", registry: raw.kind === "ok" && ownership &&
-        inboxSemanticDigest(snapshot?.proposals) === inboxSemanticDigest(proposals) ? "observed" : "unavailable", github: snapshot?.attentionCensus?.sources.githubProjection ?? "unavailable",
+        inboxSemanticDigest(snapshot?.proposals) === inboxSemanticDigest(proposals) ? "observed" : "unavailable", github,
         ledger: ledger.state, threads: threads.status === "ok" ? "observed" : "unavailable" },
       candidates: proposals.map(proposal => {
         const taskId = retirementAsk(proposal)?.taskId;
@@ -328,7 +347,8 @@ export function defaultInboxGardenerPorts(options: { stateDir: string; scope: In
           ...(task ? { dependencies: task.depends_on.flatMap(id => plan.byId.has(id) ? [inboxGardenerTaskFact(plan.byId.get(id)!)] : []),
             dependencyMerge: task.depends_on.map(id => ({ id, merged: !plan.byId.has(id) || snapshot?.gardenerDependencyEvidence === undefined ? null : snapshot.gardenerDependencyEvidence.find(value => value.id === id)?.merged ?? null })) } : {}),
           operatorIntent: inboxOperatorIntent(messages), unansweredReply: last?.role === "reply" && last.extra?.event === undefined,
-          resolvedByOperator: verdicts.isRatified(proposal.id) || verdicts.isDeclined(proposal.id) !== undefined };
+          resolvedByOperator: verdicts.isRatified(proposal.id) || verdicts.isDeclined(proposal.id) !== undefined,
+          ...(unverifiedReferents.has(proposal.id) ? { referentUnverified: true } : {}) };
       }), ledgerEventIds: new Set(ledger.rows.flatMap(row => typeof row.dismissalAuditReceipt?.id === "string" ? [row.dismissalAuditReceipt.id] : [])) };
   };
   return { capture, judge: options.judge,

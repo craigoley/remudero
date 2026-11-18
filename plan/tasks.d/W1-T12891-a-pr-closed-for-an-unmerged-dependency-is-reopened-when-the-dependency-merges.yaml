@@ -17,7 +17,7 @@
   files:
     - src/lib/sweep.ts
     - test/sweep/a-pr-closed-for-an-unmerged-dependency-is-reopened-when-the-dependency-merges.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A pull request the sweep closed with the plan-resequence reason (PLAN_RESEQUENCE_CLOSE_MARKER, an unmet dependency named in the close) is reopened by the sweep once every dependency it named reads merged, its head branch still exists and its task is not merged, and one sweep.resequence_close_reversed row names the PR, the task and the dependencies"

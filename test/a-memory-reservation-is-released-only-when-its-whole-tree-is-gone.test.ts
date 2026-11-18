@@ -208,8 +208,10 @@ test("an incomplete tree walk cannot release after its root exits before omitted
   sweepMemoryReservations(w.deps());
   assert.equal(firstReservation(w).holdReason, "incomplete-process-walk");
   w.procs.delete(300);
-  assert.equal(sweepMemoryReservations(w.deps())?.released.length, 0, "we cannot prove the omitted tree was empty");
-  assert.equal(reservationCount(w), 1);
+  const held = [...w.files]; // W1-T13658: kept so the generation-ended proof below still judges this held entry
+  assert.deepEqual(sweepMemoryReservations(w.deps())?.released.map((r) => r.rule), ["tree-gone-after-gap"], "W1-T13658: a complete walk finds every identity gone and nothing reparented to init since the root, so the omitted tree is proven empty");
+  assert.equal(reservationCount(w), 0);
+  for (const [path, content] of held) w.files.set(path, content);
 
   assert.deepEqual(
     sweepMemoryReservations(w.deps({ gen: { containerId: "c2", initStart: "proc:2" } }))?.released.map((r) => r.rule),
@@ -236,7 +238,7 @@ test("a complete retry captures visible descendants but cannot erase an earlier 
   w.procs.set(300, { start: "proc:30", parent: 1 });
   assert.equal(sweepMemoryReservations(w.deps())?.released.length, 0, "the earlier incomplete ancestry gap remains fail-closed");
   w.procs.delete(300);
-  assert.equal(sweepMemoryReservations(w.deps())?.released.length, 0, "unseen descendants cannot be ruled out, even after known identities exit");
+  assert.deepEqual(sweepMemoryReservations(w.deps())?.released.map((r) => r.rule), ["tree-gone-after-gap"], "W1-T13658: once known identities exit, the orphan scan rules unseen descendants out");
 });
 
 test("a reused pid with a new start time does not hold a reservation", () => {

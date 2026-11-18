@@ -1,0 +1,49 @@
+- id: W1-T13666
+  title: "The operator-agent rows read-model view rebuilds only when a panel fact is folded, and declares the newest panel fact as its ledger read, so other facts no longer rebuild and reserialize every panel row"
+  repo: remudero
+  depends_on: []
+  priority: 0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # when the operator-agent rows body is rebuilt and how its ledger source is judged; its rows are unchanged
+  origin: "operator-session#serve-hot-worker-2026-11-17"
+  plan_refs:
+    - W1-T13654
+  files:
+    - src/lib/operator-agent-read-model.ts
+    - test/inbox/the-operator-agent-rows-view-moves-only-with-panel-facts.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "Through the real read-model ticker, five kept facts that are not panel rows build no operator-agent rows body, and a panel fact builds it again with both panel rows"
+      proof: "grep: W1-T13666 criterion 1 in test/inbox/the-operator-agent-rows-view-moves-only-with-panel-facts.test.ts"
+    - claim: "invariant:judged-by-its-read: the view's declared ledger read is the newest panel fact, unmoved by other facts, and the posted body's ledger source is stamped with it"
+      kind: guard
+      proof: "grep: W1-T13666 criterion 2 in test/inbox/the-operator-agent-rows-view-moves-only-with-panel-facts.test.ts"
+  rationale: |
+    WHY: on the Azure host on 2026-11-18 with a Console open, read_model.view_builds for the heavy lane
+    (10:51-11:01Z, serve pid 60693, sha a065bef91) showed operator-agent-rows at 250 calls, 23 builds, 5,767 cpuMs.
+    createOperatorAgentRowsView publishes when `fold.published !== fold.seq`, and `fold.seq` is the store's max fact
+    seq, so any kept fact (worker.assignment, cost rows and others) rebuilds the body and reserializes every panel.*
+    row, though only panel.* facts change it. It republished on every fact because, with no declared ledger read,
+    serve's judge (builtLedgerSource) marks a body stale once the projector head is newer than the body's asOf by more
+    than READ_MODEL_LEDGER_STALE_MS. The read-model contract already has `ledgerReads` for this: "the newest projected
+    instant among the ledger rows this view reads", which the worker stamps on the body and serve judges with
+    judgeLedgerReads.
+  design: |
+    INVARIANT judged-by-its-read: the body is stale only when a panel fact newer than it exists.
+    1. materialize publishes when the fold's entry count moved (entries only append; a store reset starts a new fold
+       with published -1), not when `seq` moved.
+    2. The view declares `ledgerReads(db)`: max(ts_ms) of facts with step in ['panel.', 'panel/'), a range the
+       fact_step(step, ts_ms) index serves, as an ISO instant, or null before any panel fact.
+    Not in scope: the repositories view (W1-T13654) and inbox-threads.
+  falsifier: |
+    Restore the seq comparison and drop ledgerReads: criterion 1 fails (each kept fact builds a body) and criterion 2
+    fails (the view declares no read).
+  note: |
+    Id reserved for run-unfiled-1795001550992 with ~/rmd-work/bin/reserve-id.sh.
+    reservation hand-off: run-unfiled-1795001550992 -> claude/project-thread-u06uh4
+    Proof that counts in production: read_model.view_builds rows for operator-agent-rows show builds close to the
+    number of panel.* facts in the window, and its heavy-lane cpuMs falls from about 5.8 s per 10 min.

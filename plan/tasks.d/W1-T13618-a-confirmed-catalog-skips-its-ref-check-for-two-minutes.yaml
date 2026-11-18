@@ -15,7 +15,7 @@
   files:
     - src/lib/serve-plan-reload.ts
     - test/a-plan-reload-revalidates-the-kept-ops-catalog.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Five plan reloads within BOARD_CATALOG_REFRESH_MS of a confirmed read make no GET; the first one past it makes exactly one ref GET"

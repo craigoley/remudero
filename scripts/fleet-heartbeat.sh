@@ -587,12 +587,34 @@ else
 fi
 
 DISPATCH_LAST_TS=""
+DISPATCH_TS_LIST=""
 DISPATCH_BLOCK_REASON="none"
 if [ -f "$LEDGER" ]; then
-  DISPATCH_LINE="$(grep -F '"step":"run.start"' "$LEDGER" 2>/dev/null | grep -F '"lane":"run-task"' | tail -n 1)"
-  if [ -n "$DISPATCH_LINE" ]; then
-    DISPATCH_LAST_TS="$(printf '%s' "$DISPATCH_LINE" | grep -o '"ts":"[^"]*"' | head -n 1 | cut -d'"' -f4)"
-  fi
+  # W1-T13249: the newest run that PASSED its dispatch claim (`dispatch.claim` with proceed true), or the newest run.start
+  # of a run that took no claim — never a run the claim refused before spend (run.start is logged before the claim).
+  DISPATCH_SCAN="$(grep -E '"step":"(run\.start|dispatch\.claim)"' "$LEDGER" 2>/dev/null | awk '
+    function field(line, key,    m, v) {
+      if (!match(line, "\"" key "\":\"[^\"]*\"")) return ""
+      v = substr(line, RSTART, RLENGTH); sub("^\"" key "\":\"", "", v); sub("\"$", "", v); return v
+    }
+    index($0, "\"step\":\"dispatch.claim\"") {
+      rid = field($0, "run_id"); if (rid != "") claimed[rid] = 1
+      if (index($0, "\"proceed\":true")) {
+        if (best == "" || field($0, "ts") > best) best = field($0, "ts")
+        listed[++nl] = field($0, "ts")
+      }
+      next
+    }
+    index($0, "\"lane\":\"run-task\"") { n++; rids[n] = field($0, "run_id"); tss[n] = field($0, "ts") }
+    END {
+      for (i = 1; i <= n; i++) if ((rids[i] == "" || !(rids[i] in claimed)) && tss[i] > best) best = tss[i]
+      for (i = 1; i <= n; i++) if (rids[i] == "" || !(rids[i] in claimed)) listed[++nl] = tss[i]
+      print best
+      for (i = 1; i <= nl; i++) print listed[i]
+    }')"
+  # First line: the newest dispatch (unchanged W1-T13249 answer). The rest: every dispatch the same rule counts.
+  DISPATCH_LAST_TS="$(printf '%s\n' "$DISPATCH_SCAN" | head -n 1)"
+  DISPATCH_TS_LIST="$(printf '%s\n' "$DISPATCH_SCAN" | tail -n +2)"
   BLOCK_LINE="$(grep -E '"step":"(daemon_selfrestart_for_freshness|daemon\.pause|dispatch\.skipped)"' "$LEDGER" 2>/dev/null | tail -n 1)"
   if [ -n "$BLOCK_LINE" ]; then
     BLOCK_STEP="$(printf '%s' "$BLOCK_LINE" | grep -o '"step":"[^"]*"' | head -n 1 | cut -d'"' -f4)"
@@ -605,7 +627,53 @@ DISPATCH_LAST_EPOCH="$(epoch_of "$DISPATCH_LAST_TS")"
 DISPATCH_AGE_S=""
 if [ -n "$DISPATCH_LAST_EPOCH" ]; then DISPATCH_AGE_S="$((NOW_EPOCH - DISPATCH_LAST_EPOCH))"; fi
 
-DISPATCH_STALLED_AFTER_S=21600
+# W1-T13256: THE STALL BOUND IS DERIVED FROM THE FLEET'S OWN CADENCE, NOT A FIXED SIX HOURS.
+# On 2026-11-16 the fleet started nothing for 5h48m while its ordinary cadence was minutes (four
+# dispatches in 27 minutes once unblocked); a fixed 21600 s is many times that cadence and the
+# operator rejects fixed thresholds. The bound is P90 (nearest rank) of the gaps between consecutive
+# dispatches (the W1-T13249 rule, newest 50 gaps within 7 days) times 3: P90 so one long healthy
+# pause (an overnight empty queue) sets the scale without one outlier ruling it, and x3 so a gap
+# has to be three times the fleet's own slow end before it reads stalled. A floor of 1800 s (six
+# beat intervals) stops a burst of back-to-back dispatches from deriving a bound the next ordinary
+# lull would cross. The beat reads only the live ledger: rotation keeps the newest 200 rows per step
+# there and archiving a week for a 5-minute beat is the whole-union read W1-T3227 removed. With
+# fewer than 8 gaps there is nothing to derive from, so the fixed 21600 stays and the source says so.
+DISPATCH_STALL_FALLBACK_S=21600
+DISPATCH_STALL_MIN_GAPS=8
+DISPATCH_STALL_PROBE="$(printf '%s\n' "$DISPATCH_TS_LIST" | LC_ALL=C sort -u | awk -v now="$NOW_EPOCH" '
+  function epoch(ts,   y, m, d, era, yoe, doy, doe) {
+    if (ts !~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]/) return -1
+    y = substr(ts, 1, 4) + 0; m = substr(ts, 6, 2) + 0; d = substr(ts, 9, 2) + 0
+    if (m <= 2) y--
+    era = int(y / 400); yoe = y - era * 400
+    doy = int((153 * (m + (m > 2 ? -3 : 9)) + 2) / 5) + d - 1
+    doe = yoe * 365 + int(yoe / 4) - int(yoe / 100) + doy
+    return (era * 146097 + doe - 719468) * 86400 + substr(ts, 12, 2) * 3600 + substr(ts, 15, 2) * 60 + substr(ts, 18, 2)
+  }
+  { e = epoch($0); if (e >= 0 && e >= now - 604800) t[++n] = e }
+  END {
+    for (i = 2; i <= n; i++) g[i - 1] = t[i] - t[i - 1]
+    ng = n > 1 ? n - 1 : 0
+    first = ng > 50 ? ng - 49 : 1; k = 0
+    for (i = first; i <= ng; i++) w[++k] = g[i]
+    for (i = 2; i <= k; i++) { v = w[i]; j = i - 1; while (j >= 1 && w[j] > v) { w[j + 1] = w[j]; j-- } w[j + 1] = v }
+    r = int(0.9 * k); if (r < 0.9 * k) r++
+    print k, (k > 0 ? w[r] : 0)
+  }')"
+DISPATCH_STALL_GAPS="${DISPATCH_STALL_PROBE%% *}"
+DISPATCH_STALL_P90_S="${DISPATCH_STALL_PROBE##* }"
+case "$DISPATCH_STALL_GAPS" in ''|*[!0-9]*) DISPATCH_STALL_GAPS=0; DISPATCH_STALL_P90_S=0 ;; esac
+if [ "$DISPATCH_STALL_GAPS" -ge "$DISPATCH_STALL_MIN_GAPS" ]; then
+  DISPATCH_STALLED_AFTER_S="$((DISPATCH_STALL_P90_S * 3))"
+  DISPATCH_STALL_BOUND_SOURCE="derived:p90x3(gaps=${DISPATCH_STALL_GAPS},p90=${DISPATCH_STALL_P90_S}s)"
+  if [ "$DISPATCH_STALLED_AFTER_S" -lt 1800 ]; then
+    DISPATCH_STALLED_AFTER_S=1800
+    DISPATCH_STALL_BOUND_SOURCE="derived:floor1800(gaps=${DISPATCH_STALL_GAPS},p90=${DISPATCH_STALL_P90_S}s)"
+  fi
+else
+  DISPATCH_STALLED_AFTER_S="$DISPATCH_STALL_FALLBACK_S"
+  DISPATCH_STALL_BOUND_SOURCE="fixed-fallback:too-few-gaps(${DISPATCH_STALL_GAPS}<${DISPATCH_STALL_MIN_GAPS})"
+fi
 if [ "$DAEMON_LAST_STEP" = "daemon.idle_starved.pulse" ] && [ -n "$DAEMON_AGE_S" ] && [ "$DAEMON_AGE_S" -le "$DAEMON_STALE_AFTER_S" ]; then
   DISPATCH_VERDICT="idle_starved — no open PRs or auto-build tasks at last admission"
 elif [ -z "$DISPATCH_AGE_S" ]; then
@@ -1737,6 +1805,8 @@ dispatch_verdict=${DISPATCH_VERDICT}
 dispatch_last_ts=${DISPATCH_LAST_TS:-none}
 dispatch_last_age_s=${DISPATCH_AGE_S:-unknown}
 dispatch_block_reason=${DISPATCH_BLOCK_REASON}
+dispatch_stall_bound_s=${DISPATCH_STALLED_AFTER_S}
+dispatch_stall_bound_source=${DISPATCH_STALL_BOUND_SOURCE}
 supervisor_verdict=${SUPERVISOR_VERDICT}
 supervisor_last_ts=${SUPERVISOR_LAST_TS:-none}
 supervisor_last_step=${SUPERVISOR_LAST_STEP:-none}

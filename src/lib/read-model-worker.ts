@@ -238,6 +238,8 @@ export interface ReadModelSwitches {
   push?: "on" | "off";
   /** Who keeps GitHub facts warm (Phase 1 cutover); absent reads `serve`, and `worker` falls back to serve while the worker is not live. */
   github?: "serve" | "worker";
+  /** W1-T13683: where the worker runs; absent reads `thread`. Read once per handle, so a generation handoff applies it. */
+  process?: "thread" | "child";
 }
 
 /** Which keep-warm took over serve's gateway, and why. */
@@ -294,7 +296,7 @@ export function readReadModelSwitches(path: string): { ok: true; switches: ReadM
   } catch (error) {
     return { ok: false, reason: `switch file is not JSON: ${(error as Error).message}` };
   }
-  const obj = (raw ?? {}) as { projector?: unknown; views?: unknown; push?: unknown; github?: unknown };
+  const obj = (raw ?? {}) as { projector?: unknown; views?: unknown; push?: unknown; github?: unknown; process?: unknown };
   const views: Record<string, ReadModelViewMode> = {};
   for (const [name, mode] of Object.entries(typeof obj.views === "object" && obj.views !== null ? obj.views : {})) {
     if (mode !== "serve" && mode !== "shadow" && mode !== "off" && mode !== "auto") return { ok: false, reason: `view ${name} has mode ${JSON.stringify(mode)}` };
@@ -304,7 +306,27 @@ export function readReadModelSwitches(path: string): { ok: true; switches: ReadM
   if (projector !== "on" && projector !== "off") return { ok: false, reason: `projector has mode ${JSON.stringify(projector)}` };
   if (obj.push !== undefined && obj.push !== "on" && obj.push !== "off") return { ok: false, reason: `push has mode ${JSON.stringify(obj.push)}` };
   if (obj.github !== undefined && obj.github !== "serve" && obj.github !== "worker") return { ok: false, reason: `github has mode ${JSON.stringify(obj.github)}` };
-  return { ok: true, switches: { projector, views, ...(obj.push !== undefined ? { push: obj.push } : {}), ...(obj.github !== undefined ? { github: obj.github } : {}) }, mtimeMs };
+  if (obj.process !== undefined && obj.process !== "thread" && obj.process !== "child") return { ok: false, reason: `process has mode ${JSON.stringify(obj.process)}` };
+  return { ok: true, switches: { projector, views, ...(obj.push !== undefined ? { push: obj.push } : {}), ...(obj.github !== undefined ? { github: obj.github } : {}),
+    ...(obj.process !== undefined ? { process: obj.process } : {}) }, mtimeMs };
+}
+
+/** W1-T13683: the step that names where a read-model handle runs its worker, and which switch chose it. */
+export const READ_MODEL_PROCESS_MODE_STEP = "read_model.process_mode";
+
+/**
+ * W1-T13683: where a new handle runs its worker. The environment switch (W1-T13205) wins when it is `on` or `off`;
+ * otherwise switches.json's `process` decides, so a trial needs no container change, only the next generation.
+ * An unreadable switch file runs the thread, as before.
+ */
+export function readModelProcessMode(env: NodeJS.ProcessEnv, switchesPath: string):
+  { mode: "thread" | "child"; source: "env" | "switches" | "default"; reason?: string } {
+  const value = env[READ_MODEL_PROCESS_SWITCH];
+  if (value === "on") return { mode: "child", source: "env" };
+  if (value === "off") return { mode: "thread", source: "env" };
+  const read = readReadModelSwitches(switchesPath);
+  if (!read.ok) return { mode: "thread", source: "default", reason: read.reason };
+  return read.switches.process === undefined ? { mode: "thread", source: "default" } : { mode: read.switches.process, source: "switches" };
 }
 
 /** One instance's projector, as the worker last saw it. Posted to the main thread every tick. */
@@ -3001,7 +3023,10 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
   // last handed to it.
   let stopReceipt: string | undefined;
   let sentToken: string | undefined;
-  const asChild = process.env[READ_MODEL_PROCESS_SWITCH] === "on";
+  // W1-T13683: the environment switch, or else switches.json's `process`; one row names which.
+  const processMode = readModelProcessMode(process.env, readModelSwitchesPath(opts.stateDir));
+  opts.log?.(READ_MODEL_PROCESS_MODE_STEP, processMode);
+  const asChild = processMode.mode === "child";
   const sendToken = (): void => {
     const token = process.env.GH_TOKEN;
     if (!asChild || !worker || token === sentToken) return;

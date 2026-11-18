@@ -1,0 +1,52 @@
+- id: W1-T13676
+  title: "A fresh serve container counts its own boot as the last restart, so its first handoff waits out the 2 h spacing instead of running minutes after boot"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # two serve files (the supervisor and its production entry): when serve's first handoff after a boot may run; the handoff itself is unchanged
+  band_meaning: span
+  origin: "operator-session#serve-recycle-2026-11-18"
+  plan_refs:
+    - W1-T13303
+    - W1-T13623
+  files:
+    - src/lib/serve-supervisor.ts
+    - src/lib/serve-supervisor-main.ts
+    - test/console-api/serve/a-fresh-serve-supervisor-spaces-its-first-handoff-from-its-own-boot.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "Replaying 2026-11-18 (boot ready 06:01:29Z), a checkout_behind ask at 06:21:51Z is deferred with reason spacing for the base window less the 20 minutes since boot, and hands off when that wait ends"
+      proof: "grep: W1-T13676 criterion 1 in test/console-api/serve/a-fresh-serve-supervisor-spaces-its-first-handoff-from-its-own-boot.test.ts"
+    - claim: "An ask two hours after a fresh boot hands off at once"
+      proof: "grep: W1-T13676 criterion 2 in test/console-api/serve/a-fresh-serve-supervisor-spaces-its-first-handoff-from-its-own-boot.test.ts"
+    - claim: "Serve's production supervisor (runServeSupervisor) passes spaceFromBoot: true beside the production spacing base"
+      proof: "grep: W1-T13676 criterion 3 in test/console-api/serve/a-fresh-serve-supervisor-spaces-its-first-handoff-from-its-own-boot.test.ts"
+    - claim: "invariant:seam-default-unchanged — a createServeSupervisor without spaceFromBoot still hands off its first ask at once"
+      kind: guard
+      proof: "grep: W1-T13676 criterion 4 in test/console-api/serve/a-fresh-serve-supervisor-spaces-its-first-handoff-from-its-own-boot.test.ts"
+  rationale: |
+    WHY: OBSERVED in the host ledger union 2026-11-18: a fresh serve container was ready at 06:01:29Z (cold_start_ready)
+    and handed off again at 06:21:51Z (serve.handoff_done, checkout_behind): a second restart 20 minutes after a boot,
+    each a cold fold of the ledger. The supervisor's lastDoneAt is undefined at boot, so W1-T13303 criterion 2 lets a
+    supervisor with no handoff yet hand off at once.
+    DECISION: Craig chose "Yes, seed spacing from the ledger" on 2026-11-18 11:54Z ("a new container counts its own
+    boot as the last restart, so it won't hand off again minutes later"). The boot is the restart serve's own ledger
+    records (serve.supervisor_ready), so the seed is the boot time the supervisor already knows; no ledger read is added.
+    SCOPE: this changes serve's production supervisor only, through a new option. W1-T13303 criterion 2 stays true of
+    a bare createServeSupervisor (its test is unchanged), and that is what criterion 4 here guards; for production it
+    is superseded by this task.
+  design: |
+    INVARIANT seam-default-unchanged: without spaceFromBoot nothing changes.
+    1. ServeSupervisorOptions gains spaceFromBoot. When true and spacingBaseMs > 0, start() sets lastDoneAt to the
+       clock right after serve.supervisor_ready. Pressure is not raised, so the wait is the base window.
+    2. serve-supervisor-main.ts runServeSupervisor passes spaceFromBoot: true.
+  falsifier: |
+    Drop the seed: criterion 1 fails. Drop the production option: criterion 3 fails. Seed regardless of the option:
+    criterion 4 fails.
+  note: |
+    Id reserved for run-unfiled-1795002900000 with ~/rmd-work/bin/reserve-id.sh.

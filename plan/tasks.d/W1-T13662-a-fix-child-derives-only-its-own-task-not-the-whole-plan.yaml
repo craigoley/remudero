@@ -1,0 +1,102 @@
+- id: W1-T13662
+  title: "A fix child derives the merge state of its own task only, not of the whole plan: since W1-T13427 shipped, a fix child for a plan task spent p50 823 s, p90 1,497 s (max 1,537 s) in child-plan-projection before its admission, about 95% of its time from launch to admission, because readTask projects all of the plan's ~5,960 tasks to read one"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19: one concern, which tasks the fix child's recheck derives; it spans the status module and the child's production port, and the merged, retired and unreadable answers the recheck refuses on must not change
+  band_meaning: span
+  origin: "operator-session#fix-lane-flow-2026-11-18"
+  plan_refs:
+    - W1-T13427
+    - W1-T12893
+    - W1-T3971
+    - W1-T187
+  files:
+    - src/lib/status.ts
+    - src/run-task.ts
+    - test/fix-lane/a-fix-child-derives-only-its-own-task.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "projectTask(plan, taskId, deps), given a fixture plan of several tasks, returns a map that holds the named task only, and the projection it holds equals the entry projectPlan(plan, deps) gives for that task when the task is merged by a trailer, has an open pull request, and has neither"
+      proof: "grep: W1-T13662 criterion 1 in test/fix-lane/a-fix-child-derives-only-its-own-task.test.ts"
+    - claim: "invariant:the-recheck-answers-as-before — runDetachedWork with a fix-dispatch spec and its production readTask (a fixture plan, config, ledger and GitHub fake given through the existing ports) returns the same found, merged and retired values as at origin/main for a merged task, an open task and a task not in the plan, and throws the same `task <id>'s merge projection is unreadable` error when the GitHub fake fails its merged read"
+      kind: guard
+      proof: "grep: W1-T13662 criterion 2 in test/fix-lane/a-fix-child-derives-only-its-own-task.test.ts"
+    - claim: "invariant:one-task-is-derived — in the same run, with a fixture plan of at least 50 tasks, the gateway fake's per-task reads (changedFiles and any other call that names a task or its files) are made for the read task only, and the run still writes one sweep.fix.prepare_timing row with stage child-plan-projection"
+      kind: guard
+      proof: "grep: W1-T13662 criterion 3 in test/fix-lane/a-fix-child-derives-only-its-own-task.test.ts"
+    - claim: "The production fix child reads its task through the new one-task projection"
+      proof: "grep: projectTask( in src/run-task.ts"
+  rationale: |
+    WHY: before its admission a fix child rechecks that its task is not merged. To read that one task it
+    projects the whole plan. That one step now takes most of the time from launch to admission. While it
+    runs, the child holds a fix lane slot, writes no row and the pull request waits.
+    MEASURED, core ledger (~/rmd-state2/state, live file plus the archives, rows deduplicated by whole
+    line), 2026-11-16T11:16Z to 2026-11-18T11:16Z. The child-* timing rows exist from 2026-11-18T01:33Z,
+    when W1-T13427 merged:
+    - sweep.fix.prepare_timing by stage (n, p50, p90, max, total): child-plan-projection 20, 823 s,
+      1,497 s, 1,537 s, 17,176 s. child-task (holds the projection) 22, 707 s, 1,268 s, 1,542 s,
+      17,340 s. child-effects 29, 28 s, 75 s, 116 s. child-plan-sync 33, 5 s, 12 s, 16 s. child-live-pr 35,
+      1 s, 2 s, 3 s. child-hold, child-shared-pause, child-admission and child-context-digest each 0 s at
+      p90. So the projection is about 99% of child-task and about 95% of launch to admission.
+    - From the run id's launch time to the child's first row: 1 s to 24 s. run_child.launch_segments for
+      fix children (n=187): total p50 14 s, p90 41 s; entry_ms p50 1 s, p90 6 s, only 2 over 60 s (the
+      258 s case of 2026-11-16T19:03Z and one of 94 s). Launch is no longer the slow part.
+    - A child for a pull request with no plan task skips the projection and reaches admission in under
+      30 s (for example PR-19263, PR-19337, PR-19352).
+    - One child, W1-T12417 at 2026-11-18T04:56:43Z: launch, plan sync done at 04:56:57Z, then no row
+      until 05:17:58Z (child-plan-projection 1,261 s), admission at 05:17:58Z.
+    - About 4.8 hours of child time in 9.3 hours were spent in this step.
+    READ at origin/main b5ec57ef7:
+    - src/run-task.ts:45831 runFixDispatchWork. Its readTask port (:45896) calls planNow (child-plan-sync),
+      then at :45900 projectPlan(plan, { ledgerPath, github: buildBatchedGithub(owner, repo) }) over the
+      whole plan, and then reads one entry, projection.get(taskId).
+    - src/lib/status.ts:4060 projectPlan reads and indexes the ledger once, reads the credit store, makes
+      the batched merged and open reads once, and then calls deriveStatus (:3692) once for each of the
+      plan's tasks (:4174 to :4189), and openSiblingBuild for each unmerged task without an open pull
+      request. deriveStatus takes one task and the shared deps; it does not read the other tasks.
+    - The cold gateway is already seeded from the instance board snapshot (W1-T12893, merged), so the
+      GitHub walk is not the slow part; the per-task loop over ~5,960 tasks is.
+    NOT COVERED: W1-T13427 (merged) only measured this. W1-T187 and W1-T3971 (merged) made the whole-plan
+    projection read the ledger once; they keep one deriveStatus per task. W1-T12893 (merged) seeded the
+    cold gateway. Swept plan/tasks.d and plan/tasks.yaml for projectPlan, child-plan-projection,
+    runFixDispatchWork and readTask, and the 8 open pull requests on craigoley/remudero: none narrows the
+    fix child's projection.
+  design: |
+    INVARIANT the-recheck-answers-as-before: for a task in the plan, readTask returns the same found, merged and retired values, and throws the same error for an indeterminate or missing projection, as it does at origin/main.
+    INVARIANT one-task-is-derived: the child's projection derives the task it reads and no other task.
+    1. In src/lib/status.ts add an exported projectTask(plan, taskId, deps) beside projectPlan. It calls
+       projectPlan with a plan that holds only that task (tasks [task], byId with the one entry) and the
+       same deps, so the ledger read, the index, the credit store and the batched merged and open reads
+       are the ones projectPlan already makes. It returns the map projectPlan returns. A task id not in
+       the plan gives an empty map.
+    2. In runFixDispatchWork (src/run-task.ts:45900) call projectTask(plan, taskId, ...) in place of
+       projectPlan(plan, ...), with the same deps, inside the same child-plan-projection timing. Keep the
+       memo per task id, keep the not-found return before it, and keep the unreadable error text.
+    3. Do not change projectPlan, deriveStatus, the gateway or any other caller. Add no ledger step, env
+       var or config key.
+    4. TESTS in test/fix-lane/a-fix-child-derives-only-its-own-task.test.ts. Criterion 1 drives
+       projectTask and projectPlan on the same fixture plan and fake gateway. Criteria 2 and 3 drive
+       runDetachedWork with a fix-dispatch spec as
+       test/fix-lane/a-fix-child-writes-how-long-each-step-before-its-admission-took.test.ts does, with a
+       GitHub fake built from test/helpers/fake-github.ts that counts its calls. Load
+       test/setup/tmp-hygiene.ts so no test reads or writes the host's config or state.
+  falsifier: |
+    At origin/main the child projects every plan task, so criterion 3 sees per-task gateway reads for the
+    other tasks and fails, and projectTask does not exist, so criterion 1 fails. Make projectTask derive
+    with a fresh deps object that drops the batched merged read: the merged-by-trailer case in criteria 1
+    and 2 differs from projectPlan. Return an empty map for a found task: criterion 2 throws the unreadable
+    error for an open task.
+  note: |
+    Id reserved for run-unfiled-1795001139000 with ~/rmd-work/bin/reserve-id.sh.
+    Proof that counts in production: after a day, child-plan-projection p50 in sweep.fix.prepare_timing is
+    a few seconds, not minutes, and launch to admission for a plan task's fix child is near the PR-only
+    children's.
+    After admission a fix child also waits before its worker starts: from head-lookup to the first
+    sweep.fix.child_phase row p50 276 s, p90 572 s (n=124), most of it between strike_schedule_plan and
+    fix.remedy_path_execution (p50 137 s). It is not filed here.

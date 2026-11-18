@@ -1,0 +1,49 @@
+- id: W1-T13705
+  title: "Each ops catalog refresh writes one row naming its outcome, stage, duration and HTTP status class, so an unreadable catalog says why"
+  repo: remudero
+  depends_on: []
+  priority: 0.4
+  type: implement
+  verify: auto
+  risk: high # spans the read source and the daemon feed; adds rows only, every outcome and refusal is unchanged
+  origin: "human#2026-11-18-rethink-ops-tracking"
+  files:
+    - src/lib/ops-catalog-source.ts
+    - src/cli/commands/daemon.ts
+    - test/daemon/an-ops-catalog-refresh-says-why-it-failed.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Every completed opsCatalogShadowFeed refresh writes one dispatch.ops_catalog_refreshed row with outcome, refusal_stage, duration_ms, kind (full or revalidate) and, for a failed GET, http_status_class (4xx, 5xx, auth or transport), and no URL, body or token text"
+      proof: "grep: W1-T13705 criterion 1 in test/daemon/an-ops-catalog-refresh-says-why-it-failed.test.ts"
+    - claim: "A refresh whose first GET fails with HTTP 404 writes outcome unreadable, refusal_stage repository_identity and http_status_class 4xx"
+      proof: "grep: W1-T13705 criterion 2 in test/daemon/an-ops-catalog-refresh-says-why-it-failed.test.ts"
+    - claim: "invariant:outcomes-unchanged — for the same api answers every snapshot outcome and refusalStage equals origin/main's"
+      proof: "grep: W1-T13705 criterion 3 in test/daemon/an-ops-catalog-refresh-says-why-it-failed.test.ts"
+  rationale: |
+    WHY: when core's private-catalog read fails, nothing says why. defaultOpsCatalogApi
+    (src/lib/ops-catalog-source.ts) reduces every failure to a bare Refusal("unreadable") and drops the status by
+    design. Only a missing-auth diagnostic becomes its own outcome (auth_missing, get()); a 403, a 404, rate
+    limiting, a 5xx and a transport failure all read "unreadable". A refresh in opsCatalogShadowFeed
+    (src/cli/commands/daemon.ts) writes no row, and holdOpsDispatch logs only when its signature changes. An
+    operator therefore cannot tell those causes apart, or tell any of them from a read that never finishes. A
+    status class keeps the privacy rule (no URL, body or token) and makes the cause readable.
+    Filed in the public plan because core cannot yet read a core task filed in the private catalog, which is the
+    failure this task diagnoses. It re-files private W1-T13699 under a new id with this public contract.
+    Reservation note: refs/rmd-id/W1-T13705 was reserved before filing.
+    reservation hand-off: run-unfiled-1795011600001 -> claude/project-thread-vtlqln
+  design: |
+    1. src/lib/ops-catalog-source.ts: a closed OpsCatalogHttpStatusClass ("4xx" | "5xx" | "auth" | "transport").
+       defaultOpsCatalogApi classifies gh's status (HTTP_DIAGNOSTIC) before it drops the message; get() keeps the
+       class on the Refusal it rethrows, auth_missing carries "auth", an injected api's own error carries none.
+       readSnapshot copies the class onto the snapshot. createOpsCatalogShadowSource attaches `kind` (full or
+       revalidate) and the class to each answer as NON-ENUMERABLE properties, like the private handles.
+    2. src/cli/commands/daemon.ts: opsCatalogShadowFeed takes an optional log and, after each completed refresh
+       (a rejection included), writes dispatch.ops_catalog_refreshed with outcome, refusal_stage, duration_ms
+       (from the read's start), kind and http_status_class. A throwing log changes nothing. The daemon passes its log.
+    INVARIANT outcomes-unchanged: for the same api answers every snapshot outcome and refusalStage, and every
+    source answer's enumerable shape, is exactly origin/main's; the new fields are diagnostics only.
+  falsifier: |
+    Drop the classification in defaultOpsCatalogApi: criterion 2 reads http_status_class null, not "4xx".
+    Make the diagnostics enumerable: criterion 3's shape assertion fails (the answer gains kind).
+    Drop the log call: criterion 1 sees no row.

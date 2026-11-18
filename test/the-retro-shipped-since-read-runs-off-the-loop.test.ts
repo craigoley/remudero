@@ -172,7 +172,7 @@ test("a shipped-since page walk past its bound is killed and the retro decline n
   }
 });
 
-test("the awaited and sync shipped-since gateways answer identically over a recorded gh and a real git checkout", async () => {
+test("W1-T9944: awaited and sync shipped-since gateways retry transient 502 pages identically", async () => {
   const scenarios = [
     { name: "healthy", gh: {}, origin: true, minShipped: 3 },
     { name: "closed pages fail", gh: { closedFails: true }, origin: true, minShipped: 0 },

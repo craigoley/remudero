@@ -18,7 +18,7 @@
     - src/lib/serve-supervisor.ts
     - test/console-api/serve/a-handoff-warm-bar-leaves-out-bodies-only-the-active-built.test.ts
     - test/serve-generation.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "An active holding 235 bodies of which 226 are committed sets the bar at 226, so a standby holding the 226 the store gives it hands off"
