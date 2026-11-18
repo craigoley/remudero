@@ -119,3 +119,25 @@ test("idle_starved: a fresh shell pulse is live but not a stalled build; an old 
   assert.match(dead.daemon_verdict, /^STALE/);
   assert.match(dead.dispatch_verdict, /^STALLED/, "an old pulse cannot mask a dead sleeper");
 });
+
+test("W1-T13249 criterion 2: the last dispatch is the newest run that passed its claim, not the newest run.start", () => {
+  const rs = (ago: number, runId: string) =>
+    JSON.stringify({ ts: isoAgo(ago), run_id: runId, step: "run.start", lane: "run-task", task_id: "W1-T12114" });
+  const claim = (ago: number, runId: string, proceed: boolean) =>
+    JSON.stringify({ ts: isoAgo(ago), run_id: runId, step: "dispatch.claim", outcome: proceed ? "created" : "taken", proceed });
+  // A real build 48 h ago, then a refused run.start every tick since: the beat must still read STALLED.
+  const ledger = [
+    rs(48 * 3600, "real"), claim(48 * 3600 - 1, "real", true),
+    rs(120, "refused-1"), claim(119, "refused-1", false),
+    rs(60, "refused-2"), claim(59, "refused-2", false),
+  ];
+  const stalled = beat([...POLLING(), ...ledger]);
+  assert.match(stalled.dispatch_verdict, /^STALLED/, "a claim-refused run.start is not a dispatch");
+  assert.ok(Number(stalled.dispatch_last_age_s) > 47 * 3600, `last dispatch is the real build, got age ${stalled.dispatch_last_age_s}`);
+
+  // A run that took no claim, and a run that passed its claim, both still count.
+  const noClaim = beat([...POLLING(), ...ledger, rs(30, "no-claim")]);
+  assert.equal(noClaim.dispatch_verdict, "building");
+  const passed = beat([...POLLING(), ...ledger, rs(40, "ok"), claim(39, "ok", true)]);
+  assert.equal(passed.dispatch_verdict, "building");
+});
