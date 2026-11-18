@@ -21,6 +21,7 @@ import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const TERRA = "gpt-6.1-terra";
 const SOL = "gpt-6.1-sol";
+const SOL62 = "gpt-6.2-sol";
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 const table = loadMounts(mountsPath(REPO_ROOT)).capabilities!;
 
@@ -49,9 +50,10 @@ test("W1-T10839: Terra 6.1 is priced, shaped and ready on the cash lane", () => 
 test("W1-T10839: the Responses deployment set carries Sol and Terra and its errors name the deployment", async (t) => {
   const declared = responses.CASH_RESPONSES_DEPLOYMENTS;
   assert.deepEqual(declared[SOL], EFFORTS);
+  assert.deepEqual(declared[SOL62], ["low", "medium", "high"]);
   assert.deepEqual(declared[TERRA], ["none", ...EFFORTS]);
   const conversation = new responses.CashResponsesConversation("contract", "prompt");
-  for (const model of [SOL, TERRA]) {
+  for (const model of [SOL, SOL62, TERRA]) {
     for (const effort of declared[model]!) {
       assert.equal(JSON.parse(conversation.body(model, effort, 8000, [])).reasoning.effort, effort);
     }
@@ -110,7 +112,7 @@ test("W1-T10839: the Responses deployment set carries Sol and Terra and its erro
 
 test("W1-T10839: cash balanced puts Terra ahead of Sol and cash frontier swaps in Terra 6.1", () => {
   for (const effort of ["low", "medium", "high"]) {
-    const balanced = ["gpt-5-nano", "gpt-oss-120b", "gpt-6-luna", "gpt-5.6-luna", TERRA, SOL];
+    const balanced = ["gpt-5-nano", "gpt-oss-120b", "gpt-6-luna", "gpt-5.6-luna", TERRA, SOL62, SOL];
     const frontier = ["gpt-6-luna", "gpt-5.6-luna", TERRA, "gpt-5.6-terra"];
     assert.deepEqual(table.cash!.balanced[effort], balanced);
     assert.deepEqual(table.cash!.frontier[effort], frontier);
@@ -130,14 +132,18 @@ test("W1-T10839: the Sonnet fallback offers Terra 6.1 before Sol 6.1", (t) => {
   const { dir } = ownedFixtureDir(t, "terra61-sonnet");
   const config = { root: dir, claudeBin: "/unused", workerProviders: { cashEndpoint: "https://default.openai.azure.com/" } } as Config;
   try {
-    assert.deepEqual(worker.cashSonnetAlternatives("small", config, {}), [TERRA, SOL]);
+    assert.deepEqual(worker.cashSonnetAlternatives("small", config, {}), [TERRA, SOL62, SOL]);
     markOpenWeightDeploymentAbsent(TERRA);
+    assert.deepEqual(worker.cashSonnetAlternatives("small", config, {}), [SOL62, SOL]);
+    markOpenWeightDeploymentAbsent(SOL62);
     assert.deepEqual(worker.cashSonnetAlternatives("small", config, {}), [SOL]);
     markOpenWeightDeploymentAbsent(SOL);
     assert.deepEqual(worker.cashSonnetAlternatives("small", config, {}), []);
     clearOpenWeightAbsence();
     assert.deepEqual(worker.cashSonnetAlternatives("x".repeat(4_000_000), config, {}), []);
     recordCashCapacity(config, TERRA, new Headers({ "x-ratelimit-limit-tokens": "1" }), { clock: systemClock });
+    assert.deepEqual(worker.cashSonnetAlternatives("small", config, {}), [SOL62, SOL]);
+    recordCashCapacity(config, SOL62, new Headers({ "x-ratelimit-limit-tokens": "1" }), { clock: systemClock });
     assert.deepEqual(worker.cashSonnetAlternatives("small", config, {}), [SOL]);
     recordCashCapacity(config, SOL, new Headers({ "x-ratelimit-limit-tokens": "1" }), { clock: systemClock });
     assert.deepEqual(worker.cashSonnetAlternatives("small", config, {}), []);
@@ -198,4 +204,29 @@ test("W1-T10839: the successor watcher reads a deployed Terra 6.1 as ready", asy
   assert.deepEqual(classifySuccessors(routedModels, [{ source: "cash", models: ["gpt-5.6-terra"] }]), []);
   assert.deepEqual(classifySuccessors(["gpt-7-terra"], [{ source: "cash", models: ["gpt-7-terra"] }]), []);
   assert.equal(classifySuccessors(routedModels, [{ source: "cash", models: ["gpt-7-terra"] }])[0]?.state, "deployed-unpriced");
+});
+
+test("W1-T13446: the cash lane prices, shapes and bounds gpt-6.2-sol and the bake-off trials it at low, medium and high", () => {
+  const price = OPENWEIGHT_PRICES[SOL62]!;
+  assert.equal(price.inputUsdPerMillion, 2);
+  assert.equal(price.outputUsdPerMillion, 10);
+  assert.equal(price.readAt, "2026-11-18");
+  assert.equal(OPENWEIGHT_CONTEXT_WINDOWS[SOL62]?.totalTokens, 128_000);
+  assert.equal(OPENWEIGHT_RESPONSE_FORMATS[SOL62], undefined);
+  assert.equal(OPENWEIGHT_TEMPERATURE[SOL62], null);
+  assert.equal(openWeightDeploymentReady(SOL62), true);
+  // Threshold -1 prices every request at the long-context tier, 6.1 Sol's rates (the gap is named in the row).
+  assert.equal(OPENWEIGHT_PRICES[SOL62]!.longContext?.thresholdInputTokens, -1);
+  // 30 uncached x $4 + 60 cached x $0.20 + 10 cache-write x $5 + 20 output x $15, per million.
+  assert.ok(Math.abs(openWeightUsageUsd(SOL62, 100, 20, 60, 10) - 0.000482) < 1e-12);
+  const sol = BAKEOFF_CANDIDATES.filter((candidate) => candidate.model === SOL62);
+  assert.deepEqual(sol.map((candidate) => candidate.effort), ["low", "medium", "high"]);
+  assert.ok(sol.every((candidate) => candidate.tools && candidate.billing === "cash"));
+  for (const candidate of sol) {
+    const selection = selectOpenWeightModel(table, candidate.mountModel ?? "haiku", candidate.effort ?? "low",
+      Buffer.byteLength("fixture prompt"), { only: [candidate.model] });
+    assert.equal(selection.model, SOL62);
+    assert.equal(selection.effort, candidate.effort);
+    assert.equal(selection.capability, "balanced");
+  }
 });

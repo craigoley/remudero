@@ -1,0 +1,48 @@
+- id: W1-T13719
+  title: "A refused product plan does not block a fresh plan request once the target repository moves on"
+  repo: remudero
+  depends_on: []
+  priority: 0.9
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # which journal operation a product plan request binds to; a wrong binding either replans silently or never plans
+  origin: "operator-session#onboarding-idea-to-prototype-2026-11-18"
+  plan_refs:
+    - W1-T10823
+    - W1-T11394
+  files:
+    - src/lib/product-plan-operation.ts
+    - test/dispatch/product-plan-operation.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "After a plan is refused and the target head moves, a fresh request plans again at the new head (new operation, replayed false, one more hand-off)"
+      proof: "unit test: W1-T13719: a refused plan does not block a fresh request once the target head moves"
+    - claim: "invariant:refusal-not-retried-silently — at the same head a fresh request still binds to the refused operation, and the original request still replays it without a hand-off"
+      kind: guard
+      proof: "unit test: W1-T10823: pending refused unknown changed-brief and stale-target stay distinct"
+    - claim: "The reuse rule names the refused case: a stale-target operation is reused only when it was not refused"
+      proof: 'grep: if (state === "stale-target") return in src/lib/product-plan-operation.ts'
+  rationale: |
+    WHY: OBSERVED 2026-11-18 on the Wreckterra product (Console "Set up a new repository" flow). Its only plan
+    operation, b829cc79..., was requested 2026-11-03T12:04:41Z at wreckterra head 8dcce032af9c and its hand-off
+    was refused at 12:05:00Z (host read of state/products/v1/plan-operations, 4 request keys, all bound to b829).
+    Wreckterra main has since moved to 79cd6bc. In ProductPlanOperationService.propose(), a fresh request reuses
+    any same-brief operation whose state is pending, unknown or stale-target, and observe() relabels a refused
+    operation as stale-target once the live head moves. So every fresh request with the unchanged brief binds to
+    the refused operation again and never plans: the Console's "ask for a plan" step can never succeed again for
+    this product unless the operator edits the brief text.
+    W1-T11394 shares these two files but only adds an observational requirement-coverage report to the
+    operation response; it does not change which operation a request binds to, which is all this task changes.
+  design: |
+    INVARIANT refusal-not-retried-silently: at the head the refusal was recorded on, a fresh request still
+    returns the refused operation, and a replay of a known request never hands off (W1-T10823 unchanged).
+
+    1. In propose(), a same-brief operation whose state is stale-target is reused only when its state without
+    the head comparison is not refused. Pending and unknown operations are still reused at any head, so the same
+    brief never gets a second plan while the first is unresolved.
+  falsifier: >-
+    Restore src/lib/product-plan-operation.ts from main: the W1-T13719 test fails (measured: # pass 19, # fail 1)
+    because the fresh request replays the refused operation and the hand-off count stays 1.

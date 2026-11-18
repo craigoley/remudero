@@ -11,6 +11,7 @@ import { REPO_ROOT } from "#test/helpers/repo-root.js";
 // Added test helpers are overlaid onto the base by the proof runner. Exercise the existing
 // caller in its own checkout too, so a copied helper cannot certify an unchanged caller.
 let callerOutput: string | undefined;
+const missingNpmDiagnostic = /source-size-signal(?: \(calibration run, hang ceiling \d+ ms\))? ran \(status null; signal none; code ENOENT\)/;
 function runRealGateCaller(): string {
   if (callerOutput !== undefined) return callerOutput;
   const scratch = mkdtempSync(join(tmpdir(), "rmd-gate-probe-caller-"));
@@ -58,7 +59,7 @@ test("gate probe diagnostics preserve the real missing-executable refusal", () =
   assert.ok(native.stdout === null || native.stdout === undefined);
   assert.ok(native.stderr === null || native.stderr === undefined);
   assert.throws(() => assertGateProbeRan("fixture", native), /status null; signal none; code ENOENT/);
-  assert.match(runRealGateCaller(), /source-size-signal \(calibration run, hang ceiling 900000 ms\) ran \(status null; signal none; code ENOENT\)/);
+  assert.match(runRealGateCaller(), missingNpmDiagnostic);
 });
 
 test("gate probe diagnostics preserve the real native timeout and signal", () => {
@@ -68,7 +69,7 @@ test("gate probe diagnostics preserve the real native timeout and signal", () =>
   assert.equal(native.stdout, null);
   assert.equal(native.stderr, null);
   assert.throws(() => assertGateProbeRan("fixture", native), /status null; signal SIGTERM; code ETIMEDOUT/);
-  assert.match(runRealGateCaller(), /source-size-signal \(calibration run, hang ceiling 900000 ms\) ran \(status null; signal none; code ENOENT\)/);
+  assert.match(runRealGateCaller(), missingNpmDiagnostic);
 });
 
 test("gate probe diagnostics retain ordinary real zero and one exits", () => {

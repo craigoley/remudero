@@ -295,9 +295,9 @@ capabilities:
     # selectOpenWeightModel(..., { cashSqueezed: true }) promotes it only when the subscription
     # auction has already blocked and this cash request is the squeeze fallback.
     balanced:
-      low:    [gpt-5-nano, gpt-oss-120b, gpt-6-luna, gpt-5.6-luna, gpt-6.1-terra, gpt-6.1-sol]
-      medium: [gpt-5-nano, gpt-oss-120b, gpt-6-luna, gpt-5.6-luna, gpt-6.1-terra, gpt-6.1-sol]
-      high:   [gpt-5-nano, gpt-oss-120b, gpt-6-luna, gpt-5.6-luna, gpt-6.1-terra, gpt-6.1-sol]
+      low:    [gpt-5-nano, gpt-oss-120b, gpt-6-luna, gpt-5.6-luna, gpt-6.1-terra, gpt-6.2-sol, gpt-6.1-sol]
+      medium: [gpt-5-nano, gpt-oss-120b, gpt-6-luna, gpt-5.6-luna, gpt-6.1-terra, gpt-6.2-sol, gpt-6.1-sol]
+      high:   [gpt-5-nano, gpt-oss-120b, gpt-6-luna, gpt-5.6-luna, gpt-6.1-terra, gpt-6.2-sol, gpt-6.1-sol]
     # LUNA TAKES gpt-5-mini's PLACE; TERRA IS THE ESCALATION BEHIND IT. Luna is cheaper
     # than mini on both axes ($0.20/$1.20 vs $0.25/$2.00) and spent 0 reasoning tokens on an
     # identical trivial prompt where mini spent 64 of 76, so mini was REMOVED rather than demoted.
