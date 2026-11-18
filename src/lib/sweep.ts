@@ -15,7 +15,7 @@ import { buildFixProgressInput as buildBaseFixProgressInput, fixRedClass, resolv
   sameCriterionStall, nextStallRemedy, stallRemedyRows, failedApproaches, rowPrNumber, type StallRemedy,
   type FixProgressReaskResult } from "./fix-progress-judge.js";
 import type { DispatchBreakJudge } from "./stall-verifier.js";
-import { readCiGateRequiredChecks } from "./ci-gate-required.js";
+import { readCiGateRequiredNames, resolveCiGateRequiredSource, type CiGateRequiredSource } from "./ci-gate-required.js";
 import { createHeadRehomePorts, headIdentityRed, headRehomePlan, type HeadRehomePorts } from "./head-rehome.js";
 import { argmaxTypedJudgmentOption, runTypedJudgment } from "./typed-judgment.js";
 import { judgeShadowOnlyArm, judgeShadowOnlyPrimary, shadowJudgeCall, type ShadowJudgeCall } from "./judge-shadow.js";
@@ -1558,6 +1558,8 @@ export interface BuildSweepEffectsDeps {
   repoMode?: "shadow" | "live";
   repoRoot?: string;
   localRepoName?: string;
+  ciGateSource?: CiGateRequiredSource;
+  ciGateRequired?: string[];
   nowMsImpl?: () => number;
   config: Config;
   ledgerPath: string;
@@ -2922,6 +2924,10 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       }
     });
   const repoRoot = entrypointRepoRoot;
+  const ciGateSource = deps.ciGateSource ?? resolveCiGateRequiredSource({ owner, repo }, {
+    self: { owner, repo: localRepoName }, selfRoot: repoRoot, configRoot: config.root,
+  });
+  const requiredChecks = deps.ciGateRequired ?? readCiGateRequiredNames(ciGateSource, log);
   // W1-T10772: resolved per call (the store verifies its state directory's identity), never cached.
   const ladderNoteStore = () => operatorNoteStore({ stateDir: join(config.root, "state"), repository: `${owner}/${repo}`, legacyRoot: repoRoot });
   // W1-T7096: ONE judge serves both the sweep's own next-round decision and the rung it dispatches.
@@ -3672,7 +3678,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
 
     headRehome: deps.headRehomeImpl ?? createHeadRehomePorts({
       owner, repo, readJson: ghJsonForBuild, latestChecks: dedupeRollupByLatestAttempt,
-      requiredChecks: readCiGateRequiredChecks(repoRoot),
+      requiredChecks,
       judgeQuiet: async (pr) => {
         if (repoMode === "shadow") return { quiet: false, reason: "shadow repository" };
         const mounts = loadMounts(mountsPath(repoRoot));
@@ -3956,7 +3962,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // simply never fires for this PR on this pass, rather than aborting the whole sweep loop over
     // one PR's rollup read.
     // W1-T5979: a ci-gate timeout's rollup-sourced not-ready list is filtered to this list.
-    readCiGateRequired: () => readCiGateRequiredChecks(repoRoot),
+    readCiGateRequired: () => requiredChecks,
 
     readCiGateRollup: async (pr) => {
       try {
@@ -6934,7 +6940,7 @@ export type CiTimeoutNotReadySource =
 /** Checks whose latest attempt still waits for a runner. */
 const CI_TIMEOUT_NOT_STARTED = new Set(["QUEUED", "PENDING", "WAITING", "REQUESTED", "EXPECTED"]);
 
-/** W1-T5979: `required` is ci-gate's REQUIRED list ({@link readCiGateRequiredChecks}); an empty one
+/** W1-T5979: `required` is ci-gate's REQUIRED list ({@link readCiGateRequiredNames}); an empty one
  *  is that reader's unreadable answer, never an empty set. A required name with no rollup entry is
  *  the never-started check the gate waits on, so it is named and listed in `neverRegistered`. */
 export function ciTimeoutNotReadyChecks(
