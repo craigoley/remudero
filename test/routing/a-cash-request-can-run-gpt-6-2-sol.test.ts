@@ -9,7 +9,7 @@ import * as worker from "#src/lib/worker.js";
 import {
   CODEX_NOTIONAL_PRICES, OPENWEIGHT_CONTEXT_WINDOWS, OPENWEIGHT_PRICES,
   OPENWEIGHT_RESPONSE_FORMATS, OPENWEIGHT_TEMPERATURE, clearOpenWeightAbsence,
-  markOpenWeightDeploymentAbsent, openWeightDeploymentKnownAbsent, openWeightDeploymentReady,
+  markOpenWeightDeploymentAbsent, openWeightCandidatesForCapability, openWeightDeploymentKnownAbsent, openWeightDeploymentReady,
   openWeightUsageUsd, recordCashCapacity, resetLearnedCashCapacity, selectOpenWeightModel,
   spawnOpenWeightWorker,
 } from "#src/lib/worker-provider.js";
@@ -77,6 +77,51 @@ test("W1-T13446 criterion 1: gpt-6.2-sol is a ready cash deployment, priced $2/$
   }
   // The listed efforts are not copied from 6.1 Sol or the Codex list.
   assert.notDeepEqual(CASH_RESPONSES_DEPLOYMENTS[SOL62], CASH_RESPONSES_DEPLOYMENTS[SOL]);
+});
+
+test("W1-T13446 criterion 2: every cash row offering gpt-6.1-sol lists gpt-6.2-sol directly ahead of it, and cashSonnetAlternatives offers terra, 6.2 sol, 6.1 sol, passing over absent or capacity-short members", (t) => {
+  const withoutSol62 = (row: string[]) => row.filter((model) => model !== SOL62);
+  const originBalanced = ["gpt-5-nano", "gpt-oss-120b", "gpt-6-luna", "gpt-5.6-luna", TERRA, SOL];
+  const balanced = ["gpt-5-nano", "gpt-oss-120b", "gpt-6-luna", "gpt-5.6-luna", TERRA, SOL62, SOL];
+  for (const effort of ["low", "medium", "high"]) {
+    // mounts.yaml: every cash row offering 6.1 Sol has 6.2 Sol directly ahead, others in origin/main order.
+    for (const tier of ["economy", "balanced", "frontier"] as const) {
+      const row = table.cash![tier][effort]!;
+      if (row.includes(SOL)) assert.equal(row.indexOf(SOL62) + 1, row.indexOf(SOL), `${tier}/${effort}`);
+      else assert.equal(row.includes(SOL62), false, `${tier}/${effort} offers no 6.1 Sol, so no 6.2 Sol`);
+    }
+    const row = table.cash!.balanced[effort]!;
+    assert.deepEqual(row, balanced);
+    assert.deepEqual(withoutSol62(row), originBalanced);
+    // FALLBACK_OPENWEIGHT_MODELS (no mounts table) carries the same order.
+    assert.deepEqual(openWeightCandidatesForCapability(undefined, "balanced", effort), balanced);
+    for (const tier of ["economy", "frontier"] as const) {
+      assert.equal(openWeightCandidatesForCapability(undefined, tier, effort).includes(SOL62), false);
+    }
+  }
+
+  const { dir } = ownedFixtureDir(t, "sol62-alternatives");
+  const config = { root: dir, claudeBin: "/unused", workerProviders: { cashEndpoint: `https://${DEFAULT_HOST}/` } } as Config;
+  const capShort = (model: string) =>
+    recordCashCapacity(config, model, new Headers({ "x-ratelimit-limit-tokens": "1" }), { clock: systemClock });
+  try {
+    assert.deepEqual(worker.cashSonnetAlternatives("small", config, {}), [TERRA, SOL62, SOL]);
+    // Absent members are passed over, one at a time.
+    markOpenWeightDeploymentAbsent(SOL62);
+    assert.deepEqual(worker.cashSonnetAlternatives("small", config, {}), [TERRA, SOL]);
+    markOpenWeightDeploymentAbsent(TERRA);
+    assert.deepEqual(worker.cashSonnetAlternatives("small", config, {}), [SOL]);
+    markOpenWeightDeploymentAbsent(SOL);
+    assert.deepEqual(worker.cashSonnetAlternatives("small", config, {}), []);
+    clearOpenWeightAbsence();
+    // Capacity-short members are passed over too.
+    capShort(SOL62);
+    assert.deepEqual(worker.cashSonnetAlternatives("small", config, {}), [TERRA, SOL]);
+    capShort(TERRA);
+    assert.deepEqual(worker.cashSonnetAlternatives("small", config, {}), [SOL]);
+    capShort(SOL);
+    assert.deepEqual(worker.cashSonnetAlternatives("small", config, {}), []);
+  } finally { clearOpenWeightAbsence(); resetLearnedCashCapacity(); }
 });
 
 test("W1-T13446 criterion 3: the bake-off trials gpt-6.2-sol at low, medium and high on the sonnet mount, and a mapped entry sends its requests to that endpoint and key env", async (t) => {
