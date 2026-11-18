@@ -1,22 +1,15 @@
 import assert from "node:assert/strict";
-import fs, { mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import fs, { mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test, type TestContext } from "node:test";
+import { test } from "node:test";
 
-import { loadPlan, loadPlanReusingParses, PlanBlobCache, PlanError } from "#src/lib/plan.js";
+import { loadPlan, loadPlanReusingParses, mergePlanBlobsQuarantiningDuplicates, PlanBlobCache, PlanError } from "#src/lib/plan.js";
 import { buildSweepEffects, FIX_PLAN_BLOB_CACHE } from "#src/lib/sweep.js";
-import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 
 function shard(id: string, extra = ""): string {
   return `- id: ${id}\n  title: ${id}\n  repo: remudero\n  type: implement\n  status: queued\n  attempts: 0\n  depends_on: []\n${extra}`;
-}
-
-function scratch(t: TestContext): string {
-  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t13669-`));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
-  return root;
 }
 
 /** A plan directory: a monolith with one task and `count` one-task shards. Returns the monolith path. */
@@ -41,7 +34,7 @@ function thrown(fn: () => unknown): PlanError {
 }
 
 test("W1-T13669 criterion 1: a second load over one changed shard of 200 parses only that shard", (t) => {
-  const path = planDir(scratch(t), 200);
+  const path = planDir(ownedFixtureDir(t, "t13669").dir, 200);
   const cache = new PlanBlobCache();
   const first = loadPlanReusingParses(path, cache);
   assert.equal(first.tasks.length, 201);
@@ -55,7 +48,7 @@ test("W1-T13669 criterion 1: a second load over one changed shard of 200 parses 
 });
 
 test("W1-T13669 criterion 2: the loader returns loadPlan's plan and throws loadPlan's errors, also on reused parses", (t) => {
-  const dir = scratch(t);
+  const { dir } = ownedFixtureDir(t, "t13669");
   const path = planDir(dir, 5);
   const shards = join(dir, "tasks.d");
   const cache = new PlanBlobCache();
@@ -65,18 +58,28 @@ test("W1-T13669 criterion 2: the loader returns loadPlan's plan and throws loadP
   assert.deepEqual(reused, loadPlan(path), "a reused parse gives the same tasks, order and sourcePath");
   assert.deepEqual(view(reused), view(loadPlan(path)));
 
+  unlinkSync(join(shards, "W1-T3.yaml"));
   writeFileSync(join(shards, "W1-T6.yaml"), shard("W1-T3"));
+  assert.deepEqual(loadPlanReusingParses(path, cache), loadPlan(path));
+  writeFileSync(join(shards, "W1-T3.yaml"), shard("W1-T3"));
   const duplicate = thrown(() => loadPlan(path)).message;
   assert.match(duplicate, /duplicate task id 'W1-T3'/);
   assert.equal(thrown(() => loadPlanReusingParses(path, cache)).message, duplicate, "a duplicate across shards throws");
   assert.equal(thrown(() => loadPlanReusingParses(path, cache)).message, duplicate, "and throws again when every text was seen before");
   unlinkSync(join(shards, "W1-T6.yaml"));
 
-  writeFileSync(join(shards, "W1-T7.yaml"), "- id: W1-T7\n  title: [unclosed\n");
+  const invalidPath = join(shards, "W1-T7.yaml");
+  const invalidText = "- id: W1-T7\n  title: [unclosed\n";
+  writeFileSync(invalidPath, invalidText);
   const invalid = thrown(() => loadPlan(path)).message;
   assert.equal(thrown(() => loadPlanReusingParses(path, cache)).message, invalid, "a shard that is not valid YAML throws");
-  assert.equal(thrown(() => loadPlanReusingParses(path, cache)).message, invalid, "and throws again for the same text");
-  unlinkSync(join(shards, "W1-T7.yaml"));
+  const invalidCache = new PlanBlobCache();
+  mergePlanBlobsQuarantiningDuplicates([
+    { label: path, text: readFileSync(path, "utf8") },
+    { label: invalidPath, text: invalidText },
+  ], invalidCache);
+  assert.equal(thrown(() => loadPlanReusingParses(path, invalidCache)).message, invalid, "cached invalid YAML throws the same error");
+  unlinkSync(invalidPath);
 
   unlinkSync(join(shards, "W1-T2.yaml"));
   const removed = loadPlanReusingParses(path, cache);
@@ -99,6 +102,25 @@ test("W1-T13669 criterion 2: the loader returns loadPlan's plan and throws loadP
   assert.deepEqual(loadPlanReusingParses(path, cache), loadPlan(path));
 });
 
+test("W1-T13669 criterion 2: a duplicate within the monolith or a shard throws the same PlanError on cold and reused parses", (t) => {
+  const { dir } = ownedFixtureDir(t, "t13669");
+  const path = planDir(dir, 1);
+  const shardPath = join(dir, "tasks.d", "W1-T1.yaml");
+  for (const [duplicatePath, id] of [[path, "W1-T0"], [shardPath, "W1-T1"]] as const) {
+    writeFileSync(duplicatePath, shard(id) + shard(id));
+    const expected = `duplicate task id '${id}'`;
+    assert.equal(thrown(() => loadPlan(path)).message, expected);
+    const cache = new PlanBlobCache();
+    assert.equal(thrown(() => loadPlanReusingParses(path, cache)).message, expected);
+
+    const blobs = [path, shardPath].map((label) => ({ label, text: readFileSync(label, "utf8") }));
+    const { quarantined } = mergePlanBlobsQuarantiningDuplicates(blobs, cache);
+    assert.equal(quarantined[0]?.id, id, "seed the cache with the duplicate diagnostic");
+    assert.equal(thrown(() => loadPlanReusingParses(path, cache)).message, expected);
+    writeFileSync(duplicatePath, shard(id));
+  }
+});
+
 function effectsFor(root: string) {
   return buildSweepEffects({
     owner: "craigoley", repo: "t13669-fixture", config: { root } as never, ledgerPath: join(root, "ledger.ndjson"),
@@ -111,7 +133,7 @@ function effectsFor(root: string) {
 }
 
 test("W1-T13669 criterion 3: the sweep's default plan re-read reuses its parses across sweeps and sees a new shard", (t) => {
-  const root = scratch(t);
+  const { dir: root } = ownedFixtureDir(t, "t13669");
   const planRoot = join(root, "plan");
   const path = planDir(planRoot, 20);
   const first = effectsFor(root).readTaskContractRevision!("W1-T5");

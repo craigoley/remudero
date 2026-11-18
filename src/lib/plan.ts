@@ -674,6 +674,10 @@ function detachStrings(node: unknown): unknown {
   return node;
 }
 
+function rejectDuplicateTaskId(id: string): never {
+  throw new PlanError(`duplicate task id '${id}'`);
+}
+
 /** Field-validate schema-v1 tasks without resolving dependencies outside this blob.
  *  W1-T110: inbox ratification drafts need partial validation; {@link loadPlanFromYaml} resolves ids. */
 export function parseTasksFromYaml(
@@ -697,10 +701,7 @@ export function parseTasksFromYaml(
     if (typeof entry !== "object" || entry === null) throw new PlanError("each task must be a mapping.");
     const e = entry as Record<string, unknown>;
     const id = req(e.id as string, "id", String(e.id ?? "<unknown>"));
-    if (byId.has(id)) {
-      if (!onDuplicate) throw new PlanError(`duplicate task id '${id}'`);
-      onDuplicate(id);
-    }
+    if (byId.has(id)) (onDuplicate ?? rejectDuplicateTaskId)(id);
     const risk = (e.risk ?? DEFAULT_RISK) as TaskRisk;
     if (!TASK_RISKS.includes(risk)) {
       throw new PlanError(`task ${id}: invalid risk '${risk}' (must be ${TASK_RISKS.join("|")})`);
@@ -903,7 +904,8 @@ export function loadPlan(
 export function loadPlanReusingParses(path: string, cache: PlanBlobCache): Plan {
   const next = new Map<string, CachedPlanBlob>();
   const counts = { parsedBlobs: 0, reusedBlobs: 0 };
-  const plan = readMergedPlan(path, defaultIntegrityIO, join(dirname(path), "tasks.d"), undefined, undefined, cachedBlobParser(cache, next, counts));
+  const parse = cachedBlobParser(cache, next, counts, (file) => file);
+  const plan = readMergedPlan(path, defaultIntegrityIO, join(dirname(path), "tasks.d"), undefined, undefined, parse);
   cache.entries = next;
   Object.assign(cache, counts);
   return plan;
@@ -950,10 +952,15 @@ export class PlanBlobCache {
   reusedBlobs = 0;
 }
 
-function cachedBlobParser(cache: PlanBlobCache, next: Map<string, CachedPlanBlob>, counts: { parsedBlobs: number; reusedBlobs: number }): typeof parseTasksFromYaml {
+function cachedBlobParser(
+  cache: PlanBlobCache,
+  next: Map<string, CachedPlanBlob>,
+  counts: { parsedBlobs: number; reusedBlobs: number },
+  // Ref labels are `<ref>:<repo-relative path>`; changing the ref must not invalidate unchanged content.
+  pathForLabel = (label: string) => label.slice(label.indexOf(":") + 1),
+): typeof parseTasksFromYaml {
   return (text, label, onDuplicate) => {
-    // Ref labels are `<ref>:<repo-relative path>`; changing the ref must not invalidate unchanged content.
-    const path = label.slice(label.indexOf(":") + 1);
+    const path = pathForLabel(label);
     const hash = createHash("sha256").update(text, "utf8").digest("hex");
     let entry = cache.entries.get(path);
     if (entry?.hash === hash) {
@@ -963,7 +970,7 @@ function cachedBlobParser(cache: PlanBlobCache, next: Map<string, CachedPlanBlob
       counts.parsedBlobs++;
       entry = { hash, label, tasks: [], duplicates: [] };
       try {
-        entry.tasks = parseTasksFromYaml(text, label, (id) => entry!.duplicates.push(id));
+        entry.tasks = parseTasksFromYaml(text, label, onDuplicate && ((id) => entry!.duplicates.push(id)));
       } catch (err) {
         if (!(err instanceof PlanError)) throw err;
         // Strip only the diagnostic's generated prefix, never occurrences in the author's YAML.
@@ -977,7 +984,7 @@ function cachedBlobParser(cache: PlanBlobCache, next: Map<string, CachedPlanBlob
       }
     }
     next.set(path, entry);
-    for (const id of entry.duplicates) onDuplicate?.(id);
+    for (const id of entry.duplicates) (onDuplicate ?? rejectDuplicateTaskId)(id);
     if (entry.error) {
       const prefix = entry.error.prefix === "yaml" ? `plan is not valid YAML (${label}): ` : entry.error.prefix === "task" ? `${label}: task ` : "";
       throw new PlanError(prefix + entry.error.message);
