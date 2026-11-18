@@ -28,7 +28,7 @@ test("W1-T9944: board_gateway.fetch_failed no longer recurs", () => {
       log: (event, extra) => logged.push({ event, extra }),
     });
 
-    assert.deepEqual(board.listOpenHeadBranches(), [], "the board returns the successful retry's empty open set");
+    assert.deepEqual(board.listOpenHeadBranches?.(), [], "the board returns the successful retry's empty open set");
     assert.equal(calls.length, 2, "the failed API page is retried once");
     assert.deepEqual(calls[0], calls[1], "both calls read the same idempotent API page");
     assert.equal(logged.some((row) => row.event === "board_gateway.fetch_failed"), false,
@@ -52,7 +52,7 @@ test("W1-T9944: board_gateway.fetch_failed no longer recurs", () => {
       },
       log: (event, extra) => persistentLog.push({ event, extra }),
     });
-    assert.equal(board.listOpenHeadBranches(), null, "a sustained outage stays unreadable");
+    assert.equal(board.listOpenHeadBranches?.(), null, "a sustained outage stays unreadable");
     assert.equal(persistentLog.filter((row) => row.event === "board_gateway.fetch_failed").length, 1);
     assert.equal(board.readFailed?.(), true);
   } finally {
