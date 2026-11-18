@@ -24,7 +24,7 @@
       kind: guard
       proof: "unit test: W1-T10823: pending refused unknown changed-brief and stale-target stay distinct"
     - claim: "The reuse rule names the refused case"
-      proof: "grep: A refused operation is resolved in src/lib/product-plan-operation.ts"
+      proof: "grep: !== "refused" in src/lib/product-plan-operation.ts"
   rationale: |
     WHY: OBSERVED 2026-11-18 on the Wreckterra product (Console "Set up a new repository" flow). Its only plan
     operation, b829cc79..., was requested 2026-11-03T12:04:41Z at wreckterra head 8dcce032af9c and its hand-off
