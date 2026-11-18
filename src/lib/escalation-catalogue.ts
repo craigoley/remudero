@@ -6,6 +6,7 @@ import {
 } from "./daemon.js";
 import { ghRateLimitWindow, type GhRateLimitProvenance } from "./daemon-health.js";
 import { quantileOf } from "./daemon-memory-policy.js";
+import { readLedgerUnionRecords } from "./ledger-union.js";
 import { ghIssueGateway, ghIssueGatewayAsync, tryEscalate, tryEscalateAsync, type AsyncIssueGateway, type Escalation, type IssueGateway } from "./escalate.js";
 import { appendLedger, matchesRepoScopedTask } from "./ledger.js";
 import type { ReplayStranded } from "./inbox-replay.js";
@@ -1099,6 +1100,13 @@ export function escalateStarvationCleared(
 export const CLAIM_STALL_ESCALATED_STEP = "dispatch.claim_stall.escalated";
 export const CLAIM_STALL_CLEARED_STEP = "dispatch.claim_stall.cleared";
 
+type ClaimStallCtx = { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway };
+
+/** The stall's own rows, read off the event loop from the ledger union (live file and rotations). */
+async function claimStallRows(ctx: ClaimStallCtx, steps: readonly string[]): Promise<Array<Record<string, unknown>>> {
+  return readLedgerUnionRecords(dirname(ctx.ledgerPath), { step: steps });
+}
+
 /**
  * W1-T13248: the page for a fleet whose free slots went only to runs refused before spend (2026-11-16: 14:42Z to
  * 20:30Z, nothing alerted). DEDUP IS ON THE NEWEST CLAIM-PASSING RUN, never `run.start`: a refused run writes a
@@ -1106,11 +1114,11 @@ export const CLAIM_STALL_CLEARED_STEP = "dispatch.claim_stall.cleared";
  * `dispatch.claim_stall.escalated` row postdates the newest `dispatch.claim` `created` row, the stall was already
  * reported. The marker is written whether or not delivery succeeded (`escalateStarvation`'s discipline).
  */
-export function escalateClaimStall(
+export async function escalateClaimStall(
   info: ClaimStallInfo,
-  ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway },
-): void {
-  const lines = readLedgerLines(ctx.ledgerPath);
+  ctx: ClaimStallCtx,
+): Promise<void> {
+  const lines = await claimStallRows(ctx, [CLAIM_STALL_ESCALATED_STEP, "dispatch.claim"]);
   let lastEscalatedIdx = -1;
   let lastPassedIdx = -1;
   lines.forEach((l, i) => {
@@ -1178,12 +1186,12 @@ export function escalateClaimStall(
  * MEANS WAIT (W1-T130): a gateway that cannot close, or whose close throws, leaves the issue open and costs one
  * `delivered: false` row.
  */
-export function escalateClaimStallCleared(
+export async function escalateClaimStallCleared(
   info: ClaimStallClearedInfo,
-  ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway },
-): void {
+  ctx: ClaimStallCtx,
+): Promise<void> {
   let issueUrl: string | null = null;
-  for (const l of readLedgerLines(ctx.ledgerPath)) {
+  for (const l of await claimStallRows(ctx, [CLAIM_STALL_ESCALATED_STEP, CLAIM_STALL_CLEARED_STEP])) {
     if (l.step === CLAIM_STALL_ESCALATED_STEP) issueUrl = typeof l.issue_url === "string" ? l.issue_url : null;
     else if (l.step === CLAIM_STALL_CLEARED_STEP) issueUrl = null;
   }

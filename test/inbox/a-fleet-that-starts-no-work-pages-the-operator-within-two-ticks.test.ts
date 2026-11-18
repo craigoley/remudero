@@ -7,9 +7,7 @@
  * injects) and the real catalogue entries with a fake issue gateway.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { readFileSync, rmSync } from "node:fs";
 import { test } from "node:test";
 
 import {
@@ -17,6 +15,7 @@ import {
 } from "#src/lib/daemon.js";
 import { escalateClaimStall, escalateClaimStallCleared } from "#src/lib/escalation-catalogue.js";
 import type { IssueGateway } from "#src/lib/escalate.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 import type { Plan, Task } from "#src/lib/plan.js";
 import type { RunResult } from "#src/lib/run-result.js";
 
@@ -122,13 +121,14 @@ function gateway() {
   return { issues, created, closed };
 }
 
-function ledgerFixture(): { path: string; rows: () => Row[]; cleanup: () => void } {
-  const dir = mkdtempSync(join(tmpdir(), "rmd-claim-stall-"));
-  const path = join(dir, "ledger.ndjson");
+/** A throwaway ledger built with the shared fixture; `rows()` reads back what the catalogue appended. */
+function scratch(): { path: string; rows: () => Row[]; append: (row: Row) => void; cleanup: () => void } {
+  const fx = writeLedger([]);
   return {
-    path,
-    rows: () => { try { return readFileSync(path, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as Row); } catch (error) { void error; return []; } },
-    cleanup: () => rmSync(dir, { recursive: true, force: true }),
+    path: fx.path,
+    rows: () => readFileSync(fx.path, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as Row),
+    append: (row) => fx.append([row]),
+    cleanup: () => rmSync(fx.dir, { recursive: true, force: true }),
   };
 }
 
@@ -148,10 +148,10 @@ test("W1-T13248 criterion 1: two refused-only ticks past the claim-silence windo
   assert.ok(info.claimAgeMs >= info.boundMs, `claim age ${info.claimAgeMs} is past the bound`);
   assert.equal(info.refusedTicks, 2);
 
-  const fx = ledgerFixture();
+  const fx = scratch();
   try {
     const gw = gateway();
-    escalateClaimStall(info, { owner: "o", repo: "r", ledgerPath: fx.path, runId: "daemon-run", issues: gw.issues });
+    await escalateClaimStall(info, { owner: "o", repo: "r", ledgerPath: fx.path, runId: "daemon-run", issues: gw.issues });
     assert.equal(gw.created.length, 1);
     const text = `${gw.created[0]!.title}\n${gw.created[0]!.body}`;
     assert.ok(text.includes(info.taskId), "names the task");
@@ -165,7 +165,7 @@ test("W1-T13248 criterion 1: two refused-only ticks past the claim-silence windo
   } finally { fx.cleanup(); }
 });
 
-test("W1-T13248 criterion 1: with no measured claim-to-verdict build the p90 of gaps between claim-passing runs is the bound, and the page says so", () => {
+test("W1-T13248 criterion 1: with no measured claim-to-verdict build the p90 of gaps between claim-passing runs is the bound, and the page says so", async () => {
   const created = Array.from({ length: 6 }, (_, i) => ({ ts: iso(T0 - (6 - i) * 20 * MIN), run_id: `p-${i}`, task_id: "P", step: "dispatch.claim", ref: ref("P"), outcome: "created" }));
   const taken = { ts: iso(T0 - 90 * MIN), run_id: "r1", task_id: "B2", step: "dispatch.claim", ref: ref("B2"), outcome: "taken",
     reason: `B2 is already claimed — ${ref("B2")} (held by ${sha("B2")}).` };
@@ -176,40 +176,33 @@ test("W1-T13248 criterion 1: with no measured claim-to-verdict build the p90 of 
   assert.equal(info?.boundMs, 20 * MIN);
   assert.equal(info?.claimAgeMs, 90 * MIN);
   assert.equal(info?.holder, "4242@hand-host");
-  const fx = ledgerFixture();
+  const fx = scratch();
   try {
     const gw = gateway();
-    escalateClaimStall(info!, { owner: "o", repo: "r", ledgerPath: fx.path, runId: "d", issues: gw.issues });
+    await escalateClaimStall(info!, { owner: "o", repo: "r", ledgerPath: fx.path, runId: "d", issues: gw.issues });
     assert.ok(gw.created[0]!.body.includes("gaps between runs that passed their claim"), "the issue names the bound's source");
   } finally { fx.cleanup(); }
   assert.equal(decideClaimStall(lines.slice(0, 3), refused, T0, 2), undefined, "too few gaps is no bound, so no page");
 });
 
-test("W1-T13248 criterion 2: the issue is opened once per stall, deduped on the newest claim-passing run rather than run.start", () => {
-  const fx = ledgerFixture();
+test("W1-T13248 criterion 2: the issue is opened once per stall, deduped on the newest claim-passing run rather than run.start", async () => {
+  const fx = scratch();
   try {
     const gw = gateway();
     const ctx = { owner: "o", repo: "r", ledgerPath: fx.path, runId: "daemon-run", issues: gw.issues };
-    escalateClaimStall(INFO, ctx);
+    await escalateClaimStall(INFO, ctx);
     // Refused runs write a fresh run.start every tick; that must not re-arm the page.
     for (let i = 0; i < 3; i++) {
-      writeRow(fx.path, { ts: iso(T0 + i), run_id: `r${i}`, task_id: "B2", step: "run.start" });
-      writeRow(fx.path, { ts: iso(T0 + i), run_id: `r${i}`, task_id: "B2", step: "dispatch.claim", ref: ref("B2"), outcome: "taken" });
-      escalateClaimStall(INFO, ctx);
+      fx.append({ ts: iso(T0 + i), run_id: `r${i}`, task_id: "B2", step: "run.start" });
+      fx.append({ ts: iso(T0 + i), run_id: `r${i}`, task_id: "B2", step: "dispatch.claim", ref: ref("B2"), outcome: "taken" });
+      await escalateClaimStall(INFO, ctx);
     }
     assert.equal(gw.created.length, 1, "run.start and refused claims never re-open the page");
-    writeRow(fx.path, { ts: iso(T0 + 10), run_id: "good", task_id: "C3", step: "dispatch.claim", ref: ref("C3"), outcome: "created" });
-    escalateClaimStall(INFO, ctx);
+    fx.append({ ts: iso(T0 + 10), run_id: "good", task_id: "C3", step: "dispatch.claim", ref: ref("C3"), outcome: "created" });
+    await escalateClaimStall(INFO, ctx);
     assert.equal(gw.created.length, 2, "after a run passed its claim, a new stall opens its own issue");
   } finally { fx.cleanup(); }
 });
-
-function writeRow(path: string, row: Row): void {
-  // appendFileSync via the ledger helper would stamp its own ts; the fixture needs explicit ones.
-  const prior = (() => { try { return readFileSync(path, "utf8"); } catch (error) { void error; return ""; } })();
-  writeFileSyncCompat(path, `${prior}${JSON.stringify(row)}\n`);
-}
-import { writeFileSync as writeFileSyncCompat } from "node:fs";
 
 test("W1-T13248 criterion 2: the first run that passes its claim after the page closes the issue, once", async () => {
   const run = await fleet({ ids: IDS, ticks: 5, tickMs: 15 * MIN, held: new Set(["A1", "B2"]), signOfLifeAgeMs: 180 * MIN });
@@ -219,20 +212,44 @@ test("W1-T13248 criterion 2: the first run that passes its claim after the page 
   assert.ok(run.clears[0]!.tick > run.stallTicks[0]!, "the close follows the page");
   assert.ok(run.clears[0]!.info.runId?.startsWith("C3") || run.clears[0]!.info.runId?.startsWith("D4"), "names the run that passed");
 
-  const fx = ledgerFixture();
+  const fx = scratch();
   try {
     const gw = gateway();
     const ctx = { owner: "o", repo: "r", ledgerPath: fx.path, runId: "daemon-run", issues: gw.issues };
-    escalateClaimStallCleared({ runId: "x" }, ctx);
+    await escalateClaimStallCleared({ runId: "x" }, ctx);
     assert.equal(gw.closed.length, 0, "no open page, nothing to close");
-    escalateClaimStall(INFO, ctx);
-    escalateClaimStallCleared(run.clears[0]!.info, ctx);
+    await escalateClaimStall(INFO, ctx);
+    await escalateClaimStallCleared(run.clears[0]!.info, ctx);
     assert.deepEqual(gw.closed.map((c) => c.url), ["https://github.com/o/r/issues/1"]);
     assert.ok(gw.closed[0]!.comment.includes("passed its dispatch claim"));
-    escalateClaimStallCleared({ runId: "y" }, ctx);
+    await escalateClaimStallCleared({ runId: "y" }, ctx);
     assert.equal(gw.closed.length, 1, "a second clear finds the issue already closed");
     assert.ok(fx.rows().some((r) => r.step === "dispatch.claim_stall.cleared" && r.delivered === true));
   } finally { fx.cleanup(); }
+});
+
+test("W1-T13248 criterion 2: a close that cannot be delivered leaves the issue open and records the failure, never throws", async () => {
+  const throwingFx = scratch();
+  const createOnlyFx = scratch();
+  try {
+    const gw = gateway();
+    // The gateway's close throws: the daemon loop must never see it.
+    const throwing: IssueGateway = { ...gw.issues, closeWithComment: () => { throw new Error("gh: 502 bad gateway"); } };
+    const ctx = (path: string, issues: IssueGateway) => ({ owner: "o", repo: "r", ledgerPath: path, runId: "daemon-run", issues });
+    await escalateClaimStall(INFO, ctx(throwingFx.path, gw.issues));
+    await escalateClaimStallCleared({ runId: "x" }, ctx(throwingFx.path, throwing));
+    const row = throwingFx.rows().findLast((r) => r.step === "dispatch.claim_stall.cleared");
+    assert.equal(row?.delivered, false);
+    assert.equal(row?.failure, "gh: 502 bad gateway");
+    assert.equal(row?.issue_url, "https://github.com/o/r/issues/1");
+    // A gateway with no close at all is the same outcome with its own reason.
+    const createOnly: IssueGateway = { create: gw.issues.create };
+    await escalateClaimStall(INFO, ctx(createOnlyFx.path, createOnly));
+    await escalateClaimStallCleared({ runId: "y" }, ctx(createOnlyFx.path, createOnly));
+    const second = createOnlyFx.rows().findLast((r) => r.step === "dispatch.claim_stall.cleared");
+    assert.equal(second?.delivered, false);
+    assert.equal(second?.failure, "issue gateway cannot close issues");
+  } finally { throwingFx.cleanup(); createOnlyFx.cleanup(); }
 });
 
 test("W1-T13248 criterion 3: invariant a-live-holder-does-not-page — a holder alive inside the window opens no issue", async () => {
