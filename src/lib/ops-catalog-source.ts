@@ -160,25 +160,36 @@ async function get(api: OpsCatalogApi, path: string): Promise<unknown> {
 }
 
 interface TreeEntry { path: string; type: string; mode: string; sha: string }
+interface KeptBlob { text: string; bytes: number }
 
 /**
- * Trees and blobs that passed every per-object check, by sha. Git names each by its content, so a cached object is the
- * object any later commit naming that sha holds. The checks over a whole snapshot (entry and byte totals) are not
- * cached: each pass applies them again to the objects it uses.
+ * Verified objects at one commit, by sha. Each pass checks its own entry and byte totals, including cache hits.
  */
-interface ObjectCache { trees: Map<string, TreeEntry[]>; blobs: Map<string, { text: string; bytes: number }> }
+interface ObjectCache { trees: Map<string, TreeEntry[]>; blobs: Map<string, KeptBlob> }
 const emptyCache = (): ObjectCache => ({ trees: new Map(), blobs: new Map() });
+interface ShadowTreeCache { current?: { repositoryId: number; trees: ObjectCache["trees"] } }
+
 /**
- * One pass at one commit: `kept` is what earlier passes verified, `used` what this pass holds when it finishes, and
- * `bound` whether the commit object itself was read and matched, so later refusals are about that commit's content.
+ * `kept` holds the previous pass's objects and `used` holds this pass's. Only reuse from the previous pass
+ * counts toward convergence. `bound` means the commit object matched, so later refusals concern its content.
  */
-interface Pass { kept: ObjectCache; used: ObjectCache; counts: OpsCatalogCounts; fetched: number; hits: number; bound: boolean }
+interface Pass {
+  repositoryId: number;
+  kept: ObjectCache;
+  used: ObjectCache;
+  counts: OpsCatalogCounts;
+  fetched: number;
+  hits: number;
+  reusedPreviousPass: boolean;
+  bound: boolean;
+}
 
 async function readTree(api: OpsCatalogApi, repo: string, treeSha: string, pass: Pass): Promise<TreeEntry[]> {
   const counts = pass.counts;
   let entries = pass.kept.trees.get(treeSha);
   if (entries) {
     pass.hits++;
+    pass.reusedPreviousPass = true;
     counts.treeEntries += entries.length;
     if (counts.treeEntries > OPS_CATALOG_MAX_TREE_ENTRIES) throw new Refusal("malformed");
   } else {
@@ -206,11 +217,31 @@ function one(entries: TreeEntry[], name: string): TreeEntry | undefined {
 
 const regular = (e: TreeEntry): boolean => e.type === "blob" && (e.mode === "100644" || e.mode === "100755");
 
+// W1-T13673: blob texts already verified against their SHA-1, per api and repository id. Memory only.
+const keptBlobs = new WeakMap<OpsCatalogApi, Map<number, Map<string, KeptBlob>>>();
+function knownBlobText(api: OpsCatalogApi, repositoryId: number, blobSha: string): KeptBlob | undefined {
+  return keptBlobs.get(api)?.get(repositoryId)?.get(blobSha);
+}
+function blobsByRepository(api: OpsCatalogApi): Map<number, Map<string, KeptBlob>> {
+  let byRepo = keptBlobs.get(api);
+  if (!byRepo) keptBlobs.set(api, byRepo = new Map());
+  return byRepo;
+}
+function keepBlob(api: OpsCatalogApi, repositoryId: number, blobSha: string, blob: KeptBlob): void {
+  const byRepo = blobsByRepository(api);
+  let bySha = byRepo.get(repositoryId);
+  if (!bySha) byRepo.set(repositoryId, bySha = new Map());
+  bySha.set(blobSha, blob);
+}
+
 async function readBlob(api: OpsCatalogApi, repo: string, blobSha: string, pass: Pass): Promise<string> {
-  const counts = pass.counts;
-  const kept = pass.kept.blobs.get(blobSha);
+  const { counts, repositoryId } = pass;
+  const known = knownBlobText(api, repositoryId, blobSha);
+  const previous = pass.kept.blobs.get(blobSha);
+  const kept = known ?? previous;
   if (kept) {
     pass.hits++;
+    if (previous) pass.reusedPreviousPass = true;
     counts.bytes += kept.bytes;
     if (counts.bytes > OPS_CATALOG_MAX_TOTAL_BYTES) throw new Refusal("malformed");
     pass.used.blobs.set(blobSha, kept);
@@ -230,7 +261,9 @@ async function readBlob(api: OpsCatalogApi, repo: string, blobSha: string, pass:
   let text: string;
   try { text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes); }
   catch { throw new Refusal("malformed"); }
-  pass.used.blobs.set(blobSha, { text, bytes: bytes.length });
+  const verified = { text, bytes: bytes.length };
+  keepBlob(api, repositoryId, blobSha, verified);
+  pass.used.blobs.set(blobSha, verified);
   return text;
 }
 
@@ -296,8 +329,8 @@ async function readPass(
 const CONTENT_REFUSALS: ReadonlySet<OpsCatalogOutcome> = new Set(["malformed", "source_absent"]);
 
 async function read(
-  target: OpsCatalogTarget, api: OpsCatalogApi, counts: OpsCatalogCounts, store: PlanRevisionStore, cache: { current: ObjectCache },
-  atStage: (stage: OpsCatalogRefusalStage) => void,
+  target: OpsCatalogTarget, api: OpsCatalogApi, counts: OpsCatalogCounts, store: PlanRevisionStore,
+  atStage: (stage: OpsCatalogRefusalStage) => void, treeCache?: ShadowTreeCache,
 ): Promise<OpsCatalogSnapshot> {
   atStage("repository_identity");
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(target.repository)) throw new Refusal("unreadable");
@@ -310,11 +343,15 @@ async function read(
   const branch = meta.default_branch;
   atStage("branch_ref");
   let commit = await readBranchSha(api, repo, branch);
+  let kept = emptyCache();
+  if (treeCache?.current?.repositoryId === repositoryId) kept.trees = treeCache.current.trees;
   // Each pass reads one commit whole. A pass whose closing ref read still names its commit is the answer; a moved ref
-  // starts the next pass at the commit it names, which costs only the objects that commit changed. A later pass that
-  // reused nothing is not converging, and the read refuses ref_moved as a single pass would.
+  // starts the next pass at the commit it names. If a later pass moves again and shares no object with its
+  // predecessor, the read refuses ref_moved.
   for (;;) {
-    const pass: Pass = { kept: cache.current, used: emptyCache(), counts, fetched: 0, hits: 0, bound: false };
+    const pass: Pass = {
+      repositoryId, kept, used: emptyCache(), counts, fetched: 0, hits: 0, reusedPreviousPass: false, bound: false,
+    };
     counts.passes++;
     counts.treeEntries = 0;
     counts.shards = 0;
@@ -339,18 +376,19 @@ async function read(
       counts.fetchedObjects.push(pass.fetched);
       counts.cachedObjects = pass.hits;
     }
-    // Only the newest completed pass's objects are kept: one snapshot's worth, the set the next move most shares.
-    cache.current = pass.used;
-    if (named === commit) return adopt(store, counts, repositoryId, branch, commit, found, atStage);
-    if (counts.passes > 1 && pass.hits === 0) throw new Refusal("ref_moved");
+    kept = pass.used;
+    if (treeCache) treeCache.current = { repositoryId, trees: kept.trees };
+    if (named === commit) return adopt(api, store, pass, branch, commit, found, atStage);
+    if (counts.passes > 1 && !pass.reusedPreviousPass) throw new Refusal("ref_moved");
     commit = named;
   }
 }
 
 function adopt(
-  store: PlanRevisionStore, counts: OpsCatalogCounts, repositoryId: number, branch: string, commit: string,
+  api: OpsCatalogApi, store: PlanRevisionStore, pass: Pass, branch: string, commit: string,
   { monolith, shardDir, shardEntries, blobs }: PassRead, atStage: (stage: OpsCatalogRefusalStage) => void,
 ): OpsCatalogSnapshot {
+  const { counts, repositoryId } = pass;
   const shardTreeSha = shardDir ? shardDir.sha : "";
   const binding: OpsCatalogBinding = Object.freeze({
     repositoryId, ref: `refs/heads/${branch}`, commit, tasksYamlBlob: monolith.sha, shardTreeSha,
@@ -364,9 +402,19 @@ function adopt(
   } catch (error) {
     throw new Refusal(error instanceof PlanError && /^duplicate task id /.test(error.message) ? "duplicate_task_id" : "malformed");
   }
+  // Every sha in the binding was verified in this pass or recovered from verified bytes.
+  const boundBlobs = new Map<string, KeptBlob>();
+  for (const blobSha of [binding.tasksYamlBlob, ...Object.values(binding.shardBlobs)]) {
+    boundBlobs.set(blobSha, pass.used.blobs.get(blobSha)!);
+  }
+  blobsByRepository(api).set(repositoryId, boundBlobs);
   Object.freeze(counts.fetchedObjects);
   return privateHandles({ outcome: "ok" as const, identityDigest, counts: Object.freeze(counts) }, { plan, binding });
 }
+
+// W1-T13673: one default api per process, so every default reader shares one pacer and the kept blobs.
+let processDefaultApi: OpsCatalogApi | undefined;
+const sharedDefaultOpsCatalogApi = (): OpsCatalogApi => (processDefaultApi ??= defaultOpsCatalogApi());
 
 /**
  * Read the target's catalog at one pinned commit: the newest one whose pass finished with the branch still naming it.
@@ -375,17 +423,17 @@ function adopt(
  */
 export async function readOpsCatalogSnapshotAsync(
   target: OpsCatalogTarget,
-  api: OpsCatalogApi = defaultOpsCatalogApi(),
+  api: OpsCatalogApi = sharedDefaultOpsCatalogApi(),
 ): Promise<OpsCatalogSnapshot> {
-  return readSnapshot(target, api, snapshotStore, { current: emptyCache() });
+  return readSnapshot(target, api, snapshotStore);
 }
 
 async function readSnapshot(
-  target: OpsCatalogTarget, api: OpsCatalogApi, store: PlanRevisionStore, cache: { current: ObjectCache },
+  target: OpsCatalogTarget, api: OpsCatalogApi, store: PlanRevisionStore, treeCache?: ShadowTreeCache,
 ): Promise<OpsCatalogSnapshot> {
   const counts: OpsCatalogCounts = { treeEntries: 0, shards: 0, bytes: 0, passes: 0, fetchedObjects: [], cachedObjects: 0 };
   let refusalStage: OpsCatalogRefusalStage = "repository_identity";
-  try { return await read(target, api, counts, store, cache, stage => { refusalStage = stage; }); }
+  try { return await read(target, api, counts, store, stage => { refusalStage = stage; }, treeCache); }
   catch (error) {
     // The outcome code is the reason: the error's own message may hold a URL or body, so it is dropped here.
     return { outcome: error instanceof Refusal ? error.outcome : "unreadable", refusalStage, counts };
@@ -396,16 +444,16 @@ async function readSnapshot(
  * A stateful source for a per-tick refresh: a refresh that fails after an earlier success reads `stale` and
  * never hands the earlier snapshot back as current. W1-T13052: while the default branch still names the kept
  * commit, one ref GET revalidates the kept snapshot; a failed ref GET reads stale. A moved branch is read again
- * through the source's object cache, kept between refreshes, so it fetches only the trees and blobs that changed.
+ * using the source's kept trees and the api's verified blobs, so it fetches only the trees and blobs that changed.
  */
 export function createOpsCatalogShadowSource(
   target: OpsCatalogTarget,
-  api: OpsCatalogApi = defaultOpsCatalogApi(),
+  api: OpsCatalogApi = sharedDefaultOpsCatalogApi(),
 ): { refresh(): Promise<OpsCatalogShadowInput> } {
   let everOk = false;
   let kept: { plan?: Plan; binding: OpsCatalogBinding; identityDigest?: string } | undefined;
   const store = createPlanRevisionStore({ strict: true, retainLatest: true, yamlLogLevel: "error", dependencyMode: "preserve-external" });
-  const cache = { current: emptyCache() };
+  const treeCache: ShadowTreeCache = {};
   const answer = (snap: { plan?: Plan; binding?: OpsCatalogBinding; identityDigest?: string }): OpsCatalogShadowInput =>
     privateHandles({ outcome: "ok" as const, identityDigest: snap.identityDigest }, { plan: snap.plan, opsCommit: snap.binding?.commit });
   const revalidate = async (k: NonNullable<typeof kept>): Promise<"same" | "moved" | "failed"> => {
@@ -424,7 +472,7 @@ export function createOpsCatalogShadowSource(
       if (check === "same" && kept) return answer(kept);
       kept = undefined;
       if (check === "failed") return { outcome: "stale", refusalStage: "branch_ref" };
-      const snap = await readSnapshot(target, api, store, cache);
+      const snap = await readSnapshot(target, api, store, treeCache);
       if (snap.outcome === "ok" && snap.binding) {
         everOk = true;
         kept = { plan: snap.plan, binding: snap.binding, identityDigest: snap.identityDigest };

@@ -17,7 +17,7 @@
   files:
     - src/lib/escalation-answers.ts
     - test/inbox/the-escalation-answer-walk-skips-the-reads-the-issue-list-says-are-empty.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "When the open issue list gives an issue 0 comments, readEscalationAnswers does not call listComments for it; when the list gives 0 reactions on the issue, it does not call listReactions for it. The result (accepted, ignored, unreadable) and every ledger row are the same as when those reads answer an empty list"

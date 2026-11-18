@@ -1264,6 +1264,13 @@ export function stampLineViolations(proposalId: string, stampLine: string, fragm
   return out;
 }
 
+/** W1-T13693: the other ask a parked task can hold, `verify-human:<id>` for `machine-judge:<id>` and back. */
+export function parkedTaskTwinAsk(proposalId: string): string | undefined {
+  const match = /^(verify-human|machine-judge):([A-Za-z0-9][A-Za-z0-9-]*)$/.exec(proposalId);
+  if (!match) return undefined;
+  return `${match[1] === "verify-human" ? "machine-judge" : "verify-human"}:${match[2]}`;
+}
+
 /** The PURE readiness predicate. Trigger-deferral is checked first and unconditionally: an unfired trigger means
  *  DEFERRED_WITH_TRIGGER whatever the other clauses say (the dead-consumer discipline). Every other branch collects
  *  EVERY failing predicate, never the first. */
@@ -1275,6 +1282,12 @@ export function classifyProposal(
   // W1-T190: the ledger's ratify.approved receipt is checked FIRST and overrides every predicate below. This heals an
   // existing drifted entry, because it never trusts a stored flag at all.
   if (ctx.isRatified(proposal.id)) {
+    return { proposalId: proposal.id, state: "ratified", reasons: [] };
+  }
+  // W1-T13693: verify-human:<id> and machine-judge:<id> ask one question, so a ratified twin settles this ask too.
+  // The ratified twin is pruned from the registry, which once let this ask resurface on its own (W1-T12032).
+  const twin = parkedTaskTwinAsk(proposal.id);
+  if (twin !== undefined && ctx.isRatified(twin)) {
     return { proposalId: proposal.id, state: "ratified", reasons: [] };
   }
   // W1-T2604: an operator's decline is checked next and overrides everything below. It is recorded ONCE by an

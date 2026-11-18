@@ -14,7 +14,7 @@
   files:
     - src/lib/operator-agent-read-model.ts
     - test/inbox/the-operator-agent-rows-view-moves-only-with-panel-facts.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Through the real read-model ticker, five kept facts that are not panel rows build no operator-agent rows body, and a panel fact builds it again with both panel rows"

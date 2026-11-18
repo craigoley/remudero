@@ -62,7 +62,7 @@ export function readReadModelSwitches(stateDir: string): ReadModelSwitches {
   return { ...raw, projector: raw.projector === "off" ? "off" : "on", views: { ...(raw.views ?? {}) } };
 }
 
-const USAGE = "usage: rmd read-model rebuild [--instance <id>] [--ledger-dir <dir>] [--window-days <n>] | status [--json] | switch <projector|<view>> <mode>";
+const USAGE = "usage: rmd read-model rebuild [--instance <id>] [--ledger-dir <dir>] [--window-days <n>] | status [--json] | switch <projector|process|<view>> <mode>";
 
 export function readModelCommand(rest: string[], opts: ReadModelCliOptions = {}): number {
   const out = opts.out ?? console.log;
@@ -89,9 +89,11 @@ export function readModelCommand(rest: string[], opts: ReadModelCliOptions = {})
 function switchCommand(stateDir: string, args: string[], out: (l: string) => void, error: (l: string) => void): number {
   const [target = "", mode = ""] = args;
   const projector = target === "projector" && (mode === "on" || mode === "off");
-  const view = target !== "projector" && VIEW_NAME.test(target) && (mode === "serve" || mode === "shadow" || mode === "off" || mode === "auto");
-  if (!projector && !view) {
-    error(`rmd read-model switch: ${JSON.stringify(target)} ${JSON.stringify(mode)} is not a switch; projector takes on|off, a view takes serve|shadow|off|auto`);
+  // W1-T13683: where serve's read-model worker runs; serve reads it when a generation starts.
+  const processMode = target === "process" && (mode === "thread" || mode === "child");
+  const view = target !== "projector" && target !== "process" && VIEW_NAME.test(target) && (mode === "serve" || mode === "shadow" || mode === "off" || mode === "auto");
+  if (!projector && !processMode && !view) {
+    error(`rmd read-model switch: ${JSON.stringify(target)} ${JSON.stringify(mode)} is not a switch; projector takes on|off, process takes thread|child, a view takes serve|shadow|off|auto`);
     return 2;
   }
   let switches: ReadModelSwitches;
@@ -102,8 +104,9 @@ function switchCommand(stateDir: string, args: string[], out: (l: string) => voi
     error(`rmd read-model switch: ${readModelSwitchesPath(stateDir)} is unreadable (${(err as Error).message}); fix or delete it first`);
     return 1;
   }
-  const previous = projector ? switches.projector : switches.views[target] ?? "serve";
+  const previous = projector ? switches.projector : processMode ? String(switches.process ?? "thread") : switches.views[target] ?? "serve";
   if (projector) switches.projector = mode as ProjectorSwitch;
+  else if (processMode) switches.process = mode;
   else switches.views[target] = mode as ViewSwitch;
   writeAtomic(readModelSwitchesPath(stateDir), `${JSON.stringify(switches, null, 2)}\n`);
   appendLedger(join(stateDir, LEDGER_FILENAME), { run_id: "read-model-cli", task_id: "CLI", step: READ_MODEL_SWITCH_STEP, target, mode, previous });
