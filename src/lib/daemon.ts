@@ -4852,12 +4852,13 @@ export async function runDaemon(
   const claimHeldDeferrals = new Map<string, { ref: string; sinceMs: number; untilMs: number }>();
   // W1-T13248: this dispatch batch's admitted runs, and the streak of consecutive batches that were refused before
   // spend throughout. An idle tick zeroes the streak; a run that passed its claim zeroes it and closes the page.
-  const claimStallBatch: { admitted: number; passed: number; passedRun?: { taskId: string; runId: string }; refused: ClaimRefusedRun[] } =
-    { admitted: 0, passed: 0, refused: [] };
+  const claimStallBatch: { admitted: number; others: Array<{ taskId: string; runId: string }>; refused: ClaimRefusedRun[] } =
+    { admitted: 0, others: [], refused: [] };
   let claimStallStreak = 0;
   let claimStallPaged = false;
-  // Armed at boot and on every page, so a boot after a page still closes it; the catalogue no-ops with none open.
-  let claimStallCloseArmed = true;
+  // Armed on every page and at boot when the boot ledger read carries an escalation marker, so a boot after a page
+  // still closes it; the catalogue no-ops with none open. Unarmed, a non-refused run costs no ledger read.
+  let claimStallCloseArmed = false;
   // A zero-cost `blocked_illformed` verdict is a pre-dispatch admission refusal, not a durable
   // independent failure. Exclude its unchanged task contract only for this process, so it cannot
   // spin on the same immutable plan; a changed contract deliberately clears the entry below and is
@@ -4938,7 +4939,9 @@ export async function runDaemon(
   // survives the very process replacement it caused (design v); updated once per tick below from
   // that tick's own `sweepCycleOutcome.reviewerCodeStale` reading.
   const bootLedgerLines = deps.readLedgerLines?.() ?? [];
-  const restartLedger = restartCycleLedgerRows(bootLedgerLines);
+  // W1-T13248: a page left open by an earlier process (a marker row in the boot read) keeps its close armed.
+  claimStallCloseArmed = bootLedgerLines.some((raw) => raw.includes("dispatch.claim_stall.escalated"));
+  const restartLedger =restartCycleLedgerRows(bootLedgerLines);
   const restartBoots = restartLedger.rows.filter(row => row.step === "daemon.boot" && typeof row.ts === "string")
     .map(row => Date.parse(String(row.ts))).filter(Number.isFinite).sort((a, b) => a - b);
   const restartStartedAtMs = restartBoots.at(-1) ?? clockFromDateFn(deps.now).now();
@@ -6258,42 +6261,48 @@ export async function runDaemon(
       claimStallBatch.refused.push({ taskId: task.id, runId: result.runId, ...(refusal !== undefined ? { refusal } : {}) });
       return;
     }
+    // Whether this run passed its claim is only read (once, at settle) while a page is open and could close.
+    claimStallBatch.others.push({ taskId: task.id, runId: result.runId });
+  };
+
+  // The first of this batch's non-refused runs that minted a `dispatch.claim` created row, if the ledger shows one.
+  const firstClaimPassingRun = (others: ReadonlyArray<{ taskId: string; runId: string }>):
+    { taskId: string; runId: string } | undefined => {
+    if (ledgerReader === undefined || others.length === 0) return undefined;
     try {
-      const passed = ledgerReader !== undefined && ledgerReader().some((raw) => {
-        if (!raw.includes(result.runId) || !raw.includes('"dispatch.claim"')) return false;
+      const created = new Set<string>();
+      for (const raw of ledgerReader()) {
+        if (!raw.includes('"dispatch.claim"') || !raw.includes("created")) continue;
         const row = ledgerRow(raw);
-        return row?.step === "dispatch.claim" && row.outcome === "created" && row.run_id === result.runId;
-      });
-      if (passed) {
-        claimStallBatch.passed++;
-        claimStallBatch.passedRun ??= { taskId: task.id, runId: result.runId };
+        if (row?.step === "dispatch.claim" && row.outcome === "created" && typeof row.run_id === "string") created.add(row.run_id);
       }
+      return others.find((o) => created.has(o.runId));
     } catch (error) {
-      report("dispatch.claim_stall.evidence_unreadable", { task: task.id, run_id: result.runId,
-        error: String((error as Error)?.message ?? error).slice(0, 300) });
+      log("dispatch.claim_stall.evidence_unreadable", { error: String((error as Error)?.message ?? error).slice(0, 300) });
+      return undefined;
     }
   };
 
   // W1-T13248: the batch's verdict on the stall. Two consecutive batches that admitted work, every run of which was
   // refused before spend, with a refusing claim silent past the bound, page once; the first claim-passing run closes it.
   const settleClaimStall = async (): Promise<void> => {
-    const batch = { admitted: claimStallBatch.admitted, passed: claimStallBatch.passed, passedRun: claimStallBatch.passedRun,
+    const batch = { admitted: claimStallBatch.admitted, others: claimStallBatch.others.slice(),
       refused: claimStallBatch.refused.slice() };
     claimStallBatch.admitted = 0;
-    claimStallBatch.passed = 0;
-    claimStallBatch.passedRun = undefined;
+    claimStallBatch.others.length = 0;
     claimStallBatch.refused.length = 0;
     if (batch.admitted === 0) return;
-    if (batch.passed > 0) {
+    if (batch.others.length > 0) {
       claimStallStreak = 0;
-      claimStallPaged = false;
       if (!claimStallCloseArmed) return;
+      const passedRun = firstClaimPassingRun(batch.others);
+      if (passedRun === undefined) return;
+      claimStallPaged = false;
       claimStallCloseArmed = false;
-      try { await deps.onClaimStallCleared?.({ ...batch.passedRun }); }
+      try { await deps.onClaimStallCleared?.({ ...passedRun }); }
       catch (error) { log("daemon.escalation.failed", { task: "daemon", error: String((error as Error)?.message ?? error) }); }
       return;
     }
-    if (batch.refused.length !== batch.admitted) { claimStallStreak = 0; return; }
     claimStallStreak++;
     if (claimStallStreak < 2 || claimStallPaged || deps.onClaimStall === undefined) return;
     let info: ClaimStallInfo | undefined;
