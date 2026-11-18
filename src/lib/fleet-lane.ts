@@ -202,7 +202,23 @@ export interface PersistedInbox extends PersistedInboxContent {
   generatedAt: string;
 }
 
+/**
+ * W1-T13606: each persisted classification object's validity, by object. Checking it re-hashes the whole classification
+ * (about 6.6 MB of JSON on the Azure host), and serve's Inbox projection checked the same object on every inboxLanes
+ * call, on its request loop (25 stalls, 52 s, in the four hours to 04:00Z on 2026-11-17/18). A persisted classification
+ * is read once per file version and never edited in place, so its answer cannot change; a new read is a new object.
+ */
+const validatedSnapshots = new WeakMap<object, boolean>();
+
 export function validInboxSnapshot(value: Partial<PersistedInbox>): boolean {
+  const known = validatedSnapshots.get(value);
+  if (known !== undefined) return known;
+  const valid = checkInboxSnapshot(value);
+  validatedSnapshots.set(value, valid);
+  return valid;
+}
+
+function checkInboxSnapshot(value: Partial<PersistedInbox>): boolean {
   if (value.snapshotKey === undefined && value.attentionCensus === undefined) return true;
   const census = value.attentionCensus;
   const scope = value.snapshotScope;

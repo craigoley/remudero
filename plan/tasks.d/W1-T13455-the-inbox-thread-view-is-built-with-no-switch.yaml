@@ -20,7 +20,7 @@
     - test/every-view-body-matches-its-schema.test.ts
     - test/a-view-with-no-switch-is-not-built.test.ts
     - test/the-inbox-thread-view-is-built-with-no-switch.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With no switch entry, readModelViewBuilt says the worker builds inbox-thread (READ_MODEL_VIEW_READERS names its GET route as the reader), an explicit off still stops it, and an unswitched view with no reader (task) is still not built"

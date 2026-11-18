@@ -6,7 +6,7 @@
   verify: auto
   risk: low
   priority: 2.5
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "expiring-fixture:test/the-sweep-reads-the-reviewers-own-summary.test.ts"

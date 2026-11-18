@@ -18,7 +18,7 @@
     - src/lib/read-model-worker.ts
     - test/view-demand.test.ts
     - test/console-api/views/code-health-demand-lanes.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A worker restarted over a store holding an earlier run's demand key keeps serving that key's body until one eviction window has passed since it started"

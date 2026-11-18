@@ -17,7 +17,7 @@
     - test/the-config-gardener-reads-only-the-ledger-steps-it-prices.test.ts
     - test/helpers/the-config-gardener-reads-only-the-ledger-steps-it-prices.ts
     - test/the-config-garden-step-check-makes-one-inventory-at-a-time.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:one-inventory-at-a-time — the step check moves to the new test file. For the shared corpus (test/helpers/the-config-gardener-reads-only-the-ledger-steps-it-prices.ts), the inventory without the rows outside CONFIG_GARDEN_LEDGER_STEPS is equal to the whole inventory, and for every step in CONFIG_GARDEN_LEDGER_STEPS the inventory without that step's rows is different from the whole inventory (the inert list is []). The test makes each inventory in this process with serveConfigMeasurement and a port that keeps the reply, one after the other (a for loop with await, no Promise.all), so it starts no Worker. Positive control: CONFIG_GARDEN_LEDGER_STEPS has more than 30 steps"

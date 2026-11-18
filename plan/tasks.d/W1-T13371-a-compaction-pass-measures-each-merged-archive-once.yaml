@@ -15,7 +15,7 @@
   files:
     - src/lib/ledger-compact.ts
     - test/ledger/a-compaction-pass-measures-each-merged-archive-once.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A second pass over an unchanged corpus decompresses no merged archive that an earlier pass already measured at or under the ceiling"

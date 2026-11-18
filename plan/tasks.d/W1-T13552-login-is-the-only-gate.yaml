@@ -17,7 +17,7 @@
     - src/lib/operator-identity-file.ts
     - test/the-operator-reaches-core-as-themselves.test.ts
     - test/operator-identity-file.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With requireStepUp absent or false, a verified allowlisted session whose last factor is two hours old earns high, and the confirm-nonce step still applies"

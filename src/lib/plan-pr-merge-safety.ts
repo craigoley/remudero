@@ -17,7 +17,7 @@ import { boundChildByLoopTime } from "./loop-bounded-child.js";
 import { join, relative } from "node:path";
 import { step, type Steps } from "./git-push.js";
 import { singlePrRestArgs } from "./open-prs-rest.js";
-import { mergePlanBlobsQuarantiningDuplicates, parseBlobBatch } from "./plan.js";
+import { mergePlanBlobsQuarantiningDuplicates, parseBlobBatch, PlanBlobCache } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { makeTempDir } from "./tmp.js";
 
@@ -529,9 +529,13 @@ function* gitStep(git: PlanSafetyGit, args: readonly string[], stdin?: string): 
   return yield* step(() => git(args, stdin));
 }
 
+/** W1-T13609: one cache for this process's merge-safety reads, as thread-plan.ts keeps per pin. Two plan PRs
+ *  share almost all of tasks.d, so a read parses only the shards whose path or content changed since the last. */
+export const MERGED_PLAN_BLOB_CACHE = new PlanBlobCache();
+
 function mergedPlanState(blobs: Array<{ label: string; text: string }>): MergedTreePlan {
   try {
-    const { quarantined } = mergePlanBlobsQuarantiningDuplicates(blobs);
+    const { quarantined } = mergePlanBlobsQuarantiningDuplicates(blobs, MERGED_PLAN_BLOB_CACHE);
     return quarantined.length === 0 ? { state: "loads" } : { state: "quarantined", ids: quarantined.map((q) => q.id) };
   } catch (e) {
     // the monolith, or a dependency the merge left unresolved, refuses the whole plan.

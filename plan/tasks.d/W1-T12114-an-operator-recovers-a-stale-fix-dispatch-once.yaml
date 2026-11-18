@@ -15,7 +15,7 @@
     - src/run-task.ts
     - src/lib/ledger.ts
     - test/fix-lane/an-operator-recovers-a-stale-fix-dispatch-once.test.ts
-  status: queued
+  status: merged
   priority: 0.10
   attempts: 0
   acceptance:

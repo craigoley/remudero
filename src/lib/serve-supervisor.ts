@@ -959,12 +959,19 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
     if (generation.asked) void supervisor.requestHandoff();
   };
 
-  /** The active generation's served body count: a standby must not be thinner than what it replaces. */
+  /**
+   * The active generation's served body count: a standby must not be thinner than what it replaces.
+   * W1-T13600: the committed count when the active reports one. On 2026-11-18 every handoff after a 02:24Z cold
+   * start aborted on ready_bound with 226 of 235 bodies: a standby loads only the store, and the active held bodies it
+   * had built itself that the store did not give the standby.
+   * An active on older code reports no `committed`, and its total is used as before.
+   */
   const activeBodies = async (): Promise<number> => {
     if (!active) return 0;
     const reply = await get(active.socketPath, SERVE_READY_PATH).catch((err: unknown) => ({ status: 0, body: errorText(err) }));
-    const report = (safeJson(reply.body) as { criteria?: Array<{ name: string; detail?: { bodies?: number } }> } | undefined);
-    return report?.criteria?.find((c) => c.name === "read_model_warm")?.detail?.bodies ?? 0;
+    const report = (safeJson(reply.body) as { criteria?: Array<{ name: string; detail?: { bodies?: number; committed?: unknown } }> } | undefined);
+    const detail = report?.criteria?.find((c) => c.name === "read_model_warm")?.detail;
+    return typeof detail?.committed === "number" ? detail.committed : (detail?.bodies ?? 0);
   };
 
   const promote = async (generation: Generation): Promise<boolean> => {

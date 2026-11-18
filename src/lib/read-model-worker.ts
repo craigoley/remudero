@@ -2809,6 +2809,11 @@ export function committedTickTimes(stateDir: string, instances: readonly ReadMod
 export interface ReadModelWorkerHandle {
   /** Keyed `<view>\u0000<key>`; loaded from the DB at construction, then replaced by each posted body. */
   readonly bodies: ReadonlyMap<string, ReadModelBodyEntry>;
+  /**
+   * W1-T13600: how many held bodies the last committed load also read. Bodies this generation built and posted
+   * but the store no longer holds (demand-built keys) are left out: a fresh standby loads only the store.
+   */
+  committedBodies?(): number;
   /** Each instance's last posted state, and the switches the worker last read. */
   state(): { at?: number; instances: ReadonlyMap<string, ReadModelInstanceState>; switches: ReadModelSwitches; warmBoot?: string };
   body(view: string, key?: string): ReadModelBodyEntry | undefined;
@@ -2906,6 +2911,8 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
   let inboxQualification = inboxIdentityFrom(warm);
   let inboxQualificationSnapshot = inboxQualification === INBOX_QUALIFICATION_PENDING ? undefined : warm.inboxPopulation?.snapshotKey;
   for (const entry of warm.bodies) bodies.set(readModelBodyKey(entry.view, entry.key), entry);
+  /** W1-T13600: the keys the last committed load read, so a handoff's warm bar can leave out bodies only this generation built. */
+  let committedKeys = new Set(warm.bodies.map(entry => readModelBodyKey(entry.view, entry.key)));
   opts.log?.("read_model.warm_boot", { bodies: warm.bodies.length, ...(warm.reason ? { reason: warm.reason } : {}) });
   for (const entry of warm.bodies) if (entry.qualificationReason !== undefined) opts.log?.("read_model.qualification_unknown", { view: entry.view, key: entry.key, reason: entry.qualificationReason });
   if (warm.inboxQualificationReason) opts.log?.("read_model.qualification_unknown", { view: INBOX_VIEW_NAME, reason: warm.inboxQualificationReason });
@@ -3239,6 +3246,11 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
 
   const handle: ReadModelWorkerHandle = {
     bodies,
+    committedBodies: () => {
+      let held = 0;
+      for (const key of bodies.keys()) if (committedKeys.has(key)) held++;
+      return held;
+    },
     state: () => ({ ...(at === undefined ? {} : { at }), instances, switches, ...(warm.reason ? { warmBoot: warm.reason } : {}) }),
     body: (view, key = "") => bodies.get(readModelBodyKey(view, key)),
     judge: (sources, now, body) => {
@@ -3262,6 +3274,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       let removed = 0;
       if (again.reason === undefined) {
         const committed = new Set(again.bodies.map(entry => readModelBodyKey(entry.view, entry.key)));
+        committedKeys = committed;
         // Inbox pages are posted only after their commit, so a qualified committed population bounds even posted ones.
         const members = inboxQualification === INBOX_QUALIFICATION_PENDING ? undefined : new Set(again.inboxPopulation?.pages.map(page => readModelBodyKey(INBOX_VIEW_NAME, page.key)));
         for (const [key, entry] of bodies) if ((!posted.has(key) && !committed.has(key)) || (members && entry.view === INBOX_VIEW_NAME && !members.has(key))) {

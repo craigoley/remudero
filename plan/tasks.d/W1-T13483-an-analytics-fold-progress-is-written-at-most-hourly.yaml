@@ -14,7 +14,7 @@
   files:
     - src/lib/analytics-route.ts
     - test/an-analytics-fold-progress-is-written-at-most-hourly.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The first partial refresh writes its resume point at once; partial refreshes within ANALYTICS_CHECKPOINT_WRITE_INTERVAL_MS write nothing; the first one past it writes the newest resume point"

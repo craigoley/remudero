@@ -12,7 +12,7 @@
   plan_refs: [W1-T9981, W1-T6246, W1-T10817, W1-T11455]
   files: [src/lib/reader-agreement.ts, test/review/the-independent-reader-ledger-scan-yields-the-daemon-loop.test.ts]
   priority: 1
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     independentFigures is async, but reader-agreement.ts:212 selects readLedgerUnionRawLinesSync

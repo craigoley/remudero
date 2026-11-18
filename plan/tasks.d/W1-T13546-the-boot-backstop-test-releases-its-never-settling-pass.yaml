@@ -11,7 +11,7 @@
   origin: "operator-session#ci-shard-3-hang-2026-11-17"
   files:
     - test/a-boot-reviews-before-it-runs-its-cadences.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A daemon booted in the same process after the boot backstop test still runs its own dispatch ticker and ledgers a dispatch heartbeat"

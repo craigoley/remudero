@@ -216,7 +216,7 @@ export function publicOpsTaskFields(task: Task): {
 /** W1-T13488: the one default catalog api a board read uses when its caller passes none, so its kept reads persist. */
 const defaultBoardCatalogApi = defaultOpsCatalogApi();
 /** W1-T13488: per api, the last whole catalog read for each repository, revalidated by one ref GET. */
-const keptBoardCatalogs = new WeakMap<OpsCatalogApi, Map<string, { branch: string; commit: string; plan: Plan }>>();
+const keptBoardCatalogs = new WeakMap<OpsCatalogApi, Map<string, { branch: string; commit: string; plan: Plan; checkedAtMs: number }>>();
 
 /** Current disk selection and one actual pinned reader observation; never starts a writer/selector. */
 export async function readBoardCatalogs(readPublic: () => Plan | undefined, stateDir: string | undefined,
@@ -241,7 +241,11 @@ export async function readBoardCatalogs(readPublic: () => Plan | undefined, stat
   let kept = keptBoardCatalogs.get(reader);
   if (!kept) keptBoardCatalogs.set(reader, kept = new Map());
   const held = kept.get(repository);
-  const same = held ? await readBranchSha(reader, `repos/${repository}`, held.branch).then((sha) => sha === held.commit, () => false) : false;
+  // W1-T13618: each ref GET is a gh child forked from serve's whole process (a 0.7 to 1.2 s request-loop stall on the
+  // Azure host); a kept read confirmed within BOARD_CATALOG_REFRESH_MS answers with no GET, the cadence the pool keeps.
+  const fresh = held !== undefined && clock.now() - held.checkedAtMs < BOARD_CATALOG_REFRESH_MS;
+  const same = fresh || (held ? await readBranchSha(reader, `repos/${repository}`, held.branch).then((sha) => sha === held.commit, () => false) : false);
+  if (same && held && !fresh) held.checkedAtMs = clock.now();
   let opsPlan: Plan;
   if (same && held) opsPlan = held.plan;
   else {
@@ -250,7 +254,7 @@ export async function readBoardCatalogs(readPublic: () => Plan | undefined, stat
     if (snapshot.outcome !== "ok" || snapshot.plan === undefined) return refused(snapshot.outcome === "ok" ? "missing-plan" : snapshot.outcome);
     if (snapshot.binding === undefined) return refused("identity-unavailable");
     opsPlan = snapshot.plan;
-    if (snapshot.binding.ref.startsWith("refs/heads/")) kept.set(repository, { branch: snapshot.binding.ref.slice("refs/heads/".length), commit: snapshot.binding.commit, plan: snapshot.plan });
+    if (snapshot.binding.ref.startsWith("refs/heads/")) kept.set(repository, { branch: snapshot.binding.ref.slice("refs/heads/".length), commit: snapshot.binding.commit, plan: snapshot.plan, checkedAtMs: clock.now() });
   }
   const after = planDestinationRepository(stateDir);
   if (after.outcome !== "named" || after.owner !== destination.owner || after.repo !== destination.repo ||

@@ -11,7 +11,13 @@ import { join } from "node:path";
 import { test } from "node:test";
 import type { OpsCatalogApi } from "#src/lib/ops-catalog-source.js";
 import { mergePlanBlobs, type Plan } from "#src/lib/plan.js";
-import { readBoardCatalogs } from "#src/lib/serve-plan-reload.js";
+import { BOARD_CATALOG_REFRESH_MS, readBoardCatalogs } from "#src/lib/serve-plan-reload.js";
+import type { Clock } from "#src/lib/clock.js";
+
+/** A clock the test moves; W1-T13618 skips a ref GET for a read confirmed within BOARD_CATALOG_REFRESH_MS. */
+const now = { ms: Date.parse("2026-11-18T05:00:00.000Z") };
+const clock = { now: () => now.ms, iso: () => new Date(now.ms).toISOString(), date: () => new Date(now.ms) } as unknown as Clock;
+const later = () => void (now.ms += BOARD_CATALOG_REFRESH_MS + 1);
 
 const repository = "fixture-private/ops-reload";
 const hash = (text: string) => createHash("sha1").update(text).digest("hex");
@@ -52,33 +58,56 @@ const opsIds = (context: Awaited<ReturnType<typeof readBoardCatalogs>>) =>
 
 test("W1-T13488 criterion 1: a second read while the branch names the same commit makes one ref GET and answers the same plan", async (t) => {
   const dir = stateDir(t), up = upstream(record("OPS-T1"));
-  const first = await readBoardCatalogs(publicPlan, dir, up.api);
+  const first = await readBoardCatalogs(publicPlan, dir, up.api, clock);
   assert.deepEqual(opsIds(first), ["OPS-T1"]);
   assert.ok(up.calls.some((c) => c.includes("/git/blobs/")), "positive control: the first read is whole");
   const before = up.calls.length;
-  const second = await readBoardCatalogs(publicPlan, dir, up.api);
+  later();
+  const second = await readBoardCatalogs(publicPlan, dir, up.api, clock);
   assert.deepEqual(up.calls.slice(before), [`repos/${repository}/git/ref/heads/main`], "one ref GET revalidates the kept catalog");
   assert.deepEqual(opsIds(second), ["OPS-T1"]);
 });
 
 test("W1-T13488 criterion 2: a moved branch or a failed ref GET reads the whole catalog again", async (t) => {
   const dir = stateDir(t), up = upstream(record("OPS-T1"));
-  await readBoardCatalogs(publicPlan, dir, up.api);
+  await readBoardCatalogs(publicPlan, dir, up.api, clock);
   up.move(record("OPS-T2"));
+  later();
   const before = up.calls.length;
-  assert.deepEqual(opsIds(await readBoardCatalogs(publicPlan, dir, up.api)), ["OPS-T2"]);
+  assert.deepEqual(opsIds(await readBoardCatalogs(publicPlan, dir, up.api, clock)), ["OPS-T2"]);
   assert.ok(up.calls.slice(before).some((c) => c.includes("/git/blobs/")), "the moved branch was read in full");
   let armed = false;
   const failing: OpsCatalogApi = async (path) => (path.endsWith("/git/ref/heads/main") && armed ? Promise.reject(new Error("boom")) : up.api(path));
-  await readBoardCatalogs(publicPlan, dir, failing);
+  await readBoardCatalogs(publicPlan, dir, failing, clock);
   armed = true;
-  const reread = await readBoardCatalogs(publicPlan, dir, failing);
+  later();
+  const reread = await readBoardCatalogs(publicPlan, dir, failing, clock);
   assert.notEqual(reread?.outcome, "ok", "a failed ref GET does not answer the kept plan; the whole read runs and fails on the ref");
 });
 
 test("W1-T13488 criterion 3: kept reads belong to their api, so another api reads the catalog whole", async (t) => {
   const dir = stateDir(t), a = upstream(record("OPS-T1")), b = upstream(record("OPS-T1"));
-  await readBoardCatalogs(publicPlan, dir, a.api);
-  await readBoardCatalogs(publicPlan, dir, b.api);
+  await readBoardCatalogs(publicPlan, dir, a.api, clock);
+  await readBoardCatalogs(publicPlan, dir, b.api, clock);
   assert.ok(b.calls.some((c) => c.includes("/git/blobs/")), "a second api never reuses the first api's read");
+});
+
+test("W1-T13618 criterion 1: a kept catalog confirmed within BOARD_CATALOG_REFRESH_MS answers with no GET at all", async (t) => {
+  const dir = stateDir(t), up = upstream(record("OPS-T1"));
+  await readBoardCatalogs(publicPlan, dir, up.api, clock);
+  const before = up.calls.length;
+  for (let i = 0; i < 5; i += 1) assert.deepEqual(opsIds(await readBoardCatalogs(publicPlan, dir, up.api, clock)), ["OPS-T1"]);
+  assert.equal(up.calls.length, before, "five reloads inside the window made no GET");
+  later();
+  await readBoardCatalogs(publicPlan, dir, up.api, clock);
+  assert.deepEqual(up.calls.slice(before), [`repos/${repository}/git/ref/heads/main`], "positive control: past the window one ref GET revalidates");
+});
+
+test("W1-T13618 criterion 2: a branch that moved inside the window is read whole at the first check past it", async (t) => {
+  const dir = stateDir(t), up = upstream(record("OPS-T1"));
+  await readBoardCatalogs(publicPlan, dir, up.api, clock);
+  up.move(record("OPS-T2"));
+  assert.deepEqual(opsIds(await readBoardCatalogs(publicPlan, dir, up.api, clock)), ["OPS-T1"], "inside the window the kept read answers");
+  later();
+  assert.deepEqual(opsIds(await readBoardCatalogs(publicPlan, dir, up.api, clock)), ["OPS-T2"], "past it the move is read whole");
 });

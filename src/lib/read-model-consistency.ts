@@ -637,9 +637,12 @@ export const ORACLE_DRIFT_INTERVAL_MS = 10 * 60_000;
  * agreement, and ten minutes after any other outcome, so a drift is rechecked sooner.
  */
 export function consistencyCheckDue(db: ReadModelDb, now: number): boolean {
-  const last = history(db).at(-1);
+  // W1-T13617: the projector asks this on every tick, so it reads only the newest run. Reading the whole history here
+  // was 46% of the projector thread's CPU on the host on 2026-11-18, and grew with every recorded run.
+  const exists = db.prepare("SELECT 1 AS x FROM sqlite_master WHERE type = 'table' AND name = 'consistency_run'").get();
+  const last = exists ? db.prepare("SELECT at_ms, outcome FROM consistency_run ORDER BY id DESC LIMIT 1").get() : undefined;
   if (!last) return true;
-  return now - last.atMs >= (last.outcome === "agree" ? ORACLE_AGREE_INTERVAL_MS : ORACLE_DRIFT_INTERVAL_MS);
+  return now - Number(last.at_ms) >= (String(last.outcome) === "agree" ? ORACLE_AGREE_INTERVAL_MS : ORACLE_DRIFT_INTERVAL_MS);
 }
 
 /**
