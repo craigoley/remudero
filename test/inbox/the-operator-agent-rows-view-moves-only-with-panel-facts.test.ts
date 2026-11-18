@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { OPERATOR_AGENT_PROPOSAL_STEP } from "#src/lib/operator-agent.js";
 import { createOperatorAgentRowsView, type OperatorAgentRowsData } from "#src/lib/operator-agent-read-model.js";
+import { clockFromMillisFn } from "#src/lib/clock.js";
 import { createReadModelTicker, ledgerSource, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
 import type { ViewBodyEntry } from "#src/lib/views.js";
 import { readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
@@ -21,14 +22,18 @@ function worker(stateDir: string) {
   /** Bodies the view built: what each build costs is mapping and serializing every panel row. */
   let built = 0;
   const counted = { ...view, materialize: (ctx: Parameters<typeof view.materialize>[0]) => { const out = view.materialize(ctx); built += out.length; return out; } };
+  // The ticker paces a built view by its measured cost on its clock (the next build is due cost / share later). On the
+  // real clock, back-to-back passes on a loaded machine land before that, so this clock steps past any pacing per pass.
+  let nowMs = Date.parse("2026-11-18T10:10:00.000Z");
   const ticker = createReadModelTicker({
+    clock: clockFromMillisFn(() => nowMs),
     stateDir, instances: [{ name: "core", ledgerDir: stateDir }], views: [counted], holder: "w1-t13655",
     post: (message: ReadModelWorkerMessage) => {
       if (message.type === "body" && message.entry.view === "operator-agent-rows") posted.push(message.entry);
       if (message.type === "sources" && message.ledgerReads) sourceReads.push(message.ledgerReads);
     },
   });
-  return { posted, sourceReads, built: () => built, settle: () => { for (let i = 0; i < 6; i++) ticker.tick(); }, release: () => void ticker.release() };
+  return { posted, sourceReads, built: () => built, settle: () => { for (let i = 0; i < 6; i++) { nowMs += 60_000; ticker.tick(); } }, release: () => void ticker.release() };
 }
 
 test("W1-T13666 criterion 1: facts that are not panel rows build no operator-agent rows body, and a panel fact builds it again", (t) => {
