@@ -2762,8 +2762,8 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
   const humanGates = projectProposalHumanGates(classifications.filter((c) => byId.has(c.proposalId)), "core", ownerOf);
   const asks = new Set(humanGates.gates.map((gate) => decodeURIComponent(gate.key.split(":")[2]!)));
   const isAsk = (item: { proposalId: string }) => asks.has(item.proposalId);
-  // W1-T13479: a verify-human ask whose machine-judge twin is present is the same question; list it once.
-  const folded = foldedTwinAsks(classifications.filter((c) => byId.has(c.proposalId)).map((c) => c.proposalId));
+  // W1-T13479: a verify-human ask and its machine-judge twin are the same question; list the one the operator can act on.
+  const folded = foldedTwinAsks(classifications.filter((c) => byId.has(c.proposalId)));
   const operatorItems = <T extends { proposalId: string }>(items: T[]) => items.filter((item) => isOperator(item) && !folded.has(item.proposalId))
     .map((item) => ({ ...item, classification: isAsk(item) ? "ASK" as const : "RECORD" as const }));
   const fleetDecisions = fleetLaneDecisions(ledgerLines as never, stores.fleetDecisions);
