@@ -5,7 +5,7 @@ import { once } from "node:events";
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { ghShim } from "#test/helpers/gh-shim.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
@@ -1268,12 +1268,14 @@ test("served product planning receives the owned gateway from production assembl
   assert.equal(pending.body.planOperation?.state, "pending");
   await f.wait(() => existsSync(f.receiptPath));
   const child = JSON.parse(readFileSync(f.receiptPath, "utf8"));
-  assert.equal(child.cwd, f.tree, "the writable control root owns the fresh tree, separate from the installed generation");
+  // One tree per attempt under the writable control root (2026-11-18): `<stable path>-<pid>-<random>`.
+  assert.equal(dirname(child.cwd), dirname(f.tree), "the writable control root owns the fresh tree, separate from the installed generation");
+  assert.match(basename(child.cwd), new RegExp(`^${basename(f.tree)}-\\d+-[0-9a-f]{8}$`), "the attempt cuts its own tree");
   assert.equal(child.sha, f.sourceHead);
   assert.equal(child.guard, "1");
   assert.equal(child.dependencies, true);
   assert.equal(child.lease, true);
-  assert.ok(existsSync(`${f.tree}.lock`), "the real child lifetime holds the maintained lease");
+  assert.ok(existsSync(`${child.cwd}.lock`), "the real child lifetime holds the maintained lease");
   assert.notEqual(f.generation.git("rev-parse", "HEAD"), child.sha);
   assert.deepEqual(child.args.slice(0, 2), ["plan", "--mode=clarify"]);
   assert.deepEqual(child.args.slice(-2), ["--repo-root", f.checkout]);
@@ -1286,7 +1288,9 @@ test("served product planning receives the owned gateway from production assembl
   await app.stop();
   assert.equal(f.rows().find(row => row.step === "ratify.cli_exited")?.code, 0);
   assert.equal(f.rows().find(row => row.step === "ratify.cli_exited")?.sha, f.sourceHead);
-  assert.equal(existsSync(`${f.tree}.lock`), false);
+  assert.equal(existsSync(`${child.cwd}.lock`), false);
+  await f.wait(() => !existsSync(child.cwd));
+  assert.equal(existsSync(child.cwd), false, "the attempt removes its own tree once it settles");
   assert.ok(readdirSync(join(f.root, "state", "logs")).some(name => name.startsWith("product-plan-")));
 });
 
@@ -1324,21 +1328,16 @@ test("served product planning refuses when no owned runner is available", async 
 });
 
 test("served product planning retains fresh source refusal evidence", { timeout: 120_000 }, async t => {
-  for (const failure of ["unavailable", "changed"] as const) await t.test(failure, async t => {
+  await t.test("unavailable", async t => {
     const f = await ownedServedPlan(t), app = await f.boot();
     const command = await f.prepare(app.base);
-    if (failure === "unavailable") renameSync(f.localOrigin, `${f.localOrigin}.offline`);
-    else {
-      // A registered branch at the expected source path must refuse, even at the correct SHA.
-      f.generation.git("fetch", "--quiet", "origin", "main");
-      f.generation.addWorktree(f.tree, "contaminated-owned-tree", f.sourceHead);
-    }
+    renameSync(f.localOrigin, `${f.localOrigin}.offline`);
     const pending = await f.send(app.base, command);
     assert.equal(pending.status, 200, JSON.stringify(pending.body));
     await f.wait(() => f.rows().some(row => row.step === "ratify.handoff_failed"));
     const failureRow = f.rows().find(row => row.step === "ratify.handoff_failed");
     assert.equal(failureRow?.task_id, `product-plan:${pending.body.planOperation!.operationId}`);
-    assert.match(String(failureRow?.reason), failure === "unavailable" ? /fetch|repository/ : /not an exact clean detached checkout/);
+    assert.match(String(failureRow?.reason), /fetch|repository/);
     const recovered = await f.send(app.base, command);
     assert.equal(recovered.body.planOperation?.state, "unknown");
     assert.equal(recovered.body.planOperation?.operationId, pending.body.planOperation?.operationId);
@@ -1347,6 +1346,24 @@ test("served product planning retains fresh source refusal evidence", { timeout:
     assert.equal(f.rows().filter(row => row.step === "ratify.handoff_failed").length, 1, "recovery never retries a failed handoff");
     assert.equal(f.rows().filter(row => row.step === "ratify.cli_started").length, 0);
   });
+});
+
+test("a registered branch tree at the old sha-keyed path neither blocks served planning nor is touched", { timeout: 90_000 }, async t => {
+  // 2026-11-18: a tree another clone left at `approve-<sha12>` blocked every Approve at that sha. Each attempt now
+  // cuts its own tree, so a contaminated tree at the old path is never run in, re-added over or removed.
+  const f = await ownedServedPlan(t), app = await f.boot();
+  const command = await f.prepare(app.base);
+  f.generation.git("fetch", "--quiet", "origin", "main");
+  f.generation.addWorktree(f.tree, "contaminated-owned-tree", f.sourceHead);
+  const pending = await f.send(app.base, command);
+  assert.equal(pending.status, 200, JSON.stringify(pending.body));
+  await f.wait(() => existsSync(f.receiptPath));
+  const child = JSON.parse(readFileSync(f.receiptPath, "utf8"));
+  assert.notEqual(child.cwd, f.tree);
+  assert.equal(child.sha, f.sourceHead);
+  await app.stop();
+  assert.equal(f.rows().some(row => row.step === "ratify.handoff_failed"), false);
+  assert.equal(f.generation.git("-C", f.tree, "rev-parse", "--abbrev-ref", "HEAD"), "contaminated-owned-tree");
 });
 
 test("served product planning retains owned fresh-source child evidence on recovery", { timeout: 90_000 }, async t => {

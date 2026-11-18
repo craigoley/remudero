@@ -17,7 +17,7 @@
     - test/one-registry-for-the-fleet.test.ts
     - test/an-unscoped-recycle-refuses-once-instances-are-declared.test.ts
     - test/github/the-daemon-sets-its-installation-share-from-a-registry-its-container-can-read.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The committed registry has an ops row for craigoley/remudero-ops in the remudero project, declared mode shadow"

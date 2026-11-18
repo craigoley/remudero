@@ -19,7 +19,7 @@
     - src/run-task.ts
     - test/review/a-repair-proof-that-passes-at-the-base-is-replaced.test.ts
     - test/a-main-repair-pr-carries-a-dispatcher-written-acceptance-block.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "#19011's body, whose two unit test proofs grade stale at the base, is rewritten to one grep of the first non-comment line the repair adds"

@@ -15,7 +15,7 @@
   files:
     - src/lib/main-health-rung.ts
     - test/a-red-main-repairs-itself-fix-pr-then-revert-pr.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A fix PR that reads merged never yields a stall reason, however many red observations follow, while no run of a commit containing its merge has concluded"

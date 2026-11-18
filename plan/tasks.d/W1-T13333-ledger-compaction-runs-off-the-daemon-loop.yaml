@@ -20,7 +20,7 @@
     - src/run-task.ts
     - scripts/build-child-entries.mjs
     - test/ledger-compaction-runs-off-the-daemon-loop.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The hooks from buildLedgerCompactionDaemonHooks with no injected run or compact start a worker through startWorker, the worker module is listed in WORKER_ENTRIES, and a pass over a fixture state dir of real gzip rotations leaves the same archive names, the same rows in each archive and the same outcome report (sourceCount, rowsWritten, duplicatesCollapsed, archiveName) as ledgerCompactCommand run in-process on a copy of that state dir"

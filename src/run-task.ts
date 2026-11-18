@@ -1872,7 +1872,7 @@ import {
   type GithubPostureGateway,
 } from "./lib/github-posture.js";
 import { validateWorkerSettingsFile } from "./lib/settings.js";
-import { readCatalogStatusContext, type CatalogStatusContext, buildBatchedGithub, defaultCreditStorePath, loadCreditStore, saveCreditStore, buildCommitTrailerIndex, classifyGhFailure, createDispatchBreakerCache, deriveStatus, dispatchesWithoutNewOwnedPr, evaluateDispatchBreakerCorroboratedDetailed, type LedgerSnapshot, readLedgerSnapshot, type DispatchBreakerDetail, ghGateway, ghRequiredStatusCheckContexts, isGhRateLimitError, effectiveLifetimeDispatches, hasRepeatedTaskAttributableLifetimeDispatches, orphanedRunIds, streakRefusal, taskAttributableLifetimeDispatches, type LifetimeDispatchTally, projectPlan, readLedgerLines, type DeriveDeps, type GitHub, type GhFailureReason, preferImplementingPr, type PrRef, type BatchedPr, type OpenSiblingBuild, type StatusProjection, planBranchReap, type BranchFacts, type BranchReapPlan, BRANCH_REAP_REASON_LABEL, readLedgerUnionBounded, taskIdFromRunBranch, taskIdFromSlugBranch, readMergeCreditedTaskIds, readMergeCreditedTaskIdsAsync, isMergeCreditLine, readRequiredStatusCheckContexts, readRequiredStatusCheckContextsAsync, persistVerifiedCredit, type ThrownRunVerdictStage, type RefusedRunVerdictStage } from "./lib/status.js";
+import { readCatalogStatusContext, type CatalogStatusContext, buildBatchedGithub, defaultCreditStorePath, loadCreditStore, saveCreditStore, buildCommitTrailerIndex, classifyGhFailure, createDispatchBreakerCache, deriveStatus, dispatchesWithoutNewOwnedPr, evaluateDispatchBreakerCorroboratedDetailed, type LedgerSnapshot, type LedgerIndex, readLedgerSnapshot, type DispatchBreakerDetail, ghGateway, ghRequiredStatusCheckContexts, isGhRateLimitError, effectiveLifetimeDispatches, hasRepeatedTaskAttributableLifetimeDispatches, orphanedRunIds, streakRefusal, taskAttributableLifetimeDispatches, type LifetimeDispatchTally, projectPlan, readLedgerLines, type DeriveDeps, type GitHub, type GhFailureReason, preferImplementingPr, type PrRef, type BatchedPr, type OpenSiblingBuild, type StatusProjection, planBranchReap, type BranchFacts, type BranchReapPlan, BRANCH_REAP_REASON_LABEL, readLedgerUnionBounded, taskIdFromRunBranch, taskIdFromSlugBranch, readMergeCreditedTaskIds, readMergeCreditedTaskIdsAsync, isMergeCreditLine, readRequiredStatusCheckContexts, readRequiredStatusCheckContextsAsync, persistVerifiedCredit, type ThrownRunVerdictStage, type RefusedRunVerdictStage } from "./lib/status.js";
 import { readyDraftPullRequest, readTaskContractAtHeadViaGit, withCodeqlAlertEvidence, CODE_SCANNING_FALSE_POSITIVE_STEP, DEFAULT_SWEEP_POLICY, decideRedBaseRefresh, isCiHarnessPath, prAddedLinesFromPullFiles, failingSourceFilesFromCiFailures, failingTestFilesFromCiFailures, projectMergedTaskCandidates, actionableGateFailuresFromReasons, armOutcomeArmed, dispatchFixSpent, checkCostGovernor, checkMemoryGovernor, installedSlackReclaim, reclaimBeforeHold, type SlackReclaim, checkQueueGovernor, productionFixPressure, deriveQueueGovernorTrailingFlow, isFleetOwnedRunBranch, checksStateFromRollup, checksPendingSinceFromRollup, CI_GATE_CHECK_NAME, supersededRedsNowPassing, dedupeRollupByLatestAttempt, deriveDayCostUsd, deriveDayUnpricedRows, deriveDisposition, diffCoverageReport, fixCeilingInForce, fixDispatchBudget, fixRoundTally, buildFixProgressInput, flakeClaimsForHead, isBlockedCi, listRetirableEscalationIssues, listRetirableEscalationIssuesAsync, createEscalationTriageHistoryReader, ESCALATION_TRIAGE_EVIDENCE_SLICE, indexEscalationTriageHistory, type EscalationTriageHistoryReader, type EscalationTriageSlice, logCostGovernorDeferral, logMemoryObservation, logQueueGovernorDeferral, renderClarificationQuestion, renderSweepSummary, type SweepSummary, REQUIRED_CHECK_FAIL, REQUIRED_CHECK_OK, runCreditBackfill, closedPrFromRef, closedPrLookup, runPrTerminalReconcile, type PrTerminalReconcileSummary, runEscalationReconcile, runStaleEscalationRejudge, buildStaleEscalationRejudgePrompt, type StaleEscalationRejudgeCandidate, runPostFixReverification, runSweep, runSweepLightPass, runLightPassReadyRefresh, runLightPassRefreshAdmission, lightPassHeadContractRefresh, runArmedRatchetRejudge, withFullSweepRepairAdmission, redQualityGateNames, stillRedRequiredNames, terminalStateReason, toQuestionEntry, usableInstrumentEntanglementPaths, type ActionableGateFailure, type ArmedStalledPr, type CiFailure, type ClarificationQuestion, type CostGovernorResult, type EscalationReconcileSummary, type FixClass, type FixDispatchEvidence, type FixOwnerResidue, type FixDispatchSnapshot, type FixSuperseded, type LiveStateResult, type MemoryGovernorResult, type MergeConflictEvidence, type OpenPrView, type PlanScopedFixRoundInput, type ReviewDispatchMode, type ReviewReuseInputs, type RollupCheckEntry, type PostFixReverificationSummary, type ProofDiscriminationEvidence, type QueueGovernorResult, type RedBaseRefreshFacts, type PostReviewStallVerdict, type RepairFilingCapture, type Disposition, type SweepDeps, type SweepPolicy, type UpdateBranchOutcome, type UncreditableHeadReason, ABSENT_REPUSH_CAP, DEFAULT_FIX_CLASSES, buildSweepEffects as buildSweepEffectsFromLib, checkJobId, RATIFIED_BASELINE_RATCHET_REPAIRS, currentPlanIneligibilityReason, defaultSweepGhRun, dispatchFixCatchOutcome, discriminateReviewReuse, discriminateReviewReuseAsync, escalationTaskIdFor, fixDispatchErrorClass, fixDispatchSignalDeath, fixHeadAcceptable, fixRungTaskFor, foreignHeadIsStuck, isDispatchedRunBranch, detectPostReviewStall, isCappedReviewOrphanEscalation, proofDiscriminationEvidenceFromCriteria, type ArmAttemptOutcome, type ArmOutcomeName, type BuildSweepEffectsDeps, type MetadataRepairResult, sweepArmTaskId, uncreditableHeadReason, planOnlyRunBranchReceipts, REGENERABLE_ARTIFACT_GENERATORS, ADDITIVE_REGISTRATION_SURFACES, isAdditiveRegistrationChange, type RegistrationChange, repairLadderCommand, trackRepairLadder, riskJudgeHandedOffHead, handedOffHeadJudgmentPool, type HandedOffHeadJudgmentPool, awaitHandedOffHeadJudgments, riskJudgeCodeScanning, hasCapturedMergeConflictEvidence, clearedConflictEscalationCause, type FixRoundBranchClaim, inFlightReviewCount } from "./lib/sweep.js";
 import { sampleDaemonMemory, workerHeapReadings } from "./lib/daemon-memory-telemetry.js";
 import { currentReviewSignal, headLacksOwnTaskRecord, OWN_TASK_RECORD_MISSING_CAUSE, reviewOnlyStandDownReason } from "./lib/sweep.js";
@@ -1938,6 +1938,9 @@ export type FreshTreeReviewSeams = {
     store?: { storeRoot?: string }, onExit?: (exit: FreshTreeExit) => void) => Promise<number>;
   /** Tests may replace ownership; production holds the general reaper's real run-lock token. */
   withWorktreeLease?: <T>(worktree: string, action: () => Promise<T>) => Promise<T>;
+  /** Remove a tree this process cut for one attempt (`git worktree remove --force` through the
+   *  hardened leaf by default). Only ever handed a path whose `addWorktree` this process saw succeed. */
+  removeWorktree?: (repoDir: string, worktreePath: string) => void;
   /**
    * Classify the stable reviewer path before an add. `unsafe` deliberately combines a registered
    * path with a wrong ref, a branch checkout, dirt, a missing checkout, or an unreadable registry:
@@ -2089,18 +2092,58 @@ function freshTreeInspector(deps: FreshTreeTools): NonNullable<FreshTreeTools["i
   return deps.inspectExistingWorktree ?? ((dir, path, revision) => inspectFreshReviewerWorktree(dir, path, revision, deps.git));
 }
 
-/** `<worktreeRoot>/<prefix>-<sha12>`: cut, or proven an exact clean detached checkout of `sha`, then made runnable. */
+/** Does anything at all sit at `path`? `lstat`, so a dangling symlink still counts as occupied. */
+function pathOccupied(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error; // an unreadable parent is not proof of absence; the caller's named refusal carries it
+  }
+}
+
+/** A sibling name no other attempt, process or container can derive: `<prefix>-<sha12>-<pid>-<random>`. */
+function perAttemptTreePath(deps: FreshTreeTools, prefix: string, sha: string): string {
+  return `${deps.worktreeRoot}/${prefix}-${sha.slice(0, 12)}-${process.pid}-${randomUUID().slice(0, 8)}`;
+}
+
+function makeTreeRunnable(repoDir: string, deps: FreshTreeTools, prefix: string, worktree: string): void {
+  if (!(deps.prepareWorktree ?? prepareWorktreeToolchain)(repoDir, worktree)) {
+    throw new Error(`${prefix} worktree at ${worktree} has no runnable canonical node_modules link`);
+  }
+}
+
+/** `<worktreeRoot>/<prefix>-<sha12>`: cut, or proven an exact clean detached checkout of `sha`, then made runnable.
+ *  A directory at that path which THIS repository does not register (another clone's tree over a shared mount, or
+ *  debris a reaper has not reached) is never touched and never re-added over: the tree is cut at a per-attempt
+ *  sibling instead, so a leftover cannot block every cut until main moves (the 2026-11-18 W1-T12032 approve). */
 function prepareFreshOriginMainTree(repoDir: string, deps: FreshTreeTools, prefix: string, sha: string): string {
   const worktree = `${deps.worktreeRoot}/${prefix}-${sha.slice(0, 12)}`;
   const existing = freshTreeInspector(deps)(repoDir, worktree, sha);
   if (existing === "unsafe") {
     throw new Error(`${prefix} worktree at ${worktree} is not an exact clean detached checkout of ${sha}`);
   }
-  if (existing === "absent") deps.addWorktree(repoDir, worktree, sha);
-  if (!(deps.prepareWorktree ?? prepareWorktreeToolchain)(repoDir, worktree)) {
-    throw new Error(`${prefix} worktree at ${worktree} has no runnable canonical node_modules link`);
+  if (existing === "absent" && pathOccupied(worktree)) {
+    const sibling = perAttemptTreePath(deps, prefix, sha);
+    process.stderr.write(`prepareFreshOriginMainTree: ${worktree} is occupied by a directory this repository does not register; cutting ${sibling}\n`);
+    deps.addWorktree(repoDir, sibling, sha);
+    makeTreeRunnable(repoDir, deps, prefix, sibling);
+    return sibling;
   }
+  if (existing === "absent") deps.addWorktree(repoDir, worktree, sha);
+  makeTreeRunnable(repoDir, deps, prefix, worktree);
   return worktree;
+}
+
+/** Remove a per-attempt tree once its attempt settles. A failed removal never replaces the attempt's own outcome:
+ *  the tree is registered and detached, so the general worktree reaper collects it on a later pass. */
+function removePerAttemptTree(repoDir: string, deps: FreshTreeTools, worktree: string): void {
+  try {
+    (deps.removeWorktree ?? worktreeRemove)(repoDir, worktree);
+  } catch (error) {
+    process.stderr.write(`freshOriginMainTreeRunner: left ${worktree} for the worktree reaper: ${scrubGitCredentialText(String(error))}\n`);
+  }
 }
 
 /**
@@ -2109,15 +2152,25 @@ function prepareFreshOriginMainTree(repoDir: string, deps: FreshTreeTools, prefi
  * approve before the verb ran, and setting the guard there would classify against a stale plan. Here
  * the child's repoRoot IS origin/main, so its plan, policy and grep reads are fresh by construction.
  * The tree is leased until `action` settles; every failure is rethrown with credentials scrubbed.
+ *
+ * ONE TREE PER ATTEMPT, REMOVED WHEN IT SETTLES. A path keyed on the sha alone is shared by every
+ * approve and reframe at that sha, in the daemon AND in serve, which share the worktree root: a
+ * refused approve left `approve-<sha12>` behind and the next approve at that sha died on `git worktree
+ * add … already exists` (2026-11-18, W1-T12032). A per-attempt name cannot collide with a leftover,
+ * a concurrent attempt or another process's tree, and the attempt's own removal stops the leak.
  */
 export function freshOriginMainTreeRunner(
   repoDir: string,
   deps: FreshTreeTools & { mainTip?: (repoDir: string) => Promise<string> },
 ): RatifyCliTree["freshTree"] {
   return async (action) => {
+    let cut: string | undefined;
     try {
       const sha = await (deps.mainTip ?? mainTipViaGit)(repoDir);
-      const path = prepareFreshOriginMainTree(repoDir, deps, "approve", sha);
+      const path = perAttemptTreePath(deps, "approve", sha);
+      deps.addWorktree(repoDir, path, sha);
+      cut = path; // only a path whose add succeeded is ever removed: this attempt made it
+      makeTreeRunnable(repoDir, deps, "approve", path);
       return await (deps.withWorktreeLease ?? withReviewerWorktreeLease)(path, async () => {
         if (freshTreeInspector(deps)(repoDir, path, sha) !== "reusable") {
           throw new Error(`approve worktree at ${path} is no longer an exact clean detached checkout of ${sha}`);
@@ -2126,6 +2179,8 @@ export function freshOriginMainTreeRunner(
       });
     } catch (err) {
       throw new Error(freshTreeFailureText(String((err as Error)?.message ?? err)));
+    } finally {
+      if (cut !== undefined) removePerAttemptTree(repoDir, deps, cut);
     }
   };
 }
@@ -25544,14 +25599,21 @@ function lifetimeAccounting(onUnavailable?: (failure: LifetimeIndexFailure) => v
     unavailableReason: indexed.unavailableReason,
     error: indexed.error,
     close: indexed.close,
-    tallyFor(taskId: string, rows: ReadonlyArray<Record<string, unknown>>): LifetimeDispatchTally | undefined {
+    tallyFor(taskId: string, rows: ReadonlyArray<Record<string, unknown>>, index?: LedgerIndex): LifetimeDispatchTally | undefined {
       if (indexed.unavailableReason() !== undefined) return undefined;
-      const orphans = orphanedRunIds(rows, taskId);
-      const visible = new Set(rows.filter((row) => row.task_id === taskId).map((row) => row.run_id));
+      // W1-T13608: the snapshot's index holds the ledger clock and this task's rows, so a dispatch pass makes no full
+      // scan per candidate task. An index built over other rows is never trusted: those rows are scanned as before.
+      const own = index?.rows === rows ? index : undefined;
+      const orphans = orphanedRunIds(rows, taskId, own);
+      const taskRows = own === undefined ? rows : own.byTask.get(taskId) ?? [];
+      const visible = new Set(taskRows.filter((row) => row.task_id === taskId).map((row) => row.run_id));
       return indexed.tallyFor(taskId, visible, orphans);
     },
   };
 }
+
+/** W1-T13608: the pass-shared read; its index, when present, is used only if it was built over its `lines`. */
+type LifetimeLiveSnapshot = Pick<LedgerSnapshot, "identity" | "content" | "lines"> & Partial<Pick<LedgerSnapshot, "index">>;
 
 /** The live overlay is incremental while a daemon is running. On a rotation its inode changes;
  * replayed retained rows are skipped by the archive-seeded window and only genuinely new lines
@@ -25560,7 +25622,7 @@ function lifetimeAccounting(onUnavailable?: (failure: LifetimeIndexFailure) => v
 export interface LifetimeHistory {
   close?: () => boolean;
   /** W1-T6358: `live` is a pass-shared read; absent, the overlay reads the file itself. */
-  tallyFor: (taskId: string, live?: Pick<LedgerSnapshot, "identity" | "content" | "lines">) => LifetimeDispatchTally | undefined;
+  tallyFor: (taskId: string, live?: LifetimeLiveSnapshot) => LifetimeDispatchTally | undefined;
 }
 
 function lifetimeHistory(
@@ -25570,8 +25632,8 @@ function lifetimeHistory(
 ): LifetimeHistory {
   let identity: string | undefined;
   let offsetChars = 0;
-  const refresh = (supplied?: Pick<LedgerSnapshot, "identity" | "content" | "lines">) => {
-    let snapshot: Pick<LedgerSnapshot, "identity" | "content" | "lines">;
+  const refresh = (supplied?: LifetimeLiveSnapshot) => {
+    let snapshot: LifetimeLiveSnapshot;
     if (supplied) {
       snapshot = supplied;
     } else try {
@@ -25582,7 +25644,7 @@ function lifetimeHistory(
         reason: error instanceof Error ? error.message : "live ledger unreadable",
       };
     }
-    if (snapshot.identity === undefined) return { ok: true, rows: snapshot.lines };
+    if (snapshot.identity === undefined) return { ok: true, rows: snapshot.lines, index: snapshot.index };
     const nextIdentity = snapshot.identity;
     const content = snapshot.content;
     const sameFile = identity === nextIdentity && content.length >= offsetChars;
@@ -25608,14 +25670,14 @@ function lifetimeHistory(
     }
     identity = nextIdentity;
     offsetChars = sameFile ? offsetChars + completedAt + 1 : completedAt + 1;
-    return { ok: true, rows: snapshot.lines };
+    return { ok: true, rows: snapshot.lines, index: snapshot.index };
   };
   return {
     close: accounting.close,
     tallyFor(taskId, supplied) {
       const refreshed = refresh(supplied);
       if (!refreshed.ok) return undefined;
-      return accounting.tallyFor(taskId, refreshed.rows ?? []);
+      return refreshed.rows === undefined ? accounting.tallyFor(taskId, []) : accounting.tallyFor(taskId, refreshed.rows, refreshed.index);
     },
   };
 }

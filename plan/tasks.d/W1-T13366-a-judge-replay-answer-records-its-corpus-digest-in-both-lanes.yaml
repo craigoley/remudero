@@ -16,7 +16,7 @@
   files:
     - src/lib/judge-replay-batch.ts
     - test/routing/a-judge-replay-answer-records-its-corpus-digest-in-both-lanes.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:an-answer-names-its-corpus — every judge_replay.answered row of a batch-lane replay and of a direct-lane replay carries corpus_digest equal to judgeReplayCorpusDigest of the cases that replay loaded, and replay_corpus equal to the corpus name the replay was asked for. All answered rows of one replay carry the same digest, a row for an errored or unanswered case included"

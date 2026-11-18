@@ -1,0 +1,78 @@
+- id: W1-T13609
+  title: "A plan PR's merge-safety read parses only the merged-tree plan shards whose content changed, by passing the existing PlanBlobCache, so it no longer parses all of tasks.d on the daemon loop for each plan PR"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # changes how mergedPlanState in src/lib/plan-pr-merge-safety.ts parses the merged tree; its loads, quarantined and refused states decide whether a plan PR may auto-merge, so each state and its detail must stay the same
+  origin: "operator-session#loop-lag-2026-11-18"
+  plan_refs:
+    - W1-T6262
+    - W1-T4421
+    - W1-T5780
+    - W1-T11504
+  files:
+    - src/lib/plan-pr-merge-safety.ts
+    - test/plan/a-merge-safety-read-parses-only-the-plan-shards-that-changed.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "invariant:parse-only-changed-shards — two merge-safety reads in one process over merged trees of 200 shards that differ in one shard (and in their ref labels) parse 200 shards on the first read and 1 on the second (PlanBlobCache parsedBlobs 1, reusedBlobs 199), so an unchanged shard is not parsed again"
+      proof: "grep: W1-T13609 criterion 1 in test/plan/a-merge-safety-read-parses-only-the-plan-shards-that-changed.test.ts"
+    - claim: "invariant:same-merged-state — for the same blobs, the cached read and an uncached mergePlanBlobsQuarantiningDuplicates give the same MergedTreePlan: loads; quarantined with the same ids for a duplicate id across two shards and for an invalid shard; and a later read with the duplicate removed gives loads again"
+      proof: "grep: W1-T13609 criterion 2 in test/plan/a-merge-safety-read-parses-only-the-plan-shards-that-changed.test.ts"
+    - claim: "invariant:same-failure-rule — a monolith that is not valid YAML, and a dependency that the merge leaves unresolved, still give state refused with the same first-line detail on a cached read as on an uncached one, also when the shard text was seen before; a git step that fails still gives unreadable"
+      proof: "grep: W1-T13609 criterion 3 in test/plan/a-merge-safety-read-parses-only-the-plan-shards-that-changed.test.ts"
+  rationale: |
+    WHY: the plan PR merge-safety read (arm-auto-merge.ts:839 into readPlanMergeSafetySteps) merges the PR into
+    main with git merge-tree, reads every plan blob of the merged tree, and then mergedPlanState parses all of
+    them with mergePlanBlobsQuarantiningDuplicates and no cache. tasks.d holds about 5,700 shards, and two plan
+    PRs share almost all of them, so each read parses the whole plan again as YAML on the daemon loop. The
+    PlanBlobCache (W1-T6262) already reuses a shard whose path and sha256 content are unchanged, across refs,
+    and still checks duplicates and dependencies on every merge; thread-plan.ts and plan-revision-store.ts use
+    it, but this path does not.
+    MEASURED on the Azure host, 2026-11-18, one nice'd pass over the daemon.loop_stall_profile rows since the
+    03:23:47Z boot (9b4f43779d; the 04:09:18Z boot at 04f6dd8235 did not change this path), in
+    ~/rmd-state2/state/ledger.ndjson and the ledger.2026-11-18T*.ndjson.gz archives, deduplicated on ts, step
+    and command: 163 rows, 725.4 s of loop lag in 62.5 minutes.
+    - mergedPlanState, mergedTreePlanSteps or mergePlanBlobsQuarantiningDuplicates is in the top inclusive frames
+      of 8 rows (runStepsAsync2 above them, triageFleetLaneSteps and readPlanMergeSafetySteps in the chain): 45.2 s
+      of lag, max 7.9 s (03:31:15Z), about 24.0 s (3.3 percent of all lag) by inclusive share.
+    - The self frames in those rows are YAML parser work (next under parse, parseDocument, detachStrings) and
+      garbage collection (8.1 s).
+    READ at origin/main b79ad9e16d:
+    - src/lib/plan-pr-merge-safety.ts:398 readPlanMergeSafetySteps; :421 mergedTreePlanSteps; :486 it hands every
+      merged blob to mergedPlanState; :532-534 mergedPlanState calls mergePlanBlobsQuarantiningDuplicates(blobs)
+      with no cache; :534-538 the loads, quarantined and refused states.
+    - src/lib/plan.ts:937 PlanBlobCache; :943-958 cachedBlobParser keys on the path after the ref label and on the
+      sha256 of the text, and keeps a parse error too; :981 mergePlanBlobsQuarantiningDuplicates(blobs, cache).
+    - src/lib/thread-plan.ts:33 and :64 keep one PlanBlobCache per pinned path; src/lib/plan-revision-store.ts:28
+      keeps one per store.
+    NOT COVERED: swept origin/main plan/tasks.d for mergedPlanState and mergePlanBlobsQuarantiningDuplicates:
+    W1-T11504 (queued) bounds the batch read's bytes, not the parse; W1-T6262 (merged) added the cache for other
+    readers. No open pull request touches plan-pr-merge-safety.ts.
+  design: |
+    INVARIANT parse-only-changed-shards: a merge-safety read parses only shards whose path or content changed since the last read in this process.
+    INVARIANT same-merged-state: with the cache the read gives the same loads, quarantined ids and refused detail as without it.
+    INVARIANT same-failure-rule: a fatal monolith or an unresolved dependency still refuses, and a failed git step is still unreadable.
+    1. Keep one module-level PlanBlobCache in plan-pr-merge-safety.ts, as thread-plan.ts:33 does, and pass it to
+       mergePlanBlobsQuarantiningDuplicates in mergedPlanState. The labels stay `merged:<path>`, so the cache
+       keys on the path and content exactly as today's other callers.
+    2. Change nothing else: not the git steps, the batch read, the bounds, the states or their detail, and not
+       plan.ts. No env var, config key, time bound or new cache class.
+    3. The test calls readPlanMergeSafetySteps (or mergedPlanState through it) with an in-memory git fake and
+       reads parsedBlobs and reusedBlobs from the cache after each read; it isolates HOME with
+       test/setup/tmp-hygiene.ts and touches no network.
+  falsifier: |
+    Leave the cache out: criterion 1 sees 200 parsed shards on the second read. Key the cache on the full label
+    with the ref: criterion 1 parses every shard again when the ref changes. Skip the duplicate check for
+    reused shards: criterion 2 gives loads where quarantined is due.
+  note: |
+    Id reserved for run-unfiled-1794976017000 with ~/rmd-work/bin/reserve-id.sh.
+    The cache holds one parsed copy of each shard of the last merged tree (cachedBlobParser replaces its
+    entries on each merge), the same as the thread-plan cache. Proof that counts on the host: after the daemon
+    converges, no daemon.loop_stall_profile row shows mergedPlanState above YAML parser frames for longer than
+    the changed shards take.

@@ -521,6 +521,9 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "code_scanning.judged_fix",
   "code_scanning.judged_false_positive",
   "code_scanning.fix_dispatch",
+  // W1-T13470: a capture once per head and check id, an escalation once per head; archived, each would repeat.
+  "security.codeql_configuration_warning_captured",
+  "security.codeql_configuration_warning_escalated",
   "automerge.rearmed_after_disarm",
   "automerge.rearm_exhausted",
   "automerge.stale_rollup_refreshed", // W1-T6404: the once-per-PR refresh bound; forgotten, it loops.

@@ -14,7 +14,7 @@
     - src/lib/pr-owner-ledger.ts
     - src/run-task.ts
     - test/fix-lane/pr-owner-clears-only-the-recovered-dispatch.test.ts
-  status: queued
+  status: merged
   priority: 0.15
   attempts: 0
   acceptance:

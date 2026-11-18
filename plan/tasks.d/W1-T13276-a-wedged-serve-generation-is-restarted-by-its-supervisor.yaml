@@ -15,7 +15,7 @@
   files:
     - src/lib/serve-supervisor.ts
     - test/a-wedged-serve-generation-is-restarted-by-its-supervisor.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With a fake clock and an injected probe, the supervisor GETs one of SMOKE_PATHS on the active generation every ACTIVE_PROBE_INTERVAL_MS (60 s) with an ACTIVE_PROBE_TIMEOUT_MS (10 s) bound, and after ACTIVE_PROBE_FAILURES (3) consecutive failures writes one serve.active_wedged row (sha, failures, last error, uptime) and restarts the generation by the existing restart path"

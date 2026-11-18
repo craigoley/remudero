@@ -1,11 +1,24 @@
 import {createHash} from "node:crypto";
-import {classifyCodeScanningMergePolicy, CODE_SCANNING_MAX_CHANGED_FILES} from './code-scanning-merge-policy.mjs';
+import {classifyCodeScanningMergePolicy, CODE_SCANNING_MAX_CHANGED_FILES, isCodeqlConfigurationWarning} from './code-scanning-merge-policy.mjs';
 import {changesSemgrepRuntime, semgrepRuntimeMetadataRequests} from './semgrep-runtime-merge-policy.mjs';
 
 export const SECURITY_MERGE_CONTEXT = 'security-merge-policy';
 export const SECURITY_METADATA_MAX_PAGES = 30; // BACKSTOP: complete evidence or UNKNOWN, never partial success.
 const unknown = reason => ({state:'unknown',mergeAllowed:false,reason});
 const sha = value => typeof value === 'string' && /^[a-f0-9]{40}$/.test(value);
+export const CODEQL_WARNING_SUMMARY_MAX_CHARS = 8192; // BACKSTOP: the verbatim receipt is bounded per ledger row and job log.
+const digest = text => createHash('sha256').update(text).digest('hex');
+
+/** W1-T13470 — GitHub's own check text for the configuration-not-found shape, never a token or a header: the summary
+ *  verbatim up to its BACKSTOP with the whole summary's sha256, and the "View all branch alerts" target or null. */
+function configurationWarning(headSha, check) {
+  const summary = typeof check.output?.summary === 'string' ? check.output.summary : null;
+  return {checkId: check.id, headSha, completedAt: check.completed_at ?? null, conclusion: check.conclusion, title: check.output.title,
+    summary: summary === null ? null : summary.slice(0, CODEQL_WARNING_SUMMARY_MAX_CHARS),
+    summarySha256: summary === null ? null : digest(summary),
+    truncated: summary !== null && summary.length > CODEQL_WARNING_SUMMARY_MAX_CHARS,
+    alertsLink: summary?.match(/\[View all branch alerts\]\(([^()\s]{1,2048})\)/)?.[1] ?? null};
+}
 
 /** Diagnostic receipt only; the classifier remains the sole permission decision. */
 function codeqlObservation(headSha, checks, checksComplete) {
@@ -17,9 +30,9 @@ function codeqlObservation(headSha, checks, checksComplete) {
   return {checksComplete, checkCount: checks.length, trustedCodeqlCount: trusted.length,
     ...(latest ? {latest: {id: latest.id, status: latest.status ?? null, conclusion: latest.conclusion ?? null,
       title: latest.output?.title ?? null,
-      summarySha256: typeof latest.output?.summary === 'string'
-        ? createHash('sha256').update(latest.output.summary).digest('hex') : null,
-      startedAt: latest.started_at ?? null, completedAt: latest.completed_at ?? null}} : {})};
+      summarySha256: typeof latest.output?.summary === 'string' ? digest(latest.output.summary) : null,
+      startedAt: latest.started_at ?? null, completedAt: latest.completed_at ?? null},
+    ...(isCodeqlConfigurationWarning(latest) ? {configurationWarning: configurationWarning(headSha, latest)} : {})} : {})};
 }
 
 /** Shared runtime trusted API metadata ONLY. Caller supplies an authenticated, bounded HTTP reader;

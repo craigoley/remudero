@@ -17,7 +17,7 @@
     - src/run-task.ts
     - docs/operator-guide.md
     - test/routing/an-open-weight-lead-waits-for-a-reconciled-invoice.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     VERIFIED ON origin/main 742487eb2 (2026-10-27). The fleet prices every cash request from OPENWEIGHT_PRICES and
