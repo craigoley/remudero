@@ -907,8 +907,12 @@ export const OPS_DISPATCH_SOURCE_MAX_AGE_MS = 120_000;
 /** W1-T13052: the daemon refreshes on its own timer, so evidence stays younger than the bound between slow cycles. */
 export const OPS_DISPATCH_SOURCE_REFRESH_MS = 45_000;
 
+/** W1-T13705: one row per completed refresh, so an unreadable catalog says why. No URL, body or token reaches it. */
+export const OPS_CATALOG_REFRESHED_STEP = "dispatch.ops_catalog_refreshed";
+
 export function opsCatalogShadowFeed(
-  source: { refresh(): Promise<OpsCatalogShadowInput> }, clock: Clock = systemClock, opts: { refreshEveryMs?: number } = {},
+  source: { refresh(): Promise<OpsCatalogShadowInput> }, clock: Clock = systemClock,
+  opts: { refreshEveryMs?: number; log?: (step: string, fields: Record<string, unknown>) => void } = {},
 ): {
   current(): OpsCatalogShadowInput | undefined;
   forDispatch(): OpsCatalogShadowInput | undefined;
@@ -917,6 +921,18 @@ export function opsCatalogShadowFeed(
   let latest: OpsCatalogShadowInput | undefined;
   let completedAt: number | undefined;
   let inFlight = false;
+  // Only closed labels and numbers are copied: the input's private plan handle never reaches the row.
+  const logRefresh = (input: OpsCatalogShadowInput, durationMs: number): void => {
+    if (!opts.log) return;
+    try {
+      opts.log(OPS_CATALOG_REFRESHED_STEP, {
+        outcome: input.outcome, refusal_stage: input.refusalStage ?? null, duration_ms: durationMs,
+        kind: input.kind ?? null, http_status_class: input.httpStatusClass ?? null,
+      });
+    } catch {
+      // A diagnostic row that cannot be written never changes the evidence the refresh produced.
+    }
+  };
   const start = (): void => {
     if (inFlight) return;
     inFlight = true;
@@ -925,7 +941,7 @@ export function opsCatalogShadowFeed(
     // refresh() answers failure as an outcome; an unexpected rejection remains unreadable.
     void source.refresh().then((input) => { latest = input; completedAt = startedAt; }, (error: unknown) => {
       latest = { outcome: "unreadable", refusalStage: "source_refresh" }; completedAt = startedAt; void error;
-    }).finally(() => { inFlight = false; });
+    }).then(() => { if (latest) logRefresh(latest, clock.now() - startedAt); }).finally(() => { inFlight = false; });
   };
   const timer = opts.refreshEveryMs === undefined ? undefined : setInterval(start, opts.refreshEveryMs);
   timer?.unref();
@@ -2268,7 +2284,11 @@ export async function daemonCommand(
         return current.outcome === "on" && current.repository === opsSourceRepository
           ? source.refresh() : Promise.resolve({ outcome: "stale" as const });
       },
-    }, clockFromMillisFn(deps.now), opsSelection.outcome === "on" ? { refreshEveryMs: OPS_DISPATCH_SOURCE_REFRESH_MS } : {});
+    }, clockFromMillisFn(deps.now), {
+      ...(opsSelection.outcome === "on" ? { refreshEveryMs: OPS_DISPATCH_SOURCE_REFRESH_MS } : {}),
+      // W1-T13705: only the dispatch feed ledgers its refreshes; --shadow-ops-catalog keeps W1-T11770's one aggregate row.
+      ...(shadowOpsCatalog ? {} : { log }),
+    });
     if (opsShadow) cleanup.push({ resource: "ops_catalog_refresh", close: opsShadow.stop });
     opsShadow?.current();
     const readOpsTaskDispatch = opsSelection.outcome === "off" ? undefined : (publicPlan: Plan): OpsTaskDispatchRead => {
