@@ -29,10 +29,11 @@ import { stampVerificationAsk } from "./inbox-retirement.js";
  * more, one that keeps failing less, and either recovers as its outcomes move.
  */
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 
 import { fixedClock, type Clock } from "./clock.js";
+import { rotationStampIso, type readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import { fetchOriginRetryingRefLock } from "./git-fetch-retry.js";
 import { ghExec } from "./github-transport.js";
@@ -60,7 +61,7 @@ import {
 } from "./flake-incident-gardener.js";
 import {
   isMechanicalDecision, mechanicalReleaseProvenance, mechanicalRetirementReason, mechanicalRuleName, mechanicalRuling, mechanicalRulingRow,
-  corpusCoversWindow, queuedStoppedCauseRuling, RULE_3_LOW_PRIVILEGE, type MechanicalDecision, type MechanicalReleaseProvenance, type SymptomReading,
+  corpusCoversWindow, queuedStoppedCauseRuling, RULE_3_LOW_PRIVILEGE, TASK_ACTIVITY_STEPS, taskActivity, type MechanicalDecision, type MechanicalReleaseProvenance, type SymptomReading,
 } from "./mechanical-rulings.js";
 import { lintTask, promoteIntroducedPlanOnlyDiagnostics, rulingVerifyViolation, taskRulingPin, type LintViolation } from "./task-linter.js";
 
@@ -722,6 +723,32 @@ export interface MechanicalPort {
   };
   /** Writes rule 3's `ratify.approved` row through `approveParkedTask`, whose every guard stands: a non-zero code means no row. */
   release: (task: Task, provenance: MechanicalReleaseProvenance) => { code: number; message: string; released?: boolean };
+}
+
+/**
+ * W1-T12838: the span of history a ledger union in `stateDir` provably holds, from the OLDEST rotation's stamp (a
+ * rotation holds rows up to its stamp, so every later row is in a newer rotation or the live file) through `nowMs`.
+ * No rotation proves no span: undefined. An unlistable directory throws, so the reading built on it is unreadable.
+ */
+export function ledgerCorpusSpan(stateDir: string, nowMs: number, list: (dir: string) => string[] = readdirSync): SymptomReading["corpus"] {
+  const from = list(stateDir).flatMap((name) => rotationStampIso(name) ?? []).sort()[0];
+  return from === undefined ? undefined : { from, through: fixedClock(nowMs).iso() };
+}
+
+/**
+ * W1-T12838: {@link MechanicalPort}'s `activity`, read from the claim, run and pull-request rows of `ids` across the
+ * whole union: once, and only when a released record first asks. An incomplete union throws, so nothing is retired.
+ */
+export function unionTaskActivity(reader: typeof readLedgerUnionRecordsSync, stateDir: string, ids: ReadonlySet<string>): (task: Task) => string | undefined {
+  let rows: readonly Record<string, unknown>[] | undefined;
+  return (task) => {
+    if (rows === undefined) {
+      const read = reader(stateDir, { step: [...TASK_ACTIVITY_STEPS], refuseIncomplete: true, where: (row) => typeof row.task_id === "string" && ids.has(row.task_id) });
+      if (!read.ok) throw new Error(`incomplete ledger union: ${read.unread.join(", ")}`);
+      rows = read.rows;
+    }
+    return taskActivity(rows, task.id);
+  };
 }
 
 export interface MachineJudgePorts {

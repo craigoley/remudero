@@ -407,10 +407,10 @@ import { flowGardenSpec } from "./lib/flow-remedy-gardener.js";
 import { fixLaneGardenSpec } from "./lib/fix-lane-gardener.js";
 import { conflictedFilePaths, hotFileGardenSpec, readMainHistory, type HotFileGardenSources } from "./lib/hot-file-gardener.js";
 import {
-  gardenFamilyRecord, isRulingShaped, machineJudgeFoundWork, machineJudgeInputsAsync, mechanicalDecisions, operatorRulingTimes, parkedEscalation, readOperatorReleaseRecords,
-  recordOperatorRelease, runMachineFilingJudge, type MachineJudgePorts, type MechanicalPort,
+  gardenFamilyRecord, isRulingShaped, ledgerCorpusSpan, machineJudgeFoundWork, machineJudgeInputsAsync, mechanicalDecisions, operatorRulingTimes, parkedEscalation, readOperatorReleaseRecords,
+  recordOperatorRelease, runMachineFilingJudge, unionTaskActivity, type MachineJudgePorts, type MechanicalPort,
 } from "./lib/machine-filing-judge.js";
-import { countRounds, countStepRows, filingEvidenceOf, TASK_ACTIVITY_STEPS, taskActivity, type SymptomReading } from "./lib/mechanical-rulings.js";
+import { countRounds, countStepRows, filingEvidenceOf, type SymptomReading } from "./lib/mechanical-rulings.js";
 import { parseCiFrictionOrigin } from "./lib/ci-friction-remedy.js";
 import type { LedgerRecord } from "./lib/retro.js";
 import { daemonEvidenceCoverageInput, evidenceCoveragePassDue, runEvidenceCoverageGardener } from "./lib/evidence-coverage-gardener.js";
@@ -38840,9 +38840,7 @@ export function priorVerifyHumanVerdicts(rows: readonly Record<string, unknown>[
  * {@link SCOUT_WINDOW_MS}) and a ci-friction record's cause key (rounds across {@link CI_FRICTION_HALF_LIFE_MS}). Every
  * other family reads as undefined, which the rules treat as undecided, so it keeps the judge path it had.
  * A release goes through {@link approveParkedTask}, whose every guard stands.
- * W1-T12838: each reading names the span its corpus holds: from the OLDEST rotation's stamp (every later row is in a
- * newer rotation or the live file) through now; no rotation, no span. A task's activity is read from its own claim,
- * run and pull-request rows across the whole union, once per pass and only when a released record reaches rule 2.
+ * W1-T12838: each reading names its corpus span ({@link ledgerCorpusSpan}); activity is {@link unionTaskActivity}.
  */
 export function productionMechanicalPort(opts: {
   repoRoot: string;
@@ -38861,14 +38859,8 @@ export function productionMechanicalPort(opts: {
       const scoutSteps = [...new Set(tasks.flatMap((t) => (t.origin?.startsWith("scout:") ? [t.origin.slice("scout:".length)] : [])))];
       let scoutRows: readonly Record<string, unknown>[] | undefined;
       let ciRounds: ReturnType<typeof ciFrictionRoundsFromLedger> | undefined;
-      let activityRows: readonly Record<string, unknown>[] | undefined;
-      let corpusFrom: { at: string | undefined } | undefined;
-      const corpus = (): Pick<SymptomReading, "corpus"> => {
-        // An unlistable state directory throws: the symptom is unreadable, so no rule reads it.
-        corpusFrom ??= { at: readdirSync(opts.stateDir).flatMap((name) => rotationStampIso(name) ?? []).sort()[0] };
-        return corpusFrom.at === undefined ? {} : { corpus: { from: corpusFrom.at, through: new Date(nowMs).toISOString() } };
-      };
-      const ids = new Set(tasks.map((t) => t.id));
+      let span: { value: SymptomReading["corpus"] } | undefined;
+      const corpus = (): Pick<SymptomReading, "corpus"> => (span ??= { value: ledgerCorpusSpan(opts.stateDir, nowMs) }).value === undefined ? {} : { corpus: span.value };
       // ledger-read-intent: live — a decline or restore the receipts store has not retained yet.
       const declinedOf = declinedWithReceipts(readLedgerLines(ledgerPath) as unknown as Record<string, unknown>[], opts.stateDir);
       return {
@@ -38893,14 +38885,7 @@ export function productionMechanicalPort(opts: {
           return { ...countRounds(ciRounds, matches, nowMs, CI_FRICTION_HALF_LIFE_MS), ...(filing ? { filing } : {}), ...corpus() };
         },
         declined: (task) => declinedOf(`machine-judge:${task.id}`) !== undefined || declinedOf(`verify-human:${task.id}`) !== undefined,
-        activity: (task) => {
-          if (activityRows === undefined) {
-            const read = reader(opts.stateDir, { step: [...TASK_ACTIVITY_STEPS], refuseIncomplete: true, where: (row) => typeof row.task_id === "string" && ids.has(row.task_id) });
-            if (!read.ok) throw new Error(`incomplete ledger union: ${read.unread.join(", ")}`);
-            activityRows = read.rows;
-          }
-          return taskActivity(activityRows, task.id);
-        },
+        activity: unionTaskActivity(reader, opts.stateDir, new Set(tasks.map((t) => t.id))),
       };
     },
     release: (task, provenance) => approveParkedTask(task.id, {

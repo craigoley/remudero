@@ -8,14 +8,14 @@ import { ciFrictionLadder, readCiFrictionPlanTasks } from "#src/lib/ci-friction-
 import { episodesOf, FLOW_LADDER, ladderOf, markEligibility, readLadderPlan } from "#src/lib/flow-remedy-gardener.js";
 import { machineShardHeaderLines } from "#src/lib/machine-filing.js";
 import {
-  needsMachineJudgement, releasedQueuedMachineTask, renderRetiredShard, renderRuledShard, runMachineFilingJudge, type MachineJudgePorts, type MechanicalPort,
+  ledgerCorpusSpan, needsMachineJudgement, releasedQueuedMachineTask, renderRetiredShard, renderRuledShard, runMachineFilingJudge, unionTaskActivity,
+  type MachineJudgePorts, type MechanicalPort,
 } from "#src/lib/machine-filing-judge.js";
 import {
-  corpusCoversWindow, mechanicalRetirementReason, mechanicalRuling, retirementReopensAt, taskActivity, type SymptomReading,
+  corpusCoversWindow, countRounds, mechanicalRetirementReason, mechanicalRuling, retirementReopensAt, taskActivity, type SymptomReading,
 } from "#src/lib/mechanical-rulings.js";
 import { loadPlan, parseTasksFromYaml, type Task } from "#src/lib/plan.js";
 import type { LedgerRecord } from "#src/lib/retro.js";
-import { productionMechanicalPort } from "#src/run-task.js";
 import { taskRulingPin } from "#src/lib/task-linter.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
@@ -112,16 +112,16 @@ test("W1-T12838 criterion 1: rule 2 retires a released queued machine task whose
   assert.equal(f.ruling("W1-T9401")?.verdict, "retire");
 });
 
-test("W1-T12838 criterion 1: the production port's ci-friction reading names a corpus span from the oldest rotation", (t) => {
+test("W1-T12838 criterion 1: a ledger's corpus span runs from its oldest rotation, so a zero reading across it is trusted", (t) => {
   const stateDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}queued-rule-2-port-`));
   t.after(() => rmSync(stateDir, { recursive: true, force: true }));
   writeFileSync(join(stateDir, "ledger.2026-10-02T00-00-00-000Z.ndjson.gz"), "");
   writeFileSync(join(stateDir, "ledger.2026-10-01T00-00-00-000Z.ndjson.gz"), "");
   writeFileSync(join(stateDir, "ledger.ndjson"), "");
-  const port = productionMechanicalPort({ repoRoot: stateDir, stateDir, clock, ciFrictionRecords: () => [] });
-  const task = { id: "W1-T9402", origin: "ci-friction:check:ci-log:some-cause", title: "t", depends_on: [], files: ["src/lib/x.ts"], risk: "low" } as unknown as Task;
-  const reading = port.read([task]).symptom(task)!;
-  assert.deepEqual(reading.corpus, { from: "2026-10-01T00:00:00.000Z", through: "2026-11-15T00:00:00.000Z" });
+  const span = ledgerCorpusSpan(stateDir, NOW);
+  assert.deepEqual(span, { from: "2026-10-01T00:00:00.000Z", through: "2026-11-15T00:00:00.000Z" });
+  const task = { id: "W1-T9402", origin: "ci-friction:check:ci-log:some-cause", title: "t", files: ["src/lib/x.ts"], risk: "low" as const };
+  const reading: SymptomReading = { ...countRounds([], () => true, NOW, WEEK), corpus: span! };
   assert.equal(reading.count, 0);
   assert.equal(corpusCoversWindow(reading), true);
   const ruling = mechanicalRuling(task, { operatorReleased: false, shipped: false, declined: false, symptom: reading, familyCounts: [] });
@@ -161,20 +161,15 @@ test("W1-T12838 criterion 2: a queued machine task with no reader, an unreadable
   assert.equal(corpusCoversWindow({ windowMs: WEEK }), false, "no corpus span is no coverage");
 });
 
-test("W1-T12838 criterion 2: the production port refuses an incomplete union and names no span without a rotation", (t) => {
+test("W1-T12838 criterion 2: no rotation proves no span, and an incomplete union or unlistable directory is unreadable", (t) => {
   const stateDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}queued-rule-2-port-`));
   t.after(() => rmSync(stateDir, { recursive: true, force: true }));
   writeFileSync(join(stateDir, "ledger.ndjson"), "");
-  const task = { id: "W1-T9417", origin: "scout:x.failed", title: "t", depends_on: [] } as unknown as Task;
-  const live = productionMechanicalPort({ repoRoot: stateDir, stateDir, clock, reader: (() => ({ ok: true, rows: [], unread: [] })) as never });
-  const reading = live.read([task]).symptom(task)!;
-  assert.equal(reading.count, 0);
-  assert.equal(reading.corpus, undefined, "a live file alone proves no span");
-  const incomplete = productionMechanicalPort({ repoRoot: stateDir, stateDir, clock, reader: (() => ({ ok: false, rows: [], unread: ["ledger.x.ndjson.gz"] })) as never });
-  assert.throws(() => incomplete.read([task]).symptom(task), /incomplete ledger union: ledger\.x\.ndjson\.gz/);
-  assert.throws(() => incomplete.read([task]).activity!(task), /incomplete ledger union: ledger\.x\.ndjson\.gz/);
-  const gone = productionMechanicalPort({ repoRoot: stateDir, stateDir: join(stateDir, "absent"), clock, reader: (() => ({ ok: true, rows: [], unread: [] })) as never });
-  assert.throws(() => gone.read([task]).symptom(task), /ENOENT/, "an unlistable state directory is an unreadable symptom");
+  assert.equal(ledgerCorpusSpan(stateDir, NOW), undefined, "a live file alone proves no span");
+  assert.throws(() => ledgerCorpusSpan(join(stateDir, "absent"), NOW), /ENOENT/, "an unlistable state directory is no evidence");
+  const task = { id: "W1-T9417", title: "t", depends_on: [] } as unknown as Task;
+  const incomplete = unionTaskActivity((() => ({ ok: false, rows: [], unread: ["ledger.x.ndjson.gz"] })) as never, stateDir, new Set([task.id]));
+  assert.throws(() => incomplete(task), /incomplete ledger union: ledger\.x\.ndjson\.gz/);
 });
 
 test("W1-T12838 criterion 3: a cause whose remedy was retired by rule 2 or withdrawn reads open again to both ladders once new cost lands after the retirement", (t) => {
@@ -287,19 +282,15 @@ test("W1-T12838 criterion 4: a task's activity is read from its claim, run and p
     /opened a pull request for it \(https:\/\/github\.com\/o\/r\/pull\/7\)/);
   assert.equal(taskActivity([{ step: "run.start", run_id: "r9", task_id: "W1-T9999" }], "W1-T9441"), undefined, "another task's rows say nothing");
 
-  // The production port reads those rows once, through the union, for the tasks it was given.
+  // The port's reader reads those rows once, through the union, for the tasks the pass named.
   const asked: unknown[] = [];
-  const port = productionMechanicalPort({
-    repoRoot: tmpdir(), stateDir: tmpdir(), clock,
-    reader: ((_dir: string, options: { step?: unknown; where?: (r: Record<string, unknown>) => boolean }) => {
-      asked.push(options.step);
-      const rows = [row("run.start", "r1"), { step: "run.start", run_id: "r2", task_id: "W1-T9442" }];
-      return { ok: true, rows: rows.filter((r) => options.where?.(r) ?? true), unread: [] };
-    }) as never,
-  });
+  const activity = unionTaskActivity(((_dir: string, options: { step?: unknown; where?: (r: Record<string, unknown>) => boolean }) => {
+    asked.push(options.step);
+    const rows = [row("run.start", "r1"), { step: "run.start", run_id: "r2", task_id: "W1-T9442" }];
+    return { ok: true, rows: rows.filter((r) => options.where?.(r) ?? true), unread: [] };
+  }) as never, tmpdir(), new Set(["W1-T9441"]));
   const task = (id: string) => ({ id, title: id, depends_on: [] }) as unknown as Task;
-  const read = port.read([task("W1-T9441")]);
-  assert.equal(read.activity!(task("W1-T9441")), "a run is in flight (r1)");
-  assert.equal(read.activity!(task("W1-T9442")), undefined, "a task outside the pass is not read");
+  assert.equal(activity(task("W1-T9441")), "a run is in flight (r1)");
+  assert.equal(activity(task("W1-T9442")), undefined, "a task outside the pass is not read");
   assert.deepEqual(asked, [["dispatch.claim", "run.start", "verdict", "pr.opened"]], "one union read per pass");
 });
