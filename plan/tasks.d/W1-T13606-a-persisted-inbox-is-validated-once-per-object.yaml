@@ -1,0 +1,44 @@
+- id: W1-T13606
+  title: "validInboxSnapshot answers each persisted classification object once, so serve's Inbox projection stops re-hashing about 6.6 MB of JSON on every inboxLanes call, on its request loop"
+  repo: remudero
+  depends_on: []
+  priority: 0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # a memo on a validity check; a new read of the file is a new object and is checked itself
+  origin: "operator-session#serve-oom-2026-11-16"
+  plan_refs:
+    - W1-T13483
+  files:
+    - src/lib/fleet-lane.ts
+    - test/a-persisted-inbox-is-validated-once-per-object.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A second validInboxSnapshot call on the same object reads none of its properties (a counting proxy sees no new reads)"
+      proof: "grep: W1-T13606 criterion 1 in test/a-persisted-inbox-is-validated-once-per-object.test.ts"
+    - claim: "invariant:same-answer — the memo answers what a fresh check answers: a valid snapshot passes, one whose content no longer matches its key is refused, and an equal but new object is checked itself"
+      kind: guard
+      proof: "grep: W1-T13606 criterion 2 in test/a-persisted-inbox-is-validated-once-per-object.test.ts"
+    - claim: "A refused object stays refused without being read again"
+      proof: "grep: W1-T13606 criterion 3 in test/a-persisted-inbox-is-validated-once-per-object.test.ts"
+  rationale: |
+    WHY: Craig is hitting serve's main-loop stalls directly (the Inbox times out and shows "unavailable").
+    MEASURED from runtime.loop_stall_profile rows, 2026-11-17 22:00 to 2026-11-18 04:00Z: 25 stalls carrying
+    classificationSnapshotKey under validInboxSnapshot, 52 s in total (12 to 58 s an hour). The leading chain is
+    panel-graph.ts inboxLanes -> snapshotAttentionProjection -> validInboxSnapshot -> classificationSnapshotKey, which
+    hashes JSON.stringify of the whole persisted classification (state/inbox-classification.json, 6.6 MB on the host).
+    READ at origin/main: validInboxSnapshot recomputes the hash on every call, and snapshotAttentionProjection calls it
+    for the same content object on each inboxLanes pass.
+  design: |
+    INVARIANT same-answer: a memo hit returns what checking the object now would return.
+    1. A module-level WeakMap<object, boolean> in fleet-lane.ts answers validInboxSnapshot for an object it has checked.
+       A persisted classification is read once per file version and never edited in place; a new read is a new object.
+    2. The check itself moves unchanged into checkInboxSnapshot.
+  falsifier: |
+    Re-check every call: criterion 1 fails. Key the memo on the snapshot key string instead of the object: criterion 2's
+    tampered object is wrongly accepted. Memo only true answers: criterion 3 fails.
+  note: |
+    Id reserved for run-unfiled-1794975027566 with ~/rmd-work/bin/reserve-id.sh.
