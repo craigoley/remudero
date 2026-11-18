@@ -22,8 +22,9 @@ import {
   landFeedback, landFeedbackStatusContent, planDestinationLandingOpts, queueFeedbackRecord, queuedFeedbackDir, readQueuedFeedbackRecords,
   type LandFeedbackOpts,
 } from "./feedback-landing.js";
-import type { Mount, Mounts } from "./mounts.js";
-import { resolveRiskJudgeMount } from "./risk-judge.js";
+import type { JudgeMount, Mount, Mounts } from "./mounts.js";
+import { shadowJudgeCall } from "./judge-shadow.js";
+import { providerLessRiskJudgeMount, resolveRiskJudgeMount } from "./risk-judge.js";
 import { spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
 import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
 import type { ConsoleCorrection } from "./console-feedback.js";
@@ -287,7 +288,20 @@ export function buildDecisionSummarySpawnArgs(opts: {
     effort: opts.mount.effort,
     maxTurns: opts.mount.maxTurns,
     tools: [], // everything it needs is in the prompt — no exploration, mirrors RISK_JUDGE_TOOLS
+    // W1-T12187: a `feedback_summary` row may name a provider; the cell a host falls back to carries none.
+    ...(opts.mount.provider === undefined ? {} : { mountProvider: opts.mount.provider }),
   };
+}
+
+/** The JSON object in a decision-summary reply, or `null` when it holds none. */
+function decisionSummaryJson(text: string): unknown {
+  const match = /\{[\s\S]*\}/.exec(text);
+  if (!match) return null;
+  try {
+    return JSON.parse(match[0]);
+  } catch {
+    return null;
+  }
 }
 
 /** Wire a real {@link SummarizeDeps.summarize} to an actual worker spawn — the production
@@ -298,25 +312,29 @@ export function realDecisionSummarizer(opts: {
   cwd: string;
   settingsFile: string;
   spawn?: typeof spawnWorker;
+  /** W1-T12187: where the cash shadow of each summary writes its row. With none, no shadow is asked. */
+  shadowLog?: (step: string, fields: Record<string, unknown>) => void;
 }): (input: SummarizeInput) => Promise<unknown> {
   const spawn = opts.spawn ?? benchmarkNonDispatchSpawn("feedback-summary");
   return async (input: SummarizeInput) => {
-    const result: WorkerResult = await spawn(
-      buildDecisionSummarySpawnArgs({ input, mount: opts.mount, cwd: opts.cwd, settingsFile: opts.settingsFile }),
-    );
-    const match = /\{[\s\S]*\}/.exec(result.text);
-    if (!match) return null;
-    try {
-      return JSON.parse(match[0]);
-    } catch {
-      return null;
+    const args = buildDecisionSummarySpawnArgs({ input, mount: opts.mount, cwd: opts.cwd, settingsFile: opts.settingsFile });
+    const result: WorkerResult = await spawn(args);
+    const summary = decisionSummaryJson(result.text);
+    if (opts.shadowLog !== undefined) {
+      // Not awaited: the summary returned below is the primary's. The row records cost and parse, never agreement.
+      void shadowJudgeCall({
+        role: "decision-summary", key: createHash("sha256").update(args.prompt).digest("hex").slice(0, 16), mount: opts.mount,
+        primaryArgs: args, primary: result, primaryAnswer: summary, parse: (text) => decisionSummaryJson(text) ?? undefined,
+        spawn, log: opts.shadowLog,
+      });
     }
+    return summary;
   };
 }
 
-/** The cheapest configured mount for a decision-summary rung (reuses risk-judge.ts's scanner). */
-export function resolveDecisionSummaryMount(mounts: Mounts): Mount {
-  return resolveRiskJudgeMount(mounts);
+/** The decision summary's mount: its own `feedback_summary` row (W1-T12187), else the cheapest cell with no provider. */
+export function resolveDecisionSummaryMount(mounts: Mounts): JudgeMount {
+  return mounts.feedback_summary ?? providerLessRiskJudgeMount(mounts);
 }
 
 // ── Feedback expansions (W1-T350) ────────────────────────────────────────────

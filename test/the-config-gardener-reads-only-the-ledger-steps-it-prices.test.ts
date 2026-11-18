@@ -13,6 +13,7 @@ import { fixedClock } from "#src/lib/clock.js";
 import * as gardener from "#src/lib/config-gardener.js";
 import * as registry from "#src/lib/garden-registry.js";
 import type { GardenerDeps } from "#src/lib/gardener.js";
+import { JUDGE_SHADOW_STEPS } from "#src/lib/judge-shadow.js";
 import { DEFAULT_KNOWLEDGE_BUDGET_CHARS } from "#src/lib/learnings.js";
 import { readLedgerUnionRecordsSync } from "#src/lib/ledger-union.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
@@ -117,6 +118,8 @@ function corpus(): Array<Record<string, unknown>> {
   rows.push({ step: "ci.polling", run_id: "daemon", attempt: 1, ts: at(m++) }, { step: "followup.harvested", run_id: "daemon", body: "y".repeat(200), ts: at(m++) });
   fallback(["review.history_guarded"], "pr_url", 400);
   fallback(["followup.filed"], "pr_url", 500);
+  // W1-T12187: one judge-shadow row of each step, each under its own role, so each step moves the summary.
+  JUDGE_SHADOW_STEPS.forEach((step, i) => rows.push({ step, run_id: "sweep-1", role: `role-${i}`, cost_usd: 0.0002, ts: at(m++) }));
   return rows;
 }
 
@@ -168,10 +171,13 @@ test("every step in CONFIG_GARDEN_LEDGER_STEPS changes the inventory when its ro
   const whole = await gardener.configInventory(f.garden, sources(rows));
   assert.deepEqual(await gardener.configInventory(f.garden, sources(rows.filter((r) => steps().includes(String(r.step))))), whole, "rows outside the set are inert");
   assert.ok(steps().length > 30, "positive control: the set is populated");
-  const inert = (await Promise.all(steps().map(async (step) => {
+  // One inventory at a time: each configInventory starts its own measurement Worker (about 140 MB under tsx), and
+  // starting one per step at once peaked near 6 GB, which ended CI's coverage runner (W1-T13541).
+  const inert: string[] = [];
+  for (const step of steps()) {
     const without = await gardener.configInventory(f.garden, sources(rows.filter((r) => r.step !== step)));
-    return JSON.stringify(without) === JSON.stringify(whole) ? step : undefined;
-  }))).filter((step): step is string => step !== undefined);
+    if (JSON.stringify(without) === JSON.stringify(whole)) inert.push(step);
+  }
   assert.deepEqual(inert, [], "a step whose rows change nothing is either missing from the fixture or not read");
 });
 

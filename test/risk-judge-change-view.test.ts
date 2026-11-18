@@ -219,7 +219,7 @@ test("W1-T1031: run-task.ts's risk-judge call site supplies the change view, sou
   assert.deepEqual(view, { files: [{ path: "src/wiring-probe.ts", additions: 7, deletions: 3 }], truncated: false },
     "the original entrypoint still exports the real REST-sourced reader after extraction");
 
-  const mountIdx = runTaskSrc.indexOf("const riskJudgeMount = resolveRiskJudgeMount(");
+  const mountIdx = runTaskSrc.indexOf("const riskJudgeMount = resolveRiskJudgeRoleMount(");
   assert.ok(mountIdx >= 0);
   const judgeDepIdx = runTaskSrc.indexOf("judge: judgeWithChangeView,", mountIdx);
   assert.ok(judgeDepIdx >= 0, "the runRiskJudge call must be wired to a judge that supplies the change view");

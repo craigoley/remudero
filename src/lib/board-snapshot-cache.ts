@@ -624,7 +624,8 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
 
   /** A successful complete read that matched the held rows: persist WHEN it was seen, never the rows again. */
   const observeUnchangedClosed = (): void => {
-    if (!dataIdentity || !state.closed) return;
+    // W1-T13332: while a write is in flight or queued, the file on disk is not yet the held rows: certify nothing.
+    if (!dataIdentity || !state.closed || writing || queued !== undefined) return;
     const rows = state.closed.size;
     const nowMs = clock.now();
     const prior = stampMs(state.closedObservedAt);
@@ -658,11 +659,59 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
   // 43 MB file about 23 times an hour and stringified every row twice per rewrite, including the channel that did
   // not change. A row whose disk form is unchanged reuses its line; the bytes written are the same.
   const rowLines: Record<keyof SnapshotRows, RowLines> = { closed: new Map(), issues: new Map() };
+  // W1-T13332: the write-behind queue: the one write in flight and the latest commit waiting behind it.
+  const writeBehind = options.writeBehind ? (options.writeBehind === true ? writeSnapshotFileAsync : options.writeBehind.write ?? writeSnapshotFileAsync) : undefined;
+  let writing = false;
+  let queued: { lines: Buffer[]; channel: keyof SnapshotRows; rows: number; observedAt?: string } | undefined;
+  // A write that failed: the next commit retries it, even an unchanged one, so the file cannot stay behind memory.
+  let failed: typeof queued;
   const rowLine = (channel: keyof SnapshotRows, disk: DiskRow, next: RowLines): Buffer => {
     const held = rowLines[channel].get(disk.number);
     const line = held && sameFlatRow(held.row, disk) ? held.line : lineBuffer({ type: channel, row: disk }, maxLineBytes);
     next.set(disk.number, { row: disk, line });
     return line;
+  };
+
+  /** W1-T13332: write queued commits one at a time until none waits; each publishes the latest committed rows. */
+  const drainWrites = async (): Promise<void> => {
+    writing = true;
+    try {
+      // Let the committing turn finish first: no write, fsync or rename runs on the caller's turn.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      for (let next = queued; next !== undefined; next = queued) {
+        queued = undefined;
+        const stage = `${path}.tmp-${process.pid}-${randomUUID()}`;
+        const digest = createHash("sha256");
+        let bytes = 0;
+        for (const buffer of next.lines) { digest.update(buffer); bytes += buffer.length; }
+        try {
+          await writeBehind!(stage, path, next.lines);
+        } catch (writeError) {
+          // Carried, not erased: the refusal row below records it, and the next commit retries the write.
+          void writeError;
+          // A failed write never publishes: its stage file goes, and the earlier file stays as it was.
+          await fs.promises.unlink(stage).catch((unlinkError: unknown) => {
+            // Carried, not erased: a stage left by a failed write is best-effort cleanup; the refusal is logged below.
+            void unlinkError;
+          });
+          log("board_snapshot.commit_refused", next.channel, next.rows, bytes, "write_failed");
+          if (queued === undefined) failed = next;
+          continue;
+        }
+        failed = undefined;
+        // A replaced data file is a new identity: no earlier sidecar can certify it.
+        dataIdentity = { sha256: digest.digest("hex"), bytes };
+        headerObservedAt = next.observedAt;
+        try {
+          io.unlink(observationPath);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") log("board_snapshot.observation_refused", "closed", next.rows, 0, "write_failed");
+        }
+        log("board_snapshot.committed", next.channel, next.rows, bytes);
+      }
+    } finally {
+      writing = false;
+    }
   };
 
   const commit = (channel: keyof SnapshotRows, rows: readonly (BoardPrRest | BoardIssueRest)[]): boolean => {
@@ -688,6 +737,11 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
     }
 
     if (channel === "closed" ? sameVersions(state.closed, rows as readonly BoardPrRest[]) : sameVersions(state.issues, rows as readonly BoardIssueRest[])) {
+      if (failed && !writing && queued === undefined) {
+        queued = failed;
+        failed = undefined;
+        void drainWrites();
+      }
       rollup?.snapshotUnchanged(channel);
       if (!unchangedWritten.has(channel)) {
         log("board_snapshot.unchanged", channel, rows.length, 0);
@@ -740,6 +794,16 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
       const reason = error instanceof SnapshotRefusal ? error.reason : "invalid_row";
       log("board_snapshot.commit_refused", channel, rows.length, expectedBytes, reason);
       return false;
+    }
+
+    if (writeBehind) {
+      // INVARIANT atomic-and-ordered: memory moves now; the file follows, latest commit last, via stage and rename.
+      state = nextState;
+      rowLines.closed = nextLines.closed;
+      rowLines.issues = nextLines.issues;
+      queued = { lines, channel, rows: rows.length, ...(nextState.closedObservedAt === undefined ? {} : { observedAt: nextState.closedObservedAt }) };
+      if (!writing) void drainWrites();
+      return true;
     }
 
     const stage = `${path}.tmp-${process.pid}-${randomUUID()}`;
@@ -954,6 +1018,49 @@ interface SnapshotOptions {
   io?: BoardSnapshotIo;
   log?: (event: string, extra?: Record<string, unknown>) => void;
   bounds?: { maxBytes?: number; maxRows?: number; maxLineBytes?: number };
+  /**
+   * W1-T13332: write a committed collection behind the caller. The rows are committed in memory at once and the
+   * file write, fsync and rename run later through {@link writeSnapshotFileAsync} (libuv's thread pool), one in flight
+   * per cache, the latest commit replacing any queued one. Serve sets it: its board pass runs on the request loop.
+   */
+  writeBehind?: boolean | { write?: (stage: string, path: string, buffers: readonly Buffer[]) => Promise<void> };
+}
+
+/**
+ * W1-T13332: the asynchronous stage-write-fsync-rename of one snapshot file: `stage` is created exclusively (0o600),
+ * every buffer is written in order, the file is fsynced and closed, then renamed over `path`. A failure removes the
+ * stage file and rejects, leaving `path` as it was.
+ */
+export async function writeSnapshotFileAsync(stage: string, path: string, buffers: readonly Buffer[]): Promise<void> {
+  await fs.promises.mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  const handle = await fs.promises.open(stage, "wx", 0o600);
+  try {
+    for (const buffer of buffers) {
+      let offset = 0;
+      while (offset < buffer.length) offset += (await handle.write(buffer, offset, buffer.length - offset)).bytesWritten;
+    }
+    await handle.sync();
+  } catch (error) {
+    await handle.close().catch((closeError: unknown) => {
+      // Carried, not erased: the write's own error is rethrown below; a close failure after it adds nothing.
+      void closeError;
+    });
+    await fs.promises.unlink(stage).catch((unlinkError: unknown) => {
+      // Carried, not erased: the stage file is best-effort cleanup; the write's error is rethrown below.
+      void unlinkError;
+    });
+    throw error;
+  }
+  await handle.close();
+  try {
+    await fs.promises.rename(stage, path);
+  } catch (error) {
+    await fs.promises.unlink(stage).catch((unlinkError: unknown) => {
+      // Carried, not erased: the stage file is best-effort cleanup; the rename's error is rethrown below.
+      void unlinkError;
+    });
+    throw error;
+  }
 }
 
 interface SnapshotHeader {

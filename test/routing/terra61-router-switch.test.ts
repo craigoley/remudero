@@ -120,8 +120,9 @@ test("W1-T10839: cash balanced puts Terra ahead of Sol and cash frontier swaps i
     assert.deepEqual(table.codex.economy[effort], effort === "medium"
       ? ["gpt-6-luna", "gpt-5.3-codex-spark", "gpt-5.6-luna", "gpt-5.4-mini"]
       : ["gpt-5.3-codex-spark", "gpt-6-luna", "gpt-5.6-luna", "gpt-5.4-mini"]);
-    assert.deepEqual(table.codex.balanced[effort], [SOL, "gpt-6-sol", "gpt-5.6-sol"]);
-    assert.deepEqual(table.codex.frontier[effort], [SOL, "gpt-6-sol", "gpt-5.6-sol", "gpt-5.5"]);
+    // W1-T13445: the current Sol (6.2) leads the subscription Sol seats, with Sol 6.1 next.
+    assert.deepEqual(table.codex.balanced[effort], ["gpt-6.2-sol", SOL, "gpt-6-sol", "gpt-5.6-sol"]);
+    assert.deepEqual(table.codex.frontier[effort], ["gpt-6.2-sol", SOL, "gpt-6-sol", "gpt-5.6-sol", "gpt-5.5"]);
   }
 });
 
