@@ -47,3 +47,4 @@
     Delete the requireStepUp early return in verifyOperatorSession: criterion 1 fails (403 required_tier high).
   note: |
     Id reserved for run-unfiled-1794962366946 with ~/rmd-work/bin/reserve-id.sh.
+    reservation hand-off: run-unfiled-1794962366946 -> claude/project-thread-udx0oo
