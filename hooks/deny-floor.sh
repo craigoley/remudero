@@ -1711,11 +1711,9 @@ if [ -n "$cmd" ] && invokes_gh "$cmd"; then
           printf '  is the operator to schedule. Writes (create/merge/review/POST) are never refused, and\n' >&2
           printf '  `gh api rate_limit` is exempt. Deliberate burst: RMD_GH_COOLDOWN_S=0, a choice on the record.\n' >&2
           # W1-T12938: 2026-11-11 to 11-15 the Mac broker was down for four days, every session shared this one
-          # slot, and the refusal never named the cause. One more line, only when this account has a broker
-          # directory whose heartbeat is stale (this branch never runs with a live one): the state, the
-          # heartbeat's age and the installer that restores it. Nothing is started from here. gh_hb_mtime
-          # defaults because the heartbeat may have appeared since the liveness read, under `set -u`.
-          if [ -d "$gh_broker_dir" ] && [ -f "$gh_broker_dir/heartbeat" ]; then
+          # slot, and the refusal never named the cause. A broker directory with a stale or missing
+          # heartbeat gets the DOWN diagnostic and the command that restores service.
+          if [ -d "$gh_broker_dir" ]; then
             gh_down_for="an unknown time"
             if [ "${gh_hb_mtime:-0}" -gt 0 ] && [ "$gh_now" -ge "${gh_hb_mtime:-0}" ]; then
               gh_down_s=$(( gh_now - gh_hb_mtime ))
@@ -1727,7 +1725,9 @@ if [ -n "$cmd" ] && invokes_gh "$cmd"; then
             gh_installer="deploy/mac/install-gh-read-broker.sh"
             gh_hook_root="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd -P || true)"
             if [ -n "$gh_hook_root" ] && [ -f "$gh_hook_root/$gh_installer" ]; then gh_installer="$gh_hook_root/$gh_installer"; fi
-            printf '  The read broker installed for this account is DOWN: its last heartbeat was %s ago, so every session shares this floor. Restore it: bash %s\n' "$gh_down_for" "$gh_installer" >&2
+            gh_down_detail="its last heartbeat was $gh_down_for ago"
+            if [ ! -f "$gh_broker_dir/heartbeat" ]; then gh_down_detail="no heartbeat was ever written"; fi
+            printf '  The read broker installed for this account is DOWN: %s, so every session shares this floor. Restore it: bash %s\n' "$gh_down_detail" "$gh_installer" >&2
           fi
           exit 2
         fi
