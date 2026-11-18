@@ -229,6 +229,10 @@ export interface Mounts {
    *  and a cash `shadow` arm; absent = the risk judge's provider-less cell. */
   ci_judge?: JudgeMount;
   fix_progress_judge?: JudgeMount;
+  /** OPTIONAL (W1-T12187) — the risk judge's and the decision summary's own rows, of the same shape; absent = the
+   *  risk judge's provider-less cell. */
+  risk_judge?: JudgeMount;
+  feedback_summary?: JudgeMount;
   /** OPTIONAL — a task's last attempt after the worker tier failed it; must stay below the Architect. */
   step_up?: Mount;
   synthesis: Record<SynthesisRole, Mount>; // the three synthesis rungs' OWN mounts (W1-T2559) — never the Architect's; REQUIRED
@@ -760,6 +764,9 @@ export function validateMounts(raw: unknown, opts: MountsOptions = {}): Mounts {
   const ciJudge = raw.ci_judge === undefined ? undefined : parseJudgeMount(raw.ci_judge, "ci_judge", tiers, efforts);
   const fixProgressJudge =
     raw.fix_progress_judge === undefined ? undefined : parseJudgeMount(raw.fix_progress_judge, "fix_progress_judge", tiers, efforts);
+  const riskJudge = raw.risk_judge === undefined ? undefined : parseJudgeMount(raw.risk_judge, "risk_judge", tiers, efforts);
+  const feedbackSummary =
+    raw.feedback_summary === undefined ? undefined : parseJudgeMount(raw.feedback_summary, "feedback_summary", tiers, efforts);
   const stepUp = raw.step_up === undefined ? undefined : parseMount(raw.step_up, "step_up", tiers, efforts);
   const decisionModels = raw.decision_models === undefined ? undefined : parseDecisionModels(raw.decision_models);
 
@@ -786,7 +793,7 @@ export function validateMounts(raw: unknown, opts: MountsOptions = {}): Mounts {
     }
   }
 
-  const mounts: Mounts = { tiers, efforts, ...(capabilities ? { capabilities } : {}), architect, judge, ...(escalationJudge ? { escalation_judge: escalationJudge } : {}), ...(verifyHumanJudge ? { verify_human_judge: verifyHumanJudge } : {}), ...(machineFilingJudge ? { machine_filing_judge: machineFilingJudge } : {}), ...(ciJudge ? { ci_judge: ciJudge } : {}), ...(fixProgressJudge ? { fix_progress_judge: fixProgressJudge } : {}), ...(stepUp ? { step_up: stepUp } : {}), synthesis, routes, ...(decisionModels ? { decision_models: decisionModels } : {}) };
+  const mounts: Mounts = { tiers, efforts, ...(capabilities ? { capabilities } : {}), architect, judge, ...(escalationJudge ? { escalation_judge: escalationJudge } : {}), ...(verifyHumanJudge ? { verify_human_judge: verifyHumanJudge } : {}), ...(machineFilingJudge ? { machine_filing_judge: machineFilingJudge } : {}), ...(ciJudge ? { ci_judge: ciJudge } : {}), ...(fixProgressJudge ? { fix_progress_judge: fixProgressJudge } : {}), ...(riskJudge ? { risk_judge: riskJudge } : {}), ...(feedbackSummary ? { feedback_summary: feedbackSummary } : {}), ...(stepUp ? { step_up: stepUp } : {}), synthesis, routes, ...(decisionModels ? { decision_models: decisionModels } : {}) };
   // G-17 FIRST: checking the step-up ahead of it MASKED the Tier Invariant's own message, so a
   // table violating G-17 reported the step-up's refusal instead. Both fire; only the order moved.
   enforceTierInvariant(mounts, opts.thinkingDefault);
@@ -820,6 +827,8 @@ function enforceSubscriptionOnly(m: Mounts): void {
     ["machine_filing_judge", m.machine_filing_judge],
     ["ci_judge", m.ci_judge],
     ["fix_progress_judge", m.fix_progress_judge],
+    ["risk_judge", m.risk_judge],
+    ["feedback_summary", m.feedback_summary],
     ["step_up", m.step_up],
     ...Object.entries(m.synthesis).map(([role, mount]): [string, Mount] => [`synthesis.${role}`, mount]),
     ...Object.entries(m.routes).flatMap(([type, byRisk]) =>

@@ -24,7 +24,7 @@ const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/cli/commands/run-t
 
 test("run-task.ts imports the risk judge module and resolves its mount from the committed mounts.yaml (W1-T5), not a hardcoded literal", () => {
   assert.match(runTaskSrc, /from "\.\.\/\.\.\/lib\/risk-judge\.js"/);
-  assert.match(runTaskSrc, /resolveRiskJudgeMount\(loadMounts\(mountsPath\(repoRoot\)\)\)/);
+  assert.match(runTaskSrc, /resolveRiskJudgeRoleMount\(loadMounts\(mountsPath\(repoRoot\)\)\)/);
 });
 
 test("runRiskJudge has EXACTLY ONE call site in run-task.ts's dispatch path", () => {
