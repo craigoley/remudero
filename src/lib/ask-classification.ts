@@ -84,12 +84,30 @@ export function projectClassifiedHumanGates(sources: readonly ClassifiedHumanGat
   })));
 }
 
+/**
+ * W1-T13479: one parked task, one ask. The verify-human judge and the machine-filing judge can each park the
+ * same task, so `verify-human:<id>` and `machine-judge:<id>` asked the operator one question twice (nine tasks,
+ * 2026-11-17). The machine-judge ask is kept, because it carries the risk ruling; its verify-human twin folds
+ * into it for as long as the machine-judge proposal is present in ANY state, so an answer on the kept ask
+ * (declined, drafting, archived) never lets the twin resurface as a fresh ask.
+ */
+export function foldedTwinAsks(proposalIds: Iterable<string>): Set<string> {
+  const ids = new Set(proposalIds);
+  const folded = new Set<string>();
+  for (const id of ids) {
+    const taskId = /^verify-human:([A-Za-z0-9][A-Za-z0-9-]*)$/.exec(id)?.[1];
+    if (taskId && ids.has(`machine-judge:${taskId}`)) folded.add(id);
+  }
+  return folded;
+}
+
 export function projectProposalHumanGates(
   classifications: readonly Pick<InboxClassification, "proposalId" | "state" | "trigger" | "retirement">[],
   instance = "core",
   ownerOf?: (proposalId: string) => "operator" | "fleet",
 ) {
-  const gates: ClassifiedHumanGateSource["gates"] = classifications.map((item) => ({
+  const folded = foldedTwinAsks(classifications.map((item) => item.proposalId));
+  const gates: ClassifiedHumanGateSource["gates"] = classifications.filter((item) => !folded.has(item.proposalId)).map((item) => ({
     classification: { kind: "proposal", state: item.state, owner: item.retirement?.state === "restored_for_review" ? "operator" : ownerOf?.(item.proposalId) ?? inboxOwner({ id: item.proposalId }) },
     kind: "proposal", subject: item.proposalId, ownerSurface: "inbox", openedAt: null, url: null,
     reason: item.trigger?.description ?? (item.state === "ready" ? "proposal is ready to ratify" : "proposal needs reframing"),
