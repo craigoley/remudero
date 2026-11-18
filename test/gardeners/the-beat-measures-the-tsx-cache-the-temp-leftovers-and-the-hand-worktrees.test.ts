@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { parseHeartbeatPayload } from "#src/lib/host-resource-gardener.js";
@@ -86,8 +86,14 @@ esac
 printf 'Filesystem 1024-blocks Used Available Capacity Mounted\\n%s 100000 1000 99000 1%% /\\n' "$device"`);
     stub("du", `
 p="\${@: -1}"
-printf '%s\\n' "$p" >> "$FIXTURE/walks"
-if [ "$p" = "$FIXTURE/\${SLOW:-never}" ]; then touch "$FIXTURE/budget-spent"; sleep 10; fi
+args=()
+for a in "$@"; do
+  case "$a" in "$FIXTURE"/*|"$HOME"/*) args+=("$a"); printf '%s\\n' "$a" >> "$FIXTURE/walks" ;; esac
+done
+printf '%s\\t' "\${args[@]}" >> "$FIXTURE/du-calls"; printf '\\n' >> "$FIXTURE/du-calls"
+for a in "\${args[@]}"; do
+  if [ "$a" = "$FIXTURE/\${SLOW:-never}" ]; then touch "$FIXTURE/budget-spent"; exec sleep 10; fi
+done
 case "$p" in
   "$FIXTURE"/account-tmp/*|"$FIXTURE"/system-tmp/*|"$FIXTURE"/scratch-tmp/*|"$HOME"/rmd-work)
     command -p du "$@" ;;
@@ -112,6 +118,10 @@ esac`);
     return {
       beat: parseHeartbeatPayload(result.stdout), sizes,
       walks: readFileSync(join(dir, "walks"), "utf8").trim().split("\n").map(path => path.slice(dir.length + 1)),
+      duCalls: existsSync(join(dir, "du-calls"))
+        ? readFileSync(join(dir, "du-calls"), "utf8").trim().split("\n").filter(Boolean).map(line =>
+          line.split("\t").filter(Boolean).map(path => path.slice(dir.length + 1)))
+        : [],
     };
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -130,12 +140,14 @@ test("W1-T12258 criterion 1: tsx directories under all three temp roots are summ
 });
 
 test("W1-T12258 criterion 2: direct temp leftovers exclude coverage trees", () => {
-  const { beat, sizes, walks } = measure();
+  const { beat, sizes, walks, duCalls } = measure();
   assert.equal(beat.consumer_tmp_leftovers_kb, String(sizes.tmp_leftovers));
   assert.equal(beat.consumer_coverage_kb, String(sizes.coverage + 2));
   assert.equal(walks.filter(path => path.endsWith("/rmd-c-coverage")).length, 1,
     "only the existing coverage consumer walks its tree");
-  assert.equal(walks.filter(path => /\/(rmd-one|remudero-two|rmd-record)$/.test(path)).length, 9);
+  const leftoverCalls = duCalls.filter(call => call.some(path => /\/(rmd-one|remudero-two|rmd-record)$/.test(path)));
+  assert.equal(leftoverCalls.length, 3, "one bounded du walk per temp root, not one per leftover entry");
+  assert.ok(leftoverCalls.every(call => call.filter(path => /\/(rmd-one|remudero-two|rmd-record)$/.test(path)).length === 3));
 });
 
 test("W1-T12258 criterion 3: hand worktrees measure the account's rmd-work directory", () => {
@@ -167,8 +179,8 @@ test("W1-T12258 criterion 4: devices accompany sizes and missing paths add no si
 test("W1-T12258 criterion 5: each new consumer shares the walk deadline and reports a cut as unknown", () => {
   const paths = ["account-tmp/tsx-1000", "account-tmp/rmd-one", "home/rmd-work"];
   for (const [index, slow] of paths.entries()) {
-    const { beat, walks } = measure({ slow });
-    assert.equal(walks.at(-1), slow, "the slow walk started and no later du was admitted");
+    const { beat, duCalls } = measure({ slow });
+    assert.ok(duCalls.at(-1)?.includes(slow), "the slow path's bounded walk started and no later du was admitted");
     assert.equal(beat.consumer_walk_state, "budget_exhausted");
     assert.equal(beat.consumer_walk_budget_exhausted, consumers.slice(index).join(","));
     for (const name of consumers.slice(index))

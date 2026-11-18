@@ -61,6 +61,7 @@ function measure(opts: { accountEntries: number; systemEntries: number; slowSyst
     stub("git", "printf 'fixture-sha\\n'");
     stub("docker", "exit 1");
     stub("systemctl", "exit 1");
+    stub("uname", "printf 'Linux\\n'");
     stub("ionice", 'shift 2; exec "$@"');
     stub("findmnt", 'printf "%s\\n" "$*" >> "$FIXTURE/findmnt-calls"; exit 1');
     stub("df", `
