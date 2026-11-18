@@ -37,7 +37,7 @@
     - src/lib/worker-provider.ts
     - test/console-api/serve/serve-names-every-worker-thread-and-reads-every-os-thread.test.ts
     - test/serve-holds-a-cpu-budget.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Every worker spawn site in src passes name: threadName(<site>) from THREAD_NAMES (unique, at most 15 bytes), and on Node 24 that name reaches the OS thread's comm, for a nested worker too"

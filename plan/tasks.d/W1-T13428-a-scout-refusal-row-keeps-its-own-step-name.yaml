@@ -16,7 +16,7 @@
   files:
     - src/lib/scout-gardener.ts
     - test/a-scout-refusal-row-keeps-its-own-step-name.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A scout pass whose re-derived draft is refused, with its log built the way gardenRunCommand builds it (appendLedger with the payload spread after the step), appends a row whose step is scout.record_refused, whose symptom_step is the symptom's step name and whose reason is the refusal text; no row of that pass has the symptom's step name as its step"

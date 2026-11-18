@@ -17,7 +17,7 @@
   files:
     - src/cli/commands/review.ts
     - test/review/a-review-s-pending-post-reads-its-pr-lifecycle-off-the-loop.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The fetchLifecycle that reviewCommand passes to its injected postReviewPending for the pending post returns a promise, and for an open, a merged and a closed pull request row it gives the same merged, closed, baseRef and reviewInputDigest as the synchronous fetchPrLifecycle of origin/main"

@@ -200,9 +200,28 @@ test("an allowlisted operator's verified session reaches middle-tier routes", as
 
 // ── criterion 2 ────────────────────────────────────────────────────────────────────────────────
 
-test("a high-tier route needs a factor verified within the step-up window", async () => {
+test("W1-T13552 criterion 1: signing in is the only gate, so a verified session with a stale factor reaches high by default", async () => {
   const signer = makeSigner("k1");
   await withServe({ signer }, async ({ base }) => {
+    // Two hours since any factor, step-up switch absent: high — the confirm-nonce step still applies.
+    const stale = { [OPERATOR_SESSION_HEADER]: sessionToken(signer, { fva: [120, 120] }) };
+    const noNonce = await post(base, "/v1/merge-hold", stale, MERGE_HOLD);
+    assert.equal(noNonce.status, 403);
+    assert.deepEqual(await noNonce.json(), { error: "confirm_nonce_required" });
+    const ok = await post(base, "/v1/merge-hold", stale, MERGE_HOLD, await nonceFor(base, stale, "/v1/merge-hold", MERGE_HOLD));
+    assert.equal(ok.status, 200);
+  });
+  // Turned off explicitly, the same holds.
+  await withServe({ signer, config: { ...CONFIG, requireStepUp: false } }, async ({ base }) => {
+    const stale = { [OPERATOR_SESSION_HEADER]: sessionToken(signer, { fva: [-1, -1] }) };
+    const res = await post(base, "/v1/merge-hold", stale, MERGE_HOLD, await nonceFor(base, stale, "/v1/merge-hold", MERGE_HOLD));
+    assert.equal(res.status, 200);
+  });
+});
+
+test("W1-T13552 criterion 2: with requireStepUp on, a high-tier route needs a factor verified within the step-up window", async () => {
+  const signer = makeSigner("k1");
+  await withServe({ signer, config: { ...CONFIG, requireStepUp: true } }, async ({ base }) => {
     // Two hours since any factor: middle, so merge hold is refused at the tier gate.
     const stale = { [OPERATOR_SESSION_HEADER]: sessionToken(signer, { fva: [120, 120] }) };
     const staleRes = await post(base, "/v1/merge-hold", stale, MERGE_HOLD, await nonceFor(base, stale, "/v1/merge-hold", MERGE_HOLD));

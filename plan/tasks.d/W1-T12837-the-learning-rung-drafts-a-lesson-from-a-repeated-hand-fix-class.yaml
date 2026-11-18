@@ -19,7 +19,7 @@
     - src/lib/measurement-cadence.ts
     - test/daemon/the-learning-rung-drafts-a-lesson-from-a-repeated-hand-fix-class.test.ts
     - "src/run-task.ts"
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "For each hand-fix class (cause class plus most-changed file, from operator.intervention evidence) seen 2 or more times in the trailing 14 days, the scheduled learning rung drafts one learning shard scoped to the fixed files, citing each PR and hand commit and stating what the fleet's last attempt left failing"

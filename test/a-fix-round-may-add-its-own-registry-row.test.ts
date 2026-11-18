@@ -5,10 +5,13 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import {
   commitWorkerEdits, fixRungScopeStandDownReason, harnessCommitForShellLessWorker,
-  readRegistrationChanges, renderFixPrompt, scopeGuardOutOfScopeFiles,
+  readRegistrationChanges, renderFixPrompt, runFixRung, scopeGuardOutOfScopeFiles,
 } from "#src/run-task.js";
+import type { Config } from "#src/lib/config.js";
+import type { WorkerResult } from "#src/lib/worker.js";
 import * as sweep from "#src/lib/sweep.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const declared = ["src/lib/worker.ts"];
 const ledger = "src/lib/ledger.ts";
@@ -209,5 +212,235 @@ test("census fix prompts name the bounded table and refuse existing-row edits", 
   assert.ok(text.includes(baseline));
   assert.doesNotMatch(prompt(["plan/tasks.d/task.yaml"], "ledger-literal-census"), /ADDITIVE_REGISTRATION_SURFACES/);
   assert.doesNotMatch(prompt(declared, "typecheck"), /ADDITIVE_REGISTRATION_SURFACES/);
-  assert.deepEqual(sweep.ADDITIVE_REGISTRATION_SURFACES.map((row) => row.path), [ledger, spend, env, authority, baseline]);
+  assert.deepEqual(sweep.ADDITIVE_REGISTRATION_SURFACES.map((row) => row.path), [ledger, spend, env, authority, baseline,
+    parity, parityBaseline, guide]);
+});
+
+// W1-T13378: a pull request that adds a COMMANDS verb must register it in the console-parity table, its baseline
+// and the operator guide's command table. Those are instrument files, so a fix round stood down for the operator.
+const commandsPath = "src/run-task.ts";
+const parity = "scripts/console-parity-ratchet.mjs";
+const parityBaseline = "scripts/console-parity-baseline.json";
+const guide = "docs/operator-guide.md";
+const verbSurfaces = [parity, parityBaseline, guide];
+const commandRow = (verb: string) => `  {\n    name: "${verb}",\n    syntax: "rmd ${verb}",\n    summary: "s",\n    detail: "d",\n  },\n`;
+const commandsSource = (verbs: readonly string[], padding = "") =>
+  `${padding}const COMMANDS: readonly CommandSpec[] = [\n${verbs.map(commandRow).join("")}];\nexport { COMMANDS };\n`;
+const mainVerbs = ["old-verb", "listed-verb", "gh"];
+const verbBefore: Record<string, string> = {
+  [parity]: 'export const ROUTE_MATCH = {\n  status: "GET /v1/status",\n};\nexport const CLI_ONLY = {\n  "old-verb": "host-local",\n' +
+    '  ...reasons(\n    [\n      // a listed verb\n      "listed-verb",\n    ],\n    REASON,\n  ),\n  gh:\n    "runs one read " +\n    "on the Mac",\n};\n',
+  [parityBaseline]: '{\n  "_comment": "the recorded set",\n  "uncoveredVerbs": [\n    "gh",\n    "listed-verb",\n    "old-verb"\n  ]\n}\n',
+  [guide]: "# Guide\n\n| Command | What it does |\n|---|---|\n| `rmd old-verb` | Old. |\n| `rmd gh -- <args>` | One read. |\n\nAfter the table.\n",
+};
+const rowAnchor: Record<string, string> = { [parity]: '  "old-verb":', [parityBaseline]: '    "old-verb"', [guide]: "| `rmd gh" };
+const ownRow: Record<string, string> = {
+  [parity]: '  "new-verb": "host-local recovery of one PR",\n',
+  [parityBaseline]: '    "new-verb",\n',
+  [guide]: "| `rmd new-verb <pr-number>` | Recover one PR. |\n",
+};
+const withRow = (path: string, row = ownRow[path]) => verbBefore[path].replace(rowAnchor[path], `${row}${rowAnchor[path]}`);
+const verbChange = (path: string, after: string, prAddedVerbs: readonly string[] | undefined = ["new-verb"]) =>
+  ({ path, before: verbBefore[path], after, ...(prAddedVerbs ? { prAddedVerbs } : {}) });
+
+/** Each form keeps the PR's own row and adds exactly one edit the invariant refuses. */
+const refusedForms: Record<string, [string, string][]> = {
+  [parity]: [
+    ["an existing row changed", withRow(parity).replace('"old-verb": "host-local"', '"old-verb": "changed"')],
+    ["an existing row removed", withRow(parity).replace('  "old-verb": "host-local",\n', "")],
+    ["a verb the PR does not add", withRow(parity, ownRow[parity].replace("new-verb", "other-verb"))],
+    ["an edit outside the table", withRow(parity).replace('"GET /v1/status"', '"GET /v1/other"')],
+    ["the verb joined an existing list", verbBefore[parity].replace('"listed-verb",', '"listed-verb",\n      "new-verb",')],
+    ["the row added twice", withRow(parity, ownRow[parity] + ownRow[parity])],
+    ["a computed reason", withRow(parity, '  "new-verb": reasonFor("new-verb"),\n')],
+    ["a spread row", withRow(parity, '  ...reasons(["new-verb"], REASON),\n')],
+    ["a row for a verb already listed", withRow(parity, '  "listed-verb": "again",\n')],
+  ],
+  [parityBaseline]: [
+    ["an existing row changed", withRow(parityBaseline).replace('"gh"', '"gh-two"')],
+    ["an existing row removed", withRow(parityBaseline).replace('    "gh",\n', "")],
+    ["a verb the PR does not add", withRow(parityBaseline, '    "other-verb",\n')],
+    ["an edit outside the list", withRow(parityBaseline).replace("the recorded set", "an edited set")],
+    ["the row added twice", withRow(parityBaseline, ownRow[parityBaseline] + ownRow[parityBaseline])],
+  ],
+  [guide]: [
+    ["an existing row changed", withRow(guide).replace("Old.", "Changed.")],
+    ["an existing row removed", withRow(guide).replace("| `rmd old-verb` | Old. |\n", "")],
+    ["a verb the PR does not add", withRow(guide, ownRow[guide].replace("new-verb", "other-verb"))],
+    ["an edit outside the table", withRow(guide).replace("After the table.", "Edited.")],
+    ["a row that also names another verb", withRow(guide, "| `rmd new-verb` | Same as `rmd other-verb`. |\n")],
+    ["a row for a verb already documented", withRow(guide, "| `rmd old-verb --again` | Again. |\n")],
+  ],
+};
+
+function verbScope(t: { after(fn: () => void): void }, worker: Record<string, string>, opts: { prVerbs?: string[]; requested?: string[]; small?: boolean; reasked?: boolean } = {}) {
+  const repo = gitRepo({ kind: "verb-registration" });
+  t.after(() => repo.cleanup());
+  repo.git("config", "user.name", "fixture");
+  repo.git("config", "user.email", "fixture@example.invalid");
+  const put = (path: string, text: string) => {
+    mkdirSync(dirname(join(repo.dir, path)), { recursive: true });
+    writeFileSync(join(repo.dir, path), text);
+  };
+  // Past execFileSync's 1 MiB default buffer, as the real src/run-task.ts is: the PR's diff must still be readable.
+  const padding = opts.small ? "" : `// ${"x".repeat(1_200_000)}\n`;
+  put(commandsPath, commandsSource(mainVerbs, padding));
+  for (const path of verbSurfaces) put(path, verbBefore[path]);
+  repo.git("add", "-A");
+  repo.git("commit", "-qm", "main");
+  repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
+  const branch = "run-W1-T9002-1794947327900";
+  repo.git("checkout", "-qb", branch);
+  put(commandsPath, commandsSource([...mainVerbs, ...(opts.prVerbs ?? ["new-verb"])], padding));
+  repo.git("add", "-A");
+  repo.git("commit", "-qm", "feat: add the verb");
+  const headSha = repo.git("rev-parse", "HEAD");
+  const rows: ({ step: string } & Record<string, unknown>)[] = [];
+  const issues: string[] = [];
+  let spawns = 0;
+  const signature = "comment-load-ratchet: console-parity UNMAPPED new-verb; docs-claims operator guide missing new-verb";
+  const mount = { model: "sonnet", effort: "medium", maxTurns: 20, contextBudget: 120000 } as const;
+  const review = { state: "failure", criteria: [{ claim: "ci green", proof: "unit test: ci", met: false, reason: signature,
+    proof_exec: "not_executable" }], testTheater: false, summary: signature, floorDegraded: false, capped: false,
+    keywordOnly: false, planOnly: false, headSha, reviewerOutcome: "failure" } as Parameters<typeof runFixRung>[0]["initialReview"];
+  const run: Parameters<typeof runFixRung>[0] = {
+    taskId: "W1-T9002", runId: "verb-registration-run", task: { id: "W1-T9002", title: "add new-verb", files: [commandsPath] },
+    prUrl: "https://github.com/acme/remudero/pull/19014", branch, worktreePath: repo.dir, initialSessionId: "initial", mount,
+    settingsFile: join(repo.dir, "settings.json"),
+    config: { root: repo.dir, workerProviders: { harnessCommitsFix: true } } as Config,
+    budgetUsd: 10, strikeCap: 1, initialReview: review, ciFailures: [{ name: "comment-load-ratchet", logTail: signature }],
+    reviewBase: { owner: "acme", repo: "remudero", headCheckoutDir: repo.dir, reviewerMount: mount },
+    escalationJudge: async () => ({ decision: "deliver", reason: "only the operator can grant an instrument" }),
+    deps: {
+      spawn: async () => {
+        // A re-asked round first omits its COMMIT_MESSAGE line, from a writer with no provider, and gives it when asked.
+        const first = spawns++ === 0;
+        if (first) for (const [path, text] of Object.entries(worker)) put(path, text);
+        const line = opts.reasked && first ? "" : "COMMIT_MESSAGE: fix(console): register new-verb";
+        return { text: `REPORT\nnew-verb needs its registrations.\nFIX_OUTCOME: NEEDS_SCOPE ${(opts.requested ?? verbSurfaces).join(",")}\n` +
+            line, blocks: [], sessionId: "scope", costUsd: 1, numTurns: 1,
+          subtype: "success", isError: false, apiError: false, permissionDenials: [], childEnvKeys: [],
+          tokens: { input: 1, output: 1, cacheRead: 0, cacheCreation: 0 }, stderr: "", model: "sonnet", effort: "medium",
+          compactionEvents: [], qualitySuspect: false, modelUsage: {}, ...(opts.reasked ? {} : { provider: "codex" }) } as WorkerResult;
+      },
+      fetchPrBody: async () => "Adds new-verb.\n\nRemudero-Task: W1-T9002\n",
+      fetchPrDiffFiles: async () => repo.git("diff", "--name-only", "origin/main...HEAD").split("\n").filter(Boolean),
+      scopeAmendmentWritePorts: { repoDir: repo.dir, findShard: () => undefined, lookupIdentity: () => undefined,
+        probeExisting: () => undefined } as unknown as NonNullable<Parameters<typeof runFixRung>[0]["deps"]["scopeAmendmentWritePorts"]>,
+      push: () => {},
+      waitForCiGreen: async () => "green",
+      runReview: async () => ({ ...review, state: "success", headSha: repo.git("rev-parse", "HEAD") }),
+      issues: { create: (_title, body) => { issues.push(body); return "https://github.com/acme/remudero/issues/1"; },
+        listOpen: () => [], comment: () => {} },
+      ledgerPath: join(repo.dir, "ledger.ndjson"), ledgerLines: () => rows,
+      log: (step, extra) => rows.push({ step, task_id: "W1-T9002", pr_number: 19014, ...extra }),
+      say: () => {}, account: (r) => r,
+    },
+  };
+  const committed = () => repo.git("diff", "--name-only", `${headSha}..HEAD`).split("\n").filter(Boolean).sort();
+  return { repo, run, rows, issues, headSha, committed, spawns: () => spawns };
+}
+
+test("W1-T13378 criterion 1: a fix round's NEEDS_SCOPE for its own verb's rows commits them instead of escalating", async (t) => {
+  for (const reasked of [false, true]) {
+    const f = verbScope(t, Object.fromEntries(verbSurfaces.map((path) => [path, withRow(path)])), { reasked });
+    await runFixRung(f.run);
+    const scope = f.rows.filter((row) => row.step === "fix.scope_amendment");
+    assert.deepEqual(f.issues, [], JSON.stringify(f.rows.map((row) => [row.step, row.outcome, row.reason])));
+    assert.deepEqual(scope.map((row) => row.outcome), reasked ? ["registration-admitted", "registration-admitted"] : ["registration-admitted"]);
+    assert.ok(scope.every((row) => JSON.stringify(row.paths) === JSON.stringify(verbSurfaces)), JSON.stringify(scope));
+    assert.equal(f.spawns(), reasked ? 2 : 1, "positive control: the re-asked round asked once for its commit line");
+    assert.deepEqual(f.committed(), [...verbSurfaces].sort(), "the round committed exactly the three registrations");
+    for (const path of verbSurfaces) assert.equal(f.repo.git("show", `HEAD:${path}`), withRow(path).trimEnd());
+  }
+});
+
+test("W1-T13378 criterion 1: the PR's own verb row is an additive registration on each surface, read from the PR's diff", async (t) => {
+  for (const path of verbSurfaces) {
+    assert.equal(sweep.isAdditiveRegistrationChange(verbChange(path, withRow(path))), true, path);
+  }
+  const changes = verbSurfaces.map((path) => verbChange(path, withRow(path)));
+  assert.deepEqual(scopeGuardOutOfScopeFiles(verbSurfaces, [commandsPath], changes), []);
+  assert.equal(fixRungScopeStandDownReason([commandsPath, ...verbSurfaces], [commandsPath], [commandsPath], [], [], changes), undefined);
+  // The verb is what the PR's committed diff adds to COMMANDS, from the merge base to the head: a real git read.
+  const f = verbScope(t, {}, { small: true });
+  for (const path of verbSurfaces) writeFileSync(join(f.repo.dir, path), withRow(path));
+  f.repo.git("add", "-A");
+  f.repo.git("commit", "-qm", "fix: register new-verb");
+  const read = await sweep.withPrAddedVerbs(readRegistrationChanges(f.repo.dir, verbSurfaces, "origin/main"),
+    (args) => f.repo.git(...args), "HEAD");
+  assert.deepEqual(read.map((change) => [change.path, change.prAddedVerbs, change.error]), verbSurfaces.map((path) => [path, ["new-verb"], undefined]));
+  assert.ok(read.every(sweep.isAdditiveRegistrationChange));
+  // Positive control on the real files: the mechanism parses this repository's own table, baseline, guide and COMMANDS.
+  const real = (path: string) => readFileSync(join(REPO_ROOT, path), "utf8");
+  const commands = real(commandsPath);
+  const fake = "w1-t13378-probe-verb";
+  const plus = commands.replace("const COMMANDS: readonly CommandSpec[] = [\n", `const COMMANDS: readonly CommandSpec[] = [\n${commandRow(fake)}`);
+  assert.notEqual(plus, commands, "positive control: the real COMMANDS declaration was found");
+  assert.deepEqual(sweep.commandVerbsAddedByDiff(commands, plus), [fake]);
+  const realRows: Record<string, [string, string]> = {
+    [parity]: ["export const CLI_ONLY = {\n", `  "${fake}": "probe",\n`],
+    [parityBaseline]: ['  "uncoveredVerbs": [\n', `    "${fake}",\n`],
+    [guide]: ["| Command | What it does |\n|---|---|\n", `| \`rmd ${fake}\` | Probe. |\n`],
+  };
+  for (const [path, [anchor, row]] of Object.entries(realRows)) {
+    const before = real(path);
+    const after = before.replace(anchor, `${anchor}${row}`);
+    assert.notEqual(after, before, path);
+    assert.equal(sweep.isAdditiveRegistrationChange({ path, before, after, prAddedVerbs: [fake] }), true, path);
+    assert.equal(sweep.isAdditiveRegistrationChange({ path, before, after, prAddedVerbs: ["another-verb"] }), false, path);
+  }
+});
+
+test("W1-T13378 criterion 2: an existing-row edit, a removal, another verb or any other edit stays an instrument path", async () => {
+  for (const path of verbSurfaces) {
+    assert.equal(sweep.isAdditiveRegistrationChange(verbChange(path, withRow(path))), true, `positive control: ${path}`);
+    for (const [name, after] of refusedForms[path]) {
+      assert.notEqual(after, withRow(path), `${path}: ${name} is a real edit`);
+      const change = verbChange(path, after);
+      assert.equal(sweep.isAdditiveRegistrationChange(change), false, `${path}: ${name}`);
+      assert.deepEqual(scopeGuardOutOfScopeFiles([path], [commandsPath], [change]), [path], `${path}: ${name}`);
+      assert.ok(fixRungScopeStandDownReason([commandsPath, path], [commandsPath], [commandsPath], [], [], [change]), `${path}: ${name}`);
+    }
+    // The verb comes only from the PR's diff: no evidence, no verb, or an unreadable read refuses the row.
+    const own = { path, before: verbBefore[path], after: withRow(path) };
+    assert.equal(sweep.isAdditiveRegistrationChange(own), false, `${path}: no evidence`);
+    assert.equal(sweep.isAdditiveRegistrationChange({ ...own, prAddedVerbs: [] }), false, `${path}: the PR adds no verb`);
+    assert.equal(sweep.isAdditiveRegistrationChange({ ...verbChange(path, withRow(path)), error: "unreadable" }), false, path);
+  }
+  const unreadable = await sweep.withPrAddedVerbs([{ path: guide, before: verbBefore[guide], after: withRow(guide) }],
+    () => { throw new Error("merge base unavailable"); });
+  assert.match(unreadable[0].error ?? "", /merge base unavailable/);
+  assert.equal(sweep.isAdditiveRegistrationChange(unreadable[0]), false);
+  const unparsable = await sweep.withPrAddedVerbs([{ path: guide, before: verbBefore[guide], after: withRow(guide) }],
+    (args) => args[0] === "merge-base" ? "base\n" : "export const nothing = 1;\n");
+  assert.match(unparsable[0].error ?? "", /COMMANDS/);
+  const untouched = [{ path: ledger, before: sources[ledger], after: added(ledger) }, { path: guide, before: verbBefore[guide], after: verbBefore[guide] }];
+  assert.deepEqual(await sweep.withPrAddedVerbs(untouched, () => { throw new Error("must not read"); }), untouched);
+  // COMMANDS rows are keyed by their own top-level name; any row without one makes the PR's verbs unknown.
+  const commands = commandsSource(mainVerbs);
+  assert.deepEqual(sweep.commandVerbsAddedByDiff(commands, commandsSource([...mainVerbs, "new-verb"])), ["new-verb"]);
+  assert.deepEqual(sweep.commandVerbsAddedByDiff(commands, commands), []);
+  assert.deepEqual(sweep.commandVerbsAddedByDiff(commands, commands.replace('name: "gh"', 'name: "gh-renamed"')), ["gh-renamed"]);
+  for (const after of [commands.replace("];", "  { syntax: \"rmd x\", flags: [{ name: \"nested\" }] },\n];"),
+    commands.replace("];", "  { name: VERB_NAME },\n];"), commands.replace("];", "  ...MORE_COMMANDS,\n];"), "const OTHER = [];\n"]) {
+    assert.equal(sweep.commandVerbsAddedByDiff(commands, after), undefined, after);
+  }
+});
+
+test("W1-T13378 criterion 2: a fix round whose verb rows break the boundary still escalates as an instrument", async (t) => {
+  const own = Object.fromEntries(verbSurfaces.map((path) => [path, withRow(path)]));
+  for (const [name, worker, prVerbs] of [
+    ["an existing row changed", { ...own, [parity]: refusedForms[parity][0][1] }, undefined],
+    ["a verb the PR does not add", { ...own, [guide]: refusedForms[guide][2][1] }, undefined],
+    ["a verb only the worker adds", { ...own, [commandsPath]: commandsSource([...mainVerbs, "new-verb"]) }, ["unrelated-verb"]],
+  ] as const) {
+    const f = verbScope(t, worker, { prVerbs: prVerbs ? [...prVerbs] : undefined });
+    await runFixRung(f.run);
+    const scope = f.rows.filter((row) => row.step === "fix.scope_amendment");
+    assert.deepEqual(scope.map((row) => [row.outcome, row.paths]), [["instrument-escalated", [...verbSurfaces].sort()]], name);
+    assert.equal(f.issues.length, 1, name);
+    assert.match(f.issues[0], /instrument-path/, name);
+    assert.deepEqual(f.committed(), [], `${name}: nothing was committed`);
+  }
 });

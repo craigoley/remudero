@@ -15,7 +15,7 @@
     - src/lib/sweep.ts
     - src/lib/run-child.ts
     - test/sweep/a-queued-host-fix-dispatch-never-holds-its-key-unexplained.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "While a host fix child for a key is queued and not started, a later sweep pass that would dispatch the same key stands down with a reason naming the queued state, its run id and how long it has waited, never the words already claimed this pass"

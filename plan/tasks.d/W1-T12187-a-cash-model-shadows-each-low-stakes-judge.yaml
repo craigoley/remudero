@@ -26,7 +26,7 @@
     - .remudero/mounts.yaml
     - docs/model-routing.md
     - test/routing/a-cash-model-shadows-each-low-stakes-judge.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "After the risk judge answers, the same prompt goes to the first ready model of the cash economy row. One row records the role, both models, both answers, whether they agree and the cost of each call"

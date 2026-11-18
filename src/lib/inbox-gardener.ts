@@ -207,7 +207,15 @@ export function warnInboxGardenerNearBound(stateDir: string, clock: Clock, measu
   }
   return warned;
 }
-const relevantProjection: LedgerRowProjection = { name: "inbox-gardener-evidence", version: 2,
+/** W1-T13586: quarantined rows that can reach a verdict. The scanned step may be empty or a nested one, so the body is
+ *  checked too; a quarantined row of any other step (the W1-T5407 future-stamped `cli.invoked` rows) is never read. */
+function relevantQuarantineCount(db: ReturnType<typeof openProjectorReadModel>): number {
+  const marks = RELEVANT_STEPS.map(step => `"step":"${step}"`);
+  return Number(db.prepare(`SELECT COUNT(*) AS n FROM quarantine WHERE step = '' OR step IN (${RELEVANT_STEPS.map(() => "?").join(",")}) OR ${marks.map(() => "instr(body, ?) > 0").join(" OR ")}`)
+    .get(...RELEVANT_STEPS, ...marks)?.n ?? 0);
+}
+// W1-T13586: version 3 re-reads every archive under the relevant-quarantine rule.
+const relevantProjection: LedgerRowProjection = { name: "inbox-gardener-evidence", version: 3,
   tables: ["inbox_gardener_latest", "inbox_gardener_mirrors"],
   ddl: "CREATE TABLE IF NOT EXISTS inbox_gardener_latest(slot TEXT PRIMARY KEY, proposal TEXT NOT NULL, ts TEXT NOT NULL, body TEXT NOT NULL) WITHOUT ROWID; CREATE INDEX IF NOT EXISTS inbox_gardener_proposal ON inbox_gardener_latest(proposal); CREATE TABLE IF NOT EXISTS inbox_gardener_mirrors(id TEXT PRIMARY KEY) WITHOUT ROWID;",
   markers: [""],
@@ -234,15 +242,19 @@ export function readInboxGardenerLedger(stateDir: string, scope: InboxGardenerSc
   const acquired = acquireLease(db);
   try {
     if (!acquired.ok) return { state: "unavailable" as const, rows: [] };
+    // W1-T13586: a fault an older projection recorded goes with the rows that projection read, which this tick re-reads.
+    if (db.prepare("SELECT v FROM meta WHERE k = ?").get(`projection:${relevantProjection.name}`)?.v !== String(relevantProjection.version))
+      withWriteTransaction(db, acquired.lease, () => db.prepare("DELETE FROM meta WHERE k = 'inbox-source-fault'").run());
     const tick = createLedgerProjector({ ledgerDir: stateDir, db, lease: acquired.lease, factStep: () => false, clock,
       projections: [relevantProjection], chunkBytes: INBOX_GARDENER_LIMITS.ledgerChunkBytes }).tick({ budgetMs: INBOX_GARDENER_LIMITS.ledgerCatchUpMs });
-    const quarantined = Number(db.prepare("SELECT COUNT(*) AS n FROM quarantine").get()?.n ?? 0);
-    if (tick.torn || tick.quarantined) withWriteTransaction(db, acquired.lease, () => db.prepare("INSERT OR REPLACE INTO meta(k, v) VALUES('inbox-source-fault', 'torn-or-quarantined')").run());
+    // W1-T13586: relevant quarantine persists in its own table, so only a torn read needs the sticky fault.
+    const quarantined = relevantQuarantineCount(db);
+    if (tick.torn) withWriteTransaction(db, acquired.lease, () => db.prepare("INSERT OR REPLACE INTO meta(k, v) VALUES('inbox-source-fault', 'torn-source')").run());
     const live = fs.openSync(join(stateDir, LEDGER_FILENAME), "r");
     let unfinishedTail = false;
     try { const size = fs.fstatSync(live).size; if (size) { const last = Buffer.alloc(1); fs.readSync(live, last, 0, 1, size - 1); unfinishedTail = last[0] !== 10; } }
     finally { fs.closeSync(live); }
-    let incomplete = !!(unfinishedTail || tick.pending || tick.unread.length || tick.torn || tick.quarantined || quarantined || db.meta("inbox-source-fault"));
+    let incomplete = !!(unfinishedTail || tick.pending || tick.unread.length || tick.torn || quarantined || db.meta("inbox-source-fault"));
     const rows: Array<Record<string, any>> = []; let bytes = 0;
     // Each indexed slot has one latest row per relevant step, independent of lifetime ledger size.
     for (const id of proposalIds.slice(0, INBOX_GARDENER_SOURCE_LIMITS.proposals)) {

@@ -18,7 +18,7 @@
     - test/daemon/a-paused-instance-says-when-it-has-drained.test.ts
     - "src/cli/commands/daemon.ts"
     - "src/lib/garden-registry.ts"
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "While an instance is held by PAUSE, each daemon.pause row carries the in-flight units it still owns, by kind and name: live run children, review children, fix and conflict rounds, garden children and judge calls"

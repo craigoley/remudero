@@ -19,7 +19,7 @@
     - test/review/the-ci-and-fix-progress-judges-shadow-a-deepseek-arm.test.ts
     - test/review/the-ci-and-fix-progress-shadow-arm-is-on.test.ts
     - "src/lib/public-model-vocabulary.ts"
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:the-primary-judge-is-unchanged — over the repo's real .remudero/mounts.yaml, resolveCiJudgeMount and resolveFixProgressJudgeMount each give the model, effort, max_turns and context_budget of resolveRiskJudgeMount's cell and name no provider. A copy of the real file whose cheapest routed cell is changed makes this test fail, so a later change to that cell cannot split the judges from the risk judge without a red test"

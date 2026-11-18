@@ -386,6 +386,8 @@ export interface ServeDeps {
   /** Forwarded to `createService` — one ledger line per auth decision/SSE lifecycle/handler error. */
   log?: ServiceOptions["log"];
   demand?: Pick<ServeDemandOptions, "clock" | "every">;
+  /** W1-T13602: told of each view read's final answer; assembleServeServer points it at the serve.demand window. */
+  onViewAnswer?: (view: string, status: number, code: string, stale: boolean) => void;
   /**
    * W1-T163: per-token recap markers (last-seen.ts), shared with digest.ts's
    * `sendMarkerAwareDigest` so push and pull read/advance the same state. Injectable; otherwise
@@ -1599,6 +1601,10 @@ export interface StaleCodeExitDeps {
   drain?: () => Promise<void>;
   changedPathsSince?: ChangedPathsReader;
   reloadPlan?: (ref: string) => Promise<boolean>;
+  /** W1-T13615: a supervised generation's tree never moves (E43), so its threads follow a pin, not their files. Pin the
+   *  plan at {@link bootSha} at once: until main's next plan change, every thread with no pin re-stats each plan shard
+   *  on every pass (37 ms on the host, 2026-11-18). */
+  pinBootPlan?: boolean;
   requestHandoff?: (detail: Record<string, unknown>) => void;
   /** When this generation booted, the first anchor of {@link SERVE_HANDOFF_COALESCE_MS}; defaults to construction. */
   bootedAt?: number;
@@ -1769,7 +1775,7 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
   let advanceRefused: string | undefined;
   const readChangedPaths = deps.changedPathsSince ?? ((boot, target) => changedPathsSince(boot, target, serveRepoDir()));
   const relevance = new Map<string, boolean | "pending">();
-  let headPlanRef: string | undefined;
+  let headPlanRef: string | undefined = deps.pinBootPlan === true && deps.bootSha !== CONSOLE_SHA_UNKNOWN ? deps.bootSha : undefined;
   let originPlanRef: string | undefined;
   let planLoadedRef: string | undefined;
   let planReloading = false;
@@ -1928,6 +1934,7 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
   // re-check that is supposed to notice that would itself never be scheduled.
   let stopped = false;
   const stopTimer = scheduleRecheck(() => void recheck(), RECYCLE_RECHECK_MS);
+  syncPlan();
   const stopRecheck = (): void => {
     if (stopped) return;
     stopped = true;
@@ -3059,7 +3066,7 @@ function assembleServeRoutes(
   const analyticsLegacy = analyticsLegacyView({ scopes: () => navBadgeScopes().map((scope) => ({ instanceId: scope.instanceId, repository: scope.repository, analytics: scope.analytics })), modelApprovalConfig: deps.modelApprovalConfig });
   // The shadow compares the worker's badge with the undecorated legacy one; only the served badge carries decisions.
   // W1-T13455: the inbox-thread view (built on demand by the worker since P4-T10) is mounted and served with no switch entry.
-  const shadowed = withViewShadow(readModel, { readModel, servedByDefault: [readModelStatusView.name, AGENT_VIEW_NAME, INBOX_THREAD_VIEW_NAME, INBOX_THREADS_VIEW_NAME], onServed: routeReads.served,
+  const shadowed = withViewShadow(readModel, { readModel, servedByDefault: [readModelStatusView.name, AGENT_VIEW_NAME, INBOX_THREAD_VIEW_NAME, INBOX_THREADS_VIEW_NAME], onServed: routeReads.served, onAnswer: deps.onViewAnswer,
     readModelViews: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME, INBOX_VIEW_NAME, FEEDBACK_VIEW_NAME, NEEDS_YOU_VIEW_NAME, WORKSTREAMS_VIEW_NAME, ACTIONS_VIEW_NAME, HOST_VIEW_NAME, AGENT_VIEW_NAME, INCIDENTS_VIEW_NAME, TASK_VIEW_NAME, CODE_HEALTH_VIEW_NAME, INBOX_THREAD_VIEW_NAME, INBOX_THREADS_VIEW_NAME],
     demandViews: [...DEMAND_VIEWS, CODE_HEALTH_VIEW_NAME, DAILY_PROGRESS_VIEW_NAME, INBOX_THREAD_VIEW_NAME],
     requiredParams: { [NOW_VIEW_NAME]: ["instance"], [INBOX_VIEW_NAME]: ["section"], [AGENT_VIEW_NAME]: ["instance", "part"], [INBOX_THREAD_VIEW_NAME]: ["id"] },
@@ -3521,6 +3528,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     ...(keepWarm ? { github: { serve: keepWarm, ...walk } } : {}), ...deps.readModel, modelApprovalConfig }));
   const staleExit = gateStaleCodeExit({
     bootSha: consoleSha,
+    pinBootPlan: deps.generation !== undefined,
     // The caller's "current sha" is what the gate compares against; absent, the gate re-reads git.
     ...(deps.resolveCurrentSha ? { resolveCurrentSha: deps.resolveCurrentSha } : {}),
     log: deps.log,
@@ -3575,6 +3583,8 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
       confirmNonces,
       githubEventWake: deps.githubEventWake && { ...deps.githubEventWake, counters: wakeCounters },
       routeReadRollup: routeReads,
+      // W1-T13602: bound late; the demand window is built from the routes this call returns, and is read only at request time.
+      onViewAnswer: (view, status, code, stale) => demand.recordView(view, status, code, stale),
       liveMetrics: deps.liveMetrics ?? liveAnalyticsCache.current,
       // W1-T4229: /v1/daemon-health reports the SAME reading the restart decision acts on.
       daemonHealth: { ...deps.daemonHealth, gatewayCheckout: deps.daemonHealth?.gatewayCheckout ?? staleExit.checkout },

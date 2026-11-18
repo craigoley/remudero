@@ -55,6 +55,8 @@ const EXEMPT: Readonly<Record<string, string>> = {
   "fix.spawn_infra_blocked": DONE_STEPS_PRICE_THE_RUN,
   worker_smoke: DONE_STEPS_PRICE_THE_RUN,
   "sweep.plan_round.worker": DONE_STEPS_PRICE_THE_RUN,
+  // W1-T12417: a judge shadow's decision request, under a `decision-<uuid>` run id; its pr_url names the judged PR.
+  "decision.answered": A_LANE_RUN_ID,
   // The sweep.
   "main.repair.pr_unreadable": A_LANE_RUN_ID,
   "main-repair.pr_opened": A_LANE_RUN_ID,

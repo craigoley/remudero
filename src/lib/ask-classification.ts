@@ -84,12 +84,42 @@ export function projectClassifiedHumanGates(sources: readonly ClassifiedHumanGat
   })));
 }
 
+/**
+ * W1-T13479: one parked task, one ask. The verify-human judge and the machine-filing judge can each park the
+ * same task, so `verify-human:<id>` and `machine-judge:<id>` asked the operator one question twice (nine tasks,
+ * 2026-11-17). One of the pair is listed and the other folds into it for as long as both proposals are present.
+ *
+ * Which one is listed follows its state, never its kind: an answered ask (declined, ratified or retired, then
+ * drafting) is kept, so an answer on either never lets the other resurface as a fresh ask; otherwise the ask the
+ * operator can act on (ready) is kept over one that cannot be approved yet (not ready). Only a tie keeps the machine-judge ask,
+ * because it carries the risk ruling. Keeping machine-judge unconditionally hid an approvable verify-human ask
+ * behind a not-ready machine-judge one (W1-T12032, 2026-11-18), leaving the operator no way to approve it.
+ */
+const TWIN_KEEP_RANK: Readonly<Record<string, number>> = {
+  declined: 4, ratified: 4, retired: 4, drafting: 3, ready: 2, deferred_with_trigger: 1, not_ready: 1,
+};
+const twinRank = (state: string | undefined) => (state === undefined ? 0 : TWIN_KEEP_RANK[state] ?? 0);
+
+export function foldedTwinAsks(items: Iterable<{ readonly proposalId: string; readonly state?: string }>): Set<string> {
+  const stateById = new Map<string, string | undefined>();
+  for (const item of items) stateById.set(item.proposalId, item.state);
+  const folded = new Set<string>();
+  for (const [id, state] of stateById) {
+    const taskId = /^verify-human:([A-Za-z0-9][A-Za-z0-9-]*)$/.exec(id)?.[1];
+    const twin = taskId && `machine-judge:${taskId}`;
+    if (!twin || !stateById.has(twin)) continue;
+    folded.add(twinRank(state) > twinRank(stateById.get(twin)) ? twin : id);
+  }
+  return folded;
+}
+
 export function projectProposalHumanGates(
   classifications: readonly Pick<InboxClassification, "proposalId" | "state" | "trigger" | "retirement">[],
   instance = "core",
   ownerOf?: (proposalId: string) => "operator" | "fleet",
 ) {
-  const gates: ClassifiedHumanGateSource["gates"] = classifications.map((item) => ({
+  const folded = foldedTwinAsks(classifications);
+  const gates: ClassifiedHumanGateSource["gates"] = classifications.filter((item) => !folded.has(item.proposalId)).map((item) => ({
     classification: { kind: "proposal", state: item.state, owner: item.retirement?.state === "restored_for_review" ? "operator" : ownerOf?.(item.proposalId) ?? inboxOwner({ id: item.proposalId }) },
     kind: "proposal", subject: item.proposalId, ownerSurface: "inbox", openedAt: null, url: null,
     reason: item.trigger?.description ?? (item.state === "ready" ? "proposal is ready to ratify" : "proposal needs reframing"),

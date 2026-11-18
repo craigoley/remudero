@@ -15,7 +15,7 @@
   files:
     - src/lib/panel-graph.ts
     - test/console-api/the-inbox-list-shape-carries-list-fields-only.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With shape=list, GET /v1/inbox (whole, ?section=needsYou and ?section=<lane>) answers the same keys, counts, pages and snapshot keys as without it, and each row carries only the fields the Console's mailbox row renders: proposalId, from, summary, receivedAt, lastActivityAt, groupKey, lane or state, classification, snapshotAttention, archivedAt, snoozedUntil, awaitingCoreRefresh, the option count, and recommendation.action and its group (no reasons, plain, draftedTasks or resolution text)"
