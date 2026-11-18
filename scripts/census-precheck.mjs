@@ -486,17 +486,19 @@ export function evaluateInstrumentSurface(input) {
 
 const SCRIPT_REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
-async function importPrecheckModule(moduleName) {
-  const url = pathToFileURL(join(SCRIPT_REPO, "src", "lib", moduleName)).href;
+async function importPrecheckModule(specifier, importDirect = () => import(specifier)) {
+  const url = import.meta.resolve(specifier);
   // An active tsx resolver remaps the graph's .js imports to .ts, including API-registered loaders.
-  if (import.meta.resolve(url.replace(/\.ts$/, ".js")) === url) return import(url);
+  if (import.meta.resolve(url.replace(/\.ts$/, ".js")) === url) return importDirect();
   const { tsImport } = await import("tsx/esm/api");
   return tsImport(url, import.meta.url);
 }
 
-// Use one source-map shape for the census scanners even when the precheck starts under plain Node.
-const { isTrustRootPath, scanTrustRootText, trustRootFor } = await importPrecheckModule("trust-root-text.ts");
-const { isRuleSuitePath } = await importPrecheckModule("rule-suites.ts");
+// Keep literal imports visible to the reach suite's proof fixture, which copies the import closure.
+const { isTrustRootPath, scanTrustRootText, trustRootFor } = await importPrecheckModule("../src/lib/trust-root-text.ts",
+  () => import("../src/lib/trust-root-text.ts"));
+const { isRuleSuitePath } = await importPrecheckModule("../src/lib/rule-suites.ts",
+  () => import("../src/lib/rule-suites.ts"));
 const TMP_HYGIENE_URL = pathToFileURL(join(SCRIPT_REPO, "test", "setup", "tmp-hygiene.ts")).href;
 const ADMISSION_TABLE = "src/lib/ci-parity.ts";
 // BACKSTOP only: this ends a hung child as not measured. The seven admitted suites take 6-10 s together on an 8-core
@@ -621,7 +623,7 @@ export async function loadTestPriority(importSlot = defaultImportTestSlot) {
 }
 
 function defaultImportTestSlot() {
-  return importPrecheckModule("test-slot.ts");
+  return importPrecheckModule("../src/lib/test-slot.ts");
 }
 
 const TEST_PRIORITY = await loadTestPriority();
