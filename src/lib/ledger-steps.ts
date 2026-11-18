@@ -83,15 +83,15 @@ type SeedRow = Omit<LedgerStepRow, "family">;
 const SEED_ROWS: readonly SeedRow[] = [
   {
     step: "judge_shadow.compared",
-    meaning: "After the risk judge or the decision summary answered, the same prompt went once to a cash model in shadow and a reply came back. The row holds the role, both models and the cost of each call. A risk judge row also holds both answers and whether they agree; a decision summary row holds whether the reply parses and no agreement. Nothing acts on the row except the summary the config gardener reads.",
+    meaning: "After the risk judge or the decision summary answered, the same prompt went once to a cash model in shadow and a reply came back. The row holds the role, both models and the cost of each call. A risk judge row also holds both answers and whether they agree; a decision summary row holds whether the reply parses and no agreement. W1-T12417: every fixed-option judge (risk, ci, fix-progress, verify-human, refresh-value, quiet-worker watchdog, head-rehome, typed judgment) writes it under its own role when its shadow is named; a decision-model shadow adds the distribution, the latency and model_surface decisions. Nothing acts on the row except the summary the config gardener reads.",
     writer: ["shadowJudgeCall"],
     outcomes: ["agreement true", "agreement false", "parses true", "parses false"],
   },
   {
     step: "judge_shadow.skipped",
-    meaning: "The cash shadow of a risk judge or decision summary answer gave nothing to compare: the daily cash cap or a capacity limit refused it before any request (the row has a refusal), or the call failed, timed out or gave no usable answer. The row holds the reason. The role's own answer is unchanged.",
+    meaning: "The cash shadow of a risk judge or decision summary answer gave nothing to compare: the daily cash cap or a capacity limit refused it before any request (the row has a refusal), or the call failed, timed out or gave no usable answer. W1-T12417: a decision-model shadow also writes it for an unavailable candidate, a 429, a rejected answer and an abstention (the row has abstained, including below-threshold). The row holds the reason. The role's own answer is unchanged.",
     writer: ["shadowJudgeCall"],
-    outcomes: ["refusal budget", "refusal capacity", "failed", "unparseable"],
+    outcomes: ["refusal budget", "refusal capacity", "failed", "unparseable", "unavailable", "rate limited", "rejected", "abstained"],
   },
   {
     step: "git.dangling_ref_repaired",
@@ -365,7 +365,8 @@ const SEED_ROWS: readonly SeedRow[] = [
       "deployment and request shape, the served model, the latency, the reserved, settled and held " +
       "dollars, the usage, the question count and each question's distribution, abstention or " +
       "rejection. A request refused before sending, a candidate that is unavailable and a request " +
-      "that failed write the same row with their reason, so every request has exactly one row.",
+      "that failed write the same row with their reason, so every request has exactly one row. " +
+      "W1-T12417: a judge's shadow request adds the judged head as head_sha and, with it, the pull request as pr_url.",
     writer: ["askDecisionModel"],
     outcomes: ["answered", "refused", "unavailable", "failed"],
   },
