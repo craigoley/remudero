@@ -339,6 +339,7 @@ export function createRepositoriesReadModelView<S extends { instance: string; ti
   version: number;
   prepare(ctx: { now: number; instances: ReadonlyArray<{ state: S; db?: ReadModelDb }>; committed?: CommittedReader }, more: () => boolean): boolean;
   materialize(ctx: { now: number; instances: ReadonlyArray<{ state: S; db?: ReadModelDb }>; committed?: CommittedReader }): Array<{ key: string; data: RepositoriesData; sources: ViewSource[] }>;
+  inputsFingerprint(ctx: { now: number; instances: ReadonlyArray<{ state: S; db?: ReadModelDb }> }): string | undefined;
   legacy(key: string, now: number, data: unknown): ShadowLegacy | undefined;
   heldSizes(): ThreadHolds;
 } {
@@ -446,6 +447,23 @@ export function createRepositoriesReadModelView<S extends { instance: string; ti
       }
       return true;
     },
+    /**
+     * W1-T13654: what the body below is built from once `prepare` has run. Between recomputes the body is a pure function
+     * of each instance's held summary (changed only by `refresh`, which stamps `atMs`), the published sources file and
+     * the registry file. Serve reads this view about every 2 s while a Console is open (293 builds in 10 min on
+     * 2026-11-18, 14 s of heavy-lane CPU), so an unchanged portfolio is skipped instead of rebuilt.
+     */
+    inputsFingerprint: ({ instances }) => {
+      const at = published(instances);
+      if (at?.sources === undefined) return undefined;
+      const registryPath = at.sources.instances.find((i) => i.options.repoRegistryPath)?.options.repoRegistryPath;
+      const held = at.sources.instances.map(({ instanceId }) => {
+        const current = computed.get(instanceId);
+        const slot = instances.find((candidate) => candidate.state.instance === instanceId);
+        return [instanceId, current?.atMs ?? null, slot !== undefined, slot?.db !== undefined, slot?.state.tickedAt !== undefined, slot?.state.catchUp !== undefined];
+      });
+      return JSON.stringify([fileIdentity(at.path), registryPath === undefined ? null : fileIdentity(registryPath), held]);
+    },
     materialize: ({ now, instances, committed }) => observeSelectedRegistrySync(selectedRegistryObserver, "repositories-view",
       { instanceName: instances.length === 1 ? instances[0]!.state.instance : undefined }, () => {
       const at = published(instances);
@@ -482,6 +500,17 @@ export function createRepositoriesReadModelView<S extends { instance: string; ti
       return [{ key: "", data, sources }];
     }),
   };
+}
+
+/** A file's identity for a fingerprint: device, inode, size and mtime, or null when it is absent. */
+function fileIdentity(path: string): string[] | null {
+  try {
+    const st = statSync(path, { bigint: true });
+    return [st.dev, st.ino, st.size, st.mtimeNs].map(String);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
 }
 
 /** The registry core's summary route reads names each instance's project and repository. */
