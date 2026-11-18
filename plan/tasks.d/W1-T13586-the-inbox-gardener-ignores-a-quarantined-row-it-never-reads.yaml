@@ -16,7 +16,7 @@
   files:
     - src/lib/inbox-gardener.ts
     - test/gardeners/the-inbox-gardener-ignores-a-quarantined-row-it-never-reads.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A future-stamped row of a step the gardener never reads is quarantined, and the gardener's ledger read is still observed"

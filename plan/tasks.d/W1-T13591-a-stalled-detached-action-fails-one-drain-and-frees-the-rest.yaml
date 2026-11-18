@@ -14,7 +14,7 @@
   files:
     - src/lib/sweep.ts
     - test/sweep/a-stalled-detached-action-fails-one-drain-and-frees-the-rest.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "drainDetachedSweepActions() called with no options waits DETACHED_DRAIN_DEFAULT_BOUND_MS, then rejects with an error that names each detached action that never settled"

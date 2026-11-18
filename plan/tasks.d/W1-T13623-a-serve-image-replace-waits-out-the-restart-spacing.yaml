@@ -16,7 +16,7 @@
   files:
     - src/lib/serve-policy-convergence.ts
     - test/console-api/serve/a-serve-image-replace-waits-out-the-restart-spacing.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Replaying 2026-11-18 (serve cold-started 06:01:29Z, a new image every 5-minute deploy tick to 12:10Z), the 06:05:25Z tick is held with the minutes left, and serve restarts only at 08:05, 10:05 and 12:05Z, each on the newest image"
