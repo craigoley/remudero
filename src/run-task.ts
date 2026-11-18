@@ -407,8 +407,8 @@ import { flowGardenSpec } from "./lib/flow-remedy-gardener.js";
 import { fixLaneGardenSpec } from "./lib/fix-lane-gardener.js";
 import { conflictedFilePaths, hotFileGardenSpec, readMainHistory, type HotFileGardenSources } from "./lib/hot-file-gardener.js";
 import {
-  gardenFamilyRecord, isRulingShaped, machineJudgeFoundWork, machineJudgeInputsAsync, mechanicalDecisions, operatorRulingTimes, parkedEscalation, readOperatorReleaseRecords,
-  recordOperatorRelease, runMachineFilingJudge, type MachineJudgePorts, type MechanicalPort,
+  gardenFamilyRecord, isRulingShaped, ledgerCorpusSpan, machineJudgeFoundWork, machineJudgeInputsAsync, mechanicalDecisions, operatorRulingTimes, parkedEscalation, readOperatorReleaseRecords,
+  recordOperatorRelease, runMachineFilingJudge, unionTaskActivity, type MachineJudgePorts, type MechanicalPort,
 } from "./lib/machine-filing-judge.js";
 import { countRounds, countStepRows, filingEvidenceOf, type SymptomReading } from "./lib/mechanical-rulings.js";
 import { parseCiFrictionOrigin } from "./lib/ci-friction-remedy.js";
@@ -38904,6 +38904,7 @@ export function priorVerifyHumanVerdicts(rows: readonly Record<string, unknown>[
  * {@link SCOUT_WINDOW_MS}) and a ci-friction record's cause key (rounds across {@link CI_FRICTION_HALF_LIFE_MS}). Every
  * other family reads as undefined, which the rules treat as undecided, so it keeps the judge path it had.
  * A release goes through {@link approveParkedTask}, whose every guard stands.
+ * W1-T12838: each reading names its corpus span ({@link ledgerCorpusSpan}); activity is {@link unionTaskActivity}.
  */
 export function productionMechanicalPort(opts: {
   repoRoot: string;
@@ -38922,6 +38923,8 @@ export function productionMechanicalPort(opts: {
       const scoutSteps = [...new Set(tasks.flatMap((t) => (t.origin?.startsWith("scout:") ? [t.origin.slice("scout:".length)] : [])))];
       let scoutRows: readonly Record<string, unknown>[] | undefined;
       let ciRounds: ReturnType<typeof ciFrictionRoundsFromLedger> | undefined;
+      let span: { value: SymptomReading["corpus"] } | undefined;
+      const corpus = (): Pick<SymptomReading, "corpus"> => (span ??= { value: ledgerCorpusSpan(opts.stateDir, nowMs) }).value === undefined ? {} : { corpus: span.value };
       // ledger-read-intent: live — a decline or restore the receipts store has not retained yet.
       const declinedOf = declinedWithReceipts(readLedgerLines(ledgerPath) as unknown as Record<string, unknown>[], opts.stateDir);
       return {
@@ -38935,7 +38938,7 @@ export function productionMechanicalPort(opts: {
             }
             const step = origin.slice("scout:".length);
             const filing = filingEvidenceOf(task, SCOUT_WINDOW_MS);
-            return { ...countStepRows(scoutRows, step, nowMs, SCOUT_WINDOW_MS), ...(filing ? { filing } : {}) };
+            return { ...countStepRows(scoutRows, step, nowMs, SCOUT_WINDOW_MS), ...(filing ? { filing } : {}), ...corpus() };
           }
           const cause = parseCiFrictionOrigin(origin);
           if (cause === undefined) return undefined;
@@ -38943,9 +38946,10 @@ export function productionMechanicalPort(opts: {
           const filing = filingEvidenceOf(task, CI_FRICTION_HALF_LIFE_MS);
           const matches = (r: { cause: Parameters<typeof ciFrictionCauseKey>[0]; pr: number; evidence?: Parameters<typeof ciFrictionRoundMatchesCause>[0]["evidence"] }): boolean =>
             ciFrictionRoundMatchesCause({ pr: r.pr, causeKey: ciFrictionCauseKey(r.cause), ...(r.evidence ? { evidence: r.evidence } : {}) }, cause.key);
-          return { ...countRounds(ciRounds, matches, nowMs, CI_FRICTION_HALF_LIFE_MS), ...(filing ? { filing } : {}) };
+          return { ...countRounds(ciRounds, matches, nowMs, CI_FRICTION_HALF_LIFE_MS), ...(filing ? { filing } : {}), ...corpus() };
         },
         declined: (task) => declinedOf(`machine-judge:${task.id}`) !== undefined || declinedOf(`verify-human:${task.id}`) !== undefined,
+        activity: unionTaskActivity(reader, opts.stateDir, new Set(tasks.map((t) => t.id))),
       };
     },
     release: (task, provenance) => approveParkedTask(task.id, {
