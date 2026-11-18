@@ -1607,6 +1607,7 @@ import {
   readRiskPolicy,
   realRiskJudge,
   resolveRiskJudgeMount,
+  resolveRiskJudgeRoleMount,
   riskJudgeDiffInputBudget,
   riskJudgePlanContext,
   riskJudgePlanContextDigest,
@@ -2775,8 +2776,8 @@ export function codeScanningJudgeDeps(
               hooksDir: join(resolveInstallRoot(config), "hooks"),
               outPath: join(config.root, "tmp", `risk-judge-settings-${runId}.json`),
             });
-            const mount = resolveRiskJudgeMount(loadMounts(mountsPath(repoRoot)));
-            return realRiskJudge({ mount, cwd: config.root, settingsFile, spawn, spend })(input);
+            const mount = resolveRiskJudgeRoleMount(loadMounts(mountsPath(repoRoot)));
+            return realRiskJudge({ mount, cwd: config.root, settingsFile, spawn, spend, shadowLog: log })(input);
           },
           escalate: () => "",
         },
@@ -2831,7 +2832,7 @@ export function handedOffHeadRiskJudge(
         diffSource: {
           read: readViewOnce,
           inputBudgetChars: (tier1Chars) =>
-            riskJudgeDiffInputBudget(resolveRiskJudgeMount(loadMounts(mountsPath(repoRoot))))(tier1Chars),
+            riskJudgeDiffInputBudget(resolveRiskJudgeRoleMount(loadMounts(mountsPath(repoRoot))))(tier1Chars),
         },
         judge: async (input) => {
           const settingsFile = renderWorkerSettings({
@@ -2839,9 +2840,9 @@ export function handedOffHeadRiskJudge(
             hooksDir: join(resolveInstallRoot(config), "hooks"),
             outPath: join(config.root, "tmp", `risk-judge-settings-${runId}.json`),
           });
-          const mount = resolveRiskJudgeMount(loadMounts(mountsPath(repoRoot)));
+          const mount = resolveRiskJudgeRoleMount(loadMounts(mountsPath(repoRoot)));
           const judged = { ...input, change: { ...input.change, changeView: withoutRiskJudgePatches(await readViewOnce()) } };
-          return realRiskJudge({ mount, cwd: config.root, settingsFile, spawn, spend, signal })(judged);
+          return realRiskJudge({ mount, cwd: config.root, settingsFile, spawn, spend, signal, shadowLog: log })(judged);
         },
         escalate: (verdict, action) =>
           escalateImpl(
@@ -28114,6 +28115,7 @@ export function plainInboxWriter(
       mount: resolveDecisionSummaryMount(loadMounts(mountsPath(repoRoot))),
       cwd: config.root,
       settingsFile,
+      shadowLog: log,
     });
   } catch (e) {
     log("inbox.plain_writer_unavailable", { error: String((e as Error)?.message ?? e) });
@@ -30733,7 +30735,8 @@ export async function serveCommand(
   // `boardGithubRefreshMs` below so the cache's own staleness bound and the background prewarm
   // cadence never drift apart.
   const boardPacer = deps.boardPacer ?? createGhCallPacer();
-  const serveBoardSnapshot = createBoardSnapshotCache(config.root, self.owner, self.repo, { log });
+  // W1-T13332: serve's board pass runs on its request loop, so the snapshot file is written behind the commit.
+  const serveBoardSnapshot = createBoardSnapshotCache(config.root, self.owner, self.repo, { log, writeBehind: true });
   const boardGithub = (deps.buildBatchedGithub ?? buildBatchedGithub)(self.owner, self.repo, {
     log,
     pacer: boardPacer,
@@ -36053,6 +36056,7 @@ async function triageCommandLocked(
       cwd: worktreePath,
       settingsFile,
       spawn,
+      shadowLog: log,
     }),
   };
 
@@ -37149,6 +37153,7 @@ export async function planCommand(
             cwd: worktreePath,
             settingsFile,
             spawn,
+            shadowLog: log,
           }),
         });
         log("plan.grill_opened", { issue_url: issueUrl });
@@ -39038,7 +39043,8 @@ export function productionVerifyHumanRelease(
     }
   });
   const riskJudge = (input: RiskJudgeInput): Promise<RiskJudgeVerdict> => {
-    judge ??= realRiskJudge({ mount: resolveRiskJudgeMount(loadMounts(mountsPath(checkoutRoot))), cwd: checkoutRoot, settingsFile: join(checkoutRoot, "settings", "worker.json"), spawn: options.spawn ?? ledgeredNonDispatchSpawn("risk-judge") });
+    judge ??= realRiskJudge({ mount: resolveRiskJudgeRoleMount(loadMounts(mountsPath(checkoutRoot))), cwd: checkoutRoot, settingsFile: join(checkoutRoot, "settings", "worker.json"), spawn: options.spawn ?? ledgeredNonDispatchSpawn("risk-judge"),
+      shadowLog: (step, fields) => appendLedger(ledgerPath, { run_id: runId, task_id: runId, step, ...fields }) });
     return judge(input);
   };
   return async (shard, verdict) => {
@@ -44601,7 +44607,7 @@ export { buildEngineAfterStore };
 import { RUN_CHILD_FALLBACK_STEP, chainAbortSignal, createDetachedWorkHost, reviewerCodeStartGate, runChildModeIsOn, runDetachedReview, spawnRunChild, type DetachedReviewCommand, type DetachedWorkSpec,
   type FreshTreeEntry, type FreshTreeExit, type FreshTreeReview, type ReviewerCodeStartGate, type RunChildHandle, type RunChildPending, type SpawnRunChildPorts } from "./lib/run-child.js";
 export type { FreshTreeEntry, FreshTreeExit } from "./lib/run-child.js";
-import { createSweepFixAdmissionController, productionFixAdmissionResidents, installDetachedWorkHost, readFixDispatchEnvelope, runFixDispatchChild, type FixDispatchChildPorts } from "./lib/sweep.js";
+import { createSweepFixAdmissionController, productionFixAdmissionResidents, installDetachedWorkHost, readFixDispatchEnvelope, runFixDispatchChild, timedFixStage, type FixDispatchChildPorts } from "./lib/sweep.js";
 import { classEstimate, classTypical } from "./lib/host-memory-learning.js";
 import { type RunChildMode } from "./lib/policy.js";
 import {
@@ -45726,12 +45732,16 @@ async function runFixDispatchWork(work: DetachedWorkSpec, ctx: { runId: string; 
   const log = (step: string, extra: Record<string, unknown> = {}): void => {
     appendLedger(ledgerPath(), { run_id: ctx.runId, task_id: ctx.taskId, step, lane: "sweep-fix", ...extra });
   };
+  // W1-T13427: the steps only this function sees, timed on the same clock and sink as the child's own.
+  const stageClock = (): number => performance.now();
+  const timed = <T>(stage: string, run: () => T): T =>
+    envelope === undefined ? run() : timedFixStage(ports.log ?? log, stageClock, envelope.pr, stage, run);
   let planMemo: ReturnType<typeof loadPlan> | undefined;
   const planNow = (): Plan => {
     if (planMemo) return planMemo;
     const planPath = ports.planPath ?? (ownerName() === self().owner && repoName() === self().repo
       ? join(repoRoot, "plan", "tasks.yaml") : join(cfg().root, "repos", repoName(), "plan", "tasks.yaml"));
-    const synced = syncPlanOrRefuse(planPath, { allowStale: false, log: ports.log ?? log, say: () => {}, planSnapshot: ports.planSnapshot });
+    const synced = timed("child-plan-sync", () => syncPlanOrRefuse(planPath, { allowStale: false, log: ports.log ?? log, say: () => {}, planSnapshot: ports.planSnapshot }));
     if ("error" in synced) throw new Error(synced.error);
     return planMemo = synced.plan;
   };
@@ -45739,10 +45749,12 @@ async function runFixDispatchWork(work: DetachedWorkSpec, ctx: { runId: string; 
   let childPauseGit: SharedPauseGitDeps | undefined;
   if (envelope !== undefined && !ports.hold && stopDetail(cfg().root) === undefined) {
     childPauseGit = ports.sharedPauseGit ?? realDeps().sharedPauseGit;
-    await prepareSharedPause(cfg().root, childPauseGit);
+    const pauseGit = childPauseGit;
+    await timed("child-shared-pause", () => prepareSharedPause(cfg().root, pauseGit));
   }
   await runFixDispatchChild(inputs, {
     log: ports.log ?? log,
+    stageClock,
     claimFixAdmission: ports.claimFixAdmission ?? ((pr) => createSweepFixAdmissionController({
       surface: "full", queueDepth: 1, hostWorkerBudget: DEFAULT_SWEEP_POLICY.reviewCapacity.hostWorkerBudget,
       activeWorkers: activeWorkerCount(), readActiveWorkers: activeWorkerCount, reviewReservations: 0,
@@ -45768,10 +45780,10 @@ async function runFixDispatchWork(work: DetachedWorkSpec, ctx: { runId: string; 
       const plan = planNow();
       const task = plan.byId.get(taskId);
       if (task === undefined) return { found: false };
-      projection ??= projectPlan(plan, { ledgerPath: ledgerPath(), github: ports.github ?? buildBatchedGithub(ownerName(), repoName()) });
+      projection ??= timed("child-plan-projection", () => projectPlan(plan, { ledgerPath: ledgerPath(), github: ports.github ?? buildBatchedGithub(ownerName(), repoName()) }));
       const status = projection.get(taskId);
       if (!status || status.indeterminate) throw new Error(`task ${taskId}'s merge projection is unreadable`);
-      const digest = riskJudgePlanContextDigestFor(plan)({ taskId });
+      const digest = timed("child-context-digest", () => riskJudgePlanContextDigestFor(plan)({ taskId }));
       return { found: true, merged: status.merged,
         retired: task.status === "blocked" && task.retirement !== undefined, ...(digest === undefined ? {} : { contextDigest: digest }) };
     },

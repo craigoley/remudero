@@ -839,8 +839,8 @@ interface CodexModelListResult {
  * Real routing uses {@link CapabilityLadder.codex}; missing data preserves fail-soft dispatch. */
 const FALLBACK_CODEX_MODELS: Record<CodexModelTier, string[]> = {
   economy: ["gpt-6-luna", "gpt-5.6-luna", "gpt-5.3-codex-spark", "gpt-5.4-mini"],
-  balanced: ["gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol"],
-  frontier: ["gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol", "gpt-5.5"],
+  balanced: ["gpt-6.2-sol", "gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol"],
+  frontier: ["gpt-6.2-sol", "gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol", "gpt-5.5"],
 };
 const SAFE_CODEX_MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,95}$/;
 // Same deployment-id grammar as Codex. The Azure deployment id reaches a URL path, so accepting
@@ -3091,7 +3091,7 @@ function codexWriterProfileArgs(nativeCacheRoot: string | undefined, env: NodeJS
 
 function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<ProviderCapacity, "model" | "effort">, privateProfile?: PrivateRegistryCodexProfile, nativeCacheRoot?: string): string[] {
   const model = selection?.model ?? config.workerProviders?.codexModel;
-  // Never unnamed: with no --model, Codex runs the ACCOUNT default, which is gpt-6-astra (2026-09-22).
+  // Never unnamed: with no --model, Codex runs the ACCOUNT default, which is gpt-6.2-sol (2026-11-17).
   if (!model) throw new Error("refusing a Codex spawn with no model: the account default would run unreviewed");
   assertModelAllowed(model, config);
   const effort = selection?.effort === "default" ? undefined : selection?.effort;
@@ -3600,6 +3600,8 @@ export const OPENWEIGHT_PRICES: Readonly<Record<string, OpenWeightPrice>> = {
 /** Codex analytics only; these rows never admit a cash deployment (W1-T5664). */
 export const CODEX_NOTIONAL_PRICES: Readonly<Record<string, OpenWeightPrice>> = {
   ...OPENWEIGHT_PRICES,
+  // OpenAI's GPT-6.2 Sol announcement, 2026-11-17: the API keeps 6.1 Sol's base prices.
+  "gpt-6.2-sol": { inputUsdPerMillion: 2, outputUsdPerMillion: 10, cachedInputUsdPerMillion: 0.1, readAt: "2026-11-17" },
   // https://developers.openai.com/api/docs/models/gpt-6-sol
   "gpt-6-sol": { inputUsdPerMillion: 2, outputUsdPerMillion: 10, cachedInputUsdPerMillion: 0.2, readAt: "2026-10-08" },
   // https://developers.openai.com/api/docs/models/gpt-5.6-sol

@@ -631,6 +631,12 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   if (input.files.has(ciFrictionNoOwner) && files.some((f) => ciFrictionNoOwnerEdges.includes(f))) {
     pathReaders.push(ciFrictionNoOwner);
   }
+  // W1-T10111: coverage run 39071533441 (c5782eda9e6a) failed on this suite and the selector missed it.
+  const resolverDivergence = suitePath("test/resolver-divergence-detector.test.ts");
+  const resolverDivergenceEdges = ["src/lib/proof-amendment.ts", "src/run-task.ts"];
+  if (input.files.has(resolverDivergence) && files.some((f) => resolverDivergenceEdges.includes(f))) {
+    pathReaders.push(resolverDivergence);
+  }
   // W1-T6338: preserve the recorded dashboard/settings miss beyond the narrow arm's symbol reach.
   const viewSchemas = suitePath("test/every-view-body-matches-its-schema.test.ts");
   const viewSchemaEdges = ["src/lib/repo-dashboard-route.ts", suitePath("test/repo-settings-report-their-effective-values.test.ts")];

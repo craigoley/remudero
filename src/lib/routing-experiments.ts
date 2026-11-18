@@ -29,6 +29,17 @@ export interface RoutingExperiment {
   decision: { minimumDifference: number; power: number; confidence: number; stopOn: string };
 }
 
+function solVsSonnetEpochs(arm: string, codexModel: RegExp, startedOn: string): RoutingExperiment[] {
+  return ["claude-sonnet-5-5", "claude-sonnet-5"].map((model) => ({
+    id: `${arm}-vs-${model === "claude-sonnet-5-5" ? "sonnet55" : "sonnet5"}`,
+    capability: "balanced", effort: "high",
+    arms: { claude: "sonnet", codex: arm },
+    claudeModel: new RegExp(`^${model}$`), codexModel,
+    startedOn, revisitOn: startedOn, reviewCadence: "daily" as const, minTasksPerArm: 20,
+    decision: { minimumDifference: 0.1, power: 0.8, confidence: 0.95, stopOn: "2026-12-10" },
+  }));
+}
+
 export const ROUTING_EXPERIMENTS: readonly RoutingExperiment[] = [
   {
     id: "sol-vs-sonnet",
@@ -55,14 +66,9 @@ export const ROUTING_EXPERIMENTS: readonly RoutingExperiment[] = [
     minTasksPerArm: 20,
     decision: { minimumDifference: 0.1, power: 0.8, confidence: 0.95, stopOn: "2026-12-10" },
   },
-  ...["claude-sonnet-5-5", "claude-sonnet-5"].map((model) => ({
-    id: model === "claude-sonnet-5-5" ? "sol61-vs-sonnet55" : "sol61-vs-sonnet5",
-    capability: "balanced", effort: "high",
-    arms: { claude: "sonnet", codex: "sol61" },
-    claudeModel: new RegExp(`^${model}$`), codexModel: /^gpt-6\.1-sol$/,
-    startedOn: "2026-10-02", revisitOn: "2026-10-02", reviewCadence: "daily" as const, minTasksPerArm: 20,
-    decision: { minimumDifference: 0.1, power: 0.8, confidence: 0.95, stopOn: "2026-12-10" },
-  })),
+  // Each concrete Sol starts its own epoch against both Sonnets, read against one standard (W1-T13445).
+  ...solVsSonnetEpochs("sol61", /^gpt-6\.1-sol$/, "2026-10-02"),
+  ...solVsSonnetEpochs("sol62", /^gpt-6\.2-sol$/, "2026-11-17"),
   ...["low", "medium", "high"].map((effort) => ({
     id: `haiku55-vs-luna6-${effort}`, capability: "economy", effort,
     arms: { claude: "haiku55", codex: "luna6" },

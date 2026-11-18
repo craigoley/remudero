@@ -82,6 +82,18 @@ type SeedRow = Omit<LedgerStepRow, "family">;
 // `src/lib/review.ts`, `src/lib/sweep.ts` and `src/lib/panel-actions.ts` at 2026-09-07.
 const SEED_ROWS: readonly SeedRow[] = [
   {
+    step: "judge_shadow.compared",
+    meaning: "After the risk judge or the decision summary answered, the same prompt went once to a cash model in shadow and a reply came back. The row holds the role, both models and the cost of each call. A risk judge row also holds both answers and whether they agree; a decision summary row holds whether the reply parses and no agreement. Nothing acts on the row except the summary the config gardener reads.",
+    writer: ["shadowJudgeCall"],
+    outcomes: ["agreement true", "agreement false", "parses true", "parses false"],
+  },
+  {
+    step: "judge_shadow.skipped",
+    meaning: "The cash shadow of a risk judge or decision summary answer gave nothing to compare: the daily cash cap or a capacity limit refused it before any request (the row has a refusal), or the call failed, timed out or gave no usable answer. The row holds the reason. The role's own answer is unchanged.",
+    writer: ["shadowJudgeCall"],
+    outcomes: ["refusal budget", "refusal capacity", "failed", "unparseable"],
+  },
+  {
     step: "git.dangling_ref_repaired",
     meaning: "A fetch through the git leaf or the fetch retry failed because a tracking ref named an object the clone lacks. The fetch refetched that one branch, or removed the tracking ref of a branch the remote no longer has (only while it still held the missing id), and then ran the fetch once more. One row per ref, with the clone, the ref, how and the milliseconds the repair took.",
     writer: ["danglingRefRepairPlan"],
@@ -592,6 +604,36 @@ const SEED_ROWS: readonly SeedRow[] = [
       "other_route",
       "not_granted",
     ],
+  },
+  {
+    // W1-T13410: the gardener raises refs of the install clone that name an object the clone lacks.
+    step: "host_resource.clone_refs_unresolvable",
+    meaning:
+      "A host's beat counted refs of its install clone that name an object the clone lacks, so a fetch there " +
+      "fails. One escalation was raised for this episode. `count`, `first` and `install_dir` are from the beat; " +
+      "`issue_url` is the escalation.",
+    writer: ["observeCloneHealth"],
+    outcomes: ["raised"],
+  },
+  {
+    step: "host_resource.clone_refs_recovered",
+    meaning: "A beat counted 0 refs that name a missing object after an escalation was raised. The episode ends.",
+    writer: ["observeCloneHealth"],
+    outcomes: ["recovered"],
+  },
+  {
+    step: "host_resource.clone_gc_disabled",
+    meaning:
+      "The install clone's .git/gc.log has stayed with the same reason across beats that span 30 minutes, so " +
+      "automatic gc does not run. One escalation was raised. `since` is the beat that first showed the reason.",
+    writer: ["observeCloneHealth"],
+    outcomes: ["raised"],
+  },
+  {
+    step: "host_resource.clone_gc_recovered",
+    meaning: "A beat read gc_verdict=ok after a gc.log escalation was raised. The episode ends.",
+    writer: ["observeCloneHealth"],
+    outcomes: ["recovered"],
   },
 ];
 

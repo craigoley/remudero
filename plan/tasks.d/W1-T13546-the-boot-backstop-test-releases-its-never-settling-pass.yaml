@@ -1,0 +1,53 @@
+- id: W1-T13546
+  title: "The boot backstop test settles its never-settling first pass, so a pooled test process gets its dispatch ticker back"
+  repo: remudero
+  depends_on: []
+  priority: 0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # one test file, but it pins a daemon (src/lib/daemon.ts) ticker contract, two concerns by Rule 19; no source change
+  origin: "operator-session#ci-shard-3-hang-2026-11-17"
+  files:
+    - test/a-boot-reviews-before-it-runs-its-cadences.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A daemon booted in the same process after the boot backstop test still runs its own dispatch ticker and ledgers a dispatch heartbeat"
+      proof: "grep: W1-T13546 criterion 1 in test/a-boot-reviews-before-it-runs-its-cadences.test.ts"
+    - claim: "invariant:backstop-still-proven — the backstop test still asserts that the backstop, not the pass's own bound, opened the gate while the pass was in flight"
+      kind: guard
+      proof: "grep: the backstop, not the pass's own wall-clock bound, released the gate in test/a-boot-reviews-before-it-runs-its-cadences.test.ts"
+  rationale: |
+    OBSERVED 2026-11-17: since #19184 added a test file and rebalanced the fast tier, ci-shard (3/8) runs until it is
+    cancelled at about 35 minutes, on main (run 44195331261, c287903b2) and on every PR (#19227). Other shards end in
+    4 to 9 minutes. On c287903b2, `node scripts/test-tier-manifest.mjs --run fast --shard 3/8` reproduces it in a
+    cloud container: the shard's 331-file pool runs in one process (--experimental-test-isolation=none), both W1-T3181
+    tests in test/a-detached-retro-does-not-steal-the-dispatch-ticker.test.ts fail with "fixture timed out waiting
+    for both pre-dispatch clocks", and from then on every test that calls drainDetachedSweepActions() with no bound
+    times out at 120 s (W1-T4943, W1-T8086, the stood-down fix rung, and more).
+    OBSERVED by bisecting the pool: the T3181 file fails when it shares a process with
+    test/a-boot-reviews-before-it-runs-its-cadences.test.ts, and only with its test "a first full pass that never
+    settles releases the tick-1 cadences at the backstop bound". Alone, each file passes. That test hands runDaemon
+    `new Promise(() => {})` as its first full pass. The pass holds startInFlightTicker's process-wide
+    inFlightTickerOwner in src/lib/daemon.ts forever, so the next daemon in the process finds the ticker taken and never
+    starts its own clock. T3181's fixture then throws before it settles its retro, and the retro's detached action
+    never settles, so every later unbounded drain waits on it. A probe in the W1-T4943 test listed the waiting action
+    as `{what: detached, kind: retro, task_id: DAEMON, phase: best-effort}`.
+    OBSERVED: a pool of only these two files fails the T3181 test, and passes once the backstop test settles its pass.
+    The two files were in different shards before #19184's rebalance, and are both in shard 3 on origin/main
+    73fdd456e. Settling the pass is enough to make that pool pass.
+  design: |
+    In the backstop test, replace the never-settling promise with one the test settles itself. Keep every existing
+    assertion, which runs while the pass is still in flight, and settle the pass in a finally block. Then wait, in
+    bounded scheduler turns, until the fixture records first-pass-settled, so the abandoned pass's stop releases the
+    in-flight ticker before the test ends.
+    Add a test after it in the same file. It boots a daemon with a sweepLight, holds its one lane until that daemon's
+    log has a daemon.alive row with phase dispatch (or 5 s pass), and asserts that row and at least one light pass.
+    Node runs a file's tests in order, so this test fails while the backstop test leaks its pass (verified: 1 failing
+    test with the old backstop test, 0 with the fix).
+    Out of scope, for a separate task: the W1-T3181 fixture leaks its detached retro when it throws, and a bare
+    drainDetachedSweepActions() has no bound, so one failing fixture costs a pooled shard 120 s per later drain.
+    INVARIANT backstop-still-proven: the backstop test still asserts that the gate opened by trigger backstop while
+    the pass was in flight, before the test settles the pass.
