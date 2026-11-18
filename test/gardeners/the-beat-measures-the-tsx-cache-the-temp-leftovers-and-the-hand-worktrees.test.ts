@@ -84,10 +84,15 @@ case "$p" in
   *) device=/dev/root ;;
 esac
 printf 'Filesystem 1024-blocks Used Available Capacity Mounted\\n%s 100000 1000 99000 1%% /\\n' "$device"`);
+    // One du may walk several entries of a root (W1-T13190): record every path argument, in order,
+    // and stall on the slow one so nothing after it in the same walk is recorded either.
     stub("du", `
+for p in "$@"; do
+  case "$p" in -*) continue ;; esac
+  printf '%s\\n' "$p" >> "$FIXTURE/walks"
+  if [ "$p" = "$FIXTURE/\${SLOW:-never}" ]; then touch "$FIXTURE/budget-spent"; sleep 10; fi
+done
 p="\${@: -1}"
-printf '%s\\n' "$p" >> "$FIXTURE/walks"
-if [ "$p" = "$FIXTURE/\${SLOW:-never}" ]; then touch "$FIXTURE/budget-spent"; sleep 10; fi
 case "$p" in
   "$FIXTURE"/account-tmp/*|"$FIXTURE"/system-tmp/*|"$FIXTURE"/scratch-tmp/*|"$HOME"/rmd-work)
     command -p du "$@" ;;
