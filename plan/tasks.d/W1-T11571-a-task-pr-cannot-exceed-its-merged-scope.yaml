@@ -61,12 +61,13 @@
     5. Exercise the real event/default path against temporary Git ranges as well as the pure
        predicate. Prove the exact #17090 shape refuses, an actually merged scope amendment admits
        the added path, a PR-local widening does not, and unreadable evidence cannot pass.
+    INVARIANT legacy-output: Plan-only amendments, non-task PRs, explicit dependency-bot exemptions and fully in-scope task PRs keep their supported gate outcomes.
   acceptance:
     - claim: A task implementation PR with any undeclared changed path is refused by the required gate and the diagnostic names every offending path.
       proof: "unit test: W1-T11571 criterion 1 names every undeclared task path"
     - claim: Only a separately merged task scope amendment admits an added implementation path; an unmerged PR-local widening does not.
       proof: "unit test: W1-T11571 criterion 2 trusts only scope merged before the PR"
-    - claim: Plan-only amendments, non-task PRs and fully in-scope task PRs retain their supported gate outcomes.
+    - claim: Plan-only amendments, non-task PRs and fully in-scope task PRs retain their supported gate outcomes. invariant:legacy-output
       proof: "unit test: W1-T11571 criterion 3 preserves the supported gate outcomes"
     - claim: An identified task with unreadable scope or an incomplete changed-path census fails closed, while absence of a task identity is not misclassified as a task PR.
       proof: "unit test: W1-T11571 criterion 4 refuses unknown evidence for a canonical task"
