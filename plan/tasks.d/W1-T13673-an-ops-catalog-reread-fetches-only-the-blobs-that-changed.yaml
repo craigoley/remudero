@@ -1,0 +1,116 @@
+- id: W1-T13673
+  title: "An ops catalog reread fetches only the blobs that changed, so each ops merge stops costing every reader about 180 core reads"
+  repo: remudero
+  depends_on: []
+  priority: 1.4
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # every ops task lookup, serve board read and dispatch shadow read goes through this reader; a wrong kept blob would serve a wrong task
+  band_meaning: blast-radius
+  origin: "operator-session#github-budget-2026-11-18"
+  plan_refs:
+    - W1-T11768
+    - W1-T12207
+    - W1-T13052
+    - W1-T13330
+    - W1-T13618
+    - W1-T12892
+  files:
+    - src/lib/ops-catalog-source.ts
+    - test/github/an-ops-catalog-reread-fetches-only-the-blobs-that-changed.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Two readOpsCatalogSnapshotAsync reads through one api, where between them the branch moves to a commit that changes exactly one shard, send exactly one git/blobs GET on the second read (the changed shard) and return outcome ok with the changed task"
+      proof: "grep: W1-T13673 criterion 1 in test/github/an-ops-catalog-reread-fetches-only-the-blobs-that-changed.test.ts"
+    - claim: "A second read through the same api at the same commit sends no git/blobs GET, and its task list, binding and identityDigest equal the first read's"
+      proof: "grep: W1-T13673 criterion 2 in test/github/an-ops-catalog-reread-fetches-only-the-blobs-that-changed.test.ts"
+    - claim: "invariant:same-catalog-as-a-cold-read — for the same commit, a read that uses kept blobs returns the same outcome, task list, binding and identityDigest as a read of the same answers through a new api that has kept nothing"
+      kind: guard
+      proof: "grep: W1-T13673 criterion 3 in test/github/an-ops-catalog-reread-fetches-only-the-blobs-that-changed.test.ts"
+    - claim: "invariant:only-verified-bytes — a blob answer that fails any existing check (sha, encoding, base64 shape, size, the git SHA-1) is refused exactly as on origin/main and is not kept, so the next read sends that blob's GET again; a kept blob is used only for the same api, the same repository id and the same blob sha; no blob byte is written to a file"
+      kind: guard
+      proof: "grep: W1-T13673 criterion 4 in test/github/an-ops-catalog-reread-fetches-only-the-blobs-that-changed.test.ts"
+    - claim: "invariant:refusals-unchanged — for the same answers, every outcome and refusalStage (ref_moved, auth_missing, unreadable, malformed, source_absent, duplicate_task_id) equals origin/main's; blobs verified during a read that ends ref_moved are kept, so the next read sends GETs only for blobs it has not verified"
+      kind: guard
+      proof: "grep: W1-T13673 criterion 5 in test/github/an-ops-catalog-reread-fetches-only-the-blobs-that-changed.test.ts"
+    - claim: "After an ok read, the blobs kept for that api and repository are exactly the blobs its binding names; blobs of earlier commits that the new binding does not name are dropped"
+      proof: "grep: W1-T13673 criterion 6 in test/github/an-ops-catalog-reread-fetches-only-the-blobs-that-changed.test.ts"
+    - claim: "Two readOpsCatalogSnapshotAsync calls with no api argument in one process share one default api: through the real default api and a gh shim (test/helpers/gh-shim.ts), with nothing injected in place of the kept blobs, the second call at the same commit spawns no `gh api .../git/blobs/...`"
+      proof: "grep: W1-T13673 criterion 7 in test/github/an-ops-catalog-reread-fetches-only-the-blobs-that-changed.test.ts"
+    - claim: "readBlob, the production path of every ops catalog read, consults the kept blobs"
+      proof: "grep: knownBlobText( in src/lib/ops-catalog-source.ts"
+  rationale: |
+    WHY: the fleet's GitHub App installation (155256285) has 15,000 core reads an hour, shared by the core, ops,
+    console and site daemons, serve and every run child. On 2026-11-18 it ran out in most hours: the shared count
+    was 0 at 01:01Z and 04:10Z, 913 at 01:54Z, 1,232 at 03:11Z and 1,483 at 00:07Z. Between 00:30Z and 05:00Z,
+    263 fix dispatches stood down ("act-time head unreadable on the last good open-PR list") and 5 failed ("gh
+    call pacer stood down"). The largest single spender is the ops catalog reader.
+    READ at origin/main, src/lib/ops-catalog-source.ts: read() GETs the repository, the branch ref, the commit,
+    three trees, then one git/blobs GET for plan/tasks.yaml and one for each shard in plan/tasks.d, then the ref
+    again. remudero-ops holds 175 shards today, so one read costs about 183 core reads. A blob is named by its
+    git SHA-1 and readBlob already verifies the bytes against it, so a blob read once can never change. But
+    every read after a branch move GETs all 176 blobs again, although an ops merge changes one or two shards.
+    W1-T13052, W1-T13330 and W1-T13618 made an UNCHANGED branch cheap (one ref GET). A MOVED branch still costs
+    the whole read, in each reader separately: the daemon dispatch shadow source, serve's board catalog and
+    serve's plan reload each keep their own catalog. task-lookup.ts:131 (findTaskInCatalogs) passes no api for
+    most callers, so readOpsCatalogSnapshotAsync makes a new default api and reads the whole catalog on every
+    lookup of an ops task or a task the public plan does not hold (sweep.ts:2894, run-task.ts:12385, review.ts,
+    fix.ts, status.ts).
+    MEASURED on the Azure host, 2026-11-18 11:47:14Z to 11:52:13Z: every gh process on the host, read from /proc
+    (endpoint shape and container only). 589 gh processes; 336 were GET repos/craigoley/remudero-ops/git/blobs/<sha>
+    (196 from serve, 138 from the core daemon container). In the same 5 minutes the shared core count fell from
+    7,804 to 7,122 (682 reads, from the ops daemon's daemon.quota rows). So ops catalog blob reads were about half
+    of all core reads. remudero-ops main moved at 11:45Z, 11:48Z and 11:52Z.
+    IN THE WINDOW, 2026-11-18 00:30Z to 05:00Z: remudero-ops main moved 16 times. At least six lookups failed with
+    ops-ref_moved or ops-unreadable (review.catalog.unreadable, sweep.fix.dispatch_failed "task catalog
+    unreadable: ops-ref_moved"): a paced read of 183 GETs took long enough for the branch to move under it, and
+    the next read started again from blob one. Serve's loop stall profiles name ops-catalog-source.ts in every
+    hour of the window (151 rows at 00Z, 36 to 50 an hour after).
+    NOT COUNTED: no daemon.quota row in the core, console or ops ledgers names ops-catalog-source.ts among its
+    call sites, so this spend is invisible to the per-process read tallies. That is why those tallies (core about
+    3,000 an hour, ops about 1,200, console 600 to 900, serve keep-warm 700 to 1,400) sum to well under 15,000.
+    NOT THE OPERATOR: the operator's own tools (watchmine.sh, ship.sh, waitship.sh) read with ~/.gh-token, a user
+    token with its own 5,000-an-hour limit. They do not spend the installation's reads.
+    EXPECTED SAVING: a reread after an ops merge costs about 8 core reads instead of about 183 in each long-lived
+    reader, and repeated lookups in one process cost about 7. With 16 ops merges in 4.5 hours and three or more
+    long-lived readers, plus the per-lookup reads in the daemon, that is several thousand core reads an hour.
+    W1-T12892 (queued, ETag reads) does not cover this: it skips --paginate and keys nothing on content.
+  design: |
+    INVARIANT same-catalog-as-a-cold-read: a kept blob is returned only for the exact blob sha a tree of the
+    commit being read names, and only after the bytes were verified against that sha once; so a warm read
+    returns what a cold read returns.
+    INVARIANT only-verified-bytes: nothing enters the kept blobs before every readBlob check has passed. Bytes
+    stay in memory, as the module header requires: no file, no disk cache, no other process.
+    INVARIANT refusals-unchanged: trees, commits and refs are still read on every read; only verified blob reads
+    are skipped. Every refusal path and stage is unchanged.
+    1. In src/lib/ops-catalog-source.ts keep verified blob texts per api seam: a WeakMap from the OpsCatalogApi
+       function to a Map keyed by repository id and blob sha. A test that builds a new fake api starts empty, so
+       tests stay independent without a reset export.
+    2. readBlob first calls knownBlobText(api, repositoryId, blobSha); on a hit it returns the kept text and still
+       adds the byte count to counts (so the existing size bounds still apply); on a miss it reads, verifies as
+       today, then keeps the text.
+    3. After an ok read, drop kept blobs for that api and repository that the new binding does not name. This
+       is not a cap: the kept set is the catalog the reader holds now.
+    4. readOpsCatalogSnapshotAsync and createOpsCatalogShadowSource with no api argument use one default api per
+       process (made on first use) instead of a new one per call, so every default-api reader in a process shares
+       the kept blobs and one pacer. Callers that pass their own api are unchanged.
+    5. Before building, grep test/ for files that read the same blob sha twice through ONE fake api and expect a
+       second git/blobs GET or a patched blob body on the second read (test/github/ops-catalog-source-*.test.ts,
+       test/plan/ops-catalog-*.test.ts, test/serve-revalidates-its-kept-ops-catalog-with-one-ref-read.test.ts,
+       test/a-plan-reload-revalidates-the-kept-ops-catalog.test.ts). A file outside `files` that needs a change is
+       an amendment.
+    6. Run test/github/compress-src-lib-*.test.ts for ops-catalog-source.ts if one exists, and depcruise the file.
+  falsifier: |
+    Make readBlob skip knownBlobText: criteria 1, 2 and 7 must fail. Keep a blob before its SHA-1 check: criterion 4
+    must fail. Return a kept blob for a different repository id: criterion 4 must fail. Never drop blobs the new
+    binding does not name: criterion 6 must fail. Restore and require all to pass.
+  note: |
+    Id reserved for run-unfiled-1795002579000 with ~/rmd-work/bin/reserve-id.sh.
+    The /proc sample is not stored on main. A follow-up can hand run children the parent's kept catalog; a run
+    child that looks up one task still reads the catalog once.
+    Also seen, not filed here: readEscalationAnswers (src/lib/escalation-answers.ts:713 and :784) reads comments
+    and reactions for each of 133 open needs-question issues on every full sweep pass, but 132 have no reactions
+    and 27 have no comments, which the issue list it already reads says.
