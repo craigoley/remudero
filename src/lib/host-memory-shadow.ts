@@ -44,6 +44,7 @@ import {
   DEFAULT_ESTIMATE_MIB,
   WORKER_CLASSES,
   defaultInstance,
+  heldOnlyForOrphans,
   parseProcStat,
   readMemoryLedger,
   type EstimateSource,
@@ -249,8 +250,9 @@ export interface ShadowEntryInput {
   estimateSource: EstimateSource;
   status: ReadingStatus;
   walkComplete: boolean | null;
-  /** The tree's current rss+swap, or why it could not be read (then the full estimate counts). */
-  resident: { mib: number; rssMib?: number; complete: boolean; reason?: string } | { unread: string };
+  /** The tree's current rss+swap, or why it could not be read (then the full estimate counts). `basis: "orphans"`
+   *  (W1-T13658): the read covered a finished, held entry's recorded orphans, not its gone tree. */
+  resident: { mib: number; rssMib?: number; complete: boolean; reason?: string; basis?: "orphans" } | { unread: string };
   /** Since the reservation opened. W1-T7095 reads it to tell a review started since its demand row was published. */
   ageMs?: number;
   /** Its work has ended: what its tree still holds is resident, and it can claim nothing more. */
@@ -561,6 +563,9 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
     }
     // A released occupancy's tree can only shrink: its resident memory is already measured, so it claims nothing more.
     const released = entry.occupancyReleased === true;
+    // W1-T13658: a finished entry held only for its orphans is charged what they measure, never more than the margin.
+    const orphanCharge = released && "mib" in entry.resident && entry.resident.basis === "orphans" && entry.resident.complete
+      ? Math.min(margin, entry.resident.mib) : undefined;
     const decay = decayOf(entry.survival, released, entry.ageMs);
     const { share, typical, charged, chargedTail } = claim(entry.estimateMib, entry.typicalMib, resident, released, decay.factor ?? 1);
     unrealized += share;
@@ -585,7 +590,7 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
         chargedMib: charged, decay, ageMs: entry.ageMs ?? null });
     }
     if (entry.estimateSource.kind === "default-unmeasured" && !released) widen("unmeasured-estimate", margin, entry.id);
-    if (entry.status === "uncertain") widen("uncertain-entry", margin, entry.id);
+    if (entry.status === "uncertain") widen("uncertain-entry", orphanCharge ?? margin, entry.id);
     if (entry.walkComplete === false) widen("incomplete-walk", margin, entry.id);
   }
   const startSeen = inputs.start.reservationId !== undefined &&
@@ -1754,18 +1759,22 @@ function readLedgerState(ports: ShadowMemoryPorts, root: string): { reading?: Ho
 
 const identityKey = (p: ProcessIdentity): string => `${p.pid}:${p.start}`;
 
-/** One recorded tree's identities (roots first, deduplicated), or why its entry file could not be read. */
-function recordedTree(read: ShadowMemoryPorts["readFile"], entryPath: string): { roots: ProcessIdentity[]; tree: ProcessIdentity[] } | { unread: string } {
+/** One recorded tree's identities (roots first, deduplicated), or why its entry file could not be read. A finished entry
+ *  held only for its orphans (W1-T13658) reads as its orphans: its recorded tree is verified gone. */
+function recordedTree(read: ShadowMemoryPorts["readFile"], entryPath: string):
+  { roots: ProcessIdentity[]; tree: ProcessIdentity[]; orphans?: true } | { unread: string } {
   try {
-    const parsed = JSON.parse(read(entryPath)) as { tree?: ProcessIdentity[]; roots?: ProcessIdentity[] };
+    const parsed = JSON.parse(read(entryPath)) as { tree?: ProcessIdentity[]; roots?: ProcessIdentity[] } &
+      Parameters<typeof heldOnlyForOrphans>[0];
+    const orphans = heldOnlyForOrphans(parsed);
     const seen = new Set<string>();
-    const tree = [...(parsed.roots ?? []), ...(parsed.tree ?? [])].filter((p) => {
+    const tree = (orphans ? parsed.orphans! : [...(parsed.roots ?? []), ...(parsed.tree ?? [])]).filter((p) => {
       const key = identityKey(p);
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
     });
-    return { roots: parsed.roots ?? [], tree };
+    return orphans ? { roots: [], tree, orphans: true } : { roots: parsed.roots ?? [], tree };
   } catch (error) {
     const reason = reasonOf(error);
     return { unread: reason };
@@ -1799,18 +1808,21 @@ export function residentsOf(
     }
     const own = t.tree.filter((p) => !counted.has(identityKey(p)));
     for (const p of own) counted.add(identityKey(p));
-    out[i] = treeResident(read, own, budget, options.includeRss === true);
+    out[i] = t.orphans ? { ...treeResident(read, own, budget, options.includeRss === true, true), basis: "orphans" }
+      : treeResident(read, own, budget, options.includeRss === true);
   }
   return out;
 }
 
-/** rss+swap of one recorded tree, verifying each (pid, start) so a reused pid is never counted. */
+/** rss+swap of one recorded tree, verifying each (pid, start) so a reused pid is never counted. `strict` (an orphan
+ *  read, W1-T13658): a process that is there but cannot be read makes the reading partial instead of counting nothing. */
 function treeResident(
   read: ShadowMemoryPorts["readFile"],
   tree: readonly ProcessIdentity[],
   budget: { left: number },
   includeRss: boolean,
-): ShadowEntryInput["resident"] {
+  strict = false,
+): { mib: number; rssMib?: number; complete: boolean; reason?: string } {
   let kb = 0;
   let rssKb = 0;
   let rssComplete = true;
@@ -1830,6 +1842,7 @@ function treeResident(
       void error; // Gone between the listing and the read: it holds nothing now.
     }
   }
+  if (strict && !rssComplete) return { mib: kb / 1024, complete: false, reason: "an orphan's rss or swap is unreadable" };
   return { mib: kb / 1024, complete: true, ...(includeRss && rssComplete ? { rssMib: rssKb / 1024 } : {}) };
 }
 
