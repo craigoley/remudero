@@ -224,7 +224,8 @@ import {
   type CaptureSurfaceFireRecord,
 } from "./lib/doctor.js";
 import { execFile, execFileSync, spawn, spawnSync, type SpawnSyncOptionsWithStringEncoding, type SpawnSyncReturns } from "node:child_process";
-import { boundChildByLoopTime, execFileLoopBounded, LoopBoundedChildTimeout, type LoopBound } from "./lib/loop-bounded-child.js";
+import { boundChildByLoopTime, LoopBoundedChildTimeout, type LoopBound } from "./lib/loop-bounded-child.js";
+import { execFileRouted } from "./lib/spawn-helper.js";
 import { isDeepStrictEqual, promisify } from "node:util";
 import { StringDecoder } from "node:string_decoder";
 import { mkdir as mkdirAsync, open as openAsync, readdir as readdirAsync, readFile as readFileAsync, rm as rmAsync, stat as statAsync } from "node:fs/promises";
@@ -1400,6 +1401,7 @@ import {
   type StaleFixDispatchShadow,
 } from "./lib/stale-fix-dispatch-recovery.js";
 import { prStateCommand } from "./lib/pr-state.js";
+import { previewPlanTaskMigration } from "./lib/plan-task-migration.js";
 import { auditLedgerUnion, createIncrementalLedgerUnion, createSizedMemo, ledgerRowsFor, readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, readValidatedRotationDigest, realLedgerFs, type LedgerUnionRecordRead } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
 // (W1-T2888), which imports it directly.
@@ -11413,7 +11415,7 @@ const COVERAGE_RUN_MAX_BUFFER = 64 * 1024 * 1024;
 const coverageSandboxText = (reason: unknown): string => new ProofSandboxUnavailableError(String((reason as Error)?.message ?? reason).slice(0, 300)).message;
 const coverageSandboxRefusal = (reason: unknown): CoverageRunResult => ({ status: null, output: "", timedOut: false, spawnError: coverageSandboxText(reason) });
 const coverageSandboxStart = (binary: string, sandbox: string[], cwd: string, env: NodeJS.ProcessEnv): Promise<string | undefined> =>
-  execFileLoopBounded(binary, [...sandbox, process.execPath, "-e", ""], { cwd, env, encoding: "utf8", timeout: 10_000, killSignal: "SIGKILL" }).then(
+  execFileRouted(binary, [...sandbox, process.execPath, "-e", ""], { cwd, env, encoding: "utf8", timeout: 10_000, killSignal: "SIGKILL" }).then(
     () => undefined, (error: { stderr?: unknown; message: string }) => String(error.stderr ?? "").trim().split("\n")[0] || error.message);
 const realCoverageRun = async (wt: string, suites: string[], timeoutMs: number, maxOutputBytes: number): Promise<CoverageRunResult> => {
   const status = proofSandboxStatus();
@@ -16014,7 +16016,7 @@ const gardenMintBudgets = new Map<string, GardenMintBudget>();
  *  Budgets survive rebuilding a spec; a timeout never releases an id that may already be held. */
 
 export function ciLearningTaskIdMinter(root: string, log?: (step: string, fields: Record<string, unknown>) => void,
-  executeAsync: (file: string, args: string[], options: { maxBuffer: number; timeout: number; killSignal: "SIGKILL" }) => Promise<{ stdout: string; stderr?: string }> = (file, args, options) => execFileLoopBounded(file, args, { ...options, encoding: "utf8" }),
+  executeAsync: (file: string, args: string[], options: { maxBuffer: number; timeout: number; killSignal: "SIGKILL" }) => Promise<{ stdout: string; stderr?: string }> = (file, args, options) => execFileRouted(file, args, { ...options, encoding: "utf8" }),
   opts: { budget?: GardenMintBudget; clock?: Pick<Clock, "now">; pollIntervalMs?: () => number;
     loadPolicy?: () => { values: Pick<Policy["values"], "pollIntervalMs"> }; destinationSnapshot?: TaskIdDestinationSnapshot | null; destinationFailure?: string } = {}):
   ((filingBranch?: string) => string) & { async: (filingBranch: string) => Promise<string>; heldSha: (taskId: string) => string | undefined } & GardenTaskIdRelease {
@@ -43875,6 +43877,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "print the next free W1-T<n>, derived from the max across plan/tasks.yaml, EVERY plan/tasks.d/*.yaml shard, the ids OPEN plan PRs have already minted (the 2/2 collision class: W1-T256->257 #770, W1-T260->261 #775), and every id ever declared in the git history of plan/ (the fold class: an id filed then folded away, W1-T278); --offline skips the open-PR read (the mint is then a FLOOR, and says so; the history scan still runs — it is a local git read, not a network one); prints its provenance, spawns nothing. --audit is a READ-ONLY report over origin's refs/rmd-id/* namespace: every reservation is classified as HELD, CANDIDATE or UNKNOWN by current plan declarations, historical plan declarations, open run-* branches, open PR Remudero-Task trailers and the anchor age. --audit --reap previews only CANDIDATE rows past a freshly measured bar: the largest HELD-anchor-to-first-PR delay, floored at RESERVATION_PUSH_GRACE_MS, with n/max/p50 and population reported. It reads anchors with one private-namespace fetch; any unread surface or empty measured population refuses deletion. --reap alone writes one planned summary; --apply verifies a PENDING intent per id before one batched, guarded, leased push, then verifies confirmed released/skipped outcomes. Missing push results or outcome writes report UNKNOWN and return nonzero with recoverable intents. Unresolved batches block further deletion at that repository/state root. --audit --reap --reconcile reads the complete compressed, rotated-plain and live ledger union and freshly reads each pending exact ref; it records observed_absent with actor UNKNOWN, foreign or unchanged without deleting. Unread or torn history refuses action; reconciliation never retries a deletion. A later deletion requires another complete audit and explicit --reap --apply. Neither apply nor reconciliation runs automatically. --offline refuses --reap; --audit-age-days applies only to audit alone. The report states the candidate age threshold (default 14 days, override with --audit-age-days); failed open-PR or run-branch reads produce UNKNOWN rows, never reclaimable candidates, and --audit alone never pushes or deletes a ref. --max-scan N widens the W1 reservation walk from its default 50 candidates to N (1..200); it requires explicit --reserve and does not apply to --prefix. W1-T1055 --reserve ATOMICALLY CLAIMS the id on origin (refs/rmd-id/<id>) instead of merely printing one, so the push IS the claim and two concurrent minters cannot leave with the same number; it calls the existing reserveTaskIdRemote, which already advances on contention under its own maxScan bound, and PRINTS THE ID IT ACTUALLY HOLDS rather than the one it first tried. Each contested candidate is reported as HELD BY ANOTHER CALLER, naming whether the holder's anchor is the fleet's (`rmd-id reservation <pid>@<container>`) or an operator hand-mint (`reserve W1-T#### <host>-<pid>-<nanotime>`), because silently advancing past a rejection is how two collisions went unnoticed. FAIL-CLOSED: an unreachable origin REFUSES and exits non-zero rather than minting optimistically — the caller has spent nothing yet. RESERVING IS THE DEFAULT (W1-T3091): a bare mint CLAIMS the id, and --no-reserve is the opt-out. The old default printed a number and claimed nothing, so two lanes minting in one window took the same id and one renumbered after its PR was open -- measured five times in one session on 2026-09-07, and again on 2026-09-15 when two shards reached main under one id and loadPlan threw, failing every PR's required ci until a human renumbered the loser. --offline IMPLIES --no-reserve (it declines to read origin, so it cannot push to it); an explicit --reserve beside --offline or --no-reserve is still refused by name. --audit never reserves. The price is that a reserved id nobody files is HELD rather than free -- --audit is the report that finds those, and reclaiming one is an operator decision. --reserve and --offline are contradictory and are refused by argument validation. WRITING AN EXAMPLE ID IN PROSE: use the placeholder form W1-T<n> (or W1-T<id>, W1-TNNNN), never a bare digit form -- the open-PR scan above reads a literal out of any PR body, commit message or comment, and a code span or fenced block does NOT hide it. The placeholders carry no digits, so the extractor cannot see them; `scripts/task-id-existence-check.mjs` enforces this for src/ and deploy/. W1-T4388 --prefix <P> --repo <owner/name> mints a CONSUMER repo's <P>-T<n> id (CONSOLE, PORTAL): the next number above every one that repo's main plan (tasks.yaml plus tasks.d shards), open PR titles, bodies and branches, run-<P>-T* branches and refs/rmd-id/<P>-T* refs hold, reserved by pushing refs/rmd-id/<P>-T<n> to THAT repo's origin. It always reserves, refuses on any unread surface, and refuses --offline, --no-reserve, --audit and --plan. W1-T4414 --branch <name> records <name> as the reservation's holder instead of the current branch, so an id minted from any checkout names the branch its filing PR will be opened from; review refuses a filing whose head is not that holder. W1-T9683 --count <n> reserves n ids from ONE open-PR read and one history scan, each walk starting above the last id held (contention advances and is reported exactly as for one id), all under the same holder; it prints a RESERVED line per id it holds and a final `HELD k of n:` line, and a partial result (k < n) prints only the ids it holds and exits 2. --count is refused beside --offline, --no-reserve, --audit and --prefix.",
   },
   {
+    name: "migration-preview",
+    syntax: "rmd migration-preview --public-root <path> --public-commit <sha> --public-repo <owner/remudero> --ops-root <path> --ops-commit <sha> --ops-repo <owner/name>",
+    summary: "Preview the lowest-priority safe public task without moving it.",
+    detail: "Read-only explicit migration preview. Both pinned commits must already exist locally and remain current in their origins and API identities. Uses strict batched Git catalog reads, complete candidate-specific merge searches with authoritative recent-PR controls, current claims/run branches and complete open-PR/file controls. Orders by reverse maintained default dispatch order. Every remaining public dependant excludes its prerequisite, even a merged dependant. A candidate retains original YAML bytes, path, blob, commit and prospective moved_from. Changed, incomplete, duplicate or incompatible evidence returns UNKNOWN. Permission is never granted. No fetch, catalog write, reservation, claim, push, PR operation, registry/config change, scheduler or default background work. Help performs no preview reads. A mutating move needs separate transaction approval.",
+  },
+  {
     name: "plan-destination",
     syntax: "rmd plan-destination <decision|feedback|task>",
     summary: "Print the repository and checkout that take a new plan file of this kind on this host.",
@@ -45237,6 +45245,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["procedures", (rest) => proceduresCommand(rest, proceduresProductionInput())],
   ["check-acceptance", (rest) => checkAcceptanceCommand(rest)],
   ["next-task-id", async (rest) => await withGhTransportFloorMode("wait", () => nextTaskIdCommand(rest))],
+  ["migration-preview", (rest) => withGhTransportFloorMode("enforce", () => previewPlanTaskMigration(rest))],
   ["plan-destination", (rest) => planDestinationCommand(rest)],
   ["hand-worktree", (rest) => handWorktreeCommand(rest)],
   ["worktree", (rest) => worktreeCommand(rest)],
@@ -45411,6 +45420,15 @@ export async function main(
 ): Promise<void> {
   // W1-T12075: installed before the early read verbs below, because `rmd gh` and `rmd pr-state` spawn gh too.
   // It writes nothing until a gh call finds no credential; then the row names the sources tried, never a value.
+  // Explicit preview precedes invocation logging, housekeeping and credential diagnostics.
+  const previewArgv = stripRepoRootFlag(process.argv.slice(2));
+  if (previewArgv[0] === "migration-preview") {
+    if (previewArgv.includes("--help") || previewArgv.includes("-h")) {
+      console.log(commandHelp(commandSpec("migration-preview")));
+      return await flushThenExit(0);
+    }
+    return await flushThenExit(await dispatchCommand(previewArgv[0], previewArgv.slice(1), REGISTRY, USAGE));
+  }
   installGithubCredentialMissingSink((row) => appendLedger(ledgerPathFor(loadConfig()), row));
   const inspectionArgv = stripRepoRootFlag(process.argv.slice(2));
   if (inspectionArgv[0] === "inspect" && inspectionArgv[1] === "selected-registry-shadow") {

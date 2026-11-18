@@ -350,50 +350,51 @@ test("W1-T12187 criterion 6: the config gardener proposes one change that puts a
   assert.deepEqual([JUDGE_CASH_BAR.minPaired, JUDGE_CASH_BAR.minAgreeShare, JUDGE_CASH_BAR.maxNoAnswerShare, JUDGE_CASH_BAR.windowMs],
     [200, 0.98, 0.02, 14 * 24 * 3600 * 1000]);
 
-  // Exactly at the bar: one change, one line, on the role's own row.
+  // Exactly at the bar: one change, one line, on the role's own row. The risk judge fails closed, so W1-T13501
+  // skips it and the decision summary's row is the one proposed.
   const deps: GardenerDeps = { repoRoot: root, stateDir: join(root, "state"), clock: fixedClock(NOW), seed: 7, log: () => {},
     openWorkspace: () => { throw new Error("no workspace is opened to list candidates"); } };
   const spec = configGardenSpec(deps);
-  const clearing = inventory(record("decision-summary", { agreeShare: null }), record("risk-judge"));
+  const clearing = inventory(record("risk-judge"), record("decision-summary"));
   const actions = spec.candidates(clearing, rng);
   assert.equal(actions.length, 1);
   const action = actions[0]!;
-  assert.deepEqual([action.class, action.target, action.scope, action.cohort.kind], ["move-judge-to-cash", "risk-judge", "judge:risk-judge", "all"]);
+  assert.deepEqual([action.class, action.target, action.scope, action.cohort.kind], ["move-judge-to-cash", "decision-summary", "judge:decision-summary", "all"]);
   assert.deepEqual(action.edits, [{
     path: ".remudero/mounts.yaml",
-    from: "risk_judge: { model: haiku, effort: low, max_turns: 400, context_budget: 60000 }",
-    to: "risk_judge: { model: haiku, effort: low, max_turns: 400, context_budget: 60000, provider: cash }",
+    from: "feedback_summary: { model: haiku, effort: low, max_turns: 400, context_budget: 60000 }",
+    to: "feedback_summary: { model: haiku, effort: low, max_turns: 400, context_budget: 60000, provider: cash }",
   }]);
   assert.match(action.reason, /agreed on 98\.0% of 200 paired calls in 14 days, and 2\.0% of its calls gave no usable answer/);
-  assert.notEqual(spec.fingerprint(clearing), spec.fingerprint(inventory(record("risk-judge", { agreeShare: 0.97 }))));
+  assert.notEqual(spec.fingerprint(clearing), spec.fingerprint(inventory(record("decision-summary", { agreeShare: 0.97 }))));
 
   // Below the bar on any one figure, or with no agreement figure, or with nothing measured: nothing.
   const below: JudgeShadowRoleSummary[] = [
-    record("risk-judge", { agreeShare: 0.97 }),
-    record("risk-judge", { paired: 199 }),
-    record("risk-judge", { noAnswerShare: 0.03 }),
-    record("risk-judge", { noAnswerShare: null }),
+    record("decision-summary", { agreeShare: 0.97 }),
+    record("decision-summary", { paired: 199 }),
+    record("decision-summary", { noAnswerShare: 0.03 }),
+    record("decision-summary", { noAnswerShare: null }),
     record("decision-summary", { agreeShare: null }),
   ];
   for (const s of below) assert.deepEqual(configCandidates(inventory(s), root, rng), [], JSON.stringify(s));
   assert.deepEqual(configCandidates({ ...inventory(), judgeShadows: undefined }, root, rng), []);
-  // A role that clears the bar and has no row of its own on one line, or is no role at all: nothing.
-  assert.deepEqual(configCandidates(inventory(record("ci-judge"), record("unknown-role")), root, rng), []);
-  assert.deepEqual(configCandidates(inventory(record("risk-judge")), join(root, "missing"), rng), [], "no mounts table");
+  // A role that is no role at all: nothing.
+  assert.deepEqual(configCandidates(inventory(record("unknown-role")), root, rng), []);
+  assert.deepEqual(configCandidates(inventory(record("decision-summary")), join(root, "missing"), rng), [], "no mounts table");
   // A row that is not on the lowest tier would not be served from the cash economy row: nothing.
-  const dear = gardenRoot(t, TABLE.replace("risk_judge: { model: haiku,", "risk_judge: { model: sonnet,"));
-  assert.deepEqual(configCandidates(inventory(record("risk-judge")), dear, rng), []);
+  const dear = gardenRoot(t, TABLE.replace("feedback_summary: { model: haiku,", "feedback_summary: { model: sonnet,"));
+  assert.deepEqual(configCandidates(inventory(record("decision-summary")), dear, rng), []);
 
   // The change, applied: the role's row names the cash provider, the table still loads, and it is not proposed twice.
   assert.deepEqual(applyConfigEdits(root, action.edits), [".remudero/mounts.yaml"]);
   const moved = loadMounts(mountsPath(root));
-  assert.deepEqual(resolveRiskJudgeRoleMount(moved), { ...resolveRiskJudgeRoleMount(loadMounts(mountsPath(REPO_ROOT))), provider: "cash" });
-  assert.equal(resolveDecisionSummaryMount(moved).provider, undefined);
+  assert.deepEqual(resolveDecisionSummaryMount(moved), { ...resolveDecisionSummaryMount(loadMounts(mountsPath(REPO_ROOT))), provider: "cash" });
+  assert.equal(resolveRiskJudgeRoleMount(moved).provider, undefined);
   assert.deepEqual(configCandidates(clearing, root, rng), []);
-  // A row that already names another provider has that provider replaced, not doubled.
-  const claude = gardenRoot(t, TABLE.replace("context_budget: 60000 }\nfeedback_summary", "context_budget: 60000, provider: claude }\nfeedback_summary"));
-  assert.equal(resolveRiskJudgeRoleMount(loadMounts(mountsPath(claude))).provider, "claude");
-  assert.equal(configCandidates(inventory(record("risk-judge")), claude, rng)[0]!.edits[0]!.to, action.edits[0]!.to);
+  // W1-T13501: a row that already names another provider is refused; moving it from that provider is not this class's job.
+  const claude = gardenRoot(t, TABLE.replace(action.edits[0]!.from, action.edits[0]!.from.replace(/ \}$/, ", provider: claude }")));
+  assert.equal(resolveDecisionSummaryMount(loadMounts(mountsPath(claude))).provider, "claude");
+  assert.deepEqual(configCandidates(inventory(record("decision-summary")), claude, rng), []);
 });
 
 test("W1-T12187 criterion 7: with no row of its own each role resolves the same mount as today, and with a row the risk judge and the decision summary run on the model and provider the row names", async () => {

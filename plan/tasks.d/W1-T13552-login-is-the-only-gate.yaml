@@ -1,0 +1,50 @@
+- id: W1-T13552
+  title: "A verified, allowlisted operator session reaches the high write tier without a recent second factor, unless the operator identity config turns requireStepUp on"
+  repo: remudero
+  depends_on: []
+  priority: 0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # one concern (which tier a verified operator session earns) in service.ts, its config parse and schema row, and their tests
+  origin: "operator-session#login-is-the-only-gate-2026-11-18"
+  plan_refs:
+    - W1-T4244
+  files:
+    - src/lib/service.ts
+    - src/lib/config-schema.ts
+    - src/lib/operator-identity-file.ts
+    - test/the-operator-reaches-core-as-themselves.test.ts
+    - test/operator-identity-file.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "With requireStepUp absent or false, a verified allowlisted session whose last factor is two hours old earns high, and the confirm-nonce step still applies"
+      proof: "unit test: W1-T13552 criterion 1"
+    - claim: "With requireStepUp true, high still needs a factor verified within stepUpWindowMinutes"
+      proof: "unit test: W1-T13552 criterion 2"
+    - claim: "invariant:signed-in-gate — a non-boolean requireStepUp in the identity file leaves identity off, so no session is granted a tier on a misread switch"
+      kind: guard
+      proof: "unit test: W1-T13552 criterion 3"
+  rationale: |
+    WHY: Craig, 2026-11-18 00:37Z, after Approve on verify-human:W1-T12032 was refused for want of a recent second
+    factor: "Login should be the only gate" and "Once I'm in - I should be able to do everything. If we want to add
+    more security later, we can". OBSERVED at head: service.ts verifyOperatorSession grants high only when
+    operatorStepUpIsFresh(fva, iat, now, stepUpWindowMinutes ?? 10) holds, else middle, so every high-tier Inbox
+    action from a signed-in Console session older than 10 minutes since its last factor is refused. The Console side
+    of the same ruling is CONSOLE-T231.
+  design: |
+    INVARIANT signed-in-gate: a session still has to verify (signature, issuer, expiry, origin, allowlisted user);
+    only the step-up check is switched.
+    1. OperatorIdentityConfig gains requireStepUp?: boolean. verifyOperatorSession returns tier high after the
+       allowlist check unless requireStepUp === true; with it on, the existing window rule decides high or middle.
+    2. operator-identity-file.ts parses requireStepUp; a non-boolean is refused as require_step_up_not_boolean.
+    3. config-schema.ts lists serve.operatorIdentity.requireStepUp (boolean, default false).
+    The confirm-nonce round trip for high routes and the bearer token's low pin are unchanged.
+    Not in scope: changing any key, secret or credential.
+  falsifier: |
+    Delete the requireStepUp early return in verifyOperatorSession: criterion 1 fails (403 required_tier high).
+  note: |
+    Id reserved for run-unfiled-1794962366946 with ~/rmd-work/bin/reserve-id.sh.
+    reservation hand-off: run-unfiled-1794962366946 -> claude/project-thread-udx0oo
