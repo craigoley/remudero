@@ -18,7 +18,7 @@ import type { DispatchBreakJudge } from "./stall-verifier.js";
 import { readCiGateRequiredChecks } from "./ci-gate-required.js";
 import { createHeadRehomePorts, headIdentityRed, headRehomePlan, type HeadRehomePorts } from "./head-rehome.js";
 import { argmaxTypedJudgmentOption, runTypedJudgment } from "./typed-judgment.js";
-import { judgeShadowOnlyArm, shadowJudgeCall } from "./judge-shadow.js";
+import { judgeShadowOnlyArm, judgeShadowOnlyPrimary, shadowJudgeCall, type ShadowJudgeCall } from "./judge-shadow.js";
 import { diffCoverageTargets } from "./diff-coverage-targets.js";
 import { execFileSync } from "node:child_process";
 import { defaultIsPidAlive } from "./drain-lock.js";
@@ -2498,6 +2498,8 @@ export function productionFixProgressJudge(opts: {
   /** W1-T11075: the ledger a cash shadow arm's rows go to. With none, a declared shadow is not asked: an unledgered
    *  shadow would spend and measure nothing. */
   log?: (step: string, fields: Record<string, unknown>) => void;
+  /** W1-T12417: the decision-model seams of a decision-model shadow, for a test; production reads the host config. */
+  shadowDecisions?: ShadowJudgeCall<unknown>["decisions"];
 }): FixProgressJudge {
   const judge: FixProgressJudge = async input => {
     // W1-T11075: the judge's own row, which may name a provider and a cash shadow arm.
@@ -2549,7 +2551,9 @@ export function productionFixProgressJudge(opts: {
       // W1-T12417: a decision-model arm. Not awaited: the verdict returned below is the primary's.
       void shadowJudgeCall({
         role: "fix-progress", key: shadowKey, mount, primaryArgs, primary: result, primaryAnswer: verdict, parse: parseFixProgressVerdict,
-        agreementKey: (v) => JUDGE_SHADOW_COMPARED_KEY["fix-progress"](v) ?? "", head: { sha: input.headSha }, spawn, log: opts.log,
+        agreementKey: (v) => JUDGE_SHADOW_COMPARED_KEY["fix-progress"](v) ?? "",
+        head: { sha: input.headSha, ...(input.prNumber === undefined ? {} : { prNumber: input.prNumber }) }, spawn, log: opts.log,
+        ...(opts.shadowDecisions === undefined ? {} : { decisions: opts.shadowDecisions }),
       });
     } else if (mount.shadow !== undefined && opts.log !== undefined) {
       // Advisory: the verdict returned below is the primary's, whatever the shadow answers or refuses.
@@ -3667,6 +3671,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           spawn: spawnImpl ?? benchmarkNonDispatchSpawn("head-rehome"),
           // W1-T12417: the answer is asked of head-rehome's shadow afterwards, under its own role name.
           shadow: { role: "head-rehome", key: `PR${pr.prNumber}@${pr.headSha}`, arm: judgeShadowOnlyArm(mounts, "head-rehome"), log,
+            primary: judgeShadowOnlyPrimary(mounts, "head-rehome"),
             head: { sha: pr.headSha, prUrl: `https://github.com/${owner}/${repo}/pull/${pr.prNumber}` } } });
         if (result.kind === "rejected") return { quiet: false, reason: `quietness judge unavailable: ${result.reason}` };
         const choice = argmaxTypedJudgmentOption(result.distribution);

@@ -1,6 +1,7 @@
 import { loadConfig, type Config } from "./config.js";
 import { askDecisionModel, DECISION_MODEL_SURFACE, DECISION_OUTPUT_MARGIN_TOKENS, resolveDecisionTarget, type DecisionAnsweredRow } from "./decision-model.js";
-import type { CashShadowArm, DecisionShadowArm, JudgeMount, JudgeShadowArm, JudgeThreshold, Mounts } from "./mounts.js";
+import { resolveOwnerRepoAtAsync } from "./owner-repo.js";
+import type { CashShadowArm, DecisionShadowArm, JudgeMount, JudgePrimary, JudgeShadowArm, JudgeShadowOnlyRole, JudgeThreshold, Mounts } from "./mounts.js";
 import { JUDGE_SHADOW_TRIAL_ID, type spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
 import { cashCapacityReadiness, learnedCashLimit, OpenWeightAllowanceExhaustedError, OpenWeightRequestTooLargeError, type ModelSurface } from "./worker-provider.js";
 
@@ -103,12 +104,24 @@ export interface JudgeShadowRequest<T> {
   agreementKey: (verdict: T) => string;
   spawn: typeof spawnWorker;
   log: ShadowLog;
+  /** W1-T12417: the decision-model seams a test replaces; production reads the host config. */
+  decisions?: ShadowJudgeCall<T>["decisions"];
 }
 
-/** W1-T12417: the judged head of a `PR<n>@<head>` key. */
-function headOfKey(key: string): { sha?: string } {
+/** W1-T12417: the judged head: its sha and, where the judgement is of a pull request, the pull request, as a URL or as
+ *  a number the shadow turns into the URL of this checkout's origin. */
+export interface JudgedHead {
+  sha?: string;
+  prUrl?: string;
+  prNumber?: number;
+}
+
+/** W1-T12417: the judged head, and the pull request, of a `PR<n>@<head>` key. */
+function headOfKey(key: string): JudgedHead {
   const head = key.includes("@") ? key.slice(key.lastIndexOf("@") + 1) : "";
-  return /^[0-9a-f]{7,64}$/i.test(head) ? { sha: head } : {};
+  if (!/^[0-9a-f]{7,64}$/i.test(head)) return {};
+  const pr = /^PR(\d+)@/.exec(key);
+  return { sha: head, ...(pr === null ? {} : { prNumber: Number(pr[1]) }) };
 }
 
 /** The shadow's spawn args: the primary's prompt, no tools, the cash provider. A declared arm pins its deployment;
@@ -187,7 +200,7 @@ export async function runJudgeShadow<T>(request: JudgeShadowRequest<T>): Promise
     void shadowJudgeCall({ role: request.surface as FixedOptionJudgeRole, key: request.key, mount: request.mount, primaryArgs: request.primaryArgs,
       primary: {}, primaryAnswer: request.primaryVerdict, parse: request.parse, agreementKey: request.agreementKey,
       decisionAnswer: request.surface === "ci-judge" ? ciJudgeDecisionAnswer : request.agreementKey,
-      head: headOfKey(request.key), spawn: request.spawn, log: request.log });
+      head: headOfKey(request.key), spawn: request.spawn, log: request.log, ...(request.decisions === undefined ? {} : { decisions: request.decisions }) });
     return { kind: "deferred" };
   }
   const args = judgeShadowSpawnArgs(request.primaryArgs, request.mount, request.surface, arm);
@@ -236,11 +249,34 @@ export interface ShadowJudgeCall<T> {
   input?: string;
   /** The primary's answer as one of the options; absent, {@link ShadowJudgeCall.agreementKey}. */
   decisionAnswer?: (answer: T) => string | undefined;
-  /** The judged head and, where there is one, the pull request; both go on the `decision.answered` row. */
-  head?: { sha?: string; prUrl?: string };
-  /** The decision-model shadow's seams, beside `spawn` and `log`: production reads the host config and asks the
-   *  real decision model. */
-  decisions?: { config?: () => Config; ask?: typeof askDecisionModel; env?: NodeJS.ProcessEnv; learnedLimit?: typeof learnedCashLimit };
+  /** The judged head and, where there is one, the pull request; both go on the `decision.answered` row. A pull
+   *  request given by number becomes the URL of the origin of the primary's checkout. */
+  head?: JudgedHead;
+  /** The decision-model shadow's seams, beside `spawn` and `log`: production reads the host config and asks the real
+   *  decision model. Every other caller names this field's type rather than declaring a seam shape of its own. */
+  decisions?: {
+    config?: () => Config;
+    ask?: typeof askDecisionModel;
+    env?: NodeJS.ProcessEnv;
+    learnedLimit?: typeof learnedCashLimit;
+    /** The owner and repo of the checkout at a root, for the URL of a judged pull request. */
+    ownerRepo?: (root: string) => Promise<{ owner: string; repo: string }>;
+  };
+}
+
+type DecisionShadowHost = NonNullable<ShadowJudgeCall<unknown>["decisions"]>;
+
+/** W1-T12417: the URL of pull request `number` in the checkout at `root`'s origin. A checkout whose origin cannot be
+ *  read gives none: the row then records the head without the pull request. */
+async function pullRequestUrl(root: string | undefined, number: number, ownerRepo: DecisionShadowHost["ownerRepo"]): Promise<string | undefined> {
+  if (root === undefined) return undefined;
+  try {
+    const { owner, repo } = await (ownerRepo ?? resolveOwnerRepoAtAsync)(root);
+    return `https://github.com/${owner}/${repo}/pull/${number}`;
+  } catch (error) {
+    process.stderr.write(`judge shadow pull request url unavailable: ${error instanceof Error ? error.message : String(error)}\n`);
+    return undefined;
+  }
 }
 
 /** ADVISORY ONLY: after the role answered, send the same prompt once to the first ready model of the cash row at low
@@ -294,29 +330,72 @@ async function decisionShadow<T>(call: ShadowJudgeCall<T>, arm: DecisionShadowAr
   }
   const answerOf = call.decisionAnswer ?? call.agreementKey;
   const primaryAnswer = call.primaryAnswer === undefined || answerOf === undefined ? null : answerOf(call.primaryAnswer) ?? null;
+  record(...await askDecisionArm({ role: call.role, arm, question, input: call.input ?? call.primaryArgs.prompt, head: call.head,
+    cwd: call.primaryArgs.cwd, decisions: call.decisions, threshold: call.mount.threshold, primaryAnswer }));
+}
+
+/** One request to a decision model for `role`'s question, as the judge_shadow row it comes to. A config that cannot be
+ *  read, a capacity shortfall and a failed request are each a `judge_shadow.skipped` row with its reason. Never throws. */
+async function askDecisionArm(request: { role: string; arm: DecisionShadowArm; question: JudgeShadowQuestion; input: string; head: JudgedHead | undefined;
+  cwd: string | undefined; decisions: DecisionShadowHost | undefined; threshold: JudgeThreshold | undefined; primaryAnswer: string | null }): Promise<[string, Record<string, unknown>]> {
+  const { arm, head } = request;
   try {
-    const deps = call.decisions ?? {};
+    const deps = request.decisions ?? {};
     const config = (deps.config ?? loadConfig)();
     const env = deps.env ?? process.env;
-    const input = call.input ?? call.primaryArgs.prompt;
     const target = resolveDecisionTarget(config, arm.candidate, env);
     if (target.ok) {
-      const readiness = cashCapacityReadiness((deps.learnedLimit ?? learnedCashLimit)(arm.deployment, target.endpoint), decisionNeedTokens(input));
+      const readiness = cashCapacityReadiness((deps.learnedLimit ?? learnedCashLimit)(arm.deployment, target.endpoint), decisionNeedTokens(request.input));
       if (readiness.state === "shortfall") {
-        record("judge_shadow.skipped", { shadow_cost_usd: 0, refusal: "capacity",
-          reason: `${arm.deployment} has learned a limit of ${readiness.limitTokens} tokens per minute; the request needs ${readiness.shortfallTokens} more` });
-        return;
+        return ["judge_shadow.skipped", { shadow_cost_usd: 0, refusal: "capacity",
+          reason: `${arm.deployment} has learned a limit of ${readiness.limitTokens} tokens per minute; the request needs ${readiness.shortfallTokens} more` }];
       }
     }
+    const prUrl = head?.sha === undefined || head.sha === "" ? undefined
+      : head.prUrl ?? (head.prNumber === undefined ? undefined : await pullRequestUrl(request.cwd, head.prNumber, deps.ownerRepo));
     const row = await (deps.ask ?? askDecisionModel)(config, {
-      role: call.role, candidate: arm.candidate, input, env,
-      questions: [{ type: "choice", name: call.role.replace(/-/g, "_"), instructions: question.instructions, options: question.options.map((value) => ({ value })) }],
-      ...(call.head?.sha ? { headSha: call.head.sha, ...(call.head.prUrl ? { prUrl: call.head.prUrl } : {}) } : {}),
+      role: request.role, candidate: arm.candidate, input: request.input, env,
+      questions: [{ type: "choice", name: request.role.replace(/-/g, "_"), instructions: request.question.instructions,
+        options: request.question.options.map((value) => ({ value })) }],
+      ...(head?.sha ? { headSha: head.sha, ...(prUrl ? { prUrl } : {}) } : {}),
     });
-    record(...decisionShadowRow(row, primaryAnswer, thresholdFor(call.mount.threshold, arm.deployment, DECISION_MODEL_SURFACE)));
+    return decisionShadowRow(row, request.primaryAnswer, thresholdFor(request.threshold, arm.deployment, DECISION_MODEL_SURFACE));
   } catch (error) {
-    record("judge_shadow.skipped", { shadow_cost_usd: 0, reason: error instanceof Error ? error.message : String(error) });
+    return ["judge_shadow.skipped", { shadow_cost_usd: 0, reason: error instanceof Error ? error.message : String(error) }];
   }
+}
+
+/** W1-T12417: what a decision model answered as a judge's primary: the top option and the whole distribution. */
+export interface PrimaryAnswer {
+  option: string;
+  distribution: Array<{ option: string; probability: number }>;
+}
+
+/** W1-T12417: a `judge_shadows` entry's primary, for a judge with no row of its own; a head-rehome spawn with no entry
+ *  of its own uses `typed-judgment`'s. */
+export function judgeShadowOnlyPrimary(mounts: Pick<Mounts, "judge_primaries">, role: JudgeShadowOnlyRole): JudgePrimary | undefined {
+  const primaries = mounts.judge_primaries;
+  return primaries?.[role] ?? (role === "head-rehome" ? primaries?.["typed-judgment"] : undefined);
+}
+
+/** W1-T12417: ask a judge's primary decision model its options as one choice question. It answers when the top option
+ *  clears the entry's threshold; a candidate that is unavailable, refused, rejected, abstaining or below the threshold
+ *  gives nothing, one `judge_shadow.skipped` row says why, and the caller's own judge answers instead. A head and its
+ *  pull request go on the `decision.answered` row as for a shadow. Never throws. */
+export async function askPrimaryCandidate(request: { role: FixedOptionJudgeRole; key: string; primary: JudgePrimary; question: JudgeShadowQuestion;
+  input: string; head?: JudgedHead; cwd?: string; log: ShadowLog; decisions?: DecisionShadowHost }): Promise<PrimaryAnswer | undefined> {
+  const { arm } = request.primary;
+  const [step, fields] = await askDecisionArm({ role: request.role, arm, question: request.question, input: request.input, head: request.head,
+    cwd: request.cwd, decisions: request.decisions, threshold: request.primary.threshold, primaryAnswer: null });
+  const distribution = step === "judge_shadow.compared" && Array.isArray(fields.distribution) ? fields.distribution as PrimaryAnswer["distribution"] : undefined;
+  const top = distribution === undefined ? undefined : distribution.reduce((best, entry) => (entry.probability > best.probability ? entry : best));
+  if (top !== undefined && request.question.options.every((option) => distribution!.some((entry) => entry.option === option))) {
+    return { option: top.option, distribution: distribution! };
+  }
+  shadowRecorder(request.log, { role: request.role, decision_key: request.key, shadow_model: arm.candidate.name, shadow_deployment: arm.deployment,
+    model_surface: DECISION_MODEL_SURFACE, served_as: "primary", ...(request.head?.sha ? { head_sha: request.head.sha } : {}) })(
+    "judge_shadow.skipped", step === "judge_shadow.skipped" ? fields : { reason: "the reply does not carry every option" });
+  return undefined;
 }
 
 /** One decision request's judge_shadow row: `compared` for a distribution, else `skipped` with its reason. A 429

@@ -6,14 +6,15 @@
  * Every spawn and every decision request here is a fake: no network and no paid call runs.
  */
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { parse as parseYaml } from "yaml";
 
 import { fixedClock } from "#src/lib/clock.js";
 import type { Config } from "#src/lib/config.js";
-import { configCandidates, judgeShadowModelClears, judgeShadowSwitchCandidate, judgeShadowTypedAnswers, JUDGE_SWITCH_BAR, type ConfigInventory } from "#src/lib/config-gardener.js";
+import { configCandidates, judgeShadowModelClears, judgeShadowSwitchCandidate, judgeShadowThresholds, judgeShadowTypedAnswers, JUDGE_SWITCH_BAR, type ConfigInventory } from "#src/lib/config-gardener.js";
 import { askDecisionModel, DECISION_ANSWERED_STEP, type DecisionAnsweredRow } from "#src/lib/decision-model.js";
 import { buildFixProgressInput } from "#src/lib/fix-progress-judge.js";
 import {
@@ -313,7 +314,7 @@ test("W1-T12417 criterion 4: an unusable candidate changes nothing and writes on
     { model: CANDIDATE.deployment, surface: "decisions", value: 0.9 });
 });
 
-test("W1-T12417 criterion 5: the config gardener proposes a role's shadow model as its primary only when that role and model clear the per-model bar", () => {
+test("W1-T12417 criterion 5: the config gardener proposes a role's shadow model as its primary only when that role and model clear the per-model bar", async (t) => {
   const served = openWeightCandidatesForCapability(MOUNTS.capabilities, "economy", "low")[0]!;
   const rows = (role: string, model: string, count: number, agreeing: number, surface = "text") => Array.from({ length: count }, (_, i) => ({
     ts: ISO, step: "judge_shadow.compared", role, shadow_model: model, model_surface: surface, primary_answer: "continue",
@@ -322,6 +323,15 @@ test("W1-T12417 criterion 5: the config gardener proposes a role's shadow model 
   const inventory = (ledgerRows: Array<Record<string, unknown>>): ConfigInventory => ({
     nowIso: ISO, runs: [], queued: [], recommendations: [], active: [], cooling: [],
     judgeShadowScores: scoreTypedAnswers(judgeShadowTypedAnswers(ledgerRows, NOW - 14 * 24 * 3600 * 1000)).groups,
+    judgeShadowThresholds: judgeShadowThresholds(ledgerRows, NOW - 14 * 24 * 3600 * 1000),
+  });
+  // A decision model's rows: `disagreeing` of them differ from the judge's answer (top option 0.6), the rest agree at 0.9 or 0.7.
+  const decided = (role: string, count: number, disagreeing: number, model = "decisions-eastus") => Array.from({ length: count }, (_, i) => {
+    const top = i < disagreeing ? 0.6 : i % 2 === 0 ? 0.9 : 0.7;
+    return { ts: ISO, step: "judge_shadow.compared", role, shadow_model: model, model_surface: "decisions", primary_answer: "overlap",
+      shadow_answer: i < disagreeing ? "independent" : "overlap", agreement: i >= disagreeing,
+      distribution: i < disagreeing ? [{ option: "overlap", probability: 1 - top }, { option: "independent", probability: top }]
+        : [{ option: "overlap", probability: top }, { option: "independent", probability: 1 - top }] };
   });
   const n = JUDGE_SWITCH_BAR.minCompared;
   // A W1-T11075 paired row records agreement only, and is scored as agreement under its deployment.
@@ -339,8 +349,38 @@ test("W1-T12417 criterion 5: the config gardener proposes a role's shadow model 
   // It goes through the fleet's normal path: the gardener's candidates, one canary PR, review and merge.
   assert.ok(configCandidates(clear, REPO_ROOT, () => 0.5).some((a) => a.scope === "judge:fix-progress" && a.edits[0]!.to === action.edits[0]!.to));
 
+  // A decision model that clears the bar on a judge whose answer is one option becomes its primary, with its threshold
+  // stored beside its model id (the deployment) and its surface.
+  const decisionClear = inventory(decided("refresh-value", n, 2));
+  assert.equal(judgeShadowModelClears(decisionClear.judgeShadowScores![0]!), true);
+  assert.deepEqual(decisionClear.judgeShadowThresholds, [{ role: "refresh-value", model: "decisions-eastus", surface: "decisions", value: 0.6 }]);
+  const primary = judgeShadowSwitchCandidate(decisionClear, REPO_ROOT)!;
+  assert.equal(primary.scope, "judge:refresh-value");
+  assert.deepEqual(primary.edits, [{ path: ".remudero/mounts.yaml", from: "  refresh-value: decisions-eastus",
+    to: `  refresh-value: { primary: decisions-eastus, threshold: { model: ${CANDIDATE.deployment}, surface: decisions, value: 0.6 } }` }]);
+  const switched = validateMounts(parseYaml(TABLE.replace(primary.edits[0]!.from, primary.edits[0]!.to)));
+  assert.deepEqual(switched.judge_primaries!["refresh-value"], { arm: decisionsArm, threshold: { model: CANDIDATE.deployment, surface: "decisions", value: 0.6 } });
+  assert.equal(switched.judge_shadows!["refresh-value"], undefined, "the line that shadowed the role now makes the model its primary");
+  assert.ok(configCandidates(decisionClear, REPO_ROOT, () => 0.5).some((a) => a.scope === "judge:refresh-value" && a.edits[0]!.to === primary.edits[0]!.to));
+  // The rollback of the canary swaps the two lines, so the table reads as it did.
+  assert.deepEqual(validateMounts(parseYaml(TABLE.replace(primary.edits[0]!.from, primary.edits[0]!.to).replace(primary.edits[0]!.to, primary.edits[0]!.from))).judge_shadows!["refresh-value"], decisionsArm);
+  // A role that is already on its candidate gets no second proposal.
+  const { dir } = ownedFixtureDir(t, "judge-primary-switched");
+  mkdirSync(join(dir, ".remudero"));
+  writeFileSync(mountsPath(dir), TABLE.replace(primary.edits[0]!.from, primary.edits[0]!.to));
+  assert.equal(judgeShadowSwitchCandidate(decisionClear, dir), undefined, "already primary");
+  for (const [why, ledgerRows] of [["too few", decided("refresh-value", n - 1, 0)], ["too little agreement", decided("refresh-value", n, 6)],
+    ["a model that is no decision_models row", decided("refresh-value", n, 0, "unknown-model")],
+    ["a judge whose answer is more than an option", decided("fix-progress", n, 0)],
+    ["a judge with no primary read", decided("quiet-worker-watchdog", n, 0)]] as const) {
+    assert.equal(judgeShadowSwitchCandidate(inventory([...ledgerRows]), REPO_ROOT), undefined, why);
+  }
+  // Without a threshold figure for the pair, nothing is proposed: a figure for the text surface does not stand in.
+  assert.equal(judgeShadowSwitchCandidate({ ...decisionClear, judgeShadowThresholds: [{ role: "refresh-value", model: "decisions-eastus", surface: "text", value: 0.6 }] }, REPO_ROOT), undefined);
+  assert.equal(judgeShadowThresholds(rows("refresh-value", "decisions-eastus", n, n)).length, 0, "a text answer has no probability");
+
   // Below the bar, nothing: too few calls, too little agreement, too many unusable answers, another model than the one
-  // cash would serve the row with, a decision model, or a judge that fails closed.
+  // cash would serve the row with, a decision model on a judge that cannot take one, or a judge that fails closed.
   const unusable = [...rows("fix-progress", served, n, n), ...Array.from({ length: 10 }, () => ({ ts: ISO, step: "judge_shadow.skipped",
     role: "fix-progress", shadow_model: served, reason: "unparseable shadow verdict" }))];
   for (const [why, ledgerRows] of [["too few", rows("fix-progress", served, n - 1, n - 1)], ["too little agreement", rows("fix-progress", served, n, Math.floor(n * 0.97))],
@@ -349,6 +389,48 @@ test("W1-T12417 criterion 5: the config gardener proposes a role's shadow model 
     ["too old", rows("fix-progress", served, n, n).map((r) => ({ ...r, ts: fixedClock(NOW - 15 * 24 * 3600 * 1000).iso() }))]] as const) {
     assert.equal(judgeShadowSwitchCandidate(inventory([...ledgerRows]), REPO_ROOT), undefined, why);
   }
+
+  // The edit does what it says: with the line merged, the decision model answers first, and the judge's own spawn answers
+  // when the model cannot. The repo `dir` above holds the table with the edit applied.
+  const refreshQuestion: Parameters<ReturnType<typeof productionRefreshJudge>>[0] =
+    { prNumber: 9, headSha: "def5678", prFiles: ["a"], baseFiles: ["b"], baseTruncated: false, cause: "tests", ciInFlight: false };
+  let counter = 0;
+  const refresh = async (reply: DecisionAnsweredRow) => {
+    const book = ledger();
+    const seams = decisions(reply);
+    let spawned = 0;
+    const verdict = await productionRefreshJudge({ repoRoot: dir, stateDir: ownedFixtureDir(t, `judge-primary-state-${counter++}`).dir, log: book.log, diff: async () => "diff",
+      shadowDecisions: seams.deps, spawn: async () => { spawned++; return worker('{"verdict":"independent","reason":"no shared file"}'); } })(refreshQuestion);
+    return { verdict, spawned, asked: seams.asked, shadowRows: book.rows.filter(isShadowRow) };
+  };
+  const refreshDistribution = (overlap: number) => answered({ name: "refresh_value", outcome: "distribution", confidence: null,
+    distribution: [{ option: "overlap", probability: overlap }, { option: "independent", probability: 1 - overlap }] });
+  const primaryAnswered = await refresh(refreshDistribution(0.9));
+  assert.equal(primaryAnswered.verdict, "overlap", "the decision model's top option is the answer");
+  assert.equal(primaryAnswered.spawned, 0, "the judge's own spawn did not run");
+  assert.equal(primaryAnswered.asked.length, 1);
+  assert.equal(primaryAnswered.asked[0]!.role, "refresh-value");
+  assert.deepEqual(primaryAnswered.asked[0]!.questions, [{ type: "choice", name: "refresh_value", instructions: JUDGE_SHADOW_QUESTIONS["refresh-value"].instructions,
+    options: [{ value: "overlap" }, { value: "independent" }] }]);
+  assert.equal(primaryAnswered.asked[0]!.headSha, "def5678");
+  assert.equal(primaryAnswered.shadowRows.length, 0, "an answered primary writes no shadow row");
+  const belowThreshold = await refresh(refreshDistribution(0.55));
+  assert.equal(belowThreshold.verdict, "independent", "below the stored threshold the judge's own answer stands");
+  assert.equal(belowThreshold.spawned, 1);
+  assert.deepEqual(belowThreshold.shadowRows.map((row) => [row.step, row.served_as, row.abstained, row.threshold, row.shadow_model]),
+    [["judge_shadow.skipped", "primary", "below-threshold", 0.6, "decisions-eastus"]]);
+  const unreachable = await refresh(answered(undefined, { outcome: "unavailable", reason: "no-key", detail: "RMD_CASH_KEY is not set", latency_ms: null, settled_usd: 0 }));
+  assert.equal(unreachable.verdict, "independent", "an unavailable candidate leaves today's judge as the only answer");
+  assert.equal(unreachable.spawned, 1);
+  assert.deepEqual(unreachable.shadowRows.map((row) => [row.step, row.served_as, row.reason]), [["judge_shadow.skipped", "primary", "unavailable: no-key: RMD_CASH_KEY is not set"]]);
+  // A typed-judgment spawn takes the same primary through its shadow entry.
+  const typedBook = ledger();
+  const typed = await runTypedJudgment({ question: "Is the author quiet?", options: ["wait", "trailer"] as const, mount: riskMount({ shadow: undefined }), cwd: REPO_ROOT,
+    settingsFile: SETTINGS, spawn: async () => { throw new Error("the primary answered, so no spawn runs"); },
+    shadow: { role: "head-rehome", key: "PR9@def5678", arm: undefined, log: typedBook.log, primary: switched.judge_primaries!["refresh-value"],
+      decisions: decisions(answered({ name: "head_rehome", outcome: "distribution", confidence: null,
+        distribution: [{ option: "wait", probability: 0.2 }, { option: "trailer", probability: 0.8 }] })).deps } });
+  assert.deepEqual(typed, { kind: "distribution", distribution: { wait: 0.2, trailer: 0.8 } });
 });
 
 test("W1-T12417 criterion 6: a judge's decision request passes the judged head and the pull request, and its decision.answered row records both", async (t) => {
@@ -378,4 +460,43 @@ test("W1-T12417 criterion 6: a judge's decision request passes the judged head a
   // A pull request with no head is not recorded either.
   const row = await askDecisionModel(config, { role: "risk-judge", candidate: CANDIDATE, input: "x", questions: [], prUrl: "https://github.com/o/r/pull/1" });
   assert.equal(row.pr_url, undefined);
+
+  // The production callers hold a pull request number and a head, never a URL: each passes both, and the shadow turns the
+  // number into the URL of the origin of the checkout the judge ran in. Nothing here injects a URL.
+  const { dir: checkout } = ownedFixtureDir(t, "judge-shadow-origin");
+  execFileSync("git", ["-C", checkout, "init", "-q"]);
+  execFileSync("git", ["-C", checkout, "remote", "add", "origin", "git@github.com:craigoley/remudero.git"]);
+  mkdirSync(join(checkout, ".remudero"));
+  writeFileSync(mountsPath(checkout), TABLE);
+  const requestOf = async (start: (seams: DecisionShadowDeps, log: (step: string, fields: Record<string, unknown>) => void) => Promise<unknown>) => {
+    const book = ledger();
+    const seams = decisions(answered(distribution(0.9)));
+    await start(seams.deps, book.log);
+    await book.shadowRows();
+    assert.equal(seams.asked.length, 1);
+    return { headSha: seams.asked[0]!.headSha, prUrl: seams.asked[0]!.prUrl };
+  };
+  assert.deepEqual(await requestOf((seams, log) => realRiskJudge({ mount: riskMount(), cwd: checkout, settingsFile: SETTINGS, shadowLog: log, shadowDecisions: seams,
+    spawn: async () => worker(LOW) })(INPUT)), { headSha: "abc1234", prUrl: "https://github.com/craigoley/remudero/pull/7" }, "risk-judge");
+  assert.deepEqual(await requestOf((seams, log) => runJudgeShadow({ surface: "ci-judge", key: "PR9@def5678", mount: riskMount(), primaryArgs: { prompt: "p", cwd: checkout } as SpawnWorkerArgs,
+    primaryVerdict: { add: [], escalateFull: true }, parse: () => undefined, agreementKey: () => "", spawn: async () => worker(""), log, decisions: seams })),
+  { headSha: "def5678", prUrl: "https://github.com/craigoley/remudero/pull/9" }, "ci-judge");
+  assert.deepEqual(await requestOf((seams, log) => productionFixProgressJudge({ cwd: checkout, settingsFile: SETTINGS, log, shadowDecisions: seams,
+    mount: table({ fix_progress_judge: { ...ROW, shadow: "decisions-eastus" } }).fix_progress_judge,
+    spawn: async () => worker('FIX_PROGRESS: {"verdict":"continue","reason":"the red shrank"}') })(
+    buildFixProgressInput({ taskId: "W1-T1", prNumber: 9, headSha: "def5678", currentRed: ["ci"], ledger: [] }))),
+  { headSha: "def5678", prUrl: "https://github.com/craigoley/remudero/pull/9" }, "fix-progress");
+  const { dir: state } = ownedFixtureDir(t, "judge-shadow-origin-state");
+  assert.deepEqual(await requestOf((seams, log) => productionRefreshJudge({ repoRoot: checkout, stateDir: state, log, diff: async () => "diff", shadowDecisions: seams,
+    spawn: async () => worker('{"verdict":"independent","reason":"no shared file"}') })(
+    { prNumber: 11, headSha: "0123abc", prFiles: ["a"], baseFiles: ["b"], baseTruncated: false, cause: "tests", ciInFlight: false })),
+  { headSha: "0123abc", prUrl: "https://github.com/craigoley/remudero/pull/11" }, "refresh-value");
+  // A judgement with no pull request (a task id key) passes its head alone, and a checkout with no origin gives no URL.
+  const viaCall = (extra: Partial<ShadowJudgeCall<{ verdict: string }>>) => (seams: DecisionShadowDeps, log: (step: string, fields: Record<string, unknown>) => void) =>
+    shadowJudgeCall(riskCall({ log } as ReturnType<typeof ledger>, seams, riskMount(), extra));
+  assert.deepEqual(await requestOf(viaCall({ key: "W1-T1", head: { sha: "abc1234" } })), { headSha: "abc1234", prUrl: undefined }, "no pull request");
+  const { dir: bare } = ownedFixtureDir(t, "judge-shadow-no-origin");
+  execFileSync("git", ["-C", bare, "init", "-q"]);
+  assert.deepEqual(await requestOf(viaCall({ primaryArgs: { cwd: bare, prompt: "p" } as SpawnWorkerArgs, head: { sha: "abc1234", prNumber: 7 } })),
+    { headSha: "abc1234", prUrl: undefined }, "no origin");
 });

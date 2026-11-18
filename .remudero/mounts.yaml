@@ -545,6 +545,10 @@ decision_models:
 # Same `shadow:` names as above. Each judge acts on its own answer only; the shadow writes one
 # judge_shadow row. A typed-judgment spawn with no entry of its own (head-rehome) uses
 # `typed-judgment`'s. Remove a line to turn that shadow off. Keep each entry on ONE line.
+# The config gardener may replace a line of refresh-value, head-rehome or typed-judgment with
+# `{ primary: <name>, threshold: { model: <deployment>, surface: decisions, value: <0 to 1> } }`: that
+# decision model then answers first when its top option reaches the threshold, and the judge's own
+# spawn answers when it does not.
 judge_shadows:
   refresh-value: decisions-eastus
   quiet-worker-watchdog: decisions-eastus

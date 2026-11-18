@@ -33,7 +33,7 @@ import { ledgerRotationEntries, readLedgerUnionRecordsSync } from "./ledger-unio
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import type { BillingMode } from "./env.js";
 import { recommendMounts, type MountHeadroomCell, type MountRecommendation } from "./mount-recommender.js";
-import { loadMounts, mountsPath } from "./mounts.js";
+import { loadMounts, mountsPath, type JudgeShadowOnlyRole } from "./mounts.js";
 import { loadPlan } from "./plan.js";
 import { planShards } from "./plan-gardener.js";
 import { resolveRepoLayout } from "./repo-layout.js";
@@ -55,8 +55,9 @@ import { deriveTaskClass } from "./task-class.js";
  *   - RE-DERIVE-CAP: the learnings character cap is re-derived from the spawns measured UNDER the
  *     current cap, with the same two functions that derived it (digest.ts).
  *   - MOVE-JUDGE-TO-CASH (W1-T12187): a judge whose cash shadow cleared {@link JUDGE_CASH_BAR} gets `provider: cash`
- *     on its own one-line row in the mounts table. W1-T12417: the same edit when one shadow model of a role clears
- *     {@link JUDGE_SWITCH_BAR} on W1-T12414's per-model scores and is the model cash serves that row with.
+ *     on its own one-line row in the mounts table. W1-T12417: when one shadow model of a role clears
+ *     {@link JUDGE_SWITCH_BAR} on W1-T12414's per-model scores, the same edit if it is a cash model cash serves that row
+ *     with, or, for a decision model, the role's `judge_shadows` line made `{ primary, threshold }`.
  *
  * EVERY CHANGE IS A CANARY (experiment-promotion.ts). It is chosen only when its SHADOW evidence — what
  * it was derived from, read before anything is exposed — clears its guard. Its PR opening puts it in
@@ -132,6 +133,8 @@ export interface ConfigInventory {
   judgeShadows?: JudgeShadowRoleSummary[];
   /** W1-T12417: W1-T12414's scores of each role's shadow models over the same window, one group per role, model and surface. */
   judgeShadowScores?: TypedAnswerScoreGroup[];
+  /** W1-T12417: the least top-option probability each decision model clears the bar at, per role ({@link judgeShadowThresholds}). */
+  judgeShadowThresholds?: JudgeShadowThreshold[];
   active: ConfigCanary[];
   /** Scopes whose canary was rolled back or declined within {@link CANARY_TTL_MS}: re-proposing the same
    *  change on the next pass would only repeat the verdict. */
@@ -464,6 +467,7 @@ function buildConfigInventory(input: InventoryMeasurement): ConfigInventory {
     cap: { current: DEFAULT_KNOWLEDGE_BUDGET_CHARS, derivation: capDerivation(rows, weights, DEFAULT_KNOWLEDGE_BUDGET_CHARS) },
     judgeShadows: judgeShadowSummary(rows, input.nowMs - JUDGE_CASH_BAR.windowMs),
     judgeShadowScores: scoreTypedAnswers(judgeShadowTypedAnswers(rows, input.nowMs - JUDGE_CASH_BAR.windowMs)).groups,
+    judgeShadowThresholds: judgeShadowThresholds(rows, input.nowMs - JUDGE_CASH_BAR.windowMs),
     active: canaries.filter((c) => isPromotionActive(c.promotion.state)),
     cooling: canaries.filter((c) => c.promotion.state === "rolled_back" && input.nowMs - Date.parse(c.promotion.createdAt) < CANARY_TTL_MS).map((c) => c.promotion.scope.policyScope),
   };
@@ -769,36 +773,74 @@ export function judgeShadowModelClears(g: TypedAnswerScoreGroup): boolean {
     (g.rejected + g.abstained) / g.answers <= JUDGE_SWITCH_BAR.maxNoAnswerShare && (g.brier === null || g.brier <= JUDGE_SWITCH_BAR.maxBrier);
 }
 
-/** W1-T12417: the first role and shadow model that clear {@link JUDGE_SWITCH_BAR}, where `provider: cash` on the role's
- *  one-line row makes that model the role's primary: the model is the first of the cash row cash serves the row's
- *  model and effort from. A fail-closed judge, a decision model (no judge has a decision-model primary yet), a role
- *  with no one-line row and a row already on cash get no proposal. */
+/** W1-T12417: one tuned threshold figure: the least top-option probability among the answers that cleared
+ *  {@link JUDGE_SWITCH_BAR}, for one role, model and model surface. */
+export interface JudgeShadowThreshold {
+  role: string;
+  model: string;
+  surface: ModelSurface;
+  value: number;
+}
+
+/** W1-T12417: per role and decision model whose compared answers number {@link JUDGE_SWITCH_BAR}'s floor and agree with the
+ *  judge's own at its agreement share, the lowest top-option probability among them (to three places, rounded down): the
+ *  confidence the model was validated down to, below which its answer is not taken as primary. Any other model has no
+ *  figure. A single generated answer has no probability, so a `text` surface gets none. */
+export function judgeShadowThresholds(rows: ReadonlyArray<Record<string, unknown>>, sinceMs?: number): JudgeShadowThreshold[] {
+  const groups = new Map<string, { role: string; model: string; answers: Array<{ top: number; agree: boolean }> }>();
+  for (const row of rows) {
+    const role = row.role;
+    const model = row.shadow_model;
+    if (row.step !== "judge_shadow.compared" || row.model_surface !== "decisions" || typeof role !== "string" || typeof model !== "string" ||
+      typeof row.agreement !== "boolean" || !Array.isArray(row.distribution) || row.refusal !== undefined) continue;
+    if (sinceMs !== undefined && !(Date.parse(String(row.ts)) >= sinceMs)) continue;
+    const top = Math.max(...(row.distribution as Array<{ probability: number }>).map((entry) => entry.probability));
+    if (!Number.isFinite(top)) continue;
+    const key = `${role}\u0000${model}`;
+    const group = groups.get(key) ?? { role, model, answers: [] };
+    group.answers.push({ top, agree: row.agreement });
+    groups.set(key, group);
+  }
+  const out: JudgeShadowThreshold[] = [];
+  for (const { role, model, answers } of groups.values()) {
+    const agreeing = answers.filter((a) => a.agree).length;
+    // The bar was cleared over every one of these answers, so the least top probability among them is the least cut that clears it.
+    if (answers.length < JUDGE_SWITCH_BAR.minCompared || agreeing / answers.length < JUDGE_SWITCH_BAR.minAgreeShare) continue;
+    out.push({ role, model, surface: "decisions", value: Math.floor(Math.min(...answers.map((a) => a.top)) * 1000 + 1e-9) / 1000 });
+  }
+  return out;
+}
+
+/** W1-T12417: the judges whose own answer is exactly one option, so a decision model can be their primary. Their
+ *  `judge_shadows` entry is the one line {@link judgeShadowSwitchCandidate} replaces. */
+export const DECISION_PRIMARY_ROLES: readonly JudgeShadowOnlyRole[] = ["refresh-value", "head-rehome", "typed-judgment"];
+
+/** W1-T12417: the first role and shadow model that clear {@link JUDGE_SWITCH_BAR}, as one edit that makes the model the
+ *  role's primary. A decision model on a judge whose answer is one option (see {@link DECISION_PRIMARY_ROLES}) replaces the
+ *  role's `judge_shadows` line with `{ primary: <model>, threshold: { model: <deployment>, surface: decisions, value } }`;
+ *  the threshold is the model's own figure ({@link judgeShadowThresholds}) and is read only for that model id and surface.
+ *  A cash model on a role's one-line row gets `provider: cash` when cash serves that row with it first. A fail-closed
+ *  judge, a role with no such line, a role already on its candidate and a model with no threshold figure get nothing. */
 export function judgeShadowSwitchCandidate(inv: ConfigInventory, repoRoot: string): ConfigGardenAction | undefined {
   const full = mountsPath(repoRoot);
-  const clear = (inv.judgeShadowScores ?? []).filter((g) => g.modelSurface === "text" && !FAIL_CLOSED_JUDGE_ROLES.has(g.role) && judgeShadowModelClears(g));
+  const clear = (inv.judgeShadowScores ?? []).filter((g) => !FAIL_CLOSED_JUDGE_ROLES.has(g.role) && judgeShadowModelClears(g));
   if (clear.length === 0 || !existsSync(full)) return undefined;
   const path = relative(repoRoot, full).split(sep).join("/");
   const mounts = loadMounts(full);
   const lines = readFileSync(full, "utf8").split("\n");
   for (const g of clear) {
-    const key = JUDGE_ROLE_ROWS[g.role];
-    const row = key === undefined ? undefined : mounts[key];
-    const from = key === undefined ? undefined : lines.find((line) => line.startsWith(`${key}: {`) && line.trimEnd().endsWith("}"));
-    if (row === undefined || from === undefined || row.provider === "cash") continue;
-    const served = openWeightCandidatesForCapability(mounts.capabilities, openWeightCapabilityForRequestedModel(mounts.capabilities, row.model), row.effort)[0];
-    if (served !== g.model) continue;
-    const to = from.replace(/\s*\}\s*$/, ", provider: cash }");
+    const edit = g.modelSurface === "decisions" ? decisionPrimaryEdit(g, inv, mounts, lines) : cashPrimaryEdit(g, mounts, lines);
+    if (edit === undefined) continue;
     const cohort: ConfigCohort = { kind: "all" };
     const noAnswer = (g.rejected + g.abstained) / g.answers;
     const observed = { denominator: g.agreement.compared, freshness: "verified" as const, comparisonPopulation: population(cohort), observedAt: inv.nowIso };
     return {
       class: "move-judge-to-cash", target: g.role, scope: `judge:${g.role}`,
       reason: `the ${g.model} shadow of the ${g.role} agreed on ${(g.agreement.rate! * 100).toFixed(1)}% of ${g.agreement.compared} compared calls in 14 days, ` +
-        `${(noAnswer * 100).toFixed(1)}% of its calls gave no usable answer${g.brier === null ? "" : `, and its Brier score is ${g.brier.toFixed(3)}`}; ` +
-        `cash serves ${key} on ${row.model}/${row.effort} with ${g.model} first.`,
-      edits: [{ path, from, to }], cohort,
-      candidate: `${key} on ${g.model} (cash, ${g.modelSurface} surface)`,
-      baseline: `${key} on ${row.model}/${row.effort} with ${row.provider ?? "no provider"}`,
+        `${(noAnswer * 100).toFixed(1)}% of its calls gave no usable answer${g.brier === null ? "" : `, and its Brier score is ${g.brier.toFixed(3)}`}; ${edit.why}`,
+      edits: [{ path, from: edit.from, to: edit.to }], cohort,
+      candidate: `${g.role} on ${g.model} (${g.modelSurface} surface)`,
+      baseline: `${g.role} on its own judge`,
       exposure: 1,
       shadowMetrics: [
         { metricName: "shadow_agree_share", unit: "fraction", direction: "min", abortThreshold: JUDGE_SWITCH_BAR.minAgreeShare },
@@ -811,6 +853,32 @@ export function judgeShadowSwitchCandidate(inv: ConfigInventory, repoRoot: strin
     };
   }
   return undefined;
+}
+
+type PrimaryEdit = { from: string; to: string; why: string };
+
+/** A decision model that clears the bar on a judge whose answer is one option: that judge's `judge_shadows` line made a primary. */
+function decisionPrimaryEdit(g: TypedAnswerScoreGroup, inv: ConfigInventory, mounts: ReturnType<typeof loadMounts>, lines: readonly string[]): PrimaryEdit | undefined {
+  const role = (DECISION_PRIMARY_ROLES as readonly string[]).includes(g.role) ? g.role as JudgeShadowOnlyRole : undefined;
+  const candidate = mounts.decision_models !== undefined && Object.hasOwn(mounts.decision_models, g.model) ? mounts.decision_models[g.model] : undefined;
+  const figure = (inv.judgeShadowThresholds ?? []).find((t) => t.role === g.role && t.model === g.model && t.surface === g.modelSurface);
+  if (role === undefined || candidate === undefined || figure === undefined || mounts.judge_primaries?.[role] !== undefined) return undefined;
+  const entries = lines.filter((line) => new RegExp(`^ {2}${role}: \\S`).test(line));
+  if (entries.length !== 1 || mounts.judge_shadows?.[role] === undefined) return undefined;
+  return { from: entries[0]!,
+    to: `  ${role}: { primary: ${g.model}, threshold: { model: ${candidate.deployment}, surface: ${figure.surface}, value: ${figure.value} } }`,
+    why: `${g.model} becomes the primary of ${role}, answering when its top option has at least ${figure.value}, and the judge it replaces answers when it does not.` };
+}
+
+/** A cash model that clears the bar on a role's one-line row: `provider: cash`, when cash serves the row with that model first. */
+function cashPrimaryEdit(g: TypedAnswerScoreGroup, mounts: ReturnType<typeof loadMounts>, lines: readonly string[]): PrimaryEdit | undefined {
+  const key = JUDGE_ROLE_ROWS[g.role];
+  const row = key === undefined ? undefined : mounts[key];
+  const from = key === undefined ? undefined : lines.find((line) => line.startsWith(`${key}: {`) && line.trimEnd().endsWith("}"));
+  if (key === undefined || row === undefined || from === undefined || row.provider === "cash") return undefined;
+  const served = openWeightCandidatesForCapability(mounts.capabilities, openWeightCapabilityForRequestedModel(mounts.capabilities, row.model), row.effort)[0];
+  if (served !== g.model) return undefined;
+  return { from, to: from.replace(/\s*\}\s*$/, ", provider: cash }"), why: `cash serves ${key} on ${row.model}/${row.effort} with ${g.model} first.` };
 }
 
 /** A draft promotion for `action`, approved by the gardener's own draw and not yet exposed. */
@@ -915,7 +983,7 @@ const titles: Record<ConfigGardenClass, string> = {
   "recalibrate-budget": "chore(plan): the config gardener canaries recalibrated budgets",
   "adopt-mount": "chore(mounts): the config gardener canaries a recommended mount",
   "re-derive-cap": "chore(learnings): the config gardener canaries a re-derived learnings cap",
-  "move-judge-to-cash": "chore(mounts): the config gardener canaries a judge on the cash provider",
+  "move-judge-to-cash": "chore(mounts): the config gardener canaries a judge's primary on a candidate model",
 };
 
 /** Modification times of the plan and mounts, and the current read bucket: an idle tick costs a few stats. */

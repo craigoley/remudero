@@ -1,6 +1,6 @@
-import type { JudgeShadowArm, Mount } from "./mounts.js";
+import type { JudgePrimary, JudgeShadowArm, Mount } from "./mounts.js";
 import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
-import { shadowJudgeCall } from "./judge-shadow.js";
+import { askPrimaryCandidate, shadowJudgeCall, type JudgedHead, type ShadowJudgeCall } from "./judge-shadow.js";
 import { spawnWorker, type SpawnWorkerArgs } from "./worker.js";
 
 /**
@@ -179,6 +179,9 @@ export function buildTypedJudgmentSpawnArgs<TOption extends string>(opts: {
   };
 }
 
+/** W1-T12417: what a decision model is told about a typed-judgment question: the input is the question itself. */
+const TYPED_JUDGMENT_DECISION_INSTRUCTIONS = "The input is a question. Choose the option that answers it.";
+
 /** Run one typed-choice call and parse its response. `spawn` is injectable for a
  *  caller's own resolved dependency (mirrors {@link "./risk-judge.js".spawnRiskJudgeWorker}). */
 export async function runTypedJudgment<TOption extends string>(opts: {
@@ -191,9 +194,22 @@ export async function runTypedJudgment<TOption extends string>(opts: {
   /** W1-T12417: the role this spawn answers for, its ledger and its shadow arm. With one, the spawn's answer is asked
    *  of the arm afterwards (judge-shadow.ts) and the result returned here is the spawn's own. */
   shadow?: { role: "head-rehome" | "typed-judgment"; key: string; arm: JudgeShadowArm | undefined;
-    log: (step: string, fields: Record<string, unknown>) => void; head?: { sha?: string; prUrl?: string } };
+    log: (step: string, fields: Record<string, unknown>) => void; head?: JudgedHead;
+    /** W1-T12417: a decision model that answers first. Its answer is the result when it clears its threshold, and the
+     *  spawn below answers when it does not. */
+    primary?: JudgePrimary;
+    /** The decision-model seams of the primary and of the shadow, for a test; production reads the host config. */
+    decisions?: ShadowJudgeCall<unknown>["decisions"] };
 }): Promise<TypedJudgmentResult<TOption>> {
   const spawn = opts.spawn ?? benchmarkNonDispatchSpawn("typed-judgment");
+  if (opts.shadow?.primary !== undefined) {
+    const { role, key, primary, log, head, decisions } = opts.shadow;
+    const answered = await askPrimaryCandidate({ role, key, primary, question: { instructions: TYPED_JUDGMENT_DECISION_INSTRUCTIONS, options: opts.options },
+      input: opts.question, cwd: opts.cwd, log, ...(head === undefined ? {} : { head }), ...(decisions === undefined ? {} : { decisions }) });
+    if (answered !== undefined) {
+      return { kind: "distribution", distribution: Object.fromEntries(opts.options.map((option) => [option, answered.distribution.find((entry) => entry.option === option)!.probability])) as TypedJudgmentDistribution<TOption> };
+    }
+  }
   const args = buildTypedJudgmentSpawnArgs(opts);
   const result = await spawn(args);
   const parsed = parseTypedJudgmentResponse(result.text, opts.options);
@@ -207,8 +223,8 @@ export async function runTypedJudgment<TOption extends string>(opts: {
     void shadowJudgeCall({ role: shadow.role, key: shadow.key, mount: { ...opts.mount, shadow: shadow.arm }, primaryArgs: args, primary: result,
       primaryAnswer: parsed.kind === "distribution" ? argmaxTypedJudgmentOption(parsed.distribution) : undefined, parse: top,
       agreementKey: (option) => option, input: opts.question, spawn, log: shadow.log,
-      question: { instructions: "The input is a question. Choose the option that answers it.", options: opts.options },
-      ...(shadow.head === undefined ? {} : { head: shadow.head }) });
+      question: { instructions: TYPED_JUDGMENT_DECISION_INSTRUCTIONS, options: opts.options },
+      ...(shadow.head === undefined ? {} : { head: shadow.head }), ...(shadow.decisions === undefined ? {} : { decisions: shadow.decisions }) });
   }
   return parsed;
 }

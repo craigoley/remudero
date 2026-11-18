@@ -4,7 +4,7 @@ import { parse as parseYaml } from "yaml";
 import type { JudgeMount, Mount, Mounts } from "./mounts.js";
 import { MountsError } from "./mounts.js";
 import { capStderrExcerpt, REPORT_EXCERPT_CAP, spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
-import { shadowJudgeCall } from "./judge-shadow.js";
+import { shadowJudgeCall, type ShadowJudgeCall } from "./judge-shadow.js";
 import { benchmarkNonDispatchSpawn, withGuardrailAttempt } from "./benchmark-run.js";
 import { argmaxTypedJudgmentOption, runTypedJudgment, type TypedJudgmentResult } from "./typed-judgment.js";
 
@@ -1627,6 +1627,8 @@ export function realRiskJudge(opts: {
   /** W1-T12187: set for the risk judge role only. The spawn then uses the provider `mount` names, and each parsed
    *  verdict is asked of the cash shadow afterwards, with its row written here. The verdict never waits on it. */
   shadowLog?: (step: string, fields: Record<string, unknown>) => void;
+  /** W1-T12417: the decision-model seams of that shadow, for a test; production reads the host config. */
+  shadowDecisions?: ShadowJudgeCall<unknown>["decisions"];
 }): (input: RiskJudgeInput) => Promise<RiskJudgeVerdict> {
   const spawn = opts.spawn ?? benchmarkNonDispatchSpawn("risk-judge");
   const maxAttempts = opts.maxAttempts ?? RISK_JUDGE_MAX_ATTEMPTS;
@@ -1660,7 +1662,8 @@ export function realRiskJudge(opts: {
           void shadowJudgeCall({
             role: "risk-judge", key: riskJudgeDecisionKey(input), mount: opts.mount, primaryArgs: spawnArgs, primary: result,
             primaryAnswer: outcome.verdict, parse: parsedRiskJudgeVerdict, agreementKey: (verdict) => verdict.verdict,
-            ...(input.headSha === undefined ? {} : { head: { sha: input.headSha } }), spawn, log: opts.shadowLog,
+            ...(input.headSha === undefined ? {} : { head: { sha: input.headSha, ...(input.prNumber === undefined ? {} : { prNumber: input.prNumber }) } }),
+            spawn, log: opts.shadowLog, ...(opts.shadowDecisions === undefined ? {} : { decisions: opts.shadowDecisions }),
           });
         }
         return outcome.verdict;

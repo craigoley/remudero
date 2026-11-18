@@ -141,6 +141,14 @@ export interface JudgeThreshold {
   value: number;
 }
 
+/** W1-T12417: a decision model that answers a judge's fixed options as the judge's primary. Its answer counts only when
+ *  the top option clears `threshold`, which names this model's deployment on the `decisions` surface; the judge
+ *  that ran before it answers whenever it does not. The config gardener writes this entry. */
+export interface JudgePrimary {
+  arm: DecisionShadowArm;
+  threshold?: JudgeThreshold;
+}
+
 /** A judge's own mount row: a {@link Mount} plus an optional shadow arm and threshold. */
 export interface JudgeMount extends Mount {
   shadow?: JudgeShadowArm;
@@ -267,6 +275,9 @@ export interface Mounts {
   decision_models?: Record<string, DecisionCandidate>;
   /** OPTIONAL (W1-T12417) — the shadow of each fixed-option judge that has no mount row of its own. */
   judge_shadows?: Partial<Record<JudgeShadowOnlyRole, JudgeShadowArm>>;
+  /** OPTIONAL (W1-T12417) — a `judge_shadows` entry written as `{ primary: <decision model>, threshold: {...} }` makes
+   *  that decision model the judge's primary, with the judge's own spawn as the fallback. */
+  judge_primaries?: Partial<Record<JudgeShadowOnlyRole, JudgePrimary>>;
 }
 
 /** The two request shapes a decision model answers in (W1-T12416). */
@@ -359,17 +370,41 @@ function parseJudgeMount(raw: unknown, where: string, tiers: Record<string, numb
     ...(threshold === undefined ? {} : { threshold: parseThreshold(threshold, where) }) };
 }
 
-/** W1-T12417: the `judge_shadows` section: role → shadow, for the judges with no row of their own. */
-function parseJudgeShadows(raw: unknown, decisionModels: Record<string, DecisionCandidate> | undefined): Partial<Record<JudgeShadowOnlyRole, JudgeShadowArm>> {
+/** W1-T12417: a `judge_shadows` entry that makes a decision model the primary: `{ primary: <name>, threshold: {...} }`,
+ *  the threshold naming that model's deployment and the `decisions` surface. */
+function parseJudgePrimary(entry: Record<string, unknown>, where: string, decisionModels: Record<string, DecisionCandidate> | undefined): JudgePrimary {
+  const { primary, threshold, ...rest } = entry;
+  if (Object.keys(rest).length > 0 || typeof primary !== "string") {
+    throw new MountsError(`mount ${where}: a mapping needs 'primary: <decision model>' and optionally 'threshold', got keys ${JSON.stringify(Object.keys(entry))}.`);
+  }
+  const arm = parseShadowArm(primary, where, decisionModels);
+  if (arm.provider !== "decisions") throw new MountsError(`mount ${where}: 'primary' must name a decision_models row, got ${JSON.stringify(primary)}.`);
+  if (threshold === undefined) return { arm };
+  const parsed = parseThreshold(threshold, where);
+  if (parsed.surface !== "decisions" || parsed.model !== arm.deployment) {
+    throw new MountsError(`mount ${where}: 'threshold' must name the deployment ${arm.deployment} and the decisions surface of the primary.`);
+  }
+  return { arm, threshold: parsed };
+}
+
+/** W1-T12417: the `judge_shadows` section: role → shadow, or a `{ primary, threshold }` mapping, for the judges with
+ *  no row of their own. */
+function parseJudgeShadows(raw: unknown, decisionModels: Record<string, DecisionCandidate> | undefined):
+  { shadows: Partial<Record<JudgeShadowOnlyRole, JudgeShadowArm>>; primaries: Partial<Record<JudgeShadowOnlyRole, JudgePrimary>> } {
   if (!isObject(raw)) throw new MountsError("'judge_shadows' must be a mapping of role → shadow.");
-  const out: Partial<Record<JudgeShadowOnlyRole, JudgeShadowArm>> = {};
+  const shadows: Partial<Record<JudgeShadowOnlyRole, JudgeShadowArm>> = {};
+  const primaries: Partial<Record<JudgeShadowOnlyRole, JudgePrimary>> = {};
   for (const [role, shadow] of Object.entries(raw)) {
     if (!(JUDGE_SHADOW_ONLY_ROLES as readonly string[]).includes(role)) {
       throw new MountsError(`'judge_shadows.${role}' is not a judge without its own row (${JUDGE_SHADOW_ONLY_ROLES.join(", ")}).`);
     }
-    out[role as JudgeShadowOnlyRole] = parseShadowArm(shadow, `judge_shadows.${role}`, decisionModels);
+    if (isObject(shadow) && (shadow.primary !== undefined || shadow.threshold !== undefined)) {
+      primaries[role as JudgeShadowOnlyRole] = parseJudgePrimary(shadow, `judge_shadows.${role}`, decisionModels);
+    } else {
+      shadows[role as JudgeShadowOnlyRole] = parseShadowArm(shadow, `judge_shadows.${role}`, decisionModels);
+    }
   }
-  return out;
+  return { shadows, primaries };
 }
 
 /** The plan-authorship effort floor the Architect must meet or exceed (§9). */
@@ -830,7 +865,9 @@ export function validateMounts(raw: unknown, opts: MountsOptions = {}): Mounts {
   const feedbackSummary =
     raw.feedback_summary === undefined ? undefined : parseJudgeMount(raw.feedback_summary, "feedback_summary", tiers, efforts, decisionModels);
   const stepUp = raw.step_up === undefined ? undefined : parseMount(raw.step_up, "step_up", tiers, efforts);
-  const judgeShadows = raw.judge_shadows === undefined ? undefined : parseJudgeShadows(raw.judge_shadows, decisionModels);
+  const judgeSection = raw.judge_shadows === undefined ? undefined : parseJudgeShadows(raw.judge_shadows, decisionModels);
+  const judgeShadows = judgeSection?.shadows;
+  const judgePrimaries = judgeSection === undefined || Object.keys(judgeSection.primaries).length === 0 ? undefined : judgeSection.primaries;
 
   // W1-T2559: synthesis rungs — each REQUIRED, validated like architect/judge, never a fallback.
   if (!isObject(raw.synthesis)) throw new MountsError(`'synthesis' must be a mapping of role → mount (${SYNTHESIS_ROLES.join(", ")}).`);
@@ -855,7 +892,7 @@ export function validateMounts(raw: unknown, opts: MountsOptions = {}): Mounts {
     }
   }
 
-  const mounts: Mounts = { tiers, efforts, ...(capabilities ? { capabilities } : {}), architect, judge, ...(escalationJudge ? { escalation_judge: escalationJudge } : {}), ...(verifyHumanJudge ? { verify_human_judge: verifyHumanJudge } : {}), ...(machineFilingJudge ? { machine_filing_judge: machineFilingJudge } : {}), ...(ciJudge ? { ci_judge: ciJudge } : {}), ...(fixProgressJudge ? { fix_progress_judge: fixProgressJudge } : {}), ...(riskJudge ? { risk_judge: riskJudge } : {}), ...(feedbackSummary ? { feedback_summary: feedbackSummary } : {}), ...(stepUp ? { step_up: stepUp } : {}), synthesis, routes, ...(decisionModels ? { decision_models: decisionModels } : {}), ...(judgeShadows ? { judge_shadows: judgeShadows } : {}) };
+  const mounts: Mounts = { tiers, efforts, ...(capabilities ? { capabilities } : {}), architect, judge, ...(escalationJudge ? { escalation_judge: escalationJudge } : {}), ...(verifyHumanJudge ? { verify_human_judge: verifyHumanJudge } : {}), ...(machineFilingJudge ? { machine_filing_judge: machineFilingJudge } : {}), ...(ciJudge ? { ci_judge: ciJudge } : {}), ...(fixProgressJudge ? { fix_progress_judge: fixProgressJudge } : {}), ...(riskJudge ? { risk_judge: riskJudge } : {}), ...(feedbackSummary ? { feedback_summary: feedbackSummary } : {}), ...(stepUp ? { step_up: stepUp } : {}), synthesis, routes, ...(decisionModels ? { decision_models: decisionModels } : {}), ...(judgeShadows ? { judge_shadows: judgeShadows } : {}), ...(judgePrimaries ? { judge_primaries: judgePrimaries } : {}) };
   // G-17 FIRST: checking the step-up ahead of it MASKED the Tier Invariant's own message, so a
   // table violating G-17 reported the step-up's refusal instead. Both fire; only the order moved.
   enforceTierInvariant(mounts, opts.thinkingDefault);

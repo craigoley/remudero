@@ -505,7 +505,10 @@ A decision-model shadow:
 - sends nothing when the deployment's learned per-minute limit cannot hold the request.
 - passes the judged head and, where there is one, the pull request. The `decision.answered` row
   records them as `head_sha` and `pr_url`, so W1-T12425's outcome rows join it by head. A shadow
-  with no judged head records neither.
+  with no judged head records neither. A judge that holds a pull request number (the risk judge,
+  the ci judge, fix-progress and refresh-value) passes it with the head, and the shadow turns it
+  into the pull request's URL from the origin of the judge's checkout. A checkout whose origin
+  cannot be read records the head with no pull request.
 
 It writes one `judge_shadow` row with `model_surface: decisions`:
 
@@ -520,11 +523,26 @@ a distribution counts as an abstention. No other model or surface reads it.
 
 The config gardener also scores each role's shadow models with W1-T12414's scorer, one figure per
 role, model and surface, over the last 14 days. When one model clears the per-model bar, it proposes
-`provider: cash` on the role's one-line row, but only when cash serves that row with that model
-first, so the change makes that model the role's primary. The bar is the table above, plus a Brier
+one edit that makes that model the role's primary. The bar is the table above, plus a Brier
 score of at most 0.1 for a model with a Brier figure. The ceiling is new and unmeasured: no shadow
-answer had a known outcome on 2026-11-17. A judge that fails closed (the risk judge) and a decision
-model get no proposal: no judge has a decision-model primary yet.
+answer had a known outcome on 2026-11-17. A judge that fails closed (the risk judge) gets no proposal.
+
+- A decision model, on a judge whose own answer is exactly one option (`refresh-value`,
+  `head-rehome`, `typed-judgment`): the role's `judge_shadows` line becomes
+  `{ primary: <name>, threshold: { model: <deployment>, surface: decisions, value } }`. The value is
+  the lowest top-option probability among the answers that cleared the bar, so the stored threshold
+  names the model id (its deployment) and the surface it was measured on, and is read only for that
+  pair. The judge asks the decision model first. It answers when its top option reaches the
+  threshold. When it is unavailable, rate-limited, refused, rejected, abstaining or below the
+  threshold, one `judge_shadow.skipped` row (`served_as: primary`) says why and the judge's own spawn
+  answers as before. The role's shadow line is replaced, so the role is no longer shadowed.
+- A cash model, on a role's one-line row: `provider: cash`, when cash serves that row with that
+  model first. A generated answer has no probability, so no threshold is stored for it.
+
+A decision model on `ci-judge` or `fix-progress` gets no proposal: their verdicts carry a reason, a
+suite list or an approach that a decision model cannot give. The edit is a canary like a mount
+change and goes through the fleet's review and merge; a guardrail breach opens a pull request that
+reverts the line.
 
 ## Rollback
 
