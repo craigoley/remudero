@@ -1,0 +1,118 @@
+- id: W1-T13611
+  title: "A fix lane never adds a gate exclusion or baseline entry without the operator's yes"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # adds a refusal on every fix-lane push in every managed repo; a wrong match would stand down real repairs
+  origin: "operator-session#fix-lane-gate-exclusion-2026-11-18"
+  plan_refs:
+    - W1-T2596
+    - W1-T3133
+    - W1-T11030
+  files:
+    - src/lib/fix-round-gate-loosening.ts
+    - src/cli/commands/fix.ts
+    - src/lib/prompt-render.ts
+    - test/a-fix-round-never-adds-a-gate-exclusion-without-the-operator-yes.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A fix round whose diff from the PR head adds an entry to an exclusion or baseline file (scripts/*-baseline.json in any repo, osv-scanner.toml, .github/semgrep/**, or any INSTRUMENT_SURFACE path) that classifyInstrumentChange does not judge tightening is not pushed: landRoundPush writes fix.commit_refused with reason gate-loosening and the file list, writes fix.done subtype commit_refused, and the rung stands down with a reason that asks for the operator's yes"
+      proof: "grep: W1-T13611 criterion 1 in test/a-fix-round-never-adds-a-gate-exclusion-without-the-operator-yes.test.ts"
+    - claim: "invariant:refusal-holds-in-every-managed-repo — the same refusal fires for a consumer-repo PR (craigoley/remudero-console shape: scripts/core-read-contract-baseline.json gains a {route, reason} row), so the core-only gate exemptions of a-consumer-repo-fix-round-is-not-refused-by-core-only-gates do not exempt it"
+      kind: guard
+      proof: "grep: W1-T13611 criterion 2 in test/a-fix-round-never-adds-a-gate-exclusion-without-the-operator-yes.test.ts"
+    - claim: "invariant:tightening-still-lands — a fix round that only lowers a ceiling row in a scripts/*-baseline.json file, or changes no exclusion or baseline file, is pushed as today"
+      kind: guard
+      proof: "grep: W1-T13611 criterion 3 in test/a-fix-round-never-adds-a-gate-exclusion-without-the-operator-yes.test.ts"
+    - claim: "Before a fix worker is dispatched, the rung reads the PR body and its issue comments; a body or a comment by the PR author or a repo owner, member or collaborator (bots excluded) that tells the fix lane not to add or change a named file or kind of change is carried verbatim into the fix prompt as an OWNER INSTRUCTIONS block, and a round whose diff does what that instruction refuses is not pushed (fix.commit_refused reason owner-refusal)"
+      proof: "grep: W1-T13611 criterion 4 in test/a-fix-round-never-adds-a-gate-exclusion-without-the-operator-yes.test.ts"
+    - claim: "landRoundPush calls the new check on every push it makes (rung.strike and rung.generator_fix sites)"
+      proof: "grep: gateLooseningRefusal( in src/cli/commands/fix.ts"
+    - claim: "The fix prompt renders the owner instructions block"
+      proof: "grep: OWNER INSTRUCTIONS in src/lib/prompt-render.ts"
+    - claim: "The new module's tests run green under the house test setup"
+      proof: "unit test: test/a-fix-round-never-adds-a-gate-exclusion-without-the-operator-yes.test.ts"
+  rationale: |
+    WHY: a fleet fix round added a gate exclusion to a managed repo's PR that its owner had asked it not to touch.
+    The operator's rule (doctrine/ci-and-merging/no-unapproved-waivers.md) is that no advisory ignore, scanner
+    exclusion, baseline row or other gate loosening lands without the operator's explicit yes, and that a
+    session reads ALL of a PR's comments before it pushes to that PR. Nothing in the fix lane enforces either half.
+    OBSERVED 2026-11-18, console ledger /mnt/rmd/remudero-console-state/state (three-glob union: 393 .gz,
+    0 plain rotations, 1 live file), assignment f07dad20-7383-4549-ad7f-fd45dababa29, run DAEMON-1794970041888-6,
+    task CONSOLE-T232, PR craigoley/remudero-console#2676:
+    - 04:25:31Z worker.assignment worker_rung fix (claude-sonnet-5, effort high); 04:26:43Z fix.dispatch mode
+      ci-log, round resume, strike 1/2, head fd7fbe1, ci_failures console-ci "undeclared-read
+      /v1/views/inbox-threads", diff_stat "scripts/core-read-contract-baseline.json | 4 ++++".
+    - 04:26:48Z fix.done fix_outcome FIXED, push_outcome landed, pushed_head_sha cbda8241c7 (subject
+      "fix(core-read-contract): baseline the inbox-threads view read against the stale pin", trailer
+      Remudero-Assignment: f07dad20-...). 70 s, 14 turns, no shell: the harness committed and pushed.
+    - The worker's report (state/runs/DAEMON-1794970041888-6-fix1-1794975928184.tail) says it added the entry
+      "matching the task design's call for 'a reasoned baseline entry'". The CONSOLE-T232 shard on the PR head
+      lists scripts/core-read-contract-baseline.json in files and its design says a reasoned baseline entry
+      covers the gap. The PR body said: "No baseline change is in this PR until then. Please do not add one from
+      the fix lane." The operator session's revert (f558dcc, comment at 04:27:41Z) restored fd7fbe1's tree.
+    READ at origin/main b79ad9e16:
+    - src/lib/prompt-render.ts:371 renderFixPrompt takes the task design, the CI evidence, an operator
+      constraint and skills. It takes no PR body, no PR comments and no matched learnings or doctrine, so a fix
+      worker never sees an owner's refusal (INFERRED from the options list; the worker's tail cites only the
+      task design).
+    - learnings/ci.yaml:831 an-advisory-ignore-needs-the-operator-yes is scoped to osv-scanner.toml,
+      .github/semgrep/**, the OSV and title-lint workflows, commitlint.config.mjs and
+      src/lib/code-scanning-merge-policy.mjs. It never matches scripts/*-baseline.json, and the fix prompt does
+      not inject learnings at all, so it could not have reached this worker in any repo.
+    - src/cli/commands/fix.ts:2660 landRoundPush is the one pre-push seam of the fix rung (call sites :3462
+      rung.generator_fix, :5360 and :5434 rung.strike). Its only refusal today is filingRoundRefusal for
+      plan-only PRs. src/lib/review.ts:9823 INSTRUMENT_SURFACE and :10643 classifyInstrumentChange already
+      judge whether a baseline edit tightens (Standing rule 25), but only at review, after the push has landed.
+    CHECKED for duplicates (2026-11-18, origin/main and the added shards of all 605 open PR heads, 59 shard
+    files on 53 heads): none. RELATED, not duplicates: W1-T2596 (a gate that prints its own escape hatch, merged),
+    W1-T3133 (rule 25 direction table, which this reuses), W1-T11030 (an additive instrument edit rides its own
+    reviewed PR, queued: the sanctioned route this refusal points to).
+  design: |
+    INVARIANT refusal-holds-in-every-managed-repo: no fix-lane push in any managed repo adds a gate exclusion or baseline entry that is not a tightening.
+    INVARIANT tightening-still-lands: a round that only tightens, or touches no exclusion or baseline file, is pushed as before.
+    1. New module src/lib/fix-round-gate-loosening.ts:
+       - gateLooseningRefusal({ diffFiles, diff }): for each changed file that matches INSTRUMENT_SURFACE
+         (src/lib/review.ts, reused, not copied) or the scanner-ignore set (osv-scanner.toml anywhere,
+         .github/semgrep/**, .semgrepignore, .gitleaksignore, .trivyignore), call classifyInstrumentChange;
+         any result other than "tightening" is a finding. Returns undefined or { reason: "gate-loosening",
+         files, detail } where detail says the operator's yes is needed and names W1-T11030's route.
+       - ownerFixLaneInstructions({ prAuthor, body, comments }): the PR body plus each comment whose author is the
+         PR author or has author_association OWNER, MEMBER or COLLABORATOR and is not a bot, kept only when it
+         addresses the fix lane ("fix lane", "fix round", "fix worker") with a refusal ("do not", "don't",
+         "never", "please do not"). Returns the verbatim lines and, where one names a path or a kind of change
+         (baseline, exclusion, ignore, waiver), the paths or kinds it refuses.
+       - readPrConversation(prUrl, gh = ghJson): `gh pr view --json author,body` plus
+         `gh api repos/<o>/<r>/issues/<n>/comments --paginate`; an unreadable read returns { unreadable }.
+    2. src/cli/commands/fix.ts:
+       - Before the first strike of a run, read the conversation once (deps.readPrConversation, default the
+         module's reader) and pass ownerFixLaneInstructions into renderFixPrompt.
+       - landRoundPush: after filingRoundRefusal, compute the round's diff (git diff review.headSha..headSha in
+         the worktree, the same runner filingRoundRefusal uses) and call gateLooseningRefusal; then refuse a
+         diff that touches a path or kind an owner instruction refuses (reason owner-refusal). Either refusal
+         logs fix.commit_refused { site, head_sha, reason, files } and fix.done subtype commit_refused and
+         returns stood_down, exactly like the filing refusal. No new ledger step.
+       - The refusal does not depend on the task's files list or design: an author's design is not the
+         operator's yes. The operator's yes is out of scope here; until W1-T11030 lands, the operator makes
+         such a change by hand.
+    3. src/lib/prompt-render.ts renderFixPrompt: an optional ownerInstructions field renders, inside the
+       existing fence and envelope (it is external text), an "OWNER INSTRUCTIONS (from the PR body and
+       comments; they override the task design)" block after the constraint block, in every mode.
+    4. One test file drives runFixRung's push path through the house fakes (test/helpers/git-repo.ts,
+       fake-github.ts), one test per criterion titled "W1-T13611 criterion <k>": a core PR and a consumer
+       (remudero-console) PR adding a baseline row; a ceiling-lowering round; an owner comment refusing the
+       baseline change.
+  falsifier: |
+    Remove the gateLooseningRefusal call from landRoundPush: criteria 1 and 2 fail (the round pushes). Make it
+    refuse every instrument edit: criterion 3 fails. Drop the conversation read: criterion 4 fails (no OWNER
+    INSTRUCTIONS block, the owner-refused round pushes).
+  note: |
+    Id reserved for run-unfiled-1794976580000 with ~/rmd-work/bin/reserve-id.sh.
+    Proof that counts in production: over 14 days after merge, no fix.done push_outcome landed whose pushed diff
+    adds a non-tightening row to an INSTRUMENT_SURFACE or scanner-ignore file in any managed repo's ledger, and
+    each such attempt instead shows a fix.commit_refused row with reason gate-loosening or owner-refusal.
