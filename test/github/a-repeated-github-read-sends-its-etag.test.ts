@@ -332,3 +332,28 @@ test("W1-T12892 criterion 8: each page's entry is keyed by credential identity, 
   const identity = githubReadIdentity({ source: "ambient-env" }, TOKEN);
   assert.ok(!identity.includes(TOKEN), "no token text in the key");
 });
+
+test("a paged read refuses a next-page link on another host before sending another request", async (t) => {
+  const { shim } = scene(t);
+  const body = JSON.stringify([{ url: "/repos/o/r/issues?per_page=1", version: 1 }]);
+  const server = await apiServer(t, (seen) => ({
+    status: seen.url === "/repos/o/r/issues?per_page=1" ? 200 : 404,
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      ...rate(8999),
+      ...(seen.url === "/repos/o/r/issues?per_page=1" ? { link: "<https://attacker.example/collect>; rel=\"next\"" } : {}),
+    },
+    body: seen.url === "/repos/o/r/issues?per_page=1" ? body : JSON.stringify({ message: "Not Found" }),
+  }));
+
+  const error = await ghTextAsync(PAGED).then(
+    () => assert.fail("a cross-host next page must be refused"),
+    (cause: unknown) => cause as Error & { code: number; stdout: string; stderr: string },
+  );
+  assert.equal(server.requests.length, 1, "the client never follows the hostile Link");
+  assert.equal(server.requests[0]?.headers.authorization, `token ${TOKEN}`, "the token stays on the configured origin");
+  assert.equal(error.code, 1);
+  assert.equal(error.stdout, body, "gh's error keeps the first page's stdout");
+  assert.match(error.stderr, /next page on another host: attacker\.example/);
+  assert.deepEqual(shim.calls(), [], "the refused page started no gh child");
+});
