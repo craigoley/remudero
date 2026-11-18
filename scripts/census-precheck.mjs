@@ -855,6 +855,30 @@ function censusReaderContext(root, child, options) {
   return createHash("sha256").update(JSON.stringify(input)).digest("hex");
 }
 
+/** Only explicit `process.platform ===/!== "..."` test guards account for TAP skips here. */
+function platformGuardedSkipTitles(source, platform) {
+  const titles = new Set();
+  const testCall = /\b(?:test|it)\s*\(\s*(["'`])((?:\\.|(?!\1)[^\\])*)\1\s*,\s*\{([^{}]*)\}/gs;
+  for (const match of source.matchAll(testCall)) {
+    const skip = match[3].match(/(?:^|,)\s*skip\s*:\s*process\.platform\s*(===|!==)\s*(["'])([^"']+)\2\s*(?=,|$)/);
+    if (!skip) continue;
+    const condition = skip[1] === "===" ? platform === skip[3] : platform !== skip[3];
+    if (condition) titles.add(match[2].replace(/\\([\\"'`])/g, "$1"));
+  }
+  return titles;
+}
+
+function hasOnlyDeclaredPlatformSkips({ root, files, stdout, summary, tests, platform = process.platform }) {
+  if (summary.skipped === 0) return true;
+  if (summary.skipped === null || summary.pass + summary.skipped !== tests) return false;
+  const actual = [...stdout.matchAll(/^( *)(?:not )?ok [0-9]+ - (.+?)\s+# SKIP(?:\s|$).*$/gm)]
+    .map((match) => match[2]);
+  if (actual.length !== summary.skipped) return false;
+  const declared = new Set(files.flatMap((file) =>
+    [...platformGuardedSkipTitles(readFileSync(join(root, file), "utf8"), platform)]));
+  return actual.every((title) => declared.has(title)) && actual.length === declared.size;
+}
+
 /**
  * Runs `files` (repo-relative suite paths) once, in ONE `node --test` child over `root`, and returns the ones
  * that fail. THROWS, naming why, on every way the run can fail to be a measurement (spawn error, time bound,
@@ -862,6 +886,7 @@ function censusReaderContext(root, child, options) {
  */
 export function runCensusSuitesViaChild({ root, files, run = runCensusChild, priority = TEST_PRIORITY, snapshotPath, pathOverride, timeoutMs,
   readerRuntimePolicy, now = () => performance.now(), readContext = censusReaderContext, load1 = () => loadavg()[0],
+  platform = process.platform,
   history = { path: censusReaderHistoryPath(), mode: process.env[CENSUS_READER_HISTORY_ENV] === "act" ? "act" : "shadow" }, suiteHistory }) {
   const args = ["--test", "--test-reporter=tap", "--import", import.meta.resolve("tsx"), "--import", TMP_HYGIENE_URL, ...files];
   if (priority.reason) console.error(`census-precheck: census suites run at default priority - ${priority.reason}`);
@@ -949,7 +974,9 @@ export function runCensusSuitesViaChild({ root, files, run = runCensusChild, pri
         const matches = [...stdout.matchAll(new RegExp(`^# ${key} (\\d+)$`, "gm"))];
         return [key, matches.length === 1 ? Number(matches[0][1]) : null];
       }));
-      const passed = verdict?.complete !== false && summary.pass === Number(total[1]) && ["fail", "cancelled", "skipped", "todo"].every((key) => summary[key] === 0);
+      const platformSkipsComplete = hasOnlyDeclaredPlatformSkips({ root, files, stdout, summary, tests: Number(total[1]), platform });
+      const passed = verdict?.complete !== false && summary.pass + summary.skipped === Number(total[1]) &&
+        ["fail", "cancelled", "todo"].every((key) => summary[key] === 0) && platformSkipsComplete;
       // W1-T13146: only a complete passing run is a runtime the child's next bound may be priced from.
       if (childRecord && passed && failing.length === 0) {
         recordCensusReaderRuntime(childRecord.path, childRecord.key, finishedMs - startedMs, [childRecord.overrunKey]);

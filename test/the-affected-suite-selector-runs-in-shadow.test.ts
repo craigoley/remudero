@@ -505,6 +505,21 @@ test("W1-T9588: the shipped-detector suite is selected for each recorded miss ed
   assert.ok(!absent.suites.includes(suite), "a suite absent from the tree cannot be selected");
 });
 
+test("W1-T10111: the resolver-divergence suite is selected for each recorded miss edge", () => {
+  const suite = "test/resolver-divergence-detector.test.ts";
+  const edges = ["src/lib/proof-amendment.ts", "src/run-task.ts"];
+  const files = new Map([...Object.entries(TREE), [suite, ""]]);
+  for (const changed of edges) {
+    const selection = selectAffectedSuites([changed], { files, pathReaders: [], symbolSuites: [] });
+    assert.equal(selection.fullRun, false, changed);
+    assert.ok(selection.suites.includes(suite), `${changed} must select ${suite} in the floor`);
+  }
+  const unrelated = selectAffectedSuites(["src/a.ts"], { files, pathReaders: [], symbolSuites: [] });
+  assert.ok(!unrelated.suites.includes(suite), "an unrelated change must not select the suite");
+  const absent = selectAffectedSuites([edges[0]!], { files: new Map(Object.entries(TREE)), pathReaders: [], symbolSuites: [] });
+  assert.ok(!absent.suites.includes(suite), "a suite absent from the tree cannot be selected");
+});
+
 test("W1-T4404: a config or lockfile change selects the full suite", () => {
   for (const file of ["package.json", "package-lock.json", "tsconfig.json", ".github/workflows/ci.yml", "test/helpers/git-repo.ts", "test/fixtures/x.json", ".nvmrc"]) {
     const sel = select(["src/a.ts", file]);

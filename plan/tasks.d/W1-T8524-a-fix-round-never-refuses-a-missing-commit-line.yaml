@@ -11,6 +11,13 @@
   origin: "ci-friction:fix_refusal:no-anchored-commit-message-line-in-the-report#r3"  # #10031 design-remedy: was "operator session 2026-10-12: escalation #10031 triage"; re-keyed so the ci-friction gardener measures it as rung 3
   plan_refs: [W1-T5565, W1-T5325, W1-T4467, W1-T4052]
   files: [src/run-task.ts, test/fix-refusal-no-anchored-commit-message-line-in-the-report.test.ts, test/a-fix-round-never-refuses-a-missing-commit-line.test.ts]
+  # refusal-amendment (W1-T8524, run W1-T8524-1794955167529, 2026-11-17T23:47:28.973Z): the worker refused criterion 1 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
+  #   worker evidence: Legacy recovery is controlled by `src/cli/commands/fix.ts:4783–4828`, which is absent from `files:`.
+  # refusal-amendment (W1-T8524, run W1-T8524-1794955167529, 2026-11-17T23:47:28.973Z): the worker refused criterion 2 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
+  #   worker evidence: The task-title fallback belongs at `src/cli/commands/fix.ts:4772–4784`, outside the declared scope.
+  # refusal-amendment (W1-T8524, run W1-T8524-1794955167529, 2026-11-17T23:47:28.973Z): the worker refused criterion 3 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
+  #   worker evidence: Recovery when the re-ask cannot spawn requires changing `src/cli/commands/fix.ts:4820`, outside the declared scope.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   priority: 1 # 2026-11-17 operator: the design-remedy chosen on #10031 (2026-10-13) still has 0 attempts behind about 849 queued tasks while its refusal stays live on main; was 2
   attempts: 0

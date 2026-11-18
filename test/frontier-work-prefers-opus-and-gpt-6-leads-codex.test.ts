@@ -57,9 +57,11 @@ function capacity(provider: "claude" | "codex", usedPercent: number, model?: str
   };
 }
 
-// Sol seats refreshed from the fleet daemon on 2026-10-02 (ids and efforts only).
+// Sol seats refreshed from the fleet daemon on 2026-10-02 (ids and efforts only); gpt-6.2-sol added from
+// the 2026-11-17 read, where it is the account default (W1-T13445).
 const LIVE_MODELS: CodexModelInfo[] = [
-  ["gpt-6-astra", ["low", "medium", "high", "xhigh", "max", "ultra"], true],
+  ["gpt-6.2-sol", ["low", "medium", "high", "xhigh", "max", "ultra"], true],
+  ["gpt-6-astra", ["low", "medium", "high", "xhigh", "max", "ultra"]],
   ["gpt-6.1-sol", ["low", "medium", "high", "xhigh", "max", "ultra"]],
   ["gpt-6-luna", ["low", "medium", "high", "xhigh", "max"]],
   ["gpt-5.6-sol", ["low", "medium", "high", "xhigh", "max", "ultra"]],
@@ -94,22 +96,22 @@ test("GPT-6 Luna leads economy, Sol leads balanced and frontier, and Terra is in
     }
   }
   for (const effort of ["low", "medium", "high"]) {
-    assert.equal(codex.balanced[effort][0], "gpt-6.1-sol");
+    assert.equal(codex.balanced[effort][0], "gpt-6.2-sol");
     assert.equal(codex.balanced[effort].some((model) => model.includes("luna")), false, `no Luna in balanced/${effort}`);
   }
   // The high-effort Sol-vs-Sonnet A/B still runs. Lower efforts gain the same capability boundary.
-  assert.deepEqual(codex.balanced.high, ["gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol"]);
-  for (const effort of ["low", "medium", "high"]) assert.equal(codex.frontier[effort][0], "gpt-6.1-sol");
+  assert.deepEqual(codex.balanced.high, ["gpt-6.2-sol", "gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol"]);
+  for (const effort of ["low", "medium", "high"]) assert.equal(codex.frontier[effort][0], "gpt-6.2-sol");
 });
 
 test("replayed against the observed account model list, balanced and frontier pick Sol while economy picks Luna", () => {
   const table = ladder();
   for (const [model, effort, expected] of [
-    ["sonnet", "high", "gpt-6.1-sol"],
-    ["sonnet", "medium", "gpt-6.1-sol"],
+    ["sonnet", "high", "gpt-6.2-sol"],
+    ["sonnet", "medium", "gpt-6.2-sol"],
     ["haiku", "low", "gpt-6-luna"],
-    ["claude-opus-5-5", "high", "gpt-6.1-sol"],
-    ["opus", "high", "gpt-6.1-sol"],
+    ["claude-opus-5-5", "high", "gpt-6.2-sol"],
+    ["opus", "high", "gpt-6.2-sol"],
   ] as const) {
     const picked = selectCodexModel(LIVE_MODELS, LIVE_LIMITS, {} as never, model, effort, table);
     assert.equal(picked.model, expected, `${model}/${effort}`);
@@ -118,14 +120,14 @@ test("replayed against the observed account model list, balanced and frontier pi
 });
 
 test("without GPT-6 Sol on the account, balanced falls to older Sol and never to Luna", () => {
-  const withoutSix = LIVE_MODELS.filter((model) => model.id !== "gpt-6.1-sol");
+  const withoutSix = LIVE_MODELS.filter((model) => model.id !== "gpt-6.2-sol" && model.id !== "gpt-6.1-sol");
   const picked = selectCodexModel(withoutSix, LIVE_LIMITS, {} as never, "sonnet", "medium", ladder());
   assert.equal(picked.model, "gpt-5.6-sol");
   const lunaOnly = LIVE_MODELS.filter((model) => model.id === "gpt-6-luna" || model.id === "gpt-5.6-luna");
   const blocked = selectCodexModel(lunaOnly, LIVE_LIMITS, {} as never, "sonnet", "medium", ladder());
   assert.equal(blocked.readable, false, "a Luna-only account cannot authorize a balanced Codex worker");
   assert.equal(blocked.model, undefined, "no Luna is misreported as a selected balanced model");
-  assert.deepEqual(blocked.modelDecision?.mappedCandidates, ["gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol"]);
+  assert.deepEqual(blocked.modelDecision?.mappedCandidates, ["gpt-6.2-sol", "gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol"]);
 });
 
 test("an automatic policy takes the frontier preference and nothing else changes", () => {

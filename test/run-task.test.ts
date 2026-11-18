@@ -136,7 +136,7 @@ import { loadMounts, mountsPath, type Mount } from "../src/lib/mounts.js";
 import { shadowJudgeSampled } from "../src/lib/shadow-judge.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
 import { feedbackEntryPath, readFeedbackEntry } from "../src/lib/feedback.js";
-import { cashDivertToolsForLane, worktreesDir } from "../src/lib/worker.js";
+import { cashDivertToolsForLane, JUDGE_SHADOW_TRIAL_ID, worktreesDir } from "../src/lib/worker.js";
 import type { SpawnWorkerArgs, WorkerResult, WorkerSelectionAssignment, spawnWorker } from "../src/lib/worker.js";
 import { loadPlan } from "../src/lib/plan.js";
 import { loadPlanIndex, renderPlanIndex } from "../src/lib/plan-index.js";
@@ -1795,7 +1795,7 @@ test("BEHAVIORAL (W1-T268): a real runTask run all the way to a real MERGED verd
 
   const spawnCalls: SpawnWorkerArgs[] = [];
   const spawn: typeof spawnWorker = async (args) => {
-    spawnCalls.push(args);
+    if (args.routingTrial?.id !== JUDGE_SHADOW_TRIAL_ID) spawnCalls.push(args); // W1-T12187: the cash shadow is not one of this run's own spawns
     if (spawnCalls.length === 1) {
       return result({
         sessionId: "s-recon",

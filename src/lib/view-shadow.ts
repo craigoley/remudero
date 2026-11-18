@@ -755,8 +755,38 @@ function storedShadowStates(path: string, db: ReadModelDb, activeQualifications?
 
 /** Readiness as the persisted counters say, read-only: it shows from boot, before this process compared anything. */
 export function storedShadowReadiness(path: string, db: ReadModelDb, nowMs: number, qualifications: Readonly<Record<string, string>> = {}, populations?: ViewShadowOptions["populations"], populationViews?: readonly string[]): ShadowReadiness[] {
-  const counters = readShadowCounters(path, false, qualifications);
+  return readinessFromCounters(readShadowCounters(path, false, qualifications), path, db, nowMs, qualifications, populations, populationViews);
+}
+
+function readinessFromCounters(counters: ReturnType<typeof readShadowCounters>, path: string, db: ReadModelDb, nowMs: number, qualifications: Readonly<Record<string, string>>, populations?: ViewShadowOptions["populations"], populationViews?: readonly string[]): ShadowReadiness[] {
   return activeReadiness(new Map(Object.entries(counters?.states ?? storedShadowStates(path, db))), qualifications, nowMs, counters?.keyCounts, view => requiredPopulation(view, populations, populationViews));
+}
+
+/**
+ * W1-T13536: how long a thread that asks for stored readiness on every pass reuses the counters behind it. Readiness
+ * turns on a day of samples, so counters this old change no answer that matters, and the store is opened and every
+ * state parsed once per interval instead of on each 250 ms pass.
+ */
+export const STORED_READINESS_REFRESH_MS = 10_000;
+
+/**
+ * W1-T13536: {@link storedShadowReadiness} for a thread that asks on every pass. The counter store is read again once
+ * {@link STORED_READINESS_REFRESH_MS} has passed, when the path or qualifications change, or when the clock goes back;
+ * readiness itself is computed at each call's `nowMs`. A read that throws or finds no store is never kept.
+ */
+export function storedShadowReadinessReader(clock: Clock = systemClock, refreshMs = STORED_READINESS_REFRESH_MS, read: typeof readShadowCounters = readShadowCounters): typeof storedShadowReadiness {
+  let memo: { key: string; atMs: number; counters: NonNullable<ReturnType<typeof readShadowCounters>> } | undefined;
+  return (path, db, nowMs, qualifications = {}, populations, populationViews) => {
+    const key = JSON.stringify([path, qualifications]);
+    const atMs = clock.now();
+    if (memo === undefined || memo.key !== key || atMs - memo.atMs >= refreshMs || atMs < memo.atMs) {
+      memo = undefined;
+      const counters = read(path, false, qualifications);
+      if (counters !== undefined) memo = { key, atMs, counters };
+      return readinessFromCounters(counters, path, db, nowMs, qualifications, populations, populationViews);
+    }
+    return readinessFromCounters(memo.counters, path, db, nowMs, qualifications, populations, populationViews);
+  };
 }
 
 const qualifiedStateKey = (view: string, generation: string | undefined): string => generation === undefined ? view : `\u0000qualification:${JSON.stringify([view, generation])}`;

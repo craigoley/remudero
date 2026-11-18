@@ -180,6 +180,7 @@ const BASELINE_COMMAND_NAMES = [
   "pr-checks",
   "pr-owner",
   "pr-owner-recover",
+  "migration-preview",
   "pr-state",
   "read-model",
   "reframe",

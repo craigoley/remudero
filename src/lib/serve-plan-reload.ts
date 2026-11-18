@@ -213,6 +213,11 @@ export function publicOpsTaskFields(task: Task): {
   })) };
 }
 
+/** W1-T13488: the one default catalog api a board read uses when its caller passes none, so its kept reads persist. */
+const defaultBoardCatalogApi = defaultOpsCatalogApi();
+/** W1-T13488: per api, the last whole catalog read for each repository, revalidated by one ref GET. */
+const keptBoardCatalogs = new WeakMap<OpsCatalogApi, Map<string, { branch: string; commit: string; plan: Plan }>>();
+
 /** Current disk selection and one actual pinned reader observation; never starts a writer/selector. */
 export async function readBoardCatalogs(readPublic: () => Plan | undefined, stateDir: string | undefined,
   api?: OpsCatalogApi, clock: Clock = systemClock): Promise<BoardCatalogContext | undefined> {
@@ -228,13 +233,29 @@ export async function readBoardCatalogs(readPublic: () => Plan | undefined, stat
   const refused = (reason: string): BoardCatalogContext => catalogContext({ outcome: "unreadable", observedAt: clock.iso(), reason }, primary);
   if (primary === undefined) return refused("public-unreadable");
   if (destination.outcome === "unreadable") return refused("destination-unreadable");
-  const snapshot = await readOpsCatalogSnapshotAsync({ repository: `${destination.owner}/${destination.repo}` }, api);
-  if (snapshot.outcome !== "ok" || snapshot.plan === undefined) return refused(snapshot.outcome === "ok" ? "missing-plan" : snapshot.outcome);
-  if (snapshot.binding === undefined) return refused("identity-unavailable");
+  const repository = `${destination.owner}/${destination.repo}`;
+  // W1-T13488: serve reloads its plan on every main commit; each reload read the whole ops catalog, a gh child per tree
+  // and blob, on its request loop. While the branch still names the kept commit, one ref GET answers the kept plan;
+  // a moved branch or a failed ref GET reads it all, as before.
+  const reader = api ?? defaultBoardCatalogApi;
+  let kept = keptBoardCatalogs.get(reader);
+  if (!kept) keptBoardCatalogs.set(reader, kept = new Map());
+  const held = kept.get(repository);
+  const same = held ? await readBranchSha(reader, `repos/${repository}`, held.branch).then((sha) => sha === held.commit, () => false) : false;
+  let opsPlan: Plan;
+  if (same && held) opsPlan = held.plan;
+  else {
+    kept.delete(repository);
+    const snapshot = await readOpsCatalogSnapshotAsync({ repository }, reader);
+    if (snapshot.outcome !== "ok" || snapshot.plan === undefined) return refused(snapshot.outcome === "ok" ? "missing-plan" : snapshot.outcome);
+    if (snapshot.binding === undefined) return refused("identity-unavailable");
+    opsPlan = snapshot.plan;
+    if (snapshot.binding.ref.startsWith("refs/heads/")) kept.set(repository, { branch: snapshot.binding.ref.slice("refs/heads/".length), commit: snapshot.binding.commit, plan: snapshot.plan });
+  }
   const after = planDestinationRepository(stateDir);
   if (after.outcome !== "named" || after.owner !== destination.owner || after.repo !== destination.repo ||
     after.checkoutDir !== destination.checkoutDir) return refused("destination-changed");
-  return composeBoardCatalog(primary, snapshot.plan, clock.iso());
+  return composeBoardCatalog(primary, opsPlan, clock.iso());
 }
 
 function composeBoardCatalog(primary: Plan, ops: Plan, observedAt: string): BoardCatalogContext {

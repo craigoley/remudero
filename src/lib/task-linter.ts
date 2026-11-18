@@ -1788,7 +1788,7 @@ export function humanOnlyReportViolations(task: Task, opts: LintOpts = {}): Lint
       message:
         `task ${task.id} is verify: human with only \`demonstration:\` proofs over docs/ files, so remudero-review executes ` +
         "0 proofs (CAPPED) and auto-merge never arms: the operator must merge it by hand (#19122). File it verify: auto " +
-        `with \`grep:\` proofs over the report's own lines, one physical line each, e.g. \`grep: ^## Recommendation$ in ${reportPath}\`; ` +
+        `with \`grep:\` proofs over the report's own lines, one physical line each, e.g. \`grep: ## Recommendation in ${reportPath}\`; ` +
         "or keep the human gate and say why on a `NO-AUTO-VERIFY: <reason>` line in the rationale",
     },
   ];
