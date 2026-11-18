@@ -33,6 +33,8 @@ test("migration preview excludes operator retirements before checking candidate 
       ])),
     },
   });
+  // W1-T13680: a movable task holds its public reservation.
+  pub.origin.git("update-ref", `refs/rmd-id/${eligible}`, "main");
   const ops = originWithClone(join(root, "ops"), {
     scope: t,
     seed: { "plan/tasks.yaml": "[]\n" },
@@ -64,6 +66,7 @@ test("migration preview excludes operator retirements before checking candidate 
     byTrailer: search([]),
     byBranch: search([]),
     control: search([credit]),
+    refusedMoves: search([]),
   } }));
   const shim = ghShim([{ when: "api graphql", stdoutFile: response }, { when: "", exit: 97, stderr: "unexpected GitHub call" }]);
   t.after(() => rmSync(shim.dir, { recursive: true, force: true }));

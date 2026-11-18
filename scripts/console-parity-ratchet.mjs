@@ -83,6 +83,7 @@ function reasons(names, reason) {
  *  recording it, and is refused for that reason alone, never for the reason text's content. */
 export const CLI_ONLY = {
   "migration-preview": "operator-only pinned local Git catalogs and current ownership/PR evidence; remote console clients do not possess these local objects",
+  "move-task": "operator-only pinned local Git catalogs in two repositories, plan-move branch pushes and plan pull requests in both; remote console clients do not possess these local objects",
   "pr-owner-recover": "operator-only, admin-authorized recovery of a stale host-local fix dispatch; it preserves the PR branch worktree and claim state and has no remote console mutation route",
   "pr-state": "host-local, ledger-first PR state read over the operator's ledger union, with one broker query for stale or missing fields; the remote console has no route for this host-local read",
   "improvement-action": "daemon-owned internal worker: executes an already persisted improvement operation only after daemon ownership, repository identity and ordinary admission checks; console routes save requests rather than executing this worker",

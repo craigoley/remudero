@@ -12,6 +12,9 @@ import { inboxBoardReferents } from "./inbox-board-referents.js";
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { SHARE_ENV, Worker } from "node:worker_threads";
+import { bundledWorkerUrl } from "./child-entry-argv.js";
+import { threadName } from "./thread-names.js";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import {
@@ -198,6 +201,14 @@ export interface PanelGraphDeps {
   /** W1-T4261: the inbox classifier's I/O, injectable for a hermetic test; production passes none. A change
    *  stamp for one input file (size, mtime, inode), undefined when absent. */
   inboxStatFile?: (path: string) => string | undefined;
+  /**
+   * W1-T13692: build a changed persisted inbox (its parse, lanes and view pages) on a worker thread while reads keep
+   * answering from the previous one. Serve's core panel deps and every instance's inbox deps set it; absent, every
+   * read builds in place, as before.
+   */
+  inboxBuildOffLoop?: boolean;
+  /** W1-T13692: the off-loop build, as a seam; defaults to {@link buildInboxInWorker}. */
+  inboxBuild?: (input: InboxBuildInput) => Promise<InboxBuildOutcome>;
   /** W1-T4261: a directory's entry names (the plan's shard directory), undefined when absent. */
   inboxListDir?: (path: string) => string[] | undefined;
   /** W1-T4261: `origin/main`'s sha, undefined when unresolvable (which disables every reuse). */
@@ -3209,42 +3220,262 @@ interface SlowLaneInbox extends InboxRead {
   persisted: PersistedInbox;
   generatedAt: string;
   classified: Pick<ClassifiedInbox, "proposals" | "classifications" | "ledgerLines">;
-}
-const slowLaneInboxes = new WeakMap<PanelGraphDeps, { stamp: string | undefined; read: SlowLaneInbox | undefined }>();
-
-/** W1-T5897: what serve's main thread answers every inbox read from, re-read only when its file changes; undefined until one is persisted. */
-export function readSlowLaneInbox(deps: PanelGraphDeps): SlowLaneInbox | undefined {
-  const stateDir = join(deps.inboxRoot, "state");
-  const stamp = (deps.inboxStatFile ?? statStamp)(persistedInboxPath(stateDir));
-  const held = slowLaneInboxes.get(deps);
-  if (held !== undefined && held.stamp === stamp && stamp !== undefined) return held.read;
-  const persisted = stamp === undefined ? undefined : readPersistedInbox(stateDir);
-  const identity = deps.inboxSourceIdentity;
-  const sourceMatches = !identity || Object.entries(identity).every(([key, value]) =>
-    persisted?.sourceIdentity?.[key as keyof InboxSourceIdentity] === value);
-  const read = persisted && sourceMatches ? slowLaneInboxOf(deps, persisted) : undefined;
-  slowLaneInboxes.set(deps, { stamp, read });
-  return read;
+  /** W1-T13692: the view pages a worker build made for exactly these lanes, as of the read's `generatedAt`; else undefined. */
+  builtPages: (lanes: ReturnType<typeof inboxLanes>) => InboxBuiltPage[] | undefined;
 }
 
-function slowLaneInboxOf(deps: PanelGraphDeps, persisted: PersistedInbox): SlowLaneInbox {
+/** W1-T13692: how long reads build in place after an off-loop build fails, before the next one is tried. */
+export const INBOX_BUILD_RETRY_MS = 30_000;
+
+/** W1-T13692: what names one inbox read: its root, the source it must come from, and the scope its lanes carry. */
+export interface InboxBuildInput {
+  inboxRoot: string;
+  identity?: InboxSourceIdentity;
+  scope?: { repository?: string; instance?: string };
+  /** The stamp of the read the caller already holds; a worker that reads the same stamp sends no read back. */
+  knownStamp?: string;
+}
+type BuiltLanes = { key: string; built: ReturnType<typeof inboxLanes> };
+/** One inbox view page as inbox-view.ts's InboxViewBody, named here by shape: panel-graph never imports inbox-view (no-circular). */
+export interface InboxBuiltPage { key: string; data: unknown; sources: unknown[] }
+/** What one build made; `stamp` is the persisted file's stamp it read, and `persisted` is absent when unchanged or unusable. */
+export interface InboxBuildParts {
+  stamp: string | undefined;
+  /** False when the file is absent or names another source, so there is no read. */
+  usable: boolean;
+  persisted?: PersistedInbox;
+  lanes?: BuiltLanes;
+  pages?: InboxBuiltPage[];
+}
+export type InboxBuildOutcome = ({ ok: true } & InboxBuildParts) | { ok: false; reason: string };
+
+/** The two stores a lanes build reads, by stamp: either changing invalidates the lanes. */
+function inboxLanesKey(stateDir: string): string {
+  return JSON.stringify([statStamp(plainStorePath(stateDir)) ?? null, statStamp(fleetLaneStorePath(stateDir)) ?? null]);
+}
+
+function inboxSourceMatches(identity: InboxSourceIdentity | undefined, persisted: PersistedInbox | undefined): boolean {
+  return !identity || Object.entries(identity).every(([key, value]) => persisted?.sourceIdentity?.[key as keyof InboxSourceIdentity] === value);
+}
+
+/** One read's shared parts: every deps naming this inbox answers from the same parse, lanes and pages. */
+interface InboxShared {
+  persisted: PersistedInbox;
+  classified: SlowLaneInbox["classified"];
+  mergedTaskIds: ReadonlySet<string>;
+  lanes?: BuiltLanes;
+  pages?: { lanes: ReturnType<typeof inboxLanes>; bodies: InboxBuiltPage[] };
+  views: WeakMap<PanelGraphDeps, SlowLaneInbox>;
+}
+interface InboxSlot {
+  /** The persisted file's stamp `shared` was read at; `shared` is undefined there when the file was absent or unusable. */
+  stamp?: string;
+  read: boolean;
+  shared?: InboxShared;
+  building: boolean;
+  /** Bumped by every install, so a build that started before an in-place install never overwrites it. */
+  installs: number;
+  failedAtMs?: number;
+}
+const inboxSlots = new Map<string, InboxSlot>();
+/** A process names a few inboxes (core and each instance); a test process names one per fixture, so the oldest go. */
+const INBOX_SLOTS_HELD = 16;
+
+function inboxBuildInputOf(deps: PanelGraphDeps): InboxBuildInput {
+  const scope = deps.inboxSourceIdentity ?? deps.inboxAuditScope;
+  return { inboxRoot: deps.inboxRoot, ...(deps.inboxSourceIdentity ? { identity: deps.inboxSourceIdentity } : {}), ...(scope ? { scope } : {}) };
+}
+
+function inboxSlotOf(input: InboxBuildInput): InboxSlot {
+  const key = JSON.stringify([input.inboxRoot, input.identity ?? null, input.scope ?? null]);
+  let slot = inboxSlots.get(key);
+  if (!slot) {
+    inboxSlots.set(key, slot = { read: false, building: false, installs: 0 });
+    for (const oldest of inboxSlots.keys()) if (inboxSlots.size > INBOX_SLOTS_HELD) inboxSlots.delete(oldest);
+  }
+  return slot;
+}
+
+function inboxSharedOf(persisted: PersistedInbox): InboxShared {
   const ledgerLines = Object.defineProperty([...persisted.ledgerRows], "torn", { value: 0 }) as LedgerLines;
   const classified = { proposals: persisted.proposals, classifications: persisted.classifications, ledgerLines, ...(persisted.stores ? { stores: persisted.stores } : {}) };
-  let lanes: { key: string; built: ReturnType<typeof inboxLanes> } | undefined;
-  return {
+  return { persisted, classified, mergedTaskIds: new Set(persisted.mergedTaskIds), views: new WeakMap() };
+}
+
+/**
+ * W1-T13692: one inbox read's whole build, run on the inbox build worker (or in place): the persisted file's parse, its
+ * source check and its lanes. The caller adds the view pages, which live in inbox-view.ts.
+ */
+export function buildSlowLaneInbox(input: InboxBuildInput): InboxBuildParts {
+  const stateDir = join(input.inboxRoot, "state");
+  const stamp = statStamp(persistedInboxPath(stateDir));
+  const lanesKey = inboxLanesKey(stateDir);
+  const persisted = stamp === undefined ? undefined : readPersistedInbox(stateDir);
+  if (!persisted || !inboxSourceMatches(input.identity, persisted)) return { stamp, usable: false };
+  const lanes = { key: lanesKey, built: inboxLanes(inboxSharedOf(persisted).classified, input.inboxRoot, { content: persisted, scope: input.scope }) };
+  return { stamp, usable: true, persisted, lanes };
+}
+
+function installInbox(slot: InboxSlot, stamp: string | undefined, persisted: PersistedInbox | undefined): void {
+  slot.stamp = stamp;
+  slot.read = true;
+  slot.shared = persisted ? inboxSharedOf(persisted) : undefined;
+  slot.installs++;
+}
+
+function inboxBuildFailed(slot: InboxSlot, deps: PanelGraphDeps, reason: string): void {
+  slot.failedAtMs = (deps.inboxClock ?? systemClock).now();
+  deps.logProjection?.("serve.inbox_build_failed", { inboxRoot: deps.inboxRoot, reason, retryInMs: INBOX_BUILD_RETRY_MS });
+}
+
+/** Start one off-loop build for a slot; N reads while it runs start none. The result is installed only over what it replaces. */
+function startInboxBuild(slot: InboxSlot, deps: PanelGraphDeps, input: InboxBuildInput): void {
+  if (slot.building) return;
+  slot.building = true;
+  const installs = slot.installs;
+  const build = deps.inboxBuild ?? buildInboxInWorker;
+  let started: Promise<InboxBuildOutcome>;
+  try { started = build({ ...input, ...(slot.shared && slot.stamp !== undefined ? { knownStamp: slot.stamp } : {}) }); }
+  catch (error) { started = Promise.resolve({ ok: false, reason: String((error as Error)?.message ?? error) }); }
+  void started.then((outcome) => {
+    slot.building = false;
+    if (!outcome.ok) return inboxBuildFailed(slot, deps, outcome.reason);
+    if (slot.installs !== installs) return;
+    slot.failedAtMs = undefined;
+    if (!outcome.usable) return installInbox(slot, outcome.stamp, undefined);
+    // No read back means the worker read the stamp this slot holds (knownStamp), so only the lanes and pages are new.
+    if (outcome.persisted && (outcome.stamp !== slot.stamp || !slot.shared)) installInbox(slot, outcome.stamp, outcome.persisted);
+    const shared = slot.shared;
+    if (shared && outcome.lanes) {
+      shared.lanes = outcome.lanes;
+      if (outcome.pages) shared.pages = { lanes: outcome.lanes.built, bodies: outcome.pages };
+    }
+  }, (error: unknown) => {
+    slot.building = false;
+    inboxBuildFailed(slot, deps, String((error as Error)?.message ?? error));
+  });
+}
+
+/**
+ * W1-T5897: what serve's main thread answers every inbox read from, re-read only when its file changes; undefined until
+ * one is persisted. W1-T13692: every deps naming one inbox shares one read; with `inboxBuildOffLoop`, a changed file is
+ * built on a worker while reads answer from the previous read. A read with no previous read, an `inPlace` read
+ * (serve's boot read) and every read within {@link INBOX_BUILD_RETRY_MS} of a failed build are built in place.
+ */
+export function readSlowLaneInbox(deps: PanelGraphDeps, opts: { inPlace?: boolean } = {}): SlowLaneInbox | undefined {
+  const stateDir = join(deps.inboxRoot, "state");
+  const stamp = (deps.inboxStatFile ?? statStamp)(persistedInboxPath(stateDir));
+  const input = inboxBuildInputOf(deps);
+  const slot = inboxSlotOf(input);
+  const clock = deps.inboxClock ?? systemClock;
+  const offLoop = deps.inboxBuildOffLoop === true && opts.inPlace !== true && slot.shared !== undefined &&
+    (slot.failedAtMs === undefined || clock.now() - slot.failedAtMs >= INBOX_BUILD_RETRY_MS);
+  if (slot.read && slot.stamp === stamp && stamp !== undefined) return slowLaneInboxView(slot, deps);
+  if (offLoop && stamp !== undefined) {
+    startInboxBuild(slot, deps, input);
+    return slowLaneInboxView(slot, deps);
+  }
+  const persisted = stamp === undefined ? undefined : readPersistedInbox(stateDir);
+  installInbox(slot, stamp, persisted && inboxSourceMatches(deps.inboxSourceIdentity, persisted) ? persisted : undefined);
+  return slowLaneInboxView(slot, deps);
+}
+
+/** One deps' view of a slot's shared read: the shared parse, lanes and pages, with this deps' own plan reader. */
+function slowLaneInboxView(slot: InboxSlot, deps: PanelGraphDeps): SlowLaneInbox | undefined {
+  const shared = slot.shared;
+  if (!shared) return undefined;
+  const held = shared.views.get(deps);
+  if (held) return held;
+  const { persisted, classified } = shared;
+  const scope = deps.inboxSourceIdentity ?? deps.inboxAuditScope;
+  const view: SlowLaneInbox = {
     ...classified, classified, persisted, generatedAt: persisted.generatedAt, classifiedAt: persisted.generatedAt,
     snapshotKey: persisted.snapshotKey, attentionCensus: persisted.attentionCensus, whyMeFeedback: persisted.whyMeFeedback,
     attentionEvidence: persisted.attentionEvidence,
     dismissalAudit: persisted.dismissalAudit,
-    mergedTaskIds: new Set(persisted.mergedTaskIds), projectionIndeterminate: persisted.projectionIndeterminate,
+    mergedTaskIds: shared.mergedTaskIds, projectionIndeterminate: persisted.projectionIndeterminate,
     plan: () => deps.readPlanSnapshot?.() ?? loadPlan(deps.planPath),
     lanes: () => {
-      const stateDir = join(deps.inboxRoot, "state");
-      const key = JSON.stringify([statStamp(plainStorePath(stateDir)) ?? null, statStamp(fleetLaneStorePath(stateDir)) ?? null]);
-      if (lanes?.key !== key) lanes = { key, built: inboxLanes(classified, deps.inboxRoot, { content: persisted, scope: deps.inboxSourceIdentity ?? deps.inboxAuditScope }) };
-      return lanes.built;
+      // An operator write moves a lane store and must show at once, so a moved store rebuilds the lanes here, as before.
+      const key = inboxLanesKey(join(deps.inboxRoot, "state"));
+      if (shared.lanes?.key !== key) shared.lanes = { key, built: inboxLanes(classified, deps.inboxRoot, { content: persisted, scope }) };
+      return shared.lanes.built;
+    },
+    builtPages: (lanes) => shared.pages?.lanes === lanes ? shared.pages.bodies : undefined,
+  };
+  shared.views.set(deps, view);
+  return view;
+}
+
+const INBOX_BUILD_WORKER_KIND = "remudero-inbox-build" as const;
+/** The worker's module, inbox-view.ts beside this one: panel-graph never imports it, since it imports panel-graph (no-circular). */
+const inboxBuildWorkerUrl = (): URL => bundledWorkerUrl(new URL("./inbox-view.ts", import.meta.url));
+
+/** A worker's three messages for one build: the read, then its lanes, then its pages, so no one message holds them all. */
+export type InboxBuildMessage =
+  | { id: number; part: "read"; stamp: string | undefined; usable: boolean; persisted?: PersistedInbox }
+  | { id: number; part: "lanes"; lanes?: BuiltLanes }
+  | { id: number; part: "pages"; pages?: InboxBuiltPage[] }
+  | { id: number; part: "error"; reason: string };
+
+interface InboxBuildWorker { build(input: InboxBuildInput): Promise<InboxBuildOutcome>; stop(): void }
+
+/** W1-T13692: one persistent inbox build worker, spawned on first use and respawned after it dies; every build settles once. */
+export function startInboxBuildWorker(options: { workerUrl?: URL } = {}): InboxBuildWorker {
+  let worker: Worker | undefined;
+  let nextId = 1;
+  const pending = new Map<number, { parts: Partial<InboxBuildParts>; settle: (outcome: InboxBuildOutcome) => void }>();
+  const failAll = (from: Worker | undefined, reason: string): void => {
+    if (from !== worker) return;
+    for (const { settle } of pending.values()) settle({ ok: false, reason });
+    pending.clear();
+    worker = undefined;
+  };
+  const track = (): void => void (pending.size > 0 ? worker?.ref() : worker?.unref());
+  const ensure = (): Worker => {
+    if (worker) return worker;
+    const spawned = new Worker(options.workerUrl ?? inboxBuildWorkerUrl(), {
+      name: threadName("inboxBuild"), workerData: { kind: INBOX_BUILD_WORKER_KIND }, env: SHARE_ENV,
+    });
+    spawned.on("message", (msg: InboxBuildMessage) => {
+      const held = pending.get(msg.id);
+      if (!held) return;
+      if (msg.part === "read") Object.assign(held.parts, { stamp: msg.stamp, usable: msg.usable, ...(msg.persisted ? { persisted: msg.persisted } : {}) });
+      else if (msg.part === "lanes") { if (msg.lanes) held.parts.lanes = msg.lanes; }
+      if (msg.part !== "error" && msg.part !== "pages") return;
+      pending.delete(msg.id);
+      track();
+      if (msg.part === "error") return held.settle({ ok: false, reason: msg.reason });
+      held.settle({ ok: true, stamp: held.parts.stamp, usable: held.parts.usable === true, ...held.parts, ...(msg.pages ? { pages: msg.pages } : {}) });
+    });
+    spawned.on("error", (error) => failAll(spawned, `inbox build worker failed: ${String(error?.message ?? error)}`));
+    spawned.on("exit", (code) => failAll(spawned, `inbox build worker exited with code ${code}`));
+    spawned.unref();
+    worker = spawned;
+    return spawned;
+  };
+  return {
+    build: (input) => new Promise((settle) => {
+      let target: Worker;
+      try { target = ensure(); }
+      catch (error) { settle({ ok: false, reason: `inbox build worker could not start: ${String((error as Error)?.message ?? error)}` }); return; }
+      const id = nextId++;
+      pending.set(id, { parts: {}, settle });
+      track();
+      target.postMessage({ id, input });
+    }),
+    stop: () => {
+      const running = worker;
+      failAll(running, "inbox build worker stopped");
+      void running?.terminate();
     },
   };
+}
+
+let sharedInboxBuildWorker: InboxBuildWorker | undefined;
+/** W1-T13692: the default off-loop build: this process's one inbox build worker. */
+export function buildInboxInWorker(input: InboxBuildInput): Promise<InboxBuildOutcome> {
+  return (sharedInboxBuildWorker ??= startInboxBuildWorker()).build(input);
 }
 
 async function inboxRead(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): Promise<InboxRead | undefined> {

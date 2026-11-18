@@ -1179,7 +1179,7 @@ exec '${process.execPath.replaceAll("'", "'\\''")}' "$@"
     const expected = [{ bin: "apt-get", args: ["update"] }];
     if (failure !== "update") expected.push({ bin: "apt-cache", args: ["madison", "nodejs"] });
     if (!["update", "madison"].includes(failure)) {
-      expected.push({ bin: "apt-get", args: ["install", "-y", `nodejs=${pin}-1nodesource1`] });
+      expected.push({ bin: "apt-get", args: ["install", "-y", "--allow-downgrades", "--allow-change-held-packages", `nodejs=${pin}-1nodesource1`] });
     }
     assert.deepEqual(apt, expected, `${shell}: ${failure} has exact recording package receipts`);
     if (failure === "none") assert.match(installed.stdout, /install returned success but node is still 0\.0\.0/);

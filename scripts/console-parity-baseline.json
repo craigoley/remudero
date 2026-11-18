@@ -60,6 +60,7 @@
     "mcp",
     "memory-lint",
     "migration-preview",
+    "move-task",
     "next-task-id",
     "notify",
     "onboard",
