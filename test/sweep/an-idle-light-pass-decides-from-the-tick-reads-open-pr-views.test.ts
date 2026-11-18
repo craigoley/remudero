@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { servedOpenPrViews } from "#src/cli/commands/daemon.js";
-import { createLightPassOpenPrList, LIGHT_PASS_VIEWS_FALLBACK_MAX_AGE_MS } from "#src/lib/light-pass-open-pr-list.js";
+import { createLightPassOpenPrList, headReadOrStandDown, LIGHT_PASS_VIEWS_FALLBACK_MAX_AGE_MS } from "#src/lib/light-pass-open-pr-list.js";
 import { TICK_READ_MAX_AGE_MS, freshReadGeneration, type ReadGeneration } from "#src/lib/read-plane.js";
 import type { LightPassScope } from "#src/lib/daemon.js";
 import type { OpenPrView } from "#src/lib/sweep.js";
@@ -69,6 +69,26 @@ test("W1-T13709 criterion 4: boot retains the tick-read rule and refill has no s
   assert.equal(serve(undefined), undefined);
 });
 
-// W1-T13709 criterion 5: the real daemon-to-hook read-count proof lives beside the restart fixture in
-// a-restart-reads-each-open-pull-request-once-before-the-first-review.test.ts.
-// W1-T13709 criterion 3: a served list for idle or drain must use last-good act-time head guards.
+test("W1-T13709 criterion 3: the act-time guard returns the moved head and stands down when it cannot read it", async () => {
+  const moved = headReadOrStandDown(async () => ({ ok: true, state: "OPEN", headSha: "head-moved" }));
+  assert.equal((await moved(view("head-tick"))).headSha, "head-moved");
+  const unreadable = headReadOrStandDown(async () => ({ ok: false }));
+  await assert.rejects(async () => { await unreadable(view("head-tick")); }, /standing down/);
+});
+
+test("W1-T13709 criterion 5: a fresh served read avoids the list reader, while no snapshot uses it", async () => {
+  let now = STARTED_AT + 10;
+  let ownReads = 0;
+  const list = createLightPassOpenPrList<string>({ clock: { now: () => now }, log: () => {}, runId: "W1-T13709",
+    deadlineMs: 1_000, maxAgeMs: LIGHT_PASS_VIEWS_FALLBACK_MAX_AGE_MS });
+  const served = Object.assign(Promise.resolve(["tick"]), { servedReadStartedAtMs: STARTED_AT + 5 });
+  const fromTick = await list.read(served, async () => { ownReads++; return ["own"]; });
+  assert.equal(fromTick.source, "tick_read");
+  assert.deepEqual(fromTick.views, ["tick"]);
+  assert.equal(ownReads, 0);
+  now++;
+  const fromOwnRead = await list.read(undefined, async () => { ownReads++; return ["own"]; });
+  assert.equal(fromOwnRead.source, "own_read");
+  assert.deepEqual(fromOwnRead.views, ["own"]);
+  assert.equal(ownReads, 1);
+});
