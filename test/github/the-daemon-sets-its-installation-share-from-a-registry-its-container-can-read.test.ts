@@ -186,8 +186,8 @@ test("W1-T12670 criterion 5: the real daemon start in a core-like container logs
   assert.equal(row.instance, "core");
   assert.equal(row.installation_id, INSTALLATION);
   assert.equal(row.role, "daemon");
-  // W1-T13498: the ops shadow instance is a fourth live registry row, so it takes a share too.
-  assert.equal(row.consumers, 7, "core, site, console and ops plus the hand-run, run-child and serve shares");
+  // The ops shadow instance is a fourth live registry row, so it takes a share too.
+  assert.equal(row.consumers, 7, "W1-T13498: core, site, console and ops plus the hand-run, run-child and serve shares");
   assert.equal(row.source, CHECKOUT_REGISTRY);
 });
 

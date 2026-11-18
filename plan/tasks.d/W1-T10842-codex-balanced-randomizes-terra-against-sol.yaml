@@ -1,5 +1,5 @@
 - id: W1-T10842
-  title: "CODEX BALANCED LOW/MEDIUM RANDOMIZES TERRA 6.1 AGAINST SOL 6.1 — a Codex-vs-Codex routing-experiment epoch with task-unit assignment, active only under a registered protocol with a passing A/A, and Sol stays the lead"
+  title: "CODEX BALANCED LOW/MEDIUM RANDOMIZES TERRA 6.1 AGAINST THE CURRENT SOL — a Codex-vs-Codex routing-experiment epoch with task-unit assignment, whose control is the first Sol of the Codex balanced row, active only under a registered protocol with a passing A/A, and Sol stays the lead"
   repo: remudero
   depends_on: [W1-T10841]
   priority: 1
@@ -14,7 +14,9 @@
   files:
     - src/lib/routing-experiments.ts
     - src/lib/worker-provider.ts
+    - src/lib/codex-balanced-trial.ts
     - test/routing/codex-model-experiment-epoch.test.ts
+    - test/routing/terra-vs-sol-trial-registration.test.ts
     - scripts/expiring-fixture-census.mjs
   # refusal-amendment (W1-T10842, run DAEMON-1793643571744@e87ce4c6924ea9878f5b798fbfc5213ba9ea24b0, 2026-11-03T00:41:56.674Z): the worker refused criterion 5 [premise-rotted] — proposed close-unbuilt: the premise no longer holds at HEAD — close this task unbuilt, or restate the premise it should build on
   #   worker evidence: Codex exec JSONL provides no actual served-model field, so every assignment cannot receive the required attribution through this transport.
@@ -22,7 +24,20 @@
   # redesign: signature=b247e5f04e18dfff
   status: queued
   attempts: 0
-  note: 'operator grant 2026-11-01 (session) for #15520: scripts/expiring-fixture-census.mjs'
+  note: |
+    operator grant 2026-11-01 (session) for #15520: scripts/expiring-fixture-census.mjs
+    AMENDED 2026-11-17 (operator ruling, "go with all of your recommendations"): the control is the CURRENT Sol, the
+    first Sol of the Codex balanced row, not a hard-coded gpt-6.1-sol, so the trial measures what the fleet runs.
+    WHY: W1-T13445 (remudero-ops, queued 2026-11-17) puts gpt-6.2-sol at the head of every Codex Sol row; with a
+    pinned 6.1 control the trial would compare Terra against a Sol the fleet no longer leads with. The merged
+    registration (W1-T10841) pins it today: `const SOL = "gpt-6.1-sol"` (src/lib/codex-balanced-trial.ts:14), used
+    by the A/A stack check (:86), the arm pins (:156) and the protocol's `lead` (:174). So that file and its suite
+    join this record's files: test/routing/terra-vs-sol-trial-registration.test.ts pins gpt-6.1-sol in its
+    fixtures (:26, :34, :80, :101, :105) and changes on purpose to inject the resolved control.
+    The treatment stays gpt-6.1-terra (no newer Terra exists). Before this amendment no branch was being built:
+    no refs/rmd-dispatch/W1-T10842, and the only branch, run-W1-T10842-1793280330468, holds a 2026-10-29
+    checkpoint ("yield at container recycle") and no open pull request. The amendment also names criterion 4 as the
+    record's invariant (the plan lint asks a changed implement record to declare one); its proof is unchanged.
   rationale: |
     VERIFIED ON origin/main 07dbdcc77 (2026-10-27). `ROUTING_EXPERIMENTS` (src/lib/routing-experiments.ts) holds only
     CLAUDE-VS-CODEX epochs: each `RoutingExperiment` has one `claudeModel` and one `codexModel` regex and arms
@@ -33,15 +48,15 @@
     asserts "Terra is in no Codex row" — which this task keeps TRUE: the trial assigns per task, it does not edit a row.
   design: |
     (i) EPOCH SHAPE. Extend RoutingExperiment with a Codex-vs-Codex kind: two arms that both name provider codex, each
-    with a concrete model regex (^gpt-6\.1-sol$ control, ^gpt-6\.1-terra$ treatment), the tier (balanced) and the
-    efforts (low, medium) it covers. An alias that changes models starts another epoch, as now. The existing
+    with a concrete model regex (control: the current Sol, resolved as in (vii); treatment: ^gpt-6\.1-terra$), the
+    tier (balanced) and the efforts (low, medium) it covers. An alias that changes models starts another epoch, as now. The existing
     claude-vs-codex epochs and their reports are unchanged.
     (ii) ASSIGNMENT. The draw reuses `experimentDrawSeed` / `experimentArmForTask` keyed by `experimentTaskIdentity`, so a
     task keeps its arm across retries and restarts; the probability comes from the registered protocol (W1-T10841),
     not a constant here. Assignment applies only when the router has already chosen codex balanced at low or medium;
     the treatment arm moves only that one selection to gpt-6.1-terra and leaves the rest of the row as fallback.
     (iii) ACTIVE ONLY WHEN REGISTERED. With no registered protocol, an A/A receipt that fails or has aged out, or a
-    stopping rule or guardrail that has fired, the epoch assigns nothing and Sol 6.1 leads exactly as today.
+    stopping rule or guardrail that has fired, the epoch assigns nothing and the current Sol leads exactly as today.
     (iv) AUDIT. Every assignment writes an intention-to-treat row with the assigned arm, the probability, the seed, and
     later the SERVED model, so an assignment audit can compare assigned with served and the release builder
     (W1-T10843) can refuse when they diverge.
@@ -49,6 +64,16 @@
     codexExperimentArmForTask, which reads the registration W1-T10841 writes (src/lib/codex-balanced-trial.ts).
     (v) NO AUTOMATIC RE-LEAD. The trial's result is reported; changing a Codex row's lead is a separate operator
     decision (a proposal), never done by this code.
+    (vii) CONTROL IS THE CURRENT SOL (operator ruling 2026-11-17). Resolve the control as the first model whose id
+    ends in -sol in codexCandidatesForCapability(capabilities, 'balanced', effort) (src/lib/worker-provider.ts:907),
+    over the capabilities loadMounts reads (src/lib/mounts.ts:837); today that is the row's head (.remudero/mounts.yaml
+    :209-212). Replace the SOL constant in src/lib/codex-balanced-trial.ts (:14, used at :86, :156, :174) with that
+    resolution, injected so its suite builds a fixture table; the protocol's `lead` records the resolved model. The
+    epoch's control regex is built from the registered control, and when the table's current Sol no longer equals
+    it the epoch assigns nothing (the current Sol leads) until a new registration: a Sol version change starts
+    another epoch, as an alias change does in (i), so no arm mixes two Sol versions. An unreadable table assigns
+    nothing. Never fall back to a Sol literal.
+    INVARIANT an-inactive-trial-assigns-nothing: without a registered protocol and a passing in-age A/A receipt, or after its stopping rule or a guardrail fires, nothing is assigned and the current Sol leads.
   acceptance:
     - claim: "A routing experiment can compare two concrete Codex models, and the existing claude-vs-codex epochs are unchanged"
       proof: 'grep: test("W1-T10842: a Codex-vs-Codex epoch compares two concrete Codex models" in test/routing/codex-model-experiment-epoch.test.ts'
@@ -56,7 +81,7 @@
       proof: 'grep: test("W1-T10842: assignment is by task and stable across retries" in test/routing/codex-model-experiment-epoch.test.ts'
     - claim: "Only codex balanced low and medium selections enter the trial; frontier, economy, high effort, cash and Claude selections are untouched"
       proof: 'grep: test("W1-T10842: only codex balanced low and medium selections enter the trial" in test/routing/codex-model-experiment-epoch.test.ts'
-    - claim: "Without a registered protocol and a passing in-age A/A receipt, or after its stopping rule or a guardrail fires, nothing is assigned and Sol 6.1 leads"
+    - claim: "invariant:an-inactive-trial-assigns-nothing — without a registered protocol and a passing in-age A/A receipt, or after its stopping rule or a guardrail fires, nothing is assigned and the current Sol leads"
       proof: 'grep: test("W1-T10842: the trial assigns nothing until registered and Sol leads otherwise" in test/routing/codex-model-experiment-epoch.test.ts'
     - claim: "Every assignment writes an intention-to-treat row with arm, probability, seed and the served model"
       proof: "grep: intentionToTreatRow in src/lib/routing-experiments.ts"
@@ -64,9 +89,13 @@
       proof: 'grep: test("W1-T10842: the trial never re-leads a Codex row by itself" in test/routing/codex-model-experiment-epoch.test.ts'
     - claim: "The Codex model selection consults the Codex-vs-Codex experiment"
       proof: 'grep: codexExperimentArmForTask( in src/lib/worker-provider.ts'
+    - claim: "The control arm is the current Sol, the first Sol of the Codex balanced row at the selection's effort as codexCandidatesForCapability reads it from the loaded mounts table; the registration records that model, and while the table's current Sol differs from the registered control the epoch assigns nothing; no Sol version literal decides the control"
+      proof: 'grep: test("W1-T10842: the control is the current Sol of the Codex balanced row" in test/routing/codex-model-experiment-epoch.test.ts'
   falsifier: |
-    Drop the registration check: Terra is assigned with no protocol and the inactive-trial test fails. CLOSE IF
-    origin/main's ROUTING_EXPERIMENTS already holds a Codex-vs-Codex epoch for gpt-6.1-terra and gpt-6.1-sol.
+    Drop the registration check: Terra is assigned with no protocol and the inactive-trial test fails. Hard-code a
+    Sol version as the control, or keep assigning after the table's current Sol moves off the registered control,
+    and the current-Sol control test fails on a fixture table led by another Sol. CLOSE IF origin/main's
+    ROUTING_EXPERIMENTS already holds a Codex-vs-Codex epoch for gpt-6.1-terra and the current Sol.
   amendment: |
     2026-11-03, by the redesign Architect (machine, rule 16): Criterion 5’s proof relied on a non‑existent served‑model field; restating it to grep the row‑writing code satisfies the same claim.
     Restated proof for claim 5 to grep for the code that creates the intention‑to‑treat row (intentionToTreatRow) in src/lib/routing-experiments.ts, avoiding the missing served‑model field.
