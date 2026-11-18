@@ -1,0 +1,89 @@
+- id: W1-T13656
+  title: "A parked-PR remedy lands its held task file as a new file, so close-and-rebuild and split can act"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # turns on the close-and-rebuild and split remedies, which have never acted in production; they close PRs
+  origin: "operator-session#stuck-review-failed-prs-2026-11-18"
+  plan_refs:
+    - W1-T12709
+    - W1-T12222
+    - W1-T12410
+    - W1-T13046
+    - W1-T13047
+  files:
+    - src/lib/parked-pr-remedy.ts
+    - test/sweep/a-held-rebuild-task-file-lands-as-a-new-file.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A close-and-rebuild remedy on a PR whose task file origin/main holds hands the landing its held task file (plan/tasks.d/<held id>-*.yaml, which origin/main does not hold) marked newFile, and the real landTaskFilesAsync stages it instead of refusing it with 'this landing takes only an edit of a task file that exists': the parked_pr.remedy row has outcome taken and a held_task_id, and the PR is closed"
+      proof: "grep: W1-T13656 criterion 1 in test/sweep/a-held-rebuild-task-file-lands-as-a-new-file.test.ts"
+    - claim: "invariant:edits-stay-edits — a split-follow-up remedy marks only its new held task file newFile; the amended task file of the PR's own task stays an edit of a file origin/main holds"
+      kind: guard
+      proof: "grep: W1-T13656 criterion 2 in test/sweep/a-held-rebuild-task-file-lands-as-a-new-file.test.ts"
+    - claim: "The plan-filing rebuild (heldPlanRebuildFiles, W1-T13047) marks its held task file newFile and lands through the real landing"
+      proof: "grep: W1-T13656 criterion 3 in test/sweep/a-held-rebuild-task-file-lands-as-a-new-file.test.ts"
+    - claim: "invariant:a-refused-held-file-frees-its-id — when the landing refuses a held task file for any other reason, its reserved id is released (W1-T12410), so a remedy that the next pass retries does not leak one reserved id per pass"
+      kind: guard
+      proof: "grep: W1-T13656 criterion 4 in test/sweep/a-held-rebuild-task-file-lands-as-a-new-file.test.ts"
+    - claim: "The held task files the remedy builds carry the new-file mark"
+      proof: "grep: newFile: true in src/lib/parked-pr-remedy.ts"
+    - claim: "The new test runs green under the house test setup"
+      proof: "unit test: test/sweep/a-held-rebuild-task-file-lands-as-a-new-file.test.ts"
+  rationale: |
+    WHY: the remedies that W1-T12709 added so that "no PR waits on the operator" have never acted. Every
+    close-and-rebuild and split-follow-up remedy in the ledger was refused by the landing, so the PR stayed
+    parked behind a needs-human issue, which is the outcome W1-T12709 exists to remove.
+    OBSERVED 2026-11-18 in /mnt/rmd/state2/state (all ledger.*.ndjson.gz archives plus the live file):
+    - parked_pr.remedy rows with a remedy other than fix-on-pr: 47 close-and-rebuild and 10 split-follow-up,
+      all outcome refused, reason "the task files did not land: origin/main does not hold
+      plan/tasks.d/W1-T<n>-....yaml; this landing takes only an edit of a task file that exists". Zero taken.
+      First seen 2026-11-17T01:52:58Z (PR #18977, split), also PR #19166 from 2026-11-17T20:13Z.
+    - PR #19199 (W1-T9944): 4 rounds left one criterion unmet; the stall remedy chose close-and-rebuild at
+      08:58:13Z, 08:59:13Z, 08:59:51Z and 09:00:20Z, refused each time for held ids W1-T13631, W1-T13632,
+      W1-T13633 and W1-T13634. The PR then stood down behind needs-human issue #19353 (opened 08:51:54Z).
+    - refs/rmd-id/W1-T13631 to W1-T13634 are still on origin and no plan file declares them: each retry
+      reserved a fresh id and none was released.
+    READ at origin/main 535ac6c87:
+    - src/lib/parked-pr-remedy.ts takeParkedPrRemedy calls host.reserveTaskId, then heldTaskFiles or
+      heldPlanRebuildFiles, then host.landTaskFiles(files, target). Both builders return
+      { relPath, content, claim, proof } with no newFile field, and the ParkedPrHost.landTaskFiles type has
+      no such field either.
+    - src/lib/sweep.ts (parkedPr host, landTaskFiles) passes the files straight to landTaskFilesAsync and
+      returns landed.refused[0].reason as the error.
+    - src/lib/feedback-landing.ts landTaskFilesAsync (TaskFileInput.newFile, W1-T12222) refuses a path that
+      origin/main does not hold unless input.newFile === true, and its refuse() releases a reserved id only
+      for an input marked newFile, so the unmarked held file both fails and leaks its id.
+    - The sweep tests of the remedy (test/sweep/a-design-hold-splits-or-rebuilds-what-it-covers.test.ts,
+      an-exhausted-plan-round-is-closed-and-rebuilt.test.ts, a-pull-request-that-needs-operator-input-is-never-parked.test.ts)
+      fake host.landTaskFiles, so none drove the real landing with a new held file.
+    CHECKED for duplicates (2026-11-18, plan/tasks.d on origin/main and open PR titles): none. W1-T13048 fixed
+    which catalog the remedy lands in, not the new-file mark.
+  design: |
+    INVARIANT a-refused-held-file-frees-its-id: a held task file the landing refuses never keeps its reserved id.
+    INVARIANT edits-stay-edits: a file origin/main holds is never marked newFile.
+    1. src/lib/parked-pr-remedy.ts:
+       - ParkedPrHost.landTaskFiles takes TaskFileInput-shaped files: { relPath, content, claim, proof, newFile?: true }
+         (reuse the TaskFileInput type from feedback-landing.ts if the import keeps no-circular clean; else an
+         inline optional field). sweep.ts needs no change: it already passes the files to landTaskFilesAsync.
+       - heldTaskFiles: the held file entry gets newFile: true; the amended shard entry of a split does not.
+       - heldPlanRebuildFiles: the held file entry gets newFile: true.
+    2. One test file drives takeParkedPrRemedy with a host whose landTaskFiles is the real landTaskFilesAsync
+       over a git fixture (test/helpers/git-repo.ts, fake-github.ts or gh-shim.ts, the way
+       test/sweep/a-parked-pr-remedy-files-in-the-catalog-that-holds-the-task.test.ts drives it), one test per
+       criterion titled "W1-T13656 criterion <k>". Criterion 4 makes the landing refuse the held file for
+       another reason (for example the plan preflight) and asserts the reservation is released.
+  falsifier: |
+    Remove newFile from the held entry: criteria 1, 3 and 4 fail with "this landing takes only an edit of a task
+    file that exists". Mark the split's amended shard newFile too: criterion 2 fails.
+  note: |
+    Id reserved for run-unfiled-1795000890000 with ~/rmd-work/bin/reserve-id.sh.
+    Once this merges, the next sweep pass retries the stall remedy of PR #19199 and should close it with a held
+    rebuild of W1-T9944. Proof that counts in production: over 7 days after merge, parked_pr.remedy rows with
+    remedy close-and-rebuild or split-follow-up show outcome taken with a held_task_id, and none is refused with
+    "takes only an edit of a task file that exists".
