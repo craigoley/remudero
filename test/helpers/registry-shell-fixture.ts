@@ -144,13 +144,15 @@ if (bin === "df") { out("Filesystem 1024-blocks Used Available Capacity Mounted 
 if (bin === "uname") { out("Linux"); process.exit(0); }
 if (bin === "hostname") { out("fixture-host"); process.exit(0); }
 if (bin === "systemctl") process.exit(args[0]?.startsWith("is-") ? 1 : 0);
+// W1-T13720: the converge reads and sets the nodejs hold; the fixture holds nothing and records the call.
+if (bin === "apt-mark") process.exit(e.FIXTURE_APT_RECORD === "1" && ["showhold", "hold"].includes(args[0]) ? 0 : 97);
 if (bin === "apt-get" || bin === "apt-cache") {
   if (e.FIXTURE_APT_RECORD !== "1" || e.FIXTURE_APT_FAIL === args[0]) process.exit(97);
   if (bin === "apt-cache" && args.join(" ") === "madison nodejs") {
     out("nodejs | " + e.FIXTURE_NODE_PIN + "-1nodesource1 | fixture"); process.exit(0);
   }
   if (bin === "apt-get" && (args.join(" ") === "update" ||
-      args.join(" ") === "install -y nodejs=" + e.FIXTURE_NODE_PIN + "-1nodesource1")) process.exit(0);
+      args.join(" ") === "install -y --allow-downgrades --allow-change-held-packages nodejs=" + e.FIXTURE_NODE_PIN + "-1nodesource1")) process.exit(0);
   process.exit(98);
 }
 if (bin === "az" && args[0] === "acr" && args[1] === "login") process.exit(0);
@@ -159,7 +161,7 @@ if (["az", "gh", "mount", "umount", "curl", "crontab", "du", "sysctl"].includes(
 process.exit(98);
 `;
   for (const name of ["id", "sudo", "git", "docker", "findmnt", "df", "uname", "hostname", "systemctl",
-    "apt-get", "apt-cache", "az", "gh", "mount", "umount", "curl", "crontab", "du", "sysctl"]) writeFileSync(join(bin, name), transport, { mode: 0o700 });
+    "apt-get", "apt-cache", "apt-mark", "az", "gh", "mount", "umount", "curl", "crontab", "du", "sysctl"]) writeFileSync(join(bin, name), transport, { mode: 0o700 });
   const nodeSource = join(root, "nodesource.sources");
   writeFileSync(nodeSource, "URIs: https://fixture.invalid/disabled\n");
   const meminfo = join(root, "meminfo"); writeFileSync(meminfo, "MemTotal: 32768000 kB\nMemAvailable: 16000000 kB\n");
