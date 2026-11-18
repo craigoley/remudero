@@ -38465,6 +38465,8 @@ export function shadowedVerifyHumanJudge(opts: {
   const shadowSpawn = opts.spawns?.shadow ?? ledgeredNonDispatchSpawn("verify-human-shadow");
   const primary = realVerifyHumanJudge({
     ...opts,
+    // W1-T12417: a decision-model shadow named on the verify_human_judge row writes its row here.
+    shadowLog: opts.log,
     spawn: async (args) => {
       const result = await primarySpawn(args);
       primaryServedModel = result.servedModel ?? result.routedModel ?? null;

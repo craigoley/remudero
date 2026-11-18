@@ -1660,7 +1660,7 @@ export function realRiskJudge(opts: {
           void shadowJudgeCall({
             role: "risk-judge", key: riskJudgeDecisionKey(input), mount: opts.mount, primaryArgs: spawnArgs, primary: result,
             primaryAnswer: outcome.verdict, parse: parsedRiskJudgeVerdict, agreementKey: (verdict) => verdict.verdict,
-            spawn, log: opts.shadowLog,
+            ...(input.headSha === undefined ? {} : { head: { sha: input.headSha } }), spawn, log: opts.shadowLog,
           });
         }
         return outcome.verdict;

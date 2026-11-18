@@ -231,7 +231,9 @@ test("W1-T11075: a judge row's shadow arm must be a cash deployment", () => {
   const row = (shadow: unknown) => ({ ...base, ci_judge: { model: "haiku", effort: "low", max_turns: 400, context_budget: 60000, shadow } });
   assert.deepEqual(validateMounts(row({ deployment: DEEPSEEK, effort: "low", provider: "openweight" })).ci_judge?.shadow,
     { provider: "cash", deployment: DEEPSEEK, effort: "low" });
-  assert.throws(() => validateMounts(row("DeepSeek")), MountsError);
+  // W1-T12417: a bare name is a decision_models row or a cash deployment id; a name that is neither is refused.
+  assert.deepEqual(validateMounts(row(DEEPSEEK)).ci_judge?.shadow, { provider: "cash", deployment: DEEPSEEK });
+  assert.throws(() => validateMounts(row("not a deployment")), MountsError);
   assert.throws(() => validateMounts(row({ deployment: DEEPSEEK, provider: "claude" })), /shadow.provider' must be cash/);
   assert.throws(() => validateMounts(row({ deployment: "bad id!" })), /shadow.deployment/);
   assert.throws(() => validateMounts(row({ deployment: DEEPSEEK, effort: "" })), /shadow.effort/);

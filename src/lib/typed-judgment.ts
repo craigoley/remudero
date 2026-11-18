@@ -1,5 +1,6 @@
-import type { Mount } from "./mounts.js";
+import type { JudgeShadowArm, Mount } from "./mounts.js";
 import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
+import { shadowJudgeCall } from "./judge-shadow.js";
 import { spawnWorker, type SpawnWorkerArgs } from "./worker.js";
 
 /**
@@ -37,9 +38,10 @@ export const TYPED_JUDGMENT_TOOLS: readonly string[] = [];
  *  healthy multi-turn path this could ever need to raise. */
 export const TYPED_JUDGMENT_MAX_TURNS = 1;
 
-/** How far a distribution's sum may drift from 1 and still be accepted — floating-point
- *  slack only, never a licence for a model to under- or over-commit its probability mass. */
-export const TYPED_JUDGMENT_SUM_TOLERANCE = 0.01;
+// How far a distribution's sum may drift from 1 and still be accepted. W1-T12417: defined in decision-model.ts, which
+// this module's shadow imports through judge-shadow.ts, so the two modules form no import ring.
+import { TYPED_JUDGMENT_SUM_TOLERANCE } from "./decision-model.js";
+export { TYPED_JUDGMENT_SUM_TOLERANCE };
 
 /** A probability distribution over the fixed option set — every option present, every
  *  value a finite number in [0, 1]. */
@@ -186,8 +188,27 @@ export async function runTypedJudgment<TOption extends string>(opts: {
   cwd: string;
   settingsFile: string;
   spawn?: typeof spawnWorker;
+  /** W1-T12417: the role this spawn answers for, its ledger and its shadow arm. With one, the spawn's answer is asked
+   *  of the arm afterwards (judge-shadow.ts) and the result returned here is the spawn's own. */
+  shadow?: { role: "head-rehome" | "typed-judgment"; key: string; arm: JudgeShadowArm | undefined;
+    log: (step: string, fields: Record<string, unknown>) => void; head?: { sha?: string; prUrl?: string } };
 }): Promise<TypedJudgmentResult<TOption>> {
   const spawn = opts.spawn ?? benchmarkNonDispatchSpawn("typed-judgment");
-  const result = await spawn(buildTypedJudgmentSpawnArgs(opts));
-  return parseTypedJudgmentResponse(result.text, opts.options);
+  const args = buildTypedJudgmentSpawnArgs(opts);
+  const result = await spawn(args);
+  const parsed = parseTypedJudgmentResponse(result.text, opts.options);
+  const shadow = opts.shadow;
+  if (shadow !== undefined && shadow.arm !== undefined) {
+    const top = (text: string): TOption | undefined => {
+      const read = parseTypedJudgmentResponse(text, opts.options);
+      return read.kind === "distribution" ? argmaxTypedJudgmentOption(read.distribution) : undefined;
+    };
+    // Not awaited: the caller holds the spawn's own answer before any shadow request is made.
+    void shadowJudgeCall({ role: shadow.role, key: shadow.key, mount: { ...opts.mount, shadow: shadow.arm }, primaryArgs: args, primary: result,
+      primaryAnswer: parsed.kind === "distribution" ? argmaxTypedJudgmentOption(parsed.distribution) : undefined, parse: top,
+      agreementKey: (option) => option, input: opts.question, spawn, log: shadow.log,
+      question: { instructions: "The input is a question. Choose the option that answers it.", options: opts.options },
+      ...(shadow.head === undefined ? {} : { head: shadow.head }) });
+  }
+  return parsed;
 }

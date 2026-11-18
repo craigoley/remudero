@@ -19,6 +19,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
+import { judgeShadowOnlyArm, shadowJudgeCall } from "./judge-shadow.js";
 import { loadMounts, mountsPath } from "./mounts.js";
 import { resolveRiskJudgeMount } from "./risk-judge.js";
 import { spawnWorker } from "./worker.js";
@@ -336,13 +337,15 @@ export function productionRefreshJudge(opts: {
     inFlight = true;
     try {
       const prompt = buildRefreshJudgePrompt(question, await opts.diff(question.prNumber));
-      const mount = resolveRiskJudgeMount(loadMounts(mountsPath(opts.repoRoot)));
+      const mounts = loadMounts(mountsPath(opts.repoRoot));
+      const mount = resolveRiskJudgeMount(mounts);
       const raw = opts.spawn ?? spawnWorker;
       const spawn = benchmarkNonDispatchSpawn("refresh-judge", raw);
-      const result = await spawn({
-        cwd: opts.repoRoot, permissionMode: "bypassPermissions", settingsFile: join(opts.repoRoot, "settings", "worker.json"),
+      const args = {
+        cwd: opts.repoRoot, permissionMode: "bypassPermissions" as const, settingsFile: join(opts.repoRoot, "settings", "worker.json"),
         prompt, model: mount.model, effort: mount.effort, maxTurns: mount.maxTurns, tools: [],
-      });
+      };
+      const result = await spawn(args);
       opts.log?.("sweep.refresh.judge_spend", { pr_number: question.prNumber, head_sha: question.headSha,
         cost_usd: result.costUsd, num_turns: result.numTurns, model: mount.model, effort: mount.effort });
       if (result.subtype !== "success" || result.isError || result.apiError ||
@@ -351,6 +354,12 @@ export function productionRefreshJudge(opts: {
       }
       const verdict = parseRefreshJudgeReply(result.text);
       heads.set(key, verdict);
+      const arm = judgeShadowOnlyArm(mounts, "refresh-value");
+      if (arm !== undefined && opts.log !== undefined) {
+        // W1-T12417, not awaited: the ruling returned below is the judge's own. A reply the parser refuses is an unusable answer.
+        void shadowJudgeCall({ role: "refresh-value", key, mount: { ...mount, shadow: arm }, primaryArgs: args, primary: result,
+          primaryAnswer: verdict, parse: parseRefreshJudgeReply, agreementKey: (v) => v, head: { sha: question.headSha }, spawn, log: opts.log });
+      }
       return verdict;
     } finally {
       inFlight = false;

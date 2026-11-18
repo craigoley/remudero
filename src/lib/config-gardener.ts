@@ -24,6 +24,8 @@ import {
 } from "./experiment-promotion.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import { JUDGE_SHADOW_STEPS, judgeShadowSummary, type JudgeShadowRoleSummary } from "./judge-shadow.js";
+import { scoreTypedAnswers, type TypedAnswer, type TypedAnswerRow, type TypedAnswerScoreGroup } from "./typed-answer-scores.js";
+import { openWeightCandidatesForCapability, openWeightCapabilityForRequestedModel, type ModelSurface } from "./worker-provider.js";
 import { gardenNeedsInventory, gardenPassDue, landedPrUrl, gardenStatePath, judgeGardenDecision, readGardenState, runGardenAsync, type GardenAction, type GardenCheckout, type GardenPassResult, type GardenSpec, type GardenerDeps, type PrState } from "./gardener.js";
 import { buildEntryWeightIndex, DEFAULT_KNOWLEDGE_BUDGET_CHARS, loadLearningsCorpus } from "./learnings.js";
 import type { LedgerLine } from "./ledger.js";
@@ -53,7 +55,8 @@ import { deriveTaskClass } from "./task-class.js";
  *   - RE-DERIVE-CAP: the learnings character cap is re-derived from the spawns measured UNDER the
  *     current cap, with the same two functions that derived it (digest.ts).
  *   - MOVE-JUDGE-TO-CASH (W1-T12187): a judge whose cash shadow cleared {@link JUDGE_CASH_BAR} gets `provider: cash`
- *     on its own one-line row in the mounts table.
+ *     on its own one-line row in the mounts table. W1-T12417: the same edit when one shadow model of a role clears
+ *     {@link JUDGE_SWITCH_BAR} on W1-T12414's per-model scores and is the model cash serves that row with.
  *
  * EVERY CHANGE IS A CANARY (experiment-promotion.ts). It is chosen only when its SHADOW evidence — what
  * it was derived from, read before anything is exposed — clears its guard. Its PR opening puts it in
@@ -127,6 +130,8 @@ export interface ConfigInventory {
   cap?: { current: number; derivation: KnowledgeBudgetDerivation };
   /** W1-T12187: each judge role's cash shadow record over {@link JUDGE_CASH_BAR}'s window. */
   judgeShadows?: JudgeShadowRoleSummary[];
+  /** W1-T12417: W1-T12414's scores of each role's shadow models over the same window, one group per role, model and surface. */
+  judgeShadowScores?: TypedAnswerScoreGroup[];
   active: ConfigCanary[];
   /** Scopes whose canary was rolled back or declined within {@link CANARY_TTL_MS}: re-proposing the same
    *  change on the next pass would only repeat the verdict. */
@@ -163,6 +168,13 @@ export const CONFIG_TEND_INTERVAL_MS = 3600 * 1000;
 /** W1-T12187: what a judge's cash shadow must show before its row moves to cash. The three numbers are new and
  *  unmeasured (2026-11-17): the sample floor, the least agreement and the most calls with no usable answer. */
 export const JUDGE_CASH_BAR = { windowMs: 14 * 24 * 3600 * 1000, minPaired: 200, minAgreeShare: 0.98, maxNoAnswerShare: 0.02 } as const;
+/** W1-T12417: the per-model bar. The first three numbers are {@link JUDGE_CASH_BAR}'s; the Brier ceiling is new and
+ *  unmeasured (2026-11-17: no shadow answer has a known outcome yet). It applies to a model with a Brier figure; a
+ *  single answer has none (W1-T12414), and is judged on agreement. */
+export const JUDGE_SWITCH_BAR = { minCompared: JUDGE_CASH_BAR.minPaired, minAgreeShare: JUDGE_CASH_BAR.minAgreeShare,
+  maxNoAnswerShare: JUDGE_CASH_BAR.maxNoAnswerShare, maxBrier: 0.1 } as const;
+/** W1-T12417: judges that fail closed. No gardener proposal moves their primary off the subscription. */
+export const FAIL_CLOSED_JUDGE_ROLES: ReadonlySet<string> = new Set(["risk-judge"]);
 /** The mounts-table row of each shadowed role. */
 export const JUDGE_ROLE_ROWS: Readonly<Record<string, "risk_judge" | "feedback_summary" | "ci_judge" | "fix_progress_judge">> = {
   "risk-judge": "risk_judge", "decision-summary": "feedback_summary", "ci-judge": "ci_judge", "fix-progress": "fix_progress_judge",
@@ -435,6 +447,7 @@ function buildConfigInventory(input: InventoryMeasurement): ConfigInventory {
     recommendations: input.recommendations,
     cap: { current: DEFAULT_KNOWLEDGE_BUDGET_CHARS, derivation: capDerivation(rows, weights, DEFAULT_KNOWLEDGE_BUDGET_CHARS) },
     judgeShadows: judgeShadowSummary(rows, input.nowMs - JUDGE_CASH_BAR.windowMs),
+    judgeShadowScores: scoreTypedAnswers(judgeShadowTypedAnswers(rows, input.nowMs - JUDGE_CASH_BAR.windowMs)).groups,
     active: canaries.filter((c) => isPromotionActive(c.promotion.state)),
     cooling: canaries.filter((c) => c.promotion.state === "rolled_back" && input.nowMs - Date.parse(c.promotion.createdAt) < CANARY_TTL_MS).map((c) => c.promotion.scope.policyScope),
   };
@@ -696,6 +709,92 @@ export function judgeCashCandidate(inv: ConfigInventory, repoRoot: string): Conf
   return undefined;
 }
 
+/**
+ * W1-T12417: each shadow row since `sinceMs` as one W1-T12414 typed answer, keyed by role, shadow model and model
+ * surface, so `scoreTypedAnswers` gives each role and model its own figures. A refusal sent no request and gives no
+ * answer. A skipped request is a rejection, an abstention is an abstention, and a decision row keeps its distribution.
+ * A W1-T11075 paired row records agreement only, so its answer is `agree` or `disagree` against `agree`.
+ */
+export function judgeShadowTypedAnswers(rows: ReadonlyArray<Record<string, unknown>>, sinceMs?: number): TypedAnswerRow[] {
+  const out: TypedAnswerRow[] = [];
+  for (const row of rows) {
+    const role = row.role ?? row.surface;
+    const model = row.shadow_model ?? row.shadow_deployment;
+    if (typeof row.step !== "string" || !JUDGE_SHADOW_STEPS.includes(row.step) || typeof role !== "string" || typeof model !== "string") continue;
+    if (sinceMs !== undefined && !(Date.parse(String(row.ts)) >= sinceMs)) continue;
+    if (row.step === "judge_shadow.refused" || row.refusal !== undefined) continue;
+    const modelSurface: ModelSurface = row.model_surface === "decisions" ? "decisions" : "text";
+    const distribution = Array.isArray(row.distribution) ? (row.distribution as Array<{ option: string; probability: number }>) : undefined;
+    const base = { role, question: null, model, source: modelSurface === "decisions" ? "decisions" as const : "generative" as const, modelSurface,
+      questionType: null, inputDigest: null, outcome: null };
+    let answer: TypedAnswer;
+    let incumbent: string | null = typeof row.primary_answer === "string" ? row.primary_answer : null;
+    let options: string[] | null = distribution?.map((entry) => entry.option) ?? null;
+    if (typeof row.abstained === "string") answer = { kind: "abstained", reason: row.abstained === "refusal" ? "refusal" : "cannot-tell" };
+    else if (row.step === "judge_shadow.skipped" || row.step === "judge_shadow.unavailable" || row.parses === false) answer = { kind: "rejected", reason: String(row.reason ?? "no usable answer") };
+    else if (typeof row.agreement !== "boolean") continue;
+    else if (distribution !== undefined) answer = { kind: "distribution", distribution };
+    else if (typeof row.shadow_answer === "string") answer = { kind: "single", option: row.shadow_answer };
+    else {
+      answer = { kind: "single", option: row.agreement ? "agree" : "disagree" };
+      incumbent = "agree";
+      options = ["agree", "disagree"];
+    }
+    out.push({ ...base, options, answer, incumbent });
+  }
+  return out;
+}
+
+/** W1-T12417: does one shadow model of one role clear {@link JUDGE_SWITCH_BAR}? */
+export function judgeShadowModelClears(g: TypedAnswerScoreGroup): boolean {
+  return g.agreement.compared >= JUDGE_SWITCH_BAR.minCompared && g.agreement.rate !== null && g.agreement.rate >= JUDGE_SWITCH_BAR.minAgreeShare &&
+    (g.rejected + g.abstained) / g.answers <= JUDGE_SWITCH_BAR.maxNoAnswerShare && (g.brier === null || g.brier <= JUDGE_SWITCH_BAR.maxBrier);
+}
+
+/** W1-T12417: the first role and shadow model that clear {@link JUDGE_SWITCH_BAR}, where `provider: cash` on the role's
+ *  one-line row makes that model the role's primary: the model is the first of the cash row cash serves the row's
+ *  model and effort from. A fail-closed judge, a decision model (no judge has a decision-model primary yet), a role
+ *  with no one-line row and a row already on cash get no proposal. */
+export function judgeShadowSwitchCandidate(inv: ConfigInventory, repoRoot: string): ConfigGardenAction | undefined {
+  const full = mountsPath(repoRoot);
+  const clear = (inv.judgeShadowScores ?? []).filter((g) => g.modelSurface === "text" && !FAIL_CLOSED_JUDGE_ROLES.has(g.role) && judgeShadowModelClears(g));
+  if (clear.length === 0 || !existsSync(full)) return undefined;
+  const path = relative(repoRoot, full).split(sep).join("/");
+  const mounts = loadMounts(full);
+  const lines = readFileSync(full, "utf8").split("\n");
+  for (const g of clear) {
+    const key = JUDGE_ROLE_ROWS[g.role];
+    const row = key === undefined ? undefined : mounts[key];
+    const from = key === undefined ? undefined : lines.find((line) => line.startsWith(`${key}: {`) && line.trimEnd().endsWith("}"));
+    if (row === undefined || from === undefined || row.provider === "cash") continue;
+    const served = openWeightCandidatesForCapability(mounts.capabilities, openWeightCapabilityForRequestedModel(mounts.capabilities, row.model), row.effort)[0];
+    if (served !== g.model) continue;
+    const to = from.replace(/\s*\}\s*$/, ", provider: cash }");
+    const cohort: ConfigCohort = { kind: "all" };
+    const noAnswer = (g.rejected + g.abstained) / g.answers;
+    const observed = { denominator: g.agreement.compared, freshness: "verified" as const, comparisonPopulation: population(cohort), observedAt: inv.nowIso };
+    return {
+      class: "move-judge-to-cash", target: g.role, scope: `judge:${g.role}`,
+      reason: `the ${g.model} shadow of the ${g.role} agreed on ${(g.agreement.rate! * 100).toFixed(1)}% of ${g.agreement.compared} compared calls in 14 days, ` +
+        `${(noAnswer * 100).toFixed(1)}% of its calls gave no usable answer${g.brier === null ? "" : `, and its Brier score is ${g.brier.toFixed(3)}`}; ` +
+        `cash serves ${key} on ${row.model}/${row.effort} with ${g.model} first.`,
+      edits: [{ path, from, to }], cohort,
+      candidate: `${key} on ${g.model} (cash, ${g.modelSurface} surface)`,
+      baseline: `${key} on ${row.model}/${row.effort} with ${row.provider ?? "no provider"}`,
+      exposure: 1,
+      shadowMetrics: [
+        { metricName: "shadow_agree_share", unit: "fraction", direction: "min", abortThreshold: JUDGE_SWITCH_BAR.minAgreeShare },
+        { metricName: "shadow_no_answer_share", unit: "fraction", direction: "max", abortThreshold: JUDGE_SWITCH_BAR.maxNoAnswerShare },
+      ],
+      shadowObservations: [
+        { metricName: "shadow_agree_share", value: g.agreement.rate!, ...observed },
+        { metricName: "shadow_no_answer_share", value: noAnswer, ...observed },
+      ],
+    };
+  }
+  return undefined;
+}
+
 /** A draft promotion for `action`, approved by the gardener's own draw and not yet exposed. */
 export function configPromotion(action: ConfigGardenAction, nowIso: string, repo = "remudero"): PromotionRecord {
   const now = Date.parse(nowIso);
@@ -724,7 +823,8 @@ const readIfPresent = (path: string): string => (existsSync(path) ? readFileSync
 /** Every change any class could make now, each already clear of its shadow guard and of any scope an
  *  active canary holds. */
 export function configCandidates(inv: ConfigInventory, repoRoot: string, rng: () => number): ConfigGardenAction[] {
-  const all = [budgetCandidate(inv, rng), mountCandidate(inv, repoRoot), capCandidate(inv, readIfPresent(join(repoRoot, "scripts", "knowledge-budget-baseline.json"))), judgeCashCandidate(inv, repoRoot)].filter((a): a is ConfigGardenAction => a !== undefined);
+  const all = [budgetCandidate(inv, rng), mountCandidate(inv, repoRoot), capCandidate(inv, readIfPresent(join(repoRoot, "scripts", "knowledge-budget-baseline.json"))), judgeCashCandidate(inv, repoRoot),
+    judgeShadowSwitchCandidate(inv, repoRoot)].filter((a): a is ConfigGardenAction => a !== undefined);
   const held = inv.active.map((c) => ({ promotionId: c.promotion.promotionId, scope: c.promotion.scope, state: c.promotion.state }));
   return all.filter((a) => {
     const p = configPromotion(a, inv.nowIso);
@@ -814,7 +914,8 @@ export function configGardenSpec(deps: GardenerDeps, sources: ConfigGardenSource
     classes: CONFIG_GARDEN_CLASSES,
     cheapFingerprint: () => configCheapFingerprint(deps.repoRoot, (deps.clock ?? systemClock).now()),
     inventory: () => configInventory(deps, sources),
-    fingerprint: (inv) => [inv.queued.map((q) => `${q.id}=${q.budgetUsd}`).join(","), inv.recommendations.map((r) => r.cellKey).join(","), inv.cap?.derivation.recommendedCapChars, inv.runs.length, (inv.judgeShadows ?? []).filter(judgeClearsCashBar).map((s) => s.role).join(",")].join("|"),
+    fingerprint: (inv) => [inv.queued.map((q) => `${q.id}=${q.budgetUsd}`).join(","), inv.recommendations.map((r) => r.cellKey).join(","), inv.cap?.derivation.recommendedCapChars, inv.runs.length, (inv.judgeShadows ?? []).filter(judgeClearsCashBar).map((s) => s.role).join(","),
+      (inv.judgeShadowScores ?? []).filter(judgeShadowModelClears).map((g) => `${g.role}/${g.model}/${g.modelSurface}`).join(",")].join("|"),
     // The canary judges these classes (tendConfigCanaries settles the pending class), so the framework's
     // own metric is held still: it never credits or debits on a number the canary did not produce.
     metric: () => ({ trials: 0, successes: 0 }),

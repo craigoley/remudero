@@ -493,6 +493,8 @@ verify_human_judge:
   max_turns: 400
   context_budget: 60000
   provider: openweight
+  # W1-T12417: a decision model answers the same three options in shadow (docs/model-routing.md).
+  shadow: decisions-eastus
 
 # The ci judge and the fix-progress judge (W1-T11075). The operator ruling of 2026-11-17 turned the
 # shadow arm on (W1-T13364). Each row copies the risk judge's cell and names no provider, so the
@@ -518,6 +520,9 @@ machine_filing_judge:
 # judgement in shadow (docs/model-routing.md, "A cash model shadows each low-stakes judge"). When a role
 # clears the bar there, the config gardener proposes `provider: cash` on its row.
 # Keep each row on ONE line: the gardener replaces one line.
+# W1-T12417: a row may say `shadow: <name>`: a decision_models row asks the role's options as one
+# choice question, and any other name is a cash deployment. A row that names none, like these two,
+# keeps the shadow above. A shadow never names a provider for the row itself.
 risk_judge: { model: haiku, effort: low, max_turns: 400, context_budget: 60000 }
 feedback_summary: { model: haiku, effort: low, max_turns: 400, context_budget: 60000 }
 
@@ -535,6 +540,16 @@ feedback_summary: { model: haiku, effort: low, max_turns: 400, context_budget: 6
 decision_models:
   decisions-eastus: { deployment: gpt-6-luna, shape: openai-decisions, endpoint: { cash-entry: gpt-6.1-terra }, input_usd_per_million: 0.10, output_usd_per_million: 0, read_at: "2026-11-12", source: "OpenAI Decisions guide: $0.10 per 1M uncached input, output not charged. Azure publishes no Decisions price; this is the gpt-6-luna Global input rate on the Azure OpenAI pricing page." }
   systemone-eastus2: { deployment: decision-1, shape: microsoft-systemone, endpoint: cash-default, input_usd_per_million: 0.042, output_usd_per_million: 0.042, read_at: "2026-11-12", source: "Azure Foundry Microsoft models pricing page: $0.042 per 1M input; output is listed as N/A, but replies carry output tokens, so output is priced at the input rate until W1-T10858 reconciles an invoice." }
+
+# ── The shadow of each fixed-option judge with no row of its own (W1-T12417) ─────
+# Same `shadow:` names as above. Each judge acts on its own answer only; the shadow writes one
+# judge_shadow row. A typed-judgment spawn with no entry of its own (head-rehome) uses
+# `typed-judgment`'s. Remove a line to turn that shadow off. Keep each entry on ONE line.
+judge_shadows:
+  refresh-value: decisions-eastus
+  quiet-worker-watchdog: decisions-eastus
+  head-rehome: decisions-eastus
+  typed-judgment: decisions-eastus
 
 # ── max_turns is a RUNAWAY CLIFF, not a work limit (§9 tripwire re-base) ────────
 # The implement/reviewer/fix/diagnose worker lanes stay at a FLAT 400 — a tripwire

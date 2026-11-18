@@ -1,6 +1,8 @@
-import type { CashShadowArm, JudgeMount } from "./mounts.js";
+import { loadConfig, type Config } from "./config.js";
+import { askDecisionModel, DECISION_MODEL_SURFACE, DECISION_OUTPUT_MARGIN_TOKENS, resolveDecisionTarget, type DecisionAnsweredRow } from "./decision-model.js";
+import type { CashShadowArm, DecisionShadowArm, JudgeMount, JudgeShadowArm, JudgeThreshold, Mounts } from "./mounts.js";
 import { JUDGE_SHADOW_TRIAL_ID, type spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
-import { OpenWeightAllowanceExhaustedError, OpenWeightRequestTooLargeError } from "./worker-provider.js";
+import { cashCapacityReadiness, learnedCashLimit, OpenWeightAllowanceExhaustedError, OpenWeightRequestTooLargeError, type ModelSurface } from "./worker-provider.js";
 
 /**
  * lib/judge-shadow.ts — a cash model answers the same judgement beside a judge, in shadow.
@@ -10,20 +12,80 @@ import { OpenWeightAllowanceExhaustedError, OpenWeightRequestTooLargeError } fro
  * W1-T12187: the risk judge and the decision summary ask the first ready model of the cash row of their
  * own tier ({@link shadowJudgeCall}; rows `judge_shadow.compared`, `.skipped`), and
  * {@link judgeShadowSummary} reads both families for the config gardener.
+ * W1-T12417: a role's shadow may name a decision model (`shadow: <decision_models row>`); the role's fixed options go
+ * to it as one choice question ({@link JUDGE_SHADOW_QUESTIONS}), and every fixed-option judge of
+ * {@link FIXED_OPTION_JUDGE_ROLES} calls the same shadow.
  * Every shadow is advisory: the caller acts on the primary's answer only.
  */
 
 /** The judges a cash shadow may sit beside. */
 export type JudgeShadowSurface = "ci-judge" | "fix-progress" | JudgeShadowRole;
-/** W1-T12187: the roles {@link shadowJudgeCall} shadows. */
-export type JudgeShadowRole = "risk-judge" | "decision-summary";
+/** W1-T12187: the roles {@link shadowJudgeCall} shadows; W1-T12417 adds every fixed-option judge. */
+export type JudgeShadowRole = "risk-judge" | "decision-summary" | FixedOptionJudgeRole;
+
+/** W1-T12417: the fixed-option judges, in the order they gained the shadow. Each writes its rows under its own name. */
+export const FIXED_OPTION_JUDGE_ROLES = [
+  "risk-judge", "ci-judge", "fix-progress", "verify-human", "refresh-value", "quiet-worker-watchdog", "head-rehome", "typed-judgment",
+] as const;
+export type FixedOptionJudgeRole = (typeof FIXED_OPTION_JUDGE_ROLES)[number];
+
+/** W1-T12187's two roles: with no shadow named, each asks the first ready model of the cash row. Every other role
+ *  is shadowed only when its row names a candidate. */
+const CASH_ROW_SHADOW_ROLES: ReadonlySet<string> = new Set(["risk-judge", "decision-summary"]);
+
+/** W1-T12417: one judge's options as one decision question. */
+export interface JudgeShadowQuestion {
+  instructions: string;
+  options: readonly string[];
+}
+
+const ANSWER_THE_INPUT = "The input is a judge's own prompt. Choose the option that answers the question it asks.";
+
+/** W1-T12417: the fixed options of each judge whose options do not come with the call. A typed-judgment spawn, and
+ *  head-rehome through it, passes its own question and options. */
+export const JUDGE_SHADOW_QUESTIONS: Readonly<Record<Exclude<FixedOptionJudgeRole, "head-rehome" | "typed-judgment">, JudgeShadowQuestion>> = {
+  "risk-judge": { options: ["low", "high"],
+    instructions: `${ANSWER_THE_INPUT} low lets the candidate change proceed; high escalates it to a person.` },
+  "ci-judge": { options: ["escalate_full", "add_suites", "no_change"],
+    instructions: `${ANSWER_THE_INPUT} escalate_full runs the full CI; add_suites adds named suites; no_change keeps the planned suites.` },
+  "fix-progress": { options: ["continue", "change-approach", "escalate", "harness"],
+    instructions: `${ANSWER_THE_INPUT} It decides whether another fix round is justified.` },
+  "verify-human": { options: ["needs_operator", "automate", "backlog"],
+    instructions: `${ANSWER_THE_INPUT} It decides whether a verify-human task needs a person, can be automated, or waits in the backlog.` },
+  "refresh-value": { options: ["overlap", "independent"],
+    instructions: `${ANSWER_THE_INPUT} overlap means main's changes could change the pull request's verdict.` },
+  "quiet-worker-watchdog": { options: ["nudge", "kill_poll_child", "end_round", "wait"],
+    instructions: `${ANSWER_THE_INPUT} It picks one remedy for a worker that has been quiet past its bound.` },
+};
+
+/** W1-T12417: the answer a ci-judge verdict gives to {@link JUDGE_SHADOW_QUESTIONS}'s ci-judge question. */
+export function ciJudgeDecisionAnswer(verdict: unknown): string | undefined {
+  const read = verdict as { add?: unknown; escalateFull?: unknown } | null | undefined;
+  const add = read === null || read === undefined ? undefined : read.add;
+  if (Array.isArray(add) && typeof read!.escalateFull === "boolean") return read!.escalateFull ? "escalate_full" : add.length > 0 ? "add_suites" : "no_change";
+  return undefined;
+}
+
+/** W1-T12417: the shadow of a judge with no row of its own: its `judge_shadows` entry, or, for a typed-judgment spawn,
+ *  the `typed-judgment` entry. */
+export function judgeShadowOnlyArm(mounts: Pick<Mounts, "judge_shadows">, role: "refresh-value" | "quiet-worker-watchdog" | "head-rehome" | "typed-judgment"): JudgeShadowArm | undefined {
+  const shadows = mounts.judge_shadows;
+  return shadows?.[role] ?? (role === "head-rehome" ? shadows?.["typed-judgment"] : undefined);
+}
+
+/** W1-T12417: a tuned threshold applies only to the model id and the model surface it was stored with. */
+export function thresholdFor(threshold: JudgeThreshold | undefined, model: string, surface: ModelSurface): number | undefined {
+  return threshold !== undefined && threshold.model === model && threshold.surface === surface ? threshold.value : undefined;
+}
 
 /** What one shadow call came to. `refused` is a capacity or budget refusal; nothing is acted on in any case. */
 export type JudgeShadowOutcome =
   | { kind: "paired"; agreement: boolean }
   | { kind: "refused"; refusal: "capacity" | "budget"; reason: string }
   | { kind: "unavailable"; reason: string }
-  | { kind: "skipped" };
+  | { kind: "skipped" }
+  /** W1-T12417: the arm is a decision model; its row is written after the caller goes on. */
+  | { kind: "deferred" };
 
 type ShadowLog = (step: string, fields: Record<string, unknown>) => void;
 
@@ -41,6 +103,12 @@ export interface JudgeShadowRequest<T> {
   agreementKey: (verdict: T) => string;
   spawn: typeof spawnWorker;
   log: ShadowLog;
+}
+
+/** W1-T12417: the judged head of a `PR<n>@<head>` key. */
+function headOfKey(key: string): { sha?: string } {
+  const head = key.includes("@") ? key.slice(key.lastIndexOf("@") + 1) : "";
+  return /^[0-9a-f]{7,64}$/i.test(head) ? { sha: head } : {};
 }
 
 /** The shadow's spawn args: the primary's prompt, no tools, the cash provider. A declared arm pins its deployment;
@@ -114,6 +182,14 @@ function shadowRecorder(log: ShadowLog, common: Record<string, unknown>): Shadow
 export async function runJudgeShadow<T>(request: JudgeShadowRequest<T>): Promise<JudgeShadowOutcome> {
   const arm = request.mount.shadow;
   if (arm === undefined) return { kind: "skipped" };
+  if (arm.provider === "decisions") {
+    // W1-T12417: not awaited, so the caller never waits on the decision model.
+    void shadowJudgeCall({ role: request.surface as FixedOptionJudgeRole, key: request.key, mount: request.mount, primaryArgs: request.primaryArgs,
+      primary: {}, primaryAnswer: request.primaryVerdict, parse: request.parse, agreementKey: request.agreementKey,
+      decisionAnswer: request.surface === "ci-judge" ? ciJudgeDecisionAnswer : request.agreementKey,
+      head: headOfKey(request.key), spawn: request.spawn, log: request.log });
+    return { kind: "deferred" };
+  }
   const args = judgeShadowSpawnArgs(request.primaryArgs, request.mount, request.surface, arm);
   const record = shadowRecorder(request.log, {
     surface: request.surface, decision_key: request.key,
@@ -145,15 +221,26 @@ export interface ShadowJudgeCall<T> {
   /** The primary's spawn args; the shadow sends the same prompt. */
   primaryArgs: SpawnWorkerArgs;
   /** The primary's result: its cost and the model that served it go on the row. */
-  primary: Pick<WorkerResult, "costUsd" | "servedModel" | "routedModel">;
-  /** The answer the caller already holds. */
-  primaryAnswer: T;
+  primary: Partial<Pick<WorkerResult, "costUsd" | "servedModel" | "routedModel">>;
+  /** The answer the caller already holds. `undefined` when the primary gave none. */
+  primaryAnswer: T | undefined;
   /** The role's own parser. */
   parse: (text: string) => T | undefined;
   /** Two answers agree when these keys are equal. Absent, the row records whether the reply parses and no agreement. */
   agreementKey?: (answer: T) => string;
   spawn: typeof spawnWorker;
   log: ShadowLog;
+  /** W1-T12417, a decision-model shadow: the role's options, when the call brings its own (a typed-judgment spawn). */
+  question?: JudgeShadowQuestion;
+  /** The decision model's one input; absent, the primary's prompt. */
+  input?: string;
+  /** The primary's answer as one of the options; absent, {@link ShadowJudgeCall.agreementKey}. */
+  decisionAnswer?: (answer: T) => string | undefined;
+  /** The judged head and, where there is one, the pull request; both go on the `decision.answered` row. */
+  head?: { sha?: string; prUrl?: string };
+  /** The decision-model shadow's seams, beside `spawn` and `log`: production reads the host config and asks the
+   *  real decision model. */
+  decisions?: { config?: () => Config; ask?: typeof askDecisionModel; env?: NodeJS.ProcessEnv; learnedLimit?: typeof learnedCashLimit };
 }
 
 /** ADVISORY ONLY: after the role answered, send the same prompt once to the first ready model of the cash row at low
@@ -161,16 +248,18 @@ export interface ShadowJudgeCall<T> {
  *  refusal or a failure. It starts on a later turn of the event loop, so a caller that does not await it holds its
  *  own answer before any shadow request is made. It never throws. */
 export async function shadowJudgeCall<T>(call: ShadowJudgeCall<T>): Promise<void> {
-  if (call.mount.provider === "cash") return;
+  const arm = call.mount.shadow;
+  if (arm?.provider === "decisions") return decisionShadow(call, arm);
+  if (call.mount.provider === "cash" || (arm === undefined && !CASH_ROW_SHADOW_ROLES.has(call.role))) return;
   await new Promise<void>((resolve) => setImmediate(resolve));
-  const args = judgeShadowSpawnArgs(call.primaryArgs, call.mount, call.role, call.mount.shadow);
+  const args = judgeShadowSpawnArgs(call.primaryArgs, call.mount, call.role, arm);
   const record = shadowRecorder(call.log, {
     role: call.role, decision_key: call.key,
     primary_model: call.primary.servedModel ?? call.primary.routedModel ?? call.mount.model,
     primary_provider: call.mount.provider ?? null, primary_cost_usd: call.primary.costUsd ?? null, shadow_effort: args.effort,
   });
   const keyed = call.agreementKey;
-  const ask = await askShadow({ spawn: call.spawn, parse: call.parse, primaryVerdict: call.primaryAnswer, agreementKey: keyed ?? (() => "") }, args);
+  const ask = await askShadow<T>({ spawn: call.spawn, parse: call.parse, primaryVerdict: call.primaryAnswer, agreementKey: keyed ?? (() => "") }, args);
   const shadow = { shadow_model: ask.spend?.served_model ?? null, shadow_cost_usd: ask.spend?.cost_usd ?? null };
   if (ask.kind === "answered") {
     record("judge_shadow.compared", { ...shadow,
@@ -180,6 +269,80 @@ export async function shadowJudgeCall<T>(call: ShadowJudgeCall<T>): Promise<void
   } else {
     record("judge_shadow.skipped", { ...shadow, reason: ask.reason, ...(ask.kind === "refused" ? { refusal: ask.refusal } : {}) });
   }
+}
+
+/** A request's input estimate in tokens: a byte is at most one token, plus the reply margin. */
+const decisionNeedTokens = (input: string): number => Buffer.byteLength(input, "utf8") + DECISION_OUTPUT_MARGIN_TOKENS;
+
+/** W1-T12417, ADVISORY ONLY: ask the arm's decision model the role's options as one choice question, once, after the
+ *  caller holds its answer, and write one judge_shadow row. A decision with a known head records it. An unavailable,
+ *  refused, failed, rejected or abstaining candidate writes `judge_shadow.skipped` with its reason. A shadow whose
+ *  learned per-minute limit cannot hold the request sends nothing. It never throws. */
+async function decisionShadow<T>(call: ShadowJudgeCall<T>, arm: DecisionShadowArm): Promise<void> {
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const record = shadowRecorder(call.log, {
+    role: call.role, decision_key: call.key,
+    primary_model: call.primary.servedModel ?? call.primary.routedModel ?? call.mount.model,
+    primary_provider: call.mount.provider ?? null, primary_cost_usd: call.primary.costUsd ?? null,
+    shadow_model: arm.candidate.name, shadow_deployment: arm.deployment, model_surface: DECISION_MODEL_SURFACE,
+    ...(call.head?.sha ? { head_sha: call.head.sha } : {}),
+  });
+  const question = call.question ?? (Object.hasOwn(JUDGE_SHADOW_QUESTIONS, call.role) ? JUDGE_SHADOW_QUESTIONS[call.role as keyof typeof JUDGE_SHADOW_QUESTIONS] : undefined);
+  if (question === undefined) {
+    record("judge_shadow.skipped", { shadow_cost_usd: 0, reason: "the role declares no fixed options" });
+    return;
+  }
+  const answerOf = call.decisionAnswer ?? call.agreementKey;
+  const primaryAnswer = call.primaryAnswer === undefined || answerOf === undefined ? null : answerOf(call.primaryAnswer) ?? null;
+  try {
+    const deps = call.decisions ?? {};
+    const config = (deps.config ?? loadConfig)();
+    const env = deps.env ?? process.env;
+    const input = call.input ?? call.primaryArgs.prompt;
+    const target = resolveDecisionTarget(config, arm.candidate, env);
+    if (target.ok) {
+      const readiness = cashCapacityReadiness((deps.learnedLimit ?? learnedCashLimit)(arm.deployment, target.endpoint), decisionNeedTokens(input));
+      if (readiness.state === "shortfall") {
+        record("judge_shadow.skipped", { shadow_cost_usd: 0, refusal: "capacity",
+          reason: `${arm.deployment} has learned a limit of ${readiness.limitTokens} tokens per minute; the request needs ${readiness.shortfallTokens} more` });
+        return;
+      }
+    }
+    const row = await (deps.ask ?? askDecisionModel)(config, {
+      role: call.role, candidate: arm.candidate, input, env,
+      questions: [{ type: "choice", name: call.role.replace(/-/g, "_"), instructions: question.instructions, options: question.options.map((value) => ({ value })) }],
+      ...(call.head?.sha ? { headSha: call.head.sha, ...(call.head.prUrl ? { prUrl: call.head.prUrl } : {}) } : {}),
+    });
+    record(...decisionShadowRow(row, primaryAnswer, thresholdFor(call.mount.threshold, arm.deployment, DECISION_MODEL_SURFACE)));
+  } catch (error) {
+    record("judge_shadow.skipped", { shadow_cost_usd: 0, reason: error instanceof Error ? error.message : String(error) });
+  }
+}
+
+/** One decision request's judge_shadow row: `compared` for a distribution, else `skipped` with its reason. A 429
+ *  is the candidate being unavailable; a budget refusal is a refusal. Below a threshold stored for this model id and
+ *  surface, the top option is an abstention. */
+function decisionShadowRow(row: DecisionAnsweredRow, primaryAnswer: string | null, threshold: number | undefined): [string, Record<string, unknown>] {
+  const spend = { shadow_cost_usd: row.settled_usd, latency_ms: row.latency_ms };
+  if (row.outcome !== "answered") {
+    const detail = row.detail === undefined ? "" : `: ${row.detail}`;
+    if (row.reason === "budget-refused") return ["judge_shadow.skipped", { ...spend, refusal: "budget", reason: `budget refused${detail}` }];
+    if (row.status === 429) return ["judge_shadow.skipped", { ...spend, reason: `unavailable: rate limited (429)${detail}` }];
+    return ["judge_shadow.skipped", { ...spend, reason: `${row.outcome}: ${row.reason ?? "no reason"}${detail}` }];
+  }
+  const answer = row.answers[0];
+  if (answer === undefined) return ["judge_shadow.skipped", { ...spend, reason: "rejected: the reply has no answer" }];
+  if (answer.outcome === "abstained") return ["judge_shadow.skipped", { ...spend, abstained: answer.reason, reason: `abstained (${answer.reason})` }];
+  if (answer.outcome === "rejected") return ["judge_shadow.skipped", { ...spend, reason: `rejected: ${answer.reason}` }];
+  const distribution = answer.distribution.map((entry) => ({ option: String(entry.option), probability: entry.probability }));
+  const top = distribution.reduce((best, entry) => (entry.probability > best.probability ? entry : best));
+  const tuned = threshold === undefined ? {} : { threshold };
+  if (threshold !== undefined && top.probability < threshold) {
+    return ["judge_shadow.skipped", { ...spend, ...tuned, distribution, abstained: "below-threshold",
+      reason: `abstained (the top option ${top.option} has ${top.probability.toFixed(3)}, below the threshold ${threshold})` }];
+  }
+  return ["judge_shadow.compared", { ...spend, ...tuned, distribution, primary_answer: primaryAnswer, shadow_answer: top.option,
+    agreement: primaryAnswer === top.option, ...(answer.cannotTell === undefined ? {} : { cannot_tell: answer.cannotTell }) }];
 }
 
 /** Every step {@link judgeShadowSummary} reads: this task's two and the three of W1-T11075. */
@@ -240,3 +403,4 @@ export function judgeShadowSummary(rows: ReadonlyArray<Record<string, unknown>>,
     primaryMedianCostUsd: median(t.primary), shadowMedianCostUsd: median(t.shadow),
   }));
 }
+

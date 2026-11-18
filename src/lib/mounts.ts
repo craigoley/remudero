@@ -122,10 +122,34 @@ export interface CashShadowArm {
   effort?: string;
 }
 
-/** A judge's own mount row: a {@link Mount} plus an optional {@link CashShadowArm}. */
-export interface JudgeMount extends Mount {
-  shadow?: CashShadowArm;
+/** W1-T12417: a decision model (a `decision_models` row) that answers the judge's fixed options in shadow, in one
+ *  request. `deployment` is the decision model's own deployment, so a reader that names an arm's deployment reads both kinds. */
+export interface DecisionShadowArm {
+  provider: "decisions";
+  deployment: string;
+  candidate: DecisionCandidate;
 }
+
+/** W1-T12417: what a role's `shadow:` names: a cash deployment, or a decision model. */
+export type JudgeShadowArm = CashShadowArm | DecisionShadowArm;
+
+/** W1-T12417: a tuned threshold, stored beside the model id and the model surface (W1-T12420) it was tuned on. It is
+ *  read only for that pair: the least probability a top option needs before it counts as an answer. */
+export interface JudgeThreshold {
+  model: string;
+  surface: "text" | "decisions";
+  value: number;
+}
+
+/** A judge's own mount row: a {@link Mount} plus an optional shadow arm and threshold. */
+export interface JudgeMount extends Mount {
+  shadow?: JudgeShadowArm;
+  threshold?: JudgeThreshold;
+}
+
+/** W1-T12417: the fixed-option judges with no mount row of their own. Each may name a shadow under `judge_shadows`. */
+export const JUDGE_SHADOW_ONLY_ROLES = ["refresh-value", "quiet-worker-watchdog", "head-rehome", "typed-judgment"] as const;
+export type JudgeShadowOnlyRole = (typeof JUDGE_SHADOW_ONLY_ROLES)[number];
 
 /** The three synthesis rungs (W1-T2559), exempt from the Tier Invariant — see this file's header. */
 export const SYNTHESIS_ROLES = ["retro", "triage", "inbox_draft"] as const;
@@ -223,7 +247,7 @@ export interface Mounts {
   /** OPTIONAL (W1-T3614) — the escalation judge's own mount, so that zero-tool lane can carry a `provider`; absent = {@link resolveRiskJudgeMount}'s cell. NOT `judge`, which G-17 binds. */
   escalation_judge?: Mount;
   /** OPTIONAL — same shape and reason as {@link Mounts.escalation_judge}, for the verify-human judge and (below) the machine-filing judge. */
-  verify_human_judge?: Mount;
+  verify_human_judge?: JudgeMount;
   machine_filing_judge?: Mount;
   /** OPTIONAL (W1-T11075) — the ci judge's and the fix-progress judge's own rows. Each may name a `provider`
    *  and a cash `shadow` arm; absent = the risk judge's provider-less cell. */
@@ -241,6 +265,8 @@ export interface Mounts {
   routes: Record<string, Record<string, Record<string, Mount>>>;
   /** OPTIONAL (W1-T12416) — the decision models a shadow may ask, by candidate name. */
   decision_models?: Record<string, DecisionCandidate>;
+  /** OPTIONAL (W1-T12417) — the shadow of each fixed-option judge that has no mount row of its own. */
+  judge_shadows?: Partial<Record<JudgeShadowOnlyRole, JudgeShadowArm>>;
 }
 
 /** The two request shapes a decision model answers in (W1-T12416). */
@@ -293,11 +319,16 @@ function parseDecisionModels(raw: unknown): Record<string, DecisionCandidate> {
 
 const SHADOW_DEPLOYMENT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
-/** W1-T11075: a judge row — {@link parseMount} plus its optional cash `shadow` arm. */
-function parseJudgeMount(raw: unknown, where: string, tiers: Record<string, number>, efforts: Record<string, number>): JudgeMount {
-  const mount: JudgeMount = parseMount(raw, where, tiers, efforts);
-  const shadow = (raw as Record<string, unknown>).shadow;
-  if (shadow === undefined) return mount;
+/** W1-T12417: a `shadow:` value. A name is a `decision_models` row when one has that name, else a cash deployment id. */
+function parseShadowArm(shadow: unknown, where: string, decisionModels: Record<string, DecisionCandidate> | undefined): JudgeShadowArm {
+  if (typeof shadow === "string") {
+    const candidate = decisionModels !== undefined && Object.hasOwn(decisionModels, shadow) ? decisionModels[shadow] : undefined;
+    if (candidate !== undefined) return { provider: "decisions", deployment: candidate.deployment, candidate };
+    if (!SHADOW_DEPLOYMENT_ID.test(shadow)) {
+      throw new MountsError(`mount ${where}: 'shadow' must name a decision_models row or a cash deployment id, got ${JSON.stringify(shadow)}.`);
+    }
+    return { provider: "cash", deployment: shadow };
+  }
   if (!isObject(shadow)) throw new MountsError(`mount ${where}: 'shadow' must be a mapping with a cash 'deployment'.`);
   if (shadow.provider !== undefined && canonicalWorkerProviderId(String(shadow.provider)) !== "cash") {
     throw new MountsError(`mount ${where}: 'shadow.provider' must be cash, got ${JSON.stringify(shadow.provider)}.`);
@@ -308,7 +339,37 @@ function parseJudgeMount(raw: unknown, where: string, tiers: Record<string, numb
   if (shadow.effort !== undefined && (typeof shadow.effort !== "string" || shadow.effort.trim() === "")) {
     throw new MountsError(`mount ${where}: 'shadow.effort' must be a non-empty string.`);
   }
-  return { ...mount, shadow: { provider: "cash", deployment: shadow.deployment, ...(shadow.effort === undefined ? {} : { effort: shadow.effort as string }) } };
+  return { provider: "cash", deployment: shadow.deployment, ...(shadow.effort === undefined ? {} : { effort: shadow.effort as string }) };
+}
+
+function parseThreshold(raw: unknown, where: string): JudgeThreshold {
+  if (!isObject(raw) || typeof raw.model !== "string" || !SHADOW_DEPLOYMENT_ID.test(raw.model) || (raw.surface !== "text" && raw.surface !== "decisions") ||
+    typeof raw.value !== "number" || !Number.isFinite(raw.value) || raw.value < 0 || raw.value > 1) {
+    throw new MountsError(`mount ${where}: 'threshold' must be { model: <model id>, surface: text | decisions, value: <0 to 1> }.`);
+  }
+  return { model: raw.model, surface: raw.surface, value: raw.value };
+}
+
+/** W1-T11075: a judge row — {@link parseMount} plus its optional `shadow` arm (W1-T12417: or a decision model) and threshold. */
+function parseJudgeMount(raw: unknown, where: string, tiers: Record<string, number>, efforts: Record<string, number>,
+  decisionModels?: Record<string, DecisionCandidate>): JudgeMount {
+  const mount: JudgeMount = parseMount(raw, where, tiers, efforts);
+  const { shadow, threshold } = raw as Record<string, unknown>;
+  return { ...mount, ...(shadow === undefined ? {} : { shadow: parseShadowArm(shadow, where, decisionModels) }),
+    ...(threshold === undefined ? {} : { threshold: parseThreshold(threshold, where) }) };
+}
+
+/** W1-T12417: the `judge_shadows` section: role → shadow, for the judges with no row of their own. */
+function parseJudgeShadows(raw: unknown, decisionModels: Record<string, DecisionCandidate> | undefined): Partial<Record<JudgeShadowOnlyRole, JudgeShadowArm>> {
+  if (!isObject(raw)) throw new MountsError("'judge_shadows' must be a mapping of role → shadow.");
+  const out: Partial<Record<JudgeShadowOnlyRole, JudgeShadowArm>> = {};
+  for (const [role, shadow] of Object.entries(raw)) {
+    if (!(JUDGE_SHADOW_ONLY_ROLES as readonly string[]).includes(role)) {
+      throw new MountsError(`'judge_shadows.${role}' is not a judge without its own row (${JUDGE_SHADOW_ONLY_ROLES.join(", ")}).`);
+    }
+    out[role as JudgeShadowOnlyRole] = parseShadowArm(shadow, `judge_shadows.${role}`, decisionModels);
+  }
+  return out;
 }
 
 /** The plan-authorship effort floor the Architect must meet or exceed (§9). */
@@ -757,18 +818,19 @@ export function validateMounts(raw: unknown, opts: MountsOptions = {}): Mounts {
   const judge = parseMount(raw.judge, "judge", tiers, efforts);
   const escalationJudge =
     raw.escalation_judge === undefined ? undefined : parseMount(raw.escalation_judge, "escalation_judge", tiers, efforts);
+  const decisionModels = raw.decision_models === undefined ? undefined : parseDecisionModels(raw.decision_models);
   const verifyHumanJudge =
-    raw.verify_human_judge === undefined ? undefined : parseMount(raw.verify_human_judge, "verify_human_judge", tiers, efforts);
+    raw.verify_human_judge === undefined ? undefined : parseJudgeMount(raw.verify_human_judge, "verify_human_judge", tiers, efforts, decisionModels);
   const machineFilingJudge =
     raw.machine_filing_judge === undefined ? undefined : parseMount(raw.machine_filing_judge, "machine_filing_judge", tiers, efforts);
-  const ciJudge = raw.ci_judge === undefined ? undefined : parseJudgeMount(raw.ci_judge, "ci_judge", tiers, efforts);
+  const ciJudge = raw.ci_judge === undefined ? undefined : parseJudgeMount(raw.ci_judge, "ci_judge", tiers, efforts, decisionModels);
   const fixProgressJudge =
-    raw.fix_progress_judge === undefined ? undefined : parseJudgeMount(raw.fix_progress_judge, "fix_progress_judge", tiers, efforts);
-  const riskJudge = raw.risk_judge === undefined ? undefined : parseJudgeMount(raw.risk_judge, "risk_judge", tiers, efforts);
+    raw.fix_progress_judge === undefined ? undefined : parseJudgeMount(raw.fix_progress_judge, "fix_progress_judge", tiers, efforts, decisionModels);
+  const riskJudge = raw.risk_judge === undefined ? undefined : parseJudgeMount(raw.risk_judge, "risk_judge", tiers, efforts, decisionModels);
   const feedbackSummary =
-    raw.feedback_summary === undefined ? undefined : parseJudgeMount(raw.feedback_summary, "feedback_summary", tiers, efforts);
+    raw.feedback_summary === undefined ? undefined : parseJudgeMount(raw.feedback_summary, "feedback_summary", tiers, efforts, decisionModels);
   const stepUp = raw.step_up === undefined ? undefined : parseMount(raw.step_up, "step_up", tiers, efforts);
-  const decisionModels = raw.decision_models === undefined ? undefined : parseDecisionModels(raw.decision_models);
+  const judgeShadows = raw.judge_shadows === undefined ? undefined : parseJudgeShadows(raw.judge_shadows, decisionModels);
 
   // W1-T2559: synthesis rungs — each REQUIRED, validated like architect/judge, never a fallback.
   if (!isObject(raw.synthesis)) throw new MountsError(`'synthesis' must be a mapping of role → mount (${SYNTHESIS_ROLES.join(", ")}).`);
@@ -793,7 +855,7 @@ export function validateMounts(raw: unknown, opts: MountsOptions = {}): Mounts {
     }
   }
 
-  const mounts: Mounts = { tiers, efforts, ...(capabilities ? { capabilities } : {}), architect, judge, ...(escalationJudge ? { escalation_judge: escalationJudge } : {}), ...(verifyHumanJudge ? { verify_human_judge: verifyHumanJudge } : {}), ...(machineFilingJudge ? { machine_filing_judge: machineFilingJudge } : {}), ...(ciJudge ? { ci_judge: ciJudge } : {}), ...(fixProgressJudge ? { fix_progress_judge: fixProgressJudge } : {}), ...(riskJudge ? { risk_judge: riskJudge } : {}), ...(feedbackSummary ? { feedback_summary: feedbackSummary } : {}), ...(stepUp ? { step_up: stepUp } : {}), synthesis, routes, ...(decisionModels ? { decision_models: decisionModels } : {}) };
+  const mounts: Mounts = { tiers, efforts, ...(capabilities ? { capabilities } : {}), architect, judge, ...(escalationJudge ? { escalation_judge: escalationJudge } : {}), ...(verifyHumanJudge ? { verify_human_judge: verifyHumanJudge } : {}), ...(machineFilingJudge ? { machine_filing_judge: machineFilingJudge } : {}), ...(ciJudge ? { ci_judge: ciJudge } : {}), ...(fixProgressJudge ? { fix_progress_judge: fixProgressJudge } : {}), ...(riskJudge ? { risk_judge: riskJudge } : {}), ...(feedbackSummary ? { feedback_summary: feedbackSummary } : {}), ...(stepUp ? { step_up: stepUp } : {}), synthesis, routes, ...(decisionModels ? { decision_models: decisionModels } : {}), ...(judgeShadows ? { judge_shadows: judgeShadows } : {}) };
   // G-17 FIRST: checking the step-up ahead of it MASKED the Tier Invariant's own message, so a
   // table violating G-17 reported the step-up's refusal instead. Both fire; only the order moved.
   enforceTierInvariant(mounts, opts.thinkingDefault);

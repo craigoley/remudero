@@ -18,6 +18,7 @@ import type { DispatchBreakJudge } from "./stall-verifier.js";
 import { readCiGateRequiredChecks } from "./ci-gate-required.js";
 import { createHeadRehomePorts, headIdentityRed, headRehomePlan, type HeadRehomePorts } from "./head-rehome.js";
 import { argmaxTypedJudgmentOption, runTypedJudgment } from "./typed-judgment.js";
+import { judgeShadowOnlyArm, shadowJudgeCall } from "./judge-shadow.js";
 import { diffCoverageTargets } from "./diff-coverage-targets.js";
 import { execFileSync } from "node:child_process";
 import { defaultIsPidAlive } from "./drain-lock.js";
@@ -2543,10 +2544,17 @@ export function productionFixProgressJudge(opts: {
       ...(mount.provider === undefined ? {} : { mountProvider: mount.provider }) };
     const result = await spawn(primaryArgs);
     const verdict = result.subtype !== undefined && result.subtype !== "success" ? undefined : parseFixProgressVerdict(result.text);
-    if (mount.shadow !== undefined && opts.log !== undefined) {
+    const shadowKey = `${input.prNumber === undefined ? input.taskId ?? "unknown" : `PR${input.prNumber}`}@${input.headSha}`;
+    if (mount.shadow?.provider === "decisions" && opts.log !== undefined) {
+      // W1-T12417: a decision-model arm. Not awaited: the verdict returned below is the primary's.
+      void shadowJudgeCall({
+        role: "fix-progress", key: shadowKey, mount, primaryArgs, primary: result, primaryAnswer: verdict, parse: parseFixProgressVerdict,
+        agreementKey: (v) => JUDGE_SHADOW_COMPARED_KEY["fix-progress"](v) ?? "", head: { sha: input.headSha }, spawn, log: opts.log,
+      });
+    } else if (mount.shadow !== undefined && opts.log !== undefined) {
       // Advisory: the verdict returned below is the primary's, whatever the shadow answers or refuses.
       await runJudgeShadow({
-        surface: "fix-progress", key: `${input.prNumber === undefined ? input.taskId ?? "unknown" : `PR${input.prNumber}`}@${input.headSha}`,
+        surface: "fix-progress", key: shadowKey,
         mount, primaryArgs, primaryVerdict: verdict, parse: parseFixProgressVerdict,
         agreementKey: (v) => JUDGE_SHADOW_COMPARED_KEY["fix-progress"](v) ?? "",
         spawn, log: opts.log,
@@ -3646,7 +3654,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       requiredChecks: readCiGateRequiredChecks(repoRoot),
       judgeQuiet: async (pr) => {
         if (repoMode === "shadow") return { quiet: false, reason: "shadow repository" };
-        const mount = resolveRiskJudgeMount(loadMounts(mountsPath(repoRoot)));
+        const mounts = loadMounts(mountsPath(repoRoot));
+        const mount = resolveRiskJudgeMount(mounts);
         const question = "Decide whether this PR's author session is quiet enough to repair its head-identity-only red. " +
           "The repair pushes ONE empty commit carrying a Remudero-Task trailer onto the PR's own branch, so an author " +
           "still pushing there would have to pull it first. " +
@@ -3655,7 +3664,10 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           JSON.stringify({ headSha: pr.headSha, headRefName: pr.headRefName, updatedAt: pr.updatedAt, activity: pr.activity, nowMs: nowMsImpl() });
         const result = await runTypedJudgment({ question, options: ["wait", "trailer"] as const, mount,
           cwd: repoRoot, settingsFile: join(repoRoot, "settings", "worker.json"),
-          spawn: spawnImpl ?? benchmarkNonDispatchSpawn("head-rehome") });
+          spawn: spawnImpl ?? benchmarkNonDispatchSpawn("head-rehome"),
+          // W1-T12417: the answer is asked of head-rehome's shadow afterwards, under its own role name.
+          shadow: { role: "head-rehome", key: `PR${pr.prNumber}@${pr.headSha}`, arm: judgeShadowOnlyArm(mounts, "head-rehome"), log,
+            head: { sha: pr.headSha, prUrl: `https://github.com/${owner}/${repo}/pull/${pr.prNumber}` } } });
         if (result.kind === "rejected") return { quiet: false, reason: `quietness judge unavailable: ${result.reason}` };
         const choice = argmaxTypedJudgmentOption(result.distribution);
         return { quiet: choice === "trailer", reason: `activity judge chose ${choice}: ${JSON.stringify(result.distribution)}` };

@@ -8,7 +8,6 @@ import { unknownArgError } from "./cli-args.js";
 import { appendProducerLedger } from "./ledger.js";
 import { ledgerPathFor } from "./ledger-path.js";
 import { loadMounts, mountsPath, type DecisionCandidate, type DecisionModelShape } from "./mounts.js";
-import { TYPED_JUDGMENT_SUM_TOLERANCE } from "./typed-judgment.js";
 import { sendCashRequest, type ModelSurface, type OpenWeightPrice } from "./worker-provider.js";
 
 /**
@@ -22,6 +21,9 @@ import { sendCashRequest, type ModelSurface, type OpenWeightPrice } from "./work
  */
 
 export const DECISION_ANSWERED_STEP = "decision.answered";
+/** How far a distribution's sum may drift from 1 and still be accepted — floating-point slack only, never a licence
+ *  for a model to under- or over-commit its probability mass. typed-judgment.ts re-exports it under the same name. */
+export const TYPED_JUDGMENT_SUM_TOLERANCE = 0.01;
 /** The pseudo sender that writes {@link DECISION_ANSWERED_STEP} (src/lib/producer-identity.ts). */
 export const DECISION_SENDER = "DECISIONS";
 /** PRIMARY CONTROL: the OpenAI-shape limit, checked before any reservation; the Microsoft shape states none. */
@@ -75,6 +77,9 @@ export interface DecisionAnsweredRow {
   usage: { input_tokens: number; output_tokens: number; cached_tokens?: number } | null;
   question_count: number;
   answers: DecisionAnswer[];
+  /** W1-T12417: the judged head and pull request of a judge's shadow request, so W1-T12425's outcome rows join it. */
+  head_sha?: string;
+  pr_url?: string;
 }
 
 type Checked<T> = { ok: true; value: T } | { ok: false; reason: string };
@@ -307,6 +312,8 @@ export function resolveDecisionTarget(config: Pick<Config, "workerProviders">, c
 export async function askDecisionModel(config: Config, request: {
   role: string; candidate: DecisionCandidate; input: unknown; questions: unknown; env?: NodeJS.ProcessEnv;
   fetchImpl?: typeof fetch; clock?: Pick<Clock, "now" | "iso">; requestTimeoutMs?: number; signal?: AbortSignal;
+  /** W1-T12417: a judge's shadow passes the head it judged and, where there is one, the pull request. */
+  headSha?: string; prUrl?: string;
 }): Promise<DecisionAnsweredRow> {
   const { candidate } = request;
   const input = typeof request.input === "string" ? request.input : "";
@@ -315,6 +322,8 @@ export async function askDecisionModel(config: Config, request: {
     deployment: candidate.deployment, shape: candidate.shape, model_surface: DECISION_MODEL_SURFACE, outcome: "refused", served_model: null, latency_ms: null,
     reserved_usd: 0, settled_usd: 0, held_usd: 0, usage: null,
     question_count: Array.isArray(request.questions) ? request.questions.length : 0, answers: [],
+    ...(nonEmpty(request.headSha) ? { head_sha: request.headSha } : {}),
+    ...(nonEmpty(request.headSha) && nonEmpty(request.prUrl) ? { pr_url: request.prUrl } : {}),
   };
   const finish = (patch: Partial<DecisionAnsweredRow>): DecisionAnsweredRow => {
     Object.assign(row, patch);
