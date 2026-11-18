@@ -14,7 +14,7 @@
   files:
     - src/lib/board-snapshot-cache.ts
     - test/a-board-commit-checks-only-the-rows-that-changed.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "After a 500-row closed commit, a commit with one changed row measures (Buffer.byteLength) at most that row's strings, where the first commit measured every row's"

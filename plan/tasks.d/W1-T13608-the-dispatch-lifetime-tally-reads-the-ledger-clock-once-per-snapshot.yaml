@@ -17,7 +17,7 @@
   files:
     - src/run-task.ts
     - test/daemon/the-dispatch-lifetime-tally-reads-the-ledger-clock-once-per-snapshot.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:one-clock-scan-per-snapshot — over one LedgerSnapshot with 20,000 rows and 50 candidate tasks, 50 lifetime tallies make no full pass over the rows: the ledger clock comes from the snapshot's LedgerIndex.latestTsMs and each task's rows from its byTask bucket, so a rows proxy that counts element reads sees fewer reads than one pass over the rows for the 50 tallies together, and no new LedgerIndex is built (ledgerIndexBuildCount does not change)"

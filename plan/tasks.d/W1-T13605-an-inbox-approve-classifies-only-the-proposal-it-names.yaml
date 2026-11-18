@@ -16,7 +16,7 @@
     - src/lib/panel-graph.ts
     - test/inbox/an-inbox-approve-classifies-only-the-proposal-it-names.test.ts
     - test/console-api/an-inbox-write-classifies-only-the-proposal-it-acts-on.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With a registry of 30 proposals and a counting anchor grep, POST /v1/inbox/approve greps only the named proposal's anchor and answers as before"
