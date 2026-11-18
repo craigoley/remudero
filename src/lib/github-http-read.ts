@@ -62,7 +62,7 @@ export const GITHUB_HTTP_READ_SERVER_RETRY_ATTEMPTS = 3;
 export const GITHUB_HTTP_READ_SERVER_RETRY_DELAY_MS = 250;
 
 function isTransientGithubServerError(status: number): boolean {
-  return status === 500 || status === 502 || status === 503 || status === 504;
+  return status === 502 || status === 503 || status === 504;
 }
 
 /** One stored answer: the validator GitHub sent and the response it validates. */
