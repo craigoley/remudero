@@ -1,0 +1,59 @@
+- id: W1-T13684
+  title: "Serve's memory sample sizes each holder in its own turn and walks a large holder in slices of 5,000 nodes, so the 3-minute sample stops holding serve's request loop for the whole walk"
+  repo: remudero
+  depends_on: []
+  priority: 0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # when serve's memory sample runs on its loop; the row's numbers are unchanged
+  band_meaning: span
+  origin: "operator-session#serve-oom-2026-11-16"
+  plan_refs:
+    - W1-T13331
+    - W1-T5355
+  files:
+    - src/lib/serve-memory.ts
+    - src/lib/serve.ts
+    - test/serve-samples-memory-between-requests.test.ts
+    - test/serve-memory-names-where-rss-lives.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "Serve's memory monitor takes its sample with sampleServeMemorySliced"
+      proof: 'grep: await sampleServeMemorySliced(holders in src/lib/serve.ts'
+    - claim: "A sliced walk yields the loop between slices and counts exactly what the whole walk counts, within the same node budget"
+      proof: "grep: W1-T13684: a sliced walk yields the loop between slices in test/serve-samples-memory-between-requests.test.ts"
+    - claim: "invariant:same-reading — the sliced sample reports every holder, a failing one included, exactly as the whole sample does"
+      kind: guard
+      proof: "grep: W1-T13684: invariant:same-reading in test/serve-samples-memory-between-requests.test.ts"
+    - claim: "A sliced view body size shares the W1-T13331 memo, so a held body is walked once"
+      proof: "grep: W1-T13684: a sliced view body size is memoized like a whole one in test/serve-samples-memory-between-requests.test.ts"
+    - claim: "A timer queued before the sample fires before the sample finishes"
+      proof: "grep: W1-T13684: serve's sample runs between requests in test/serve-samples-memory-between-requests.test.ts"
+  rationale: |
+    WHY: Craig wants serve under 0.3 cores even while the Console is open, and the Inbox still times out during
+    serve's main-loop stalls.
+    MEASURED: serve's runtime.loop_stall_profile rows for the hour to 12:13Z on 2026-11-18 carry sampleServeMemory
+    (638 ms) and its holder closures in serve-memory.ts (708 ms). Every 3 minutes (SERVE_MEMORY_SAMPLE_MS) the
+    sample sizes every holder in one turn; each snapshot holder (analytics, the four instance analytics caches,
+    live-analytics, board-snapshot, goal-board) is walked by approxBytes, up to 200,000 nodes, with a property
+    descriptor read per property. W1-T13331 memoized only the view bodies.
+    On the Azure host with a board-like holder (9,000 snapshot rows plus a 4,000-row copy), the whole sample used
+    16 ms of CPU in one turn (median of 10, max 58 ms); sliced, the longest turn used 1.8 ms (max 2.1 ms).
+    Serve's 1 GB heap and its host load make the live turns several times longer.
+  design: |
+    INVARIANT same-reading: the sliced sample's row equals the whole sample's row for the same holders.
+    1. approxBytes becomes a walk that steps a bounded number of nodes; approxBytes steps it to the end, and
+       approxBytesSliced steps APPROX_BYTES_SLICE_NODES (5,000) at a time with a turn (setImmediate) between.
+    2. MemoryHolder gets an optional sizeSliced(turn). snapshotHolder and viewBodiesHolder provide it;
+       heldBodyBytesSliced shares the W1-T13331 WeakMap memo.
+    3. sampleServeMemorySliced reads usage and headroom first, then sizes each holder in its own turn (sizeSliced
+       when the holder has it, size otherwise), and builds the same row. serve.ts's monitor uses it.
+    4. W1-T5355's test waits for the sample row instead of a fixed five turns, since the sample now spans turns.
+  falsifier: |
+    Serve keeps the whole sample: criterion 1 fails. A sliced walk that counts differently: criterion 2 or 3 fails.
+    No memo for sliced bodies: criterion 4 fails. A sample in one turn: criterion 5 fails.
+  note: |
+    Id reserved for run-unfiled-1795004067799 with ~/rmd-work/bin/reserve-id.sh.

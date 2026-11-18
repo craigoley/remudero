@@ -289,7 +289,8 @@ test("W1-T5355: serve's sample names each worker heap, every instance analytics 
     assert.equal(plan.status, 201, "a goal naming a task reads the goal board");
     await plan.text();
     timer.tick();
-    await settled();
+    // W1-T13684: the sample sizes each holder in its own turn, so it settles over several turns, not a fixed five.
+    for (let i = 0; i < 500 && !rows.some((row) => row.step === SERVE_MEMORY_STEP); i += 1) await settled();
   } finally {
     server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));

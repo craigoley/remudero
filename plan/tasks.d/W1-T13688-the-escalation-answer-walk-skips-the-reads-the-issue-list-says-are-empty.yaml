@@ -1,0 +1,95 @@
+- id: W1-T13688
+  title: "The escalation answer walk skips the comment or reaction read of an issue whose list row says it has none"
+  repo: remudero
+  depends_on: []
+  priority: 1.3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # which per-issue reads one sweep stage sends; an answer must never be missed
+  origin: "operator-session#github-budget-2026-11-18"
+  plan_refs:
+    - W1-T4471
+    - W1-T4676
+    - W1-T11262
+    - W1-T12839
+  files:
+    - src/lib/escalation-answers.ts
+    - test/inbox/the-escalation-answer-walk-skips-the-reads-the-issue-list-says-are-empty.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "When the open issue list gives an issue 0 comments, readEscalationAnswers does not call listComments for it; when the list gives 0 reactions on the issue, it does not call listReactions for it. The result (accepted, ignored, unreadable) and every ledger row are the same as when those reads answer an empty list"
+      proof: "grep: W1-T13688 criterion 1 in test/inbox/the-escalation-answer-walk-skips-the-reads-the-issue-list-says-are-empty.test.ts"
+    - claim: "An issue whose list row gives 1 or more comments still has listComments called, and 1 or more reactions still has listReactions called, with the same accepted, ignored and refusal rows as origin/main"
+      proof: "grep: W1-T13688 criterion 2 in test/inbox/the-escalation-answer-walk-skips-the-reads-the-issue-list-says-are-empty.test.ts"
+    - claim: "invariant:an-unknown-count-reads — a list row with no count, a count that is not a non-negative safe integer, or a gateway that gives no counts (every existing test double) reads both lists exactly as origin/main does"
+      kind: guard
+      proof: "grep: W1-T13688 criterion 3 in test/inbox/the-escalation-answer-walk-skips-the-reads-the-issue-list-says-are-empty.test.ts"
+    - claim: "invariant:feedback-answers-unchanged — for a feedback grill issue whose list row gives 0 comments and 0 reactions, applyGrilledFeedbackAnswer is called with the same arguments as origin/main gives for empty comment and reaction lists"
+      kind: guard
+      proof: "grep: W1-T13688 criterion 4 in test/inbox/the-escalation-answer-walk-skips-the-reads-the-issue-list-says-are-empty.test.ts"
+    - claim: "Through the real ghEscalationAnswerGateway and a gh shim (test/helpers/gh-shim.ts) that answers the labelled issue list with `comments: 0` and `reactions.total_count: 0` for one issue and 2 and 1 for another, no `issues/<n>/comments` or `issues/<n>/reactions` call is made for the first issue and both are made for the second, with nothing injected in place of the gateway's list parse"
+      proof: "grep: W1-T13688 criterion 5 in test/inbox/the-escalation-answer-walk-skips-the-reads-the-issue-list-says-are-empty.test.ts"
+    - claim: "readEscalationAnswers, the production path of the full sweep's escalation_answers stage, asks the new check before each per-issue read"
+      proof: "grep: listedNone( in src/lib/escalation-answers.ts"
+  rationale: |
+    WHY: one GitHub App installation (15,000 core reads an hour) is shared by the core, ops, console and site
+    daemons, serve and the run children. It has run out in most hours since 2026-11-15. On 2026-11-18 the core
+    count was 0 at 01:01Z and 04:10Z, and 17 of 56 core daemon.quota rows (2026-11-14 to 2026-11-18) were at or
+    below the 1,500 write reserve.
+    READ at origin/main 1f902f383, src/lib/escalation-answers.ts: readEscalationAnswers lists the open
+    needs-question issues once (gateway.listOpen, the REST `/issues?labels=needs-question&state=open` read with
+    --paginate), then for EACH issue with a task id reads `/issues/<n>/comments` (:713) and, when an owner or
+    operator login is known, `/issues/<n>/reactions` (:784). Both per-issue reads use --paginate.
+    The list response already holds both counts. GitHub's REST issue rows carry `comments` (the comment count)
+    and `reactions.total_count`. labelledIssuesRestArgs sends no --jq, so the fields are in the bytes the gateway
+    reads; parseLabelledIssuesRest drops them, and ghEscalationAnswerGateway.listOpen already parses the raw
+    pages a second time for the feedback subjects.
+    MEASURED on the live list, 2026-11-18 12:13Z (the same endpoint and query the code sends, read with the
+    operator's own user token): 133 open needs-question issues; 27 have 0 comments; 132 have 0 reactions;
+    one has more than 100 comments (two pages). So one walk sends 134 comment GETs and 133 reaction GETs,
+    267 in all. 159 of them answer an empty list.
+    MEASURED in the core ledger, 2026-11-17 00:01Z to 2026-11-18 12:11Z: 135 sweep.full_prelude rows; 91 ran the
+    escalation_answers stage (more than 1 s), about 2.5 an hour. The stage took 388 s at the median and up to
+    1,417 s, because each read waits for the read cadence. daemon.quota reads_by_call_site
+    (2026-11-18 00:21Z to 04:25Z, 21 rows) names escalation-answers.ts:260 (reactions) 624 times and :244
+    (comments) 526 times; together they are the third largest named call site after git-push.ts:904.
+    The console, ops and site repos hold 5, 3 and 1 open needs-question issues, so their daemons spend little here.
+    EXPECTED SAVING: about 159 core reads a walk, about 400 an hour on the core daemon (2.7% of the hourly limit),
+    and a shorter escalation_answers stage. It also leaves fewer reads for W1-T12892's conditional pages to answer.
+  design: |
+    INVARIANT an-unknown-count-reads: a per-issue read is skipped only when the list row gives a count that is
+    exactly 0 and is a safe integer. A missing, negative, fractional or non-number count reads as today.
+    INVARIANT feedback-answers-unchanged: a skipped read acts exactly as a read that answered an empty list:
+    no answer, no ignored row, no unreadable count, and the same call to applyGrilledFeedbackAnswer.
+    1. In ghEscalationAnswerGateway.listOpen (src/lib/escalation-answers.ts), read `comments` and
+       `reactions.total_count` from the raw REST pages it already parses for the feedback subjects. Parse them in
+       that one pass for every call, not only when `feedback` is set. Return them on each issue as optional
+       fields of a type declared in escalation-answers.ts (an OpenIssue plus the two counts). Do not change
+       OpenIssue, parseLabelledIssuesRest or labelledIssuesRestArgs in escalate.ts: other readers and their
+       tests use those shapes.
+    2. Add one small function listedNone(count) that is true only for a count of exactly 0, as the invariant
+       says. Before gateway.listComments, skip the read and use an empty list when listedNone(issue's comment
+       count). Before gateway.listReactions, do the same with the reaction count. Keep every other step of the
+       loop as it is.
+    3. Add no counter, bound or config key. The skip has no limit to tune.
+    4. Before building, grep test/ for tests that count listComments or listReactions calls, or the gh argv of
+       ghEscalationAnswerGateway (test/inbox/*escalation*, test/escalation-*). A test that expects a read for an
+       issue its fixture lists with a 0 count needs an amendment if it is outside `files`.
+    NOT SKIPPED, ON PURPOSE: an issue whose counts did not change since the last pass. No safe key exists. The
+    issue's updated_at does not change when a comment is edited, and the comment count stays the same. An
+    operator can edit a comment that was empty (no answer landed, so nothing was recorded) into an answer; a
+    skip keyed on the counts would miss it. W1-T12892 (amended in the same filing) makes those repeated reads
+    cost no core read when GitHub answers 304.
+    NOT IN SCOPE: the issue list read itself, the refusal history reader (W1-T11262), and escalate.ts's own
+    open-issue readers.
+  falsifier: |
+    Remove the listedNone check before listComments: criteria 1 and 5 must fail. Skip on a missing count:
+    criterion 3 must fail. Skip the feedback call for a skipped issue: criterion 4 must fail. Restore and require
+    all to pass.
+  note: |
+    Id reserved for run-unfiled-1795004596000 with ~/rmd-work/bin/reserve-id.sh.
+    The live list counts came from the operator's user token (its own 5,000-an-hour limit), not the installation.
+    A test must build its gh answers with test/helpers/gh-shim.ts and load test/setup/tmp-hygiene.ts.

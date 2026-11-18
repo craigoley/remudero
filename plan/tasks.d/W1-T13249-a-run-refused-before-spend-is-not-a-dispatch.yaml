@@ -20,7 +20,7 @@
     - scripts/fleet-heartbeat.sh
     - test/console-api/board/a-run-refused-before-spend-is-not-a-dispatch.test.ts
     - test/the-beat-reports-whether-the-fleet-builds.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A run whose dispatch claim refused it before spend does not count as a queue dispatch: the queue-head cadence and STALL, and the incident invariant dispatch-stall, judge a window holding only such runs as starting no work"

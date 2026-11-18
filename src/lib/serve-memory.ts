@@ -78,6 +78,31 @@ export const LEGACY_CACHE_VIEWS: Readonly<Record<string, string>> = {
  * invoked. A walk past `budget` nodes stops and returns what it counted — a lower bound, never a throw.
  */
 export function approxBytes(value: unknown, budget: number = APPROX_BYTES_NODE_BUDGET): number {
+  const walk = approxWalk(value, budget);
+  walk.step(Number.POSITIVE_INFINITY);
+  return walk.bytes();
+}
+
+/** W1-T13684: the nodes one turn of a sliced walk visits before it yields the loop. */
+export const APPROX_BYTES_SLICE_NODES = 5_000;
+
+/** W1-T13684: a wait for the loop's next turn; {@link nextTurn} lets every queued request and timer run first. */
+export type YieldTurn = () => Promise<void>;
+export const nextTurn: YieldTurn = () => new Promise((resolve) => setImmediate(resolve));
+
+/**
+ * W1-T13684: {@link approxBytes} in slices of {@link APPROX_BYTES_SLICE_NODES} nodes with a turn between them, so a
+ * large holder is sized without holding serve's loop for the whole walk. It counts exactly what approxBytes counts.
+ */
+export async function approxBytesSliced(value: unknown, turn: YieldTurn = nextTurn, budget: number = APPROX_BYTES_NODE_BUDGET,
+  sliceNodes: number = APPROX_BYTES_SLICE_NODES): Promise<number> {
+  const walk = approxWalk(value, budget);
+  while (!walk.step(sliceNodes)) await turn();
+  return walk.bytes();
+}
+
+/** The walk behind {@link approxBytes}: `step` visits at most `maxNodes` nodes and says whether the walk is done. */
+function approxWalk(value: unknown, budget: number): { step(maxNodes: number): boolean; bytes(): number } {
   const seen = new WeakSet<object>();
   const stack: unknown[] = [value];
   let bytes = 0;
@@ -85,37 +110,40 @@ export function approxBytes(value: unknown, budget: number = APPROX_BYTES_NODE_B
   const push = (next: unknown): void => {
     if (stack.length < budget) stack.push(next);
   };
-  while (stack.length > 0 && visited < budget) {
-    const next = stack.pop();
-    visited += 1;
-    if (typeof next === "string") {
-      bytes += next.length;
-      continue;
+  const step = (maxNodes: number): boolean => {
+    for (let slice = 0; stack.length > 0 && visited < budget && slice < maxNodes; slice++) {
+      const next = stack.pop();
+      visited += 1;
+      if (typeof next === "string") {
+        bytes += next.length;
+        continue;
+      }
+      if (typeof next !== "object" || next === null) {
+        bytes += 8;
+        continue;
+      }
+      if (seen.has(next)) continue;
+      seen.add(next);
+      if (ArrayBuffer.isView(next)) {
+        bytes += next.byteLength;
+        continue;
+      }
+      if (next instanceof Map || next instanceof Set) {
+        bytes += 16 + 16 * next.size;
+        for (const entry of next instanceof Map ? next.entries() : next.values()) push(entry);
+        continue;
+      }
+      const names = Object.getOwnPropertyNames(next);
+      bytes += 16 + 8 * names.length;
+      for (const name of names) {
+        const descriptor = Object.getOwnPropertyDescriptor(next, name);
+        if (descriptor && "value" in descriptor) push(descriptor.value);
+        if (!Array.isArray(next)) bytes += name.length;
+      }
     }
-    if (typeof next !== "object" || next === null) {
-      bytes += 8;
-      continue;
-    }
-    if (seen.has(next)) continue;
-    seen.add(next);
-    if (ArrayBuffer.isView(next)) {
-      bytes += next.byteLength;
-      continue;
-    }
-    if (next instanceof Map || next instanceof Set) {
-      bytes += 16 + 16 * next.size;
-      for (const entry of next instanceof Map ? next.entries() : next.values()) push(entry);
-      continue;
-    }
-    const names = Object.getOwnPropertyNames(next);
-    bytes += 16 + 8 * names.length;
-    for (const name of names) {
-      const descriptor = Object.getOwnPropertyDescriptor(next, name);
-      if (descriptor && "value" in descriptor) push(descriptor.value);
-      if (!Array.isArray(next)) bytes += name.length;
-    }
-  }
-  return bytes;
+    return !(stack.length > 0 && visited < budget);
+  };
+  return { step, bytes: () => bytes };
 }
 
 /** What one holder reports of itself. `parts` breaks a grouped holder down (view bodies by view and generation). */
@@ -135,6 +163,8 @@ export interface MemoryHolder {
   kind: "legacy-cache" | "refreshable" | "view-bodies" | "measured" | "worker-heap";
   view?: string;
   size(): MemoryHolderSize;
+  /** W1-T13684: the same reading, walked in slices with `turn` between them; a holder without it is sized by `size`. */
+  sizeSliced?(turn: YieldTurn): Promise<MemoryHolderSize>;
   drop?(): void;
 }
 
@@ -158,6 +188,10 @@ export function snapshotHolder(name: string, current: () => unknown, drop?: () =
       const value = current();
       return value === undefined || value === null ? { entries: 0, bytes: 0 } : { entries: 1, bytes: approxBytes(value) };
     },
+    sizeSliced: async (turn) => {
+      const value = current();
+      return value === undefined || value === null ? { entries: 0, bytes: 0 } : { entries: 1, bytes: await approxBytesSliced(value, turn) };
+    },
     ...(drop ? { drop } : {}),
   };
 }
@@ -178,11 +212,37 @@ export function heldBodyBytes(body: unknown, walk: (value: unknown) => number = 
   return size;
 }
 
+/** W1-T13684: {@link heldBodyBytes} with a body not sized before walked in slices; the memo is the same one. */
+export async function heldBodyBytesSliced(body: unknown, turn: YieldTurn = nextTurn): Promise<number> {
+  if (typeof body !== "object" || body === null) return approxBytes(body);
+  const known = VIEW_BODY_SIZES.get(body);
+  if (known !== undefined) return known;
+  const size = await approxBytesSliced(body, turn);
+  VIEW_BODY_SIZES.set(body, size);
+  return size;
+}
+
 /** The read model's view bodies, broken down by `<view>@g<generation>` so a generation left behind is visible. */
 export function viewBodiesHolder(bodies: () => ReadonlyMap<string, { view: string; generation: number; body: unknown }>, walk: (value: unknown) => number = approxBytes): MemoryHolder {
+  const size = async (sizeOf: (body: unknown) => number | Promise<number>): Promise<MemoryHolderSize> => {
+    const parts: Record<string, { entries: number; bytes: number }> = {};
+    let entries = 0;
+    let bytes = 0;
+    for (const entry of [...bodies().values()]) {
+      const part = (parts[`${entry.view}@g${entry.generation}`] ??= { entries: 0, bytes: 0 });
+      const held = await sizeOf(entry.body);
+      part.entries += 1;
+      part.bytes += held;
+      entries += 1;
+      bytes += held;
+    }
+    return { entries, bytes, parts };
+  };
   return {
     name: "view-bodies",
     kind: "view-bodies",
+    // W1-T13684: a body not sized before is walked in slices; a custom `walk` (a test seam) stays whole.
+    sizeSliced: (turn) => size((body) => walk === approxBytes ? heldBodyBytesSliced(body, turn) : heldBodyBytes(body, walk)),
     size: () => {
       const parts: Record<string, { entries: number; bytes: number }> = {};
       let entries = 0;
@@ -315,7 +375,52 @@ export function sampleServeMemory(
 ): ServeMemorySample {
   const usage = (opts.usage ?? process.memoryUsage)();
   const headroom = (opts.headroom ?? readCgroupHeadroom)();
-  const workerHeaps = opts.workerHeaps ?? [];
+  return memorySample(usage, headroom, holders.map((holder) => holderReading(holder, () => holder.size())), opts.workerHeaps ?? []);
+}
+
+/**
+ * W1-T13684: {@link sampleServeMemory} with each holder sized in its own turn, and a large holder walked in slices
+ * ({@link approxBytesSliced}). On serve's ~1 GB process the whole sample in one turn held the loop for hundreds of ms.
+ */
+export async function sampleServeMemorySliced(
+  holders: readonly MemoryHolder[],
+  opts: { usage?: () => NodeJS.MemoryUsage; headroom?: () => CgroupHeadroom | undefined; workerHeaps?: readonly HolderReading[];
+    turn?: YieldTurn } = {},
+): Promise<ServeMemorySample> {
+  const turn = opts.turn ?? nextTurn;
+  const usage = (opts.usage ?? process.memoryUsage)();
+  const headroom = (opts.headroom ?? readCgroupHeadroom)();
+  const readings: HolderReading[] = [];
+  for (const holder of holders) {
+    await turn();
+    const sliced = holder.sizeSliced;
+    readings.push(sliced ? await holderReadingAsync(holder, () => sliced.call(holder, turn)) : holderReading(holder, () => holder.size()));
+  }
+  return memorySample(usage, headroom, readings, opts.workerHeaps ?? []);
+}
+
+function holderName(holder: MemoryHolder): Pick<HolderReading, "name" | "kind" | "view"> {
+  return { name: holder.name, kind: holder.kind, ...(holder.view ? { view: holder.view } : {}) };
+}
+
+function holderReading(holder: MemoryHolder, size: () => MemoryHolderSize): HolderReading {
+  try {
+    return { ...holderName(holder), ...size() };
+  } catch (e) {
+    return { ...holderName(holder), entries: 0, bytes: 0, error: String((e as Error)?.message ?? e) };
+  }
+}
+
+async function holderReadingAsync(holder: MemoryHolder, size: () => Promise<MemoryHolderSize>): Promise<HolderReading> {
+  try {
+    return { ...holderName(holder), ...(await size()) };
+  } catch (e) {
+    return { ...holderName(holder), entries: 0, bytes: 0, error: String((e as Error)?.message ?? e) };
+  }
+}
+
+function memorySample(usage: NodeJS.MemoryUsage, headroom: CgroupHeadroom | undefined, readings: HolderReading[],
+  workerHeaps: readonly HolderReading[]): ServeMemorySample {
   const workerBytes = workerHeaps.reduce((sum, reading) => sum + reading.bytes, 0);
   return {
     rss_bytes: usage.rss,
@@ -326,14 +431,7 @@ export function sampleServeMemory(
     limit_bytes: headroom?.limitBytes ?? null,
     free_bytes: headroom?.freeBytes ?? null,
     headroom: headroom?.fraction ?? null,
-    holders: holders.map((holder) => {
-      const named = { name: holder.name, kind: holder.kind, ...(holder.view ? { view: holder.view } : {}) };
-      try {
-        return { ...named, ...holder.size() };
-      } catch (e) {
-        return { ...named, entries: 0, bytes: 0, error: String((e as Error)?.message ?? e) };
-      }
-    }).concat(workerHeaps),
+    holders: readings.concat(workerHeaps),
     unattributed_bytes: usage.rss - usage.heapTotal - usage.external - workerBytes,
   };
 }

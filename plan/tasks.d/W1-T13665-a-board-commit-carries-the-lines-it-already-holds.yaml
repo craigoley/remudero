@@ -17,7 +17,7 @@
   files:
     - src/lib/board-snapshot-cache.ts
     - test/a-board-commit-carries-the-lines-it-already-holds.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The first commit after a load reuses the lines the load read and serializes only the changed row"

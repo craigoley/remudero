@@ -623,6 +623,8 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // W1-T372: `escalateQuotaExhaustion`'s (run-task.ts) dedup marker, read per bucket; dropping it
   // re-opens one duplicate quota-exhaustion notice per tick while the bucket stays exhausted.
   "daemon.quota_exhausted.escalated",
+  // W1-T13690: `deliverQuotaExhaustionLate`'s marker; dropping it re-sends the late notice after a restart.
+  "daemon.quota_exhausted.delivered_late",
   // W1-T1082: `escalateDiskHeadroomBreach`'s (run-task.ts) dedup marker, compared against an
   // episode window; it is what stops a daemon RESTART mid-episode from re-opening the issue.
   "daemon.disk_headroom.escalated",

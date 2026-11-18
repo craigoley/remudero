@@ -2,128 +2,115 @@
   title: "A repeated GitHub read sends its ETag, and an unchanged answer costs no core read"
   repo: remudero
   depends_on: []
-  priority: 1.4
+  priority: 1.3
   type: implement
   verify: auto
   principles:
     tdd: strict
-  risk: high # every GitHub GET can be answered from the cache; a wrong key or a stale body reaches every lane
+  risk: high # every paged GitHub GET can be answered from the store; a wrong page or a stale body reaches every lane
   band_meaning: blast-radius
   origin: "operator-session#github-reads-by-caller-2026-11-15"
   plan_refs:
     - W1-T12553
     - W1-T12531
+    - W1-T12839
     - W1-T12888
+    - W1-T13182
     - W1-T10279
     - W1-T10310
   files:
-    - src/lib/github-conditional-read.ts
+    - src/lib/github-http-read.ts
     - src/lib/github-transport.ts
-    - src/lib/daemon.ts
     - test/github/a-repeated-github-read-sends-its-etag.test.ts
   status: queued
   attempts: 0
   acceptance:
-    - claim: "A second ghJsonAsync read of the same `api <path>` GET sends If-None-Match with the ETag of the first answer; when GitHub answers 304 (gh exits 1 and prints an `HTTP/2.0 304 Not Modified` header block), the read returns the stored body of the first answer, parsed exactly as the first read was, and raises no error"
+    - claim: "A `gh api <path> --paginate` GET (with or without -i, and with none of the other flags parseGhApiRead refuses) is sent by the in-process client page by page: it follows each answer's `Link: rel=\"next\"` URL as gh does, and each page is a conditional read through the W1-T12839 store, keyed by that page's own path and query"
       proof: "grep: W1-T12892 criterion 1 in test/github/a-repeated-github-read-sends-its-etag.test.ts"
-    - claim: "invariant:never-a-stale-body — when the answer is 200 the new body is returned and replaces the stored one; a 304 for a path with no stored body, any other non-2xx answer, or an unreadable stored entry gives exactly the result and error that origin/main gives for the same response, and nothing is stored from a failed read"
+    - claim: "invariant:gh-shaped-pages — for the same page answers, the in-process paged read returns text that splitConcatenatedJsonPages and splitGhHeaderBlock read exactly as they read what the gh shim prints for those pages, and a non-2xx page throws the gh-shaped error the shim's exit gives"
       kind: guard
       proof: "grep: W1-T12892 criterion 2 in test/github/a-repeated-github-read-sends-its-etag.test.ts"
-    - claim: "invariant:one-credential-per-entry — the cache key holds the request path, the Accept header and the credential identity (app installation id or a user login, never the token); a read under another credential never gets a body stored under the first, and no token text is written to the cache"
+    - claim: "invariant:never-a-stale-page — a stored page is returned only for a 304 to a request that sent that page's own ETag; a 200 page replaces its entry, and when page 1 changes, every later page is read from the new page 1's Link, never from the store's old chain"
       kind: guard
       proof: "grep: W1-T12892 criterion 3 in test/github/a-repeated-github-read-sends-its-etag.test.ts"
-    - claim: "The rate-limit headers of a 304 answer are recorded in the installation budget as every other answer's are (githubInstallationBudget().record), and the pacer and isGhRateLimitError react to a 403 or 429 on a conditional read as they do on a plain read"
-      proof: "grep: W1-T12892 criterion 4 in test/github/a-repeated-github-read-sends-its-etag.test.ts"
-    - claim: "Two processes that share one instance state directory share the cache: an answer stored by one process lets the other send its ETag; the stored entries stay within a fixed byte bound with the oldest dropped first"
-      proof: "grep: W1-T12892 criterion 5 in test/github/a-repeated-github-read-sends-its-etag.test.ts"
-    - claim: "An argument form the cache does not handle (a write method, -f/-F/--input fields, --paginate, --slurp, --jq, -q, --template, a non-api command) runs exactly as on origin/main with no If-None-Match header"
-      proof: "grep: W1-T12892 criterion 6 in test/github/a-repeated-github-read-sends-its-etag.test.ts"
-    - claim: "The daemon.quota row for the core bucket carries `conditional: {sent, not_modified, changed}` for this process since the previous poll, so the saving can be read from the ledger"
-      proof: "grep: W1-T12892 criterion 7 in test/github/a-repeated-github-read-sends-its-etag.test.ts"
-    - claim: "Through the real ghJsonAsync with a gh shim (test/helpers/gh-shim.ts) that answers 200 with an ETag and then 304, the second read returns the first body with nothing injected in place of the conditional read"
-      proof: "grep: W1-T12892 criterion 8 in test/github/a-repeated-github-read-sends-its-etag.test.ts"
-    - claim: "invariant:writes-keep-their-reserve — a conditional read still claims a read from the installation budget before it is sent and is refused at the write reserve exactly as a plain read is; no write sends If-None-Match or reads the cache"
+    - claim: "invariant:each-page-is-a-read — each page claims a read from the installation budget before it is sent and records its own rate-limit headers (githubInstallationBudget().record), so a 304 page costs no allowance only as GitHub counts it; a page refused at the write reserve fails the whole read as a refused read does today"
       kind: guard
-      proof: "grep: W1-T12892 criterion 9 in test/github/a-repeated-github-read-sends-its-etag.test.ts"
-    - claim: "ghStdoutAsync, the production path of every daemon ghJsonAsync read, calls the new module"
-      proof: "grep: conditionalGhRead( in src/lib/github-transport.ts"
+      proof: "grep: W1-T12892 criterion 4 in test/github/a-repeated-github-read-sends-its-etag.test.ts"
+    - claim: "ghTextAsync sends an `api` read with utf8 encoding and no env of its own through the in-process client when the client takes the form, as ghStdoutAsync does; a latin1 read, a read with an env, and every form the client refuses run gh exactly as on origin/main"
+      proof: "grep: W1-T12892 criterion 5 in test/github/a-repeated-github-read-sends-its-etag.test.ts"
+    - claim: "The daemon.quota row for the core bucket carries `conditional: {sent, not_modified}` for this process since the previous poll, taken with takeGhReadCadenceTally, so the saving can be read from the ledger"
+      proof: "grep: W1-T12892 criterion 6 in test/github/a-repeated-github-read-sends-its-etag.test.ts"
+    - claim: "Through the real ghTextAsync and the in-process client pointed at a local test server (configureGithubHttpRead) that answers two pages with ETags and then 304 for both, the second paged read returns the first read's text with nothing injected in place of the paged read"
+      proof: "grep: W1-T12892 criterion 7 in test/github/a-repeated-github-read-sends-its-etag.test.ts"
+    - claim: "invariant:one-credential-per-entry — each page's store entry is keyed by the credential identity W1-T12839 computes (githubReadIdentity), the origin and that page's path and query; a paged read under another credential never gets a page stored under the first, and no token text is stored"
+      kind: guard
+      proof: "grep: W1-T12892 criterion 8 in test/github/a-repeated-github-read-sends-its-etag.test.ts"
+    - claim: "parseGhApiRead, the production gate of every in-process read, takes the paged form"
+      proof: "grep: paginate: true in src/lib/github-http-read.ts"
   rationale: |
     WHY: the fleet spends the GitHub App installation's 15,000 core reads an hour before each reset. Then
-    reviews cannot start (W1-T12888 shows the stall). Half of the reads ask for exactly what the same process
-    asked for minutes before. GitHub does not count a 304 Not Modified against the core limit, but no daemon,
-    serve or run child read sends If-None-Match. Only the Mac read broker (W1-T10279, W1-T10310) does.
+    reviews cannot start (W1-T12888 shows the stall). Many reads ask for exactly what the same process asked
+    for minutes before. GitHub does not count a 304 Not Modified against the core limit.
     MEASURED on the Azure host, 2026-11-14 16:48Z to 2026-11-15 16:48Z (core, site and console ledgers):
     - daemon.quota rows: in 18 of 26 reset windows the remaining count fell to the 1,500 write reserve, and in 15
-      it fell to 114 or less (12 to 0). The 21 github.budget.throttled rows have reason reserve, refused, or
-      share at remaining 1,494 to 1,507.
-    - From daemon.quota reads_stamped (rows 150 s or less apart): the console daemon read 1,964 times an hour and
-      the site daemon 1,300 times an hour. The console acted on nothing (7 open PRs, all dep-review,
-      actions_taken 0). The core daemon has only 37 quota rows in 24 h, so its rate cannot be read from the ledger.
-    - github.keep_warm.rollup (serve): 14,946 calls in 24 h, 623 an hour.
+      it fell to 114 or less (12 to 0).
     SAMPLED, 2026-11-15 16:54Z to 17:03Z: every gh process on the host, read from /proc (endpoint shape, container
-    and parent verb only). 1,357 calls, about 8,700 an hour; a 50 ms scan misses some short calls.
-    - By instance, per hour: core daemon 3,812; site daemon 1,858; serve 1,234; console daemon 797; host read
-      broker 694; others about 330.
-    - By endpoint, per hour: paged pulls list 1,273; commits/SHA/status 733; commits/SHA/check-runs 778;
-      pulls/N 579; pulls/N/files 579; issues lists 662; issues/N 379; actions jobs and logs 373; commits/main 219;
-      branch protection 174; git/ref/heads/main 167. No `gh api graphql` call was seen.
-    - 694 of 1,271 GET calls (55%) asked for a path already read earlier in the same 9 minutes. The share of
-      repeated reads: site 84%, console 83%, serve 82%, core daemon 30%. About 4,400 an hour in all.
-    - 69 calls (5%) sent If-None-Match, all from the host read broker.
-    - Only 47 repeats in 60 s or less came from another process, so most of the waste is a process asking again.
-    CHECKED by hand, 2026-11-15: `gh api -i -H "If-None-Match: <etag>" repos/craigoley/remudero/pulls/18575`
-    answered `HTTP/2.0 304 Not Modified`, exit code 1, and x-ratelimit-used did not move (499, then 500 after
-    the next 200).
-    READ at origin/main df91bd762, src/lib/github-transport.ts:
-    - :434 ghStdoutAsync spawns gh once for each read the broker does not answer. :361 asyncReadInFlight only
-      joins reads that run at the same time.
-    - :249, :264, :429, :489 record each answer's rate-limit reading in the budget.
-    - src/lib/gh-read-broker.ts:1083-1135 already revalidates with If-None-Match and serves the stored body on a
-      304, but only on the Mac accounts.
-    - src/cli/commands/daemon.ts:3071 configures the budget in the daemon process only; run children and serve
-      read with no budget. That is why the remaining count reaches 0 under a 10% reserve. A free 304 helps the
-      readers the budget cannot see as well.
-    EXPECTED SAVING: up to about 4,400 counted reads an hour (the repeats above), less the repeats whose answer
-    changed. Plan on 3,000 to 4,000 an hour, 20% to 27% of the hourly limit. That covers most of the 30% of each
-    hour now spent at the reserve. Criterion 7 measures it.
-    SHARE SPLIT, CHECKED: the four-way share is not what binds. Each answer's reading resets the share count
-    (record() in src/lib/github-installation-budget.ts sets reads to 0), so a consumer is refused for its share only next to the reserve.
-    The console and site are not idle on GitHub: together they spend about 3,260 reads an hour. An adaptive share
-    would give their allowance to core but would not spend fewer reads, so this task does not change the share.
+    and parent verb only). 1,357 calls, about 8,700 an hour. 694 of 1,271 GET calls (55%) asked for a path already
+    read earlier in the same 9 minutes, about 4,400 an hour. By endpoint, per hour: paged pulls list 1,273;
+    issues lists 662.
+    RECHECKED for the amendment, 2026-11-18, at origin/main 1f902f383:
+    - W1-T12531 (merged 2026-11-16) sends a daemon `gh api <path>` read through one in-process fetch client,
+      src/lib/github-http-read.ts, after the broker and the cadence step (github-transport.ts ghHttpReadFor).
+    - W1-T12839 (merged 2026-11-16) made that client conditional: a bounded ETag store keyed by credential
+      identity, origin and path; a 304 returns the stored answer with the 304's rate-limit headers; a 200
+      replaces it; any other answer drops it. That is the first design of this task, built on the path production
+      now takes. Its NOT IN SCOPE line leaves "paginated and jq forms (still spawned)".
+    - parseGhApiRead (github-http-read.ts:133) refuses --paginate, so every paged read still spawns gh and sends
+      no ETag. ghTextAsync (github-transport.ts:515) never uses the in-process client at all.
+    - SAMPLED 2026-11-18 11:47Z to 11:52Z (every gh process, endpoint shape and container only): 589 gh calls, 69
+      of them --paginate (about 830 an hour): issue lists, issue comments and reactions (the escalation answer
+      walk, src/lib/escalation-answers.ts:244 and :260, which read through ghTextAsync), and pulls/<n>/files.
+      The other big group, 336 ops catalog blob GETs, is W1-T13673's; it sends through an injected executor and
+      keys on content, so this task does not touch it.
+    - The first design's own gh-process store (a new src/lib/github-conditional-read.ts, entries under
+      github-etag/, a 304 read from gh's exit 1) would now be a second store beside W1-T12839's, on a path the
+      daemon's single-page reads no longer take. This amendment drops it and extends the client that exists.
+    EXPECTED SAVING: the paged reads that repeat unchanged. At the 2026-11-15 repeat share (55%) that is about
+    450 of the 830 paged calls an hour, more counted pages, plus the per-issue comment reads the escalation walk
+    still sends after W1-T13688. It also removes a gh process per paged read. Criterion 6 measures it.
   design: |
-    INVARIANT never-a-stale-body: a stored body is returned only for a 304 that answers a request sent with
-    that body's own ETag. Every other outcome is today's outcome.
-    INVARIANT one-credential-per-entry: an entry is keyed by path, Accept header and credential identity; no
-    token is stored.
-    INVARIANT writes-keep-their-reserve: unchanged from W1-T12553. A conditional read is a read: it still
-    calls claimRead and is refused at the reserve. W1-T12888 owns the act-time head read at the reserve.
-    1. New module src/lib/github-conditional-read.ts, exporting conditionalGhRead(args, send, store). It decides
-       whether an argv can be conditional (`api <path>` GET with none of -X/--method other than GET,
-       -f/-F/--field/--raw-field/--input, --paginate, --slurp, --jq/-q, --template, --hostname), adds `-i` and
-       `-H If-None-Match: <etag>` when it holds an entry, and turns a 304 into the stored body. It must not import
-       the ledger or config (github-transport.ts sits below the ledger; check with depcruise).
-    2. The store: one file per entry (sha256 of the key) under `github-etag/` beside the read-cadence stamp
-       (the directory ghReadCadenceStampPath(env) resolves), so the daemon, its run children and serve in one
-       container share it. Write by atomic rename. Bound the total bytes with one named BACKSTOP constant (a disk
-       bound, not a read limit) and drop the oldest entries first. With no stamp directory, keep a bounded in-process map.
-    3. In ghStdoutAsync, after the broker and the cadence step, before the spawn, send through
-       conditionalGhRead. Treat exit 1 with a 304 status in the -i header block as success. Strip the header
-       block again when the caller did not ask for -i. Record the answer's rate-limit reading as today.
-       When W1-T12531 lands first, put the same call before its in-process client: the cache must not depend
-       on which path sends the request.
-    4. Keep process counts {sent, not_modified, changed} and hand them out with takeGhReadCadenceTally, which
-       daemon.ts:7547 already writes on the daemon.quota row. Add no comment lines to daemon.ts (comment cap).
-    5. Add the focused test file for criteria 1 to 9.
-    NOT IN SCOPE: the share split; the reserve; writes; synchronous ghJson callers (a follow-up when this works);
-    the Mac read broker, which keeps its own cache.
+    INVARIANT never-a-stale-page: a stored page is returned only for a 304 that answers a request sent with that
+    page's own ETag. Later pages follow the Link of the page actually returned for this read.
+    INVARIANT gh-shaped-pages: callers cannot tell the in-process paged read from gh's. Parse both with the
+    readers callers already use.
+    INVARIANT each-page-is-a-read: every page is sent as one read: claimed from the installation budget, paced as
+    the client paces one read, and recorded with its own rate-limit headers.
+    INVARIANT one-credential-per-entry: unchanged from W1-T12839; the key holds the credential identity, never
+    the token.
+    1. In src/lib/github-http-read.ts, let parseGhApiRead accept --paginate (a field `paginate: true` on the
+       request) and keep refusing --slurp, --jq, -q, --template, fields, --input and every other flag. Add the
+       paged send: read page 1 conditionally, then each `rel="next"` URL from the Link header of the answer
+       returned (stored or new), each one conditional with its own key, until no next link. Build the text gh
+       prints for those pages, with and without -i. Before building, check gh's paged output on the host
+       (`gh api -i --paginate` on a two-page read with the operator's user token, never the installation) and
+       write the test's expected text from what it prints.
+    2. In src/lib/github-transport.ts, claim a budget read for each page after the first inside the paged send,
+       record each page's rate-limit headers, and let ghTextAsync use ghHttpReadFor under the conditions of
+       criterion 5, after its broker and cadence steps, as ghStdoutAsync does.
+    3. Count conditional sends and 304 answers in the client and add `conditional: {sent, not_modified}` to
+       the object takeGhReadCadenceTally returns. The daemon already spreads that object into the daemon.quota
+       row (src/lib/daemon.ts:8061), so daemon.ts does not change.
+    4. Run test/github/compress-src-lib-github-transport-ts.test.ts and the W1-T12839 test file
+       (test/github/an-unchanged-github-read-costs-none-of-the-rate-limit.test.ts); grep test/ for tests that
+       expect a --paginate read to spawn gh or that assert the whole takeGhReadCadenceTally object.
+    NOT IN SCOPE: --jq and --slurp forms, synchronous ghJson and ghExec callers, writes, GraphQL, the read
+    broker, the ops catalog reader, and the share split.
   falsifier: |
-    Remove the If-None-Match header: criteria 1, 5 and 8 must fail. Return the stored body for a 200 or for a 304
-    to a request sent without that body's ETag: criterion 2 must fail. Leave the credential out of the key:
-    criterion 3 must fail. Drop the 304's rate-limit reading: criterion 4 must fail. Restore and require all to pass.
+    Keep refusing --paginate in parseGhApiRead: criteria 1 and 7 must fail. Follow the stored page 1's Link after
+    page 1 answered 200 with a new body: criterion 3 must fail. Claim one budget read for the whole paged read:
+    criterion 4 must fail. Key a page by path alone: criterion 8 must fail. Restore and require all to pass.
   note: |
     Id reserved for run-unfiled-1794762415000 with ~/rmd-work/bin/reserve-id.sh.
-    The sample came from a /proc scan of gh processes; it is not stored on main. Criterion 7 replaces it with a
-    ledger count.
+    Amended 2026-11-18 in run-unfiled-1795004596000: W1-T12531 and W1-T12839 built the single-page conditional
+    read; this task now covers the paged form and the ledger count.
     src/lib/github-transport.ts has a comment cap: run test/github/compress-src-lib-github-transport-ts.test.ts.
-    src/lib/daemon.ts is at its comment cap: run test/daemon/compress-src-lib-daemon-ts.test.ts.
-    W1-T12531 (claimed) edits ghStdoutAsync too; re-cut on main after it merges.
