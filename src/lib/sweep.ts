@@ -24214,14 +24214,20 @@ export async function runSweep(
               revision: standingOn ?? current, observedRevision: current, semantic, roundId: handoff.roundId, producer: held };
             // W1-T12714: a report routed to an amendment waits on that amendment, never on a person.
             const awaitsAmendment = held.needs_design_remedy === "amendment-proposed";
-            disposition = amended || mainAdoption ? "blocked-fixable" : awaitsAmendment ? "wait" : "refused-escalate";
+            const producedAt = typeof held.ts === "string" ? held.ts : undefined;
+            const amendmentUnanswered = awaitsAmendment && !amended && !mainAdoption && producedAt !== undefined &&
+              now - Date.parse(producedAt) >= HELD_ESCALATION_SLO_MS;
+            disposition = amended || mainAdoption ? "blocked-fixable" : awaitsAmendment && !amendmentUnanswered ? "wait" : "refused-escalate";
             reason = amended ? "task contract amended under this terminal design handoff — adopting main before any fix admission"
+              : amendmentUnanswered ? `fix needs a task contract amendment at this exact head (round ${handoff.roundId}) — ` +
+                `unanswered past the held-escalation SLO, so the ladder's rebuild acts: ${handoff.reason}`
               : awaitsAmendment ? `fix needs a task contract amendment at this exact head (round ${handoff.roundId}) — the fix ` +
                 `lane proposed it from the worker's ${String(held.needs_design_kind)} report; a changed contract releases this head: ${handoff.reason}`
               : mainAdoption ? `fix needs design at this exact head (round ${handoff.roundId}), which is ${behindBy} commit(s) ` +
                 `behind main — taking main into the branch once before a person is asked: ${handoff.reason}`
               : `fix needs design at this exact head (round ${handoff.roundId}) — ${handoff.reason}`;
             if (mainAdoption) designMainAdoptionSpent = true;
+            if (amendmentUnanswered) heldEscalationAt = producedAt;
             if (!amended && !mainAdoption && !awaitsAmendment) {
               ruleBlockerByIndex.set(prIndex, "escalated");
               heldEscalationAt = typeof handoff.producer.ts === "string" ? handoff.producer.ts : undefined;
