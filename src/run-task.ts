@@ -12315,6 +12315,32 @@ export function headShaRestArgs(prUrl: string): string[] {
  * than the rate-limit failure this replaces: the caller would judge and post a verdict against an
  * empty head instead of failing. So an absent sha is raised here, where it is attributable.
  */
+/**
+ * A plan PR in a repository that merges its own plan PRs (the ops repo does) can land while this lane still waits on
+ * CI or review. Review then declines the PR as closed and posts no verdict, the arm finds no review row to join
+ * (automerge.ledger_refused) and the lane exited non-zero although its filing landed (2026-11-18, remudero-ops#127).
+ * A merge is the outcome the gate exists to reach, so it is the lane's success, ledgered as
+ * `gate.merged_before_review`. Only a merge counts: an open PR, a closed unmerged one and an unreadable read all
+ * keep the review's own code, so an unreadable PR still reads as the review failure it was before this check.
+ */
+export async function mergedBeforeGate(
+  prUrl: string,
+  reviewCode: number,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  fetch: (args: string[]) => Promise<unknown> = ghJsonAsync,
+): Promise<boolean> {
+  if (reviewCode === 0) return false;
+  let row: RestPullRow;
+  try {
+    row = (await fetch(headShaRestArgs(prUrl))) as RestPullRow;
+  } catch {
+    return false; // unreadable: the review's own failure stands, exactly as before this check existed
+  }
+  if (typeof row?.merged_at !== "string") return false;
+  log("gate.merged_before_review", { merged_pr: prUrl, review_code: reviewCode, merged_at: row.merged_at });
+  return true;
+}
+
 export function readHeadShaRest(prUrl: string, fetch: GhApiFetcher = ghJson): string {
   const sha = mapRestPr(fetch(headShaRestArgs(prUrl)) as RestPullRow).headRefOid;
   if (!sha) {
@@ -36670,6 +36696,10 @@ async function triageCommandLocked(
 
       const prNum = prUrl.match(/\/pull\/(\d+)/)?.[1] ?? prUrl;
       const reviewCode = await reviewCommand(view === undefined ? prNum : prUrl);
+      if (await mergedBeforeGate(prUrl, reviewCode, log)) {
+        say(`triage PR merged by its repository before review — nothing to arm: ${prUrl}`);
+        continue;
+      }
       // W1-T230: reviewCommand resolved this PR's task id off its own
       // `Remudero-Task: <taskId>` trailer (ensureTaskTrailer above), so its
       // review.posted ledger line is keyed to the SAME `taskId` armAutoMerge
@@ -37352,6 +37382,10 @@ export async function planCommand(
       }
       const prNum = prUrl.match(/\/pull\/(\d+)/)?.[1] ?? prUrl;
       const reviewCode = await reviewCommand(isPublic ? prNum : prUrl);
+      if (await mergedBeforeGate(prUrl, reviewCode, log)) {
+        say(`plan PR merged by its repository before review — nothing to arm: ${prUrl}`);
+        continue;
+      }
       // W1-T230: reviewCommand resolved this PR's task id off its own
       // `Remudero-Task: <taskId>` trailer (ensureTaskTrailer above), so its
       // review.posted ledger line is keyed to the SAME `taskId` armAutoMerge
@@ -40451,6 +40485,12 @@ export async function approveCommand(
     if (notGreenExit !== undefined) return notGreenExit;
     const prNum = result.prUrl.match(/\/pull\/(\d+)/)?.[1] ?? result.prUrl;
     const reviewCode = await reviewCommand(filing.destination ? result.prUrl : prNum);
+    if (await mergedBeforeGate(result.prUrl, reviewCode, log)) {
+      removeApproveWorktree();
+      console.log(`rmd approve: ${proposalId} — plan PR merged by its repository before review, nothing to arm: ${result.prUrl}`);
+      approveNoteChain(rest, proposalId, config, deps);
+      return 0;
+    }
     // W1-T230: a ratification PR carries NO Remudero-Task trailer by design
     // (see the no-trailer comment above) — reviewCommand's own taskId resolve
     // therefore falls back to `PR-${view.number}` and its review.posted ledger
@@ -40848,6 +40888,11 @@ async function approveBatchCommand(
     if (notGreenExit !== undefined) return notGreenExit;
     const prNum = result.prUrl.match(/\/pull\/(\d+)/)?.[1] ?? result.prUrl;
     const reviewCode = await reviewCommand(filing.destination ? result.prUrl : prNum);
+    if (await mergedBeforeGate(result.prUrl, reviewCode, log)) {
+      removeApproveWorktree();
+      console.log(`rmd approve: batch of ${result.accepted.length} — plan PR merged by its repository before review, nothing to arm: ${result.prUrl}`);
+      return 0;
+    }
     let armHeadSha: string | undefined;
     try {
       armHeadSha = readHeadShaRest(result.prUrl);

@@ -272,6 +272,15 @@ test("SITE approve reads the arm outcome rather than discarding it", () => {
 });
 
 // ── 9: the SIXTH site the brief did not name — #968 was inert without it ────────────
+test("every gate that reviews a destination plan PR checks for a self-merge before it arms", () => {
+  const sites = [...SRC.matchAll(/const reviewCode = await reviewCommand\(([^)]*prUrl[^)]*)\);\n([^\n]*)\n/g)];
+  assert.deepEqual(sites.map((m) => m[1]), [
+    "view === undefined ? prNum : prUrl", "isPublic ? prNum : prUrl",
+    "filing.destination ? result.prUrl : prNum", "filing.destination ? result.prUrl : prNum",
+  ], "the triage, plan, approve and approve-batch gates");
+  for (const site of sites) assert.match(site[2]!, /^\s*if \(await mergedBeforeGate\((result\.)?prUrl, reviewCode, log\)\) \{$/, site[0]);
+});
+
 test("SITE sweep arm fold returns the outcome shape the sweep can read", () => {
   // The fold is total: every shape the adapter can hand it comes back as something
   // `armOutcomeArmed` can read; none returns undefined.
