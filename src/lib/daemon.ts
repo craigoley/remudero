@@ -1706,6 +1706,7 @@ export interface DaemonDeps {
    *  so the loop latches per bucket. Unlike `onHeadroomBreach` this never pauses dispatch: it observes
    *  and surfaces (W1-T372). Forensics: docs/forensics/daemon.md. */
   onQuotaExhausted?: (info: { bucket: "core" | "graphql"; remaining: number; resetsAt: string }) => void | Promise<void>;
+  onQuotaRecovered?: (info: { bucket: "core" | "graphql"; remaining: number; resetsAt: string }) => void | Promise<void>;
   /** Real free disk space for this tick, pre-judged against the same thresholds `rmd doctor` reports
    *  against. Judged in the CLI wiring, never here, because a daemon alarming at a different number
    *  than `rmd doctor` is a contradiction an operator must adjudicate mid-incident. An unreadable read
@@ -8074,7 +8075,15 @@ export async function runDaemon(
         // resets, so alerting on the raw value would re-fire up to once a minute for an hour. The latch fires
         // only on the tick a bucket first reads exhausted, and clears the instant it reads positive.
         if (reading.remaining > 0) {
+          const recovered = quotaExhaustedEscalated[bucket];
           quotaExhaustedEscalated[bucket] = false;
+          if (recovered) {
+            try {
+              await deps.onQuotaRecovered?.({ bucket, remaining: reading.remaining, resetsAt: reading.resetsAt });
+            } catch (e) {
+              log("daemon.escalation.failed", { error: String((e as Error)?.message ?? e) });
+            }
+          }
           continue;
         }
         if (quotaExhaustedEscalated[bucket]) continue;

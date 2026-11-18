@@ -7,7 +7,7 @@ import {
 import { ghRateLimitWindow, type GhRateLimitProvenance } from "./daemon-health.js";
 import { quantileOf } from "./daemon-memory-policy.js";
 import { readLedgerUnionRecords } from "./ledger-union.js";
-import { ghIssueGateway, ghIssueGatewayAsync, tryEscalate, tryEscalateAsync, type AsyncIssueGateway, type Escalation, type IssueGateway } from "./escalate.js";
+import { ghIssueGateway, ghIssueGatewayAsync, ghIssueGatewayGraphql, tryEscalate, tryEscalateAsync, type AsyncIssueGateway, type Escalation, type IssueGateway } from "./escalate.js";
 import { appendLedger, matchesRepoScopedTask } from "./ledger.js";
 import type { ReplayStranded } from "./inbox-replay.js";
 import type { Task } from "./plan.js";
@@ -15,6 +15,7 @@ import { DEFAULT_MAX_TASK_LIFETIME_DISPATCHES, readLedgerLines } from "./status.
 import type { EscalationTriageSlice, PostReviewStallVerdict } from "./sweep.js";
 import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
+import { readFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { systemClock, type Clock } from "./clock.js";
 import { deliveredEscalationUrl, spoolIssueAction, withdrawSpooledEscalation } from "./host-escalation-spool.js";
@@ -884,7 +885,7 @@ export function escalateQuotaExhaustion(
   info: { bucket: "core" | "graphql"; remaining: number; resetsAt: string },
   ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway },
   deps: { provenanceBracket?: { start: GhRateLimitProvenance; end: GhRateLimitProvenance } } = {},
-): void {
+): void | Promise<void> {
   if (deps.provenanceBracket && !ghRateLimitWindow(deps.provenanceBracket.start, deps.provenanceBracket.end)) {
     appendLedger(ctx.ledgerPath, {
       run_id: ctx.runId,
@@ -899,48 +900,110 @@ export function escalateQuotaExhaustion(
     (l) => l.step === "daemon.quota_exhausted.escalated" && l.bucket === info.bucket && l.resets_at === info.resetsAt,
   );
   if (already) return;
+  const escalated = (issueUrl: string | null): void => appendLedger(ctx.ledgerPath, {
+    run_id: ctx.runId,
+    task_id: "daemon",
+    step: "daemon.quota_exhausted.escalated",
+    bucket: info.bucket,
+    resets_at: info.resetsAt,
+    issue_url: issueUrl,
+    delivered: issueUrl !== null,
+  });
+  const notice = quotaExhaustionNotice(info, ctx.runId);
+  // W1-T13690: a core exhaustion reads and opens its issue through GraphQL, which spends none of core.
+  if (info.bucket === "core" && ctx.issues === undefined) {
+    return tryEscalateAsync(notice, { issues: ghIssueGatewayGraphql(ctx.owner, ctx.repo), ledgerPath: ctx.ledgerPath, runId: ctx.runId })
+      .then(escalated);
+  }
+  escalated(tryEscalate(notice, { issues: ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo), ledgerPath: ctx.ledgerPath, runId: ctx.runId }));
+}
+
+/** The quota notice. `late`, when set, is the window a notice sent after the reset names (W1-T13690). */
+function quotaExhaustionNotice(
+  info: { bucket: "core" | "graphql"; remaining: number; resetsAt: string },
+  runId: string,
+  late?: { firstSeenAt: string },
+): Escalation {
   const spent =
     info.bucket === "graphql"
       ? "`gh pr create`, `gh pr view --json`, and therefore `rmd review` — a run that finishes its work and " +
         "then cannot open or update its own PR at this bucket's exhaustion loses that work silently, exactly " +
         "as W1-T333 did"
       : "the board's own `gh pr view`/`pr list`/`issue view` reads (status.ts's `ghGateway`/`buildBatchedGithub`)";
-  const issueUrl = tryEscalate(
-    {
-      class: "HARD_STOP",
-      taskId: "daemon",
-      runId: ctx.runId,
-      summary: `gh api rate_limit ${info.bucket} bucket exhausted — resets ${info.resetsAt}`,
-      detail:
-        `W1-T372: the daemon's tick observed the ${info.bucket} bucket cross from having budget to ${info.remaining} ` +
-        `remaining. This bucket backs ${spent}. This is a NOTICE, not a hold: dispatch is not paused and no ` +
-        `existing consumer's behavior changed — the bucket refills on its own at ${info.resetsAt}, and this notice ` +
-        `is self-clearing at that instant with no action required; a human reading this after that time can close ` +
-        `it on sight.`,
-      options: [
-        {
-          label: "wait for reset",
-          detail: `The bucket refills on its own at ${info.resetsAt} — no action needed.`,
-        },
-        {
-          label: "check what spent it",
-          detail: "`gh api rate_limit` shows the live figure; a runaway caller against this bucket is the thing worth finding, not this notice.",
-        },
-      ],
-      recommendation: "wait for reset",
-    },
-    {
-      issues: ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo),
-      ledgerPath: ctx.ledgerPath,
-      runId: ctx.runId,
-    },
-  );
+  return {
+    class: "HARD_STOP",
+    taskId: "daemon",
+    runId,
+    summary: late
+      ? `gh api rate_limit ${info.bucket} bucket was exhausted from ${late.firstSeenAt} to ${info.resetsAt} — sent after the reset`
+      : `gh api rate_limit ${info.bucket} bucket exhausted — resets ${info.resetsAt}`,
+    detail:
+      `W1-T372: the daemon's tick observed the ${info.bucket} bucket cross from having budget to ${info.remaining} ` +
+      `remaining. This bucket backs ${spent}. This is a NOTICE, not a hold: dispatch is not paused and no ` +
+      `existing consumer's behavior changed — the bucket refills on its own at ${info.resetsAt}, and this notice ` +
+      `is self-clearing at that instant with no action required; a human reading this after that time can close ` +
+      `it on sight.`,
+    options: [
+      {
+        label: "wait for reset",
+        detail: `The bucket refills on its own at ${info.resetsAt} — no action needed.`,
+      },
+      {
+        label: "check what spent it",
+        detail: "`gh api rate_limit` shows the live figure; a runaway caller against this bucket is the thing worth finding, not this notice.",
+      },
+    ],
+    recommendation: "wait for reset",
+  };
+}
+
+/** The live ledger's quota notice rows. Both steps are kept across a rotation, so the live file holds them. */
+async function quotaNoticeRows(ledgerPath: string): Promise<Record<string, unknown>[]> {
+  let text: string;
+  try {
+    text = await readFile(ledgerPath, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+  const rows: Record<string, unknown>[] = [];
+  for (const line of text.split("\n")) {
+    if (!line.includes("daemon.quota_exhausted.")) continue;
+    try {
+      rows.push(JSON.parse(line) as Record<string, unknown>);
+    } catch {
+      // deliberate: a torn line is no row, as readLedgerLines reads it.
+    }
+  }
+  return rows;
+}
+
+/**
+ * W1-T13690: the daemon's `onQuotaRecovered` hook, called on the tick a bucket reads positive after it read 0
+ * in this process. When the newest `daemon.quota_exhausted.escalated` row for the bucket says the notice was
+ * not delivered, and no `daemon.quota_exhausted.delivered_late` row has the same bucket and reset, it sends
+ * the notice once, naming the window, through the same gateway choice as {@link escalateQuotaExhaustion}.
+ * It writes the `delivered_late` row whatever the outcome, so a later tick or a restart sends nothing.
+ */
+export async function deliverQuotaExhaustionLate(
+  info: { bucket: "core" | "graphql" },
+  ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway },
+): Promise<void> {
+  const rows = await quotaNoticeRows(ctx.ledgerPath);
+  const newest = rows.filter((l) => l.step === "daemon.quota_exhausted.escalated" && l.bucket === info.bucket).at(-1);
+  if (newest === undefined || newest.delivered !== false || typeof newest.resets_at !== "string") return;
+  const resetsAt = newest.resets_at;
+  if (rows.some((l) => l.step === "daemon.quota_exhausted.delivered_late" && l.bucket === info.bucket && l.resets_at === resetsAt)) return;
+  const firstSeenAt = typeof newest.ts === "string" ? newest.ts : "an unrecorded time";
+  const notice = quotaExhaustionNotice({ bucket: info.bucket, remaining: 0, resetsAt }, ctx.runId, { firstSeenAt });
+  const issues = ctx.issues ?? (info.bucket === "core" ? ghIssueGatewayGraphql(ctx.owner, ctx.repo) : ghIssueGateway(ctx.owner, ctx.repo));
+  const issueUrl = await tryEscalateAsync(notice, { issues, ledgerPath: ctx.ledgerPath, runId: ctx.runId });
   appendLedger(ctx.ledgerPath, {
     run_id: ctx.runId,
     task_id: "daemon",
-    step: "daemon.quota_exhausted.escalated",
+    step: "daemon.quota_exhausted.delivered_late",
     bucket: info.bucket,
-    resets_at: info.resetsAt,
+    resets_at: resetsAt,
     issue_url: issueUrl,
     delivered: issueUrl !== null,
   });
