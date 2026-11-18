@@ -11,6 +11,8 @@ import { openWeightAllowancePath, openWeightCommittedUsd, openWeightReservationU
 import { workerSelectionAssignment } from "#src/lib/worker.js";
 
 const MODEL = "gpt-6.1-sol";
+// W1-T13445 (2026-11-17): Sol 6.2 now leads the subscription Sol seats; Sol 6.1 is the next fallback.
+const SOL62 = "gpt-6.2-sol";
 const root = join(import.meta.dirname, "..");
 const table = loadMounts(mountsPath(root)).capabilities!;
 const env = { RMD_OPENWEIGHT_API_KEY: "test-only-key" };
@@ -27,8 +29,8 @@ function fixture() {
 
 test("Sol 6.1 leads subscription Sol seats and cash keeps the measured economy order", () => {
   for (const effort of ["low", "medium", "high"]) {
-    assert.deepEqual(table.codex.balanced[effort], [MODEL, "gpt-6-sol", "gpt-5.6-sol"]);
-    assert.equal(table.codex.frontier[effort][0], MODEL);
+    assert.deepEqual(table.codex.balanced[effort], [SOL62, MODEL, "gpt-6-sol", "gpt-5.6-sol"]);
+    assert.deepEqual(table.codex.frontier[effort].slice(0, 2), [SOL62, MODEL]);
     assert.equal(table.cash!.economy[effort][0], "gpt-oss-120b");
     assert.equal(table.cash!.economy[effort].includes(MODEL), false);
     assert.equal(table.cash!.balanced[effort][0], "gpt-5-nano");

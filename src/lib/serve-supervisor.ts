@@ -143,6 +143,12 @@ export function socketStatesForPort(port: number, read: (path: string) => string
  * spaced: a supervisor with no handoff yet hands off at once.
  */
 export const SERVE_HANDOFF_SPACING_BASE_MS = 2 * 60 * 60_000;
+/**
+ * BACKSTOP (W1-T13534): the most handoff pressure may stretch the spacing, twice its base. W1-T13303 meant a 2 h
+ * window; OBSERVED 2026-11-17 a wait of 3.45 h (spacingMs 13291701) held a merged fix out of serve. A base set
+ * above it is never cut below that base.
+ */
+export const SERVE_HANDOFF_SPACING_MAX_MS = 2 * SERVE_HANDOFF_SPACING_BASE_MS;
 /** BACKSTOP: the cap on a memory-deferred handoff's retry backoff: the old 15-minute window, kept apart from the spacing above. */
 export const SERVE_HANDOFF_MEMORY_RETRY_CAP_MS = 15 * 60_000;
 /** How fast handoff pressure fades: a handoff an hour ago weighs half of one just done. */
@@ -169,13 +175,14 @@ export function decayedPressure(pressure: HandoffPressure | undefined, now: numb
  * 471 source files, and no src/ merge in that span touched only the other 11.
  *
  * So the gap after a handoff is `base x (1 + pressure)`, where pressure counts the handoffs done
- * and halves every {@link SERVE_HANDOFF_PRESSURE_HALF_LIFE_MS}. No cap and no cliff: a busy fleet
- * settles where the gaps balance the decay (about 1.4 an hour on the measured merges, from 2.8), and
- * a quiet one returns to the base window on its own. The deferred handoff prepares the newest main
- * when it finally runs, so every merge meanwhile rides it.
+ * and halves every {@link SERVE_HANDOFF_PRESSURE_HALF_LIFE_MS}. No cliff: a busy fleet settles where
+ * the gaps balance the decay (about 1.4 an hour on the measured merges, from 2.8), and a quiet one
+ * returns to the base window on its own. W1-T13534 caps the stretch at
+ * {@link SERVE_HANDOFF_SPACING_MAX_MS}, so a self-sync is never held behind main past twice the base.
+ * The deferred handoff prepares the newest main when it finally runs, so every merge meanwhile rides it.
  */
 export function handoffSpacingMs(pressure: number, baseMs: number): number {
-  return baseMs * (1 + Math.max(0, pressure));
+  return Math.min(baseMs * (1 + Math.max(0, pressure)), Math.max(baseMs, SERVE_HANDOFF_SPACING_MAX_MS));
 }
 
 /** One forked generation, as the supervisor sees it. */
@@ -348,9 +355,15 @@ interface Generation {
   workersShedAt?: number;
 }
 
+/** What a handoff ask says about itself. */
+export interface HandoffAsk {
+  targetSha?: string;
+}
+
 export interface ServeSupervisor {
   start(): Promise<void>;
-  requestHandoff(): Promise<void>;
+  /** `ask.targetSha`, when the asker knows it, names the build it wants; the spacing ledger carries it. */
+  requestHandoff(ask?: HandoffAsk): Promise<void>;
   shutdown(reason: string): Promise<void>;
   /** The sha the active generation runs, for tests and the ledger. */
   activeSha(): string | undefined;
@@ -737,6 +750,9 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
   let pressure: HandoffPressure | undefined;
   let lastDoneAt: number | undefined;
   let spacingPending = false;
+  /** W1-T13534: when the pending spacing wait re-asks, and how many asks it has absorbed meanwhile. */
+  let spacingWakeAt = 0;
+  let spacingAbsorbed = 0;
   const servePort = opts.servePort ?? servePortOf(opts.serveArgs);
   const activeProbe = opts.activeProbe ?? ((_socketPath: string, path: string, timeoutMs: number) => tcpGet(servePort, path, timeoutMs));
   const privateProbe = opts.privateProbe ?? ((socketPath: string, path: string, timeoutMs: number) => socketGet(socketPath, path, timeoutMs));
@@ -763,7 +779,7 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
     const generation: Generation = { id, slot, socketPath, process: proc, exited, isAlive: () => alive, startedAt: clock.now(), asked: false };
     proc.onMessage((message) => {
       if (message.type !== GENERATION_MESSAGES.handoffRequest) return;
-      if (generation === active) void supervisor.requestHandoff();
+      if (generation === active) void supervisor.requestHandoff(typeof message.targetSha === "string" ? { targetSha: message.targetSha } : undefined);
       else generation.asked = true;
     });
     proc.onExit((code, signal) => {
@@ -1188,29 +1204,38 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
     await supervisor.shutdown(reason);
   };
 
-  /** True when this ask must wait out the spacing; the wait re-asks once, however many asks arrive meanwhile. */
-  const awaitSpacing = (from: Generation): boolean => {
+  /**
+   * True when this ask must wait out the spacing; the wait re-asks once, however many asks arrive meanwhile.
+   * W1-T13534: each ask it absorbs writes `serve.handoff_spacing_absorbed`, so a self-sync held behind main says why.
+   */
+  const awaitSpacing = (from: Generation, ask: HandoffAsk | undefined): boolean => {
     if (spacingBaseMs <= 0 || lastDoneAt === undefined) return false;
     const now = clock.now();
     const level = decayedPressure(pressure, now, spacingHalfLifeMs);
     const spacingMs = handoffSpacingMs(level, spacingBaseMs);
     const waitMs = lastDoneAt + spacingMs - now;
     if (waitMs <= 0) return false;
-    if (spacingPending) return true;
+    if (spacingPending) {
+      spacingAbsorbed += 1;
+      opts.log("serve.handoff_spacing_absorbed", { sha: ask?.targetSha, remainingMs: Math.max(0, spacingWakeAt - now), absorbed: spacingAbsorbed });
+      return true;
+    }
     spacingPending = true;
+    spacingWakeAt = now + waitMs;
     opts.log("serve.handoff_deferred", { reason: "spacing", waitMs, spacingMs, pressure: Number(level.toFixed(3)), sinceLastMs: now - lastDoneAt, sha: from.slot.sha });
     void sleep(waitMs).then(() => {
       spacingPending = false;
+      spacingAbsorbed = 0;
       return supervisor.requestHandoff();
     });
     return true;
   };
 
-  const handoff = async (): Promise<void> => {
+  const handoff = async (ask?: HandoffAsk): Promise<void> => {
     if (!handoffEnabled()) return legacyExit("handoff_off");
     const from = active;
     if (!from) return;
-    if (awaitSpacing(from)) return;
+    if (awaitSpacing(from, ask)) return;
     const startedAt = clock.now();
     let slot: PreparedSlot;
     try {
@@ -1333,7 +1358,7 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
       budget.start(() => [process.pid, ...(active?.process.pid === undefined ? [] : [active.process.pid])]);
       await reportAlone(up.generation, up.startedAt, up.readyMs);
     },
-    requestHandoff: () => {
+    requestHandoff: (ask) => {
       if (stopping) return Promise.resolve();
       if (inFlight) {
         askedAgain = true;
@@ -1342,7 +1367,7 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
       // A memory refusal owns one retry. An external/coalesced ask must not skip its backoff and
       // prepare/shed/restore again; that retry prepares the newest main when it actually wakes.
       if (retryPending && handoffEnabled()) return Promise.resolve();
-      inFlight = handoff()
+      inFlight = handoff(ask)
         .catch((err: unknown) => opts.log("serve.handoff_failed", { reason: errorText(err) }))
         // Whatever ended the handoff without replacing the generation, its worker threads come back.
         .then(() => restoreWorkers("handoff_abandoned"))

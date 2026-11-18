@@ -259,9 +259,21 @@ export function fixRoutingWeights(
  * W1-T6360: THE LEARNER RANKS ONLY WHAT THE LANE MOUNTS. The evidence arms for `provider` whose model the lane's
  * current capability row offers. An arm the row no longer names (gpt-6-sol after the 2026-10-02 Sol 6.1 switch) is
  * left out, so its history can never route a round back to it; its rows stay in the ledger, so a re-mount restores it.
+ *
+ * W1-T13450: A TRAILING ENTRY IS ONLY A FALLBACK. The mounts table's Codex rows state the rule (mounts.yaml): every
+ * model shares one quota bucket, so row order decides and a trailing entry is reached only when the ones ahead are
+ * absent or cannot serve the effort. So only the arms AHEAD of `served` in `mounted` are rivals: with the lead served
+ * there is none, and an older Sol kept for availability never takes a round however high its weight. A `served`
+ * model the row does not name (or none) keeps every mounted arm, as before.
  */
-export function mountedFixArms(evidence: FixArmEvidence, provider: string, mounted: readonly string[]): FixRoutingCandidate[] {
-  const offered = new Set(mounted);
+export function mountedFixArms(
+  evidence: FixArmEvidence,
+  provider: string,
+  mounted: readonly string[],
+  served: string | undefined,
+): FixRoutingCandidate[] {
+  const at = served === undefined ? -1 : mounted.indexOf(served);
+  const offered = new Set(at >= 0 ? mounted.slice(0, at) : mounted);
   return evidence.arms.filter((arm) => arm.provider === provider && offered.has(arm.model)).map((arm) => ({ provider, model: arm.model }));
 }
 

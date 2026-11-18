@@ -351,7 +351,8 @@ test("W1-T5535: the ledger read is cached for a short time and a failed read is 
 
 test("W1-T5535: a codex arm that out-draws the served model is re-read and adopted", async () => {
   const root = fixtureRoot("rmd-fix-learner-reread-");
-  mountCodexBalanced(root, ["gpt-6-sol", "gpt-better"]);
+  // W1-T13450: only an arm AHEAD of the served model in the row is a rival, so the served gpt-6-sol is a fallback here.
+  mountCodexBalanced(root, ["gpt-better", "gpt-6-sol"]);
   try {
     const asked: string[] = [];
     const rows = [...armRounds("codex", "gpt-6-sol", 30, 0), ...armRounds("codex", "gpt-better", 0, 30), ...armRounds("claude", "claude-sonnet-5-5", 30, 0)];
@@ -372,7 +373,8 @@ test("W1-T5535: a codex arm that out-draws the served model is re-read and adopt
 
 test("W1-T5535: a codex re-read that throws is logged and keeps the served capacity", async (t) => {
   const root = fixtureRoot("rmd-fix-learner-reread-throws-");
-  mountCodexBalanced(root, ["gpt-6-sol", "gpt-better"]);
+  // W1-T13450: only an arm AHEAD of the served model in the row is a rival, so the served gpt-6-sol is a fallback here.
+  mountCodexBalanced(root, ["gpt-better", "gpt-6-sol"]);
   const errors: string[] = [];
   t.mock.method(console, "error", (line: unknown) => { errors.push(String(line)); });
   try {

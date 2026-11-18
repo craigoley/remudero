@@ -434,6 +434,53 @@ refuses missing or unreadable state. The read-only `--report` mode of
 `deploy/migrate-fleet-cash-allowance.sh` shows the combined UTC-day commitment and source mtime;
 it does not report an invoice or grant permission to raise the $50 ceiling.
 
+## A cash model shadows each low-stakes judge
+
+W1-T12187. The risk judge and the decision summary each have a row of their own in
+`.remudero/mounts.yaml`: `risk_judge` and `feedback_summary`. Each row is on one line and has the
+shape of `escalation_judge`. Today each row names the model and effort that the cheapest routed
+cell gives (`haiku`, `low`) and no provider, so neither role changed model when the rows were
+added. A host with no row falls back to that cell with its provider removed.
+
+After the role answers, the same prompt goes once to a cash model in shadow
+(`shadowJudgeCall` in `src/lib/judge-shadow.ts`):
+
+- The caller already holds the role's own answer. It does not wait for the shadow, and the shadow
+  changes nothing.
+- The call asks the first ready model of the cash row for the row's tier, at low effort. For the
+  rows above, that is the cash economy row. A `shadow: { deployment }` arm on the row pins one
+  deployment, as on the `ci_judge` and `fix_progress_judge` rows of W1-T11075.
+- The call reserves against the normal figure of the daily cash cap. It never sets the squeezed
+  figure. When the cap refuses, no request is sent.
+- A role whose row already names `provider: cash` is not shadowed.
+
+Each call writes one ledger row:
+
+| Step | When | Fields |
+| --- | --- | --- |
+| `judge_shadow.compared` | a reply came back | `role`, `primary_model`, `primary_cost_usd`, `shadow_model`, `shadow_cost_usd`; the risk judge adds `primary_answer`, `shadow_answer` and `agreement`; the decision summary adds `parses` and no agreement |
+| `judge_shadow.skipped` | the cap or a capacity limit refused the call (`refusal`), or the call failed, timed out or gave no usable answer | `role`, `reason` |
+
+`judgeShadowSummary` reads those rows and the `judge_shadow.paired`, `judge_shadow.refused` and
+`judge_shadow.unavailable` rows of the ci judge and the fix-progress judge. For each role it gives
+the number of paired calls, the share that agree, the share of calls with no usable shadow answer,
+the number of refused calls and the median cost of each model. A refused call made no request, so
+it is not counted as a call. The decision summary has no agreement figure.
+
+The config gardener reads that summary over the last 14 days. Its class `move-judge-to-cash`
+proposes one change: `provider: cash` on the one-line row of one role. The bar is:
+
+| Figure | Bar |
+| --- | --- |
+| Paired calls in 14 days | at least 200 |
+| Agreement | at least 98% |
+| Calls with no usable shadow answer | at most 2% |
+
+These three numbers are new and are not measured yet. A role with no agreement figure, a role with
+no one-line row of its own and a row that is not on the lowest tier get no proposal. The change is
+a canary like a mount change: the gardener compares implement runs after the merge with the equal
+window before it, and a guardrail breach opens a pull request that reverts the line.
+
 ## Rollback
 
 The policy switch is the candidate membership and order of `capabilities.codex.balanced` in
