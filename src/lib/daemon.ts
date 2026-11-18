@@ -8319,7 +8319,7 @@ export async function runDaemon(
             return state;
           }
         : undefined;
-      const tickLive = await prefetchLive(planForBatch, isMerged);
+      const tickLive = deps.readLiveState ? await prefetchLive(planForBatch, isMerged) : undefined;
       const dispatchOpts: NextRunnableOpts = {
       onPassedOver: (task, detail) => { tickPassedOver.add(task.id); observePassedOver("tick")(task, detail); },
       priorityBackfill,

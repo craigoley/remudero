@@ -780,7 +780,6 @@ export function daemonTargetCheckoutRoot(target: { repo: string; isSelf: boolean
 type RunBranchSyncExec = (cmd: string, args: string[], opts: { encoding: "utf8"; cwd: string }) => string;
 type RunBranchAsyncExec = (cmd: string, args: string[], opts: { encoding: "utf8"; cwd: string; timeout: number; killSignal: "SIGKILL" }) => Promise<{ stdout: string }>;
 
-/** W1-T10897: a leading checkout path names the repo whose `origin` is listed; without one it is this engine checkout. */
 /** W1-T13671: the tick's live PR state over the async transport, the same REST row and fold as
  *  run-task.ts's ghLiveStateByNumberAsync; a failed read is unknown (`undefined`). */
 export function daemonLiveStateReader(owner: string, repo: string): (taskId: string, prNumber: number) => Promise<string | undefined> {
@@ -794,6 +793,7 @@ export function daemonLiveStateReader(owner: string, repo: string): (taskId: str
   };
 }
 
+/** W1-T10897: a leading checkout path names the repo whose `origin` is listed; without one it is this engine checkout. */
 export function readPushedRunBranchesOutput(checkout: string, exec?: RunBranchSyncExec): string;
 export function readPushedRunBranchesOutput(exec?: RunBranchSyncExec): string;
 export function readPushedRunBranchesOutput(...args: [(string | RunBranchSyncExec)?, RunBranchSyncExec?]): string {
