@@ -1,5 +1,5 @@
 import type { EventLoopLag } from "./daemon-health.js";
-import type { LedgerLine } from "./ledger.js";
+import { queueDispatchRunStarts, type LedgerLine } from "./ledger.js";
 import type { PrBlocker } from "./pr-blocker.js";
 
 /**
@@ -127,6 +127,7 @@ const DISPATCH_SETTLED_SET_STEP = "dispatch.settled_set";
  *  the daemon's own hold rows — each says dispatchable work was being held back — and the implement
  *  `run.start` rows that prove work began. */
 const RUN_START_STEP = "run.start";
+const DISPATCH_CLAIM_STEP = "dispatch.claim";
 const IMPLEMENT_RUN_TYPE = "implement";
 const DAEMON_PAUSE_STEP = "daemon.pause";
 const LANE_REFILL_HELD_STEP = "dispatch.lane_refill_held";
@@ -170,7 +171,7 @@ const RULES: readonly InvariantRule[] = [
     // so a rule bound to a single miss would fire on ordinary dispatch spacing — this needs a
     // window wide enough that a truly quiet queue is the only way to read fulfilled=0 throughout.
     longMs: 2 * 60 * 60_000,
-    inputs: [DAEMON_PAUSE_STEP, LANE_REFILL_HELD_STEP, LANE_IDLE_SUMMARY_STEP, RUN_START_STEP, DISPATCH_SETTLED_SET_STEP],
+    inputs: [DAEMON_PAUSE_STEP, LANE_REFILL_HELD_STEP, LANE_IDLE_SUMMARY_STEP, RUN_START_STEP, DISPATCH_CLAIM_STEP, DISPATCH_SETTLED_SET_STEP],
     bad: (window) => {
       const held = window.filter(
         (row) =>
@@ -178,7 +179,8 @@ const RULES: readonly InvariantRule[] = [
           row.step === LANE_REFILL_HELD_STEP ||
           (row.step === LANE_IDLE_SUMMARY_STEP && numberField(row, "idle_minutes") > 0),
       ).length;
-      const implementStarts = window.filter(
+      // W1-T13249: a run its dispatch claim refused before spend started no work (the shared predicate).
+      const implementStarts = queueDispatchRunStarts(window).filter(
         (row) => row.step === RUN_START_STEP && row.type === IMPLEMENT_RUN_TYPE,
       ).length;
       const fulfilled = window
