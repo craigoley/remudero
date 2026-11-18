@@ -257,8 +257,8 @@ test("W1-T5048: a key that is read again is kept ten minutes from its last read,
   assert.ok(main.body("task", PINNED));
 });
 
-test("W1-T5048: a body an earlier run persisted is dropped unless this run is asked for it", (t) => {
-  const clock = mutableClock();
+/** W1-T13490: an earlier run's worker built and persisted KEY, then its serve stopped. */
+function persistedByAnEarlierRun(t: TestCtx, clock: ReturnType<typeof mutableClock>): { stateDir: string; ledgerDir: string } {
   const stateDir = scratch(t, "vds-state");
   const ledgerDir = seeded(t, "vds-ledger");
   const first = createDemandBook({ clock });
@@ -266,14 +266,60 @@ test("W1-T5048: a body an earlier run persisted is dropped unless this run is as
   const firstTicker = ticker(t, { clock, stateDir, ledgerDir, book: first, builds: [], post: firstMain.post });
   firstMain.want?.("task", KEY);
   firstTicker.tick();
-  assert.ok(firstMain.body("task", KEY));
+  assert.ok(firstMain.body("task", KEY), "positive control: the earlier run built and persisted the key");
   firstTicker.release();
+  return { stateDir, ledgerDir };
+}
 
-  const book = createDemandBook({ clock });
+function storedTaskKeys(stateDir: string): string[] {
+  const db = openReadModel({ stateDir, instance: "core", schemaVersion: LEDGER_PROJECTOR_SCHEMA_VERSION, readOnly: true });
+  try {
+    return db.prepare("SELECT key FROM view_body WHERE view = 'task'").all().map((row) => String(row.key));
+  } finally {
+    db.close();
+  }
+}
+
+test("W1-T13490 criterion 1: a restarted worker keeps an earlier run's demand key through one eviction window", (t) => {
+  const clock = mutableClock();
+  const { stateDir, ledgerDir } = persistedByAnEarlierRun(t, clock);
   const main = fakeMain(() => made);
-  const made = ticker(t, { clock, stateDir, ledgerDir, book, builds: [], post: main.post });
+  const made = ticker(t, { clock, stateDir, ledgerDir, book: createDemandBook({ clock }), builds: [], post: main.post });
   made.tick();
-  assert.ok(main.messages.some((m) => m.type === "drop" && m.key === KEY), "the stale persisted key is dropped on this run's first sweep");
+  clock.advance(VIEW_DEMAND_EVICT_MS - 1_000);
+  made.tick();
+  assert.ok(!main.messages.some((m) => m.type === "drop"), "no carried key is dropped inside the window");
+  assert.deepEqual(storedTaskKeys(stateDir), [KEY], "and the committed body stays in the store for serve to answer");
+});
+
+test("W1-T13490 criterion 2: a carried demand key nobody read in the window is dropped on the first sweep after it", (t) => {
+  const clock = mutableClock();
+  const { stateDir, ledgerDir } = persistedByAnEarlierRun(t, clock);
+  const main = fakeMain(() => made);
+  const made = ticker(t, { clock, stateDir, ledgerDir, book: createDemandBook({ clock }), builds: [], post: main.post });
+  made.tick();
+  clock.advance(VIEW_DEMAND_EVICT_MS);
+  made.tick();
+  assert.ok(main.messages.some((m) => m.type === "drop" && m.key === KEY), "the unread carried key is dropped from serve's memory");
+  assert.deepEqual(storedTaskKeys(stateDir), [], "and deleted from the store");
+});
+
+test("W1-T13490 criterion 3: invariant:carried-then-read — a carried key read in the window is rebuilt and kept", (t) => {
+  const clock = mutableClock();
+  const { stateDir, ledgerDir } = persistedByAnEarlierRun(t, clock);
+  const builds: string[][] = [];
+  const main = fakeMain(() => made);
+  const made = ticker(t, { clock, stateDir, ledgerDir, book: createDemandBook({ clock }), builds, post: main.post });
+  made.tick();
+  clock.advance(VIEW_DEMAND_EVICT_MS / 2);
+  main.want?.("task", KEY);
+  made.tick();
+  assert.ok(builds.some((keys) => keys.includes(KEY)), "the read key is rebuilt by this run");
+  assert.ok(main.body("task", KEY), "and posted to serve");
+  clock.advance(VIEW_DEMAND_EVICT_MS / 2 + 1_000);
+  made.tick();
+  assert.ok(!main.messages.some((m) => m.type === "drop" && m.key === KEY), "a key read in the window survives the first sweep after it");
+  assert.deepEqual(storedTaskKeys(stateDir), [KEY]);
 });
 
 test("W1-T5048: the view routes ask the worker for a missing key and answer from its body", async () => {

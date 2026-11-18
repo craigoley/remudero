@@ -3,14 +3,14 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: auto
+  verify: human  # parked with the retirement: any risk ruling judged the record before this edit
   risk: high  # One security-gate recovery spanning producer, metadata adapter, classifier and unresolved-evidence disposition.
   band_meaning: span
-  priority: 1.26
   # refusal-amendment (W1-T10976, run W1-T10976-1794272641237, 2026-11-10T08:29:16.562Z): the worker refused criterion 1 [proof-unexecutable-at-head] — proposed re-scope-criteria: repair the criterion's proof so it is executable at HEAD, or re-scope the criterion
   #   worker evidence: W1-T10976: a filed proof already passes at the merge base, so branch run-W1-T10976-1794272641237 cannot open a PR
   #   this task is held from dispatch until its record changes; an Architect must make the change above
-  status: queued
+  status: blocked
+  retirement: retired  # closed unbuilt: the kept branch's only reconcilable warning shape is invented, not captured, and its four current proofs exist nowhere; superseded by the capture-first task W1-T13470 (remudero-ops); operator decision 2026-11-17
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:ci-log:security-merge-policy:security-merge-policy-failed-at-this-head-unknown-security-a"
@@ -34,6 +34,31 @@
     - claim: "an exhausted or invalid recovery receives a durable owner/task disposition without repeated generic fix rounds, real alerts retain their repair route, and recovered safe heads retain the ordinary merge guards"
       proof: "unit test: W1-T10976: exhausted recovery assigns an owner once and keeps genuine alert repair intact"
   note: |
+    CLOSED UNBUILT 2026-11-17 (operator decision, "go with all of your recommendations"; superseded by W1-T13470,
+    a smaller capture-first task filed in remudero-ops). Evidence, from the reviewer's evaluation of the kept branch
+    run-W1-T10976-1794272641237 (head 26ef4a6c49, built 2026-11-10, 1039 commits behind main at evaluation):
+    - Its four current acceptance proofs exist nowhere. #17651 amended them to unique test titles after the build;
+      each title is in 0 files on the branch and 0 on origin/main, and `rmd check-proof` at the branch head answers
+      `candidates: absent`, `verdict: no-match` for all four. All four criteria are unmet as filed.
+    - The only warning shape that can reconcile is invented, not captured. The design asks for the verbatim GitHub
+      warning as a fixture; the branch's own comment reads "UNVERIFIED SHAPE ... Replace with the captured fixture
+      before relying on recovery in production", and every positive test builds its input with the function the
+      parser was written from. With a real warning that differs, no recovery fires and every real "1 configuration
+      not found" head moves from a fix round to a one-time human escalation: the opposite of this task's goal.
+    - A recovered head is probably refused again at arm time once main moves (evidence bound to the test-merge
+      commit; main moved 210 times in the 24 hours before the evaluation). Inference from the code, not a measurement.
+    - The measured cost of the cause is small: 14.4 PR-minutes (seven-day half-life) over 4 fix rounds on 3 pull
+      requests, all in late October (#14442, #15133, #15380; see the rationale). On #17217 GitHub refreshed its
+      own check within minutes with no help.
+    The evaluation found no place where the branch loosens a security refusal; it is retired as not ready, not as
+    unsafe. The kept branch is left as it is. W1-T13470 captures the real warning the next time it occurs and
+    re-observes such a head after GitHub's own refresh, with no new success path; any recovery rule built on the
+    captured shape is a separate operator-reviewed task. W1-T11776 depends on this record; a retired dependency
+    counts as met (unmetDependencies, src/lib/plan.ts:1363-1372), so this retirement releases that edge. W1-T11776
+    lists .github/workflows/security-merge-policy.yml in its files, so it stays an operator build either way.
+    The retirement parks the record as the repo's retirement renderer does (renderRetiredShard,
+    src/lib/machine-filing-judge.ts:506: `verify: human`), and drops the 2026-11-10 operator_release_pin, which no
+    longer matches the contract (drop-and-reapprove, as #17651 did for this record); nothing here releases it.
     Existing rung-1 ci-friction origin is retained for before/after attribution. This clarification is plan-only;
     verify: human and the recorded high/escalate ruling remain holds. It grants no waiver, server-protection
     activation or autonomous release. Implementation and its security-policy diff still require human review.
@@ -199,4 +224,3 @@
       - "released by the operator with rmd approve"
     judged_at: "2026-11-10T15:20:18.220Z"
     pin: "8a8221d3e75a10c85fde505783a45667d12126626175a93826aed41e8f688929"
-    operator_release_pin: "a51cd42dc05af517949a6e1ad222cbac92f67652441ea1d1aa5e6b7213a9458a"
