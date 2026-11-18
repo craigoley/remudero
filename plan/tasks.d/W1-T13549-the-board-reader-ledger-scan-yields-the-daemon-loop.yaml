@@ -1,0 +1,91 @@
+- id: W1-T13549
+  title: "The reader-agreement check's board figures read their ledger window off the daemon event loop, with the same figures and the same failure rule"
+  repo: remudero
+  depends_on: [W1-T11506]
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # changes the default corpus read of boardFigures in src/lib/reader-agreement.ts, which feeds every reader.disagreement row; the figures and the refusal must stay the same
+  origin: "operator-session#followups-2026-11-18"
+  plan_refs:
+    - W1-T11506
+    - W1-T9981
+    - W1-T4820
+  files:
+    - src/lib/reader-agreement.ts
+    - test/review/the-board-reader-ledger-scan-yields-the-daemon-loop.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "invariant:board-read-yields — with the default board corpus reader, a timer set just before checkReaderAgreement starts fires while a board corpus read is still pending, and checkReaderAgreement has not returned and has written no reader.disagreement or reader-agreement stats row before that read completes"
+      proof: "grep: W1-T13549 criterion 1 in test/review/the-board-reader-ledger-scan-yields-the-daemon-loop.test.ts"
+    - claim: "invariant:same-board-figures — on a temporary state directory with a live ledger and gzip rotations (one row that the live file shares with an archive, a halted task with dispatch rows, deploy.ok rows for two instances and a status.json), the async default and an injected boardCorpus of readLedgerUnionBounded give equal board figures (dispatchStreaks, healthyDeploys, openPrCount, queuedTaskCount) and equal board lines scanned and rows kept"
+      proof: "grep: W1-T13549 criterion 2 in test/review/the-board-reader-ledger-scan-yields-the-daemon-loop.test.ts"
+    - claim: "invariant:same-board-failure-rule — a missing ledger, a torn row, and a malformed row that the figure filter keeps each make both the async default and the injected readLedgerUnionBounded throw `board ledger is missing or contains malformed rows`, in the step pass and in the halted-task pass; an unreadable gzip rotation gives the async default the same outcome (figures or error) as readLedgerUnionBounded"
+      proof: "grep: W1-T13549 criterion 3 in test/review/the-board-reader-ledger-scan-yields-the-daemon-loop.test.ts"
+  rationale: |
+    WHY: checkReaderAgreement runs in the sweep (src/lib/sweep.ts:20591) on the daemon's event loop and reads
+    the ledger window twice: once for the board figures and once for the independent figures. W1-T11506 moves
+    only the independent read off the loop and says the board's read is out of its scope. The board's read
+    then stays a synchronous scan of the same window, and it is about half of this check's stall time.
+    MEASURED on the Azure host, 2026-11-18, one nice'd pass over the 2026-11-17 daemon.loop_stall_profile rows in
+    ~/rmd-state2/state/ledger.ndjson and the 50 ledger.2026-11-17*.ndjson.gz archives (7,100 rows, deduplicated
+    by ts, pid, run and lag; each row keeps only its top 5 inclusive frames):
+    - checkReaderAgreement is in the top inclusive frames of 36 rows, 1,005.8 s inclusive in all.
+    - boardFigures (with runSweep above it, and readLedgerUnionRecordsSync or readLedgerUnionRawLinesSync
+      under it at 95 to 99 percent of it) is shown in 15 of those rows: 218.0 s, 55 percent of
+      checkReaderAgreement in those rows, up to 42.2 s in one row (19:12:24Z, lag 112.4 s).
+    - independentFigures is shown in 21 rows: 263.0 s, 53 percent of checkReaderAgreement where shown.
+    - Estimate of the board's whole share (the shown board time, plus checkReaderAgreement minus the shown
+      independent time where the board is cut off, plus half of the rows that show neither): about 514 s,
+      51 percent of the check. W1-T11506 was raised to priority 1 on 892 s for the whole check; this half
+      is material, so this task is priority 1.
+    READ at origin/main 8f9b27588a:
+    - src/lib/reader-agreement.ts:126 boardFigures. :127 the default reader is readLedgerUnionBounded. :128 the
+      step pass; :130-132 the failure rule (not present, torn, or a malformed kept row throws `board ledger is
+      missing or contains malformed rows`). :136 the halted-task pass and its rule at :138. Both are synchronous.
+    - :211-212 independentFigures selects readLedgerUnionRawLinesSync; W1-T11506 changes that default.
+    - :267 checkReaderAgreement; :272 awaits `boardReader ?? boardFigures`, so an async boardFigures needs no
+      change to the caller.
+    - src/lib/status.ts:964 readLedgerUnionBounded reads the live file, then readLedgerUnionRecordsSync (:985)
+      over STATUS_BOARD_WINDOW_MS and STATUS_BOARD_MIN_ROTATIONS, newest first, with the W1-T4820 dedupe of rows
+      the live file shares with its archives, and returns rows with `present` and `torn`.
+    - src/lib/ledger-union.ts:1017 readLedgerUnionRawLinesAsync: the async raw-union reader W1-T11506 uses,
+      which yields between slices.
+    NOT COVERED: swept origin/main plan/tasks.d for boardFigures and readLedgerUnionBounded: W1-T9981 (merged,
+    filters rows before parsing), W1-T4820 (merged, dedupe) and W1-T11506 (queued, independent read only). Open
+    PR #19251 only amends W1-T11506. No open pull request touches reader-agreement.ts.
+  design: |
+    INVARIANT board-read-yields: the board figures' ledger reads never hold the event loop for the whole window.
+    INVARIANT same-board-figures: on the same corpus the async board read and readLedgerUnionBounded give the same figures, lines scanned and rows kept.
+    INVARIANT same-board-failure-rule: the async board read refuses exactly when readLedgerUnionBounded refuses, with the same error.
+    1. Build on W1-T11506 (depends_on). Use the same async reader it uses for the independent figures,
+       readLedgerUnionRawLinesAsync, or an async form of readLedgerUnionBounded built on it in status.ts, for
+       the default of boardFigures. Make boardFigures async and await each pass; checkReaderAgreement
+       already awaits it (:272).
+    2. Keep the board's read as it is in every other way: liveFirst, newest-first, STATUS_BOARD_WINDOW_MS,
+       STATUS_BOARD_MIN_ROTATIONS, the keep filters (keepFigureSteps, keepNamed), the dedupe of rows shared by
+       the live file and an archive, the `present` and `torn` facts and the scan count.
+    3. Keep the failure rule of :130-132 and :138 for both passes. Do not add the independent reader's
+       refuseIncomplete rule to the board, and do not drop any refusal the board has today.
+    4. Keep `boardCorpus` working for a synchronous injected reader (readLedgerUnionBounded) as well as a
+       promise, as W1-T11506 does for independentCorpus, so the test can compare the two on one corpus.
+    5. Keep the board and independent corpora and reducers separate; never copy one reader's rows or figures
+       into the other. Do not change the status.json read, the PR count read, the figures, the comparison,
+       the cadence or any bound. No env var, config key, time bound or new reader store.
+    6. The test follows W1-T11506's test (test/review/the-independent-reader-ledger-scan-yields-the-daemon-loop.test.ts):
+       a pending-read control for criterion 1 and a temporary live-plus-gzip state directory for criteria 2
+       and 3. It isolates HOME with test/setup/tmp-hygiene.ts and touches no network.
+  falsifier: |
+    Put back readLedgerUnionBounded as the default: criterion 1 fails the pending-read timer control. Drop the
+    await of the halted-task pass: criterion 2 fails on dispatchStreaks. Drop the torn check or use the
+    independent refuseIncomplete rule: criterion 3 fails on the torn-row or unreadable-rotation case.
+  note: |
+    Id reserved for run-unfiled-1794961378000 with ~/rmd-work/bin/reserve-id.sh.
+    The share is a lower-bounded estimate: loop_stall_profile rows keep only the top 5 inclusive frames, so the
+    board frame is cut off in 21 of the 36 rows. Proof that counts on the host: after the daemon converges to
+    this and W1-T11506, no daemon.loop_stall_profile row shows boardFigures or checkReaderAgreement above a
+    synchronous ledger union read.
+    The board's open-PR count (listOpenHeadBranches at :164) is a separate read and is not in this task.
