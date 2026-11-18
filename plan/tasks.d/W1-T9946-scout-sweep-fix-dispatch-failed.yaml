@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: high  # Rule 19 span: the scout widens its files to ledger, sweep (src/lib/ledger.ts, src/lib/sweep.ts)
   band_meaning: span
   priority: 3.4
@@ -21,3 +21,14 @@
     The ledger step sweep.fix.dispatch_failed carries a failure shape and landed rows in both halves of the trailing 7 days: 1 in the older half, 2 in the newer.
     No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
     The rows name no file of their own: locate the code that writes this step first, then fix its cause.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.68
+    reasons:
+      - "The declared files list names only one new test file (test/scout-sweep-fix-dispatch-failed.test.ts), and the description mentions no secrets, auth, permissions, deletion, merge/deploy/review policy, or irreversible action."
+      - "The task is a fix for a recurring ledger failure, which is a defect-removal framing and does not ask for an operator-only decision."
+      - "The cause is stated as not yet located and the acceptance check is only a grep for a test title, so the finding is weakly verified. This is mitigated because the PR still passes CI and review."
+      - "The family track record is mixed (10 merged, 18 declined), which suggests quality risk rather than danger, and it is not enough on its own to classify HIGH."
+    judged_at: "2026-11-17T19:18:48.713Z"
+    pin: "93dd375bb63fda2d525f4c7e9ee91b46ced4bae322b2e91b08768a150b452fa8"

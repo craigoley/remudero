@@ -1,0 +1,28 @@
+- id: W1-T13479
+  title: "One parked task shows one Inbox ask: when verify-human:<id> and machine-judge:<id> are both open for the same task, needsYou carries one row"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high # one concern across 2 files: the source change and its own new test
+  priority: 1.2
+  status: queued
+  files:
+    - src/lib/inbox.ts
+    - test/inbox/one-parked-task-shows-one-ask.test.ts
+  design: |
+    INVARIANT twin-answer-settles-both: an operator answer on the kept ask is recorded against both proposal ids, so the hidden twin never resurfaces as a fresh ask.
+
+    When both asks are open for one task, keep the machine-judge ask (it carries the risk ruling) and fold the verify-human row into it. Counts in needsYou count the task once.
+  acceptance:
+    - claim: "When both verify-human:<id> and machine-judge:<id> are open for one task, the needsYou section lists one ask for that task and counts it once."
+      proof: "grep: W1-T13479 criterion 1 in test/inbox/one-parked-task-shows-one-ask.test.ts"
+    - claim: "invariant:twin-answer-settles-both — an answer on the kept ask settles its hidden twin"
+      proof: "grep: W1-T13479 criterion 2 in test/inbox/one-parked-task-shows-one-ask.test.ts"
+  origin: "operator-session#inbox-asks-2026-11-17"
+  rationale: |
+    OBSERVED 2026-11-17 19:50Z through the Console view relay (GET /api/console/views/inbox?section=needsYou, 13 pages, 219 rows, 57 ready):
+    nine tasks held two ready asks each, one verify-human:<id> and one machine-judge:<id>:
+    W1-T10591, W1-T10679, W1-T10707, W1-T10720, W1-T12265, W1-T13092, W1-T13093, W1-T13113, W1-T13126.
+    Both ask the operator the same question (release this parked task or not), so 9 of the 57 asks were duplicates.
+    Filed under reservation branch run-unfiled-1794945460139.

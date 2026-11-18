@@ -230,5 +230,5 @@ test("an inadmissible scout rescope leaves its contract intact and does not pois
   assert.equal(landing.paths.length, 1, "only the independent admissible record may reach landing");
   assert.ok(!landing.paths.includes(path));
   assert.equal(spec.landingRefusal!(repo.dir, landing.paths), undefined, "the real unchanged final filing gate admits exactly the retained record");
-  assert.ok(rows.some(r => r.step === "scout.record_refused" && r.fields.task_id === task.id && /sizing/.test(String(r.fields.reason))));
+  assert.ok(rows.some(r => r.step === "scout.record_refused" && r.fields.refused_task_id === task.id && /sizing/.test(String(r.fields.reason))));
 });

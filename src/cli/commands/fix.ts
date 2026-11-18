@@ -35,6 +35,7 @@ import { planFilingFixRoundRefusal, readPlanFilingFixRoundInput } from "../../li
 import { createPlanPrRest, probeExistingPlanPr, renderAcceptanceBlock } from "../../lib/plan-pr-emitter.js";
 import { findTaskShard, parseProofAmendmentProposal, requestProofAmendment, requestScopeAmendment, isUngrantableInstrumentPath, SCOPE_AMENDMENT_RETRYABLE_REFUSALS, saveScopeAmendmentWork, restoreScopeAmendmentWork, type ScopeAmendmentOutcome, type ProofAmendmentOutcome } from "../../lib/proof-amendment.js";
 import { appendLedger, isSpawnInfraBlockedError, LEDGER_COST_TAG_INFRA } from "../../lib/ledger.js";
+import { setDanglingRefRepairLog } from "../../lib/git-fetch-retry.js";
 import { systemClock } from "../../lib/clock.js";
 import { observeFeedbackInputs, type AdmissionObserver } from "../../lib/contributor-admission.js";
 import { observeContributorAdmission } from "../../lib/arm-auto-merge.js";
@@ -2585,7 +2586,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
   const unfiledScope = opts.taskId === `PR-${prNumber}` && (branchTaskId === undefined || branchTaskId === UNFILED_RUN_SENTINEL);
   const unfiledGrantNow = async () => unfiledScope && prNumber !== undefined
     ? unfiledScopeGrant(deps.ledgerLines ? deps.ledgerLines() : await readFixScopeHistory(deps.ledgerPath, prNumber), { prNumber }) : undefined;
-  const amendScope = async (paths: string[], changedPaths: string[], headSha: string, saveWork = false, extra: { retry?: 1 } = {}): Promise<ScopeAmendmentOutcome> => {
+  const amendScope = async (paths: string[], changedPaths: string[], headSha: string, saveWork = false, extra: { retry?: 1; dropped_paths?: string[] } = {}): Promise<ScopeAmendmentOutcome> => {
     let outcome: ScopeAmendmentOutcome;
     try {
       const body = await (deps.fetchPrBody ?? host.fetchPrBodyViaGh)(opts.prUrl);
@@ -5311,7 +5312,14 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         const ask = async (extra: { retry?: 1 }): Promise<ScopeAmendmentOutcome> => {
           scopeAsks++;
           try {
-            return await amendScope(fixAction.paths, readWorkerChanged(), priorHeadSha, true, extra);
+            const changed = readWorkerChanged();
+            // W1-T10900: requestScopeAmendment refuses the WHOLE ask when any one path is untouched by the worker's
+            // diff (path-not-changed), and a refusal is not retried. Drop the untouched paths first and amend the
+            // rest; when nothing is touched the original ask stands, so the refusal stays named, not hidden.
+            const touched = fixAction.paths.filter((path) => changed.includes(path));
+            const dropped = fixAction.paths.filter((path) => !changed.includes(path));
+            if (touched.length === 0 || dropped.length === 0) return await amendScope(fixAction.paths, changed, priorHeadSha, true, extra);
+            return await amendScope(touched, changed, priorHeadSha, true, { ...extra, dropped_paths: dropped });
           } catch (error) {
             const refused = { kind: "refused" as const, reason: "worker-diff-unreadable", detail: String(error) };
             deps.log("fix.scope_amendment", { outcome: refused.kind, ...refused, paths: fixAction.paths, head_sha: priorHeadSha, ...extra });
@@ -6155,6 +6163,8 @@ export async function fixCommand(
   const operatorRequested = rest.includes("--requested");
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: "FIX", step, lane: "fix", ...extra });
+  // Inside the daemon's process the daemon's log stays.
+  setDanglingRefRepairLog(log, true);
   const adoptionComment = flagValue(rest, "--admission-adopt-comment");
   await observeAdmissionDisposition(config.contributorAdmission, { owner, repo, prNumber }, config.root, log,
     adoptionComment === undefined ? undefined : Number(adoptionComment));

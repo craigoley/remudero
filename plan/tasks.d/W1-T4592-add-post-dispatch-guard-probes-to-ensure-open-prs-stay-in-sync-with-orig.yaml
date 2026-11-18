@@ -4,8 +4,7 @@
   depends_on:
     - W1-T4591
   type: implement
-  verify:
-    proof: "manual-check: verify origin/main not diverging before W1-T4081 dispatch"
+  verify: human  # 2026-11-17: was a mapping (proof: "manual-check: verify origin/main not diverging before W1-T4081 dispatch"); the ops composer refuses any verify other than auto or human, which held all ops dispatch since 2026-11-16
   risk: low
   status: blocked
   retirement: withdrawn

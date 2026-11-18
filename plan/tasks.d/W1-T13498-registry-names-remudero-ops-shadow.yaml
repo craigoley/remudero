@@ -1,0 +1,70 @@
+- id: W1-T13498
+  title: "The fleet registry names remudero-ops as a shadow instance, and the suites that pin the live topology count it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # adds a registry row every registry reader sees; a shadow row never arms or merges (W1-T4265)
+  band_meaning: span
+  origin: "human#2026-11-17-onboard-remudero-ops"
+  plan_refs:
+    - W1-T4265
+    - W1-T4227
+  files:
+    - .remudero/daemon-instances.yaml
+    - test/one-registry-for-the-fleet.test.ts
+    - test/an-unscoped-recycle-refuses-once-instances-are-declared.test.ts
+    - test/github/the-daemon-sets-its-installation-share-from-a-registry-its-container-can-read.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The committed registry has an ops row for craigoley/remudero-ops in the remudero project, declared mode shadow"
+      proof: "grep: github_repo: craigoley/remudero-ops in .remudero/daemon-instances.yaml"
+    - claim: "The ops row is a shadow instance, so its worker opens pull requests but never arms or merges one"
+      proof: "grep: mode: shadow in .remudero/daemon-instances.yaml"
+    - claim: "The W1-T3596 census names the four live instances, ops included, each carrying all seven required fields"
+      proof: "grep: W1-T13498 in test/an-unscoped-recycle-refuses-once-instances-are-declared.test.ts"
+    - claim: "The daemon's GitHub App installation share counts the ops row as a seventh consumer"
+      proof: "grep: W1-T13498 in test/github/the-daemon-sets-its-installation-share-from-a-registry-its-container-can-read.test.ts"
+    - claim: "The committed-registry test pins core, site, console and ops, with ops in shadow mode and every other row live"
+      proof: "grep: W1-T13498 in test/one-registry-for-the-fleet.test.ts"
+  rationale: |
+    WHY: Craig, 2026-11-17 20:45Z: "we need to onboard remudero-ops to be a managed repo". The Console's repository
+    picker lists a repository as managed only when core's instances view returns it registered (a live row in
+    .remudero/daemon-instances.yaml) and served (console lib/repo-dashboard.ts instancesFromView). remudero-ops has
+    no row today (OBSERVED at 5c6c8ce: rows core, site, console).
+    The onboarding gate for a new repository is a mode: shadow row (W1-T4265, src/lib/instance-mode.ts instanceMode):
+    its worker runs real tasks and opens real pull requests but never arms or merges one.
+    AMENDED 2026-11-17: the filing said both shell readers refuse `mode`. That was wrong. install-host-units.sh and
+    recycle-container.sh each validate `mode` (shadow|live, no duplicates) in a dedicated `mode)` arm ahead of the
+    known-and-ignored list, and test/host-units-install.test.ts falsifies that arm. No script change is needed.
+    instanceMode falls back to live when no mode is readable, so the mode must be present in every registry the
+    daemon reads, the host copy included.
+    Two suites pin the live topology: the W1-T3596 census (three instance names) and W1-T12670 criterion 5 (six
+    installation-share consumers). The ops row makes them four and seven.
+    A remudero-ops daemon does not dispatch core's tasks held in remudero-ops/plan/tasks.d: isDispatchEligible in
+    src/lib/drain.ts refuses foreign-repo tasks through taskTargetsRepo (W1-T988).
+    Host convergence (state dir, /etc/remudero/daemon-instances.yaml row, install-host-units.sh --instance ops, serve
+    recreate) is an operator step after this merges, not part of this task.
+  design: |
+    1. .remudero/daemon-instances.yaml: add after console
+         ops:
+           repo: remudero-ops
+           project: remudero
+           github_repo: craigoley/remudero-ops
+           mode: shadow
+           container_name: remudero-ops-daemon
+           state_dir: /mnt/rmd/remudero-ops-state
+           claude_dir, codex_dir, container_config_dir, image: the same values as the site and console rows.
+       Add a header note naming ops and its shadow mode.
+    2. test/one-registry-for-the-fleet.test.ts: the committed-registry test expects four rows, ops last; a
+       "W1-T13498 ..." case pins each row's mode (core, site, console live; ops shadow).
+    3. test/an-unscoped-recycle-refuses-once-instances-are-declared.test.ts: the census expects four names.
+    4. test/github/the-daemon-sets-its-installation-share-from-a-registry-its-container-can-read.test.ts:
+       criterion 5 expects seven consumers.
+    NO-INVARIANTS: a registry row and the pins that count it; no gate, threshold, script or credential changes.
+  falsifier: |
+    Drop `mode: shadow` from the ops row: the W1-T13498 mode case fails (ops reads live).
+    Drop the ops row: the committed-registry, census and installation-share cases fail on their counts.

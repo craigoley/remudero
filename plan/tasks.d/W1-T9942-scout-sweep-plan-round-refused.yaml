@@ -21,3 +21,11 @@
     The ledger step sweep.plan_round.refused carries a failure shape and landed rows in both halves of the trailing 7 days: 2 in the older half, 6 in the newer.
     No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
     The rows name no file of their own: locate the code that writes this step first, then fix its cause.
+  risk_ruling:
+    verdict: "low"
+    action: escalate
+    confidence: 0.6
+    reasons:
+      - "low-confidence verdict (0.60 < 0.6780487804878048) — on the change's description/files alone, no diff was read — The declared FILES TOUCHED is a single new test file (test/scout-sweep-plan-round-refused.test.ts); the description and files list show no secrets, credentials, auth, deletion, or merge/deploy/review-policy changes.; on the change's description/files alone, no diff was read — The task asks to fix the cause of a recurring ledger step, which is a normal bug-fix scope with no operator-only decision stated in the description.; on the change's description/files alone, no diff was read — The acceptance proof is a grep for a test name, and the true fix location is unstated (the rows name no file). This weakens verification, but the PR still goes through CI and review.; on the change's description/files alone, no diff was read — Family track record is mixed (10 merged, 18 declined), which is a mild caution and not evidence of danger in this change."
+    judged_at: "2026-11-17T19:18:32.464Z"
+    pin: "5300036bcb4dcb2a5745304bc9c7aa34045b710ed9d2bb279fa7c4e443f2afd5"

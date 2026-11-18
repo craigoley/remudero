@@ -1536,6 +1536,26 @@ else
   GC_DISABLED_REASON="none"
 fi
 
+# ── probe: refs of the install clone that name an object it lacks (W1-T13410) ──
+# Read only: no fetch, fsck, gc or update-ref. Not finished inside the BACKSTOP reads unknown, never 0.
+REFS_BACKSTOP_S="${RMD_HEARTBEAT_REFS_BACKSTOP_S:-20}"
+case "$REFS_BACKSTOP_S" in ''|*[!0-9]*|0) REFS_BACKSTOP_S=20 ;; esac
+UNRESOLVABLE_REFS="unknown"
+UNRESOLVABLE_REF_FIRST="none"
+REFS_PROBE='set -o pipefail
+refs="$(git -C "$1" for-each-ref --format="%(objectname) %(refname)")" || exit 3
+[ -n "$refs" ] || { echo "0 none"; exit 0; }
+ids="$(printf "%s\n" "$refs" | cut -d" " -f1 | sort -u | git -C "$1" cat-file --batch-check)" || exit 3
+{ printf "%s\n" "$ids" | awk "\$NF==\"missing\" {print \"M\", \$1}"; printf "%s\n" "$refs" | sed "s/^/R /"; } |
+  awk "\$1==\"M\" {m[\$2]=1; next} \$1==\"R\" && (\$2 in m) {c++; if (f==\"\") f=\$3} END {print c+0, (f==\"\" ? \"none\" : f)}"'
+if command -v timeout >/dev/null 2>&1; then
+  REFS_OUT="$(unset GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
+    timeout "$REFS_BACKSTOP_S" nice -n 10 bash -c "$REFS_PROBE" refs-probe "$INSTALL_DIR" 2>/dev/null)" || REFS_OUT=""
+  case "$REFS_OUT" in
+    [0-9]*" "?*) UNRESOLVABLE_REFS="${REFS_OUT%% *}"; UNRESOLVABLE_REF_FIRST="${REFS_OUT#* }" ;;
+  esac
+fi
+
 # The gap the MACHINE observed since its own last successful beat. This is what makes the
 # watcher's threshold refinable later against a measured distribution instead of intuition — a
 # force-pushed single-commit branch keeps no history of its own to measure.
@@ -1731,6 +1751,8 @@ install_head_sha=${INSTALL_SHA}
 runtime_contract_verdict=${RUNTIME_HEALTH_VERDICT}
 gc_verdict=${GC_VERDICT}
 gc_disabled_reason=${GC_DISABLED_REASON}
+unresolvable_refs=${UNRESOLVABLE_REFS}
+unresolvable_ref_first=${UNRESOLVABLE_REF_FIRST}
 config_root=${RMD_ROOT}
 config_root_source=${ROOT_SOURCE}
 ledger_state=${LEDGER_STATE}
