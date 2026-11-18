@@ -2931,6 +2931,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   // than a second lock location.
   const inflightDir = join(config.root, "state", "inflight");
   const issues = issuesImpl ?? ghIssueGateway(owner, repo);
+  const openEscalationIssues = issuesImpl ?? ghIssueGatewayAsync(owner, repo);
   const primaryShadowAlerts = primaryShadowOperatorChannel({ owner, repo, ledgerPath, runId, issues: issuesImpl,
     clock: clockFromMillisFn(nowMsImpl), readPrState: ghLiveState,
     selection: () => {
@@ -3290,7 +3291,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     readerAgreement: { owner, repo, plan, readJson: readJsonImpl },
     fixDispatchFleetHold: () => checkSharedPause(config.root, { run: pauseGit.run, mintAnchor: pauseGit.mintAnchor }),
     reconcilePrimaryShadowAlert: () => primaryShadowAlerts.reconcile().catch(primaryShadowAlertFailed),
-    readOpenEscalations: () => issues.listOpen?.(NEEDS_HUMAN_LABEL) ?? [],
+    readOpenEscalations: () => openEscalationIssues.listOpen?.(NEEDS_HUMAN_LABEL) ?? [],
     fixProgressJudge: effectsProgressJudge,
     readHostedProofResults: (headSha, proofs) => readHostedFixProofResults({ owner, repo, headSha, proofs },
       { json: readJsonImpl, text: ghTextAsync }),
