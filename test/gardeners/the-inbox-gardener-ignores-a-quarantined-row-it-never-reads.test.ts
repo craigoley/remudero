@@ -3,13 +3,13 @@
 // 2027-10-14, and any quarantine set a sticky fault that nothing cleared. Only a quarantined row the gardener reads may
 // keep its read partial, and a fault from an older projection goes with that projection's rows.
 import assert from "node:assert/strict";
-import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { gzipSync } from "node:zlib";
 import { test, type TestContext } from "node:test";
 import { readInboxGardenerLedger } from "#src/lib/inbox-gardener.js";
+import { readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const SCOPE = { repository: "craigoley/remudero", instance: "core", root: "/r" };
 const PAST = Date.now() - 86_400_000, FUTURE = Date.now() + 330 * 86_400_000;
@@ -18,8 +18,9 @@ const row = (at: number, step: string, extra: Record<string, unknown> = {}) =>
 
 /** An archive holding one relevant row, plus a live ledger holding `liveRows`. */
 function ledgerDir(t: TestContext, liveRows: string[]): string {
-  const dir = mkdtempSync(join(tmpdir(), "rmd-gardener-quarantine-"));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  // The read model publishes its transaction records from a worker after the read returns; the shared fixture flushes
+  // them before it removes the dir, which a bare rmSync races (ENOTEMPTY under the flake screen).
+  const { dir } = readModelFixtureDir(t, "gardener-quarantine");
   writeFileSync(join(dir, "ledger.2026-11-17T16-21-21-036Z.ndjson.gz"),
     gzipSync(row(PAST, "panel.proposal_declined", { proposal_id: "ask-old" }) + "\n" + row(PAST + 1000, "worker.activity") + "\n"));
   writeFileSync(join(dir, "ledger.ndjson"), liveRows.map(r => r + "\n").join(""));
