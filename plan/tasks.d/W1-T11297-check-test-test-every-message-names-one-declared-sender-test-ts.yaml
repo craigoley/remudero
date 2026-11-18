@@ -6,6 +6,9 @@
   verify: auto
   risk: low
   priority: 1.25
+  # refusal-amendment (W1-T11297, run W1-T11297-1795019683145, 2026-11-18T16:45:22.499Z): the worker refused criterion 1 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
+  #   worker evidence: Preventing the recorded round requires a change to the sender census or its pre-CI invocation, both outside the declared files.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   author_class: machine

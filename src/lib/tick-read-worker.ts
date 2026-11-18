@@ -20,7 +20,7 @@ import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { ghExec, ghJsonAsync, ghLinesAsync, ghTextAsync, githubInstallationBudget } from "./github-transport.js";
 import type { InstallationBudgetThreadInput } from "./github-installation-budget.js";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { loadConfig, type Config } from "./config.js";
 import { ledgerPathFor } from "./ledger-path.js";
 import { createBoardSnapshotCache } from "./board-snapshot-cache.js";
@@ -42,11 +42,12 @@ import { cappedOverrideFromLedger, postedArmFactsFromLedger, lastPendingReviewSt
 import { buildBatchedGithub, defaultCreditStorePath, loadCreditStore, buildCommitTrailerIndex, deriveStatus, isGhRateLimitError, projectPlan, readLedgerLines, type DeriveDeps, type GitHub, isBookkeepingOnlyChangeset, type PrRef, type StatusProjection, taskIdFromRunBranch, creditsByAnchoredTrailer, readMergeCreditedTaskIds, readRequiredStatusCheckContextsAsync, isPlanTextDeliverable, type RequiredContextsRead } from "./status.js";
 import { RUNNER_TIMEOUT_LINE, actionableGateFailuresFromReasons, cancelledRequiredCheckNames, withoutDownstreamGateFailure, earlyRedEvidenceRollup, checksStateFromRollup, checksPendingSinceFromRollup, dedupeRollupByLatestAttempt, fixLedgerRowsForHead, fixRoundTally, listRetirableEscalationIssues, listRetirableEscalationIssuesAsync, operatorVerdictEvidence, REQUIRED_CHECK_FAIL, closedPrFacts, type ClosedPrFact, redQualityGateNames, pendingQualityGateNames, dependabotCheckStates, usableInstrumentEntanglementPaths, type ActionableGateFailure, type CancelledRequiredCheck, type CiFailure, type CiLogUnavailableCause, MAX_CI_LOG_FAILURE_DETAIL, type CiTailSource, type CiAnnotationFallback, type CreditCandidate, type EscalationReconcileCandidate, type InstrumentEntanglementPaths, type OpenPrView, type StrikeAttempt, DEFAULT_FIX_CLASSES, checkJobId, corroboratedIneligibility, creditSubjectIsImplementation, isPostReviewDiffCeilingRefusal, isRetryableReviewThrow, codeScanningHeadSettled, reviewInputLoopFacts, REVIEW_INPUT_ADMISSION_BACKSTOP, type ReviewSetupRefusal, type BaseChangedFiles } from "./sweep.js";
 import { loadedReviewerCodeSha } from "./reviewer-health.js";
-import { readCiGateRequiredChecks } from "./ci-gate-required.js";
+import { readCiGateRequiredNames, resolveCiGateRequiredSource, type CiGateRequiredSource } from "./ci-gate-required.js";
 import { ghJson } from "./worker.js";
 import { runStepsAsync, runStepsSync, step, type Steps } from "./git-push.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { repoRoot, resolveOwnerRepo } from "./repo-location.js";
+import { OwnerRepoUnresolvableError } from "./owner-repo.js";
 import { reviewTaskIdFromBody } from "./report-commands.js";
 
 /** REST rollups preserve check-run order: retain external_id and the exact head/constituent
@@ -243,6 +244,7 @@ export function createTickReadProducer(options: TickReadOptions, io: {
 } = {}) {
   const { owner, repo, config, ledgerPath, checkoutRoot } = options;
   const log = io.log ?? (() => {});
+  const ciGateSource = { repository: `${owner}/${repo}`, checkoutRoot, isSelf: resolve(checkoutRoot) === resolve(repoRoot) };
   const pacer = io.pacer ?? createGhCallPacer();
   const nextDistanceProbe = createDistanceProbeSequence();
   const snapshotCache = createBoardSnapshotCache(config.root, owner, repo, { log });
@@ -349,7 +351,7 @@ export function createTickReadProducer(options: TickReadOptions, io: {
     credits = creditBefore;
     projection = derive();
     const openPrViews = openPrRows ? await buildOpenPrViewsAsync(owner, repo, ledgerPath, {
-      ...io.viewsDeps, fetchAsync, pacer, planFilingFileCache: filingFiles, openPrRows, stageReuse,
+      ciGateSource, log, ...io.viewsDeps, fetchAsync, pacer, planFilingFileCache: filingFiles, openPrRows, stageReuse,
       readMainPlan: () => plan, isMerged: (task) => projection.get(task.id)?.merged ?? false,
     }) : [];
     if (openPrRows) {
@@ -2131,6 +2133,19 @@ function byCandidate<V>(candidates: readonly { number: number }[], values: reado
   return out;
 }
 
+function boardCiGateSource(owner: string, repo: string, ledgerPath: string): CiGateRequiredSource {
+  let self: ReturnType<typeof resolveOwnerRepo> | undefined;
+  try {
+    self = resolveOwnerRepo();
+  } catch (error) {
+    if (!(error instanceof OwnerRepoUnresolvableError)) throw error;
+  }
+  // Direct view builders receive the canonical <config root>/state ledger path.
+  return resolveCiGateRequiredSource({ owner, repo }, {
+    self, selfRoot: repoRoot, configRoot: dirname(dirname(ledgerPath)),
+  });
+}
+
 export function* openPrViewSteps(
   owner: string,
   repo: string,
@@ -2152,6 +2167,8 @@ export function* openPrViewSteps(
     pacer?: GhCallPacer;
     /** Injectable seams for the checked-in ci-gate contract and its already-fetched red evidence. */
     readCiGateRequired?: (root: string) => string[];
+    ciGateSource?: CiGateRequiredSource;
+    log?: (step: string, fields: Record<string, unknown>) => void;
     fetchCiFailureEvidence?: typeof fetchCiFailures;
     /** Local-only owner probe; never performs a GitHub read. */
     assessPendingOwner?: (record: PendingReviewStatusRecord) => PendingReviewOwnerAssessment;
@@ -2238,8 +2255,9 @@ export function* openPrViewSteps(
     requiredRead.kind === "unreadable" ? { branch: requiredRead.branch, reason: requiredRead.reason } : undefined;
   // W1-T2599: one checked-out contract read per board build, never one filesystem or API read per PR.
   const ciGateRequired = deps.readCiGateRequired
-    ? deps.readCiGateRequired(repoRoot)
-    : readCiGateRequiredChecks(repoRoot);
+    ? deps.readCiGateRequired(deps.ciGateSource?.checkoutRoot ?? repoRoot)
+    : readCiGateRequiredNames(deps.ciGateSource ?? boardCiGateSource(owner, repo, ledgerPath),
+      deps.log ?? ((step, fields) => console.error(`${step} ${JSON.stringify(fields)}`)));
   lap("required_contexts");
   let mainPlan: Plan | undefined;
   const mainPlanPath = deps.mainPlanPath ?? join(repoRoot, "plan", "tasks.yaml");

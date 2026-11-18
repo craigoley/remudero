@@ -133,7 +133,7 @@ import {
   type IssueCloser,
   type PanelActionDeps,
 } from "./panel-actions.js";
-import { buildPanelGraphRoutes, inboxThreadStorePath, OPERATOR_ACTIVITY_CONTRACT_VERSION, ratifyCliGateway, type PanelGraphDeps } from "./panel-graph.js";
+import { buildPanelGraphRoutes, inboxThreadStorePath, OPERATOR_ACTIVITY_CONTRACT_VERSION, ratifyCliGateway, readSlowLaneInbox, type PanelGraphDeps } from "./panel-graph.js";
 import { buildPanelSkillsRoutes } from "./panel-skills.js";
 import { buildPanelSkillRunRoutes } from "./panel-skill-run.js";
 import { buildRepoDashboardRoutes } from "./repo-dashboard-route.js";
@@ -2965,7 +2965,10 @@ function assembleServeRoutes(
   // W1-T5897: under the slow lane that classifies the inbox, no inbox read classifies on this thread; a new generation reads what it persisted.
   const coreInbox = deps.readModel?.slowLane?.inbox;
   const panelReadDeps: PanelGraphDeps = { ...panelGraphDeps, readPlanSnapshot: () => deps.board.plan, readPlanSource: () => deps.board.planSource,
-    ...(coreInbox ? { inboxFromSlowLane: true, inboxAuditScope: panelGraphDeps.inboxAuditScope ?? { instance: CORE_INSTANCE, repository: coreInbox.repository } } : {}) };
+    ...(coreInbox ? { inboxFromSlowLane: true, inboxBuildOffLoop: true, inboxAuditScope: panelGraphDeps.inboxAuditScope ?? { instance: CORE_INSTANCE, repository: coreInbox.repository } } : {}) };
+  // W1-T13692: the boot read and its lanes are built in place, before any request, so a generation starts from the file
+  // on disk; every later change to it is built on the inbox build worker while reads answer from this one.
+  if (coreInbox) readSlowLaneInbox(panelReadDeps, { inPlace: true })?.lanes();
   const lastSeen = deps.lastSeen ?? createLastSeenStore(lastSeenPath(deps.fleetControlRoot));
   // W1-T500: SAME instance `createService`'s dispatch consults (see ServeDeps.confirmNonces's own
   // doc for why that has to be true) -- {@link buildServeServer} resolves this once and threads it
@@ -3479,6 +3482,8 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   // (each defaulting on its own) would issue nonces into a store the dispatch never consults.
   const confirmNonces = deps.confirmNonces ?? createConfirmNonceStore();
   const analyticsCache = createAnalyticsSnapshotCache({
+    // W1-T13685: the fold, its snapshot and the checkpoint write run on the analytics worker, not this request loop.
+    offThread: true,
     ...deps.analytics,
     stateDir: dirname(deps.ledgerPath),
     log: deps.log,

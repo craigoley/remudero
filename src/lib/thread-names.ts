@@ -11,12 +11,14 @@
 export const OS_THREAD_NAME_MAX = 15;
 
 export const THREAD_NAMES = {
+  analyticsRefresh: "rmd-analytics",
   benchmarkCohort: "rmd-bench-cohrt",
   board: "rmd-board",
   codexProbe: "rmd-codex-probe",
   configMeasure: "rmd-config-meas",
   consoleProjection: "rmd-console-prj",
   heavyReadyDeadline: "rmd-heavy-ready",
+  inboxBuild: "rmd-inbox-build",
   ledgerCompact: "rmd-ledger-cmpt",
   ledgerDigestCodec: "rmd-ledger-dgst",
   loopStallWatchdog: "rmd-stall-watch",
