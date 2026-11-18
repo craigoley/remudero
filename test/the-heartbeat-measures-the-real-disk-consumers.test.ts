@@ -88,7 +88,6 @@ esac`);
     stub("du", `
 p="\${@: -1}"
 [ "\${PUBLISH:-}" = 1 ] && printf 'du:%s\\n' "$p" >> "$FIXTURE/events"
-[ "$p" = "\${SLOW_DU:-}" ] && sleep "\${SLOW_DU_S:-10}"
 case "$p" in
   /var/lib/docker) exit 1 ;;
   "$FIXTURE/docker data")
@@ -112,6 +111,10 @@ case "$p" in
   /mnt/rmd) [ "\${FINDMNT_ABSENT:-}" = 1 ] || exit 1; n=60000000 ;;
   *) n=10 ;;
 esac
+# Keep the delay in the timed process itself; a child sleep can outlive timeout.
+if [ "$p" = "\${SLOW_DU:-}" ]; then
+  exec node -e 'setTimeout(() => process.stdout.write(process.argv[2] + "\\t" + process.argv[3] + "\\n"), Number(process.argv[1]) * 1000)' "\${SLOW_DU_S:-10}" "$n" "$p"
+fi
 printf '%s\\t%s\\n' "$n" "$p"`);
     stub("df", FIXTURE_DF);
     writeFileSync(join(dir, "state-root/state/heartbeat-count.txt"), overrides.BEAT_N ?? "0");
