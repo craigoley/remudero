@@ -14,7 +14,7 @@
   files:
     - src/lib/task-linter.ts
     - test/plan/a-report-task-only-a-person-can-verify-is-refused-at-filing.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A verify: human task whose every proof is demonstration: and every file is under docs/ gets one block violation that says its PR can never auto-merge and shows a grep: proof over the report as the runnable form"

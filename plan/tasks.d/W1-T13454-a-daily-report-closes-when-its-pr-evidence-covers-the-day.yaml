@@ -16,7 +16,7 @@
   files:
     - src/lib/daily-progress-collector.ts
     - test/console-api/read-model/a-daily-report-closes-when-its-pr-receipt-lands-mid-pass.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A complete PR receipt written after the pass began but before its files were read certifies the closed day, and the job's closedThrough advances"

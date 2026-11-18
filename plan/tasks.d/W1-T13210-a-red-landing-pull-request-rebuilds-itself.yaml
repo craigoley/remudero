@@ -18,7 +18,7 @@
     - src/lib/feedback-landing.ts
     - src/lib/sweep.ts
     - test/inbox/a-red-landing-pull-request-rebuilds-itself.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A landing pull request whose own checks are red at its head, where main alone is not red the same way, or which conflicts with current main, is rebuilt by the lane at its next pass from the pending edits on current main: one new commit and a body written from it, or the lane closes it and opens the next one itself"

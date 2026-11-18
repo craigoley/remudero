@@ -19,7 +19,7 @@
   files:
     - src/lib/test-slot.ts
     - test/ci/suites/an-aged-foreign-test-slot-whose-owner-start-time-no-process-has-is-reclaimed.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: In acquireTestSlot's aged-hold path, when the pid namespace probe answers unknown for an aged foreign record on the same boot id with a proc:<n> processStart, a waiter in the initial pid namespace whose complete process start scan (W1-T12822's scanProcessStarts) finds no start equal to n reclaims the slot through the existing quiescent reclaim, with coverage boot-start-scan and one test_slot.reclaimed_quiescent line

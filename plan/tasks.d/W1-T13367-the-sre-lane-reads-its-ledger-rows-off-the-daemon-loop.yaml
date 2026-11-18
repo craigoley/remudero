@@ -28,7 +28,7 @@
     - "src/lib/ledger-union.ts"
     - "src/lib/live-ledger-tail.ts"
     - "src/lib/sweep.ts"
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:a-pass-reads-only-new-ledger-bytes — with the input the daemon builds, a second SRE lane pass over an unchanged state dir reads 0 bytes of any ledger file and parses 0 ledger lines on the daemon thread. After k rows are appended to the live file, the next pass reads only those bytes. No pass calls readLedgerLines on the live ledger, and no pass calls readLedgerUnionRecordsSync without an incremental union"

@@ -19,7 +19,7 @@
     - src/run-task.ts
     - src/cli/commands/run-task-verb.ts
     - test/fix-lane/a-ci-wait-reads-a-policy-status-that-awaits-codeql-as-pending.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "ciGateFromRollup reads pending, not red, for a rollup whose newest required security-merge-policy status has state ERROR and a description that starts with `unknown: trusted-exact-head-codeql-result-missing` or with `unknown: security-analysis-pending`, while the other required contexts are in progress or passed; RollupEntry declares the description field the REST rollup already carries"

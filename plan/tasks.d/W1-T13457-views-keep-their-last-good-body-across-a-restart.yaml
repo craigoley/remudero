@@ -16,7 +16,7 @@
     - src/lib/read-model-worker.ts
     - src/lib/repositories-view.ts
     - test/views-keep-their-last-good-body-across-a-restart.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A handle started over a state dir whose store holds committed bodies for repositories, instances, inbox and agent answers each of them at once, before the worker's first body, with stale true and a warming source reason"

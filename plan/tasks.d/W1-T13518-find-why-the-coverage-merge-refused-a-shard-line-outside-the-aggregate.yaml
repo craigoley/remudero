@@ -13,7 +13,7 @@
   files:
     - docs/forensics/coverage-merge-shard-line-outside-aggregate.md
     - docs/docs-index.json
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The report names the shard whose LCOV carries the hit on src/lib/trust-root-text.ts line 23, and the test process that loaded the file in that shape"

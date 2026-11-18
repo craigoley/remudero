@@ -20,7 +20,7 @@
     - src/lib/sweep.ts
     - test/setup/tmp-hygiene.ts
     - test/github/a-daemon-exit-latch-never-leaks-into-the-next-pooled-file.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Every registered exit latch is reopened in registration order, and registering a name again replaces it"

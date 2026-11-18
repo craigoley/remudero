@@ -17,7 +17,7 @@
     - src/lib/serve-supervisor.ts
     - test/a-wedged-serve-generation-is-restarted-by-its-supervisor.test.ts
     - test/console-api/serve/the-serve-watchdog-probes-the-port-the-tunnel-uses.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With its real default probes, the supervisor GETs ACTIVE_PROBE_PUBLIC_PATH over TCP on 127.0.0.1 and the port serve's own --port argument binds; a port that answers nothing for ACTIVE_PROBE_FAILURES probes writes serve.active_wedged with probedPort and the private socket's answer (answered and status, or the error) and restarts the generation, even while the private socket answers"

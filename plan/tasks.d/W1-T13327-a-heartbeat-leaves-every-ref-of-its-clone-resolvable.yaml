@@ -15,7 +15,7 @@
   files:
     - scripts/fleet-heartbeat.sh
     - test/daemon/a-heartbeat-leaves-every-ref-of-its-clone-resolvable.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:every-ref-resolves — the real script publishes one beat with real git from an install clone to a local bare remote. After it, every ref that `git for-each-ref` lists in the install clone names an object the clone has, and a `git fetch` of another branch of that remote ends with status 0 in the clone"

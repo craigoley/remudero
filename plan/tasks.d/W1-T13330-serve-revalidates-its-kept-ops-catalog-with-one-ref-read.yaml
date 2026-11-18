@@ -16,7 +16,7 @@
     - src/lib/ops-catalog-source.ts
     - src/lib/serve-plan-reload.ts
     - test/serve-revalidates-its-kept-ops-catalog-with-one-ref-read.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A catalog refresh past BOARD_CATALOG_REFRESH_MS whose branch still names the kept commit makes exactly one GET (the branch ref) and answers the same Plan as the whole read before it"

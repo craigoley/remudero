@@ -15,7 +15,7 @@
   files:
     - src/lib/inbox-gardener.ts
     - test/gardeners/the-inbox-gardener-retires-an-ask-whose-task-already-shipped.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The Inbox gardener's ledger catch-up budget per pass is 300 seconds"

@@ -15,7 +15,7 @@
   files:
     - src/lib/serve-memory.ts
     - test/serve-memory-sizes-a-view-body-once.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "viewBodiesHolder's size() calls approxBytes once per held body object: a second sample over the same bodies walks none, and a body replaced by a new generation is walked once"
