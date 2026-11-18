@@ -15,7 +15,7 @@ import { buildFixProgressInput as buildBaseFixProgressInput, fixRedClass, resolv
   sameCriterionStall, nextStallRemedy, stallRemedyRows, failedApproaches, rowPrNumber, type StallRemedy,
   type FixProgressReaskResult } from "./fix-progress-judge.js";
 import type { DispatchBreakJudge } from "./stall-verifier.js";
-import { readCiGateRequiredChecks } from "./ci-gate-required.js";
+import { readCiGateRequiredNames, resolveCiGateRequiredSource, type CiGateRequiredSource } from "./ci-gate-required.js";
 import { createHeadRehomePorts, headIdentityRed, headRehomePlan, type HeadRehomePorts } from "./head-rehome.js";
 import { argmaxTypedJudgmentOption, runTypedJudgment } from "./typed-judgment.js";
 import { judgeShadowOnlyArm, judgeShadowOnlyPrimary, shadowJudgeCall, type ShadowJudgeCall } from "./judge-shadow.js";
@@ -1558,6 +1558,8 @@ export interface BuildSweepEffectsDeps {
   repoMode?: "shadow" | "live";
   repoRoot?: string;
   localRepoName?: string;
+  ciGateSource?: CiGateRequiredSource;
+  ciGateRequired?: string[];
   nowMsImpl?: () => number;
   config: Config;
   ledgerPath: string;
@@ -2922,6 +2924,10 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       }
     });
   const repoRoot = entrypointRepoRoot;
+  const ciGateSource = deps.ciGateSource ?? resolveCiGateRequiredSource({ owner, repo }, {
+    self: { owner, repo: localRepoName }, selfRoot: repoRoot, configRoot: config.root,
+  });
+  const requiredChecks = deps.ciGateRequired ?? readCiGateRequiredNames(ciGateSource, log);
   // W1-T10772: resolved per call (the store verifies its state directory's identity), never cached.
   const ladderNoteStore = () => operatorNoteStore({ stateDir: join(config.root, "state"), repository: `${owner}/${repo}`, legacyRoot: repoRoot });
   // W1-T7096: ONE judge serves both the sweep's own next-round decision and the rung it dispatches.
@@ -3672,7 +3678,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
 
     headRehome: deps.headRehomeImpl ?? createHeadRehomePorts({
       owner, repo, readJson: ghJsonForBuild, latestChecks: dedupeRollupByLatestAttempt,
-      requiredChecks: readCiGateRequiredChecks(repoRoot),
+      requiredChecks,
       judgeQuiet: async (pr) => {
         if (repoMode === "shadow") return { quiet: false, reason: "shadow repository" };
         const mounts = loadMounts(mountsPath(repoRoot));
@@ -3956,7 +3962,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // simply never fires for this PR on this pass, rather than aborting the whole sweep loop over
     // one PR's rollup read.
     // W1-T5979: a ci-gate timeout's rollup-sourced not-ready list is filtered to this list.
-    readCiGateRequired: () => readCiGateRequiredChecks(repoRoot),
+    readCiGateRequired: () => requiredChecks,
 
     readCiGateRollup: async (pr) => {
       try {
@@ -6683,12 +6689,9 @@ export function pendingViewSettledFromDeliveredFailure(
   reviewKey: string,
 ): { view: OpenPrView; basis: "verdict-after-pending" | "restore-spent"; deliveredAt: string } | undefined {
   if (!delivered || pr.reviewState !== "pending") return undefined;
-  const row = postedRowsForInput(pr, lines).at(-1);
-  const verdict = row?.decision_verdict as ReviewVerdict | undefined;
-  if (row === undefined || row.state !== "failure" || verdict?.state !== "failure" || verdict.cannotEvaluate === true) return undefined;
-  if (row.instrument_entangled === true || row.failure_class === "instrument_entangled") return undefined;
-  const claims = Array.isArray(row.unmet_criteria) ? row.unmet_criteria.map(String) : [];
-  if (claims.length === 0) return undefined;
+  const settled = deliveredFailureView(pr, lines);
+  if (settled === undefined) return undefined;
+  const { row } = settled;
   const deliveredAtMs = typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN;
   const pendingSinceMs = pr.reviewPendingSince ? Date.parse(pr.reviewPendingSince) : Number.NaN;
   const restoreSpent = lines.some(r => r.step === REVIEW_STATUS_RESTORED_STEP &&
@@ -6696,6 +6699,33 @@ export function pendingViewSettledFromDeliveredFailure(
   const basis = Number.isFinite(deliveredAtMs) && Number.isFinite(pendingSinceMs) && pendingSinceMs <= deliveredAtMs
     ? "verdict-after-pending" as const : restoreSpent ? "restore-spent" as const : undefined;
   if (basis === undefined) return undefined;
+  return { view: settled.view, basis, deliveredAt: String(row.ts) };
+}
+
+/** W1-T13706 — a view that reads no review status is settled the same way: GitHub never removes a status, so a view that reads
+ *  none beside a delivered verdict for its exact head and input was read before that review's pending post. */
+export function reviewViewSettledFromDeliveredFailure(
+  pr: OpenPrView,
+  delivered: boolean,
+  lines: ReadonlyArray<Record<string, unknown>>,
+  reviewKey: string,
+): { view: OpenPrView; basis: "verdict-after-pending" | "restore-spent" | "verdict-without-status"; deliveredAt: string } | undefined {
+  if (pr.reviewState !== "none") return pendingViewSettledFromDeliveredFailure(pr, delivered, lines, reviewKey);
+  if (!delivered || pr.rollupUnreadable === true) return undefined;
+  const settled = deliveredFailureView(pr, lines);
+  return settled === undefined ? undefined : { view: settled.view, basis: "verdict-without-status", deliveredAt: String(settled.row.ts) };
+}
+
+function deliveredFailureView(
+  pr: OpenPrView,
+  lines: ReadonlyArray<Record<string, unknown>>,
+): { view: OpenPrView; row: Record<string, unknown> } | undefined {
+  const row = postedRowsForInput(pr, lines).at(-1);
+  const verdict = row?.decision_verdict as ReviewVerdict | undefined;
+  if (row === undefined || row.state !== "failure" || verdict?.state !== "failure" || verdict.cannotEvaluate === true) return undefined;
+  if (row.instrument_entangled === true || row.failure_class === "instrument_entangled") return undefined;
+  const claims = Array.isArray(row.unmet_criteria) ? row.unmet_criteria.map(String) : [];
+  if (claims.length === 0) return undefined;
   // The same reading the view producer makes of a failing row (`unmetFromLedger`), for this one row.
   const reasons = Array.isArray(row.reasons) ? row.reasons.map(String) : [];
   const judged = new Map<string, Partial<CriterionVerdict>>();
@@ -6716,8 +6746,7 @@ export function pendingViewSettledFromDeliveredFailure(
   return {
     view: { ...pr, reviewState: "failure", unmetCriteria, reviewSummary: typeof summary === "string" && summary !== "" ? summary : undefined,
       reviewPendingSince: undefined, reviewPendingOwnerDead: undefined, reviewPendingOwnerGone: undefined, reviewPendingOwnerGoneReason: undefined },
-    basis,
-    deliveredAt: String(row.ts),
+    row,
   };
 }
 
@@ -6934,7 +6963,7 @@ export type CiTimeoutNotReadySource =
 /** Checks whose latest attempt still waits for a runner. */
 const CI_TIMEOUT_NOT_STARTED = new Set(["QUEUED", "PENDING", "WAITING", "REQUESTED", "EXPECTED"]);
 
-/** W1-T5979: `required` is ci-gate's REQUIRED list ({@link readCiGateRequiredChecks}); an empty one
+/** W1-T5979: `required` is ci-gate's REQUIRED list ({@link readCiGateRequiredNames}); an empty one
  *  is that reader's unreadable answer, never an empty set. A required name with no rollup entry is
  *  the never-started check the gate waits on, so it is named and listed in `neverRegistered`. */
 export function ciTimeoutNotReadyChecks(
@@ -23415,8 +23444,8 @@ export async function runSweep(
     if (pr.planResequenceHeld !== undefined) {
       log("sweep.plan_resequence_close.held", { pr_number: pr.prNumber, task_id: pr.taskId, reason: pr.planResequenceHeld });
     }
-    // W1-T12994: a delivered failure settles a view that still reads pending, before anything below reads the review state.
-    const settledView = pendingViewSettledFromDeliveredFailure(pr, prior.reviewDelivered.has(reviewOutcomeKeyForPr(pr)),
+    // W1-T12994/W1-T13706: a delivered failure settles a view that reads pending or none, before anything reads the review state.
+    const settledView = reviewViewSettledFromDeliveredFailure(pr, prior.reviewDelivered.has(reviewOutcomeKeyForPr(pr)),
       ledgerLines, reviewOutcomeKeyForPr(pr));
     if (settledView !== undefined) pr = settledView.view;
     const hostGapRefusal = prior.reviewHostGapRefusals.get(reviewOutcomeKeyForPr(pr));

@@ -1,0 +1,52 @@
+- id: W1-T13706
+  title: "A delivered review failure settles an open pull request's view that reads no review status, so a pass on an older open-PR list sends the head to the fix lane instead of deduping it"
+  repo: remudero
+  priority: 0.9
+  depends_on: [W1-T12994]
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # it decides when a failed pull request gets a fix round; a wrong settle could fix a head whose review was released
+  band_meaning: span
+  origin: "operator-session#review-fail-to-fix-latency-2026-11-18"
+  plan_refs:
+    - W1-T12994
+    - W1-T13148
+    - W1-T12755
+    - W1-T11847
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/a-delivered-review-failure-settles-a-view-that-reads-no-review.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "When the newest review.posted row for a head and input is a failure with unmet criteria, a view whose review state reads none is settled from that verdict: the disposition is the one a failed review takes (blocked-fixable, blocker review-failed), not post-review, and no review is started for that input"
+      proof: "grep: W1-T13706 criterion 1 in test/sweep/a-delivered-review-failure-settles-a-view-that-reads-no-review.test.ts"
+    - claim: "On the light pass's production path (runSweepLightPass with the real buildSweepEffects seams except the GitHub and worker spawns), a view that reads none beside that delivered failure reaches dispatchFix once through the existing fix admission, and its sweep.disposed row names the settle in review_view_settled with a basis distinct from verdict-after-pending"
+      proof: "grep: W1-T13706 criterion 2 in test/sweep/a-delivered-review-failure-settles-a-view-that-reads-no-review.test.ts"
+    - claim: "invariant:settle-only-on-a-delivered-failure — a view that reads none keeps origin/main's disposition when the head and input have no delivered verdict, when the newest delivered verdict is a success or cannot-evaluate, when the failure row names no unmet criterion or is instrument-entangled, and when a reviewer-code or reviewer-image requeue released the key after the verdict"
+      proof: "grep: W1-T13706 criterion 3 in test/sweep/a-delivered-review-failure-settles-a-view-that-reads-no-review.test.ts"
+  rationale: |
+    OBSERVED 2026-11-18 in the core ledger (live file and rotations, 2026-11-16T16:20Z to 2026-11-18T16:20Z, deduplicated) and on GitHub, read-only, by the operator session.
+
+    - 34 heads got a remudero-review failure in the window. 28 got a fix round (`sweep.fix.child`) before any other outcome. From the failure to the fix round: p50 13.6 min, p90 27.8 min, max 63.1 min. GitHub's status times match the review.posted rows to the second.
+    - In 17 of those 28, a pass disposed the head as post-review after the failure was posted. 20 of the 22 such rows read "review never posted" (the view's review state was none), and every one stood down with "a verdict was already DELIVERED for input:[...]". The fix round came p50 15.9 min (p90 31.5 min) after that first deduped row, on a later pass that read the failure. These 17 waits add up to 274 min in two days.
+    - Example, #19199 head dcc5863f: GitHub shows pending 20:53:35Z and failure 20:57:31Z on 2026-11-17. The light pass at 21:01:47Z decided from a last good open-PR list (`sweep_light.views_fallback`, reason slow_read, list age 262 s). At 21:02:59Z it wrote post-review, reason "checks pending 23m, review never posted", stand-down "a verdict was already DELIVERED". The fix round started at 21:22:35Z, 25 min after the failure.
+    - Example, #19114 head 30b5cb22: failure posted 16:14:27Z on 2026-11-17; 16:15:08Z post-review with the same dedup; fix round 16:46:39Z, 32 min after.
+    - 352 of 680 light passes in the window decided from a last good list (W1-T12755: the open-PR read missed its 60 s deadline or failed). That list can be up to 15 min old, older than a review that takes 4 to 6 min, so it can hold no review status for the head at all.
+    - W1-T12994 settles a view from a delivered failure only when the view reads pending (`pendingViewSettledFromDeliveredFailure`, src/lib/sweep.ts). It wrote 22 `review_view_settled` rows in the window, all `verdict-after-pending`. A view that reads none is not settled, so the post-review row's claim dedups it and nothing else acts until a pass reads the failure.
+    - For comparison, CI red to fix round (first failed check's completed_at on GitHub to `sweep.fix.child`, 109 heads): p50 20.5 min, p90 48.5 min. Most of that wait is deliberate ("another CI run for this head is still queued or in progress").
+    - Why the view reads an older state than GitHub is W1-T13148's question. This task acts on the ledger's record whatever the view's age.
+  design: |
+    1. Extend the W1-T12994 settle to a view whose review state is none: when the newest review.posted row for the head and the view's review input digest is a delivered failure with unmet criteria, the view takes the verdict's state and unmet criteria before any disposition rule reads it. A status on GitHub is never removed, so a view that reads none beside a delivered verdict for the same head and input was read before that review's pending post.
+    2. Use the same exclusions as the pending settle: a success, a cannot-evaluate verdict, a failure with no unmet criterion, an instrument-entangled failure, and a key a requeue released keep today's behaviour.
+    3. Name the new basis on the existing `review_view_settled` field of the sweep.disposed row (no new ledger step), so a later count can tell the two cases apart.
+    4. The light pass's existing act-time head read still guards the dispatch: a moved head stands down as today.
+    INVARIANT settle-only-on-a-delivered-failure: a view that reads none is settled only from a delivered failure with unmet criteria for its exact head and input that no requeue released; every other view keeps origin/main's disposition.
+    NOT IN SCOPE: why the view is older than GitHub (W1-T13148); the last good list's age bound (W1-T12755); full-sweep and light-pass cadence.
+  falsifier: |
+    Remove the none arm and criterion 1 must fail (the disposition reads post-review). Skip the light-pass wiring and criterion 2 must fail (no dispatchFix). Settle a none view with a delivered success, or after a reviewer-code requeue row, and criterion 3 must fail. Restore and all pass.
+  note: |
+    reservation hand-off: run-unfiled-1795019476000 -> run-unfiled-1795019476000
+    Reserved with reserve-id.sh from a worktree at origin/main. Check refs/rmd-dispatch/W1-T13706 and any run branch before building. The test sits beside test/sweep/a-review-recorded-delivered-behind-a-pending-status-is-acted-on.test.ts. src/lib/sweep.ts has a comment cap: add as few comments as possible.
