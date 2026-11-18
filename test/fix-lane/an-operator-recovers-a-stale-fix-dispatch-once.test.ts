@@ -14,6 +14,7 @@ import {
   PR_OWNER_RECOVERY_RECEIPT_STEP,
   recoveryAuthorizationId,
   type LivePr,
+  type RecoveryGit,
   type RecoveryPorts,
   type RecoveryResult,
   type RecoveryTuple,
@@ -45,7 +46,7 @@ const TUPLE: RecoveryTuple = { repo: REPO, prNumber: PR, taskId: TASK, runId: RU
 
 interface World {
   dir: string;
-  ports: RecoveryPorts;
+  ports: RecoveryPorts & { repoDir: string; git: RecoveryGit };
   rows: Row[];
   pr: LivePr;
   gitCalls: string[][];
@@ -96,8 +97,9 @@ function makeWorld(): World {
   };
   const priorLockPath = join(inflightDir, `${claimKeyOf("craigoley", "remudero", BRANCH)}.lock`);
   const ok = (stdout = "") => ({ status: 0, stdout, stderr: "" });
-  const ports: RecoveryPorts = {
+  const ports: World["ports"] = {
     stateDir, inflightDir, repoDir,
+    resolveRepository: async () => ({ repoDir, git: (...args) => ports.git(...args) }),
     readLedger: async () => ({ ok: true, unread: [], rows: rows.map((r) => ({ ...r })) }),
     appendLedger: (step, row) => {
       if (state.failAppend?.(step)) throw new Error(`simulated crash appending ${step}`);
@@ -873,4 +875,18 @@ test("W1-T12114 every unreadable read fails closed", async () => {
   } finally {
     blocked.cleanup();
   }
+});
+
+test("W1-T13373 a missing authorized clone leaves the prior branch claim in place", async (t) => {
+  const w = makeWorld();
+  t.after(w.cleanup);
+  const id = await authorized(w);
+  const claim = w.writePriorLock();
+  w.ports.resolveRepository = async () => undefined;
+
+  assert.deepEqual(await apply(w, id), { outcome: "held", reason: "authorized_repo_clone_unavailable", durable: false });
+  assert.equal(readFileSync(w.priorLockPath, "utf8"), claim);
+  assert.deepEqual(w.gitCalls, []);
+  assert.deepEqual(receipts(w), []);
+  assert.deepEqual(receiptFiles(w), []);
 });

@@ -196,10 +196,9 @@ import {
   authorizeStaleFixDispatchRecovery,
   defaultDescendants,
   defaultProbeProcess,
-  defaultRecoveryGit,
+  defaultRecoveryRepository,
   PR_OWNER_RECOVERY_AUTHORIZED_STEP,
   PR_OWNER_RECOVERY_RECEIPT_STEP,
-  splitRepo,
   type RecoveryWiring,
   type RecoveryPorts,
   type RecoveryResult,
@@ -4170,21 +4169,17 @@ const PR_OWNER_RECOVER_VALUE_FLAGS = ["--repo", "--task", "--run", "--round", "-
 /** W1-T12114: the production ports of `rmd pr-owner-recover` — the ledger union, the gh transport,
  *  the inflight claim directory, the /proc probes and git in the repository's own clone. */
 export function prOwnerRecoverPorts(
-  repo: string,
   opts: { ledgerPath: string; root: string; gh?: (args: string[]) => Promise<unknown> },
 ): RecoveryPorts {
   const { ledgerPath } = opts;
   const gh = opts.gh ?? ((args: string[]) => ghJsonAsync(args));
   const stateDir = dirname(ledgerPath);
-  const name = splitRepo(repo)?.[1] ?? "";
-  const clone = join(opts.root, "repos", name);
-  const repoDir = name !== "" && existsSync(clone) ? clone : repoRoot;
   const invocation = `pr-owner-recover-${systemClock.now()}`;
   const steps = ["fix.dispatch", "fix.done", PR_OWNER_RECOVERY_AUTHORIZED_STEP, PR_OWNER_RECOVERY_RECEIPT_STEP];
   return {
     stateDir,
     inflightDir: join(stateDir, "inflight"),
-    repoDir,
+    resolveRepository: (repo) => defaultRecoveryRepository(opts.root, repo),
     readLedger: async () => {
       const read = await readLedgerUnionRawLinesAsync(stateDir, { refuseIncomplete: true, keep: (line) => steps.some((step) => line.includes(`"${step}"`)) });
       const rows: Array<Record<string, unknown>> = [];
@@ -4214,7 +4209,6 @@ export function prOwnerRecoverPorts(
     probeProcess: (holder) => defaultProbeProcess(holder, { hostname }),
     descendants: (pid) => defaultDescendants(pid),
     cwdCensus: (path) => ({ state: readProcessCwdCensus(path).state }),
-    git: defaultRecoveryGit(repoDir),
     nowIso: () => systemClock.iso(),
     nonce: () => randomUUID().replace(/-/g, ""),
     hostname,
@@ -4239,7 +4233,7 @@ export async function prOwnerRecoverCommand(
   const flag = (name: string) => flagValue(rest, name) ?? "";
   const config = (io.config ?? (() => ({ ledgerPath: ledgerPathFor(loadConfig()), root: loadConfig().root })))();
   const recovery: RecoveryWiring = {
-    ports: prOwnerRecoverPorts(flag("--repo"), { ...config, ...(io.gh ? { gh: io.gh } : {}) }), claimKeyOf: fixBranchClaimKey, fixRoundClaimId,
+    ports: prOwnerRecoverPorts({ ...config, ...(io.gh ? { gh: io.gh } : {}) }), claimKeyOf: fixBranchClaimKey, fixRoundClaimId,
   };
   let result: RecoveryResult;
   if (mode === "apply") {

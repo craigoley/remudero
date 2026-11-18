@@ -11,7 +11,7 @@
  * writes fix.done, a credit, or a plan or source file. Every I/O goes through {@link RecoveryPorts}.
  */
 import { createHash } from "node:crypto";
-import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gitClaimRunnerAsync } from "./dispatch-claim.js";
@@ -20,6 +20,7 @@ import { defaultGetProcessStartTime, reclaimStaleLock } from "./fs-race-safe.js"
 import { sameHost } from "./host-identity.js";
 import { acquireInflightLock, inflightLockPath } from "./inflight-lock.js";
 import { isFleetAutomationActor } from "./operator-interventions.js";
+import { resolveOwnerRepoAtAsync } from "./owner-repo.js";
 import { publishRecoveryRefs, RECOVERY_REF_NAMESPACE, type RecoveryGitAnswer } from "./recovery-refs.js";
 import {
   decideStaleFixDispatchRecovery,
@@ -74,10 +75,15 @@ export interface LockHolder {
 
 export type RecoveryGit = (args: string[], opts?: { cwd?: string; env?: Record<string, string> }) => Promise<RecoveryGitAnswer>;
 
+interface RecoveryRepository {
+  repoDir: string;
+  git: RecoveryGit;
+}
+
 export interface RecoveryPorts {
   stateDir: string;
   inflightDir: string;
-  repoDir: string;
+  resolveRepository(repo: string): Promise<RecoveryRepository | undefined>;
   readLedger(): Promise<RecoveryLedgerRead>;
   appendLedger(step: string, row: Row): void;
   readPr(repo: string, prNumber: number): Promise<LivePr>;
@@ -90,7 +96,6 @@ export interface RecoveryPorts {
   probeProcess(holder: LockHolder): StaleFixDispatchProcess["state"];
   descendants(pid: number): StaleFixDispatchFacts["descendants"];
   cwdCensus(path: string): StaleFixDispatchFacts["cwdCensus"];
-  git: RecoveryGit;
   nowIso(): string;
   nonce(): string;
   hostname(): string;
@@ -315,7 +320,7 @@ export function parseLockHolder(raw: string): LockHolder | undefined {
 
 type WorktreeLookup = { state: "found"; path: string } | { state: "none" } | { state: "unknown"; reason: string };
 
-async function registeredWorktree(ports: RecoveryPorts, branch: string): Promise<WorktreeLookup> {
+async function registeredWorktree(ports: RecoveryRepository, branch: string): Promise<WorktreeLookup> {
   const res = await ports.git(["worktree", "list", "--porcelain"], { cwd: ports.repoDir });
   if (res.status !== 0) return { state: "unknown", reason: `git worktree list failed: ${res.stderr.trim()}` };
   for (const block of res.stdout.split("\n\n")) {
@@ -325,13 +330,13 @@ async function registeredWorktree(ports: RecoveryPorts, branch: string): Promise
   return { state: "none" };
 }
 
-async function cwdOf(ports: RecoveryPorts, branch: string): Promise<StaleFixDispatchFacts["cwdCensus"]> {
+async function cwdOf(ports: RecoveryRepository & Pick<RecoveryPorts, "cwdCensus">, branch: string): Promise<StaleFixDispatchFacts["cwdCensus"]> {
   const wt = await registeredWorktree(ports, branch);
   if (wt.state === "unknown") return { state: "unknown" };
   return wt.state === "none" ? { state: "clear" } : ports.cwdCensus(wt.path);
 }
 
-async function dispatchClaimOf(ports: RecoveryPorts, taskId: string): Promise<StaleFixDispatchFacts["dispatchClaim"]> {
+async function dispatchClaimOf(ports: RecoveryRepository, taskId: string): Promise<StaleFixDispatchFacts["dispatchClaim"]> {
   const res = await ports.git(["ls-remote", "origin", `refs/rmd-dispatch/${taskId}`], { cwd: ports.repoDir });
   if (res.status !== 0) return { state: "unknown" };
   const holder = res.stdout.trim();
@@ -387,7 +392,9 @@ async function judgeHolder(
   if (priorMs === undefined) return { ok: true };
   const descendants = ports.descendants(holder.pid);
   if (descendants.state !== "none") return { ok: false, reason: `descendants_${descendants.state}` };
-  const cwd = await cwdOf(ports, ctx.tuple.branch);
+  const repository = await ports.resolveRepository(ctx.tuple.repo);
+  if (!repository) return { ok: false, reason: "authorized_repo_clone_unavailable" };
+  const cwd = await cwdOf({ ...ports, ...repository }, ctx.tuple.branch);
   if (cwd.state !== "clear") return { ok: false, reason: `cwd_${cwd.state}` };
   return { ok: true, prior: priorMs };
 }
@@ -490,7 +497,7 @@ function recordedPrior(rows: readonly Row[], auth: AuthorizationRow, recoveryId:
 /** Snapshot dirty or unpublished work into a create-only refs/rmd-recovery commit and publish it
  *  create-only. A clean tree whose head the PR head contains has nothing to preserve. */
 export async function preserveRecoveryWork(
-  ports: RecoveryPorts,
+  ports: RecoveryPorts & RecoveryRepository,
   t: RecoveryTuple,
   prHead: string,
   recoveryId: string,
@@ -721,7 +728,7 @@ interface Gathered {
 }
 
 async function gather(
-  ports: RecoveryPorts,
+  ports: RecoveryPorts & RecoveryRepository,
   t: RecoveryTuple,
   authorizationId: string,
   claim: HeldClaim,
@@ -811,6 +818,9 @@ async function applyUnderClaim(
   const admin = await adminLogin(ports, t.repo);
   if ("reason" in admin) return { outcome: "refused", reason: admin.reason };
   if (admin.login !== auth.login) return { outcome: "refused", reason: `authorization_login_mismatch:${admin.login}` };
+  const repository = await ports.resolveRepository(auth.tuple.repo);
+  if (!repository) return { outcome: "held", reason: "authorized_repo_clone_unavailable", durable: false };
+  const boundPorts = { ...ports, ...repository };
   const file = readReceiptFile(ports.stateDir, recoveryId, t, authorizationId);
   if (file.state === "invalid") return { outcome: "unknown", reason: file.reason };
   const prior = claim.prior ?? recordedPrior(ledger.rows, auth, recoveryId, { ...ctx, rows: ledger.rows }, file);
@@ -826,15 +836,15 @@ async function applyUnderClaim(
     return { outcome: "held", reason: String(receipt.hold_reason), durable: true, receipt };
   };
 
-  const firstRead = await gather(ports, t, authorizationId, claim, prior, { state: "unknown", reason: "first read: preservation runs after this decision" });
+  const firstRead = await gather(boundPorts, t, authorizationId, claim, prior, { state: "unknown", reason: "first read: preservation runs after this decision" });
   if ("reason" in firstRead) return { outcome: "unknown", reason: firstRead.reason };
   const d1 = decideStaleFixDispatchRecovery(expected, firstRead.facts);
   if (d1.kind === "hold" && d1.reason !== "preservation_unknown") return hold(firstRead.facts);
   await ports.afterFirstRead?.();
 
-  const preservation = await preserveRecoveryWork(ports, t, firstRead.facts.observed.headSha, recoveryId);
+  const preservation = await preserveRecoveryWork(boundPorts, t, firstRead.facts.observed.headSha, recoveryId);
   await ports.beforeSecondRead?.();
-  const second = await gather(ports, t, authorizationId, claim, prior, preservation);
+  const second = await gather(boundPorts, t, authorizationId, claim, prior, preservation);
   if ("reason" in second) return { outcome: "unknown", reason: second.reason };
   if (decideStaleFixDispatchRecovery(expected, second.facts).kind === "hold") return hold(second.facts);
 
@@ -900,6 +910,24 @@ export function defaultDescendants(pid: number, procRoot = "/proc", platform: st
     }
   }
   return found.length > 0 ? { state: "present", pids: found } : { state: "none" };
+}
+
+/** Resolve the managed clone and verify its checkout root and origin before using its evidence. */
+export async function defaultRecoveryRepository(root: string, repo: string): Promise<RecoveryRepository | undefined> {
+  const slug = splitRepo(repo);
+  if (!slug || slug[1] === "." || slug[1] === "..") return undefined;
+  try {
+    const repoDir = realpathSync(join(root, "repos", slug[1]));
+    const git = defaultRecoveryGit(repoDir);
+    const top = await git(["rev-parse", "--show-toplevel"]);
+    if (top.status !== 0 || top.stdout.trim() !== repoDir) return undefined;
+    const origin = await resolveOwnerRepoAtAsync(repoDir);
+    return `${origin.owner}/${origin.repo}`.toLowerCase() === repo.toLowerCase() ? { repoDir, git } : undefined;
+  } catch (error) {
+    // Missing paths and unreadable origins cannot supply repository evidence.
+    void error;
+    return undefined;
+  }
 }
 
 /** `git <args>` resolving on every outcome: repository commands through the dispatch-claim runner,
