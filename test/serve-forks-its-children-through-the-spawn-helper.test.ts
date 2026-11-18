@@ -178,7 +178,10 @@ test("W1-T13664: the catalog's default api forks gh through the installed helper
     const pacer = { wait: () => undefined, waitAsync: async () => undefined, recordResult: () => undefined };
     const api = defaultOpsCatalogApi({ pacer: pacer as unknown as NonNullable<Parameters<typeof defaultOpsCatalogApi>[0]>["pacer"] });
     assert.deepEqual(await api("repos/o/r/git/ref/heads/main"), { ok: true });
-    assert.deepEqual(seen.rows.filter((row) => row.step === "spawn.routed").map((row) => [row.via, row.command]), [["helper", "gh"]]);
+    const routed = seen.rows.filter((row) => row.step === "spawn.routed");
+    assert.equal(routed.length, 1);
+    assert.equal(routed[0]?.via, "helper");
+    assert.match(String(routed[0]?.command), /^gh$/);
   } finally {
     process.env.PATH = savedPath;
     stopInstalled();
