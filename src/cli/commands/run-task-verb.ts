@@ -2598,7 +2598,14 @@ function implementAttemptOutcome(helperHost: Pick<RunTaskHelperHost, "workerSign
   return { success: true };
 }
 
-function finishTransientRetry(
+/**
+ * W1-T13284: the prefix `runDiagnoseThenRetry` puts on `DiagnoseThenRetryResult.reason` ONLY when the
+ * progress judge ruled "escalate" on the exhausted retry loop (classify.ts), i.e. it named a
+ * no-progress or needs-operator-input loop. A bare exhausted budget never carries it.
+ */
+const JUDGED_PROGRESS_LOOP_REASON = /^fix progress loop: /;
+
+export function finishTransientRetry(
   helperHost: Pick<RunTaskHelperHost, "terminalVerdictFields">, driverResult: DiagnoseThenRetryResult,
   context: { taskId: string; runId: string; repoDir: string; worktreePath: string; costUsd: number;
     worker: WorkerResult; log: RunTaskContext["log"]; say: RunTaskContext["say"] },
@@ -2607,15 +2614,38 @@ function finishTransientRetry(
   const { terminalVerdictFields } = helperHost;
   if (driverResult.outcome !== "gave_up" || driverResult.exhaustedClass !== "transient") return undefined;
   const { taskId, runId, repoDir, worktreePath, costUsd, worker, log, say } = context;
+  // W1-T13284: a worker the progress judge says cannot progress is a BLOCKER, not a flake. The
+  // attempts' subtype is an API error (codex `error_codex`), but the judge has named the loop (e.g.
+  // needs-operator-input), so recording `blocked_transient` invited the daemon to retry the same
+  // task and latched a lane. Without a judge verdict (cash allowance, plain exhausted retries) the
+  // transient verdict below is unchanged.
+  const judgedLoop = !driverResult.cashAllowanceExhausted && driverResult.reason !== undefined
+    && JUDGED_PROGRESS_LOOP_REASON.test(driverResult.reason);
   if (driverResult.cashAllowanceExhausted) {
     log("worktree.retained", { on: "cash_allowance_exhausted", reason: "a later tool turn may have left unpublished edits" });
   } else {
     try {
       removeWorktree(repoDir, worktreePath);
-      log("worktree.remove", { on: "blocked_transient" });
+      log("worktree.remove", { on: judgedLoop ? "blocked" : "blocked_transient" });
     } catch (e) {
-      log("worktree.remove.error", { on: "blocked_transient", error: String((e as Error)?.message ?? e) });
+      log("worktree.remove.error", { on: judgedLoop ? "blocked" : "blocked_transient", error: String((e as Error)?.message ?? e) });
     }
+  }
+  if (judgedLoop) {
+    const reason = driverResult.reason as string;
+    log("verdict", {
+      verdict: "blocked",
+      stage: "implement",
+      subtype: worker.subtype,
+      num_turns: worker.numTurns,
+      cost_usd: costUsd,
+      billing_mode: billingMode(worker.childEnvKeys),
+      account_label: worker.accountLabel,
+      reason,
+      ...terminalVerdictFields(worker),
+    });
+    say(`verdict: blocked — ${reason}`);
+    return { taskId, runId, merged: false, costUsd, verdict: "blocked" };
   }
   log("verdict", {
     verdict: "blocked_transient",
