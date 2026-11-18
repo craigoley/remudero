@@ -70,7 +70,7 @@ import { withEscalationSpoolDrain } from "../../lib/host-escalation-spool.js";
 import { instanceMode, readInstanceRegistryText } from "../../lib/instance-mode.js";
 import { instanceRegistryRuntimePresent, ledgerSelectedRegistryReadTimeouts, selectedInstanceRegistryEnvPath, withInstanceRegistryRuntime } from "../../lib/instance-registry-selection.js";
 import { escalate, escalateWithJudge, realEscalationJudge, ghIssueGateway, ghIssueGatewayAsync, type Escalation, type EscalationJudgeVerdict } from "../../lib/escalate.js";
-import { createGhCallPacer } from "../../lib/open-prs-rest.js";
+import { createGhCallPacer, prStateFromRest, singlePrRestArgs } from "../../lib/open-prs-rest.js";
 import { buildMainHealthRung } from "../../lib/main-health-rung.js";
 import { ghEscalationAnswerGateway } from "../../lib/escalation-answers.js";
 import { feedbackLandingSweepRungs, type LandingReviewRequest } from "../../lib/feedback-landing.js";
@@ -781,6 +781,19 @@ type RunBranchSyncExec = (cmd: string, args: string[], opts: { encoding: "utf8";
 type RunBranchAsyncExec = (cmd: string, args: string[], opts: { encoding: "utf8"; cwd: string; timeout: number; killSignal: "SIGKILL" }) => Promise<{ stdout: string }>;
 
 /** W1-T10897: a leading checkout path names the repo whose `origin` is listed; without one it is this engine checkout. */
+/** W1-T13671: the tick's live PR state over the async transport, the same REST row and fold as
+ *  run-task.ts's ghLiveStateByNumberAsync; a failed read is unknown (`undefined`). */
+export function daemonLiveStateReader(owner: string, repo: string): (taskId: string, prNumber: number) => Promise<string | undefined> {
+  return async (_taskId, prNumber) => {
+    try {
+      return prStateFromRest((await ghJsonAsync(singlePrRestArgs(owner, repo, prNumber))) as Parameters<typeof prStateFromRest>[0]);
+    } catch (e) {
+      void e; // unreadable => undefined; the tick ledgers dispatch.live_state_indeterminate
+      return undefined;
+    }
+  };
+}
+
 export function readPushedRunBranchesOutput(checkout: string, exec?: RunBranchSyncExec): string;
 export function readPushedRunBranchesOutput(exec?: RunBranchSyncExec): string;
 export function readPushedRunBranchesOutput(...args: [(string | RunBranchSyncExec)?, RunBranchSyncExec?]): string {
@@ -2353,7 +2366,7 @@ export async function daemonCommand(
         ),
         // W1-T177: a fresh `gh pr view` re-read, consulted only when isOpenPr
         // reports a task in-flight — see NextRunnableOpts.readLiveState's doc.
-        readLiveState: (_taskId, prNumber) => ghLiveStateByNumber(target.owner, target.repo, prNumber),
+        readLiveState: daemonLiveStateReader(target.owner, target.repo),
         isIndeterminate,
         releaseLandedClaims: async (isMerged) => {
           await releaseLandedDispatchClaims(deps.tickClaimReserver ?? dispatchClaimReserverAsyncFor(join(config.root, "repos", target.repo)), {
