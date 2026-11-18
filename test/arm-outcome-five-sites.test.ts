@@ -281,6 +281,11 @@ test("every gate that reviews a destination plan PR checks for a self-merge befo
   for (const site of sites) assert.match(site[2]!, /^\s*if \(await mergedBeforeGate\((result\.)?prUrl, reviewCode, log\)\) \{$/, site[0]);
 });
 
+test("SITE approve and approve batch stamp the ratified default priority before they mint", () => {
+  const sites = [...SRC.matchAll(/materializeDraftTaskIds\(\s*\{ fragmentYaml: ([^,]+), stampLine: payload\.stampLine \}/g)].map((m) => m[1]);
+  assert.deepEqual(sites, ["stampDraftedPriority(payload.fragmentYaml)", "stampDraftedPriority(payload.fragmentYaml)"]);
+});
+
 test("SITE sweep arm fold returns the outcome shape the sweep can read", () => {
   // The fold is total: every shape the adapter can hand it comes back as something
   // `armOutcomeArmed` can read; none returns undefined.

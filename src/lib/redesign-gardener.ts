@@ -42,6 +42,10 @@ export const REDESIGN_MAX_PER_PASS = 2;
 const SWEPT_RECENTLY_MS = 2 * 60 * 60_000;
 const EVIDENCE_WINDOW_MS = 7 * 24 * 60 * 60_000;
 const HOLD_REASON = /^(?:fix needs design at this exact head|fix stood down at )/;
+/** W1-T13657: the sweep's wait on a task contract amendment (W1-T12714) is a hold too; nothing else makes the amendment. */
+const AMENDMENT_WAIT = /^fix needs a task contract amendment at this exact head/;
+const isHold = (r: Row): r is Row & { reason: string } => typeof r.reason === "string" &&
+  ((r.disposition === "refused-escalate" && HOLD_REASON.test(r.reason)) || (r.disposition === "wait" && AMENDMENT_WAIT.test(r.reason)));
 const POINTER = /^ {2}# refusal-amendment \(.*(?:\n {2}# {3}.*)*/gm;
 /** The stamp refusal-amendment.ts writes into the pointer's head: `(<task>, run <run>, <iso>)`. */
 export const POINTER_STAMP_RE = /^ {2}# refusal-amendment \([^,]+, run [^,]+, (\d{4}-\d\d-\d\dT[\d:.]+Z)\)/;
@@ -143,7 +147,7 @@ export function redesignCandidates(sources: RedesignSources): RedesignCandidate[
     if (typeof row.task_id !== "string" || !Number.isFinite(at) || now - at > SWEPT_RECENTLY_MS) continue;
     // Every live PR waits its task's pointer until its own hold qualifies below.
     waiting.add(`${row.task_id}#${row.pr_number}`);
-    if (row.disposition !== "refused-escalate" || typeof row.reason !== "string" || !HOLD_REASON.test(row.reason)) continue;
+    if (!isHold(row)) continue;
     // The hold is aged from the start of its unbroken run: walking back from the newest row, any other disposition, an
     // unrelated refusal or another head ends it, so an interrupted hold restarts its hour.
     const history = rows.filter((r) => r.step === "sweep.disposed" && r.pr_number === row.pr_number)
@@ -151,8 +155,7 @@ export function redesignCandidates(sources: RedesignSources): RedesignCandidate[
     let heldSince = at;
     for (const r of history) {
       const ts = Date.parse(String(r.ts));
-      if (r.disposition !== "refused-escalate" || r.head_sha !== row.head_sha || typeof r.reason !== "string" ||
-          !HOLD_REASON.test(r.reason) || !Number.isFinite(ts)) break;
+      if (!isHold(r) || r.head_sha !== row.head_sha || !Number.isFinite(ts)) break;
       heldSince = Math.min(heldSince, ts);
     }
     if (now - heldSince < REDESIGN_AFTER_MS) continue;

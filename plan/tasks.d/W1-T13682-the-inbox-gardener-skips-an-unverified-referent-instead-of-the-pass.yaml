@@ -1,0 +1,54 @@
+- id: W1-T13682
+  title: "An Inbox proposal whose referent cannot be verified is skipped and counted, instead of stopping every gardener pass"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # 2 files: capture and the candidate loop in src/lib/inbox-gardener.ts, and one new test
+  origin: "operator-session#inbox-gardener-shadow-2026-11-18"
+  plan_refs:
+    - W1-T13337
+    - W1-T13586
+  files:
+    - src/lib/inbox-gardener.ts
+    - test/gardeners/the-inbox-gardener-skips-an-unverified-referent-instead-of-the-pass.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "When the snapshot's only GitHub gap is unverified referents, the gardener's GitHub coverage is observed and each such candidate is marked"
+      proof: "grep: W1-T13682 criterion 1 in test/gardeners/the-inbox-gardener-skips-an-unverified-referent-instead-of-the-pass.test.ts"
+    - claim: "invariant:indeterminate-projection-stays-partial — an indeterminate GitHub projection value still keeps GitHub coverage partial"
+      proof: "grep: W1-T13682 criterion 2 in test/gardeners/the-inbox-gardener-skips-an-unverified-referent-instead-of-the-pass.test.ts"
+    - claim: "A marked candidate is skipped with defer_source and counted as unverified_referents, never proven or retired, while the others are still read"
+      proof: "grep: W1-T13682 criterion 3 in test/gardeners/the-inbox-gardener-skips-an-unverified-referent-instead-of-the-pass.test.ts"
+  rationale: |
+    WHY: Craig ruled 2026-11-18 12:11Z (decision card "Skip only those items"): an unverifiable item is skipped and
+    recorded, and the gardener still judges the rest. Shadow mode stays on.
+    OBSERVED on the host 2026-11-18 05:00-06:52Z: every inbox.gardener_pass ended source_partial with gap
+    coverage:github. state/inbox-classification.json at 06:29Z held exactly 2 classifications with referentUnverified
+    (operator-test:console-answers-20261118-a and -b, whose originatingItemId names no board item) and 0 indeterminate
+    projection entries; attentionCensus.sources.githubProjection was partial. Two test items out of about 2,400 stopped
+    every pass until a thread removed them by hand at 06:52Z.
+    READ at origin/main: panel-graph.ts sets githubProjection partial when any projection value is indeterminate OR any
+    classification has referentUnverified (inbox.ts resolveBoardReferent returns unreadable). inbox-gardener.ts capture
+    copies that value into coverage.github, and inboxGardenerGaps turns any non-observed coverage into a whole-pass refusal.
+  design: |
+    INVARIANT indeterminate-projection-stays-partial: an indeterminate projection value (a task merge fact GitHub did
+    not answer) still makes coverage.github partial and the whole pass refuses, as today.
+    1. In capture, collect the snapshot classifications with referentUnverified. When the census says githubProjection
+       partial, the snapshot's projectionIndeterminate is exactly false, and at least one referent is unverified, the
+       pack's coverage.github is observed. Any other value is passed through unchanged.
+    2. Each candidate whose proposal is in that set carries referentUnverified: true.
+    3. The pass loop skips a marked candidate before any proof, judge or retirement, storing decision defer_source with
+       a digest that can never equal a real semantic input, so a later verified read re-judges it.
+    4. The pass result carries unverified_referents: <count over the whole pack> when it is non-zero, so the gap is
+       still recorded in the inbox.gardener_pass row.
+  falsifier: |
+    Keep capture copying githubProjection verbatim and the loop unaware of the mark: criteria 1 and 3 fail
+    (measured: fail 2, pass 1).
+  note: |
+    Id reserved for run-unfiled-1795003957000 with ~/rmd-work/bin/reserve-id.sh.
+    reservation hand-off: run-unfiled-1795003957000 -> claude/project-thread-cb5huh-plan-gardener-unverified
