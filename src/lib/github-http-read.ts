@@ -215,14 +215,14 @@ export async function githubHttpRead(
     if (key === undefined) return answer;
     // The 304 validates the answer this request sent the ETag of; a concurrent read may since have
     // replaced or dropped the entry, and then the store is left as that read left it.
-    if (response.status === 304 && stored !== undefined) {
+    if (answer.status === 304 && stored !== undefined) {
       if (store.get(key) === stored) {
         store.delete(key);
         store.set(key, stored);
       }
       return revalidated(stored, answer.headers);
     }
-    if (response.status === 200) storeRead(key, answer);
+    if (answer.status === 200) storeRead(key, answer);
     else dropStored(key);
     return answer;
   } catch (err) {
