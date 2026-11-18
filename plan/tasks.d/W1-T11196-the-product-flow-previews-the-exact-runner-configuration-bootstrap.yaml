@@ -22,6 +22,7 @@
     - test/infra/product-runner-config-preview.test.ts
     - test/console-api/serve/product-routes.test.ts
     - test/route-wiring.test.ts
+  # proof-amendment 2026-11-18: criterion 1 named a test FILE path, which a zero-match run echoes as `ok 1 - <path>`, so it passed at base and no PR could open; it now names a W1-T11196 test title absent at base.
   # refusal-amendment (W1-T11196, run W1-T11196-1794680324570, 2026-11-16T17:56:27.443Z): the worker refused criterion 1 [proof-unexecutable-at-head] — proposed re-scope-criteria: repair the criterion's proof so it is executable at HEAD, or re-scope the criterion
   #   worker evidence: W1-T11196: a filed proof already passes at the merge base, so branch run-W1-T11196-1794680324570 cannot open a PR
   #   this task is held from dispatch until its record changes; an Architect must make the change above
@@ -83,7 +84,7 @@
     hold releases, budgets and access changes.
   acceptance:
     - claim: an absent target configuration previews exactly one add of validated source bytes with their digest and head, while present, invalid, unreadable and moved targets yield no proposal and nothing is written
-      proof: "unit test: test/infra/product-runner-config-preview.test.ts"
+      proof: "unit test: W1-T11196 criterion 1"
     - claim: the production product route invokes the preview
       proof: "grep: previewRunnerConfigBootstrap( in src/lib/product-routes.ts"
     - claim: the served preview matches its authenticated public contract
