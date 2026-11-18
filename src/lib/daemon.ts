@@ -8687,6 +8687,8 @@ export async function runDaemon(
     const refillProposals = new Set<Task>();
     let newBuildHeld = false;
     let refillClosed: string | undefined;
+    let phaseApiWindow = apiWindowHoldState;
+    let apiWindowHeldUntilMs = 0;
     // W1-T9089 (ADR 0007 A.10): a restart decided mid-phase is no latch. A child run keeps running for the next boot to
     // adopt, a refill is taken only when it runs as a child, and an in-process lane is awaited, never asked to yield.
     let restartDecided: Extract<DaemonFreshness, { stale: true }> | undefined;
@@ -8718,7 +8720,16 @@ export async function runDaemon(
     // 2026-10-10 19:38: both freed lanes were held for good while the lane that later held the phase was 5 min old.
     // A measured bound parks such a lane instead; a dispatch tick or a sibling's finish re-decides it.
     const parkedLanes: Array<{ lane: number; finished: Task; wake: (next: Promise<Task | undefined>) => void }> = [];
-    const governorParked = new Map<number, string>();
+    const laneParkedFor = new Map<number, string>();
+    // One row per lane and reason, not per tick; the row for a closed API window names when the lane is asked again.
+    const parkLane = (lane: number, finished: Task, reason: string, phaseAgeMs: number): Promise<Task | undefined> => {
+      if (laneParkedFor.get(lane) !== reason) log("dispatch.lane_parked", { lane, finished_task: finished.id, reason, phase_age_ms: phaseAgeMs,
+        ...(reason === "blocked_transient" ? { resumes_at_ms: apiWindowHeldUntilMs, consecutive_different_tasks: phaseApiWindow.streak } : {}),
+        waiting_on: [...inFlightTasks].map((t) => t.id) });
+      sampleLaneChange();
+      laneParkedFor.set(lane, reason);
+      return new Promise<Task | undefined>((wake) => parkedLanes.push({ lane, finished, wake }));
+    };
     const wakeParkedLanes = (): void => {
       if (inFlightTasks.size > 0 && !refillClosed && phaseBoundHolds()) return;
       const waking = parkedLanes.splice(0, parkedLanes.length);
@@ -8763,9 +8774,12 @@ export async function runDaemon(
           refillClosed ??= "a lane rejected";
         }
       }
-      // W1-T4662: `handed_off` (a healthy freshness yield) deliberately does NOT match here — only
-      // a genuine, repeated `blocked_transient` API failure closes this lane's refill.
-      else if (outcome.value.verdict === "blocked_transient") refillClosed ??= "blocked_transient";
+      else {
+        // W1-T13283: one blocked task never closes refill. Only the cross-task streak does, for the guard's own hold.
+        const disposition = reasonAboutApiWindow(phaseApiWindow, finished.id, outcome.value.verdict, pollIntervalMs, maxApiWindowHoldMs);
+        phaseApiWindow = disposition.state;
+        apiWindowHeldUntilMs = disposition.holdMs > 0 ? daemonClock.now() + disposition.holdMs : 0;
+      }
       const decision = decideRefill(lane, finished);
       wakeParkedLanes();
       return decision;
@@ -8778,10 +8792,11 @@ export async function runDaemon(
         log("dispatch.lane_parked", { lane, finished_task: finished.id, reason: phaseBound, phase_age_ms: phaseAgeMs,
           refill_bound_ms: refillBoundMs, waiting_on: [...inFlightTasks].map((t) => t.id) });
         sampleLaneChange();
-        governorParked.delete(lane);
+        laneParkedFor.delete(lane);
         return new Promise<Task | undefined>((wake) => parkedLanes.push({ lane, finished, wake }));
       }
-      const governed = refillClosed || phaseBound ? undefined : checkDispatchGovernors(deps, dailyCostCeilingUsd);
+      const apiWindow = daemonClock.now() < apiWindowHeldUntilMs ? "blocked_transient" : undefined;
+      const governed = refillClosed || phaseBound || apiWindow ? undefined : checkDispatchGovernors(deps, dailyCostCeilingUsd);
       const memoryPressure = governed?.kind === "queue" && governed.result.measuredBound === 0
         ? governed.result.pressure : undefined;
       const governorReason = memoryPressure
@@ -8790,7 +8805,7 @@ export async function runDaemon(
       const stopped = deps.checkStop?.();
       const paused = deps.checkPause?.();
       // W1-T5083: the same restart decision the top of tick asks; a sibling lane in flight makes it busy.
-      const freshness = refillClosed || phaseBound ? undefined : freshnessReadsAsync ? settledFreshness : (checkFreshness?.() as DaemonFreshness | undefined);
+      const freshness = refillClosed || phaseBound || apiWindow ? undefined : freshnessReadsAsync ? settledFreshness : (checkFreshness?.() as DaemonFreshness | undefined);
       if (!freshnessReadsAsync) logNotStaleFreshness(freshness);
       const freshnessAction = freshness?.stale ? decideFreshness(freshness, inFlightTasks.size) : undefined;
       // W1-T9089: a restart decided here holds only the refills that would not run as a child.
@@ -8802,18 +8817,13 @@ export async function runDaemon(
         holdWorkerAdmission("lane-refill")?.reason ??
         (stopped ? `stop: ${stopped}` : undefined) ??
         (paused ? `pause: ${paused}` : undefined) ??
+        apiWindow ??
         governorReason ??
         (enforcedLaneTarget(inFlightTasks.size, deps.readQueueAdmission?.()?.wipLimit) <= inFlightTasks.size ? "lane target" : undefined);
       // 2026-10-12 09:00: one container-short WIP reading held lane 2 for good while two siblings ran on past the hour.
-      // A governor reading is re-taken each tick, so a lane it holds parks; one row per lane and reason, not per tick.
-      if (reason !== undefined && (reason === governorReason || reason === "lane target") && inFlightTasks.size > 0) {
-        if (governorParked.get(lane) !== reason) log("dispatch.lane_parked", { lane, finished_task: finished.id, reason,
-          phase_age_ms: phaseAgeMs, waiting_on: [...inFlightTasks].map((t) => t.id) });
-        sampleLaneChange();
-        governorParked.set(lane, reason);
-        return new Promise<Task | undefined>((wake) => parkedLanes.push({ lane, finished, wake }));
-      }
-      governorParked.delete(lane);
+      // A governor reading is re-taken each tick and an API-window hold lapses, so a lane held by either one parks.
+      if (reason !== undefined && (reason === apiWindow || reason === governorReason || reason === "lane target") && inFlightTasks.size > 0)
+        return parkLane(lane, finished, reason, phaseAgeMs);
       // W1-T5805: the refill decides on its OWN branch read, never the tick's: a branch pushed since the
       // tick began must refuse its task here. A failed read decides on the tick-start reading instead.
       const chooseRefill = (runBranchListing: string | undefined): Task | undefined | Promise<Task | undefined> => {
@@ -8823,10 +8833,11 @@ export async function runDaemon(
         let nextSnapshot: { plan: Plan; isMerged: MergedSet } | undefined;
         let refillEligible: Task[] = [];
         let refillContext: DispatchValueContext | undefined;
+        let boardUnreadable = false;
         const decide = (snapshot: { plan: Plan; isMerged: MergedSet }): void => {
-          const budget = laneDispatchBudget({
-            laneCount, wipLimit: opts.wipLimit, openPrCount: deps.openPrCount?.(), queueAdmission: deps.readQueueAdmission?.(),
-          });
+          let openPrCount: number | undefined;
+          try { openPrCount = deps.openPrCount?.(); } catch (e) { boardUnreadable = true; throw e; }
+          const budget = laneDispatchBudget({ laneCount, wipLimit: opts.wipLimit, openPrCount, queueAdmission: deps.readQueueAdmission?.() });
           const runBranchState = runBranchStateFrom(
             runBranchListing, readRunBranchEvidence(), resumableHandoffs,
             lazyClosedUnmerged(deps.readClosedRunBranchPrs),
@@ -8864,6 +8875,8 @@ export async function runDaemon(
           reason = `refill read failed: ${String((e as Error)?.message ?? e)}`;
         };
         const conclude = (): Task | undefined | Promise<Task | undefined> => {
+          if (boardUnreadable && inFlightTasks.size > 0) return parkLane(lane, finished, reason!, phaseAgeMs);
+          laneParkedFor.delete(lane);
           // W1-T6274: the reads above are awaited; a restart, stop or pause decided meanwhile still holds the lane.
           if (next) {
             const latched = refillClosed ?? (restartDecided && !runsAsChild(next) ? "stale code" : undefined) ??
@@ -8911,7 +8924,7 @@ export async function runDaemon(
             }
             decide({ plan: refillPlan, isMerged: deps.refreshMerged(refillPlan) });
           } catch (e) {
-            // the failure is carried as the held reason, logged by `dispatch.lane_refill_held`
+            // The failure is carried as the reason: an unreadable board parks the lane (W1-T13283), any other read holds it.
             readFailed(e);
           }
           return conclude();
