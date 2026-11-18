@@ -18,7 +18,6 @@
  * keyed by identity, origin and path, so an answer is served only to the request that stored it.
  */
 import { STATUS_CODES } from "node:http";
-import { setTimeout as delay } from "node:timers/promises";
 
 import { loopAvailableDeadline, systemClock } from "./clock.js";
 import { LIVE_WRITE_SENTINEL_TOKEN, LiveWriteBlockedError } from "./live-write-guard.js";
@@ -54,16 +53,6 @@ export const GITHUB_HTTP_READ_STORE_MAX_BYTES = 32 * 1024 * 1024;
 
 /** BACKSTOP: an answer larger than this is never stored, so one page cannot take most of the store. */
 export const GITHUB_HTTP_READ_ENTRY_MAX_BYTES = 2 * 1024 * 1024;
-
-/** BOUNDED: transient GitHub server errors can interrupt a single page in a board walk. Retrying
- *  that GET page avoids discarding the whole snapshot, while a sustained outage still reaches the
- *  caller as the same visible 5xx failure. */
-export const GITHUB_HTTP_READ_SERVER_RETRY_ATTEMPTS = 3;
-export const GITHUB_HTTP_READ_SERVER_RETRY_DELAY_MS = 250;
-
-function isTransientGithubServerError(status: number): boolean {
-  return status === 502 || status === 503 || status === 504;
-}
 
 /** One stored answer: the validator GitHub sent and the response it validates. */
 interface StoredRead {
@@ -196,33 +185,27 @@ export async function githubHttpRead(
   const stored = key === undefined ? undefined : store.get(key);
   const cancel = loopAvailableDeadline(systemClock, timeoutMs, () => { timedOut = true; controller.abort(); });
   try {
-    let answer: GithubHttpReadResponse | undefined;
-    for (let attempt = 0; attempt < GITHUB_HTTP_READ_SERVER_RETRY_ATTEMPTS; attempt += 1) {
-      const response = await fetch(`${origin}/${read.path}`, {
-        method: "GET",
-        headers: {
-          Accept: "application/vnd.github+json", "User-Agent": "remudero", Authorization: `token ${token}`,
-          ...(stored === undefined ? {} : { "If-None-Match": stored.etag }),
-        },
-        signal: controller.signal,
-      });
-      const body = await response.text();
-      answer = { status: response.status, statusText: response.statusText, headers: [...response.headers.entries()], body };
-      if (!isTransientGithubServerError(response.status) || attempt + 1 >= GITHUB_HTTP_READ_SERVER_RETRY_ATTEMPTS) break;
-      await delay(GITHUB_HTTP_READ_SERVER_RETRY_DELAY_MS * (attempt + 1));
-    }
-    if (answer === undefined) throw new Error("GitHub read produced no response");
+    const response = await fetch(`${origin}/${read.path}`, {
+      method: "GET",
+      headers: {
+        Accept: "application/vnd.github+json", "User-Agent": "remudero", Authorization: `token ${token}`,
+        ...(stored === undefined ? {} : { "If-None-Match": stored.etag }),
+      },
+      signal: controller.signal,
+    });
+    const body = await response.text();
+    const answer = { status: response.status, statusText: response.statusText, headers: [...response.headers.entries()], body };
     if (key === undefined) return answer;
     // The 304 validates the answer this request sent the ETag of; a concurrent read may since have
     // replaced or dropped the entry, and then the store is left as that read left it.
-    if (answer.status === 304 && stored !== undefined) {
+    if (response.status === 304 && stored !== undefined) {
       if (store.get(key) === stored) {
         store.delete(key);
         store.set(key, stored);
       }
       return revalidated(stored, answer.headers);
     }
-    if (answer.status === 200) storeRead(key, answer);
+    if (response.status === 200) storeRead(key, answer);
     else dropStored(key);
     return answer;
   } catch (err) {
