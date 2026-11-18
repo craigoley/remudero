@@ -17528,9 +17528,11 @@ export async function observeCodeqlConfigurationWarning(deps: SweepDeps, lines: 
   const row = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha };
   const atHead = (step: string) => lines.filter((line) => line.step === step && line.pr_number === pr.prNumber && line.head_sha === pr.headSha);
   const captures = atHead(CODE_SCANNING_CONFIGURATION_WARNING_STEP);
-  const capturedEarlier = captures.length > 0; // W1-T13663: a capture an earlier pass wrote, not this one
   const notes: string[] = [];
   const warning = observed.observation?.configurationWarning;
+  // W1-T13663: only this exact check's capture proves it was seen on an earlier pass. A
+  // newer warning check on the same head must get its own capture-only pass.
+  const capturedEarlier = warning !== undefined && captures.some((line) => line.check_id === warning.checkId);
   if (warning !== undefined && !captures.some((line) => line.check_id === warning.checkId)) {
     const capture = { ...row, step: CODE_SCANNING_CONFIGURATION_WARNING_STEP, check_id: warning.checkId,
       decision: `${observed.decision.state}: ${observed.decision.reason}`, receipt: warning };
