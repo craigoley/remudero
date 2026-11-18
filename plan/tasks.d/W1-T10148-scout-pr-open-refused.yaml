@@ -6,6 +6,9 @@
   verify: auto
   risk: low
   priority: 3.55
+  # refusal-amendment (W1-T10148, run work-fix-dispatch-W1-T10148-1794976439303-80a4@74ccce1028ba88a7ffe07b276b66f5b0b341d600, 2026-11-18T06:50:02.137Z): the worker refused criterion 1 [premise-rotted] — proposed close-unbuilt: the premise no longer holds at HEAD — close this task unbuilt, or restate the premise it should build on
+  #   worker evidence: `pr.open_refused` is the designed record of a legitimate refusal, so there is no defect to fix. The criterion should be reclassified as by-design, or the cause of specific refusals fixed in a separate task.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   author_class: machine
