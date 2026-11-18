@@ -30733,7 +30733,8 @@ export async function serveCommand(
   // `boardGithubRefreshMs` below so the cache's own staleness bound and the background prewarm
   // cadence never drift apart.
   const boardPacer = deps.boardPacer ?? createGhCallPacer();
-  const serveBoardSnapshot = createBoardSnapshotCache(config.root, self.owner, self.repo, { log });
+  // W1-T13332: serve's board pass runs on its request loop, so the snapshot file is written behind the commit.
+  const serveBoardSnapshot = createBoardSnapshotCache(config.root, self.owner, self.repo, { log, writeBehind: true });
   const boardGithub = (deps.buildBatchedGithub ?? buildBatchedGithub)(self.owner, self.repo, {
     log,
     pacer: boardPacer,
