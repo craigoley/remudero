@@ -5,7 +5,8 @@ import { syncBuiltinESMExports } from "node:module";
 import { test } from "node:test";
 import { ghShim, type GhShimRoute } from "#test/helpers/gh-shim.js";
 import {
-  OpsCatalogAuthMissingError, readOpsCatalogSnapshotAsync, type OpsCatalogApi, type OpsCatalogSnapshot,
+  OpsCatalogAuthMissingError, createOpsCatalogShadowSource, readOpsCatalogSnapshotAsync,
+  type OpsCatalogApi, type OpsCatalogSnapshot,
 } from "#src/lib/ops-catalog-source.js";
 
 const REPO = "acme-private/ops-catalog";
@@ -238,10 +239,17 @@ test("W1-T13673 criterion 5: every refusal and stage equals a cold read's, and a
       arrange: (r) => r.move(withShard(base(), "d.yaml", taskYaml("OPS-T2", "a second OPS-T2"))) },
     { label: "ref_moved", outcome: "ref_moved", stage: "final_ref",
       arrange: (r) => {
-        const changed = taskYaml("OPS-T2", "ref moves under me");
-        const later = r.commitOf(withShard(base(), "b.yaml", taskYaml("OPS-T3", "later")));
-        r.move(withShard(base(), "a.yaml", changed));
-        r.onBlob((s) => { if (s === blobSha(changed)) r.setHead(later); });
+        const monolith = taskYaml("OPS-T1", "new monolith");
+        const later = r.commitOf(base());
+        const first = r.move({
+          monolith,
+          shards: { "a.yaml": taskYaml("OPS-T2", "new shard") },
+        });
+        r.onBlob((s) => { if (s === blobSha(monolith)) r.setHead(later); });
+        r.failWhen((p) => {
+          if (p.endsWith(`/git/commits/${later}`)) r.setHead(first);
+          return undefined;
+        });
       } },
   ];
   for (const s of scenarios) {
@@ -261,11 +269,16 @@ test("W1-T13673 criterion 5: every refusal and stage equals a cold read's, and a
   await readOpsCatalogSnapshotAsync(r.target, r.api);
   const changedA = taskYaml("OPS-T2", "verified during a moved read");
   const changedB = taskYaml("OPS-T3", "the commit the ref moved to");
-  const later = r.commitOf({ ...withShard(base(), "a.yaml", changedA), shards: { ...withShard(base(), "a.yaml", changedA).shards, "b.yaml": changedB } });
+  const later = r.commitOf(withShard(withShard(base(), "a.yaml", changedA), "b.yaml", changedB));
   r.move(withShard(base(), "a.yaml", changedA));
   r.onBlob((s) => { if (s === blobSha(changedA)) r.setHead(later); });
-  assert.equal((await readOpsCatalogSnapshotAsync(r.target, r.api)).outcome, "ref_moved");
+  r.failWhen((p) => p.endsWith(`/git/commits/${later}`) ? new Error("HTTP 502") : undefined);
+  const moved = await readOpsCatalogSnapshotAsync(r.target, r.api);
+  assert.equal(moved.outcome, "ref_moved");
+  assert.equal(moved.refusalStage, "final_ref");
+  assert.equal(moved.counts.passes, 2, "the reader tried to follow the moved ref");
   r.onBlob(undefined);
+  r.failWhen(undefined);
   r.reset();
   const next = await readOpsCatalogSnapshotAsync(r.target, r.api);
   assert.equal(next.outcome, "ok");
@@ -326,6 +339,10 @@ test("W1-T13673 criterion 7: two reads with no api argument share one default ap
     assert.equal(blobCalls(), 2, "the second read spawns no gh api .../git/blobs/...");
     assert.ok(shim.calls().length > before, "the ref, commit and trees are still read");
     assert.equal(second.identityDigest, first.identityDigest);
+    const shadow = await createOpsCatalogShadowSource({ repository }).refresh();
+    assert.equal(shadow.outcome, "ok");
+    assert.equal(shadow.identityDigest, first.identityDigest);
+    assert.equal(blobCalls(), 2, "the default shadow source shares the snapshot reader's kept blobs");
   } finally {
     process.env.PATH = priorPath;
     fs.rmSync(shim.dir, { recursive: true, force: true });

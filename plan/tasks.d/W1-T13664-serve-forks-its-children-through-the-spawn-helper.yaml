@@ -1,0 +1,67 @@
+- id: W1-T13664
+  title: "Serve starts the spawn helper at boot, and its self-sync git calls and ops-catalog gh reads fork through it, so a child spawn stops forking serve's whole process on its request loop"
+  repo: remudero
+  depends_on: []
+  priority: 0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # which process forks serve's git and gh children; a signalled git call keeps its direct child unless it names its bound
+  band_meaning: span
+  origin: "operator-session#serve-oom-2026-11-16"
+  plan_refs:
+    - W1-T9754
+    - W1-T10291
+    - W1-T13437
+  files:
+    - src/lib/spawn-helper.ts
+    - src/lib/daemon.ts
+    - src/run-task.ts
+    - src/lib/git-fetch-retry.ts
+    - src/lib/self-sync.ts
+    - src/lib/ops-catalog-source.ts
+    - test/serve-forks-its-children-through-the-spawn-helper.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Serve's boot starts and installs the spawn helper with one serve.spawn_helper row, and the server's close stops only that helper"
+      proof: 'grep: bootSpawnHelper(log, process\.env, "serve\.spawn_helper") in src/run-task.ts'
+    - claim: "The boot routine is shared: the switch set to off starts no helper, and a start that throws leaves the direct path with a named row"
+      proof: "grep: W1-T13664: the switch set to off starts no helper in test/serve-forks-its-children-through-the-spawn-helper.test.ts"
+    - claim: "asyncGit calls and boundGitCall fetches fork through the installed helper, and the helper stops a fetch's child at its bound"
+      proof: "grep: W1-T13664: a git read and a bounded fetch fork through the installed helper in test/serve-forks-its-children-through-the-spawn-helper.test.ts"
+    - claim: "invariant:abort-settles — a routed git call settles at its abort, and a failing child rejects with its stderr, as a direct execFile does"
+      kind: guard
+      proof: "grep: W1-T13664: a routed git call settles at its abort in test/serve-forks-its-children-through-the-spawn-helper.test.ts"
+    - claim: "invariant:signal-kills — a signalled git call that names no bound keeps its direct child, which its signal can stop"
+      kind: guard
+      proof: "grep: W1-T13664: a signalled call with no bound keeps its direct child in test/serve-forks-its-children-through-the-spawn-helper.test.ts"
+    - claim: "The ops-catalog default api forks gh through the installed helper"
+      proof: "grep: W1-T13664: the catalog's default api forks gh through the installed helper in test/serve-forks-its-children-through-the-spawn-helper.test.ts"
+  rationale: |
+    WHY: Craig wants serve under 0.3 cores even while the Console is open, and the Inbox still times out during
+    serve's main-loop stalls.
+    MEASURED on 2026-11-18 from serve's runtime.loop_stall_profile rows: child spawns are about 28% of main-thread
+    stall time. The spawn frames are called from self-sync.ts (asyncGit: freshness fetches, gateway checkout reads)
+    and ops-catalog-source.ts (the gh ref GET). Each spawn forks serve's ~1 GB process on its loop. The daemon has
+    routed its awaited children through a small spawn helper since W1-T9754; serve never installs one, so every
+    execFileRouted caller in serve also runs direct.
+    NOT W1-T10291: that task moves the read-model oracle's IPC child (forkWorkerEntry) into the helper; this one
+    installs the helper in serve and routes its plain awaited git and gh children, which need no IPC channel.
+  design: |
+    INVARIANT abort-settles: a routed git call settles at its abort signal, exactly when a direct one would.
+    INVARIANT signal-kills: a git child that only a signal can stop (a signalled call with no bound) stays direct.
+    1. spawn-helper.ts gets bootSpawnHelper(log, env, step, start?) and stopBootedSpawnHelper(helper), with
+       SPAWN_HELPER_SWITCH moved there. daemon.ts's boot calls bootSpawnHelper (rows unchanged) and re-exports the switch.
+    2. serveCommand calls bootSpawnHelper(log, process.env, "serve.spawn_helper") right after its log is defined,
+       before the board and read model grow the process, and stops it on server close.
+    3. AsyncGitRunner takes an optional boundMs. boundGitCall passes timeoutMs + lateGraceMs + GIT_FETCH_KILL_GRACE_MS.
+       asyncGit routes through execFileRouted when a helper is installed and the call has no signal or names its
+       bound; the helper's timeout stops the child.
+    4. defaultOpsCatalogApi's default executor is execFileRouted.
+  falsifier: |
+    Serve never installs the helper: criterion 1 fails. A routed call ignores its abort: criterion 4 fails. A
+    signalled call without a bound routes: criterion 5 fails. The catalog spawns direct: criterion 6 fails.
+  note: |
+    Id reserved for run-unfiled-1795001290571 with ~/rmd-work/bin/reserve-id.sh.

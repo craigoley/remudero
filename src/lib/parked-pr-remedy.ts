@@ -5,6 +5,7 @@ import { stallLadderSpent, stallRemedyRows } from "./fix-progress-judge.js";
 import { isInPlanScope } from "./plan-scope.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import type { PrBlocker } from "./pr-blocker.js";
+import type { TaskFileInput } from "./feedback-landing.js";
 
 /**
  * W1-T12709: an open pull request is never left with "a person must answer" as its only next action. Where the
@@ -111,7 +112,7 @@ export interface ParkedPrHost {
   /** R3: an id from reservePlanRepairTaskId, for the landing branch of `target`. */
   reserveTaskId(target: ParkedPrTarget): string;
   /** R3: lands new and amended task files through landTaskFilesAsync, in `target`. */
-  landTaskFiles(files: readonly { relPath: string; content: string; claim: string; proof: string }[], target: ParkedPrTarget):
+  landTaskFiles(files: readonly TaskFileInput[], target: ParkedPrTarget):
     Promise<{ prUrl?: string; error?: string }>;
   closePr(prUrl: string, comment: string): Promise<void>;
   /** W1-T13047: the paths the pull request adds or changes, for a plan filing rebuilt from the pull request itself. */
@@ -277,7 +278,7 @@ function slug(text: string): string {
 
 /** The held task, and for a split the amended task file that no longer carries the moved criteria. */
 function heldTaskFiles(shard: { relPath: string; text: string }, taskId: string, heldTaskId: string, decision: ParkedPrDecision,
-  pr: ParkedPrSubject, ctx: ParkedPrContext): { relPath: string; content: string; claim: string; proof: string }[] {
+  pr: ParkedPrSubject, ctx: ParkedPrContext): TaskFileInput[] {
   const doc = parseDocument(shard.text);
   const seq = doc.contents;
   const index = isSeq(seq) ? seq.items.findIndex(node => isMap(node) && (node.toJSON() as { id?: unknown }).id === taskId) : -1;
@@ -302,8 +303,8 @@ function heldTaskFiles(shard: { relPath: string; text: string }, taskId: string,
       `${typeof task.rationale === "string" ? task.rationale : ""}` };
   const dir = shard.relPath.includes("/tasks.d/") ? posix.dirname(shard.relPath) : posix.join(posix.dirname(shard.relPath), "tasks.d");
   const heldRel = `${dir}/${heldTaskId}-${slug(String(task.title))}.yaml`;
-  const files = [{ relPath: heldRel, content: stringify([held], { lineWidth: 0 }),
-    claim: `the held ${split ? "follow-up" : "rebuild"} task ${heldTaskId} for ${pr.prUrl} is filed`, proof: `grep: id: ${heldTaskId} in ${heldRel}` }];
+  const files: TaskFileInput[] = [{ relPath: heldRel, content: stringify([held], { lineWidth: 0 }),
+    claim: `the held ${split ? "follow-up" : "rebuild"} task ${heldTaskId} for ${pr.prUrl} is filed`, proof: `grep: id: ${heldTaskId} in ${heldRel}`, newFile: true }];
   if (split) {
     const node = item.get("acceptance", true);
     if (isSeq(node)) node.items = node.items.filter(c => !(isMap(c) && claims.has(String((c.toJSON() as { claim?: unknown }).claim))));
@@ -320,7 +321,7 @@ function heldTaskFiles(shard: { relPath: string; text: string }, taskId: string,
  * request adds or changes, and its rationale carries the red gates, the refusal and the plan files' paths.
  */
 function heldPlanRebuildFiles(heldTaskId: string, decision: ParkedPrDecision, pr: ParkedPrSubject, ctx: ParkedPrContext):
-  { relPath: string; content: string; claim: string; proof: string }[] {
+  TaskFileInput[] {
   const files = [...new Set(pr.planFiles ?? [])].sort();
   const repo = /github\.com\/[^/]+\/([^/]+)\/pull\//.exec(pr.prUrl)?.[1] ?? "remudero";
   const title = `Rebuild the plan filing of pull request ${pr.prNumber}`;
@@ -337,7 +338,7 @@ function heldPlanRebuildFiles(heldTaskId: string, decision: ParkedPrDecision, pr
       `RED GATES AND REFUSAL: ${ctx.text}\nPLAN FILES of the pull request:\n${files.map(f => `- ${f}`).join("\n")}\n` };
   const heldRel = posix.join(resolveRepoLayout("", () => undefined).planDir, "tasks.d", `${heldTaskId}-${slug(title)}.yaml`);
   return [{ relPath: heldRel, content: stringify([held], { lineWidth: 0 }),
-    claim: `the held rebuild task ${heldTaskId} for ${pr.prUrl} is filed`, proof: `grep: id: ${heldTaskId} in ${heldRel}` }];
+    claim: `the held rebuild task ${heldTaskId} for ${pr.prUrl} is filed`, proof: `grep: id: ${heldTaskId} in ${heldRel}`, newFile: true }];
 }
 
 /** The number of criteria the task file declares for `taskId`, or undefined when it cannot be read. */

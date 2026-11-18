@@ -139,8 +139,9 @@ export function socketStatesForPort(port: number, read: (path: string) => string
 
 /**
  * W1-T13303: the shortest gap between two ordinary handoffs. MEASURED 2026-11-16/17: at 15 minutes, serve handed off 12
- * times in 10 hours (main moved 28 times in 3), and each cold boot stalled the Console for minutes. A restart is not
- * spaced: a supervisor with no handoff yet hands off at once.
+ * times in 10 hours (main moved 28 times in 3), and each cold boot stalled the Console for minutes. W1-T13676: with
+ * {@link ServeSupervisorOptions.spaceFromBoot} (serve's production supervisor) a fresh boot counts as the last restart, so its
+ * first handoff waits out the base window too; without it a supervisor with no handoff yet hands off at once.
  */
 export const SERVE_HANDOFF_SPACING_BASE_MS = 2 * 60 * 60_000;
 /**
@@ -312,6 +313,11 @@ export interface ServeSupervisorOptions {
   /** {@link handoffSpacingMs}'s base; absent or 0, a handoff never waits on the previous one. */
   spacingBaseMs?: number;
   spacingHalfLifeMs?: number;
+  /**
+   * W1-T13676: count the cold boot as the last restart, so the first handoff waits out the base spacing from it. OBSERVED
+   * 2026-11-18: a container booted at 06:01:29Z handed off again at 06:21:51Z. A boot adds no handoff pressure.
+   */
+  spaceFromBoot?: boolean;
   /**
    * W1-T13276: one probe of the active generation; resolves with any HTTP status, rejects on a refusal. W1-T13503: defaults
    * to {@link tcpGet} of {@link ACTIVE_PROBE_PUBLIC_PATH} on the serve port, the path the tunnel's connections take.
@@ -1362,6 +1368,7 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
         return;
       }
       opts.log("serve.supervisor_ready", { sha: opts.coldSlot.sha, readyMs: up.readyMs });
+      if (opts.spaceFromBoot === true && spacingBaseMs > 0) lastDoneAt = clock.now();
       budget.start(() => [process.pid, ...(active?.process.pid === undefined ? [] : [active.process.pid])]);
       await reportAlone(up.generation, up.startedAt, up.readyMs);
     },

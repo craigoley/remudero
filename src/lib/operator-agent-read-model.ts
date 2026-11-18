@@ -15,7 +15,7 @@
  * bound, or with no body at all, the route answers 503 with a reason and its sources, never an empty list.
  */
 import type { Clock } from "./clock.js";
-import { systemClock } from "./clock.js";
+import { fixedClock, systemClock } from "./clock.js";
 import type { ReadModelDb } from "./read-model-db.js";
 import type { ViewBodyEntry, ViewBodySource, ViewSource } from "./views.js";
 
@@ -33,6 +33,7 @@ export interface OperatorAgentRowsData {
   newestTs: string | null;
 }
 
+/** `published` is how many entries the last posted body held; entries only append, and a reset starts a new fold. */
 type Fold = { seq: number; entries: Array<{ tsMs: number; seq: number; ts: string; row: Record<string, unknown> }>; published: number };
 
 function foldOf(folds: WeakMap<ReadModelDb, Fold>, db: ReadModelDb): { fold: Fold; max: number } {
@@ -60,6 +61,7 @@ export function createOperatorAgentRowsView<S extends { instance: string; ticked
   version: number;
   prepare(ctx: { instances: ReadonlyArray<{ state: S; db?: ReadModelDb }> }, more: () => boolean): boolean;
   materialize(ctx: { now: number; instances: ReadonlyArray<{ state: S; db?: ReadModelDb }> }): Array<{ key: string; data: OperatorAgentRowsData; sources: ViewSource[] }>;
+  ledgerReads(db: ReadModelDb): string | null;
 } {
   const folds = new WeakMap<ReadModelDb, Fold>();
   return {
@@ -80,10 +82,20 @@ export function createOperatorAgentRowsView<S extends { instance: string; ticked
       if (home?.db === undefined || home.state.tickedAt === undefined) return [];
       const { fold, max } = foldOf(folds, home.db);
       if (max > fold.seq) foldThrough(fold, home.db, max);
-      if (fold.published === fold.seq) return [];
-      fold.published = fold.seq;
+      // W1-T13666: the body moves only when a `panel.*` fact is folded, not when any other fact advances `seq`.
+      if (fold.published === fold.entries.length) return [];
+      fold.published = fold.entries.length;
       const data = { rows: fold.entries.map((entry) => entry.row), newestTs: fold.entries.at(-1)?.ts ?? null };
       return [{ key: "", data, sources: [ledgerSource(home.state, now)] }];
+    },
+    /**
+     * W1-T13666: the newest `panel.*` fact the store holds. The worker stamps the body's ledger source with it, and
+     * serve judges that source against it, so a body is behind only when a panel fact it lacks exists, never because
+     * an unrelated fact moved the projector head. Without it this view republished on every projected fact.
+     */
+    ledgerReads: (db) => {
+      const row = db.prepare("SELECT max(ts_ms) AS m FROM fact WHERE step >= 'panel.' AND step < 'panel/'").get();
+      return row?.m == null ? null : fixedClock(Number(row.m)).iso();
     },
   };
 }
