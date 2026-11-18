@@ -3,7 +3,8 @@
 // Sampled on the Azure host on 2026-11-18: about 830 paged gh calls an hour, about 450 of them
 // repeats of a read made minutes before. Each test points the client at a local server of its own.
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
 import { createServer, type IncomingHttpHeaders } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -270,7 +271,7 @@ test("W1-T12892 criterion 6: the core daemon.quota row carries this process's co
 
   const planDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t12892-plan-`));
   t.after(() => rmSync(planDir, { recursive: true, force: true }));
-  writeFileSync(join(planDir, "tasks.yaml"), "- id: M\n  title: merged\n  repo: remudero\n  type: implement\n  depends_on: []\n  status: queued\n");
+  await writeFile(join(planDir, "tasks.yaml"), "- id: M\n  title: merged\n  repo: remudero\n  type: implement\n  depends_on: []\n  status: queued\n");
   const rows: Array<{ step: string; extra: Record<string, unknown> }> = [];
   const poll = () => runDaemon(loadPlan(join(planDir, "tasks.yaml")), {
     refreshMerged: () => (id) => id === "M",
