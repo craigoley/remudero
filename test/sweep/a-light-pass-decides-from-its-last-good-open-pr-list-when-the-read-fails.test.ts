@@ -25,6 +25,7 @@ import {
   LIGHT_PASS_VIEWS_FALLBACK_MAX_AGE_MS,
 } from "#src/lib/light-pass-open-pr-list.js";
 import { LIVE_WRITE_OVERRIDE_ENV } from "#src/lib/live-write-guard.js";
+import type { LightPassScope } from "#src/lib/daemon.js";
 import type { Plan } from "#src/lib/plan.js";
 import { reviewInputDigest } from "#src/lib/review.js";
 import type { BuildSweepEffectsDeps, LiveStateResult, OpenPrView, SweepDeps } from "#src/lib/sweep.js";
@@ -33,6 +34,7 @@ import { ghShim, type GhShim } from "#test/helpers/gh-shim.js";
 import { buildSweepLightHook } from "#test/helpers/run-task-test.js";
 
 const NO_PLAN: Plan = { tasks: [], byId: new Map() };
+const IDLE: LightPassScope = { reviewOnly: false, scope: "idle" };
 const RATE_LIMITED = "gh: API rate limit exceeded for installation ID 1 (HTTP 403)";
 const rateLimitError = () => Object.assign(
   new Error("gh api repos/o/r/pulls?state=open&per_page=100 -i: HTTP 403 API rate limit exceeded"), { stderr: RATE_LIMITED });
@@ -113,7 +115,7 @@ function fixture() {
   const ports = {
     effects: (deps: (typeof effectsDeps)[number]) => { effectsDeps.push(deps); return effects; },
     readCompare: async () => ({ ahead_by: 0, files: [] }),
-    openPrViews: () => serve?.(),
+    openPrViews: (scope?: LightPassScope) => scope === undefined ? undefined : serve?.(),
     clock: { now: () => nowMs },
     pacer,
   };
@@ -127,7 +129,9 @@ function fixture() {
     advance: (ms: number) => { nowMs += ms; },
     cleanup: async () => {
       // A posted review frees a lane, and the refill reads the open pull requests after the hook returns.
-      for (let quiet = 0, rounds = 0; quiet < 5 && rounds < 200; rounds++) {
+      // A no-scope refill now owns its view read. Let the production pacer's 1.5 s slot and
+      // the resulting shim process finish before removing the PATH shim.
+      for (let quiet = 0, rounds = 0; quiet < 40 && rounds < 600; rounds++) {
         const before = shims.flatMap((gh) => gh.events());
         await sleep(50);
         const after = shims.flatMap((gh) => gh.events());
@@ -145,7 +149,7 @@ function fixture() {
 /** Pass 1 reads the list but admits no review, so the eligible PR is still due on pass 2. */
 async function firstPassWithoutReview(f: ReturnType<typeof fixture>): Promise<void> {
   f.effects.continueReviewAdmissions = () => false;
-  await f.hook()();
+  await f.hook()(IDLE);
   delete f.effects.continueReviewAdmissions;
   assert.equal(f.posted.length, 0, "control: pass 1 admitted no review");
   assert.equal(f.steps("sweep_light.views_fallback").length, 0, "control: pass 1 read a fresh list");
@@ -157,12 +161,12 @@ test("W1-T12755 criterion 1: a rate-limited read after a good one still admits t
     const hook = f.hook();
     f.serveViews([view(1275501, "head-a")]);
     f.effects.continueReviewAdmissions = () => false;
-    await hook();
+    await hook(IDLE);
     delete f.effects.continueReviewAdmissions;
     assert.equal(f.posted.length, 0, "control: pass 1 admitted no review");
     f.serveError(rateLimitError());
     f.advance(30_000);
-    await hook();
+    await hook(IDLE);
     assert.deepEqual(f.posted, [{ prNumber: 1275501, headSha: "head-a" }], JSON.stringify(f.logs));
     // The refill read after the posted review frees a lane falls back too.
     const fallback = f.steps("sweep_light.views_fallback");
@@ -185,7 +189,7 @@ test("W1-T12755 criterion 2: a slow read goes on from the last good list, keeps 
   let reads = 0;
   let settle!: (views: string[]) => void;
   const slowRead = () => { reads++; return new Promise<string[]>((resolve) => { settle = resolve; }); };
-  assert.deepEqual(await list.read(undefined, async () => { reads++; return ["A"]; }), { fallback: false, source: "own_read", views: ["A"] });
+  assert.deepEqual(await list.read(undefined, async () => { reads++; return ["A"]; }), { fallback: false, source: "own_read", views: ["A"], readStartedAtMs: 0 });
   nowMs = 1_000;
   const second = await list.read(undefined, slowRead);
   assert.equal(second.fallback, true);
@@ -234,7 +238,7 @@ test("W1-T12755 criterion 3: on a last good list a moved or unreadable head stan
     const hook = f.hook();
     f.serveViews([moved, unreadable, ready]);
     f.effects.continueReviewAdmissions = () => false;
-    await hook();
+    await hook(IDLE);
     delete f.effects.continueReviewAdmissions;
     assert.deepEqual(armImpls, [undefined], "control: a pass on a fresh list arms as today");
     // A new pass's ledger: the fresh pass's rows would dedup the arm.
@@ -242,7 +246,7 @@ test("W1-T12755 criterion 3: on a last good list a moved or unreadable head stan
     f.live.set(moved.prNumber, { ok: true, state: "OPEN", headSha: "head-moved-new" });
     f.live.set(unreadable.prNumber, { ok: false });
     f.serveError(rateLimitError());
-    await hook();
+    await hook(IDLE);
     assert.equal(f.steps("sweep_light.views_fallback")[0]?.reason, "rate_limited");
     assert.equal(f.posted.some((post) => post.prNumber === moved.prNumber), false, "no review for a moved head");
     assert.ok(f.rows.some((row) => row.step === "sweep.head_moved" && row.pr_number === moved.prNumber &&
@@ -263,12 +267,12 @@ test("W1-T12755 criterion 4: a last good list older than the age limit is not us
     const hook = f.hook();
     f.serveViews([view(1275541, "head-a")]);
     f.effects.continueReviewAdmissions = () => false;
-    await hook();
+    await hook(IDLE);
     delete f.effects.continueReviewAdmissions;
     f.serveError(rateLimitError());
     f.advance(LIGHT_PASS_VIEWS_FALLBACK_MAX_AGE_MS + 1);
     const before = f.rows.length;
-    await hook();
+    await hook(IDLE);
     assert.equal(f.posted.length, 0, "no review decision");
     const fallback = f.steps("sweep_light.views_fallback");
     assert.equal(fallback.length, 1);
@@ -284,17 +288,17 @@ test("W1-T12755 criterion 5: with no good list a failed read stands down, and ev
   try {
     const hook = f.hook();
     f.serveError(rateLimitError());
-    await hook();
+    await hook(IDLE);
     assert.equal(f.posted.length, 0);
     assert.equal(f.steps("sweep_light.views_fallback")[0]?.reason, "no_snapshot");
     assert.equal(f.steps("sweep_light.views_fallback")[0]?.snapshot_age_ms, null);
     assert.equal(f.steps("sweep_light.error").length, 1, "the pass stands down as today");
     f.serveViews([view(1275551, "head-a")]);
     f.effects.continueReviewAdmissions = () => false;
-    await hook();
+    await hook(IDLE);
     delete f.effects.continueReviewAdmissions;
     f.serveError(rateLimitError());
-    await hook();
+    await hook(IDLE);
     assert.deepEqual(f.steps("sweep_light.pre_review_timing").map((row) => row.views_source), ["tick_read", "tick_read", "fallback"]);
     assert.deepEqual(f.posted, [{ prNumber: 1275551, headSha: "head-a" }]);
   } finally { await f.cleanup(); }
@@ -307,12 +311,12 @@ test("W1-T12755 criterion 6: through the real list read, a 403 rate limit on the
     f.ownRead();
     const hook = f.hook();
     f.effects.continueReviewAdmissions = () => false;
-    await hook();
+    await hook(IDLE);
     delete f.effects.continueReviewAdmissions;
     assert.equal(f.posted.length, 0, "control: pass 1 admitted no review");
     assert.ok(gh.calls().some((call) => call.includes(`repos/o/${f.repo}/pulls?state=open`)), "pass 1 read the list itself");
     gh.addRoute({ when: "state=open", stderr: RATE_LIMITED, exit: 1 });
-    await hook();
+    await hook(IDLE);
     assert.equal(f.steps("sweep_light.error").length, 0, JSON.stringify(f.logs));
     assert.equal(f.steps("sweep_light.views_fallback")[0]?.reason, "rate_limited", JSON.stringify(f.logs));
     assert.ok(f.backoffSleeps.length > 0 && f.backoffSleeps.every((ms) => ms >= DEFAULT_GH_REFUSAL_BACKOFF_FLOOR_MS),
