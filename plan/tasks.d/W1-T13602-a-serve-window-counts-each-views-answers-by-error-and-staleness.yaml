@@ -17,7 +17,7 @@
     - src/lib/serve-demand.ts
     - src/lib/serve.ts
     - test/console-api/serve/a-serve-window-counts-each-views-answers-by-error-and-staleness.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A window with view reads answering 200 fresh, 200 stale, 404 view_not_ready and 404 view_disabled writes one serve.demand row whose views section counts each view by answer code and stale"

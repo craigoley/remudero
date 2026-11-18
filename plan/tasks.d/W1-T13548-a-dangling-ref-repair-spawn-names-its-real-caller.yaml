@@ -17,7 +17,7 @@
     - src/lib/read-plane.ts
     - src/lib/worktree-git.ts
     - test/console-api/read-model/a-dangling-ref-repair-spawn-names-its-real-caller.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:bundled-repair-names-its-caller — in a single-file esbuild bundle (keepNames, like the daemon's run-task.mjs), `function actualCaller()` calls hostWorktreeGit(clone, [\"fetch\", \"origin\", \"main\"]) on a clone whose refs/remotes/origin/<branch> names an object the clone lacks (W1-T13409's fixture: a commit pushed from a private object directory that is then deleted), and the repair succeeds. sync_spawn_by_caller has exactly one row; its caller is actualCaller in run-task.mjs and its leaf is hostWorktreeGit. No row of sync_spawn_by_caller or sync_spawn_top has a caller of `<anonymous>`, retryAfterDanglingRefRepair, gitSync or runHostWorktreeGit"

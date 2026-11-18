@@ -28,7 +28,7 @@
     - src/run-task.ts
     - docs/model-routing.md
     - test/routing/a-new-model-joins-the-judge-shadow-pool-by-itself.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A role's mount row may say `shadow: auto`. Its pool is every decision_models candidate and every ready cash deployment that is not a Foundry Claude deployment and that has a judge_replay.finished row for that role. A role that names one candidate keeps W1-T12417's behaviour"

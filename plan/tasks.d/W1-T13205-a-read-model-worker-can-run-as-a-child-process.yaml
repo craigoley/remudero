@@ -18,7 +18,7 @@
     - test/a-read-model-worker-can-run-as-a-child-process.test.ts
     - "src/lib/config-schema.ts"
     - "src/lib/serve.ts"
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With RMD_READ_MODEL_PROCESS=on, the read-model handle starts its worker with forkWorkerEntry (serialization advanced), receives the same ReadModelWorkerMessage stream (state, bodies, body, log), and handle.body(view, key) serves a body the child built; with the switch unset the worker is a thread exactly as before"

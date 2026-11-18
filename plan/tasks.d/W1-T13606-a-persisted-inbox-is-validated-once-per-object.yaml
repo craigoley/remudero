@@ -14,7 +14,7 @@
   files:
     - src/lib/fleet-lane.ts
     - test/a-persisted-inbox-is-validated-once-per-object.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A second validInboxSnapshot call on the same object reads none of its properties (a counting proxy sees no new reads)"

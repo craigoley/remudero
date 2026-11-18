@@ -1,0 +1,55 @@
+- id: W1-T13623
+  title: "An automatic serve replace for image drift alone waits out the 2 h restart spacing from serve's last restart in the ledger, then takes the newest image"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # one src file: the deployer's serve-replace decision for image-only drift; resource and mount drift, STOP/PAUSE, back-off and handoff holds are unchanged
+  band_meaning: span
+  origin: "operator-session#serve-recycle-2026-11-18"
+  plan_refs:
+    - W1-T13303
+    - W1-T13278
+  files:
+    - src/lib/serve-policy-convergence.ts
+    - test/console-api/serve/a-serve-image-replace-waits-out-the-restart-spacing.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "Replaying 2026-11-18 (serve cold-started 06:01:29Z, a new image every 5-minute deploy tick to 12:10Z), the 06:05:25Z tick is held with the minutes left, and serve restarts only at 08:05, 10:05 and 12:05Z, each on the newest image"
+      proof: "grep: W1-T13623 criterion 1 in test/console-api/serve/a-serve-image-replace-waits-out-the-restart-spacing.test.ts"
+    - claim: "Resource drift beside a restart minutes ago still replaces at once"
+      proof: "grep: W1-T13623 criterion 2 in test/console-api/serve/a-serve-image-replace-waits-out-the-restart-spacing.test.ts"
+    - claim: "invariant:unknown-holds — an unreadable last restart holds an image-only replace, and a complete ledger with no restart row replaces"
+      kind: guard
+      proof: "grep: W1-T13623 criterion 3 in test/console-api/serve/a-serve-image-replace-waits-out-the-restart-spacing.test.ts"
+    - claim: "Every restart kind (supervisor_ready, cold_start_ready, handoff_done, recycle_swapped) counts, and the spacing equals the supervisor's SERVE_HANDOFF_SPACING_BASE_MS"
+      proof: "grep: W1-T13623 criterion 4 in test/console-api/serve/a-serve-image-replace-waits-out-the-restart-spacing.test.ts"
+  rationale: |
+    WHY: serve restarts cost a cold fold of the ledger (about 1 core for minutes) and a generation swap clients see.
+    OBSERVED, host ledger union 2026-11-18: serve restarted at 06:00:41Z (an operator's manual serve-container.sh
+    --replace), 06:05:25Z (deploy.serve_policy_replace, image drift expected e39bcd2b3 actual 04f6dd823, following the
+    image built at 06:03:21Z) and 06:21:51Z (in-process serve.handoff_done, checkout_behind). The supervisor already
+    spaces its own handoffs (serve-supervisor.ts SERVE_HANDOFF_SPACING_BASE_MS, 2 h), but the deployer's image-drift
+    replace in serve-policy-convergence.ts decideServePolicyConvergence had no spacing at all, so every main merge that
+    rebuilt the image could swap serve again.
+    An image is the one drift a later image also fixes, so holding it loses nothing: the held replace takes the newest
+    image when it runs. Resource and mount drift keep replacing at once.
+    NOT IN SCOPE: the supervisor's own first handoff after a fresh container (lastDoneAt is undefined at boot, by
+    W1-T13303 criterion 2); changing that reverses a recorded decision and is proposed separately.
+  design: |
+    INVARIANT unknown-holds: an image-only replace never runs on an unknown last restart.
+    1. SERVE_IMAGE_REPLACE_SPACING_MS = 2 h; SERVE_RESTART_STEPS lists the four restart rows.
+    2. serveLastRestartMsFromLedger(stateDir) reads those steps with readLedgerUnionRawLinesSync (rotation window = the
+       spacing, refuseIncomplete): newest ts, null for none, undefined for an incomplete read or a throw.
+    3. ServePolicyInputs gains lastRestartAtMs; decideServePolicyConvergence holds image drift ALONE until the spacing
+       has passed, with the minutes left in the reason; runServePolicyCycle passes it from a deps seam that
+       realServePolicyDeps wires to the ledger beside the instance's state.
+  falsifier: |
+    Unwire the seam or skip the hold: criterion 1 fails. Apply the hold to any drift: criterion 2 fails. Treat
+    unknown as no restart: criterion 3 fails. Drop a restart kind: criteria 1 and 4 fail.
+  note: |
+    Id reserved for run-unfiled-1794983700000 with ~/rmd-work/bin/reserve-id.sh.

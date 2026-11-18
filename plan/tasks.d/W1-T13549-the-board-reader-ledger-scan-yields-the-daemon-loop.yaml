@@ -16,7 +16,7 @@
   files:
     - src/lib/reader-agreement.ts
     - test/review/the-board-reader-ledger-scan-yields-the-daemon-loop.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:board-read-yields — with the default board corpus reader, a timer set just before checkReaderAgreement starts fires while a board corpus read is still pending, and checkReaderAgreement has not returned and has written no reader.disagreement or reader-agreement stats row before that read completes"

@@ -21,7 +21,7 @@
     - src/lib/ci-friction-gardener.ts
     - src/lib/flow-remedy-gardener.ts
     - test/dispatch/a-queued-machine-task-is-retired-when-its-symptom-has-stopped.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The mechanical rulings pass applies rule 2 (cause stopped) to a queued, released (verify auto) machine task whose family has a symptom reader: with 0 occurrences across the rule's window it is retired with the same retirement note rule 2 writes today"

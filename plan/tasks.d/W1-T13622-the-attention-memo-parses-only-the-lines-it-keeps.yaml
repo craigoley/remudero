@@ -14,7 +14,7 @@
   files:
     - src/lib/panel-graph.ts
     - test/ledger/the-attention-memo-parses-only-the-lines-it-keeps.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Over an archive of 500 filler rows, the four kept steps and a torn filler line, the attention memo keeps exactly the four kept rows and counts no torn row"

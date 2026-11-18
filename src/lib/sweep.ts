@@ -18,6 +18,7 @@ import type { DispatchBreakJudge } from "./stall-verifier.js";
 import { readCiGateRequiredChecks } from "./ci-gate-required.js";
 import { createHeadRehomePorts, headIdentityRed, headRehomePlan, type HeadRehomePorts } from "./head-rehome.js";
 import { argmaxTypedJudgmentOption, runTypedJudgment } from "./typed-judgment.js";
+import { judgeShadowOnlyArm, judgeShadowOnlyPrimary, shadowJudgeCall, type ShadowJudgeCall } from "./judge-shadow.js";
 import { diffCoverageTargets } from "./diff-coverage-targets.js";
 import { execFileSync } from "node:child_process";
 import { defaultIsPidAlive } from "./drain-lock.js";
@@ -2405,6 +2406,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "arm",
   "readArmFacts",
   "close",
+  "resequenceCloseReversal", // W1-T12891
   "withDependencyCloseFence",
   "dispatchFix",
   // W1-T3390 — the plan-only shard-repair rung, dispatched once the body-repair budget above is
@@ -2505,6 +2507,8 @@ export function productionFixProgressJudge(opts: {
   /** W1-T11075: the ledger a cash shadow arm's rows go to. With none, a declared shadow is not asked: an unledgered
    *  shadow would spend and measure nothing. */
   log?: (step: string, fields: Record<string, unknown>) => void;
+  /** W1-T12417: the decision-model seams of a decision-model shadow, for a test; production reads the host config. */
+  shadowDecisions?: ShadowJudgeCall<unknown>["decisions"];
 }): FixProgressJudge {
   const judge: FixProgressJudge = async input => {
     // W1-T11075: the judge's own row, which may name a provider and a cash shadow arm.
@@ -2551,10 +2555,19 @@ export function productionFixProgressJudge(opts: {
       ...(mount.provider === undefined ? {} : { mountProvider: mount.provider }) };
     const result = await spawn(primaryArgs);
     const verdict = result.subtype !== undefined && result.subtype !== "success" ? undefined : parseFixProgressVerdict(result.text);
-    if (mount.shadow !== undefined && opts.log !== undefined) {
+    const shadowKey = `${input.prNumber === undefined ? input.taskId ?? "unknown" : `PR${input.prNumber}`}@${input.headSha}`;
+    if (mount.shadow?.provider === "decisions" && opts.log !== undefined) {
+      // W1-T12417: a decision-model arm. Not awaited: the verdict returned below is the primary's.
+      void shadowJudgeCall({
+        role: "fix-progress", key: shadowKey, mount, primaryArgs, primary: result, primaryAnswer: verdict, parse: parseFixProgressVerdict,
+        agreementKey: (v) => JUDGE_SHADOW_COMPARED_KEY["fix-progress"](v) ?? "",
+        head: { sha: input.headSha, ...(input.prNumber === undefined ? {} : { prNumber: input.prNumber }) }, spawn, log: opts.log,
+        ...(opts.shadowDecisions === undefined ? {} : { decisions: opts.shadowDecisions }),
+      });
+    } else if (mount.shadow !== undefined && opts.log !== undefined) {
       // Advisory: the verdict returned below is the primary's, whatever the shadow answers or refuses.
       await runJudgeShadow({
-        surface: "fix-progress", key: `${input.prNumber === undefined ? input.taskId ?? "unknown" : `PR${input.prNumber}`}@${input.headSha}`,
+        surface: "fix-progress", key: shadowKey,
         mount, primaryArgs, primaryVerdict: verdict, parse: parseFixProgressVerdict,
         agreementKey: (v) => JUDGE_SHADOW_COMPARED_KEY["fix-progress"](v) ?? "",
         spawn, log: opts.log,
@@ -2679,6 +2692,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "arm"
   | "readArmFacts"
   | "close"
+  | "resequenceCloseReversal"
   | "withDependencyCloseFence"
   | "headRehome"
   | "dispatchFix"
@@ -3656,7 +3670,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       requiredChecks: readCiGateRequiredChecks(repoRoot),
       judgeQuiet: async (pr) => {
         if (repoMode === "shadow") return { quiet: false, reason: "shadow repository" };
-        const mount = resolveRiskJudgeMount(loadMounts(mountsPath(repoRoot)));
+        const mounts = loadMounts(mountsPath(repoRoot));
+        const mount = resolveRiskJudgeMount(mounts);
         const question = "Decide whether this PR's author session is quiet enough to repair its head-identity-only red. " +
           "The repair pushes ONE empty commit carrying a Remudero-Task trailer onto the PR's own branch, so an author " +
           "still pushing there would have to pull it first. " +
@@ -3665,7 +3680,11 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           JSON.stringify({ headSha: pr.headSha, headRefName: pr.headRefName, updatedAt: pr.updatedAt, activity: pr.activity, nowMs: nowMsImpl() });
         const result = await runTypedJudgment({ question, options: ["wait", "trailer"] as const, mount,
           cwd: repoRoot, settingsFile: join(repoRoot, "settings", "worker.json"),
-          spawn: spawnImpl ?? benchmarkNonDispatchSpawn("head-rehome") });
+          spawn: spawnImpl ?? benchmarkNonDispatchSpawn("head-rehome"),
+          // W1-T12417: the answer is asked of head-rehome's shadow afterwards, under its own role name.
+          shadow: { role: "head-rehome", key: `PR${pr.prNumber}@${pr.headSha}`, arm: judgeShadowOnlyArm(mounts, "head-rehome"), log,
+            primary: judgeShadowOnlyPrimary(mounts, "head-rehome"),
+            head: { sha: pr.headSha, prUrl: `https://github.com/${owner}/${repo}/pull/${pr.prNumber}` } } });
         if (result.kind === "rejected") return { quiet: false, reason: `quietness judge unavailable: ${result.reason}` };
         const choice = argmaxTypedJudgmentOption(result.distribution);
         return { quiet: choice === "trailer", reason: `activity judge chose ${choice}: ${JSON.stringify(result.distribution)}` };
@@ -3738,6 +3757,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         throw e;
       }
     },
+    // W1-T12891 — the reopen that reverses a plan-resequence close, on the same read and effect seams as the close.
+    resequenceCloseReversal: createResequenceCloseReversalPort({ readJson: readJsonImpl, ghRun: ghRunImpl }),
 
     // W1-T1223 (design iv) — THE JOB, NEVER THE RUN: `actions/jobs/{job_id}/rerun`, never
     // `actions/runs/{run_id}/rerun-failed-jobs` — a whole-run re-run would re-spend an
@@ -16433,6 +16454,10 @@ export interface SweepDeps {
   readLedgerUnion?: () => { complete: boolean; lines: ReadonlyArray<Record<string, unknown>> } | undefined;
   /** Ledger appender; defaults to appendLedger. Injectable for tests. */
   appendLine?: (path: string, line: Record<string, unknown> & { run_id: string; task_id: string; step: string }) => void;
+  /** W1-T12891 — the reads and the reopen that reverse a plan-resequence close. Omitted, no close is kept or reversed. */
+  resequenceCloseReversal?: ResequenceCloseReversalPort;
+  /** W1-T12891 — each task's merge state for a kept close; defaults to the ledger's merge credit. */
+  readTaskMergeStates?: (taskIds: readonly string[]) => Promise<ReadonlyMap<string, ResequenceDependencyState>>;
   /** Injected clock for the stale window (default Date.now). */
   now?: () => number;
   /** One console/ledger-adjacent line per disposition (optional). */
@@ -20809,6 +20834,276 @@ export function isMergeQueueReplayPr(pr: Pick<OpenPrView, "headRefName">): boole
   return pr.headRefName?.startsWith(MERGE_QUEUE_REPLAY_HEAD_PREFIX) === true;
 }
 
+/** W1-T12891 — one plan-resequence close the sweep made and may reverse: the facts its close row names. */
+export interface KeptResequenceClose {
+  prNumber: number;
+  prUrl: string;
+  taskId: string;
+  dependencies: string[];
+  headRef: string;
+  /** When the sweep's close returned. A closed or reopened event later than this was another actor's. */
+  closedAt: string;
+}
+
+/** W1-T12891 — a task's merge state as the reversal reads it. Only `merged` counts toward a reopen. */
+export type ResequenceDependencyState = "merged" | "unmerged" | "indeterminate";
+
+/** W1-T12891 — the PR's lifecycle as GitHub reports it, oldest event first. */
+export interface ResequenceCloseLifecycle {
+  state: "open" | "closed" | "merged";
+  events: ReadonlyArray<{ event: "closed" | "reopened"; at: string }>;
+  /** The event list hit its page bound, so a later close cannot be ruled out. */
+  truncated?: boolean;
+}
+
+/** W1-T12891 — the GitHub reads and the one write a reversal takes. A read that throws is unreadable. */
+export interface ResequenceCloseReversalPort {
+  readLifecycle: (kept: KeptResequenceClose) => Promise<ResequenceCloseLifecycle>;
+  headExists: (kept: KeptResequenceClose) => Promise<boolean>;
+  reopen: (kept: KeptResequenceClose, comment: string) => void | Promise<void>;
+}
+
+/** W1-T12891 — GitHub's clock and ours differ; a lifecycle event inside this margin of the close is the close. */
+const RESEQUENCE_CLOSE_EVENT_SKEW_MS = 2 * 60_000;
+
+function resequenceCloseSlug(prUrl: string): { owner: string; repo: string } | undefined {
+  const slug = /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/\d+$/.exec(prUrl);
+  return slug ? { owner: slug[1], repo: slug[2] } : undefined;
+}
+
+function resequenceClosePath(ledgerPath: string, kept: Pick<KeptResequenceClose, "prUrl" | "prNumber">): string | undefined {
+  const slug = resequenceCloseSlug(kept.prUrl);
+  return slug && join(dirname(ledgerPath), "resequence-closes", slug.owner, slug.repo, `PR${kept.prNumber}.json`);
+}
+
+/** W1-T12891 — the kept close for a resequence close that acted, or why none is kept. Only the unmet-dependency
+ *  reason carries dependency ids, so a blocked or retired task's close is never kept and never reversed. */
+export function keptResequenceCloseFor(pr: OpenPrView, reason: string, closedAtMs: number): KeptResequenceClose | string {
+  if (!reason.includes(PLAN_RESEQUENCE_CLOSE_MARKER)) return "not a plan-resequence close";
+  const dependencies = [...(pr.planResequenceUnmetDependencies ?? [])];
+  if (pr.taskId === undefined || dependencies.length === 0) return "the close names no unmet dependency";
+  if (!pr.headRefName) return "the close names no head branch";
+  if (resequenceCloseSlug(pr.prUrl) === undefined) return `the pull request url ${pr.prUrl} names no repository`;
+  return { prNumber: pr.prNumber, prUrl: pr.prUrl, taskId: pr.taskId, dependencies, headRef: pr.headRefName,
+    closedAt: clockFromMillisFn(() => closedAtMs).iso() };
+}
+
+/** W1-T12891 — record a kept close beside the ledger, one file per PR, written whole before it is renamed in. */
+export function keepResequenceClose(ledgerPath: string, kept: KeptResequenceClose): void {
+  const path = resequenceClosePath(ledgerPath, kept)!;
+  mkdirSync(dirname(path), { recursive: true });
+  const partial = `${path}.${process.pid}.tmp`;
+  writeFileSync(partial, `${JSON.stringify(kept)}\n`);
+  fs.renameSync(partial, path);
+}
+
+function parseKeptResequenceClose(text: string): KeptResequenceClose | undefined {
+  const row = JSON.parse(text) as Partial<KeptResequenceClose> | null;
+  if (typeof row?.prNumber !== "number" || typeof row.prUrl !== "string" || typeof row.taskId !== "string" ||
+      typeof row.headRef !== "string" || typeof row.closedAt !== "string" || !Array.isArray(row.dependencies) ||
+      row.dependencies.length === 0 || !row.dependencies.every((d) => typeof d === "string")) return undefined;
+  return { prNumber: row.prNumber, prUrl: row.prUrl, taskId: row.taskId, dependencies: row.dependencies,
+    headRef: row.headRef, closedAt: row.closedAt };
+}
+
+/** W1-T12891 — every kept close beside this ledger. A file that does not parse is named, never acted on. */
+export function readKeptResequenceCloses(ledgerPath: string): { kept: Array<KeptResequenceClose & { path: string }>; unreadable: string[] } {
+  const root = join(dirname(ledgerPath), "resequence-closes");
+  if (!existsSync(root)) return { kept: [], unreadable: [] };
+  const kept: Array<KeptResequenceClose & { path: string }> = [];
+  const unreadable: string[] = [];
+  let entries: string[];
+  try {
+    entries = readdirSync(root, { recursive: true, encoding: "utf8" });
+  } catch (error) {
+    const reason = `${root}: ${String(error)}`;
+    return { kept, unreadable: [reason] };
+  }
+  for (const entry of entries) {
+    if (!/^PR\d+\.json$/.test(basename(entry))) continue;
+    const path = join(root, entry);
+    let row: KeptResequenceClose | undefined;
+    try {
+      row = parseKeptResequenceClose(readFileSync(path, "utf8"));
+    } catch (error) {
+      const reason = `${path}: ${String(error)}`;
+      unreadable.push(reason);
+      continue;
+    }
+    if (row === undefined || resequenceClosePath(ledgerPath, row) !== path) unreadable.push(`${path}: not a kept close`);
+    else kept.push({ ...row, path });
+  }
+  return { kept, unreadable };
+}
+
+/** W1-T12891 — the default merge read: a task the ledger holds merge credit for is merged, any other unmerged. */
+export async function ledgerTaskMergeStates(ledgerPath: string, taskIds: readonly string[]): Promise<Map<string, ResequenceDependencyState>> {
+  const scan = await readMergeCreditedTaskIdsAsync(ledgerPath, { candidates: taskIds });
+  return new Map(taskIds.map((id) => [id, scan.credited.has(id) ? "merged" : "unmerged"]));
+}
+
+/** W1-T12891 — GitHub's pull and issue-events answers as a lifecycle. Throws on a shape it cannot read. */
+export function resequenceCloseLifecycleFrom(pull: unknown, events: unknown): ResequenceCloseLifecycle {
+  const row = pull as { state?: unknown; merged?: unknown } | null | undefined;
+  const state = row?.merged === true ? "merged" : row?.state === "open" ? "open" : row?.state === "closed" ? "closed" : undefined;
+  if (state === undefined) throw new Error("the pull request's state was unreadable");
+  if (!Array.isArray(events)) throw new Error("the pull request's events were not a list");
+  const lifecycle = events.flatMap((e: { event?: unknown; created_at?: unknown }) =>
+    (e?.event === "closed" || e?.event === "reopened") && typeof e.created_at === "string"
+      ? [{ event: e.event as "closed" | "reopened", at: e.created_at }] : []);
+  return { state, events: lifecycle, ...(events.length >= 100 ? { truncated: true } : {}) };
+}
+
+/** W1-T12891 — the production port: two fresh reads per kept close and `gh pr reopen`, the twin of the close. */
+export function createResequenceCloseReversalPort(io: {
+  readJson: (args: string[], opts?: GhJsonReadOptions) => Promise<unknown>;
+  ghRun: (file: string, args: readonly string[]) => void;
+}): ResequenceCloseReversalPort {
+  const repoPath = (kept: KeptResequenceClose): string => {
+    const slug = resequenceCloseSlug(kept.prUrl);
+    if (slug === undefined) throw new Error(`the pull request url ${kept.prUrl} names no repository`);
+    return `repos/${slug.owner}/${slug.repo}`;
+  };
+  return {
+    readLifecycle: async (kept) => resequenceCloseLifecycleFrom(
+      await io.readJson(["api", `${repoPath(kept)}/pulls/${kept.prNumber}`], { fresh: true }),
+      await io.readJson(["api", `${repoPath(kept)}/issues/${kept.prNumber}/events?per_page=100`], { fresh: true })),
+    headExists: async (kept) => {
+      const refs = await io.readJson(["api", `${repoPath(kept)}/git/matching-refs/heads/${kept.headRef}`], { fresh: true });
+      if (!Array.isArray(refs)) throw new Error("the matching-refs answer was not a list");
+      return refs.some((ref: { ref?: unknown }) => ref?.ref === `refs/heads/${kept.headRef}`);
+    },
+    reopen: (kept, comment) => io.ghRun("gh", ["pr", "reopen", kept.prUrl, "--comment", comment]),
+  };
+}
+
+/** What {@link reverseResequenceCloses} did with one kept close. `held` keeps it for a later pass. */
+export interface ResequenceReversalOutcome {
+  prNumber: number;
+  outcome: "reversed" | "reverse-failed" | "held" | "dropped";
+  reason: string;
+}
+
+/**
+ * W1-T12891 — REOPEN A PULL REQUEST THE SWEEP CLOSED FOR AN UNMET DEPENDENCY ONCE THAT DEPENDENCY MERGES.
+ * MEASURED 2026-11-15: #18581 and #18570 were closed for unmet W1-T12209, which merged 2h40m later, and both
+ * stayed closed 13.5 hours until an operator reopened them by hand. The close called itself reversible and kept
+ * the head, but nothing reversed it, and a closed PR is no longer in the sweep's open list.
+ *
+ * Acts only on a close this sweep kept (only the unmet-dependency resequence close is kept). It holds, writing
+ * nothing, while any named dependency is unmerged, indeterminate or unreadable. It drops the close without acting
+ * when the task itself merged, the PR is open or merged, or a closed/reopened event follows the sweep's close (a
+ * person acted after it). Otherwise the kept file is removed first, so a reopen is attempted once per close: a gone
+ * head or a refused reopen writes `sweep.resequence_close_reverse_failed`, a reopen `sweep.resequence_close_reversed`.
+ */
+export async function reverseResequenceCloses(input: {
+  ledgerPath: string;
+  runId: string;
+  port: ResequenceCloseReversalPort;
+  readTaskMergeStates?: (taskIds: readonly string[]) => Promise<ReadonlyMap<string, ResequenceDependencyState>>;
+  appendLine: NonNullable<SweepDeps["appendLine"]>;
+  log: (step: string, extra?: Record<string, unknown>) => void;
+}): Promise<ResequenceReversalOutcome[]> {
+  const { kept, unreadable } = readKeptResequenceCloses(input.ledgerPath);
+  for (const reason of unreadable) input.log("sweep.resequence_close.unreadable", { reason });
+  if (kept.length === 0) return [];
+  const ids = [...new Set(kept.flatMap((k) => [k.taskId, ...k.dependencies]))];
+  let states: ReadonlyMap<string, ResequenceDependencyState> | undefined;
+  let mergeReadError: string | undefined;
+  try {
+    states = await (input.readTaskMergeStates ?? ((t) => ledgerTaskMergeStates(input.ledgerPath, t)))(ids);
+  } catch (error) {
+    const reason = `the merge-state read failed: ${String(error)}`;
+    mergeReadError = reason;
+  }
+  const outcomes: ResequenceReversalOutcome[] = [];
+  for (const close of kept) {
+    const held = (reason: string) => outcomes.push({ prNumber: close.prNumber, outcome: "held", reason });
+    if (states === undefined) {
+      held(mergeReadError!);
+      continue;
+    }
+    const notMerged = close.dependencies.filter((id) => states.get(id) !== "merged");
+    if (notMerged.length > 0) {
+      held(`dependencies not read merged: ${notMerged.map((id) => `${id} (${states.get(id) ?? "unread"})`).join(", ")}`);
+      continue;
+    }
+    const taskState = states.get(close.taskId);
+    if (taskState !== "unmerged") {
+      if (taskState === "merged") drop(close, `task ${close.taskId} merged`);
+      else held(`task ${close.taskId} merge state ${taskState ?? "unread"}`);
+      continue;
+    }
+    let lifecycle: ResequenceCloseLifecycle;
+    let exists: boolean;
+    try {
+      lifecycle = await input.port.readLifecycle(close);
+    } catch (error) {
+      const reason = `the pull request's lifecycle was unreadable: ${String(error)}`;
+      held(reason);
+      continue;
+    }
+    const after = Date.parse(close.closedAt) + RESEQUENCE_CLOSE_EVENT_SKEW_MS;
+    const later = lifecycle.events.find((e) => Date.parse(e.at) > after);
+    const ownClose = lifecycle.events.some((e) => e.event === "closed" && Date.parse(e.at) <= after);
+    const dropReason = lifecycle.state !== "closed" ? `the pull request is ${lifecycle.state}`
+      : later ? `${later.event} at ${later.at}, after the sweep's close at ${close.closedAt}`
+      : lifecycle.truncated ? "its events exceed one page, so a later close cannot be ruled out"
+      : !ownClose ? "no closed event matches the sweep's close" : undefined;
+    if (dropReason !== undefined) {
+      drop(close, dropReason);
+      continue;
+    }
+    try {
+      exists = await input.port.headExists(close);
+    } catch (error) {
+      const reason = `the head branch read failed: ${String(error)}`;
+      held(reason);
+      continue;
+    }
+    // The claim: a close whose file cannot be removed is not attempted, so no later pass repeats an attempt.
+    if (!claim(close)) continue;
+    const row = { run_id: input.runId, task_id: close.taskId, pr_number: close.prNumber,
+      dependencies: close.dependencies, head_ref: close.headRef, closed_at: close.closedAt };
+    if (!exists) {
+      input.appendLine(input.ledgerPath, { ...row, step: "sweep.resequence_close_reverse_failed", cause: "head branch gone" });
+      outcomes.push({ prNumber: close.prNumber, outcome: "reverse-failed", reason: "head branch gone" });
+      continue;
+    }
+    try {
+      await input.port.reopen(close, `Reopened by rmd sweep: ${close.dependencies.join(", ")} merged — the dependenc` +
+        `${close.dependencies.length === 1 ? "y" : "ies"} task ${close.taskId} was closed for. ` +
+        `This reverses the close made because ${PLAN_RESEQUENCE_CLOSE_MARKER}.`);
+    } catch (error) {
+      const cause = `reopen refused: ${String(error)}`;
+      input.appendLine(input.ledgerPath, { ...row, step: "sweep.resequence_close_reverse_failed", cause });
+      outcomes.push({ prNumber: close.prNumber, outcome: "reverse-failed", reason: cause });
+      continue;
+    }
+    input.appendLine(input.ledgerPath, { ...row, step: "sweep.resequence_close_reversed" });
+    outcomes.push({ prNumber: close.prNumber, outcome: "reversed", reason: `${close.dependencies.join(", ")} merged` });
+  }
+  return outcomes;
+
+  function claim(close: KeptResequenceClose & { path: string }): boolean {
+    try {
+      unlinkSync(close.path);
+      return true;
+    } catch (error) {
+      const reason = `the kept close could not be removed: ${String(error)}`;
+      input.log("sweep.resequence_close.unclaimed", { pr_number: close.prNumber, reason });
+      outcomes.push({ prNumber: close.prNumber, outcome: "held", reason });
+      return false;
+    }
+  }
+
+  function drop(close: KeptResequenceClose & { path: string }, reason: string): void {
+    if (!claim(close)) return;
+    input.log("sweep.resequence_close.dropped", { pr_number: close.prNumber, task_id: close.taskId, reason });
+    outcomes.push({ prNumber: close.prNumber, outcome: "dropped", reason });
+  }
+}
+
 export async function runSweep(
   openPrs: OpenPrView[],
   sweepDeps: SweepDeps,
@@ -20940,6 +21235,16 @@ export async function runSweep(
   // Dedup is keyed on the ledger, which persists across sweeps even when the input is
   // byte-identical — the level-triggered idempotence mechanism. The SAME read feeds
   // {@link decideSweepArm}'s head-bound recovery, so arming parity costs no extra read.
+  // W1-T12891: a closed PR is not in the open list, so a full pass reads the resequence closes it kept.
+  if (deps.resequenceCloseReversal && !deps.dryRun && deps.repairAdmissionSurface !== "light") {
+    try {
+      await reverseResequenceCloses({ ledgerPath: deps.ledgerPath, runId: deps.runId, port: deps.resequenceCloseReversal,
+        readTaskMergeStates: deps.readTaskMergeStates, appendLine, log });
+    } catch (error) {
+      // The reversal never decides this pass's dispositions: its failure is recorded and the pass goes on.
+      log("sweep.resequence_close.reversal_failed", { reason: String(error) });
+    }
+  }
   deps.markPrelude?.("armed_body_guard");
   if (endsForRestart("armed_body_guard")) return endedEarly();
   // W1-T11260: the live tail's rows are shared and read-only; this pass appends its own receipts, so it copies them.
@@ -26202,6 +26507,19 @@ export async function runSweep(
                 if (!acted) standDownReason = fenced?.reason ?? "dependency close requires a strict fresh lifecycle/main/owner fence";
                 extraDisposedFields = { ...extraDisposedFields, dependency_main_identity: dependencyIdentity };
               } else await deps.close(pr, reason);
+              // W1-T12891: the close calls itself reversible, so the facts that reverse it are kept once it returns.
+              if (acted && deps.resequenceCloseReversal && reason.includes(PLAN_RESEQUENCE_CLOSE_MARKER)) {
+                const kept = keptResequenceCloseFor(pr, reason, deps.now ? deps.now() : systemClock.now());
+                let notKept = typeof kept === "string" ? kept : undefined;
+                if (typeof kept !== "string") {
+                  try { keepResequenceClose(deps.ledgerPath, kept); }
+                  catch (error) {
+                    const reason = `the kept close could not be written: ${String(error)}`;
+                    notKept = reason;
+                  }
+                }
+                if (notKept !== undefined) log("sweep.resequence_close.not_kept", { pr_number: pr.prNumber, task_id: pr.taskId, reason: notKept });
+              }
               break;
             }
             case "refused-escalate":

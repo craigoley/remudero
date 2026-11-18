@@ -18,7 +18,7 @@
     - hooks/deny-floor.sh
     - src/lib/gh-read-broker.ts
     - test/github/the-mac-read-broker-says-when-its-installed-copy-is-old.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "When the installed copy's recorded commit differs from the calling checkout's commit in the broker's own source paths, `rmd gh` prints one stderr line that names both commits and the reinstall command, at most once per calling checkout commit, and the read's stdout and exit code are exactly what they were"

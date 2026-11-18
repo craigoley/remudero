@@ -2762,8 +2762,8 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
   const humanGates = projectProposalHumanGates(classifications.filter((c) => byId.has(c.proposalId)), "core", ownerOf);
   const asks = new Set(humanGates.gates.map((gate) => decodeURIComponent(gate.key.split(":")[2]!)));
   const isAsk = (item: { proposalId: string }) => asks.has(item.proposalId);
-  // W1-T13479: a verify-human ask whose machine-judge twin is present is the same question; list it once.
-  const folded = foldedTwinAsks(classifications.filter((c) => byId.has(c.proposalId)).map((c) => c.proposalId));
+  // W1-T13479: a verify-human ask and its machine-judge twin are the same question; list the one the operator can act on.
+  const folded = foldedTwinAsks(classifications.filter((c) => byId.has(c.proposalId)));
   const operatorItems = <T extends { proposalId: string }>(items: T[]) => items.filter((item) => isOperator(item) && !folded.has(item.proposalId))
     .map((item) => ({ ...item, classification: isAsk(item) ? "ASK" as const : "RECORD" as const }));
   const fleetDecisions = fleetLaneDecisions(ledgerLines as never, stores.fleetDecisions);
@@ -2948,14 +2948,20 @@ function operatorThreadItems(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan
 /** Archive releases and judge receipts are memoized across requests; never reparse all rotations
  * synchronously on the serve thread or mistake an unreadable archive for proof of absence. */
 const attentionLedgerMemos = new WeakMap<PanelGraphDeps, ReturnType<typeof createLedgerRotationMemo>>();
-function attentionLedgerMemo(deps: PanelGraphDeps) {
+/** W1-T13622: the only lines the attention memo keeps; every other line is skipped before it is parsed. Each boot folds
+ *  every ledger archive once, and parsing every line of 211 archives held serve's slow lane near 0.5 cores for minutes
+ *  after each restart on 2026-11-18. A superset of the reducer's steps, so the reducer still decides. */
+export const ATTENTION_LEDGER_STEPS: readonly string[] = ["ratify.approved", "verify_human.judged", ...PROPOSAL_VERDICT_RECEIPT_STEPS];
+export const ATTENTION_LEDGER_LINE = new RegExp(ATTENTION_LEDGER_STEPS.map((step) => step.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"));
+/** Exported so a test can read the memo's retention; serve reaches it only through readRetainedHumanReleases. */
+export function attentionLedgerMemo(deps: PanelGraphDeps) {
   let memo = attentionLedgerMemos.get(deps);
   if (!memo) {
     memo = createLedgerRotationMemo((rows) => rows.flatMap((row): Array<Record<string, unknown>> => {
       if (row.step === "ratify.approved" || row.step === "verify_human.judged") return [row];
       const receipt = verdictReceiptOf(row);
       return receipt ? [{ ...receipt }] : [];
-    }));
+    }), { pattern: ATTENTION_LEDGER_LINE });
     attentionLedgerMemos.set(deps, memo);
   }
   return memo;
@@ -2974,7 +2980,7 @@ function humanReleaseReceipt(row: Record<string, unknown>): string {
  * in the classifier fingerprint and must not be scanned a second time on each Inbox read. */
 async function readRetainedHumanReleases(deps: PanelGraphDeps) {
   const ledger = await readLedgerUnionRecordsMemoized(dirname(deps.ledgerPath), attentionLedgerMemo(deps), {
-    step: ["ratify.approved", "verify_human.judged", ...PROPOSAL_VERDICT_RECEIPT_STEPS], readLiveRecords: () => [], refuseIncomplete: true,
+    step: [...ATTENTION_LEDGER_STEPS], readLiveRecords: () => [], refuseIncomplete: true,
   });
   const receipts = new Map<string, string>();
   const verdictReceipts = ledger.ok ? ledger.rows.flatMap((row) => verdictReceiptOf(row) ?? []) : [];
