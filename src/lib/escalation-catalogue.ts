@@ -1202,6 +1202,7 @@ export function escalateClaimStallCleared(
       issues.closeWithComment(issueUrl, comment);
       delivered = true;
     } catch (e) {
+      // CANNOT-OBSERVE MEANS WAIT (W1-T130): never rethrown into the daemon loop; the row below carries it as `failure`.
       failure = String((e as Error)?.message ?? e);
     }
   }

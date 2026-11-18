@@ -6284,13 +6284,13 @@ export async function runDaemon(
     claimStallBatch.passedRun = undefined;
     claimStallBatch.refused.length = 0;
     if (batch.admitted === 0) return;
-    const failed = (error: unknown): void => log("daemon.escalation.failed", { task: "daemon", error: String((error as Error)?.message ?? error) });
     if (batch.passed > 0) {
       claimStallStreak = 0;
       claimStallPaged = false;
       if (!claimStallCloseArmed) return;
       claimStallCloseArmed = false;
-      try { await deps.onClaimStallCleared?.({ ...batch.passedRun }); } catch (error) { failed(error); }
+      try { await deps.onClaimStallCleared?.({ ...batch.passedRun }); }
+      catch (error) { log("daemon.escalation.failed", { task: "daemon", error: String((error as Error)?.message ?? error) }); }
       return;
     }
     if (batch.refused.length !== batch.admitted) { claimStallStreak = 0; return; }
@@ -6309,7 +6309,8 @@ export async function runDaemon(
     log("dispatch.claim_stall.detected", { task_id: info.taskId, task: info.taskId, ref: info.ref, holder: info.holder,
       claim_age_ms: info.claimAgeMs, bound_ms: info.boundMs, bound_source: info.boundSource, samples: info.samples,
       refused_ticks: info.refusedTicks });
-    try { await deps.onClaimStall(info); } catch (error) { failed(error); }
+    try { await deps.onClaimStall(info); }
+    catch (error) { log("daemon.escalation.failed", { task: "daemon", error: String((error as Error)?.message ?? error) }); }
   };
 
   const processDispatchResult = async (
