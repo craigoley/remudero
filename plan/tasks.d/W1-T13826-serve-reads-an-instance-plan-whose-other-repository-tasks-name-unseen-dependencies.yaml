@@ -1,0 +1,53 @@
+- id: W1-T13826
+  title: "Serve's instance status and now view read an instance plan whose other-repository tasks depend on tasks that plan does not hold"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # loosens one plan validation in serve's instance reads, only for tasks of another repository
+  band_meaning: span
+  origin: "operator-session#now-view-serve-2026-11-17"
+  plan_refs:
+    - W1-T13752
+    - W1-T13585
+  files:
+    - src/lib/instance-gateway.ts
+    - src/lib/now-view.ts
+    - test/serve-reads-an-instance-plan-whose-other-repository-tasks-name-unseen-dependencies.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Serve's instance plan read loads a plan where a task of another repository depends on an id the plan does not hold, and keeps that dependency"
+      proof: "grep: W1-T13826 criterion 1 in test/serve-reads-an-instance-plan-whose-other-repository-tasks-name-unseen-dependencies.test.ts"
+    - claim: "invariant:own-repo-dependencies-stay-strict — the instance's own task with an unseen dependency still fails with loadPlan's PlanError text, and a root with no repository reads with loadPlan"
+      kind: guard
+      proof: "grep: W1-T13826 criterion 2 in test/serve-reads-an-instance-plan-whose-other-repository-tasks-name-unseen-dependencies.test.ts"
+    - claim: "The now view reads another instance's plan with the same rule"
+      proof: "grep: W1-T13826 criterion 3 in test/serve-reads-an-instance-plan-whose-other-repository-tasks-name-unseen-dependencies.test.ts"
+    - claim: "Both instance plan reads in the gateway call the new loader"
+      proof: "grep: instancePlanLoader(root) in src/lib/instance-gateway.ts"
+    - claim: "The now view's plan stage calls the new reader for every instance but core"
+      proof: "grep: nowInstancePlan(path, instance.repo) in src/lib/now-view.ts"
+  rationale: |
+    WHY: on 2026-11-19 at 12:08Z the now view was switched to serve. core, site and console answer 200, but ops answers
+    404 view_not_ready, and read_model.now_view_failed repeats "task W1-T13722: depends_on unknown task 'W1-T10840'".
+    The legacy GET /v1/i/ops/status answers 503 instance_unavailable with the same reason. The ops plan holds core tasks
+    (repo: remudero) that depend on core ids. Checked on a copy of the ops plan (219 files): strict loadPlan throws;
+    the new readers load all 219 tasks. W1-T13752 applied this rule to the instance Inbox and W1-T13585 to the
+    daemon boot read; serve's instance gateway (loadPlan) and the now view (threadPlan) still read strictly.
+  design: |
+    INVARIANT own-repo-dependencies-stay-strict: a task of the instance's own repository still fails the read on an
+    unseen dependency with loadPlan's PlanError text, and core's reads are unchanged.
+    1. instance-gateway.ts: InstanceStateRoot gets repo (the registry repo). New export instancePlanLoader(root):
+       loadPlan when there is no repo, else loadPlanKeepingUnseenDependencies(path, task => !taskTargetsRepo(task.repo,
+       repo)). Both plan reads in instancePlanReader use it when opts.loadPlan is not given.
+    2. now-view.ts: new export nowInstancePlan(path, repo) = loadTargetPlanQuarantiningDuplicates(path, repo).plan, the
+       daemon's own target read. readPlan uses it for every instance but core; core keeps threadPlan.
+  falsifier: |
+    Put loadPlan back in the gateway: criterion 1 fails with "depends_on unknown task". Make the predicate always true:
+    criterion 2 fails because the own-repo task no longer throws.
+  note: |
+    Id reserved for run-unfiled-1795090825013 with ~/rmd-work/bin/reserve-id.sh.
