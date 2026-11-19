@@ -20,6 +20,7 @@
     - src/lib/review.ts
     - src/run-task.ts
     - test/a-proof-home-that-holds-a-read-only-tree-is-removed.test.ts
+    - test/host-capability-fixtures.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -88,6 +89,8 @@
        test/helpers/pass-through-proof-sandbox.ts for the spawners, and restores modes in t.after.
     NOT IN SCOPE: making the W1-T11468 test survive SIGKILL (no test can), the crash-loop issue itself (#19644
     closes when the daemon stops crashing), and a general rule that unknown run rejections end only their lane.
+    BUILD FOUND (2026-11-19): the new test makes the read-only tree it reproduces (chmod 0o444 and 0o555),
+    so test/host-capability-fixtures.test.ts declares those two host-capability fixtures.
   falsifier: |
     Put rmSync(home, { recursive: true, force: true }) back in prepareProofChild's cleanup: criteria 2, 3 and 5
     must fail with EACCES. Make removeOwnedTree follow symbolic links: criterion 4 must fail. Leave the sweep on
