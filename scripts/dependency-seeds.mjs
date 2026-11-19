@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { closeSync, constants, fsyncSync, fstatSync, lstatSync, mkdirSync, openSync, opendirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, constants, fsyncSync, fstatSync, lstatSync, mkdirSync, openSync, opendirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -19,6 +19,34 @@ export function ownerOnlyHome(seed, uid, home = homedir(), exec = execFileSync, 
   const st = statSync(home);
   if (st.uid !== uid || st.mode & 0o011) return false;
   return !exec('/bin/ls', ['-led', home], { encoding: 'utf8' }).split('\n').slice(1).some(line => line.includes(' allow '));
+}
+
+const STORE_MARKER = '.rmd-dependency-seed-root.json';
+
+/** True when `seed` lies in a Linux seed store only its owner can enter: the store directory has
+ * no group or other access, and it and every folder between it and the seed are the owner's and
+ * writable by no one else, so no other non-root account can hold a seed file open there. */
+export function ownerOnlyStore(seed, uid, platform = process.platform) {
+  if (platform !== 'linux' || !isAbsolute(seed)) return false;
+  const store = dirname(resolve(seed)), owned = st => st?.uid === uid && !st.isSymbolicLink();
+  if (!lstatSync(join(store, STORE_MARKER), { throwIfNoEntry: false })?.isFile()) return false;
+  for (let p = resolve(seed); ; p = dirname(p)) {
+    const st = lstatSync(p, { throwIfNoEntry: false });
+    if (!owned(st) || !st.isDirectory() || st.mode & (p === store ? 0o077 : 0o022)) return false;
+    if (p === store) return true;
+  }
+}
+
+/** Either owner-only rule makes the owner's own lsof the complete view of a seed. */
+function ownerOnlySeed(seed, uid) { return ownerOnlyHome(seed, uid) || ownerOnlyStore(seed, uid); }
+
+/** Creates a Linux store directory 0700, or tightens an existing one this account owns, so its
+ * seeds pass ownerOnlyStore; a directory another account owns is left as it is. */
+export function privateStoreDirectory(root, platform = process.platform, uid = process.getuid?.()) {
+  if (platform !== 'linux') return;
+  mkdirSync(root, { recursive: true, mode: 0o700 });
+  const st = lstatSync(root);
+  if (st.isDirectory() && !st.isSymbolicLink() && st.uid === uid && st.mode & 0o077) chmodSync(root, 0o700);
 }
 
 export const OPEN_FILE_SCANS = '/Library/Application Support/Remudero/open-files';
@@ -48,12 +76,12 @@ export function attestedOpen(seed, { dir = OPEN_FILE_SCANS, now = Date.now(), ro
   } catch { return undefined; } finally { if (fd !== undefined) closeSync(fd); }
 }
 
-export function seedIsOpen(seed, uid = process.getuid?.(), exec = execFileSync, ownerOnly = ownerOnlyHome, attested = attestedOpen) {
-  // User lsof cannot rule out other accounts unless none of them can enter the seed's home;
-  // a fresh root-owned scan of the store can.
+export function seedIsOpen(seed, uid = process.getuid?.(), exec = execFileSync, ownerOnly = ownerOnlySeed, attested = attestedOpen) {
+  // User lsof cannot rule out other accounts unless none of them can enter the seed's home or
+  // store directory; a fresh root-owned scan of the store can.
   if (uid !== 0 && !ownerOnly(seed, uid)) {
     const seen = attested(seed);
-    if (seen === undefined) throw new Error('administrator open-file scan required (or a seed store in an owner-only home)');
+    if (seen === undefined) throw new Error('administrator open-file scan required (or a seed store only its owner can enter)');
     return seen;
   }
   try { return exec(process.platform === 'darwin' ? '/usr/sbin/lsof' : 'lsof', ['-nP', '+D', seed], { encoding: 'utf8', timeout: 30_000 }).trim().length > 0; }
@@ -209,6 +237,7 @@ export function main(argv = process.argv.slice(2)) {
   const root = flag('--root') ?? configuredDependencySeedRoot() ?? defaultDependencySeedRoot();
   if (command === 'enable') {
     if (!isAbsolute(root)) throw new Error('seed root must be absolute');
+    privateStoreDirectory(root); // before the config refusal, so re-running enable tightens it
     const file = dependencySeedConfigPath();
     mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
     try { writeFileSync(file, JSON.stringify({ enabled: true, root }), { mode: 0o600, flag: 'wx' }); }
