@@ -415,8 +415,9 @@ export function vetPinnedConfig(pin: PinnedWorktreeGit, log: WorktreeGitLog = st
   return vetted(pin, listing, log, harnessRoot);
 }
 
-async function vetPinnedConfigAsync(pin: PinnedWorktreeGit, log: WorktreeGitLog, timeout = CONFIG_READ_TIMEOUT_MS): Promise<Array<[string, string]>> {
-  const { stdout } = await execFileRouted("git", CONFIG_LIST_ARGS, { cwd: pin.worktree, encoding: "utf8", env: configReadEnv(pin), timeout });
+async function vetPinnedConfigAsync(pin: PinnedWorktreeGit, log: WorktreeGitLog, timeout = CONFIG_READ_TIMEOUT_MS,
+  runGit = execFileRouted): Promise<Array<[string, string]>> {
+  const { stdout } = await runGit("git", CONFIG_LIST_ARGS, { cwd: pin.worktree, encoding: "utf8", env: configReadEnv(pin), timeout });
   return vetted(pin, stdout, log);
 }
 
@@ -445,6 +446,8 @@ export interface HostWorktreeGitOptions {
   log?: WorktreeGitLog;
   /** The loop-available budget of the async leaf's pinned config read; a test seam, 30 s otherwise. */
   configReadTimeoutMs?: number;
+  /** Use the owning operation's child supervisor for the config read and the pinned Git command. */
+  runAsync?: typeof execFileRouted;
 }
 
 function spawnOptions(pin: PinnedWorktreeGit, opts: HostWorktreeGitOptions, overrides: ReadonlyArray<readonly [string, string]>) {
@@ -521,13 +524,13 @@ function directGit(pin: PinnedWorktreeGit, args: readonly string[], spawn: Omit<
 /** {@link hostWorktreeGit} off the event loop. `inherit-stdout` writes stdout through on completion. */
 export async function hostWorktreeGitAsync(worktreePath: string, args: readonly string[], opts: HostWorktreeGitOptions = {}): Promise<string> {
   const pin = pinWorktreeGit(worktreePath, opts.log);
-  const overrides = await vetPinnedConfigAsync(pin, opts.log ?? stderrLog, opts.configReadTimeoutMs);
+  const overrides = await vetPinnedConfigAsync(pin, opts.log ?? stderrLog, opts.configReadTimeoutMs, opts.runAsync);
   const { stdio: _stdio, input, ...spawn } = spawnOptions(pin, opts, overrides);
   const run = async (): Promise<string> => {
     // W1-T13434: through a healthy helper the git child forks there; a request it took is never sent again.
     const route = spawnRoute(spawn);
-    const { stdout } = route.helper !== undefined && route.why === undefined
-      ? await execFileRouted("git", argv(pin, args), { ...spawn, cwd: pin.worktree, ...(input === undefined ? {} : { input }) })
+    const { stdout } = opts.runAsync || (route.helper !== undefined && route.why === undefined)
+      ? await (opts.runAsync ?? execFileRouted)("git", argv(pin, args), { ...spawn, cwd: pin.worktree, ...(input === undefined ? {} : { input }) })
       : await directGit(pin, args, spawn, input, route);
     if (opts.stdio === "inherit-stdout") {
       if (stdout) process.stdout.write(stdout);
@@ -541,7 +544,8 @@ export async function hostWorktreeGitAsync(worktreePath: string, args: readonly 
     // The same repair as the sync leaf, off the loop; anything else rethrows.
     const { stdio: _repairStdio, ...repair } = spawnOptions(pin, {}, overrides);
     return retryAfterDanglingRefRepairAsync(async (a, timeout) =>
-      (await execFileRouted("git", argv(pin, a), { ...repair, cwd: pin.worktree, timeout, maxBuffer: DANGLING_REF_MAX_BUFFER })).stdout, args, error, run);
+      (await (opts.runAsync ?? execFileRouted)("git", argv(pin, a),
+        { ...repair, cwd: pin.worktree, timeout, maxBuffer: DANGLING_REF_MAX_BUFFER })).stdout, args, error, run);
   }
 }
 

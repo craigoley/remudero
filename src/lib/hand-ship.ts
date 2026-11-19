@@ -3,6 +3,7 @@ import { appendFileSync, createReadStream, existsSync, mkdirSync, mkdtempSync, r
   renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { systemClock } from "./clock.js";
 import { acquireDrainLock, defaultIsPidAlive, DrainLockError } from "./drain-lock.js";
@@ -22,8 +23,8 @@ interface ShipHost {
 }
 
 interface ShipSource { root: string; branch: string; head: string; origin: string }
-interface FailingTest { file: string | null; title: string; location?: string | null; failed?: boolean; suite?: boolean;
-  fileLevel?: boolean; state?: string }
+interface NamedTest { file: string | null; title: string }
+interface TestRow extends NamedTest { failed: boolean; suite?: boolean; aggregate?: boolean }
 type Priority = "low" | "normal";
 type FailureClass = "caused by the change" | "caused by the host" | "also failing on main";
 
@@ -33,16 +34,14 @@ export interface ShipReceipt {
   verdict: string;
   selection?: string;
   steps: { name: string; ok: boolean; failedCheck?: string; suites?: string[]; signal?: string | null; error?: unknown;
-    judge?: { given: number; reported: number }; diagnostics?: { mayBeIncomplete: boolean };
+    judge?: { given: number; reported: number }; diagnostics?: { mayBeIncomplete: boolean; stdout?: string };
     testSummary?: { pass: number; fail: number; cancelled: number; tests?: number } }[];
-  failureAttribution?: { counts?: { failingAtHead?: number; unattributed?: number }; tests?: FailingTest[] };
+  failureAttribution?: { counts?: { failingAtHead?: number; unattributed?: number }; tests?: (NamedTest & { state?: string })[] };
 }
 
 interface AuthorTools {
   authorEnvironment(parent: NodeJS.ProcessEnv): NodeJS.ProcessEnv;
   authorPushEligibility(receipt: ShipReceipt): { pushEligible: boolean; pushEligibleReason: string };
-  failingTestsFromTap(output: string, root: string): FailingTest[];
-  testResultsFromTap(output: string, root: string): FailingTest[];
   pinnedNodeReexec(input: { pin: string; current: string; env: NodeJS.ProcessEnv }): { reexec?: string; refuse?: string };
   testSummary(output: string): { tests?: number; pass: number; fail: number; cancelled: number } | null;
 }
@@ -72,7 +71,8 @@ export interface HandShipEffects {
   readSource(cwd: string, run: ShipRun): Promise<ShipSource>;
   prepare(host: ShipHost, source: ShipSource, run: ShipRun): Promise<{
     preflight(priority: Priority): Promise<ShipReceipt>;
-    rerun(tree: "head" | "main", file: string, sha: string, title?: string): Promise<FailingTest[]>;
+    readFailures(step: ShipReceipt["steps"][number]): Promise<TestRow[]>;
+    rerun(tree: "head" | "main", file: string, sha: string, title: string): Promise<TestRow[]>;
     close(): Promise<void>;
   }>;
   push(source: ShipSource, run: ShipRun): Promise<void>;
@@ -127,34 +127,49 @@ function testFailureStage(step: ShipReceipt["steps"][number]): boolean {
   return step.name === "affected-tests" || step.name === "affected-tests-subset" || step.name === "workflow-contract-precheck";
 }
 
-/** Parse complete TAP rows locally so the hand-ship comparison does not change the author-preflight contract. */
-function tapResults(output: string, root: string): FailingTest[] {
-  const clean = (path: string) => path.replace(/^\/private(?=\/)/, "");
-  root = clean(root);
-  const lines = String(output).split("\n"), rows: FailingTest[] = [], parents: string[] = [];
+/** The preflight logs can contain many files. A named rerun executes exactly one file. */
+function tapResults(output: string, root: string, singleFile?: string): TestRow[] {
+  const lines = output.split("\n"), rows: TestRow[] = [], parents: string[] = [];
   for (let i = 0; i < lines.length; i += 1) {
     const header = /^( *)# Subtest: (.*)$/.exec(lines[i]!);
-    if (header) { parents.splice(header[1]!.length / 4); parents.push(header[2]!); continue; }
+    if (header) {
+      parents.splice(header[1]!.length / 4);
+      parents.push(header[2]!);
+      continue;
+    }
     const result = /^( *)(not ok|ok) [0-9]+ - (.*)$/.exec(lines[i]!);
     if (!result) continue;
+    const indent = result[1]!, status = result[2]!, name = result[3]!;
+    if (/ # (?:SKIP|TODO|EXPECTED FAILURE)(?: |$)/.test(name)) continue;
     const fields: Record<string, string> = {};
-    for (let j = i + 1; j < lines.length && lines[j]!.startsWith(`${result[1]}  `) && !/^\s*\.\.\.$/.test(lines[j]!); j += 1) {
+    for (let j = i + 1; j < lines.length && lines[j]!.startsWith(indent + "  ") && !/^\s*\.\.\.$/.test(lines[j]!); j += 1) {
       const field = /^\s+(type|location|failureType): '?(.*?)'?$/.exec(lines[j]!);
       if (field) fields[field[1]!] = field[2]!;
     }
-    const locationMatch = /^(.*):([0-9]+):([0-9]+)$/.exec(clean(fields.location ?? ""));
-    const absolute = locationMatch?.[1] ?? "";
-    const relativePath = absolute && isAbsolute(absolute) ? relative(root, absolute).split(sep).join("/") : "";
-    const file = relativePath && relativePath !== ".." && !relativePath.startsWith("../") && !isAbsolute(relativePath) ? relativePath : null;
-    const fileLevel = file !== null && result[3]!.replace(/\\/g, "/").endsWith(file);
-    rows.push({ file, title: fileLevel ? "(whole file)" : [...parents.slice(0, result[1]!.length / 4), result[3]!].join(" > "),
-      location: locationMatch ? `${locationMatch[2]}:${locationMatch[3]}` : null,
-      failed: result[2] === "not ok", ...(fields.type === "suite" || fields.failureType === "subtestsFailed" ? { suite: true } : {}), fileLevel });
+    const located = fields.location?.replace(/:\d+:\d+$/, "");
+    const path = located?.startsWith("file://") ? fileURLToPath(located) : located;
+    const relativePath = path && isAbsolute(path) ? relative(root.replace(/^\/private(?=\/)/, ""), path.replace(/^\/private(?=\/)/, "")).split(sep).join("/") : null;
+    const file = relativePath ?? (status === "ok" ? singleFile ?? null : null);
+    const wholeFile = indent === "" && [file, singleFile, path].includes(name);
+    const title = [...parents.slice(0, indent.length / 4), name].join(" > ");
+    rows.push({ file: wholeFile ? null : file, title, failed: status === "not ok",
+      ...(fields.type === "suite" ? { suite: true } : {}),
+      ...(fields.failureType === "subtestsFailed" ? { aggregate: true } : {}) });
   }
   return rows;
 }
 
 function escapeTestName(name: string): string { return name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
+
+function testNameArgs(title: string): string[] {
+  const [root, ...children] = title.split(" > ").map(escapeTestName);
+  const include = ["--test-name-pattern", `^${root}$`];
+  if (children.length === 0) return include;
+  // Dynamic subtests register inside their parent callback. Select that parent, then filter
+  // full ancestor paths so Node never calls a sibling's body.
+  const paths = children.map((_, index) => children.slice(0, index + 1).join(" "));
+  return [...include, "--test-skip-pattern", `^${root} (?!(?:${paths.join("|")})$).*$`];
+}
 
 async function compareFailures(receipt: ShipReceipt, workspace: Awaited<ReturnType<HandShipEffects["prepare"]>>, run: ShipRun) {
   const failed = receipt.steps.find((step) => !step.ok);
@@ -162,126 +177,79 @@ async function compareFailures(receipt: ShipReceipt, workspace: Awaited<ReturnTy
     if (failed?.name === "static-preflight" && failed.failedCheck) run.log(`caused by the change: ${failed.failedCheck}`);
     return receipt;
   }
-  let tests: FailingTest[] = (receipt.failureAttribution?.tests ?? []).map((test) => ({ ...test, suite: false }));
-  const summary = failed.testSummary;
   const withEvidence = { ...receipt, failureAttribution: undefined };
-  if (failed.signal || failed.error || failed.diagnostics?.mayBeIncomplete !== false || !summary || summary.fail === 0 ||
-    tests.some(({ file, fileLevel }) => !file || fileLevel || !testPath.test(file) ||
-      file.split("/").some((part) => part === "." || part === ".."))) {
-    run.log("test failure comparison unavailable: the preflight did not completely name its failures");
+  const incomplete = "test failure comparison unavailable: the preflight did not completely name its failures";
+  const summary = failed.testSummary;
+  if (failed.signal || failed.error || failed.diagnostics?.mayBeIncomplete !== false || !summary ||
+    summary.fail === 0 || summary.cancelled !== 0) {
+    run.log(incomplete);
     return withEvidence;
   }
-  if (failed.name !== "workflow-contract-precheck") {
-    const counts = receipt.failureAttribution?.counts;
-    const namedUnattributed = tests.filter((test) => test.state === "unattributed").length;
-    const unnamed = (counts?.unattributed ?? -1) - namedUnattributed;
-    if (counts?.failingAtHead !== summary.fail || unnamed < 0 || tests.length + unnamed !== summary.fail) {
-      run.log("test failure comparison unavailable: the preflight did not completely name its failures");
-      return withEvidence;
-    }
-  }
-  if (failed.name === "workflow-contract-precheck" && tests.length === 0) {
-    const suites = failed.suites ?? [];
-    if (!suites.length || suites.some((file) => !testPath.test(file) || file.split("/").some((part) => part === "." || part === ".."))) {
-      run.log("workflow contract failure comparison unavailable: the preflight did not name its test suites");
-      return withEvidence;
-    }
-    let failedRows = 0;
-    for (const file of [...new Set(suites)].sort()) {
-      const rows = await workspace.rerun("head", file, receipt.headSha);
-      failedRows += rows.filter((test) => test.failed).length;
-      tests.push(...rows.filter((test) => test.failed && !test.suite));
-    }
-    if (failedRows !== summary.fail) {
-      run.log("workflow contract failure comparison unavailable: isolated head reruns did not account for every failure");
-      return withEvidence;
-    }
-  }
-  if (tests.length === 0 || tests.length > summary.fail) {
-    run.log("test failure comparison unavailable: the preflight did not completely name its failures");
+
+  const failures = await workspace.readFailures(failed);
+  const groups = new Map<string, { file: string; title: string; count: number }>();
+  if (failures.length !== summary.fail || failures.some(({ file, suite, aggregate }) =>
+    !file || !testPath.test(file) || file.split("/").some((part) => part === "." || part === "..") || (suite && !aggregate))) {
+    run.log(incomplete);
     return withEvidence;
   }
-  const groups = new Map<string, FailingTest[]>();
-  for (const test of tests) {
-    const key = `${test.file}\0${test.title}\0${test.location ?? ""}`;
-    groups.set(key, [...(groups.get(key) ?? []), test]);
+  for (const { file, title, aggregate } of failures) {
+    if (aggregate) continue;
+    const key = `${file}\0${title}`;
+    const group = groups.get(key);
+    if (group) group.count += 1;
+    else groups.set(key, { file: file!, title, count: 1 });
   }
-  const unionRows = (runs: FailingTest[][]) => {
-    const counts = new Map<string, { row: FailingTest; count: number }>();
-    for (const rows of runs) {
-      const perRun = new Map<string, { row: FailingTest; count: number }>();
-      for (const row of rows) {
-        if (row.file === null) continue;
-        const key = `${row.file}\0${row.title}\0${row.location ?? ""}\0${row.suite === true}\0${row.failed === true}`;
-        const found = perRun.get(key);
-        if (found) found.count += 1; else perRun.set(key, { row, count: 1 });
-      }
-      for (const [key, found] of perRun) {
-        if ((counts.get(key)?.count ?? 0) < found.count) counts.set(key, found);
-      }
+  const targets = [...groups.values()];
+  const descendants = ({ file, title }: NamedTest) => targets.filter((test) => test.file === file && test.title.startsWith(title + " > "));
+  if (failures.some((failure) => failure.aggregate && descendants(failure).length === 0)) {
+    run.log(incomplete);
+    return withEvidence;
+  }
+
+  const rerun = async (tree: "head" | "main", sha: string) => {
+    const results = new Map<typeof targets[number], TestRow[]>();
+    for (const target of targets) {
+      const rows = await workspace.rerun(tree, target.file, sha, target.title);
+      results.set(target, rows.filter((row) => row.file === target.file && row.title === target.title && !row.suite && !row.aggregate));
     }
-    return [...counts.values()].flatMap(({ row, count }) => Array.from({ length: count }, () => row));
+    return results;
   };
-  const rerunGroups = async (tree: "head" | "main", sha: string) => {
-    const runs: FailingTest[][] = [];
-    for (const group of groups.values()) {
-      const test = group[0]!;
-      runs.push(await workspace.rerun(tree, test.file!, sha, test.title));
-    }
-    return unionRows(runs);
-  };
-  const headRows = await rerunGroups("head", receipt.headSha);
+  const head = await rerun("head", receipt.headSha);
+  const main = await rerun("main", receipt.baseSha);
+  const classes = new Map<typeof targets[number], FailureClass[]>();
+  const rows: NonNullable<NonNullable<ShipReceipt["failureAttribution"]>["tests"]> = [];
   let hostCaused = false;
-  const exactHeadFailures: FailingTest[] = [];
-  for (const group of groups.values()) {
-    const target = group[0]!;
-    // Node's name-pattern option selects an ancestor suite to reach a nested leaf.
-    // Ignore every non-target row (including passing or failing siblings) and use
-    // the receipt's physical location to identify the specific test.
-    const selected = headRows.filter((row) => row.file === target.file && row.title === target.title &&
-      row.location === target.location && !row.suite && !row.fileLevel);
-    const targetFailures = selected.filter((row) => row.failed === true);
-    const targetPasses = headRows.filter((row) => row.file === target.file && row.title === target.title &&
-      !row.suite && !row.fileLevel && row.failed === false);
-    if (targetFailures.length === group.length) {
-      exactHeadFailures.push(...targetFailures);
-      continue;
+  const record = ({ file, title }: NamedTest, classification: FailureClass) => {
+    run.log(`${classification}: ${file} :: ${title}`);
+    hostCaused ||= classification === "caused by the host";
+    rows.push({ file, title, state: classification === "also failing on main" ? "also-red" : "only-head" });
+  };
+  for (const target of targets) {
+    const atHead = head.get(target)!;
+    const atMain = main.get(target)!;
+    if (atHead.length !== target.count) {
+      run.log(`test failure comparison unavailable: isolated head rerun did not account for ${target.file} :: ${target.title}`);
+      return withEvidence;
     }
-    if (targetFailures.length === 0 && targetPasses.length >= group.length) {
-      hostCaused = true;
-      for (const test of group) run.log(`caused by the host: ${test.file} :: ${test.title}`);
-      continue;
-    }
-    run.log(`test failure comparison unavailable: isolated head rerun did not account for ${target.file} :: ${target.title}`);
-    return withEvidence;
+    // Match full titles within the file, with each main result accounting for at most one failure.
+    // Extra same-title results are ambiguous and cannot establish a pre-existing red.
+    let mainReds = atMain.length <= target.count ? atMain.filter((row) => row.failed).length : 0;
+    const classified = atHead.map(({ failed }): FailureClass => !failed ? "caused by the host"
+      : mainReds-- > 0 ? "also failing on main" : "caused by the change");
+    classes.set(target, classified);
+    for (const classification of classified) record(target, classification);
   }
-  const mainRows = await rerunGroups("main", receipt.baseSha);
-  const mainFailures = [...groups.values()].flatMap((group) => {
-    const target = group[0]!;
-    return mainRows.filter((row) => row.file === target.file && row.title === target.title &&
-      row.location === target.location && !row.suite && !row.fileLevel && row.failed === true);
-  });
-  const remainingMain = [...mainFailures];
-  const rows = [];
-  for (const test of exactHeadFailures) {
-    const index = remainingMain.findIndex((other) => other.file === test.file && other.title === test.title &&
-      other.location === test.location && other.suite === test.suite);
-    const classification: FailureClass = index >= 0 ? "also failing on main" : "caused by the change";
-    if (index >= 0) remainingMain.splice(index, 1);
-    run.log(`${classification}: ${test.file} :: ${test.title}`);
-    rows.push({ file: test.file, title: test.title, location: test.location,
-      state: classification === "also failing on main" ? "also-red" : "only-head" });
+  for (const failure of failures.filter((test) => test.aggregate)) {
+    const children = descendants(failure).flatMap((test) => classes.get(test)!);
+    record(failure, children.includes("caused by the change") ? "caused by the change"
+      : children.includes("also failing on main") ? "also failing on main" : "caused by the host");
   }
-  if (hostCaused || rows.length !== summary.fail || exactHeadFailures.some((test) => typeof test.location !== "string" || !/^\d+:\d+$/.test(test.location))) {
-    run.log("test failure comparison unavailable: the preflight did not completely name its failures");
-    return withEvidence;
-  }
+  if (hostCaused) return withEvidence;
+  const alsoFailingAtBase = rows.filter((test) => test.state === "also-red").length;
   return { ...withEvidence, failureAttribution: {
-    // The installed judge calls the comparison SHA mergeBase. Here it is the exact main SHA run above.
     base: { mergeBase: receipt.baseSha }, tests: rows,
-    counts: { failingAtHead: rows.length, alsoFailingAtBase: rows.filter((test) => test.state === "also-red").length,
-      failingOnlyAtHead: rows.filter((test) => test.state === "only-head").length,
-      unattributed: rows.filter((test) => test.state === "unattributed").length },
+    counts: { failingAtHead: rows.length, alsoFailingAtBase, failingOnlyAtHead: rows.length - alsoFailingAtBase, unattributed: 0 },
   } };
 }
 
@@ -523,8 +491,16 @@ async function hostCommand(host: ShipHost, run: ShipRun, args: string[], opts: C
 
 async function gitAt(run: ShipRun, cwd: string, args: string[]): Promise<string> {
   run.signal.throwIfAborted();
-  const output = await hostWorktreeGitAsync(cwd, args);
-  run.signal.throwIfAborted();
+  const timeout = args[0] === "bundle" ? 15 * 60_000 : 60_000;
+  const output = await hostWorktreeGitAsync(cwd, args, {
+    timeout,
+    async runAsync(file, argv, options) {
+      const signal = AbortSignal.any([run.signal, AbortSignal.timeout(options.timeout ?? timeout)]);
+      const result = await runChild(run, file, [...argv], { cwd: String(options.cwd), env: options.env, signal });
+      checked(result, `git ${args[0]}`);
+      return result;
+    },
+  });
   return output.trim();
 }
 
@@ -551,7 +527,7 @@ async function defaultSource(cwd: string, run: ShipRun): Promise<ShipSource> {
 async function prepareWorkspace(host: ShipHost, source: ShipSource, run: ShipRun): ReturnType<HandShipEffects["prepare"]> {
   const command = async (args: string[], opts: ChildOptions = {}) => checked(await hostCommand(host, run, args, opts), args.slice(0, 2).join(" "));
   run.signal.throwIfAborted();
-  const scratch = (await command(["mktemp", "-d", "/tmp/rmd-hand-ship.XXXXXXXX"], { signal: AbortSignal.timeout(30_000) })).trim();
+  const scratch = (await command(["mktemp", "-d", "/tmp/rmd-hand-ship.XXXXXXXX"], { signal: AbortSignal.any([run.signal, AbortSignal.timeout(30_000)]) })).trim();
   if (!/^\/tmp\/rmd-hand-ship\.[a-zA-Z0-9]{8}$/.test(scratch)) throw new Error("host returned an invalid temporary directory");
   const bundle = join(run.dir, "head.bundle");
   const donor = host.checkout ?? source.root;
@@ -606,8 +582,17 @@ async function prepareWorkspace(host: ShipHost, source: ShipSource, run: ShipRun
         }
         return receipt;
       },
+      async readFailures(step) {
+        const log = step.diagnostics?.stdout;
+        if (!log || !/^coverage\/rmd-author-[a-zA-Z0-9]{6}\//.test(log) ||
+          log.split("/").slice(2).join("/") !== `${step.name}.stdout.log`) {
+          throw new Error(`${step.name}: receipt did not identify its captured TAP log`);
+        }
+        const output = await command(["cat", "--", log], { cwd: headDir });
+        return tapResults(output, headDir).filter((row) => row.failed);
+      },
       async rerun(tree, file, sha, title) {
-        run.log(`isolated rerun on ${tree} ${sha}: ${file}${title === undefined ? "" : ` :: ${title}`}`);
+        run.log(`isolated rerun on ${tree} ${sha}: ${file} :: ${title}`);
         if (tree === "main" && !baseCut) {
           await git(["diff", "--quiet", source.head, sha, "--", "package-lock.json"]);
           await command(["git", "clone", "--shared", "--no-checkout", "--", headDir, mainDir]);
@@ -623,21 +608,19 @@ async function prepareWorkspace(host: ShipHost, source: ShipSource, run: ShipRun
         if (available.code === 1 && tree === "main") return [];
         checked(available, `${tree} test ${file}`);
         await command(["test", "!", "-L", file], { cwd });
-        const namePattern = title === undefined ? [] : ["--test-name-pattern", `^(?:${[...new Set(title.split(" > "))].map(escapeTestName).join("|")})$`];
-        const args = proofTestRunnerArgs(["--test", "--test-reporter=tap", "--test-concurrency=1", ...namePattern,
+        const args = proofTestRunnerArgs(["--test", "--test-reporter=tap", "--test-concurrency=1", ...testNameArgs(title),
           "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", file], source.root, [file]);
         const result = await hostCommand(host, run, node(args), { cwd, record: true });
         const { testSummary } = await authorTools();
         const summary = testSummary(result.stdout);
-        const results = tapResults(result.stdout, cwd);
-        const targetSelected = title === undefined || results.some((test) => !test.suite && !test.fileLevel && test.file === file && test.title === title);
-        if (result.truncated || !summary || summary.cancelled !== 0 || results.length !== summary.tests ||
+        const results = tapResults(result.stdout, cwd, file);
+        const unexpected = results.some((test) => test.file !== file &&
+          !(test.file === null && test.title === file && !test.failed) ||
+          test.file === file && test.title !== title && !title.startsWith(test.title + " > "));
+        if (result.truncated || !summary || summary.cancelled !== 0 ||
           results.filter((test) => test.failed).length !== summary.fail ||
-          (result.code !== 0 && result.code !== 1) ||
-          (title === undefined && result.code === 0 ? summary.pass === 0 || summary.fail !== 0 : false) ||
-          (title !== undefined && !targetSelected && tree === "head") ||
-          results.some((test) => test.file !== null && test.file !== file)) throw new Error(`${tree} ${file}: isolated rerun had no complete test result ` +
-            `(exit=${result.code}, summary=${JSON.stringify(summary)}, rows=${JSON.stringify(results)}, selected=${targetSelected})`);
+          (result.code !== 0 && result.code !== 1) || (result.code === 0) !== (summary.fail === 0) ||
+          unexpected) throw new Error(`${tree} ${file}: isolated rerun had no complete result for ${title}`);
         return results;
       },
       close,
@@ -670,7 +653,7 @@ export function handShipEffects(checkAcceptance: (bodyFile: string) => number,
       if (current.head !== source.head || current.branch !== source.branch || current.origin !== source.origin) {
         throw new Error("source branch, head or origin changed during verification");
       }
-      const execute = worktreePushExecAsync(source.root, { signal: run.signal, push: (worktree, args, opts) => {
+      const execute = worktreePushExecAsync(source.root, { requirePrePushGate: true, signal: run.signal, push: (worktree, args, opts) => {
         run.signal.throwIfAborted();
         return pushGit(worktree, args, opts);
       } });

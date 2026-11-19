@@ -468,12 +468,18 @@ function* prePushGateSteps(
   pushArgs: string[],
   read: (args: string[]) => string | Promise<string>,
   readConfig: (pin: PinnedWorktreeGit, key: string) => string | undefined | Promise<string | undefined>,
+  required = false,
 ): Steps<PrePushGate | undefined> {
   const pin = pinWorktreeGit(worktreePath);
-  const configured = yield* step(() => readConfig(pin, "core.hooksPath"));
-  if (configured === undefined || configured === "" || configured === "/dev/null") return undefined;
+  if (!required) {
+    const configured = yield* step(() => readConfig(pin, "core.hooksPath"));
+    if (configured === undefined || configured === "" || configured === "/dev/null") return undefined;
+  }
   const hook = join(harnessHooksDir(), "pre-push");
-  if (!existsSync(hook)) return undefined;
+  if (!existsSync(hook)) {
+    if (required) throw new Error(`required pre-push gate is missing: ${hook}`);
+    return undefined;
+  }
   const tryRead = function* (args: string[]): Steps<string | undefined> {
     try {
       const out = String(yield* step(() => read(args))).trim();
@@ -494,9 +500,11 @@ function* prePushGateSteps(
   // Unreadable reads as a new ref: the hook's only reader (identity-transition) abstains on it, and the
   // push that follows reports the transport failure itself.
   const remoteSha = (yield* tryRead(["ls-remote", remote, remoteRef]))?.split(/\s+/)[0] ?? ZERO_SHA;
-  if (remoteSha === localSha) return undefined; // up to date: git sends nothing and runs no pre-push
+  if (!required && remoteSha === localSha) return undefined; // up to date: git sends nothing and runs no pre-push
   const url = (yield* tryRead(["remote", "get-url", remote])) ?? remote;
-  return { hook, args: [remote, url], input: `${localRef} ${localSha} ${remoteRef} ${remoteSha}\n`, env: prePushGateEnv() };
+  const env = prePushGateEnv();
+  if (required) delete env.RMD_PREPUSH_GATES;
+  return { hook, args: [remote, url], input: `${localRef} ${localSha} ${remoteRef} ${remoteSha}\n`, env };
 }
 
 const GATE_ENV_ALLOWLIST = ["PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "RMD_PREPUSH_GATES"] as const;
@@ -798,22 +806,23 @@ function runHookAsync(worktreePath: string, gate: PrePushGate, signal?: AbortSig
 
 /** {@link worktreePushExec} off the event loop; `prGates: false` (a restart checkpoint, which opens no PR) skips the PR gate. */
 export function worktreePushExecAsync(
-  worktreePath: string, { prGates = true, verdicts = defaultPushGateVerdicts(), push, refreshAmbient, signal }: {
+  worktreePath: string, { prGates = true, verdicts = defaultPushGateVerdicts(), push, refreshAmbient, signal, requirePrePushGate }: {
     prGates?: boolean; verdicts?: PushGateVerdicts; push?: typeof hostWorktreeGitAsync; refreshAmbient?: () => Promise<unknown>; signal?: AbortSignal;
+    requirePrePushGate?: boolean;
   } = {},
 ): PushExecAsync {
   return async (_file, args, opts) => {
     signal?.throwIfAborted();
     const pushArgs = leafArgs(worktreePath, args);
     const read = (a: string[]) => hostWorktreeGitAsync(worktreePath, a, { signal });
-    const gate = prGates
-      ? await runStepsAsync(prePushGateSteps(worktreePath, pushArgs, read, pinnedConfigValueAsync))
+    const gate = prGates || requirePrePushGate
+      ? await runStepsAsync(prePushGateSteps(worktreePath, pushArgs, read, pinnedConfigValueAsync, requirePrePushGate))
       : undefined;
     if (gate) {
       const outcome = await runStepsAsync(pushGateSteps(worktreePath, gate, read, () => {
         signal?.throwIfAborted();
         return runHookAsync(worktreePath, gate, signal);
-      }, verdicts, "worktreePushExecAsync"));
+      }, requirePrePushGate ? undefined : verdicts, "worktreePushExecAsync"));
       if (outcome !== undefined && opts.stdio !== "ignore") writeThrough(outcome.refused ? outcome.err : outcome.out);
       if (outcome?.refused) throw gateRefusal(worktreePath, pushArgs, outcome.err);
     }
