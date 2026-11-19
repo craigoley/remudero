@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
+import { FIXTURE_CONFIG_PATH_SEGMENTS } from "#src/lib/config.js";
 import type { Check, DoctorReport } from "#src/lib/doctor.js";
 import { DAEMON_LABEL, DIGEST_LABEL, SERVE_LABEL, SUPERVISOR_LABEL, launchctlGuiTarget, launchdPlistPath } from "#src/lib/launchd.js";
 import { doctorCommand, type DoctorDeps } from "#src/lib/report-commands.js";
@@ -21,6 +22,12 @@ function fixture(t: TestContext) {
 
 function service(label: string, program: string, lines: readonly string[] = []): string {
   return `${target(label)} = {\n\tprogram = ${program}\n${lines.map(line => `\t${line}`).join("\n")}\n}\n`;
+}
+
+function writeJobConfig(home: string, root: string, installRoot: string): void {
+  const path = join(home, ...FIXTURE_CONFIG_PATH_SEGMENTS);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, JSON.stringify({ claudeBin: "/bin/true", root, installRoot }));
 }
 
 function missingService(label: string): never {
@@ -82,7 +89,11 @@ test("W1-T12176 criterion 1 reads all four launchd labels and accepts idle jobs"
 test("W1-T12176 criterion 2 fails repeat crashes and bounds the last error line", async t => {
   const { root, program, log } = fixture(t);
   const cause = `${root}/node_modules/.bin/tsx: No such file or directory`;
-  writeFileSync(log, `${"x".repeat(32_768)}\nprevious failure\n${cause} ${"x".repeat(512)} do-not-copy-this-suffix\n`);
+  writeFileSync(log, Buffer.concat([
+    Buffer.from(`${"x".repeat(32_768)}\nprevious failure `),
+    Buffer.from([0xff]),
+    Buffer.from(`\n${cause} ${"x".repeat(512)} do-not-copy-this-suffix\r\n`),
+  ]));
   const result = await report(root, { platform: "darwin", home: root, exec: (_cmd, args) => {
     if (args[1] !== target(DAEMON_LABEL)) missingService(args[1]!.split("/").at(-1)!);
     return service(DAEMON_LABEL, program, ["state = spawn scheduled", "runs = 450", "last exit code = 127: EX_NOTFOUND", `stderr path = ${log}`]);
@@ -111,6 +122,18 @@ test("W1-T12176 criterion 3 names the missing program and both operator remedies
   assert.ok(check.measured.includes(`launchctl bootout ${target(DAEMON_LABEL)}`));
 });
 
+test("doctor can decode a bounded tail starting inside an overlong final line", async t => {
+  const { root, program, log } = fixture(t);
+  writeFileSync(log, `${"é".repeat(10_000)}x`);
+  const result = await report(root, { platform: "darwin", home: root, exec: (_cmd, args) => {
+    if (args[1] !== target(DAEMON_LABEL)) missingService(args[1]!.split("/").at(-1)!);
+    return service(DAEMON_LABEL, program, ["state = not running", "runs = 4", "last exit code = 1", `stderr path = ${log}`]);
+  } });
+  const check = checkFor(result.launchd, DAEMON_LABEL);
+  assert.equal(check.verdict, "FAIL");
+  assert.ok(check.measured.endsWith(`last error: ${"é".repeat(239)}…`));
+});
+
 test("W1-T12176 criterion 4 warns about the actual checkout and branch used for self-sync", async t => {
   const { root } = fixture(t);
   const writeLauncher = (checkout: string) => {
@@ -122,12 +145,20 @@ test("W1-T12176 criterion 4 warns about the actual checkout and branch used for 
   const main = writeLauncher(gitRepo({ scope: t }).dir);
   const offMain = gitRepo({ scope: t, branch: "plan-amendment" }).dir;
   const offMainProgram = writeLauncher(offMain);
+  const jobHome = join(root, "job home");
+  writeJobConfig(root, root, dirname(dirname(main)));
+  writeJobConfig(jobHome, root, offMain);
   const result = await report(root, { platform: "darwin", home: root, exec: (_cmd, args) => {
     const label = args[1]!.split("/").at(-1)!;
     const state = ["state = not running", "runs = 4", "last exit code = 0"];
     if (label === DIGEST_LABEL) state.push("environment = {", "\tRMD_SELF_SYNC_DONE => 1", "}");
+    if (label === SUPERVISOR_LABEL) state.push(
+      "arguments = {", `\t${main}`, "\tdeploy-run", "}",
+      "inherited environment = {", `\tHOME => ${root}`, "}",
+      "environment = {", `\tHOME => ${jobHome}`, "}",
+    );
     return service(label, label === SUPERVISOR_LABEL ? main : offMainProgram, state);
-  } }, offMain);
+  } }, dirname(dirname(main)));
   const warnings = result.checks.filter(check => check.name.startsWith("launchd-self-sync:"));
   assert.deepEqual(warnings.map(check => [check.name, check.verdict]),
     [SERVE_LABEL, SUPERVISOR_LABEL].map(label => [`launchd-self-sync:${label}`, "WARN"]));
@@ -135,6 +166,46 @@ test("W1-T12176 criterion 4 warns about the actual checkout and branch used for 
     assert.ok(warning.measured.includes(offMain));
     assert.ok(warning.measured.includes("plan-amendment"));
   }
+});
+
+test("supervisor --state-root overrides its job HOME's explicit install checkout", async t => {
+  const { root, program } = fixture(t);
+  const configured = gitRepo({ scope: t }).dir;
+  const jobHome = join(root, "job home");
+  writeJobConfig(jobHome, root, configured);
+  const stateRoot = join(root, "other state root");
+  mkdirSync(stateRoot);
+  const checkout = join(stateRoot, "daemon-install");
+  symlinkSync(gitRepo({ scope: t, branch: "override-branch" }).dir, checkout, "dir");
+  const result = await report(root, { platform: "darwin", home: root, exec: (_cmd, args) => {
+    if (args[1] !== target(SUPERVISOR_LABEL)) missingService(args[1]!.split("/").at(-1)!);
+    return service(SUPERVISOR_LABEL, program, [
+      "state = not running", "runs = 4", "last exit code = 0",
+      "arguments = {", `\t${program}`, "\tdeploy-run", "\t--state-root", `\t${stateRoot}`, "}",
+      "environment = {", `\tHOME => ${jobHome}`, "}",
+    ]);
+  } }, configured);
+  const warning = result.checks.find(check => check.name === `launchd-self-sync:${SUPERVISOR_LABEL}`);
+  assert.equal(warning?.verdict, "WARN");
+  assert.equal(warning.measured, `${checkout} (override-branch)`);
+});
+
+test("doctor reports an unreadable supervisor checkout without creating a job config", async t => {
+  const { root, program } = fixture(t);
+  const jobHome = join(root, "unconfigured home");
+  const result = await report(root, { platform: "darwin", home: root, exec: (_cmd, args) => {
+    if (args[1] !== target(SUPERVISOR_LABEL)) missingService(args[1]!.split("/").at(-1)!);
+    return service(SUPERVISOR_LABEL, program, [
+      "state = not running", "runs = 4", "last exit code = 0",
+      "arguments = {", `\t${program}`, "\tdeploy-run", "}",
+      "environment = {", `\tHOME => ${jobHome}`, "}",
+    ]);
+  } }, gitRepo({ scope: t }).dir);
+  assert.equal(checkFor(result.launchd, SUPERVISOR_LABEL).verdict, "OK");
+  const warning = result.checks.find(check => check.name === `launchd-self-sync:${SUPERVISOR_LABEL}`);
+  assert.equal(warning?.verdict, "WARN");
+  assert.match(warning.measured, /checkout unreadable/);
+  assert.equal(existsSync(jobHome), false);
 });
 
 test("W1-T12176 criterion 5 distinguishes absent, unreadable, and non-launchd hosts", async t => {

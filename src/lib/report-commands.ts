@@ -8,11 +8,10 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, writeFileSync } from "node:fs";
 import { hostname as osHostname } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { createBoardSnapshotCache } from "./board-snapshot-cache.js";
-import { readBoundedFileTail } from "./bounded-file-tail.js";
 import {
   consoleAppUrl,
   enabledWorkerProviders,
@@ -42,7 +41,7 @@ import {
   SUPERVISOR_LABEL,
 } from "./launchd.js";
 import { classifyRollupSupersession, type RollupCheckEntry } from "./sweep.js";
-import { resolveInstallRoot } from "./install-root.js";
+import { resolveInstallRoot, validateDeployStateRoot } from "./install-root.js";
 import {
   buildStatusBoard,
   buildStatusBoardAsync,
@@ -566,9 +565,83 @@ function readLaunchdCheckoutBranch(checkout: string): string | null {
 
 function readLaunchdErrorLine(path: string | undefined): string {
   if (!path || !isAbsolute(path)) return "";
-  const { text } = readBoundedFileTail(path, 16 * 1024);
-  const tail = text.replace(/\r?\n$/, "");
-  return tail.slice(tail.lastIndexOf("\n") + 1).trim();
+  try {
+    const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    try {
+      const before = fstatSync(fd);
+      if (!before.isFile()) return "";
+      const bytes = Buffer.alloc(Math.min(before.size, 16 * 1024));
+      const offset = before.size - bytes.length;
+      for (let read = 0; read < bytes.length;) {
+        const count = readSync(fd, bytes, read, bytes.length - read, offset + read);
+        if (count === 0) return "";
+        read += count;
+      }
+      const after = fstatSync(fd);
+      if (after.size !== before.size || after.mtimeMs !== before.mtimeMs) return "";
+      const end = bytes.at(-1) === 0x0a ? bytes.length - 1 : bytes.length;
+      let start = bytes.subarray(0, end).lastIndexOf(0x0a) + 1;
+      // The tail can start in the middle of a UTF-8 character on an overlong final line.
+      if (start === 0 && offset > 0) {
+        while (start < Math.min(3, end) && (bytes[start]! & 0xc0) === 0x80) start++;
+      }
+      return new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(start, end)).trim();
+    } finally {
+      closeSync(fd);
+    }
+  } catch (error) {
+    // Missing, unreadable or malformed final lines cannot supply a crash cause.
+    void error;
+    return "";
+  }
+}
+
+function launchdPrintBlock(lines: readonly string[], indent: string, name: string): string[] | undefined {
+  const start = lines.indexOf(`${indent}${name} = {`);
+  if (start < 0) return undefined;
+  const end = lines.indexOf(`${indent}}`, start + 1);
+  if (end < 0) return undefined;
+  const entries = lines.slice(start + 1, end);
+  const entryIndent = /^[\t ]+/.exec(entries[0] ?? "")?.[0];
+  if (entryIndent === undefined || entryIndent === indent || !entryIndent.startsWith(indent)) return undefined;
+  if (entries.some(line => !line.startsWith(entryIndent))) return undefined;
+  return entries.map(line => line.slice(entryIndent.length));
+}
+
+function readSupervisorCheckout(output: string, indent: string): string | null {
+  const lines = output.split(/\r?\n/);
+  const args = launchdPrintBlock(lines, indent, "arguments");
+  if (args?.[1] !== "deploy-run") return null;
+  const rest = args.slice(2);
+  if (unknownArgError("deploy-run", rest, ["--state-root", "--selected-registry-shadow", "--selected-registry-pin"],
+    ["--dry-run", "--image-drift-only"])) return null;
+  if (rest.includes("--state-root")) {
+    const root = flagValue(rest, "--state-root") ?? "";
+    return validateDeployStateRoot(root).ok ? resolveInstallRoot({ root }) : null;
+  }
+
+  const homeEntry = ["environment", "inherited environment", "default environment"]
+    .map(name => launchdPrintBlock(lines, indent, name)?.find(line => line.startsWith("HOME => ")))
+    .find(entry => entry !== undefined);
+  const home = homeEntry?.slice("HOME => ".length);
+  if (!home || !isAbsolute(home)) return null;
+  try {
+    // Read the job's existing config without invoking loadConfig's provisioning path.
+    const config = JSON.parse(readFileSync(join(home, ".config", "remudero", "config.json"), "utf8")) as {
+      root?: unknown;
+      installRoot?: unknown;
+    } | null;
+    if (!config || typeof config !== "object" || Array.isArray(config)) return null;
+    const { installRoot } = config;
+    const root = config.root == null || config.root === "" ? join(home, "Remudero") : config.root;
+    if (typeof root !== "string" || (installRoot !== undefined && typeof installRoot !== "string")) return null;
+    const checkout = resolveInstallRoot({ root, installRoot });
+    return isAbsolute(checkout) && !checkout.includes("\0") ? checkout : null;
+  } catch (error) {
+    // Missing or invalid job config leaves the checkout unreadable.
+    void error;
+    return null;
+  }
 }
 
 function parseLaunchdPrint(output: string, target: string) {
@@ -576,6 +649,7 @@ function parseLaunchdPrint(output: string, target: string) {
   // Nested blocks also have fields such as state. Use the indentation of the job's fields.
   const fields = new Map<string, string>();
   const indent = /^[\t ]+(?=\S)/m.exec(output)?.[0];
+  if (!indent) return undefined;
   for (const match of output.matchAll(/^([\t ]+)([a-z ]+) = ([^\r\n]+)\r?$/gm)) {
     if (match[1] === indent) fields.set(match[2]!, match[3]!.trim());
   }
@@ -592,12 +666,12 @@ function parseLaunchdPrint(output: string, target: string) {
     || (!exit && !signal && exitField !== "(never exited)")) return undefined;
 
   return {
-    program, pid, starts: Number(runs), stderrPath: fields.get("stderr path"),
+    program, pid, starts: Number(runs), stderrPath: fields.get("stderr path"), indent,
     lastExit: exit ? { code: Number(exit[1]) } : signal ? { signal } : null,
   };
 }
 
-function readDoctorLaunchdServices(config: Config, deps: DoctorDeps["launchd"] = {}): LaunchdServiceReading[] {
+function readDoctorLaunchdServices(deps: DoctorDeps["launchd"] = {}): LaunchdServiceReading[] {
   if ((deps.platform ?? process.platform) !== "darwin") return [];
   const exec = deps.exec ?? ((cmd, args) => execFileSync(cmd, args, {
     encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 1_000, killSignal: "SIGKILL",
@@ -633,12 +707,14 @@ function readDoctorLaunchdServices(config: Config, deps: DoctorDeps["launchd"] =
     const usesCheckout = (label === DIGEST_LABEL || label === SERVE_LABEL) && resolved
       && basename(resolved) === "rmd" && basename(dirname(resolved)) === "bin"
       && !/^[\t ]+RMD_SELF_SYNC_DONE => 1\s*$/m.test(output);
-    // deploy-run updates the configured install, which can differ from its own launcher checkout.
-    const checkout = label === SUPERVISOR_LABEL ? resolveInstallRoot(config) : usesCheckout ? dirname(dirname(resolved)) : undefined;
+    const checkout = label === SUPERVISOR_LABEL
+      ? readSupervisorCheckout(output, service.indent)
+      : usesCheckout ? dirname(dirname(resolved)) : undefined;
+    const selfSync = checkout === null ? "unreadable" as const
+      : checkout === undefined ? undefined : { checkout, branch: readLaunchdCheckoutBranch(checkout) };
     readings.push({
       label, target, program, pid, starts, lastExit, programState: programPath.state,
-      lastErrorLine: readLaunchdErrorLine(stderrPath),
-      ...(checkout === undefined ? {} : { selfSync: { checkout, branch: readLaunchdCheckoutBranch(checkout) } }),
+      lastErrorLine: readLaunchdErrorLine(stderrPath), selfSync,
     });
   }
   return readings;
@@ -776,7 +852,7 @@ export async function doctorCommand(rest: string[], deps: DoctorDeps = {}): Prom
     ...(lockRead.unreadableReason === undefined ? {} : { locksUnreadableReason: lockRead.unreadableReason }),
     deadLocks: dead,
     gitLocks: (deps.readGitLocks ?? readGitLocks)(repoDir, nowMs),
-    launchdServices: readDoctorLaunchdServices(config, deps.launchd),
+    launchdServices: readDoctorLaunchdServices(deps.launchd),
     // W1-T3628: a LIVE reading, not the literal 0 that stood here. The arm it feeds could not
     // return anything but OK while this was a constant, and read "0 worker process(es)" on a host
     // carrying two `npm ci` stuck 80 minutes during the 2026-09-16 outage.

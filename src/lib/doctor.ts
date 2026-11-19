@@ -918,7 +918,7 @@ export type LaunchdServiceReading = { label: string } & (
       program: string;
       programState: "present" | "missing" | "unreadable";
       lastErrorLine: string;
-      selfSync?: { checkout: string; branch: string | null };
+      selfSync?: { checkout: string; branch: string | null } | "unreadable";
     }
 );
 
@@ -951,11 +951,12 @@ export function judgeLaunchdServices(services: readonly LaunchdServiceReading[])
     }
     checks.push({ name, verdict, measured: observations.join("; "), threshold });
 
-    if (selfSync && selfSync.branch !== "main") {
+    if (selfSync && (selfSync === "unreadable" || selfSync.branch !== "main")) {
       checks.push({
         name: `launchd-self-sync:${service.label}`,
         verdict: "WARN",
-        measured: `${selfSync.checkout} (${selfSync.branch === null ? "branch unreadable" : selfSync.branch})`,
+        measured: selfSync === "unreadable" ? "self-sync checkout unreadable"
+          : `${selfSync.checkout} (${selfSync.branch === null ? "branch unreadable" : selfSync.branch})`,
         threshold: "self-sync checkout on main",
       });
     }
