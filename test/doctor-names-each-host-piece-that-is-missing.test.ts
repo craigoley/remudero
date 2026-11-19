@@ -85,12 +85,9 @@ test("W1-T12074 criterion 2: the doctor check reports FAIL and names every missi
   const gone = new Set(["dependency-tool", "gh-broker-unit", "github-login"]);
   const missingPaths = new Set(hostPieces("linux", CTX).filter((p) => gone.has(p.id)).map((p) => p.path));
   const seen: string[] = [];
-  const reading = readHostPieces(CTX, {
-    platform: "linux",
-    exists: (path) => {
-      seen.push(path);
-      return !missingPaths.has(path);
-    },
+  const reading = readHostPieces(CTX, "linux", (path) => {
+    seen.push(path);
+    return !missingPaths.has(path);
   });
   assert.deepEqual(seen, hostPieces("linux", CTX).map((p) => p.path), "the check is given each piece's path and nothing else");
 
@@ -108,7 +105,7 @@ test("W1-T12074 criterion 2: the doctor check reports FAIL and names every missi
   }
 
   // All present: the check passes with doctor's passing verdict, OK.
-  const healthy = buildDoctorReport(baseInputs({ hostPieces: readHostPieces(CTX, { platform: "linux", exists: () => true }) }));
+  const healthy = buildDoctorReport(baseInputs({ hostPieces: readHostPieces(CTX, "linux", () => true) }));
   const ok = healthy.checks.find((c) => c.name === "host-pieces")!;
   assert.equal(ok.verdict, "OK");
   assert.equal(ok.detail, undefined);
@@ -126,11 +123,11 @@ test("W1-T12074 criterion 2: the default reader tests real paths on disk", () =>
       mkdirSync(dirname(p.path), { recursive: true });
       writeFileSync(p.path, "");
     }
-    assert.equal(judgeHostPieces(readHostPieces(ctx, { platform: "linux" })).verdict, "OK");
+    assert.equal(judgeHostPieces(readHostPieces(ctx, "linux")).verdict, "OK");
 
     const removed = hostPieces("linux", ctx).find((p) => p.id === "field-trials-script")!;
     rmSync(removed.path);
-    const check = judgeHostPieces(readHostPieces(ctx, { platform: "linux" }));
+    const check = judgeHostPieces(readHostPieces(ctx, "linux"));
     assert.equal(check.verdict, "FAIL");
     assert.match(check.measured, /^1 of \d+ missing: field-trials-script$/);
     assert.ok(check.detail!.includes(`restore: ${removed.installer}`), check.detail);
@@ -141,19 +138,19 @@ test("W1-T12074 criterion 2: the default reader tests real paths on disk", () =>
 
 test("W1-T12074 criterion 3: a piece that does not apply to this host, such as a Mac-only one on Linux, is not reported", () => {
   const nothing = () => false;
-  const onLinux = judgeHostPieces(readHostPieces(CTX, { platform: "linux", exists: nothing }));
+  const onLinux = judgeHostPieces(readHostPieces(CTX, "linux", nothing));
   assert.equal(onLinux.verdict, "FAIL");
   assert.ok(!onLinux.detail!.includes("gh-broker-agent"), "the Mac launchd agent is not reported on Linux");
   assert.ok(!onLinux.detail!.includes("LaunchAgents"), onLinux.detail);
   assert.ok(!onLinux.detail!.includes("hosts.yml"), "the Mac GitHub login path is not reported on Linux");
   assert.ok(onLinux.detail!.includes("gh-broker-unit"), "control: a Linux piece is reported on Linux");
 
-  const onMac = judgeHostPieces(readHostPieces(CTX, { platform: "darwin", exists: nothing }));
+  const onMac = judgeHostPieces(readHostPieces(CTX, "darwin", nothing));
   assert.ok(onMac.detail!.includes("gh-broker-agent"), "control: the Mac agent is reported on a Mac");
   assert.ok(!onMac.detail!.includes("gh-broker-unit"), "the Linux systemd unit is not reported on a Mac");
   assert.ok(!onMac.detail!.includes(".gh-token"), "the Linux token file is not reported on a Mac");
 
-  const elsewhere = readHostPieces(CTX, { platform: "win32", exists: nothing });
+  const elsewhere = readHostPieces(CTX, "win32", nothing);
   assert.equal(elsewhere.checked, 0);
   assert.equal(judgeHostPieces(elsewhere).verdict, "OK", "a platform with no pieces reports none missing");
 });

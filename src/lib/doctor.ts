@@ -1144,10 +1144,9 @@ export interface HostPieceReading {
  *  and nothing else, so no piece, the GitHub login included, is ever opened. */
 export function readHostPieces(
   ctx: HostPieceContext,
-  deps: { platform?: string; exists?: (path: string) => boolean } = {},
+  platform: string = process.platform,
+  exists: (path: string) => boolean = existsSync,
 ): HostPieceReading {
-  const platform = deps.platform ?? process.platform;
-  const exists = deps.exists ?? existsSync;
   const pieces = hostPieces(platform, ctx);
   return { platform, checked: pieces.length, missing: pieces.filter((p) => !exists(p.path)) };
 }
