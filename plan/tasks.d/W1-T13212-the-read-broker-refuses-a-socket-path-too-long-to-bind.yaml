@@ -16,6 +16,9 @@
     - src/lib/gh-read-broker.ts
     - test/github/every-mac-session-reads-github-through-one-broker.test.ts
     - test/github/daemon-github-reads-share-one-in-process-client.test.ts
+  # refusal-amendment (W1-T13212, run W1-T13212-1795056386606, 2026-11-19T09:29:08.772Z): the worker refused criterion 1 [proof-unexecutable-at-head] — proposed re-scope-criteria: repair the criterion's proof so it is executable at HEAD, or re-scope the criterion
+  #   worker evidence: W1-T13212: a filed proof already passes at the merge base, so branch run-W1-T13212-1795056386606 cannot open a PR
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   acceptance:
