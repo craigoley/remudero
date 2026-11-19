@@ -4,7 +4,7 @@ import { test, type TestContext } from "node:test";
 import { runReview, type ReviewCommandHost } from "#src/cli/commands/review.js";
 import type { Config } from "#src/lib/config.js";
 import { readLedgerLines } from "#src/lib/status.js";
-import { readReviewEvidenceRecord, renderReviewEvidenceRecord } from "#src/lib/review-evidence-record.js";
+import { readReviewEvidenceRecord, renderReviewEvidenceRecord, writeReviewEvidenceRecord } from "#src/lib/review-evidence-record.js";
 import { reviewInputDigest, type ReviewVerdict } from "#src/lib/review.js";
 import { runSweep, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
 import { withGhShim, type GhShimRoute } from "#test/helpers/gh-shim.js";
@@ -95,6 +95,10 @@ test("a comment write failure is logged without changing the posted verdict", as
   assert.match(String(ledger.find(row => row.step === "review.evidence_write_failed")?.reason), /HTTP 503|failed/i);
 });
 
+test("terminal evidence without an input digest is reported as a write failure", async () => {
+  await assert.rejects(writeReviewEvidenceRecord({ ...ROW, review_input_digest: undefined }), /without the exact review input digest/);
+});
+
 test("the record preserves proof results and keeps holdout text and ops details private", () => {
   const record = renderReviewEvidenceRecord({
     ...ROW,
@@ -106,12 +110,12 @@ test("the record preserves proof results and keeps holdout text and ops details 
 });
 
 async function sweep(t: TestContext, comments: unknown[], state: "success" | "failure" = "success",
-  routes = reads(comments, state)) {
+  routes = reads(comments, state), prOverrides: Partial<OpenPrView> = {}) {
   const ledgerPath = join(ownedFixtureDir(t, "t12159-sweep").dir, "ledger.ndjson");
   const pr: OpenPrView = {
     prNumber: 42, prUrl: PR, taskId: "W1-T12159", headSha: HEAD, reviewInputDigest: DIGEST,
     reviewState: state, checksState: "green", mergeState: "clean", priorReviewAttemptsForInput: 0,
-    unmetCriteria: [], priorStrikes: 0, autoMergeArmed: false, lastActivityAt: COMMENT_AT,
+    unmetCriteria: [], priorStrikes: 0, autoMergeArmed: false, lastActivityAt: COMMENT_AT, ...prOverrides,
   };
   let reviewers = 0;
   const deps: SweepDeps = {
@@ -146,6 +150,30 @@ test("W1-T12159 criterion 2: each terminal verdict recovers its exact-input row 
 test("W1-T12159 criterion 3: missing, mismatched, foreign and damaged evidence preserves re-review", async (t) => {
   const valid = renderReviewEvidenceRecord(ROW);
   const foreign = { login: "some-other-reviewer[bot]", type: "Bot" };
+  const graphqlMismatchRoutes: GhShimRoute[] = [
+    { when: "issues/42/comments?per_page=100", stdout: JSON.stringify([[], [comment(valid)]]) },
+    { when: `commits/${HEAD}/status`, stdout: JSON.stringify({ sha: HEAD, statuses: [{
+      context: "remudero-review", state: "success", created_at: STATUS_AT,
+      description: `Verdict [review code ${REVIEWER_CODE}]`,
+    }] }) },
+    { when: "api graphql", stdout: JSON.stringify({
+      data: {
+        repository: {
+          nameWithOwner: "acme/remudero",
+          object: {
+            oid: HEAD,
+            status: {
+              context: {
+                context: "remudero-review", state: "SUCCESS", createdAt: "2026-11-19T10:02:00Z",
+                description: `Verdict [review code ${REVIEWER_CODE}]`,
+                creator: { login: "remudero-fleet", __typename: "Bot" },
+              },
+            },
+          },
+        },
+      },
+    }) },
+  ];
   const cases = [
     { name: "absent record", comments: [] },
     { name: "another head", comments: [comment(renderReviewEvidenceRecord({ ...ROW, head_sha: "b".repeat(40) }))] },
@@ -156,6 +184,7 @@ test("W1-T12159 criterion 3: missing, mismatched, foreign and damaged evidence p
       routes: reads([comment(valid)], "success", FLEET, "d".repeat(40)) },
     { name: "another author", comments: [comment(valid, foreign)] },
     { name: "foreign status and author agree", comments: [comment(valid, foreign)], routes: reads([comment(valid, foreign)], "success", foreign) },
+    { name: "GraphQL publisher belongs to a newer same-state status", comments: [comment(valid)], routes: graphqlMismatchRoutes },
     { name: "unparseable", comments: [comment(valid.replace("{", "["))] },
     { name: "invalid checksum", comments: [comment(valid.replace("recorded by the reviewer", "altered"))] },
     { name: "older than the status", comments: [{ ...comment(valid), created_at: "2026-11-19T09:00:00Z", updated_at: "2026-11-19T09:00:00Z" }] },
@@ -169,6 +198,17 @@ test("W1-T12159 criterion 3: missing, mismatched, foreign and damaged evidence p
       assert.deepEqual(rows, []);
     });
   }
+});
+
+test("activity-after-failure reruns the reviewer instead of recovering an older evidence record", async (t) => {
+  const failed = renderReviewEvidenceRecord({ ...ROW, state: "failure" });
+  const routes = reads([comment(failed)], "failure");
+  const { reviewers, rows } = await sweep(t, [comment(failed)], "failure", routes, {
+    reviewVerdictPostedAt: STATUS_AT,
+    lastActivityAt: "2026-11-19T10:01:02Z",
+  });
+  assert.equal(reviewers, 1);
+  assert.deepEqual(rows, []);
 });
 
 test("W1-T12159 criterion 4: the recovered row names the GitHub comment as its source", async (t) => {

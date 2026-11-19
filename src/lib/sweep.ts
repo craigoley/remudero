@@ -27260,10 +27260,11 @@ export async function runSweep(
       );
       return;
     }
-    if (reviewMode.kind === "full-review" && job.pr.priorReviewAttemptsForInput === 0 &&
+    if (jobDisposition === "post-review" && reviewMode.kind === "full-review" && job.pr.priorReviewAttemptsForInput === 0 &&
         job.pr.checksState === "green" && job.pr.requiredContextsUnreadable !== true && job.pr.reviewPostRefused !== true &&
         !hostGapReviews.has(job.reviewKey) &&
         job.pr.reviewInputDigest !== undefined && (job.pr.reviewState === "success" || job.pr.reviewState === "failure") &&
+        !(job.pr.reviewState === "failure" && reviewVerdictOvertakenByActivity(job.pr)) &&
         deps.readReviewEvidenceRecord && postedRowsForInput(job.pr, ledgerLines).length === 0) {
       // Keep the claim across the GitHub read, and check for a local verdict before appending.
       let recovered: string | undefined;

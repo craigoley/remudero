@@ -84,7 +84,10 @@ function parseRecord(body: string): ReviewEvidencePayload | undefined {
 }
 
 export async function writeReviewEvidenceRecord(row: PostedReview, catalog?: "public" | "ops"): Promise<void> {
-  if (row.state === "pending" || row.review_input_digest === undefined) return;
+  if (row.state === "pending") return;
+  if (row.review_input_digest === undefined) {
+    throw new Error("cannot write terminal review evidence without the exact review input digest");
+  }
   const target = mergeTargetFromPrUrl(row.pr_url);
   if (!target) throw new Error("review evidence needs a GitHub pull request URL");
   const token = process.env[REVIEWER_TOKEN_ENV];
@@ -129,20 +132,9 @@ export async function readReviewEvidenceRecord(
   if (!row || row.pr_url !== expected.prUrl || row.head_sha !== expected.headSha ||
       row.review_input_digest !== expected.reviewInputDigest || row.state !== expected.reviewState) return undefined;
 
-  let statusAt = Number.NaN;
-  let statusCodeSha: string | undefined;
-  const status = await readReviewStatusEntry(target.owner, target.repo, expected.headSha, async args => {
-    const response = await fetch(args) as { sha?: unknown;
-      statuses?: Array<{ context?: string; state?: string; created_at?: string; description?: string }> };
-    if (response?.sha === expected.headSha && Array.isArray(response.statuses)) {
-      const entry = response.statuses.find(entry => entry?.context === REVIEW_CONTEXT);
-      if (entry?.state === row.state) {
-        statusAt = Date.parse(entry.created_at ?? "");
-        statusCodeSha = reviewCodeShaFromDescription(entry.description);
-      }
-    }
-    return response;
-  });
+  const status = await readReviewStatusEntry(target.owner, target.repo, expected.headSha, async args => fetch(args));
+  const statusAt = Date.parse(status?.createdAt ?? "");
+  const statusCodeSha = reviewCodeShaFromDescription(status?.description);
   if (status?.state !== row.state || status.posterLogin?.toLowerCase() !== login || status.posterType !== newest.user.type ||
       row.reviewer_code_sha !== statusCodeSha || !(Date.parse(newest.created_at) >= statusAt)) return undefined;
 
