@@ -19,6 +19,8 @@
     - src/lib/feedback-landing.ts
     - src/lib/measurement-cadence.ts
     - test/plan/a-status-reconcile-keeps-what-main-changed-since-its-read.test.ts
+    - test/measurement-cadence-production-wiring.test.ts
+    - test/the-boot-sweep-and-content-landings-await-their-preflight.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -91,6 +93,9 @@
     5. No change to reconcilePlan, reconcileShardStatus, stageBranchPending or the credit projection.
     6. The test builds its repository, remote and gh fake with test/helpers/ (git-repo.ts, fake-github.ts or
        gh-shim.ts). Criterion 1 uses the W1-T13790 shard text at b3cf1e609 and at b4c0f5757 as its fixture.
+    BUILD FOUND (2026-11-19): two existing tests land shards that exist only in the read copy, never on main; the
+    design refuses those, so their fixtures push the shards to main after the checkout is cloned (the checkout keeps no
+    plan/), and the cadence's edit becomes a plain field the wiring test's deepEqual names.
   falsifier: |
     Stage the input content as today: criteria 1, 2, 4 and 6 fail. Apply the edit to the read copy instead of
     main's text: criteria 1 and 6 fail. Skip the edit's checks on main's text: criterion 3 fails. Apply the
