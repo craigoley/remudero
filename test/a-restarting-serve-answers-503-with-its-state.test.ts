@@ -9,6 +9,7 @@ import type { AddressInfo } from "node:net";
 import { test } from "node:test";
 import { createServeSupervisor, restartingRetryAfterS, type PreparedSlot, type ServeSupervisorOptions } from "#src/lib/serve-supervisor.js";
 import type { GenerationMessage } from "#src/lib/serve-generation.js";
+import { assertWallClockBound } from "#test/helpers/wall-clock-bound.js";
 
 async function freePort(): Promise<number> {
   const probe = createServer();
@@ -108,7 +109,7 @@ test("W1-T13277 criterion 1: before the first promotion, the port answers 503 wi
   assert.ok(!("error" in reply), `answered, not refused (${JSON.stringify(reply)})`);
   assert.equal(reply.status, 503);
   assert.equal(reply.headers["retry-after"], "5", "no boot measured yet: the default");
-  assert.ok(reply.ms < 100, `answered within 100 ms (${reply.ms.toFixed(1)} ms)`);
+  assertWallClockBound(reply.ms, 100, `answered within 100 ms (${reply.ms.toFixed(1)} ms)`);
   const body = JSON.parse(reply.body) as Record<string, unknown>;
   assert.deepEqual(body, { state: "starting", since: new Date(1_000_000).toISOString(), reason: "boot", expectedReadyMs: null });
   r.advance(4_000);
