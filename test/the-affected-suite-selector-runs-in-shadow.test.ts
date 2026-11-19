@@ -171,6 +171,20 @@ test("W1-T6924: the now-view rederivation suite is selected for each recorded mi
   assert.ok(!absent.suites.includes(suite), "a suite absent from the tree cannot be selected");
 });
 
+for (const changed of [
+  "src/lib/sweep.ts",
+  "test/a-stalled-pr-stage-is-named-by-the-reason-it-kept-repeating.test.ts",
+]) {
+  test(`W1-T10546: the infrastructure re-run suite is selected for ${changed}`, () => {
+    const suite = "test/a-plan-only-pr-red-only-on-a-ci-infrastructure-step-is-re-run.test.ts";
+    const files = new Map([...Object.entries(TREE), [suite, ""], [changed, ""]]);
+    const selection = selectAffectedSuites([changed], { files, pathReaders: [], symbolSuites: [] });
+    assert.equal(selection.fullRun, false);
+    assert.ok(selection.suites.includes(suite), `${changed} must select ${suite} in the floor`);
+    assert.ok(selection.narrow?.includes(suite), `${changed} must select ${suite} in the narrow candidate`);
+  });
+}
+
 test("W1-T9511: the env-name suite is selected for each recorded miss edge", () => {
   const suite = "test/every-env-name-a-source-file-reads-is-registered.test.ts";
   const edges = [

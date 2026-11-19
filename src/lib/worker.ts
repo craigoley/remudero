@@ -52,6 +52,7 @@ import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { recordedWorktreeGitDir } from "./worktree-git.js";
+import { engineTreesRoot, isEngineTreeEntryName } from "./engine-paths.js";
 import { resolveTestSlotDir } from "./test-slot.js";
 import { performance } from "node:perf_hooks";
 import { createSdkMcpServer, query, tool, type Options, type PermissionMode, type SDKUserMessage, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
@@ -7916,7 +7917,12 @@ export async function runAdhocLaneReapRung(
         }
       },
     };
-    const rootSummary = await reap(root, baseOpts);
+    const engineRoot = engineTreesRoot(join(config.root, "state"));
+    const rootOverlapsEngineStore = pathsOverlap(root, engineRoot);
+    const rootSummary = rootOverlapsEngineStore
+      ? { reaped: [], reapedLocks: [], kept: [], keptReasons: [] }
+      : await reap(root, baseOpts);
+    if (rootOverlapsEngineStore) log("adhoc_lane.reap.root_skipped", { root, engine_root: engineRoot, reason: "overlaps-engine-store" });
     summaries.push(rootSummary);
     // LEDGER THE SURVEY EVEN THOUGH NOTHING WAS REMOVED — that IS the deliverable while disarmed. `reapStaleWorktrees`
     // populates `reaped`/`reapedLocks` under `dryRun` precisely so a caller can record what it would have reclaimed
@@ -7933,16 +7939,18 @@ export async function runAdhocLaneReapRung(
     // decisions stay inside reapStaleWorktrees. Supplying `candidatePaths` is the safety boundary — no parent directory is
     // walked to find unmanaged lanes.
     if (deps.repoDir !== undefined) {
-      const unmanaged = (deps.listUnmanaged ?? unmanagedWorktreeLanes)(config, deps.repoDir);
-      if (unmanaged.length) {
-        const unmanagedSummary = await reap(root, { ...baseOpts, candidatePaths: unmanaged });
-        summaries.push(unmanagedSummary);
+      const engineOwned: string[] = [];
+      const unmanaged = (deps.listUnmanaged ?? unmanagedWorktreeLanes)(config, deps.repoDir, undefined, (path) => engineOwned.push(path));
+      if (unmanaged.length || engineOwned.length) {
+        const unmanagedSummary = unmanaged.length ? await reap(root, { ...baseOpts, candidatePaths: unmanaged }) : undefined;
+        if (unmanagedSummary) summaries.push(unmanagedSummary);
         log("adhoc_lane.unmanaged", {
           count: unmanaged.length,
           lanes: unmanaged,
+          engine_owned: engineOwned.length,
           dry_run: !enabled,
-          reaped: unmanagedSummary.reaped.length,
-          reaped_locks: unmanagedSummary.reapedLocks.length,
+          reaped: unmanagedSummary?.reaped.length ?? 0,
+          reaped_locks: unmanagedSummary?.reapedLocks.length ?? 0,
         });
       }
     }
@@ -7989,6 +7997,7 @@ export function unmanagedWorktreeLanes(
   config: Config,
   repoDir: string,
   runGit: (args: string[], cwd: string) => string = defaultLaneListGit,
+  onEngineOwned: (path: string) => void = () => {},
 ): string[] {
   let out: string;
   try {
@@ -7996,7 +8005,12 @@ export function unmanagedWorktreeLanes(
   } catch {
     return []; // unreadable registration ⇒ report nothing, never guess a population
   }
-  const managed = [worktreesDir(config), adhocLaneRoot(config)];
+  const spellings = (path: string): string[] => [path, canonicalPath(path)];
+  const managed = [worktreesDir(config), adhocLaneRoot(config)].flatMap(spellings);
+  const engines = spellings(engineTreesRoot(join(config.root, "state")));
+  const main = spellings(repoDir);
+  const inside = (forms: string[], roots: string[]): boolean =>
+    forms.some((path) => roots.some((root) => path === root || path.startsWith(root.endsWith(sep) ? root : `${root}${sep}`)));
   const lanes: string[] = [];
   for (const line of out.split("\n")) {
     const m = /^worktree (.+)$/.exec(line.trim());
@@ -8004,11 +8018,47 @@ export function unmanagedWorktreeLanes(
     const path = m[1];
     // The main checkout reports itself first and is not a lane; a path under either managed root is already covered by a
     // rung. Compared with a trailing separator so `…/lanes-old` can never read as being inside `…/lanes`.
-    if (path === repoDir) continue;
-    if (managed.some((root) => path === root || path.startsWith(`${root}/`))) continue;
+    const forms = spellings(path);
+    if (forms.some((form) => main.includes(form))) continue;
+    const underEngineStore = inside(forms, engines);
+    // Engine worktrees win a root collision: `lanes` may itself resolve to `<state>/engines`. The engine
+    // owner manages its hash-named trees and `.build-` siblings; a stray non-engine registration there
+    // still belongs in this reaper's census.
+    if (underEngineStore && forms.some((form) => engines.some((engineRoot) =>
+      dirname(form) === engineRoot && isEngineTreeEntryName(basename(form))))) {
+      onEngineOwned(path);
+      continue;
+    }
+    if (!underEngineStore && inside(forms, managed)) continue;
     lanes.push(path);
   }
   return lanes;
+}
+
+/** W1-T10777: the real path of `path`, or of its nearest existing ancestor with the rest appended, so a gone tree still
+ * compares under a symlinked root. git registers real paths; config.root may not be one. */
+function canonicalPath(path: string): string {
+  let head = path;
+  let tail = "";
+  for (;;) {
+    try {
+      return join(realpathSync(head), tail);
+    } catch {
+      const up = dirname(head);
+      if (up === head) return path; // nothing resolves: the spelling git wrote is the only one to compare
+      tail = join(basename(head), tail);
+      head = up;
+    }
+  }
+}
+
+/** True when two roots are equal or one contains the other after symlinks are resolved. */
+function pathsOverlap(left: string, right: string): boolean {
+  const a = canonicalPath(left);
+  const b = canonicalPath(right);
+  const contains = (parent: string, child: string): boolean =>
+    child === parent || child.startsWith(parent.endsWith(sep) ? parent : `${parent}${sep}`);
+  return contains(a, b) || contains(b, a);
 }
 
 /** The real `git worktree list` reader {@link unmanagedWorktreeLanes} defaults to. Separated so the survey's own seam is
