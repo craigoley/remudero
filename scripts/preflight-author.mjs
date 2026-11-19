@@ -6,7 +6,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { affectedSelectionOrFull, buildAffectedSuitesGraph, changedSymbols, fullRunTrigger, isPlanOnlyDiff,
   planOnlySelectionOrFull, readAffectedSuitesInput, readPlanOnlyListing, symbollessSourceFiles } from '../src/lib/affected-suites.ts';
-import { callerReachableSuites } from '../src/lib/ci-parity.ts';
+import { authorCiSplit, callerReachableSuites, readAuthorCiContract } from '../src/lib/ci-parity.ts';
 import { authorTestRunnerArgs } from '../src/lib/test-run-timeout.ts';
 import { admitStaticWork, enqueueTestSlot, lowPriorityCommand, memoryTestConcurrency, readHostLoad, readMemoryHeadroom,
   readVmStat, TEST_FILE_PEAK_BYTES, testRunArgv, testRunConcurrency, testSlotExecutionAllowed } from '../src/lib/test-slot.ts';
@@ -223,9 +223,16 @@ export const CENSUS_TIME_BOUND_LINE = 'census-precheck: census suites NOT MEASUR
  *  (CENSUS_FULL_PASS_SKIPPED_LABEL in scripts/census-precheck.mjs). */
 export const CENSUS_FULL_PASS_SKIPPED_LINE = 'census-precheck: full pass SKIPPED (no census-read file changed) - ';
 
-/** The author's census step: counts first, and the full suite pass only when the diff touches a census read. */
-export function authorCensusPrecheckArgs(root, baseSha) {
-  return [join(root, 'scripts/census-precheck.mjs'), '--base', baseSha, '--skip-when-unread'];
+/** W1-T12511 — the author's census step runs the census COUNTS only: the census suites and the instrument-surface
+ *  child are left to the required ci.yml jobs authorCiSplit names. When a job it names cannot be confirmed in
+ *  ci.yml (`countsOnly` false), the step keeps the W1-T11940 full pass, skipped only when no census read changed. */
+export function authorCensusPrecheckArgs(root, baseSha, countsOnly = true) {
+  return [join(root, 'scripts/census-precheck.mjs'), '--base', baseSha, countsOnly ? '--counts-only' : '--skip-when-unread'];
+}
+
+/** The receipt line naming each check the author path left to CI, and the job and required check that run it. */
+export function leftToCiLine(rows) {
+  return `left to CI: ${rows.length === 0 ? 'nothing (no ci.yml job confirmed)' : rows.map((r) => `${r.job} (${r.ciJob} as ${r.ciCheck})`).join(', ')}`;
 }
 
 /** Whether the census step skipped its full pass, and the counts it relied on, read from its own stdout line. */
@@ -1157,8 +1164,14 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
       reusable = stages;
       console.log(`stage reuse: ${stageReuse.state}; ${stageReuse.reason}`);
       // A reused census passed measured: it was never time-bound and its full-pass note is the one it printed.
+      // W1-T12511: what this run leaves to CI, confirmed against this tree's ci.yml; the static child derives the same split.
+      const ciSplit = authorCiSplit(readAuthorCiContract(root));
+      receipt.leftToCi = ciSplit.leftToCi;
+      receipt.authorPathKept = ciSplit.kept;
+      console.log(leftToCiLine(ciSplit.leftToCi));
+      for (const { job, reason } of ciSplit.kept) console.log(`kept on the author path: ${job} — ${reason}`);
       const censusReused = Boolean(reuseStage('census-precheck'));
-      const census = censusReused ? { status: 0 } : runStep('census-precheck', authorCensusPrecheckArgs(root, receipt.baseSha));
+      const census = censusReused ? { status: 0 } : runStep('census-precheck', authorCensusPrecheckArgs(root, receipt.baseSha, ciSplit.censusCountsOnly));
       receipt.censusFullPass = censusReused ? previous.censusFullPass ?? { skipped: false } : censusFullPassNote(census);
       if (receipt.censusFullPass.skipped) console.log(`census full pass SKIPPED - ${receipt.censusFullPass.reliedOn}`);
       const censusTimeBound = censusTimeBoundOnly(census);
