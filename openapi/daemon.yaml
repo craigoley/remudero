@@ -11602,7 +11602,7 @@ components:
                     type: object
                     description: >
                       Optional version-one current contract observation (W1-T10430), bound to this registered
-                      repository, instance, prefix and owned projector generation. The matching named source
+                      repository, instance, prefix and held projector lease. The matching named source
                       has its own observation clock and existing inbox-store freshness budget, independent of
                       ledger health. Missing or unavailable evidence is not write readiness; neither is
                       observed evidence permission for an individual reply. Server checks remain authoritative.
@@ -11615,7 +11615,6 @@ components:
                       instance: {type: string}
                       repository: {type: string}
                       prefix: {type: string}
-                      generation: {type: integer, minimum: 0}
                   capabilities:
                     type: object
                     required: [views, writes]

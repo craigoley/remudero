@@ -4830,7 +4830,7 @@ export interface components {
           readModel: {
             lease: "held" | "elsewhere" | "none";
           };
-          /** Optional version-one current contract observation (W1-T10430), bound to this registered repository, instance, prefix and owned projector generation. The matching named source has its own observation clock and existing inbox-store freshness budget, independent of ledger health. Missing or unavailable evidence is not write readiness; neither is observed evidence permission for an individual reply. Server checks remain authoritative. */
+          /** Optional version-one current contract observation (W1-T10430), bound to this registered repository, instance, prefix and held projector lease. The matching named source has its own observation clock and existing inbox-store freshness budget, independent of ledger health. Missing or unavailable evidence is not write readiness; neither is observed evidence permission for an individual reply. Server checks remain authoritative. */
           inboxCapabilityEvidence?: {
             version: 1;
             qualificationGeneration: string;
@@ -4839,7 +4839,6 @@ export interface components {
             instance: string;
             repository?: string;
             prefix: string;
-            generation?: number;
           };
           capabilities: {
             views: (string)[];
