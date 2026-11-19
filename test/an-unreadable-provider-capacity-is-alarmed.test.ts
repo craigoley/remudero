@@ -109,6 +109,7 @@ test("doctorCommand feeds the live provider-routing read into the provider-capac
     readGitLocks: () => [],
     readCheckoutDepth: () => ({ shallow: false, commitCount: 980 }),
     readNvmrcVersion: () => process.versions.node,
+    hostPieceExists: () => true,
     // The live projection doctorCommand actually reads from (provider-routing-status.ts), stood
     // up here as a fixture rather than a real file — the exact read this arm feeds through
     // unchanged, mapped into ProviderCapacityReading by the wiring under test.
