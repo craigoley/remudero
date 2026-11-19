@@ -28,10 +28,47 @@ type Row = Record<string, unknown>;
 const CI_TEST_PATH_SUFFIX = /\b(?:test|tests|__tests__)[\\/][A-Za-z0-9._@%+~\\/-]+\.(?:[cm]?[jt]sx?)/gi;
 const CI_PATH_PREFIX_CHAR = /[A-Za-z0-9._:@%+~\\/-]/;
 
+const CI_LINE_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z /;
+const TAP_TOP_LEVEL_FAILURE = /^not ok \d+ - (.*)$/;
+const TAP_FAILURE_LOCATION = /^ {2}location: (['"])(.+?):\d+:\d+\1$/;
+const FLAKE_RETRY_FILES_LINE = /^FLAKE-RETRY-FILES: retrying \d+ failed file\(s\)(?: uninstrumented)? — (.+)$/;
+export type TapFailure = { test: string; location?: string; lines: string[] };
+
+/** W1-T13790 — the column-0 TAP failures in runner output, each with the `location:` key two spaces into its own
+ *  block and the block's lines. A quoted, deeper or nested line is never a key, so a quoted path is never a failure. */
+export function topLevelTapFailures(output: string): TapFailure[] {
+  const failures: TapFailure[] = [];
+  let open: TapFailure | undefined;
+  for (const raw of output.split(/\r?\n/)) {
+    const line = raw.replace(CI_LINE_TIMESTAMP, "").trimEnd();
+    const head = TAP_TOP_LEVEL_FAILURE.exec(line);
+    if (head) {
+      open = { test: head[1]!.trim(), lines: [line] };
+      failures.push(open);
+    } else if (open && (line === "  ..." || /^\S/.test(line))) {
+      open = undefined;
+    } else if (open) {
+      open.lines.push(line);
+      const key = open.location === undefined ? TAP_FAILURE_LOCATION.exec(line) : null;
+      if (key) open.location = key[2]!;
+    }
+  }
+  return failures;
+}
+
+/** The text a log tail names its failing files in: each column-0 block's own location, else (an annotation tail
+ *  carries no key) that block's own lines; and FLAKE-RETRY-FILES lines. A tail with no `not ok` is read whole. */
+function failingFileEvidence(logTail: string): string[] {
+  if (!/^(?:\S+ )?\s*not ok \d+ - /m.test(logTail)) return [logTail];
+  const named = topLevelTapFailures(logTail).map((failure) => failure.location ?? failure.lines.join("\n"));
+  const retried = logTail.split(/\r?\n/).flatMap((raw) => FLAKE_RETRY_FILES_LINE.exec(raw.replace(CI_LINE_TIMESTAMP, "").trimEnd())?.[1] ?? []);
+  return [...named, ...retried];
+}
+
 export function failingTestFilesFromCiFailures(failures: readonly Failure[]): string[] {
   const paths = new Set<string>();
   for (const failure of failures) {
-    for (const text of [failure.name, failure.logTail]) {
+    for (const text of [failure.name, ...failingFileEvidence(failure.logTail)]) {
       for (const match of text.matchAll(CI_TEST_PATH_SUFFIX)) {
         let start = match.index;
         while (start > 0 && CI_PATH_PREFIX_CHAR.test(text[start - 1])) start--;
