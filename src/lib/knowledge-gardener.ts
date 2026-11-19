@@ -15,6 +15,7 @@ import { hostWorktreeGit } from "./worktree-git.js";
 import { buildSkillEffectivenessReport, loadInjectableSkills, SKILL_EFFECTIVENESS_LEDGER_STEPS, stageSkillLifecycleProposal, type InjectableSkill, type SkillEffectivenessArm } from "./skill-workshop.js";
 import { updateProposalRegistry, type Proposal } from "./inbox.js";
 import {
+  gardenLedgerBucket,
   gardenStatePath,
   initialGardenState,
   judgeGardenPending,
@@ -699,23 +700,32 @@ export function stageSkillLifecycleForAction(
   log: (step: string, extra?: Record<string, unknown>) => void,
 ): void {
   if (actions.length === 0) return;
+  let ledger: ReturnType<typeof readLedgerUnionRecordsSync>;
   try {
-    const ledger = readLedgerUnionRecordsSync(stateDir, { step: SKILL_EFFECTIVENESS_LEDGER_STEPS, refuseIncomplete: true });
-    // A partial read is not evidence either way: staging from it could withdraw a staged retirement
-    // the full ledger still supports, so an incomplete union leaves the registry untouched.
-    if (!ledger.ok) return;
-    for (const action of actions) {
-      const report = buildSkillEffectivenessReport(ledger.rows, action.target);
-      const staged = stageSkillLifecycleProposal(join(stateDir, "inbox-proposals.json"), join(repoRoot, ".claude", "skills"), report);
-      const arm = (c: SkillEffectivenessArm) => ({ terminal_runs: c.terminal_runs, merged_runs: c.merged_runs, cost_per_merged_pr: c.cost_per_merged_pr });
-      log("skills.lifecycle_judged", {
-        skill: report.skill_name, status: report.status, basis: report.basis, settle_window_ms: report.settle_window_ms,
-        selected: arm(report.selected), control: arm(report.control), staged: staged.staged || staged.refreshed, withdrawn: staged.withdrawn,
-      });
+    ledger = readLedgerUnionRecordsSync(stateDir, { step: SKILL_EFFECTIVENESS_LEDGER_STEPS, refuseIncomplete: true });
+  } catch (error) {
+    log("knowledge.gardener_failed", { phase: "skill-lifecycle-evidence", error: String(error) });
+    return;
+  }
+  // A partial read could withdraw a retirement the full ledger still supports.
+  if (!ledger.ok) return;
+  const registry = join(stateDir, "inbox-proposals.json");
+  const approvedSkills = join(repoRoot, ".claude", "skills");
+  const arm = (c: SkillEffectivenessArm) => ({ terminal_runs: c.terminal_runs, merged_runs: c.merged_runs, cost_per_merged_pr: c.cost_per_merged_pr });
+  for (const action of actions) {
+    const report = buildSkillEffectivenessReport(ledger.rows, action.target);
+    const judgment = {
+      skill: report.skill_name, status: report.status, basis: report.basis, settle_window_ms: report.settle_window_ms,
+      selected: arm(report.selected), control: arm(report.control),
+    };
+    let staged: ReturnType<typeof stageSkillLifecycleProposal>;
+    try {
+      staged = stageSkillLifecycleProposal(registry, approvedSkills, report);
+    } catch (error) {
+      log("skills.lifecycle_judged", { ...judgment, staged: false, withdrawn: false, proposal_error: String(error) });
+      continue;
     }
-  } catch {
-    // deliberate: a background proposal attempt never fails the pass it rides in — the next tick
-    // tries again, and nothing here has written anything if the ledger could not be read.
+    log("skills.lifecycle_judged", { ...judgment, staged: staged.staged || staged.refreshed, withdrawn: staged.withdrawn });
   }
 }
 
@@ -1185,10 +1195,16 @@ export function knowledgeGardenSpec(deps: GardenerDeps<GardenWorkspace>): Garden
   const clock = deps.clock ?? systemClock;
   const approvedSkillsDir = join(deps.repoRoot, ".claude", "skills");
   const inboxPath = join(deps.stateDir, "inbox-proposals.json");
+  const usagePath = skillUsagePath(deps.stateDir);
   return {
     name: "knowledge",
     classes: GARDEN_ACTION_CLASSES,
-    cheapFingerprint: () => cheapFingerprint(deps.repoRoot, deps.stateDir),
+    cheapFingerprint: () => {
+      const corpus = cheapFingerprint(deps.repoRoot, deps.stateDir);
+      const skillUsageStamp = statSync(usagePath, { throwIfNoEntry: false })?.mtimeMs;
+      // Follow the ledger-reading gardens' hourly cadence. Each live ledger write would wake the pass.
+      return skillUsageStamp === undefined ? corpus : `${corpus}:${skillUsageStamp}:${gardenLedgerBucket(clock)}`;
+    },
     inventory: () => {
       const items = buildKnowledgeInventory(deps.repoRoot, { memoryDirs: deps.memoryDirs });
       const learningIds = items.filter((i) => i.kind === "learning").map((i) => bare(i.id));
@@ -1197,13 +1213,17 @@ export function knowledgeGardenSpec(deps: GardenerDeps<GardenWorkspace>): Garden
         items,
         testPins: testPinnedLearnings(deps.repoRoot, learningIds),
         usage: readLearningUsage(`${deps.stateDir}/learnings-usage.json`),
-        skillUsage: readSkillUsage(skillUsagePath(deps.stateDir)),
+        skillUsage: readSkillUsage(usagePath),
         approvedSkillNames: approvedSkills.map((s) => s.name),
         approvedSkills,
         guardZeroStreak: readGuardZeroStreak(deps.stateDir),
       };
     },
-    fingerprint: (inv) => gardenFingerprint(inv.items, inv.usage),
+    fingerprint: (inv) => {
+      const corpus = gardenFingerprint(inv.items, inv.usage);
+      const offered = inv.approvedSkillNames.filter((name) => (inv.skillUsage[name]?.offered ?? 0) > 0);
+      return offered.length === 0 ? corpus : `${corpus}:${gardenLedgerBucket(clock)}:${offered.sort().join(",")}`;
+    },
     // Every class that lands a PR here is judged on the same evidence: whether workers use the
     // learnings they are offered. SKILL-LIFECYCLE/GUARD-RETIREMENT never land a PR (see above), so
     // this metric is never actually read for them — `rmd approve` is their judge, not this loop.
@@ -1233,7 +1253,7 @@ export function knowledgeGardenSpec(deps: GardenerDeps<GardenWorkspace>): Garden
       // dir, outside the checkout this pass would otherwise land as a PR. STALE-CITATION (W1-T4682)
       // is the same shape — there is no single correct rewrite for a stale citation, so it stages
       // a proposal too, rather than editing the citing skill or doctrine body itself.
-      stageSkillLifecycleForAction(deps.stateDir, deps.repoRoot, plan.actions.filter((a) => a.class === "skill-lifecycle"), deps.log);
+      stageSkillLifecycleForAction(deps.stateDir, deps.repoRoot, plan0.actions.filter((a) => a.class === "skill-lifecycle"), deps.log);
       for (const a of plan.actions) {
         if (a.class === "guard-retirement") stageGuardRetirementProposal(inboxPath, a);
         if (a.class === "stale-citation") stageStaleCitationProposal(inboxPath, a);

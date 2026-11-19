@@ -5,16 +5,16 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { selectImplementSkills } from "#src/cli/commands/run-task-verb.js";
+import { clockFromMillisFn } from "#src/lib/clock.js";
 import type { Config } from "#src/lib/config.js";
-import { loadProposalRegistry } from "#src/lib/inbox.js";
-import { knowledgeGardenSpec, skillLifecycleCandidates, skillUsagePath, type GardenWorkspace } from "#src/lib/knowledge-gardener.js";
+import { gardenPassDue } from "#src/lib/gardener.js";
+import { loadProposalRegistry, updateProposalRegistryAsync } from "#src/lib/inbox.js";
+import { knowledgeGardenSpec, runGardenPass, skillLifecycleCandidates, skillUsagePath, type GardenWorkspace } from "#src/lib/knowledge-gardener.js";
 import type { CriterionVerdict } from "#src/lib/review.js";
 import {
   buildSkillEffectivenessReport,
   skillLifecycleProposalId,
   skillWithheldForRun,
-  stageSkillLifecycleProposal,
-  withdrawSkillLifecycleProposal,
 } from "#src/lib/skill-workshop.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import type { WorkerResult } from "#src/lib/worker.js";
@@ -54,24 +54,14 @@ function pricedArm(prefix: string, treated: boolean, runs: number, merged: numbe
   for (let i = 0; i < runs; i++) {
     const runId = `${prefix}-${i}`;
     const n = prBase + i;
-    rows.push(selection(runId, treated, skill), verdict(runId, "handed_off", { pr_url: `${PR}${n}`, total_cost_usd: cost(i) }));
-    rows.push(i < merged ? merge(n) : { step: "pr.terminal", pr_url: `${PR}${n}`, pr_number: n, state: "closed" });
+    rows.push(selection(runId, treated, skill, T0),
+      verdict(runId, "handed_off", { ts: iso(T0), pr_url: `${PR}${n}`, total_cost_usd: cost(i) }));
+    rows.push(i < merged ? merge(n, T0 + HOUR) : { ts: iso(T0 + HOUR), step: "pr.terminal", pr_url: `${PR}${n}`, pr_number: n, state: "closed" });
   }
   return rows;
 }
 
 test("W1-T13860 criterion 1: a closed or long-waiting handed-off run counts as not merged; thin or untimed evidence stays pending", () => {
-  // A PR closed without merging resolves at once, with or without timestamps.
-  const closed = buildSkillEffectivenessReport([
-    selection("closed-1", true),
-    verdict("closed-1", "handed_off", { pr_url: `${PR}1` }),
-    { step: "pr.terminal", pr_url: `${PR}1`, pr_number: 1, state: "closed" },
-  ], SKILL);
-  assert.equal(closed.selected.not_merged_runs, 1);
-  assert.equal(closed.selected.pending_merge_runs, 0);
-  assert.equal(closed.selected.merged_runs, 0);
-  assert.equal(closed.selected.harmful_terminal_runs, 0, "not merged is not harm");
-
   // Ten handed-off runs merged after 1..10 hours, so the settle window is the 95th percentile: 10 hours.
   const timed = (waitMs: number, mergedRuns: number): Row[] => {
     const rows: Row[] = [];
@@ -91,8 +81,8 @@ test("W1-T13860 criterion 1: a closed or long-waiting handed-off run counts as n
   assert.equal(settled.selected.not_merged_runs, 1, "waited longer than the window");
   assert.equal(settled.selected.pending_merge_runs, 0);
 
-  const inWindow = buildSkillEffectivenessReport(timed(9 * HOUR, 10), SKILL);
-  assert.equal(inWindow.selected.pending_merge_runs, 1, "inside the window it can still merge");
+  const inWindow = buildSkillEffectivenessReport(timed(10 * HOUR, 10), SKILL);
+  assert.equal(inWindow.selected.pending_merge_runs, 1, "the run must wait strictly longer than the window");
   assert.equal(inWindow.selected.not_merged_runs, 0);
 
   const thin = buildSkillEffectivenessReport(timed(100 * HOUR, 9), SKILL);
@@ -102,6 +92,30 @@ test("W1-T13860 criterion 1: a closed or long-waiting handed-off run counts as n
   const untimed = timed(100 * HOUR, 10).map((row) => (row.run_id === "waiting" ? { ...row, ts: undefined } : row));
   const noTs = buildSkillEffectivenessReport(untimed, SKILL);
   assert.equal(noTs.selected.pending_merge_runs, 1, "a run without a timestamp stays pending");
+
+  const closedRows = [
+    selection("closed-1", true),
+    verdict("closed-1", "handed_off", { ts: iso(T0), pr_url: `${PR}1` }),
+    { ts: iso(T0), step: "pr.terminal", pr_url: `${PR}1`, pr_number: 1, state: "closed" },
+  ];
+  const directMerges = Array.from({ length: 10 }, (_, i) =>
+    verdict(`direct-${i}`, "merged", { ts: iso(T0), pr_url: `${PR}${200 + i}` }));
+  const closedThin = buildSkillEffectivenessReport([...closedRows, ...directMerges.slice(1)], SKILL);
+  assert.equal(closedThin.settle_window_ms, null);
+  assert.equal(closedThin.selected.pending_merge_runs, 1, "closing a PR still requires the merge horizon");
+  const closed = buildSkillEffectivenessReport([...closedRows, ...directMerges], SKILL);
+  assert.equal(closed.settle_window_ms, 0, "a direct merge verdict records both timestamps");
+  assert.equal(closed.selected.not_merged_runs, 1);
+  assert.equal(closed.selected.pending_merge_runs, 0);
+  assert.equal(closed.selected.merged_runs, 0);
+  assert.equal(closed.selected.harmful_terminal_runs, 0);
+  assert.deepEqual(closed.selected.outcomes, { not_merged: 1 });
+  for (const missing of [1, 2]) {
+    const missingTs = closedRows.map((row, i) => i === missing ? { ...row, ts: undefined } : row);
+    const closedUntimed = buildSkillEffectivenessReport([...missingTs, ...directMerges], SKILL);
+    assert.equal(closedUntimed.settle_window_ms, 0);
+    assert.equal(closedUntimed.selected.pending_merge_runs, 1, "untimed verdict or close evidence stays pending");
+  }
 });
 
 test("W1-T13860 criterion 2: each arm carries its costed runs, run plus fix-round cost, and cost per merged PR", () => {
@@ -126,11 +140,13 @@ test("W1-T13860 criterion 2: each arm carries its costed runs, run plus fix-roun
 
 test("W1-T13860 criterion 3: an offered arm that costs more per merged PR at one-sided 95% is a retire candidate, every time", () => {
   const rows = [
-    ...pricedArm("sel", true, 20, 10, () => 5, 1000),
-    ...pricedArm("ctl", false, 20, 10, () => 1, 2000),
+    ...pricedArm("sel", true, 20, 20, () => 5, 1000),
+    ...pricedArm("ctl", false, 20, 5, () => 0.1, 2000),
   ];
   const report = buildSkillEffectivenessReport(rows, SKILL);
   assert.equal(report.selected.pending_merge_runs, 0);
+  assert.equal(report.control.pending_merge_runs, 0);
+  assert.ok(report.selected.merged_runs > report.control.merged_runs, "the offered arm has a favorable merge bound");
   assert.equal(report.status, "RETIRE-CANDIDATE");
   assert.equal(report.basis, "costs-more-than-it-saves");
   assert.ok((report.cost_difference_lower_bound_usd ?? 0) > 0, `bound ${report.cost_difference_lower_bound_usd}`);
@@ -146,15 +162,8 @@ test("W1-T13860 criterion 4: a skill that merges more at a cost not confidently 
   ], SKILL);
   assert.ok(shape.selected.cost_per_merged_pr! > shape.control.cost_per_merged_pr!, "precondition: it costs a little more");
   assert.ok((shape.cost_difference_lower_bound_usd ?? 0) <= 0);
-  assert.notEqual(shape.status, "RETIRE-CANDIDATE");
-  // A clear winner on merges is not retired even when its cost is confidently higher.
-  const winner = buildSkillEffectivenessReport([
-    ...pricedArm("sel", true, 20, 20, () => 5, 1000),
-    ...pricedArm("ctl", false, 20, 5, () => 0.1, 2000),
-  ], SKILL);
-  assert.ok((winner.cost_difference_lower_bound_usd ?? 0) > 0, "precondition: cost is confidently higher");
-  assert.equal(winner.status, "REVIEW-CANDIDATE");
-  assert.equal(winner.basis, "favorable-comparison");
+  assert.equal(shape.status, "REVIEW-CANDIDATE");
+  assert.equal(shape.basis, "favorable-comparison");
 });
 
 /** A repo root with approved skills, a state dir with skills-usage.json and a ledger. */
@@ -184,7 +193,7 @@ function lifecyclePass(root: string): Array<[string, Row]> {
   return logged.filter(([step]) => step === "skills.lifecycle_judged");
 }
 
-test("W1-T13860 criterion 5: a skill-lifecycle pass judges every offered approved skill and writes one row per skill", () => {
+test("W1-T13860 criterion 5: a skill-lifecycle pass judges every offered approved skill and writes one row per skill", async () => {
   const rows = [
     ...pricedArm("sel", true, 20, 10, () => 5, 1000),
     ...pricedArm("ctl", false, 20, 10, () => 1, 2000),
@@ -193,16 +202,27 @@ test("W1-T13860 criterion 5: a skill-lifecycle pass judges every offered approve
   const usage = { [SKILL]: { offered: 40, used: 30 }, "useful-skill": { offered: 40, used: 30 }, "unoffered-skill": { offered: 0, used: 0 } };
   const root = gardenFixture([SKILL, "useful-skill", "unoffered-skill"], usage, rows);
   try {
+    const registry = join(root, "state", "inbox-proposals.json");
+    await updateProposalRegistryAsync(registry, () => {
+      const judged = lifecyclePass(root);
+      assert.deepEqual(judged.map(([, row]) => row.skill), [SKILL, "useful-skill"]);
+      assert.equal(judged[0]![1].status, "RETIRE-CANDIDATE");
+      assert.equal(judged[0]![1].staged, false);
+      assert.match(String(judged[0]![1].proposal_error), /same-process-busy/);
+      assert.equal(judged[1]![1].status, "INSUFFICIENT EVIDENCE");
+      return null;
+    }, { maxWaitMs: 500 });
+    assert.deepEqual(loadProposalRegistry(registry), [], "a held lock prevents staging");
     const judged = lifecyclePass(root);
     assert.deepEqual(judged.map(([, row]) => row.skill).sort(), [SKILL, "useful-skill"]);
     const costly = judged.find(([, row]) => row.skill === SKILL)![1];
     assert.equal(costly.status, "RETIRE-CANDIDATE");
     assert.equal(costly.basis, "costs-more-than-it-saves");
-    assert.equal(costly.settle_window_ms, null);
+    assert.equal(costly.settle_window_ms, HOUR);
     assert.deepEqual(costly.selected, { terminal_runs: 20, merged_runs: 10, cost_per_merged_pr: 10 });
     assert.deepEqual(costly.control, { terminal_runs: 20, merged_runs: 10, cost_per_merged_pr: 2 });
     assert.equal(costly.staged, true);
-    const staged = loadProposalRegistry(join(root, "state", "inbox-proposals.json"));
+    const staged = loadProposalRegistry(registry);
     assert.deepEqual(staged.map((p) => p.id), [skillLifecycleProposalId(SKILL)]);
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -258,12 +278,13 @@ async function fixPrompt(stateRoot: string, runId: string, approvedSkillsDir: st
 
 test("W1-T13860 criterion 6: a skill with a staged retirement is offered only on the seeded share; withdrawing restores it", async () => {
   const rows = [
-    ...pricedArm("sel", true, 20, 10, () => 5, 1000),
+    ...pricedArm("sel", true, 20, 10, () => 5, 1000).filter((row) => row.state !== "closed"),
     ...pricedArm("ctl", false, 20, 10, () => 1, 2000),
   ];
-  const root = gardenFixture([SKILL], {}, []);
-  writeFileSync(join(root, ".claude", "skills", SKILL, "SKILL.md"), `---\nname: ${SKILL}\napplies-to: implement, fix\n---\n\nDo ${SKILL}.\n`);
-  const registry = join(root, "state", "inbox-proposals.json");
+  const root = gardenFixture([SKILL], { [SKILL]: { offered: 20, used: 15 } }, []);
+  const stateDir = join(root, "state");
+  const registry = join(stateDir, "inbox-proposals.json");
+  const approved = join(root, ".claude", "skills");
   const task = { type: "implement" as const, files: ["src/a.ts"] };
   const offeredRuns = (): string[] => {
     const out: string[] = [];
@@ -275,18 +296,45 @@ test("W1-T13860 criterion 6: a skill with a staged retirement is offered only on
   const seededShare = Array.from({ length: 400 }, (_, i) => `run-${i}`).filter((r) => skillWithheldForRun(r, SKILL));
   const normal = Array.from({ length: 400 }, (_, i) => `run-${i}`).filter((r) => !skillWithheldForRun(r, SKILL));
   try {
+    writeFileSync(join(approved, SKILL, "SKILL.md"), `---\nname: ${SKILL}\napplies-to: implement, fix\n---\n\nDo ${SKILL}.\n`);
+    writeFileSync(join(stateDir, "KNOWLEDGE_OFF-refresh"), "");
+    const ledger = writeLedger(rows, { dir: stateDir });
+    let now = T0 + HOUR;
+    const judged: Row[] = [];
+    const deps = {
+      stateDir, repoRoot: root, seed: 3, clock: clockFromMillisFn(() => now),
+      log: (step: string, extra?: Row) => { if (step === "skills.lifecycle_judged") judged.push(extra ?? {}); },
+      openWorkspace: (): GardenWorkspace => ({
+        root, refreshAssertions: () => [], dispose: () => {},
+        land: () => { throw new Error("skill lifecycle uses the proposal registry"); },
+      }),
+    };
+    const spec = knowledgeGardenSpec(deps);
     assert.deepEqual(offeredRuns(), normal, "before staging: offered on every run the seed does not withhold");
-    const staged = stageSkillLifecycleProposal(registry, join(root, ".claude", "skills"), buildSkillEffectivenessReport(rows, SKILL));
-    assert.equal(staged.staged, true);
+    assert.equal(gardenPassDue(spec, deps), true);
+    assert.deepEqual((await runGardenPass(deps)).plan?.acting, ["skill-lifecycle"]);
+    assert.equal(judged[0]?.status, "RETIRE-CANDIDATE");
+    assert.deepEqual(loadProposalRegistry(registry).map((proposal) => proposal.id), [skillLifecycleProposalId(SKILL)]);
+    assert.equal(gardenPassDue(spec, deps), false, "an unchanged tick is idle");
     assert.deepEqual(offeredRuns(), seededShare, "staged: offered only on the seeded share");
     assert.ok(seededShare.length < normal.length / 2);
     // The fix lane reads the same registry.
     const keptRun = normal[0]!;
-    assert.ok(!(await fixPrompt(root, keptRun, join(root, ".claude", "skills"))).includes(`## skill: ${SKILL}`));
-    assert.ok((await fixPrompt(root, seededShare[0]!, join(root, ".claude", "skills"))).includes(`## skill: ${SKILL}`));
-    assert.equal(withdrawSkillLifecycleProposal(registry, skillLifecycleProposalId(SKILL)), true);
+    assert.ok(!(await fixPrompt(root, keptRun, approved)).includes(`## skill: ${SKILL}`));
+    assert.ok((await fixPrompt(root, seededShare[0]!, approved)).includes(`## skill: ${SKILL}`));
+
+    now += HOUR;
+    ledger.append(Array.from({ length: 10 }, (_, i) => [
+      merge(1010 + i, now),
+      { ts: iso(now), step: "fix.done", repair_pr_url: `${PR}${2000 + i}`, notional_cost_usd: 20 },
+    ]).flat());
+    assert.equal(gardenPassDue(spec, deps), true, "new ledger evidence is eligible on the next hourly pass");
+    assert.deepEqual((await runGardenPass(deps)).plan?.acting, ["skill-lifecycle"]);
+    assert.deepEqual(judged.map((row) => row.basis), ["costs-more-than-it-saves", "favorable-comparison"]);
+    assert.equal(judged[1]?.withdrawn, true);
+    assert.deepEqual(loadProposalRegistry(registry), []);
     assert.deepEqual(offeredRuns(), normal, "withdrawn: the normal share returns");
-    assert.ok((await fixPrompt(root, keptRun, join(root, ".claude", "skills"))).includes(`## skill: ${SKILL}`));
+    assert.ok((await fixPrompt(root, keptRun, approved)).includes(`## skill: ${SKILL}`));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

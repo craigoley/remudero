@@ -971,7 +971,7 @@ export interface SkillEffectivenessReport {
   /** Terminal compared runs per skill version, in first-seen order; `digest: null` is a row written before
    *  versions were recorded. The comparison above pools every version listed here. */
   versions: SkillEffectivenessVersion[];
-  /** The 95th percentile of verdict-to-merge time over handed-off runs that merged; null below the horizon. */
+  /** The 95th percentile of verdict-to-merge time over timestamped merged runs; null below the horizon. */
   settle_window_ms: number | null;
   /** One-sided 95% lower bound of (selected minus control) cost per merged PR; null when not compared. */
   cost_difference_lower_bound_usd: number | null;
@@ -1025,11 +1025,9 @@ const rowCostUsd = (row: SkillLedgerRow): number | undefined => {
  * terminal `verdict` row that carries the same run id.  It never reads or writes the approved
  * tree: results are evidence for an operator's later decision, not a lifecycle action.
  *
- * W1-T10764: a run's own `verdict` row never reads `merged` — it hands off (`handed_off`,
- * `blocked_ci`) and the merge is recorded later under another run id: a `verdict.merged` credit
- * backfill, or a `pr.terminal` row reading `merged`. So a run resolves to `merged` when its terminal
- * `verdict` row names a PR that any {@link isMergedLedgerRow} row names. The join is by PR, never by
- * `task_id`: a task can have several runs and only one PR merged.
+ * A direct merge records its own terminal verdict. Handed-off runs can merge under another run id
+ * through a `verdict.merged` credit or a `pr.terminal` row. The join is by PR because a task can
+ * have several runs and only one PR merged.
  */
 export function buildSkillEffectivenessReport(
   rows: readonly SkillLedgerRow[],
@@ -1038,7 +1036,7 @@ export function buildSkillEffectivenessReport(
 ): SkillEffectivenessReport {
   const terminalVerdictByRun = new Map<string, { verdict: string; prKey: string | undefined; ms: number | undefined; cost: number | undefined }>();
   const mergedAtMs = new Map<string, number | undefined>();
-  const closedPrKeys = new Set<string>();
+  const timedClosedPrKeys = new Set<string>();
   const fixCostByPr = new Map<string, number>();
   const selectionByRun = new Map<string, { selected: boolean; withheld?: boolean; digest: string | null }>();
   let latestMs: number | undefined;
@@ -1053,9 +1051,9 @@ export function buildSkillEffectivenessReport(
         mergedAtMs.set(prKey, prior === undefined ? ms : ms === undefined ? prior : Math.min(prior, ms));
       }
     }
-    if (row.step === PR_TERMINAL_STEP && row.state === "closed") {
+    if (row.step === PR_TERMINAL_STEP && row.state === "closed" && ms !== undefined) {
       const prKey = effectivenessPrKey(row);
-      if (prKey !== undefined) closedPrKeys.add(prKey);
+      if (prKey !== undefined) timedClosedPrKeys.add(prKey);
     }
     if (row.step === "fix.done") {
       const prKey = effectivenessPrKey(row) ?? prUrlKey(row.repair_pr_url);
@@ -1084,11 +1082,10 @@ export function buildSkillEffectivenessReport(
   }
 
   const isMerged = (prKey: string | undefined): boolean => prKey !== undefined && mergedAtMs.has(prKey);
-  // Settle: the window is how long handed-off runs that did merge waited for their merge row.
   const delays: number[] = [];
   for (const terminal of terminalVerdictByRun.values()) {
-    if (!PENDING_VERDICTS.includes(terminal.verdict) || !isMerged(terminal.prKey)) continue;
-    const mergedMs = mergedAtMs.get(terminal.prKey!);
+    const mergedMs = terminal.verdict === "merged" ? terminal.ms
+      : terminal.prKey === undefined ? undefined : mergedAtMs.get(terminal.prKey);
     if (terminal.ms !== undefined && mergedMs !== undefined) delays.push(Math.max(0, mergedMs - terminal.ms));
   }
   delays.sort((a, b) => a - b);
@@ -1096,18 +1093,18 @@ export function buildSkillEffectivenessReport(
 
   // Resolved only after every row is read: the merge row is written after the run's verdict, but a union
   // read need not return them in that order.
-  const resolve = (runId: string): { outcome: string; notMerged: boolean; cost: number | undefined } | undefined => {
+  const resolve = (runId: string): { outcome: string; cost: number | undefined } | undefined => {
     const terminal = terminalVerdictByRun.get(runId);
     if (terminal === undefined) return undefined;
     const cost = terminal.cost === undefined ? undefined
       : terminal.cost + (terminal.prKey === undefined ? 0 : fixCostByPr.get(terminal.prKey) ?? 0);
-    if (isMerged(terminal.prKey)) return { outcome: "merged", notMerged: false, cost };
-    const notMerged = PENDING_VERDICTS.includes(terminal.verdict) && (
-      (terminal.prKey !== undefined && closedPrKeys.has(terminal.prKey)) ||
-      (settleWindowMs !== null && terminal.ms !== undefined && latestMs !== undefined && latestMs > terminal.ms + settleWindowMs));
-    return { outcome: terminal.verdict, notMerged, cost };
+    if (isMerged(terminal.prKey)) return { outcome: "merged", cost };
+    if (PENDING_VERDICTS.includes(terminal.verdict) && settleWindowMs !== null && terminal.ms !== undefined) {
+      const closed = terminal.prKey !== undefined && timedClosedPrKeys.has(terminal.prKey);
+      if (closed || (latestMs !== undefined && latestMs > terminal.ms + settleWindowMs)) return { outcome: "not_merged", cost };
+    }
+    return { outcome: terminal.verdict, cost };
   };
-  const terminalOutcome = (runId: string): string | undefined => resolve(runId)?.outcome;
 
   // Once any randomized row exists for this skill, only randomized rows are compared: the arms are then
   // assigned, so a budget omission (which tracks how many skills a task drew) cannot bias them.
@@ -1124,12 +1121,12 @@ export function buildSkillEffectivenessReport(
       cohort.observed_eligible_runs++;
       const resolved = resolve(runId);
       if (!resolved) continue;
-      const { outcome, notMerged, cost } = resolved;
+      const { outcome, cost } = resolved;
       cohort.terminal_runs++;
       cohort.outcomes[outcome] = (cohort.outcomes[outcome] ?? 0) + 1;
       if (outcome === "merged") cohort.merged_runs++;
-      if (notMerged) cohort.not_merged_runs++;
-      const pending = PENDING_VERDICTS.includes(outcome) && !notMerged;
+      if (outcome === "not_merged") cohort.not_merged_runs++;
+      const pending = PENDING_VERDICTS.includes(outcome);
       if (pending) cohort.pending_merge_runs++;
       if ((SKILL_EFFECTIVENESS_HARM_OUTCOMES as readonly string[]).includes(outcome)) cohort.harmful_terminal_runs++;
       if (!pending && cost !== undefined) samples.push({ runId, cost, merged: outcome === "merged" });
@@ -1148,7 +1145,7 @@ export function buildSkillEffectivenessReport(
   const versionByDigest = new Map<string | null, SkillEffectivenessVersion>();
   for (const [runId, observation] of selectionByRun) {
     const treated = inArm(observation, true);
-    if ((!treated && !inArm(observation, false)) || terminalOutcome(runId) === undefined) continue;
+    if ((!treated && !inArm(observation, false)) || !terminalVerdictByRun.has(runId)) continue;
     let version = versionByDigest.get(observation.digest);
     if (version === undefined) {
       version = { digest: observation.digest, selected_terminal_runs: 0, control_terminal_runs: 0 };
@@ -1180,7 +1177,7 @@ export function buildSkillEffectivenessReport(
   } else if (harmExcessPValue(selected, control) < SKILL_EFFECTIVENESS_HARM_ALPHA) {
     status = "RETIRE-CANDIDATE";
     basis = "named-harm-signal";
-  } else if (costLowerBound !== null && costLowerBound > 0 && !(selectedMergeRate > controlMergeUpper)) {
+  } else if (costLowerBound !== null && costLowerBound > 0) {
     status = "RETIRE-CANDIDATE";
     basis = "costs-more-than-it-saves";
   } else if (selectedMergeUpper <= controlMergeRate) {
