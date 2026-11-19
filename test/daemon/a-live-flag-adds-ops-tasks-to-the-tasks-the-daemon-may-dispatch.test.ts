@@ -44,6 +44,8 @@ interface Scenario {
   ownerHold?: "pause" | "stop";
   realClaims?: boolean;
   realWorkerDependency?: boolean;
+  /** W1-T13749: while the sound task runs, the real runner is asked to run the held one. */
+  realHeldRun?: string;
   lookupPrivacy?: boolean;
   selectionRecord?: Record<string, unknown>;
   coreRefusal?: "throw" | "missing-plan" | "unreadable" | "public-revision" | "ops-revision" | "identity";
@@ -224,6 +226,18 @@ async function selectedRun(enabled: unknown, scenario: Scenario = {}): Promise<{
         } catch (error) { failure = error; }
         rows.push({ step: "fixture.real_worker_dependency", data: { reachedWorker, failure: String(failure) } });
       }
+      if (scenario.realHeldRun && id !== scenario.realHeldRun) {
+        let reachedWorker = false, failure: unknown;
+        try {
+          await withLiveWritesAllowed(() => runTask(scenario.realHeldRun!, {
+            config: { root, installRoot: REPO_ROOT, claudeBin: "/bin/false", workerProviders: { harnessCommitsImplement: true } },
+            planPath: target.planPath, skipGitSync: true,
+            claimReserver: { mintAnchor: () => "fixture", attempt: () => "created", holder: () => undefined, drop: () => true },
+            spawn: async () => { reachedWorker = true; throw new Error("fixture stops before any model execution"); },
+          }));
+        } catch (error) { failure = error; }
+        rows.push({ step: "fixture.real_held_run", data: { reachedWorker, failure: String(failure) } });
+      }
       ran.push(id);
       return { taskId: id, runId: `${id}-fixture`, merged: true, costUsd: 0, verdict: "merged" };
     },
@@ -362,10 +376,13 @@ test("W1-T12209 criterion 6: an explicitly false host flag leaves public dispatc
 test("W1-T12209 criterion 2: ops waits for public credit and the reversed graph is refused atomically", async () => {
   const waiting = await selectedRun(true, { opsText: opsYaml.replace("depends_on: []", "depends_on: [PUB-A]") });
   assert.deepEqual(waiting.ran, ["PUB-A", "OPS-T1", "PUB-B"]);
+  // W1-T13749: the reversed edge holds the public task that names the ops id, never the ops catalog.
   const reversed = await selectedRun(true, { reversePublicEdge: true });
-  assert.ok(!reversed.ran.includes("OPS-T1"));
-  assert.deepEqual(reversed.ran, ["PUB-B", "PUB-C"]);
-  assert.ok(reversed.rows.some(row => row.step === "dispatch.ops_catalog_held" && row.data.outcome === "invalid_cross_catalog_dependency"));
+  assert.ok(!reversed.ran.includes("PUB-A"));
+  assert.deepEqual(reversed.ran, ["OPS-T1", "PUB-B"]);
+  assert.equal(reversed.rows.some(row => row.step === "dispatch.ops_catalog_held"), false);
+  assert.deepEqual(reversed.rows.filter(row => row.step === "dispatch.ops_task_held").map(row => row.data),
+    [{ task: "PUB-A", outcome: "invalid_cross_catalog_dependency", edge: "PUB-A -> OPS-T1" }]);
 });
 
 test("W1-T12209 criterion 1: a completed ops lane refills from the combined priority frontier while public work runs", { timeout: 30_000 }, async t => {
@@ -377,11 +394,26 @@ test("W1-T12209 criterion 1: a completed ops lane refills from the combined prio
 });
 
 test("W1-T12209 criterion 3: a duplicate refuses the ops snapshot and reports the public id once", async () => {
+  // W1-T13749: the duplicate holds both copies of the public id, never the ops task beside it.
   const duplicate = await selectedRun(true, { opsText: opsYaml.replace("OPS-T1", "PUB-A") + opsYaml });
-  assert.deepEqual(duplicate.ran, ["PUB-A", "PUB-B", "PUB-C"]);
-  const refusals = duplicate.rows.filter(row => row.step === "dispatch.ops_catalog_held");
+  assert.deepEqual(duplicate.ran, ["OPS-T1", "PUB-B", "PUB-C"]);
+  assert.equal(duplicate.rows.some(row => row.step === "dispatch.ops_catalog_held"), false);
+  const refusals = duplicate.rows.filter(row => row.step === "dispatch.ops_task_held");
   assert.equal(refusals.length, 1);
-  assert.deepEqual(refusals[0]!.data, { outcome: "duplicate_task_id", task_id: "PUB-A" });
+  assert.deepEqual(refusals[0]!.data, { task: "PUB-A", outcome: "duplicate_task_id", edge: "PUB-A in both catalogs" });
+});
+
+test("W1-T13749 criterion 7: the real runner refuses an ops task the composition holds before any worker starts, while the sound one beside it dispatches", async () => {
+  const held = opsYaml.replace("OPS-T1", "OPS-T2").replace("depends_on: []", "depends_on: [W1-T900099]");
+  const result = await selectedRun(true, { realHeldRun: "OPS-T2", opsText: opsYaml + held });
+  assert.equal(result.ran.includes("OPS-T2"), false, "the daemon never dispatches the held task");
+  assert.equal(result.ran[0], "OPS-T1", JSON.stringify(result.ran));
+  const probes = result.rows.filter(row => row.step === "fixture.real_held_run");
+  assert.ok(probes.length > 0, "positive control: the real runner was asked to run the held task");
+  for (const probe of probes) {
+    assert.equal(probe.data.reachedWorker, false, JSON.stringify(probe));
+    assert.match(String(probe.data.failure), /task catalog unreadable \(ops-held-invalid_cross_catalog_dependency\)/);
+  }
 });
 
 test("W1-T12209 criterion 4: the actual command worker path reserves the public ref and a rival cannot take it", async () => {

@@ -1,6 +1,6 @@
 import { isImprovementBoundProposal, isReviewedImprovementDraft, runImprovementAction, type ImprovementPlanReceipt } from "./lib/improvement-thread.js";
 import { fileEligibleFollowups, followupFilingPresentation, type FollowupFinalizer } from "./lib/followup-filing.js";
-import { findReleasePlanInCatalogs, findTaskInCatalogs, catalogTaskContract, type TaskLookupOptions } from "./lib/task-lookup.js";
+import { compositionHoldEdge, findApproveReleasePlan, findTaskInCatalogs, catalogTaskContract, readReleasePublicPlan, type TaskLookupOptions } from "./lib/task-lookup.js";
 import type { OpsCatalogApi } from "./lib/ops-catalog-source.js";
 import { operatorReleaseContractChanged, operatorReleasePin, qualifyReleaseEvidence, readReleaseLedgerLines, releaseContractPins, type ReleaseEvidence } from "./lib/operator-release.js";
 import {
@@ -39870,11 +39870,19 @@ export async function approveCommand(
     const located = deps.planPath === undefined ? verbTaskPlan(proposalId, () => join(config.root, "state")) : undefined;
     // W1-T13386: a local miss asks the catalog this host names before the id is called unknown. An ops task
     // is released against the plan the daemon's tick composes, so both read the same pin.
+    // W1-T13749: that composition reads the checkout's origin/main, the ref the daemon's plan reloader reads, never
+    // its working tree (on the host, the boot's detached HEAD); a local id origin/main moved out goes to the catalogs.
     const localPlan = located?.ok ? located.plan : loadPlan(planPath);
-    const held = located?.ok ? undefined
-      : await findReleasePlanInCatalogs(proposalId, localPlan, { ...deps.taskLookup, stateDir: join(config.root, "state") });
+    const checkoutRoot = located?.ok ? located.root : dirname(dirname(planPath));
+    const held = await findApproveReleasePlan(proposalId, localPlan, () => readReleasePublicPlan(checkoutRoot),
+      { ...deps.taskLookup, stateDir: join(config.root, "state") });
     if (held?.outcome === "unreadable") {
       console.error(`rmd approve: cannot release '${proposalId}': the task catalogs cannot be read as the daemon composes them (${held.reason}) — nothing released`);
+      return 1;
+    }
+    if (held?.outcome === "held") {
+      const whose = held.hold.task === proposalId ? "its own edge" : `the edge of ${held.hold.task}, which it depends on`;
+      console.error(`rmd approve: cannot release '${proposalId}': it is held by ${whose} (${held.hold.reason}: ${compositionHoldEdge(held.hold)}) — nothing released`);
       return 1;
     }
     if (located && !located.ok && held?.outcome !== "found") {

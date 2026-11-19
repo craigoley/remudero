@@ -22,10 +22,13 @@ function yaml(prefix: string, count: number, extra: (i: number) => string = () =
 
 const plan = (prefix: string, count: number, extra?: (i: number) => string): Plan => loadPlanFromYaml(yaml(prefix, count, extra), `${prefix} plan`);
 
-/** The outcome code and how many canonical parses the call ran. */
+/** The outcome code and how many canonical parses the call ran. Since W1-T13749 a bad edge holds its own tasks
+ *  inside an ok composition: such a composition reads `held:<reason>`. */
 function compose(primary: Plan, secondary: Plan): { outcome: string; parses: number } {
   const before = snapshotParseCount();
-  const outcome = composeSecondaryPlan(primary, secondary).outcome;
+  const composition = composeSecondaryPlan(primary, secondary);
+  const held = composition.outcome === "ok" ? [...composition.held.values()][0] : undefined;
+  const outcome = held ? `held:${held.reason}` : composition.outcome;
   return { outcome, parses: snapshotParseCount() - before };
 }
 
@@ -55,7 +58,7 @@ test("W1-T13610 criterion 2: each outcome is the same on the first call, which p
       name: "a byId map that does not match tasks", outcome: "malformed",
       make: () => { const p = plan("W1-E", 30); p.byId.set("W1-E7", { ...p.byId.get("W1-E7")! }); return [p, plan("OPS-E", 5)]; },
     },
-    { name: "a duplicate id", outcome: "duplicate_task_id", make: () => [plan("W1-F", 30), plan("W1-F", 2)] },
+    { name: "a duplicate id", outcome: "held:duplicate_task_id", make: () => [plan("W1-F", 30), plan("W1-F", 2)] },
     {
       name: "a getter that throws", outcome: "malformed",
       make: () => {
@@ -65,7 +68,7 @@ test("W1-T13610 criterion 2: each outcome is the same on the first call, which p
       },
     },
     {
-      name: "a primary task that depends on a secondary one", outcome: "invalid_cross_catalog_dependency",
+      name: "a primary task that depends on a secondary one", outcome: "held:invalid_cross_catalog_dependency",
       make: () => { const p = plan("W1-H", 30); const s = plan("OPS-H", 5); p.tasks[0]!.depends_on = ["OPS-H1"]; return [p, s]; },
     },
   ];
