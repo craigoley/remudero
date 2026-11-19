@@ -13563,8 +13563,8 @@ interface TaskIdDestinationSnapshot {
   openPrTexts: readonly string[];
 }
 
-/** The destination plan is read in one `cat-file --batch`, so its whole size must fit one child's stdout. The ops plan
- *  outgrew Node's 1 MiB default on 2026-11-18 and every id mint refused; this matches the other plan readers' bound. */
+/** BACKSTOP: the destination plan is read in one `cat-file --batch`. Exceeding this buffer refuses the snapshot.
+ *  The ops plan outgrew Node's 1 MiB default on 2026-11-18. This matches the other plan readers' bound. */
 export const TASK_ID_DESTINATION_MAX_BUFFER = 1 << 27;
 
 /** A fetched, commit-pinned ID population. Dirty checkout bytes never replace the fetched plan. */
