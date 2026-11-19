@@ -715,6 +715,8 @@ test("W1-T2269: arming (or not arming) the credential refresh changes NOTHING ab
     "/v1/inbox/approve",
     "/v1/manual/approve",
     "/v1/merge-hold",
+    "/v1/new-path-approval/confirm",
+    "/v1/new-path-approval/revoke",
     "/v1/operator-agent/actions/decision",
     "/v1/operator-agent/actions/execute-high",
     "/v1/operator-agent/consequences/decision",

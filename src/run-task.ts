@@ -954,6 +954,7 @@ import {
   stopServeReadModel,
   serveGeneration,
   defaultIsListening,
+  newPathApprovalIssuerConfig,
 } from "./lib/serve.js";
 import {
   awaitPromotion,
@@ -1472,6 +1473,8 @@ import {
   DEFAULT_RISK,
   type TaskRisk,
   type MergedResolver,
+  type NewPathApprovalFacts,
+  resolveNewPathApprovalFacts,
   type Plan,
   type Task,
   type TaskStatus,
@@ -18400,6 +18403,8 @@ export type LintPlanStatusDeps = {
    * names every check or refinement that becomes unavailable.
    */
   offline?: boolean;
+  /** Bounded opt-in transport for explicit new-path issuer facts; omitted means no network. */
+  resolveNewPathApproval?: typeof resolveNewPathApprovalFacts;
 };
 
 // ── W1-T1076: THE FILING-TIME DUPLICATE CORPUS ──────────────────────────────────────────────
@@ -19947,15 +19952,35 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   let planOnlyFilingDiff: boolean | undefined;
   let doctrineCitations: DoctrineCitationFacts | undefined;
   let releasedIdsForAdmission = new Set<string>();
+  const newPathApprovalFacts = new Map<string, NewPathApprovalFacts>();
+  let filingConfig: Config | undefined;
   if (scope && !offline) {
     try {
-      const config = (deps.loadConfig ?? loadConfig)();
-      releasedIdsForAdmission = new Set(resolveReleasedIds(releaseReadersFor(ledgerPathFor(config)), plan));
+      filingConfig = (deps.loadConfig ?? loadConfig)();
+      releasedIdsForAdmission = new Set(resolveReleasedIds(releaseReadersFor(ledgerPathFor(filingConfig)), plan));
     } catch {
       // An unreadable ledger releases nothing. That is the safe direction for a machine filing:
       // it must not become dispatchable by guessing that an operator approved it.
       releasedIdsForAdmission = new Set<string>();
     }
+  }
+  if (scope && !offline && filingConfig) {
+    try {
+      const binding = newPathApprovalIssuerConfig(() => filingConfig!);
+      if (binding) {
+        // Do not mint a console credential from a lint invocation. Resolve only when an explicit
+        // issuer binding exists and the already-published service token is readable.
+        const tokenFile = JSON.parse(readFileSync(serviceTokensPath(filingConfig.root), "utf8")) as { write?: unknown };
+        const token = typeof tokenFile.write === "string" && /^[a-f0-9]{64}$/.test(tokenFile.write) ? tokenFile.write : "";
+        const selected = plan.tasks.filter((candidate) => scope!.has(candidate.id) && candidate.new_path_approval_ref !== undefined);
+        // A changed PR should have few referenced approvals; cap total issuer work as a fixed
+        // upper bound and fail closed for any excess references.
+        for (const candidate of selected.slice(0, 20)) {
+          const resolved = await (deps.resolveNewPathApproval ?? resolveNewPathApprovalFacts)(candidate, binding, token);
+          if (resolved.state === "verified") newPathApprovalFacts.set(candidate.id, resolved.facts);
+        }
+      }
+    } catch { /* an issuer read failure stays UNKNOWN; the pure admission will refuse its missing facts */ }
   }
   const knownRepos = knownPlanRepos(codeRoot); // W1-T4700: the repo rule's names, read once per pass
   for (const task of plan.tasks) {
@@ -20102,6 +20127,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
         dependencyEvidence,
         pathExists: opts.moduleExists,
         pathExistsAtBase,
+        ...(newPathApprovalFacts.has(task.id) ? { newPathApproval: newPathApprovalFacts.get(task.id) } : {}),
       };
     }
     let { violations: lintViolations } = lintTask(task, opts);
