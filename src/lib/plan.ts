@@ -1573,7 +1573,7 @@ export function newPathAdmission(task: Task, context: Pick<MachineFilingAdmissio
   if (!Number.isFinite(facts.issuedAtMs) || !Number.isFinite(facts.expiresAtMs) || facts.operator === "" || facts.confirmation === "") {
     return refuse("approval provenance is incomplete");
   }
-  const now = context.nowMs ?? Date.now();
+  const now = context.nowMs ?? systemClock.now();
   if (facts.revoked) return refuse("approval was revoked");
   if (facts.issuedAtMs > now || facts.expiresAtMs <= now) return refuse("approval is not currently valid");
   return { admitted: new Set(approved), refusals: [] };
