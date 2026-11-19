@@ -372,7 +372,7 @@ function runsOrReadsAt(masked: string, at: number, seen: Set<string>): boolean {
   const name = constHolding(masked, at);
   if (name === undefined || seen.has(name)) return false;
   seen.add(name);
-  const uses = new RegExp(`(?<![\\w$.])${name.replace(/\$/g, "\\$")}(?![\\w$])`, "g");
+  const uses = new RegExp(`(?<![\\w$.])${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w$])`, "g");
   for (const use of masked.matchAll(uses)) {
     if (use.index !== at && runsOrReadsAt(masked, use.index, seen)) return true;
   }
