@@ -23,6 +23,7 @@
     - test/a-read-of-one-instance-paces-only-that-instance.test.ts
     - test/view-etags-are-deterministic.test.ts
     - test/lib/an-idle-serve-view-rebuilds-at-its-idle-floor.test.ts
+    - test/console-api/read-model/a-read-model-view-whose-inputs-are-unchanged-is-not-rebuilt.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -58,7 +59,9 @@
   falsifier: |
     Keep building at the largest stretch and criteria 1 and 5 must fail. Ignore a read of the needs-you view and criterion 2 must fail. Answer the first read with the old body as current and criterion 3 must fail. Stop a unit that a connected reader reads and criterion 4 must fail. Restore and require all five to pass.
   note: |
-    files: amendment 2026-11-19: the stop rule moves two suites the first build did not list.
+    files: amendment 2026-11-19: the stop rule moves three suites the first build did not list.
     test/view-etags-are-deterministic.test.ts never read its views, so the stopped now view's idle republish posted a
     body; it now notes reads. test/lib/an-idle-serve-view-rebuilds-at-its-idle-floor.test.ts (W1-T11933 criterion 3)
     asserted the now view holds at its stretch bound; it now asserts the stop. Both were red on #19655 at 728d1e152.
+    The is-not-rebuilt suite's restamp fixture view is read-paced and unread across its 10-minute jump, so it stops
+    and makes 6 calls, not 7; red at 728d1e152 merged with origin/main, green on origin/main alone.
