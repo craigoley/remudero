@@ -201,6 +201,8 @@ export const READ_MODEL_READ_NOTE_MS = 5_000;
 export const READ_MODEL_HEAVY_IDLE_MS = 10 * 60_000;
 /** `GET /v1/views/versions` (view-events.ts's VIEW_VERSIONS_PATH): a console polling every view's version reads them all. */
 const READ_MODEL_EVERY_VIEW_PATHS: ReadonlySet<string> = new Set(["/v1/views/versions"]);
+/** W1-T11979: the versions poll's optional comma-separated list of the views its page shows. */
+export const READ_MODEL_VERSIONS_VIEWS_PARAM = "views";
 /** A legacy read that serves a view's body inside its own answer: `/v1/status` carries `needs-you`'s human gates. */
 const READ_MODEL_LEGACY_VIEW_READS: Readonly<Record<string, string>> = { "/v1/status": "needs-you" };
 /** Work outstanding without a commit for this long is stalled; serve watches silent workers too. */
@@ -545,14 +547,36 @@ export function readModelViewBuilt(view: string, switches: ReadModelSwitches, re
 /**
  * The views a read of `path` reads, directly or through a view built from them ({@link READ_MODEL_VIEW_READERS}):
  * `/v1/views/nav-badge` reads `nav-badge`, `needs-you` and `now`. A per-instance copy (`/v1/i/<x>/...`) reads what
- * its core path does; `/v1/views/versions` reads every view in `names`; any other path reads none.
+ * its core path does; `/v1/views/versions` reads every view in `names`, or with a `views` parameter only the known
+ * views it names; any other path reads none.
  */
 export function viewsReadBy(path: string, names: readonly string[], readers: ReadModelViewReaders = READ_MODEL_VIEW_READERS): string[] {
-  const base = path.split("?")[0]!.replace(/^\/v1\/i\/[^/]+\//, "/v1/");
-  if (READ_MODEL_EVERY_VIEW_PATHS.has(base)) return [...names];
+  const [route = "", query = ""] = path.split("?");
+  const base = route.replace(/^\/v1\/i\/[^/]+\//, "/v1/");
+  if (READ_MODEL_EVERY_VIEW_PATHS.has(base)) {
+    // W1-T11979: a poll naming the views its page shows reads only those and what they are built from.
+    const named = new URLSearchParams(query).get(READ_MODEL_VERSIONS_VIEWS_PARAM);
+    if (named === null) return [...names];
+    const known = new Set(names);
+    return withSourceViews(named.split(",").map((name) => name.trim()).filter((name) => known.has(name)), readers);
+  }
   const direct = base.startsWith("/v1/views/") ? base.slice("/v1/views/".length) : READ_MODEL_LEGACY_VIEW_READS[base];
   if (!direct) return [];
-  const read = new Set([direct]);
+  return withSourceViews([direct], readers);
+}
+
+/**
+ * W1-T11979: the `views` list serve forwards with a read of `routePath`, from the request's query. Only a versions
+ * poll (core or per-instance) carries one; any other read, and a poll without the parameter, forwards none.
+ */
+export function versionsReadViews(routePath: string, params: URLSearchParams): string | undefined {
+  if (!READ_MODEL_EVERY_VIEW_PATHS.has(routePath.replace(/^\/v1\/i\/[^/]+\//, "/v1/"))) return undefined;
+  return params.get(READ_MODEL_VERSIONS_VIEWS_PARAM) ?? undefined;
+}
+
+/** `read` and every view a view in it is built from ({@link READ_MODEL_VIEW_READERS}). */
+function withSourceViews(direct: readonly string[], readers: ReadModelViewReaders): string[] {
+  const read = new Set(direct);
   for (let grew = true; grew;) {
     grew = false;
     for (const [view, list] of Object.entries(readers)) {
@@ -2864,8 +2888,8 @@ export interface ReadModelWorkerHandle {
   onBody(listener: (entry: ReadModelBodyEntry) => void): () => void;
   /** A reader was served: paces the worker's GitHub keep-warm as serve's own is paced. */
   noteGithubRead?(): void;
-  /** Serve answered a read-scoped route for `instance` (a known one, else all): the read-paced views it reads keep their cadence (posted at most every {@link READ_MODEL_READ_NOTE_MS} per path and instance). */
-  noteViewRead?(path: string, instance?: string): void;
+  /** Serve answered a read-scoped route for `instance` (a known one, else all): the read-paced views it reads keep their cadence (posted at most every {@link READ_MODEL_READ_NOTE_MS} per path, instance and `views` list, W1-T11979). */
+  noteViewRead?(path: string, instance?: string, views?: string): void;
 }
 
 export interface ReadModelWorkerOptions {
@@ -3340,9 +3364,10 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       return () => bodyListeners.delete(listener);
     },
     noteGithubRead: () => workerWarm?.noteRead(),
-    noteViewRead: (route, instance) => {
+    noteViewRead: (route, instance, views) => {
       const now = clock.now();
-      const path = scopedReadPath(route, instance !== undefined && opts.instances.some((known) => known.name === instance) ? instance : undefined);
+      const scoped = scopedReadPath(route, instance !== undefined && opts.instances.some((known) => known.name === instance) ? instance : undefined);
+      const path = views === undefined ? scoped : `${scoped}${scoped.includes("?") ? "&" : "?"}${READ_MODEL_VERSIONS_VIEWS_PARAM}=${encodeURIComponent(views)}`;
       if (!worker || now - (readNotedAt.get(path) ?? Number.NEGATIVE_INFINITY) < READ_MODEL_READ_NOTE_MS) return;
       readNotedAt.set(path, now);
       worker.postMessage({ type: "read", path });

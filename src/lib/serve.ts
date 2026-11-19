@@ -99,7 +99,7 @@ import { BOARD_PROJECTION_IDLE_INTERVAL_MS } from "./board-worker.js";
 import { buildBatchedGithub, type GhFailureReason, type GitHub } from "./status.js";
 import { fleetRuntimeHealthTelemetry, readFleetRuntimeHealth, type FleetRuntimeHealth } from "./fleet-runtime-health.js";
 import { buildInstanceGatewayRoutes, CORE_INSTANCE, DEFAULT_INSTANCE_STATE_BASE, instanceStateRoot, livenessInstances, watchInstanceLiveness, type InstanceGatewayOptions } from "./instance-gateway.js";
-import { createReadModelWorker, READ_MODEL_VIEWS, readModelStatusView, type ReadModelInstance, type ReadModelWorkerHandle, type ReadModelWorkerOptions } from "./read-model-worker.js";
+import { createReadModelWorker, READ_MODEL_VIEWS, readModelStatusView, versionsReadViews, type ReadModelInstance, type ReadModelWorkerHandle, type ReadModelWorkerOptions } from "./read-model-worker.js";
 import { CONSOLE_CACHED_READ_PATHS, ROUTE_READS_STEP, buildRouteReadsRoute, createRouteReadRollup, type RouteReadRollup } from "./route-read-rollup.js";
 import { buildOperatorAgentAnswer, buildOperatorAgentAnswerRoute, readInboxAnswerEvidence } from "./operator-agent-answer.js";
 import { buildOperatorAgentActionHandoffRoutes } from "./operator-agent-action-handoff.js";
@@ -3574,7 +3574,9 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
       prewarm.noteRead();
       readModel?.noteGithubRead?.();
       // A per-instance view's read names its instance, so only that instance's unit keeps its cadence.
-      readModel?.noteViewRead?.(route.path, new URL(req.url ?? "/", "http://localhost").searchParams.get("instance") ?? undefined);
+      // W1-T11979: a versions poll that names its page's views keeps only those on their cadence.
+      const params = new URL(req.url ?? "/", "http://localhost").searchParams;
+      readModel?.noteViewRead?.(route.path, params.get("instance") ?? undefined, versionsReadViews(route.path, params));
     });
   // W1-T5175: every holder serve can name, sized by its own memory loop (startLedgerWriters, below).
   const memory = createServeMemoryRegistry();
