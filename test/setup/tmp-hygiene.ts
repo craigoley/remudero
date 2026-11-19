@@ -424,22 +424,39 @@ export function redirectChildCoverage(
  *  redirected value (tsx's module-hooks thread) writes its report after every exit handler, and it
  *  must land flat, as it did before (MEASURED: without the link, one report per suite was lost).
  *  Returns the moved names; a report that cannot be moved throws, naming it. */
-export function flattenChildCoverage(redirect: ChildCoverageRedirect, now: () => number = Date.now): string[] {
+export function flattenChildCoverage(
+  redirect: ChildCoverageRedirect,
+  now: () => number = Date.now,
+  removeChildDir: (path: string) => void = (path) => fs.rmSync(path, { recursive: true, force: true }),
+): string[] {
   const moved: string[] = [];
-  for (const name of fs.readdirSync(redirect.childDir).filter((n) => V8_REPORT.test(n)).sort()) {
-    const from = join(redirect.childDir, name);
-    const to = join(redirect.coverageDir, name);
-    try {
-      fs.renameSync(from, to);
-    } catch (error) {
-      // Another filesystem: copy, then remove. Any other failure is the caller's to report.
-      if ((error as NodeJS.ErrnoException).code !== "EXDEV") throw error;
-      fs.copyFileSync(from, to);
-      fs.rmSync(from);
+  const moveReports = (): void => {
+    for (const name of fs.readdirSync(redirect.childDir).filter((n) => V8_REPORT.test(n)).sort()) {
+      const from = join(redirect.childDir, name);
+      const to = join(redirect.coverageDir, name);
+      try {
+        fs.renameSync(from, to);
+      } catch (error) {
+        // Another filesystem: copy, then remove. Any other failure is the caller's to report.
+        if ((error as NodeJS.ErrnoException).code !== "EXDEV") throw error;
+        fs.copyFileSync(from, to);
+        fs.rmSync(from);
+      }
+      moved.push(name);
     }
-    moved.push(name);
+  };
+  moveReports();
+  // A late V8 thread can publish between the first move and rmdir. Node may report ENOTEMPTY
+  // while recursively removing that directory; collect any report it left and retry the cleanup.
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      removeChildDir(redirect.childDir);
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOTEMPTY" || attempt >= 4) throw error;
+      moveReports();
+    }
   }
-  fs.rmSync(redirect.childDir, { recursive: true, force: true });
   fs.symlinkSync(redirect.coverageDir, redirect.childDir, "dir");
   if (moved.length > 0) {
     const record = join(redirect.coverageDir, `rmd-v8-children-${process.pid}-${now()}.json`);

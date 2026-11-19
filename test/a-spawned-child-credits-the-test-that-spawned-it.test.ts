@@ -227,3 +227,29 @@ test("W1-T6108: the redirect applies only to a suite's main thread under coverag
     rmSync(out, { recursive: true, force: true });
   }
 });
+
+test("W1-T6108: a late child report is collected when directory cleanup races it", () => {
+  const out = mkdtempSync(join(tmpdir(), "rmd-t6108-late-child-coverage-"));
+  try {
+    const redirect = hygiene.redirectChildCoverage({ NODE_V8_COVERAGE: out }, {
+      script: join(REPO_ROOT, "test", "x.test.ts"), cwd: REPO_ROOT,
+    });
+    assert.ok(redirect);
+    writeFileSync(join(redirect.childDir, "coverage-3-0000000000000-2.json"), "{}");
+    let attempts = 0;
+    const moved = hygiene.flattenChildCoverage(redirect, () => 1234567890125, (path) => {
+      attempts += 1;
+      if (attempts === 1) {
+        writeFileSync(join(path, "coverage-4-0000000000000-3.json"), "{}");
+        throw Object.assign(new Error("Directory not empty"), { code: "ENOTEMPTY" });
+      }
+      rmSync(path, { recursive: true, force: true });
+    });
+    assert.deepEqual(moved, ["coverage-3-0000000000000-2.json", "coverage-4-0000000000000-3.json"]);
+    assert.equal(attempts, 2, "cleanup retries after moving the late report");
+    const record = JSON.parse(readFileSync(join(out, `rmd-v8-children-${process.pid}-1234567890125.json`), "utf8")) as { reports: string[] };
+    assert.deepEqual(record.reports, moved, "the receipt covers both the original and late report");
+  } finally {
+    rmSync(out, { recursive: true, force: true });
+  }
+});
