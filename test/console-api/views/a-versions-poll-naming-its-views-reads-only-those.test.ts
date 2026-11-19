@@ -4,7 +4,7 @@
  * they are built from; a poll without the parameter reads every view, as before, and the body never changes.
  */
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -13,18 +13,12 @@ import type { Clock } from "#src/lib/clock.js";
 import {
   createReadModelWorker, READ_MODEL_READ_NOTE_MS, READ_MODEL_VERSIONS_VIEWS_PARAM, versionsReadViews, viewsReadBy,
 } from "#src/lib/read-model-worker.js";
-import { makeTempDir } from "#src/lib/tmp.js";
 import { createViewEvents, VIEW_VERSIONS_PATH } from "#src/lib/view-events.js";
 import { viewEtag, type ViewBodyEntry, type ViewSource } from "#src/lib/views.js";
+import { readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const T0 = Date.parse("2026-11-19T13:00:00.000Z");
 const NAMES = ["now", "needs-you", "nav-badge", "repositories", "read-model"];
-
-function scratch(t: TestContext, label: string): string {
-  const dir = makeTempDir(`rmd-versions-views-${label}-`);
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  return dir;
-}
 
 function entry(view: string, key: string, data: unknown): ViewBodyEntry {
   const sources: ViewSource[] = [{ name: "ledger:core", asOf: new Date(T0).toISOString(), state: "fresh" }];
@@ -57,9 +51,10 @@ async function versionsAnswer(url: string): Promise<{ status: number; etag: stri
 
 /** A read-model worker whose module records each posted read path. */
 async function postedReads(t: TestContext, note: (handle: ReturnType<typeof createReadModelWorker>, advance: (ms: number) => void) => void, want: number): Promise<string[]> {
-  const stateDir = scratch(t, "state");
-  const seen = join(scratch(t, "seen"), "seen.txt");
-  const dir = scratch(t, "worker");
+  const state = readModelFixtureDir(t, "versions-views-state");
+  const stateDir = state.dir;
+  const seen = join(readModelFixtureDir(t, "versions-views-seen").dir, "seen.txt");
+  const dir = readModelFixtureDir(t, "versions-views-worker").dir;
   writeFileSync(join(dir, "module.mjs"), `import { parentPort } from "node:worker_threads";
 import { appendFileSync } from "node:fs";
 parentPort.on("message", (msg) => { if (msg.type === "read") appendFileSync(${JSON.stringify(seen)}, msg.path + "\\n"); });
@@ -69,7 +64,7 @@ setInterval(() => {}, 1000);
   const clock: Clock = { now: () => now, date: () => new Date(now), iso: () => new Date(now).toISOString() };
   const handle = createReadModelWorker({ stateDir, instances: ["core", "site"].map((name) => ({ name, ledgerDir: stateDir })),
     workerUrl: pathToFileURL(join(dir, "module.mjs")), clock, every: () => () => undefined, stopWaitMs: 1 });
-  t.after(() => handle.stop());
+  state.onClose(() => handle.stop());
   handle.start();
   note(handle, (ms) => { now += ms; });
   const lines = (): string[] => (existsSync(seen) ? readFileSync(seen, "utf8").trim().split("\n") : []);
