@@ -88,6 +88,8 @@ test("W1-T12176 criterion 1 reads all four launchd labels and accepts idle jobs"
 
 test("W1-T12176 criterion 2 fails repeat crashes and bounds the last error line", async t => {
   const { root, program, log } = fixture(t);
+  const stderrLink = join(root, "stderr-link.log");
+  symlinkSync(log, stderrLink);
   const cause = `${root}/node_modules/.bin/tsx: No such file or directory`;
   writeFileSync(log, Buffer.concat([
     Buffer.from(`${"x".repeat(32_768)}\nprevious failure `),
@@ -96,7 +98,7 @@ test("W1-T12176 criterion 2 fails repeat crashes and bounds the last error line"
   ]));
   const result = await report(root, { platform: "darwin", home: root, exec: (_cmd, args) => {
     if (args[1] !== target(DAEMON_LABEL)) missingService(args[1]!.split("/").at(-1)!);
-    return service(DAEMON_LABEL, program, ["state = spawn scheduled", "runs = 450", "last exit code = 127: EX_NOTFOUND", `stderr path = ${log}`]);
+    return service(DAEMON_LABEL, program, ["state = spawn scheduled", "runs = 450", "last exit code = 127: EX_NOTFOUND", `stderr path = ${stderrLink}`]);
   } });
   const check = checkFor(result.launchd, DAEMON_LABEL);
   assert.equal(check.verdict, "FAIL");
@@ -186,13 +188,15 @@ test("digest self-sync checks the Git checkout at its WorkingDirectory", async t
   const { root } = fixture(t);
   const main = gitRepo({ scope: t }).dir;
   const offMain = gitRepo({ scope: t, branch: "digest-plan-amendment" }).dir;
+  const nestedWorkingDirectory = join(offMain, "nested", "working-directory");
+  mkdirSync(nestedWorkingDirectory, { recursive: true });
   const program = join(main, "bin", "rmd");
   mkdirSync(dirname(program), { recursive: true });
   writeFileSync(program, "", { mode: 0o755 });
   const result = await report(root, { platform: "darwin", home: root, exec: (_cmd, args) => {
     const label = args[1]!.split("/").at(-1)!;
     if (label === DIGEST_LABEL) return service(label, program, [
-      "state = not running", "runs = 4", "last exit code = 0", `working directory = ${offMain}`,
+      "state = not running", "runs = 4", "last exit code = 0", `working directory = ${nestedWorkingDirectory}`,
     ]);
     if (label === SERVE_LABEL) return service(label, "/bin/true", ["state = not running", "runs = 0", "last exit code = 0"]);
     return missingService(label);

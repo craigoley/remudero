@@ -573,7 +573,13 @@ function launchdDigestCheckout(
   const cwd = readLaunchdPath(workingDirectory);
   if (cwd.state !== "present") return null;
   try {
-    const root = hostWorktreeGit(cwd.resolved, ["rev-parse", "--show-toplevel"], { timeout: 1_000 }).trim();
+    let gitRoot = cwd.resolved;
+    while (!existsSync(join(gitRoot, ".git"))) {
+      const parent = dirname(gitRoot);
+      if (parent === gitRoot) throw new Error("WorkingDirectory is outside Git");
+      gitRoot = parent;
+    }
+    const root = hostWorktreeGit(gitRoot, ["rev-parse", "--show-toplevel"], { timeout: 1_000 }).trim();
     return isAbsolute(root) ? realpathSync(root) : null;
   } catch (error) {
     // The CLI falls back to its install checkout when its working directory is not inside Git.
@@ -594,7 +600,7 @@ function readLaunchdCheckoutBranch(checkout: string): string | null {
 function readLaunchdErrorLine(path: string | undefined): string {
   if (!path || !isAbsolute(path)) return "";
   try {
-    const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    const fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
     try {
       const before = fstatSync(fd);
       if (!before.isFile()) return "";
