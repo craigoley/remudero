@@ -8,6 +8,7 @@ import { requestStop, stopDetail } from "#src/lib/fleet-control.js";
 import type { UsageSnapshot } from "#src/lib/headroom.js";
 import { loadPlan } from "#src/lib/plan.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { hostIndependentDaemonDeps } from "#test/helpers/daemon-host-pins.js";
 
 // W1-T13837: with the headroom governor off, the reading only feeds a telemetry row, yet each tick ran
 // `claude -p /usage` (about 12 CPU s and 340 MB on the Azure host). The tick now reads at most once per
@@ -39,6 +40,7 @@ async function readsOver(headroomEnabled: boolean): Promise<{ reads: number[]; b
   const reads: number[] = [];
   let beats = 0;
   await runDaemon(planWithNothingRunnable(), {
+    ...hostIndependentDaemonDeps(),
     refreshMerged: () => () => true,
     runOne: async () => { throw new Error("nothing is runnable"); },
     readUsage: () => { reads.push(nowMs - start); return UNDER; },
