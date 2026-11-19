@@ -249,6 +249,26 @@ test("W1-T13832 criterion 3: invariant:probe-never-blocks-the-swap — a probe t
   });
 });
 
+test("a probe whose view list throws, or whose ledger cannot be written, still returns its row and says why", async () => {
+  await withTempDir("swap-probe-edges", async (root) => {
+    const ledgerPath = join(root, "ledger.ndjson");
+    writeFileSync(ledgerPath, "");
+    const world = viewWorld(ledgerPath);
+    const base = world.reader()!;
+    const broken: ViewProbeReader = { ...base, mode: () => { throw new Error("switches unreadable"); } };
+    const thrown = await runSwapProbe({ trigger: "cold_start", generation: 1, sha: "sha-1" }, { reader: broken, heldKeys: world.held, ledgerPath, seen: new Set() });
+    assert.equal(thrown?.probe_failed, "threw: switches unreadable");
+    assert.deepEqual(thrown?.views, {});
+    const logged: Array<{ step: string; extra: Record<string, unknown> }> = [];
+    const unwritable = join(root, "a-directory");
+    mkdirSync(unwritable);
+    const row = await runSwapProbe({ trigger: "handoff", generation: 2, sha: "sha-2" }, { reader: base, heldKeys: world.held, ledgerPath: unwritable, seen: new Set(), log: (step, extra) => void logged.push({ step, extra }) });
+    assert.equal(row?.views.held?.status, 200, "the row is still returned");
+    assert.deepEqual(logged.map((entry) => [entry.step, entry.extra.trigger, entry.extra.generation]), [["serve.swap_probe_write_failed", "handoff", 2]]);
+    assert.match(String(logged[0]?.extra.reason), /EISDIR|directory/i);
+  });
+});
+
 test("W1-T13832 criterion 5: a crash restart's replacement generation runs the swap probe and its serve.swap_probe row says trigger crash_restart", async () => {
   await withTempDir("swap-probe-crash", async (root) => {
     const ledgerPath = join(root, "ledger.ndjson");
