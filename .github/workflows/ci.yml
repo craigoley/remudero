@@ -2300,8 +2300,9 @@ jobs:
             VALUE="$(cat "$CLASS_FILE")"
             case "$VALUE" in
               # W1-T4406: merge_group:* joins the whitelist alongside pull_request:* — the classify
-              # step above now computes a real class for a merge_group run too.
-              pull_request:PLAN_ONLY|pull_request:DOCS_ONLY|pull_request:TEST_ONLY|pull_request:NO_SRC|pull_request:SOURCE|merge_group:PLAN_ONLY|merge_group:DOCS_ONLY|merge_group:TEST_ONLY|merge_group:NO_SRC|merge_group:SOURCE|push:SOURCE) ;;
+              # step above now computes a real class for a merge_group run too. W1-T13792: workflow_dispatch:*
+              # is a main-bisection probe run on an rmd-attribution/ ref.
+              pull_request:PLAN_ONLY|pull_request:DOCS_ONLY|pull_request:TEST_ONLY|pull_request:NO_SRC|pull_request:SOURCE|merge_group:PLAN_ONLY|merge_group:DOCS_ONLY|merge_group:TEST_ONLY|merge_group:NO_SRC|merge_group:SOURCE|push:SOURCE|workflow_dispatch:PLAN_ONLY|workflow_dispatch:DOCS_ONLY|workflow_dispatch:TEST_ONLY|workflow_dispatch:NO_SRC|workflow_dispatch:SOURCE) ;;
               *)
                 echo "coverage-ratchet: coverage-shard-${SHARD} carried unrecognised class metadata '${VALUE}'."
                 exit 1
