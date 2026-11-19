@@ -45103,7 +45103,7 @@ export function selfSyncRefusalSink(cmd: string | undefined, rest: string[], led
  * comment, for the verbs that keep the gate). A DECLARED LIST, named beside its reason at each
  * call site, deliberately not a heuristic over the verb string and not conditioned on
  * `--dry-run` (a flag can be absent and the verb still dispatch) — see design (ii) of the
- * W1-T1134 task record. Three members today:
+ * W1-T1134 task record. The members are:
  *   - `doctor`    — read-only by construction; its own registry entry refuses `--fix` by name.
  *   - `status`    — its only write is the machine-owned `state/status.json` cache, never a
  *                   decision this gate protects (the one judgement call design (v) calls out).
@@ -45643,7 +45643,8 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
 const REGISTRY: readonly RegisteredCommand[] = buildRegistry(COMMANDS, HANDLERS);
 
 // ── CLI entry (invoked by bin/rmd). Kept tiny; all logic is above/lib.
-export async function main(
+async function main(
+  assessBrokerFreshness: () => void,
   // W1-T79/W1-T221: the freshness check is injectable so a `callMain` test can drive the
   // "refused" branch below (its console.error+process.exit can't otherwise be covered — in CI
   // the real check returns "guarded", never "refused"). Default = the real self-sync check.
@@ -45697,7 +45698,7 @@ export async function main(
   // PAUSE validates its target locally; --fleet retains its independent authenticated Git path.
   if (inspectionArgv[0] !== "stop" && inspectionArgv[0] !== "pause"
     && selectedInstanceRegistryEnvPath() !== undefined && !instanceRegistryRuntimePresent()) {
-    return withInstanceRegistryRuntime(() => main(deps));
+    return withInstanceRegistryRuntime(() => main(assessBrokerFreshness, deps));
   }
   // FIRST, before argv is even read: a rejection escaping any line below (the freshness gate's
   // own spawns included) must reach a ledger row and a named exit code, not Node's default crash.
@@ -45855,7 +45856,7 @@ export async function main(
     // Does NOT touch `checkCliFreshness`'s own predicate, message or ledger row (W1-T446 owns
     // that) — only where the gate applies, never what it decides (design (i)).
     // W1-T11788: the broker's skip is observable — one `self_sync.exempt` row, tree untouched.
-    if (cmd === "gh-broker") ledgerFreshnessExemption(cmd, repoRoot, process.env, deps.checkFreshness);
+    if (cmd === "gh-broker") assessBrokerFreshness();
   } else {
     const freshness = (deps.checkFreshness ?? checkCliFreshness)(repoRoot, process.env, selfSyncRefusalSink(cmd, rest));
     if (freshness.status === "refused") {
@@ -45890,6 +45891,14 @@ export async function main(
   );
 }
 
+// Wire the synchronous checkout assessment at the CLI entry. The daemon-loop census can reach
+// the name `main` through unrelated fields named `main`, but the CLI alone supplies this effect.
+function runTaskCli(deps?: Parameters<typeof main>[1]): Promise<void> {
+  return main(() => ledgerFreshnessExemption("gh-broker", repoRoot, process.env, deps?.checkFreshness), deps);
+}
+
+export { runTaskCli as main };
+
 // W1-T9722: the read-plane worker starts from ./lib/tick-read-worker.ts, never from this module; a worker
 // that loads this module anyway still never runs the CLI. Kept OUTSIDE the process-boundary region below.
 const readWorkerOptions = readPlaneWorkerInput();
@@ -45898,7 +45907,7 @@ const readWorkerOptions = readPlaneWorkerInput();
 // `exitCodeFor()`, while this wrapper only prints and exits the current process.
 // Only run when invoked directly (not when imported by tests).
 if (!readWorkerOptions && process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  main().catch((err) => {
+  runTaskCli().catch((err) => {
     console.error("\n### RUN-TASK ERROR\n" + (err?.stack ?? String(err)));
     // W1-T2901: the process boundary asks the error its own exit code (an `RmdError` such as
     // `PlanError` answers with its declared code) instead of hardcoding the generic one for
