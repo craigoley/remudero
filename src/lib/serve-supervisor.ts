@@ -31,7 +31,7 @@ import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { systemClock, type Clock } from "./clock.js";
-import { GENERATION_MESSAGES, SERVE_READY_PATH, SERVE_READY_SOCKET_ENV, SERVE_ROLE_ENV, type GenerationMessage } from "./serve-generation.js";
+import { GENERATION_MESSAGES, SERVE_READY_PATH, SERVE_READY_SOCKET_ENV, SERVE_ROLE_ENV, type GenerationMessage, type SwapProbeTrigger } from "./serve-generation.js";
 import { SELF_SYNC_GUARD_ENV } from "./self-sync.js";
 
 export const SERVE_HANDOFF_ENV = "RMD_SERVE_HANDOFF";
@@ -1068,6 +1068,15 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
     stopProbing = every(() => void probeTick().catch((err: unknown) => opts.log("serve.active_probe_error", { reason: errorText(err) })), ACTIVE_PROBE_INTERVAL_MS);
   };
 
+  /** W1-T13832: ask the generation now serving to probe its views once. Never awaited, so it cannot hold a swap. */
+  const askSwapProbe = (generation: Generation, trigger: SwapProbeTrigger, fromSha?: string): void => {
+    try {
+      generation.process.send({ type: GENERATION_MESSAGES.swapProbe, trigger, generation: generation.id, sha: generation.slot.sha, ...(fromSha === undefined ? {} : { fromSha }) });
+    } catch (error) {
+      opts.log("serve.swap_probe_unsent", { generation: generation.id, trigger, reason: errorText(error) });
+    }
+  };
+
   const activate = (generation: Generation): void => {
     active = generation;
     startProbing();
@@ -1434,6 +1443,7 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
       overlapPeakBytes: measured.overlapPeakBytes, overlapSamples: measured.overlapSamples,
       ...(from.workersShedAt === undefined ? {} : { workersShedMs: lastDoneAt - from.workersShedAt }),
     });
+    askSwapProbe(up.generation, "handoff", from.slot.sha);
   };
 
   /** A promoted generation died on its own: replace it, from the previous slot when it is a different build. */
@@ -1454,6 +1464,7 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
     const up = await bringUpAlone(slot);
     if (up.generation) {
       previous = undefined;
+      askSwapProbe(up.generation, "crash_restart", dead.slot.sha);
       return reportAlone(up.generation, up.startedAt, up.readyMs);
     }
     opts.log("serve.generation_restart_failed", { sha: slot.sha, criterion: up.criterion });
@@ -1485,6 +1496,7 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
         return;
       }
       opts.log("serve.supervisor_ready", { sha: opts.coldSlot.sha, readyMs: up.readyMs });
+      askSwapProbe(up.generation, "cold_start");
       if (opts.spaceFromBoot === true && spacingBaseMs > 0) lastDoneAt = clock.now();
       budget.start(() => [process.pid, ...(active?.process.pid === undefined ? [] : [active.process.pid])]);
       await reportAlone(up.generation, up.startedAt, up.readyMs);
