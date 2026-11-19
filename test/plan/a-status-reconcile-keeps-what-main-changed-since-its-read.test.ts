@@ -17,6 +17,7 @@ import {
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { buildPlanReconcileCadenceInput, planReconcileCadence } from "#src/lib/measurement-cadence.js";
 import { reconcileShardStatus } from "#src/lib/plan-reconcile.js";
+import { withGhShim } from "#test/helpers/gh-shim.js";
 import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 // W1-T13816: the cadence reads shards from the daemon's own checkout, which can lag origin/main.
@@ -27,7 +28,8 @@ const TARGET: LandingRepository = { owner: "o", repo: "r" };
 const OWNER = "w1-t13816-fixture";
 const BRANCH = landingIdentity({ family: "plan-reconcile", targetRepository: TARGET, landingOwner: OWNER }).branch;
 const ok = () => ({ ok: true, failures: [], unreadable: [] });
-const gh = (args: string[]): string => (args[0] === "pr" && args[1] === "list" ? "[]" : "https://github.com/o/r/pull/13816\n");
+const FIXTURE_PR = "https://github.com/o/r/pull/13816";
+const ghRoutes = [{ when: "pr list", stdout: "[]" }, { when: "pr create", stdout: FIXTURE_PR }];
 
 // W1-T13790's shard at its filing (b3cf1e609) and after the #19632 amendment (b4c0f5757), trimmed
 // to the lines around both amendment hunks; the acceptance block is left out.
@@ -80,6 +82,7 @@ interface World {
   seed: GitRepo;
   /** Write (or, with `null`, delete) files on main and push them. */
   main(files: Record<string, string | null>, message: string): string;
+  pending(files: Record<string, string>): void;
   /** A checkout cut from origin now: it never moves again, like the daemon's lagging checkout. */
   laggingCopy(): string;
   blob(ref: string, path: string): string | undefined;
@@ -89,22 +92,30 @@ function world(kind: string): World {
   const origin = gitRepo({ bare: true, kind: `${kind}-origin` });
   const seed = gitRepo({ kind: `${kind}-seed` });
   seed.addRemote("origin", origin.dir);
+  function commit(repo: GitRepo, files: Record<string, string | null>, message: string): void {
+    for (const [path, content] of Object.entries(files)) {
+      const abs = join(repo.dir, path);
+      if (content === null) rmSync(abs);
+      else {
+        mkdirSync(dirname(abs), { recursive: true });
+        writeFileSync(abs, content);
+      }
+    }
+    repo.git("add", "-A");
+    repo.git("commit", "--quiet", "-m", message);
+  }
   return {
     origin,
     seed,
     main(files, message) {
-      for (const [path, content] of Object.entries(files)) {
-        const abs = join(seed.dir, path);
-        if (content === null) rmSync(abs);
-        else {
-          mkdirSync(dirname(abs), { recursive: true });
-          writeFileSync(abs, content);
-        }
-      }
-      seed.git("add", "-A");
-      seed.git("commit", "--quiet", "-m", message);
+      commit(seed, files, message);
       seed.git("push", "--quiet", "origin", "HEAD:refs/heads/main");
       return seed.git("rev-parse", "HEAD");
+    },
+    pending(files) {
+      const repo = gitRepo({ cloneFrom: origin.dir, kind: `${kind}-pending` });
+      commit(repo, files, "prior reconcile");
+      repo.git("push", "--quiet", "origin", `HEAD:refs/heads/${BRANCH}`);
     },
     laggingCopy() {
       return gitRepo({ cloneFrom: origin.dir, kind: `${kind}-checkout` }).dir;
@@ -141,7 +152,6 @@ async function reconcileFromLaggingCopy(
     return landPlanReconcileShardsAsync(root, batch, landOpts).then((r) => (results.push(r), r));
   };
   const landOpts = (): LandFeedbackAsyncOpts => ({
-    gh,
     targetRepository: TARGET,
     landingOwner: OWNER,
     planPrPreflight: async (sha) => preflight(sha),
@@ -155,11 +165,12 @@ async function reconcileFromLaggingCopy(
     lint: () => new Map(),
     land: landing.land,
   });
-  const report = await withLiveWritesAllowed(async () => {
+  const report = await withGhShim(ghRoutes, () => withLiveWritesAllowed(async () => {
     const r = planReconcileCadence(cadence);
     await landing.settled();
     return r;
-  });
+  }));
+  assert.equal(results[0]?.prUrl, FIXTURE_PR);
   return { results, inputs, drift: report.drift };
 }
 
@@ -191,14 +202,19 @@ test("W1-T13816 criterion 1: the W1-T13790 amendment that merged after the read 
 
 test("W1-T13816 criterion 2: each landed shard differs from main by exactly the status line", async () => {
   const w = world("t13816-c2");
-  const moved = pathOf("W1-T501"), still = pathOf("W1-T502");
-  w.main({ [moved]: shard("W1-T501"), [still]: shard("W1-T502") }, "base");
+  const moved = pathOf("W1-T501"), still = pathOf("W1-T502"), earlier = pathOf("W1-T503");
+  w.main({ [moved]: shard("W1-T501"), [still]: shard("W1-T502"), [earlier]: shard("W1-T503") }, "base");
   const checkout = w.laggingCopy();
-  w.main({ [moved]: shard("W1-T501", "queued", "  note: |\n    main's amendment after the read\n") }, "main amends one shard");
+  w.main({
+    [moved]: shard("W1-T501", "queued", "  note: |\n    main's amendment after the read\n"),
+    [earlier]: shard("W1-T503", "queued", "  note: main amended a shard outside this batch\n"),
+  }, "main amends two shards");
+  w.pending({ [moved]: shard("W1-T501", "merged"), [still]: shard("W1-T502", "merged"), [earlier]: shard("W1-T503", "merged") });
 
   const { results } = await reconcileFromLaggingCopy(checkout, [moved, still]);
 
   assert.equal(results[0].landed, true, results[0].error);
+  assert.equal(results[0].pushed, true, "the stale landing tip was replaced");
   assert.deepEqual(w.origin.git("diff", "--name-only", "main", BRANCH).split("\n").sort(), [moved, still]);
   for (const path of [moved, still]) {
     assert.deepEqual(changedLines(w, path), ["-  status: queued", "+  status: merged"], path);
@@ -215,6 +231,7 @@ test("W1-T13816 criterion 3: a shard main moved off queued, retired or deleted i
     [retired]: shard("W1-T602", "queued", "  retirement: superseded\n"),
     [gone]: null,
   }, "main changes three shards after the read");
+  w.pending({ [running]: shard("W1-T601", "merged"), [retired]: shard("W1-T602", "merged"), [gone]: shard("W1-T603", "merged") });
 
   const { results } = await reconcileFromLaggingCopy(checkout, [running, retired, gone, fine]);
 
@@ -224,7 +241,8 @@ test("W1-T13816 criterion 3: a shard main moved off queued, retired or deleted i
   assert.deepEqual(result.refused?.map((r) => r.path).sort(), [running, retired, gone].sort());
   for (const r of result.refused ?? []) assert.ok(r.reason.includes(r.path), `the reason names ${r.path}: ${r.reason}`);
   assert.match(result.refused?.find((r) => r.path === gone)?.reason ?? "", /main no longer has/);
-  assert.match(result.refused?.find((r) => r.path === running)?.reason ?? "", /no longer takes its edit/);
+  assert.match(result.refused?.find((r) => r.path === running)?.reason ?? "", /status-not-queued/);
+  assert.match(result.refused?.find((r) => r.path === retired)?.reason ?? "", /retired/);
   assert.deepEqual(w.origin.git("diff", "--name-only", "main", BRANCH).split("\n"), [fine]);
   assert.equal(w.blob(BRANCH, running), shard("W1-T601", "running"), "main's status stands");
   assert.equal(w.blob(BRANCH, retired), shard("W1-T602", "queued", "  retirement: superseded\n"), "main's retirement stands");
@@ -264,23 +282,26 @@ test("W1-T13816 criterion 4: the rebuild after a lost lease edits main's newer t
 
 test("W1-T13816 criterion 5: an input with no edit stages its content as today", async () => {
   const w = world("t13816-c5");
-  const path = pathOf("W1-T801");
+  const path = pathOf("W1-T801"), pendingPath = pathOf("W1-T802");
   w.main({ [path]: shard("W1-T801") }, "base");
   const root = w.laggingCopy();
   w.main({ [path]: shard("W1-T801", "queued", "  note: main's edit\n") }, "main edits the shard");
   // The ops-catalog reconcile's shape: bytes it read at its pinned commit, no edit.
   const content = shard("W1-T801", "merged");
+  const pending = shard("W1-T802", "merged");
+  w.pending({ [pendingPath]: pending });
 
-  const result = await withLiveWritesAllowed(() => landPlanReconcileShardsAsync(root, [{ relPath: path, content }], {
-    gh,
+  const result = await withGhShim(ghRoutes, () => withLiveWritesAllowed(() => landPlanReconcileShardsAsync(root, [{ relPath: path, content }], {
     targetRepository: TARGET,
     landingOwner: OWNER,
     planPrPreflight: async () => ok(),
-  }));
+  })));
 
   assert.equal(result.landed, true, result.error);
+  assert.equal(result.prUrl, FIXTURE_PR);
   assert.equal(result.refused, undefined);
   assert.equal(w.blob(BRANCH, path), content, "the given bytes land unchanged; main's copy is not read");
+  assert.equal(w.blob(BRANCH, pendingPath), pending, "the no-edit landing still carries its earlier content");
 });
 
 test("W1-T13816 criterion 6: invariant main-text-only, no staged byte comes from the copy the cadence read", async () => {
@@ -296,11 +317,27 @@ test("W1-T13816 criterion 6: invariant main-text-only, no staged byte comes from
     "W1-T904": shard("W1-T904"),
   };
   w.main(Object.fromEntries(ids.map((id) => [pathOf(id), onMain[id]])), "main changes every shard after the read");
+  const stalePending = pathOf("W1-T905"), goodPending = pathOf("W1-T906");
+  const missingPending = pathOf("W1-T907"), retiredPending = pathOf("W1-T908");
+  const pendingMain = shard("W1-T905", "queued", "  note: main amended a prior batch\n");
+  const goodMain = shard("W1-T906", "queued", "  note: valid pending status edit\n");
+  const retiredMain = shard("W1-T908", "queued", "  retirement: superseded\n");
+  w.main({ [stalePending]: pendingMain, [goodPending]: goodMain, [retiredPending]: retiredMain }, "file shards outside this batch");
+  w.pending({
+    [stalePending]: flip(readCopy("W1-T905")),
+    [goodPending]: flip(goodMain),
+    [missingPending]: shard("W1-T907", "merged"),
+    [retiredPending]: shard("W1-T908", "merged", "  retirement: superseded\n"),
+  });
 
   const { results, inputs } = await reconcileFromLaggingCopy(checkout, ids.map(pathOf));
 
   assert.equal(results[0].landed, true, results[0].error);
   assert.equal(inputs[0].length, ids.length);
+  assert.equal(w.blob(BRANCH, stalePending), pendingMain, "an earlier landing's stale bytes are excluded");
+  assert.equal(w.blob(BRANCH, goodPending), flip(goodMain), "an earlier status-only edit is retained");
+  assert.equal(w.blob(BRANCH, missingPending), undefined, "pending carry cannot add a missing shard");
+  assert.equal(w.blob(BRANCH, retiredPending), retiredMain, "pending carry cannot flip a retired shard");
   for (const input of inputs[0]) assert.equal(typeof input.edit, "function", `${input.relPath} carries the status edit`);
   for (const id of ids) {
     const landed = w.blob(BRANCH, pathOf(id)) ?? "";
