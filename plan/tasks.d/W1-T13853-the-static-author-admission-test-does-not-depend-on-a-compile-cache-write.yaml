@@ -1,0 +1,46 @@
+- id: W1-T13853
+  title: The static author admission test does not depend on when Node writes its compile cache
+  repo: remudero
+  depends_on: []
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: low
+  origin: operator-request#serve-cpu-thread-2026-11-19
+  files:
+    - test/a-static-author-admits-its-nested-checks-once.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    The test "author static admission: real child and grandchild borrow one live owner without releasing
+    it" in test/a-static-author-admits-its-nested-checks-once.test.ts asserts that readdirSync(dir)
+    deep-equals ["node-compile-cache", "slot-1.json"], and intermittently gets only ["slot-1.json"]. It went
+    red on coverage-shard 9/12 on #19690 (11506c50b) and on coverage-shard 3/12 on #19711 (0f839ea0a) and
+    #19712 (85a26633f); none of those diffs touch src/lib/test-slot.ts or the compile cache. On Node 24.22.3
+    it passed 10 of 10 when idle and failed 3 times under load. At origin/main, src/lib/test-slot.ts sets
+    NODE_COMPILE_CACHE=join(dir, "node-compile-cache") in the child environment, while
+    scripts/test-with-retry.mjs (coverageChildEnvironment) and scripts/coverage-batches.mjs set
+    NODE_DISABLE_COMPILE_CACHE=1. The assertion was last edited by #18644.
+  design: |
+    First find why the compile-cache directory is sometimes absent, and record the cause in the test's
+    comment: for example, Node writes the cache lazily (on exit or after a flush threshold), a child that
+    exits through a signal or a fast path never flushes, or NODE_DISABLE_COMPILE_CACHE from the coverage
+    harness reaches the child. Then make the assertion state only what the test proves: the slot record
+    slot-1.json exists once and is not released, and the directory holds nothing else except, optionally,
+    node-compile-cache. Change the assertion only if the cause shows the cache directory is not part of
+    the behaviour under test; if the cause is a real leak of NODE_DISABLE_COMPILE_CACHE into a child that
+    should cache, report that instead of loosening the test. This is a test assertion change, not a gate
+    change.
+
+    INVARIANT static-admission-slot-only: the test passes or fails on the slot record alone; the presence or absence of node-compile-cache never decides it.
+  acceptance:
+    - claim: invariant:static-admission-slot-only — the admission test asserts slot-1.json and accepts either state of node-compile-cache, with the root cause written in the test
+      proof: 'unit test: test/a-static-author-admits-its-nested-checks-once.test.ts'
+      kind: guard
+    - claim: the test names the root cause of the missing compile-cache directory beside the changed assertion
+      proof: 'grep: W1-T13853 compile cache in test/a-static-author-admits-its-nested-checks-once.test.ts'
+  falsifier: |
+    Run the test repeatedly under load (for example 20 runs with a parallel CPU load): it must pass every
+    time. Delete slot-1.json, or add a second unexpected entry to the directory, and the test must fail.
