@@ -7878,6 +7878,7 @@ export async function runAdhocLaneReapRung(
     root = (deps.root ?? (() => adhocLaneRoot(config)))();
     try {
       const disk = (deps.diskHeadroom ?? ((path: string) => {
+        while (!existsSync(path) && dirname(path) !== path) path = dirname(path);
         const stat = statfsSync(path);
         return { freeBytes: stat.bavail * stat.bsize, totalBytes: stat.blocks * stat.bsize };
       }))(root);
@@ -7894,6 +7895,8 @@ export async function runAdhocLaneReapRung(
       maxAgeMs: graceMs,
       isPidAlive: deps.isPidAlive ?? worktreeLockIsPidAlive,
       onEnumerationError: (e: unknown): void => {
+        // W1-T13789: a lanes root that was never made is a survey of zero lanes.
+        if ((e as NodeJS.ErrnoException)?.code === "ENOENT") return;
         error = String(e);
         log("adhoc_lane.reap.enumeration_error", { root, error });
       },
