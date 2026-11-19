@@ -20,7 +20,7 @@ import {
   readBlobsAtRefAsync,
   type GitBlobRunner,
 } from "#src/lib/plan.js";
-import { gitRepo } from "#test/helpers/git-repo.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 
 const SIXTY_FOUR_MIB = 1 << 26;
 
@@ -31,7 +31,7 @@ function shard(id: string, rationale: string): string {
 }
 
 /** A committed plan: an empty monolith and one shard per entry of `rationales`. */
-function planRepo(t: TestContext, rationales: string[]): { dir: string; paths: string[]; ids: string[] } {
+function planRepo(t: TestContext, rationales: string[]): { repo: GitRepo; dir: string; paths: string[]; ids: string[] } {
   const repo = gitRepo({ scope: t, kind: "plan-blob-bound" });
   mkdirSync(join(repo.dir, "plan", "tasks.d"), { recursive: true });
   writeFileSync(join(repo.dir, "plan", "tasks.yaml"), "[]\n");
@@ -41,7 +41,7 @@ function planRepo(t: TestContext, rationales: string[]): { dir: string; paths: s
   writeFileSync(join(repo.dir, "plan", "tasks.d", "café.txt"), "café — fallback\n".repeat(600));
   repo.git("add", "plan");
   repo.git("commit", "--quiet", "-m", "fixture plan");
-  return { dir: repo.dir, paths, ids };
+  return { repo, dir: repo.dir, paths, ids };
 }
 
 /** The bytes git itself writes for a `cat-file --batch` of `paths` at HEAD, read as a Buffer with no bound in the way. */
@@ -91,25 +91,77 @@ test("W1-T13824 criterion 2: canonical and ./-prefixed UTF-8 shards have the sam
   }
 });
 
-test("a quoted listing path can resolve to a blob and a missing UTF-8 path retains Git's error", async (t) => {
-  const { dir, paths } = planRepo(t, ["first shard"]);
+test("W1-T13824 criterion 1: the sized listing supplies UTF-8 blob IDs and an absent path contributes its missing line", async (t) => {
+  const { repo, dir, paths } = planRepo(t, ["first shard"]);
+  repo.git("config", "core.quotePath", "true");
   const quoted = "plan/tasks.d/café.txt";
   const missing = "plan/tasks.d/absent-é.yaml";
-  const request = [quoted, paths[0]!, quoted, missing];
-  const exact = batchBytes(dir, request);
+  const request = [quoted, paths[0]!, `./${quoted}`, missing];
+  const commit = repo.git("rev-parse", "HEAD");
+  const quotedId = repo.git("rev-parse", `HEAD:${quoted}`);
+  const shardId = repo.git("rev-parse", `HEAD:${paths[0]}`);
+  const missingLine = `${commit}:${missing}`;
+  const batchInput = `${quotedId}\n${shardId}\n${quotedId}\n${missingLine}\n`;
+  const exact = batchBytes(dir, request.slice(0, -1)) + Buffer.byteLength(`${missingLine} missing\n`);
   const asyncRun = defaultGitRunnerAsync(dir);
-  const bounds: Array<number | undefined> = [];
-  const quotePaths = ["-c", "core.quotePath=true"];
-  const missingError = /could not read HEAD:plan\/tasks\.d\/absent-é\.yaml \(HEAD:plan\/tasks\.d\/absent-é\.yaml missing\)/;
+  const batches: Array<{ input: string | undefined; bound: number | undefined; bytes: number }> = [];
+  const missingError = /could not read HEAD:plan\/tasks\.d\/absent-é\.yaml \(.*absent-é\.yaml missing\)/;
   assert.throws(() => readBlobsAtRef((args, stdin, opts) => {
-    if (args[1] === "--batch") bounds.push(opts?.maxBuffer);
-    return execFileSync("git", ["-C", dir, ...quotePaths, ...args], { encoding: "utf8", input: stdin, maxBuffer: opts?.maxBuffer });
+    assert.ok(args[1] !== "--batch-check");
+    const output = execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", input: stdin, maxBuffer: opts?.maxBuffer });
+    if (args[1] === "--batch") batches.push({ input: stdin, bound: opts?.maxBuffer, bytes: Buffer.byteLength(output) });
+    return output;
   }, "HEAD", request), missingError);
-  await assert.rejects(() => readBlobsAtRefAsync((args, stdin, opts) => {
-    if (args[1] === "--batch") bounds.push(opts?.maxBuffer);
-    return asyncRun([...quotePaths, ...args], stdin, opts);
+  await assert.rejects(() => readBlobsAtRefAsync(async (args, stdin, opts) => {
+    assert.ok(args[1] !== "--batch-check");
+    const output = await asyncRun(args, stdin, opts);
+    if (args[1] === "--batch") batches.push({ input: stdin, bound: opts?.maxBuffer, bytes: Buffer.byteLength(output) });
+    return output;
   }, "HEAD", request), missingError);
-  assert.deepEqual(bounds, [exact, exact], "resolved and missing fallback output is counted in request order");
+  assert.deepEqual(batches, Array.from({ length: 2 }, () => ({ input: batchInput, bound: exact, bytes: exact })));
+});
+
+test("W1-T13824 criterion 2: a ref moving after the sized listing cannot grow the batch or resolve a missing path", async (t) => {
+  const { repo, dir } = planRepo(t, ["first shard"]);
+  const ref = "refs/heads/moving-plan";
+  const before = repo.git("rev-parse", "HEAD");
+  const quoted = "plan/tasks.d/café.txt";
+  const absent = "new-dir/absent-é.yml";
+  const grown = "日本語のテキスト ".repeat(4000);
+  writeFileSync(join(dir, quoted), grown);
+  mkdirSync(join(dir, "new-dir"));
+  writeFileSync(join(dir, absent), grown);
+  repo.git("add", "-A");
+  repo.git("commit", "--quiet", "-m", "grow plan paths");
+  const after = repo.git("rev-parse", "HEAD");
+  const asyncRun = defaultGitRunnerAsync(dir);
+
+  for (const paths of [[quoted], [absent], [quoted, absent]]) {
+    const bounds: Array<number | undefined> = [];
+    const observe = (args: string[], opts: Parameters<GitBlobRunner>[2], output: string): string => {
+      if (args[0] === "ls-tree" && args.includes("-l")) repo.git("update-ref", ref, after);
+      if (args[1] === "--batch") {
+        bounds.push(opts?.maxBuffer);
+        assert.equal(opts?.maxBuffer, Buffer.byteLength(output));
+        assert.ok(Buffer.byteLength(output) < Buffer.byteLength(grown));
+      }
+      return output;
+    };
+    repo.git("update-ref", ref, before);
+    const sync = () => readBlobsAtRef((args, stdin, opts) => observe(args, opts,
+      execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", input: stdin, maxBuffer: opts?.maxBuffer })), ref, paths);
+    if (paths.includes(absent)) assert.throws(sync, /absent-é\.yml missing/);
+    else assert.deepEqual(sync(), ["café — fallback\n".repeat(600)]);
+    assert.equal(repo.git("rev-parse", ref), after);
+
+    repo.git("update-ref", ref, before);
+    const awaited = () => readBlobsAtRefAsync(async (args, stdin, opts) =>
+      observe(args, opts, await asyncRun(args, stdin, opts)), ref, paths);
+    if (paths.includes(absent)) await assert.rejects(awaited, /absent-é\.yml missing/);
+    else assert.deepEqual(await awaited(), ["café — fallback\n".repeat(600)]);
+    assert.equal(repo.git("rev-parse", ref), after);
+    assert.equal(bounds.length, 2, "both readers ran their bounded batch after the ref moved");
+  }
 });
 
 test("W1-T13824 criterion 3: a two-argument runner still reads the plan, and the defaults keep 64 MiB without a bound", async (t) => {
@@ -131,4 +183,25 @@ test("W1-T13824 criterion 3: a two-argument runner still reads the plan, and the
   // Without a bound the default async runner keeps 64 MiB: a 2 MiB blob passes Node's 1 MiB default.
   const blob = execFileSync("git", ["-C", dir, "rev-parse", `HEAD:${paths[0]}`], { encoding: "utf8" }).trim();
   assert.equal((await defaultGitRunnerAsync(dir)(["cat-file", "blob", blob])).length, shard(ids[0]!, big).length);
+});
+
+test("W1-T13824 criterion 3: a legacy two-argument fake with an empty ID listing still uses the path batch", async (t) => {
+  const { dir, paths, ids } = planRepo(t, ["first shard", "second shard"]);
+  const commands: string[] = [];
+  const legacy = (args: string[], stdin?: string): string => {
+    commands.push(args.slice(0, 2).join(" "));
+    if (args[0] === "ls-tree" && args.includes("-l")) return "";
+    if (args[0] === "cat-file") {
+      assert.deepEqual(args, ["cat-file", "--batch"]);
+      assert.equal(stdin, paths.map(path => `HEAD:${path}\n`).join(""));
+    } else {
+      assert.ok(args[0] === "show" || args[0] === "ls-tree");
+    }
+    return execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", input: stdin });
+  };
+  assert.deepEqual(loadPlanAtRef(dir, "plan/tasks.yaml", "HEAD", legacy).tasks.map(task => task.id).sort(), ids);
+  const awaited = await loadPlanAtRefAsync(dir, "plan/tasks.yaml", "HEAD", async (args, stdin) => legacy(args, stdin));
+  assert.deepEqual(awaited.tasks.map(task => task.id).sort(), ids);
+  const expected = ["show HEAD:plan/tasks.yaml", "ls-tree --name-only", "ls-tree -l", "cat-file --batch"];
+  assert.deepEqual(commands, [...expected, ...expected]);
 });

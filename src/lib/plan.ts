@@ -2,7 +2,7 @@ import { operatorReleaseContractChanged, qualifyReleaseEvidence, releaseContract
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { execFile, execFileSync, type ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
-import { dirname, join } from "node:path";
+import { dirname, join, posix } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml, type DocumentOptions } from "yaml";
 import { RmdError } from "./errors.js";
@@ -1308,11 +1308,10 @@ type GitBlobRunOptions = { maxBuffer?: number };
  *  retain their PlanError/GitFetchError wrappers. */
 export function readBlobsAtRef(runGit: GitBlobRunner, ref: string, relPaths: string[]): string[] {
   if (relPaths.length === 0) return [];
-  const { request, listedBytes, fallback } = blobBatchRequest(ref, relPaths, runGit(blobIdListingArgs(ref, relPaths)));
-  const maxBuffer = fallback.length > 0 && listedBytes !== undefined
-    ? blobBatchMaxBuffer(listedBytes, fallback, runGit(["cat-file", "--batch-check"], fallback.join("\n") + "\n"))
-    : listedBytes;
-  return parseBlobBatch(runGit(["cat-file", "--batch"], request, { maxBuffer }), ref, relPaths);
+  const pin = blobBatchPinArgs(runGit.length, ref);
+  const batchRef = pin ? runGit(pin).trim() : ref;
+  const batch = blobBatchRequest(batchRef, relPaths, runGit(blobIdListingArgs(batchRef, relPaths)), runGit.length >= 3);
+  return parseBlobBatch(runGit(["cat-file", "--batch"], batch.request, { maxBuffer: batch.maxBuffer }), ref, relPaths);
 }
 
 /** {@link readBlobsAtRef} through an AWAITED runner: the same listing, one `cat-file --batch`, request and framing. */
@@ -1329,73 +1328,65 @@ export async function readBlobsAtRefAsync(
 /**
  * The `cat-file --batch` request for `relPaths` at `ref`, each path asked by its blob id. A `<ref>:<path>` line makes
  * git resolve the path through its directory's tree once per line: over plan/tasks.d's 4,577 entries that cost about
- * 2 ms a shard, 9.86 s for the plan against 0.36 s by id (measured 2026-10-28; #15230). One `git ls-tree` over the
- * paths' directories names every id; batch-check measures any remaining path requests before the read.
+ * 2 ms a shard, 9.86 s for the plan against 0.36 s by id (measured 2026-10-28; #15230).
  */
 export async function blobBatchRequestAsync(
-  runGit: (args: string[], stdin?: string) => Promise<string>,
+  runGit: (args: string[], stdin?: string, opts?: GitBlobRunOptions) => Promise<string>,
   ref: string,
   relPaths: string[],
 ): Promise<{ request: string; maxBuffer: number | undefined }> {
-  const { request, listedBytes, fallback } = blobBatchRequest(ref, relPaths, await runGit(blobIdListingArgs(ref, relPaths)));
-  const maxBuffer = fallback.length > 0 && listedBytes !== undefined
-    ? blobBatchMaxBuffer(listedBytes, fallback, await runGit(["cat-file", "--batch-check"], fallback.join("\n") + "\n"))
-    : listedBytes;
-  return { request, maxBuffer };
+  const pin = blobBatchPinArgs(runGit.length, ref);
+  const batchRef = pin ? (await runGit(pin)).trim() : ref;
+  return blobBatchRequest(batchRef, relPaths, await runGit(blobIdListingArgs(batchRef, relPaths)), runGit.length >= 3);
 }
 
-/** `git ls-tree -l <ref> -- <dir>/...`: every entry, with its size, in each directory that holds one of `relPaths`. */
+// Runners with the batch options parameter can pin missing requests; older runners keep their path-batch protocol.
+function blobBatchPinArgs(runnerArity: number, ref: string): string[] | undefined {
+  if (runnerArity < 3 || /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(ref)) return undefined;
+  return ["rev-parse", "--verify", "--end-of-options", ref];
+}
+
+/** List sizes and raw paths for every entry in the requested directories. */
 function blobIdListingArgs(ref: string, relPaths: string[]): string[] {
   const dirs = new Set(relPaths.map((path) => {
     const p = blobListingPath(path);
-    const dir = dirname(p);
+    const dir = posix.dirname(p);
     return dir === "." ? p : `${dir}/`;
   }));
-  return ["ls-tree", "-l", ref, "--", ...[...dirs].sort()];
+  return ["ls-tree", "-l", "-z", ref, "--", ...[...dirs].sort()];
 }
 
 function blobListingPath(path: string): string {
-  return path.replace(/^(?:\.\/+)+/, "") || path;
+  return path.startsWith("./") ? posix.normalize(path) : path;
 }
 
-function blobBatchRequest(ref: string, relPaths: string[], listing: string) {
-  const listed = new Map<string, { oid: string; size: number | undefined }>();
-  const namesOnly = new Set<string>();
-  for (const line of listing.split("\n")) {
-    const entry = /^\d{6} blob ([0-9a-f]{40,64})(?: +(\d+))?\t(.+)$/.exec(line);
-    if (entry) listed.set(entry[3]!, { oid: entry[1]!, size: entry[2] === undefined ? undefined : Number(entry[2]) });
-    else namesOnly.add(line);
-  }
-  const fallback: string[] = [];
-  const inputs: string[] = [];
-  let listedBytes: number | undefined = 0;
-  for (const path of relPaths) {
-    const key = blobListingPath(path);
-    const entry = listed.get(key);
-    if (entry === undefined) {
-      if (namesOnly.has(key)) listedBytes = undefined;
-      const input = `${ref}:${path}`;
-      fallback.push(input);
-      inputs.push(input);
-      continue;
+function blobBatchRequest(ref: string, relPaths: string[], listing: string, pinned: boolean) {
+  const listed = new Map<string, { type: string; oid: string; size: number | undefined }>();
+  const rawPaths = listing.endsWith("\0");
+  for (const line of listing.split(rawPaths ? "\0" : "\n")) {
+    const entry = /^\d{6} (\w+) ([0-9a-f]{40,64})(?: +(\d+|-))?\t([\s\S]+)$/.exec(line);
+    if (entry) {
+      const [, type, oid, size, path] = entry;
+      listed.set(path!, { type: type!, oid: oid!, size: size === undefined || size === "-" ? undefined : Number(size) });
     }
-    if (entry.size === undefined) listedBytes = undefined;
-    else if (listedBytes !== undefined) listedBytes += entry.oid.length + " blob ".length + String(entry.size).length + 2 + entry.size;
-    inputs.push(entry.oid);
   }
-  return { request: inputs.join("\n") + "\n", listedBytes, fallback };
+  const batch = relPaths.map(path => {
+    const key = blobListingPath(path);
+    const entry = listed.get(key) ?? (key.endsWith("/") ? listed.get(key.slice(0, -1)) : undefined);
+    if (entry && entry.type !== "blob") throw new Error(`git cat-file --batch could not read ${ref}:${path} (${entry.type})`);
+    if (entry && !key.endsWith("/")) return { input: entry.oid, size: entry.size };
+    return { input: `${ref}:${path}`, size: pinned && (rawPaths || listing === "") ? "missing" as const : undefined };
+  });
+  return { request: batch.map(({ input }) => input).join("\n") + "\n", maxBuffer: blobBatchMaxBuffer(batch) };
 }
 
-/** Batch-check prints the batch headers verbatim. Only sized objects add contents and a trailing LF. */
-function blobBatchMaxBuffer(listedBytes: number, fallback: string[], headers: string): number | undefined {
-  const lines = headers.split("\n");
-  if (lines.pop() !== "" || lines.length !== fallback.length) return undefined;
-  let bytes = listedBytes + Buffer.byteLength(headers);
-  for (const [i, input] of fallback.entries()) {
-    const line = lines[i]!;
-    const size = /^[0-9a-f]{40,64} \S+ (\d+)$/.exec(line)?.[1];
-    if (size !== undefined) bytes += Number(size) + 1;
-    else if (line !== `${input} missing` && line !== `${input} ambiguous`) return undefined;
+function blobBatchMaxBuffer(batch: Array<{ input: string; size: number | "missing" | undefined }>): number | undefined {
+  let bytes = 0;
+  for (const { input, size } of batch) {
+    if (size === undefined) return undefined;
+    bytes += size === "missing"
+      ? Buffer.byteLength(`${input} missing\n`)
+      : input.length + " blob ".length + String(size).length + 2 + size;
   }
   return bytes;
 }
