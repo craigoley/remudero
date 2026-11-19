@@ -142,7 +142,7 @@ test("W1-T12074 criterion 2: the doctor command reports FAIL with every missing 
   process.env.RMD_CLEANUP_PATH = "/custom/cleanup/host.sh";
   process.env.RMD_TMP_SWEEP_PATH = "/custom/cleanup/hourly-sweep.sh";
   const pieces = hostPieces("linux", commandContext());
-  const missingIds = ["dependency-tool", "heartbeat-script", "reclaim-script", "host-cleanup-script", "tmp-sweep-script", "github-login"];
+  const missingIds = ["dependency-tool", "heartbeat-script", "reclaim-script", "host-cleanup-script", "tmp-sweep-script", "reap-stray-script", "github-login"];
   const missingPaths = new Set(pieces.filter((p) => missingIds.includes(p.id)).map((p) => p.path));
   const seen: [string][] = [];
   const failed = await runDoctor((...args) => {
