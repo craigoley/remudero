@@ -153,7 +153,7 @@ import {
 // Pure shared gate; dispatch-governor.ts explains why drain.ts cannot share it from here (W1-T342).
 import { checkDispatchGovernors, checkNewBuildReservation, governorDeferPayload, newBuildReservationPayload, type DispatchGovernorDeps, type DispatchGovernorVerdict, type MemoryReadTracker, type QuietHoursHoldResult } from "./dispatch-governor.js";
 import { assertRunnable, PlanError, TaskAdmissionError, type MergedResolver, type Plan, type Task, type TaskInputAnswer } from "./plan.js";
-import { composeSecondaryPlan } from "./task-lookup.js";
+import { composeSecondaryPlan, compositionHoldEdge, type CompositionHold } from "./task-lookup.js";
 import { resolveReleases, closedUnmergedRunBranchRefs, type DispatchFilterReason, type ReleaseResolution } from "./drain.js";
 import type { StatusProjection } from "./status.js";
 import { ENVIRONMENTAL_BLOCK_COOLDOWN_MS, INDEPENDENT_BLOCK_RELEASED_STEP, isEnvironmentalBlock, PRE_RESTORE_RUN_VERDICT_STAGES, type IndependentBlockRelease } from "./status.js";
@@ -2343,6 +2343,10 @@ export function compareSecondaryCatalogShadow(
   try {
     const composition = composeSecondaryPlan(primary, secondary);
     if (composition.outcome !== "ok") return result(composition.outcome);
+    // W1-T13749: dispatch now holds only a bad edge's own tasks; this observation keeps reporting any held edge as
+    // the refusal code it had, a duplicate ahead of an edge, so its rows mean what they meant before.
+    const heldReasons = new Set([...composition.held.values()].map((hold) => hold.reason));
+    if (heldReasons.size > 0) return result(heldReasons.has("duplicate_task_id") ? "duplicate_task_id" : "invalid_cross_catalog_dependency");
     const { plan: composed, secondaryIds } = composition;
     // Precondition evaluation may spawn an rmd reader. Do not repeat or add that read in a shadow pass.
     if ([...primary.tasks, ...secondary.tasks].some((task) => task.precondition !== undefined)) return result("comparison_deferred");
@@ -5542,6 +5546,26 @@ export async function runDaemon(
     catch (error) { void error; /* A diagnostic failure cannot authorize ops work or stop public selection. */ }
     lastOpsDispatchHold = signature;
   };
+  // W1-T13749: the per-task holds the last composed ops plan wrote, by id; a row is written when a hold starts or its
+  // edge changes, and a cleared row when the id composes again, never one per tick.
+  let lastOpsTaskHolds = new Map<string, string>();
+  const noteOpsTaskHolds = (held: ReadonlyMap<string, CompositionHold>): void => {
+    const current = new Map<string, string>();
+    for (const [taskId, hold] of held) {
+      const edge = compositionHoldEdge(hold);
+      const signature = JSON.stringify([hold.reason, edge]);
+      current.set(taskId, signature);
+      if (lastOpsTaskHolds.get(taskId) === signature) continue;
+      try { log("dispatch.ops_task_held", { task: taskId, outcome: hold.reason, edge }); }
+      catch (error) { void error; /* A diagnostic failure cannot authorize the held task or stop the others. */ }
+    }
+    for (const taskId of lastOpsTaskHolds.keys()) {
+      if (current.has(taskId)) continue;
+      try { log("dispatch.ops_task_hold_cleared", { task: taskId }); }
+      catch (error) { void error; /* The task composes either way; only the diagnostic is lost. */ }
+    }
+    lastOpsTaskHolds = current;
+  };
   const readOpsDispatch = (primary: Plan): OpsTaskDispatchRead => {
     try { return deps.readOpsTaskDispatch?.(primary) ?? { outcome: "off" }; }
     catch (error) {
@@ -5571,10 +5595,12 @@ export async function runDaemon(
     }
     const composition = composeSecondaryPlan(primary, input.plan);
     if (composition.outcome !== "ok") {
-      holdOpsDispatch(composition.outcome, composition.taskId);
+      holdOpsDispatch(composition.outcome);
       return { plan: primary, observation };
     }
     lastOpsDispatchHold = undefined;
+    // W1-T13749: a bad edge holds its own task and its dependants; every other task dispatches from the composed plan.
+    noteOpsTaskHolds(composition.held);
     opsDispatchContexts.set(composition.plan, { publicPlan: primary, publicCommit: observation.publicCommit,
       source: input, opsIds: composition.secondaryIds });
     return { plan: composition.plan, observation };
