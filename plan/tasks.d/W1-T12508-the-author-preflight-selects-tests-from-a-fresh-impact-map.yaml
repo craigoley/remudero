@@ -98,6 +98,19 @@
     fail. Drop an over-budget executing suite from the receipt and criterion 10 must fail. Restore and require all ten
     to pass.
   note: |
+    AMENDED 2026-11-19 (operator: paused until a nightly read map exists). Operator ruling, 2026-11-19: "Pause the
+    chain, amend the records". This task depends on W1-T12505, which now depends on W1-T13164 (the operator build
+    that makes the nightly coverage run upload main's read map), so it does not dispatch before a map exists. What
+    the W1-T12505 hand build (kept local and unpushed, a4cddf305c) found that applies here too:
+    - Step 1's "bounded artifact fetch W1-T12505 adds" is a generic seam, `fetchNightlyArtifact({ root, artifact,
+      file, spawn, cacheDir })`; reuse it with artifact 'test-impact-map', not a second fetch. In the half-build its
+      suite drives that seam, but scripts/preflight-author.mjs does not define it yet (see the next line).
+    - The half-build's author-side fetch in scripts/preflight-author.mjs was refused by the deny-floor hook: the code
+      held `gh` `run list` and `run download` strings, and the hook read it as a GitHub call. The fetch goes through
+      the existing transport (`ghExec` in src/lib/github-transport.ts, which owns every `gh` spawn and routes a read
+      through a live broker; find it with `git grep -n "ghJsonAsync\|rmd gh" -- src scripts`), never a raw `gh` spawn.
+    - The default fetch is off under the test runner (W1-T12505 design step 11): no suite that runs the author `main`
+      or `authorSelection` without injecting a fetch may spawn `gh`.
     AMENDED 2026-11-18 (operator: lighter preflight). Operator, 2026-11-18: "I hate how big, long, and heavy
     preflights are. They are so limiting." and "Go with all of your recommendations". The record as filed adopts the
     impact arm as built, and the operator session's analysis (main's nightly impact map, run 44240707631 at main
