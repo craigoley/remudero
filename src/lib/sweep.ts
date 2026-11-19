@@ -17489,8 +17489,10 @@ export function withCodeqlAlertEvidence(pr: Pick<OpenPrView, "headSha" | "codeql
 /* W1-T13470 — GITHUB'S "N CONFIGURATION(S) NOT FOUND" CODEQL STATE IS OBSERVED, NEVER REPAIRED. The policy keeps it
  * UNKNOWN under its own reason; a head whose only red is that status waits instead of entering a fix round. A full
  * pass reads the decision through the read-only adapter and writes its receipt once per head and check generation, and
- * a CodeQL workflow completion GitHub re-judged with the warning still standing is escalated once. Nothing here grants,
- * merges or writes a status; a cleared fresh read re-runs the trusted producer once per head (W1-T13787). */
+ * a CodeQL workflow completion GitHub re-judged with the warning still standing is escalated once. If the fresh,
+ * exact-head observation is merge-allowed and no longer contains the warning, the sweep re-dispatches the trusted
+ * producer once;
+ * it never grants, merges or writes a status itself. */
 export const CODE_SCANNING_CONFIGURATION_WARNING_STEP = "security.codeql_configuration_warning_captured";
 export const CODE_SCANNING_CONFIGURATION_WARNING_ESCALATED_STEP = "security.codeql_configuration_warning_escalated";
 const SECURITY_PRODUCER_REDISPATCHED_STEP = "security.producer_redispatched";
@@ -17572,10 +17574,10 @@ export async function observeCodeqlConfigurationWarning(deps: SweepDeps, lines: 
   const warning = observed.observation?.configurationWarning;
   const capturedEarlier = captures.length > 0; // W1-T13663: a capture an earlier pass wrote, not this one
   const fresh = `${observed.decision.state}: ${observed.decision.reason}`;
-  if (warning === undefined && observed.decision.reason !== CODEQL_CONFIGURATION_NOT_FOUND && deps.dispatchSecurityMergeProducer) {
-    if (!observed.observation || (observed.observation.checksComplete !== true && observed.decision.state !== "not-applicable")) {
-      return `${waitReason} — the fresh read did not verify warning clearance (${fresh})`;
-    }
+  const clearedDecision = observed.decision.mergeAllowed === true &&
+    (observed.decision.state === "safe" || observed.decision.state === "not-applicable") &&
+    observed.decision.reason !== CODEQL_CONFIGURATION_NOT_FOUND;
+  if (warning === undefined && clearedDecision && deps.dispatchSecurityMergeProducer) {
     const alreadyDispatched = (line: Record<string, unknown>) =>
       line.step === SECURITY_PRODUCER_REDISPATCHED_STEP && line.pr_number === pr.prNumber && line.head_sha === pr.headSha;
     let claimed = false;
@@ -17618,6 +17620,8 @@ export async function observeCodeqlConfigurationWarning(deps: SweepDeps, lines: 
         notes.push(`the fresh read answers ${fresh}; ${reason}`);
       }
     }
+  } else if (warning === undefined && !clearedDecision) {
+    notes.push(`the fresh read did not verify warning clearance (${fresh})`);
   }
   if (warning !== undefined && !captures.some((line) => line.check_id === warning.checkId)) {
     const capture = { ...row, step: CODE_SCANNING_CONFIGURATION_WARNING_STEP, check_id: warning.checkId,

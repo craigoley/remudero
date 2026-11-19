@@ -85,6 +85,13 @@ test("W1-T13787 criterion 1: a cleared fresh read at the same head dispatches th
   assert.match(reason, /^wait — the fresh read answers safe: no-new-high-or-critical-alert, so the security-merge-policy producer was dispatched once for this head$/);
 });
 
+test("W1-T13787 criterion 1: safe same-head evidence does not need the optional checksComplete field", async () => {
+  const h = harness([], async () => ({ ...CLEARED, observation: { latest: { id: 3 } } }));
+  const reason = await sweep.observeCodeqlConfigurationWarning(h.deps, [], view(), "wait");
+  assert.deepEqual(h.dispatched, [PR]);
+  assert.match(reason, /fresh read answers safe: no-new-high-or-critical-alert/);
+});
+
 test("W1-T13787 criterion 2: the producer is re-run at most once per head, and a new head is re-run again", async () => {
   const first = harness([], async () => CLEARED);
   await sweep.observeCodeqlConfigurationWarning(first.deps, [], view(), "wait");
@@ -197,6 +204,7 @@ test("W1-T13787 criterion 3: the real adapter's failed read and changed final he
     ["502 after the first PR read", "security-api-unavailable"],
     ["moved head on final recheck", "head-or-base-changed-during-observation"],
     ["incomplete check corpus", "check-corpus-incomplete"],
+    ["duplicate check generation", "check-generation-ambiguous"],
   ] as const) {
     await t.test(name, async () => {
       const reads: string[] = [];
@@ -210,7 +218,9 @@ test("W1-T13787 criterion 3: the real adapter's failed read and changed final he
           case FILE_ENDPOINT:
             if (problem === "security-api-unavailable") throw new Error("HTTP 502");
             return [{ filename: "src/example.ts" }];
-          case CHECK_ENDPOINT: return { total_count: problem === "check-corpus-incomplete" ? 2 : 1, check_runs: [CLEARED_CHECK] };
+          case CHECK_ENDPOINT: return problem === "check-generation-ambiguous"
+            ? { total_count: 2, check_runs: [CLEARED_CHECK, CLEARED_CHECK] }
+            : { total_count: problem === "check-corpus-incomplete" ? 2 : 1, check_runs: [CLEARED_CHECK] };
           default: assert.fail(`unexpected metadata read ${path}`);
         }
       }, writes);
