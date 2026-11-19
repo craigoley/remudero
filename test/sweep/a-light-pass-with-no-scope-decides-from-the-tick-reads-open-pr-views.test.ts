@@ -158,7 +158,7 @@ test("W1-T13831 criterion 2: the refill read is never served the tick read, what
   for (const scope of [undefined, HANDOFF, IDLE, BOOT]) {
     assert.ok(port(scope, "pass"), `${scope?.scope ?? "no scope"}: the pass's read is served`);
     assert.equal(port(scope, "refill"), undefined, `${scope?.scope ?? "no scope"}: the refill read reads its own`);
-    assert.equal(port(scope), undefined, "a call that names no read is not served");
+    assert.equal(port(scope) !== undefined, scope?.scope === "boot", "only a boot caller may omit the read kind");
   }
   const f = fixture(82, "head-live");
   try {

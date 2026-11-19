@@ -879,12 +879,12 @@ export async function daemonSreLaneEnabled(
 }
 
 /** W1-T12236 / W1-T13709 / W1-T13831: a pass of any scope, or none, may use a fresh, clean tick read.
- * A refill read (or a call that names no read), no tick read, an older one, or a failed open list reads its own. */
+ * A boot caller may omit the read kind. Refills and other calls that omit it read their own views. */
 export function servedOpenPrViews(
   published: () => ReadGeneration<TickReadFacts> | undefined,
   tickStartedAtMs: () => number | undefined,
 ): (scope?: LightPassScope, read?: "pass" | "refill") => (Promise<OpenPrView[]> & { servedReadStartedAtMs?: number }) | undefined {
-  return (_scope, read = "refill") => {
+  return (scope, read = scope?.scope === "boot" ? "pass" : "refill") => {
     const generation = published();
     const startedAtMs = tickStartedAtMs();
     if (read !== "pass" || !generation || startedAtMs === undefined) return undefined;
