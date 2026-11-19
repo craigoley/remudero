@@ -18,7 +18,9 @@ const probe = `
 function child(environment: NodeJS.ProcessEnv) {
   return JSON.parse(execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", probe], {
     cwd: ROOT, encoding: "utf8", timeout: 15_000,
-    env: { ...process.env, ...environment, NODE_TEST_CONTEXT: undefined },
+    // These child probes verify author-time cache sharing. Keep them out of the parent suite's
+    // coverage session, which deliberately disables compile caching in spawned children.
+    env: { ...process.env, ...environment, NODE_TEST_CONTEXT: undefined, NODE_V8_COVERAGE: "" },
   }));
 }
 function owner(t: { after: (fn: () => void) => void }) {
@@ -44,7 +46,7 @@ test("author static admission: real child and grandchild borrow one live owner w
     import { execFileSync } from 'node:child_process';
     process.stdout.write(execFileSync(process.execPath, ${JSON.stringify(["--import", "tsx", "--input-type=module", "-e", probe])}, {encoding:'utf8'}));
   `], { cwd: ROOT, encoding: "utf8", timeout: 15_000,
-    env: { ...process.env, ...lease.childEnvironment, NODE_TEST_CONTEXT: undefined } });
+    env: { ...process.env, ...lease.childEnvironment, NODE_TEST_CONTEXT: undefined, NODE_V8_COVERAGE: "" } });
   assert.match(JSON.parse(grandchild).note, /inherited live parent test slot/);
   assert.deepEqual(readdirSync(dir), ["node-compile-cache", "slot-1.json"]);
   assert.equal(readFileSync(claim.path, "utf8"), bytes);
