@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -11,6 +11,7 @@ import { loadMountHeadroomCells, resolveMountExplorationDispatch } from "#src/li
 import { loadMounts, mountsPath, type Mount } from "#src/lib/mounts.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { writeLedger } from "#test/helpers/ledger-fixture.js";
+import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 interface BuildChildEntries {
@@ -49,14 +50,10 @@ try {
 
 test("W1-T13791 criterion 1: a bundled loadMountHeadroomCells returns cells under plain node, where a plain import() fails", async (t) => {
   const build = createRequire(import.meta.url)(join(REPO_ROOT, "scripts", "build-child-entries.mjs")) as BuildChildEntries;
-  // Inside the tree's gitignored dist/, at a bundle's depth, so the bundle resolves tsx from the tree's node_modules.
-  mkdirSync(join(REPO_ROOT, "dist"), { recursive: true });
-  const out = mkdtempSync(join(REPO_ROOT, "dist", `${RMD_TMP_PREFIX}w13791-bundle-`));
-  const ledger = writeLedger(sweepRows());
-  t.after(() => {
-    rmSync(out, { recursive: true, force: true });
-    rmSync(ledger.dir, { recursive: true, force: true });
-  });
+  const { dir: out } = ownedFixtureDir(t, "w13791-bundle");
+  // Child-entry builds externalize packages, so the bundle needs node_modules at runtime.
+  symlinkSync(join(REPO_ROOT, "node_modules"), join(out, "node_modules"), "dir");
+  const ledger = writeLedger(sweepRows(), { scope: t });
   // The loader as main had it: a plain import() of the sweep, bundled the same way as a second tiny entry.
   const plainEntry = join(out, "plain-import-entry.mjs");
   writeFileSync(plainEntry, [
