@@ -16,7 +16,7 @@
   files:
     - src/lib/escalation-answers.ts
     - test/inbox/the-escalation-answer-walk-reads-only-issues-with-a-new-or-edited-comment.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "On a walk after the first in the same process, an issue whose listed comment count equals its kept read and that the since read does not name is not read again: listComments is not called for it, and the result (accepted, ignored, unreadable), every ledger row and every applyGrilledFeedbackAnswer call are the same as when listComments answers the kept comments"

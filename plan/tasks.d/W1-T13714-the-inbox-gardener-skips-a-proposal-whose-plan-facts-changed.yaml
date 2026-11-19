@@ -16,7 +16,7 @@
     - src/lib/inbox-retirement.ts
     - src/lib/inbox-gardener.ts
     - test/gardeners/the-inbox-gardener-skips-a-proposal-whose-plan-facts-changed.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "When only some proposals' plan facts differ from the snapshot's, the gardener's plan coverage is the census value and only those candidates are marked"

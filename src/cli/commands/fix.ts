@@ -5,7 +5,7 @@ import type { RunTaskCommandHost, GitRunner, CiGateOutcome, ReviewRunResult, Fix
 import { buildBaseProofDir, releaseBaseProofDir, type BaseProofDir } from "../../lib/check-proof.js";
 import { conflictRoundProgressVerdict, judgeFixProgress, resolveFixProgress, type FixProgressJudge, type FixProgressResult, type FixProgressVerdict, type FixProgressWorkerProofResult, reviewerProofFailures, unfiledScopeGrant, UNFILED_SCOPE_GRANT_ANSWER } from "../../lib/fix-progress-judge.js";
 import { openEscalationRelease, PARKED_PR_REMEDY_STEP } from "../../lib/parked-pr-remedy.js";
-import { buildFixProgressInputWithHostedProofs, conflictRoundHeldHead, readHostedFixProofResults, reservePlanRepairTaskId, type HostedFixProofReader } from "../../lib/sweep.js";
+import { buildFixProgressInputWithHostedProofs, conflictRoundHeldHead, fixRoundArchiveRows, readHostedFixProofResults, readSweepRepairHistory, reservePlanRepairTaskId, type HostedFixProofReader } from "../../lib/sweep.js";
 import { parseWhitelistedProof, execWhitelistedProofAsync, proofChildCommand, buildProofEnv, type AsyncProofSpawner } from "../../lib/review.js";
 import { execFileRouted } from "../../lib/spawn-helper.js";
 import { BASE_REPRODUCTION_MAX_FILES, boundedBaseProbeReason, baseReproductionFiles, decideBaseReproduction, type BaseProbeResult } from "../../lib/base-reproduction.js";
@@ -2827,11 +2827,13 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     // the current PR head, and compare the carried head to that same head when selecting its cause.
     const holdLedgerRows = [...(deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))(), ...roundRows];
     let holdRows: ReadonlyArray<Record<string, unknown>> = holdLedgerRows;
-    const holdHeadSha = prNumber === undefined ? currentPrHeadSha : conflictRoundHeldHead(
+    // W1-T13712: the rotations come from the sweep's async reader, kept across rounds, never from a synchronous union read.
+    const repairHistory = prNumber === undefined ? undefined : await readSweepRepairHistory(deps.ledgerPath);
+    const holdHeadSha = prNumber === undefined || repairHistory === undefined ? currentPrHeadSha : conflictRoundHeldHead(
       { taskId: opts.taskId, prNumber, prUrl: opts.prUrl, headSha: currentPrHeadSha },
       holdLedgerRows,
       deps.ledgerPath,
-      undefined,
+      () => fixRoundArchiveRows(repairHistory),
       (head, history) => {
         holdRows = history;
         if (history.some(row => row.step === "fix.needs_design" && row.task_id === opts.taskId &&
