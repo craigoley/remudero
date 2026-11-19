@@ -12,7 +12,7 @@ import { MERGED_RULES_FILE } from "./learnings.js";
 import { GUARD_RETIREMENT_ZERO_STREAK } from "./retro-closure.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { hostWorktreeGit } from "./worktree-git.js";
-import { buildSkillEffectivenessReport, loadInjectableSkills, SKILL_EFFECTIVENESS_LEDGER_STEPS, stageSkillLifecycleProposal, type InjectableSkill } from "./skill-workshop.js";
+import { buildSkillEffectivenessReport, loadInjectableSkills, SKILL_EFFECTIVENESS_LEDGER_STEPS, stageSkillLifecycleProposal, type InjectableSkill, type SkillEffectivenessArm } from "./skill-workshop.js";
 import { updateProposalRegistry, type Proposal } from "./inbox.js";
 import {
   gardenStatePath,
@@ -679,30 +679,40 @@ export function stageGuardRetirementProposal(registryPath: string, action: Garde
   });
 }
 
-/** Approved, opted-in skills with enough `skills.used` history to judge — {@link retireCandidates}
- *  reused verbatim, since {@link SkillUsage} is {@link LearningUsage}'s own shape: a skill offered
- *  and rarely used, compared with the corpus's typical skill, is a SKILL-LIFECYCLE candidate. */
-export function skillLifecycleCandidates(skillUsage: SkillUsage, approvedNames: string[], rng: () => number): GardenAction[] {
-  return retireCandidates(skillUsage, approvedNames, rng).map((name) => ({
+/** Every approved, opted-in skill that `skills.used` shows offered at least once. The effectiveness report
+ *  judges each one; a name missing from the approved tree is never judged, whatever its old counts say. */
+export function skillLifecycleCandidates(skillUsage: SkillUsage, approvedNames: string[]): GardenAction[] {
+  return approvedNames.filter((name) => (skillUsage[name]?.offered ?? 0) > 0).map((name) => ({
     class: "skill-lifecycle" as const,
     target: name,
-    reason: "Workers offered it have rarely reported using it, compared with other approved skills.",
+    reason: "Its offered and withheld runs are compared on merges, harm and cost per merged PR.",
   }));
 }
 
-/** Build this skill's effectiveness report from the ledger and stage its retirement proposal —
- *  `stageSkillLifecycleProposal` ON SCHEDULE instead of only by hand (`rmd skill lifecycle`).
- *  BEST-EFFORT: an unreadable ledger or a report that does not clear `stageSkillLifecycleProposal`'s
- *  own bar (not yet RETIRE-CANDIDATE) stages nothing, silently — the next pass tries again once
- *  more evidence accrues. */
-export function stageSkillLifecycleForAction(stateDir: string, repoRoot: string, action: GardenAction): void {
+/** Build each skill's effectiveness report from one ledger read, stage or withdraw its retirement proposal —
+ *  `stageSkillLifecycleProposal` ON SCHEDULE instead of only by hand (`rmd skill lifecycle`) — and log one
+ *  `skills.lifecycle_judged` row per skill. BEST-EFFORT: an unreadable or partial ledger judges nothing. */
+export function stageSkillLifecycleForAction(
+  stateDir: string,
+  repoRoot: string,
+  actions: readonly GardenAction[],
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): void {
+  if (actions.length === 0) return;
   try {
     const ledger = readLedgerUnionRecordsSync(stateDir, { step: SKILL_EFFECTIVENESS_LEDGER_STEPS, refuseIncomplete: true });
     // A partial read is not evidence either way: staging from it could withdraw a staged retirement
     // the full ledger still supports, so an incomplete union leaves the registry untouched.
     if (!ledger.ok) return;
-    const report = buildSkillEffectivenessReport(ledger.rows, action.target);
-    stageSkillLifecycleProposal(join(stateDir, "inbox-proposals.json"), join(repoRoot, ".claude", "skills"), report);
+    for (const action of actions) {
+      const report = buildSkillEffectivenessReport(ledger.rows, action.target);
+      const staged = stageSkillLifecycleProposal(join(stateDir, "inbox-proposals.json"), join(repoRoot, ".claude", "skills"), report);
+      const arm = (c: SkillEffectivenessArm) => ({ terminal_runs: c.terminal_runs, merged_runs: c.merged_runs, cost_per_merged_pr: c.cost_per_merged_pr });
+      log("skills.lifecycle_judged", {
+        skill: report.skill_name, status: report.status, basis: report.basis, settle_window_ms: report.settle_window_ms,
+        selected: arm(report.selected), control: arm(report.control), staged: staged.staged || staged.refreshed, withdrawn: staged.withdrawn,
+      });
+    }
   } catch {
     // deliberate: a background proposal attempt never fails the pass it rides in — the next tick
     // tries again, and nothing here has written anything if the ledger could not be read.
@@ -768,7 +778,7 @@ function candidateActions(opts: {
   }
   if (opts.root) actions.push(...repairReferenceCandidates(opts.root));
   actions.push(...guardRetirementCandidates(opts.guardZeroStreak ?? {}));
-  actions.push(...skillLifecycleCandidates(opts.skillUsage ?? {}, opts.approvedSkillNames ?? [], opts.rng));
+  actions.push(...skillLifecycleCandidates(opts.skillUsage ?? {}, opts.approvedSkillNames ?? []));
   actions.push(
     ...staleCitationCandidates({
       items: opts.items,
@@ -1223,8 +1233,8 @@ export function knowledgeGardenSpec(deps: GardenerDeps<GardenWorkspace>): Garden
       // dir, outside the checkout this pass would otherwise land as a PR. STALE-CITATION (W1-T4682)
       // is the same shape — there is no single correct rewrite for a stale citation, so it stages
       // a proposal too, rather than editing the citing skill or doctrine body itself.
+      stageSkillLifecycleForAction(deps.stateDir, deps.repoRoot, plan.actions.filter((a) => a.class === "skill-lifecycle"), deps.log);
       for (const a of plan.actions) {
-        if (a.class === "skill-lifecycle") stageSkillLifecycleForAction(deps.stateDir, deps.repoRoot, a);
         if (a.class === "guard-retirement") stageGuardRetirementProposal(inboxPath, a);
         if (a.class === "stale-citation") stageStaleCitationProposal(inboxPath, a);
       }
