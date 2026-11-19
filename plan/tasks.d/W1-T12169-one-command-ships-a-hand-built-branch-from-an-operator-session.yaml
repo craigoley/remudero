@@ -16,9 +16,10 @@
     - W1-T11914
   files:
     - src/lib/hand-ship.ts
-    - scripts/preflight-author.mjs
+    - src/lib/git-push.ts
+    - src/lib/worktree-git.ts
+    - src/lib/github-transport.ts
     - src/run-task.ts
-    - test/ci/an-author-preflight-says-which-of-its-failures-the-change-caused.test.ts
     - test/ci/one-command-ships-a-hand-built-branch-from-an-operator-session.test.ts
   status: queued
   attempts: 0

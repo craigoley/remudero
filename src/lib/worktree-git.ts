@@ -437,6 +437,8 @@ export interface HostWorktreeGitOptions {
   timeout?: number;
   /** The signal `timeout` kills with (node's default is SIGTERM). */
   killSignal?: NodeJS.Signals;
+  /** Cancels an in-flight Git child when an owning operation is stopped. */
+  signal?: AbortSignal;
   /** `latin1` maps each stdout byte to one char, so `Buffer.from(out, "latin1")` is the bytes exactly: a blob read
    *  must reach its reader as a checkout writes it, and a UTF-8 decode rewrites an invalid sequence. Default utf8. */
   encoding?: "utf8" | "latin1";
@@ -457,6 +459,7 @@ function spawnOptions(pin: PinnedWorktreeGit, opts: HostWorktreeGitOptions, over
     ...(opts.input === undefined ? {} : { input: opts.input }),
     ...(opts.timeout === undefined ? {} : { timeout: opts.timeout }),
     ...(opts.killSignal === undefined ? {} : { killSignal: opts.killSignal }),
+    ...(opts.signal === undefined ? {} : { signal: opts.signal }),
   };
 }
 

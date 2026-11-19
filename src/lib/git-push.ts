@@ -787,9 +787,9 @@ export function worktreePushExec(worktreePath: string, { verdicts = defaultPushG
   };
 }
 
-function runHookAsync(worktreePath: string, gate: PrePushGate): Promise<HookOutcome> {
+function runHookAsync(worktreePath: string, gate: PrePushGate, signal?: AbortSignal): Promise<HookOutcome> {
   return withGateHome(gate, (env) => new Promise<HookOutcome>((resolveGate) => {
-    const child = execFile(gate.hook, gate.args, { cwd: worktreePath, env, encoding: "utf8", maxBuffer: GATE_MAX_BUFFER },
+    const child = execFile(gate.hook, gate.args, { cwd: worktreePath, env, encoding: "utf8", maxBuffer: GATE_MAX_BUFFER, signal },
       (err, stdout, stderr) => resolveGate(err ? { refused: true, err: Object.assign(err, { stdout, stderr }) } : { refused: false, out: { stdout, stderr } }));
     child.stdin?.on("error", (err: NodeJS.ErrnoException) => { if (err.code !== "EPIPE") resolveGate({ refused: true, err }); });
     child.stdin?.end(gate.input);
@@ -798,24 +798,31 @@ function runHookAsync(worktreePath: string, gate: PrePushGate): Promise<HookOutc
 
 /** {@link worktreePushExec} off the event loop; `prGates: false` (a restart checkpoint, which opens no PR) skips the PR gate. */
 export function worktreePushExecAsync(
-  worktreePath: string, { prGates = true, verdicts = defaultPushGateVerdicts(), push, refreshAmbient }: {
-    prGates?: boolean; verdicts?: PushGateVerdicts; push?: typeof hostWorktreeGitAsync; refreshAmbient?: () => Promise<unknown>;
+  worktreePath: string, { prGates = true, verdicts = defaultPushGateVerdicts(), push, refreshAmbient, signal }: {
+    prGates?: boolean; verdicts?: PushGateVerdicts; push?: typeof hostWorktreeGitAsync; refreshAmbient?: () => Promise<unknown>; signal?: AbortSignal;
   } = {},
 ): PushExecAsync {
   return async (_file, args, opts) => {
+    signal?.throwIfAborted();
     const pushArgs = leafArgs(worktreePath, args);
-    const read = (a: string[]) => hostWorktreeGitAsync(worktreePath, a);
+    const read = (a: string[]) => hostWorktreeGitAsync(worktreePath, a, { signal });
     const gate = prGates
       ? await runStepsAsync(prePushGateSteps(worktreePath, pushArgs, read, pinnedConfigValueAsync))
       : undefined;
     if (gate) {
-      const outcome = await runStepsAsync(pushGateSteps(worktreePath, gate, read, () => runHookAsync(worktreePath, gate), verdicts, "worktreePushExecAsync"));
+      const outcome = await runStepsAsync(pushGateSteps(worktreePath, gate, read, () => {
+        signal?.throwIfAborted();
+        return runHookAsync(worktreePath, gate, signal);
+      }, verdicts, "worktreePushExecAsync"));
       if (outcome !== undefined && opts.stdio !== "ignore") writeThrough(outcome.refused ? outcome.err : outcome.out);
       if (outcome?.refused) throw gateRefusal(worktreePath, pushArgs, outcome.err);
     }
+    signal?.throwIfAborted();
     await pushWithAuthRetry(async (env) => {
       try {
-        await (push ?? hostWorktreeGitAsync)(worktreePath, pushArgs, { stdio: opts.stdio === "ignore" ? "ignore" : "inherit-stdout", env });
+        signal?.throwIfAborted();
+        await (push ?? hostWorktreeGitAsync)(worktreePath, pushArgs, { stdio: opts.stdio === "ignore" ? "ignore" : "inherit-stdout", env, signal });
+        signal?.throwIfAborted();
       } catch (err) {
         if (opts.stdio !== "ignore") writeThrough(err);
         throw pushFailure(err);

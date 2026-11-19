@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { appendFileSync, createReadStream, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync,
   renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { basename, isAbsolute, join, resolve } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { parseArgs } from "node:util";
 import { systemClock } from "./clock.js";
@@ -22,7 +22,7 @@ interface ShipHost {
 }
 
 interface ShipSource { root: string; branch: string; head: string; origin: string }
-interface FailingTest { file: string | null; title: string; location?: string | null; failed?: boolean }
+interface FailingTest { file: string | null; title: string; location?: string | null; failed?: boolean; suite?: boolean; fileLevel?: boolean }
 type Priority = "low" | "normal";
 type FailureClass = "caused by the change" | "caused by the host" | "also failing on main";
 
@@ -75,8 +75,8 @@ export interface HandShipEffects {
     close(): Promise<void>;
   }>;
   push(source: ShipSource, run: ShipRun): Promise<void>;
-  findPull(source: ShipSource): Promise<number | undefined>;
-  publish(source: ShipSource, title: string, body: string, existing?: number): Promise<{ url: string; body: string }>;
+  findPull(source: ShipSource, run: ShipRun): Promise<number | undefined>;
+  publish(source: ShipSource, title: string, body: string, existing: number | undefined, run: ShipRun): Promise<{ url: string; body: string }>;
   checkBody(body: string, run: ShipRun): void;
 }
 
@@ -126,20 +126,58 @@ function testFailureStage(step: ShipReceipt["steps"][number]): boolean {
   return step.name === "affected-tests" || step.name === "affected-tests-subset" || step.name === "workflow-contract-precheck";
 }
 
+/** Parse complete TAP rows locally so the hand-ship comparison does not change the author-preflight contract. */
+function tapResults(output: string, root: string): FailingTest[] {
+  const clean = (path: string) => path.replace(/^\/private(?=\/)/, "");
+  root = clean(root);
+  const lines = String(output).split("\n"), rows: FailingTest[] = [], parents: string[] = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    const header = /^( *)# Subtest: (.*)$/.exec(lines[i]!);
+    if (header) { parents.splice(header[1]!.length / 4); parents.push(header[2]!); continue; }
+    const result = /^( *)(not ok|ok) [0-9]+ - (.*)$/.exec(lines[i]!);
+    if (!result) continue;
+    const fields: Record<string, string> = {};
+    for (let j = i + 1; j < lines.length && lines[j]!.startsWith(`${result[1]}  `) && !/^\s*\.\.\.$/.test(lines[j]!); j += 1) {
+      const field = /^\s+(type|location|failureType): '?(.*?)'?$/.exec(lines[j]!);
+      if (field) fields[field[1]!] = field[2]!;
+    }
+    const locationMatch = /^(.*):([0-9]+):([0-9]+)$/.exec(clean(fields.location ?? ""));
+    const absolute = locationMatch?.[1] ?? "";
+    const relativePath = absolute && isAbsolute(absolute) ? relative(root, absolute).split(sep).join("/") : "";
+    const file = relativePath && relativePath !== ".." && !relativePath.startsWith("../") && !isAbsolute(relativePath) ? relativePath : null;
+    const fileLevel = file !== null && result[3]!.replace(/\\/g, "/").endsWith(file);
+    rows.push({ file, title: fileLevel ? "(whole file)" : [...parents.slice(0, result[1]!.length / 4), result[3]!].join(" > "),
+      location: locationMatch ? `${locationMatch[2]}:${locationMatch[3]}` : null,
+      failed: result[2] === "not ok", ...(fields.type === "suite" || fields.failureType === "subtestsFailed" ? { suite: true } : {}), fileLevel });
+  }
+  return rows;
+}
+
+function escapeTestName(name: string): string { return name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
+
 async function compareFailures(receipt: ShipReceipt, workspace: Awaited<ReturnType<HandShipEffects["prepare"]>>, run: ShipRun) {
   const failed = receipt.steps.find((step) => !step.ok);
   if (!failed || !testFailureStage(failed)) {
     if (failed?.name === "static-preflight" && failed.failedCheck) run.log(`caused by the change: ${failed.failedCheck}`);
     return receipt;
   }
-  let tests = receipt.failureAttribution?.tests ?? [];
+  let tests = (receipt.failureAttribution?.tests ?? []).map((test) => ({ ...test, suite: false }));
   const summary = failed.testSummary;
   const withEvidence = { ...receipt, failureAttribution: undefined };
   if (failed.signal || failed.error || failed.diagnostics?.mayBeIncomplete !== false || !summary || summary.fail === 0 ||
-    tests.some(({ file }) => !file || !testPath.test(file) ||
+    tests.some(({ file, fileLevel }) => !file || fileLevel || !testPath.test(file) ||
       file.split("/").some((part) => part === "." || part === ".."))) {
     run.log("test failure comparison unavailable: the preflight did not completely name its failures");
     return withEvidence;
+  }
+  if (failed.name !== "workflow-contract-precheck") {
+    const counts = receipt.failureAttribution?.counts;
+    const namedUnattributed = tests.filter((test) => test.state === "unattributed").length;
+    const unnamed = (counts?.unattributed ?? -1) - namedUnattributed;
+    if (counts?.failingAtHead !== summary.fail || unnamed < 0 || tests.length + unnamed !== summary.fail) {
+      run.log("test failure comparison unavailable: the preflight did not completely name its failures");
+      return withEvidence;
+    }
   }
   if (failed.name === "workflow-contract-precheck" && tests.length === 0) {
     const suites = failed.suites ?? [];
@@ -147,39 +185,95 @@ async function compareFailures(receipt: ShipReceipt, workspace: Awaited<ReturnTy
       run.log("workflow contract failure comparison unavailable: the preflight did not name its test suites");
       return withEvidence;
     }
+    let failedRows = 0;
     for (const file of [...new Set(suites)].sort()) {
-      tests.push(...(await workspace.rerun("head", file, receipt.headSha)).filter((test) => test.failed));
+      const rows = await workspace.rerun("head", file, receipt.headSha);
+      failedRows += rows.filter((test) => test.failed).length;
+      tests.push(...rows.filter((test) => test.failed && !test.suite));
     }
-    if (tests.length !== summary.fail) {
+    if (failedRows !== summary.fail) {
       run.log("workflow contract failure comparison unavailable: isolated head reruns did not account for every failure");
       return withEvidence;
     }
   }
-  if (tests.length !== summary.fail || tests.some(({ location }) => typeof location !== "string" || !/^\d+:\d+$/.test(location))) {
+  if (tests.length === 0 || tests.length > summary.fail) {
     run.log("test failure comparison unavailable: the preflight did not completely name its failures");
     return withEvidence;
   }
-  const rerun = async (tree: "head" | "main", test: FailingTest, sha: string) =>
-    workspace.rerun(tree, test.file!, sha, test.title);
-  const rows = [];
+  const groups = new Map<string, FailingTest[]>();
   for (const test of tests) {
-    const headFailures = await rerun("head", test, receipt.headSha);
-    const mainFailures = await rerun("main", test, receipt.baseSha);
-    const same = (other: FailingTest) => other.file === test.file && other.title === test.title && other.location === test.location;
-    const headMatches = headFailures.filter(same);
-    const mainMatches = mainFailures.filter(same);
-    const headExactFailures = headMatches.filter((result) => result.failed === true);
-    const mainExactFailures = mainMatches.filter((result) => result.failed === true);
-    const headHasPass = headFailures.some((result) => result.file === test.file && result.title === test.title && result.failed === false);
-    const headHasFailure = headFailures.some((result) => result.failed === true);
-    // A title pattern can include same-title siblings. Only the same file, title, and TAP
-    // source location can establish that this individual test also fails on main.
-    const classification: FailureClass = !headHasFailure && headHasPass ? "caused by the host"
-      : headExactFailures.length === 1 && mainExactFailures.length === 1 ? "also failing on main"
-        : "caused by the change";
+    const key = `${test.file}\0${test.title}\0${test.location ?? ""}`;
+    groups.set(key, [...(groups.get(key) ?? []), test]);
+  }
+  const unionRows = (runs: FailingTest[][]) => {
+    const counts = new Map<string, { row: FailingTest; count: number }>();
+    for (const rows of runs) {
+      const perRun = new Map<string, { row: FailingTest; count: number }>();
+      for (const row of rows) {
+        if (row.file === null) continue;
+        const key = `${row.file}\0${row.title}\0${row.location ?? ""}\0${row.suite === true}\0${row.failed === true}`;
+        const found = perRun.get(key);
+        if (found) found.count += 1; else perRun.set(key, { row, count: 1 });
+      }
+      for (const [key, found] of perRun) {
+        if ((counts.get(key)?.count ?? 0) < found.count) counts.set(key, found);
+      }
+    }
+    return [...counts.values()].flatMap(({ row, count }) => Array.from({ length: count }, () => row));
+  };
+  const rerunGroups = async (tree: "head" | "main", sha: string) => {
+    const runs: FailingTest[][] = [];
+    for (const group of groups.values()) {
+      const test = group[0]!;
+      runs.push(await workspace.rerun(tree, test.file!, sha, test.title));
+    }
+    return unionRows(runs);
+  };
+  const headRows = await rerunGroups("head", receipt.headSha);
+  let hostCaused = false;
+  const exactHeadFailures: FailingTest[] = [];
+  for (const group of groups.values()) {
+    const target = group[0]!;
+    // Node's name-pattern option selects an ancestor suite to reach a nested leaf.
+    // Ignore every non-target row (including passing or failing siblings) and use
+    // the receipt's physical location to identify the specific test.
+    const selected = headRows.filter((row) => row.file === target.file && row.title === target.title &&
+      row.location === target.location && !row.suite && !row.fileLevel);
+    const targetFailures = selected.filter((row) => row.failed === true);
+    const targetPasses = headRows.filter((row) => row.file === target.file && row.title === target.title &&
+      !row.suite && !row.fileLevel && row.failed === false);
+    if (targetFailures.length === group.length) {
+      exactHeadFailures.push(...targetFailures);
+      continue;
+    }
+    if (targetFailures.length === 0 && targetPasses.length >= group.length) {
+      hostCaused = true;
+      for (const test of group) run.log(`caused by the host: ${test.file} :: ${test.title}`);
+      continue;
+    }
+    run.log(`test failure comparison unavailable: isolated head rerun did not account for ${target.file} :: ${target.title}`);
+    return withEvidence;
+  }
+  const mainRows = await rerunGroups("main", receipt.baseSha);
+  const mainFailures = [...groups.values()].flatMap((group) => {
+    const target = group[0]!;
+    return mainRows.filter((row) => row.file === target.file && row.title === target.title &&
+      row.location === target.location && !row.suite && !row.fileLevel && row.failed === true);
+  });
+  const remainingMain = [...mainFailures];
+  const rows = [];
+  for (const test of exactHeadFailures) {
+    const index = remainingMain.findIndex((other) => other.file === test.file && other.title === test.title &&
+      other.location === test.location && other.suite === test.suite);
+    const classification: FailureClass = index >= 0 ? "also failing on main" : "caused by the change";
+    if (index >= 0) remainingMain.splice(index, 1);
     run.log(`${classification}: ${test.file} :: ${test.title}`);
-    rows.push({ ...test, state: classification === "also failing on main" ? "also-red"
-      : classification === "caused by the host" ? "unattributed" : "only-head" });
+    rows.push({ file: test.file, title: test.title, location: test.location,
+      state: classification === "also failing on main" ? "also-red" : "only-head" });
+  }
+  if (hostCaused || rows.length !== summary.fail || exactHeadFailures.some((test) => typeof test.location !== "string" || !/^\d+:\d+$/.test(test.location))) {
+    run.log("test failure comparison unavailable: the preflight did not completely name its failures");
+    return withEvidence;
   }
   return { ...withEvidence, failureAttribution: {
     // The installed judge calls the comparison SHA mergeBase. Here it is the exact main SHA run above.
@@ -305,7 +399,7 @@ export async function runHandShip(args: string[], options: ShipOptions, effects:
       lock.release();
     }
     continueRun();
-    const existing = await effects.findPull(source);
+    const existing = await effects.findPull(source, run);
     const block = acceptanceBlockDiagnostics(body);
     if (existing !== undefined && (block.defective || block.criteriaParsed === 0)) {
       throw new Error("an amendment pull request requires a valid Acceptance: block");
@@ -314,7 +408,7 @@ export async function runHandShip(args: string[], options: ShipOptions, effects:
     status("publishing", source.branch);
     await effects.push(source, run);
     continueRun();
-    const pr = await effects.publish(source, title, body, existing);
+    const pr = await effects.publish(source, title, body, existing, run);
     continueRun();
     run.log(`pull request ${pr.url}`);
     effects.checkBody(pr.body, run);
@@ -497,8 +591,10 @@ async function prepareWorkspace(host: ShipHost, source: ShipSource, run: ShipRun
       async preflight(requested) {
         priority = requested;
         run.log(`running author preflight at ${priority} priority`);
+        const env = (await authorTools()).authorEnvironment(process.env);
+        if (isAbsolute(nodeExecutable)) env.PATH = `${dirname(nodeExecutable)}${delimiter}${env.PATH ?? ""}`;
         const result = await hostCommand(host, run, node(["--import", "tsx", authorEntry,
-          "--head-ref", source.branch, "--head-sha", source.head]), { cwd: headDir, capture: false, record: true });
+          "--head-ref", source.branch, "--head-sha", source.head]), { cwd: headDir, capture: false, record: true, env });
         if (result.code === null || result.code > 3) throw new Error(`author preflight did not finish (exit ${result.code ?? "signal"})`);
         const raw = await command(["cat", "coverage/preflight-author.json"], { cwd: headDir });
         writeFileSync(join(run.dir, "receipt.json"), raw, { mode: 0o600 });
@@ -526,20 +622,22 @@ async function prepareWorkspace(host: ShipHost, source: ShipSource, run: ShipRun
         if (available.code === 1 && tree === "main") return [];
         checked(available, `${tree} test ${file}`);
         await command(["test", "!", "-L", file], { cwd });
-        const namePattern = title === undefined ? [] : ["--test-name-pattern", `^${title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`];
+        const namePattern = title === undefined ? [] : ["--test-name-pattern", `^(?:${[...new Set(title.split(" > "))].map(escapeTestName).join("|")})$`];
         const args = proofTestRunnerArgs(["--test", "--test-reporter=tap", "--test-concurrency=1", ...namePattern,
           "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", file], source.root, [file]);
         const result = await hostCommand(host, run, node(args), { cwd, record: true });
-        const { testSummary, failingTestsFromTap, testResultsFromTap } = await authorTools();
+        const { testSummary } = await authorTools();
         const summary = testSummary(result.stdout);
-        const failures = failingTestsFromTap(result.stdout, cwd);
-        const results = testResultsFromTap(result.stdout, cwd);
-        if (result.truncated || !summary || summary.cancelled !== 0 ||
-          (result.code !== 0 && result.code !== 1) || failures.length !== summary.fail ||
+        const results = tapResults(result.stdout, cwd);
+        const targetSelected = title === undefined || results.some((test) => !test.suite && !test.fileLevel && test.file === file && test.title === title);
+        if (result.truncated || !summary || summary.cancelled !== 0 || results.length !== summary.tests ||
+          results.filter((test) => test.failed).length !== summary.fail ||
+          (result.code !== 0 && result.code !== 1) ||
           (title === undefined && result.code === 0 ? summary.pass === 0 || summary.fail !== 0 : false) ||
-          (title !== undefined && results.length === 0) ||
-          failures.some((failure) => failure.file !== file)) throw new Error(`${tree} ${file}: isolated rerun had no complete test result`);
-        return results.map((test) => test.file === null ? { ...test, file } : test);
+          (title !== undefined && !targetSelected && tree === "head") ||
+          results.some((test) => test.file !== null && test.file !== file)) throw new Error(`${tree} ${file}: isolated rerun had no complete test result ` +
+            `(exit=${result.code}, summary=${JSON.stringify(summary)}, rows=${JSON.stringify(results)}, selected=${targetSelected})`);
+        return results;
       },
       close,
     };
@@ -556,7 +654,7 @@ const pullEndpoint = (source: ShipSource) => {
 };
 
 export function handShipEffects(checkAcceptance: (bodyFile: string) => number,
-  github: (args: string[], fresh?: true) => Promise<unknown> = (args, fresh) => ghJsonAsync(args, undefined, undefined, { fresh }),
+  github: (args: string[], fresh?: true, signal?: AbortSignal) => Promise<unknown> = (args, fresh, signal) => ghJsonAsync(args, undefined, undefined, { fresh, signal }),
   pushGit = hostWorktreeGitAsync,
 ): HandShipEffects {
   return {
@@ -571,17 +669,19 @@ export function handShipEffects(checkAcceptance: (bodyFile: string) => number,
       if (current.head !== source.head || current.branch !== source.branch || current.origin !== source.origin) {
         throw new Error("source branch, head or origin changed during verification");
       }
-      const execute = worktreePushExecAsync(source.root, { push: (worktree, args, opts) => {
+      const execute = worktreePushExecAsync(source.root, { signal: run.signal, push: (worktree, args, opts) => {
         run.signal.throwIfAborted();
         return pushGit(worktree, args, opts);
       } });
       await gitPushRunBranchAsync(source.root, { expectedHeadSha: source.head, destination: source.branch,
         exec: (file, args, opts) => execute(file, [...args.slice(0, -1), `${source.head}:refs/heads/${source.branch}`], opts) });
     },
-    async findPull(source) {
+    async findPull(source, run) {
+      run.signal.throwIfAborted();
       const { owner, path } = pullEndpoint(source);
       const query = new URLSearchParams({ state: "open", head: `${owner}:${source.branch}` });
-      const existing = await github(["api", `${path}?${query}`], true) as PullResponse[];
+      const existing = await github(["api", `${path}?${query}`], true, run.signal) as PullResponse[];
+      run.signal.throwIfAborted();
       if (Array.isArray(existing) && existing.length === 0) return undefined;
       const pull = Array.isArray(existing) && existing.length === 1 ? existing[0] : undefined;
       if (!pull || !Number.isSafeInteger(pull.number)) {
@@ -589,14 +689,17 @@ export function handShipEffects(checkAcceptance: (bodyFile: string) => number,
       }
       return pull.number;
     },
-    async publish(source, title, body, existing) {
+    async publish(source, title, body, existing, run) {
+      run.signal.throwIfAborted();
       const { path } = pullEndpoint(source);
       const fields = ["-f", `title=${title}`, "-f", `body=${body}`];
       const written = await github(existing === undefined
         ? ["api", "-X", "POST", path, "-f", `head=${source.branch}`, "-f", "base=main", ...fields]
-        : ["api", "-X", "PATCH", `${path}/${existing}`, ...fields]) as PullResponse;
+        : ["api", "-X", "PATCH", `${path}/${existing}`, ...fields], undefined, run.signal) as PullResponse;
+      run.signal.throwIfAborted();
       if (!written || !Number.isSafeInteger(written.number)) throw new Error("GitHub did not return a pull request number");
-      const stored = await github(["api", `${path}/${written.number}`], true) as PullResponse;
+      const stored = await github(["api", `${path}/${written.number}`], true, run.signal) as PullResponse;
+      run.signal.throwIfAborted();
       if (stored.body?.trimEnd() !== body.trimEnd()) throw new Error(`stored pull request body differs at ${stored.html_url}`);
       return { url: stored.html_url, body: stored.body };
     },

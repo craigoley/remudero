@@ -334,7 +334,7 @@ export function ghJson(
 const execFileAsync = (
   file: string,
   args: readonly string[],
-  opts: { encoding: BufferEncoding; maxBuffer: number; timeout: number; env?: NodeJS.ProcessEnv },
+  opts: { encoding: BufferEncoding; maxBuffer: number; timeout: number; env?: NodeJS.ProcessEnv; signal?: AbortSignal },
 ): Promise<{ stdout: string; stderr: string }> => execFileRouted(file, args, withGhCredentialEnv(file, args, opts));
 
 export type GhAsyncExecutor = typeof execFileAsync;
@@ -432,7 +432,7 @@ function parseGhJsonBody(args: string[], body: string): unknown {
 }
 
 /** An explicit revalidation request; omitted preserves normal broker caching. */
-export interface GhJsonReadOptions { fresh?: true; }
+export interface GhJsonReadOptions { fresh?: true; signal?: AbortSignal; }
 
 export async function ghJsonAsync(
   args: string[],
@@ -458,27 +458,33 @@ async function ghStdoutAsync(args: string[], execArgs: string[], execAsync: type
       encoding: "utf8",
       maxBuffer: DEFAULT_GH_MAX_BUFFER,
       timeout: DEFAULT_GH_CALL_TIMEOUT_MS,
+      ...(readOpts.signal === undefined ? {} : { signal: readOpts.signal }),
     }),
     execArgs,
     DEFAULT_GH_CALL_TIMEOUT_MS,
   )).stdout;
   // Only real transport coalesces; injected executors may have independent side effects.
+  readOpts.signal?.throwIfAborted();
   if (execAsync !== execFileAsync) {
     await admitInstallationReadAsync(args);
     try { return await run(); } catch (err) { noteInstallationRefusal(err); throw err; }
   }
-  const key = ghArgsAreCoalescibleRead(args) ? `${readOpts.fresh === true ? "fresh:" : ""}${JSON.stringify(execArgs)}` : undefined;
+  const key = readOpts.signal === undefined && ghArgsAreCoalescibleRead(args) ? `${readOpts.fresh === true ? "fresh:" : ""}${JSON.stringify(execArgs)}` : undefined;
   const existing = key === undefined ? undefined : asyncReadInFlight.get(key) as Promise<string> | undefined;
   if (existing) return existing;
   const request = (async (): Promise<string> => {
     await admitInstallationReadAsync(args);
     // Async CI/review polls must share ghJson/ghExec's floor to prevent rapid read bursts.
     refuseSentinelGhToken("gh", args, undefined);
-    const brokered = await ghBrokeredAsync(execArgs, readOpts);
+    const brokered = readOpts.signal === undefined ? await ghBrokeredAsync(execArgs, readOpts) : undefined;
     if (brokered !== undefined) return brokered;
+    readOpts.signal?.throwIfAborted();
     await applyGhReadCadenceAsync(args);
-    const inProcess = ghHttpReadFor(execArgs);
-    return inProcess === undefined ? run() : inProcess.send();
+    readOpts.signal?.throwIfAborted();
+    const inProcess = readOpts.signal === undefined ? ghHttpReadFor(execArgs) : undefined;
+    const output = inProcess === undefined ? await run() : await inProcess.send();
+    readOpts.signal?.throwIfAborted();
+    return output;
   })().catch((err: unknown) => { noteInstallationRefusal(err); throw err; });
   if (key === undefined) return request;
   asyncReadInFlight.set(key, request);

@@ -34,7 +34,8 @@ function redReceipt(titles: string[]): ShipReceipt {
     name: "affected-tests", ok: false, judge: { given: 1, reported: 1 },
     diagnostics: { mayBeIncomplete: false }, testSummary: { pass: 1, fail: titles.length, cancelled: 0 },
   };
-  result.failureAttribution = { tests: titles.map((title, index) => ({ file, title, location: `${index + 1}:1` })) };
+  result.failureAttribution = { counts: { failingAtHead: titles.length, unattributed: 0 },
+    tests: titles.map((title, index) => ({ file, title, location: `${index + 1}:1` })) };
   return result;
 }
 
@@ -104,15 +105,16 @@ test("W1-T12169 criterion 3 compares isolated head failures with unchanged main 
   f.workspace.preflight = async () => redReceipt(["flake", "existing red", "regression"]);
   f.workspace.rerun = async (tree, target, sha, title) => {
     f.calls.push(`${tree} ${target} ${sha} ${title ?? ""}`);
+    if (title === "flake" && tree === "head") return passingResults(["flake"]);
     if (title === "existing red") return [{ file, title, location: "2:1", failed: true }];
     if (title === "regression" && tree === "head") return [{ file, title, location: "3:1", failed: true }];
     return [];
   };
   assert.equal(await runHandShip(f.args, f.options, f.effects), 1);
-  assert.deepEqual(f.calls, [`prepare mac`, `head ${file} ${head} flake`, `main ${file} ${main} flake`,
-    `head ${file} ${head} existing red`, `main ${file} ${main} existing red`,
-    `head ${file} ${head} regression`, `main ${file} ${main} regression`, "close"]);
-  assert.match(f.lines.join("\n"), /caused by the change.*flake/);
+  assert.deepEqual(f.calls, [`prepare mac`, `head ${file} ${head} flake`,
+    `head ${file} ${head} existing red`, `head ${file} ${head} regression`,
+    `main ${file} ${main} flake`, `main ${file} ${main} existing red`, `main ${file} ${main} regression`, "close"]);
+  assert.match(f.lines.join("\n"), /caused by the host.*flake/);
   assert.match(f.lines.join("\n"), /also failing on main.*existing red/);
   assert.match(f.lines.join("\n"), /caused by the change.*regression/);
 });
@@ -242,14 +244,32 @@ test("an amendment reuses the open PR and requires its own acceptance block befo
   assert.ok(!f.calls.some((call) => call.startsWith("push")));
 });
 
-test("one occurrence on main accounts for only the same-location failure with a duplicate title", async (t) => {
+test("one occurrence on main accounts for only one same-location duplicate failure", async (t) => {
   const f = fixture(t);
-  f.workspace.preflight = async () => redReceipt(["duplicate", "duplicate"]);
-  f.workspace.rerun = async (tree) => rerunResults(tree === "head" ? ["duplicate", "duplicate"] : ["duplicate"]);
-  assert.equal(await runHandShip(f.args, f.options, f.effects), 1);
+  const original = redReceipt(["duplicate", "duplicate"]);
+  original.failureAttribution!.tests!.forEach((test) => { test.location = "7:3"; });
+  f.workspace.preflight = async () => original;
+  f.workspace.rerun = async (tree) => (tree === "head" ? ["duplicate", "duplicate"] : ["duplicate"])
+    .map((title) => ({ file, title, location: "7:3", failed: true }));
+  assert.equal(await runHandShip(f.args, f.options, f.effects), 1, f.lines.join("\n"));
   assert.match(f.lines.join("\n"), /also failing on main.*duplicate/);
   assert.match(f.lines.join("\n"), /caused by the change.*duplicate/);
   assert.ok(!f.calls.some((call) => call.startsWith("push")));
+});
+
+test("a nested target comparison ignores sibling results from its selected parent", async (t) => {
+  const f = fixture(t);
+  const original = redReceipt(["parent > leaf"]);
+  original.failureAttribution!.tests![0]!.location = "10:1";
+  f.workspace.preflight = async () => original;
+  f.workspace.rerun = async (tree) => [
+    { file, title: "parent", location: "9:1", failed: true, suite: true },
+    { file, title: "parent > leaf", location: "10:1", failed: true },
+    { file, title: "parent > sibling", location: "11:1", failed: tree === "head" },
+  ];
+  assert.equal(await runHandShip(f.args, f.options, f.effects), 0, f.lines.join("\n"));
+  assert.match(f.lines.join("\n"), /also failing on main.*parent > leaf/);
+  assert.doesNotMatch(f.lines.join("\n"), /sibling/);
 });
 
 test("different same-title failures at distinct source locations never become base-red evidence", async (t) => {
@@ -263,6 +283,37 @@ test("different same-title failures at distinct source locations never become ba
   assert.equal(await runHandShip(f.args, f.options, f.effects), 1);
   assert.match(f.lines.join("\n"), /caused by the change.*duplicate/);
   assert.ok(!f.calls.some((call) => call.startsWith("push")));
+});
+
+test("the production rerun reaches a nested failing leaf through its parent suite", async (t) => {
+  const f = fixture(t);
+  const repo = gitRepo({ scope: t });
+  seedHandBranch(repo, true);
+  writeFileSync(join(repo.dir, "package-lock.json"), readFileSync(join(REPO_ROOT, "package-lock.json")));
+  mkdirSync(join(repo.dir, "test/setup"), { recursive: true });
+  writeFileSync(join(repo.dir, "test/setup/tmp-hygiene.ts"), "");
+  writeFileSync(join(repo.dir, file), [
+    'import { test } from "node:test";',
+    'test("parent", async (context) => {',
+    '  await context.test("leaf", () => { throw new Error("selected leaf"); });',
+    '  await context.test("sibling", () => { throw new Error("sibling result is not the selected leaf"); });',
+    '});',
+    "",
+  ].join("\n"));
+  repo.git("add", file, "package-lock.json", "test/setup/tmp-hygiene.ts");
+  repo.git("commit", "-m", "nested test fixture");
+  const defaults = handShipEffects(() => 0);
+  const run = { dir: f.root, signal: new AbortController().signal, log: f.options.write };
+  const source = await defaults.readSource(repo.dir, run);
+  const workspace = await defaults.prepare({ ...mac, target: "local", checkout: REPO_ROOT }, source, run);
+  try {
+    const rows = await workspace.rerun("head", file, source.head, "parent > leaf");
+    assert.ok(rows.some((row) => row.title === "parent > leaf" && row.failed === true));
+    assert.ok(rows.some((row) => row.title === "parent" && row.failed === true && row.suite === true));
+    assert.ok(rows.some((row) => row.title === "parent > sibling" && row.failed === true));
+  } finally {
+    await workspace.close();
+  }
 });
 
 test("a stop requested during PR publication leaves the run stopped", async (t) => {
@@ -492,15 +543,41 @@ test("the GitHub adapter creates or updates and then checks the freshly stored b
     calls.push({ args, fresh });
     return responses.shift();
   });
-  assert.equal(await defaults.findPull(source), undefined);
-  assert.equal((await defaults.publish(source, "Title", body)).url, pull.html_url);
-  assert.equal(await defaults.findPull(source), 42);
-  const stored = await defaults.publish(source, "Title", body, 42);
+  const controller = new AbortController();
+  const run = { dir: f.root, signal: controller.signal, log: f.options.write };
+  assert.equal(await defaults.findPull(source, run), undefined);
+  assert.equal((await defaults.publish(source, "Title", body, undefined, run)).url, pull.html_url);
+  assert.equal(await defaults.findPull(source, run), 42);
+  const stored = await defaults.publish(source, "Title", body, 42, run);
   defaults.checkBody(stored.body, { dir: f.root, signal: new AbortController().signal, log: f.options.write });
   assert.match(calls[0].args[1], /head=example%3Arun-unfiled-123/);
   assert.deepEqual(calls[1].args.slice(0, 8), ["api", "-X", "POST", "repos/example/repo/pulls", "-f", `head=${branch}`, "-f", "base=main"]);
   assert.deepEqual(calls[4].args.slice(0, 4), ["api", "-X", "PATCH", "repos/example/repo/pulls/42"]);
   assert.deepEqual(calls[5], { args: ["api", "repos/example/repo/pulls/42"], fresh: true });
   responses.push([pull, pull]);
-  await assert.rejects(defaults.findPull(source), /did not identify a unique pull request/);
+  await assert.rejects(defaults.findPull(source, run), /did not identify a unique pull request/);
+});
+
+test("a stop after the GitHub write prevents publication readback", async (t) => {
+  const f = fixture(t);
+  const source = await f.effects.readSource(f.root, { dir: f.root, signal: new AbortController().signal, log: f.options.write });
+  const controller = new AbortController();
+  let finishWrite!: () => void;
+  let writeStarted!: () => void;
+  const started = new Promise<void>((resolve) => { writeStarted = resolve; });
+  const write = new Promise<void>((resolve) => { finishWrite = resolve; });
+  const calls: string[][] = [];
+  const defaults = handShipEffects(() => 0, async (args) => {
+    calls.push(args);
+    writeStarted();
+    await write;
+    return { number: 42, body: readFileSync(f.body, "utf8"), html_url: "https://github.com/example/repo/pull/42" };
+  });
+  const run = { dir: f.root, signal: controller.signal, log: f.options.write };
+  const publishing = defaults.publish(source, "Title", readFileSync(f.body, "utf8"), undefined, run);
+  await started;
+  controller.abort(new Error("stop requested"));
+  finishWrite();
+  await assert.rejects(publishing, /stop requested/);
+  assert.equal(calls.length, 1, "no PR readback starts after cancellation");
 });
