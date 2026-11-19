@@ -18,7 +18,7 @@
     - src/lib/base-reproduction.ts
     - scripts/test-with-retry.mjs
     - test/a-failing-file-is-the-one-its-own-tap-block-names.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "failingTestFilesFromCiFailures, given the measured ci-shard (1/8) excerpt of main run 44373577634 (job 135054821069: a column-0 'not ok 832' block for test/infra/gate-probe-native-evidence.test.ts whose error and actual fields quote a child's TAP with a location in test/a-gate-run-leaves-the-tracked-tree-clean.test.ts, each line with its CI timestamp), returns only the evidence test's path"

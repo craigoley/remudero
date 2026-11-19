@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { generateKeyPairSync, sign } from "node:crypto";
 import { once } from "node:events";
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { basename, dirname, join } from "node:path";
@@ -1025,6 +1025,67 @@ setTimeout(() => {
 
 /** This repository's own validated runner configuration, the table a real product target commits. */
 const VALID_MOUNTS = readFileSync(join(REPO_ROOT, ".remudero", "mounts.yaml"), "utf8");
+
+test("W1-T11196: the served runner-config preview matches its authenticated public contract", async t => {
+  const head = "a".repeat(40);
+  const shim = ghShim([
+    { when: "/commits/", stdout: JSON.stringify({ sha: head }) },
+    { when: "/git/trees/", stdout: JSON.stringify({ truncated: false, tree: [] }) },
+    { when: "api repos/craigoley/wreckterra", stdout: JSON.stringify({ id: WRECKTERRA_ID, name: "wreckterra", owner: { login: "craigoley" }, private: false, default_branch: "main" }) },
+  ]);
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${shim.dir}:${previousPath}`;
+  t.after(() => { process.env.PATH = previousPath; rmSync(shim.dir, { recursive: true, force: true }); });
+  const root = ownedFixtureDir(t, "runner-preview-http").dir;
+  const routes = [...assembled(root), ...assembled(root, "/v1/products/runner-config-preview")];
+  const route = routes.find(route => route.path === "/v1/products/runner-config-preview");
+  assert.equal(route?.scope, "read");
+  assert.equal(route?.sensitivity, "sensitive");
+  // Production serve does not enable read-sensitivity enforcement, so neither does this proof: the owner check is the gate.
+  const instance = createService({ tokens: { read: "fixture-read", write: "fixture-write" }, operatorSession: identity, routes });
+  await new Promise<void>(resolve => instance.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise<void>((resolve, reject) => instance.close(error => error ? reject(error) : resolve())));
+  const base = `http://127.0.0.1:${(instance.address() as AddressInfo).port}`;
+  const saved = await request(base, "/v1/products", "alice", command);
+  const productId = saved.body.receipt!.productId;
+  const store = new ProductIntentStore({ root });
+  assert.ok(store.transition("clerk:alice", { version: "product-intent-v1", requestId: "preview-bind-http-01", id: productId,
+    expectedRevision: 1, expectedObjectiveRevision: 1, repository: { provider: "github", id: WRECKTERRA_ID, owner: "craigoley", name: "wreckterra",
+      defaultBranch: "main", visibility: "public", verifiedAt: new Date().toISOString() } }).ok);
+  const snapshot = () => Object.fromEntries(readdirSync(root, { recursive: true }).map(String).sort()
+    .map(path => [path, lstatSync(join(root, path)).isFile() ? readFileSync(join(root, path)).toString("base64") : "<directory>"]));
+  const before = snapshot();
+  const params = new URLSearchParams({ productId, expectedRevision: "2", expectedObjectiveRevision: "1" });
+  const get = async (session: "alice" | "bob" | undefined, query = params.toString(), token = "fixture-read") => {
+    const response = await fetch(`${base}/v1/products/runner-config-preview?${query}`, { headers: { authorization: `Bearer ${token}`,
+      ...(session ? { "x-test-session": session } : {}) } });
+    const body = await response.json();
+    assert.deepEqual(violations(body, declaredBody("/v1/products/runner-config-preview", "GET", response.status)), []);
+    assert.equal(response.headers.get("cache-control"), "private, no-store", `cache-control on ${response.status}`);
+    assert.deepEqual(snapshot(), before, "every preview leaves durable product and journal bytes unchanged");
+    return { response, body };
+  };
+  assert.equal((await get(undefined)).response.status, 403);
+  assert.equal((await get("bob")).response.status, 404);
+  assert.equal((await get(undefined, params.toString(), "unknown")).response.status, 401);
+  const { response, body } = await get("alice");
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("cache-control"), "private, no-store");
+  assert.equal(body.state, "absent");
+  assert.equal(body.proposal.bytes, VALID_MOUNTS, "the assembled route reads the serving install rather than fleet state");
+  assert.equal(body.proposal.targetHead, head);
+  assert.deepEqual(body.proposal.changes, [{ operation: "add", path: ".remudero/mounts.yaml" }]);
+  for (const query of [params + "&productId=other", params + "&bytes=untrusted", params.toString().replace("expectedRevision=2", "expectedRevision=0"), "productId=" + productId]) {
+    assert.equal((await get("alice", query)).response.status, 400);
+  }
+  assert.equal((await get("alice", params.toString().replace("expectedRevision=2", "expectedRevision=3"))).response.status, 409);
+  shim.addRoute({ when: "/git/trees/", stdout: JSON.stringify({ truncated: true, tree: [] }) });
+  const unreadable = await get("alice");
+  assert.equal(unreadable.body.state, "unreadable");
+  assert.equal(unreadable.body.proposal, undefined);
+  assert.ok(shim.calls().every(call => call.startsWith("api repos/craigoley/wreckterra") && !call.includes("-X")));
+});
+
 /** Commit `.remudero/mounts.yaml` into a target checkout with a fixture-local identity. */
 function commitRunnerConfig(checkout: string, text: string) {
   const git = (...args: string[]) => execFileSync("git", ["-C", checkout, ...args], { encoding: "utf8", env: { ...process.env,

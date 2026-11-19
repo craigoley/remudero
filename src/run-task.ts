@@ -2996,7 +2996,7 @@ import {
 import { materializeWorkerHome, perRunWorkerHomeDir, sweepStaleWorkerHomes, sweepStaleWorkerHomesAsync, workerKeychainPaths, type ClaudeCredentialSeedEvent } from "./lib/worker-home.js";
 import { FIX_CASH_TOOLS, FIX_WORKER_TOOLS, FIX_WORKER_TOOLS_HARNESS_COMMITS } from "./lib/fix-fence.js";
 import { acquireDrainLock, defaultIsPidAlive, DrainLockError, readDrainLock, type DrainLockHandle } from "./lib/drain-lock.js";
-import { asyncGit, checkCliFreshness, checkReviewerCodeFreshnessAsync, checkServiceFreshness, checkServiceFreshnessAsync, daemonFreshnessFromService, reviewerGit, type ReviewerCodeFreshness, type SelfSyncDeps } from "./lib/self-sync.js";
+import { asyncGit, checkCliFreshness, checkReviewerCodeFreshnessAsync, checkServiceFreshness, checkServiceFreshnessAsync, daemonFreshnessFromService, reviewerGit, testRunnerOnItsOwnCheckout, type ReviewerCodeFreshness, type SelfSyncDeps } from "./lib/self-sync.js";
 import { daemonClosureGit, daemonProcessClosure, daemonProcessEntry, withDaemonClosure, type ClosureGit } from "./lib/daemon-closure.js";
 import { LIVE_EDIT_TREES, runLiveEditLadder, type LiveEditLadderWiring, type LiveEditTree } from "./lib/live-edit-ladder.js";
 import { recoveryRefMaintainer } from "./lib/recovery-refs.js";
@@ -38723,6 +38723,13 @@ async function lifetimeShardAge(
   return { ageDays: Math.max(0, Math.floor((nowMs - first) / 86400000)) };
 }
 
+/** W1-T13754: the part of a task's contract a lifetime-pressure verdict was judged against. Title, acceptance,
+ *  design and files only: status, attempts and priority change on every dispatch and must not re-ask the judge. */
+export function lifetimeContractDigest(task: Task): string {
+  const contract = JSON.stringify([task.title ?? null, task.acceptance ?? null, task.design ?? null, task.files ?? null]);
+  return createHash("sha256").update(contract).digest("hex").slice(0, 12);
+}
+
 function latestLifetimeOperatorRuling(note: string | undefined): { date: string; decision: "automate" | "needs_operator" } | undefined {
   if (!note) return undefined;
   let latest: { date: string; decision: "automate" | "needs_operator" } | undefined;
@@ -38759,7 +38766,9 @@ export async function routeAdaptiveLifetimePressure(
     const ruling = latestLifetimeOperatorRuling(task.note);
     const key = `${task.id}:adaptive-lifetime=${attributableDispatches}:capacity=${capacityRefusals}:` +
       `open=${openPrEvidence}:merged=${mergeEvidence}:last=verdict:${lastVerdict}:${terminalRows.length}` +
-      (ruling ? `:ruling=${ruling.date}:${ruling.decision}` : "");
+      (ruling ? `:ruling=${ruling.date}:${ruling.decision}` : "") +
+      // W1-T13754: an amended contract is a new observed state, so a verdict about the old one is not reused.
+      `:contract=${lifetimeContractDigest(task)}`;
     if (attributableDispatches === 0) {
       infraOnly.push(task.id);
       if (!rows.some((row) => row.step === "dispatch.lifetime_pressure.infra_only" && row.task_id === task.id && row.observed_state === key)) {
@@ -45103,7 +45112,7 @@ export function selfSyncRefusalSink(cmd: string | undefined, rest: string[], led
  * comment, for the verbs that keep the gate). A DECLARED LIST, named beside its reason at each
  * call site, deliberately not a heuristic over the verb string and not conditioned on
  * `--dry-run` (a flag can be absent and the verb still dispatch) — see design (ii) of the
- * W1-T1134 task record. Three members today:
+ * W1-T1134 task record. The members are:
  *   - `doctor`    — read-only by construction; its own registry entry refuses `--fix` by name.
  *   - `status`    — its only write is the machine-owned `state/status.json` cache, never a
  *                   decision this gate protects (the one judgement call design (v) calls out).
@@ -45141,11 +45150,61 @@ export function selfSyncRefusalSink(cmd: string | undefined, rest: string[], led
  *                   gate would refuse, and the answer it returns cannot be affected by the
  *                   staleness the gate is guarding, because the ledger it reads is host-local and
  *                   not a checkout artifact at all.
+ * `gh-broker` (W1-T11788): the per-account GitHub READ broker — `serve`, `status` and `stop` alike.
+ *                   It never syncs, decides from the plan or writes the tree. OBSERVED 2026-11-08:
+ *                   its serve unit restarted 15,000+ times, one `self_sync.refused` (dirty) row every
+ *                   11 s, because the operator checkout was behind with three untracked plan/feedback
+ *                   files, and every session's GitHub read fell back to the 180 s floor. Exempt runs
+ *                   still ASSESS the tree, read-only, and ledger one `self_sync.exempt` row when the
+ *                   gate would have refused — see {@link ledgerFreshnessExemption}.
  * `sweep`/`inbox` stay OUT even though their `--dry-run` forms are read-only: exempting the verb
  * name would also exempt their real (non-dry-run) dispatch. `run-task`/`drain`/`triage`/`fix`/
- * `approve`/`review`/`lint-plan` are untouched and keep falling to the gate's `else` branch.
+ * `approve`/`review`/`lint-plan`/`ledger-grep` are untouched and keep falling to the gate's `else`
+ * branch. `gh` is not listed: its read dispatch runs earlier in {@link main}, before this gate.
  */
-const READ_ONLY_FRESHNESS_EXEMPT_VERBS: ReadonlySet<string> = new Set(["doctor", "status", "preflight", "pr-owner"]);
+export const READ_ONLY_FRESHNESS_EXEMPT_VERBS: ReadonlySet<string> = new Set(["doctor", "status", "preflight", "pr-owner", "gh-broker"]);
+
+/**
+ * W1-T11788 — WHAT THE GATE WOULD HAVE SAID, WITHOUT LETTING IT ACT. Runs the CLI freshness check
+ * for an exempt verb with a git runner that stops at `merge` (the check's only mutation; its fetch
+ * moves `origin/main` alone) and no-op say/warn/reexec, so the tree and HEAD never move. A refusal
+ * becomes ONE `self_sync.exempt` row (`verb`, `reason`) and the verb proceeds. Returns which case
+ * it was: `exempt` (refused, row written), `would-sync` (clean and behind on main: nothing moved,
+ * no row), `unassessed` (the check itself threw: said on stderr, no row), or the check's own status.
+ */
+export function ledgerFreshnessExemption(
+  cmd: string,
+  repoDir: string,
+  env: NodeJS.ProcessEnv,
+  checkFreshness?: typeof checkCliFreshness,
+  ledgerPath: () => string = cliLedgerPathWithoutConfig,
+): ReturnType<typeof checkCliFreshness>["status"] | "exempt" | "would-sync" | "unassessed" {
+  // The assess-only git runner below switches off the check's own test-runner guard, so keep it here.
+  if (!checkFreshness && testRunnerOnItsOwnCheckout(repoDir, env)) return "guarded";
+  const mergeBlocked = new Error("assess only: the ff-merge is never run");
+  const assessOnly = (args: string[]): string => {
+    if (args[0] === "merge") throw mergeBlocked;
+    return hostWorktreeGit(repoDir, args, { env: { GIT_OPTIONAL_LOCKS: "0" } });
+  };
+  let result: ReturnType<typeof checkCliFreshness>;
+  try {
+    result = (checkFreshness ?? checkCliFreshness)(repoDir, env, {
+      git: assessOnly, say: () => {}, warn: () => {}, reexec: () => {},
+    });
+  } catch (err) {
+    if (err === mergeBlocked) return "would-sync";
+    console.error(`rmd ${cmd}: freshness assessment failed, proceeding (exempt verb): ${String(err)}`);
+    return "unassessed";
+  }
+  if (result.status !== "refused") return result.status;
+  const row = { run_id: `CLI-${systemClock.now()}`, task_id: "CLI", step: "self_sync.exempt", verb: cmd, reason: result.reason };
+  try {
+    appendLedger(ledgerPath(), row);
+  } catch (err) {
+    process.stderr.write(`${JSON.stringify({ ...row, ledger_error: String(err) })}\n`);
+  }
+  return "exempt";
+}
 
 /**
  * A PROMISE REJECTION THAT ESCAPED EVERY HANDLER — the fourth named halt, alongside
@@ -45593,7 +45652,8 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
 const REGISTRY: readonly RegisteredCommand[] = buildRegistry(COMMANDS, HANDLERS);
 
 // ── CLI entry (invoked by bin/rmd). Kept tiny; all logic is above/lib.
-export async function main(
+async function main(
+  assessBrokerFreshness: () => void,
   // W1-T79/W1-T221: the freshness check is injectable so a `callMain` test can drive the
   // "refused" branch below (its console.error+process.exit can't otherwise be covered — in CI
   // the real check returns "guarded", never "refused"). Default = the real self-sync check.
@@ -45647,7 +45707,7 @@ export async function main(
   // PAUSE validates its target locally; --fleet retains its independent authenticated Git path.
   if (inspectionArgv[0] !== "stop" && inspectionArgv[0] !== "pause"
     && selectedInstanceRegistryEnvPath() !== undefined && !instanceRegistryRuntimePresent()) {
-    return withInstanceRegistryRuntime(() => main(deps));
+    return withInstanceRegistryRuntime(() => main(assessBrokerFreshness, deps));
   }
   // FIRST, before argv is even read: a rejection escaping any line below (the freshness gate's
   // own spawns included) must reach a ledger row and a named exit code, not Node's default crash.
@@ -45804,6 +45864,8 @@ export async function main(
     //
     // Does NOT touch `checkCliFreshness`'s own predicate, message or ledger row (W1-T446 owns
     // that) — only where the gate applies, never what it decides (design (i)).
+    // W1-T11788: the broker's skip is observable — one `self_sync.exempt` row, tree untouched.
+    if (cmd === "gh-broker") assessBrokerFreshness();
   } else {
     const freshness = (deps.checkFreshness ?? checkCliFreshness)(repoRoot, process.env, selfSyncRefusalSink(cmd, rest));
     if (freshness.status === "refused") {
@@ -45838,6 +45900,14 @@ export async function main(
   );
 }
 
+// Wire the synchronous checkout assessment at the CLI entry. The daemon-loop census can reach
+// the name `main` through unrelated fields named `main`, but the CLI alone supplies this effect.
+function runTaskCli(deps?: Parameters<typeof main>[1]): Promise<void> {
+  return main(() => ledgerFreshnessExemption("gh-broker", repoRoot, process.env, deps?.checkFreshness), deps);
+}
+
+export { runTaskCli as main };
+
 // W1-T9722: the read-plane worker starts from ./lib/tick-read-worker.ts, never from this module; a worker
 // that loads this module anyway still never runs the CLI. Kept OUTSIDE the process-boundary region below.
 const readWorkerOptions = readPlaneWorkerInput();
@@ -45846,7 +45916,7 @@ const readWorkerOptions = readPlaneWorkerInput();
 // `exitCodeFor()`, while this wrapper only prints and exits the current process.
 // Only run when invoked directly (not when imported by tests).
 if (!readWorkerOptions && process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  main().catch((err) => {
+  runTaskCli().catch((err) => {
     console.error("\n### RUN-TASK ERROR\n" + (err?.stack ?? String(err)));
     // W1-T2901: the process boundary asks the error its own exit code (an `RmdError` such as
     // `PlanError` answers with its declared code) instead of hardcoding the generic one for

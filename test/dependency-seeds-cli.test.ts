@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, statSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 // @ts-expect-error -- standalone .mjs tool is outside tsconfig and has no declarations.
-import { attestedOpen, ownerOnlyHome, seedIsOpen } from "#scripts/dependency-seeds.mjs";
+import { attestedOpen, ownerOnlyHome, ownerOnlyStore, seedIsOpen } from "#scripts/dependency-seeds.mjs";
+import { sweepDependencySeeds } from "#src/lib/dependency-seeds.js";
 // @ts-expect-error -- standalone .mjs tool has no declarations.
 import * as dependencyCli from "#scripts/dependency-seeds.mjs";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
@@ -219,7 +220,7 @@ test("a seed store in an owner-only macOS home is scanned with the owner's own l
     chmodSync(home, 0o700);
     assert.equal(ownerOnlyHome(seed, uid, home, acl("0: group:everyone deny delete"), "darwin"), true);
     assert.equal(ownerOnlyHome(seed, uid, home, acl("0: user:other allow list,search"), "darwin"), false, "an ACL grant lets another account in");
-    assert.equal(ownerOnlyHome(seed, uid, home, acl(""), "linux"), false, "Linux keeps the administrator scan");
+    assert.equal(ownerOnlyHome(seed, uid, home, acl(""), "linux"), false, "the macOS home rule does not apply on Linux");
     assert.equal(ownerOnlyHome("/elsewhere/seed", uid, home, acl(""), "darwin"), false);
     assert.equal(ownerOnlyHome(seed, uid + 1, home, acl(""), "darwin"), false);
     chmodSync(home, 0o711);
@@ -227,6 +228,100 @@ test("a seed store in an owner-only macOS home is scanned with the owner's own l
     assert.equal(seedIsOpen(seed, 501, () => "", () => true), false);
     assert.throws(() => seedIsOpen(seed, 501, () => "", () => false), /administrator/);
   } finally { chmodSync(home, 0o700); rmSync(home, { recursive: true, force: true }); }
+});
+
+/** A Linux seed store holding one idle, unreferenced seed, every folder in it at an explicit mode. */
+function linuxStore(storeMode = 0o700) {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "rmd-seed-linux-")));
+  const store = join(root, "account"), key = "a".repeat(64), seed = join(store, key);
+  mkdirSync(join(seed, "consumers"), { recursive: true });
+  writeFileSync(join(store, ".rmd-dependency-seed-root.json"), '{"version":1}');
+  writeFileSync(join(seed, "ready.json"), JSON.stringify({ version: 1, key, lastUsed: Date.now() - 7 * 60 * 60 * 1000 }));
+  chmodSync(seed, 0o755); chmodSync(store, storeMode);
+  return { root, store, seed };
+}
+const linuxOwner = { skip: process.platform !== "linux" || process.getuid?.() === 0 ? "needs a non-root Linux account" : false };
+
+test("W1-T11821 criterion 1: a Linux seed store only its owner can enter is owner-only; a shared, foreign or linked one is not", linuxOwner, () => {
+  const { root, store, seed } = linuxStore(), uid = process.getuid!();
+  try {
+    assert.equal(ownerOnlyStore(seed, uid, "linux"), true);
+    assert.equal(ownerOnlyStore(seed, uid, "darwin"), false, "macOS keeps its home rule");
+    assert.equal(ownerOnlyStore(seed, uid + 1, "linux"), false, "another account's store");
+    assert.equal(ownerOnlyStore(join(store, "b".repeat(64)), uid, "linux"), false, "a missing seed");
+    chmodSync(seed, 0o775); assert.equal(ownerOnlyStore(seed, uid, "linux"), false, "a group-writable seed folder");
+    chmodSync(seed, 0o757); assert.equal(ownerOnlyStore(seed, uid, "linux"), false, "an other-writable seed folder");
+    chmodSync(seed, 0o755);
+    for (const mode of [0o710, 0o701, 0o770, 0o775]) {
+      chmodSync(store, mode); assert.equal(ownerOnlyStore(seed, uid, "linux"), false, `store mode ${mode.toString(8)}`);
+    }
+    chmodSync(store, 0o700);
+    const linked = join(store, "c".repeat(64)); symlinkSync(seed, linked);
+    assert.equal(ownerOnlyStore(linked, uid, "linux"), false, "a symlinked seed");
+    rmSync(join(store, ".rmd-dependency-seed-root.json"));
+    assert.equal(ownerOnlyStore(seed, uid, "linux"), false, "not a seed store");
+  } finally { chmodSync(store, 0o700); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("W1-T11821 criterion 2: an owner-only Linux seed is answered by the owner's own lsof, never the administrator-scan error", linuxOwner, () => {
+  const { root, seed } = linuxStore(), uid = process.getuid!();
+  const noAttestation = () => undefined; // reaching the attested scan would throw "administrator"
+  try {
+    const calls: unknown[][] = [];
+    const open = (...args: unknown[]) => { calls.push(args); return "p42\nn" + join(seed, "x.js"); };
+    assert.equal(seedIsOpen(seed, uid, open, undefined, noAttestation), true);
+    assert.deepEqual(calls[0]?.slice(0, 2), ["lsof", ["-nP", "+D", seed]]);
+    assert.equal(seedIsOpen(seed, uid, () => "", undefined, noAttestation), false);
+    const none = () => { throw Object.assign(new Error("none"), { status: 1, stdout: "", stderr: "" }); };
+    assert.equal(seedIsOpen(seed, uid, none, undefined, noAttestation), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("W1-T11821 criterion 3: a Linux store other accounts can enter still needs the attested root scan and is kept without one", linuxOwner, () => {
+  const uid = process.getuid!();
+  for (const mode of [0o750, 0o705, 0o775]) {
+    const { root, store, seed } = linuxStore(mode);
+    try {
+      let scanned = 0;
+      const lsof = () => { scanned++; return ""; };
+      assert.throws(() => seedIsOpen(seed, uid, lsof, undefined, () => undefined), /administrator/);
+      assert.equal(seedIsOpen(seed, uid, lsof, undefined, () => true), true, "an attested scan still answers");
+      assert.equal(scanned, 0, "the owner's lsof cannot see other accounts here");
+      const swept = sweepDependencySeeds(store, { apply: true, isOpen: path => seedIsOpen(path, uid, lsof, undefined, () => undefined) });
+      assert.deepEqual(swept.map(r => r.action), ["keep"]);
+      assert.match(swept[0]!.reason, /administrator open-file scan required/);
+      assert.equal(existsSync(seed), true);
+    } finally { chmodSync(store, 0o700); rmSync(root, { recursive: true, force: true }); }
+  }
+});
+
+test("W1-T11821 criterion 4: enable makes the Linux store 0700, tightens an owned one, and a dry sweep lists its idle seed as removable", linuxOwner, () => {
+  const { root, store, seed } = linuxStore(0o775);
+  const home = join(root, "home"), bin = join(root, "bin"), log = join(root, "lsof.log");
+  mkdirSync(home); mkdirSync(bin);
+  // An lsof that finds nothing: exit 1 with no output. It records each scan it was asked for.
+  writeFileSync(join(bin, "lsof"), `#!/bin/sh\nprintf '%s\\n' "$*" >> '${log}'\nexit 1\n`, { mode: 0o755 });
+  const cli = join(REPO_ROOT, "scripts", "dependency-seeds.mjs");
+  const env = { ...process.env, HOME: home, RMD_DEPENDENCY_SEED_ROOT: "", PATH: `${bin}:${process.env.PATH}` };
+  const run = (...args: string[]) => spawnSync(process.execPath, [cli, ...args], { env, encoding: "utf8" });
+  const mode = (path: string) => statSync(path).mode & 0o7777;
+  try {
+    const kept = run("sweep", "--root", store); assert.equal(kept.status, 0, kept.stderr);
+    assert.match(JSON.parse(kept.stdout)[0].reason, /administrator/, "a 0775 store is not owner-only");
+    const enabled = run("enable", "--root", store); assert.equal(enabled.status, 0, enabled.stderr);
+    assert.equal(mode(store), 0o700, "an existing owned store is tightened");
+    chmodSync(store, 0o775);
+    assert.equal(run("enable", "--root", store).status, 1, "the configuration is still not replaced");
+    assert.equal(mode(store), 0o700, "re-running enable tightens again");
+    rmSync(join(home, ".config", "remudero"), { recursive: true });
+    const fresh = join(root, "fresh/account");
+    assert.equal(run("enable", "--root", fresh).status, 0);
+    assert.equal(mode(fresh), 0o700, "a new store is created owner-only");
+    const swept = run("sweep", "--root", store); assert.equal(swept.status, 0, swept.stderr);
+    assert.deepEqual(JSON.parse(swept.stdout), [{ seed, action: "remove", reason: "unreferenced and idle for six hours" }]);
+    assert.equal(existsSync(seed), true, "a dry sweep removes nothing");
+    assert.equal(readFileSync(log, "utf8"), `-nP +D ${seed}\n`, "the owner's own lsof was the scan");
+  } finally { chmodSync(store, 0o700); rmSync(root, { recursive: true, force: true }); }
 });
 
 test("a fresh root-owned open-file scan stands in for the administrator scan; a stale, foreign or writable one does not", () => {

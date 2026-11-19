@@ -1,0 +1,44 @@
+- id: W1-T13811
+  title: A test slot record from an earlier boot is reclaimed, never withheld
+  repo: remudero
+  depends_on: []
+  priority: 1.3
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: medium
+  origin: operator-request#onboarding-thread-2026-11-19
+  # placement-amendment 2026-11-19: `rmd test-place` puts this test in test/ci/suites/ (ci-parity via test-slot), beside the other slot-reclaim suites.
+  files:
+    - src/lib/test-slot.ts
+    - test/ci/suites/a-test-slot-record-from-an-earlier-boot-is-reclaimed.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    Observed 2026-11-19 in a cloud session. In src/lib/test-slot.ts, the reclaim path after
+    testSlotHolderStale gives a local slot record whose bootId differs from the current boot the
+    evidence { state: "unknown", reason: "owner identity unknown or host/boot/namespace/uid differs" },
+    so the slot is withheld for ever. A record written under an earlier kernel boot cannot have a live
+    owner. Two stale files (/tmp/rmd-test-slots/slot-1.json and slot-2.json, dead pids 697 and 354)
+    blocked every author preflight: one preflight reached its 2700 s wait bound with NOT_RUN, and the
+    next waited 25 minutes until the files were removed by hand. A reboot of the Azure host wedges
+    every preflight the same way.
+  design: |
+    In the reclaim predicate, when the record is on this host and in this pid namespace and its bootId is
+    set and differs from the current readable boot id, treat the owner as ended: the earlier boot ended
+    every process it held, so no tree probe is needed. Record this as reclaim evidence with a reason
+    that names the boot change (old and new boot id), so the existing test-slot reclaim ledger row says
+    why the slot was freed. Keep every other rule: an equal boot id still needs exact-tree terminal
+    evidence, a foreign host or foreign pid namespace keeps today's handling, an unreadable current
+    boot id keeps the slot withheld, and darwin marker records keep their lease rule.
+
+    INVARIANT slot-earlier-boot: a same-host, same-namespace slot record whose boot id differs from the current boot is reclaimed at once with a boot-change reason; an equal or unreadable boot id never frees a slot by this rule.
+  acceptance:
+    - claim: invariant:slot-earlier-boot — a same-host, same-namespace record from an earlier boot is reclaimed at once with a reason naming the boot change; an equal or unreadable boot id is never freed by this rule
+      proof: 'unit test: test/ci/suites/a-test-slot-record-from-an-earlier-boot-is-reclaimed.test.ts'
+  falsifier: |
+    Write a slot record with this host, this pid namespace, a foreign bootId and a dead pid, then
+    acquire: the acquire must take the slot without waiting and the reclaim row must name the boot
+    change. The same record with the current bootId must still be withheld. Removing the new branch
+    must make the test fail.

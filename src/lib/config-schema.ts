@@ -548,6 +548,8 @@ export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
   envEntry("RMD_SERVE_INGEST_TOKEN", "Supplies serve's optional bearer token that is accepted only on the incident ingest route.", ["src/lib/serve.ts"]),
   envEntry("RMD_SERVE_INGEST_TOKEN_FILE", "Names the read-only mounted file holding serve's incident ingest token when RMD_SERVE_INGEST_TOKEN is unset.", ["src/lib/serve.ts"]),
   envEntry("RMD_SERVE_NETWORK", "Declares container-network context for serve wildcard binds.", ["src/lib/serve.ts"]),
+  envEntry("RMD_SERVE_READ_DEADLINE", "Defaults to shadow, which records late reads. Set to enforce to serve the committed body or return a retryable 503 at the deadline.", ["src/lib/serve-read-deadline.ts"]),
+  envEntry("RMD_SERVE_READ_DEADLINE_MS", "Sets the serve read deadline in milliseconds. Defaults to 4000 when unset or invalid.", ["src/lib/serve-read-deadline.ts"]),
   envEntry("RMD_SERVE_READY_SOCKET", "Names the private unix socket a supervised standby serve answers readiness on.", ["src/lib/serve-generation.ts"]),
   envEntry("RMD_SERVE_ROLE", "Set to standby by the serve supervisor so serve warms and waits for promotion before binding its port.", ["src/lib/serve-generation.ts"]),
   envEntry("RMD_SPAWN_HELPER", "Switch for the daemon's small long-lived spawn helper, which awaited child spawns route through; the boot starts it unless the value is off, and off keeps every spawn direct.", ["src/lib/daemon.ts"]),
@@ -555,6 +557,10 @@ export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
   envEntry("RMD_TASK_PRECONDITION_READ", "Set to 1 on a task precondition read subprocess so a nested precondition check refuses as recursive-read instead of spawning again.", ["src/lib/plan.ts"]),
   envEntry("RMD_WORKER_EGRESS", "Selects the worker egress mode when the spawn arguments do not specify one.", ["src/lib/worker.ts"]),
   envEntry("RMD_WORKER_HOME_DIR", "Maps one config root to the directory holding its worker homes as <root>:<dir>; set by deploy/scratch-mounts.sh.", ["src/lib/config.ts"]),
+  envEntry("RMD_BIN_DIR", "Overrides the installed host command directory checked by rmd doctor.", ["src/lib/report-commands.ts"]),
+  envEntry("RMD_FLEET_INSTALL_DIR", "Overrides the fleet install checkout used to check and restore host cron scripts in rmd doctor.", ["src/lib/report-commands.ts"]),
+  envEntry("RMD_CLEANUP_PATH", "Overrides the installed six-hour cleanup script path checked by rmd doctor.", ["src/lib/report-commands.ts"]),
+  envEntry("RMD_TMP_SWEEP_PATH", "Overrides the installed temporary sweep script path checked by rmd doctor.", ["src/lib/report-commands.ts"]),
 ];
 
 function configField(

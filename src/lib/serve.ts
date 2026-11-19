@@ -74,7 +74,7 @@ import {
 import { loadEscalationLinkSecret, readEscalationLinkSecret, type EscalationOption, type EscalationOptionRoute } from "./escalate.js";
 import { projectClassifiedHumanGates } from "./ask-classification.js";
 import { CODE_HEALTH_VIEW_NAME, validateCodeHealthRequest } from "./code-health-view.js";
-import { buildReadModelViewRoutes, oldestAsOf, viewMode, type ViewBodySource } from "./views.js";
+import { buildReadModelViewRoutes, oldestAsOf, viewKey, viewMode, type ViewBodySource } from "./views.js";
 import { createViewEvents, VIEW_EVENTS_PATH, type ViewEvents } from "./view-events.js";
 import { analyticsLegacyView, captureHostModelApprovals, type HostModelApprovalConfig } from "./analytics-view.js";
 import { NAV_BADGE_NO_COMPOSITE, navBadgeView, navBadgeWithDecisions, startNavBadgeSourcePublisher, type NavBadgeScope } from "./nav-badge-view.js";
@@ -179,8 +179,9 @@ import {
   writeProviderRoutingPolicyOverride,
   type ProviderRoutingPolicyOverrideInput,
 } from "./provider-routing-policy.js";
-import { appendLedger } from "./ledger.js";
+import { appendLedger, setLedgerRotationRole, type LedgerRotationRole } from "./ledger.js";
 import { createServeDemand, recordServeRequest, type ServeDemandOptions } from "./serve-demand.js";
+import { committedViewBody, createReadDeadline, readDeadlineConfig, withReadDeadline } from "./serve-read-deadline.js";
 import { startServeThreadLoad, type ServeThreadLoadOptions } from "./serve-thread-load.js";
 import {
   buildAnalyticsRoute,
@@ -3085,7 +3086,7 @@ function assembleServeRoutes(
     ...buildImprovementThreadRoutes({ stateDir: dirname(deps.ledgerPath) }),
     ...buildProductRoutes({ root: deps.fleetControlRoot }),
     ...buildProductResearchRoutes({ root: deps.fleetControlRoot, provider: deps.productResearchProvider, budgetUsd: deps.productResearchBudgetUsd }),
-    ...buildProductRepositoryRoutes({ root: deps.fleetControlRoot }),
+    ...buildProductRepositoryRoutes({ root: deps.fleetControlRoot, installRoot: serveRepoDir() }),
     ...buildProductDeploymentRoutes({ root: deps.fleetControlRoot }),
     ...buildProductEvaluationRoutes({ root: deps.fleetControlRoot }),
     // W1-T10615: the kick marker lands under the target's OWN daemon root, resolved through the same
@@ -3451,6 +3452,23 @@ export function startIncidentInvariantsMonitor(
   }, { stallProfiler });
 }
 
+let activeServeAssemblies = 0;
+let priorRotationRole: LedgerRotationRole;
+
+function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
+  // W1-T13236: standby can append during assembly, before the main listener starts.
+  if (activeServeAssemblies++ === 0) priorRotationRole = setLedgerRotationRole("backstop-only");
+  const releaseRotationRole = (): void => {
+    if (--activeServeAssemblies === 0) setLedgerRotationRole(priorRotationRole);
+  };
+  try {
+    return wireServeServer(deps, releaseRotationRole);
+  } catch (error) {
+    releaseRotationRole();
+    throw error;
+  }
+}
+
 /**
  * Build (but do not `.listen()`) the full `rmd serve` HTTP server — one call, every route wired.
  * `deps.board.github`'s background refresh keeps its facts warm with no viewer, paced by quota
@@ -3458,7 +3476,7 @@ export function startIncidentInvariantsMonitor(
  * is not off-loop keeps {@link gatePrewarmOnClients}'s reader gate instead. Both stop when the
  * returned server `close`s, so no timer outlives it.
  */
-function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
+function wireServeServer(deps: ServeDeps, releaseRotationRole: () => void): ServeServerAssembly {
   // The CLI supplies this property only after loadConfig succeeds, including an absent optional list.
   // Direct callers without a source stay unreported; no directory name is permission evidence.
   const supplied = deps.modelApprovalConfig ?? (Object.hasOwn(deps, "modelApprovals")
@@ -3599,13 +3617,18 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     readModel,
     memory,
   );
+  // W1-T11817: the deadline counts under the demand window's own families, read only at request time.
+  const readDeadline = createReadDeadline({
+    ...readDeadlineConfig(process.env), ...deps.demand, log: deps.log, ledgerPath: deps.ledgerPath,
+    cachedReadPaths: CONSOLE_CACHED_READ_PATHS, viewEventsPath: VIEW_EVENTS_PATH, family: (req) => demand.familyFor(req),
+  });
   const routes = routeAssembly.routes.map((route) =>
     // rationale (7): HIGH-tier IS the write-consequence set this task must respect — the same
     // five paths (`/v1/manual/approve`, `/v1/drain/kick`, `/v1/drain/run`, `/v1/inbox/approve`,
     // `/v1/skills/run`) `HIGH_TIER_WRITE_PATHS` names client-side, read here off the route table's
     // own declared `tier` (already asserted complete, above in `buildServeRoutes`) rather than a
     // second hard-coded path list that could drift from it.
-    routeReads.wrap(route.tier === "high" ? staleExit.wrapWrite(route) : route.path === VIEW_EVENTS_PATH ? serveDrain.wrapStream(route) : stampRead(route)),
+    routeReads.wrap(route.tier === "high" ? staleExit.wrapWrite(route) : route.path === VIEW_EVENTS_PATH ? serveDrain.wrapStream(route) : stampRead(withReadDeadline(route, readDeadline, committedViewBody(readModel, route, viewKey)))),
   );
   const ingestToken = deps.tokens.ingest ?? process.env[INGEST_TOKEN_ENV] ?? readIngestTokenFile(process.env[INGEST_TOKEN_FILE_ENV], deps.log);
   const server = createService({
@@ -3659,7 +3682,8 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   server.on("close", prewarm.stop);
   if (keepWarm) server.once("listening", keepWarm.start);
   server.on("close", stopWakeSummary);
-  server.once("listening", () => { stopRouteReads = routeReads.start(); stopDemand = demand.start(); });
+  // The demand window starts last, so a test seam that keeps one `every` tick drives serve.demand.
+  server.once("listening", () => { stopRouteReads = routeReads.start(); const stops = [readDeadline.start(), demand.start()]; stopDemand = () => { for (const stop of stops) stop(); }; });
   server.on("close", () => { stopRouteReads(); stopDemand(); });
   server.once("listening", analyticsCache.start);
   server.on("close", analyticsCache.stop);
@@ -3671,12 +3695,11 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   });
   server.once("listening", liveAnalyticsCache.start);
   server.on("close", liveAnalyticsCache.stop);
-  const startLedgerWriters = (): void => {
-    server.on("close", watchInstanceLiveness({ registryPath: daemonInstanceRegistryPath(deps.questionsRoot), ledgerPath: deps.ledgerPath, log: deps.log, ...deps.instances,
-      selectedRegistryObserver: routeAssembly.selectedRegistryObserver }));
+  const startLedgerWriters = (): (() => void) => {
+    const stopLiveness = watchInstanceLiveness({ registryPath: daemonInstanceRegistryPath(deps.questionsRoot), ledgerPath: deps.ledgerPath, log: deps.log, ...deps.instances,
+      selectedRegistryObserver: routeAssembly.selectedRegistryObserver });
     const stopInvariants = startIncidentInvariantsMonitor(deps.ledgerPath, { ...deps.incidentInvariants, log: deps.log });
-    // W1-T5175: serve samples its memory from its own loop, beside the invariants it ledgers. ONE close
-    // listener stops both: the server already sits at its listener ceiling.
+    // W1-T5175: serve samples its memory from its own loop, beside the invariants it ledgers.
     // W1-T8711: the shared producer observation rides the sample cadence above (no timer of its own), once at start and
     // once at close. It never throws and never waits on anything but one small atomic write.
     const publishServe = (scenario: "serve-steady" | "serve-stopped"): void => {
@@ -3704,17 +3727,26 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     });
     // W1-T11816: each thread's CPU and loop share, and the gc share, once a minute over the threads sampled above.
     const threadLoad = startServeThreadLoad({ ...deps.threadLoad, workers: liveThreads, log: (step, extra) => deps.log?.(step, extra) });
-    server.on("close", () => {
+    return () => {
+      stopLiveness();
       stopInvariants();
       stopMemory();
       threadLoad.stop();
       // A supervised generation closing at a handoff is not serve stopping: its successor publishes its own, and a
       // supervisor that really stopped is read as stale (unknown), never as an explicit stop it did not make.
       if (!deps.generation) publishServe("serve-stopped");
-    });
+    };
   };
-  if (deps.generation) server.setMaxListeners(server.getMaxListeners() + 1).once("listening", startLedgerWriters);
-  else startLedgerWriters();
+  let stopLedgerWriters: (() => void) | undefined;
+  if (deps.generation) server.setMaxListeners(server.getMaxListeners() + 1).once("listening", () => { stopLedgerWriters = startLedgerWriters(); });
+  else stopLedgerWriters = startLedgerWriters();
+  server.once("close", () => {
+    try {
+      stopLedgerWriters?.();
+    } finally {
+      releaseRotationRole();
+    }
+  });
   const githubAuth = { settled: routeAssembly.githubAppReady === undefined };
   void routeAssembly.githubAppReady?.then(() => (githubAuth.settled = true));
   // W1-T9508, memory tier 2: the read model's worker (its views lanes, slow lane and oracle with it) and the board

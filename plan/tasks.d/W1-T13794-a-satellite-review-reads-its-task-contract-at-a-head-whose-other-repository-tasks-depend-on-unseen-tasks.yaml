@@ -18,7 +18,7 @@
     - src/cli/commands/review.ts
     - test/resolver-divergence-detector.test.ts
     - test/review/a-satellite-review-reads-a-head-plan-whose-other-repository-tasks-name-unseen-dependencies.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A satellite review resolves its task's criteria and risk at a head whose other-repository task names a dependency that plan does not hold"

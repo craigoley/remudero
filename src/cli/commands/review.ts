@@ -16,6 +16,7 @@ import { isWorkerProviderId, loadConfig, type Config, type WorkerProviderId } fr
 import { ledgerPathFor } from "../../lib/ledger-path.js";
 import { disarmOutcomeWithdrawn, disarmAutoMerge, armIfVerdictPermitsAsync, type ArmOutcome, type DisarmOutcome } from "../../lib/arm-auto-merge.js";
 import { type ComposedRealGraph, type ReviewWorktreeDeps } from "../../lib/composition-root.js";
+import { writeReviewEvidenceRecord } from "../../lib/review-evidence-record.js";
 import { SPECIALIST_TOOLS } from "../../lib/specialist-panel.js";
 import { REVIEWER_INCIDENT_FLAG, REVIEWER_SHADOW_FLAG, REVIEWER_SHADOW_VERDICT_STEP, reviewerHealthRowFields, reviewerShadowStep } from "../../lib/reviewer-health.js";
 import { withTempDir } from "../../lib/tmp.js";
@@ -37,7 +38,7 @@ import { loadMounts, mountsPath, resolveMount, type Mount } from "../../lib/moun
 import { resolveRiskJudgeMount } from "../../lib/risk-judge.js";
 import { runShadowJudge, SHADOW_JUDGE_MAX_BUDGET_USD } from "../../lib/shadow-judge.js";
 import type { ReviewTriagePullRequest } from "../../lib/review-triage.js";
-import { REVIEW_CONTEXT, REVIEW_ENGINE_REVISION, settleReviewOutboxEntry, applyVerdictStability, applyReviewStatusHistoryGuard, readReviewStatusHistory, type ReviewStatusHistoryReader, buildReviewPrompt, reviewScopeContext, reviewPlacementAdmitted, cappedAnnotation, cappedOverrideFromLedger, cappedWordingApplies, decideAutoMergeArm, fetchPrLifecycle, fetchPrLifecycleAsync, floorDegradedAnnotation, judgeRubric, rubricAdvisorySection, scopeAdvisorySection, inverseScopeAdvisorySection, unwiredExportAdvisorySection, keywordOnlyAnnotation, parseAcceptanceBlock, parseReviewerUnable, parseReviewerVerdictClauses, parseReviewerVerdicts, postReviewCommentGuarded, postReviewPending, postReviewStatus, postReviewStatusGuarded, reviewDescriptionWithCodeProvenance, readReviewStatusEntry, reviewStatusEntryFromCombined, priorReviewVerdictFromLedger, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, planOnlyDiff, reviewerOutcome, reviewerRerunDecision, reviewerVerdictContract, reviewEvidenceStrength, claimReviewDecision, preparePromisedReviewDecision, reviewTaskIdEvidenceAsync, reviewContractDigest, reviewTaskNarrative, type ReviewTaskNarrativeInput, reviewInputDigest, reviewLedgerLegibilityFields, reviewLedgerReasons, unmetReviewCriteria, resolvePlanCriteriaAtHeadAsync, type PlanCriteriaAtHeadDivergence, type ReviewVerdict, type PlanLintOutcome, type ReviewEvaluatorProvenance, type ReviewStatusHistory, type PriorReproducedReviewFailure } from "../../lib/review.js";
+import { REVIEW_CONTEXT, REVIEW_ENGINE_REVISION, settleReviewOutboxEntry, applyVerdictStability, applyReviewStatusHistoryGuard, readReviewStatusHistory, type ReviewStatusHistoryReader, buildReviewPrompt, reviewScopeContext, reviewPlacementAdmitted, cappedAnnotation, cappedOverrideFromLedger, cappedWordingApplies, decideAutoMergeArm, fetchPrLifecycle, fetchPrLifecycleAsync, floorDegradedAnnotation, judgeRubric, rubricAdvisorySection, scopeAdvisorySection, inverseScopeAdvisorySection, unwiredExportAdvisorySection, keywordOnlyAnnotation, parseAcceptanceBlock, parseReviewerUnable, parseReviewerVerdictClauses, parseReviewerVerdicts, postReviewCommentGuarded, postReviewPending, postReviewStatus, postReviewStatusGuarded, reviewDescriptionWithCodeProvenance, readReviewStatusEntry, reviewStatusEntryFromCombined, priorReviewVerdictFromLedger, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, planOnlyDiff, reviewerOutcome, reviewerRerunDecision, reviewerVerdictContract, reviewEvidenceStrength, claimReviewDecision, preparePromisedReviewDecision, reviewTaskIdEvidenceAsync, satelliteReservationRead, reviewContractDigest, reviewTaskNarrative, type ReviewTaskNarrativeInput, reviewInputDigest, reviewLedgerLegibilityFields, reviewLedgerReasons, unmetReviewCriteria, resolvePlanCriteriaAtHeadAsync, type PlanCriteriaAtHeadDivergence, type ReviewVerdict, type PlanLintOutcome, type ReviewEvaluatorProvenance, type ReviewStatusHistory, type PriorReproducedReviewFailure } from "../../lib/review.js";
 import { resolveReviewProviderProvenance, reviewProviderProvenanceLedgerFields } from "../../lib/review-provider-provenance.js";
 import { validateWorkerSettingsFile } from "../../lib/settings.js";
 import { readLedgerLines, readRequiredStatusCheckContextsAsync } from "../../lib/status.js";
@@ -469,18 +470,21 @@ export async function readChecksGreenReviewedAtHead(
  *  withheld or replayed verdict is terminal and reports `posted`. */
 export { readReviewStatusHistory, type ReviewStatusHistoryReader } from "../../lib/review.js";
 
-export function failureRecordingPoster(): { post: (o: Parameters<typeof postReviewStatus>[0]) => Promise<void>; failed: () => boolean } {
+export function failureRecordingPoster(): { post: (o: Parameters<typeof postReviewStatus>[0]) => Promise<void>; failed: () => boolean; published: () => boolean } {
   let threw = false;
+  let published = false;
   return {
     post: async (o) => {
       try {
         await postReviewStatus(o);
+        published = true;
       } catch (error) {
         threw = true;
         throw error;
       }
     },
     failed: () => threw,
+    published: () => published,
   };
 }
 
@@ -564,7 +568,7 @@ export async function runReview(host: ReviewCommandHost, args: {
    * this task already gets.
    */
   reportIsSubstitute?: boolean;
-  /** Actual PR body snapshot used only to key retry/backoff state. This stays separate from
+  /** Actual PR body snapshot used to key retry/backoff and bind published evidence. This stays separate from
    * `report`: several fix modes intentionally review a worker transcript, but that substitute is
    * not a material PR input. When omitted, a non-substitute report remains the body-compatible
    * fallback for existing callers. */
@@ -649,6 +653,8 @@ export async function runReview(host: ReviewCommandHost, args: {
   /** Head ref of the PR under review — used ONLY to exclude `dependabot/` heads from the
    *  post-verdict arm, which the dep-review lane owns. Absent ⇒ not a dependabot PR. */
   headRefName?: string;
+  /** W1-T13817: core's checkout when the PR is a satellite's; its origin holds W1 reservations the satellite's lacks. */
+  reservationHomeDir?: string;
   /** Injectable arm (impl-BG), awaited (W1-T9549). Default: the awaited {@link armAutoMergeDetailedAsync}. */
   arm?: (prUrl: string, taskId: string) => ArmOutcome | Promise<ArmOutcome>;
   /**
@@ -731,8 +737,8 @@ export async function runReview(host: ReviewCommandHost, args: {
     };
   }
   // A substituted worker transcript is not a material PR input. Production fix-rung callers
-  // supply the independently fetched body; a degraded caller with neither fails open toward
-  // retrying rather than letting unrelated worker prose consume the cap.
+  // supply the independently fetched body. Without either body snapshot, leave this input
+  // eligible for retry and withhold terminal publication.
   const inputBody = args.reviewInputBody ?? (args.reportIsSubstitute ? undefined : report);
   const inputDigest = inputBody === undefined ? undefined : reviewInputDigest(headSha, inputBody);
   // W1-T913 (fb-1784901239119-1be356, PR #707): post `remudero-review=pending` the MOMENT this
@@ -823,7 +829,8 @@ export async function runReview(host: ReviewCommandHost, args: {
   }
   const scopeContext = reviewScopeContext(diff, task.files, reviewPlacementAdmitted(diff, args.headCheckoutDir, task.files, task.acceptance ?? []));
   const criteria = task.acceptance ?? [];
-  const taskIdEvidence = await reviewTaskIdEvidenceAsync(diff, args.headRefName, args.headCheckoutDir);
+  const taskIdEvidence = await reviewTaskIdEvidenceAsync(diff, args.headRefName, args.headCheckoutDir,
+    args.reservationHomeDir && args.headCheckoutDir ? satelliteReservationRead(args.headCheckoutDir, args.reservationHomeDir) : undefined);
   const ownership = taskIdEvidence.ownership;
   const preparedDecision = await preparePromisedReviewDecision({
     input: { headSha, diff, report, implementationReport: args.implementationReport, body: inputBody, acceptance: criteria, declaredFiles: task.files, ownership,
@@ -1409,6 +1416,16 @@ export async function runReview(host: ReviewCommandHost, args: {
     say(`remudero-review: verdict WITHHELD for ${headSha.slice(0, 7)} — ${verdict.taskIdOwnershipWithheld}`);
     return { ...verdict, headSha, reviewerOutcome: outcome, verdictWithheld: verdict.taskIdOwnershipWithheld, reviewDecisionDigest: decisionDigest, decisionDisposition, evaluatorProvenance };
   }
+  if (inputDigest === undefined && verdict.state !== "pending") {
+    const reason = "PR body unavailable for the review evidence input digest";
+    replayInput = { ...replayInput, publication_refusal: reason };
+    recordReplay(classifyReviewOutcome(replayInput));
+    log("review.evidence_write_failed", { pr_number: reviewPrNumber(prUrl), head_sha: headSha, reason });
+    log("review.post_refused", { pr_url: prUrl, head_sha: headSha, attempted_state: verdict.state, reason });
+    reportPhase("posted");
+    say(`remudero-review: verdict WITHHELD for ${headSha.slice(0, 7)} — ${reason}`);
+    return { ...verdict, headSha, reviewerOutcome: outcome, verdictWithheld: reason, reviewDecisionDigest: decisionDigest, decisionDisposition, evaluatorProvenance };
+  }
   let reviewerCodeFreshness: ReviewerCodeFreshness | undefined;
   try {
     reviewerCodeFreshness = await args.reviewerCodeFreshness?.();
@@ -1552,6 +1569,7 @@ export async function runReview(host: ReviewCommandHost, args: {
     review_decision_digest: decisionDigest,
     decision_verdict: verdict,
     evaluator_provenance: evaluatorProvenance,
+    ...(reviewerCodeFreshness?.status === "fresh" ? { reviewer_code_sha: reviewerCodeFreshness.codeSha } : {}),
     ...(reviewerCodeFreshness !== undefined ? { reviewer_code_provenance: reviewerCodeFreshness } : {}),
     test_theater: verdict.testTheater,
     unmet_criteria: unmetClaims,
@@ -1617,6 +1635,9 @@ export async function runReview(host: ReviewCommandHost, args: {
   };
   log("review.posted", reviewPostedRow);
   if (inputDigest !== undefined) settleReviewOutboxEntry(args.ledgerPath, prUrl, inputDigest);
+  await writeReviewEvidenceRecord(reviewPostedRow, task.catalog).catch(error => {
+    log("review.evidence_write_failed", { pr_number: reviewPrNumber(prUrl), head_sha: headSha, reason: String(error) });
+  });
   recordReplay(replayDecision);
   // W1-T322 (SHIPS-UNWIRED advisory floor): ADVISORY ONLY — ledgered here, never consulted by the
   // verdict/arm decision above or below. One `review.unwired_advisory` line per reason code (see
@@ -2617,6 +2638,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
           prUrl: view.url,
           // impl-BG: excludes dependabot heads from the post-verdict arm (the dep-review lane owns those).
           headRefName: view.headRefName,
+          ...(keepsUnseenDependency ? { reservationHomeDir: repoRoot } : {}),
           task: {
             id: reviewKey,
             catalog: taskCatalog,
@@ -2703,15 +2725,24 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
       { prUrl: view.url, taskId: reviewKey, headSha: view.headRefOid, ledgerPath, log }, { disarm: deps.disarm });
     if (restored.posted) {
       replayStatusAction = "restored";
-      log("review.posted", {
+      const { unmetClaims, reasons } = reviewUnmetFields(verdict);
+      const reviewPostedRow = {
         context: REVIEW_CONTEXT, state: verdict.state, head_sha: view.headRefOid, pr_url: view.url,
         review_input_digest: inputDigest, review_engine_revision: REVIEW_ENGINE_REVISION,
         review_decision_digest: verdict.reviewDecisionDigest, decision_verdict: verdict,
         evaluator_provenance: verdict.evaluatorProvenance,
+        ...(restoringFreshness.status === "fresh" ? { reviewer_code_sha: restoringFreshness.codeSha } : {}),
         reviewer_outcome: verdict.reviewerOutcome, proof_exec: verdict.criteria.map((criterion) => criterion.proof_exec),
+        unmet_criteria: unmetClaims, reasons, ...reviewLedgerLegibilityFields(verdict),
         status_recovered: true,
         status_publisher: restored.publisherEvidence,
-      });
+      };
+      log("review.posted", reviewPostedRow);
+      if (restorePoster.published()) {
+        await writeReviewEvidenceRecord(reviewPostedRow, taskCatalog).catch(error => {
+          log("review.evidence_write_failed", { pr_number: view.number, head_sha: view.headRefOid, reason: String(error) });
+        });
+      }
     } else if (restored.replayed) {
       replayStatusAction = "confirmed";
       // W1-T5726: nothing posted, but this input WAS judged; no row leaves the attempt count 0 and the sweep re-reviews (#9138).
