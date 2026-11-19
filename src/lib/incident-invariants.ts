@@ -70,11 +70,17 @@ function stringField(row: IncidentInvariantRow, key: string): string | undefined
   return typeof v === "string" ? v : undefined;
 }
 
+/** W1-T13828: each row's parsed time, kept for as long as the row is: the live tail hands back the same row objects
+ *  every minute, and parsing every row's time once per rule window held serve's loop. */
+const rowTimes = new WeakMap<object, number | null>();
 function rowTimeMs(row: IncidentInvariantRow): number | undefined {
+  const held = rowTimes.get(row);
+  if (held !== undefined) return held ?? undefined;
   const ts = row.ts;
-  if (typeof ts !== "string") return undefined;
-  const parsed = Date.parse(ts);
-  return Number.isFinite(parsed) ? parsed : undefined;
+  const parsed = typeof ts === "string" ? Date.parse(ts) : Number.NaN;
+  const ms = Number.isFinite(parsed) ? parsed : null;
+  rowTimes.set(row, ms);
+  return ms ?? undefined;
 }
 
 /** Rows strictly newer than `sinceMs`, at or before `nowMs` — half-open, so one instant is never
@@ -331,6 +337,23 @@ export const INCIDENT_RULE_INPUTS: Readonly<Record<string, readonly string[]>> =
 
 export const INCIDENT_LONGEST_WINDOW_MS = Math.max(...RULES.map((rule) => rule.longMs));
 
+/** W1-T13828: whether a step is one of a rule's declared inputs: an exact step, `*suffix` or `prefix*`. */
+function stepMatches(step: unknown, inputs: readonly string[]): boolean {
+  if (typeof step !== "string") return false;
+  return inputs.some((input) => input.startsWith("*") ? step.endsWith(input.slice(1))
+    : input.endsWith("*") ? step.startsWith(input.slice(0, -1)) : step === input);
+}
+
+const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/**
+ * W1-T13828: a ledger line whose step is an input of some rule. Serve's live tail parses only these lines, so it
+ * neither parses nor holds the rows no rule reads. A line that matches but is not an input is still filtered by step.
+ */
+export const INCIDENT_INPUT_LINE: RegExp = new RegExp(`"step":"(?:${RULES.flatMap((rule) => rule.inputs).map((input) =>
+  input.startsWith("*") ? `[^"]*${escapeRegExp(input.slice(1))}` : input.endsWith("*") ? `${escapeRegExp(input.slice(0, -1))}[^"]*` : escapeRegExp(input),
+).join("|")})"`);
+
 /**
  * Evaluate every rule over `rows` at instant `nowMs`. A rule fires (and appears in the returned
  * array) only when BOTH its long window AND its short (1/12th) confirmation window are bad — see
@@ -344,8 +367,10 @@ export function evaluateIncidentInvariants(
   const findings: InvariantFinding[] = [];
   for (const rule of RULES) {
     const shortMs = rule.longMs / 12;
-    const long = rule.bad(rowsSince(rows, nowMs - rule.longMs, nowMs));
-    const short = rule.bad(rowsSince(rows, nowMs - shortMs, nowMs));
+    // W1-T13828: a rule reads only its declared inputs, so each window scans those rows, not the whole tail.
+    const inputs = rows.filter((row) => stepMatches(row.step, rule.inputs));
+    const long = rule.bad(rowsSince(inputs, nowMs - rule.longMs, nowMs));
+    const short = rule.bad(rowsSince(inputs, nowMs - shortMs, nowMs));
     if (long.bad && short.bad) {
       findings.push({ ruleId: rule.id, message: long.message, longMs: rule.longMs, shortMs });
     }

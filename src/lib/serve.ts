@@ -156,7 +156,7 @@ import {
 } from "./daemon-health.js";
 import {
   INCIDENT_LONGEST_WINDOW_MS,
-  evaluateIncidentInvariants,
+  evaluateIncidentInvariants, INCIDENT_INPUT_LINE,
   eventLoopLagLedgerLine,
   invariantFindingLedgerLine,
   loopStallLedgerLine,
@@ -3409,7 +3409,9 @@ export function startIncidentInvariantsMonitor(
   deps: NonNullable<ServeDeps["incidentInvariants"]> & { log?: ServiceOptions["log"] } = {},
 ): (() => void) & { stallProfiler: LoopStallProfiler } {
   const readLedger = deps.readLedger;
-  const liveRows = readLedger ? () => readLedger(ledgerPath) : createLiveLedgerTail(ledgerPath, INCIDENT_INVARIANTS_TAIL_RETAIN_MS);
+  // W1-T13828: the tail parses and holds only the lines some rule reads.
+  const liveRows = readLedger ? () => readLedger(ledgerPath)
+    : createLiveLedgerTail(ledgerPath, INCIDENT_INVARIANTS_TAIL_RETAIN_MS, { keepLine: INCIDENT_INPUT_LINE });
   const writeLedger = deps.writeLedger ?? appendLedger;
   const eventLoopLag = deps.eventLoopLag
     ?? createEventLoopLagMonitor(systemClock, () => monitorEventLoopDelay({ resolution: SERVE_LOOP_LAG_RESOLUTION_MS }));

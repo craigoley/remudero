@@ -26,9 +26,15 @@ export type LiveLedgerTail = (nowMs: number) => ReadonlyArray<Record<string, unk
 const NEWLINE = 0x0a;
 const ANCHOR_BYTES = 64;
 
+/** W1-T13828: each retained row's parsed time, so the retention pass parses a row's time once, not once a call. */
+const rowTimes = new WeakMap<object, number | null>();
 function rowMs(row: Record<string, unknown>): number | undefined {
+  const held = rowTimes.get(row);
+  if (held !== undefined) return held ?? undefined;
   const parsed = typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN;
-  return Number.isFinite(parsed) ? parsed : undefined;
+  const ms = Number.isFinite(parsed) ? parsed : null;
+  rowTimes.set(row, ms);
+  return ms ?? undefined;
 }
 
 function retained(row: Record<string, unknown>, cutoff: number, keepUntimed: boolean): boolean {
@@ -36,10 +42,12 @@ function retained(row: Record<string, unknown>, cutoff: number, keepUntimed: boo
   return t === undefined ? keepUntimed : t > cutoff;
 }
 
-function parseLines(path: string, text: string, out: Array<Record<string, unknown>>): void {
+function parseLines(path: string, text: string, out: Array<Record<string, unknown>>, keepLine?: RegExp): void {
   for (const raw of text.split("\n")) {
     const line = raw.trim();
     if (!line) continue;
+    // W1-T13828: a caller that reads only some steps skips every other line before it is parsed.
+    if (keepLine && !keepLine.test(line)) continue;
     try {
       out.push(JSON.parse(line) as Record<string, unknown>);
     } catch {
@@ -48,9 +56,9 @@ function parseLines(path: string, text: string, out: Array<Record<string, unknow
   }
 }
 
-function tentativeRow(text: string): Record<string, unknown> | undefined {
+function tentativeRow(text: string, keepLine?: RegExp): Record<string, unknown> | undefined {
   const line = text.trim();
-  if (!line) return undefined;
+  if (!line || (keepLine && !keepLine.test(line))) return undefined;
   try {
     return JSON.parse(line) as Record<string, unknown>;
   } catch {
@@ -59,8 +67,9 @@ function tentativeRow(text: string): Record<string, unknown> | undefined {
   }
 }
 
-export function createLiveLedgerTail(path: string, retainMs: number, opts: { keepUntimed?: boolean } = {}): LiveLedgerTail {
+export function createLiveLedgerTail(path: string, retainMs: number, opts: { keepUntimed?: boolean; keepLine?: RegExp } = {}): LiveLedgerTail {
   const keepUntimed = opts.keepUntimed === true;
+  const keepLine = opts.keepLine;
   let identity: string | undefined;
   // W1-T13367: the size and times of the last fstat whose bytes were all read; undefined after a short read or a reset.
   let seenStat: { size: number; mtimeMs: number; ctimeMs: number } | undefined;
@@ -135,7 +144,7 @@ export function createLiveLedgerTail(path: string, retainMs: number, opts: { kee
       }
       const end = chunk.lastIndexOf(NEWLINE) + 1;
       const appended: Array<Record<string, unknown>> = [];
-      parseLines(path, chunk.subarray(0, end).toString("utf8"), appended);
+      parseLines(path, chunk.subarray(0, end).toString("utf8"), appended, keepLine);
       offset += end;
       const cutoff = nowMs - retainMs;
       // Nothing can age out of an unbounded tail that keeps untimed rows, so an unchanged read allocates nothing.
@@ -149,7 +158,7 @@ export function createLiveLedgerTail(path: string, retainMs: number, opts: { kee
       const tailBytes = chunk.subarray(end);
       if (end > 0 || !tailBytes.equals(pendingBytes)) {
         pendingBytes = Buffer.from(tailBytes);
-        pendingRow = tentativeRow(tailBytes.toString("utf8"));
+        pendingRow = tentativeRow(tailBytes.toString("utf8"), keepLine);
         withPending = undefined;
       }
       if (!pendingRow || !retained(pendingRow, cutoff, keepUntimed)) return rows;
