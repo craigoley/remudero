@@ -346,13 +346,54 @@ function stepMatches(step: unknown, inputs: readonly string[]): boolean {
 
 const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-/**
- * W1-T13828: a ledger line whose step is an input of some rule. Serve's live tail parses only these lines, so it
- * neither parses nor holds the rows no rule reads. A line that matches but is not an input is still filtered by step.
- */
-export const INCIDENT_INPUT_LINE: RegExp = new RegExp(`"step":"(?:${RULES.flatMap((rule) => rule.inputs).map((input) =>
-  input.startsWith("*") ? `[^"]*${escapeRegExp(input.slice(1))}` : input.endsWith("*") ? `${escapeRegExp(input.slice(0, -1))}[^"]*` : escapeRegExp(input),
-).join("|")})"`);
+function incidentStepPattern(wildcard: string): string {
+  return [...new Set(RULES.flatMap((rule) => rule.inputs))].map((input) =>
+    input.startsWith("*") ? wildcard + escapeRegExp(input.slice(1))
+      : input.endsWith("*") ? escapeRegExp(input.slice(0, -1)) + wildcard : escapeRegExp(input),
+  ).join("|");
+}
+const plainIncidentField = new RegExp(`"step"[ \\t\\r\\n]*:[ \\t\\r\\n]*"(?:${incidentStepPattern('[^"]*')})"`);
+
+// Consume quoted strings as units, so braces and brackets inside them never change the nesting depth.
+const jsonString = String.raw`"[^"\\]*(?:\\.[^"\\]*)*"`;
+const jsonTokens = new RegExp(String.raw`[\[\]{}]|(${jsonString})([ \t\r\n]*:[ \t\r\n]*(${jsonString})?)?`, "g");
+const jsonEscapes: Readonly<Record<string, string>> = { b: "\b", f: "\f", n: "\n", r: "\r", t: "\t" };
+
+function decodeJsonString(token: string): string {
+  return token.slice(1, -1).replace(/\\(?:u([\da-fA-F]{4})|(["\\/bfnrt]))/g, (_, hex, escape) =>
+    hex === undefined ? jsonEscapes[escape] ?? escape : String.fromCharCode(Number.parseInt(hex, 16)),
+  );
+}
+
+function topLevelStep(line: string): string | undefined {
+  if (!line.trimStart().startsWith("{")) return undefined;
+  let depth = 0;
+  let step: string | undefined;
+  for (const [token, key, field, value] of line.matchAll(jsonTokens)) {
+    if (token === "{" || token === "[") depth += 1;
+    else if (token === "}" || token === "]") {
+      depth -= 1;
+      if (depth === 0) break;
+    } else if (depth === 1 && field !== undefined &&
+      (key === '"step"' || (key.includes("\\") && decodeJsonString(key) === "step"))) {
+      // JSON.parse uses the last occurrence of a repeated key.
+      step = value === undefined ? undefined : decodeJsonString(value);
+    }
+  }
+  return step;
+}
+
+class IncidentInputLine extends RegExp {
+  override test(line: string): boolean {
+    // Reject ordinary unrelated lines before scanning their JSON tokens. Escapes can change keys or values.
+    if (!line.includes("\\") && !plainIncidentField.test(line)) return false;
+    const step = topLevelStep(line);
+    return step !== undefined && super.test(step);
+  }
+}
+
+/** W1-T13828: test the top-level step against every rule's inputs before the tail parses the row. */
+export const INCIDENT_INPUT_LINE: RegExp = new IncidentInputLine(`^(?:${incidentStepPattern("[\\s\\S]*")})$`);
 
 /**
  * Evaluate every rule over `rows` at instant `nowMs`. A rule fires (and appears in the returned

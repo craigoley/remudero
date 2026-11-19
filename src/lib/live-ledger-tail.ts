@@ -42,12 +42,21 @@ function retained(row: Record<string, unknown>, cutoff: number, keepUntimed: boo
   return t === undefined ? keepUntimed : t > cutoff;
 }
 
-function parseLines(path: string, text: string, out: Array<Record<string, unknown>>, keepLine?: RegExp): void {
+function lineFilter(pattern: RegExp): (line: string) => boolean {
+  if (!pattern.global && !pattern.sticky) return (line) => pattern.test(line);
+  const regex = new RegExp(pattern);
+  return (line) => {
+    regex.lastIndex = 0;
+    return regex.test(line);
+  };
+}
+
+function parseLines(path: string, text: string, out: Array<Record<string, unknown>>, keepLine?: (line: string) => boolean): void {
   for (const raw of text.split("\n")) {
     const line = raw.trim();
     if (!line) continue;
     // W1-T13828: a caller that reads only some steps skips every other line before it is parsed.
-    if (keepLine && !keepLine.test(line)) continue;
+    if (keepLine && !keepLine(line)) continue;
     try {
       out.push(JSON.parse(line) as Record<string, unknown>);
     } catch {
@@ -56,9 +65,9 @@ function parseLines(path: string, text: string, out: Array<Record<string, unknow
   }
 }
 
-function tentativeRow(text: string, keepLine?: RegExp): Record<string, unknown> | undefined {
+function tentativeRow(text: string, keepLine?: (line: string) => boolean): Record<string, unknown> | undefined {
   const line = text.trim();
-  if (!line || (keepLine && !keepLine.test(line))) return undefined;
+  if (!line || (keepLine && !keepLine(line))) return undefined;
   try {
     return JSON.parse(line) as Record<string, unknown>;
   } catch {
@@ -69,7 +78,7 @@ function tentativeRow(text: string, keepLine?: RegExp): Record<string, unknown> 
 
 export function createLiveLedgerTail(path: string, retainMs: number, opts: { keepUntimed?: boolean; keepLine?: RegExp } = {}): LiveLedgerTail {
   const keepUntimed = opts.keepUntimed === true;
-  const keepLine = opts.keepLine;
+  const keepLine = opts.keepLine && lineFilter(opts.keepLine);
   let identity: string | undefined;
   // W1-T13367: the size and times of the last fstat whose bytes were all read; undefined after a short read or a reset.
   let seenStat: { size: number; mtimeMs: number; ctimeMs: number } | undefined;
