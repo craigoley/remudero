@@ -37,7 +37,7 @@ import { GIT_FETCH_KILL_GRACE_MS } from "./git-fetch-retry.js";
 import { isFullReviewerCodeSha, probeReviewerCodeFreshnessAsync } from "./self-sync.js";
 import { formatTail } from "./proofExecutor.js";
 import { playwrightCacheRoot } from "./worker-home.js";
-import { makeTempDir } from "./tmp.js";
+import { makeTempDir, removeOwnedTree } from "./tmp.js";
 import { createProofCache, ProofCacheUnavailableError, type ProofCache, type ProofCacheRelease } from "./proof-cache.js";
 import { defaultTestSlots, lowPriorityCommand, readHostLoad, testRunArgv, testRunConcurrency, type BinaryProbe, type HostLoad } from "./test-slot.js";
 import { hashInstallInputs, installHashMarkerPath } from "./install-hash.js";
@@ -2546,7 +2546,10 @@ function prepareProofChild(command: string, args: readonly string[], cwd: string
   if (!existsSync(cwd)) throw new ProofCwdMissingError(cwd);
   const child = proofChildCommand(command, args);
   const home = makeTempDir("proof-home");
-  const cleanup = () => rmSync(home, { recursive: true, force: true });
+  const cleanup = () => {
+    const removal = removeOwnedTree(home);
+    if (!removal.ok) process.emitWarning(removal.reason);
+  };
   const env = proofChildEnv(home);
   try {
     const status = proofSandboxStatus();

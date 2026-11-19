@@ -652,7 +652,7 @@ import {
 // closure below (daemonCommand), wired into BOTH daemonBoot's boot-time param and
 // DaemonDeps.sweepOrphans.
 import { defaultListCandidates, defaultReadMarkers, killProcessGroup, type OrphanSweepDeps } from "./lib/worker-containment.js";
-import { makeTempDir, sweepStaleTempDirs, sweepStaleTempDirsAsync, withTempDir, type TempSweepOpts, type TempSweepSummary } from "./lib/tmp.js";
+import { makeTempDir, removeOwnedTree, sweepStaleTempDirs, sweepStaleTempDirsAsync, withTempDir, type TempSweepOpts, type TempSweepSummary } from "./lib/tmp.js";
 import { reapWorkerScratch } from "./lib/worker-scratch.js";
 import { DAEMON_LABEL, DIGEST_LABEL, generateDigestLaunchdPlist, generateLaunchdPlist, generateServeLaunchdPlist, generateSupervisorLaunchdPlist, launchctlGuiTarget, launchdPlistPath, parseSupervisorStartInterval, SERVE_LABEL, serveLogPaths, SUPERVISOR_LABEL } from "./lib/launchd.js";
 import { daemonInstanceRegistryPath, deriveDrainWait, IMAGE_BUILD_SHA_PATH, readDrainWaitLanes, readImplementDurationsMs, requestDeploy, runDeployCycle } from "./lib/deployer.js";
@@ -11493,7 +11493,8 @@ const realCoverageRun = async (wt: string, suites: string[], timeoutMs: number, 
     const argv = [...sandbox, process.execPath, join(wt, "scripts", "diff-coverage-local.mjs"), "--base", "origin/main", "--lcov", "coverage/precheck-lcov.info", ...suites];
     return await spawnCoverageChild(status.binary, argv, wt, env, timeoutMs, maxOutputBytes);
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    const removal = removeOwnedTree(home);
+    if (!removal.ok) process.emitWarning(removal.reason);
   }
 };
 export const spawnCoverageChild = (file: string, args: string[], wt: string, env: NodeJS.ProcessEnv, timeoutMs: number, maxOutputBytes: number): Promise<CoverageRunResult> =>

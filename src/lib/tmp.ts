@@ -151,6 +151,56 @@ function testContextRefusal(opts: TempSweepOpts): string | undefined {
   return "refused: running in a test process with no explicit root, so the sweep would scan the real temp root";
 }
 
+/** W1-T13819: remove a directory this process owns, even when a killed child left a read-only tree in it.
+ *  rmSync's force does not cover permissions: it fails with EACCES or EPERM (Linux) or ENOTEMPTY (macOS).
+ *  It then adds owner rwx to each directory inside (lstat only: a symbolic link is never followed) and
+ *  tries once more. Never throws. */
+const PERMISSION_CODES: ReadonlySet<string> = new Set(["EACCES", "EPERM", "ENOTEMPTY"]);
+
+export function removeOwnedTree(dir: string): { ok: true } | { ok: false; reason: string } {
+  try {
+    fs.rmSync(dir, { recursive: true, force: true });
+    return { ok: true };
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (!PERMISSION_CODES.has(String(code))) return { ok: false, reason: removalReason(dir, error) };
+  }
+  makeOwnedDirsWritable(dir);
+  try {
+    fs.rmSync(dir, { recursive: true, force: true });
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, reason: removalReason(dir, error) };
+  }
+}
+
+function removalReason(dir: string, error: unknown): string {
+  const e = error as NodeJS.ErrnoException;
+  return `could not remove ${e.path ?? dir}: ${e.code ?? e.message}`;
+}
+
+function makeOwnedDirsWritable(dir: string): void {
+  let st: fs.Stats;
+  try {
+    st = fs.lstatSync(dir);
+  } catch {
+    return; // gone or unreadable: the retry's rmSync names what is left
+  }
+  if (!st.isDirectory()) return;
+  try {
+    fs.chmodSync(dir, (st.mode & 0o7777) | 0o700);
+  } catch {
+    return; // not ours to change: the retry's rmSync names the path
+  }
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return; // unreadable: the retry's rmSync names the path
+  }
+  for (const name of names) makeOwnedDirsWritable(join(dir, name));
+}
+
 /** Default age ceiling for {@link sweepStaleTempDirs}: 24 hours. */
 export const DEFAULT_TEMP_SWEEP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
@@ -211,12 +261,8 @@ export function sweepStaleTempDirs(opts: TempSweepOpts = {}): TempSweepSummary {
       noteKept(name, ageMs);
       continue;
     }
-    try {
-      fs.rmSync(full, { recursive: true, force: true });
-      removed.push(name);
-    } catch {
-      noteKept(name, ageMs); // a permissions hiccup on one entry never blocks boot
-    }
+    if (removeOwnedTree(full).ok) removed.push(name);
+    else noteKept(name, ageMs); // a removal that still fails on one entry never blocks boot
   }
   return { removed, kept, oldestKeptAgeMs };
 }

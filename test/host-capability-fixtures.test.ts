@@ -181,6 +181,20 @@ const DECLARED: readonly Declared[] = [
       "not whether the OS denies a write, so it holds for every uid.",
   },
   {
+    kind: "chmod", file: "a-proof-home-that-holds-a-read-only-tree-is-removed.test.ts", key: "0o444", count: 3,
+    reason:
+      "Makes the read-only seed files a killed W1-T11468 proof child left in its proof home, the tree " +
+      "whose removal threw EACCES and stopped the daemon on 2026-11-19. The test asserts the removal " +
+      "succeeds; only its uid-0-skipped criterion 5 expects an OS permission denial.",
+  },
+  {
+    kind: "chmod", file: "a-proof-home-that-holds-a-read-only-tree-is-removed.test.ts", key: "0o555", count: 6,
+    reason:
+      "Makes the read-only directories of that same proof home, and locks a parent so a removal still " +
+      "fails. It reproduces the home that stopped the daemon; the one test that needs a real denial " +
+      "(criterion 5) skips under uid 0.",
+  },
+  {
     kind: "chmod", file: "dependency-seeds.test.ts", key: "0o444", count: 4,
     reason:
       "These sites restore sealed payload and manifest modes and seal an external symlink target. " +
