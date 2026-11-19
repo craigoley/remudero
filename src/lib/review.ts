@@ -27,7 +27,7 @@ import { systemClock, type Clock } from "./clock.js";
 import { combinedStatusRestArgs, prStateFromRest, singlePrRestArgs, type GhApiFetcher, type RestPullRow } from "./open-prs-rest.js";
 // W1-T2895: review.ts imports "src/lib/plan-scope" through the leaf module below.
 import { isInPlanScope } from "./plan-scope.js";
-import { defaultGitRunnerAsync, loadPlanAtRef, loadPlanAtRefAsync, readBlobsAtRef, readBlobsAtRefAsync, visibleCriteria, type AcceptanceCriterion, type GitBlobRunner, type Task, type TaskRisk } from "./plan.js";
+import { defaultGitRunnerAsync, loadPlanAtRef, loadPlanAtRefAsync, readBlobsAtRef, readBlobsAtRefAsync, visibleCriteria, type AcceptanceCriterion, type GitBlobRunner, type KeepsUnseenDependency, type Task, type TaskRisk } from "./plan.js";
 import { scanUnreachedExports, type UnreachedExport } from "./reachability.js";
 import { baseLacksPrAddedExports } from "./proof-missing-export.js";
 import { loadDefaultPolicy, type ArmCalibrationBandRow } from "./policy.js";
@@ -8958,12 +8958,14 @@ export async function resolvePlanCriteriaAtHeadAsync(
   planRelPath: string,
   headSha: string,
   runGit?: (args: string[], stdin?: string) => Promise<string>,
+  keepsUnseenDependency?: KeepsUnseenDependency,
 ): Promise<PlanCriteriaAtHeadResult> {
   const taskId = extractTaskTrailerId(body ?? "");
   if (taskId === undefined) return { criteria: [] };
   const gitRunner = runGit ?? defaultGitRunnerAsync(repoRoot);
   try {
-    const plan = await loadPlanAtRefAsync(repoRoot, planRelPath, headSha, gitRunner);
+    // W1-T13794: a satellite's catalog keeps another repository's task whose dependency it cannot hold.
+    const plan = await loadPlanAtRefAsync(repoRoot, planRelPath, headSha, gitRunner, keepsUnseenDependency);
     const t = plan.byId.get(taskId);
     const criteria = t?.acceptance?.length ? t.acceptance : [];
     const identity = criteria.length ? await formatPlanReadIdentityAtHeadAsync(gitRunner, headSha, planRelPath) : undefined;
