@@ -6,6 +6,7 @@ import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
+import { withoutCheckoutRetryPair } from "#test/helpers/checkout-retry-pair.js";
 
 // ── W1-T212 (recon R-12): per-diff coverage gate ────────────────────────────
 //
@@ -145,7 +146,8 @@ test("diff-coverage CI wiring: the stable coverage-ratchet aggregator checks the
   assert.equal(doc.jobs["coverage-ratchet"].if, undefined, "coverage shards must always register");
   assert.equal(doc.jobs["coverage-ratchet-required"].if, "${{ always() }}", "the stable check must run even when a shard fails");
   for (const jobId of ["coverage-ratchet", "coverage-ratchet-required"]) {
-    for (const step of doc.jobs[jobId].steps ?? []) assert.equal(step.if, undefined, `${jobId} must use shell guards, never step if:`);
+    // W1-T13825: the checkout retry pair is the one admitted step if:; skipping it never skips the job.
+    for (const step of withoutCheckoutRetryPair(`ci.yml:${jobId}`, doc.jobs[jobId].steps ?? [])) assert.equal(step.if, undefined, `${jobId} must use shell guards, never step if:`);
   }
   // Needs the full base..head history to diff against, not the default shallow clone.
   assert.match(jobBody, /fetch-depth:\s*0/, "coverage-ratchet's checkout must fetch full history for the diff");
