@@ -45155,9 +45155,6 @@ export function selfSyncRefusalSink(cmd: string | undefined, rest: string[], led
  */
 export const READ_ONLY_FRESHNESS_EXEMPT_VERBS: ReadonlySet<string> = new Set(["doctor", "status", "preflight", "pr-owner", "gh-broker"]);
 
-/** Thrown by the assess-only git runner at the one mutating call `checkCliFreshness` makes. */
-class FreshnessAssessOnlyStop extends Error {}
-
 /**
  * W1-T11788 — WHAT THE GATE WOULD HAVE SAID, WITHOUT LETTING IT ACT. Runs the CLI freshness check
  * for an exempt verb with a git runner that stops at `merge` (the check's only mutation; its fetch
@@ -45175,9 +45172,10 @@ export function ledgerFreshnessExemption(
 ): ReturnType<typeof checkCliFreshness>["status"] | "exempt" | "would-sync" | "unassessed" {
   // The assess-only git runner below switches off the check's own test-runner guard, so keep it here.
   if (!checkFreshness && testRunnerOnItsOwnCheckout(repoDir, env)) return "guarded";
+  const mergeBlocked = new Error("assess only: the ff-merge is never run");
   const assessOnly = (args: string[]): string => {
-    if (args[0] === "merge") throw new FreshnessAssessOnlyStop("assess only: the ff-merge is never run");
-    return execFileSync("git", ["-C", repoDir, ...args], { encoding: "utf8" });
+    if (args[0] === "merge") throw mergeBlocked;
+    return hostWorktreeGit(repoDir, args, { env: { GIT_OPTIONAL_LOCKS: "0" } });
   };
   let result: ReturnType<typeof checkCliFreshness>;
   try {
@@ -45185,7 +45183,7 @@ export function ledgerFreshnessExemption(
       git: assessOnly, say: () => {}, warn: () => {}, reexec: () => {},
     });
   } catch (err) {
-    if (err instanceof FreshnessAssessOnlyStop) return "would-sync";
+    if (err === mergeBlocked) return "would-sync";
     console.error(`rmd ${cmd}: freshness assessment failed, proceeding (exempt verb): ${String(err)}`);
     return "unassessed";
   }

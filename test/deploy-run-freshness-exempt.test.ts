@@ -71,7 +71,7 @@ after(() => {
   assert.deepEqual(
     escapedReasons.map((r) => String((r as Error)?.stack ?? r)),
     [],
-    "an unhandled rejection escaped from the in-process main() calls in this file",
+    "an unhandled rejection escaped from the in-process CLI calls in this file",
   );
 });
 
