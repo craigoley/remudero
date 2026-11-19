@@ -1,0 +1,85 @@
+- id: W1-T13825
+  title: "A shard checkout that runs past 3 minutes is stopped and run once more, so a silent fetch stall no longer uses up to 24 minutes of the shard's ceiling"
+  repo: remudero
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # it changes how both shard lanes check out the repository, and moves the W1-T13321 suite with it (Rule 19)
+  band_meaning: span
+  origin: "W1-T13321 post-merge validation, operator-session#coverage-shard-timeouts-2026-11-19"
+  plan_refs:
+    - W1-T13321
+    - W1-T13271
+    - W1-T13269
+  files:
+    - .github/workflows/ci.yml
+    - test/rules/a-stalled-shard-checkout-times-out-and-retries.test.ts
+    - test/ci/a-stalled-checkout-fetch-aborts-and-retries.test.ts
+    - scripts/census-precheck.mjs
+    - test/helpers/checkout-retry-pair.ts
+    - test/scanner-gate-config.test.ts
+    - test/diff-coverage.test.ts
+    - test/fast-lane-classifier.test.ts
+    - test/a-coverage-skip-message-names-the-diff-class.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The ci and coverage-ratchet jobs each run their first actions/checkout step with an id, timeout-minutes 3 and continue-on-error true"
+      proof: "grep: W1-T13825 criterion 1 in test/rules/a-stalled-shard-checkout-times-out-and-retries.test.ts"
+    - claim: "Right after it, each job runs a second checkout of the same pinned action and inputs only when the first step's outcome is failure, with its own timeout and without continue-on-error, so a second failure still fails the job"
+      proof: "grep: W1-T13825 criterion 2 in test/rules/a-stalled-shard-checkout-times-out-and-retries.test.ts"
+    - claim: "invariant:fetch-unchanged — both checkout steps in each job keep fetch-depth 0, the pinned actions/checkout sha and the W1-T13321 low-speed env"
+      proof: "grep: W1-T13825 criterion 3 in test/rules/a-stalled-shard-checkout-times-out-and-retries.test.ts"
+    - claim: "The no-continue-on-error and no-step-if guards admit exactly this checkout pair, and a pair that drifts from its shape still answers to them"
+      proof: "grep: W1-T13825 criterion 4 in test/rules/a-stalled-shard-checkout-times-out-and-retries.test.ts"
+  rationale: |
+    W1-T13321 (#19016, merged 2026-11-17 06:49Z) did not stop the stall. MEASURED 2026-11-19 from the Actions jobs
+    API over every ci.yml run created 2026-11-17 06:50Z to 2026-11-19 13:00Z (1327 runs, all attempts): 18,150
+    ci-shard and coverage-shard checkout steps, p50 21 s, p90 24 s, p99 28 s. 13 took 5 minutes or more
+    (314 to 1434 s), all between 2026-11-17 16:15Z and 2026-11-18 00:10Z; 2 of those jobs ended cancelled.
+    OBSERVED in job 134181189924 (ci-shard 2/8, 1191 s): the step log lists GIT_HTTP_LOW_SPEED_LIMIT 1000 and
+    GIT_HTTP_LOW_SPEED_TIME 120 in its env, then one `git -c protocol.version=2 fetch --no-tags --prune ...` that
+    prints nothing from 16:15:06Z to 16:34:55Z and then completes with no error and no retry. So git's low-speed
+    abort did not fire: whatever stalls, it is not a transfer under 1000 bytes/s that curl sees for 120 s.
+    INFERRED: the cause sits outside what a client-side git setting can bound. A wall-clock bound on the step does
+    not depend on knowing it.
+    VERIFIED 2026-11-19 in craigoley/remudero-sandbox (workflow step-timeout-probe.yml, run 44522907162): a step
+    killed by its own timeout-minutes with continue-on-error true lets the job go on, and a later step sees
+    `steps.<id>.outcome == 'failure'` (the step's conclusion still reads success), for both a run step and a
+    JavaScript action step.
+  design: |
+    1. In the `ci` job and the `coverage-ratchet` job of .github/workflows/ci.yml, give the existing checkout step
+       `id: checkout`, `timeout-minutes: 3` and `continue-on-error: true`. Keep its env and with: inputs.
+       3 minutes is about six times the slowest healthy checkout seen (28 s at p99, 100 s at most outside the stall
+       window).
+    2. Right after it, add a step named "Retry the checkout once after a stalled fetch (W1-T13825)" with
+       `if: steps.checkout.outcome == 'failure'`, the same `uses:` sha, the same env and with: inputs, and
+       `timeout-minutes: 5`. It has no continue-on-error, so a real checkout failure (bad ref, auth) still fails the
+       job on the second try. actions/checkout deletes the workspace contents before it fetches, so a half-done
+       first attempt leaves nothing behind.
+    3. New suite test/rules/a-stalled-shard-checkout-times-out-and-retries.test.ts parses ci.yml with the `yaml`
+       package and checks criteria 1 to 3 for both jobs. Root through `#test/helpers/repo-root.js`.
+    4. test/ci/a-stalled-checkout-fetch-aborts-and-retries.test.ts (W1-T13321) asserts exactly one checkout step per
+       job. It now reads the first checkout step by its id and keeps its own titles and checks.
+    5. A suite under test/rules/ is a CI census, so a-stalled-shard-checkout-times-out-and-retries.test.ts gets a
+       PRECHECK_PARITY row in scripts/census-precheck.mjs, through PRECHECK_PATH_TRIGGERED_SUITES: it is asked before
+       the push when ci.yml, the precheck or the suite changes. The suite declares `@census-reads:` (W1-T11940).
+    6. GUARD NARROWING, APPROVED by Craig 2026-11-19 12:49Z (decision card in operator-session#coverage-shard-timeouts):
+       test/scanner-gate-config.test.ts forbids continue-on-error in a job ci-gate requires, and
+       test/diff-coverage.test.ts, test/fast-lane-classifier.test.ts and
+       test/a-coverage-skip-message-names-the-diff-class.test.ts forbid a step `if:` in coverage-ratchet (the #729
+       skipped-required-check deadlock). New helper test/helpers/checkout-retry-pair.ts admits only the exact pair
+       above; each guard checks every other step as before. Skipping a step never skips the job, and the retry has no
+       continue-on-error, so neither protection weakens. Criterion 4 shows five drifted pairs are not admitted.
+    INVARIANT fetch-unchanged: every checkout step in both jobs keeps fetch-depth 0, the pinned sha and the
+    W1-T13321 env, so every history reader sees the same full history.
+  falsifier: |
+    Drop timeout-minutes or continue-on-error from either first checkout and criterion 1 fails. Drop the retry step,
+    its `if:`, or add continue-on-error to it and criterion 2 fails. VALIDATION AFTER MERGE: over the next seven
+    days, no ci-shard or coverage-shard spends more than 9 minutes in checkout (3 + about 1 for the retry's setup
+    + 5), and any stall shows as a failed-then-skipped-to-retry pair in the job's step list.
+  note: |
+    An operator session hand-builds this task: the daemon holds any task that names a workflow path (W1-T5351). A
+    workflow diff rides alone (W1-T297).
