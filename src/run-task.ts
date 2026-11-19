@@ -180,6 +180,7 @@ import { createOperatorMcpServer, operatorMcpCommand } from "./lib/operator-mcp.
 import { runInboxGardener } from "./lib/inbox-gardener.js";
 import { inboxSemanticDigest, proofDebtPopulationPermit } from "./lib/inbox-retirement.js";
 import { GARDEN_PLAN_FLAG, GARDEN_REPO_FLAG, issueRevalidationPolicyForTarget, registeredGardenEnabled } from "./lib/garden-registry.js";
+import { approveInChild, checkoutHeadCommit, productionStuckStatePorts, recordApproveReleaseRefusal, runStuckStateGardener } from "./lib/stuck-state-gardener.js";
 import { inboxGardenerMode, inboxRetirementContext } from "./lib/inbox-retirement.js";
 import { createHandWorktree, defaultHandWorktreeParent, renderHandWorktree } from "./lib/hand-worktree.js";
 import { addCowWorktree, linkDonorNodeModules, mainWorktreeOf, renderCowWorktree } from "./lib/cow-worktree.js";
@@ -29127,6 +29128,16 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
       const d = deps("backlog", raiseDuplicate);
       return gardenPass(backlogGardenSpec(d), d);
     }
+    // W1-T13750: held work is re-probed on the events its refusal class names; the operator's own refused release
+    // re-runs as `rmd approve <id>` (approveCommand, in a child) with that id and nothing else, and only while the ops
+    // record it refused is unchanged.
+    case "stuck-state": {
+      const ports = productionStuckStatePorts({ stateDir, log, escalate: raiseDuplicate, publicMainCommit: () => readOriginMainSha(repoRoot),
+        publicPlan: () => loadPlan(join(instanceVerbPlanRoot(() => stateDir).root, "plan", "tasks.yaml")),
+        destinationRead: () => taskIdDestinationSnapshot({ destinationStateDir: () => stateDir }), approve: approveInChild(),
+        gardenNames: REGISTERED_GARDEN_NAMES });
+      return () => runStuckStateGardener(ports);
+    }
     // W1-T9925: the queue judge re-ranks queued tasks by measured cost of delay through its own reviewed plan PR.
     case "redesign": {
       const d = deps("redesign", raiseDuplicate);
@@ -39881,6 +39892,9 @@ export async function approveCommand(
       { ...deps.taskLookup, stateDir: join(config.root, "state") });
     if (held?.outcome === "unreadable") {
       console.error(`rmd approve: cannot release '${proposalId}': the task catalogs cannot be read as the daemon composes them (${held.reason}) — nothing released`);
+      // W1-T13750: the refusal's ledger row, so the stuck-state gardener can re-run this same release once its cause clears.
+      await recordApproveReleaseRefusal(proposalId, { reason: held.reason }, { lookup: { ...deps.taskLookup, stateDir: join(config.root, "state") },
+        append: (row) => appendLedger(ledgerPathFor(config), row), publicCommit: () => checkoutHeadCommit(dirname(dirname(planPath))) });
       return 1;
     }
     if (held?.outcome === "held") {

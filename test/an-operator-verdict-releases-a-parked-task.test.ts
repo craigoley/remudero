@@ -491,7 +491,11 @@ test("W1-T13386 criterion 3: approve names an unreadable ops catalog, writes not
       assert.match(said, reason, `the refusal names the outcome — ${label}`);
       assert.match(said, new RegExp(`cannot release '${OPS_ID}'.*cannot be read`), label);
       assert.doesNotMatch(said, /unknown task/, `an unread catalog is not an absent task — ${label}`);
-      assert.equal(host.wroteAnything(), false, `no row and no record — ${label}`);
+      // W1-T13750: a composition refusal writes its approve.release_refused row for the stuck-state gardener; still no release and no record.
+      const refusalRow = /compose-/.test(reason.source);
+      assert.deepEqual(host.rawLines().map(line => String((JSON.parse(line) as Record<string, unknown>).step)), refusalRow ? ["approve.release_refused"] : [], `no release row — ${label}`);
+      assert.equal(host.wroteAnything(), refusalRow, `no row and no record — ${label}`);
+      if (refusalRow) assert.throws(() => host.durableRecords(), /ENOENT/, `no durable record — ${label}`);
       assert.equal(host.calls.length > 0, reads, `control: the catalog read ${reads ? "was" : "was not"} attempted — ${label}`);
     }
   }
