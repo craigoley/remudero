@@ -56,9 +56,9 @@
        package and checks criteria 1 to 3 for both jobs. Root through `#test/helpers/repo-root.js`.
     4. test/ci/a-stalled-checkout-fetch-aborts-and-retries.test.ts (W1-T13321) asserts exactly one checkout step per
        job. It now reads the first checkout step by its id and keeps its own titles and checks.
-    5. A suite under test/rules/ is a CI census, so scripts/census-precheck.mjs PRECHECK_PATH_TRIGGERED_SUITES gains a
-       row that asks the new suite before the push when ci.yml, the precheck or the suite changes, and the suite
-       declares `@census-reads:` (W1-T11940).
+    5. A suite under test/rules/ is a CI census, so a-stalled-shard-checkout-times-out-and-retries.test.ts gets a
+       PRECHECK_PARITY row in scripts/census-precheck.mjs, through PRECHECK_PATH_TRIGGERED_SUITES: it is asked before
+       the push when ci.yml, the precheck or the suite changes. The suite declares `@census-reads:` (W1-T11940).
     INVARIANT fetch-unchanged: every checkout step in both jobs keeps fetch-depth 0, the pinned sha and the
     W1-T13321 env, so every history reader sees the same full history.
   falsifier: |
