@@ -182,7 +182,7 @@ function containsReadOnlyDirectory(dir: string): boolean {
   try {
     st = fs.lstatSync(dir);
   } catch {
-    return false;
+    return false; // a missing or unstatable path is not evidence of a read-only directory
   }
   if (!st.isDirectory()) return false;
   if ((st.mode & 0o200) === 0) return true;
@@ -190,7 +190,7 @@ function containsReadOnlyDirectory(dir: string): boolean {
   try {
     names = fs.readdirSync(dir);
   } catch {
-    return false;
+    return false; // unreadable children cannot authorize the permission repair
   }
   return names.some((name) => containsReadOnlyDirectory(join(dir, name)));
 }
