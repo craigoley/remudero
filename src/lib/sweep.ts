@@ -116,6 +116,7 @@ import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { isWorkerProviderId, type Config, type WorkerProviderId, fixStrikeCap, overflowFallbackRefusal } from "./config.js";
 import { defaultGitCaptureAsync, gitPushEmptyCommit, gitPushRunBranchAsync, worktreePushExec, worktreePushExecAsync, runStepsSync, runStepsAsync, step, type Steps } from "./git-push.js";
 import { ghExec, ghJson, ghJsonAsync, ghLinesAsync, ghTextAsync, GhPaceWouldBlockError, paceGhEntryAsync, type GhJsonReadOptions } from "./github-transport.js";
+import { readReviewEvidenceRecord } from "./review-evidence-record.js";
 import { withdrawStaleConflictedJudgePr } from "./machine-filing-judge.js";
 import type { AdmissionObserver, AdmissionSettings, AdmissionRead } from "./contributor-admission.js";
 import { observeContributorAdmission } from "./arm-auto-merge.js";
@@ -2434,6 +2435,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "depReview",
   "retireDepReviewRefusedAsk", // W1-T12955
   "postReview",
+  "readReviewEvidenceRecord",
   "repushAbsent",
   "updateBranch",
   "mergeQueue", // W1-T5903: the behind-main refresh stands down under a merge queue
@@ -2725,6 +2727,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "depReview"
   | "retireDepReviewRefusedAsk"
   | "postReview"
+  | "readReviewEvidenceRecord"
   | "repushAbsent"
   | "updateBranch"
   | "mergeQueue"
@@ -3312,6 +3315,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   });
   return {
     readerAgreement: { owner, repo, plan, readJson: readJsonImpl },
+    readReviewEvidenceRecord: pr => readReviewEvidenceRecord(pr, readJsonImpl),
     fixDispatchFleetHold: () => checkSharedPause(config.root, { run: pauseGit.run, mintAnchor: pauseGit.mintAnchor }),
     fixDispatchCauseProbe: (cause) => fixDispatchCauseProbe(cause, { stateDir: join(config.root, "state") }),
     reconcilePrimaryShadowAlert: () => primaryShadowAlerts.reconcile().catch(primaryShadowAlertFailed),
@@ -16287,6 +16291,7 @@ export function reviewOnlyStandDownReason(scope: LightPassScopeName): string {
 }
 
 export interface SweepDeps {
+  readReviewEvidenceRecord?: typeof readReviewEvidenceRecord;
   /** Awaited once per effects instance; unknown selection never closes a shadow notice. */
   reconcilePrimaryShadowAlert?: () => Promise<void>;
   /** One shared open needs-human snapshot per pass; missing or unreadable fails toward fixing. */
@@ -27502,6 +27507,35 @@ export async function runSweep(
         undefined,
       );
       return;
+    }
+    if (jobDisposition === "post-review" && reviewMode.kind === "full-review" && job.pr.priorReviewAttemptsForInput === 0 &&
+        job.pr.checksState === "green" && job.pr.requiredContextsUnreadable !== true && job.pr.reviewPostRefused !== true &&
+        !hostGapReviews.has(job.reviewKey) &&
+        job.pr.reviewInputDigest !== undefined && (job.pr.reviewState === "success" || job.pr.reviewState === "failure") &&
+        !(job.pr.reviewState === "failure" && reviewVerdictOvertakenByActivity(job.pr)) &&
+        deps.readReviewEvidenceRecord && postedRowsForInput(job.pr, ledgerLines).length === 0) {
+      // Keep the claim across the GitHub read, and check for a local verdict before appending.
+      let recovered: string | undefined;
+      try {
+        const record = await deps.readReviewEvidenceRecord(job.pr);
+        if (postedRowsForInput(job.pr, readLedger(deps.ledgerPath)).length > 0) {
+          recovered = "a review row for the exact input arrived during the evidence read";
+        } else if (record !== undefined) {
+          appendLine(deps.ledgerPath, {
+            ...record.row, step: "review.posted", run_id: deps.runId, task_id: reviewOutcomeTaskIdFor(job.pr),
+            review_source: "github-comment", review_evidence_comment_id: record.commentId,
+          });
+          recovered = `recovered the exact-input verdict from GitHub comment ${record.commentId}`;
+        }
+      } catch (error) {
+        log("sweep.review_evidence_recovery_failed", { pr_number: job.pr.prNumber, head_sha: job.pr.headSha, reason: String(error) });
+      }
+      if (recovered !== undefined) {
+        claim.release();
+        await finalizeDisposition(job.index, job.pr, jobDisposition, recovered, job.question,
+          false, false, undefined, recovered, undefined, undefined, undefined);
+        return;
+      }
     }
     const reviewAttemptId = `review-PR${job.pr.prNumber}-${randomUUID()}`;
     const hostGapSkips = hostGapReviews.get(job.reviewKey);
