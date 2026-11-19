@@ -14,6 +14,7 @@
     - deploy/recycle-container.sh
     - src/lib/daemon.ts
     - src/cli/commands/daemon.ts
+    - src/cli/commands/sweep.ts
     - test/daemon/strict-idle-recycle.test.ts
   status: queued
   attempts: 0
