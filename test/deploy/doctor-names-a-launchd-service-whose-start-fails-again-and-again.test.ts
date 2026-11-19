@@ -251,6 +251,24 @@ test("digest self-sync falls back to the launcher checkout when WorkingDirectory
   assert.equal(result.checks.some(check => check.name === `launchd-self-sync:${SERVE_LABEL}`), false);
 });
 
+test("digest self-sync uses the launcher checkout when WorkingDirectory is omitted", async t => {
+  const { root } = fixture(t);
+  const launcher = gitRepo({ scope: t, branch: "digest-default-cwd-branch" }).dir;
+  const program = join(launcher, "bin", "rmd");
+  mkdirSync(dirname(program), { recursive: true });
+  writeFileSync(program, "", { mode: 0o755 });
+  const result = await report(root, { platform: "darwin", home: root, exec: (_cmd, args) => {
+    const label = args[1]!.split("/").at(-1)!;
+    if (label === DIGEST_LABEL) return service(label, program, [
+      "state = not running", "runs = 4", "last exit code = 0",
+    ]);
+    return missingService(label);
+  } });
+  const warning = result.checks.find(check => check.name === `launchd-self-sync:${DIGEST_LABEL}`);
+  assert.equal(warning?.verdict, "WARN");
+  assert.equal(warning?.measured, `${realpathSync(launcher)} (digest-default-cwd-branch)`);
+});
+
 test("supervisor --state-root overrides its job HOME's explicit install checkout", async t => {
   const { root, program } = fixture(t);
   const configured = gitRepo({ scope: t }).dir;

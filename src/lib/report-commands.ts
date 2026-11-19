@@ -580,8 +580,9 @@ function launchdDigestCheckout(
       return isAbsolute(root) ? realpathSync(root) : path.resolved;
     }
 
-    if (!workingDirectory || !isAbsolute(workingDirectory)) return null;
-    const cwd = readLaunchdPath(workingDirectory);
+    const effectiveWorkingDirectory = workingDirectory ?? "/";
+    if (!isAbsolute(effectiveWorkingDirectory)) return null;
+    const cwd = readLaunchdPath(effectiveWorkingDirectory);
     if (cwd.state !== "present") return null;
     let gitRoot = cwd.resolved;
     while (!existsSync(join(gitRoot, ".git"))) {
