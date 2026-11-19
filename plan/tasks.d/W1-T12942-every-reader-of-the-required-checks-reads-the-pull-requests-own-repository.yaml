@@ -21,7 +21,7 @@
     - src/cli/commands/fix.ts
     - src/cli/commands/sweep.ts
     - test/ci/every-reader-of-the-required-checks-reads-the-pull-requests-own-repository.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "In an instance that manages another repository, the head-identity repair judges a pull request against that repository's own ci-gate list: with the repository's own checks green it is not refused for unfinished checks, and no remudero check name is reported unfinished"

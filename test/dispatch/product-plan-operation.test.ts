@@ -576,3 +576,26 @@ test("W1-T10823: a directory flush failure preserves an unknown committed operat
   assert.equal(replayed.observation.state, "unknown");
   assert.equal(f.calls.length, 0, "a lost durable outcome never retries the planner");
 });
+
+test("W1-T13719: a refused plan does not block a fresh request once the target head moves", async (t) => {
+  const f = fixture(t);
+  const first = await ok(f.service().execute(actor, f.command()));
+  f.release("queued");
+  nativeRun(f, first.observation.operationId, { exit: true });
+  assert.equal((await ok(f.service({ gateway: false }).execute(actor, f.command()))).observation.state, "refused");
+  // The same head keeps the refusal: a fresh request is never a silent retry.
+  const sameHead = await ok(f.service().execute(actor, f.command({ requestId: "plan-request-00005", expectedRevision: revisionOf(f) })));
+  assert.deepEqual([sameHead.replayed, sameHead.observation.operationId], [true, first.observation.operationId]);
+  assert.equal(f.calls.length, 1);
+  // The original request still replays its own refused operation and launches nothing.
+  f.target.inspection = { enrolled: true, head: MOVED, readmeOnly: false };
+  const replay = await ok(f.service({ gateway: false }).execute(actor, f.command()));
+  assert.deepEqual([replay.replayed, replay.observation.operationId, replay.observation.state], [true, first.observation.operationId, "stale-target"]);
+  assert.equal(f.calls.length, 1);
+  // A fresh request at the moved head plans again, at that head.
+  const fresh = await ok(f.service().execute(actor, f.command({ requestId: "plan-request-00006", expectedRevision: revisionOf(f) })));
+  assert.equal(fresh.replayed, false);
+  assert.notEqual(fresh.observation.operationId, first.observation.operationId);
+  assert.equal(fresh.observation.targetHead, MOVED);
+  assert.equal(f.calls.length, 2);
+});

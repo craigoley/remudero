@@ -1,0 +1,56 @@
+- id: W1-T13744
+  title: "Serve spaces its next handoff by the handoffs before the last one, so one ordinary handoff waits the 2 h base instead of the full 4 h cap"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # two serve files (the supervisor and its production entry): how long serve's code may lag main between handoffs; the handoff itself is unchanged
+  band_meaning: span
+  origin: "operator-session#serve-spacing-2026-11-18"
+  plan_refs:
+    - W1-T13303
+    - W1-T13534
+    - W1-T13676
+  files:
+    - src/lib/serve-supervisor.ts
+    - src/lib/serve-supervisor-main.ts
+    - test/console-api/serve/serve-spaces-a-handoff-by-the-handoffs-before-it.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Replaying 2026-11-18 (one handoff at 21:02Z after a quiet spell, asks at 21:03Z and 22:51:57Z), a supervisor with spaceByEarlierHandoffs waits the 2 h base and hands off at 23:02Z, where the seam default waits nearly the 4 h cap"
+      proof: "grep: W1-T13744 criterion 1 in test/console-api/serve/serve-spaces-a-handoff-by-the-handoffs-before-it.test.ts"
+    - claim: "Three handoffs in quick succession still stretch the next gap past the base, up to SERVE_HANDOFF_SPACING_MAX_MS"
+      proof: "grep: W1-T13744 criterion 2 in test/console-api/serve/serve-spaces-a-handoff-by-the-handoffs-before-it.test.ts"
+    - claim: "Serve's production supervisor (runServeSupervisor) passes spaceByEarlierHandoffs: true"
+      proof: "grep: W1-T13744 criterion 3 in test/console-api/serve/serve-spaces-a-handoff-by-the-handoffs-before-it.test.ts"
+    - claim: "invariant:seam-default-unchanged — without spaceByEarlierHandoffs the first spacing row after one handoff still weighs that handoff, and serve.handoff_done still carries the pressure including it"
+      kind: guard
+      proof: "grep: W1-T13744 criterion 4 in test/console-api/serve/serve-spaces-a-handoff-by-the-handoffs-before-it.test.ts"
+  rationale: |
+    WHY: OBSERVED on the host 2026-11-18: serve booted 19:18Z on f8481b61d, handed off after 20:57Z to a62d80e9e, and
+    at 22:51:57Z wrote serve.handoff_spacing_absorbed with remainingMs 7801186, a wake at 01:02Z, the 4 h cap after
+    about 21:02Z. Main was 17 commits ahead and nothing could reach serve before the cap.
+    READ at origin/main 29d46f39b, src/lib/serve-supervisor.ts: the handoff sets pressure to the decayed value plus 1
+    at lastDoneAt, and awaitSpacing reads that pressure, so the handoff just done weighs on its own gap. An ask a few
+    minutes later sees about 1, and handoffSpacingMs(1, 2 h) is 4 h, the cap. Every ordinary handoff after a quiet
+    spell therefore waits the cap, never the base. W1-T13303 set "at most every two hours" as the intent, and W1-T13534
+    added the cap after a 3.45 h wait ("W1-T13303 kept 2 h as the intent"). The cap bounded the symptom; this removes
+    the self-weight that causes it.
+    EFFECT: one handoff after a quiet spell waits 2 h. Under steady merges the gap settles near 2.4 h (earlier
+    handoffs decay with the 1 h half-life) instead of 4 h, so more handoffs a day; each is a prewarmed generation.
+    SCOPE: a new option, as W1-T13676 did; a bare createServeSupervisor and the W1-T13303/W1-T13534 tests are unchanged.
+  design: |
+    INVARIANT seam-default-unchanged: without the option nothing changes.
+    1. ServeSupervisorOptions gains spaceByEarlierHandoffs. On each handoff_done the supervisor keeps the pressure
+       before the +1 (decayed to lastDoneAt) as spacingPressure; the pressure written to serve.handoff_done is unchanged.
+    2. When the option is true, awaitSpacing decays spacingPressure (not pressure) to now; otherwise it reads pressure.
+    3. serve-supervisor-main.ts runServeSupervisor passes spaceByEarlierHandoffs: true.
+  falsifier: |
+    Read the full pressure under the option: criterion 1 fails. Drop the earlier handoffs too: criterion 2 fails. Drop
+    the production option: criterion 3 fails. Apply it regardless of the option: criterion 4 fails.
+  note: |
+    Id reserved for run-unfiled-1795046400001 with ~/rmd-work/bin/reserve-id.sh.

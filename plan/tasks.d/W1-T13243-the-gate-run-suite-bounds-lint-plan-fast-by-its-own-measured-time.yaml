@@ -15,7 +15,7 @@
     - W1-T13146
   files:
     - test/a-gate-run-leaves-the-tracked-tree-clean.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The suite's run of each fast-gate step is bounded by a time derived from that step's own measured runtime on the running host, with the fixed value only as the fallback, and the failure message names both"

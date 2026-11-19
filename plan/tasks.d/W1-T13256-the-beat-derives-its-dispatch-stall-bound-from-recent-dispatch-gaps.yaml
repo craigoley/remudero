@@ -15,7 +15,7 @@
   files:
     - scripts/fleet-heartbeat.sh
     - test/the-beat-reports-whether-the-fleet-builds.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The beat's dispatch verdict turns stalled when the time since the last dispatch exceeds a bound derived from the recent gaps between dispatches in the ledger, and publishes that bound and its source"
