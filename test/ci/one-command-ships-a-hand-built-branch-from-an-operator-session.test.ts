@@ -9,8 +9,8 @@ import { test, type TestContext } from "node:test";
 import { authorPushEligibility } from "#scripts/preflight-author.mjs";
 import { handShipEffects, runHandShip, type HandShipEffects, type ShipReceipt } from "#src/lib/hand-ship.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
-import { HANDLERS } from "#src/run-task.js";
-import { gitRepo } from "#test/helpers/git-repo.js";
+import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
+import { HANDLERS } from "#test/helpers/run-task-test.js";
 
 const head = "1".repeat(40);
 const main = "2".repeat(40);
@@ -213,8 +213,7 @@ test("one occurrence on main cannot account for two failures with the same title
   assert.ok(!f.calls.some((call) => call.startsWith("push")));
 });
 
-function handCheckout(t: TestContext, withTest = false) {
-  const repo = gitRepo({ scope: t });
+function seedHandBranch(repo: GitRepo, withTest = false): string {
   repo.addRemote("origin", "https://github.com/example/repo.git");
   writeFileSync(join(repo.dir, "package-lock.json"), "{}\n");
   writeFileSync(join(repo.dir, ".gitignore"), "node_modules\ncoverage/\n");
@@ -229,12 +228,13 @@ function handCheckout(t: TestContext, withTest = false) {
   const base = repo.git("rev-parse", "HEAD");
   repo.git("switch", "-c", branch);
   repo.git("commit", "--allow-empty", "-m", "hand branch");
-  return { repo, base };
+  return base;
 }
 
 test("the local launcher reads Git, opens the committed bundle and cuts unchanged main", async (t) => {
   const f = fixture(t);
-  const { repo, base } = handCheckout(t);
+  const repo = gitRepo({ scope: t });
+  const base = seedHandBranch(repo);
   const run = { dir: f.root, signal: new AbortController().signal, log: f.options.write };
   const defaults = handShipEffects(() => 0);
   const source = await defaults.readSource(repo.dir, run);
@@ -257,7 +257,8 @@ test("the local launcher reads Git, opens the committed bundle and cuts unchange
 
 test("the launcher passes the frozen head to preflight under nice and reads complete TAP from each checkout", async (t) => {
   const f = fixture(t);
-  const { repo, base } = handCheckout(t, true);
+  const repo = gitRepo({ scope: t });
+  const base = seedHandBranch(repo, true);
   const defaults = handShipEffects(() => 0);
   const spawned: string[][] = [];
   let receiptBound = true;
@@ -304,7 +305,8 @@ test("the launcher passes the frozen head to preflight under nice and reads comp
 
 test("the SSH launcher uploads the bundle and removes its private checkout after the comparison", async (t) => {
   const f = fixture(t);
-  const { repo, base } = handCheckout(t);
+  const repo = gitRepo({ scope: t });
+  const base = seedHandBranch(repo);
   const defaults = handShipEffects(() => 0);
   const calls: string[] = [];
   const run: Parameters<HandShipEffects["readSource"]>[1] = {
@@ -378,7 +380,8 @@ test("cancellation reaches both a local child and the SSH supervisor", async (t)
 
 test("the source publisher sends one non-forced refspec pinned to the receipt head and refuses drift", async (t) => {
   const f = fixture(t);
-  const { repo } = handCheckout(t);
+  const repo = gitRepo({ scope: t });
+  seedHandBranch(repo);
   repo.git("config", "--local", "core.hooksPath", "");
   const requests: string[][] = [];
   const defaults = handShipEffects(() => 0, undefined, async (_cwd, args) => { requests.push([...args]); return ""; });

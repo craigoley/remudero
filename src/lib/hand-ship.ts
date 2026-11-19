@@ -4,6 +4,7 @@ import { appendFileSync, createReadStream, existsSync, mkdirSync, mkdtempSync, r
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { parseArgs } from "node:util";
+import { systemClock } from "./clock.js";
 import { acquireDrainLock, defaultIsPidAlive, DrainLockError } from "./drain-lock.js";
 import { gitPushRunBranchAsync, worktreePushExecAsync } from "./git-push.js";
 import { ghJsonAsync } from "./github-transport.js";
@@ -43,9 +44,11 @@ interface AuthorTools {
   testSummary(output: string): { pass: number; fail: number; cancelled: number } | null;
 }
 
+const authorEntry = "scripts/preflight-author.mjs";
+
 async function authorTools(): Promise<AuthorTools> {
-  // @ts-expect-error The executable .mjs module has no declaration file.
-  return import("../../scripts/preflight-author.mjs");
+  const installedEntry = new URL(authorEntry, new URL("../../", import.meta.url));
+  return import(installedEntry.href);
 }
 
 async function readMacPressure(raw: string): Promise<string> {
@@ -174,7 +177,7 @@ function queuedEarlier(queue: string, id: string): boolean {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
-    return !existsSync(join(dir, "status.json")) && Date.now() - statSync(dir).mtimeMs < INIT_WINDOW_MS;
+    return !existsSync(join(dir, "status.json")) && systemClock.now() - statSync(dir).mtimeMs < INIT_WINDOW_MS;
   });
 }
 
@@ -234,7 +237,7 @@ export async function runHandShip(args: string[], options: ShipOptions, effects:
   const hosts = readHosts(join(state, "hand-ship-hosts.json"));
   const queue = join(state, "hand-ship");
   mkdirSync(queue, { recursive: true, mode: 0o700 });
-  const dir = mkdtempSync(join(queue, `rmd-ship-${Date.now()}-`));
+  const dir = mkdtempSync(join(queue, `rmd-ship-${systemClock.now()}-`));
   const id = basename(dir);
   const controller = new AbortController();
   const stop = () => controller.abort(new Error("stop requested"));
@@ -244,7 +247,7 @@ export async function runHandShip(args: string[], options: ShipOptions, effects:
     write(`${id}: ${line}`);
   } };
   const status = (state: string, detail?: string) => {
-    const data = JSON.stringify({ id, pid: process.pid, status: state, detail, at: new Date().toISOString() }) + "\n";
+    const data = JSON.stringify({ id, pid: process.pid, status: state, detail, at: systemClock.iso() }) + "\n";
     writeFileSync(join(dir, "status.next"), data, { mode: 0o600 });
     renameSync(join(dir, "status.next"), join(dir, "status.json"));
     appendFileSync(join(dir, "history.ndjson"), data, { mode: 0o600 });
@@ -459,7 +462,7 @@ async function prepareWorkspace(host: ShipHost, source: ShipSource, run: ShipRun
       async preflight(requested) {
         priority = requested;
         run.log(`running author preflight at ${priority} priority`);
-        const result = await hostCommand(host, run, node(["--import", "tsx", "scripts/preflight-author.mjs",
+        const result = await hostCommand(host, run, node(["--import", "tsx", authorEntry,
           "--head-ref", source.branch, "--head-sha", source.head]), { cwd: headDir, capture: false, record: true });
         if (result.code === null || result.code > 3) throw new Error(`author preflight did not finish (exit ${result.code ?? "signal"})`);
         const raw = await command(["cat", "coverage/preflight-author.json"], { cwd: headDir });
