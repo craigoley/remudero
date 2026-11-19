@@ -89,6 +89,10 @@ const COVERAGE_DEBT: ReadonlyMap<string, string> = new Map([
   ["POST /v1/inbox/archive", "W1-T8831: state-dir triage mark, no gateway/root to mis-wire -- covered in test/the-operator-can-archive-or-snooze-an-inbox-item.test.ts"],
   ["POST /v1/inbox/snooze", "W1-T8831: state-dir triage mark, no gateway/root to mis-wire -- covered in test/the-operator-can-archive-or-snooze-an-inbox-item.test.ts"],
   ["POST /v1/inbox/restore", "W1-T3407: ledger-only reversal of decline -- covered in test/a-decline-can-be-taken-back.test.ts"],
+  ["POST /v1/new-path-approval/preview", "W1-T10331: verified issuer preview is exercised over HTTP in test/ci-friction-remedies-file-admission.test.ts"],
+  ["POST /v1/new-path-approval/confirm", "W1-T10331: verified high-tier confirmation and nonce handling are exercised over HTTP in test/ci-friction-remedies-file-admission.test.ts"],
+  ["POST /v1/new-path-approval/resolve", "W1-T10331: verified issuer resolution is exercised over HTTP in test/ci-friction-remedies-file-admission.test.ts"],
+  ["POST /v1/new-path-approval/revoke", "W1-T10331: verified high-tier revocation and replay refusal are exercised over HTTP in test/ci-friction-remedies-file-admission.test.ts"],
   // W1-T4584: six write routes the line-start source scan could not see (built through a variable,
   // or declared with method and path on one line), surfaced once the helper learned the assembled
   // table. Each has its own suite; none has a deps-wiring test here yet.
