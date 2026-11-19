@@ -32,6 +32,7 @@ const settle = async (): Promise<void> => {
  * serves with no body yet (404 view_not_ready); `keyed` needs ?id= and holds nothing (no_key); `dark` is off.
  */
 function viewWorld(ledgerPath: string, onClient?: (read: () => Promise<number>) => void) {
+  const wanted: string[] = [];
   let clock = 0;
   const demand = createServeDemand({ ledgerPath, routes: [], clock: clockFromMillisFn(() => clock) });
   const entries = new Map<string, ViewBodyEntry>();
@@ -44,12 +45,18 @@ function viewWorld(ledgerPath: string, onClient?: (read: () => Promise<number>) 
   }
   let reader: ViewProbeReader | undefined;
   const routes = buildReadModelViewRoutes({
-    legacy: [], readModelViews: ["held", "warming", "keyed", "dark"], clock: fixedClock(NOW), servedByDefault: ["held", "warming", "keyed"],
+    legacy: [], readModelViews: ["held", "warming", "keyed", "dark", "validated"], clock: fixedClock(NOW), servedByDefault: ["held", "warming", "keyed", "validated"],
     requiredParams: { held: ["instance"], keyed: ["id"] },
+    // Like the code-health and daily-progress validators: a cold key is asked for through source.want, then refused 503.
+    requestValidators: { validated: (_params, source) => {
+      if (source && !source.body("validated", "") && source.judge([], NOW).length === 0 && source.switches()) source.want?.("validated", "");
+      return { error: "view_not_ready", status: 503 };
+    } },
     readModel: {
       switches: () => ({ views: {} as Record<string, ViewSwitchMode> }),
       body: (view, key) => view === "held" ? entries.get(key ?? "") : undefined,
       judge: (sources) => [...sources],
+      want: (view, key) => { wanted.push(`${view}:${key}`); return true; },
     },
     onAnswer: (view, status, code, stale, source) => demand.recordView(view, status, code, stale, undefined, source),
     onProbeReader: (got) => { reader = got; },
@@ -63,7 +70,7 @@ function viewWorld(ledgerPath: string, onClient?: (read: () => Promise<number>) 
   });
   const held = (view: string) => heldViewKeys(entries, view);
   const flushed = (): Row => { clock += SERVE_DEMAND_WINDOW_MS; demand.flush(); return rows(ledgerPath).filter((row) => row.step === "serve.demand").at(-1)!; };
-  return { reader: () => reader, held, flushed };
+  return { reader: () => reader, held, flushed, wanted };
 }
 
 /** A supervisor over fake generations; every message each one is sent is kept, and a generation can die on its own. */
@@ -156,7 +163,9 @@ test("W1-T13832 criterion 1: a completed swap writes one serve.swap_probe row wi
       held: { key: "instance=games", status: 200, code: "ok", stale: true },
       warming: { key: "", status: 404, code: "view_not_ready", stale: false },
       keyed: { key: null, code: "no_key" },
+      validated: { key: "", status: 503, code: "view_not_ready", stale: false },
     }, "each served view once, the off view not at all");
+    assert.deepEqual(world.wanted, [], "a probe read never asks the demand book for a key, through a validator or otherwise");
   });
 });
 
@@ -172,7 +181,9 @@ test("W1-T13832 criterion 2: probe answers are counted in the window's views_pro
     assert.deepEqual(probeOnly.views_probe, {
       held: { n: 1, stale: 1, codes: { "200 ok": 1 } },
       warming: { n: 1, stale: 0, codes: { "404 view_not_ready": 1 } },
+      validated: { n: 1, stale: 0, codes: { "503 view_not_ready": 1 } },
     });
+    assert.deepEqual(world.wanted, [], "the probe added or refreshed no demand key");
     assert.equal(await client!(), 200);
     const clientOnly = world.flushed();
     assert.deepEqual(clientOnly.views, { held: { n: 1, stale: 0, codes: { "200 ok": 1 } } });
@@ -237,7 +248,16 @@ test("W1-T13832 criterion 3: invariant:probe-never-blocks-the-swap — a probe t
     const timedOut = await runSwapProbe({ trigger: "handoff", generation: 3, sha: "sha-3" }, { reader: stuck, heldKeys: world.held, ledgerPath, seen: new Set(), timeoutMs: 20 });
     assert.equal(timedOut?.probe_failed, "timeout after 20 ms");
     assert.deepEqual(timedOut?.views.held, { key: "instance=games", status: 200, code: "ok", stale: true }, "the views it had read are kept");
-    assert.deepEqual(rows(ledgerPath).filter((r) => r.step === "serve.swap_probe").map((r) => r.probe_failed), ["threw: body store closed", "timeout after 20 ms"]);
+    let now = 0;
+    const blocking: ViewProbeReader = { ...base, read: async (name, params) => { now += 46; return base.read(name, params); } };
+    const slow = await runSwapProbe({ trigger: "handoff", generation: 4, sha: "sha-4" }, { reader: blocking, heldKeys: world.held, ledgerPath, seen: new Set(), timeoutMs: 10, clock: clockFromMillisFn(() => now) });
+    assert.equal(slow?.probe_failed, "timeout after 10 ms", "a read that blocks past the bound before any timer can fire is still a timeout");
+    assert.deepEqual(rows(ledgerPath).filter((r) => r.step === "serve.swap_probe").map((r) => r.probe_failed), ["threw: body store closed", "timeout after 20 ms", "timeout after 10 ms"]);
+    const directory = join(root, "not-a-file");
+    mkdirSync(directory);
+    const throwingLog = await runSwapProbe({ trigger: "handoff", generation: 5, sha: "sha-5" }, { reader: base, heldKeys: world.held, ledgerPath: directory, seen: new Set(),
+      log: () => { throw new Error("the logger shares the ledger"); } });
+    assert.ok(throwingLog, "a ledger write failure whose logger also throws still resolves, so the fire-and-forget hook never rejects");
 
     const refused = swapRig(true);
     await refused.supervisor.start();

@@ -332,7 +332,8 @@ export function buildReadModelViewRoutes(opts: ReadModelViewRoutesOptions): Rout
     let mode = modeOf(name);
     const sampled = shadowSampled(opts.readModel?.switches().views[name]) && opts.shadow !== undefined;
     const fallback = legacy.get(name);
-    const refused = (opts.requestValidators?.[name] ?? fallback?.validateRequest)?.(params, mode === "serve" ? opts.readModel : undefined);
+    const source = mode !== "serve" || !opts.readModel ? undefined : probe ? withoutDemand(opts.readModel) : opts.readModel;
+    const refused = (opts.requestValidators?.[name] ?? fallback?.validateRequest)?.(params, source);
     if (refused) {
       const { status = 400, ...body } = refused;
       return { shadowSampled: sampled, answer: json(status, body) };
@@ -428,6 +429,15 @@ export function buildReadModelViewRoutes(opts: ReadModelViewRoutesOptions): Rout
     },
   });
   return routes;
+}
+
+/** W1-T13832: the read model as a swap probe's validators see it: it reads bodies but can never ask for a key. */
+function withoutDemand(readModel: ViewBodySource): ViewBodySource {
+  return {
+    body: (view, key) => readModel.body(view, key),
+    judge: (sources, now, body) => readModel.judge(sources, now, body),
+    switches: () => readModel.switches(),
+  };
 }
 
 /** W1-T13294: one view read's answer, as the GET writes it: status, headers and the JSON body (none for a 304). */

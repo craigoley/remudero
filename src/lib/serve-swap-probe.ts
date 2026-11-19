@@ -63,13 +63,23 @@ function failureText(error: unknown): string {
   return `threw: ${String((error as Error)?.message ?? error)}`;
 }
 
-function withinBound(work: Promise<unknown>, ms: number): Promise<string | undefined> {
+/** The time bound, armed before any read starts, so a read that blocks the loop is still measured against it. */
+function armBound(ms: number): { expired: Promise<string>; clear: () => void } {
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const bound = new Promise<string>((resolve) => {
+  const expired = new Promise<string>((resolve) => {
     timer = setTimeout(() => resolve(`timeout after ${ms} ms`), ms);
     timer.unref?.();
   });
-  return Promise.race([work.then(() => undefined, failureText), bound]).finally(() => clearTimeout(timer));
+  return { expired, clear: () => clearTimeout(timer) };
+}
+
+/** Reports a failure without letting the report itself throw: the production logger writes the same ledger. */
+function report(opts: SwapProbeOptions, extra: Record<string, unknown>): void {
+  try {
+    opts.log?.("serve.swap_probe_write_failed", extra);
+  } catch (reportError) {
+    console.error("serve.swap_probe_report_failed", { ...extra, reportReason: String(reportError) });
+  }
 }
 
 /** Reads each served view once and writes one serve.swap_probe row; undefined when it ran before or no view serves. */
@@ -80,6 +90,8 @@ export async function runSwapProbe(request: SwapProbeRequest, opts: SwapProbeOpt
   const clock = opts.clock ?? systemClock;
   const started = clock.now();
   const views: Record<string, SwapProbeViewResult> = {};
+  const boundMs = opts.timeoutMs ?? SWAP_PROBE_TIMEOUT_MS;
+  const bound = armBound(boundMs);
   let failed: string | undefined;
   try {
     const reader = opts.reader;
@@ -93,11 +105,14 @@ export async function runSwapProbe(request: SwapProbeRequest, opts: SwapProbeOpt
       }
       views[name] = { key, ...(await reader.read(name, new URLSearchParams(key))) };
     }));
-    failed = await withinBound(reads, opts.timeoutMs ?? SWAP_PROBE_TIMEOUT_MS);
+    failed = await Promise.race([reads.then(() => undefined, failureText), bound.expired]);
   } catch (error) {
     // The probe never throws: a failure is the row's probe_failed reason.
     failed = failureText(error);
+  } finally {
+    bound.clear();
   }
+  if (failed === undefined && clock.now() - started > boundMs) failed = `timeout after ${boundMs} ms`;
   const row: SwapProbeRow = {
     run_id: "serve", task_id: "", step: "serve.swap_probe", trigger: request.trigger, generation: request.generation, sha: request.sha,
     ...(request.fromSha === undefined ? {} : { fromSha: request.fromSha }),
@@ -106,8 +121,8 @@ export async function runSwapProbe(request: SwapProbeRequest, opts: SwapProbeOpt
   try {
     appendLedger(opts.ledgerPath, row);
   } catch (error) {
-    // Observation must not take down the generation when its ledger is unavailable; the log says why.
-    opts.log?.("serve.swap_probe_write_failed", { reason: String(error), trigger: request.trigger, generation: request.generation });
+    // Observation must not take down the generation when its ledger is unavailable; the report says why.
+    report(opts, { reason: String(error), trigger: request.trigger, generation: request.generation });
   }
   return row;
 }
