@@ -3,7 +3,7 @@
   repo: remudero
   type: implement
   # 2026-11-18 operator session: this task edits the author gate (scripts/preflight-author.mjs), so the operator reviews its diff before it ships
-  verify: human
+  verify: human  # parked with the retirement: any risk ruling judged the record before this edit
   principles: {tdd: strict}
   budget_usd: 5.00
   risk: high
@@ -15,7 +15,8 @@
   # refusal-amendment (W1-T11468, run work-fix-dispatch-W1-T11468-1795061114418-4d3c@799fde7c084ff72da53f2a418f2739a10e6d6927, 2026-11-19T04:25:10.921Z): the worker refused criterion 1 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
   #   worker evidence: The one named remedy is a PR-body edit and I have no shell or gh to make it. The tree already matches the task design, and the body's "no hooks/post-merge" claim is stale and must be rewritten to say the changeset adds it.
   #   this task is held from dispatch until its record changes; an Architect must make the change above
-  status: queued
+  status: blocked
+  retirement: retired  # retired by rule 1 (already shipped or declined) of the operator's mechanical rulings (2026-10-21, W1-T10371): a merged pull request on main carries this record's Remudero-Task trailer. Retired by the machine-filing judge, 2026-11-19T05:37:45.220Z
   # backlog gardener: band=2 evidence=df8896e7cf8530a7
   # backlog gardener: placed=2026-11-07T06:32:14.941Z
   attempts: 0

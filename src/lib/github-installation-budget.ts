@@ -24,6 +24,38 @@ export const GITHUB_BUDGET_THROTTLED_STEP = "github.budget.throttled";
 /** The budget counts the `core` REST resource only; graphql and search have their own limits. */
 const BUDGET_RESOURCE = "core";
 
+/** GitHub's documented REST secondary limit: 900 points a minute, and a GET costs 1 point. */
+const GITHUB_REST_SECONDARY_POINTS_PER_MINUTE = 900;
+/** GitHub's primary rate-limit window: the reset is one hour after the window starts. */
+const GITHUB_PRIMARY_WINDOW_MS = 3_600_000;
+
+/**
+ * W1-T13786 — the gap between this process's reads, in whole milliseconds. It is the larger of the
+ * secondary spacing (every instance keeps the installation under 900 reads a minute) and the
+ * budget spacing (the spendable budget spread over the time to the reset, at least the equal share).
+ * With no current reading, or nothing spendable, it is the secondary spacing; the admission refuses those reads.
+ */
+export function ghBudgetReadGapMs(input: {
+  reading: InstallationBudgetReading | undefined;
+  nowMs: number;
+  shares: number;
+  instances: number;
+  ownWindowReads: number;
+  reserveFraction: number;
+}): number {
+  const { reading, nowMs } = input;
+  const secondaryMs = 60_000 * Math.max(1, input.instances) / GITHUB_REST_SECONDARY_POINTS_PER_MINUTE;
+  const resetMs = reading === undefined ? 0 : reading.reset * 1000;
+  const spendable = reading === undefined ? 0 : reading.remaining - Math.ceil(reading.limit * input.reserveFraction);
+  if (reading === undefined || resetMs <= nowMs || spendable <= 0) return Math.ceil(secondaryMs);
+  const toResetMs = resetMs - nowMs;
+  const sinceWindowStartMs = nowMs - (resetMs - GITHUB_PRIMARY_WINDOW_MS);
+  const othersPerMs = sinceWindowStartMs <= 0 ? 0
+    : Math.max(0, reading.limit - reading.remaining - input.ownWindowReads) / sinceWindowStartMs;
+  const perMs = Math.max(spendable / toResetMs / Math.max(1, input.shares), spendable / toResetMs - othersPerMs);
+  return Math.ceil(Math.max(secondaryMs, 1 / perMs));
+}
+
 export interface InstallationBudgetReading {
   remaining: number;
   limit: number;
@@ -63,6 +95,8 @@ export interface InstallationBudgetThreadInput {
   instance: string;
   /** W1-T12820: the longest wait for a reset; a worker thread stands down past it, as the daemon does. */
   maxWaitMs?: number;
+  /** W1-T13786: the daemon instances on the installation, for the secondary spacing. */
+  instances?: number;
 }
 
 /** A refused admission: what {@link InstallationBudget.resetWaitMs} is asked about. */
@@ -93,6 +127,8 @@ export interface InstallationBudget {
    * With no bound the wait is the whole reset window, as before.
    */
   resetWaitMs(refusal: InstallationBudgetRefusal): number | undefined;
+  /** W1-T13786: the gap between this process's reads now, from the latest reading and its own window reads. */
+  readGapMs(): number;
 }
 
 /** The throttle-row windows kept for de-duplication; older windows are dropped. */
@@ -104,7 +140,7 @@ export function createInstallationBudgetState(): SharedArrayBuffer {
 }
 
 const enum Slot {
-  Lock, Remaining, Limit, Reset, Reads, PendingCount, WindowCursor,
+  Lock, Remaining, Limit, Reset, Reads, PendingCount, WindowReads, WindowReset, WindowCursor,
 }
 
 const WINDOW_START = Slot.WindowCursor + 1;
@@ -123,6 +159,7 @@ function withState<T>(state: BigInt64Array, fn: () => T): T {
 export function installationBudgetForThread(input: InstallationBudgetThreadInput, clock: Clock): InstallationBudget {
   return createInstallationBudget({
     consumers: input.consumers, instance: input.instance, clock, sharedState: input.state, maxWaitMs: input.maxWaitMs,
+    instances: input.instances,
   });
 }
 
@@ -136,27 +173,34 @@ export function createInstallationBudget(opts: {
   sharedState?: SharedArrayBuffer;
   /** W1-T12820: the longest a refused read waits for its reset; the daemon sets its poll interval. */
   maxWaitMs?: number;
+  /** W1-T13786: the daemon instances on the installation (the registry's consumers); 1 when unset. */
+  instances?: number;
 }): InstallationBudget {
   const consumers = opts.consumers !== undefined && Number.isInteger(opts.consumers) && opts.consumers > 0
     ? opts.consumers : undefined;
+  const instances = opts.instances !== undefined && Number.isInteger(opts.instances) && opts.instances > 0
+    ? opts.instances : undefined;
   const maxWaitMs = opts.maxWaitMs !== undefined && Number.isFinite(opts.maxWaitMs) && opts.maxWaitMs >= 0
     ? opts.maxWaitMs : undefined;
   const reserveFraction = opts.writeReserveFraction ?? GITHUB_WRITE_RESERVE_FRACTION;
   const instance = opts.instance ?? "unknown";
   let latest: InstallationBudgetReading | undefined;
   let reads = 0;
+  let windowReads = 0;
+  let windowReset: number | undefined;
   const windows: Array<{ key: string; refused: boolean }> = [];
   const pending: GithubBudgetThrottledRow[] = [];
   const shared = opts.sharedState === undefined ? undefined : new BigInt64Array(opts.sharedState);
 
-  const snapshot = (): { reading: InstallationBudgetReading | undefined; reads: number } => {
-    if (shared === undefined) return { reading: latest, reads };
+  const snapshot = (): { reading: InstallationBudgetReading | undefined; reads: number; windowReads: number } => {
+    if (shared === undefined) return { reading: latest, reads, windowReads: windowReset === latest?.reset ? windowReads : 0 };
     return withState(shared, () => ({
       reading: shared[Slot.Limit] > 0n ? {
         remaining: Number(shared[Slot.Remaining]), limit: Number(shared[Slot.Limit]),
         reset: Number(shared[Slot.Reset]), resource: BUDGET_RESOURCE,
       } : undefined,
       reads: Number(shared[Slot.Reads]),
+      windowReads: shared[Slot.WindowReset] === shared[Slot.Reset] ? Number(shared[Slot.WindowReads]) : 0,
     }));
   };
 
@@ -189,11 +233,19 @@ export function createInstallationBudget(opts: {
       if (shared === undefined) {
         latest = { remaining, limit, reset, resource: resource ?? BUDGET_RESOURCE };
         reads = 0;
+        if (windowReset !== reset) {
+          windowReset = reset;
+          windowReads = 0;
+        }
       } else withState(shared, () => {
         shared[Slot.Remaining] = BigInt(Math.trunc(remaining));
         shared[Slot.Limit] = BigInt(Math.trunc(limit));
         shared[Slot.Reset] = BigInt(Math.trunc(reset));
         shared[Slot.Reads] = 0n;
+        if (shared[Slot.WindowReset] !== shared[Slot.Reset]) {
+          shared[Slot.WindowReset] = shared[Slot.Reset];
+          shared[Slot.WindowReads] = 0n;
+        }
       });
     },
     admit() {
@@ -201,15 +253,22 @@ export function createInstallationBudget(opts: {
       return decision(state.reading, state.reads);
     },
     noteRead() {
-      if (consumers !== undefined && current() !== undefined) {
-        if (shared === undefined) reads += 1;
-        else Atomics.add(shared, Slot.Reads, 1n);
+      if (current() === undefined) return;
+      if (shared === undefined) {
+        windowReads += 1;
+        if (consumers !== undefined) reads += 1;
+      } else {
+        Atomics.add(shared, Slot.WindowReads, 1n);
+        if (consumers !== undefined) Atomics.add(shared, Slot.Reads, 1n);
       }
     },
     claimRead() {
       if (shared === undefined) {
         const admitted = decision(latest, reads);
-        if (admitted.ok && consumers !== undefined && current() !== undefined) reads += 1;
+        if (admitted.ok && current() !== undefined) {
+          windowReads += 1;
+          if (consumers !== undefined) reads += 1;
+        }
         return admitted;
       }
       return withState(shared, () => {
@@ -218,8 +277,9 @@ export function createInstallationBudget(opts: {
           reset: Number(shared[Slot.Reset]), resource: BUDGET_RESOURCE,
         } : undefined;
         const admitted = decision(reading, Number(shared[Slot.Reads]));
-        if (admitted.ok && consumers !== undefined && reading !== undefined && reading.reset * 1000 > opts.clock.now()) {
-          shared[Slot.Reads] += 1n;
+        if (admitted.ok && reading !== undefined && reading.reset * 1000 > opts.clock.now()) {
+          shared[Slot.WindowReads] += 1n;
+          if (consumers !== undefined) shared[Slot.Reads] += 1n;
         }
         return admitted;
       });
@@ -301,11 +361,25 @@ export function createInstallationBudget(opts: {
     },
     threadInput() {
       return opts.sharedState === undefined || consumers === undefined
-        ? undefined : { state: opts.sharedState, consumers, instance, ...(maxWaitMs === undefined ? {} : { maxWaitMs }) };
+        ? undefined : {
+          state: opts.sharedState, consumers, instance,
+          ...(maxWaitMs === undefined ? {} : { maxWaitMs }), ...(instances === undefined ? {} : { instances }),
+        };
     },
     resetWaitMs(refusal) {
       const waitMs = Math.max(1, refusal.waitUntil * 1000 - opts.clock.now());
       return maxWaitMs === undefined || waitMs <= maxWaitMs ? waitMs : undefined;
+    },
+    readGapMs() {
+      const state = snapshot();
+      const input = {
+        reading: state.reading, nowMs: opts.clock.now(), shares: consumers ?? 1, instances: instances ?? 1,
+        ownWindowReads: state.windowReads, reserveFraction,
+      };
+      const gapMs = ghBudgetReadGapMs(input);
+      if (maxWaitMs === undefined) return gapMs;
+      // W1-T12820: a gap past the wait bound would hold the read that the admission stands down at once.
+      return Math.min(gapMs, Math.max(maxWaitMs, ghBudgetReadGapMs({ ...input, reading: undefined })));
     },
     takeThrottleRows() {
       if (shared === undefined) return pending.splice(0);
