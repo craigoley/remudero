@@ -86,9 +86,19 @@ test("W1-T13825 criterion 4: the guards admit exactly this pair, and a pair that
         { ...retry, with: { ...retry.with, ref: "main" } }],
       ["a pair that checks out another repository", { ...first, with: { ...first.with, repository: "x/y" } },
         { ...retry, with: { ...retry.with, repository: "x/y" } }],
+      ["a retry under another name", first, { ...retry, name: "Retry" }],
+      ["a retry with no name", first, Object.fromEntries(Object.entries(retry).filter(([k]) => k !== "name")) as Step],
+      ["a first checkout with an extra key", { ...first, name: "Checkout" }, retry],
+      ["a retry with an extra key", first, { ...retry, id: "retry" }],
     ];
     for (const [why, a, b] of drifts) {
       assert.equal(withoutCheckoutRetryPair(`ci.yml:${job}`, [a, b]).length, 2, `${job}: ${why} is not admitted`);
+    }
+    // The pair must be the job's only checkouts.
+    const other: Step = { uses: CHECKOUT, with: { "fetch-depth": 1 } };
+    for (const [why, list] of [["a checkout before the pair", [other, first, retry]],
+      ["a checkout after the pair", [first, retry, other]]] as Array<[string, Step[]]>) {
+      assert.equal(withoutCheckoutRetryPair(`ci.yml:${job}`, list).length, 3, `${job}: ${why} is not admitted`);
     }
     // The exact pair is admitted only in the two shard lanes, never in another job or workflow.
     for (const other of ["ci.yml:coverage-ratchet-required", "ci.yml:commitlint", "codeql.yml:ci", "ci.yaml:ci"]) {

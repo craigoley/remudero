@@ -16,6 +16,11 @@ export interface WorkflowStep {
   env?: Record<string, unknown>;
 }
 
+/** The retry step's exact name. */
+export const CHECKOUT_RETRY_NAME = "Retry the checkout once after a stalled fetch (W1-T13825)";
+/** Every key each step may carry, and no other. */
+const FIRST_KEYS = ["continue-on-error", "env", "id", "timeout-minutes", "uses", "with"];
+const RETRY_KEYS = ["env", "if", "name", "timeout-minutes", "uses", "with"];
 /** The retry step's exact condition. */
 export const CHECKOUT_RETRY_IF = "steps.checkout.outcome == 'failure'";
 
@@ -40,17 +45,22 @@ function isFullPinnedCheckout(step: WorkflowStep | undefined): boolean {
  *  timeout-minutes 3, continue-on-error true and no if:, and the next step checks out with the same inputs, only on
  *  `steps.checkout.outcome == 'failure'`, with timeout-minutes 5 and no continue-on-error. Both must use the pinned
  *  action, `with: { fetch-depth: 0 }` and nothing else, and the W1-T13321 env, and the job must be one of
- *  CHECKOUT_RETRY_JOBS. */
+ *  CHECKOUT_RETRY_JOBS. The two steps must be the job's only checkouts, carry no key beyond FIRST_KEYS and
+ *  RETRY_KEYS, and the retry must be named CHECKOUT_RETRY_NAME. */
 export function checkoutRetryPairIndex(job: string, steps: readonly WorkflowStep[]): number {
   if (!CHECKOUT_RETRY_JOBS.has(job)) return -1;
   const i = steps.findIndex((s) => s?.id === "checkout");
   if (i < 0) return -1;
+  // The pair must be the job's only checkouts: nothing checks out before it, after it, or in between.
+  const checkouts = steps.flatMap((s, at) => (typeof s?.uses === "string" && s.uses.startsWith("actions/checkout@") ? [at] : []));
+  if (!same(checkouts, [i, i + 1])) return -1;
   const first = steps[i]!;
   const retry = steps[i + 1];
+  if (!same(Object.keys(first).sort(), FIRST_KEYS) || !same(Object.keys(retry ?? {}).sort(), RETRY_KEYS)) return -1;
   const admitted = isFullPinnedCheckout(first) && isFullPinnedCheckout(retry) &&
     first["timeout-minutes"] === 3 && first["continue-on-error"] === true && first.if === undefined &&
     retry!.if === CHECKOUT_RETRY_IF && retry!["continue-on-error"] === undefined && retry!["timeout-minutes"] === 5 &&
-    retry!.id === undefined && retry!.run === undefined;
+    retry!.name === CHECKOUT_RETRY_NAME;
   return admitted ? i : -1;
 }
 
