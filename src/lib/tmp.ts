@@ -201,24 +201,23 @@ function removalReason(dir: string, error: unknown): string {
 }
 
 function makeOwnedDirsWritable(dir: string): void {
-  let st: fs.Stats;
+  let fd: number;
   try {
-    st = fs.lstatSync(dir);
+    // The mode is ignored without O_CREAT; spelling it out also keeps temp-path
+    // analysis from treating this existing-directory open as file creation.
+    fd = fs.openSync(dir, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW, 0o700);
   } catch {
-    return; // gone or unreadable: the retry's rmSync names what is left
+    return; // gone, unreadable, or replaced by a link: the retry's rmSync names what is left
   }
-  if (!st.isDirectory()) return;
   try {
-    // chmod follows a symlink if an entry is swapped after lstat. Open the final
-    // component without following links, then change the opened directory itself.
-    const fd = fs.openSync(dir, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
-    try {
-      fs.fchmodSync(fd, (st.mode & 0o7777) | 0o700);
-    } finally {
-      fs.closeSync(fd);
-    }
+    const st = fs.fstatSync(fd);
+    if (!st.isDirectory()) return;
+    // fchmod changes the opened directory itself, not a path that might now be a link.
+    fs.fchmodSync(fd, (st.mode & 0o7777) | 0o700);
   } catch {
     return; // not ours to change: the retry's rmSync names the path
+  } finally {
+    try { fs.closeSync(fd); } catch { /* a close failure must not escape cleanup */ }
   }
   try {
     if (!fs.lstatSync(dir).isDirectory()) return; // swapped for a link during permission repair
