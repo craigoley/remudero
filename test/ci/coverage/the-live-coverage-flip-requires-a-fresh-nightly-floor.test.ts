@@ -351,6 +351,37 @@ esac
   return { status: r.status, out: r.stdout + r.stderr, calls: read("calls.log") + gh.calls().map((c) => `gh ${c}\n`).join(""), read, cwd };
 }
 
+/** The bash the steps run under (`runStep` spawns plain `bash`) and its major version, read once. The shard step
+ *  body uses `mapfile`, a bash 4 builtin; a macOS /bin/bash 3.2 exits 127 on it. Keyed on the version, never the platform. */
+const STEP_BASH_MIN_MAJOR = 4;
+const bashVersion = (): string => {
+  const r = spawnSync("bash", ["--noprofile", "--norc", "-c", 'printf "%s.%s" "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}"'], { encoding: "utf8" });
+  return r.status === 0 && /^\d+\.\d+$/.test(r.stdout) ? r.stdout : "unknown";
+};
+/** The skip reason for a found bash version, or false when it can run the step. An unreadable version never skips. */
+const bashTooOld = (found: string): string | false => {
+  const major = Number(found.split(".")[0]);
+  return Number.isInteger(major) && major < STEP_BASH_MIN_MAJOR
+    ? `the host's bash is too old: found ${found}, the step needs ${STEP_BASH_MIN_MAJOR}.0 or newer (mapfile)` : false;
+};
+const HOST_BASH = bashVersion();
+const HOST_BASH_SKIP = bashTooOld(HOST_BASH);
+
+// W1-T13233 criterion 1: on a host whose bash is too old, the tests that run the step report the versions instead of exit 127.
+test("W1-T13233: the too-old-bash reason names the version found and the version the step needs", () => {
+  const reason = bashTooOld("3.2");
+  assert.ok(reason, "bash 3.2 is too old for the step");
+  assert.match(reason, /too old/);
+  assert.match(reason, /found 3\.2/);
+  assert.match(reason, /needs 4\.0 or newer/);
+  assert.equal(bashTooOld("4.0"), false);
+  assert.equal(bashTooOld("5.2"), false);
+  assert.equal(bashTooOld("unknown"), false);
+  // W1-T13233 criterion 2: a host bash that is new enough skips nothing, whatever the platform.
+  assert.equal(HOST_BASH_SKIP, bashTooOld(HOST_BASH));
+  if (Number(HOST_BASH.split(".")[0]) >= STEP_BASH_MIN_MAJOR) assert.equal(HOST_BASH_SKIP, false);
+});
+
 test("W1-T5892: the existing ledger prerequisite owns admission without adding a check name", () => {
   const owner = CI.jobs["coverage-ledger"]!;
   assert.equal(owner.outputs?.artifact_id, "${{ steps.finish.outputs.artifact_id }}");
@@ -388,7 +419,7 @@ function admit(n = nightly({ measuredAt: new Date(Date.now() - 3_600_000),
   return { selected, env, pin, transport };
 }
 
-test("W1-T5892: sparse admission shares the producers' policy identity without dependencies", () => {
+test("W1-T5892: sparse admission shares the producers' policy identity without dependencies", { skip: HOST_BASH_SKIP }, () => {
   const owner = CI.jobs["coverage-ledger"]!;
   const inputs = owner.steps.find((s) => s.uses?.startsWith("actions/checkout@"))!.with!["sparse-checkout"];
   const cwd = checkout(String(inputs).split(/\s+/).filter(Boolean));
@@ -406,7 +437,7 @@ const seedShards = (pin: string, split = 0) => Array.from({ length: 8 }, (_, i) 
   return `mkdir -p ${dir}\necho narrow > ${dir}/selection\ncat > ${dir}/floor-pin.json <<'PIN'\n${i + 1 === split ? pin.replace('"run_id": 111', '"run_id": 112') : pin}PIN\n`;
 }).join("\n");
 
-test("W1-T5892: one admission precedes all shards and every consumer uses its published pin", () => {
+test("W1-T5892: one admission precedes all shards and every consumer uses its published pin", { skip: HOST_BASH_SKIP }, () => {
   assert.equal(CI.jobs["coverage-ledger"]!.outputs?.floor_decision, "${{ steps.floor-finish.outputs.decision }}");
   for (const job of ["coverage-ratchet", "coverage-ratchet-required"]) {
     assert.ok(CI.jobs[job]!.needs?.includes("coverage-ledger"), `${job} must wait for admission`);
@@ -438,7 +469,7 @@ test("W1-T5892: one admission precedes all shards and every consumer uses its pu
   }
 });
 
-test("W1-T5892: refused admission and publication failure make every shard full with one named reason", () => {
+test("W1-T5892: refused admission and publication failure make every shard full with one named reason", { skip: HOST_BASH_SKIP }, () => {
   for (const a of [admit(nightly({ row: { conclusion: "failure" } })),
     admit(nightly({ measuredAt: new Date(Date.now() - 49 * 3_600_000) })),
     admit(nightly(), artifact("not json")), admit(undefined, undefined, "failure")]) {
