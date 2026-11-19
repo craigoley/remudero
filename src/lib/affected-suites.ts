@@ -664,6 +664,12 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   if (input.files.has(scoutWriter) && files.some((f) => scoutWriterEdges.includes(f))) {
     pathReaders.push(scoutWriter);
   }
+  // W1-T10356: coverage run 39573110596 (PR #13317) failed on this suite and the selector missed it.
+  const bakedInputs = suitePath("test/baked-supervisor-inputs.test.ts");
+  const bakedInputsEdges = ["src/lib/ledger.ts", "src/lib/state-backup-engine-links.ts", suitePath("test/state-backup.test.ts")];
+  if (input.files.has(bakedInputs) && files.some((f) => bakedInputsEdges.includes(f))) {
+    pathReaders.push(bakedInputs);
+  }
   // W1-T6338: preserve the recorded dashboard/settings miss beyond the narrow arm's symbol reach.
   const viewSchemas = suitePath("test/every-view-body-matches-its-schema.test.ts");
   const viewSchemaEdges = ["src/lib/repo-dashboard-route.ts", suitePath("test/repo-settings-report-their-effective-values.test.ts")];
