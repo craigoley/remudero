@@ -1269,6 +1269,7 @@ export async function loadPlanAtRefAsync(
   planRelPath: string,
   ref = "HEAD",
   runGit: (args: string[], stdin?: string) => Promise<string> = defaultGitRunnerAsync(repoRoot),
+  keepsUnseenDependency?: KeepsUnseenDependency,
 ): Promise<Plan> {
   let monolithBlob: string;
   try {
@@ -1291,7 +1292,7 @@ export async function loadPlanAtRefAsync(
   } catch (err) {
     throw new PlanError(`cannot read plan shard at ${ref} in ${repoRoot}: ${String(err)}`);
   }
-  return mergePlanBlobs(withShardBlobs(blobs, ref, shardRelPaths, shardBlobs));
+  return mergePlanBlobs(withShardBlobs(blobs, ref, shardRelPaths, shardBlobs), {}, { keepsUnseenDependency });
 }
 
 /** Git invoker with optional stdin for `cat-file --batch`; old `(args) => string` fakes still work. */
@@ -1382,11 +1383,11 @@ export function parseBlobBatch(raw: string, ref: string, relPaths: string[]): st
 export function mergePlanBlobs(
   blobs: Array<{ label: string; text: string }>,
   yamlOptions: Pick<DocumentOptions, "logLevel"> = {},
-  opts: { dependencyMode?: "preserve-external" } = {},
+  opts: { dependencyMode?: "preserve-external"; keepsUnseenDependency?: KeepsUnseenDependency } = {},
 ): Plan {
   const parse = yamlOptions.logLevel === undefined && opts.dependencyMode === undefined ? parseTasksFromYaml
     : (text: string, label: string, onDuplicate?: (id: string) => void) => parseTasksFromYaml(text, label, onDuplicate, yamlOptions, opts.dependencyMode);
-  return validatedPlan(mergeBlobTasks(blobs, undefined, undefined, parse), opts.dependencyMode);
+  return validatedPlan(mergeBlobTasks(blobs, undefined, undefined, parse), opts.dependencyMode, opts.keepsUnseenDependency);
 }
 
 function mergeBlobTasks(

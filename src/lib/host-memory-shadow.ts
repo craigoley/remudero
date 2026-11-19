@@ -1104,7 +1104,8 @@ export function summarizeShadowTally(tally: ShadowTally): Record<ServeScenario, 
 const MIB = 1024 * 1024;
 /** BACKSTOP on the ledger tail read for daemon.alive and serve rows; an hour of heartbeats fits in a fraction. */
 export const LEDGER_TAIL_BYTES = 4 * MIB;
-/** BACKSTOP on processes read across every tree. A tree past it is reported partial, never resident-zero. */
+/** BACKSTOP on LIVE processes read across every tree; an exited one (ENOENT) is not charged. A tree past it is reported
+ *  partial, never resident-zero. */
 export const MAX_TREE_PROCESSES = 1_024;
 const HOUR_MS = 60 * 60_000;
 /** A supervisor start or handoff with no closing row within this long is no longer read as a cold start. */
@@ -1839,6 +1840,10 @@ function treeResident(
       kb += Number(/^VmRSS:\s+(\d+)/m.exec(status)?.[1] ?? 0) + Number(/^VmSwap:\s+(\d+)/m.exec(status)?.[1] ?? 0);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") rssComplete = false;
+      // An exited process costs the walk nothing: refund its read. OBSERVED 2026-11-19 04:36Z on the Azure core
+      // container: 15 reservations recorded 3270 identities, 68 of them alive. The exited ones spent the shared cap,
+      // so 9 trees read partial ("process cap") and each added an uncertainty margin to the host projection.
+      else budget.left += 1;
       void error; // Gone between the listing and the read: it holds nothing now.
     }
   }

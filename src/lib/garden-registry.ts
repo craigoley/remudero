@@ -79,6 +79,9 @@ export const REGISTERED_GARDEN_NAMES = [
   "queue-judge",
   // Operator ruling 2026-10-30: the plan Architect amends a task its fix lane stood down on, through a reviewed plan PR.
   "redesign",
+  // W1-T13750: work held by a known transient refusal is re-probed on the events that can clear it, then re-run
+  // through its own path (the operator's own refused `rmd approve`, or the action's own next pass).
+  "stuck-state",
 ] as const;
 
 export type RegisteredGardenName = (typeof REGISTERED_GARDEN_NAMES)[number];

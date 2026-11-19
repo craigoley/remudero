@@ -30,11 +30,12 @@ import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 const THIS_FILE = "test/github/the-pacer-waits-out-a-normal-gap-on-the-daemon-loop.test.ts";
 const neverLimited = (): boolean => false;
 
-/** A pacer on a fake clock: `sleeps` lists every blocking sleep, and each sleep advances the clock. */
+/** A pacer on a fake clock: `sleeps` lists every blocking sleep, and each sleep advances the clock.
+ *  W1-T13786: the normal gap now follows the installation budget, so this pacer fixes it at the loop's bound. */
 function scene(build: typeof createGhCallPacer = createGhCallPacer) {
   let now = 0;
   const sleeps: number[] = [];
-  const pacer = build({ now: () => now, sleepSync: (ms) => { sleeps.push(ms); now += ms; } });
+  const pacer = build({ minGapMs: DEFAULT_GH_PACE_MIN_GAP_MS, now: () => now, sleepSync: (ms) => { sleeps.push(ms); now += ms; } });
   return { pacer, sleeps, advance: (ms: number) => { now += ms; } };
 }
 
