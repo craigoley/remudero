@@ -18,6 +18,7 @@
     - src/cli/commands/sweep.ts
     - src/lib/light-pass-open-pr-list.ts
     - test/sweep/an-idle-light-pass-decides-from-the-tick-reads-open-pr-views.test.ts
+    - test/sweep/a-restart-reads-each-open-pull-request-once-before-the-first-review.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -73,6 +74,12 @@
        changed. Grep test/ for tests that assert servedOpenPrViews serves nothing for idle, or the whole
        pre_review_timing row; one outside `files` needs an amendment. W1-T12888 and W1-T13237 (queued) also change
        the last good list path; rebase on whichever merges first.
+    5. AMENDED (2026-11-18): W1-T12236 criterion 3 in
+       test/sweep/a-restart-reads-each-open-pull-request-once-before-the-first-review.test.ts asserts that idle
+       and drain passes read their own views even when a fresh generation exists, which this task changes on
+       purpose for scoped passes.
+       Narrow that test to the pass with no scope (the refill read); criteria 1, 2 and 4 here cover
+       the idle and drain behaviour.
     NOT IN SCOPE: the pacer gap, the budget, the tick read itself, and the deadline value.
   falsifier: |
     Serve an idle pass a generation older than its last good list: criterion 2 must fail. Drop the act-time guards for

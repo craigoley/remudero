@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { makeTempDir } from "#src/lib/tmp.js";
+import { makeTempDir, RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { REAL_SCRIPT } from "#test/helpers/fleet-heartbeat-harness.js";
 
 // Declare the fixture's topology before host paths: its temporary root may itself
@@ -87,11 +87,6 @@ esac`);
     stub("du", `
 p="\${@: -1}"
 [ "\${PUBLISH:-}" = 1 ] && printf 'du:%s\\n' "$p" >> "$FIXTURE/events"
-if [ "$p" = "\${SLOW_DU:-}" ]; then
-  # A simulated slow walk spends the fake clock instead of the host's: nothing here waits in real time.
-  if [ "\${FAKE_CLOCK:-}" = 1 ]; then printf '%s' $(( $(cat "$FIXTURE/clock-offset") + \${SLOW_DU_S:-10} )) > "$FIXTURE/clock-offset"
-  else sleep "\${SLOW_DU_S:-10}"; fi
-fi
 case "$p" in
   /var/lib/docker) exit 1 ;;
   "$FIXTURE/docker data")
@@ -115,6 +110,14 @@ case "$p" in
   /mnt/rmd) [ "\${FINDMNT_ABSENT:-}" = 1 ] || exit 1; n=60000000 ;;
   *) n=10 ;;
 esac
+# A simulated slow walk under the fake clock spends that clock instead of the host's: nothing waits
+# in real time, and the stubbed timeout reads the spent seconds. Otherwise keep the real delay in
+# the timed process itself; a child sleep can outlive timeout.
+if [ "$p" = "\${SLOW_DU:-}" ] && [ "\${FAKE_CLOCK:-}" = 1 ]; then
+  printf '%s' $(( $(cat "$FIXTURE/clock-offset") + \${SLOW_DU_S:-10} )) > "$FIXTURE/clock-offset"
+elif [ "$p" = "\${SLOW_DU:-}" ]; then
+  exec node -e 'setTimeout(() => process.stdout.write(process.argv[2] + "\\t" + process.argv[3] + "\\n"), Number(process.argv[1]) * 1000)' "\${SLOW_DU_S:-10}" "$n" "$p"
+fi
 printf '%s\\t%s\\n' "$n" "$p"`);
     stub("df", FIXTURE_DF);
     if (overrides.FAKE_CLOCK === "1") {
@@ -144,6 +147,7 @@ cat "$out"; rm -f "$out"; exit "$status"`);
         PATH: `${bin}:${process.env.PATH ?? ""}`,
         HOME: join(dir, "home"),
         TMPDIR: join(dir, "tmp"),
+        RMD_HEARTBEAT_SYSTEM_TMP: join(dir, "tmp"),
         FIXTURE: dir,
         RMD_ROOT: join(dir, "state-root"),
         RMD_HEARTBEAT_LOCK_HELD: "1",
@@ -406,3 +410,17 @@ test("a failed consumer supplement preserves the published liveness and a failed
     assert.deepEqual(readFileSync(join(dir, "events"), "utf8").trim().split("\n"), ["push:1"]);
   } });
 });
+
+// CI's full slow tier left this file's budget test red (#19511, three runs; run 44407112451): the beat
+// listed the runner's real /tmp, where concurrent suites keep thousands of rmd-* dirs, and timed that
+// listing instead of its own fixture. The fixture's beat must never reach the host's /tmp.
+test("the fixture's beat never walks a leftover in the host's real /tmp", (t) => {
+  const sentinel = mkdtempSync(join("/tmp", `${RMD_TMP_PREFIX}heartbeat-host-sentinel-`));
+  t.after(() => rmSync(sentinel, { recursive: true, force: true }));
+  let log = "";
+  const beat = measure({}, { inspect: (dir) => { log = readFileSync(join(dir, "ionice.log"), "utf8"); } });
+  assert.ok(log.includes("rmd-leftover"), "positive control: the fixture's own temp leftover is walked");
+  assert.ok(!log.includes(sentinel), `the beat walked ${sentinel}, a dir in the host's /tmp`);
+  assert.equal(beat.consumer_walk_state, "walked");
+});
+

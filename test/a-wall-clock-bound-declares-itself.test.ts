@@ -28,9 +28,11 @@ const HELPER_IMPORT = "helpers/wall-clock-bound.js";
 // W1-T9954 declares the stuck named-pipe discovery child's kill bound: one file, one site.
 // W1-T11071 declares the daemon review stop bound: one declaring file and one site.
 // W1-T13179 declares the run child's pace-floor stand-down bound: one declaring file and one site.
-const RECORDED_DECLARED_WALL_CLOCK_BOUND_FILES = 43;
+// W1-T10926 drives the heartbeat's consumer-walk budget test with a manual clock, a deterministic
+// witness in place of its wall-clock bound: one file, one site fewer.
+const RECORDED_DECLARED_WALL_CLOCK_BOUND_FILES = 42;
 // W1-T11280 adds one shared site to the status JSON deadline suite, which already declares: no new file, one site.
-const RECORDED_DECLARED_WALL_CLOCK_BOUND_SITES = 65;
+const RECORDED_DECLARED_WALL_CLOCK_BOUND_SITES = 64;
 const WALL_CLOCK_BOUND_FILE_FLOOR = 3;
 const WALL_CLOCK_BOUND_SITE_FLOOR = 4;
 

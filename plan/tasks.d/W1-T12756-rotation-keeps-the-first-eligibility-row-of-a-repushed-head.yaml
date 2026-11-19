@@ -17,7 +17,7 @@
   files:
     - src/lib/ledger.ts
     - test/ledger/rotation-keeps-the-first-eligibility-row-of-a-repushed-head.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "When rotation caps sweep.review_eligible rows, it keeps the first sweep.review_eligible row of every pr@head that a kept sweep.absent_repush row names as new_head, so a light pass after the rotation keys that head by the same time as before it"

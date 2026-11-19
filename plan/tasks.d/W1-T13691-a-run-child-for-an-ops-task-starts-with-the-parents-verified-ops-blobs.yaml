@@ -21,7 +21,7 @@
     - src/run-child-main.ts
     - src/lib/daemon.ts
     - test/github/a-run-child-for-an-ops-task-starts-with-the-parents-verified-ops-blobs.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "When the daemon spawns a run child for a task the ops catalog holds, and its process holds verified ops blobs from an ok catalog read, the child starts with those blob texts on an inherited pipe, and the child's first findTaskInCatalogs at the same commit sends no git/blobs GET and returns the same task as a cold read"

@@ -11,7 +11,7 @@
     - src/lib/ops-catalog-source.ts
     - src/cli/commands/daemon.ts
     - test/daemon/an-ops-catalog-refresh-says-why-it-failed.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Every completed opsCatalogShadowFeed refresh writes one dispatch.ops_catalog_refreshed row with outcome, refusal_stage, duration_ms, kind (full or revalidate) and, for a failed GET, http_status_class (4xx, 5xx, auth or transport), and no URL, body or token text"

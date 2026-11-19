@@ -220,7 +220,8 @@ test("W1-T13470 criterion 3: the head waits with no fix round or strike, GitHub'
     "the only security row the waits wrote is the one capture");
 
   // Escalation: a CodeQL run that completed after the first capture, which GitHub re-judged and still warns on.
-  const run = (over: Record<string, unknown>) => ({ id: 700, run_attempt: 1, head_sha: HEAD, status: "completed", conclusion: "success", updated_at: T2, ...over });
+  const run = (over: Record<string, unknown>) => ({ id: 700, run_attempt: 1, head_sha: HEAD, status: "completed", conclusion: "success",
+    created_at: T1, run_started_at: T1, updated_at: T2, ...over });
   const escalation = async (prior: Record<string, unknown>[], runs: unknown, answer = gen3warn) => {
     const h = harness(prior, async () => answer, runs);
     const reason = await sweep.observeCodeqlConfigurationWarning(h.deps, prior, view(), "wait");
@@ -228,14 +229,25 @@ test("W1-T13470 criterion 3: the head waits with no fix round or strike, GitHub'
   };
   const captured = ledger.filter((r) => r.step === CAPTURED);
   for (const [why, runs] of [
-    ["the run that produced the warning, never re-judged", { workflow_runs: [run({ updated_at: "2026-11-17T03:19:00Z" })] }],
-    ["a run GitHub has not re-judged yet", { workflow_runs: [run({ updated_at: "2026-11-17T03:27:00Z" })] }],
+    ["a completed re-run began after the standing check", { workflow_runs: [run({ created_at: "2026-11-17T03:27:00Z",
+      run_started_at: "2026-11-17T03:27:00Z", updated_at: "2026-11-17T03:27:00Z" })] }],
     ["a run still in progress", { workflow_runs: [run({ status: "in_progress" })] }],
-    ["another head's run", { workflow_runs: [run({ head_sha: OTHER })] }],
     ["an unreadable listing", { message: "Not Found" }],
   ] as const) {
     const quiet = await escalation(captured, runs);
     assert.deepEqual([quiet.calls.escalated.length, quiet.rows.some((r) => r.step === ESCALATED)], [0, false], `control: ${why}`);
+  }
+  // W1-T13663: GitHub never re-judges an unchanged head, so these two, each with a capture from an earlier pass and no
+  // CodeQL run at the head open or created after the standing check, now escalate once with the owner's remedy. The
+  // producing run is created before the check and updated after it, as on #15133 and #17217.
+  for (const [why, runs] of [
+    ["the run that produced the warning, never re-judged",
+      { workflow_runs: [run({ created_at: "2026-11-17T03:25:00Z", updated_at: "2026-11-17T03:30:00Z" })] }],
+    ["another head's run", { workflow_runs: [run({ head_sha: OTHER })] }],
+  ] as const) {
+    const escalated = await escalation(captured, runs);
+    assert.deepEqual([escalated.calls.escalated.length, escalated.rows.filter((r) => r.step === ESCALATED).length], [1, 1], `W1-T13663: ${why}`);
+    assert.match(escalated.calls.escalated[0]!.reason, /push a new commit or re-run CodeQL at this head/, why);
   }
   assert.equal((await escalation(captured, { workflow_runs: [run({})] }, gen3ok)).calls.runsRead, 0, "a refreshed check escalates nothing");
   const fired = await escalation(captured, { workflow_runs: [run({})] });

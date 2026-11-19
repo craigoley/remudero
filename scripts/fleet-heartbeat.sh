@@ -2055,7 +2055,9 @@ if [ "$CONSUMER_PROBE" = "walked" ]; then
   consumer_kb npm_cache "${HOME}/.npm"
   TSX_CACHE_PATHS=()
   TMP_LEFTOVER_PATHS=()
-  for temp_root in "$CONSUMER_TMP" /tmp /mnt/scratch/tmp; do
+  # The host's own /tmp, beside $TMPDIR. RMD_HEARTBEAT_SYSTEM_TMP is the fixtures' seam: without it a
+  # fixture walks the real /tmp, and a busy CI runner's thousands of rmd-* dirs slow every beat.
+  for temp_root in "$CONSUMER_TMP" "${RMD_HEARTBEAT_SYSTEM_TMP:-/tmp}" /mnt/scratch/tmp; do
     for temp_path in "$temp_root"/tsx-[0-9]*; do
       [ -d "$temp_path" ] && TSX_CACHE_PATHS+=("$temp_path")
     done
