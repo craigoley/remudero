@@ -13,12 +13,12 @@
  * - `unreadable`: any git or transport failure, including a head that is not a commit in the checkout.
  */
 import { createHash } from "node:crypto";
-import { lstatSync, readFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readFileSync } from "node:fs";
 import { isAbsolute, relative, sep } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 import { ghTextAsync } from "./github-transport.js";
-import { loadMounts, mountsPath, validateMounts } from "./mounts.js";
+import { mountsPath, validateMounts } from "./mounts.js";
 import { ProductIntentStore } from "./product-intent-store.js";
 import { productIdSchema, type ProductStoreCode } from "./product-intent.js";
 import { ghProductRepositoryProvider, type ProductRepositoryProvider } from "./product-repository.js";
@@ -175,14 +175,20 @@ export async function previewRunnerConfigBootstrap(options: RunnerConfigPreviewO
   if (config.state === "absent") try {
     if (!isAbsolute(options.installRoot)) throw new Error("serving install root unavailable");
     const path = mountsPath(options.installRoot);
-    const stat = lstatSync(path);
-    if (!stat.isFile() || stat.size > TARGET_RUNNER_CONFIG_MAX_BYTES) throw new Error("source is not a bounded regular file");
+    // One descriptor, opened without following a link, is checked and read: the bytes checked are the bytes compared.
+    const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    let onDisk: Buffer;
+    try {
+      const stat = fstatSync(fd);
+      if (!stat.isFile() || stat.size > TARGET_RUNNER_CONFIG_MAX_BYTES) throw new Error("source is not a bounded regular file");
+      onDisk = readFileSync(fd);
+    } finally { closeSync(fd); }
     const sourceCommit = commitId.parse((await hostRead(options.installRoot, ["rev-parse", "HEAD"], { maxBuffer: 4096 })).trim());
     const committed = Buffer.from(await hostRead(options.installRoot, ["cat-file", "blob", `${sourceCommit}:${TARGET_RUNNER_CONFIG_PATH}`],
       { maxBuffer: TARGET_RUNNER_CONFIG_MAX_BYTES + 1, encoding: "latin1" }), "latin1");
-    loadMounts(path);
-    if (!readFileSync(path).equals(committed)) throw new Error("source differs from its recorded commit");
+    if (!onDisk.equals(committed)) throw new Error("source differs from its recorded commit");
     const bytes = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(committed);
+    // loadMounts' own validation (including G-17), over the single read above rather than a second read of the path.
     validateMounts(parseYaml(bytes));
     const digest = createHash("sha256").update(committed).digest("hex");
     proposal = { path: TARGET_RUNNER_CONFIG_PATH, bytes, digest, targetHead: head,
