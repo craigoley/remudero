@@ -13,7 +13,7 @@ import { closeSync, fstatSync, openSync, readSync } from "node:fs";
  * byte. Any other call reads once, from the 64-byte anchor before `offset` to the end, and takes the next head and
  * anchor from those bytes; it reads the head again only when the file did not grow.
  * A trailing line with no newline yet is parsed for this call but not consumed; while its bytes are unchanged,
- * later calls reuse that parse. A missing file reads as no
+ * later calls reuse that parse, including when the newline arrives. A missing file reads as no
  * rows. Any other read error clears the state and is rethrown, so the next call starts over.
  * Rows timed before `nowMs - retainMs`, or with no parseable `ts`, are dropped: no window can reach them.
  * W1-T11260: `keepUntimed` keeps a row with no parseable `ts`, so a tail with an infinite `retainMs` returns
@@ -153,7 +153,13 @@ export function createLiveLedgerTail(path: string, retainMs: number, opts: { kee
       }
       const end = chunk.lastIndexOf(NEWLINE) + 1;
       const appended: Array<Record<string, unknown>> = [];
-      parseLines(path, chunk.subarray(0, end).toString("utf8"), appended, keepLine);
+      let start = 0;
+      if (pendingRow && chunk[pendingBytes.length] === NEWLINE &&
+          chunk.subarray(0, pendingBytes.length).equals(pendingBytes)) {
+        appended.push(pendingRow);
+        start = pendingBytes.length + 1;
+      }
+      parseLines(path, chunk.subarray(start, end).toString("utf8"), appended, keepLine);
       offset += end;
       const cutoff = nowMs - retainMs;
       // Nothing can age out of an unbounded tail that keeps untimed rows, so an unchanged read allocates nothing.

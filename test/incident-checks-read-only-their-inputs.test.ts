@@ -95,9 +95,34 @@ test("W1-T13828: a tail with a line filter parses and holds only the kept lines,
   assert.ok(held.every((row) => row.step === "runtime.loop_lag"));
   assert.equal(parsedLines, 15, "nested steps in both complete and pending lines are skipped before parsing");
   const newRow = JSON.stringify({ ts: at(0), step: "runtime.loop_lag", p99Ms: 1 });
-  appendFileSync(path, `\n${newRow}\n`);
+  appendFileSync(path, `\n${newRow}`);
   const again = parses(t, () => assert.equal(tail(NOW).length, 16));
-  assert.equal(again, 1, "only the new row's time was parsed");
+  assert.equal(again, 1, "only the kept pending row's time was parsed");
+
+  const pending = tail(NOW);
+  appendFileSync(path, "\n");
+  const completion = t.mock.method(JSON, "parse");
+  try {
+    const times = parses(t, () => assert.deepEqual(tail(NOW), pending));
+    assert.equal(times, 0, "completing the kept row parses no timestamps again");
+    assert.equal(completion.mock.callCount(), 0, "completing the kept row parses no JSON again");
+  } finally {
+    completion.mock.restore();
+  }
+  assert.strictEqual(tail(NOW).at(-1), pending.at(-1), "the completed row reuses the pending row's object");
+});
+
+test("W1-T13828: a rewritten pending row is read when its newline arrives", (t) => {
+  const path = join(ownedFixtureDir(t, "incident-tail-rewrite").dir, "ledger.ndjson");
+  const row = (p99Ms: number) => JSON.stringify({ ts: at(0), step: "runtime.loop_lag", p99Ms });
+  const tail = createLiveLedgerTail(path, 60 * 60_000, { keepLine: INCIDENT_INPUT_LINE });
+  writeFileSync(path, `${row(1)}\n${row(2)}`);
+  const pending = tail(NOW);
+  assert.deepEqual(pending.map((r) => r.p99Ms), [1, 2]);
+
+  writeFileSync(path, `${row(1)}\n${row(3)}\n${row(4)}\n`);
+  assert.deepEqual(tail(NOW).map((r) => r.p99Ms), [1, 3, 4]);
+  assert.deepEqual(pending.map((r) => r.p99Ms), [1, 2], "the previous snapshot stays stable");
 });
 
 test("W1-T13828: a tail with a line filter parses and holds only the kept lines with global or sticky flags", (t) => {
