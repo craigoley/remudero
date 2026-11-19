@@ -41,7 +41,7 @@ try {
 }`;
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env.NODE_OPTIONS;
-  delete env.NODE_V8_COVERAGE;
+  env.NODE_V8_COVERAGE = "";
   const run = spawnSync(process.execPath, ["--input-type=module", "-e", code], { cwd: REPO_ROOT, env, encoding: "utf8" });
   assert.equal(run.status, 0, `the plain node child exits cleanly: ${run.stderr}`);
   return JSON.parse(run.stdout.trim().split("\n").at(-1) ?? "{}");
