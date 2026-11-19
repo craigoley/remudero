@@ -156,10 +156,10 @@ export function removeOwnedTree(dir: string): { ok: true } | { ok: false; reason
     fs.rmSync(dir, { recursive: true, force: true });
     return { ok: true };
   } catch (error) {
-    const code = removalPermissionCode(dir, error);
+    const code = (error as NodeJS.ErrnoException).code;
     if (code !== "EACCES" && code !== "EPERM") return { ok: false, reason: removalReason(dir, error) };
   }
-  makeOwnedDirsWritable(dir);
+  if (process.platform === "linux") makeOwnedDirsWritable(dir.replace(/\/+$/, "") || "/");
   try {
     fs.rmSync(dir, { recursive: true, force: true });
     return { ok: true };
@@ -168,69 +168,35 @@ export function removeOwnedTree(dir: string): { ok: true } | { ok: false; reason
   }
 }
 
-function removalPermissionCode(dir: string, error: unknown): string | undefined {
-  const code = (error as NodeJS.ErrnoException).code;
-  if (code === "EACCES" || code === "EPERM") return code;
-  // macOS reports ENOTEMPTY when rmSync cannot remove entries from a read-only
-  // directory; normalize that permission failure before applying the EACCES/EPERM rule.
-  if (process.platform === "darwin" && code === "ENOTEMPTY" && containsReadOnlyDirectory(dir)) return "EPERM";
-  return code;
-}
-
-function containsReadOnlyDirectory(dir: string): boolean {
-  let st: fs.Stats;
-  try {
-    st = fs.lstatSync(dir);
-  } catch {
-    return false; // a missing or unstatable path is not evidence of a read-only directory
-  }
-  if (!st.isDirectory()) return false;
-  if ((st.mode & 0o200) === 0) return true;
-  let names: string[];
-  try {
-    names = fs.readdirSync(dir);
-  } catch {
-    return false; // unreadable children cannot authorize the permission repair
-  }
-  return names.some((name) => containsReadOnlyDirectory(join(dir, name)));
-}
-
 function removalReason(dir: string, error: unknown): string {
   const e = error as NodeJS.ErrnoException;
   return `could not remove ${e.path ?? dir}: ${e.code ?? e.message}`;
 }
 
-function makeOwnedDirsWritable(dir: string): void {
-  let fd: number;
+function makeOwnedDirsWritable(path: string | Buffer): void {
+  let fd: number | undefined;
   try {
-    // The mode is ignored without O_CREAT; spelling it out also keeps temp-path
-    // analysis from treating this existing-directory open as file creation.
-    fd = fs.openSync(dir, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW, 0o700);
+    const entry = fs.lstatSync(path, { bigint: true });
+    if (!entry.isDirectory()) return;
+    fd = fs.openSync(path, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW, 0o700);
+    const opened = fs.fstatSync(fd, { bigint: true });
+    if (opened.dev !== entry.dev || opened.ino !== entry.ino) return;
+    // Resolve every child relative to the held directory through procfs. Its
+    // original pathname can be replaced while the directory is being read.
+    const pinned = `/proc/self/fd/${fd}`;
+    const mode = Number(opened.mode) & 0o7777;
+    if ((mode & 0o700) !== 0o700) fs.fchmodSync(fd, mode | 0o700);
+    const prefix = Buffer.from(`${pinned}/`);
+    for (const name of fs.readdirSync(pinned, { encoding: "buffer" })) {
+      makeOwnedDirsWritable(Buffer.concat([prefix, name]));
+    }
   } catch {
-    return; // gone, unreadable, or replaced by a link: the retry's rmSync names what is left
-  }
-  try {
-    const st = fs.fstatSync(fd);
-    if (!st.isDirectory()) return;
-    // fchmod changes the opened directory itself, not a path that might now be a link.
-    fs.fchmodSync(fd, (st.mode & 0o7777) | 0o700);
-  } catch {
-    return; // not ours to change: the retry's rmSync names the path
+    // A vanished or inaccessible entry need not stop repair of its siblings.
   } finally {
-    try { fs.closeSync(fd); } catch { /* a close failure must not escape cleanup */ }
+    if (fd !== undefined) {
+      try { fs.closeSync(fd); } catch { /* the removal retry still reports what remains */ }
+    }
   }
-  try {
-    if (!fs.lstatSync(dir).isDirectory()) return; // swapped for a link during permission repair
-  } catch {
-    return; // gone: the retry's rmSync names what is left
-  }
-  let names: string[];
-  try {
-    names = fs.readdirSync(dir);
-  } catch {
-    return; // unreadable: the retry's rmSync names the path
-  }
-  for (const name of names) makeOwnedDirsWritable(join(dir, name));
 }
 
 /** Default age ceiling for {@link sweepStaleTempDirs}: 24 hours. */

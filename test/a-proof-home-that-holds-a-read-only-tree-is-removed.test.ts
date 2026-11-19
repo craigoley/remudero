@@ -88,6 +88,25 @@ test("W1-T13819 criterion 1: removeOwnedTree removes a directory that holds a re
   assert.deepEqual(removeOwnedTree(dir), { ok: true }, "a missing directory is ok");
 });
 
+test("W1-T13819 criterion 1: ENOTEMPTY is returned without retry or mode repair on macOS", (t) => {
+  const dir = makeTempDir("t13819-c1-not-empty");
+  t.after(() => restoreModes(dir));
+  const deepest = makeReadOnlyTree(dir);
+  const before = snapshot(dir);
+  const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+  Object.defineProperty(process, "platform", { value: "darwin" });
+  t.after(() => Object.defineProperty(process, "platform", platform));
+  const rm = fs.rmSync;
+  const removal = t.mock.method(fs, "rmSync", (path: fs.PathLike, options?: fs.RmOptions) => {
+    if (path === dir) throw Object.assign(new Error("directory not empty"), { code: "ENOTEMPTY", path: deepest });
+    rm(path, options);
+  });
+
+  assert.deepEqual(removeOwnedTree(dir), { ok: false, reason: `could not remove ${deepest}: ENOTEMPTY` });
+  assert.equal(removal.mock.callCount(), 1);
+  assert.deepEqual(snapshot(dir), before);
+});
+
 test("W1-T13819 criterion 2: both spawners return the stdout of a child that leaves a read-only tree in its HOME, and the home is removed", async (t) => {
   const cwd = makeTempDir("t13819-c2");
   const homes: string[] = [];
@@ -138,40 +157,81 @@ test("W1-T13819 criterion 4: a symbolic link to a read-only directory outside is
   assert.deepEqual(removeOwnedTree(dir), { ok: true });
   assert.equal(existsSync(dir), false);
   assert.deepEqual(snapshot(outside), before);
+});
 
-  const racedOutside = makeTempDir("t13819-c4-raced-outside");
-  const racedRoot = makeTempDir("t13819-c4-raced-root");
-  const racedEntry = join(racedRoot, "entry");
-  const parkedEntry = join(racedRoot, "parked-entry");
-  mkdirSync(racedEntry);
-  makeReadOnlyTree(racedEntry);
-  mkdirSync(join(racedOutside, "sub"));
-  writeFileSync(join(racedOutside, "sub", "kept.txt"), "unchanged\n");
-  chmodSync(join(racedOutside, "sub", "kept.txt"), 0o444);
-  chmodSync(join(racedOutside, "sub"), 0o555);
-  chmodSync(racedOutside, 0o555);
-  const racedBefore = snapshot(racedOutside);
-  t.after(() => restoreModes(racedOutside));
-  const originalOpen = fs.openSync;
-  let swapped = false;
-  fs.openSync = ((path: fs.PathLike, flags: string | number, mode?: number) => {
-    if (!swapped && String(path) === racedEntry) {
-      swapped = true;
-      fs.renameSync(racedEntry, parkedEntry);
-      symlinkSync(racedOutside, racedEntry);
-      restoreModes(parkedEntry);
+test("W1-T13819 criterion 4: repair stays with the opened parent when its pathname is reused", {
+  skip: process.platform !== "linux" && "descriptor-relative permission repair uses Linux procfs",
+}, (t) => {
+  const dir = makeTempDir("t13819-c4-renamed");
+  t.after(() => restoreModes(dir));
+  const parent = join(dir, "parent");
+  const moved = join(dir, "moved");
+  const originalChild = makeReadOnlyTree(parent);
+  const movedChild = join(moved, ...SEED);
+  const parentInode = lstatSync(parent).ino;
+
+  const rm = fs.rmSync;
+  let attempts = 0;
+  t.mock.method(fs, "rmSync", (path: fs.PathLike, options?: fs.RmOptions) => {
+    if (path === dir) {
+      if (++attempts === 1) throw Object.assign(new Error("denied"), { code: "EPERM", path: dir });
+      assert.equal(lstatSync(movedChild).mode & 0o700, 0o700, "repair reached the original parent's child");
+      assert.equal(existsSync(originalChild), false, "the replacement parent stayed empty");
     }
-    return originalOpen(path, flags, mode);
-  }) as typeof fs.openSync;
-  try {
-    assert.deepEqual(removeOwnedTree(racedRoot), { ok: true });
-  } finally {
-    fs.openSync = originalOpen;
-    restoreModes(racedRoot);
-  }
-  assert.equal(swapped, true);
-  assert.equal(existsSync(racedRoot), false);
-  assert.deepEqual(snapshot(racedOutside), racedBefore);
+    rm(path, options);
+  });
+
+  // Schedule a real rename after enumeration so the fixture needs no timing assumptions.
+  const readDir = fs.readdirSync;
+  let renamed = false;
+  t.mock.method(fs, "readdirSync", (...args: Parameters<typeof readDir>) => {
+    const names = readDir(...args);
+    if (!renamed && fs.statSync(args[0]).ino === parentInode) {
+      renamed = true;
+      fs.renameSync(parent, moved);
+      mkdirSync(parent);
+    }
+    return names;
+  });
+
+  assert.deepEqual(removeOwnedTree(dir), { ok: true });
+  assert.equal(renamed, true);
+  assert.equal(attempts, 2);
+  assert.equal(existsSync(dir), false);
+});
+
+test("W1-T13819 criterion 5: an unreadable repair entry preserves the retry's path and code", {
+  skip: process.platform !== "linux" && "descriptor-relative permission repair uses Linux procfs",
+}, (t) => {
+  const dir = makeTempDir("t13819-c5-repair-unavailable");
+  const rm = fs.rmSync;
+  let attempts = 0;
+  t.mock.method(fs, "rmSync", (path: fs.PathLike, options?: fs.RmOptions) => {
+    if (path !== dir) return rm(path, options);
+    if (++attempts === 1) throw Object.assign(new Error("denied"), { code: "EACCES", path: dir });
+    throw Object.assign(new Error("busy"), { code: "EBUSY", path: dir });
+  });
+  const readDir = fs.readdirSync;
+  let repairFd: number | undefined;
+  t.mock.method(fs, "readdirSync", (...args: Parameters<typeof readDir>) => {
+    const pinned = /^\/proc\/self\/fd\/(\d+)$/.exec(String(args[0]));
+    if (!pinned) return readDir(...args);
+    repairFd = Number(pinned[1]);
+    throw Object.assign(new Error("directory unreadable"), { code: "EACCES" });
+  });
+  const close = fs.closeSync;
+  const closed: number[] = [];
+  t.mock.method(fs, "closeSync", (fd: number) => {
+    close(fd);
+    if (fd !== repairFd) return;
+    closed.push(fd);
+    throw Object.assign(new Error("close failed"), { code: "EIO" });
+  });
+
+  assert.deepEqual(removeOwnedTree(dir), { ok: false, reason: `could not remove ${dir}: EBUSY` });
+  assert.notEqual(repairFd, undefined);
+  assert.deepEqual(closed, [repairFd]);
+  assert.equal(attempts, 2);
 });
 
 const UID0_SKIP = process.getuid?.() === 0 ? "uid 0 ignores directory modes, so no removal can be made to fail" : false;
