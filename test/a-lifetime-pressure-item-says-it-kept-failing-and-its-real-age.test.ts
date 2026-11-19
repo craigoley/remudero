@@ -18,7 +18,8 @@ import {
 import type { Config } from "#src/lib/config-schema.js";
 import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "#src/lib/worker.js";
 import { hostWorktreeGitAsync } from "#src/lib/worktree-git.js";
-import { routeAdaptiveLifetimePressure } from "#src/run-task.js";
+import { lifetimeContractDigest, routeAdaptiveLifetimePressure } from "#src/run-task.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 // W1-T8827: the adaptive lifetime-pressure path judged every task with `ageDays: 0` and the
 // proposal then worded it as "filed `verify: human` 0 days ago". These tests drive the real route
@@ -244,4 +245,81 @@ test("W1-T10278: lifetime ages survive unrelated historical metadata errors", as
     assert.equal(automationProposalFromJudgedShard(base, { decision: "automate", reason: "fixture" }).id,
       automationProposalFromJudgedShard({ ...base, ageDays: null }, { decision: "automate", reason: "fixture" }).id);
   } finally { rmSync(f.dir, { recursive: true, force: true }); }
+});
+
+// W1-T13754: an amended task's lifetime-pressure verdict is not reused; a dispatch-only change still is.
+
+const T13754_NOW_MS = Date.parse("2026-11-18T12:00:00Z");
+const T13754_ID = "T13754-AMENDED";
+
+function t13754Shard(proof: string, status = "queued", priority = 1.1): string {
+  return `
+- id: ${T13754_ID}
+  title: a task whose proof was amended
+  repo: remudero
+  type: implement
+  depends_on: []
+  priority: ${priority}
+  status: ${status}
+  files:
+    - src/example.ts
+  acceptance:
+    - claim: "the example works"
+      proof: "${proof}"
+`;
+}
+
+async function t13754JudgeOnce(dir: string, yaml: string): Promise<number> {
+  writeFileSync(join(dir, "tasks.yaml"), yaml);
+  const plan = loadPlan(join(dir, "tasks.yaml"));
+  let calls = 0;
+  const spawn: typeof spawnWorker = async (_args: SpawnWorkerArgs) => {
+    calls += 1;
+    return { text: "VERIFY_HUMAN_DECISION: needs_operator\nVERIFY_HUMAN_REASON: fixture" } as WorkerResult;
+  };
+  await routeAdaptiveLifetimePressure([plan.byId.get(T13754_ID)!], {
+    plan, root: dir, config: { root: dir } as unknown as Config, ledgerPath: join(dir, "ledger.ndjson"),
+    runId: "RUN-T13754", shadowJudgeSpawns: { primary: spawn, shadow: spawn }, clock: fixedClock(T13754_NOW_MS),
+  });
+  return calls;
+}
+
+function t13754Fixture(): string {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-lifetime-contract-"));
+  mkdirSync(join(dir, ".remudero"), { recursive: true });
+  copyFileSync(join(REPO_ROOT, ".remudero", "mounts.yaml"), join(dir, ".remudero", "mounts.yaml"));
+  mkdirSync(join(dir, "state"), { recursive: true });
+  const rows: Record<string, unknown>[] = [];
+  for (let i = 0; i < 2; i++) {
+    const ts = new Date(T13754_NOW_MS - (5 - i) * 86_400_000).toISOString();
+    rows.push({ ts, step: "run.start", task_id: T13754_ID, run_id: `r${i}` });
+    rows.push({ ts, step: "verdict", task_id: T13754_ID, run_id: `r${i}`, verdict: "failed", stage: "review", reason: "proof passes at base" });
+  }
+  writeFileSync(join(dir, "ledger.ndjson"), rows.map((r) => JSON.stringify(r)).join("\n") + "\n");
+  return dir;
+}
+
+test("W1-T13754 criterion 1: an amended acceptance is judged again, not settled by the old verdict", async () => {
+  const dir = t13754Fixture();
+  try {
+    assert.ok(await t13754JudgeOnce(dir, t13754Shard("unit test: test/old.test.ts")) > 0, "the first observation is judged");
+    assert.equal(await t13754JudgeOnce(dir, t13754Shard("unit test: test/old.test.ts")), 0, "the same contract is settled");
+    assert.ok(await t13754JudgeOnce(dir, t13754Shard("unit test: test/new.test.ts")) > 0, "the amended contract is judged again");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("W1-T13754 criterion 2: a status or priority change alone leaves the verdict settled", async () => {
+  const dir = t13754Fixture();
+  try {
+    assert.ok(await t13754JudgeOnce(dir, t13754Shard("unit test: test/old.test.ts")) > 0);
+    assert.equal(await t13754JudgeOnce(dir, t13754Shard("unit test: test/old.test.ts", "running", 2.5)), 0);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("W1-T13754: the contract digest ignores status, attempts and priority", () => {
+  const task = { id: T13754_ID, title: "t", acceptance: [{ claim: "c", proof: "p" }], files: ["a"], status: "queued", priority: 1 };
+  const moved = { ...task, status: "running", priority: 3, attempts: 2 };
+  const amended = { ...task, acceptance: [{ claim: "c", proof: "q" }] };
+  assert.equal(lifetimeContractDigest(task as never), lifetimeContractDigest(moved as never));
+  assert.notEqual(lifetimeContractDigest(task as never), lifetimeContractDigest(amended as never));
 });

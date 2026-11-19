@@ -457,6 +457,14 @@ export interface FixLaneInventory extends Inventory {
   interventions: { read: InterventionRead; byClass: Map<string, number>; total: number; fresh: OperatorInterventionRow[] };
 }
 
+function interventionCauseOf(events: readonly DefectEvent[], sweepRows: readonly LedgerRecord[], i: OperatorIntervention): { cause?: DefectEvent; key: string } {
+  const at = Date.parse(i.at);
+  const handBuild = i.kind === HAND_BUILD_ACTION;
+  const cause = handBuild ? undefined : events.findLast(e => e.pr === i.pr && i.pr > 0 && e.at <= at);
+  const key = cause?.key ?? (handBuild ? i.cause_class : undefined) ?? prCauseClass(sweepRows, i.pr, at);
+  return { cause, key };
+}
+
 /** Builds the fix-lane episodes (one per defect event, plus the fix-lane-owned sweep blockers) and runs the shared ladder. */
 export function fixLaneInventoryOf(records: readonly LedgerRecord[], tasks: Parameters<typeof ladderOf>[3], outcomes: ReadonlyMap<number, PrOutcome>,
   interventions: InterventionRead, now: number, sources: FixLaneEvidence = {}): FixLaneInventory {
@@ -469,23 +477,21 @@ export function fixLaneInventoryOf(records: readonly LedgerRecord[], tasks: Para
   const sweepRows = records.filter(r => r.step === "sweep.disposed" && Number(r.pr_number) > 0 && Number.isFinite(tsOf(r))).sort((a, b) => tsOf(a) - tsOf(b));
   const byClass = new Map<string, number>();
   const read = interventions.ok ? [...interventions.interventions].filter(i => Number.isFinite(Date.parse(i.at))).sort((a, b) => Date.parse(a.at) - Date.parse(b.at)) : [];
+  const classified = read.map(i => ({ i, ...interventionCauseOf(events, sweepRows, i) }));
   // W1-T12836: a hand build answers a BUILD run the fleet ended, not a fix-lane defect, so it is recorded and never priced here.
-  const list = read.filter(i => i.kind !== HAND_BUILD_ACTION);
+  const list = classified.filter(({ i }) => i.kind !== HAND_BUILD_ACTION);
   const episodes: Episode[] = [];
   const weight = new Map<DefectEvent, number>();
   const standalone: Array<{ i: OperatorIntervention; key: string }> = [];
-  for (const i of list) {
-    // expiring-fixture: exempt -- `now` only caps the span; intervention fixtures pass a fixed now, so no outcome ages with the calendar.
-    const at = Date.parse(i.at);
-    const cause = [...events].reverse().find(e => e.pr === i.pr && i.pr > 0 && e.at <= at);
-    if (cause) { weight.set(cause, (weight.get(cause) ?? 0) + 1); byClass.set(cause.key, (byClass.get(cause.key) ?? 0) + 1); }
-    else { const key = prCauseClass(sweepRows, i.pr, at); standalone.push({ i, key }); byClass.set(key, (byClass.get(key) ?? 0) + 1); }
+  for (const { i, cause, key } of list) {
+    if (cause) weight.set(cause, (weight.get(cause) ?? 0) + 1);
+    else standalone.push({ i, key });
+    byClass.set(key, (byClass.get(key) ?? 0) + 1);
   }
-  // W1-T8264: one `operator.intervention` row per finding, classed by the PR's disposition at that moment, not by the action.
   const recorded = new Set(records.flatMap(r => { const row = interventionFromLedgerRow(r); return row ? [interventionKey(row)] : []; }));
-  const fresh = read.map<OperatorInterventionRow>(i => ({
+  const fresh = classified.map<OperatorInterventionRow>(({ i, key }) => ({
     at: i.at, surface: "pr", action: i.kind, target: prInterventionTarget(i), actor: i.actor,
-    cause_class: i.cause_class ?? prCauseClass(sweepRows, i.pr, Date.parse(i.at)), source: "github",
+    cause_class: key, source: "github",
     ...(i.evidence !== undefined ? { evidence: i.evidence } : {}),
   })).filter(row => !recorded.has(interventionKey(row)));
   for (const e of events) {

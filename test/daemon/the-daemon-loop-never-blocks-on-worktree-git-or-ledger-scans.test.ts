@@ -14,7 +14,7 @@ import { gitRepo } from "#test/helpers/git-repo.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 import { writeLedger, type LedgerRotationFixture } from "#test/helpers/ledger-fixture.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
-import { productionLifetimePressureHook, readLiveLedgerRowsOffLoop, rowsWithArchivedVerifyHumanVerdicts,
+import { lifetimeContractDigest, productionLifetimePressureHook, readLiveLedgerRowsOffLoop, rowsWithArchivedVerifyHumanVerdicts,
   rowsWithArchivedVerifyHumanVerdictsAsync } from "#test/helpers/run-task-test.js";
 
 type Row = Record<string, unknown>;
@@ -68,7 +68,9 @@ function attempts(taskId: string): Row[] {
 function lifetimeKey(taskId: string, rows: Row[], ruling: string): string {
   const [, date, decision] = /^OPERATOR RULING (\S+): (\S+)/.exec(ruling)!;
   return `${taskId}:adaptive-lifetime=${taskAttributableLifetimeDispatches(rows, taskId)}:capacity=0:open=0:merged=0:` +
-    `last=verdict:failed:1:ruling=${date}:${decision}`;
+    `last=verdict:failed:1:ruling=${date}:${decision}` +
+    // W1-T13754: the key ends with the task's contract digest; these tasks carry only a title.
+    `:contract=${lifetimeContractDigest({ title: `${taskId} feature` } as Parameters<typeof lifetimeContractDigest>[0])}`;
 }
 
 function filler(prefix: string, count: number, bytes = 150): Row[] {
@@ -126,7 +128,7 @@ function assertRouteEffects(f: ReturnType<typeof lifetimeFixture>): void {
   const written = [...readLedgerLines(f.ledger.path)].slice(f.liveCount);
   assert.deepEqual(written.map((row) => [row.step, row.task_id, row.judge_decision]),
     [["verify_human.judged", "T-RULED", "needs_operator"]]);
-  assert.match(String(written[0]!.observed_state), /^T-RULED:adaptive-lifetime=1:.*:ruling=2026-11-01:needs_operator$/);
+  assert.match(String(written[0]!.observed_state), /^T-RULED:adaptive-lifetime=1:.*:ruling=2026-11-01:needs_operator:contract=[0-9a-f]{12}$/);
   assert.match(f.proposals(), /T-RULED/);
   assert.doesNotMatch(f.proposals(), /T-SETTLED/);
 }

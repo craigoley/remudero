@@ -25,6 +25,8 @@
     - test/github/the-read-gap-follows-the-installation-budget.test.ts
     - test/github/the-pacer-waits-out-a-normal-gap-on-the-daemon-loop.test.ts
     - test/github/the-shared-read-gap-is-waited-out-on-the-daemon-loop.test.ts
+    - test/open-prs-rest.test.ts
+    - test/the-tick-reads-run-off-the-event-loop.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -126,6 +128,12 @@
     NOT IN SCOPE: a separate gap for GraphQL or search reads (both are far from their limits); the Mac broker's
     pacer (it already adapts); a minimum spacing for writes. The code has none today. GitHub asks for at least one
     second between mutating requests; a write rule is a separate task if writes ever burst.
+    AMENDED (2026-11-19): two existing tests assume the 1.5 s default gap, test/open-prs-rest.test.ts (a fresh
+    pacer's default gap) and test/the-tick-reads-run-off-the-event-loop.test.ts (W1-T13129 criterion 1); both join
+    files and state their no-budget setup. A process with no installation budget keeps DEFAULT_GH_PACE_MIN_GAP_MS
+    (hand runs, the interactive token); only a budgeted process takes the adaptive gap. A budget with a wait bound
+    (maxWaitMs) caps the gap there, never below the secondary spacing, so the W1-T12820 share stand-down still acts;
+    after a rate-limited or low-water result the gap is the larger of the 10 s gap and the budget gap.
   falsifier: |
     Put the fixed 1,500 ms gap back as the default: criteria 1 and 9 must fail. Drop the others' rate term or the
     equal-share term: criteria 2 and 5 must fail. Use the budget gap after a rate-limited result: criterion 4 must

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { loadPlan, type Plan } from "#src/lib/plan.js";
 import { shadowJudgeSampled } from "#src/lib/shadow-judge.js";
-import { productionLifetimePressureHook, routeAdaptiveLifetimePressure } from "#src/run-task.js";
+import { lifetimeContractDigest, productionLifetimePressureHook, routeAdaptiveLifetimePressure } from "#src/run-task.js";
 import { VERIFY_HUMAN_JUDGED_STEP } from "#src/lib/verify-human-judge.js";
 import type { Config } from "#src/lib/config-schema.js";
 import type { WorkerResult, spawnWorker } from "#src/lib/worker.js";
@@ -145,9 +145,11 @@ test("routeAdaptiveLifetimePressure asks the judge about a shard whose evidence 
 test("routeAdaptiveLifetimePressure records sampled agreement through its production ledger adapter", async () => {
   const { dir, plan, ledgerPath, config } = fixture();
   try {
+    // The digest reads title, acceptance, design and files only, so it is the same for every candidate id.
+    const contract = lifetimeContractDigest(plan.byId.get("T4025-C")!);
     const id = Array.from({ length: 1000 }, (_, i) => `T-ADAPTIVE-SHADOW-${i}`)
       .find((candidate) => shadowJudgeSampled(
-        `verify-human:${candidate}:adaptive-lifetime=1:capacity=0:open=0:merged=0:last=verdict:failed:1`,
+        `verify-human:${candidate}:adaptive-lifetime=1:capacity=0:open=0:merged=0:last=verdict:failed:1:contract=${contract}`,
       ));
     assert.ok(id, "the fixture selects a stable sampled adaptive observation");
     writeLedger(ledgerPath, [
