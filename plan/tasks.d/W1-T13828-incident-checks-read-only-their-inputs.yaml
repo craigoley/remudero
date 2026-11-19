@@ -1,0 +1,50 @@
+- id: W1-T13828
+  title: "Serve's incident checks read only each rule's declared input rows, parse each row's time once, and its live tail parses and holds only those steps' lines, so the minute's check stops scanning the whole ledger tail sixteen times on serve's loop"
+  repo: remudero
+  depends_on: []
+  priority: 0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # which ledger rows serve's incident rules see; a rule's declared inputs become the only rows it reads
+  band_meaning: span
+  origin: "operator-session#serve-oom-2026-11-16"
+  plan_refs:
+    - W1-T13304
+    - W1-T11210
+  files:
+    - src/lib/incident-invariants.ts
+    - src/lib/live-ledger-tail.ts
+    - src/lib/serve.ts
+    - test/incident-checks-read-only-their-inputs.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A rule reads only its declared inputs (rows no rule reads change no finding), and a row's time is parsed once across evaluations"
+      proof: "grep: W1-T13828: a rule reads only its inputs in test/incident-checks-read-only-their-inputs.test.ts"
+    - claim: "invariant:inputs-kept — the tail's line filter keeps every declared input of every rule"
+      kind: guard
+      proof: "grep: W1-T13828: invariant:inputs-kept in test/incident-checks-read-only-their-inputs.test.ts"
+    - claim: "A tail with a line filter parses and holds only the kept lines, and parses each row's time once"
+      proof: "grep: W1-T13828: a tail with a line filter parses and holds only the kept lines in test/incident-checks-read-only-their-inputs.test.ts"
+    - claim: "Serve's incident tail passes the rules' line filter"
+      proof: 'grep: createLiveLedgerTail(ledgerPath, INCIDENT_INVARIANTS_TAIL_RETAIN_MS, { keepLine: INCIDENT_INPUT_LINE }) in src/lib/serve.ts'
+  rationale: |
+    WHY: Craig wants serve under 0.3 cores with no Console timeouts. After serve restarted at 11:31Z on 2026-11-19
+    with this week's fixes, the top main-loop stall frames were incident-invariants.ts evaluateIncidentInvariants,
+    rowsSince and rowTimeMs (about 3 s profiled in 48 minutes).
+    CAUSE: every 60 s each of the eight rules filters the whole live tail twice and parses every row's time again, and
+    the tail parses and holds every ledger line. On a copy of the live ledger (9,841 lines) one tick took 73 to 75 ms
+    in an idle process and held 8,971 rows; with this change it takes 1 to 6 ms and holds 913.
+  design: |
+    INVARIANT inputs-kept: every step a rule declares in inputs passes the tail's line filter.
+    1. evaluateIncidentInvariants filters each rule's rows by its declared inputs before the two time windows.
+    2. rowTimeMs (and the tail's own retention check) memoize each row's parsed time in a WeakMap.
+    3. INCIDENT_INPUT_LINE is a regex built from every rule's inputs; createLiveLedgerTail takes keepLine and skips
+       other lines before JSON.parse. serve.ts passes it.
+  falsifier: |
+    Every row still scanned: criterion 1 fails. An input dropped by the filter: criterion 2 fails. The tail still
+    parses every line: criterion 3 fails.
+  note: |
+    Id reserved for run-unfiled-1795090879793 with ~/rmd-work/bin/reserve-id.sh.

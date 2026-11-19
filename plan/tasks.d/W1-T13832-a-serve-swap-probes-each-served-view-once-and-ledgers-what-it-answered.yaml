@@ -1,0 +1,95 @@
+- id: W1-T13832
+  title: "A serve generation swap probes each served view once in-process and ledgers what it answered, so swap evidence never waits for a client to read views"
+  repo: remudero
+  depends_on: [W1-T13602, W1-T13600]
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19 sizing: one concern (a post-swap self-read) across the supervisor, the generation channel, the view routes, the demand window and one new module; client tallies and the swap path are unchanged
+  band_meaning: span
+  origin: "human#2026-11-19-serve-swap-evidence"
+  plan_refs:
+    - W1-T13602
+    - W1-T13600
+  files:
+    - src/lib/serve-swap-probe.ts
+    - src/lib/views.ts
+    - src/lib/serve-demand.ts
+    - src/lib/serve.ts
+    - src/lib/serve-generation.ts
+    - src/lib/serve-supervisor.ts
+    - src/run-task.ts
+    - test/console-api/serve/a-serve-swap-probes-each-served-view-once-and-ledgers-what-it-answered.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A completed swap writes one serve.swap_probe row with the sha, the generation, the trigger and each served view's status, code and stale"
+      proof: "grep: W1-T13832 criterion 1 in test/console-api/serve/a-serve-swap-probes-each-served-view-once-and-ledgers-what-it-answered.test.ts"
+    - claim: "Probe answers are counted in the window's views_probe section and never in its client views section"
+      proof: "grep: W1-T13832 criterion 2 in test/console-api/serve/a-serve-swap-probes-each-served-view-once-and-ledgers-what-it-answered.test.ts"
+    - claim: "invariant:probe-never-blocks-the-swap — a probe that throws or passes its time bound leaves the swap done and writes serve.swap_probe with a probe_failed reason"
+      kind: guard
+      proof: "grep: W1-T13832 criterion 3 in test/console-api/serve/a-serve-swap-probes-each-served-view-once-and-ledgers-what-it-answered.test.ts"
+    - claim: "serve.ts binds the generation's swapProbe hook to runSwapProbe, so the new module has a production caller"
+      proof: "grep: runSwapProbe( in src/lib/serve.ts"
+    - claim: "A crash restart's replacement generation runs the swap probe and its serve.swap_probe row says trigger crash_restart"
+      proof: "grep: W1-T13832 criterion 5 in test/console-api/serve/a-serve-swap-probes-each-served-view-once-and-ledgers-what-it-answered.test.ts"
+  rationale: |
+    WHY: W1-T13602 (#19315, 8202941cd) made each serve.demand row count view answers by code and staleness, but only
+    for reads a client made. OBSERVED on the host 2026-11-19 (state/ledger.*.ndjson.gz, 199 files, plus
+    state/ledger.ndjson; newest sane ts 12:18:13Z): 18 generation swaps completed after 8202941cd began serving at
+    2026-11-18T06:00:41Z (serve.handoff_done or serve.supervisor_ready followed by serve.recycle_swapped). Only 3 of the
+    18 had a demand row with a views section within 10 minutes. Of the 357 demand rows since 06:00:41Z, 28 have one, and
+    the other 329 carry only /v1/hooks/github, /v1/version, /v1/status, /v1/views/versions and other. So whether
+    W1-T13457 and W1-T13490 hold across a swap is still unproven: 15 swaps had no reader. The view_not_ready and
+    view_disabled answers seen (the now view, ts 2026-11-19T12:11:30Z) came 40 minutes after a swap, from a client.
+    READ at origin/main 762d3a053:
+    - src/lib/views.ts buildReadModelViewRoutes: answerRead is a closure, the one path GET /v1/views/<name> and POST
+      /v1/views/batch both use, and report() calls opts.onAnswer(name, status, code, stale). Nothing outside the
+      routes can call it.
+    - src/lib/serve-supervisor.ts: handoff logs serve.handoff_done after drainOld, and supervisor.start logs
+      serve.supervisor_ready after bringUpAlone. Both run in the supervisor process, which holds no read model.
+      serve.recycle_swapped is written by deploy/serve-container.sh (serve_ledger_row), outside TypeScript.
+      replaceCrashed (a promoted generation that exits on its own) logs serve.generation_crashed or
+      serve.handoff_rolled_back, waits its back-off, then bringUpAlone; on success it calls reportAlone and logs no
+      row of its own, so a crash restart is a third swap with no client-independent evidence either.
+    - src/lib/serve-generation.ts GENERATION_MESSAGES is the supervisor-to-generation IPC; src/run-task.ts registers
+      onDrainRequest, onShedRequest and the others on the generation's channel through serveGeneration(server).
+    - src/lib/serve-demand.ts createServeDemand recordView feeds the one views map that flush writes as `views`.
+  design: |
+    INVARIANT probe-never-blocks-the-swap: the supervisor sends the probe request and never awaits it; the generation
+    runs the probe off the request path under SWAP_PROBE_TIMEOUT_MS, and any throw or timeout becomes a probe_failed
+    reason in the row, never an exit, a retry or a held handoff.
+    1. serve-generation.ts: GENERATION_MESSAGES gains swapProbe ("rmd.swap_probe") and onSwapProbeRequest(channel, fn).
+       serve-supervisor.ts: right after the serve.handoff_done log in handoff, and after the serve.supervisor_ready log
+       in supervisor.start, send { type: swapProbe, trigger: "handoff" | "cold_start" | "crash_restart", generation, sha, fromSha? } to
+       the active generation. In replaceCrashed, once bringUpAlone returns the promoted replacement and before
+       reportAlone, send the same message with trigger "crash_restart" and the dead generation's sha as fromSha.
+       A recycle is covered by its new container's cold_start trigger: supervisor.start cannot tell a recycle from a
+       first boot, so the row says cold_start, never recycle.
+    2. views.ts: ReadModelViewRoutesOptions gains onProbeReader(reader). buildReadModelViewRoutes hands it one function
+       that reads a view through answerRead with a probe flag: its answer reaches onAnswer with source "swap-probe",
+       and a probe read never calls touchViewDemand or awaitViewDemand, so the probe keeps no demand key alive.
+       onAnswer gains a fifth argument, source: "client" | "swap-probe"; client reads pass "client".
+    3. serve-demand.ts: recordView takes the source; "swap-probe" answers go to a separate views_probe map with the same
+       shape and cap, written as `views_probe` only when non-empty. The client `views` section is unchanged.
+    4. serve-swap-probe.ts (new): runSwapProbe(request, deps) picks each view whose effective mode is serve (viewMode,
+       else servedByDefault), at most SWAP_PROBE_MAX_VIEWS (32, as VIEW_BATCH_MAX_READS). Key: "" when a body is held
+       for it or the view needs no params; else the first key the read model holds a body for (that is the demand
+       book's live set for a demand view); a view with required params and no held key is listed as no_key and not
+       read. It writes one ledger row serve.swap_probe { trigger, generation, sha, fromSha, views: { <name>: { key,
+       status, code, stale } }, ms } or, on a throw or timeout, the same row with probe_failed and the views it had.
+       No view in serve mode writes no row. A second request for the same generation and trigger is ignored.
+    5. serve.ts: ServeGenerationHooks gains swapProbe, bound to runSwapProbe with the reader from onProbeReader, the
+       read model and deps.ledgerPath; onViewAnswer forwards source to demand.recordView. run-task.ts registers
+       onSwapProbeRequest beside onDrainRequest.
+  falsifier: |
+    Never send swapProbe after handoff_done or supervisor_ready: criterion 1 fails (no row). Drop the send from
+    replaceCrashed, or send trigger cold_start there: criterion 5 fails. Count probe answers in
+    `views`: criterion 2 fails. Await the probe before handoff_done, or let a throw escape: criterion 3 fails.
+  note: |
+    Id reserved for run-unfiled-1795090868671 with ~/rmd-work/bin/reserve-id.sh.
+    Filed in the public repository like the other repo: remudero tasks filed today (#19608, #19603, #19602), though
+    `rmd plan-destination task` prints craigoley/remudero-ops; the operator may want to settle which is right.
