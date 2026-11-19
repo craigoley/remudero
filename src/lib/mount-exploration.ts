@@ -1,4 +1,7 @@
 import { createHash } from "node:crypto";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { tsImport } from "tsx/esm/api";
 import type { Config, WorkerProviderId } from "./config.js";
 import type { Mount, Mounts } from "./mounts.js";
 import type { MountHeadroomArm, MountHeadroomCell } from "./mount-recommender.js";
@@ -292,6 +295,18 @@ export function configForMountExploration(config: Config, decision: MountExplora
 // Seaming it fixes both: the cell source (a dynamic import of `scripts/mount-headroom-sweep.mjs`)
 // and the mounts table become injectable, so the explore arm and the failure arm are each reachable
 // by passing a fake, while `runTask` keeps the real ones.
+
+/**
+ * The observed per-cell arm population, read by the headroom sweep script. The script imports src/*.ts, and a
+ * bundled run child has no tsx loader, so a plain import() fails in Node's strip-only mode; tsImport loads it.
+ */
+export async function loadMountHeadroomCells(repoRoot: string, stateDir: string): Promise<MountHeadroomCell[]> {
+  const url = pathToFileURL(join(repoRoot, "scripts", "mount-headroom-sweep.mjs")).href;
+  const sweep = (await tsImport(url, import.meta.url)) as {
+    buildMountHeadroomSweep: (stateDir: string) => { cells: MountHeadroomCell[] };
+  };
+  return sweep.buildMountHeadroomSweep(stateDir).cells;
+}
 
 export interface MountExplorationWiringInput {
   taskType: string;

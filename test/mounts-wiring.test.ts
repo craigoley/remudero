@@ -36,7 +36,7 @@ test("W1-T3095: run-task calls the explorer through the seamed resolver", () => 
   assert.match(runTaskVerbSrc, /\bexploreMount\(/, "runTask must call the explorer on the dispatch path");
   assert.doesNotMatch(runTaskVerbSrc, /exploration\.kind === "explore"/, "the explore branch belongs in lib, not in runTask");
   assert.doesNotMatch(runTaskVerbSrc, /mount\.exploration\.error/, "the failure arm belongs in lib, not in runTask");
-  assert.match(runTaskVerbSrc, /mount-headroom-sweep\.mjs/, "runTask owns the real sweep source");
+  assert.match(runTaskVerbSrc, /loadCells: \(\) => loadMountHeadroomCells\(repoRoot, /, "runTask owns the real sweep source");
   assert.match(runTaskVerbSrc, /loadMountsTable: \(\) => loadMounts\(mountsPath\(repoRoot\)\)/, "runTask owns the real mounts source");
 });
 

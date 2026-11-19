@@ -193,6 +193,21 @@ export const AUTHORITY_TABLE: readonly AuthorityRow[] = [
       "This inventory grants no provider or execution authority.",
   },
   {
+    id: "propose-product-runner-config",
+    action: "open one add-only pull request that proposes the previewed runner configuration on its own branch of the product repository",
+    module: "src/lib/product-target-config.ts",
+    symbol: "proposeRunnerConfigBootstrap (RunnerConfigProposalRun.write)",
+    boundary: "gh-pr-create",
+    gate: "operator-verb",
+    ledgerSteps: [],
+    verb: "POST /v1/products/runner-config-proposal",
+    note: "W1-T11197: the production route requires a verified operator identity and the existing high-tier action-bound nonce. " +
+      "The command binds product/objective revisions, the exact previewed head and the accepted config digest; the preview is recomputed before any write. " +
+      "A private journal record precedes the branch-ref POST, the contents PUT (no blob sha, so an existing path is refused by GitHub) and the pull POST; " +
+      "a lost response reconciles by reading the exact branch, its one-file diff and the open pull, never by a second create. " +
+      "It never writes the default branch, merges, approves, deletes or changes protection. No dedicated ledger step is emitted.",
+  },
+  {
     id: "restore-checkpoint-branch",
     action: "recreate an absent source branch at its persisted checkpoint head",
     module: "src/cli/commands/run-task-verb.ts",

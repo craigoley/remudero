@@ -633,7 +633,8 @@ function reviewPostRefusedFor(
 /** W1-T13193 — the review setup refusals the running reviewer code wrote for this exact input (PR, head, body
  *  digest) since the PR's last `review.pending_posted` or `review.posted` row, grouped by reason. Only a group of
  *  {@link REVIEW_INPUT_ADMISSION_BACKSTOP} or more is returned, so one refusal, or refusals with different
- *  reasons, are retried. Rows of other reviewer code, another head or another digest never count. */
+ *  reasons, are retried. Rows of other reviewer code, another head or another digest never count. W1-T13838: a healed
+ *  tree's sha (a `review.ran_from_healed_tree` row) counts as running code, since an open incident reviews from it. */
 export function reviewSetupRefusalsFor(
   ledger: ReadonlyArray<Record<string, unknown>>,
   taskId: string,
@@ -643,6 +644,10 @@ export function reviewSetupRefusalsFor(
   runningReviewerCodeSha: string | null,
 ): ReviewSetupRefusal | undefined {
   const groups = new Map<string, ReviewSetupRefusal>();
+  const healedShas = new Set<string>();
+  for (const row of ledger) {
+    if (row.step === "review.ran_from_healed_tree" && typeof row.healed_sha === "string") healedShas.add(row.healed_sha);
+  }
   for (const row of ledger) {
     if ((row.step === "review.pending_posted" || row.step === "review.posted") && reviewRowNamesPr(row, taskId, prUrl)) {
       groups.clear();
@@ -651,8 +656,8 @@ export function reviewSetupRefusalsFor(
     if (row.step !== "review.semantic_setup_refused" || row.pr_url !== prUrl || row.head_sha !== headSha ||
         row.review_input_digest !== inputDigest || typeof row.reason !== "string") continue;
     const codeSha = typeof row.reviewer_code_sha === "string" ? row.reviewer_code_sha : null;
-    if (codeSha !== runningReviewerCodeSha) continue;
-    const group = groups.get(row.reason) ?? { reason: row.reason, count: 0, reviewerCodeSha: codeSha, runningReviewerCodeSha };
+    if (codeSha !== runningReviewerCodeSha && (codeSha === null || !healedShas.has(codeSha))) continue;
+    const group = groups.get(row.reason) ?? { reason: row.reason, count: 0, reviewerCodeSha: runningReviewerCodeSha, runningReviewerCodeSha };
     group.count++;
     groups.set(row.reason, group);
   }

@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { generateKeyPairSync, sign } from "node:crypto";
+import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import { once } from "node:events";
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { basename, dirname, join } from "node:path";
@@ -20,7 +20,7 @@ import type { Config } from "#src/lib/config.js";
 import { CLAUDE_BIN_ENV_OVERRIDE, createClaudeExecutableCache, spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "#src/lib/worker.js";
 import { clearOpenWeightAbsence, spawnOpenWeightWorker } from "#src/lib/worker-provider.js";
 import { buildServeRoutes, type ServeDeps } from "#src/lib/serve.js";
-import { createService, type IdentityProvider } from "#src/lib/service.js";
+import { createConfirmNonceStore, createService, makeConfirmNonceRoute, type IdentityProvider } from "#src/lib/service.js";
 import { fakeGitHub } from "#test/helpers/fake-github.js";
 import { declaredBody, violations, SPEC } from "#test/helpers/openapi-strict.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
@@ -1025,6 +1025,157 @@ setTimeout(() => {
 
 /** This repository's own validated runner configuration, the table a real product target commits. */
 const VALID_MOUNTS = readFileSync(join(REPO_ROOT, ".remudero", "mounts.yaml"), "utf8");
+
+test("W1-T11196: the served runner-config preview matches its authenticated public contract", async t => {
+  const head = "a".repeat(40);
+  const shim = ghShim([
+    { when: "/commits/", stdout: JSON.stringify({ sha: head }) },
+    { when: "/git/trees/", stdout: JSON.stringify({ truncated: false, tree: [] }) },
+    { when: "api repos/craigoley/wreckterra", stdout: JSON.stringify({ id: WRECKTERRA_ID, name: "wreckterra", owner: { login: "craigoley" }, private: false, default_branch: "main" }) },
+  ]);
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${shim.dir}:${previousPath}`;
+  t.after(() => { process.env.PATH = previousPath; rmSync(shim.dir, { recursive: true, force: true }); });
+  const root = ownedFixtureDir(t, "runner-preview-http").dir;
+  const routes = [...assembled(root), ...assembled(root, "/v1/products/runner-config-preview")];
+  const route = routes.find(route => route.path === "/v1/products/runner-config-preview");
+  assert.equal(route?.scope, "read");
+  assert.equal(route?.sensitivity, "sensitive");
+  // Production serve does not enable read-sensitivity enforcement, so neither does this proof: the owner check is the gate.
+  const instance = createService({ tokens: { read: "fixture-read", write: "fixture-write" }, operatorSession: identity, routes });
+  await new Promise<void>(resolve => instance.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise<void>((resolve, reject) => instance.close(error => error ? reject(error) : resolve())));
+  const base = `http://127.0.0.1:${(instance.address() as AddressInfo).port}`;
+  const saved = await request(base, "/v1/products", "alice", command);
+  const productId = saved.body.receipt!.productId;
+  const store = new ProductIntentStore({ root });
+  assert.ok(store.transition("clerk:alice", { version: "product-intent-v1", requestId: "preview-bind-http-01", id: productId,
+    expectedRevision: 1, expectedObjectiveRevision: 1, repository: { provider: "github", id: WRECKTERRA_ID, owner: "craigoley", name: "wreckterra",
+      defaultBranch: "main", visibility: "public", verifiedAt: new Date().toISOString() } }).ok);
+  const snapshot = () => Object.fromEntries(readdirSync(root, { recursive: true }).map(String).sort()
+    .map(path => [path, lstatSync(join(root, path)).isFile() ? readFileSync(join(root, path)).toString("base64") : "<directory>"]));
+  const before = snapshot();
+  const params = new URLSearchParams({ productId, expectedRevision: "2", expectedObjectiveRevision: "1" });
+  const get = async (session: "alice" | "bob" | undefined, query = params.toString(), token = "fixture-read") => {
+    const response = await fetch(`${base}/v1/products/runner-config-preview?${query}`, { headers: { authorization: `Bearer ${token}`,
+      ...(session ? { "x-test-session": session } : {}) } });
+    const body = await response.json();
+    assert.deepEqual(violations(body, declaredBody("/v1/products/runner-config-preview", "GET", response.status)), []);
+    assert.equal(response.headers.get("cache-control"), "private, no-store", `cache-control on ${response.status}`);
+    assert.deepEqual(snapshot(), before, "every preview leaves durable product and journal bytes unchanged");
+    return { response, body };
+  };
+  assert.equal((await get(undefined)).response.status, 403);
+  assert.equal((await get("bob")).response.status, 404);
+  assert.equal((await get(undefined, params.toString(), "unknown")).response.status, 401);
+  const { response, body } = await get("alice");
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("cache-control"), "private, no-store");
+  assert.equal(body.state, "absent");
+  assert.equal(body.proposal.bytes, VALID_MOUNTS, "the assembled route reads the serving install rather than fleet state");
+  assert.equal(body.proposal.targetHead, head);
+  assert.deepEqual(body.proposal.changes, [{ operation: "add", path: ".remudero/mounts.yaml" }]);
+  for (const query of [params + "&productId=other", params + "&bytes=untrusted", params.toString().replace("expectedRevision=2", "expectedRevision=0"), "productId=" + productId]) {
+    assert.equal((await get("alice", query)).response.status, 400);
+  }
+  assert.equal((await get("alice", params.toString().replace("expectedRevision=2", "expectedRevision=3"))).response.status, 409);
+  shim.addRoute({ when: "/git/trees/", stdout: JSON.stringify({ truncated: true, tree: [] }) });
+  const unreadable = await get("alice");
+  assert.equal(unreadable.body.state, "unreadable");
+  assert.equal(unreadable.body.proposal, undefined);
+  assert.ok(shim.calls().every(call => call.startsWith("api repos/craigoley/wreckterra") && !call.includes("-X")));
+});
+
+test("W1-T11197: the served runner-config proposal matches its authenticated high-tier public contract", async t => {
+  const head = "a".repeat(40);
+  const tip = "c".repeat(40);
+  const configDigest = createHash("sha256").update(VALID_MOUNTS).digest("hex");
+  const branch = `remudero/runner-config-${head.slice(0, 12)}-${configDigest.slice(0, 12)}`;
+  const state = ownedFixtureDir(t, "runner-proposal-gh").dir;
+  const refFile = join(state, "ref.json");
+  const pullsFile = join(state, "pulls.json");
+  // The proposal branch already sits at the exact head (a reconciled earlier attempt), so the add and the pull are written here.
+  writeFileSync(refFile, JSON.stringify({ object: { sha: head } }));
+  writeFileSync(pullsFile, "[]");
+  const pull = { number: 7, html_url: "https://github.com/craigoley/wreckterra/pull/7", state: "open", head: { ref: branch }, base: { ref: "main" } };
+  const shim = ghShim([
+    { when: "-X PUT repos/craigoley/wreckterra/contents/.remudero/mounts.yaml", stdout: "{}", writes: { path: refFile, content: JSON.stringify({ object: { sha: tip } }) } },
+    { when: "-X POST repos/craigoley/wreckterra/pulls", stdout: JSON.stringify(pull), writes: { path: pullsFile, content: JSON.stringify([pull]) } },
+    { when: `/compare/${head}...${tip}`, stdout: JSON.stringify({ status: "ahead", ahead_by: 1, behind_by: 0, files: [{ filename: ".remudero/mounts.yaml", status: "added" }] }) },
+    { when: "/contents/.remudero/mounts.yaml?ref=", stdout: JSON.stringify({ type: "file", encoding: "base64", content: Buffer.from(VALID_MOUNTS).toString("base64") }) },
+    { when: "/git/ref/heads/", stdoutFile: refFile },
+    { when: "/pulls?head=", stdoutFile: pullsFile },
+    { when: "/pulls/7", stdout: JSON.stringify({ ...pull, merged_at: null, merge_commit_sha: null }) },
+    { when: "/commits/", stdout: JSON.stringify({ sha: head }) },
+    { when: "/git/trees/", stdout: JSON.stringify({ truncated: false, tree: [] }) },
+    { when: "api repos/craigoley/wreckterra", stdout: JSON.stringify({ id: WRECKTERRA_ID, name: "wreckterra", owner: { login: "craigoley" }, private: false, default_branch: "main" }) },
+  ]);
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${shim.dir}:${previousPath}`;
+  t.after(() => { process.env.PATH = previousPath; rmSync(shim.dir, { recursive: true, force: true }); });
+  const root = ownedFixtureDir(t, "runner-proposal-http").dir;
+  const routes = [...assembled(root), ...assembled(root, "/v1/products/runner-config-proposal")];
+  const route = routes.find(route => route.path === "/v1/products/runner-config-proposal");
+  assert.equal(route?.scope, "write");
+  assert.equal(route?.tier, "high", "opening a pull request on the product repository is a high-tier action");
+  const high: IdentityProvider = { ...identity, authorize(req) {
+    const session = req.headers["x-test-session"];
+    if (session !== "alice" && session !== "bob") return undefined;
+    return { scopes: new Set(["read", "write"]), tier: "high", actor: `clerk:${session}` };
+  } };
+  const confirmNonces = createConfirmNonceStore();
+  const instance = createService({ tokens: { read: "fixture-read", write: "fixture-write" }, operatorSession: high, enforceWriteTiers: true,
+    confirmNonces, routes: [...routes, makeConfirmNonceRoute(confirmNonces)] });
+  await new Promise<void>(resolve => instance.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise<void>((resolve, reject) => instance.close(error => error ? reject(error) : resolve())));
+  const base = `http://127.0.0.1:${(instance.address() as AddressInfo).port}`;
+  const saved = await request(base, "/v1/products", "alice", command);
+  const productId = saved.body.receipt!.productId;
+  assert.ok(new ProductIntentStore({ root }).transition("clerk:alice", { version: "product-intent-v1", requestId: "proposal-bind-http-1", id: productId,
+    expectedRevision: 1, expectedObjectiveRevision: 1, repository: { provider: "github", id: WRECKTERRA_ID, owner: "craigoley", name: "wreckterra",
+      defaultBranch: "main", visibility: "public", verifiedAt: new Date().toISOString() } }).ok);
+  const proposal = (overrides: Record<string, unknown> = {}) => ({ version: "product-runner-config-proposal-v1", requestId: "proposal-http-000001", productId,
+    expectedRevision: 2, expectedObjectiveRevision: 1, targetHead: head, configDigest, ...overrides });
+  const send = async (session: "alice" | "bob" | undefined, body: unknown, options: { raw?: string; nonce?: boolean; token?: string } = {}) => {
+    const payload = options.raw ?? JSON.stringify(body);
+    const headers = { authorization: `Bearer ${options.token ?? "fixture-write"}`, "content-type": "application/json", ...(session ? { "x-test-session": session } : {}) };
+    let nonce: string | undefined;
+    if (options.nonce !== false) {
+      const confirmed = await fetch(`${base}/v1/confirm`, { method: "POST", headers, body: JSON.stringify({ method: "POST", path: "/v1/products/runner-config-proposal", payload }) });
+      nonce = confirmed.status === 200 ? (await confirmed.json() as { nonce: string }).nonce : undefined;
+    }
+    const response = await fetch(`${base}/v1/products/runner-config-proposal`, { method: "POST", headers: { ...headers, ...(nonce ? { "x-confirm-nonce": nonce } : {}) }, body: payload });
+    const reply = await response.json() as { error?: string; state?: string; replayed?: boolean; proposal?: { branch: string; pullRequest: { number: number } } };
+    assert.deepEqual(violations(reply, declaredBody("/v1/products/runner-config-proposal", "POST", response.status)), [],
+      `the real proposal response (${response.status}) must match its declared contract`);
+    // The service's own gate answers 401 and scope/tier/nonce 403s before the handler; every handler response is uncached.
+    const gate = response.status === 401 || ["unauthorized", "forbidden", "confirm_nonce_required"].includes(reply.error ?? "");
+    if (!gate) assert.equal(response.headers.get("cache-control"), "private, no-store", `cache-control on ${response.status}`);
+    return { status: response.status, cache: response.headers.get("cache-control"), body: reply };
+  };
+  assert.equal((await send("alice", proposal(), { nonce: false })).status, 403, "no confirmation, no proposal");
+  assert.equal((await send(undefined, proposal())).status, 403);
+  assert.equal((await send(undefined, proposal(), { token: "unknown" })).status, 401);
+  assert.equal((await send("bob", proposal())).status, 404);
+  assert.equal((await send("alice", { ...proposal(), bytes: "version: 1" })).status, 400, "the command never carries bytes");
+  assert.equal((await send("alice", undefined, { raw: "{broken" })).status, 400);
+  assert.equal((await send("alice", undefined, { raw: JSON.stringify({ padding: "x".repeat(5000) }) })).status, 413);
+  assert.equal((await send("alice", proposal({ requestId: "proposal-http-000002", configDigest: "e".repeat(64) }))).body.error, "stale_preview");
+  const created = await send("alice", proposal());
+  assert.equal(created.status, 200, JSON.stringify(created.body));
+  assert.equal(created.cache, "private, no-store");
+  assert.equal(created.body.state, "open");
+  assert.equal(created.body.proposal?.branch, branch);
+  assert.equal(created.body.proposal?.pullRequest.number, 7);
+  const replay = await send("alice", proposal());
+  assert.equal(replay.status, 200);
+  assert.equal(replay.body.replayed, true);
+  const writes = shim.calls().filter(call => / -X (POST|PUT|PATCH|DELETE) /.test(` ${call} `));
+  assert.deepEqual(writes.map(call => call.split(" -f ")[0]), ["api -X PUT repos/craigoley/wreckterra/contents/.remudero/mounts.yaml", "api -X POST repos/craigoley/wreckterra/pulls"]);
+  // The pull body itself says a human must merge it, so only the call's path and fields before the body are checked.
+  assert.ok(writes.every(call => !call.includes("branch=main") && !/merge|protection/.test(call.split(" -f body=")[0]!)), "never writes, merges or protects the default branch");
+});
+
 /** Commit `.remudero/mounts.yaml` into a target checkout with a fixture-local identity. */
 function commitRunnerConfig(checkout: string, text: string) {
   const git = (...args: string[]) => execFileSync("git", ["-C", checkout, ...args], { encoding: "utf8", env: { ...process.env,
