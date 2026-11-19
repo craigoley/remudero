@@ -132,12 +132,13 @@ function assertSourceRestamping(t: TestContext): void {
   assert.ok(refreshed);
   assert.equal(refreshed.sources.find(s => s.name === "plan:core")?.asOf, iso(f.now()));
   assert.equal(refreshed.sources.find(s => s.name === "ledger:core")?.asOf, iso(START));
+  // W1-T12270: the read-paced fixture view is unread for the 10-minute jump, so it stops instead of making a 7th call.
   f.tick(600_000);
   const row = f.messages.find(m => m.type === "log" && m.step === "read_model.view_builds" && m.extra.view === "digest");
   assert.ok(row?.type === "log");
   assert.equal(row.extra.builds, 1);
-  assert.equal(row.extra.skipped, 6);
-  assert.equal(row.extra.calls, 7);
+  assert.equal(row.extra.skipped, 5);
+  assert.equal(row.extra.calls, 6);
 }
 
 test("production status rebuilds for every declared input and for quarantine changes without a generation", t => {

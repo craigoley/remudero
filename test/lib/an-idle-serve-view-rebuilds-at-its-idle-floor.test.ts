@@ -11,7 +11,6 @@ import { test } from "node:test";
 import type { Clock } from "#src/lib/clock.js";
 import {
   READ_MODEL_IDLE_FLOOR_MS,
-  READ_MODEL_IDLE_STRETCH_MAX,
   READ_MODEL_READ_HOT_MS,
   READ_MODEL_VIEW_SHARE,
   createReadModelTicker,
@@ -156,13 +155,11 @@ test("W1-T11933 criterion 3: the now view keeps its stretch ladder and a demand 
   f.run(READ_MODEL_READ_HOT_MS - 5_000);
   const idleFrom = f.hand.clock.now();
   f.run(TEN_MINUTES);
+  // W1-T12270: past its unread window the now view stops instead of holding at its stretch bound, and is never floored.
   const nowStarts = f.starts("now", idleFrom);
-  const ladder = nowStarts.slice(1).map((at, i) => Math.round((at - nowStarts[i]! - COST_MS) / BASE_WAIT_MS));
-  // Three views share each pass here, so a stretched wait can round one base wait long.
-  const first = ladder.indexOf(4);
-  assert.deepEqual(ladder.slice(first, first + 3), [4, 8, 16], `the now view's wait still doubles: ${ladder.join(", ")}`);
-  const held = ladder.slice(first + 3);
-  assert.ok(held.length >= 5 && held.every((stretch) => Math.abs(stretch - READ_MODEL_IDLE_STRETCH_MAX) <= 1), `then holds at its stretch bound, never the floor: ${ladder.join(", ")}`);
+  const stoppedFrom = idleFrom + 5_000;
+  assert.ok(nowStarts.some((at) => at < stoppedFrom), `a positive control: the now view built inside its hot window: ${nowStarts.join(", ")}`);
+  assert.deepEqual(nowStarts.filter((at) => at >= stoppedFrom), [], `then it stopped, never rebuilt at the floor: ${nowStarts.map((at) => at - idleFrom).join(", ")}`);
   const wanted = f.count("wanted", idleFrom), today = f.count("today", idleFrom);
   assert.ok(today >= 300, `a positive control: ${today} builds at today's cadence`);
   assert.ok(Math.abs(wanted - today) <= 2, `a demand view is never floored: ${wanted} vs ${today}`);

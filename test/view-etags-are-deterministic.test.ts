@@ -175,9 +175,12 @@ test("a re-materialize over unchanged content posts no new body and a real chang
   t.after(() => ticker.release());
   const bodies = (): ViewBodyEntry[] => posted.flatMap((m) => (m.type === "body" ? [m.entry] : []));
   /** The worker ticks every 250 ms; stepping 5 s keeps each projector inside its 10 s stale bound, as in production. */
+  // W1-T12270: an unread read-paced view is stopped and republished as idle, so a reader keeps both views on cadence.
   const runTo = (ms: number): void => {
     while (clock.at < ms) {
       clock.at = Math.min(ms, clock.at + 5_000);
+      ticker.read("/v1/views/now");
+      ticker.read("/v1/views/repositories");
       ticker.tick();
     }
   };
