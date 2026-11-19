@@ -6,7 +6,7 @@
   priority: 0
   type: implement
   # 2026-11-18 operator session: this task edits the author gate (scripts/preflight-author.mjs), so the operator reviews its diff before it ships
-  verify: human
+  verify: human  # parked with the retirement: any risk ruling judged the record before this edit
   principles:
     tdd: strict
   risk: high # changes what the hand route treats as the gate; a check that leaves the author path must have a required CI job
@@ -23,7 +23,8 @@
     - doctrine/before-you-push/preflight-before-first-push.md
     - docs/operator-guide.md
     - test/ci/the-author-preflight-is-advisory-and-its-static-step-runs-only-checks-ci-does-not.test.ts
-  status: queued
+  status: blocked
+  retirement: retired  # retired by rule 1 (already shipped or declined) of the operator's mechanical rulings (2026-10-21, W1-T10371): a merged pull request on main carries this record's Remudero-Task trailer. Retired by the machine-filing judge, 2026-11-19T04:24:22.373Z
   attempts: 0
   acceptance:
     - claim: "Each FAST_GATE_STEPS entry carries a `ciJob` field naming the ci.yml job that runs the same check on every pull request (for example jscpd runs in `jscpd-gate`), or no field when no such job exists. The author static step passes `runPreflightFast` only the entries with no `ciJob`, and the receipt lists each skipped entry as left to CI with its job name"
