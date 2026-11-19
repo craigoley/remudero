@@ -127,10 +127,20 @@ test("W1-T12074 criterion 1: one list names each host piece with its path, what 
 
 test("W1-T12074 criterion 2: the doctor command reports FAIL with every missing piece and restore command, then OK when all are present", async (t) => {
   t.mock.property(process, "platform", "linux");
-  t.mock.env("RMD_BIN_DIR", "/custom/bin");
-  t.mock.env("RMD_FLEET_INSTALL_DIR", "/custom/daemon-install");
-  t.mock.env("RMD_CLEANUP_PATH", "/custom/cleanup/host.sh");
-  t.mock.env("RMD_TMP_SWEEP_PATH", "/custom/cleanup/hourly-sweep.sh");
+  const savedEnv = new Map(
+    ["RMD_BIN_DIR", "RMD_FLEET_INSTALL_DIR", "RMD_CLEANUP_PATH", "RMD_TMP_SWEEP_PATH"]
+      .map((key) => [key, process.env[key]] as const),
+  );
+  t.after(() => {
+    for (const [key, value] of savedEnv) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+  process.env.RMD_BIN_DIR = "/custom/bin";
+  process.env.RMD_FLEET_INSTALL_DIR = "/custom/daemon-install";
+  process.env.RMD_CLEANUP_PATH = "/custom/cleanup/host.sh";
+  process.env.RMD_TMP_SWEEP_PATH = "/custom/cleanup/hourly-sweep.sh";
   const pieces = hostPieces("linux", commandContext());
   const missingIds = ["dependency-tool", "heartbeat-script", "reclaim-script", "host-cleanup-script", "tmp-sweep-script", "github-login"];
   const missingPaths = new Set(pieces.filter((p) => missingIds.includes(p.id)).map((p) => p.path));
