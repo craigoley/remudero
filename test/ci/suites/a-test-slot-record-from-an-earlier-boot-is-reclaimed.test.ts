@@ -75,3 +75,22 @@ test("W1-T13811: a record from another pid namespace is not freed by the earlier
   f.acquire();
   assert.equal(reclaims(f.rows).some(row => row.coverage === "earlier-boot"), false);
 });
+
+test("W1-T13811: an earlier-boot record is reclaimed even when its pid number is live again in this boot", t => {
+  const f = slot(t, holder());
+  const lease = f.acquire({ isPidAlive: () => true });
+  assert.equal(lease.executionAllowed, true, `a reused pid number does not hold the slot: ${lease.note}`);
+  const rows = reclaims(f.rows);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]!.coverage, "earlier-boot");
+});
+
+test("W1-T13811: an earlier-boot record with no heartbeat cadence is reclaimed with the boot-change reason", t => {
+  const f = slot(t, holder({ heartbeatIntervalMs: undefined }));
+  const lease = f.acquire({ isPidAlive: () => true });
+  assert.equal(lease.executionAllowed, true, lease.note);
+  const rows = reclaims(f.rows);
+  assert.equal(rows.length, 1, "the reclaim is ledgered, not a silent unlink");
+  assert.equal(rows[0]!.coverage, "earlier-boot");
+  assert.match(String(rows[0]!.reason), new RegExp(`boot ${EARLIER_BOOT}.*current boot is ${CURRENT_BOOT}`));
+});

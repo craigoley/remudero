@@ -2166,6 +2166,10 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
               // A cadence-less record keeps the pid probe; a foreign one its boot id (the lease only without one).
               const recordedCadence = cadence !== undefined && Number.isSafeInteger(cadence) && cadence > 0;
               if (!local) return pidStale || probeAgedNamespace(held);
+              // A pid recorded under an earlier boot names nothing in this kernel, whether or not some process holds that
+              // number now, so the boot change decides first, before any pid or heartbeat reading.
+              const earlierBoot = earlierBootEvidence(held, bootId(), myNs);
+              if (earlierBoot) { quiescent = { held, evidence: earlierBoot }; return true; }
               if (!recordedCadence && held.workIdentity === undefined) return pidStale;
               reservedWorkUnproven = true;
               const silentMs = clock.now() - Date.parse(held.heartbeatAt);
@@ -2176,7 +2180,6 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
               if (!pidStale) return false;
               // The owner pid is gone or reused: only exact-tree terminal evidence (darwin: pid and lease) frees its capacity.
               const evidence = darwinMarkerOwnerEvidence(held, currentStat?.uid, true, clock.now(), darwinWaiter()) ??
-                earlierBootEvidence(held, bootId(), myNs) ??
                 (held.ownerUid === currentStat?.uid && held.ownerUid === process.getuid?.() &&
                 held.bootId === bootId() && held.pidNs === myNs && testSlotReservationIdentity(held) !== undefined
                 ? observeReservedTree(held, treeProbe)
