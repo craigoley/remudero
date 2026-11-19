@@ -6,7 +6,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { affectedSelectionOrFull, buildAffectedSuitesGraph, changedSymbols, fullRunTrigger, isPlanOnlyDiff,
   planOnlySelectionOrFull, readAffectedSuitesInput, readPlanOnlyListing, symbollessSourceFiles } from '../src/lib/affected-suites.ts';
-import { callerReachableSuites } from '../src/lib/ci-parity.ts';
+import { authorCiSplit, callerReachableSuites, readAuthorCiContract } from '../src/lib/ci-parity.ts';
 import { authorTestRunnerArgs } from '../src/lib/test-run-timeout.ts';
 import { admitStaticWork, enqueueTestSlot, lowPriorityCommand, memoryTestConcurrency, readHostLoad, readMemoryHeadroom,
   readVmStat, TEST_FILE_PEAK_BYTES, testRunArgv, testRunConcurrency, testSlotExecutionAllowed } from '../src/lib/test-slot.ts';
@@ -21,13 +21,13 @@ import { isMainModule, parseArgv } from './lib/argv.mjs';
 import { REPO_ROOT } from './lib/repo-root.mjs';
 import { captureStepSync, AUTHOR_OUTPUT_LIMIT_BYTES, AUTHOR_STEP_RUNTIME_MS } from './lib/author-step-capture.mjs';
 import { AUTHOR_RUNTIME_SAFETY_FACTOR, AUTHOR_SHUTDOWN_RESERVE_MS, runtimeBindings, readRuntimeProfile, runtimeDeadlineFit, closedDurationEvidence } from './lib/native-author-runtime.mjs';
-import { authorDependencyProvenance, sameAuthorDependencyProvenance } from './lib/author-dependency-provenance.mjs';
+import { authorDependencyProvenance, reprimeOwnSeedMaterialization, sameAuthorDependencyProvenance } from './lib/author-dependency-provenance.mjs';
 import { AUTHOR_CONTEXT_FORMAT, observeAuthorContext, requireAuthorContext } from './lib/author-context-compatibility.mjs';
 import { homedir, tmpdir } from 'node:os';
 import { accountAuthorPhases } from './lib/author-phase-accounting.mjs';
 import { AUTHOR_WORKFLOW_CONTRACT_MAX_MS, AUTHOR_WORKFLOW_CONTRACT_SUITES, authorWorkflowContractInputs } from './lib/author-workflow-contract.mjs';
 import { evaluateHeadIdentityGate } from './head-identity-gate.mjs';
-import { guardedAuthorEntry, MacAuthorCapacityRefusal, macAuthorRefusalReport, readMacAuthorAdmission } from './lib/mac-author-admission.mjs';
+import { guardedAuthorEntry, MacAuthorCapacityRefusal, macAuthorMemorySeams, macAuthorRefusalReport, readMacAuthorAdmission } from './lib/mac-author-admission.mjs';
 import { readBoundedJsonFile } from './lib/coverage-disk-profile.mjs';
 import { scanRepo as scanCoverageBlanking } from './coverage-session-blanking-check.mjs';
 
@@ -223,9 +223,16 @@ export const CENSUS_TIME_BOUND_LINE = 'census-precheck: census suites NOT MEASUR
  *  (CENSUS_FULL_PASS_SKIPPED_LABEL in scripts/census-precheck.mjs). */
 export const CENSUS_FULL_PASS_SKIPPED_LINE = 'census-precheck: full pass SKIPPED (no census-read file changed) - ';
 
-/** The author's census step: counts first, and the full suite pass only when the diff touches a census read. */
-export function authorCensusPrecheckArgs(root, baseSha) {
-  return [join(root, 'scripts/census-precheck.mjs'), '--base', baseSha, '--skip-when-unread'];
+/** W1-T12511 — the author's census step runs the census COUNTS only: the census suites and the instrument-surface
+ *  child are left to the required ci.yml jobs authorCiSplit names. When a job it names cannot be confirmed in
+ *  ci.yml (`countsOnly` false), the step keeps the W1-T11940 full pass, skipped only when no census read changed. */
+export function authorCensusPrecheckArgs(root, baseSha, countsOnly = true) {
+  return [join(root, 'scripts/census-precheck.mjs'), '--base', baseSha, countsOnly ? '--counts-only' : '--skip-when-unread'];
+}
+
+/** The receipt line naming each check the author path left to CI, and the job and required check that run it. */
+export function leftToCiLine(rows) {
+  return `left to CI: ${rows.length === 0 ? 'nothing (no ci.yml job confirmed)' : rows.map((r) => `${r.job} (${r.ciJob} as ${r.ciCheck})`).join(', ')}`;
 }
 
 /** Whether the census step skipped its full pass, and the counts it relied on, read from its own stdout line. */
@@ -380,7 +387,7 @@ export function authorHeadRef(root, declared, spawn = spawnSync) {
  * row and on a failed row whose tests never ran: the class its refusal site named (`refusalClass`), else the one the
  * receipt's own stages show. A dry run is read-only and has no row.
  */
-export function authorVerdictRow(receipt, { exitCode = null, headRef, refusalClass, refusalStage, capacityReasons } = {}) {
+export function authorVerdictRow(receipt, { exitCode = null, headRef, refusalClass, refusalStage, capacityReasons, entryCapacity } = {}) {
   if (receipt.dryRun) return undefined;
   const steps = receipt.steps ?? [];
   const outcome = receipt.verdict === 'passed' || (receipt.verdict === 'over-capacity' && receipt.pushEligible === true) ? 'passed'
@@ -398,6 +405,11 @@ export function authorVerdictRow(receipt, { exitCode = null, headRef, refusalCla
   const branch = typeof headRef === 'function' ? headRef() : headRef;
   const head = typeof branch === 'string' && branch ? branch : null;
   const waits = [receipt.staticAdmission?.waitedMs, Math.max(receipt.suiteQueue?.waitedMs ?? 0, receipt.testSlot?.waitedMs ?? 0)];
+  // W1-T10926: each stage that waited out memory pressure, so a later run can derive its wait limit from these.
+  const pressureWaits = [['entry', entryCapacity], ...(receipt.hostCapacity ?? []).map((row) => [row?.stage, row])]
+    .filter(([stage, row]) => typeof stage === 'string' && Number.isFinite(row?.pressureWait?.waitedMs))
+    .map(([stage, { pressureWait }]) => ({ stage, waited_ms: pressureWait.waitedMs, outcome: pressureWait.outcome,
+      limit_ms: pressureWait.limitMs, limit_basis: pressureWait.limitBasis }));
   return {
     run_id: `author-preflight-${Date.parse(receipt.startedAt) || 0}`,
     task_id: (head && runBranchTaskId(head)?.taskId) || 'CLI',
@@ -413,6 +425,7 @@ export function authorVerdictRow(receipt, { exitCode = null, headRef, refusalCla
       ...(Array.isArray(receipt.failureAttribution.tests) ? { preexisting_reds: preexistingReds(receipt) } : {}) } : {}),
     wall_ms: receipt.durationMs ?? null,
     admission_wait_ms: waits.reduce((sum, ms) => sum + (Number.isFinite(ms) && ms > 0 ? ms : 0), 0),
+    ...(pressureWaits.length > 0 ? { pressure_waits: pressureWaits } : {}),
     selection: receipt.selectedArm ?? receipt.selection ?? null,
   };
 }
@@ -500,19 +513,46 @@ export function concludeAuthorRun(receipt, { announce = true, ...context } = {})
   return exitCode;
 }
 
+/** W1-T10926 — this host's earlier memory-pressure waits for `stage` (ms), from the rows its author runs appended.
+ *  No configured ledger, or one that cannot be read, is no history: the wait limit then falls back to its sampling rule. */
+export function authorPressureWaitHistory(stage, { ledger = configuredAuthorLedger, read = (path) => readFileSync(path, 'utf8'),
+  log = (line) => console.error(line) } = {}) {
+  const target = (ledger ?? configuredAuthorLedger)();
+  if (typeof target?.root !== 'string') return [];
+  let text;
+  try { text = read(ledgerPathFor({ root: target.root })); }
+  catch (error) {
+    log(`author preflight: no pressure-wait history read (${error.code ?? error.message}); the ${stage} wait limit uses its sampling rule`);
+    return [];
+  }
+  const waits = [];
+  for (const line of text.split('\n')) {
+    if (!line.includes('"pressure_waits"')) continue;
+    let row;
+    try { row = JSON.parse(line); }
+    catch { continue; } // A torn line names no wait; only whole rows are history.
+    for (const wait of Array.isArray(row?.pressure_waits) ? row.pressure_waits : []) {
+      if (wait?.stage === stage && Number.isFinite(wait.waited_ms) && wait.waited_ms >= 0) waits.push(wait.waited_ms);
+    }
+  }
+  return waits;
+}
+
 /** The script's entry. A capacity refusal at entry never reaches `main`, so its row is appended here. */
 export function runGuardedAuthor(argv, { root = REPO_ROOT, runAuthor = main, readAdmission = readMacAuthorAdmission,
-  verdictLedger = {} } = {}) {
+  verdictLedger = {}, memory = readAdmission === readMacAuthorAdmission
+    ? macAuthorMemorySeams({ pastWaits: (stage) => authorPressureWaitHistory(stage, { ledger: verdictLedger.ledger }) }) : null } = {}) {
   const startedAt = Date.now();
-  let reached = false, admission;
-  const exitCode = guardedAuthorEntry(argv, { root, readAdmission: (...args) => (admission = readAdmission(...args)),
-    runAuthor: (args, deps) => { reached = true; return runAuthor(args, { ...deps, verdictLedger }); } });
+  let reached = false, admission, entryCapacity;
+  const exitCode = guardedAuthorEntry(argv, { root, readAdmission: (...args) => (admission = readAdmission(...args)), memory,
+    recordEntry: (settled) => { entryCapacity = settled; },
+    runAuthor: (args, deps) => { reached = true; return runAuthor(args, { ...deps, verdictLedger: { ...verdictLedger, entryCapacity } }); } });
   if (!reached) {
     const declared = argv.find((arg) => arg.startsWith('--head-ref='))?.slice('--head-ref='.length)
       ?? (argv.includes('--head-ref') ? argv[argv.indexOf('--head-ref') + 1] : undefined);
     recordAuthorVerdict({ verdict: 'over-capacity', pushEligible: false, dryRun: false, steps: [],
       startedAt: new Date(startedAt).toISOString(), durationMs: Date.now() - startedAt },
-    { ...verdictLedger, exitCode, refusalClass: 'other', refusalStage: 'entry', capacityReasons: admission?.reasons,
+    { ...verdictLedger, exitCode, refusalClass: 'other', refusalStage: 'entry', capacityReasons: (entryCapacity ?? admission)?.reasons, entryCapacity,
       headRef: () => authorHeadRef(root, declared) });
   }
   return exitCode;
@@ -818,9 +858,49 @@ export function attributionLines(result) {
       counts.failingOnlyAtHead}; unattributed ${counts.unattributed}`];
 }
 
+/**
+ * W1-T13736 — whether a run on a Node other than the .nvmrc pin re-runs itself under an installed pin. Candidates, in
+ * order: ~/.local/opt/node-v<pin>, its nodejs.org archive form node-v<pin>-<platform>-<arch>, then nvm's
+ * versions/node/v<pin>; the first that exists and whose own --version reads v<pin> is chosen. INVARIANT
+ * never-another-node: nothing here downloads or installs a Node, a candidate reading another version is never chosen,
+ * and when this process already is the chosen install (the re-run child) it refuses, so the re-run happens at most once.
+ */
+export function pinnedNodeReexec({ pin, current, env = process.env, home = homedir(), platform = process.platform,
+  arch = process.arch, execPath = process.execPath, exists = existsSync, spawn = spawnSync,
+  versionOf = (path) => spawn(path, ['--version'], { encoding: 'utf8' }).stdout?.trim(), realpath = realpathSync }) {
+  const nvmDir = env.NVM_DIR || join(home, '.nvm');
+  const candidates = [join(home, '.local/opt', `node-v${pin}`, 'bin/node'),
+    join(home, '.local/opt', `node-v${pin}-${platform}-${arch}`, 'bin/node'), join(nvmDir, 'versions/node', `v${pin}`, 'bin/node')];
+  const file = `node-v${pin}-${platform}-${arch}.tar.gz`, dist = `https://nodejs.org/dist/v${pin}`;
+  const sum = { darwin: 'shasum -a 256 -c -', linux: 'sha256sum -c -' }[platform];
+  const install = env.NVM_DIR || exists(join(home, '.nvm', 'nvm.sh'))
+    ? `nvm install ${pin} (nvm checks the download against the release's SHASUMS256.txt)`
+    : sum ? `cd "$(mktemp -d)" && curl -fsSLO ${dist}/${file} && curl -fsSLO ${dist}/SHASUMS256.txt && ` +
+      `grep ' ${file}$' SHASUMS256.txt | ${sum} && mkdir -p "$HOME/.local/opt" && tar -xzf ${file} -C "$HOME/.local/opt"`
+      : `the nodejs.org release for ${platform}-${arch} from ${dist}/ checked against its SHASUMS256.txt`;
+  // W1-T13720: name the remedy. On the fleet host the units converge installs the pin and raises
+  // host-node-behind while it cannot; a bare version pair sent every lane to guess.
+  const remedy = `On the fleet host the units converge (deploy/install-host-units.sh --install) installs the .nvmrc pin and raises the ` +
+    `host-node-behind alert while it cannot; read its host-node: journal lines. Elsewhere, install Node ${pin}: ${install}; ` +
+    `the author preflight then re-runs itself under it`;
+  const prefix = `Node ${pin} required; got ${current}. `;
+  const misread = [];
+  for (const path of candidates) {
+    if (!exists(path)) continue;
+    const read = versionOf(path);
+    if (read !== `v${pin}`) { misread.push(`${path} reads ${read || 'no version'}`); continue; }
+    if (realpath(path) === realpath(execPath)) {
+      return { candidates, refuse: `${prefix}This Node (${execPath}) is the install at ${path}, whose --version reads v${pin}; ` +
+        `it is not re-run again. ${remedy}` };
+    }
+    return { candidates, reexec: path };
+  }
+  return { candidates, refuse: prefix + (misread.length ? `Not run: ${misread.join('; ')}. ` : '') + remedy };
+}
+
 export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
   select = (changed, range) => authorSelection(root, changed, range), host, admitHost = () => undefined,
-  testSlot = {}, enqueueTestSlot: enqueueSuiteSlot = enqueueTestSlot, verdictLedger = {} } = {}) {
+  testSlot = {}, enqueueTestSlot: enqueueSuiteSlot = enqueueTestSlot, verdictLedger = {}, pinnedNode: pinnedNodeLocation = {} } = {}) {
   const { values, helpRequested } = parseArgv(argv, {
     'dry-run': { type: 'boolean' },
     deadline: { type: 'string' },
@@ -941,11 +1021,16 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
       throw new Error('runtime admission requires a future ISO deadline and a native runtime profile together');
     }
     const pinnedNode = readFileSync(join(root, '.nvmrc'), 'utf8').trim().replace(/^v/, '');
-    // W1-T13720: name the remedy. On the fleet host the units converge installs the pin and raises
-    // host-node-behind while it cannot; a bare version pair sent every lane to guess.
-    if (process.versions.node !== pinnedNode) throw refusal('node-version', `Node ${pinnedNode} required; got ${process.versions.node}. ` +
-      `On the fleet host the units converge (deploy/install-host-units.sh --install) installs the .nvmrc pin and raises the ` +
-      `host-node-behind alert while it cannot; read its host-node: journal lines. Elsewhere, install Node ${pinnedNode}`);
+    // W1-T13736: off the pin, re-run this script under an installed pin with the same flags, arguments and environment.
+    if (process.versions.node !== pinnedNode) {
+      const located = pinnedNodeReexec({ spawn, ...pinnedNodeLocation, pin: pinnedNode, current: process.versions.node });
+      if (located.refuse !== undefined) throw refusal('node-version', located.refuse);
+      console.log(`author preflight: Node ${process.versions.node} is not the .nvmrc pin ${pinnedNode}; re-running under Node ${pinnedNode} at ${located.reexec}`);
+      const child = spawn(located.reexec, [...process.execArgv, fileURLToPath(import.meta.url), ...argv], { stdio: 'inherit', env: process.env });
+      if (child.error) throw new Error(`the re-run under Node ${pinnedNode} (${located.reexec}) could not start: ${child.error.message}`);
+      if (child.signal) throw new Error(`the re-run under Node ${pinnedNode} (${located.reexec}) ended by signal ${child.signal}`);
+      return child.status;
+    }
     // Turning worktreeConfig on removes Git's main-worktree-only exception for these keys.
     // A suite can enable it midway through validation and poison every sibling checkout.
     // Admit the topology, never migrate an operator's shared Git configuration here.
@@ -1045,8 +1130,11 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
       if (partial.unavailable) for (const why of partial.unavailable) console.log(`full-fallback partial set: ${why}`);
     }
     if (!values['dry-run']) {
-      const dependencyBefore=authorDependencyProvenance(root);
-      receipt.dependencyProvenance={before:dependencyBefore,assurance:'metadata/tool precheck, not cached-test permission'};
+      let dependencyBefore=authorDependencyProvenance(root);
+      // W1-T11468: a checkout's own seed materialization behind its lockfile is re-primed once, then re-checked.
+      const reprime=reprimeOwnSeedMaterialization(root,dependencyBefore,{run});
+      if(reprime){dependencyBefore=reprime.after;console.log(`dependency re-prime: exit ${reprime.record.status}; ${reprime.record.firstLine}`);}
+      receipt.dependencyProvenance={before:dependencyBefore,...(reprime?{reprime:reprime.record}:{}),assurance:'metadata/tool precheck, not cached-test permission'};
       if(dependencyBefore.state!=='present')throw refusal('dependency-precheck',`installed dependency precheck unavailable: ${dependencyBefore.reason}; expensive validation not started`);
       // Production phases only: an injected spawn is a diagnostic seam with no native slot to bind.
       const nativeBoundary = spawn === spawnSync;
@@ -1079,8 +1167,14 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
       reusable = stages;
       console.log(`stage reuse: ${stageReuse.state}; ${stageReuse.reason}`);
       // A reused census passed measured: it was never time-bound and its full-pass note is the one it printed.
+      // W1-T12511: what this run leaves to CI, confirmed against this tree's ci.yml; the static child derives the same split.
+      const ciSplit = authorCiSplit(readAuthorCiContract(root));
+      receipt.leftToCi = ciSplit.leftToCi;
+      receipt.authorPathKept = ciSplit.kept;
+      console.log(leftToCiLine(ciSplit.leftToCi));
+      for (const { job, reason } of ciSplit.kept) console.log(`kept on the author path: ${job} — ${reason}`);
       const censusReused = Boolean(reuseStage('census-precheck'));
-      const census = censusReused ? { status: 0 } : runStep('census-precheck', authorCensusPrecheckArgs(root, receipt.baseSha));
+      const census = censusReused ? { status: 0 } : runStep('census-precheck', authorCensusPrecheckArgs(root, receipt.baseSha, ciSplit.censusCountsOnly));
       receipt.censusFullPass = censusReused ? previous.censusFullPass ?? { skipped: false } : censusFullPassNote(census);
       if (receipt.censusFullPass.skipped) console.log(`census full pass SKIPPED - ${receipt.censusFullPass.reliedOn}`);
       const censusTimeBound = censusTimeBoundOnly(census);

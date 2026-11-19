@@ -195,8 +195,9 @@ test("W1-T11940 criterion 3: a diff touching no census-read file skips the full 
   assert.ok(line, io.out.join("\n"));
   assert.match(line, /relied on counts OK over 1 changed file\(s\) against main and 1 census suite\(s\) declaring @census-reads/);
 
-  // The author preflight asks for the gate, and reads the skip and its count from the census step's own stdout.
-  assert.deepEqual(authorCensusPrecheckArgs("/r", "abc").slice(1), ["--base", "abc", "--skip-when-unread"]);
+  // The author preflight asks for the gate when ci.yml cannot confirm its census rows (W1-T12511: else counts only),
+  // and reads the skip and its count from the census step's own stdout.
+  assert.deepEqual(authorCensusPrecheckArgs("/r", "abc", false).slice(1), ["--base", "abc", "--skip-when-unread"]);
   assert.ok(CENSUS_FULL_PASS_SKIPPED_LINE.startsWith(`${CENSUS_FULL_PASS_SKIPPED_LABEL} - `), "the two scripts name one line");
   const note = censusFullPassNote({ status: 0, stdout: io.out.join("\n") });
   assert.equal(note.skipped, true);

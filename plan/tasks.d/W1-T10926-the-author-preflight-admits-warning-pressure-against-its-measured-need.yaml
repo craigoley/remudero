@@ -14,7 +14,7 @@
   files:
     - scripts/lib/mac-author-admission.mjs
     - test/infra/the-author-preflight-admits-warning-pressure-against-its-measured-need.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-10-28 on the Mac mini (16 GiB RAM), read at origin/main 170ef90ef.

@@ -18946,7 +18946,7 @@ function repeatedFixRefusalReason(reason: string): string {
 /** W1-T2981 widened this from the single `"fix-dispatch"` literal: the registry was always a
  *  DAEMON-LIFETIME seam (the freshness exit drains it), and the retro is the loop's other long await. */
 export type DetachedActionKind = "fix-dispatch" | "retro" | "auto-triage" | "ci-learning" | "measurement-cadence" | "benchmark-cohort"
-  | "light-pass-action";
+  | "light-pass-action" | "plan-task-move";
 export type DetachedFixPhase = "admission" | "worker" | "ci-wait";
 export type DetachedFixPhaseObserver = (phase: DetachedFixPhase, wait?: { sinceMs: number; attempts: number }) => void;
 export interface DetachedFixControl { signal: AbortSignal; admissionSinceMs?: number }

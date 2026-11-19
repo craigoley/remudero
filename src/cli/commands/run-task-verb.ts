@@ -4964,6 +4964,9 @@ export async function runTask(
     if (privatePlan === undefined) throw new Error("task catalog unreadable (ops-plan-unavailable)");
     const composition = composeSecondaryPlan(plan, privatePlan);
     if (composition.outcome !== "ok") throw new Error(`task catalog unreadable (ops-${composition.outcome})`);
+    // W1-T13749: the tick holds a task with an invalid edge, or one depending on it; its run refuses before any worker.
+    const hold = composition.held.get(taskId);
+    if (hold !== undefined) throw new Error(`task catalog unreadable (ops-held-${hold.reason})`);
     // Credit and assertRunnable need the prerequisite records, not just the chosen task.
     // Their catalog provenance stays private; public source/claim roots are unchanged.
     const tasks = composition.plan.tasks.map(record => composition.secondaryIds.has(record.id)

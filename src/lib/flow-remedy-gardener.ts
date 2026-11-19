@@ -14,7 +14,7 @@ import { PR_TERMINAL_STEP } from "./ledger-carry.js";
 import { ledgerRotationEntries, readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { machineShardFilingRefusal, machineShardLandingGuard, renderMachineShard } from "./machine-filing.js";
 import { retirementReopensAt, type RetirementDated } from "./mechanical-rulings.js";
-import { loadPlanFromYaml, newTestPath, parseTasksFromYaml } from "./plan.js";
+import { newTestPath, parseTasksFromYaml } from "./plan.js";
 import { blockerOwnerModule, PR_BLOCKERS, type PrBlocker } from "./pr-blocker.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import type { LedgerRecord } from "./retro.js";
@@ -570,8 +570,6 @@ export function ladderGardenSpec(deps: GardenerDeps, input: LadderSpecInput): Ga
       const contents = sources.draftShard ? sources.draftShard(action, id) : draftShard(action, id, search, kind);
       const verdict = ciFrictionRecordVerdict(contents, `${kind.stem}:${id}`);
       if (!verdict.ok) throw new Error(`${kind.stem} gardener: drafted record failed lint (${verdict.reason})`);
-      const draftedPlan = loadPlanFromYaml(contents, `${kind.stem}:${id}`);
-      if (draftedPlan.tasks.length !== 1) throw new Error(`${kind.stem} gardener: drafted shard must contain exactly one task (found ${draftedPlan.tasks.length})`);
       const dir = join(resolveRepoLayout(ws.root).planDir, "tasks.d");
       const path = join(dir, `${id}-${kind.stem}-${slug(flowCauseLabel(action.price.key), 80)}.yaml`);
       // lint-plan's verdict before the draft reaches disk; the spec's `landingRefusal` re-reads the landing.

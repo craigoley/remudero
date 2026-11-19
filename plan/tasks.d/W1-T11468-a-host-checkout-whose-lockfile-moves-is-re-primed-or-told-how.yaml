@@ -11,6 +11,9 @@
   plan_refs: [W1-T10507, W1-T10508, W1-T10739]
   files: [hooks/post-merge, scripts/lib/author-dependency-provenance.mjs, scripts/preflight-author.mjs, src/lib/dependency-seeds.ts, deploy/DEPENDENCY-SEEDS.md, test/review/a-host-checkout-whose-lockfile-moves-is-re-primed-or-told-how.test.ts]
   priority: 2
+  # refusal-amendment (W1-T11468, run work-fix-dispatch-W1-T11468-1795061114418-4d3c@799fde7c084ff72da53f2a418f2739a10e6d6927, 2026-11-19T04:25:10.921Z): the worker refused criterion 1 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
+  #   worker evidence: The one named remedy is a PR-body edit and I have no shell or gh to make it. The tree already matches the task design, and the body's "no hooks/post-merge" claim is stale and must be rewritten to say the changeset adds it.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   # backlog gardener: band=2 evidence=df8896e7cf8530a7
   # backlog gardener: placed=2026-11-07T06:32:14.941Z

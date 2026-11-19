@@ -10,7 +10,7 @@
   files:
     - scripts/task-id-existence-check.mjs
     - test/plan/a-shard-main-moved-out-after-the-branch-was-cut-is-not-added-by-it.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A shard main deleted after the branch was cut, which the branch carries unchanged, is not an id the branch adds"

@@ -53,7 +53,7 @@ import { createThreadEventSync, registryThreadItems, type InboxResponderDeps } f
 import type { InboxCausalScope } from "../../lib/inbox-thread.js";
 import { gitRecommendationEvidence, RECOMMENDATION_SEED_PATH } from "../../lib/inbox-recommendation.js";
 import { censusRunDirs } from "../../lib/run-child-contract.js";
-import { plannedSequence, runDrain, type DrainDeps, type MergedSet, type OpenPrCheck } from "../../lib/drain.js";
+import { loadTargetPlanQuarantiningDuplicates, plannedSequence, runDrain, type DrainDeps, type MergedSet, type OpenPrCheck } from "../../lib/drain.js";
 import { fileTargetJobStore, nativeTargetAdmission, readTargetExecution, type ProductBuildInstances } from "../../lib/product-build.js";
 import { loadManagedRepos } from "../../lib/managed-repos.js";
 import type { RunResult } from "../../lib/run-result.js";
@@ -83,6 +83,7 @@ import { sweepInflightLocksWithReceipts } from "../../lib/benchmark-run.js";
 import { ledgerMemoHolders, readLedgerUnionRecordsSync } from "../../lib/ledger-union.js";
 import { childMeasurementCadenceSpawn, measurementCadenceChildRunner } from "../../lib/measurement-cadence.js";
 import { loadPlan, type Plan } from "../../lib/plan.js";
+import { createPlanTaskMover, opsCatalogOutcomeReader, planTaskMovePorts, type PlanTaskMoveFlag, type PlanTaskMoveSwitch } from "../../lib/plan-task-move-janitor.js";
 import { PLAN_DESTINATION_KINDS, planDestinationRepository, planDestinationPath, resolvePlanDestination, type PlanDestinationRepository } from "../../lib/plan-destination.js";
 import { readOperatorReleaseRecords } from "../../lib/machine-filing-judge.js";
 import { readReleaseLedgerLines } from "../../lib/operator-release.js";
@@ -877,18 +878,18 @@ export async function daemonSreLaneEnabled(
   return sreLaneEnabled(sreLane);
 }
 
-/** W1-T12236: the boot light sweep takes the open pull request views of a tick read that started in this tick.
- * Any other scope, no tick read, an older one, or one whose open list failed gives undefined: the hook reads its own. */
+/** W1-T12236 / W1-T13709: boot keeps its tick rule; scoped passes may use a fresh, clean tick read.
+ * A no-scope refill, no tick read, an older one, or one whose open list failed reads its own views. */
 export function servedOpenPrViews(
   published: () => ReadGeneration<TickReadFacts> | undefined,
   tickStartedAtMs: () => number | undefined,
-): (scope?: LightPassScope) => Promise<OpenPrView[]> | undefined {
+): (scope?: LightPassScope) => (Promise<OpenPrView[]> & { servedReadStartedAtMs?: number }) | undefined {
   return (scope) => {
     const generation = published();
     const startedAtMs = tickStartedAtMs();
-    if (scope?.scope !== "boot" || !generation || startedAtMs === undefined) return undefined;
+    if (scope === undefined || !generation || startedAtMs === undefined) return undefined;
     if (generation.publishedAtMs < startedAtMs || generation.facts.openPrError !== undefined) return undefined;
-    return Promise.resolve(structuredClone(generation.facts.openPrViews));
+    return Object.assign(Promise.resolve(structuredClone(generation.facts.openPrViews)), { servedReadStartedAtMs: generation.publishedAtMs });
   };
 }
 
@@ -956,30 +957,40 @@ export function opsCatalogShadowFeed(
   };
 }
 
-type OpsDispatchSelection = { outcome: "off" } | { outcome: "on"; repository: string }
-  | { outcome: "unavailable"; reason: string };
+type OpsDispatchSelection = PlanTaskMoveFlag;
 
-/** Read the new flag, reusing canonical repository validation and refusing a changed file. */
-function opsDispatchSelection(stateDir: string): OpsDispatchSelection {
+/** Read one flag of the selection file, reusing canonical repository validation and refusing a changed file. */
+function planDestinationFlag(stateDir: string, name: "dispatch_ops_tasks" | "move_public_tasks", invalid: string,
+  readFile: (path: string) => string | undefined = readFileIfExists): OpsDispatchSelection {
   try {
-    const path = planDestinationPath(stateDir), before = readFileIfExists(path);
+    const path = planDestinationPath(stateDir), before = readFile(path);
     if (before === undefined) return { outcome: "off" };
     const record: unknown = JSON.parse(before);
     if (record === null || typeof record !== "object" || Array.isArray(record)) return { outcome: "unavailable", reason: "selection_unreadable" };
-    const flag = (record as Record<string, unknown>).dispatch_ops_tasks;
+    const flag = (record as Record<string, unknown>)[name];
     if (flag === undefined || flag === false) return { outcome: "off" };
-    if (flag !== true) return { outcome: "unavailable", reason: "invalid_dispatch_flag" };
+    if (flag !== true) return { outcome: "unavailable", reason: invalid };
     const named = planDestinationRepository(stateDir);
-    if (before !== readFileIfExists(path)) return { outcome: "unavailable", reason: "selection_changed" };
+    if (before !== readFile(path)) return { outcome: "unavailable", reason: "selection_changed" };
     if (named.outcome !== "named" || (record as Record<string, unknown>).repository !== `${named.owner}/${named.repo}`) {
       return { outcome: "unavailable", reason: "selection_unreadable" };
     }
-    return { outcome: "on", repository: `${named.owner}/${named.repo}` };
+    return { outcome: "on", repository: `${named.owner}/${named.repo}`, checkoutDir: named.checkoutDir };
   } catch (error) {
     // A local selection failure is UNKNOWN, never a public fallback for a private task.
     void error;
     return { outcome: "unavailable", reason: "selection_unreadable" };
   }
+}
+
+function opsDispatchSelection(stateDir: string): OpsDispatchSelection {
+  return planDestinationFlag(stateDir, "dispatch_ops_tasks", "invalid_dispatch_flag");
+}
+
+/** W1-T13681: `move_public_tasks` beside `dispatch_ops_tasks`, each read with the same rules on every tick. */
+export function planTaskMoveSwitch(stateDir: string, readFile?: (path: string) => string | undefined): PlanTaskMoveSwitch {
+  return { move: planDestinationFlag(stateDir, "move_public_tasks", "invalid_move_flag", readFile),
+    dispatch: planDestinationFlag(stateDir, "dispatch_ops_tasks", "invalid_dispatch_flag", readFile) };
 }
 
 /** W1-T12244: the parts of the time from the process start to the first tick, on the daemon clock. */
@@ -1487,6 +1498,8 @@ export async function daemonCommand(
     registeredGardenEnabled(name, target.isSelf)
       ? startGardenOffLoop(name, intervalMs, { flight: gardenFlight, spawnPass: gardenPassSpawn, log, observe: (event) => gardenerRuntime.record(event), ...(injectedPassSpawn ? {} : { due: registeredGardenDueProbe(name, gardenContextFor(name)) }) })
       : { stop() {} };
+  // W1-T13585: a foreign target's plan can hold other repositories' tasks whose dependencies it cannot see.
+  const foreignTargetPlanLoad = (path: string) => loadTargetPlanQuarantiningDuplicates(path, target.repo);
   if (!target.isSelf && !flagValue(rest, "--plan")) {
     const repoDir = join(reposDir, target.repo);
     if (!existsSync(repoDir)) {
@@ -1496,7 +1509,7 @@ export async function daemonCommand(
       execFileSync("git", ["-C", repoDir, "fetch", "--quiet", "origin"], { stdio: "pipe" });
       execFileSync("git", ["-C", repoDir, "reset", "--hard", "--quiet", "origin/main"], { stdio: "pipe" });
     }
-    plan = loadDaemonPlan(target.planPath, log, raiseDuplicate);
+    plan = loadDaemonPlan(target.planPath, log, raiseDuplicate, foreignTargetPlanLoad);
   } else if (target.isSelf && !flagValue(rest, "--plan")) {
     // ── GIT SELF-SYNC (W1-T60): self-hosting must not read the daemon's own working tree
     // either — same fail-closed gate as run-task/drain (see syncPlanOrRefuse).
@@ -1511,7 +1524,7 @@ export async function daemonCommand(
     plan = synced.plan;
   } else {
     // An explicit --plan overrides the derived path — read it literally, no git sync.
-    plan = loadDaemonPlan(target.planPath, log, raiseDuplicate);
+    plan = target.isSelf ? loadDaemonPlan(target.planPath, log, raiseDuplicate) : loadDaemonPlan(target.planPath, log, raiseDuplicate, foreignTargetPlanLoad);
   }
   bootPhases.mark("plan_load");
 
@@ -2306,6 +2319,9 @@ export async function daemonCommand(
     const summary = await runDaemonFn(
       plan,
       {
+        // W1-T988: the target this daemon already resolved and already ledgers as `daemon.target`'s
+        // `repo:` field — the SAME value, never a second resolution that could drift from it.
+        targetRepo: target.repo,
         claimSweepSettled,
         bootPhases,
         refreshMerged,
@@ -2333,6 +2349,13 @@ export async function daemonCommand(
           daemonPlanCopies.observe(fresh);
         },
         ...(readOpsTaskDispatch ? { readOpsTaskDispatch } : {}),
+        // W1-T13681: the move janitor reads move_public_tasks on every tick; absent or false, it does nothing.
+        planTaskMover: createPlanTaskMover(planTaskMovePorts({
+          publicRoot: targetCheckoutRoot, publicRepository: `${target.owner}/${target.repo}`,
+          readSwitch: () => planTaskMoveSwitch(join(config.root, "state")),
+          readOpsCatalog: opsCatalogOutcomeReader(opsShadow),
+          cliEntry: fileURLToPath(new URL(`../../run-task${import.meta.url.endsWith(".ts") ? ".ts" : ".js"}`, import.meta.url)),
+        })),
         ...(opsShadow ? {
           secondaryCatalogShadowSource: opsShadow.current,
           primaryPlanCommit: () => planReaders.revisions.revisionOf(activePlanRef.current)?.commit,
@@ -2351,9 +2374,6 @@ export async function daemonCommand(
         readRestartHistory: () => {
           return readRestartHistoryLines(dirname(ledgerPathFor(config)));
         },
-        // W1-T988: the target this daemon already resolved and already ledgers as `daemon.target`'s
-        // `repo:` field — the SAME value, never a second resolution that could drift from it.
-        targetRepo: target.repo,
         taskInputAnswer: (taskId) => taskInputAnswer(effectiveRepoRoot, taskId),
         // W1-T9680: a worker push's token — the credential socket's own scoped mint, else the ambient GH_TOKEN.
         probeFleetPushCredential: receivePackCredentialProbe({ originUrl: `https://github.com/${target.owner}/${target.repo}.git`,
