@@ -180,7 +180,7 @@ import {
   writeProviderRoutingPolicyOverride,
   type ProviderRoutingPolicyOverrideInput,
 } from "./provider-routing-policy.js";
-import { appendLedger } from "./ledger.js";
+import { appendLedger, setLedgerRotationRole, type LedgerRotationRole } from "./ledger.js";
 import { createServeDemand, recordServeRequest, type ServeDemandOptions } from "./serve-demand.js";
 import { committedViewBody, createReadDeadline, readDeadlineConfig, withReadDeadline } from "./serve-read-deadline.js";
 import { startServeThreadLoad, type ServeThreadLoadOptions } from "./serve-thread-load.js";
@@ -3457,6 +3457,23 @@ export function startIncidentInvariantsMonitor(
   }, { stallProfiler });
 }
 
+let activeServeAssemblies = 0;
+let priorRotationRole: LedgerRotationRole;
+
+function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
+  // W1-T13236: standby can append during assembly, before the main listener starts.
+  if (activeServeAssemblies++ === 0) priorRotationRole = setLedgerRotationRole("backstop-only");
+  const releaseRotationRole = (): void => {
+    if (--activeServeAssemblies === 0) setLedgerRotationRole(priorRotationRole);
+  };
+  try {
+    return wireServeServer(deps, releaseRotationRole);
+  } catch (error) {
+    releaseRotationRole();
+    throw error;
+  }
+}
+
 /**
  * Build (but do not `.listen()`) the full `rmd serve` HTTP server — one call, every route wired.
  * `deps.board.github`'s background refresh keeps its facts warm with no viewer, paced by quota
@@ -3464,7 +3481,7 @@ export function startIncidentInvariantsMonitor(
  * is not off-loop keeps {@link gatePrewarmOnClients}'s reader gate instead. Both stop when the
  * returned server `close`s, so no timer outlives it.
  */
-function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
+function wireServeServer(deps: ServeDeps, releaseRotationRole: () => void): ServeServerAssembly {
   // The CLI supplies this property only after loadConfig succeeds, including an absent optional list.
   // Direct callers without a source stay unreported; no directory name is permission evidence.
   const supplied = deps.modelApprovalConfig ?? (Object.hasOwn(deps, "modelApprovals")
@@ -3683,12 +3700,11 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   });
   server.once("listening", liveAnalyticsCache.start);
   server.on("close", liveAnalyticsCache.stop);
-  const startLedgerWriters = (): void => {
-    server.on("close", watchInstanceLiveness({ registryPath: daemonInstanceRegistryPath(deps.questionsRoot), ledgerPath: deps.ledgerPath, log: deps.log, ...deps.instances,
-      selectedRegistryObserver: routeAssembly.selectedRegistryObserver }));
+  const startLedgerWriters = (): (() => void) => {
+    const stopLiveness = watchInstanceLiveness({ registryPath: daemonInstanceRegistryPath(deps.questionsRoot), ledgerPath: deps.ledgerPath, log: deps.log, ...deps.instances,
+      selectedRegistryObserver: routeAssembly.selectedRegistryObserver });
     const stopInvariants = startIncidentInvariantsMonitor(deps.ledgerPath, { ...deps.incidentInvariants, log: deps.log });
-    // W1-T5175: serve samples its memory from its own loop, beside the invariants it ledgers. ONE close
-    // listener stops both: the server already sits at its listener ceiling.
+    // W1-T5175: serve samples its memory from its own loop, beside the invariants it ledgers.
     // W1-T8711: the shared producer observation rides the sample cadence above (no timer of its own), once at start and
     // once at close. It never throws and never waits on anything but one small atomic write.
     const publishServe = (scenario: "serve-steady" | "serve-stopped"): void => {
@@ -3716,17 +3732,26 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     });
     // W1-T11816: each thread's CPU and loop share, and the gc share, once a minute over the threads sampled above.
     const threadLoad = startServeThreadLoad({ ...deps.threadLoad, workers: liveThreads, log: (step, extra) => deps.log?.(step, extra) });
-    server.on("close", () => {
+    return () => {
+      stopLiveness();
       stopInvariants();
       stopMemory();
       threadLoad.stop();
       // A supervised generation closing at a handoff is not serve stopping: its successor publishes its own, and a
       // supervisor that really stopped is read as stale (unknown), never as an explicit stop it did not make.
       if (!deps.generation) publishServe("serve-stopped");
-    });
+    };
   };
-  if (deps.generation) server.setMaxListeners(server.getMaxListeners() + 1).once("listening", startLedgerWriters);
-  else startLedgerWriters();
+  let stopLedgerWriters: (() => void) | undefined;
+  if (deps.generation) server.setMaxListeners(server.getMaxListeners() + 1).once("listening", () => { stopLedgerWriters = startLedgerWriters(); });
+  else stopLedgerWriters = startLedgerWriters();
+  server.once("close", () => {
+    try {
+      stopLedgerWriters?.();
+    } finally {
+      releaseRotationRole();
+    }
+  });
   const githubAuth = { settled: routeAssembly.githubAppReady === undefined };
   void routeAssembly.githubAppReady?.then(() => (githubAuth.settled = true));
   // W1-T9508, memory tier 2: the read model's worker (its views lanes, slow lane and oracle with it) and the board
