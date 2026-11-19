@@ -18,6 +18,11 @@
     - test/rules/a-stalled-shard-checkout-times-out-and-retries.test.ts
     - test/ci/a-stalled-checkout-fetch-aborts-and-retries.test.ts
     - scripts/census-precheck.mjs
+    - test/helpers/checkout-retry-pair.ts
+    - test/scanner-gate-config.test.ts
+    - test/diff-coverage.test.ts
+    - test/fast-lane-classifier.test.ts
+    - test/a-coverage-skip-message-names-the-diff-class.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -27,6 +32,8 @@
       proof: "grep: W1-T13825 criterion 2 in test/rules/a-stalled-shard-checkout-times-out-and-retries.test.ts"
     - claim: "invariant:fetch-unchanged — both checkout steps in each job keep fetch-depth 0, the pinned actions/checkout sha and the W1-T13321 low-speed env"
       proof: "grep: W1-T13825 criterion 3 in test/rules/a-stalled-shard-checkout-times-out-and-retries.test.ts"
+    - claim: "The no-continue-on-error and no-step-if guards admit exactly this checkout pair, and a pair that drifts from its shape still answers to them"
+      proof: "grep: W1-T13825 criterion 4 in test/rules/a-stalled-shard-checkout-times-out-and-retries.test.ts"
   rationale: |
     W1-T13321 (#19016, merged 2026-11-17 06:49Z) did not stop the stall. MEASURED 2026-11-19 from the Actions jobs
     API over every ci.yml run created 2026-11-17 06:50Z to 2026-11-19 13:00Z (1327 runs, all attempts): 18,150
@@ -59,6 +66,13 @@
     5. A suite under test/rules/ is a CI census, so a-stalled-shard-checkout-times-out-and-retries.test.ts gets a
        PRECHECK_PARITY row in scripts/census-precheck.mjs, through PRECHECK_PATH_TRIGGERED_SUITES: it is asked before
        the push when ci.yml, the precheck or the suite changes. The suite declares `@census-reads:` (W1-T11940).
+    6. GUARD NARROWING, APPROVED by Craig 2026-11-19 12:49Z (decision card in operator-session#coverage-shard-timeouts):
+       test/scanner-gate-config.test.ts forbids continue-on-error in a job ci-gate requires, and
+       test/diff-coverage.test.ts, test/fast-lane-classifier.test.ts and
+       test/a-coverage-skip-message-names-the-diff-class.test.ts forbid a step `if:` in coverage-ratchet (the #729
+       skipped-required-check deadlock). New helper test/helpers/checkout-retry-pair.ts admits only the exact pair
+       above; each guard checks every other step as before. Skipping a step never skips the job, and the retry has no
+       continue-on-error, so neither protection weakens. Criterion 4 shows five drifted pairs are not admitted.
     INVARIANT fetch-unchanged: every checkout step in both jobs keeps fetch-depth 0, the pinned sha and the
     W1-T13321 env, so every history reader sees the same full history.
   falsifier: |
