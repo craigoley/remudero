@@ -2,9 +2,8 @@
   title: "Serve spaces its next handoff by the handoffs before the last one, so one ordinary handoff waits the 2 h base instead of the full 4 h cap"
   repo: remudero
   depends_on: []
-  priority: 1
   type: implement
-  verify: auto
+  verify: human  # parked with the retirement
   principles:
     tdd: strict
   risk: high # two serve files (the supervisor and its production entry): how long serve's code may lag main between handoffs; the handoff itself is unchanged
@@ -18,7 +17,8 @@
     - src/lib/serve-supervisor.ts
     - src/lib/serve-supervisor-main.ts
     - test/console-api/serve/serve-spaces-a-handoff-by-the-handoffs-before-it.test.ts
-  status: queued
+  status: blocked
+  retirement: retired  # closed unbuilt: its premise was wrong; the host ledger shows the spacing re-reads decayed pressure on every ask
   attempts: 0
   acceptance:
     - claim: "Replaying 2026-11-18 (one handoff at 21:02Z after a quiet spell, asks at 21:03Z and 22:51:57Z), a supervisor with spaceByEarlierHandoffs waits the 2 h base and hands off at 23:02Z, where the seam default waits nearly the 4 h cap"
@@ -53,4 +53,12 @@
     Read the full pressure under the option: criterion 1 fails. Drop the earlier handoffs too: criterion 2 fails. Drop
     the production option: criterion 3 fails. Apply it regardless of the option: criterion 4 fails.
   note: |
+    CLOSED UNBUILT 2026-11-19 (author's own retraction). The rationale above is wrong. awaitSpacing recomputes
+    the decayed pressure on EVERY ask and returns false once lastDoneAt + spacing has passed; only the backstop timer
+    is fixed at the first ask, and serve.handoff_spacing_absorbed reports that timer's remainingMs. OBSERVED in the
+    host ledger: absorbed at 23:40:59Z (remainingMs 4858559, timer 01:01:58Z), then the coalesced ask at 23:56:58Z
+    was admitted and serve.handoff_done landed 23:58:06Z (a62d80e9e -> eb79fd765, pressure 1.162), INFERRED from that pressure about 2.6 h after
+    the previous handoff, not 4 h. One handoff after a quiet spell clears at about 2.4 h; W1-T13303 asked for
+    "at most every two hours", which 2.4 h meets. The change would add handoffs (serve CPU) for about 0.4 h less
+    lag, so it is retired. Implementation PR #19538 is closed unmerged.
     Id reserved for run-unfiled-1795046400001 with ~/rmd-work/bin/reserve-id.sh.
