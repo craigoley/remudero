@@ -2,7 +2,7 @@
 // Author-time feedback, not a substitute for the required hosted full-suite/coverage verdict.
 import { spawnSync } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { affectedSelectionOrFull, buildAffectedSuitesGraph, changedSymbols, fullRunTrigger, isPlanOnlyDiff,
   planOnlySelectionOrFull, readAffectedSuitesInput, readPlanOnlyListing, symbollessSourceFiles } from '../src/lib/affected-suites.ts';
@@ -1065,7 +1065,11 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
       const located = pinnedNodeReexec({ spawn, ...pinnedNodeLocation, pin: pinnedNode, current: process.versions.node });
       if (located.refuse !== undefined) throw refusal('node-version', located.refuse);
       console.log(`author preflight: Node ${process.versions.node} is not the .nvmrc pin ${pinnedNode}; re-running under Node ${pinnedNode} at ${located.reexec}`);
-      const child = spawn(located.reexec, [...process.execArgv, fileURLToPath(import.meta.url), ...argv], { stdio: 'inherit', env: process.env });
+      // Keep nested `node` commands on the same pin as the gate itself. Several tests and
+      // coverage helpers launch `node` by name, so inheriting the caller's PATH can silently
+      // drop them back onto a different runtime after this re-exec.
+      const env = { ...process.env, PATH: `${dirname(located.reexec)}${delimiter}${process.env.PATH || ''}` };
+      const child = spawn(located.reexec, [...process.execArgv, fileURLToPath(import.meta.url), ...argv], { stdio: 'inherit', env });
       if (child.error) throw new Error(`the re-run under Node ${pinnedNode} (${located.reexec}) could not start: ${child.error.message}`);
       if (child.signal) throw new Error(`the re-run under Node ${pinnedNode} (${located.reexec}) ended by signal ${child.signal}`);
       return child.status;

@@ -57,9 +57,10 @@ function fakeNode(path: string, version: string) {
     `if [ "$1" = "--version" ]; then echo "v${version}"; exit 0; fi`,
     `printf '%s\\n' "$@" > "$(dirname "$0")/argv.txt"`,
     `printf '%s' "$T13736_PROBE" > "$(dirname "$0")/probe.txt"`,
+    `printf '%s' "$PATH" > "$(dirname "$0")/path.txt"`,
     "exit 7", ""].join("\n"), { mode: 0o755 });
   return { ran: () => existsSync(join(path, "..", "argv.txt")), argv: () => readFileSync(join(path, "..", "argv.txt"), "utf8").split("\n").slice(0, -1),
-    probe: () => readFileSync(join(path, "..", "probe.txt"), "utf8") };
+    probe: () => readFileSync(join(path, "..", "probe.txt"), "utf8"), path: () => readFileSync(join(path, "..", "path.txt"), "utf8") };
 }
 
 /** Run `fn` with console output captured. */
@@ -87,6 +88,7 @@ test("W1-T13736 criterion 1: the preflight re-runs itself under the installed pi
   assert.equal(run.value, 7, "the preflight exits with the child's status");
   assert.deepEqual(fake.argv(), [...process.execArgv, SCRIPT, ...argv], "the child gets this process's node flags, this script and the same arguments");
   assert.equal(fake.probe(), "same-environment", "the child inherits the same environment");
+  assert.equal(fake.path().split(":", 1)[0], join(home, ".local/opt", `node-v${PIN}`, "bin"), "the pinned Node directory leads PATH for nested node commands");
   const lines = run.out.filter((line) => line.includes(path));
   assert.equal(lines.length, 1, `one line names the path: ${run.out.join(" | ")}`);
   assert.ok(lines[0]!.includes(process.versions.node) && lines[0]!.includes(PIN), `the line names both versions: ${lines[0]}`);
