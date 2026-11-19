@@ -2447,6 +2447,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "reaggregateCiGate",
   "readSecurityMergeObservation", // W1-T13470
   "readCodeqlWorkflowRuns", // W1-T13470
+  "dispatchSecurityMergeProducer", // W1-T13787
   "readMainTip",
   "readMainRepair",
   "mainInheritance", // W1-T8042
@@ -2747,6 +2748,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "reaggregateCiGate"
   | "readSecurityMergeObservation"
   | "readCodeqlWorkflowRuns"
+  | "dispatchSecurityMergeProducer"
   | "readMainTip"
   | "readMainRepair"
   | "mainInheritance"
@@ -4034,6 +4036,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       (path: string) => readJsonImpl(securityMetadataGhArgs(path))),
     readCodeqlWorkflowRuns: (pr) =>
       readJsonImpl(["api", `repos/${owner}/${repo}/actions/workflows/codeql.yml/runs?head_sha=${pr.headSha}&per_page=100`]),
+    // W1-T13787: the one write, a dispatch of the trusted producer's own backfill input; the producer decides the status.
+    dispatchSecurityMergeProducer: async (pr) => ghRunImpl("gh", ["api", "-X", "POST",
+      `repos/${owner}/${repo}/actions/workflows/security-merge-policy.yml/dispatches`, "-f", "ref=main", "-f", `inputs[pr_number]=${pr.prNumber}`]),
 
     // W1-T78 — the CLARIFICATION-QUESTION rung's real wiring: `question` is
     // ALREADY rendered (deterministically, from ledger ground truth) by the
@@ -16329,6 +16334,7 @@ export interface SweepDeps {
   /** W1-T13470 — the read-only security decision for this PR at its head (readSecurityMergeDecision). Omitted, a
    *  configuration-not-found wait captures and escalates nothing. */
   readSecurityMergeObservation?: (pr: OpenPrView) => Promise<SecurityMergeObservation>;
+  dispatchSecurityMergeProducer?: (pr: OpenPrView) => Promise<void>;
   /** W1-T13470 — this head's runs of the CodeQL workflow (`actions/workflows/codeql.yml/runs`), raw. */
   readCodeqlWorkflowRuns?: (pr: OpenPrView) => Promise<unknown>;
   /** W1-T177 — an OPTIONAL fresh re-read of ONE PR's live state, consulted immediately before a
@@ -17482,10 +17488,11 @@ export function withCodeqlAlertEvidence(pr: Pick<OpenPrView, "headSha" | "codeql
 /* W1-T13470 — GITHUB'S "N CONFIGURATION(S) NOT FOUND" CODEQL STATE IS OBSERVED, NEVER REPAIRED. The policy keeps it
  * UNKNOWN under its own reason; a head whose only red is that status waits instead of entering a fix round. A full
  * pass reads the decision through the read-only adapter and writes its receipt once per head and check generation, and
- * a CodeQL workflow completion GitHub re-judged with the warning still standing is escalated once. Nothing here
- * grants, merges, dispatches or writes a status: GitHub's refresh reaches the producer through its own triggers. */
+ * a CodeQL workflow completion GitHub re-judged with the warning still standing is escalated once. Nothing here grants,
+ * merges or writes a status; a cleared fresh read re-runs the trusted producer once per head (W1-T13787). */
 export const CODE_SCANNING_CONFIGURATION_WARNING_STEP = "security.codeql_configuration_warning_captured";
 export const CODE_SCANNING_CONFIGURATION_WARNING_ESCALATED_STEP = "security.codeql_configuration_warning_escalated";
+const SECURITY_PRODUCER_REDISPATCHED_STEP = "security.producer_redispatched";
 const CODEQL_CONFIGURATION_WAIT_REASON = `security-merge-policy unknown at this head: ${CODEQL_CONFIGURATION_NOT_FOUND} — ` +
   "GitHub's CodeQL check reports a missing configuration, a GitHub-side state no source edit clears — " +
   "waiting for GitHub's refresh, no fix round and no strike";
@@ -17563,6 +17570,22 @@ export async function observeCodeqlConfigurationWarning(deps: SweepDeps, lines: 
   const notes: string[] = [];
   const warning = observed.observation?.configurationWarning;
   const capturedEarlier = captures.length > 0; // W1-T13663: a capture an earlier pass wrote, not this one
+  const fresh = `${observed.decision.state}: ${observed.decision.reason}`;
+  if (warning === undefined && observed.decision.reason !== CODEQL_CONFIGURATION_NOT_FOUND && deps.dispatchSecurityMergeProducer) {
+    if (atHead(SECURITY_PRODUCER_REDISPATCHED_STEP).length > 0) {
+      notes.push(`the fresh read answers ${fresh}; the security-merge-policy producer was already re-run at this head`);
+    } else {
+      appendLine(deps.ledgerPath, { ...row, step: SECURITY_PRODUCER_REDISPATCHED_STEP, decision: fresh,
+        posted_status: `${pr.securityMergePolicy?.state}: ${pr.securityMergePolicy?.reason}` });
+      try {
+        await deps.dispatchSecurityMergeProducer(pr);
+        notes.push(`the fresh read answers ${fresh}, so the security-merge-policy producer was dispatched once for this head`);
+      } catch (error) {
+        // Named in the disposed row; its pre-written row keeps the dispatch to once per head.
+        notes.push(`the fresh read answers ${fresh}; the producer dispatch failed (${failed(error)}) and is not repeated at this head`);
+      }
+    }
+  }
   if (warning !== undefined && !captures.some((line) => line.check_id === warning.checkId)) {
     const capture = { ...row, step: CODE_SCANNING_CONFIGURATION_WARNING_STEP, check_id: warning.checkId,
       decision: `${observed.decision.state}: ${observed.decision.reason}`, receipt: warning };
