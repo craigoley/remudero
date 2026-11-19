@@ -19,7 +19,7 @@
     - src/lib/daemon.ts
     - test/reviews-and-detached-actions-run-as-run-children.test.ts
     - test/a-kind-the-last-drain-placed-in-a-run-child-stays-there.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Replaying the 2026-11-18 16:20Z live ledger shape (mode on; the newest drain row's detached_work_placement names fix-dispatch as child; no drain row waited on a fix-dispatch), the work host's spawnFix starts a run child, and the placement reason says the kind ran as a run child at the last drain"

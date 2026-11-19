@@ -16,6 +16,9 @@
  * W1-T12839: a read handed an `identity` is conditional. GitHub does not count a 304 Not Modified
  * against the primary rate limit, and most of the fleet's polls are answered unchanged. The store is
  * keyed by identity, origin and path, so an answer is served only to the request that stored it.
+ *
+ * W1-T12892: a `--paginate` read is sent page by page. Each page is one conditional read under its
+ * own path and query, and the next page is the `rel="next"` Link of the answer this read returned.
  */
 import { STATUS_CODES } from "node:http";
 
@@ -34,6 +37,8 @@ export interface GithubHttpReadRequest {
   args: readonly string[];
   path: string;
   include: boolean;
+  /** W1-T12892: `--paginate`, sent by {@link githubHttpPagedRead}. */
+  paginate?: true;
 }
 
 export interface GithubHttpReadResponse {
@@ -67,6 +72,16 @@ let entryMaxBytes = GITHUB_HTTP_READ_ENTRY_MAX_BYTES;
 /** Oldest use first: a hit is re-inserted, so eviction takes the first key. */
 const store = new Map<string, StoredRead>();
 let storeBytes = 0;
+/** W1-T12892: reads sent with If-None-Match, and the 304s that answered them, since the last take. */
+const conditionalCounts = { sent: 0, not_modified: 0 };
+
+/** The conditional counts since the previous call, then reset; the daemon.quota row carries them. */
+export function takeGithubHttpReadConditionalTally(): { sent: number; not_modified: number } {
+  const tally = { ...conditionalCounts };
+  conditionalCounts.sent = 0;
+  conditionalCounts.not_modified = 0;
+  return tally;
+}
 
 /**
  * Point the client at another origin, for a test's own local server. `undefined` restores GitHub.
@@ -127,16 +142,18 @@ export function githubHttpReadConfigured(): boolean {
 
 /**
  * The read in `args`, or `undefined` for any form this client does not send. It sends only
- * `api <path>` with `-i`/`--include` and an optional GET method. Any other flag means gh must run:
- * fields, `--input`, `--paginate`, `--slurp`, `--jq`, `--template`, `--hostname`, headers and the rest.
+ * `api <path>` with `-i`/`--include`, `--paginate` and an optional GET method. Any other flag means
+ * gh must run: fields, `--input`, `--slurp`, `--jq`, `--template`, `--hostname`, headers and the rest.
  */
 export function parseGhApiRead(args: readonly string[]): GithubHttpReadRequest | undefined {
   if (args[0] !== "api") return undefined;
   let path: string | undefined;
   let include = false;
+  let paginate = false;
   for (let i = 1; i < args.length; i += 1) {
     const arg = args[i]!;
     if (arg === "-i" || arg === "--include") include = true;
+    else if (arg === "--paginate") paginate = true;
     else if (arg === "-X" || arg === "--method") {
       if (args[i + 1] !== "GET") return undefined;
       i += 1;
@@ -148,7 +165,7 @@ export function parseGhApiRead(args: readonly string[]): GithubHttpReadRequest |
   if (path === undefined || path === "" || /^\/?graphql(?:[?/]|$)/.test(path) || path.includes("://") || /[{}\s]/.test(path)) {
     return undefined;
   }
-  return { args, path: path.replace(/^\/+/, ""), include };
+  return { args, path: path.replace(/^\/+/, ""), include, ...(paginate ? { paginate: true } : {}) };
 }
 
 /** An error shaped like the one `execFile("gh", …)` rejects with, which every caller already reads. */
@@ -184,6 +201,7 @@ export async function githubHttpRead(
   const key = opts.identity === undefined ? undefined : JSON.stringify([opts.identity, origin, read.path]);
   const stored = key === undefined ? undefined : store.get(key);
   const cancel = loopAvailableDeadline(systemClock, timeoutMs, () => { timedOut = true; controller.abort(); });
+  if (stored !== undefined) conditionalCounts.sent += 1;
   try {
     const response = await fetch(`${origin}/${read.path}`, {
       method: "GET",
@@ -199,6 +217,7 @@ export async function githubHttpRead(
     // The 304 validates the answer this request sent the ETag of; a concurrent read may since have
     // replaced or dropped the entry, and then the store is left as that read left it.
     if (response.status === 304 && stored !== undefined) {
+      conditionalCounts.not_modified += 1;
       if (store.get(key) === stored) {
         store.delete(key);
         store.set(key, stored);
@@ -256,4 +275,48 @@ export function ghStdoutOfHttpRead(read: GithubHttpReadRequest, response: Github
   const stdout = `${read.include ? ghIncludeHeaderBlock(response) : ""}${response.body}`;
   if (response.status >= 200 && response.status < 300) return stdout;
   throw ghExecError(read.args, stdout, `gh: ${ghApiServerError(response.status, response.body)}\n`);
+}
+
+/** gh's own Link pattern (findNextPage): the first `rel="next"` URL, or none on the last page. */
+const LINK_PATTERN = /<([^>]+)>;\s*rel="([^"]+)"/g;
+
+function nextPageUrl(response: GithubHttpReadResponse): string | undefined {
+  const link = response.headers.find(([name]) => name === "link")?.[1] ?? "";
+  for (const match of link.matchAll(LINK_PATTERN)) if (match[2] === "next") return match[1];
+  return undefined;
+}
+
+/**
+ * W1-T12892: send a `--paginate` read page by page, and return what gh prints for those pages: each
+ * page's body in turn, and with `-i` each page's header block before its body and a newline between
+ * pages. INVARIANT never-a-stale-page: the next page is the Link of the answer this read returned,
+ * stored (a 304 to this page's own ETag) or new, never an older chain. `beforePage` runs before every
+ * page after the first and `afterPage` after every page, so each page is claimed and recorded as one
+ * read. A non-2xx page throws the error gh exits with, its stdout every page printed so far.
+ */
+export async function githubHttpPagedRead(
+  read: GithubHttpReadRequest,
+  token: string,
+  opts: { timeoutMs?: number; identity?: string; beforePage(): Promise<void>; afterPage(response: GithubHttpReadResponse): void },
+): Promise<string> {
+  let stdout = "";
+  let path: string | undefined = read.path;
+  while (path !== undefined) {
+    const response = await githubHttpRead({ ...read, path }, token, opts);
+    opts.afterPage(response);
+    stdout += `${read.include ? ghIncludeHeaderBlock(response) : ""}${response.body}`;
+    if (response.status < 200 || response.status >= 300) {
+      throw ghExecError(read.args, stdout, `gh: ${ghApiServerError(response.status, response.body)}\n`);
+    }
+    const next = nextPageUrl(response);
+    if (next === undefined) break;
+    // gh sends its token only to its own host; this client sends it nowhere else either.
+    if (!next.startsWith(`${origin}/`)) {
+      throw ghExecError(read.args, stdout, `gh: in-process paged read was given a next page on another host: ${URL.canParse(next) ? new URL(next).host : "unreadable"}\n`);
+    }
+    path = next.slice(origin.length + 1);
+    if (read.include) stdout += "\n";
+    await opts.beforePage();
+  }
+  return stdout;
 }

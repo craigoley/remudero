@@ -15,7 +15,7 @@
   files:
     - src/cli/commands/run-task-verb.ts
     - test/infra/a-worker-that-cannot-progress-is-not-recorded-as-a-transient-api-error.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A run whose attempts end error_codex (api_error) while the progress judge has named a no-progress or needs-operator-input loop ends with a non-transient verdict that names the loop, not blocked_transient"
