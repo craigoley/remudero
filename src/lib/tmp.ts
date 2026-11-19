@@ -151,19 +151,13 @@ function testContextRefusal(opts: TempSweepOpts): string | undefined {
   return "refused: running in a test process with no explicit root, so the sweep would scan the real temp root";
 }
 
-/** W1-T13819: remove a directory this process owns, even when a killed child left a read-only tree in it.
- *  rmSync's force does not cover permissions: it fails with EACCES or EPERM (Linux) or ENOTEMPTY (macOS).
- *  It then adds owner rwx to each directory inside (lstat only: a symbolic link is never followed) and
- *  tries once more. Never throws. */
-const PERMISSION_CODES: ReadonlySet<string> = new Set(["EACCES", "EPERM", "ENOTEMPTY"]);
-
 export function removeOwnedTree(dir: string): { ok: true } | { ok: false; reason: string } {
   try {
     fs.rmSync(dir, { recursive: true, force: true });
     return { ok: true };
   } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (!PERMISSION_CODES.has(String(code))) return { ok: false, reason: removalReason(dir, error) };
+    const code = removalPermissionCode(dir, error);
+    if (code !== "EACCES" && code !== "EPERM") return { ok: false, reason: removalReason(dir, error) };
   }
   makeOwnedDirsWritable(dir);
   try {
@@ -172,6 +166,33 @@ export function removeOwnedTree(dir: string): { ok: true } | { ok: false; reason
   } catch (error) {
     return { ok: false, reason: removalReason(dir, error) };
   }
+}
+
+function removalPermissionCode(dir: string, error: unknown): string | undefined {
+  const code = (error as NodeJS.ErrnoException).code;
+  if (code === "EACCES" || code === "EPERM") return code;
+  // macOS reports ENOTEMPTY when rmSync cannot remove entries from a read-only
+  // directory; normalize that permission failure before applying the EACCES/EPERM rule.
+  if (process.platform === "darwin" && code === "ENOTEMPTY" && containsReadOnlyDirectory(dir)) return "EPERM";
+  return code;
+}
+
+function containsReadOnlyDirectory(dir: string): boolean {
+  let st: fs.Stats;
+  try {
+    st = fs.lstatSync(dir);
+  } catch {
+    return false;
+  }
+  if (!st.isDirectory()) return false;
+  if ((st.mode & 0o200) === 0) return true;
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return false;
+  }
+  return names.some((name) => containsReadOnlyDirectory(join(dir, name)));
 }
 
 function removalReason(dir: string, error: unknown): string {
@@ -188,9 +209,21 @@ function makeOwnedDirsWritable(dir: string): void {
   }
   if (!st.isDirectory()) return;
   try {
-    fs.chmodSync(dir, (st.mode & 0o7777) | 0o700);
+    // chmod follows a symlink if an entry is swapped after lstat. Open the final
+    // component without following links, then change the opened directory itself.
+    const fd = fs.openSync(dir, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+    try {
+      fs.fchmodSync(fd, (st.mode & 0o7777) | 0o700);
+    } finally {
+      fs.closeSync(fd);
+    }
   } catch {
     return; // not ours to change: the retry's rmSync names the path
+  }
+  try {
+    if (!fs.lstatSync(dir).isDirectory()) return; // swapped for a link during permission repair
+  } catch {
+    return; // gone: the retry's rmSync names what is left
   }
   let names: string[];
   try {

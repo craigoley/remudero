@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -137,6 +138,40 @@ test("W1-T13819 criterion 4: a symbolic link to a read-only directory outside is
   assert.deepEqual(removeOwnedTree(dir), { ok: true });
   assert.equal(existsSync(dir), false);
   assert.deepEqual(snapshot(outside), before);
+
+  const racedOutside = makeTempDir("t13819-c4-raced-outside");
+  const racedRoot = makeTempDir("t13819-c4-raced-root");
+  const racedEntry = join(racedRoot, "entry");
+  const parkedEntry = join(racedRoot, "parked-entry");
+  mkdirSync(racedEntry);
+  makeReadOnlyTree(racedEntry);
+  mkdirSync(join(racedOutside, "sub"));
+  writeFileSync(join(racedOutside, "sub", "kept.txt"), "unchanged\n");
+  chmodSync(join(racedOutside, "sub", "kept.txt"), 0o444);
+  chmodSync(join(racedOutside, "sub"), 0o555);
+  chmodSync(racedOutside, 0o555);
+  const racedBefore = snapshot(racedOutside);
+  t.after(() => restoreModes(racedOutside));
+  const originalOpen = fs.openSync;
+  let swapped = false;
+  fs.openSync = ((path: fs.PathLike, flags: string | number, mode?: number) => {
+    if (!swapped && String(path) === racedEntry) {
+      swapped = true;
+      fs.renameSync(racedEntry, parkedEntry);
+      symlinkSync(racedOutside, racedEntry);
+      restoreModes(parkedEntry);
+    }
+    return originalOpen(path, flags, mode);
+  }) as typeof fs.openSync;
+  try {
+    assert.deepEqual(removeOwnedTree(racedRoot), { ok: true });
+  } finally {
+    fs.openSync = originalOpen;
+    restoreModes(racedRoot);
+  }
+  assert.equal(swapped, true);
+  assert.equal(existsSync(racedRoot), false);
+  assert.deepEqual(snapshot(racedOutside), racedBefore);
 });
 
 const UID0_SKIP = process.getuid?.() === 0 ? "uid 0 ignores directory modes, so no removal can be made to fail" : false;
