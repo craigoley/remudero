@@ -34,11 +34,11 @@ const SHARDS = IDS.map((id) => `plan/tasks.d/${id}-fixture.yaml`);
 const HEAD = "b".repeat(40);
 
 /** The gate's own HELD block, as scripts/task-id-existence-check.mjs prints it, with the Actions timestamp prefix. */
-function heldLog(entries: Array<{ id: string; file: string; handoff?: string }>): string {
+function heldLog(entries: Array<{ id: string; file: string; handoff?: string; holder?: string }>): string {
   const stamp = "2026-11-19T05:33:01.1234567Z ";
   const lines = ["task-id-existence: FAILED -- the following added id(s) are HELD by a different reservation holder:", ""];
   for (const e of entries) {
-    lines.push(`  ${e.id} -- reserved by ${HOLDER}, while this filing is ${FILER}`, `    ${e.file}:1`);
+    lines.push(`  ${e.id} -- reserved by ${e.holder ?? HOLDER}, while this filing is ${FILER}`, `    ${e.file}:1`);
     if (e.handoff !== undefined) {
       lines.push("    remedy: add this as a NEW line in the shard's note -- do not merge it into any existing note text on the same line, or the check that requires it will not see it:",
         "        note: |", `          ${e.handoff}`);
@@ -121,6 +121,7 @@ function fixture(t: TestContext, opts: {
   openPrOnHolder?: boolean;
   unreadableOpenPr?: boolean;
   texts?: string[];
+  holders?: readonly string[];
 }): Fixture {
   const remote = gitRepo({ bare: true, scope: t, kind: "t13829-remote" });
   const seed = gitRepo({ cloneFrom: remote.dir, scope: t, kind: "t13829-seed" });
@@ -131,8 +132,8 @@ function fixture(t: TestContext, opts: {
   seed.git("push", "--quiet", "origin", "HEAD:main");
   const startedAt = new Date(NOW - opts.startedAgoMs).toISOString();
   const tree = seed.git("rev-parse", "HEAD^{tree}");
-  for (const id of IDS) {
-    const claim = seed.git("commit-tree", tree, "-m", formatReservationAnchorMessage({ branch: HOLDER, startedAt }));
+  for (const [i, id] of IDS.entries()) {
+    const claim = seed.git("commit-tree", tree, "-m", formatReservationAnchorMessage({ branch: opts.holders?.[i] ?? HOLDER, startedAt }));
     seed.git("push", "--quiet", "origin", `${claim}:refs/rmd-id/${id}`);
   }
   if (opts.holderOnOrigin) seed.git("push", "--quiet", "origin", `HEAD:refs/heads/${HOLDER}`);
@@ -167,7 +168,9 @@ async function withFixtureHooks<T>(f: Fixture, run: () => Promise<T>): Promise<T
 }
 
 function handOff(f: Fixture, pr: OpenPrView, git?: typeof hostWorktreeGitAsync) {
-  const handoffs = IDS.map((id, i) => ({ id, holder: HOLDER, filer: FILER, files: [SHARDS[i]!] }));
+  const decision = sweep.decidePlanRepair(pr, {}, undefined, new Set());
+  assert.equal(decision?.action, "handoff");
+  const { handoffs } = decision;
   return withFixtureHooks(f, () => sweep.handOffHeldPlanPrIds(pr, handoffs, f.host.dir, join(dirname(f.hooksDir), `wt-${++cuts}`), {
     owner: "acme", repo: "remudero", log: () => {}, readJson: f.readJson, nowMs: () => NOW, git,
   }));
@@ -244,6 +247,74 @@ test("W1-T13829 criterion 3: a literal note keeps its header, indentation and tr
   const [task] = parseYaml(after) as Array<Record<string, unknown>>;
   assert.equal(task!.note, `filed by hand\n\n\n${handoffLine}\n`);
   assert.equal(shardNoteRecordsReservationHandoff(after, HOLDER, FILER), true);
+});
+
+test("W1-T13829 criterion 3: folded notes keep their headers and wrapping when the remedy gets its own line", async (t) => {
+  const notes = [
+    { header: ">- # keep this comment", indent: "    ", trailing: "", finalNewline: false },
+    { header: ">4+ # keep these blank lines", indent: "      ", trailing: "\n\n", finalNewline: true },
+    { header: ">", indent: "     ", trailing: "", finalNewline: true },
+  ].map(({ header, indent, trailing, finalNewline }, i) => {
+    const wrapped = `- id: ${IDS[i]}\n  note: ${header}\n${indent}filed by hand with a long note\n${indent}that wraps onto another line\n${trailing}`;
+    const rest = "  status: queued # leave the rest alone\n";
+    return { before: wrapped + rest, after: `${wrapped}${indent} ${handoffLine}\n${rest}`, finalNewline };
+  });
+  const f = fixture(t, { startedAgoMs: RESERVATION_PUSH_GRACE_MS + 60_000, texts: notes.map((note) => note.before) });
+  const out = await handOff(f, planPr({ headSha: f.headSha }));
+  assert.equal(out.outcome, "handed-off", JSON.stringify(out));
+  for (const [i, note] of notes.entries()) {
+    const after = f.remote.git("show", `${out.newHeadSha}:${SHARDS[i]}`) + "\n";
+    assert.equal(after, note.after, "the remedy line is the only source edit");
+    const [beforeTask] = parseYaml(note.before) as Array<{ note: string }>;
+    const [afterTask] = parseYaml(after) as Array<{ note: string }>;
+    const prior = beforeTask!.note;
+    const actual = afterTask!.note;
+    assert.ok(actual.startsWith(prior.endsWith("\n") ? prior : `${prior}\n`));
+    assert.equal(actual.split("\n").findLast((line) => line !== "")?.trim(), handoffLine);
+    assert.equal(actual.endsWith("\n"), note.finalNewline, "the header still controls chomping");
+    assert.equal(shardNoteRecordsReservationHandoff(after, HOLDER, FILER), true);
+  }
+});
+
+test("W1-T13829 criterion 3: two held ids in one shard share one copy of the same printed remedy", async (t) => {
+  const prior = SHARD_TEXTS[1]!.replace("note: filed by hand", "note: |\n    filed by hand") + SHARD_TEXTS[0];
+  const unrelated = SHARD_TEXTS[0]!.replace(IDS[0]!, "W1-T13786");
+  const f = fixture(t, { startedAgoMs: RESERVATION_PUSH_GRACE_MS + 60_000, texts: [unrelated, prior, SHARD_TEXTS[2]!] });
+  const logTail = heldLog([IDS[1]!, IDS[0]!].map((id) => ({ id, file: SHARDS[1]!, handoff: handoffLine })));
+  const out = await handOff(f, planPr({ headSha: f.headSha, ciFailures: [failure(logTail)] }));
+  assert.equal(out.outcome, "handed-off", JSON.stringify(out));
+  assert.equal(f.remote.git("diff", "--name-only", f.headSha, out.newHeadSha!), SHARDS[1]);
+  const after = f.remote.git("show", `${out.newHeadSha}:${SHARDS[1]}`) + "\n";
+  assert.equal(after, prior.replace("    filed by hand\n", `    filed by hand\n    ${handoffLine}\n`));
+  const tasks = parseYaml(after) as Array<Record<string, unknown>>;
+  assert.deepEqual(tasks.map((task) => task.id), [IDS[1], IDS[0]]);
+  assert.equal(shardNoteRecordsReservationHandoff(after, HOLDER, FILER), true);
+});
+
+test("W1-T13829 criterion 3: a remedy already in the shard is left in place", async (t) => {
+  const prior = SHARD_TEXTS[0]! + `  note: >-\n    ${handoffLine}\n`;
+  const f = fixture(t, { startedAgoMs: RESERVATION_PUSH_GRACE_MS + 60_000, texts: [prior] });
+  const logTail = heldLog([{ id: IDS[0]!, file: SHARDS[0]!, handoff: handoffLine }]);
+  const out = await handOff(f, planPr({ headSha: f.headSha, ciFailures: [failure(logTail)] }));
+  assert.deepEqual(out, { outcome: "stood-down", reason: "the named shards already contain the printed hand-offs" });
+  assert.equal(f.remote.git("rev-parse", `refs/heads/${FILER}`), f.headSha);
+});
+
+test("W1-T13829 criterion 3: two different remedies for one shard stand down", async (t) => {
+  const otherHolder = "run-unfiled-1795065830000";
+  const f = fixture(t, {
+    startedAgoMs: RESERVATION_PUSH_GRACE_MS + 60_000,
+    holders: [HOLDER, otherHolder],
+    texts: [SHARD_TEXTS[0]! + SHARD_TEXTS[1]!],
+  });
+  const logTail = heldLog([
+    { id: IDS[0]!, file: SHARDS[0]!, handoff: handoffLine },
+    { id: IDS[1]!, file: SHARDS[0]!, holder: otherHolder, handoff: `reservation hand-off: ${otherHolder} -> ${FILER}` },
+  ]);
+  const out = await handOff(f, planPr({ headSha: f.headSha, ciFailures: [failure(logTail)] }));
+  assert.equal(out.outcome, "stood-down", JSON.stringify(out));
+  assert.match(out.reason ?? "", /the gate printed different hand-offs for the same shard/);
+  assert.equal(f.remote.git("rev-parse", `refs/heads/${FILER}`), f.headSha);
 });
 
 test("W1-T13829 criterion 5: the real sweep repairs all three shards when the CI excerpt drops the HELD header", async (t) => {

@@ -11872,6 +11872,16 @@ export async function handOffHeldPlanPrIds(
   const git = deps.git ?? ((cwd, args) => hostWorktreeGitAsync(cwd, args, { maxBuffer: 1 << 24 }));
   const standDown = await handoffStandDown(handoffs, repoDir, git, deps);
   if (standDown !== undefined) return { outcome: "stood-down", reason: standDown };
+  const edits = new Map<string, { ids: string[]; line: string }>();
+  for (const { id, holder, filer, files } of handoffs) {
+    const line = reservationHandoffNoteLine(holder, filer);
+    for (const rel of files) {
+      const edit = edits.get(rel);
+      if (!edit) edits.set(rel, { ids: [id], line });
+      else if (edit.line === line) edit.ids.push(id);
+      else return { outcome: "stood-down", reason: `${rel}: the gate printed different hand-offs for the same shard` };
+    }
+  }
   let cut = false;
   try {
     await worktreeAddAsync(repoDir, wt, basename(wt), `origin/${branch}`, { log: deps.log });
@@ -11879,16 +11889,19 @@ export async function handOffHeldPlanPrIds(
     const observed = (await git(wt, ["rev-parse", "HEAD"])).trim();
     if (observed !== pr.headSha) return { outcome: "lease-mismatch", reason: `origin/${branch} is ${observed}, not ${pr.headSha}` };
     const files: string[] = [];
-    for (const h of handoffs) {
-      for (const rel of h.files) {
-        const next = shardWithHandoffNote(readFileSync(join(wt, rel), "utf8"), h.id, reservationHandoffNoteLine(h.holder, h.filer));
-        if (typeof next !== "string") return { outcome: "stood-down", reason: `${rel}: ${next.reason}` };
-        writeFileSync(join(wt, rel), next);
+    for (const [rel, edit] of edits) {
+      const path = join(wt, rel);
+      const text = readFileSync(path, "utf8");
+      const next = shardWithHandoffNote(text, edit.ids, edit.line);
+      if (typeof next !== "string") return { outcome: "stood-down", reason: `${rel}: ${next.reason}` };
+      if (next !== text) {
+        writeFileSync(path, next);
         files.push(rel);
       }
     }
+    if (files.length === 0) return { outcome: "stood-down", reason: "the named shards already contain the printed hand-offs" };
     const ids = [...new Set(handoffs.map((h) => h.id))].join(", ");
-    await git(wt, ["add", "--", ...new Set(files)]);
+    await git(wt, ["add", "--", ...files]);
     await git(wt, ["commit", "-m", `chore(plan): record the reservation hand-off for ${ids}\n\nW1-T13829 sweep plan repair.`]);
     const newHeadSha = (await git(wt, ["rev-parse", "HEAD"])).trim();
     assertLiveWriteAllowed("git-push", `recording the reservation hand-off for ${ids} on ${branch} for PR #${pr.prNumber}`);
@@ -11945,15 +11958,19 @@ async function handoffStandDown(
   }
 }
 
-/** `text` with `line` as a new last line of task `id`'s note (a block scalar), or why it cannot be added alone. */
-function shardWithHandoffNote(text: string, id: string, line: string): string | { reason: string } {
+/** The check matches the remedy across the shard, so one note suffices for all ids that share it. */
+function shardWithHandoffNote(text: string, ids: readonly string[], line: string): string | { reason: string } {
   const doc = parseDocument(text);
   if (doc.errors.length > 0 || !isSeq(doc.contents)) return { reason: "the shard is not a YAML task list" };
   const before = doc.toJS() as Array<Record<string, unknown> | null>;
+  const invalid = ids.find((id) => before.filter((row) => row?.id === id).length !== 1);
+  if (invalid !== undefined) return { reason: `the shard does not declare ${invalid} once` };
+  if (text.split(/\r?\n/).some((row) => row.trim() === line)) return text;
+  const id = ids[0]!;
   const task = doc.contents.items[before.findIndex((row) => row?.id === id)];
   const first = isMap(task) ? task.items[0]?.key : undefined;
   const keyStart = isScalar(first) ? first.range?.[0] : undefined;
-  if (before.filter((row) => row?.id === id).length !== 1 || !isMap(task) || task.range === undefined || keyStart === undefined) {
+  if (!isMap(task) || task.range === undefined || keyStart === undefined) {
     return { reason: `the shard does not declare ${id} once` };
   }
   const pad = " ".repeat(keyStart - (text.lastIndexOf("\n", keyStart - 1) + 1));
@@ -11962,26 +11979,29 @@ function shardWithHandoffNote(text: string, id: string, line: string): string | 
     return { reason: `the note of ${id} is not text` };
   }
   const prior = isScalar(note) && typeof note.value === "string" ? note.value : "";
-  const joined = prior + (prior && !prior.endsWith("\n") ? "\n" : "") + line;
+  const prefix = prior + (prior && !prior.endsWith("\n") ? "\n" : "");
+  const joined = prefix + line;
   const eol = text.includes("\r\n") ? "\r\n" : "\n";
   const body = joined.split("\n").map((l) => (l ? `${pad}  ${l}` : "")).join(eol);
+  const folded = isScalar(note) && note.type === "BLOCK_FOLDED";
   let expected = `${joined}\n`;
   let next: string;
   if (isScalar(note) && note.range) {
     const [start, end] = note.range;
-    if (note.type === "BLOCK_LITERAL") {
-      const literal = text.slice(start, end);
-      const indicators = /^\|([1-9+-]*)/.exec(literal)?.[1] ?? "";
+    if (note.type === "BLOCK_LITERAL" || folded) {
+      const block = text.slice(start, end);
+      const indicators = /^[|>]([1-9+-]*)/.exec(block)?.[1] ?? "";
       const width = Number(/[1-9]/.exec(indicators)?.[0]);
-      const indent = width ? pad + " ".repeat(width) : /^ +(?=[^ \r\n])/m.exec(literal)?.[0] ?? `${pad}  `;
+      const contentIndent = /^ +(?=[^ \r\n])/m.exec(block)?.[0];
+      const indent = width ? pad + " ".repeat(width) : contentIndent ?? `${pad}  `;
+      // More-indented text in a folded block retains the preceding line break.
+      const extra = folded && contentIndent !== undefined ? " " : "";
       if (indicators.includes("-")) expected = joined;
-      next = `${text.slice(0, end)}${text[end - 1] === "\n" ? "" : eol}${indent}${line}${eol}${text.slice(end)}`;
+      next = `${text.slice(0, end)}${text[end - 1] === "\n" ? "" : eol}${indent}${extra}${line}${eol}${text.slice(end)}`;
     } else {
       const at = text.indexOf("\n", end);
-      const headerSuffix = note.type === "BLOCK_FOLDED"
-        ? /^>[1-9+-]*([^\r\n]*)/.exec(text.slice(start, end))?.[1] ?? ""
-        : text.slice(end, at < 0 ? text.length : at).replace(/\r$/, "");
-      const rest = note.type === "BLOCK_FOLDED" ? end : at < 0 ? text.length : at + 1;
+      const headerSuffix = text.slice(end, at < 0 ? text.length : at).replace(/\r$/, "");
+      const rest = at < 0 ? text.length : at + 1;
       next = `${text.slice(0, start)}|${headerSuffix}${eol}${body}${eol}${text.slice(rest)}`;
     }
   } else {
@@ -11992,8 +12012,11 @@ function shardWithHandoffNote(text: string, id: string, line: string): string | 
   }
   const after = parseDocument(next);
   const rows = after.errors.length === 0 ? (after.toJS() as Array<Record<string, unknown>>) : undefined;
+  const noteMatches = (value: unknown) => folded
+    ? typeof value === "string" && value.startsWith(prefix) && value.slice(prefix.length).trim() === line
+    : value === expected;
   const same = Array.isArray(rows) && rows.length === before.length && rows.every((row, i) => row?.id === id
-    ? row.note === expected && isDeepStrictEqual({ ...row, note: undefined }, { ...before[i], note: undefined })
+    ? noteMatches(row.note) && isDeepStrictEqual({ ...row, note: undefined }, { ...before[i], note: undefined })
     : isDeepStrictEqual(row, before[i]));
   return same ? next : { reason: `adding the hand-off to the note of ${id} would change other text` };
 }
