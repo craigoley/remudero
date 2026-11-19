@@ -1489,8 +1489,14 @@ export async function serveGhReadBroker(opts: {
   // auth failure, while its heartbeat stops the hook's 180 s floor. Resolve the login before the old
   // socket or the heartbeat is touched. App credentials start first: an App-held token is an identity.
   await broker.startCredentials();
-  // A lookup that threw is no identity either; a GitHub login holds no space, so "unknown (" names no account.
-  const login = await broker.login().catch((err: unknown) => `unknown (the lookup threw: ${(err as Error).message})`);
+  let login: string;
+  try {
+    login = await broker.login();
+  } catch (err) {
+    // A lookup that threw is no identity either; its reason rides into the refusal. A GitHub login
+    // holds no space, so "unknown (" names no account.
+    login = `unknown (the lookup threw: ${(err as Error).message})`;
+  }
   if (login === "unknown" || login.startsWith("unknown (")) {
     broker.stopCredentials();
     throw new Error(`gh-broker: refusing to serve ${socketPath}: no GitHub identity (login reads ${login}); `
