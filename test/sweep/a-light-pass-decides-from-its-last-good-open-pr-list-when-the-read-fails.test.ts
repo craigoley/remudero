@@ -240,7 +240,8 @@ test("W1-T12755 criterion 3: on a last good list a moved or unreadable head stan
     f.effects.continueReviewAdmissions = () => false;
     await hook(IDLE);
     delete f.effects.continueReviewAdmissions;
-    assert.deepEqual(armImpls, [undefined], "control: a pass on a fresh list arms as today");
+    assert.equal(armImpls.length, 1, "control: the fresh served list arms once");
+    assert.equal(typeof armImpls[0], "function", "control: a fresh served list guards the act-time head");
     // A new pass's ledger: the fresh pass's rows would dedup the arm.
     f.rows.splice(0, f.rows.length, reviewed);
     f.live.set(moved.prNumber, { ok: true, state: "OPEN", headSha: "head-moved-new" });
@@ -254,10 +255,12 @@ test("W1-T12755 criterion 3: on a last good list a moved or unreadable head stan
     assert.equal(f.posted.some((post) => post.prNumber === unreadable.prNumber), false, "no review for an unreadable head");
     assert.ok(f.rows.some((row) => row.step === "sweep.action_failed" && row.pr_number === unreadable.prNumber &&
       /unreadable on the last good open-PR list/.test(String(row.error))), JSON.stringify(f.rows));
-    assert.deepEqual(merged, [ready.prUrl]);
+    assert.deepEqual(merged, [ready.prUrl, ready.prUrl], "fresh and last-good passes both arm the list's eligible PR");
     const merges = gh.calls().filter((call) => call.includes(`pulls/${ready.prNumber}/merge`));
-    assert.equal(merges.length, 1, JSON.stringify(gh.calls()));
-    assert.match(merges[0]!, new RegExp(`sha=${ready.headSha}`), "the merge names the list's head as expectedHead");
+    assert.equal(merges.length, 2, JSON.stringify(gh.calls()));
+    for (const merge of merges) {
+      assert.match(merge, new RegExp(`sha=${ready.headSha}`), "the merge names the list's head as expectedHead");
+    }
   } finally { await f.cleanup(); }
 });
 
