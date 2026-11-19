@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { posix } from "node:path";
 import { isMap, isSeq, parseDocument, stringify } from "yaml";
 
@@ -5,7 +6,7 @@ import { stallLadderSpent, stallRemedyRows } from "./fix-progress-judge.js";
 import { isInPlanScope } from "./plan-scope.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import type { PrBlocker } from "./pr-blocker.js";
-import type { TaskFileInput } from "./feedback-landing.js";
+import type { TaskFileInput, TaskFilesLandingResult } from "./feedback-landing.js";
 
 /**
  * W1-T12709: an open pull request is never left with "a person must answer" as its only next action. Where the
@@ -109,11 +110,14 @@ export interface ParkedPrHost {
   planFilingTarget?: ParkedPrTarget;
   /** W1-T13048: the task file from the repository that holds it (readParkedPrShard). */
   readTaskShard(taskId: string): Promise<ParkedPrShardRead>;
-  /** R3: an id from reservePlanRepairTaskId, for the landing branch of `target`. */
-  reserveTaskId(target: ParkedPrTarget): string;
-  /** R3: lands new and amended task files through landTaskFilesAsync, in `target`. */
+  /** R3: an id from reservePlanRepairTaskIdAsync, for the landing branch of `target`. W1-T13830: awaited, off the loop. */
+  reserveTaskId(target: ParkedPrTarget): string | Promise<string>;
+  /**
+   * R3: lands new and amended task files through landTaskFilesAsync, in `target`. W1-T13830: `refusalChecks` names the
+   * plan preflight checks that refused the draft (planPreflightRefusalChecks), only for a verdict on the draft itself.
+   */
   landTaskFiles(files: readonly TaskFileInput[], target: ParkedPrTarget):
-    Promise<{ prUrl?: string; error?: string }>;
+    Promise<{ prUrl?: string; error?: string; refusalChecks?: readonly string[] }>;
   closePr(prUrl: string, comment: string): Promise<void>;
   /** W1-T13047: the paths the pull request adds or changes, for a plan filing rebuilt from the pull request itself. */
   readPrFiles?(prUrl: string): Promise<readonly string[]>;
@@ -175,7 +179,30 @@ export function parkedPrUnchanged(ledger: readonly Record<string, unknown>[], pr
     Array.isArray(last.red_checks) && names(last.red_checks) === names(observed.redChecks);
 }
 
-export interface ParkedPrOutcome { remedy: ParkedPrRemedy; reason: string; heldTaskId?: string; error?: string }
+/**
+ * W1-T13830: `unchanged` is set when a split or rebuild was refused by the plan preflight at this same input, so the
+ * remedy reserved nothing, landed nothing and wrote no row. actOnParkedPr takes the ladder's next remedy.
+ */
+export interface ParkedPrOutcome { remedy: ParkedPrRemedy; reason: string; heldTaskId?: string; error?: string; unchanged?: true }
+
+/**
+ * W1-T13830, invariant:retry-on-transient: the sorted check names of the first refused or set-aside entry's plan
+ * preflight failures. Undefined for anything that is not a verdict on the draft: no failures, a timed-out preflight,
+ * or a red that main alone has. PURE.
+ */
+export function planPreflightRefusalChecks(landed: Pick<TaskFilesLandingResult, "refused" | "setAside">): string[] | undefined {
+  const entry = landed.refused[0] ?? landed.setAside[0];
+  if (entry === undefined || (entry.failures?.length ?? 0) === 0 || entry.timedOut === true || entry.mainRed === true) return undefined;
+  return [...new Set(entry.failures!.map(f => f.check))].sort();
+}
+
+/** W1-T13830: the input a split or rebuild acts on: the head, the task file (or the plan files) and the moved criteria. */
+function remedyInputDigest(remedy: ParkedPrRemedy, pr: ParkedPrSubject, shard: ParkedPrShard | undefined,
+  decision: ParkedPrDecision): string {
+  const source = shard === undefined ? { planFiles: [...new Set(pr.planFiles ?? [])].sort() } : { relPath: shard.relPath, text: shard.text };
+  return createHash("sha256").update(JSON.stringify({ remedy, head: pr.headSha, source,
+    criteria: decision.inputCriteria.map(c => c.claim).sort() })).digest("hex");
+}
 
 /**
  * R4: the answer the fix lane passes to openEscalationStandDownReason. An operator's answer, or else a fix-on-pr row for
@@ -213,6 +240,8 @@ export async function takeParkedPrRemedy(pr: ParkedPrSubject, decision: ParkedPr
     return { remedy: prior.remedy as ParkedPrRemedy, heldTaskId: prior.held_task_id as string,
       reason: `held task ${String(prior.held_task_id)} was filed for this pull request and cause; this pass reuses it` };
   }
+  let inputDigest: string | undefined;
+  let refusalChecks: string[] | undefined;
   try {
     const closed = decision.remedy === "close-and-rebuild";
     const read = pr.taskId === undefined ? undefined : await host.readTaskShard(pr.taskId);
@@ -225,10 +254,20 @@ export async function takeParkedPrRemedy(pr: ParkedPrSubject, decision: ParkedPr
     if (fromPr && (pr.planFiles ?? []).length === 0) throw new Error("the plan files the pull request adds or changes cannot be read");
     const target = read?.target ?? host.planFilingTarget;
     if (target === undefined) throw new Error("the repository for the held plan rebuild cannot be resolved");
-    const heldTaskId = host.reserveTaskId(target);
+    // W1-T13830: the plan preflight refused this same input before, so a retry would get the same verdict.
+    inputDigest = remedyInputDigest(decision.remedy, pr, read?.outcome === "read" ? read.shard : undefined, decision);
+    const last = ledger.findLast(r => r.step === PARKED_PR_REMEDY_STEP && r.pr_number === pr.prNumber && r.cause === ctx.cause &&
+      r.remedy === decision.remedy);
+    if (last?.outcome === "refused" && last.input_digest === inputDigest && Array.isArray(last.refusal_checks) &&
+        last.refusal_checks.length > 0) {
+      return { remedy: decision.remedy, unchanged: true, reason: `the ${decision.remedy} remedy was refused by the plan preflight ` +
+        `(${last.refusal_checks.map(String).join(", ")}) at this head, task file and criteria, so it is not tried again (W1-T13830)` };
+    }
+    const heldTaskId = await host.reserveTaskId(target);
     const files = read?.outcome === "read" ? heldTaskFiles(read.shard, pr.taskId!, heldTaskId, decision, pr, ctx)
       : heldPlanRebuildFiles(heldTaskId, decision, pr, ctx);
     const landed = await host.landTaskFiles(files, target);
+    if ((landed.refusalChecks?.length ?? 0) > 0) refusalChecks = [...landed.refusalChecks!].sort();
     if (landed.error !== undefined) throw new Error(`the task files did not land: ${landed.error}`);
     if (closed) {
       await host.closePr(pr.prUrl, `Closed by the sweep (${pr.isPlanFiling === true ? "W1-T13047" : "W1-T12709"}): ` +
@@ -243,7 +282,8 @@ export async function takeParkedPrRemedy(pr: ParkedPrSubject, decision: ParkedPr
       reason: `${decision.reason}: held task ${heldTaskId}${landed.prUrl === undefined ? "" : ` (${landed.prUrl})`}` };
   } catch (error) {
     const reason = String((error as Error)?.message ?? error);
-    ctx.append({ ...row, outcome: "refused", reason });
+    ctx.append({ ...row, outcome: "refused", reason, ...(inputDigest === undefined ? {} : { input_digest: inputDigest }),
+      ...(refusalChecks === undefined ? {} : { refusal_checks: refusalChecks }) });
     return { remedy: decision.remedy, error: reason, reason: `the ${decision.remedy} remedy could not act, and the next pass tries it again: ${reason}` };
   }
 }
@@ -409,13 +449,24 @@ function parkedPrAnswer(remedy: ParkedPrRemedy, facts: ParkedPrFacts): Pick<Park
  * fix-on-pr that hands the pull request to the fix lane or to review is that lane's to bound, and is judged as before.
  */
 export async function actOnParkedPr(pr: ParkedPrSubject, decision: ParkedPrDecision, facts: ParkedPrFacts,
-  ledger: readonly Record<string, unknown>[], host: ParkedPrHost, ctx: ParkedPrContext): Promise<ParkedPrSweepOutcome> {
+  ledger: readonly Record<string, unknown>[], host: ParkedPrHost, ctx: ParkedPrContext,
+  spent: readonly ParkedPrRemedy[] = []): Promise<ParkedPrSweepOutcome> {
   if (ctx.observed !== undefined && decision.remedy === "fix-on-pr" && parkedPrAnswer("fix-on-pr", facts).disposition === "wait" &&
       parkedPrUnchanged(ledger, pr, ctx.cause, ctx.observed)) {
-    const next = parkedPrRemedy(facts, ["fix-on-pr"]);
-    return next === undefined ? askPerson(pr, facts, ledger, ctx, ctx.observed) : actOnParkedPr(pr, next, facts, ledger, host, ctx);
+    const nowSpent = [...spent, "fix-on-pr" as const];
+    const next = parkedPrRemedy(facts, nowSpent);
+    return next === undefined ? askPerson(pr, facts, ledger, ctx, ctx.observed, spent)
+      : actOnParkedPr(pr, next, facts, ledger, host, ctx, nowSpent);
   }
   const outcome = await takeParkedPrRemedy(pr, decision, ledger, host, ctx);
+  // W1-T13830, invariant:never-parked: a split or rebuild refused at this same input is spent for this pass.
+  if (outcome.unchanged === true) {
+    const nowSpent = [...spent, decision.remedy];
+    const next = parkedPrRemedy(facts, nowSpent);
+    // No remedy left means fix-on-pr is spent too: parkedPrRemedy names fix-on-pr whenever it is left.
+    return next !== undefined ? actOnParkedPr(pr, next, facts, ledger, host, ctx, nowSpent)
+      : askPerson(pr, facts, ledger, ctx, ctx.observed, nowSpent.filter(r => r !== "fix-on-pr"));
+  }
   if (outcome.error !== undefined) return { ...outcome, disposition: "wait", blocker: "other" };
   return { ...outcome, ...parkedPrAnswer(outcome.remedy, facts) };
 }
@@ -427,10 +478,13 @@ export async function actOnParkedPr(pr: ParkedPrSubject, decision: ParkedPrDecis
  * that may. The pull request keeps its wait.
  */
 async function askPerson(pr: ParkedPrSubject, facts: ParkedPrFacts, ledger: readonly Record<string, unknown>[], ctx: ParkedPrContext,
-  observed: ParkedPrObserved): Promise<ParkedPrSweepOutcome> {
+  observed: ParkedPrObserved | undefined, refusedAtInput: readonly ParkedPrRemedy[] = []): Promise<ParkedPrSweepOutcome> {
   const answer = { remedy: "fix-on-pr" as const, ...parkedPrAnswer("fix-on-pr", facts) };
+  const refused = refusedAtInput.length === 0 ? "" : `; ${refusedAtInput.join(" and ")} was refused by the plan preflight at ` +
+    "this same input, so it is not tried again (W1-T13830)";
   const held = `fix-on-pr was taken at head ${pr.headSha.slice(0, 7)} and left the head, the body and the red checks unchanged, ` +
-    "so it is not taken again (W1-T13361), and no remedy is left";
+    `so it is not taken again (W1-T13361)${refused}, and no remedy is left`;
+  if (observed === undefined) return { ...answer, reason: `${held}; the needs-human issue waits for a pass that reads the pull request's state` };
   if (ledger.some(r => r.step === PARKED_PR_REMEDY_STEP && r.pr_number === pr.prNumber && r.needs_human === true &&
       r.head_sha === pr.headSha && r.body_digest === observed.bodyDigest)) {
     return { ...answer, reason: `${held}; one needs-human issue was opened for this head and body` };
