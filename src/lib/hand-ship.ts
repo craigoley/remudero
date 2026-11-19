@@ -251,8 +251,8 @@ async function compareFailures(receipt: ShipReceipt, workspace: Awaited<ReturnTy
     const counts = receipt.failureAttribution?.counts;
     const namedUnattributed = tests.filter((test) => test.state === "unattributed").length;
     const unnamed = (counts?.unattributed ?? -1) - namedUnattributed;
-    if (!Number.isSafeInteger(counts?.failingAtHead) || counts!.failingAtHead! > summary.fail || unnamed < 0 ||
-      tests.length + unnamed !== counts!.failingAtHead!) {
+    if (counts?.failingAtHead === undefined || Number.isSafeInteger(counts.failingAtHead) === false ||
+      counts.failingAtHead > summary.fail || unnamed < 0 || tests.length + unnamed !== counts.failingAtHead) {
       run.log("test failure comparison unavailable: the preflight did not completely name its failures");
       return withEvidence;
     }
