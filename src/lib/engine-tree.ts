@@ -14,15 +14,13 @@ import { buildIntoStore, materializeFromStore, type BuildIntoStoreOptions, type 
 import { writeAtomic } from "./fs-race-safe.js";
 import { acquireInflightLock, InflightLockError, type InflightLockHandle } from "./inflight-lock.js";
 import { classifyRunDir, readSpec, realRunChildProbe, type RunChildProbe } from "./run-child-contract.js";
+import { ENGINE_BUILD_PREFIX, ENGINE_SOURCE_HASH, engineTreesRoot } from "./engine-paths.js";
 import { linkWorktreeNodeModules, resolveNodeModulesSource, type NodeModulesLinkOutcome } from "./worker.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
 
-const SHA256_HEX = /^[0-9a-f]{64}$/;
 const GIT_SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
-export const ENGINES_DIR = "engines";
 /** Written LAST, into the finished tree: an engine directory without it is not an engine. */
 export const ENGINE_RECORD = "engine.json";
-const BUILD_PREFIX = ".build-";
 
 const reasonOf = (err: unknown): string => String((err as Error)?.message ?? err).slice(0, 400);
 
@@ -39,11 +37,11 @@ export interface EngineRef extends EngineRecord {
 }
 
 /** `<state>/engines`. */
-export const enginesRoot = (stateRoot: string): string => join(stateRoot, ENGINES_DIR);
+export const enginesRoot = engineTreesRoot;
 
 /** `<state>/engines/<sourceHash>/`. A name that could leave `engines/` is refused, never normalized. */
 export function enginePath(stateRoot: string, sourceHash: string): string {
-  if (!SHA256_HEX.test(sourceHash)) throw new RangeError(`engine-tree: source hash ${JSON.stringify(sourceHash)} is not a sha256`);
+  if (!ENGINE_SOURCE_HASH.test(sourceHash)) throw new RangeError(`engine-tree: source hash ${JSON.stringify(sourceHash)} is not a sha256`);
   return join(enginesRoot(stateRoot), sourceHash);
 }
 
@@ -58,7 +56,7 @@ function readRecord(root: string): EngineRecord | undefined {
   }
   const r = parsed as Partial<EngineRecord> | null;
   const target = typeof r?.nodeModulesTarget === "string" ? { nodeModulesTarget: r.nodeModulesTarget } : {};
-  return r && typeof r.sha === "string" && GIT_SHA.test(r.sha) && typeof r.sourceHash === "string" && SHA256_HEX.test(r.sourceHash) && Number.isFinite(r.builtAt)
+  return r && typeof r.sha === "string" && GIT_SHA.test(r.sha) && typeof r.sourceHash === "string" && ENGINE_SOURCE_HASH.test(r.sourceHash) && Number.isFinite(r.builtAt)
     ? { sha: r.sha, sourceHash: r.sourceHash, builtAt: r.builtAt as number, ...target }
     : undefined;
 }
@@ -74,7 +72,7 @@ export function listEngines(stateRoot: string): EngineRef[] {
   }
   const found: EngineRef[] = [];
   for (const name of names) {
-    if (!SHA256_HEX.test(name)) continue;
+    if (!ENGINE_SOURCE_HASH.test(name)) continue;
     const root = join(enginesRoot(stateRoot), name);
     const record = readRecord(root);
     if (record && record.sourceHash === name) found.push({ ...record, root });
@@ -237,7 +235,7 @@ export function ensureEngineTree(stateRoot: string, sha: string, sourceHash: str
 
 async function buildEngine(stateRoot: string, sha: string, sourceHash: string, deps: EngineBuildOptions): Promise<BuildOutcome> {
   if (!GIT_SHA.test(sha)) return { kind: "failed", reason: `sha-invalid: ${JSON.stringify(sha)}` };
-  if (!SHA256_HEX.test(sourceHash)) return { kind: "failed", reason: `source-hash-invalid: ${JSON.stringify(sourceHash)}` };
+  if (!ENGINE_SOURCE_HASH.test(sourceHash)) return { kind: "failed", reason: `source-hash-invalid: ${JSON.stringify(sourceHash)}` };
   const clock = deps.clock ?? systemClock;
   const git = deps.git ?? hardenedEngineGit;
   const final = enginePath(stateRoot, sourceHash);
@@ -271,7 +269,7 @@ async function buildEngine(stateRoot: string, sha: string, sourceHash: string, d
   if (!modules.ok) return { kind: "failed", reason: `${modules.reason}: ${modules.detail}` };
   const started = clock.now();
   mkdirSync(enginesRoot(stateRoot), { recursive: true });
-  const temp = join(enginesRoot(stateRoot), `${BUILD_PREFIX}${sourceHash.slice(0, 12)}-${process.pid}-${started}`);
+  const temp = join(enginesRoot(stateRoot), `${ENGINE_BUILD_PREFIX}${sourceHash.slice(0, 12)}-${process.pid}-${started}`);
   try {
     await git(deps.repoDir, ["worktree", "add", "--detach", temp, sha]);
     const link = deps.linkNodeModules ?? ((target, tree) => linkWorktreeNodeModules(target, tree, { resolveSource: () => target }));
@@ -658,8 +656,8 @@ export async function pruneEngineTrees(stateRoot: string, deps: PruneEngineOptio
   const building = new Set([...inFlight.keys()].map((k) => k.split("\0")[1]));
   const present = existsSync(enginesRoot(stateRoot)) ? readdirSync(enginesRoot(stateRoot), { withFileTypes: true }) : [];
   for (const name of present.filter((e) => e.isDirectory()).map((e) => e.name)) {
-    const orphan = (name.startsWith(BUILD_PREFIX) && ![...building].some((h) => h && name.startsWith(`${BUILD_PREFIX}${h.slice(0, 12)}-`)))
-      || (SHA256_HEX.test(name) && !building.has(name) && readRecord(join(enginesRoot(stateRoot), name)) === undefined);
+    const orphan = (name.startsWith(ENGINE_BUILD_PREFIX) && ![...building].some((h) => h && name.startsWith(`${ENGINE_BUILD_PREFIX}${h.slice(0, 12)}-`)))
+      || (ENGINE_SOURCE_HASH.test(name) && !building.has(name) && readRecord(join(enginesRoot(stateRoot), name)) === undefined);
     if (orphan) await removeEngineDir(join(enginesRoot(stateRoot), name), deps.repoDir, git);
   }
   if (removed.length) log("engine.pruned", { removed, ...(Object.keys(deferred).length ? { deferred } : {}) });
@@ -716,7 +714,7 @@ const refreshedSha = new Map<string, string>();
 /** Whether the store result's engine is published at `sha`: a built, present or advanced engine's record says so. */
 function publishedAt(stateRoot: string, stored: StoreBuildResult, sha: string): boolean {
   if (stored.kind !== "built" && stored.kind !== "present") return false;
-  if (!SHA256_HEX.test(stored.hash)) return false;
+  if (!ENGINE_SOURCE_HASH.test(stored.hash)) return false;
   const record = readRecord(enginePath(stateRoot, stored.hash));
   return record?.sourceHash === stored.hash && record.sha === sha;
 }

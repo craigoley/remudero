@@ -375,9 +375,8 @@ test("W1-T11975 criterion 2: all four declarations skip unrelated diagnostics an
   const generation = f.contexts.get("agent")!.sourceStore!.meta("generation");
   f.append("run.start"); f.tick();
   assert.notEqual(f.contexts.get("agent")!.sourceStore!.meta("generation"), generation);
-  for (const name of ["agent", "analytics", "nav-badge"]) assert.equal(f.counts.get(name), before.get(name), `${name} also ignores a generation-moving unread row`);
-  assert.equal(f.counts.get("instances"), before.get("instances")! + 1,
-    "instances reads generation in inboxCapabilityEvidence and must rebuild when that field moves");
+  // W1-T13835: instances no longer publishes the projector generation, so it skips this row too.
+  for (const name of DECLARED) assert.equal(f.counts.get(name), before.get(name), `${name} also ignores a generation-moving unread row`);
   const analytics = f.originals.get("analytics")!;
   f.snapshot.asOf = new Date(f.start + 1).toISOString();
   const bodies = analyticsSourceBodies(f.snapshot, "owner/core");
@@ -633,4 +632,20 @@ test("W1-T11975 criterion 7: an instance mismatch leaves the other instance's au
   assert.ok(Number(core.skipped) > Number(console.skipped));
   assert.equal((core.not_skipped as Record<string, number>).mismatch, undefined);
   assert.ok((console.not_skipped as Record<string, number>).mismatch > 0);
+});
+
+test("W1-T13835 criterion 1: a row that moves only the projector generation leaves the instances body skipped and equal to a full build", t => {
+  const f = production(t);
+  const before = f.counts.get("instances");
+  const fingerprint = f.fingerprint("instances");
+  const generation = f.contexts.get("instances")!.instances.map(({ state }) => state.generation);
+  f.append("run.start"); f.tick();
+  assert.notDeepEqual(f.contexts.get("instances")!.instances.map(({ state }) => state.generation), generation, "positive control: the row moved a generation");
+  assert.equal(f.fingerprint("instances"), fingerprint, "the generation is not an input");
+  f.build("instances");
+  assert.equal(f.counts.get("instances"), before, "instances is skipped");
+  const data = f.output.get("instances")![0].data as InstancesData;
+  assert.ok(data.instances.every(entry => entry.inboxCapabilityEvidence === undefined || !Object.hasOwn(entry.inboxCapabilityEvidence, "generation")),
+    "no entry publishes the per-pass generation");
+  f.equalFullBuild("instances");
 });
