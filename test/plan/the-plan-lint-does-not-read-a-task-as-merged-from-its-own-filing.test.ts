@@ -2,10 +2,9 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
-import type { Config } from "#src/lib/config.js";
 import { loadPlan } from "#src/lib/plan.js";
 import { buildCommitTrailerIndex, ghGateway, persistVerifiedCredit, projectPlan } from "#src/lib/status.js";
-import { lintPlanCommand, planLintOutcomeFromOutput } from "#src/run-task.js";
+import { lintTask } from "#src/lib/task-linter.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 
 const OWNER = "fixture";
@@ -62,7 +61,10 @@ function history(t: TestContext) {
   write(planText.path, "marker\n");
   paths.set(4, commit(4, "deliver the declared plan text", planText.id));
   repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
+  const planPath = join(repo.dir, "plan", "tasks.yaml");
+  const base = loadPlan(planPath);
   for (const task of TASKS) record(task, true);
+  const plan = loadPlan(planPath);
 
   const filesReads: number[] = [];
   const slug = `${OWNER}/${REPO}`;
@@ -86,69 +88,70 @@ function history(t: TestContext) {
     return ghGateway(OWNER, REPO, options);
   };
   const ledgerPath = join(repo.dir, "state", "ledger.ndjson");
-  const projection = () => projectPlan(loadPlan(join(repo.dir, "plan", "tasks.yaml")), {
+  const projection = () => projectPlan(plan, {
     github: gateway(),
     ledgerPath,
     mergedPathsByPr: paths,
     writeCreditStore: () => {},
   });
-  const lint = async (cwd?: string) => {
-    const lines: string[] = [];
-    for (const method of ["log", "warn", "error"] as const) {
-      t.mock.method(console, method, (line: string) => lines.push(line));
-    }
-    try {
-      const code = await lintPlanCommand(["--base", "origin/main"], {
-        repoRoot: repo.dir,
-        loadConfig: () => ({ root: repo.dir }) as Config,
-        resolveOwnerRepo: () => ({ owner: OWNER, repo: REPO }),
-        ghGateway: () => gateway(cwd),
-        openPlanShardSlugs: () => [],
+  const lint = (cwd?: string) => {
+    const statuses = projectPlan(plan, { github: gateway(cwd), ledgerPath, writeCreditStore: () => {} });
+    const refused = new Set<string>();
+    for (const task of plan.tasks) {
+      const status = statuses.get(task.id);
+      assert.ok(status && !status.indeterminate, `expected resolved credit for ${task.id}`);
+      const baseTask = base.byId.get(task.id);
+      assert.ok(baseTask, `expected a base record for ${task.id}`);
+      const { violations } = lintTask(task, {
+        postMergeAmendment: {
+          statusResolvable: true,
+          merged: status.merged,
+          baseTask,
+          baseAcceptance: baseTask.acceptance,
+          followUpFiled: false,
+        },
       });
-      const outcome = planLintOutcomeFromOutput(code, lines, repo.git("rev-parse", "origin/main"), true);
-      assert.ok(outcome.ran, lines.join("\n"));
-      assert.equal(outcome.checked, TASKS.length, lines.join("\n"));
-      return new Set(outcome.violations.filter((line) => line.includes(" [post-merge-amendment] "))
-        .map((line) => line.split(" ")[0]));
-    } finally {
-      t.mock.restoreAll();
+      if (violations.some((violation) => violation.check === "post-merge-amendment" && violation.severity === "block")) {
+        refused.add(task.id);
+      }
     }
+    return refused;
   };
   return { lint, projection, filesReads, ledgerPath };
 }
 
-test("W1-T13192 criterion 1 allows an amendment after the task's own filing commit", async (t) => {
+test("W1-T13192 criterion 1 allows an amendment after the task's own filing commit", (t) => {
   const { lint } = history(t);
-  assert.equal((await lint()).has(TASKS[0].id), false);
+  assert.equal(lint().has(TASKS[0].id), false);
 });
 
-test("W1-T13192 criterion 2 agrees with the daemon projection over the same history", async (t) => {
+test("W1-T13192 criterion 2 agrees with the daemon projection over the same history", (t) => {
   const { lint, projection } = history(t);
   const projectedMerged = new Set([...projection()].filter(([, row]) => row.merged).map(([id]) => id));
   assert.deepEqual(projectedMerged, new Set(TASKS.slice(1).map((task) => task.id)));
-  assert.deepEqual(await lint(), projectedMerged);
+  assert.deepEqual(lint(), projectedMerged);
 });
 
-test("W1-T13192 criterion 3 keeps code and declared plan text terminal using local paths", async (t) => {
+test("W1-T13192 criterion 3 keeps code and declared plan text terminal using local paths", (t) => {
   const { lint, filesReads } = history(t);
-  const refused = await lint();
+  const refused = lint();
   assert.ok(refused.has(TASKS[1].id), "an amendment to built code is refused");
   assert.ok(refused.has(TASKS[2].id), "an amendment to delivered plan text is refused");
   assert.deepEqual(filesReads, [], "locally available paths need no GitHub files request");
 });
 
-test("a cached trailer credit from the filing is revalidated against the local commit", async (t) => {
+test("a cached trailer credit from the filing is revalidated against the local commit", (t) => {
   const { lint, ledgerPath } = history(t);
   const pr = { number: 1, url: `https://github.com/${OWNER}/${REPO}/pull/1` };
   assert.equal(persistVerifiedCredit(ledgerPath, TASKS[0].id, pr, [TASKS[0].path]), "recorded");
-  assert.equal((await lint()).has(TASKS[0].id), false);
+  assert.equal(lint().has(TASKS[0].id), false);
 });
 
-test("an unreadable local merge history leaves the gateway's files fallback available", async (t) => {
+test("an unreadable local merge history leaves the gateway's files fallback available", (t) => {
   const { lint, filesReads } = history(t);
   const otherRepo = gitRepo({ scope: t });
   otherRepo.addRemote("origin", `https://github.com/${OWNER}/${REPO}.git`);
-  const refused = await lint(otherRepo.dir);
+  const refused = lint(otherRepo.dir);
   assert.ok(refused.has(TASKS[1].id));
   assert.ok(refused.has(TASKS[2].id));
   assert.deepEqual(filesReads, [3, 4]);
