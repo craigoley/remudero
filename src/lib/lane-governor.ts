@@ -334,7 +334,9 @@ export function readLaneMemory(root: string, overrides: Partial<ShadowMemoryPort
   // The class median the shadow budget splits a tree's claim at; unreadable, the whole estimate stays typical.
   let perLaneTypicalMib: number | undefined;
   try { perLaneTypicalMib = Math.min(perLaneMib, ports.typical("implement")); }
-  catch (error) { void error; }
+  catch (error) {
+    void error; // An unreadable estimate store: no median, so every new lane is charged the whole estimate, as before.
+  }
   let highEvents: number | undefined;
   let highEventsUnread: string | undefined;
   try {
