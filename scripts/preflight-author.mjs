@@ -21,7 +21,7 @@ import { isMainModule, parseArgv } from './lib/argv.mjs';
 import { REPO_ROOT } from './lib/repo-root.mjs';
 import { captureStepSync, AUTHOR_OUTPUT_LIMIT_BYTES, AUTHOR_STEP_RUNTIME_MS } from './lib/author-step-capture.mjs';
 import { AUTHOR_RUNTIME_SAFETY_FACTOR, AUTHOR_SHUTDOWN_RESERVE_MS, runtimeBindings, readRuntimeProfile, runtimeDeadlineFit, closedDurationEvidence } from './lib/native-author-runtime.mjs';
-import { authorDependencyProvenance, sameAuthorDependencyProvenance } from './lib/author-dependency-provenance.mjs';
+import { authorDependencyProvenance, reprimeOwnSeedMaterialization, sameAuthorDependencyProvenance } from './lib/author-dependency-provenance.mjs';
 import { AUTHOR_CONTEXT_FORMAT, observeAuthorContext, requireAuthorContext } from './lib/author-context-compatibility.mjs';
 import { homedir, tmpdir } from 'node:os';
 import { accountAuthorPhases } from './lib/author-phase-accounting.mjs';
@@ -1130,8 +1130,11 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
       if (partial.unavailable) for (const why of partial.unavailable) console.log(`full-fallback partial set: ${why}`);
     }
     if (!values['dry-run']) {
-      const dependencyBefore=authorDependencyProvenance(root);
-      receipt.dependencyProvenance={before:dependencyBefore,assurance:'metadata/tool precheck, not cached-test permission'};
+      let dependencyBefore=authorDependencyProvenance(root);
+      // W1-T11468: a checkout's own seed materialization behind its lockfile is re-primed once, then re-checked.
+      const reprime=reprimeOwnSeedMaterialization(root,dependencyBefore,{run});
+      if(reprime){dependencyBefore=reprime.after;console.log(`dependency re-prime: exit ${reprime.record.status}; ${reprime.record.firstLine}`);}
+      receipt.dependencyProvenance={before:dependencyBefore,...(reprime?{reprime:reprime.record}:{}),assurance:'metadata/tool precheck, not cached-test permission'};
       if(dependencyBefore.state!=='present')throw refusal('dependency-precheck',`installed dependency precheck unavailable: ${dependencyBefore.reason}; expensive validation not started`);
       // Production phases only: an injected spawn is a diagnostic seam with no native slot to bind.
       const nativeBoundary = spawn === spawnSync;
