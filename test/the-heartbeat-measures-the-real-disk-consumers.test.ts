@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { makeTempDir, RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { REAL_SCRIPT } from "#test/helpers/fleet-heartbeat-harness.js";
-import { assertWallClockBound } from "#test/helpers/wall-clock-bound.js";
+import { assertWallClockBound, deriveWallClockBound } from "#test/helpers/wall-clock-bound.js";
 
 // Declare the fixture's topology before host paths: its temporary root may itself
 // live below /mnt/rmd, but that must not move its synthetic root onto /dev/data.
@@ -321,8 +321,20 @@ function budgeted(overrides: Record<string, string>): { beat: Record<string, str
 }
 
 test("a consumer walk stops at its time budget and publishes the cut consumer and every later walk unknown, never 0", () => {
-  const { beat, walks, elapsedMs } = budgeted({ SLOW_DU: "/var/lib/containerd", SLOW_DU_S: "10", RMD_CONSUMER_WALK_BUDGET_S: "2" });
-  assertWallClockBound(elapsedMs, 8_000, `the beat waited ${elapsedMs} ms on a walk budgeted at 2 s`);
+  const overrides = { SLOW_DU: "/var/lib/containerd", SLOW_DU_S: "10", RMD_CONSUMER_WALK_BUDGET_S: "2" };
+  const { beat, walks, elapsedMs } = budgeted(overrides);
+  const bound = deriveWallClockBound(() => {
+    const calibration = budgeted({ ...overrides, SLOW_DU_S: "1" });
+    assert.ok(calibration.walks.some((walk) => walk.endsWith(" du -sk /var/lib/containerd")), "the calibration must run the same consumer walk");
+  }, 2, 8_000);
+  const calibration = bound.source === "calibrated"
+    ? `${bound.calibrationMs.toFixed(1)} ms`
+    : `unavailable (${String(bound.reason)})`;
+  assertWallClockBound(
+    elapsedMs,
+    bound.boundMs,
+    `the beat waited ${elapsedMs} ms on a walk budgeted at 2 s; calibration ${calibration}, ${bound.source} bound ${bound.boundMs.toFixed(1)} ms`,
+  );
   assert.ok(walks.at(-1)?.endsWith(" du -sk /var/lib/containerd"), "positive control: the slow walk started, and no walk started after it");
   assert.equal(beat.consumer_containerd_kb, "unknown", "a walk cut off by the budget is unknown, never 0");
   assert.equal(beat.consumer_worktrees_kb, "42000", "walks finished inside the budget keep their sizes");
@@ -335,7 +347,7 @@ test("a consumer walk stops at its time budget and publishes the cut consumer an
 });
 
 test("a walk that finishes inside its budget is unchanged, and a malformed budget falls back to the default", () => {
-  const slow = budgeted({ SLOW_DU: "/var/lib/containerd", SLOW_DU_S: "1", RMD_CONSUMER_WALK_BUDGET_S: "30" }).beat;
+  const slow = budgeted({ SLOW_DU: "/var/lib/containerd", SLOW_DU_S: "0.1", RMD_CONSUMER_WALK_BUDGET_S: "30" }).beat;
   assert.equal(slow.consumer_containerd_kb, "27200000", "a slow walk that ends in time is measured, not cut");
   assert.equal(slow.consumer_npm_cache_kb, "10");
   assert.equal(slow.consumer_walk_state, "walked");
