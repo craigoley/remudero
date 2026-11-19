@@ -1,0 +1,106 @@
+- id: W1-T13816
+  title: "A plan-status reconcile changes only the status line of each shard's current text on main, so an amendment that merged after the cadence read the shard is never undone"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the landing writes plan shards on main; a wrong write silently undoes reviewed plan amendments
+  origin: "operator-session#reconcile-reverts-amendment-19642-2026-11-19"
+  plan_refs:
+    - W1-T3226
+    - W1-T3970
+    - W1-T9753
+    - W1-T11859
+    - W1-T11183
+  files:
+    - src/lib/feedback-landing.ts
+    - src/lib/measurement-cadence.ts
+    - test/plan/a-status-reconcile-keeps-what-main-changed-since-its-read.test.ts
+    - test/measurement-cadence-production-wiring.test.ts
+    - test/the-boot-sweep-and-content-landings-await-their-preflight.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Today's case: the cadence reads W1-T13790's shard from a checkout that holds its filing version (status queued, no amendment), while origin/main holds the amended version (the extra files entry test/a-red-the-pr-caused-is-fixed-not-refreshed.test.ts and the AMENDED (2026-11-19) note, still queued). The task is credited merged. buildPlanReconcileCadenceInput, planReconcileCadence and landPlanReconcileShards run on a real git fixture. The landed tree's shard reads status merged and still holds the files entry and the note"
+      proof: "grep: W1-T13816 criterion 1 in test/plan/a-status-reconcile-keeps-what-main-changed-since-its-read.test.ts"
+    - claim: "For every shard in a landed batch, the diff from origin/main to the landing tip is exactly one removed '  status: queued' line and one added '  status: merged' line, both for a shard main changed since the read and for one it did not change"
+      proof: "grep: W1-T13816 criterion 2 in test/plan/a-status-reconcile-keeps-what-main-changed-since-its-read.test.ts"
+    - claim: "A shard whose current text on main no longer reads status queued, carries a retirement field, or no longer exists is not staged. The landing result's refused list names its path with a reason, and the other shards of the batch still land"
+      proof: "grep: W1-T13816 criterion 3 in test/plan/a-status-reconcile-keeps-what-main-changed-since-its-read.test.ts"
+    - claim: "When main changes a shard after the first tree build and the landing builds its tree again (the rebuild path), the rebuilt tree holds main's new text with only the status line changed"
+      proof: "grep: W1-T13816 criterion 4 in test/plan/a-status-reconcile-keeps-what-main-changed-since-its-read.test.ts"
+    - claim: "An input with no status edit (the feedback and decision landings, and the ops-catalog reconcile, which reads bytes at its pinned commit and refuses a moved main) stages its content as today"
+      proof: "grep: W1-T13816 criterion 5 in test/plan/a-status-reconcile-keeps-what-main-changed-since-its-read.test.ts"
+    - claim: "invariant:main-text-only — every shard the public plan-status reconcile stages is the status edit applied to that shard's text on origin/main at that tree build. No byte comes from the copy the cadence read"
+      kind: guard
+      proof: "grep: W1-T13816 criterion 6 in test/plan/a-status-reconcile-keeps-what-main-changed-since-its-read.test.ts"
+    - claim: "The production cadence input attaches the status edit to each landing input"
+      proof: "grep: reconcileShardStatus( in src/lib/measurement-cadence.ts"
+  rationale: |
+    WHY: on 2026-11-19 the plan-status reconcile PR #19642 (squash 99867c3f2) set W1-T13790 to merged and, in
+    the same edit, removed the files entry and the 3-line AMENDED note that #19632 (b4c0f5757) had merged
+    1 h 37 min earlier. It also removed a files entry from W1-T13754 that #19626 (32f30142f) had added.
+    THE CAUSE (read at origin/main 762d3a053):
+    - The production hook (src/run-task.ts, the measurement cadence) reads every shard with readPlanShards
+      from the daemon's own checkout (repoRoot/plan/tasks.d). That checkout can lag origin/main.
+    - reconcileShardStatus (src/lib/plan-reconcile.ts) changes only the status line, but of the text it was
+      given: the checkout copy. buildPlanReconcileCadenceInput passes that whole text as the landing content.
+    - landContentSteps (src/lib/feedback-landing.ts) starts from a fresh origin/main tree (read-tree
+      origin/main) and then stages each input's whole content with update-index. For a plan-reconcile input
+      it never compares main's current blob with the text the cadence read. So every line main changed in
+      that shard since the read is put back to the old text.
+    - The PR's own commit 98547ddd5 has parent b00a2f3f9, which already holds #19632. The written W1-T13790
+      shard is exactly its filing version (b3cf1e609) with the status flipped. So the stale bytes came from
+      the read, not from the PR's base.
+    - The carry-forward of an earlier landing branch (stageBranchPending, W1-T9753) already refuses a path
+      main changed. Only the fresh inputs have no check.
+    HOW OFTEN (git, origin/main, 14 days to 2026-11-19): 31 reconcile PRs changed 1,022 shards. 8 shard edits
+    in 7 PRs also removed or changed lines other than the status line. Each of the 8 is the shard as it was
+    one main commit earlier, with the status flipped, so each undid the last main change to that shard:
+    - #19642: W1-T13790 (the #19632 amendment), W1-T13754 (the #19626 files entry).
+    - #19595: W1-T12511 (the #19565 risk_ruling block and comment move).
+    - #19444: W1-T9944 (the #19428 files entry, criterion proof and pin).
+    - #18831: W1-T12952 (the #18807 files list, criterion 1 proof and design notes 5 to 7).
+    - #18746: W1-T12792 (the #18720 files entry, criteria 5 and 6, a MEASURED note, the INVARIANT line and
+      design item 6).
+    - #18586: W1-T12177 (the build #18305's files entry).
+    - #18456: W1-T12149 (the #18418 files entry).
+    None of these lines is on origin/main now.
+    WHO IS AT RISK: the reconcile writes only shards its read copy shows as queued and the credit shows as
+    merged, so a task that was never built is changed only when its credit is wrong. But the retirement and
+    status checks also read the stale copy. A retirement, or a status change, that merged after the read is
+    undone the same way, and that changes what the fleet may build next.
+  design: |
+    INVARIANT main-text-only: every shard the public plan-status reconcile stages is the status edit applied
+    to that shard's text on origin/main at that tree build. No byte comes from the copy the cadence read.
+    1. LandContentInput gains an optional edit: (current: string) => string | undefined. When an input has an
+       edit, landContentSteps reads the path's blob on origin/main at each tree build (the first build and
+       every rebuild), applies the edit to that text, and stages the result. It never stages the input's
+       content for that path.
+    2. When main has no blob at that path, or the edit returns undefined, nothing is staged for that path.
+       The path goes on the build's refused list with a reason that names main's change (for example
+       "main's copy no longer reads status: queued"). The other inputs still land. The next cadence fire
+       reads again.
+    3. buildPlanReconcileCadenceInput gives each landing input an edit that calls reconcileShardStatus on the
+       given text with the credit answer the write already had. So main's text gets the same one-line change
+       and the same retirement and status checks.
+    4. An input without an edit is staged as today. This keeps the feedback and decision landings and the
+       ops-catalog reconcile (it reads bytes at its pinned commit and its preflight refuses a candidate whose
+       parent is not the pin) unchanged.
+    5. No change to reconcilePlan, reconcileShardStatus, stageBranchPending or the credit projection.
+    6. The test builds its repository, remote and gh fake with test/helpers/ (git-repo.ts, fake-github.ts or
+       gh-shim.ts). Criterion 1 uses the W1-T13790 shard text at b3cf1e609 and at b4c0f5757 as its fixture.
+    BUILD FOUND (2026-11-19): two existing tests land shards that exist only in the read copy, never on main; the
+    design refuses those, so their fixtures push the shards to main after the checkout is cloned (the checkout keeps no
+    plan/), and the cadence's edit becomes a plain field the wiring test's deepEqual names.
+  falsifier: |
+    Stage the input content as today: criteria 1, 2, 4 and 6 fail. Apply the edit to the read copy instead of
+    main's text: criteria 1 and 6 fail. Skip the edit's checks on main's text: criterion 3 fails. Apply the
+    edit to every input: criterion 5 fails.
+  note: |
+    Filed from an operator analysis session of PR #19642. The 8 lost amendments listed in the rationale are
+    not restored by this task; the operator decides that separately. W1-T11183 (queued) changes which shards
+    readPlanShards finds; this task changes what the landing writes, so the two do not overlap.
