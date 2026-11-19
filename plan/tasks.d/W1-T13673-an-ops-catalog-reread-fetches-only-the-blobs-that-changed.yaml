@@ -20,7 +20,7 @@
   files:
     - src/lib/ops-catalog-source.ts
     - test/github/an-ops-catalog-reread-fetches-only-the-blobs-that-changed.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Two readOpsCatalogSnapshotAsync reads through one api, where between them the branch moves to a commit that changes exactly one shard, send exactly one git/blobs GET on the second read (the changed shard) and return outcome ok with the changed task"

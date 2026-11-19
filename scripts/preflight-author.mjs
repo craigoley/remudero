@@ -941,7 +941,11 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
       throw new Error('runtime admission requires a future ISO deadline and a native runtime profile together');
     }
     const pinnedNode = readFileSync(join(root, '.nvmrc'), 'utf8').trim().replace(/^v/, '');
-    if (process.versions.node !== pinnedNode) throw refusal('node-version', `Node ${pinnedNode} required; got ${process.versions.node}`);
+    // W1-T13720: name the remedy. On the fleet host the units converge installs the pin and raises
+    // host-node-behind while it cannot; a bare version pair sent every lane to guess.
+    if (process.versions.node !== pinnedNode) throw refusal('node-version', `Node ${pinnedNode} required; got ${process.versions.node}. ` +
+      `On the fleet host the units converge (deploy/install-host-units.sh --install) installs the .nvmrc pin and raises the ` +
+      `host-node-behind alert while it cannot; read its host-node: journal lines. Elsewhere, install Node ${pinnedNode}`);
     // Turning worktreeConfig on removes Git's main-worktree-only exception for these keys.
     // A suite can enable it midway through validation and poison every sibling checkout.
     // Admit the topology, never migrate an operator's shared Git configuration here.

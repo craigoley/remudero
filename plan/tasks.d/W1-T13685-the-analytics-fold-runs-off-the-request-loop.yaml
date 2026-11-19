@@ -21,7 +21,7 @@
     - src/lib/thread-names.ts
     - test/console-api/serve/the-analytics-fold-runs-off-the-request-loop.test.ts
     - "scripts/build-child-entries.mjs"
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With offThread, the fold and its checkpoint write run on the worker; this thread serializes no checkpoint-sized text"

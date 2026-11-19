@@ -1,0 +1,36 @@
+- id: W1-T13739
+  title: "task-id-existence counts an id as added only when the branch itself changed its shard since the merge base, so a shard main moved out after the cut is carried along"
+  repo: remudero
+  depends_on: []
+  priority: 0.6
+  type: implement
+  verify: auto
+  risk: low # narrows which carried shards count as added; the re-issue check against main's tip is unchanged
+  origin: "human#2026-11-18-rethink-ops-tracking"
+  files:
+    - scripts/task-id-existence-check.mjs
+    - test/plan/a-shard-main-moved-out-after-the-branch-was-cut-is-not-added-by-it.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A shard main deleted after the branch was cut, which the branch carries unchanged, is not an id the branch adds"
+      proof: "grep: W1-T13739 criterion 1 in test/plan/a-shard-main-moved-out-after-the-branch-was-cut-is-not-added-by-it.test.ts"
+    - claim: "A shard the branch itself edited after main deleted it still counts as added"
+      proof: "grep: W1-T13739 criterion 2 in test/plan/a-shard-main-moved-out-after-the-branch-was-cut-is-not-added-by-it.test.ts"
+    - claim: "invariant:unreadable-base-over-refuses — an unreadable merge base leaves every shard main lacks counted as added, so the gate over-refuses rather than passing a real add"
+      proof: "grep: W1-T13739 criterion 3 in test/plan/a-shard-main-moved-out-after-the-branch-was-cut-is-not-added-by-it.test.ts"
+  rationale: |
+    OBSERVED: addedIdsAtHead in scripts/task-id-existence-check.mjs compares the shards at HEAD with the plan at
+    origin/main's tip (resolveBaseDeclaredIds reads the tip on purpose, so a re-issue landed after the cut is seen).
+    When a catalog move deletes a public shard on main after a branch was cut, the branch still carries the shard
+    unchanged. The tip has no declaration for it, so the carried copy reads as an id the branch adds, and the
+    reservation-holder check refuses it: #19506 failed on W1-T12249 after #19497 and on W1-T12223 after #19512, and
+    #19520 failed on W1-T12223. Merging main cleared each one, at the cost of a full CI run. The movers W1-T13680
+    and W1-T13681 will make such moves routine.
+  design: |
+    Add resolveBranchChangedPlanFiles(baseRef, cwd): git merge-base baseRef HEAD, then git diff --no-renames
+    --name-only <merge-base> HEAD over plan/tasks.yaml and plan/tasks.d/. addedIdsAtHead takes it as a fourth
+    argument and, when it is readable, considers only the declaring files the branch changed. When it is unreadable
+    the old behaviour stands. main() passes it. evaluateAddedIdCollisions and resolveBaseDeclaredIds are unchanged.
+    INVARIANT unreadable-base-over-refuses: with no readable merge base, every shard the tip of main lacks still counts
+    as added, exactly as before this change.

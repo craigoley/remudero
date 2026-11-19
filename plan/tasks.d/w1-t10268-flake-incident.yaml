@@ -6,7 +6,7 @@
   verify: auto
   risk: low
   priority: 2.5
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "flake-incident:test/serves-main-loop-stalls-are-profiled-and-named.test.ts#W1-T10074: a serve main-thread stall longer than its bound writes a profile row naming its top frame"
