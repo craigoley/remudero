@@ -23,6 +23,14 @@ function payload(t: TestContext): { dir: string; path: string; bytes: Buffer; no
   writeFileSync(path, 'closed evidence bytes\n'.repeat(12000), { mode: 0o600 });
   return { dir, path, bytes: readFileSync(path), now: Date.now() + EVIDENCE_IDLE_MS + 1000 };
 }
+type CompressOptions = NonNullable<Parameters<typeof compressEvidenceFile>[1]>;
+type Listing = (file: string) => { error?: Error; status: number | null; stdout: string; stderr: string };
+// scripts/lib/evidence-storage.d.mts predates the listing option and is outside W1-T13213's files, so the
+// option is attached through one cast here instead of being declared to the compiler.
+const listed = (listing: Listing): CompressOptions => ({ openFileListing: listing }) as CompressOptions;
+const clean: Listing = () => ({ status: 1, stdout: '', stderr: '' });
+const CLEAN = listed(clean);
+const MEASURED_WARNING = "lsof: WARNING: can't stat() devicefs file system /Users/other/Library/Developer/CoreDevice/DeviceFS";
 function platformRefusal(path: string, now: number): boolean {
   if (process.platform === 'darwin') return false;
   const r = compressEvidenceFile(path, { apply: true, now });
@@ -101,7 +109,7 @@ test('evidence compression refuses real fresh files and links without changing b
 });
 test('closed evidence compresses through a pinned descriptor and retains ordinary-reader bytes', t => {
   const f = payload(t); if (platformRefusal(f.path, f.now)) return;
-  const before = lstatSync(f.path), result = compressEvidenceFile(f.path, { apply: true, now: f.now });
+  const before = lstatSync(f.path), result = compressEvidenceFile(f.path, { ...CLEAN, apply: true, now: f.now });
   assert.equal(result.disposition, 'LOSSLESSLY_COMPRESSED', result.reason);
   assert.equal(result.copyMethod, 'pinned-fd-fcopyfile');
   assert.equal(result.publicationMethod, 'pinned-directory-atomic-exchange');
@@ -111,26 +119,26 @@ test('closed evidence compresses through a pinned descriptor and retains ordinar
 });
 test('pre-publication evidence writer is retained without replacement', t => {
   const f = payload(t); if (platformRefusal(f.path, f.now)) return;
-  const result = compressEvidenceFile(f.path, { apply: true, now: f.now, beforePublish: () => writeFileSync(f.path, 'new writer content') });
+  const result = compressEvidenceFile(f.path, { ...CLEAN, apply: true, now: f.now, beforePublish: () => writeFileSync(f.path, 'new writer content') });
   assert.equal(result.disposition, 'KEEP'); assert.equal(result.reason, 'publish-race');
   assert.equal(readFileSync(f.path, 'utf8'), 'new writer content'); assert.deepEqual(readdirSync(f.dir), ['closed.log']);
 });
 test('detached-original evidence writer is UNKNOWN and its newer bytes keep a recovery path', t => {
   const f = payload(t); if (platformRefusal(f.path, f.now)) return;
-  const result = compressEvidenceFile(f.path, { apply: true, now: f.now, afterPublish: ({ original }) => writeFileSync(original, 'new detached writer content') });
+  const result = compressEvidenceFile(f.path, { ...CLEAN, apply: true, now: f.now, afterPublish: ({ original }) => writeFileSync(original, 'new detached writer content') });
   assert.equal(result.disposition, 'UNKNOWN_AFTER_PUBLICATION'); assert.equal(result.reason, 'detached-original-changed');
   assert.ok(result.retainedOriginalPath); assert.equal(readFileSync(result.retainedOriginalPath, 'utf8'), 'new detached writer content');
   assert.deepEqual(readFileSync(f.path), f.bytes);
 });
 test('post-publication public-path writer is not overwritten and the original is retained', t => {
   const f = payload(t); if (platformRefusal(f.path, f.now)) return;
-  const result = compressEvidenceFile(f.path, { apply: true, now: f.now, afterPublish: ({ path }) => writeFileSync(path, 'new public writer content') });
+  const result = compressEvidenceFile(f.path, { ...CLEAN, apply: true, now: f.now, afterPublish: ({ path }) => writeFileSync(path, 'new public writer content') });
   assert.equal(result.disposition, 'UNKNOWN_AFTER_PUBLICATION'); assert.ok(result.retainedOriginalPath);
   assert.equal(readFileSync(f.path, 'utf8'), 'new public writer content'); assert.deepEqual(readFileSync(result.retainedOriginalPath), f.bytes);
 });
 test('an atomic writer in the final publication gap keeps its actual displaced inode', t => {
   const f = payload(t); if (platformRefusal(f.path, f.now)) return;
-  const result = compressEvidenceFile(f.path, { apply: true, now: f.now, beforeExchange: () => {
+  const result = compressEvidenceFile(f.path, { ...CLEAN, apply: true, now: f.now, beforeExchange: () => {
     const newer = join(f.dir, 'atomic-writer'); writeFileSync(newer, 'newer atomic writer bytes', { mode: 0o600 }); renameSync(newer, f.path);
   } });
   assert.equal(result.disposition, 'UNKNOWN_AFTER_PUBLICATION');
@@ -142,7 +150,7 @@ test('an atomic writer in the final publication gap keeps its actual displaced i
 test('an unverified exchange receipt retains both names and never retries or cleans the displaced slot', t => {
   const f = payload(t); if (platformRefusal(f.path, f.now)) return;
   const held = join(f.dir, 'removed-public-held');
-  const result = compressEvidenceFile(f.path, { apply: true, now: f.now, beforeExchange: () => renameSync(f.path, held) });
+  const result = compressEvidenceFile(f.path, { ...CLEAN, apply: true, now: f.now, beforeExchange: () => renameSync(f.path, held) });
   assert.equal(result.disposition, 'UNKNOWN_AFTER_PUBLICATION'); assert.equal(result.reason, 'exchange-outcome-unverified');
   assert.equal(existsSync(f.path), false); assert.deepEqual(readFileSync(held), f.bytes);
   assert.deepEqual(readFileSync(result.retainedOriginalPath!), f.bytes);
@@ -151,7 +159,7 @@ test('an unverified exchange receipt retains both names and never retries or cle
 test('a replaced stage pathname is refused before publication and its new bytes are retained', t => {
   const f = payload(t); if (platformRefusal(f.path, f.now)) return;
   let replaced: string | undefined;
-  const result = compressEvidenceFile(f.path, { apply: true, now: f.now, beforePublish: () => {
+  const result = compressEvidenceFile(f.path, { ...CLEAN, apply: true, now: f.now, beforePublish: () => {
     replaced = join(f.dir, readdirSync(f.dir).find(n => n.startsWith('.rmd-evidence-compress-'))!);
     renameSync(replaced, join(f.dir, 'verified-stage-held')); writeFileSync(replaced, 'foreign replacement', { mode: 0o600 });
   } });
@@ -160,11 +168,80 @@ test('a replaced stage pathname is refused before publication and its new bytes 
 });
 test('a replaced public pathname cannot be confused with the retained published descriptor', t => {
   const f = payload(t); if (platformRefusal(f.path, f.now)) return;
-  const result = compressEvidenceFile(f.path, { apply: true, now: f.now, afterPublish: ({ path }) => {
+  const result = compressEvidenceFile(f.path, { ...CLEAN, apply: true, now: f.now, afterPublish: ({ path }) => {
     renameSync(path, join(f.dir, 'published-inode-held')); writeFileSync(path, 'new public inode', { mode: 0o600 });
   } });
   assert.equal(result.disposition, 'UNKNOWN_AFTER_PUBLICATION'); assert.equal(result.reason, 'published-reader-changed');
   assert.equal(readFileSync(f.path, 'utf8'), 'new public inode'); assert.deepEqual(readFileSync(result.retainedOriginalPath!), f.bytes);
+});
+// Spoofs only the platform guard, so the keep-on-doubt arms (which return before any macOS tool runs)
+// execute on any host. Never used for a listing that may let a compaction proceed.
+function asDarwin(t: TestContext): void {
+  const original = Object.getOwnPropertyDescriptor(process, 'platform')!;
+  Object.defineProperty(process, 'platform', { value: 'darwin', configurable: true });
+  t.after(() => Object.defineProperty(process, 'platform', original));
+}
+const DOUBTS: Array<[string, Listing, string | undefined]> = [
+  ['a holder', () => ({ status: 0, stdout: 'p4242\nn/some/file\n', stderr: '' }), undefined],
+  ['a warning', () => ({ status: 1, stdout: '', stderr: MEASURED_WARNING + '\n      Output information may be incomplete.\n' }), MEASURED_WARNING],
+  ['a timeout', () => ({ error: Object.assign(new Error('spawnSync lsof ETIMEDOUT'), { code: 'ETIMEDOUT' }), status: null, stdout: '', stderr: '' }), 'ETIMEDOUT'],
+  ['a failed status', () => ({ status: 2, stdout: '', stderr: '' }), 'status 2'],
+  ['a clean status with nothing to say', () => ({ status: 0, stdout: '', stderr: '' }), 'status 0'],
+];
+test('W1-T13213 criterion 1: a listed holder and an untrusted listing give different reasons and the warning is carried', t => {
+  asDarwin(t);
+  const seen = new Map<string, { reason?: string; detail?: string }>();
+  for (const [name, listing, detail] of DOUBTS) {
+    const f = payload(t), result = compressEvidenceFile(f.path, { ...listed(listing), apply: true, now: f.now }) as ReturnType<typeof compressEvidenceFile> & { reasonDetail?: string };
+    assert.equal(result.disposition, 'KEEP', name);
+    seen.set(name, { reason: result.reason, detail: result.reasonDetail });
+    if (detail === undefined) { assert.equal(result.reason, 'open', name); assert.equal(result.reasonDetail, undefined, name); }
+    else { assert.equal(result.reason, 'open-files-unverified', name); assert.equal(result.reasonDetail, detail, name); }
+  }
+  assert.notEqual(seen.get('a holder')!.reason, seen.get('a warning')!.reason);
+});
+test('W1-T13213 criterion 2: compaction asks the injected listing, not the host, at every open-file check', t => {
+  const f = payload(t); if (platformRefusal(f.path, f.now)) return;
+  const asked: string[] = [];
+  const result = compressEvidenceFile(f.path, { ...listed(file => { asked.push(file); return { status: 1, stdout: '', stderr: '' }; }), apply: true, now: f.now });
+  assert.equal(result.disposition, 'LOSSLESSLY_COMPRESSED', result.reason);
+  assert.equal(asked.length, 3); assert.equal(asked[0], f.path); assert.equal(asked[1], f.path); assert.notEqual(asked[2], f.path);
+});
+test('W1-T13213 criterion 2: the real listing yields the compaction or a keep that says it could not verify', t => {
+  const f = payload(t); if (platformRefusal(f.path, f.now)) return;
+  const result = compressEvidenceFile(f.path, { apply: true, now: f.now });
+  if (result.disposition === 'LOSSLESSLY_COMPRESSED') return;
+  assert.equal(result.disposition, 'KEEP'); assert.equal(result.reason, 'open-files-unverified');
+  assert.deepEqual(readFileSync(f.path), f.bytes);
+});
+test('W1-T13213 criterion 3: a listing clean of holders that prints a warning keeps the file byte for byte on the same inode', t => {
+  asDarwin(t);
+  const f = payload(t), before = lstatSync(f.path);
+  const warned: Listing = () => ({ status: 1, stdout: '', stderr: MEASURED_WARNING + '\n      Output information may be incomplete.\n' });
+  const result = compressEvidenceFile(f.path, { ...listed(warned), apply: true, now: f.now }) as ReturnType<typeof compressEvidenceFile> & { reasonDetail?: string };
+  assert.equal(result.disposition, 'KEEP'); assert.equal(result.reason, 'open-files-unverified');
+  assert.equal(result.reasonDetail, MEASURED_WARNING);
+  assert.deepEqual(readFileSync(f.path), f.bytes);
+  const after = lstatSync(f.path);
+  assert.equal(after.ino, before.ino); assert.equal(after.mtimeMs, before.mtimeMs); assert.equal(after.size, before.size);
+  assert.deepEqual(readdirSync(f.dir), ['closed.log']);
+});
+test('W1-T13213 criterion 4: keep-on-doubt holds for every non-clean answer and scheduled maintenance passes no listing', t => {
+  asDarwin(t);
+  for (const [name, listing] of DOUBTS) {
+    const f = payload(t), before = lstatSync(f.path);
+    const result = compressEvidenceFile(f.path, { ...listed(listing), apply: true, now: f.now });
+    assert.equal(result.disposition, 'KEEP', name); assert.match(result.reason!, /^open(-files-unverified)?$/, name);
+    assert.deepEqual(readFileSync(f.path), f.bytes, name); assert.equal(lstatSync(f.path).ino, before.ino, name);
+    assert.deepEqual(readdirSync(f.dir), ['closed.log'], name);
+  }
+  const home = fixture(t), root = join(home, 'evidence'), config = join(home, '.config/remudero'); mkdirSync(root); mkdirSync(config, { recursive: true });
+  writeFileSync(join(config, 'evidence-storage.json'), JSON.stringify({ schema: 'rmd-evidence-storage/v1', enabled: true, roots: [root] }), { mode: 0o600 });
+  t.mock.method(console, 'log', () => {});
+  const calls: unknown[][] = [];
+  const compactRoot = (...args: unknown[]) => { calls.push(args); return { entries: [], incomplete: false, historyDeleted: false as const, modelCalls: 0 as const }; };
+  assert.equal(main(['--scheduled'], home, { readPressure: () => ({ status: 0, stdout: '1' }), compactRoot }), 0);
+  assert.equal(calls.length, 1); assert.deepEqual(calls[0], [root, { apply: true }]);
 });
 test('another process holding the evidence descriptor prevents compaction', async t => {
   const f = payload(t); if (platformRefusal(f.path, f.now)) return;
@@ -172,7 +249,8 @@ test('another process holding the evidence descriptor prevents compaction', asyn
   try {
     await once(child.stdout!, 'data');
     const result = compressEvidenceFile(f.path, { apply: true, now: f.now });
-    assert.equal(result.disposition, 'KEEP'); assert.equal(result.reason, 'open-or-unverified');
+    // The real listing is host-dependent: a Mac whose lsof warns about an unrelated mount cannot verify.
+    assert.equal(result.disposition, 'KEEP'); assert.match(result.reason!, /^open(-files-unverified)?$/);
     assert.deepEqual(readFileSync(f.path), f.bytes);
   } finally { child.kill('SIGTERM'); await once(child, 'close'); }
 });

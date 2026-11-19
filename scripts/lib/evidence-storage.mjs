@@ -36,17 +36,25 @@ function privateParents(file) {
     if (!s.isDirectory() || s.isSymbolicLink() || ((s.mode & 0o022) && !stickyShared)) throw Error('unsafe-parent');
   }
 }
-function noOtherOpenFiles(file) {
-  const p = spawnSync('/usr/sbin/lsof', ['-nP','-a','-p','^' + process.pid,'-Fpn','--',file], {
-    encoding: 'utf8', timeout: 5000, maxBuffer: 1024 ** 2,
-  });
-  if (p.error || p.status !== 1 || p.stdout !== '' || p.stderr !== '') throw Error('open-or-unverified');
+const realOpenFileListing = file => spawnSync('/usr/sbin/lsof', ['-nP','-a','-p','^' + process.pid,'-Fpn','--',file], {
+  encoding: 'utf8', timeout: 5000, maxBuffer: 1024 ** 2,
+});
+// Only status 1 with empty stdout and stderr is clean. A listed holder is `open`; every other
+// answer (error, timeout, other status, any stderr) is `open-files-unverified` and keeps the file.
+function noOtherOpenFiles(file, listing) {
+  const p = listing(file);
+  if (!p.error && p.status === 1 && p.stdout === '' && p.stderr === '') return;
+  if (!p.error && typeof p.stdout === 'string' && p.stdout !== '') throw Error('open');
+  const warning = typeof p.stderr === 'string' ? p.stderr.split('\n').find(l => l.trim() !== '') : undefined;
+  const failure = new Error('open-files-unverified');
+  failure.detail = warning ?? (p.error ? String(p.error.code ?? p.error.name) : 'status ' + p.status);
+  throw failure;
 }
 function samePayloadMetadata(a, b) {
   return ['dev','ino','size','mode','uid','gid','mtimeMs'].every(k => a[k] === b[k]);
 }
 export function compressEvidenceFile(file, options = {}) {
-  const { apply = false, now = Date.now(), beforePublish = () => {}, beforeExchange = () => {}, afterPublish = () => {} } = options;
+  const { apply = false, now = Date.now(), beforePublish = () => {}, beforeExchange = () => {}, afterPublish = () => {}, openFileListing = realOpenFileListing } = options;
   const entry = { path: file, disposition: 'KEEP' };
   let fd, dirfd, stagedFd, stagedIdentity, snapshot, stage, backup, exchangeAttempted = false;
   try {
@@ -61,7 +69,7 @@ export function compressEvidenceFile(file, options = {}) {
     if (original.size < 65536 || original.size > EVIDENCE_MAX_FILE_BYTES
         || original.blocks * 512 < original.size * .9) throw Error('small-oversize-or-already-compressed');
     if (!sameEvidenceIdentity(original, lstatSync(file))) throw Error('open-race');
-    noOtherOpenFiles(file);
+    noOtherOpenFiles(file, openFileListing);
     entry.sha256 = evidenceDigest(fd, original.size);
     entry.logicalBytes = original.size;
     entry.beforeAllocatedBytes = original.blocks * 512;
@@ -92,7 +100,7 @@ export function compressEvidenceFile(file, options = {}) {
     fsyncSync(stagedFd);
     if (staged.blocks * 512 >= original.blocks * 512 * .9) throw Error('insufficient-saving');
     beforePublish();
-    noOtherOpenFiles(file);
+    noOtherOpenFiles(file, openFileListing);
     if (!sameEvidenceIdentity(original, fstatSync(fd)) || !sameEvidenceIdentity(original, lstatSync(file))) throw Error('publish-race');
     if (!sameEvidenceIdentity(staged, fstatSync(stagedFd)) || !sameEvidenceIdentity(staged, lstatSync(stage))) throw Error('stage-changed-before-publish');
     backup = join(dirname(file), '.rmd-evidence-original-' + randomUUID());
@@ -112,7 +120,7 @@ export function compressEvidenceFile(file, options = {}) {
     afterPublish({ path: file, original: stage });
     // The displaced original must still be unchanged AND unused. A pre-exchange
     // writer can hold that inode even after the public pathname is replaced.
-    noOtherOpenFiles(stage);
+    noOtherOpenFiles(stage, openFileListing);
     const detached = fstatSync(fd);
     if (!samePayloadMetadata(original, detached) || detached.nlink !== 2
         || !sameEvidenceIdentity(detached, lstatSync(stage))
@@ -135,6 +143,7 @@ export function compressEvidenceFile(file, options = {}) {
     entry.allocatedSavingBytes = entry.beforeAllocatedBytes - entry.afterAllocatedBytes;
   } catch (error) {
     entry.reason = error.message;
+    if (error.detail !== undefined) entry.reasonDetail = error.detail;
     if (exchangeAttempted) entry.disposition = 'UNKNOWN_AFTER_PUBLICATION';
     if (backup) entry.retainedOriginalPath = backup;
     if (exchangeAttempted && stage) entry.retainedDisplacedPath = stage;
