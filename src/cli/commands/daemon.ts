@@ -878,16 +878,16 @@ export async function daemonSreLaneEnabled(
   return sreLaneEnabled(sreLane);
 }
 
-/** W1-T12236 / W1-T13709: boot keeps its tick rule; scoped passes may use a fresh, clean tick read.
- * A no-scope refill, no tick read, an older one, or one whose open list failed reads its own views. */
+/** W1-T12236 / W1-T13709 / W1-T13831: a pass of any scope, or none, may use a fresh, clean tick read.
+ * A boot caller may omit the read kind. Refills and other calls that omit it read their own views. */
 export function servedOpenPrViews(
   published: () => ReadGeneration<TickReadFacts> | undefined,
   tickStartedAtMs: () => number | undefined,
-): (scope?: LightPassScope) => (Promise<OpenPrView[]> & { servedReadStartedAtMs?: number }) | undefined {
-  return (scope) => {
+): (scope?: LightPassScope, read?: "pass" | "refill") => (Promise<OpenPrView[]> & { servedReadStartedAtMs?: number }) | undefined {
+  return (scope, read = scope?.scope === "boot" ? "pass" : "refill") => {
     const generation = published();
     const startedAtMs = tickStartedAtMs();
-    if (scope === undefined || !generation || startedAtMs === undefined) return undefined;
+    if (read !== "pass" || !generation || startedAtMs === undefined) return undefined;
     if (generation.publishedAtMs < startedAtMs || generation.facts.openPrError !== undefined) return undefined;
     return Object.assign(Promise.resolve(structuredClone(generation.facts.openPrViews)), { servedReadStartedAtMs: generation.publishedAtMs });
   };
