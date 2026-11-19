@@ -8,10 +8,11 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { hostname as osHostname } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import { createBoardSnapshotCache } from "./board-snapshot-cache.js";
+import { readBoundedFileTail } from "./bounded-file-tail.js";
 import {
   consoleAppUrl,
   enabledWorkerProviders,
@@ -75,6 +76,7 @@ import {
   readNvmrcVersion,
   readPauseAgeMs,
   refuseUnsupportedArgs,
+  type LaunchdServiceReading,
   type MemInfo,
   type ProviderCapacityReading,
   type WorktreeBaseRow,
@@ -543,6 +545,105 @@ function defaultIsWorktreeBaseAncestor(worktreePath: string, base: string, head:
   }
 }
 
+function readLaunchdPath(path: string): { state: "present"; resolved: string } | { state: "missing" | "unreadable" } {
+  try {
+    return { state: "present", resolved: realpathSync(path) };
+  } catch (error) {
+    // Only missing path components establish absence. Permission failures leave it unreadable.
+    const { absent, reason } = classifyReadFailure(error);
+    return { state: absent || reason === "ENOTDIR" ? "missing" : "unreadable" };
+  }
+}
+
+function readLaunchdCheckoutBranch(checkout: string): string | null {
+  try {
+    return hostWorktreeGit(checkout, ["symbolic-ref", "--short", "-q", "HEAD"], { timeout: 1_000 }).trim() || null;
+  } catch (error) {
+    // Git uses status 1 for a detached HEAD. Other failures leave the branch unreadable.
+    return (error as { status?: number }).status === 1 ? "detached HEAD" : null;
+  }
+}
+
+function readLaunchdErrorLine(path: string | undefined): string {
+  if (!path || !isAbsolute(path)) return "";
+  const { text } = readBoundedFileTail(path, 16 * 1024);
+  const tail = text.replace(/\r?\n$/, "");
+  return tail.slice(tail.lastIndexOf("\n") + 1).trim();
+}
+
+function parseLaunchdPrint(output: string, target: string) {
+  if (!output.trimStart().startsWith(`${target} = {`)) return undefined;
+  // Nested blocks also have fields such as state. Use the indentation of the job's fields.
+  const fields = new Map<string, string>();
+  const indent = /^[\t ]+(?=\S)/m.exec(output)?.[0];
+  for (const match of output.matchAll(/^([\t ]+)([a-z ]+) = ([^\r\n]+)\r?$/gm)) {
+    if (match[1] === indent) fields.set(match[2]!, match[3]!.trim());
+  }
+  const program = fields.get("program");
+  const runs = fields.get("runs") ?? "";
+  const state = fields.get("state");
+  const pidField = fields.get("pid");
+  const pid = pidField === undefined ? null : /^[1-9]\d*$/.test(pidField) ? Number(pidField) : NaN;
+  const exitField = fields.get("last exit code");
+  const exit = /^(-?\d+)(?::.*)?$/.exec(exitField ?? "");
+  const signal = fields.get("last terminating signal");
+  if (!program || !isAbsolute(program) || !/^\d+$/.test(runs) || !Number.isSafeInteger(Number(runs)) || !state
+    || (pid === null ? state === "running" : !Number.isSafeInteger(pid))
+    || (!exit && !signal && exitField !== "(never exited)")) return undefined;
+
+  return {
+    program, pid, starts: Number(runs), stderrPath: fields.get("stderr path"),
+    lastExit: exit ? { code: Number(exit[1]) } : signal ? { signal } : null,
+  };
+}
+
+function readDoctorLaunchdServices(config: Config, deps: DoctorDeps["launchd"] = {}): LaunchdServiceReading[] {
+  if ((deps.platform ?? process.platform) !== "darwin") return [];
+  const exec = deps.exec ?? ((cmd, args) => execFileSync(cmd, args, {
+    encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 1_000, killSignal: "SIGKILL",
+  }));
+  const readings: LaunchdServiceReading[] = [];
+  for (const label of [DAEMON_LABEL, SERVE_LABEL, SUPERVISOR_LABEL, DIGEST_LABEL]) {
+    const target = launchctlGuiTarget(realUid(), label);
+    let output: string;
+    try {
+      output = exec("launchctl", ["print", target]);
+    } catch (error) {
+      // Permission and domain failures leave state unreadable. Only an explicit missing job can be absent.
+      const stderr = String((error as { stderr?: string })?.stderr ?? "");
+      if (stderr.includes(`Could not find service "${label}"`)) {
+        const plist = launchdPlistPath(label, deps.home);
+        if (readLaunchdPath(plist).state === "missing") continue;
+        readings.push({ label, unreadableReason: `service not loaded; check ${plist}` });
+      } else {
+        readings.push({ label, unreadableReason: "launchctl print failed" });
+      }
+      continue;
+    }
+
+    const service = parseLaunchdPrint(output, target);
+    if (!service) {
+      readings.push({ label, unreadableReason: "unexpected launchctl print output" });
+      continue;
+    }
+
+    const { program, pid, starts, lastExit, stderrPath } = service;
+    const programPath = readLaunchdPath(program);
+    const resolved = programPath.state === "present" ? programPath.resolved : undefined;
+    const usesCheckout = (label === DIGEST_LABEL || label === SERVE_LABEL) && resolved
+      && basename(resolved) === "rmd" && basename(dirname(resolved)) === "bin"
+      && !/^[\t ]+RMD_SELF_SYNC_DONE => 1\s*$/m.test(output);
+    // deploy-run updates the configured install, which can differ from its own launcher checkout.
+    const checkout = label === SUPERVISOR_LABEL ? resolveInstallRoot(config) : usesCheckout ? dirname(dirname(resolved)) : undefined;
+    readings.push({
+      label, target, program, pid, starts, lastExit, programState: programPath.state,
+      lastErrorLine: readLaunchdErrorLine(stderrPath),
+      ...(checkout === undefined ? {} : { selfSync: { checkout, branch: readLaunchdCheckoutBranch(checkout) } }),
+    });
+  }
+  return readings;
+}
+
 /** Injectable seams for {@link doctorCommand} — every reader it drives, so the whole command is
  *  exercisable without a real /proc, a real ledger, or a live daemon. */
 export interface DoctorDeps extends ReportRepoContext {
@@ -582,6 +683,7 @@ export interface DoctorDeps extends ReportRepoContext {
   readProviderRoutingStatus?: typeof readProviderRoutingStatus;
   /** W1-T3728: presence only. Doctor never prints or persists the Azure Foundry key. */
   readCashKey?: () => string | undefined;
+  launchd?: { platform?: NodeJS.Platform; home?: string; exec?: typeof defaultLifecycleExec };
 }
 
 export function readCaptureSurfaceFireHistory(root: string): Array<Record<string, unknown>> {
@@ -674,6 +776,7 @@ export async function doctorCommand(rest: string[], deps: DoctorDeps = {}): Prom
     ...(lockRead.unreadableReason === undefined ? {} : { locksUnreadableReason: lockRead.unreadableReason }),
     deadLocks: dead,
     gitLocks: (deps.readGitLocks ?? readGitLocks)(repoDir, nowMs),
+    launchdServices: readDoctorLaunchdServices(config, deps.launchd),
     // W1-T3628: a LIVE reading, not the literal 0 that stood here. The arm it feeds could not
     // return anything but OK while this was a constant, and read "0 worker process(es)" on a host
     // carrying two `npm ci` stuck 80 minutes during the 2026-09-16 outage.

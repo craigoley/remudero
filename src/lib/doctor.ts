@@ -905,6 +905,62 @@ export interface DoctorInputs {
   providerCapacity?: readonly ProviderCapacityReading[];
   /** W1-T3728: a configured cash fallback is useful only if its host credential is readable. */
   cashSpendability?: CashSpendabilityReading;
+  launchdServices?: readonly LaunchdServiceReading[];
+}
+
+export type LaunchdServiceReading = { label: string } & (
+  | { unreadableReason: string }
+  | {
+      target: string;
+      pid: number | null;
+      starts: number;
+      lastExit: { code: number } | { signal: string } | null;
+      program: string;
+      programState: "present" | "missing" | "unreadable";
+      lastErrorLine: string;
+      selfSync?: { checkout: string; branch: string | null };
+    }
+);
+
+export function judgeLaunchdServices(services: readonly LaunchdServiceReading[]): Check[] {
+  const checks: Check[] = [];
+  const restartLimit = 3;
+  const threshold = `program present; FAIL after > ${restartLimit} starts with no process and a nonzero exit`;
+  for (const service of services) {
+    const name = `launchd:${service.label}`;
+    if ("unreadableReason" in service) {
+      checks.push({ name, verdict: "WARN", measured: `unreadable (${service.unreadableReason})`, threshold });
+      continue;
+    }
+    const { pid, starts, lastExit, program, programState, lastErrorLine, selfSync } = service;
+    const exitCode = lastExit && "code" in lastExit ? lastExit.code : undefined;
+    const repeatedFailure = pid === null && starts > restartLimit && exitCode !== undefined && exitCode !== 0;
+    const verdict = repeatedFailure || programState === "missing" ? "FAIL" : programState === "unreadable" ? "WARN" : "OK";
+    const processState = pid === null ? "no running process" : `pid ${pid}`;
+    const exitState = lastExit === null ? "never exited" : "code" in lastExit ? `last exit ${lastExit.code}` : `last signal ${lastExit.signal}`;
+    const observations = [`${starts} starts, ${processState}, ${exitState}`];
+    if (repeatedFailure) {
+      const line = lastErrorLine.replace(/[\p{Cc}\u2028\u2029]/gu, " ");
+      const excerpt = line.length > 240 ? `${line.slice(0, 239)}…` : line;
+      observations.push(excerpt ? `last error: ${excerpt}` : "last error: error log unavailable or empty");
+    }
+    if (programState === "missing") {
+      observations.push(`missing program ${program}; repair with \`rmd install-checkout --write\` or remove the service with \`launchctl bootout ${service.target}\` and remove its LaunchAgent plist`);
+    } else if (programState === "unreadable") {
+      observations.push(`program path unreadable: ${program}`);
+    }
+    checks.push({ name, verdict, measured: observations.join("; "), threshold });
+
+    if (selfSync && selfSync.branch !== "main") {
+      checks.push({
+        name: `launchd-self-sync:${service.label}`,
+        verdict: "WARN",
+        measured: `${selfSync.checkout} (${selfSync.branch === null ? "branch unreadable" : selfSync.branch})`,
+        threshold: "self-sync checkout on main",
+      });
+    }
+  }
+  return checks;
 }
 
 /** A capability reading, deliberately separate from a judgement outcome: fail-open judges retain
@@ -1151,6 +1207,7 @@ export function buildDoctorReport(inputs: DoctorInputs): DoctorReport {
     judgeCaptureSurfaceLiveness(inputs.captureSurfaceFires ?? inputs.ledgerLines),
     judgeProviderCapacityReadable(inputs.providerCapacity ?? []),
     judgeCashSpendability(inputs.cashSpendability),
+    ...judgeLaunchdServices(inputs.launchdServices ?? []),
   ];
   const worst = worstVerdict(checks);
   return { checks, worst, exitCode: exitCodeFor(worst), text: renderDoctor(checks) };

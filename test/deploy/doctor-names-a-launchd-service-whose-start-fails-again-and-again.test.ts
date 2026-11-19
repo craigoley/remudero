@@ -1,0 +1,196 @@
+import assert from "node:assert/strict";
+import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { test, type TestContext } from "node:test";
+import type { Check, DoctorReport } from "#src/lib/doctor.js";
+import { DAEMON_LABEL, DIGEST_LABEL, SERVE_LABEL, SUPERVISOR_LABEL, launchctlGuiTarget, launchdPlistPath } from "#src/lib/launchd.js";
+import { doctorCommand, type DoctorDeps } from "#src/lib/report-commands.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
+
+const labels = [DAEMON_LABEL, SERVE_LABEL, SUPERVISOR_LABEL, DIGEST_LABEL];
+const target = (label: string) => launchctlGuiTarget(process.getuid?.() ?? 0, label);
+
+function fixture(t: TestContext) {
+  const root = ownedFixtureDir(t, "doctor-launchd").dir;
+  const program = join(root, "program");
+  const log = join(root, "error.log");
+  writeFileSync(program, "", { mode: 0o755 });
+  return { root, program, log };
+}
+
+function service(label: string, program: string, lines: readonly string[] = []): string {
+  return `${target(label)} = {\n\tprogram = ${program}\n${lines.map(line => `\t${line}`).join("\n")}\n}\n`;
+}
+
+function missingService(label: string): never {
+  throw Object.assign(new Error("launchctl print failed"), {
+    status: 113, stderr: `Bad request.\nCould not find service "${label}" in domain for user gui: 501\n`,
+  });
+}
+
+async function report(root: string, launchd: NonNullable<DoctorDeps["launchd"]>, installRoot = join(root, "configured install")) {
+  const lines: string[] = [];
+  const exit = await doctorCommand(["--json"], {
+    out: line => lines.push(line),
+    loadConfig: () => ({ claudeBin: "/bin/true", root, installRoot }),
+    repoRoot: root,
+    nowMs: 1_000,
+    readLedgerLines: () => [
+      { step: "daemon.tick", run_id: "daemon", ts: new Date(1_000).toISOString() },
+      { step: "daemon.alive", run_id: "daemon", phase: "dispatch", ts: new Date(1_000).toISOString() },
+      { step: "sweep.pass", ts: new Date(1_000).toISOString() },
+      { step: "sweep.summary", ts: new Date(1_000).toISOString() },
+    ],
+    liveInflightRuns: () => [],
+    readLockFiles: () => ({ locks: [] }),
+    readGitLocks: () => [],
+    readMemInfo: () => ({ availableBytes: 1_024, totalBytes: 2_048, swapTotalBytes: 0 }),
+    readWorkerProcesses: () => ({ count: 0, processes: [] }),
+    readDiskFreeBytes: () => 64 * 1024 ** 3,
+    readDiskTotalBytes: () => 128 * 1024 ** 3,
+    readCheckoutDepth: () => ({ shallow: false, commitCount: 100_000 }),
+    readNvmrcVersion: () => process.versions.node,
+    launchd,
+  });
+  const parsed = JSON.parse(lines.join("\n")) as Pick<DoctorReport, "checks" | "worst">;
+  return { ...parsed, exit, launchd: parsed.checks.filter(check => check.name.startsWith("launchd:")) };
+}
+
+function checkFor(checks: readonly Check[], label: string): Check {
+  const check = checks.find(check => check.name === `launchd:${label}`);
+  assert.ok(check, `doctor should report ${label}`);
+  return check;
+}
+
+test("W1-T12176 criterion 1 reads all four launchd labels and accepts idle jobs", async t => {
+  const { root, program } = fixture(t);
+  const calls: string[][] = [];
+  const result = await report(root, { platform: "darwin", home: root, exec: (cmd, args) => {
+    assert.equal(cmd, "launchctl");
+    calls.push(args);
+    const label = args[1]!.split("/").at(-1)!;
+    if (label === DAEMON_LABEL) return service(label, program, ["state = running", "runs = 450", "pid = 17", "last exit code = 127"]);
+    if (label === SERVE_LABEL) return service(label, program, ["state = not running", "runs = 3", "last exit code = 127"]);
+    if (label === DIGEST_LABEL) return service(label, program, ["state = not running", "runs = 14", "last exit code = 0"]);
+    return service(label, program, ["state = not running", "runs = 0", "last exit code = (never exited)"]);
+  } });
+  assert.deepEqual(calls, labels.map(label => ["print", target(label)]));
+  assert.deepEqual(result.launchd.map(check => check.verdict), ["OK", "OK", "OK", "OK"]);
+});
+
+test("W1-T12176 criterion 2 fails repeat crashes and bounds the last error line", async t => {
+  const { root, program, log } = fixture(t);
+  const cause = `${root}/node_modules/.bin/tsx: No such file or directory`;
+  writeFileSync(log, `${"x".repeat(32_768)}\nprevious failure\n${cause} ${"x".repeat(512)} do-not-copy-this-suffix\n`);
+  const result = await report(root, { platform: "darwin", home: root, exec: (_cmd, args) => {
+    if (args[1] !== target(DAEMON_LABEL)) missingService(args[1]!.split("/").at(-1)!);
+    return service(DAEMON_LABEL, program, ["state = spawn scheduled", "runs = 450", "last exit code = 127: EX_NOTFOUND", `stderr path = ${log}`]);
+  } });
+  const check = checkFor(result.launchd, DAEMON_LABEL);
+  assert.equal(check.verdict, "FAIL");
+  assert.match(check.measured, /450 starts/);
+  assert.ok(check.measured.includes(cause));
+  assert.doesNotMatch(check.measured, /previous failure|do-not-copy-this-suffix|\r|\n/);
+  assert.ok(check.measured.length < 400);
+  assert.equal(result.worst, "FAIL");
+  assert.equal(result.exit, 2);
+});
+
+test("W1-T12176 criterion 3 names the missing program and both operator remedies", async t => {
+  const { root } = fixture(t);
+  const program = join(root, "missing install", "bin", "rmd");
+  const result = await report(root, { platform: "darwin", home: root, exec: (_cmd, args) => {
+    if (args[1] !== target(DAEMON_LABEL)) missingService(args[1]!.split("/").at(-1)!);
+    return service(DAEMON_LABEL, program, ["state = not running", "runs = 0", "last exit code = (never exited)"]);
+  } });
+  const check = checkFor(result.launchd, DAEMON_LABEL);
+  assert.equal(check.verdict, "FAIL");
+  assert.ok(check.measured.includes(program));
+  assert.match(check.measured, /install-checkout --write/);
+  assert.ok(check.measured.includes(`launchctl bootout ${target(DAEMON_LABEL)}`));
+});
+
+test("W1-T12176 criterion 4 warns about the actual checkout and branch used for self-sync", async t => {
+  const { root } = fixture(t);
+  const writeLauncher = (checkout: string) => {
+    const program = join(checkout, "bin", "rmd");
+    mkdirSync(dirname(program), { recursive: true });
+    writeFileSync(program, "", { mode: 0o755 });
+    return program;
+  };
+  const main = writeLauncher(gitRepo({ scope: t }).dir);
+  const offMain = gitRepo({ scope: t, branch: "plan-amendment" }).dir;
+  const offMainProgram = writeLauncher(offMain);
+  const result = await report(root, { platform: "darwin", home: root, exec: (_cmd, args) => {
+    const label = args[1]!.split("/").at(-1)!;
+    const state = ["state = not running", "runs = 4", "last exit code = 0"];
+    if (label === DIGEST_LABEL) state.push("environment = {", "\tRMD_SELF_SYNC_DONE => 1", "}");
+    return service(label, label === SUPERVISOR_LABEL ? main : offMainProgram, state);
+  } }, offMain);
+  const warnings = result.checks.filter(check => check.name.startsWith("launchd-self-sync:"));
+  assert.deepEqual(warnings.map(check => [check.name, check.verdict]),
+    [SERVE_LABEL, SUPERVISOR_LABEL].map(label => [`launchd-self-sync:${label}`, "WARN"]));
+  for (const warning of warnings) {
+    assert.ok(warning.measured.includes(offMain));
+    assert.ok(warning.measured.includes("plan-amendment"));
+  }
+});
+
+test("W1-T12176 criterion 5 distinguishes absent, unreadable, and non-launchd hosts", async t => {
+  const { root } = fixture(t);
+  const plist = launchdPlistPath(SUPERVISOR_LABEL, root);
+  mkdirSync(dirname(plist), { recursive: true });
+  writeFileSync(plist, "");
+  const linux = await report(root, { platform: "linux", exec: () => assert.fail("launchctl must not run on Linux") });
+  assert.deepEqual(linux.launchd, []);
+  const mac = await report(root, { platform: "darwin", home: root, exec: (_cmd, args) => {
+    if (args[1] === target(SERVE_LABEL)) throw Object.assign(new Error("permission denied"), { status: 1 });
+    if (args[1] === target(DIGEST_LABEL)) return service(DIGEST_LABEL, "/bin/true", ["state = not running", "runs = 450"]);
+    return missingService(args[1]!.split("/").at(-1)!);
+  } });
+  assert.deepEqual(mac.launchd.map(check => check.name), [SERVE_LABEL, SUPERVISOR_LABEL, DIGEST_LABEL].map(label => `launchd:${label}`));
+  for (const check of mac.launchd) {
+    assert.equal(check.verdict, "WARN");
+    assert.match(check.measured, /unreadable/);
+  }
+});
+
+test("doctor keeps repeated crash evidence when the service has no readable error log", async t => {
+  const { root, program, log } = fixture(t);
+  const result = await report(root, { platform: "darwin", home: root, exec: (_cmd, args) => {
+    if (args[1] !== target(DAEMON_LABEL)) missingService(args[1]!.split("/").at(-1)!);
+    return service(DAEMON_LABEL, program, ["state = not running", "runs = 4", "last exit code = 1", `stderr path = ${log}`]);
+  } });
+  const check = checkFor(result.launchd, DAEMON_LABEL);
+  assert.equal(check.verdict, "FAIL");
+  assert.match(check.measured, /error log unavailable/);
+});
+
+test("doctor describes a prior signal separately and reports an unreadable program path", async t => {
+  const { root } = fixture(t);
+  const program = join(root, "program-loop");
+  symlinkSync(program, program);
+  const result = await report(root, { platform: "darwin", home: root, exec: (_cmd, args) => {
+    if (args[1] !== target(DAEMON_LABEL)) missingService(args[1]!.split("/").at(-1)!);
+    return service(DAEMON_LABEL, program, ["state = running", "runs = 4", "pid = 18", "last terminating signal = Killed: 9"]);
+  } });
+  const check = checkFor(result.launchd, DAEMON_LABEL);
+  assert.equal(check.verdict, "WARN");
+  assert.match(check.measured, /pid 18, last signal Killed: 9/);
+  assert.ok(check.measured.includes(`program path unreadable: ${program}`));
+});
+
+test("doctor treats an unavailable launchctl executable as unreadable on Darwin", async t => {
+  const { root } = fixture(t);
+  const originalPath = process.env.PATH;
+  process.env.PATH = root;
+  try {
+    const result = await report(root, { platform: "darwin", home: root });
+    assert.deepEqual(result.launchd.map(check => [check.verdict, check.measured]),
+      labels.map(() => ["WARN", "unreadable (launchctl print failed)"]));
+  } finally {
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+  }
+});
