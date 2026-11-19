@@ -1026,6 +1026,10 @@ const TERMINAL_UNCREDITABLE_HEAD_ESCALATED_STEP = "sweep.fix.uncreditable_head_e
 const TERMINAL_UNCREDITABLE_HISTORY_SLICE: EscalationTriageSlice = {
   holder: "sweep.terminal-uncreditable-heads",
   steps: [TERMINAL_UNCREDITABLE_HEAD_STEP, TERMINAL_UNCREDITABLE_HEAD_ESCALATED_STEP],
+  sharedSnapshot: true,
+  project: ({ ts, step, pr_number, head_sha, head, repair_task_id, cause, reason, terminal }) => ({
+    ts, step, pr_number, head_sha, head, repair_task_id, cause, reason, terminal,
+  }),
   rawPattern: /"step":"sweep\.fix\.uncreditable_head"|"step":"sweep\.fix\.uncreditable_head_escalated"/,
   sharedSnapshot: true,
   // The union uses ts when deduplicating replayed decisions.
