@@ -3314,7 +3314,11 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     readerAgreement: { owner, repo, plan, readJson: readJsonImpl },
     readReviewEvidenceRecord: pr => readReviewEvidenceRecord(pr, readJsonImpl),
     fixDispatchFleetHold: () => checkSharedPause(config.root, { run: pauseGit.run, mintAnchor: pauseGit.mintAnchor }),
-    fixDispatchCauseProbe: (cause) => fixDispatchCauseProbe(cause, { stateDir: join(config.root, "state") }),
+    fixDispatchCauseProbe: async (cause) => fixDispatchMemoryCause(cause)
+      ? fixAdmissionCauseProbe({ hostWorkerBudget: policy.reviewCapacity.hostWorkerBudget, readActiveWorkers: () => activeWorkerCount(),
+        readPressure: () => productionFixPressure(policy.memoryFloorMib, ledgerPath, classEstimate("fix").estimateMib),
+        readEstimate: classEstimate, readTypical: classTypical, readResidents: () => productionFixAdmissionResidents(config.root) })
+      : fixDispatchCauseProbe(cause, { stateDir: join(config.root, "state") }),
     reconcilePrimaryShadowAlert: () => primaryShadowAlerts.reconcile().catch(primaryShadowAlertFailed),
     readOpenEscalations: () => openEscalationIssues.listOpen?.(NEEDS_HUMAN_LABEL) ?? [],
     fixProgressJudge: effectsProgressJudge,
@@ -15908,6 +15912,13 @@ function dispatchFailureCause(row: Record<string, unknown>): string {
     .replace(/\/pull\/\d+/g, "/pull/<n>").replace(/\b\d+(?:\.\d+)?\b/g, "<n>").trim();
 }
 
+const FIX_ADMISSION_MEMORY_CAUSE = /^fix dispatch refused: worker admission refused \((?:live host capacity|host worker budget <n>) exhausted/;
+
+/** W1-T13869: a cause (as dispatchFailureCause normalises it) where the run child's own fix admission refused for memory. */
+export function fixDispatchMemoryCause(cause: string): boolean {
+  return FIX_ADMISSION_MEMORY_CAUSE.test(cause);
+}
+
 function fixDispatchSuccess(row: Record<string, unknown>, pr: OpenPrView): boolean {
   if (isProofAmendmentIdentityRow(row)) return false;
   return (row.step === "fix.dispatch" || row.step === "fix.retrigger") &&
@@ -15937,6 +15948,7 @@ function* fixDispatchHoldAtHeadSteps(
   const last = history.at(-1);
   if (!last) return undefined;
   const cause = dispatchFailureCause(last);
+  const memoryCause = fixDispatchMemoryCause(cause);
   let consecutive = 0;
   for (let i = history.length - 1; i >= 0 && dispatchFailureCause(history[i]!) === cause; i--) consecutive++;
   const nowMs = options.nowMs ?? systemClock.now();
@@ -16015,7 +16027,7 @@ function* fixDispatchHoldAtHeadSteps(
   } else if (cause.startsWith("preservation:") && typeof last.worktree_path === "string") {
     if (!ownerWorktreeExists(last.worktree_path) ||
         (yield* step(() => ownerReclaimable?.(pr, last))) === true) return undefined;
-  } else if (options.causeProbe && fixDispatchRefusalClass(cause) !== undefined) {
+  } else if (options.causeProbe && (memoryCause || fixDispatchRefusalClass(cause) !== undefined)) {
     // W1-T13750: a registered cause reads its probe as fleet-held does: a clear read lifts the hold at this head.
     const read = yield* step(() => options.causeProbe!(cause));
     if (read === "clear") return undefined;
@@ -16033,7 +16045,7 @@ function* fixDispatchHoldAtHeadSteps(
   const nextRetryAt = clockFromMillisFn(() => nextRetryMs).iso();
   const escalationKey = `${pr.prNumber}@${pr.headSha}:${cause}`;
   const escalated = lines.some(row => atHead(row) && row.step === "sweep.disposed" && row.dispatch_cause_escalated === escalationKey);
-  if (probe === "unprobed" && nowMs >= nextRetryMs && progress.verdict !== "escalate") return undefined;
+  if (probe === "unprobed" && nowMs >= nextRetryMs && (progress.verdict !== "escalate" || memoryCause)) return undefined;
   const decline = isOwnerClaimDecline(last);
   const staged = Array.isArray(last.staged_paths) ? `, staged ${last.staged_paths.map(String).join(", ")}` : "";
   const reason = `${decline ? "fix checkout claim declined" : "detached fix dispatch failed before fix.dispatch"} on #${pr.prNumber} ` +
@@ -16052,7 +16064,8 @@ async function holdRepeatedFixClaimDecline(
   pr: OpenPrView, hold: FixDispatchHold | undefined, escalate: SweepDeps["escalate"],
 ): Promise<{ reason: string; fields: Record<string, unknown> } | undefined> {
   if (hold === undefined) return undefined;
-  if (hold.fields.judge_verdict === "escalate" && hold.fields.escalation_deferred !== true) {
+  if (hold.fields.judge_verdict === "escalate" && hold.fields.escalation_deferred !== true &&
+      !fixDispatchMemoryCause(String(hold.fields.cause))) {
     if (!hold.escalated) await escalate(pr, hold.reason, renderClarificationQuestion(pr, hold.reason, pr.strikeHistory ?? []));
     hold.fields.dispatch_cause_escalated = hold.fields.dispatch_cause_key;
     if (hold.fields.dispatch_held === "fix_claim_decline")
@@ -20351,6 +20364,21 @@ export function createSweepFixAdmissionController(input: {
       } };
     },
   };
+}
+
+/** W1-T13869: "clear" when the run child's fix admission (full surface, queue depth 1, no review reserved) would admit
+ *  one fix on these readings now, else "present". It builds the same controller and claims nothing. */
+export function fixAdmissionCauseProbe(readers: { hostWorkerBudget: number } & Required<Pick<
+  Parameters<typeof createSweepFixAdmissionController>[0],
+  "readPressure" | "readActiveWorkers" | "readEstimate" | "readTypical" | "readResidents">>): "clear" | "present" {
+  try {
+    const controller = createSweepFixAdmissionController({ ...readers, surface: "full", queueDepth: 1,
+      activeWorkers: readers.readActiveWorkers(), reviewReservations: 0 });
+    return controller.snapshot().fixAdmissionsAvailable > 0 ? "clear" : "present";
+  } catch (error) {
+    void error; // An unreadable reading does not prove that memory freed, so the cause stays present.
+    return "present";
+  }
 }
 
 /** Production composition for both full-sweep entry points. Kept pure so wiring cannot drift. */
