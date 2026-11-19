@@ -5131,9 +5131,9 @@ function shorthandIsInsideEnumeration(report: string, index: number): boolean {
 
 function shorthandIsAboutChangeset(report: string, index: number, length: number): boolean {
   if (isInsideInlineQuote(report, index)) return false;
+  const rest = report.slice(index + length);
   const before = report.slice(0, index);
   if (/\bnon-$/i.test(before)) return false;
-  const rest = report.slice(index + length);
   // Is a house-shorthand claim (`plan-only`/`data-only`) at `index` ABOUT THE CHANGESET? THREE GRAMMATICAL RELATIONS,
   // none of them "a changeset word appears nearby", and the inline-quote guard above is checked FIRST and ONCE —
   // W1-T2534 gave the count arm that check and left these three uncovered, so a body that QUOTED a scope label was
