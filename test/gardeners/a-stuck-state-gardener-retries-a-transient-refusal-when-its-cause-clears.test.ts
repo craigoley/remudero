@@ -9,16 +9,16 @@ import { gzipSync } from "node:zlib";
 import type { Escalation } from "#src/lib/escalate.js";
 import { REGISTERED_GARDEN_NAMES } from "#src/lib/garden-registry.js";
 import { operatorReleasePin } from "#src/lib/operator-release.js";
-import type { OpsCatalogApi } from "#src/lib/ops-catalog-source.js";
-import { mergePlanBlobs, RELEASE_LEDGER_STEP, type Plan } from "#src/lib/plan.js";
+import { readOpsCatalogSnapshotAsync, type OpsCatalogApi } from "#src/lib/ops-catalog-source.js";
+import { loadPlan, mergePlanBlobs, RELEASE_LEDGER_STEP, type Plan } from "#src/lib/plan.js";
 import {
-  APPROVE_RELEASE_REFUSED_STEP, approveInChild, checkoutHeadCommit, clearanceBound, fixDispatchCauseProbe, opsMainCommit, opsRecordDigest, productionStuckStatePorts,
-  productionStuckStateProbe, readStuckStateRows, recordApproveReleaseRefusal, runStuckStateGardener, scanStuckState,
+  APPROVE_RELEASE_REFUSED_STEP, approveInChild, clearanceBound, fixDispatchCauseProbe, opsMainCommit, opsRecordDigest, productionStuckStatePorts,
+  productionStuckStateProbe, readApproveRelease, readStuckStateRows, recordApproveReleaseRefusal, runStuckStateGardener, scanStuckState,
   type HeldItem, type ProbeResult, type StuckStatePorts,
 } from "#src/lib/stuck-state-gardener.js";
 import { buildSweepEffects, runSweep, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
-import { findReleasePlanInCatalogs, findTaskInCatalogs } from "#src/lib/task-lookup.js";
-import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { findReleasePlanInCatalogs } from "#src/lib/task-lookup.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 /**
  * W1-T13750. Tonight's two `rmd approve` refusals (a pinned public view that held a moved id, then ops W1-T13599
@@ -59,7 +59,8 @@ function opsCatalog(t: TestContext, initial: string) {
     assert.equal(path, `${base}/git/blobs/${blob}`, "only pinned read-only fixture routes may run");
     return { sha: blob, encoding: "base64", size: Buffer.byteLength(text), content: Buffer.from(text).toString("base64") };
   };
-  return { root, stateDir, api, set: (next: string) => { text = next; }, commit: () => sha1(text) };
+  return { root, stateDir, api, read: () => readOpsCatalogSnapshotAsync({ repository: REPOSITORY }, api),
+    set: (next: string) => { text = next; }, commit: () => sha1(text) };
 }
 
 /** The gardener over one in-memory ledger, the operator's approve release path, and counted probes. */
@@ -69,15 +70,14 @@ function harness(fx: ReturnType<typeof opsCatalog>, publicPlan: Plan, probe?: (i
     now: NOW, publicPlan, publicCommit: "a".repeat(40), refuseNextRetry: false,
   };
   const lookup = { stateDir: fx.stateDir, api: fx.api };
-  /** The release branch of `rmd approve <id>`: the catalog lookup and the refusal recorder approveCommand calls; the
-   *  release row stands in for approveParkedTask (src/run-task.ts, which a new suite may not import). */
+  /** In-memory approve port for the gardener's retry and failure cases. */
   const approvePath = async (id: string): Promise<number> => {
     const held = await findReleasePlanInCatalogs(id, h.publicPlan, lookup);
     if (held.outcome === "absent") return 2;
     if (held.outcome !== "found" || h.refuseNextRetry) {
       h.refuseNextRetry = false;
-      await recordApproveReleaseRefusal(id, held.outcome === "found" ? { reason: "compose-invalid_cross_catalog_dependency" } : refusalOf(held), {
-        lookup, append: row => h.ledger.push({ ts: iso(h.now), ...row }), publicCommit: () => h.publicCommit });
+      recordApproveReleaseRefusal(id, held.outcome === "found" ? { reason: "compose-invalid_cross_catalog_dependency" } : refusalOf(held), {
+        opsSnapshot: await fx.read(), append: row => h.ledger.push({ ts: iso(h.now), ...row }), publicCommit: h.publicCommit });
       return 1;
     }
     if (h.ledger.some(row => row.step === RELEASE_LEDGER_STEP && row.task_id === id)) return 0;
@@ -102,74 +102,51 @@ function harness(fx: ReturnType<typeof opsCatalog>, publicPlan: Plan, probe?: (i
 
 const steps = (rows: readonly Row[], step: string) => rows.filter(row => row.step === step);
 
-/** The refusal approveCommand records: a whole-composition refusal by its reason, or (once W1-T13749 lands and the
- *  lookup answers a per-task hold) `held-<code>` with the edge, so this suite holds before and after that change. */
+/** A composition refusal reason or the held edge that the fixture presents to the gardener. */
 function refusalOf(answer: object): { reason: string; edge?: string } {
   if ("reason" in answer && typeof answer.reason === "string") return { reason: answer.reason };
   const hold = (answer as { hold: { reason: string; task: string; dependsOn?: string } }).hold;
   return { reason: `held-${hold.reason}`, edge: hold.dependsOn === undefined ? `${hold.task} in both catalogs` : `${hold.task} -> ${hold.dependsOn}` };
 }
-const REFUSED_EDGE = /^(?:compose|held)-invalid_cross_catalog_dependency$/;
+test("W1-T13750 criterion 1: the approve lookup and production probe read the pinned public plan", async t => {
+  const id = "W1-T13599", dependency = "W1-T13733";
+  const fx = opsCatalog(t, shard(id, { depends_on: "[W1-T13733]" }));
+  const checkout = gitRepo({ scope: t, seedCommit: false });
+  const planPath = join(checkout.dir, "plan", "tasks.yaml");
+  const before = shard("W1-T13700", { verify: "auto" });
+  mkdirSync(join(checkout.dir, "plan"));
+  writeFileSync(planPath, before);
+  checkout.git("add", "plan/tasks.yaml");
+  checkout.git("commit", "--quiet", "-m", "fixture public plan");
+  const publicCommit = checkout.git("rev-parse", "HEAD");
+  checkout.git("update-ref", "refs/remotes/origin/main", publicCommit);
 
-test("W1-T13750 criterion 1: a refused approve of a sound ops task is recorded, held, and released once after the main commit gives the public view the id", async t => {
-  const fx = opsCatalog(t, shard("W1-T13599", { depends_on: "[W1-T13733]" }) + shard("W1-T13601"));
-  const { h, pass, operatorApprove } = harness(fx, planOf(shard("W1-T13700", { verify: "auto" })));
-  assert.equal(await operatorApprove("W1-T13599"), 1, "the operator's release is refused");
-  const refused = steps(h.ledger, APPROVE_RELEASE_REFUSED_STEP);
-  assert.equal(refused.length, 1, "one approve.release_refused row");
-  const opsTask = await findTaskInCatalogs("W1-T13599", { byId: new Map(), stateDir: fx.stateDir, api: fx.api });
-  assert.equal(opsTask.outcome, "found");
-  assert.match(String(refused[0]!.reason), REFUSED_EDGE, "the reason the lookup gave");
-  assert.deepEqual({ ...refused[0], ts: undefined, reason: undefined, edge: undefined }, { ts: undefined, reason: undefined, edge: undefined,
-    run_id: "APPROVE-W1-T13599", task_id: "W1-T13599", step: APPROVE_RELEASE_REFUSED_STEP, class: "release-compose",
-    public_commit: h.publicCommit, ops_commit: fx.commit(), ops_record_digest: opsRecordDigest(opsTask.task!) });
+  const rows: Row[] = [];
+  const lookup = { stateDir: fx.stateDir, api: fx.api };
+  const release = () => readApproveRelease(id, loadPlan(planPath), checkout.dir, lookup, row => rows.push({ ts: iso(NOW), ...row }));
+  assert.equal((await release())?.outcome, "held");
+  const ops = await fx.read();
+  assert.deepEqual(rows, [{
+    ts: iso(NOW), run_id: `APPROVE-${id}`, task_id: id, step: APPROVE_RELEASE_REFUSED_STEP,
+    class: "release-compose", reason: "held-invalid_cross_catalog_dependency", edge: `${id} -> ${dependency}`,
+    public_commit: publicCommit, ops_commit: fx.commit(), ops_record_digest: opsRecordDigest(ops.plan!.byId.get(id)!),
+  }]);
+  const [item] = scanStuckState(rows).open;
+  assert.equal(item?.signature, `held-invalid_cross_catalog_dependency ${id} -> ${dependency}`);
+  const ports = productionStuckStatePorts({
+    stateDir: fx.stateDir, api: fx.api, publicRoot: checkout.dir, publicMainCommit: () => publicCommit,
+    log: () => {}, escalate: () => null, destinationRead: async () => undefined, approve: async () => 0, gardenNames: [],
+  });
 
-  await pass();
-  assert.equal(steps(h.logged, "stuck_state.held").length, 1, "held once");
-  const written = h.ledger.length;
-  await pass();
-  await pass();
-  assert.equal(h.ledger.length, written, "a pass with no clearing event writes nothing");
-  assert.deepEqual(h.probes, [], "and reads no probe");
-  // An ops main commit that leaves the cause in place: one probe, which still reads it.
-  fx.set(shard("W1-T13599", { depends_on: "[W1-T13733]" }) + shard("W1-T13601") + shard("W1-T13602"));
-  await pass();
-  assert.deepEqual(h.probes, ["release-compose"]);
-  assert.equal(h.ledger.length, written, "while its probe still reads the cause, a pass writes nothing");
-  assert.deepEqual(h.approveCalls, [], "and calls no retry");
-
-  // The fixture main commit gives the public view the id.
-  h.publicPlan = planOf(shard("W1-T13700", { verify: "auto" }), shard("W1-T13733", { verify: "auto" }));
-  h.publicCommit = "b".repeat(40);
-  await pass();
-  assert.deepEqual(h.probes, ["release-compose", "release-compose"], "the next pass probes once");
-  assert.deepEqual(h.approveCalls, [["W1-T13599"]], "the release is called once, through the approve path, with the same id");
-  assert.equal(steps(h.ledger, RELEASE_LEDGER_STEP).filter(row => row.task_id === "W1-T13599").length, 1, "which releases it");
-  assert.equal(steps(h.logged, "stuck_state.retried")[0]?.exit_code, 0);
-  assert.equal(steps(h.logged, "stuck_state.cleared")[0]?.retry, "approve");
-  assert.deepEqual(h.escalations, [], "and escalates nothing");
-  h.publicCommit = "c".repeat(40);
-  await pass();
-  assert.deepEqual(h.approveCalls, [["W1-T13599"]], "a cleared item is never retried again");
-});
-
-test("W1-T13750 criterion 1, W1-T13749's per-task hold: a held refusal names its edge and is released once the edge clears", async t => {
-  const fx = opsCatalog(t, shard("W1-T13599", { depends_on: "[W1-T13733]" }));
-  const { h, pass } = harness(fx, planOf(shard("W1-T13700", { verify: "auto" })));
-  await recordApproveReleaseRefusal("W1-T13599", { reason: "held-invalid_cross_catalog_dependency", edge: "W1-T13599 -> W1-T13733" },
-    { lookup: { stateDir: fx.stateDir, api: fx.api }, append: row => h.ledger.push({ ts: iso(h.now), ...row }), publicCommit: () => h.publicCommit });
-  const [row] = steps(h.ledger, APPROVE_RELEASE_REFUSED_STEP);
-  assert.equal(row?.class, "release-compose");
-  assert.equal(row?.edge, "W1-T13599 -> W1-T13733");
-  assert.match(String(row?.ops_record_digest), /^[0-9a-f]{64}$/);
-  await pass();
-  assert.equal(steps(h.logged, "stuck_state.held")[0]?.signature, "held-invalid_cross_catalog_dependency W1-T13599 -> W1-T13733", "the edge is its signature");
-  h.publicPlan = planOf(shard("W1-T13700", { verify: "auto" }), shard("W1-T13733", { verify: "auto" }));
-  h.publicCommit = "b".repeat(40);
-  await pass();
-  assert.deepEqual(h.approveCalls, [["W1-T13599"]]);
-  assert.equal(steps(h.ledger, RELEASE_LEDGER_STEP).length, 1);
-  assert.deepEqual(h.escalations, []);
+  writeFileSync(planPath, before + shard(dependency, { verify: "auto" }));
+  assert.equal((await ports.probe(item!)).present, true, "an uncommitted dependency cannot clear the refusal");
+  checkout.git("commit", "--quiet", "-am", "add public dependency");
+  checkout.git("update-ref", "refs/remotes/origin/main", "HEAD");
+  checkout.git("checkout", "--quiet", "--detach", publicCommit);
+  assert.equal(loadPlan(planPath).byId.has(dependency), false, "the boot checkout still lacks the dependency");
+  assert.deepEqual(await ports.probe(item!), { present: false, digest: rows[0]?.ops_record_digest });
+  assert.equal((await release())?.outcome, "found");
+  assert.equal(rows.length, 1, "a successful lookup writes no refusal");
 });
 
 test("W1-T13750 criterion 2: a held item is re-probed only on an event its class names, once per event", async t => {
@@ -380,7 +357,7 @@ test("W1-T13750 criterion 7: the only action on held work is the refused action'
   const twice = opsCatalog(t, shard("W1-T13599", { depends_on: "[W1-T13733]" }));
   const both = harness(twice, planOf(shard("W1-T13700", { verify: "auto" })));
   for (const refusal of [{ reason: "compose-invalid_cross_catalog_dependency" }, { reason: "held-invalid_cross_catalog_dependency", edge: "W1-T13599 -> W1-T13733" }]) {
-    await recordApproveReleaseRefusal("W1-T13599", refusal, { lookup: { stateDir: twice.stateDir, api: twice.api },
+    recordApproveReleaseRefusal("W1-T13599", refusal, { opsSnapshot: await twice.read(),
       append: row => both.h.ledger.push({ ts: iso(both.h.now), ...row }) });
   }
   await both.pass();
@@ -462,17 +439,15 @@ test("W1-T13750 production ports: the ledger union, the events, each class's pro
   }
   let approved: string[] = [];
   const ports = productionStuckStatePorts({ stateDir: fx.stateDir, log: () => {}, escalate: () => null, publicMainCommit: () => "f".repeat(40),
-    publicPlan: () => planOf(shard("W1-T13700", { verify: "auto" })), destinationRead: async () => undefined, api: fx.api,
+    publicRoot: fx.root, destinationRead: async () => undefined, api: fx.api,
     approve: async id => { approved = [id]; return 0; }, gardenNames: ["flow", "scout"] });
   assert.equal((await ports.readRows()).length, 4);
   assert.equal(await ports.eventStamps["public-main"]!(), "f".repeat(40));
-  assert.match(String(checkoutHeadCommit(REPO_ROOT)), /^[0-9a-f]{40}$/, "a checkout's HEAD, read from its ref files");
   assert.equal(await ports.eventStamps["ops-main"]!(), fx.commit());
   assert.equal(await ports.approve("W1-T13610"), 0);
   assert.deepEqual(approved, ["W1-T13610"]);
   assert.equal(productionStuckStatePorts({ stateDir: fx.stateDir, log: () => {}, escalate: () => null, publicMainCommit: () => undefined,
-    publicPlan: () => planOf(), destinationRead: async () => undefined, approve: async () => 0, gardenNames: [] }).stateDir, fx.stateDir, "with no api injected the ports build the host default");
-  assert.equal(checkoutHeadCommit(fx.root), undefined, "a directory that is no checkout names no commit");
+    publicRoot: fx.root, destinationRead: async () => undefined, approve: async () => 0, gardenNames: [] }).stateDir, fx.stateDir, "with no api injected the ports build the host default");
   assert.equal(await opsMainCommit(fx.stateDir, async () => { throw new Error("transport"); }), undefined);
   assert.equal(await opsMainCommit(join(fx.root, "no-state"), fx.api), undefined);
 
@@ -517,17 +492,17 @@ test("W1-T13750 production ports: the ledger union, the events, each class's pro
   const original = console.error;
   console.error = (line: string) => { errors.push(line); };
   try {
-    await recordApproveReleaseRefusal("W1-T13610", { reason: "compose-malformed" }, { lookup: { stateDir: fx.stateDir, api: fx.api }, append: () => { throw new Error("disk full"); } });
+    recordApproveReleaseRefusal("W1-T13610", { reason: "compose-malformed" }, { opsSnapshot: await fx.read(), append: () => { throw new Error("disk full"); } });
   } finally { console.error = original; }
   assert.match(errors[0] ?? "", /could not record the refusal of 'W1-T13610': disk full/);
   const rows: Row[] = [];
   for (const reason of ["ops-unreadable", "destination-unreadable"]) {
-    await recordApproveReleaseRefusal("W1-T13610", { reason }, { lookup: { stateDir: fx.stateDir }, append: row => rows.push(row) });
+    recordApproveReleaseRefusal("W1-T13610", { reason }, { append: row => rows.push(row) });
   }
   assert.equal(rows.length, 0, "a catalog read that failed writes nothing: it has no record to replay");
-  await recordApproveReleaseRefusal("W1-T13610", { reason: "compose-malformed" }, { lookup: { stateDir: join(fx.root, "no-state") }, append: row => rows.push(row) });
+  recordApproveReleaseRefusal("W1-T13610", { reason: "compose-malformed" }, { append: row => rows.push(row) });
   assert.deepEqual([rows[0]?.class, rows[0]?.ops_record_digest, rows[0]?.public_commit], ["release-compose", null, null],
-    "a refusal whose ops record cannot be read again records no digest, so it is never replayed");
+    "a refusal without an ops record has no digest, so it is never replayed");
   writeFileSync(join(fx.stateDir, "stuck-state.json"), "{torn");
   const logged: Row[] = [];
   const base: StuckStatePorts = { stateDir: fx.stateDir, readRows: () => [], log: (step, extra) => { logged.push({ step, ...extra }); },

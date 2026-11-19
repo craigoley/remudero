@@ -13,8 +13,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { readOriginMainSha } from "#src/lib/inbox.js";
 import { ledgerPathFor } from "#src/lib/ledger-path.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { productionStuckStatePorts, opsRecordDigest, runStuckStateGardener } from "#src/lib/stuck-state-gardener.js";
 import { approveCommand, approveParkedTask, namesATask } from "#src/run-task.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 /**
  * W1-T3206 — `verify: human` WAS A ONE-WAY PARK WITH NO RELEASE.
@@ -522,6 +526,73 @@ test("W1-T13749 criterion 6: approve refuses an ops task held by its own edge, n
     everything.slice(from).join("\n"));
   assert.match(everything.slice(from).join("\n"), new RegExp(`${OPS_ID} RELEASED`));
   assert.equal(host.releaseRows(OPS_ID)[0]?.release_pin, tick.pin, "pinned from the record the tick hashes");
+});
+
+test("W1-T13750 criterion 1: the real approve and gardener replay the held edge against advancing origin/main", async t => {
+  const taskId = "W1-T13599", dependency = "W1-T13733";
+  const host = hostWithSecondCatalog(t, { opsText: shardText(taskId).replace("depends_on: []", `depends_on: [${dependency}]`) });
+  const checkout = gitRepo({ scope: t, seedCommit: false });
+  const planPath = join(checkout.dir, "plan", "tasks.yaml");
+  const publicText = shardText(PUBLIC_ID);
+  const publishMain = (text: string) => {
+    writeFileSync(planPath, text);
+    checkout.git("add", "plan/tasks.yaml");
+    checkout.git("commit", "--quiet", "--allow-empty", "-m", "fixture main");
+    const sha = checkout.git("rev-parse", "HEAD");
+    checkout.git("update-ref", "refs/remotes/origin/main", sha);
+    return sha;
+  };
+  mkdirSync(join(checkout.dir, "plan"));
+  const boot = publishMain(publicText);
+  const publicCommit = publishMain(publicText);
+  checkout.git("checkout", "--quiet", "--detach", boot);
+  const ops = await readOpsCatalogSnapshotAsync({ repository: OPS_REPOSITORY }, host.api);
+  const opsTask = ops.plan!.byId.get(taskId)!;
+  host.calls.length = 0;
+  const approve = (args: string[]) => approveCommand(args, { config: host.config, planPath, taskLookup: { api: host.api } });
+  const said = everythingSaid(t);
+  assert.equal(await approve([taskId]), 1, said.join("\n"));
+  assert.match(said.join("\n"), /invalid_cross_catalog_dependency: W1-T13599 -> W1-T13733/);
+  assert.equal(host.calls.filter(path => path === `repos/${OPS_REPOSITORY}`).length, 1, "the row uses the snapshot that made the decision");
+  const rows = () => host.rawLines().map(line => JSON.parse(line) as Record<string, unknown>);
+  const byStep = (step: string) => rows().filter(row => row.step === step);
+  const refusal = byStep("approve.release_refused");
+  assert.equal(refusal.length, 1, "the production held branch writes exactly one refusal");
+  assert.deepEqual(
+    [refusal[0]!.task_id, refusal[0]!.class, refusal[0]!.reason, refusal[0]!.edge, refusal[0]!.public_commit, refusal[0]!.ops_commit, refusal[0]!.ops_record_digest],
+    [taskId, "release-compose", "held-invalid_cross_catalog_dependency", `${taskId} -> ${dependency}`, publicCommit, ops.binding?.commit, opsRecordDigest(opsTask)],
+  );
+  assert.equal(existsSync(host.durablePath), false, "refusal writes no durable release");
+  const retries: string[][] = [];
+  const escalations: unknown[] = [];
+  const ports = productionStuckStatePorts({
+    stateDir: host.stateDir, api: host.api, gardenNames: [],
+    publicRoot: checkout.dir, publicMainCommit: () => readOriginMainSha(checkout.dir),
+    destinationRead: async () => undefined,
+    log: (step, fields) => appendLedger(ledgerPathFor(host.config), { run_id: "GARDEN", task_id: taskId, ...fields, step }),
+    escalate: item => { escalations.push(item); return null; },
+    approve: async (...args) => { retries.push(args); return approve(args); },
+  });
+  await runStuckStateGardener(ports);
+  assert.equal(byStep("stuck_state.held").length, 1);
+  const heldRows = host.rawLines();
+  await runStuckStateGardener(ports);
+  publishMain(publicText);
+  await runStuckStateGardener(ports);
+  assert.deepEqual(host.rawLines(), heldRows, "an unchanged cause writes no further rows");
+  assert.deepEqual(retries, []);
+
+  publishMain(publicText + shardText(dependency));
+  checkout.git("checkout", "--quiet", "--detach", boot);
+  assert.equal(loadPlan(planPath).byId.has(dependency), false, "the boot checkout still lacks the dependency");
+  await runStuckStateGardener(ports);
+  await runStuckStateGardener(ports);
+  assert.deepEqual(retries, [[taskId]]);
+  assert.equal(host.releaseRows(taskId).length, 1);
+  assert.equal(host.durableRecords()[taskId]?.pin, operatorReleasePin(opsTask));
+  assert.deepEqual(byStep("stuck_state.retried").map(row => row.exit_code), [0]);
+  assert.deepEqual(byStep("stuck_state.cleared").map(row => row.retry), ["approve"]);
+  assert.deepEqual(escalations, []);
 });
 
 test("W1-T13386 criterion 4: an id in neither catalog is refused as unknown and nothing is written", async t => {

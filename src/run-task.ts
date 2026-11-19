@@ -1,6 +1,6 @@
 import { isImprovementBoundProposal, isReviewedImprovementDraft, runImprovementAction, type ImprovementPlanReceipt } from "./lib/improvement-thread.js";
 import { fileEligibleFollowups, followupFilingPresentation, type FollowupFinalizer } from "./lib/followup-filing.js";
-import { compositionHoldEdge, findApproveReleasePlan, findTaskInCatalogs, catalogTaskContract, readReleasePublicPlan, type TaskLookupOptions } from "./lib/task-lookup.js";
+import { compositionHoldEdge, findTaskInCatalogs, catalogTaskContract, type TaskLookupOptions } from "./lib/task-lookup.js";
 import type { OpsCatalogApi } from "./lib/ops-catalog-source.js";
 import { operatorReleaseContractChanged, operatorReleasePin, qualifyReleaseEvidence, readReleaseLedgerLines, releaseContractPins, type ReleaseEvidence } from "./lib/operator-release.js";
 import {
@@ -180,7 +180,7 @@ import { createOperatorMcpServer, operatorMcpCommand } from "./lib/operator-mcp.
 import { runInboxGardener } from "./lib/inbox-gardener.js";
 import { inboxSemanticDigest, proofDebtPopulationPermit } from "./lib/inbox-retirement.js";
 import { GARDEN_PLAN_FLAG, GARDEN_REPO_FLAG, issueRevalidationPolicyForTarget, registeredGardenEnabled } from "./lib/garden-registry.js";
-import { approveInChild, checkoutHeadCommit, productionStuckStatePorts, recordApproveReleaseRefusal, runStuckStateGardener } from "./lib/stuck-state-gardener.js";
+import { approveInChild, productionStuckStatePorts, readApproveRelease, runStuckStateGardener } from "./lib/stuck-state-gardener.js";
 import { inboxGardenerMode, inboxRetirementContext } from "./lib/inbox-retirement.js";
 import { createHandWorktree, defaultHandWorktreeParent, renderHandWorktree } from "./lib/hand-worktree.js";
 import { addCowWorktree, linkDonorNodeModules, mainWorktreeOf, renderCowWorktree } from "./lib/cow-worktree.js";
@@ -29132,8 +29132,8 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     // re-runs as `rmd approve <id>` (approveCommand, in a child) with that id and nothing else, and only while the ops
     // record it refused is unchanged.
     case "stuck-state": {
-      const ports = productionStuckStatePorts({ stateDir, log, escalate: raiseDuplicate, publicMainCommit: () => readOriginMainSha(repoRoot),
-        publicPlan: () => loadPlan(join(instanceVerbPlanRoot(() => stateDir).root, "plan", "tasks.yaml")),
+      const publicRoot = instanceVerbPlanRoot(() => stateDir).root;
+      const ports = productionStuckStatePorts({ stateDir, log, escalate: raiseDuplicate, publicRoot, publicMainCommit: () => readOriginMainSha(publicRoot),
         destinationRead: () => taskIdDestinationSnapshot({ destinationStateDir: () => stateDir }), approve: approveInChild(),
         gardenNames: REGISTERED_GARDEN_NAMES });
       return () => runStuckStateGardener(ports);
@@ -39888,13 +39888,10 @@ export async function approveCommand(
     // its working tree (on the host, the boot's detached HEAD); a local id origin/main moved out goes to the catalogs.
     const localPlan = located?.ok ? located.plan : loadPlan(planPath);
     const checkoutRoot = located?.ok ? located.root : dirname(dirname(planPath));
-    const held = await findApproveReleasePlan(proposalId, localPlan, () => readReleasePublicPlan(checkoutRoot),
-      { ...deps.taskLookup, stateDir: join(config.root, "state") });
+    const held = await readApproveRelease(proposalId, localPlan, checkoutRoot, { ...deps.taskLookup, stateDir: join(config.root, "state") },
+      row => appendLedger(ledgerPathFor(config), row));
     if (held?.outcome === "unreadable") {
       console.error(`rmd approve: cannot release '${proposalId}': the task catalogs cannot be read as the daemon composes them (${held.reason}) — nothing released`);
-      // W1-T13750: the refusal's ledger row, so the stuck-state gardener can re-run this same release once its cause clears.
-      await recordApproveReleaseRefusal(proposalId, { reason: held.reason }, { lookup: { ...deps.taskLookup, stateDir: join(config.root, "state") },
-        append: (row) => appendLedger(ledgerPathFor(config), row), publicCommit: () => checkoutHeadCommit(dirname(dirname(planPath))) });
       return 1;
     }
     if (held?.outcome === "held") {

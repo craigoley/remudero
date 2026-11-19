@@ -20,7 +20,6 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { headShaFromRefFiles } from "./checkout-head.js";
 import { fixedClock, systemClock } from "./clock.js";
 import type { Escalation } from "./escalate.js";
 import { writeAtomic } from "./fs-race-safe.js";
@@ -29,8 +28,8 @@ import { execFileRouted } from "./spawn-helper.js";
 import { ledgerRowsFor } from "./ledger-union.js";
 import { defaultOpsCatalogApi, readOpsCatalogSnapshotAsync, type OpsCatalogApi, type OpsCatalogSnapshot } from "./ops-catalog-source.js";
 import { planDestinationRepository } from "./plan-destination.js";
-import { RELEASE_LEDGER_STEP, type Plan, type Task } from "./plan.js";
-import { composeSecondaryPlan, findReleasePlanInCatalogs, findTaskInCatalogs, type TaskLookupOptions, type TaskReleasePlan } from "./task-lookup.js";
+import { defaultGitRunnerAsync, loadPlan, loadPlanAtRefAsync, RELEASE_LEDGER_STEP, type Plan, type Task } from "./plan.js";
+import { composeSecondaryPlan, compositionHoldEdge, findApproveReleasePlan, findReleasePlanInCatalogs, type ReleasePublicPlan, type TaskLookupOptions, type TaskReleasePlan } from "./task-lookup.js";
 
 type Row = Record<string, unknown>;
 
@@ -397,30 +396,59 @@ export function opsRecordDigest(task: Task): string {
   return createHash("sha256").update(stable(task)).digest("hex");
 }
 
-/** A checkout's HEAD commit, read from its ref files (no git spawn); undefined for a layout they cannot name. */
-export function checkoutHeadCommit(dir: string): string | undefined {
-  return headShaFromRefFiles(dir);
+/** Pin the public ref before opening its plan blobs so the refusal names the commit it actually read. */
+async function readPinnedReleasePublicPlan(root: string): Promise<ReleasePublicPlan & { commit?: string }> {
+  try {
+    const runGit = defaultGitRunnerAsync(root);
+    const commit = (await runGit(["rev-parse", "--verify", "origin/main"])).trim();
+    return { read: "origin/main", commit, plan: await loadPlanAtRefAsync(root, "plan/tasks.yaml", commit, runGit) };
+  } catch (error) {
+    const reason = error instanceof Error ? "origin-main-unreadable" : "origin-main-thrown";
+    return { read: "working_tree", reason, plan: loadPlan(join(root, "plan", "tasks.yaml")) };
+  }
 }
 
+type RefusalRow = Row & { run_id: string; task_id: string; step: string };
+
 /**
- * `rmd approve`'s composition refusal, as a ledger row: the task, its class (release-compose), the reason, the public and
- * ops commits read and the ops record's digest (read again from the ops catalog; a record that cannot be read has none,
- * and is never replayed). The reason is the whole composition's (`compose-<code>`) or, once W1-T13749's per-task holds
- * land, one edge's (`held-<code>`, with the edge). A catalog read that failed (`ops-<outcome>`, `destination-unreadable`)
- * writes nothing, as before: it has no record to replay. Called on the refusal path only, after the refusal is decided.
+ * Resolve the approve decision and record composition refusals from the exact snapshots that made it.
+ * The local/public fast paths keep their lookup order and open the ops snapshot only when needed.
  */
-export async function recordApproveReleaseRefusal(
+export async function readApproveRelease(
+  taskId: string, localPlan: Plan, publicRoot: string, options: TaskLookupOptions, append: (row: RefusalRow) => void,
+): Promise<TaskReleasePlan | undefined> {
+  const lookup = { ...options };
+  let publicCommit: string | undefined;
+  const release = await findApproveReleasePlan(taskId, localPlan, async () => {
+    const view = await readPinnedReleasePublicPlan(publicRoot);
+    publicCommit = view.commit;
+    if (!view.plan.byId.has(taskId) && (view.read === "origin/main" || !localPlan.byId.has(taskId)) && lookup.opsSnapshot === undefined) {
+      const snapshot = await readOps(lookup.stateDir, lookup.api);
+      if (snapshot.outcome !== "off" && snapshot.outcome !== "destination-unreadable") lookup.opsSnapshot = snapshot;
+    }
+    return view;
+  }, lookup);
+  const evidence = { publicCommit, opsSnapshot: lookup.opsSnapshot, append };
+  if (release?.outcome === "unreadable") recordApproveReleaseRefusal(taskId, { reason: release.reason }, evidence);
+  // Only a hold read from the public ref has a commit whose movement can prove it cleared.
+  if (release?.outcome === "held" && publicCommit !== undefined) {
+    recordApproveReleaseRefusal(taskId, { reason: `held-${release.hold.reason}`, edge: compositionHoldEdge(release.hold) }, evidence);
+  }
+  return release;
+}
+
+/** A failed catalog read carries no replayable record. A composition refusal uses the snapshot that produced it. */
+export function recordApproveReleaseRefusal(
   taskId: string, refusal: { reason: string; edge?: string },
-  opts: { lookup: TaskLookupOptions; append: (row: Row & { run_id: string; task_id: string; step: string }) => void; publicCommit?: () => string | undefined },
-): Promise<void> {
+  opts: { opsSnapshot?: OpsCatalogSnapshot; append: (row: RefusalRow) => void; publicCommit?: string },
+): void {
   const { reason } = refusal;
   if (!RELEASE_REFUSAL_REASON.test(reason)) return;
   try {
-    const ops = await findTaskInCatalogs(taskId, { ...opts.lookup, byId: new Map() });
-    const found = ops.outcome === "found" && ops.catalog === "ops" ? ops : undefined;
+    const task = opts.opsSnapshot?.plan?.byId.get(taskId);
     opts.append({ run_id: `APPROVE-${taskId}`, task_id: taskId, step: APPROVE_RELEASE_REFUSED_STEP, class: "release-compose", reason,
       ...(refusal.edge === undefined ? {} : { edge: refusal.edge }),
-      public_commit: opts.publicCommit?.() ?? null, ops_commit: found?.commit ?? null, ops_record_digest: found ? opsRecordDigest(found.task) : null });
+      public_commit: opts.publicCommit ?? null, ops_commit: opts.opsSnapshot?.binding?.commit ?? null, ops_record_digest: task ? opsRecordDigest(task) : null });
   } catch (error) {
     // The refusal stands whatever happens here; a row that cannot be written only leaves the operator's re-run to him.
     console.error(`rmd approve: could not record the refusal of '${taskId}': ${String((error as Error)?.message ?? error)}`);
@@ -429,7 +457,7 @@ export async function recordApproveReleaseRefusal(
 
 type OpsRead = OpsCatalogSnapshot | { outcome: "off" } | { outcome: "destination-unreadable" };
 
-async function readOps(stateDir: string, api: OpsCatalogApi): Promise<OpsRead> {
+async function readOps(stateDir?: string, api?: OpsCatalogApi): Promise<OpsRead> {
   const destination = planDestinationRepository(stateDir);
   if (destination.outcome === "off") return { outcome: "off" };
   if (destination.outcome === "unreadable") return { outcome: "destination-unreadable" };
@@ -479,7 +507,7 @@ export function productionStuckStateProbe(opts: {
       return composed.outcome === "ok" ? { present: false } : { present: true, reason: `compose-${composed.outcome}` };
     }
     const release: TaskReleasePlan = await findReleasePlanInCatalogs(item.taskId!, publicPlan, { stateDir: opts.stateDir, api: opts.api, opsSnapshot: read });
-    // Anything but found is the cause still present: a refusal, or (once W1-T13749 lands) a per-task hold.
+    // A catalog refusal or a per-task hold keeps the cause present.
     if (release.outcome !== "found") return { present: true, reason: "reason" in release ? release.reason : `${release.outcome}` };
     const record = read.plan.byId.get(item.taskId!);
     return { present: false, ...(release.outcome === "found" && release.catalog === "ops" && record ? { digest: opsRecordDigest(record) } : {}) };
@@ -521,7 +549,7 @@ export function approveInChild(opts: {
 /** The production ports: the ledger union, the clearing events, every class's probe, and the approve path it is handed. */
 export function productionStuckStatePorts(ctx: {
   stateDir: string; log: StuckStatePorts["log"]; escalate: StuckStatePorts["escalate"]; publicMainCommit: () => string | undefined;
-  publicPlan: () => Plan | Promise<Plan>; destinationRead: () => Promise<unknown>; approve: (taskId: string) => Promise<number>; api?: OpsCatalogApi;
+  publicRoot: string; destinationRead: () => Promise<unknown>; approve: (taskId: string) => Promise<number>; api?: OpsCatalogApi;
   /** The gardens whose filing refusals it reads (the registry's names). */
   gardenNames: readonly string[];
 }): StuckStatePorts {
@@ -530,6 +558,7 @@ export function productionStuckStatePorts(ctx: {
     stateDir: ctx.stateDir, log: ctx.log, escalate: ctx.escalate, approve: ctx.approve,
     readRows: () => readStuckStateRows(ctx.stateDir, ctx.gardenNames),
     eventStamps: { "public-main": ctx.publicMainCommit, "ops-main": () => opsMainCommit(ctx.stateDir, api) },
-    probe: productionStuckStateProbe({ stateDir: ctx.stateDir, publicPlan: ctx.publicPlan, api, destinationRead: ctx.destinationRead }),
+    probe: productionStuckStateProbe({ stateDir: ctx.stateDir, publicPlan: async () => (await readPinnedReleasePublicPlan(ctx.publicRoot)).plan,
+      api, destinationRead: ctx.destinationRead }),
   };
 }
