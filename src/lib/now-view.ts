@@ -817,6 +817,7 @@ export interface NowSlotState {
 
 export interface NowViewContext {
   now: number;
+  resumedRead?: true;
   /** `lease`: the writer lease the board projection persists behind; absent, it lives in memory only. */
   instances: ReadonlyArray<{ state: NowSlotState; db?: ReadModelDb; lease?: ReadModelLease }>;
   switches?: { views: Record<string, ViewSwitchMode> };
@@ -1361,7 +1362,7 @@ export function createNowView(opts: NowViewOptions): {
    * Advances one instance's build while `more()` allows, starting one only when it is due. True once
    * there is nothing left to do for it: its body is ready, or no build was due.
    */
-  function step(instance: NowInstance, entry: { state: NowSlotState; db: ReadModelDb; lease?: ReadModelLease }, now: number, more: () => boolean): boolean {
+  function step(instance: NowInstance, entry: { state: NowSlotState; db: ReadModelDb; lease?: ReadModelLease }, now: number, more: () => boolean, resumedRead?: true): boolean {
     let b = builds.get(instance.name);
     if (b && b.db !== entry.db) b = undefined;
     if (!b) {
@@ -1369,7 +1370,7 @@ export function createNowView(opts: NowViewOptions): {
       const keys = { plan: planKey(instance), github: githubKey(instance), feedback, decisions: decisionsKey(instance, feedback) };
       const h = held.get(instance.name);
       const due = !h || h.db !== entry.db || h.generation !== entry.state.generation || h.planKey !== keys.plan || h.githubKey !== keys.github
-        || h.decisionsKey !== keys.decisions || now - h.at >= NOW_REFRESH_MS;
+        || h.decisionsKey !== keys.decisions || now - h.at >= NOW_REFRESH_MS || resumedRead === true;
       if (!due) return true;
       b = { db: entry.db, ...(entry.lease ? { lease: entry.lease } : {}), state: entry.state, now, stage: 0, keys };
       builds.set(instance.name, b);
@@ -1501,7 +1502,7 @@ export function createNowView(opts: NowViewOptions): {
     prepare(ctx, more) {
       for (const { state } of ctx.instances) ran.delete(state.instance);
       let done = true;
-      eachInstance(ctx, (instance, entry) => void (done = step(instance, entry, ctx.now, more) && done));
+      eachInstance(ctx, (instance, entry) => void (done = step(instance, entry, ctx.now, more, ctx.resumedRead) && done));
       return done;
     },
     /** `ReadModelView.stages`: each stage's ms `step` ran for `ctx`'s instances since their last `prepare` (one worker call),
@@ -1527,7 +1528,7 @@ export function createNowView(opts: NowViewOptions): {
     materialize(ctx) {
       const out: Array<{ key: string; data: NowViewData; sources: ViewSource[] }> = [];
       eachInstance(ctx, (instance, entry) => {
-        step(instance, entry, ctx.now, () => true);
+        step(instance, entry, ctx.now, () => true, ctx.resumedRead);
         const body = builds.get(instance.name)?.body;
         builds.delete(instance.name);
         if (body) out.push(body);

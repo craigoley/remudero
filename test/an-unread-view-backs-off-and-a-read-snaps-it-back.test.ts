@@ -4,7 +4,7 @@
  * routes that read it (`now`, `needs-you`, `nav-badge`, `/v1/status`) were read in 20 of those 46 hours.
  *
  * A view marked `readPaced` keeps its cost / share cadence while it is read, stretches that wait by
- * doubling each unread build, and goes back to its unstretched schedule on the next read.
+ * doubling each unread build until it stops, and goes back to its unstretched schedule on the next read.
  */
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -14,10 +14,8 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 import type { Clock } from "#src/lib/clock.js";
 import {
-  READ_MODEL_IDLE_STRETCH_MAX,
   READ_MODEL_READ_HOT_MS,
   READ_MODEL_READ_NOTE_MS,
-  READ_MODEL_VIEW_SHARE,
   createReadModelTicker,
   createReadModelWorker,
   runReadModelViewWorker,
@@ -80,7 +78,7 @@ function projectorStates(stateDir: string, ledgerDir: string, clock: Clock): { s
   return { states: last?.type === "state" ? last.instances : [], release: () => ticker.release() };
 }
 
-test("a read-paced view nobody reads is rebuilt at most once per stretched interval, and the next read rebuilds it on the next tick", (t) => {
+test("a read-paced view nobody reads stops, and the next read rebuilds it on the next tick", (t) => {
   const stateDir = scratch(t, "paced-state");
   const ledgerDir = scratch(t, "paced-ledger");
   writeFileSync(join(ledgerDir, LIVE), row(T0));
@@ -112,27 +110,19 @@ test("a read-paced view nobody reads is rebuilt at most once per stretched inter
     }
   };
   const count = (name: string, from: number): number => builds.filter(([n, at]) => n === name && at >= from).length;
-  const baseWaitMs = costMs / READ_MODEL_VIEW_SHARE;
 
   run(READ_MODEL_READ_HOT_MS - 5_000);
   const hot = count("now", 0);
   assert.ok(hot >= 50, `inside the hot window it keeps the unstretched cadence: ${hot} builds`);
   assert.ok(Math.abs(hot - count("steady", 0)) <= 2, "the same cadence as an unpaced view of the same cost");
 
-  // Past the window every unread build doubles the wait, up to the bound.
-  const idleFrom = hand.clock.now();
   run(10 * 60_000);
-  const nowStarts = builds.filter(([n, at]) => n === "now" && at >= idleFrom).map(([, at]) => at);
-  const waits = nowStarts.slice(1).map((at, i) => at - nowStarts[i]! - costMs);
-  const ladder = waits.map((ms) => Math.round(ms / baseWaitMs));
-  const first = ladder.findIndex((stretch) => stretch >= 2);
-  assert.deepEqual(ladder.slice(first, first + 7), [2, 4, 8, 16, READ_MODEL_IDLE_STRETCH_MAX, READ_MODEL_IDLE_STRETCH_MAX, READ_MODEL_IDLE_STRETCH_MAX], `the wait doubles per unread build, then holds at the bound: ${waits.join(", ")} ms`);
   const lastTenFrom = hand.clock.now();
   run(10 * 60_000);
   const idle = count("now", lastTenFrom);
   const steady = count("steady", lastTenFrom);
   assert.ok(steady >= 300, `a positive control: the unpaced view kept building, ${steady} builds`);
-  assert.ok(idle <= Math.ceil((10 * 60_000) / (baseWaitMs * READ_MODEL_IDLE_STRETCH_MAX)) + 1, `unread, it was built ${idle} times in 10 min (unpaced: ${steady})`);
+  assert.equal(idle, 0, "the unread unit stayed stopped throughout the window");
 
   // A read of a route that reads no paced view changes nothing.
   ticker.read("/v1/registry");

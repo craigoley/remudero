@@ -93,10 +93,10 @@ test("a read of one instance's now keeps only that instance's unit on its cadenc
   const minutes = 10;
   const unreadBound = Math.ceil((minutes * 60_000) / ((costMs / READ_MODEL_VIEW_SHARE) * READ_MODEL_IDLE_STRETCH_MAX)) + 1;
 
-  // Nobody reads: both units climb the ladder.
+  // Nobody reads: both units stop.
   run(READ_MODEL_READ_HOT_MS + 10 * 60_000);
 
-  // The console reads site's now every minute: site keeps its cadence, core stays stretched.
+  // The console reads site's now every minute: site keeps its cadence, core stays stopped.
   const from = hand.clock.now();
   for (let minute = 0; minute < minutes; minute++) {
     ticker.read("/v1/views/now?instance=site");
@@ -105,7 +105,7 @@ test("a read of one instance's now keeps only that instance's unit on its cadenc
   const site = count("site", from);
   const core = count("core", from);
   assert.ok(site > unreadBound * 4, `site, read every minute, kept its cadence: ${site} builds`);
-  assert.ok(core <= unreadBound, `core, never read, stayed stretched: ${core} builds (bound ${unreadBound}, site ${site})`);
+  assert.equal(core, 0, "core stayed stopped while site was read");
 
   // A read that names no instance, or reaches now through needs-you, still warms every instance.
   for (const path of ["/v1/views/now", "/v1/views/nav-badge"]) {

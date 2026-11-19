@@ -182,7 +182,7 @@ export const READ_MODEL_SKIP_AUDIT_EVERY = 20;
 export const READ_MODEL_READ_HOT_MS = 2 * 60_000;
 /**
  * BACKSTOP: maximum unread interval multiplier, doubled per unread build and reset by any read.
- * `now@core` (~4.8 s cost, ~12 s interval) then runs every ~6.4 min at ~1/32 of its read cost.
+ * This also sets the unread limit: a ~12 s regular interval lets the unit idle for ~6.4 min.
  */
 export const READ_MODEL_IDLE_STRETCH_MAX = 32;
 /**
@@ -201,8 +201,10 @@ export const READ_MODEL_READ_NOTE_MS = 5_000;
 export const READ_MODEL_HEAVY_IDLE_MS = 10 * 60_000;
 /** `GET /v1/views/versions` (view-events.ts's VIEW_VERSIONS_PATH): a console polling every view's version reads them all. */
 const READ_MODEL_EVERY_VIEW_PATHS: ReadonlySet<string> = new Set(["/v1/views/versions"]);
-/** A legacy read that serves a view's body inside its own answer: `/v1/status` carries `needs-you`'s human gates. */
-const READ_MODEL_LEGACY_VIEW_READS: Readonly<Record<string, string>> = { "/v1/status": "needs-you" };
+/** Legacy reads of the same surfaces. Status also serves the human gates from `needs-you`. */
+const READ_MODEL_LEGACY_VIEW_READS: Readonly<Record<string, string>> = { "/v1/status": "needs-you", "/v1/recent": NOW_VIEW_NAME };
+const IDLE_VIEW_SOURCE_PREFIX = "read-model:idle:";
+const carriesIdleSource = (body: ViewBody | undefined): boolean => body?.sources.at(-1)?.name.startsWith(IDLE_VIEW_SOURCE_PREFIX) === true;
 /** Work outstanding without a commit for this long is stalled; serve watches silent workers too. */
 export const READ_MODEL_STALL_MS = 60_000;
 /**
@@ -369,6 +371,7 @@ export interface ReadModelLaneMove {
 
 export interface ReadModelViewContext {
   now: number;
+  resumedRead?: true;
   sourceStore?: ReadModelDb; // Home snapshots stay shared when instances are scoped.
   instances: ReadonlyArray<{ state: ReadModelInstanceState; db?: ReadModelDb; lease?: ReadModelLease }>;
   switches?: ReadModelSwitches;
@@ -403,8 +406,7 @@ export interface ReadModelView {
   snapshotSourced?: true;
   /**
    * Its cadence follows its readers: kept while it or a view built from it was read within
-   * {@link READ_MODEL_READ_HOT_MS}, stretched while nobody reads it, restored by the next read. Serve
-   * judges every source at request time, so a body read before its rebuild says it is stale.
+   * {@link READ_MODEL_READ_HOT_MS}, stretched and then stopped while nobody reads it, restored by the next read.
    */
   readPaced?: true;
   /** Its cadence floors while unread: {@link READ_MODEL_IDLE_FLOOR_MS} between builds, never for a `demand` view. */
@@ -976,12 +978,14 @@ interface ViewUnit {
   storedCostIno?: string;
   /** What its last build call took (absent until one ran); `startedAt` is the first call of a bounded build in flight. */
   costMs?: number;
-  /** Not rebuilt before this: its last cost divided by {@link READ_MODEL_VIEW_SHARE}, times `stretch`. */
+  /** Not rebuilt before this. Infinity means an unread unit is stopped. */
   dueAt: number;
   /** A read-paced unit's multiplier on that wait: 1 while read, doubled by each build finished unread. */
   stretch?: number;
   /** When it would be due unstretched; a read pulls `dueAt` back to it. */
   baseDueAt?: number;
+  /** The first build after an idle stop must take new measurements. */
+  resumedRead?: true;
   /** An idle-floor unit's last build was finished unread, so `dueAt` waits {@link READ_MODEL_IDLE_FLOOR_MS}. */
   floored?: true;
   startedAt?: number;
@@ -1529,7 +1533,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     }
     const previous = latest.get(id);
     latest.set(id, entry);
-    if (lastEtag.get(id) === etag && previous?.qualificationGeneration === qualificationGeneration) return;
+    if (lastEtag.get(id) === etag && previous?.qualificationGeneration === qualificationGeneration && carriesIdleSource(previous?.body) === carriesIdleSource(body)) return;
     if (switches.projector === "on" && !committed) persist(entry);
     lastEtag.set(id, etag);
     opts.post({ type: "body", entry });
@@ -1682,6 +1686,25 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     return finished + waitMs * unit.stretch;
   }
 
+  function stopUnread(unit: ViewUnit): void {
+    unit.dueAt = Number.POSITIVE_INFINITY;
+    const view = unit.view.name;
+    const instance = unit.slot?.instance.name;
+    // Serve can answer from memory immediately. The build clock ages while the reader waits for a new sample.
+    for (const entry of latest.values()) {
+      if (entry.view !== view || carriesIdleSource(entry.body) || (instance !== undefined && new URLSearchParams(entry.key).get("instance") !== instance)) continue;
+      const age: ViewSource = {
+        name: `${IDLE_VIEW_SOURCE_PREFIX}${view}${instance === undefined ? "" : `@${instance}`}`,
+        kind: "read-model", asOf: entry.body.generatedAt, state: "stale", phase: "refreshing",
+        reason: "waiting for the first build after the view went idle",
+        ...(instance === undefined ? {} : { instance }),
+      };
+      const sources = [...entry.body.sources, age];
+      const body: ViewBody = { ...entry.body, stale: true, sources, asOf: oldestAsOf(sources) };
+      publishEntry({ ...entry, etag: viewEtag(view, entry.version, true, body.data), body });
+    }
+  }
+
   function inputDigest(ctx: ReadModelViewContext, readAsOf: Map<string, string | null> | undefined, view: ReadModelView): InputDigest | undefined {
     if ((!view.inputsFingerprint && (!readAsOf || readAsOf.size === 0)) || !ctx.sourceStore) return undefined;
     const stores = [...new Set([ctx.sourceStore, ...ctx.instances.flatMap(({ db }) => db ? [db] : [])])];
@@ -1755,7 +1778,8 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     let why: string | undefined;
     let digest: InputDigest | undefined;
     const builtKeys: string[] = [];
-    const scoped = unit.slot ? { ...ctx, instances: ctx.instances.filter(({ state }) => state === unit.slot!.state) } : ctx;
+    const scope = unit.slot ? { ...ctx, instances: ctx.instances.filter(({ state }) => state === unit.slot!.state) } : ctx;
+    const scoped = unit.resumedRead ? { ...scope, resumedRead: unit.resumedRead } : scope;
     const buildStartedMs = (unit.startedAt ??= started);
     let live: ReadModelView | undefined;
     try {
@@ -1819,7 +1843,10 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     if (!skipped) {
       unit.lastInputDigest = succeeded ? digest : undefined;
       unit.builtKeys = succeeded ? builtKeys : undefined;
-      if (succeeded) unit.lastBuiltAt = finished;
+      if (succeeded) {
+        unit.lastBuiltAt = finished;
+        unit.resumedRead = undefined;
+      }
     }
     const elapsedMs = finished - started;
     unit.costMs = skipped ? unit.costMs ?? elapsedMs : elapsedMs;
@@ -1929,7 +1956,18 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   const demanded = (unit: ViewUnit): boolean => unit.view.demand !== true || !opts.demand || opts.demand.keys(unit.view.name).length > 0;
   /** W1-T13536: a view thread asks on every pass; the counter store is re-read at most once per refresh interval. */
   const storedReadiness = storedShadowReadinessReader(clock);
-  const dueUnits = (now: number): ViewUnit[] => units.filter((unit) => owns(unit) && built(unit.view.name) && unit.dueAt <= now && demanded(unit)).sort((a, b) => a.dueAt - b.dueAt);
+  const dueUnits = (now: number): ViewUnit[] => units.filter((unit) => {
+    if (!owns(unit) || !built(unit.view.name) || !demanded(unit) || unit.dueAt === Number.POSITIVE_INFINITY) return false;
+    if (unit.view.readPaced && unit.costMs !== undefined && unit.startedAt === undefined) {
+      // Preserve the hot window for cheap units. The biggest stretched wait bounds the unread tail for expensive ones.
+      const unreadMs = Math.max(READ_MODEL_READ_HOT_MS, unit.costMs / READ_MODEL_VIEW_SHARE * READ_MODEL_IDLE_STRETCH_MAX);
+      if (now - lastReadOf(unit) >= unreadMs) {
+        stopUnread(unit);
+        return false;
+      }
+    }
+    return unit.dueAt <= now;
+  }).sort((a, b) => a.dueAt - b.dueAt);
 
   /**
    * Build oldest due units within the pass left since `tickStart`, fitting each by last cost.
@@ -2102,9 +2140,15 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
         instance !== undefined && name === direct && views.some((view) => view.name === name && view.perInstance) ? instance : undefined;
       for (const view of read) readAt.set(only(view) === undefined ? view : `${view}@${only(view)}`, now);
       for (const unit of units) {
-        if (!read.has(unit.view.name) || ((unit.stretch ?? 1) === 1 && unit.floored !== true)) continue;
+        if (!read.has(unit.view.name)) continue;
         const scope = only(unit.view.name);
         if (scope !== undefined && unit.slot?.instance.name !== scope) continue;
+        if (unit.dueAt === Number.POSITIVE_INFINITY) {
+          unit.dueAt = 0;
+          unit.resumedRead = true;
+          unit.lastInputDigest = undefined;
+        }
+        if ((unit.stretch ?? 1) === 1 && unit.floored !== true) continue;
         unit.stretch = 1;
         unit.floored = undefined;
         if (unit.baseDueAt !== undefined) unit.dueAt = Math.min(unit.dueAt, unit.baseDueAt);
@@ -3269,6 +3313,14 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
     return state ? ledgerSource(state, now) : { ...describeSource(source), state: "stale", phase: "warming", reason: "read model warming: this body was committed before serve started" };
   });
 
+  const noteViewRead = (route: string, instance?: string): void => {
+    const now = clock.now();
+    const path = scopedReadPath(route, instance !== undefined && opts.instances.some((known) => known.name === instance) ? instance : undefined);
+    if (!worker || now - (readNotedAt.get(path) ?? Number.NEGATIVE_INFINITY) < READ_MODEL_READ_NOTE_MS) return;
+    readNotedAt.set(path, now);
+    worker.postMessage({ type: "read", path });
+  };
+
   const handle: ReadModelWorkerHandle = {
     bodies,
     committedBodies: () => {
@@ -3279,6 +3331,11 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
     state: () => ({ ...(at === undefined ? {} : { at }), instances, switches, ...(warm.reason ? { warmBoot: warm.reason } : {}) }),
     body: (view, key = "") => bodies.get(readModelBodyKey(view, key)),
     judge: (sources, now, body) => {
+      // The push stream re-judges bodies while subscribers are connected, even between HTTP fetches.
+      if (body) {
+        const route = `/v1/views/${body.view}`;
+        if (viewsReadBy(route, []).includes(NOW_VIEW_NAME)) noteViewRead(route, new URLSearchParams(body.key).get("instance") ?? undefined);
+      }
       const judged = judgeSources(sources, now, body);
       // W1-T13457 invariant stale-says-so: a body this run's worker has not posted was carried across a restart. Its
       // ledger sources are stale until the worker posts that key: a lease the dead serve renewed seconds ago says when
@@ -3340,13 +3397,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       return () => bodyListeners.delete(listener);
     },
     noteGithubRead: () => workerWarm?.noteRead(),
-    noteViewRead: (route, instance) => {
-      const now = clock.now();
-      const path = scopedReadPath(route, instance !== undefined && opts.instances.some((known) => known.name === instance) ? instance : undefined);
-      if (!worker || now - (readNotedAt.get(path) ?? Number.NEGATIVE_INFINITY) < READ_MODEL_READ_NOTE_MS) return;
-      readNotedAt.set(path, now);
-      worker.postMessage({ type: "read", path });
-    },
+    noteViewRead,
     start: () => {
       if (worker || stopping || paused) return;
       started = true;
