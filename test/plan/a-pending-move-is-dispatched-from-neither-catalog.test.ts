@@ -32,14 +32,26 @@ test("W1-T13680 criterion 4: composeSecondaryPlan names a moved_from id both cat
   const frontier = runnableCandidates(composition.plan, () => false, 10).map(task => task.id).sort();
   assert.deepEqual(frontier, ["W1-T2", "W1-T3"]);
 
-  // Without a moved_from line, or with one that names no public commit, a shared id is still a duplicate.
+  // Without a moved_from line, or with one that names no public commit, a shared id is still a duplicate: since
+  // W1-T13749 the duplicate holds both of its copies, never the rest of the catalog.
   for (const line of ["", "  moved_from: remudero@abc\n", `  moved_from: elsewhere@${SOURCE}\n`]) {
     const refused = composeSecondaryPlan(PUBLIC, moved(line));
-    assert.deepEqual(refused, { outcome: "duplicate_task_id", taskId: "W1-T1" }, `moved_from line ${JSON.stringify(line)}`);
+    assert.equal(refused.outcome, "ok", `moved_from line ${JSON.stringify(line)}`);
+    if (refused.outcome !== "ok") continue;
+    assert.deepEqual(Object.fromEntries(refused.held), { "W1-T1": { reason: "duplicate_task_id", task: "W1-T1" } }, `moved_from line ${JSON.stringify(line)}`);
+    assert.deepEqual(refused.plan.tasks.map(task => task.id), ["W1-T2", "W1-T3"], "neither copy of the duplicate composes");
+    assert.deepEqual([...refused.secondaryIds], ["W1-T3"]);
+    assert.deepEqual([...refused.pendingMoveIds], []);
   }
-  // An ops task whose dependency neither catalog holds is still refused, pending move or not.
+  // An ops task whose dependency neither catalog holds is still held, pending move or not.
   const orphan = plan([record("W1-T1", `  moved_from: remudero@${SOURCE}\n`), record("W1-T4").replace("depends_on: []", "depends_on: [W1-T9]")], "ops");
-  assert.deepEqual(composeSecondaryPlan(PUBLIC, orphan), { outcome: "invalid_cross_catalog_dependency" });
+  const orphaned = composeSecondaryPlan(PUBLIC, orphan);
+  assert.equal(orphaned.outcome, "ok");
+  if (orphaned.outcome === "ok") {
+    assert.deepEqual(Object.fromEntries(orphaned.held), { "W1-T4": { reason: "invalid_cross_catalog_dependency", task: "W1-T4", dependsOn: "W1-T9" } });
+    assert.deepEqual([...orphaned.pendingMoveIds], ["W1-T1"]);
+    assert.equal(orphaned.plan.byId.has("W1-T4"), false);
+  }
   // A plan with no shared id composes as before, with an empty pending set.
   const plain = composeSecondaryPlan(PUBLIC, plan([record("W1-T3")], "ops"));
   assert.equal(plain.outcome, "ok");

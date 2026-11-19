@@ -1,0 +1,46 @@
+- id: W1-T13752
+  title: "An instance Inbox classifies a plan whose other-repository tasks depend on tasks that plan does not hold"
+  repo: remudero
+  depends_on: [W1-T13585]
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19 sizing: spans plan loader, Inbox read and its test; loosens one validation, only for tasks of another repository
+  origin: "human#2026-11-18-rethink-ops-tracking"
+  plan_refs:
+    - W1-T13585
+  files:
+    - src/lib/plan.ts
+    - src/lib/panel-graph.ts
+    - test/console-api/views/an-instance-inbox-reads-a-plan-whose-other-repository-tasks-name-unseen-dependencies.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "An instance Inbox pass completes over a plan where a task of another repository depends on an id that plan does not hold, and keeps that dependency"
+      proof: "grep: W1-T13752 criterion 1 in test/console-api/views/an-instance-inbox-reads-a-plan-whose-other-repository-tasks-name-unseen-dependencies.test.ts"
+    - claim: "invariant:own-repo-dependencies-stay-strict — an instance Inbox still refuses its own repository's task with an unseen dependency, with loadPlan's PlanError text"
+      proof: "grep: W1-T13752 criterion 2 in test/console-api/views/an-instance-inbox-reads-a-plan-whose-other-repository-tasks-name-unseen-dependencies.test.ts"
+  rationale: |
+    WHY: on the host, serve's read_model.slow_unit_failed for unit inbox:ops repeats every pass (OBSERVED 2026-11-19
+    from 00:01Z), so the ops Inbox view does not update. Reproduced with core loadPlan on remudero-ops main: the strict
+    read throws on the first depends_on the ops plan cannot resolve, and it has failed since 2026-11-18 20:35Z.
+    The ops plan holds core tasks (repo: remudero) written by rmd approve that depend on core public ids. The instance
+    Inbox reads the plan through threadStrictPlan (src/lib/thread-plan.ts), which falls back to strict loadPlan.
+    Every other reader of that catalog already defers such edges (dependencyMode "preserve-external",
+    src/lib/ops-catalog-source.ts). W1-T13585 designs the same rule for the daemon boot read.
+  design: |
+    plan.ts: loadPlanKeepingUnseenDependencies(path, keepsUnseenDependency) reads like loadPlan with the
+    preserve-external parse and W1-T13585's KeepsUnseenDependency predicate. A task for which the predicate
+    answers true keeps an unseen depends_on id. Every other task throws loadPlan's PlanError text. readMergedPlan
+    takes the validator as an optional last parameter, default validatedPlan, so every existing caller is
+    unchanged. Build after W1-T13585 (#19559) merges: both edit src/lib/plan.ts.
+    panel-graph.ts: inboxPlan(deps) is the Inbox fingerprint's plan read. With no inboxSourceIdentity (the core
+    Inbox), it is threadStrictPlan as before. Otherwise the predicate is !taskTargetsRepo(task.repo,
+    identity.repository). The planKey reuse of the last parse is unchanged.
+    INVARIANT own-repo-dependencies-stay-strict: a task whose repo is the instance's repository still fails the
+    read on an unseen dependency with the same PlanError text, and the core Inbox's read is unchanged.
+  falsifier: |
+    Restore threadStrictPlan in the fingerprint: criterion 1 fails with "depends_on unknown task". Make the
+    predicate always true: criterion 2 fails because the own-repo task no longer throws.

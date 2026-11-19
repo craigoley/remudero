@@ -14,7 +14,7 @@
   files:
     - scripts/lib/evidence-storage.mjs
     - test/review/evidence-storage.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The open-file proof gives two different reasons: one when the listing names a process that holds the file, and one when the listing could not be trusted (it warned, failed or timed out), and the second carries the listing's first warning line"

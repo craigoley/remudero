@@ -23,7 +23,7 @@ import { startGarden, type GardenerDeps, type PrState } from "./gardener.js";
 import { knowledgeGardenSpec, type GardenWorkspace } from "./knowledge-gardener.js";
 import { startInboxResponder, type InboxResponderDeps } from "./inbox-responder.js";
 import { startLivenessPulse } from "./liveness-pulse.js";
-import { installedSpawnHelper, installSpawnHelper, startSpawnHelper } from "./spawn-helper.js";
+import { bootSpawnHelper, SPAWN_HELPER_SWITCH } from "./spawn-helper.js";
 
 
 import type {
@@ -122,6 +122,7 @@ import {
   type StaleReviewerRecurrenceState,
   type StaleReviewerSkipObservation,
 } from "./sweep.js";
+import { PLAN_TASK_MOVE_ACTION, runPlanTaskMoveTick, type PlanTaskMover } from "./plan-task-move-janitor.js";
 // The same cycle-free sweep.ts value edge (W1-T2744).
 import {
   adoptChildWork,
@@ -153,7 +154,7 @@ import {
 // Pure shared gate; dispatch-governor.ts explains why drain.ts cannot share it from here (W1-T342).
 import { checkDispatchGovernors, checkNewBuildReservation, governorDeferPayload, newBuildReservationPayload, type DispatchGovernorDeps, type DispatchGovernorVerdict, type MemoryReadTracker, type QuietHoursHoldResult } from "./dispatch-governor.js";
 import { assertRunnable, PlanError, TaskAdmissionError, type MergedResolver, type Plan, type Task, type TaskInputAnswer } from "./plan.js";
-import { composeSecondaryPlan } from "./task-lookup.js";
+import { composeSecondaryPlan, compositionHoldEdge, type CompositionHold } from "./task-lookup.js";
 import { resolveReleases, closedUnmergedRunBranchRefs, type DispatchFilterReason, type ReleaseResolution } from "./drain.js";
 import type { StatusProjection } from "./status.js";
 import { ENVIRONMENTAL_BLOCK_COOLDOWN_MS, INDEPENDENT_BLOCK_RELEASED_STEP, isEnvironmentalBlock, PRE_RESTORE_RUN_VERDICT_STAGES, type IndependentBlockRelease } from "./status.js";
@@ -1458,6 +1459,8 @@ interface OpsDispatchContext {
 export interface DaemonDeps {
   /** Absent by default. This reads completed state only; it never awaits a private source on the tick. */
   readOpsTaskDispatch?: (publicPlan: Plan) => OpsTaskDispatchRead;
+  /** W1-T13681: the move janitor, one detached movePlanTask tick per iteration; absent, no tick runs. */
+  planTaskMover?: PlanTaskMover;
   /** W1-T11600: an optional, already-parsed second catalog used only for shadow comparison. No source
    *  reader is installed here; absence preserves the single-plan path exactly, and this snapshot
    *  can never contribute work to the actual dispatch set. */
@@ -2343,6 +2346,10 @@ export function compareSecondaryCatalogShadow(
   try {
     const composition = composeSecondaryPlan(primary, secondary);
     if (composition.outcome !== "ok") return result(composition.outcome);
+    // W1-T13749: dispatch now holds only a bad edge's own tasks; this observation keeps reporting any held edge as
+    // the refusal code it had, a duplicate ahead of an edge, so its rows mean what they meant before.
+    const heldReasons = new Set([...composition.held.values()].map((hold) => hold.reason));
+    if (heldReasons.size > 0) return result(heldReasons.has("duplicate_task_id") ? "duplicate_task_id" : "invalid_cross_catalog_dependency");
     const { plan: composed, secondaryIds } = composition;
     // Precondition evaluation may spawn an rmd reader. Do not repeat or add that read in a shadow pass.
     if ([...primary.tasks, ...secondary.tasks].some((task) => task.precondition !== undefined)) return result("comparison_deferred");
@@ -3989,8 +3996,8 @@ export interface LearnedCrashLoopSummary {
   incident: "none" | "opened" | "updated" | "cleared" | "open";
 }
 
-/** W1-T9754: the environment switch for the spawn helper. W1-T13437: on unless set to exactly "off" (operator ruling). */
-export const SPAWN_HELPER_SWITCH = "RMD_SPAWN_HELPER";
+/** W1-T9754: the spawn helper's environment switch, now defined beside the boot routine it gates (W1-T13664). */
+export { SPAWN_HELPER_SWITCH };
 
 /** The daemon's startup routine (W1-T12b): the clean-env boot assertion, run once before the scheduler loop starts.
  * Takes the log sink and the env as injectable inputs, so it is provable in-process with a fake env and no real
@@ -4059,23 +4066,7 @@ export async function daemonBoot(
     ...(checkoutDepth ? { checkout_shallow: checkoutDepth.shallow, checkout_commit_count: checkoutDepth.commitCount } : {}),
   });
   // W1-T9754/W1-T13437: the helper starts while this process is small, unless the switch is "off"; one row either way.
-  const switchValue = env[SPAWN_HELPER_SWITCH] ?? "unset";
-  const helperRow = { switch: SPAWN_HELPER_SWITCH, value: switchValue };
-  if (switchValue === "off") {
-    log("daemon.spawn_helper", { started: false, reason: "switch_off", ...helperRow });
-  } else {
-    try {
-      installedSpawnHelper()?.stop();
-      const helper = startSpawnHelper({ log });
-      installSpawnHelper(helper);
-      log("daemon.spawn_helper", { started: true, pid: helper.pid, ...helperRow });
-    } catch (error) {
-      // Reason: a helper that cannot start costs no spawn; the boot continues on the direct path, named here.
-      installSpawnHelper(undefined);
-      log("daemon.spawn_helper", { started: false,
-        reason: `start_failed: ${String((error as Error)?.message ?? error).slice(0, 120)}`, ...helperRow });
-    }
-  }
+  bootSpawnHelper(log, env, "daemon.spawn_helper");
   // The boot-rate invariant: the shape-not-cause check. Logged either way, so the invariant's own
   // pass or fail is part of the boot record, not only its breaches (W1-T215).
   if (crashLoopCheck) {
@@ -5241,7 +5232,7 @@ export async function runDaemon(
       }
       const cpuReading = sampleLaneCpu(nowMs)!;
       const result = laneTarget({
-        previous: laneTargetReading?.result.next, inFlight, memory, wipBound, cpuCount: laneGovernorPorts.cpuCount(), cpu: cpuReading.cpu,
+        previous: laneTargetReading?.result.next, inFlight, memory, wipBound, cpuCount: laneGovernorPorts.cpuCount(), cpu: cpuReading.cpu, maxLanes: laneCount,
       });
       laneTargetReading = { atMs: nowMs, result };
       log(LANE_TARGET_STEP, laneTargetPayload(result, { mode: laneGovernorMode, fixed: laneCount, inFlight }));
@@ -5558,6 +5549,29 @@ export async function runDaemon(
     catch (error) { void error; /* A diagnostic failure cannot authorize ops work or stop public selection. */ }
     lastOpsDispatchHold = signature;
   };
+  /** W1-T13681: why ops dispatch is held this iteration (the hold's own outcome label), or undefined while it is not. */
+  const opsDispatchHoldReason = (): string | undefined => deps.readOpsTaskDispatch === undefined ? "ops_dispatch_unwired"
+    : lastOpsDispatchHold === undefined ? undefined : String((JSON.parse(lastOpsDispatchHold) as unknown[])[0]);
+  // W1-T13749: the per-task holds the last composed ops plan wrote, by id; a row is written when a hold starts or its
+  // edge changes, and a cleared row when the id composes again, never one per tick.
+  let lastOpsTaskHolds = new Map<string, string>();
+  const noteOpsTaskHolds = (held: ReadonlyMap<string, CompositionHold>): void => {
+    const current = new Map<string, string>();
+    for (const [taskId, hold] of held) {
+      const edge = compositionHoldEdge(hold);
+      const signature = JSON.stringify([hold.reason, edge]);
+      current.set(taskId, signature);
+      if (lastOpsTaskHolds.get(taskId) === signature) continue;
+      try { log("dispatch.ops_task_held", { task: taskId, outcome: hold.reason, edge }); }
+      catch (error) { void error; /* A diagnostic failure cannot authorize the held task or stop the others. */ }
+    }
+    for (const taskId of lastOpsTaskHolds.keys()) {
+      if (current.has(taskId)) continue;
+      try { log("dispatch.ops_task_hold_cleared", { task: taskId }); }
+      catch (error) { void error; /* The task composes either way; only the diagnostic is lost. */ }
+    }
+    lastOpsTaskHolds = current;
+  };
   const readOpsDispatch = (primary: Plan): OpsTaskDispatchRead => {
     try { return deps.readOpsTaskDispatch?.(primary) ?? { outcome: "off" }; }
     catch (error) {
@@ -5587,10 +5601,12 @@ export async function runDaemon(
     }
     const composition = composeSecondaryPlan(primary, input.plan);
     if (composition.outcome !== "ok") {
-      holdOpsDispatch(composition.outcome, composition.taskId);
+      holdOpsDispatch(composition.outcome);
       return { plan: primary, observation };
     }
     lastOpsDispatchHold = undefined;
+    // W1-T13749: a bad edge holds its own task and its dependants; every other task dispatches from the composed plan.
+    noteOpsTaskHolds(composition.held);
     opsDispatchContexts.set(composition.plan, { publicPlan: primary, publicCommit: observation.publicCommit,
       source: input, opsIds: composition.secondaryIds });
     return { plan: composition.plan, observation };
@@ -7605,6 +7621,11 @@ export async function runDaemon(
       const captured = captureOpsDispatchPlan(publicPlanForBatch);
       planForBatch = captured.plan;
       opsDispatchObservation = captured.observation;
+    }
+    // W1-T13681: at most one move-task tick in flight, detached after this iteration's ops hold is read; never gates dispatch.
+    if (deps.planTaskMover && !detachedActionInFlight(PLAN_TASK_MOVE_ACTION)) {
+      detachSweepAction(runPlanTaskMoveTick({ opsDispatchHold: opsDispatchHoldReason(), log }, deps.planTaskMover),
+        { actionKind: PLAN_TASK_MOVE_ACTION, taskId: "DAEMON" });
     }
     const isMerged = deps.refreshMergedAsync ? await deps.refreshMergedAsync(planForBatch) : deps.refreshMerged(planForBatch);
     for (const taskId of pendingMergedCredit) {

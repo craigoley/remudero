@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# W1-T11468: a merge that moves package-lock.json re-primes a seed-linked host checkout. A borrowed
+# layout (a whole-directory symlink or a real install) is never changed: it gets the exact remedy.
+# The author precheck prints the same remedy text. This hook never fails the merge.
+set -u
+
+kernel=$(uname -s 2>/dev/null) || exit 0
+[ "$kernel" != Darwin ] || exit 0
+[ -f package-lock.json ] || exit 0
+tool=$(command -v remudero-dependencies 2>/dev/null) || tool="${HOME:-}/.local/bin/remudero-dependencies"
+[ -x "$tool" ] || exit 0
+changed=$(git diff --name-only ORIG_HEAD HEAD -- package-lock.json 2>/dev/null) || exit 0
+[ -n "$changed" ] || exit 0
+top=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+modules="$top/node_modules"
+
+if [ -L "$modules" ]; then
+  echo "post-merge: package-lock.json changed and node_modules is a whole-directory symlink; nothing was changed." >&2
+  echo "post-merge: Remedy: rm $modules (the link only: never -r and no trailing slash), then $tool prime $top" >&2
+elif [ -d "$modules" ] && [ ! -L "$modules/typescript" ]; then
+  echo "post-merge: package-lock.json changed and node_modules is a real install; nothing was changed." >&2
+  echo "post-merge: Remedy: mv $modules $modules.before-prime (other checkouts may borrow it), then $tool prime $top" >&2
+else
+  echo "post-merge: package-lock.json changed; re-priming $modules from the account seed store" >&2
+  outcome=$("$tool" prime "$top" 2>&1) || :
+  printf '%s\n' "${outcome%%$'\n'*}" >&2
+fi
+exit 0

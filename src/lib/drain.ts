@@ -10,7 +10,7 @@ import { headroomExhausted, UNREADABLE_DEGRADED_LIMIT } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
 import type { CostGovernorResult, MemoryGovernorResult, QueueGovernorResult } from "./sweep.js";
 import { checkDispatchGovernors, checkNewBuildReservation, consultMemoryReads, governorDeferPayload, newBuildReservationPayload, type DispatchGovernorDeps, type DispatchGovernorVerdict, type MemoryReadHold, type MemoryReadTracker, type NewBuildReservationVerdict } from "./dispatch-governor.js";
-import { RELEASE_LEDGER_STEP, unmetDependencies, unmetTaskPrecondition, type Plan, type Task, type TaskPreconditionOptions, type UnmetTaskPrecondition } from "./plan.js";
+import { loadPlanQuarantiningDuplicates, unmetDependencies, unmetTaskPrecondition, type Plan, type Task, type TaskPreconditionOptions, type UnmetTaskPrecondition } from "./plan.js";
 import {
   NO_OBSERVED_SCOPE,
   partitionByFileOverlap,
@@ -655,6 +655,16 @@ export function normalizeRepoName(value: string): string {
   const trimmed = value.trim().replace(/\/+$/, "");
   const lastSegment = trimmed.slice(trimmed.lastIndexOf("/") + 1);
   return lastSegment.toLowerCase();
+}
+
+/**
+ * W1-T13585 — the boot plan read of a daemon whose target is another repository. That repository's plan can
+ * carry tasks of other repositories (remudero-ops holds core's tasks) that depend on ids it cannot hold; such a
+ * task can never dispatch here ({@link taskTargetsRepo}), so its unseen dependency is kept, not thrown. A task of
+ * the target itself still fails the read with loadPlan's PlanError. Quarantine is unchanged.
+ */
+export function loadTargetPlanQuarantiningDuplicates(path: string, targetRepo: string): ReturnType<typeof loadPlanQuarantiningDuplicates> {
+  return loadPlanQuarantiningDuplicates(path, undefined, undefined, (task) => !taskTargetsRepo(task.repo, targetRepo));
 }
 
 /** W1-T988: single-target safety guard, not multi-repo routing. Foreign tasks would otherwise edit

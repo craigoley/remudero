@@ -3566,6 +3566,7 @@ export function ciLearningShardYaml(draft: CiLearningShardDraft, taskId: string,
   const q = (v: string) => JSON.stringify(v); // YAML accepts JSON scalars, so this escapes correctly
   const lessonsFile = ciLearningLessonsFile(draft.findingId);
   const fixtureDir = ciLearningGoldenFixtureDir(draft.findingId);
+  const fixturePath = `${fixtureDir}/criteria.yaml`;
   return [
     `- id: ${taskId}`,
     `  title: ${q(draft.title)}`,
@@ -3573,20 +3574,21 @@ export function ciLearningShardYaml(draft: CiLearningShardDraft, taskId: string,
     "  depends_on: []",
     "  type: implement",
     // Unjudged until the machine-filing judge rules (operator ruling 2026-09-29); LAW 5's mark rides it.
-    ...ciLearningMachineHeader([lessonsFile], draft.prs.length, population),
+    ...ciLearningMachineHeader([lessonsFile, fixturePath], draft.prs.length, population),
     `  origin: ${q(draft.findingId)}`,
     // W1-T3052: store PRs as data; the highest monotonic PR is efficacy's clock-free watermark.
     // The origin's first PR alone cannot distinguish refusals after the lesson landed.
     `  ci_learning_prs: [${draft.prs.join(", ")}]`,
     "  files:",
     `    - ${lessonsFile}`,
+    `    - ${fixturePath}`,
     `  design: ${q(machineShardDesign(undefined, { none: `the task adds one new learnings file, ${lessonsFile}, and its golden verdict fixture; no existing lesson, gate or code path changes` }))}`,
     "  acceptance:",
     `    - claim: ${q(`the lane that trips the ${draft.gate} gate is reached by a matched learnings entry rather than prose no dispatched worker reads`)}`,
     `      proof: ${q(`grep: ${draft.findingId} in ${lessonsFile}`)}`,
     `    - claim: ${q("the lesson carries the golden verdict prompt-surface-gate admits for a learnings path")}`,
-    `      proof: ${q(`grep: ${fixtureDir} in ${lessonsFile}`)}`,
-    `  note: ${q(`Filed by the ci-learning rung from ${draft.findingId}. The ${draft.gate} gate went red on #${draft.pr} and was repaired; the repair touched ${draft.repairFiles.join(", ") || "no recorded file"}. Recommended action: ${draft.action ?? "unclear"}. Remedy surface: ${draft.remedySurface}. prompt-surface-gate admits a learnings change only with a golden verdict under ${fixtureDir}/ — build it beside the entry, in the layout of test/fixtures/golden-verdicts/ci-clock-sweep-report-lesson/. Name ${fixtureDir} in the entry: this record declares the lessons file alone, so both proofs read it. MACHINE-AUTHORED AND PARKED — a person decides what guidance changes.`)}`,
+    `      proof: ${q(`grep: ${draft.findingId} in ${fixturePath}`)}`,
+    `  note: ${q(`Filed by the ci-learning rung from ${draft.findingId}. The ${draft.gate} gate went red on #${draft.pr} and was repaired; the repair touched ${draft.repairFiles.join(", ") || "no recorded file"}. Recommended action: ${draft.action ?? "unclear"}. Remedy surface: ${draft.remedySurface}. prompt-surface-gate admits a learnings change only with a golden verdict under ${fixtureDir}/ — use the layout of test/fixtures/golden-verdicts/ci-clock-sweep-report-lesson/ and include ${draft.findingId} in ${fixturePath}. MACHINE-AUTHORED AND PARKED — a person decides what guidance changes.`)}`,
     "",
   ].join("\n");
 }
@@ -3597,6 +3599,7 @@ function handFixShardYaml(draft: CiLearningShardDraft, cls: HandFixClass, taskId
   const q = (v: string) => JSON.stringify(v);
   const lessonsFile = ciLearningLessonsFile(draft.findingId);
   const fixtureDir = ciLearningGoldenFixtureDir(draft.findingId);
+  const fixturePath = `${fixtureDir}/criteria.yaml`;
   const fixed = draft.repairFiles.join(", ") || cls.file;
   const cites = cls.instances
     .map((i) => `${i.pr === undefined ? i.target : `#${i.pr}`}${i.commit === undefined ? "" : ` (${i.commit})`}`)
@@ -3607,17 +3610,18 @@ function handFixShardYaml(draft: CiLearningShardDraft, cls: HandFixClass, taskId
     "  repo: remudero",
     "  depends_on: []",
     "  type: implement",
-    ...ciLearningMachineHeader([lessonsFile], cls.count, population),
+    ...ciLearningMachineHeader([lessonsFile, fixturePath], cls.count, population),
     `  origin: ${q(draft.findingId)}`,
     "  files:",
     `    - ${lessonsFile}`,
+    `    - ${fixturePath}`,
     `  design: ${q(machineShardDesign(undefined, { none: `the task adds one new learnings file, ${lessonsFile}, scoped to ${fixed}, and its golden verdict fixture; no existing lesson, gate or code path changes` }))}`,
     "  acceptance:",
     `    - claim: ${q(`a worker editing ${fixed} is reached by a matched learnings entry that says what the fleet's last attempt left failing (${cls.cause}) and how the hand fixed it`)}`,
     `      proof: ${q(`grep: ${cls.file} in ${lessonsFile}`)}`,
     `    - claim: ${q("the lesson carries the golden verdict prompt-surface-gate admits for a learnings path")}`,
-    `      proof: ${q(`grep: ${fixtureDir} in ${lessonsFile}`)}`,
-    `  note: ${q(`Filed by the ci-learning rung from ${draft.findingId}. A person hand-fixed ${cls.file} ${cls.count} times in ${HAND_FIX_WINDOW_DAYS} days; the fleet's last attempt left ${cls.cause} failing. Hand fixes: ${cites}. Files changed: ${fixed}. Remedy surface: ${draft.remedySurface}. prompt-surface-gate admits a learnings change only with a golden verdict under ${fixtureDir}/ — build it beside the entry, in the layout of test/fixtures/golden-verdicts/ci-clock-sweep-report-lesson/. Name ${fixtureDir} in the entry. MACHINE-AUTHORED AND PARKED — the operator releases it; no text from it reaches a worker prompt until the record is released and merged.`)}`,
+    `      proof: ${q(`grep: ${draft.findingId} in ${fixturePath}`)}`,
+    `  note: ${q(`Filed by the ci-learning rung from ${draft.findingId}. A person hand-fixed ${cls.file} ${cls.count} times in ${HAND_FIX_WINDOW_DAYS} days; the fleet's last attempt left ${cls.cause} failing. Hand fixes: ${cites}. Files changed: ${fixed}. Remedy surface: ${draft.remedySurface}. prompt-surface-gate admits a learnings change only with a golden verdict under ${fixtureDir}/ — use the layout of test/fixtures/golden-verdicts/ci-clock-sweep-report-lesson/ and include ${draft.findingId} in ${fixturePath}. MACHINE-AUTHORED AND PARKED — the operator releases it; no text from it reaches a worker prompt until the record is released and merged.`)}`,
     "",
   ].join("\n");
 }

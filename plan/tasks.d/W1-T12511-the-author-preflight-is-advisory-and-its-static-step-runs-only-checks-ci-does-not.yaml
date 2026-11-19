@@ -22,7 +22,7 @@
     - doctrine/before-you-push/preflight-before-first-push.md
     - docs/operator-guide.md
     - test/ci/the-author-preflight-is-advisory-and-its-static-step-runs-only-checks-ci-does-not.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Each FAST_GATE_STEPS entry carries a `ciJob` field naming the ci.yml job that runs the same check on every pull request (for example jscpd runs in `jscpd-gate`), or no field when no such job exists. The author static step passes `runPreflightFast` only the entries with no `ciJob`, and the receipt lists each skipped entry as left to CI with its job name"

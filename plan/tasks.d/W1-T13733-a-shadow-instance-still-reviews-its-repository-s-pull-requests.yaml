@@ -10,7 +10,7 @@
   files:
     - src/lib/sweep.ts
     - test/sweep/a-shadow-instance-still-reviews-its-repository-s-pull-requests.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With repoMode shadow, a reviewable open pull request is reviewed and its remudero-review status is posted on the exact head, as with repoMode live"

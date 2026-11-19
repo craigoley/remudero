@@ -5,7 +5,8 @@
     - W1-T12505
   priority: 1.3
   type: implement
-  verify: human  # 2026-11-18 operator session: this task edits the author gate (scripts/preflight-author.mjs) and the affected-suite selector (src/lib/test-impact-map.ts), so the operator reviews its diff before it ships
+  # 2026-11-18 operator session: this task edits the author gate (scripts/preflight-author.mjs) and the affected-suite selector (src/lib/test-impact-map.ts), so the operator reviews its diff before it ships
+  verify: human
   principles:
     tdd: strict
   risk: high # moves the impact arm from shadow evidence to the author's live selection; a miss passes a run CI must fail
@@ -115,3 +116,11 @@
     W1-T12511, W1-T11850, W1-T13720, W1-T11468 (queued). Related: W1-T12505 and W1-T13164 (the read map), W1-T12507,
     W1-T11916.
     Id W1-T12508 reserved for run-unfiled-1794582098000 with ~/rmd-work/bin/reserve-id.sh.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.6
+    reasons:
+      - "high-risk verdict at confidence 0.60 — on the change's description/files alone, no diff was read — The description says the change edits the author preflight gate and the affected-suite selector, and the note says verify was set to human for that reason. This is a change to what gates a push, which is review/merge policy.; on the change's description/files alone, no diff was read — Criterion 9 replaces the fixed AUTHOR_WALL_SHARE budget with a budget derived from measured inputs, and criterion 8 leaves some suites to CI. These are policy decisions about test coverage, though the operator endorsed the direction.; on the change's description/files alone, no diff was read — The files list shows preflight-author.mjs is also edited by four other queued tasks (W1-T12511, W1-T11850, W1-T13720, W1-T11468), so there is conflict and drift risk. No change view was supplied, so the selection logic cannot be verified from what is shown."
+    judged_at: "2026-11-19T01:10:21.726Z"
+    pin: "31452c19d94311697ae4952d95ef0816bf62ca6db14606281a282be421a039d3"

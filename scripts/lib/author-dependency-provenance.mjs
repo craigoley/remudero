@@ -1,7 +1,7 @@
 import {createHash} from 'node:crypto';
 import {spawnSync} from 'node:child_process';
-import {closeSync,constants,fstatSync,openSync,readSync,realpathSync,statSync} from 'node:fs';
-import {dirname,join,sep} from 'node:path';
+import {accessSync,closeSync,constants,existsSync,fstatSync,lstatSync,openSync,readSync,realpathSync,statSync} from 'node:fs';
+import {delimiter,dirname,isAbsolute,join,sep} from 'node:path';
 const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
 const atom=part=>part!=='.'&&part!=='..'&&!part.includes('\0');
 const boundedRead=path=>{
@@ -58,10 +58,57 @@ function proofInstallRemedy(root) {
  }catch(error){return '';} // unreadable marker and foreign install both mean no recognized seed, so no remedy is named
 }
 
+// W1-T11468: the seed tool, found as hooks/post-merge finds it: on PATH, else in ~/.local/bin.
+function seedTool(env) {
+ for(const dir of (env.PATH??'').split(delimiter).filter(Boolean)) {
+  const path=join(dir,'remudero-dependencies');
+  try{accessSync(path,constants.X_OK);if(statSync(path).isFile())return path;}
+  catch(error){if(!['ENOENT','ENOTDIR','EACCES'].includes(error.code))throw error;} // not an executable on this PATH entry
+ }
+ return join(env.HOME??'','.local/bin/remudero-dependencies');
+}
+
+/** W1-T11468: the remedy for a node_modules behind its lockfile, by layout; hooks/post-merge prints the
+ * same text. A whole-directory symlink and a real install may be borrowed, so neither is changed here. */
+export function dependencyRemedy(root,env=process.env) {
+ const top=realpathSync(root),modules=join(top,'node_modules'),tool=seedTool(env);
+ const st=lstatSync(modules);
+ if(st.isSymbolicLink())return `; node_modules is a whole-directory symlink. Remedy: rm ${modules} (the link only: never -r and no trailing slash), then ${tool} prime ${top}`;
+ if(ownSeedStore(top)!==undefined||lstatSync(join(modules,'typescript'),{throwIfNoEntry:false})?.isSymbolicLink())return `; node_modules is a seed materialization. Remedy: ${tool} prime ${top} --proof`;
+ return `; node_modules is a real install. Remedy: mv ${modules} ${modules}.before-prime (other checkouts may borrow it), then ${tool} prime ${top}`;
+}
+
+const remedyFor=(root,env)=>{try{return dependencyRemedy(root,env);}catch(error){return `; remedy unavailable: ${error.message}`;}};
+
+/** The seed store of the materialization this checkout's own consumer marker names, else undefined. */
+function ownSeedStore(top) {
+ const modules=join(top,'node_modules'),file=join(modules,'.rmd-dependency-seed.json');
+ if(!lstatSync(modules).isDirectory()||!existsSync(file))return undefined;
+ let marker;
+ try{marker=JSON.parse(boundedRead(file));}
+ catch(error){return undefined;} // an unreadable marker names no checkout, so nothing is re-primed or named for it
+ return marker.checkout===top&&typeof marker.seed==='string'&&isAbsolute(marker.seed)?dirname(marker.seed):undefined;
+}
+
+/** W1-T11468: when the precheck read a version behind the lockfile and node_modules is this checkout's
+ * own seed materialization, run the checkout's own seed tool once (`prime --proof`) and re-check.
+ * Returns undefined when it does not apply; otherwise the prime's record and the re-checked provenance. */
+export function reprimeOwnSeedMaterialization(root,before,{run,env=process.env}) {
+ if(before?.state!=='unavailable'||!before.reason.startsWith('installed package version differs'))return undefined;
+ const top=realpathSync(root),tool=join(top,'scripts/dependency-seeds.mjs'),store=ownSeedStore(top);
+ if(store===undefined||!existsSync(tool))return undefined;
+ const args=['--experimental-strip-types',tool,'prime',top,'--proof','--root',store];
+ const result=run(process.execPath,args);
+ const firstLine=String(result.status===0?result.stdout??'':result.stderr||result.error?.message||'').split('\n')[0];
+ const record={command:[process.execPath,...args],status:result.status??null,signal:result.signal??null,firstLine};
+ if(result.status!==0)return {record,after:{state:'unavailable',reason:`${before.reason}; re-prime refused: ${firstLine}`}};
+ return {record,after:authorDependencyProvenance(root,{env})};
+}
+
 /** Cheap metadata/tool precheck, NOT a byte attestation or authority to reuse tests.
  * Records the real dependency donor so disappearance through a symlink is visible.
  */
-export function authorDependencyProvenance(root) {
+export function authorDependencyProvenance(root,{env=process.env}={}) {
  try {
   const lockBytes=boundedRead(join(root,'package-lock.json')),lock=JSON.parse(lockBytes);
   if(lock.lockfileVersion!==3||!lock.packages||typeof lock.packages!=='object')throw Error('complete v3 lock metadata required');
@@ -95,7 +142,8 @@ export function authorDependencyProvenance(root) {
    installedPackages:rows.length,optionalAbsent};
  }catch(error){
   const escaped=error.message.startsWith('dependency tool escapes installed donor');
-  return {state:'unavailable',reason:escaped?error.message+proofInstallRemedy(root):error.message};
+  const behind=error.message.startsWith('installed package version differs');
+  return {state:'unavailable',reason:escaped?error.message+proofInstallRemedy(root):behind?error.message+remedyFor(root,env):error.message};
  }
 }
 

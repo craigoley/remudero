@@ -20,7 +20,7 @@
     - src/lib/plan.ts
     - src/lib/measurement-cadence.ts
     - test/triage/every-machine-filer-refuses-a-promoted-check-when-it-writes.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The CI-friction filer and the flow-remedy filer pass their rendered record through the shared machine-shard lint with the plan-only promotion applied before they write it, and a record carrying a promoted check is refused with the check named and nothing written"

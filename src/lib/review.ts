@@ -3056,8 +3056,7 @@ function vitestNameFilterScope(w: WhitelistedProof, cwd: string): string[] {
   const files = entries
     .filter((entry) => /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(entry) && !/(?:^|\/)e2e\//.test(entry))
     .map((entry) => `${root.replace(/\/$/, "")}/${entry}`);
-  const diffHits = files.filter((file) => w.diffTestFiles?.includes(file));
-  if (diffHits.length === 1) return diffHits;
+  const inDiff = (file: string) => w.diffTestFiles?.includes(file) === true;
   const titleHits = files.filter((file) => {
     try { return readFileSync(join(cwd, file), "utf8").includes(w.label); }
     catch (error) {
@@ -3065,7 +3064,14 @@ function vitestNameFilterScope(w: WhitelistedProof, cwd: string): string[] {
       return true;
     }
   });
-  return titleHits.length > 0 ? titleHits : files;
+  // The diff's own file wins only among files that hold the title: a guard naming an earlier task's test in
+  // another file must still run that file, not the diff's file, where it matches nothing.
+  if (titleHits.length > 0) {
+    const diffTitleHits = titleHits.filter(inDiff);
+    return diffTitleHits.length === 1 ? diffTitleHits : titleHits;
+  }
+  const diffHits = files.filter(inDiff);
+  return diffHits.length === 1 ? diffHits : files;
 }
 
 /** A missing checkout runner is a host gap, not a failed proof (W1-T3312).
@@ -5132,6 +5138,8 @@ function shorthandIsInsideEnumeration(report: string, index: number): boolean {
 function shorthandIsAboutChangeset(report: string, index: number, length: number): boolean {
   if (isInsideInlineQuote(report, index)) return false;
   const rest = report.slice(index + length);
+  const before = report.slice(0, index);
+  if (/\bnon-$/i.test(before)) return false;
   // Is a house-shorthand claim (`plan-only`/`data-only`) at `index` ABOUT THE CHANGESET? THREE GRAMMATICAL RELATIONS,
   // none of them "a changeset word appears nearby", and the inline-quote guard above is checked FIRST and ONCE —
   // W1-T2534 gave the count arm that check and left these three uncovered, so a body that QUOTED a scope label was
@@ -5158,7 +5166,7 @@ function shorthandIsAboutChangeset(report: string, index: number, length: number
   // W1-T3061: ...unless a subordinator governs that whole clause, which makes the sentence a RULE rather than this
   // changeset's own assertion. Checked here rather than folded into the pattern above so the two reads stay legible
   // and the widening is one enumerated list, not a longer regex nobody can audit.
-  if (SELF_REFERENTIAL_CLAIM_RE.test(report.slice(0, index))) return !CONDITIONAL_CLAUSE_RE.test(report.slice(0, index));
+  if (SELF_REFERENTIAL_CLAIM_RE.test(before)) return !CONDITIONAL_CLAUSE_RE.test(before);
   // THE ATTRIBUTIVE FORM IS A CLAIM when, and only when, the noun the shorthand modifies is ITSELF the changeset:
   // "plan-only change", "a data-only diff". A forward scan over the whole rest of the sentence could not draw that
   // line: in "the plan-only CARVE-OUT exempts a plan-scope DIFF" the modified noun is `carve-out`.
@@ -5168,11 +5176,11 @@ function shorthandIsAboutChangeset(report: string, index: number, length: number
   // whose subject names something else — "1020 files is a very large plan-only diff" — the sentence describes a
   // changeset that does not exist. Only a POSITIVELY identified foreign subject cancels the claim; an unreadable or
   // absent frame leaves the refusal standing.
-  const frame = ATTRIBUTIVE_SUBJECT_RE.exec(report.slice(0, index));
+  const frame = ATTRIBUTIVE_SUBJECT_RE.exec(before);
   if (frame && !SELF_REFERENTIAL_SUBJECT_RE.test(frame[1].trim())) return false;
   // W1-T2533: "this is NOT a plan-only change" modifies the changeset AND denies it. The negator
   // sits in front of the whole noun phrase, where the head-noun read cannot see it.
-  return !DENIED_ATTRIBUTIVE_RE.test(report.slice(0, index));
+  return !DENIED_ATTRIBUTIVE_RE.test(before);
 }
 
 /** Does `file` fall under the claimed-absent `path` (an exact file, or a directory prefix)? */

@@ -1,6 +1,7 @@
 import { hasNonBotAuthor, namePathLanding, type DependencyMainIdentity } from "./dependency-main-identity.js";
 import { registerProcessExitLatch } from "./process-exit-latches.js";
 import { findTaskInCatalogs, type TaskLookupOptions, type TaskLookupResult } from "./task-lookup.js";
+import { clearanceBound, fixDispatchCauseProbe, fixDispatchRefusalClass } from "./stuck-state-gardener.js";
 import { planDestinationRepository, type PlanDestinationRepository } from "./plan-destination.js";
 import { decideLoopOutcome } from "./loop-decision.js";
 import { CI_REFRESH_GUARD_VERSION } from "./ci-refresh-prevention.js";
@@ -2419,6 +2420,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "escalate",
   "fixOwnerReclaimableAtHold", // W1-T7998
   "fixDispatchFleetHold", // W1-T11168
+  "fixDispatchCauseProbe", // W1-T13750
   "readLiveState",
   "terminalFixStandDown",
   "readRedBaseRefreshFacts",
@@ -2708,6 +2710,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "escalate"
   | "fixOwnerReclaimableAtHold"
   | "fixDispatchFleetHold"
+  | "fixDispatchCauseProbe"
   | "strikeLadder"
   | "readLiveState"
   | "terminalFixStandDown"
@@ -3303,6 +3306,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   return {
     readerAgreement: { owner, repo, plan, readJson: readJsonImpl },
     fixDispatchFleetHold: () => checkSharedPause(config.root, { run: pauseGit.run, mintAnchor: pauseGit.mintAnchor }),
+    fixDispatchCauseProbe: (cause) => fixDispatchCauseProbe(cause, { stateDir: join(config.root, "state") }),
     reconcilePrimaryShadowAlert: () => primaryShadowAlerts.reconcile().catch(primaryShadowAlertFailed),
     readOpenEscalations: () => openEscalationIssues.listOpen?.(NEEDS_HUMAN_LABEL) ?? [],
     fixProgressJudge: effectsProgressJudge,
@@ -15819,6 +15823,8 @@ export interface FixDispatchHoldOptions {
   judge?: FixProgressJudge;
   record?: (row: Record<string, unknown> & { step: string }) => void;
   onProgress?: (progress: FixProgressResult) => void;
+  /** W1-T13750: the stuck-state registry's probe for a cause it names (task catalog unreadable: ops-<outcome>). */
+  causeProbe?: SweepDeps["fixDispatchCauseProbe"];
 }
 
 /** The synchronous reader never starts a judge; the async sweep records its verdict for later readers. */
@@ -15966,7 +15972,18 @@ function* fixDispatchHoldAtHeadSteps(
   } else if (cause.startsWith("preservation:") && typeof last.worktree_path === "string") {
     if (!ownerWorktreeExists(last.worktree_path) ||
         (yield* step(() => ownerReclaimable?.(pr, last))) === true) return undefined;
+  } else if (options.causeProbe && fixDispatchRefusalClass(cause) !== undefined) {
+    // W1-T13750: a registered cause reads its probe as fleet-held does: a clear read lifts the hold at this head.
+    const read = yield* step(() => options.causeProbe!(cause));
+    if (read === "clear") return undefined;
+    if (read === "present") probe = "present";
   }
+  // W1-T13750: while the probe still reads a registered cause, the judge's escalate verdict waits for the class's
+  // derived clearance bound (stuck-state-gardener.ts clearanceBound), measured from this cause's first failure here.
+  const refusalClass = probe === "present" ? fixDispatchRefusalClass(cause) : undefined;
+  const causeBound = refusalClass === undefined ? undefined : clearanceBound(refusalClass, lines);
+  const causeSince = stamp(history[history.length - consecutive]!);
+  const escalationDeferred = causeBound !== undefined && Number.isFinite(causeSince) && nowMs - causeSince <= causeBound.ms;
   const recordedFailureAt = Date.parse(String(priorHold?.failure_at));
   const failureAt = Number.isFinite(stamp(last)) ? stamp(last) : Number.isFinite(recordedFailureAt) ? recordedFailureAt : nowMs;
   const nextRetryMs = Math.min(8.64e15, probe === "present" ? nowMs + cadence : failureAt + backoffMs);
@@ -15983,6 +16000,8 @@ function* fixDispatchHoldAtHeadSteps(
   return { reason, escalated, fields: { cause, probe_result: probe, next_retry_at: nextRetryAt,
     backoff_ms: backoffMs, judge_verdict: progress.verdict, failure_key: failureKey, failure_at: clockFromMillisFn(() => failureAt).iso(),
     dispatch_held: decline ? "fix_claim_decline" : "fix_dispatch_failed", dispatch_cause_key: escalationKey,
+    ...(causeBound ? { cause_bound_ms: causeBound.ms, cause_bound_basis: causeBound.basis } : {}),
+    ...(escalationDeferred ? { escalation_deferred: true } : {}),
     ...(escalated ? { dispatch_cause_escalated: escalationKey } : {}) } };
 }
 
@@ -15990,7 +16009,7 @@ async function holdRepeatedFixClaimDecline(
   pr: OpenPrView, hold: FixDispatchHold | undefined, escalate: SweepDeps["escalate"],
 ): Promise<{ reason: string; fields: Record<string, unknown> } | undefined> {
   if (hold === undefined) return undefined;
-  if (hold.fields.judge_verdict === "escalate") {
+  if (hold.fields.judge_verdict === "escalate" && hold.fields.escalation_deferred !== true) {
     if (!hold.escalated) await escalate(pr, hold.reason, renderClarificationQuestion(pr, hold.reason, pr.strikeHistory ?? []));
     hold.fields.dispatch_cause_escalated = hold.fields.dispatch_cause_key;
     if (hold.fields.dispatch_held === "fix_claim_decline")
@@ -16168,6 +16187,8 @@ export interface SweepDeps {
   workerAdmissionHold?: (kind?: "review") => string | undefined;
   /** Re-read the shared PAUSE ref for a recorded fleet-held fix failure. */
   fixDispatchFleetHold?: () => string | undefined;
+  /** W1-T13750: the stuck-state registry's probe for a fix-dispatch cause it names; undefined for any other cause. */
+  fixDispatchCauseProbe?: (cause: string) => Promise<"clear" | "present" | undefined>;
   restartAdmission?: ((kind: ReviewLaneClass, surface: "light" | "light-refill") => boolean) & { readonly heldBy?: string; readonly recycleWait?: true };
   /** W1-T11148: the head diff (reviewer's source) and the plan-lane bound's readings; absent: code lane, review-width bound. */
   readPrHeadDiff?: (pr: OpenPrView) => Promise<string>;
@@ -18946,7 +18967,7 @@ function repeatedFixRefusalReason(reason: string): string {
 /** W1-T2981 widened this from the single `"fix-dispatch"` literal: the registry was always a
  *  DAEMON-LIFETIME seam (the freshness exit drains it), and the retro is the loop's other long await. */
 export type DetachedActionKind = "fix-dispatch" | "retro" | "auto-triage" | "ci-learning" | "measurement-cadence" | "benchmark-cohort"
-  | "light-pass-action";
+  | "light-pass-action" | "plan-task-move";
 export type DetachedFixPhase = "admission" | "worker" | "ci-wait";
 export type DetachedFixPhaseObserver = (phase: DetachedFixPhase, wait?: { sinceMs: number; attempts: number }) => void;
 export interface DetachedFixControl { signal: AbortSignal; admissionSinceMs?: number }
@@ -21685,7 +21706,7 @@ export async function runSweep(
         }
         return dispatchFleetHold;
       },
-      onProgress: progress => dispatchCauseProgress.set(pr.prNumber, progress) };
+      onProgress: progress => dispatchCauseProgress.set(pr.prNumber, progress), causeProbe: deps.fixDispatchCauseProbe };
     if (!deps.dryRun) {
       opts.judge = deps.fixProgressJudge;
       opts.record = row => appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", ...row });
