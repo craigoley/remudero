@@ -14,12 +14,11 @@ import { buildIntoStore, materializeFromStore, type BuildIntoStoreOptions, type 
 import { writeAtomic } from "./fs-race-safe.js";
 import { acquireInflightLock, InflightLockError, type InflightLockHandle } from "./inflight-lock.js";
 import { classifyRunDir, readSpec, realRunChildProbe, type RunChildProbe } from "./run-child-contract.js";
-import { linkWorktreeNodeModules, resolveNodeModulesSource, type NodeModulesLinkOutcome } from "./worker.js";
+import { ENGINES_DIR, linkWorktreeNodeModules, resolveNodeModulesSource, type NodeModulesLinkOutcome } from "./worker.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
 
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 const GIT_SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
-export const ENGINES_DIR = "engines";
 /** Written LAST, into the finished tree: an engine directory without it is not an engine. */
 export const ENGINE_RECORD = "engine.json";
 const BUILD_PREFIX = ".build-";

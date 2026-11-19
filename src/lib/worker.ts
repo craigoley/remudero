@@ -5126,6 +5126,9 @@ export function adhocLaneRoot(config: Config): string {
   return join(config.root, "lanes");
 }
 
+/** W1-T10777: the one spelling of `<state>/engines`; engine-tree.ts imports it, and owns every worktree under it. */
+export const ENGINES_DIR = "engines";
+
 /** THE AGE CEILING FOR AN OPERATOR LANE, SIZED FOR A HUMAN RATHER THAN FOR A RUN. Deliberately not {@link
  * DEFAULT_WORKTREE_REAP_GRACE_MS}, which is calibrated against run wall-clock: reusing it would fire on a healthy condition,
  * this repo's recurring defect (W1-T312, W1-T380, W1-T382). The longest legitimate idle window for a hand-cut lane is a long
@@ -7933,16 +7936,18 @@ export async function runAdhocLaneReapRung(
     // decisions stay inside reapStaleWorktrees. Supplying `candidatePaths` is the safety boundary — no parent directory is
     // walked to find unmanaged lanes.
     if (deps.repoDir !== undefined) {
-      const unmanaged = (deps.listUnmanaged ?? unmanagedWorktreeLanes)(config, deps.repoDir);
-      if (unmanaged.length) {
-        const unmanagedSummary = await reap(root, { ...baseOpts, candidatePaths: unmanaged });
-        summaries.push(unmanagedSummary);
+      const engineOwned: string[] = [];
+      const unmanaged = (deps.listUnmanaged ?? unmanagedWorktreeLanes)(config, deps.repoDir, undefined, (path) => engineOwned.push(path));
+      if (unmanaged.length || engineOwned.length) {
+        const unmanagedSummary = unmanaged.length ? await reap(root, { ...baseOpts, candidatePaths: unmanaged }) : undefined;
+        if (unmanagedSummary) summaries.push(unmanagedSummary);
         log("adhoc_lane.unmanaged", {
           count: unmanaged.length,
           lanes: unmanaged,
+          engine_owned: engineOwned.length,
           dry_run: !enabled,
-          reaped: unmanagedSummary.reaped.length,
-          reaped_locks: unmanagedSummary.reapedLocks.length,
+          reaped: unmanagedSummary?.reaped.length ?? 0,
+          reaped_locks: unmanagedSummary?.reapedLocks.length ?? 0,
         });
       }
     }
@@ -7989,6 +7994,7 @@ export function unmanagedWorktreeLanes(
   config: Config,
   repoDir: string,
   runGit: (args: string[], cwd: string) => string = defaultLaneListGit,
+  onEngineOwned: (path: string) => void = () => {},
 ): string[] {
   let out: string;
   try {
@@ -7997,6 +8003,7 @@ export function unmanagedWorktreeLanes(
     return []; // unreadable registration ⇒ report nothing, never guess a population
   }
   const managed = [worktreesDir(config), adhocLaneRoot(config)];
+  const engines = join(config.root, "state", ENGINES_DIR);
   const lanes: string[] = [];
   for (const line of out.split("\n")) {
     const m = /^worktree (.+)$/.exec(line.trim());
@@ -8006,6 +8013,10 @@ export function unmanagedWorktreeLanes(
     // rung. Compared with a trailing separator so `…/lanes-old` can never read as being inside `…/lanes`.
     if (path === repoDir) continue;
     if (managed.some((root) => path === root || path.startsWith(`${root}/`))) continue;
+    if (path === engines || path.startsWith(`${engines}/`)) {
+      onEngineOwned(path);
+      continue;
+    }
     lanes.push(path);
   }
   return lanes;
