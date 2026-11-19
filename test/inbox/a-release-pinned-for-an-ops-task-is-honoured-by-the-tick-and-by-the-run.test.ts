@@ -156,7 +156,13 @@ test("W1-T13386: an absent id, an unread catalog and a catalog the tick would ho
   assert.deepEqual(await releasePlan(OPS_ID, primary, { stateDir: undefined, api: fx.api }), { outcome: "absent" }, "a host that names no second catalog");
   const down: OpsCatalogApi = async () => { throw new Error("fixture transport is down"); };
   assert.deepEqual(await releasePlan(OPS_ID, primary, { stateDir: fx.stateDir, api: down }), { outcome: "unreadable", reason: "ops-unreadable" });
-  // The catalog repeats a public id: the tick composes no plan from it, so a release has no record to pin.
+  // W1-T13749: an ops task whose own edge the tick holds has no record to pin, and is held with that edge.
+  const dangling = catalog(t, shard(OPS_ID, { depends_on: "[W1-T900198]" }));
+  assert.deepEqual(await releasePlan(OPS_ID, primary, dangling),
+    { outcome: "held", hold: { reason: "invalid_cross_catalog_dependency", task: OPS_ID, dependsOn: "W1-T900198" } });
+  // The catalog repeats a public id: the tick holds that id, not the ops task beside it, which is still released.
   const repeated = catalog(t, shard(OPS_ID) + shard(PUBLIC_ID));
-  assert.deepEqual(await releasePlan(OPS_ID, primary, repeated), { outcome: "unreadable", reason: "compose-duplicate_task_id" });
+  const beside = await releasePlan(OPS_ID, primary, repeated);
+  assert.equal(beside.outcome, "found", JSON.stringify(beside));
+  if (beside.outcome === "found") assert.equal(beside.plan.byId.has(PUBLIC_ID), false, "neither copy of the repeated id is in the plan it pins from");
 });

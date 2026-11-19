@@ -1,0 +1,49 @@
+- id: W1-T13753
+  title: "A Vitest guard proof runs the test file that holds its title, not the diff's own test file"
+  repo: remudero
+  depends_on: []
+  priority: 0.9
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # which test file a name-filtered Vitest proof runs; a wrong scope fails a real proof as test theater or passes on the wrong file
+  origin: "operator-session#onboarding-idea-to-prototype-2026-11-18"
+  plan_refs:
+    - W1-T4934
+    - W1-T11155
+  files:
+    - src/lib/review.ts
+    - test/review/a-guard-proof-runs-the-file-that-holds-its-title.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A name-filtered Vitest proof whose title lives only in a test file outside the diff runs that file, even when the diff holds exactly one test file"
+      proof: "unit test: test/review/a-guard-proof-runs-the-file-that-holds-its-title.test.ts"
+    - claim: "invariant:diff-file-wins — when the diff's own test file holds the title, it still wins over other files that hold the same title"
+      kind: guard
+      proof: "unit test: a diff-named Vitest file wins over other title hits and bare search excludes e2e"
+  rationale: |
+    WHY: OBSERVED 2026-11-18 on remudero-console#2708 (CONSOLE-T248). Its guard criterion
+    `unit test: CONSOLE-T245 criterion 1` names a test in tests/unit/the-setup-page-shows-each-step-and-the-next.test.tsx,
+    while the diff added one test file, tests/unit/the-setup-page-names-a-missing-runner-configuration.test.tsx.
+    remudero-review graded the guard executed_fail ("0 tests matched 'CONSOLE-T245 criterion 1' — test theater")
+    on head fdc7221, though `rmd check-proof "unit test: CONSOLE-T245 criterion 1"` on the same head resolved the
+    T245 file and passed (1 test). Cause: vitestNameFilterScope in src/lib/review.ts returns the diff's single
+    test file BEFORE it checks which files hold the title (added by W1-T4934, #8157). So every `kind: guard`
+    proof that names an earlier task's test in another file fails on a diff with one test file. The fleet's fix
+    lane worked around it on #2708 by copying the title into the new file (8f841cf).
+    W1-T11155 also declares src/lib/review.ts, but only for the shared child-entry bundle's module resolution;
+    it does not touch vitestNameFilterScope or which file a proof runs, which is all this task changes.
+  design: |
+    INVARIANT diff-file-wins: when the diff's own test file holds the title, it is still the only file run,
+    over other files with the same title (W1-T4934's "a diff-named Vitest file wins" test unchanged).
+
+    1. In vitestNameFilterScope, compute the title hits first. When any file holds the title, return the
+    diff's file only if it is the single title hit in the diff; otherwise return all title hits.
+    2. When no file holds the title (an interpolated title), keep the old fallback: the diff's single test
+    file, else every file under the root.
+    Out of scope: core's node --test path (grepFilesContaining), which already searches by title.
+  falsifier: >-
+    Restore src/lib/review.ts from main: the W1-T13753 test fails (measured on the cloud session: # pass 12,
+    # fail 1) because the proof runs only the diff's file and matches no test.

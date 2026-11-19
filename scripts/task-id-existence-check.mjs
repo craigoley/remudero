@@ -542,6 +542,23 @@ export function resolveDeletedPlanFiles(baseRef, cwd) {
   return { readable: true, files: new Set(result.stdout.split("\n").filter(Boolean)) };
 }
 
+/** Plan files THIS branch changed since it left `baseRef` (the merge base, not `baseRef`'s tip).
+ *  A shard the branch never touched is carried along from its cut, even when `baseRef` has since
+ *  deleted it -- a catalog move that removed the public record after this branch was cut. Unreadable
+ *  (no merge base, a failed diff) is `readable: false`, and the caller then keeps counting every
+ *  such shard as added, which over-refuses rather than passing a real add. */
+export function resolveBranchChangedPlanFiles(baseRef, cwd) {
+  const mergeBase = git(["merge-base", baseRef, "HEAD"], { cwd });
+  if (mergeBase.error || mergeBase.status !== 0 || !mergeBase.stdout.trim()) return { readable: false, files: new Set() };
+  // The gate scans the working tree, so the branch's changes are the merge base against the working
+  // tree (no HEAD), plus untracked shards, which no diff lists.
+  const paths = ["--", "plan/tasks.yaml", "plan/tasks.d/"];
+  const changed = git(["diff", "--no-renames", "--name-only", mergeBase.stdout.trim(), ...paths], { cwd });
+  const untracked = git(["ls-files", "--others", "--exclude-standard", ...paths], { cwd });
+  if (changed.error || changed.status !== 0 || untracked.error || untracked.status !== 0) return { readable: false, files: new Set() };
+  return { readable: true, files: new Set(`${changed.stdout}\n${untracked.stdout}`.split("\n").filter(Boolean)) };
+}
+
 /** owner/repo, parsed from `remote`'s url at `cwd`, mirroring src/lib/repo-location.ts. Duplicated,
  *  not imported: a plain `.mjs` outside tsconfig's build. `undefined` on an unparsable/unreadable
  *  url -- never guessed, which would send the open-PR read below to the wrong repo. */
@@ -596,11 +613,13 @@ function mentionedIds(text) {
 /** Ids THIS branch ADDS relative to `base`, for the open-vs-open check's claim set -- a file
  *  unchanged from `base` is a carried-along shard, not an add. `base.readable === false` propagates
  *  as `{ readable: false, ids: [] }` rather than guessing an empty set. */
-export function addedIdsAtHead(occurrencesById, base, deletedFiles = new Set()) {
+export function addedIdsAtHead(occurrencesById, base, deletedFiles = new Set(), branchChanged = { readable: false, files: new Set() }) {
   if (!base.readable) return { readable: false, ids: [] };
   const ids = [];
   for (const [id, occurrences] of occurrencesById) {
-    const headFiles = [...new Set(occurrences.map((o) => o.file))];
+    const declaring = [...new Set(occurrences.map((o) => o.file))];
+    // A shard the branch did not change since its merge base is carried along, not added by it.
+    const headFiles = branchChanged.readable ? declaring.filter((f) => branchChanged.files.has(f)) : declaring;
     const baseFiles = base.byId.get(id);
     const newFiles = baseFiles ? headFiles.filter((f) => !baseFiles.has(f)) : headFiles;
     const baseDeclarationSurvives = baseFiles?.size > 0 && [...baseFiles].some((file) => !deletedFiles.has(file));
@@ -943,7 +962,7 @@ export function main(argv) {
   const addedAtHead =
     base === undefined || !base.readable || !deletedPlanFiles?.readable
       ? { readable: false, ids: [] }
-      : addedIdsAtHead(occurrencesById, base, deletedPlanFiles.files);
+      : addedIdsAtHead(occurrencesById, base, deletedPlanFiles.files, resolveBranchChangedPlanFiles(values.base, cwd));
   const ownHeadRef = values["head-ref"] ?? process.env.GITHUB_HEAD_REF ?? currentBranch(cwd);
   if (collisionVerdict.unreadableBase) {
     console.error(

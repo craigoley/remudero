@@ -2,7 +2,8 @@
   title: A host checkout whose lockfile moves under a fast-forward is re-primed from the seed store, a Mac worktree whose node_modules falls behind its lockfile re-primes its own node_modules from the seed store, and a stale-dependency refusal names the supported remedy
   repo: remudero
   type: implement
-  verify: human  # 2026-11-18 operator session: this task edits the author gate (scripts/preflight-author.mjs), so the operator reviews its diff before it ships
+  # 2026-11-18 operator session: this task edits the author gate (scripts/preflight-author.mjs), so the operator reviews its diff before it ships
+  verify: human
   principles: {tdd: strict}
   budget_usd: 5.00
   risk: high
@@ -113,3 +114,11 @@
     occupied-destination refusal and criterion 4 must fail with dependency seed version mismatch. Let
     the replace path also act on a whole-directory symlink or an unmarked real install and criterion 5
     must fail. Restore and require all five to pass.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it declares deploy/DEPENDENCY-SEEDS.md, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
+    judged_at: "2026-11-19T01:10:09.468Z"
+    pin: "2a09b75beb8b79bcdf21c176e66018c5c25b3c6eeb998dfdd349040863b71aeb"

@@ -6,9 +6,21 @@ The hand route previously paid for a full instrumented suite locally and again i
 the relevant tests needed no coverage collection. The frozen earlier rule (kept verbatim at the end of this file) is historical;
 this post-migration rule supersedes its first-push **full-parity** obligation.
 
+**Read this first: the author preflight is advisory.** It is fast feedback for the author, not the gate. The gate is the three
+required checks on `main` (`remudero-review`, `ci-gate` and `security-merge-policy`) plus the merge-time ratchet
+verdict (W1-T12509), which counts every recorded-count gate on the merged tree, so two green pull requests cannot
+cross a ceiling together. Since W1-T12511 the author run skips what a required ci.yml job already runs on every
+pull request: its census step runs the census counts only (`census-precheck --counts-only`, which still refuses
+every count growth, such as W1-T12842's fixture-copy `ledgerHelperNames 53 > 51`), and its static step runs only
+the fast-gate steps with no `ciJob` (`worker-branch-shape`, `cli-reference`, `self-path-proof` and the census
+answer). The census suites, the instrument-surface census, `rule-checks` and the other light gates are left to
+the light-gates job and the ci and coverage shards. The receipt's `leftToCi` names each of them with the ci.yml
+job and required check that run it; a job the run cannot confirm in ci.yml keeps its check local
+(`authorPathKept`).
+
 Commit first, then run `node --import tsx scripts/preflight-author.mjs` before the first push. The script refreshes and
 pins `origin/main`, verifies the committed tree and each selected test path, checks the shipped
-cheap census before expensive validation, runs default static preflight and the module-level affected floor, and refuses missing/zero test
+census counts before expensive validation, runs default static preflight (less the steps left to CI) and the module-level affected floor, and refuses missing/zero test
 summaries. A test helper, a `.remudero/` file or a `hooks/` file selects the suites that import, name or read it
 (W1-T12506), and every suite when none does. Configuration, dependency, workflow, fixture, unknown and empty-floor changes
 fall back to every suite, without full-suite coverage instrumentation. A failing test is not

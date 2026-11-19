@@ -6,8 +6,10 @@ import { join } from "node:path";
 
 export type GitRunner = (args: string[]) => string;
 /** The same runner, off the event loop: a network `git fetch` on the daemon loop stalled it 49 s (E36).
- *  `signal` aborts at the fetch's bound; the real runner kills its child on it (W1-T5282). */
-export type AsyncGitRunner = (args: string[], signal?: AbortSignal, env?: NodeJS.ProcessEnv) => Promise<string>;
+ *  `signal` aborts at the fetch's bound; the real runner kills its child on it (W1-T5282).
+ *  W1-T13664: `boundMs` names the bound a spawn helper stops the child at; a runner that forks its child directly has
+ *  its signal for that and may ignore it. */
+export type AsyncGitRunner = (args: string[], signal?: AbortSignal, env?: NodeJS.ProcessEnv, boundMs?: number) => Promise<string>;
 
 /** W1-T4229 BACKSTOP: a hung fetch must not hold the checkout read open past the next re-check.
  *  Moved here from serve.ts so the daemon's awaited freshness reads share the number (W1-T5282). */
@@ -56,7 +58,9 @@ export async function boundGitCall(
         if (lateMs > LATE_TIMER_SLACK_MS) timer = setTimeout(() => fail(lateMs), lateGraceMs);
         else fail(lateMs);
       }, timeoutMs);
-      Promise.resolve().then(() => git(args, controller.signal, { ...baseEnv, GIT_TRACE2_EVENT: tracePath })).then(resolve, reject);
+      // W1-T13664: a helper stops the child at the abort plus both graces, the time the direct path's SIGKILL would come.
+      const boundMs = timeoutMs + lateGraceMs + GIT_FETCH_KILL_GRACE_MS;
+      Promise.resolve().then(() => git(args, controller.signal, { ...baseEnv, GIT_TRACE2_EVENT: tracePath }, boundMs)).then(resolve, reject);
     });
   } finally {
     clearTimeout(timer);

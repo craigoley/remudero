@@ -7,7 +7,7 @@ import { test } from "node:test";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 import { defaultPreflightSpawn, type PreflightSpawn } from "#src/lib/commit-message.js";
-import { AUTHOR_CENSUS_ANSWERED_ENV, FAST_GATE_CENSUS_BOUND_MS, FAST_GATE_STEPS, runPreflightFast } from "#src/lib/ci-parity.js";
+import { AUTHOR_CENSUS_ANSWERED_ENV, FAST_GATE_CENSUS_BOUND_MS, FAST_GATE_STEPS, authorCiSplit, readAuthorCiContract, runPreflightFast } from "#src/lib/ci-parity.js";
 
 // ── W1-T2478: the fast gate admits the census class under a MEASURED bound ─────────────────────
 //
@@ -277,7 +277,10 @@ test("mocked preflight steps isolate and restore an inherited head-bound census 
     process.env[AUTHOR_CENSUS_ANSWERED_ENV] = answer;
     const answered = recordingSpawn();
     runPreflightFast(REPO_ROOT, { spawn: answered.spawn, packageJsonText: REAL_PACKAGE_JSON });
-    assert.equal(answered.calls.length, FAST_GATE_STEPS.length - 1, "matching author answer skips the actual census spawn");
+    // W1-T12511: the matching answer marks the author static stage, which runs only the steps no CI job runs.
+    const authorSteps = authorCiSplit(readAuthorCiContract(REPO_ROOT)).staticSteps;
+    assert.ok(authorSteps.some((s) => s.runner === "census-precheck"), "the census step stays on the author path");
+    assert.equal(answered.calls.length, authorSteps.length - 1, "matching author answer skips the actual census spawn");
     const isolated = recordingSpawn();
     withoutAuthorCensusAnswer(() => runPreflightFast(REPO_ROOT,
       { spawn: isolated.spawn, packageJsonText: REAL_PACKAGE_JSON }));

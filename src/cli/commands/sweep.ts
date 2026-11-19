@@ -1269,7 +1269,7 @@ export function buildSweepLightHook(
   mainHealthRung?: () => Promise<void>,
   io: {
     /** W1-T12236: undefined leaves the hook on its own read. */
-    openPrViews?: (scope?: LightPassScope) => Promise<OpenPrView[]> | undefined;
+    openPrViews?: (scope?: LightPassScope) => (Promise<OpenPrView[]> & { servedReadStartedAtMs?: number }) | undefined;
     effects?: (deps: Parameters<SweepCommandHost["buildSweepEffects"]>[0]) => SweepDeps;
     readCompare?: (args: string[]) => Promise<unknown>;
     clock?: Pick<Clock, "now">;
@@ -1318,10 +1318,11 @@ export function buildSweepLightHook(
     const timing = new LightPassPreReviewTiming(io.clock);
     let timingWritten = false;
     let viewsSource: "tick_read" | "own_read" | "fallback" = "own_read";
+    let viewsAgeMs: number | null = null;
     const finishTiming = () => {
       if (timingWritten) return;
       timingWritten = true;
-      log("sweep_light.pre_review_timing", { run_id: runId, ...timing.finish(), views_source: viewsSource });
+      log("sweep_light.pre_review_timing", { run_id: runId, ...timing.finish(), views_source: viewsSource, views_age_ms: viewsAgeMs });
     };
     try {
       await timing.run(async () => {
@@ -1345,14 +1346,19 @@ export function buildSweepLightHook(
       // W1-T12755: a failed or slow read decides from the last good list (a refill read too).
       const readViews = async (passScope?: LightPassScope, initial = false) => {
         const served = io.openPrViews?.(passScope);
-        if (initial) viewsSource = served ? "tick_read" : "own_read";
-        const read = await openPrList.read(served, ownViews);
-        if (initial && read.fallback) viewsSource = "fallback";
+        const read = await openPrList.read(served, ownViews, { boot: passScope?.scope === "boot" },
+          initial ? (source) => { viewsSource = source; } : undefined);
+        // The row and the act-time guards follow the list the pass decided from, not the list it was offered.
+        if (initial) {
+          viewsSource = read.fallback ? "fallback" : read.source;
+          viewsAgeMs = Math.max(0, (io.clock ?? systemClock).now() - read.readStartedAtMs);
+        }
         return read;
       };
       const first = await timing.run(() => timing.measure("open_pr_views", () => readViews(scope, true)));
       const openPrs = first.views;
-      const onLastGoodList = first.fallback;
+      // A served list is older than the pass: a pass of any scope but boot acts on it as on the last good list.
+      const onLastGoodList = first.fallback || (first.source === "tick_read" && scope?.scope !== "boot");
       compares.retain(openPrs);
       const activePlan = planAccessor?.() ?? plan;
       const effects: Omit<SweepDeps, "ledgerPath" | "runId"> = timing.run(() => (io.effects ?? buildSweepEffects)({
