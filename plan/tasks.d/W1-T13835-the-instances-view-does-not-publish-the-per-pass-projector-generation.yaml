@@ -55,3 +55,6 @@
     Put state.generation back in the fingerprint in place of state.lease: criterion 1 fails (the view rebuilds)
     and criterion 2 fails (the lease is no longer an input). Publish generation in the evidence again: both
     criteria fail.
+  note: |
+    reservation hand-off: claude/project-thread-u06uh4 -> run-unfiled-1795093265214
+    Reserved with rmd next-task-id by the project coordinator on claude/project-thread-u06uh4 and filed from this branch.
