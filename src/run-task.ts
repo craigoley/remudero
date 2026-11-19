@@ -180,7 +180,7 @@ import { createOperatorMcpServer, operatorMcpCommand } from "./lib/operator-mcp.
 import { runInboxGardener } from "./lib/inbox-gardener.js";
 import { inboxSemanticDigest, proofDebtPopulationPermit } from "./lib/inbox-retirement.js";
 import { GARDEN_PLAN_FLAG, GARDEN_REPO_FLAG, issueRevalidationPolicyForTarget, registeredGardenEnabled } from "./lib/garden-registry.js";
-import { APPROVE_PUBLIC_REPLAY_FLAG, approveInChild, productionStuckStatePorts, readApproveRelease, runStuckStateGardener } from "./lib/stuck-state-gardener.js";
+import { APPROVE_PUBLIC_REPLAY_FLAG, APPROVE_WORKING_TREE_REPLAY_FLAG, approveInChild, productionStuckStatePorts, readApproveRelease, runStuckStateGardener } from "./lib/stuck-state-gardener.js";
 import { inboxGardenerMode, inboxRetirementContext } from "./lib/inbox-retirement.js";
 import { createHandWorktree, defaultHandWorktreeParent, renderHandWorktree } from "./lib/hand-worktree.js";
 import { addCowWorktree, linkDonorNodeModules, mainWorktreeOf, renderCowWorktree } from "./lib/cow-worktree.js";
@@ -39891,6 +39891,7 @@ export async function approveCommand(
     const stateDir = join(config.root, "state");
     const replayArg = rest.find((arg, index) => rest[index - 1] !== "--note" && arg.startsWith(APPROVE_PUBLIC_REPLAY_FLAG));
     const expectedPublicDigest = replayArg?.slice(APPROVE_PUBLIC_REPLAY_FLAG.length);
+    const allowWorkingTree = rest.some((arg, index) => rest[index - 1] !== "--note" && arg === APPROVE_WORKING_TREE_REPLAY_FLAG);
     const readLocal = (path: string) => loadLocalReleasePlan(path, stateDir);
     // W1-T10925: a consumer task's id is found in the instance's target plan, not the engine's.
     const located = deps.planPath === undefined && expectedPublicDigest === undefined ? verbTaskPlan(proposalId, () => stateDir, readLocal) : undefined;
@@ -39898,7 +39899,7 @@ export async function approveCommand(
     const localPlan = expectedPublicDigest === undefined ? located?.ok ? located.plan : readLocal(planPath) : undefined;
     const checkoutRoot = located?.ok ? located.root : dirname(dirname(planPath));
     const held = await readApproveRelease(proposalId, localPlan, checkoutRoot, { ...deps.taskLookup, stateDir },
-      row => appendLedger(ledgerPathFor(config), row), expectedPublicDigest);
+      row => appendLedger(ledgerPathFor(config), row), expectedPublicDigest, allowWorkingTree);
     if (held?.outcome === "unreadable") {
       console.error(`rmd approve: cannot release '${proposalId}': the task catalogs cannot be read as the daemon composes them (${held.reason}) — nothing released`);
       return 1;

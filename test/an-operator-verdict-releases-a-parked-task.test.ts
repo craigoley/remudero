@@ -610,12 +610,12 @@ test("W1-T13386 criterion 4: an id in neither catalog is refused as unknown and 
   assert.equal(onHost.wroteAnything(), false);
 });
 
-test("W1-T13386 criterion 4: a task in the public plan is located, pinned and released as before; amended by W1-T13785 criterion 2, the ops read is attempted while a destination is named", async t => {
+test("W1-T13386 criterion 4: a public release keeps its pin and reads ops only while a destination is named (W1-T13785 criterion 2)", async t => {
   const host = hostWithSecondCatalog(t, { transport: "down" }), said = everythingSaid(t);
   const record = loadPlan(host.planPath).byId.get(PUBLIC_ID)!;
   assert.equal(await approveCommand([PUBLIC_ID], { config: host.config, planPath: host.planPath, taskLookup: { api: host.api } }), 0, said.join("\n"));
   // W1-T13785 criterion 2 supersedes "a public hit opens no private reader": the read is attempted, fails, and the release stands.
-  assert.ok(host.calls.length > 0, "a public hit attempts the ops read while a destination is named");
+  assert.equal(host.calls.length, 1, "a public hit attempts one ops read while a destination is named");
   const rows = host.releaseRows(PUBLIC_ID);
   assert.equal(rows.length, 1);
   assert.equal(rows[0]!.run_id, `APPROVE-${PUBLIC_ID}`);
@@ -626,9 +626,20 @@ test("W1-T13386 criterion 4: a task in the public plan is located, pinned and re
   // And as the host runs the verb: its own checkout holds the id; the catalog is asked whether the tick holds it.
   const onHost = hostWithSecondCatalog(t, { transport: "down" });
   assert.equal(await approveAsTheHostRunsIt(onHost, [PUBLIC_ID]), 0, said.join("\n"));
-  assert.ok(onHost.calls.length > 0, "W1-T13785 criterion 2: the read is attempted while a destination is named");
+  assert.equal(onHost.calls.length, 1, "W1-T13785 criterion 2: the read is attempted while a destination is named");
   assert.equal(onHost.releaseRows(PUBLIC_ID).length, 1);
   assert.equal(onHost.releaseRows(PUBLIC_ID)[0]!.release_pin, pinBeforeThisTask(record));
+
+  for (const handed of [true, false]) {
+    const off = hostWithSecondCatalog(t);
+    rmSync(join(off.stateDir, "plan-destination.json"));
+    const code = handed
+      ? await approveCommand([PUBLIC_ID], { config: off.config, planPath: off.planPath, taskLookup: { api: off.api } })
+      : await approveAsTheHostRunsIt(off, [PUBLIC_ID]);
+    assert.equal(code, 0, said.join("\n"));
+    assert.equal(off.calls.length, 0, "a public hit opens no ops reader while the destination is off");
+    assert.deepEqual(off.releaseRows(PUBLIC_ID).map(row => row.release_pin), [pinBeforeThisTask(record)]);
+  }
 });
 
 // W1-T13785: the composition holds public records too. Approve composes a public hit while a destination is named.
@@ -753,6 +764,31 @@ test("W1-T13785 criterion 4: the real approve retry releases the verified origin
   assert.ok(host.rawLines().some(line => JSON.parse(line).step === "stuck_state.cleared" && JSON.parse(line).retry === "approve"));
 });
 
+test("W1-T13785 criterion 4: the real approve retry releases a verified working-tree record after the destination turns off", async t => {
+  const host = hostWithSecondCatalog(t, { opsText: REPEATS_PUBLIC_ID });
+  const said = everythingSaid(t);
+  assert.equal(await approveAsTheHostRunsIt(host, [PUBLIC_ID]), 1, said.join("\n"));
+  const record = loadPlan(host.planPath).byId.get(PUBLIC_ID)!;
+  const run = t.mock.fn(async (_file: string, args: readonly string[]) => {
+    assert.ok(args.includes("--replay-public-working-tree"));
+    assert.equal(await approveAtRoot(host.root, host, stripRepoRootFlag(args.slice(2))), 0, said.join("\n"));
+  });
+  const ports = productionStuckStatePorts({
+    stateDir: host.stateDir, api: host.api, gardenNames: [], publicRoot: host.root, publicMainCommit: () => undefined,
+    destinationRead: async () => undefined, escalate: () => null,
+    log: (step, fields) => appendLedger(ledgerPathFor(host.config), { run_id: "GARDEN", task_id: PUBLIC_ID, ...fields, step }),
+    approve: approveInChild({ publicRoot: host.root, execArgv: [], entry: "src/run-task.ts", env: {}, run }),
+  });
+  rmSync(join(host.stateDir, "plan-destination.json"));
+  const opsCalls = host.calls.length;
+  await runStuckStateGardener(ports);
+  await runStuckStateGardener(ports);
+  assert.equal(run.mock.callCount(), 1, "the ops-only change is seen even before the first pass");
+  assert.equal(host.calls.length, opsCalls, "the disabled destination opens no ops reader");
+  assert.deepEqual(host.releaseRows(PUBLIC_ID).map(row => row.release_pin), [pinBeforeThisTask(record)]);
+  assert.equal(host.durableRecords()[PUBLIC_ID]?.pin, pinBeforeThisTask(record));
+});
+
 test("W1-T13785 criterion 2: a held public record is released as on origin/main when the ops catalog cannot be read or the destination is off, and a sound public task beside a held one keeps the local pin", async t => {
   const everything = everythingSaid(t);
   const record = loadPlan(hostWithSecondCatalog(t).planPath).byId.get(PUBLIC_ID)!;
@@ -791,5 +827,24 @@ test("W1-T13785 criterion 2: a held public record is released as on origin/main 
       "control: the boot's record and origin/main's pin apart");
     assert.equal(host.releaseRows(DEPENDANT_ID)[0]?.release_pin, pinBeforeThisTask(local), `pinned from the local plan as origin/main does — ${label}`);
     assert.deepEqual(host.rawLines().map(line => (JSON.parse(line) as Record<string, unknown>).step), [RELEASE_LEDGER_STEP], `no refusal row — ${label}`);
+  }
+});
+
+test("W1-T13785 criterion 2: the public-only fallback rejects an unresolved dependency as the strict loader does", async t => {
+  everythingSaid(t);
+  const text = dependingOn(PUBLIC_ID, OPS_ID) + dependingOn(DEPENDANT_ID, PUBLIC_ID);
+  for (const mode of MODES) {
+    for (const destination of ["offline", "off", "malformed"] as const) {
+      const host = hostWithSecondCatalog(t, { opsText: shardText(OPS_ID), transport: "down" });
+      if (destination === "off") rmSync(join(host.stateDir, "plan-destination.json"));
+      if (destination === "malformed") writeFileSync(join(host.stateDir, "plan-destination.json"), "{invalid");
+      const error = { name: "PlanError", message: `task ${PUBLIC_ID}: depends_on unknown task '${OPS_ID}'` };
+      writeFileSync(host.planPath, text);
+      assert.throws(() => loadPlan(host.planPath), error, "control: strict public loader rejects the whole plan");
+      await assert.rejects(approveIn(mode, t, host, text, DEPENDANT_ID, shardText(PUBLIC_ID) + shardText(DEPENDANT_ID)),
+        error, `${mode}, ${destination}`);
+      assert.equal(host.calls.length > 0, destination === "offline", `${mode}, ${destination}: ops read attempted`);
+      assert.equal(host.wroteAnything(), false, `${mode}, ${destination}: no ledger or durable release`);
+    }
   }
 });

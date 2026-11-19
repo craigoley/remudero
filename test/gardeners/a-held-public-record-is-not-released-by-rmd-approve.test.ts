@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 
+import { readOriginMainSha } from "#src/lib/inbox.js";
 import { readOpsCatalogSnapshotAsync, type OpsCatalogApi } from "#src/lib/ops-catalog-source.js";
 import { operatorReleasePin } from "#src/lib/operator-release.js";
 import { loadPlan, parseTasksFromYaml, type Plan } from "#src/lib/plan.js";
@@ -115,7 +116,7 @@ function publicMain(t: TestContext, text: string) {
   };
   const boot = publish(text);
   return { dir: checkout.dir, planPath, boot, publish: (next: string) => { const sha = publish(next); checkout.git("checkout", "--quiet", "--detach", boot); return sha; },
-    head: () => checkout.git("rev-parse", "refs/remotes/origin/main"), unpublish: () => checkout.git("update-ref", "-d", "refs/remotes/origin/main") };
+    head: () => readOriginMainSha(checkout.dir), unpublish: () => checkout.git("update-ref", "-d", "refs/remotes/origin/main") };
 }
 
 /** The refused public release and the gardener replay over an older detached checkout. */
@@ -134,8 +135,8 @@ async function refusalFixture(t: TestContext) {
     ...productionStuckStatePorts({
       stateDir: fx.stateDir, api: fx.api, publicRoot: main.dir, publicMainCommit: main.head, gardenNames: [],
       log: (step, extra = {}) => void rows.push({ ts: iso(now), step, ...extra }), escalate: () => null,
-      destinationRead: async () => undefined, approve: async (id, digest) => {
-        const release = await readApproveRelease(id, digest === undefined ? bootPlan : undefined, main.dir, fx.lookup, append, digest);
+      destinationRead: async () => undefined, approve: async (id, digest, publicSource) => {
+        const release = await readApproveRelease(id, digest === undefined ? bootPlan : undefined, main.dir, fx.lookup, append, digest, publicSource === "working_tree");
         const task = (release?.outcome === "found" ? release.plan : bootPlan).byId.get(id)!;
         approved.push({ id, pin: operatorReleasePin(task) });
         return release?.outcome === "found" || release === undefined ? 0 : 1;
@@ -174,19 +175,33 @@ test("W1-T13785 criterion 4: the release probe reads a held public record's caus
   assert.deepEqual(steps(rows, "stuck_state.cleared").map(row => row.retry), ["approve"]);
 });
 
-test("W1-T13785 criterion 4: the working-tree public refusal is recorded without opening a replay item", async t => {
-  const fx = opsCatalog(t, record("PUB-2") + record("OPS-GOOD"));
-  mkdirSync(join(fx.stateDir, "plan"));
-  writeFileSync(join(fx.stateDir, "plan", "tasks.yaml"), PUBLIC_TEXT);
-  const rows: Row[] = [];
-  const publicPlan = loadPlan(join(fx.stateDir, "plan", "tasks.yaml"));
-  assert.deepEqual(await readApproveRelease("PUB-2", publicPlan, fx.stateDir, fx.lookup, row => rows.push({ ts: iso(NOW), ...row })),
-    { outcome: "held", hold: DUP_HOLD });
-  const [row] = rows;
-  assert.equal(rows.length, 1);
-  assert.equal(row?.public_commit, null);
-  assert.equal(row?.public_record_digest, publicRecordDigest(publicPlan.byId.get("PUB-2")!));
-  assert.deepEqual(scanStuckState(rows).open, []);
+test("W1-T13785 criterion 4: working-tree refusals replay once after an ops-only edit or switching the destination off", async t => {
+  for (const clearing of ["ops edit", "destination off"] as const) {
+    const { fx, main, ports, rows, pass, approved } = await refusalFixture(t);
+    main.unpublish();
+    rows.length = 0;
+    const publicPlan = loadPlan(main.planPath);
+    const current = publicPlan.byId.get("PUB-2")!;
+    const append = (row: Row) => rows.push({ ts: iso(NOW), ...row });
+    assert.deepEqual(await readApproveRelease("PUB-2", publicPlan, main.dir, fx.lookup, append), { outcome: "held", hold: DUP_HOLD });
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]?.public_commit, null);
+    const digest = publicRecordDigest(current);
+    assert.equal(rows[0]?.public_record_digest, digest);
+    const [item] = scanStuckState(rows).open;
+    assert.equal(item?.digest, digest, clearing);
+    assert.equal((await ports.probe(item!)).present, true, clearing);
+    await pass();
+    assert.deepEqual(approved, [], clearing);
+
+    if (clearing === "ops edit") fx.set(record("OPS-GOOD"));
+    else rmSync(join(fx.stateDir, "plan-destination.json"));
+    assert.deepEqual(await ports.probe(item!), { present: false, digest }, clearing);
+    await pass();
+    await pass();
+    assert.deepEqual(approved, [{ id: "PUB-2", pin: operatorReleasePin(current) }], clearing);
+    assert.deepEqual(steps(rows, "stuck_state.cleared").map(row => row.retry), ["approve"], clearing);
+  }
 });
 
 test("W1-T13785 criterion 4: a held public record that changed, or moved to the ops catalog, is never re-run and writes stuck_state.record_changed", async t => {
@@ -219,6 +234,11 @@ test("W1-T13785 criterion 4: a public retry checks the digest and catalog again 
   const retry = () => readApproveRelease("PUB-2", undefined, main.dir, fx.lookup, append, expected);
   assert.equal((await retry())?.outcome, "held", "a hold still present refuses automatic release");
   fx.set(record("OPS-GOOD"));
+  const snapshot = await fx.read();
+  assert.equal(snapshot.outcome, "ok");
+  const malformed = { ...fx.lookup, opsSnapshot: { ...snapshot, plan: { ...snapshot.plan!, tasks: [] } } };
+  assert.deepEqual(await readApproveRelease("PUB-2", undefined, main.dir, malformed, append, expected),
+    { outcome: "unreadable", reason: "compose-malformed" });
   const offline = { ...fx.lookup, api: async () => { throw new Error("ops offline"); } };
   assert.deepEqual(await readApproveRelease("PUB-2", undefined, main.dir, offline, append, expected),
     { outcome: "unreadable", reason: "public-replay-ops-unreadable" });
@@ -230,6 +250,10 @@ test("W1-T13785 criterion 4: a public retry checks the digest and catalog again 
   main.unpublish();
   assert.deepEqual(await ports.probe(item!), { present: true, reason: "origin-main-unreadable" });
   assert.deepEqual(await retry(), { outcome: "unreadable", reason: "public-replay-record-unverified" });
+  main.publish(PUBLIC_TEXT + record("PUB-REV", ["OPS-GOOD"]));
+  rmSync(join(fx.stateDir, "plan-destination.json"));
+  assert.deepEqual(await ports.probe(item!), { present: true, reason: "public-replay-plan-invalid" });
+  assert.deepEqual(await retry(), { outcome: "unreadable", reason: "public-replay-plan-invalid" });
 });
 
 test("W1-T13785 criterion 5: invariant no-held-record-is-released-from-either-catalog — no record the composition holds is answered found by the approve release plan, and every other record is answered as on origin/main", async t => {
