@@ -164,14 +164,13 @@ test("the guard's decision is unchanged -- ON MAIN still fast-forwards exactly a
 // W1-T2769 UPDATE: the set itself DID widen -- by that task, not this one. Its own doc in
 // run-task.ts gives `preflight` a reason distinct from (and stronger than) doctor/status's:
 // auto-syncing before a preflight run would silently test code the operator never asked to
-// test. This guard's job stays the same -- catch an UNREVIEWED widening -- so it now pins the
-// set W1-T2769 left behind rather than the set W1-T1134 did; a fourth verb appearing here still
-// needs its own reasoning paragraph in run-task.ts, same as every member already has.
+// test. Every addition needs its own reasoning paragraph in run-task.ts.
 // W1-T3281 UPDATE: `pr-owner` is a local-ledger-only diagnostic whose reason to exist is answering
 // while GitHub/API access is unavailable; self-syncing first would add the network dependency the
 // verb is meant to avoid.
+// W1-T11788 UPDATE: `gh-broker` must start and answer status even when the freshness gate would refuse.
 
-test("READ_ONLY_FRESHNESS_EXEMPT_VERBS (src/run-task.ts) is exactly {doctor, status, preflight, pr-owner}", () => {
+test("READ_ONLY_FRESHNESS_EXEMPT_VERBS (src/run-task.ts) is exactly {doctor, status, preflight, pr-owner, gh-broker}", () => {
   const runTaskSrc = readFileSync(join(__dirname, "..", "src", "run-task.ts"), "utf8");
   const match = runTaskSrc.match(
     /READ_ONLY_FRESHNESS_EXEMPT_VERBS:\s*ReadonlySet<string>\s*=\s*new Set\(\[([^\]]*)\]\)/,
@@ -183,8 +182,8 @@ test("READ_ONLY_FRESHNESS_EXEMPT_VERBS (src/run-task.ts) is exactly {doctor, sta
     .filter(Boolean);
   assert.deepEqual(
     verbs.sort(),
-    ["doctor", "pr-owner", "preflight", "status"],
-    "an unreviewed widening beyond W1-T3281's addition of `pr-owner` must fail here, not pass silently",
+    ["doctor", "gh-broker", "pr-owner", "preflight", "status"],
+    "the declared set must match the reviewed exemptions through W1-T11788",
   );
 });
 
