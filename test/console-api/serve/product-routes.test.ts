@@ -1061,8 +1061,7 @@ test("W1-T11196: the served runner-config preview matches its authenticated publ
       ...(session ? { "x-test-session": session } : {}) } });
     const body = await response.json();
     assert.deepEqual(violations(body, declaredBody("/v1/products/runner-config-preview", "GET", response.status)), []);
-    // The service answers 401 before the handler; every handler response is private and uncached.
-    if (response.status !== 401) assert.equal(response.headers.get("cache-control"), "private, no-store", `cache-control on ${response.status}`);
+    assert.equal(response.headers.get("cache-control"), "private, no-store", `cache-control on ${response.status}`);
     assert.deepEqual(snapshot(), before, "every preview leaves durable product and journal bytes unchanged");
     return { response, body };
   };

@@ -17436,8 +17436,7 @@ paths:
         including G-17. Present or invalid configuration is preserved. Unreadable or moved targets and
         missing or invalid sources yield no proposal. Nothing is written to product records, journals,
         branches, files or resources. This is informational; a later mutation must recheck independently.
-        Every response from the route handler (200, 400, 403, 404, 409, 503) uses Cache-Control private,
-        no-store; a 401 is answered by the service before the handler.
+        Every response, including service-level authentication failures, uses Cache-Control private, no-store.
       parameters:
         - name: productId
           in: query
