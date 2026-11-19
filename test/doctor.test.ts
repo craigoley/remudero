@@ -594,6 +594,7 @@ test("doctor: the verb registration dispatches into the doctor module", async ()
     // R-49: same reasoning — echo the running version back so this test's exit code never depends
     // on whether THIS host's node happens to match the repo's .nvmrc pin.
     readNvmrcVersion: () => process.versions.node,
+    hostPieceExists: () => true,
   });
   assert.equal(code, 0, `a healthy local read exits 0; report:\n${lines.join("\n")}`);
   assert.match(lines.join("\n"), /^rmd doctor: OK/m, "the command printed the module's own report");
@@ -632,6 +633,7 @@ function doctorDoctorDeps(over: Record<string, unknown> = {}) {
     // itself runs 22.22.2 against a 22.22.3 pin, a live mismatch — see doctor-node-pin.test.ts).
     // Echo the running version back so the arm always reads a match, on any host.
     readNvmrcVersion: () => process.versions.node,
+    hostPieceExists: () => true,
     ...over,
   };
 }

@@ -471,35 +471,54 @@ export function builtLedgerSource(built: ViewSource, state: ReadModelInstanceSta
   return { ...behind, state: "stale", phase: "behind", reason: `built from the ledger as of ${built.asOf}, ${Math.round(lagMs / 1000)} s old (budget ${Math.round(staleMs / 1000)} s); the projector has newer rows` };
 }
 
-/** The read model's own status, one body per serve: what each projector has applied and who holds it. */
-export const readModelStatusView: ReadModelView = {
-  name: READ_MODEL_STATUS_VIEW,
-  version: 1,
-  // Status reads the projector head and its quarantine; reuse fingerprints only quarantine (W1-T5884 diagnostics move the head).
-  ledgerReads: db => {
-    const row = db.prepare("SELECT max(m) AS last_ms FROM (SELECT max(ts_ms) AS m FROM seen WHERE ts_ms > 0 UNION ALL SELECT max(ts_ms) FROM quarantine)").get();
-    return row?.last_ms == null ? null : fixedClock(Number(row.last_ms)).iso();
-  },
-  digestReads: db => {
-    const row = db.prepare("SELECT MAX(ts_ms) AS last_ms FROM quarantine").get();
-    return row?.last_ms == null ? null : fixedClock(Number(row.last_ms)).iso();
-  },
-  materialize: ({ now, instances, shadow }) => [{
-    key: "",
-    data: {
-      instances: instances.map(({ state, db }) => ({
-        instance: state.instance,
-        generation: state.generation,
-        lease: state.lease,
-        ...(state.heldBy ? { heldBy: state.heldBy } : {}),
-        quarantined: db ? Number(db.prepare("SELECT count(*) AS n FROM quarantine").get()?.n ?? 0) : 0,
-        ...(state.reason ? { reason: state.reason } : {}),
-      })),
-      ...(shadow && shadow.length > 0 ? { shadow } : {}),
+/** PRIMARY CONTROL (W1-T13836): how long the status body keeps showing a projector generation that has since moved. */
+export const READ_MODEL_STATUS_GENERATION_HOLD_MS = 10_000;
+
+/**
+ * The read model's own status, one body per serve: what each projector has applied and who holds it.
+ *
+ * W1-T13836: the body declares its inputs. A projector's `generation` advances on every projected row, about once a
+ * second on the host, and rebuilt this body on 359 of 446 calls in one 10-minute window. It is now shown as of its last
+ * showing for up to {@link READ_MODEL_STATUS_GENERATION_HOLD_MS}, so a run of rows rebuilds the body at most once per
+ * hold; every other field (lease, holder, quarantine, failure reason, shadow readiness) rebuilds it at once, and
+ * each projector's progress stays current in its ledger source's `asOf`, which a skip restamps.
+ */
+export function createReadModelStatusView(holdMs = READ_MODEL_STATUS_GENERATION_HOLD_MS): ReadModelView {
+  // Keyed by store, so two tickers in one process (a standby, a test) never share a showing.
+  const shown = new WeakMap<ReadModelDb, { generation: number; atMs: number }>();
+  const shownGeneration = (state: ReadModelInstanceState, db: ReadModelDb | undefined, now: number): number => {
+    if (db === undefined) return state.generation;
+    const last = shown.get(db);
+    if (last !== undefined && (last.generation === state.generation || now - last.atMs < holdMs)) return last.generation;
+    shown.set(db, { generation: state.generation, atMs: now });
+    return state.generation;
+  };
+  const data = ({ now, instances, shadow }: ReadModelViewContext): Record<string, unknown> => ({
+    instances: instances.map(({ state, db }) => ({
+      instance: state.instance,
+      generation: shownGeneration(state, db, now),
+      lease: state.lease,
+      ...(state.heldBy ? { heldBy: state.heldBy } : {}),
+      quarantined: db ? Number(db.prepare("SELECT count(*) AS n FROM quarantine").get()?.n ?? 0) : 0,
+      ...(state.reason ? { reason: state.reason } : {}),
+    })),
+    ...(shadow && shadow.length > 0 ? { shadow } : {}),
+  });
+  return {
+    name: READ_MODEL_STATUS_VIEW,
+    version: 1,
+    // Status reads the projector head and its quarantine.
+    ledgerReads: db => {
+      const row = db.prepare("SELECT max(m) AS last_ms FROM (SELECT max(ts_ms) AS m FROM seen WHERE ts_ms > 0 UNION ALL SELECT max(ts_ms) FROM quarantine)").get();
+      return row?.last_ms == null ? null : fixedClock(Number(row.last_ms)).iso();
     },
-    sources: instances.map(({ state }) => ledgerSource(state, now)),
-  }],
-};
+    inputsFingerprint: (ctx) => JSON.stringify(data(ctx)),
+    materialize: (ctx) => [{ key: "", data: data(ctx), sources: ctx.instances.map(({ state }) => ledgerSource(state, ctx.now)) }],
+  };
+}
+
+/** The status view production serve builds. */
+export const readModelStatusView: ReadModelView = createReadModelStatusView();
 
 /** Every view the worker materializes; later Phase 1 views register here. */
 export const READ_MODEL_VIEWS: readonly ReadModelView[] = [createNavBadgeReadModelView(ledgerSource), createRepositoriesReadModelView(ledgerSource), createAnalyticsView(), createDailyProgressView(), readModelStatusView];

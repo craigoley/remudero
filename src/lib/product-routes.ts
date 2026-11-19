@@ -2,6 +2,7 @@ import { PRODUCT_CASE_LIMITS, PRODUCT_CASE_VERSION, ProductCaseService, type Pro
 import { RawBodyTooLargeError, readBoundedRawBody, verifiedActor, type Route } from "./service.js";
 import { sendJson } from "./panel-actions.js";
 import { ProductIntentStore } from "./product-intent-store.js";
+import { previewRunnerConfigBootstrap, RUNNER_CONFIG_PREVIEW_VERSION } from "./product-target-config.js";
 import {
   PRODUCT_REPOSITORY_LIMITS, PRODUCT_REPOSITORY_VERSION, ProductRepositoryService, ghProductRepositoryProvider, inspectProductRepository,
   type ProductRepositoryCode, type ProductRepositoryProvider,
@@ -104,11 +105,23 @@ const repositoryStatus: Record<ProductRepositoryCode, number> = {
 };
 
 /** Exact create-or-adopt of the product repository. HIGH tier: it may create a real GitHub repository. */
-export function buildProductRepositoryRoutes(options: { root?: string; provider?: ProductRepositoryProvider }): Route[] {
+export function buildProductRepositoryRoutes(options: { root?: string; installRoot?: string; provider?: ProductRepositoryProvider }): Route[] {
   const provider = options.provider ?? ghProductRepositoryProvider();
   const service = new ProductRepositoryService({ ...options, provider });
   const intents = new ProductIntentStore(options);
   return [
+    { method: "GET", path: "/v1/products/runner-config-preview", scope: "read", sensitivity: "sensitive", async handler(req, res) {
+      res.setHeader("Cache-Control", "private, no-store");
+      const fail = (code: ProductStoreCode) => sendJson(res, status[code], { version: RUNNER_CONFIG_PREVIEW_VERSION, error: code });
+      const actor = verifiedActor(req);
+      if (!actor) { fail("invalid_identity"); return; }
+      const params = new URL(req.url ?? "/", "http://rmd.local").searchParams;
+      const keys = [...params.keys()];
+      if (keys.length !== 3 || new Set(keys).size !== keys.length) { fail("invalid_input"); return; }
+      const result = await previewRunnerConfigBootstrap({ store: intents, provider, installRoot: options.installRoot ?? "" }, actor, Object.fromEntries(params));
+      if (!result.ok) { fail(result.code); return; }
+      sendJson(res, 200, result.value);
+    } },
     { method: "GET", path: "/v1/products/repository-preview", scope: "read", sensitivity: "sensitive", async handler(req, res) {
       res.setHeader("Cache-Control", "private, no-store");
       const reply = (code: number, body: Record<string, unknown>) => sendJson(res, code, { version: PRODUCT_REPOSITORY_VERSION, ...body });

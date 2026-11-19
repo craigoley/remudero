@@ -217,7 +217,7 @@ test("W1-T10430: capability evidence is current while independent ledger health 
   assert.equal(core.inboxCapabilityEvidence?.repository, "craigoley/remudero");
   assert.equal(core.inboxCapabilityEvidence?.instance, "core");
   assert.equal(core.inboxCapabilityEvidence?.prefix, "/v1/i/core");
-  assert.equal(core.inboxCapabilityEvidence?.generation, states.find(s => s.instance === "core")!.generation, "bind core's generation, not the aggregate across repositories");
+  assert.equal(Object.hasOwn(core.inboxCapabilityEvidence!, "generation"), false, "W1-T13835: the per-pass projector generation is not published");
   assert.equal(source.asOf, new Date(observedAt).toISOString());
   assert.equal(judgeSource(source, observedAt + SLOW_LANE_STORE_BUDGET_MS + 1).state, "stale", "a frozen positive expires under the existing source budget");
   assert.equal(entry.body.sources.find(s => s.name === "ledger:core")!.state, "stale", "actual native ledger health remains stale independently");
@@ -268,7 +268,7 @@ test("W1-T10430: capability evidence follows owned generation and revalidation w
   const ctx = { now: NOW, instances: [{ state, lease: {} }] };
   const read = () => view.materialize(ctx)[0].data.instances.find(i => i.id === "core")!.inboxCapabilityEvidence!;
   assert.equal(read().state, "observed");
-  assert.equal(read().generation, 4);
+  assert.equal(Object.hasOwn(read(), "generation"), false, "W1-T13835: the ownership check reads the generation; the body does not carry it");
   state.lease = "elsewhere";
   assert.equal(read().state, "unavailable", "a lost owner cannot refresh positive evidence");
   state.lease = "held";
@@ -347,4 +347,26 @@ test("W1-T10430: revoked contract controls stay closed without positive qualific
   assert.equal(read().data.instances[0].inboxCapabilityEvidence?.state, "unavailable", "mutable registry cannot rebind the fixed mount's repository");
   rmSync(f.repoPath);
   assert.equal(read().data.instances[0].inboxCapabilityEvidence?.state, "unavailable");
+});
+
+test("W1-T13835 criterion 2: evidence stays bound to the held lease, and a generation move during observation still refuses", (t) => {
+  const f = fixture(t);
+  writeFileSync(join(f.stateDir, "inbox-proposals.json"), "[]");
+  const state = { instance: "core", lease: "held" as "held" | "elsewhere" | "none", generation: 7 };
+  let invalidate = false;
+  const view = createInstancesView({ instances: [{ name: "core", ledgerDir: f.stateDir, repo: "craigoley/remudero" }], repoPath: f.repoPath, hostPath: f.hostPath,
+    mounted: () => { if (invalidate) state.generation++; return true; }, ledgerSource: () => ({ name: "ledger:core", asOf: null, state: "stale" }) });
+  const lease = {};
+  const read = () => view.materialize({ now: NOW, instances: [{ state, lease }] })[0].data.instances.find(i => i.id === "core")!.inboxCapabilityEvidence!;
+  const first = read();
+  assert.equal(first.state, "observed");
+  state.generation += 3;
+  assert.deepEqual(read(), first, "a generation move alone does not change the published evidence");
+  invalidate = true;
+  assert.equal(read().state, "unavailable", "a generation move mid-observation refuses, as before");
+  invalidate = false;
+  state.lease = "elsewhere";
+  assert.equal(read().state, "unavailable", "a lost lease refuses");
+  const fingerprint = (lease: "held" | "elsewhere" | "none") => view.inputsFingerprint({ now: NOW, instances: [{ state: { ...state, lease }, lease }] });
+  assert.notEqual(fingerprint("held"), fingerprint("elsewhere"), "the lease state stays an input");
 });
