@@ -53,7 +53,7 @@ import { createThreadEventSync, registryThreadItems, type InboxResponderDeps } f
 import type { InboxCausalScope } from "../../lib/inbox-thread.js";
 import { gitRecommendationEvidence, RECOMMENDATION_SEED_PATH } from "../../lib/inbox-recommendation.js";
 import { censusRunDirs } from "../../lib/run-child-contract.js";
-import { plannedSequence, runDrain, type DrainDeps, type MergedSet, type OpenPrCheck } from "../../lib/drain.js";
+import { loadTargetPlanQuarantiningDuplicates, plannedSequence, runDrain, type DrainDeps, type MergedSet, type OpenPrCheck } from "../../lib/drain.js";
 import { fileTargetJobStore, nativeTargetAdmission, readTargetExecution, type ProductBuildInstances } from "../../lib/product-build.js";
 import { loadManagedRepos } from "../../lib/managed-repos.js";
 import type { RunResult } from "../../lib/run-result.js";
@@ -1487,6 +1487,8 @@ export async function daemonCommand(
     registeredGardenEnabled(name, target.isSelf)
       ? startGardenOffLoop(name, intervalMs, { flight: gardenFlight, spawnPass: gardenPassSpawn, log, observe: (event) => gardenerRuntime.record(event), ...(injectedPassSpawn ? {} : { due: registeredGardenDueProbe(name, gardenContextFor(name)) }) })
       : { stop() {} };
+  // W1-T13585: a foreign target's plan can hold other repositories' tasks whose dependencies it cannot see.
+  const foreignTargetPlanLoad = (path: string) => loadTargetPlanQuarantiningDuplicates(path, target.repo);
   if (!target.isSelf && !flagValue(rest, "--plan")) {
     const repoDir = join(reposDir, target.repo);
     if (!existsSync(repoDir)) {
@@ -1496,7 +1498,7 @@ export async function daemonCommand(
       execFileSync("git", ["-C", repoDir, "fetch", "--quiet", "origin"], { stdio: "pipe" });
       execFileSync("git", ["-C", repoDir, "reset", "--hard", "--quiet", "origin/main"], { stdio: "pipe" });
     }
-    plan = loadDaemonPlan(target.planPath, log, raiseDuplicate);
+    plan = loadDaemonPlan(target.planPath, log, raiseDuplicate, foreignTargetPlanLoad);
   } else if (target.isSelf && !flagValue(rest, "--plan")) {
     // ── GIT SELF-SYNC (W1-T60): self-hosting must not read the daemon's own working tree
     // either — same fail-closed gate as run-task/drain (see syncPlanOrRefuse).
@@ -1511,7 +1513,7 @@ export async function daemonCommand(
     plan = synced.plan;
   } else {
     // An explicit --plan overrides the derived path — read it literally, no git sync.
-    plan = loadDaemonPlan(target.planPath, log, raiseDuplicate);
+    plan = target.isSelf ? loadDaemonPlan(target.planPath, log, raiseDuplicate) : loadDaemonPlan(target.planPath, log, raiseDuplicate, foreignTargetPlanLoad);
   }
   bootPhases.mark("plan_load");
 
