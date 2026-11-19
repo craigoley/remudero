@@ -162,7 +162,7 @@ export function renderSkillDraft(candidate: ProceduralCandidateLike, transcripts
   const workflowSteps = workflow ? renderTranscriptWorkflowSteps(workflow) : [];
   // Once transcript-mined steps name what a worker DID, a signal step that only restates its own
   // mined outcome (W1-T4283) is dropped rather than left to make the scanner refuse the whole
-  // draft; with no mined steps it stays, so the scanner still refuses an outcome-only procedure.
+  // draft; with no mined steps it stays, so stageSkillDraft refuses the outcome-only procedure.
   // Only skill-eligible signals render a step (W1-T4270): an outcome label is never a procedure.
   const steps = eligibleSignals
     .map((key) => ({ line: `- ${PROCEDURAL_STEP_TEXT[key] ?? key}`, outcome: outcomeFor(key) }))
@@ -475,12 +475,58 @@ export function skillFileStagedAtMs(value: string | undefined): number | null {
   return Number.isFinite(ms) ? ms : null;
 }
 
+function procedureStepLines(markdown: string): string[] {
+  const section = /^## Procedure\n([\s\S]*?)(?=^## |(?![\s\S]))/m.exec(markdown)?.[1] ?? "";
+  return section.split("\n").filter((line) => line.startsWith("- "));
+}
+
 /** Procedure steps, excluding restatements of the supplied mined outcomes. */
 function skillProcedureSteps(markdown: string, descriptions: readonly string[]): string[] {
-  const section = /^## Procedure\n([\s\S]*?)(?=^## |(?![\s\S]))/m.exec(markdown)?.[1] ?? "";
-  return section.split("\n").filter((line) =>
-    line.startsWith("- ") && !descriptions.some((description) => restatesOutcome(line, description)),
-  );
+  return procedureStepLines(markdown).filter((line) => !descriptions.some((description) => restatesOutcome(line, description)));
+}
+
+const SIGNAL_TABLE_STEP_LINES: ReadonlySet<string> = new Set(Object.values(PROCEDURAL_STEP_TEXT).map((text) => `- ${text}`));
+
+/** W1-T13858: the #7833 whole-draft check, beside the W1-T4283 per-line check. */
+function outcomeOnlyDraftRefusal(markdown: string): string | undefined {
+  const steps = procedureStepLines(markdown);
+  if (steps.length === 0 || !steps.every((line) => SIGNAL_TABLE_STEP_LINES.has(line))) return undefined;
+  return "outcome-only: every Procedure step restates the signal the runs were mined on, so the draft names no step a worker could take";
+}
+
+/** The origin a workshop close writes on its decline row. */
+const SKILL_WORKSHOP_ORIGIN = "skill-workshop";
+
+function storedSkillSha256(proposal: Proposal): string {
+  return createHash("sha256").update(proposal.skillFile?.markdown ?? "").digest("hex");
+}
+
+/** True when the workshop already closed this entry's stored text. An operator restore keeps the record. */
+function workshopClosedSkillDraft(proposal: Proposal): boolean {
+  return proposal.skillDraftClose?.skillSha256 === storedSkillSha256(proposal);
+}
+
+/**
+ * Close one staged skill draft: the decline row first, then the close record on the registry entry.
+ * A crash between the two can repeat one row; it cannot record a close for a draft that is still open.
+ * Writes nothing under .claude/skills/. True when it closed.
+ */
+function closeSkillDraft(
+  registryPath: string,
+  proposalId: string,
+  reason: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  clock: Pick<Clock, "iso">,
+): boolean {
+  const entry = loadProposalRegistry(registryPath).find((p) => p.id === proposalId);
+  if (!entry || workshopClosedSkillDraft(entry)) return false;
+  log("panel.proposal_declined", { task_id: proposalId, origin: SKILL_WORKSHOP_ORIGIN, reason });
+  updateProposalRegistry(registryPath, (current) => {
+    const i = current.findIndex((p) => p.id === proposalId);
+    if (i < 0) return null;
+    return current.map((p, j) => (j === i ? { ...p, skillDraftClose: { at: clock.iso(), reason, skillSha256: storedSkillSha256(p) } } : p));
+  });
+  return true;
 }
 
 /**
@@ -508,6 +554,8 @@ export function stageSkillDraft(
   if (!scan.ok) {
     return { refused: true, staged: false, alreadyStaged: false, reason: `${scan.reason} (offending line: "${scan.offendingLine}")` };
   }
+  const outcomeOnly = outcomeOnlyDraftRefusal(draft.markdown);
+  if (outcomeOnly !== undefined) return { refused: true, staged: false, alreadyStaged: false, reason: outcomeOnly };
   const id = skillDraftProposalId(draft.procedureKey);
   let staged = false;
   let alreadyStaged = false;
@@ -1335,8 +1383,14 @@ export function stageSkillDrafts(
 ): void {
   for (const draft of drafts) {
     try {
-      const r = stageOne(registryPath, draft, typeof allowlist === "function" ? allowlist(draft) : allowlist, reachability(draft));
-      log("skill.staged", { name: draft.name, staged: r.staged, already: r.alreadyStaged, backfilled: r.backfilled === true, refreshed: r.refreshed === true, refused: r.refused, reason: r.reason });
+      const list = typeof allowlist === "function" ? allowlist(draft) : allowlist;
+      const r = stageOne(registryPath, draft, list, reachability(draft));
+      // A capability-context refusal judges the host, not the draft text, so it closes nothing.
+      const closed = r.refused && !(list.contextRefusal !== undefined && r.reason?.startsWith(list.contextRefusal)) &&
+        closeSkillDraft(registryPath, skillDraftProposalId(draft.procedureKey), `withdrawn: ${r.reason}`, log, systemClock);
+      const changed = r.staged || r.refreshed === true || r.backfilled === true || r.stamped === true || r.legacyReplaced === true;
+      if (!changed && !closed) continue;
+      log("skill.staged", { name: draft.name, staged: r.staged, already: r.alreadyStaged, backfilled: r.backfilled === true, refreshed: r.refreshed === true, refused: r.refused, closed, reason: r.reason });
     } catch (e) {
       log("skill.stage_failed", { name: draft.name, error: String((e as Error)?.message ?? e) });
     }

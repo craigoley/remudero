@@ -664,17 +664,17 @@ test("two drafts in one batch with different applies-to get different reachabili
   assert.equal(negative.skillFile?.markdown, missing.markdown);
 });
 
-test("W1-T3101: stageSkillDrafts logs one skill.staged per draft, carrying the stager's own verdict", () => {
+test("W1-T3101: stageSkillDrafts logs a skill.staged row for a draft it staged, carrying the stager's own verdict", () => {
   const rows: Array<[string, Record<string, unknown> | undefined]> = [];
   const stub = (_p: string, d: SkillDraft): StageSkillDraftResult =>
     d.name === "one"
       ? { staged: true, alreadyStaged: false, refused: false }
       : { staged: false, alreadyStaged: false, refused: true, reason: "not allowlisted" };
   stageSkillDrafts("/registry.json", [draft("one"), draft("two")], allowlist, reachable, (step, extra) => rows.push([step, extra]), stub as typeof stageSkillDraft);
-  assert.deepEqual(rows.map(([step]) => step), ["skill.staged", "skill.staged"]);
+  // W1-T13858: a refusal with no staged proposal to close writes no row.
+  assert.deepEqual(rows.map(([step]) => step), ["skill.staged"]);
   assert.equal(rows[0][1]?.staged, true);
-  assert.equal(rows[1][1]?.refused, true);
-  assert.equal(rows[1][1]?.reason, "not allowlisted");
+  assert.equal(rows[0][1]?.name, "one");
 });
 
 test("W1-T3101: a THROW on one draft is logged and the loop continues — a bad draft never fails the retro", () => {
@@ -766,8 +766,9 @@ test("real skill staging retains scanner and operator approval boundaries", () =
   assert.deepEqual(loadInjectableSkills(join(dir, ".claude", "skills")), [], "staging cannot inject or ratify a skill");
   const before = readFileSync(registry, "utf8");
   const unknown = { ...contextDraft("Read the source.", "future-lane"), procedureKey: "unknown-context" };
+  const rowsBefore = rows.length;
   stageSkillDrafts(registry, [unknown], d => skillDraftWorkerAllowlist(config, d), describeSkillInjectionReachability, (_step, extra) => rows.push(extra ?? {}));
-  assert.equal(rows.at(-1)?.refused, true);
+  assert.equal(rows.length, rowsBefore, "W1-T13858: a refusal with no staged proposal to close writes no row");
   assert.equal(readFileSync(registry, "utf8"), before);
   renameSync(settingsPath, settingsPath + ".held");
   stageSkillDrafts(registry, [valid], d => skillDraftWorkerAllowlist(config, d), describeSkillInjectionReachability, (_step, extra) => rows.push(extra ?? {}));
