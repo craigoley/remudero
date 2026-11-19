@@ -192,7 +192,8 @@ async function withIssuer<T>(yaml: string, run: (input: { facts: NewPathApproval
   const token = "a".repeat(64);
   const server = createService({ tokens: { read: token, write: token }, routes: [
     { ...makeConfirmNonceRoute(store), tier: "low" },
-    ...makeNewPathApprovalIssuerRoutes({ binding, repository: "remudero", instance: "core", repoRoot: REPO_ROOT, stateRoot, now: () => NOW }),
+    ...makeNewPathApprovalIssuerRoutes({ binding, repository: "remudero", instance: "core", repoRoot: REPO_ROOT, stateRoot,
+      clock: { now: () => NOW, date: () => new Date(NOW), iso: () => new Date(NOW).toISOString() } }),
   ], operatorSession: provider, enforceWriteTiers: true, confirmNonces: store });
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;

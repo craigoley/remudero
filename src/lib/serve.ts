@@ -2365,7 +2365,7 @@ export function makeNewPathApprovalIssuerRoutes(input: {
   instance?: string;
   repoRoot: string;
   stateRoot: string;
-  now?: () => number;
+  clock?: Clock;
 }): Route[] {
   const binding = input.binding;
   const unavailable = (path: string): Route => ({
@@ -2380,7 +2380,7 @@ export function makeNewPathApprovalIssuerRoutes(input: {
     return [unavailable("/v1/new-path-approval/preview"), unavailable("/v1/new-path-approval/confirm"),
       unavailable("/v1/new-path-approval/resolve"), unavailable("/v1/new-path-approval/revoke")];
   }
-  const now = input.now ?? Date.now;
+  const clock = input.clock ?? systemClock;
   const auditPath = join(input.stateRoot, "state", "new-path-approval-audit.ndjson");
   const previews = new Map<string, NewPathApprovalPreview>();
   const active = new Map<string, NewPathApprovalFacts>();
@@ -2457,7 +2457,7 @@ export function makeNewPathApprovalIssuerRoutes(input: {
       const approvedMissingPaths = body.approvedMissingPaths as string[];
       if (approvedMissingPaths.length === 0 || new Set(approvedMissingPaths.map((path) => path.toLowerCase())).size !== approvedMissingPaths.length ||
         approvedMissingPaths.some((path) => !missingPaths.includes(path))) return responseJson(res, 409, { error: "approval_subset_mismatch" });
-      const createdAt = now();
+      const createdAt = clock.now();
       const preview: NewPathApprovalPreview = {
         id: randomUUID(), ref: `npa_${randomUUID()}`, task, operator,
         intentDigest: taskIntentDigest(task), declaredPaths: Object.freeze([...declaredPaths]),
@@ -2492,7 +2492,7 @@ export function makeNewPathApprovalIssuerRoutes(input: {
         return responseJson(res, 400, { error: "invalid_request" });
       }
       const preview = typeof body.previewId === "string" ? previews.get(body.previewId) : undefined;
-      const timestamp = now();
+      const timestamp = clock.now();
       if (!preview || preview.operator !== operator || preview.expiresAtMs <= timestamp) return responseJson(res, 409, { error: "preview_expired_or_wrong_actor" });
       if (Object.keys(body).some((key) => key !== "previewId") || !previews.delete(preview.id)) return responseJson(res, 409, { error: "preview_expired_or_wrong_actor" });
       const facts: NewPathApprovalFacts = Object.freeze({
@@ -2520,7 +2520,7 @@ export function makeNewPathApprovalIssuerRoutes(input: {
       if (typeof body.ref !== "string" || typeof body.taskId !== "string") return responseJson(res, 400, { error: "invalid_request" });
       const facts = active.get(body.ref);
       if (!facts || facts.taskId !== body.taskId) return responseJson(res, 404, { error: "approval_unknown" });
-      if (facts.expiresAtMs <= now()) {
+      if (facts.expiresAtMs <= clock.now()) {
         active.delete(facts.ref);
         return responseJson(res, 410, { error: "approval_expired" });
       }
@@ -2553,7 +2553,7 @@ export function makeNewPathApprovalIssuerRoutes(input: {
       if (Object.keys(body).some((key) => key !== "ref")) return responseJson(res, 400, { error: "invalid_request" });
       const facts = typeof body.ref === "string" ? active.get(body.ref) : undefined;
       if (!facts || facts.operator !== operator) return responseJson(res, 404, { error: "approval_unknown" });
-      const revokedAt = now();
+      const revokedAt = clock.now();
       try {
         if (!(await auditIsCurrent(facts))) return responseJson(res, 503, { error: "approval_audit_unknown" });
         await appendAudit({ event: "revoked", ref: facts.ref, atMs: revokedAt, operator, factsDigest: factsDigest(facts) });
