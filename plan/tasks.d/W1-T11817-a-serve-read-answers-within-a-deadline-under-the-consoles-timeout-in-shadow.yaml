@@ -18,6 +18,7 @@
     - src/lib/serve-read-deadline.ts
     - src/lib/serve.ts
     - test/console-api/serve/a-serve-read-past-its-deadline-is-ledgered-late-and-answered-stale-in-enforce.test.ts
+    - "src/lib/config-schema.ts"
   status: queued
   attempts: 0
   acceptance:

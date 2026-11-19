@@ -17,7 +17,7 @@ import { runSweep, type OpenPrView } from "#test/helpers/sweep-test.js";
 import { runReadPlaneWorker, readPlaneWorkerInput, readPlaneWorkerLog } from "#src/lib/read-plane.worker.js";
 import { boardOpenSnapshotPath } from "#src/lib/board-snapshot-cache.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
-import { createGhCallPacer, DEFAULT_GH_PACE_MIN_GAP_MS } from "#src/lib/github-transport.js";
+import { configureGithubInstallationBudget, createGhCallPacer, DEFAULT_GH_PACE_MIN_GAP_MS } from "#src/lib/github-transport.js";
 
 function fixture() {
   const root = makeTempDir("read-plane");
@@ -131,6 +131,8 @@ test("the persistent tick reader rotates bounded probes across stable open PRs",
 });
 
 test("W1-T13129 criterion 1: the tick reads keep the pacer's real gap and wait on no real timer", async (t) => {
+  // W1-T13786: with no installation budget the pacer's real gap is the 1.5 s default.
+  configureGithubInstallationBudget(undefined);
   const f = fixtureReader();
   f.setListed(Array.from({ length: 9 }, (_, i) => i + 10));
   const produce = createTickReadProducer(f.options, f.io);

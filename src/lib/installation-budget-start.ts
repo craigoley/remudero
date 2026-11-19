@@ -116,6 +116,7 @@ function shareDivisorOf(raw: string | undefined): number | undefined {
  * The daemon shares its budget state with its read worker thread; a run child and serve have no worker
  * to share with. A run child's allowance is its run-child share divided by the host worker budget in
  * {@link INSTALLATION_SHARE_DIVISOR_ENV}; with no divisor it divides by 1 and the row says divisor_missing.
+ * W1-T13786: the registry's consumers, before that divisor, are the instances that set the secondary spacing.
  */
 export function startProcessInstallationBudget(opts: {
   role: "daemon" | "run_child" | "serve";
@@ -168,7 +169,7 @@ export function startProcessInstallationBudget(opts: {
   const split = role !== "run_child" ? {}
     : divisor === undefined ? { share_divisor: 1, divisor_reason: "divisor_missing" } : { share_divisor: divisor };
   configureGithubInstallationBudget(createInstallationBudget({
-    consumers: consumers * (divisor ?? 1), instance, clock: opts.clock ?? systemClock, maxWaitMs,
+    consumers: consumers * (divisor ?? 1), instances: consumers, instance, clock: opts.clock ?? systemClock, maxWaitMs,
     ...(role === "daemon" ? { sharedState: createInstallationBudgetState() } : {}),
   }));
   log(GITHUB_BUDGET_CONFIGURED_STEP, {

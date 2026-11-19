@@ -1,6 +1,6 @@
 // W1-T11978: serve wrote one agent.built and one workstreams.built row for every build: 2,072 of the 7,781 ledger rows
 // every actor wrote between 2026-11-09T16:00Z and 2026-11-10T05:00Z, each one moving the ledger every reader folds.
-// Both views now tally their builds and write one row a window.
+// Agent builds are tallied by window. Workstreams builds are tallied until their counts change (W1-T11886).
 import assert from "node:assert/strict";
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -10,7 +10,8 @@ import type { Clock } from "#src/lib/clock.js";
 import { openProjectorReadModel } from "#src/lib/ledger-projector.js";
 import { acquireLease } from "#src/lib/read-model-db.js";
 import { createReadModelTicker, ledgerSource, type ReadModelInstanceState } from "#src/lib/read-model-worker.js";
-import { createWorkstreamsView, WORKSTREAMS_BUILT_ROW_WINDOW_MS, WORKSTREAMS_DEBOUNCE_MS, WORKSTREAMS_VIEW_NAME } from "#src/lib/workstreams-view.js";
+import { WORKSTREAMS_REUSE_AUDIT_MS } from "#src/lib/workstreams-projection-reuse.js";
+import { createWorkstreamsView, WORKSTREAMS_DEBOUNCE_MS, WORKSTREAMS_VIEW_NAME } from "#src/lib/workstreams-view.js";
 import { onReadModelClose, readModelFixtureDir, type ReadModelFixtureTestScope } from "#test/helpers/read-model-fixture-dir.js";
 import { switchViewsOn } from "#test/helpers/read-model-switches.js";
 
@@ -48,7 +49,7 @@ function agent(t: ReadModelFixtureTestScope, builtRowWindowMs?: number): { rows:
 }
 
 /** A workstreams view under the real ticker; each `insert` is one ledger row and the one build it causes. */
-function workstreams(t: ReadModelFixtureTestScope, builtRowWindowMs?: number): { rows: Rows; insert(at: number): void; idle(at: number): void } {
+function workstreams(t: ReadModelFixtureTestScope): { rows: Rows; insert(at: number): void; idle(at: number): void } {
   const root = readModelFixtureDir(t, "workstreams-build-rows").dir;
   const stateDir = join(root, "state");
   mkdirSync(join(stateDir, "read-model"), { recursive: true });
@@ -61,7 +62,7 @@ function workstreams(t: ReadModelFixtureTestScope, builtRowWindowMs?: number): {
   const clock = movingClock(NOW);
   const rows: Rows = [];
   const view = createWorkstreamsView<ReadModelInstanceState>({
-    instances, ledgerSource, clock, ...(builtRowWindowMs === undefined ? {} : { builtRowWindowMs }),
+    instances, ledgerSource, clock,
     log: (step, extra) => void (step === "workstreams.built" && rows.push(extra)),
   });
   switchViewsOn(stateDir, [WORKSTREAMS_VIEW_NAME]);
@@ -97,23 +98,19 @@ test("W1-T11978 criterion 1: agent-view writes one agent.built row per instance 
   assert.deepEqual(each.rows.map((row) => row.builds), [1, 1, 1, 1]);
 });
 
-test("W1-T11978 criterion 2: workstreams-view writes one workstreams.built row per window, carrying the builds and the summed reused and derived counts", (t) => {
-  const { rows, insert } = workstreams(t);
+test("W1-T11978 criterion 2 (updated by W1-T11886): workstreams-view tallies equal builds on the next changed row", (t) => {
+  const { rows, insert, idle } = workstreams(t);
   rows.splice(0);
-  for (const at of [10_000, 20_000, 30_000]) insert(NOW + at);
-  assert.deepEqual(rows, [], "three builds inside the window write no row of their own");
-  // The window's row is written by the first pass after it ends, before the build that pass's insert debounces into.
-  insert(NOW + WORKSTREAMS_BUILT_ROW_WINDOW_MS + 5_000);
-  assert.equal(rows.length, 1, JSON.stringify(rows));
-  const row = rows[0] as { instances: number; builds: number; reused: number; derived: number };
-  assert.deepEqual([row.instances, row.builds], [1, 3]);
-  assert.equal(row.reused + row.derived, 3 * TASKS.length, "every task of every build is counted once, reused or derived");
-  assert.equal(row.reused, 3 * (TASKS.length - 1), "the sum carries what the three warm builds reused: all but the task whose row moved");
-
-  const each = workstreams(t, 0);
-  each.insert(NOW + 10_000);
-  each.insert(NOW + 20_000);
-  assert.deepEqual(each.rows.map((r) => r.builds), [1, 1, 1], "control: a zero window still writes a row per build");
+  insert(NOW + 10_000);
+  assert.deepEqual(rows.splice(0), [{ instances: 1, builds: 1, reused: TASKS.length - 1, derived: 1, repeats: 0 }],
+    "the first warm build logs its changed counts immediately");
+  insert(NOW + 20_000);
+  insert(NOW + 30_000);
+  idle(NOW + WORKSTREAMS_REUSE_AUDIT_MS + 1_000);
+  assert.deepEqual(rows, [], "two equal builds stay silent even after the old flush window");
+  insert(NOW + WORKSTREAMS_REUSE_AUDIT_MS + 5_000);
+  assert.deepEqual(rows, [{ instances: 1, builds: 3, reused: 0, derived: TASKS.length, repeats: 2 }],
+    "the audited build logs its own counts and tallies the two silent builds");
 });
 
 test("W1-T11978 criterion 3: a window with no build writes no row, and a view's first build after start is written at once", (t) => {
@@ -127,10 +124,13 @@ test("W1-T11978 criterion 3: a window with no build writes no row, and a view's 
   assert.deepEqual(a.rows, []);
 
   const w = workstreams(t);
-  assert.deepEqual(w.rows.map((row) => row.builds), [1], "the workstreams view's cold build is on the ledger at once");
-  w.rows.splice(0);
-  for (const windows of [1, 2, 3]) w.idle(NOW + windows * WORKSTREAMS_BUILT_ROW_WINDOW_MS + 1_000);
-  assert.equal(w.rows.length, 0, "three windows with no build write nothing");
-  w.insert(NOW + 4 * WORKSTREAMS_BUILT_ROW_WINDOW_MS);
-  assert.deepEqual(w.rows.map((row) => row.builds), [1], "the next build after empty windows is counted alone");
+  assert.deepEqual(w.rows.splice(0), [{ instances: 1, builds: 1, reused: 0, derived: TASKS.length, repeats: 0 }],
+    "the workstreams view's cold build is on the ledger at once");
+  w.insert(NOW + 10_000);
+  assert.deepEqual(w.rows.splice(0).map((row) => row.reused), [TASKS.length - 1], "warm the view before the idle passes");
+  for (const windows of [1, 2, 3]) w.idle(NOW + windows * WORKSTREAMS_REUSE_AUDIT_MS + 1_000);
+  assert.equal(w.rows.length, 0, "three audit intervals with no build write nothing");
+  w.insert(NOW + 4 * WORKSTREAMS_REUSE_AUDIT_MS);
+  assert.deepEqual(w.rows, [{ instances: 1, builds: 1, reused: 0, derived: TASKS.length, repeats: 0 }],
+    "the next changed build after idle passes is counted alone");
 });
