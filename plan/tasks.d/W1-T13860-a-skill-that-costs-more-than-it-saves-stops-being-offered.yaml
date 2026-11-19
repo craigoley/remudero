@@ -27,6 +27,7 @@
     - test/the-fix-lane-is-offered-its-skills-under-seeded-withholding.test.ts
     - test/learning/a-stale-skill-retirement-is-withdrawn-not-approved.test.ts
     - test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts
+    - test/a-staged-skill-reaches-the-worker-prompt.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -114,6 +115,8 @@
     Tests drive buildSkillEffectivenessReport, runGardenPass or knowledgeGardenSpec, and observeSkillSelection
     through the two lanes' own selection code with nothing injected in place of the new code. Build ledgers
     with test/helpers/ledger-fixture.ts. Import through #src/* and #test/*.
+    BUILD FOUND (2026-11-19): design step 2 adds fix.done to SKILL_EFFECTIVENESS_LEDGER_STEPS, so
+    test/a-staged-skill-reaches-the-worker-prompt.test.ts updates its expected step filter by one literal.
   falsifier: |
     Remove the settle step: criterion 1 fails (the closed PR stays pending). Return INSUFFICIENT EVIDENCE
     where the cost rule decides: criterion 3 fails. Drop the stagedSkillRetirements read in
