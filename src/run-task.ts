@@ -2996,7 +2996,7 @@ import {
 import { materializeWorkerHome, perRunWorkerHomeDir, sweepStaleWorkerHomes, sweepStaleWorkerHomesAsync, workerKeychainPaths, type ClaudeCredentialSeedEvent } from "./lib/worker-home.js";
 import { FIX_CASH_TOOLS, FIX_WORKER_TOOLS, FIX_WORKER_TOOLS_HARNESS_COMMITS } from "./lib/fix-fence.js";
 import { acquireDrainLock, defaultIsPidAlive, DrainLockError, readDrainLock, type DrainLockHandle } from "./lib/drain-lock.js";
-import { asyncGit, checkCliFreshness, checkReviewerCodeFreshnessAsync, checkServiceFreshness, checkServiceFreshnessAsync, daemonFreshnessFromService, reviewerGit, type ReviewerCodeFreshness, type SelfSyncDeps } from "./lib/self-sync.js";
+import { asyncGit, checkCliFreshness, checkReviewerCodeFreshnessAsync, checkServiceFreshness, checkServiceFreshnessAsync, daemonFreshnessFromService, reviewerGit, testRunnerOnItsOwnCheckout, type ReviewerCodeFreshness, type SelfSyncDeps } from "./lib/self-sync.js";
 import { daemonClosureGit, daemonProcessClosure, daemonProcessEntry, withDaemonClosure, type ClosureGit } from "./lib/daemon-closure.js";
 import { LIVE_EDIT_TREES, runLiveEditLadder, type LiveEditLadderWiring, type LiveEditTree } from "./lib/live-edit-ladder.js";
 import { recoveryRefMaintainer } from "./lib/recovery-refs.js";
@@ -45141,11 +45141,63 @@ export function selfSyncRefusalSink(cmd: string | undefined, rest: string[], led
  *                   gate would refuse, and the answer it returns cannot be affected by the
  *                   staleness the gate is guarding, because the ledger it reads is host-local and
  *                   not a checkout artifact at all.
+ * `gh-broker` (W1-T11788): the per-account GitHub READ broker — `serve`, `status` and `stop` alike.
+ *                   It never syncs, decides from the plan or writes the tree. OBSERVED 2026-11-08:
+ *                   its serve unit restarted 15,000+ times, one `self_sync.refused` (dirty) row every
+ *                   11 s, because the operator checkout was behind with three untracked plan/feedback
+ *                   files, and every session's GitHub read fell back to the 180 s floor. Exempt runs
+ *                   still ASSESS the tree, read-only, and ledger one `self_sync.exempt` row when the
+ *                   gate would have refused — see {@link ledgerFreshnessExemption}.
  * `sweep`/`inbox` stay OUT even though their `--dry-run` forms are read-only: exempting the verb
  * name would also exempt their real (non-dry-run) dispatch. `run-task`/`drain`/`triage`/`fix`/
- * `approve`/`review`/`lint-plan` are untouched and keep falling to the gate's `else` branch.
+ * `approve`/`review`/`lint-plan`/`ledger-grep` are untouched and keep falling to the gate's `else`
+ * branch. `gh` is not listed: its read dispatch runs earlier in {@link main}, before this gate.
  */
-const READ_ONLY_FRESHNESS_EXEMPT_VERBS: ReadonlySet<string> = new Set(["doctor", "status", "preflight", "pr-owner"]);
+export const READ_ONLY_FRESHNESS_EXEMPT_VERBS: ReadonlySet<string> = new Set(["doctor", "status", "preflight", "pr-owner", "gh-broker"]);
+
+/** Thrown by the assess-only git runner at the one mutating call `checkCliFreshness` makes. */
+class FreshnessAssessOnlyStop extends Error {}
+
+/**
+ * W1-T11788 — WHAT THE GATE WOULD HAVE SAID, WITHOUT LETTING IT ACT. Runs the CLI freshness check
+ * for an exempt verb with a git runner that stops at `merge` (the check's only mutation; its fetch
+ * moves `origin/main` alone) and no-op say/warn/reexec, so the tree and HEAD never move. A refusal
+ * becomes ONE `self_sync.exempt` row (`verb`, `reason`) and the verb proceeds. Returns which case
+ * it was: `exempt` (refused, row written), `would-sync` (clean and behind on main: nothing moved,
+ * no row), `unassessed` (the check itself threw: said on stderr, no row), or the check's own status.
+ */
+export function ledgerFreshnessExemption(
+  cmd: string,
+  repoDir: string,
+  env: NodeJS.ProcessEnv,
+  checkFreshness?: typeof checkCliFreshness,
+  ledgerPath: () => string = cliLedgerPathWithoutConfig,
+): ReturnType<typeof checkCliFreshness>["status"] | "exempt" | "would-sync" | "unassessed" {
+  // The assess-only git runner below switches off the check's own test-runner guard, so keep it here.
+  if (!checkFreshness && testRunnerOnItsOwnCheckout(repoDir, env)) return "guarded";
+  const assessOnly = (args: string[]): string => {
+    if (args[0] === "merge") throw new FreshnessAssessOnlyStop("assess only: the ff-merge is never run");
+    return execFileSync("git", ["-C", repoDir, ...args], { encoding: "utf8" });
+  };
+  let result: ReturnType<typeof checkCliFreshness>;
+  try {
+    result = (checkFreshness ?? checkCliFreshness)(repoDir, env, {
+      git: assessOnly, say: () => {}, warn: () => {}, reexec: () => {},
+    });
+  } catch (err) {
+    if (err instanceof FreshnessAssessOnlyStop) return "would-sync";
+    console.error(`rmd ${cmd}: freshness assessment failed, proceeding (exempt verb): ${String(err)}`);
+    return "unassessed";
+  }
+  if (result.status !== "refused") return result.status;
+  const row = { run_id: `CLI-${systemClock.now()}`, task_id: "CLI", step: "self_sync.exempt", verb: cmd, reason: result.reason };
+  try {
+    appendLedger(ledgerPath(), row);
+  } catch (err) {
+    process.stderr.write(`${JSON.stringify({ ...row, ledger_error: String(err) })}\n`);
+  }
+  return "exempt";
+}
 
 /**
  * A PROMISE REJECTION THAT ESCAPED EVERY HANDLER — the fourth named halt, alongside
@@ -45804,6 +45856,8 @@ export async function main(
     //
     // Does NOT touch `checkCliFreshness`'s own predicate, message or ledger row (W1-T446 owns
     // that) — only where the gate applies, never what it decides (design (i)).
+    // W1-T11788: the broker's skip is observable — one `self_sync.exempt` row, tree untouched.
+    if (cmd === "gh-broker") ledgerFreshnessExemption(cmd, repoRoot, process.env, deps.checkFreshness);
   } else {
     const freshness = (deps.checkFreshness ?? checkCliFreshness)(repoRoot, process.env, selfSyncRefusalSink(cmd, rest));
     if (freshness.status === "refused") {

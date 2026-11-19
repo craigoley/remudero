@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { after, test } from "node:test";
 import { CLI_EXIT_UNHANDLED_REJECTION, installUnhandledRejectionGuard, main } from "../src/run-task.js";
 import { treeFfSafe } from "../src/lib/deployer.js";
 import { checkCliFreshness } from "../src/lib/self-sync.js";
+import { ledgerFreshnessExemption, READ_ONLY_FRESHNESS_EXEMPT_VERBS } from "#src/run-task.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 // ── THE CIRCULAR REFUSAL ─────────────────────────────────────────────────────────────
 // `deploy-run` is the deploy supervisor's cycle — the com.remudero.supervisor launchd unit
@@ -112,6 +114,7 @@ async function runVerbUnderRefusal(
   t: { mock: { method: typeof import("node:test").mock.method } },
   argv: string[],
   checkFreshness: typeof checkCliFreshness = REFUSED_BEHIND_AND_DIRTY,
+  dispatch?: NonNullable<Parameters<typeof main>[0]>["dispatch"],
 ): Promise<{ exited: boolean; code?: number; errs: string[]; reached: boolean }> {
   const errs: string[] = [];
   t.mock.method(
@@ -128,7 +131,7 @@ async function runVerbUnderRefusal(
   process.argv = ["node", "run-task.js", ...argv];
   try {
     let caught: unknown;
-    await main({ checkFreshness }).catch((e) => {
+    await main({ checkFreshness, ...(dispatch ? { dispatch } : {}) }).catch((e) => {
       caught = e;
     });
     const exited = caught instanceof ProcessExitCalled;
@@ -435,4 +438,164 @@ test("W1-T11337 criterion 3: freshness-exemption tests surface escaped rejection
   assert.equal(escapedReasons.length, before + 1, "the escaped reason is recorded for teardown");
   assert.deepEqual(escapedRejections.splice(0), [`exit ${CLI_EXIT_UNHANDLED_REJECTION}`]);
   escapedReasons.splice(before, 1);
+});
+
+
+// ── W1-T11788: THE READ BROKER IS EXEMPT FROM THE CLI FRESHNESS REFUSAL ──────────────────
+//
+// OBSERVED 2026-11-08: the unit running `rmd gh-broker serve` restarted 15,000+ times, one
+// `self_sync.refused` (dirty) row every 11 s, because the operator checkout was behind origin/main
+// with untracked plan/feedback files. A broker that never writes the tree was down, and every
+// session's GitHub read fell back to the 180 s floor.
+
+/** The diverged shape `checkCliFreshness` returns for a checkout with unpublished commits. */
+const REFUSED_DIVERGED = () =>
+  ({
+    status: "refused" as const,
+    reason: "diverged" as const,
+    message:
+      "rmd has diverged from origin/main (c66b504 vs 2e93251) -- not a fast-forward, refusing to " +
+      "auto-sync (never merging or rebasing on your behalf).",
+  });
+
+/** Runs `fn` with HOME (and so the CLI ledger) under a temp dir; returns the ledger's rows. */
+async function withIsolatedLedger<T>(fn: () => Promise<T>): Promise<{ value: T; rows: Array<Record<string, unknown>> }> {
+  const scratch = mkdtempSync(join(tmpdir(), "rmd-w1-t11788-"));
+  const home = join(scratch, "home");
+  const root = join(scratch, "root");
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ root }), "utf8");
+  process.env.HOME = home;
+  delete process.env.RMD_SELECTED_INSTANCE_REGISTRY;
+  delete process.env.RMD_INSTANCE_REGISTRY;
+  try {
+    const value = await fn();
+    const ledger = join(root, "state", "ledger.ndjson");
+    const rows = existsSync(ledger)
+      ? readFileSync(ledger, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>)
+      : [];
+    return { value, rows };
+  } finally {
+    restoreIsolatedEnv();
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+/** A dispatch stand-in that records the verb the gate let through and answers 0, so no real verb runs. */
+function recordingDispatch(): { calls: Array<{ cmd: string; rest: string[] }>; dispatch: NonNullable<Parameters<typeof main>[0]>["dispatch"] } {
+  const calls: Array<{ cmd: string; rest: string[] }> = [];
+  return {
+    calls,
+    dispatch: async (cmd, rest) => {
+      calls.push({ cmd: cmd ?? "", rest: [...rest] });
+      return 0;
+    },
+  };
+}
+
+test("W1-T11788 criterion 1: gh-broker, with any subcommand, is exempt and never refused for a dirty, diverged or off-main checkout", async (t) => {
+  assert.equal(READ_ONLY_FRESHNESS_EXEMPT_VERBS.has("gh-broker"), true, "gh-broker is in the declared exempt set");
+  const refusals = [REFUSED_BEHIND_AND_DIRTY, REFUSED_DIVERGED, REFUSED_DETACHED_AND_BEHIND];
+  for (const checkFreshness of refusals) {
+    for (const sub of [["serve"], ["status"], ["status", "--since", "1h"], ["stop"], ["not-a-subcommand"], []]) {
+      const { calls, dispatch } = recordingDispatch();
+      const { value: r } = await withIsolatedLedger(() => runVerbUnderRefusal(t, ["gh-broker", ...sub], checkFreshness, dispatch));
+      const label = `gh-broker ${sub.join(" ")} under ${checkFreshness().reason}`;
+      assert.ok(r.reached, `${label} must not be refused by the entry gate; stderr was ${JSON.stringify(r.errs)}`);
+      assert.deepEqual(calls, [{ cmd: "gh-broker", rest: sub }], `${label} reaches the gh-broker dispatch`);
+      assert.equal(r.code, 0, `${label} exits with the verb's own code, not the gate's 1`);
+    }
+  }
+});
+
+test("W1-T11788 criterion 2: every verb that was not exempt before, including gh and ledger-grep, is still refused on a dirty checkout", async (t) => {
+  // The declared set grew by exactly gh-broker. `gh` stays OUT: its read dispatch runs before
+  // this gate, and listing it here would exempt nothing but the declaration's honesty.
+  assert.deepEqual(
+    [...READ_ONLY_FRESHNESS_EXEMPT_VERBS].sort(),
+    ["doctor", "gh-broker", "pr-owner", "preflight", "status"],
+  );
+  assert.equal(READ_ONLY_FRESHNESS_EXEMPT_VERBS.has("gh"), false, "the gh verb is not exempt");
+  assert.equal(READ_ONLY_FRESHNESS_EXEMPT_VERBS.has("ledger-grep"), false, "ledger-grep is not exempt");
+  for (const argv of [
+    ["ledger-grep", "self_sync"], ["lint-plan"], ["run-task", "T1"], ["drain"], ["triage"], ["fix", "1"],
+    ["review", "1"], ["deploy"], ["sweep", "--dry-run"], ["inbox", "--dry-run"],
+  ]) {
+    const { calls, dispatch } = recordingDispatch();
+    const r = await runVerbUnderRefusal(t, argv, REFUSED_BEHIND_AND_DIRTY, dispatch);
+    assert.ok(r.exited, `\`rmd ${argv.join(" ")}\` still exits at the gate`);
+    assert.equal(r.code, 1, `\`rmd ${argv.join(" ")}\` exits 1, exactly as before`);
+    assert.ok(r.errs.some((e) => e.includes("refusing to auto-sync")), `\`rmd ${argv.join(" ")}\` still prints the refusal`);
+    assert.deepEqual(calls, [], `\`rmd ${argv.join(" ")}\` never reaches its dispatch`);
+  }
+});
+
+test("W1-T11788 criterion 3: a broker started on a dirty checkout does not move or write the tree and ledgers the exemption once", async (t) => {
+  // Through main(): one self_sync.exempt row, and never the refused row the gate used to write.
+  const { calls, dispatch } = recordingDispatch();
+  const { rows } = await withIsolatedLedger(() => runVerbUnderRefusal(t, ["gh-broker", "serve"], REFUSED_BEHIND_AND_DIRTY, dispatch));
+  assert.deepEqual(calls, [{ cmd: "gh-broker", rest: ["serve"] }]);
+  const selfSync = rows.filter((row) => String(row.step).startsWith("self_sync."));
+  assert.equal(selfSync.length, 1, `exactly one self_sync row; got ${JSON.stringify(selfSync)}`);
+  assert.equal(selfSync[0]!.step, "self_sync.exempt");
+  assert.equal(selfSync[0]!.verb, "gh-broker");
+  assert.equal(selfSync[0]!.reason, "dirty");
+
+  // Against a REAL behind checkout whose dirt the fast-forward would also write: the real check,
+  // the real git, and nothing in the tree moves.
+  const git = (dir: string, args: string[]): string => execFileSync("git", args, { cwd: dir, encoding: "utf8" });
+  const { localDir } = behindFixture();
+  writeFileSync(join(localDir, "plan", "tasks.yaml"), "- id: T1\n  title: \"local edit\"\n", "utf8");
+  writeFileSync(join(localDir, "plan", "feedback.yaml"), "untracked\n", "utf8");
+  const head = git(localDir, ["rev-parse", "HEAD"]);
+  const porcelain = git(localDir, ["status", "--porcelain"]);
+  const ledgerDir = mkdtempSync(join(tmpdir(), "rmd-w1-t11788-ledger-"));
+  const ledger = join(ledgerDir, "ledger.ndjson");
+  assert.equal(ledgerFreshnessExemption("gh-broker", localDir, {}, undefined, () => ledger), "exempt");
+  assert.equal(git(localDir, ["rev-parse", "HEAD"]), head, "HEAD did not move");
+  assert.equal(git(localDir, ["status", "--porcelain"]), porcelain, "the working tree is exactly as it was");
+  assert.equal(readFileSync(join(localDir, "plan", "tasks.yaml"), "utf8"), "- id: T1\n  title: \"local edit\"\n");
+  const written = readFileSync(ledger, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>);
+  assert.equal(written.length, 1, "the exemption is ledgered once");
+  assert.deepEqual([written[0]!.step, written[0]!.verb, written[0]!.reason], ["self_sync.exempt", "gh-broker", "dirty"]);
+
+  // Clean, behind and on main — the one case the real gate fast-forwards. Exempt, it moves nothing.
+  const clean = behindFixture().localDir;
+  const cleanHead = git(clean, ["rev-parse", "HEAD"]);
+  const cleanLedger = join(ledgerDir, "clean.ndjson");
+  assert.equal(ledgerFreshnessExemption("gh-broker", clean, {}, undefined, () => cleanLedger), "would-sync");
+  assert.equal(git(clean, ["rev-parse", "HEAD"]), cleanHead, "the exempt broker never fast-forwards");
+  assert.equal(existsSync(cleanLedger), false, "nothing was refused, so nothing is ledgered");
+  rmSync(ledgerDir, { recursive: true, force: true });
+  for (const dir of [localDir, clean]) rmSync(dirname(dir), { recursive: true, force: true });
+});
+
+test("W1-T11788: an exempt assessment that cannot run or cannot ledger still lets the broker proceed", (t) => {
+  const errs: string[] = [];
+  t.mock.method(console, "error", (...a: unknown[]) => {
+    errs.push(a.map(String).join(" "));
+  });
+  const stderr: string[] = [];
+  t.mock.method(process.stderr, "write", (chunk: unknown) => {
+    stderr.push(String(chunk));
+    return true;
+  });
+  const throwing = (): never => {
+    throw new Error("status unreadable");
+  };
+  assert.equal(ledgerFreshnessExemption("gh-broker", REPO_ROOT, {}, throwing), "unassessed");
+  assert.ok(errs.some((e) => e.includes("freshness assessment failed") && e.includes("status unreadable")));
+
+  const scratch = mkdtempSync(join(tmpdir(), "rmd-w1-t11788-unwritable-"));
+  const blocker = join(scratch, "a-file");
+  writeFileSync(blocker, "x", "utf8");
+  const status = ledgerFreshnessExemption("gh-broker", REPO_ROOT, {}, REFUSED_BEHIND_AND_DIRTY, () => join(blocker, "ledger.ndjson"));
+  assert.equal(status, "exempt");
+  const line = stderr.find((s) => s.includes("self_sync.exempt"));
+  assert.ok(line, `the unwritable row reaches stderr; got ${JSON.stringify(stderr)}`);
+  assert.match(JSON.parse(line!).ledger_error, /ENOTDIR|EEXIST/);
+  rmSync(scratch, { recursive: true, force: true });
+
+  // On its own checkout under the test runner, with nothing injected, it never touches git.
+  assert.equal(ledgerFreshnessExemption("gh-broker", REPO_ROOT, process.env), "guarded");
 });
