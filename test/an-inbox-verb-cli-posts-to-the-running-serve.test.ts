@@ -5,11 +5,12 @@
  */
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { createServer, type Server } from "node:http";
-import type { AddressInfo } from "node:net";
+import { createServer, globalAgent, type Server } from "node:http";
+import { Socket, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { setImmediate } from "node:timers/promises";
 import { INBOX_VERBS, inboxVerbCommand, type InboxVerbActions, type InboxVerbName } from "#src/lib/inbox-verdict-command.js";
 import type { Config } from "#src/lib/config.js";
 import { inboxCliServeTarget, inboxVerbViaServe, serveFirstInboxActions } from "#src/lib/inbox-cli-serve.js";
@@ -92,13 +93,11 @@ test("W1-T13238 criterion 2: with no serve reachable the verb runs in-process an
   const local = fakeActions();
   let built = 0;
   const actions = serveFirstInboxActions({ url: `http://127.0.0.1:${port}`, token: TOKEN }, () => { built++; return local; });
-  const started = Date.now();
   const result = await captured(t, () => inboxVerbCommand("snooze", ["P3", "--wake"], actions));
-  assert.ok(Date.now() - started < 2_500, "a refused connection falls back within the 2 s connect bound");
   assert.equal(result.code, 0);
   assert.deepEqual(local.calls, ["snooze"]);
   assert.equal(built, 1);
-  assert.match(result.err.join("\n"), /rmd snooze: no serve answered at http:\/\/127\.0\.0\.1:\d+ \(ECONNREFUSED\); running in-process/);
+  assert.deepEqual(result.err, [`rmd snooze: no serve answered at http://127.0.0.1:${port} (ECONNREFUSED); running in-process`]);
 
   // No token: the target says why, and the CLI never mints one.
   const bare = root(t, null);
@@ -107,6 +106,30 @@ test("W1-T13238 criterion 2: with no serve reachable the verb runs in-process an
   assert.equal(existsSync(join(bare, "state", "service-tokens.json")), false);
   assert.deepEqual(inboxCliServeTarget({ root: root(t), serve: { port: 9 } } as unknown as Config, { RMD_SERVE_PORT: "4400" }),
     { url: "http://127.0.0.1:4400", token: TOKEN }, "RMD_SERVE_PORT wins over config");
+});
+
+test("W1-T13238: a stalled serve connection falls back at the two-second connect deadline", async (t) => {
+  const socket = Object.assign(new Socket(), { connecting: true });
+  t.after(() => { socket.destroy(); });
+  const connect = t.mock.method(globalAgent, "createConnection", () => socket);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+
+  const local = fakeActions();
+  const url = "http://127.0.0.1:1";
+  const actions = serveFirstInboxActions({ url, token: TOKEN }, () => local);
+  const result = await captured(t, async () => {
+    const run = inboxVerbCommand("snooze", ["P3", "--wake"], actions);
+    await setImmediate(); // Let the HTTP request attach the pending socket before advancing the clock.
+    assert.equal(connect.mock.callCount(), 1);
+    t.mock.timers.tick(1_999);
+    assert.equal(socket.destroyed, false);
+    t.mock.timers.tick(1);
+    assert.equal(socket.destroyed, true);
+    return run;
+  });
+  assert.equal(result.code, 0);
+  assert.deepEqual(local.calls, ["snooze"]);
+  assert.deepEqual(result.err, [`rmd snooze: no serve answered at ${url} (CONNECT_TIMEOUT); running in-process`]);
 });
 
 test("W1-T13238 criterion 3: invariant:same-answer-either-path — archive, snooze and decline print the same and exit the same through serve or in-process", async (t) => {
