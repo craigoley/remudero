@@ -1148,6 +1148,9 @@ test("W1-T11197: the served runner-config proposal matches its authenticated hig
     const reply = await response.json() as { error?: string; state?: string; replayed?: boolean; proposal?: { branch: string; pullRequest: { number: number } } };
     assert.deepEqual(violations(reply, declaredBody("/v1/products/runner-config-proposal", "POST", response.status)), [],
       `the real proposal response (${response.status}) must match its declared contract`);
+    // The service's own gate answers 401 and scope/tier/nonce 403s before the handler; every handler response is uncached.
+    const gate = response.status === 401 || ["unauthorized", "forbidden", "confirm_nonce_required"].includes(reply.error ?? "");
+    if (!gate) assert.equal(response.headers.get("cache-control"), "private, no-store", `cache-control on ${response.status}`);
     return { status: response.status, cache: response.headers.get("cache-control"), body: reply };
   };
   assert.equal((await send("alice", proposal(), { nonce: false })).status, 403, "no confirmation, no proposal");

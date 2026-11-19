@@ -17491,8 +17491,9 @@ paths:
         .remudero/mounts.yaml there and opens one pull request to the default branch. A lost response
         is reconciled by reading the branch, its one-file diff and the open pull request, never by a
         second create; outcome_unknown is retried with the identical command. It never writes the
-        default branch, merges, approves, deletes or changes protection. Responses use Cache-Control
-        private, no-store.
+        default branch, merges, approves, deletes or changes protection. Every response from the route
+        handler uses Cache-Control private, no-store; a 401, or a 403 for a missing scope, tier or
+        confirmation, is answered by the service before the handler.
       requestBody:
         required: true
         content:
