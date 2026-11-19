@@ -123,20 +123,18 @@ function ciLearningDraft(): CiLearningShardDraft {
   } as CiLearningShardDraft;
 }
 
-test("W1-T13035 criterion 3: the CI-learning draft's proofs read only the path its record declares and it passes the shared lint with the promotion applied", () => {
+test("W1-T13035 criterion 3: the CI-learning draft's proofs read only paths its record declares and it passes the shared lint with the promotion applied", () => {
   const text = ciLearningShardYaml(ciLearningDraft(), "W1-T998362", [1]);
   assert.deepEqual(promotedAtThePreflight(text), [], "the draft carries no check the plan preflight promotes");
   const task = parsed(text);
   const lessonsFile = ciLearningLessonsFile(FINDING);
   const fixtureDir = ciLearningGoldenFixtureDir(FINDING);
-  // Machine-filing admission takes a CI-learning record with exactly one declared path (W1-T10027), so the golden
-  // fixture cannot join files: and each proof reads the lessons file instead.
-  assert.deepEqual(task.files, [lessonsFile]);
+  const fixturePath = `${fixtureDir}/criteria.yaml`;
+  assert.deepEqual(task.files, [lessonsFile, fixturePath]);
   const proofs = (task.acceptance ?? []).map((c) => c.proof ?? "");
-  assert.deepEqual(proofs, [`grep: ${FINDING} in ${lessonsFile}`, `grep: ${fixtureDir} in ${lessonsFile}`], "each proof reads the declared lessons file, and each is its own");
-  // The golden verdict is still asked for: the worker is told where to build it and to name it in the entry.
+  assert.deepEqual(proofs, [`grep: ${FINDING} in ${lessonsFile}`, `grep: ${FINDING} in ${fixturePath}`], "each proof reads its own declared path");
   assert.ok(task.note?.includes(`golden verdict under ${fixtureDir}/`), task.note);
-  assert.ok(task.note?.includes(`Name ${fixtureDir} in the entry`), task.note);
+  assert.ok(task.note?.includes(`include ${FINDING} in ${fixturePath}`), task.note);
 
   assert.equal(machineShardLintRefusal(text, SOURCE), undefined, "the shared lint admits the draft");
   assert.deepEqual(ciLearningRecordVerdict(text, "ci-learning:W1-T998362"), { ok: true, reason: "" });
@@ -147,9 +145,8 @@ test("W1-T13035 criterion 3: the CI-learning draft's proofs read only the path i
   assert.equal(written.length, 1);
   assert.equal(machineShardLintRefusal(written[0]!.slice(written[0]!.indexOf("\n") + 1), SOURCE), undefined, "and what it wrote passes the shared lint");
 
-  // Control: pointed back at the fixture the record does not declare, the filer's verdict refuses it by name.
-  const undeclared = text.replace(`proof: ${JSON.stringify(proofs[1])}`, `proof: ${JSON.stringify(`grep: ${FINDING} in ${fixtureDir}/criteria.yaml`)}`);
-  assert.notEqual(undeclared, text, "the fixture changed the second proof");
+  const undeclared = text.replace(`    - ${fixturePath}\n`, "");
+  assert.deepEqual(parsed(undeclared).files, [lessonsFile], "the fixture declaration was removed");
   assert.equal(machineShardLintRefusal(undeclared, SOURCE), `proof-scope ${PROMOTED}`);
   assert.deepEqual(ciLearningRecordVerdict(undeclared, "ci-learning:W1-T998362"), { ok: false, reason: `block:proof-scope ${PROMOTED}` });
 });

@@ -84,16 +84,17 @@
     a foreign branch, a closed-unmerged PR, an unapproved merge, and a byte-drifted merge.
     Assert that no default-branch write or merge call ever occurs. Confirm test placement with
     rmd test-place.
+    NO-INVARIANTS: proposeRunnerConfigBootstrap is a new write operation; no prior output, receipt, default or error path exists for it; the stageEvidence item it records is a new entry, not a change to an existing one.
     Out of scope: Console UI source (filed in the Console plan after this contract merges),
     other target files, workflows, protection, the live Wreckterra proposal and plan run, hold
     releases, budgets and access.
   acceptance:
     - claim: an accepted digest opens exactly one single-file add-only pull request at the exact head, reconciles lost responses and restarts without a second branch or PR, and refuses present, stale, moved and foreign states
-      proof: "unit test: test/infra/product-runner-config-proposal.test.ts"
+      proof: "unit test: W1-T11197 criterion 1"
     - claim: the production product route invokes the proposal operation
       proof: "grep: proposeRunnerConfigBootstrap( in src/lib/product-routes.ts"
     - claim: the served proposal matches its authenticated high-tier public contract
-      proof: "unit test: test/console-api/serve/product-routes.test.ts"
+      proof: "unit test: W1-T11197: the served runner-config proposal matches its authenticated high-tier public contract"
     - claim: the proposal operation and its target pull-request boundary are named in the authority census
       proof: "grep: proposeRunnerConfigBootstrap in src/lib/authority.ts"
   falsifier: |

@@ -17,8 +17,8 @@ import { ledgerLivePath, ledgerRotationDigests, ledgerRotationEntries, readLedge
 import { readOriginMainSha } from "./inbox.js";
 import { loadPlanFromYaml, newTestPath, type Task } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
-import { lintTask, proofResolvabilityViolations } from "./task-linter.js";
-import { MACHINE_SHARD_LINT_OPTIONS, machineShardFilingRefusal, machineShardLandingGuard, renderMachineShard } from "./machine-filing.js";
+import { proofResolvabilityViolations } from "./task-linter.js";
+import { machineShardFilingRefusal, machineShardLandingGuard, machineShardLint, renderMachineShard } from "./machine-filing.js";
 import { retirementReopensAt, type RetirementDated } from "./mechanical-rulings.js";
 import {
   CI_FRICTION_ESCALATE_RUNG,
@@ -1645,9 +1645,12 @@ export function ciFrictionShardYaml(draft: CiFrictionDraft, taskId: string, pric
  *  own linter must never reach the disk. */
 export function ciFrictionRecordVerdict(contents: string, label: string): { ok: boolean; reason: string } {
   try {
-    const task = loadPlanFromYaml(contents, label).tasks[0];
-    const lint = lintTask(task, MACHINE_SHARD_LINT_OPTIONS);
-    return lint.ok ? { ok: true, reason: "" } : { ok: false, reason: lint.violations.map((v) => `${v.severity}:${v.check}`).join(", ") };
+    const { tasks } = loadPlanFromYaml(contents, label);
+    if (tasks.length !== 1) return { ok: false, reason: `drafted shard must contain exactly one task (found ${tasks.length})` };
+    const lint = machineShardLint(tasks[0]!);
+    return lint.some(v => v.severity === "block")
+      ? { ok: false, reason: lint.map(v => `${v.severity}:${v.name}`).join(", ") }
+      : { ok: true, reason: "" };
   } catch (e) {
     return { ok: false, reason: `unparseable: ${(e as Error).message}` };
   }
@@ -1735,6 +1738,7 @@ export interface CiFrictionGardenSources {
   /** THE RESERVATION PATH (task-id-reservation.ts via `ciLearningTaskIdMinter`, run-task.ts),
    *  never `max(id)+1` — see that minter's own doc for why. */
   mintTaskId: GardenTaskIdMinter;
+  draftShard?: typeof ciFrictionShardYaml;
   /** W1-T13219: closes an escalation that left the ladder; absent, the `gh api` gateway ({@link ghCiFrictionEscalationIssues}). */
   issues?: CiFrictionEscalationIssues;
 }
@@ -2018,7 +2022,7 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
       const taskId = (heldIds ?? prepareGardenTaskIds(ws, 1, sources.mintTaskId) as string[])[0]!;
       const records = sources.ledgerRecords();
       const ledgerRounds = withoutBirthRounds(ciFrictionRoundsFromLedger(records), sources.ownerSearch);
-      const contents = ciFrictionShardYaml(
+      const contents = (sources.draftShard ?? ciFrictionShardYaml)(
         { price: action.price, rung: action.rung, owner: action.decision.owner, rounds: remedyRoundsOf([
           ...ledgerRounds, ...ciFrictionHandFixRounds(sources.handFixes?.().fixes ?? [], ledgerRounds,
             action.priced ?? [], sources.ownerSearch, sources.gateFireRates?.()),

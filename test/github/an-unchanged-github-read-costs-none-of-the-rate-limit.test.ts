@@ -300,7 +300,7 @@ test("W1-T12839 criterion 5: argument forms the client does not parse still spaw
   await ghJsonAsync(["api", "repos/o/r/pulls"]);
   assert.equal(server.requests.at(-1)!.headers["if-none-match"], `"/repos/o/r/pulls#1"`, "the store holds this path");
   const forms = [
-    ["api", "--paginate", "repos/o/r/pulls"],
+    ["api", "--paginate", "--slurp", "repos/o/r/pulls"],
     ["api", "repos/o/r/pulls", "--jq", ".[0]"],
     ["api", "--slurp", "repos/o/r/pulls"],
     ["api", "-H", "Accept: application/vnd.github.raw", "repos/o/r/pulls"],

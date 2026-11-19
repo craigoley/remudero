@@ -291,13 +291,19 @@ test("the committed registry parses and puts core, site and console in the remud
   );
 });
 
-test("W1-T13498: the committed registry onboards remudero-ops in shadow, and every other row stays live", () => {
+test("W1-T13700: the committed registry runs remudero-ops live, and every other row stays live", () => {
   const text = readFileSync(join(REPO_ROOT, ".remudero", "daemon-instances.yaml"), "utf8");
   const parsed = parseInstanceRegistry(text);
   assert.deepEqual(
     parsed.instances.map((i) => [i.name, i.mode ?? "live"]),
-    [["core", "live"], ["site", "live"], ["console", "live"], ["ops", "shadow"]],
+    [["core", "live"], ["site", "live"], ["console", "live"], ["ops", "live"]],
   );
+  // The ruling is written out: an absent mode also reads live, so only the ops block's own key tells
+  // the promotion from a dropped one.
+  const ops = parsed.instances.find((i) => i.name === "ops");
+  assert.equal(ops?.mode, "live");
+  const block = text.slice(text.indexOf("\n  ops:"));
+  assert.match(block, /^ {4}mode: live$/m);
 });
 
 // The two shell readers REFUSE an unknown field, so the project layer is only safe to add because

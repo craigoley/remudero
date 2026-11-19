@@ -51,11 +51,12 @@
 # 2026-09-24: core). Exactly one live row may carry it: `parseInstanceRegistry` refuses two
 # (duplicate_primary), `requirePrimaryInstance` refuses none (no_primary), and a retired row's
 # `primary` is ignored. Both shell readers list it as known-and-ignored. No deploy behavior reads it yet.
-# W1-T13498 — `ops` (craigoley/remudero-ops) is ONBOARDED IN SHADOW (operator ruling 2026-11-17: onboard
-# remudero-ops as a managed repo, shadow daemon after a host check). `mode: shadow` (W1-T4265) means its worker
-# opens real pull requests but never arms or merges one; promotion to live is a later reviewed registry PR. Both
-# shell readers validate `mode` (shadow|live). The host copy (/etc/remudero/daemon-instances.yaml) needs the
-# same row, with `mode: shadow`, before `install-host-units.sh --instance ops`: an absent mode reads as live.
+# W1-T13498 — `ops` (craigoley/remudero-ops) was ONBOARDED IN SHADOW (operator ruling 2026-11-17). `mode: shadow`
+# (W1-T4265) means a worker opens real pull requests but never arms or merges one. Both shell readers validate
+# `mode` (shadow|live); an absent mode reads as live.
+# W1-T13700 — PROMOTED TO LIVE (operator ruling 2026-11-18: "Yes, go live"). The ops row writes `mode: live`
+# explicitly. Host step, an operator act after this merges: set the ops row of the host copy
+# (/etc/remudero/daemon-instances.yaml) to `mode: live`, then relaunch the ops daemon.
 # remudero-ops' plan holds core's tasks (`repo: remudero`); taskTargetsRepo (src/lib/drain.ts) keeps this
 # instance from dispatching them.
 instances:
@@ -94,7 +95,7 @@ instances:
     repo: remudero-ops
     project: remudero
     github_repo: craigoley/remudero-ops
-    mode: shadow
+    mode: live
     container_name: remudero-ops-daemon
     state_dir: /mnt/rmd/remudero-ops-state
     claude_dir: /home/craigoleyagent/.claude
