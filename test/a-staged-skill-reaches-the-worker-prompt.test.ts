@@ -18,6 +18,7 @@ import {
   renderSkillsPart,
   selectSkillsForTask,
   skillsInjectedEvent,
+  PROCEDURAL_STEP_TEXT,
   stageSkillDraft,
   stageSkillDrafts,
   workerAllowlistFromSettings,
@@ -791,6 +792,18 @@ test("skill conformance names the real eligible execution context", () => {
   assert.ok(allow.capabilityContext?.consumers.every(c => c.source.startsWith("src/lib/")));
   const onlyCash = { root: dir, workerProviders: { enabled: ["cash"], harnessCommitsFix: false } } as Config;
   assert.ok(skillDraftWorkerAllowlist(onlyCash, both, settingsPath).contextRefusal, "one known lane cannot stand in for a missing fix consumer");
+});
+
+test("signal-only staging keeps its outcome-only reason with a missing production capability context", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}signal-context-`));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const config: Config = { root: dir, claudeBin: join(dir, "unused-claude"), workerProviders: { enabled: [] } };
+  const signalOnly = contextDraft(PROCEDURAL_STEP_TEXT.fully_executed_proof);
+  const missing = skillDraftWorkerAllowlist(config, signalOnly, join(dir, "worker.json"));
+  assert.equal(missing.contextRefusal, "worker-capability-context:missing");
+  const outcome = stageSkillDraft(join(dir, "registry.json"), signalOnly, missing, describeSkillInjectionReachability(signalOnly));
+  assert.equal(outcome.refused, true);
+  assert.match(outcome.reason ?? "", /^outcome-only:.*worker-capability-context:missing/);
 });
 
 test("skill context conformance regressions fail without the boundary repair", () => {

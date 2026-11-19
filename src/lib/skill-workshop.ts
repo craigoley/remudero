@@ -15,15 +15,15 @@
  * with zero conversion at the one call site that matters (retro.ts's `buildGather`).
  */
 import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-import { createHash } from "node:crypto";
+import { dirname, join } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
 import { slug as kebabSlug } from "./feedback-docket.js";
 import { systemClock, type Clock } from "./clock.js";
 import { loadProposalRegistry, SKILL_DRAFT_ID_PREFIX, updateProposalRegistry, type Proposal, type SkillLifecycleAction, type UpdateProposalRegistryOpts } from "./inbox.js";
 import { TASK_TYPES, type Task } from "./plan.js";
 import { WORKER_PROVIDER_IDS } from "./config-schema.js";
 import { isMergedLedgerRow, PR_TERMINAL_STEP, prUrlKey } from "./ledger-carry.js";
-import { readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { ledgerLivePath, readLedgerUnionRecordsSync, realLedgerFs } from "./ledger-union.js";
 import {
   mineTranscriptWorkflows,
   renderTranscriptWorkflowSteps,
@@ -518,15 +518,36 @@ function closeSkillDraft(
   log: (step: string, extra?: Record<string, unknown>) => void,
   clock: Pick<Clock, "iso">,
 ): boolean {
-  const entry = loadProposalRegistry(registryPath).find((p) => p.id === proposalId);
-  if (!entry || workshopClosedSkillDraft(entry)) return false;
-  log("panel.proposal_declined", { task_id: proposalId, origin: SKILL_WORKSHOP_ORIGIN, reason });
-  updateProposalRegistry(registryPath, (current) => {
-    const i = current.findIndex((p) => p.id === proposalId);
-    if (i < 0) return null;
-    return current.map((p, j) => (j === i ? { ...p, skillDraftClose: { at: clock.iso(), reason, skillSha256: storedSkillSha256(p) } } : p));
-  });
-  return true;
+  const staged = loadProposalRegistry(registryPath).find((p) => p.id === proposalId);
+  if (!staged || workshopClosedSkillDraft(staged)) return false;
+  return updateProposalRegistry(registryPath, (current) => {
+    const entry = current.find((p) => p.id === proposalId);
+    if (!entry || workshopClosedSkillDraft(entry)) return null;
+    const at = clock.iso();
+    const closeId = randomUUID();
+    const step = "panel.proposal_declined";
+    log(step, { ts: at, task_id: proposalId, origin: SKILL_WORKSHOP_ORIGIN, reason, skill_draft_close_id: closeId });
+
+    // appendLedger can return after a short write. Confirm this attempt in the ledger, including rotations.
+    const stateDir = dirname(registryPath);
+    const livePath = ledgerLivePath(stateDir);
+    const { rows } = readLedgerUnionRecordsSync(stateDir, {
+      step, since: at, liveFirst: true, pattern: new RegExp(closeId),
+      where: (row) => row.skill_draft_close_id === closeId && row.task_id === proposalId &&
+        row.origin === SKILL_WORKSHOP_ORIGIN && row.reason === reason,
+      satisfied: (steps) => steps.has(step),
+    }, {
+      ...realLedgerFs,
+      readFileSync: (path) => {
+        const bytes = realLedgerFs.readFileSync(path);
+        // A live tail missing its newline can still be valid JSON until another append joins it.
+        return path === livePath ? bytes.subarray(0, bytes.lastIndexOf(0x0a) + 1) : bytes;
+      },
+    });
+    if (rows.length === 0) throw new Error(`could not confirm the workshop decline for ${proposalId} in the ledger`);
+    const skillDraftClose = { at, reason, skillSha256: storedSkillSha256(entry) };
+    return current.map((p) => p === entry ? { ...p, skillDraftClose } : p);
+  }) !== null;
 }
 
 /**
@@ -551,10 +572,11 @@ export function stageSkillDraft(
   clock: Pick<Clock, "iso"> = systemClock,
 ): StageSkillDraftResult {
   const scan = scanSkillDraft(draft, allowlist);
-  if (!scan.ok) {
-    return { refused: true, staged: false, alreadyStaged: false, reason: `${scan.reason} (offending line: "${scan.offendingLine}")` };
-  }
   const outcomeOnly = outcomeOnlyDraftRefusal(draft.markdown);
+  if (!scan.ok) {
+    const detail = `${scan.reason} (offending line: "${scan.offendingLine}")`;
+    return { refused: true, staged: false, alreadyStaged: false, reason: outcomeOnly ? `${outcomeOnly}. ${detail}` : detail };
+  }
   if (outcomeOnly !== undefined) return { refused: true, staged: false, alreadyStaged: false, reason: outcomeOnly };
   const id = skillDraftProposalId(draft.procedureKey);
   let staged = false;
@@ -1371,7 +1393,7 @@ export function recheckSkillRetirement(
  *
  * STAGING WRITES A PROPOSAL AND NOTHING ELSE. The operator still releases it with `rmd approve`,
  * and only that writes under `.claude/skills/` — so nothing here can put machine-authored text in
- * front of a worker.
+ * front of a worker. The log writes to the ledger beside `registryPath`.
  */
 export function stageSkillDrafts(
   registryPath: string,
@@ -1385,8 +1407,7 @@ export function stageSkillDrafts(
     try {
       const list = typeof allowlist === "function" ? allowlist(draft) : allowlist;
       const r = stageOne(registryPath, draft, list, reachability(draft));
-      // A capability-context refusal judges the host, not the draft text, so it closes nothing.
-      const closed = r.refused && !(list.contextRefusal !== undefined && r.reason?.startsWith(list.contextRefusal)) &&
+      const closed = r.refused &&
         closeSkillDraft(registryPath, skillDraftProposalId(draft.procedureKey), `withdrawn: ${r.reason}`, log, systemClock);
       const changed = r.staged || r.refreshed === true || r.backfilled === true || r.stamped === true || r.legacyReplaced === true;
       if (!changed && !closed) continue;

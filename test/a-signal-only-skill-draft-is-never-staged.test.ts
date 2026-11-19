@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { test } from "node:test";
@@ -12,6 +13,7 @@ import {
   skillDraftProposalId,
   stageSkillDraft,
   stageSkillDrafts,
+  workerAllowlistFromCapabilityContext,
   workerAllowlistFromSettings,
   type SkillDraft,
 } from "#src/lib/skill-workshop.js";
@@ -19,6 +21,7 @@ import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const reachability = () => ({ reachable: false, reason: "unapproved proposals are not injected" });
 const allowlist = workerAllowlistFromSettings(undefined);
+const missingContext = workerAllowlistFromCapabilityContext(undefined, undefined);
 const clock = { iso: () => "2026-11-19T10:00:00.000Z" };
 
 /** The one-line draft the Azure host holds for four procedures: only the fully_executed_proof line. */
@@ -88,6 +91,13 @@ test("W1-T13858 criterion 1: a draft whose every step is a signal-table line is 
     assert.equal(r.staged, false);
     assert.match(r.reason ?? "", /^outcome-only:/);
     assert.equal(existsSync(f.registryPath), false, "a refusal never writes the registry");
+
+    assert.equal(missingContext.contextRefusal, "worker-capability-context:missing");
+    const withMissingContext = stageSkillDraft(f.registryPath, oneLine, missingContext, reachability(), {}, clock);
+    assert.equal(withMissingContext.refused, true);
+    assert.equal(withMissingContext.staged, false);
+    assert.match(withMissingContext.reason ?? "", /^outcome-only:.*worker-capability-context:missing.*<worker-capability-context>/);
+    assert.equal(existsSync(f.registryPath), false);
 
     const both = { ...oneLine, markdown: oneLine.markdown.replace(`- ${PROCEDURAL_STEP_TEXT.fully_executed_proof}`,
       `- ${PROCEDURAL_STEP_TEXT.fully_executed_proof}\n- ${PROCEDURAL_STEP_TEXT.clean_single_strike}`) };
@@ -196,14 +206,51 @@ test("W1-T13858 criterion 6: invariant:approve-only-writes-skills a close writes
   } finally { f.done(); }
 });
 
-test("a capability-context refusal closes no staged draft", () => {
+test("W1-T13858 criterion 3: a production capability-context refusal closes matching staged text once", () => {
   const f = fixture();
   try {
     const good = minedDraft();
-    const id = seedStaged(f.registryPath, good);
-    const refusing = { ...allowlist, contextRefusal: "worker-capability-context:missing" };
-    stageSkillDrafts(f.registryPath, [good], refusing, reachability, f.log);
-    assert.equal(declines(f.rows(), id).length, 0);
-    assert.equal(loadProposalRegistry(f.registryPath).find((p) => p.id === id)?.skillDraftClose, undefined);
+    const stored = { ...good, markdown: `${good.markdown}\n- [src: run#run-c]` };
+    const id = seedStaged(f.registryPath, stored);
+    const reason = 'withdrawn: worker-capability-context:missing (offending line: "<worker-capability-context>")';
+    stageSkillDrafts(f.registryPath, [good], missingContext, reachability, f.log);
+    const rows = f.rows();
+    const [decline] = declines(rows, id);
+    assert.deepEqual(rows.map((row) => row.step), ["panel.proposal_declined", "skill.staged"]);
+    assert.equal(decline?.origin, "skill-workshop");
+    assert.equal(decline?.reason, reason);
+    const entry = loadProposalRegistry(f.registryPath).find((p) => p.id === id);
+    assert.ok(entry);
+    assert.equal(entry.skillDraftClose?.reason, reason);
+    assert.equal(entry.skillDraftClose?.at, decline?.ts);
+    assert.equal(entry.skillDraftClose?.skillSha256, createHash("sha256").update(stored.markdown).digest("hex"));
+    const { isRatified, isDeclined } = ledgerProposalVerdicts(rows);
+    assert.equal(classifyProposal(entry, undefined, { isRatified, isDeclined } as ReadinessContext).state, "declined");
+    stageSkillDrafts(f.registryPath, [good], missingContext, reachability, f.log);
+    assert.deepEqual(f.rows(), rows);
+  } finally { f.done(); }
+});
+
+test("W1-T13858 criterion 3: an unterminated decline cannot close a draft and the next pass can retry", () => {
+  const f = fixture();
+  try {
+    const draft = signalOnlyDraft();
+    const id = seedStaged(f.registryPath, draft);
+    const before = readFileSync(f.registryPath, "utf8");
+    stageSkillDrafts(f.registryPath, [draft], allowlist, reachability, (step, extra) => {
+      if (step === "panel.proposal_declined") {
+        appendFileSync(f.ledgerPath, JSON.stringify({ step, ...extra }));
+      } else {
+        f.log(step, extra);
+      }
+    });
+
+    assert.equal(readFileSync(f.registryPath, "utf8"), before);
+    assert.deepEqual(f.rows(), [], "the short decline and the next append did not form a readable row");
+    stageSkillDrafts(f.registryPath, [draft], allowlist, reachability, f.log);
+    const rows = f.rows();
+    assert.deepEqual(rows.map((row) => row.step), ["panel.proposal_declined", "skill.staged"]);
+    assert.equal(declines(rows, id).length, 1);
+    assert.match(loadProposalRegistry(f.registryPath).find((p) => p.id === id)?.skillDraftClose?.reason ?? "", /^withdrawn:/);
   } finally { f.done(); }
 });
