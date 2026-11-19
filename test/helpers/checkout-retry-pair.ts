@@ -24,18 +24,25 @@ export const CHECKOUT_ACTION = "actions/checkout@3d3c42e5aac5ba805825da76410c181
 /** W1-T13321's low-speed env, which both steps keep. */
 export const CHECKOUT_LOW_SPEED_ENV = { GIT_HTTP_LOW_SPEED_LIMIT: "1000", GIT_HTTP_LOW_SPEED_TIME: "120" };
 
+/** The only `with:` inputs either step may carry: the full history, nothing that picks another ref or repository. */
+export const CHECKOUT_WITH = { "fetch-depth": 0 };
+/** The only jobs whose pair is admitted, as `<workflow file>:<job id>`. Every other job answers to the guards in full. */
+export const CHECKOUT_RETRY_JOBS: ReadonlySet<string> = new Set(["ci.yml:ci", "ci.yml:coverage-ratchet"]);
+
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 
 /** True when a checkout step uses the pinned action, the full history and the low-speed env. */
 function isFullPinnedCheckout(step: WorkflowStep | undefined): boolean {
-  return step?.uses === CHECKOUT_ACTION && step.with?.["fetch-depth"] === 0 && same(step.env, CHECKOUT_LOW_SPEED_ENV);
+  return step?.uses === CHECKOUT_ACTION && same(step.with, CHECKOUT_WITH) && same(step.env, CHECKOUT_LOW_SPEED_ENV);
 }
 
 /** The index of the first step of an admitted pair, or -1. Admitted only when the first step is `id: checkout` with
  *  timeout-minutes 3, continue-on-error true and no if:, and the next step checks out with the same inputs, only on
  *  `steps.checkout.outcome == 'failure'`, with timeout-minutes 5 and no continue-on-error. Both must use the pinned
- *  action, fetch-depth 0 and the W1-T13321 env. */
-export function checkoutRetryPairIndex(steps: readonly WorkflowStep[]): number {
+ *  action, `with: { fetch-depth: 0 }` and nothing else, and the W1-T13321 env, and the job must be one of
+ *  CHECKOUT_RETRY_JOBS. */
+export function checkoutRetryPairIndex(job: string, steps: readonly WorkflowStep[]): number {
+  if (!CHECKOUT_RETRY_JOBS.has(job)) return -1;
   const i = steps.findIndex((s) => s?.id === "checkout");
   if (i < 0) return -1;
   const first = steps[i]!;
@@ -43,13 +50,13 @@ export function checkoutRetryPairIndex(steps: readonly WorkflowStep[]): number {
   const admitted = isFullPinnedCheckout(first) && isFullPinnedCheckout(retry) &&
     first["timeout-minutes"] === 3 && first["continue-on-error"] === true && first.if === undefined &&
     retry!.if === CHECKOUT_RETRY_IF && retry!["continue-on-error"] === undefined && retry!["timeout-minutes"] === 5 &&
-    retry!.id === undefined && retry!.run === undefined && same(retry!.with, first.with);
+    retry!.id === undefined && retry!.run === undefined;
   return admitted ? i : -1;
 }
 
 /** `steps` without the admitted pair, so every other step still answers to the guard. A pair that drifts from the
  *  admitted shape is left in, and the guard then names it. */
-export function withoutCheckoutRetryPair<T extends WorkflowStep>(steps: readonly T[]): T[] {
-  const i = checkoutRetryPairIndex(steps);
+export function withoutCheckoutRetryPair<T extends WorkflowStep>(job: string, steps: readonly T[]): T[] {
+  const i = checkoutRetryPairIndex(job, steps);
   return i < 0 ? [...steps] : [...steps.slice(0, i), ...steps.slice(i + 2)];
 }

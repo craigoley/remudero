@@ -116,7 +116,7 @@ test("scanner-gate-config: no job ci-gate REQUIRED depends on is configured cont
       const jobLevelCoE = job?.["continue-on-error"] === true;
       const steps: any[] = Array.isArray(job?.steps) ? job.steps : [];
       // W1-T13825: a bounded first checkout whose retry fails the job is the one admitted step-level shape.
-      const stepLevelCoE = withoutCheckoutRetryPair(steps).some((s) => s && s["continue-on-error"] === true);
+      const stepLevelCoE = withoutCheckoutRetryPair(`${file}:${jobId}`, steps).some((s) => s && s["continue-on-error"] === true);
 
       // REVIEW-RATIFIED SCOPE WIDENING (W1-T4401): the upstream reusable workflow's
       // checkout/result-file symlink vulnerability requires exposing its two scanner steps here.

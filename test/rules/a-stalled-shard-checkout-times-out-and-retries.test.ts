@@ -67,7 +67,7 @@ test("W1-T13825 criterion 4: the guards admit exactly this pair, and a pair that
   for (const job of LANES) {
     const doc = parseYaml(readFileSync(join(REPO_ROOT, ".github/workflows/ci.yml"), "utf8")) as Workflow;
     const steps = doc.jobs[job]?.steps ?? [];
-    const rest = withoutCheckoutRetryPair(steps);
+    const rest = withoutCheckoutRetryPair(`ci.yml:${job}`, steps);
     assert.equal(rest.length, steps.length - 2, `${job}: the admitted pair is the two checkout steps`);
     assert.ok(rest.every((s) => !(s.uses ?? "").startsWith("actions/checkout@")), `${job}: no checkout is left to the guards`);
     const { first, retry } = checkouts(job);
@@ -82,9 +82,17 @@ test("W1-T13825 criterion 4: the guards admit exactly this pair, and a pair that
       ["a pair on an unpinned tag", { ...first, uses: "actions/checkout@v7" }, { ...retry, uses: "actions/checkout@v7" }],
       ["a pair on a shallow fetch", { ...first, with: { "fetch-depth": 1 } }, { ...retry, with: { "fetch-depth": 1 } }],
       ["a pair without the low-speed env", { ...first, env: undefined }, { ...retry, env: undefined }],
+      ["a pair that checks out main instead of the PR", { ...first, with: { ...first.with, ref: "main" } },
+        { ...retry, with: { ...retry.with, ref: "main" } }],
+      ["a pair that checks out another repository", { ...first, with: { ...first.with, repository: "x/y" } },
+        { ...retry, with: { ...retry.with, repository: "x/y" } }],
     ];
     for (const [why, a, b] of drifts) {
-      assert.equal(withoutCheckoutRetryPair([a, b]).length, 2, `${job}: ${why} is not admitted`);
+      assert.equal(withoutCheckoutRetryPair(`ci.yml:${job}`, [a, b]).length, 2, `${job}: ${why} is not admitted`);
+    }
+    // The exact pair is admitted only in the two shard lanes, never in another job or workflow.
+    for (const other of ["ci.yml:coverage-ratchet-required", "ci.yml:commitlint", "codeql.yml:ci", "ci.yaml:ci"]) {
+      assert.equal(withoutCheckoutRetryPair(other, [first, retry]).length, 2, `${other}: the pair is not admitted there`);
     }
   }
 });
