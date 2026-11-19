@@ -974,6 +974,12 @@
       "grepHint": "Retained automation inspirations: current overlap and dispositions"
     },
     {
+      "path": "docs/research/claude-md-headlines-by-stage.md",
+      "title": "CLAUDE.md headlines sorted by the stage that needs them",
+      "summary": "Task: W1-T13725 (recon). Read at `eb79fd765d0ad4505aa2ebf6a29c3b1c1afed49f` (origin/main). Nothing was changed, filed or pushed.",
+      "grepHint": "CLAUDE.md headlines sorted by the stage that needs them"
+    },
+    {
       "path": "docs/research/model-evidence-program.md",
       "title": "Model evidence program: from fleet work to field trials",
       "summary": "Status: design, 2026-09-25. No trial result, public data transfer, new routing policy, paid call, or merge gate is authorized by this document. The site's `/fi…",
