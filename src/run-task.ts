@@ -225,7 +225,7 @@ import {
 } from "./lib/doctor.js";
 import { execFile, execFileSync, spawn, spawnSync, type SpawnSyncOptionsWithStringEncoding, type SpawnSyncReturns } from "node:child_process";
 import { boundChildByLoopTime, LoopBoundedChildTimeout, type LoopBound } from "./lib/loop-bounded-child.js";
-import { execFileRouted } from "./lib/spawn-helper.js";
+import { bootSpawnHelper, execFileRouted, stopBootedSpawnHelper } from "./lib/spawn-helper.js";
 import { isDeepStrictEqual, promisify } from "node:util";
 import { StringDecoder } from "node:string_decoder";
 import { mkdir as mkdirAsync, open as openAsync, readdir as readdirAsync, readFile as readFileAsync, rm as rmAsync, stat as statAsync } from "node:fs/promises";
@@ -30783,6 +30783,8 @@ export async function serveCommand(
   const runId = `SERVE-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: "SERVE", step, lane: "serve", ...extra });
+  // W1-T13664: serve's own helper, started while this process is small, so its child spawns fork the helper's heap.
+  const spawnHelper = bootSpawnHelper(log, process.env, "serve.spawn_helper");
   if (boardPlanReadFailure) log("serve.board_plan_unreadable", { reason: boardPlanReadFailure });
 
   // W1-T2568 + W1-T152: SEAMED AND NON-FATAL, and it sits below `log` so a degraded read is
@@ -31045,7 +31047,7 @@ export async function serveCommand(
       for (const listener of realRequestListeners) listener(req, res);
     }));
   }
-  server.on("close", () => boardProjection?.stop());
+  server.on("close", () => { boardProjection?.stop(); stopBootedSpawnHelper(spawnHelper); });
   const precomputeBoard = async (): Promise<void> => {
     if (!buildInitialBoardSnapshot) return;
     log("serve.board_precompute_started", {});
@@ -31120,6 +31122,7 @@ export async function serveCommand(
     console.error(`### rmd serve — failed to listen on ${hosts.join(", ")}:${port}: ${(e as Error).message}`);
     log("serve.bind_failed", { hosts, port, error: (e as Error).message });
     for (const m of mirrors) m.close();
+    stopBootedSpawnHelper(spawnHelper);
     return 1;
   }
 

@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
-import { execFile } from "node:child_process";
-import { inspect, promisify } from "node:util";
+import { inspect } from "node:util";
 import { RmdError } from "./errors.js";
 import { ghJsonAsync, createGhCallPacer, type GhCallPacer } from "./github-transport.js";
 import { PlanError, type Plan } from "./plan.js";
+import { execFileRouted } from "./spawn-helper.js";
 import { createPlanRevisionStore, type PlanRevisionStore } from "./plan-revision-store.js";
 
 /**
@@ -131,7 +131,6 @@ function statusClassOf(code: string | undefined): OpsCatalogHttpStatusClass {
 
 const AUTH_DIAGNOSTIC = /^(?:gh: )?(?:To get started with GitHub CLI, please run:|To use GitHub CLI in a GitHub Actions workflow, set the GH_TOKEN environment variable\.)/m;
 const HTTP_DIAGNOSTIC = /^(?:HTTP (\d{3})(?:[ \t:]|$)|gh: [^\r\n]*?\(HTTP (\d{3})\))/m;
-const execFileAsync = promisify(execFile);
 const snapshotStore = createPlanRevisionStore({ strict: true, yamlLogLevel: "error", dependencyMode: "preserve-external" });
 
 /** Private handles remain available to the shadow composer, but ordinary logging cannot traverse them. */
@@ -152,7 +151,9 @@ export function defaultOpsCatalogApi(
   const pacer = opts.pacer ?? createGhCallPacer();
   // An explicit executor keeps ghJsonAsync off the broker's persistent response cache. The child has
   // no --cache flag; each mutable ref check reaches upstream. Pacing remains local to this source.
-  const exec = opts.exec ?? ((...args: Parameters<typeof execFileAsync>) => execFileAsync(...args)) as typeof execFileAsync;
+  // W1-T13664: through the installed spawn helper when there is one, else `execFileLoopBounded` directly.
+  const exec = opts.exec ?? ((file: string, args: readonly string[], options: Parameters<typeof execFileRouted>[2]) =>
+    execFileRouted(file, args, options)) as NonNullable<typeof opts.exec>;
   return async (path) => {
     try {
       if (pacer.waitAsync) await pacer.waitAsync();
