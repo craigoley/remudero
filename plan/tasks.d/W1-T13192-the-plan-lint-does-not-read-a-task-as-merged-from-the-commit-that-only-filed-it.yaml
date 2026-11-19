@@ -18,7 +18,7 @@
     - src/lib/task-linter.ts
     - src/lib/status.ts
     - test/plan/the-plan-lint-does-not-read-a-task-as-merged-from-its-own-filing.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A task whose only crediting commit changed nothing outside the plan is not merged for the plan lint: an amendment to its record is linted as an amendment to a queued task"

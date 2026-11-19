@@ -15,7 +15,7 @@
   files:
     - src/lib/review.ts
     - test/review/a-guard-proof-runs-the-file-that-holds-its-title.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A name-filtered Vitest proof whose title lives only in a test file outside the diff runs that file, even when the diff holds exactly one test file"

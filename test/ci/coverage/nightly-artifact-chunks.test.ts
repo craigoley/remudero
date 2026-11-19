@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { copyFileSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { test } from "node:test";
 import { parse as parseYaml } from "yaml";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
@@ -21,7 +21,7 @@ const packaging = compactStep.slice(packagingStart);
 // Test-only safety bound for our own closed synthetic-corpus subprocess, never a production timeout.
 const CHILD_BOUND_MS = 30_000;
 const environment = () => ({
-  PATH: process.env.PATH,
+  PATH: [dirname(process.execPath), process.env.PATH ?? ""].join(delimiter),
   HOME: process.env.HOME,
   TMPDIR: process.env.TMPDIR,
   GIT_CONFIG_GLOBAL: "/dev/null",

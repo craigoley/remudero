@@ -27,7 +27,7 @@
     - test/github/the-shared-read-gap-is-waited-out-on-the-daemon-loop.test.ts
     - test/open-prs-rest.test.ts
     - test/the-tick-reads-run-off-the-event-loop.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With a core reading of 14,000 of 15,000, the reset 50 min away, no reads by other processes in the window and 7 instances on the installation, the read gap is the secondary spacing 60,000 ms x 7 / 900 (467 ms), not 1,500 ms; ten waitAsync calls of createGhCallPacer() with no minGapMs, on a clock only the pacer moves, wait nine gaps of that length"

@@ -1,0 +1,36 @@
+- id: W1-T13867
+  title: The benchmark cohort index joins the verified task outcome to each worker call
+  repo: remudero
+  depends_on: []
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: medium
+  origin: operator-request#field-trials-2026-11-19
+  files:
+    - src/lib/benchmark-cohort.ts
+    - test/benchmark-cohort.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    The field trials work needs each worker call in the benchmark cohort index to carry the verified outcome of
+    the task it worked on (merged, reverted, refused, and so on), so a model's calls can be scored by result,
+    not only by cost. src/lib/benchmark-cohort.ts already computes joinVerifiedTaskOutcomes at the cohort level
+    (verifiedTaskOutcome, with "unavailable-no-github-verification-join" when no case files are joined), but the
+    per-call index rows do not carry it. RECON first: confirm which index rows lack the join and why.
+  design: |
+    For each worker call row in the cohort index, attach the verified outcome of its task from the same
+    case-file join the cohort already uses, at the same as-of cutoff. When the join is unavailable, write the
+    existing named unavailable reason, never a guessed outcome. Do not change cohort-level totals.
+
+    INVARIANT cohort-call-outcome: every worker call row in the cohort index names its task's verified outcome or the named reason it is unavailable.
+  acceptance:
+    - claim: invariant:cohort-call-outcome — each worker call in the cohort index carries its task's verified outcome, or the named unavailable reason when no verification join exists
+      proof: 'unit test: test/benchmark-cohort.test.ts'
+      kind: guard
+    - claim: the test that proves it is named for W1-T13867 criterion 1
+      proof: 'grep: W1-T13867 criterion 1 in test/benchmark-cohort.test.ts'
+  falsifier: |
+    Remove the per-call join: the test must fail because a call row has no outcome and no reason.

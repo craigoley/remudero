@@ -24,7 +24,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmdirSy
 import { hostname } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { resolveRepoLayout } from "../../lib/repo-layout.js";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { fixStrikeCap, globalArtifactPath, enabledWorkerProviders, loadConfig, softBudgetThreshold, userOverallLearningsHome, workerHomeDir, type Config } from "../../lib/config.js";
 import { ledgerPathFor, nextLaneEpochMs } from "../../lib/ledger-path.js";
 import { realArmDepsAsync, isPrMergedNow, armAutoMerge, armAutoMergeAtOpen, armAutoMergeAtOpenAsync, disarmOutcomeWithdrawn, disarmAutoMerge, disarmAutoMergeAsync, armIfVerdictPermits, type ArmOutcome, type DisarmOutcome } from "../../lib/arm-auto-merge.js";
@@ -85,8 +85,7 @@ import { GENERIC_EXIT_CODE, RmdError } from "../../lib/errors.js";
 import { assertLintClean, lintTask, TaskLintError } from "../../lib/task-linter.js";
 import { readPriorRefusal, preDispatchContractRevision, writePriorRefusal, repairRefusedTask, type RefusalViolation } from "../../lib/dispatch-repair.js";
 import { loadMounts, mountsPath, resolveMount, resolveMountForClass, type Mount } from "../../lib/mounts.js";
-import { resolveMountExplorationDispatch as exploreMount } from "../../lib/mount-exploration.js";
-import { type MountHeadroomCell } from "../../lib/mount-recommender.js";
+import { loadMountHeadroomCells, resolveMountExplorationDispatch as exploreMount } from "../../lib/mount-exploration.js";
 import { loadDefaultPolicy, loadPolicy, policyPath } from "../../lib/policy.js";
 import { loadRatifications, ratificationPinCheck, ratificationsPath, type Ratifications } from "../../lib/ratification.js";
 import { defaultOpenFileCountAsync, reapStaleClones, reapStaleClonesAsync, type CloneReapSummary } from "../../lib/clone-reaper.js";
@@ -5645,13 +5644,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       enabledProviders: enabledWorkerProviders(config),
     },
     {
-      loadCells: async () => {
-        const scriptUrl = pathToFileURL(join(repoRoot, "scripts", "mount-headroom-sweep.mjs")).href;
-        const sweep = (await import(scriptUrl)) as {
-          buildMountHeadroomSweep: (stateDir: string) => { cells: MountHeadroomCell[] };
-        };
-        return sweep.buildMountHeadroomSweep(join(config.root, "state")).cells;
-      },
+      loadCells: () => loadMountHeadroomCells(repoRoot, join(config.root, "state")),
       loadMountsTable: () => loadMounts(mountsPath(repoRoot)),
       log,
     },

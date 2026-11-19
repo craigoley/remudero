@@ -11,9 +11,12 @@
   band_meaning: blast-radius
   origin: operator-session#github-connections-2026-11-10
   files:
+    - src/lib/config-schema.ts
     - src/lib/host-pieces.ts
     - src/lib/doctor.ts
     - test/doctor-names-each-host-piece-that-is-missing.test.ts
+    - "src/lib/report-commands.ts"
+    - test/env-var-registry.test.ts
   status: queued
   attempts: 0
   acceptance:

@@ -22,6 +22,13 @@
     - test/a-filing-age-that-cannot-be-read-is-unknown-never-zero-days.test.ts
     - test/daemon/the-filing-history-git-reads-do-not-block-the-daemon-loop.test.ts
     - test/no-daemon-loop-path-calls-the-synchronous-worktree-git-leaf.test.ts
+    - test/helpers/daemon-loop-walk.ts
+    - test/a-lifetime-pressure-item-says-it-kept-failing-and-its-real-age.test.ts
+    - test/a-verify-human-shard-is-judged.test.ts
+    - test/the-judge-sees-the-evidence-the-shard-carries.test.ts
+    - test/the-machine-filing-judge-releases-or-escalates.test.ts
+    - test/the-verify-human-cadence-reads-the-checkout.test.ts
+    - test/the-verify-human-queue-reads-credit-not-the-status-field.test.ts
   status: merged
   attempts: 0
   acceptance:
@@ -81,6 +88,18 @@
     3. New census test/no-daemon-loop-path-calls-the-synchronous-worktree-git-leaf.test.ts on the existing walk
        helpers, with the baseline recorded at build time.
     4. Update test/a-filing-age-that-cannot-be-read-is-unknown-never-zero-days.test.ts for the async reader.
+    5. AMENDED 2026-11-15 at build time. parkedVerifyHumanShards becomes async; its five existing test callers await it
+       (a-verify-human-shard-is-judged, the-judge-sees-the-evidence-the-shard-carries,
+       the-machine-filing-judge-releases-or-escalates, the-verify-human-cadence-reads-the-checkout,
+       the-verify-human-queue-reads-credit-not-the-status-field). The lifetime-pressure age test injects a synchronous
+       readGit, which no longer type-checks; it injects hostWorktreeGitAsync instead.
+    6. The census shares the sync-spawn census's code-only walk (strings and comments blanked), so the two censuses
+       agree about reach: test/helpers/daemon-loop-walk.ts exports codeOnly and loopCensusFunctions. The sync-spawn
+       census keeps its own copy for now (W1-T12954 edits that file).
+    7. Criterion 1 drives routeAdaptiveLifetimePressure from src/run-task.ts. A new test that imports src/run-task.ts
+       raises the affected-reach importer count (1,011 > 1,010), so criterion 1 lives in
+       test/a-filing-age-that-cannot-be-read-is-unknown-never-zero-days.test.ts, which already imports it. The daemon
+       test file holds criteria 2 and 3, which need only the reader module.
     NOT IN SCOPE: the other 110 callers; vetPinnedConfig's own spawn; the read-plane caller names (W1-T11795).
   falsifier: |
     Put the synchronous readGit back: criteria 1 and 6 must fail. Drop the hardened environment from the async
