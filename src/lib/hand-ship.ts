@@ -22,7 +22,8 @@ interface ShipHost {
 }
 
 interface ShipSource { root: string; branch: string; head: string; origin: string }
-interface FailingTest { file: string | null; title: string; location?: string | null; failed?: boolean; suite?: boolean; fileLevel?: boolean }
+interface FailingTest { file: string | null; title: string; location?: string | null; failed?: boolean; suite?: boolean;
+  fileLevel?: boolean; state?: string }
 type Priority = "low" | "normal";
 type FailureClass = "caused by the change" | "caused by the host" | "also failing on main";
 
@@ -33,8 +34,8 @@ export interface ShipReceipt {
   selection?: string;
   steps: { name: string; ok: boolean; failedCheck?: string; suites?: string[]; signal?: string | null; error?: unknown;
     judge?: { given: number; reported: number }; diagnostics?: { mayBeIncomplete: boolean };
-    testSummary?: { pass: number; fail: number; cancelled: number } }[];
-  failureAttribution?: { tests?: FailingTest[] };
+    testSummary?: { pass: number; fail: number; cancelled: number; tests?: number } }[];
+  failureAttribution?: { counts?: { failingAtHead?: number; unattributed?: number }; tests?: FailingTest[] };
 }
 
 interface AuthorTools {
@@ -43,7 +44,7 @@ interface AuthorTools {
   failingTestsFromTap(output: string, root: string): FailingTest[];
   testResultsFromTap(output: string, root: string): FailingTest[];
   pinnedNodeReexec(input: { pin: string; current: string; env: NodeJS.ProcessEnv }): { reexec?: string; refuse?: string };
-  testSummary(output: string): { pass: number; fail: number; cancelled: number } | null;
+  testSummary(output: string): { tests?: number; pass: number; fail: number; cancelled: number } | null;
 }
 
 const authorEntry = "scripts/preflight-author.mjs";
@@ -161,7 +162,7 @@ async function compareFailures(receipt: ShipReceipt, workspace: Awaited<ReturnTy
     if (failed?.name === "static-preflight" && failed.failedCheck) run.log(`caused by the change: ${failed.failedCheck}`);
     return receipt;
   }
-  let tests = (receipt.failureAttribution?.tests ?? []).map((test) => ({ ...test, suite: false }));
+  let tests: FailingTest[] = (receipt.failureAttribution?.tests ?? []).map((test) => ({ ...test, suite: false }));
   const summary = failed.testSummary;
   const withEvidence = { ...receipt, failureAttribution: undefined };
   if (failed.signal || failed.error || failed.diagnostics?.mayBeIncomplete !== false || !summary || summary.fail === 0 ||

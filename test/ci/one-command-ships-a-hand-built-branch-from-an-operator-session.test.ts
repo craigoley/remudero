@@ -305,7 +305,7 @@ test("the production rerun reaches a nested failing leaf through its parent suit
   const defaults = handShipEffects(() => 0);
   const run = { dir: f.root, signal: new AbortController().signal, log: f.options.write };
   const source = await defaults.readSource(repo.dir, run);
-  const workspace = await defaults.prepare({ ...mac, target: "local", checkout: REPO_ROOT }, source, run);
+  const workspace = await defaults.prepare({ ...mac, target: "local", kind: "mac" as const, checkout: REPO_ROOT }, source, run);
   try {
     const rows = await workspace.rerun("head", file, source.head, "parent > leaf");
     assert.ok(rows.some((row) => row.title === "parent > leaf" && row.failed === true));
