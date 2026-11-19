@@ -5,7 +5,8 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -359,9 +360,12 @@ function callerViolations(rows: readonly AuthorityRow[], isSrcModule: (path: str
   return out;
 }
 
-/** A src module that exists in this tree; test/authority-ratchet.test.ts's drift check also holds each caller to a tracked file. */
+/** Exact tracked-src membership, not a path-prefix or filesystem-existence approximation. */
+const TRACKED_SRC_MODULES = new Set(execFileSync("git", ["-C", REPO_ROOT, "ls-files", "src"], { encoding: "utf8" })
+  .split("\n").filter((path) => path.startsWith("src/") && /\.(?:ts|mts|cts|js|mjs|cjs)$/.test(path)));
+
 function isSrcModule(path: string): boolean {
-  return /^src\/.*\.ts$/.test(path) && existsSync(join(REPO_ROOT, path));
+  return TRACKED_SRC_MODULES.has(path);
 }
 
 test("W1-T13773 criterion 3: the closed gate vocabulary is origin/main's five kinds plus host-switch, and a host-switch caller that names no switch fails the self-check", () => {
@@ -386,8 +390,8 @@ test("W1-T13773 criterion 3: the closed gate vocabulary is origin/main's five ki
   assert.deepEqual(callerViolations(withCaller(noSwitch), isSrcModule), [
     "push-plan-move-branch caller src/lib/plan-task-move-janitor.ts: a host-switch caller must name its switch",
   ]);
-  assert.deepEqual(callerViolations(withCaller({ ...janitor, module: "src/lib/no-such-janitor.ts" }), isSrcModule), [
-    "push-plan-move-branch caller src/lib/no-such-janitor.ts: module is not a src file in this tree",
+  assert.deepEqual(callerViolations(withCaller({ ...janitor, module: "src/../test/authority-table.test.ts" }), isSrcModule), [
+    "push-plan-move-branch caller src/../test/authority-table.test.ts: module is not a src file in this tree",
   ]);
   assert.deepEqual(callerViolations(withCaller({ ...janitor, gate: "daemon-flag" as AuthorityCaller["gate"] }), isSrcModule), [
     "push-plan-move-branch caller src/lib/plan-task-move-janitor.ts: gate daemon-flag is outside the closed vocabulary",
@@ -444,6 +448,8 @@ const ROWS_AS_BEFORE: Record<string, string> = {
 };
 
 test("W1-T13773 criterion 4: invariant every-other-row-reads-as-before — each row without callers, its rmd authority line and its JSON row equal origin/main's", () => {
+  const reservationRow = AUTHORITY_TABLE.find((r) => r.id === "task-id-reservation-ref-push")!;
+  assert.equal(reservationRow.callers, undefined, "the gated next-task-id --reserve fallback is not a child-CLI caller and must preserve the baseline row");
   const report = buildAuthorityReport({ ledger: fakeLedger([]) });
   assert.equal(report.status, "measured");
   if (report.status !== "measured") return;
