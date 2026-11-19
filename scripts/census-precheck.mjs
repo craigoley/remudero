@@ -1134,9 +1134,9 @@ const IMPORT_SPECIFIER_RE = /(?:\bfrom|\bimport|\brequire)\s*\(?\s*(["'])([^"'\r
 const BAKED_CATALOG_PATHS = ["deploy/install-host-units.sh", "src/lib/baked-runtime-inputs.ts", ".github/workflows/acr-build.yml"];
 
 /** Both sides matter: removing an import or detaching a module also moves the catalogued closure. */
-function closureImportTrigger(seed) {
+function closureImportTrigger(seed, additionalPaths = BAKED_CATALOG_PATHS) {
   return ({ changed, readHead, readBase }) => {
-    if (changed.some((p) => p === seed || BAKED_CATALOG_PATHS.includes(p))) return true;
+    if (changed.some((p) => p === seed || additionalPaths.includes(p))) return true;
     if (typeof readHead !== "function" || typeof readBase !== "function") return false;
     const specifiers = (text) => new Set([...String(text ?? "").matchAll(IMPORT_SPECIFIER_RE)].map((m) => m[2]));
     const importChanges = changed.filter((path) => {
@@ -1426,6 +1426,13 @@ export const PRECHECK_TRIGGERED_SUITES = [
 /** Suites a diff joins by path with no npm script of their own (W1-T9565): evaluateAdmittedCensusSuites runs each by
  *  testFile and models it in PRECHECK_PARITY as `modeled`. A row is `{ testFile, trigger, remedy }`. */
 export const PRECHECK_PATH_TRIGGERED_SUITES = [
+  { testFile: "test/ci/gates/ci-friction-remedy-f8ac7f1fb15abc0b.test.ts",
+    trigger: closureImportTrigger("scripts/census-precheck.mjs", [
+      "test/ci/gates/ci-friction-remedy-f8ac7f1fb15abc0b.test.ts",
+      "test/a-census-this-branch-grows-is-refused-before-the-push.test.ts",
+      "package.json", "package-lock.json",
+    ]),
+    remedy: "keep the linked-worktree fixture's precheck dependencies in sync with its imports" },
   // W1-T10820: the alias suite's real-tree check reddens when the imports map it reads, or coverage-narrow, moves.
   // A change to src/lib/affected-suites.ts starts the reach ratchet alone (W1-T5702); CI still runs this suite.
   { testFile: "test/ci/suites/the-affected-suite-graph-resolves-package-import-aliases.test.ts",
