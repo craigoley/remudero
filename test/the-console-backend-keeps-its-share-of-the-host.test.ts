@@ -282,7 +282,7 @@ test("W1-T4102: the resource policy derives its ceiling from the host's memory a
   assert.match(tiny.output, /OVERCOMMITTED/);
 });
 
-function healthBody(deps: Partial<Parameters<typeof buildDaemonHealthRoute>[0]>): DaemonHealthSnapshot {
+async function healthBody(deps: Partial<Parameters<typeof buildDaemonHealthRoute>[0]>): Promise<DaemonHealthSnapshot> {
   const route = buildDaemonHealthRoute({
     ledgerPath: "/nonexistent/ledger.ndjson",
     readLedger: () => [],
@@ -293,13 +293,14 @@ function healthBody(deps: Partial<Parameters<typeof buildDaemonHealthRoute>[0]>)
   });
   let body = "";
   const res = { writeHead: () => res, end: (b: string) => void (body = b) } as unknown as ServerResponse;
-  void route.handler({} as IncomingMessage, res, {} as never);
+  // W1-T13833: the route awaits its held rate-limit reading before it writes.
+  await route.handler({} as IncomingMessage, res, {} as never);
   return JSON.parse(body) as DaemonHealthSnapshot;
 }
 
-test("W1-T4102: daemon health carries serve event-loop lag and host pressure", () => {
+test("W1-T4102: daemon health carries serve event-loop lag and host pressure", async () => {
   const psi = "some avg10=61.96 avg60=68.56 avg300=72.96 total=45113116285\nfull avg10=40.10 avg60=41.00 avg300=42.00 total=1\n";
-  const body = healthBody({
+  const body = await healthBody({
     eventLoopLag: () => ({ p50Ms: 1.2, p99Ms: 812, maxMs: 8045, windowMs: 60_000 }),
     hostPressure: () => readHostPressure(() => psi),
   });
@@ -307,14 +308,14 @@ test("W1-T4102: daemon health carries serve event-loop lag and host pressure", (
   assert.deepEqual(body.hostPressure.io, { someAvg10: 61.96, someAvg60: 68.56, fullAvg10: 40.1 });
 });
 
-test("W1-T4102: an unreadable pressure file reads unknown, not zero", () => {
+test("W1-T4102: an unreadable pressure file reads unknown, not zero", async () => {
   const missing = readHostPressure(() => {
     throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
   });
   assert.deepEqual(missing, { cpu: "unknown", io: "unknown", memory: "unknown" });
   assert.equal(parsePressure("garbage"), undefined, "an unparseable file is unknown too");
   assert.deepEqual(parsePressure("some avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"), { someAvg10: 0, someAvg60: 0 }, "a real zero is kept");
-  const body = healthBody({ eventLoopLag: () => undefined, hostPressure: () => missing });
+  const body = await healthBody({ eventLoopLag: () => undefined, hostPressure: () => missing });
   assert.equal(body.hostPressure.memory, "unknown");
   assert.equal(body.eventLoopLag, undefined, "no lag reading is absent, never a zero");
 });

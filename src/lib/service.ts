@@ -903,6 +903,9 @@ export function operatorSessionIdentityProvider(opts: OperatorSessionOptions): I
   const refused = new WeakMap<IncomingMessage, ProviderRefusalReason>();
   return {
     name: "operator-session",
+    // Verified operator sessions can satisfy sensitive read routes when the service enables
+    // read-sensitivity enforcement. This is a provider capability; enforcement stays opt-in.
+    readSensitivity: "sensitive",
     grant: () => undefined,
     authorize: (req) => {
       const token = headerValue(req, OPERATOR_SESSION_HEADER);
@@ -1121,6 +1124,8 @@ function createRoutedServer(opts: ServiceOptions): Server {
         sendJson(res, 404, { error: "not_found" });
         return;
       }
+      // Sensitive responses are private even when authentication fails before the handler runs.
+      if (route?.sensitivity === "sensitive") res.setHeader("Cache-Control", "private, no-store");
       // A SELF-AUTHENTICATED route (Route.selfAuthenticated) skips scope/tier/sensitivity
       // dispatch ENTIRELY; checked first, so it's never logged `service.unauthorized` for
       // lacking a bearer token it was never meant to carry.

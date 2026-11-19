@@ -42,7 +42,7 @@
 
 import { readFileSync, statfsSync } from "node:fs";
 import { monitorEventLoopDelay } from "node:perf_hooks";
-import { ghExec } from "./github-transport.js";
+import { ghExec, ghJsonAsync } from "./github-transport.js";
 import type { ServerResponse } from "node:http";
 import { readLedgerLines, type LedgerReader } from "./status.js";
 import { systemClock, type Clock } from "./clock.js";
@@ -164,6 +164,44 @@ export function readGhRateLimitRemaining(exec: (args: string[]) => string = defa
   } catch {
     return undefined;
   }
+}
+
+/** `gh api rate_limit`'s REST core `remaining`, read without blocking; `undefined` when it does not answer a number. */
+export async function readGhRateLimitRemainingAsync(json: (args: string[]) => Promise<unknown> = ghJsonAsync): Promise<number | undefined> {
+  const remaining = ((await json(["api", "rate_limit"])) as { resources?: { core?: { remaining?: unknown } } } | undefined)?.resources?.core?.remaining;
+  return typeof remaining === "number" ? remaining : undefined;
+}
+
+/** PRIMARY CONTROL (W1-T13833): how long /v1/daemon-health answers with one rate-limit reading before it reads again. */
+export const DAEMON_HEALTH_RATE_LIMIT_HOLD_MS = 60_000;
+
+/**
+ * W1-T13833 — the route's rate-limit reading, held. `gh api rate_limit` ran synchronously on serve's request loop
+ * on every GET (2.45 s of a 10-minute host profile, 2026-11-19, in `defaultGhExec`). Now one read is in flight at a
+ * time, off the loop: a request before the first reading lands awaits it, and every later request answers at once
+ * with the held reading, starting a fresh read when it is older than {@link DAEMON_HEALTH_RATE_LIMIT_HOLD_MS}. A
+ * read that fails holds `undefined`, so the field is absent, as before.
+ */
+export function createRateLimitHold(read: () => Promise<number | undefined>, clock: Pick<Clock, "now">, holdMs = DAEMON_HEALTH_RATE_LIMIT_HOLD_MS): () => Promise<number | undefined> {
+  let held: { value: number | undefined; atMs: number } | undefined;
+  let pending: Promise<number | undefined> | undefined;
+  const refresh = (): Promise<number | undefined> => {
+    pending ??= read().catch(() => {
+      // Deliberate: a failed or non-numeric read collapses to "no reading", the absent field readGhRateLimitRemaining
+      // has always answered; the next request past the hold reads again, so the failure is not held for good.
+      return undefined;
+    }).then((value) => {
+      held = { value, atMs: clock.now() };
+      pending = undefined;
+      return value;
+    });
+    return pending;
+  };
+  return async () => {
+    if (held === undefined) return refresh();
+    if (clock.now() - held.atMs >= holdMs) void refresh();
+    return held.value;
+  };
 }
 
 function defaultGhExec(args: string[]): string {
@@ -418,8 +456,11 @@ export interface DaemonHealthDeps {
   diskPath: string;
   /** Injectable `fs.statfsSync` stand-in — see {@link readDiskFreeBytes}. */
   statfs?: (path: string) => StatfsLike;
-  /** Injectable `gh` invocation — see {@link readGhRateLimitRemaining}. */
+  /** Injectable `gh` invocation — see {@link readGhRateLimitRemaining}. The route calls it through its held,
+   *  awaited reading (W1-T13833), never inline on the request. */
   exec?: (args: string[]) => string;
+  /** W1-T13833: the route's rate-limit read; defaults to {@link readGhRateLimitRemainingAsync} (or `exec` when given). */
+  rateLimit?: () => Promise<number | undefined>;
   /** Clock; defaults to `Date.now`. Injectable so a test can assert an exact `lastPollAgeMs`. */
   now?: () => number;
   /** Default poll interval when the winning `daemon.*` line carries none of its own. */
@@ -469,14 +510,21 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 }
 
 /** `GET /v1/daemon-health` — read-scoped, computed fresh per request (this route is polled at a
- *  much coarser cadence than `/v1/status`, so no memoization layer is warranted). */
+ *  much coarser cadence than `/v1/status`, so no memoization layer is warranted), except the
+ *  rate limit, which is a held reading read off the loop (W1-T13833, {@link createRateLimitHold}). */
 export function buildDaemonHealthRoute(deps: DaemonHealthDeps): Route {
+  const exec = deps.exec;
+  const rateLimit = createRateLimitHold(
+    deps.rateLimit ?? (exec ? async () => readGhRateLimitRemaining(exec) : () => readGhRateLimitRemainingAsync()),
+    deps.now ? { now: deps.now } : systemClock,
+  );
   return {
     method: "GET",
     path: "/v1/daemon-health",
     scope: "read",
-    handler: (_req, res) => {
+    handler: async (_req, res) => {
       const now = deps.now ?? Date.now;
+      const rateLimitRemaining = await rateLimit();
       const readLedger = deps.readLedger ?? readLedgerLines;
       const lines = readLedger(deps.ledgerPath);
       const poll = deriveLastPoll(lines, deps.defaultPollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS);
@@ -486,7 +534,7 @@ export function buildDaemonHealthRoute(deps: DaemonHealthDeps): Route {
         pollIntervalMs: poll.pollIntervalMs,
         nextPollAt: poll.lastPollTs ? new Date(Date.parse(poll.lastPollTs) + poll.pollIntervalMs).toISOString() : undefined,
         diskFreeBytes: readDiskFreeBytes(deps.diskPath, deps.statfs),
-        rateLimitRemaining: readGhRateLimitRemaining(deps.exec),
+        rateLimitRemaining,
         eventLoopLag: (deps.eventLoopLag ?? defaultEventLoopLag)(),
         hostPressure: (deps.hostPressure ?? readHostPressure)(),
         gatewayCheckout: deps.gatewayCheckout?.() ?? GATEWAY_CHECKOUT_UNCHECKED,

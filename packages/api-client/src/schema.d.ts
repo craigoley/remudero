@@ -574,6 +574,57 @@ export interface components {
       required_scope?: "write";
       required_tier?: "high";
     };
+    ProductRunnerConfigProposal: {
+      path: ".remudero/mounts.yaml";
+      bytes: string;
+      digest: string;
+      targetHead: string;
+      source: {
+        kind: "serving_instance_mounts";
+        commit: string;
+      };
+      validation: {
+        valid: true;
+        g17: true;
+      };
+      changes: ({
+        operation: "add";
+        path: ".remudero/mounts.yaml";
+      })[];
+    };
+    /** Only confirmed absence carries a proposal. The preview grants no mutation authority. */
+    ProductRunnerConfigPreview: ({
+      version: "product-runner-config-preview-v1";
+      productId: ProductId;
+      revision: ProductRevision;
+      objectiveRevision: ProductRevision;
+      path: ".remudero/mounts.yaml";
+      state: "absent";
+      head: string;
+      proposal: ProductRunnerConfigProposal;
+    }) | ({
+      version: "product-runner-config-preview-v1";
+      productId: ProductId;
+      revision: ProductRevision;
+      objectiveRevision: ProductRevision;
+      path: ".remudero/mounts.yaml";
+      state: "present";
+      head: string;
+      digest: string;
+    }) | ({
+      version: "product-runner-config-preview-v1";
+      productId: ProductId;
+      revision: ProductRevision;
+      objectiveRevision: ProductRevision;
+      path: ".remudero/mounts.yaml";
+      state: "invalid" | "unreadable" | "source_unavailable" | "stale_target" | "repository_missing" | "repository_conflict";
+      head?: string;
+      reason?: string;
+    });
+    ProductRunnerConfigPreviewError: {
+      version: "product-runner-config-preview-v1";
+      error: "invalid_identity" | "invalid_input" | "not_found" | "stale_revision" | "idempotency_conflict" | "capacity" | "busy" | "corrupt" | "unavailable" | "outcome_unknown" | "recovery_required";
+    };
     /** A server observation of the exact repository a create or adopt would act on, taken at observedAt. It is informational: it writes nothing and authorizes nothing, and the mutation rechecks every prerequisite itself. state ready means the exact adoption target exists, or the creation target is absent and the owner namespace allows creation. absent, conflict, stale, denied and unavailable are never ready; reasons name why. creation reports the provider's answer for the owner namespace and is not_checked when the repository read did not succeed or a product-level state decided first. */
     ProductRepositoryPreview: {
       version: "product-repository-preview-v1";
@@ -4830,7 +4881,7 @@ export interface components {
           readModel: {
             lease: "held" | "elsewhere" | "none";
           };
-          /** Optional version-one current contract observation (W1-T10430), bound to this registered repository, instance, prefix and owned projector generation. The matching named source has its own observation clock and existing inbox-store freshness budget, independent of ledger health. Missing or unavailable evidence is not write readiness; neither is observed evidence permission for an individual reply. Server checks remain authoritative. */
+          /** Optional version-one current contract observation (W1-T10430), bound to this registered repository, instance, prefix and held projector lease. The matching named source has its own observation clock and existing inbox-store freshness budget, independent of ledger health. Missing or unavailable evidence is not write readiness; neither is observed evidence permission for an individual reply. Server checks remain authoritative. */
           inboxCapabilityEvidence?: {
             version: 1;
             qualificationGeneration: string;
@@ -4839,7 +4890,6 @@ export interface components {
             instance: string;
             repository?: string;
             prefix: string;
-            generation?: number;
           };
           capabilities: {
             views: (string)[];
@@ -7291,6 +7341,19 @@ export interface paths {
           "409": ProductRepositoryError;
           "413": ProductRepositoryError;
           "503": ProductRepositoryError;
+        };
+    };
+  };
+  "/v1/products/runner-config-preview": {
+    get: {
+      responses: {
+          "200": ProductRunnerConfigPreview;
+          "400": ProductRunnerConfigPreviewError;
+          "401": ProductAccessError;
+          "403": (ProductRunnerConfigPreviewError) | (ProductAccessError);
+          "404": ProductRunnerConfigPreviewError;
+          "409": ProductRunnerConfigPreviewError;
+          "503": ProductRunnerConfigPreviewError;
         };
     };
   };
