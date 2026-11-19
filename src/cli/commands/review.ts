@@ -16,6 +16,7 @@ import { isWorkerProviderId, loadConfig, type Config, type WorkerProviderId } fr
 import { ledgerPathFor } from "../../lib/ledger-path.js";
 import { disarmOutcomeWithdrawn, disarmAutoMerge, armIfVerdictPermitsAsync, type ArmOutcome, type DisarmOutcome } from "../../lib/arm-auto-merge.js";
 import { type ComposedRealGraph, type ReviewWorktreeDeps } from "../../lib/composition-root.js";
+import { writeReviewEvidenceRecord } from "../../lib/review-evidence-record.js";
 import { SPECIALIST_TOOLS } from "../../lib/specialist-panel.js";
 import { REVIEWER_INCIDENT_FLAG, REVIEWER_SHADOW_FLAG, REVIEWER_SHADOW_VERDICT_STEP, reviewerHealthRowFields, reviewerShadowStep } from "../../lib/reviewer-health.js";
 import { withTempDir } from "../../lib/tmp.js";
@@ -1552,6 +1553,7 @@ export async function runReview(host: ReviewCommandHost, args: {
     review_decision_digest: decisionDigest,
     decision_verdict: verdict,
     evaluator_provenance: evaluatorProvenance,
+    ...(reviewerCodeFreshness?.status === "fresh" ? { reviewer_code_sha: reviewerCodeFreshness.codeSha } : {}),
     ...(reviewerCodeFreshness !== undefined ? { reviewer_code_provenance: reviewerCodeFreshness } : {}),
     test_theater: verdict.testTheater,
     unmet_criteria: unmetClaims,
@@ -1617,6 +1619,9 @@ export async function runReview(host: ReviewCommandHost, args: {
   };
   log("review.posted", reviewPostedRow);
   if (inputDigest !== undefined) settleReviewOutboxEntry(args.ledgerPath, prUrl, inputDigest);
+  await writeReviewEvidenceRecord(reviewPostedRow, task.catalog).catch(error => {
+    log("review.evidence_write_failed", { pr_number: reviewPrNumber(prUrl), head_sha: headSha, reason: String(error) });
+  });
   recordReplay(replayDecision);
   // W1-T322 (SHIPS-UNWIRED advisory floor): ADVISORY ONLY — ledgered here, never consulted by the
   // verdict/arm decision above or below. One `review.unwired_advisory` line per reason code (see
@@ -2703,14 +2708,21 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
       { prUrl: view.url, taskId: reviewKey, headSha: view.headRefOid, ledgerPath, log }, { disarm: deps.disarm });
     if (restored.posted) {
       replayStatusAction = "restored";
-      log("review.posted", {
+      const { unmetClaims, reasons } = reviewUnmetFields(verdict);
+      const reviewPostedRow = {
         context: REVIEW_CONTEXT, state: verdict.state, head_sha: view.headRefOid, pr_url: view.url,
         review_input_digest: inputDigest, review_engine_revision: REVIEW_ENGINE_REVISION,
         review_decision_digest: verdict.reviewDecisionDigest, decision_verdict: verdict,
         evaluator_provenance: verdict.evaluatorProvenance,
+        ...(restoringFreshness.status === "fresh" ? { reviewer_code_sha: restoringFreshness.codeSha } : {}),
         reviewer_outcome: verdict.reviewerOutcome, proof_exec: verdict.criteria.map((criterion) => criterion.proof_exec),
+        unmet_criteria: unmetClaims, reasons, ...reviewLedgerLegibilityFields(verdict),
         status_recovered: true,
         status_publisher: restored.publisherEvidence,
+      };
+      log("review.posted", reviewPostedRow);
+      await writeReviewEvidenceRecord(reviewPostedRow, taskCatalog).catch(error => {
+        log("review.evidence_write_failed", { pr_number: view.number, head_sha: view.headRefOid, reason: String(error) });
       });
     } else if (restored.replayed) {
       replayStatusAction = "confirmed";
