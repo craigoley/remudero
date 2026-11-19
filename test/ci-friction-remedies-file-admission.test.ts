@@ -6,14 +6,17 @@
  * exist yet — and admission must take it as a parked proposal, as it does the legacy shape.
  */
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { CI_FRICTION_REMEDIES_FILE, ciFrictionRemedyTestTitle, ciFrictionShardStem, ciFrictionShardYaml } from "#src/lib/ci-friction-gardener.js";
 import { lintTask, sizingViolation } from "#src/lib/task-linter.js";
-import { loadPlanFromYaml, machineFilingAdmissionViolations, newTestPath } from "#src/lib/plan.js";
+import { loadPlanFromYaml, machineFilingAdmissionViolations, newTestPath, sealVerifiedNewPathApproval, taskIntentDigest, type NewPathApprovalFacts, type Task } from "#src/lib/plan.js";
+import { machineShardFilingRefusal, machineShardLandingRefusal } from "#src/lib/machine-filing.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -138,4 +141,156 @@ test("every drafted remedy claims a mechanism a review can judge from the diff, 
   const plan = loadPlanFromYaml(yaml, "mechanism claim admission");
   assert.deepEqual(lintTask(task, { duplicateSlug: ciFrictionShardStem(key), machineFilingAdmission: { plan, releasedIds: new Set(),
     pathExists: p => existsSync(join(REPO_ROOT, p)) } }).violations.filter(v => v.severity === "block"), []);
+});
+
+// ── W1-T10331: an explicitly approved new path versus an invented filing path ──────────────────
+const NEW_PATH = "src/lib/approved-new-module.ts";
+const NOW = Date.UTC(2026, 10, 19, 12);
+
+function newPathYaml(over: { id?: string; ref?: string | null; extra?: string[]; hold?: boolean; design?: string; verify?: string } = {}): string {
+  return [
+    `- id: ${over.id ?? "W1-T99950"}`, '  title: "approved new path"', "  repo: remudero", "  depends_on: []", "  type: implement",
+    `  verify: ${over.verify ?? "auto"}`, "  risk: high", "  status: queued", "  attempts: 0", "  author_class: machine",
+    ...(over.hold ? ["  dispatch_hold: true"] : []),
+    ...(over.ref === null ? [] : [`  new_path_approval_ref: ${over.ref ?? "npa-ref-1"}`]),
+    `  design: ${JSON.stringify(over.design ?? "one design")}`,
+    "  files:", "    - src/lib/plan.ts", `    - ${NEW_PATH}`, ...(over.extra ?? []).map((f) => `    - ${f}`),
+    "  acceptance:", '    - claim: "c"', '      proof: "grep: approvedNewModule in src/lib/plan.ts"', "",
+  ].join("\n");
+}
+
+const taskOf = (yaml: string): Task => loadPlanFromYaml(yaml, "new-path-fixture").tasks[0]!;
+
+function sealedFor(task: Task, over: Partial<NewPathApprovalFacts> = {}): NewPathApprovalFacts {
+  return sealVerifiedNewPathApproval({
+    protocol: "new-path-approval-v1", ref: task.new_path_approval_ref ?? "npa-ref-1", taskId: task.id, repo: task.repo,
+    intentDigest: taskIntentDigest(task), declaredPaths: task.files ?? [], approvedMissingPaths: [NEW_PATH],
+    operator: "operator-a", confirmation: "confirmation-1", issuedAtMs: NOW - 1000, expiresAtMs: NOW + 60_000, revoked: false, ...over,
+  });
+}
+
+const present = (p: string): boolean => existsSync(join(REPO_ROOT, p));
+
+function decide(yaml: string, facts?: NewPathApprovalFacts | ((t: Task) => NewPathApprovalFacts | undefined), exists = present): string[] {
+  const plan = loadPlanFromYaml(yaml, "new-path-fixture");
+  const task = plan.tasks[0]!;
+  const newPathApproval = typeof facts === "function" ? facts(task) : facts;
+  return machineFilingAdmissionViolations(task, { plan, releasedIds: new Set(), pathExists: exists, newPathApproval, nowMs: NOW });
+}
+
+test("new path admission binds the explicit approval to the exact task and declared paths", () => {
+  assert.equal(existsSync(join(REPO_ROOT, NEW_PATH)), false, "the approved path is genuinely absent");
+  assert.deepEqual(decide(newPathYaml(), sealedFor), []);
+  // the same sealed facts do not travel to another task, another reference, other bytes or another path set
+  const sealed = sealedFor(taskOf(newPathYaml()));
+  assert.match(decide(newPathYaml({ id: "W1-T99951" }), sealed).join(";"), /approval is for task W1-T99950/);
+  assert.match(decide(newPathYaml({ ref: "npa-ref-2" }), sealed).join(";"), /different reference/);
+  assert.match(decide(newPathYaml({ design: "a changed design" }), sealed).join(";"), /task changed since it was approved/);
+  assert.match(decide(newPathYaml({ extra: ["src/lib/other-missing-module.ts"] }), sealed).join(";"), /task changed since it was approved/);
+  const sameBytesOtherSet = taskOf(newPathYaml());
+  assert.match(decide(newPathYaml(), sealedFor(sameBytesOtherSet, { declaredPaths: [NEW_PATH, "src/lib/plan.ts"] })).join(";"), /declared path set differs/);
+  // an extra missing path is never admitted by an approval that names only one
+  const both = (t: Task) => sealedFor(t, { approvedMissingPaths: [NEW_PATH] });
+  const extra = decide(newPathYaml({ extra: ["src/lib/other-missing-module.ts"] }), both);
+  assert.match(extra.join(";"), /other-missing-module\.ts/);
+  assert.doesNotMatch(extra.join(";"), /approved-new-module/);
+  // an approval for the declared set admits only the approved missing path, not a wider one
+  const wide = decide(newPathYaml({ extra: ["src/lib/other-missing-module.ts"] }), (t) => sealedFor(t));
+  assert.match(wide.join(";"), /exist in neither the checkout nor the base tree: src\/lib\/other-missing-module\.ts$/);
+});
+
+test("new path admission refuses missing drifted and unsupported authority before staging", () => {
+  const yaml = newPathYaml();
+  const task = taskOf(yaml);
+  const good = sealedFor(task);
+  const refused = (facts: NewPathApprovalFacts | undefined, pattern: RegExp) => {
+    const reasons = decide(yaml, facts).join(";");
+    assert.match(reasons, pattern);
+    assert.match(reasons, /exist in neither the checkout nor the base tree: src\/lib\/approved-new-module\.ts/, "the path stays refused");
+  };
+  refused(undefined, /no prepared verified facts/);
+  refused({ ...good }, /not verified by a trusted issuer/); // copied/forged-looking facts, even field for field
+  refused(JSON.parse(JSON.stringify(good)) as NewPathApprovalFacts, /not verified by a trusted issuer/);
+  refused(sealedFor(task, { protocol: "new-path-approval-v2" }), /unsupported protocol/);
+  refused(sealedFor(task, { revoked: true }), /revoked/);
+  refused(sealedFor(task, { expiresAtMs: NOW }), /not currently valid/);
+  refused(sealedFor(task, { issuedAtMs: NOW + 1 }), /not currently valid/);
+  refused(sealedFor(task, { expiresAtMs: Number.NaN }), /provenance is incomplete/);
+  refused(sealedFor(task, { operator: "" }), /provenance is incomplete/);
+  refused(sealedFor(task, { repo: "other" }), /repository other/);
+  refused(sealedFor(task, { approvedMissingPaths: [] }), /no approved new path/);
+  refused(sealedFor(task, { approvedMissingPaths: ["src/lib/not-declared.ts"] }), /not declared/);
+  for (const bad of ["/abs/x.ts", "src/../x.ts", "./src/x.ts", "src//x.ts", "src/*.ts", "src/x\u0000.ts", "src\\x.ts", "src/"]) {
+    const t = taskOf(yaml);
+    refused(sealedFor(t, { declaredPaths: [...(t.files ?? []), bad], approvedMissingPaths: [bad] }), /./);
+  }
+  refused(sealedFor(task, { approvedMissingPaths: [NEW_PATH, NEW_PATH.toUpperCase()] }), /not declared|duplicated/);
+  // a task that names no reference and is handed facts gets no authority from them either
+  assert.match(decide(newPathYaml({ ref: null }), good).join(";"), /names no new_path_approval_ref/);
+  assert.match(decide(newPathYaml({ ref: null }), undefined).join(";"), /exist in neither/);
+  // before staging: the filing precheck and the landing refusal both refuse without any prepared facts
+  const text = newPathYaml();
+  const precheck = machineShardFilingRefusal(text, "W1-T99950.yaml", { pathExists: present });
+  assert.match(precheck ?? "", /no prepared verified facts/);
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}new-path-admission-`));
+  try {
+    mkdirSync(join(root, "plan/tasks.d"), { recursive: true });
+    mkdirSync(join(root, "src/lib"), { recursive: true });
+    writeFileSync(join(root, "src/lib/plan.ts"), "// present\n");
+    writeFileSync(join(root, "plan/tasks.d/W1-T99950-approved-new-path.yaml"), text);
+    const landing = machineShardLandingRefusal(root, ["plan/tasks.d/W1-T99950-approved-new-path.yaml"]);
+    assert.match(landing ?? "", /no prepared verified facts/);
+    assert.equal(existsSync(join(root, NEW_PATH)), false, "nothing was staged or created");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("new path admission agrees between the real filing precheck and plan lint", () => {
+  const admissionOf = (reasons: string | undefined): string[] =>
+    (reasons ?? "").split("; ").filter((r) => /exist in neither|new-path approval|dependency/.test(r)).map((r) => r.replace(/^W1-T\d+: machine-filing-admission: /, ""));
+  const cases: [string, (t: Task) => NewPathApprovalFacts | undefined][] = [
+    ["admitted", (t) => sealedFor(t)],
+    ["no facts", () => undefined],
+    ["unsealed", (t) => ({ ...sealedFor(t) })],
+    ["revoked", (t) => sealedFor(t, { revoked: true })],
+    ["other task", (t) => sealedFor(t, { taskId: "W1-T1" })],
+    ["drifted digest", (t) => sealedFor(t, { intentDigest: "0".repeat(64) })],
+  ];
+  for (const [name, make] of cases) {
+    const plan = loadPlanFromYaml(newPathYaml(), "parity");
+    const task = plan.tasks[0]!;
+    const newPathApproval = make(task);
+    const precheck = machineShardFilingRefusal(newPathYaml(), "W1-T99950.yaml", { pathExists: present, newPathApproval, nowMs: NOW });
+    const lint = lintTask(task, { machineFilingAdmission: { plan, releasedIds: new Set(), pathExists: present, newPathApproval, nowMs: NOW } })
+      .violations.filter((v) => v.check === "machine-filing-admission").map((v) => v.message);
+    const direct = decide(newPathYaml(), make);
+    assert.equal(precheck?.includes(": machine-filing-admission: ") ?? false, direct.length > 0, `${name}: ${precheck}`);
+    assert.deepEqual(lint, direct.length > 0 ? [direct.join("; ")] : [], name);
+    assert.deepEqual(admissionOf(precheck), direct, name);
+  }
+});
+
+test("new path admission preserves legacy proposals and independent owner holds", () => {
+  // no reference and no facts: the legacy invented-path refusal is byte-identical
+  const invented = decide(newPathYaml({ ref: null }));
+  assert.deepEqual(invented, [`task W1-T99950 declares file path(s) that exist in neither the checkout nor the base tree: ${NEW_PATH}`]);
+  // an approval never releases a human gate, an unmet dependency, a block or a dispatch hold
+  const human = decide(newPathYaml({ verify: "human" }), sealedFor).join(";");
+  assert.match(human, /verify:human — not auto-runnable/);
+  assert.doesNotMatch(human, /exist in neither/);
+  const held = taskOf(newPathYaml({ hold: true }));
+  assert.equal(held.dispatch_hold, true);
+  assert.deepEqual(decide(newPathYaml({ hold: true }), sealedFor), [], "a hold permits filing and still holds dispatch");
+  assert.equal(held.dispatch_hold, true, "admission never clears the hold");
+  const blocked = newPathYaml().replace("status: queued", "status: blocked");
+  assert.match(decide(blocked, sealedFor).join(";"), /is blocked/);
+  const dep = newPathYaml().replace("depends_on: []", "depends_on: [W1-T99949]") +
+    ["- id: W1-T99949", '  title: "dep"', "  repo: remudero", "  depends_on: []", "  type: implement", "  verify: human", "  status: queued", "  attempts: 0", ""].join("\n");
+  assert.match(decide(dep, sealedFor).join(";"), /unmerged dependencies: W1-T99949/);
+  // the digest ignores only its own reference and the judge's ruling, never a field the operator acted on
+  const base = taskOf(newPathYaml());
+  assert.equal(taskIntentDigest(base), taskIntentDigest({ ...base, new_path_approval_ref: "other-ref" }));
+  assert.notEqual(taskIntentDigest(base), taskIntentDigest({ ...base, rationale: "x" }));
+  assert.throws(() => taskOf(newPathYaml({ ref: "has space" })), /new_path_approval_ref/);
 });
