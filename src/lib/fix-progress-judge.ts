@@ -737,8 +737,9 @@ export function priorRoundHold(ledger: readonly Record<string, unknown>[], facts
     after(row.ts))) return undefined;
   const latched = ledger.findLast(row => row.step === "sweep.disposed" &&
     row.head_sha === facts.headSha && row[PRIOR_ROUND_HOLD_FIELD] === "NEEDS_SCOPE" && row.prior_round_hold_since === since);
-  const standingOn = stringValue(done!.contract_revision) ?? stringValue(latched?.prior_round_hold_contract_revision) ?? facts.contractRevision;
-  if (standingOn !== undefined && facts.contractRevision !== undefined && standingOn !== facts.contractRevision) return undefined;
+  const currentRevision = facts.contractRevision;
+  const standingOn = stringValue(done!.contract_revision) ?? stringValue(latched?.prior_round_hold_contract_revision) ?? currentRevision;
+  if (standingOn !== undefined && currentRevision !== undefined && standingOn !== currentRevision) return undefined;
   return { hold: "NEEDS_SCOPE", since, roundId, ...(standingOn !== undefined ? { contractRevision: standingOn } : {}),
     reason: `the last fix round at ${head} ruled NEEDS_SCOPE at ${since}; no scope amendment has merged and the task ` +
       "contract is unchanged since — no fix round until one changes" };

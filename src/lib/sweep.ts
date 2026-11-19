@@ -25864,7 +25864,10 @@ export async function runSweep(
                 }
               }
               const roundHold = priorRoundHold(ledgerLines, { taskId: fixLedgerTaskIdFor(pr), headSha: pr.headSha,
-                contractRevision: pr.taskId === undefined ? undefined : deps.readTaskContractRevision?.(pr.taskId),
+                // Only an unresolved NEEDS_SCOPE ruling needs a contract read.
+                get contractRevision() {
+                  return pr.taskId === undefined ? undefined : readWitnessContractRevision(pr.taskId);
+                },
                 checkCompletions: pr.ciFailures });
               if (roundHold) {
                 acted = false;
