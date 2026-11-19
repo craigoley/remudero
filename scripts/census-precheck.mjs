@@ -1488,11 +1488,12 @@ export const PRECHECK_PATH_TRIGGERED_SUITES = [
     ].includes(p) || (p.startsWith(".github/workflows/") && /^\s*runs-on:.*-latest\b/m.test(readHead?.(p) ?? ""))),
     remedy: "pin each runs-on to a versioned image such as ubuntu-26.04" },
   // W1-T13825: the stalled-checkout suite reads ci.yml's two shard lanes, so a ci.yml edit asks it before the push.
+  // A fixture tree that never had the suite starts no child.
   { testFile: "test/rules/a-stalled-shard-checkout-times-out-and-retries.test.ts", gitFree: true,
-    trigger: ({ changed }) => changed.some((p) => [
+    trigger: ({ changed, readHead }) => changed.some((p) => [
       ".github/workflows/ci.yml", "scripts/census-precheck.mjs",
       "test/rules/a-stalled-shard-checkout-times-out-and-retries.test.ts",
-    ].includes(p)),
+    ].includes(p)) && readHead?.("test/rules/a-stalled-shard-checkout-times-out-and-retries.test.ts") != null,
     remedy: "keep each shard lane's first checkout bounded at 3 minutes with continue-on-error, followed by one retry checkout" },
   { testFile: "test/rules/the-root-scratch-ignore-stays-root-only.test.ts",
     trigger: ({ changed }) => changed.some((p) => [".gitignore", "scripts/census-precheck.mjs",
