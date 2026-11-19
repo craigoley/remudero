@@ -1586,6 +1586,7 @@ export function validNewPathApprovalIssuerOrigin(value: string): boolean {
     return (url.protocol === "https:" || (url.protocol === "http:" && loopback)) && url.origin === value &&
       url.username === "" && url.password === "" && url.pathname === "/" && url.search === "" && url.hash === "";
   } catch {
+    // An unparseable origin is unusable; false makes the caller refuse that issuer binding.
     return false;
   }
 }

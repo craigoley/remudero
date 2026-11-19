@@ -2324,6 +2324,7 @@ export function newPathApprovalIssuerConfig(read: () => Pick<Config, "serve"> = 
       binding.issuerId.trim() !== "" && binding.policy.trim() !== "" && binding.repository.trim() !== "" &&
       binding.instance.trim() !== "" && binding.audience.trim() !== "" ? binding : undefined;
   } catch {
+    // Unreadable configuration cannot authorize an issuer binding; undefined keeps those routes inert.
     return undefined;
   }
 }
