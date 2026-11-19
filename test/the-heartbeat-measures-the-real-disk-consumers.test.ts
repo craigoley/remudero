@@ -5,7 +5,6 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { makeTempDir, RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { REAL_SCRIPT } from "#test/helpers/fleet-heartbeat-harness.js";
-import { assertWallClockBound, deriveWallClockBound } from "#test/helpers/wall-clock-bound.js";
 
 // Declare the fixture's topology before host paths: its temporary root may itself
 // live below /mnt/rmd, but that must not move its synthetic root onto /dev/data.
@@ -111,12 +110,33 @@ case "$p" in
   /mnt/rmd) [ "\${FINDMNT_ABSENT:-}" = 1 ] || exit 1; n=60000000 ;;
   *) n=10 ;;
 esac
-# Keep the delay in the timed process itself; a child sleep can outlive timeout.
-if [ "$p" = "\${SLOW_DU:-}" ]; then
+# A simulated slow walk under the fake clock spends that clock instead of the host's: nothing waits
+# in real time, and the stubbed timeout reads the spent seconds. Otherwise keep the real delay in
+# the timed process itself; a child sleep can outlive timeout.
+if [ "$p" = "\${SLOW_DU:-}" ] && [ "\${FAKE_CLOCK:-}" = 1 ]; then
+  printf '%s' $(( $(cat "$FIXTURE/clock-offset") + \${SLOW_DU_S:-10} )) > "$FIXTURE/clock-offset"
+elif [ "$p" = "\${SLOW_DU:-}" ]; then
   exec node -e 'setTimeout(() => process.stdout.write(process.argv[2] + "\\t" + process.argv[3] + "\\n"), Number(process.argv[1]) * 1000)' "\${SLOW_DU_S:-10}" "$n" "$p"
 fi
 printf '%s\\t%s\\n' "$n" "$p"`);
     stub("df", FIXTURE_DF);
+    if (overrides.FAKE_CLOCK === "1") {
+      // The beat reads time only through `date +%s` and bounds each du through `timeout`; both are
+      // stubbed on PATH against a manual clock that starts frozen and moves only when a walk spends it.
+      writeFileSync(join(dir, "clock-base"), String(Math.floor(Date.now() / 1000)));
+      writeFileSync(join(dir, "clock-offset"), "0");
+      stub("date", `
+if [ "$*" = "+%s" ]; then printf '%s\\n' $(( $(cat "$FIXTURE/clock-base") + $(cat "$FIXTURE/clock-offset") ))
+else PATH=/usr/bin:/bin exec date "$@"; fi`);
+      stub("timeout", `
+limit="$1"; shift
+out="$FIXTURE/timeout-out.$$"
+before=$(cat "$FIXTURE/clock-offset")
+"$@" > "$out"; status=$?
+after=$(cat "$FIXTURE/clock-offset")
+if [ $(( after - before )) -ge "$limit" ]; then rm -f "$out"; exit 124; fi
+cat "$out"; rm -f "$out"; exit "$status"`);
+    }
     writeFileSync(join(dir, "state-root/state/heartbeat-count.txt"), overrides.BEAT_N ?? "0");
     if (opts.state !== undefined) writeFileSync(join(dir, "state-root/state/consumer-probe.state"), opts.state);
     const result = spawnSync("bash", [script], {
@@ -320,21 +340,10 @@ function budgeted(overrides: Record<string, string>): { beat: Record<string, str
   return { beat, walks, elapsedMs: Date.now() - started };
 }
 
+// Deterministic on any host (W1-T10926): the beat's `date +%s` and `timeout` run against a manual clock
+// that only the slow du advances, so the 2 s budget is spent by simulated time and no real second counts.
 test("a consumer walk stops at its time budget and publishes the cut consumer and every later walk unknown, never 0", () => {
-  const overrides = { SLOW_DU: "/var/lib/containerd", SLOW_DU_S: "10", RMD_CONSUMER_WALK_BUDGET_S: "2" };
-  const { beat, walks, elapsedMs } = budgeted(overrides);
-  const bound = deriveWallClockBound(() => {
-    const calibration = budgeted({ ...overrides, SLOW_DU_S: "1" });
-    assert.ok(calibration.walks.some((walk) => walk.endsWith(" du -sk /var/lib/containerd")), "the calibration must run the same consumer walk");
-  }, 2, 8_000);
-  const calibration = bound.source === "calibrated"
-    ? `${bound.calibrationMs.toFixed(1)} ms`
-    : `unavailable (${String(bound.reason)})`;
-  assertWallClockBound(
-    elapsedMs,
-    bound.boundMs,
-    `the beat waited ${elapsedMs} ms on a walk budgeted at 2 s; calibration ${calibration}, ${bound.source} bound ${bound.boundMs.toFixed(1)} ms`,
-  );
+  const { beat, walks } = budgeted({ FAKE_CLOCK: "1", SLOW_DU: "/var/lib/containerd", SLOW_DU_S: "10", RMD_CONSUMER_WALK_BUDGET_S: "2" });
   assert.ok(walks.at(-1)?.endsWith(" du -sk /var/lib/containerd"), "positive control: the slow walk started, and no walk started after it");
   assert.equal(beat.consumer_containerd_kb, "unknown", "a walk cut off by the budget is unknown, never 0");
   assert.equal(beat.consumer_worktrees_kb, "42000", "walks finished inside the budget keep their sizes");
@@ -346,8 +355,19 @@ test("a consumer walk stops at its time budget and publishes the cut consumer an
   assert.equal(beat.consumer_walk_budget_exhausted, "containerd,rmd_tmp,scratch,coverage,transcripts,npm_cache,tsx_cache,tmp_leftovers,hand_worktrees");
 });
 
+// The one real-time check: the real `timeout` and the real clock cut a really sleeping du. It is
+// NON-GATING on time — the elapsed figure is only reported — because a loaded host can stretch it with
+// no defect. What it asserts holds at any speed: the cut walk is unknown whether it was killed or never started.
+test("a really sleeping du under the real timeout is cut and published unknown (elapsed time is reported, not asserted)", (t) => {
+  const { beat, elapsedMs } = budgeted({ SLOW_DU: "/var/lib/containerd", SLOW_DU_S: "5", RMD_CONSUMER_WALK_BUDGET_S: "2" });
+  t.diagnostic(`real-time cut: the beat took ${elapsedMs} ms on a 2 s walk budget with a 5 s du`);
+  assert.equal(beat.consumer_containerd_kb, "unknown", "a walk cut off by the budget is unknown, never 0");
+  assert.equal(beat.consumer_walk_state, "budget_exhausted");
+  assert.match(beat.consumer_walk_budget_exhausted ?? "", /(^|,)containerd(,|$)/);
+});
+
 test("a walk that finishes inside its budget is unchanged, and a malformed budget falls back to the default", () => {
-  const slow = budgeted({ SLOW_DU: "/var/lib/containerd", SLOW_DU_S: "0.1", RMD_CONSUMER_WALK_BUDGET_S: "30" }).beat;
+  const slow = budgeted({ FAKE_CLOCK: "1", SLOW_DU: "/var/lib/containerd", SLOW_DU_S: "1", RMD_CONSUMER_WALK_BUDGET_S: "30" }).beat;
   assert.equal(slow.consumer_containerd_kb, "27200000", "a slow walk that ends in time is measured, not cut");
   assert.equal(slow.consumer_npm_cache_kb, "10");
   assert.equal(slow.consumer_walk_state, "walked");

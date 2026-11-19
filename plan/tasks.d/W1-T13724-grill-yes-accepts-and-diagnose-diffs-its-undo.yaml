@@ -15,7 +15,7 @@
     - .claude/skills/grill/SKILL.md
     - .claude/skills/diagnose/SKILL.md
     - MASTER-PLAN.md
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The /grill macro row tells the agent to word each question so that yes accepts its recommended answer"

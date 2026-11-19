@@ -153,7 +153,7 @@ async function proveDetachedEntryCompatibility() {
 test("W1-T9114: the inventory moves a kind only on a measured drain cost", () => {
   const everyKind: Record<DetachedActionKind, true> = {
     "fix-dispatch": true, retro: true, "auto-triage": true, "ci-learning": true, "measurement-cadence": true, "benchmark-cohort": true,
-    "light-pass-action": true,
+    "light-pass-action": true, "plan-task-move": true,
   };
   assert.deepEqual([...DETACHED_WORK_KINDS].sort(), [...Object.keys(everyKind), "review"].sort(), "the table classifies every kind and the review registry");
   for (const kind of DETACHED_WORK_KINDS) assert.ok(DETACHED_WORK_INVENTORY[kind].holds.length > 0, `${kind} says what it holds`);

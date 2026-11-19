@@ -322,6 +322,18 @@ to one day for this view.
    `blocked_review`/`blocked_illformed` verdict naming a real gap, or an
    escalation issue. Idle time on your end is fine — the fleet keeps grooming.
 
+## The author preflight is advisory (W1-T12511)
+
+`node --import tsx scripts/preflight-author.mjs` gives the author quick feedback before the first push, and
+the author preflight is advisory: it is not the gate. The gate is the three required checks on `main`, `remudero-review`,
+`ci-gate` and `security-merge-policy`, plus the merge-time ratchet verdict (W1-T12509), which counts every
+recorded-count gate on the merged tree. A check leaves the author run only when a ci.yml job that runs on every
+pull request runs it. So the author census step runs the census counts only, and they still refuse every count
+growth; the census suites, the instrument-surface census, `rule-checks` and the other light gates run in hosted
+CI. The receipt (`coverage/preflight-author.json`) lists them under `leftToCi` with the ci.yml job and the
+required check that runs each one. If a job cannot be confirmed in ci.yml, its check stays local and
+`authorPathKept` says why. More: doctrine/before-you-push/preflight-before-first-push.md.
+
 ## Where to cut a worktree, and why it matters
 
 Cut ad-hoc lanes under **`<config.root>/lanes/`**. Nowhere else under `config.root`, and never

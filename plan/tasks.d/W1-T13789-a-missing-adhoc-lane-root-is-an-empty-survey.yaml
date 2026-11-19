@@ -1,0 +1,68 @@
+- id: W1-T13789
+  title: "A missing ad-hoc lane root is an empty survey, not two errors on every run, and the reap rung measures disk headroom on the nearest folder that exists: in the fleet container <root>/lanes was never made, so all 268 census rows since 2026-11-11 carry an ENOENT error and free_fraction is always null, which turns the disk-pressure grace off"
+  repo: remudero
+  depends_on: [W1-T10777]
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # it makes the disk-pressure grace work again in production, which shortens the age gate; W1-T10777 must ship first so no engine tree is a candidate
+  origin: "operator-session#fleet-small-issues-2026-11-19"
+  plan_refs:
+    - W1-T4065
+    - W1-T2847
+    - W1-T10777
+  files:
+    - src/lib/worker.ts
+    - test/a-missing-adhoc-lane-root-is-an-empty-survey.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "invariant:missing-root-is-empty — runAdhocLaneReapRung with a config whose <root>/lanes does not exist logs no adhoc_lane.reap.enumeration_error and no adhoc_lane.reap.headroom_error, and its adhoc_lane.reap.census row has no error field and an empty kept_by_reason and reaped count 0"
+      proof: "grep: W1-T13789 criterion 1 in test/a-missing-adhoc-lane-root-is-an-empty-survey.test.ts"
+    - claim: "invariant:headroom-from-an-existing-folder — with <root>/lanes missing and <root> present, the default disk-headroom read measures <root>, so the census row's free_fraction is a number in (0, 1] and grace_ms is ADHOC_LANE_REAP_GRACE_MS times that fraction"
+      proof: "grep: W1-T13789 criterion 2 in test/a-missing-adhoc-lane-root-is-an-empty-survey.test.ts"
+    - claim: "invariant:real-errors-still-report — a lanes root that exists but cannot be read (a file in its place) still logs adhoc_lane.reap.enumeration_error and the census error field, and the unmanaged-lane sweep still runs when the root is missing"
+      proof: "grep: W1-T13789 criterion 3 in test/a-missing-adhoc-lane-root-is-an-empty-survey.test.ts"
+  rationale: |
+    WHY: the ad-hoc lane reaper reports an error on every run and its disk-pressure rule never acts.
+    runAdhocLaneReapRung (src/lib/worker.ts) runs at the start of every run-task
+    (src/cli/commands/run-task-verb.ts, `runAdhocLaneReapRung(config, log, { repoDir, enabled: ... })`).
+    Its root is adhocLaneRoot(config) = join(config.root, "lanes"), which is /home/node/Remudero/lanes in the
+    fleet container. Nothing in src, bin or scripts creates that folder: it is a home for lanes cut by hand,
+    and none are cut in the container.
+    MEASURED on the Azure host (ledger.ndjson and every rotation since 2026-11-11, sort -u):
+    - 268 adhoc_lane.reap.census rows, 268 with `error: ENOENT ... scandir '/home/node/Remudero/lanes'`, each
+      with a headroom_error (statfs) and an enumeration_error row: 3 rows a run, 16 to 52 runs a day. The rise
+      after the 2026-11-18 16:23Z boot is the run-task start rate, not a new fault.
+    - free_fraction is null in every row, so grace_ms stays 1,209,600,000 (14 days). The state disk
+      (~/rmd-state2) is 83% used: the W1-T4065 rule would give about 2.4 days.
+    - No lane leaks from the missing folder; it holds nothing. The unmanaged sweep still runs: it lists
+      31 engine trees under state/engines (6.9 GB, all kept as recent-activity, 0 reaped). That listing is
+      W1-T10777's defect. This task depends on it because a working headroom rule would shorten the grace
+      for those engine trees.
+    NOT COVERED: swept plan/tasks.d for adhocLaneRoot, adhoc_lane.reap.headroom_error and free_fraction:
+    W1-T2847, W1-T2962 and W1-T4065 (merged) built the rung; W1-T10777 (queued) owns the engine trees. None
+    handles a missing root.
+  design: |
+    INVARIANT missing-root-is-empty: a lanes root that does not exist is a survey of zero lanes, not an error.
+    INVARIANT headroom-from-an-existing-folder: disk headroom is read from the nearest existing ancestor of the lanes root, which is on the same file system the lanes would use.
+    INVARIANT real-errors-still-report: any error other than a missing root is still logged and still sets the census error field.
+    1. In runAdhocLaneReapRung, the default diskHeadroom walks from the root to the nearest existing ancestor
+       (stop at the file-system root) and statfs's that path. The injected diskHeadroom seam is unchanged.
+    2. Before the root reap, if the root does not exist (lstat ENOENT), skip reap(root, ...) and push an empty
+       summary. Any other lstat error goes on to the reap as today, so its enumeration error is logged. The
+       unmanaged branch (deps.repoDir) runs as today.
+    3. No new folder is created, and no env var, config key or time bound is added.
+    4. src/lib/worker.ts has a comment cap (test/worker/spawn/compress-src-lib-worker-ts.test.ts): add as few
+       comment lines as possible. Re-run test/adhoc-lane-reap.test.ts and test/adhoc-lane-root.test.ts.
+    5. The test uses a temp config root (RMD_TMP_PREFIX) with test/setup/tmp-hygiene.ts and the real reaper.
+  falsifier: |
+    At origin/main criterion 1 fails (two error rows and a census error) and criterion 2 fails (free_fraction
+    null). Treat every enumeration error as empty: criterion 3 fails. Skip the unmanaged sweep when the root
+    is missing: criterion 3 fails.
+  note: |
+    reservation hand-off: run-unfiled-1795065820000 -> run-unfiled-1795065953000
+    Ids reserved with ~/rmd-work/bin/reserve-id.sh for run-unfiled-1795065820000; this filing ships from
+    run-unfiled-1795065953000 (see W1-T13787's note).

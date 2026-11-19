@@ -7,6 +7,7 @@ import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { parse as parseYaml } from "yaml";
 
 import { readAffectedSuitesInput, selectAffectedSuites, type AffectedSuitesInput } from "./affected-suites.js";
+import { flagValue } from "./cli-args.js";
 import { defaultPreflightSpawn, spawnFailureDetail, typecheckStep, type PreflightSpawn } from "./commit-message.js";
 import { CENSUS_POPULATION, isRuleSuitePath, type CensusPopulationMember } from "./rule-suites.js";
 import { resolveTestPath } from "./test-path-resolver.js";
@@ -2461,8 +2462,9 @@ export const CENSUS_ADMITTED_MEMBERS: readonly (CensusPopulationMember & {
 );
 
 /** THE PROJECTION: every census step is computed FROM {@link CENSUS_ADMITTED_MEMBERS}, never beside it. */
-const CENSUS_FAST_GATE_STEPS: { job: string; script: string; reason: string; boundMs: number }[] = CENSUS_ADMITTED_MEMBERS.map(
-  (m) => ({ job: m.job, script: m.script, reason: m.reason, boundMs: FAST_GATE_CENSUS_BOUND_MS }),
+// W1-T12511: every admitted member is a rule suite, so ci.yml's light-gates `rule-checks` step runs it on every PR.
+const CENSUS_FAST_GATE_STEPS: FastGateStep[] = CENSUS_ADMITTED_MEMBERS.map(
+  (m) => ({ job: m.job, script: m.script, reason: m.reason, boundMs: FAST_GATE_CENSUS_BOUND_MS, ciJob: "commitlint", ciCheck: "rule-checks" }),
 );
 
 /** W1-T2809 — WHICH ENUMERATION IDIOM a candidate was recognised BY. TRAP: the recognizer
@@ -2839,11 +2841,18 @@ export interface FastGateStep {
    * BEFORE checking scriptNames. E.g. site/console repos without plan/ have nothing to lint
    * (design iv); undefined retains normal execution. */
   skipWhenAbsent?: string;
+  /** W1-T12511: the ci.yml job KEY that runs this same check on every pull request, read from ci.yml per step and
+   * never set on a guess. Absent: no such job exists, and the author static step keeps the step. */
+  ciJob?: string;
+  /** W1-T12511: the check-run name ci-gate.yml requires for it: the `ciJob` step's `id:`, or the job that aggregates it. */
+  ciCheck?: string;
 }
 
 export const FAST_GATE_STEPS: FastGateStep[] = [
   {
     job: "rule-checks",
+    ciJob: "commitlint",
+    ciCheck: "rule-checks",
     script: "rule-checks:population",
     runner: "rule-checks",
     reason:
@@ -2856,21 +2865,29 @@ export const FAST_GATE_STEPS: FastGateStep[] = [
   },
   {
     job: "claims",
+    ciJob: "commitlint",
+    ciCheck: "claims",
     script: "claims",
     reason: "required-core — already a --ci-parity entry but unreachable without shelling test:ci; blocked #1352 twice in one sitting (design iv)",
   },
   {
     job: "learnings-budget-ratchet",
+    ciJob: "commitlint",
+    ciCheck: "learnings-budget-ratchet",
     script: "learnings-budget-ratchet",
     reason: "same-class — deterministic npm-script gate ci.yml's learnings-budget-ratchet job runs unconditionally, measured 0.16s",
   },
   {
     job: "jscpd",
+    ciJob: "commitlint",
+    ciCheck: "jscpd-gate",
     script: "jscpd",
     reason: "same-class — deterministic npm-script gate ci.yml's jscpd-gate job runs unconditionally, measured 0.17s",
   },
   {
     job: "comment-load-ratchet",
+    ciJob: "commitlint",
+    ciCheck: "comment-load-ratchet",
     script: "comment-load-signal",
     reason:
       "same-class — a deterministic, offline npm-script gate ci.yml's comment-load-ratchet job runs unconditionally. It " +
@@ -2882,21 +2899,29 @@ export const FAST_GATE_STEPS: FastGateStep[] = [
   },
   {
     job: "depcruise",
+    ciJob: "commitlint",
+    ciCheck: "depcruise",
     script: "depcruise",
     reason: "same-class — deterministic npm-script gate ci.yml's depcruise job runs unconditionally, measured 0.48s",
   },
   {
     job: "api-client-drift",
+    ciJob: "commitlint",
+    ciCheck: "api-client-drift",
     script: "api-client:check",
     reason: "same-class — deterministic npm-script gate ci.yml's api-client-drift job runs unconditionally, measured 0.17s",
   },
   {
     job: "no-hand-rolled-fetch",
+    ciJob: "commitlint",
+    ciCheck: "no-hand-rolled-fetch",
     script: "no-hand-rolled-fetch:check",
     reason: "same-class — deterministic npm-script gate ci.yml's no-hand-rolled-fetch job runs unconditionally, measured 0.14s",
   },
   {
     job: "source-size",
+    ciJob: "commitlint",
+    ciCheck: "source-size",
     script: "source-size-signal",
     retainSuccessOutput: true,
     reason:
@@ -2910,6 +2935,8 @@ export const FAST_GATE_STEPS: FastGateStep[] = [
   },
   {
     job: "lint-plan",
+    ciJob: "commitlint",
+    ciCheck: "lint-plan",
     script: "lint-plan:fast",
     skipWhenAbsent: "plan",
     reason:
@@ -2968,6 +2995,146 @@ export const FAST_GATE_STEPS: FastGateStep[] = [
       "`remedyFiles` (its remedy is the offending change, never a baseline file)",
   },
 ];
+
+/** W1-T12511 — one check the author path leaves to hosted CI: its local name, the ci.yml job KEY that runs it on
+ *  every pull request, and the required check-run name it reports under. */
+export interface LeftToCi {
+  job: string;
+  ciJob: string;
+  ciCheck: string;
+}
+
+/** W1-T12511 — what the author census step (counts only) leaves to CI. The census suites are rule suites the
+ *  light-gates `rule-checks` step runs, or tracked `test/**` suites the ci shards (non-source diffs) and the
+ *  coverage shards (source diffs) run; test/instrument-surface-completeness.test.ts is one of the latter. */
+export const AUTHOR_CENSUS_LEFT_TO_CI: readonly LeftToCi[] = [
+  { job: "census-precheck:census-suites", ciJob: "commitlint", ciCheck: "rule-checks" },
+  { job: "census-precheck:census-suites", ciJob: "ci", ciCheck: "ci" },
+  { job: "census-precheck:census-suites", ciJob: "coverage-ratchet", ciCheck: "coverage-ratchet" },
+  { job: "census-precheck:instrument-surface", ciJob: "ci", ciCheck: "ci" },
+  { job: "census-precheck:instrument-surface", ciJob: "coverage-ratchet", ciCheck: "coverage-ratchet" },
+];
+
+const PULL_REQUEST_BINDINGS: Readonly<Record<string, string | boolean>> = {
+  "github.event_name": "pull_request", "always()": true, "success()": true, "cancelled()": false, "failure()": false,
+  true: true, false: false,
+};
+
+/** W1-T12511 — whether a job-level `if:` can never skip its job on a pull request. It is evaluated with the event
+ *  bound to pull_request, always()/success() true and cancelled()/failure() false; any other context, a
+ *  non-boolean result or text it cannot read counts as able to skip. */
+export function jobIfRunsOnPullRequest(condition: unknown): boolean {
+  if (condition === undefined || condition === true) return true;
+  if (typeof condition !== "string") return false;
+  const tokens = condition.trim().replace(/^\$\{\{([\s\S]*)\}\}$/, "$1").match(/'[^']*'|&&|\|\||[=!]=|[A-Za-z_][\w.-]*\(\)|[!()]|[^\s!()&|=']+/g) ?? [];
+  let at = 0;
+  let unreadable = false;
+  const fail = (): boolean => { unreadable = true; return false; };
+  const take = (want?: string): string | undefined => (tokens[at] !== undefined && (want === undefined || tokens[at] === want) ? tokens[at++] : undefined);
+  const bool = (value: string | boolean): boolean => (typeof value === "boolean" ? value : fail());
+  const atom = (): string | boolean => {
+    const token = take();
+    if (token === undefined) return fail();
+    if (token === "(") {
+      const inner = or();
+      return take(")") === undefined ? fail() : inner;
+    }
+    if (token.startsWith("'")) return token.slice(1, -1);
+    return Object.hasOwn(PULL_REQUEST_BINDINGS, token) ? PULL_REQUEST_BINDINGS[token]! : fail();
+  };
+  const compare = (): string | boolean => {
+    const left = atom();
+    const op = tokens[at] === "==" || tokens[at] === "!=" ? take() : undefined;
+    return op === undefined ? left : (left === atom()) === (op === "==");
+  };
+  const unary = (): boolean => (take("!") !== undefined ? !unary() : bool(compare()));
+  const and = (): boolean => {
+    let value = unary();
+    while (take("&&") !== undefined) value = unary() && value;
+    return value;
+  };
+  function or(): boolean {
+    let value = and();
+    while (take("||") !== undefined) value = and() || value;
+    return value;
+  }
+  const result = or();
+  return !unreadable && at === tokens.length && result;
+}
+
+/** The ci.yml jobs and ci-gate.yml's REQUIRED check names the author split is confirmed against. */
+export interface AuthorCiContract {
+  jobs: Record<string, unknown>;
+  required: string[];
+  unreadable?: string;
+}
+
+function requiredChecksIn(node: unknown): string[] | undefined {
+  if (typeof node !== "object" || node === null) return undefined;
+  for (const [key, value] of Object.entries(node)) {
+    if (key === "REQUIRED" && typeof value === "string") return JSON.parse(value) as string[];
+    const found = requiredChecksIn(value);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+/** Read the contract from `repoRoot`'s workflows. An unreadable file confirms nothing, so every step stays local. */
+export function readAuthorCiContract(repoRoot: string): AuthorCiContract {
+  try {
+    const ci = parseYaml(readFileSync(join(repoRoot, ".github/workflows/ci.yml"), "utf8")) as { jobs?: Record<string, unknown> } | null;
+    const required = requiredChecksIn(parseYaml(readFileSync(join(repoRoot, ".github/workflows/ci-gate.yml"), "utf8")));
+    const jobs = ci === null || typeof ci !== "object" ? undefined : ci.jobs;
+    if (jobs === undefined || required === undefined) return { jobs: {}, required: [], unreadable: "ci.yml jobs or ci-gate.yml REQUIRED not found" };
+    return { jobs, required };
+  } catch (error) {
+    return { jobs: {}, required: [], unreadable: String((error as Error)?.message ?? error) };
+  }
+}
+
+type CiJobDoc = { name?: unknown; if?: unknown; needs?: unknown; steps?: { id?: unknown }[] };
+
+/** W1-T12511 — why `row`'s ci.yml job does not answer for it on every pull request, or undefined when it does. */
+export function ciJobRefusal(row: { ciJob: string; ciCheck?: string }, contract: AuthorCiContract): string | undefined {
+  const jobs = contract.jobs as Record<string, CiJobDoc | undefined>;
+  const job = jobs[row.ciJob];
+  if (!job) return `ci.yml has no job ${row.ciJob}${contract.unreadable ? ` (${contract.unreadable})` : ""}`;
+  if (!jobIfRunsOnPullRequest(job.if)) return `ci.yml job ${row.ciJob} has a job-level if: that can skip it on a pull request (${String(job.if)})`;
+  if (row.ciCheck === undefined) return `${row.ciJob} names no ciCheck`;
+  if (!contract.required.includes(row.ciCheck)) return `${row.ciCheck} is not a required check in ci-gate.yml`;
+  const posts = job.name === row.ciCheck || (Array.isArray(job.steps) && job.steps.some((step) => step?.id === row.ciCheck)) ||
+    Object.values(jobs).some((other) => other !== undefined && other.name === row.ciCheck && [other.needs].flat().includes(row.ciJob) && jobIfRunsOnPullRequest(other.if));
+  return posts ? undefined : `ci.yml job ${row.ciJob} reports no check named ${row.ciCheck}`;
+}
+
+/** W1-T12511 — the author path's split: the fast-gate steps its static step still runs, what it leaves to CI and
+ *  where, whether its census step may run counts only, and each `ciJob` it could not confirm (kept local). */
+export interface AuthorCiSplit {
+  staticSteps: FastGateStep[];
+  leftToCi: LeftToCi[];
+  censusCountsOnly: boolean;
+  kept: { job: string; reason: string }[];
+}
+
+export function authorCiSplit(contract: AuthorCiContract, steps: readonly FastGateStep[] = FAST_GATE_STEPS,
+  censusRows: readonly LeftToCi[] = AUTHOR_CENSUS_LEFT_TO_CI): AuthorCiSplit {
+  const kept: AuthorCiSplit["kept"] = [];
+  const staticSteps: FastGateStep[] = [];
+  const leftToCi: LeftToCi[] = [];
+  for (const step of steps) {
+    const refusal = step.ciJob === undefined ? "no ciJob" : ciJobRefusal({ ciJob: step.ciJob, ciCheck: step.ciCheck }, contract);
+    if (refusal === undefined) leftToCi.push({ job: step.job, ciJob: step.ciJob!, ciCheck: step.ciCheck! });
+    else {
+      staticSteps.push(step);
+      if (step.ciJob !== undefined) kept.push({ job: step.job, reason: refusal });
+    }
+  }
+  const censusRefusals = censusRows.map((row) => ({ job: row.job, reason: ciJobRefusal(row, contract) }))
+    .filter((r): r is { job: string; reason: string } => r.reason !== undefined);
+  kept.push(...censusRefusals);
+  const censusCountsOnly = censusRefusals.length === 0;
+  return { staticSteps, leftToCi: [...leftToCi, ...(censusCountsOnly ? censusRows : [])], censusCountsOnly, kept };
+}
 
 /** Pair a remedy path with its declaring job so the fix prompt names both (W1-T2653 design iii). */
 export interface RemedyFileForGate {
@@ -3466,6 +3633,14 @@ function censusAnswerHead(repoRoot: string): { head: string } | { unreadable: st
   }
 }
 
+/** W1-T12511: whether this fast gate is the author preflight's static stage, read from its census answer for HEAD. */
+function authorStaticStage(repoRoot: string): boolean {
+  const recorded = process.env[AUTHOR_CENSUS_ANSWERED_ENV];
+  if (!recorded) return false;
+  const head = censusAnswerHead(repoRoot);
+  return authorCensusAnswer(recorded, "head" in head ? head.head : undefined) !== undefined;
+}
+
 function censusPrecheckLeaf(repoRoot: string, spawn: PreflightSpawn, stepLog?: PreflightStepLog, countsOnly = false): CiParityLeafResult {
   const recorded = process.env[AUTHOR_CENSUS_ANSWERED_ENV];
   const head = recorded ? censusAnswerHead(repoRoot) : undefined;
@@ -3501,7 +3676,9 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
   const spawn = deps.spawn ?? defaultPreflightSpawn;
   const scriptNames = fastGateScriptNames(repoRoot, deps.packageJsonText);
   const now = deps.now ?? Date.now;
-  const gateSteps = deps.steps ?? FAST_GATE_STEPS;
+  // W1-T12511: the author's static stage (marked by its census answer for this head) runs only the steps no CI job runs.
+  const authorStatic = deps.steps === undefined && authorStaticStage(repoRoot);
+  const gateSteps = deps.steps ?? (authorStatic ? authorCiSplit(readAuthorCiContract(repoRoot)).staticSteps : FAST_GATE_STEPS);
   const timingClock = deps.timingNow ? clockFromMillisFn(deps.timingNow) : undefined;
   const timings = gateSteps.map(() => createStaticCheckTiming(spawn, timingClock));
   // W1-T8920 — in a repo that is not the harness's own, core's steps it does not hold are skipped.
@@ -3614,6 +3791,17 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
           `${FAST_GATE_CENSUS_REFERENCE_FLOOR_MS}ms, plus the margin); its own result would have PASSed. Refused by a bound ` +
           `derived from this run's own measurements, never by a written constant a growing corpus outgrows`,
       });
+    }
+  }
+  if (!consumer && !deps.light && (authorStatic || gateSteps.some(({ runner }) => runner === "rule-checks"))) {
+    const base = (authorStatic ? flagValue(process.argv.slice(2), "--from") : undefined) ?? "origin/main";
+    try {
+      const { ruleSuiteShadowLine } = require("../../scripts/record-rule-suite-reads.mjs") as {
+        ruleSuiteShadowLine(root: string, listSuites: () => string[], base: string): string;
+      };
+      console.log(ruleSuiteShadowLine(repoRoot, () => listRuleSuites(repoRoot), base));
+    } catch (error) {
+      console.log(`rule-checks: shadow unavailable: ${String(error).replace(/\s+/g, " ")}`);
     }
   }
   return {

@@ -38,6 +38,7 @@ import {
 import { checksStateFromRollup, DEFAULT_SWEEP_POLICY, deriveDisposition, runSweep, type OpenPrView, type SweepDeps } from "#test/helpers/sweep-test.js";
 import { fixCommand, routeFix, buildSweepEffects, type RegisteredFixOwnerSnapshot } from "#src/run-task.js";
 import { ghJson, type GhRateLimitReading } from "#src/lib/worker.js";
+import { configureGithubInstallationBudget } from "#src/lib/github-transport.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import type { Config } from "#src/lib/config.js";
 import { isInPlanScope } from "#src/lib/plan-architect.js";
@@ -559,6 +560,8 @@ test("createGhCallPacer: a later CLEAN result heals the gap back down to the flo
 });
 
 test("createGhCallPacer: a fresh pacer enforces the module's exported default gap and default backoff", () => {
+  // W1-T13786: with no installation budget a fresh pacer keeps the 1.5 s default; a budget would adapt it.
+  configureGithubInstallationBudget(undefined);
   const clock = fakeClock();
   const pacer = createGhCallPacer({ now: clock.now, sleepSync: clock.sleepSync });
   pacer.wait();

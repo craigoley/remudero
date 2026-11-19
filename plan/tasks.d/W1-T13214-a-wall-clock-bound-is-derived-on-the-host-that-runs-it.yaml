@@ -16,7 +16,7 @@
     - test/helpers/wall-clock-bound.ts
     - test/status-board-reads-rotations.test.ts
     - test/infra/a-wall-clock-bound-is-derived-on-the-host-that-runs-it.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The wall-clock helper file exports a second function that returns a bound derived from a calibration run in the same process on the same host, with the calibration time and where the bound came from, and returns the caller's fixed number only when the calibration cannot run"

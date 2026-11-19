@@ -13,8 +13,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { readOriginMainSha } from "#src/lib/inbox.js";
 import { ledgerPathFor } from "#src/lib/ledger-path.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { productionStuckStatePorts, opsRecordDigest, runStuckStateGardener } from "#src/lib/stuck-state-gardener.js";
 import { approveCommand, approveParkedTask, namesATask } from "#src/run-task.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 /**
  * W1-T3206 — `verify: human` WAS A ONE-WAY PARK WITH NO RELEASE.
@@ -477,8 +481,6 @@ test("W1-T13386 criterion 3: approve names an unreadable ops catalog, writes not
   const cases: Array<{ name: string; host: Parameters<typeof hostWithSecondCatalog>[1]; reason: RegExp; reads: boolean }> = [
     { name: "the transport fails", host: { transport: "down" }, reason: /\(ops-unreadable\)/, reads: true },
     { name: "the host file that names the catalog is not JSON", host: { destination: "{not json" }, reason: /\(destination-unreadable\)/, reads: false },
-    { name: "the catalog repeats a public id, so the tick composes no plan from the two", host: { opsText: shardText(OPS_ID) + shardText(PUBLIC_ID) },
-      reason: /\(compose-duplicate_task_id\)/, reads: true },
   ];
   const everything = everythingSaid(t);
   for (const { name, host: shape, reason, reads } of cases) {
@@ -493,10 +495,104 @@ test("W1-T13386 criterion 3: approve names an unreadable ops catalog, writes not
       assert.match(said, reason, `the refusal names the outcome — ${label}`);
       assert.match(said, new RegExp(`cannot release '${OPS_ID}'.*cannot be read`), label);
       assert.doesNotMatch(said, /unknown task/, `an unread catalog is not an absent task — ${label}`);
-      assert.equal(host.wroteAnything(), false, `no row and no record — ${label}`);
+      // W1-T13750: a composition refusal writes its approve.release_refused row for the stuck-state gardener; still no release and no record.
+      const refusalRow = /compose-/.test(reason.source);
+      assert.deepEqual(host.rawLines().map(line => String((JSON.parse(line) as Record<string, unknown>).step)), refusalRow ? ["approve.release_refused"] : [], `no release row — ${label}`);
+      assert.equal(host.wroteAnything(), refusalRow, `no row and no record — ${label}`);
+      if (refusalRow) assert.throws(() => host.durableRecords(), /ENOENT/, `no durable record — ${label}`);
       assert.equal(host.calls.length > 0, reads, `control: the catalog read ${reads ? "was" : "was not"} attempted — ${label}`);
     }
   }
+});
+
+test("W1-T13749 criterion 6: approve refuses an ops task held by its own edge, naming the reason and the edge, and releases the sound task beside a repeated public id", async t => {
+  const everything = everythingSaid(t);
+  for (const handed of [true, false]) {
+    const host = hostWithSecondCatalog(t, { opsText: shardText(OPS_ID).replace("depends_on: []", `depends_on: [${NOWHERE_ID}]`) });
+    const from = everything.length;
+    const code = handed
+      ? await approveCommand([OPS_ID], { config: host.config, planPath: host.planPath, taskLookup: { api: host.api } })
+      : await approveAsTheHostRunsIt(host, [OPS_ID]);
+    const said = everything.slice(from).join("\n"), label = `${handed ? "handed" : "as the host runs it"}: ${said}`;
+    assert.equal(code, 1, label);
+    assert.match(said, new RegExp(`cannot release '${OPS_ID}': it is held by its own edge \\(invalid_cross_catalog_dependency: ${OPS_ID} -> ${NOWHERE_ID}\\) — nothing released`), label);
+    assert.doesNotMatch(said, /unknown task|cannot be read/, label);
+    assert.equal(host.wroteAnything(), false, `no row and no record — ${label}`);
+  }
+  // The catalog repeats the public id: that id is held, and the ops task beside it is released as the tick pins it.
+  const host = hostWithSecondCatalog(t, { opsText: shardText(OPS_ID) + shardText(PUBLIC_ID) }), from = everything.length;
+  const tick = await host.tick();
+  assert.equal(await approveCommand([OPS_ID], { config: host.config, planPath: host.planPath, taskLookup: { api: host.api } }), 0,
+    everything.slice(from).join("\n"));
+  assert.match(everything.slice(from).join("\n"), new RegExp(`${OPS_ID} RELEASED`));
+  assert.equal(host.releaseRows(OPS_ID)[0]?.release_pin, tick.pin, "pinned from the record the tick hashes");
+});
+
+test("W1-T13750 criterion 1: the real approve and gardener replay the held edge against advancing origin/main", async t => {
+  const taskId = "W1-T13599", dependency = "W1-T13733";
+  const host = hostWithSecondCatalog(t, { opsText: shardText(taskId).replace("depends_on: []", `depends_on: [${dependency}]`) });
+  const checkout = gitRepo({ scope: t, seedCommit: false });
+  const planPath = join(checkout.dir, "plan", "tasks.yaml");
+  const publicText = shardText(PUBLIC_ID);
+  const publishMain = (text: string) => {
+    writeFileSync(planPath, text);
+    checkout.git("add", "plan/tasks.yaml");
+    checkout.git("commit", "--quiet", "--allow-empty", "-m", "fixture main");
+    const sha = checkout.git("rev-parse", "HEAD");
+    checkout.git("update-ref", "refs/remotes/origin/main", sha);
+    return sha;
+  };
+  mkdirSync(join(checkout.dir, "plan"));
+  const boot = publishMain(publicText);
+  const publicCommit = publishMain(publicText);
+  checkout.git("checkout", "--quiet", "--detach", boot);
+  const ops = await readOpsCatalogSnapshotAsync({ repository: OPS_REPOSITORY }, host.api);
+  const opsTask = ops.plan!.byId.get(taskId)!;
+  host.calls.length = 0;
+  const approve = (args: string[]) => approveCommand(args, { config: host.config, planPath, taskLookup: { api: host.api } });
+  const said = everythingSaid(t);
+  assert.equal(await approve([taskId]), 1, said.join("\n"));
+  assert.match(said.join("\n"), /invalid_cross_catalog_dependency: W1-T13599 -> W1-T13733/);
+  assert.equal(host.calls.filter(path => path === `repos/${OPS_REPOSITORY}`).length, 1, "the row uses the snapshot that made the decision");
+  const rows = () => host.rawLines().map(line => JSON.parse(line) as Record<string, unknown>);
+  const byStep = (step: string) => rows().filter(row => row.step === step);
+  const refusal = byStep("approve.release_refused");
+  assert.equal(refusal.length, 1, "the production held branch writes exactly one refusal");
+  assert.deepEqual(
+    [refusal[0]!.task_id, refusal[0]!.class, refusal[0]!.reason, refusal[0]!.edge, refusal[0]!.public_commit, refusal[0]!.ops_commit, refusal[0]!.ops_record_digest],
+    [taskId, "release-compose", "held-invalid_cross_catalog_dependency", `${taskId} -> ${dependency}`, publicCommit, ops.binding?.commit, opsRecordDigest(opsTask)],
+  );
+  assert.equal(existsSync(host.durablePath), false, "refusal writes no durable release");
+  const retries: string[][] = [];
+  const escalations: unknown[] = [];
+  const ports = productionStuckStatePorts({
+    stateDir: host.stateDir, api: host.api, gardenNames: [],
+    publicRoot: checkout.dir, publicMainCommit: () => readOriginMainSha(checkout.dir),
+    destinationRead: async () => undefined,
+    log: (step, fields) => appendLedger(ledgerPathFor(host.config), { run_id: "GARDEN", task_id: taskId, ...fields, step }),
+    escalate: item => { escalations.push(item); return null; },
+    approve: async (...args) => { retries.push(args); return approve(args); },
+  });
+  await runStuckStateGardener(ports);
+  assert.equal(byStep("stuck_state.held").length, 1);
+  const heldRows = host.rawLines();
+  await runStuckStateGardener(ports);
+  publishMain(publicText);
+  await runStuckStateGardener(ports);
+  assert.deepEqual(host.rawLines(), heldRows, "an unchanged cause writes no further rows");
+  assert.deepEqual(retries, []);
+
+  publishMain(publicText + shardText(dependency));
+  checkout.git("checkout", "--quiet", "--detach", boot);
+  assert.equal(loadPlan(planPath).byId.has(dependency), false, "the boot checkout still lacks the dependency");
+  await runStuckStateGardener(ports);
+  await runStuckStateGardener(ports);
+  assert.deepEqual(retries, [[taskId]]);
+  assert.equal(host.releaseRows(taskId).length, 1);
+  assert.equal(host.durableRecords()[taskId]?.pin, operatorReleasePin(opsTask));
+  assert.deepEqual(byStep("stuck_state.retried").map(row => row.exit_code), [0]);
+  assert.deepEqual(byStep("stuck_state.cleared").map(row => row.retry), ["approve"]);
+  assert.deepEqual(escalations, []);
 });
 
 test("W1-T13386 criterion 4: an id in neither catalog is refused as unknown and nothing is written", async t => {

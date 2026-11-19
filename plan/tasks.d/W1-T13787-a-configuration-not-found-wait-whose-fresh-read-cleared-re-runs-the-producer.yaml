@@ -1,0 +1,91 @@
+- id: W1-T13787
+  title: "A configuration-not-found wait whose fresh security read no longer shows the warning re-runs the trusted security-merge-policy producer once at that head: on PR 19489 GitHub re-judged its CodeQL check after the producer's last trigger, nothing woke the producer, and the error status stood 58 minutes until a person re-ran CodeQL"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # it adds one GitHub write (a workflow dispatch of the trusted producer) to the security hold path; the sweep must never write the status itself or grant anything, and the T13470 capture and T13663 escalation must not change
+  origin: "operator-session#fleet-small-issues-2026-11-19"
+  plan_refs:
+    - W1-T11776
+    - W1-T9626
+  files:
+    - src/lib/sweep.ts
+    - src/lib/ledger.ts
+    - test/github/a-configuration-not-found-wait-whose-fresh-read-cleared-re-runs-the-producer.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "invariant:stale-status-wakes-the-producer — observeCodeqlConfigurationWarning, for a PR whose posted security-merge-policy status reads unknown codeql-configuration-not-found, whose fresh readSecurityMergeObservation at the same head answers a reason other than codeql-configuration-not-found with no configurationWarning, calls dispatchSecurityMergeProducer once with that PR, writes one security.producer_redispatched row naming the PR, head and fresh decision, and its returned reason names the fresh decision and the dispatch"
+      proof: "grep: W1-T13787 criterion 1 in test/github/a-configuration-not-found-wait-whose-fresh-read-cleared-re-runs-the-producer.test.ts"
+    - claim: "invariant:once-per-head — a second pass over the same head with a security.producer_redispatched row already in the ledger lines dispatches nothing and its reason says the producer was already re-run at this head; a new head dispatches again"
+      proof: "grep: W1-T13787 criterion 2 in test/github/a-configuration-not-found-wait-whose-fresh-read-cleared-re-runs-the-producer.test.ts"
+    - claim: "invariant:no-dispatch-without-evidence — no dispatch is made when the fresh read still carries the configurationWarning, answers another head, or throws; and when the dispatch throws, the row is still written once, the reason names the failure, and the wait disposition is unchanged (no fix round, no strike)"
+      proof: "grep: W1-T13787 criterion 3 in test/github/a-configuration-not-found-wait-whose-fresh-read-cleared-re-runs-the-producer.test.ts"
+    - claim: "the production sweep deps wire dispatchSecurityMergeProducer to a POST of actions/workflows/security-merge-policy.yml/dispatches on ref main with the pr_number input, and a test drives buildSweepEffects' real wiring through its gh runner seam and sees exactly that argument list"
+      proof: "grep: W1-T13787 criterion 4 in test/github/a-configuration-not-found-wait-whose-fresh-read-cleared-re-runs-the-producer.test.ts"
+    - claim: "the call site in observeCodeqlConfigurationWarning calls the new seam"
+      proof: "grep: dispatchSecurityMergeProducer( in src/lib/sweep.ts"
+    - claim: "the new ledger step is declared"
+      proof: "grep: \"security\\.producer_redispatched\" in src/lib/ledger.ts"
+  rationale: |
+    WHY: a CodeQL configuration-not-found hold stayed for 58 minutes after GitHub had already cleared it.
+    PR 19489 (head 41a67e1, opened 2026-11-18 20:12Z). The CodeQL workflow ran all three languages:
+    actions done 20:14:26, python 20:14:49, javascript-typescript 20:20:26. GitHub's one trusted CodeQL
+    check (github-advanced-security, id 135100777654) reads "N configurations not found" until every
+    category on main has an upload for the PR. The producer's last trigger, the workflow_run completed
+    event, ran at 20:20:41, before GitHub re-judged the last upload, and posted
+    `unknown: codeql-configuration-not-found`. GitHub later re-judged the check in place (it now reads "No
+    new alerts in code changed by this pull request"), but no event ran the producer again.
+    At 21:18:21 the operator account re-ran CodeQL (attempt 2; no fleet ledger row). Its requested event
+    ran the producer, which posted `safe` at 21:18:53, before attempt 2 had uploaded anything (first job
+    done 21:19:20). So the check had already refreshed; only the wake was missing.
+    THE FLEET SAW IT. W1-T13470's observeCodeqlConfigurationWarning (src/lib/sweep.ts) ran on six full
+    sweep passes between 20:42 and 21:31Z. It wrote no capture row and its reasons carried no notes. That
+    means the fresh read at this head did not see the warning: a throw or another head would have added
+    a note. The function then does nothing.
+    MEASURED over the week (final heads of 1,000 PRs created since 2026-11-11, statuses read with gh):
+    11 heads had the neutral CodeQL state (9 under the older reason security-analysis-failed-or-unrecognized,
+    2 under the new name). 10 cleared by themselves in 46 s to 5 min 44 s, when a later CodeQL event re-ran
+    the producer. Only 19489 stuck.
+    NOT COVERED: W1-T13470 (merged) captures; W1-T13663 (merged 2026-11-19, #19510) escalates once when
+    GitHub never re-judges. Both act only while the fresh read still shows the warning. W1-T11776 (queued)
+    adds a check_run trigger to the producer; its falsifier says GitHub may not send that event when a
+    completed check is updated in place. This task needs no GitHub event.
+  design: |
+    INVARIANT stale-status-wakes-the-producer: when the posted status reads configuration-not-found but the trusted fresh read at the same head no longer does, the sweep asks the trusted producer to run again for that PR.
+    INVARIANT once-per-head: the sweep dispatches the producer at most once per PR head.
+    INVARIANT no-dispatch-without-evidence: the sweep never dispatches on a read that failed, answered another head, or still shows the warning, and it never writes the security status or grants a merge itself.
+    1. Add an optional SweepDeps seam `dispatchSecurityMergeProducer?: (pr: OpenPrView) => Promise<void>` next
+       to readSecurityMergeObservation, listed in the same two key lists (W1-T13470's entries). Its real wiring
+       in buildSweepEffects is one gh call through the existing ghRunImpl: `api -X POST
+       repos/<owner>/<repo>/actions/workflows/security-merge-policy.yml/dispatches -f ref=main -f
+       inputs[pr_number]=<n>`. The producer's workflow_dispatch branch (scripts/security-merge-producer.mjs)
+       already takes pr_number and re-derives everything from trusted metadata.
+    2. In observeCodeqlConfigurationWarning, after the head check: if `warning === undefined` and
+       observed.decision.reason !== CODEQL_CONFIGURATION_NOT_FOUND and there is no security.producer_redispatched
+       row for this PR and head in `lines`, write that row first (so a crash cannot repeat it), then call the
+       seam. A thrown dispatch is named in the reason and not retried at this head.
+    3. Declare the step in src/lib/ledger.ts beside the two W1-T13470 steps.
+    4. No time bound, env var or config key. The producer workflow, classifier and adapter do not change.
+    5. src/lib/sweep.ts has a comment cap (test/sweep/compress-src-lib-sweep-ts.test.ts): add as few comment
+       lines as possible. Re-run W1-T13470's and W1-T13663's suites in test/github/.
+  falsifier: |
+    At origin/main criterion 1 fails: the function returns the plain wait reason and dispatches nothing.
+    Dispatch whenever the posted status reads the reason, without the fresh read: criterion 3 sees a
+    dispatch while the warning still stands. Key the guard on the PR only: criterion 2's new head
+    dispatches nothing.
+    GUARDS: test/github/a-codeql-configuration-not-found-warning-is-captured-and-re-observed-not-fixed.test.ts
+    and test/github/a-codeql-configuration-not-found-head-github-never-re-judges-is-escalated-once.test.ts
+    pass unchanged.
+  note: |
+    reservation hand-off: run-unfiled-1795065820000 -> run-unfiled-1795065953000
+    Ids W1-T13787, W1-T13789 and W1-T13791 were reserved with ~/rmd-work/bin/reserve-id.sh for
+    run-unfiled-1795065820000. A second filer was on that branch name at the same time, so this filing
+    ships from run-unfiled-1795065953000.
+    Filed in the public plan. reserve-id and next-task-id mint ids only and do not choose a catalog.
+    Proof on the host after it ships: a configuration-not-found wait whose check has refreshed is followed
+    by a security.producer_redispatched row and a producer success within minutes.

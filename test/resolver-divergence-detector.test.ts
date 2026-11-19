@@ -236,7 +236,7 @@ test("resolvePlanCriteriaForReview is wired at exactly ZERO call sites now — t
   );
   assert.match(
     runTaskSrc,
-    /resolvePlanCriteriaAtHeadAsync\(body, subjectRepoDir, "plan\/tasks\.yaml", "origin\/main"\)[\s\S]{0,120}headLacksOwnTaskRecord\(resolved, atMain\)/,
+    /resolvePlanCriteriaAtHeadAsync\(body, subjectRepoDir, "plan\/tasks\.yaml", "origin\/main", undefined,\s*keepsUnseenDependency\)[\s\S]{0,120}headLacksOwnTaskRecord\(resolved, atMain\)/,
     "the fifth resolver call is the review command's origin/main read feeding headLacksOwnTaskRecord",
   );
   assert.match(

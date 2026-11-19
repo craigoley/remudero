@@ -1,0 +1,92 @@
+- id: W1-T13792
+  title: "A main bisection's CI probe is judged on the red it bisects, and coverage-ratchet accepts a workflow_dispatch probe run, so a probe no longer always reads red"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the probe verdict names the culprit the lane fixes or reverts; a probe that always reads red blames the oldest commit in the span
+  origin: "operator-session#main-red-19469-2026-11-18"
+  plan_refs:
+    - W1-T7760
+    - W1-T13136
+    - W1-T13790
+  files:
+    - src/lib/main-health-rung.ts
+    - .github/workflows/ci.yml
+    - test/a-main-bisection-probe-is-judged-on-the-red-it-bisects.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "Replaying the 2026-11-18 bisection (red d23fd07de on ci and ci-shard, green 58be942f8, span 12f14d934, 22cb974e3, 73fef8b1b), a completed CI probe of 22cb974e3 whose only red required check is coverage-ratchet and whose ci-shard jobs are green is recorded as green for this red, and the lane locates 73fef8b1b (#19469), not 12f14d934"
+      proof: "grep: W1-T13792 criterion 1 in test/a-main-bisection-probe-is-judged-on-the-red-it-bisects.test.ts"
+    - claim: "A probe that is red on the red's own checks with the same log detail (mainRedSignaturesMatch on the red's check set) is recorded red"
+      proof: "grep: W1-T13792 criterion 2 in test/a-main-bisection-probe-is-judged-on-the-red-it-bisects.test.ts"
+    - claim: "invariant:probe-judged-on-its-red — a probe red on the red's checks with different log detail, or with one of the red's checks still pending, cancelled or unread, is recorded inconclusive, never red or green, and the main.repair.probe_concluded row names the probe's failing checks and why it did not count"
+      kind: guard
+      proof: "grep: W1-T13792 criterion 3 in test/a-main-bisection-probe-is-judged-on-the-red-it-bisects.test.ts"
+    - claim: "The coverage-ratchet class check, run as the workflow step's own script over shard class files that read workflow_dispatch:SOURCE, exits 0 and outputs class SOURCE"
+      proof: "grep: W1-T13792 criterion 4 in test/a-main-bisection-probe-is-judged-on-the-red-it-bisects.test.ts"
+    - claim: "invariant:unknown-class-still-refused — the same step still exits 1 for a class it does not list (for example schedule:SOURCE) and for shards that disagree"
+      kind: guard
+      proof: "grep: W1-T13792 criterion 5 in test/a-main-bisection-probe-is-judged-on-the-red-it-bisects.test.ts"
+    - claim: "The coverage-ratchet shard-class whitelist lists the workflow_dispatch class"
+      proof: "grep: workflow_dispatch:SOURCE in .github/workflows/ci.yml"
+    - claim: "locateOffender judges a CI probe through one verdict function that compares it with the current red"
+      proof: "grep: probeVerdictForRed( in src/lib/main-health-rung.ts"
+  rationale: |
+    WHY: on 2026-11-18 the red-main lane blamed the wrong merge. Main went red at d23fd07de after #19469
+    (73fef8b1b) changed a test label; the red was ci and ci-shard (gate-probe-native-evidence.test.ts).
+    MEASURED, core ledger (~/rmd-state2/state) and GitHub Actions:
+    - main.repair.probe_concluded 20:06:14Z: CI probe of 22cb974e3 (run 44382839009) verdict red,
+      failing_checks [coverage-ratchet]. 20:53:47Z: probe of 12f14d934 (run 44391399141) verdict red,
+      failing_checks [coverage-ratchet]. In both runs every ci-shard job passed; coverage-ratchet was the only
+      failed job.
+    - Both commits merged before #19469 (first-parent order 58be942f8 green, 12f14d934, 22cb974e3, 73fef8b1b,
+      d23fd07de). main.repair.located at 20:56:06Z named offending_sha 12f14d934 (#19468, a feedback-filings
+      landing). The fix branch was run-main-repair-12f14d9342d8-..., and #19502 opened at 21:16Z.
+    - The coverage-ratchet failure in both probes: "coverage-ratchet: coverage-shard-1 carried unrecognised
+      class metadata 'workflow_dispatch:SOURCE'." Every rmd-attribution probe run since 2026-10-22 has failed
+      (9 of 9: 39872179570, 40033472084, 40036319239, 40603527829, 42434634972, 42436705141, 43728060756,
+      44382839009, 44391399141) and coverage-ratchet failed in each. W1-T13136's rationale records the same
+      shape for 580877d7c (probe 43728060756 red on coverage-ratchet and test-slow).
+    READ at origin/main 3e6597e95:
+    - src/lib/main-health-rung.ts locateOffender: a completed CI probe is judged by
+      mainHealthFromRollup(probe.sha, jobs, required) and is red when ANY required check is red. The current
+      red (ctx.red, a MainRedSignature) is not compared. So a probe is red whenever coverage-ratchet refuses
+      the dispatch class, and planMainBisection names the oldest probed commit.
+    - .github/workflows/ci.yml, coverage-ratchet "Require downloaded coverage shard artifacts" step: the class
+      whitelist lists pull_request:*, merge_group:* and push:SOURCE only. A probe runs CI by
+      workflow_dispatch on an rmd-attribution ref, so its shards write workflow_dispatch:SOURCE and the step
+      exits 1. The later steps read only the class output, not the event.
+  design: |
+    INVARIANT probe-judged-on-its-red: a CI probe counts as red for a bisection only when it is red on that
+    red's own checks with matching detail, and as green only when all of that red's checks concluded green.
+    INVARIANT unknown-class-still-refused: coverage-ratchet still refuses a class marker it does not list and
+    shards that disagree.
+    1. Add probeVerdictForRed(judged, red, failures) in src/lib/main-health-rung.ts and call it from
+       locateOffender for a completed CI probe. It restricts the probe's judged failing checks to the red's
+       checks (the same check-name normalisation mainRedSignature uses, so ci-shard (1/8) reads as ci-shard).
+       Build the probe's signature with mainRedSignature from those checks and the probe's CI failures when
+       the probe reader can read them, and compare it with ctx.red through mainRedSignaturesMatch. Red when
+       they match; green when every check in ctx.red concluded green on the probe, whatever other required
+       checks did; inconclusive otherwise (detail differs, or one of the red's checks is pending, cancelled
+       or unread). The probe_concluded row keeps failing_checks (all of them) and adds counted_checks and,
+       when inconclusive, a reason.
+    2. ci.yml coverage-ratchet class whitelist: add workflow_dispatch:PLAN_ONLY, DOCS_ONLY, TEST_ONLY,
+       NO_SRC and SOURCE, as merge_group was added in W1-T4406. No other step changes.
+    3. The test extracts that step's run script from ci.yml and runs it with bash over a temporary shard
+       directory, as test/the-full-suite-runs-in-the-merge-queue.test.ts reads the same whitelist; the rung
+       criteria drive buildMainHealthRung with a fake probe reader and ledger fixture, as
+       test/a-red-main-is-attributed-by-its-failing-tests-run-locally.test.ts does.
+    src/lib/main-health-rung.ts is over 3,000 lines: run npm run census:source-size.
+  falsifier: |
+    Keep judging a probe on every required check: criterion 1 fails (12f14d934 is located). Count a probe red
+    on other detail as red: criterion 3 fails. Leave the whitelist as is: criterion 4 fails. Accept any
+    event prefix: criterion 5 fails.
+  note: |
+    Filed from an operator analysis session of the 2026-11-18 red main, with W1-T13788 (suite selection) and
+    W1-T13790 (the failing file a red names). W1-T13790 makes local bisection run the right file, so CI
+    probes are needed less often; this task makes them right when they run.

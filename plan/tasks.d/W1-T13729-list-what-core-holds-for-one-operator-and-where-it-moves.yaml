@@ -14,7 +14,7 @@
   files:
     - docs/research/what-core-holds-for-one-operator.md
     - docs/docs-index.json
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The report lists each file in core that serves one operator or one fleet's instances, with every reader in code and the symbol that reads it"

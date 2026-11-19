@@ -16,7 +16,7 @@
   files:
     - scripts/fleet-heartbeat.sh
     - test/daemon/a-beat-measures-its-temp-leftovers-in-one-bounded-walk.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The number of measuring commands a beat starts for its temp leftovers does not grow with the number of leftover entries: a temp root holding hundreds of matching entries is measured with the same count of commands as one holding three"

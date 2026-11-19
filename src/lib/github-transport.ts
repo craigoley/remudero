@@ -640,6 +640,8 @@ export async function ghLinesAsync(
   catch (err) { noteInstallationRefusal(err); throw err; }
 }
 
+/** W1-T13786: the read gap of a process with no installation budget, the longest gap wait a synchronous read
+ *  may sleep on the daemon loop, and the broker's first guess. A process with a budget takes the budget's gap. */
 export const DEFAULT_GH_PACE_MIN_GAP_MS = 1_500;
 
 /** PRIMARY CONTROL: a rate-limit signal widens pacing until a later clean result narrows it again. */
@@ -683,6 +685,13 @@ export function githubInstallationBudget(): InstallationBudget {
 
 export function configureGithubInstallationBudget(budget: InstallationBudget | undefined): void {
   processInstallationBudget = budget ?? createInstallationBudget({ consumers: undefined, clock: systemClock });
+}
+
+/** W1-T13786: the normal read gap. Only a process with an installation budget gets the budget's gap;
+ *  one with none (a hand run, the interactive token) keeps {@link DEFAULT_GH_PACE_MIN_GAP_MS}. */
+function normalGhReadGapMs(): number {
+  const budget = githubInstallationBudget();
+  return budget.consumers === undefined ? DEFAULT_GH_PACE_MIN_GAP_MS : budget.readGapMs();
 }
 
 /** The daemon drains rows that either its own thread or its read worker recorded. */
@@ -751,7 +760,7 @@ export function createGhCallPacer(
     sleep?: (ms: number) => Promise<void>;
   } = {},
 ): GhCallPacer {
-  const minGapMs = opts.minGapMs ?? DEFAULT_GH_PACE_MIN_GAP_MS;
+  const fixedGapMs = opts.minGapMs;
   const rateLimitGapMs = opts.rateLimitGapMs ?? DEFAULT_GH_PACE_RATE_LIMIT_GAP_MS;
   const lowWaterFraction = opts.lowWaterFraction ?? DEFAULT_GH_PACE_LOW_WATER_FRACTION;
   const floorFraction = opts.floorFraction ?? DEFAULT_GH_PACE_FLOOR_FRACTION;
@@ -759,10 +768,15 @@ export function createGhCallPacer(
   const blockingSleep = opts.sleepSync ?? defaultBlockingSleepSync;
   const sleepSync = loopSafeGhSleep(blockingSleep);
   // W1-T12057: only the gap wait may sleep on the daemon loop, and only up to this pacer's normal gap.
-  const gapSleepSync = loopSafeGhSleep(blockingSleep, minGapMs);
+  const gapSleepSync = loopSafeGhSleep(blockingSleep, fixedGapMs ?? DEFAULT_GH_PACE_MIN_GAP_MS);
   const sleep = opts.sleep ?? defaultTimerSleep;
   let lastCallAt: number | undefined;
-  let gapMs = minGapMs;
+  let widened = false;
+  // W1-T13786: the normal gap is read at each wait; a widened gap is never shorter than it.
+  const gapMs = (): number => {
+    const normalMs = fixedGapMs ?? normalGhReadGapMs();
+    return widened ? Math.max(rateLimitGapMs, normalMs) : normalMs;
+  };
   let standDown: GhBudgetReading | undefined;
   const takeStandDown = (): void => {
     if (!standDown) return;
@@ -775,14 +789,14 @@ export function createGhCallPacer(
     wait() {
       takeStandDown();
       if (lastCallAt !== undefined) {
-        const remaining = gapMs - (now() - lastCallAt);
+        const remaining = gapMs() - (now() - lastCallAt);
         if (remaining > 0) gapSleepSync(remaining);
       }
       lastCallAt = now();
     },
     async waitAsync() {
       takeStandDown();
-      const remaining = lastCallAt === undefined ? 0 : gapMs - (now() - lastCallAt);
+      const remaining = lastCallAt === undefined ? 0 : gapMs() - (now() - lastCallAt);
       // The slot is claimed before the timer, so a second waiter queues behind it rather than beside it.
       lastCallAt = now() + Math.max(0, remaining);
       if (remaining > 0) await sleep(remaining);
@@ -790,7 +804,7 @@ export function createGhCallPacer(
     recordResult(rateLimited, budget) {
       if (rateLimited) githubInstallationBudget().noteThrottle("refused");
       const lowWater = budget !== undefined && budget.limit > 0 && budget.remaining <= budget.limit * lowWaterFraction;
-      gapMs = rateLimited || lowWater ? rateLimitGapMs : minGapMs;
+      widened = rateLimited || lowWater;
       standDown = budget !== undefined && budget.limit > 0 && budget.remaining <= budget.limit * floorFraction ? budget : undefined;
     },
     sleepSync,
@@ -1008,18 +1022,21 @@ export async function paceGhEntryAsync<T>(
 export const DEFAULT_GH_READ_CADENCE_S = 180;
 
 /** A short, cross-process transport gap protects the secondary limiter without making a normal
- * daemon sweep self-refuse after its first read. This is not another 180-second budget window. */
+ * daemon sweep self-refuse after its first read. This is not another 180-second budget window.
+ * W1-T13786: with no override the gap is the installation budget's read gap, and this constant is
+ * only the longest shared-gap wait a synchronous read may sleep on the daemon loop. */
 export const DEFAULT_GH_SHARED_READ_GAP_MS = DEFAULT_GH_PACE_MIN_GAP_MS;
 export const GH_SHARED_READ_GAP_ENV = "RMD_GH_SHARED_READ_GAP_MS";
 const GH_CADENCE_LOCK_WAIT_MS = 25;
 const GH_CADENCE_LOCK_MAX_WAIT_MS = 1_000;
 const GH_CADENCE_LOCK_STALE_MS = 30_000;
 
-function resolveGhSharedReadGapMs(env: NodeJS.ProcessEnv): number {
+/** The shared read gap and the longest wait on it that the daemon loop may sleep. */
+function resolveGhSharedReadGapMs(env: NodeJS.ProcessEnv): { gapMs: number; loopBoundMs: number } {
   const raw = env[GH_SHARED_READ_GAP_ENV];
-  if (raw === undefined || raw.trim() === "") return DEFAULT_GH_SHARED_READ_GAP_MS;
-  const parsed = Number(raw);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_GH_SHARED_READ_GAP_MS;
+  const parsed = raw === undefined || raw.trim() === "" ? Number.NaN : Number(raw);
+  if (Number.isFinite(parsed) && parsed >= 0) return { gapMs: parsed, loopBoundMs: parsed };
+  return { gapMs: normalGhReadGapMs(), loopBoundMs: DEFAULT_GH_SHARED_READ_GAP_MS };
 }
 
 /** Further reads allowed after one enforce-mode invocation's first read passes the full floor.
@@ -1769,6 +1786,8 @@ interface GhReadCadencePlan {
   coordinatedStampPath: string | undefined;
   /** The longest shared-gap wait this read can be given. */
   sharedReadGapMs: number;
+  /** W1-T13786: the longest shared-gap wait the daemon loop may sleep. */
+  sharedReadGapLoopBoundMs: number;
   sharedGapRemainingMs(stampPath: string): number;
   stampAfterGap(stampPath: string): void;
   /** Removes this read's ticket: an admitted, refused or interrupted waiter never holds the queue. */
@@ -1792,7 +1811,7 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
   const cooldown = env.RMD_GH_COOLDOWN_S;
   const windowS = cooldown !== undefined && /^[0-9]+$/.test(cooldown) ? Number(cooldown) : DEFAULT_GH_READ_CADENCE_S;
   const windowMs = windowS * 1000;
-  const sharedReadGapMs = resolveGhSharedReadGapMs(env);
+  const { gapMs: sharedReadGapMs, loopBoundMs: sharedReadGapLoopBoundMs } = resolveGhSharedReadGapMs(env);
   let mode = resolveGhTransportFloorMode(env);
   /** An invocation's first read under enforce or wait: floored from the counted stamps; stamps `.gated`. */
   let gatedFirst = false;
@@ -1927,6 +1946,7 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
     mustWait: () => waiter,
     coordinatedStampPath: isWrite || isExempt ? undefined : stampPath,
     sharedReadGapMs,
+    sharedReadGapLoopBoundMs,
     sharedGapRemainingMs: (path) => {
       // The 180-second floor is intentionally advisory for daemon multi-read sweeps. A bounded
       // shared gap still protects the secondary limiter across sibling processes without making a
@@ -2012,7 +2032,7 @@ export function applyGhReadCadence(args: readonly string[], deps: GhReadCadenceD
   }
   const blockingSleep = deps.sleepSync ?? defaultBlockingSleepSync;
   // W1-T12123: on the daemon loop a wait of at most the shared read gap is slept. A longer wait is refused.
-  const sleepSync = loopSafeGhSleep(blockingSleep, plan.sharedReadGapMs);
+  const sleepSync = loopSafeGhSleep(blockingSleep, plan.sharedReadGapLoopBoundMs);
   // W1-T12057: a lock wait may sleep on the daemon loop, because tryGhCadenceLock already bounds the total.
   const lockSleepSync = loopSafeGhSleep(blockingSleep, GH_CADENCE_LOCK_MAX_WAIT_MS);
   // W1-T12123: this process's own async read holds the lock and needs the loop to release it.
