@@ -562,12 +562,13 @@ function launchdDigestCheckout(
 ): string | null {
   const args = launchdPrintBlock(output.split(/\r?\n/), indent, "arguments") ?? [];
   const repoRootIndex = args.indexOf("--repo-root");
-  if (repoRootIndex >= 0) {
-    const override = args[repoRootIndex + 1];
-    if (!override) return null;
-    const path = readLaunchdPath(resolve(workingDirectory ?? "/", override));
-    if (path.state !== "present") return null;
-    try {
+  const explicitRepoRoot = repoRootIndex >= 0;
+  try {
+    if (explicitRepoRoot) {
+      const override = args[repoRootIndex + 1];
+      if (!override) return null;
+      const path = readLaunchdPath(resolve(workingDirectory ?? "/", override));
+      if (path.state !== "present") return null;
       let gitRoot = path.resolved;
       while (!existsSync(join(gitRoot, ".git"))) {
         const parent = dirname(gitRoot);
@@ -576,16 +577,11 @@ function launchdDigestCheckout(
       }
       const root = hostWorktreeGit(gitRoot, ["rev-parse", "--show-toplevel"], { timeout: 1_000 }).trim();
       return isAbsolute(root) ? realpathSync(root) : path.resolved;
-    } catch (error) {
-      void error;
-      return path.resolved;
     }
-  }
 
-  if (!workingDirectory || !isAbsolute(workingDirectory)) return null;
-  const cwd = readLaunchdPath(workingDirectory);
-  if (cwd.state !== "present") return null;
-  try {
+    if (!workingDirectory || !isAbsolute(workingDirectory)) return null;
+    const cwd = readLaunchdPath(workingDirectory);
+    if (cwd.state !== "present") return null;
     let gitRoot = cwd.resolved;
     while (!existsSync(join(gitRoot, ".git"))) {
       const parent = dirname(gitRoot);
@@ -595,6 +591,7 @@ function launchdDigestCheckout(
     const root = hostWorktreeGit(gitRoot, ["rev-parse", "--show-toplevel"], { timeout: 1_000 }).trim();
     return isAbsolute(root) ? realpathSync(root) : null;
   } catch (error) {
+    if (explicitRepoRoot) return null;
     // The CLI falls back to its install checkout when its working directory is not inside Git.
     void error;
     return launcherCheckout;
