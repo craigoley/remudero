@@ -1423,15 +1423,19 @@ export const PRECHECK_TRIGGERED_SUITES = [
     remedy: "route the site through worktreeAdd (src/lib/worker.ts), or add a NAMED exempt row with its reason to WORKTREE_SITE_REGISTRY (src/lib/worktree-sites.ts)" },
 ];
 
+const CENSUS_FIXTURE_SMOKE = "test/ci/gates/ci-friction-remedy-f8ac7f1fb15abc0b.test.ts";
+const censusFixtureSmokeTrigger = closureImportTrigger("scripts/census-precheck.mjs", [
+  CENSUS_FIXTURE_SMOKE, "test/a-census-this-branch-grows-is-refused-before-the-push.test.ts",
+  "package.json", "package-lock.json",
+]);
+
 /** Suites a diff joins by path with no npm script of their own (W1-T9565): evaluateAdmittedCensusSuites runs each by
  *  testFile and models it in PRECHECK_PARITY as `modeled`. A row is `{ testFile, trigger, remedy }`. */
 export const PRECHECK_PATH_TRIGGERED_SUITES = [
   { testFile: "test/ci/gates/ci-friction-remedy-f8ac7f1fb15abc0b.test.ts",
-    trigger: closureImportTrigger("scripts/census-precheck.mjs", [
-      "test/ci/gates/ci-friction-remedy-f8ac7f1fb15abc0b.test.ts",
-      "test/a-census-this-branch-grows-is-refused-before-the-push.test.ts",
-      "package.json", "package-lock.json",
-    ]),
+    // Minimal fixture trees may have a package.json without ever having this suite.
+    trigger: (input) => censusFixtureSmokeTrigger(input) &&
+      (input.readHead?.(CENSUS_FIXTURE_SMOKE) !== null || input.readBase?.(CENSUS_FIXTURE_SMOKE) !== null),
     remedy: "keep the linked-worktree fixture's precheck dependencies in sync with its imports" },
   // W1-T10820: the alias suite's real-tree check reddens when the imports map it reads, or coverage-narrow, moves.
   // A change to src/lib/affected-suites.ts starts the reach ratchet alone (W1-T5702); CI still runs this suite.

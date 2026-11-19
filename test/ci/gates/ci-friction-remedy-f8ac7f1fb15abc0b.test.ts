@@ -15,15 +15,20 @@ test("W1-T10445: check:test:test/a-census-this-branch-grows-is-refused-before-th
   const dependency = "scripts/clock-signature-ratchet.mjs";
   const importLine = (specifier: string) => `import ${JSON.stringify(specifier)};`;
   const precheckSource = importLine("./clock-signature-ratchet.mjs");
-  const readBase = (path: string) => path === PRECHECK ? precheckSource : null;
-  const evaluate = (changed: string, fail: boolean) => evaluateAdmittedCensusSuites({
-    changed: [changed],
-    loadMembers: () => [],
-    readBase,
-    readHead: (path: string) => path === dependency ? importLine("./new-helper.mjs") : readBase(path),
-    runSuites: (files: string[]) => fail ? files.filter(file => file === SMOKE) : [],
-  });
-  for (const path of [PRECHECK, FIXTURE, dependency]) {
+  const evaluate = (changed: string, fail: boolean, smokeExists = true) => {
+    const base = new Map([[PRECHECK, precheckSource]]);
+    if (smokeExists) base.set(SMOKE, "");
+    const readBase = (path: string) => base.get(path) ?? null;
+    return evaluateAdmittedCensusSuites({
+      changed: [changed],
+      loadMembers: () => [],
+      readBase,
+      readHead: (path: string) => path === dependency ? importLine("./new-helper.mjs") : readBase(path),
+      runSuites: (files: string[]) => fail ? files.filter(file => file === SMOKE) : [],
+    });
+  };
+  assert.deepEqual(evaluate("package.json", true, false), { violations: [], unmeasured: null });
+  for (const path of [PRECHECK, FIXTURE, dependency, "package.json"]) {
     const result = evaluate(path, true);
     assert.equal(result.unmeasured, null);
     assert.ok(result.violations.some((line: string) => line.startsWith(`census-suite: ${SMOKE} fails`)), path);
