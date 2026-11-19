@@ -593,7 +593,7 @@ const prClearances = (rows: Row[]) => clearances(rows).filter((r) => r.pr_number
 function renameRedPr(): OpenPrView {
   return redPr({ createdAt: ago(60), ciFailures: [
     { name: "typecheck", logTail: "src/lib/sweep.ts(18901,29): error TS2304: Cannot find name 'freshByName'." },
-    { name: CHECK, logTail: `not ok 6 - ${FILE}\n  error: 'freshByName is not defined'\nok 7 - ${OTHER}` },
+    { name: CHECK, logTail: `not ok 6 - ${FILE}\n  error: 'freshByName is not defined'\nnot ok 7 - ${OTHER}` },
   ] });
 }
 

@@ -6,6 +6,9 @@
   verify: auto
   risk: low
   priority: 1.22
+  # refusal-amendment (W1-T11636, run W1-T11636-1795076362936, 2026-11-19T08:49:48.567Z): the worker refused criterion 1 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
+  #   worker evidence: The recorded rounds require corrected acceptance proofs or pre-publication validation because the declared gate correctly refuses each proof that passes on both revisions.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   author_class: machine

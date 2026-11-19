@@ -49,6 +49,7 @@ import { hostWorktreeGit } from "../../lib/worktree-git.js";
 import { releaseReviewWorktree } from "../../lib/review-worktree-reclaim.js";
 import { step } from "../../lib/git-push.js";
 import { acquireDrainLock, type DrainLockHandle } from "../../lib/drain-lock.js";
+import { taskTargetsRepo } from "../../lib/drain.js";
 import { checkReviewerCodeFreshnessAsync, type ReviewerCodeFreshness } from "../../lib/self-sync.js";
 import { acquireInflightLock } from "../../lib/inflight-lock.js";
 import { repoRoot, resolveOwnerRepo } from "../../lib/repo-location.js";
@@ -2344,8 +2345,13 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   const [recordHeadSuccess, recordHeadFailure] = startPhaseHandlers<Awaited<ReturnType<typeof resolvePlanCriteriaAtHeadAsync>>>(
     "head_criteria", headCriteriaStartedAt, ledgerPath, reviewKey,
   );
+  // W1-T13794: a satellite target's catalog (remudero-ops) holds other repositories' tasks naming dependencies it cannot
+  // hold; the strict read threw on the first one and every task of that repository was refused review. Its own tasks stay strict.
+  const keepsUnseenDependency = subjectCheckout.explicitTarget && subjectRepoDir !== repoRoot
+    ? (task: { repo: string }) => !taskTargetsRepo(task.repo, `${owner}/${repo}`) : undefined;
   if (taskId) {
-    const resolved = await resolvePlanCriteriaAtHeadAsync(body, subjectRepoDir, "plan/tasks.yaml", view.headRefOid)
+    const resolved = await resolvePlanCriteriaAtHeadAsync(body, subjectRepoDir, "plan/tasks.yaml", view.headRefOid, undefined,
+      keepsUnseenDependency)
       .then(recordHeadSuccess, recordHeadFailure);
     criteria = resolved.criteria;
     if (resolved.source) source = resolved.source;
@@ -2363,7 +2369,8 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
       const [recordMainSuccess, recordMainFailure] = startPhaseHandlers<Awaited<ReturnType<typeof resolvePlanCriteriaAtHeadAsync>>>(
         "main_criteria", mainCriteriaStartedAt, ledgerPath, reviewKey,
       );
-      const atMain = await resolvePlanCriteriaAtHeadAsync(body, subjectRepoDir, "plan/tasks.yaml", "origin/main")
+      const atMain = await resolvePlanCriteriaAtHeadAsync(body, subjectRepoDir, "plan/tasks.yaml", "origin/main", undefined,
+        keepsUnseenDependency)
         .then(recordMainSuccess, recordMainFailure);
       ownTaskRecordMissing = headLacksOwnTaskRecord(resolved, atMain);
       publicTaskAbsent = atMain.divergence === undefined && atMain.criteria.length === 0 &&

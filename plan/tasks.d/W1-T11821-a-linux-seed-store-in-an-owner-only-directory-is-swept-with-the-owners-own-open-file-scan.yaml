@@ -16,7 +16,7 @@
   files:
     - scripts/dependency-seeds.mjs
     - test/dependency-seeds-cli.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: On Linux, ownerOnlyHome-equivalent logic reports a seed owner-only when the account's store directory and every ancestor to the store root are owned by the uid, the account directory has no group or other access, and no ancestor is writable by group or other

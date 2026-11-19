@@ -58,6 +58,7 @@ import { fileURLToPath } from "node:url";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { gitOrThrow } from "./lib/git.mjs";
 import { newTestCoverage, renderCoverageSummary } from "./coverage-merge-ratchet.mjs";
+import { topLevelTapFailures } from "../src/lib/base-reproduction.ts";
 import { closeJudgedRun, judgedNodeTestArgs, POOL_ISOLATION_FLAG, prepareJudgedRun, testFilesInArgv, unreportedFilesIn } from "./pure-test-pool.mjs";
 import { boundedNodeTestArgs, COVERAGE_HANG_MANIFEST_ENV, withCoverageHangBound } from "./test-tier-manifest.mjs";
 
@@ -164,55 +165,22 @@ export function parseFailingTestNames(output) {
  * be retried. Paths outside `cwd` are ignored rather than granting a retry access to another
  * checkout. */
 export function parseFailingTestFiles(output, cwd = process.cwd()) {
-  const files = new Set();
-  let inFailure = false;
-  for (const rawLine of output.split(/\r?\n/)) {
-    if (/^not ok \d+ - /.test(rawLine)) inFailure = true;
-    if (inFailure) {
-      const match = rawLine.match(/location:\s*['"](.+?\.test\.(?:[cm]?[jt]s))(?::\d+:\d+)?['"]/);
-      if (match) {
-        let path = match[1];
-        if (path.startsWith("file://")) path = fileURLToPath(path);
-        const rel = (isAbsolute(path) ? relative(cwd, path) : path).split(sep).join("/");
-        if (rel !== ".." && !rel.startsWith("../")) files.add(rel);
-      }
-    }
-    if (inFailure && rawLine.trim() === "...") inFailure = false;
-  }
-  return [...files].sort();
+  return [...new Set(parseFailingTestEntries(output, cwd).map((entry) => entry.file))].sort();
 }
 
 /**
- * W1-T4112 (design note i) — the SAME TAP scan as {@link parseFailingTestFiles}, but paired with
- * the failing test's own title, so each failure becomes one `{ file, test }` pair the ledger can
- * carry. Kept as its own function rather than folded into `parseFailingTestFiles`/
- * `parseFailingTestNames`: those two are already relied on independently (file retry scoping,
- * console/step-summary evidence) and neither needs the other's shape.
+ * W1-T4112 (design note i) — the SAME TAP scan as {@link parseFailingTestFiles}, paired with the failing test's
+ * own title, so each failure becomes one `{ file, test }` pair the ledger can carry. W1-T13790: both read only the
+ * column-0 blocks' own `location:` keys (`topLevelTapFailures`), never a path a failure's message quotes.
  */
 export function parseFailingTestEntries(output, cwd = process.cwd()) {
   const entries = [];
-  let currentTest;
-  let inFailure = false;
-  for (const rawLine of output.split(/\r?\n/)) {
-    const notOk = rawLine.match(/^not ok \d+ - (.+)$/);
-    if (notOk) {
-      inFailure = true;
-      currentTest = notOk[1].trim();
-      continue;
-    }
-    if (inFailure) {
-      const match = rawLine.match(/location:\s*['"](.+?\.test\.(?:[cm]?[jt]s))(?::\d+:\d+)?['"]/);
-      if (match && currentTest !== undefined) {
-        let path = match[1];
-        if (path.startsWith("file://")) path = fileURLToPath(path);
-        const rel = (isAbsolute(path) ? relative(cwd, path) : path).split(sep).join("/");
-        if (rel !== ".." && !rel.startsWith("../")) entries.push({ test: currentTest, file: rel });
-      }
-    }
-    if (inFailure && rawLine.trim() === "...") {
-      inFailure = false;
-      currentTest = undefined;
-    }
+  for (const failure of topLevelTapFailures(output)) {
+    if (failure.location === undefined || !/\.test\.(?:[cm]?[jt]s)$/.test(failure.location)) continue;
+    let path = failure.location;
+    if (path.startsWith("file://")) path = fileURLToPath(path);
+    const rel = (isAbsolute(path) ? relative(cwd, path) : path).split(sep).join("/");
+    if (rel !== ".." && !rel.startsWith("../")) entries.push({ test: failure.test, file: rel });
   }
   return entries;
 }

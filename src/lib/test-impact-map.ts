@@ -312,6 +312,90 @@ function scanSource(content: string, mask: boolean, keepLines: boolean, conserva
 }
 
 
+/** Calls that spawn, fork or read the path in their arguments — through an argv array. */
+const PATH_SINKS: ReadonlySet<string> = new Set(["spawn", "spawnSync", "execFile", "execFileSync", "fork", "runBoundedSuite", "readFileSync", "readFile", "URL"]);
+/** Calls that resolve a repo-relative path against a directory. */
+const PATH_JOINS = new Set(["join", "resolve"]);
+/** W1-T13788 — the calls that run a test file as a child or read its text. */
+const TEST_PATH_SINKS: ReadonlySet<string> = new Set([...PATH_SINKS].filter((sink) => sink !== "URL"));
+
+/** W1-T6089 — whether the path named at `at` is USED at runtime: it sits in the arguments of a
+ *  `sinks` call (through any argv `[…]`), or is joined onto a RUNTIME directory —
+ *  `join(deps.repoRoot, "src", "run-task.ts")` — which a module does only to touch the file (spawn
+ *  it, hand it to cluster as `exec:`, read it). A rootless `join("src", "x.ts")` is transparent: the
+ *  call around it decides. An enclosing `{` (object literal, block) or the file's top level ends the
+ *  walk: a path held as data in a table, array or constant is never used in place. Moved here from
+ *  affected-suites.ts by W1-T13788, so the test-path scanner walks the same code; `rootedJoins: false`
+ *  makes every join transparent. */
+export function usedAtRuntime(masked: string, at: number, opts: { sinks?: ReadonlySet<string>; rootedJoins?: boolean } = {}): boolean {
+  const sinks = opts.sinks ?? PATH_SINKS;
+  let depth = 0;
+  for (let i = at - 1; i >= 0; i -= 1) {
+    const c = masked[i]!;
+    if (c === ")" || c === "]" || c === "}") depth += 1;
+    else if (c === "(" || c === "[" || c === "{") {
+      if (depth > 0) depth -= 1;
+      else if (c === "{") return false;
+      else if (c === "(") {
+        const callee = /([\w$]+)\s*$/.exec(masked.slice(Math.max(0, i - 64), i))?.[1] ?? "";
+        if (sinks.has(callee)) return true;
+        if (opts.rootedJoins !== false && PATH_JOINS.has(callee) && !/^\s*["'`]/.test(masked.slice(i + 1, at + 1))) return true;
+      }
+    }
+  }
+  return false;
+}
+
+/** The const whose initializer holds the text at `at` outright, through join or resolve calls and argv
+ *  arrays only: `const CHILD = join(ROOT, "test", "x.test.ts")`. Any other call, object or statement end
+ *  means the text is not that const's value. */
+function constHolding(masked: string, at: number): string | undefined {
+  let depth = 0;
+  for (let i = at - 1; i >= 0; i -= 1) {
+    const c = masked[i]!;
+    if (c === ")" || c === "]" || c === "}") depth += 1;
+    else if (c === "(" || c === "[" || c === "{") {
+      if (depth > 0) depth -= 1;
+      else if (c === "{") return undefined;
+      else if (c === "(" && !PATH_JOINS.has(/([\w$]+)\s*$/.exec(masked.slice(Math.max(0, i - 64), i))?.[1] ?? "")) return undefined;
+    } else if (depth === 0 && c === ";") return undefined;
+    else if (depth === 0 && c === "=" && !/[=!<>]/.test(masked[i - 1] ?? "") && !/[=>]/.test(masked[i + 1] ?? "")) {
+      return /\bconst\s+([\w$]+)\s*(?::[^;=]*)?$/.exec(masked.slice(Math.max(0, i - 160), i))?.[1];
+    }
+  }
+  return undefined;
+}
+
+/** Whether `masked` hands the value at `at` to a run or read call: in place, or through a chain of consts. */
+function runsOrReadsAt(masked: string, at: number, seen: Set<string>): boolean {
+  if (usedAtRuntime(masked, at, { sinks: TEST_PATH_SINKS, rootedJoins: false })) return true;
+  const name = constHolding(masked, at);
+  if (name === undefined || seen.has(name)) return false;
+  seen.add(name);
+  const uses = new RegExp(`(?<![\\w$.])${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w$])`, "g");
+  for (const use of masked.matchAll(uses)) {
+    if (use.index !== at && runsOrReadsAt(masked, use.index, seen)) return true;
+  }
+  return false;
+}
+
+/** W1-T13788 — the `test/` suite paths a comment-free file text runs as a child or reads as text: a path
+ *  literal, or quoted segments under join or resolve, in the arguments of spawn, spawnSync, execFile,
+ *  execFileSync, fork, runBoundedSuite, readFileSync or readFile, or held by a const passed to one.
+ *  INVARIANT named-is-not-run: a path in a table, an assertion message or a comment selects nothing. */
+export function testFilesASuiteRunsOrReads(content: string): string[] {
+  const named: Array<{ path: string; at: number }> = [];
+  for (const m of content.matchAll(/["'`](test\/[\w./-]+\.test\.ts)["'`]/g)) named.push({ path: m[1]!, at: m.index });
+  for (const m of content.matchAll(/["']test["']\s*,\s*((?:["'][\w./-]+["']\s*,\s*)*)["']([\w./-]+\.test\.ts)["']/g)) {
+    const middle = [...m[1]!.matchAll(/["']([\w./-]+)["']/g)].map((p) => p[1]);
+    named.push({ path: ["test", ...middle, m[2]].join("/"), at: m.index });
+  }
+  if (named.length === 0) return [];
+  const masked = maskLiterals(content);
+  return [...new Set(named.filter(({ at }) => runsOrReadsAt(masked, at, new Set())).map(({ path }) => path))].sort();
+}
+
+
 /** Commits the base may be past the map's sha before the arm stops trusting it. MEASURED 2026-09-30..
  *  10-13: main lands 149–272 first-parent commits a day, so 150 silenced the arm for the last hours of
  *  11 of 13 days and for every day after a missed nightly. 500 covers two days at the busiest rate.
