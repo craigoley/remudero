@@ -1,0 +1,73 @@
+- id: W1-T13791
+  title: "The run child loads the mount headroom sweep through tsx's tsImport, as the config gardener does: since run-child mode went live on 2026-10-16 every mount exploration fails with \"TypeScript parameter property is not supported in strip-only mode\", because a plain import() of scripts/mount-headroom-sweep.mjs runs src/lib/retro.ts through Node's strip-only mode, and no run has ever explored a mount"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19: one concern (how the run child loads the sweep) spans the exploration module, the run-task verb and its wiring test; exploration starts to act for the first time in production: a sampled run can ride a perturbed mount; the exploration policy and its exclusions are unchanged
+  origin: "operator-session#fleet-small-issues-2026-11-19"
+  plan_refs:
+    - W1-T3095
+    - W1-T9087
+    - W1-T4113
+  files:
+    - src/lib/mount-exploration.ts
+    - src/cli/commands/run-task-verb.ts
+    - test/mounts-wiring.test.ts
+    - test/worker/the-run-child-loads-the-headroom-sweep-through-tsx.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "invariant:loads-without-a-tsx-loader — src/lib/mount-exploration.ts, bundled with esbuild the way scripts/build-child-entries.mjs bundles a child entry and imported by a plain node child with no tsx loader, exports loadMountHeadroomCells(repoRoot, stateDir), which returns an array of cells for a fixture state folder; with the sweep loaded by a plain import() the same child fails with ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX"
+      proof: "grep: W1-T13791 criterion 1 in test/worker/the-run-child-loads-the-headroom-sweep-through-tsx.test.ts"
+    - claim: "invariant:exploration-errors-stay-ledgered — resolveMountExplorationDispatch with a loadCells that throws still logs mount.exploration.error and returns the on-policy mount and config"
+      proof: "grep: W1-T13791 criterion 2 in test/worker/the-run-child-loads-the-headroom-sweep-through-tsx.test.ts"
+    - claim: "the run-task verb's loadCells calls the new loader"
+      proof: "grep: loadMountHeadroomCells( in src/cli/commands/run-task-verb.ts"
+  rationale: |
+    WHY: the mount exploration rung has never worked in the run child.
+    In loadCells (src/cli/commands/run-task-verb.ts, the exploreMount call), the run-task verb loads
+    scripts/mount-headroom-sweep.mjs with a plain `await import(scriptUrl)`. That script imports
+    ../src/lib/retro.ts, ../src/lib/mounts.ts and ../src/lib/ledger-grep.ts directly. Since W1-T9087 (2026-10-16)
+    run-task runs as a bundled run child under plain Node 24, so those .ts files go through Node's
+    strip-only mode. It fails at src/lib/retro.ts:895, `class ShippedReadPending ... constructor(readonly load:
+    ...)`, a parameter property added on 2026-10-07 (#9751). resolveMountExplorationDispatch catches it and
+    logs mount.exploration.error.
+    MEASURED on the Azure host: 0 mount.exploration* rows before 2026-10-16 15:14Z (first error, run
+    W1-T9327-1792163565718), then 5 to 143 errors a day, all with this reason (151 since 2026-11-11). Zero
+    mount.exploration rows (an actual exploration) in any ledger read.
+    REPRODUCED in a worktree at origin/main with Node 24.22.3: a plain import() of the script fails with
+    ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX at retro.ts:895; tsImport from "tsx/esm/api" loads it and
+    buildMountHeadroomSweep is a function. Removing the parameter property alone only moves the failure to
+    ERR_MODULE_NOT_FOUND for src/lib/workflow-mining.js (a .js specifier strip-only mode cannot resolve), so
+    the source edit is not the fix.
+    THE CODE INTENDS TSX: the config gardener loads the same script with tsImport (src/run-task.ts, case
+    "config"; src/lib/config-gardener.ts), and test/a-near-crossing-check-loads-the-gate-gardener-as-esm.test.ts
+    names tsImport as the way to load src modules from scripts/.
+    NOT COVERED: swept plan/tasks.d for mount-headroom-sweep.mjs, loadCells and strip-only. W1-T3095 built the
+    rung, W1-T3096 and W1-T2668 change the sweep itself; none changes how the run child loads it.
+  design: |
+    INVARIANT loads-without-a-tsx-loader: the run child's loader for the headroom sweep works in a process that has no tsx loader registered.
+    INVARIANT exploration-errors-stay-ledgered: a failure to load or run the sweep is still ledgered as mount.exploration.error and the run keeps its on-policy mount.
+    1. In src/lib/mount-exploration.ts export `loadMountHeadroomCells(repoRoot: string, stateDir: string)`.
+       It loads join(repoRoot, "scripts", "mount-headroom-sweep.mjs") with `tsImport(url, import.meta.url)` from
+       "tsx/esm/api" and returns buildMountHeadroomSweep(stateDir).cells.
+    2. run-task-verb.ts's loadCells becomes `() => loadMountHeadroomCells(repoRoot, join(config.root, "state"))`.
+    3. test/mounts-wiring.test.ts asserts on run-task-verb.ts's text for the sweep name; update that assertion
+       to follow the move. Do not add new source-text assertions.
+    4. The new test bundles src/lib/mount-exploration.ts into a temp folder (RMD_TMP_PREFIX) with the esbuild
+       options scripts/build-child-entries.mjs uses, then spawns `node` with no --import flags and an
+       isolated HOME (test/setup/tmp-hygiene.ts) to import the bundle and call the loader on a fixture state
+       folder built with test/helpers/. The falsifier child uses the same bundle with the loader's import
+       replaced through an esbuild define or a second tiny entry, whichever needs no test-only export.
+    5. No change to the exploration policy, its fraction, its exclusions or the sweep script.
+  falsifier: |
+    At origin/main there is no loadMountHeadroomCells, and the bundled plain import() fails with
+    ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX, so criterion 1 fails. Use import() inside the new loader: criterion 1's
+    child fails the same way. Let the loader throw out of resolveMountExplorationDispatch: criterion 2 fails.
+  note: |
+    Ids reserved with ~/rmd-work/bin/reserve-id.sh for run-unfiled-1795065820000; this filing ships from
+    run-unfiled-1795065953000 (see W1-T13787's note).
