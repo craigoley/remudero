@@ -25,10 +25,11 @@ export type LightPassViewsFallbackReason = "rate_limited" | "read_failed" | "slo
 
 /** One pass's list: the fresh read, or the last good list with the reason it was used. */
 export type LightPassViewsRead<V> =
-  | { fallback: false; source: LightPassViewsSource; views: V[] }
-  | { fallback: true; source: LightPassViewsSource; views: V[]; reason: LightPassViewsFallbackReason };
+  | { fallback: false; source: LightPassViewsSource; views: V[]; readStartedAtMs: number }
+  | { fallback: true; source: LightPassViewsSource; views: V[]; reason: LightPassViewsFallbackReason; readStartedAtMs: number };
 
-interface LastGoodList<V> { views: V[]; readAtMs: number; source: LightPassViewsSource }
+interface LastGoodList<V> { views: V[]; readStartedAtMs: number; source: LightPassViewsSource }
+type ServedViews<V> = Promise<V[]> & { servedReadStartedAtMs?: number };
 
 /** True for GitHub's rate-limit refusal, by the error's stderr or, when the transport kept none, its message. */
 function rateLimited(error: unknown): boolean {
@@ -47,41 +48,52 @@ export function createLightPassOpenPrList<V>(opts: {
   runId: string;
   deadlineMs: number;
   maxAgeMs: number;
-}): { read(served: Promise<V[]> | undefined, own: () => Promise<V[]>): Promise<LightPassViewsRead<V>> } {
+}): { read(served: ServedViews<V> | undefined, own: () => Promise<V[]>, rule?: { boot?: boolean },
+  onSource?: (source: LightPassViewsSource) => void): Promise<LightPassViewsRead<V>> } {
   let lastGood: LastGoodList<V> | undefined;
-  let inFlight: Promise<V[]> | undefined;
-  const keep = (read: Promise<V[]>, source: LightPassViewsSource): Promise<V[]> => {
-    read.then((views) => { lastGood = { views, readAtMs: opts.clock.now(), source }; }, (error: unknown) => {
+  let inFlight: { promise: Promise<V[]>; readStartedAtMs: number } | undefined;
+  const keep = (read: Promise<V[]>, source: LightPassViewsSource, readStartedAtMs: number): Promise<V[]> => {
+    read.then((views) => { lastGood = { views, readStartedAtMs, source }; }, (error: unknown) => {
       // Reason: not erased; the pass that awaits this read gets the same error and writes it to its row.
       void error;
     });
     return read;
   };
   const ownRead = (own: () => Promise<V[]>): Promise<V[]> => {
-    if (inFlight !== undefined) return inFlight;
-    const read = keep(own(), "own_read");
-    inFlight = read;
-    const clear = () => { if (inFlight === read) inFlight = undefined; };
+    if (inFlight !== undefined) return inFlight.promise;
+    const readStartedAtMs = opts.clock.now();
+    const read = keep(own(), "own_read", readStartedAtMs);
+    const flight = { promise: read, readStartedAtMs };
+    inFlight = flight;
+    const clear = () => { if (inFlight === flight) inFlight = undefined; };
     read.then(clear, clear);
     return read;
   };
   const usable = (): LastGoodList<V> | undefined =>
-    lastGood !== undefined && opts.clock.now() - lastGood.readAtMs <= opts.maxAgeMs ? lastGood : undefined;
+    lastGood !== undefined && opts.clock.now() - lastGood.readStartedAtMs <= opts.maxAgeMs ? lastGood : undefined;
   const record = (reason: LightPassViewsFallbackReason, error?: unknown): void => {
     opts.log("sweep_light.views_fallback", {
       run_id: opts.runId, reason,
-      snapshot_age_ms: lastGood === undefined ? null : opts.clock.now() - lastGood.readAtMs,
+      snapshot_age_ms: lastGood === undefined ? null : opts.clock.now() - lastGood.readStartedAtMs,
       pr_count: lastGood?.views.length ?? 0,
       ...(error === undefined ? {} : { error: String((error as Error)?.message ?? error) }),
     });
   };
   const fallback = (list: LastGoodList<V>, reason: LightPassViewsFallbackReason, error?: unknown): LightPassViewsRead<V> => {
     record(reason, error);
-    return { fallback: true, source: list.source, views: structuredClone(list.views), reason };
+    return { fallback: true, source: list.source, views: structuredClone(list.views), reason, readStartedAtMs: list.readStartedAtMs };
   };
   return {
-    async read(served, own) {
-      const pending = served === undefined ? ownRead(own) : keep(served, "tick_read");
+    async read(served, own, rule, onSource) {
+      const servedReadStartedAtMs = served?.servedReadStartedAtMs ?? opts.clock.now();
+      // W1-T13709: a served list whose read started before the last good list's is older than it; the pass
+      // reads its own views. The boot pass keeps the W1-T12236 rule and takes the served list as before.
+      const useServed = served !== undefined && (rule?.boot === true || served.servedReadStartedAtMs === undefined
+        || lastGood === undefined || servedReadStartedAtMs >= lastGood.readStartedAtMs);
+      const pending = useServed ? keep(served, "tick_read", servedReadStartedAtMs) : ownRead(own);
+      const source: LightPassViewsSource = useServed ? "tick_read" : "own_read";
+      onSource?.(source);
+      const readStartedAtMs = useServed ? servedReadStartedAtMs : inFlight?.readStartedAtMs ?? opts.clock.now();
       let timer: ReturnType<typeof setTimeout> | undefined;
       const slow = new Promise<"slow">((resolve) => {
         timer = setTimeout(() => resolve("slow"), opts.deadlineMs);
@@ -89,11 +101,11 @@ export function createLightPassOpenPrList<V>(opts: {
       });
       try {
         const first = await Promise.race([pending, slow]);
-        if (first !== "slow") return { fallback: false, source: served === undefined ? "own_read" : "tick_read", views: first };
+        if (first !== "slow") return { fallback: false, source, views: first, readStartedAtMs };
         const list = usable();
         if (list !== undefined) return fallback(list, "slow_read");
         // No list to decide from: wait for the read, as before this task.
-        return { fallback: false, source: served === undefined ? "own_read" : "tick_read", views: await pending };
+        return { fallback: false, source, views: await pending, readStartedAtMs };
       } catch (error) {
         const list = usable();
         if (list !== undefined) return fallback(list, rateLimited(error) ? "rate_limited" : "read_failed", error);
