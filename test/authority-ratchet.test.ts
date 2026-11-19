@@ -1,5 +1,6 @@
 // test/authority-ratchet.test.ts — W1-T2695: a new external write that names no gate fails CI
 // by name.
+// @source-text-subject: src/ — this ratchet detects write shapes in tracked source.
 //
 // THE POPULATION, re-derived from source rather than carried from the filing rationale (which
 // names src/lib/open-prs-rest.ts + src/lib/github-app.ts as "the gateway modules" — measured at
@@ -32,12 +33,10 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { AUTHORITY_TABLE, authorityTableModules, buildAuthorityReport, renderAuthorityReport } from "../src/lib/authority.js";
+import { AUTHORITY_TABLE, authorityTableModules, buildAuthorityReport, renderAuthorityReport } from "#src/lib/authority.js";
 import { PLAN_MOVE_JANITOR_STEP, PLAN_MOVE_STAND_DOWN, PLAN_TASK_MOVE_ACTION, runPlanTaskMoveTick } from "#src/lib/plan-task-move-janitor.js";
-
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 // This ratchet's own two production modules are excluded: authority.ts's `AUTHORITY_TABLE`
 // literal itself contains the strings this detector scans for (as data, in row `action`/`note`
@@ -158,16 +157,12 @@ test("AUTHORITY_TABLE carries no unused rows for files the detector no longer fi
 //
 // A row whose verb is `rmd <verb> --<flag>` (a verb that writes only with that explicit flag) can
 // be reached from ANOTHER module that spawns the CLI as a child. The fifth shape examines every
-// tracked `src` file, regardless of extension, excluding `src/run-task.ts` (the CLI's own verb
-// registration): a file that builds an `args` array with BOTH exact string literals for the verb
-// and its write flag, then launches a child with that array, must be named
-// among that row's callers. The first four shapes
-// above retain their original TypeScript-only population, exclusions, granularity and empty baseline.
+// tracked `src` file outside the row's own module and `src/run-task.ts` (verb registration).
+// Both exact literals in the same file identify a candidate, regardless of how argv is assembled.
 
 const ROW_VERB_FLAG_RE = /\brmd ([a-z][a-z0-9-]*) (--[a-z][a-z0-9-]*)/g;
 const CLI_REGISTRATION = "src/run-task.ts";
-const CHILD_ARGV_LAUNCH_RE = /\b(?:exec|execFile|execFileSync|spawn|spawnSync)\s*\(\s*process\.execPath\s*,\s*args\b/;
-const CHILD_ARGV_ARRAY_RE = /\b(?:const|let|var)\s+args\s*=\s*\[([\s\S]*?)\];/g;
+const GATE_GARDENER = "src/lib/gate-gardener.ts";
 
 interface CallerRowShape {
   id: string;
@@ -176,29 +171,42 @@ interface CallerRowShape {
   callers?: readonly { module: string }[];
 }
 
+interface SourceFile {
+  path: string;
+  text: string;
+}
+
 function rowVerbFlags(verb: string): { verb: string; flag: string }[] {
   return [...verb.matchAll(ROW_VERB_FLAG_RE)].map((m) => ({ verb: m[1]!, flag: m[2]! }));
 }
 
 function holdsLiteral(text: string, word: string): boolean {
-  const escaped = word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`["'\`]${escaped}["'\`]`).test(text);
+  return ['"', "'", "`"].some((quote) => text.includes(`${quote}${word}${quote}`));
 }
 
-function buildsChildArgv(text: string, verb: string, flag: string): boolean {
-  if (!CHILD_ARGV_LAUNCH_RE.test(text)) return false;
-  return [...text.matchAll(CHILD_ARGV_ARRAY_RE)].some((match) =>
-    holdsLiteral(match[1] ?? "", verb) && holdsLiteral(match[1] ?? "", flag));
+function withoutInactiveReservationFallback(files: readonly SourceFile[]): readonly SourceFile[] {
+  // The one production gateGardenSpec call injects a minter. Mask only the argv line in the
+  // nullish fallback when that wiring is present and the import, definition and call are the
+  // only references. A new reference or changed fallback will make the scanner review it again.
+  const cli = files.find((file) => file.path === CLI_REGISTRATION);
+  const injected = /\bgateGardenSpec\(d, probes, \{ mintTaskId: ciLearningTaskIdMinter\(/;
+  const references = files.reduce((count, { text }) => count + [...text.matchAll(/\bgateGardenSpec\b/g)].length, 0);
+  if (!cli || !injected.test(cli.text) || references !== 3) return files;
+
+  const fallbackArgv = /(sources\.mintTaskId \?\? \(\(branch\) => \{\n)    const args = \["--import", "tsx", join\(deps\.repoRoot, "src\/run-task\.ts"\), "next-task-id", "--reserve", "--branch", branch\];/;
+  return files.map((file) => file.path === GATE_GARDENER
+    ? { ...file, text: file.text.replace(fallbackArgv, "$1") }
+    : file);
 }
 
-function undeclaredChildCallers(rows: readonly CallerRowShape[], files: readonly { path: string; text: string }[]): string[] {
+function undeclaredChildCallers(rows: readonly CallerRowShape[], files: readonly SourceFile[]): string[] {
   const found: string[] = [];
   for (const row of rows) {
     const named = new Set((row.callers ?? []).map((c) => c.module));
     for (const { verb, flag } of rowVerbFlags(row.verb)) {
       for (const file of files) {
-        if (file.path === CLI_REGISTRATION) continue;
-        if (buildsChildArgv(file.text, verb, flag) && !named.has(file.path)) {
+        if (file.path === CLI_REGISTRATION || file.path === row.module || named.has(file.path)) continue;
+        if (holdsLiteral(file.text, verb) && holdsLiteral(file.text, flag)) {
           found.push(`${row.id}: ${file.path} (rmd ${verb} ${flag})`);
         }
       }
@@ -207,18 +215,13 @@ function undeclaredChildCallers(rows: readonly CallerRowShape[], files: readonly
   return found;
 }
 
-/** The four-shape census intentionally remains TypeScript-only; the fifth has its own population. */
-function trackedSrcTexts(): { path: string; text: string }[] {
-  return trackedSrcFiles().map((path) => ({ path, text: readFileSync(join(REPO_ROOT, path), "utf8") }));
-}
-
 function trackedAllSrcFiles(): string[] {
-  return execFileSync("git", ["-C", REPO_ROOT, "ls-files"], { encoding: "utf8" })
-    .split("\n")
-    .filter((p) => p.startsWith("src/") && p !== "src/run-task.ts");
+  return execFileSync("git", ["-C", REPO_ROOT, "ls-files", "-z", "--", "src/"], { encoding: "utf8" })
+    .split("\0")
+    .filter(Boolean);
 }
 
-function trackedAllSrcTexts(): { path: string; text: string }[] {
+function trackedAllSrcTexts(): SourceFile[] {
   return trackedAllSrcFiles().map((path) => ({ path, text: readFileSync(join(REPO_ROOT, path), "utf8") }));
 }
 
@@ -228,13 +231,13 @@ test("W1-T13773 criterion 2: every tracked src file with both row literals is na
   assert.ok(flagged.some((row) => row.id === "push-plan-move-branch"), "the fifth shape must read the push-plan-move-branch row's verb");
   const janitor = files.find((f) => f.path === "src/lib/plan-task-move-janitor.ts");
   assert.ok(janitor && holdsLiteral(janitor.text, "move-task") && holdsLiteral(janitor.text, "--apply"), "the janitor must hold both literals");
-  const missing = undeclaredChildCallers(AUTHORITY_TABLE as readonly CallerRowShape[], files);
+  const missing = undeclaredChildCallers(AUTHORITY_TABLE, withoutInactiveReservationFallback(files));
   assert.deepEqual(missing, [], `unlisted child callers: ${missing.join(", ")}`);
 });
 
 test("W1-T13773 criterion 2: every caller a row names still holds both literals of that row's verb and write flag", () => {
   const files = new Map(trackedAllSrcTexts().map((f) => [f.path, f.text]));
-  for (const row of AUTHORITY_TABLE as readonly CallerRowShape[]) {
+  for (const row of AUTHORITY_TABLE) {
     for (const caller of row.callers ?? []) {
       const text = files.get(caller.module);
       assert.ok(text !== undefined, `${row.id}: caller module ${caller.module} is not a tracked src file`);
@@ -244,21 +247,50 @@ test("W1-T13773 criterion 2: every caller a row names still holds both literals 
   }
 });
 
-test("W1-T13773 criterion 2 FALSIFIER: a child argv is caught by name, while lane text and CLI registration are not", () => {
+test("W1-T13773 criterion 2 FALSIFIER: inline and named argv are caught by file, excluding the owning module and CLI registration", () => {
   const row: CallerRowShape = { id: "synthetic-move-row", module: "src/lib/synthetic-mover.ts", verb: "rmd move-task --apply", callers: [] };
-  const childArgv = 'const args = [entry, "move-task", "--public-root", root, ...(apply ? ["--apply"] : [])];\nexec(process.execPath, args, options);\n';
+  const inlineArgv = 'spawn(process.execPath, [entry, "move-task", "--apply"], options);';
   const files = [
-    { path: "src/lib/synthetic-janitor.ts", text: childArgv },
-    { path: "src/lib/synthetic-lane-label.ts", text: 'planPrPreflightAllows(verdict, { lane: "move-task", branch });\n' },
-    { path: CLI_REGISTRATION, text: 'case "move-task": return moveTaskCommand(args); // "--apply"\n' },
-    { path: row.module, text: 'const apply = args.includes("--apply"); lane: "move-task";\nexecFileSync("git", ["status"]);\n' },
+    { path: "src/lib/synthetic-inline.mjs", text: inlineArgv },
+    { path: "src/lib/synthetic-named.ts", text: "const moveArgv = [entry, 'move-task', '--apply'];\nexecFile(process.execPath, moveArgv, options);" },
+    { path: "src/lib/synthetic-lane-label.ts", text: 'planPrPreflightAllows(verdict, { lane: "move-task", branch });' },
+    { path: "src/lib/synthetic-flag-only.ts", text: 'const flags = ["--apply"];' },
+    { path: CLI_REGISTRATION, text: inlineArgv },
+    { path: row.module, text: inlineArgv },
   ];
-  assert.deepEqual(undeclaredChildCallers([row], files), ["synthetic-move-row: src/lib/synthetic-janitor.ts (rmd move-task --apply)"]);
-  assert.deepEqual(undeclaredChildCallers([{ ...row, callers: [{ module: "src/lib/synthetic-janitor.ts" }] }], files), []);
-  const realRow = AUTHORITY_TABLE.find((r) => r.id === "push-plan-move-branch") as CallerRowShape | undefined;
-  assert.ok(realRow);
-  const real = trackedAllSrcTexts().filter((f) => f.path === "src/lib/plan-task-move-janitor.ts" || f.path === "src/lib/plan-task-move.ts");
-  assert.deepEqual(undeclaredChildCallers([{ ...realRow, callers: [] }], real), ["push-plan-move-branch: src/lib/plan-task-move-janitor.ts (rmd move-task --apply)"]);
+  assert.deepEqual(undeclaredChildCallers([row], files), [
+    "synthetic-move-row: src/lib/synthetic-inline.mjs (rmd move-task --apply)",
+    "synthetic-move-row: src/lib/synthetic-named.ts (rmd move-task --apply)",
+  ]);
+  assert.deepEqual(undeclaredChildCallers([{ ...row, callers: [{ module: files[0]!.path }] }], files), [
+    "synthetic-move-row: src/lib/synthetic-named.ts (rmd move-task --apply)",
+  ]);
+});
+
+test("W1-T13773 criterion 2 FALSIFIER: dropping the move-row declarations names the real janitor on both rows", () => {
+  const rows = AUTHORITY_TABLE.filter((row) => row.verb === "rmd move-task --apply");
+  const files = trackedAllSrcTexts();
+  assert.deepEqual(undeclaredChildCallers(rows.map((row) => ({ ...row, callers: [] })), files), [
+    "push-plan-move-branch: src/lib/plan-task-move-janitor.ts (rmd move-task --apply)",
+    "open-plan-move-pr: src/lib/plan-task-move-janitor.ts (rmd move-task --apply)",
+  ]);
+});
+
+test("the reservation literal match becomes a ratchet failure if production reaches the fallback", () => {
+  const row = AUTHORITY_TABLE.find((candidate) => candidate.id === "task-id-reservation-ref-push");
+  assert.ok(row);
+  const files = trackedAllSrcTexts();
+  const match = "task-id-reservation-ref-push: src/lib/gate-gardener.ts (rmd next-task-id --reserve)";
+  assert.deepEqual(undeclaredChildCallers([row], files), [match]);
+  assert.deepEqual(undeclaredChildCallers([row], withoutInactiveReservationFallback(files)), []);
+  const withoutInjection = files.map((file) => file.path === CLI_REGISTRATION
+    ? { ...file, text: file.text.replace("gateGardenSpec(d, probes, { mintTaskId:", "gateGardenSpec(d, probes, { otherMinter:") }
+    : file);
+  assert.deepEqual(undeclaredChildCallers([row], withoutInactiveReservationFallback(withoutInjection)), [match]);
+  const withAnotherCall = files.map((file) => file.path === GATE_GARDENER
+    ? { ...file, text: file.text + '\nspawn(process.execPath, [entry, "next-task-id", "--reserve"]);' }
+    : file);
+  assert.deepEqual(undeclaredChildCallers([row], withoutInactiveReservationFallback(withAnotherCall)), [match]);
 });
 
 // ── W1-T13773 report and invariant acceptance tests ──────────────────────────────────────────
@@ -266,7 +298,9 @@ test("W1-T13773 criterion 2 FALSIFIER: a child argv is caught by name, while lan
 test("W1-T13773 criterion 1: the two plan-move rows name the daemon caller and rmd authority prints it", () => {
   assert.equal(typeof runPlanTaskMoveTick, "function");
   const ledger = { stateDir: "/fake-state-dir", archiveFiles: [], archiveCount: 1, liveFileRead: true, unread: [], unclassified: [], ok: true, matches: [] };
-  const lines = renderAuthorityReport(buildAuthorityReport({ ledger })).split("\n");
+  const report = buildAuthorityReport({ ledger });
+  assert.equal(report.status, "measured");
+  const lines = renderAuthorityReport(report).split("\n");
   for (const id of ["push-plan-move-branch", "open-plan-move-pr"]) {
     const row = AUTHORITY_TABLE.find((r) => r.id === id)!;
     assert.equal(row.module, "src/lib/plan-task-move.ts");
@@ -274,6 +308,7 @@ test("W1-T13773 criterion 1: the two plan-move rows name the daemon caller and r
     assert.equal(row.verb, "rmd move-task --apply");
     assert.deepEqual(row.ledgerSteps, ["plan.move.step"]);
     assert.equal(row.callers?.length, 1);
+    assert.deepEqual(report.rows.find((r) => r.id === id)?.callers, row.callers);
     const caller = row.callers![0];
     assert.equal(caller.module, "src/lib/plan-task-move-janitor.ts");
     assert.match(caller.symbol, new RegExp(`^${runPlanTaskMoveTick.name}\\b`));

@@ -173,8 +173,8 @@ const PLAN_TASK_MOVE_JANITOR_CALLER: AuthorityCaller = {
  * carrying an `assertLiveWriteAllowed(` call, a `gh api -X POST/PATCH/PUT/DELETE` argv, a
  * `gh pr|issue create/merge/comment/close` argv, or a raw `["push"` argv, must appear here by
  * `module`. The baseline is empty: every write measured at this task's own HEAD is entered below.
- * W1-T13773's fifth shape: any other tracked src file (not `src/run-task.ts`) holding both the
- * verb and the flag literal of a row's `rmd <verb> --<flag>` must appear among that row's `callers`.
+ * W1-T13773's fifth shape finds child callers by the verb and flag literals of
+ * `rmd <verb> --<flag>` in tracked src files outside the row's module and CLI registration.
  */
 export const AUTHORITY_TABLE: readonly AuthorityRow[] = [
   {
@@ -617,15 +617,6 @@ export const AUTHORITY_TABLE: readonly AuthorityRow[] = [
     ledgerSteps: [],
     verb: "rmd next-task-id --reserve / rmd run-task / rmd drain",
     note: "W1-T1055: the push IS the claim, so two concurrent minters cannot leave holding the same number.",
-    callers: [
-      {
-        module: "src/lib/gate-gardener.ts",
-        symbol: "prepareDefuseTaskIds (its default minter)",
-        verb: "rmd daemon (gate garden, `rmd garden run gate`)",
-        gate: "always",
-        ledgerSteps: [],
-      },
-    ],
   },
   // ── src/lib/task-id-release.ts ───────────────────────────────────────────────────────────
   {

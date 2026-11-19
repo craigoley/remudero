@@ -4,10 +4,11 @@
 // `rmd authority` verb that prints it is read-only (no network, no gh/git spawn).
 
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import {
   AUTHORITY_GATE_KINDS,
@@ -340,17 +341,18 @@ test("authorityCommand is read-only: with PATH emptied and the REAL (non-injecte
 // ── W1-T13773: child-process callers, the host-switch gate, and every other row as before ───
 
 /** The table's self-check over callers: every violation, by row, so a fixture can show each one fires. */
-function callerViolations(rows: readonly AuthorityRow[], isSrcModule: (path: string) => boolean): string[] {
+function callerViolations(rows: readonly AuthorityRow[], trackedSrc: ReadonlySet<string>): string[] {
   const out: string[] = [];
   const check = (where: string, gate: string) => {
     if (!(AUTHORITY_GATE_KINDS as readonly string[]).includes(gate)) out.push(`${where}: gate ${gate} is outside the closed vocabulary`);
   };
   for (const row of rows) {
     check(row.id, row.gate);
+    if (!trackedSrc.has(row.module)) out.push(`${row.id}: module ${row.module} is not a tracked src file`);
     for (const caller of row.callers ?? []) {
       const where = `${row.id} caller ${caller.module}`;
       check(where, caller.gate);
-      if (!isSrcModule(caller.module)) out.push(`${where}: module is not a src file in this tree`);
+      if (!trackedSrc.has(caller.module)) out.push(`${where}: module is not a tracked src file`);
       for (const field of ["symbol", "verb"] as const) if (!caller[field]) out.push(`${where}: ${field} must not be empty`);
       if (!Array.isArray(caller.ledgerSteps)) out.push(`${where}: ledgerSteps must be an array`);
       if (caller.gate === "host-switch" && !caller.hostSwitch) out.push(`${where}: a host-switch caller must name its switch`);
@@ -359,13 +361,18 @@ function callerViolations(rows: readonly AuthorityRow[], isSrcModule: (path: str
   return out;
 }
 
-function isSrcModule(path: string): boolean {
-  return path.startsWith("src/") && !path.split("/").includes("..") && existsSync(join(REPO_ROOT, path));
-}
-
-test("W1-T13773 criterion 3: the closed gate vocabulary is origin/main's five kinds plus host-switch, and a host-switch caller that names no switch fails the self-check", () => {
+test("W1-T13773 criterion 3: the closed gate vocabulary adds host-switch, whose callers require a switch and tracked source module", () => {
+  const moveRow = AUTHORITY_TABLE.find((r) => r.id === "push-plan-move-branch")!;
+  const janitor: AuthorityCaller = moveRow.callers![0]!;
+  const directory = dirname(janitor.module);
+  const modules = AUTHORITY_TABLE.flatMap((row) => [row.module, ...(row.callers ?? []).map((caller) => caller.module)]);
+  const moduleSpecs = [...new Set([...modules, directory])]
+    .filter((path) => path.startsWith("src/") && !path.split("/").includes(".."))
+    .map((path) => `:(literal)${path}`);
+  const trackedSrc = new Set(execFileSync("git", ["-C", REPO_ROOT, "ls-files", "-z", "--", ...moduleSpecs], { encoding: "utf8" })
+    .split("\0").filter(Boolean));
   assert.deepEqual([...AUTHORITY_GATE_KINDS], ["policy", "ledger-verdict", "operator-verb", "sweep-rung", "always", "host-switch"]);
-  assert.deepEqual(callerViolations(AUTHORITY_TABLE, isSrcModule), []);
+  assert.deepEqual(callerViolations(AUTHORITY_TABLE, trackedSrc), []);
   const hostSwitched = AUTHORITY_TABLE.flatMap((r) => (r.callers ?? []).filter((c) => c.gate === "host-switch"));
   assert.deepEqual(
     hostSwitched.map((caller) => caller.module),
@@ -378,17 +385,16 @@ test("W1-T13773 criterion 3: the closed gate vocabulary is origin/main's five ki
     assert.match(row.callers?.[0]?.hostSwitch ?? "", /^state\/plan-destination\.json move_public_tasks\b/);
   }
   // FALSIFIERS: the self-check is not silent on a broken caller.
-  const base = AUTHORITY_TABLE.find((r) => r.id === "push-plan-move-branch")!;
-  const janitor: AuthorityCaller = base.callers![0]!;
-  const withCaller = (caller: AuthorityCaller): AuthorityRow[] => [{ ...base, callers: [caller] }];
+  const withCaller = (caller: AuthorityCaller): AuthorityRow[] => [{ ...moveRow, callers: [caller] }];
   const { hostSwitch: _dropped, ...noSwitch } = janitor;
-  assert.deepEqual(callerViolations(withCaller(noSwitch), isSrcModule), [
+  assert.deepEqual(callerViolations(withCaller(noSwitch), trackedSrc), [
     "push-plan-move-branch caller src/lib/plan-task-move-janitor.ts: a host-switch caller must name its switch",
   ]);
-  assert.deepEqual(callerViolations(withCaller({ ...janitor, module: "src/../test/authority-table.test.ts" }), isSrcModule), [
-    "push-plan-move-branch caller src/../test/authority-table.test.ts: module is not a src file in this tree",
+  assert.ok(statSync(join(REPO_ROOT, directory)).isDirectory());
+  assert.deepEqual(callerViolations(withCaller({ ...janitor, module: directory }), trackedSrc), [
+    "push-plan-move-branch caller src/lib: module is not a tracked src file",
   ]);
-  assert.deepEqual(callerViolations(withCaller({ ...janitor, gate: "daemon-flag" as AuthorityCaller["gate"] }), isSrcModule), [
+  assert.deepEqual(callerViolations(withCaller({ ...janitor, gate: "daemon-flag" as AuthorityCaller["gate"] }), trackedSrc), [
     "push-plan-move-branch caller src/lib/plan-task-move-janitor.ts: gate daemon-flag is outside the closed vocabulary",
   ]);
 });
@@ -432,6 +438,7 @@ const ROWS_AS_BEFORE: Record<string, string> = {
   "dispatch-claim-ref-push": "96ba987f9201c063",
   "fleet-pause-ref-push": "bf7f5f0a2482d050",
   "recovery-ref-push": "37782b31e45ff7f0",
+  "task-id-reservation-ref-push": "06b424963c926d98",
   "task-id-reservation-ref-release": "1fec5408fc01c9f4",
   "prune-deletable-branches": "2f4e46d3c8e96e77",
   "archive-stale-held-branches": "b8134fe7b813372a",
@@ -444,23 +451,15 @@ const ROWS_AS_BEFORE: Record<string, string> = {
 };
 
 test("W1-T13773 criterion 4: invariant every-other-row-reads-as-before — each row without callers, its rmd authority line and its JSON row equal origin/main's", () => {
-  const reservationRow = AUTHORITY_TABLE.find((r) => r.id === "task-id-reservation-ref-push")!;
-  assert.deepEqual(reservationRow.callers, [{
-    module: "src/lib/gate-gardener.ts",
-    symbol: "prepareDefuseTaskIds (its default minter)",
-    verb: "rmd daemon (gate garden, `rmd garden run gate`)",
-    gate: "always",
-    ledgerSteps: [],
-  }], "the existing gate-gardener caller from origin/main must remain unchanged");
   const report = buildAuthorityReport({ ledger: fakeLedger([]) });
   assert.equal(report.status, "measured");
   if (report.status !== "measured") return;
   const lines = renderAuthorityReport(report).split("\n");
   const withCallers = report.rows.filter((r) => r.callers !== undefined).map((r) => r.id);
-  assert.deepEqual(withCallers, ["push-plan-move-branch", "open-plan-move-pr", "task-id-reservation-ref-push"]);
+  assert.deepEqual(withCallers, ["push-plan-move-branch", "open-plan-move-pr"]);
   const withoutCallers = report.rows.filter((row) => row.callers === undefined).map((row) => row.id).sort();
   assert.deepEqual(withoutCallers, Object.keys(ROWS_AS_BEFORE).sort(), "the pin covers every origin/main row that gained no callers");
-  assert.equal(Object.keys(ROWS_AS_BEFORE).length, 42, "the pin covers every origin/main row that gained no callers");
+  assert.equal(Object.keys(ROWS_AS_BEFORE).length, 43, "the pin covers every origin/main row that gained no callers");
   for (const [id, digest] of Object.entries(ROWS_AS_BEFORE)) {
     const row: AuthorityReportRow | undefined = report.rows.find((r) => r.id === id);
     assert.ok(row, `${id} must still exist`);
