@@ -13,7 +13,7 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -236,17 +236,27 @@ test("W1-T6108: a late child report is collected when directory cleanup races it
     });
     assert.ok(redirect);
     writeFileSync(join(redirect.childDir, "coverage-3-0000000000000-2.json"), "{}");
-    let attempts = 0;
+    let removeAttempts = 0;
+    let linkAttempts = 0;
     const moved = hygiene.flattenChildCoverage(redirect, () => 1234567890125, (path) => {
-      attempts += 1;
-      if (attempts === 1) {
+      removeAttempts += 1;
+      if (removeAttempts === 1) {
         writeFileSync(join(path, "coverage-4-0000000000000-3.json"), "{}");
         throw Object.assign(new Error("Directory not empty"), { code: "ENOTEMPTY" });
       }
       rmSync(path, { recursive: true, force: true });
+    }, (target, path) => {
+      linkAttempts += 1;
+      if (linkAttempts === 1) {
+        mkdirSync(path);
+        writeFileSync(join(path, "coverage-5-0000000000000-4.json"), "{}");
+        throw Object.assign(new Error("File exists"), { code: "EEXIST" });
+      }
+      symlinkSync(target, path, "dir");
     });
-    assert.deepEqual(moved, ["coverage-3-0000000000000-2.json", "coverage-4-0000000000000-3.json"]);
-    assert.equal(attempts, 2, "cleanup retries after moving the late report");
+    assert.deepEqual(moved, ["coverage-3-0000000000000-2.json", "coverage-4-0000000000000-3.json", "coverage-5-0000000000000-4.json"]);
+    assert.equal(removeAttempts, 3, "cleanup retries after both late report writes");
+    assert.equal(linkAttempts, 2, "the link is retried after the path is recreated");
     const record = JSON.parse(readFileSync(join(out, `rmd-v8-children-${process.pid}-1234567890125.json`), "utf8")) as { reports: string[] };
     assert.deepEqual(record.reports, moved, "the receipt covers both the original and late report");
   } finally {

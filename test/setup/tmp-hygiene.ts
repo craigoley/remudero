@@ -428,6 +428,7 @@ export function flattenChildCoverage(
   redirect: ChildCoverageRedirect,
   now: () => number = Date.now,
   removeChildDir: (path: string) => void = (path) => fs.rmSync(path, { recursive: true, force: true }),
+  createChildDirLink: (target: string, path: string) => void = (target, path) => fs.symlinkSync(target, path, "dir"),
 ): string[] {
   const moved: string[] = [];
   const moveReports = (): void => {
@@ -446,18 +447,19 @@ export function flattenChildCoverage(
     }
   };
   moveReports();
-  // A late V8 thread can publish between the first move and rmdir. Node may report ENOTEMPTY
-  // while recursively removing that directory; collect any report it left and retry the cleanup.
+  // A late V8 thread can publish during removal or recreate the path before the symlink is installed.
+  // Collect its report and retry both operations when those races surface as ENOTEMPTY or EEXIST.
   for (let attempt = 0; ; attempt += 1) {
     try {
       removeChildDir(redirect.childDir);
+      createChildDirLink(redirect.coverageDir, redirect.childDir);
       break;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOTEMPTY" || attempt >= 4) throw error;
+      const code = (error as NodeJS.ErrnoException).code;
+      if ((code !== "ENOTEMPTY" && code !== "EEXIST") || attempt >= 4) throw error;
       moveReports();
     }
   }
-  fs.symlinkSync(redirect.coverageDir, redirect.childDir, "dir");
   if (moved.length > 0) {
     const record = join(redirect.coverageDir, `rmd-v8-children-${process.pid}-${now()}.json`);
     fs.writeFileSync(`${record}.part`, JSON.stringify({ format: CHILD_COVERAGE_RECORD_FORMAT, suite: redirect.suite, reports: moved }));
