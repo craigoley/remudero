@@ -17,6 +17,7 @@
     - src/lib/worker.ts
     - src/lib/engine-tree.ts
     - test/deploy/an-engine-tree-is-never-an-unmanaged-lane.test.ts
+    - "src/lib/engine-tree-paths.ts"
   rationale: |
     READ 2026-10-26 on origin/main 4e339a938, and read-only on the Azure host (core ledger
     /mnt/rmd/state2/state, every rotation from 2026-10-13 plus the live file).
