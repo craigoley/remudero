@@ -46,7 +46,7 @@ test("the daemon GitHub cadence invokes the intake before its sibling check can 
 });
 
 test("W1-T3970: production measurement cadence supplies plan reconciliation inputs", () => {
-  const landed: Array<Array<{ relPath: string; content: string }>> = [];
+  const landed: Array<Array<{ relPath: string; content: string; edit?: (current: string) => string | undefined }>> = [];
   const opts = buildPlanReconcileCadenceInput({
     checkoutRoot: "/fixture",
     readShards: () => [
@@ -59,7 +59,10 @@ test("W1-T3970: production measurement cadence supplies plan reconciliation inpu
   });
   const report = planReconcileCadence(opts);
   assert.equal(report.status, "landed");
-  assert.deepEqual(landed, [[{ relPath: "plan/tasks.d/W1-T1.yaml", content: "- id: W1-T1\n  status: merged\n" }]]);
+  assert.deepEqual(landed.map((batch) => batch.map(({ relPath, content }) => ({ relPath, content }))),
+    [[{ relPath: "plan/tasks.d/W1-T1.yaml", content: "- id: W1-T1\n  status: merged\n" }]]);
+  // W1-T13816: the landing applies the input's status edit to main's current text, not to this read.
+  assert.equal(landed[0][0].edit?.("- id: W1-T1\n  status: queued\n  note: main\n"), "- id: W1-T1\n  status: merged\n  note: main\n");
   assert.deepEqual(report.taskIds, ["W1-T1"]);
 });
 
@@ -138,6 +141,18 @@ test("W1-T3970: production adapter's omitted land seam invokes the real local la
     process.env.PATH = `${ghBin}:${oldPath}`;
 
     const ids = Array.from({ length: 10 }, (_, i) => `W1-T${i + 1}`);
+    // W1-T13816: the landing edits main's copy, so main holds the shards; a second clone pushes them and
+    // the daemon checkout stays without plan/.
+    const writer = mkdtempSync(join(tmpdir(), "rmd-plan-reconcile-default-writer-"));
+    execFileSync("git", ["clone", "--quiet", "--branch", "main", origin, writer]);
+    execFileSync("git", ["-C", writer, "config", "user.email", "fixture@example.invalid"]);
+    execFileSync("git", ["-C", writer, "config", "user.name", "fixture"]);
+    mkdirSync(join(writer, "plan", "tasks.d"), { recursive: true });
+    for (const taskId of ids) writeFileSync(join(writer, "plan", "tasks.d", `${taskId}.yaml`), `- id: ${taskId}\n  status: queued\n`);
+    execFileSync("git", ["-C", writer, "add", "plan"]);
+    execFileSync("git", ["-C", writer, "commit", "--quiet", "-m", "chore: shards on main"]);
+    execFileSync("git", ["-C", writer, "push", "--quiet", "origin", "HEAD:main"]);
+    rmSync(writer, { recursive: true, force: true });
     const input = buildPlanReconcileProductionInput({
       checkoutRoot: root,
       readShards: () =>
