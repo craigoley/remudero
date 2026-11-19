@@ -7,8 +7,8 @@ import { readLedgerLines } from "#src/lib/status.js";
 import { readReviewEvidenceRecord, renderReviewEvidenceRecord } from "#src/lib/review-evidence-record.js";
 import { reviewInputDigest, type ReviewVerdict } from "#src/lib/review.js";
 import { runSweep, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
-import { makeTempDir } from "#src/lib/tmp.js";
-import { ghShim, type GhShimRoute } from "#test/helpers/gh-shim.js";
+import { withGhShim, type GhShimRoute } from "#test/helpers/gh-shim.js";
+import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 
 const PR = "https://github.com/acme/remudero/pull/42";
 const HEAD = "a".repeat(40);
@@ -27,14 +27,6 @@ const ROW = {
   decision_verdict: { criteria: [CRITERION] }, unmet_criteria: [], reasons: [],
 } as const;
 
-function github(t: TestContext, routes: GhShimRoute[]) {
-  const gh = ghShim(routes);
-  const oldPath = process.env.PATH;
-  process.env.PATH = `${gh.dir}:${oldPath}`;
-  t.after(() => { process.env.PATH = oldPath; });
-  return gh;
-}
-
 function comment(body: string, author = FLEET) {
   return { id: 123, body, user: author, created_at: COMMENT_AT, updated_at: COMMENT_AT };
 }
@@ -50,41 +42,42 @@ function reads(comments: unknown[], state = "success", creator = FLEET, codeSha 
 }
 
 async function handReview(t: TestContext, extraRoutes: GhShimRoute[] = []) {
-  const root = makeTempDir("t12159-review");
-  const gh = github(t, [
+  const { dir: root } = ownedFixtureDir(t, "t12159-review");
+  const routes: GhShimRoute[] = [
     ...extraRoutes,
     { when: "/statuses?", stdout: "[[]]" },
     { when: "pulls/42", stdout: JSON.stringify({ state: "open", merged: false, head: { sha: HEAD } }) },
     { when: "pr diff", stdout: "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-old\n+new\n" },
-  ]);
+  ];
   const host = {
     readHeadShaRest: () => HEAD,
     reviewPostedDescription: (verdict: ReviewVerdict) => verdict.summary,
   } as unknown as ReviewCommandHost;
   const ledger: Record<string, unknown>[] = [];
-  const verdict = await runReview(host, {
-    owner: "acme", repo: "remudero", prUrl: PR,
-    task: { id: "W1-T12159", acceptance: [{ claim: CRITERION.claim, proof: CRITERION.proof }] },
-    report: REPORT, settingsFile: join(root, "settings.json"), config: { root } as Config,
-    ledgerPath: join(root, "ledger.ndjson"), runId: "review-test",
-    log: (step, row) => ledger.push({ ...row, step }), say: () => {}, account: result => result,
-    spawnReviewer: false, reviewerMount: { model: "sonnet", effort: "medium", maxTurns: 1, contextBudget: 120000 },
-    reviewerCodeFreshness: () => ({ status: "fresh", codeSha: REVIEWER_CODE, originMainSha: REVIEWER_CODE, advance: "none" }),
-    arm: () => "ledger-refused", disarm: () => "not-armed",
+  return withGhShim(routes, async (gh) => {
+    const verdict = await runReview(host, {
+      owner: "acme", repo: "remudero", prUrl: PR,
+      task: { id: "W1-T12159", acceptance: [{ claim: CRITERION.claim, proof: CRITERION.proof }] },
+      report: REPORT, settingsFile: join(root, "settings.json"), config: { root } as Config,
+      ledgerPath: join(root, "ledger.ndjson"), runId: "review-test",
+      log: (step, row) => ledger.push({ ...row, step }), say: () => {}, account: result => result,
+      spawnReviewer: false, reviewerMount: { model: "sonnet", effort: "medium", maxTurns: 1, contextBudget: 120000 },
+      reviewerCodeFreshness: () => ({ status: "fresh", codeSha: REVIEWER_CODE, originMainSha: REVIEWER_CODE, advance: "none" }),
+      arm: () => "ledger-refused", disarm: () => "not-armed",
+    });
+    return { calls: gh.calls(), ledger, verdict };
   });
-  return { gh, ledger, verdict };
 }
 
 test("W1-T12159 criterion 1: the review command publishes one record of its posted verdict", async (t) => {
-  const { gh, ledger, verdict } = await handReview(t);
-  const published = gh.calls().filter(call => call.includes("--method POST repos/acme/remudero/issues/42/comments"));
+  const { calls, ledger, verdict } = await handReview(t);
+  const published = calls.filter(call => call.includes("--method POST repos/acme/remudero/issues/42/comments"));
   assert.equal(published.length, 1);
   const row = ledger.find(entry => entry.step === "review.posted");
   assert.ok(row);
-  const calls = gh.calls();
   const body = calls.slice(calls.indexOf(published[0]!), calls.indexOf(published[0]!) + 3).join("\n").split("body=")[1]!;
-  for (const route of reads([comment(body)], verdict.state)) gh.addRoute(route);
-  const record = await readReviewEvidenceRecord({ prUrl: PR, headSha: HEAD, reviewState: verdict.state, reviewInputDigest: DIGEST });
+  const record = await withGhShim(reads([comment(body)], verdict.state), () =>
+    readReviewEvidenceRecord({ prUrl: PR, headSha: HEAD, reviewState: verdict.state, reviewInputDigest: DIGEST }));
   assert.ok(record);
   assert.equal(record.row.head_sha, row.head_sha);
   assert.equal(record.row.review_input_digest, row.review_input_digest);
@@ -114,8 +107,7 @@ test("the record preserves proof results and keeps holdout text and ops details 
 
 async function sweep(t: TestContext, comments: unknown[], state: "success" | "failure" = "success",
   routes = reads(comments, state)) {
-  github(t, routes);
-  const ledgerPath = join(makeTempDir("t12159-sweep"), "ledger.ndjson");
+  const ledgerPath = join(ownedFixtureDir(t, "t12159-sweep").dir, "ledger.ndjson");
   const pr: OpenPrView = {
     prNumber: 42, prUrl: PR, taskId: "W1-T12159", headSha: HEAD, reviewInputDigest: DIGEST,
     reviewState: state, checksState: "green", mergeState: "clean", priorReviewAttemptsForInput: 0,
@@ -129,7 +121,7 @@ async function sweep(t: TestContext, comments: unknown[], state: "success" | "fa
     arm: () => assert.fail("arm in a later pass"), close: () => assert.fail("unexpected close"),
     dispatchFix: () => assert.fail("unexpected fix"), escalate: () => assert.fail("unexpected escalation"),
   };
-  await runSweep([pr], deps);
+  await withGhShim(routes, () => runSweep([pr], deps));
   return { reviewers, rows: readLedgerLines(ledgerPath).filter(row => row.step === "review.posted"), pr, deps };
 }
 
@@ -186,11 +178,12 @@ test("W1-T12159 criterion 4: the recovered row names the GitHub comment as its s
 });
 
 test("the next sweep checks the recovered verdict's reviewer-code freshness", async (t) => {
-  const { pr, deps } = await sweep(t, [comment(renderReviewEvidenceRecord(ROW))]);
+  const comments = [comment(renderReviewEvidenceRecord(ROW))];
+  const { pr, deps } = await sweep(t, comments);
   const checked: unknown[] = [];
   let pendingPosts = 0;
   let reviewers = 0;
-  await runSweep([{ ...pr, priorReviewAttemptsForInput: 1 }], {
+  await withGhShim(reads(comments), () => runSweep([{ ...pr, priorReviewAttemptsForInput: 1 }], {
     ...deps,
     reviewerCodeAdvance: {
       judge: async codeSha => {
@@ -204,7 +197,7 @@ test("the next sweep checks the recovered verdict's reviewer-code freshness", as
     },
     postReview: () => { reviewers++; },
     arm: () => "armed",
-  });
+  }));
   assert.deepEqual(checked, [REVIEWER_CODE]);
   assert.equal(pendingPosts, 0);
   assert.equal(reviewers, 0);
