@@ -9,7 +9,7 @@
 
 import { execFileSync } from "node:child_process";
 import { closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, writeFileSync } from "node:fs";
-import { hostname as osHostname } from "node:os";
+import { homedir, hostname as osHostname } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { createBoardSnapshotCache } from "./board-snapshot-cache.js";
 import {
@@ -69,6 +69,7 @@ import {
   readDiskFreeBytes,
   readDiskTotalBytes,
   readGitLocks,
+  readHostPieces,
   readMemInfo,
   readWorkerProcesses,
   type WorkerProcessReading,
@@ -840,6 +841,7 @@ export interface DoctorDeps extends ReportRepoContext {
   /** W1-T3728: presence only. Doctor never prints or persists the Azure Foundry key. */
   readCashKey?: () => string | undefined;
   launchd?: { platform?: NodeJS.Platform; home?: string; exec?: typeof defaultLifecycleExec };
+  hostPieceExists?: (path: string) => boolean;
 }
 
 export function readCaptureSurfaceFireHistory(root: string): Array<Record<string, unknown>> {
@@ -966,6 +968,19 @@ export async function doctorCommand(rest: string[], deps: DoctorDeps = {}): Prom
       configured: config.workerProviders?.cashFallbackWhenBlocked === true && enabledWorkerProviders(config).includes("cash"),
       keyPresent: Boolean((deps.readCashKey ?? (() => process.env[OPENWEIGHT_API_KEY_ENV]))()),
     },
+    hostPieces: readHostPieces(
+      {
+        home: homedir(),
+        configHome: process.env.XDG_CONFIG_HOME || undefined,
+        stateRoot: root,
+        binDir: process.env.RMD_BIN_DIR || undefined,
+        fleetInstallDir: process.env.RMD_FLEET_INSTALL_DIR || config.installRoot,
+        cleanupPath: process.env.RMD_CLEANUP_PATH || undefined,
+        tmpSweepPath: process.env.RMD_TMP_SWEEP_PATH || undefined,
+      },
+      process.platform,
+      deps.hostPieceExists,
+    ),
   });
 
   const unverifiableLines = judged.unverifiable.map((u) => `${u.taskId}: unverifiable here (host ${u.host})`);
