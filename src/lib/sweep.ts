@@ -137,7 +137,7 @@ import {
 } from "./strike-ladder.js";
 import { buildRiskJudgeSpawnArgs, JUDGE_SHADOW_COMPARED_KEY, resolveFixProgressJudgeMount, resolveRiskJudgeMount, runJudgeShadow, scrubRiskJudgeText, runRiskJudge, type RiskJudgeConfig, type RiskJudgeInput, type RiskJudgeOrchestratorDeps } from "./risk-judge.js";
 import {
-  createIncrementalLedgerUnion, createLedgerRotationMemo, createSizedMemo, ledgerRotationDigests, ledgerRotationEntries, ledgerRowsForSync, ndjsonLines,
+  createIncrementalLedgerUnion, createLedgerRotationMemo, createSizedMemo, ledgerRotationDigests, ledgerRotationEntries, ledgerRowsFor, ndjsonLines,
   readLedgerUnionRecordsSync, realLedgerFs, resolveLedgerUnion,
   type IncrementalUnionPass, type LedgerCorpusEntry, type LedgerGrepFsDeps, type LedgerRotationRecords, type LedgerUnionRecordRead,
 } from "./ledger-union.js";
@@ -17584,11 +17584,11 @@ export async function observeCodeqlConfigurationWarning(deps: SweepDeps, lines: 
         mkdirSync(dirname(deps.ledgerPath), { recursive: true });
         const lock = new DatabaseSync(`${deps.ledgerPath}.security-producer.lock.sqlite`, { timeout: 0 });
         try {
-          // Serialize the live receipt check and append across processes. Closing releases the lock before GitHub I/O.
+          // Serialize receipt lookup and append across processes. Closing releases the lock before GitHub I/O.
           lock.exec("BEGIN IMMEDIATE");
           let recorded = (deps.readLedger ?? readLiveLedgerRows)(deps.ledgerPath).some(alreadyDispatched);
           if (!recorded && !deps.readLedger) {
-            const history = ledgerRowsForSync(dirname(deps.ledgerPath), {
+            const history = await ledgerRowsFor(dirname(deps.ledgerPath), {
               steps: [SECURITY_PRODUCER_REDISPATCHED_STEP], prNumbers: [pr.prNumber],
             }, { refuseIncomplete: true });
             if (!history.ok) throw new Error("producer dispatch receipt history is unreadable");

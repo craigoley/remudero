@@ -115,12 +115,17 @@ test("W1-T13787 criterion 2: overlapping full passes share one redispatch receip
   const first = harness([], read);
   const second = harness([], read);
   const ledgerPath = join(ROOT, "overlap.ndjson");
-  const results = await Promise.all([first, second].map(({ deps }, index) =>
-    sweep.runSweep([view()], { ...deps, runId: `OVERLAP-${index}`, ledgerPath, readLedger: undefined, appendLine: undefined })));
+  const passes = [first, second].map(({ deps }, index) =>
+    ({ ...deps, runId: `OVERLAP-${index}`, ledgerPath, readLedger: undefined, appendLine: undefined }));
+  const results = await Promise.all(passes.map((deps) => sweep.runSweep([view()], deps)));
+  assert.equal(results.filter((result) => result.actions.some(({ reason }) =>
+    reason.includes("could not record a producer dispatch at this head (database is locked)"))).length, 1);
   assert.equal(reads, 2);
+
+  const nextPass = await sweep.runSweep([view()], passes[1]!);
+  assert.match(nextPass.actions[0]!.reason, /producer was already re-run at this head/);
   assert.deepEqual([...first.dispatched, ...second.dispatched], [PR]);
   assert.equal(readLedgerLines(ledgerPath).filter((row) => row.step === STEP).length, 1);
-  assert.equal(results.filter((result) => result.actions.some(({ reason }) => reason.includes("producer was already re-run at this head"))).length, 1);
 });
 
 test("W1-T13787 criterion 2: a competing ledger writer defers the dispatch until a later pass", async () => {
