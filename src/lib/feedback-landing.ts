@@ -1686,6 +1686,8 @@ export interface LandContentInput {
   /** Repo-relative, forward-slash path this content belongs at. */
   relPath: string;
   content: string;
+  /** W1-T13816: when set, each tree build stages `edit` of main's current blob, never `content`; undefined refuses the path. */
+  edit?: (current: string) => string | undefined;
 }
 
 /**
@@ -1747,10 +1749,21 @@ function* landContentSteps(
       // Decision/ruling shards have no lifecycle; see `isFeedbackRecordPath`.
       const refused: FeedbackRefusal[] = [...(carried?.refused ?? [])];
       let i = 0;
-      for (const { relPath, content: inputContent } of inputs) {
-        const gateRefusal = destinationGateRefusal(opts, relPath, inputContent);
-        if (gateRefusal) { refused.push(gateRefusal); continue; }
+      for (const { relPath, content: inputContent, edit } of inputs) {
         let content = inputContent;
+        if (edit) {
+          const current = yield* blobAt(net, "origin/main", relPath);
+          const edited = current === undefined ? undefined : edit(current);
+          if (edited === undefined) {
+            refused.push({ path: relPath, reason: current === undefined
+              ? `main no longer has ${relPath}, so its edit was not applied`
+              : `main's current copy of ${relPath} no longer takes its edit (a status edit needs status: queued and no retirement)` });
+            continue;
+          }
+          content = edited;
+        }
+        const gateRefusal = destinationGateRefusal(opts, relPath, content);
+        if (gateRefusal) { refused.push(gateRefusal); continue; }
         // A scratch tmp file, never inside root — hash-object just needs a path to read from.
         const tmpFile = join(scratchDir as string, `content-${i++}`);
         writeFileSync(tmpFile, content);
