@@ -10,7 +10,7 @@ import { instanceRegistryRuntimePresent, runtimeInstanceRegistryText, runtimeIns
   runtimeInstanceRegistryPrivateFile, runtimeInstanceRegistryDigest, type RegistryFileIO } from "./instance-registry-selection.js";
 import { parseInstanceRegistry } from "./instance-registry.js";
 import { selectedInstanceRegistryEnvPath } from "./instance-registry-selection.js";
-import { buildFixProgressInput as buildBaseFixProgressInput, fixRedClass, resolveFixProgress, parseFixProgressVerdict, scopeEscalationStandDown,
+import { buildFixProgressInput as buildBaseFixProgressInput, fixRedClass, resolveFixProgress, parseFixProgressVerdict, scopeEscalationStandDown, priorRoundHold, PRIOR_ROUND_HOLD_FIELD,
   type FixProgressWitness, type FixProgressHostedProofResult,
   type FixProgressInput, type FixProgressJudge, type FixProgressResult, type FixProgressVerdict,
   sameCriterionStall, nextStallRemedy, stallRemedyRows, failedApproaches, rowPrNumber, type StallRemedy,
@@ -25862,6 +25862,17 @@ export async function runSweep(
                   standDownReason = amended;
                   break;
                 }
+              }
+              const roundHold = priorRoundHold(ledgerLines, { taskId: fixLedgerTaskIdFor(pr), headSha: pr.headSha,
+                contractRevision: pr.taskId === undefined ? undefined : deps.readTaskContractRevision?.(pr.taskId),
+                checkCompletions: pr.ciFailures });
+              if (roundHold) {
+                acted = false;
+                spent = false;
+                standDownReason = roundHold.reason;
+                extraDisposedFields = { ...extraDisposedFields, [PRIOR_ROUND_HOLD_FIELD]: roundHold.hold, prior_round_hold_since: roundHold.since,
+                  ...(roundHold.contractRevision !== undefined ? { prior_round_hold_contract_revision: roundHold.contractRevision } : {}) };
+                break;
               }
               if (refusedSameRed && fixRoundTally(ledgerLines, fixLedgerTaskIdFor(pr), pr.headSha).refusals.length === 0) {
                 progressParkedReason = `fix commit refused at this head and red set (${refusedSameRed.reason}) — incomplete round history`;

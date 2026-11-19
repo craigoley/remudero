@@ -710,6 +710,40 @@ export async function resolveFixProgress(input: FixProgressInput, ledger: readon
   return { decision, receipt: { step: "fix.progress_judged", input_key: inputKey } };
 }
 
+/** W1-T13865: a NEEDS_SCOPE or FLAKE round waits on an input; the next round at the same head waits for it too. */
+export interface PriorRoundHold { hold: "NEEDS_SCOPE" | "FLAKE"; since: string; roundId?: string; contractRevision?: string; reason: string }
+export const PRIOR_ROUND_HOLD_FIELD = "prior_round_hold";
+export function priorRoundHold(ledger: readonly Record<string, unknown>[], facts: { taskId: string | undefined; headSha: string;
+  contractRevision?: string; checkCompletions?: readonly { name: string; completedAt?: string }[] }): PriorRoundHold | undefined {
+  if (facts.taskId === undefined) return undefined;
+  const done = ledger.findLast(row => row.step === "fix.done" && row.task_id === facts.taskId && row.head_sha === facts.headSha);
+  const outcome = done?.fix_outcome;
+  if ((outcome !== "NEEDS_SCOPE" && outcome !== "FLAKE") || typeof done!.ts !== "string") return undefined;
+  const since = done!.ts, sinceMs = Date.parse(since);
+  if (!Number.isFinite(sinceMs)) return undefined;
+  const after = (ts: unknown) => typeof ts === "string" && Date.parse(ts) > sinceMs;
+  const roundId = stringValue(done!.round_id);
+  const head = facts.headSha.slice(0, 7);
+  if (outcome === "FLAKE") {
+    if (done!.flake_claim === "refuted" || done!.flake_claim === "confirmed") return undefined;
+    const completed = (facts.checkCompletions ?? []).find(check => after(check.completedAt));
+    if (completed) return undefined;
+    return { hold: "FLAKE", since, roundId, reason: `the last fix round at ${head} ruled FLAKE at ${since} and no required ` +
+      "check has completed on this head since — no fix round until one does" };
+  }
+  const amendments = new Set(ledger.filter(row => row.step === "fix.scope_amendment" && row.task_id === facts.taskId)
+    .map(row => Number(row.amendmentNumber ?? row.amendment_number)).filter(n => Number.isSafeInteger(n) && n > 0));
+  if (ledger.some(row => row.step === PR_TERMINAL_STEP && row.state === "merged" && amendments.has(Number(row.pr_number)) &&
+    after(row.ts))) return undefined;
+  const latched = ledger.findLast(row => row.step === "sweep.disposed" &&
+    row.head_sha === facts.headSha && row[PRIOR_ROUND_HOLD_FIELD] === "NEEDS_SCOPE" && row.prior_round_hold_since === since);
+  const standingOn = stringValue(done!.contract_revision) ?? stringValue(latched?.prior_round_hold_contract_revision) ?? facts.contractRevision;
+  if (standingOn !== undefined && facts.contractRevision !== undefined && standingOn !== facts.contractRevision) return undefined;
+  return { hold: "NEEDS_SCOPE", since, roundId, ...(standingOn !== undefined ? { contractRevision: standingOn } : {}),
+    reason: `the last fix round at ${head} ruled NEEDS_SCOPE at ${since}; no scope amendment has merged and the task ` +
+      "contract is unchanged since — no fix round until one changes" };
+}
+
 /** W1-T12710: the remedies a stalled criterion gets, in this order. */
 export const STALL_REMEDIES = ["stronger-worker", "amend-criterion", "operator-input"] as const;
 export type StallRemedy = (typeof STALL_REMEDIES)[number];
