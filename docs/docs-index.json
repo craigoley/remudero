@@ -962,6 +962,12 @@
       "grepHint": "Recovered research artefacts"
     },
     {
+      "path": "docs/research/a-home-repo-for-each-fleet.md",
+      "title": "A home repository for each fleet",
+      "summary": "Recon for W1-T13727. Read 2026-11-19 against core `origin/main` eb79fd765 and the Console checkout. Each claim is",
+      "grepHint": "A home repository for each fleet"
+    },
+    {
       "path": "docs/research/a-standby-daemon-for-a-freshness-restart.md",
       "title": "A standby daemon for a freshness restart",
       "summary": "Design only. This document changes nothing under `src/` or `deploy/`. A build needs its own task,",
