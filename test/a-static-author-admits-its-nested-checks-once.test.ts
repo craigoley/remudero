@@ -53,7 +53,7 @@ test("author static admission: real child and grandchild borrow one live owner w
   // (coverageChildEnvironment in scripts/test-with-retry.mjs), and these children inherit it, so Node
   // writes no compile cache into the slot dir there. The slot's NODE_COMPILE_CACHE wiring is asserted
   // wherever the cache is enabled; slot-1.json is asserted in both.
-  const cacheDisabled = ordinaryChildEnvironment.NODE_DISABLE_COMPILE_CACHE !== undefined;
+  const cacheDisabled = { ...process.env, ...lease.childEnvironment }.NODE_DISABLE_COMPILE_CACHE !== undefined;
   assert.deepEqual(readdirSync(dir), cacheDisabled ? ["slot-1.json"] : ["node-compile-cache", "slot-1.json"],
     "W1-T13853 compile cache: only slot-1.json, plus node-compile-cache when the child's compile cache is enabled");
   assert.equal(readFileSync(claim.path, "utf8"), bytes);
