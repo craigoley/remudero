@@ -86,6 +86,9 @@ const FIX_CATALOG_CAUSE = /^task catalog unreadable: ops-[a-z_]+$/;
 const DESTINATION_REASON = /^plan destination is unreadable at (switch|offline|fetch|plan|pulls)$/;
 const str = (value: unknown): string | undefined => typeof value === "string" && value !== "" ? value : undefined;
 
+/** W1-T13785: the refused record's digest, the ops copy's or (for a public subject) the public record's. */
+const recordDigestOf = (row: Row): string | undefined => str(row.ops_record_digest) ?? str(row.public_record_digest);
+
 export const REFUSAL_CLASSES: readonly RefusalClass[] = [
   {
     // rmd approve (src/run-task.ts approveCommand): the two catalogs cannot be composed as the daemon composes them.
@@ -93,7 +96,7 @@ export const REFUSAL_CLASSES: readonly RefusalClass[] = [
     opens: (row) => {
       const taskId = str(row.task_id), reason = str(row.reason);
       if (row.step !== APPROVE_RELEASE_REFUSED_STEP || row.class !== "release-compose" || !taskId || !reason) return undefined;
-      return { subject: `task:${taskId}`, signature: str(row.edge) ? `${reason} ${String(row.edge)}` : reason, taskId, ...(str(row.ops_record_digest) ? { digest: String(row.ops_record_digest) } : {}) };
+      return { subject: `task:${taskId}`, signature: str(row.edge) ? `${reason} ${String(row.edge)}` : reason, taskId, ...(recordDigestOf(row) === undefined ? {} : { digest: recordDigestOf(row) }) };
     },
     recovered: (row, item) => row.step === RELEASE_LEDGER_STEP && row.task_id === item.taskId,
     probeOn: ["public-main", "ops-main", "daemon-boot"],
@@ -383,17 +386,28 @@ async function stuckStatePass(ports: StuckStatePorts): Promise<void> {
   writeAtomic(join(ports.stateDir, STUCK_STATE_FILE), `${JSON.stringify(next)}\n`);
 }
 
+/** A record with keys sorted, without the keys `drop` names (the lookup's provenance stamps), at every depth. */
+function stableRecord(value: unknown, drop: ReadonlySet<string>): string {
+  if (Array.isArray(value)) return `[${value.map((item) => stableRecord(item, drop)).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record).filter((k) => record[k] !== undefined && !drop.has(k)).sort().map((k) => `${JSON.stringify(k)}:${stableRecord(record[k], drop)}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
 /** The ops record's digest: the record as its catalog holds it, keys sorted, without the lookup's provenance stamp. */
 export function opsRecordDigest(task: Task): string {
-  const stable = (value: unknown): string => {
-    if (Array.isArray(value)) return `[${value.map(stable).join(",")}]`;
-    if (value !== null && typeof value === "object") {
-      const record = value as Record<string, unknown>;
-      return `{${Object.keys(record).filter((k) => record[k] !== undefined && k !== "catalog").sort().map((k) => `${JSON.stringify(k)}:${stable(record[k])}`).join(",")}}`;
-    }
-    return JSON.stringify(value) ?? "null";
-  };
-  return createHash("sha256").update(stable(task)).digest("hex");
+  return createHash("sha256").update(stableRecord(task, new Set(["catalog"]))).digest("hex");
+}
+
+/**
+ * W1-T13785: a public record's digest. The file it was read from (sourcePath names the pinned commit) is provenance,
+ * not the record, so an unchanged record keeps its digest as main moves. The catalog is part of the input, so a record
+ * that moved between the catalogs never digests as the one the operator's refused release read.
+ */
+export function publicRecordDigest(task: Task): string {
+  return createHash("sha256").update(`public\0${stableRecord(task, new Set(["catalog", "sourcePath"]))}`).digest("hex");
 }
 
 /** Pin the public ref before opening its plan blobs so the refusal names the commit it actually read. */
@@ -419,16 +433,20 @@ export async function readApproveRelease(
 ): Promise<TaskReleasePlan | undefined> {
   const lookup = { ...options };
   let publicCommit: string | undefined;
+  let publicPlan: Plan | undefined;
   const release = await findApproveReleasePlan(taskId, localPlan, async () => {
     const view = await readPinnedReleasePublicPlan(publicRoot);
     publicCommit = view.commit;
-    if (!view.plan.byId.has(taskId) && (view.read === "origin/main" || !localPlan.byId.has(taskId)) && lookup.opsSnapshot === undefined) {
+    publicPlan = view.plan;
+    // W1-T13785: a public hit composes too, so only a local hit the working tree alone answers opens no ops read.
+    const needsOps = view.plan.byId.has(taskId) || view.read === "origin/main" || !localPlan.byId.has(taskId);
+    if (needsOps && lookup.opsSnapshot === undefined) {
       const snapshot = await readOps(lookup.stateDir, lookup.api);
       if (snapshot.outcome !== "off" && snapshot.outcome !== "destination-unreadable") lookup.opsSnapshot = snapshot;
     }
     return view;
   }, lookup);
-  const evidence = { publicCommit, opsSnapshot: lookup.opsSnapshot, append };
+  const evidence = { publicCommit, publicPlan, opsSnapshot: lookup.opsSnapshot, append };
   if (release?.outcome === "unreadable") recordApproveReleaseRefusal(taskId, { reason: release.reason }, evidence);
   // Only a hold read from the public ref has a commit whose movement can prove it cleared.
   if (release?.outcome === "held" && publicCommit !== undefined) {
@@ -437,18 +455,22 @@ export async function readApproveRelease(
   return release;
 }
 
-/** A failed catalog read carries no replayable record. A composition refusal uses the snapshot that produced it. */
+/** A failed catalog read carries no replayable record. A composition refusal uses the snapshot that produced it.
+ *  W1-T13785: a subject the public view holds is a public record (approve resolves the public plan first), so its row
+ *  carries that record's digest as `public_record_digest`; an ops subject's row is unchanged. */
 export function recordApproveReleaseRefusal(
   taskId: string, refusal: { reason: string; edge?: string },
-  opts: { opsSnapshot?: OpsCatalogSnapshot; append: (row: RefusalRow) => void; publicCommit?: string },
+  opts: { opsSnapshot?: OpsCatalogSnapshot; append: (row: RefusalRow) => void; publicCommit?: string; publicPlan?: Plan },
 ): void {
   const { reason } = refusal;
   if (!RELEASE_REFUSAL_REASON.test(reason)) return;
   try {
-    const task = opts.opsSnapshot?.plan?.byId.get(taskId);
+    const publicTask = opts.publicPlan?.byId.get(taskId);
+    const task = publicTask === undefined ? opts.opsSnapshot?.plan?.byId.get(taskId) : undefined;
     opts.append({ run_id: `APPROVE-${taskId}`, task_id: taskId, step: APPROVE_RELEASE_REFUSED_STEP, class: "release-compose", reason,
       ...(refusal.edge === undefined ? {} : { edge: refusal.edge }),
-      public_commit: opts.publicCommit ?? null, ops_commit: opts.opsSnapshot?.binding?.commit ?? null, ops_record_digest: task ? opsRecordDigest(task) : null });
+      public_commit: opts.publicCommit ?? null, ops_commit: opts.opsSnapshot?.binding?.commit ?? null, ops_record_digest: task ? opsRecordDigest(task) : null,
+      ...(publicTask === undefined ? {} : { public_record_digest: publicRecordDigest(publicTask) }) });
   } catch (error) {
     // The refusal stands whatever happens here; a row that cannot be written only leaves the operator's re-run to him.
     console.error(`rmd approve: could not record the refusal of '${taskId}': ${String((error as Error)?.message ?? error)}`);
@@ -509,8 +531,9 @@ export function productionStuckStateProbe(opts: {
     const release: TaskReleasePlan = await findReleasePlanInCatalogs(item.taskId!, publicPlan, { stateDir: opts.stateDir, api: opts.api, opsSnapshot: read });
     // A catalog refusal or a per-task hold keeps the cause present.
     if (release.outcome !== "found") return { present: true, reason: "reason" in release ? release.reason : `${release.outcome}` };
-    const record = read.plan.byId.get(item.taskId!);
-    return { present: false, ...(release.outcome === "found" && release.catalog === "ops" && record ? { digest: opsRecordDigest(record) } : {}) };
+    // W1-T13785: a public release names the public record's digest; a record that moved catalog digests apart.
+    const record = (release.catalog === "ops" ? read.plan : publicPlan).byId.get(item.taskId!);
+    return { present: false, ...(record === undefined ? {} : { digest: release.catalog === "ops" ? opsRecordDigest(record) : publicRecordDigest(record) }) };
   };
 }
 

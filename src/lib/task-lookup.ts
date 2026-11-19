@@ -191,23 +191,41 @@ export type TaskReleasePlan =
 
 /**
  * W1-T13386: the plan an operator's release of `taskId` reads and pins from. A task the public plan holds keeps
- * that plan and opens no private reader. A task only the ops catalog holds gets the plan the daemon's tick
+ * that plan. A task only the ops catalog holds gets the plan the daemon's tick
  * dispatches from (`composeSecondaryPlan` over the same two plans), so the pinned record is the one the tick
  * hashes. Two plans the tick cannot compose (a malformed snapshot) are `unreadable` with the reason
  * `compose-<the tick's outcome code>`; the `compose-` prefix keeps that apart from a catalog read that failed
  * (`ops-<outcome>`). W1-T13749: an ops task the composition holds is `held` with its edge, so it is never released
  * while the tick holds it, and a sound ops task beside it is `found` as if the bad edge were absent.
+ * W1-T13785: a public hit while a destination is named reads the ops catalog too, because the tick holds public
+ * records as well (a duplicate's public copy, a public task naming an ops id, and their dependants). A public task
+ * the composition holds is `held`; with the destination off, the catalog unreadable or the composition malformed,
+ * the tick dispatches the public plan alone, and the public hit is `found` with that plan as before.
  */
 export async function findReleasePlanInCatalogs(taskId: string, publicPlan: Plan, sources: TaskLookupOptions = {}): Promise<TaskReleasePlan> {
   const lookup = await findTaskInCatalogs(taskId, { ...sources, byId: publicPlan.byId });
   if (lookup.outcome !== "found") return lookup;
-  if (lookup.catalog === "public") return { outcome: "found", catalog: "public", plan: publicPlan };
+  if (lookup.catalog === "public") {
+    const hold = await publicCompositionHold(taskId, publicPlan, sources);
+    return hold === undefined ? { outcome: "found", catalog: "public", plan: publicPlan } : { outcome: "held", hold };
+  }
   // An ops hit always kept its snapshot; were one ever missing, the composer reads it as malformed.
   const composition = composeSecondaryPlan(publicPlan, opsPlanForLookup(lookup) as Plan);
   if (composition.outcome !== "ok") return { outcome: "unreadable", reason: `compose-${composition.outcome}` };
   const hold = composition.held.get(taskId);
   if (hold !== undefined) return { outcome: "held", hold };
   return { outcome: "found", catalog: "ops", plan: composition.plan };
+}
+
+/** W1-T13785: the hold the tick's composition puts on a public record. Only a named destination whose catalog reads ok
+ *  and composes can hold one; every other read leaves the tick dispatching the public plan alone, so none holds it. */
+async function publicCompositionHold(taskId: string, publicPlan: Plan, sources: TaskLookupOptions): Promise<CompositionHold | undefined> {
+  const destination = planDestinationRepository(sources.stateDir);
+  if (destination.outcome !== "named") return undefined;
+  const snapshot = sources.opsSnapshot ?? await readOpsCatalogSnapshotAsync({ repository: `${destination.owner}/${destination.repo}` }, sources.api);
+  if (snapshot.outcome !== "ok" || snapshot.plan === undefined) return undefined;
+  const composition = composeSecondaryPlan(publicPlan, snapshot.plan);
+  return composition.outcome === "ok" ? composition.held.get(taskId) : undefined;
 }
 
 /** Which public plan a release composed against: the checkout's origin/main, or its working tree and why. */
@@ -236,13 +254,19 @@ export async function readReleasePublicPlan(checkoutRoot: string): Promise<Relea
  * A local miss composes against `readPublic()` (readReleasePublicPlan of the checkout). A local hit that origin/main
  * no longer holds (an id moved to the ops catalog after the boot) is resolved through the catalogs, and released
  * from the ops catalog when that is where it lives now; any other local hit is released as before.
+ * W1-T13785: a local hit the public view still holds is `held` when the composition over that view holds it, and
+ * `undefined` otherwise, so a sound public record is released from the local plan with the pin it always had.
  */
 export async function findApproveReleasePlan(taskId: string, localPlan: Plan, readPublic: () => Promise<ReleasePublicPlan>,
   sources: TaskLookupOptions = {}): Promise<TaskReleasePlan | undefined> {
   if (!localPlan.byId.has(taskId)) return findReleasePlanInCatalogs(taskId, (await readPublic()).plan, sources);
   if (planDestinationRepository(sources.stateDir).outcome === "off") return undefined;
   const publicPlan = await readPublic();
-  if (publicPlan.read !== "origin/main" || publicPlan.plan.byId.has(taskId)) return undefined;
+  if (publicPlan.plan.byId.has(taskId)) {
+    const release = await findReleasePlanInCatalogs(taskId, publicPlan.plan, sources);
+    return release.outcome === "held" ? release : undefined;
+  }
+  if (publicPlan.read !== "origin/main") return undefined;
   const moved = await findReleasePlanInCatalogs(taskId, publicPlan.plan, sources);
   return moved.outcome === "held" || (moved.outcome === "found" && moved.catalog === "ops") ? moved : undefined;
 }

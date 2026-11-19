@@ -16,7 +16,7 @@ import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { readOriginMainSha } from "#src/lib/inbox.js";
 import { ledgerPathFor } from "#src/lib/ledger-path.js";
 import { appendLedger } from "#src/lib/ledger.js";
-import { productionStuckStatePorts, opsRecordDigest, runStuckStateGardener } from "#src/lib/stuck-state-gardener.js";
+import { productionStuckStatePorts, opsRecordDigest, publicRecordDigest, runStuckStateGardener } from "#src/lib/stuck-state-gardener.js";
 import { approveCommand, approveParkedTask, namesATask } from "#src/run-task.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 
@@ -610,11 +610,12 @@ test("W1-T13386 criterion 4: an id in neither catalog is refused as unknown and 
   assert.equal(onHost.wroteAnything(), false);
 });
 
-test("W1-T13386 criterion 4: a task in the public plan is located, pinned and released as before, with no read of the ops catalog", async t => {
+test("W1-T13386 criterion 4: a task in the public plan is located, pinned and released as before; amended by W1-T13785 criterion 2, the ops read is attempted while a destination is named", async t => {
   const host = hostWithSecondCatalog(t, { transport: "down" }), said = everythingSaid(t);
   const record = loadPlan(host.planPath).byId.get(PUBLIC_ID)!;
   assert.equal(await approveCommand([PUBLIC_ID], { config: host.config, planPath: host.planPath, taskLookup: { api: host.api } }), 0, said.join("\n"));
-  assert.equal(host.calls.length, 0, "a public hit opens no private reader");
+  // W1-T13785 criterion 2 supersedes "a public hit opens no private reader": the read is attempted, fails, and the release stands.
+  assert.ok(host.calls.length > 0, "a public hit attempts the ops read while a destination is named");
   const rows = host.releaseRows(PUBLIC_ID);
   assert.equal(rows.length, 1);
   assert.equal(rows[0]!.run_id, `APPROVE-${PUBLIC_ID}`);
@@ -622,10 +623,149 @@ test("W1-T13386 criterion 4: a task in the public plan is located, pinned and re
   assert.deepEqual(Object.keys(host.durableRecords()), [PUBLIC_ID]);
   assert.equal(host.durableRecords()[PUBLIC_ID]!.pin, pinBeforeThisTask(record));
 
-  // And as the host runs the verb: its own checkout holds the id, so the catalogs are never asked.
+  // And as the host runs the verb: its own checkout holds the id; the catalog is asked whether the tick holds it.
   const onHost = hostWithSecondCatalog(t, { transport: "down" });
   assert.equal(await approveAsTheHostRunsIt(onHost, [PUBLIC_ID]), 0, said.join("\n"));
-  assert.equal(onHost.calls.length, 0);
+  assert.ok(onHost.calls.length > 0, "W1-T13785 criterion 2: the read is attempted while a destination is named");
   assert.equal(onHost.releaseRows(PUBLIC_ID).length, 1);
   assert.equal(onHost.releaseRows(PUBLIC_ID)[0]!.release_pin, pinBeforeThisTask(record));
+});
+
+// W1-T13785: the composition holds public records too. Approve composes a public hit while a destination is named.
+const DEPENDANT_ID = "W1-T1042";
+const dependingOn = (id: string, dependency: string): string => shardText(id).replace("depends_on: []", `depends_on: [${dependency}]`);
+/** The ops catalog repeats the public id without moved_from: both copies are held (duplicate_task_id). */
+const REPEATS_PUBLIC_ID = shardText(OPS_ID) + shardText(PUBLIC_ID);
+const HELD_PUBLIC = [
+  { name: "the public copy of an id the ops catalog repeats", publicText: shardText(PUBLIC_ID), subject: PUBLIC_ID,
+    held: `it is held by its own edge \\(duplicate_task_id: ${PUBLIC_ID} in both catalogs\\)` },
+  { name: "a public task depending on that copy", publicText: shardText(PUBLIC_ID) + dependingOn(DEPENDANT_ID, PUBLIC_ID), subject: DEPENDANT_ID,
+    held: `it is held by the edge of ${PUBLIC_ID}, which it depends on \\(duplicate_task_id: ${PUBLIC_ID} in both catalogs\\)` },
+];
+
+/** A public plan published at origin/main in a git checkout detached at the boot commit, as the host runs. */
+function publicMainAt(t: TestContext, bootText: string, mainText = bootText) {
+  const checkout = gitRepo({ scope: t, seedCommit: false });
+  const planPath = join(checkout.dir, "plan", "tasks.yaml");
+  mkdirSync(join(checkout.dir, "plan"));
+  const publish = (text: string) => {
+    writeFileSync(planPath, text);
+    checkout.git("add", "plan/tasks.yaml");
+    checkout.git("commit", "--quiet", "--allow-empty", "-m", "fixture main");
+    const sha = checkout.git("rev-parse", "HEAD");
+    checkout.git("update-ref", "refs/remotes/origin/main", sha);
+    return sha;
+  };
+  const boot = publish(bootText);
+  const main = publish(mainText);
+  checkout.git("checkout", "--quiet", "--detach", boot);
+  return { dir: checkout.dir, planPath, main };
+}
+
+/** `rmd --repo-root <root> approve <rest>` with the host's state directory: the verb finds the plan in that root. */
+async function approveAtRoot(root: string, host: ReturnType<typeof hostWithSecondCatalog>, rest: string[]): Promise<number> {
+  const argv = [...process.argv];
+  process.argv.push("--repo-root", root);
+  try {
+    return await approveCommand(rest, { config: host.config, taskLookup: { api: host.api } });
+  } finally {
+    process.argv.splice(0, process.argv.length, ...argv);
+  }
+}
+
+const MODES = ["checkout, plan handed", "checkout, as the host runs it", "working tree, plan handed", "working tree, as the host runs it"] as const;
+async function approveIn(mode: (typeof MODES)[number], t: TestContext, host: ReturnType<typeof hostWithSecondCatalog>, bootText: string, subject: string,
+  mainText = bootText) {
+  writeFileSync(host.planPath, bootText);
+  if (mode.startsWith("working tree")) {
+    const code = mode.endsWith("handed")
+      ? await approveCommand([subject], { config: host.config, planPath: host.planPath, taskLookup: { api: host.api } })
+      : await approveAsTheHostRunsIt(host, [subject]);
+    return { code, main: undefined, planPath: host.planPath };
+  }
+  const world = publicMainAt(t, bootText, mainText);
+  const code = mode.endsWith("handed")
+    ? await approveCommand([subject], { config: host.config, planPath: world.planPath, taskLookup: { api: host.api } })
+    : await approveAtRoot(world.dir, host, [subject]);
+  return { code, main: world.main, planPath: world.planPath };
+}
+
+test("W1-T13785 criterion 1: approve refuses a public record the composition holds, handed a plan and as the host runs it, releases nothing, and writes one refusal row with the public record's digest", async t => {
+  const everything = everythingSaid(t);
+  for (const world of HELD_PUBLIC) {
+    for (const mode of MODES) {
+      const host = hostWithSecondCatalog(t, { opsText: REPEATS_PUBLIC_ID }), from = everything.length;
+      const ops = await readOpsCatalogSnapshotAsync({ repository: OPS_REPOSITORY }, host.api);
+      const { code, main, planPath } = await approveIn(mode, t, host, world.publicText, world.subject);
+      const said = everything.slice(from).join("\n"), label = `${world.name}, ${mode}: ${said}`;
+      assert.equal(code, 1, label);
+      assert.match(said, new RegExp(`cannot release '${world.subject}': ${world.held} — nothing released`), label);
+      assert.doesNotMatch(said, /RELEASED|unknown task|cannot be read/, label);
+      assert.deepEqual(host.releaseRows(world.subject), [], `no release row — ${label}`);
+      assert.equal(existsSync(host.durablePath), false, `no durable record — ${label}`);
+      const rows = host.rawLines().map(line => JSON.parse(line) as Record<string, unknown>);
+      if (main === undefined) {
+        // #19593's design, kept: a hold read through the working-tree fallback has no public commit to replay against.
+        assert.deepEqual(rows, [], `the working-tree fallback writes no row — ${label}`);
+        continue;
+      }
+      assert.deepEqual(rows.map(row => row.step), ["approve.release_refused"], `exactly one refusal row — ${label}`);
+      const record = loadPlan(planPath).byId.get(world.subject)!;
+      assert.deepEqual(
+        [rows[0]!.task_id, rows[0]!.class, rows[0]!.reason, rows[0]!.edge, rows[0]!.public_commit, rows[0]!.ops_commit, rows[0]!.ops_record_digest, rows[0]!.public_record_digest],
+        [world.subject, "release-compose", "held-duplicate_task_id", `${PUBLIC_ID} in both catalogs`, main, ops.binding?.commit, null, publicRecordDigest(record)], label);
+    }
+  }
+  // A public task naming an ops id, and its dependant: the public plan's own strict loader refuses that plan before
+  // any release is read, on origin/main and here, so nothing is released and nothing is written. The lookup-level
+  // held answer for both is criterion 3's.
+  for (const subject of [PUBLIC_ID, DEPENDANT_ID]) {
+    const host = hostWithSecondCatalog(t);
+    const publicText = dependingOn(PUBLIC_ID, OPS_ID) + dependingOn(DEPENDANT_ID, PUBLIC_ID);
+    for (const mode of MODES) {
+      await assert.rejects(approveIn(mode, t, host, publicText, subject), new RegExp(`depends_on unknown task '${OPS_ID}'`), `${subject}, ${mode}`);
+      assert.equal(host.wroteAnything(), false, `${subject}, ${mode}: no row and no record`);
+    }
+  }
+});
+
+test("W1-T13785 criterion 2: a held public record is released as on origin/main when the ops catalog cannot be read or the destination is off, and a sound public task beside a held one keeps the local pin", async t => {
+  const everything = everythingSaid(t);
+  const record = loadPlan(hostWithSecondCatalog(t).planPath).byId.get(PUBLIC_ID)!;
+  for (const handed of [true, false]) {
+    // The transport is down: the tick dispatches the public plan alone, so approve releases the public copy.
+    const down = hostWithSecondCatalog(t, { opsText: REPEATS_PUBLIC_ID, transport: "down" }), from = everything.length;
+    const code = handed
+      ? await approveCommand([PUBLIC_ID], { config: down.config, planPath: down.planPath, taskLookup: { api: down.api } })
+      : await approveAsTheHostRunsIt(down, [PUBLIC_ID]);
+    const label = `${handed ? "handed" : "as the host runs it"}: ${everything.slice(from).join("\n")}`;
+    assert.equal(code, 0, label);
+    assert.ok(down.calls.length > 0, `the ops read is attempted while a destination is named — ${label}`);
+    assert.equal(down.releaseRows(PUBLIC_ID).length, 1, label);
+    assert.equal(down.releaseRows(PUBLIC_ID)[0]!.release_pin, pinBeforeThisTask(record), `the pin origin/main wrote — ${label}`);
+    assert.equal(down.durableRecords()[PUBLIC_ID]!.pin, pinBeforeThisTask(record), label);
+
+    // The destination is off: no ops read at all, and the release is origin/main's.
+    const off = hostWithSecondCatalog(t, { opsText: REPEATS_PUBLIC_ID });
+    rmSync(join(off.stateDir, "plan-destination.json"));
+    const offCode = handed
+      ? await approveCommand([PUBLIC_ID], { config: off.config, planPath: off.planPath, taskLookup: { api: off.api } })
+      : await approveAsTheHostRunsIt(off, [PUBLIC_ID]);
+    assert.equal(offCode, 0, label);
+    assert.equal(off.calls.length, 0, `no ops read while the destination is off — ${label}`);
+    assert.equal(off.releaseRows(PUBLIC_ID)[0]?.release_pin, pinBeforeThisTask(record), label);
+  }
+  // A sound public task beside the held copy: released from the boot's local record, never origin/main's newer one.
+  const boot = shardText(PUBLIC_ID) + shardText(DEPENDANT_ID), main = shardText(PUBLIC_ID) + shardText(DEPENDANT_ID).replace(`Fixture ${DEPENDANT_ID}`, "Retitled on main");
+  for (const mode of MODES.filter(m => m.startsWith("checkout"))) {
+    const host = hostWithSecondCatalog(t, { opsText: REPEATS_PUBLIC_ID }), from = everything.length;
+    const { code, planPath } = await approveIn(mode, t, host, boot, DEPENDANT_ID, main);
+    const label = `${mode}: ${everything.slice(from).join("\n")}`;
+    assert.equal(code, 0, label);
+    const local = loadPlan(planPath).byId.get(DEPENDANT_ID)!;
+    assert.notEqual(pinBeforeThisTask(local), pinBeforeThisTask(parseTasksFromYaml(main, "main.yaml").find(task => task.id === DEPENDANT_ID)!),
+      "control: the boot's record and origin/main's pin apart");
+    assert.equal(host.releaseRows(DEPENDANT_ID)[0]?.release_pin, pinBeforeThisTask(local), `pinned from the local plan as origin/main does — ${label}`);
+    assert.deepEqual(host.rawLines().map(line => (JSON.parse(line) as Record<string, unknown>).step), [RELEASE_LEDGER_STEP], `no refusal row — ${label}`);
+  }
 });

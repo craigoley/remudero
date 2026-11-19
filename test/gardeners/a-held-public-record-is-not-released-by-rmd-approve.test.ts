@@ -1,0 +1,220 @@
+/**
+ * W1-T13785 — A HELD PUBLIC RECORD IS NOT RELEASED BY RMD APPROVE.
+ *
+ * composeSecondaryPlan holds public records too: both copies of an id the two catalogs hold without a valid moved_from,
+ * a public task naming an ops id, and every task depending on either. The daemon dispatches from that composition, but
+ * approve resolved a public hit without composing and released it. Here the approve release plan answers held for such a
+ * record over the public view it reads, the refusal row and the stuck-state probe name the public record's digest, and
+ * every record the composition does not hold is answered as before.
+ */
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { test, type TestContext } from "node:test";
+
+import { readOpsCatalogSnapshotAsync, type OpsCatalogApi } from "#src/lib/ops-catalog-source.js";
+import { loadPlan, parseTasksFromYaml, type Plan } from "#src/lib/plan.js";
+import {
+  APPROVE_RELEASE_REFUSED_STEP, productionStuckStatePorts, publicRecordDigest, readApproveRelease, runStuckStateGardener, scanStuckState,
+} from "#src/lib/stuck-state-gardener.js";
+import { composeSecondaryPlan, findApproveReleasePlan, type ReleasePublicPlan } from "#src/lib/task-lookup.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+
+type Row = Record<string, unknown>;
+const REPOSITORY = "fixture-private/ops";
+const MISSING = "W1-T9";
+const BAD_EDGE = "invalid_cross_catalog_dependency";
+const NOW = Date.parse("2026-11-19T12:00:00.000Z");
+const MIN = 60_000;
+const iso = (ms: number) => new Date(ms).toISOString();
+const sha1 = (s: string) => createHash("sha1").update(s).digest("hex");
+
+const record = (id: string, depends: string[] = [], title = `held public fixture ${id}`): string =>
+  `- id: ${id}\n  title: ${title}\n  repo: remudero\n  type: implement\n  verify: human\n  status: queued\n  depends_on: [${depends.join(", ")}]\n`;
+const planOf = (text: string, label: string): Plan => {
+  const tasks = parseTasksFromYaml(text, `${label}.yaml`);
+  return { tasks, byId: new Map(tasks.map(task => [task.id, task])) };
+};
+
+/** A state directory naming the ops repository, and that repository's read-only routes over a text a test may change. */
+function opsCatalog(t: TestContext, initial: string) {
+  let text = initial;
+  const root = mkdtempSync(join(tmpdir(), "rmd-held-public-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const stateDir = join(root, "state"); mkdirSync(stateDir);
+  writeFileSync(join(stateDir, "plan-destination.json"), JSON.stringify({ repository: REPOSITORY, kinds: [] }));
+  const api: OpsCatalogApi = async path => {
+    const commit = sha1(text), tree = sha1(commit + "root"), plan = sha1(commit + "plan");
+    const blob = sha1(`blob ${Buffer.byteLength(text)}\0${text}`);
+    const base = `repos/${REPOSITORY}`;
+    if (path === base) return { id: 42, full_name: REPOSITORY, default_branch: "main" };
+    if (path === `${base}/git/ref/heads/main`) return { object: { type: "commit", sha: commit } };
+    if (path === `${base}/git/commits/${commit}`) return { sha: commit, tree: { sha: tree } };
+    if (path === `${base}/git/trees/${tree}`) return { sha: tree, truncated: false, tree: [{ path: "plan", sha: plan, type: "tree", mode: "040000" }] };
+    if (path === `${base}/git/trees/${plan}`) return { sha: plan, truncated: false, tree: [{ path: "tasks.yaml", sha: blob, type: "blob", mode: "100644" }] };
+    assert.equal(path, `${base}/git/blobs/${blob}`, "only pinned read-only fixture routes may run");
+    return { sha: blob, encoding: "base64", size: Buffer.byteLength(text), content: Buffer.from(text).toString("base64") };
+  };
+  return { stateDir, api, lookup: { stateDir, api }, set: (next: string) => { text = next; },
+    read: () => readOpsCatalogSnapshotAsync({ repository: REPOSITORY }, api) };
+}
+
+// W1-T13749's fixture worlds (test/daemon/one-bad-cross-catalog-edge-holds-only-its-own-task.test.ts), with a public
+// dependant of the duplicated id added so each held public shape has a dependant.
+const PUBLIC_TEXT = record("PUB-1") + record("PUB-2");
+const SOUND_OPS = record("OPS-GOOD") + record("OPS-ON-PUBLIC", ["PUB-1"]) + record("OPS-ON-GOOD", ["OPS-GOOD"]);
+const BAD_OPS = record("OPS-BAD", [MISSING]) + record("OPS-CHILD", ["OPS-BAD"]) + record("OPS-GRANDCHILD", ["OPS-CHILD"]);
+const DUP_HOLD = { reason: "duplicate_task_id", task: "PUB-2" };
+const REV_HOLD = { reason: BAD_EDGE, task: "PUB-REV", dependsOn: "OPS-GOOD" };
+const WORLDS = [
+  { name: "a dangling ops edge", publicText: PUBLIC_TEXT, opsText: BAD_OPS + SOUND_OPS },
+  { name: "a duplicate without moved_from", publicText: PUBLIC_TEXT + record("PUB-2-CHILD", ["PUB-2"]),
+    opsText: record("PUB-2") + record("OPS-DUP-CHILD", ["PUB-2"]) + SOUND_OPS },
+  { name: "a public task naming an ops id", publicText: PUBLIC_TEXT + record("PUB-REV", ["OPS-GOOD"]) + record("PUB-REV-CHILD", ["PUB-REV"]),
+    opsText: SOUND_OPS },
+  { name: "no bad edge", publicText: PUBLIC_TEXT, opsText: SOUND_OPS },
+];
+const viewOf = (plan: Plan, read: "origin/main" | "working_tree"): (() => Promise<ReleasePublicPlan>) =>
+  async () => read === "origin/main" ? { plan, read } : { plan, read, reason: "origin-main-unreadable" };
+
+test("W1-T13785 criterion 3: findApproveReleasePlan answers held with the reason and the edge for each held public record, and undefined for a sound one", async t => {
+  const cases = [
+    { world: WORLDS[1]!, held: { "PUB-2": DUP_HOLD, "PUB-2-CHILD": DUP_HOLD }, sound: ["PUB-1"] },
+    { world: WORLDS[2]!, held: { "PUB-REV": REV_HOLD, "PUB-REV-CHILD": REV_HOLD }, sound: ["PUB-1", "PUB-2"] },
+  ];
+  for (const { world, held, sound } of cases) {
+    const fx = opsCatalog(t, world.opsText), publicPlan = planOf(world.publicText, "public");
+    for (const read of ["origin/main", "working_tree"] as const) {
+      for (const [id, hold] of Object.entries(held)) {
+        assert.deepEqual(await findApproveReleasePlan(id, publicPlan, viewOf(publicPlan, read), fx.lookup), { outcome: "held", hold },
+          `${world.name}, ${read}: ${id} is held by ${JSON.stringify(hold)}`);
+      }
+      for (const id of sound) {
+        assert.equal(await findApproveReleasePlan(id, publicPlan, viewOf(publicPlan, read), fx.lookup), undefined,
+          `${world.name}, ${read}: the sound ${id} keeps its own local plan`);
+      }
+    }
+  }
+});
+
+/** A public plan committed at origin/main in a git checkout; `publish` moves origin/main and leaves the boot detached. */
+function publicMain(t: TestContext, text: string) {
+  const checkout = gitRepo({ scope: t, seedCommit: false });
+  const planPath = join(checkout.dir, "plan", "tasks.yaml");
+  mkdirSync(join(checkout.dir, "plan"));
+  const publish = (next: string) => {
+    writeFileSync(planPath, next);
+    checkout.git("add", "plan/tasks.yaml");
+    checkout.git("commit", "--quiet", "--allow-empty", "-m", "fixture main");
+    const sha = checkout.git("rev-parse", "HEAD");
+    checkout.git("update-ref", "refs/remotes/origin/main", sha);
+    return sha;
+  };
+  const boot = publish(text);
+  return { dir: checkout.dir, planPath, boot, publish: (next: string) => { const sha = publish(next); checkout.git("checkout", "--quiet", "--detach", boot); return sha; },
+    head: () => checkout.git("rev-parse", "refs/remotes/origin/main") };
+}
+
+/** The operator's refused approve of PUB-2 (the public copy of a duplicate), then the gardener over its row with a counted approve. */
+async function refusalFixture(t: TestContext) {
+  const fx = opsCatalog(t, record("PUB-2") + record("OPS-GOOD"));
+  const main = publicMain(t, PUBLIC_TEXT);
+  const rows: Row[] = [];
+  let now = NOW;
+  const held = await readApproveRelease("PUB-2", loadPlan(main.planPath), main.dir, fx.lookup, row => rows.push({ ts: iso(now), ...row }));
+  assert.deepEqual(held, { outcome: "held", hold: DUP_HOLD });
+  const approved: string[] = [];
+  const ports = {
+    ...productionStuckStatePorts({
+      stateDir: fx.stateDir, api: fx.api, publicRoot: main.dir, publicMainCommit: main.head, gardenNames: [],
+      log: (step, extra = {}) => void rows.push({ ts: iso(now), step, ...extra }), escalate: () => null,
+      destinationRead: async () => undefined, approve: async id => { approved.push(id); return 0; },
+    }),
+    readRows: () => rows, nowMs: () => now,
+  };
+  const pass = async () => { now += MIN; await runStuckStateGardener(ports); };
+  return { fx, main, rows, ports, pass, approved };
+}
+const steps = (rows: readonly Row[], step: string) => rows.filter(row => row.step === step);
+
+test("W1-T13785 criterion 4: the release probe reads a held public record's cause while the composition holds it and gone once the edge clears, with the public record's digest, and the gardener re-runs that release once", async t => {
+  const { fx, main, rows, ports, pass, approved } = await refusalFixture(t);
+  const refusal = steps(rows, APPROVE_RELEASE_REFUSED_STEP);
+  assert.equal(refusal.length, 1, "the operator's refusal wrote one row");
+  const digest = publicRecordDigest(loadPlan(main.planPath).byId.get("PUB-2")!);
+  assert.equal(refusal[0]!.public_record_digest, digest, "the row names the public record's digest");
+  const [item] = scanStuckState(rows).open;
+  assert.equal(item?.digest, digest, "the held item carries it");
+  assert.equal((await ports.probe(item!)).present, true, "present while the composition holds the public copy");
+
+  await pass();
+  assert.equal(steps(rows, "stuck_state.held").length, 1);
+  await pass();
+  assert.deepEqual(approved, [], "an unchanged cause re-runs nothing");
+
+  fx.set(record("OPS-GOOD"));
+  assert.deepEqual(await ports.probe(item!), { present: false, digest }, "gone once the edge clears, with the same public digest");
+  await pass();
+  await pass();
+  assert.deepEqual(approved, ["PUB-2"], "the gardener re-ran that release exactly once");
+  assert.deepEqual(steps(rows, "stuck_state.record_changed"), []);
+  assert.deepEqual(steps(rows, "stuck_state.cleared").map(row => row.retry), ["approve"]);
+});
+
+test("W1-T13785 criterion 4: a held public record that changed, or moved to the ops catalog, is never re-run and writes stuck_state.record_changed", async t => {
+  for (const shape of ["changed", "moved"] as const) {
+    const { fx, main, rows, pass, approved } = await refusalFixture(t);
+    await pass();
+    if (shape === "changed") {
+      main.publish(PUBLIC_TEXT.replace("held public fixture PUB-2", "retitled PUB-2"));
+      fx.set(record("OPS-GOOD"));
+    } else {
+      // The public copy leaves main; the ops catalog keeps a record of the same text, now the only copy.
+      main.publish(record("PUB-1"));
+    }
+    await pass();
+    await pass();
+    assert.deepEqual(approved, [], `${shape}: a changed record is never released on the operator's behalf`);
+    const changed = steps(rows, "stuck_state.record_changed");
+    assert.equal(changed.length, 1, `${shape}: one record_changed row`);
+    assert.equal(changed[0]!.recorded_digest, steps(rows, APPROVE_RELEASE_REFUSED_STEP)[0]!.public_record_digest, shape);
+    assert.notEqual(changed[0]!.current_digest, changed[0]!.recorded_digest, shape);
+  }
+});
+
+test("W1-T13785 criterion 5: invariant no-held-record-is-released-from-either-catalog — no record the composition holds is answered found by the approve release plan, and every other record is answered as on origin/main", async t => {
+  let heldSeen = 0, soundSeen = 0;
+  for (const world of WORLDS) {
+    const fx = opsCatalog(t, world.opsText), publicPlan = planOf(world.publicText, "public");
+    // The tick composes over the snapshot its reader returns, so the reference does too.
+    const opsPlan = (await fx.read()).plan!;
+    const composition = composeSecondaryPlan(publicPlan, opsPlan);
+    assert.equal(composition.outcome, "ok", world.name);
+    if (composition.outcome !== "ok") continue;
+    const ids = new Set([...publicPlan.tasks, ...opsPlan.tasks].map(task => task.id));
+    for (const id of ids) {
+      const answer = await findApproveReleasePlan(id, publicPlan, viewOf(publicPlan, "origin/main"), fx.lookup);
+      const hold = composition.held.get(id), label = `${world.name}: ${id}`;
+      if (hold !== undefined) {
+        heldSeen += 1;
+        assert.deepEqual(answer, { outcome: "held", hold }, `${label} is held, never found`);
+      } else if (publicPlan.byId.has(id)) {
+        soundSeen += 1;
+        assert.equal(answer, undefined, `${label}: a sound public record keeps its local plan, as on origin/main`);
+      } else {
+        soundSeen += 1;
+        assert.equal(answer?.outcome, "found", label);
+        assert.equal(answer?.outcome === "found" ? answer.catalog : undefined, "ops", label);
+        assert.deepEqual(answer?.outcome === "found" ? answer.plan.byId.get(id) : undefined, composition.plan.byId.get(id),
+          `${label}: a sound ops record is released from the composed plan, as on origin/main`);
+      }
+    }
+  }
+  // Every bad world contributes: the dangling edge and its two dependants; the duplicated id (one id, both copies held)
+  // with its public and its ops dependant; the public task naming an ops id and its dependant.
+  assert.equal(heldSeen, 3 + 3 + 2, `the held records the worlds name (${heldSeen})`);
+  // The sound ones: five per world, less the duplicated id in its world.
+  assert.equal(soundSeen, 5 + 4 + 5 + 5, `the sound records the worlds name (${soundSeen})`);
+});
