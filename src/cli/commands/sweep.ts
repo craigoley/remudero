@@ -1319,7 +1319,6 @@ export function buildSweepLightHook(
     let timingWritten = false;
     let viewsSource: "tick_read" | "own_read" | "fallback" = "own_read";
     let viewsAgeMs: number | null = null;
-    let initialViewsWerePublishedTickRead = false;
     const finishTiming = () => {
       if (timingWritten) return;
       timingWritten = true;
@@ -1347,18 +1346,18 @@ export function buildSweepLightHook(
       // W1-T12755: a failed or slow read decides from the last good list (a refill read too).
       const readViews = async (passScope?: LightPassScope, initial = false) => {
         const served = io.openPrViews?.(passScope);
+        const read = await openPrList.read(served, ownViews, { boot: passScope?.scope === "boot" });
+        // The row and the act-time guards follow the list the pass decided from, not the list it was offered.
         if (initial) {
-          viewsSource = served ? "tick_read" : "own_read";
-          initialViewsWerePublishedTickRead = served?.servedReadStartedAtMs !== undefined;
+          viewsSource = read.fallback ? "fallback" : read.source;
+          viewsAgeMs = Math.max(0, (io.clock ?? systemClock).now() - read.readStartedAtMs);
         }
-        const read = await openPrList.read(served, ownViews);
-        if (initial && read.fallback) viewsSource = "fallback";
-        if (initial) viewsAgeMs = Math.max(0, (io.clock ?? systemClock).now() - read.readStartedAtMs);
         return read;
       };
       const first = await timing.run(() => timing.measure("open_pr_views", () => readViews(scope, true)));
       const openPrs = first.views;
-      const onLastGoodList = first.fallback || (initialViewsWerePublishedTickRead && scope?.scope !== "boot");
+      // A served list is older than the pass: a pass of any scope but boot acts on it as on the last good list.
+      const onLastGoodList = first.fallback || (first.source === "tick_read" && scope?.scope !== "boot");
       compares.retain(openPrs);
       const activePlan = planAccessor?.() ?? plan;
       const effects: Omit<SweepDeps, "ledgerPath" | "runId"> = timing.run(() => (io.effects ?? buildSweepEffects)({

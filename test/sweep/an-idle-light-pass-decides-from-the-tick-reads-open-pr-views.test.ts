@@ -60,6 +60,13 @@ test("W1-T13709 criterion 2: a generation whose read started before the last goo
   const result = await list.read(older, own);
   assert.equal(result.source, "own_read");
   assert.deepEqual(result.views, ["own"]);
+  // A read that started with the last good list's own read is not older than it, so it is served.
+  const same = Object.assign(Promise.resolve(["same-start"]), { servedReadStartedAtMs: STARTED_AT + 20 });
+  assert.equal((await list.read(same, own)).source, "tick_read");
+  // The boot pass keeps the W1-T12236 rule: it takes the tick read whatever the last good list's start.
+  const boot = await list.read(older, own, { boot: true });
+  assert.equal(boot.source, "tick_read");
+  assert.deepEqual(boot.views, ["older-tick"]);
 });
 
 test("W1-T13709 criterion 4: boot retains the tick-read rule and refill has no served scope", async () => {

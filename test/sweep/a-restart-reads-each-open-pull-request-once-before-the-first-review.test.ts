@@ -122,13 +122,16 @@ function fixture() {
     escalate: () => assert.fail("unexpected escalation"),
     readLiveState: (p) => ({ ok: true, state: "OPEN", headSha: liveHead ?? p.headSha }), rereadPrAtAct: async (p) => p,
   };
+  // W1-T13709: what each pass handed the effects builder, so a test sees whether the pass merges at a list's head.
+  const builds: Array<{ armImpl?: unknown }> = [];
   const hook = (openPrViews?: ReturnType<typeof servedOpenPrViews>) =>
     buildSweepLightHook("o", repo, { root } as never, effects.ledgerPath, "T12236", NO_PLAN,
       (step, extra) => { logs.push({ step, ...extra }); }, undefined, () => false, () => NO_PLAN, undefined, undefined,
-      { effects: () => effects, readCompare: async () => ({ ahead_by: 0, files: [] }), ...(openPrViews ? { openPrViews } : {}) });
+      { effects: (built) => { builds.push(built); return effects; }, readCompare: async () => ({ ahead_by: 0, files: [] }),
+        ...(openPrViews ? { openPrViews } : {}) });
   const timing = () => logs.filter((row) => row.step === "sweep_light.pre_review_timing");
   const storePath = join(root, "state", "cache", "plan-filing-files.json");
-  return { root, repo, logs, posted, rows, hook, timing, storePath, useShim, effects,
+  return { root, repo, logs, posted, rows, hook, timing, storePath, useShim, effects, builds,
     livePull: () => pullRow(liveHead!, repo),
     moveLiveHead: (headSha: string) => { liveHead = headSha; },
     settle,
@@ -204,6 +207,48 @@ test("W1-T13709 criteria 1 and 3: idle serves the tick read, records its age, an
       assert.equal(f.posted.length, 0, "the review stood down because the live head moved");
     } finally { await f.cleanup(); }
   }
+});
+
+test("W1-T13709 criterion 3: a served list in a scoped pass is acted on as a last good list, and boot's is not", async () => {
+  for (const [scope, guarded] of [[IDLE, true], [{ reviewOnly: true, scope: "drain" } as LightPassScope, true], [BOOT, false]] as const) {
+    const f = fixture();
+    try {
+      f.useShim("head-live");
+      f.moveLiveHead("head-pushed");
+      const served = servedOpenPrViews(() => generation(TICK_STARTED_AT_MS + 5, [view("head-tick")]), () => TICK_STARTED_AT_MS);
+      await f.hook(served)(scope);
+      assert.equal(f.timing()[0]?.views_source, "tick_read");
+      assert.equal(typeof f.builds[0]?.armImpl === "function", guarded,
+        `${scope.scope}: a direct merge ${guarded ? "names the list's head" : "is not tied to the list's head"}`);
+      const moved = f.rows.filter((row) => row.step === "sweep.head_moved");
+      if (guarded) {
+        assert.ok(moved.length >= 1, JSON.stringify(f.rows));
+        assert.equal(moved[0]?.snapshot_head_sha, "head-tick");
+        assert.equal(moved[0]?.live_head_sha, "head-pushed");
+      }
+      assert.equal(f.posted.length, 0, "no review was posted on the moved head");
+    } finally { await f.cleanup(); }
+  }
+});
+
+test("W1-T13709 criterion 2: a generation older than the last good list is not served, and the row and guards say own read", async () => {
+  const f = fixture();
+  try {
+    f.useShim("head-live");
+    let published: ReadGeneration<TickReadFacts> | undefined;
+    const port = servedOpenPrViews(() => published, () => TICK_STARTED_AT_MS);
+    const run = f.hook(port);
+    await run(IDLE);
+    await f.settle();
+    // This generation started long before the own read the first pass kept as its last good list.
+    published = generation(TICK_STARTED_AT_MS + 5, [view("head-tick")]);
+    assert.ok(port(IDLE), "the generation is offered to the pass");
+    await run(IDLE);
+    await f.settle();
+    assert.deepEqual(f.timing().map((row) => row.views_source), ["own_read", "own_read"]);
+    assert.equal(f.builds[1]?.armImpl, undefined, "an own read is not acted on as a last good list");
+    assert.equal(f.posted.some((post) => post.headSha === "head-tick"), false, "the older generation's head was not decided from");
+  } finally { await f.cleanup(); }
 });
 
 test("W1-T13709 criterion 5: an idle pass without a fresh generation still reads the list, checks, and status", async () => {
