@@ -174,7 +174,7 @@ test("W1-T9097: shadow ledgers the target and changes nothing", async () => {
 
   const rows = laneTargetRows(h.steps);
   assert.ok(rows.length >= 1, "the target is ledgered");
-  assert.deepEqual(rows[0], {
+  assert.deepEqual(rows[0], { container_basis: "memory.high",
     mode: "shadow", target: 1, fixed: 2, binding: "container", projection_mib: 8379 + 3000 + 1400, onset_mib: 8379, in_flight: 0,
     pressed: true, host_base_available_mib: 20_000, host_reserve_mib: 2048, per_lane_mib: 1400, per_lane_typical_mib: 1400,
   });

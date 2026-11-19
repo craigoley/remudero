@@ -62,6 +62,18 @@ export interface LaneMemoryReading {
   /** memory.events `high`, cumulative; absent with the reason when unread. */
   highEvents?: number;
   highEventsUnread?: string;
+  /** What {@link containerBaseMib} is made of, so a `container` binding can be explained from its row alone. */
+  containerParts?: ContainerProjectionParts;
+}
+
+/** The container base, split: working set (memory.current less inactive_file) + the in-flight trees' claim + this
+ *  daemon's typical growth (the remainder). `currentMib` and `reclaimableMib` are what the working set was cut from. */
+export interface ContainerProjectionParts {
+  currentMib: number;
+  reclaimableMib: number;
+  workingSetMib: number;
+  claimMib: number;
+  daemonTypicalMib: number;
 }
 
 /** What one reading carries to the next. */
@@ -119,6 +131,9 @@ export interface LaneTarget {
   perLaneTypicalMib: number | null;
   unread?: string;
   next: LaneTargetPrevious;
+  /** The reading's container basis and base split; absent when unread. */
+  containerBasis?: string;
+  containerParts?: ContainerProjectionParts;
 }
 
 /** The lane target for one reading. Pure: no clock, no fs. */
@@ -186,6 +201,8 @@ export function laneTarget(inputs: LaneTargetInputs): LaneTarget {
     perLaneTypicalMib: "unread" in memory ? null : perLaneTypicalMib,
     ...(unread !== undefined ? { unread } : {}),
     next: { target, ...(highEvents !== undefined ? { highEvents } : {}) },
+    ...("unread" in memory ? {} : { containerBasis: memory.containerBasis }),
+    ...("unread" in memory || memory.containerParts === undefined ? {} : { containerParts: memory.containerParts }),
   };
 }
 
@@ -301,7 +318,25 @@ export function laneTargetPayload(
     per_lane_typical_mib: result.perLaneTypicalMib === null ? null : Math.round(result.perLaneTypicalMib),
     in_flight: context.inFlight,
     pressed: result.pressed,
+    ...(result.containerBasis !== undefined ? { container_basis: result.containerBasis } : {}),
+    ...(result.containerParts !== undefined ? {
+      container_current_mib: Math.round(result.containerParts.currentMib),
+      container_reclaimable_mib: Math.round(result.containerParts.reclaimableMib),
+      container_working_set_mib: Math.round(result.containerParts.workingSetMib),
+      container_claim_mib: Math.round(result.containerParts.claimMib),
+      container_daemon_typical_mib: Math.round(result.containerParts.daemonTypicalMib),
+    } : {}),
     ...(result.unread !== undefined ? { unread: result.unread } : {}),
+  };
+}
+
+/** The base split from the shadow numbers; undefined when the container was unread or unbounded (no projection). */
+function containerPartsOf(numbers: ReturnType<typeof evaluateShadowMemory>["numbers"]): ContainerProjectionParts | undefined {
+  const { containerProjectedMib: projected, containerWorkingSetMib: workingSet, containerCurrentMib: current } = numbers;
+  if (projected === null || workingSet === null || current === null) return undefined;
+  return {
+    currentMib: current, reclaimableMib: current - workingSet, workingSetMib: workingSet,
+    claimMib: numbers.containerClaimMib, daemonTypicalMib: projected - workingSet - numbers.containerClaimMib,
   };
 }
 
@@ -339,6 +374,7 @@ export function readLaneMemory(root: string, overrides: Partial<ShadowMemoryPort
   }
   let highEvents: number | undefined;
   let highEventsUnread: string | undefined;
+  const containerParts = containerPartsOf(numbers);
   try {
     const raw = /^high (\d+)$/m.exec(ports.readFile("/sys/fs/cgroup/memory.events"))?.[1];
     if (raw === undefined) highEventsUnread = "no high line in memory.events";
@@ -361,6 +397,7 @@ export function readLaneMemory(root: string, overrides: Partial<ShadowMemoryPort
     containerPressed: numbers.containerPressed || numbers.containerSighted,
     ...(highEvents !== undefined ? { highEvents } : {}),
     ...(highEventsUnread !== undefined ? { highEventsUnread } : {}),
+    ...(containerParts !== undefined ? { containerParts } : {}),
   };
 }
 
