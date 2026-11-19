@@ -16,7 +16,7 @@
   files:
     - src/run-task.ts
     - test/deploy-run-freshness-exempt.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: The gh-broker verb, with any subcommand, is in the read-only freshness exempt set and is never refused for a dirty, diverged or off-main checkout
