@@ -376,6 +376,9 @@ function recordingCrossReads(index: LedgerIndex, into: () => Set<string> | undef
   return {
     rows: index.rows,
     byTask: index.byTask,
+    // W1-T13840: no cross-task step is a signal step, so its reads record nothing.
+    ...(index.byTaskSteps ? { byTaskSteps: index.byTaskSteps } : {}),
+    ...(index.appendSequenceOf ? { appendSequenceOf: index.appendSequenceOf } : {}),
     byStep: {
       get: (step) => {
         if (BOARD_CROSS_TASK_STEPS.has(step)) into()?.add(`${CROSS_STEP}${step}`);
@@ -678,6 +681,24 @@ interface StepBucket {
   readonly seqs: readonly number[];
   readonly bytes: number;
 }
+
+interface TaskBucketEntry {
+  readonly row: Row;
+  readonly key: readonly [tsMs: number, kind: number, seq: number];
+}
+
+const taskBucketOrder = (a: TaskBucketEntry, b: TaskBucketEntry): number =>
+  a.key[0] - b.key[0] || a.key[1] - b.key[1] || a.key[2] - b.key[2];
+
+const workerEntry = (r: Row): TaskBucketEntry => ({
+  row: { ...runWorkerRow(String(r.body), String(r.fields)), step: WORKER_ACTIVITY_STAND_IN_STEP },
+  key: [Number(r.ts_ms), 1, Number(r.seq)],
+});
+
+const activityEntry = (r: Row, taskId: string): TaskBucketEntry => ({
+  row: { ts: String(r.ts), step: BOARD_RUN_ACTIVITY_STEP, task_id: taskId, run_id: String(r.run_id) },
+  key: [Number(r.ts_ms), 2, Number(r.seq)],
+});
 
 /** W1-T9604: the two plan-only sets, as `storeIndex`'s full read builds them; never mutated once handed out. */
 interface PlanOnlySets {
@@ -1155,7 +1176,11 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
   function newestFactMsOf(taskId: string, runId: string): number {
     const bulk = bulkNewestFactMs?.get(`${taskId}|${runId}`);
     if (bulkNewestFactMs) return bulk ?? Number.NEGATIVE_INFINITY;
-    const r = sql.runNewestFact.get(taskId, runId, lastSeq, ...unread);
+    return newestStoredFactMs(taskId, runId, lastSeq);
+  }
+
+  function newestStoredFactMs(taskId: string, runId: string, upTo: number): number {
+    const r = sql.runNewestFact.get(taskId, runId, upTo, ...unread);
     return r?.ms === null || r?.ms === undefined ? Number.NEGATIVE_INFINITY : Number(r.ms);
   }
 
@@ -1394,7 +1419,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
   }
 
   /** `step`'s cached rows as of `upTo`: read in full at `lastSeq` on the first ask, so the ingest extends it from there. */
-  function cachedStep(step: string, upTo: number): readonly Row[] {
+  function cachedStep(step: string, upTo: number): StepBucket {
     let bucket = stepCache.get(step);
     if (!bucket) {
       bucket = readStep(step, lastSeq);
@@ -1411,9 +1436,15 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       [stepReads.reusedRows, stepReads.reusedBytes] = [stepReads.reusedRows + held, stepReads.reusedBytes + heldBytes];
     }
     stepCache.set(step, bucket);
-    if (upTo >= lastSeq) return bucket.rows;
+    if (upTo >= lastSeq) return bucket;
     const seqs = bucket.seqs;
-    return bucket.rows.filter((_, at) => seqs[at]! <= upTo);
+    const withinBound = (_: unknown, at: number): boolean => seqs[at]! <= upTo;
+    return {
+      rows: bucket.rows.filter(withinBound),
+      tsMs: bucket.tsMs.filter(withinBound),
+      seqs: seqs.filter(withinBound),
+      bytes: bucket.bytes,
+    };
   }
 
   /** The cached plan-only sets as of `upTo`; an index built before the cache moved past it reads its own in full. */
@@ -1577,7 +1608,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     const aliasReady = factAliasReady(db);
     let aliasSeqs: Map<string, number[]> | undefined;
     let last: { id: string; rows: Row[] } | undefined;
-    const steps = new Map<string, readonly Row[]>();
+    const steps = new Map<string, StepBucket>();
     const runSql = taskRunStatements();
     let filing: Set<string> | undefined;
     let reviewed: Map<string, Set<string>> | undefined;
@@ -1589,13 +1620,8 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       fullRead(1, text.length);
       return text;
     };
-    const fullStep = (step: string): readonly Row[] => {
-      const own = readStep(step, upTo);
-      fullRead(own.rows.length, own.bytes);
-      return own.rows;
-    };
     const taskBucket = (id: string): Row[] => {
-      const facts: Array<{ row: Row; key: [number, number, number] }> = [];
+      const facts: TaskBucketEntry[] = [];
       if (cached && aliasReady && taskCacheLimit > 0) {
         const held = cachedTask(id, upTo);
         // Design 4: a reader that mutates a handed-out row gets a copy, never the held row.
@@ -1625,14 +1651,63 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       }
       // Its runs' stand-ins, as ingest builds them: a run's worker rows always, its newest row only past its newest fact row.
       for (const r of runSql.worker?.iterate(id) ?? []) {
-        facts.push({ row: { ...runWorkerRow(String(r.body), String(r.fields)), step: WORKER_ACTIVITY_STAND_IN_STEP }, key: [Number(r.ts_ms), 1, Number(r.seq)] });
+        facts.push(workerEntry(r));
       }
       for (const r of runSql.activity?.iterate(id) ?? []) {
         const [runId, tsMs] = [String(r.run_id), Number(r.ts_ms)];
-        if (tsMs > (newest.get(runId) ?? Number.NEGATIVE_INFINITY)) facts.push({ row: { ts: String(r.ts), step: BOARD_RUN_ACTIVITY_STEP, task_id: id, run_id: runId }, key: [tsMs, 2, Number(r.seq)] });
+        if (tsMs > (newest.get(runId) ?? Number.NEGATIVE_INFINITY)) facts.push(activityEntry(r, id));
       }
-      facts.sort((a, b) => a.key[0] - b.key[0] || a.key[1] - b.key[1] || a.key[2] - b.key[2]);
-      return facts.map((f) => f.row);
+      return facts.sort(taskBucketOrder).map((f) => f.row);
+    };
+    const stepEntries = (step: string): StepBucket => {
+      const held = steps.get(step);
+      if (held) return held;
+      const bucket = BOARD_UNREAD_STEPS.has(step) ? { rows: [], tsMs: [], seqs: [], bytes: 0 }
+        : cached ? cachedStep(step, upTo) : readStep(step, upTo);
+      if (!cached) fullRead(bucket.rows.length, bucket.bytes);
+      steps.set(step, bucket);
+      return bucket;
+    };
+    const appendSequences = new WeakMap<Row, number>();
+    /** W1-T13840: every task's rows of one step set, grouped once per index from the step buckets, in taskBucket's order. */
+    const byTaskSteps = new Map<string, Map<string, Row[]>>();
+    const taskStepRows = (id: string, wanted: readonly string[]): readonly Row[] => {
+      const wantedSteps = [...new Set(wanted)].sort();
+      const key = JSON.stringify(wantedSteps);
+      const held = byTaskSteps.get(key);
+      if (held) return held.get(id) ?? [];
+
+      const entries = new Map<string, TaskBucketEntry[]>();
+      const add = (entry: TaskBucketEntry): void => {
+        const taskId = entry.row.task_id;
+        if (typeof taskId !== "string") return;
+        const list = entries.get(taskId);
+        if (list) list.push(entry);
+        else entries.set(taskId, [entry]);
+      };
+      for (const step of wantedSteps) {
+        const bucket = stepEntries(step);
+        bucket.rows.forEach((row, at) => {
+          const seq = bucket.seqs[at]!;
+          appendSequences.set(row, seq);
+          add({ row, key: [bucket.tsMs[at]!, 0, seq] });
+        });
+      }
+      if (wantedSteps.includes(WORKER_ACTIVITY_STAND_IN_STEP) && runSql.worker) {
+        for (const r of db.prepare("SELECT ts_ms, body, fields, seq FROM run_worker").iterate()) {
+          add(workerEntry(r));
+        }
+      }
+      if (wantedSteps.includes(BOARD_RUN_ACTIVITY_STEP) && runSql.activity) {
+        for (const r of db.prepare("SELECT task_id, run_id, ts, ts_ms, seq FROM run_activity").iterate()) {
+          const taskId = String(r.task_id);
+          if (Number(r.ts_ms) > newestStoredFactMs(taskId, String(r.run_id), upTo)) add(activityEntry(r, taskId));
+        }
+      }
+      const tasks = new Map<string, Row[]>();
+      for (const [task, list] of entries) tasks.set(task, list.sort(taskBucketOrder).map((entry) => entry.row));
+      byTaskSteps.set(key, tasks);
+      return tasks.get(id) ?? [];
     };
     const planOnly = (): void => {
       const sets = cached ? cachedPlanOnly(upTo) : readPlanOnly(upTo);
@@ -1642,16 +1717,9 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     return {
       rows: bound,
       byTask: { get: (id) => (last?.id === id ? last.rows : (last = { id, rows: taskBucket(id) }).rows) },
-      byStep: {
-        get: (step) => {
-          let bucket = steps.get(step);
-          if (!bucket) {
-            bucket = BOARD_UNREAD_STEPS.has(step) ? [] : cached ? cachedStep(step, upTo) : fullStep(step);
-            steps.set(step, bucket);
-          }
-          return bucket;
-        },
-      },
+      byStep: { get: (step) => stepEntries(step).rows },
+      byTaskSteps: { get: taskStepRows },
+      appendSequenceOf: (row) => appendSequences.get(row),
       get planOnlyFilingPrUrls() {
         if (!filing) planOnly();
         return filing!;

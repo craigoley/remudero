@@ -1394,6 +1394,55 @@ components:
         error:
           type: string
           enum: [invalid_identity, invalid_input, not_found, stale_revision, idempotency_conflict, capacity, busy, corrupt, unavailable, outcome_unknown, recovery_required]
+    ProductRunnerConfigProposalCommand:
+      type: object
+      additionalProperties: false
+      description: Binds the exact head and digest an operator accepted from the preview; carries no bytes or paths.
+      required: [version, requestId, productId, expectedRevision, expectedObjectiveRevision, targetHead, configDigest]
+      properties:
+        version: { type: string, enum: [product-runner-config-proposal-v1] }
+        requestId: { type: string, pattern: '^[A-Za-z0-9_-]{16,128}$' }
+        productId: { $ref: "#/components/schemas/ProductId" }
+        expectedRevision: { $ref: "#/components/schemas/ProductRevision" }
+        expectedObjectiveRevision: { $ref: "#/components/schemas/ProductRevision" }
+        targetHead: { type: string, pattern: '^[a-f0-9]{40}$' }
+        configDigest: { type: string, pattern: '^[a-f0-9]{64}$' }
+    ProductRunnerConfigProposalReceipt:
+      type: object
+      additionalProperties: false
+      description: One add-only pull request for the runner configuration. merged counts only after an approving review and identical bytes at the merge commit.
+      required: [version, productId, state, replayed, proposal]
+      properties:
+        version: { type: string, enum: [product-runner-config-proposal-v1] }
+        productId: { $ref: "#/components/schemas/ProductId" }
+        state: { type: string, enum: [open, merged, merged_unreviewed, merged_drifted, closed_unmerged, unknown] }
+        replayed: { type: boolean }
+        proposal:
+          type: object
+          additionalProperties: false
+          required: [path, branch, targetHead, configDigest, sourceCommit, pullRequest]
+          properties:
+            path: { type: string, enum: [.remudero/mounts.yaml] }
+            branch: { type: string, minLength: 1, maxLength: 255 }
+            targetHead: { type: string, pattern: '^[a-f0-9]{40}$' }
+            configDigest: { type: string, pattern: '^[a-f0-9]{64}$' }
+            sourceCommit: { type: string, pattern: '^[a-f0-9]{40}$' }
+            pullRequest:
+              type: object
+              additionalProperties: false
+              required: [number, url]
+              properties:
+                number: { type: integer, minimum: 1 }
+                url: { type: string, format: uri }
+    ProductRunnerConfigProposalError:
+      type: object
+      additionalProperties: false
+      required: [version, error]
+      properties:
+        version: { type: string, enum: [product-runner-config-proposal-v1] }
+        error:
+          type: string
+          enum: [invalid_identity, invalid_input, request_too_large, not_found, stale_revision, idempotency_conflict, capacity, busy, corrupt, unavailable, outcome_unknown, recovery_required, repository_missing, repository_conflict, provider_unreadable, stale_preview, runner_config_present, runner_config_invalid, source_unavailable, branch_conflict]
     ProductRepositoryPreview:
       type: object
       additionalProperties: false
@@ -15811,6 +15860,88 @@ components:
           type: string
           description: 48 hex characters; present it as the `X-Confirm-Nonce` header.
 
+    NewPathApprovalPreviewRequest:
+      type: object
+      additionalProperties: false
+      required: [taskYaml, approvedMissingPaths]
+      properties:
+        taskYaml:
+          type: string
+          maxLength: 49152
+          description: One machine-authored task draft, before its new_path_approval_ref is added.
+        approvedMissingPaths:
+          type: array
+          minItems: 1
+          items: { type: string }
+    NewPathApprovalPreview:
+      type: object
+      required: [previewId, ref, taskId, intentDigest, declaredPaths, missingPaths, approvedMissingPaths, operator, expiresAtMs]
+      properties:
+        previewId: { type: string }
+        ref: { type: string }
+        taskId: { type: string }
+        title: { type: string }
+        repo: { type: string }
+        issuerId: { type: string }
+        epoch: { type: integer }
+        policy: { type: string }
+        instance: { type: string }
+        audience: { type: string }
+        intentDigest: { type: string, pattern: '^[a-f0-9]{64}$' }
+        declaredPaths: { type: array, items: { type: string } }
+        missingPaths: { type: array, items: { type: string } }
+        approvedMissingPaths: { type: array, items: { type: string } }
+        operator: { type: string }
+        expiresAtMs: { type: integer }
+    NewPathApprovalConfirmRequest:
+      type: object
+      additionalProperties: false
+      required: [previewId]
+      properties:
+        previewId: { type: string }
+    NewPathApprovalResolveRequest:
+      type: object
+      additionalProperties: false
+      required: [ref, taskId]
+      properties:
+        ref: { type: string }
+        taskId: { type: string }
+    NewPathApprovalRevokeRequest:
+      type: object
+      additionalProperties: false
+      required: [ref]
+      properties:
+        ref: { type: string }
+    NewPathApprovalFacts:
+      type: object
+      additionalProperties: false
+      required: [protocol, ref, issuerId, issuerEpoch, policy, taskId, repo, instance, audience, intentDigest, declaredPaths, approvedMissingPaths, operator, confirmation, issuedAtMs, expiresAtMs, revoked]
+      properties:
+        protocol: { type: string, const: new-path-approval-v1 }
+        ref: { type: string }
+        issuerId: { type: string }
+        issuerEpoch: { type: integer }
+        policy: { type: string }
+        taskId: { type: string }
+        repo: { type: string }
+        instance: { type: string }
+        audience: { type: string }
+        intentDigest: { type: string, pattern: '^[a-f0-9]{64}$' }
+        declaredPaths: { type: array, items: { type: string } }
+        approvedMissingPaths: { type: array, minItems: 1, items: { type: string } }
+        operator: { type: string }
+        confirmation: { type: string }
+        issuedAtMs: { type: integer }
+        expiresAtMs: { type: integer }
+        revoked: { type: boolean, const: false }
+    NewPathApprovalRefusal:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          enum: [invalid_request, verified_operator_session_required, verified_step_up_confirmation_required, task_draft_unreadable, task_scope_unsupported, approval_subset_mismatch, preview_expired_or_wrong_actor, approval_audit_unavailable, approval_unknown, approval_expired, approval_audit_unknown]
+
     DrainFeedbackRequest:
       type: object
       description: >
@@ -17416,6 +17547,83 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ProductRepositoryError" }
+  /v1/products/runner-config-proposal:
+    parameters:
+      - name: x-rmd-operator-session
+        in: header
+        required: true
+        description: >
+          Signed operator session verified by the service. Browser owner fields, actor headers and
+          shared bearers cannot substitute for it. Missing or unavailable identity fails explicitly.
+        schema: { type: string, minLength: 1 }
+      - name: x-confirm-nonce
+        in: header
+        required: true
+        description: Server-issued HIGH-tier confirmation bound to this exact method, path and body.
+        schema: { type: string, minLength: 1 }
+    post:
+      operationId: proposeProductRunnerConfig
+      summary: Propose the previewed runner configuration as one add-only pull request a human reviews.
+      description: >
+        Requires the verified operator, the write scope and the high tier with a bound confirmation.
+        The preview is recomputed immediately before acting; a moved head or different digest is
+        stale_preview and an existing path is runner_config_present. A private journal record is
+        written before the first GitHub write. It creates one branch at the exact head, adds only
+        .remudero/mounts.yaml there and opens one pull request to the default branch. A lost response
+        is reconciled by reading the branch, its one-file diff and the open pull request, never by a
+        second create; outcome_unknown is retried with the identical command. It never writes the
+        default branch, merges, approves, deletes or changes protection. Every response from the route
+        handler uses Cache-Control private, no-store; a 401, or a 403 for a missing scope, tier or
+        confirmation, is answered by the service before the handler.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProductRunnerConfigProposalCommand" }
+      responses:
+        "200":
+          description: The one pull request for this head and digest, new or replayed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductRunnerConfigProposalReceipt" }
+        "400":
+          description: Malformed command.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductRunnerConfigProposalError" }
+        "401":
+          description: No recognized service credential.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductRepositoryAccessError" }
+        "403":
+          description: No verified owner, write grant or high-tier confirmation.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ProductRunnerConfigProposalError"
+                  - $ref: "#/components/schemas/ProductRepositoryAccessError"
+        "404":
+          description: No product owned by this principal.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductRunnerConfigProposalError" }
+        "409":
+          description: Revisions, head or digest moved, the path exists or is invalid, the branch holds anything else, or the key was reused.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductRunnerConfigProposalError" }
+        "413":
+          description: Request body over the bound.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductRunnerConfigProposalError" }
+        "503":
+          description: busy, corrupt, unavailable, provider_unreadable, source_unavailable or outcome_unknown; no success is fabricated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductRunnerConfigProposalError" }
   /v1/products/runner-config-preview:
     parameters:
       - name: x-rmd-operator-session
@@ -23929,6 +24137,112 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+
+  /v1/new-path-approval/preview:
+    post:
+      summary: Preview a machine task's exact missing paths for explicit operator approval.
+      description: >
+        W1-T10331 (src/lib/serve.ts). Opt-in only when an explicit issuer binding is configured.
+        Requires a verified operator session. Does not grant path authority; returns an in-memory,
+        actor-bound preview that expires after five minutes.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NewPathApprovalPreviewRequest" }
+      responses:
+        "200":
+          description: The server-derived task and missing-path preview.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NewPathApprovalPreview" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: The draft or selected path set is unsupported.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NewPathApprovalRefusal" }
+
+  /v1/new-path-approval/confirm:
+    post:
+      summary: Confirm one preview with a fresh second factor and a consumed action-bound nonce.
+      description: >
+        W1-T10331 (src/lib/serve.ts). HIGH tier. The exact raw body must match the single-use nonce
+        issued by POST /v1/confirm; the same verified operator must have fresh step-up. Confirmation
+        is audited before it becomes available, and does not activate a path outside plan admission.
+      security:
+        - bearerWrite: []
+      parameters:
+        - $ref: "#/components/parameters/ConfirmNonce"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NewPathApprovalConfirmRequest" }
+      responses:
+        "200": { description: The approval is active for its bounded lifetime. }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/HighTierForbidden" }
+        "409":
+          description: The preview expired or belongs to another actor.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NewPathApprovalRefusal" }
+        "503": { description: Approval audit is unavailable; no authority was granted. }
+
+  /v1/new-path-approval/resolve:
+    post:
+      summary: Resolve current verified facts for one task and opaque approval reference.
+      description: >
+        W1-T10331 (src/lib/serve.ts). Read-only in effect, authenticated by the service bearer
+        token. Facts are returned only from current in-memory authority whose append-only audit is
+        readable; startup never rehydrates approvals from audit history.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NewPathApprovalResolveRequest" }
+      responses:
+        "200":
+          description: Current facts for the exact task and reference.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NewPathApprovalFacts" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: No active approval exists for the reference and task. }
+        "410": { description: The approval expired. }
+        "503": { description: The approval audit cannot prove current authority. }
+
+  /v1/new-path-approval/revoke:
+    post:
+      summary: Revoke one approval using a fresh second factor and a consumed action-bound nonce.
+      description: >
+        W1-T10331 (src/lib/serve.ts). HIGH tier. Only the confirming operator may revoke. The
+        revocation is appended before in-memory authority is removed.
+      security:
+        - bearerWrite: []
+      parameters:
+        - $ref: "#/components/parameters/ConfirmNonce"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NewPathApprovalRevokeRequest" }
+      responses:
+        "200": { description: The approval was revoked. }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/HighTierForbidden" }
+        "404": { description: No active approval exists for the reference. }
+        "503": { description: The approval audit cannot prove or record revocation. }
 
   /v1/drain/feedback:
     post:
