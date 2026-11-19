@@ -113,6 +113,23 @@ test("W1-T13238 criterion 2: with no serve reachable the verb runs in-process an
     { url: "http://127.0.0.1:4400", token: TOKEN }, "RMD_SERVE_PORT wins over config");
 });
 
+test("W1-T13238: without a serve write token, the CLI warns once and returns the local verdict", async (t) => {
+  const config = { root: root(t, null) };
+  const local = fakeActions();
+  const result = await captured(t, () => inboxVerbViaServe("archive", ["refused"], config, () => local, {}));
+
+  assert.deepEqual(result, {
+    code: 1,
+    out: [],
+    err: [
+      "rmd archive: no serve write token (ENOENT); running in-process",
+      JSON.stringify({ error: "conflict", detail: "archive refused for refused" }),
+    ],
+  });
+  assert.deepEqual(local.calls, ["archive"]);
+  assert.equal(existsSync(join(config.root, "state", "service-tokens.json")), false);
+});
+
 test("W1-T13238: a stalled serve connection falls back at the two-second connect deadline", async (t) => {
   const socket = Object.assign(new Socket(), { connecting: true });
   t.after(() => { socket.destroy(); });
