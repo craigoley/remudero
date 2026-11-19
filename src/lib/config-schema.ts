@@ -548,6 +548,8 @@ export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
   envEntry("RMD_SERVE_INGEST_TOKEN", "Supplies serve's optional bearer token that is accepted only on the incident ingest route.", ["src/lib/serve.ts"]),
   envEntry("RMD_SERVE_INGEST_TOKEN_FILE", "Names the read-only mounted file holding serve's incident ingest token when RMD_SERVE_INGEST_TOKEN is unset.", ["src/lib/serve.ts"]),
   envEntry("RMD_SERVE_NETWORK", "Declares container-network context for serve wildcard binds.", ["src/lib/serve.ts"]),
+  envEntry("RMD_SERVE_READ_DEADLINE", "Defaults to shadow, which records late reads. Set to enforce to serve the committed body or return a retryable 503 at the deadline.", ["src/lib/serve-read-deadline.ts"]),
+  envEntry("RMD_SERVE_READ_DEADLINE_MS", "Sets the serve read deadline in milliseconds. Defaults to 4000 when unset or invalid.", ["src/lib/serve-read-deadline.ts"]),
   envEntry("RMD_SERVE_READY_SOCKET", "Names the private unix socket a supervised standby serve answers readiness on.", ["src/lib/serve-generation.ts"]),
   envEntry("RMD_SERVE_ROLE", "Set to standby by the serve supervisor so serve warms and waits for promotion before binding its port.", ["src/lib/serve-generation.ts"]),
   envEntry("RMD_SPAWN_HELPER", "Switch for the daemon's small long-lived spawn helper, which awaited child spawns route through; the boot starts it unless the value is off, and off keeps every spawn direct.", ["src/lib/daemon.ts"]),

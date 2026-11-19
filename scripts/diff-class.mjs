@@ -33,6 +33,7 @@ import { readFileSync, readdirSync } from "node:fs";
 // arm below a real, driven fixture (test/a-census-suite-is-unreachable-from-the-symbols-a-diff-
 // changes.test.ts) instead of an untested comment.
 import fs from "node:fs";
+import { createRequire } from "node:module";
 import { dirname, join, normalize, relative, sep } from "node:path";
 import { parseArgs } from "node:util";
 // `plan-scope.ts` is the canonical predicate's dependency-free leaf. Node 22.22.3 can strip its
@@ -646,15 +647,22 @@ export function clonesTheRepository(content, testDir, root) {
  * (over-listing costs one suite; under-listing is the silent miss this verb exists to end); the
  * second is exact. An empty changed-file set yields an empty list, unlike `classify()`'s SOURCE.
  */
+/** W1-T13788 — the shared run-or-read scanner, loaded on the census path only: the coverage jobs check out a
+ *  sparse tree to classify a diff, and it holds only the src modules `classify` reads. */
+let scanner;
+const runOrReadScanner = () => (scanner ??= createRequire(import.meta.url)("../src/lib/test-impact-map.ts"));
+
 // Why: docs/forensics/diff-class.md#censussuitefiles.
 export function censusSuiteFiles(changedFiles, root = REPO_ROOT) {
   const files = (changedFiles ?? []).filter((f) => typeof f === "string" && f.length > 0);
   if (files.length === 0) return [];
+  const { stripComments, testFilesASuiteRunsOrReads } = runOrReadScanner();
   const areas = changedAreas(files);
   const changed = new Set(files);
   const rulesJoin = classify(files).class === CLASSES.SOURCE;
   const testDir = join(root, "test");
   const out = [];
+  const runsOrReads = new Map();
   for (const abs of suiteFiles(testDir)) {
     const rel = relative(root, abs).split(sep).join("/");
     if (changed.has(rel)) continue; // a suite the diff itself edits is already in hand
@@ -681,10 +689,30 @@ export function censusSuiteFiles(changedFiles, root = REPO_ROOT) {
     const walksAnArea =
       (enumeratesPopulation(content) && namesAreaLoosely(content, areas)) ||
       importedWalkerWalksArea(content, dirname(abs), root, areas);
-    const readsAChangedFile = [...sourceTextPathsRead(content)].some((p) => changed.has(p));
+    // W1-T13788: a test path read only inside a comment is named, not read.
+    const namesATest = content.includes(".test.ts");
+    const code = namesATest ? stripComments(content) : content;
+    const readsAChangedFile = [...sourceTextPathsRead(content)]
+      .some((p) => changed.has(p) && (!p.endsWith(".test.ts") || sourceTextPathsRead(code).has(p)));
+    if (namesATest) {
+      const paths = testFilesASuiteRunsOrReads(code).filter((p) => p !== rel);
+      if (paths.length > 0) runsOrReads.set(rel, paths);
+    }
     if ((rulesJoin && isRuleSuitePath(rel, content)) || walksAnArea || readsAChangedFile ||
       // A root-level file (CLAUDE.md) has no area; its readers alone run for it (W1-T4397).
       (areas.size > 0 && clonesTheRepository(content, dirname(abs), root))) out.push(rel);
+  }
+  // W1-T13788: a suite that runs a changed test as a child or reads its text joins, and so does a suite that
+  // runs or reads one that joined this way, until none joins (#19469 changed a test another suite spawns).
+  const reached = new Set(files);
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const [rel, paths] of runsOrReads) {
+      if (reached.has(rel) || !paths.some((p) => reached.has(p))) continue;
+      reached.add(rel);
+      if (!out.includes(rel)) out.push(rel);
+      grew = true;
+    }
   }
   out.sort();
   return out;

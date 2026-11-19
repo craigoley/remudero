@@ -17,7 +17,7 @@
   files:
     - scripts/preflight-author.mjs
     - test/ci/an-author-preflight-row-names-capacity-and-gate-refusals-by-class.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A run the Mac admission does not start for disk carries the class disk-reserve, and one it does not start for memory pressure carries memory-pressure, each read from the admission's own reason tokens and never from verdict text"

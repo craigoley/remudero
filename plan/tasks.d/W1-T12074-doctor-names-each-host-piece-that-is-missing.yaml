@@ -14,6 +14,7 @@
     - src/lib/host-pieces.ts
     - src/lib/doctor.ts
     - test/doctor-names-each-host-piece-that-is-missing.test.ts
+    - "src/lib/report-commands.ts"
   status: queued
   attempts: 0
   acceptance:
