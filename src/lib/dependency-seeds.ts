@@ -24,7 +24,7 @@ export interface DependencySeedOptions {
   runInstall?: (stage: string, args: string[], env: NodeJS.ProcessEnv) => void;
   lockWaitMs?: number;
 }
-export type DependencySeedResult = { status: "present" } | { status: "materialized"; key: string; seed: string; method: SeedMethod; installed: boolean };
+export type DependencySeedResult = { status: "present" } | { status: "materialized"; key: string; seed: string; method: SeedMethod; installed: boolean; replaced?: true };
 
 export function dependencySeedConfigPath(home = homedir()): string {
   return join(home, ".config", "remudero", "dependency-seeds.json");
@@ -302,7 +302,8 @@ function verifyImmutableGeneration(seed: string, files: Record<string, string>):
   }
 }
 
-/** An occupied destination is never replaced. Validate it before calling it available: a dangling
+/** An occupied destination is never replaced, except this checkout's own stale materialization
+ * (ownStaleMaterialization). Validate it before calling it available: a dangling
  * borrower or stale generation must not silently become an install/retry storm. Legacy installs
  * have no generation identity; package checks do not claim their unrecorded toolchain is proven. */
 function verifyExistingDependencies(checkout: string, modules: string, opts: DependencySeedOptions): void {
@@ -389,11 +390,57 @@ function removeOwnLinkOnlyMaterialization(checkout: string, dest: string): boole
   return true;
 }
 
+/** W1-T11468: the inputs of the verified generation `modules` was materialized from for `owner`, or
+ * undefined when its marker does not name `owner` or its generation is not ready. A generation that
+ * fails verifyImmutableGeneration throws: a node_modules its seed cannot verify is never replaced. */
+function ownMaterializationInputs(owner: string, modules: string): Record<string, string> | undefined {
+  const markerFile = join(modules, CONSUMER_MARKER);
+  if (!lstatSync(modules).isDirectory() || !lstatExists(markerFile) || !lstatSync(markerFile).isFile()) return undefined;
+  let marker: { version?: unknown; key?: unknown; checkout?: unknown; seed?: unknown; method?: unknown };
+  // An unparseable marker names no checkout: the destination is not provably this checkout's, so it is left to the old refusal.
+  try { marker = JSON.parse(readFileSync(markerFile, "utf8")); } catch (error) { if (error instanceof SyntaxError) return undefined; throw error; }
+  if (marker.version !== VERSION || marker.checkout !== owner || !["apfs-clone", "readonly-links", "private-copy"].includes(marker.method as string) ||
+      typeof marker.key !== "string" || typeof marker.seed !== "string" || !isAbsolute(marker.seed) || !existsSync(join(marker.seed, "ready.json"))) return undefined;
+  const ready = JSON.parse(readFileSync(join(marker.seed, "ready.json"), "utf8")) as SeedMetadata;
+  if (ready.version !== VERSION || ready.key !== marker.key) return undefined;
+  verifyImmutableGeneration(marker.seed, ready.files);
+  return ready.files;
+}
+
+/** W1-T11468: the node_modules directories (root, then workspaces) to replace when the checkout's
+ * own verified materialization was made from inputs its lockfile has since left; otherwise undefined. */
+function ownStaleMaterialization(checkout: string, dest: string): string[] | undefined {
+  const current = readInputs(checkout);
+  const targets: Array<[string, string]> = [[checkout, dest]];
+  for (const name of Object.keys(current).filter(name => name.endsWith(`${sep}package.json`))) {
+    const modules = join(checkout, dirname(name), "node_modules");
+    if (lstatExists(modules)) targets.push([join(checkout, dirname(name)), modules]);
+  }
+  let stale = false;
+  for (const [owner, modules] of targets) {
+    const files = ownMaterializationInputs(owner, modules);
+    if (!files) return undefined;
+    const names = new Set([...Object.keys(files), ...Object.keys(current)]);
+    if ([...names].some(name => files[name] !== current[name])) stale = true;
+  }
+  return stale ? targets.map(([, modules]) => modules) : undefined;
+}
+
+/** Renames the replacement into place, keeping the retired materialization until it has landed. */
+function replaceMaterialization(stage: string, dest: string): void {
+  const retired = join(dirname(dest), `.rmd-dependency-retired-${randomUUID()}`);
+  renameSync(dest, retired);
+  try { renameSync(stage, dest); } catch (error) { renameSync(retired, dest); throw error; }
+  setWritable(retired, true);
+  rmSync(retired, { recursive: true, force: true });
+}
+
 function lstatExists(path: string): boolean {
   try { lstatSync(path); return true; } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
 }
 
-/** Existing installs, including dangling links, are never replaced. Publication fails if a concurrent installer wins. */
+/** Existing installs, including dangling links, are never replaced; only this checkout's own verified stale
+ * materialization is (W1-T11468). Publication fails if a concurrent installer wins. */
 export function materializeDependencySeed(checkout: string, opts: DependencySeedOptions = {}): DependencySeedResult {
   checkout = realpathSync(checkout);
   const dest = join(checkout, "node_modules");
@@ -403,7 +450,9 @@ export function materializeDependencySeed(checkout: string, opts: DependencySeed
   // through to provisioning, which could otherwise publish through another owner's path.
   // The one exception: a proof prime replaces a link-only install of its own, because a proof run must not borrow tools from a seed.
   if (occupied && opts.proof && removeOwnLinkOnlyMaterialization(checkout, dest)) occupied = false;
-  if (occupied) { verifyExistingDependencies(checkout, dest, opts); return { status: "present" }; }
+  // W1-T11468: this checkout's own verified materialization of inputs its lockfile has left is replaced.
+  const replacing = occupied ? ownStaleMaterialization(checkout, dest) : undefined;
+  if (occupied && !replacing) { verifyExistingDependencies(checkout, dest, opts); return { status: "present" }; }
   const root = opts.root ?? configuredDependencySeedRoot() ?? defaultDependencySeedRoot();
   makeStore(root);
   const meta = dependencySeedIdentity(checkout, opts);
@@ -483,7 +532,8 @@ export function materializeDependencySeed(checkout: string, opts: DependencySeed
     for (const name of Object.keys(meta.files).filter(name => name.endsWith(`${sep}package.json`))) {
       const workspace = dirname(name), local = join(checkout, workspace, "node_modules"), source = join(seed, workspace, "node_modules");
       if (!existsSync(source)) continue;
-      try { lstatSync(local); continue; } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      const replaceLocal = replacing?.includes(local) ?? false;
+      if (!replaceLocal && lstatExists(local)) continue;
       const localStage = join(checkout, workspace, `.rmd-dependency-stage-${randomUUID()}`);
       try {
         if (method === "readonly-links") linkPackages(source, localStage);
@@ -491,12 +541,16 @@ export function materializeDependencySeed(checkout: string, opts: DependencySeed
         setWritable(localStage, true);
         workspaceLinks(checkout, localStage, workspace);
         registerConsumer(seed, join(checkout, workspace), localStage, meta.key, method, installed);
-        renameSync(localStage, local);
+        if (replaceLocal) replaceMaterialization(localStage, local); else renameSync(localStage, local);
       } finally { if (existsSync(localStage)) { setWritable(localStage, true); rmSync(localStage, { recursive: true, force: true }); } }
     }
     // Register before publication, under the GC lock. A failed publication leaves a harmless stale reference.
     registerConsumer(seed, checkout, targetStage, meta.key, method, installed);
     writeJsonAtomic(join(seed, "ready.json"), { ...ready, lastUsed: opts.now ?? systemClock.now() });
+    if (replacing) {
+      replaceMaterialization(targetStage, dest);
+      return { status: "materialized", key: meta.key, seed, method, installed, replaced: true };
+    }
     if (existsSync(dest)) throw new Error("dependency destination was occupied during provisioning");
     renameSync(targetStage, dest);
     return { status: "materialized", key: meta.key, seed, method, installed };
