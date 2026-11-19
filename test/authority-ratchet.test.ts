@@ -158,13 +158,16 @@ test("AUTHORITY_TABLE carries no unused rows for files the detector no longer fi
 //
 // A row whose verb is `rmd <verb> --<flag>` (a verb that writes only with that explicit flag) can
 // be reached from ANOTHER module that spawns the CLI as a child. The fifth shape examines every
-// tracked `src` file, regardless of extension, excluding only the row's own module and
-// `src/run-task.ts` (the CLI's own verb registration): a file holding BOTH exact string literals
-// for the verb and its write flag must be named among that row's callers. The first four shapes
+// tracked `src` file, regardless of extension, excluding `src/run-task.ts` (the CLI's own verb
+// registration): a file that builds an `args` array with BOTH exact string literals for the verb
+// and its write flag, then launches a child with that array, must be named
+// among that row's callers. The first four shapes
 // above retain their original TypeScript-only population, exclusions, granularity and empty baseline.
 
 const ROW_VERB_FLAG_RE = /\brmd ([a-z][a-z0-9-]*) (--[a-z][a-z0-9-]*)/g;
 const CLI_REGISTRATION = "src/run-task.ts";
+const CHILD_ARGV_LAUNCH_RE = /\b(?:exec|execFile|execFileSync|spawn|spawnSync)\s*\(\s*process\.execPath\s*,\s*args\b/;
+const CHILD_ARGV_ARRAY_RE = /\b(?:const|let|var)\s+args\s*=\s*\[([\s\S]*?)\];/g;
 
 interface CallerRowShape {
   id: string;
@@ -182,14 +185,20 @@ function holdsLiteral(text: string, word: string): boolean {
   return new RegExp(`["'\`]${escaped}["'\`]`).test(text);
 }
 
+function buildsChildArgv(text: string, verb: string, flag: string): boolean {
+  if (!CHILD_ARGV_LAUNCH_RE.test(text)) return false;
+  return [...text.matchAll(CHILD_ARGV_ARRAY_RE)].some((match) =>
+    holdsLiteral(match[1] ?? "", verb) && holdsLiteral(match[1] ?? "", flag));
+}
+
 function undeclaredChildCallers(rows: readonly CallerRowShape[], files: readonly { path: string; text: string }[]): string[] {
   const found: string[] = [];
   for (const row of rows) {
     const named = new Set((row.callers ?? []).map((c) => c.module));
     for (const { verb, flag } of rowVerbFlags(row.verb)) {
       for (const file of files) {
-        if (file.path === row.module || file.path === CLI_REGISTRATION) continue;
-        if (holdsLiteral(file.text, verb) && holdsLiteral(file.text, flag) && !named.has(file.path)) {
+        if (file.path === CLI_REGISTRATION) continue;
+        if (buildsChildArgv(file.text, verb, flag) && !named.has(file.path)) {
           found.push(`${row.id}: ${file.path} (rmd ${verb} ${flag})`);
         }
       }
@@ -235,14 +244,14 @@ test("W1-T13773 criterion 2: every caller a row names still holds both literals 
   }
 });
 
-test("W1-T13773 criterion 2 FALSIFIER: synthetic child argv is caught by name, while a bare verb mention is not", () => {
+test("W1-T13773 criterion 2 FALSIFIER: a child argv is caught by name, while lane text and CLI registration are not", () => {
   const row: CallerRowShape = { id: "synthetic-move-row", module: "src/lib/synthetic-mover.ts", verb: "rmd move-task --apply", callers: [] };
-  const childArgv = 'const args = [entry, "move-task", "--public-root", root, ...(apply ? ["--apply"] : [])];\n';
+  const childArgv = 'const args = [entry, "move-task", "--public-root", root, ...(apply ? ["--apply"] : [])];\nexec(process.execPath, args, options);\n';
   const files = [
     { path: "src/lib/synthetic-janitor.ts", text: childArgv },
     { path: "src/lib/synthetic-lane-label.ts", text: 'planPrPreflightAllows(verdict, { lane: "move-task", branch });\n' },
     { path: CLI_REGISTRATION, text: 'case "move-task": return moveTaskCommand(args); // "--apply"\n' },
-    { path: row.module, text: 'const apply = args.includes("--apply"); lane: "move-task";\n' },
+    { path: row.module, text: 'const apply = args.includes("--apply"); lane: "move-task";\nexecFileSync("git", ["status"]);\n' },
   ];
   assert.deepEqual(undeclaredChildCallers([row], files), ["synthetic-move-row: src/lib/synthetic-janitor.ts (rmd move-task --apply)"]);
   assert.deepEqual(undeclaredChildCallers([{ ...row, callers: [{ module: "src/lib/synthetic-janitor.ts" }] }], files), []);

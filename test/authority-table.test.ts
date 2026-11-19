@@ -394,12 +394,13 @@ test("W1-T13773 criterion 3: the closed gate vocabulary is origin/main's five ki
 });
 
 /**
- * Every row without callers, as origin/main carried it at W1-T13773 (762d3a0530): a sha256 prefix
+ * Every row without callers, as origin/main carried it at this task's refreshed base (956fdea387): a sha256 prefix
  * over the report's JSON row and its `rmd authority` line. A later task that edits one of these
  * rows on purpose re-pins its digest; a row added later is not pinned here.
  */
 const ROWS_AS_BEFORE: Record<string, string> = {
   "create-product-repository": "c75665ea4e8925f0",
+  "propose-product-runner-config": "f4add31d2e9f816e",
   "restore-checkpoint-branch": "3369093791eeb635",
   "arm-auto-merge-at-open": "a928e813caacaa3a",
   "arm-auto-merge-ledger-gated": "b229b5dc18d856a9",
@@ -457,7 +458,9 @@ test("W1-T13773 criterion 4: invariant every-other-row-reads-as-before — each 
   const lines = renderAuthorityReport(report).split("\n");
   const withCallers = report.rows.filter((r) => r.callers !== undefined).map((r) => r.id);
   assert.deepEqual(withCallers, ["push-plan-move-branch", "open-plan-move-pr", "task-id-reservation-ref-push"]);
-  assert.equal(Object.keys(ROWS_AS_BEFORE).length, 41, "the pin covers every origin/main row that gained no callers");
+  const withoutCallers = report.rows.filter((row) => row.callers === undefined).map((row) => row.id).sort();
+  assert.deepEqual(withoutCallers, Object.keys(ROWS_AS_BEFORE).sort(), "the pin covers every origin/main row that gained no callers");
+  assert.equal(Object.keys(ROWS_AS_BEFORE).length, 42, "the pin covers every origin/main row that gained no callers");
   for (const [id, digest] of Object.entries(ROWS_AS_BEFORE)) {
     const row: AuthorityReportRow | undefined = report.rows.find((r) => r.id === id);
     assert.ok(row, `${id} must still exist`);
