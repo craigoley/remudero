@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -24,7 +25,7 @@ function snapshot(root: string): Record<string, string> {
 
 test("W1-T11196 criterion 1: an absent target previews exactly one add of validated source bytes; present, invalid, unreadable and moved targets propose nothing and write nothing", async t => {
   for (const scenario of ["absent", "bom", "crlf", "present", "invalid", "symlink", "parent-symlink", "unreadable", "truncated", "corrupt-blob", "short-blob",
-    "bad-head", "identity-unreadable", "recheck-unreadable", "moved", "foreign", "missing-source", "invalid-source", "tier-source", "dirty-source", "oversized-source", "symlink-source", "relative-source"] as const) {
+    "bad-head", "identity-unreadable", "recheck-unreadable", "moved", "foreign", "missing-source", "invalid-source", "tier-source", "dirty-source", "oversized-source", "symlink-source", "fifo-source", "relative-source"] as const) {
     await t.test(scenario, async t => {
       const source = gitRepo({ scope: t });
       mkdirSync(join(source.dir, ".remudero"));
@@ -46,6 +47,11 @@ test("W1-T11196 criterion 1: an absent target previews exactly one add of valida
         source.git("commit", "-qm", "chore: g17 violation fixture");
       }
       if (scenario === "oversized-source") writeFileSync(join(source.dir, ".remudero/mounts.yaml"), "x".repeat(1024 * 1024 + 1));
+      if (scenario === "fifo-source") {
+        // A FIFO with no writer: a blocking open would wait forever, so this scenario finishing at all is the proof.
+        rmSync(join(source.dir, ".remudero/mounts.yaml"));
+        execFileSync("mkfifo", [join(source.dir, ".remudero/mounts.yaml")]);
+      }
       if (scenario === "symlink-source") {
         rmSync(join(source.dir, ".remudero/mounts.yaml"));
         symlinkSync("missing", join(source.dir, ".remudero/mounts.yaml"));
@@ -124,4 +130,36 @@ test("W1-T11196 criterion 1: an absent target previews exactly one add of valida
       });
     });
   }
+});
+
+test("W1-T11196: both default-branch head reads bypass read caches, so a moved target cannot keep a cached head", async t => {
+  const source = gitRepo({ scope: t });
+  mkdirSync(join(source.dir, ".remudero"));
+  writeFileSync(join(source.dir, ".remudero/mounts.yaml"), table);
+  source.git("add", ".remudero/mounts.yaml");
+  source.git("commit", "-qm", "chore: source table");
+  const head = "a".repeat(40);
+  const root = ownedFixtureDir(t, "runner-preview-fresh").dir;
+  const store = new ProductIntentStore({ root });
+  const saved = store.write("clerk:alice", { version: "product-intent-v1", requestId: "preview-fresh-00001", expectedRevision: 0, brief: { idea: "fresh fixture" } });
+  assert.ok(saved.ok);
+  const productId = saved.value.receipt.productId;
+  assert.ok(store.transition("clerk:alice", { version: "product-intent-v1", requestId: "preview-fresh-bind01", id: productId,
+    expectedRevision: 1, expectedObjectiveRevision: 1, repository }).ok);
+  const reads: { path: string; fresh: boolean }[] = [];
+  const text = async (args: string[], opts?: { fresh?: true }) => {
+    const path = args[1]!;
+    reads.push({ path, fresh: opts?.fresh === true });
+    if (path === "repos/fixture/target") return JSON.stringify({ id: 42, name: "target", owner: { login: "fixture" }, private: true, default_branch: "main" });
+    if (path.includes("/commits/")) return JSON.stringify({ sha: head });
+    if (path.includes("/git/trees/")) return JSON.stringify({ truncated: false, tree: [] });
+    throw new Error(`unexpected read ${path}`);
+  };
+  const result = await previewRunnerConfigBootstrap({ store, installRoot: source.dir, text }, "clerk:alice",
+    { productId, expectedRevision: "2", expectedObjectiveRevision: "1" });
+  assert.ok(result.ok);
+  assert.equal(result.value.state, "absent");
+  const headReads = reads.filter(read => read.path === "repos/fixture/target/commits/main");
+  assert.equal(headReads.length, 2, "the head is read once to decide and once to recheck");
+  assert.ok(headReads.every(read => read.fresh), "every default-branch head read is fresh");
 });

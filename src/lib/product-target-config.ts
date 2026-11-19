@@ -18,7 +18,7 @@ import { isAbsolute, relative, sep } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 import { ghTextAsync } from "./github-transport.js";
-import { mountsPath, validateMounts } from "./mounts.js";
+import { loadMounts, mountsPath, validateMounts } from "./mounts.js";
 import { ProductIntentStore } from "./product-intent-store.js";
 import { productIdSchema, type ProductStoreCode } from "./product-intent.js";
 import { ghProductRepositoryProvider, type ProductRepositoryProvider } from "./product-repository.js";
@@ -163,7 +163,9 @@ export async function previewRunnerConfigBootstrap(options: RunnerConfigPreviewO
       live.repository.owner.toLowerCase() === repository.owner.toLowerCase() && live.repository.name.toLowerCase() === repository.name.toLowerCase() &&
       live.repository.defaultBranch === repository.defaultBranch;
   };
-  const currentHead = async () => commitId.parse(JSON.parse(await api(`${slug}/commits/${encodeURIComponent(repository.defaultBranch)}`)).sha);
+  // Both head reads bypass every read cache (broker and in-flight): a cached head would let a moved target keep its proposal.
+  const currentHead = async () => commitId.parse(JSON.parse(await text(["api", `${slug}/commits/${encodeURIComponent(repository.defaultBranch)}`],
+    { maxBuffer: 2 * TARGET_RUNNER_CONFIG_MAX_BYTES, timeout: 20_000, fresh: true })).sha);
   let head: string;
   let config: TargetRunnerConfig;
   try {
@@ -175,8 +177,9 @@ export async function previewRunnerConfigBootstrap(options: RunnerConfigPreviewO
   if (config.state === "absent") try {
     if (!isAbsolute(options.installRoot)) throw new Error("serving install root unavailable");
     const path = mountsPath(options.installRoot);
-    // One descriptor, opened without following a link, is checked and read: the bytes checked are the bytes compared.
-    const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    // One descriptor, opened without following a link and without blocking (a FIFO would otherwise wait for a writer),
+    // is checked and read: the bytes checked are the bytes compared.
+    const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     let onDisk: Buffer;
     try {
       const stat = fstatSync(fd);
@@ -187,8 +190,10 @@ export async function previewRunnerConfigBootstrap(options: RunnerConfigPreviewO
     const committed = Buffer.from(await hostRead(options.installRoot, ["cat-file", "blob", `${sourceCommit}:${TARGET_RUNNER_CONFIG_PATH}`],
       { maxBuffer: TARGET_RUNNER_CONFIG_MAX_BYTES + 1, encoding: "latin1" }), "latin1");
     if (!onDisk.equals(committed)) throw new Error("source differs from its recorded commit");
+    // The maintained entry point (including G-17) over the path now known to be a bounded regular file, then the same
+    // validation over the exact committed bytes that are offered.
+    loadMounts(path);
     const bytes = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(committed);
-    // loadMounts' own validation (including G-17), over the single read above rather than a second read of the path.
     validateMounts(parseYaml(bytes));
     const digest = createHash("sha256").update(committed).digest("hex");
     proposal = { path: TARGET_RUNNER_CONFIG_PATH, bytes, digest, targetHead: head,

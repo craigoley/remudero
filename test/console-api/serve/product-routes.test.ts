@@ -1041,8 +1041,8 @@ test("W1-T11196: the served runner-config preview matches its authenticated publ
   const route = routes.find(route => route.path === "/v1/products/runner-config-preview");
   assert.equal(route?.scope, "read");
   assert.equal(route?.sensitivity, "sensitive");
-  const instance = createService({ tokens: { read: "fixture-read", write: "fixture-write" }, operatorSession: identity,
-    enforceReadSensitivity: true, routes });
+  // Production serve does not enable read-sensitivity enforcement, so neither does this proof: the owner check is the gate.
+  const instance = createService({ tokens: { read: "fixture-read", write: "fixture-write" }, operatorSession: identity, routes });
   await new Promise<void>(resolve => instance.listen(0, "127.0.0.1", resolve));
   t.after(() => new Promise<void>((resolve, reject) => instance.close(error => error ? reject(error) : resolve())));
   const base = `http://127.0.0.1:${(instance.address() as AddressInfo).port}`;
@@ -1061,6 +1061,8 @@ test("W1-T11196: the served runner-config preview matches its authenticated publ
       ...(session ? { "x-test-session": session } : {}) } });
     const body = await response.json();
     assert.deepEqual(violations(body, declaredBody("/v1/products/runner-config-preview", "GET", response.status)), []);
+    // The service answers 401 before the handler; every handler response is private and uncached.
+    if (response.status !== 401) assert.equal(response.headers.get("cache-control"), "private, no-store", `cache-control on ${response.status}`);
     assert.deepEqual(snapshot(), before, "every preview leaves durable product and journal bytes unchanged");
     return { response, body };
   };

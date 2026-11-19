@@ -17428,13 +17428,16 @@ paths:
       operationId: previewProductRunnerConfig
       summary: Preview the exact validated runner configuration missing from a bound target.
       description: >
-        Requires a verified owner and sensitive read access. Accepts only productId and both expected
-        revisions, once each. Rechecks live repository identity and default-branch head. Only confirmed
+        Requires a verified owner session; the route is declared sensitive, which the service enforces
+        only where read-sensitivity enforcement is enabled. Accepts only productId and both expected
+        revisions, once each. Rechecks live repository identity and default-branch head, both head reads
+        bypassing read caches. Only confirmed
         absence offers bytes from the serving install's committed mounts table, validated by loadMounts
         including G-17. Present or invalid configuration is preserved. Unreadable or moved targets and
         missing or invalid sources yield no proposal. Nothing is written to product records, journals,
         branches, files or resources. This is informational; a later mutation must recheck independently.
-        Responses use Cache-Control private, no-store.
+        Every response from the route handler (200, 400, 403, 404, 409, 503) uses Cache-Control private,
+        no-store; a 401 is answered by the service before the handler.
       parameters:
         - name: productId
           in: query
