@@ -1,0 +1,43 @@
+- id: W1-T13754
+  title: "A task whose acceptance, design or files are amended is judged again under lifetime pressure"
+  repo: remudero
+  depends_on: []
+  priority: 1.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # which observed state settles a lifetime-pressure verdict; too narrow a key keeps a stale ruling, too wide re-asks the judge every tick
+  origin: "operator-session#onboarding-idea-to-prototype-2026-11-18"
+  plan_refs:
+    - W1-T4025
+    - W1-T3921
+  files:
+    - src/run-task.ts
+    - test/console-api/an-amended-task-is-judged-again-under-lifetime-pressure.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Amending a task's acceptance, design or files changes its lifetime-pressure observation key, so a verdict settled before the amendment is not reused"
+      proof: "unit test: W1-T13754 criterion 1"
+    - claim: "A change to a task's status, attempts or priority alone leaves the key unchanged, so the judge is not re-asked on every dispatch"
+      proof: "unit test: W1-T13754 criterion 2"
+  rationale: |
+    WHY: OBSERVED 2026-11-18. W1-T11196 held a verify-human Inbox ask (verify-human:W1-T11196) whose evidence was a
+    proof that passed at base. #19529 amended that proof, but routeAdaptiveLifetimePressure (src/run-task.ts) keys a
+    settled verdict on adaptive-lifetime, capacity, open, merged and last-verdict counts only. None of those
+    change when a shard is amended, so a ruling about the OLD contract stays settled and the stale ask stays in
+    the Inbox. The same holds for any re-scoped task: the fix that removed the cause never reaches the judge.
+    preDispatchContractRevision (src/lib/dispatch-repair.ts) is not reused here because it hashes every parsed
+    field, including status and attempts, which change on each dispatch and would re-ask the judge every tick.
+  design: |
+    NO-INVARIANTS: the key gains one segment; no verdict is re-routed, no ask text changes, and keys of tasks
+    with no lifetime pressure are not computed.
+
+    1. In routeAdaptiveLifetimePressure, append `:contract=<sha256-12>` to the observation key, where the digest
+    is over a stable JSON of the task's title, acceptance, design and files only.
+    2. A prior verdict keyed without the segment no longer matches, so each pressured task is judged once more
+    after this ships and then settles on the new key.
+  falsifier: >-
+    Remove the contract segment: criterion 1 fails because the amended task's key equals the settled key and
+    the judge is not called.
