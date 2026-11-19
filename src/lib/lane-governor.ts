@@ -48,6 +48,15 @@ export interface LaneMemoryReading {
   hostReserveMib: number;
   /** One more run tree at the learned class tail (p90 peak) of the next build. */
   perLaneMib: number;
+  /** One more run tree at the class's learned TYPICAL peak (the median), at most {@link perLaneMib}. Absent: every new
+   *  lane is charged the whole {@link perLaneMib}, as before. Present: the shadow budget's own rule applies to the new
+   *  lanes — each claims its typical growth, and only ONE tail above it competes with the tail already reserved. */
+  perLaneTypicalMib?: number;
+  /** The tail the container base already reserves (the shadow budget's containerTailMib); a new lane's tail competes
+   *  with it for the one allowance. Absent: none is credited. */
+  containerTailMib?: number;
+  /** The tail the host base already reserves (the shadow budget's hostTailMib). Absent: none is credited. */
+  hostTailMib?: number;
   /** The container's own PSI or swap-in past the thresholds now. */
   containerPressed: boolean;
   /** memory.events `high`, cumulative; absent with the reason when unread. */
@@ -106,6 +115,8 @@ export interface LaneTarget {
   hostBaseAvailableMib: number | null;
   hostReserveMib: number | null;
   perLaneMib: number | null;
+  /** The typical charge of each new lane; equal to perLaneMib when no typical was read. */
+  perLaneTypicalMib: number | null;
   unread?: string;
   next: LaneTargetPrevious;
 }
@@ -121,6 +132,8 @@ export function laneTarget(inputs: LaneTargetInputs): LaneTarget {
   let projectionBase: number | null = null;
   let onsetMib: number | null = null;
   let perLaneMib = 0;
+  let perLaneTypicalMib = 0;
+  let containerExtraTail = 0;
   let unread: string | undefined;
   let highEvents = inputs.previous?.highEvents;
   if ("unread" in memory) {
@@ -129,7 +142,19 @@ export function laneTarget(inputs: LaneTargetInputs): LaneTarget {
     bounds.push([prior ?? Math.max(1, inFlight), "unread"]);
   } else {
     perLaneMib = Math.max(1, memory.perLaneMib);
-    const fit = (roomMib: number): number => inFlight + Math.floor(roomMib / perLaneMib);
+    // The shadow budget's rule (host-memory-shadow.ts): every tree's typical growth counts, and only ONE tail above it.
+    // So k new lanes cost k x typical plus the part of one lane's tail the base has not already reserved.
+    perLaneTypicalMib = Math.max(1, Math.min(perLaneMib, memory.perLaneTypicalMib ?? perLaneMib));
+    const extraTail = (reservedTailMib: number | undefined): number =>
+      Math.max(0, perLaneMib - perLaneTypicalMib - Math.max(0, reservedTailMib ?? 0));
+    containerExtraTail = extraTail(memory.containerTailMib);
+    // Over the onset already: shed a lane per typical lane's worth over, as before. Room under one typical lane plus
+    // the unreserved tail: no new lane.
+    const fit = (roomMib: number, extra: number): number => {
+      if (roomMib < 0) return inFlight + Math.floor(roomMib / perLaneTypicalMib);
+      if (roomMib < perLaneTypicalMib + extra) return inFlight;
+      return inFlight + Math.floor((roomMib - extra) / perLaneTypicalMib);
+    };
     const rising = memory.highEvents !== undefined && highEvents !== undefined && memory.highEvents > highEvents;
     pressed = memory.containerPressed || rising;
     if (memory.highEvents !== undefined) highEvents = memory.highEvents;
@@ -137,9 +162,9 @@ export function laneTarget(inputs: LaneTargetInputs): LaneTarget {
     if (memory.containerBaseMib !== null && memory.containerOnsetMib !== null) {
       projectionBase = memory.containerBaseMib;
       onsetMib = memory.containerOnsetMib;
-      if (memory.containerArmCounts) bounds.push([fit(onsetMib - projectionBase), "container"]);
+      if (memory.containerArmCounts) bounds.push([fit(onsetMib - projectionBase, containerExtraTail), "container"]);
     }
-    if (memory.hostBaseAvailableMib !== null) bounds.push([fit(memory.hostBaseAvailableMib - memory.hostReserveMib), "host"]);
+    if (memory.hostBaseAvailableMib !== null) bounds.push([fit(memory.hostBaseAvailableMib - memory.hostReserveMib, extraTail(memory.hostTailMib)), "host"]);
     if (!pressed && prior !== undefined) bounds.push([prior + 1, "growth"]);
   }
   if (inputs.wipBound !== undefined && Number.isFinite(inputs.wipBound)) bounds.push([Math.floor(inputs.wipBound), "wip"]);
@@ -147,15 +172,18 @@ export function laneTarget(inputs: LaneTargetInputs): LaneTarget {
   let [target, binding] = bounds[0]!;
   for (const [n, name] of bounds) if (n < target) [target, binding] = [n, name];
   target = Math.max(1, target);
+  const added = Math.max(0, target - inFlight);
   return {
     target,
     binding,
     pressed,
-    projectionMib: projectionBase === null ? null : projectionBase + Math.max(0, target - inFlight) * perLaneMib,
+    projectionMib: projectionBase === null ? null
+      : projectionBase + added * perLaneTypicalMib + (added > 0 ? containerExtraTail : 0),
     onsetMib,
     hostBaseAvailableMib: "unread" in memory ? null : memory.hostBaseAvailableMib,
     hostReserveMib: "unread" in memory ? null : memory.hostReserveMib,
     perLaneMib: "unread" in memory ? null : perLaneMib,
+    perLaneTypicalMib: "unread" in memory ? null : perLaneTypicalMib,
     ...(unread !== undefined ? { unread } : {}),
     next: { target, ...(highEvents !== undefined ? { highEvents } : {}) },
   };
@@ -270,6 +298,7 @@ export function laneTargetPayload(
     host_base_available_mib: result.hostBaseAvailableMib === null ? null : Math.round(result.hostBaseAvailableMib),
     host_reserve_mib: result.hostReserveMib === null ? null : Math.round(result.hostReserveMib),
     per_lane_mib: result.perLaneMib === null ? null : Math.round(result.perLaneMib),
+    per_lane_typical_mib: result.perLaneTypicalMib === null ? null : Math.round(result.perLaneTypicalMib),
     in_flight: context.inFlight,
     pressed: result.pressed,
     ...(result.unread !== undefined ? { unread: result.unread } : {}),
@@ -301,6 +330,13 @@ export function readLaneMemory(root: string, overrides: Partial<ShadowMemoryPort
   const policy: HostMemoryBudgetPolicy = { ...ports.policy(), mode: "shadow", classModes: {} };
   const inputs = gatherShadowInputs({ workerClass: "implement", root, estimateMib: 0 }, ports, policy);
   const numbers = evaluateShadowMemory(inputs, policy).numbers;
+  const perLaneMib = ports.estimate("implement");
+  // The class median the shadow budget splits a tree's claim at; unreadable, the whole estimate stays typical.
+  let perLaneTypicalMib: number | undefined;
+  try { perLaneTypicalMib = Math.min(perLaneMib, ports.typical("implement")); }
+  catch (error) {
+    void error; // An unreadable estimate store: no median, so every new lane is charged the whole estimate, as before.
+  }
   let highEvents: number | undefined;
   let highEventsUnread: string | undefined;
   try {
@@ -318,7 +354,10 @@ export function readLaneMemory(root: string, overrides: Partial<ShadowMemoryPort
     containerBasis: numbers.containerBasis,
     hostBaseAvailableMib: numbers.projectedAvailableMib,
     hostReserveMib: numbers.hostReserveMib,
-    perLaneMib: ports.estimate("implement"),
+    perLaneMib,
+    ...(perLaneTypicalMib !== undefined ? { perLaneTypicalMib } : {}),
+    containerTailMib: numbers.containerTailMib,
+    hostTailMib: numbers.hostTailMib,
     containerPressed: numbers.containerPressed || numbers.containerSighted,
     ...(highEvents !== undefined ? { highEvents } : {}),
     ...(highEventsUnread !== undefined ? { highEventsUnread } : {}),

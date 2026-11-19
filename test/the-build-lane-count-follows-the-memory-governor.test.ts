@@ -176,7 +176,7 @@ test("W1-T9097: shadow ledgers the target and changes nothing", async () => {
   assert.ok(rows.length >= 1, "the target is ledgered");
   assert.deepEqual(rows[0], {
     mode: "shadow", target: 1, fixed: 2, binding: "container", projection_mib: 8379 + 3000 + 1400, onset_mib: 8379, in_flight: 0,
-    pressed: true, host_base_available_mib: 20_000, host_reserve_mib: 2048, per_lane_mib: 1400,
+    pressed: true, host_base_available_mib: 20_000, host_reserve_mib: 2048, per_lane_mib: 1400, per_lane_typical_mib: 1400,
   });
   assert.equal(laneTargetRows(baseline.steps).length, 0, "no governor, no row");
 });
@@ -233,7 +233,7 @@ test("W1-T9097: an unreadable reading holds the target and an unreadable mode ne
   assert.deepEqual(u.started, ["A"], "one lane: the unread reading holds the floor");
   assert.deepEqual(laneTargetRows(u.steps)[0], {
     mode: "enforce", target: 1, fixed: 2, binding: "unread", projection_mib: null, onset_mib: null, in_flight: 0, pressed: false,
-    host_base_available_mib: null, host_reserve_mib: null, per_lane_mib: null,
+    host_base_available_mib: null, host_reserve_mib: null, per_lane_mib: null, per_lane_typical_mib: null,
     unread: "EACCES: memory.current",
   });
   u.settleA();
