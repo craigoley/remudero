@@ -2286,7 +2286,15 @@ export function runReadModelViewWorker(
   const early: ReadModelViewsInput[] = [];
   const catalogs = createWorkerBoardCatalogClient(data.catalogBridgeVersion === BOARD_CATALOG_WIRE_VERSION, post, clock);
   const handle = (msg: ReadModelViewsInput): void => {
-    if (isBoardCatalogReply(msg)) { catalogs.accept(msg); return; }
+    if (isBoardCatalogReply(msg)) {
+      catalogs.accept(msg);
+      // A selected private catalog can arrive after the first demanded body was built with
+      // catalog-pending. Rebuild now so the fresh snapshot becomes visible without waiting
+      // for the ordinary unread-view cadence.
+      try { ticker?.buildNow(NOW_VIEW_NAME); }
+      catch (error) { log("read_model.catalog_refresh_failed", { error: (error as Error).message }); }
+      return;
+    }
     if (msg.type === "stop") {
       stopped = true;
       clearTimeout(timer);
