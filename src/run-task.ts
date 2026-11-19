@@ -929,7 +929,8 @@ import {
   type GatePostureRuntime,
 } from "./lib/gate-posture.js";
 import { appendPanelLedger, ghIssueCloser } from "./lib/panel-actions.js";
-import { inboxVerbCommand, inboxVerbHelp, proposalVerdictCommand, type InboxVerbName } from "./lib/inbox-verdict-command.js";
+import { inboxVerbCommand, inboxVerbHelp, proposalVerdictCommand, type InboxVerbActions, type InboxVerbName } from "./lib/inbox-verdict-command.js";
+import { inboxVerbViaServe } from "./lib/inbox-cli-serve.js";
 import { computeBoardSnapshot, type BoardDeps } from "./lib/board.js";
 import { createBoardProjectionWorker } from "./lib/board-worker.js";
 import { adoptPlanSource, planSourceFailed, planSourceLoaded, type PlanSourceHolder } from "./lib/serve-plan-reload.js";
@@ -39750,16 +39751,22 @@ export function readLedgerRawLines(path: string): readonly string[] {
   }
 }
 
-export async function inboxActionCliCommand(name: InboxVerbName, rest: string[], config: Config = loadConfig(), deps?: PanelGraphDeps): Promise<number> {
-  const instancePlan = instanceVerbPlanRoot(() => join(config.root, "state"));
-  const { owner, repo } = deps ? { owner: "", repo: "" } : instancePlan.target ?? resolveOwnerRepo();
-  const causalScope = deps?.inboxSourceIdentity ?? deps?.inboxAuditScope ?? reframeCausalScope(config, true);
-  const actions = buildInboxVerbActions(deps ?? {
-    root: instancePlan.root, inboxRoot: config.root, planPath: join(instancePlan.root, "plan", "tasks.yaml"), ledgerPath: ledgerPathFor(config),
-    github: ghTraceGateway(owner, repo), statusGithub: ghGateway(owner, repo),
-    ratify: ratifyCliGateway(instancePlan.root, join(config.root, "logs")),
-  }, causalScope);
-  return inboxVerbCommand(name, rest, actions);
+export async function inboxActionCliCommand(name: InboxVerbName, rest: string[], config: Config = loadConfig(), deps?: PanelGraphDeps,
+  env: NodeJS.ProcessEnv = process.env): Promise<number> {
+  let built: InboxVerbActions | undefined;
+  const inProcess = (): InboxVerbActions => built ??= (() => {
+    const instancePlan = instanceVerbPlanRoot(() => join(config.root, "state"));
+    const { owner, repo } = deps ? { owner: "", repo: "" } : instancePlan.target ?? resolveOwnerRepo();
+    const causalScope = deps?.inboxSourceIdentity ?? deps?.inboxAuditScope ?? reframeCausalScope(config, true);
+    return buildInboxVerbActions(deps ?? {
+      root: instancePlan.root, inboxRoot: config.root, planPath: join(instancePlan.root, "plan", "tasks.yaml"), ledgerPath: ledgerPathFor(config),
+      github: ghTraceGateway(owner, repo), statusGithub: ghGateway(owner, repo),
+      ratify: ratifyCliGateway(instancePlan.root, join(config.root, "logs")),
+    }, causalScope);
+  })();
+  if (deps) return inboxVerbCommand(name, rest, inProcess());
+  // W1-T13238: the running serve's write route first, as the Console does; in-process only when no serve answers.
+  return inboxVerbViaServe(name, rest, config, inProcess, env);
 }
 
 export function proposalVerdictCliCommand(kind: ProposalVerdictKind, rest: string[], config: Config = loadConfig()): number {
