@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { FIXTURE_CONFIG_PATH_SEGMENTS } from "#src/lib/config.js";
@@ -108,6 +108,19 @@ test("W1-T12176 criterion 2 fails repeat crashes and bounds the last error line"
   assert.equal(result.exit, 2);
 });
 
+test("doctor preserves a crash cause before a long final-line suffix", async t => {
+  const { root, program, log } = fixture(t);
+  const cause = `${root}/node_modules/.bin/tsx: No such file or directory`;
+  writeFileSync(log, `${cause}${" ".repeat(16 * 1024)}`);
+  const result = await report(root, { platform: "darwin", home: root, exec: (_cmd, args) => {
+    if (args[1] !== target(DAEMON_LABEL)) missingService(args[1]!.split("/").at(-1)!);
+    return service(DAEMON_LABEL, program, ["state = not running", "runs = 4", "last exit code = 1", `stderr path = ${log}`]);
+  } });
+  const check = checkFor(result.launchd, DAEMON_LABEL);
+  assert.equal(check.verdict, "FAIL");
+  assert.ok(check.measured.includes(cause));
+});
+
 test("W1-T12176 criterion 3 names the missing program and both operator remedies", async t => {
   const { root } = fixture(t);
   const program = join(root, "missing install", "bin", "rmd");
@@ -151,6 +164,7 @@ test("W1-T12176 criterion 4 warns about the actual checkout and branch used for 
   const result = await report(root, { platform: "darwin", home: root, exec: (_cmd, args) => {
     const label = args[1]!.split("/").at(-1)!;
     const state = ["state = not running", "runs = 4", "last exit code = 0"];
+    if (label === SERVE_LABEL) state.push(`working directory = ${offMain}`);
     if (label === DIGEST_LABEL) state.push("environment = {", "\tRMD_SELF_SYNC_DONE => 1", "}");
     if (label === SUPERVISOR_LABEL) state.push(
       "arguments = {", `\t${main}`, "\tdeploy-run", "}",
@@ -166,6 +180,26 @@ test("W1-T12176 criterion 4 warns about the actual checkout and branch used for 
     assert.ok(warning.measured.includes(offMain));
     assert.ok(warning.measured.includes("plan-amendment"));
   }
+});
+
+test("digest self-sync checks its WorkingDirectory instead of the launcher checkout", async t => {
+  const { root } = fixture(t);
+  const main = gitRepo({ scope: t }).dir;
+  const offMain = gitRepo({ scope: t, branch: "digest-plan-amendment" }).dir;
+  const program = join(main, "bin", "rmd");
+  mkdirSync(dirname(program), { recursive: true });
+  writeFileSync(program, "", { mode: 0o755 });
+  const result = await report(root, { platform: "darwin", home: root, exec: (_cmd, args) => {
+    const label = args[1]!.split("/").at(-1)!;
+    if (label === DIGEST_LABEL) return service(label, program, [
+      "state = not running", "runs = 4", "last exit code = 0", `working directory = ${offMain}`,
+    ]);
+    if (label === SERVE_LABEL) return service(label, "/bin/true", ["state = not running", "runs = 0", "last exit code = 0"]);
+    return missingService(label);
+  } });
+  const warning = result.checks.find(check => check.name === `launchd-self-sync:${DIGEST_LABEL}`);
+  assert.equal(warning?.verdict, "WARN");
+  assert.equal(warning.measured, `${realpathSync(offMain)} (digest-plan-amendment)`);
 });
 
 test("supervisor --state-root overrides its job HOME's explicit install checkout", async t => {

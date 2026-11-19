@@ -8,7 +8,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, writeFileSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { hostname as osHostname } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { createBoardSnapshotCache } from "./board-snapshot-cache.js";
@@ -570,22 +570,46 @@ function readLaunchdErrorLine(path: string | undefined): string {
     try {
       const before = fstatSync(fd);
       if (!before.isFile()) return "";
-      const bytes = Buffer.alloc(Math.min(before.size, 16 * 1024));
-      const offset = before.size - bytes.length;
-      for (let read = 0; read < bytes.length;) {
-        const count = readSync(fd, bytes, read, bytes.length - read, offset + read);
+      let end = before.size;
+      if (end > 0) {
+        const last = Buffer.alloc(1);
+        if (readSync(fd, last, 0, 1, end - 1) !== 1) return "";
+        if (last[0] === 0x0a) {
+          end--;
+          if (end > 0) {
+            const prior = Buffer.alloc(1);
+            if (readSync(fd, prior, 0, 1, end - 1) !== 1) return "";
+            if (prior[0] === 0x0d) end--;
+          }
+        }
+      }
+      let start = 0;
+      for (let cursor = end; cursor > 0;) {
+        const offset = Math.max(0, cursor - 4096);
+        const chunk = Buffer.alloc(cursor - offset);
+        let read = 0;
+        while (read < chunk.length) {
+          const count = readSync(fd, chunk, read, chunk.length - read, offset + read);
+          if (count === 0) return "";
+          read += count;
+        }
+        const newline = chunk.lastIndexOf(0x0a);
+        if (newline >= 0) {
+          start = offset + newline + 1;
+          break;
+        }
+        cursor = offset;
+      }
+      const bytes = Buffer.alloc(Math.min(end - start, 16 * 1024));
+      let read = 0;
+      while (read < bytes.length) {
+        const count = readSync(fd, bytes, read, bytes.length - read, start + read);
         if (count === 0) return "";
         read += count;
       }
       const after = fstatSync(fd);
       if (after.size !== before.size || after.mtimeMs !== before.mtimeMs) return "";
-      const end = bytes.at(-1) === 0x0a ? bytes.length - 1 : bytes.length;
-      let start = bytes.subarray(0, end).lastIndexOf(0x0a) + 1;
-      // The tail can start in the middle of a UTF-8 character on an overlong final line.
-      if (start === 0 && offset > 0) {
-        while (start < Math.min(3, end) && (bytes[start]! & 0xc0) === 0x80) start++;
-      }
-      return new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(start, end)).trim();
+      return bytes.toString("utf8").trim();
     } finally {
       closeSync(fd);
     }
@@ -666,7 +690,8 @@ function parseLaunchdPrint(output: string, target: string) {
     || (!exit && !signal && exitField !== "(never exited)")) return undefined;
 
   return {
-    program, pid, starts: Number(runs), stderrPath: fields.get("stderr path"), indent,
+    program, pid, starts: Number(runs), stderrPath: fields.get("stderr path"),
+    workingDirectory: fields.get("working directory"), indent,
     lastExit: exit ? { code: Number(exit[1]) } : signal ? { signal } : null,
   };
 }
@@ -701,7 +726,7 @@ function readDoctorLaunchdServices(deps: DoctorDeps["launchd"] = {}): LaunchdSer
       continue;
     }
 
-    const { program, pid, starts, lastExit, stderrPath } = service;
+    const { program, pid, starts, lastExit, stderrPath, workingDirectory } = service;
     const programPath = readLaunchdPath(program);
     const resolved = programPath.state === "present" ? programPath.resolved : undefined;
     const usesCheckout = (label === DIGEST_LABEL || label === SERVE_LABEL) && resolved
@@ -709,7 +734,17 @@ function readDoctorLaunchdServices(deps: DoctorDeps["launchd"] = {}): LaunchdSer
       && !/^[\t ]+RMD_SELF_SYNC_DONE => 1\s*$/m.test(output);
     const checkout = label === SUPERVISOR_LABEL
       ? readSupervisorCheckout(output, service.indent)
-      : usesCheckout ? dirname(dirname(resolved)) : undefined;
+      : usesCheckout && workingDirectory && isAbsolute(workingDirectory)
+        ? (() => {
+          try {
+            const directory = realpathSync(workingDirectory);
+            return statSync(directory).isDirectory() ? directory : null;
+          } catch (error) {
+            void error;
+            return null;
+          }
+        })()
+        : usesCheckout ? null : undefined;
     const selfSync = checkout === null ? "unreadable" as const
       : checkout === undefined ? undefined : { checkout, branch: readLaunchdCheckoutBranch(checkout) };
     readings.push({
