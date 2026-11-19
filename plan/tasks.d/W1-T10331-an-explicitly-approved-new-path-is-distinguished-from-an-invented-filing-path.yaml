@@ -238,6 +238,10 @@
     No implementation before the plan's actual normal filing merge. The four
     future behavioral proof titles are requirements, NOT tests claimed executed
     by this plan-only filing. Retain all prior source/native/base/UNKNOWN logs.
+    Operator decision, 2026-11-19: authorize the full production issuer and
+    caller repair within the existing ten paths and a feature-branch push to
+    PR 19605 after qualification. PR 19605 remains unmerged; no live issuer,
+    grant, dispatch release, or runtime cutover is approved.
   risk_ruling:
     verdict: "operator"
     action: proceed
@@ -246,5 +250,6 @@
       - "Explicit same-chat operator approval of this separate USD5 high/span four-file admission repair and its four behavioral proofs, through normal gates only when ownership permits. Source-plan risk authority only: no live release ledger, gate waiver, source build before actual filing merge, hosted owner clearance, new W10280 attempt, worker stop, schedule or production activation."
       - "Explicit same-chat operator approval2026-10-22 of the exact eight-existing-file scope-and-authority amendment, retaining USD5/high/span and all four proofs. Authenticated issuer-backed exact-intent confirmation contract only; normal amendment merge before source work and fresh ownership. No actual path grant, dispatch release, hosted-route clearance, issuer enablement, worker stop, schedule or live cutover; qualify automatic source rollout effects separately."
       - "Explicit same-chat operator approval2026-10-23 adds ONLY openapi/daemon.yaml and packages/api-client/src/schema.d.ts through a files-only amendment, making ten declared existing files. USD5/high/span, authority, design, all four criteria/proofs and baselines remain unchanged. The actual scope merge and fresh ownership precede these source edits; no baseline waiver, duplicate work/run, worker stop, schedule, live issuer/grant or cutover. Existing source automatic-rollout release hold remains independent."
+      - "Explicit operator decision 2026-11-19: finish the production issuer and caller wiring within the existing ten declared paths and push a qualified feature-branch update to PR 19605. The PR remains unmerged; no live issuer enablement, actual path grant, task dispatch release or runtime cutover is authorized."
     judged_at: "2026-10-23T11:33:37.150Z"
     pin: "e6dc2b01ee43e607e47b17855e20668ad0ebca11ada712fa95b63eb4ba27993b"
