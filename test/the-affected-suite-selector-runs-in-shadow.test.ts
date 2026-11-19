@@ -579,6 +579,31 @@ test("W1-T10286: the narrow selector includes the garden due-interval suite for 
   assert.ok(!absent.narrow?.includes(suite));
 });
 
+test("W1-T10330: the narrow selector includes the busy-primary recycle suite for each recorded miss edge", () => {
+  const suite = "test/a-busy-primary-reaches-its-image-recycle.test.ts";
+  const edges = ["src/lib/ledger.ts", "src/lib/state-backup-engine-links.ts", "test/state-backup.test.ts"];
+  const files = new Map(Object.entries(TREE));
+  for (const edge of edges) files.set(edge, "");
+  files.set(suite, "");
+  const input = { files, pathReaders: [], symbolSuites: [] };
+
+  for (const changed of edges) {
+    const selection = selectAffectedSuites([changed], input);
+    assert.equal(selection.fullRun, false, changed);
+    assert.deepEqual(shadowRecord(selection, [suite]).failures, [
+      { file: suite, floor: "selected", narrow: "selected" },
+    ], changed);
+  }
+
+  const unrelated = selectAffectedSuites(["src/a.ts"], input);
+  assert.ok(!unrelated.suites.includes(suite));
+  assert.ok(!unrelated.narrow?.includes(suite));
+  files.delete(suite);
+  const absent = selectAffectedSuites([edges[0]!], input);
+  assert.ok(!absent.suites.includes(suite));
+  assert.ok(!absent.narrow?.includes(suite));
+});
+
 test("W1-T10323: the scout writer suite is selected for each recorded miss edge", () => {
   const suite = "test/the-scout-declares-the-writer-of-its-symptom.test.ts";
   const edges = ["src/lib/scout-gardener.ts", "test/scout-inbox-draft-escalated.test.ts"];
