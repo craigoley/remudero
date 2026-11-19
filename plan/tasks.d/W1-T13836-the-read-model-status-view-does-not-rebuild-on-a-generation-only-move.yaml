@@ -54,3 +54,6 @@
     Make shownGeneration return state.generation unconditionally: criterion 1 fails (each move rebuilds), and
     the two existing production status tests fail at their in-hold counts. Measured in the build worktree:
     # fail 3 with the hold removed, # fail 0 restored, over 12 tests in the criterion file.
+  note: |
+    reservation hand-off: claude/project-thread-u06uh4 -> run-unfiled-1795095057216
+    Reserved with rmd next-task-id by the project coordinator on claude/project-thread-u06uh4 and filed from this branch.
