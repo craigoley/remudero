@@ -5229,7 +5229,7 @@ export async function runDaemon(
       }
       const cpuReading = sampleLaneCpu(nowMs)!;
       const result = laneTarget({
-        previous: laneTargetReading?.result.next, inFlight, memory, wipBound, cpuCount: laneGovernorPorts.cpuCount(), cpu: cpuReading.cpu,
+        previous: laneTargetReading?.result.next, inFlight, memory, wipBound, cpuCount: laneGovernorPorts.cpuCount(), cpu: cpuReading.cpu, maxLanes: laneCount,
       });
       laneTargetReading = { atMs: nowMs, result };
       log(LANE_TARGET_STEP, laneTargetPayload(result, { mode: laneGovernorMode, fixed: laneCount, inFlight }));
