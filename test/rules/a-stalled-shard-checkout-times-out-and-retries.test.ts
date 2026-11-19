@@ -1,3 +1,4 @@
+// @census-reads: .github/workflows/ci.yml test/helpers/repo-root.ts test/rules/a-stalled-shard-checkout-times-out-and-retries.test.ts — ci.yml's shard lanes, the root helper, itself.
 // W1-T13825 — a shard checkout that runs past 3 minutes is stopped and run once more.
 // MEASURED 2026-11-19 (Actions jobs API, every ci.yml run 2026-11-17 06:50Z..2026-11-19 13:00Z): after W1-T13321's
 // low-speed abort merged, 13 of 18,150 ci-shard and coverage-shard checkouts still took 314-1434 s. Job
