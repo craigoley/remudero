@@ -878,9 +878,49 @@ export function attributionLines(result) {
       counts.failingOnlyAtHead}; unattributed ${counts.unattributed}`];
 }
 
+/**
+ * W1-T13736 — whether a run on a Node other than the .nvmrc pin re-runs itself under an installed pin. Candidates, in
+ * order: ~/.local/opt/node-v<pin>, its nodejs.org archive form node-v<pin>-<platform>-<arch>, then nvm's
+ * versions/node/v<pin>; the first that exists and whose own --version reads v<pin> is chosen. INVARIANT
+ * never-another-node: nothing here downloads or installs a Node, a candidate reading another version is never chosen,
+ * and when this process already is the chosen install (the re-run child) it refuses, so the re-run happens at most once.
+ */
+export function pinnedNodeReexec({ pin, current, env = process.env, home = homedir(), platform = process.platform,
+  arch = process.arch, execPath = process.execPath, exists = existsSync, spawn = spawnSync,
+  versionOf = (path) => spawn(path, ['--version'], { encoding: 'utf8' }).stdout?.trim(), realpath = realpathSync }) {
+  const nvmDir = env.NVM_DIR || join(home, '.nvm');
+  const candidates = [join(home, '.local/opt', `node-v${pin}`, 'bin/node'),
+    join(home, '.local/opt', `node-v${pin}-${platform}-${arch}`, 'bin/node'), join(nvmDir, 'versions/node', `v${pin}`, 'bin/node')];
+  const file = `node-v${pin}-${platform}-${arch}.tar.gz`, dist = `https://nodejs.org/dist/v${pin}`;
+  const sum = { darwin: 'shasum -a 256 -c -', linux: 'sha256sum -c -' }[platform];
+  const install = env.NVM_DIR || exists(join(home, '.nvm', 'nvm.sh'))
+    ? `nvm install ${pin} (nvm checks the download against the release's SHASUMS256.txt)`
+    : sum ? `cd "$(mktemp -d)" && curl -fsSLO ${dist}/${file} && curl -fsSLO ${dist}/SHASUMS256.txt && ` +
+      `grep ' ${file}$' SHASUMS256.txt | ${sum} && mkdir -p "$HOME/.local/opt" && tar -xzf ${file} -C "$HOME/.local/opt"`
+      : `the nodejs.org release for ${platform}-${arch} from ${dist}/ checked against its SHASUMS256.txt`;
+  // W1-T13720: name the remedy. On the fleet host the units converge installs the pin and raises
+  // host-node-behind while it cannot; a bare version pair sent every lane to guess.
+  const remedy = `On the fleet host the units converge (deploy/install-host-units.sh --install) installs the .nvmrc pin and raises the ` +
+    `host-node-behind alert while it cannot; read its host-node: journal lines. Elsewhere, install Node ${pin}: ${install}; ` +
+    `the author preflight then re-runs itself under it`;
+  const prefix = `Node ${pin} required; got ${current}. `;
+  const misread = [];
+  for (const path of candidates) {
+    if (!exists(path)) continue;
+    const read = versionOf(path);
+    if (read !== `v${pin}`) { misread.push(`${path} reads ${read || 'no version'}`); continue; }
+    if (realpath(path) === realpath(execPath)) {
+      return { candidates, refuse: `${prefix}This Node (${execPath}) is the install at ${path}, whose --version reads v${pin}; ` +
+        `it is not re-run again. ${remedy}` };
+    }
+    return { candidates, reexec: path };
+  }
+  return { candidates, refuse: prefix + (misread.length ? `Not run: ${misread.join('; ')}. ` : '') + remedy };
+}
+
 export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
   select = (changed, range) => authorSelection(root, changed, range), host, admitHost = () => undefined,
-  testSlot = {}, enqueueTestSlot: enqueueSuiteSlot = enqueueTestSlot, verdictLedger = {} } = {}) {
+  testSlot = {}, enqueueTestSlot: enqueueSuiteSlot = enqueueTestSlot, verdictLedger = {}, pinnedNode: pinnedNodeLocation = {} } = {}) {
   const { values, helpRequested } = parseArgv(argv, {
     'dry-run': { type: 'boolean' },
     deadline: { type: 'string' },
@@ -1001,11 +1041,16 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
       throw new Error('runtime admission requires a future ISO deadline and a native runtime profile together');
     }
     const pinnedNode = readFileSync(join(root, '.nvmrc'), 'utf8').trim().replace(/^v/, '');
-    // W1-T13720: name the remedy. On the fleet host the units converge installs the pin and raises
-    // host-node-behind while it cannot; a bare version pair sent every lane to guess.
-    if (process.versions.node !== pinnedNode) throw refusal('node-version', `Node ${pinnedNode} required; got ${process.versions.node}. ` +
-      `On the fleet host the units converge (deploy/install-host-units.sh --install) installs the .nvmrc pin and raises the ` +
-      `host-node-behind alert while it cannot; read its host-node: journal lines. Elsewhere, install Node ${pinnedNode}`);
+    // W1-T13736: off the pin, re-run this script under an installed pin with the same flags, arguments and environment.
+    if (process.versions.node !== pinnedNode) {
+      const located = pinnedNodeReexec({ spawn, ...pinnedNodeLocation, pin: pinnedNode, current: process.versions.node });
+      if (located.refuse !== undefined) throw refusal('node-version', located.refuse);
+      console.log(`author preflight: Node ${process.versions.node} is not the .nvmrc pin ${pinnedNode}; re-running under Node ${pinnedNode} at ${located.reexec}`);
+      const child = spawn(located.reexec, [...process.execArgv, fileURLToPath(import.meta.url), ...argv], { stdio: 'inherit', env: process.env });
+      if (child.error) throw new Error(`the re-run under Node ${pinnedNode} (${located.reexec}) could not start: ${child.error.message}`);
+      if (child.signal) throw new Error(`the re-run under Node ${pinnedNode} (${located.reexec}) ended by signal ${child.signal}`);
+      return child.status;
+    }
     // Turning worktreeConfig on removes Git's main-worktree-only exception for these keys.
     // A suite can enable it midway through validation and poison every sibling checkout.
     // Admit the topology, never migrate an operator's shared Git configuration here.
