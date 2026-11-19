@@ -1,0 +1,93 @@
+- id: W1-T13790
+  title: "A red's failing test file is the one its own top-level TAP block names, never a test path quoted in its error text, so base reproduction, head reproduction and main bisection run the file that failed"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # these files decide base red on every PR red, the main-red bisection and the flake retry; a wrong file sends fix rounds after the wrong red
+  origin: "operator-session#main-red-19469-2026-11-18"
+  plan_refs:
+    - W1-T2671
+    - W1-T7848
+    - W1-T9927
+    - W1-T13136
+  files:
+    - src/lib/base-reproduction.ts
+    - scripts/test-with-retry.mjs
+    - test/a-failing-file-is-the-one-its-own-tap-block-names.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "failingTestFilesFromCiFailures, given the measured ci-shard (1/8) excerpt of main run 44373577634 (job 135054821069: a column-0 'not ok 832' block for test/infra/gate-probe-native-evidence.test.ts whose error and actual fields quote a child's TAP with a location in test/a-gate-run-leaves-the-tracked-tree-clean.test.ts, each line with its CI timestamp), returns only the evidence test's path"
+      proof: "grep: W1-T13790 criterion 1 in test/a-failing-file-is-the-one-its-own-tap-block-names.test.ts"
+    - claim: "baseReproductionFiles on that failure returns [test/infra/gate-probe-native-evidence.test.ts], and decideBaseReproduction with that file failing at main returns reproduced (base red), where today it returns partial because the quoted file is unrunnable"
+      proof: "grep: W1-T13790 criterion 2 in test/a-failing-file-is-the-one-its-own-tap-block-names.test.ts"
+    - claim: "parseFailingTestFiles on the same runner output (no timestamps) returns only test/infra/gate-probe-native-evidence.test.ts, so the FLAKE-RETRY-FILES line names one file, not two"
+      proof: "grep: W1-T13790 criterion 3 in test/a-failing-file-is-the-one-its-own-tap-block-names.test.ts"
+    - claim: "A real nested subtest failure (an indented not ok under a column-0 not ok in file X) and a second column-0 failure in file Y yield X and Y from both functions"
+      proof: "grep: W1-T13790 criterion 4 in test/a-failing-file-is-the-one-its-own-tap-block-names.test.ts"
+    - claim: "A log tail with no TAP not ok line (a crash or an unreported file that names test/z.test.ts in a plain error line) still yields that path, as failingTestFilesFromCiFailures does today"
+      proof: "grep: W1-T13790 criterion 5 in test/a-failing-file-is-the-one-its-own-tap-block-names.test.ts"
+    - claim: "invariant:quoted-is-not-failed — a test path that appears only inside a failure's diagnostic body (a quoted string, a block scalar, a stack frame, an indented child not ok) is never returned when the text holds a column-0 TAP failure, and a tail cut inside a body credits no file from the indented lines"
+      kind: guard
+      proof: "grep: W1-T13790 criterion 6 in test/a-failing-file-is-the-one-its-own-tap-block-names.test.ts"
+  rationale: |
+    WHY: on 2026-11-18 the red main (18:47Z to 21:22Z, caused by #19469) was detected but never correctly
+    handled, and PR fix rounds chased it, because every reader named the wrong failing file.
+    THE RED (main CI run 44373577634, job 135054821069): test/infra/gate-probe-native-evidence.test.ts failed
+    ("not ok 832", location ...gate-probe-native-evidence.test.ts:1:2770). Its assertion message quotes the
+    TAP of the child it runs, which holds "not ok 1 - W1-T2791 (acceptance 1) ..." and
+    "location: '.../test/a-gate-run-leaves-the-tracked-tree-clean.test.ts:1:3191'", both as a quoted string
+    and again in the actual: block. The clean-tree test did not fail on its own.
+    WHAT READ THE QUOTED FILE (core ledger, ~/rmd-state2/state, 2026-11-18):
+    - test-with-retry: "FLAKE-RETRY-FILES: retrying 2 failed file(s) — test/a-gate-run-leaves-the-tracked-
+      tree-clean.test.ts, test/infra/gate-probe-native-evidence.test.ts". parseFailingTestFiles matches any
+      location: text between a column-0 not ok and the next "..." line, quoted lines included.
+    - main health: every main.health.head_reproduction row that ran a file (10 of 11) and every
+      main.repair.bisecting / probe_concluded local-test row ran only test/a-gate-run-leaves-the-tracked-tree-clean.test.ts. Every run ended
+      unrunnable (LoopBoundedChildTimeout after 183 to 220 s; the test is slow on the loaded host). So head
+      reproduction never confirmed the red, local bisection was inconclusive, and the rung fell back to CI
+      probes that took 25 to 47 minutes each (113 queued jobs, 0 idle runners). It located the culprit at
+      20:56Z and opened its fix PR #19502 at 21:16Z, 2 h 29 min after the merge.
+    - base red on PRs: sweep.base_reproduction for #19459 and #19479 read both files. The evidence test
+      failed at main in 7 to 18 s; the clean-tree test was unrunnable. decideBaseReproduction needs every file
+      to fail, so the verdict was partial, not reproduced, 5 times from 20:19Z to 21:14Z. Fix rounds ran on
+      the unrelated PRs: #19479's round at 20:38Z changed gate-probe-native-evidence.test.ts; #19459's round at
+      21:14Z ran against the same red and made no diff.
+    READ at origin/main 079539063: src/lib/base-reproduction.ts failingTestFilesFromCiFailures adds every
+    test path that appears anywhere in the failure name or log tail. baseReproductionFiles,
+    main-health-rung.ts (head reproduction, locateOffender, proveCulprit) and sweep.ts (strike cause key) read
+    it.
+    WHAT THE RUNG WOULD HAVE DONE with the right file: the evidence test runs in about 12 s. Head reproduction
+    would have confirmed the red, local bisection would have read 22cb974e3 (pass) and 73fef8b1b (#19469,
+    fail) and located #19469 within minutes, and base reproduction would have read reproduced on every PR, so
+    their fix rounds would not have chased main's red.
+  design: |
+    INVARIANT quoted-is-not-failed: a test file counts as failing only when a column-0 TAP failure names it in
+    its own diagnostic block, or, for text with no TAP failure, when the text names it as today.
+    1. One rule for both parsers. Strip an optional CI timestamp prefix (an ISO time and one space) from each
+       line. A failure block starts at a line that begins "not ok <n> - " at column 0. Its file is the value
+       of the first line in that block that is exactly two spaces, "location: '", a path, ":<line>:<col>'"
+       (single or double quotes), before the block's two-space "..." line. Lines indented more than two
+       spaces, and lines that start with a quote, are never read as keys. A failing nested subtest always
+       makes its column-0 ancestor fail with a location in the same file, and a log tail is a suffix, so the
+       ancestor is in the tail whenever the nested line is.
+    2. scripts/test-with-retry.mjs parseFailingTestFiles (and parseFailingTestEntries, which scans the same
+       blocks) use this rule.
+    3. src/lib/base-reproduction.ts failingTestFilesFromCiFailures: paths in failure.name as today. For a log
+       tail that holds a "not ok <n> - " line at any indent, return the paths the rule finds (none when the
+       tail was cut inside a body), and also the files on a "FLAKE-RETRY-FILES: retrying ..." line. For a
+       tail with no "not ok" line, keep today's free-text read. Keep the checkout prefix as found (W1-T2671).
+    4. No change to decideBaseReproduction, localProbeVerdict or the rung.
+    5. The test uses the measured excerpt (lines from job 135054821069, trimmed to the two failure blocks
+       and the FLAKE-RETRY lines) as a fixture string.
+  falsifier: |
+    Keep today's free-text read for TAP tails: criteria 1, 2 and 6 fail. Keep matching any location: text
+    in a block: criterion 3 fails. Read only the first column-0 block, or drop nested subtests' parents:
+    criterion 4 fails. Return nothing for a non-TAP tail: criterion 5 fails.
+  note: |
+    Filed from an operator analysis session of the 2026-11-18 red main, with W1-T13788 (suite selection) and
+    W1-T13792 (the CI probe verdict, which located the wrong culprit #19468, 12f14d934, here).

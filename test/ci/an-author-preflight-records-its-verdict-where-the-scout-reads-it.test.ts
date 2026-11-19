@@ -102,14 +102,14 @@ const DISK_REASONS = ["workspaceFreeBytes:below-existing-20GiB-reserve"];
 const EXPECTED: Array<[keyof typeof RUNS, Context, "passed" | "failed" | "refused", string | null, string | undefined, number]> = [
   ["passed", {}, "passed", null, undefined, 0],
   ["overCapacityGreen", {}, "passed", null, undefined, 3],
-  ["censusFailed", {}, "failed", "census-precheck", "other", 1],
+  ["censusFailed", {}, "failed", "census-precheck", "census-precheck", 1],
   ["subsetFailed", {}, "failed", "affected-tests-subset", undefined, 1],
-  ["staticFailed", {}, "failed", "static-preflight", "other", 1],
+  ["staticFailed", {}, "failed", "static-preflight", "static-preflight", 1],
   ["lintPlanFailed", {}, "failed", "lint-plan-fast", "lint-plan", 1],
   ["censusTimeBound", {}, "refused", "census-precheck", "census-time-bound", 3],
   ["testsNotRun", {}, "refused", "affected-tests", "affected-tests", 3],
   ["dependencyRefused", { refusalClass: "dependency-precheck" }, "refused", "census-precheck", "dependency-precheck", 1],
-  ["diskReserveNotRun", { refusalClass: "other", refusalStage: "static-preflight", capacityReasons: DISK_REASONS }, "refused", "static-preflight", "other", 3],
+  ["diskReserveNotRun", { refusalClass: "other", refusalStage: "static-preflight", capacityReasons: DISK_REASONS }, "refused", "static-preflight", "disk-reserve", 3],
   ["treeChanged", { refusalClass: "other" }, "refused", "receipt", "other", 1],
 ];
 
@@ -225,7 +225,7 @@ test("W1-T12842 criterion 1: the preflight's own exit appends one row for a run 
     ["author_preflight.refused", "node-version", "W1-T12842", BRANCH, "census-precheck", 1]);
   assert.equal(typeof fromMain!.wall_ms, "number");
   assert.deepEqual([fromEntry!.step, fromEntry!.first_step, fromEntry!.refusal_class, fromEntry!.exit_code, fromEntry!.task_id],
-    ["author_preflight.refused", "entry", "other", 3, "W1-T12842"]);
+    ["author_preflight.refused", "entry", "memory-pressure", 3, "W1-T12842"]);
   assert.deepEqual(fromEntry!.capacity_reasons, ["pressure:warning"]);
   assert.deepEqual([undeclared!.first_step, undeclared!.head_ref, undeclared!.task_id], ["entry", null, "CLI"]);
 });
@@ -362,7 +362,7 @@ const suiteLine = (lease: Record<string, unknown>) => () => ({ ticketed: true, p
 
 test("W1-T12842 criterion 3: a refused or NOT_RUN run carries a refusal class from the closed list, named at the site that refused", (t) => {
   assert.deepEqual(author.AUTHOR_REFUSAL_CLASSES, ["node-version", "dependency-precheck", "static-wait-bound", "test-slot-wait-bound",
-    "census-time-bound", "lint-plan", "affected-tests", "other"]);
+    "census-time-bound", "lint-plan", "affected-tests", "disk-reserve", "memory-pressure", "census-precheck", "static-preflight", "other"]);
   // Every run in the table: a refused row always carries a class, a passed row never, and each class is in the list.
   for (const [name, context, outcome, , refusalClass, exitCode] of EXPECTED) {
     const row = author.authorVerdictRow(RUNS[name], { ...context, exitCode, headRef: BRANCH })!;
@@ -398,7 +398,7 @@ test("W1-T12842 criterion 3: a refused or NOT_RUN run carries a refusal class fr
       note: "NOT_RUN: private coordination requires an admitted lease (wait_bound_exceeded); waited 2700s" }) });
   assert.match(slotRefused, /author preflight NOT_RUN \(NOT_RUN: private coordination/, "positive control: the suite slot was not admitted");
 
-  // A Mac disk-reserve refusal before the static stage: NOT_RUN, exit 3, and no class in the list fits it.
+  // A Mac disk-reserve refusal before the static stage is NOT_RUN with exit 3.
   const short = { state: "not-run", platform: "darwin", minimumFreeBytes: 20 * GiB, reserveBasis: "existing-20GiB", reasons: DISK_REASONS, pressure: "normal",
     capacityChecks: [{ filesystem: "workspaceFreeBytes", requiredFreeBytes: 20 * GiB, observedFreeBytes: 20 * GiB - 13_938_688, shortfallBytes: 13_938_688 }] };
   const diskRefused = site(authorTree(t, "disk", { dependencies: true }), { enqueueTestSlot: suiteLine({ outcome: "acquired", concurrency: 1, waitedMs: 0, note: "unused" }),
@@ -410,7 +410,7 @@ test("W1-T12842 criterion 3: a refused or NOT_RUN run carries a refusal class fr
     ["author_preflight.refused", "dependency-precheck", "census-precheck", 1, HEAD],
     ["author_preflight.refused", "static-wait-bound", "static-preflight", 1, HEAD],
     ["author_preflight.refused", "test-slot-wait-bound", "affected-tests", 1, HEAD],
-    ["author_preflight.refused", "other", "static-preflight", author.OVER_CAPACITY_EXIT, HEAD],
+    ["author_preflight.refused", "disk-reserve", "static-preflight", author.OVER_CAPACITY_EXIT, HEAD],
   ], "exactly one row for each refused run, with the class its site named");
   assert.equal(rows[2]!.admission_wait_ms as number >= 2_700_000, true, "the 45 minutes the run waited for its slot are on the row");
   assert.deepEqual(rows[3]!.capacity_reasons, DISK_REASONS);

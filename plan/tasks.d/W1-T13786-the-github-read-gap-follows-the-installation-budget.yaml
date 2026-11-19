@@ -1,0 +1,147 @@
+- id: W1-T13786
+  title: "The GitHub read gap follows the installation budget instead of a fixed 1.5 s"
+  repo: remudero
+  priority: 1.2
+  depends_on: []
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # every paced GitHub read on every instance; a wrong gap spends the shared hourly budget or trips a secondary limit
+  origin: "operator-session#pacer-gap-2026-11-19"
+  plan_refs:
+    - W1-T468
+    - W1-T3991
+    - W1-T12553
+    - W1-T12057
+    - W1-T12123
+    - W1-T10279
+    - W1-T13709
+    - W1-T13710
+  files:
+    - src/lib/github-installation-budget.ts
+    - src/lib/installation-budget-start.ts
+    - src/lib/github-transport.ts
+    - test/github/the-read-gap-follows-the-installation-budget.test.ts
+    - test/github/the-pacer-waits-out-a-normal-gap-on-the-daemon-loop.test.ts
+    - test/github/the-shared-read-gap-is-waited-out-on-the-daemon-loop.test.ts
+    - test/open-prs-rest.test.ts
+    - test/the-tick-reads-run-off-the-event-loop.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "With a core reading of 14,000 of 15,000, the reset 50 min away, no reads by other processes in the window and 7 instances on the installation, the read gap is the secondary spacing 60,000 ms x 7 / 900 (467 ms), not 1,500 ms; ten waitAsync calls of createGhCallPacer() with no minGapMs, on a clock only the pacer moves, wait nine gaps of that length"
+      proof: "grep: W1-T13786 criterion 1 in test/github/the-read-gap-follows-the-installation-budget.test.ts"
+    - claim: "With the same time to the reset, readings of 10,000, 5,000, 2,500 and 1,700 remaining, with other processes spending at the window's average rate so far, give gaps that never shrink and end above 1,500 ms; each gap equals 1 / max(S / T / shares, S / T - others' rate) when that is longer than the secondary spacing, where S is remaining minus the write reserve and T the time to the reset"
+      proof: "grep: W1-T13786 criterion 2 in test/github/the-read-gap-follows-the-installation-budget.test.ts"
+    - claim: "invariant:the-floor-still-stands-down — a reading at or below the floor fraction (2%) makes the next wait and waitAsync throw GhPaceFloorStandDownError, a reading at or below the write reserve makes the installation admission refuse the read with reason reserve, and a reading at the low-water fraction (10%) gives DEFAULT_GH_PACE_RATE_LIMIT_GAP_MS, each as on origin/main"
+      kind: guard
+      proof: "grep: W1-T13786 criterion 3 in test/github/the-read-gap-follows-the-installation-budget.test.ts"
+    - claim: "invariant:a-secondary-limit-slows-down — through paceGhEntryAsync, a secondary-limit refusal with retry-after 30 waits 30 s (plus at most the 25% jitter) before its retry, one with no retry-after waits at least DEFAULT_GH_REFUSAL_BACKOFF_FLOOR_MS, and the gap after either is DEFAULT_GH_PACE_RATE_LIMIT_GAP_MS while the budget reading is healthy; a later clean result returns the gap to the budget gap"
+      kind: guard
+      proof: "grep: W1-T13786 criterion 4 in test/github/the-read-gap-follows-the-installation-budget.test.ts"
+    - claim: "invariant:every-process-keeps-its-share — two budgets on the same shared reading with the same own reads give the same gap, and a process whose others spend faster than S / T still gets a gap no longer than T x shares / S (its equal share), never a stop while the reading is above the reserve"
+      kind: guard
+      proof: "grep: W1-T13786 criterion 5 in test/github/the-read-gap-follows-the-installation-budget.test.ts"
+    - claim: "invariant:writes-are-not-sped-up — a write argv (POST, PATCH, PUT, DELETE, a gh pr merge) claims no read budget, takes no cadence stamp and waits on no read gap, as on origin/main"
+      kind: guard
+      proof: "grep: W1-T13786 criterion 6 in test/github/the-read-gap-follows-the-installation-budget.test.ts"
+    - claim: "invariant:the-loop-sleep-bound-holds — on the daemon loop a synchronous gap wait longer than DEFAULT_GH_PACE_MIN_GAP_MS still throws GhPaceWouldBlockError and a shorter one is slept and leaves one github.pace.loop_wait row, for the pacer gap and for the shared read gap"
+      kind: guard
+      proof: "grep: W1-T13786 criterion 7 in test/github/the-read-gap-follows-the-installation-budget.test.ts"
+    - claim: "With RMD_GH_SHARED_READ_GAP_MS unset, the cross-process shared read gap equals the budget gap; with it set, the set value is used, as on origin/main"
+      proof: "grep: W1-T13786 criterion 8 in test/github/the-read-gap-follows-the-installation-budget.test.ts"
+    - claim: "Through the real ghJsonAsync and a gh shim (test/helpers/gh-shim.ts) whose answers carry x-ratelimit-remaining, x-ratelimit-limit and x-ratelimit-reset headers, a createGhCallPacer() read sequence is spaced by the gap the recorded headers give, with nothing injected in place of the budget or the pacer"
+      proof: "grep: W1-T13786 criterion 9 in test/github/the-read-gap-follows-the-installation-budget.test.ts"
+    - claim: "The pacer reads its gap from the process installation budget"
+      proof: "grep: readGapMs() in src/lib/github-transport.ts"
+    - claim: "The budget counts this process's own reads in the current reset window"
+      proof: "grep: WindowReads in src/lib/github-installation-budget.ts"
+  rationale: |
+    WHY: every paced read waits a fixed 1.5 s gap (DEFAULT_GH_PACE_MIN_GAP_MS, src/lib/github-transport.ts:643), and
+    the cross-process shared read gap reuses the same number (DEFAULT_GH_SHARED_READ_GAP_MS, :1012). One pacer per
+    process serialises its reads: waitAsync claims each slot in turn. The open pull request list costs 1 + 2N reads
+    at 1.75 s each (p50; W1-T13709), about 50 s at 16 open pull requests, so it misses its 60 s deadline in about
+    half of light passes. The escalation answer walk was 107 reads in series (W1-T13710).
+    WHERE 1.5 S CAME FROM: W1-T468 (#1780, 2026-08-14) added the pacer because three tick reads fired in the same
+    second and drew secondary-limit 403s while the primary budget was full. Its comment sized the gap for those three
+    calls: "three guarded waits cost at most ~4.5s against that 60s interval". W1-T3991 (#6569) copied it as the
+    shared gap. The Mac broker (W1-T10279, src/lib/gh-read-broker.ts:215) calls it "a guess" and already adapts. So
+    the gap guards the secondary limit, not the budget. The budget has its own controls: the installation share and
+    write reserve (W1-T12553), and the low-water and floor fractions (W1-T525, W1-T1008).
+    MEASURED 2026-11-18 12:00Z to 2026-11-19 00:36Z from daemon.quota core rows (ops and console ledgers; the core
+    ledger has few) on the one installation (limit 15,000 an hour, reset at :12):
+    - Used per window, ending 13:12 to 01:12: 9,200; 8,742; 12,322; 9,556; 6,342; 5,827; 6,065; 5,653; 5,543;
+      9,651; 8,596; 8,176; and 4,837 in the first 24 min of the window ending 01:12.
+    - Lowest remaining: 2,678 at 15:11 (21 min before the reset). In every window after 16:12 the lowest was 5,349 or
+      more. No reading reached the write reserve (1,500) or the floor (300).
+    - No github.budget.throttled row and no pacer stand-down on any of the four daemon ledgers. No secondary-limit
+      refusal in the core ledger. Serve's keep-warm reads (about 500 an hour) saw no rate limit.
+    - Reads stamped per hour: ops about 750 to 1,050, console about 300 to 1,300, serve about 500, core about 2,800
+      to 3,400 (from rows that span several hours). Run children make the rest.
+    So the fleet leaves 5,000 to 9,000 reads of each hour unspent while every read waits 1.5 s. GitHub's REST
+    secondary limit is 900 points a minute (a GET is 1 point); the fleet's peak was about 205 reads a minute.
+    THE FIXED GAP IS A CEILING: at most 2,400 reads an hour a process, however much budget is left, and it does not
+    slow down as the budget runs low until the 10% low-water mark.
+  design: |
+    INVARIANT the-floor-still-stands-down: the floor fraction, the low-water widening, the write reserve and the
+    installation admission refuse or widen exactly as today.
+    INVARIANT a-secondary-limit-slows-down: a rate-limited result widens the gap to DEFAULT_GH_PACE_RATE_LIMIT_GAP_MS
+    and the retry honours retry-after, else waits at least one minute with exponential backoff, as today.
+    INVARIANT every-process-keeps-its-share: no process's gap is longer than its equal share of the spendable budget
+    over the time to the reset, while the reading is above the reserve.
+    INVARIANT writes-are-not-sped-up: no write path changes.
+    INVARIANT the-loop-sleep-bound-holds: the W1-T12057 and W1-T12123 loop-sleep bound is unchanged.
+    1. In github-installation-budget.ts add an exported pure function ghBudgetReadGapMs({ reading, nowMs, shares,
+       instances, ownWindowReads, reserveFraction }) and a budget method readGapMs(). Every input is a measured value
+       or a documented GitHub limit. No new tuning constant:
+       - S = remaining - ceil(limit x GITHUB_WRITE_RESERVE_FRACTION) (the spendable budget); T = reset - now.
+       - Window start = reset - 1 h (GitHub's primary window is one hour). Others' rate = max(0, limit - remaining -
+         ownWindowReads) / (now - window start); 0 when that time is 0 or less.
+       - Read rate = max(S / T / shares, S / T - others' rate). The first term is the equal share (shares is the
+         budget's consumers, so a run child keeps its divided share); the second lets one process use what the
+         others leave. Every process sees the same shared reading, so a busy hour slows all of them together.
+       - Secondary spacing = 60,000 ms x instances / 900. 900 is GitHub's documented REST limit of points a minute
+         (a GET costs 1 point); instances is the count of daemon instances on the installation from the registry
+         (github.budget.configured consumers, 7 today), or 1 when the budget is not configured.
+       - Gap = max(secondary spacing, 1,000 ms / read rate). With no current reading, or S at or below 0, the gap
+         is the secondary spacing; the admission and the floor refuse those reads as today.
+       Worked from the measured windows: at the start of a window (S 13,500, T 3,600 s) the gap is 467 ms, about
+       3.2 times as fast as today. At 2,500 remaining with 20 min left and others at 3 reads a second it is about
+       8.4 s (the equal share: S 1,000, T 1,200 s, 7 shares).
+    2. Count this process's admitted core reads in the current reset window: two new slots in the shared state
+       (WindowReads and WindowReset), reset when a reading with a new reset arrives, so the daemon and its read
+       worker thread count as one process. readGapMs() reads them under the same lock as claimRead. Carry
+       instances in threadInput and createInstallationBudget's options; installation-budget-start.ts passes the
+       registry consumers before the run-child divisor.
+    3. In createGhCallPacer, when no minGapMs option is given, the normal gap is githubInstallationBudget()
+       .readGapMs() read at each wait and waitAsync. A minGapMs option still fixes the gap (tests and the broker's
+       guess keep working). A rate-limited result or a low-water reading still sets DEFAULT_GH_PACE_RATE_LIMIT_GAP_MS
+       until a clean result. The floor stand-down is unchanged.
+    4. resolveGhSharedReadGapMs uses the same readGapMs() when RMD_GH_SHARED_READ_GAP_MS is unset.
+    5. The loop-sleep bound (loopSafeGhSleep's normalGapMs in createGhCallPacer and applyGhReadCadence) stays
+       DEFAULT_GH_PACE_MIN_GAP_MS, so a synchronous wait on the daemon loop never sleeps longer than today; a longer
+       budget gap throws GhPaceWouldBlockError there, as the 10 s widening does today. The constant stays exported
+       for that bound and for the broker.
+    6. Add no config key, counter or ledger step. Grep test/ for tests that rely on the default 1.5 s gap
+       (createGhCallPacer() with no minGapMs, DEFAULT_GH_SHARED_READ_GAP_MS); one outside `files` needs an amendment.
+    NOT IN SCOPE: a separate gap for GraphQL or search reads (both are far from their limits); the Mac broker's
+    pacer (it already adapts); a minimum spacing for writes. The code has none today. GitHub asks for at least one
+    second between mutating requests; a write rule is a separate task if writes ever burst.
+    AMENDED (2026-11-19): two existing tests assume the 1.5 s default gap, test/open-prs-rest.test.ts (a fresh
+    pacer's default gap) and test/the-tick-reads-run-off-the-event-loop.test.ts (W1-T13129 criterion 1); both join
+    files and state their no-budget setup. A process with no installation budget keeps DEFAULT_GH_PACE_MIN_GAP_MS
+    (hand runs, the interactive token); only a budgeted process takes the adaptive gap. A budget with a wait bound
+    (maxWaitMs) caps the gap there, never below the secondary spacing, so the W1-T12820 share stand-down still acts;
+    after a rate-limited or low-water result the gap is the larger of the 10 s gap and the budget gap.
+  falsifier: |
+    Put the fixed 1,500 ms gap back as the default: criteria 1 and 9 must fail. Drop the others' rate term or the
+    equal-share term: criteria 2 and 5 must fail. Use the budget gap after a rate-limited result: criterion 4 must
+    fail. Remove the floor check: criterion 3 must fail. Let the loop sleep the budget gap: criterion 7 must fail.
+    Restore and require all to pass.
+  note: |
+    Id reserved for run-unfiled-1795065820000 with ~/rmd-work/bin/reserve-id.sh.
+    Measured from the ops, console, core and site daemon ledgers on the Azure host (read only, sort -u over the
+    overlapping archives). A test must build its gh answers with test/helpers/gh-shim.ts and load
+    test/setup/tmp-hygiene.ts. Secondary-limit numbers are from docs.github.com, "Rate limits for the REST API"
+    (900 points a minute for REST, a GET is 1 point, at least one minute before a retry with no retry-after).

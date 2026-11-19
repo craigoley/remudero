@@ -364,12 +364,35 @@ export const AUTHOR_VERDICT_STEPS = Object.freeze({ passed: 'author_preflight.pa
   refused: 'author_preflight.refused' });
 /** The closed list a refused or NOT_RUN row's `refusal_class` comes from, so equal causes cluster. */
 export const AUTHOR_REFUSAL_CLASSES = Object.freeze(['node-version', 'dependency-precheck', 'static-wait-bound',
-  'test-slot-wait-bound', 'census-time-bound', 'lint-plan', 'affected-tests', 'other']);
+  'test-slot-wait-bound', 'census-time-bound', 'lint-plan', 'affected-tests', 'disk-reserve', 'memory-pressure',
+  'census-precheck', 'static-preflight', 'other']);
 /** BACKSTOP: how long the row's child may take before it is killed. The verdict is printed before it starts. */
 export const AUTHOR_VERDICT_WRITE_BOUND_MS = 30_000;
 const AUTHOR_VERDICT_ROW_FLAG = '--append-author-verdict-row';
 /** A refusal that names its class where it is raised; the message is the one the run always printed. */
 const refusal = (refusalClass, message) => Object.assign(new Error(message), { refusalClass });
+
+function capacityRefusalClass(reasons) {
+  // A disk shortfall prevents admission even when pressure is also high.
+  if (reasons.some((reason) => /^(?:workspaceFreeBytes|scratchFreeBytes|allocation:[^:]+):below-[^:]+-reserve$/.test(reason))) {
+    return 'disk-reserve';
+  }
+  if (reasons.some((reason) => /^(?:pressure:(?:warning|critical|critical-or-unknown)|memory:below-measured-peak(?:-and-reserve)?|swap:below-measured-growth)$/.test(reason))) {
+    return 'memory-pressure';
+  }
+  return 'other';
+}
+
+function staticFailureMetadata(path) {
+  try {
+    const summary = JSON.parse(readFileSync(path, 'utf8'));
+    const failedCheck = Array.isArray(summary?.steps)
+      ? summary.steps.find((step) => step?.ok === false && typeof step.name === 'string' && step.name)?.name : undefined;
+    return failedCheck ? { failedCheck } : {};
+  } catch (error) {
+    return { failureNameUnavailable: error.message };
+  }
+}
 
 /** The branch a run's row names: the declared publication target, else the checked-out branch; null when unreadable. */
 export function authorHeadRef(root, declared, spawn = spawnSync) {
@@ -383,9 +406,9 @@ export function authorHeadRef(root, declared, spawn = spawnSync) {
 /**
  * W1-T12842 — the one ledger row an author run appends, built from the receipt the run already computed.
  * A run that may push is `passed`, one that reached its end with a failed step is `failed`, every other is `refused`.
- * `first_step` is the first failed step, else the stage the run stopped before. `refusal_class` is on every refused
- * row and on a failed row whose tests never ran: the class its refusal site named (`refusalClass`), else the one the
- * receipt's own stages show. A dry run is read-only and has no row.
+ * `first_step` is the first failed step, else the stage the run stopped before. Every refused row and every failed
+ * row whose tests never ran carries a `refusal_class` from the failed gate, capacity reasons, or the refusal site.
+ * `failed_check` names the failed gate's suite or check when the child recorded it. A dry run has no row.
  */
 export function authorVerdictRow(receipt, { exitCode = null, headRef, refusalClass, refusalStage, capacityReasons, entryCapacity } = {}) {
   if (receipt.dryRun) return undefined;
@@ -398,9 +421,12 @@ export function authorVerdictRow(receipt, { exitCode = null, headRef, refusalCla
   const atSite = refusalClass !== undefined;
   const firstStep = outcome === 'passed' ? null : failed?.name ?? refusalStage ?? PUSH_STAGES.find((name) => !ran(name))
     ?? (atSite ? 'receipt' : censusTimeBound ? 'census-precheck' : 'affected-tests');
-  const derivedClass = outcome === 'failed' ? (failed?.name === 'lint-plan-fast' ? 'lint-plan' : 'other')
-    : atSite ? (AUTHOR_REFUSAL_CLASSES.includes(refusalClass) ? refusalClass : 'other')
-      : ran('affected-tests') && censusTimeBound ? 'census-time-bound' : receipt.verdict === 'over-capacity' ? 'affected-tests' : 'other';
+  const gateClass = ['census-precheck', 'static-preflight'].includes(failed?.name) ? failed.name : undefined;
+  const reasons = Array.isArray(capacityReasons) ? capacityReasons.map(String) : [];
+  const derivedClass = gateClass ?? (outcome === 'failed' ? (failed?.name === 'lint-plan-fast' ? 'lint-plan' : 'other')
+    : reasons.length > 0 ? capacityRefusalClass(reasons)
+      : atSite ? (AUTHOR_REFUSAL_CLASSES.includes(refusalClass) ? refusalClass : 'other')
+        : ran('affected-tests') && censusTimeBound ? 'census-time-bound' : receipt.verdict === 'over-capacity' ? 'affected-tests' : 'other');
   const classed = outcome === 'refused' || (outcome === 'failed' && !ran('affected-tests'));
   const branch = typeof headRef === 'function' ? headRef() : headRef;
   const head = typeof branch === 'string' && branch ? branch : null;
@@ -417,7 +443,8 @@ export function authorVerdictRow(receipt, { exitCode = null, headRef, refusalCla
     verdict: receipt.verdict ?? null, exit_code: exitCode, push_eligible: receipt.pushEligible === true,
     head_ref: head, head_sha: receipt.headSha ?? null, first_step: firstStep,
     ...(classed ? { refusal_class: derivedClass } : {}),
-    ...(Array.isArray(capacityReasons) && capacityReasons.length > 0 ? { capacity_reasons: capacityReasons.map(String) } : {}),
+    ...(classed && gateClass && failed.failedCheck ? { failed_check: failed.failedCheck } : {}),
+    ...(reasons.length > 0 ? { capacity_reasons: reasons } : {}),
     ...(receipt.failureAttribution?.counts ? { failing_at_head: receipt.failureAttribution.counts.failingAtHead,
       failing_also_at_base: receipt.failureAttribution.counts.alsoFailingAtBase,
       failing_only_at_head: receipt.failureAttribution.counts.failingOnlyAtHead,
@@ -1179,7 +1206,9 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
       if (receipt.censusFullPass.skipped) console.log(`census full pass SKIPPED - ${receipt.censusFullPass.reliedOn}`);
       const censusTimeBound = censusTimeBoundOnly(census);
       const censusOk = (census.status === 0 || censusTimeBound) && !census.signal && !census.error;
-      if (!censusReused) report('census-precheck', census, censusOk, censusTimeBound ? { notMeasured: 'time-bound' } : {});
+      const failedSuite = !censusOk && /^  census-suite: (test\/.+?) fails — /m.exec(census.stderr ?? '')?.[1];
+      if (!censusReused) report('census-precheck', census, censusOk, censusTimeBound ? { notMeasured: 'time-bound' }
+        : failedSuite ? { failedCheck: failedSuite } : {});
       if (censusTimeBound) {
         receipt.censusNotMeasured = { reason: 'time-bound', checkedBy: 'CI' };
         console.log('census suites NOT MEASURED (time bound) — CI runs them');
@@ -1291,13 +1320,16 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
           try {
             if (!staticAdmission.executionAllowed) throw refusal('static-wait-bound', `author static stage NOT_RUN (${staticAdmission.note})`);
             if (!staticReused) {
+              // A per-run summary cannot name a check from an earlier run if the child exits before writing it.
+              const staticSummaryPath = join(diagnosticsRoot, 'preflight-author-static.json');
               const staticCommand = lowPriorityCommand(process.execPath, ['--import', 'tsx',
                 join(root, 'src/run-task.ts'), 'preflight', '--from', receipt.baseSha,
-                '--summary-file', join(root, 'coverage/preflight-author-static.json')]);
+                '--summary-file', staticSummaryPath]);
               const censusAnswer = { RMD_AUTHOR_CENSUS_ANSWERED: `${receipt.headSha}:${censusTimeBound ? 'time-bound' : 'ok'}` };
               const staticResult = runStep('static-preflight', staticCommand.args, staticCommand.file, { ...(staticAdmission.childEnvironment ?? {}), ...censusAnswer }, AUTHOR_STEP_RUNTIME_MS);
               staticOk = staticResult.status === 0 && !staticResult.signal && !staticResult.error;
-              report('static-preflight', staticResult, staticOk, { priority: staticCommand.priority });
+              report('static-preflight', staticResult, staticOk, { priority: staticCommand.priority,
+                ...(staticResult.status === 1 && !staticResult.signal && !staticResult.error ? staticFailureMetadata(staticSummaryPath) : {}) });
             }
             // An unsuccessful static gate already makes this tree unpublishable. Keep its failed
             // receipt and selected floor, but don't spend another full run on known-doomed tests.

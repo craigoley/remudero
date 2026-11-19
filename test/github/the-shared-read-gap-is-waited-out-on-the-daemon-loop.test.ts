@@ -48,8 +48,9 @@ function scene(opts: { gapMs?: number; agoMs?: number; floor?: string; stampText
 test("W1-T12123 criterion 1: on the daemon loop a shared read gap wait is slept, the read is made, and a row names its call site", async () => {
   takeGhPaceLoopWaits();
   // The three shared-gap waits the daemon refused on 2026-11-10, and the whole gap.
+  // W1-T13786: the unset gap follows the installation budget, so these scenes set the loop's whole bound.
   for (const waitMs of [993, 1474, 72, DEFAULT_GH_SHARED_READ_GAP_MS]) {
-    const s = scene({ agoMs: DEFAULT_GH_SHARED_READ_GAP_MS - waitMs });
+    const s = scene({ gapMs: DEFAULT_GH_SHARED_READ_GAP_MS, agoMs: DEFAULT_GH_SHARED_READ_GAP_MS - waitMs });
     try {
       const before = readGhReadCadenceStampMs(s.stamp)!;
       await withDaemonGhTransportFloor(() => {
