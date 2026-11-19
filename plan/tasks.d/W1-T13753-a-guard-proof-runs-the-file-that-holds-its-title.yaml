@@ -19,7 +19,7 @@
   attempts: 0
   acceptance:
     - claim: "A name-filtered Vitest proof whose title lives only in a test file outside the diff runs that file, even when the diff holds exactly one test file"
-      proof: "unit test: W1-T13753 criterion 1"
+      proof: "unit test: test/review/a-guard-proof-runs-the-file-that-holds-its-title.test.ts"
     - claim: "invariant:diff-file-wins — when the diff's own test file holds the title, it still wins over other files that hold the same title"
       kind: guard
       proof: "unit test: a diff-named Vitest file wins over other title hits and bare search excludes e2e"
