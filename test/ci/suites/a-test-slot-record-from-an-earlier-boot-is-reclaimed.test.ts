@@ -66,8 +66,20 @@ test("W1-T13811: the same record under the current boot id is still withheld", t
 
 test("W1-T13811: an unreadable current boot id never frees a slot by this rule", t => {
   const f = slot(t, holder(), () => undefined);
-  f.acquire();
-  assert.equal(reclaims(f.rows).some(row => row.coverage === "earlier-boot"), false);
+  const lease = f.acquire();
+  assert.equal(lease.executionAllowed, false, `an unreadable boot id keeps the slot withheld: ${lease.note}`);
+  assert.equal(reclaims(f.rows).length, 0, "nothing is reclaimed");
+  assert.equal(existsSync(f.path), true, "the slot file is kept");
+});
+
+test("W1-T13811: an equal or unreadable boot id never frees a cadence-less legacy record by the earlier-boot rule", t => {
+  for (const [held, boot] of [[holder({ bootId: CURRENT_BOOT, heartbeatIntervalMs: undefined }), () => CURRENT_BOOT],
+    [holder({ heartbeatIntervalMs: undefined }), () => undefined]] as const) {
+    const f = slot(t, held, boot);
+    f.acquire({ isPidAlive: () => true });
+    assert.equal(reclaims(f.rows).some(row => row.coverage === "earlier-boot"), false, `boot ${held.bootId} against ${boot()}`);
+    assert.equal(existsSync(f.path), true, "a live owner pid keeps the legacy record");
+  }
 });
 
 test("W1-T13811: a record from another pid namespace is not freed by the earlier-boot rule", t => {
