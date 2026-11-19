@@ -27,6 +27,7 @@
 import cluster from "node:cluster";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { createServer, request } from "node:http";
+import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { systemClock, type Clock } from "./clock.js";
@@ -154,6 +155,7 @@ export function createRestartingAnswer(port: number, host: string | undefined, c
   log: (step: string, extra?: Record<string, unknown>) => void): RestartingAnswer {
   let current: RestartingState | undefined;
   let answered = 0;
+  let listenPort = port;
   let listening: ReturnType<typeof createServer> | undefined;
   // One transition at a time: an open and a close never interleave on the listener.
   let chain: Promise<void> = Promise.resolve();
@@ -176,15 +178,17 @@ export function createRestartingAnswer(port: number, host: string | undefined, c
       const bound = await new Promise<boolean>((resolve) => {
         next.once("listening", () => resolve(true));
         next.once("error", (error) => {
-          log("serve.restarting_answer_failed", { port, reason: errorText(error) });
+          log("serve.restarting_answer_failed", { port: listenPort, reason: errorText(error) });
           resolve(false);
         });
-        next.listen(port, host);
+        next.listen(listenPort, host);
       });
       if (!bound) return;
+      // Keep the same endpoint across restarts when the first bind used an ephemeral port.
+      listenPort = (next.address() as AddressInfo).port;
       listening = next;
       answered = 0;
-      log("serve.restarting_answer_opened", { port, ...state });
+      log("serve.restarting_answer_opened", { port: listenPort, ...state });
     }),
     close: () => serially(async () => {
       const open = listening;
@@ -196,7 +200,7 @@ export function createRestartingAnswer(port: number, host: string | undefined, c
         open.close(() => resolve());
         open.closeAllConnections();
       });
-      log("serve.restarting_answer_closed", { port, answered, ...(was ? { reason: was.reason, since: was.since } : {}) });
+      log("serve.restarting_answer_closed", { port: listenPort, answered, ...(was ? { reason: was.reason, since: was.since } : {}) });
     }),
   };
 }
