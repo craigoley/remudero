@@ -63,5 +63,6 @@
     null). Treat every enumeration error as empty: criterion 3 fails. Skip the unmanaged sweep when the root
     is missing: criterion 3 fails.
   note: |
+    reservation hand-off: run-unfiled-1795065820000 -> run-unfiled-1795065953000
     Ids reserved with ~/rmd-work/bin/reserve-id.sh for run-unfiled-1795065820000; this filing ships from
     run-unfiled-1795065953000 (see W1-T13787's note).
