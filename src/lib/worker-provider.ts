@@ -210,7 +210,25 @@ export interface ProviderCapacity {
   /** W1-T3718: `readable: false` because the provider ANSWERED and every candidate sat below the
    *  reserve, not because the probe failed. See {@link providerRefusalCondition}. */
   exhausted?: boolean;
-  carriedForward?: { readAt: number; ageMs: number; failure: string };
+  /** W1-T13855: `failureKind` names the probe failure the last-good reading was carried over. */
+  carriedForward?: { readAt: number; ageMs: number; failure: string; failureKind?: "timeout" | "starved" };
+  /** W1-T13855: how prepaid credits carried this Codex capacity past its reserve; see {@link CodexCreditsRescue}. */
+  creditsRescue?: CodexCreditsRescue;
+  /** W1-T13855: the probe failure behind an unreadable Codex read, so a decision record can name it. */
+  probeFailure?: "timeout" | "starved" | "terminal";
+}
+
+/**
+ * W1-T13855: a credits rescue. `carried` is a last-good reading carried over a timed-out or starved
+ * probe whose credits still carry it (its balance projected to now); `generic-bucket` is a model
+ * whose own bucket has no credits block, carried by the generic Codex bucket's credits.
+ */
+export interface CodexCreditsRescue {
+  path: "carried" | "generic-bucket";
+  /** The balance the rescue spends against: the projected one for a carried reading; `null` when unlimited or unreadable. */
+  projectedBalance: number | null;
+  ageMs?: number;
+  failureKind?: "timeout" | "starved";
 }
 
 /** W1-T10382: the lane a Codex account past its reserve is admitted on when its prepaid credits can carry it. */
@@ -486,8 +504,13 @@ export function providerEligibility(capacity: ProviderCapacity, reservePercent: 
   // `below-reserve` with the tightest window it still carries, not `unreadable`.
   if (capacity.exhausted === true) {
     const carried = providerAllocationWindows(capacity).filter(validCapacityWindow);
-    return { eligible: false, reason: "below-reserve",
-      headroomPercent: carried.length > 0 ? Math.min(...carried.map((window) => 100 - window.usedPercent)) : null };
+    const headroomPercent = carried.length > 0 ? Math.min(...carried.map((window) => 100 - window.usedPercent)) : null;
+    // W1-T13855: an exhausted Codex read whose credits are spendable is the credits lane, as below.
+    if (capacity.provider === "codex" && capacity.windows.length > 0 && capacity.windows.every(validCapacityWindow) &&
+        codexCreditsSpendable(capacity.credits)) {
+      return { eligible: true, lane: "codex-credits", headroomPercent };
+    }
+    return { eligible: false, reason: "below-reserve", headroomPercent };
   }
   const remaining = tightestRemaining(capacity);
   const headroomPercent = Number.isFinite(remaining) ? remaining : null;
@@ -1361,14 +1384,50 @@ function parseCodexCredits(bucket: CodexRateLimitBucket): CodexCredits | undefin
   const block = bucket.credits;
   if (!block || typeof block !== "object" || typeof block.hasCredits !== "boolean" || typeof block.unlimited !== "boolean") return undefined;
   const parsed = typeof block.balance === "string" && UNSIGNED_DECIMAL.test(block.balance) ? Number(block.balance) : Number.NaN;
+  const blocked = codexCreditsBlock(bucket);
+  return { hasCredits: block.hasCredits, unlimited: block.unlimited, balance: Number.isFinite(parsed) ? parsed : null,
+    ...(blocked ? { blocked } : {}) };
+}
+
+/** Why a bucket's own state stops credits carrying it: a reached spend control, or a reached type credits do not lift. */
+function codexCreditsBlock(bucket: CodexRateLimitBucket): string | undefined {
   const reached = bucket.rateLimitReachedType;
-  const blocked = bucket.spendControlReached === true
+  return bucket.spendControlReached === true
     ? "spend-control-reached"
     : reached == null || reached === CREDITS_CARRIED_REACHED_TYPE
       ? undefined
       : typeof reached === "string" && /^[a-z_]{1,64}$/.test(reached) ? reached : "rate-limit-reached";
-  return { hasCredits: block.hasCredits, unlimited: block.unlimited, balance: Number.isFinite(parsed) ? parsed : null,
-    ...(blocked ? { blocked } : {}) };
+}
+
+function genericCodexBucket(reading: CodexRateLimitResult | undefined): CodexRateLimitBucket | undefined {
+  return reading?.rateLimits ?? reading?.rateLimitsByLimitId?.codex ?? undefined;
+}
+
+/**
+ * W1-T13855: a bucket's credits are its own when it carries a credits block, else the generic Codex
+ * bucket's (`borrowed`). The account's prepaid balance is one pool; a per-model bucket split must not
+ * hide it. A block the bucket itself reached is never lifted by borrowing.
+ */
+function codexCreditsFor(bucket: CodexRateLimitBucket | undefined, reading: CodexRateLimitResult | undefined):
+  { credits?: CodexCredits; borrowed: boolean } {
+  if (!bucket) return { borrowed: false };
+  const own = parseCodexCredits(bucket);
+  if (own) return { credits: own, borrowed: false };
+  const generic = genericCodexBucket(reading);
+  const shared = generic && generic !== bucket ? parseCodexCredits(generic) : undefined;
+  if (!shared) return { borrowed: false };
+  const blocked = codexCreditsBlock(bucket) ?? shared.blocked;
+  return { credits: { hasCredits: shared.hasCredits, unlimited: shared.unlimited, balance: shared.balance,
+    ...(blocked ? { blocked } : {}) }, borrowed: true };
+}
+
+/** A model's capacity off its own bucket, carrying the credits {@link codexCreditsFor} assigns it. */
+function codexModelCapacity(reading: CodexRateLimitResult, model: CodexModelInfo): { capacity: ProviderCapacity; borrowed: boolean } {
+  const bucket = codexBucketForModel(reading, model);
+  const capacity = capacityFromBucket(bucket);
+  const { credits, borrowed } = codexCreditsFor(bucket, reading);
+  if (!capacity.readable || !borrowed || !credits) return { capacity, borrowed: false };
+  return { capacity: { ...capacity, credits }, borrowed: true };
 }
 
 function codexAllocationWindows(reading: CodexRateLimitResult, modelCapacity: ProviderCapacity): ProviderCapacityWindow[] {
@@ -1447,7 +1506,7 @@ export function selectCodexModel(
       .map((entry) => entry.reasoningEffort)
       .filter((effort): effort is string => typeof effort === "string" && SAFE_CODEX_EFFORT.test(effort)))].slice(0, 8);
     const mapped = mappedIds.has(model.id) || (typeof model.model === "string" && mappedIds.has(model.model));
-    const capacity = capacityFromBucket(codexBucketForModel(reading, model));
+    const { capacity } = codexModelCapacity(reading, model);
     const effortSupported = !requestedEffort || supportedEfforts.includes(requestedEffort);
     const measured = capacity.readable && capacity.windows.length > 0 && capacity.windows.every(validCapacityWindow);
     const hasHeadroom = measured && capacity.windows.every((window) => window.usedPercent < 100 - reserve);
@@ -1477,8 +1536,8 @@ export function selectCodexModel(
   });
   const ranked = candidates.map((model, preference) => {
     const option = options.find((candidate) => candidate.id === canonicalCodexModelId(model));
-    const capacity = capacityFromBucket(codexBucketForModel(reading, model));
-    return { model, capacity, option, preference, remaining: tightestRemaining(capacity) };
+    const { capacity, borrowed } = codexModelCapacity(reading, model);
+    return { model, capacity, borrowed, option, preference, remaining: tightestRemaining(capacity) };
   }).sort((a, b) => b.remaining - a.remaining || a.preference - b.preference);
   const admitted = ranked.filter((candidate) => candidate.option?.eligible);
   // W1-T10382: a model with subscription headroom is always chosen over one its credits carry.
@@ -1555,8 +1614,13 @@ export function selectCodexModel(
   const effort = requestedEffort ?? selected.model.defaultReasoningEffort ?? efforts[0] ?? "default";
   const selectedModel = canonicalCodexModelId(selected.model)!;
   for (const option of options) option.selected = option.id === selectedModel;
+  // W1-T13855: name the rescue when the generic bucket's credits are what carried this model past its reserve.
+  const borrowedRescue = selected.borrowed && selected.option?.lane === "codex-credits"
+    ? { creditsRescue: { path: "generic-bucket" as const, projectedBalance: selected.capacity.credits?.balance ?? null } }
+    : {};
   return {
     ...selected.capacity,
+    ...borrowedRescue,
     allocationWindows: codexAllocationWindows(reading, selected.capacity),
     model: selectedModel,
     effort,
@@ -2158,16 +2222,43 @@ function rememberCodexRuntime(config: Config, bin: string, value: CodexRuntimeRe
   }
 }
 
+/**
+ * W1-T13855: a carried reading's credit balance, projected to now. Unlimited credits keep their
+ * reading (they are spendable without a balance); otherwise the balance less its own measured burn
+ * over the reading's age: the fall between the two last-good points over their interval, or zero
+ * when they do not show one. No fixed age or balance floor: the projection itself decides.
+ */
+function projectedCreditsBalance(current: { readAt: number; credits: CodexCredits },
+  previous: { readAt: number; credits: CodexCredits | undefined } | undefined, ageMs: number): number | null {
+  const balance = current.credits.balance;
+  if (current.credits.unlimited || balance === null) return balance;
+  const before = previous?.credits?.balance;
+  const intervalMs = previous ? current.readAt - previous.readAt : 0;
+  const burn = typeof before === "number" && intervalMs > 0 && before > balance ? (before - balance) / intervalMs : 0;
+  return balance - burn * ageMs;
+}
+
 function carryCodexCapacity(config: Config, bin: string, deps: CodexCapacityDeps, capabilities: CapabilityLadder | undefined,
   failure: ProviderCapacity, failureKind: CodexRuntimeFailure["failureKind"], now: number): ProviderCapacity {
-  if (deps.forceRefresh || (failureKind !== "timeout" && failureKind !== "starved")) return failure;
+  if (deps.forceRefresh || (failureKind !== "timeout" && failureKind !== "starved")) return { ...failure, probeFailure: failureKind };
   try {
     const saved = decodeCodexLastGood(readCodexLastGoodText(config), config, bin), current = saved.current, previous = saved.previous;
     if (current.invalidated) throw new Error("last-good invalidated by terminal probe evidence");
     const ageMs = now - current.readAt, reserve = deps.reservePercent ?? config.workerProviders?.reservePercent ?? 5;
     if (!Number.isFinite(ageMs) || ageMs < 0 || !Number.isFinite(reserve) || reserve < 0 || reserve >= 100) throw new Error("invalid clock or reserve");
+    const currentRates = current.value.rateLimits as CodexRateLimitResult, previousRates = previous?.value.rateLimits as CodexRateLimitResult | undefined;
+    // W1-T13855: the credits a bucket would spend past its reserve, with the balance projected over the reading's age.
+    const carriedCredits = (b: CodexRateLimitBucket, old: CodexRateLimitBucket | null | undefined): CodexCredits | undefined => {
+      const { credits } = codexCreditsFor(b, currentRates);
+      if (!credits) return undefined;
+      const before = old ? codexCreditsFor(old, previousRates).credits : undefined;
+      const balance = projectedCreditsBalance({ readAt: current.readAt, credits },
+        previous && previous.readAt < current.readAt ? { readAt: previous.readAt, credits: before } : undefined, ageMs);
+      return { ...credits, balance };
+    };
     let windows = 0;
-    const project = (w: CodexRateLimitWindow | null | undefined, old: CodexRateLimitWindow | null | undefined): CodexRateLimitWindow | null => {
+    const project = (w: CodexRateLimitWindow | null | undefined, old: CodexRateLimitWindow | null | undefined,
+      credits: CodexCredits | undefined): CodexRateLimitWindow | null => {
       if (!w) return null;
       const used = w.usedPercent, duration = w.windowDurationMins, reset = w.resetsAt;
       if (typeof duration !== "number" || !Number.isFinite(duration) || duration <= 0 ||
@@ -2180,24 +2271,33 @@ function carryCodexCapacity(config: Config, bin: string, deps: CodexCapacityDeps
           typeof old.usedPercent === "number" && Number.isFinite(old.usedPercent) && old.usedPercent >= 0 && old.usedPercent <= used)
         burn = Math.max(burn, (used - old.usedPercent) / (current.readAt - previous.readAt));
       const projected = used + burn * ageMs;
-      if (!Number.isFinite(projected) || projected >= 100 - reserve) throw new Error("projected burn reaches the reserve");
+      if (!Number.isFinite(projected)) throw new Error("projected burn reaches the reserve");
+      // W1-T13855: past the reserve, spendable credits (blocked never, a projected balance above zero) carry the window.
+      if (projected >= 100 - reserve && !codexCreditsSpendable(credits)) throw new Error("projected burn reaches the reserve");
       windows++;
-      return { usedPercent: projected, windowDurationMins: duration, resetsAt: reset };
+      return { usedPercent: Math.min(projected, 100), windowDurationMins: duration, resetsAt: reset };
     };
-    const currentRates = current.value.rateLimits as CodexRateLimitResult, previousRates = previous?.value.rateLimits as CodexRateLimitResult | undefined;
-    const bucket = (b: CodexRateLimitBucket | null | undefined, old: CodexRateLimitBucket | null | undefined) => b == null ? b
-      : { ...b, primary: project(b.primary, old?.primary), secondary: project(b.secondary, old?.secondary) };
+    const bucket = (b: CodexRateLimitBucket | null | undefined, old: CodexRateLimitBucket | null | undefined) => {
+      if (b == null) return b;
+      const credits = carriedCredits(b, old);
+      // The projected balance is written back, so the selection below sees what the projection sees.
+      const balance = credits && !credits.unlimited && credits.balance !== null && b.credits
+        ? { credits: { ...b.credits, balance: Math.max(0, credits.balance).toFixed(10) } } : {};
+      return { ...b, ...balance, primary: project(b.primary, old?.primary, credits), secondary: project(b.secondary, old?.secondary, credits) };
+    };
     const rateLimits = { ...currentRates, rateLimits: bucket(currentRates.rateLimits, previousRates?.rateLimits),
       rateLimitsByLimitId: currentRates.rateLimitsByLimitId && Object.fromEntries(Object.entries(currentRates.rateLimitsByLimitId)
         .map(([id, b]) => [id, bucket(b, previousRates?.rateLimitsByLimitId?.[id])])) };
     if (windows === 0) throw new Error("no unreset quota window with a duration");
     const selected = selectCodexRuntime({ rateLimits, models: current.value.models }, config, deps, capabilities);
     if (!selected.readable) throw new Error(selected.detail ?? "projected model is unavailable");
-    return { ...selected, carriedForward: { readAt: current.readAt, ageMs, failure: failure.detail ?? "probe unavailable" },
+    const rescued = providerEligibility(selected, reserve).lane === "codex-credits"
+      ? { creditsRescue: { path: "carried" as const, projectedBalance: selected.credits?.balance ?? null, ageMs, failureKind } } : {};
+    return { ...selected, ...rescued, carriedForward: { readAt: current.readAt, ageMs, failure: failure.detail ?? "probe unavailable", failureKind },
       detail: `Codex capacity carried forward ${ageMs}ms from ${fixedClock(current.readAt).iso()}; ${failure.detail ?? "probe unavailable"}` };
   } catch (error) {
     const reason = String((error as Error).message).slice(0, 256);
-    return { ...failure, detail: `${failure.detail}; last-good unavailable: ${reason}` };
+    return { ...failure, probeFailure: failureKind, detail: `${failure.detail}; last-good unavailable: ${reason}` };
   }
 }
 

@@ -14,7 +14,7 @@ import type {
   ProviderRoutingPolicyFallbackReason,
   ProviderRoutingPreference,
 } from "./provider-routing-policy.js";
-import type { ProviderCapacity, ProviderSelection } from "./worker-provider.js";
+import { providerEligibility, type ProviderCapacity, type ProviderSelection } from "./worker-provider.js";
 
 export const PROVIDER_ROUTING_STATUS_VERSION = 1;
 /** BACKSTOP: field-count and string-length projection limits are the normal size controls. */
@@ -22,6 +22,12 @@ export const MAX_PROVIDER_ROUTING_SNAPSHOT_BYTES = 16 * 1024;
 const MAX_WINDOWS_PER_PROVIDER = 8;
 const MAX_CODEX_MODEL_OPTIONS = 32;
 const SAFE_LABEL = /^[A-Za-z0-9][A-Za-z0-9 ._()+:@-]{0,95}$/;
+/** How old a lapsed provider-routing reading may be and still be judged: three of the daemon's own
+ *  headroom sampling intervals (`3 * HEADROOM_SAMPLE_MAX_AGE_MS`, src/lib/daemon.ts), the bound the
+ *  review widener pins as `REVIEW_PROVIDER_READING_MAX_AGE_MS`. Declared here because both the
+ *  widener and the daemon read it and importing daemon.ts would close an import ring.
+ *  KIND: PRIMARY CONTROL — every {@link creditsLaneRoom} read consults it to decide whether a lapsed cache counts. */
+export const PROVIDER_ROUTING_READING_MAX_AGE_MS = 900_000;
 
 export type ProviderRoutingUnknownReason = "absent" | "unreadable" | "malformed" | "unsupported-version";
 export type ProviderRoutingFreshness = "fresh" | "stale" | "not-probed" | "unknown";
@@ -44,6 +50,9 @@ export interface ProviderRoutingProviderStatus {
   modelDecision?: CodexModelDecisionStatus;
   /** Manual reset readiness. Count and earliest expiry ONLY — see {@link projectResetCredits}. */
   resetCredits?: ProviderRoutingResetCreditsStatus;
+  /** W1-T13855: admitted past its reserve on prepaid Codex credits at the status's reserve. Never a balance:
+   *  this file is served by `/v1/provider-routing`. */
+  creditsLane?: true;
 }
 
 /**
@@ -291,9 +300,10 @@ function projectResetCredits(capacity: ProviderCapacity): ProviderRoutingResetCr
   return usable ? { availableCount: count, earliestExpiresAt: expiresAt } : { availableCount: count };
 }
 
-function projectCapacity(capacity: ProviderCapacity): ProviderRoutingProviderStatus | undefined {
+function projectCapacity(capacity: ProviderCapacity, reservePercent: number): ProviderRoutingProviderStatus | undefined {
   const provider = providerId(capacity.provider);
   if (!provider) return undefined;
+  const creditsLane = providerEligibility(capacity, reservePercent).lane === "codex-credits";
   const windows = projectWindows(capacity.windows);
   const allocationWindows = capacity.allocationWindows ? projectWindows(capacity.allocationWindows) : undefined;
   const modelDecision = projectModelDecision(capacity);
@@ -309,14 +319,15 @@ function projectCapacity(capacity: ProviderCapacity): ProviderRoutingProviderSta
     ...(safeLabel(capacity.effort) ? { effort: safeLabel(capacity.effort) } : {}),
     ...(modelDecision ? { modelDecision } : {}),
     ...(resetCredits ? { resetCredits } : {}),
+    ...(creditsLane ? { creditsLane: true as const } : {}),
   };
 }
 
-function projectCapacities(capacities: readonly ProviderCapacity[]): ProviderRoutingProviderStatus[] {
+function projectCapacities(capacities: readonly ProviderCapacity[], reservePercent: number): ProviderRoutingProviderStatus[] {
   const seen = new Set<WorkerProviderId>();
   const projected: ProviderRoutingProviderStatus[] = [];
   for (const capacity of capacities) {
-    const row = projectCapacity(capacity);
+    const row = projectCapacity(capacity, reservePercent);
     if (!row || seen.has(row.provider)) continue;
     seen.add(row.provider);
     projected.push(row);
@@ -396,11 +407,11 @@ function projectWrite(input: ProviderRoutingWriteInput): ProviderRoutingStatus {
   if (input.state === "not-probed") {
     return { ...base, state: "not-probed", freshness: "not-probed", providers: [] };
   }
-  const providers = projectCapacities(input.capacities);
+  const providers = projectCapacities(input.capacities, reservePercent);
   if (input.state === "blocked") {
     return { ...base, state: "blocked", freshness: "fresh", providers, blockedReason: "no-provider-headroom" };
   }
-  const selectedCapacity = projectCapacity(input.selection.capacity);
+  const selectedCapacity = projectCapacity(input.selection.capacity, reservePercent);
   const tightestRemainingPercent = safePercent(input.selection.tightestRemainingPercent);
   if (tightestRemainingPercent === undefined) throw new Error("provider routing selection headroom is invalid");
   const hasAllocation = input.selection.allocationWeight !== undefined || input.selection.allocationSharePercent !== undefined;
@@ -714,6 +725,7 @@ function parseSnapshot(value: unknown, nowMs: number): ProviderRoutingStatus | u
       ...(safeLabel(row.model) ? { model: safeLabel(row.model) } : {}),
       ...(safeLabel(row.effort) ? { effort: safeLabel(row.effort) } : {}),
       ...(modelDecision ? { modelDecision } : {}),
+      ...(row.creditsLane === true ? { creditsLane: true as const } : {}),
     });
   }
   const freshness: ProviderRoutingFreshness =
@@ -795,4 +807,24 @@ export function readProviderRoutingStatus(
     // JSON/schema/clock failures are malformed, distinct from absent and unreadable state.
     return unknown("malformed");
   }
+}
+
+/**
+ * W1-T13855: whether the routing status shows a squeeze the Codex credits lane is carrying — the one
+ * case a review widener or headroom governor must not read as "no provider room". It holds only for
+ * a selected reading the router still vouches for, or a lapsed one within
+ * {@link PROVIDER_ROUTING_READING_MAX_AGE_MS}, whose codex row is on the credits lane while no
+ * provider row has subscription headroom at the status's reserve. A blocked, unknown, not-probed or
+ * older status never counts: an old reading must not quietly authorise anything.
+ */
+export function creditsLaneRoom(status: ProviderRoutingStatus, nowMs: number): boolean {
+  if (status.state !== "selected" || status.reservePercent === undefined) return false;
+  const observedMs = status.observedAt ? Date.parse(status.observedAt) : Number.NaN;
+  const ageMs = Number.isFinite(observedMs) ? Math.max(0, nowMs - observedMs) : Number.POSITIVE_INFINITY;
+  if (status.freshness !== "fresh" && !(status.freshness === "stale" && ageMs <= PROVIDER_ROUTING_READING_MAX_AGE_MS)) return false;
+  const providers = status.providers ?? [];
+  const ceiling = 100 - status.reservePercent;
+  const subscriptionHeadroom = providers.some((row) => row.readable && row.creditsLane !== true && row.windows.length > 0 &&
+    row.windows.every((window) => window.usedPercent < ceiling));
+  return !subscriptionHeadroom && providers.some((row) => row.provider === "codex" && row.creditsLane === true);
 }

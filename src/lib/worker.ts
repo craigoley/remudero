@@ -605,6 +605,17 @@ export interface RoutingDecision {
     lane?: ProviderLane;
     /** W1-T10382: the Codex credit balance this read saw; `null` when the balance was unreadable. */
     creditsBalance?: number | null;
+    /** W1-T13855: how credits rescued this capacity: the path, the tier chosen, the projected balance and, for a
+     *  carried reading, its age and the probe failure it was carried over. */
+    creditsRescue?: {
+      path: "carried" | "generic-bucket";
+      tier: ProviderLane;
+      projectedBalance: number | null;
+      ageMs?: number;
+      failureKind?: "timeout" | "starved";
+    };
+    /** W1-T13855: why an unreadable Codex read could not be asked: the probe's failure kind. */
+    failureKind?: "timeout" | "starved" | "terminal";
   }>;
   /** Tightest remaining window per subscription read for this decision; `null` means unreadable. */
   headroomPercent: Partial<Record<WorkerProviderId, number | null>>;
@@ -1854,6 +1865,14 @@ function routingDecision(args: SpawnWorkerArgs, input: Parameters<typeof workerS
       ...(verdict.reason ? { reason: verdict.reason } : {}),
       ...(verdict.lane ? { lane: verdict.lane } : {}),
       ...(capacity.credits ? { creditsBalance: capacity.credits.balance } : {}),
+      ...(verdict.lane && capacity.creditsRescue ? { creditsRescue: {
+        path: capacity.creditsRescue.path,
+        tier: verdict.lane,
+        projectedBalance: capacity.creditsRescue.projectedBalance,
+        ...(capacity.creditsRescue.ageMs !== undefined ? { ageMs: capacity.creditsRescue.ageMs } : {}),
+        ...(capacity.creditsRescue.failureKind ? { failureKind: capacity.creditsRescue.failureKind } : {}),
+      } } : {}),
+      ...(verdict.reason === "unreadable" && capacity.probeFailure ? { failureKind: capacity.probeFailure } : {}),
     };
   });
   if (!considered.some((entry) => entry.selected)) {

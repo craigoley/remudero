@@ -1,0 +1,525 @@
+import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { PassThrough } from "node:stream";
+import test from "node:test";
+import type { Config } from "#src/lib/config.js";
+import { HEADROOM_SAMPLE_MAX_AGE_MS, runDaemon, type DaemonDeps } from "#src/lib/daemon.js";
+import { requestStop, stopDetail } from "#src/lib/fleet-control.js";
+import type { UsageSnapshot } from "#src/lib/headroom.js";
+import { loadMounts, mountsPath } from "#src/lib/mounts.js";
+import { loadPlan } from "#src/lib/plan.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+// Read off the namespace: at a base without the export a named import fails the whole file at LOAD,
+// which reads as "could not execute" rather than the red each criterion must show.
+import * as routingStatus from "#src/lib/provider-routing-status.js";
+import {
+  providerRoutingStatusPath,
+  readProviderRoutingStatus,
+  writeProviderRoutingStatus,
+  type ProviderRoutingStatus,
+} from "#src/lib/provider-routing-status.js";
+import {
+  initialReviewCapacityState,
+  reviewProviderObservation,
+  selectAdaptiveReviewWidth,
+  selectRuntimeReviewWidth,
+  type ReviewCapacityObservation,
+  type ReviewCapacityPolicy,
+} from "#src/lib/review-capacity.js";
+import {
+  clearCodexCapacityCache,
+  providerEligibility,
+  readCodexCapacity,
+  selectCodexModel,
+  selectWorkerProvider,
+  type CodexModelInfo,
+  type ProviderCapacity,
+} from "#src/lib/worker-provider.js";
+import {
+  createClaudeExecutableCache,
+  spawnWorker,
+  workerSelectionAssignment,
+  type SpawnWorkerArgs,
+  type WorkerResult,
+  type WorkerSelectionAssignment,
+} from "#src/lib/worker.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
+
+// W1-T13855. While every subscription window is at or below its reserve, spendable Codex credits
+// are the tier before cash and before holding work: a carried reading, a per-model bucket with no
+// credits block, the review widener and the daemon's headroom governor all honour them.
+// Readings follow the acceptance: a last-good reading with generic and codex buckets at 97 percent
+// (balance 38997.84), and the 14:47:59Z review.capacity row (claude 95, codex 99, reserve 5, base width 4).
+
+const CAPABILITIES = loadMounts(mountsPath(REPO_ROOT)).capabilities!;
+const START = Date.parse("2026-11-19T15:00:00.000Z");
+const BALANCE = "38997.8437045000";
+const SOL: CodexModelInfo = {
+  id: "gpt-6.2-sol", displayName: "GPT-6.2-Sol", defaultReasoningEffort: "high",
+  supportedReasoningEfforts: [{ reasoningEffort: "high" }],
+};
+const SOL61: CodexModelInfo = {
+  id: "gpt-6.1-sol", displayName: "GPT-6.1-Sol", defaultReasoningEffort: "high",
+  supportedReasoningEfforts: [{ reasoningEffort: "high" }],
+};
+const claudeAt = (usedPercent: number): ProviderCapacity =>
+  ({ provider: "claude", readable: true, windows: [{ name: "claude weekly", usedPercent }], model: "claude-sonnet-5-5", effort: "high" });
+
+/** Scratch under the OS temp dir, outside every Git work tree, as a worker home must be. */
+function scratchRoot(): string {
+  return mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t13855-`));
+}
+
+type Mode = "ok" | "timeout" | "rpc";
+/** A Codex app-server stand-in over stdio: one weekly window, a credits block, and a timeout or refusal on demand. */
+function codexAccount(t: test.TestContext) {
+  clearCodexCapacityCache();
+  const root = scratchRoot();
+  const cfg: Config = { root, claudeBin: "/unused", workerProviders: {
+    enabled: ["claude", "codex"], codexBin: "/bin/sh", codexHome: join(root, "codex"), capacityCacheMs: 1, reservePercent: 5 } };
+  const state = { now: START, used: 97, mode: "ok" as Mode, balance: BALANCE as string, extras: {} as Record<string, unknown>,
+    reset: Math.floor((START + 3 * 86_400_000) / 1000) };
+  const spawn = () => {
+    const stdin = new PassThrough(), stdout = new PassThrough(), stderr = new PassThrough();
+    const proc = Object.assign(new EventEmitter(), { stdin, stdout, stderr, kill: () => true });
+    stdin.on("data", (chunk) => {
+      for (const line of String(chunk).trim().split("\n")) {
+        const request = JSON.parse(line) as { id?: number };
+        if (state.mode === "timeout") continue;
+        if (request.id === 1) stdout.write(`${JSON.stringify({ id: 1, result: {} })}\n`);
+        if (request.id === 2) {
+          if (state.mode === "rpc") { stdout.write(`${JSON.stringify({ id: 2, error: { message: "fixture RPC refused" } })}\n`); continue; }
+          const bucket = { limitId: "codex", primary: { usedPercent: state.used, windowDurationMins: 10080, resetsAt: state.reset },
+            credits: { hasCredits: true, unlimited: false, balance: state.balance }, ...state.extras };
+          stdout.write(`${JSON.stringify({ id: 2, result: { rateLimits: bucket, rateLimitsByLimitId: { codex: bucket } } })}\n`);
+        }
+        if (request.id === 3) stdout.write(`${JSON.stringify({ id: 3, result: { data: [SOL], nextCursor: null } })}\n`);
+      }
+    });
+    return proc as never;
+  };
+  const read = (over: Record<string, unknown> = {}) => readCodexCapacity(cfg, { spawn, now: () => state.now, timeoutMs: 10,
+    requestedModel: "sonnet", requestedEffort: "high", reservePercent: 5, capabilities: CAPABILITIES, ...over });
+  /** The next probe times out `ageMs` after the last good reading. */
+  const fail = (ageMs = 61_000) => { state.now += ageMs; state.mode = "timeout"; };
+  t.after(() => { clearCodexCapacityCache(); rmSync(root, { recursive: true, force: true }); });
+  return { cfg, state, read, fail, spawn, lastGood: join(root, "state", "codex-capacity-last-good.json") };
+}
+
+function codexResult(): WorkerResult {
+  return { provider: "codex", sessionId: "codex-session", costUsd: 0, numTurns: 1, text: "done", blocks: ["done"], stderr: "",
+    subtype: "success", isError: false, apiError: false, permissionDenials: [], childEnvKeys: [], model: SOL.id, effort: "high",
+    tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 }, modelUsage: {}, compactionEvents: [], compactionConfigured: false,
+    compactionFailures: [], qualitySuspect: false, servedModel: null, servedModelReason: "Codex JSONL reports no served model" } as WorkerResult;
+}
+
+/** The real spawnWorker with Claude below its reserve, Codex read through the real carry, and cash counted. */
+async function routeSpawn(account: ReturnType<typeof codexAccount>) {
+  const root = scratchRoot();
+  const assignments: WorkerSelectionAssignment[] = [];
+  let cashSpawns = 0, codexSpawns = 0;
+  try {
+    await spawnWorker({
+      cwd: root, permissionMode: "bypassPermissions" as const, settingsFile: join(REPO_ROOT, "settings", "worker.json"),
+      prompt: "work", env: {}, model: "sonnet", effort: "high", tools: ["Read", "Grep", "Glob", "RunCheck"],
+      config: { claudeBin: "/unused", root, dailyCapUsd: 20, workerProviders: { enabled: ["claude", "codex", "cash"],
+        codexBin: "/unused/codex", reservePercent: 5, capacityCacheMs: 60_000, cashFallbackWhenBlocked: true } } as never,
+      providerRouting: {
+        readClaudeHealth: async () => ({ degradedModels: [], source: "fresh", observedAtMs: account.state.now }),
+        readClaude: async () => claudeAt(99),
+        readCodex: async (_config, request) => account.read({ ...request }),
+        spawnCodex: async () => { codexSpawns += 1; return codexResult(); },
+        spawnOpenWeight: async () => { cashSpawns += 1; return { provider: "cash", text: "done", isError: false, subtype: "success" } as never; },
+        writeStatus: () => {},
+        now: () => account.state.now,
+      },
+      onSelectionAssignment: (assignment) => assignments.push(assignment),
+      claudeExecutable: { cache: createClaudeExecutableCache(), deps: { env: { RMD_CLAUDE_BIN: "/fake/claude" }, home: root,
+        exists: () => true, which: () => "/fake/claude", canExecute: () => true, locations: [] } },
+      keychain: { platform: "linux" as const,
+        readCredentialFile: () => JSON.stringify({ claudeAiOauth: { accessToken: "stub", expiresAt: 4_102_444_800_000 } }) },
+      queryFn: (() => (async function* () {
+        yield { type: "result", subtype: "success", is_error: false, result: "done", session_id: "s", total_cost_usd: 0, num_turns: 1 };
+      })()) as never,
+    } as SpawnWorkerArgs).catch((error: unknown) => error);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+  return { assignments, cashSpawns, codexSpawns, decision: assignments.at(-1)?.routing.decision };
+}
+
+test("W1-T13855 criterion 1: a timed-out probe carries a credits-lane last-good reading to codex instead of cash", async (t) => {
+  const account = codexAccount(t);
+  const seeded = await account.read();
+  assert.equal(providerEligibility(seeded, 5).lane, "codex-credits", "control: the 97 percent reading is on the credits lane");
+  account.fail();
+  const carried = await account.read();
+  assert.equal(carried.readable, true, `a carried credits-lane reading is readable, not refused at the reserve: ${carried.detail}`);
+  assert.equal(carried.carriedForward?.ageMs, 61_000);
+  assert.ok(carried.windows.every((window) => window.usedPercent >= 95 && window.usedPercent <= 100), "projected, held at most 100");
+  assert.deepEqual(providerEligibility(carried, 5), { eligible: true, lane: "codex-credits", headroomPercent: 100 - carried.windows[0].usedPercent });
+  const routed = selectWorkerProvider([claudeAt(99), carried], 5, 0.999);
+  assert.equal(routed.provider, "codex");
+  assert.equal(routed.lane, "codex-credits");
+
+  // The live spawn path: on origin/main the carry threw "projected burn reaches the reserve" and the spawn took cash.
+  const spawn = await routeSpawn(account);
+  assert.equal(spawn.decision?.rule, "codex-credits", "the rule is codex-credits, never cash-fallback");
+  assert.equal(spawn.cashSpawns, 0, "no cash spawn while credits carry codex");
+  assert.equal(spawn.codexSpawns, 1);
+
+  // No age limit: a 24-hour-old last-good reading carries the same way, its window held at 100.
+  const old = codexAccount(t);
+  await old.read();
+  old.fail(24 * 3_600_000);
+  const day = await old.read();
+  assert.equal(day.readable, true, `a 24-hour carry is not refused for its age: ${day.detail}`);
+  assert.equal(day.carriedForward?.ageMs, 24 * 3_600_000);
+  assert.equal(day.windows[0].usedPercent, 100, "the projection is held at 100, not past it");
+  assert.equal(providerEligibility(day, 5).lane, "codex-credits");
+  assert.equal(selectWorkerProvider([claudeAt(99), day], 5, 0.5).lane, "codex-credits");
+});
+
+// A rateLimitsByLimitId split: the selected model's own bucket at 99 percent carries no credits block.
+const splitReading = (model: Record<string, unknown> = {}, generic: Record<string, unknown> = {}) => {
+  const codex = { limitId: "codex", primary: { usedPercent: 60, windowDurationMins: 10080 },
+    credits: { hasCredits: true, unlimited: false, balance: BALANCE }, ...generic };
+  return { rateLimits: codex, rateLimitsByLimitId: { codex,
+    sol: { limitId: "gpt-6.2-sol", limitName: "gpt-6.2-sol", primary: { usedPercent: 99, windowDurationMins: 10080 }, ...model } } };
+};
+const CONFIG = { claudeBin: "/unused", root: REPO_ROOT, workerProviders: { enabled: ["claude" as const, "codex" as const], reservePercent: 5 } };
+
+test("W1-T13855 criterion 2: a model bucket without a credits block is carried by the generic bucket's credits", () => {
+  const capacity = selectCodexModel([SOL], splitReading(), CONFIG, "sonnet", "high", CAPABILITIES);
+  assert.equal(capacity.readable, true, `origin/main returned below-reserve and exhausted: ${capacity.detail}`);
+  assert.equal(capacity.exhausted, undefined);
+  assert.equal(capacity.model, SOL.id);
+  assert.deepEqual(capacity.windows.map((window) => window.usedPercent), [99], "the model's own bucket still supplies the windows");
+  assert.deepEqual(capacity.credits, { hasCredits: true, unlimited: false, balance: 38997.8437045 });
+  assert.equal(capacity.modelDecision?.options.find((option) => option.id === SOL.id)?.lane, "codex-credits");
+  assert.deepEqual(providerEligibility(capacity, 5), { eligible: true, lane: "codex-credits", headroomPercent: 1 });
+
+  // An exhausted capacity that carries spendable credits is the credits lane; without them it stays below-reserve.
+  const exhausted: ProviderCapacity = { provider: "codex", readable: false, exhausted: true, model: SOL.id,
+    windows: [{ name: "gpt-6.2-sol primary 10080m", usedPercent: 99 }], credits: { hasCredits: true, unlimited: false, balance: 10 } };
+  assert.deepEqual(providerEligibility(exhausted, 5), { eligible: true, lane: "codex-credits", headroomPercent: 1 });
+  const { credits: _spent, ...dry } = exhausted;
+  assert.deepEqual(providerEligibility(dry, 5), { eligible: false, reason: "below-reserve", headroomPercent: 1 });
+
+  // A model bucket whose own reached type or spend control blocks credits is not rescued by the generic bucket.
+  for (const own of [{ spendControlReached: true }, { rateLimitReachedType: "workspace_member_usage_limit_reached" }]) {
+    const blocked = selectCodexModel([SOL], splitReading(own), CONFIG, "sonnet", "high", CAPABILITIES);
+    assert.equal(blocked.readable, false, JSON.stringify(own));
+    assert.equal(blocked.exhausted, true, JSON.stringify(own));
+    assert.ok(blocked.credits?.blocked, JSON.stringify(own));
+    assert.equal(providerEligibility(blocked, 5).reason, "below-reserve", JSON.stringify(own));
+  }
+});
+
+function statusFor(root: string, nowMs: number, capacities: ProviderCapacity[], state: "selected" | "blocked" = "selected"): ProviderRoutingStatus {
+  const base = { enabledProviders: ["claude", "codex"] as const, reservePercent: 5, observedAtMs: nowMs, cacheValidMs: 60_000 };
+  if (state === "blocked") writeProviderRoutingStatus(root, { ...base, enabledProviders: [...base.enabledProviders], state, capacities });
+  else writeProviderRoutingStatus(root, { ...base, enabledProviders: [...base.enabledProviders], state,
+    capacities, selection: selectWorkerProvider(capacities, 5, 0.5) });
+  return readProviderRoutingStatus(root, { now: () => nowMs });
+}
+const creditsCodex = (): ProviderCapacity => selectCodexModel([SOL], splitReading(), CONFIG, "sonnet", "high", CAPABILITIES);
+
+test("W1-T13855 criterion 3: the routing status marks a credits-lane codex row and publishes no balance", (t) => {
+  const root = scratchRoot();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const nowMs = START;
+  const status = statusFor(root, nowMs, [claudeAt(95), creditsCodex()]);
+  const raw = readFileSync(providerRoutingStatusPath(root), "utf8");
+  const rows = (JSON.parse(raw) as { providers: Array<Record<string, unknown>> }).providers;
+  assert.equal(rows.find((row) => row.provider === "codex")?.creditsLane, true);
+  assert.equal(rows.find((row) => row.provider === "claude")?.creditsLane, undefined, "a refused provider carries no flag");
+  assert.doesNotMatch(raw, /38997|"balance"|creditsBalance/, "the served row carries no balance");
+  assert.equal(status.providers?.find((row) => row.provider === "codex")?.creditsLane, true, "the reader parses the flag back");
+
+  // A provider admitted on subscription headroom writes no flag.
+  const healthy = selectCodexModel([SOL], splitReading({ primary: { usedPercent: 40, windowDurationMins: 10080 } }), CONFIG,
+    "sonnet", "high", CAPABILITIES);
+  statusFor(root, nowMs, [claudeAt(95), healthy]);
+  const plain = JSON.parse(readFileSync(providerRoutingStatusPath(root), "utf8")) as { providers: Array<Record<string, unknown>> };
+  assert.ok(plain.providers.every((row) => row.creditsLane === undefined));
+});
+
+const POLICY: ReviewCapacityPolicy = {
+  hostWorkerBudget: 8, workerMemoryReserveMib: 1536, healthyWindowSamples: 3, sampleCadenceMs: 60_000, telemetryCadenceMs: 300_000,
+  cpuPsiLowPct: 5, memoryPsiLowPct: 5, memoryPsiHighPct: 15, providerAllowancePct: 2, settlementWindowMs: 1_800_000,
+  unhealthySettlementThreshold: 2, minHealthySettlements: 1, latencyExpansionRatio: 2,
+};
+const BOUNDS = { baseWidth: 4, minWidth: 1, maxWidth: 5 };
+function hostHealthy(nowMs: number, provider: ProviderRoutingStatus, over: Partial<ReviewCapacityObservation> = {}): ReviewCapacityObservation {
+  return { nowMs, queueDepth: 12, activeWorkers: 2, memAvailableMib: 6_700, cpuPsiSomeAvg10Pct: 1, cpuPsiFullAvg10Pct: 0,
+    cpuWeightShare: 1, memoryPsiSomeAvg10Pct: 0, provider: reviewProviderObservation(provider, nowMs),
+    settlements: { successes: 4, failures: 0, timeouts: 0 }, ...over };
+}
+/** The same status as origin/main reads it: no row carries the flag this record adds. */
+const unflagged = (status: ProviderRoutingStatus): ProviderRoutingStatus =>
+  ({ ...status, providers: status.providers?.map(({ creditsLane: _flag, ...row }) => row) });
+function widen(samples: number, status: (nowMs: number) => ProviderRoutingStatus, over: Partial<ReviewCapacityObservation> = {}) {
+  let state = initialReviewCapacityState(BOUNDS.baseWidth);
+  const decisions = [];
+  for (let i = 0; i < samples; i += 1) {
+    const nowMs = START + i * 60_000;
+    const result = selectAdaptiveReviewWidth(state, POLICY, hostHealthy(nowMs, status(nowMs), over), BOUNDS);
+    state = result.state;
+    decisions.push(result.decision);
+  }
+  return decisions;
+}
+
+test("W1-T13855 criterion 4: the review widener does not hold base for provider-headroom while the credits lane carries", (t) => {
+  const root = scratchRoot();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  // The 14:47:59Z reading: claude 95, codex 99 on a fresh credits lane, reserve 5 -> provider_headroom_pct 5.
+  const squeeze = statusFor(root, START, [claudeAt(95), creditsCodex()]);
+  const replay = widen(5, (nowMs) => ({ ...squeeze, observedAt: new Date(nowMs).toISOString(), freshUntil: new Date(nowMs + 60_000).toISOString() }));
+  assert.ok(replay.every((decision) => decision.reason !== "provider-headroom"), "origin/main held base for provider-headroom");
+  assert.ok(replay.every((decision) => decision.evidence.providerCreditsLane === true), "the evidence names the credits lane");
+  assert.equal(replay.at(-1)!.effectiveWidth, BOUNDS.maxWidth, "a healthy host earns its lane above base");
+  const observed = reviewProviderObservation(squeeze, START);
+  assert.equal(observed.headroomPct, 5);
+  assert.equal(observed.creditsLane, true);
+  assert.equal(routingStatus.creditsLaneRoom(squeeze, START), true);
+
+  // Claude above its reserve beside the same credits lane: origin/main's reason and width.
+  const above = statusFor(root, START, [claudeAt(90), creditsCodex()]);
+  assert.equal(routingStatus.creditsLaneRoom(above, START), false, "subscription headroom is not a credits squeeze");
+  const aboveDecisions = widen(3, () => above);
+  assert.deepEqual(aboveDecisions.map((d) => [d.reason, d.effectiveWidth]), widen(3, () => unflagged(above)).map((d) => [d.reason, d.effectiveWidth]));
+  // Claude at 94 is above its reserve (6 left) but inside the allowance: origin/main holds for provider-headroom, and so does this.
+  const thin = statusFor(root, START, [claudeAt(94), creditsCodex()]);
+  assert.equal(routingStatus.creditsLaneRoom(thin, START), false);
+  assert.deepEqual(widen(3, () => thin).map((d) => [d.reason, d.effectiveWidth]),
+    [["provider-headroom", 4], ["provider-headroom", 4], ["provider-headroom", 4]]);
+
+  // A lapsed reading past the age bound, or a blocked one, is not trusted: origin/main's reason and width.
+  const lapsed = statusFor(root, START - 900_001, [claudeAt(95), creditsCodex()]);
+  const lapsedNow = { ...readProviderRoutingStatus(root, { now: () => START }) };
+  assert.equal(routingStatus.creditsLaneRoom(lapsedNow, START), false);
+  assert.equal(routingStatus.creditsLaneRoom(lapsed, START - 900_001 + 640_000), true, "a lapsed cache inside the age bound still counts");
+  assert.deepEqual(widen(3, () => lapsedNow).map((d) => [d.reason, d.effectiveWidth]),
+    widen(3, () => unflagged(lapsedNow)).map((d) => [d.reason, d.effectiveWidth]));
+  const blocked: ProviderRoutingStatus = { ...squeeze, state: "blocked", blockedReason: "no-provider-headroom" };
+  assert.equal(routingStatus.creditsLaneRoom(blocked, START), false);
+  assert.deepEqual(widen(3, () => blocked).map((d) => [d.reason, d.effectiveWidth]),
+    widen(3, () => unflagged(blocked)).map((d) => [d.reason, d.effectiveWidth]));
+
+  // The production adapter's row records the field.
+  statusFor(root, START, [claudeAt(95), creditsCodex()]);
+  const rows: Array<Record<string, unknown>> = [];
+  selectRuntimeReviewWidth({ root, ...BOUNDS, queueDepth: 12, activeWorkers: 2, nowMs: START, ledgerLines: [], policy: POLICY,
+    cpuWeightShare: 1, laneCpuBound: 8, log: (_step, extra = {}) => rows.push(extra) });
+  assert.equal(rows.at(-1)?.provider_credits_lane, true);
+});
+
+const PLAN_YAML = `
+- id: A
+  title: a
+  repo: remudero
+  type: implement
+  depends_on: []
+  acceptance:
+    - claim: a
+      proof: unit test
+  verify: auto
+  status: queued
+`;
+const OVER_CEILING: UsageSnapshot = { billingMode: "subscription",
+  session: { percentUsed: 42, resetsAt: "2026-07-25T18:00:00.000Z" },
+  weekly: [{ label: "all models", percentUsed: 99, resetsAt: "2026-07-28T04:00:00.000Z" }] };
+const DAEMON_NOW = Date.parse("2026-07-20T22:00:00.000Z");
+
+async function governedTick(t: test.TestContext, reader: DaemonDeps["readProviderRoutingStatus"], usage: UsageSnapshot | "unreadable" = OVER_CEILING) {
+  const dir = scratchRoot();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(join(dir, "tasks.yaml"), PLAN_YAML);
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  let spawned = 0, sleeps = 0;
+  const summary = await runDaemon(loadPlan(join(dir, "tasks.yaml")), {
+    refreshMerged: () => () => false,
+    runOne: async (id) => { spawned += 1; return { taskId: id, runId: `RUN-${id}`, merged: true, costUsd: 0, verdict: "merged" } as never; },
+    readUsage: () => (usage === "unreadable" ? undefined : usage),
+    ...(reader ? { readProviderRoutingStatus: reader } : {}),
+    now: () => new Date(DAEMON_NOW),
+    checkStop: () => stopDetail(dir),
+    sleep: async () => { sleeps += 1; if (sleeps >= 3) requestStop(dir, "test done polling"); },
+    log: (step, extra = {}) => lines.push({ step, extra }),
+  }, { headroomEnabled: true, max: 1, unreadableDegradedLimit: 1 });
+  return { summary, spawned, lines, beats: lines.filter((line) => line.step === "daemon.headroom").map((line) => line.extra) };
+}
+
+test("W1-T13855 criterion 5: an over-ceiling Claude reading beside a fresh credits lane keeps dispatch running", async (t) => {
+  const root = scratchRoot();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const fresh = statusFor(root, DAEMON_NOW, [claudeAt(95), creditsCodex()]);
+  const carried = await governedTick(t, () => fresh);
+  assert.equal(carried.spawned, 1, "the tick does not idle while credits carry the squeeze");
+  assert.equal(carried.summary.stopReason, "max_reached");
+  assert.equal(carried.beats[0].enforced, true);
+  assert.equal(carried.beats[0].over_ceiling, true);
+  assert.equal(carried.beats[0].credits_lane, "codex-credits");
+
+  // No fresh status, a codex row without the flag, or a reader that fails: the tick idles as on origin/main.
+  const stale = statusFor(root, DAEMON_NOW - 900_001, [claudeAt(95), creditsCodex()]);
+  const staleNow = readProviderRoutingStatus(root, { now: () => DAEMON_NOW });
+  assert.equal(stale.freshness, "fresh", "control: the same reading was fresh when written");
+  for (const [label, reader] of [
+    ["stale", () => staleNow],
+    ["unflagged", () => unflagged(fresh)],
+    ["absent", () => readProviderRoutingStatus(join(root, "nowhere"))],
+    ["throws", () => { throw new Error("status reader failed"); }],
+    ["no reader", undefined],
+  ] as const) {
+    const idle = await governedTick(t, reader);
+    assert.equal(idle.spawned, 0, `${label}: still idles`);
+    assert.equal(idle.summary.stopReason, "stopped", label);
+    assert.equal(idle.beats[0].credits_lane, undefined, label);
+    assert.equal(idle.beats[0].tick, 1, label);
+    if (label === "throws") assert.ok(idle.lines.some((line) => line.step === "daemon.headroom.credits_lane_unreadable"));
+  }
+
+  // The in-flight sampler's row, taken during the long phase the credits lane let start, gains the same field.
+  const dir = scratchRoot();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(join(dir, "tasks.yaml"), PLAN_YAML);
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  let nowMs = DAEMON_NOW, sleeps = 0, release: (() => void) | undefined;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  await runDaemon(loadPlan(join(dir, "tasks.yaml")), {
+    refreshMerged: () => () => false,
+    runOne: async (id) => { await gate; return { taskId: id, runId: `RUN-${id}`, merged: true, costUsd: 0, verdict: "merged" } as never; },
+    sweepLight: async () => {},
+    readUsage: () => OVER_CEILING,
+    readProviderRoutingStatus: () => statusFor(root, nowMs, [claudeAt(95), creditsCodex()]),
+    now: () => new Date(nowMs),
+    sleep: async () => { sleeps += 1; nowMs += HEADROOM_SAMPLE_MAX_AGE_MS + 1_000; if (sleeps >= 6) release?.(); },
+    log: (step, extra = {}) => lines.push({ step, extra }),
+  }, { headroomEnabled: true, max: 1 });
+  const inFlight = lines.filter((line) => line.step === "daemon.headroom" && line.extra.source === "in-flight").map((line) => line.extra);
+  assert.ok(inFlight.length >= 1, "the long phase was sampled");
+  assert.ok(inFlight.every((row) => row.over_ceiling === true && row.credits_lane === "codex-credits"));
+});
+
+test("W1-T13855 criterion 6: a rescued assignment names its rescue and an unreadable codex entry its failure kind", async (t) => {
+  const assign = (codex: ProviderCapacity) => {
+    const capacities = [claudeAt(99), codex];
+    const selection = selectWorkerProvider(capacities, 5, 0.5);
+    return workerSelectionAssignment({ cwd: REPO_ROOT, prompt: "work", model: "sonnet", effort: "high",
+      permissionMode: "bypassPermissions", settingsFile: join(REPO_ROOT, "settings", "worker.json") }, {
+      provider: selection.provider, model: selection.capacity.model, effort: "high", capacity: selection.capacity, capacities,
+      mode: "multi-provider", selectionPath: "auction", policy: { preference: "automatic", reservePercent: 5, provenance: "default" }, selection,
+    }).routing.decision?.considered.find((entry) => entry.provider === "codex");
+  };
+  const account = codexAccount(t);
+  await account.read();
+  account.fail();
+  assert.deepEqual(assign(await account.read())?.creditsRescue,
+    { path: "carried", tier: "codex-credits", projectedBalance: 38997.8437045, ageMs: 61_000, failureKind: "timeout" });
+  assert.deepEqual(assign(creditsCodex())?.creditsRescue, { path: "generic-bucket", tier: "codex-credits", projectedBalance: 38997.8437045 });
+
+  // The live spawn's own row names the carried rescue.
+  const spawn = await routeSpawn(account);
+  assert.equal(spawn.decision?.considered.find((entry) => entry.provider === "codex")?.creditsRescue?.path, "carried");
+
+  // Unreadable: a probe that times out with no last-good, a terminal refusal, and a starved read each name their kind.
+  const fresh = codexAccount(t);
+  fresh.fail();
+  const unreadable = (capacity: ProviderCapacity) => {
+    const capacities = [claudeAt(40), capacity];
+    const selection = selectWorkerProvider(capacities, 5, 0);
+    return workerSelectionAssignment({ cwd: REPO_ROOT, prompt: "work", model: "sonnet", effort: "high",
+      permissionMode: "bypassPermissions", settingsFile: join(REPO_ROOT, "settings", "worker.json") }, {
+      provider: selection.provider, model: "claude-sonnet-5-5", effort: "high", capacity: selection.capacity, capacities,
+      mode: "multi-provider", selectionPath: "auction", policy: { preference: "automatic", reservePercent: 5, provenance: "default" }, selection,
+    }).routing.decision?.considered.find((entry) => entry.provider === "codex");
+  };
+  const timedOut = unreadable(await fresh.read());
+  assert.equal(timedOut?.reason, "unreadable");
+  assert.equal(timedOut?.failureKind, "timeout");
+  fresh.state.mode = "rpc";
+  clearCodexCapacityCache();
+  assert.equal(unreadable(await fresh.read())?.failureKind, "terminal");
+  assert.equal(unreadable({ provider: "codex", readable: false, windows: [], detail: "starved", probeFailure: "starved" })?.failureKind, "starved");
+});
+
+test("W1-T13855 criterion 9: subscription headroom first, credits next, and cash only when credits cannot carry", async (t) => {
+  const account = codexAccount(t);
+  await account.read();
+  account.fail();
+  const carried = await account.read();
+  // Claude with headroom is chosen over a carried credits lane at every draw.
+  for (const draw of [0, 0.5, 0.999, 0.99999]) {
+    const pick = selectWorkerProvider([claudeAt(60), carried], 5, draw);
+    assert.equal(pick.provider, "claude", `draw ${draw}`);
+    assert.equal(pick.lane, undefined, `draw ${draw}`);
+  }
+  // A Codex model with headroom is chosen over the one its credits carry.
+  const both = { ...splitReading(), rateLimitsByLimitId: { ...splitReading().rateLimitsByLimitId,
+    sol61: { limitId: "gpt-6.1-sol", limitName: "gpt-6.1-sol", primary: { usedPercent: 30, windowDurationMins: 10080 } } } };
+  const preferred = selectCodexModel([SOL, SOL61], both, CONFIG, "sonnet", "high", CAPABILITIES);
+  assert.equal(preferred.model, SOL61.id);
+  assert.equal(providerEligibility(preferred, 5).lane, undefined);
+
+  const refused = async (label: string, prepare: (a: ReturnType<typeof codexAccount>) => Promise<void>) => {
+    const a = codexAccount(t);
+    await prepare(a);
+    const read = await a.read();
+    assert.equal(read.readable, false, `${label}: ${read.detail}`);
+    assert.throws(() => selectWorkerProvider([claudeAt(99), read], 5), /./, `${label}: the auction blocks, so cash may serve`);
+  };
+  // Blocked credits on the carried reading.
+  await refused("blocked", async (a) => { a.state.extras = { spendControlReached: true }; await a.read(); a.fail(); });
+  // A burn-projected balance at or below zero: 20 then 10 an hour apart, projected six hours on.
+  await refused("burned out", async (a) => {
+    a.state.balance = "20"; await a.read();
+    a.state.now += 3_600_000; a.state.balance = "10"; clearCodexCapacityCache(); await a.read();
+    a.fail(6 * 3_600_000);
+  });
+  // Control: the same burn half an hour on still carries (10 - 5 > 0), so the projection is what refuses.
+  const soon = codexAccount(t);
+  soon.state.balance = "20"; await soon.read();
+  soon.state.now += 3_600_000; soon.state.balance = "10"; clearCodexCapacityCache(); await soon.read();
+  soon.fail(1_800_000);
+  const halfHour = await soon.read();
+  assert.equal(halfHour.readable, true, halfHour.detail);
+  assert.ok(Math.abs((halfHour.credits?.balance ?? 0) - 5) < 1e-6, "the projected balance is what the selection sees");
+  // A terminal probe failure, an invalidated last-good reading, and an absent one.
+  await refused("terminal", async (a) => { await a.read(); a.state.now += 61_000; a.state.mode = "rpc"; });
+  await refused("invalidated", async (a) => {
+    await a.read(); a.state.now += 61_000; a.state.mode = "rpc"; await a.read(); clearCodexCapacityCache(); a.fail();
+  });
+  await refused("absent", async (a) => { await a.read(); rmSync(a.lastGood); clearCodexCapacityCache(); a.fail(); });
+});
+
+test("W1-T13855 criterion 10: the credits lane lifts no memory, CPU or host-worker bound", async (t) => {
+  const root = scratchRoot();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const squeeze = statusFor(root, START, [claudeAt(95), creditsCodex()]);
+  const live = (nowMs: number) => ({ ...squeeze, observedAt: new Date(nowMs).toISOString(), freshUntil: new Date(nowMs + 60_000).toISOString() });
+  // The host-worker budget binding: the reason stays host-worker-budget beside a fresh credits lane.
+  const bound = widen(4, live, { activeWorkers: 4 });
+  assert.ok(bound.every((d) => d.reason === "host-worker-budget" && d.effectiveWidth === BOUNDS.baseWidth));
+  assert.ok(bound.every((d) => d.evidence.providerCreditsLane === true), "control: the credits lane was seen");
+  // The widener never passes its max width, however long the credits lane carries.
+  const long = widen(20, live);
+  assert.ok(long.every((d) => d.effectiveWidth <= BOUNDS.maxWidth));
+  assert.equal(long.at(-1)!.effectiveWidth, BOUNDS.maxWidth);
+  // Memory pressure still sheds beside the credits lane.
+  assert.ok(widen(3, live, { memAvailableMib: 1_000 }).every((d) => d.reason === "memory-reserve"));
+
+  // The governor's unreadable-usage park is unchanged: the status is never consulted on that path.
+  let reads = 0;
+  const parked = await governedTick(t, () => { reads += 1; return squeeze; }, "unreadable");
+  const plain = await governedTick(t, undefined, "unreadable");
+  assert.equal(reads, 0, "an unreadable usage read never asks the routing status");
+  const degraded = (run: typeof parked) => run.lines.filter((line) => line.step.startsWith("daemon.headroom")).map((line) => line.step);
+  assert.deepEqual(degraded(parked), degraded(plain));
+  assert.equal(parked.spawned, plain.spawned);
+});
