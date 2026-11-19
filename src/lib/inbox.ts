@@ -376,7 +376,10 @@ export interface DraftExclusion {
 export type DraftSelectionContext = Pick<
   ReadinessContext,
   "isRatified" | "isDeclined" | "boardReferents" | "grepAnchorTrue" | "openProposalIds" | "retirement"
->;
+> & {
+  /** W1-T13864: ledger rows whose lint-clean inbox.drafted rows retire a proposal at its current draft input. */
+  draftLedgerRows?: readonly Record<string, unknown>[];
+};
 
 function readDraftExclusion(check: () => DraftExclusion | undefined): DraftExclusion | undefined {
   try {
@@ -489,6 +492,21 @@ export function resolvedInboxDraftLane(repoDir: string = process.cwd()): DraftLa
     : { leadDeployment, effort: mount.effort };
 }
 
+/** W1-T13864: what a draft is drafted from, without the lane: the anchor fingerprint and the reframe count. */
+export function draftInputKey(proposal: Pick<Proposal, "evidenceAnchors" | "reframeHistory">): string {
+  return `${anchorFingerprint(proposal.evidenceAnchors)}::${(proposal.reframeHistory ?? []).length}`;
+}
+
+/** Proposal id to the draft_input_key of its newest lint-clean inbox.drafted row (rows in ledger order). */
+export function cleanDraftInputKeys(rows: readonly Record<string, unknown>[]): Map<string, string> {
+  const keys = new Map<string, string>();
+  for (const row of rows) {
+    if (row.step === "inbox.drafted" && row.lint_clean === true && typeof row.proposal_id === "string" &&
+      typeof row.draft_input_key === "string") keys.set(row.proposal_id, row.draft_input_key);
+  }
+  return keys;
+}
+
 /** Lead + Sonnet rescue fingerprint: old lanes become due once, unless a clean cached draft already wins. */
 export function draftAttemptKey(proposal: Proposal, lane: DraftLaneIdentity = resolvedInboxDraftLane()): string {
   return `${anchorFingerprint(proposal.evidenceAnchors)}::${(proposal.reframeHistory ?? []).length}::${JSON.stringify([
@@ -538,8 +556,10 @@ export function draftsDueOnDaemon(
   ctx?: DraftSelectionContext,
   lane: DraftLaneIdentity = resolvedInboxDraftLane(),
 ): Proposal[] {
+  const clean = cleanDraftInputKeys(ctx?.draftLedgerRows ?? []);
   const due = rankDraftSelection(
-    proposalsNeedingDraft(proposals, drafts, ctx).filter((p) => attempts[p.id] !== draftAttemptKey(p, lane)),
+    proposalsNeedingDraft(proposals, drafts, ctx).filter((p) => attempts[p.id] !== draftAttemptKey(p, lane) &&
+      clean.get(p.id) !== draftInputKey(p)),
     drafts,
   );
   return cap > 0 ? due.slice(0, cap) : due;
@@ -2090,7 +2110,8 @@ export function commitInboxDraftOutcomes(opts: {
           if (drafts[snapshot.proposal.id]?.completion?.snapshot.completionId !== id) continue;
           record.adopted = true; saveOutbox();
         }
-        opts.log("inbox.drafted", { proposal_id: snapshot.proposal.id, repository: snapshot.repository, completion_id: id,
+        opts.log("inbox.drafted", { proposal_id: snapshot.proposal.id, draft_input_key: draftInputKey(snapshot.proposal),
+          repository: snapshot.repository, completion_id: id,
           ...(completion.modelFields ?? draftModelFields()),
           consumed_inputs: snapshot.inputs, cache_adopted: true, lint_clean: completion.lintClean, unresolved_violations: completion.violations });
         delete outbox[id]; saveOutbox();
@@ -2522,6 +2543,7 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
         }
         deps.log("inbox.draft_synthesized", {
           proposal_id: proposal.id,
+          draft_input_key: draftInputKey(proposal),
           attempt,
           session_id: worker.sessionId,
           cost_usd: worker.costUsd,
@@ -2559,6 +2581,7 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
             });
             deps.log("inbox.draft_synthesized", {
               proposal_id: proposal.id,
+              draft_input_key: draftInputKey(proposal),
               attempt: cashAttempts + 1,
               session_id: escalated.sessionId,
               cost_usd: escalated.costUsd,
@@ -2622,7 +2645,7 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
       };
       // A still-dirty draft after the bounded retries is cached anyway and surfaces NOT-READY, but the unresolved set
       // is named on the ledger so the retro sees what the rung could not fix.
-      if (!deps.causalScope) deps.log("inbox.drafted", { proposal_id: proposal.id, ...draftModelFields(lastWorker), lint_clean: violations.length === 0, unresolved_violations: violations.map((v) => v.message) });
+      if (!deps.causalScope) deps.log("inbox.drafted", { proposal_id: proposal.id, draft_input_key: draftInputKey(proposal), ...draftModelFields(lastWorker), lint_clean: violations.length === 0, unresolved_violations: violations.map((v) => v.message) });
       return { proposalId: proposal.id, ok: true, candidate };
     } catch (e) {
       const error = String((e as Error)?.message ?? e);

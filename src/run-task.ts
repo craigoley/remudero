@@ -38020,6 +38020,7 @@ export function buildInboxDraftHook(
           openProposalIds: new Set(proposals.map((p) => p.id)),
           isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
           isDeclined: declinedWithReceipts(ledgerLines, join(inboxRoot, "state")),
+          draftLedgerRows: ledgerLines,
         };
       } catch (e) {
         log("inbox.draft_readiness_unavailable", { error: String((e as Error)?.message ?? e) });
