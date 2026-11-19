@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { hostIndependentDaemonDeps } from "#test/helpers/daemon-host-pins.js";
 import { operatorReleasePin } from "#src/lib/operator-release.js";
 import { test } from "node:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -120,6 +121,7 @@ test("idle_starved: a confirmed empty dedicated queue exits without a normal pol
   const lines: string[] = [];
   const clock = fakeClock();
   const s = await runDaemon(fixturePlan(), {
+    ...hostIndependentDaemonDeps(),
     refreshMerged: () => mergedSetOf("A", "B", "C", "D"),
     runOne: async () => { throw new Error("unexpected dispatch"); },
     isCreditIndeterminate: () => false,
@@ -140,6 +142,7 @@ test("idle_starved: an unreadable PR board remains on the normal poll path", asy
   const clock = fakeClock();
   let stopReads = 0;
   const s = await runDaemon(fixturePlan(), {
+    ...hostIndependentDaemonDeps(),
     refreshMerged: () => mergedSetOf("A", "B", "C", "D"),
     runOne: async () => { throw new Error("unexpected dispatch"); },
     isCreditIndeterminate: () => false,
@@ -157,6 +160,7 @@ test("idle_starved: an uncredited auto task cannot be hidden by a dispatch hold"
   const clock = fakeClock();
   let stopReads = 0;
   const s = await runDaemon(fixturePlan(), {
+    ...hostIndependentDaemonDeps(),
     refreshMerged: () => NONE_MERGED,
     runOne: async () => { throw new Error("unexpected dispatch"); },
     isCreditIndeterminate: () => false,
@@ -177,6 +181,7 @@ test("idle_starved: a frontier containing only blocked or dependency-blocked tas
   plan.byId.get("D")!.status = "blocked";
   const clock = fakeClock();
   const s = await runDaemon(plan, {
+    ...hostIndependentDaemonDeps(),
     refreshMerged: () => NONE_MERGED,
     runOne: async () => { throw new Error("unexpected dispatch"); },
     isCreditIndeterminate: () => false,
@@ -198,6 +203,7 @@ test("idle_starved: an operator-released human task or failed board read keeps t
     const dispatched: string[] = [];
     const plan = fixturePlan();
     const s = await runDaemon(plan, {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => mergedSetOf("A", "B", "C", "D"),
       // W1-T10348: the daemon's own tick now dispatches the released task, rather than only staying awake for it.
       runOne: async (id) => {
@@ -232,6 +238,7 @@ test("idle_starved: a detached PR action must settle before the Node process can
   let finish!: (result: { outcome: "completed" }) => void;
   const inFlight = new Promise<{ outcome: "completed" }>((resolve) => { finish = resolve; });
   const s = await runDaemon(fixturePlan(), {
+    ...hostIndependentDaemonDeps(),
     refreshMerged: () => mergedSetOf("A", "B", "C", "D"),
     runOne: async () => { throw new Error("unexpected dispatch"); },
     isCreditIndeterminate: () => false,
@@ -408,6 +415,7 @@ test("dispatches in dependency order (DAG), skipping verify:human and merged tas
   const s = await runDaemon(
     plan,
     {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => (id) => merged.has(id),
       runOne: async (id) => { ran.push(id); merged.add(id); return okResult(id); },
       sleep: clock.sleep,
@@ -435,6 +443,7 @@ test("W1-T80: a task whose latest PR is OPEN is never re-dispatched — the daem
   const s = await runDaemon(
     plan,
     {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => (id) => merged.has(id),
       isOpenPr,
       runOne: async (id) => { ran.push(id); merged.add(id); return okResult(id); },
@@ -458,7 +467,12 @@ test("W1-T80: no isOpenPr wired ⇒ the daemon dispatches exactly as before this
   const clock = fakeClock();
   const s = await runDaemon(
     plan,
-    { refreshMerged: () => (id) => merged.has(id), runOne: async (id) => { ran.push(id); merged.add(id); return okResult(id); }, sleep: clock.sleep },
+    {
+      ...hostIndependentDaemonDeps(),
+      refreshMerged: () => (id) => merged.has(id),
+      runOne: async (id) => { ran.push(id); merged.add(id); return okResult(id); },
+      sleep: clock.sleep,
+    },
     { max: 4 },
   );
   assert.deepEqual(ran, ["A", "B", "C", "D"]);
@@ -478,6 +492,7 @@ test("P29(ii): a circuit-broken task is never (re-)dispatched — the daemon ski
   const s = await runDaemon(
     plan,
     {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => (id) => merged.has(id),
       isCircuitTripped: (id) => id === "A",
       onCircuitBreak: (t) => broken.push(t.id),
@@ -503,7 +518,12 @@ test("P29(ii): no isCircuitTripped wired ⇒ the daemon dispatches exactly as be
   const clock = fakeClock();
   const s = await runDaemon(
     plan,
-    { refreshMerged: () => (id) => merged.has(id), runOne: async (id) => { ran.push(id); merged.add(id); return okResult(id); }, sleep: clock.sleep },
+    {
+      ...hostIndependentDaemonDeps(),
+      refreshMerged: () => (id) => merged.has(id),
+      runOne: async (id) => { ran.push(id); merged.add(id); return okResult(id); },
+      sleep: clock.sleep,
+    },
     { max: 4 },
   );
   assert.deepEqual(ran, ["A", "B", "C", "D"]);
@@ -535,6 +555,7 @@ test("P29(ii) the W1-T29 x10 spin shape: a circuit-broken task is escalated EXAC
     if (calls >= 5) requestStop(root, "test done polling");
   };
   const s = await runDaemon(plan, {
+    ...hostIndependentDaemonDeps(),
     refreshMerged: () => (id) => merged.has(id),
     isCircuitTripped: (id) => id === "A",
     onCircuitBreak: (t) => broken.push(t.id),
@@ -565,6 +586,7 @@ test("W1-T316: lifetime pressure is observed by the daemon without removing the 
   const s = await runDaemon(
     plan,
     {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => (id) => merged.has(id),
       isLifetimeCapExceeded: (id) => id === "A",
       onLifetimeCapExceeded: (t) => capped.push(t.id),
@@ -589,7 +611,12 @@ test("W1-T316: no isLifetimeCapExceeded wired ⇒ the daemon dispatches exactly 
   const clock = fakeClock();
   const s = await runDaemon(
     plan,
-    { refreshMerged: () => (id) => merged.has(id), runOne: async (id) => { ran.push(id); merged.add(id); return okResult(id); }, sleep: clock.sleep },
+    {
+      ...hostIndependentDaemonDeps(),
+      refreshMerged: () => (id) => merged.has(id),
+      runOne: async (id) => { ran.push(id); merged.add(id); return okResult(id); },
+      sleep: clock.sleep,
+    },
     { max: 4 },
   );
   assert.deepEqual(ran, ["A", "B", "C", "D"]);
@@ -602,6 +629,7 @@ test("W1-T316 the x10 shape: lifetime pressure does not create an idle spin or r
   const ran: string[] = [];
   const capped: string[] = [];
   const s = await runDaemon(plan, {
+    ...hostIndependentDaemonDeps(),
     refreshMerged: () => (id) => merged.has(id),
     isLifetimeCapExceeded: (id) => id === "A",
     onLifetimeCapExceeded: (t) => capped.push(t.id),
@@ -623,6 +651,7 @@ test("W1-T316: a THROWING onLifetimeCapExceeded hook does not kill the loop", as
   const root = mkdtempSync(join(tmpdir(), "daemon-lifetime-cap-throw-"));
   let ticks = 0;
   const s = await runDaemon(plan, {
+    ...hostIndependentDaemonDeps(),
     refreshMerged: () => () => false,
     runOne: async (id) => okResult(id),
     isLifetimeCapExceeded: () => true,
@@ -648,6 +677,7 @@ test("STOP: checked first, every tick — halts within one tick, no subsequent s
   const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
   const clock = fakeClock();
   const s = await runDaemon(plan, {
+    ...hostIndependentDaemonDeps(),
     refreshMerged: () => (id) => merged.has(id),
     runOne: async (id) => {
       ran.push(id);
@@ -675,6 +705,7 @@ test("STOP set before the daemon even starts: zero tasks attempted", async () =>
   let spawned = 0;
   const clock = fakeClock();
   const s = await runDaemon(plan, {
+    ...hostIndependentDaemonDeps(),
     refreshMerged: () => NONE_MERGED,
     runOne: async (id) => { spawned++; return okResult(id); },
     checkStop: () => stopDetail(root),
@@ -693,6 +724,7 @@ test("STOP takes precedence over PAUSE when both flags are set", async () => {
   requestStop(root, "a");
   const clock = fakeClock();
   const s = await runDaemon(plan, {
+    ...hostIndependentDaemonDeps(),
     refreshMerged: () => NONE_MERGED,
     runOne: async (id) => okResult(id),
     checkStop: () => stopDetail(root),
@@ -718,6 +750,7 @@ test("PAUSE (drain-and-hold): issued mid-run, the in-flight task still reaches m
     if (sleeps >= 3) requestStop(root, "test done polling — pause never cleared");
   };
   const s = await runDaemon(plan, {
+    ...hostIndependentDaemonDeps(),
     refreshMerged: () => (id) => merged.has(id),
     runOne: async (id) => {
       // Simulate an operator pausing WHILE task A is in flight — the flag
@@ -759,6 +792,7 @@ test("PAUSE clears via rmd resume and the SAME process resumes dispatching on it
   const s = await runDaemon(
     plan,
     {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => (id) => merged.has(id),
       runOne: async (id) => {
         merged.add(id);
@@ -785,6 +819,7 @@ test("QUIET_HOURS is a dispatch governor, not PAUSE, so sweeps continue while ne
   let sweeps = 0;
   let stopped = false;
   const s = await runDaemon(plan, {
+    ...hostIndependentDaemonDeps(),
     refreshMerged: () => NONE_MERGED,
     runOne: async (id) => okResult(id),
     sweep: () => {
@@ -836,6 +871,7 @@ test("headroom: a near-limit reading is an IN-PROCESS idle heartbeat, never a st
     if (calls >= 3) requestStop(root, "test done polling — headroom never freed up");
   };
   const s = await runDaemon(plan, {
+    ...hostIndependentDaemonDeps(),
     refreshMerged: () => NONE_MERGED,
     runOne: async (id) => { spawned++; return okResult(id); },
     readUsage: () => nearLimit,
@@ -887,6 +923,7 @@ test("headroom governor DISABLED (ruling a4153e): percent_used 99 does NOT pause
   const s = await runDaemon(
     plan,
     {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => NONE_MERGED,
       runOne: async (id) => { spawned++; return okResult(id); },
       readUsage: () => overLimit,
@@ -926,6 +963,7 @@ test("a4153e falsifier (retargeted to disabled-by-config): with the governor dis
   const s = await runDaemon(
     plan,
     {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => NONE_MERGED,
       runOne: async (id) => { spawned++; return okResult(id); },
       readUsage: () => overLimit,
@@ -956,6 +994,7 @@ test("headroom governor ENABLED explicitly: an at-ceiling reading idles EXACTLY 
   const s = await runDaemon(
     plan,
     {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => NONE_MERGED,
       runOne: async (id) => { spawned++; return okResult(id); },
       readUsage: () => nearLimit,
@@ -984,6 +1023,7 @@ test("headroom governor DISABLED + UNREADABLE usage: absent telemetry, never a h
   const s = await runDaemon(
     plan,
     {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => NONE_MERGED,
       runOne: async (id) => { spawned++; return okResult(id); },
       readUsage: () => undefined, // unreadable every tick
@@ -1018,6 +1058,7 @@ test("console kick: a Run on a runnable queued task dispatches THAT task by id (
   const s = await runDaemon(
     plan,
     {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => NONE_MERGED,
       runOne: async (id) => { spawned.push(id); return okResult(id); },
       pendingKicks: () => kicks,
@@ -1045,6 +1086,7 @@ test("console kick: a verify:human target is REFUSED with its named reason (rend
   const s = await runDaemon(
     plan,
     {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => NONE_MERGED,
       runOne: async (id) => { spawned.push(id); return okResult(id); },
       pendingKicks: () => kicks,
@@ -1072,6 +1114,7 @@ test("console kick: a STALE kick for an already-merged task is refused via the p
   const s = await runDaemon(
     plan,
     {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => mergedSetOf("D"), // D already merged/done per the projection
       runOne: async (id) => { spawned.push(id); return okResult(id); },
       pendingKicks: () => kicks,
@@ -1097,6 +1140,7 @@ test("console kick: an unknown task id is refused (unknown task id) and the mark
   await runDaemon(
     plan,
     {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => NONE_MERGED,
       runOne: async (id) => okResult(id),
       pendingKicks: () => kicks,
@@ -1119,6 +1163,7 @@ test("console drain-now: consuming DRAIN_REQUESTED ledgers console.drain_consume
   const s = await runDaemon(
     plan,
     {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => NONE_MERGED,
       runOne: async (id) => okResult(id),
       consumeDrainNow: () => { const d = drain; drain = null; return d; },
@@ -1146,6 +1191,7 @@ test("console PR action: one durable request reaches the established action seam
   await runDaemon(
     plan,
     {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => NONE_MERGED,
       runOne: async (id) => okResult(id),
       pendingPrActions: () => actions,
@@ -1183,6 +1229,7 @@ test("console PR action: a named refusal is ledgered and consumed without turnin
   const summary = await runDaemon(
     plan,
     {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => NONE_MERGED,
       runOne: async (id) => okResult(id),
       pendingPrActions: () => actions,
@@ -1235,6 +1282,7 @@ test("headroom exhaustion resumes ON ITS OWN once the underlying window actually
   const s = await runDaemon(
     plan,
     {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => (id) => merged.has(id),
       runOne: async (id) => { merged.add(id); return okResult(id); },
       readUsage: () => (simNowMs < RESET_AT_MS ? exhausted : fresh),
@@ -1291,6 +1339,7 @@ test("headroom: the SAME percent_used(98%) — inside the window's final day, di
   const insideFinalDay = await runDaemon(
     plan,
     {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => NONE_MERGED,
       runOne: async (id) => okResult(id),
       readUsage: snapAt98,
@@ -1308,6 +1357,7 @@ test("headroom: the SAME percent_used(98%) — inside the window's final day, di
   const root = mkdtempSync(join(tmpdir(), "daemon-headroom-timeaware-"));
   let calls = 0;
   const outsideFinalDay = await runDaemon(plan, {
+    ...hostIndependentDaemonDeps(),
     refreshMerged: () => NONE_MERGED,
     runOne: async (id) => { spawned++; return okResult(id); },
     readUsage: snapAt98,
@@ -1339,6 +1389,7 @@ test("headroom policy is OVERRIDABLE DATA — a custom curve changes behaviour w
   const s = await runDaemon(
     plan,
     {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => NONE_MERGED,
       runOne: async (id) => { spawned++; return okResult(id); },
       readUsage: snapAt80,
@@ -1365,6 +1416,7 @@ test("headroom unreadable (undefined), WITHIN the bounded allowance, does not si
   const s = await runDaemon(
     plan,
     {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => (id) => merged.has(id),
       runOne: async (id) => { merged.add(id); return okResult(id); },
       readUsage: () => undefined,
@@ -1391,6 +1443,7 @@ test("headroom unreadable BEYOND the bounded allowance ESCALATES to the in-proce
   const s = await runDaemon(
     plan,
     {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => NONE_MERGED,
       runOne: async (id) => { spawned++; return okResult(id); },
       readUsage: () => undefined, // NEVER readable — the "78% of the time" fixture, worst case
@@ -1439,6 +1492,7 @@ test("a single successful read RESETS the consecutive-unreadable counter — it 
   const s = await runDaemon(
     plan,
     {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => (id) => merged.has(id),
       runOne: async (id) => { merged.add(id); return okResult(id); },
       readUsage: () => reads[readCount++],
@@ -1514,6 +1568,7 @@ test("headroom heartbeat: two boots reading the SAME window a minute apart log t
     const root = mkdtempSync(join(tmpdir(), "daemon-headroom-canon-"));
     let calls = 0;
     await runDaemon(plan, {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => NONE_MERGED,
       runOne: async (id) => okResult(id),
       readUsage: () => snapWith(resetsAt),
@@ -1584,6 +1639,7 @@ test("daemonExitCode: a genuine crash (stopReason='error') STILL exits nonzero �
   const plan = fixturePlan();
   const clock = fakeClock();
   const s = await runDaemon(plan, {
+    ...hostIndependentDaemonDeps(),
     refreshMerged: () => NONE_MERGED,
     runOne: async () => { throw new Error("boom — a genuine crash, not a policy stop"); },
     sleep: clock.sleep,
@@ -1653,6 +1709,7 @@ test("stop-on-block: a blocked task HALTS the daemon and does NOT run its depend
   const ran: string[] = [];
   const clock = fakeClock();
   const s = await runDaemon(plan, {
+    ...hostIndependentDaemonDeps(),
     refreshMerged: () => (id) => merged.has(id),
     runOne: async (id) => {
       ran.push(id);
@@ -1677,6 +1734,7 @@ test("W1-T46 GENUINE BLOCKER: escalateBlock is invoked once, naming the real dep
   const escalations: Array<{ task: Task; result: RunResult; dependents: string[] }> = [];
   const clock = fakeClock();
   const s = await runDaemon(plan, {
+    ...hostIndependentDaemonDeps(),
     refreshMerged: () => (id) => merged.has(id),
     runOne: async (id) => {
       if (id === "B") return blockedResult(id);
@@ -1705,6 +1763,7 @@ test("W1-T46 TRANSIENT: a blocked_transient verdict retries with NO strike, and 
   const s = await runDaemon(
     plan,
     {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => (id) => merged.has(id),
       runOne: async (id): Promise<RunResult> => {
         ran.push(id);
@@ -1740,6 +1799,7 @@ test("W1-T46 INDEPENDENT-FAILURE: a block on a task with NO transitive dependent
   const s = await runDaemon(
     plan,
     {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => (id) => merged.has(id),
       runOne: async (id): Promise<RunResult> => {
         ran.push(id);
@@ -1799,6 +1859,7 @@ test("W1-T174: a FIXABLE genuine blocker (blocked_ci, the #382 fixture's own ver
   const s = await runDaemon(
     plan,
     {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => (id) => merged.has(id),
       runOne: async (id): Promise<RunResult> => {
         ran.push(id);
@@ -1846,6 +1907,7 @@ test("W1-T174: an UNFIXABLE genuine blocker still halts + escalates immediately,
   const escalations: Array<{ task: Task; result: RunResult; dependents: string[] }> = [];
   const clock = fakeClock();
   const s = await runDaemon(plan, {
+    ...hostIndependentDaemonDeps(),
     refreshMerged: () => (id) => merged.has(id),
     runOne: async (id): Promise<RunResult> => {
       if (id === "B") {
@@ -1871,6 +1933,7 @@ test("W1-T174: a FIXABLE genuine blocker with NO dispatchFix wired still halts +
   const escalations: Array<{ task: Task; result: RunResult; dependents: string[] }> = [];
   const clock = fakeClock();
   const s = await runDaemon(plan, {
+    ...hostIndependentDaemonDeps(),
     refreshMerged: () => (id) => merged.has(id),
     runOne: async (id): Promise<RunResult> => {
       if (id === "B") {
@@ -1900,6 +1963,7 @@ test("W1-T976: a task whose pull request already merged is not treated as blocke
   const s = await runDaemon(
     plan,
     {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => (id) => merged.has(id),
       runOne: async (id): Promise<RunResult> => {
         if (id === "B") {
@@ -1932,6 +1996,7 @@ test("W1-T976: an already merged task does not block its dependents", async () =
   const s = await runDaemon(
     plan,
     {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => (id) => merged.has(id),
       runOne: async (id): Promise<RunResult> => {
         ran.push(id);
@@ -1962,6 +2027,7 @@ test("W1-T976: no fix rung is dispatched for a task that already merged", async 
   await runDaemon(
     plan,
     {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => (id) => merged.has(id),
       runOne: async (id): Promise<RunResult> => {
         if (id === "B") {
@@ -1987,6 +2053,7 @@ test("W1-T976: a task that genuinely did not merge still blocks", async () => {
   const escalations: Array<{ task: Task; result: RunResult; dependents: string[] }> = [];
   const clock = fakeClock();
   const s = await runDaemon(plan, {
+    ...hostIndependentDaemonDeps(),
     refreshMerged: () => (id) => merged.has(id),
     runOne: async (id): Promise<RunResult> => {
       if (id === "B") {
@@ -2022,6 +2089,7 @@ test("no runnable task right now: the daemon PACES itself (injected clock) and k
   };
   const root = mkdtempSync(join(tmpdir(), "daemon-idle-"));
   const s = await runDaemon(plan, {
+    ...hostIndependentDaemonDeps(),
     refreshMerged: () => isMerged,
     runOne: async (id) => okResult(id),
     checkStop: () => stopDetail(root),
@@ -2039,6 +2107,7 @@ test("default poll interval is passed to the injected clock unless overridden", 
   const seen: number[] = [];
   const root = mkdtempSync(join(tmpdir(), "daemon-poll-ms-"));
   await runDaemon(plan, {
+    ...hostIndependentDaemonDeps(),
     refreshMerged: () => isMerged,
     runOne: async (id) => okResult(id),
     checkStop: () => {
@@ -2060,6 +2129,7 @@ test("--max N halts after N successful tasks (absent = unbounded, unlike a test 
   const s = await runDaemon(
     plan,
     {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => (id) => merged.has(id),
       runOne: async (id) => { merged.add(id); return okResult(id); },
       sleep: clock.sleep,
@@ -2077,6 +2147,7 @@ test("an unexpected error from runOne is a terminal 'error' stop, naming the tas
   const plan = fixturePlan();
   const clock = fakeClock();
   const s = await runDaemon(plan, {
+    ...hostIndependentDaemonDeps(),
     refreshMerged: () => NONE_MERGED,
     runOne: async () => { throw new Error("boom"); },
     sleep: clock.sleep,
@@ -2104,6 +2175,7 @@ test("W1-T3214: a retired-after-selection lane stands down without losing its su
   const s = await runDaemon(
     plan,
     {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => (id) => merged.has(id),
       runOne: async (id) => {
         if (id === "A") {
@@ -2135,6 +2207,7 @@ test("W1-T3214: an invalidated admission is not selected twice from one daemon p
   const s = await runDaemon(
     plan,
     {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => (id) => merged.has(id),
       runOne: async (id) => {
         calls.push(id);
@@ -2156,6 +2229,7 @@ test("W1-T3214: an invalidated admission is not selected twice from one daemon p
 
 test("W1-T3214: an ordinary PlanError from a worker lane remains fatal", async () => {
   const s = await runDaemon(fixturePlan(), {
+    ...hostIndependentDaemonDeps(),
     refreshMerged: () => NONE_MERGED,
     runOne: async () => { throw new PlanError("corrupt plan control"); },
     sleep: async () => {},
@@ -2178,6 +2252,7 @@ test("W1-T3165: a GitHub rate-limit rejection holds in process with bounded back
   const s = await runDaemon(
     plan,
     {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => NONE_MERGED,
       runOne: async () => { throw refusal; },
       checkStop: () => (stopped ? "test completed" : undefined),
@@ -2205,6 +2280,7 @@ test("W1-T3165: one settled worker resets the transient GitHub backoff episode",
   const s = await runDaemon(
     fixturePlan(),
     {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => NONE_MERGED,
       runOne: async (id) => {
         calls++;
@@ -2232,6 +2308,7 @@ test("W1-T3165: a timed-out gh child is transport backpressure even when stderr 
   const s = await runDaemon(
     plan,
     {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => NONE_MERGED,
       runOne: async () => {
         throw Object.assign(new Error("Command failed: gh api repos/craigoley/remudero/pulls"), {
@@ -2255,6 +2332,7 @@ test("W1-T3165: auth refusals and non-GitHub transient prose remain fatal softwa
     new Error("worker wrote: internal server error"),
   ]) {
     const s = await runDaemon(fixturePlan(), {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => NONE_MERGED,
       runOne: async () => { throw rejection; },
       sleep: async () => {},
@@ -2285,6 +2363,7 @@ test("W1-T113: a spawn-infra (blocked_toolchain) failure is NEVER a terminal 'er
     if (calls >= 3) requestStop(root, "test done polling");
   };
   const s = await runDaemon(plan, {
+    ...hostIndependentDaemonDeps(),
     refreshMerged: () => NONE_MERGED,
     runOne: async () => { throw toolchainBlockedError(); },
     checkStop: () => stopDetail(root),
@@ -2305,6 +2384,7 @@ test("W1-T113: repeated spawn-infra failures escalate EXACTLY ONCE per distinct 
     if (calls >= 5) requestStop(root, "test done polling");
   };
   await runDaemon(plan, {
+    ...hostIndependentDaemonDeps(),
     refreshMerged: () => NONE_MERGED,
     runOne: async () => { throw toolchainBlockedError("same cause every time"); },
     onSpawnInfraBlocked: async (info) => { escalations.push({ task: info.task.id, reason: info.reason }); },
@@ -2326,6 +2406,7 @@ test("W1-T113: a DIFFERENT spawn-infra cause escalates again — dedup is conten
     if (calls >= 2) requestStop(root, "test done polling");
   };
   await runDaemon(plan, {
+    ...hostIndependentDaemonDeps(),
     refreshMerged: () => NONE_MERGED,
     runOne: async () => { throw toolchainBlockedError(calls === 0 ? "cause A" : "cause B"); },
     onSpawnInfraBlocked: async (info) => { escalations.push(info.reason); },
@@ -2345,6 +2426,7 @@ test("W1-T113: dispatch backs off with DOUBLING sleeps while sweep keeps running
     if (backoffs.length >= 4) requestStop(root, "test done polling");
   };
   await runDaemon(plan, {
+    ...hostIndependentDaemonDeps(),
     refreshMerged: () => NONE_MERGED,
     runOne: async () => { throw toolchainBlockedError(); },
     sweep: async () => { sweepCalls++; },
@@ -2366,6 +2448,7 @@ test("W1-T113: the backoff is capped at maxSpawnInfraBackoffMs, never grows unbo
   await runDaemon(
     plan,
     {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => NONE_MERGED,
       runOne: async () => { throw toolchainBlockedError(); },
       checkStop: () => stopDetail(root),
@@ -2385,6 +2468,7 @@ test("W1-T113: a THROWING onSpawnInfraBlocked hook does not kill the loop", asyn
     if (calls >= 2) requestStop(root, "test done polling");
   };
   const s = await runDaemon(plan, {
+    ...hostIndependentDaemonDeps(),
     refreshMerged: () => NONE_MERGED,
     runOne: async () => { throw toolchainBlockedError(); },
     onSpawnInfraBlocked: () => { throw new Error("gh unreachable"); },
@@ -2398,6 +2482,7 @@ test("W1-T113: an unrelated throw (no reasonClass) still terminates as an 'error
   const plan = fixturePlan();
   const clock = fakeClock();
   const s = await runDaemon(plan, {
+    ...hostIndependentDaemonDeps(),
     refreshMerged: () => NONE_MERGED,
     runOne: async () => { throw Object.assign(new Error("disk full"), { reasonClass: "blocked_something_else" }); },
     sleep: clock.sleep,
@@ -2532,6 +2617,7 @@ test("a THROWING sweep does not kill the loop — it logs daemon.sweep.failed an
   let sweeps = 0;
   const root = mkdtempSync(join(tmpdir(), "daemon-sweep-throw-"));
   const s = await runDaemon(plan, {
+    ...hostIndependentDaemonDeps(),
     refreshMerged: () => (id: string) => merged.has(id),
     runOne: async (id) => {
       merged.add(id);
@@ -2562,6 +2648,7 @@ test("runDaemon: sweepOrphans runs once per tick and logs daemon.orphan_sweep wi
   const lines: Array<{ step: string; extra?: Record<string, unknown> }> = [];
   const root = mkdtempSync(join(tmpdir(), "daemon-orphan-sweep-"));
   const s = await runDaemon(plan, {
+    ...hostIndependentDaemonDeps(),
     refreshMerged: () => (id: string) => merged.has(id),
     runOne: async (id) => {
       merged.add(id);
@@ -2592,6 +2679,7 @@ test("runDaemon: a THROWING sweepOrphans does not kill the loop — it logs daem
   let sweepCalls = 0;
   const root = mkdtempSync(join(tmpdir(), "daemon-orphan-sweep-throw-"));
   const s = await runDaemon(plan, {
+    ...hostIndependentDaemonDeps(),
     refreshMerged: () => (id: string) => merged.has(id),
     runOne: async (id) => {
       merged.add(id);
@@ -2614,6 +2702,7 @@ test("runDaemon: with no sweepOrphans injected, the loop behaves exactly as befo
   const lines: Array<{ step: string }> = [];
   const root = mkdtempSync(join(tmpdir(), "daemon-no-orphan-sweep-"));
   await runDaemon(plan, {
+    ...hostIndependentDaemonDeps(),
     refreshMerged: () => (id: string) => merged.has(id),
     runOne: async (id) => {
       merged.add(id);
@@ -2863,6 +2952,7 @@ test("W1-T254: the light sweep runs while runOne is in flight, so a green PR wit
   const s = await runDaemon(
     plan,
     {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => (id) => merged.has(id),
       runOne: async (id) => {
         // FALSIFIER: pre-fix, nothing ran again to see a new head until this
@@ -2902,6 +2992,7 @@ test("W1-T254: a THROWING sweepLight does not kill the loop — it logs daemon.s
   const s = await runDaemon(
     plan,
     {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => (id) => merged.has(id),
       runOne: async (id) => {
         await runOneGate;
@@ -2934,6 +3025,7 @@ test("W1-T254: no sweepLight wired -> the daemon dispatches exactly as before th
   const s = await runDaemon(
     plan,
     {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => (id) => merged.has(id),
       runOne: async (id) => {
         merged.add(id);
@@ -2980,6 +3072,7 @@ test("W1-T513: the light pass interval is unchanged by the fix", async () => {
   const s = await runDaemon(
     plan,
     {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => (id) => merged.has(id),
       runOne: async (id) => {
         await runOneGate;
@@ -3017,6 +3110,7 @@ test("W1-T513: a heartbeat alone is not counted as a sweep", async () => {
   const s = await runDaemon(
     plan,
     {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => (id) => merged.has(id),
       runOne: async (id) => {
         await runOneGate;
@@ -3072,6 +3166,7 @@ test("W1-T513: a long tick occupant does not block the light pass", async () => 
     if (sleeps >= 6) requestStop(root, "test done polling");
   };
   const s = await runDaemon(plan, {
+    ...hostIndependentDaemonDeps(),
     refreshMerged: () => isMerged,
     runOne: async (id) => okResult(id),
     sweep: async () => {
@@ -3165,6 +3260,7 @@ test("a THROWING onCircuitBreak hook does not kill the loop", async () => {
   const root = mkdtempSync(join(tmpdir(), "daemon-escalate-throw-"));
   let ticks = 0;
   const s = await runDaemon(plan, {
+    ...hostIndependentDaemonDeps(),
     refreshMerged: () => () => false,
     runOne: async (id) => okResult(id),
     isCircuitTripped: () => true,
@@ -3519,6 +3615,7 @@ test("idle reasons: an idle daemon SAYS why, and does not repeat an unchanged pi
   const s = await runDaemon(
     plan,
     {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => (id) => merged.has(id),
       runOne: async (id) => okResult(id),
       // Bound the otherwise-endless idle loop: stop after the 3rd poll.
@@ -3620,6 +3717,7 @@ test("W1-T1272: an in-cycle full sweep satisfies a stale freshness exit", async 
   // single pass and its order before the final stale read and stop.
   const events: string[] = [];
   const s = await runDaemon(plan, {
+    ...hostIndependentDaemonDeps(),
     refreshMerged: () => NONE_MERGED,
     // W1-T2965 — this was a throwing falsifier reading "dispatch must never be reached once
     // freshness is stale". That absolute form is gone: a lifetime that has completed no cycle is
@@ -3657,6 +3755,7 @@ test("W1-T1272: a stale freshness verdict still ends the boot rather than being 
   const plan = fixturePlan();
   let sweepCompleted = false;
   const s = await runDaemon(plan, {
+    ...hostIndependentDaemonDeps(),
     refreshMerged: () => NONE_MERGED,
     // W1-T2965 — this was a throwing falsifier reading "dispatch must never be reached once
     // freshness is stale". That absolute form is gone: a lifetime that has completed no cycle is
@@ -3688,6 +3787,7 @@ test("W1-T1272: a boot that outlives one iteration runs the full sweep more than
   let sweeps = 0;
   const root = mkdtempSync(join(tmpdir(), "daemon-sweep-retrigger-iterations-"));
   const s = await runDaemon(plan, {
+    ...hostIndependentDaemonDeps(),
     refreshMerged: () => (id: string) => merged.has(id),
     runOne: async (id) => {
       merged.add(id);
@@ -3726,6 +3826,7 @@ test("W1-T1272: a long-held dispatch re-triggers the full sweep more than once w
   const s = await runDaemon(
     plan,
     {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => (id) => merged.has(id),
       runOne: async (id) => {
         await runOneGate;
@@ -3757,6 +3858,7 @@ test("W1-T1272: an over-running sweep is still abandoned when reached from the s
   const s = await runDaemon(
     fixturePlan(),
     {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => NONE_MERGED,
       // W1-T2965 — this was a throwing falsifier reading "dispatch must never be reached once
       // freshness is stale". That absolute form is gone: a lifetime that has completed no cycle is
@@ -3800,6 +3902,7 @@ test("a settled full sweep is not held hostage by an in-flight light pass during
   const daemon = runDaemon(
     fixturePlan(),
     {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => NONE_MERGED,
       runOne: async (id) => okResult(id),
       sweep: async () => { await sweepSettled; },
@@ -3834,6 +3937,7 @@ test("a rejected detached ticker is logged after shutdown instead of becoming an
   const daemon = runDaemon(
     fixturePlan(),
     {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => NONE_MERGED,
       runOne: async (id) => okResult(id),
       sweep: async () => {},
@@ -3861,6 +3965,7 @@ test("W1-T9563 (inverts W1-T2584): the daemon sweep bound leaves the continuatio
   const summary = await runDaemon(
     fixturePlan(),
     {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => NONE_MERGED,
       // W1-T2965 — this was a throwing falsifier reading "dispatch must never be reached once
       // freshness is stale". That absolute form is gone: a lifetime that has completed no cycle is
@@ -3895,6 +4000,7 @@ test("W1-T2584: the continuation gate re-checks both existing STOP and PAUSE con
   const summary = await runDaemon(
     fixturePlan(),
     {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => (taskId) => merged.has(taskId),
       runOne: async (taskId) => {
         merged.add(taskId);
@@ -3946,6 +4052,7 @@ test("W1-T1272: the sweep still runs one at a time and no additional lane is tak
   const s = await runDaemon(
     plan,
     {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => (id) => merged.has(id),
       runOne: async (id) => {
         runOneCalls += 1;
@@ -4076,10 +4183,14 @@ test("a repo-scoped kick is consumed once without consuming another repository's
     requestKick(root, task.id, "foreign-intent", "console");
     requestKick(root, task.id, "owned-intent", task.repo);
     const spawned: string[] = [];
-    await runDaemon(plan, { refreshMerged: () => NONE_MERGED, targetRepo: task.repo,
+    await runDaemon(plan, {
+      ...hostIndependentDaemonDeps(),
+      refreshMerged: () => NONE_MERGED,
+      targetRepo: task.repo,
       runOne: async id => { spawned.push(id); return okResult(id); },
       ...daemonKickPort(root, { repo: task.repo, isSelf: true }),
-      sleep: async () => {} }, { headroomEnabled: false, max: 1 });
+      sleep: async () => {},
+    }, { headroomEnabled: false, max: 1 });
     assert.deepEqual(spawned, [task.id]);
     assert.equal(existsSync(kickFilePath(root, task.id, task.repo)), false);
     assert.equal(existsSync(kickFilePath(root, task.id, "console")), true);
@@ -4097,12 +4208,16 @@ test("an old kick cannot bypass an existing PR or unreadable ownership", async (
       requestKick(root, task.id, "stale-kick", task.repo);
       const spawned: string[] = [];
       const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
-      await runDaemon(plan, { refreshMerged: () => NONE_MERGED, targetRepo: task.repo,
+      await runDaemon(plan, {
+        ...hostIndependentDaemonDeps(),
+        refreshMerged: () => NONE_MERGED,
+        targetRepo: task.repo,
         isOpenPr: () => unknown ? undefined : 14729, isCreditIndeterminate: () => unknown,
         runOne: async id => { spawned.push(id); return okResult(id); },
         ...daemonKickPort(root, { repo: task.repo, isSelf: true }),
         checkStop: () => stopDetail(root), sleep: async () => { requestStop(root, "fixture complete"); },
-        log: (step, extra = {}) => lines.push({ step, extra }) }, { headroomEnabled: false, max: 1 });
+        log: (step, extra = {}) => lines.push({ step, extra }),
+      }, { headroomEnabled: false, max: 1 });
       assert.deepEqual(spawned, []);
       assert.equal(existsSync(kickFilePath(root, task.id, task.repo)), unknown, "unknown ownership retains the intent; a known existing PR disposes the stale request");
       assert.ok(lines.some(row => row.step === (unknown ? "console.kick_held" : "console.kick_refused")));
@@ -4120,6 +4235,7 @@ test("W1-T11600 criterion 1: absent secondary snapshot preserves single-plan can
   const ran: string[] = [];
   const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
   const summary = await runDaemon(plan, {
+    ...hostIndependentDaemonDeps(),
     refreshMerged: () => (id) => merged.has(id),
     runOne: async (id) => { ran.push(id); merged.add(id); return okResult(id); },
     sleep: fakeClock().sleep,
@@ -4245,6 +4361,7 @@ test("W1-T11600 criterion 4: secondary catalog shadow cannot alter dispatch", as
   const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
   let shadowExtra: Record<string, unknown> | undefined;
   const summary = await runDaemon(plan, {
+    ...hostIndependentDaemonDeps(),
     refreshMerged: () => (id) => merged.has(id),
     secondaryPlanForShadow: secondaryPlan,
     targetRepo: "remudero",
@@ -4272,6 +4389,7 @@ test("W1-T11600 criterion 4: secondary catalog shadow cannot alter dispatch", as
   let secondaryBreakerReads = 0;
   let deferredShadow: Record<string, unknown> | undefined;
   await runDaemon(plan, {
+    ...hostIndependentDaemonDeps(),
     refreshMerged: () => (id) => breakerMerged.has(id),
     secondaryPlanForShadow: secondaryPlan,
     isIndeterminate: (id) => {
@@ -4353,6 +4471,7 @@ test("W1-T11790 criterion 1: a retro still running past the shadow duration is l
   const retro = adoptedRetroChild("retro-c1-run", 4242);
   const clock = retroTickClock(7);
   await runDaemon(fixturePlan(), {
+    ...hostIndependentDaemonDeps(),
     refreshMerged: () => mergedSetOf("A", "B", "C", "D"),
     runOne: async (id) => okResult(id),
     sleep: fakeClock().sleep,
@@ -4391,6 +4510,7 @@ test("W1-T11790 criterion 1: a spawned retro's overrun row includes its child pi
     let checks = 0;
     const clock = retroTickClock(7);
     await runDaemon(fixturePlan(), {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => mergedSetOf("A", "B", "C", "D"),
       runOne: async (id) => okResult(id),
       sleep: fakeClock().sleep,
@@ -4426,6 +4546,7 @@ test("W1-T11790 criterion 2: a retro that finishes within the shadow duration pr
   // Fired on tick 1 at T0+25 min; ticks 2 and 3 observe it at 0 and 25 min; tick 3's stop check (T0+75) ends it at 50.
   const clock = retroTickClock(7, (tick) => { if (tick === 3) releaseRetro(); });
   await runDaemon(fixturePlan(), {
+    ...hostIndependentDaemonDeps(),
     refreshMerged: () => mergedSetOf("A", "B", "C", "D"),
     runOne: async (id) => okResult(id),
     sleep: fakeClock().sleep,
@@ -4465,6 +4586,7 @@ test("W1-T11790 criterion 3: every retro that ends, in time or not, ledgers one 
       if (n === 8) failInProcess(new Error("retro subprocess exited 1"));
     });
     await runDaemon(fixturePlan(), {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => mergedSetOf("A", "B", "C", "D"),
       runOne: async (id) => okResult(id),
       sleep: fakeClock().sleep,
@@ -4509,6 +4631,7 @@ test("W1-T11790 criterion 4: the overrun and duration rows are observation only;
     // The control's retro ends at tick 2 (25 min), the subject's never during the run.
     const clock = retroTickClock(7, (tick) => { if (!overrun && tick === 1) retro.release(); });
     const summary = await runDaemon(fixturePlan(), {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => (id) => merged.has(id),
       runOne: async (id) => { attempted.push(id); merged.add(id); return okResult(id); },
       sleep: fakeClock().sleep,
