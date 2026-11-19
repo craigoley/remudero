@@ -1,0 +1,40 @@
+- id: W1-T13763
+  title: "When a home-repo overlay registry is configured but unreadable, an instance is never resolved live"
+  repo: remudero
+  depends_on:
+    - W1-T13757
+  priority: 1
+  type: implement
+  verify: auto
+  risk: high # Rule 19 sizing: arming and merging decisions read this mode; refusal must not stall a live fleet
+  origin: "operator-session#pocock-rescan-2026-11-18"
+  plan_refs:
+    - W1-T13729
+    - W1-T13700
+  files:
+    - src/lib/overlay-home.ts
+    - src/lib/instance-mode.ts
+    - test/daemon/an-unreadable-overlay-registry-is-never-live.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "With the overlay pointer set, core's registry absent and the overlay unreadable, instanceMode does not return live"
+      proof: 'grep: W1-T13763 criterion 1 in test/daemon/an-unreadable-overlay-registry-is-never-live.test.ts'
+    - claim: "invariant:legacy-mode-unchanged — With no overlay pointer, the documented legacy policy is unchanged: a missing registry still resolves live"
+      proof: 'grep: W1-T13763 criterion 2 in test/daemon/an-unreadable-overlay-registry-is-never-live.test.ts'
+    - claim: "instance-mode reads the pointer through its parser"
+      proof: 'grep: parseOverlayHome( in src/lib/instance-mode.ts'
+  rationale: |
+    W1-T13729 found readInstanceRegistryText returns undefined for a missing file and instanceMode resolves that to
+    live. Once core's copy becomes an example, a shadow instance whose overlay cannot be read would start arming and
+    merging. The selected-registry path already throws on a mismatch; the legacy path does not.
+  design: |
+    Add parseOverlayHome in src/lib/overlay-home.ts for the W1-T13757 pointer, called from instance-mode.ts. When the
+    pointer declares an overlay registry and it cannot be read, return a third outcome the
+    callers see as refusal (unknown), never live. The no-pointer path keeps its documented live default.
+    INVARIANT legacy-mode-unchanged: with no overlay pointer, instanceMode's answers are unchanged for every input.
+  falsifier: |
+    Return live on the overlay-unreadable branch: criterion 1 fails.
+  note: |
+    Id reserved for run-unfiled-1795050000009 with ~/rmd-work/bin/reserve-id.sh.
+    reservation hand-off: run-unfiled-1795050000009 -> claude/project-thread-eatx1y
