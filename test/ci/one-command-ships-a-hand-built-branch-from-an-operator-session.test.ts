@@ -6,10 +6,11 @@ import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { test, type TestContext } from "node:test";
 // @ts-expect-error The installed author entrypoint has no declaration file.
-import { authorPushEligibility } from "#scripts/preflight-author.mjs";
+import { authorPushEligibility, pinnedNodeReexec } from "#scripts/preflight-author.mjs";
 import { handShipEffects, runHandShip, type HandShipEffects, type ShipReceipt } from "#src/lib/hand-ship.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { HANDLERS } from "#test/helpers/run-task-test.js";
 
 const head = "1".repeat(40);
@@ -286,6 +287,7 @@ test("a stop requested during PR publication leaves the run stopped", async (t) 
 function seedHandBranch(repo: GitRepo, withTest = false): string {
   repo.addRemote("origin", "https://github.com/example/repo.git");
   writeFileSync(join(repo.dir, "package-lock.json"), "{}\n");
+  writeFileSync(join(repo.dir, ".nvmrc"), readFileSync(join(REPO_ROOT, ".nvmrc"), "utf8"));
   writeFileSync(join(repo.dir, ".gitignore"), "node_modules\ncoverage/\n");
   mkdirSync(join(repo.dir, "node_modules"));
   if (withTest) {
@@ -293,7 +295,7 @@ function seedHandBranch(repo: GitRepo, withTest = false): string {
     writeFileSync(join(repo.dir, file), "");
     repo.git("add", file);
   }
-  repo.git("add", "package-lock.json", ".gitignore");
+  repo.git("add", "package-lock.json", ".gitignore", ".nvmrc");
   repo.git("commit", "-m", "base with dependency donor");
   const base = repo.git("rev-parse", "HEAD");
   repo.git("switch", "-c", branch);
@@ -351,12 +353,16 @@ test("the launcher passes the frozen head to preflight under nice and reads comp
     },
   };
   const source = await defaults.readSource(repo.dir, run);
-  const workspace = await defaults.prepare(linux, source, run);
+  const workspace = await defaults.prepare({ ...linux, kind: "mac" }, source, run);
   try {
     const observed = await workspace.preflight("low");
     assert.equal(observed.headSha, source.head);
     assert.equal(observed.baseSha, base);
-    assert.deepEqual(spawned[0], ["-n", "10", "node", "--import", "tsx", "scripts/preflight-author.mjs",
+    const pin = readFileSync(join(repo.dir, ".nvmrc"), "utf8").trim();
+    const pinned = process.versions.node === pin ? process.execPath
+      : pinnedNodeReexec({ pin, current: process.versions.node, env: process.env }).reexec;
+    assert.ok(pinned, "the .nvmrc Node is present on the local Mac");
+    assert.deepEqual(spawned[0], ["-n", "10", pinned, "--import", "tsx", "scripts/preflight-author.mjs",
       "--head-ref", branch, "--head-sha", source.head]);
     assert.deepEqual(await workspace.rerun("head", file, source.head), [
       { file, title: "existing red", location: "1:1", fileLevel: false, failed: true },

@@ -42,6 +42,7 @@ interface AuthorTools {
   authorPushEligibility(receipt: ShipReceipt): { pushEligible: boolean; pushEligibleReason: string };
   failingTestsFromTap(output: string, root: string): FailingTest[];
   testResultsFromTap(output: string, root: string): FailingTest[];
+  pinnedNodeReexec(input: { pin: string; current: string; env: NodeJS.ProcessEnv }): { reexec?: string; refuse?: string };
   testSummary(output: string): { pass: number; fail: number; cancelled: number } | null;
 }
 
@@ -480,7 +481,17 @@ async function prepareWorkspace(host: ShipHost, source: ShipSource, run: ShipRun
     await command(["cmp", "-s", join(headDir, "package-lock.json"), join(donor, "package-lock.json")]);
     await command(["ln", "-s", join(donor, "node_modules"), join(headDir, "node_modules")]);
     let priority: Priority = "normal";
-    const node = (args: string[]) => priority === "low" ? ["/usr/bin/nice", "-n", "10", "node", ...args] : ["node", ...args];
+    let nodeExecutable = "node";
+    if (host.target === "local" && host.kind === "mac") {
+      const pin = readFileSync(join(source.root, ".nvmrc"), "utf8").trim().replace(/^v/, "");
+      if (process.versions.node === pin) nodeExecutable = process.execPath;
+      else {
+        const located = (await authorTools()).pinnedNodeReexec({ pin, current: process.versions.node, env: process.env });
+        if (!located.reexec) throw new Error(located.refuse ?? `the pinned Node ${pin} could not be located`);
+        nodeExecutable = located.reexec;
+      }
+    }
+    const node = (args: string[]) => priority === "low" ? ["/usr/bin/nice", "-n", "10", nodeExecutable, ...args] : [nodeExecutable, ...args];
     let baseCut = false;
     return {
       async preflight(requested) {
