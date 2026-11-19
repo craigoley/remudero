@@ -22,7 +22,7 @@ interface ShipHost {
 }
 
 interface ShipSource { root: string; branch: string; head: string; origin: string }
-interface FailingTest { file: string | null; title: string }
+interface FailingTest { file: string | null; title: string; location?: string | null; failed?: boolean }
 type Priority = "low" | "normal";
 type FailureClass = "caused by the change" | "caused by the host" | "also failing on main";
 
@@ -41,6 +41,7 @@ interface AuthorTools {
   authorEnvironment(parent: NodeJS.ProcessEnv): NodeJS.ProcessEnv;
   authorPushEligibility(receipt: ShipReceipt): { pushEligible: boolean; pushEligibleReason: string };
   failingTestsFromTap(output: string, root: string): FailingTest[];
+  testResultsFromTap(output: string, root: string): FailingTest[];
   testSummary(output: string): { pass: number; fail: number; cancelled: number } | null;
 }
 
@@ -69,7 +70,7 @@ export interface HandShipEffects {
   readSource(cwd: string, run: ShipRun): Promise<ShipSource>;
   prepare(host: ShipHost, source: ShipSource, run: ShipRun): Promise<{
     preflight(priority: Priority): Promise<ShipReceipt>;
-    rerun(tree: "head" | "main", file: string, sha: string): Promise<string[]>;
+    rerun(tree: "head" | "main", file: string, sha: string, title?: string): Promise<FailingTest[]>;
     close(): Promise<void>;
   }>;
   push(source: ShipSource, run: ShipRun): Promise<void>;
@@ -146,39 +147,39 @@ async function compareFailures(receipt: ShipReceipt, workspace: Awaited<ReturnTy
       return withEvidence;
     }
     for (const file of [...new Set(suites)].sort()) {
-      for (const title of await workspace.rerun("head", file, receipt.headSha)) tests.push({ file, title });
+      tests.push(...(await workspace.rerun("head", file, receipt.headSha)).filter((test) => test.failed));
     }
     if (tests.length !== summary.fail) {
       run.log("workflow contract failure comparison unavailable: isolated head reruns did not account for every failure");
       return withEvidence;
     }
   }
-  if (tests.length !== summary.fail) {
+  if (tests.length !== summary.fail || tests.some(({ location }) => typeof location !== "string" || !/^\d+:\d+$/.test(location))) {
     run.log("test failure comparison unavailable: the preflight did not completely name its failures");
     return withEvidence;
   }
-  const files = [...new Set(tests.map((test) => test.file!))].sort();
-  const head = new Map<string, string[]>();
-  const main = new Map<string, string[]>();
-  for (const file of files) head.set(file, [...await workspace.rerun("head", file, receipt.headSha)]);
-  for (const file of files) main.set(file, [...await workspace.rerun("main", file, receipt.baseSha)]);
-  const counts = (values: string[]) => values.reduce((result, value) => result.set(value, (result.get(value) ?? 0) + 1), new Map<string, number>());
-  const ambiguous = (file: string, title: string) => [tests.filter((test) => test.file === file).map((test) => test.title),
-    head.get(file)!, main.get(file)!].some((values) => (counts(values).get(title) ?? 0) > 1);
-  const rows = tests.map((test) => {
-    const headFailures = head.get(test.file!)!;
-    const mainFailures = main.get(test.file!)!;
-    const here = headFailures.includes(test.title);
-    const there = here && mainFailures.includes(test.title);
-    // Titles do not uniquely identify node:test cases. Treat a duplicate title as change-caused
-    // evidence so it can never authorize a push by matching a different test on main.
-    const classification: FailureClass = headFailures.length === 0 ? "caused by the host"
-      : ambiguous(test.file!, test.title) ? "caused by the change"
-        : !here ? "caused by the change" : there ? "also failing on main" : "caused by the change";
+  const rerun = async (tree: "head" | "main", test: FailingTest, sha: string) =>
+    workspace.rerun(tree, test.file!, sha, test.title);
+  const rows = [];
+  for (const test of tests) {
+    const headFailures = await rerun("head", test, receipt.headSha);
+    const mainFailures = await rerun("main", test, receipt.baseSha);
+    const same = (other: FailingTest) => other.file === test.file && other.title === test.title && other.location === test.location;
+    const headMatches = headFailures.filter(same);
+    const mainMatches = mainFailures.filter(same);
+    const headExactFailures = headMatches.filter((result) => result.failed === true);
+    const mainExactFailures = mainMatches.filter((result) => result.failed === true);
+    const headHasPass = headFailures.some((result) => result.file === test.file && result.title === test.title && result.failed === false);
+    const headHasFailure = headFailures.some((result) => result.failed === true);
+    // A title pattern can include same-title siblings. Only the same file, title, and TAP
+    // source location can establish that this individual test also fails on main.
+    const classification: FailureClass = !headHasFailure && headHasPass ? "caused by the host"
+      : headExactFailures.length === 1 && mainExactFailures.length === 1 ? "also failing on main"
+        : "caused by the change";
     run.log(`${classification}: ${test.file} :: ${test.title}`);
-    return { ...test, state: classification === "also failing on main" ? "also-red"
-      : classification === "caused by the host" ? "unattributed" : "only-head" };
-  });
+    rows.push({ ...test, state: classification === "also failing on main" ? "also-red"
+      : classification === "caused by the host" ? "unattributed" : "only-head" });
+  }
   return { ...withEvidence, failureAttribution: {
     // The installed judge calls the comparison SHA mergeBase. Here it is the exact main SHA run above.
     base: { mergeBase: receipt.baseSha }, tests: rows,
@@ -497,8 +498,8 @@ async function prepareWorkspace(host: ShipHost, source: ShipSource, run: ShipRun
         }
         return receipt;
       },
-      async rerun(tree, file, sha) {
-        run.log(`isolated rerun on ${tree} ${sha}: ${file}`);
+      async rerun(tree, file, sha, title) {
+        run.log(`isolated rerun on ${tree} ${sha}: ${file}${title === undefined ? "" : ` :: ${title}`}`);
         if (tree === "main" && !baseCut) {
           await git(["diff", "--quiet", source.head, sha, "--", "package-lock.json"]);
           await command(["git", "clone", "--shared", "--no-checkout", "--", headDir, mainDir]);
@@ -514,17 +515,20 @@ async function prepareWorkspace(host: ShipHost, source: ShipSource, run: ShipRun
         if (available.code === 1 && tree === "main") return [];
         checked(available, `${tree} test ${file}`);
         await command(["test", "!", "-L", file], { cwd });
-        const args = proofTestRunnerArgs(["--test", "--test-reporter=tap", "--test-concurrency=1", "--import", "tsx",
-          "--import", "./test/setup/tmp-hygiene.ts", file], source.root, [file]);
+        const namePattern = title === undefined ? [] : ["--test-name-pattern", `^${title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`];
+        const args = proofTestRunnerArgs(["--test", "--test-reporter=tap", "--test-concurrency=1", ...namePattern,
+          "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", file], source.root, [file]);
         const result = await hostCommand(host, run, node(args), { cwd, record: true });
-        const { testSummary, failingTestsFromTap } = await authorTools();
+        const { testSummary, failingTestsFromTap, testResultsFromTap } = await authorTools();
         const summary = testSummary(result.stdout);
         const failures = failingTestsFromTap(result.stdout, cwd);
+        const results = testResultsFromTap(result.stdout, cwd);
         if (result.truncated || !summary || summary.cancelled !== 0 ||
           (result.code !== 0 && result.code !== 1) || failures.length !== summary.fail ||
-          (result.code === 0 ? summary.pass === 0 || summary.fail !== 0 : summary.fail === 0) ||
+          (title === undefined && result.code === 0 ? summary.pass === 0 || summary.fail !== 0 : false) ||
+          (title !== undefined && results.length === 0) ||
           failures.some((failure) => failure.file !== file)) throw new Error(`${tree} ${file}: isolated rerun had no complete test result`);
-        return failures.map(({ title }) => title);
+        return results.map((test) => test.file === null ? { ...test, file } : test);
       },
       close,
     };

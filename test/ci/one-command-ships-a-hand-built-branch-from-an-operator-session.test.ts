@@ -33,8 +33,16 @@ function redReceipt(titles: string[]): ShipReceipt {
     name: "affected-tests", ok: false, judge: { given: 1, reported: 1 },
     diagnostics: { mayBeIncomplete: false }, testSummary: { pass: 1, fail: titles.length, cancelled: 0 },
   };
-  result.failureAttribution = { tests: titles.map((title) => ({ file, title })) };
+  result.failureAttribution = { tests: titles.map((title, index) => ({ file, title, location: `${index + 1}:1` })) };
   return result;
+}
+
+function rerunResults(titles: string[]): { file: string; title: string; location: string; failed: boolean }[] {
+  return titles.map((title, index) => ({ file, title, location: `${index + 1}:1`, failed: true }));
+}
+
+function passingResults(titles: string[]): { file: string; title: string; location: null; failed: boolean }[] {
+  return titles.map((title) => ({ file, title, location: null, failed: false }));
 }
 
 function fixture(t: TestContext) {
@@ -93,24 +101,27 @@ test("W1-T12169 criterion 2 asks the Mac launcher for low priority", async (t) =
 test("W1-T12169 criterion 3 compares isolated head failures with unchanged main on the same host", async (t) => {
   const f = fixture(t);
   f.workspace.preflight = async () => redReceipt(["flake", "existing red", "regression"]);
-  f.workspace.rerun = async (tree, target, sha) => {
-    f.calls.push(`${tree} ${target} ${sha}`);
-    return tree === "head" ? ["existing red", "regression"] : ["existing red"];
+  f.workspace.rerun = async (tree, target, sha, title) => {
+    f.calls.push(`${tree} ${target} ${sha} ${title ?? ""}`);
+    if (title === "existing red") return [{ file, title, location: "2:1", failed: true }];
+    if (title === "regression" && tree === "head") return [{ file, title, location: "3:1", failed: true }];
+    return [];
   };
   assert.equal(await runHandShip(f.args, f.options, f.effects), 1);
-  assert.deepEqual(f.calls, [`prepare mac`, `head ${file} ${head}`, `main ${file} ${main}`, "close"]);
+  assert.deepEqual(f.calls, [`prepare mac`, `head ${file} ${head} flake`, `main ${file} ${main} flake`,
+    `head ${file} ${head} existing red`, `main ${file} ${main} existing red`,
+    `head ${file} ${head} regression`, `main ${file} ${main} regression`, "close"]);
   assert.match(f.lines.join("\n"), /caused by the change.*flake/);
   assert.match(f.lines.join("\n"), /also failing on main.*existing red/);
   assert.match(f.lines.join("\n"), /caused by the change.*regression/);
 });
 
-test("a red head rerun with a different failing title is never classified as a host failure", async (t) => {
+test("an exact named test that reruns green is classified as host-caused", async (t) => {
   const f = fixture(t);
   f.workspace.preflight = async () => redReceipt(["original failure"]);
-  f.workspace.rerun = async (tree) => tree === "head" ? ["different sibling failure"] : [];
+  f.workspace.rerun = async (tree) => tree === "head" ? passingResults(["original failure"]) : [];
   assert.equal(await runHandShip(f.args, f.options, f.effects), 1);
-  assert.match(f.lines.join("\n"), /caused by the change.*original failure/);
-  assert.doesNotMatch(f.lines.join("\n"), /caused by the host/);
+  assert.match(f.lines.join("\n"), /caused by the host.*original failure/);
 });
 
 test("workflow contract failures are isolated on head and unchanged main before the run is refused", async (t) => {
@@ -120,13 +131,14 @@ test("workflow contract failures are isolated on head and unchanged main before 
     steps: [{ name: "census-precheck", ok: true }, { name: "workflow-contract-precheck", ok: false,
       suites: [file], diagnostics: { mayBeIncomplete: false }, testSummary: { pass: 1, fail: 1, cancelled: 0 } }],
   });
-  f.workspace.rerun = async (tree, target) => {
-    f.calls.push(`${tree} ${target}`);
-    return tree === "head" ? ["head contract failure"] : ["main contract failure"];
+  f.workspace.rerun = async (tree, target, _sha, title) => {
+    f.calls.push(`${tree} ${target} ${title ?? ""}`);
+    return tree === "head" ? rerunResults(["head contract failure"]) : rerunResults(["main contract failure"]);
   };
   assert.equal(await runHandShip(f.args, f.options, f.effects), 1);
   assert.match(f.lines.join("\n"), /caused by the change.*head contract failure/);
-  assert.deepEqual(f.calls.filter((call) => /^(head|main) /.test(call)), [`head ${file}`, `head ${file}`, `main ${file}`]);
+  assert.deepEqual(f.calls.filter((call) => /^(head|main) /.test(call)),
+    [`head ${file} `, `head ${file} head contract failure`, `main ${file} head contract failure`]);
   assert.ok(!f.calls.some((call) => call.startsWith("push")));
 });
 
@@ -135,14 +147,14 @@ test("W1-T12169 criterion 4 gives the installed receipt judge complete compariso
   const original = redReceipt(["existing one", "existing two"]);
   assert.equal(authorPushEligibility(original).pushEligible, false);
   f.workspace.preflight = async () => original;
-  f.workspace.rerun = async () => ["existing one", "existing two"];
+  f.workspace.rerun = async () => rerunResults(["existing one", "existing two"]);
   assert.equal(await runHandShip(f.args, f.options, f.effects), 0);
   assert.match(f.lines.join("\n"), /also failing on main.*existing one/);
   assert.match(f.lines.join("\n"), /also failing on main.*existing two/);
   assert.deepEqual(f.calls.slice(-3), [`push ${head}`, "publish", "check stored body"]);
 
   f.calls.length = 0;
-  f.workspace.rerun = async (tree) => tree === "head" ? ["existing one", "existing two"] : ["existing one"];
+  f.workspace.rerun = async (tree) => rerunResults(tree === "head" ? ["existing one", "existing two"] : ["existing one"]);
   assert.equal(await runHandShip(f.args, f.options, f.effects), 1);
   assert.ok(!f.calls.some((call) => call.startsWith("push")));
 
@@ -229,12 +241,25 @@ test("an amendment reuses the open PR and requires its own acceptance block befo
   assert.ok(!f.calls.some((call) => call.startsWith("push")));
 });
 
-test("one occurrence on main cannot account for two failures with the same title", async (t) => {
+test("one occurrence on main accounts for only the same-location failure with a duplicate title", async (t) => {
   const f = fixture(t);
   f.workspace.preflight = async () => redReceipt(["duplicate", "duplicate"]);
-  f.workspace.rerun = async (tree) => tree === "head" ? ["duplicate", "duplicate"] : ["duplicate"];
+  f.workspace.rerun = async (tree) => rerunResults(tree === "head" ? ["duplicate", "duplicate"] : ["duplicate"]);
   assert.equal(await runHandShip(f.args, f.options, f.effects), 1);
-  assert.doesNotMatch(f.lines.join("\n"), /also failing on main.*duplicate/);
+  assert.match(f.lines.join("\n"), /also failing on main.*duplicate/);
+  assert.match(f.lines.join("\n"), /caused by the change.*duplicate/);
+  assert.ok(!f.calls.some((call) => call.startsWith("push")));
+});
+
+test("different same-title failures at distinct source locations never become base-red evidence", async (t) => {
+  const f = fixture(t);
+  const original = redReceipt(["duplicate"]);
+  original.failureAttribution!.tests![0]!.location = "10:1";
+  f.workspace.preflight = async () => original;
+  f.workspace.rerun = async (tree) => rerunResults(tree === "head" ? ["duplicate"] : ["duplicate"]).map((result) => ({
+    ...result, location: tree === "head" ? "10:1" : "20:1",
+  }));
+  assert.equal(await runHandShip(f.args, f.options, f.effects), 1);
   assert.match(f.lines.join("\n"), /caused by the change.*duplicate/);
   assert.ok(!f.calls.some((call) => call.startsWith("push")));
 });
@@ -333,8 +358,16 @@ test("the launcher passes the frozen head to preflight under nice and reads comp
     assert.equal(observed.baseSha, base);
     assert.deepEqual(spawned[0], ["-n", "10", "node", "--import", "tsx", "scripts/preflight-author.mjs",
       "--head-ref", branch, "--head-sha", source.head]);
-    assert.deepEqual(await workspace.rerun("head", file, source.head), ["existing red"]);
-    assert.deepEqual(await workspace.rerun("main", file, base), ["existing red"]);
+    assert.deepEqual(await workspace.rerun("head", file, source.head), [
+      { file, title: "existing red", location: "1:1", fileLevel: false, failed: true },
+    ]);
+    assert.deepEqual(await workspace.rerun("head", file, source.head, "existing red"), [
+      { file, title: "existing red", location: "1:1", fileLevel: false, failed: true },
+    ]);
+    assert.ok(spawned.at(-1)!.includes("--test-name-pattern"), "the isolated rerun selects the named failure");
+    assert.deepEqual(await workspace.rerun("main", file, base), [
+      { file, title: "existing red", location: "1:1", fileLevel: false, failed: true },
+    ]);
     assert.ok(spawned.slice(1).every((args) => args.includes("--test-concurrency=1") && args.at(-1) === file));
     receiptBound = false;
     await assert.rejects(workspace.preflight("low"), /did not issue a receipt for this branch/);

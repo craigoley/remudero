@@ -12,8 +12,8 @@ import { makeTempDir } from "#src/lib/tmp.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
-type Failing = { file: string | null; title: string; fileLevel?: boolean };
-type Entry = { file: string | null; title: string; state: string; reason: string };
+type Failing = { file: string | null; title: string; location?: string | null; fileLevel?: boolean };
+type Entry = { file: string | null; title: string; location?: string | null; state: string; reason: string };
 type Counts = { failingAtHead: number; alsoFailingAtBase: number; failingOnlyAtHead: number; unattributed: number };
 type Result = { tests: Entry[]; unnamed: number; counts: Counts; cleanup: { removed: boolean; reason?: string }; base: { boundMs?: number } };
 type Raw = { status: number | null; signal?: string | null; stdout?: string; stderr?: string; error?: Error; outputComplete?: boolean };
@@ -21,6 +21,7 @@ type Receipt = { verdict: string; pushEligible: boolean; pushEligibleReason: str
   failureAttribution?: { counts: Counts; tests: Entry[]; cleanup: { removed: boolean } } };
 const author = authorModule as unknown as {
   failingTestsFromTap(output: string, root: string): Failing[];
+  testResultsFromTap(output: string, root: string): Array<Failing & { failed: boolean }>;
   headFilesMs(durations: unknown, files: string[], stageMs: number): number;
   attributeFailures(input: Record<string, unknown>): Result;
   attributionLines(result: Result): string[];
@@ -42,10 +43,10 @@ after(() => {
 const HEAD = "a".repeat(40), BASE = "b".repeat(40), MERGE_BASE = "c".repeat(40);
 const ok = (stdout = ""): Raw => ({ status: 0, signal: null, stdout, stderr: "" });
 /** A TAP report as node 24 prints it: one failing leaf, its location diagnostic naming the file. */
-const tap = (root: string, ...failures: Array<[file: string, title: string]>): string => [
+const tap = (root: string, ...failures: Array<[file: string, title: string, location?: string]>): string => [
   "TAP version 13",
   ...failures.flatMap(([file, title], index) => [`# Subtest: ${title}`, `not ok ${index + 1} - ${title}`, "  ---", "  duration_ms: 1", "  type: 'test'",
-    `  location: '${join(root, file)}:1:1'`, "  failureType: 'testCodeFailure'", "  ..."]),
+    `  location: '${join(root, file)}:${failures[index]![2] ?? "1:1"}'`, "  failureType: 'testCodeFailure'", "  ..."]),
   `# tests ${failures.length + 2}`, "# suites 0", "# pass 2", `# fail ${failures.length}`, "# cancelled 0", "# skipped 0", "# todo 0", ""].join("\n");
 
 /** A scripted Git for the merge base and the scratch worktree, recording every call; `held` are the files the base has. */
@@ -73,7 +74,8 @@ const attribute = (failing: Failing[], seams: { git: (args: string[]) => Raw; ru
   return author.attributeFailures({ root: REPO_ROOT, baseSha: BASE, headSha: HEAD, failing, headMs: 5000, nodeModules: dependencies,
     runnerArgs: (files: string[]) => ["--test", ...files], ...seams, ...extra });
 };
-const failing: Failing[] = [{ file: "test/a.test.ts", title: "red at both" }, { file: "test/a.test.ts", title: "red only here" }, { file: "test/new.test.ts", title: "new file" }];
+const failing: Failing[] = [{ file: "test/a.test.ts", title: "red at both", location: "1:1" },
+  { file: "test/a.test.ts", title: "red only here", location: "1:1" }, { file: "test/new.test.ts", title: "new file", location: "1:1" }];
 const byTitle = (result: Result) => Object.fromEntries(result.tests.map((test) => [test.title, test.state]));
 
 test("W1-T13215 criterion 1: the failing files, and only those the base holds, run again at the merge base in a scratch worktree that is removed", () => {
@@ -178,7 +180,7 @@ if (readFileSync("node_modules/marker", "utf8") === "author donor") {
     ...process.env, RMD_ATTRIBUTION_FIXTURE_DONOR: donor, RMD_ATTRIBUTION_FIXTURE_FOREIGN: foreign,
   } });
   const run = (runBase: (run: Run) => Raw) => author.attributeFailures({
-    root, baseSha: base, headSha: base, failing: [{ file, title: "red at both" }],
+    root, baseSha: base, headSha: base, failing: [{ file, title: "red at both", location: "4:3" }],
     headMs: 30_000, nodeModules: donor, git, runBase,
     runnerArgs: (files: string[]) => ["--test", "--test-reporter=tap", ...files],
   });
@@ -259,6 +261,18 @@ test("W1-T13215 criterion 2: a base run that is cut short, cannot be set up or r
   // A test with no file under this checkout has nothing to look up.
   const noFile = attribute([{ file: null, title: "elsewhere" }], { git, runBase: () => ok() });
   assert.deepEqual(noFile.tests.map((test) => test.state), ["unattributed"]);
+});
+
+test("same-title tests at different TAP source locations are different failures", () => {
+  const parsed = author.failingTestsFromTap(tap(REPO_ROOT, ["test/a.test.ts", "duplicate", "10:1"],
+    ["test/a.test.ts", "duplicate", "20:1"]), REPO_ROOT);
+  assert.deepEqual(parsed.map((test) => test.location), ["10:1", "20:1"]);
+  const { git } = scriptedGit({ held: ["test/a.test.ts"] });
+  const result = attribute([{ file: "test/a.test.ts", title: "duplicate", location: "10:1" }], {
+    git, runBase: (run) => ok(tap(run.cwd, ["test/a.test.ts", "duplicate", "20:1"])),
+  });
+  assert.equal(result.tests[0]!.state, "only-head");
+  assert.equal(result.counts.alsoFailingAtBase, 0);
 });
 
 /** The fixture of test/author-preflight.test.ts, cut down to what a failing run needs: a base red test, a head-only red test and a new red file. */
