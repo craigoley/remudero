@@ -33,9 +33,9 @@ export interface HostPieceContext {
   home: string;
   /** `$XDG_CONFIG_HOME` when set; otherwise `<home>/.config` is used. */
   configHome?: string;
-  /** The fleet state root (`RMD_STATE_DIR` in deploy/install-host-units.sh). */
+  /** The fleet state root, the state directory deploy/install-host-units.sh is given. */
   stateRoot: string;
-  /** Where deploy/install-host-units.sh writes its scripts (`RMD_BIN_DIR`); `/usr/local/bin` by default. */
+  /** Where deploy/install-host-units.sh writes its scripts; `/usr/local/bin` by default. */
   binDir?: string;
 }
 
