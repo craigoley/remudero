@@ -1266,6 +1266,17 @@ function testSlotHolderStale(held: TestSlotHolder, now: number, opts: Required<P
 }
 
 /**
+ * W1-T13811: a same-host, same-pid-namespace record written under an EARLIER kernel boot has no live owner,
+ * because that boot ended every process it held. Undefined (equal, missing or unreadable boot ids, or another
+ * namespace) keeps today's rules, so an equal boot id still needs exact-tree terminal evidence.
+ */
+function earlierBootEvidence(held: TestSlotHolder, currentBoot: string | undefined, pidNs: string | undefined): ReservedTreeEvidence | undefined {
+  if (!held.bootId || !currentBoot || held.bootId === currentBoot || held.pidNs === undefined || held.pidNs !== pidNs) return undefined;
+  return { state: "ended", complete: true, coverage: "earlier-boot",
+    reason: `recorded under boot ${held.bootId}, which ended; the current boot is ${currentBoot}` };
+}
+
+/**
  * W1-T12295: a same-host, same-uid marker holder on darwin, where no boot id, pid namespace or tree probe exists.
  * Undefined keeps today's rules. A gone or reused owner pid ends it only once its beat is past the lease.
  */
@@ -2165,6 +2176,7 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
               if (!pidStale) return false;
               // The owner pid is gone or reused: only exact-tree terminal evidence (darwin: pid and lease) frees its capacity.
               const evidence = darwinMarkerOwnerEvidence(held, currentStat?.uid, true, clock.now(), darwinWaiter()) ??
+                earlierBootEvidence(held, bootId(), myNs) ??
                 (held.ownerUid === currentStat?.uid && held.ownerUid === process.getuid?.() &&
                 held.bootId === bootId() && held.pidNs === myNs && testSlotReservationIdentity(held) !== undefined
                 ? observeReservedTree(held, treeProbe)
