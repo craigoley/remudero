@@ -12,7 +12,7 @@
   files:
     - src/lib/fix-lane-gardener.ts
     - test/gardeners/a-hand-repair-is-routed-under-the-fix-lane-defect-it-is-charged-to.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "the new test file passes"

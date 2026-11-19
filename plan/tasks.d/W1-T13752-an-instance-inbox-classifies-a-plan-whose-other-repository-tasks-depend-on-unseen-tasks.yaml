@@ -15,7 +15,7 @@
     - src/lib/plan.ts
     - src/lib/panel-graph.ts
     - test/console-api/views/an-instance-inbox-reads-a-plan-whose-other-repository-tasks-name-unseen-dependencies.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "An instance Inbox pass completes over a plan where a task of another repository depends on an id that plan does not hold, and keeps that dependency"

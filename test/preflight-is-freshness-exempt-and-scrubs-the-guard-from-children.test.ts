@@ -126,7 +126,7 @@ test("W1-T2769 REGRESSION LOCK: a plan-reading verb still refuses on the same of
   assert.deepEqual(r.dispatched, [], "a refused verb must never reach dispatch");
 });
 
-test("W1-T2769: the exempt set names exactly {doctor, status, preflight, pr-owner}, each with its own declared reason", () => {
+test("W1-T2769: the exempt set names exactly {doctor, status, preflight, pr-owner, gh-broker}, each with its own declared reason", () => {
   const src = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
   const match = src.match(
     /READ_ONLY_FRESHNESS_EXEMPT_VERBS:\s*ReadonlySet<string>\s*=\s*new Set\(\[([^\]]*)\]\)/,
@@ -137,10 +137,8 @@ test("W1-T2769: the exempt set names exactly {doctor, status, preflight, pr-owne
     .map((s) => s.trim().replace(/^["']|["']$/g, ""))
     .filter(Boolean)
     .sort();
-  assert.deepEqual(verbs, ["doctor", "pr-owner", "preflight", "status"]);
-  // W1-T3281 widened the set by one. The "declared reason" half of this test's own title is what
-  // stops that widening being free: every name above must carry its own paragraph in the block
-  // documenting WHY refusing it would be self-defeating, and a name added without one fails here.
+  assert.deepEqual(verbs, ["doctor", "gh-broker", "pr-owner", "preflight", "status"]);
+  // Every member must have its own reason in the declaration's doc block.
   const doc = src.slice(0, src.indexOf("const READ_ONLY_FRESHNESS_EXEMPT_VERBS"));
   const block = doc.slice(doc.lastIndexOf("/**"));
   for (const verb of verbs) {
@@ -245,7 +243,7 @@ test("W1-T2769: checkCliFreshness in a spawned child still REFUSES a diverged ch
     // earlier check, never reaching the fake `git` dep this test constructs at all — masking the
     // one path this test exists to prove, only when run in CI. Clearing both here isolates the
     // guard-var behavior under test from that unrelated, already-correct short-circuit.
-    const r = defaultPreflightSpawn("npx", ["tsx", "-e", childScript], {
+    const r = defaultPreflightSpawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", childScript], {
       cwd: REPO_ROOT,
       env: { ...process.env, CI: "", GITHUB_ACTIONS: "" },
     });

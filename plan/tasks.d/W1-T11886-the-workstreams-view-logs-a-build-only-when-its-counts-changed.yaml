@@ -14,7 +14,7 @@
   files:
     - src/lib/workstreams-view.ts
     - test/console-api/the-workstreams-view-logs-a-build-only-when-its-counts-changed.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: A workstreams build whose instances, reused and derived counts equal the last logged build writes no `workstreams.built` row, and the next row that differs carries `repeats`, the number of builds it stood in for

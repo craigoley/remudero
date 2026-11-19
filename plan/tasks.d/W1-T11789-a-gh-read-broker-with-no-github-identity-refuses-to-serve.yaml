@@ -17,7 +17,7 @@
   files:
     - src/lib/gh-read-broker.ts
     - test/github/every-mac-session-reads-github-through-one-broker.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: serveGhReadBroker resolves the account login once before it binds the socket, and refuses to serve, naming the missing identity, when the login reads unknown

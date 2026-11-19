@@ -48,6 +48,7 @@ import { activeCategorizedRefusal, categorizedRefusalRejoin, type CategorizedRef
 import { preDispatchContractRevision } from "./dispatch-repair.js";
 import { DEFAULT_LIVENESS_BOUND_MS, infrastructureRefusal, lifetimeInfrastructureRefusal, provenOrphanRunIds, streakRefusal } from "./non-worker-verdict.js";
 import { startWorker } from "./child-entry-argv.js";
+import { hostWorktreeGit } from "./worktree-git.js";
 
 /** Host-private inputs for one status pass. Only the finite outcome is enumerable. */
 export interface CatalogStatusContext {
@@ -313,6 +314,8 @@ export interface GitHub {
   prBody(prUrl: string): string | undefined;
   /** W1-T2387: same memoized index; preserve creditsByAnchoredTrailer's exact lines/run-id grammar, fail closed. */
   creditedByCommitTrailer?(taskId: string, prUrl: string): boolean;
+  /** Changed paths of a squash merge in the gateway's local origin/main. Missing means unknown. */
+  localMergedPaths?(prNumber: number): readonly string[] | undefined;
   /** W1-T413: changed paths for rung (c)'s plan-only refusal. undefined means unavailable, not no files:
    *  retain today's answer; absent heads cannot add credit, but withdrawing credit redispatches finished work. */
   changedFiles?(prUrl: string, snapshotPr?: Pick<PrRef, "state" | "headRefOid">): string[] | undefined;
@@ -2615,6 +2618,8 @@ function derivePrPrecedence(
   ledgerLines: Array<Record<string, unknown>>,
   overrides: CreditOverrideExclusion,
 ): StatusProjection {
+  const localMergePaths = (prNumber: number) =>
+    deps.mergedPathsByPr?.get(prNumber) ?? deps.github.localMergedPaths?.(prNumber);
   // SUPREMACY (MASTER-PLAN P9 / W1-T75): an operator correction is checked FIRST, above rungs (a)/(b)/(c). It
   // is DECLARED credit, not INFERRED evidence, so it is EXEMPT from the ownership-assert, which guards the
   // fuzzy search and not a human declaration. SUPREME OFFLINE (W1-T130): `applyCorrection` already resolved the
@@ -2660,7 +2665,7 @@ function derivePrPrecedence(
       // row is no opinion. HEAD-BRANCH: its writer once skipped the diff check (W1-T3990/#6468). TRAILER
       // (W1-T5552): an entry saved before the diff refusal (W1-T413/W1-T3067) was never checked — W1-T380
       // stayed credited by plan-only #1437 until #8962. The `prByRef` review arm stays head-branch only.
-      const planOnlyPaths = deps.mergedPathsByPr?.get(entry.prNumber) ?? [];
+      const planOnlyPaths = localMergePaths(entry.prNumber) ?? [];
       const reviewedPr = entry.source === "head-branch" && !isPlanTextDeliverable(task, planOnlyPaths) &&
         hasPlanOnlyReviewForPr(ledgerLines, entry.prUrl, ledgerIndex)
         ? deps.github.prByRef(entry.prUrl) : null;
@@ -2814,7 +2819,7 @@ function derivePrPrecedence(
     return changedFilesByPr.get(pr.url);
   };
   const reviewHead = (pr: PrRef): string | undefined => {
-    let files = deps.mergedPathsByPr?.get(pr.number);
+    let files = localMergePaths(pr.number);
     if ((!files || files.length === 0) &&
         !isPlanOnlyFilingPr(ledgerLines, pr.url, ledgerIndex) &&
         isPlanOnlyFilingPr(ledgerLines, pr.url, ledgerIndex, pr.headRefOid)) {
@@ -2833,7 +2838,7 @@ function derivePrPrecedence(
     // would sail past `isPlanOnlyFilingPr` below and get re-persisted in the SAME projection that just
     // refused it, undoing the revalidation before this function even returns. W1-T5552: under EITHER source.
     const planOnlyByDiff = (pr: PrRef): boolean => {
-      const files = deps.mergedPathsByPr?.get(pr.number) ?? changedFiles(pr);
+      const files = localMergePaths(pr.number) ?? changedFiles(pr);
       return files !== undefined && refusesAsPlanOnly(task, files);
     };
     const hit = cands.find(
@@ -2928,7 +2933,7 @@ function derivePrPrecedence(
         ? (() => {
             // LOCAL EVIDENCE FIRST, AND IT IS FREE. A merged PR's merge commit is on origin/main by
             // definition, so the one-git-log map answers for exactly the population that matters.
-            const local = deps.mergedPathsByPr?.get(trailerPr.number);
+            const local = localMergePaths(trailerPr.number);
             if (local && local.length > 0) return refusesAsPlanOnly(task, local);
             // ⚠ NO LOCAL ANSWER: FALL BACK TO EXACTLY THE PRE-W1-T3067 BEHAVIOUR, INCLUDING THE
             // SHORTCUT. That shortcut is a TESTED COST GUARANTEE, not an oversight — "a worker's own
@@ -4008,6 +4013,48 @@ function prNumberFromSquashSubject(subject: string): number | undefined {
   return m ? Number(m[1]) : undefined;
 }
 
+/** The per-task gateway used by plan lint has no daemon path snapshot. Index squash commits once,
+ * then read and cache only the diffs for the PRs the projection considers. */
+function localMergedPathsReader(slug: string, cwd: string): NonNullable<GitHub["localMergedPaths"]> {
+  const git = (...args: string[]) => {
+    try {
+      return hostWorktreeGit(cwd, args, { maxBuffer: 1 << 24, timeout: 10_000 });
+    } catch (error) {
+      // Missing or unreadable local history leaves the existing credit evidence in charge.
+      void error;
+      return undefined;
+    }
+  };
+  const index = () => {
+    const commits = new Map<number, string>();
+    const origin = git("config", "--get", "remote.origin.url")?.trim();
+    if (!origin || originRepoSlug(origin) !== slug.toLowerCase()) return commits;
+    const log = git("log", "--first-parent", "--no-merges", "--format=%H%x00%s", "origin/main");
+    for (const row of (log ?? "").split("\n")) {
+      const [sha, subject] = row.split("\0");
+      if (!sha || !subject) continue;
+      const number = prNumberFromSquashSubject(subject);
+      if (number !== undefined && !commits.has(number)) commits.set(number, sha);
+    }
+    return commits;
+  };
+  let commits: Map<number, string> | undefined;
+  const paths = new Map<number, readonly string[] | undefined>();
+  return (number) => {
+    if (!paths.has(number)) {
+      const sha = (commits ??= index()).get(number);
+      const diff = sha && git("diff-tree", "-r", "--no-ext-diff", "--no-textconv",
+        "--no-renames", "--no-commit-id", "--name-only", "-z", sha, "--");
+      paths.set(number, diff ? diff.split("\0").filter(Boolean) : undefined);
+    }
+    return paths.get(number);
+  };
+}
+
+function originRepoSlug(url: string): string {
+  return url.replace(/\.git$/, "").replace(/^.*[:/]([^/]+\/[^/]+)$/, "$1").toLowerCase();
+}
+
 /** W1-T2387: union machine-written commit trailers after hand-written body trailers miss; add credit only,
  *  never compare surfaces or fetch again. Failed read returns null, never [].
  *  W1-T2447: admin-only `squash_merge_commit_message` must remain `COMMIT_MESSAGES` for trailers to survive.
@@ -4047,8 +4094,7 @@ export function buildCommitTrailerIndex(opts: {
       // case above, a genuine ABSENCE. An empty map, never `null`, which is reserved for a failed read.
       return new Map();
     }
-    const localSlug = originUrl.replace(/\.git$/, "").replace(/^.*[:/]([^/]+\/[^/]+)$/, "$1");
-    if (localSlug.toLowerCase() !== slug.toLowerCase()) return new Map();
+    if (originRepoSlug(originUrl) !== slug.toLowerCase()) return new Map();
     let raw: string;
     try {
       raw = exec(["log", ref, "--format=%H%x00%s%x00%b%x1e"]);
@@ -4389,11 +4435,14 @@ export function ghGateway(
   repo: string,
   opts: {
     exec?: (args: string[]) => string;
+    /** Checkout for local changed-path evidence. Required when injecting a GitHub transport. */
+    cwd?: string;
     /** W1-T2387: injectable stand-in for {@link buildCommitTrailerIndex}'s real `git log` read. */
     commitTrailerIndex?: () => Map<string, PrRef[]> | null;
   } = {},
 ): GitHub {
   const slug = `${owner}/${repo}`;
+  const localPathsCwd = opts.cwd ?? (opts.exec === undefined ? process.cwd() : undefined);
   // W1-T2387 — THE COMMIT SURFACE, MEMOIZED AND LAZY: built at most ONCE per gateway instance and only once a
   // task has missed on the body surface. NOT TTL'd, commits being append-only, so a stale index can only LACK a
   // very recent merge — the case the body surface answers.
@@ -4560,6 +4609,7 @@ export function ghGateway(
     creditedByCommitTrailer(taskId, prUrl) {
       return commitCreditsFor(taskId, prUrl);
     },
+    localMergedPaths: localPathsCwd === undefined ? undefined : localMergedPathsReader(slug, localPathsCwd),
     changedFiles(prUrl) {
       // W1-T413. The files endpoint has no field-selection story, so filenames come straight off `--jq`.
       const n = prNumberFromRef(prUrl);

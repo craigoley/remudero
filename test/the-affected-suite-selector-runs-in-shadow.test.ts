@@ -542,6 +542,31 @@ test("W1-T10505: the preflight-phase-integration suite is selected for each reco
   assert.ok(!absent.suites.includes(suite), "a suite absent from the tree cannot be selected");
 });
 
+test("W1-T10506: the unreadable commit range suite is selected for each recorded miss edge", async (t) => {
+  const suite = "test/an-unreadable-commit-range-is-not-an-empty-emitter-pass.test.ts";
+  const edges = [
+    "scripts/comment-load-baseline.json",
+    "src/lib/commit-message.ts",
+    "test/a-harness-checkpoint-commit-never-fails-the-preopen-gate.test.ts",
+    "test/preflight.test.ts",
+  ];
+  const filesWithoutSuite = new Map(Object.entries(TREE));
+  for (const edge of edges) filesWithoutSuite.set(edge, "");
+  const selectorInput = { files: new Map([...filesWithoutSuite, [suite, ""]]), pathReaders: [] };
+  for (const changed of edges) {
+    await t.test(changed, () => {
+      const selection = selectAffectedSuites([changed], selectorInput);
+      assert.equal(selection.fullRun, false);
+      assert.ok(selection.suites.includes(suite), `${changed} must select ${suite} in the floor`);
+    });
+  }
+  const unrelated = selectAffectedSuites(["src/a.ts"], selectorInput);
+  assert.ok(!unrelated.suites.includes(suite), "an unrelated change must not select the suite");
+  const absent = selectAffectedSuites(["src/lib/commit-message.ts"], { ...selectorInput, files: filesWithoutSuite });
+  assert.equal(absent.fullRun, false);
+  assert.ok(!absent.suites.includes(suite), "a suite absent from the tree cannot be selected");
+});
+
 test("W1-T10111: the resolver-divergence suite is selected for each recorded miss edge", () => {
   const suite = "test/resolver-divergence-detector.test.ts";
   const edges = ["src/lib/proof-amendment.ts", "src/run-task.ts"];
