@@ -20,6 +20,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import {
   loadPlan,
   loadPlanAtRef,
+  loadPlanKeepingUnseenDependencies,
   parseTasksFromYaml,
   PlanError,
   unmetDependencies,
@@ -46,7 +47,7 @@ import {
   type PrRef,
   type StatusProjection,
 } from "./status.js";
-import { buildDrainPreview, dispatchOrder, runnableCandidateIds, workflowPaths, type DrainOpts, type DispatchFilterReason, type MergedSet } from "./drain.js";
+import { buildDrainPreview, dispatchOrder, runnableCandidateIds, taskTargetsRepo, workflowPaths, type DrainOpts, type DispatchFilterReason, type MergedSet } from "./drain.js";
 import {
   captureFeedback,
   expandFeedbackDraft,
@@ -2279,12 +2280,24 @@ function inboxFingerprint(deps: PanelGraphDeps, state: InboxClassifyState, readP
   } else {
     planKey = planFilesStamp(deps.planPath, stat, deps.inboxListDir ?? listDirOrUndefined) + threadPlanPin(deps.planPath);
     const last = state.last;
-    plan = last?.planKey !== undefined && last.planKey === planKey ? last.plan : threadStrictPlan(deps.planPath);
+    plan = last?.planKey !== undefined && last.planKey === planKey ? last.plan : inboxPlan(deps);
   }
   const { projection, boardReferents } = projectInboxPlan(deps, plan, ledgerLines);
   const archiveKey = archiveReleases?.size ? [...archiveReleases].sort(([a], [b]) => a.localeCompare(b)) : null;
   const key = JSON.stringify([stamps, sha ?? null, verdictDigest, projectionDigest(projection, boardReferents), archiveKey]);
   return { key, sha, plan, planKey, projection, boardReferents, ledgerLines, archiveReleases, verdictReceipts };
+}
+
+/**
+ * W1-T13752 — the plan an Inbox pass classifies against. An instance's Inbox reads its own repository's plan, whose
+ * other-repository tasks may name dependencies that plan cannot hold (remudero-ops carries core tasks that depend on
+ * core's public ones). Those keep their unseen dependency; a task for the instance's own repository stays strict.
+ * The core Inbox, which names no source instance, reads the shared strict parse as before.
+ */
+function inboxPlan(deps: PanelGraphDeps): Plan {
+  const target = deps.inboxSourceIdentity?.repository;
+  if (target === undefined) return threadStrictPlan(deps.planPath);
+  return loadPlanKeepingUnseenDependencies(deps.planPath, (task) => !taskTargetsRepo(task.repo, target));
 }
 
 /** The previous result, when `fp` names exactly its inputs and the commit is known. Its ledger rows are this pass's. */
