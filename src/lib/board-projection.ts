@@ -378,6 +378,7 @@ function recordingCrossReads(index: LedgerIndex, into: () => Set<string> | undef
     byTask: index.byTask,
     // W1-T13840: no cross-task step is a signal step, so its reads record nothing.
     ...(index.byTaskSteps ? { byTaskSteps: index.byTaskSteps } : {}),
+    ...(index.appendSequenceOf ? { appendSequenceOf: index.appendSequenceOf } : {}),
     byStep: {
       get: (step) => {
         if (BOARD_CROSS_TASK_STEPS.has(step)) into()?.add(`${CROSS_STEP}${step}`);
@@ -1667,6 +1668,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       steps.set(step, bucket);
       return bucket;
     };
+    const appendSequences = new WeakMap<Row, number>();
     /** W1-T13840: every task's rows of one step set, grouped once per index from the step buckets, in taskBucket's order. */
     const byTaskSteps = new Map<string, Map<string, Row[]>>();
     const taskStepRows = (id: string, wanted: readonly string[]): readonly Row[] => {
@@ -1685,7 +1687,11 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       };
       for (const step of wantedSteps) {
         const bucket = stepEntries(step);
-        bucket.rows.forEach((row, at) => add({ row, key: [bucket.tsMs[at]!, 0, bucket.seqs[at]!] }));
+        bucket.rows.forEach((row, at) => {
+          const seq = bucket.seqs[at]!;
+          appendSequences.set(row, seq);
+          add({ row, key: [bucket.tsMs[at]!, 0, seq] });
+        });
       }
       if (wantedSteps.includes(WORKER_ACTIVITY_STAND_IN_STEP) && runSql.worker) {
         for (const r of db.prepare("SELECT ts_ms, body, fields, seq FROM run_worker").iterate()) {
@@ -1713,6 +1719,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       byTask: { get: (id) => (last?.id === id ? last.rows : (last = { id, rows: taskBucket(id) }).rows) },
       byStep: { get: (step) => stepEntries(step).rows },
       byTaskSteps: { get: taskStepRows },
+      appendSequenceOf: (row) => appendSequences.get(row),
       get planOnlyFilingPrUrls() {
         if (!filing) planOnly();
         return filing!;

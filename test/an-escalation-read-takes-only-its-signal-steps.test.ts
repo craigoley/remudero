@@ -87,7 +87,7 @@ function world(t: { after: (fn: () => void) => void }, rows: Row[]) {
   const board = createBoardProjection({ db: counted.db, ledgerPath: join(ledgerDir, "ledger.ndjson"), clock, readPlan: () => PLAN,
     github: GATEWAY, githubGeneration: () => "g1", readCreditStore: () => ({}), readCreditOverrideFile: () => "" });
   const index = (): LedgerIndex => { while (!board.update({ force: true }).caughtUp); return board.index(board.rows()); };
-  return { append, index, all, bodies: counted.bodies };
+  return { append, index, all, bodies: counted.bodies, board };
 }
 
 const ownRowsOf = (index: LedgerIndex, id: string, steps: readonly string[]): readonly Row[] =>
@@ -134,7 +134,9 @@ test("byTaskSteps keeps each distinct step set grouped for the lifetime of the i
 
 test("W1-T13840 criterion 2: invariant:same-escalation — latestEscalationLine over the store index equals it over an in-memory index of the same rows", (t) => {
   const openedAt = at(T0 + 2_000);
+  const lateOpenedAt = at(T0 + 1_000);
   const issueUrl = "https://github.com/o/r/issues/1";
+  const lateIssueUrl = "https://github.com/o/r/issues/2";
   const opened = { ts: openedAt, issue_url: issueUrl, class: "MANUAL" };
   const w = world(t, [
     { ...opened, step: "escalation.issue_opened", task_id: "W1-T1" },
@@ -142,26 +144,27 @@ test("W1-T13840 criterion 2: invariant:same-escalation — latestEscalationLine 
     { ts: openedAt, step: "run.start", task_id: "W1-T2", run_id: "same-stamp" },
     { ts: openedAt, step: "run.start", task_id: "W1-T3", run_id: "never-escalated" },
   ]);
-  const verify = (): void => {
+  const verify = (expected: Record<string, ReturnType<typeof latestEscalationLine>>): void => {
     const store = w.index();
     const memory = buildLedgerIndex(w.all);
-    const expected = {
-      "W1-T1": { issueUrl, escalationClass: "MANUAL", openedAt },
-      "W1-T2": undefined,
-      "W1-T3": undefined,
-    };
+    const projected = w.board.projections();
     for (const [id, answer] of Object.entries(expected)) {
-      const stored = latestEscalationLine(store.rows, id, store);
-      assert.deepEqual(stored, answer, id);
-      assert.deepEqual(latestEscalationLine(w.all, id, memory), stored, `${id}, live-ledger order`);
+      assert.deepEqual(latestEscalationLine(w.all, id), answer, `${id}, unindexed ledger`);
+      assert.deepEqual(latestEscalationLine(w.all, id, memory), answer, `${id}, in-memory index`);
+      assert.deepEqual(latestEscalationLine(store.rows, id, store), answer, `${id}, store index`);
+      assert.equal(projected.get(id)?.escalationIssueUrl, answer?.issueUrl, `${id}, board projection`);
     }
   };
-  verify();
+  verify({ "W1-T1": { issueUrl, escalationClass: "MANUAL", openedAt }, "W1-T2": undefined, "W1-T3": undefined });
   w.append([
-    { ts: at(T0 + 1_000), step: "run.start", task_id: "W1-T1", run_id: "late-run" },
-    { ts: at(T0 + 1_000), step: "escalation.issue_opened", task_id: "W1-T2", issue_url: issueUrl },
+    { ts: lateOpenedAt, step: "run.start", task_id: "W1-T1", run_id: "late-run" },
+    { ts: lateOpenedAt, step: "escalation.issue_opened", task_id: "W1-T2", issue_url: lateIssueUrl },
   ]);
-  verify();
+  verify({
+    "W1-T1": undefined,
+    "W1-T2": { issueUrl: lateIssueUrl, escalationClass: undefined, openedAt: lateOpenedAt },
+    "W1-T3": undefined,
+  });
 });
 
 test("W1-T13840 criterion 3: a board build reads no fact row of a long-history task's other steps for its escalation", (t) => {

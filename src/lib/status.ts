@@ -1286,6 +1286,8 @@ export interface LedgerIndex {
   /** W1-T13840: `taskId`'s rows of `steps` alone, with `task_id` equal to `taskId`, in ledger order. An index over a
    *  store answers it from its step buckets, so a reader of a few steps never reads a task's whole history. */
   readonly byTaskSteps?: { get(taskId: string, steps: readonly string[]): ReadonlyArray<Record<string, unknown>> };
+  /** Append sequence for facts returned by `byTaskSteps` when the store's buckets are timestamp-ordered. */
+  readonly appendSequenceOf?: (row: Record<string, unknown>) => number | undefined;
   /** W1-T3523: the newest parseable `ts` anywhere in `rows` — {@link orphanedRunIds}'s ledger-derived
    *  "now", computed ONCE here rather than re-scanned per task (R-23's own discipline). Undefined
    *  when no row carries a parseable `ts` at all. */
@@ -3302,8 +3304,7 @@ function deriveRunState(
 /** W1-T13840: the steps {@link latestEscalationLine} reads; every other row of a task leaves its answer unchanged. */
 export const ESCALATION_SIGNAL_STEPS: readonly string[] = ["run.start", "escalation.issue_opened", "primary_shadow.issue_published"];
 
-/** The task's most recent escalation line, if an escalation is its latest signal by timestamp, with ties
- *  resolved in ledger order (W1-T155). DELIBERATELY DOES NOT ANSWER "is the escalation still open": the ledger is
+/** The task's escalation line, if an escalation is its last appended signal (W1-T155). The ledger is
  *  append-only, so it can say one WAS opened but never that it has since closed — that needs {@link
  *  resolveEscalation}'s live join. An absent url never suppresses the escalation, only the join. */
 export function latestEscalationLine(
@@ -3312,19 +3313,20 @@ export function latestEscalationLine(
   index?: LedgerIndex,
 ): { issueUrl?: string; escalationClass?: string; openedAt?: string } | undefined {
   let latest: Record<string, unknown> | undefined;
-  let latestMs = Number.NEGATIVE_INFINITY;
+  let latestSeq = 0;
   // W1-T13840: only these steps decide the answer, so an index that can hand over just them is asked for just them
   // (core's DAEMON id names 706,926 fact rows, 358 MB, read in full on every build before this).
   const signals = index !== undefined && index.rows === lines && index.byTaskSteps !== undefined
     ? index.byTaskSteps.get(taskId, ESCALATION_SIGNAL_STEPS) : indexedTaskRows(lines, taskId, index);
+  const appendSequenceOf = index?.rows === lines ? index.appendSequenceOf : undefined;
   for (const line of signals) {
     if (line.task_id !== taskId) continue;
     if (typeof line.step !== "string" || !ESCALATION_SIGNAL_STEPS.includes(line.step)) continue;
-    // The fact store gives an undated row ts_ms = 0. Equal times keep the later row in ledger order.
-    const ms = typeof line.ts === "string" ? Date.parse(line.ts) || 0 : 0;
-    if (ms < latestMs) continue;
+    // In-memory rows already arrive in append order, so equal sequences also let the last signal win.
+    const seq = appendSequenceOf?.(line) ?? 0;
+    if (seq < latestSeq) continue;
     latest = line;
-    latestMs = ms;
+    latestSeq = seq;
   }
   if (!latest || latest.step === "run.start") return undefined;
   return {
