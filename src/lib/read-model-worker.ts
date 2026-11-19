@@ -603,9 +603,14 @@ export function canonicalVersionsViews(views: string, known: ReadonlySet<string>
   return [...new Set(views.split(",").map((name) => name.trim()).filter((name) => known.has(name)))].sort().join(",");
 }
 
-/** The view names serve can tell apart without the worker: the built-in views and every view in the reader graph. */
-function readModelViewLexicon(readers: ReadModelViewReaders = READ_MODEL_VIEW_READERS): Set<string> {
+/**
+ * The view names serve can tell apart without the worker: the built-in views, every view the production view lane
+ * registers ({@link readModelLaneViews}, named without building one), and every view in the reader graph. A view a
+ * `viewsModule` adds joins once its first body arrives.
+ */
+export function readModelViewLexicon(instances: ReadonlyArray<ReadModelInstance>, readers: ReadModelViewReaders = READ_MODEL_VIEW_READERS): Set<string> {
   const names = new Set(READ_MODEL_VIEWS.map((view) => view.name));
+  for (const view of readModelLaneViews({ instances: [...instances] }, systemClock, () => undefined, createDemandBook({ clock: systemClock }))) names.add(view.name);
   for (const [view, list] of Object.entries(readers)) {
     names.add(view);
     for (const { view: consumer } of list) if (consumer !== undefined) names.add(consumer);
@@ -3103,6 +3108,8 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
   let respawnTimer: NodeJS.Timeout | undefined;
   /** When each path's read was last posted to the worker ({@link READ_MODEL_READ_NOTE_MS}). */
   const readNotedAt = new Map<string, number>();
+  /** W1-T11979: the names a versions poll may key its read note on, built once on first use. */
+  let lexicon: Set<string> | undefined;
   /** When the running worker last said anything; a worker that ticks posts its state four times a second. */
   let heardAt = clock.now();
   let silenceLogged = false;
@@ -3408,7 +3415,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       const scoped = scopedReadPath(route, instance !== undefined && opts.instances.some((known) => known.name === instance) ? instance : undefined);
       let path = scoped;
       if (views !== undefined) {
-        const known = readModelViewLexicon();
+        const known = new Set(lexicon ??= readModelViewLexicon(opts.instances));
         for (const body of bodies.values()) known.add(body.view);
         path = `${scoped}${scoped.includes("?") ? "&" : "?"}${READ_MODEL_VERSIONS_VIEWS_PARAM}=${encodeURIComponent(canonicalVersionsViews(views, known))}`;
       }

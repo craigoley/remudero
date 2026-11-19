@@ -11,7 +11,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 import type { Clock } from "#src/lib/clock.js";
 import {
-  canonicalVersionsViews, createReadModelWorker, READ_MODEL_READ_NOTE_MS, READ_MODEL_VERSIONS_VIEWS_PARAM, versionsReadViews, viewsReadBy,
+  canonicalVersionsViews, createReadModelWorker, READ_MODEL_READ_NOTE_MS, READ_MODEL_VERSIONS_VIEWS_PARAM, readModelViewLexicon, versionsReadViews, viewsReadBy,
 } from "#src/lib/read-model-worker.js";
 import { createViewEvents, VIEW_VERSIONS_PATH } from "#src/lib/view-events.js";
 import { viewEtag, type ViewBodyEntry, type ViewSource } from "#src/lib/views.js";
@@ -100,6 +100,9 @@ test("W1-T11979 criterion 1: a versions poll naming its views answers the same b
   assert.deepEqual(lines, [`${VIEW_VERSIONS_PATH}?views=repositories`, `${VIEW_VERSIONS_PATH}?views=now`,
     `${VIEW_VERSIONS_PATH}?instance=core&views=now%2Crepositories`], "each named set is posted and spaced on its own, whatever its order, repeats or unknown names");
   assert.deepEqual(viewsReadBy(lines[2]!, NAMES).sort(), ["now", "repositories"], "the worker reads the posted list back");
+  const lane = await postedReads(t, (handle) => handle.noteViewRead?.(VIEW_VERSIONS_PATH, undefined, "actions"), 1);
+  assert.deepEqual(lane, [`${VIEW_VERSIONS_PATH}?views=actions`],
+    "a view the production view lane registers keeps its name before its first body exists");
 });
 
 test("W1-T11979 criterion 2: a poll without the parameter reads every view, and an unknown name is ignored", () => {
@@ -113,9 +116,15 @@ test("W1-T11979 criterion 2: a poll without the parameter reads every view, and 
   assert.equal(canonicalVersionsViews("no-such-view", known), "", "a list of only unknown names keys as the empty list");
 });
 
-test("W1-T11979 criterion 3: the per-instance copy of the versions path reads the same way", () => {
+test("W1-T11979 criterion 3: the per-instance copy of the versions path reads the same way", async (t) => {
   assert.deepEqual(viewsReadBy("/v1/i/site/views/versions", NAMES), NAMES);
   assert.deepEqual(viewsReadBy("/v1/i/site/views/versions?views=needs-you", NAMES), ["now"]);
   assert.deepEqual(viewsReadBy("/v1/i/site/views/versions?views=repositories,needs-you", NAMES).sort(), ["now", "repositories"]);
   assert.equal(versionsReadViews("/v1/i/site/views/versions", new URLSearchParams("views=needs-you")), "needs-you");
+  const lexicon = readModelViewLexicon([{ name: "core", ledgerDir: "/nonexistent" }]);
+  for (const name of ["actions", "inbox-threads", "workstreams", "now"]) assert.ok(lexicon.has(name), `serve knows the lane view ${name} without the worker`);
+  const lines = await postedReads(t, (handle) => handle.noteViewRead?.(VIEW_VERSIONS_PATH, "core", "actions,needs-you"), 1);
+  assert.deepEqual(lines, [`${VIEW_VERSIONS_PATH}?instance=core&views=actions%2Cneeds-you`],
+    "the mounted per-instance path keeps a lane view's name before its first body exists");
+  assert.deepEqual(viewsReadBy(`/v1/i/core/views/versions?views=actions`, [...NAMES, "actions"]), ["actions"], "and the worker counts it");
 });
