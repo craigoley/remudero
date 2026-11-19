@@ -1026,13 +1026,9 @@ const TERMINAL_UNCREDITABLE_HEAD_ESCALATED_STEP = "sweep.fix.uncreditable_head_e
 const TERMINAL_UNCREDITABLE_HISTORY_SLICE: EscalationTriageSlice = {
   holder: "sweep.terminal-uncreditable-heads",
   steps: [TERMINAL_UNCREDITABLE_HEAD_STEP, TERMINAL_UNCREDITABLE_HEAD_ESCALATED_STEP],
-  sharedSnapshot: true,
-  project: ({ ts, step, pr_number, head_sha, head, repair_task_id, cause, reason, terminal }) => ({
-    ts, step, pr_number, head_sha, head, repair_task_id, cause, reason, terminal,
-  }),
   rawPattern: /"step":"sweep\.fix\.uncreditable_head"|"step":"sweep\.fix\.uncreditable_head_escalated"/,
   sharedSnapshot: true,
-  // The union uses ts when deduplicating replayed decisions.
+  version: "2",
   project: ({ ts, step, pr_number, head_sha, head, repair_task_id, cause, reason, terminal }) => ({
     ts, step, pr_number, head_sha, head, repair_task_id, cause, reason, terminal,
   }),
@@ -1080,14 +1076,15 @@ interface TerminalUncreditableHead {
  * instances reuse the compact map and update it synchronously when they emit a new terminal row.
  * Rotation is therefore harmless without decompressing the full corpus on every poll.
  */
-const terminalUncreditableHeadsByLedger = new Map<string, Map<string, TerminalUncreditableHead> | null>();
+const terminalUncreditableHeadsByLedger = new Map<string, Map<string, TerminalUncreditableHead>>();
 
 function terminalUncreditableHeadKey(prNumber: number, headSha: string): string {
   return `${prNumber}:${headSha}`;
 }
 
-function terminalUncreditableHeads(ledgerPath: string): Map<string, TerminalUncreditableHead> | null {
-  if (terminalUncreditableHeadsByLedger.has(ledgerPath)) return terminalUncreditableHeadsByLedger.get(ledgerPath)!;
+function terminalUncreditableHeads(ledgerPath: string): Map<string, TerminalUncreditableHead> {
+  const cached = terminalUncreditableHeadsByLedger.get(ledgerPath);
+  if (cached) return cached;
 
   const stateDir = dirname(ledgerPath);
   const reader = terminalUncreditableHistoryReader ??= createEscalationTriageHistoryReader({ slice: TERMINAL_UNCREDITABLE_HISTORY_SLICE });
@@ -1095,7 +1092,17 @@ function terminalUncreditableHeads(ledgerPath: string): Map<string, TerminalUncr
   let rows = history.rows;
   const livePath = ledgerLivePath(stateDir);
   if (history.archiveCount === 0) {
-    rows = readLedgerLines(ledgerPath); // ledger-read-intent: live
+    // A caller may pass a non-default live path. Preserve the legacy raw-line predicate there too.
+    const matches = new Set<string>();
+    try {
+      const pattern = TERMINAL_UNCREDITABLE_HISTORY_SLICE.rawPattern!;
+      for (const line of readFileSync(ledgerPath, "utf8").split(/\r?\n/)) {
+        if (!pattern.test(line)) continue;
+        try { matches.add(JSON.stringify(JSON.parse(line))); }
+        catch { /* malformed rows never become terminal heads */ }
+      }
+    } catch { /* readLedgerLines below retains the legacy unread-live answer */ }
+    rows = readLedgerLines(ledgerPath).filter((row) => matches.has(JSON.stringify(row))); // ledger-read-intent: live
   } else if (history.unread.length === 1 && history.unread[0] === livePath) {
     // The legacy union accepts complete rotations when only the live read fails. Retry through their cached slices.
     history = createEscalationTriageHistoryReader({
@@ -1104,9 +1111,8 @@ function terminalUncreditableHeads(ledgerPath: string): Map<string, TerminalUncr
     }).current(stateDir);
     rows = history.rows;
   }
-  // Shared slices are an optimization only while their source rotations remain readable. The
-  // legacy union refuses an unread rotation; do not let a cached slice turn that unknown history
-  // into an empty terminal set that dispatch could mistake for an unused head.
+  // Preserve the legacy answer for unread history. The union returned no terminal rows when any
+  // rotation was unread; discard any cached projection rather than treating it as complete.
   let historyReadable = history.ok;
   if (historyReadable && history.archiveCount > 0) {
     try {
@@ -1116,8 +1122,9 @@ function terminalUncreditableHeads(ledgerPath: string): Map<string, TerminalUncr
     }
   }
   if (!historyReadable) {
-    terminalUncreditableHeadsByLedger.set(ledgerPath, null);
-    return null;
+    const terminals = new Map<string, TerminalUncreditableHead>();
+    terminalUncreditableHeadsByLedger.set(ledgerPath, terminals);
+    return terminals;
   }
   const terminals = new Map<string, TerminalUncreditableHead>();
   for (const row of rows) {
@@ -3004,9 +3011,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   const primaryShadowAlertFailed = (error: unknown): void => {
     log("primary_shadow.alert_failed", { error_class: error instanceof Error ? error.name : "unknown" });
   };
-  const loadedTerminalHeads = terminalUncreditableHeads(ledgerPath);
-  const terminalHistoryUnread = loadedTerminalHeads === null;
-  const terminalHeads = loadedTerminalHeads ?? new Map<string, TerminalUncreditableHead>();
+  const terminalHeads = terminalUncreditableHeads(ledgerPath);
   const escalateTerminalHead = async (terminal: TerminalUncreditableHead, pr?: Pick<OpenPrView, "reviewState" | "checksState">): Promise<void> => {
     if (terminal.escalated) return;
     // W1-T3168: the ownership fact alone is not an ask. A foreign head on a PR that is not stuck
@@ -5419,7 +5424,6 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // cached at all) returns `undefined` and the ordinary dispatch path — including the failed-
     // delivery retry — runs unchanged.
     terminalFixStandDown: (pr) => {
-      if (terminalHistoryUnread) return "terminal uncreditable-head history unread; dispatch held";
       const terminal = terminalHeads.get(terminalUncreditableHeadKey(pr.prNumber, pr.headSha));
       // Written as two explicit checks, not `!terminal?.escalated` — that negated-optional-chain
       // shape is exactly the conflator test/catch-erasure-ratchet.test.ts's detector (b) exists to
@@ -31339,9 +31343,25 @@ export function createEscalationTriageHistoryReader(
     return buf;
   };
   const union = createIncrementalLedgerUnion(identity, { ...fsDeps,
-    readFileSync: (path) => counted(path, () => fsDeps.readFileSync(path)),
-    readRangeSync: (path, start, end) => counted(path, () => (fsDeps.readRangeSync ?? realLedgerFs.readRangeSync)(path, start, end)),
+    readFileSync: (path) => counted(path, () => maskNonmatchingLiveRows(path, fsDeps.readFileSync(path))),
+    readRangeSync: (path, start, end) => counted(path, () => maskNonmatchingLiveRows(path,
+      (fsDeps.readRangeSync ?? realLedgerFs.readRangeSync)(path, start, end))),
   });
+  const liveStepAlternation = steps.map((step) => JSON.stringify(step).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
+  const liveStepPattern = rawPattern && new RegExp(`"step"\\s*:\\s*(?:${liveStepAlternation})`);
+  function maskNonmatchingLiveRows(path: string, input: Buffer): Buffer {
+    if (!rawPattern || !liveStepPattern || path !== ledgerLivePath(dirname(path))) return input;
+    const output = Buffer.from(input);
+    let start = 0;
+    while (start < input.length) {
+      const newline = input.indexOf(0x0a, start);
+      const end = newline < 0 ? input.length : newline;
+      const line = input.toString("utf8", start, end);
+      if (liveStepPattern.test(line) && !rawPattern.test(line)) output.fill(0x20, start, end);
+      start = end + 1;
+    }
+    return output;
+  }
   // The digest version the union's own rotation hook reads (see createIncrementalLedgerUnion).
   const durableDigest = { reducerVersion: `${identity.reducerVersion}:${steps.join(",")}` };
   // Only a line naming one of the steps is parsed while loading; the reducer drops every other row anyway.
@@ -31422,7 +31442,7 @@ export function createEscalationTriageHistoryReader(
       return { stateDir, archiveFiles, archiveCount: archiveFiles.length, liveFileRead: false,
         unread: [...strictUnread], unclassified: [], ok: false, rows: [], torn: 0, filesRead: 0 };
     }
-    return union(stateDir, { step: steps, ...(rawPattern ? { pattern: rawPattern } : {}), refuseIncomplete: true });
+    return union(stateDir, { step: steps, refuseIncomplete: true });
   };
   const load = async (stateDir: string): Promise<{ entries: LedgerCorpusEntry[]; stats: Map<string, string>; fresh: number }> => {
     lastLoad = { rotations: 0, digestHits: 0, digestMisses: 0, bytesRead: 0, rotationsRead: 0, snapshotHit: false };

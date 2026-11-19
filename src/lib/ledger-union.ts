@@ -2008,7 +2008,7 @@ function incrementalReadSize(read: LedgerRotationRecords): MemoSize {
  *  - the live file is read from where the last call stopped, while its inode holds and the bytes just before
  *    that point are unchanged; anything else re-reads it from the start.
  * The union itself (order, replay dedupe, `ok` and `unread`) is still {@link readLedgerUnionRecordsSync}'s.
- * Only `step`, `pattern`, `refuseIncomplete` and `requireArchives` are cached; any other option reads uncached. The
+ * Only `step`, `refuseIncomplete` and `requireArchives` are cached; any other option reads uncached. The
  * returned `rows` array is frozen and shared between calls: a caller must not mutate it or its rows.
  * `project` declares the fields this consumer reads; change `reducerVersion` whenever it changes.
  */
@@ -2052,15 +2052,15 @@ export function createIncrementalLedgerUnion(
     }
   };
   const readOnce = (stateDir: string, readOpts: LedgerUnionRecordReadOptions): LedgerUnionRecordRead => {
-    const { step, pattern, refuseIncomplete, requireArchives, ...rest } = readOpts;
+    const { step, refuseIncomplete, requireArchives, ...rest } = readOpts;
     if (step === undefined || Object.values(rest).some((value) => value !== undefined)) {
       return readLedgerUnionRecordsSync(stateDir, readOpts, fsDeps);
     }
     const steps = typeof step === "string" ? [step] : [...step];
     // W1-T9710: the live file parses only a line naming an asked step (JSON-quoted, anywhere in the line), and
     // `stepMatches` still decides. A line not framed as `{...}` is parsed too, so `torn` matches a whole read.
-    const candidate = new RegExp([pattern?.source ?? steps.map((name) => JSON.stringify(name).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "^[^{]", "[^}]$"].join("|"), pattern?.flags);
-    const stateKey = JSON.stringify([stateDir, steps, pattern?.source, pattern?.flags, refuseIncomplete === true, requireArchives === true]);
+    const candidate = new RegExp([...steps.map((name) => JSON.stringify(name).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), "^[^{]", "[^}]$"].join("|"));
+    const stateKey = JSON.stringify([stateDir, steps, refuseIncomplete === true, requireArchives === true]);
     const state: IncrementalUnionState = states.get(stateKey) ?? { rotations: new Map() };
     const pendingSizes: Array<() => void> = [];
     const extraSizes: MemoSize[] = [];
@@ -2170,7 +2170,7 @@ export function createIncrementalLedgerUnion(
     };
 
     const tornLines: string[] = [];
-    const result = readLedgerUnionRecordsSync(stateDir, { step, pattern, refuseIncomplete, requireArchives, rotationRecords, liveRecords,
+    const result = readLedgerUnionRecordsSync(stateDir, { step, refuseIncomplete, requireArchives, rotationRecords, liveRecords,
       onTorn: (line) => void tornLines.push(line) }, fsDeps);
     // W1-T13185: a caller that judges what each torn line could have been reads them here, with no second read.
     Object.defineProperty(result, "tornLines", { value: tornLines, enumerable: false });

@@ -92,16 +92,11 @@ test("W1-T3360: it SEES the corpus — the real tree yields step-keyed union rea
     keyed.reduce((n, f) => n + f.steps.length, 0) >= 15,
     "expected the real patterns to name a substantial set of steps",
   );
-  // The former outage rows moved to the per-file terminal-head slice. They must not regress to a
-  // full-corpus resolveLedgerUnion read, and that slice must still name both row kinds.
-  const terminalSteps = new Set(["sweep.fix.uncreditable_head", "sweep.fix.uncreditable_head_escalated"]);
-  assert.deepEqual(
-    keyed.flatMap((finding) => finding.steps.map((step) => step.step)).filter((step) => terminalSteps.has(step)),
-    [],
-    "terminal-head rows returned to a full-corpus union read",
+  // The outage's own row must still be found, or the gate has stopped watching the thing it was built for.
+  assert.ok(
+    findings.some((f) => f.steps.some((s) => s.step === "sweep.fix.uncreditable_head")),
+    "the census no longer finds sweep.fix.uncreditable_head — the read moved and this gate went blind",
   );
-  const sweepSource = readReal("src/lib/sweep.ts");
-  assert.match(sweepSource, /const TERMINAL_UNCREDITABLE_HISTORY_SLICE[\s\S]{0,500}steps:\s*\[TERMINAL_UNCREDITABLE_HEAD_STEP,\s*TERMINAL_UNCREDITABLE_HEAD_ESCALATED_STEP\]/);
 });
 
 // ── it refuses a NEW contradiction ──────────────────────────────────────────────────────────────
@@ -245,8 +240,7 @@ test("W1-T3360: every acknowledgement names a task and carries measured evidence
   // was mandatory and this control had to follow it rather than block it. Still a real control:
   // it is an emptiness guard, not a census of its own, and a set that collapsed would fail here.
   // 10 until W1-T5966 retained fix.exhausted and fix.stood_down, retiring both entries the same way.
-  // W1-T12271 moved the two terminal-head rows from a full union scan to a projected slice.
-  assert.ok(ACKNOWLEDGED.size >= 6, `expected the measured contradiction set; got ${ACKNOWLEDGED.size}`);
+  assert.ok(ACKNOWLEDGED.size >= 8, `expected the measured contradiction set; got ${ACKNOWLEDGED.size}`);
   for (const [step, reason] of ACKNOWLEDGED) {
     assert.match(reason, /W1-T\d+/, `${step}: an acknowledgement must name the task that will fix it`);
     assert.match(reason, /union=|MB|rows/, `${step}: an acknowledgement must carry a measured figure`);

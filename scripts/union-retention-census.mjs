@@ -51,6 +51,17 @@ export const ACKNOWLEDGED = new Map([
   // retention contributes NOTHING to any of these reads, so the union is doing 100% of the work
   // for all of them, which is why the corpus size became a fleet outage.
   [
+    "sweep.fix.uncreditable_head",
+    "W1-T3352 — union=324 live=0, naming 49 distinct head shas. THE OUTAGE ROW. Small and bounded, " +
+      "so the fix is a projection keyed by head sha; a retention entry alone is insufficient because " +
+      "200 newest ROWS need not cover all 49 HEADS.",
+  ],
+  [
+    "sweep.fix.uncreditable_head_escalated",
+    "W1-T3352 — union=0 live=0 today; the escalation half of the row above, written only when the " +
+      "uncreditable head is escalated, and read through the SAME pattern so it shares that scan.",
+  ],
+  [
     "report.followups",
     "W1-T3352 — +3,804 MB in #5017's own measured OOM table. Its sibling `followup.harvested` is " +
       "76,131 rows: far too many to retain, so this call site needs a dedupe projection and must " +

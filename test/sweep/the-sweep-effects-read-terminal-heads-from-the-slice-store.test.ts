@@ -17,7 +17,6 @@ const terminalStep = "sweep.fix.uncreditable_head";
 const escalatedStep = "sweep.fix.uncreditable_head_escalated";
 const legacyPattern = /"step":"sweep\.fix\.uncreditable_head"|"step":"sweep\.fix\.uncreditable_head_escalated"/;
 const standDownReason = `terminal uncreditable head already escalated for this PR@head (${escalatedStep})`;
-const unreadHistoryReason = "terminal uncreditable-head history unread; dispatch held";
 const childFlag = "--terminal-heads-child";
 const candidates = [1, 2, 3, 4, 5].map((prNumber) => ({ prNumber, headSha: `sha-${prNumber}` }));
 candidates.push({ prNumber: 1, headSha: "sha-new-push" });
@@ -73,7 +72,7 @@ function observeBuild(root: string, ledgerPath: string): BuildObservation {
     const stoodDown = candidates.filter((candidate) => {
       const answer = standDown(candidate as OpenPrView);
       if (answer === undefined) return false;
-      assert.ok(answer === standDownReason || answer === unreadHistoryReason, `unexpected stand-down reason: ${answer}`);
+      assert.equal(answer, standDownReason, `unexpected stand-down reason: ${answer}`);
       return true;
     });
     return { gunzips, stoodDown };
@@ -138,8 +137,8 @@ if (process.argv[2] === childFlag) {
     assert.equal(unread.ok, false);
     assert.deepEqual(unread.unread, [archive]);
     assert.deepEqual(unread.matches, []);
-    const rejected = buildInNewProcess(root, path);
-    assert.deepEqual(rejected, { gunzips: 1, stoodDown: candidates }, "an unread rotation holds dispatch instead of making prior heads look free");
+    const unreadAnswer = buildInNewProcess(root, path);
+    assert.deepEqual(unreadAnswer, { gunzips: 1, stoodDown: [] }, "an unread rotation preserves the legacy empty terminal-head result");
 
     writeFileSync(archive, original);
     assert.deepEqual(buildInNewProcess(root, path).stoodDown, candidates.slice(0, 3));
@@ -155,11 +154,12 @@ if (process.argv[2] === childFlag) {
     assert.deepEqual(observeBuild(root, path), { gunzips: 2, stoodDown: candidates.slice(0, 1) });
   });
 
-  test("W1-T12271: an unreadable rotation cannot make a cached terminal head look free", async (t) => {
+  test("W1-T12271: an unreadable rotation does not turn a cached slice into a universal stand-down", async (t) => {
     const { root, dir, path } = fixture(t);
     const slice = {
       holder: "sweep.terminal-uncreditable-heads",
       steps: [terminalStep, escalatedStep],
+      version: "2",
       rawPattern: legacyPattern,
       sharedSnapshot: true,
       project: (row: Record<string, unknown>) => ({
@@ -175,9 +175,11 @@ if (process.argv[2] === childFlag) {
         if (String(candidate) === archive) throw Object.assign(new Error("permission denied"), { code: "EACCES" });
         return access(candidate, mode);
       }) as typeof fs.accessSync;
-      assert.deepEqual(observeBuild(root, path), { gunzips: 0, stoodDown: candidates }, "a cache hit cannot override the unreadable source rotation");
+      syncBuiltinESMExports();
+      assert.deepEqual(observeBuild(root, path), { gunzips: 0, stoodDown: [] }, "the cached projection preserves the legacy unread-history answer");
     } finally {
       fs.accessSync = access;
+      syncBuiltinESMExports();
     }
   });
 
