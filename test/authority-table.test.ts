@@ -368,7 +368,16 @@ test("W1-T13773 criterion 3: the closed gate vocabulary is origin/main's five ki
   assert.deepEqual([...AUTHORITY_GATE_KINDS], ["policy", "ledger-verdict", "operator-verb", "sweep-rung", "always", "host-switch"]);
   assert.deepEqual(callerViolations(AUTHORITY_TABLE, isSrcModule), []);
   const hostSwitched = AUTHORITY_TABLE.flatMap((r) => (r.callers ?? []).filter((c) => c.gate === "host-switch"));
-  assert.ok(hostSwitched.length >= 2, "the two plan-move rows' janitor callers are host-switch callers");
+  assert.deepEqual(
+    hostSwitched.map((caller) => caller.module),
+    ["src/lib/plan-task-move-janitor.ts", "src/lib/plan-task-move-janitor.ts"],
+    "both and only the two plan-move rows must list the janitor as a host-switch caller",
+  );
+  for (const id of ["push-plan-move-branch", "open-plan-move-pr"]) {
+    const row = AUTHORITY_TABLE.find((candidate) => candidate.id === id)!;
+    assert.equal(row.callers?.[0]?.gate, "host-switch", `${id} must carry its host-switch caller entry`);
+    assert.match(row.callers?.[0]?.hostSwitch ?? "", /^state\/plan-destination\.json move_public_tasks\b/);
+  }
   // FALSIFIERS: the self-check is not silent on a broken caller.
   const base = AUTHORITY_TABLE.find((r) => r.id === "push-plan-move-branch")!;
   const janitor: AuthorityCaller = base.callers![0]!;

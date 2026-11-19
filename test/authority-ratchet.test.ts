@@ -265,6 +265,12 @@ test("W1-T13773 criterion 2 FALSIFIER: a synthetic child caller missing from cal
 test("W1-T13773 criterion 1: the two plan-move rows name the operator verb and the daemon's plan-task-move action, each with its gate, and rmd authority prints a line for each", () => {
   // The caller's names are the janitor's own exports, never carried from prose.
   assert.equal(typeof runPlanTaskMoveTick, "function");
+  const daemon = readFileSync(join(REPO_ROOT, "src/lib/daemon.ts"), "utf8");
+  assert.match(
+    daemon,
+    /detachSweepAction\(runPlanTaskMoveTick\([\s\S]{0,250}deps\.planTaskMover[\s\S]{0,160}actionKind:\s*PLAN_TASK_MOVE_ACTION/,
+    "the daemon must wire the reported janitor action into its detached-action runner",
+  );
   const ledger = { stateDir: "/fake-state-dir", archiveFiles: [], archiveCount: 1, liveFileRead: true, unread: [], unclassified: [], ok: true, matches: [] };
   const lines = renderAuthorityReport(buildAuthorityReport({ ledger })).split("\n");
   for (const id of ["push-plan-move-branch", "open-plan-move-pr"]) {
