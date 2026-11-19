@@ -15,6 +15,9 @@ import { systemClock, type Clock } from "./clock.js";
 import type { GitHub } from "./status.js";
 import type { Plan } from "./plan.js";
 import type { ReadModelWorkerHandle } from "./read-model-worker.js";
+import type { SwapProbeRequest, SwapProbeTrigger } from "./serve-swap-probe.js";
+
+export type { SwapProbeRequest, SwapProbeTrigger };
 
 export const SERVE_ROLE_ENV = "RMD_SERVE_ROLE";
 export const SERVE_READY_SOCKET_ENV = "RMD_SERVE_READY_SOCKET";
@@ -33,6 +36,7 @@ export const GENERATION_MESSAGES = {
   shed_workers_done: "rmd.shed_workers_done",
   restore_workers: "rmd.restore_workers",
   restore_workers_done: "rmd.restore_workers_done",
+  swapProbe: "rmd.swap_probe",
 } as const;
 
 export interface GenerationMessage {
@@ -115,6 +119,17 @@ export function onShedRequest(
 export function onRestoreRequest(channel: GenerationChannel, restore: (reason: string) => void): void {
   channel.onMessage((message) => {
     if (message.type === GENERATION_MESSAGES.restore) restore(message.reason ?? "restore");
+  });
+}
+
+const SWAP_PROBE_TRIGGERS: readonly string[] = ["handoff", "cold_start", "crash_restart"] satisfies SwapProbeTrigger[];
+
+export function onSwapProbeRequest(channel: GenerationChannel, probe: (request: SwapProbeRequest) => void): void {
+  channel.onMessage((message) => {
+    if (message.type !== GENERATION_MESSAGES.swapProbe) return;
+    const { trigger, generation, sha, fromSha } = message;
+    if (typeof trigger !== "string" || !SWAP_PROBE_TRIGGERS.includes(trigger) || typeof generation !== "number" || typeof sha !== "string") return;
+    probe({ trigger: trigger as SwapProbeTrigger, generation, sha, ...(typeof fromSha === "string" ? { fromSha } : {}) });
   });
 }
 
