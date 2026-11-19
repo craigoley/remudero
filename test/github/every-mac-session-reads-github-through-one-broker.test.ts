@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createServer, connect } from "node:net";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { test, type TestContext } from "node:test";
 import {
-  brokerGhRead, ghBrokerDir, ghBrokerDirLive, ghBrokerRouteFor, ghReadBrokerLive,
+  brokerGhRead, GH_BROKER_HEARTBEAT, GH_BROKER_SOCKET, ghBrokerDir, ghBrokerDirLive, ghBrokerRouteFor, ghReadBrokerLive,
   type GhBrokerProgress, type GhBrokerResult,
 } from "#src/lib/gh-read-broker-client.js";
 import {
@@ -719,19 +719,54 @@ test("a fresh default JSON read cannot join an ordinary in-flight broker read", 
 });
 
 
+function overlongBrokerDir(t: TestContext): string {
+  const parent = tmp(t, "overlong");
+  // Add enough ASCII to put a path ending in a two-byte character one byte over the limit.
+  const padding = MAX_UNIX_SOCKET_PATH_BYTES + 1 - Buffer.byteLength(join(parent, "é", GH_BROKER_SOCKET));
+  return join(parent, "x".repeat(padding) + "é");
+}
+
+test("W1-T13212 criterion 1: an overlong broker socket refusal names the path, byte length and limit", async (t) => {
+  const dir = overlongBrokerDir(t);
+  const socketPath = join(dir, GH_BROKER_SOCKET);
+  const broker = bootBroker(dir);
+  await assert.rejects(serveGhReadBroker({ dir, broker }), {
+    message: `gh-broker: ${socketPath} is ${MAX_UNIX_SOCKET_PATH_BYTES + 1} bytes; a unix socket path holds at most ${MAX_UNIX_SOCKET_PATH_BYTES} here. Point the GitHub cache home at a shorter directory.`,
+  });
+});
+
+test("W1-T13212 criterion 3: an overlong broker socket refusal preserves the existing socket entry and writes no heartbeat", async (t) => {
+  const dir = overlongBrokerDir(t);
+  const broker = bootBroker(dir);
+  const socketPath = join(dir, GH_BROKER_SOCKET);
+  writeFileSync(socketPath, "existing socket entry");
+  chmodSync(dir, 0o750);
+  await assert.rejects(serveGhReadBroker({ dir, broker }));
+  assert.equal(readFileSync(socketPath, "utf8"), "existing socket entry");
+  assert.equal(existsSync(join(dir, GH_BROKER_HEARTBEAT)), false);
+  assert.equal(statSync(dir).mode & 0o777, 0o750);
+});
+
 test("a refused broker socket bind leaves no heartbeat timer keeping its process alive", (t) => {
-  const parent = tmp(t, "bind-failure");
-  const dir = join(parent, "x".repeat(180));
+  const dir = tmp(t, "bind-failure");
   const source = pathToFileURL(join(ROOT, "src/lib/gh-read-broker.ts")).href;
   const code = [
     'import assert from "node:assert/strict";',
+    'import { writeFileSync } from "node:fs";',
+    'import { Server } from "node:net";',
+    'import { mock } from "node:test";',
     `import { GhReadBroker, serveGhReadBroker } from ${JSON.stringify(source)};`,
     `const dir = ${JSON.stringify(dir)};`,
     'const broker = new GhReadBroker(dir, async () => { throw new Error("no upstream request belongs to a failed bind"); });',
-    'await assert.rejects(serveGhReadBroker({ dir, broker }), /listen|ENAMETOOLONG|EINVAL/);',
+    'const listen = Server.prototype.listen;',
+    'mock.method(Server.prototype, "listen", function (path, ...args) {',
+    '  writeFileSync(path, "occupied");',
+    '  return listen.call(this, path, ...args);',
+    '});',
+    'await assert.rejects(serveGhReadBroker({ dir, broker }), { syscall: "listen" });',
     'console.log("broker-bind-refused");',
   ].join("\n");
-  // This child owns the deliberately invalid socket path; the timeout bounds the old leaked-timer falsifier.
+  // The child occupies the path just before the real listen call. The timeout detects a leaked timer.
   const observed = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", code], {
     cwd: ROOT, encoding: "utf8", timeout: 10_000,
   });

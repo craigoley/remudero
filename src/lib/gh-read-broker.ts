@@ -48,6 +48,7 @@ import { ghArgvNeedsNoCredential, githubAppReferenceKey, githubRepoOfGhArgv, ins
 import { mintInstallationToken, startInstallationTokenRefresh, type InstallationTokenConfig, type InstallationTokenResult } from "./github-app.js";
 import { deriveLedgerActor } from "./ledger.js";
 import { LIVE_WRITE_SENTINEL_TOKEN } from "./live-write-guard.js";
+import { MAX_UNIX_SOCKET_PATH_BYTES } from "./short-path-root.js";
 import { execFileRouted } from "./spawn-helper.js";
 import { hostWorktreeGitEnv, pinWorktreeGit } from "./worktree-git.js";
 
@@ -1474,8 +1475,12 @@ export async function serveGhReadBroker(opts: {
   if (uid !== undefined && st.uid !== uid) {
     throw new Error(`gh-broker: ${dir} belongs to uid ${st.uid}, not this account (${uid}); refusing to serve it`);
   }
-  chmodSync(dir, 0o700);
   const socketPath = join(dir, GH_BROKER_SOCKET);
+  const socketPathBytes = Buffer.byteLength(socketPath);
+  if (socketPathBytes > MAX_UNIX_SOCKET_PATH_BYTES) {
+    throw new Error(`gh-broker: ${socketPath} is ${socketPathBytes} bytes; a unix socket path holds at most ${MAX_UNIX_SOCKET_PATH_BYTES} here. Point the GitHub cache home at a shorter directory.`);
+  }
+  chmodSync(dir, 0o700);
   if (ghBrokerDirLive(dir)) {
     try {
       await brokerRequest(socketPath, { op: "status" });
@@ -1605,6 +1610,7 @@ src/lib/log-rotation.ts
 src/lib/loop-bounded-child.ts
 src/lib/policy.ts
 src/lib/producer-identity.ts
+src/lib/short-path-root.ts
 src/lib/spawn-helper.ts
 src/lib/state-backup-engine-links.ts
 src/lib/worker-containment.ts

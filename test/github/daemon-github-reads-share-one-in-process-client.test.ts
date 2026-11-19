@@ -3,7 +3,7 @@
 // at once, about 2 cores between them. Each test points the client at a local server of its own, and a
 // recording `gh` stub on PATH says whether a child process started.
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingHttpHeaders } from "node:http";
 import { createServer as createSocketServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
@@ -18,6 +18,7 @@ import {
 import { ghJsonAsync, parseGhRateLimitHeaders, splitGhHeaderBlock, type GhRateLimitReading } from "#src/lib/github-transport.js";
 import { LIVE_WRITE_SENTINEL_TOKEN, LiveWriteBlockedError } from "#src/lib/live-write-guard.js";
 import { LoopBoundedChildTimeout } from "#src/lib/loop-bounded-child.js";
+import { MAX_UNIX_SOCKET_PATH_BYTES, shortPathWhenTooLong } from "#src/lib/short-path-root.js";
 import { classifyGhFailure, isGhRateLimitError } from "#src/lib/status.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { ghShim, type GhShim } from "#test/helpers/gh-shim.js";
@@ -31,9 +32,12 @@ interface Seen { method: string; url: string; headers: IncomingHttpHeaders; }
 /** This process's GitHub environment for one test: a fixture token, its own HOME, read cache and recording `gh`. */
 function scene(t: TestContext, routes: Parameters<typeof ghShim>[0] = []): { root: string; cache: string; shim: GhShim } {
   const saved = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
-  // macOS's per-process TMPDIR can be long enough that the broker socket exceeds sun_path.
-  const tempRoot = process.platform === "darwin" ? "/tmp" : tmpdir();
-  const root = mkdtempSync(join(tempRoot, `${RMD_TMP_PREFIX}w1-t12531-`));
+  const prefix = `${RMD_TMP_PREFIX}w1-t12531-`;
+  // W1-T13212 criterion 2: include mkdtemp's suffix and the full socket path when choosing a root.
+  const path = shortPathWhenTooLong(join(tmpdir(), prefix), (tempRoot) => join(tempRoot, prefix),
+    (candidate) => Buffer.byteLength(join(`${candidate}XXXXXX`, "cache", "remudero", "gh-broker", "broker.sock")) <= MAX_UNIX_SOCKET_PATH_BYTES,
+    existsSync);
+  const root = mkdtempSync(path);
   const cache = join(root, "cache");
   mkdirSync(cache);
   mkdirSync(join(root, "gh-config"));
