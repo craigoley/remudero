@@ -68,9 +68,9 @@ function history(t: TestContext) {
 
   const filesReads: number[] = [];
   const slug = `${OWNER}/${REPO}`;
-  const gateway = (cwd = repo.dir) => {
+  const gateway = (cwd: string | null = repo.dir) => {
     const options = {
-      cwd,
+      cwd: cwd ?? undefined,
       commitTrailerIndex: buildCommitTrailerIndex({ slug, cwd: repo.dir }),
       exec(args: string[]) {
         const endpoint = args.find((arg) => arg.startsWith(`repos/${slug}/pulls/`));
@@ -94,7 +94,7 @@ function history(t: TestContext) {
     mergedPathsByPr: paths,
     writeCreditStore: () => {},
   });
-  const lint = (cwd?: string) => {
+  const lint = (cwd?: string | null) => {
     const statuses = projectPlan(plan, { github: gateway(cwd), ledgerPath, writeCreditStore: () => {} });
     const refused = new Set<string>();
     for (const task of plan.tasks) {
@@ -155,4 +155,18 @@ test("an unreadable local merge history leaves the gateway's files fallback avai
   assert.ok(refused.has(TASKS[1].id));
   assert.ok(refused.has(TASKS[2].id));
   assert.deepEqual(filesReads, [3, 4]);
+});
+
+test("an injected GitHub transport needs an explicit checkout to use local merge paths", (t) => {
+  const { lint, filesReads, ledgerPath } = history(t);
+  const previous = process.cwd();
+  process.chdir(dirname(dirname(ledgerPath)));
+  try {
+    const paths = ghGateway(OWNER, REPO).localMergedPaths?.(1);
+    assert.deepEqual(paths, [`plan/tasks.d/${TASKS[0].id}-${TASKS[0].slug}.yaml`]);
+    assert.ok(lint(null).has(TASKS[0].id));
+    assert.deepEqual(filesReads, [3, 4]);
+  } finally {
+    process.chdir(previous);
+  }
 });

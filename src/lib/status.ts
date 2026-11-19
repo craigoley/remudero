@@ -4015,10 +4015,10 @@ function prNumberFromSquashSubject(subject: string): number | undefined {
 
 /** The per-task gateway used by plan lint has no daemon path snapshot. Index squash commits once,
  * then read and cache only the diffs for the PRs the projection considers. */
-function localMergedPathsReader(slug: string, cwd: string | undefined): NonNullable<GitHub["localMergedPaths"]> {
+function localMergedPathsReader(slug: string, cwd: string): NonNullable<GitHub["localMergedPaths"]> {
   const git = (...args: string[]) => {
     try {
-      return hostWorktreeGit(cwd ?? process.cwd(), args, { maxBuffer: 1 << 24, timeout: 10_000 });
+      return hostWorktreeGit(cwd, args, { maxBuffer: 1 << 24, timeout: 10_000 });
     } catch (error) {
       // Missing or unreadable local history leaves the existing credit evidence in charge.
       void error;
@@ -4435,13 +4435,14 @@ export function ghGateway(
   repo: string,
   opts: {
     exec?: (args: string[]) => string;
-    /** Checkout for local changed-path evidence. */
+    /** Checkout for local changed-path evidence. Required when injecting a GitHub transport. */
     cwd?: string;
     /** W1-T2387: injectable stand-in for {@link buildCommitTrailerIndex}'s real `git log` read. */
     commitTrailerIndex?: () => Map<string, PrRef[]> | null;
   } = {},
 ): GitHub {
   const slug = `${owner}/${repo}`;
+  const localPathsCwd = opts.cwd ?? (opts.exec === undefined ? process.cwd() : undefined);
   // W1-T2387 — THE COMMIT SURFACE, MEMOIZED AND LAZY: built at most ONCE per gateway instance and only once a
   // task has missed on the body surface. NOT TTL'd, commits being append-only, so a stale index can only LACK a
   // very recent merge — the case the body surface answers.
@@ -4608,7 +4609,7 @@ export function ghGateway(
     creditedByCommitTrailer(taskId, prUrl) {
       return commitCreditsFor(taskId, prUrl);
     },
-    localMergedPaths: localMergedPathsReader(slug, opts.cwd),
+    localMergedPaths: localPathsCwd === undefined ? undefined : localMergedPathsReader(slug, localPathsCwd),
     changedFiles(prUrl) {
       // W1-T413. The files endpoint has no field-selection story, so filenames come straight off `--jq`.
       const n = prNumberFromRef(prUrl);
