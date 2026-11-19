@@ -109,6 +109,20 @@ function bindingKey(identifier: Identifier): string {
   return `${ctxt}:${value}`;
 }
 
+function unwrapExpression(expression: Expression): Expression {
+  switch (expression.type) {
+    case "ParenthesisExpression":
+    case "TsAsExpression":
+    case "TsSatisfiesExpression":
+    case "TsNonNullExpression":
+    case "TsTypeAssertion":
+    case "TsConstAssertion":
+      return unwrapExpression(expression.expression);
+    default:
+      return expression;
+  }
+}
+
 function usesUnpinnedDaemon(text: string): boolean {
   if (!text.includes("runDaemon")) return false;
   const tree = parseSync(text, { syntax: "typescript", decorators: true });
@@ -122,7 +136,7 @@ function usesUnpinnedDaemon(text: string): boolean {
     }
   }
 
-  const daemonCalls: CallExpression[] = [];
+  const calls: CallExpression[] = [];
   const bindings = new Map<string, Expression | FunctionDeclaration>();
   function visit(value: unknown): void {
     if (Array.isArray(value)) {
@@ -131,13 +145,7 @@ function usesUnpinnedDaemon(text: string): boolean {
     }
     if (!value || typeof value !== "object") return;
     const node = value as Node;
-    if (node.type === "CallExpression") {
-      const { callee } = node as CallExpression;
-      const name = callee.type === "Identifier"
-        ? importedNames.get(bindingKey(callee)) ?? callee.value
-        : callee.type === "MemberExpression" && callee.property.type === "Identifier" ? callee.property.value : undefined;
-      if (name === "runDaemon") daemonCalls.push(node as CallExpression);
-    }
+    if (node.type === "CallExpression") calls.push(node as CallExpression);
     if (node.type === "VariableDeclaration" && (node as VariableDeclaration).kind === "const") {
       for (const { id, init } of (node as VariableDeclaration).declarations) {
         if (id.type === "Identifier" && init) bindings.set(bindingKey(id), init);
@@ -151,12 +159,42 @@ function usesUnpinnedDaemon(text: string): boolean {
   }
   visit(tree);
 
+  function resolveConst(expression: Expression): Expression {
+    let value = unwrapExpression(expression);
+    const seen = new Set<string>();
+    while (value.type === "Identifier") {
+      const key = bindingKey(value);
+      const binding = bindings.get(key);
+      if (!binding || binding.type === "FunctionDeclaration" || seen.has(key)) break;
+      seen.add(key);
+      value = unwrapExpression(binding);
+    }
+    return value;
+  }
+
+  function isDaemonCall({ callee }: CallExpression): boolean {
+    if (callee.type === "Super" || callee.type === "Import") return false;
+    const target = resolveConst(callee);
+    if (target.type === "Identifier") {
+      return (importedNames.get(bindingKey(target)) ?? target.value) === "runDaemon";
+    }
+    return target.type === "MemberExpression" && target.property.type === "Identifier" &&
+      target.property.value === "runDaemon";
+  }
+
+  function suppliesGovernor(expression: Expression): boolean {
+    const value = resolveConst(expression);
+    return value.type !== "NullLiteral" &&
+      !(value.type === "Identifier" && value.value === "undefined") &&
+      !(value.type === "UnaryExpression" && value.operator === "void");
+  }
+
   const resolving = new Set<Expression>();
   function governorIn(deps: Expression | undefined, parameters: ReadonlyMap<string, GovernorPin>): GovernorPin {
     if (!deps || resolving.has(deps)) return undefined;
     resolving.add(deps);
     try {
-      return resolveGovernor(deps, parameters);
+      return resolveGovernor(unwrapExpression(deps), parameters);
     } finally {
       resolving.delete(deps);
     }
@@ -165,13 +203,6 @@ function usesUnpinnedDaemon(text: string): boolean {
   // Follow dependency object literals, const bindings and simple local factories.
   function resolveGovernor(deps: Expression, parameters: ReadonlyMap<string, GovernorPin>): GovernorPin {
     switch (deps.type) {
-      case "ParenthesisExpression":
-      case "TsAsExpression":
-      case "TsSatisfiesExpression":
-      case "TsNonNullExpression":
-      case "TsTypeAssertion":
-      case "TsConstAssertion":
-        return governorIn(deps.expression, parameters);
       case "Identifier": {
         const key = bindingKey(deps);
         if (parameters.has(key)) return parameters.get(key);
@@ -184,14 +215,11 @@ function usesUnpinnedDaemon(text: string): boolean {
           if (property.type === "SpreadElement") {
             pin = governorIn(property.arguments, parameters) ?? pin;
           } else if (property.type === "Identifier" && property.value === "memoryGovernor") {
-            pin = true;
+            pin = suppliesGovernor(property);
           } else if (property.type === "KeyValueProperty" &&
             (property.key.type === "Identifier" || property.key.type === "StringLiteral") &&
             property.key.value === "memoryGovernor") {
-            const value = property.value;
-            pin = value.type !== "NullLiteral" &&
-              !(value.type === "Identifier" && value.value === "undefined") &&
-              !(value.type === "UnaryExpression" && value.operator === "void");
+            pin = suppliesGovernor(property.value);
           }
         }
         return pin;
@@ -221,8 +249,11 @@ function usesUnpinnedDaemon(text: string): boolean {
     }
   }
 
-  return daemonCalls.some(({ arguments: args }) =>
-    args.slice(0, 2).some((arg) => arg.spread) || governorIn(args[1]?.expression, new Map()) !== true);
+  return calls.some((call) => {
+    if (!isDaemonCall(call)) return false;
+    const args = call.arguments;
+    return args.slice(0, 2).some((arg) => arg.spread) || governorIn(args[1]?.expression, new Map()) !== true;
+  });
 }
 
 test("the daemon memory census checks the dependencies of every call", () => {
@@ -241,6 +272,30 @@ test("the daemon memory census checks the dependencies of every call", () => {
   assert.equal(usesUnpinnedDaemon(fixture + "loop(plan, deps({}));" + pinnedCalls), true);
   assert.equal(usesUnpinnedDaemon(fixture + "loop(plan, { nested: { memoryGovernor: governor } });"), true);
   assert.equal(usesUnpinnedDaemon(fixture + "loop(plan, { ...pinned, memoryGovernor: undefined });"), true);
+});
+
+test("the daemon memory census counts an unpinned call through a local alias", () => {
+  const fixture = `
+    import { runDaemon as daemonLoop } from "#src/lib/daemon.js";
+    import { hostIndependentDaemonDeps } from "#test/helpers/daemon-host-pins.js";
+    const loop = daemonLoop;
+  `;
+  assert.equal(usesUnpinnedDaemon(fixture + "loop(plan, hostIndependentDaemonDeps());"), false);
+  assert.equal(usesUnpinnedDaemon(fixture + "loop(plan, {});"), true);
+  assert.equal(usesUnpinnedDaemon(fixture + "const run = (loop); run(plan, {});"), true);
+  assert.equal(usesUnpinnedDaemon(fixture + "{ const loop = () => {}; loop(plan, {}); }"), false);
+});
+
+test("the daemon memory census counts a nullish shorthand governor even after a pin", () => {
+  const fixture = `
+    import { runDaemon } from "#src/lib/daemon.js";
+    import { hostIndependentDaemonDeps } from "#test/helpers/daemon-host-pins.js";
+  `;
+  const call = "runDaemon(plan, { ...hostIndependentDaemonDeps(), memoryGovernor });";
+  assert.equal(usesUnpinnedDaemon(fixture + "const memoryGovernor = undefined;" + call), true);
+  assert.equal(usesUnpinnedDaemon(fixture + "const absent = (void 0); const memoryGovernor = absent;" + call), true);
+  assert.equal(usesUnpinnedDaemon(fixture + "const memoryGovernor = null;" + call), true);
+  assert.equal(usesUnpinnedDaemon(fixture + "const memoryGovernor = fakeGovernor();" + call), false);
 });
 
 // @source-text-subject: test/**/*.test.ts — use of the daemon's memory seams.
