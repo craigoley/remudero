@@ -1485,6 +1485,17 @@ export async function serveGhReadBroker(opts: {
       // A heartbeat with nobody answering is a dead broker's leftover: take its place below.
     }
   }
+  // W1-T11789: a broker with no GitHub identity would hold the socket and answer every read with gh's
+  // auth failure, while its heartbeat stops the hook's 180 s floor. Resolve the login before the old
+  // socket or the heartbeat is touched. App credentials start first: an App-held token is an identity.
+  await broker.startCredentials();
+  // A lookup that threw is no identity either; a GitHub login holds no space, so "unknown (" names no account.
+  const login = await broker.login().catch((err: unknown) => `unknown (the lookup threw: ${(err as Error).message})`);
+  if (login === "unknown" || login.startsWith("unknown (")) {
+    broker.stopCredentials();
+    throw new Error(`gh-broker: refusing to serve ${socketPath}: no GitHub identity (login reads ${login}); `
+      + "set GH_TOKEN for the broker process");
+  }
   rmSync(socketPath, { force: true });
   const heartbeat = join(dir, GH_BROKER_HEARTBEAT);
   const beat = () => {
@@ -1539,10 +1550,12 @@ export async function serveGhReadBroker(opts: {
     });
   });
   await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
+    server.once("error", (err) => {
+      broker.stopCredentials(); // a refused bind must not leave a token refresh loop running either
+      reject(err);
+    });
     server.listen(socketPath, () => resolve());
   });
-  await broker.startCredentials();
   installGithubAppTokenHolder(broker.appTokens);
   // A refused bind must not leave a heartbeat timer keeping the failed server process alive.
   const timer = setInterval(beat, intervalS * 1000);
