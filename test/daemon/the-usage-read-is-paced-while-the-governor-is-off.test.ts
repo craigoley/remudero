@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { HEADROOM_SAMPLE_MAX_AGE_MS, runDaemon } from "#src/lib/daemon.js";
+import { runDaemon } from "#src/lib/daemon.js";
 import { requestStop, stopDetail } from "#src/lib/fleet-control.js";
 import type { UsageSnapshot } from "#src/lib/headroom.js";
 import { loadPlan } from "#src/lib/plan.js";
@@ -54,15 +54,9 @@ async function readsOver(headroomEnabled: boolean): Promise<{ reads: number[]; b
   return { reads, beats };
 }
 
-test("W1-T13837 criterion 1: with the governor off, the tick reads usage once per HEADROOM_SAMPLE_MAX_AGE_MS", async () => {
+test("W1-T13837 criterion 1: with the governor off, usage reads occur at minutes 0, 5, and 10", async () => {
   const { reads, beats } = await readsOver(false);
-  assert.ok(reads.length >= 2, `the first tick and a tick five minutes later both read (saw ${JSON.stringify(reads)})`);
-  assert.equal(reads[0], 0, "the first tick reads");
-  for (let i = 1; i < reads.length; i++) {
-    assert.ok(reads[i] - reads[i - 1] >= HEADROOM_SAMPLE_MAX_AGE_MS,
-      `reads are at least ${HEADROOM_SAMPLE_MAX_AGE_MS} ms apart (saw ${JSON.stringify(reads)})`);
-  }
-  assert.ok(reads.length < SLEEPS, `fewer reads than ticks (saw ${reads.length} for ${SLEEPS} ticks)`);
+  assert.deepEqual(reads, [0, 300_000, 600_000]);
   assert.equal(beats, reads.length, "each read still writes its telemetry row");
 });
 
