@@ -30,6 +30,8 @@ import {
   maskLiterals,
   spawningSuites,
   stripComments,
+  testFilesASuiteRunsOrReads,
+  usedAtRuntime,
   type ImpactArmInput,
 } from "./test-impact-map.js";
 import { RMD_TMP_PREFIX } from "./tmp.js";
@@ -315,35 +317,6 @@ function namedPaths(content: string): Array<{ path: string; at: number }> {
   return out.filter(({ path }) => !/\.test\.ts$/.test(path));
 }
 
-/** Calls that spawn, fork or read the path in their arguments — through an argv array. */
-const PATH_SINKS = new Set(["spawn", "spawnSync", "execFile", "execFileSync", "fork", "runBoundedSuite", "readFileSync", "readFile", "URL"]);
-/** Calls that resolve a repo-relative path against a directory. */
-const PATH_JOINS = new Set(["join", "resolve"]);
-
-/** W1-T6089 — whether the path named at `at` is USED at runtime: it sits in the arguments of a
- *  PATH_SINKS call (through any argv `[…]`), or is joined onto a RUNTIME directory —
- *  `join(deps.repoRoot, "src", "run-task.ts")` — which a module does only to touch the file (spawn
- *  it, hand it to cluster as `exec:`, read it). A rootless `join("src", "x.ts")` is transparent: the
- *  call around it decides. An enclosing `{` (object literal, block) or the file's top level ends the
- *  walk: a path held as data in a table, array or constant is never used in place. */
-function usedAtRuntime(masked: string, at: number): boolean {
-  let depth = 0;
-  for (let i = at - 1; i >= 0; i -= 1) {
-    const c = masked[i]!;
-    if (c === ")" || c === "]" || c === "}") depth += 1;
-    else if (c === "(" || c === "[" || c === "{") {
-      if (depth > 0) depth -= 1;
-      else if (c === "{") return false;
-      else if (c === "(") {
-        const callee = /([\w$]+)\s*$/.exec(masked.slice(Math.max(0, i - 64), i))?.[1] ?? "";
-        if (PATH_SINKS.has(callee)) return true;
-        if (PATH_JOINS.has(callee) && !/^\s*["'`]/.test(masked.slice(i + 1, at + 1))) return true;
-      }
-    }
-  }
-  return false;
-}
-
 /** The named-path edges `file` contributes to the graph. A repo path written as a STRING inside a
  *  src/ module is usually data — authority.ts, config-schema.ts, worktree-sites.ts and
  *  baked-runtime-inputs.ts list src paths in tables — never an import: MEASURED 2026-10-06 those 114
@@ -463,8 +436,10 @@ export function buildAffectedSuitesGraph(
     const imported = new Set(specifiers(content).map((s) => resolve(file, s, known, aliases))
       .filter((dep): dep is string => dep !== undefined && dep !== file));
     const named = new Set(namedEdges(file, content, known).filter((dep) => dep !== file));
+    // W1-T13788: a test file's run-or-read edges to other suites, kept out of the import graph (and its reach).
+    const runsOrReads = file.startsWith("test/") ? testFilesASuiteRunsOrReads(content).filter((p) => known.has(p) && p !== file) : [];
     directImports.set(file, imported);
-    namedDependencies.set(file, named);
+    namedDependencies.set(file, runsOrReads.length === 0 ? named : new Set([...named, ...runsOrReads]));
     const deps = new Set([...imported, ...named]);
     dependencies.set(file, deps);
     for (const dep of deps) {
@@ -533,6 +508,19 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   if (reviewReplayRequired) pathNamers.add(reviewReplaySuite);
   for (const [file, named] of namedDependencies) {
     if (SUITE.test(file) && [...named].some((p) => changedSet.has(p))) pathNamers.add(file);
+  }
+  // W1-T13788: a suite that runs or reads a changed suite, or a suite selected so, to a fixed point.
+  const runOrRead = new Set(files.filter((f) => SUITE.test(f)));
+  for (let grew = runOrRead.size > 0; grew;) {
+    grew = false;
+    for (const [file, named] of namedDependencies) {
+      const hit = SUITE.test(file) && !runOrRead.has(file) ? [...named].find((p) => SUITE.test(p) && runOrRead.has(p)) : undefined;
+      if (hit === undefined) continue;
+      runOrRead.add(file);
+      pathNamers.add(file);
+      pick(file, `runs or reads ${hit}`);
+      grew = true;
+    }
   }
   const seen = new Set<string>();
   const contractSeen = new Set<string>();

@@ -17,7 +17,7 @@
     - src/lib/main-health-rung.ts
     - .github/workflows/ci.yml
     - test/a-main-bisection-probe-is-judged-on-the-red-it-bisects.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Replaying the 2026-11-18 bisection (red d23fd07de on ci and ci-shard, green 58be942f8, span 12f14d934, 22cb974e3, 73fef8b1b), a completed CI probe of 22cb974e3 whose only red required check is coverage-ratchet and whose ci-shard jobs are green is recorded as green for this red, and the lane locates 73fef8b1b (#19469), not 12f14d934"
