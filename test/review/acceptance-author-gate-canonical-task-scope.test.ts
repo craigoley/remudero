@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { gitRepo } from "#test/helpers/git-repo.js";
@@ -112,8 +112,7 @@ function fixture(t: TestContext, id: string, files: readonly string[]) {
     "  verify: auto",
     "  risk: low",
     "  depends_on: []",
-    "  files:",
-    ...paths.map(path => `    - ${JSON.stringify(path)}`),
+    ...(paths.length === 0 ? [] : ["  files:", ...paths.map(path => `    - ${JSON.stringify(path)}`)]),
     "  acceptance:",
     "    - claim: fixture behavior",
     "      proof: 'unit test: fixture behavior'",
@@ -131,7 +130,7 @@ function fixture(t: TestContext, id: string, files: readonly string[]) {
 }
 
 function check(root: string, options: {
-  base: string;
+  base?: string;
   head: string;
   body?: string;
   ref?: string;
@@ -225,6 +224,13 @@ test("W1-T11571 criterion 4 refuses unknown evidence for a canonical task", t =>
   const unreadable = check(f.root, { base: "0".repeat(40), head: f.base, body });
   assert.equal(unreadable.code, 1, unreadable.message);
   assert.match(unreadable.message, /canonical-task-scope-unreadable/);
+  const missing = check(f.root, { head: f.base, body });
+  assert.equal(missing.code, 1, missing.message);
+  assert.match(missing.message, /canonical-task-scope-unreadable/);
+  const noFiles = fixture(t, id, []);
+  const undeclared = check(noFiles.root, { base: noFiles.base, head: noFiles.base, body });
+  assert.equal(undeclared.code, 1, undeclared.message);
+  assert.match(undeclared.message, /canonical-task-scope-unreadable/);
   const empty = check(f.root, { base: f.base, head: f.base, body });
   assert.equal(empty.code, 1, empty.message);
   assert.match(empty.message, /canonical-task-diff-unreadable/);
@@ -233,4 +239,17 @@ test("W1-T11571 criterion 4 refuses unknown evidence for a canonical task", t =>
   // The public checkout positively lacks this private or external task identity.
   const other = check(f.root, { base: f.base, head: f.base, body: acceptance, ref: "run-W1-T77777-12345678" });
   assert.equal(other.code, 0, other.message);
+
+  // Keep the checked-out task and base monolith readable. Removing only the
+  // fixture's loose shard tree object invalidates its committed shard listing.
+  const tree = f.git("rev-parse", `${f.base}:plan/tasks.d`);
+  const path = join(f.root, ".git", "objects", tree.slice(0, 2), tree.slice(2));
+  renameSync(path, path + ".saved");
+  try {
+    const incomplete = check(f.root, { base: f.base, head: f.base, body });
+    assert.equal(incomplete.code, 1, incomplete.message);
+    assert.match(incomplete.message, /canonical-task-scope-unreadable/);
+  } finally {
+    renameSync(path + ".saved", path);
+  }
 });
