@@ -505,6 +505,22 @@ test("W1-T9588: the shipped-detector suite is selected for each recorded miss ed
   assert.ok(!absent.suites.includes(suite), "a suite absent from the tree cannot be selected");
 });
 
+test("W1-T10356: the baked-supervisor-inputs suite is selected for each recorded miss edge", () => {
+  const suite = "test/baked-supervisor-inputs.test.ts";
+  const edges = ["src/lib/ledger.ts", "src/lib/state-backup-engine-links.ts", "test/state-backup.test.ts"];
+  const files = new Map([...Object.entries(TREE), [suite, ""]]);
+  for (const changed of edges) {
+    if (changed.startsWith("test/")) files.set(changed, "export {};\n");
+    const selection = selectAffectedSuites([changed], { files, pathReaders: [], symbolSuites: [] });
+    assert.equal(selection.fullRun, false, changed);
+    assert.ok(selection.suites.includes(suite), `${changed} must select ${suite} in the floor`);
+  }
+  const unrelated = selectAffectedSuites(["src/a.ts"], { files, pathReaders: [], symbolSuites: [] });
+  assert.ok(!unrelated.suites.includes(suite), "an unrelated change must not select the suite");
+  const absent = selectAffectedSuites([edges[0]!], { files: new Map(Object.entries(TREE)), pathReaders: [], symbolSuites: [] });
+  assert.ok(!absent.suites.includes(suite), "a suite absent from the tree cannot be selected");
+});
+
 test("W1-T10111: the resolver-divergence suite is selected for each recorded miss edge", () => {
   const suite = "test/resolver-divergence-detector.test.ts";
   const edges = ["src/lib/proof-amendment.ts", "src/run-task.ts"];
