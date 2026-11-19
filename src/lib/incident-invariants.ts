@@ -146,6 +146,26 @@ export const RUNTIME_LOOP_LAG_STEP = "runtime.loop_lag";
 // 1-20s" was already the incident; 500ms p99 is well inside "fine" and well outside "the event
 // loop is fine."
 export const LOOP_LAG_P99_BOUND_MS = 500;
+/**
+ * W1-T13203: one stall this long is an incident even when p99 stays low. The histogram behind p99 holds one sample
+ * per loop turn, so serve's 887,447 ms freeze on 2026-11-16 (runtime.loop_lag 14:39:37Z: p99Ms 108.6) was one sample.
+ */
+export const LOOP_LAG_MAX_STALL_BOUND_MS = 30_000;
+/** W1-T13203: the stall profiler's row (W1-T10074), on the same run_id as the runtime.loop_lag row it explains. */
+export const RUNTIME_LOOP_STALL_PROFILE_STEP = "runtime.loop_stall_profile";
+
+/** W1-T13203: up to three `function (file)` pairs from the profile row on the stalled minute's run_id. */
+function stallTopFrames(window: readonly IncidentInvariantRow[], runId: unknown): string | undefined {
+  if (typeof runId !== "string") return undefined;
+  const profile = window.find((row) => row.step === RUNTIME_LOOP_STALL_PROFILE_STEP && row.run_id === runId);
+  const frames = Array.isArray(profile?.top_inclusive) ? (profile.top_inclusive as unknown[]).slice(0, 3) : [];
+  const named = frames.map((frame) => {
+    const entry = (frame ?? {}) as Record<string, unknown>;
+    const file = typeof entry.url === "string" ? entry.url.split("/").pop() : undefined;
+    return `${typeof entry.function === "string" ? entry.function : "?"} (${file || "?"})`;
+  });
+  return named.length > 0 ? named.join(", ") : undefined;
+}
 
 /** W1-T8233: green work waiting is the sweep's own `sweep.disposed` row with the awaiting-arm blocker
  *  (`queue.merge_ready` was never written). Merges are ledgered as `verdict.merged`; `pr.merged` is kept
@@ -230,15 +250,21 @@ const RULES: readonly InvariantRule[] = [
     // Fifteen minutes, sampled once a minute (serve.ts's timer) — enough samples that one noisy
     // minute cannot alone carry both the long AND the short (75s) window.
     longMs: 15 * 60_000,
-    inputs: [RUNTIME_LOOP_LAG_STEP],
+    inputs: [RUNTIME_LOOP_LAG_STEP, RUNTIME_LOOP_STALL_PROFILE_STEP],
     bad: (window) => {
-      const p99s = window
-        .filter((row) => row.step === RUNTIME_LOOP_LAG_STEP)
-        .map((row) => numberField(row, "p99Ms"));
+      const lags = window.filter((row) => row.step === RUNTIME_LOOP_LAG_STEP);
+      const p99s = lags.map((row) => numberField(row, "p99Ms"));
       const maxP99 = p99s.length > 0 ? Math.max(...p99s) : 0;
+      // W1-T13203: the longest single stall in the window, read beside the p99 test, never instead of it.
+      let longest: IncidentInvariantRow | undefined;
+      for (const row of lags) if (!longest || numberField(row, "maxMs") > numberField(longest, "maxMs")) longest = row;
+      const maxStall = longest ? numberField(longest, "maxMs") : 0;
+      const stalled = maxStall > LOOP_LAG_MAX_STALL_BOUND_MS;
+      const top = stalled ? stallTopFrames(window, longest?.run_id) : undefined;
       return {
-        bad: p99s.length > 0 && maxP99 > LOOP_LAG_P99_BOUND_MS,
-        message: `p99=${maxP99}ms over ${p99s.length} sample(s), bound=${LOOP_LAG_P99_BOUND_MS}ms`,
+        bad: p99s.length > 0 && (maxP99 > LOOP_LAG_P99_BOUND_MS || stalled),
+        message: `p99=${maxP99}ms over ${p99s.length} sample(s), bound=${LOOP_LAG_P99_BOUND_MS}ms` +
+          (stalled ? `; max=${maxStall}ms, bound=${LOOP_LAG_MAX_STALL_BOUND_MS}ms` : "") + (top ? `; top: ${top}` : ""),
       };
     },
   },
