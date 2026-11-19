@@ -291,9 +291,41 @@ export function appendLedger(
   }
   if (behind.length > 0) reappendBehindSeal(path, behind);
   // W1-T209: check growth here via stat/sidecar; read and rewrite only above the effective ceiling.
-  if (ledgerExceedsRotationCeiling(path, opts.ceilingBytes)) {
+  // W1-T13236: a backstop-only process (serve) rotates only past the backstop; below it the daemon rotates.
+  const due = rotationRole === "backstop-only"
+    ? ledgerExceedsRotationBackstop(path, opts.ceilingBytes)
+    : ledgerExceedsRotationCeiling(path, opts.ceilingBytes);
+  if (due) {
     rotateLedger(path, { ceilingBytes: opts.ceilingBytes });
   }
+}
+
+/**
+ * W1-T13236: which appends in this process may rotate the live ledger. "rotator" (the default) rotates at the
+ * effective ceiling, as before. "backstop-only" rotates only once the live file is past ceiling x
+ * {@link LEDGER_ROTATION_BACKSTOP_MULTIPLIER}: serve takes it, because a rotation reads, filters and gzips the live
+ * file on the caller's thread, and on serve that is the request loop. The daemon appends far more often and keeps
+ * the default, so it reaches the ceiling first.
+ */
+export type LedgerRotationRole = "rotator" | "backstop-only";
+let rotationRole: LedgerRotationRole = "rotator";
+
+/** W1-T13236: sets this process's {@link LedgerRotationRole} and returns the one it replaces. */
+export function setLedgerRotationRole(role: LedgerRotationRole): LedgerRotationRole {
+  const prior = rotationRole;
+  rotationRole = role;
+  return prior;
+}
+
+/** W1-T13236: this process's {@link LedgerRotationRole}. */
+export function ledgerRotationRole(): LedgerRotationRole {
+  return rotationRole;
+}
+
+/** W1-T13236: true iff `path` is past the backstop, ceiling x {@link LEDGER_ROTATION_BACKSTOP_MULTIPLIER}. */
+function ledgerExceedsRotationBackstop(path: string, ceilingBytes: number = LEDGER_ROTATION_CEILING_BYTES): boolean {
+  if (!realRotationFs.existsSync(path)) return false;
+  return realRotationFs.statSize(path) > ceilingBytes * LEDGER_ROTATION_BACKSTOP_MULTIPLIER;
 }
 
 /** Append for a pseudo sender (daemon, retro, drain, sweep), gated by producer-identity.ts's registry.
@@ -524,6 +556,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // W1-T13470: a capture once per head and check id, an escalation once per head; archived, each would repeat.
   "security.codeql_configuration_warning_captured",
   "security.codeql_configuration_warning_escalated",
+  "security.producer_redispatched", // W1-T13787: keep recent claims live; older claims are read from rotations.
   "automerge.rearmed_after_disarm",
   "automerge.rearm_exhausted",
   "automerge.stale_rollup_refreshed", // W1-T6404: the once-per-PR refresh bound; forgotten, it loops.

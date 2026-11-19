@@ -89,6 +89,10 @@ const COVERAGE_DEBT: ReadonlyMap<string, string> = new Map([
   ["POST /v1/inbox/archive", "W1-T8831: state-dir triage mark, no gateway/root to mis-wire -- covered in test/the-operator-can-archive-or-snooze-an-inbox-item.test.ts"],
   ["POST /v1/inbox/snooze", "W1-T8831: state-dir triage mark, no gateway/root to mis-wire -- covered in test/the-operator-can-archive-or-snooze-an-inbox-item.test.ts"],
   ["POST /v1/inbox/restore", "W1-T3407: ledger-only reversal of decline -- covered in test/a-decline-can-be-taken-back.test.ts"],
+  ["POST /v1/new-path-approval/preview", "W1-T10331: verified issuer preview is exercised over HTTP in test/ci-friction-remedies-file-admission.test.ts"],
+  ["POST /v1/new-path-approval/confirm", "W1-T10331: verified high-tier confirmation and nonce handling are exercised over HTTP in test/ci-friction-remedies-file-admission.test.ts"],
+  ["POST /v1/new-path-approval/resolve", "W1-T10331: verified issuer resolution is exercised over HTTP in test/ci-friction-remedies-file-admission.test.ts"],
+  ["POST /v1/new-path-approval/revoke", "W1-T10331: verified high-tier revocation and replay refusal are exercised over HTTP in test/ci-friction-remedies-file-admission.test.ts"],
   // W1-T4584: six write routes the line-start source scan could not see (built through a variable,
   // or declared with method and path on one line), surfaced once the helper learned the assembled
   // table. Each has its own suite; none has a deps-wiring test here yet.
@@ -323,6 +327,8 @@ const COVERED: ReadonlySet<string> = new Set([
   "POST /v1/products/research",
   // Assembled HTTP proof: test/console-api/serve/product-routes.test.ts and the production-assembly test below (W1-T10613).
   "POST /v1/products/repository",
+  // Assembled HTTP proof: W1-T11197 in test/console-api/serve/product-routes.test.ts and the production-assembly test below.
+  "POST /v1/products/runner-config-proposal",
   // Assembled HTTP proof over the real default Vercel transport: test/console-api/serve/product-routes.test.ts (W1-T10616).
   "POST /v1/products/deployment",
   // Assembled HTTP proof: test/console-api/serve/product-routes.test.ts and the production-assembly test below (W1-T10615).
@@ -692,6 +698,50 @@ test("W1-T10613: POST /v1/products/repository is high tier, confirmed, and journ
       assert.equal(readFileSync(h.ledgerPath, "utf8"), "", "adoption preserves the ledger");
     }, true, true);
   } finally { process.env.PATH = originalPath; }
+});
+
+test("W1-T11196: GET /v1/products/runner-config-preview is registered with verified owner reads", async () => {
+  await withProductionServer(async h => {
+    const headers = { authorization: `Bearer ${WRITE_TOKEN}`, "content-type": "application/json", [OPERATOR_SESSION_HEADER]: h.operatorSession! };
+    const saved = await fetch(`${h.base}/v1/products`, { method: "POST", headers, body: JSON.stringify({ version: "product-intent-v1",
+      requestId: "wiring-runner-preview", expectedRevision: 0, brief: { idea: "runner preview wiring" } }) });
+    const { receipt } = await saved.json() as { receipt: { productId: string } };
+    const url = `${h.base}/v1/products/runner-config-preview?productId=${receipt.productId}&expectedRevision=1&expectedObjectiveRevision=1`;
+    assert.equal((await fetch(url, { headers: { authorization: `Bearer ${READ_TOKEN}` } })).status, 403);
+    const before = readdirSync(h.fleetRoot, { recursive: true }).sort();
+    const preview = await fetch(url, { headers: { authorization: `Bearer ${READ_TOKEN}`, [OPERATOR_SESSION_HEADER]: h.operatorSession! } });
+    assert.equal(preview.status, 200);
+    assert.equal((await preview.json()).state, "repository_missing");
+    assert.equal(preview.headers.get("cache-control"), "private, no-store");
+    assert.deepEqual(readdirSync(h.fleetRoot, { recursive: true }).sort(), before);
+    assert.equal(readFileSync(h.ledgerPath, "utf8"), "");
+  }, true);
+});
+
+test("W1-T11197: POST /v1/products/runner-config-proposal is high tier, confirmed, and journals under the fleet root", async () => {
+  await withProductionServer(async h => {
+    const headers: Record<string, string> = { authorization: `Bearer ${WRITE_TOKEN}`, "content-type": "application/json",
+      [OPERATOR_SESSION_HEADER]: h.operatorSession! };
+    const saved = await fetch(`${h.base}/v1/products`, { method: "POST", headers, body: JSON.stringify({ version: "product-intent-v1",
+      requestId: "wiring-runner-proposal", expectedRevision: 0, brief: { idea: "runner proposal wiring" } }) });
+    const { receipt } = await saved.json() as { receipt: { productId: string } };
+    const payload = JSON.stringify({ version: "product-runner-config-proposal-v1", requestId: "wiring-runner-proposal-01", productId: receipt.productId,
+      expectedRevision: 1, expectedObjectiveRevision: 1, targetHead: "a".repeat(40), configDigest: "b".repeat(64) });
+    const refused = await fetch(`${h.base}/v1/products/runner-config-proposal`, { method: "POST", headers, body: payload });
+    assert.equal(refused.status, 403);
+    assert.equal((await refused.json()).error, "confirm_nonce_required");
+    const confirmed = await fetch(`${h.base}/v1/confirm`, { method: "POST", headers,
+      body: JSON.stringify({ method: "POST", path: "/v1/products/runner-config-proposal", payload }) });
+    assert.equal(confirmed.status, 200);
+    const { nonce } = await confirmed.json() as { nonce: string };
+    const proposed = await fetch(`${h.base}/v1/products/runner-config-proposal`, { method: "POST", headers: { ...headers, "x-confirm-nonce": nonce }, body: payload });
+    assert.equal(proposed.status, 409);
+    assert.equal((await proposed.json()).error, "repository_missing");
+    assert.equal(proposed.headers.get("cache-control"), "private, no-store");
+    assert.ok(existsSync(join(h.fleetRoot, "state/products/v1/runner-config")));
+    assert.ok(!existsSync(join(h.questionsRoot, "state/products")));
+    assert.equal(readFileSync(h.ledgerPath, "utf8"), "", "a refused proposal preserves the ledger");
+  }, true, true);
 });
 
 test("W1-T10726: GET /v1/products/repository-preview is verified-operator read-only over the fleet root", async () => {
