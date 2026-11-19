@@ -3,13 +3,17 @@
 // beyond the claim's stated inputs is a follow-up finding, not a FAIL. An untagged FAIL is held once, then folds as
 // before. The fixtures replay recorded clauses of 2026-11-19 (core ledger union, review.posted rows).
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import * as reviewCommand from "#src/cli/commands/review.js";
+import type { AsyncIssueGateway } from "#src/lib/escalate.js";
 import { appendLedger } from "#src/lib/ledger.js";
+import type { MainRepairLane } from "#src/lib/main-health-rung.js";
 import * as outcomeClass from "#src/lib/review-outcome-class.js";
 import * as review from "#src/lib/review.js";
+import * as health from "#src/lib/reviewer-health.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
@@ -284,4 +288,134 @@ test("W1-T13849 criterion 5: the gate only narrows — failed proofs, failed flo
   assert.equal(operator.verdict.state, fleet.verdict.state, "an operator PR and a fleet PR, a Claude and a Sol reviewer: one rule");
   assert.deepEqual(operator.verdict.criteria.map(c => [c.met, c.downgrade_class, c.followUp]),
     fleet.verdict.criteria.map(c => [c.met, c.downgrade_class, c.followUp]));
+});
+
+// W1-T13849 guard (operator ruling 2026-11-19): reviewer health reads the first downgrade-unclassified hold per
+// head and input digest as pending, so a wave of first holds after this change deploys is not a reviewer regression.
+type HealthRow = Record<string, unknown>;
+const sha40 = (seed: string): string => createHash("sha1").update(seed).digest("hex");
+let healthClock = Date.parse("2026-11-19T00:00:00.000Z");
+const healthTick = (): string => new Date((healthClock += 1000)).toISOString();
+const PULLS = "https://github.com/acme/remudero/pull";
+const healthUnit = (pr: number) => ({ pr_url: `${PULLS}/${pr}`, head_sha: sha40(`head-${pr}`) });
+const postedRow = (sha: string, pr: number): HealthRow =>
+  ({ ts: healthTick(), host: "core", step: "review.posted", state: "success", plan_only: false, reviewer_code_sha: sha, ...healthUnit(pr) });
+/** The row #19727 writes (src/cli/commands/review.ts): reason, reviewer_outcome and both digests. */
+const holdRow = (sha: string, pr: number, opts: { digest?: string; ts?: string; outcome?: string; reason?: string } = {}): HealthRow =>
+  ({ ts: opts.ts ?? healthTick(), host: "core", step: "review.semantic_incomplete", reason: opts.reason ?? outcomeClass.DOWNGRADE_UNCLASSIFIED,
+    reviewer_outcome: opts.outcome ?? "success", review_decision_digest: `decision-${pr}`, review_input_digest: opts.digest ?? `input-${pr}`,
+    reviewer_code_sha: sha, ...healthUnit(pr) });
+/** A clean history: three reviewer code shas, 150 posted code reviews each, none withheld. */
+const cleanHistory = (): HealthRow[] => [0, 1, 2].flatMap(i => Array.from({ length: 150 }, (_, j) => postedRow(sha40(`clean-${i}`), 1000 * (i + 1) + j)));
+
+/** evaluateReviewerHealthNow over a row queue; the issue gateway and repair lane record, git knows no sha. */
+function healthFixture(t: TestContext) {
+  const dir = ownedFixtureDir(t, "reviewer-health-hold").dir;
+  const statePath = join(dir, "reviewer-health.json");
+  const queue: HealthRow[] = [];
+  const steps: string[] = [];
+  const calls = { issues: 0, reverts: 0 };
+  const issues: AsyncIssueGateway = {
+    create: async () => { calls.issues += 1; return "https://github.com/acme/remudero/issues/1"; },
+    listOpen: async () => [], ensureLabel: async () => true, comment: async () => {}, closeWithComment: async () => {},
+  };
+  const lane: MainRepairLane = {
+    openFixPr: async () => { throw new Error("a reviewer regression opens no fix PR"); },
+    openRevertPr: async () => { calls.reverts += 1; return { prUrl: `${PULLS}/900` }; },
+    readPr: async () => ({ state: "open" as const }), closePr: async () => {},
+  };
+  const git: health.GitText = async () => { throw new Error("no git history in this fixture"); };
+  const evaluate = (current: string) => health.evaluateReviewerHealthNow({ originMainSha: current }, statePath,
+    async () => ({ rows: queue.splice(0), cursor: { liveOffset: 0 } }), git,
+    { issues, ledgerPath: join(dir, "ledger.ndjson"), runId: "w1-t13849-guard" }, lane,
+    (step: string) => { steps.push(step); }, { iso: () => new Date(healthClock).toISOString() });
+  return { queue, steps, calls, evaluate, state: () => health.loadReviewerHealthState(statePath) };
+}
+
+test("W1-T13849 guard: first-attempt holds, each re-asked to a posted verdict at the same sha, open no reviewer-regression incident", async (t) => {
+  const S = sha40("deployed-19727");
+  const h = healthFixture(t);
+  h.queue.push(...cleanHistory());
+  await h.evaluate(sha40("clean-2"));
+  assert.equal(h.state().coverage.rows, 450, "the clean history was read");
+  const classes: string[] = [];
+  for (let pr = 1; pr <= 4; pr++) {
+    h.queue.push(holdRow(S, pr));
+    await h.evaluate(S); // judged before its re-ask posts
+    classes.push(h.state().shas[S]!.units[`${PULLS}/${pr}#${sha40(`head-${pr}`)}`]!);
+    h.queue.push(postedRow(S, pr));
+    await h.evaluate(S);
+  }
+  assert.deepEqual(h.steps.filter(step => step.startsWith("reviewer.regression_")), [], "no incident opens, extends or carries");
+  const state = h.state();
+  assert.equal(state.incident, null);
+  assert.equal(state.shas[S]!.regressedAt, undefined, "the sha is never judged regressed");
+  assert.deepEqual([h.calls.issues, h.calls.reverts], [0, 0], "no issue, no revert PR");
+  assert.deepEqual(classes, ["withheld-pending", "withheld-pending", "withheld-pending", "withheld-pending"]);
+  assert.deepEqual(health.shaCounts(state.shas[S]!), { k: 0, n: 4 }, "the sha reads as its posted verdicts alone");
+  assert.deepEqual(state.shas[S]!.reasons, {}, "a pending hold adds no failure reason");
+  assert.equal(state.shas[S]!.firstFailHost, undefined, "nor a first-fail host");
+  assert.notEqual(health.judgeReviewerSha(state, S).state, "regressed");
+
+  // The seed replays the same rows, every hold before its re-ask: nothing regresses, nothing is carried.
+  const seed = healthFixture(t);
+  seed.queue.push(...cleanHistory(), ...[1, 2, 3, 4].map(pr => holdRow(S, pr)), ...[1, 2, 3, 4].map(pr => postedRow(S, pr)));
+  await seed.evaluate(S);
+  assert.deepEqual(seed.steps.filter(step => step.startsWith("reviewer.regression_")), []);
+  assert.equal(seed.state().shas[S]!.regressedAt, undefined);
+  assert.deepEqual(seed.state().closed, []);
+
+  // The production writer's own hold row is the one classed pending.
+  const { drive } = reviewFixture(t, W1_T12176);
+  const written = (await drive(`REVIEW_VERDICT 1: FAIL ${W1_T12176_CLAUSE}`)).rows.find(row => row.step === "review.semantic_incomplete")!;
+  const classed = health.classifyReviewerHealthRow(written as HealthRow);
+  assert.equal(classed?.kind === "outcome" ? classed.cls : undefined, "withheld-pending");
+});
+
+test("W1-T13849 guard: a second hold on the same head and input digest counts failing, as on origin/main", async (t) => {
+  const S = sha40("second-hold");
+  const h = healthFixture(t);
+  h.queue.push(...cleanHistory());
+  await h.evaluate(sha40("clean-2"));
+  const first = holdRow(S, 7, { digest: "input-a" });
+  h.queue.push(first, holdRow(S, 7, { digest: "input-b" }));
+  await h.evaluate(S);
+  const unit = `${PULLS}/7#${sha40("head-7")}`;
+  assert.equal(h.state().shas[S]!.units[unit], "withheld-pending", "a first hold per digest is pending");
+  assert.equal(h.state().incident, null);
+  h.queue.push(first); // the same row read again is not a second hold
+  await h.evaluate(S);
+  assert.equal(h.state().shas[S]!.units[unit], "withheld-pending");
+  h.queue.push(holdRow(S, 7, { digest: "input-a" }));
+  await h.evaluate(S);
+  const state = h.state();
+  assert.equal(state.shas[S]!.units[unit], "withheld-success", "the second hold on head and digest input-a fails");
+  assert.deepEqual(state.shas[S]!.reasons, { [outcomeClass.DOWNGRADE_UNCLASSIFIED]: 1 }, "its reason is recorded though it replaced a pending unit");
+  assert.equal(state.shas[S]!.firstFailHost, "core");
+  assert.deepEqual(h.steps.filter(step => step === "reviewer.regression_opened"), ["reviewer.regression_opened"]);
+  assert.deepEqual(state.incident?.signature, [outcomeClass.DOWNGRADE_UNCLASSIFIED]);
+  assert.equal(state.incident?.regressedSha, S);
+});
+
+test("W1-T13849 guard: every other withheld reason and outcome classes and counts as on origin/main", async (t) => {
+  const S = sha40("other-reason");
+  const cls = (row: HealthRow) => { const c = health.classifyReviewerHealthRow(row); return c?.kind === "outcome" ? c.cls : undefined; };
+  assert.equal(cls(holdRow(S, 1, { reason: "required-semantic-incomplete-verdicts" })), "withheld-success");
+  assert.equal(cls(holdRow(S, 1, { outcome: "error" })), "withheld-failure", "a hold whose reviewer failed is provider health");
+  const undigested = holdRow(S, 1);
+  delete undigested.review_input_digest;
+  delete undigested.review_decision_digest;
+  assert.equal(cls(undigested), "withheld-success", "a hold naming no digest cannot be the first: it fails");
+  assert.equal(cls({ ...postedRow(S, 1) }), "posted");
+  assert.equal(cls({ ts: healthTick(), host: "core", step: "review.semantic_setup_refused", reason: "head-task-metadata-unavailable",
+    reviewer_code_sha: S, ...healthUnit(1) }), "setup-refused");
+  const h = healthFixture(t);
+  h.queue.push(...cleanHistory());
+  await h.evaluate(sha40("clean-2"));
+  h.queue.push(holdRow(S, 9, { reason: "required-semantic-incomplete-verdicts" }));
+  await h.evaluate(S);
+  const state = h.state();
+  assert.deepEqual(health.shaCounts(state.shas[S]!), { k: 1, n: 1 });
+  assert.deepEqual(state.incident?.signature, ["required-semantic-incomplete-verdicts"], "one other-reason hold regresses the sha as before");
+  assert.deepEqual(h.steps.filter(step => step === "reviewer.regression_opened"), ["reviewer.regression_opened"]);
 });
