@@ -31329,7 +31329,7 @@ export function createEscalationTriageHistoryReader(
   const steps = [...slice.steps];
   const project = slice.project ?? ((row: Record<string, unknown>) => row);
   const rawPattern = slice.rawPattern === undefined ? undefined : new RegExp(slice.rawPattern.source, slice.rawPattern.flags.replace(/[gy]/g, ""));
-  const identity = { holder: slice.holder, reducerVersion: `${slice.version ?? "1"}${io.parseAll ? "-all-record-objects-v2" : ""}:${rawPattern?.source ?? ""}/${rawPattern?.flags ?? ""}`, project };
+  const identity = { holder: slice.holder, reducerVersion: `${slice.version ?? "1"}${io.parseAll ? "-all-record-objects-v2" : ""}${rawPattern ? `:${rawPattern.source}/${rawPattern.flags}` : ""}`, project };
   let lastLoad: EscalationTriageHistoryLoad = { rotations: 0, digestHits: 0, digestMisses: 0,
     bytesRead: 0, rotationsRead: 0, snapshotHit: false };
   const counted = (path: string, read: () => Buffer): Buffer => {
