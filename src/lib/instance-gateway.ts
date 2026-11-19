@@ -61,7 +61,8 @@ import {
 } from "./panel-actions.js";
 import { buildEscalationConversationRoute, createEscalationConversationReader } from "./escalation-conversation.js";
 import { buildEscalationConversationIndexRoute, createEscalationConversationIndexReader } from "./escalation-conversation-index.js";
-import { loadPlan, type Plan } from "./plan.js";
+import { taskTargetsRepo } from "./drain.js";
+import { loadPlan, loadPlanKeepingUnseenDependencies, type Plan } from "./plan.js";
 import { planSourceFailed, planSourceLoaded, type PlanSourceOutcome } from "./serve-plan-reload.js";
 import { buildRepoDashboardRoutes } from "./repo-dashboard-route.js";
 import { buildGardenersRoute } from "./gardeners-route.js";
@@ -82,6 +83,8 @@ export interface InstanceStateRoot {
   root: string;
   ledgerPath: string;
   planPath: string;
+  /** The registry's repository name: tasks of another repository may name dependencies this plan does not hold. */
+  repo?: string;
 }
 
 export type InstanceAvailability = { ok: true; staleReason?: string } | { ok: false; reason: string };
@@ -126,7 +129,19 @@ export function instanceStateRoot(instance: RegistryInstance, stateBase: string)
     root,
     ledgerPath: join(root, "state", LEDGER_FILENAME),
     planPath: resolveRepoLayout(checkout).planMonolith,
+    repo: instance.repo,
   };
+}
+
+/**
+ * W1-T13826: how an instance's plan is read. loadPlan, except that a task of another repository (the ops catalog
+ * holds core tasks that depend on core ids) keeps a depends_on id this plan does not hold, as W1-T13752 does for
+ * the instance Inbox. The instance's own tasks still fail with loadPlan's PlanError text.
+ */
+export function instancePlanLoader(root: Pick<InstanceStateRoot, "repo">): (planPath: string) => Plan {
+  const repo = root.repo;
+  if (repo === undefined || repo.trim() === "") return loadPlan;
+  return (planPath) => loadPlanKeepingUnseenDependencies(planPath, (task) => !taskTargetsRepo(task.repo, repo));
 }
 
 /** `/v1/status` → `/v1/i/<instance>/status`; undefined for anything outside `/v1/`. */
@@ -339,7 +354,7 @@ function instancePlanReader(root: InstanceStateRoot, board: BoardDeps, opts: Ins
   try {
     const before = initialInstancePlanIdentity(root.planPath);
     attemptedIdentity = before;
-    const next = (opts.loadPlan ?? loadPlan)(root.planPath);
+    const next = (opts.loadPlan ?? instancePlanLoader(root))(root.planPath);
     if (initialInstancePlanIdentity(root.planPath) !== before) throw new Error("instance plan source changed during startup");
     board.plan = next; source = planSourceLoaded(source, before, opts.clock);
   } catch (error) {
@@ -358,7 +373,7 @@ function instancePlanReader(root: InstanceStateRoot, board: BoardDeps, opts: Ins
         captured = true;
         if (before !== attemptedIdentity || source?.state !== "loaded" && (opts.clock ?? systemClock).now() >= retryAfter) {
           attemptedIdentity = before;
-          const next = (opts.loadPlan ?? loadPlan)(root.planPath);
+          const next = (opts.loadPlan ?? instancePlanLoader(root))(root.planPath);
           if (await instancePlanIdentity(root.planPath) !== before) throw new Error("instance plan source changed during refresh");
           board.plan = next;
           source = planSourceLoaded(source, before, opts.clock);
