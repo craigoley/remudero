@@ -426,7 +426,8 @@ class RunnerConfigProposalRun {
 
   /** A write whose response is lost is decided by the read that follows it, never by a retry. */
   private async attempt(args: string[]): Promise<void> {
-    try { await this.api(args); } catch (error) { void error; }
+    // A lost or failed write is decided by the read that follows it, never by this reply.
+    try { await this.api(args); } catch { /* decided by the following read */ }
   }
 
   private async branchFile(record: ProposalRecord, ref: string): Promise<string | undefined> {
@@ -535,7 +536,7 @@ class RunnerConfigProposalRun {
       fd = openSync(this.paths.state, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
       const info = fstatSync(fd);
       if (!info.isFile() || info.nlink > 1 || (info.mode & 0o077) !== 0 || info.size > RUNNER_CONFIG_PROPOSAL_LIMITS.stateBytes) throw proposalFault("unavailable");
-      const parsed = proposalJournalSchema.safeParse((() => { try { return JSON.parse(readFileSync(fd!, "utf8")); } catch { return undefined; } })());
+      const parsed = proposalJournalSchema.safeParse((() => { try { return JSON.parse(readFileSync(fd!, "utf8")); } catch { /* unparseable bytes fail the schema below as corrupt */ return undefined; } })());
       if (!parsed.success || parsed.data.ownerKey !== this.paths.ownerKey) throw proposalFault("corrupt");
       return parsed.data;
     } catch (error) {
