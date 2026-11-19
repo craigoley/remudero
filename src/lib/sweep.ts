@@ -45,8 +45,9 @@ import { loadFleetStateCommitStore, type FleetStateCommitStore } from "./fleet-s
 import { CONVENTIONAL_LIMITS, fitConventionalTitle } from "./commit-message.js";
 import { mintNextTaskId } from "./task-id.js";
 import {
-  gatedRemoteRefReserver, parseReservationHolderLine, RESERVATION_PUSH_GRACE_MS, reservationHandoffNoteLine, reserveTaskIdRemote,
-  taskIdReservationRef, type RemoteReserveDeps,
+  gatedRemoteRefReserver, gatedRemoteRefReserverAsync, parseReservationHolderLine, RESERVATION_PUSH_GRACE_MS,
+  reservationHandoffNoteLine, reserveTaskIdBlockRemoteAsync, reserveTaskIdRemote, taskIdReservationRef,
+  type RemoteReserveAsyncInput, type RemoteReserveDeps,
 } from "./task-id-reservation.js";
 import { basename, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -405,7 +406,7 @@ import {
   type RefusalCandidate,
 } from "./refusal-amendment.js";
 import { landTaskFilesAsync, landingIdentity, stagedTaskFiles, type LandTaskFilesOpts } from "./feedback-landing.js";
-import { PARKED_PR_REMEDY_STEP, openEscalationRelease, actOnParkedPr, designHoldCoverage, parkedPrFacts, parkedPrRemedy, planRoundExhaustedRemedy, readParkedPrShard, remedyStalledCriterion, standDownHoldRemedied, standDownHoldRemedy, takeParkedPrRemedy, type ParkedPrHost } from "./parked-pr-remedy.js";
+import { PARKED_PR_REMEDY_STEP, openEscalationRelease, actOnParkedPr, designHoldCoverage, parkedPrFacts, parkedPrRemedy, planPreflightRefusalChecks, planRoundExhaustedRemedy, readParkedPrShard, remedyStalledCriterion, standDownHoldRemedied, standDownHoldRemedy, takeParkedPrRemedy, type ParkedPrHost } from "./parked-pr-remedy.js";
 
 /** W1-T6434: the bounded, already-scrubbed view of a preserved fix-owner patch. */
 export interface PriorPartialWork {
@@ -5517,13 +5518,19 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           (checkoutDir) => readTaskShard(checkoutDir, taskId));
       },
       // Task ids are one global sequence: the id is minted in the public repository, held by the target's landing branch.
-      reserveTaskId: (target) => (deps.planRepairReserveIdImpl ?? ((cwd, branch) => reservePlanRepairTaskId(cwd, branch, undefined, log)))(
-        repoDir, landingIdentity({ family: "task-files", targetRepository: { owner: target.owner, repo: target.repo },
-          sourceRepository: { owner, repo } }).branch),
+      // W1-T13830: the reservation is awaited (W1-T13183), so its git runs off the daemon loop.
+      reserveTaskId: (target) => {
+        const branch = landingIdentity({ family: "task-files", targetRepository: { owner: target.owner, repo: target.repo },
+          sourceRepository: { owner, repo } }).branch;
+        return deps.planRepairReserveIdImpl ? deps.planRepairReserveIdImpl(repoDir, branch)
+          : reservePlanRepairTaskIdAsync(repoDir, branch, undefined, log);
+      },
       landTaskFiles: async (files, target) => {
         const landed = await landTaskFilesAsync(target.checkoutDir, files, taskFilesLandingOpts(target));
         const error = landed.error ?? landed.refused[0]?.reason;
-        return { ...(landed.prUrl === undefined ? {} : { prUrl: landed.prUrl }), ...(error === undefined ? {} : { error }) };
+        const refusalChecks = error === undefined ? undefined : planPreflightRefusalChecks(landed);
+        return { ...(landed.prUrl === undefined ? {} : { prUrl: landed.prUrl }), ...(error === undefined ? {} : { error }),
+          ...(refusalChecks === undefined ? {} : { refusalChecks }) };
       },
       closePr: async (prUrl, comment) => {
         assertLiveWriteAllowed("gh-transport", `parked pull request close of ${prUrl}`);
@@ -12016,6 +12023,32 @@ export function reservePlanRepairTaskId(
 ): string {
   const mint = mintNextTaskId({ planPath: join(worktreePath, "plan", "tasks.yaml") });
   return reserveTaskIdRemote(mint.n, gatedRemoteRefReserver({ run, filingBranch, lane: "plan-repair", log })).taskId;
+}
+
+/** W1-T13830: {@link planRepairGitRun} awaited, over hostWorktreeGitAsync. A non-zero exit is an answer, not a throw. */
+function planRepairGitRunAsync(cwd: string): RemoteReserveAsyncInput["run"] {
+  return async (args) => {
+    try {
+      return { status: 0, stdout: await hostWorktreeGitAsync(cwd, args), stderr: "" };
+    } catch (error) {
+      if (error instanceof WorktreePointerRefusedError) throw error;
+      const failed = error as { code?: unknown; stdout?: unknown; stderr?: unknown; message?: unknown };
+      return { status: typeof failed.code === "number" ? failed.code : 1, stdout: String(failed.stdout ?? ""),
+        stderr: String(failed.stderr || failed.message || "") };
+    }
+  };
+}
+
+/** W1-T13830: {@link reservePlanRepairTaskId} for the daemon loop: the same mint, and the reservation's git awaited. */
+export async function reservePlanRepairTaskIdAsync(
+  worktreePath: string,
+  filingBranch: string,
+  run: RemoteReserveAsyncInput["run"] = planRepairGitRunAsync(worktreePath),
+  log?: (step: string, fields: Record<string, unknown>) => void,
+): Promise<string> {
+  const mint = mintNextTaskId({ planPath: join(worktreePath, "plan", "tasks.yaml") });
+  const block = await reserveTaskIdBlockRemoteAsync(mint.n, 1, gatedRemoteRefReserverAsync({ run, filingBranch, lane: "plan-repair", log }));
+  return block.taskIds[0]!;
 }
 
 export interface StaleBaseReleaseTarget {

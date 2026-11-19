@@ -13,9 +13,15 @@
  * - `unreadable`: any git or transport failure, including a head that is not a commit in the checkout.
  */
 import { createHash } from "node:crypto";
-import { relative, sep } from "node:path";
+import { closeSync, constants, fstatSync, openSync, readFileSync } from "node:fs";
+import { isAbsolute, relative, sep } from "node:path";
 import { parse as parseYaml } from "yaml";
-import { mountsPath, validateMounts } from "./mounts.js";
+import { z } from "zod";
+import { ghTextAsync } from "./github-transport.js";
+import { loadMounts, mountsPath, validateMounts } from "./mounts.js";
+import { ProductIntentStore } from "./product-intent-store.js";
+import { productIdSchema, type ProductStoreCode } from "./product-intent.js";
+import { ghProductRepositoryProvider, type ProductRepositoryProvider } from "./product-repository.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
 
@@ -75,4 +81,131 @@ export async function readTargetRunnerConfig(checkout: string, head: string, rea
     return { state: "invalid", ...at, reason: String((error as Error)?.message ?? error) };
   }
   return { state: "present", ...at, digest: createHash("sha256").update(blob).digest("hex") };
+}
+
+export const RUNNER_CONFIG_PREVIEW_VERSION = "product-runner-config-preview-v1" as const;
+const commitId = z.string().regex(/^[a-f0-9]{40}$/);
+const previewQuery = z.object({ productId: productIdSchema,
+  expectedRevision: z.coerce.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  expectedObjectiveRevision: z.coerce.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+}).strict();
+export interface RunnerConfigProposal {
+  path: string; bytes: string; digest: string; targetHead: string;
+  source: { kind: "serving_instance_mounts"; commit: string };
+  validation: { valid: true; g17: true };
+  changes: [{ operation: "add"; path: string }];
+}
+export interface RunnerConfigPreview {
+  version: typeof RUNNER_CONFIG_PREVIEW_VERSION; productId: string; revision: number; objectiveRevision: number;
+  state: TargetRunnerConfig["state"] | "source_unavailable" | "stale_target" | "repository_missing" | "repository_conflict";
+  head?: string; path: string; digest?: string; reason?: string; proposal?: RunnerConfigProposal;
+}
+export interface RunnerConfigPreviewOptions {
+  root?: string; installRoot: string; store?: ProductIntentStore;
+  provider?: Pick<ProductRepositoryProvider, "read">;
+  text?: typeof ghTextAsync;
+}
+type PreviewResult = { ok: true; value: RunnerConfigPreview } | { ok: false; code: ProductStoreCode };
+
+/** Adapt bounded GitHub tree/blob reads to the same committed-tree reader used by native planning. */
+function githubRunnerConfigRead(slug: string, api: (path: string) => Promise<string>): TargetGitRead {
+  const row = z.object({ path: z.string(), mode: z.string().regex(/^\d{6}$/), type: z.string(), sha: commitId, size: z.number().int().nonnegative().optional() });
+  const tree = z.object({ truncated: z.literal(false), tree: z.array(row) });
+  const trees = new Map<string, z.infer<typeof tree>>();
+  const getTree = async (ref: string) => {
+    if (!trees.has(ref)) trees.set(ref, tree.parse(JSON.parse(await api(`${slug}/git/trees/${ref}`))));
+    return trees.get(ref)!.tree;
+  };
+  return async (_checkout, args) => {
+    if (args[0] === "rev-parse") {
+      const head = args.at(-1)!.replace(/\^\{commit\}$/, "");
+      return commitId.parse(JSON.parse(await api(`${slug}/commits/${head}`)).sha);
+    }
+    if (args[0] === "ls-tree") {
+      const head = args[4]!;
+      const path = args.at(-1)!;
+      const roots = await getTree(head);
+      const parent = roots.find(entry => entry.path === STATE_DIRECTORY);
+      const found = path === STATE_DIRECTORY ? parent : parent?.type === "tree"
+        ? (await getTree(parent.sha)).find(entry => entry.path === "mounts.yaml") : undefined;
+      return found ? `${found.mode} ${found.type} ${found.sha} ${found.size ?? "-"}\t${path}\0` : "";
+    }
+    const blob = z.object({ sha: commitId, encoding: z.literal("base64"), size: z.number().int().max(TARGET_RUNNER_CONFIG_MAX_BYTES), content: z.string() })
+      .parse(JSON.parse(await api(`${slug}/git/blobs/${args[2]}`)));
+    const content = blob.content.replace(/\s/g, "");
+    if (blob.sha !== args[2] || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(content)) throw new Error("invalid GitHub blob");
+    const bytes = Buffer.from(content, "base64");
+    if (bytes.length !== blob.size) throw new Error("GitHub blob size mismatch");
+    return bytes.toString("latin1");
+  };
+}
+
+/** Informational only: the owner and live repository/head are checked again before any proposal is returned. */
+export async function previewRunnerConfigBootstrap(options: RunnerConfigPreviewOptions, actor: string, query: unknown): Promise<PreviewResult> {
+  const input = previewQuery.safeParse(query);
+  if (!input.success) return { ok: false, code: "invalid_input" };
+  const store = options.store ?? new ProductIntentStore(options);
+  const product = store.read(actor, input.data.productId);
+  if (!product.ok) return { ok: false, code: product.code };
+  const { id: productId, revision, objectiveRevision, repository } = product.value;
+  if (revision !== input.data.expectedRevision || objectiveRevision !== input.data.expectedObjectiveRevision) return { ok: false, code: "stale_revision" };
+  const result = (value: Omit<RunnerConfigPreview, "version" | "productId" | "revision" | "objectiveRevision" | "path">): PreviewResult => ({ ok: true,
+    value: { version: RUNNER_CONFIG_PREVIEW_VERSION, productId, revision, objectiveRevision, path: TARGET_RUNNER_CONFIG_PATH, ...value } });
+  if (!repository) return result({ state: "repository_missing" });
+  const text = options.text ?? ghTextAsync;
+  const api = (path: string) => text(["api", path], { maxBuffer: 2 * TARGET_RUNNER_CONFIG_MAX_BYTES, timeout: 20_000 });
+  const provider = options.provider ?? ghProductRepositoryProvider(text);
+  const slug = `repos/${repository.owner}/${repository.name}`;
+  const liveIdentity = async () => {
+    const live = await provider.read(repository.owner, repository.name);
+    if (live.state === "unreadable") throw new Error("repository identity unreadable");
+    return live.state === "found" && live.repository.id === repository.id &&
+      live.repository.owner.toLowerCase() === repository.owner.toLowerCase() && live.repository.name.toLowerCase() === repository.name.toLowerCase() &&
+      live.repository.defaultBranch === repository.defaultBranch;
+  };
+  // Both head reads bypass every read cache (broker and in-flight): a cached head would let a moved target keep its proposal.
+  const currentHead = async () => commitId.parse(JSON.parse(await text(["api", `${slug}/commits/${encodeURIComponent(repository.defaultBranch)}`],
+    { maxBuffer: 2 * TARGET_RUNNER_CONFIG_MAX_BYTES, timeout: 20_000, fresh: true })).sha);
+  let head: string;
+  let config: TargetRunnerConfig;
+  try {
+    if (!await liveIdentity()) return result({ state: "repository_conflict" });
+    head = await currentHead();
+    config = await readTargetRunnerConfig(slug, head, githubRunnerConfigRead(slug, api));
+  } catch (error) { return result({ state: "unreadable", reason: String(error).slice(0, 512) }); }
+  let proposal: RunnerConfigProposal | undefined;
+  if (config.state === "absent") try {
+    if (!isAbsolute(options.installRoot)) throw new Error("serving install root unavailable");
+    const path = mountsPath(options.installRoot);
+    // One descriptor, opened without following a link and without blocking (a FIFO would otherwise wait for a writer),
+    // is checked and read: the bytes checked are the bytes compared.
+    const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    let onDisk: Buffer;
+    try {
+      const stat = fstatSync(fd);
+      if (!stat.isFile() || stat.size > TARGET_RUNNER_CONFIG_MAX_BYTES) throw new Error("source is not a bounded regular file");
+      onDisk = readFileSync(fd);
+    } finally { closeSync(fd); }
+    const sourceCommit = commitId.parse((await hostRead(options.installRoot, ["rev-parse", "HEAD"], { maxBuffer: 4096 })).trim());
+    const committed = Buffer.from(await hostRead(options.installRoot, ["cat-file", "blob", `${sourceCommit}:${TARGET_RUNNER_CONFIG_PATH}`],
+      { maxBuffer: TARGET_RUNNER_CONFIG_MAX_BYTES + 1, encoding: "latin1" }), "latin1");
+    if (!onDisk.equals(committed)) throw new Error("source differs from its recorded commit");
+    // The maintained entry point (including G-17) over the path now known to be a bounded regular file, then the same
+    // validation over the exact committed bytes that are offered.
+    loadMounts(path);
+    const bytes = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(committed);
+    validateMounts(parseYaml(bytes));
+    const digest = createHash("sha256").update(committed).digest("hex");
+    proposal = { path: TARGET_RUNNER_CONFIG_PATH, bytes, digest, targetHead: head,
+      source: { kind: "serving_instance_mounts", commit: sourceCommit }, validation: { valid: true, g17: true },
+      changes: [{ operation: "add", path: TARGET_RUNNER_CONFIG_PATH }] };
+  } catch (error) { return result({ state: "source_unavailable", head, reason: String(error).slice(0, 512) }); }
+  try {
+    if (!await liveIdentity()) return result({ state: "repository_conflict" });
+    if (await currentHead() !== head) return result({ state: "stale_target", head });
+  } catch (error) { return result({ state: "unreadable", head, reason: String(error).slice(0, 512) }); }
+  const latest = store.read(actor, productId);
+  if (!latest.ok) return { ok: false, code: latest.code };
+  if (latest.value.revision !== revision || latest.value.objectiveRevision !== objectiveRevision) return { ok: false, code: "stale_revision" };
+  return result({ ...config, ...("reason" in config ? { reason: config.reason.slice(0, 512) } : {}), ...(proposal ? { proposal } : {}) });
 }
