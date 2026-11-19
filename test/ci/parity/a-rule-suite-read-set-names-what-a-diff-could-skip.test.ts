@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
@@ -86,6 +86,36 @@ test("W1-T11819 criterion 1: the recorder runs each suite once and writes sorted
     [observedScript, "export {};"],
   ]));
   assert.deepEqual([...graph.dependencies.get(RECORDER)!], [], "recorded reads create no code dependencies from the recorder");
+});
+
+test("--refresh-reads runs the recorder and writes the discovered read set", async (t) => {
+  const { dir } = ownedFixtureDir(t, "rule-suite-refresh");
+  const suite = "test/rules/refresh.test.mjs";
+  const input = "fixtures/refresh-input";
+  const source = `
+    import { readFileSync } from "node:fs";
+    import { test } from "node:test";
+    test("read refresh input", () => readFileSync(${JSON.stringify(input)}));
+  `;
+  put(dir, suite, source);
+  put(dir, input, "traced input");
+  put(dir, "test/setup/tmp-hygiene.ts", "export {};");
+  mkdirSync(join(dir, "node_modules"));
+  symlinkSync(join(REPO_ROOT, "node_modules/tsx"), join(dir, "node_modules/tsx"), "junction");
+  mkdirSync(join(dir, "scripts"));
+  copyFileSync(join(REPO_ROOT, RECORDER), join(dir, RECORDER));
+
+  const { main } = await import(RULE_SUITE_RUNNER);
+  const refresh = { repoRoot: dir, suites: [suite] };
+  assert.equal(await main(["--refresh-reads"], undefined, undefined, undefined, undefined, undefined, refresh), 0);
+  const { RULE_SUITE_READS: record }: { RULE_SUITE_READS: Record<string, ReadRow> } =
+    await import(pathToFileURL(join(dir, RECORDER)).href);
+  const row = record[suite];
+  assert.ok(row, "the refresh wrote a row for the fixture suite");
+  assert.deepEqual(Object.keys(record), [suite]);
+  assert.equal(row.sha256, sha256(source));
+  assert.equal(row.incomplete, undefined);
+  assert.ok(row.roots.includes(input));
 });
 
 test("W1-T11819 criterion 2: shadow keeps missing, stale, incomplete and intersecting records", (t) => {

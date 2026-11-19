@@ -211,7 +211,7 @@ const USAGE = "usage: node --import tsx scripts/list-rule-suites.mjs [--list|--r
 /** The CLI: `--list` (the default) prints the population, `--run` executes it at a width that follows host
  *  pressure, starting from {@link ruleSuiteConcurrency}, or one at a time through an injected `run`, and
  *  `--measure-starts <n> [suite]` times `n` starts of one suite (the population's first when none is named). */
-export function main(argv, run, concurrency = ruleSuiteConcurrency(), runConcurrently = runRuleSuitesConcurrently, pressure = ruleSuitePressure(), rerunAlone = ruleSuiteRerunsAlone()) {
+export function main(argv, run, concurrency = ruleSuiteConcurrency(), runConcurrently = runRuleSuitesConcurrently, pressure = ruleSuitePressure(), rerunAlone = ruleSuiteRerunsAlone(), refresh = {}) {
   if (argv[0] === "--measure-starts") {
     const [, count, suite = ruleSuites()[0], ...extra] = argv;
     if (!/^[1-9]\d*$/.test(count ?? "") || extra.length > 0) {
@@ -221,7 +221,8 @@ export function main(argv, run, concurrency = ruleSuiteConcurrency(), runConcurr
     return measureSuiteStarts(Number(count), suite, { run: run ?? spawnSync });
   }
   if (argv.length === 1 && argv[0] === "--refresh-reads") {
-    return recordRuleSuiteReads(root, ruleSuites(), suiteArgs);
+    const { repoRoot = root, suites = ruleSuites(repoRoot) } = refresh;
+    return recordRuleSuiteReads(repoRoot, suites, suiteArgs);
   }
   const scopeAt = argv.indexOf("--scope");
   const base = scopeAt < 0 ? undefined : argv[scopeAt + 1];
