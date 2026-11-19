@@ -18,7 +18,7 @@
     - scripts/preflight-author.mjs
     - test/the-hosts-own-node-follows-nvmrc.test.ts
     - test/deploy/a-host-node-off-its-pin-raises-a-host-alert.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A hand-held nodejs below the pin is installed at the pin and stays held"

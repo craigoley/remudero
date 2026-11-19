@@ -14,7 +14,7 @@
   files:
     - docs/research/operator-macros-for-codex-sessions.md
     - docs/docs-index.json
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The report names the skill paths the pinned Codex version scans, with the version and source it was read from"

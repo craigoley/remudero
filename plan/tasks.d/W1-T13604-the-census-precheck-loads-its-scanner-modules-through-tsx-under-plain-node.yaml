@@ -15,7 +15,7 @@
     - scripts/census-precheck.mjs
     - test/a-precheck-child-loads-each-source-file-once.test.ts
     - test/infra/gate-probe-native-evidence.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A census precheck child started under plain Node reports src/lib/trust-root-text.ts and src/lib/rule-suites.ts through tsx (a source-map-cache entry in its V8 report), and in each of the plain, CLI, env and registered loader modes each file is loaded once"

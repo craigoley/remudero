@@ -24,7 +24,7 @@
     - test/github/a-repeated-github-read-sends-its-etag.test.ts
     - test/github/an-unchanged-github-read-costs-none-of-the-rate-limit.test.ts
     - test/github/daemon-github-reads-share-one-in-process-client.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A `gh api <path> --paginate` GET (with or without -i, and with none of the other flags parseGhApiRead refuses) is sent by the in-process client page by page: it follows each answer's `Link: rel=\"next\"` URL as gh does, and each page is a conditional read through the W1-T12839 store, keyed by that page's own path and query"

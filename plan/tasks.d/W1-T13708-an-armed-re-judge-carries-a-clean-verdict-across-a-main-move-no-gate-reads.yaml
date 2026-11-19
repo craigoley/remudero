@@ -18,7 +18,7 @@
     - src/lib/merged-ratchet-verdict.ts
     - src/lib/arm-auto-merge.ts
     - test/sweep/an-armed-re-judge-carries-a-clean-verdict-across-a-main-move-no-gate-reads.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "When the newest sweep.ratchet_judge.decided row for an armed pull request's head is clean with no rows and remedy proceed, and every path changed between the main that row judged (merged_main_sha when present, else main_sha) and the current main tip is outside every path a counted gate reads, runArmedRatchetRejudge does not call readMergedRatchets for it. It writes one sweep.ratchet_judge.decided row for the current main tip with the same verdict, remedy proceed, and carried_from_main_sha naming the judged main"

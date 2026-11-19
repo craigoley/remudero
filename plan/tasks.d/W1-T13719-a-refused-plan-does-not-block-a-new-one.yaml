@@ -15,7 +15,7 @@
   files:
     - src/lib/product-plan-operation.ts
     - test/dispatch/product-plan-operation.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "After a plan is refused and the target head moves, a fresh request plans again at the new head (new operation, replayed false, one more hand-off)"

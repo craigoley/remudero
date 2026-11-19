@@ -16,7 +16,7 @@
   files:
     - src/lib/review.ts
     - test/review/the-reviewer-reads-a-non-plan-only-diff-as-a-denial.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A body that describes some other change as a non-plan-only diff (the shorthand preceded by a non- prefix) produces no changeset contradiction"

@@ -22,7 +22,7 @@
     - src/lib/self-sync.ts
     - src/lib/ops-catalog-source.ts
     - test/serve-forks-its-children-through-the-spawn-helper.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Serve's boot starts and installs the spawn helper with one serve.spawn_helper row, and the server's close stops only that helper"

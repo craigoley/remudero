@@ -18,7 +18,7 @@
     - src/cli/commands/fix.ts
     - src/lib/sweep.ts
     - test/fix-lane/a-fix-round-traces-its-held-head-without-blocking-the-loop.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "On a ledger directory with at least 50 MB of rotations, runFixRung's held-head trace for a PR whose head no conflict round pushed lets a 50 ms timer started before the round fire at least once in every 500 ms of the history read"
