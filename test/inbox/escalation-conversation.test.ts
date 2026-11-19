@@ -334,14 +334,14 @@ test("escalation reply refuses changed advice and records partial delivery hones
 test("escalation source default really shells out through the bounded transport", t => {
   const f = fixture(); t.after(() => rmSync(f.root, { recursive: true, force: true }));
   const marker = join(f.root, "called");
-  const shim = ghShim([{ when: "api repos/craigoley/remudero/issues/16183", stdout: JSON.stringify(f.issue), writes: { path: marker, content: "used" } }], { kind: "escalation-conversation" });
+  const shim = ghShim([{ when: "api repos/craigoley/remudero/issues/16183", stdout: JSON.stringify(f.issue), writes: { path: marker, content: "used" } }], { kind: "escalation-conversation", parent: f.root });
   t.after(() => rmSync(shim.dir, { recursive: true, force: true }));
   const module = pathToFileURL(join(REPO_ROOT, "src/lib/escalation-conversation.ts")).href;
   const stdout = execFileSync(process.execPath, ["--enable-source-maps", "--import", "tsx", "--input-type=module", "-e",
     `import {readEscalationIssueSource} from ${JSON.stringify(module)}; console.log(JSON.stringify(await readEscalationIssueSource(${JSON.stringify(URL)})))`], {
     cwd: REPO_ROOT, timeout: 20_000, encoding: "utf8",
     // Only a fixture binary and dummy identity; no host credential or broker can reach this child.
-    env: { PATH: `${shim.dir}:/usr/bin:/bin`, HOME: f.root, GH_TOKEN: "offline-fixture-only",
+    env: { PATH: `${shim.dir}:/usr/bin:/bin`, HOME: f.root, TMPDIR: f.root, GH_TOKEN: "offline-fixture-only",
       ...(process.env.NODE_V8_COVERAGE ? { NODE_V8_COVERAGE: process.env.NODE_V8_COVERAGE } : {}) },
   });
   assert.equal(JSON.parse(stdout).html_url, URL);

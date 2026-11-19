@@ -23,7 +23,7 @@
     - test/console-api/views/an-inbox-read-builds-off-the-request-loop.test.ts
     - "scripts/build-child-entries.mjs"
     - test/a-bundled-parent-starts-its-workers-from-bundled-worker-entries.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Two PanelGraphDeps that name one inbox share one parse of the persisted file and one build of its lanes"

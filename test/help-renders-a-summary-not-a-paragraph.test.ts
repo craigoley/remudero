@@ -181,6 +181,7 @@ const BASELINE_COMMAND_NAMES = [
   "pr-owner",
   "pr-owner-recover",
   "migration-preview",
+  "move-task",
   "pr-state",
   "read-model",
   "reframe",

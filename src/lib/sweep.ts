@@ -80,6 +80,7 @@ import {
   readMergeQueueMembership,
   realArmDepsAsync,
   readMergedRatchetsAsync,
+  mainChangedPathsReader,
   stackPrerequisiteFromRest,
   directMergeOperationsInFlight,
   type DirectMergeOperation,
@@ -94,7 +95,7 @@ import {
   type StackPrerequisiteCheck,
 } from "./arm-auto-merge.js";
 import { diagnoseBodyDefects, type BodyRepairDeps } from "./body-repair.js";
-import { RATCHET_JUDGE_DECIDED_STEP, armedRejudgeHold, judgeMergedRatchets, ratchetJudgeLedgerFields, withheldRatchetFixRoute, type MergedRatchetJudgement, type SweepFixRoute } from "./merged-ratchet-verdict.js";
+import { RATCHET_JUDGE_DECIDED_STEP, armedRejudgeHold, judgeMergedRatchets, ratchetJudgeLedgerFields, ratchetReadsAnyPath, withheldRatchetFixRoute, type MergedRatchetJudgement, type SweepFixRoute } from "./merged-ratchet-verdict.js";
 import { MAX_PLAN_REPAIR_STRIKES, planCappedRepair, judgeCappedRepair } from "./classify.js";
 import { DEFAULT_ESTIMATE_MIB, readMemoryLedger, type HostMemoryReading } from "./host-memory-ledger.js";
 import { classEstimate, classTypical, type LearnedEstimate } from "./host-memory-learning.js";
@@ -2500,6 +2501,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "readTaskContractAtHead",
   "readTaskSemanticRevision",
   "readMergedRatchets", // W1-T9962
+  "readMainChangedPaths",
   "readOpenEscalations",
   "reconcilePrimaryShadowAlert",
 ] as const;
@@ -2774,6 +2776,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "readTaskContractAtHead"
   | "readTaskSemanticRevision"
   | "readMergedRatchets"
+  | "readMainChangedPaths"
   | "readOpenEscalations"
   | "reconcilePrimaryShadowAlert"
 > & {
@@ -5431,6 +5434,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // W1-T528 — the action half of W1-T520; see `SweepDeps.updateBranch`'s own doc.
     updateBranch: (pr) => updateBranchImpl(pr),
     readMergedRatchets: (pr) => readMergedRatchetsAsync(pr.prUrl, () => config),
+    readMainChangedPaths: () => mainChangedPathsReader(() => config),
 
     // W1-T5903 — the queue tests the merged result, so staleness against main is the queue's job.
     mergeQueue: (prUrl) => baseBranchRequiresMergeQueue(prUrl, ghJsonForBuild),
@@ -16397,6 +16401,7 @@ export interface SweepDeps {
   updateBranch?: (pr: ArmedStalledPr) => UpdateBranchOutcome | Promise<UpdateBranchOutcome>;
   /** W1-T9962 — the ratchet verdict on the merge of this PR's head into main's tip, for the armed re-judge. */
   readMergedRatchets?: (pr: OpenPrView) => Promise<MergedRatchetJudgement>;
+  readMainChangedPaths?: () => (prUrl: string, fromSha: string, toSha: string) => Promise<string[] | undefined>;
   /** W1-T5903 — whether the PR's base branch requires a merge queue. When it does, the queue tests
    *  the merged result, so the behind-main distance refresh ({@link openPrsBehindMain}) stands down
    *  for that PR. Omitted or throwing reads as "no queue": the pre-queue behaviour is unchanged. */
@@ -18026,16 +18031,21 @@ export function conflictRoundHeldHead(pr: Pick<OpenPrView, "taskId" | "prNumber"
   }
 }
 
-/** The production `archive` reader: the fix-round rows across rotations and the live file, or undefined if incomplete. */
+const FIX_ROUND_ARCHIVE_STEPS: readonly string[] = ["fix.dispatch", "fix.retrigger", "fix.done", "fix.needs_design", "sweep.conflict_regenerated"];
+
+/** W1-T13712: the fix-round rows of a strict union read, or undefined if it is incomplete. Both archive readers keep these steps. */
+export function fixRoundArchiveRows(read: LedgerUnionRecordRead): ReadonlyArray<Record<string, unknown>> | undefined {
+  return read.ok ? read.rows.filter((row) => typeof row.step === "string" && FIX_ROUND_ARCHIVE_STEPS.includes(row.step)) : undefined;
+}
+
+/** The synchronous `archive` reader: the fix-round rows across rotations and the live file, or undefined if incomplete. */
 function readFixRoundArchiveRows(ledgerPath: string): ReadonlyArray<Record<string, unknown>> | undefined {
-  const read = readLedgerUnionRecordsSync(dirname(ledgerPath), {
-    step: ["fix.dispatch", "fix.retrigger", "fix.done", "fix.needs_design", "sweep.conflict_regenerated"], refuseIncomplete: true });
-  return read.ok ? read.rows : undefined;
+  return fixRoundArchiveRows(readLedgerUnionRecordsSync(dirname(ledgerPath), { step: [...FIX_ROUND_ARCHIVE_STEPS], refuseIncomplete: true }));
 }
 
 const SWEEP_REFRESH_STEPS = ["fix.base_refreshed", BASE_RED_REFRESH_STEP, BASE_FIXED_REFRESH_STEP, REFRESH_CLEARANCE_STEP];
 const SWEEP_REPAIR_HISTORY_SLICE: EscalationTriageSlice = { holder: "sweep.repair-history",
-  steps: [...SWEEP_REFRESH_STEPS, "fix.dispatch", "fix.retrigger", "fix.done", "fix.needs_design", "sweep.conflict_regenerated"] };
+  steps: [...SWEEP_REFRESH_STEPS, ...FIX_ROUND_ARCHIVE_STEPS] };
 const sweepRepairHistoryReaders = new Map<string, EscalationTriageHistoryReader>();
 
 /** W1-T12954: the repair rows across rotations and the live file, as a strict union read gives them (`ok` false
@@ -27850,6 +27860,7 @@ export function armedRatchetRejudgeTargets(openPrs: readonly OpenPrView[], ledge
   const firstArm = new Map<string, number>();
   ledgerLines.forEach((l, i) => {
     if (l.step === RATCHET_JUDGE_DECIDED_STEP) judged.add(`${String(l.pr_number)}@${String(l.head_sha)}@${String(l.main_sha)}`);
+    if (l.step === RATCHET_JUDGE_DECIDED_STEP && typeof l.merged_main_sha === "string") judged.add(`${String(l.pr_number)}@${String(l.head_sha)}@${l.merged_main_sha}`);
     if (l.step === "automerge.armed" && typeof l.pr_url === "string" && !firstArm.has(l.pr_url)) firstArm.set(l.pr_url, i);
   });
   return openPrs
@@ -27867,7 +27878,7 @@ export function armedRatchetRejudgeTargets(openPrs: readonly OpenPrView[], ledge
 export async function runArmedRatchetRejudge(
   openPrs: readonly OpenPrView[],
   deps: Pick<SweepDeps, "ledgerPath" | "runId" | "updateBranch" | "readLedger" | "appendLine" | "dryRun" | "now" |
-    "readMainTip" | "readMergedRatchets" | "readActionsStatusSummary">,
+    "readMainTip" | "readMergedRatchets" | "readActionsStatusSummary" | "readMainChangedPaths">,
 ): Promise<number[]> {
   const read = deps.readMergedRatchets;
   if (deps.dryRun || !read || !deps.readMainTip) return [];
@@ -27877,7 +27888,20 @@ export async function runArmedRatchetRejudge(
   const ledgerLines = (deps.readLedger ?? readLiveLedgerRows)(deps.ledgerPath);
   const refreshed: number[] = [];
   let incidentHold: boolean | undefined;
+  const changedPaths = deps.readMainChangedPaths?.();
   for (const pr of armedRatchetRejudgeTargets(openPrs, ledgerLines, mainTip)) {
+    const prior = ledgerLines.findLast((l) => l.step === RATCHET_JUDGE_DECIDED_STEP && Number(l.pr_number) === pr.prNumber && l.head_sha === pr.headSha);
+    const judgedMain = prior?.merged_main_sha ?? prior?.main_sha;
+    if (changedPaths && prior?.verdict === "clean" && prior.rows_count === 0 && Array.isArray(prior.rows) && prior.rows.length === 0 &&
+      prior.remedy === "proceed" && typeof judgedMain === "string") {
+      const paths = await changedPaths(pr.prUrl, judgedMain, mainTip);
+      if (paths !== undefined && !ratchetReadsAnyPath(paths)) {
+        appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: RATCHET_JUDGE_DECIDED_STEP, pr_number: pr.prNumber,
+          lane: "sweep-armed", verdict: "clean", counted_gates: prior.counted_gates, uncounted_gates: prior.uncounted_gates, rows: [], rows_count: 0,
+          head_sha: pr.headSha, main_sha: mainTip, remedy: "proceed", carried_from_main_sha: judgedMain });
+        continue;
+      }
+    }
     let judge: MergedRatchetJudgement;
     try {
       judge = await read(pr);

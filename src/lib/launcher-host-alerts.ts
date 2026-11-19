@@ -63,7 +63,8 @@ export type LauncherAlertCondition =
   | "deploy-code-fetch-failed"
   | "deploy-code-diverged"
   | "deploy-run-problem"
-  | "tunnel-roll-failed";
+  | "tunnel-roll-failed"
+  | "host-node-behind";
 
 interface ConditionSpec {
   persistingAt: number;
@@ -126,6 +127,18 @@ const SPECS: Record<LauncherAlertCondition, ConditionSpec> = {
     remedy:
       "read edge-heal's journal lines (rmd-fleet-watchdog.service) for the failed step; check the pin in " +
       "deploy/cloudflared/Dockerfile pulls and registers, then remove <state>/state/tunnel-roll-failed to retry now",
+  },
+  // W1-T13720: the units converge reports a host Node it could not move and returns 0, so from
+  // 2026-11-18 14:20Z a hand-set apt hold kept the host on 24.22.2 under a 24.22.3 pin, and every
+  // full author preflight refused, with nothing raised.
+  "host-node-behind": {
+    ...REFUSAL_TIERS,
+    summary: (i) => `the host Node for ${i} is not the version .nvmrc pins: full author preflights refuse`,
+    recovered: "`node --version` on the host equal to the install checkout's .nvmrc",
+    remedy:
+      "read the `host-node:` lines in the watchdog's journal (rmd-fleet-watchdog.service) for why the converge could " +
+      "not install the pinned nodejs package (NodeSource not yet publishing it, an apt failure), fix that, and the " +
+      "next tick converges it",
   },
 };
 

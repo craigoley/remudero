@@ -31,7 +31,9 @@ interface Seen { method: string; url: string; headers: IncomingHttpHeaders; }
 /** This process's GitHub environment for one test: a fixture token, its own HOME, read cache and recording `gh`. */
 function scene(t: TestContext, routes: Parameters<typeof ghShim>[0] = []): { root: string; cache: string; shim: GhShim } {
   const saved = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
-  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t12531-`));
+  // macOS's per-process TMPDIR can be long enough that the broker socket exceeds sun_path.
+  const tempRoot = process.platform === "darwin" ? "/tmp" : tmpdir();
+  const root = mkdtempSync(join(tempRoot, `${RMD_TMP_PREFIX}w1-t12531-`));
   const cache = join(root, "cache");
   mkdirSync(cache);
   mkdirSync(join(root, "gh-config"));
@@ -258,7 +260,7 @@ test("W1-T12531 criterion 5: an argument form the client does not parse still sp
     ["api", "-X", "PATCH", "repos/o/r/pulls/51", "-f", "title=x"],
     ["api", "--method=POST", "repos/o/r/issues"],
     ["api", "repos/o/r/issues", "-F", "n=1"],
-    ["api", "--paginate", "repos/o/r/pulls"],
+    ["api", "--paginate", "--slurp", "repos/o/r/pulls"],
     ["api", "repos/o/r/pulls", "--jq", ".[0]"],
     ["api", "graphql", "-f", "query={viewer{login}}"],
     ["api", "repos/{owner}/{repo}/pulls"],

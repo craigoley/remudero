@@ -1307,6 +1307,27 @@ $(render_edge_heal)
 
 $(render_host_alerts)
 
+# W1-T13720 — A HOST NODE OFF ITS PIN IS RAISED, NOT ONLY LOGGED. converge_host_node reports every
+# failure and returns 0 (so units still install), which left the host on 24.22.2 under a 24.22.3 pin
+# from 2026-11-18 14:20Z: a hand-set apt hold refused each install, each tick logged one line, and every
+# full author preflight refused. This compares the host's node with the install checkout's .nvmrc after
+# the converge, raises host-node-behind while they differ and clears it once they match.
+host_node_alert() {
+  local pin actual held=""
+  pin=\$(cat "\$CHECKOUT/.nvmrc" 2>/dev/null) || return 0
+  pin=\${pin#v}
+  [ -n "\$pin" ] || return 0
+  actual=\$(node --version 2>/dev/null || true)
+  actual=\${actual#v}
+  if [ "\$actual" = "\$pin" ]; then
+    host_alert_clear host-node-behind
+    return 0
+  fi
+  if apt-mark showhold 2>/dev/null | grep -qx nodejs; then held="; nodejs is apt-mark held"; fi
+  echo "rmd-relaunch: host-node \${actual:-unavailable} is not the pinned \$pin\$held" >&2
+  host_alert_raise host-node-behind "host node \${actual:-unavailable} is not the \$pin that \$CHECKOUT/.nvmrc pins\$held"
+}
+
 # W1-T3269 — CONVERGE THIS HOST'S OWN UNITS, THE THIRD QUESTION THIS TICK ALREADY ASKS.
 #
 # The installer had NO automatic caller -- referenced only by its own test, the operator guide and a
@@ -1508,6 +1529,7 @@ $(render_serve_memory_tuning)
   # here runs before the revive decision; boot is excluded because a host coming up is the worst
   # moment to rewrite its units -- the rule W1-T3245 applied to the recycle decision.
   [ "\$BOOT" -eq 0 ] && converge_host_units
+  [ "\$BOOT" -eq 0 ] && host_node_alert
   [ "\$BOOT" -eq 1 ] || daemon_code_resolve
   if [ "\$BOOT" -eq 0 ] && [ ! -x "\$DAEMON_CODE/bin/rmd" ]; then
     # W1-T9617: a cold scratch checkout is still being cloned and installed by the entrypoint.
@@ -1968,6 +1990,17 @@ host_apt() {
   else "$@"; fi
 }
 
+# W1-T13720: hold nodejs at the pin so unattended-upgrades never moves the host's Node ahead of
+# .nvmrc (a NodeSource release lands before Dependabot bumps the pin); only this converge moves it.
+host_node_hold() {
+  if host_apt apt-mark showhold 2>/dev/null | grep -qx nodejs; then return 0; fi
+  if host_apt apt-mark hold nodejs >/dev/null; then
+    echo "host-node: nodejs held at the pin"
+  else
+    echo "host-node: apt-mark hold nodejs failed; unattended-upgrades may move it, retried next converge"
+  fi
+}
+
 converge_host_node() {
   local pin actual node_path major source source_text desired versions package after
   source="${RMD_NODESOURCE_PATH:-/etc/apt/sources.list.d/nodesource.sources}"
@@ -2018,6 +2051,7 @@ converge_host_node() {
     echo "host-node: source now node_${major}.x"
   elif [ "$actual" = "$pin" ]; then
     echo "host-node: in step ${actual}"
+    host_node_hold
     return 0
   fi
   if ! host_apt apt-get update; then
@@ -2037,7 +2071,10 @@ converge_host_node() {
     echo "host-node: ${pin} not yet in node_${major}.x; staying on ${actual}, retried next converge"
     return 0
   fi
-  if ! host_apt apt-get install -y "nodejs=${package}"; then
+  # W1-T13720: the converge OWNS this package. --allow-change-held-packages moves a hold (a hand-set
+  # one refused every install from 2026-11-18 14:20Z), and --allow-downgrades returns a host that
+  # unattended-upgrades moved past the pin; host_node_hold then re-holds it at the pin.
+  if ! host_apt apt-get install -y --allow-downgrades --allow-change-held-packages "nodejs=${package}"; then
     echo "host-node: apt-get install failed for ${package}; staying on ${actual}, retried next converge"
     return 0
   fi
@@ -2045,6 +2082,7 @@ converge_host_node() {
   after="${after#v}"
   if [ "$after" = "$pin" ]; then
     echo "host-node: installed ${pin} (${package})"
+    host_node_hold
   else
     echo "host-node: install returned success but node is still ${after:-unavailable} != ${pin}; retried next converge"
   fi
