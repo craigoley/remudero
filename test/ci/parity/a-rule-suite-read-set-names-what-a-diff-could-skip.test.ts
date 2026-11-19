@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 
+import { buildAffectedSuitesGraph } from "#src/lib/affected-suites.js";
 import { AUTHOR_CENSUS_ANSWERED_ENV, authorCiSplit, listRuleSuites, readAuthorCiContract, runPreflightFast } from "#src/lib/ci-parity.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
@@ -32,8 +33,10 @@ function put(root: string, path: string, contents: string) {
 test("W1-T11819 criterion 1: the recorder runs each suite once and writes sorted relative roots and source hashes", async (t) => {
   const { dir } = ownedFixtureDir(t, "rule-suite-reads");
   const suites = ["test/rules/z.test.mjs", "test/rules/a.test.mjs"];
+  const observedScript = "scripts/fixture-read.mjs";
   mkdirSync(join(dir, "scripts"));
   copyFileSync(join(REPO_ROOT, RECORDER), join(dir, RECORDER));
+  put(dir, observedScript, "export {};");
   put(dir, "src/sync/input", "sync");
   put(dir, "plan/tasks.d/input", "async");
   put(dir, "docs/index/input", "directory");
@@ -53,6 +56,8 @@ test("W1-T11819 criterion 1: the recorder runs each suite once and writes sorted
         statSync("src/sync/input");
         statSync(".");
         existsSync("future/config/input");
+        existsSync("odd*/input");
+        readFileSync(${JSON.stringify(observedScript)});
         readFileSync(${JSON.stringify(join(REPO_ROOT, "package.json"))});
         appendFileSync("runs.txt", ${JSON.stringify(suite + "\n")});
       });
@@ -70,12 +75,17 @@ test("W1-T11819 criterion 1: the recorder runs each suite once and writes sorted
     assert.equal(incomplete, undefined);
     assert.deepEqual(roots, [...new Set(roots)].sort());
     assert.ok(roots.every((root: string) => !root.startsWith("/") && !root.startsWith("../")));
-    for (const root of ["docs/index", "future/config", "other/opened", "plan/tasks.d", "src/sync", "test/rules"]) {
+    for (const root of ["docs/index", "future/config", "odd*/input", "other/opened", "plan/tasks.d", observedScript, "src/sync", "test/rules"]) {
       assert.ok(roots.includes(root), `${suite} did not record ${root}: ${roots.join(", ")}`);
     }
     assert.ok(!roots.includes("package.json"), "an absolute read outside the fixture never enters its roots");
     assert.ok(!roots.includes("."), "stat of the checkout does not enumerate its contents");
   }
+  const graph = buildAffectedSuitesGraph(new Map([
+    [RECORDER, readFileSync(join(dir, RECORDER), "utf8")],
+    [observedScript, "export {};"],
+  ]));
+  assert.deepEqual([...graph.dependencies.get(RECORDER)!], [], "recorded reads create no code dependencies from the recorder");
 });
 
 test("W1-T11819 criterion 2: shadow keeps missing, stale, incomplete and intersecting records", (t) => {
