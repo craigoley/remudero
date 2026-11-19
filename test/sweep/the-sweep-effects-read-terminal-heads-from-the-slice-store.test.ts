@@ -137,11 +137,12 @@ if (process.argv[2] === childFlag) {
     assert.equal(unread.ok, false);
     assert.deepEqual(unread.unread, [archive]);
     assert.deepEqual(unread.matches, []);
-    const unreadAnswer = buildInNewProcess(root, path);
-    assert.deepEqual(unreadAnswer, { gunzips: 1, stoodDown: [] }, "an unread rotation preserves the legacy empty terminal-head result");
+    const unreadAnswer = observeBuild(root, path);
+    assert.deepEqual(unreadAnswer, { gunzips: 1, stoodDown: candidates.slice(0, 3) },
+      "a known terminal head stays blocked when its rotation becomes unreadable");
 
     writeFileSync(archive, original);
-    assert.deepEqual(buildInNewProcess(root, path).stoodDown, candidates.slice(0, 3));
+    assert.deepEqual(observeBuild(root, path).stoodDown, candidates.slice(0, 3));
   });
 
   test("W1-T12271 criterion 4: production sweep effects keep complete rotations when the live read fails", (t) => {
@@ -156,6 +157,7 @@ if (process.argv[2] === childFlag) {
 
   test("W1-T12271: an unreadable rotation does not turn a cached slice into a universal stand-down", async (t) => {
     const { root, dir, path } = fixture(t);
+    assert.deepEqual(observeBuild(root, path).stoodDown, candidates.slice(0, 3));
     const slice = {
       holder: "sweep.terminal-uncreditable-heads",
       steps: [terminalStep, escalatedStep],
@@ -176,7 +178,8 @@ if (process.argv[2] === childFlag) {
         return access(candidate, mode);
       }) as typeof fs.accessSync;
       syncBuiltinESMExports();
-      assert.deepEqual(observeBuild(root, path), { gunzips: 0, stoodDown: [] }, "the cached projection preserves the legacy unread-history answer");
+      assert.deepEqual(observeBuild(root, path), { gunzips: 0, stoodDown: candidates.slice(0, 3) },
+        "the cached projection keeps known heads blocked without standing down unrelated PRs");
     } finally {
       fs.accessSync = access;
       syncBuiltinESMExports();

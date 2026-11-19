@@ -1083,9 +1083,6 @@ function terminalUncreditableHeadKey(prNumber: number, headSha: string): string 
 }
 
 function terminalUncreditableHeads(ledgerPath: string): Map<string, TerminalUncreditableHead> {
-  const cached = terminalUncreditableHeadsByLedger.get(ledgerPath);
-  if (cached) return cached;
-
   const stateDir = dirname(ledgerPath);
   const reader = terminalUncreditableHistoryReader ??= createEscalationTriageHistoryReader({ slice: TERMINAL_UNCREDITABLE_HISTORY_SLICE });
   let history = reader.current(stateDir);
@@ -1122,9 +1119,9 @@ function terminalUncreditableHeads(ledgerPath: string): Map<string, TerminalUncr
     }
   }
   if (!historyReadable) {
-    const terminals = new Map<string, TerminalUncreditableHead>();
-    terminalUncreditableHeadsByLedger.set(ledgerPath, terminals);
-    return terminals;
+    // Keep the last complete answer when a previously readable rotation becomes unreadable. This
+    // preserves known terminal heads without turning unknown history into a stand-down for every PR.
+    return terminalUncreditableHeadsByLedger.get(ledgerPath) ?? new Map<string, TerminalUncreditableHead>();
   }
   const terminals = new Map<string, TerminalUncreditableHead>();
   for (const row of rows) {
