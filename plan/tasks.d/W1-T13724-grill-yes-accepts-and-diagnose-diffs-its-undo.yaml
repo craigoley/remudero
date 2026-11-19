@@ -1,0 +1,45 @@
+- id: W1-T13724
+  title: "The /grill macro words each question so that yes accepts the recommendation, and /diagnose shows the undo's git diff before trusting its red, taken from mattpocock/skills 1.3.2 and recorded as MASTER-PLAN §4I"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  risk: high # Rule 19 sizing: a report and its docs index entry (or skill text and its plan section), two concerns; it changes no code path a worker or daemon runs
+  origin: "operator-session#pocock-rescan-2026-11-18"
+  plan_refs:
+    - W1-T4332
+    - W1-T2763
+  files:
+    - settings/macros.yaml
+    - .claude/skills/grill/SKILL.md
+    - .claude/skills/diagnose/SKILL.md
+    - MASTER-PLAN.md
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The /grill macro row tells the agent to word each question so that yes accepts its recommended answer"
+      proof: 'grep: Word each question so that "yes" accepts your recommended answer in settings/macros.yaml'
+    - claim: "The /diagnose macro row asks for the undo's git diff before its red is trusted"
+      proof: "grep: an undo that changed nothing proves nothing in settings/macros.yaml"
+    - claim: "The generated /grill skill carries the new sentence, so macro-skills:check stays byte-equal"
+      proof: 'grep: Word each question so that "yes" accepts your recommended answer in .claude/skills/grill/SKILL.md'
+    - claim: "MASTER-PLAN records the rescan as section 4I, with what was taken, refused, parked and already held"
+      proof: 'grep: ## 4I\. External rescan (2026-11-18) in MASTER-PLAN.md'
+  rationale: |
+    MASTER-PLAN §4F took four operator macros from mattpocock/skills at c55ee46 (2026-09-23). Read again at 5863806
+    (2026-11-12, package 1.3.2): `grilling` now words each question so "yes" accepts the recommended answer
+    (mattpocock/skills#1193), and `diagnosing-bugs` Phase 5 diffs a forced mutation against a pristine copy before
+    trusting the red (mattpocock/skills#1209). Our /grill has neither; our /diagnose undoes the fix but never checks
+    that the undo changed the file, so an edit that silently missed can pass as a red.
+  design: |
+    Two sentences in settings/macros.yaml (grill and diagnose rows), regenerate with `npm run macro-skills`, and add
+    MASTER-PLAN §4I before §5. Both rows stay disable-model-invocation, so W1-T4332's operator-only rule holds and
+    prompt-surface-gate needs no golden fixture.
+    NO-INVARIANTS: operator-only macro text and a plan section; no output bucket, default, error path or side effect
+    of any command changes.
+  falsifier: |
+    macro-skills:check (test/operator-macros-are-generated.test.ts) fails if the generated skills drift from the table.
+  note: |
+    Id reserved for run-unfiled-1795041800001 with ~/rmd-work/bin/reserve-id.sh.
+    reservation hand-off: run-unfiled-1795041800001 -> claude/project-thread-eatx1y

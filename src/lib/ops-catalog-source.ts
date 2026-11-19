@@ -87,18 +87,46 @@ export interface OpsCatalogSnapshot {
   /** sha256 of the identity tuple; the only identity an observer sees. */
   identityDigest?: string;
   counts: OpsCatalogCounts;
+  /** W1-T13705: present only when a GET failed. Diagnostic: it never changes `outcome` or `refusalStage`. */
+  httpStatusClass?: OpsCatalogHttpStatusClass;
 }
+/** W1-T13705: why a GET failed, as a closed class. It never carries a URL, a body or token text. */
+export type OpsCatalogHttpStatusClass = "4xx" | "5xx" | "auth" | "transport";
 export interface OpsCatalogShadowInput {
   outcome: OpsCatalogOutcome;
   refusalStage?: OpsCatalogRefusalStage;
   plan?: Plan;
   opsCommit?: string;
   identityDigest?: string;
+  /** W1-T13705: `revalidate` when one ref GET answered from a kept snapshot, `full` when the catalog was read.
+   *  Non-enumerable, like the private handles: a diagnostic never changes what an equality or a row sees. */
+  readonly kind?: "full" | "revalidate";
+  /** W1-T13705: present only when a GET failed; see {@link OpsCatalogHttpStatusClass}. Non-enumerable. */
+  readonly httpStatusClass?: OpsCatalogHttpStatusClass;
+}
+
+/** W1-T13705: attach the refresh diagnostics without changing the input's own enumerable shape. */
+function withDiagnostics(input: OpsCatalogShadowInput, kind: "full" | "revalidate",
+  httpStatusClass: OpsCatalogHttpStatusClass | undefined): OpsCatalogShadowInput {
+  Object.defineProperty(input, "kind", { value: kind });
+  if (httpStatusClass !== undefined) Object.defineProperty(input, "httpStatusClass", { value: httpStatusClass });
+  return input;
 }
 
 class Refusal extends RmdError {
   readonly outcome: OpsCatalogOutcome;
-  constructor(outcome: OpsCatalogOutcome) { super("github", 1, outcome); this.outcome = outcome; }
+  readonly httpStatusClass?: OpsCatalogHttpStatusClass;
+  constructor(outcome: OpsCatalogOutcome, httpStatusClass?: OpsCatalogHttpStatusClass) {
+    super("github", 1, outcome);
+    this.outcome = outcome;
+    if (httpStatusClass !== undefined) this.httpStatusClass = httpStatusClass;
+  }
+}
+
+/** W1-T13705: a gh status code as its class; no code at all is a transport failure (DNS, reset, timeout, spawn). */
+function statusClassOf(code: string | undefined): OpsCatalogHttpStatusClass {
+  if (code === undefined) return "transport";
+  return code.startsWith("5") ? "5xx" : "4xx";
 }
 
 const AUTH_DIAGNOSTIC = /^(?:gh: )?(?:To get started with GitHub CLI, please run:|To use GitHub CLI in a GitHub Actions workflow, set the GH_TOKEN environment variable\.)/m;
@@ -136,7 +164,7 @@ export function defaultOpsCatalogApi(
       const diagnostic = typeof stderr === "string" && stderr ? stderr : error instanceof Error ? error.message : "";
       const status = HTTP_DIAGNOSTIC.exec(diagnostic);
       const authMissing = status ? (status[1] ?? status[2]) === "401" : AUTH_DIAGNOSTIC.test(diagnostic);
-      throw authMissing ? new OpsCatalogAuthMissingError() : new Refusal("unreadable");
+      throw authMissing ? new OpsCatalogAuthMissingError() : new Refusal("unreadable", statusClassOf(status?.[1] ?? status?.[2]));
     }
   };
 }
@@ -154,8 +182,9 @@ function sha(value: unknown): string {
 async function get(api: OpsCatalogApi, path: string): Promise<unknown> {
   try { return await api(path); }
   catch (error) {
-    if (error instanceof OpsCatalogAuthMissingError) throw new Refusal("auth_missing");
-    throw new Refusal("unreadable");
+    if (error instanceof OpsCatalogAuthMissingError) throw new Refusal("auth_missing", "auth");
+    // An injected api's own error carries no class; only the default api's classified refusal keeps one.
+    throw new Refusal("unreadable", error instanceof Refusal ? error.httpStatusClass : undefined);
   }
 }
 
@@ -227,6 +256,8 @@ function blobsByRepository(api: OpsCatalogApi): Map<number, Map<string, KeptBlob
   if (!byRepo) keptBlobs.set(api, byRepo = new Map());
   return byRepo;
 }
+// W1-T13691: what the newest ok read of each api bound, so a run child is offered that binding's blobs only.
+const newestOkBinding = new WeakMap<OpsCatalogApi, { repositoryId: number; blobShas: string[]; taskIds: ReadonlySet<string> }>();
 function keepBlob(api: OpsCatalogApi, repositoryId: number, blobSha: string, blob: KeptBlob): void {
   const byRepo = blobsByRepository(api);
   let bySha = byRepo.get(repositoryId);
@@ -255,16 +286,21 @@ async function readBlob(api: OpsCatalogApi, repo: string, blobSha: string, pass:
     || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)) throw new Refusal("malformed");
   const bytes = Buffer.from(encoded, "base64");
   counts.bytes += bytes.length;
-  if (bytes.length > OPS_CATALOG_MAX_BLOB_BYTES || counts.bytes > OPS_CATALOG_MAX_TOTAL_BYTES
-    || blob.size !== bytes.length) throw new Refusal("malformed");
+  if (counts.bytes > OPS_CATALOG_MAX_TOTAL_BYTES || blob.size !== bytes.length) throw new Refusal("malformed");
+  const verified = verifiedBlob(blobSha, bytes);
+  keepBlob(api, repositoryId, blobSha, verified);
+  pass.used.blobs.set(blobSha, verified);
+  return verified.text;
+}
+
+/** The checks every kept blob passes, from GitHub or from a parent: the per-blob bound, git's blob SHA-1, strict UTF-8. */
+function verifiedBlob(blobSha: string, bytes: Uint8Array): KeptBlob {
+  if (bytes.length > OPS_CATALOG_MAX_BLOB_BYTES) throw new Refusal("malformed");
   if (createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex") !== blobSha) throw new Refusal("malformed");
   let text: string;
   try { text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes); }
   catch { throw new Refusal("malformed"); }
-  const verified = { text, bytes: bytes.length };
-  keepBlob(api, repositoryId, blobSha, verified);
-  pass.used.blobs.set(blobSha, verified);
-  return text;
+  return { text, bytes: bytes.length };
 }
 
 /** The commit a branch names now: one ref GET. `repo` is `repos/<owner>/<name>`. Throws a refusal on any failure. */
@@ -408,6 +444,7 @@ function adopt(
     boundBlobs.set(blobSha, pass.used.blobs.get(blobSha)!);
   }
   blobsByRepository(api).set(repositoryId, boundBlobs);
+  newestOkBinding.set(api, { repositoryId, blobShas: [...boundBlobs.keys()], taskIds: new Set(plan.byId.keys()) });
   Object.freeze(counts.fetchedObjects);
   return privateHandles({ outcome: "ok" as const, identityDigest, counts: Object.freeze(counts) }, { plan, binding });
 }
@@ -415,6 +452,78 @@ function adopt(
 // W1-T13673: one default api per process, so every default reader shares one pacer and the kept blobs.
 let processDefaultApi: OpsCatalogApi | undefined;
 const sharedDefaultOpsCatalogApi = (): OpsCatalogApi => (processDefaultApi ??= defaultOpsCatalogApi());
+
+const OFFER_HEADER_MAX_BYTES = 64 * 1024; // BACKSTOP: 501 [sha, length] pairs need about 30 KiB.
+/** BACKSTOP: the most a run child reads of an offer: the snapshot's byte bound plus the header line. */
+export const OPS_CATALOG_MAX_OFFER_BYTES = OPS_CATALOG_MAX_TOTAL_BYTES + OFFER_HEADER_MAX_BYTES;
+interface OfferedOpsCatalogBlobCounts { offered: number; kept: number; refused: number }
+
+/**
+ * W1-T13691: the blobs a run child for `taskId` is offered, when the api's newest ok read holds that task: one JSON
+ * line with the repository id and each blob's [sha, byte length], then the blob bytes in that order. Memory only.
+ */
+export function keptOpsCatalogBlobsForChild(taskId: string, api: OpsCatalogApi | undefined = processDefaultApi): Buffer | undefined {
+  const newest = api && newestOkBinding.get(api);
+  if (!api || !newest || !newest.taskIds.has(taskId)) return undefined;
+  const kept = keptBlobs.get(api)?.get(newest.repositoryId);
+  const blobs: Array<[string, Buffer]> = [];
+  for (const blobSha of newest.blobShas) {
+    const blob = kept?.get(blobSha);
+    if (blob) blobs.push([blobSha, Buffer.from(blob.text, "utf8")]);
+  }
+  if (blobs.length === 0) return undefined;
+  const header = JSON.stringify({ repositoryId: newest.repositoryId, blobs: blobs.map(([blobSha, bytes]) => [blobSha, bytes.length]) });
+  return Buffer.concat([Buffer.from(`${header}\n`), ...blobs.map(([, bytes]) => bytes)]);
+}
+
+function offerHeader(line: Uint8Array): { repositoryId: number; blobs: Array<[string, number]> } | undefined {
+  let raw: unknown;
+  try { raw = JSON.parse(new TextDecoder().decode(line)); }
+  catch (error) {
+    void error; // A malformed offer is no offer: the child reads every blob from GitHub, as before.
+    return undefined;
+  }
+  const { repositoryId, blobs } = (raw ?? {}) as { repositoryId?: unknown; blobs?: unknown };
+  if (typeof repositoryId !== "number" || !Number.isSafeInteger(repositoryId) || repositoryId < 1 || !Array.isArray(blobs)
+    || blobs.length > OPS_CATALOG_MAX_SHARDS + 1) return undefined;
+  const pairs: Array<[string, number]> = [];
+  for (const pair of blobs as unknown[]) {
+    if (!Array.isArray(pair) || pair.length !== 2 || typeof pair[0] !== "string" || !SHA.test(pair[0])
+      || !Number.isSafeInteger(pair[1]) || pair[1] < 0) return undefined;
+    pairs.push([pair[0], pair[1] as number]);
+  }
+  return { repositoryId, blobs: pairs };
+}
+
+/**
+ * W1-T13691: keep each offered blob that passes the checks a GitHub answer passes, in the api's kept blobs. A
+ * truncated, oversized or malformed payload keeps nothing. Never throws on a bad payload; returns counts only.
+ */
+export function acceptOfferedOpsCatalogBlobs(
+  payload: Uint8Array | undefined, api: OpsCatalogApi = sharedDefaultOpsCatalogApi(),
+): OfferedOpsCatalogBlobCounts {
+  if (!payload || payload.length > OPS_CATALOG_MAX_OFFER_BYTES) return { offered: 0, kept: 0, refused: 0 };
+  const end = payload.indexOf(0x0a);
+  const header = end > 0 && end <= OFFER_HEADER_MAX_BYTES ? offerHeader(payload.subarray(0, end)) : undefined;
+  if (!header) return { offered: 0, kept: 0, refused: 0 };
+  const offered = header.blobs.length;
+  const declared = header.blobs.reduce((sum, [, length]) => sum + length, 0);
+  if (declared > OPS_CATALOG_MAX_TOTAL_BYTES || end + 1 + declared !== payload.length) return { offered, kept: 0, refused: offered };
+  let at = end + 1;
+  let kept = 0;
+  for (const [blobSha, length] of header.blobs) {
+    const bytes = payload.subarray(at, at += length);
+    let verified: KeptBlob;
+    try { verified = verifiedBlob(blobSha, bytes); }
+    catch (error) {
+      if (error instanceof Refusal) continue; // A blob that fails a check is dropped; the read GETs it from GitHub.
+      throw error;
+    }
+    keepBlob(api, header.repositoryId, blobSha, verified);
+    kept++;
+  }
+  return { offered, kept, refused: offered - kept };
+}
 
 /**
  * Read the target's catalog at one pinned commit: the newest one whose pass finished with the branch still naming it.
@@ -436,7 +545,9 @@ async function readSnapshot(
   try { return await read(target, api, counts, store, stage => { refusalStage = stage; }, treeCache); }
   catch (error) {
     // The outcome code is the reason: the error's own message may hold a URL or body, so it is dropped here.
-    return { outcome: error instanceof Refusal ? error.outcome : "unreadable", refusalStage, counts };
+    const httpStatusClass = error instanceof Refusal ? error.httpStatusClass : undefined;
+    return { outcome: error instanceof Refusal ? error.outcome : "unreadable", refusalStage, counts,
+      ...(httpStatusClass === undefined ? {} : { httpStatusClass }) };
   }
 }
 
@@ -454,31 +565,36 @@ export function createOpsCatalogShadowSource(
   let kept: { plan?: Plan; binding: OpsCatalogBinding; identityDigest?: string } | undefined;
   const store = createPlanRevisionStore({ strict: true, retainLatest: true, yamlLogLevel: "error", dependencyMode: "preserve-external" });
   const treeCache: ShadowTreeCache = {};
-  const answer = (snap: { plan?: Plan; binding?: OpsCatalogBinding; identityDigest?: string }): OpsCatalogShadowInput =>
-    privateHandles({ outcome: "ok" as const, identityDigest: snap.identityDigest }, { plan: snap.plan, opsCommit: snap.binding?.commit });
+  const answer = (snap: { plan?: Plan; binding?: OpsCatalogBinding; identityDigest?: string }, kind: "full" | "revalidate"): OpsCatalogShadowInput =>
+    privateHandles({ outcome: "ok" as const, identityDigest: snap.identityDigest }, { plan: snap.plan, opsCommit: snap.binding?.commit, kind });
+  let revalidateClass: OpsCatalogHttpStatusClass | undefined;
   const revalidate = async (k: NonNullable<typeof kept>): Promise<"same" | "moved" | "failed"> => {
+    revalidateClass = undefined;
     try {
       return await readBranchSha(api, `repos/${target.repository}`, k.binding.ref.slice("refs/heads/".length)) === k.binding.commit
         ? "same" : "moved";
     } catch (error) {
       // A failed revalidation is not evidence, and a full read would start with the same failing GitHub.
-      void error;
+      if (error instanceof Refusal) revalidateClass = error.httpStatusClass;
       return "failed";
     }
   };
   return {
     async refresh() {
       const check = kept ? await revalidate(kept) : "moved";
-      if (check === "same" && kept) return answer(kept);
+      if (check === "same" && kept) return answer(kept, "revalidate");
       kept = undefined;
-      if (check === "failed") return { outcome: "stale", refusalStage: "branch_ref" };
+      if (check === "failed") {
+        return withDiagnostics({ outcome: "stale", refusalStage: "branch_ref" }, "revalidate", revalidateClass);
+      }
       const snap = await readSnapshot(target, api, store, treeCache);
       if (snap.outcome === "ok" && snap.binding) {
         everOk = true;
         kept = { plan: snap.plan, binding: snap.binding, identityDigest: snap.identityDigest };
-        return answer(kept);
+        return answer(kept, "full");
       }
-      return { outcome: everOk ? "stale" : snap.outcome, ...(snap.refusalStage ? { refusalStage: snap.refusalStage } : {}) };
+      return withDiagnostics({ outcome: everOk ? "stale" : snap.outcome, ...(snap.refusalStage ? { refusalStage: snap.refusalStage } : {}) },
+        "full", snap.httpStatusClass);
     },
   };
 }

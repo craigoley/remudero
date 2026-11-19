@@ -931,7 +931,7 @@ export function codexCandidatesForCapability(
 // judgement favours gpt-oss 2.40x, since nano spends ~5x the completion tokens on reasoning.
 const FALLBACK_OPENWEIGHT_MODELS: Record<CodexModelTier, string[]> = {
   economy: ["gpt-oss-120b", "gpt-5-nano", "gpt-5.6-luna"],
-  balanced: ["gpt-5-nano", "gpt-oss-120b", "gpt-6-luna", "gpt-5.6-luna", "gpt-6.1-terra", "gpt-6.1-sol"],
+  balanced: ["gpt-5-nano", "gpt-oss-120b", "gpt-6-luna", "gpt-5.6-luna", "gpt-6.1-terra", "gpt-6.2-sol", "gpt-6.1-sol"],
   frontier: ["gpt-6-luna", "gpt-5.6-luna", "gpt-6.1-terra", "gpt-5.6-terra"],
 };
 
@@ -991,6 +991,11 @@ export const OPENWEIGHT_CONTEXT_WINDOWS: Readonly<Record<string, OpenWeightConte
   // Azure's 922K input limit is lower than the combined window; reserve 8K for output.
   "gpt-6-luna": { totalTokens: 922_000, readAt: "2026-09-24" },
   "gpt-6.1-sol": { totalTokens: 922_000, readAt: "2026-10-02" },
+  // A DELIBERATE FLOOR, NOT A MEASURED CEILING (the gpt-5.6 precedent above): no Microsoft Learn input
+  // limit was read for 6.2 Sol (2026-11-18), and its long-context rates are unread too. A prompt above
+  // 128K tokens refuses pre-transport for this deployment and the row falls through to gpt-6.1-sol.
+  // Raise it only when the limit is read AND the long-context rate is priced.
+  "gpt-6.2-sol": { totalTokens: 128_000, readAt: "2026-11-18" },
   // Terra metadata (2026-10-27): 922K input, conservatively leaving room for output as above.
   // https://learn.microsoft.com/en-us/azure/foundry/foundry-models/concepts/models-sold-directly-by-azure#gpt-61
   "gpt-6.1-terra": { totalTokens: 922_000, readAt: "2026-10-27" },
@@ -3583,6 +3588,19 @@ export const OPENWEIGHT_PRICES: Readonly<Record<string, OpenWeightPrice>> = {
       cachedInputUsdPerMillion: 0.2, cacheWriteUsdPerMillion: 5, reservationInputUsdPerMillion: 5 },
     readAt: "2026-10-02",
   },
+  // GPT-6.2 Sol: $2 input, $0.10 cached input, $10 output (OpenAI announcement, 2026-11-17). THE GAP:
+  // no Microsoft Global Standard cache-write rate, long-context threshold or long-context rate was read
+  // for 6.2 (no cash key on a worker), so cache write and the long-context rates reuse 6.1 Sol's and
+  // threshold -1 reserves EVERY request at the long-context rate, as the Terra row does -- overbilling,
+  // never underbilling. Replace with Microsoft's figures when an operator reads them.
+  "gpt-6.2-sol": {
+    unbilledAzureOpenAi429: true,
+    inputUsdPerMillion: 2, outputUsdPerMillion: 10, cachedInputUsdPerMillion: 0.1, cacheWriteUsdPerMillion: 2.5,
+    reservationInputUsdPerMillion: 2.5,
+    longContext: { thresholdInputTokens: -1, inputUsdPerMillion: 4, outputUsdPerMillion: 15,
+      cachedInputUsdPerMillion: 0.2, cacheWriteUsdPerMillion: 5, reservationInputUsdPerMillion: 5 },
+    readAt: "2026-11-18",
+  },
   // Global Standard, read 2026-10-27:
   // https://techcommunity.microsoft.com/blog/azure-ai-foundry-blog/gpt-6-1-terra-now-generally-available-in-microsoft-foundry-build-agents-that-see/4567769
   // No Microsoft threshold verified at https://azure.microsoft.com/en-us/pricing/details/cognitive-services/openai-service/.
@@ -3600,8 +3618,6 @@ export const OPENWEIGHT_PRICES: Readonly<Record<string, OpenWeightPrice>> = {
 /** Codex analytics only; these rows never admit a cash deployment (W1-T5664). */
 export const CODEX_NOTIONAL_PRICES: Readonly<Record<string, OpenWeightPrice>> = {
   ...OPENWEIGHT_PRICES,
-  // OpenAI's GPT-6.2 Sol announcement, 2026-11-17: the API keeps 6.1 Sol's base prices.
-  "gpt-6.2-sol": { inputUsdPerMillion: 2, outputUsdPerMillion: 10, cachedInputUsdPerMillion: 0.1, readAt: "2026-11-17" },
   // https://developers.openai.com/api/docs/models/gpt-6-sol
   "gpt-6-sol": { inputUsdPerMillion: 2, outputUsdPerMillion: 10, cachedInputUsdPerMillion: 0.2, readAt: "2026-10-08" },
   // https://developers.openai.com/api/docs/models/gpt-5.6-sol
@@ -3735,6 +3751,7 @@ export const OPENWEIGHT_TEMPERATURE: Readonly<Record<string, number | null>> = {
   "gpt-5.6-terra": null,
   "gpt-6-luna": null,
   "gpt-6.1-sol": null,
+  "gpt-6.2-sol": null,
   // GA request shape, read 2026-10-27; omit temperature for Terra reasoning requests.
   // https://techcommunity.microsoft.com/blog/azure-ai-foundry-blog/gpt-6-1-terra-now-generally-available-in-microsoft-foundry-build-agents-that-see/4567769
   "gpt-6.1-terra": null,

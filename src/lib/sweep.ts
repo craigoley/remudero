@@ -80,6 +80,7 @@ import {
   readMergeQueueMembership,
   realArmDepsAsync,
   readMergedRatchetsAsync,
+  mainChangedPathsReader,
   stackPrerequisiteFromRest,
   directMergeOperationsInFlight,
   type DirectMergeOperation,
@@ -94,7 +95,7 @@ import {
   type StackPrerequisiteCheck,
 } from "./arm-auto-merge.js";
 import { diagnoseBodyDefects, type BodyRepairDeps } from "./body-repair.js";
-import { RATCHET_JUDGE_DECIDED_STEP, armedRejudgeHold, judgeMergedRatchets, ratchetJudgeLedgerFields, withheldRatchetFixRoute, type MergedRatchetJudgement, type SweepFixRoute } from "./merged-ratchet-verdict.js";
+import { RATCHET_JUDGE_DECIDED_STEP, armedRejudgeHold, judgeMergedRatchets, ratchetJudgeLedgerFields, ratchetReadsAnyPath, withheldRatchetFixRoute, type MergedRatchetJudgement, type SweepFixRoute } from "./merged-ratchet-verdict.js";
 import { MAX_PLAN_REPAIR_STRIKES, planCappedRepair, judgeCappedRepair } from "./classify.js";
 import { DEFAULT_ESTIMATE_MIB, readMemoryLedger, type HostMemoryReading } from "./host-memory-ledger.js";
 import { classEstimate, classTypical, type LearnedEstimate } from "./host-memory-learning.js";
@@ -2500,6 +2501,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "readTaskContractAtHead",
   "readTaskSemanticRevision",
   "readMergedRatchets", // W1-T9962
+  "readMainChangedPaths",
   "readOpenEscalations",
   "reconcilePrimaryShadowAlert",
 ] as const;
@@ -2774,6 +2776,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "readTaskContractAtHead"
   | "readTaskSemanticRevision"
   | "readMergedRatchets"
+  | "readMainChangedPaths"
   | "readOpenEscalations"
   | "reconcilePrimaryShadowAlert"
 > & {
@@ -5431,6 +5434,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // W1-T528 — the action half of W1-T520; see `SweepDeps.updateBranch`'s own doc.
     updateBranch: (pr) => updateBranchImpl(pr),
     readMergedRatchets: (pr) => readMergedRatchetsAsync(pr.prUrl, () => config),
+    readMainChangedPaths: () => mainChangedPathsReader(() => config),
 
     // W1-T5903 — the queue tests the merged result, so staleness against main is the queue's job.
     mergeQueue: (prUrl) => baseBranchRequiresMergeQueue(prUrl, ghJsonForBuild),
@@ -16397,6 +16401,7 @@ export interface SweepDeps {
   updateBranch?: (pr: ArmedStalledPr) => UpdateBranchOutcome | Promise<UpdateBranchOutcome>;
   /** W1-T9962 — the ratchet verdict on the merge of this PR's head into main's tip, for the armed re-judge. */
   readMergedRatchets?: (pr: OpenPrView) => Promise<MergedRatchetJudgement>;
+  readMainChangedPaths?: () => (prUrl: string, fromSha: string, toSha: string) => Promise<string[] | undefined>;
   /** W1-T5903 — whether the PR's base branch requires a merge queue. When it does, the queue tests
    *  the merged result, so the behind-main distance refresh ({@link openPrsBehindMain}) stands down
    *  for that PR. Omitted or throwing reads as "no queue": the pre-queue behaviour is unchanged. */
@@ -17496,6 +17501,24 @@ function codeqlRunCompletedAgain(body: unknown, headSha: string, since: number, 
     Date.parse(run.updated_at) > since && Date.parse(run.updated_at) <= standing);
 }
 
+/** W1-T13663 — this head's CodeQL runs read whole, none open now and none whose attempt BEGAN (created_at, or a re-run's
+ *  run_started_at) after GitHub's standing check: nothing at this head will re-judge it, and no finished re-run is
+ *  waiting on a check not yet visible. The run that produced the warning began before it and finishes after uploading
+ *  it, so its later updated_at alone is no new judgement (#15133, #17217). An unread or truncated listing, or an
+ *  unparseable time, never matches. */
+function codeqlNeverRejudged(body: unknown, headSha: string, standing: number): number | undefined {
+  const listing = body as { total_count?: unknown; workflow_runs?: unknown } | null;
+  const runs = listing?.workflow_runs;
+  if (!Array.isArray(runs) || !Number.isFinite(standing)) return undefined;
+  if (typeof listing?.total_count === "number" && listing.total_count > runs.length) return undefined;
+  const atHead = runs.filter((run) => run?.head_sha === headSha);
+  // A re-run keeps its created_at but restarts run_started_at, so the later of the two is when this attempt began.
+  const began = (run: { created_at?: unknown; run_started_at?: unknown }) =>
+    Math.max(Date.parse(String(run.created_at)), run.run_started_at === undefined || run.run_started_at === null ? -Infinity
+      : Date.parse(String(run.run_started_at)));
+  return atHead.some((run) => run.status !== "completed" || !(began(run) <= standing)) ? undefined : atHead.length;
+}
+
 /** W1-T13470 — one full pass over a configuration-not-found wait; returns the wait's reason with what this pass did. */
 export async function observeCodeqlConfigurationWarning(deps: SweepDeps, lines: ReadonlyArray<Record<string, unknown>>,
   pr: OpenPrView, waitReason: string): Promise<string> {
@@ -17518,6 +17541,7 @@ export async function observeCodeqlConfigurationWarning(deps: SweepDeps, lines: 
   const captures = atHead(CODE_SCANNING_CONFIGURATION_WARNING_STEP);
   const notes: string[] = [];
   const warning = observed.observation?.configurationWarning;
+  const capturedEarlier = captures.length > 0; // W1-T13663: a capture an earlier pass wrote, not this one
   if (warning !== undefined && !captures.some((line) => line.check_id === warning.checkId)) {
     const capture = { ...row, step: CODE_SCANNING_CONFIGURATION_WARNING_STEP, check_id: warning.checkId,
       decision: `${observed.decision.state}: ${observed.decision.reason}`, receipt: warning };
@@ -17536,27 +17560,49 @@ export async function observeCodeqlConfigurationWarning(deps: SweepDeps, lines: 
       // Named in the disposed row; no escalation is judged without the runs, and the next pass reads them again.
       notes.push(`CodeQL workflow runs unread (${failed(error)})`);
     }
+    const standing = Date.parse(String(warning.completedAt));
     const run = codeqlRunCompletedAgain(runs, pr.headSha,
-      Date.parse(String((first.receipt as { completedAt?: unknown } | undefined)?.completedAt)), Date.parse(String(warning.completedAt)));
-    if (run !== undefined) {
-      const owner = pr.taskId ?? "security-policy";
-      const reason = `CodeQL configuration-not-found persists at head ${pr.headSha.slice(0, 7)} of #${pr.prNumber}: CodeQL workflow ` +
-        `run ${run.id} (attempt ${run.run_attempt ?? "unknown"}) completed at ${run.updated_at}, and GitHub's trusted CodeQL check ` +
-        `${warning.checkId} completed at ${warning.completedAt} still reads "${warning.title}" — security-merge-policy stays unknown ` +
-        `and no fix round was spent. Receipt: ${JSON.stringify(warning)}`;
+      Date.parse(String((first.receipt as { completedAt?: unknown } | undefined)?.completedAt)), standing);
+    const owner = pr.taskId ?? "security-policy";
+    // One escalation per head, whichever rule finds it; the row is written first so a failed send is not repeated.
+    const escalateOnce = async (reason: string, extra: Record<string, unknown>, resolutions: ClarificationQuestion["resolutions"],
+      done: string): Promise<void> => {
       appendLine(deps.ledgerPath, { ...row, step: CODE_SCANNING_CONFIGURATION_WARNING_ESCALATED_STEP, check_id: warning.checkId,
-        workflow_run_id: run.id, workflow_run_attempt: run.run_attempt ?? null, owner, receipt: warning });
+        ...extra, owner, receipt: warning });
       try {
         await deps.escalate(pr, reason, { taskId: owner, prNumber: pr.prNumber, prUrl: pr.prUrl, question: reason, criterion: "",
-          reviewerRequirement: reason, specText: "", strikeHistory: pr.strikeHistory ?? [], resolutions: [
-            { label: "re-run CodeQL", detail: "Re-run CodeQL at this head; its completion re-runs the trusted producer through that workflow's own trigger." },
-            { label: "file the recovery rule", detail: "Read the captured receipt and file the operator-reviewed recovery task it supports." },
-          ] });
-        notes.push(`CodeQL run ${run.id} completed again with the warning standing — escalated once to ${owner}`);
+          reviewerRequirement: reason, specText: "", strikeHistory: pr.strikeHistory ?? [], resolutions });
+        notes.push(`${done} — escalated once to ${owner}`);
       } catch (error) {
         // Named in the disposed row; its pre-written escalation row keeps the escalation to once per head.
         notes.push(`its escalation to ${owner} failed (${failed(error)}) and is not repeated at this head`);
       }
+    };
+    const quietRuns = run === undefined && capturedEarlier ? codeqlNeverRejudged(runs, pr.headSha, standing) : undefined;
+    if (run !== undefined) {
+      const reason = `CodeQL configuration-not-found persists at head ${pr.headSha.slice(0, 7)} of #${pr.prNumber}: CodeQL workflow ` +
+        `run ${run.id} (attempt ${run.run_attempt ?? "unknown"}) completed at ${run.updated_at}, and GitHub's trusted CodeQL check ` +
+        `${warning.checkId} completed at ${warning.completedAt} still reads "${warning.title}" — security-merge-policy stays unknown ` +
+        `and no fix round was spent. Receipt: ${JSON.stringify(warning)}`;
+      await escalateOnce(reason, { workflow_run_id: run.id, workflow_run_attempt: run.run_attempt ?? null }, [
+        { label: "re-run CodeQL", detail: "Re-run CodeQL at this head; its completion re-runs the trusted producer through that workflow's own trigger." },
+        { label: "file the recovery rule", detail: "Read the captured receipt and file the operator-reviewed recovery task it supports." },
+      ], `CodeQL run ${run.id} completed again with the warning standing`);
+    } else if (quietRuns !== undefined) {
+      // W1-T13663 — GitHub does not re-judge an unchanged head on its own (all 4 real heads read 2026-11-18), so a warning
+      // captured on an earlier pass with no CodeQL run here open or begun (created or re-run) after it waits on nothing. The remedy is the
+      // owner's: the sweep pushes nothing, re-runs nothing and writes no status.
+      const reason = `CodeQL configuration-not-found stands at head ${pr.headSha.slice(0, 7)} of #${pr.prNumber}: GitHub's trusted ` +
+        `CodeQL check ${warning.checkId} completed at ${warning.completedAt} still reads "${warning.title}", first captured on an ` +
+        `earlier pass from check ${String(first.check_id)}, and GitHub has not re-judged it at this head: of ${quietRuns} CodeQL ` +
+        "workflow run(s) listed at this head, none is open or began after it. Nothing at an unchanged head " +
+        "re-judges it; push a new commit or re-run CodeQL at this head. security-merge-policy stays unknown and no fix round " +
+        `was spent. Receipt: ${JSON.stringify(warning)}`;
+      await escalateOnce(reason, { first_check_id: first.check_id, workflow_run_id: null, workflow_runs_at_head: quietRuns,
+        trigger: "never-re-judged" }, [
+        { label: "push a new commit", detail: "A new head gets its own CodeQL run and check, which the sweep observes afresh." },
+        { label: "re-run CodeQL at this head", detail: "Re-run the CodeQL workflow at this head; its completion re-runs the trusted producer through that workflow's own trigger." },
+      ], `GitHub has not re-judged check ${warning.checkId} at this head`);
     }
   }
   return notes.length > 0 ? `${waitReason} — ${notes.join("; ")}` : waitReason;
@@ -18026,16 +18072,21 @@ export function conflictRoundHeldHead(pr: Pick<OpenPrView, "taskId" | "prNumber"
   }
 }
 
-/** The production `archive` reader: the fix-round rows across rotations and the live file, or undefined if incomplete. */
+const FIX_ROUND_ARCHIVE_STEPS: readonly string[] = ["fix.dispatch", "fix.retrigger", "fix.done", "fix.needs_design", "sweep.conflict_regenerated"];
+
+/** W1-T13712: the fix-round rows of a strict union read, or undefined if it is incomplete. Both archive readers keep these steps. */
+export function fixRoundArchiveRows(read: LedgerUnionRecordRead): ReadonlyArray<Record<string, unknown>> | undefined {
+  return read.ok ? read.rows.filter((row) => typeof row.step === "string" && FIX_ROUND_ARCHIVE_STEPS.includes(row.step)) : undefined;
+}
+
+/** The synchronous `archive` reader: the fix-round rows across rotations and the live file, or undefined if incomplete. */
 function readFixRoundArchiveRows(ledgerPath: string): ReadonlyArray<Record<string, unknown>> | undefined {
-  const read = readLedgerUnionRecordsSync(dirname(ledgerPath), {
-    step: ["fix.dispatch", "fix.retrigger", "fix.done", "fix.needs_design", "sweep.conflict_regenerated"], refuseIncomplete: true });
-  return read.ok ? read.rows : undefined;
+  return fixRoundArchiveRows(readLedgerUnionRecordsSync(dirname(ledgerPath), { step: [...FIX_ROUND_ARCHIVE_STEPS], refuseIncomplete: true }));
 }
 
 const SWEEP_REFRESH_STEPS = ["fix.base_refreshed", BASE_RED_REFRESH_STEP, BASE_FIXED_REFRESH_STEP, REFRESH_CLEARANCE_STEP];
 const SWEEP_REPAIR_HISTORY_SLICE: EscalationTriageSlice = { holder: "sweep.repair-history",
-  steps: [...SWEEP_REFRESH_STEPS, "fix.dispatch", "fix.retrigger", "fix.done", "fix.needs_design", "sweep.conflict_regenerated"] };
+  steps: [...SWEEP_REFRESH_STEPS, ...FIX_ROUND_ARCHIVE_STEPS] };
 const sweepRepairHistoryReaders = new Map<string, EscalationTriageHistoryReader>();
 
 /** W1-T12954: the repair rows across rotations and the live file, as a strict union read gives them (`ok` false
@@ -27850,6 +27901,7 @@ export function armedRatchetRejudgeTargets(openPrs: readonly OpenPrView[], ledge
   const firstArm = new Map<string, number>();
   ledgerLines.forEach((l, i) => {
     if (l.step === RATCHET_JUDGE_DECIDED_STEP) judged.add(`${String(l.pr_number)}@${String(l.head_sha)}@${String(l.main_sha)}`);
+    if (l.step === RATCHET_JUDGE_DECIDED_STEP && typeof l.merged_main_sha === "string") judged.add(`${String(l.pr_number)}@${String(l.head_sha)}@${l.merged_main_sha}`);
     if (l.step === "automerge.armed" && typeof l.pr_url === "string" && !firstArm.has(l.pr_url)) firstArm.set(l.pr_url, i);
   });
   return openPrs
@@ -27867,7 +27919,7 @@ export function armedRatchetRejudgeTargets(openPrs: readonly OpenPrView[], ledge
 export async function runArmedRatchetRejudge(
   openPrs: readonly OpenPrView[],
   deps: Pick<SweepDeps, "ledgerPath" | "runId" | "updateBranch" | "readLedger" | "appendLine" | "dryRun" | "now" |
-    "readMainTip" | "readMergedRatchets" | "readActionsStatusSummary">,
+    "readMainTip" | "readMergedRatchets" | "readActionsStatusSummary" | "readMainChangedPaths">,
 ): Promise<number[]> {
   const read = deps.readMergedRatchets;
   if (deps.dryRun || !read || !deps.readMainTip) return [];
@@ -27877,7 +27929,20 @@ export async function runArmedRatchetRejudge(
   const ledgerLines = (deps.readLedger ?? readLiveLedgerRows)(deps.ledgerPath);
   const refreshed: number[] = [];
   let incidentHold: boolean | undefined;
+  const changedPaths = deps.readMainChangedPaths?.();
   for (const pr of armedRatchetRejudgeTargets(openPrs, ledgerLines, mainTip)) {
+    const prior = ledgerLines.findLast((l) => l.step === RATCHET_JUDGE_DECIDED_STEP && Number(l.pr_number) === pr.prNumber && l.head_sha === pr.headSha);
+    const judgedMain = prior?.merged_main_sha ?? prior?.main_sha;
+    if (changedPaths && prior?.verdict === "clean" && prior.rows_count === 0 && Array.isArray(prior.rows) && prior.rows.length === 0 &&
+      prior.remedy === "proceed" && typeof judgedMain === "string") {
+      const paths = await changedPaths(pr.prUrl, judgedMain, mainTip);
+      if (paths !== undefined && !ratchetReadsAnyPath(paths)) {
+        appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: RATCHET_JUDGE_DECIDED_STEP, pr_number: pr.prNumber,
+          lane: "sweep-armed", verdict: "clean", counted_gates: prior.counted_gates, uncounted_gates: prior.uncounted_gates, rows: [], rows_count: 0,
+          head_sha: pr.headSha, main_sha: mainTip, remedy: "proceed", carried_from_main_sha: judgedMain });
+        continue;
+      }
+    }
     let judge: MergedRatchetJudgement;
     try {
       judge = await read(pr);

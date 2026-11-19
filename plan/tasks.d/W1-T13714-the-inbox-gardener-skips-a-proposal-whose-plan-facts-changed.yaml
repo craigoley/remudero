@@ -1,0 +1,54 @@
+- id: W1-T13714
+  title: "An Inbox proposal whose plan facts differ from the snapshot's is skipped and counted, instead of stopping every gardener pass"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # 3 files: per-proposal digests in src/lib/inbox-retirement.ts, capture and the candidate loop in src/lib/inbox-gardener.ts, and one new test
+  origin: "operator-session#inbox-gardener-shadow-2026-11-18"
+  plan_refs:
+    - W1-T13682
+    - W1-T4481
+  files:
+    - src/lib/inbox-retirement.ts
+    - src/lib/inbox-gardener.ts
+    - test/gardeners/the-inbox-gardener-skips-a-proposal-whose-plan-facts-changed.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "When only some proposals' plan facts differ from the snapshot's, the gardener's plan coverage is the census value and only those candidates are marked"
+      proof: "grep: W1-T13714 criterion 1 in test/gardeners/the-inbox-gardener-skips-a-proposal-whose-plan-facts-changed.test.ts"
+    - claim: "invariant:snapshot-without-digests-stays-unavailable — a snapshot with no per-proposal digests still keeps plan coverage unavailable when the identity differs"
+      proof: "grep: W1-T13714 criterion 2 in test/gardeners/the-inbox-gardener-skips-a-proposal-whose-plan-facts-changed.test.ts"
+    - claim: "A marked candidate is skipped with defer_source and counted as source_changed, never proven or retired, while the others are still read"
+      proof: "grep: W1-T13714 criterion 3 in test/gardeners/the-inbox-gardener-skips-a-proposal-whose-plan-facts-changed.test.ts"
+  rationale: |
+    WHY: Craig ruled 2026-11-18 12:11Z (decision card "Skip only those items"): an item the gardener cannot check is
+    skipped and recorded, and the gardener still judges the rest. This applies the same ruling to plan facts. Shadow
+    mode stays on.
+    OBSERVED on the host 2026-11-18: every inbox.gardener_pass at 14:22, 15:46, 17:31 and 18:07Z ended source_partial
+    with gap coverage:plan. The registry and snapshot proposals were identical (0 differing), the threads file was
+    unchanged since 11:40Z, and the daemon checkout did not move between 16:22 and 17:31Z, while serve.plan_reloaded rows
+    named many new main shas. The identities matched at 16:47Z and differed again at 18:07Z.
+    READ at origin/main: serve-plan-reload.ts reloadServePlan (W1-T4481) reloads serve's plan in place at each plan-only
+    merge, and inbox-view.ts writes gardenerSource from that plan. The daemon's checkout advances only at boot. capture
+    in inbox-gardener.ts sets coverage.plan to unavailable whenever the whole-population inboxGardenerSource identity
+    differs, so one changed task fact among about 2,400 proposals stops the whole pass.
+  design: |
+    INVARIANT snapshot-without-digests-stays-unavailable: a snapshot whose gardenerSource has no per-proposal digests
+    (an older writer), or whose scope differs, keeps coverage.plan unavailable when the identity differs, as today.
+    1. inboxGardenerSource also returns items: for each proposal id, a short digest of that proposal's facts entry.
+    2. In capture, when the identities differ, the scopes are equal and the snapshot carries items, the ids whose digest
+       differs or is absent form a changed set; coverage.plan is then the census plan value instead of unavailable.
+    3. Each candidate in that set carries sourceChanged: true. The pass loop skips it before any proof, judge or
+       retirement, storing decision defer_source with a digest that can never equal a real semantic input.
+    4. The pass result carries source_changed: <count over the whole pack> when it is non-zero.
+  falsifier: |
+    Keep inboxGardenerSource without items and capture comparing only the whole identity: criteria 1 and 3 fail
+    (measured: fail 2, pass 1).
+  note: |
+    Id reserved for run-unfiled-1795025361000 with ~/rmd-work/bin/reserve-id.sh.
+    reservation hand-off: run-unfiled-1795025361000 -> claude/project-thread-cb5huh-plan-gardener-plan-mismatch

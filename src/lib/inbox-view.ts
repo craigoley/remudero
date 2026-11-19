@@ -18,7 +18,8 @@ import { persistedInboxIdentity, readPersistedInbox, writeClassificationSnapshot
 import { deriveTaskReferent, parseProposalRegistryResult, ProposalRegistryBusyError, pruneRatifiedProposals, updateProposalRegistryAsync } from "./inbox.js";
 import { buildInboxDismissalAudit, inboxDismissalReceipts } from "./inbox-dismissal-audit.js";
 import { INBOX_STALE_AFTER_MS } from "./nav-badge-view.js";
-import { classifyAllProposalsSliced, inboxClassificationEvidence, inboxLanes, lapseInboxKeeps, materializeInboxAttentionCensus, nextInboxSnoozeWake, peekClassifiedInbox, pruneInboxTriage, readInboxStores, recordInboxFirstSeen, readSlowLaneInbox, type ClassifiedInbox, type InboxStores, type PanelGraphDeps } from "./panel-graph.js";
+import { isMainThread, parentPort, workerData } from "node:worker_threads";
+import { buildSlowLaneInbox, classifyAllProposalsSliced, inboxClassificationEvidence, inboxLanes, lapseInboxKeeps, materializeInboxAttentionCensus, nextInboxSnoozeWake, peekClassifiedInbox, pruneInboxTriage, readInboxStores, recordInboxFirstSeen, readSlowLaneInbox, type ClassifiedInbox, type InboxBuildInput, type InboxBuildMessage, type InboxStores, type PanelGraphDeps } from "./panel-graph.js";
 import { projectWhyMeFeedback, type WhyMeFeedback } from "./inbox-why-me.js";
 import { writeVerdictReceipts } from "./inbox-verdict-receipts.js";
 import { readSnapshotCursor, snapshotCursor } from "./read-page.js";
@@ -391,6 +392,11 @@ function sectionItems(lanes: Lanes, section: InboxViewSection): LaneItem[] {
  * page is `section=<s>`; continuation cursors bind the classification, section and item offset. A
  * `needsYou` item names its `lane`. No clock is in `data`, so an unchanged inbox keeps its ETags.
  */
+/** W1-T13692: the pages a fresh read of `generatedAt` serves, as the inbox build worker makes them ahead of any request. */
+export function inboxFreshViewBodies(lanes: Lanes, generatedAt: string, snapshotKey?: string): InboxViewBody[] {
+  return inboxViewBodies(lanes, inboxStoreSource(generatedAt, "fresh"), snapshotKey);
+}
+
 export function inboxViewBodies(lanes: Lanes, source: ViewSource, snapshotKey?: string): InboxViewBody[] {
   return INBOX_VIEW_SECTIONS.flatMap((section) => {
     const items = sectionItems(lanes, section);
@@ -465,11 +471,56 @@ export function inboxLegacyView(deps: PanelGraphDeps, clock = systemClock): View
         : inboxStoreSource(clock.iso());
       const lanes = read?.lanes() ?? inboxLanes(classified, deps.inboxRoot);
       if (!paged || paged.lanes !== lanes || paged.asOf !== source.asOf || paged.snapshotKey !== cursor?.snapshotKey) {
+        // W1-T13692: the pages an off-loop build made for these lanes are these bodies, while the read is fresh.
+        const built = source.state === "fresh" && cursor?.snapshotKey === read?.snapshotKey ? read?.builtPages(lanes) as InboxViewBody[] | undefined : undefined;
         paged = { lanes, asOf: source.asOf, snapshotKey: cursor?.snapshotKey,
-          bodies: new Map(inboxViewBodies(lanes, source, cursor?.snapshotKey).map(body => [body.key, body])) };
+          bodies: new Map((built ?? inboxViewBodies(lanes, source, cursor?.snapshotKey)).map(body => [body.key, body])) };
       }
       const body = paged.bodies.get(viewKey(params));
       return body ? { data: body.data, sources: body.sources } : { error: `no such page: ${viewKey(params)}` };
     },
   };
 }
+
+/**
+ * W1-T13692: the inbox build worker. A changed persisted inbox costs serve's one event loop its parse, its source
+ * check, its lanes and its view pages; that thread makes all four while reads keep answering from the previous read,
+ * and serve's main thread only swaps the finished parts in (panel-graph.ts's readSlowLaneInbox). panel-graph.ts starts
+ * THIS MODULE by URL as that worker and never imports it, since this module imports panel-graph.ts. It lives here, not
+ * in a module of its own, because a new worker module that imports panel-graph.ts would join the import graph's
+ * largest strongly connected component (test/the-affected-suite-reach-ratchet.test.ts), and this one is already in it.
+ * Each build answers in three messages, read, lanes and pages, so the main thread takes each in its own turn; a read
+ * the caller already holds (`knownStamp`) is not sent back.
+ */
+const INBOX_BUILD_WORKER_KIND = "remudero-inbox-build" as const;
+
+interface InboxBuildPort {
+  on(event: "message", run: (msg: { id: number; input: InboxBuildInput }) => void): unknown;
+  postMessage(value: InboxBuildMessage): void;
+}
+
+/** One build's three messages, made wherever it is called: the worker thread, or a test of this body. */
+export function inboxBuildMessages(id: number, input: InboxBuildInput): InboxBuildMessage[] {
+  try {
+    const parts = buildSlowLaneInbox(input);
+    const sendRead = parts.usable && parts.stamp !== input.knownStamp;
+    const persisted = parts.persisted;
+    const pages = parts.lanes && persisted ? inboxFreshViewBodies(parts.lanes.built, persisted.generatedAt, persisted.snapshotKey) : undefined;
+    return [
+      { id, part: "read", stamp: parts.stamp, usable: parts.usable, ...(sendRead ? { persisted } : {}) },
+      { id, part: "lanes", ...(parts.lanes ? { lanes: parts.lanes } : {}) },
+      { id, part: "pages", ...(pages ? { pages } : {}) },
+    ];
+  } catch (error) {
+    return [{ id, part: "error", reason: `inbox build failed: ${String((error as Error)?.message ?? error)}` }];
+  }
+}
+
+/** The worker branch's body, named so the parent can cover it: coverage instruments the parent thread only. */
+export function serveInboxBuilds(port: InboxBuildPort | null): void {
+  port?.on("message", (msg) => {
+    for (const message of inboxBuildMessages(msg.id, msg.input)) port.postMessage(message);
+  });
+}
+
+if (!isMainThread && (workerData as { kind?: unknown } | undefined)?.kind === INBOX_BUILD_WORKER_KIND) serveInboxBuilds(parentPort);

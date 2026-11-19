@@ -17,6 +17,9 @@
     - .remudero/daemon-instances.yaml
     - test/one-registry-for-the-fleet.test.ts
     - test/an-unscoped-recycle-refuses-once-instances-are-declared.test.ts
+  # refusal-amendment (W1-T13700, run W1-T13700-1795024352310, 2026-11-19T00:45:41.687Z): the worker refused criterion 1 [proof-unexecutable-at-head] — proposed re-scope-criteria: repair the criterion's proof so it is executable at HEAD, or re-scope the criterion
+  #   worker evidence: W1-T13700: a filed proof already passes at the merge base, so branch run-W1-T13700-1795024352310 cannot open a PR
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   acceptance:
@@ -24,9 +27,8 @@
       proof: "grep: mode: live in .remudero/daemon-instances.yaml"
     - claim: "The committed-registry test pins core, site, console and ops all live, and requires the ops row to write its mode"
       proof: "unit test: W1-T13700: the committed registry runs remudero-ops live"
-    - claim: "The registry header records the promotion and the host step that follows it"
-      proof: "grep: W1-T13700 in .remudero/daemon-instances.yaml"
   rationale: |
+    AMENDED 2026-11-18: the header-note proof was dropped because it matched only a comment line.
     WHY: Craig, 2026-11-18 13:40:10Z, on a decision card: chose "Yes, go live" on "Switch the ops repo from shadow
     to live on the host and in the core registry?". W1-T13498 onboarded remudero-ops with `mode: shadow` and its
     header says "promotion to live is a later reviewed registry PR"; this is that PR.

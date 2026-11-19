@@ -15,7 +15,7 @@
     - W1-T9310
   files:
     - test/fleet-heartbeat.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A beat run long after the suite file loaded still reads a fixture row written as one minute old as one minute old: each fixture's times are taken from the child clock when its test builds it, not once when the file loads"
