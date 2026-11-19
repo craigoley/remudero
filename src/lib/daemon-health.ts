@@ -172,7 +172,7 @@ export async function readGhRateLimitRemainingAsync(json: (args: string[]) => Pr
   return typeof remaining === "number" ? remaining : undefined;
 }
 
-/** W1-T13833: how long /v1/daemon-health answers with one rate-limit reading before it reads again. */
+/** PRIMARY CONTROL (W1-T13833): how long /v1/daemon-health answers with one rate-limit reading before it reads again. */
 export const DAEMON_HEALTH_RATE_LIMIT_HOLD_MS = 60_000;
 
 /**
@@ -182,7 +182,7 @@ export const DAEMON_HEALTH_RATE_LIMIT_HOLD_MS = 60_000;
  * with the held reading, starting a fresh read when it is older than {@link DAEMON_HEALTH_RATE_LIMIT_HOLD_MS}. A
  * read that fails holds `undefined`, so the field is absent, as before.
  */
-export function createRateLimitHold(read: () => Promise<number | undefined>, now: () => number, holdMs = DAEMON_HEALTH_RATE_LIMIT_HOLD_MS): () => Promise<number | undefined> {
+export function createRateLimitHold(read: () => Promise<number | undefined>, clock: Pick<Clock, "now">, holdMs = DAEMON_HEALTH_RATE_LIMIT_HOLD_MS): () => Promise<number | undefined> {
   let held: { value: number | undefined; atMs: number } | undefined;
   let pending: Promise<number | undefined> | undefined;
   const refresh = (): Promise<number | undefined> => {
@@ -191,7 +191,7 @@ export function createRateLimitHold(read: () => Promise<number | undefined>, now
       // has always answered; the next request past the hold reads again, so the failure is not held for good.
       return undefined;
     }).then((value) => {
-      held = { value, atMs: now() };
+      held = { value, atMs: clock.now() };
       pending = undefined;
       return value;
     });
@@ -199,7 +199,7 @@ export function createRateLimitHold(read: () => Promise<number | undefined>, now
   };
   return async () => {
     if (held === undefined) return refresh();
-    if (now() - held.atMs >= holdMs) void refresh();
+    if (clock.now() - held.atMs >= holdMs) void refresh();
     return held.value;
   };
 }
@@ -516,7 +516,7 @@ export function buildDaemonHealthRoute(deps: DaemonHealthDeps): Route {
   const exec = deps.exec;
   const rateLimit = createRateLimitHold(
     deps.rateLimit ?? (exec ? async () => readGhRateLimitRemaining(exec) : () => readGhRateLimitRemainingAsync()),
-    deps.now ?? Date.now,
+    deps.now ? { now: deps.now } : systemClock,
   );
   return {
     method: "GET",
