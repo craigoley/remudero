@@ -431,9 +431,9 @@ export function reappendLostReviewPosted(
 /** W1-T13849: an earlier downgrade-unclassified hold at this head and input digest (else decision digest). History
  *  that cannot be read counts as held, so the FAIL folds as origin/main does and is never withheld again blindly. */
 export async function unclassifiedHoldRecorded(ledgerPath: string | undefined, headSha: string,
-  inputDigest: string | undefined, decisionDigest: string): Promise<boolean> {
+  inputDigest: string | undefined, decisionDigest: string, shadow = false): Promise<boolean> {
   if (!ledgerPath) return true;
-  const read = await readLedgerUnionRawLinesAsync(dirname(ledgerPath), { step: "review.semantic_incomplete",
+  const read = await readLedgerUnionRawLinesAsync(dirname(ledgerPath), { step: reviewerShadowStep("review.semantic_incomplete", shadow),
     keep: (line) => line.includes(headSha) && line.includes(DOWNGRADE_UNCLASSIFIED) });
   if (!read.ok) return true;
   return read.rawLines.some((line) => {
@@ -1257,13 +1257,14 @@ export async function runReview(host: ReviewCommandHost, args: {
     // this outcome exists to prevent.
     planOnlySkip: planOnlySkip && !attemptReviewer,
   });
-  // W1-T13849: an untagged FAIL on a proof that executed and passed is asked again once per head and input.
-  const downgradeUnclassified = unclassifiedDowngrades(semantic, semanticClauses, preliminaryProofs?.criteria);
+  // Ask again once per head and input, unless the floor has already settled the review as a failure.
+  const downgradeUnclassified = preliminaryProofs?.floorState === "failure" ? []
+    : unclassifiedDowngrades(semantic, semanticClauses, preliminaryProofs?.criteria);
   replayInput = { ...replayInput, stage: "semantic", plan_only: planOnlySkip,
     criteria_count: criteria.length, reviewer_outcome: outcome,
     verdict_lines: recordedReviewVerdictLines(reviewerFindingText ?? "", criteria.length),
     ...(downgradeUnclassified.length === 0 ? {} : { downgrade_unclassified: downgradeUnclassified,
-      downgrade_unclassified_withheld: await unclassifiedHoldRecorded(args.ledgerPath, headSha, inputDigest, decisionDigest) }) };
+      downgrade_unclassified_withheld: await unclassifiedHoldRecorded(args.ledgerPath, headSha, inputDigest, decisionDigest, args.shadow) }) };
   const replayDecision = classifyReviewOutcome(replayInput);
   const semanticRefusal = replayDecision.class === "posted" ? undefined : replayDecision.reason;
   if (semanticRefusal !== undefined) {

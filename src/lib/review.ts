@@ -4834,16 +4834,10 @@ export function judgeCriterion(
     // W1-T13849: (a) and (c) fold as before on the untagged text; (b) keeps the floor and becomes a follow-up.
     const downgrade = classifyDowngrade(semanticClause);
     semanticClause = downgrade.text;
-    if (semanticClause !== undefined) downgradeClass = downgrade.class;
-    // An UNEXPLAINED downgrade cannot outweigh a proof this run watched execute and pass. `reviewerVerdictContract`
-    // calls the fold advisory and promises a reviewer "that emits nothing parseable simply leaves the floor untouched
-    // — never a stall, never a deadlock"; a bare FAIL is that stall, unactionable by construction. Narrow BY DESIGN
-    // to `executed_pass`: where the floor rests on keyword coverage the reviewer's judgement is the only real signal
-    // and still binds, unexplained or not (W1-T2263 acceptance 3).
+    downgradeClass = downgrade.class;
+    // The review command handles the once-per-input hold; any unclassified FAIL reaching this fold is binding.
     if (downgradeClass === "b") {
       followUp = semanticClause;
-    } else if (semanticClause === undefined && proofExec === "executed_pass") {
-      reason = `${reason} — NOTE: ${downgradeNote} REFUSED: the FAIL line named no reason, and an unexplained non-responsive cannot outweigh an observed executed_pass`;
     } else {
       met = false;
       reason = semanticClause ? `${reason} — NOTE: ${downgradeNote}: ${semanticClause}` : `${reason} — NOTE: ${downgradeNote}`;
@@ -8202,10 +8196,12 @@ export function buildReviewPrompt(input: ReviewPromptInput): string {
       `   proof's code and whether it substantiates its claim and preservation constraints.`,
       `   A passing execution cannot waive a logical gap or a violated design constraint.`,
       `   A violated preservation constraint is (c). A design-item deviation that makes the claim`,
-      `   false on its own inputs is (a); one that changes no claimed behaviour (where a test helper`,
-      `   comes from, for example) is a REVIEW_FOLLOW_UP line. An extra experiment's counterexample`,
-      `   goes to its class: on the claim's own input (a), elsewhere broken (c), beyond the claim a`,
-      `   follow-up. A sandbox permission refusal before assertions execute`,
+      `   false on its own inputs is (a). A deviation that changes neither claimed nor existing`,
+      `   behaviour and satisfies preservation constraints (such as where a test helper comes from)`,
+      `   is a (b) REVIEW_FOLLOW_UP line. Apply the same classes to an extra experiment: (a) if it`,
+      `   falsifies the claim on its own input, (c) if it exposes a regression or preservation`,
+      `   violation, and (b) for an out-of-claim result that does neither.`,
+      `   A sandbox permission refusal before assertions execute`,
       `   is an unavailable experiment, not a functional counterexample. Keep that distinction`,
       `   explicit instead of changing the proof or treating EPERM as a failed assertion.`,
     ]),
@@ -8247,22 +8243,21 @@ export function reviewerVerdictContract(count: number): string {
     `the status from, since you do not post it yourself): emit`,
     `EXACTLY one line per criterion, in this form:`,
     `  REVIEW_VERDICT <n>: PASS`,
-    `  REVIEW_VERDICT <n>: FAIL   <why THIS proof did not substantiate THIS claim>`,
-    `  REVIEW_VERDICT <n>: UNABLE <what you could not inspect, and why>`,
-    `for n = 1..${count}. These are folded into the deterministic verdict and may`,
-    `only DOWNGRADE a criterion to failure, never rescue an unpasted proof.`,
-    ``,
-    `EVERY FAIL REASON OPENS WITH ITS CLASS, right after the token:`,
-    `  REVIEW_VERDICT <n>: FAIL (a) <the claim's own input, and what the change does with it>`,
+    `  REVIEW_VERDICT <n>: FAIL (a) <the claim's own input and what the change does with it>`,
     `  REVIEW_VERDICT <n>: FAIL (c) <the behaviour outside the claim that the change breaks, and where>`,
+    `  REVIEW_VERDICT <n>: UNABLE <what you could not inspect, and why>`,
+    `for n = 1..${count}. Each FAIL requires its class immediately after the token.`,
+    `A reviewer verdict may downgrade a criterion and can never rescue a failed floor.`,
+    ``,
     `(a): on an input the claim itself names, the change does not do what the claim says,`,
     `or the proof never exercises that input. Name the input and what happens to it.`,
     `(c): the change breaks behaviour outside the claim: a previously passing test, a`,
     `preservation constraint, a production path. Name that behaviour and where it breaks.`,
-    `A counterexample on an input OUTSIDE what the claim states is never a FAIL: emit`,
-    `PASS for that criterion and, at most one per criterion, the follow-up line`,
+    `(b): a counterexample on an input outside the claim that exposes no regression`,
+    `or preservation violation. Use at most one follow-up line per criterion:`,
     `  REVIEW_FOLLOW_UP <n>: <the input and the result>`,
-    `A FAIL with no class is held and the review is asked again.`,
+    `Emit PASS if (b) is the only finding. Emit the appropriate FAIL for a separate`,
+    `(a) or (c) finding on the same criterion, alongside the follow-up line.`,
     ``,
     `ON A FAIL, THE TEXT AFTER THE TOKEN IS THE WHOLE POINT. It is recorded verbatim`,
     `on that criterion's row and is the ONLY thing an author or operator ever sees`,
@@ -8412,12 +8407,18 @@ export function followUpFindingsSection(followUps: ReadonlyArray<ReviewFollowUp>
 
 export function parseReviewerVerdictClauses(text: string, count: number): (string | undefined)[] {
   const clauses: (string | undefined)[] = new Array(count).fill(undefined);
+  // On conflicting FAILs, keep the binding class. A bare FAIL also outranks a follow-up.
+  const priority: Record<DowngradeClass, number> = { b: 0, unclassified: 1, a: 2, c: 2 };
+  const seenPriority: number[] = new Array(count).fill(-1);
   for (const m of text.matchAll(REVIEW_VERDICT_LINE_RE)) {
     const n = Number(m[1]) - 1;
     if (n < 0 || n >= count) continue;
     if (m[2].toUpperCase() !== "FAIL") continue; // PASS lines never gain a clause.
     const clause = extractBoundedClause(m[3]);
-    if (clause) clauses[n] = clause;
+    const rank = priority[classifyDowngrade(clause).class];
+    if (rank < seenPriority[n]! || (rank === seenPriority[n] && clause === undefined)) continue;
+    seenPriority[n] = rank;
+    clauses[n] = clause;
   }
   return clauses;
 }

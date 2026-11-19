@@ -80,13 +80,19 @@ const MOUNTS = {
   sol: { provider: "codex", model: "gpt-6.2-sol", served: "gpt-6.2-sol" },
 } as const;
 
-/** The production review command over a real checkout whose grep proof executes and passes. */
-function reviewFixture(t: TestContext, criterion: Criterion) {
+/** The production review command over a real checkout with observable grep proof results. */
+function reviewFixture(t: TestContext, criterion: Criterion, failingCriterion?: Criterion) {
   const repo = gitRepo({ scope: t, kind: "semantic-downgrade-review" });
+  const criteria = failingCriterion ? [criterion, failingCriterion] : [criterion];
   const target = criterion.proof.replace(/^grep: .* in /, "");
   const marker = criterion.proof.replace(/^grep: (.*) in .*$/, "$1");
   mkdirSync(join(repo.dir, dirname(target)), { recursive: true });
   writeFileSync(join(repo.dir, target), `test("${marker}", () => {});\n`);
+  if (failingCriterion) {
+    const missingMarkerTarget = failingCriterion.proof.replace(/^grep: .* in /, "");
+    mkdirSync(join(repo.dir, dirname(missingMarkerTarget)), { recursive: true });
+    writeFileSync(join(repo.dir, missingMarkerTarget), "// The cited marker is absent.\n");
+  }
   repo.git("add", ".");
   repo.git("commit", "-qm", "fixture proof");
   const head = repo.git("rev-parse", "HEAD");
@@ -104,16 +110,21 @@ function reviewFixture(t: TestContext, criterion: Criterion) {
   process.env.PATH = `${shim.dir}:${oldPath}`;
   t.after(() => { if (oldPath === undefined) delete process.env.PATH; else process.env.PATH = oldPath; });
   const prompts: string[] = [];
-  const drive = async (transcript: string, opts: { mount?: keyof typeof MOUNTS; ledger?: string; headRefName?: string } = {}) => {
+  const drive = async (transcript: string, opts: {
+    mount?: keyof typeof MOUNTS; ledger?: string; headRefName?: string; shadow?: boolean; inputBody?: string;
+  } = {}) => {
     const mount = MOUNTS[opts.mount ?? "sol"];
     const ledgerPath = join(repo.dir, opts.ledger ?? "ledger.ndjson");
     const runId = `semantic-downgrade-${prompts.length}`;
     const verdict = await reviewCommand.runReview(reviewFixtureHost(head), {
       owner: "acme", repo: "remudero", prUrl, ...(opts.headRefName ? { headRefName: opts.headRefName } : {}),
-      task: { id: "W1-T13849", files: [target], acceptance: [criterion] },
-      report: `${criterion.claim}\n${criterion.proof}`, settingsFile: join(repo.dir, "settings.json"),
+      task: { id: "W1-T13849", files: [target], acceptance: criteria },
+      report: criteria.map(c => `${c.claim}\n${c.proof}`).join("\n"),
+      reviewInputBody: opts.inputBody, shadow: opts.shadow, settingsFile: join(repo.dir, "settings.json"),
       config: { root: repo.dir, claudeBin: "/unused" },
-      log: (step: string, extra: Record<string, unknown> = {}) => appendLedger(ledgerPath, { run_id: runId, task_id: "W1-T13849", step, ...extra }),
+      log: (step: string, extra: Record<string, unknown> = {}) => appendLedger(ledgerPath, {
+        run_id: runId, task_id: "W1-T13849", step: health.reviewerShadowStep(step, opts.shadow === true), ...extra,
+      }),
       say: () => {}, account: (worker: unknown) => worker, spawnReviewer: true, readReviewReuseFacts: () => undefined,
       runtimeImageSha: null,
       reviewerSpawnWorker: async (args: { prompt: string }) => {
@@ -158,6 +169,8 @@ test("W1-T13849 criterion 1: a (b) FAIL beyond the claim leaves an executed_pass
   assert.equal(followUps[0]!.head_sha, verdict.headSha);
   const posted = rows.find(row => row.step === "review.posted");
   assert.equal(posted?.state, "success");
+  assert.ok(posted?.review_input_digest);
+  assert.equal(followUps[0]!.review_input_digest, posted.review_input_digest);
   const body = reviewBodies(shim);
   assert.match(body, /Follow-up findings/);
   assert.ok(body.includes("16 KiB of spaces"), body);
@@ -217,6 +230,47 @@ test("W1-T13849 criterion 3: an untagged FAIL on an executed_pass criterion is w
   assert.equal(criteria[0]!.downgrade_class, "unclassified", "the posted row names the unclassified fold");
 });
 
+test("W1-T13849 criterion 3: a bare FAIL holds once for each input digest, then posts an unmet criterion", async (t) => {
+  const { drive, head } = reviewFixture(t, W1_T12176);
+  const transcript = "REVIEW_VERDICT 1: FAIL";
+  const inputBody = "first PR body";
+  const first = await drive(transcript, { inputBody });
+  assert.equal(first.verdict.verdictWithheld, "downgrade-unclassified");
+  assert.equal(first.rows.some(row => row.step === "review.posted"), false);
+  const second = await drive(transcript, { inputBody });
+  assert.equal(second.verdict.verdictWithheld, undefined);
+  assert.equal(second.verdict.state, "failure");
+  assert.equal(second.verdict.criteria[0]!.proof_exec, "executed_pass");
+  assert.equal(second.verdict.criteria[0]!.met, false);
+  assert.ok(second.verdict.criteria[0]!.reason.endsWith(`— NOTE: ${ORIGIN_MAIN_NOTE}`));
+  const posted = second.rows.find(row => row.step === "review.posted");
+  const decision = posted?.decision_verdict as review.ReviewVerdict | undefined;
+  assert.equal(decision?.criteria[0]?.downgrade_class, "unclassified");
+
+  const changed = await drive(transcript, { inputBody: "changed PR body" });
+  assert.equal(changed.verdict.verdictWithheld, "downgrade-unclassified");
+  const holds = changed.rows.filter(row => row.step === "review.semantic_incomplete");
+  assert.deepEqual(holds.map(row => [row.head_sha, row.reason, row.review_input_digest]), [
+    [head, "downgrade-unclassified", review.reviewInputDigest(head, inputBody)],
+    [head, "downgrade-unclassified", review.reviewInputDigest(head, "changed PR body")],
+  ]);
+});
+
+test("W1-T13849 criterion 3: each shadow input holds once independently of production", async (t) => {
+  const { drive } = reviewFixture(t, W1_T12176);
+  const transcript = `REVIEW_VERDICT 1: FAIL ${W1_T12176_CLAUSE}`;
+  const first = await drive(transcript, { shadow: true });
+  assert.equal(first.verdict.verdictWithheld, "downgrade-unclassified");
+  const second = await drive(transcript, { shadow: true });
+  assert.equal(second.verdict.verdictWithheld, "reviewer-health shadow: no publication");
+  assert.equal(second.verdict.state, "failure");
+  assert.equal(second.verdict.criteria[0]!.downgrade_class, "unclassified");
+  assert.equal(second.rows.filter(row => row.step === "shadow.review.semantic_incomplete").length, 1);
+  assert.equal(second.rows.some(row => row.step === "review.posted"), false);
+  assert.equal((await drive(transcript)).verdict.verdictWithheld, "downgrade-unclassified",
+    "a shadow hold never consumes the production retry");
+});
+
 test("W1-T13849 criterion 3: the withhold decision reads the prior hold, and an untagged FAIL is never met", (t) => {
   const input = {
     stage: "semantic", plan_only: false, required_semantic: false, criteria_count: 1, risk_present: true,
@@ -244,7 +298,10 @@ test("W1-T13849 criterion 4: the contract and prompt name the three classes, and
   assert.match(contract, /REVIEW_VERDICT <n>: FAIL \(a\) <the claim's own input/);
   assert.match(contract, /REVIEW_VERDICT <n>: FAIL \(c\) <the behaviour outside the claim that the change breaks, and where>/);
   assert.match(contract, /REVIEW_FOLLOW_UP <n>: <the input and the result>/);
-  assert.match(contract, /OUTSIDE what the claim states is never a FAIL/);
+  assert.deepEqual(contract.match(/^  REVIEW_VERDICT <n>: FAIL.*$/gm)?.map(line => line.match(/FAIL \(([a-z])\)/)?.[1]), ["a", "c"]);
+  assert.match(contract, /\(c\): the change breaks behaviour outside the claim/);
+  assert.match(contract, /\(b\): a counterexample on an input outside the claim that exposes no regression\s+or preservation violation/);
+  assert.match(contract, /Emit PASS if \(b\) is the only finding/);
   assert.equal(review.reviewerVerdictContract.length, 1, "the contract takes the criteria count and nothing else");
   const prompt = review.buildReviewPrompt({
     task: { id: "W1-T13849", acceptance: [W1_T12176], design: "keep the floor" },
@@ -253,7 +310,8 @@ test("W1-T13849 criterion 4: the contract and prompt name the three classes, and
   } as never);
   assert.doesNotMatch(prompt, /Additional checks may help/);
   assert.match(prompt, /violated preservation constraint is \(c\)/);
-  assert.match(prompt, /REVIEW_FOLLOW_UP/);
+  assert.match(prompt, /false on its own inputs is \(a\)/);
+  assert.match(prompt, /changes neither claimed nor existing\s+behaviour[\s\S]*?is a \(b\) REVIEW_FOLLOW_UP line/);
   const { drive, prompts } = reviewFixture(t, W1_T12176);
   await drive("REVIEW_VERDICT 1: PASS", { mount: "sonnet", ledger: "ledger-sonnet.ndjson" });
   await drive("REVIEW_VERDICT 1: PASS", { mount: "sol", ledger: "ledger-sol.ndjson" });
@@ -262,6 +320,45 @@ test("W1-T13849 criterion 4: the contract and prompt name the three classes, and
   assert.ok(prompts.length >= 2);
   assert.equal(sol, sonnet, "a Claude and a Sol reviewer receive byte-identical review text");
   assert.ok(sonnet.endsWith(review.reviewerVerdictContract(1)));
+});
+
+test("W1-T13849 criterion 5: a failing proof posts failure despite an unclassified FAIL on another criterion", async (t) => {
+  const { drive } = reviewFixture(t, W1_T12176, W1_T13709);
+  const { verdict, rows } = await drive(`REVIEW_VERDICT 1: FAIL ${W1_T12176_CLAUSE}\nREVIEW_VERDICT 2: PASS`);
+  assert.equal(verdict.verdictWithheld, undefined);
+  assert.equal(verdict.state, "failure");
+  assert.deepEqual(verdict.criteria.map(c => [c.proof_exec, c.met]), [["executed_pass", false], ["executed_fail", false]]);
+  assert.equal(rows.some(row => row.step === "review.semantic_incomplete"), false);
+  assert.equal(rows.find(row => row.step === "review.posted")?.state, "failure");
+});
+
+test("W1-T13849 criterion 5: duplicate FAIL lines retain a binding failure and separate follow-up findings", (t) => {
+  const edge = `REVIEW_VERDICT 1: FAIL (b) ${W1_T12176_CLAUSE}`;
+  const bare = "REVIEW_VERDICT 1: FAIL";
+  const explained = `REVIEW_VERDICT 1: FAIL ${W1_T12176_CLAUSE}`;
+  const finding = `REVIEW_FOLLOW_UP 1: ${W1_T12176_CLAUSE}`;
+  for (const [criterion, tag, clause] of [[W1_T13785, "a", W1_T13785_CLAUSE], [W1_T13709, "c", W1_T13709_CLAUSE]] as const) {
+    const binding = `REVIEW_VERDICT 1: FAIL (${tag}) ${clause}`;
+    for (const weaker of [edge, bare, explained]) {
+      for (const lines of [[binding, weaker], [weaker, binding]]) {
+        const transcript = [...lines, finding].join("\n");
+        const verdict = judged(t, criterion, transcript, { exec: "pass" });
+        assert.equal(verdict.state, "failure");
+        assert.equal(verdict.criteria[0]!.downgrade_class, tag);
+        assert.ok(verdict.criteria[0]!.reason.endsWith(clause));
+        assert.deepEqual(review.reviewFollowUps(verdict.criteria, transcript),
+          [{ criterion: 1, clause: W1_T12176_CLAUSE, source: "follow-up-line" }]);
+      }
+    }
+  }
+  for (const unclassified of [bare, explained]) {
+    for (const lines of [[unclassified, edge], [edge, unclassified]]) {
+      const transcript = lines.join("\n");
+      const verdict = judged(t, W1_T12176, transcript, { exec: "pass" });
+      assert.equal(verdict.state, "failure");
+      assert.equal(verdict.criteria[0]!.downgrade_class, "unclassified");
+    }
+  }
 });
 
 test("W1-T13849 criterion 5: the gate only narrows — failed proofs, failed floors, (c) and plan-only verdicts stand", async (t) => {

@@ -39,19 +39,20 @@ test("W1-T2930: the contract asks for a reason rather than a fixed category", ()
 
   // It must now ASK for this criterion's own reason, and say where that text ends up — a reviewer
   // told only "add a reason" writes a category; one told an operator will read it writes evidence.
-  assert.match(contract, /REVIEW_VERDICT <n>: FAIL\s+<why THIS proof did not substantiate THIS claim>/);
+  assert.match(contract, /REVIEW_VERDICT <n>: FAIL \(a\) <the claim's own input and what the change does with it>/);
+  assert.match(contract, /REVIEW_VERDICT <n>: FAIL \(c\) <the behaviour outside the claim that the change breaks, and where>/);
   assert.match(contract, /recorded verbatim/, "the contract must say the text is recorded, not advisory chatter");
   assert.match(contract, /ONLY thing an author or operator ever sees/, "and that it is the sole channel");
 
   // The lane's own invariants must survive the rewording, or this trades one silent failure for another.
-  assert.match(contract, /only DOWNGRADE a criterion to failure, never rescue an unpasted proof/);
+  assert.match(contract, /may downgrade a criterion and can never rescue a failed floor/);
   assert.match(contract, /PASS lines are never annotated/, "a PASS line must still never gain a clause");
 });
 
 test("W1-T2930: a written reason reaches the recorded row", () => {
-  // The shape the rewritten contract now asks for: a bare trailing reason, no parentheses required.
+  // The writer emits the class followed by the specific proof gap.
   const transcript = [
-    "REVIEW_VERDICT 1: FAIL   ran the named test; it passes but asserts only that the file parses",
+    "REVIEW_VERDICT 1: FAIL (a) ran the named test; it passes but asserts only that the file parses",
     "REVIEW_VERDICT 2: PASS",
   ].join("\n");
 

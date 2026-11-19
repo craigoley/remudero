@@ -92,10 +92,11 @@ test("the existing stability rule still suppresses semantic noise on the same kn
   assert.equal(r.rows.some(row => row.step === "review.downgrade_suppressed"), true);
 });
 
-test("a bare semantic failure retains the existing mechanical-proof rule", async t => {
+test("a bare semantic failure asks again before publishing a verdict on a passing proof", async t => {
   const r = await fixture(t, "REVIEW_VERDICT 1: FAIL");
-  assert.equal(r.verdict.state, "success");
-  assert.ok(r.verdict.criteria[0]?.reason.includes("FAIL line named no reason"));
+  assert.equal(r.verdict.verdictWithheld, "downgrade-unclassified");
+  assert.equal(r.rows.find(row => row.step === "review.semantic_incomplete")?.fields.reason, "downgrade-unclassified");
+  assert.equal(r.rows.some(row => row.step === "review.posted"), false);
 });
 
 test("a semantic pass does not add a failure clause", async t => {

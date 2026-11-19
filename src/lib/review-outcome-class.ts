@@ -29,8 +29,7 @@ export function unclassifiedDowngrades(semantic: readonly (boolean | undefined)[
   clauses: readonly (string | undefined)[] | undefined,
   proofs: ReadonlyArray<Pick<CriterionVerdict, "proof_exec" | "floorMet">> | undefined): number[] {
   return (proofs ?? []).flatMap((proof, i) => semantic?.[i] === false && proof.floorMet === true &&
-    proof.proof_exec === "executed_pass" && clauses?.[i] !== undefined &&
-    classifyDowngrade(clauses[i]).class === "unclassified" ? [i + 1] : []);
+    proof.proof_exec === "executed_pass" && classifyDowngrade(clauses?.[i]).class === "unclassified" ? [i + 1] : []);
 }
 export interface ReviewOutcomeDecision { class: ReviewOutcomeClass; reason: string }
 
