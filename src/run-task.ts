@@ -183,6 +183,7 @@ import { GARDEN_PLAN_FLAG, GARDEN_REPO_FLAG, issueRevalidationPolicyForTarget, r
 import { approveInChild, productionStuckStatePorts, readApproveRelease, runStuckStateGardener } from "./lib/stuck-state-gardener.js";
 import { inboxGardenerMode, inboxRetirementContext } from "./lib/inbox-retirement.js";
 import { createHandWorktree, defaultHandWorktreeParent, renderHandWorktree } from "./lib/hand-worktree.js";
+import { handShipEffects, runHandShip } from "./lib/hand-ship.js";
 import { addCowWorktree, linkDonorNodeModules, mainWorktreeOf, renderCowWorktree } from "./lib/cow-worktree.js";
 import { judgeFixProgress, resolveFixProgress,
   type FixProgressJudge, type FixProgressVerdict, reviewerProofFailures } from "./lib/fix-progress-judge.js";
@@ -44049,9 +44050,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "hand-worktree",
-    syntax: "rmd hand-worktree <taskId|unfiled> [--parent <abs dir>]",
-    summary: "Create a hand build's run-<taskId>-<epochMs> worktree from origin/main with linked node_modules.",
-    detail: "W1-T5533: the worktree a HAND build works in, made by one command instead of retyped. Refuses before adding a worktree when the task id is malformed, --parent is relative or missing, the target filesystem has under 2 GiB free, origin is unreachable, origin already has a run-<taskId>-* branch, or origin/main already carries a `Remudero-Task: <taskId>` trailer (`unfiled` skips the two duplicate checks). Then runs `git worktree add --no-track -b run-<taskId>-<epochMs> <parent>/<branch> origin/main` — no upstream, an ABSOLUTE path (--parent wins; otherwise defaults to /mnt/scratch/hand when /mnt/scratch is a directory, creating hand if needed, or beside the checkout when scratch is absent; avoids the janitor sweep root /mnt/scratch/worktrees) — and HARD-LINKS (`cp -al`, never a symlink, so a later `npm ci` cannot empty the donor) node_modules from the first sibling worktree on the same filesystem whose package-lock.json is byte-identical, whose node_modules/.bin is non-empty and whose top-level `npm ls` passes. When none qualifies it prints `npm ci` as the next step with each candidate's reason and the free space, and does not run it. Prints the chosen parent and why, the path and branch; exits 0 created, 1 refused, 2 bad usage.",
+    syntax: "rmd hand-worktree <taskId|unfiled> [--parent <abs dir>] | rmd hand-worktree ship (--title <title> --body-file <path> | stop <run-id>)",
+    summary: "Create a worktree or preflight and ship a hand-built branch.",
+    detail: "W1-T5533: the worktree a HAND build works in, made by one command instead of retyped. Refuses before adding a worktree when the task id is malformed, --parent is relative or missing, the target filesystem has under 2 GiB free, origin is unreachable, origin already has a run-<taskId>-* branch, or origin/main already carries a `Remudero-Task: <taskId>` trailer (`unfiled` skips the two duplicate checks). Then runs `git worktree add --no-track -b run-<taskId>-<epochMs> <parent>/<branch> origin/main` — no upstream, an ABSOLUTE path (--parent wins; otherwise defaults to /mnt/scratch/hand when /mnt/scratch is a directory, creating hand if needed, or beside the checkout when scratch is absent; avoids the janitor sweep root /mnt/scratch/worktrees) — and HARD-LINKS (`cp -al`, never a symlink, so a later `npm ci` cannot empty the donor) node_modules from the first sibling worktree on the same filesystem whose package-lock.json is byte-identical, whose node_modules/.bin is non-empty and whose top-level `npm ls` passes. When none qualifies it prints `npm ci` as the next step with each candidate's reason and the free space, and does not run it. Prints the chosen parent and why, the path and branch; exits 0 created, 1 refused, 2 bad usage. W1-T12169: run `ship` from the committed branch's worktree. Put a JSON array in the instance state directory's hand-ship-hosts.json. Each entry has name, target (local or SSH), and kind (mac or linux). An SSH host needs an absolute checkout path to a dependency donor. Optional absolute pathPrefix prepends to PATH. Runs queue in the instance state directory. The command prints the run id, selected host and reading, and receipt decision. Keep the PR body file outside the worktree and supply an Acceptance: block when updating a PR. Use `ship stop` with the printed id to cancel a run from another session.",
   },
   {
     name: "worktree",
@@ -45493,7 +45494,14 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["migration-preview", (rest) => withGhTransportFloorMode("enforce", () => previewPlanTaskMigration(rest))],
   ["move-task", (rest) => withGhTransportFloorMode("enforce", () => movePlanTask(rest, { ledger: (row) => appendLedger(ledgerPathFor(loadConfig()), row) }))],
   ["plan-destination", (rest) => planDestinationCommand(rest)],
-  ["hand-worktree", (rest) => handWorktreeCommand(rest)],
+  [
+    "hand-worktree",
+    (rest) => rest[0] === "ship"
+      ? withGhTransportFloorMode("wait", () => runHandShip(rest.slice(1), {
+        cwd: process.cwd(), stateDir: () => join(loadConfig().root, "state"),
+      }, handShipEffects((file) => checkAcceptanceCommand([file]))))
+      : handWorktreeCommand(rest),
+  ],
   ["worktree", (rest) => worktreeCommand(rest)],
   ["pr-checks", (rest) => reportPrChecks(rest)],
   [

@@ -1,0 +1,419 @@
+import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
+import { test, type TestContext } from "node:test";
+// @ts-expect-error The installed author entrypoint has no declaration file.
+import { authorPushEligibility } from "#scripts/preflight-author.mjs";
+import { handShipEffects, runHandShip, type HandShipEffects, type ShipReceipt } from "#src/lib/hand-ship.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { HANDLERS } from "#src/run-task.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+
+const head = "1".repeat(40);
+const main = "2".repeat(40);
+const branch = "run-unfiled-123";
+const file = "test/ci/example.test.ts";
+const mac = { name: "mac", target: "mac.example", kind: "mac", checkout: "/donor" };
+const linux = { name: "azure", target: "local", kind: "linux" } as const;
+
+function receipt(): ShipReceipt {
+  return {
+    headSha: head, baseSha: main, verdict: "passed",
+    steps: ["census-precheck", "static-preflight", "affected-tests"].map((name) => ({ name, ok: true })),
+  };
+}
+
+function redReceipt(titles: string[]): ShipReceipt {
+  const result = receipt();
+  result.verdict = "failed";
+  result.steps[2] = {
+    name: "affected-tests", ok: false, judge: { given: 1, reported: 1 },
+    diagnostics: { mayBeIncomplete: false }, testSummary: { pass: 1, fail: titles.length, cancelled: 0 },
+  };
+  result.failureAttribution = { tests: titles.map((title) => ({ file, title })) };
+  return result;
+}
+
+function fixture(t: TestContext) {
+  const root = mkdtempSync(join(tmpdir(), "rmd-hand-ship-test-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const body = join(root, "body.md");
+  writeFileSync(body, "Acceptance:\n- Example | grep: example in example.ts\n");
+  writeFileSync(join(root, "hand-ship-hosts.json"), JSON.stringify([mac, linux]));
+  const options = { stateDir: root, cwd: root, write: (line: string) => lines.push(line) };
+  const args = ["--title", "fix(example): ship the change", "--body-file", body];
+  const lines: string[] = [];
+  const calls: string[] = [];
+  const workspace: Awaited<ReturnType<HandShipEffects["prepare"]>> = {
+    preflight: async (priority) => { calls.push(`priority ${priority}`); return receipt(); },
+    rerun: async (tree, target) => { calls.push(`${tree} ${target}`); return []; },
+    close: async () => { calls.push("close"); },
+  };
+  const effects: HandShipEffects = {
+    readHost: async (host) => host.kind === "mac" ? "1\n" : "MemAvailable: 2048000 kB\n",
+    readSource: async () => ({ root, branch, head, origin: "https://github.com/example/repo.git" }),
+    prepare: async (host) => { calls.push(`prepare ${host.name}`); return workspace; },
+    push: async (source) => { calls.push(`push ${source.head}`); },
+    findPull: async () => undefined,
+    publish: async () => { calls.push("publish"); return { url: "https://example.com/pull/1", body: readFileSync(body, "utf8") }; },
+    checkBody: (stored) => { assert.equal(stored, readFileSync(body, "utf8")); calls.push("check stored body"); },
+  };
+  return { root, body, options, args, calls, lines, effects, workspace };
+}
+
+test("W1-T12169 criterion 1 chooses a measured normal Mac and skips unreadable hosts", async (t) => {
+  const f = fixture(t);
+  assert.equal(await runHandShip(f.args, f.options, f.effects), 0);
+  assert.match(f.lines.join("\n"), /mac.*normal.*1/);
+  f.effects.readHost = async (host) => {
+    if (host.kind === "mac") throw new Error("SSH reading timed out");
+    return "MemAvailable: 2048000 kB\n";
+  };
+  assert.equal(await runHandShip(f.args, f.options, f.effects), 0);
+  assert.match(f.lines.join("\n"), /mac: reading unavailable.*timed out/);
+  assert.match(f.lines.join("\n"), /azure.*2048000 kB/);
+  f.effects.readHost = async () => "broken";
+  const preparations = f.calls.filter((call) => call.startsWith("prepare"));
+  assert.equal(await runHandShip(f.args, f.options, f.effects), 1);
+  assert.deepEqual(f.calls.filter((call) => call.startsWith("prepare")), preparations);
+});
+
+test("W1-T12169 criterion 2 asks the Mac launcher for low priority", async (t) => {
+  const f = fixture(t);
+  assert.equal(await runHandShip(f.args, f.options, f.effects), 0);
+  assert.ok(f.calls.includes("priority low"));
+  f.effects.readHost = async (host) => host.kind === "mac" ? "2" : "MemAvailable: 2048000 kB\n";
+  assert.equal(await runHandShip(f.args, f.options, f.effects), 0);
+  assert.ok(f.calls.includes("priority normal"));
+});
+
+test("W1-T12169 criterion 3 compares isolated head failures with unchanged main on the same host", async (t) => {
+  const f = fixture(t);
+  f.workspace.preflight = async () => redReceipt(["flake", "existing red", "regression"]);
+  f.workspace.rerun = async (tree, target, sha) => {
+    f.calls.push(`${tree} ${target} ${sha}`);
+    return tree === "head" ? ["existing red", "regression"] : ["existing red"];
+  };
+  assert.equal(await runHandShip(f.args, f.options, f.effects), 1);
+  assert.deepEqual(f.calls, [`prepare mac`, `head ${file} ${head}`, `main ${file} ${main}`, "close"]);
+  assert.match(f.lines.join("\n"), /caused by the host.*flake/);
+  assert.match(f.lines.join("\n"), /also failing on main.*existing red/);
+  assert.match(f.lines.join("\n"), /caused by the change.*regression/);
+});
+
+test("W1-T12169 criterion 4 gives the installed receipt judge complete comparisons before push", async (t) => {
+  const f = fixture(t);
+  const original = redReceipt(["existing one", "existing two"]);
+  assert.equal(authorPushEligibility(original).pushEligible, false);
+  f.workspace.preflight = async () => original;
+  f.workspace.rerun = async () => ["existing one", "existing two"];
+  assert.equal(await runHandShip(f.args, f.options, f.effects), 0);
+  assert.match(f.lines.join("\n"), /also failing on main.*existing one/);
+  assert.match(f.lines.join("\n"), /also failing on main.*existing two/);
+  assert.deepEqual(f.calls.slice(-3), [`push ${head}`, "publish", "check stored body"]);
+
+  f.calls.length = 0;
+  f.workspace.rerun = async (tree) => tree === "head" ? ["existing one", "existing two"] : ["existing one"];
+  assert.equal(await runHandShip(f.args, f.options, f.effects), 1);
+  assert.ok(!f.calls.some((call) => call.startsWith("push")));
+
+  const staticRed = receipt();
+  staticRed.verdict = "failed";
+  staticRed.steps[1] = { name: "static-preflight", ok: false, failedCheck: "typecheck" };
+  f.workspace.preflight = async () => staticRed;
+  f.workspace.rerun = async () => assert.fail("static failures must not run tests again");
+  assert.equal(await runHandShip(f.args, f.options, f.effects), 1);
+  assert.match(f.lines.join("\n"), /caused by the change.*typecheck/);
+  assert.ok(!f.calls.some((call) => call.startsWith("push")));
+});
+
+test("W1-T12169 criterion 5 stops the active run by its id and lets the next queued run proceed", async (t) => {
+  const f = fixture(t);
+  let started!: () => void;
+  const entered = new Promise<void>((resolve) => { started = resolve; });
+  let resolveStopped!: () => void;
+  const stopped = new Promise<void>((resolve) => { resolveStopped = resolve; });
+  let launches = 0;
+  f.effects.prepare = async (_host, _source, { signal }) => ({
+    ...f.workspace,
+    preflight: async () => {
+      if (++launches === 1) {
+        started();
+        signal.addEventListener("abort", resolveStopped, { once: true });
+        await stopped;
+        signal.throwIfAborted();
+      }
+      return receipt();
+    },
+  });
+  const first = runHandShip(f.args, f.options, f.effects);
+  await entered;
+  const state = join(f.root, "hand-ship");
+  const id = readdirSync(state).find((name) => /^rmd-ship-/.test(name))!;
+  const second = runHandShip(f.args, f.options, f.effects);
+  await delay(50);
+  assert.equal(launches, 1);
+  assert.equal(await runHandShip(["stop", "../invalid"], f.options, f.effects), 2);
+  assert.equal(await runHandShip(["stop", id], f.options, f.effects), 0);
+  assert.equal(await first, 1);
+  assert.equal(await second, 0);
+  assert.equal(await runHandShip(["stop", id], f.options, f.effects), 1);
+  assert.equal(JSON.parse(readFileSync(join(state, id, "status.json"), "utf8")).status, "stopped");
+  assert.equal(launches, 2);
+  assert.equal(f.calls.filter((call) => call === `push ${head}`).length, 1);
+});
+
+test("the registered command handles bad usage before configuration and refuses unknown runs or malformed hosts", async (t) => {
+  const f = fixture(t);
+  const handler = HANDLERS.get("hand-worktree")!;
+  assert.equal(await handler(["ship", "--unexpected"]), 2);
+  assert.equal(await handler(["--unexpected"]), 2);
+  assert.equal(await runHandShip([], f.options, f.effects), 2);
+  assert.equal(await runHandShip(["stop", "rmd-ship-1234567890123-abcdef"], f.options, f.effects), 1);
+  writeFileSync(join(f.root, "hand-ship-hosts.json"), JSON.stringify([{ ...mac, target: "-oInvalid" }]));
+  await assert.rejects(runHandShip(f.args, f.options, f.effects), /expected hosts with name, target/);
+});
+
+test("a partial failing-test list cannot be turned into eligible evidence", async (t) => {
+  const f = fixture(t);
+  const partial = redReceipt(["one red", "unnamed red"]);
+  partial.failureAttribution!.tests!.pop();
+  f.workspace.preflight = async () => partial;
+  f.workspace.rerun = async () => assert.fail("there is no complete list of failing tests to rerun");
+  assert.equal(await runHandShip(f.args, f.options, f.effects), 1);
+  assert.match(f.lines.join("\n"), /did not completely name its failures/);
+  assert.ok(!f.calls.some((call) => call.startsWith("push")));
+});
+
+test("an amendment reuses the open PR and requires its own acceptance block before pushing", async (t) => {
+  const f = fixture(t);
+  f.effects.findPull = async () => 42;
+  f.effects.publish = async (_source, _title, body, existing) => {
+    assert.equal(existing, 42);
+    return { url: "https://example.com/pull/42", body };
+  };
+  assert.equal(await runHandShip(f.args, f.options, f.effects), 0);
+  writeFileSync(f.body, "An amendment without an acceptance block.\n");
+  f.calls.length = 0;
+  assert.equal(await runHandShip(f.args, f.options, f.effects), 1);
+  assert.match(f.lines.join("\n"), /amendment pull request requires a valid Acceptance:/);
+  assert.ok(!f.calls.some((call) => call.startsWith("push")));
+});
+
+test("one occurrence on main cannot account for two failures with the same title", async (t) => {
+  const f = fixture(t);
+  f.workspace.preflight = async () => redReceipt(["duplicate", "duplicate"]);
+  f.workspace.rerun = async (tree) => tree === "head" ? ["duplicate", "duplicate"] : ["duplicate"];
+  assert.equal(await runHandShip(f.args, f.options, f.effects), 1);
+  assert.match(f.lines.join("\n"), /also failing on main.*duplicate/);
+  assert.match(f.lines.join("\n"), /caused by the change.*duplicate/);
+  assert.ok(!f.calls.some((call) => call.startsWith("push")));
+});
+
+function handCheckout(t: TestContext, withTest = false) {
+  const repo = gitRepo({ scope: t });
+  repo.addRemote("origin", "https://github.com/example/repo.git");
+  writeFileSync(join(repo.dir, "package-lock.json"), "{}\n");
+  writeFileSync(join(repo.dir, ".gitignore"), "node_modules\ncoverage/\n");
+  mkdirSync(join(repo.dir, "node_modules"));
+  if (withTest) {
+    mkdirSync(dirname(join(repo.dir, file)), { recursive: true });
+    writeFileSync(join(repo.dir, file), "");
+    repo.git("add", file);
+  }
+  repo.git("add", "package-lock.json", ".gitignore");
+  repo.git("commit", "-m", "base with dependency donor");
+  const base = repo.git("rev-parse", "HEAD");
+  repo.git("switch", "-c", branch);
+  repo.git("commit", "--allow-empty", "-m", "hand branch");
+  return { repo, base };
+}
+
+test("the local launcher reads Git, opens the committed bundle and cuts unchanged main", async (t) => {
+  const f = fixture(t);
+  const { repo, base } = handCheckout(t);
+  const run = { dir: f.root, signal: new AbortController().signal, log: f.options.write };
+  const defaults = handShipEffects(() => 0);
+  const source = await defaults.readSource(repo.dir, run);
+  assert.equal(source.branch, branch);
+  assert.equal(source.head, repo.git("rev-parse", "HEAD"));
+  if (process.platform === "linux") assert.match(await defaults.readHost(linux, run), /^MemAvailable:/m);
+  const workspace = await defaults.prepare(linux, source, run);
+  try {
+    assert.ok(existsSync(join(f.root, "head.bundle")));
+    assert.deepEqual(await workspace.rerun("main", file, base), []);
+    await assert.rejects(workspace.rerun("head", file, base), /head changed before the isolated rerun/);
+    await assert.rejects(workspace.rerun("head", file, source.head), /head test .* failed/);
+  } finally {
+    await workspace.close();
+  }
+  assert.equal(existsSync(join(f.root, "head.bundle")), false);
+  assert.equal(repo.git("status", "--porcelain"), "");
+  assert.equal(repo.git("branch", "--show-current"), branch);
+});
+
+test("the launcher passes the frozen head to preflight under nice and reads complete TAP from each checkout", async (t) => {
+  const f = fixture(t);
+  const { repo, base } = handCheckout(t, true);
+  const defaults = handShipEffects(() => 0);
+  const spawned: string[][] = [];
+  let receiptBound = true;
+  const run: Parameters<HandShipEffects["readSource"]>[1] = {
+    dir: f.root, signal: new AbortController().signal, log: f.options.write,
+    spawn(command, args, options) {
+      if (command !== "/usr/bin/nice") return spawn(command, args, options);
+      spawned.push(args);
+      const cwd = String(options.cwd);
+      if (args.includes("scripts/preflight-author.mjs")) {
+        mkdirSync(join(cwd, "coverage"), { recursive: true });
+        writeFileSync(join(cwd, "coverage/preflight-author.json"), JSON.stringify({ ...redReceipt(["existing red"]),
+          headSha: repo.git("rev-parse", "HEAD"), baseSha: base, version: 1, dryRun: false,
+          publicationIdentity: { state: "passed", headRef: receiptBound ? branch : "different-branch" } }));
+        return spawn(process.execPath, ["-e", "process.stdout.write('preflight output'); process.exitCode = 1"], options);
+      }
+      const tap = `not ok 1 - existing red\n  ---\n  location: '${join(cwd, file)}:1:1'\n  ...\n` +
+        "# tests 1\n# suites 0\n# pass 0\n# fail 1\n# cancelled 0\n# skipped 0\n# todo 0\n";
+      return spawn(process.execPath, ["-e", "process.stdout.write(process.argv[1]); process.exitCode = 1", tap], options);
+    },
+  };
+  const source = await defaults.readSource(repo.dir, run);
+  const workspace = await defaults.prepare(linux, source, run);
+  try {
+    const observed = await workspace.preflight("low");
+    assert.equal(observed.headSha, source.head);
+    assert.equal(observed.baseSha, base);
+    assert.deepEqual(spawned[0], ["-n", "10", "node", "--import", "tsx", "scripts/preflight-author.mjs",
+      "--head-ref", branch, "--head-sha", source.head]);
+    assert.deepEqual(await workspace.rerun("head", file, source.head), ["existing red"]);
+    assert.deepEqual(await workspace.rerun("main", file, base), ["existing red"]);
+    assert.ok(spawned.slice(1).every((args) => args.includes("--test-concurrency=1") && args.at(-1) === file));
+    receiptBound = false;
+    await assert.rejects(workspace.preflight("low"), /did not issue a receipt for this branch/);
+    const log = join(f.root, "commands.log");
+    assert.match(readFileSync(log, "utf8"), /not ok 1 - existing red/);
+    rmSync(log);
+    mkdirSync(log);
+    await assert.rejects(workspace.preflight("low"), /EISDIR/);
+  } finally {
+    await workspace.close();
+  }
+});
+
+test("the SSH launcher uploads the bundle and removes its private checkout after the comparison", async (t) => {
+  const f = fixture(t);
+  const { repo, base } = handCheckout(t);
+  const defaults = handShipEffects(() => 0);
+  const calls: string[] = [];
+  const run: Parameters<HandShipEffects["readSource"]>[1] = {
+    dir: f.root, signal: new AbortController().signal, log: f.options.write,
+    spawn(command, args, options) {
+      if (command !== "ssh") return spawn(command, args, options);
+      const remote = args.at(-1)!;
+      calls.push(remote);
+      return spawn("bash", ["-c", remote], options);
+    },
+  };
+  const source = await defaults.readSource(repo.dir, run);
+  const workspace = await defaults.prepare({ ...linux, target: "test-ssh", checkout: repo.dir, pathPrefix: "/operator/bin" }, source, run);
+  try {
+    assert.deepEqual(await workspace.rerun("main", file, base), []);
+  } finally {
+    await workspace.close();
+  }
+  assert.ok(calls.some((command) => command.includes("cat >") && command.includes("head.bundle")));
+  assert.ok(calls.some((command) => command.includes('PATH="$1:$PATH"') && command.includes("/operator/bin")));
+  const scratch = /\/tmp\/rmd-hand-ship\.[A-Za-z0-9]{8}/.exec(calls.at(-1)!)?.[0];
+  assert.ok(scratch);
+  assert.equal(existsSync(scratch), false);
+  await assert.rejects(defaults.prepare(linux, { ...source, head: "0".repeat(40) }, run), /git checkout failed/);
+  assert.equal(existsSync(join(f.root, "head.bundle")), false);
+});
+
+test("cancellation reaches both a local child and the SSH supervisor", async (t) => {
+  const f = fixture(t);
+  const defaults = handShipEffects(() => 0);
+  for (const target of ["local", "test-ssh"]) {
+    const controller = new AbortController();
+    let started!: () => void;
+    const running = new Promise<void>((resolve) => { started = resolve; });
+    const run: Parameters<HandShipEffects["readHost"]>[1] = {
+      dir: f.root, signal: controller.signal, log: f.options.write,
+      spawn(_command, args, options) {
+        const child = target === "local" ? spawn("sleep", ["60"], options) : spawn("bash", ["-c",
+          args.at(-1)!.replace("'cat' '/proc/meminfo'", "'sleep' '60'")], options);
+        child.once("spawn", started);
+        return child;
+      },
+    };
+    const reading = defaults.readHost({ ...linux, target }, run);
+    await running;
+    controller.abort(new Error("cancelled reading"));
+    await assert.rejects(reading, /cancelled reading/);
+  }
+  await assert.rejects(defaults.readHost(linux, {
+    dir: f.root, signal: new AbortController().signal, log: f.options.write,
+    spawn(_file, _args, options) { return spawn(join(f.root, "missing-binary"), [], options); },
+  }), /ENOENT/);
+  const exited = new AbortController();
+  await assert.rejects(defaults.readHost(linux, {
+    dir: f.root, signal: exited.signal, log: f.options.write,
+    spawn(_file, _args, options) {
+      const child = spawn(process.execPath, ["-e", "process.exit(0)"], options);
+      child.once("exit", () => exited.abort(new Error("process ended during cancellation")));
+      return child;
+    },
+  }), /process ended during cancellation/);
+  await assert.rejects(defaults.readHost({ ...linux, target: "test-ssh" }, {
+    dir: f.root, signal: new AbortController().signal, log: f.options.write,
+    spawn(_file, _args, options) {
+      const child = spawn("bash", ["-c", "read -r _"], options);
+      child.once("spawn", () => child.stdin!.emit("error", Object.assign(new Error("SSH control pipe failed"), { code: "EIO" })));
+      return child;
+    },
+  }), /SSH control pipe failed/);
+});
+
+test("the source publisher sends one non-forced refspec pinned to the receipt head and refuses drift", async (t) => {
+  const f = fixture(t);
+  const { repo } = handCheckout(t);
+  repo.git("config", "--local", "core.hooksPath", "");
+  const requests: string[][] = [];
+  const defaults = handShipEffects(() => 0, undefined, async (_cwd, args) => { requests.push([...args]); return ""; });
+  const run = { dir: f.root, signal: new AbortController().signal, log: f.options.write };
+  const source = await defaults.readSource(repo.dir, run);
+  await withLiveWritesAllowed(() => defaults.push(source, run));
+  assert.deepEqual(requests, [["push", "origin", `${source.head}:refs/heads/${branch}`]]);
+  repo.git("commit", "--allow-empty", "-m", "head moved after receipt");
+  await assert.rejects(defaults.push(source, run), /changed during verification/);
+  assert.equal(requests.length, 1);
+});
+
+test("the GitHub adapter creates or updates and then checks the freshly stored body", async (t) => {
+  const f = fixture(t);
+  const source = await f.effects.readSource(f.root, { dir: f.root, signal: new AbortController().signal, log: f.options.write });
+  const body = readFileSync(f.body, "utf8");
+  const pull = { number: 42, body, html_url: "https://github.com/example/repo/pull/42" };
+  const calls: { args: string[]; fresh?: true }[] = [];
+  const responses: unknown[] = [[], pull, pull, [pull], pull, pull];
+  const defaults = handShipEffects((path) => {
+    assert.equal(readFileSync(path, "utf8"), body);
+    return 0;
+  }, async (args, fresh) => {
+    calls.push({ args, fresh });
+    return responses.shift();
+  });
+  assert.equal(await defaults.findPull(source), undefined);
+  assert.equal((await defaults.publish(source, "Title", body)).url, pull.html_url);
+  assert.equal(await defaults.findPull(source), 42);
+  const stored = await defaults.publish(source, "Title", body, 42);
+  defaults.checkBody(stored.body, { dir: f.root, signal: new AbortController().signal, log: f.options.write });
+  assert.match(calls[0].args[1], /head=example%3Arun-unfiled-123/);
+  assert.deepEqual(calls[1].args.slice(0, 8), ["api", "-X", "POST", "repos/example/repo/pulls", "-f", `head=${branch}`, "-f", "base=main"]);
+  assert.deepEqual(calls[4].args.slice(0, 4), ["api", "-X", "PATCH", "repos/example/repo/pulls/42"]);
+  assert.deepEqual(calls[5], { args: ["api", "repos/example/repo/pulls/42"], fresh: true });
+  responses.push([pull, pull]);
+  await assert.rejects(defaults.findPull(source), /did not identify a unique pull request/);
+});
