@@ -7,12 +7,14 @@ import assert from "node:assert/strict";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { createBoardProjection, type Row } from "#src/lib/board-projection.js";
+import { BOARD_RUN_ACTIVITY_STEP, createBoardProjection, type Row } from "#src/lib/board-projection.js";
 import type { Clock } from "#src/lib/clock.js";
 import { createLedgerProjector, openProjectorReadModel } from "#src/lib/ledger-projector.js";
 import type { Plan, Task } from "#src/lib/plan.js";
 import { acquireLease, type ReadModelDb, type ReadModelStatement } from "#src/lib/read-model-db.js";
-import { buildLedgerIndex, ESCALATION_SIGNAL_STEPS, latestEscalationLine, type GitHub, type LedgerIndex } from "#src/lib/status.js";
+import {
+  buildLedgerIndex, ESCALATION_SIGNAL_STEPS, latestEscalationLine, WORKER_ACTIVITY_STAND_IN_STEP, type GitHub, type LedgerIndex,
+} from "#src/lib/status.js";
 import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const T0 = Date.parse("2026-11-19T08:00:00.000Z");
@@ -88,37 +90,78 @@ function world(t: { after: (fn: () => void) => void }, rows: Row[]) {
   return { append, index, all, bodies: counted.bodies };
 }
 
-const signalsOf = (index: LedgerIndex, id: string): string[] =>
-  (index.byTask.get(id) ?? []).filter((r) => r.task_id === id && ESCALATION_SIGNAL_STEPS.includes(String(r.step))).map((r) => JSON.stringify(r));
+const ownRowsOf = (index: LedgerIndex, id: string, steps: readonly string[]): readonly Row[] =>
+  (index.byTask.get(id) ?? []).filter((r) => r.task_id === id && typeof r.step === "string" && steps.includes(r.step));
 
 test("W1-T13840 criterion 1: a store index's byTaskSteps equals the task's own rows of those steps, in ledger order, as the store grows", (t) => {
-  const w = world(t, history(T0, 3_000));
+  const id = "W1-T4";
+  const ts = at(T0 + 1_000);
+  const w = world(t, [...history(T0, 3_000),
+    { ts, step: "run.start", task_id: id, run_id: "fact" },
+    { ts, step: "worker.activity", task_id: id, run_id: "worker", event_kind: "working", served_model: "model" },
+    { ts, step: "worker.state", task_id: id, run_id: "fact" },
+  ]);
+  const mixed = [...ESCALATION_SIGNAL_STEPS, BOARD_RUN_ACTIVITY_STEP, WORKER_ACTIVITY_STAND_IN_STEP];
   for (let round = 0; round < 3; round++) {
+    if (round > 0) {
+      w.append([...history(T0 + 7_200_000 + round * 60_000, 300, 2_700 + round * 300),
+        { ts: at(T0 + round), step: "run.start", task_id: id, run_id: `late-${round}` }]);
+    }
     const index = w.index();
     assert.ok(index.byTaskSteps, "the store index answers byTaskSteps");
-    for (const id of IDS) {
-      assert.deepEqual(index.byTaskSteps.get(id, ESCALATION_SIGNAL_STEPS).map((r) => JSON.stringify(r)), signalsOf(index, id), `round ${round} ${id}`);
+    for (const steps of [ESCALATION_SIGNAL_STEPS, [BOARD_RUN_ACTIVITY_STEP], [WORKER_ACTIVITY_STAND_IN_STEP], mixed]) {
+      for (const taskId of [...IDS, id, "missing"]) {
+        assert.deepEqual(index.byTaskSteps.get(taskId, steps), ownRowsOf(index, taskId, steps), `round ${round}, ${taskId}, ${steps}`);
+      }
     }
-    // New rows, some stamped before rows already held (a late row), extend the cached step buckets.
-    w.append([...history(T0 + 7_200_000 + round * 60_000, 300, 3_000 + round * 300),
-      { ts: at(T0 + 1_000 + round), step: "run.start", task_id: "W1-T3", run_id: `late-${round}`, host: "h1" }]);
+    assert.deepEqual(ownRowsOf(index, id, mixed).map((r) => r.run_id), [
+      ...Array.from({ length: round }, (_, i) => `late-${i + 1}`), "fact", "worker", "worker",
+    ]);
   }
 });
 
+test("byTaskSteps keeps each distinct step set grouped for the lifetime of the index", (t) => {
+  const index = world(t, history(T0, 300)).index();
+  const lookup = index.byTaskSteps;
+  assert.ok(lookup);
+  const a = lookup.get("DAEMON", ESCALATION_SIGNAL_STEPS);
+  assert.ok(a.length > 0);
+  assert.ok(lookup.get("DAEMON", ["verdict"]).length > 0);
+  assert.strictEqual(lookup.get("DAEMON", ESCALATION_SIGNAL_STEPS), a, "reuses A after querying B");
+  const reordered = [...ESCALATION_SIGNAL_STEPS].reverse();
+  assert.strictEqual(lookup.get("DAEMON", [...reordered, reordered[0]!]), a, "permutations and duplicates identify the same set");
+});
+
 test("W1-T13840 criterion 2: invariant:same-escalation — latestEscalationLine over the store index equals it over an in-memory index of the same rows", (t) => {
-  const w = world(t, history(T0, 3_000));
-  w.append([{ ts: at(T0 + 9_000_000), step: "run.start", task_id: "W1-T1", run_id: "after", host: "h1" }]);
-  const store = w.index();
-  const rows = store.rows;
-  const memory = buildLedgerIndex(w.all);
-  let some = 0;
-  for (const id of IDS) {
-    const viaStore = latestEscalationLine(rows, id, store);
-    if (viaStore) some++;
-    assert.deepEqual(viaStore, latestEscalationLine(w.all, id, memory), id);
-  }
-  assert.equal(latestEscalationLine(rows, "W1-T1", store), undefined, "a run after the escalation clears it");
-  assert.ok(some >= 2, "the comparison covers open escalations, not only absent ones");
+  const openedAt = at(T0 + 2_000);
+  const issueUrl = "https://github.com/o/r/issues/1";
+  const opened = { ts: openedAt, issue_url: issueUrl, class: "MANUAL" };
+  const w = world(t, [
+    { ...opened, step: "escalation.issue_opened", task_id: "W1-T1" },
+    { ...opened, step: "primary_shadow.issue_published", task_id: "W1-T2" },
+    { ts: openedAt, step: "run.start", task_id: "W1-T2", run_id: "same-stamp" },
+    { ts: openedAt, step: "run.start", task_id: "W1-T3", run_id: "never-escalated" },
+  ]);
+  const verify = (): void => {
+    const store = w.index();
+    const memory = buildLedgerIndex(w.all);
+    const expected = {
+      "W1-T1": { issueUrl, escalationClass: "MANUAL", openedAt },
+      "W1-T2": undefined,
+      "W1-T3": undefined,
+    };
+    for (const [id, answer] of Object.entries(expected)) {
+      const stored = latestEscalationLine(store.rows, id, store);
+      assert.deepEqual(stored, answer, id);
+      assert.deepEqual(latestEscalationLine(w.all, id, memory), stored, `${id}, live-ledger order`);
+    }
+  };
+  verify();
+  w.append([
+    { ts: at(T0 + 1_000), step: "run.start", task_id: "W1-T1", run_id: "late-run" },
+    { ts: at(T0 + 1_000), step: "escalation.issue_opened", task_id: "W1-T2", issue_url: issueUrl },
+  ]);
+  verify();
 });
 
 test("W1-T13840 criterion 3: a board build reads no fact row of a long-history task's other steps for its escalation", (t) => {

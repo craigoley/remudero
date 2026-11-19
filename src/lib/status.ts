@@ -3302,8 +3302,8 @@ function deriveRunState(
 /** W1-T13840: the steps {@link latestEscalationLine} reads; every other row of a task leaves its answer unchanged. */
 export const ESCALATION_SIGNAL_STEPS: readonly string[] = ["run.start", "escalation.issue_opened", "primary_shadow.issue_published"];
 
-/** The task's most recent escalation line, IF `escalation.issue_opened` is the LATEST signal among it and a
- *  redispatch (W1-T155). DELIBERATELY DOES NOT ANSWER "is the escalation still open": the ledger is
+/** The task's most recent escalation line, if an escalation is its latest signal by timestamp, with ties
+ *  resolved in ledger order (W1-T155). DELIBERATELY DOES NOT ANSWER "is the escalation still open": the ledger is
  *  append-only, so it can say one WAS opened but never that it has since closed — that needs {@link
  *  resolveEscalation}'s live join. An absent url never suppresses the escalation, only the join. */
 export function latestEscalationLine(
@@ -3311,28 +3311,27 @@ export function latestEscalationLine(
   taskId: string,
   index?: LedgerIndex,
 ): { issueUrl?: string; escalationClass?: string; openedAt?: string } | undefined {
-  let last: "run" | "escalation" | undefined;
-  let issueUrl: string | undefined;
-  let escalationClass: string | undefined;
-  let openedAt: string | undefined;
+  let latest: Record<string, unknown> | undefined;
+  let latestMs = Number.NEGATIVE_INFINITY;
   // W1-T13840: only these steps decide the answer, so an index that can hand over just them is asked for just them
   // (core's DAEMON id names 706,926 fact rows, 358 MB, read in full on every build before this).
   const signals = index !== undefined && index.rows === lines && index.byTaskSteps !== undefined
     ? index.byTaskSteps.get(taskId, ESCALATION_SIGNAL_STEPS) : indexedTaskRows(lines, taskId, index);
   for (const line of signals) {
     if (line.task_id !== taskId) continue;
-    if (line.step === "run.start") {
-      last = "run";
-    } else if (line.step === "escalation.issue_opened" || line.step === "primary_shadow.issue_published") {
-      last = "escalation";
-      issueUrl = typeof line.issue_url === "string" ? line.issue_url : undefined;
-      escalationClass = typeof line.class === "string" ? line.class : undefined;
-      // W1-T159: the escalation's OWN ledger-line ts, so a caller measures "how long has this actually needed a
-      // human" against the escalation's real open time, never a run's `startedAt` — a DIFFERENT event.
-      openedAt = typeof line.ts === "string" ? line.ts : undefined;
-    }
+    if (typeof line.step !== "string" || !ESCALATION_SIGNAL_STEPS.includes(line.step)) continue;
+    // The fact store gives an undated row ts_ms = 0. Equal times keep the later row in ledger order.
+    const ms = typeof line.ts === "string" ? Date.parse(line.ts) || 0 : 0;
+    if (ms < latestMs) continue;
+    latest = line;
+    latestMs = ms;
   }
-  return last === "escalation" ? { issueUrl, escalationClass, openedAt } : undefined;
+  if (!latest || latest.step === "run.start") return undefined;
+  return {
+    issueUrl: typeof latest.issue_url === "string" ? latest.issue_url : undefined,
+    escalationClass: typeof latest.class === "string" ? latest.class : undefined,
+    openedAt: typeof latest.ts === "string" ? latest.ts : undefined,
+  };
 }
 
 /** {@link deriveStatus}'s escalation-derived fields, once an escalation resolves as still-relevant. */
