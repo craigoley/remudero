@@ -376,6 +376,8 @@ function recordingCrossReads(index: LedgerIndex, into: () => Set<string> | undef
   return {
     rows: index.rows,
     byTask: index.byTask,
+    // W1-T13840: no cross-task step is a signal step, so its reads record nothing.
+    ...(index.byTaskSteps ? { byTaskSteps: index.byTaskSteps } : {}),
     byStep: {
       get: (step) => {
         if (BOARD_CROSS_TASK_STEPS.has(step)) into()?.add(`${CROSS_STEP}${step}`);
@@ -1634,6 +1636,39 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       facts.sort((a, b) => a.key[0] - b.key[0] || a.key[1] - b.key[1] || a.key[2] - b.key[2]);
       return facts.map((f) => f.row);
     };
+    /** W1-T13840: one step's rows with their ts and seq, as of `upTo`: the cached bucket, or a full read. */
+    const stepEntries = (step: string): StepBucket => {
+      if (BOARD_UNREAD_STEPS.has(step)) return { rows: [], tsMs: [], seqs: [], bytes: 0 };
+      if (!cached) {
+        const own = readStep(step, upTo);
+        fullRead(own.rows.length, own.bytes);
+        return own;
+      }
+      cachedStep(step, upTo);
+      const bucket = stepCache.get(step)!;
+      if (upTo >= lastSeq) return bucket;
+      const keep = bucket.seqs.map((seq) => seq <= upTo);
+      return { rows: bucket.rows.filter((_, at) => keep[at]), tsMs: bucket.tsMs.filter((_, at) => keep[at]), seqs: bucket.seqs.filter((_, at) => keep[at]), bytes: bucket.bytes };
+    };
+    /** W1-T13840: every task's rows of one step set, grouped once per index from the step buckets, in taskBucket's order. */
+    let byTaskSteps: { key: string; tasks: Map<string, Row[]> } | undefined;
+    const taskStepRows = (id: string, wanted: readonly string[]): readonly Row[] => {
+      const key = wanted.join("\u0000");
+      if (byTaskSteps?.key !== key) {
+        const entries = new Map<string, Array<{ row: Row; tsMs: number; seq: number }>>();
+        for (const step of new Set(wanted)) {
+          const bucket = stepEntries(step);
+          bucket.rows.forEach((row, at) => {
+            if (typeof row.task_id !== "string") return;
+            (entries.get(row.task_id) ?? entries.set(row.task_id, []).get(row.task_id)!).push({ row, tsMs: bucket.tsMs[at]!, seq: bucket.seqs[at]! });
+          });
+        }
+        const tasks = new Map<string, Row[]>();
+        for (const [task, list] of entries) tasks.set(task, list.sort((a, b) => a.tsMs - b.tsMs || a.seq - b.seq).map((e) => e.row));
+        byTaskSteps = { key, tasks };
+      }
+      return byTaskSteps.tasks.get(id) ?? [];
+    };
     const planOnly = (): void => {
       const sets = cached ? cachedPlanOnly(upTo) : readPlanOnly(upTo);
       if (!cached) fullRead(sets.rows, sets.bytes);
@@ -1652,6 +1687,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
           return bucket;
         },
       },
+      byTaskSteps: { get: taskStepRows },
       get planOnlyFilingPrUrls() {
         if (!filing) planOnly();
         return filing!;

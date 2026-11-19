@@ -1283,6 +1283,9 @@ export interface LedgerIndex {
   readonly planOnlyFilingPrUrls: ReadonlySet<string>;
   /** Positive plan-only review evidence, tied to the exact PR head so a later implementation push is not refused. */
   readonly planOnlyReviewedHeads: ReadonlyMap<string, ReadonlySet<string>>;
+  /** W1-T13840: `taskId`'s rows of `steps` alone, with `task_id` equal to `taskId`, in ledger order. An index over a
+   *  store answers it from its step buckets, so a reader of a few steps never reads a task's whole history. */
+  readonly byTaskSteps?: { get(taskId: string, steps: readonly string[]): ReadonlyArray<Record<string, unknown>> };
   /** W1-T3523: the newest parseable `ts` anywhere in `rows` — {@link orphanedRunIds}'s ledger-derived
    *  "now", computed ONCE here rather than re-scanned per task (R-23's own discipline). Undefined
    *  when no row carries a parseable `ts` at all. */
@@ -3296,6 +3299,9 @@ function deriveRunState(
   return { inFlight, phase, startedAt, lastActivityTs, workerState, workerStateSince, workerTelemetry };
 }
 
+/** W1-T13840: the steps {@link latestEscalationLine} reads; every other row of a task leaves its answer unchanged. */
+export const ESCALATION_SIGNAL_STEPS: readonly string[] = ["run.start", "escalation.issue_opened", "primary_shadow.issue_published"];
+
 /** The task's most recent escalation line, IF `escalation.issue_opened` is the LATEST signal among it and a
  *  redispatch (W1-T155). DELIBERATELY DOES NOT ANSWER "is the escalation still open": the ledger is
  *  append-only, so it can say one WAS opened but never that it has since closed — that needs {@link
@@ -3309,7 +3315,11 @@ export function latestEscalationLine(
   let issueUrl: string | undefined;
   let escalationClass: string | undefined;
   let openedAt: string | undefined;
-  for (const line of indexedTaskRows(lines, taskId, index)) {
+  // W1-T13840: only these steps decide the answer, so an index that can hand over just them is asked for just them
+  // (core's DAEMON id names 706,926 fact rows, 358 MB, read in full on every build before this).
+  const signals = index !== undefined && index.rows === lines && index.byTaskSteps !== undefined
+    ? index.byTaskSteps.get(taskId, ESCALATION_SIGNAL_STEPS) : indexedTaskRows(lines, taskId, index);
+  for (const line of signals) {
     if (line.task_id !== taskId) continue;
     if (line.step === "run.start") {
       last = "run";
