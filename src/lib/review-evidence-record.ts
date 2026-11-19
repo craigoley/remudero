@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import { mergeTargetFromPrUrl } from "./arm-auto-merge.js";
 import { ghJsonAsync, ghTextAsync, type GhJsonReadOptions } from "./github-transport.js";
-import { readReviewStatusEntry, reviewCodeShaFromDescription, REVIEW_CONTEXT, REVIEWER_IDENTITY_ENV, REVIEWER_TOKEN_ENV,
+import { reviewCodeShaFromDescription, REVIEW_CONTEXT, REVIEWER_IDENTITY_ENV, REVIEWER_TOKEN_ENV,
   type CriterionVerdict, type ReviewState } from "./review.js";
 
 const MARKER = "<!-- remudero-review-evidence:v1";
@@ -36,6 +36,17 @@ const commentSchema = z.object({
   user: z.object({ login: z.string(), type: z.enum(["Bot", "User"]) }),
 });
 const commentPages = z.array(z.array(z.unknown()));
+const statusResponseSchema = z.object({
+  errors: z.never().optional(),
+  data: z.object({ repository: z.object({
+    nameWithOwner: z.string(),
+    object: z.object({ oid: z.string(), status: z.object({ context: z.object({
+      context: z.literal(REVIEW_CONTEXT), state: z.enum(["SUCCESS", "FAILURE"]),
+      createdAt: z.string(), description: z.string().nullable(),
+      creator: z.object({ login: z.string(), __typename: z.enum(["Bot", "User"]) }),
+    }) }) }),
+  }) }),
+});
 
 type ReviewEvidencePayload = z.infer<typeof payloadSchema>;
 type PostedReview = Omit<ReviewEvidencePayload, "state" | "review_input_digest" | "decision_verdict" | "unmet_criteria" | "reasons"> & {
@@ -84,7 +95,7 @@ function parseRecord(body: string): ReviewEvidencePayload | undefined {
 }
 
 export async function writeReviewEvidenceRecord(row: PostedReview, catalog?: "public" | "ops"): Promise<void> {
-  if (row.state === "pending" || row.review_input_digest === undefined) return;
+  if (row.state === "pending") return;
   const target = mergeTargetFromPrUrl(row.pr_url);
   if (!target) throw new Error("review evidence needs a GitHub pull request URL");
   const token = process.env[REVIEWER_TOKEN_ENV];
@@ -129,22 +140,23 @@ export async function readReviewEvidenceRecord(
   if (!row || row.pr_url !== expected.prUrl || row.head_sha !== expected.headSha ||
       row.review_input_digest !== expected.reviewInputDigest || row.state !== expected.reviewState) return undefined;
 
-  let statusAt = Number.NaN;
-  let statusCodeSha: string | undefined;
-  const status = await readReviewStatusEntry(target.owner, target.repo, expected.headSha, async args => {
-    const response = await fetch(args) as { sha?: unknown;
-      statuses?: Array<{ context?: string; state?: string; created_at?: string; description?: string }> };
-    if (response?.sha === expected.headSha && Array.isArray(response.statuses)) {
-      const entry = response.statuses.find(entry => entry?.context === REVIEW_CONTEXT);
-      if (entry?.state === row.state) {
-        statusAt = Date.parse(entry.created_at ?? "");
-        statusCodeSha = reviewCodeShaFromDescription(entry.description);
-      }
-    }
-    return response;
-  });
-  if (status?.state !== row.state || status.posterLogin?.toLowerCase() !== login || status.posterType !== newest.user.type ||
-      row.reviewer_code_sha !== statusCodeSha || !(Date.parse(newest.created_at) >= statusAt)) return undefined;
+  const query = `query($owner:String!,$name:String!,$sha:GitObjectID!){
+    repository(owner:$owner,name:$name){nameWithOwner object(oid:$sha){... on Commit{
+      oid status{context(name:"${REVIEW_CONTEXT}"){context state createdAt description creator{login __typename}}}
+    }}}
+  }`;
+  const response = statusResponseSchema.safeParse(await fetch(["api", "graphql", "-f", `query=${query}`,
+    "-f", `owner=${target.owner}`, "-f", `name=${target.repo}`, "-f", `sha=${expected.headSha}`]));
+  if (!response.success) return undefined;
+  const repository = response.data.data.repository;
+  if (repository.nameWithOwner.toLowerCase() !== `${target.owner}/${target.repo}`.toLowerCase() ||
+      repository.object.oid !== expected.headSha) return undefined;
+  const entry = repository.object.status.context;
+  const actor = entry.creator;
+  const posterLogin = actor.__typename === "Bot" && /^[a-z0-9-]+$/i.test(actor.login) ? `${actor.login}[bot]` : actor.login;
+  if (entry.state.toLowerCase() !== row.state || posterLogin.toLowerCase() !== login || actor.__typename !== newest.user.type ||
+      row.reviewer_code_sha !== reviewCodeShaFromDescription(entry.description ?? undefined) ||
+      !(Date.parse(newest.created_at) >= Date.parse(entry.createdAt))) return undefined;
 
   return { row: { ...row, context: REVIEW_CONTEXT, proof_exec: row.decision_verdict.criteria.map(criterion => criterion.proof_exec) },
     commentId: newest.id };
