@@ -1394,6 +1394,55 @@ components:
         error:
           type: string
           enum: [invalid_identity, invalid_input, not_found, stale_revision, idempotency_conflict, capacity, busy, corrupt, unavailable, outcome_unknown, recovery_required]
+    ProductRunnerConfigProposalCommand:
+      type: object
+      additionalProperties: false
+      description: Binds the exact head and digest an operator accepted from the preview; carries no bytes or paths.
+      required: [version, requestId, productId, expectedRevision, expectedObjectiveRevision, targetHead, configDigest]
+      properties:
+        version: { type: string, enum: [product-runner-config-proposal-v1] }
+        requestId: { type: string, pattern: '^[A-Za-z0-9_-]{16,128}$' }
+        productId: { $ref: "#/components/schemas/ProductId" }
+        expectedRevision: { $ref: "#/components/schemas/ProductRevision" }
+        expectedObjectiveRevision: { $ref: "#/components/schemas/ProductRevision" }
+        targetHead: { type: string, pattern: '^[a-f0-9]{40}$' }
+        configDigest: { type: string, pattern: '^[a-f0-9]{64}$' }
+    ProductRunnerConfigProposalReceipt:
+      type: object
+      additionalProperties: false
+      description: One add-only pull request for the runner configuration. merged counts only after an approving review and identical bytes at the merge commit.
+      required: [version, productId, state, replayed, proposal]
+      properties:
+        version: { type: string, enum: [product-runner-config-proposal-v1] }
+        productId: { $ref: "#/components/schemas/ProductId" }
+        state: { type: string, enum: [open, merged, merged_unreviewed, merged_drifted, closed_unmerged, unknown] }
+        replayed: { type: boolean }
+        proposal:
+          type: object
+          additionalProperties: false
+          required: [path, branch, targetHead, configDigest, sourceCommit, pullRequest]
+          properties:
+            path: { type: string, enum: [.remudero/mounts.yaml] }
+            branch: { type: string, minLength: 1, maxLength: 255 }
+            targetHead: { type: string, pattern: '^[a-f0-9]{40}$' }
+            configDigest: { type: string, pattern: '^[a-f0-9]{64}$' }
+            sourceCommit: { type: string, pattern: '^[a-f0-9]{40}$' }
+            pullRequest:
+              type: object
+              additionalProperties: false
+              required: [number, url]
+              properties:
+                number: { type: integer, minimum: 1 }
+                url: { type: string, format: uri }
+    ProductRunnerConfigProposalError:
+      type: object
+      additionalProperties: false
+      required: [version, error]
+      properties:
+        version: { type: string, enum: [product-runner-config-proposal-v1] }
+        error:
+          type: string
+          enum: [invalid_identity, invalid_input, request_too_large, not_found, stale_revision, idempotency_conflict, capacity, busy, corrupt, unavailable, outcome_unknown, recovery_required, repository_missing, repository_conflict, provider_unreadable, stale_preview, runner_config_present, runner_config_invalid, source_unavailable, branch_conflict]
     ProductRepositoryPreview:
       type: object
       additionalProperties: false
@@ -17416,6 +17465,83 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ProductRepositoryError" }
+  /v1/products/runner-config-proposal:
+    parameters:
+      - name: x-rmd-operator-session
+        in: header
+        required: true
+        description: >
+          Signed operator session verified by the service. Browser owner fields, actor headers and
+          shared bearers cannot substitute for it. Missing or unavailable identity fails explicitly.
+        schema: { type: string, minLength: 1 }
+      - name: x-confirm-nonce
+        in: header
+        required: true
+        description: Server-issued HIGH-tier confirmation bound to this exact method, path and body.
+        schema: { type: string, minLength: 1 }
+    post:
+      operationId: proposeProductRunnerConfig
+      summary: Propose the previewed runner configuration as one add-only pull request a human reviews.
+      description: >
+        Requires the verified operator, the write scope and the high tier with a bound confirmation.
+        The preview is recomputed immediately before acting; a moved head or different digest is
+        stale_preview and an existing path is runner_config_present. A private journal record is
+        written before the first GitHub write. It creates one branch at the exact head, adds only
+        .remudero/mounts.yaml there and opens one pull request to the default branch. A lost response
+        is reconciled by reading the branch, its one-file diff and the open pull request, never by a
+        second create; outcome_unknown is retried with the identical command. It never writes the
+        default branch, merges, approves, deletes or changes protection. Every response from the route
+        handler uses Cache-Control private, no-store; a 401, or a 403 for a missing scope, tier or
+        confirmation, is answered by the service before the handler.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProductRunnerConfigProposalCommand" }
+      responses:
+        "200":
+          description: The one pull request for this head and digest, new or replayed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductRunnerConfigProposalReceipt" }
+        "400":
+          description: Malformed command.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductRunnerConfigProposalError" }
+        "401":
+          description: No recognized service credential.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductRepositoryAccessError" }
+        "403":
+          description: No verified owner, write grant or high-tier confirmation.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ProductRunnerConfigProposalError"
+                  - $ref: "#/components/schemas/ProductRepositoryAccessError"
+        "404":
+          description: No product owned by this principal.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductRunnerConfigProposalError" }
+        "409":
+          description: Revisions, head or digest moved, the path exists or is invalid, the branch holds anything else, or the key was reused.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductRunnerConfigProposalError" }
+        "413":
+          description: Request body over the bound.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductRunnerConfigProposalError" }
+        "503":
+          description: busy, corrupt, unavailable, provider_unreadable, source_unavailable or outcome_unknown; no success is fabricated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductRunnerConfigProposalError" }
   /v1/products/runner-config-preview:
     parameters:
       - name: x-rmd-operator-session
