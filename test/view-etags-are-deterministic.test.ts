@@ -100,7 +100,11 @@ function materialize(root: string, stateDir: string, at: number, holder: string)
   assert.deepEqual(views.map((v) => v.name), READ_MODEL_VIEWS.map((v) => v.name), "the same views the worker registers");
   const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir }], views: [...views, now, createInstancesView({ instances: [{ name: "core", ledgerDir: stateDir }], repoPath: daemonInstanceRegistryPath(root), ledgerSource })], clock, holder, post: (m) => void posted.push(m) });
   try {
-    ticker.tick();
+    for (let pass = 0; pass < 12; pass++) {
+      ticker.read("/v1/views/versions");
+      ticker.tick();
+      if (posted.some((m) => m.type === "body" && m.entry.view === "now")) break;
+    }
   } finally {
     ticker.release();
   }
@@ -184,6 +188,7 @@ test("a re-materialize over unchanged content posts no new body and a real chang
       ticker.tick();
     }
   };
+  ticker.read("/v1/views/now?instance=core");
   ticker.tick();
   const first = new Map(bodies().map((b) => [b.view, b.etag]));
   assert.deepEqual([...first.keys()].sort(), ["now", "repositories"], "control: both clock-sensitive views posted a first body");

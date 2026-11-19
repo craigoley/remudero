@@ -206,6 +206,8 @@ export interface ViewBodySource {
   autoMode?(view: string): EffectiveViewMode | undefined;
   /** The current producer's required shadow qualification, independent of any warm body's provenance. */
   qualificationGeneration?(view: string): string | undefined;
+  /** A successful GET or batch item was served; counts the requested view and its read-model inputs. */
+  noteViewRead?(path: string, instance?: string): void;
 }
 
 /** `auto` serves exactly while the view's shadow readiness reads ready, and is `shadow` otherwise. */
@@ -345,6 +347,7 @@ export function buildReadModelViewRoutes(opts: ReadModelViewRoutesOptions): Rout
       }
       const { body, etag } = rendered;
       opts.onServed?.(name, body);
+      opts.readModel?.noteViewRead?.(`/v1/views/${name}${params.size ? `?${params.toString()}` : ""}`, params.get("instance") ?? undefined);
       const read: ViewReadAnswer = ifNoneMatchHits(ifNoneMatch, etag) ? { status: 304, headers: { etag, "cache-control": "no-cache" } }
         : { status: 200, headers: { "content-type": "application/json; charset=utf-8", etag, "cache-control": "no-cache" }, json: body };
       staleOf.set(read, body.stale === true);

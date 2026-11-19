@@ -66,7 +66,7 @@ export interface ViewEventsOptions {
   names: readonly string[];
   /** Views that serve their body with no switch entry (the read model's own status). */
   servedByDefault?: readonly string[];
-  readModel?: Pick<ReadModelWorkerHandle, "bodies" | "body" | "judge" | "switches" | "onBody" | "autoMode">;
+  readModel?: Pick<ReadModelWorkerHandle, "bodies" | "body" | "judge" | "switches" | "onBody" | "autoMode" | "noteViewRead">;
   clock?: Clock;
   bootId?: string;
   every?: (run: () => void, ms: number) => () => void;
@@ -89,7 +89,7 @@ export interface ViewEvents {
 interface Subscriber {
   res: ServerResponse;
   views?: ReadonlySet<string>;
-  pending: Map<string, string>;
+  pending: Map<string, { text: string; view: string; key: string }>;
   backedSince?: number;
 }
 
@@ -196,23 +196,33 @@ export function createViewEvents(opts: ViewEventsOptions): ViewEvents {
     return true;
   };
 
-  const deliver = (sub: Subscriber, key: string, text: string, now: number): void => {
+  const noteRead = (readModel: NonNullable<ViewEventsOptions["readModel"]>, view: string, key: string): void => {
+    const path = `/v1/views/${view}${key ? `?${key}` : ""}`;
+    readModel.noteViewRead?.(path, new URLSearchParams(key).get("instance") ?? undefined);
+  };
+
+  const deliver = (readModel: NonNullable<ViewEventsOptions["readModel"]>, sub: Subscriber, view: string, key: string, text: string, now: number): void => {
+    const id = `${view}\u0000${key}`;
     if (sub.pending.size === 0 && sub.res.writableLength <= highWater) {
+      noteRead(readModel, view, key);
       sub.res.write(text);
       return;
     }
-    sub.pending.set(key, text);
+    sub.pending.set(id, { text, view, key });
     sub.backedSince ??= now;
     stalled(sub, now);
   };
 
-  const flush = (sub: Subscriber): void => {
-    for (const text of sub.pending.values()) sub.res.write(text);
+  const flush = (readModel: NonNullable<ViewEventsOptions["readModel"]>, sub: Subscriber): void => {
+    for (const { text, view, key } of sub.pending.values()) {
+      noteRead(readModel, view, key);
+      sub.res.write(text);
+    }
     sub.pending.clear();
     sub.backedSince = undefined;
   };
 
-  const emit = (judged: Judged, cause: "body" | "judge", now: number): void => {
+  const emit = (readModel: NonNullable<ViewEventsOptions["readModel"]>, judged: Judged, cause: "body" | "judge", now: number): void => {
     const { entry, etag, stale, asOf, sources } = judged;
     const id = `${entry.view}\u0000${entry.key}`;
     if (emitted.get(id) === etag) return;
@@ -235,7 +245,7 @@ export function createViewEvents(opts: ViewEventsOptions): ViewEvents {
         sampleEveryMs: VIEW_EMITTED_SAMPLE_MS, unsampled: skipped,
         ...(prevRowTs ? { prevRowTs } : {}), ...(entry.buildStartedMs !== undefined ? { buildStartedAt: fixedClock(entry.buildStartedMs).iso() } : {}) });
     } else unsampled.set(id, (unsampled.get(id) ?? 0) + 1);
-    for (const sub of subs) if (!sub.views || sub.views.has(entry.view)) deliver(sub, id, text, now);
+    for (const sub of subs) if (!sub.views || sub.views.has(entry.view)) deliver(readModel, sub, entry.view, entry.key, text, now);
   };
 
   const sweep = (): void => {
@@ -244,7 +254,9 @@ export function createViewEvents(opts: ViewEventsOptions): ViewEvents {
       return;
     }
     const now = clock.now();
-    for (const judged of current(now).values()) emit(judged, "judge", now);
+    const readModel = opts.readModel;
+    if (!readModel) return;
+    for (const judged of current(now).values()) emit(readModel, judged, "judge", now);
     for (const sub of subs) stalled(sub, now);
   };
 
@@ -264,7 +276,7 @@ export function createViewEvents(opts: ViewEventsOptions): ViewEvents {
       readModel.onBody((entry) => {
         if (!served(entry.view)) return;
         const now = clock.now();
-        emit(judge(readModel, entry, now), "body", now);
+        emit(readModel, judge(readModel, entry, now), "body", now);
       }),
       every(sweep, VIEW_EVENTS_SWEEP_MS),
       every(heartbeat, VIEW_EVENTS_HEARTBEAT_MS),
@@ -305,7 +317,7 @@ export function createViewEvents(opts: ViewEventsOptions): ViewEvents {
       const now = clock.now();
       res.write(`retry: ${VIEW_EVENTS_RETRY_MS}\n\n`);
       res.write(frame("hello", { bootId, serverNow: clock.iso(), ...versions(now, views) }, `${bootId}:${seq}`));
-      res.on("drain", () => flush(sub));
+      res.on("drain", () => flush(readModel, sub));
       req.on("close", () => {
         if (!subs.delete(sub)) return;
         opts.onSubscribers?.("close", subs.size);

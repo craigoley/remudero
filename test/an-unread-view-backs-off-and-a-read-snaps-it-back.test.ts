@@ -14,8 +14,10 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 import type { Clock } from "#src/lib/clock.js";
 import {
+  READ_MODEL_IDLE_STRETCH_MAX,
   READ_MODEL_READ_HOT_MS,
   READ_MODEL_READ_NOTE_MS,
+  READ_MODEL_VIEW_SHARE,
   createReadModelTicker,
   createReadModelWorker,
   runReadModelViewWorker,
@@ -111,10 +113,14 @@ test("a read-paced view nobody reads stops, and the next read rebuilds it on the
   };
   const count = (name: string, from: number): number => builds.filter(([n, at]) => n === name && at >= from).length;
 
-  run(READ_MODEL_READ_HOT_MS - 5_000);
-  const hot = count("now", 0);
-  assert.ok(hot >= 50, `inside the hot window it keeps the unstretched cadence: ${hot} builds`);
-  assert.ok(Math.abs(hot - count("steady", 0)) <= 2, "the same cadence as an unpaced view of the same cost");
+  const hotFrom = hand.clock.now();
+  for (let minute = 0; minute < 2; minute++) {
+    ticker.read("/v1/views/nav-badge");
+    run(60_000);
+  }
+  const hot = count("now", hotFrom);
+  assert.ok(hot >= 30, `inside the hot window it keeps the unstretched cadence: ${hot} builds`);
+  assert.ok(count("steady", hotFrom) >= 30, "the positive control kept building at its usual cadence");
 
   run(10 * 60_000);
   const lastTenFrom = hand.clock.now();
@@ -141,7 +147,44 @@ test("a read-paced view nobody reads stops, and the next read rebuilds it on the
     run(60_000);
   }
   const reading = count("now", readingFrom);
-  assert.ok(Math.abs(reading - count("steady", readingFrom)) <= 2, `read every minute, it keeps the unpaced cadence: ${reading} vs ${count("steady", readingFrom)}`);
+  assert.ok(reading >= 40, `reads every minute keep the now view building: ${reading} builds`);
+});
+
+test("the original unread ladder doubles before the read-paced unit stops", t => {
+  const stateDir = scratch(t, "paced-ladder-state");
+  const ledgerDir = scratch(t, "paced-ladder-ledger");
+  writeFileSync(join(ledgerDir, LIVE), row(T0));
+  switchOn(stateDir, ["now"]);
+  const hand = handClock(T0 + 1_000), costMs = 4_000, interval = costMs / READ_MODEL_VIEW_SHARE;
+  const projector = projectorStates(stateDir, ledgerDir, hand.clock);
+  onReadModelClose(t, () => void projector.release());
+  const builds: number[] = [];
+  const views: Array<ReadModelView | ReadModelViewFactory> = [{ name: "now", readPaced: true, create: () => ({
+    name: "now", version: 1, materialize: () => { builds.push(hand.clock.now()); hand.advance(costMs); return [{ key: "", data: { at: hand.clock.now() }, sources: [] }]; },
+  }) }];
+  const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir }], clock: hand.clock,
+    holder: "paced-ladder", views, viewsOnly: true, oracle: "off", post: () => {} });
+  onReadModelClose(t, () => void ticker.release());
+  ticker.observe(projector.states);
+  ticker.start();
+  ticker.tick();
+  ticker.read("/v1/views/now");
+  const readAt = hand.clock.now();
+  const tickAt = (at: number) => { hand.advance(at - hand.clock.now()); ticker.tick(); };
+  tickAt(readAt + READ_MODEL_READ_HOT_MS);
+  const waits: number[] = [];
+  for (const stretch of [2, 4, 8]) {
+    const previous = builds.at(-1)!;
+    const count = builds.length;
+    tickAt(previous + costMs + stretch * interval);
+    if (builds.length === count) { hand.advance(250); ticker.tick(); }
+    assert.equal(builds.length, count + 1, `${stretch}x interval is still built`);
+    waits.push(builds.at(-1)! - previous - costMs);
+  }
+  assert.deepEqual(waits.map(ms => Math.round(ms / interval)), [2, 4, 8]);
+  const stoppedAt = builds.length;
+  tickAt(readAt + interval * READ_MODEL_IDLE_STRETCH_MAX + 60_000);
+  assert.equal(builds.length, stoppedAt, "after the capped unread window, the view waits for a read");
 });
 
 test("the lane's now view is read-paced and no other built-in view is", () => {

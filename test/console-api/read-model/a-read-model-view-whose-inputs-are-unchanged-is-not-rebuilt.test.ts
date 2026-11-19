@@ -220,6 +220,7 @@ test("W1-T11127 criterion 2: ledger readings, plan identity, store generations a
   f.tick();
   assert.equal(f.count(), 5, "a source snapshot can move without the ledger generation moving");
   f.switches("on");
+  f.ticker.read("/v1/views/digest?instance=core");
   f.tick(5_000);
   assert.equal(f.count(), 6);
 });

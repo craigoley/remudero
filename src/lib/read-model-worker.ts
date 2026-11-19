@@ -174,8 +174,9 @@ export const READ_MODEL_VIEW_SHARE = 0.4;
 /** BACKSTOP: sample the first would-be skip and every twentieth thereafter to detect missing inputs. */
 export const READ_MODEL_SKIP_AUDIT_EVERY = 20;
 /**
- * {@link ReadModelView.readPaced}: after this unread window, each finished build doubles the wait;
- * a read restores cost / share cadence (stale units run next tick). MEASURED 2026-10-06 20:25Z to
+ * {@link ReadModelView.readPaced}: after this hot window, each finished unread build doubles the wait;
+ * a read restores cost / share cadence (stale units run next tick). A unit with no readers stops after
+ * {@link READ_MODEL_IDLE_STRETCH_MAX} × max(measured cost, tick interval) / share. MEASURED 2026-10-06 20:25Z to
  * 10-08 18:38Z: `now@core` rebuilt 5,320 times, costing 25,605 CPU s; `now`, `needs-you`, `nav-badge`
  * and `/v1/status` were read in 20/46 hours (console: 7). Open consoles read nav-badge about every minute.
  */
@@ -1696,7 +1697,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       const age: ViewSource = {
         name: `${IDLE_VIEW_SOURCE_PREFIX}${view}${instance === undefined ? "" : `@${instance}`}`,
         kind: "read-model", asOf: entry.body.generatedAt, state: "stale", phase: "refreshing",
-        reason: "waiting for the first build after the view went idle",
+        reason: `waiting for the first build after the view went idle; last good body generated at ${entry.body.generatedAt}`,
         ...(instance === undefined ? {} : { instance }),
       };
       const sources = [...entry.body.sources, age];
@@ -1959,8 +1960,9 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   const dueUnits = (now: number): ViewUnit[] => units.filter((unit) => {
     if (!owns(unit) || !built(unit.view.name) || !demanded(unit) || unit.dueAt === Number.POSITIVE_INFINITY) return false;
     if (unit.view.readPaced && unit.costMs !== undefined && unit.startedAt === undefined) {
-      // Preserve the hot window for cheap units. The biggest stretched wait bounds the unread tail for expensive ones.
-      const unreadMs = Math.max(READ_MODEL_READ_HOT_MS, unit.costMs / READ_MODEL_VIEW_SHARE * READ_MODEL_IDLE_STRETCH_MAX);
+      // The capped exponential interval is the entire unread window, even when it is shorter than the hot window.
+      // Costs below one tick cannot be measured reliably, so use the ticker interval as their effective cost.
+      const unreadMs = Math.max(unit.costMs, tickMs) / READ_MODEL_VIEW_SHARE * READ_MODEL_IDLE_STRETCH_MAX;
       if (now - lastReadOf(unit) >= unreadMs) {
         stopUnread(unit);
         return false;
@@ -2102,7 +2104,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
           if (population && page && data?.snapshotKey === population.snapshotKey && data.section === page.section && data.page?.index === page.index) legacy = { ...legacy, qualificationGeneration: population.generation };
         }
         const shadow = body && legacy ? viewShadow() : undefined;
-        if (!body || !legacy || !shadow) {
+        if (!body || carriesIdleSource(body) || !legacy || !shadow) {
           if (request.view === INBOX_VIEW_NAME && inboxScope && request.requests > 0) viewShadow()?.observeRequests(request.view, request.requests);
           return false;
         }
@@ -3331,11 +3333,6 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
     state: () => ({ ...(at === undefined ? {} : { at }), instances, switches, ...(warm.reason ? { warmBoot: warm.reason } : {}) }),
     body: (view, key = "") => bodies.get(readModelBodyKey(view, key)),
     judge: (sources, now, body) => {
-      // The push stream re-judges bodies while subscribers are connected, even between HTTP fetches.
-      if (body) {
-        const route = `/v1/views/${body.view}`;
-        if (viewsReadBy(route, []).includes(NOW_VIEW_NAME)) noteViewRead(route, new URLSearchParams(body.key).get("instance") ?? undefined);
-      }
       const judged = judgeSources(sources, now, body);
       // W1-T13457 invariant stale-says-so: a body this run's worker has not posted was carried across a restart. Its
       // ledger sources are stale until the worker posts that key: a lease the dead serve renewed seconds ago says when
