@@ -986,6 +986,12 @@
       "grepHint": "Model evidence program: from fleet work to field trials"
     },
     {
+      "path": "docs/research/operator-macros-for-codex-sessions.md",
+      "title": "Operator macros for Codex sessions, not Codex workers",
+      "summary": "Recon for W1-T13726. Tree: `origin/main` at `eb79fd765d0ad4505aa2ebf6a29c3b1c1afed49f`. No repository file was changed.",
+      "grepHint": "Operator macros for Codex sessions, not Codex workers"
+    },
+    {
       "path": "docs/research/recon-guard-complements.md",
       "title": "Recon: the guard complements — what each gate structurally cannot see — 2026-08-11",
       "summary": "Run at origin/main `3b18d956a46e8fc6be05868146437a8e7cd6af58` (toplevel /home/user/remudero, branch",
