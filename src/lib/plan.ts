@@ -1509,12 +1509,28 @@ export function assertRunnable(
 
 export const NEW_PATH_APPROVAL_PROTOCOL = "new-path-approval-v1";
 
+/** Explicit daemon-side trust binding for the one issuer allowed to answer a path lookup. */
+export interface NewPathApprovalIssuerBinding {
+  origin: string;
+  issuerId: string;
+  epoch: number;
+  policy: string;
+  repository: string;
+  instance: string;
+  audience: string;
+}
+
 /** What a trusted issuer reports about one operator confirmation, after verifying it. */
 export interface NewPathApprovalFacts {
   protocol: string;
   ref: string;
+  issuerId: string;
+  issuerEpoch: number;
+  policy: string;
   taskId: string;
   repo: string;
+  instance: string;
+  audience: string;
   /** {@link taskIntentDigest} of the record the operator was shown. */
   intentDigest: string;
   /** The complete declared path set, in declaration order. */
@@ -1531,15 +1547,112 @@ export interface NewPathApprovalFacts {
 const verifiedNewPathApprovals = new WeakSet<object>();
 
 /**
- * Seal facts an issuer has actually verified (operator session, step-up, consumed nonce). Only that
- * verification path may call this: a raw object, copied JSON or a spread copy of sealed facts is not
- * sealed, so authority-looking data alone never admits a path.
+ * Register a response only after the configured issuer transport has authenticated it. The transport
+ * validates the explicit origin, current issuer epoch and policy before this function is reached.
+ * Raw objects, copied JSON and spread copies remain unsealed.
  */
-export function sealVerifiedNewPathApproval(facts: NewPathApprovalFacts): NewPathApprovalFacts {
+function registerTransportVerifiedNewPathApproval(
+  facts: NewPathApprovalFacts,
+  binding: NewPathApprovalIssuerBinding,
+): NewPathApprovalFacts | undefined {
+  if (facts.protocol !== NEW_PATH_APPROVAL_PROTOCOL || facts.issuerId !== binding.issuerId ||
+    facts.issuerEpoch !== binding.epoch || facts.policy !== binding.policy || facts.repo !== binding.repository ||
+    facts.instance !== binding.instance || facts.audience !== binding.audience || facts.revoked !== false) return undefined;
+  if (typeof facts.ref !== "string" || facts.ref.length < 16 || facts.ref.length > 256 ||
+    typeof facts.taskId !== "string" || typeof facts.intentDigest !== "string" || !/^[a-f0-9]{64}$/.test(facts.intentDigest) ||
+    !Array.isArray(facts.declaredPaths) || !Array.isArray(facts.approvedMissingPaths) ||
+    facts.declaredPaths.some((p) => typeof p !== "string" || !isCanonicalRepoPath(p)) ||
+    facts.approvedMissingPaths.some((p) => typeof p !== "string" || !isCanonicalRepoPath(p) || !facts.declaredPaths.includes(p)) ||
+    facts.approvedMissingPaths.length === 0 || typeof facts.operator !== "string" || !facts.operator.startsWith("operator:") ||
+    typeof facts.confirmation !== "string" || facts.confirmation.length < 16 ||
+    !Number.isFinite(facts.issuedAtMs) || !Number.isFinite(facts.expiresAtMs) || facts.expiresAtMs <= facts.issuedAtMs) return undefined;
   const sealed = Object.freeze({ ...facts, declaredPaths: Object.freeze([...facts.declaredPaths]),
     approvedMissingPaths: Object.freeze([...facts.approvedMissingPaths]) });
   verifiedNewPathApprovals.add(sealed);
   return sealed;
+}
+
+const NEW_PATH_APPROVAL_RESPONSE_MAX_BYTES = 64 * 1024;
+const NEW_PATH_APPROVAL_FETCH_TIMEOUT_MS = 5_000;
+
+export type NewPathApprovalResolution =
+  | { state: "verified"; facts: NewPathApprovalFacts }
+  | { state: "unknown"; reason: string };
+
+export function validNewPathApprovalIssuerOrigin(value: string): boolean {
+  try {
+    const url = new URL(value);
+    const loopback = url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]";
+    return (url.protocol === "https:" || (url.protocol === "http:" && loopback)) && url.origin === value &&
+      url.username === "" && url.password === "" && url.pathname === "/" && url.search === "" && url.hash === "";
+  } catch {
+    return false;
+  }
+}
+
+async function boundedIssuerResponse(response: Response, maxBytes: number): Promise<string> {
+  if (!response.body) throw new Error("issuer response body is absent");
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const next = await reader.read();
+      if (next.done) break;
+      total += next.value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel("issuer response exceeded byte bound");
+        throw new Error("issuer response exceeded byte bound");
+      }
+      chunks.push(next.value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)), total).toString("utf8");
+}
+
+/** Resolve one opaque ref from its explicitly configured HTTPS issuer; all failures stay UNKNOWN. */
+export async function resolveNewPathApprovalFacts(
+  task: Task,
+  binding: NewPathApprovalIssuerBinding,
+  token: string,
+  opts: { fetchImpl?: typeof fetch; signal?: AbortSignal; timeoutMs?: number; maxResponseBytes?: number } = {},
+): Promise<NewPathApprovalResolution> {
+  if (!task.new_path_approval_ref) return { state: "unknown", reason: "task has no new-path approval reference" };
+  if (!validNewPathApprovalIssuerOrigin(binding.origin) || token.trim() === "") {
+    return { state: "unknown", reason: "issuer binding or service credential is invalid" };
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(new Error("new-path approval issuer timed out")), opts.timeoutMs ?? NEW_PATH_APPROVAL_FETCH_TIMEOUT_MS);
+  const cancel = () => controller.abort(opts.signal?.reason ?? new Error("new-path approval resolution cancelled"));
+  opts.signal?.addEventListener("abort", cancel, { once: true });
+  try {
+    if (opts.signal?.aborted) cancel();
+    const response = await (opts.fetchImpl ?? fetch)(`${binding.origin}/v1/new-path-approval/resolve`, {
+      method: "POST", redirect: "error", signal: controller.signal,
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json", accept: "application/json" },
+      body: JSON.stringify({ ref: task.new_path_approval_ref, taskId: task.id }),
+    });
+    if (response.status !== 200 || response.redirected || new URL(response.url).origin !== binding.origin) {
+      return { state: "unknown", reason: `issuer returned ${response.status} or an unexpected response origin` };
+    }
+    const raw = await boundedIssuerResponse(response, opts.maxResponseBytes ?? NEW_PATH_APPROVAL_RESPONSE_MAX_BYTES);
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      return { state: "unknown", reason: "issuer response is not an object" };
+    }
+    const facts = registerTransportVerifiedNewPathApproval(parsed as NewPathApprovalFacts, binding);
+    if (!facts || facts.taskId !== task.id || facts.ref !== task.new_path_approval_ref) {
+      return { state: "unknown", reason: "issuer facts do not match the configured binding and requested task" };
+    }
+    return { state: "verified", facts };
+  } catch (error) {
+    return { state: "unknown", reason: `issuer transport unavailable: ${String((error as Error)?.message ?? error)}` };
+  } finally {
+    clearTimeout(timeout);
+    opts.signal?.removeEventListener("abort", cancel);
+  }
 }
 
 /**

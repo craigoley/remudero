@@ -6824,6 +6824,61 @@ export interface components {
       /** 48 hex characters; present it as the `X-Confirm-Nonce` header. */
       nonce: string;
     };
+    NewPathApprovalPreviewRequest: {
+      /** One machine-authored task draft, before its new_path_approval_ref is added. */
+      taskYaml: string;
+      approvedMissingPaths: (string)[];
+    };
+    NewPathApprovalPreview: {
+      previewId: string;
+      ref: string;
+      taskId: string;
+      title?: string;
+      repo?: string;
+      issuerId?: string;
+      epoch?: number;
+      policy?: string;
+      instance?: string;
+      audience?: string;
+      intentDigest: string;
+      declaredPaths: (string)[];
+      missingPaths: (string)[];
+      approvedMissingPaths: (string)[];
+      operator: string;
+      expiresAtMs: number;
+    };
+    NewPathApprovalConfirmRequest: {
+      previewId: string;
+    };
+    NewPathApprovalResolveRequest: {
+      ref: string;
+      taskId: string;
+    };
+    NewPathApprovalRevokeRequest: {
+      ref: string;
+    };
+    NewPathApprovalFacts: {
+      protocol: string;
+      ref: string;
+      issuerId: string;
+      issuerEpoch: number;
+      policy: string;
+      taskId: string;
+      repo: string;
+      instance: string;
+      audience: string;
+      intentDigest: string;
+      declaredPaths: (string)[];
+      approvedMissingPaths: (string)[];
+      operator: string;
+      confirmation: string;
+      issuedAtMs: number;
+      expiresAtMs: number;
+      revoked: boolean;
+    };
+    NewPathApprovalRefusal: {
+      error: "invalid_request" | "verified_operator_session_required" | "verified_step_up_confirmation_required" | "task_draft_unreadable" | "task_scope_unsupported" | "approval_subset_mismatch" | "preview_expired_or_wrong_actor" | "approval_audit_unavailable" | "approval_unknown" | "approval_expired" | "approval_audit_unknown";
+    };
     /** POST /v1/drain/feedback's body (src/lib/panel-actions.ts's `validateDrainFeedback`) -- the post-drain rundown's one-tap verdict on one task (W1-T141). */
     DrainFeedbackRequest: {
       taskId: string;
@@ -9199,6 +9254,53 @@ export interface paths {
           "401": Error;
           "403": Error;
           "404": Error;
+        };
+    };
+  };
+  "/v1/new-path-approval/preview": {
+    post: {
+      responses: {
+          "200": NewPathApprovalPreview;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "409": NewPathApprovalRefusal;
+        };
+    };
+  };
+  "/v1/new-path-approval/confirm": {
+    post: {
+      responses: {
+          "200": undefined;
+          "400": Error;
+          "401": Error;
+          "403": HighTierRefusal;
+          "409": NewPathApprovalRefusal;
+          "503": undefined;
+        };
+    };
+  };
+  "/v1/new-path-approval/resolve": {
+    post: {
+      responses: {
+          "200": NewPathApprovalFacts;
+          "400": Error;
+          "401": Error;
+          "404": undefined;
+          "410": undefined;
+          "503": undefined;
+        };
+    };
+  };
+  "/v1/new-path-approval/revoke": {
+    post: {
+      responses: {
+          "200": undefined;
+          "400": Error;
+          "401": Error;
+          "403": HighTierRefusal;
+          "404": undefined;
+          "503": undefined;
         };
     };
   };

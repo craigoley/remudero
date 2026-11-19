@@ -21,7 +21,7 @@ import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, rea
 import { createConnection } from "node:net";
 import { promises as fsPromises } from "node:fs";
 import { execFile, execFileSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Server } from "node:http";
@@ -44,6 +44,11 @@ import {
   ingestTokenProvider,
   operatorJwksUrl,
   operatorSessionIdentityProvider,
+  RAW_BODY_CACHE,
+  RawBodyTooLargeError,
+  readBoundedRawBody,
+  verifiedConfirmAction,
+  verifiedStepUpActor,
   type IdentityProvider,
   type OperatorIdentityConfig,
   type ServiceOptions,
@@ -52,6 +57,7 @@ import {
   type WriteTier,
   verifiedActor,
 } from "./service.js";
+import { isCanonicalRepoPath, loadPlanFromYaml, taskIntentDigest, validNewPathApprovalIssuerOrigin, type NewPathApprovalFacts, type NewPathApprovalIssuerBinding, type Task } from "./plan.js";
 import {
   buildIncidentEventsRoute,
   INCIDENT_INGEST_ROUTE_METHOD,
@@ -331,6 +337,8 @@ export interface ServeDeps {
    * by {@link buildServeServer}; injectable for tests. Absent: preserve existing authorization.
    */
   operatorIdentity?: OperatorIdentityConfig;
+  /** Optional explicit new-path issuer trust binding. Absent: no issuer routes or issuer work. */
+  newPathApprovalIssuer?: NewPathApprovalIssuerBinding;
   /** The key-set fetch and clock the operator provider uses — injectable so a test is hermetic. */
   operatorIdentityIo?: { fetchImpl?: typeof fetch; clock?: Clock };
   /** W1-T2562: re-resolve the CURRENT on-disk sha. Handed to {@link gateStaleCodeExit}, which
@@ -2308,6 +2316,257 @@ export function operatorIdentityConfig(
   return configured ?? operatorIdentityFromFile(file);
 }
 
+/** Unreadable config disables this opt-in issuer; it never falls back to consoleUrl or task data. */
+export function newPathApprovalIssuerConfig(read: () => Pick<Config, "serve"> = loadConfig): NewPathApprovalIssuerBinding | undefined {
+  try {
+    const binding = read().serve?.newPathApprovalIssuer;
+    return binding && validNewPathApprovalIssuerOrigin(binding.origin) && Number.isSafeInteger(binding.epoch) && binding.epoch >= 0 &&
+      binding.issuerId.trim() !== "" && binding.policy.trim() !== "" && binding.repository.trim() !== "" &&
+      binding.instance.trim() !== "" && binding.audience.trim() !== "" ? binding : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+const NEW_PATH_PREVIEW_TTL_MS = 5 * 60_000;
+const NEW_PATH_APPROVAL_TTL_MS = 30 * 60_000;
+const NEW_PATH_REQUEST_MAX_BYTES = 64 * 1024;
+
+interface NewPathApprovalPreview {
+  id: string;
+  ref: string;
+  task: Task;
+  operator: string;
+  intentDigest: string;
+  declaredPaths: readonly string[];
+  missingPaths: readonly string[];
+  approvedMissingPaths: readonly string[];
+  expiresAtMs: number;
+}
+
+function responseJson(res: import("node:http").ServerResponse, status: number, value: unknown): void {
+  const body = JSON.stringify(value);
+  res.writeHead(status, { "content-type": "application/json; charset=utf-8", "content-length": Buffer.byteLength(body), "cache-control": "no-store" });
+  res.end(body);
+}
+
+function factsDigest(facts: NewPathApprovalFacts): string {
+  return createHash("sha256").update(JSON.stringify(facts)).digest("hex");
+}
+
+/**
+ * The real opt-in issuer mounted by serve. Draft bytes are parsed here, the preview is kept in
+ * process memory and tied to the verified operator, and only a HIGH-tier dispatcher confirmation
+ * can create active state. The append-only audit is evidence; boot never restores authority from it.
+ */
+export function makeNewPathApprovalIssuerRoutes(input: {
+  binding?: NewPathApprovalIssuerBinding;
+  repository?: string;
+  instance?: string;
+  repoRoot: string;
+  stateRoot: string;
+  now?: () => number;
+}): Route[] {
+  const binding = input.binding;
+  const unavailable = (path: string): Route => ({
+    method: "POST", path, scope: "write", tier: path.endsWith("/confirm") || path.endsWith("/revoke") ? "high" : "low",
+    ...(path.endsWith("/confirm") || path.endsWith("/revoke") ? { maxBodyBytes: 4096 } : {}),
+    handler: (_req, res) => responseJson(res, 404, { error: "approval_issuer_disabled" }),
+  });
+  if (!binding || !validNewPathApprovalIssuerOrigin(binding.origin) || binding.repository !== input.repository || binding.instance !== input.instance ||
+    !Number.isSafeInteger(binding.epoch) || binding.epoch < 0 || !binding.issuerId || !binding.policy || !binding.instance || !binding.audience) {
+    // Keep the routes mounted for a stable API surface; without an explicit matching binding
+    // each is inert and performs no file, identity, or network work.
+    return [unavailable("/v1/new-path-approval/preview"), unavailable("/v1/new-path-approval/confirm"),
+      unavailable("/v1/new-path-approval/resolve"), unavailable("/v1/new-path-approval/revoke")];
+  }
+  const now = input.now ?? Date.now;
+  const auditPath = join(input.stateRoot, "state", "new-path-approval-audit.ndjson");
+  const previews = new Map<string, NewPathApprovalPreview>();
+  const active = new Map<string, NewPathApprovalFacts>();
+
+  const readObject = async (req: import("node:http").IncomingMessage, res: import("node:http").ServerResponse, maxBytes = NEW_PATH_REQUEST_MAX_BYTES): Promise<Record<string, unknown> | undefined> => {
+    try {
+      const raw = await readBoundedRawBody(req, maxBytes);
+      const value: unknown = raw.trim() ? JSON.parse(raw) : {};
+      if (typeof value !== "object" || value === null || Array.isArray(value)) {
+        responseJson(res, 400, { error: "invalid_request" });
+        return undefined;
+      }
+      return value as Record<string, unknown>;
+    } catch (error) {
+      if (error instanceof RawBodyTooLargeError) responseJson(res, 413, { error: "request_body_too_large", max_bytes: maxBytes });
+      else responseJson(res, 400, { error: "invalid_request" });
+      return undefined;
+    }
+  };
+  const verifiedOperator = (req: import("node:http").IncomingMessage): string | undefined => {
+    const actor = verifiedActor(req);
+    return actor?.startsWith("operator:") ? actor : undefined;
+  };
+  const appendAudit = async (event: Record<string, unknown>): Promise<void> => {
+    await fsPromises.mkdir(dirname(auditPath), { recursive: true, mode: 0o700 });
+    const file = await fsPromises.open(auditPath, "a", 0o600);
+    try {
+      await file.writeFile(`${JSON.stringify(event)}\n`, "utf8");
+      await file.sync();
+    } finally {
+      await file.close();
+    }
+  };
+  const auditIsCurrent = async (facts: NewPathApprovalFacts): Promise<boolean> => {
+    const raw = await fsPromises.readFile(auditPath, "utf8");
+    let confirmed = false;
+    let revoked = false;
+    for (const line of raw.split("\n").filter(Boolean)) {
+      const row: unknown = JSON.parse(line);
+      if (typeof row !== "object" || row === null || Array.isArray(row)) return false;
+      const record = row as Record<string, unknown>;
+      if (record.ref !== facts.ref) continue;
+      if (record.event === "confirmed" && record.factsDigest === factsDigest(facts)) confirmed = true;
+      if (record.event === "revoked") revoked = true;
+    }
+    return confirmed && !revoked;
+  };
+
+  const previewRoute: Route = {
+    method: "POST", path: "/v1/new-path-approval/preview", scope: "write", tier: "low",
+    handler: async (req, res) => {
+      const operator = verifiedOperator(req);
+      if (!operator) return responseJson(res, 403, { error: "verified_operator_session_required" });
+      const body = await readObject(req, res);
+      if (!body) return;
+      if (Object.keys(body).some((key) => !["taskYaml", "approvedMissingPaths"].includes(key))) return responseJson(res, 400, { error: "invalid_request" });
+      if (typeof body.taskYaml !== "string" || body.taskYaml.length > 48 * 1024 || !Array.isArray(body.approvedMissingPaths) ||
+        body.approvedMissingPaths.some((path) => typeof path !== "string")) return responseJson(res, 400, { error: "invalid_request" });
+      let task: Task;
+      try {
+        const parsed = loadPlanFromYaml(body.taskYaml, "issuer-preview");
+        if (parsed.tasks.length !== 1) return responseJson(res, 400, { error: "one_task_required" });
+        task = parsed.tasks[0]!;
+      } catch {
+        return responseJson(res, 400, { error: "task_draft_unreadable" });
+      }
+      const declaredPaths = task.files ?? [];
+      if (task.repo !== binding.repository || task.author_class !== "machine" || task.new_path_approval_ref !== undefined ||
+        declaredPaths.length === 0 || declaredPaths.some((path) => !isCanonicalRepoPath(path)) ||
+        new Set(declaredPaths.map((path) => path.toLowerCase())).size !== declaredPaths.length) {
+        return responseJson(res, 409, { error: "task_scope_unsupported" });
+      }
+      const missingPaths = declaredPaths.filter((path) => !existsSync(join(input.repoRoot, path)));
+      const approvedMissingPaths = body.approvedMissingPaths as string[];
+      if (approvedMissingPaths.length === 0 || new Set(approvedMissingPaths.map((path) => path.toLowerCase())).size !== approvedMissingPaths.length ||
+        approvedMissingPaths.some((path) => !missingPaths.includes(path))) return responseJson(res, 409, { error: "approval_subset_mismatch" });
+      const createdAt = now();
+      const preview: NewPathApprovalPreview = {
+        id: randomUUID(), ref: `npa_${randomUUID()}`, task, operator,
+        intentDigest: taskIntentDigest(task), declaredPaths: Object.freeze([...declaredPaths]),
+        missingPaths: Object.freeze([...missingPaths]), approvedMissingPaths: Object.freeze([...approvedMissingPaths]),
+        expiresAtMs: createdAt + NEW_PATH_PREVIEW_TTL_MS,
+      };
+      previews.set(preview.id, preview);
+      responseJson(res, 200, {
+        previewId: preview.id, ref: preview.ref, taskId: task.id, title: task.title, repo: task.repo,
+        issuerId: binding.issuerId, epoch: binding.epoch, policy: binding.policy, instance: binding.instance, audience: binding.audience,
+        intentDigest: preview.intentDigest, declaredPaths: preview.declaredPaths, missingPaths: preview.missingPaths,
+        approvedMissingPaths: preview.approvedMissingPaths, operator, expiresAtMs: preview.expiresAtMs,
+      });
+    },
+  };
+  const confirmRoute: Route = {
+    method: "POST", path: "/v1/new-path-approval/confirm", scope: "write", tier: "high", maxBodyBytes: 4096,
+    handler: async (req, res) => {
+      const operator = verifiedOperator(req);
+      const action = verifiedConfirmAction(req);
+      const raw = (req as unknown as Record<symbol, unknown>)[RAW_BODY_CACHE];
+      if (!operator || verifiedStepUpActor(req) !== operator || !action || action.method !== "POST" ||
+        action.path !== "/v1/new-path-approval/confirm" || typeof raw !== "string" || action.payload !== raw) {
+        return responseJson(res, 403, { error: "verified_step_up_confirmation_required" });
+      }
+      let body: Record<string, unknown>;
+      try {
+        const parsed: unknown = raw.trim() ? JSON.parse(raw) : {};
+        if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error("invalid confirmation body");
+        body = parsed as Record<string, unknown>;
+      } catch {
+        return responseJson(res, 400, { error: "invalid_request" });
+      }
+      const preview = typeof body.previewId === "string" ? previews.get(body.previewId) : undefined;
+      const timestamp = now();
+      if (!preview || preview.operator !== operator || preview.expiresAtMs <= timestamp) return responseJson(res, 409, { error: "preview_expired_or_wrong_actor" });
+      if (Object.keys(body).some((key) => key !== "previewId") || !previews.delete(preview.id)) return responseJson(res, 409, { error: "preview_expired_or_wrong_actor" });
+      const facts: NewPathApprovalFacts = Object.freeze({
+        protocol: "new-path-approval-v1", ref: preview.ref, issuerId: binding.issuerId, issuerEpoch: binding.epoch,
+        policy: binding.policy, taskId: preview.task.id, repo: preview.task.repo, instance: binding.instance, audience: binding.audience,
+        intentDigest: preview.intentDigest, declaredPaths: Object.freeze([...preview.declaredPaths]),
+        approvedMissingPaths: Object.freeze([...preview.approvedMissingPaths]), operator,
+        confirmation: randomUUID(), issuedAtMs: timestamp, expiresAtMs: timestamp + NEW_PATH_APPROVAL_TTL_MS, revoked: false,
+      });
+      try {
+        await appendAudit({ event: "confirmed", ref: facts.ref, atMs: timestamp, factsDigest: factsDigest(facts), facts });
+      } catch {
+        return responseJson(res, 503, { error: "approval_audit_unavailable" });
+      }
+      active.set(facts.ref, facts);
+      responseJson(res, 200, { ref: facts.ref, taskId: facts.taskId, intentDigest: facts.intentDigest, expiresAtMs: facts.expiresAtMs });
+    },
+  };
+  const resolveRoute: Route = {
+    method: "POST", path: "/v1/new-path-approval/resolve", scope: "write", tier: "low", maxBodyBytes: 4096,
+    handler: async (req, res) => {
+      const body = await readObject(req, res, 4096);
+      if (!body) return;
+      if (Object.keys(body).some((key) => !["ref", "taskId"].includes(key))) return responseJson(res, 400, { error: "invalid_request" });
+      if (typeof body.ref !== "string" || typeof body.taskId !== "string") return responseJson(res, 400, { error: "invalid_request" });
+      const facts = active.get(body.ref);
+      if (!facts || facts.taskId !== body.taskId) return responseJson(res, 404, { error: "approval_unknown" });
+      if (facts.expiresAtMs <= now()) {
+        active.delete(facts.ref);
+        return responseJson(res, 410, { error: "approval_expired" });
+      }
+      try {
+        if (!(await auditIsCurrent(facts))) return responseJson(res, 503, { error: "approval_audit_unknown" });
+      } catch {
+        return responseJson(res, 503, { error: "approval_audit_unavailable" });
+      }
+      responseJson(res, 200, facts);
+    },
+  };
+  const revokeRoute: Route = {
+    method: "POST", path: "/v1/new-path-approval/revoke", scope: "write", tier: "high", maxBodyBytes: 4096,
+    handler: async (req, res) => {
+      const operator = verifiedOperator(req);
+      const action = verifiedConfirmAction(req);
+      const raw = (req as unknown as Record<symbol, unknown>)[RAW_BODY_CACHE];
+      if (!operator || verifiedStepUpActor(req) !== operator || !action || action.method !== "POST" ||
+        action.path !== "/v1/new-path-approval/revoke" || typeof raw !== "string" || action.payload !== raw) {
+        return responseJson(res, 403, { error: "verified_step_up_confirmation_required" });
+      }
+      let body: Record<string, unknown>;
+      try {
+        const parsed: unknown = raw.trim() ? JSON.parse(raw) : {};
+        if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error("invalid revoke body");
+        body = parsed as Record<string, unknown>;
+      } catch {
+        return responseJson(res, 400, { error: "invalid_request" });
+      }
+      if (Object.keys(body).some((key) => key !== "ref")) return responseJson(res, 400, { error: "invalid_request" });
+      const facts = typeof body.ref === "string" ? active.get(body.ref) : undefined;
+      if (!facts || facts.operator !== operator) return responseJson(res, 404, { error: "approval_unknown" });
+      const revokedAt = now();
+      try {
+        if (!(await auditIsCurrent(facts))) return responseJson(res, 503, { error: "approval_audit_unknown" });
+        await appendAudit({ event: "revoked", ref: facts.ref, atMs: revokedAt, operator, factsDigest: factsDigest(facts) });
+      } catch {
+        return responseJson(res, 503, { error: "approval_audit_unavailable" });
+      }
+      active.delete(facts.ref);
+      responseJson(res, 200, { ref: facts.ref, revoked: true });
+    },
+  };
+  return [previewRoute, confirmRoute, resolveRoute, revokeRoute];
+}
+
 /**
  * W1-T4244 — COMPOSE THE OPERATOR-SESSION PROVIDER, OR NOTHING. Absent config, or one with no
  * issuer / no allowed origin / no operator, composes NO provider: a verifier with an empty
@@ -3083,6 +3342,8 @@ function assembleServeRoutes(
     legacy: [navBadge, analyticsLegacy, inboxLegacyView(panelReadDeps), feedbackLegacyView(panelGraphDeps, () => deps.board.plan), hostLegacy, agentLegacyView({ scopes: navBadgeScopes })] });
   const served = { ...shadowed, legacy: shadowed.legacy.map((view) => view === navBadge ? navBadgeWithDecisions(navBadge, needsYouGates) : view) };
   const rawRoutes = [
+    ...makeNewPathApprovalIssuerRoutes({ binding: deps.newPathApprovalIssuer, repository: deps.assistantRepository,
+      instance: deps.instances?.coreInstance ?? CORE_INSTANCE, repoRoot: deps.questionsRoot, stateRoot: deps.fleetControlRoot }),
     ...buildImprovementThreadRoutes({ stateDir: dirname(deps.ledgerPath) }),
     ...buildProductRoutes({ root: deps.fleetControlRoot }),
     ...buildProductResearchRoutes({ root: deps.fleetControlRoot, provider: deps.productResearchProvider, budgetUsd: deps.productResearchBudgetUsd }),
@@ -3585,6 +3846,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   const routeAssembly = assembleServeRoutes(
     {
       ...deps,
+      newPathApprovalIssuer: deps.newPathApprovalIssuer ?? newPathApprovalIssuerConfig(),
       consoleSha,
       confirmNonces,
       githubEventWake: deps.githubEventWake && { ...deps.githubEventWake, counters: wakeCounters },
