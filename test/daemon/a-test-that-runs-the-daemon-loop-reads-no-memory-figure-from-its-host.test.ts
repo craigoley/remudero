@@ -206,7 +206,7 @@ function usesUnpinnedDaemon(text: string): boolean {
       value.callee.property.type === "Identifier" && value.callee.property.value === "get") {
       const map = resolveConst(value.callee.object);
       if (map.type === "NewExpression" && map.callee.type === "Identifier" && map.callee.value === "Map" &&
-        map.arguments.length === 0) {
+        map.arguments?.length === 0) {
         const hasWrite = calls.some((call) => call.callee.type === "MemberExpression" &&
           call.callee.property.type === "Identifier" && call.callee.property.value === "set" &&
           resolveConst(call.callee.object) === map);
