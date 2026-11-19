@@ -136,7 +136,7 @@ import {
 } from "./strike-ladder.js";
 import { buildRiskJudgeSpawnArgs, JUDGE_SHADOW_COMPARED_KEY, resolveFixProgressJudgeMount, resolveRiskJudgeMount, runJudgeShadow, scrubRiskJudgeText, runRiskJudge, type RiskJudgeConfig, type RiskJudgeInput, type RiskJudgeOrchestratorDeps } from "./risk-judge.js";
 import {
-  createIncrementalLedgerUnion, createLedgerRotationMemo, createSizedMemo, ledgerRotationDigests, ledgerRotationEntries, ndjsonLines,
+  createIncrementalLedgerUnion, createLedgerRotationMemo, createSizedMemo, ledgerLivePath, ledgerRotationDigests, ledgerRotationEntries, ndjsonLines,
   readLedgerUnionRecordsSync, realLedgerFs, resolveLedgerUnion,
   type IncrementalUnionPass, type LedgerCorpusEntry, type LedgerGrepFsDeps, type LedgerRotationRecords, type LedgerUnionRecordRead,
 } from "./ledger-union.js";
@@ -1023,8 +1023,16 @@ const TERMINAL_UNCREDITABLE_HEAD_STEP = "sweep.fix.uncreditable_head";
  *  the suppression is legible — "we saw this and chose not to page you" must be greppable. */
 const TERMINAL_UNCREDITABLE_HEAD_HEALTHY_STEP = "sweep.terminal_head.not_stuck";
 const TERMINAL_UNCREDITABLE_HEAD_ESCALATED_STEP = "sweep.fix.uncreditable_head_escalated";
-const TERMINAL_UNCREDITABLE_HEAD_PATTERN =
-  '"step":"sweep\\.fix\\.uncreditable_head"|"step":"sweep\\.fix\\.uncreditable_head_escalated"';
+const TERMINAL_UNCREDITABLE_HISTORY_SLICE: EscalationTriageSlice = {
+  holder: "sweep.terminal-uncreditable-heads",
+  steps: [TERMINAL_UNCREDITABLE_HEAD_STEP, TERMINAL_UNCREDITABLE_HEAD_ESCALATED_STEP],
+  sharedSnapshot: true,
+  // The union uses ts when deduplicating replayed decisions.
+  project: ({ ts, step, pr_number, head_sha, head, repair_task_id, cause, reason, terminal }) => ({
+    ts, step, pr_number, head_sha, head, repair_task_id, cause, reason, terminal,
+  }),
+};
+let terminalUncreditableHistoryReader: EscalationTriageHistoryReader | undefined;
 
 /**
  * W1-T3168 — is a foreign-head PR actually STUCK, or merely not fleet-owned?
@@ -1077,15 +1085,20 @@ function terminalUncreditableHeads(ledgerPath: string): Map<string, TerminalUncr
   const cached = terminalUncreditableHeadsByLedger.get(ledgerPath);
   if (cached) return cached;
 
-  const union = resolveLedgerUnion(dirname(ledgerPath), TERMINAL_UNCREDITABLE_HEAD_PATTERN);
-  // A fresh fixture/installation has no rotations. In that one case, use the live ledger; once
-  // rotations exist, only a complete archive∪live union is accepted so a rotated terminal marker
-  // can never silently disappear and re-enable the GraphQL loop.
-  const rows = union.ok
-    ? parseLedger(union.matches.join("\n"))
-    : union.archiveCount === 0
-      ? readLedgerLines(ledgerPath)
-      : [];
+  const stateDir = dirname(ledgerPath);
+  const reader = terminalUncreditableHistoryReader ??= createEscalationTriageHistoryReader({ slice: TERMINAL_UNCREDITABLE_HISTORY_SLICE });
+  const history = reader.current(stateDir);
+  let rows = history.rows;
+  const livePath = ledgerLivePath(stateDir);
+  if (history.archiveCount === 0) {
+    rows = readLedgerLines(ledgerPath); // ledger-read-intent: live
+  } else if (history.unread.length === 1 && history.unread[0] === livePath) {
+    // The legacy union accepts complete rotations when only the live read fails. Retry through their cached slices.
+    rows = createEscalationTriageHistoryReader({
+      slice: TERMINAL_UNCREDITABLE_HISTORY_SLICE,
+      fs: { ...realLedgerFs, existsSync: (path) => path !== livePath && realLedgerFs.existsSync(path) },
+    }).current(stateDir).rows;
+  }
   const terminals = new Map<string, TerminalUncreditableHead>();
   for (const row of rows) {
     if (
