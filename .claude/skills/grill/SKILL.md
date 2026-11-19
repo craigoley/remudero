@@ -16,6 +16,8 @@ every decision whose prerequisites are already settled. Ask in rounds:
 - Each round asks the whole frontier at once. Number the questions (Q1, Q2 …).
 - Give each question a short title, the choices you see, YOUR RECOMMENDED ANSWER, and the
   one piece of evidence that would change your recommendation.
+- Word each question so that "yes" accepts your recommended answer. Agreeing must never
+  mean answering "no".
 - Never put a question in this round if its answer depends on another question in this
   round. It belongs in a later round.
 - After I answer, re-compute the frontier and ask the next round.

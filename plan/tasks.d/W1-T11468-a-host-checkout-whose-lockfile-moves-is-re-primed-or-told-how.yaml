@@ -1,15 +1,15 @@
 - id: W1-T11468
-  title: A host checkout whose lockfile moves under a fast-forward is re-primed from the seed store, and a stale-dependency refusal names the supported remedy
+  title: A host checkout whose lockfile moves under a fast-forward is re-primed from the seed store, a Mac worktree whose node_modules falls behind its lockfile re-primes its own node_modules from the seed store, and a stale-dependency refusal names the supported remedy
   repo: remudero
   type: implement
-  verify: auto
+  verify: human  # 2026-11-18 operator session: this task edits the author gate (scripts/preflight-author.mjs), so the operator reviews its diff before it ships
   principles: {tdd: strict}
   budget_usd: 5.00
   risk: high
   band_meaning: span
   origin: "2026-11-06 Azure host: preflight-author refused /tmp/rmd-amend-W1-T11431-1793931609000 because its node_modules (a whole-directory symlink to ~/rmd-op/node_modules) held claude-agent-sdk 0.3.310 against a 0.3.316 lockfile"
   plan_refs: [W1-T10507, W1-T10508, W1-T10739]
-  files: [hooks/post-merge, scripts/lib/author-dependency-provenance.mjs, deploy/DEPENDENCY-SEEDS.md, test/review/a-host-checkout-whose-lockfile-moves-is-re-primed-or-told-how.test.ts]
+  files: [hooks/post-merge, scripts/lib/author-dependency-provenance.mjs, scripts/preflight-author.mjs, src/lib/dependency-seeds.ts, deploy/DEPENDENCY-SEEDS.md, test/review/a-host-checkout-whose-lockfile-moves-is-re-primed-or-told-how.test.ts]
   priority: 2
   status: queued
   # backlog gardener: band=2 evidence=df8896e7cf8530a7
@@ -57,13 +57,49 @@
     3. deploy/DEPENDENCY-SEEDS.md documents the fast-forward case and the remedy, including the trap
        that `rm -rf node_modules/` with a trailing slash follows the link and deletes the donor's
        install.
+    4. (AMENDED 2026-11-18) MAC WORKTREES. A Mac worktree rebases rather than fast-forwards, and hooks/post-checkout
+       exits on Darwin (:8-9), so the heal runs where the refusal is seen: the author dependency precheck
+       (scripts/preflight-author.mjs:1044-1046).
+       - When authorDependencyProvenance reads "installed package version differs" and the worktree's node_modules is its
+         own seed materialization (its `.rmd-dependency-seed.json` consumer marker names this checkout), the preflight
+         runs the checkout's own `scripts/dependency-seeds.mjs prime <checkout> --proof` once, as src/lib/review.ts
+         (~:2768) invokes it, not the installed wrapper (the Mac's ~/.local/bin/remudero-dependencies runs a 2026-10-23
+         tool snapshot under Node 24.21.0). Then it re-runs authorDependencyProvenance and proceeds only when that reads
+         present; otherwise it refuses as today, naming the prime's first refusal line and the remedy of step 2.
+       - src/lib/dependency-seeds.ts: an occupied destination that is this checkout's own seed materialization and
+         differs from the lockfile is replaced, not refused (verifyExistingDependencies ~:305-320 throws "dependency
+         seed version mismatch" from verifyPackages ~:272 today, and "An occupied destination is never replaced"). The
+         replacement is built beside it and renamed into place; when no seed generation matches the lockfile, the tool
+         materializes a new generation through its own path (its `npm ci --ignore-scripts` stage, or `--source` from a
+         fresh donor checkout at the same lockfile, as the 2026-11-18 recovery did), then links or copies from it.
+       - Anything else stays untouched: a whole-directory symlink, a real install with no consumer marker naming this
+         checkout, a seed generation, every other checkout's node_modules. Seed integrity (verifyImmutableGeneration,
+         W1-T10739) is unchanged.
+    INVARIANT only-this-worktree-is-replaced: only that checkout's node_modules is replaced: a whole-directory symlink, a real install with no consumer marker naming the checkout, every seed generation and every other checkout's node_modules are byte-identical before and after, and the seed integrity checks are unchanged.
     No fixed thresholds; no new install path. The seed tool remains the only materializer.
   acceptance:
     - claim: "A merge that changes package-lock.json in a seed-linked host checkout runs remudero-dependencies prime for that checkout, and a merge that leaves the lockfile unchanged runs nothing"
       proof: "grep: W1-T11468 criterion 1 in test/review/a-host-checkout-whose-lockfile-moves-is-re-primed-or-told-how.test.ts"
     - claim: "When node_modules is a whole-directory symlink or a real install, the hook changes nothing on disk and prints the exact remedy, and the author precheck's version-differs refusal names that same remedy"
       proof: "grep: W1-T11468 criterion 2 in test/review/a-host-checkout-whose-lockfile-moves-is-re-primed-or-told-how.test.ts"
+    - claim: "When the author dependency precheck reads an installed package version that differs from the lockfile and the checkout's node_modules is its own seed materialization, the author preflight runs the checkout's scripts/dependency-seeds.mjs prime with --proof for that checkout once, re-runs the provenance check, and starts census only when it reads present"
+      proof: "grep: W1-T11468 criterion 3 in test/review/a-host-checkout-whose-lockfile-moves-is-re-primed-or-told-how.test.ts"
+    - claim: "prime replaces a checkout's own seed materialization that differs from the lockfile instead of refusing dependency seed version mismatch, materializing a new seed generation when none matches the lockfile (the 2026-11-18 playwright 1.65.0 to 1.65.1 case)"
+      proof: "grep: W1-T11468 criterion 4 in test/review/a-host-checkout-whose-lockfile-moves-is-re-primed-or-told-how.test.ts"
+    - claim: "invariant:only-this-worktree-is-replaced — only that checkout's node_modules is replaced: a whole-directory symlink, a real install with no consumer marker naming the checkout, every seed generation and every other checkout's node_modules are byte-identical before and after, and the seed integrity checks are unchanged"
+      proof: "grep: W1-T11468 criterion 5 in test/review/a-host-checkout-whose-lockfile-moves-is-re-primed-or-told-how.test.ts"
   note: |
+    AMENDED 2026-11-18 (operator: lighter preflight). Operator, 2026-11-18: "I hate how big, long, and heavy
+    preflights are. They are so limiting." and "Go with all of your recommendations". Evidence: #19389 (559dcf3a64)
+    bumped playwright 1.65.0 to 1.65.1; every primed Mac worktree then failed the author precheck ("installed package
+    version differs: node_modules/playwright"), and `remudero-dependencies prime` refused with "dependency seed version
+    mismatch" (src/lib/dependency-seeds.ts:272) because an occupied destination is never replaced (:305). The recovery
+    took a fresh detached donor worktree with `npm ci`, the operator's yes for each exact `rm -r <worktree>/node_modules`,
+    and `prime <worktree> --source <donor> --proof` (new seed 84565ce5), once per worktree (build-13672, build-13695).
+    The operator session's analysis of 81 Mac author runs counts 3 Node or dependency refusals. Added: design step 4,
+    criteria 3-5, the falsifier's last lines, the title's middle clause, scripts/preflight-author.mjs and
+    src/lib/dependency-seeds.ts in files. verify is human because it edits the author gate. Also editing
+    scripts/preflight-author.mjs: W1-T12511, W1-T12508, W1-T11850, W1-T13720 (queued).
     Copy the fixture technique from test/deploy/a-host-worktree-links-its-dependencies-whoever-creates-it.test.ts:
     a real git repo, a fake remudero-dependencies on PATH that records its argv, and a forced
     non-Darwin uname. For criterion 2, assert the symlink target and a real install's files are
@@ -72,4 +108,8 @@
     "W1-T11468 criterion N".
   falsifier: |
     Delete hooks/post-merge. Criterion 1 must then fail, because no prime is recorded. Drop the
-    remedy text from the precheck reason. Criterion 2's refusal assertion must then fail.
+    remedy text from the precheck reason. Criterion 2's refusal assertion must then fail. Remove the
+    precheck's re-prime and criterion 3 must fail (the run refuses at dependency-precheck). Keep the
+    occupied-destination refusal and criterion 4 must fail with dependency seed version mismatch. Let
+    the replace path also act on a whole-directory symlink or an unmarked real install and criterion 5
+    must fail. Restore and require all five to pass.

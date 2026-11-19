@@ -87,18 +87,46 @@ export interface OpsCatalogSnapshot {
   /** sha256 of the identity tuple; the only identity an observer sees. */
   identityDigest?: string;
   counts: OpsCatalogCounts;
+  /** W1-T13705: present only when a GET failed. Diagnostic: it never changes `outcome` or `refusalStage`. */
+  httpStatusClass?: OpsCatalogHttpStatusClass;
 }
+/** W1-T13705: why a GET failed, as a closed class. It never carries a URL, a body or token text. */
+export type OpsCatalogHttpStatusClass = "4xx" | "5xx" | "auth" | "transport";
 export interface OpsCatalogShadowInput {
   outcome: OpsCatalogOutcome;
   refusalStage?: OpsCatalogRefusalStage;
   plan?: Plan;
   opsCommit?: string;
   identityDigest?: string;
+  /** W1-T13705: `revalidate` when one ref GET answered from a kept snapshot, `full` when the catalog was read.
+   *  Non-enumerable, like the private handles: a diagnostic never changes what an equality or a row sees. */
+  readonly kind?: "full" | "revalidate";
+  /** W1-T13705: present only when a GET failed; see {@link OpsCatalogHttpStatusClass}. Non-enumerable. */
+  readonly httpStatusClass?: OpsCatalogHttpStatusClass;
+}
+
+/** W1-T13705: attach the refresh diagnostics without changing the input's own enumerable shape. */
+function withDiagnostics(input: OpsCatalogShadowInput, kind: "full" | "revalidate",
+  httpStatusClass: OpsCatalogHttpStatusClass | undefined): OpsCatalogShadowInput {
+  Object.defineProperty(input, "kind", { value: kind });
+  if (httpStatusClass !== undefined) Object.defineProperty(input, "httpStatusClass", { value: httpStatusClass });
+  return input;
 }
 
 class Refusal extends RmdError {
   readonly outcome: OpsCatalogOutcome;
-  constructor(outcome: OpsCatalogOutcome) { super("github", 1, outcome); this.outcome = outcome; }
+  readonly httpStatusClass?: OpsCatalogHttpStatusClass;
+  constructor(outcome: OpsCatalogOutcome, httpStatusClass?: OpsCatalogHttpStatusClass) {
+    super("github", 1, outcome);
+    this.outcome = outcome;
+    if (httpStatusClass !== undefined) this.httpStatusClass = httpStatusClass;
+  }
+}
+
+/** W1-T13705: a gh status code as its class; no code at all is a transport failure (DNS, reset, timeout, spawn). */
+function statusClassOf(code: string | undefined): OpsCatalogHttpStatusClass {
+  if (code === undefined) return "transport";
+  return code.startsWith("5") ? "5xx" : "4xx";
 }
 
 const AUTH_DIAGNOSTIC = /^(?:gh: )?(?:To get started with GitHub CLI, please run:|To use GitHub CLI in a GitHub Actions workflow, set the GH_TOKEN environment variable\.)/m;
@@ -137,7 +165,7 @@ export function defaultOpsCatalogApi(
       const diagnostic = typeof stderr === "string" && stderr ? stderr : error instanceof Error ? error.message : "";
       const status = HTTP_DIAGNOSTIC.exec(diagnostic);
       const authMissing = status ? (status[1] ?? status[2]) === "401" : AUTH_DIAGNOSTIC.test(diagnostic);
-      throw authMissing ? new OpsCatalogAuthMissingError() : new Refusal("unreadable");
+      throw authMissing ? new OpsCatalogAuthMissingError() : new Refusal("unreadable", statusClassOf(status?.[1] ?? status?.[2]));
     }
   };
 }
@@ -155,8 +183,9 @@ function sha(value: unknown): string {
 async function get(api: OpsCatalogApi, path: string): Promise<unknown> {
   try { return await api(path); }
   catch (error) {
-    if (error instanceof OpsCatalogAuthMissingError) throw new Refusal("auth_missing");
-    throw new Refusal("unreadable");
+    if (error instanceof OpsCatalogAuthMissingError) throw new Refusal("auth_missing", "auth");
+    // An injected api's own error carries no class; only the default api's classified refusal keeps one.
+    throw new Refusal("unreadable", error instanceof Refusal ? error.httpStatusClass : undefined);
   }
 }
 
@@ -517,7 +546,9 @@ async function readSnapshot(
   try { return await read(target, api, counts, store, stage => { refusalStage = stage; }, treeCache); }
   catch (error) {
     // The outcome code is the reason: the error's own message may hold a URL or body, so it is dropped here.
-    return { outcome: error instanceof Refusal ? error.outcome : "unreadable", refusalStage, counts };
+    const httpStatusClass = error instanceof Refusal ? error.httpStatusClass : undefined;
+    return { outcome: error instanceof Refusal ? error.outcome : "unreadable", refusalStage, counts,
+      ...(httpStatusClass === undefined ? {} : { httpStatusClass }) };
   }
 }
 
@@ -535,31 +566,36 @@ export function createOpsCatalogShadowSource(
   let kept: { plan?: Plan; binding: OpsCatalogBinding; identityDigest?: string } | undefined;
   const store = createPlanRevisionStore({ strict: true, retainLatest: true, yamlLogLevel: "error", dependencyMode: "preserve-external" });
   const treeCache: ShadowTreeCache = {};
-  const answer = (snap: { plan?: Plan; binding?: OpsCatalogBinding; identityDigest?: string }): OpsCatalogShadowInput =>
-    privateHandles({ outcome: "ok" as const, identityDigest: snap.identityDigest }, { plan: snap.plan, opsCommit: snap.binding?.commit });
+  const answer = (snap: { plan?: Plan; binding?: OpsCatalogBinding; identityDigest?: string }, kind: "full" | "revalidate"): OpsCatalogShadowInput =>
+    privateHandles({ outcome: "ok" as const, identityDigest: snap.identityDigest }, { plan: snap.plan, opsCommit: snap.binding?.commit, kind });
+  let revalidateClass: OpsCatalogHttpStatusClass | undefined;
   const revalidate = async (k: NonNullable<typeof kept>): Promise<"same" | "moved" | "failed"> => {
+    revalidateClass = undefined;
     try {
       return await readBranchSha(api, `repos/${target.repository}`, k.binding.ref.slice("refs/heads/".length)) === k.binding.commit
         ? "same" : "moved";
     } catch (error) {
       // A failed revalidation is not evidence, and a full read would start with the same failing GitHub.
-      void error;
+      if (error instanceof Refusal) revalidateClass = error.httpStatusClass;
       return "failed";
     }
   };
   return {
     async refresh() {
       const check = kept ? await revalidate(kept) : "moved";
-      if (check === "same" && kept) return answer(kept);
+      if (check === "same" && kept) return answer(kept, "revalidate");
       kept = undefined;
-      if (check === "failed") return { outcome: "stale", refusalStage: "branch_ref" };
+      if (check === "failed") {
+        return withDiagnostics({ outcome: "stale", refusalStage: "branch_ref" }, "revalidate", revalidateClass);
+      }
       const snap = await readSnapshot(target, api, store, treeCache);
       if (snap.outcome === "ok" && snap.binding) {
         everOk = true;
         kept = { plan: snap.plan, binding: snap.binding, identityDigest: snap.identityDigest };
-        return answer(kept);
+        return answer(kept, "full");
       }
-      return { outcome: everOk ? "stale" : snap.outcome, ...(snap.refusalStage ? { refusalStage: snap.refusalStage } : {}) };
+      return withDiagnostics({ outcome: everOk ? "stale" : snap.outcome, ...(snap.refusalStage ? { refusalStage: snap.refusalStage } : {}) },
+        "full", snap.httpStatusClass);
     },
   };
 }

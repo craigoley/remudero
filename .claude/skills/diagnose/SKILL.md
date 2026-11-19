@@ -25,7 +25,8 @@ patch.
 4. HYPOTHESISE, RANKED. List the candidate causes. For each, name the one observation that
    would falsify it, and check that observation before you believe it.
 5. FIX THE NAMED CAUSE, then re-run the SAME loop and show it green. Prove the fix is
-   load-bearing: undo it, show red, restore it, show green.
+   load-bearing: undo it, show red, restore it, show green. Before you trust that red, show
+   `git diff` of the undo against the fixed tree: an undo that changed nothing proves nothing.
 
 If two patches have not moved the symptom, stop. No third patch and no wider change — get
 more data or return to the last known good state.

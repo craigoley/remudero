@@ -1404,6 +1404,7 @@ import {
 } from "./lib/stale-fix-dispatch-recovery.js";
 import { prStateCommand } from "./lib/pr-state.js";
 import { previewPlanTaskMigration } from "./lib/plan-task-migration.js";
+import { movePlanTask } from "./lib/plan-task-move.js";
 import { auditLedgerUnion, createIncrementalLedgerUnion, createSizedMemo, ledgerRowsFor, readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, readValidatedRotationDigest, realLedgerFs, type LedgerUnionRecordRead } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
 // (W1-T2888), which imports it directly.
@@ -13562,6 +13563,10 @@ interface TaskIdDestinationSnapshot {
   openPrTexts: readonly string[];
 }
 
+/** BACKSTOP: the destination plan is read in one `cat-file --batch`. Exceeding this buffer refuses the snapshot.
+ *  The ops plan outgrew Node's 1 MiB default on 2026-11-18. This matches the other plan readers' bound. */
+export const TASK_ID_DESTINATION_MAX_BUFFER = 1 << 27;
+
 /** A fetched, commit-pinned ID population. Dirty checkout bytes never replace the fetched plan. */
 export async function taskIdDestinationSnapshot(
   checks: TaskIdDestinationChecks = {}, offline = false,
@@ -13573,7 +13578,7 @@ export async function taskIdDestinationSnapshot(
     if (destination.outcome === "unreadable") throw new Error("unreadable host switch");
     if (offline) { stage = "offline"; throw new Error("selected catalog requires a fresh read"); }
     const run = async (cwd: string, args: string[], input?: string): Promise<string> =>
-      checks.destinationGit ? await checks.destinationGit(cwd, args, input) : await hostWorktreeGitAsync(cwd, args, { timeout: DEFAULT_GH_CALL_TIMEOUT_MS, ...(input === undefined ? {} : { input }) });
+      checks.destinationGit ? await checks.destinationGit(cwd, args, input) : await hostWorktreeGitAsync(cwd, args, { timeout: DEFAULT_GH_CALL_TIMEOUT_MS, maxBuffer: TASK_ID_DESTINATION_MAX_BUFFER, ...(input === undefined ? {} : { input }) });
     stage = "fetch";
     await run(destination.checkoutDir, ["fetch", "--no-tags", "origin", "main"]);
     stage = "plan";
@@ -44039,6 +44044,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "Read-only explicit migration preview. Both pinned commits must already exist locally and remain current in their origins and API identities. Uses strict batched Git catalog reads, complete candidate-specific merge searches with authoritative recent-PR controls, current claims/run branches and complete open-PR/file controls. Orders by reverse maintained default dispatch order. Every remaining public dependant excludes its prerequisite, even a merged dependant. A candidate retains original YAML bytes, path, blob, commit and prospective moved_from. Changed, incomplete, duplicate or incompatible evidence returns UNKNOWN. Permission is never granted. No fetch, catalog write, reservation, claim, push, PR operation, registry/config change, scheduler or default background work. Help performs no preview reads. A mutating move needs separate transaction approval.",
   },
   {
+    name: "move-task",
+    syntax: "rmd move-task --public-root <path> --public-commit <sha> --public-repo <owner/remudero> --ops-root <path> --ops-commit <sha> --ops-repo <owner/name> [--apply]",
+    summary: "Take one recoverable step of moving a preview-admitted public task into the ops catalog.",
+    detail: "W1-T13680. Reads both mains at the pinned commits (which must be current in their origins and API identities) and takes at most one step, printing it and the evidence it read. WAIT while a plan-move- pull request is open in either repository. CONVERGE an id both mains hold: when the ops copy equals the bound original once its moved_from line is removed and the public copy is unchanged and unowned, open the public removal pull request (its commit carries Remudero-Moved-To: <ops repo>@<ops commit> <id> path=<path> blob=<blob>); when the public copy was amended, is claimed, has a run branch or an open pull request, open an ops pull request removing the ops copy. RESTORE the bound original bytes in a public pull request when neither main holds an id public history names a mover removal for. COPY, when nothing is pending, the migration preview's candidate into one ops pull request at its public path, byte for byte plus one moved_from: remudero@<public commit> line after its id line. COMPLETE when only ops holds a removed id, confirming its refs/rmd-id ref is unchanged. Mover pull requests use plan-move-<id>-<epochMs> branches and carry no Remudero-Task line, so neither merge credits the task as built. Pushes, deletes and mints no reservation ref. Each step writes one plan.move.step ledger row. Without --apply it prints the step it would take and writes nothing. Unreadable or changed evidence prints UNKNOWN and takes no step. Exits 0 when the read completed, 1 unknown or a failed write, 2 bad usage.",
+  },
+  {
     name: "plan-destination",
     syntax: "rmd plan-destination <decision|feedback|task>",
     summary: "Print the repository and checkout that take a new plan file of this kind on this host.",
@@ -45402,6 +45413,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["check-acceptance", (rest) => checkAcceptanceCommand(rest)],
   ["next-task-id", async (rest) => await withGhTransportFloorMode("wait", () => nextTaskIdCommand(rest))],
   ["migration-preview", (rest) => withGhTransportFloorMode("enforce", () => previewPlanTaskMigration(rest))],
+  ["move-task", (rest) => withGhTransportFloorMode("enforce", () => movePlanTask(rest, { ledger: (row) => appendLedger(ledgerPathFor(loadConfig()), row) }))],
   ["plan-destination", (rest) => planDestinationCommand(rest)],
   ["hand-worktree", (rest) => handWorktreeCommand(rest)],
   ["worktree", (rest) => worktreeCommand(rest)],
@@ -45578,9 +45590,9 @@ export async function main(
   // It writes nothing until a gh call finds no credential; then the row names the sources tried, never a value.
   // Explicit preview precedes invocation logging, housekeeping and credential diagnostics.
   const previewArgv = stripRepoRootFlag(process.argv.slice(2));
-  if (previewArgv[0] === "migration-preview") {
+  if (previewArgv[0] === "migration-preview" || previewArgv[0] === "move-task") {
     if (previewArgv.includes("--help") || previewArgv.includes("-h")) {
-      console.log(commandHelp(commandSpec("migration-preview")));
+      console.log(commandHelp(commandSpec(previewArgv[0])));
       return await flushThenExit(0);
     }
     return await flushThenExit(await dispatchCommand(previewArgv[0], previewArgv.slice(1), REGISTRY, USAGE));

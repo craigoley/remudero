@@ -4449,6 +4449,43 @@ resume from a durable checkpoint (`implement.resumed`); scheduled flake detectio
 flake-incident gardener); session learnings (the retro and learnings/*.yaml); an audit trail of every agent tool call
 (`worker.activity` rows).
 
+## 4I. External rescan (2026-11-18): Matt Pocock's skills since §4F, and the Home Repo pattern — taken, refused, parked, already held
+
+[research: pocock-rescan-2026-11-18] Read at source: `mattpocock/skills` at 5863806 (2026-11-12, package 1.3.2, MIT,
+20 engineering, 7 productivity, 4 misc and 8 in-progress skills), its CHANGELOG from 1.3.0 to 1.3.2, aihero.dev "The
+Home Repo Pattern" (updated 2026-11-12) and the Codex "Build skills" page (learn.chatgpt.com, undated). §4F read the
+same repo at c55ee46; this section records only what changed since. As in §4F, every row taken is rewritten here.
+
+**TAKEN INTO THE OPERATOR MACROS (W1-T13724):** `grilling` now words each question so "yes" accepts the recommended answer
+(1.3.2, mattpocock/skills#1193) — added to `/grill`. `diagnosing-bugs` Phase 5 now diffs a forced mutation against a pristine copy
+before trusting the red (1.3.2, mattpocock/skills#1209) — added to `/diagnose` as a `git diff` of the undo, beside the undo-the-fix
+proof it already had.
+**TAKEN AS RECON:** **W1-T13725** `retro`'s "implementation vs review" split: the review agent has the least context
+pressure, so standards belong in what review reads and CLAUDE.md holds navigation pointers. CLAUDE.md is about 14.7 KB
+and 63 headlines, every one read on every interactive turn, and AGENTS.md (about 10.5 KB) reaches every Codex worker.
+The RECON sorts each headline by the stage that needs it (an existing check, review time, implement time) before any
+move. **W1-T13726** Codex scans `.agents/skills` from the working directory up to the repository root, and never lists
+`.claude/skills`, so an operator's Codex session gets none of the eleven macros; W1-T4332's falsifier left Codex
+discovery unverified, and this confirms its premise for `.claude/skills`. A mirror under `.agents/skills` would also be
+scanned by every dispatched Codex worker in its worktree, so the RECON must prove worker isolation before any mirror
+lands. **W1-T13727** the Home Repo pattern: one private repository of shared skills, steering files and docs, with one
+pointer line per working repository and no submodules. The product question is whether onboarding a fleet should
+create one for the customer.
+**REFUSED, WITH THE REASON:** making this public core the home repo, or folding the private overlay, console and site
+repositories into it as sub-components — the pattern itself says a home repo is private and separate, holds pointers
+rather than code, and suits exactly a public/private mix; folding would make operator data public and mix an
+operator's workspace into the product. `/wizard` as a macro — no secret-handling step runs from an agent session here,
+and keys stay with the operator; revisit when onboarding has a human-only secret step. A `GLOSSARY.md` — the same
+reason as §4F's `domain-modeling` refusal.
+**PARKED:** `/pr`'s "Merge Danger" section (one-way or two-way door, blast radius) for fleet PR bodies, until the
+review lane shows an operator reading PR bodies to decide a merge. `chief-of-staff`'s dated, commit-cited wiki — the
+doctrine bodies and `learnings/` already cite the earning PR; revisit for operator memory outside this repository.
+`software-factory`'s shared terms ("three brakes": automated checks, automated review, human review) as site copy.
+**ALREADY HELD:** `implement-spec` (the daemon's frontier, `runnableCandidates`, and worktree isolation) · `to-spec`,
+`to-tickets`, `wayfinder` (`rmd plan`) · `retro` (`/session-retro`) · `writing-for-agents` (`/agent-doc`) ·
+`improve-codebase-architecture` (`/architecture-scan`) · `handoff`, `wait-what`, `research`, `code-review`
+(`/handoff`, `/wait-what`, `/research`, remudero-review).
+
 ## 5. Principles engine
 
 Remudero's CI today is typecheck + tests. That is the FLOOR, not the bar. The operator's fleet
