@@ -146,26 +146,27 @@ test("W1-T7954: a ci-learning filing writes its own entry file", () => {
   const first = ciLearningShardYaml(draft(111), "W1-T111");
   const second = ciLearningShardYaml(draft(222), "W1-T222");
   const task = loadPlanFromYaml(first, "first filing").tasks[0]!;
-  assert.deepEqual(task.files, ["learnings/ci.d/ci-learning-111-coverage-ratchet.yaml"]);
-  assert.notDeepEqual(task.files, loadPlanFromYaml(second, "second filing").tasks[0]!.files);
-  assert.equal(task.acceptance![0]!.proof, `grep: ci-learning:111:coverage-ratchet in ${task.files![0]}`);
+  const lessonsFile = "learnings/ci.d/ci-learning-111-coverage-ratchet.yaml";
+  assert.deepEqual(task.files, [lessonsFile, `${ciLearningGoldenFixtureDir("ci-learning:111:coverage-ratchet")}/criteria.yaml`]);
+  const secondTask = loadPlanFromYaml(second, "second filing").tasks[0]!;
+  assert.equal(secondTask.files?.[0], "learnings/ci.d/ci-learning-222-coverage-ratchet.yaml");
+  assert.equal(task.acceptance![0]!.proof, `grep: ci-learning:111:coverage-ratchet in ${lessonsFile}`);
   assert.equal(first.includes("learnings/ci.yaml"), false);
   assert.deepEqual(ciLearningRecordVerdict(first, "fixture"), { ok: true, reason: "" });
 });
 
 test("a ci-learning filing also asks for the golden verdict prompt-surface-gate needs beside a learnings path", () => {
-  const filing = ciLearningShardYaml(draft(111), "W1-T111");
+  const learning = draft(111);
+  const filing = ciLearningShardYaml(learning, "W1-T111");
   const task = loadPlanFromYaml(filing, "golden filing").tasks[0]!;
-  const lessonsFile = ciLearningLessonsFile("ci-learning:111:coverage-ratchet");
-  const fixtureDir = ciLearningGoldenFixtureDir("ci-learning:111:coverage-ratchet");
+  const lessonsFile = ciLearningLessonsFile(learning.findingId);
+  const fixtureDir = ciLearningGoldenFixtureDir(learning.findingId);
+  const fixturePath = `${fixtureDir}/criteria.yaml`;
   assert.equal(basename(fixtureDir), basename(lessonsFile, ".yaml"));
-  // The fixture is asked for by a criterion, not declared: a ci-learning record admits exactly one file (W1-T10027).
-  // W1-T13035: that criterion reads the declared lessons file, which names the fixture; a proof on the fixture's own
-  // undeclared path was proof-scope, which the plan preflight blocks on a new shard.
-  assert.deepEqual(task.files, [lessonsFile]);
+  assert.deepEqual(task.files, [lessonsFile, fixturePath]);
   assert.deepEqual(task.acceptance![1], {
     claim: "the lesson carries the golden verdict prompt-surface-gate admits for a learnings path",
-    proof: `grep: ${fixtureDir} in ${lessonsFile}`,
+    proof: `grep: ${learning.findingId} in ${fixturePath}`,
   });
   assert.ok(task.note!.includes(`golden verdict under ${fixtureDir}/`), task.note);
   assert.deepEqual(ciLearningRecordVerdict(filing, "golden filing"), { ok: true, reason: "" });

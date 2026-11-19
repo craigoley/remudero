@@ -1,0 +1,36 @@
+- id: W1-T13768
+  title: "A Codex worker gets CLAUDE.md's headline index once, from its project doc, not again as the rule_headlines prompt part"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  risk: high # Rule 19 sizing: the implement prompt changes for one provider lane
+  origin: "operator-session#pocock-rescan-2026-11-18"
+  plan_refs:
+    - W1-T13725
+    - W1-T3323
+  files:
+    - src/run-task.ts
+    - src/lib/prompt-render.ts
+    - test/worker/a-codex-worker-gets-the-headline-index-once.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A prompt routed to the Codex provider carries no rule_headlines part"
+      proof: 'grep: W1-T13768 criterion 1 in test/worker/a-codex-worker-gets-the-headline-index-once.test.ts'
+    - claim: "invariant:claude-prompt-unchanged — A prompt routed to the Claude provider still carries the rule_headlines part"
+      proof: 'grep: W1-T13768 criterion 2 in test/worker/a-codex-worker-gets-the-headline-index-once.test.ts'
+  rationale: |
+    W1-T13725 (docs/research/claude-md-headlines-by-stage.md): Codex workers load AGENTS.md as the project doc and
+    also get the same 63 headlines as rule_headlines, built before provider routing with no provider check, about
+    21.5 KB of overlap per prompt.
+  design: |
+    Skip the rule_headlines part when the resolved provider is Codex (its project doc already carries the index).
+    Claude workers keep it, since settingSources: [] blocks CLAUDE.md for them.
+    INVARIANT claude-prompt-unchanged: a Claude-routed prompt is byte-identical to today's.
+  falsifier: |
+    Remove the provider check: criterion 1 fails.
+  note: |
+    Id reserved for run-unfiled-1795050000014 with ~/rmd-work/bin/reserve-id.sh.
+    reservation hand-off: run-unfiled-1795050000014 -> claude/project-thread-eatx1y
