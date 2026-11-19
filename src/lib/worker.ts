@@ -52,6 +52,7 @@ import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { recordedWorktreeGitDir } from "./worktree-git.js";
+import { engineTreesRoot, isEngineTreeEntryName } from "./engine-paths.js";
 import { resolveTestSlotDir } from "./test-slot.js";
 import { performance } from "node:perf_hooks";
 import { createSdkMcpServer, query, tool, type Options, type PermissionMode, type SDKUserMessage, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
@@ -5126,9 +5127,6 @@ export function adhocLaneRoot(config: Config): string {
   return join(config.root, "lanes");
 }
 
-/** W1-T10777: the one spelling of `<state>/engines`; engine-tree.ts imports it, and owns every worktree under it. */
-export const ENGINES_DIR = "engines";
-
 /** THE AGE CEILING FOR AN OPERATOR LANE, SIZED FOR A HUMAN RATHER THAN FOR A RUN. Deliberately not {@link
  * DEFAULT_WORKTREE_REAP_GRACE_MS}, which is calibrated against run wall-clock: reusing it would fire on a healthy condition,
  * this repo's recurring defect (W1-T312, W1-T380, W1-T382). The longest legitimate idle window for a hand-cut lane is a long
@@ -7919,7 +7917,12 @@ export async function runAdhocLaneReapRung(
         }
       },
     };
-    const rootSummary = await reap(root, baseOpts);
+    const engineRoot = engineTreesRoot(join(config.root, "state"));
+    const rootOverlapsEngineStore = pathsOverlap(root, engineRoot);
+    const rootSummary = rootOverlapsEngineStore
+      ? { reaped: [], reapedLocks: [], kept: [], keptReasons: [] }
+      : await reap(root, baseOpts);
+    if (rootOverlapsEngineStore) log("adhoc_lane.reap.root_skipped", { root, engine_root: engineRoot, reason: "overlaps-engine-store" });
     summaries.push(rootSummary);
     // LEDGER THE SURVEY EVEN THOUGH NOTHING WAS REMOVED — that IS the deliverable while disarmed. `reapStaleWorktrees`
     // populates `reaped`/`reapedLocks` under `dryRun` precisely so a caller can record what it would have reclaimed
@@ -8004,10 +8007,10 @@ export function unmanagedWorktreeLanes(
   }
   const spellings = (path: string): string[] => [path, canonicalPath(path)];
   const managed = [worktreesDir(config), adhocLaneRoot(config)].flatMap(spellings);
-  const engines = spellings(join(config.root, "state", ENGINES_DIR));
+  const engines = spellings(engineTreesRoot(join(config.root, "state")));
   const main = spellings(repoDir);
   const inside = (forms: string[], roots: string[]): boolean =>
-    forms.some((path) => roots.some((root) => path === root || path.startsWith(`${root}/`)));
+    forms.some((path) => roots.some((root) => path === root || path.startsWith(root.endsWith(sep) ? root : `${root}${sep}`)));
   const lanes: string[] = [];
   for (const line of out.split("\n")) {
     const m = /^worktree (.+)$/.exec(line.trim());
@@ -8017,11 +8020,16 @@ export function unmanagedWorktreeLanes(
     // rung. Compared with a trailing separator so `…/lanes-old` can never read as being inside `…/lanes`.
     const forms = spellings(path);
     if (forms.some((form) => main.includes(form))) continue;
-    if (inside(forms, managed)) continue;
-    if (inside(forms, engines)) {
+    const underEngineStore = inside(forms, engines);
+    // Engine worktrees win a root collision: `lanes` may itself resolve to `<state>/engines`. The engine
+    // owner manages its hash-named trees and `.build-` siblings; a stray non-engine registration there
+    // still belongs in this reaper's census.
+    if (underEngineStore && forms.some((form) => engines.some((engineRoot) =>
+      dirname(form) === engineRoot && isEngineTreeEntryName(basename(form))))) {
       onEngineOwned(path);
       continue;
     }
+    if (!underEngineStore && inside(forms, managed)) continue;
     lanes.push(path);
   }
   return lanes;
@@ -8042,6 +8050,15 @@ function canonicalPath(path: string): string {
       head = up;
     }
   }
+}
+
+/** True when two roots are equal or one contains the other after symlinks are resolved. */
+function pathsOverlap(left: string, right: string): boolean {
+  const a = canonicalPath(left);
+  const b = canonicalPath(right);
+  const contains = (parent: string, child: string): boolean =>
+    child === parent || child.startsWith(parent.endsWith(sep) ? parent : `${parent}${sep}`);
+  return contains(a, b) || contains(b, a);
 }
 
 /** The real `git worktree list` reader {@link unmanagedWorktreeLanes} defaults to. Separated so the survey's own seam is

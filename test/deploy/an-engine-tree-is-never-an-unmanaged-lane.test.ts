@@ -20,8 +20,8 @@ function age(path: string): void {
 }
 
 /** Which directory on the way to `<config.root>/state/engines` is a symlink; "none" is the canonical layout. */
-type Link = "none" | "root" | "state" | "engines";
-const LINKS: readonly Link[] = ["none", "root", "state", "engines"];
+type Link = "none" | "root" | "state" | "engines" | "lanes-engines";
+const LINKS: readonly Link[] = ["none", "root", "state", "engines", "lanes-engines"];
 
 /** Makes `at` a symlink to a new real directory beside it, or a plain directory when `link` names another level. */
 function dir(at: string, link: Link, level: Link): void {
@@ -39,6 +39,7 @@ function fixture(link: Link = "none"): {
   engine: string;
   building: string;
   control: string;
+  staleInEngineRoot?: string;
   registered: () => string[];
 } {
   const root = mkdtempSync(join(realpathSync(tmpdir()), `${RMD_TMP_PREFIX}engine-tree-lane-`));
@@ -52,38 +53,47 @@ function fixture(link: Link = "none"): {
   const engine = enginePath(state, hash);
   const building = join(enginesRoot(state), `.build-${hash.slice(0, 12)}-${process.pid}-1`);
   const control = join(root, "manual", "control");
+  const staleInEngineRoot = link === "lanes-engines" ? join(enginesRoot(state), "stale-lane-registration") : undefined;
   dir(config.root, link, "root");
   dir(state, link, "state");
   dir(enginesRoot(state), link, "engines");
+  if (staleInEngineRoot) symlinkSync(enginesRoot(state), join(config.root, "lanes"));
   mkdirSync(join(root, "manual"), { recursive: true });
-  for (const path of [engine, building, control]) fixtureRepo.git("worktree", "add", "--quiet", "--detach", path, "HEAD");
+  for (const path of [engine, building, control, ...(staleInEngineRoot ? [staleInEngineRoot] : [])]) {
+    fixtureRepo.git("worktree", "add", "--quiet", "--detach", path, "HEAD");
+  }
   writeFileSync(join(engine, "engine.json"), JSON.stringify({ sha, sourceHash: hash, builtAt: 1 }));
-  for (const path of [engine, building, control]) age(path);
-  if (link !== "none") assert.notEqual(realpathSync(engine), engine, "the fixture reaches the engine through a symlink");
+  for (const path of [engine, building, control, ...(staleInEngineRoot ? [staleInEngineRoot] : [])]) age(path);
+  if (link !== "none" && link !== "lanes-engines") {
+    assert.notEqual(realpathSync(engine), engine, "the fixture reaches the engine through a symlink");
+  }
   const registered = (): string[] =>
     fixtureRepo.git("worktree", "list", "--porcelain").split("\n").filter((l) => l.startsWith("worktree ")).map((l) => l.slice(9));
-  return { config, repo, engine: realpathSync(engine), building: realpathSync(building), control, registered };
+  return { config, repo, engine: realpathSync(engine), building: realpathSync(building), control,
+    ...(staleInEngineRoot ? { staleInEngineRoot: realpathSync(staleInEngineRoot) } : {}), registered };
 }
 
 
 test("W1-T10777: an engine tree registered outside the lane roots is not an unmanaged lane", () => {
   for (const link of LINKS) {
-    const { config, repo, engine, building, control } = fixture(link);
+    const { config, repo, engine, building, control, staleInEngineRoot } = fixture(link);
     const engineOwned: string[] = [];
     const lanes = unmanagedWorktreeLanes(config, repo, undefined, (path) => engineOwned.push(path));
-    assert.deepEqual(lanes, [control], `${link} link: only the ordinary lane outside every managed root is an unmanaged lane`);
+    assert.deepEqual(lanes.sort(), [control, ...(staleInEngineRoot ? [staleInEngineRoot] : [])].sort(),
+      `${link} link: non-engine lanes remain in the census, including a stale registration under an aliased engine root`);
     assert.deepEqual(engineOwned.sort(), [engine, building].sort(), `${link} link: the engine trees are left to the engine owner`);
     rmSync(building, { recursive: true, force: true });
     const goneOwned: string[] = [];
     const afterGone = unmanagedWorktreeLanes(config, repo, undefined, (path) => goneOwned.push(path));
-    assert.deepEqual(afterGone, [control], `${link} link: a registered engine tree that is gone is still not a lane`);
+    assert.deepEqual(afterGone.sort(), [control, ...(staleInEngineRoot ? [staleInEngineRoot] : [])].sort(),
+      `${link} link: a gone engine tree stays owned while the stale non-engine registration stays reapable`);
     assert.ok(goneOwned.includes(building), `${link} link: the gone .build- sibling stays with the engine owner`);
   }
 });
 
 test("W1-T10777: an armed ad-hoc reap pass never removes or sizes an engine tree", async () => {
   for (const link of LINKS) {
-    const { config, repo, engine, building, control, registered } = fixture(link);
+    const { config, repo, engine, building, control, staleInEngineRoot, registered } = fixture(link);
     const sized: string[] = [];
     const lines: Array<[string, Record<string, unknown> | undefined]> = [];
     await runAdhocLaneReapRung(config, (step, fields) => lines.push([step, fields]), {
@@ -106,5 +116,12 @@ test("W1-T10777: an armed ad-hoc reap pass never removes or sizes an engine tree
     assert.ok(sized.includes(control), "the stale control lane is still sized");
     assert.equal(existsSync(control), false, "and still reaped");
     assert.ok(!registered().includes(control), "through its parent, so its registration goes too");
+    if (staleInEngineRoot) {
+      assert.ok(sized.includes(staleInEngineRoot), "the stale non-engine registration inside the aliased root still reaches the reaper");
+      assert.equal(existsSync(staleInEngineRoot), false, "and is reaped from the engine-root alias");
+      assert.ok(!registered().includes(staleInEngineRoot), "its registration is removed too");
+      assert.ok(lines.some(([step, fields]) => step === "adhoc_lane.reap.root_skipped" && fields?.reason === "overlaps-engine-store"),
+        "the direct root sweep is skipped before it can enumerate the engine trees");
+    }
   }
 });
