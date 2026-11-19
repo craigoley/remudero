@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { MOVED_FROM_VALUE, parseTasksFromYaml, TASK_RISKS, TASK_STATUSES, TASK_TYPES, type Plan, type Task } from "./plan.js";
+import { join } from "node:path";
+import { loadPlan, loadPlanAtRefAsync, MOVED_FROM_VALUE, parseTasksFromYaml, TASK_RISKS, TASK_STATUSES, TASK_TYPES, type Plan, type Task } from "./plan.js";
 import { planDestinationRepository } from "./plan-destination.js";
 import { readOpsCatalogSnapshotAsync, type OpsCatalogApi, type OpsCatalogSnapshot } from "./ops-catalog-source.js";
 import type { PlanCriteriaAtHeadResult } from "./review.js";
@@ -96,29 +97,66 @@ function isParsedPlanSnapshot(value: unknown): value is Plan {
   }
 }
 
+/** W1-T13749: why one task is held out of a composition. The codes keep the names the whole-catalog refusal had. */
+export type CompositionHoldReason = "duplicate_task_id" | "invalid_cross_catalog_dependency";
+/** The edge that holds a task: its own, or the one a task it depends on (directly or through another) is held by. */
+export interface CompositionHold {
+  reason: CompositionHoldReason;
+  /** The record whose own edge is invalid: an id both catalogs hold, or the task naming the bad dependency. */
+  task: string;
+  /** The id that task's depends_on names: one neither catalog holds, or an ops id a public task names. */
+  dependsOn?: string;
+}
+/** The edge as one line: `TASK -> DEPENDENCY`, or `TASK in both catalogs` for a duplicate. */
+export function compositionHoldEdge(hold: CompositionHold): string {
+  return hold.dependsOn === undefined ? `${hold.task} in both catalogs` : `${hold.task} -> ${hold.dependsOn}`;
+}
+
 type SecondaryComposition =
-  | { outcome: "ok"; plan: Plan; secondaryIds: ReadonlySet<string>; pendingMoveIds: ReadonlySet<string> }
-  | { outcome: "malformed" | "duplicate_task_id" | "invalid_cross_catalog_dependency"; taskId?: string };
+  | { outcome: "ok"; plan: Plan; secondaryIds: ReadonlySet<string>; pendingMoveIds: ReadonlySet<string>;
+    held: ReadonlyMap<string, CompositionHold> }
+  | { outcome: "malformed" };
 
 /** One atomic graph rule shared by observation and explicit live selection.
  *  W1-T13680: an id both catalogs hold whose ops copy carries a valid moved_from is a PENDING MOVE: it is in neither
  *  the composed tasks nor secondaryIds, so neither copy is a dispatch candidate, and every other ops task still
- *  composes. A shared id without that provenance is still a duplicate. */
+ *  composes. A shared id without that provenance is still a duplicate.
+ *  W1-T13749: a bad edge holds its own task, never the catalog. A duplicate holds both copies (duplicate_task_id); a
+ *  public task naming an ops id, and an ops task naming an id neither catalog holds once pending moves are removed,
+ *  are held (invalid_cross_catalog_dependency). Every task depending on a held one, directly or through another, is
+ *  held by the same edge. A held id is in neither the composed tasks nor secondaryIds; every other task composes as
+ *  before. Only a snapshot failing the canonical check still refuses the whole composition, as malformed. */
 export function composeSecondaryPlan(primary: Plan, secondary: Plan): SecondaryComposition {
   if (!isParsedPlanSnapshot(primary) || !isParsedPlanSnapshot(secondary)) return { outcome: "malformed" };
   const primaryIds = new Set(primary.tasks.map(task => task.id));
-  const shared = secondary.tasks.filter(task => primaryIds.has(task.id));
-  const duplicate = shared.find(task => task.moved_from === undefined || !MOVED_FROM_VALUE.test(task.moved_from));
-  if (duplicate) return { outcome: "duplicate_task_id", taskId: duplicate.id };
-  const pendingMoveIds = new Set(shared.map(task => task.id));
-  const secondaryIds = new Set(secondary.tasks.filter(task => !pendingMoveIds.has(task.id)).map(task => task.id));
-  if (primary.tasks.some(task => task.depends_on.some(id => secondaryIds.has(id))) ||
-    secondary.tasks.some(task => task.depends_on.some(id => !primaryIds.has(id) && !secondaryIds.has(id)))) {
-    return { outcome: "invalid_cross_catalog_dependency" };
+  const held = new Map<string, CompositionHold>();
+  const pendingMoveIds = new Set<string>();
+  for (const task of secondary.tasks) {
+    if (!primaryIds.has(task.id)) continue;
+    if (task.moved_from !== undefined && MOVED_FROM_VALUE.test(task.moved_from)) pendingMoveIds.add(task.id);
+    else held.set(task.id, { reason: "duplicate_task_id", task: task.id });
   }
-  const settled = (task: Task) => !pendingMoveIds.has(task.id);
-  const tasks = [...primary.tasks.filter(settled), ...secondary.tasks.filter(settled)];
-  return { outcome: "ok", secondaryIds, pendingMoveIds, plan: { tasks, byId: new Map(tasks.map(task => [task.id, task])) } };
+  const opsOnlyIds = new Set(secondary.tasks.filter(task => !primaryIds.has(task.id)).map(task => task.id));
+  const candidates = [...primary.tasks.filter(task => !pendingMoveIds.has(task.id)),
+    ...secondary.tasks.filter(task => opsOnlyIds.has(task.id))];
+  for (const task of candidates) {
+    if (held.has(task.id)) continue;
+    const ops = opsOnlyIds.has(task.id);
+    const bad = task.depends_on.find(id => ops ? !primaryIds.has(id) && !opsOnlyIds.has(id) : opsOnlyIds.has(id));
+    if (bad !== undefined) held.set(task.id, { reason: "invalid_cross_catalog_dependency", task: task.id, dependsOn: bad });
+  }
+  // Close the held set over dependants until it stops growing; each inherits the edge of its first held dependency.
+  for (let grew = held.size > 0; grew;) {
+    grew = false;
+    for (const task of candidates) {
+      if (held.has(task.id)) continue;
+      const via = task.depends_on.find(id => held.has(id));
+      if (via !== undefined) { held.set(task.id, held.get(via)!); grew = true; }
+    }
+  }
+  const tasks = candidates.filter(task => !held.has(task.id));
+  const secondaryIds = new Set([...opsOnlyIds].filter(id => !held.has(id)));
+  return { outcome: "ok", secondaryIds, pendingMoveIds, held, plan: { tasks, byId: new Map(tasks.map(task => [task.id, task])) } };
 }
 
 /** Resolve a host-private task. The existing public reader owns its reads; only a proven miss opens ops. */
@@ -148,15 +186,17 @@ export async function findTaskInCatalogs(taskId: string, sources: TaskLookupOpti
 
 export type TaskReleasePlan =
   | { outcome: "found"; catalog: "public" | "ops"; plan: Plan }
+  | { outcome: "held"; hold: CompositionHold }
   | Extract<TaskLookupResult, { outcome: "absent" | "unreadable" }>;
 
 /**
  * W1-T13386: the plan an operator's release of `taskId` reads and pins from. A task the public plan holds keeps
  * that plan and opens no private reader. A task only the ops catalog holds gets the plan the daemon's tick
  * dispatches from (`composeSecondaryPlan` over the same two plans), so the pinned record is the one the tick
- * hashes. Two plans the tick cannot compose are `unreadable` with the reason `compose-<the tick's outcome code>`:
- * the tick dispatches no ops task from them, so a release would pin a record no reader holds. The `compose-`
- * prefix keeps that apart from a catalog read that failed (`ops-<outcome>`); either plan may be the cause.
+ * hashes. Two plans the tick cannot compose (a malformed snapshot) are `unreadable` with the reason
+ * `compose-<the tick's outcome code>`; the `compose-` prefix keeps that apart from a catalog read that failed
+ * (`ops-<outcome>`). W1-T13749: an ops task the composition holds is `held` with its edge, so it is never released
+ * while the tick holds it, and a sound ops task beside it is `found` as if the bad edge were absent.
  */
 export async function findReleasePlanInCatalogs(taskId: string, publicPlan: Plan, sources: TaskLookupOptions = {}): Promise<TaskReleasePlan> {
   const lookup = await findTaskInCatalogs(taskId, { ...sources, byId: publicPlan.byId });
@@ -165,7 +205,46 @@ export async function findReleasePlanInCatalogs(taskId: string, publicPlan: Plan
   // An ops hit always kept its snapshot; were one ever missing, the composer reads it as malformed.
   const composition = composeSecondaryPlan(publicPlan, opsPlanForLookup(lookup) as Plan);
   if (composition.outcome !== "ok") return { outcome: "unreadable", reason: `compose-${composition.outcome}` };
+  const hold = composition.held.get(taskId);
+  if (hold !== undefined) return { outcome: "held", hold };
   return { outcome: "found", catalog: "ops", plan: composition.plan };
+}
+
+/** Which public plan a release composed against: the checkout's origin/main, or its working tree and why. */
+export type ReleasePublicPlan =
+  | { plan: Plan; read: "origin/main" }
+  | { plan: Plan; read: "working_tree"; reason: string };
+
+/**
+ * W1-T13749: the public plan an ops release composes against. It is the checkout's origin/main, the ref the
+ * daemon's plan reloader reads (`planReloader` in src/run-task.ts), not the working tree: on the host that is the
+ * boot's detached HEAD, older than every public id filed or moved since the boot. With that ref unreadable, the
+ * working tree is the only plan the checkout holds, and the answer says it was read.
+ */
+export async function readReleasePublicPlan(checkoutRoot: string): Promise<ReleasePublicPlan> {
+  try {
+    return { plan: await loadPlanAtRefAsync(checkoutRoot, "plan/tasks.yaml", "origin/main"), read: "origin/main" };
+  } catch (error) {
+    // The ref read failed, not the plan: the working tree answers, labelled, and its own load errors propagate.
+    const reason = error instanceof Error ? "origin-main-unreadable" : "origin-main-thrown";
+    return { plan: loadPlan(join(checkoutRoot, "plan", "tasks.yaml")), read: "working_tree", reason };
+  }
+}
+
+/**
+ * W1-T13749: the release plan `rmd approve` uses for `taskId`; `undefined` keeps the local plan's own public record.
+ * A local miss composes against `readPublic()` (readReleasePublicPlan of the checkout). A local hit that origin/main
+ * no longer holds (an id moved to the ops catalog after the boot) is resolved through the catalogs, and released
+ * from the ops catalog when that is where it lives now; any other local hit is released as before.
+ */
+export async function findApproveReleasePlan(taskId: string, localPlan: Plan, readPublic: () => Promise<ReleasePublicPlan>,
+  sources: TaskLookupOptions = {}): Promise<TaskReleasePlan | undefined> {
+  if (!localPlan.byId.has(taskId)) return findReleasePlanInCatalogs(taskId, (await readPublic()).plan, sources);
+  if (planDestinationRepository(sources.stateDir).outcome === "off") return undefined;
+  const publicPlan = await readPublic();
+  if (publicPlan.read !== "origin/main" || publicPlan.plan.byId.has(taskId)) return undefined;
+  const moved = await findReleasePlanInCatalogs(taskId, publicPlan.plan, sources);
+  return moved.outcome === "held" || (moved.outcome === "found" && moved.catalog === "ops") ? moved : undefined;
 }
 
 export type CatalogTaskContract = PlanCriteriaAtHeadResult & { taskCatalog?: "public" | "ops" };

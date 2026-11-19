@@ -1,0 +1,35 @@
+- id: W1-T13757
+  title: "A home-repo overlay pointer file lands in core, and no reader uses it yet"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  risk: high # Rule 19 sizing: the change and its own falsifier (or several docs of one concern); no worker or daemon path changes beyond the files named
+  origin: "operator-session#pocock-rescan-2026-11-18"
+  plan_refs:
+    - W1-T13729
+  files:
+    - .remudero/overlay-home.json
+    - test/plan/an-overlay-home-pointer-parses-and-nothing-reads-it.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The overlay pointer is JSON naming one owner/name repository and the relative paths it holds, with no host path or secret"
+      proof: 'grep: W1-T13757 criterion 1 in test/plan/an-overlay-home-pointer-parses-and-nothing-reads-it.test.ts'
+    - claim: "No src or deploy file reads the pointer yet"
+      proof: 'grep: W1-T13757 criterion 2 in test/plan/an-overlay-home-pointer-parses-and-nothing-reads-it.test.ts'
+  rationale: |
+    W1-T13729 (docs/research/what-core-holds-for-one-operator.md) step 2.0: every later move needs a declared place
+    for one fleet's private values. The name avoids .remudero/home-repo.json, which already means the feedback
+    upstream target (W1-T397).
+  design: |
+    Add .remudero/overlay-home.json naming the private home repository and the paths it holds. The test parses it
+    and walks src/ and deploy/ for readers (0). The pointer names a repository, never a host path or secret. Its
+    parser lands with its first reader, W1-T13763.
+    NO-INVARIANTS: a new file nothing reads; no behaviour changes.
+  falsifier: |
+    Add a reader in src/: criterion 2 fails.
+  note: |
+    Id reserved for run-unfiled-1795050000003 with ~/rmd-work/bin/reserve-id.sh.
+    reservation hand-off: run-unfiled-1795050000003 -> claude/project-thread-eatx1y

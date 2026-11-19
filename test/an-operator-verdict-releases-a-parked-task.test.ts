@@ -477,8 +477,6 @@ test("W1-T13386 criterion 3: approve names an unreadable ops catalog, writes not
   const cases: Array<{ name: string; host: Parameters<typeof hostWithSecondCatalog>[1]; reason: RegExp; reads: boolean }> = [
     { name: "the transport fails", host: { transport: "down" }, reason: /\(ops-unreadable\)/, reads: true },
     { name: "the host file that names the catalog is not JSON", host: { destination: "{not json" }, reason: /\(destination-unreadable\)/, reads: false },
-    { name: "the catalog repeats a public id, so the tick composes no plan from the two", host: { opsText: shardText(OPS_ID) + shardText(PUBLIC_ID) },
-      reason: /\(compose-duplicate_task_id\)/, reads: true },
   ];
   const everything = everythingSaid(t);
   for (const { name, host: shape, reason, reads } of cases) {
@@ -497,6 +495,29 @@ test("W1-T13386 criterion 3: approve names an unreadable ops catalog, writes not
       assert.equal(host.calls.length > 0, reads, `control: the catalog read ${reads ? "was" : "was not"} attempted — ${label}`);
     }
   }
+});
+
+test("W1-T13749 criterion 6: approve refuses an ops task held by its own edge, naming the reason and the edge, and releases the sound task beside a repeated public id", async t => {
+  const everything = everythingSaid(t);
+  for (const handed of [true, false]) {
+    const host = hostWithSecondCatalog(t, { opsText: shardText(OPS_ID).replace("depends_on: []", `depends_on: [${NOWHERE_ID}]`) });
+    const from = everything.length;
+    const code = handed
+      ? await approveCommand([OPS_ID], { config: host.config, planPath: host.planPath, taskLookup: { api: host.api } })
+      : await approveAsTheHostRunsIt(host, [OPS_ID]);
+    const said = everything.slice(from).join("\n"), label = `${handed ? "handed" : "as the host runs it"}: ${said}`;
+    assert.equal(code, 1, label);
+    assert.match(said, new RegExp(`cannot release '${OPS_ID}': it is held by its own edge \\(invalid_cross_catalog_dependency: ${OPS_ID} -> ${NOWHERE_ID}\\) — nothing released`), label);
+    assert.doesNotMatch(said, /unknown task|cannot be read/, label);
+    assert.equal(host.wroteAnything(), false, `no row and no record — ${label}`);
+  }
+  // The catalog repeats the public id: that id is held, and the ops task beside it is released as the tick pins it.
+  const host = hostWithSecondCatalog(t, { opsText: shardText(OPS_ID) + shardText(PUBLIC_ID) }), from = everything.length;
+  const tick = await host.tick();
+  assert.equal(await approveCommand([OPS_ID], { config: host.config, planPath: host.planPath, taskLookup: { api: host.api } }), 0,
+    everything.slice(from).join("\n"));
+  assert.match(everything.slice(from).join("\n"), new RegExp(`${OPS_ID} RELEASED`));
+  assert.equal(host.releaseRows(OPS_ID)[0]?.release_pin, tick.pin, "pinned from the record the tick hashes");
 });
 
 test("W1-T13386 criterion 4: an id in neither catalog is refused as unknown and nothing is written", async t => {

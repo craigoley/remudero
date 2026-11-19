@@ -63,6 +63,9 @@ test("test/a-checkout-pull-does-not-erase-loaded-code-staleness.test.ts", async 
     const guardedEnv = ["CI", "GITHUB_ACTIONS", SELF_SYNC_GUARD_ENV] as const;
     const savedEnv = guardedEnv.map((name) => [name, process.env[name]] as const);
     for (const name of guardedEnv) delete process.env[name];
+    // W1-T13664: a freshness fetch with a bound forks through the installed spawn helper, a process this test's
+    // in-process execFile redirect cannot reach; the switch off keeps the daemon's boot from installing one.
+    const savedHelperSwitch = process.env.RMD_SPAWN_HELPER; process.env.RMD_SPAWN_HELPER = "off";
     const originalSync = childProcess.execFileSync, originalAsync = childProcess.execFile;
     let captures = 0;
     let recoveredLoaded: string | undefined;
@@ -103,6 +106,7 @@ test("test/a-checkout-pull-does-not-erase-loaded-code-staleness.test.ts", async 
       sync.mock.restore(); async.mock.restore(); syncBuiltinESMExports();
       if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
       for (const [name, value] of savedEnv) { if (value === undefined) delete process.env[name]; else process.env[name] = value; }
+      if (savedHelperSwitch === undefined) delete process.env.RMD_SPAWN_HELPER; else process.env.RMD_SPAWN_HELPER = savedHelperSwitch;
     }
   });
 

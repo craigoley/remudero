@@ -533,8 +533,13 @@ function isScoutDraftShape(task: Task): boolean {
   return task.origin?.startsWith("scout:") === true && files.length > 0 && SCOUT_TEST_FILE.test(files[files.length - 1]!);
 }
 
-function isCiLearningLessonPath(path: string): boolean {
-  return /^learnings\/ci\.d\/[a-z0-9]+(?:-[a-z0-9]+)*\.yaml$/.test(path);
+const CI_LEARNING_LESSON_PATH = /^learnings\/ci\.d\/([a-z0-9]+(?:-[a-z0-9]+)*)\.yaml$/;
+
+function isCiLearningProposalShape(files: readonly string[]): boolean {
+  const [lesson, fixture] = files;
+  const slug = CI_LEARNING_LESSON_PATH.exec(lesson ?? "")?.[1];
+  if (files.length === 1) return lesson === "learnings/ci.yaml" || slug !== undefined;
+  return files.length === 2 && slug !== undefined && fixture === `test/fixtures/golden-verdicts/${slug}/criteria.yaml`;
 }
 
 function isParkedMachineProposal(task: Task): boolean {
@@ -549,9 +554,9 @@ function isParkedMachineProposal(task: Task): boolean {
     task.status !== "blocked" &&
     (task.depends_on ?? []).length === 0 &&
     (isSelectorShadowEdgeShape(task) || isFlakeIncidentShape(task) ||
+      (task.origin?.startsWith("ci-learning:") === true && isCiLearningProposalShape(task.files ?? [])) ||
       (task.files?.length === 1 &&
-        ((task.origin?.startsWith("ci-learning:") === true && (task.files[0] === "learnings/ci.yaml" || isCiLearningLessonPath(task.files[0]!))) ||
-          (task.origin?.startsWith("ci-friction:") === true && task.files[0] === "docs/ci-friction-remedies.md") ||
+        ((task.origin?.startsWith("ci-friction:") === true && task.files[0] === "docs/ci-friction-remedies.md") ||
           (task.origin?.startsWith("host-resource:") === true && task.files[0] === "deploy/rmd-host-cleanup.sh"))))
   );
 }
@@ -1528,9 +1533,13 @@ export function machineFilingAdmissionViolations(
   const created = (path: string) => NEW_TEST_FILE.test(path) || (path === ".gitattributes" && isHotFileRemedyProposal(task));
   const declared = task.files ?? [];
   const scoutNew = isScoutDraftShape(task) ? declared[declared.length - 1] : undefined;
-  const newLessonAllowed = task.origin?.startsWith("ci-learning:") === true && declared.length === 1 && isParkedMachineProposal(task);
+  const ciLearning = task.origin?.startsWith("ci-learning:") === true;
+  if (ciLearning && !isCiLearningProposalShape(declared)) {
+    reasons.push(`task ${task.id} CI-learning scope must be its lessons file and optional matching golden criteria fixture: ${declared.join(", ")}`);
+  }
+  const newLessonAllowed = ciLearning && isParkedMachineProposal(task) && CI_LEARNING_LESSON_PATH.test(declared[0] ?? "");
   const missing = missingDeclaredPaths(task, context, (path) =>
-    (newTestAllowed && created(path)) || path === scoutNew || (newLessonAllowed && isCiLearningLessonPath(path)));
+    (newTestAllowed && created(path)) || path === scoutNew || newLessonAllowed);
   if (missing.length > 0) {
     reasons.push(
       `task ${task.id} declares file path(s) that exist in neither the checkout nor the base tree: ` +
