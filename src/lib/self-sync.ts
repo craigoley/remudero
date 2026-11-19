@@ -54,6 +54,12 @@ function abortError(signal: AbortSignal): Error {
   return Object.assign(new Error("The operation was aborted"), { name: "AbortError", code: "ABORT_ERR", cause: signal.reason });
 }
 
+/** W1-T13664: the options a routed git call hands the helper — the helper's own timer is the call's bound, which is
+ *  how it stops a child that only a bound can stop. Kept apart from `asyncGit` because that function starts the child. */
+function routedGitOptions(options: { maxBuffer?: number }, env: NodeJS.ProcessEnv | undefined, boundMs: number | undefined) {
+  return { encoding: "utf8" as const, ...options, env, ...(boundMs === undefined ? {} : { timeout: boundMs }) };
+}
+
 /** The real {@link AsyncGitRunner}: `git -C <repoDir>` off the loop, killed (SIGTERM, then SIGKILL
  *  after grace) when its bound aborts. Exported for the retro trigger merged-commits read.
  *  W1-T13664: with a spawn helper installed, a call with no signal, or one that names its `boundMs`, forks through it
@@ -62,7 +68,7 @@ function abortError(signal: AbortSignal): Error {
 export function asyncGit(repoDir: string, options: { maxBuffer?: number } = {}): AsyncGitRunner {
   return (args, signal, env, boundMs) => {
     const argv = ["-C", repoDir, ...args];
-    const routed = { encoding: "utf8" as const, ...options, env, ...(boundMs === undefined ? {} : { timeout: boundMs }) };
+    const routed = routedGitOptions(options, env, boundMs);
     if ((signal === undefined || boundMs !== undefined) && spawnRoute(routed).why === undefined) {
       if (signal?.aborted) return Promise.reject(abortError(signal));
       const run = execFileRouted("git", argv, routed).then(({ stdout }) => stdout);

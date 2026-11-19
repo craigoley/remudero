@@ -7,6 +7,7 @@ import { boundGitCall } from "#src/lib/git-fetch-retry.js";
 import { defaultOpsCatalogApi } from "#src/lib/ops-catalog-source.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
+import { assertWallClockBound } from "#test/helpers/wall-clock-bound.js";
 import { asyncGit } from "#src/lib/self-sync.js";
 import { bootSpawnHelper, installedSpawnHelper, installSpawnHelper, SPAWN_HELPER_SWITCH, startSpawnHelper,
   stopBootedSpawnHelper, type SpawnHelper } from "#src/lib/spawn-helper.js";
@@ -99,7 +100,7 @@ test("W1-T13664: a git read and a bounded fetch fork through the installed helpe
     // A fetch that never ends: the helper stops its child at the bound, and the call rejects.
     const began = Date.now();
     await assert.rejects(asyncGit(repo)(["fetch"], new AbortController().signal, slow.env, 300));
-    assert.ok(Date.now() - began < 4_000, "the child was stopped at its bound, not at its own end");
+    assertWallClockBound(Date.now() - began, 4_000, "the child was stopped at its bound, not at its own end");
   } finally {
     stopInstalled();
     slow.cleanup();
@@ -120,7 +121,7 @@ test("W1-T13664: a routed git call settles at its abort, and a failing child rej
     const began = Date.now();
     setTimeout(() => controller.abort(), 100);
     await assert.rejects(asyncGit("/tmp")(["fetch"], controller.signal, hung.env, 20_000), { name: "AbortError" });
-    assert.ok(Date.now() - began < 3_000, "settled at the abort, not at the child's end");
+    assertWallClockBound(Date.now() - began, 3_000, "settled at the abort, not at the child's end");
 
     const already = new AbortController();
     already.abort();
