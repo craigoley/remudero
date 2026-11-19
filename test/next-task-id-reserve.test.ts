@@ -34,11 +34,11 @@ import {
   describeReservationRefusal,
   nextTaskIdCommand as runNextTaskIdCommand,
   readReservationHolder,
-  TASK_ID_DESTINATION_MAX_BUFFER,
   taskIdDestinationSnapshot,
   validateReserveArgs,
 } from "../src/run-task.js";
 import { type RemoteRefReserver, type RemoteReserveOutcome } from "../src/lib/task-id-reservation.js";
+import { hostWorktreeGitAsync } from "#src/lib/worktree-git.js";
 import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "./helpers/git-repo.js";
 
 const mintRepo = gitRepo({ kind: "reserve-mint-plan" });
@@ -401,7 +401,8 @@ test("W1-T9683: a partial next-task-id --count prints only the ids it holds and 
 
 // A plan destination whose plan is bigger than Node's 1 MiB child stdout default. Before the bound, the batched blob
 // read failed with "stdout maxBuffer length exceeded" and the mint refused as "plan destination is unreadable at plan".
-test("a plan destination larger than one mebibyte still yields its task id population", async t => {
+// W1-T13824: the batch's bound is now the exact byte count the size listing names, never a fixed constant.
+test("W1-T13824 criterion 4: a plan destination larger than one mebibyte mints with the batch bound the listing derives", async t => {
   const origin = gitRepo({ bare: true, scope: t }), seed = gitRepo({ scope: t }), root = gitRepo({ scope: t });
   mkdirSync(join(seed.dir, "plan", "tasks.d"), { recursive: true });
   writeFileSync(join(seed.dir, "plan", "tasks.yaml"), "[]\n");
@@ -416,9 +417,22 @@ test("a plan destination larger than one mebibyte still yields its task id popul
   writeFileSync(join(stateDir, "plan-destination.json"), JSON.stringify({ repository: "fixture-owner/ops", kinds: [] }));
   mkdirSync(join(root.dir, "repos"), { recursive: true });
   root.git("clone", "--quiet", origin.dir, join(root.dir, "repos", "ops"));
-  assert.ok(TASK_ID_DESTINATION_MAX_BUFFER > 3 * filler.length, "the bound holds the whole fixture plan");
-  const snapshot = await taskIdDestinationSnapshot({ destinationStateDir: () => stateDir, destinationPrFetch: async () => [] });
+  const plain = await taskIdDestinationSnapshot({ destinationStateDir: () => stateDir, destinationPrFetch: async () => [] });
+  assert.deepEqual([...(plain?.ids ?? [])].sort(), ids, "the default destination git mints");
+  // The production git call, with the bound the snapshot hands it; only the bound is recorded.
+  const bounds: Array<{ args: string[]; maxBuffer: number | undefined }> = [];
+  const destinationGit = (cwd: string, args: string[], input?: string, opts?: { maxBuffer?: number }) => {
+    bounds.push({ args, maxBuffer: opts?.maxBuffer });
+    return hostWorktreeGitAsync(cwd, args, { ...(opts?.maxBuffer === undefined ? {} : { maxBuffer: opts.maxBuffer }), ...(input === undefined ? {} : { input }) });
+  };
+  const snapshot = await taskIdDestinationSnapshot({ destinationStateDir: () => stateDir, destinationPrFetch: async () => [], destinationGit });
   assert.ok(snapshot, "a named destination answers");
   assert.deepEqual([...snapshot.ids].sort(), ids);
   assert.ok(snapshot.planTexts.reduce((n, text) => n + text.length, 0) > 1024 * 1024, "the fixture really exceeds 1 MiB");
+  const batch = bounds.filter(call => call.args[0] === "cat-file");
+  assert.equal(batch.length, 1, "one batch");
+  const paths = ["plan/tasks.d/OPS-T1-fixture.yaml", "plan/tasks.d/OPS-T2-fixture.yaml", "plan/tasks.d/OPS-T3-fixture.yaml", "plan/tasks.yaml"];
+  const written = spawnSync("git", ["-C", origin.dir, "cat-file", "--batch"], { input: paths.map(p => `main:${p}`).join("\n") + "\n", maxBuffer: 1 << 30 }).stdout.length;
+  assert.equal(batch[0]!.maxBuffer, written, "the batch bound is the exact byte count git writes");
+  assert.ok(bounds.filter(call => call.args[0] !== "cat-file").every(call => call.maxBuffer === undefined), "the other calls keep their default");
 });
