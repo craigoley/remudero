@@ -7,6 +7,7 @@ import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { parse as parseYaml } from "yaml";
 
 import { readAffectedSuitesInput, selectAffectedSuites, type AffectedSuitesInput } from "./affected-suites.js";
+import { flagValue } from "./cli-args.js";
 import { defaultPreflightSpawn, spawnFailureDetail, typecheckStep, type PreflightSpawn } from "./commit-message.js";
 import { CENSUS_POPULATION, isRuleSuitePath, type CensusPopulationMember } from "./rule-suites.js";
 import { resolveTestPath } from "./test-path-resolver.js";
@@ -3676,7 +3677,8 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
   const scriptNames = fastGateScriptNames(repoRoot, deps.packageJsonText);
   const now = deps.now ?? Date.now;
   // W1-T12511: the author's static stage (marked by its census answer for this head) runs only the steps no CI job runs.
-  const gateSteps = deps.steps ?? (authorStaticStage(repoRoot) ? authorCiSplit(readAuthorCiContract(repoRoot)).staticSteps : FAST_GATE_STEPS);
+  const authorStatic = deps.steps === undefined && authorStaticStage(repoRoot);
+  const gateSteps = deps.steps ?? (authorStatic ? authorCiSplit(readAuthorCiContract(repoRoot)).staticSteps : FAST_GATE_STEPS);
   const timingClock = deps.timingNow ? clockFromMillisFn(deps.timingNow) : undefined;
   const timings = gateSteps.map(() => createStaticCheckTiming(spawn, timingClock));
   // W1-T8920 — in a repo that is not the harness's own, core's steps it does not hold are skipped.
@@ -3789,6 +3791,17 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
           `${FAST_GATE_CENSUS_REFERENCE_FLOOR_MS}ms, plus the margin); its own result would have PASSed. Refused by a bound ` +
           `derived from this run's own measurements, never by a written constant a growing corpus outgrows`,
       });
+    }
+  }
+  if (!consumer && !deps.light && (authorStatic || gateSteps.some(({ runner }) => runner === "rule-checks"))) {
+    const base = (authorStatic ? flagValue(process.argv.slice(2), "--from") : undefined) ?? "origin/main";
+    try {
+      const { ruleSuiteShadowLine } = require("../../scripts/record-rule-suite-reads.mjs") as {
+        ruleSuiteShadowLine(root: string, listSuites: () => string[], base: string): string;
+      };
+      console.log(ruleSuiteShadowLine(repoRoot, () => listRuleSuites(repoRoot), base));
+    } catch (error) {
+      console.log(`rule-checks: shadow unavailable: ${String(error).replace(/\s+/g, " ")}`);
     }
   }
   return {

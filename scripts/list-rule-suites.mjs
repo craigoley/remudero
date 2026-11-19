@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { listRuleSuites } from "../src/lib/ci-parity.ts";
 import { lowPriorityCommand, pressureWidth, readHostPressure } from "../src/lib/test-slot.ts";
 import { isMainModule } from "./lib/argv.mjs";
+import { recordRuleSuiteReads, ruleSuiteShadowLine } from "./record-rule-suite-reads.mjs";
 import { boundedNodeTestArgs } from "./test-tier-manifest.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
@@ -205,7 +206,7 @@ export function measureSuiteStarts(n, suite, { repoRoot = root, run = spawnSync,
   return failed ? 1 : 0;
 }
 
-const USAGE = "usage: node --import tsx scripts/list-rule-suites.mjs [--list|--run] | --measure-starts <n> [suite]";
+const USAGE = "usage: node --import tsx scripts/list-rule-suites.mjs [--list|--run] | --measure-starts <n> [suite] | --refresh-reads | [--list|--run] --scope <base>";
 
 /** The CLI: `--list` (the default) prints the population, `--run` executes it at a width that follows host
  *  pressure, starting from {@link ruleSuiteConcurrency}, or one at a time through an injected `run`, and
@@ -219,15 +220,27 @@ export function main(argv, run, concurrency = ruleSuiteConcurrency(), runConcurr
     }
     return measureSuiteStarts(Number(count), suite, { run: run ?? spawnSync });
   }
-  if (argv.includes("--run")) {
-    if (run !== undefined || concurrency === 1) return runRuleSuites(root, run ?? spawnSync);
-    return runConcurrently(root, { concurrency, pressure, rerunAlone });
+  if (argv.length === 1 && argv[0] === "--refresh-reads") {
+    return recordRuleSuiteReads(root, ruleSuites(), suiteArgs);
   }
-  if (argv.length > 0 && !argv.includes("--list")) {
+  const scopeAt = argv.indexOf("--scope");
+  const base = scopeAt < 0 ? undefined : argv[scopeAt + 1];
+  const modes = argv.filter((_, i) => scopeAt < 0 || (i !== scopeAt && i !== scopeAt + 1));
+  if ((scopeAt >= 0 && (!base || base.startsWith("-"))) || modes.length > 1 ||
+      modes.some((arg) => arg !== "--run" && arg !== "--list")) {
     console.error(USAGE);
     return 2;
   }
-  for (const suite of ruleSuites()) console.log(suite);
+  if (base !== undefined) {
+    console.log(ruleSuiteShadowLine(root, ruleSuites, base));
+  }
+  if (modes[0] === "--run") {
+    if (run !== undefined || concurrency === 1) return runRuleSuites(root, run ?? spawnSync);
+    return runConcurrently(root, { concurrency, pressure, rerunAlone });
+  }
+  if (base === undefined || modes[0] === "--list") {
+    for (const suite of ruleSuites()) console.log(suite);
+  }
   return 0;
 }
 
