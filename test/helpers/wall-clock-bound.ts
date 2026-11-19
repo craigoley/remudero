@@ -52,3 +52,21 @@ export function assertWallClockBound(measured: number, bound: number, message: s
     operator: "assertWallClockBound",
   });
 }
+
+/** Time one synchronous reference workload and use its measured cost to set the bound. */
+export function deriveWallClockBound(
+  calibrate: () => undefined,
+  ratio: number,
+  fallbackMs: number,
+):
+  | { source: "calibrated"; boundMs: number; calibrationMs: number }
+  | { source: "fallback"; boundMs: number; calibrationMs: null; reason: unknown } {
+  const started = performance.now();
+  try {
+    calibrate();
+  } catch (reason) {
+    return { source: "fallback", boundMs: fallbackMs, calibrationMs: null, reason };
+  }
+  const calibrationMs = performance.now() - started;
+  return { source: "calibrated", boundMs: calibrationMs * ratio, calibrationMs };
+}

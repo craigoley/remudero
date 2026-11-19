@@ -1,0 +1,36 @@
+- id: W1-T13733
+  title: "A shadow instance's sweep reviews its repository's open pull requests and posts remudero-review exactly as a live instance does; only arming and merging stay refused"
+  repo: remudero
+  depends_on: []
+  priority: 0.4
+  type: implement
+  verify: auto
+  risk: low # pins and, if needed, restores review on a shadow instance; arm and merge refusals are unchanged
+  origin: "human#2026-11-18-rethink-ops-tracking"
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/a-shadow-instance-still-reviews-its-repository-s-pull-requests.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "With repoMode shadow, a reviewable open pull request is reviewed and its remudero-review status is posted on the exact head, as with repoMode live"
+      proof: "grep: W1-T13733 criterion 1 in test/sweep/a-shadow-instance-still-reviews-its-repository-s-pull-requests.test.ts"
+    - claim: "invariant:shadow-never-merges — with repoMode shadow, arm still returns shadow-refused and no direct merge is attempted"
+      proof: "grep: W1-T13733 criterion 2 in test/sweep/a-shadow-instance-still-reviews-its-repository-s-pull-requests.test.ts"
+  rationale: |
+    Operator ruling 2026-11-18 03:22Z (thread "Rethink how ops tracks fleet work"): ops workflow and script pull
+    requests merge through the fleet reviewer instead of the operator's hand. remudero-ops is registered as a
+    shadow instance (W1-T13498). OBSERVED at core 773fdf09: src/lib/sweep.ts gates arm on repoMode === "shadow"
+    ("automerge.shadow_refused") and headRehome's judgeQuiet; no review path reads repoMode. So a shadow instance
+    should already post remudero-review, but no test pins it, and the ops review gate (W1-T13599) depends on it.
+    This task pins the behaviour, and restores it if the builder finds a shadow gate on the review path.
+    Refiled from the private catalog's W1-T13598 under a new id: core can neither dispatch nor review a
+    repo: remudero task filed there while its private-catalog read is unreadable (W1-T13705 diagnoses that read),
+    so the original never built. The private record is retired with a pointer here.
+  design: |
+    Drive the sweep with repoMode "shadow" and a fake GitHub holding one reviewable open PR (green required
+    checks, Remudero-Task trailer). Assert the review lane runs and the pending/terminal remudero-review status
+    is posted on the PR's head sha, identical to the repoMode "live" run of the same fixture. If any review step
+    is skipped under shadow, remove only that gate.
+    INVARIANT shadow-never-merges: arm returns "shadow-refused", automerge.shadow_refused is logged, and no merge
+    call is made, in the same fixture.
