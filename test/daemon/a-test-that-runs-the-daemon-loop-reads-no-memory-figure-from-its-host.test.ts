@@ -182,44 +182,55 @@ function usesUnpinnedDaemon(text: string): boolean {
       target.property.value === "runDaemon";
   }
 
-  function suppliesGovernor(expression: Expression): boolean {
+  function suppliesGovernor(expression: Expression, nullishParameters: ReadonlyMap<string, boolean> = new Map()): boolean {
     const value = resolveConst(expression);
+    if (value.type === "Identifier" && nullishParameters.has(bindingKey(value))) {
+      return !nullishParameters.get(bindingKey(value));
+    }
     return value.type !== "NullLiteral" &&
       !(value.type === "Identifier" && value.value === "undefined") &&
       !(value.type === "UnaryExpression" && value.operator === "void");
   }
 
   const resolving = new Set<Expression>();
-  function governorIn(deps: Expression | undefined, parameters: ReadonlyMap<string, GovernorPin>): GovernorPin {
+  function governorIn(
+    deps: Expression | undefined,
+    parameters: ReadonlyMap<string, GovernorPin>,
+    nullishParameters: ReadonlyMap<string, boolean> = new Map(),
+  ): GovernorPin {
     if (!deps || resolving.has(deps)) return undefined;
     resolving.add(deps);
     try {
-      return resolveGovernor(unwrapExpression(deps), parameters);
+      return resolveGovernor(unwrapExpression(deps), parameters, nullishParameters);
     } finally {
       resolving.delete(deps);
     }
   }
 
   // Follow dependency object literals, const bindings and simple local factories.
-  function resolveGovernor(deps: Expression, parameters: ReadonlyMap<string, GovernorPin>): GovernorPin {
+  function resolveGovernor(
+    deps: Expression,
+    parameters: ReadonlyMap<string, GovernorPin>,
+    nullishParameters: ReadonlyMap<string, boolean>,
+  ): GovernorPin {
     switch (deps.type) {
       case "Identifier": {
         const key = bindingKey(deps);
         if (parameters.has(key)) return parameters.get(key);
         const binding = bindings.get(key);
-        return binding?.type === "FunctionDeclaration" ? undefined : governorIn(binding, parameters);
+        return binding?.type === "FunctionDeclaration" ? undefined : governorIn(binding, parameters, nullishParameters);
       }
       case "ObjectExpression": {
         let pin: GovernorPin;
         for (const property of deps.properties) {
           if (property.type === "SpreadElement") {
-            pin = governorIn(property.arguments, parameters) ?? pin;
+            pin = governorIn(property.arguments, parameters, nullishParameters) ?? pin;
           } else if (property.type === "Identifier" && property.value === "memoryGovernor") {
-            pin = suppliesGovernor(property);
+            pin = suppliesGovernor(property, nullishParameters);
           } else if (property.type === "KeyValueProperty" &&
             (property.key.type === "Identifier" || property.key.type === "StringLiteral") &&
             property.key.value === "memoryGovernor") {
-            pin = suppliesGovernor(property.value);
+            pin = suppliesGovernor(property.value, nullishParameters);
           }
         }
         return pin;
@@ -236,13 +247,16 @@ function usesUnpinnedDaemon(text: string): boolean {
         const last = "stmts" in body ? body.stmts.at(-1) : undefined;
         const result = "stmts" in body ? (last?.type === "ReturnStatement" ? last.argument : undefined) : body;
         const locals = new Map(parameters);
+        const nullishLocals = new Map(nullishParameters);
         factory.params.forEach((parameter, index) => {
           const pattern = parameter.type === "Parameter" ? parameter.pat : parameter;
           if (pattern.type === "Identifier") {
-            locals.set(bindingKey(pattern), governorIn(deps.arguments[index]?.expression, parameters));
+            const argument = deps.arguments[index]?.expression;
+            locals.set(bindingKey(pattern), governorIn(argument, parameters, nullishParameters));
+            nullishLocals.set(bindingKey(pattern), argument === undefined || !suppliesGovernor(argument, nullishParameters));
           }
         });
-        return governorIn(result, locals);
+        return governorIn(result, locals, nullishLocals);
       }
       default:
         return undefined;
@@ -298,12 +312,25 @@ test("the daemon memory census counts a nullish shorthand governor even after a 
   assert.equal(usesUnpinnedDaemon(fixture + "const memoryGovernor = fakeGovernor();" + call), false);
 });
 
+test("the daemon memory census counts an omitted optional governor factory parameter", () => {
+  const fixture = `
+    import { runDaemon } from "#src/lib/daemon.js";
+    function daemonDeps(memoryGovernor?) { return { memoryGovernor }; }
+  `;
+  assert.equal(usesUnpinnedDaemon(fixture + "runDaemon(plan, daemonDeps());"), true);
+  assert.equal(usesUnpinnedDaemon(fixture + "runDaemon(plan, daemonDeps(undefined));"), true);
+  assert.equal(usesUnpinnedDaemon(fixture + "const governor = {}; runDaemon(plan, daemonDeps(governor));"), false);
+});
+
 // @source-text-subject: test/**/*.test.ts — use of the daemon's memory seams.
 // @census-reads: test/**/*.test.ts
 test("W1-T12163 criterion 3: the number of test files without daemon memory pins only goes down", () => {
   // Measured per call after the W1-T12163 migrations on 2026-11-19.
   const baseline = 230;
   const testRoot = join(REPO_ROOT, "test");
+  const mixedDaemonFile = fs.readFileSync(join(testRoot, "heavy-new-build-admission.test.ts"), "utf8");
+  assert.equal(usesUnpinnedDaemon(mixedDaemonFile), true,
+    "a memory pin on one runDaemon call must not hide another unpinned call in the same file");
   const unpinned = fs.globSync("**/*.test.ts", { cwd: testRoot })
     .filter((file) => usesUnpinnedDaemon(fs.readFileSync(join(testRoot, file), "utf8")))
     .sort();
