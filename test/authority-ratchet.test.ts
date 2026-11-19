@@ -275,18 +275,18 @@ test("W1-T13773 criterion 1: the two plan-move rows name the daemon caller and r
     assert.deepEqual(caller.ledgerSteps, [PLAN_MOVE_JANITOR_STEP, PLAN_MOVE_STAND_DOWN]);
     const at = lines.findIndex((l) => l.startsWith(`${id.padEnd(42)} `));
     assert.ok(at > 0);
-    assert.equal(lines[at].split(/\\s+/)[1], "operator-verb");
+    assert.equal(lines[at].split(/\s+/)[1], "operator-verb");
     const callerLine = lines[at + 1] ?? "";
-    assert.match(callerLine, /^\\s+\\S/);
+    assert.match(callerLine, /^\s+\S/);
     for (const part of ["daemon plan-task-move action", "host-switch", "state/plan-destination.json move_public_tasks", "src/lib/plan-task-move-janitor.ts"]) assert.ok(callerLine.includes(part));
   }
 });
 
 test("W1-T13773 criterion 4: the four original shapes and empty per-file baseline remain intact", () => {
-  assert.equal(ASSERT_LIVE_WRITE_RE.source, String.raw`assertLiveWriteAllowed\\(\\s*\\"([a-z-]+)\\"`);
-  assert.equal(GH_VERB_RE.source, String.raw`\\"-X\\"\\s*,\\s*\\"(POST|PATCH|PUT|DELETE)\\"`);
-  assert.equal(GH_SUBCOMMAND_RE.source, String.raw`\\[\\s*\\"(pr|issue)\\"\\s*,\\s*\\"(create|merge|comment|close|review)\\"`);
-  assert.equal(GIT_PUSH_ARGV_RE.source, String.raw`\\[\\s*\\"push\\"`);
+  assert.equal(ASSERT_LIVE_WRITE_RE.source, String.raw`assertLiveWriteAllowed\(\s*"([a-z-]+)"`);
+  assert.equal(GH_VERB_RE.source, String.raw`"-X"\s*,\s*"(POST|PATCH|PUT|DELETE)"`);
+  assert.equal(GH_SUBCOMMAND_RE.source, String.raw`\[\s*"(pr|issue)"\s*,\s*"(create|merge|comment|close|review)"`);
+  assert.equal(GIT_PUSH_ARGV_RE.source, String.raw`\[\s*"push"`);
   assert.deepEqual([...EXCLUDED_MODULES], ["src/lib/authority.ts", "src/lib/live-write-guard.ts"]);
   const detected = filesWithExternalWrites();
   assert.ok([...detected.keys()].every((f) => SRC_TS_RE.test(f) && !EXCLUDED_MODULES.has(f)));

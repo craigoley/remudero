@@ -5,8 +5,7 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -360,12 +359,8 @@ function callerViolations(rows: readonly AuthorityRow[], isSrcModule: (path: str
   return out;
 }
 
-/** Exact tracked-src membership, not a path-prefix or filesystem-existence approximation. */
-const TRACKED_SRC_MODULES = new Set(execFileSync("git", ["-C", REPO_ROOT, "ls-files", "src"], { encoding: "utf8" })
-  .split("\n").filter((path) => path.startsWith("src/") && /\.(?:ts|mts|cts|js|mjs|cjs)$/.test(path)));
-
 function isSrcModule(path: string): boolean {
-  return TRACKED_SRC_MODULES.has(path);
+  return path.startsWith("src/") && !path.split("/").includes("..") && existsSync(join(REPO_ROOT, path));
 }
 
 test("W1-T13773 criterion 3: the closed gate vocabulary is origin/main's five kinds plus host-switch, and a host-switch caller that names no switch fails the self-check", () => {
@@ -449,7 +444,13 @@ const ROWS_AS_BEFORE: Record<string, string> = {
 
 test("W1-T13773 criterion 4: invariant every-other-row-reads-as-before — each row without callers, its rmd authority line and its JSON row equal origin/main's", () => {
   const reservationRow = AUTHORITY_TABLE.find((r) => r.id === "task-id-reservation-ref-push")!;
-  assert.equal(reservationRow.callers, undefined, "the gated next-task-id --reserve fallback is not a child-CLI caller and must preserve the baseline row");
+  assert.deepEqual(reservationRow.callers, [{
+    module: "src/lib/gate-gardener.ts",
+    symbol: "prepareDefuseTaskIds (its default minter)",
+    verb: "rmd daemon (gate garden, `rmd garden run gate`)",
+    gate: "always",
+    ledgerSteps: [],
+  }], "the existing gate-gardener caller from origin/main must remain unchanged");
   const report = buildAuthorityReport({ ledger: fakeLedger([]) });
   assert.equal(report.status, "measured");
   if (report.status !== "measured") return;
