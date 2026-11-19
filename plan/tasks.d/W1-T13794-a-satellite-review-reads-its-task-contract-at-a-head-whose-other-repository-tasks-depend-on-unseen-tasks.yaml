@@ -1,0 +1,50 @@
+- id: W1-T13794
+  title: "A satellite review reads its task contract at a head whose other-repository tasks depend on tasks that plan does not hold"
+  repo: remudero
+  depends_on: [W1-T13752]
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19 sizing: spans plan loader, review resolver, review command, a census pin and the test; loosens one validation, only for another repository's tasks in a satellite review
+  origin: "human#2026-11-18-rethink-ops-tracking"
+  plan_refs:
+    - W1-T13585
+    - W1-T13752
+  files:
+    - src/lib/plan.ts
+    - src/lib/review.ts
+    - src/cli/commands/review.ts
+    - test/resolver-divergence-detector.test.ts
+    - test/review/a-satellite-review-reads-a-head-plan-whose-other-repository-tasks-name-unseen-dependencies.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A satellite review resolves its task's criteria and risk at a head whose other-repository task names a dependency that plan does not hold"
+      proof: "grep: W1-T13794 criterion 1 in test/review/a-satellite-review-reads-a-head-plan-whose-other-repository-tasks-name-unseen-dependencies.test.ts"
+    - claim: "invariant:own-repo-dependencies-stay-strict — a satellite's own task with an unseen dependency still diverges at head, with loadPlan's PlanError text"
+      proof: "grep: W1-T13794 criterion 2 in test/review/a-satellite-review-reads-a-head-plan-whose-other-repository-tasks-name-unseen-dependencies.test.ts"
+  rationale: |
+    WHY: remudero-ops#171 (W1-T13599) never gets a remudero-review status. OBSERVED on the host 2026-11-19 (ops
+    ledger union from 02:13Z): six review runs of PR 171, each ending review.reviewer.skipped then
+    review.semantic_setup_refused reason=head-task-metadata-unavailable, and the sweep now holds the PR "not
+    re-admitted until the head, body or reviewer code changes". Reproduced off-host: core loadPlanAtRefAsync on
+    the PR head throws "task W1-T13722: depends_on unknown task 'W1-T10840'", which
+    resolvePlanCriteriaAtHeadAsync returns as a divergence, so risk is undefined and setup refuses.
+    The ops plan holds core tasks (repo: remudero) written by rmd approve that depend on core public ids. This is
+    the third strict reader of that plan: W1-T13585 fixed the daemon boot read and W1-T13752 the instance Inbox.
+  design: |
+    plan.ts: loadPlanAtRefAsync takes an optional KeepsUnseenDependency after runGit and passes it to
+    mergePlanBlobs, whose opts gain keepsUnseenDependency, handed to validatedPlan's existing third parameter.
+    review.ts: resolvePlanCriteriaAtHeadAsync takes the same optional predicate after runGit and passes it on.
+    cli/commands/review.ts: when the review subject is an explicit satellite target (subjectCheckout.explicitTarget
+    and subjectRepoDir differs from repoRoot), the predicate is !taskTargetsRepo(task.repo, owner/repo); it is
+    passed to both the head read and the origin/main read. A core review passes none and stays strict.
+    test/resolver-divergence-detector.test.ts: the origin/main call-site pin gains the two new arguments; the
+    call count stays 7.
+    INVARIANT own-repo-dependencies-stay-strict: a task whose repo is the PR's repository still diverges on an
+    unseen dependency with the same PlanError text, and a core review's read is unchanged.
+  falsifier: |
+    Drop the predicate from mergePlanBlobs' validatedPlan call: criterion 1 fails with "depends_on unknown
+    task". Make the predicate always true: criterion 2 fails because the own-repo task no longer diverges.
