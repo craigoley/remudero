@@ -99,9 +99,35 @@ test("W1-T12169 criterion 3 compares isolated head failures with unchanged main 
   };
   assert.equal(await runHandShip(f.args, f.options, f.effects), 1);
   assert.deepEqual(f.calls, [`prepare mac`, `head ${file} ${head}`, `main ${file} ${main}`, "close"]);
-  assert.match(f.lines.join("\n"), /caused by the host.*flake/);
+  assert.match(f.lines.join("\n"), /caused by the change.*flake/);
   assert.match(f.lines.join("\n"), /also failing on main.*existing red/);
   assert.match(f.lines.join("\n"), /caused by the change.*regression/);
+});
+
+test("a red head rerun with a different failing title is never classified as a host failure", async (t) => {
+  const f = fixture(t);
+  f.workspace.preflight = async () => redReceipt(["original failure"]);
+  f.workspace.rerun = async (tree) => tree === "head" ? ["different sibling failure"] : [];
+  assert.equal(await runHandShip(f.args, f.options, f.effects), 1);
+  assert.match(f.lines.join("\n"), /caused by the change.*original failure/);
+  assert.doesNotMatch(f.lines.join("\n"), /caused by the host/);
+});
+
+test("workflow contract failures are isolated on head and unchanged main before the run is refused", async (t) => {
+  const f = fixture(t);
+  f.workspace.preflight = async () => ({
+    ...receipt(), verdict: "failed",
+    steps: [{ name: "census-precheck", ok: true }, { name: "workflow-contract-precheck", ok: false,
+      suites: [file], diagnostics: { mayBeIncomplete: false }, testSummary: { pass: 1, fail: 1, cancelled: 0 } }],
+  });
+  f.workspace.rerun = async (tree, target) => {
+    f.calls.push(`${tree} ${target}`);
+    return tree === "head" ? ["head contract failure"] : ["main contract failure"];
+  };
+  assert.equal(await runHandShip(f.args, f.options, f.effects), 1);
+  assert.match(f.lines.join("\n"), /caused by the change.*head contract failure/);
+  assert.deepEqual(f.calls.filter((call) => /^(head|main) /.test(call)), [`head ${file}`, `head ${file}`, `main ${file}`]);
+  assert.ok(!f.calls.some((call) => call.startsWith("push")));
 });
 
 test("W1-T12169 criterion 4 gives the installed receipt judge complete comparisons before push", async (t) => {
@@ -208,9 +234,28 @@ test("one occurrence on main cannot account for two failures with the same title
   f.workspace.preflight = async () => redReceipt(["duplicate", "duplicate"]);
   f.workspace.rerun = async (tree) => tree === "head" ? ["duplicate", "duplicate"] : ["duplicate"];
   assert.equal(await runHandShip(f.args, f.options, f.effects), 1);
-  assert.match(f.lines.join("\n"), /also failing on main.*duplicate/);
+  assert.doesNotMatch(f.lines.join("\n"), /also failing on main.*duplicate/);
   assert.match(f.lines.join("\n"), /caused by the change.*duplicate/);
   assert.ok(!f.calls.some((call) => call.startsWith("push")));
+});
+
+test("a stop requested during PR publication leaves the run stopped", async (t) => {
+  const f = fixture(t);
+  let finishPublication!: () => void;
+  const publication = new Promise<{ url: string; body: string }>((resolve) => {
+    finishPublication = () => resolve({ url: "https://example.com/pull/1", body: readFileSync(f.body, "utf8") });
+  });
+  let publishStarted!: () => void;
+  const started = new Promise<void>((resolve) => { publishStarted = resolve; });
+  f.effects.publish = async () => { publishStarted(); return publication; };
+  const first = runHandShip(f.args, f.options, f.effects);
+  await started;
+  const state = join(f.root, "hand-ship");
+  const id = readdirSync(state).find((name) => /^rmd-ship-/.test(name))!;
+  assert.equal(await runHandShip(["stop", id], f.options, f.effects), 0);
+  finishPublication();
+  assert.equal(await first, 1);
+  assert.equal(JSON.parse(readFileSync(join(state, id, "status.json"), "utf8")).status, "stopped");
 });
 
 function seedHandBranch(repo: GitRepo, withTest = false): string {

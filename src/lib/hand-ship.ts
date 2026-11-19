@@ -31,7 +31,7 @@ export interface ShipReceipt {
   baseSha: string;
   verdict: string;
   selection?: string;
-  steps: { name: string; ok: boolean; failedCheck?: string; signal?: string | null; error?: unknown;
+  steps: { name: string; ok: boolean; failedCheck?: string; suites?: string[]; signal?: string | null; error?: unknown;
     judge?: { given: number; reported: number }; diagnostics?: { mayBeIncomplete: boolean };
     testSummary?: { pass: number; fail: number; cancelled: number } }[];
   failureAttribution?: { tests?: FailingTest[] };
@@ -121,14 +121,7 @@ async function chooseHost(hosts: ShipHost[], effects: HandShipEffects, run: Ship
 }
 
 function testFailureStage(step: ShipReceipt["steps"][number]): boolean {
-  return step.name === "affected-tests" || step.name === "affected-tests-subset";
-}
-
-function consumeFailure(failures: string[], title: string): boolean {
-  const index = failures.indexOf(title);
-  if (index < 0) return false;
-  failures.splice(index, 1);
-  return true;
+  return step.name === "affected-tests" || step.name === "affected-tests-subset" || step.name === "workflow-contract-precheck";
 }
 
 async function compareFailures(receipt: ShipReceipt, workspace: Awaited<ReturnType<HandShipEffects["prepare"]>>, run: ShipRun) {
@@ -137,12 +130,30 @@ async function compareFailures(receipt: ShipReceipt, workspace: Awaited<ReturnTy
     if (failed?.name === "static-preflight" && failed.failedCheck) run.log(`caused by the change: ${failed.failedCheck}`);
     return receipt;
   }
-  const tests = receipt.failureAttribution?.tests ?? [];
+  let tests = receipt.failureAttribution?.tests ?? [];
   const summary = failed.testSummary;
   const withEvidence = { ...receipt, failureAttribution: undefined };
   if (failed.signal || failed.error || failed.diagnostics?.mayBeIncomplete !== false || !summary || summary.fail === 0 ||
-    tests.length !== summary.fail || tests.some(({ file }) => !file || !testPath.test(file) ||
+    tests.some(({ file }) => !file || !testPath.test(file) ||
       file.split("/").some((part) => part === "." || part === ".."))) {
+    run.log("test failure comparison unavailable: the preflight did not completely name its failures");
+    return withEvidence;
+  }
+  if (failed.name === "workflow-contract-precheck" && tests.length === 0) {
+    const suites = failed.suites ?? [];
+    if (!suites.length || suites.some((file) => !testPath.test(file) || file.split("/").some((part) => part === "." || part === ".."))) {
+      run.log("workflow contract failure comparison unavailable: the preflight did not name its test suites");
+      return withEvidence;
+    }
+    for (const file of [...new Set(suites)].sort()) {
+      for (const title of await workspace.rerun("head", file, receipt.headSha)) tests.push({ file, title });
+    }
+    if (tests.length !== summary.fail) {
+      run.log("workflow contract failure comparison unavailable: isolated head reruns did not account for every failure");
+      return withEvidence;
+    }
+  }
+  if (tests.length !== summary.fail) {
     run.log("test failure comparison unavailable: the preflight did not completely name its failures");
     return withEvidence;
   }
@@ -151,12 +162,22 @@ async function compareFailures(receipt: ShipReceipt, workspace: Awaited<ReturnTy
   const main = new Map<string, string[]>();
   for (const file of files) head.set(file, [...await workspace.rerun("head", file, receipt.headSha)]);
   for (const file of files) main.set(file, [...await workspace.rerun("main", file, receipt.baseSha)]);
+  const counts = (values: string[]) => values.reduce((result, value) => result.set(value, (result.get(value) ?? 0) + 1), new Map<string, number>());
+  const ambiguous = (file: string, title: string) => [tests.filter((test) => test.file === file).map((test) => test.title),
+    head.get(file)!, main.get(file)!].some((values) => (counts(values).get(title) ?? 0) > 1);
   const rows = tests.map((test) => {
-    const here = consumeFailure(head.get(test.file!)!, test.title);
-    const there = here && consumeFailure(main.get(test.file!)!, test.title);
-    const classification: FailureClass = !here ? "caused by the host" : there ? "also failing on main" : "caused by the change";
+    const headFailures = head.get(test.file!)!;
+    const mainFailures = main.get(test.file!)!;
+    const here = headFailures.includes(test.title);
+    const there = here && mainFailures.includes(test.title);
+    // Titles do not uniquely identify node:test cases. Treat a duplicate title as change-caused
+    // evidence so it can never authorize a push by matching a different test on main.
+    const classification: FailureClass = headFailures.length === 0 ? "caused by the host"
+      : ambiguous(test.file!, test.title) ? "caused by the change"
+        : !here ? "caused by the change" : there ? "also failing on main" : "caused by the change";
     run.log(`${classification}: ${test.file} :: ${test.title}`);
-    return { ...test, state: here && there ? "also-red" : here ? "only-head" : "unattributed" };
+    return { ...test, state: classification === "also failing on main" ? "also-red"
+      : classification === "caused by the host" ? "unattributed" : "only-head" };
   });
   return { ...withEvidence, failureAttribution: {
     // The installed judge calls the comparison SHA mergeBase. Here it is the exact main SHA run above.
@@ -292,8 +313,10 @@ export async function runHandShip(args: string[], options: ShipOptions, effects:
     await effects.push(source, run);
     continueRun();
     const pr = await effects.publish(source, title, body, existing);
+    continueRun();
     run.log(`pull request ${pr.url}`);
     effects.checkBody(pr.body, run);
+    continueRun();
     status("shipped", pr.url);
     return 0;
   } catch (error) {
