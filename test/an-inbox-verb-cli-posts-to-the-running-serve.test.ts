@@ -103,6 +103,11 @@ test("W1-T13238 criterion 2: with no serve reachable the verb runs in-process an
   const bare = root(t, null);
   const target = inboxCliServeTarget({ root: bare } as unknown as Config, {});
   assert.ok("reason" in target && /no serve write token/.test(target.reason));
+  const fallback = await captured(t, () => inboxVerbViaServe("snooze", ["P3", "--wake"],
+    { root: bare } as unknown as Config, () => fakeActions(), {}));
+  assert.equal(fallback.code, 0);
+  assert.deepEqual(fallback.out, [JSON.stringify({ ok: true, verb: "snooze", proposalId: "P3" })]);
+  assert.deepEqual(fallback.err, ["rmd snooze: no serve write token (ENOENT); running in-process"]);
   assert.equal(existsSync(join(bare, "state", "service-tokens.json")), false);
   assert.deepEqual(inboxCliServeTarget({ root: root(t), serve: { port: 9 } } as unknown as Config, { RMD_SERVE_PORT: "4400" }),
     { url: "http://127.0.0.1:4400", token: TOKEN }, "RMD_SERVE_PORT wins over config");
