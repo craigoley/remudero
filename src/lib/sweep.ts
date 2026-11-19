@@ -1115,6 +1115,7 @@ function terminalUncreditableHeads(ledgerPath: string): Map<string, TerminalUncr
     try {
       for (const archive of history.archiveFiles) fs.accessSync(archive, fs.constants.R_OK);
     } catch {
+      // A failed archive access means the cached slice cannot be trusted as a complete history.
       historyReadable = false;
     }
   }
