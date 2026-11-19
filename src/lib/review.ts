@@ -7375,9 +7375,6 @@ export interface ReviewStatusEntry {
   /** Widened to {@link PostableReviewState} (W1-T913): a LIVE read off GitHub can genuinely be `pending` now that
    * {@link postReviewPending} posts one. {@link decideAutoMergeArmAtSha} covers why a pending is never armed. */
   state: PostableReviewState;
-  /** Timestamp and description belong to this exact latest context entry, alongside its publisher. */
-  createdAt?: string;
-  description?: string;
   /** GitHub's `creator.login` for this status — the one field a poster cannot spoof, being server-attributed from the
    * authenticating credential rather than the request body. `undefined` only if GitHub's response is malformed, and
    * treated the same as a mismatched login. */
@@ -7387,8 +7384,7 @@ export interface ReviewStatusEntry {
 
 export function reviewStatusEntryFromCombined(payload: unknown): ReviewStatusEntry | undefined {
   const raw = payload as {
-    statuses?: Array<{ context?: string; state?: string; creator?: { login?: string; type?: string };
-      created_at?: string; description?: string }>;
+    statuses?: Array<{ context?: string; state?: string; creator?: { login?: string; type?: string } }>;
   };
   if (!raw || !Array.isArray(raw.statuses) || raw.statuses.some(entry => !entry || typeof entry.context !== "string")) {
     throw new Error("combined commit status has no readable statuses array");
@@ -7397,9 +7393,7 @@ export function reviewStatusEntryFromCombined(payload: unknown): ReviewStatusEnt
   if (!entry) return undefined;
   const state = entry.state === "error" ? "failure" : entry.state;
   if (state !== "success" && state !== "pending" && state !== "failure") throw new Error("unrecognized remudero-review state");
-  return { state, posterLogin: entry.creator?.login, posterType: entry.creator?.type,
-    ...(typeof entry.created_at === "string" ? { createdAt: entry.created_at } : {}),
-    ...(typeof entry.description === "string" ? { description: entry.description } : {}) };
+  return { state, posterLogin: entry.creator?.login, posterType: entry.creator?.type };
 }
 
 export async function readReviewStatusEntry(owner: string, repo: string, sha: string,
@@ -7412,15 +7406,14 @@ export async function readReviewStatusEntry(owner: string, repo: string, sha: st
   // scanning status history; bind its repository and commit before using that identity.
   const query = `query($owner:String!,$name:String!,$sha:GitObjectID!){
     repository(owner:$owner,name:$name){nameWithOwner object(oid:$sha){... on Commit{
-      oid status{context(name:"remudero-review"){context state createdAt description creator{login __typename}}}
+      oid status{context(name:"remudero-review"){context state creator{login __typename}}}
     }}}
   }`;
   const raw = await fetch(["api", "graphql", "-f", `query=${query}`, "-f", `owner=${owner}`,
     "-f", `name=${repo}`, "-f", `sha=${sha}`]) as {
     errors?: unknown[];
     data?: { repository?: { nameWithOwner?: string; object?: { oid?: string;
-      status?: { context?: { context?: string; state?: string; createdAt?: string; description?: string;
-        creator?: { login?: string; __typename?: string } | null } | null } | null;
+      status?: { context?: { context?: string; state?: string; creator?: { login?: string; __typename?: string } | null } | null } | null;
     } | null } | null };
   };
   const repository = raw?.data?.repository;
@@ -7442,12 +7435,8 @@ export async function readReviewStatusEntry(owner: string, repo: string, sha: st
     ? `${actor.login}[bot]` : actor?.login;
   const identified = reviewStatusEntryFromCombined({ statuses: [{ context: context.context,
     state: typeof context.state === "string" ? context.state.toLowerCase() : context.state,
-    created_at: context.createdAt, description: context.description,
     creator: { login, type: actor?.__typename } }] });
-  if (identified?.state !== entry.state || identified.createdAt !== entry.createdAt ||
-      identified.description !== entry.description) {
-    throw new Error("live review publisher status changed during its identity read");
-  }
+  if (identified?.state !== entry.state) throw new Error("live review publisher status changed during its identity read");
   return identified;
 }
 

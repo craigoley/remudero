@@ -470,18 +470,21 @@ export async function readChecksGreenReviewedAtHead(
  *  withheld or replayed verdict is terminal and reports `posted`. */
 export { readReviewStatusHistory, type ReviewStatusHistoryReader } from "../../lib/review.js";
 
-export function failureRecordingPoster(): { post: (o: Parameters<typeof postReviewStatus>[0]) => Promise<void>; failed: () => boolean } {
+export function failureRecordingPoster(): { post: (o: Parameters<typeof postReviewStatus>[0]) => Promise<void>; failed: () => boolean; published: () => boolean } {
   let threw = false;
+  let published = false;
   return {
     post: async (o) => {
       try {
         await postReviewStatus(o);
+        published = true;
       } catch (error) {
         threw = true;
         throw error;
       }
     },
     failed: () => threw,
+    published: () => published,
   };
 }
 
@@ -565,7 +568,7 @@ export async function runReview(host: ReviewCommandHost, args: {
    * this task already gets.
    */
   reportIsSubstitute?: boolean;
-  /** Actual PR body snapshot used only to key retry/backoff state. This stays separate from
+  /** Actual PR body snapshot used to key retry/backoff and bind published evidence. This stays separate from
    * `report`: several fix modes intentionally review a worker transcript, but that substitute is
    * not a material PR input. When omitted, a non-substitute report remains the body-compatible
    * fallback for existing callers. */
@@ -732,8 +735,8 @@ export async function runReview(host: ReviewCommandHost, args: {
     };
   }
   // A substituted worker transcript is not a material PR input. Production fix-rung callers
-  // supply the independently fetched body; a degraded caller with neither fails open toward
-  // retrying rather than letting unrelated worker prose consume the cap.
+  // supply the independently fetched body. Without either body snapshot, leave this input
+  // eligible for retry and withhold terminal publication.
   const inputBody = args.reviewInputBody ?? (args.reportIsSubstitute ? undefined : report);
   const inputDigest = inputBody === undefined ? undefined : reviewInputDigest(headSha, inputBody);
   // W1-T913 (fb-1784901239119-1be356, PR #707): post `remudero-review=pending` the MOMENT this
@@ -1409,6 +1412,16 @@ export async function runReview(host: ReviewCommandHost, args: {
     (args.onPhase ?? reportReviewPhase)("posted");
     say(`remudero-review: verdict WITHHELD for ${headSha.slice(0, 7)} — ${verdict.taskIdOwnershipWithheld}`);
     return { ...verdict, headSha, reviewerOutcome: outcome, verdictWithheld: verdict.taskIdOwnershipWithheld, reviewDecisionDigest: decisionDigest, decisionDisposition, evaluatorProvenance };
+  }
+  if (inputDigest === undefined && verdict.state !== "pending") {
+    const reason = "PR body unavailable for the review evidence input digest";
+    replayInput = { ...replayInput, publication_refusal: reason };
+    recordReplay(classifyReviewOutcome(replayInput));
+    log("review.evidence_write_failed", { pr_number: reviewPrNumber(prUrl), head_sha: headSha, reason });
+    log("review.post_refused", { pr_url: prUrl, head_sha: headSha, attempted_state: verdict.state, reason });
+    reportPhase("posted");
+    say(`remudero-review: verdict WITHHELD for ${headSha.slice(0, 7)} — ${reason}`);
+    return { ...verdict, headSha, reviewerOutcome: outcome, verdictWithheld: reason, reviewDecisionDigest: decisionDigest, decisionDisposition, evaluatorProvenance };
   }
   let reviewerCodeFreshness: ReviewerCodeFreshness | undefined;
   try {
@@ -2721,9 +2734,11 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
         status_publisher: restored.publisherEvidence,
       };
       log("review.posted", reviewPostedRow);
-      await writeReviewEvidenceRecord(reviewPostedRow, taskCatalog).catch(error => {
-        log("review.evidence_write_failed", { pr_number: view.number, head_sha: view.headRefOid, reason: String(error) });
-      });
+      if (restorePoster.published()) {
+        await writeReviewEvidenceRecord(reviewPostedRow, taskCatalog).catch(error => {
+          log("review.evidence_write_failed", { pr_number: view.number, head_sha: view.headRefOid, reason: String(error) });
+        });
+      }
     } else if (restored.replayed) {
       replayStatusAction = "confirmed";
       // W1-T5726: nothing posted, but this input WAS judged; no row leaves the attempt count 0 and the sweep re-reviews (#9138).
