@@ -149,6 +149,20 @@ function usesUnpinnedDaemon(text: string): boolean {
     if (node.type === "VariableDeclaration" && (node as VariableDeclaration).kind === "const") {
       for (const { id, init } of (node as VariableDeclaration).declarations) {
         if (id.type === "Identifier" && init) bindings.set(bindingKey(id), init);
+        if (id.type === "ObjectPattern" && init) {
+          const initializer = unwrapExpression(init);
+          const imported = initializer.type === "AwaitExpression" ? initializer.argument : initializer;
+          if (imported.type === "CallExpression" && imported.callee.type === "Import") {
+            for (const property of id.properties) {
+              if (property.type !== "KeyValuePatternProperty") continue;
+              const { key, value } = property;
+              if ((key.type === "Identifier" || key.type === "StringLiteral") &&
+                key.value === "runDaemon" && value.type === "Identifier") {
+                importedNames.set(bindingKey(value), "runDaemon");
+              }
+            }
+          }
+        }
       }
     }
     if (node.type === "FunctionDeclaration") {
@@ -178,8 +192,9 @@ function usesUnpinnedDaemon(text: string): boolean {
     if (target.type === "Identifier") {
       return (importedNames.get(bindingKey(target)) ?? target.value) === "runDaemon";
     }
-    return target.type === "MemberExpression" && target.property.type === "Identifier" &&
-      target.property.value === "runDaemon";
+    if (target.type !== "MemberExpression") return false;
+    const property = target.property.type === "Computed" ? target.property.expression : target.property;
+    return (property.type === "Identifier" || property.type === "StringLiteral") && property.value === "runDaemon";
   }
 
   function suppliesGovernor(expression: Expression, nullishParameters: ReadonlyMap<string, boolean> = new Map()): boolean {
@@ -298,6 +313,30 @@ test("the daemon memory census counts an unpinned call through a local alias", (
   assert.equal(usesUnpinnedDaemon(fixture + "loop(plan, {});"), true);
   assert.equal(usesUnpinnedDaemon(fixture + "const run = (loop); run(plan, {});"), true);
   assert.equal(usesUnpinnedDaemon(fixture + "{ const loop = () => {}; loop(plan, {}); }"), false);
+});
+
+test("the daemon memory census counts a destructured dynamic-import alias", () => {
+  const fixture = `
+    import { hostIndependentDaemonDeps } from "#test/helpers/daemon-host-pins.js";
+    async function invoke() {
+      const { runDaemon: loop } = await import("#src/lib/daemon.js");
+      loop(plan, {});
+    }
+  `;
+  assert.equal(usesUnpinnedDaemon(fixture), true);
+  assert.equal(usesUnpinnedDaemon(fixture.replaceAll("plan, {}", "plan, hostIndependentDaemonDeps()")), false);
+});
+
+test("the daemon memory census counts a computed daemon property", () => {
+  const fixture = `
+    import { hostIndependentDaemonDeps } from "#test/helpers/daemon-host-pins.js";
+    async function invoke() {
+      const daemon = await import("#src/lib/daemon.js");
+      daemon["runDaemon"](plan, {});
+    }
+  `;
+  assert.equal(usesUnpinnedDaemon(fixture), true);
+  assert.equal(usesUnpinnedDaemon(fixture.replace("plan, {}", "plan, hostIndependentDaemonDeps()")), false);
 });
 
 test("the daemon memory census counts a nullish shorthand governor even after a pin", () => {
