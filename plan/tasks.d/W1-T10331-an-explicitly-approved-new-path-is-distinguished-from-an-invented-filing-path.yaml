@@ -252,4 +252,4 @@
       - "Explicit same-chat operator approval2026-10-23 adds ONLY openapi/daemon.yaml and packages/api-client/src/schema.d.ts through a files-only amendment, making ten declared existing files. USD5/high/span, authority, design, all four criteria/proofs and baselines remain unchanged. The actual scope merge and fresh ownership precede these source edits; no baseline waiver, duplicate work/run, worker stop, schedule, live issuer/grant or cutover. Existing source automatic-rollout release hold remains independent."
       - "Explicit operator decision 2026-11-19: finish the production issuer and caller wiring within the existing ten declared paths and push a qualified feature-branch update to PR 19605. The PR remains unmerged; no live issuer enablement, actual path grant, task dispatch release or runtime cutover is authorized."
     judged_at: "2026-10-23T11:33:37.150Z"
-    pin: "e6dc2b01ee43e607e47b17855e20668ad0ebca11ada712fa95b63eb4ba27993b"
+    pin: "b35869ff478ec132fbd9b013c86829407eb0153028ede8399a95e5064e51f9db"
