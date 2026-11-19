@@ -566,7 +566,20 @@ function launchdDigestCheckout(
     const override = args[repoRootIndex + 1];
     if (!override) return null;
     const path = readLaunchdPath(resolve(workingDirectory ?? "/", override));
-    return path.state === "present" ? path.resolved : null;
+    if (path.state !== "present") return null;
+    try {
+      let gitRoot = path.resolved;
+      while (!existsSync(join(gitRoot, ".git"))) {
+        const parent = dirname(gitRoot);
+        if (parent === gitRoot) return path.resolved;
+        gitRoot = parent;
+      }
+      const root = hostWorktreeGit(gitRoot, ["rev-parse", "--show-toplevel"], { timeout: 1_000 }).trim();
+      return isAbsolute(root) ? realpathSync(root) : path.resolved;
+    } catch (error) {
+      void error;
+      return path.resolved;
+    }
   }
 
   if (!workingDirectory || !isAbsolute(workingDirectory)) return null;
@@ -586,6 +599,17 @@ function launchdDigestCheckout(
     void error;
     return launcherCheckout;
   }
+}
+
+function launchdSelfSyncAlreadyDone(output: string, indent: string): boolean {
+  // launchd's explicit job environment overrides the environment inherited when it was loaded.
+  // Preserve the inherited value only when the job did not set the key itself.
+  for (const name of ["environment", "inherited environment", "default environment"]) {
+    const entry = launchdPrintBlock(output.split(/\r?\n/), indent, name)
+      ?.find(line => line.startsWith("RMD_SELF_SYNC_DONE => "));
+    if (entry !== undefined) return entry.slice("RMD_SELF_SYNC_DONE => ".length) === "1";
+  }
+  return false;
 }
 
 function readLaunchdCheckoutBranch(checkout: string): string | null {
@@ -765,7 +789,7 @@ function readDoctorLaunchdServices(deps: DoctorDeps["launchd"] = {}): LaunchdSer
     const resolved = programPath.state === "present" ? programPath.resolved : undefined;
     const usesCheckout = label === DIGEST_LABEL && resolved
       && basename(resolved) === "rmd" && basename(dirname(resolved)) === "bin"
-      && !/^[\t ]+RMD_SELF_SYNC_DONE => 1\s*$/m.test(output);
+      && !launchdSelfSyncAlreadyDone(output, service.indent);
     const checkout = label === SUPERVISOR_LABEL
       ? readSupervisorCheckout(output, service.indent)
       : usesCheckout ? launchdDigestCheckout(output, service.indent, workingDirectory, dirname(dirname(resolved))) : undefined;

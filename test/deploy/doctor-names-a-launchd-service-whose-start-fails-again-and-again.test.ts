@@ -206,6 +206,30 @@ test("digest self-sync checks the Git checkout at its WorkingDirectory", async t
   assert.equal(warning.measured, `${realpathSync(offMain)} (digest-plan-amendment)`);
 });
 
+test("digest --repo-root resolves nested paths and job environment overrides inherited self-sync guard", async t => {
+  const { root } = fixture(t);
+  const launcher = gitRepo({ scope: t, branch: "digest-launcher-main" }).dir;
+  const offMain = gitRepo({ scope: t, branch: "digest-explicit-root" }).dir;
+  const nestedRepoRoot = join(offMain, "src");
+  mkdirSync(nestedRepoRoot);
+  const program = join(launcher, "bin", "rmd");
+  mkdirSync(dirname(program), { recursive: true });
+  writeFileSync(program, "", { mode: 0o755 });
+  const result = await report(root, { platform: "darwin", home: root, exec: (_cmd, args) => {
+    const label = args[1]!.split("/").at(-1)!;
+    if (label === DIGEST_LABEL) return service(label, program, [
+      "state = not running", "runs = 4", "last exit code = 0",
+      "arguments = {", `\t${program}`, "\t--repo-root", `\t${nestedRepoRoot}`, "}",
+      "inherited environment = {", "\tRMD_SELF_SYNC_DONE => 1", "}",
+      "environment = {", "\tRMD_SELF_SYNC_DONE => 0", "}",
+    ]);
+    return missingService(label);
+  } });
+  const warning = result.checks.find(check => check.name === `launchd-self-sync:${DIGEST_LABEL}`);
+  assert.equal(warning?.verdict, "WARN");
+  assert.equal(warning?.measured, `${realpathSync(offMain)} (digest-explicit-root)`);
+});
+
 test("digest self-sync falls back to the launcher checkout when WorkingDirectory is outside Git", async t => {
   const { root } = fixture(t);
   const launcher = gitRepo({ scope: t, branch: "digest-launcher-branch" }).dir;
