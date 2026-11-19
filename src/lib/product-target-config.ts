@@ -15,7 +15,7 @@
 import { createHash } from "node:crypto";
 import { randomUUID } from "node:crypto";
 import {
-  closeSync, constants, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync,
+  closeSync, constants, fchmodSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync,
 } from "node:fs";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { parse as parseYaml } from "yaml";
@@ -363,7 +363,7 @@ class RunnerConfigProposalRun {
         // The same accepted proposal returns the same pull request until a human closes it unmerged.
         const state = await this.pullState(record);
         if (state !== "closed_unmerged") {
-          journal = this.persist({ ...journal, requests: { ...journal.requests, [requestKey]: { key, payloadDigest } } });
+          this.persist({ ...journal, requests: { ...journal.requests, [requestKey]: { key, payloadDigest } } });
           return this.reply(record, state, true);
         }
       }
