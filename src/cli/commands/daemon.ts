@@ -2317,6 +2317,9 @@ export async function daemonCommand(
     const summary = await runDaemonFn(
       plan,
       {
+        // W1-T988: the target this daemon already resolved and already ledgers as `daemon.target`'s
+        // `repo:` field — the SAME value, never a second resolution that could drift from it.
+        targetRepo: target.repo,
         claimSweepSettled,
         bootPhases,
         refreshMerged,
@@ -2369,9 +2372,6 @@ export async function daemonCommand(
         readRestartHistory: () => {
           return readRestartHistoryLines(dirname(ledgerPathFor(config)));
         },
-        // W1-T988: the target this daemon already resolved and already ledgers as `daemon.target`'s
-        // `repo:` field — the SAME value, never a second resolution that could drift from it.
-        targetRepo: target.repo,
         taskInputAnswer: (taskId) => taskInputAnswer(effectiveRepoRoot, taskId),
         // W1-T9680: a worker push's token — the credential socket's own scoped mint, else the ambient GH_TOKEN.
         probeFleetPushCredential: receivePackCredentialProbe({ originUrl: `https://github.com/${target.owner}/${target.repo}.git`,
