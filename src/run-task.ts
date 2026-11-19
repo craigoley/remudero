@@ -13573,17 +13573,24 @@ export async function taskIdDestinationSnapshot(
     if (destination.outcome === "off") return undefined;
     if (destination.outcome === "unreadable") throw new Error("unreadable host switch");
     if (offline) { stage = "offline"; throw new Error("selected catalog requires a fresh read"); }
-    const run = async (cwd: string, args: string[], input?: string): Promise<string> =>
-      checks.destinationGit ? await checks.destinationGit(cwd, args, input) : await hostWorktreeGitAsync(cwd, args, { timeout: DEFAULT_GH_CALL_TIMEOUT_MS, ...(input === undefined ? {} : { input }) });
+    const run = async (cwd: string, args: string[], input?: string, maxBuffer?: number): Promise<string> =>
+      checks.destinationGit ? await checks.destinationGit(cwd, args, input) : await hostWorktreeGitAsync(cwd, args,
+        { timeout: DEFAULT_GH_CALL_TIMEOUT_MS, ...(input === undefined ? {} : { input }), ...(maxBuffer === undefined ? {} : { maxBuffer }) });
     stage = "fetch";
     await run(destination.checkoutDir, ["fetch", "--no-tags", "origin", "main"]);
     stage = "plan";
     const commit = (await run(destination.checkoutDir, ["rev-parse", "--verify", "origin/main^{commit}"])).trim();
     if (!/^[a-f0-9]{40}$/.test(commit)) throw new Error("invalid commit");
-    const paths = (await run(destination.checkoutDir, ["ls-tree", "-r", "--name-only", commit, "--", "plan/tasks.yaml", "plan/tasks.d/"]))
-      .split("\n").filter(path => path === "plan/tasks.yaml" || /^plan\/tasks\.d\/[^/]+\.ya?ml$/.test(path));
+    // W1-T12206: `-l` gives each blob's size, so the one `cat-file --batch` read is bounded by the plan it reads.
+    const entries = (await run(destination.checkoutDir, ["ls-tree", "-r", "-l", commit, "--", "plan/tasks.yaml", "plan/tasks.d/"]))
+      .split("\n").map(line => /^\S+ \S+ \S+ +(\d+|-)\t(.+)$/.exec(line)).flatMap(m => m ? [{ path: m[2]!, size: Number(m[1]) || 0 }] : [])
+      .filter(({ path }) => path === "plan/tasks.yaml" || /^plan\/tasks\.d\/[^/]+\.ya?ml$/.test(path));
+    const paths = entries.map(({ path }) => path);
     if (!paths.includes("plan/tasks.yaml")) throw new Error("missing plan");
-    const texts = await readBlobsAtRefAsync((args, input) => run(destination.checkoutDir, args, input), commit, paths);
+    // Each answer is `<id> blob <size> LF <bytes> LF` or `<commit>:<path> missing LF`; this line bounds either header.
+    const blobBytes = entries.reduce((bytes, { path, size }) => bytes + size + 1 + Buffer.byteLength(`${commit}:${path} ambiguous ${size}\n`), 0);
+    const texts = await readBlobsAtRefAsync((args, input) =>
+      run(destination.checkoutDir, args, input, args[0] === "cat-file" ? blobBytes : undefined), commit, paths);
     const tasks = texts.flatMap(text => parseTasksFromYaml(text, "plan destination", undefined, {}, "preserve-external"));
     const ids = tasks.map(task => task.id);
     if (new Set(ids).size !== ids.length) throw new Error("duplicate task id");
